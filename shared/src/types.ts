@@ -2803,6 +2803,10 @@ export interface EmailIntakeView {
   replyStatus: string;
   receivedAt: string;
   createdAt: string;
+  /** #541: an unsorted message a person can place by choosing its client ("File under client …"). */
+  canFile: boolean;
+  /** #541: an unsorted message that failed partway and can be re-run as the poll would have. */
+  canRetry: boolean;
 }
 
 export interface EmailIntakeRunResult {

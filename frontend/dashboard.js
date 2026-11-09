@@ -1059,11 +1059,43 @@ async function loadEmailIntake() {
     return node;
   };
   const rows = [];
+  if ((data.unsorted || []).some((i) => i.canFile) && !(state.clients || []).length) {
+    try { await loadClients(); } catch { /* the select below says there are none */ }
+  }
+  // #541: File under client … re-runs intake with the chosen client; Retry re-runs a failed one.
+  // Both answer with the row as it now stands; a row that is still unsorted says why.
+  const rerun = async (button, item, action, body) => {
+    button.disabled = true;
+    try {
+      const out = await api(`/api/email-intake/${encodeURIComponent(item.id)}/${action}`, { method: "POST", body: JSON.stringify(body || {}) });
+      if (out.status === "created" || out.status === "attached") showMessage(out.status === "attached" ? "Filed: the files were added to the client's project at that address." : "Filed: a new project was created.");
+      else showMessage(`Still unsorted: ${out.reasonText || out.reason}`, "error");
+      await loadEmailIntake();
+    } catch (err) { button.disabled = false; showMessage(err.message || "Could not file it.", "error"); }
+  };
   for (const item of data.unsorted || []) {
     const files = (item.files || []).map((f, i) => el("li", {}, [
       el("a", { href: `/api/email-intake/${encodeURIComponent(item.id)}/files/${i}`, textContent: f.name }),
       f.refused ? ` (${f.refused})` : "",
     ]));
+    const actions = [];
+    if (item.canFile) {
+      const pick = el("select", {}, [
+        el("option", { value: "", textContent: "File under client…" }),
+        ...(state.clients || []).map((c) => el("option", { value: c.id, textContent: c.companyName || c.legalBusinessName || "Unnamed", selected: c.id === item.clientId })),
+      ]);
+      const file = el("button", { type: "button", textContent: "File under client" });
+      file.addEventListener("click", () => {
+        if (!pick.value) { showMessage("Choose the client first.", "error"); return; }
+        rerun(file, item, "file", { clientId: pick.value });
+      });
+      actions.push(pick, " ", file, " ");
+    }
+    if (item.canRetry) {
+      const retry = el("button", { type: "button", textContent: "Retry" });
+      retry.addEventListener("click", () => rerun(retry, item, "retry"));
+      actions.push(retry, " ");
+    }
     const dismiss = el("button", { className: "secondary", type: "button", textContent: "Dismiss" });
     dismiss.addEventListener("click", async () => {
       dismiss.disabled = true;
@@ -1075,7 +1107,7 @@ async function loadEmailIntake() {
       el("div", { className: "muted", textContent: `From ${item.sender || "unknown sender"}${item.intakeTag ? ` to tag "${item.intakeTag}"` : ""}, ${new Date(item.receivedAt || item.createdAt).toLocaleString()}` }),
       el("div", { textContent: item.reasonText }),
       el("ul", {}, files),
-      dismiss,
+      el("div", {}, [...actions, dismiss]),
     ]));
   }
   for (const item of data.recent || []) {

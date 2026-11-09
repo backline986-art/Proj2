@@ -1474,6 +1474,20 @@ app.post("/api/email-intake/:id/dismiss", asyncHandler(async (req, res) => {
   const { dismissEmailIntake } = await import("./emailIntake");
   res.json(dismissEmailIntake(db, String(req.params.id), reqOrgFilter(db, req), currentUser(db, req)?.email || "operator"));
 }));
+// #541: place an unsorted message in one step. "file" re-runs the intake pipeline with the client a
+// person chose (that client must be in the message's own org: another org's id is a 404, rule 6);
+// "retry" re-runs a message that failed partway. Both 404 a row outside reqOrgFilter, 409 a row
+// that is no longer unsorted, and audit the person's name.
+app.post("/api/email-intake/:id/file", asyncHandler(async (req, res) => {
+  const { fileEmailIntake } = await import("./emailIntake");
+  const clientId = String((req.body || {}).clientId || "").trim();
+  if (!clientId) throw new HttpError(400, "Choose the client to file this message under.");
+  res.json(await fileEmailIntake(db, String(req.params.id), clientId, reqOrgFilter(db, req), currentUser(db, req)?.email || "operator"));
+}));
+app.post("/api/email-intake/:id/retry", asyncHandler(async (req, res) => {
+  const { retryEmailIntake } = await import("./emailIntake");
+  res.json(await retryEmailIntake(db, String(req.params.id), reqOrgFilter(db, req), currentUser(db, req)?.email || "operator"));
+}));
 
 app.get("/api/email-tracker", (req, res) => {
   res.json(getEmailTrackerStatus(db, reqOrgFilter(db, req)));
