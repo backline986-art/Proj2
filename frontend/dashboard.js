@@ -10093,10 +10093,34 @@ function openReviewerPacket() {
   window.open(`/api/projects/${state.selectedProjectId}/reviewer-report?format=html`, "_blank");
 }
 
+// A CLICK CHECKS NOW (#160): every active filing of the kind, paced one portal at a time, so it can
+// take a while. The answer is one result per filing — said here as counts plus the first few that
+// could not be read and why (showMessage sets textContent, so nothing here is HTML).
+function checkNowSummary(kind, result) {
+  const results = Array.isArray(result?.results) ? result.results : [];
+  if (!results.length) return `${kind}: no active filings to check.`;
+  const parts = [`${result.read || 0} read`];
+  if (result.unreadable) parts.push(`${result.unreadable} could not be read`);
+  if (result.skipped) parts.push(`${result.skipped} skipped`);
+  const notes = results.filter((r) => r.result !== "read").slice(0, 3)
+    .map((r) => `${r.projectName || r.projectId} (${r.label || r.track}): ${r.result === "skipped" ? "skipped, " : ""}${r.reason || "no reason given"}`);
+  const more = results.filter((r) => r.result !== "read").length - notes.length;
+  return `${kind}: checked ${result.checked || 0} filing(s) now: ${parts.join(", ")}.`
+    + (notes.length ? ` ${notes.join("; ")}${more > 0 ? `; and ${more} more` : ""}.` : "");
+}
+
 async function runPermitMonitor() {
-  const result = await api("/api/permit-monitor/run", { method: "POST", body: "{}" });
-  showMessage(`Permit monitor ran ${result.checked || 0} due check(s).`);
-  await loadProjects();
+  $("runPermitMonitorBtn").disabled = true;
+  showMessage("Checking every permit filing now, one portal at a time…", "info");
+  try {
+    const result = await api("/api/permit-monitor/run", { method: "POST", body: JSON.stringify({ targetType: "permit" }) });
+    showMessage(checkNowSummary("Permit checks", result), result.unreadable || result.skipped ? "warning" : "info");
+    await loadProjects();
+  } catch (err) {
+    showMessage(err.message || "Permit check failed.", "error");
+  } finally {
+    $("runPermitMonitorBtn").disabled = false;
+  }
 }
 
 async function captureConfirmation(event) {
@@ -11404,9 +11428,10 @@ if ($("startBatchScanBtn")) $("startBatchScanBtn").addEventListener("click", sta
 // ----- NEM monitor button -----
 async function runNemMonitor() {
   $("runNemMonitorBtn").disabled = true;
+  showMessage("Checking every NEM filing now, one portal at a time…", "info");
   try {
     const result = await api("/api/nem-monitor/run", { method: "POST" });
-    showMessage(`NEM check: ${result.checked} target(s) checked.`, "info");
+    showMessage(checkNowSummary("NEM checks", result), result.unreadable || result.skipped ? "warning" : "info");
     await loadProjects();
   } catch (err) {
     showMessage(err.message || "NEM check failed.", "error");

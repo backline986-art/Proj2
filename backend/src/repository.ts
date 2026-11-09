@@ -29,6 +29,8 @@ import type {
   ParserPayload,
   PermitCheckOutcome,
   PermitCheckSource,
+  PermitCheckNowResponse,
+  PermitCheckNowResult,
   PermitCheckTarget,
   PermitStatusCheck,
   PermitUtilityKnowledgeProfile,
@@ -174,6 +176,7 @@ import { applyCachedVisionVerdicts, visionRelaxedBlockers } from "./reviewerVisi
 import { nowIso } from "./time";
 import { isHarnessAbort, looksBotBlocked } from "./runAbort";
 import { finalSubmitEnvAllows, recipeShapeProblems } from "../../shared/src/portalSafety";
+import { PAGE_READ_MIN_GAP_MS } from "./agencyPageReader";
 import { parsePerJobPortalQuestion } from "../../shared/src/perJobQuestions";
 
 // THE ONE SEAM A TEST MAY STUB: the recipe-replay launcher prepareSubmission calls. Everything
@@ -7524,22 +7527,169 @@ export function recipeDisciplineForTarget(targetType: string, permitType: string
   return recipeDisciplineForTrack(track);
 }
 
+/** THE BACKGROUND SWEEP (scheduler, every 15 minutes; the permit_checks/nem_checks jobs): only the
+ *  targets whose next_check_at has passed. A person's click does not come here — it checks NOW
+ *  (runPermitChecksNow, #160). */
 export async function runDuePermitChecks(
   db: AppDb,
   targetType: "permit" | "nem" | "all" = "all",
-): Promise<{ checked: number; projects: ProjectDetail[] }> {
+): Promise<{ checked: number; projects: ProjectDetail[]; results: PermitCheckNowResult[] }> {
   const now = nowIso();
   // Kind by trackKind (the ONE answer), judged in JS rather than a raw `target_type = ?` filter
   // that would poll a legacy 'permit'-typed NEM filing in the permit sweep. The 50-per-sweep cap
   // is applied AFTER the kind filter, as the SQL LIMIT was, so a kind-scoped sweep still gets 50.
-  const targets = db.query<Row>(
+  const due = db.query<Row>(
     `SELECT * FROM permit_check_targets
      WHERE active = 1 AND (next_check_at IS NULL OR next_check_at <= ?)
      ORDER BY next_check_at ASC, created_at ASC`,
     [now],
   ).filter((row) => targetType === "all" || trackKind(text(row.target_type), text(row.permit_type)) === targetType).slice(0, 50);
+  // A target a person's "check now" already has in hand is left to it (not read twice in a row).
+  const targets = due.filter((row) => !permitTargetsInFlight.has(text(row.id)));
+  return withTargetsInFlight(targets, () => checkPermitTargets(db, targets, null));
+}
+
+// ── "CHECK NOW" (#160, owner's choice 2026-10-04: "check now, paced") ─────────────────────────────
+// The dashboard's Permit checks / NEM checks used to call the due-only sweep, so a click on a 7-day
+// cadence checked nothing ("Permit monitor ran 0 due check(s)", 1 ms) while a live job's permits sat
+// issued on the city's portal for days. A click now checks EVERY active target of its kind, whatever
+// next_check_at says — and is paced so a click never hammers a portal:
+//   - ONE TARGET AT A TIME (the loop is serial), so one portal host at a time;
+//   - at least PERMIT_CHECK_HOST_GAP_MS between the end of one read on a host and the start of the
+//     next on that host (the go-gently rule for protected sites: agencyPageReader's 10 s floor). The
+//     targets are interleaved across hosts so one host's gap is spent reading another's;
+//   - a target another check already has in hand (the 15-minute sweep, or a second click) is skipped
+//     and said so, never read twice at once;
+//   - at most PERMIT_CHECK_NOW_CAP targets per click, the longest-unchecked first, so the next click
+//     starts with the rest;
+//   - every per-target protection inside the read stays as it is: the rule 5 host checks, the
+//     once-a-day record-list lookup and record search, a refused login never typed again.
+// The click is the operator's own org's filings (rule 6: orgFilter, null = every org for a
+// superadmin). The background sweep stays due-only (runDuePermitChecks).
+export const PERMIT_CHECK_NOW_CAP = 100;
+export function permitCheckHostGapMs(): number {
+  // An operator may widen the gap, never narrow it below the floor.
+  const raw = Number(process.env.PERMIT_CHECK_HOST_GAP_MS ?? "");
+  return Number.isFinite(raw) && raw > PAGE_READ_MIN_GAP_MS ? raw : PAGE_READ_MIN_GAP_MS;
+}
+
+/** Targets a check is reading right now (process-wide): the sweep and a click never both read one. */
+const permitTargetsInFlight = new Set<string>();
+async function withTargetsInFlight<T>(targets: Row[], run: () => Promise<T>): Promise<T> {
+  const ids = targets.map((t) => text(t.id));
+  for (const id of ids) permitTargetsInFlight.add(id);
+  try {
+    return await run();
+  } finally {
+    for (const id of ids) permitTargetsInFlight.delete(id);
+  }
+}
+
+/** The host a check of this target talks to, for pacing: the target's own track-safe link, else
+ *  the entity whose recorded portal the read would sign in to (one recipe per AHJ/utility). */
+function permitTargetPaceKey(target: Row): string {
+  const track = trackKind(text(target.target_type), text(target.permit_type));
+  const url = trackSafeUrl(track, text(target.tracking_url)) || trackSafeUrl(track, text(target.portal_url));
+  const host = url ? portalHostOf(url) : "";
+  if (host) return host;
+  const entity = track === "nem" ? text(target.project_utility) : text(target.project_ahj);
+  return `${track}:${entity.trim().toLowerCase()}`;
+}
+
+/** Round-robin across pace keys, keeping each key's own order: a, b, a, b, a — never a, a, a, b. */
+function interleaveByHost(targets: Row[]): Row[] {
+  const groups = new Map<string, Row[]>();
+  for (const t of targets) {
+    const key = permitTargetPaceKey(t);
+    const g = groups.get(key);
+    if (g) g.push(t); else groups.set(key, [t]);
+  }
+  const out: Row[] = [];
+  const lists = [...groups.values()];
+  for (let i = 0; out.length < targets.length; i += 1) {
+    for (const g of lists) if (g[i]) out.push(g[i]);
+  }
+  return out;
+}
+
+type PermitCheckPacing = { gapMs: number; sleep: (ms: number) => Promise<void>; lastAt: Map<string, number> };
+
+/** A PERSON'S CLICK: check every active target of this kind now, paced (see above). */
+export async function runPermitChecksNow(
+  db: AppDb,
+  targetType: "permit" | "nem" | "all",
+  orgFilter: string | null,
+  opts: { sleep?: (ms: number) => Promise<void>; gapMs?: number } = {},
+): Promise<PermitCheckNowResponse> {
+  const clause = orgFilter ? "AND p.org_id = ?" : "";
+  const params = orgFilter ? [orgFilter] : [];
+  const active = db.query<Row>(
+    `SELECT t.*, p.ahj AS project_ahj, p.utility AS project_utility
+     FROM permit_check_targets t JOIN projects p ON p.id = t.project_id
+     WHERE t.active = 1 ${clause}
+     ORDER BY t.last_checked_at IS NOT NULL, t.last_checked_at ASC, t.created_at ASC`,
+    params,
+  ).filter((row) => targetType === "all" || trackKind(text(row.target_type), text(row.permit_type)) === targetType);
+  const skipped: PermitCheckNowResult[] = [];
+  const free: Row[] = [];
+  for (const row of active) {
+    if (permitTargetsInFlight.has(text(row.id))) {
+      skipped.push(permitCheckResult(db, row, "skipped", { reason: "another check is reading this filing right now" }));
+    } else if (free.length >= PERMIT_CHECK_NOW_CAP) {
+      skipped.push(permitCheckResult(db, row, "skipped", { reason: `more than ${PERMIT_CHECK_NOW_CAP} filings in one click; the next click starts with this one` }));
+    } else {
+      free.push(row);
+    }
+  }
+  const targets = interleaveByHost(free);
+  const pacing: PermitCheckPacing = {
+    gapMs: opts.gapMs ?? permitCheckHostGapMs(),
+    sleep: opts.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms))),
+    lastAt: new Map(),
+  };
+  const ran = await withTargetsInFlight(targets, () => checkPermitTargets(db, targets, pacing));
+  // clientPortal imports this module statically, so its labeller is loaded on demand.
+  const { trackLabel } = await import("./clientPortal");
+  const byId = new Map(active.map((row) => [text(row.id), row]));
+  const results = [...ran.results, ...skipped].map((r) => {
+    const row = byId.get(r.targetId);
+    return row ? { ...r, label: trackLabel(text(row.target_type), text(row.permit_type)) } : r;
+  });
+  const count = (r: PermitCheckNowResult["result"]) => results.filter((x) => x.result === r).length;
+  return { checked: ran.results.length, read: count("read"), unreadable: count("unreadable"), skipped: count("skipped"), results };
+}
+
+function permitCheckResult(db: AppDb, target: Row, result: PermitCheckNowResult["result"], extra: Partial<PermitCheckNowResult>): PermitCheckNowResult {
+  const projectId = text(target.project_id);
+  const name = db.get<{ homeowner_name?: string }>("SELECT homeowner_name FROM projects WHERE id = ?", [projectId]);
+  return {
+    targetId: text(target.id),
+    projectId,
+    projectName: text(name?.homeowner_name),
+    label: "", // worded by runPermitChecksNow (clientPortal.trackLabel)
+    track: trackKind(text(target.target_type), text(target.permit_type)),
+    result,
+    ...extra,
+  };
+}
+
+/** THE READ ITSELF, one target at a time — shared by the sweep and the click. `pacing` null = the
+ *  sweep's old back-to-back order (it reads only what is due, at most 50 every 15 minutes). */
+async function checkPermitTargets(
+  db: AppDb,
+  targets: Row[],
+  pacing: PermitCheckPacing | null,
+): Promise<{ checked: number; projects: ProjectDetail[]; results: PermitCheckNowResult[] }> {
   const projects: ProjectDetail[] = [];
+  const results: PermitCheckNowResult[] = [];
   for (const target of targets) {
+    const paceKey = pacing ? permitTargetPaceKey(target) : "";
+    if (pacing) {
+      const wait = (pacing.lastAt.get(paceKey) ?? -Infinity) + pacing.gapMs - Date.now();
+      if (wait > 0) await pacing.sleep(wait);
+    }
+    // Each read stamps its own time: a paced click can run for minutes.
+    const now = nowIso();
     const projectId = text(target.project_id);
     // Try a live authenticated portal scrape, falling back to the public tracking URL
     // and finally mock. Authenticated strategies, in order:
@@ -7876,6 +8026,8 @@ export async function runDuePermitChecks(
         { projectId },
       );
       rescheduleUnreadTarget(db, projectId, target, track, why, now);
+      results.push(permitCheckResult(db, target, "unreadable", { reason: why }));
+      if (pacing) pacing.lastAt.set(paceKey, Date.now());
       continue;
     }
     const detail = await recordPermitStatusCheck(db, projectId, {
@@ -7898,8 +8050,15 @@ export async function runDuePermitChecks(
     }
     touchProjectMetrics(db, projectId);
     projects.push(detail);
+    // A never-checked target that read nothing is recorded as "manual check required" (above) — it
+    // was still not READ, and the click says so.
+    const recorded = detail.permitStatusChecks.find((c) => c.targetId === text(target.id));
+    results.push(gatheredNothing
+      ? permitCheckResult(db, target, "unreadable", { reason: unreadableReason || "no portal URL or recipe to read" })
+      : permitCheckResult(db, target, "read", { outcome: recorded?.outcome, statusLabel: recorded?.statusLabel }));
+    if (pacing) pacing.lastAt.set(paceKey, Date.now());
   }
-  return { checked: targets.length, projects };
+  return { checked: targets.length, projects, results };
 }
 
 // Extract a concise, non-sensitive failure reason from a stage result for operator

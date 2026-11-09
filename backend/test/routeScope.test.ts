@@ -147,8 +147,10 @@ const UNSCOPED_BY_DESIGN: Record<string, string> = {
   // Email-in intake (#489): each row is stamped with its client's org (else the polling source's)
   // and the handlers 404 a row outside reqOrgFilter (emailIntake.rowInScope; emailIntake.test).
   "/api/email-intake": "rows carry their client's org; handlers read through reqOrgFilter and 404 outside it",
-  "/api/permit-monitor/run": "global background sweep; runs as system",
-  "/api/nem-monitor/run": "global background sweep; runs as system",
+  // A person's "check now" (#160): POST-only, so not in SCOPED_LIST_ROUTES (GET); the handlers'
+  // reqOrgFilter is asserted by name below.
+  "/api/permit-monitor/run": "check-now click; reads only the caller's org's targets (reqOrgFilter, asserted below)",
+  "/api/nem-monitor/run": "check-now click; reads only the caller's org's targets (reqOrgFilter, asserted below)",
   "/api/portal-pauses": "global automation kill-switches",
   "/api/users/:id": "role changes are authorized inside updateUser against the session actor",
 
@@ -214,6 +216,13 @@ for (const [routePath, helper] of Object.entries(SCOPED_LIST_ROUTES)) {
   const start = source.indexOf(`app.get("${routePath}"`);
   const body = start < 0 ? "" : source.slice(start, source.indexOf("\napp.", start + 10));
   run(`GET ${routePath} passes a tenant filter`, body.includes(helper), `expected ${helper} in:\n${body.slice(0, 300)}`);
+}
+
+// The check-now clicks (#160) read every active target of their kind NOW — only the caller's org's.
+for (const routePath of ["/api/permit-monitor/run", "/api/nem-monitor/run"]) {
+  const start = source.indexOf(`app.post("${routePath}"`);
+  const body = start < 0 ? "" : source.slice(start, source.indexOf("\napp.", start + 10));
+  run(`POST ${routePath} checks only the caller's org`, /runPermitChecksNow\(db,[^)]*reqOrgFilter\(db,\s*req\)\)/.test(body), `expected runPermitChecksNow(db, …, reqOrgFilter(db, req)) in:\n${body.slice(0, 300)}`);
 }
 
 // The two highest-traffic project routes, asserted explicitly rather than by prefix.

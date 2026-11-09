@@ -163,7 +163,7 @@ import {
   updateOperationStep,
   runEmailTracker,
   runProjectWorkflow,
-  runDuePermitChecks,
+  runPermitChecksNow,
   createRunApproval,
   finalSubmitJobPayload,
 } from "./repository";
@@ -2455,13 +2455,17 @@ app.get("/api/projects/:id/permit-checks/stale", (req, res) => {
   });
 });
 
+// A PERSON'S CLICK CHECKS NOW (#160): every active target of the kind, paced one portal host at a
+// time, the caller's own org only (rule 6) — one result per filing, not "0 due". The 15-minute
+// background sweep (scheduler.ts) stays due-only.
 app.post("/api/permit-monitor/run", asyncHandler(async (req, res) => {
   const targetType = req.body?.targetType || "all";
-  res.json(await runDuePermitChecks(db, targetType));
+  if (!["permit", "nem", "all"].includes(targetType)) throw new HttpError(400, "targetType must be permit, nem or all.");
+  res.json(await runPermitChecksNow(db, targetType, reqOrgFilter(db, req)));
 }));
 
-app.post("/api/nem-monitor/run", asyncHandler(async (_req, res) => {
-  res.json(await runDuePermitChecks(db, "nem"));
+app.post("/api/nem-monitor/run", asyncHandler(async (req, res) => {
+  res.json(await runPermitChecksNow(db, "nem", reqOrgFilter(db, req)));
 }));
 
 // Users

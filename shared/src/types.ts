@@ -3349,6 +3349,34 @@ export interface PermitStatusCheckResult extends ProjectDetail {
   unreadable?: string;
 }
 
+/** WHAT A "CHECK NOW" CLICK DID TO ONE FILING (#160): POST /api/permit-monitor/run and
+ *  /api/nem-monitor/run answer one of these per active target, instead of "0 due". `read` = a
+ *  status was read and recorded; `unreadable` = the check ran and read nothing (reason says why);
+ *  `skipped` = the check did not run for this filing (reason says why: another check already had
+ *  it in hand, or the click's cap). */
+export interface PermitCheckNowResult {
+  targetId: string;
+  projectId: string;
+  /** The homeowner's name on the project, so the operator can tell filings apart. */
+  projectName: string;
+  /** "Building permit", "Electrical permit", "NEM / interconnection"… (clientPortal.trackLabel). */
+  label: string;
+  track: "permit" | "nem";
+  result: "read" | "unreadable" | "skipped";
+  /** The recorded outcome and its status label, when `read`. */
+  outcome?: string;
+  statusLabel?: string;
+  reason?: string;
+}
+export interface PermitCheckNowResponse {
+  /** Filings a check ran on (read + unreadable). */
+  checked: number;
+  read: number;
+  unreadable: number;
+  skipped: number;
+  results: PermitCheckNowResult[];
+}
+
 // ---------------------------------------------------------------------------
 // THE TOKENIZED, NO-LOGIN CLIENT STATUS PAGE (/api/public/status/:token → frontend/status.html).
 //
