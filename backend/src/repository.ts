@@ -65,6 +65,7 @@ import type {
   SubmitGateReport,
   SubmittalTrack,
   SubmittalTrackType,
+  StatePermitRule,
 } from "../../shared/src/types";
 import { correctionFilingStamp, correctionOverdueSql, touchProjectMetrics, type CorrectionFilingInput } from "./kpi";
 import fs from "node:fs";
@@ -86,6 +87,7 @@ import { installerHandoffNoteBody, sendInstallerHandoff } from "./installerHando
 import { accelaModulesForNumber, detectPlatform, publicPermitStatusCheck, searchAccelaRecordByNumber } from "./publicPermitStatus";
 import { planSetTextForProject, projectDocsByType, DOCS_DIR, PLAN_TEXT_DOC_TYPES } from "./projectDocuments";
 import { activeStructuralLetterConfirmation, structuralLetterState } from "./structuralLetter";
+import { statePermitRulesFor } from "./stateRules";
 import type { DesignTextSource } from "./designCriteria";
 import { describeCited, lookedUpRecordType, issuingAgencyFor, permitAnswerForTrack, stateRulesFor, isStatewidePortalUrl, permitProcessKey, projectForTrack, refuseTrackIssuerValue, trackIssuer } from "./permitProcess";
 import { statewideDecisionFor, statewideUrlRefusal } from "./statewideEvidence";
@@ -247,7 +249,11 @@ export function buildReviewerReportFor(db: AppDb, project: ProjectRecord): Revie
   // A named person's confirmation of the engineer's letter (#198; owner ruling 2026-10-08) — the
   // only thing that turns the stamped-structural hold into "verify the seal". Text never does.
   const structuralCertification = activeStructuralLetterConfirmation(db, project.id);
-  return buildReviewerReport(project, { codeContext, codeProfileRow, uploadedDocTypes, documentTexts: designDocumentTexts(db, project.id), pvWorksheet: filedPvWorksheetInput(db, project), structuralCertification });
+  // The job state's cited structural rules (state_permit_rules, #595 PR2). A failed read leaves them
+  // out, which raises nothing new: the rules only ever add findings.
+  let stateRules: StatePermitRule[] = [];
+  try { stateRules = statePermitRulesFor(db, project.state, "structural"); } catch { stateRules = []; }
+  return buildReviewerReport(project, { codeContext, codeProfileRow, uploadedDocTypes, documentTexts: designDocumentTexts(db, project.id), pvWorksheet: filedPvWorksheetInput(db, project), structuralCertification, stateRules });
 }
 
 // WHAT HOLDS THIS FILING: ONE ANSWER (#214). The text report with the cached vision verdicts folded

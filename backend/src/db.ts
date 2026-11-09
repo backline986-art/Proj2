@@ -140,6 +140,10 @@ export async function openDatabase(): Promise<AppDb> {
   try {
     (await import("./codeProfiles")).seedReferenceCodeProfiles(appDb);
   } catch { /* reference data is best-effort */ }
+  // Each state's cited permit rules (#595): the same idempotent seed, never over a verified row.
+  try {
+    (await import("./stateRules")).seedStatePermitRules(appDb);
+  } catch { /* reference data is best-effort */ }
   // Per-job permit process answers: loaded into the in-process registry that the pure
   // (db-less) track/document/fee resolvers read — the same pattern as the process-profile cache.
   try {
@@ -3124,6 +3128,37 @@ const VERSIONED_MIGRATIONS: VersionedMigration[] = [
           FOREIGN KEY (project_id) REFERENCES projects(id)
         );
         CREATE INDEX IF NOT EXISTS idx_track_fee_payments_project ON track_fee_payments(project_id, track, paid_at);
+      `);
+    },
+  },
+  {
+    version: 63,
+    name: "state_permit_rules",
+    up: (db) => {
+      // EACH STATE'S PERMIT RULES AS CITED DATA, NOT CODE (#595 PR2; the shape #586 asks for its fee
+      // rules). One row per (state, family, rule): `structural` holds the prescriptive-solar limits,
+      // what forces the engineered path and where a seal is valid (#595); #586's `fee` rules (state
+      // surcharges, caps) join the same table under their own family. Shared knowledge on purpose, like
+      // jurisdiction_code_profiles: no org_id.
+      //   value_json: the rule's value (a number, a list, an object) — stateRules.ts reads each key.
+      //   citation / source_url: the section and its words, and where they were read. Every row has one.
+      //   confidence: 'seeded' (shipped reference data or research) | 'verified' (a person checked it
+      //     against the official source). RULE 3: the seeder never writes a row whose verified_at is set.
+      // Created here, never lazily: the reviewer reads it, and reads write nothing.
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS state_permit_rules (
+          state TEXT NOT NULL,
+          family TEXT NOT NULL,
+          rule_key TEXT NOT NULL,
+          value_json TEXT NOT NULL,
+          citation TEXT NOT NULL,
+          source_url TEXT NOT NULL DEFAULT '',
+          confidence TEXT NOT NULL DEFAULT 'seeded',
+          verified_at TEXT NOT NULL DEFAULT '',
+          verified_by TEXT NOT NULL DEFAULT '',
+          updated_at TEXT NOT NULL,
+          PRIMARY KEY (state, family, rule_key)
+        );
       `);
     },
   },
