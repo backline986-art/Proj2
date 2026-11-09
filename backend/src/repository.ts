@@ -75,6 +75,7 @@ import { closeStageCancel, openStageCancel } from "./stageCancel";
 import os from "node:os";
 import { checkStatusWithAdapter, runCorrectionReopen, stageWithAccela, stageWithMockPortal, stageWithPowerClerk, stageWithRecipe } from "../../portal-bot/src/index";
 import { readRecordLinkSignedIn } from "../../portal-bot/src/recordLinkRead";
+import { liveReviewSessionUnder } from "../../portal-bot/src/reviewSession";
 import { portalAutomationDisabled, resolveHeadless } from "../../portal-bot/src/browser";
 import { findCompleteRecipeForProject, findAnyRecipeForProject, resolveRecipeFieldValues, markPortalRecipeForRerecord, demoteOnReplayFailure, collectHealedSteps, persistHealedSteps, getPortalRecipe, portalEntityEvidence, recipeHostFit, findBorrowableRecipe, replayFailureBlamesRecipe, recipeStepsSignature, isNotServedRecipe, recordPortalNotServed, type BorrowedRecipeChoice } from "./portalRecipes";
 import { notServedInResult } from "../../shared/src/portalNotServed";
@@ -7651,6 +7652,58 @@ function interleaveByHost(targets: Row[]): Row[] {
 
 type PermitCheckPacing = { gapMs: number; sleep: (ms: number) => Promise<void>; lastAt: Map<string, number> };
 
+// ── A STATUS READ NEVER TAKES A PORTAL SESSION A PERSON OR A RUN HOLDS (#516) ─────────────────────
+// Some portals allow one session per account and end the older one when a second sign-in appears
+// (PowerClerk: recipeAdapter reports "THE PORTAL ENDED THIS SESSION mid-run … commonly a concurrent
+// login with the same account"). The monitor signs in with the CLIENT'S OWN login, so a read that
+// signed in while that account was in use would log a person out mid-review in the hand-over window
+// (#333 / #378: the submit is theirs, rule 1), or end a stage / learn run partway and leave a partial
+// draft (staging is not idempotent portal-side). So while the client's account is in use, no
+// signed-in door opens: the read waits for the next check (rescheduled like any unread target) and
+// the card says why (statusLinkGap "in_use"). Anonymous reads of a public link still run.
+//
+// IN USE means either:
+//   - a profile under the client's profile root carries a LIVE review marker (reviewSession.ts,
+//     age-bounded at 8 h) — a window left open for a person to verify and submit in; or
+//   - a portal run is in flight on one of the client's projects: a running portal-effect job
+//     (jobQueue PORTAL_EFFECT_JOB_TYPES: prepare_submission, auto_learn, autopilot) or a live
+//     'running' portal_runs row (a stage or a correction reopen; portalRunnerAlive, so a crashed
+//     run's row does not hold the account forever).
+// A clientless project's profiles sit at the profile root itself, beside every client's directory:
+// its root is scanned with the client directories left out, so another client's window never holds it.
+// Asked per target, at the door, so a long paced click sees a run that started mid-click.
+const STATUS_READ_HOLD_JOB_TYPES = ["prepare_submission", "auto_learn", "autopilot"];
+function portalAccountInUse(db: AppDb, clientId: string, profileBase: string, currentProjectId: string, now = Date.now()): string {
+  const clientClause = clientId ? "p.client_id = ?" : "(p.client_id IS NULL OR p.client_id = '')";
+  const clientParams = clientId ? [clientId] : [];
+  const marker = clientId
+    ? liveReviewSessionUnder(path.join(profileBase, clientId), { now })
+    : (() => {
+        const clientDirs = new Set(db.query<{ id: string }>("SELECT id FROM clients").map((r) => text(r.id)));
+        return liveReviewSessionUnder(profileBase, { now, skip: (name) => clientDirs.has(name) });
+      })();
+  if (marker) {
+    return "the client's portal account is in use: a review window is open for a person to verify and submit in, so a status read does not sign in (a second sign-in can end their session); it tries again on the next check";
+  }
+  const job = db.get<Row>(
+    `SELECT j.job_type, j.project_id FROM job_queue j JOIN projects p ON p.id = j.project_id
+      WHERE j.status = 'running' AND j.job_type IN (${STATUS_READ_HOLD_JOB_TYPES.map(() => "?").join(", ")}) AND ${clientClause}
+      LIMIT 1`,
+    [...STATUS_READ_HOLD_JOB_TYPES, ...clientParams],
+  );
+  const run = job ? null : db.query<Row>(
+    `SELECT r.runner, r.started_at, r.project_id FROM portal_runs r JOIN projects p ON p.id = r.project_id
+      WHERE r.status = 'running' AND ${clientClause}`,
+    clientParams,
+  ).find((r) => portalRunnerAlive(text(r.runner), text(r.started_at)));
+  const busy = job ?? run;
+  if (busy) {
+    const what = job ? `a ${text(job.job_type).replace(/_/g, " ")} run` : "a portal run";
+    return `the client's portal account is in use: ${what} is in progress on ${text(busy.project_id) === currentProjectId ? "this project" : "another of this client's projects"}, so a status read does not sign in (a second sign-in can end that run's session); it tries again on the next check`;
+  }
+  return "";
+}
+
 /** A PERSON'S CLICK: check every active target of this kind now, paced (see above). */
 export async function runPermitChecksNow(
   db: AppDb,
@@ -7770,6 +7823,14 @@ async function checkPermitTargets(
     let signedInRan = false;
     let foundLink = "";
     let linkLookupStamp: string | null = null;
+    // #516: asked only when a signed-in door is about to open, once per target.
+    let accountHold: string | null = null;
+    const accountInUse = (): string => (accountHold ??= portalAccountInUse(db, clientId, profileBase, projectId));
+    const holdSignIn = (host: string): void => {
+      gap.signedIn = "in_use";
+      gap.portalHost ||= host;
+      noteReason(accountInUse());
+    };
     let publicReadUrl = "";
 
     // 0. A PERMIT FILING WITH A STATUS LINK IS READ ANONYMOUSLY FIRST (#413). The link is the record's
@@ -7816,11 +7877,19 @@ async function checkPermitTargets(
         noteReason("the account's record list was already searched for this filing in the last day");
         recipe = null;
       }
+      if (recipe?.portalUrl && accountInUse()) {
+        holdSignIn(portalHostOf(recipe.portalUrl));
+        recipe = null;
+      }
       if (recipe?.portalUrl) {
-        // Same credential/profile conventions as the learner/replay: portalType key is
-        // "utility" | "AHJ", persistent per-client browser profile carries the session.
+        // Same credential conventions as the learner/replay: portalType key is "utility" | "AHJ".
+        // A PROFILE OF ITS OWN (#517), as the #512 record-link read has: the correction reopen takes
+        // portalProfileDir(<client>, <type>, <host>) — the very dir this read used to take — and
+        // checkStatusWithAdapter first closes any window left open on its profile, so a status check
+        // of any target of that client on that host closed the reopen window a person was handed to
+        // verify and submit in. A status read never shares a profile with a window a person uses.
         const recipePortalType = scopeType === "utility" ? "utility" : "AHJ";
-        const userDataDir = portalProfileDir(profileBase, clientId ?? null, recipePortalType, recipe.portalUrl);
+        const userDataDir = portalProfileDir(profileBase, clientId ?? null, "status-read", recipe.portalUrl);
         const credential = clientId
           ? (getDecryptedCredential(db, clientId, recipePortalType)
               ?? getDecryptedCredentialByUrl(db, clientId, recipe.portalUrl)
@@ -7869,8 +7938,12 @@ async function checkPermitTargets(
        ORDER BY CASE WHEN client_id = ? THEN 0 ELSE 1 END, created_at DESC LIMIT 1`,
       [portalType, clientId, clientId],
     );
-    if (portalProfile?.encrypted_storage_state) {
-      const userDataDir = portalProfileDir(profileBase, clientId ?? null, portalType, safeTargetPortalUrl);
+    if (portalProfile?.encrypted_storage_state && accountInUse()) {
+      holdSignIn(portalHostOf(safeTargetPortalUrl));
+    } else if (portalProfile?.encrypted_storage_state) {
+      // A profile of its own (#517): with no portal URL this was <client>/<type> — staging's own
+      // profile (prepareSubmission), whose left-open review window checkStatusWithAdapter closes.
+      const userDataDir = portalProfileDir(profileBase, clientId ?? null, "status-read", safeTargetPortalUrl);
       const credential = clientId
         ? (getDecryptedCredential(db, clientId, portalType)
             ?? (safeTargetPortalUrl ? getDecryptedCredentialByUrl(db, clientId, safeTargetPortalUrl) : null)
@@ -7975,7 +8048,9 @@ async function checkPermitTargets(
       const hasLogin = Boolean(clientId && linkUrl && clientHasLoginOnHost(db, clientId, linkUrl));
       gap.portalHost ||= portalHostOf(linkUrl);
       gap.hasCredential ||= hasLogin;
-      if (linkUrl && hasLogin && appNums.length > 0) {
+      if (linkUrl && hasLogin && appNums.length > 0 && accountInUse()) {
+        holdSignIn(portalHostOf(linkUrl));
+      } else if (linkUrl && hasLogin && appNums.length > 0) {
         portalRead = true;
         signedInRan = true;
         const linkHost = portalHostOf(linkUrl);
