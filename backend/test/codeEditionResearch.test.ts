@@ -18,7 +18,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import type { CodeEdition, JurisdictionCodeProfile, JurisdictionCodeResearchInput, LLMProvider } from "../../shared/src/types";
+import type { CodeEdition, JurisdictionCodeProfile, JurisdictionCodeResearchInput, LLMProvider, ProjectRecord } from "../../shared/src/types";
 
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "code-editions-"));
 process.env.AUTOPILOT_DB_PATH = path.join(tmp, "t.sqlite");
@@ -32,6 +32,7 @@ delete process.env.SKIP_CODE_RESEARCH;
 const { openDatabase } = await import("../src/db");
 const CP = await import("../src/codeProfiles");
 const F = await import("../src/codeFamilies");
+const DC = await import("../src/designCriteria");
 const db = await openDatabase();
 
 // Never reach the worker: queued payloads are recorded here.
@@ -517,8 +518,12 @@ await check("B4 MUST-PASS: the stale VERIFIED Oregon row gets a proposal from th
   assert.match(String(byFamily.fire?.proposed), /^OFC 2025 \(2024 IFC\)/);
   assert.equal(byFamily.building?.current, null, "OSSC is missing from the verified row");
   assert.match(String(byFamily.building?.proposed), /^OSSC 2025/);
-  assert.equal(byFamily.residential, undefined, "ORSC 2023 (2021 IRC) already agrees with the row");
-  assert.equal(byFamily.electrical, undefined, "OESC 2023 already agrees with the row");
+  // #596: the 2026 ORSC took effect 2026-10-01 (phase-in to 2027-04-01) while the verified row
+  // still states the 2023 ORSC, so residential IS a proposal now; the shipped row already says
+  // OESC 2026, so electrical agrees.
+  assert.equal(byFamily.residential?.current, "ORSC 2023, IRC 2021");
+  assert.match(String(byFamily.residential?.proposed), /^ORSC 2026 \(2024 IRC\)/);
+  assert.equal(byFamily.electrical, undefined, "OESC 2026 already agrees with the row");
   assert.ok(byFamily.fire.sourceUrl?.includes("oregon.gov/osfm"), "the proposal lost its official source");
   // Surfaced on the listing GET /api/code-profiles returns.
   assert.equal(CP.listCodeProfiles(db).find((p) => p.key === OR_KEY)?.editionProposals?.length, 1);
@@ -629,15 +634,35 @@ await check("B3+B4 MUST-PASS (Coos Bay): after the operator approves the proposa
   assert.equal(or.confidence, "verified", "approval must be a re-verification");
   assert.ok(Object.keys(or.designCriteria).length + Object.keys(or.prescriptive).length > 0, "approval dropped the row's criteria/limits");
   const read = CP.getCodeProfile(db, { state: "OR", ahj: "City of Coquilleview" })!;
-  for (const want of ["OSSC 2025", "OFC 2025", "ORSC 2023", "OESC 2023"]) assert.ok(codesOf(read).includes(want), `${want} missing: ${codesOf(read)}`);
+  for (const want of ["OSSC 2025", "OFC 2025", "ORSC 2026", "OESC 2026"]) assert.ok(codesOf(read).includes(want), `${want} missing: ${codesOf(read)}`);
   assert.ok(!codesOf(read).includes("IFC 2021"), "the stale IFC 2021 survived approval");
-  assert.ok(codesOf(or).includes("IRC 2021") && codesOf(or).includes("NEC 2023"), `approval replaced families it did not change: ${codesOf(or)}`);
+  assert.ok(codesOf(or).includes("NEC 2026"), `approval replaced families it did not change: ${codesOf(or)}`);
   const ctx = CP.resolveEffectiveCodeContext(db, "OR", "City of Coquilleview");
   const fire = ctx.citationFor("IFC", "1205", "Solar PV systems");
   assert.equal(fire.code, "2025 OFC", `an IFC citation in Oregon reads ${fire.code}`);
   assert.match(fire.adoptionScope, /2024 IFC/);
   assert.match(fire.sourceUrl, /oregon\.gov\/osfm/);
   assert.equal(CP.listEditionProposals(db, OR_KEY).length, 0, "the applied proposal is still pending");
+});
+
+await check("#596 MUST-PASS: after approval, a Washington County plan on '2023 ORSC, 2025 OSSC, 2026 OESC' does not block — OESC matches and ORSC 2023 is inside the 2026 ORSC phase-in", () => {
+  const orsc = payloadOf(OR_KEY)!.adoptedCodes.find((c) => c.code === "ORSC");
+  assert.equal(orsc?.previousEdition, "2023", `approval lost the phase-in's previous edition: ${JSON.stringify(orsc)}`);
+  assert.equal(orsc?.mandatoryDate, "2027-04-01", `approval lost the phase-in's mandatory date: ${JSON.stringify(orsc)}`);
+  const ctx = CP.resolveEffectiveCodeContext(db, "OR", "Washington County");
+  const plan = {
+    id: "or-596", state: "OR", ahj: "Washington County", utility: "Test Power", homeownerName: "Test Owner", projectAddress: "1 Test St",
+    interconnectionMethod: "Load-side breaker",
+    parserSnapshot: { mounting: "Roof mount", planSetExtractedText: "GOVERNING CODES: 2023 ORSC, 2025 OSSC, 2026 OESC. SYSTEM SIZE: 8 kW DC" },
+  } as unknown as ProjectRecord;
+  const basis = (asOf: string) => DC.evaluateDesignCriteriaFindings(plan, ctx, { roofMounted: true, asOf }).find((f) => f.id === "city.code.basis-mismatch");
+  const now = basis("2026-11-09");
+  assert.notEqual(now?.severity, "blocker", now?.message);
+  assert.ok(!/OESC/.test(now?.message ?? ""), `the 2026 OESC line is still a mismatch: ${now?.message}`);
+  // The window is what softens ORSC 2023: from the mandatory date on it blocks again.
+  const later = basis("2027-04-02");
+  assert.equal(later?.severity, "blocker", later?.message);
+  assert.match(String(later?.message), /ORSC 2023/);
 });
 
 await check("B4 MUST-EXCLUDE: an IFC citation never borrows a non-IFC fire code (Florida's FFPC is NFPA 1)", () => {
