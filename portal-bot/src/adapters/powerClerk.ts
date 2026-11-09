@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { portalDebugDir } from "../../../backend/src/statePaths";
+import { isPacifiCorp, pacifiCorpBrand } from "../../../backend/src/utilityIdentity";
 import type { ProjectRecord, ReviewerReport } from "../../../shared/src/types";
 import { BasePortalAdapter, HUMAN_REVIEW_MESSAGE, ok, fail, type PortalContext, type PortalStepResult } from "../adapter";
 import { openPortal } from "../browser";
@@ -221,6 +222,30 @@ async function clearPowerClerkOverlays(page: any): Promise<void> {
       }
     });
   } catch { /* mock page or no DOM — non-fatal */ }
+}
+
+/**
+ * WHICH "New … Application" PROGRAM BUTTON this job opens on PowerClerk's Program Home (#602).
+ * PGE's button says "New Net Metering Application" (no "PGE" in it, and the canonical utility value
+ * IS the short form "PGE", so a naive `.*PGE.*` regex never matched). PacifiCorp's ONE tenant shows
+ * BOTH "New Pacific Power Customer Generation Application" and a Rocky Mountain Power sibling, and
+ * the job's STATE picks the brand (utilityIdentity.pacifiCorpBrand: UT/ID/WY Rocky Mountain Power,
+ * OR/WA/CA Pacific Power) — a Utah job typed "PacifiCorp" or "Pacific Power" used to open the
+ * Pacific Power program. Only the button wording forks: the tenant, the login and every rule-5 host
+ * check are the same either way. A PacifiCorp spelling whose state is unknown keeps the pre-#602
+ * answer (the brand it was typed as: "Rocky Mountain Power" stays itself, anything else reads
+ * "Pacific Power"); any other utility matches by its own name.
+ */
+export function powerClerkProgramButtonName(project: Pick<ProjectRecord, "utility" | "state">): RegExp {
+  const utilRaw = String(project.utility || "").trim();
+  const escapeRe = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  if (/^(pge|portland general electric)$/i.test(utilRaw)) return /^New Net Metering Application$/i;
+  const utilityWord = isPacifiCorp({ state: project.state, utility: utilRaw })
+    ? pacifiCorpBrand(project.state)
+    : /pacificorp|pacific power/i.test(utilRaw)
+      ? "Pacific Power" // no known PacifiCorp state: the pre-#602 wording
+      : utilRaw;
+  return new RegExp(`^New .*${escapeRe(utilityWord)}.* Application$`, "i");
 }
 
 export class PowerClerkAdapter extends BasePortalAdapter {
@@ -513,19 +538,8 @@ export class PowerClerkAdapter extends BasePortalAdapter {
       // default, then any "New … Application".
       await clearPowerClerkOverlays(page);
       // Match by the PROGRAM wording the button actually carries, not the raw utility
-      // string: PGE's button says "New Net Metering Application" (no "PGE" in it), and
-      // the codebase's canonical utility value IS the short form "PGE" — so a naive
-      // `.*PGE.*` regex never matched and always degraded to the loose fallback.
-      const utilRaw = String(project.utility || "").trim();
-      const escapeRe = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-      const utilityWord = /^(pge|portland general electric)$/i.test(utilRaw)
-        ? "" // PGE's program button carries no utility name — use the exact default below
-        : /pacificorp|pacific power/i.test(utilRaw)
-          ? "Pacific Power" // PacifiCorp's page shows Pacific Power + Rocky Mountain siblings
-          : utilRaw;
-      const newAppRe = utilityWord
-        ? new RegExp(`^New .*${escapeRe(utilityWord)}.* Application$`, "i")
-        : /^New Net Metering Application$/i;
+      // string; PacifiCorp's brand comes from the job's state (powerClerkProgramButtonName).
+      const newAppRe = powerClerkProgramButtonName(project);
       let newApp = page.getByRole("link", { name: newAppRe }).or(page.getByRole("button", { name: newAppRe }));
       if ((await newApp.count().catch(() => 0)) === 0) {
         const anyNew = /^New .* Application$/i;

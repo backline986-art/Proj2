@@ -76,7 +76,11 @@ export interface ReviewSubmissionRecord {
   status: "complete" | "failed";
   report: ReviewerReport | null;
   aiSummary: string;
-  plansetPath: string;
+  /** Whether a plan-set PDF was uploaded with this submission. The server-side file path stays in
+   *  `review_submissions.planset_path` and never leaves the server (#392): this record is what the
+   *  review API serializes to every tenant, and an absolute path there teaches a client the
+   *  server's disk layout while giving it nothing it can use (no route serves the file). */
+  hasPlanset: boolean;
   createdAt: string;
 }
 
@@ -90,7 +94,7 @@ function mapSubmission(row: Row): ReviewSubmissionRecord {
     status: s(row.status) === "failed" ? "failed" : "complete",
     report: parseJson<ReviewerReport | null>(s(row.report_json), null),
     aiSummary: s(row.ai_summary),
-    plansetPath: s(row.planset_path),
+    hasPlanset: s(row.planset_path) !== "",
     createdAt: s(row.created_at),
   };
 }

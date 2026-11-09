@@ -15,6 +15,8 @@
 //              status   a permit/NEM tracking target's outcome changed (ref = target id)
 //              unmatched_email  a correction email matched no job (ref = the message's signature;
 //                       no project, so the org is the inbox source's) (#522)
+//              unsorted_intake  an emailed job landed on the unsorted intake list (ref = the intake
+//                       row id; the org is the row's own) (#541)
 //              stage_held  the stage gate refused a filing before any browser opened: boxes its
 //                       recipe types that the job has no value for, or a per-job question nobody
 //                       answered (#445). No run row exists, so the run alert never fired (#551).
@@ -55,7 +57,7 @@ import { projectSecretValuesById } from "./projectSecrets";
 import { redactSecretValues } from "../../shared/src/portalSafety";
 import { configuredStaffOrgs, staffAlertChannels, staffDigestHour, type StaffAlertChannels } from "./staffAlertConfig";
 
-export type StaffAlertKind = "run" | "correction" | "status" | "digest" | "unmatched_email" | "stage_held";
+export type StaffAlertKind = "run" | "correction" | "status" | "digest" | "unmatched_email" | "unsorted_intake" | "stage_held";
 
 /** Stage-run endings that need a person. awaiting_human_submit (staged cleanly, waiting for
  *  review) is deliberately absent: it is the expected end of a run and the digest carries it. */
@@ -446,6 +448,64 @@ export function alertStaffOnUnmatchedCorrectionEmail(
     return recordAndSend(db, { orgId: input.orgId || DEFAULT_ORG_ID, projectId: null, kind: "unmatched_email", ref: input.signature, state: "unmatched", ...mail });
   } catch (err) {
     logger.warn("staff-alert", `unmatched email alert skipped: ${err instanceof Error ? err.message : String(err)}`);
+    return Promise.resolve();
+  }
+}
+
+/** Why an emailed job is unsorted, in our own words for the team (never the message's text). */
+const UNSORTED_INTAKE_WHY: Record<string, string> = {
+  no_tag: "it was sent to the intake address without a client tag.",
+  unknown_tag: "no client has the intake tag it was sent to.",
+  ambiguous_tag: "more than one client has the intake tag it was sent to.",
+  unknown_sender: "the sender is not one of the client's own addresses or intake senders.",
+  sender_not_authenticated: "the sender's address could not be verified (authentication failed).",
+  no_usable_attachments: "none of its attachments is a PDF or a photo we can use.",
+  address_unreadable: "the project address could not be read from its documents.",
+  plan_set_names_another_client: "the plan set's licence number belongs to a different client than the tag.",
+  failed: "processing failed partway; it can be retried.",
+};
+
+/** The unsorted-intake alert: the sender's domain, the day, the reason in our words, a file count. */
+export function unsortedIntakeAlert(input: { domain: string; day: string; reason: string; files: number }): StaffEmail {
+  const why = scrubStaffText(UNSORTED_INTAKE_WHY[input.reason] ?? "intake could not place it.", []);
+  return renderStaff(`Action needed: an emailed job could not be filed (${input.domain})`, {
+    audience: "staff",
+    preheader: `An emailed job from ${input.domain} (${input.day}) is waiting on the unsorted list.`,
+    eyebrow: "Action needed · Emailed jobs",
+    headline: "An emailed job needs a person",
+    intro: ["A job emailed to the intake address could not be filed on its own. It is waiting on the dashboard's Emailed jobs list, with its files."],
+    rows: [
+      ["From", input.domain],
+      ["Received", input.day],
+      ["Files", String(Math.max(0, Math.floor(input.files)))],
+      ["Why", why],
+      ["Next", "open Emailed jobs on the dashboard: File under client, Retry, or Dismiss it."],
+    ],
+    action: { label: `Open ${BRAND}`, url: dashboardLink() },
+  });
+}
+
+/**
+ * An emailed job landed unsorted (#541): it used to wait on the dashboard until somebody looked.
+ * RULE 2 / no-homeowner-data: the alert carries the sender's DOMAIN, the day, a file count and the
+ * reason in our own words — never the subject, the body, a file name or an address. RULE 6: the org
+ * is the intake row's own (its client's, else the polling source's). Deduped per intake row, so a
+ * re-read or a person's re-run never alerts twice for the same message.
+ */
+export function alertStaffOnUnsortedIntake(
+  db: AppDb,
+  input: { orgId: string; intakeId: string; from: string; receivedAt: string | null; reason: string; files: number },
+): Promise<void> {
+  try {
+    const mail = unsortedIntakeAlert({
+      domain: senderDomain(input.from),
+      day: String(input.receivedAt || "").slice(0, 10) || "unknown date",
+      reason: input.reason,
+      files: input.files,
+    });
+    return recordAndSend(db, { orgId: input.orgId || DEFAULT_ORG_ID, projectId: null, kind: "unsorted_intake", ref: input.intakeId, state: "unsorted", ...mail });
+  } catch (err) {
+    logger.warn("staff-alert", `unsorted intake alert skipped: ${err instanceof Error ? err.message : String(err)}`);
     return Promise.resolve();
   }
 }

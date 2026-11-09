@@ -12,7 +12,7 @@ import { stampStructuralLetterVoid } from "./structuralLetterVoid";
 import { parseFeeSummary, recordFeeSummary } from "./feeSummary";
 import { parsePaidFeeReceipt, recordPaidFeeReceipt } from "./feeReceipts";
 import { logger } from "./logger";
-import { sniffFileKind, looksLikeCad, isImageKind, describeKind, type SniffedKind } from "./fileTypes";
+import { sniffFileKind, looksLikeCad, isImageKind, describeKind, PDF_ACCEPT, PHOTO_OR_PDF_ACCEPT, type SniffedKind } from "./fileTypes";
 
 type Row = Record<string, unknown>;
 
@@ -189,6 +189,17 @@ const PDF_REQUIRED_DOC_TYPES = new Set([
 // The issued permit and the utility's approval / PTO letter (#492): downloaded off the filed record
 // by the permit monitor, or attached by a person — a permit card is often a phone photo.
 const IMAGE_OR_PDF_DOC_TYPES = new Set(["meter_photo", "site_photo", "roof_photo", "utility_bill", "photo", "issued_permit", "utility_approval"]);
+
+/**
+ * The file picker `accept` for a slot: the same sets `assertUploadUsable` refuses by, so a page
+ * never offers a file this route will 415 (#311). "" means the slot takes anything but CAD.
+ * The intake page (parser.html) carries these strings literally; intakeUploadTypes.test pins it.
+ */
+export function uploadAcceptFor(docType: string): string {
+  if (PDF_REQUIRED_DOC_TYPES.has(docType)) return PDF_ACCEPT;
+  if (IMAGE_OR_PDF_DOC_TYPES.has(docType)) return PHOTO_OR_PDF_ACCEPT;
+  return "";
+}
 
 // Where a native CAD file is allowed to live: as reference material an operator can
 // download, never as something the pipeline will try to read.

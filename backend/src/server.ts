@@ -163,13 +163,14 @@ import {
   updateOperationStep,
   runEmailTracker,
   runProjectWorkflow,
-  runDuePermitChecks,
+  runPermitChecksNow,
   createRunApproval,
   finalSubmitJobPayload,
 } from "./repository";
 import { createSignatureRequestApproval } from "./signatureRequestApproval";
 import { confirmSignatureRequestSent } from "./signatureTrack";
-import { getSubmittalTracks, markTrackSubmitted } from "./submittalTracks";
+import { getSubmittalTracks, markTrackSubmitted, requiredTracks, trackSubmittedAndTracked, trackSubmittedSentence } from "./submittalTracks";
+import { stagedReviewScreenshotFile } from "./stagedReviews";
 import { buildApprovalSheet } from "./approvalSheet";
 import { getPermitProcessLookup, projectForTrack, verifyPermitProcessLookup } from "./permitProcess";
 import { ahjProcessKnowledgeStatus, AHJ_PROCESS_REFERENCE_ENV } from "./processProfiles";
@@ -1014,14 +1015,23 @@ app.post("/api/code-profiles/research", asyncHandler(async (req, res) => {
 // dashboard sends, and no name is a 400 — "operator" is not a person.
 // The same named person verifies a seeded code profile (#209): PUT /api/code-profiles/verify, from
 // /review or the dashboard's KB card, stamps verified_by the same way (body field `verifiedBy`).
-const namedPersonDecider = (req: Request, field: "decidedBy" | "verifiedBy", signIn: string, nameIt: string): string => {
+// `isPerson` (optional; the KB profile verify routes pass feeConfirm.isConfirmingPerson, #563) also
+// refuses a placeholder or automation label ("human", "operator", "system", "bot"…) as the name, the
+// same way fee confirm and the structural letter do; signed in, an account whose display name is a
+// role ("Admin") is recorded by its email, which names the person who holds it.
+const namedPersonDecider = (req: Request, field: "decidedBy" | "verifiedBy", signIn: string, nameIt: string, isPerson?: (name: string) => boolean): string => {
   if (AUTH_ENABLED) {
     const user = currentUser(db, req);
     if (!user) throw new HttpError(401, signIn);
+    if (isPerson) {
+      const who = String((user.name && isPerson(user.name) ? user.name : user.email) || "").trim();
+      if (!isPerson(who)) throw new HttpError(400, nameIt);
+      return who;
+    }
     return String(user.name || user.email || "").trim() || "authenticated user";
   }
   const named = String(req.body?.[field] || "").trim().slice(0, 120);
-  if (!named) throw new HttpError(400, nameIt);
+  if (!named || (isPerson && !isPerson(named))) throw new HttpError(400, nameIt);
   return named;
 };
 const editionProposalDecider = (req: Request): string => namedPersonDecider(req, "decidedBy",
@@ -1463,6 +1473,20 @@ app.get("/api/email-intake/:id/files/:index", asyncHandler(async (req, res) => {
 app.post("/api/email-intake/:id/dismiss", asyncHandler(async (req, res) => {
   const { dismissEmailIntake } = await import("./emailIntake");
   res.json(dismissEmailIntake(db, String(req.params.id), reqOrgFilter(db, req), currentUser(db, req)?.email || "operator"));
+}));
+// #541: place an unsorted message in one step. "file" re-runs the intake pipeline with the client a
+// person chose (that client must be in the message's own org: another org's id is a 404, rule 6);
+// "retry" re-runs a message that failed partway. Both 404 a row outside reqOrgFilter, 409 a row
+// that is no longer unsorted, and audit the person's name.
+app.post("/api/email-intake/:id/file", asyncHandler(async (req, res) => {
+  const { fileEmailIntake } = await import("./emailIntake");
+  const clientId = String((req.body || {}).clientId || "").trim();
+  if (!clientId) throw new HttpError(400, "Choose the client to file this message under.");
+  res.json(await fileEmailIntake(db, String(req.params.id), clientId, reqOrgFilter(db, req), currentUser(db, req)?.email || "operator"));
+}));
+app.post("/api/email-intake/:id/retry", asyncHandler(async (req, res) => {
+  const { retryEmailIntake } = await import("./emailIntake");
+  res.json(await retryEmailIntake(db, String(req.params.id), reqOrgFilter(db, req), currentUser(db, req)?.email || "operator"));
 }));
 
 app.get("/api/email-tracker", (req, res) => {
@@ -1938,9 +1962,23 @@ app.post("/api/knowledge-base/research-ahj", asyncHandler(async (req, res) => {
 
 // Human-verified AHJ profile — a coordinator confirming/correcting the AI's guess
 // (e.g. "Hillsboro uses email + ProjectDox, not Accela"). Outranks AI research.
-app.post("/api/knowledge-base/ahj-profile", (req, res) => {
+// WHO VERIFIED IS A NAMED PERSON (#563, rule 3): the same namedPersonDecider as code-profile verify —
+// the signed-in user when auth is on (a body name is ignored); with auth off (how the live install
+// runs) the `verifiedBy` the caller sends, and a missing, placeholder or automation name is a 400 that
+// writes nothing. It used to stamp the session's user id, or "human" with auth off: a verified row
+// with no person behind it.
+const kbProfileVerifier = async (req: Request, what: string): Promise<string> => {
+  const { isConfirmingPerson } = await import("./feeConfirm");
+  return namedPersonDecider(req, "verifiedBy",
+    `Sign in to verify ${what}.`,
+    `Name the person verifying: ${what} is verified by a named person (type your name; "human", "operator" or a bot's name is not a person).`,
+    isConfirmingPerson);
+};
+app.post("/api/knowledge-base/ahj-profile", asyncHandler(async (req, res) => {
   const b = req.body || {};
   if (!String(b.ahj || "").trim()) throw new HttpError(400, "ahj is required.");
+  // Named BEFORE anything is written.
+  const verifiedBy = await kbProfileVerifier(req, "an AHJ profile");
   // RULE 5 AT THE KB WRITE: a person verifying an AHJ can still paste the utility's portal (the
   // Happy Valley row had PowerClerk in portal_url). A verified row outranks everything, so a wrong
   // one here would pin the permit track to the NEM portal. The entity half is the person's call.
@@ -1957,11 +1995,10 @@ app.post("/api/knowledge-base/ahj-profile", (req, res) => {
     submissionMethod: b.submissionMethod ? String(b.submissionMethod) : undefined,
     requiredDocuments: Array.isArray(b.requiredDocuments) ? b.requiredDocuments.map(String) : undefined,
     notes: b.notes ? String(b.notes) : undefined,
-    // WHO verified comes from the session, never the body.
-    verifiedBy: requestScope(db, req).userId || "human",
+    verifiedBy,
   });
   res.status(201).json({ saved: true, profileKey: profile.profileKey, profile });
-});
+}));
 
 // Onboard a new UTILITY with the LLM — the same easy "add a utility" workflow used for
 // AHJs: research the NEM/interconnection portal + required docs + smart-inverter/disconnect
@@ -1981,9 +2018,11 @@ app.post("/api/knowledge-base/research-utility", asyncHandler(async (req, res) =
 // Human-verified utility NEM profile — a coordinator confirming/correcting the AI's
 // guess, or teaching a utility from scratch (e.g. "Idaho Power uses PowerClerk; smart
 // inverter settings = Yes"). Outranks AI research.
-app.post("/api/knowledge-base/utility-profile", (req, res) => {
+app.post("/api/knowledge-base/utility-profile", asyncHandler(async (req, res) => {
   const b = req.body || {};
   if (!String(b.utility || "").trim()) throw new HttpError(400, "utility is required.");
+  // Named BEFORE anything is written (kbProfileVerifier, #563).
+  const verifiedBy = await kbProfileVerifier(req, "a utility profile");
   if (b.portalUrl && !trackSafeUrl("nem", String(b.portalUrl))) {
     throw new HttpError(409, `${String(b.portalUrl)} is an AHJ permit portal — it belongs on the AHJ's profile, not the utility's.`, { hostRefused: true, code: "track_conflict" });
   }
@@ -2001,11 +2040,10 @@ app.post("/api/knowledge-base/utility-profile", (req, res) => {
     acDisconnectRule: b.acDisconnectRule ? String(b.acDisconnectRule) : undefined,
     exportLimitNote: b.exportLimitNote ? String(b.exportLimitNote) : undefined,
     notes: b.notes ? String(b.notes) : undefined,
-    // WHO verified comes from the session, never the body.
-    verifiedBy: requestScope(db, req).userId || "human",
+    verifiedBy,
   });
   res.status(201).json({ saved: true, profileKey: profile.profileKey, profile });
-});
+}));
 
 // ---------------------------------------------------------------------------
 // Portal record/replay recipes — teach the bot a new AHJ or utility portal by
@@ -2455,13 +2493,17 @@ app.get("/api/projects/:id/permit-checks/stale", (req, res) => {
   });
 });
 
+// A PERSON'S CLICK CHECKS NOW (#160): every active target of the kind, paced one portal host at a
+// time, the caller's own org only (rule 6) — one result per filing, not "0 due". The 15-minute
+// background sweep (scheduler.ts) stays due-only.
 app.post("/api/permit-monitor/run", asyncHandler(async (req, res) => {
   const targetType = req.body?.targetType || "all";
-  res.json(await runDuePermitChecks(db, targetType));
+  if (!["permit", "nem", "all"].includes(targetType)) throw new HttpError(400, "targetType must be permit, nem or all.");
+  res.json(await runPermitChecksNow(db, targetType, reqOrgFilter(db, req)));
 }));
 
-app.post("/api/nem-monitor/run", asyncHandler(async (_req, res) => {
-  res.json(await runDuePermitChecks(db, "nem"));
+app.post("/api/nem-monitor/run", asyncHandler(async (req, res) => {
+  res.json(await runPermitChecksNow(db, "nem", reqOrgFilter(db, req)));
 }));
 
 // Users
@@ -2982,12 +3024,13 @@ app.patch("/api/ahj-templates/:id/verify", (req, res) => {
   res.json({ id: String(req.params.id), verified });
 });
 
-// Fully delete a stored template (blob + map).
-app.delete("/api/ahj-templates/:id", (req, res) => {
-  // SHARED cross-tenant knowledge: one delete removes the template (and any
-  // human-verified field map) for EVERY tenant. Admin-only, and a verified map
-  // needs the explicit ?force=1 acknowledgement — verified mapping work is the
-  // product's asset and must never vanish on a casual click.
+// SHARED cross-tenant knowledge: a template row (and any human-verified field map on
+// it) serves EVERY tenant, so anything that destroys it — the row itself, or the PDF
+// blob the map is useless without (fill needs pdf_blob; remap and download answer 410
+// without it) — is admin-only, and a verified map needs the explicit ?force=1
+// acknowledgement. Verified mapping work is the product's asset and must never vanish,
+// or be made unusable, on a casual click (#393). One guard for both deletes.
+function guardSharedTemplateDestruction(req: Request): void {
   requireAdmin(req);
   const row = db.get<{ id: string; field_map?: string }>("SELECT id, field_map FROM ahj_form_templates WHERE id = ?", [String(req.params.id)]);
   if (!row) throw new HttpError(404, "Template not found.");
@@ -2995,13 +3038,20 @@ app.delete("/api/ahj-templates/:id", (req, res) => {
   if (map.verified === true && String(req.query.force || "") !== "1") {
     throw new HttpError(409, "This template's field map is HUMAN-VERIFIED. Deleting it destroys that work for every tenant — retry with ?force=1 if you really mean it.");
   }
+}
+
+// Fully delete a stored template (blob + map).
+app.delete("/api/ahj-templates/:id", (req, res) => {
+  guardSharedTemplateDestruction(req);
   db.run("DELETE FROM ahj_form_templates WHERE id = ?", [String(req.params.id)]);
   res.json({ deleted: true });
 });
 
-// Wipe the raw PDF blob (keep moat data + field map for submission prep)
+// Wipe the raw PDF blob (keep moat data + field map for submission prep). Same guard
+// as the full delete: without the blob the template cannot be filled for anyone.
 app.delete("/api/ahj-templates/:id/blob", (req, res) => {
-  db.run("UPDATE ahj_form_templates SET pdf_blob = NULL, updated_at = ? WHERE id = ?", [new Date().toISOString(), req.params.id]);
+  guardSharedTemplateDestruction(req);
+  db.run("UPDATE ahj_form_templates SET pdf_blob = NULL, updated_at = ? WHERE id = ?", [new Date().toISOString(), String(req.params.id)]);
   res.json({ wiped: true });
 });
 
@@ -3489,6 +3539,16 @@ app.post("/api/projects/:id/prepare-submission", (req, res) => {
   // Recorded in the audit trail BEFORE the run, with the approver's identity, exactly as
   // autopilot/approve does: a filing must always be attributable to a person.
   const allowFinalSubmit = req.body?.allowFinalSubmit === true || String(req.body?.allowFinalSubmit) === "true";
+  // #436 RULING 5 (owner 2026-11-03): A TRACK ALREADY SUBMITTED AND TRACKED IS NEVER STAGED AGAIN — a
+  // filing is on record for it (trackSubmittedAndTracked: main's duplicate guard, asked here too).
+  // Refused HERE, before an approval is minted or a job enqueued (the card holds Stage with the same
+  // reason, and the job asks the same predicate again). A number on the tracking card alone is NOT
+  // this (PowerClerk numbers a draft), and neither is a staged draft awaiting approval: both run.
+  // The trackless legacy stage keeps its own refusals in the job.
+  if (track) {
+    const filed = trackSubmittedAndTracked(db, projectId, track, requiredTracks(getProjectDetail(db, projectId).project));
+    if (filed) throw new HttpError(409, trackSubmittedSentence(filed), { track, submittedAndTracked: filed.via, number: filed.number, tracked: filed.tracked });
+  }
   // APPROVE & SUBMIT: A NAMED PERSON APPROVES THIS RUN. The approval row is the only thing that
   // lets the run click the portal's final submit (repository.maySubmitAutomatically also needs
   // PORTAL_ALLOW_FINAL_SUBMIT=1, a complete recipe and its one flagged terminal submit). The
@@ -3736,6 +3796,19 @@ app.post("/api/portal-runs/:id/mark-resubmitted", (req, res) => {
 // Save a public AHJ portal tracking URL (no login required) for a portal run or
 // permit check target. Operators paste the CapDetail / record-detail URL after
 // submission so the system can surface it for unauthenticated status checks.
+// #436 PR1 — THE STAGED REVIEW'S MASKED PICTURE. Serves ONLY the file the staged-review row names (the
+// review page with every known secret masked, inside statePaths.stagedReviewShotsDir), for a row of
+// THIS project — never portal_runs.screenshots_path (the unmasked outcome shot) and never the recipe
+// notes' fallback below (which can serve another project's picture). Under /api/projects/:id, so the
+// scope guard covers it (rule 6); another project's run, or no row, is a 404.
+app.get("/api/projects/:id/staged-reviews/:runId/screenshot", (req, res) => {
+  const file = stagedReviewScreenshotFile(db, String(req.params.id), String(req.params.runId));
+  if (!file) throw new HttpError(404, "No staged review picture for this project's run.");
+  res.setHeader("Content-Type", "image/png");
+  res.setHeader("Cache-Control", "no-store");
+  res.sendFile(file);
+});
+
 // Serve the auto-captured review-page screenshot for a portal run (or auto-learn recipe).
 app.get("/api/projects/:id/portal-runs/:runId/review-screenshot", (req, res) => {
   const projectId = String(req.params.id);

@@ -355,15 +355,17 @@
         </div>
         <div class="ps-file">
           <label for="ubFile">Utility bill PDF or image <span class="opt">&mdash; verifies account + meter number</span></label>
-          <input id="ubFile" type="file" accept=".pdf,image/*,application/pdf" />
+          <!-- accept = uploadAcceptFor(slot) in backend/src/projectDocuments.ts, verbatim: what a picker
+               offers, the documents route takes (#311). intakeUploadTypes.test pins all four. -->
+          <input id="ubFile" type="file" accept=".pdf,application/pdf,.jpg,.jpeg,image/jpeg,.png,image/png,.gif,image/gif,.tif,.tiff,image/tiff,.heic,.heif,image/heic,image/heif,.webp,image/webp" />
         </div>
         <div class="ps-file">
           <label for="meterPhotoFile">Meter photo image or PDF <span class="opt">&mdash; confirms the meter in the field</span></label>
-          <input id="meterPhotoFile" type="file" accept=".pdf,image/*,application/pdf" />
+          <input id="meterPhotoFile" type="file" accept=".pdf,application/pdf,.jpg,.jpeg,image/jpeg,.png,image/png,.gif,image/gif,.tif,.tiff,image/tiff,.heic,.heif,image/heic,image/heif,.webp,image/webp" />
         </div>
         <div class="ps-file">
           <label for="structuralLetterFile">Stamped structural letter / calcs <span class="opt">(when required) &mdash; engineered path only</span></label>
-          <input id="structuralLetterFile" type="file" accept=".pdf,image/*,application/pdf" />
+          <input id="structuralLetterFile" type="file" accept=".pdf,application/pdf" />
         </div>
       </div>
 
@@ -4881,7 +4883,7 @@ function detectElectricalScope(plan){
   // any other utility the documents name (Eversource, Oncor, SRP…) is identified with no
   // utility-specific rules on file — generic rules apply and the words say so. Only when
   // nothing named a utility is it "not identified".
-  const utilityId = ParserReview.identifyUtility(plan.utility || getVal('utility') || '', rawText);
+  const utilityId = ParserReview.identifyUtility(plan.utility || getVal('utility') || '', rawText, plan.state || getVal('state') || '');
   const utilityNorm = utilityId.norm;
   const rule = utilityNorm === 'OTHER'
     ? { ...SCOPE_UTILITY_RULES_V40.UNKNOWN,
@@ -5804,12 +5806,15 @@ async function saveToSystem() {
       // Reviewer Gate (and submittal package) can use them without a re-upload.
       let docWarn = '';
       if (id && id !== '—') {
+        if (statusEl) statusEl.textContent = '✅ Saved. Logging parsed documents…';
+        // Every file attaches or says why not, BY NAME (#311): one refused bill used to abort the
+        // loop and silently drop the meter photo and the stamped structural letter after it.
         try {
-          if (statusEl) statusEl.textContent = '✅ Saved. Logging parsed documents…';
-          await uploadIntakeDocs(id);
+          docWarn = intakeUploadWarning(await uploadIntakeDocs(id));
+          if (docWarn) console.warn('Some intake documents did not attach:', docWarn);
         } catch (e) {
           console.warn('Could not log intake documents:', e);
-          docWarn = ' ⚠ but the plan set / bill did NOT attach — re-save or upload them on the project before the Reviewer Gate.';
+          docWarn = ' ⚠ but the intake documents could not be checked — confirm them on the project before the Reviewer Gate.';
         }
       }
       if (statusEl) statusEl.textContent = `✅ Saved. Project ID: ${id}.${docWarn}`;
@@ -5845,7 +5850,12 @@ async function uploadIntakeDoc(projectId, file, docType){
     headers: { 'Content-Type': file.type || 'application/octet-stream' },
     body: file,
   });
-  if (!res.ok) throw new Error(`upload ${docType} failed: ${res.status}`);
+  if (!res.ok){
+    // The route says what is wrong and what to send instead ("… needs a PDF"); pass that on
+    // rather than a bare status code.
+    const body = await res.json().catch(() => ({}));
+    throw new Error((body && body.error) || `upload failed (${res.status})`);
+  }
 }
 
 // THE PARSER PAGE IS THE INTAKE SURFACE. After a save, fetch the questions this project's
@@ -5923,11 +5933,27 @@ async function uploadIntakeDocs(projectId){
     [state.meterFile, 'meter_photo'],
     [state.structuralLetterFile, 'structural_letter'],
   ];
+  // Each file on its own: a refusal is recorded and the NEXT file still goes (#311). Returns
+  // [{ file, docType, error }] for every file that did not attach; empty when all did.
+  const failures = [];
   for (const [file, docType] of planned){
     if (!file) continue;
     if (existing.includes(`${docType}:${file.name}`)) continue;
-    await uploadIntakeDoc(projectId, file, docType);
+    try {
+      await uploadIntakeDoc(projectId, file, docType);
+    } catch (e) {
+      failures.push({ file: file.name, docType, error: (e && e.message) || String(e) });
+    }
   }
+  return failures;
+}
+
+const INTAKE_DOC_LABELS = { plan_set: 'plan set', utility_bill: 'utility bill', meter_photo: 'meter photo', structural_letter: 'structural letter' };
+// The save-status tail for the files that did not attach: each by name, with the route's reason.
+function intakeUploadWarning(failures){
+  if (!failures || !failures.length) return '';
+  const lines = failures.map(f => `${INTAKE_DOC_LABELS[f.docType] || f.docType} "${f.file}": ${f.error}`);
+  return ` ⚠ ${failures.length} document(s) did NOT attach: ${lines.join(' · ')} Upload ${failures.length > 1 ? 'them' : 'it'} on the project before the Reviewer Gate; every other intake file attached.`;
 }
 
 // The selected client is the single source of truth for installer/contractor/CCB

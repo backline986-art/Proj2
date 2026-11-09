@@ -154,6 +154,29 @@ export const KNOWN_POWERCLERK_PORTALS: Record<KnownPowerClerkUtility, { portalNa
   portland_general: { portalName: "PowerClerk", portalUrl: "https://pgenm.powerclerk.com/MvcAccount/Login", host: "pgenm.powerclerk.com", owner: "Portland General Electric" },
 };
 
+/** PacifiCorp's two brands. One company, one PowerClerk tenant, one identity ("pacificorp"). */
+export type PacifiCorpBrand = "Pacific Power" | "Rocky Mountain Power";
+/**
+ * THE NAME A PACIFICORP JOB GOES BY, chosen by state (#562): Rocky Mountain Power in UT/ID/WY,
+ * Pacific Power in OR/WA/CA. Only the WORDING forks: the identity, the shared tenant and every
+ * rule-5 host check stay PacifiCorp's one answer. A Utah job used to read "Pacific Power" in its
+ * portal name, its application document line and its QC findings. Ask it only of a job that IS
+ * PacifiCorp (knownPowerClerkUtility), whose state is therefore known; anything else reads as
+ * "Pacific Power", the name every pre-#562 record carries.
+ */
+export function pacifiCorpBrand(state: unknown): PacifiCorpBrand {
+  const st = usStateCode(state);
+  return st && ROCKY_MOUNTAIN_POWER_STATES.has(st) ? "Rocky Mountain Power" : "Pacific Power";
+}
+
+/** A known utility's PowerClerk portal as THIS job names it: the same tenant (URL, host, owner) as
+ *  KNOWN_POWERCLERK_PORTALS, with PacifiCorp's portal named by the job's brand (pacifiCorpBrand). */
+export function knownPowerClerkPortalFor(identity: KnownPowerClerkUtility, state: unknown): { portalName: string; portalUrl: string; host: string; owner: string } {
+  const base = KNOWN_POWERCLERK_PORTALS[identity];
+  if (identity !== "pacificorp") return { ...base };
+  return { ...base, portalName: `${pacifiCorpBrand(state)} Customer Generation Portal` };
+}
+
 /** The known utility whose PowerClerk tenant this host is, or null. */
 export function knownTenantOwner(host: string): KnownPowerClerkUtility | null {
   const h = String(host ?? "").trim().toLowerCase().replace(/^www\./, "");

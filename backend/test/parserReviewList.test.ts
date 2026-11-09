@@ -11,6 +11,7 @@ import path from "node:path";
 import vm from "node:vm";
 import assert from "node:assert/strict";
 import { REPO } from "./_isolate";
+import { pacifiCorpBrand } from "../src/utilityIdentity";
 
 const src = fs.readFileSync(path.join(REPO, "frontend", "parser-review.js"), "utf8");
 const sandbox: { window: Record<string, unknown> } = { window: {} };
@@ -251,6 +252,32 @@ assert.equal(PR.licenseLabel(""), "contractor license");
   const unk = PR.identifyUtility("", "COVER SHEET WITH NO UTILITY LINE");
   same([unk.norm, unk.identified], ["UNKNOWN", false], "nothing named it → UNKNOWN");
 }
+{
+  // #602: PacifiCorp is NAMED by the job's state (backend utilityIdentity.pacifiCorpBrand), and
+  // "Rocky Mountain Power" / "RMP" are PacifiCorp. The Pacific Power SOP rule table (D/R + locates)
+  // stays with the Pacific Power brand: a Rocky Mountain Power job is identified with generic rules.
+  const shape = (r: { norm: string; name: string; identified: boolean; sop: boolean; pacifiCorp?: boolean }) =>
+    [r.norm, r.name, r.identified, r.sop, !!r.pacifiCorp];
+  const RMP = ["OTHER", "Rocky Mountain Power", true, false, true];
+  const PAC = ["PACIFICORP", "Pacific Power", true, true, true];
+  same(shape(PR.identifyUtility("PacifiCorp", "", "UT")), RMP, "a Utah job typed PacifiCorp reads Rocky Mountain Power");
+  same(shape(PR.identifyUtility("Pacific Power", "", "UT")), RMP, "a Utah job typed Pacific Power reads Rocky Mountain Power");
+  same(shape(PR.identifyUtility("", "UTILITY: PACIFICORP", "Utah")), RMP, "a spelled-out state counts");
+  same(shape(PR.identifyUtility("Rocky Mountain Power", "", "UT")), RMP, "Rocky Mountain Power is recognised as PacifiCorp");
+  same(shape(PR.identifyUtility("Rocky Mtn. Power", "", "ID")), RMP);
+  same(shape(PR.identifyUtility("RMP", "", "WY")), RMP, "the bare RMP in its own states");
+  same(shape(PR.identifyUtility("Rocky Mountain Power", "", "")), RMP, "no state: an RMP spelling stays RMP (never the Oregon SOP)");
+  same(shape(PR.identifyUtility("PacifiCorp", "", "OR")), PAC, "Oregon keeps Pacific Power + its SOP");
+  same(shape(PR.identifyUtility("", "UTILITY: PACIFIC POWER", "WA")), PAC);
+  same(shape(PR.identifyUtility("PacifiCorp", "", "")), PAC, "no state: the pre-#602 answer");
+  const rmpOr = PR.identifyUtility("RMP", "", "OR");
+  same([rmpOr.norm, rmpOr.pacifiCorp], ["OTHER", undefined], "the bare RMP outside UT/ID/WY is not PacifiCorp");
+  // Mirror pin: the page's brand agrees with the backend's pacifiCorpBrand in every PacifiCorp state.
+  for (const st of ["OR", "WA", "CA", "UT", "ID", "WY"]) {
+    assert.equal(PR.identifyUtility("PacifiCorp", "", st).name, pacifiCorpBrand(st), `brand mirror for ${st}`);
+  }
+}
+ok("#602: PacifiCorp brand by state on the review screen; Rocky Mountain Power / RMP recognised; SOP stays Pacific Power's");
 ok("no Oregon leakage: licence label by state, N/A dropped, identified-vs-unknown utility");
 
 // ---------------------------------------------------------------------------

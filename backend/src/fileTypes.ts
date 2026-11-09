@@ -14,7 +14,7 @@
 // Longest magic prefix we compare against.
 const SNIFF_BYTES = 12;
 
-export type SniffedKind = "pdf" | "zip" | "png" | "jpeg" | "gif" | "tiff" | "heic" | "dwg" | "dxf" | "rtf" | "unknown";
+export type SniffedKind = "pdf" | "zip" | "png" | "jpeg" | "gif" | "tiff" | "heic" | "webp" | "dwg" | "dxf" | "rtf" | "unknown";
 
 function startsWith(buf: Buffer, sig: number[] | string, offset = 0): boolean {
   const bytes = typeof sig === "string" ? Buffer.from(sig, "latin1") : Buffer.from(sig);
@@ -38,6 +38,8 @@ export function sniffFileKind(buffer: Buffer): SniffedKind {
   if (startsWith(head, [0xff, 0xd8, 0xff])) return "jpeg";
   if (startsWith(head, "GIF87a") || startsWith(head, "GIF89a")) return "gif";
   if (startsWith(head, [0x49, 0x49, 0x2a, 0x00]) || startsWith(head, [0x4d, 0x4d, 0x00, 0x2a])) return "tiff";
+  // WebP: a RIFF container whose form type is "WEBP" (#311: phones and browsers save bills this way).
+  if (startsWith(head, "RIFF") && startsWith(head, "WEBP", 8)) return "webp";
   // HEIC/HEIF from iPhone camera rolls: "....ftypheic" / "ftypmif1" at offset 4.
   if (startsWith(head, "ftyp", 4)) {
     const brand = buffer.subarray(8, 12).toString("latin1");
@@ -53,9 +55,35 @@ export function sniffFileKind(buffer: Buffer): SniffedKind {
   return "unknown";
 }
 
-export function isImageKind(kind: SniffedKind): boolean {
-  return kind === "png" || kind === "jpeg" || kind === "gif" || kind === "tiff" || kind === "heic";
+// THE ONE LIST OF PHOTO FORMATS a photo slot takes, and how a browser's file picker names each.
+//
+// #311: the intake page's pickers said `image/*`, so a .webp utility bill was offered, read by the
+// vision pass, and then refused with a 415 by the documents route on Save, because the route's own
+// list ended at HEIC. Both answers now come from this table: `isImageKind` is the route's check and
+// `PHOTO_OR_PDF_ACCEPT` is the pickers' `accept` attribute (uploadAcceptFor in projectDocuments.ts;
+// intakeUploadTypes.test pins parser.html to it), so a format added here is offered and taken
+// together, and one left out is neither.
+const IMAGE_KIND_PICKER_NAMES = {
+  jpeg: [".jpg", ".jpeg", "image/jpeg"],
+  png: [".png", "image/png"],
+  gif: [".gif", "image/gif"],
+  tiff: [".tif", ".tiff", "image/tiff"],
+  heic: [".heic", ".heif", "image/heic", "image/heif"],
+  webp: [".webp", "image/webp"],
+} as const satisfies Partial<Record<SniffedKind, readonly string[]>>;
+
+export type ImageKind = keyof typeof IMAGE_KIND_PICKER_NAMES;
+
+export function isImageKind(kind: SniffedKind): kind is ImageKind {
+  return Object.prototype.hasOwnProperty.call(IMAGE_KIND_PICKER_NAMES, kind);
 }
+
+/** A file picker's `accept` for a slot that needs a PDF. */
+export const PDF_ACCEPT = ".pdf,application/pdf";
+
+/** A file picker's `accept` for a slot that takes a photo or a PDF: exactly the kinds
+ *  `isImageKind` passes, plus PDF. Never `image/*`, which offers formats the route refuses. */
+export const PHOTO_OR_PDF_ACCEPT = [PDF_ACCEPT, ...Object.values(IMAGE_KIND_PICKER_NAMES).flat()].join(",");
 
 // Native design/CAD formats we can store as reference but can never read, split,
 // extract text from, or hand to an AHJ portal (portal file inputs take PDFs).
@@ -75,7 +103,7 @@ export function describeKind(kind: SniffedKind, filename: string): string {
   }
   const names: Record<Exclude<SniffedKind, "unknown">, string> = {
     pdf: "a PDF", zip: "a ZIP archive", png: "a PNG image", jpeg: "a JPEG image",
-    gif: "a GIF image", tiff: "a TIFF image", heic: "a HEIC image (iPhone photo)",
+    gif: "a GIF image", tiff: "a TIFF image", heic: "a HEIC image (iPhone photo)", webp: "a WebP image",
     dwg: "an AutoCAD DWG drawing", dxf: "a DXF drawing", rtf: "an RTF document",
   };
   return names[kind];

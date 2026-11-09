@@ -1,6 +1,6 @@
 import type { ParserPayload, QcStatus, Severity } from "../../shared/src/types";
 import type { EffectiveCodeContext } from "./codeProfiles";
-import { knownPowerClerkUtility } from "./utilityIdentity";
+import { knownPowerClerkUtility, pacifiCorpBrand } from "./utilityIdentity";
 import { isBillHolderName, nemApplicantName } from "./accountHolders";
 
 export interface BaselineRuleDefinition {
@@ -139,8 +139,8 @@ export const baselineRuleDefinitions: BaselineRuleDefinition[] = [
     id: "pacpower-ul1741sb",
     ruleType: "qc",
     name: "Pacific Power UL 1741 SB inverter settings",
-    jurisdictionScope: "Oregon",
-    utilityScope: "Pacific Power/PacifiCorp",
+    jurisdictionScope: "PacifiCorp states (OR/WA/CA Pacific Power; UT/ID/WY Rocky Mountain Power)",
+    utilityScope: "Pacific Power/Rocky Mountain Power/PacifiCorp",
     source: "Pacific Power Customer Generation",
     severity: "warning",
     trigger: "Pacific Power project lacks UL 1741 SB / inverter settings evidence",
@@ -150,8 +150,8 @@ export const baselineRuleDefinitions: BaselineRuleDefinition[] = [
     id: "pacpower-meter-photo",
     ruleType: "qc",
     name: "Pacific Power meter photo requirement",
-    jurisdictionScope: "Oregon",
-    utilityScope: "Pacific Power/PacifiCorp",
+    jurisdictionScope: "PacifiCorp states (OR/WA/CA Pacific Power; UT/ID/WY Rocky Mountain Power)",
+    utilityScope: "Pacific Power/Rocky Mountain Power/PacifiCorp",
     source: "Pacific Power Customer Generation",
     severity: "warning",
     trigger: "Pacific Power project missing meter evidence",
@@ -327,6 +327,8 @@ export function evaluateBaselineRules(payload: ParserPayload, ctx?: EffectiveCod
   // Portland General, and must not be told a Pacific Power meter photo is missing.
   const knownUtility = knownPowerClerkUtility({ state, utility });
   const isPacific = knownUtility === "pacificorp";
+  // The name a PacifiCorp job goes by (#562): Rocky Mountain Power in UT/ID/WY. Rule IDs stay.
+  const pacBrand = pacifiCorpBrand(state);
   const isPge = knownUtility === "portland_general";
 
   // PRESCRIPTIVE-PATH SCREENS — data-driven when a jurisdiction code context is
@@ -616,10 +618,10 @@ export function evaluateBaselineRules(payload: ParserPayload, ctx?: EffectiveCod
   if (isPacific && !hasAny(`${split}\n${notes}`, [/UL\s*1741\s*SB/i, /inverter settings/i, /smart inverter/i])) {
     out.push(result(
       "pacpower-ul1741sb",
-      "Pacific Power UL 1741 SB inverter settings",
+      `${pacBrand} UL 1741 SB inverter settings`,
       "warning",
       "warning",
-      "Pacific Power project lacks clear UL 1741 SB / inverter settings evidence.",
+      `${pacBrand} project lacks clear UL 1741 SB / inverter settings evidence.`,
       "utilityUploadNotesText",
     ));
   }
@@ -627,10 +629,10 @@ export function evaluateBaselineRules(payload: ParserPayload, ctx?: EffectiveCod
   if (isPacific && !str(payload, "meter") && !str(payload, "ubMeterNumber")) {
     out.push(result(
       "pacpower-meter-photo",
-      "Pacific Power meter photo requirement",
+      `${pacBrand} meter photo requirement`,
       "warning",
       "warning",
-      "Pacific Power application should include meter evidence; no meter number was captured.",
+      `${pacBrand} application should include meter evidence; no meter number was captured.`,
       "meter",
     ));
   }
