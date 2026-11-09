@@ -182,7 +182,7 @@ import { buildReviewerReport, renderReviewerReportHtml } from "./reviewerEngine"
 import type { PvWorksheetGateInput } from "./pvWorksheetGate";
 import { resolveEffectiveCodeContext, ensureCodeProfilesResearched, ownCodeProfileRow, resolvePermitPathForProject, recordApprovedDesignObservation, isStructuralPermitTrack } from "./codeProfiles";
 import { applyCachedVisionVerdicts, visionRelaxedBlockers } from "./reviewerVision";
-import { applyReviewerBlockerOverrides, auditOverrideRelaxedAtStage, overriddenBlockers } from "./reviewerOverrides";
+import { applyReviewerBlockerOverrides, auditOverrideRelaxedAtStage, hasStandingOverride, overriddenBlockers, parseReleasedOverrides, releasedOverrides, type ReleasedOverride } from "./reviewerOverrides";
 import { nowIso } from "./time";
 import { isHarnessAbort, looksBotBlocked } from "./runAbort";
 import { finalSubmitEnvAllows, recipeShapeProblems } from "../../shared/src/portalSafety";
@@ -8351,15 +8351,24 @@ export function createRunApproval(
   const approver = String(input.approver ?? "").trim();
   if (!approver) throw new HttpError(400, "A final submit needs a named approver — sign in, or give your name, before approving.");
   const approvalId = id();
+  // WHAT THIS APPROVER SAW RELEASED (#640 + #226): the named blocker overrides releasing a blocker on
+  // the gate at this click. A final-submit run may go past an override only when it is on this list
+  // (prepareSubmission): an override recorded after the click, or one that was void at the click and
+  // applies again later (a field edited back), was a BLOCKER to this approver. Only a project with a
+  // standing override pays for the gate read; no model call, no code research.
+  const released = hasStandingOverride(db, input.projectId)
+    ? withoutCodeResearch(() => releasedOverrides(reviewerGateReportFor(db, getProjectDetail(db, input.projectId).project)))
+    : [];
   const now = Date.now();
   const expiresAt = new Date(now + RUN_APPROVAL_TTL_MS).toISOString();
   db.run(
-    `INSERT INTO portal_run_approvals (id, project_id, track, approver, approver_user_id, created_at, expires_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?)`,
-    [approvalId, input.projectId, input.track || "permit", approver, input.approverUserId ?? null, new Date(now).toISOString(), expiresAt],
+    `INSERT INTO portal_run_approvals (id, project_id, track, approver, approver_user_id, created_at, expires_at, released_overrides_json)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    [approvalId, input.projectId, input.track || "permit", approver, input.approverUserId ?? null, new Date(now).toISOString(), expiresAt, JSON.stringify(released)],
   );
   addAuditLog(db, input.projectId, "human", approver, "portal.final_submit_approved", {
     approvalId, track: input.track || "permit", expiresAt,
+    ...(released.length ? { releasedOverrides: released } : {}),
   });
   return { id: approvalId, approver, expiresAt };
 }
@@ -8377,18 +8386,18 @@ export function createRunApproval(
  * The id alone is not the check: the row must still be this project's, this track's, unconsumed
  * and unexpired.
  */
-function claimRunApproval(db: AppDb, projectId: string, track: string, approvalId: string | null | undefined): { id: string; approver: string; createdAt: string } | null {
+function claimRunApproval(db: AppDb, projectId: string, track: string, approvalId: string | null | undefined): { id: string; approver: string; createdAt: string; releasedOverrides: ReleasedOverride[] } | null {
   const wanted = String(approvalId ?? "").trim();
   if (!wanted) return null;
   const row = db.get<Row>(
-    `SELECT id, approver, created_at FROM portal_run_approvals
+    `SELECT id, approver, created_at, released_overrides_json FROM portal_run_approvals
       WHERE id = ? AND project_id = ? AND track = ? AND consumed_at IS NULL AND expires_at > ?`,
     [wanted, projectId, track || "permit", nowIso()],
   );
   if (!row) return null;
   db.run("UPDATE portal_run_approvals SET consumed_at = ? WHERE id = ? AND consumed_at IS NULL", [nowIso(), text(row.id)]);
   if (Number(db.get<{ n: number }>("SELECT changes() AS n")?.n ?? 0) === 0) return null; // another run took it
-  return { id: text(row.id), approver: text(row.approver), createdAt: text(row.created_at) };
+  return { id: text(row.id), approver: text(row.approver), createdAt: text(row.created_at), releasedOverrides: parseReleasedOverrides(row.released_overrides_json) };
 }
 
 /** The approval id the RUNNING prepare_submission job for this project carries in its payload —
@@ -8462,8 +8471,9 @@ export function automaticSubmitRefusals(
     /** Reviewer blockers this run's gate let through on a vision verdict cached AFTER the approval
      *  (#226): the approver was shown them as blockers, so such a run always stops at review. */
     relaxedSinceApproval?: string[];
-    /** Reviewer blockers this run's gate let through on a named person's override recorded AFTER the
-     *  approval (#640): the approver was shown them as blockers, so such a run always stops at review. */
+    /** Reviewer blockers this run's gate let through on a named person's override that was NOT in
+     *  force at the approval (#640): recorded after it, or void then and applying again since. The
+     *  approver was shown them as blockers, so such a run always stops at review. */
     overriddenSinceApproval?: string[];
   },
 ): string[] {
@@ -8474,7 +8484,7 @@ export function automaticSubmitRefusals(
     out.push(`a vision verdict cached after the approval relaxed ${input.relaxedSinceApproval.join(", ")} — the approver saw ${input.relaxedSinceApproval.length > 1 ? "them as blockers" : "it as a blocker"}; approve again to file`);
   }
   if (input.overriddenSinceApproval?.length) {
-    out.push(`a blocker override recorded after the approval released ${input.overriddenSinceApproval.join(", ")} — the approver saw ${input.overriddenSinceApproval.length > 1 ? "them as blockers" : "it as a blocker"}; approve again to file`);
+    out.push(`a blocker override not in force at the approval (recorded after it, or void then) released ${input.overriddenSinceApproval.join(", ")} — the approver saw ${input.overriddenSinceApproval.length > 1 ? "them as blockers" : "it as a blocker"}; approve again to file`);
   }
   const a = input.runApproval;
   const approver = a && typeof a.approver === "string" ? a.approver.trim() : "";
@@ -9528,17 +9538,26 @@ export async function prepareSubmission(
   // (automaticSubmitRefusals.relaxedSinceApproval). Only a claimed approval with something relaxed pays
   // for the second read; it makes no model call.
   //
-  // A NAMED PERSON'S OVERRIDE IS READ THE SAME WAY (#640): the as-approved read counts only overrides
-  // recorded before the approval, and a blocker an override releases now but nothing released then
-  // is named separately (overriddenSinceApproval). "Released then" is either fold: the approver saw a
-  // callout whichever one released it.
+  // A NAMED PERSON'S OVERRIDE (#640) is compared against the APPROVAL'S OWN LIST, not the as-approved
+  // read: an override's validity is checked against the current finding, so rebuilding the gate "as
+  // of the approval" would count an override that was VOID at the click (the approver saw a blocker)
+  // and applies again after a field was edited back. createRunApproval recorded which overrides were
+  // releasing a blocker at the click; a blocker an override releases now is "released then" only when
+  // THAT override id is on the list (or vision relaxed the finding then). Anything else is named
+  // (overriddenSinceApproval) and the run stops at review. For the vision comparison, "released then"
+  // is either fold: the approver saw a callout whichever one released it.
   const { relaxedSinceApproval, overriddenSinceApproval } = claimedApproval && (visionRelaxed.length > 0 || overrideRelaxed.length > 0)
     ? (() => {
       const asApproved = reviewerGateReportFor(db, detail.project, { verdictsWrittenBefore: claimedApproval.createdAt || "" });
-      const relaxedThen = new Set([...visionRelaxedBlockers(asApproved), ...overriddenBlockers(asApproved)].map((finding) => finding.id));
+      const visionRelaxedThen = new Set(visionRelaxedBlockers(asApproved).map((finding) => finding.id));
+      const overridesThen = new Set(claimedApproval.releasedOverrides.map((r) => r.overrideId));
+      const overriddenFindingsThen = new Set(claimedApproval.releasedOverrides.map((r) => r.findingId));
       return {
-        relaxedSinceApproval: visionRelaxed.map((finding) => finding.id).filter((findingId) => !relaxedThen.has(findingId)),
-        overriddenSinceApproval: overrideRelaxed.map((finding) => finding.id).filter((findingId) => !relaxedThen.has(findingId)),
+        relaxedSinceApproval: visionRelaxed.map((finding) => finding.id)
+          .filter((findingId) => !visionRelaxedThen.has(findingId) && !overriddenFindingsThen.has(findingId)),
+        overriddenSinceApproval: overrideRelaxed
+          .filter((finding) => !visionRelaxedThen.has(finding.id) && !overridesThen.has(finding.override?.id ?? ""))
+          .map((finding) => finding.id),
       };
     })()
     : { relaxedSinceApproval: [] as string[], overriddenSinceApproval: [] as string[] };

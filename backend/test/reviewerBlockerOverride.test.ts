@@ -19,14 +19,20 @@
 //                    is Approve.
 //   (b) MUST-STOP    an override recorded AFTER a claimed approval: that run stages, does not auto-submit,
 //                    automaticSubmitRefusals names the override, the approval is burned.
+//       MUST-STOP    REVIVAL: an override VOID at the approval (a field edit changed the finding, so the
+//                    approver saw the blocker) that applies again after the field is edited back — that
+//                    run does not file either, and only the revived finding is named.
 //       MUST-PASS    the same override recorded BEFORE the approval: the run is allowed.
 //   (c) MUST-EXCLUDE a replaced plan set (new PDF bytes) voids it: the blocker blocks again and says why.
 //                    So does an edit that changes the finding's own content (the DC size it computed).
 //   (d) MUST-EXCLUDE overriding X never releases a different blocker Y; overriding the permit-only RSD
 //                    finding leaves the NEM filing's holds exactly as they were.
-//   (e) MUST-EXCLUDE the stamped-structural finding is refused 409 naming /structural-letter/confirm; an
-//                    empty reason is refused; only a current blocker can be overridden.
-//   (f)              withdraw restores the blocker; override and withdraw are audited; reads write nothing.
+//   (e) MUST-EXCLUDE the stamped-structural finding, and its tile twin, each a LIVE blocker on its own
+//                    project, are refused 409 naming /structural-letter/confirm; the fold never releases
+//                    them even from a tampered row; an empty reason is refused; only a current blocker can
+//                    be overridden; a stale or missing page token (seenAs) is refused.
+//   (f)              withdraw restores the blocker; override and withdraw are audited; reads write nothing
+//                    (a write trap over standing AND void overrides).
 //
 // Run: npx tsx backend/test/reviewerBlockerOverride.test.ts
 import "./_isolate"; // FIRST: generated files land in a temp cwd, never the repo's backend/data
@@ -44,10 +50,13 @@ const { reviewerBlockerList, reviewerBlockersFor } = await import("../src/nextSt
 const { readCorrectionNotice } = await import("../src/correctionNotice");
 const { runAutopilotApproval } = await import("../src/autopilot");
 const { findingHoldScope, scopeHoldsTrack } = await import("../src/gateScope");
+const { planSetIdentity } = await import("../src/reviewerVision");
+const { computeNextStep } = await import("../src/nextStep");
 
 const RSD = "city.elec.rapid-shutdown-missing"; // electrical, permit-only scope (gateScope ELECTRICAL_PERMIT_ONLY)
 const DC = "city.elec.dc-size-mismatch"; // holds every filing, the utility's included
 const STRUCT = "city.struct.stamped-engineering-missing";
+const TILE_STRUCT = "city.struct.tile-stamped-engineering-missing"; // released by the same structural-letter door
 // The fixture names rapid shutdown in three fields and runs micro-inverters (RSD only a warning).
 // Without the words and with a string inverter RSD is a text BLOCKER.
 const RSD_BLOCKER = {
@@ -241,7 +250,7 @@ await check("(b) MUST-STOP an override recorded AFTER the approval: staged, fina
   const declined = auditsFor("portal.auto_submit_declined", projectId);
   assert.equal(declined.length, 1, "no decline was recorded");
   const reasons = (declined[0].reasons as string[]).join(" | ");
-  assert.match(reasons, /blocker override recorded after the approval released .*city\.elec\.rapid-shutdown-missing/);
+  assert.match(reasons, /blocker override not in force at the approval \(recorded after it, or void then\) released .*city\.elec\.rapid-shutdown-missing/);
   assert.doesNotMatch(reasons, /vision verdict cached after the approval/, "the override was named as a vision verdict");
   const consumed = db.get<{ consumed_at: string | null }>("SELECT consumed_at FROM portal_run_approvals WHERE id = ?", [approval.id]);
   assert.ok(consumed?.consumed_at, "the approval survived its refused run");
@@ -256,8 +265,38 @@ await check("(b) the one door: automaticSubmitRefusals refuses overriddenSinceAp
   assert.deepEqual(repo.automaticSubmitRefusals(db, { ...ok, overriddenSinceApproval: [] }), [], "setup: the clean inputs must pass");
   const refusals = repo.automaticSubmitRefusals(db, { ...ok, overriddenSinceApproval: [RSD] });
   assert.equal(refusals.length, 1);
-  assert.match(refusals[0], /blocker override recorded after the approval released city\.elec\.rapid-shutdown-missing — the approver saw it as a blocker; approve again to file/);
+  assert.match(refusals[0], /blocker override not in force at the approval \(recorded after it, or void then\) released city\.elec\.rapid-shutdown-missing — the approver saw it as a blocker; approve again to file/);
   assert.equal(repo.maySubmitAutomatically(db, { ...ok, overriddenSinceApproval: [RSD] }), false);
+});
+
+await check("(b) MUST-STOP revival across an approval: an override VOID at the click that applies again after an edit-back does not let the run file", async () => {
+  const projectId = await projectWith({ dcKw: "10.0" });
+  const blockers = blockersOf(gate(projectId));
+  assert.ok(blockers.includes(DC), `setup: DC should be a blocker, got ${blockers.join(", ")}`);
+  for (const fid of blockers) await override(projectId, fid);
+  assert.deepEqual(blockersOf(gate(projectId)), [], "setup: the overrides did not release every blocker");
+  // A field edit changes DC's content: its override is void, so DC BLOCKS when the approver clicks.
+  repo.updateProject(db, projectId, { dcKw: "12.0", systemSizeDcKw: "12.0" } as never);
+  await tick();
+  const atClick = gate(projectId);
+  assert.deepEqual(blockersOf(atClick), [DC], `setup: at the click only DC should block, got ${blockersOf(atClick).join(", ")}`);
+  assert.match(findingIn(atClick, DC)?.overrideVoided?.why ?? "", /finding changed/, "setup: DC's override is not void at the click");
+  const approval = approve(projectId);
+  const snapshot = db.get<{ released_overrides_json: string }>("SELECT released_overrides_json FROM portal_run_approvals WHERE id = ?", [approval.id])!;
+  const released = (JSON.parse(snapshot.released_overrides_json) as Array<{ findingId: string }>).map((r) => r.findingId).sort();
+  assert.deepEqual(released, blockers.filter((fid) => fid !== DC), "the approval recorded a different set of overrides in force");
+  await tick();
+  // The field is edited back: DC's override matches again and DC reads as a callout.
+  repo.updateProject(db, projectId, { dcKw: "10.0", systemSizeDcKw: "10.0" } as never);
+  assert.equal(findingIn(gate(projectId), DC)?.severity, "callout", "setup: the edit-back did not revive DC's override — this proves nothing");
+  const seen = await stage(projectId, { approvalId: approval.id, final: true });
+  assert.equal(seen.autoSubmit, false, "ESCAPE: the approver saw DC as a blocker, yet the run was allowed to file on the revived override");
+  const declined = auditsFor("portal.auto_submit_declined", projectId);
+  assert.equal(declined.length, 1, "no decline was recorded");
+  assert.match((declined[0].reasons as string[]).join(" | "), /blocker override not in force at the approval .* released city\.elec\.dc-size-mismatch — the approver saw it as a blocker/);
+  const rows = auditsFor(ov.REVIEWER_OVERRIDE_RELAXED_AT_STAGE_ACTION, projectId);
+  assert.equal(rows.length, 1);
+  assert.deepEqual(rows[0].recordedAfterApproval, [DC], "only the revived finding should be named; the others were in force at the click");
 });
 
 await check("(b) MUST-PASS the same override recorded BEFORE the approval → the run is allowed", async () => {
@@ -332,13 +371,65 @@ await check("(d) MUST-EXCLUDE overriding X (RSD) never releases Y (DC, or any ot
 });
 
 // (e) ---------------------------------------------------------------------------------------------
-await check("(e) MUST-EXCLUDE the stamped-structural finding is refused 409 naming its own door, and nothing is written", async () => {
-  const projectId = fx.newProject();
-  const before = db.get<{ n: number }>("SELECT COUNT(*) AS n FROM reviewer_blocker_overrides")!.n;
-  const refused = await statusOf(override(projectId, STRUCT));
-  assert.equal(refused?.status, 409);
-  assert.match(refused!.message, /structural-letter\/confirm/);
-  assert.equal(db.get<{ n: number }>("SELECT COUNT(*) AS n FROM reviewer_blocker_overrides")!.n, before);
+// Each stamped-structural hold as a LIVE blocker on its own project: the engineered permit path with no
+// sealed letter raises STRUCT; a concrete-tile roof raises the tile twin.
+const STRUCT_LIVE: Array<[string, Record<string, string>]> = [
+  [STRUCT, { permitPath: "Engineered (non-prescriptive)" }],
+  [TILE_STRUCT, { roofMaterial: "Concrete Tile" }],
+];
+for (const [fid, over] of STRUCT_LIVE) {
+  await check(`(e) MUST-EXCLUDE ${fid}, a LIVE blocker here, is refused 409 naming its own door, and nothing is written`, async () => {
+    const projectId = fx.newProject(over as never);
+    const live = findingIn(gate(projectId), fid);
+    assert.equal(live?.severity, "blocker", `setup: ${fid} is not a live blocker (${live?.severity ?? "absent"}) — this proves nothing`);
+    assert.equal(live?.overrideSeenAs, undefined, "the gate offers an override token on a hold no override may release");
+    const before = db.get<{ n: number }>("SELECT COUNT(*) AS n FROM reviewer_blocker_overrides")!.n;
+    const refused = await statusOf(override(projectId, fid));
+    assert.equal(refused?.status, 409);
+    assert.match(refused!.message, /structural-letter\/confirm/);
+    assert.equal(db.get<{ n: number }>("SELECT COUNT(*) AS n FROM reviewer_blocker_overrides")!.n, before);
+    assert.equal(findingIn(gate(projectId), fid)?.severity, "blocker");
+  });
+}
+
+await check("(e) MUST-EXCLUDE TAMPER TEST (raw SQL on purpose: no writer can make this row): the fold never releases a stamped-structural blocker", () => {
+  const projectId = fx.newProject({ permitPath: "Engineered (non-prescriptive)" } as never);
+  const live = findingIn(gate(projectId), STRUCT)!;
+  assert.equal(live?.severity, "blocker", "setup: STRUCT is not a live blocker");
+  // A row that would match in every other respect: this finding's own fingerprint and plan set.
+  db.run(
+    `INSERT INTO reviewer_blocker_overrides (id, project_id, finding_id, fingerprint, plan_set_sig, reason, overridden_by, created_at)
+     VALUES (?, ?, ?, ?, ?, 'tampered', 'Tamper Test', ?)`,
+    [`tamper-${projectId}`, projectId, STRUCT, ov.findingFingerprint(live), planSetIdentity(db, projectId), new Date(Date.now() - 1000).toISOString()],
+  );
+  const after = findingIn(gate(projectId), STRUCT)!;
+  assert.equal(after.severity, "blocker", "a tampered override row released the stamped-structural hold");
+  assert.equal(after.overriddenFrom, undefined);
+  // The fold itself, on a hand-built report (with an overridable blocker beside it, so the fold walks
+  // every finding): STRUCT stays a blocker and gets no token.
+  const other = { ...live, id: "city.test.other-blocker", overrideSeenAs: undefined };
+  const handBuilt: ReviewerReport = { ...gate(projectId), findings: [{ ...live, overrideSeenAs: undefined }, other] };
+  const folded = ov.applyReviewerBlockerOverrides(db, handBuilt).findings;
+  assert.equal(folded[0].severity, "blocker");
+  assert.equal(folded[0].overrideSeenAs, undefined);
+  assert.ok(folded[1].overrideSeenAs, "setup: the fold did not walk the findings");
+});
+
+await check("(e) MUST-EXCLUDE the page token binds the override: a missing token → 400, a stale one (the finding changed) → 409, the current one → 200", async () => {
+  const projectId = await projectWith({ dcKw: "10.0" });
+  const seenThen = findingIn(gate(projectId), DC)?.overrideSeenAs ?? "";
+  assert.ok(seenThen, "setup: the DC blocker carries no override token");
+  const byRoute = (seenAs: string) => ov.overrideReviewerBlocker(db, projectId, DC, { reason: REASON, by: PERSON, userId: "", seenAs });
+  assert.equal((await statusOf(byRoute("")))?.status, 400, "an override with no page token was accepted");
+  repo.updateProject(db, projectId, { dcKw: "12.0", systemSizeDcKw: "12.0" } as never);
+  const stale = await statusOf(byRoute(seenThen));
+  assert.equal(stale?.status, 409, "an override bound to content the person never saw was accepted");
+  assert.match(stale!.message, /changed since you looked/);
+  assert.equal(db.get<{ n: number }>("SELECT COUNT(*) AS n FROM reviewer_blocker_overrides WHERE project_id = ?", [projectId])!.n, 0, "a refused override wrote a row");
+  const seenNow = findingIn(gate(projectId), DC)!.overrideSeenAs!;
+  assert.notEqual(seenNow, seenThen);
+  await byRoute(seenNow);
+  assert.equal(findingIn(gate(projectId), DC)?.severity, "callout");
 });
 
 await check("(e) MUST-EXCLUDE an empty reason, a non-blocker, an already-overridden blocker and a missing finding are refused", async () => {
@@ -356,14 +447,51 @@ await check("(e) MUST-EXCLUDE an empty reason, a non-blocker, an already-overrid
 });
 
 // (f) ---------------------------------------------------------------------------------------------
-await check("(f) reads write nothing: the gate, the notice and the blocker list over standing and void overrides", async () => {
+// A write trap (nextStep.test's shape): every write the AppDb can make goes through run / exec /
+// transaction, so an UPDATE that changes no row count is caught too.
+const trapWrites = <T>(fn: () => T): { value: T; writes: string[] } => {
+  const writes: string[] = [];
+  const orig = { run: db.run, exec: db.exec, transaction: db.transaction };
+  db.run = ((sql: string) => { writes.push(sql.trim().slice(0, 80)); }) as typeof db.run;
+  db.exec = ((sql: string) => { writes.push(sql.trim().slice(0, 80)); }) as typeof db.exec;
+  db.transaction = (<R>(f: () => R): R => { writes.push("transaction"); return f(); }) as typeof db.transaction;
+  try {
+    return { value: fn(), writes };
+  } finally {
+    db.run = orig.run; db.exec = orig.exec; db.transaction = orig.transaction;
+  }
+};
+
+await check("(f) reads write nothing: the gate, the notice, the blocker list and next-step, over a standing override AND two void ones", async () => {
   assert.ok(aId, "setup failed");
-  const counts = () => ["reviewer_blocker_overrides", "audit_logs", "reviewer_vision_cache"].map((t) => db.get<{ n: number }>(`SELECT COUNT(*) AS n FROM ${t}`)!.n);
-  const was = counts();
-  gate(aId);
-  readCorrectionNotice(db, aId);
-  reviewerBlockerList(db, repo.getProjectDetail(db, aId).project);
-  assert.deepEqual(counts(), was, "a read wrote rows");
+  // Two fresh void overrides whose FIRST read after the voiding change is inside the trap, so a read
+  // that stamped a void (the forbidden write) is caught here and not hidden by an earlier read.
+  const planSetVoid = await projectWith(RSD_BLOCKER);
+  await override(planSetVoid, RSD);
+  await tick();
+  await attachPlanSet(planSetVoid, "REVISION 2 - E-1 UPDATED");
+  const fieldVoid = await projectWith({ dcKw: "10.0" });
+  await override(fieldVoid, DC, "Designer confirmed the module count");
+  repo.updateProject(db, fieldVoid, { dcKw: "12.0", systemSizeDcKw: "12.0" } as never);
+  const cases = [
+    ["standing", aId, RSD, (f: ReviewerReport["findings"][number] | undefined) => f?.overriddenFrom === "blocker"],
+    ["plan-set void", planSetVoid, RSD, (f: ReviewerReport["findings"][number] | undefined) => /plan set was replaced/.test(f?.overrideVoided?.why ?? "")],
+    ["field void", fieldVoid, DC, (f: ReviewerReport["findings"][number] | undefined) => /finding changed/.test(f?.overrideVoided?.why ?? "")],
+  ] as const;
+  for (const [label, pid, fid, exercised] of cases) {
+    const project = repo.getProjectDetail(db, pid).project;
+    const first = trapWrites(() => repo.reviewerGateReportFor(db, project));
+    assert.deepEqual(first.writes, [], `reviewerGateReportFor over a ${label} override wrote: ${first.writes.join(" | ")}`);
+    assert.ok(exercised(findingIn(first.value, fid)), `setup: the ${label} case is not what the gate shows: ${JSON.stringify(findingIn(first.value, fid)?.overrideVoided ?? findingIn(first.value, fid)?.override ?? null)}`);
+    for (const [reader, fn] of [
+      ["readCorrectionNotice", () => readCorrectionNotice(db, pid)],
+      ["reviewerBlockerList", () => reviewerBlockerList(db, project)],
+      ["computeNextStep", () => computeNextStep(db, pid)],
+    ] as const) {
+      const t = trapWrites(fn as () => unknown);
+      assert.deepEqual(t.writes, [], `${reader} over a ${label} override wrote: ${t.writes.join(" | ")}`);
+    }
+  }
 });
 
 await check("(f) withdraw restores the blocker; override and withdraw are both in the audit trail under the person", async () => {

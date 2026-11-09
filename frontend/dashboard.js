@@ -7009,13 +7009,17 @@ function findingPlanSetLine(finding) {
 // On a blocker: why an earlier override no longer applies (overrideVoided), then an "Override…" fold
 // with the reason (and, with sign-in off, the person's name; with it on the server records the
 // signed-in person and ignores anything typed). The stamped-structural hold has its own door (the
-// structural-letter card on the submit gate) and gets no Override control.
-const REVIEWER_OVERRIDE_OWN_DOOR = new Set(["city.struct.stamped-engineering-missing"]);
+// structural-letter card on the submit gate) and gets no Override control — on the tile path too.
+// A void override keeps a Withdraw button, so a stale row can be cleared instead of waiting to apply
+// again. The Override button carries the blocker's overrideSeenAs: the server refuses (409) when the
+// finding or the plan set changed between this page and the click.
+const REVIEWER_OVERRIDE_OWN_DOOR = new Set(["city.struct.stamped-engineering-missing", "city.struct.tile-stamped-engineering-missing"]);
 function reviewerOverrideControlHtml(finding, authOn) {
   if (!finding || finding.severity !== "blocker") return "";
   const v = finding.overrideVoided;
   const voidedNote = v
-    ? `<p class="muted kx-override-void">The override by ${esc(v.by)} on ${esc(String(v.at || "").slice(0, 10))} (${esc(v.reason)}) no longer applies: ${esc(v.why)}.</p>`
+    ? `<p class="muted kx-override-void">The override by ${esc(v.by)} on ${esc(String(v.at || "").slice(0, 10))} (${esc(v.reason)}) no longer applies: ${esc(v.why)}.
+      <button type="button" class="secondary" data-reviewer-override-action="withdraw" data-finding-id="${esc(finding.id)}">Withdraw</button></p>`
     : "";
   if (REVIEWER_OVERRIDE_OWN_DOOR.has(finding.id)) {
     return `${voidedNote}<p class="muted">This hold is released only by confirming the engineer's sealed letter (the structural-letter card on the submit gate); it cannot be overridden.</p>`;
@@ -7027,7 +7031,7 @@ function reviewerOverrideControlHtml(finding, authOn) {
         <label>Reason (required)<textarea rows="2" data-reviewer-override-reason placeholder="Why this should not hold the filing"></textarea></label>
         ${authOn ? "" : `<label>Your name<input type="text" data-reviewer-override-name autocomplete="name" /></label>`}
         <div class="kx-inline-tool-row">
-          <button type="button" data-reviewer-override-action="override" data-finding-id="${esc(finding.id)}">Override this blocker</button>
+          <button type="button" data-reviewer-override-action="override" data-finding-id="${esc(finding.id)}" data-seen-as="${esc(finding.overrideSeenAs || "")}">Override this blocker</button>
         </div>
       </div>
     </details>`;
@@ -7082,7 +7086,9 @@ async function reviewerOverrideAction(action, btn) {
   if (name) { try { localStorage.setItem("feeConfirmName", name); } catch { /* per-viewer convenience only */ } }
   btn.disabled = true;
   try {
-    const body = action === "override" ? { reason, overriddenBy: name } : { withdrawnBy: name };
+    const body = action === "override"
+      ? { reason, overriddenBy: name, seenAs: btn.getAttribute("data-seen-as") || "" }
+      : { withdrawnBy: name };
     await api(`/api/projects/${id}/reviewer-blockers/${encodeURIComponent(findingId)}/${action}`, { method: "POST", body: JSON.stringify(body) });
     showMessage(action === "override" ? "Blocker overridden — recorded with your name and reason." : "Override withdrawn — the blocker holds again.");
     if (state.selectedProjectId === id) await selectProject(id);

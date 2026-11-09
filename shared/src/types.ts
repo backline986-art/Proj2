@@ -2572,6 +2572,11 @@ export interface ReviewerFinding {
   /** On a finding that still BLOCKS although an override was recorded for it: that override no longer
    *  covers what is on file (the plan set was replaced, or the finding itself changed), and why. */
   overrideVoided?: ReviewerBlockerOverrideView & { why: string };
+  /** On a blocker a person MAY override: an opaque token of what the gate shows right now (a hash of
+   *  the finding's fingerprint and the plan set's identity; reviewerOverrides.seenAsToken). The
+   *  dashboard echoes it with an override, and the writer refuses 409 when the finding or the plan set
+   *  changed between the page and the click, so an override binds to what the person looked at. */
+  overrideSeenAs?: string;
   /** On city.fire.pathway-unmeasured only: what the roof plan must show, so the vision pass can
    *  compare a measured sheet against the same requirement the text rule used. */
   roofPlanRequired?: RoofPlanRequiredDimension[];

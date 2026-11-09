@@ -8,9 +8,11 @@
 // guard answers 404 for another org's project (hard rule 6). Pinned against a real server process:
 //   1. signed out → 401, nothing written; an org API key alone → 401 (a key names an org, never a person);
 //   2. signed in → 200, WHO is the session's person (a body name is ignored), the user id is kept, the
-//      response's gate shows the blocker as an overridden callout;
+//      response's gate shows the blocker as an overridden callout; with no page token (seenAs) → 400,
+//      with a token that no longer matches the finding → 409, nothing written either way;
 //   3. MUST-EXCLUDE another org's project → 404 (never 403) for override AND withdraw, nothing written;
-//   4. the stamped-structural finding → 409 naming /structural-letter/confirm; an empty reason → 400;
+//   4. the stamped-structural finding and its tile twin → 409 naming /structural-letter/confirm; an
+//      empty reason → 400;
 //   5. withdraw → 200 under the session's person; again → 409;
 //   6. sign-in OFF: a placeholder ("Operator", "N/A", blank, "Admin") → 400 and nothing written;
 //      "Jane Example" → 200, recorded by that typed name.
@@ -52,18 +54,20 @@ const db = await openDatabase();
 const apiKey = createApiKey(db, DEFAULT_ORG_ID, "override-route key").key;
 
 const STRUCT = "city.struct.stamped-engineering-missing";
+const TILE_STRUCT = "city.struct.tile-stamped-engineering-missing";
 const OTHER_ORG = "org-override-beta";
 db.run("INSERT OR IGNORE INTO orgs (id, name, edition, created_at) VALUES (?, ?, 'full', ?)", [OTHER_ORG, "Beta Solar", new Date().toISOString()]);
 const client = createClient(db, {
   companyName: "Override Route Solar LLC", legalBusinessName: "Override Route Solar LLC", ccbLicenseNumber: "240136",
   electricalLicenseNumber: "C1235", businessEmail: "ops@override-route.test", businessPhone: "(503) 555-0143",
 });
-/** A bare project: nothing attached, so the gate raises blockers. Returns one overridable blocker. */
+/** A bare project: nothing attached, so the gate raises blockers. Returns one overridable blocker and
+ *  the page token the gate shows for it (overrideSeenAs, which the dashboard echoes). */
 const mk = (owner: string) => {
   const d = createProject(db, { clientId: client.id, owner, street: "1 Example St", city: "Testville", state: "UT", zip: "84000", ahj: "City of Testville", utility: "Rocky Mountain Power" } as never);
-  const blockers = reviewerGateReportFor(db, getProjectDetail(db, d.project.id).project).findings.filter((f) => f.severity === "blocker" && f.id !== STRUCT);
+  const blockers = reviewerGateReportFor(db, getProjectDetail(db, d.project.id).project).findings.filter((f) => f.severity === "blocker" && f.overrideSeenAs);
   if (!blockers.length) throw new Error("setup: a bare project raised no overridable reviewer blocker");
-  return { projectId: d.project.id, findingId: blockers[0].id };
+  return { projectId: d.project.id, findingId: blockers[0].id, seenAs: blockers[0].overrideSeenAs! };
 };
 const mine = mk("Jane Example");
 const second = mk("Jim Example");
@@ -112,16 +116,23 @@ try {
   await waitUp(BASE, () => serverLog);
   const post = postTo(BASE);
 
-  const keyOnly = await post(mine.projectId, mine.findingId, "override", { reason: REASON, overriddenBy: "Jane Example" }, "", { "x-api-key": apiKey });
+  const keyOnly = await post(mine.projectId, mine.findingId, "override", { reason: REASON, overriddenBy: "Jane Example", seenAs: mine.seenAs }, "", { "x-api-key": apiKey });
   check("1a. an org API key alone (no session): 401, and nothing written", keyOnly.status === 401 && rowsFor(mine.projectId).length === 0, String(keyOnly.status));
-  const anon = await post(mine.projectId, mine.findingId, "override", { reason: REASON, overriddenBy: "Mallory Forger" });
+  const anon = await post(mine.projectId, mine.findingId, "override", { reason: REASON, overriddenBy: "Mallory Forger", seenAs: mine.seenAs });
   check("1b. signed out: 401, and nothing written", anon.status === 401 && rowsFor(mine.projectId).length === 0, String(anon.status));
 
   const login = await fetch(`${BASE}/api/auth/login`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ email: "admin@override.test", password: "override-test-password-1" }) });
   const cookie = String(login.headers.get("set-cookie") || "").split(";")[0];
   const adminId = String(read("SELECT id FROM users WHERE email = 'admin@override.test'")[0]?.id ?? "");
 
-  const res = await post(mine.projectId, mine.findingId, "override", { reason: REASON, overriddenBy: "Mallory Forger" }, cookie);
+  const noToken = await post(mine.projectId, mine.findingId, "override", { reason: REASON }, cookie);
+  check("2-. no page token (seenAs) → 400, nothing written: the route never binds to content the caller did not fetch",
+    noToken.status === 400 && rowsFor(mine.projectId).length === 0, String(noToken.status));
+  const staleToken = await post(mine.projectId, mine.findingId, "override", { reason: REASON, seenAs: "0".repeat(32) }, cookie);
+  const staleText = await staleToken.text();
+  check("2-. a token that no longer matches the finding on file → 409 'changed since you looked', nothing written",
+    staleToken.status === 409 && /changed since you looked/.test(staleText) && rowsFor(mine.projectId).length === 0, `${staleToken.status} ${staleText.slice(0, 200)}`);
+  const res = await post(mine.projectId, mine.findingId, "override", { reason: REASON, overriddenBy: "Mallory Forger", seenAs: mine.seenAs }, cookie);
   const body = await res.json().catch(() => ({})) as { outcome?: { override?: { by?: string } }; reviewerReport?: { findings?: Array<{ id: string; severity: string; override?: { by?: string; reason?: string } }> } };
   const rows = rowsFor(mine.projectId);
   check("2a. signed in: 200, WHO is the session's person, never the body's name, with the user id",
@@ -135,18 +146,20 @@ try {
     audit.length === 1 && audit[0].actor_name === "admin@override.test" && (JSON.parse(String(audit[0].details)) as { findingId?: string; reason?: string }).findingId === mine.findingId
     && (JSON.parse(String(audit[0].details)) as { reason?: string }).reason === REASON, JSON.stringify(audit));
 
-  const foreign = await post(theirs.projectId, theirs.findingId, "override", { reason: REASON }, cookie);
+  const foreign = await post(theirs.projectId, theirs.findingId, "override", { reason: REASON, seenAs: theirs.seenAs }, cookie);
   check("3a. MUST-EXCLUDE another org's project → 404 (never 403), nothing written there", foreign.status === 404 && rowsFor(theirs.projectId).length === 0, String(foreign.status));
   const foreignWithdraw = await post(theirs.projectId, theirs.findingId, "withdraw", {}, cookie);
   check("3b. MUST-EXCLUDE …and its withdraw → 404", foreignWithdraw.status === 404, String(foreignWithdraw.status));
-  const missing = await post("no-such-project", mine.findingId, "override", { reason: REASON }, cookie);
+  const missing = await post("no-such-project", mine.findingId, "override", { reason: REASON, seenAs: mine.seenAs }, cookie);
   check("3c. a project that does not exist → 404", missing.status === 404, String(missing.status));
 
-  const structural = await post(second.projectId, STRUCT, "override", { reason: REASON }, cookie);
-  const structuralText = await structural.text();
-  check("4a. the stamped-structural finding → 409 naming its own door, nothing written",
-    structural.status === 409 && /structural-letter\/confirm/.test(structuralText) && rowsFor(second.projectId).length === 0, `${structural.status} ${structuralText.slice(0, 300)}`);
-  const noReason = await post(second.projectId, second.findingId, "override", { reason: "  " }, cookie);
+  for (const fid of [STRUCT, TILE_STRUCT]) {
+    const structural = await post(second.projectId, fid, "override", { reason: REASON, seenAs: second.seenAs }, cookie);
+    const structuralText = await structural.text();
+    check(`4a. ${fid} → 409 naming its own door, nothing written`,
+      structural.status === 409 && /structural-letter\/confirm/.test(structuralText) && rowsFor(second.projectId).length === 0, `${structural.status} ${structuralText.slice(0, 300)}`);
+  }
+  const noReason = await post(second.projectId, second.findingId, "override", { reason: "  ", seenAs: second.seenAs }, cookie);
   check("4b. an empty reason → 400, nothing written", noReason.status === 400 && rowsFor(second.projectId).length === 0, String(noReason.status));
 
   const w = await post(mine.projectId, mine.findingId, "withdraw", { withdrawnBy: "Mallory Forger" }, cookie);
@@ -174,10 +187,10 @@ try {
   const post = postTo(OFF_BASE);
   const before = rowsFor(second.projectId).length;
   const refused: string[] = [];
-  for (const name of ["Operator", "N/A", "", "Admin"]) refused.push(`${name || "(blank)"}=${(await post(second.projectId, second.findingId, "override", { reason: REASON, overriddenBy: name })).status}`);
+  for (const name of ["Operator", "N/A", "", "Admin"]) refused.push(`${name || "(blank)"}=${(await post(second.projectId, second.findingId, "override", { reason: REASON, overriddenBy: name, seenAs: second.seenAs })).status}`);
   check("6a. sign-in off: a placeholder name (Operator, N/A, blank, Admin) → 400, and nothing written",
     refused.every((r) => r.endsWith("=400")) && rowsFor(second.projectId).length === before, refused.join(" "));
-  const typed = await post(second.projectId, second.findingId, "override", { reason: REASON, overriddenBy: "Jane Example" });
+  const typed = await post(second.projectId, second.findingId, "override", { reason: REASON, overriddenBy: "Jane Example", seenAs: second.seenAs });
   const typedBody = await typed.json().catch(() => ({})) as { outcome?: { override?: { by?: string } } };
   const typedRow = rowsFor(second.projectId).find((r) => !r.withdrawn_at);
   check("6b. sign-in off: \"Jane Example\" typed → 200, recorded by that name",

@@ -3188,8 +3188,8 @@ const VERSIONED_MIGRATIONS: VersionedMigration[] = [
       // that turns that one blocker into a visible callout (reviewerOverrides.applyReviewerBlockerOverrides,
       // folded in by repository.reviewerGateReportFor and nowhere else). Written ONLY by
       // reviewerOverrides.overrideReviewerBlocker. Bound to what the person saw:
-      //   finding_id:   the reviewer finding released (never city.struct.stamped-engineering-missing,
-      //                 which keeps its own door, /structural-letter/confirm, #198).
+      //   finding_id:   the reviewer finding released (never city.struct.stamped-engineering-missing or
+      //                 its tile twin, which keep their own door, /structural-letter/confirm, #198).
       //   fingerprint:  a hash of the finding's plan-derived content (reviewerOverrides.findingFingerprint);
       //                 when the live finding no longer hashes the same, the override does not apply.
       //   plan_set_sig: the plan set's identity as the vision cache keys it (reviewerVision.planSetIdentity);
@@ -3217,6 +3217,16 @@ const VERSIONED_MIGRATIONS: VersionedMigration[] = [
         );
         CREATE INDEX IF NOT EXISTS idx_reviewer_blocker_overrides_project ON reviewer_blocker_overrides(project_id, finding_id, created_at);
       `);
+      // WHAT THE APPROVER SAW RELEASED (#226 for overrides). An override's validity is computed on read
+      // against the CURRENT finding and plan set, so one that was VOID when "Approve & auto-submit" was
+      // clicked (the blocker showed and held) can apply again later (a field edited back). Reading the
+      // gate "as of the approval" cannot tell, because the finding is rebuilt from today's values. So the
+      // approval records, when it is minted (repository.createRunApproval), the overrides that were
+      // releasing a blocker at that moment, as JSON [{overrideId, findingId}]; prepareSubmission lets a
+      // run file past an override only when that override id is in its approval's list. '[]' (also every
+      // approval minted before this column) = nothing was released: any override-relaxed blocker stops
+      // that run at review, the safe direction.
+      addColumnIfMissing(db, "portal_run_approvals", "released_overrides_json", "TEXT NOT NULL DEFAULT '[]'");
     },
   },
 ];

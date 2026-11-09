@@ -47,9 +47,15 @@ check("(a) a blocker carries an Override… fold with a reason box and, with sig
 const onCtl = lib.control(blocker, true);
 check("(a2) with sign-in on there is no name box (the session names the person)", !onCtl.includes("data-reviewer-override-name") && onCtl.includes("data-reviewer-override-reason"), onCtl);
 check("(a3) a warning or a callout gets no Override control", lib.control({ ...blocker, severity: "warning" }, false) === "" && lib.control({ ...blocker, severity: "callout" }, false) === "");
-const structural = lib.control({ id: "city.struct.stamped-engineering-missing", severity: "blocker" }, false);
-check("(b) the stamped-structural hold gets no Override button, and names its own door",
-  !structural.includes("data-reviewer-override-action") && /structural-letter card/.test(structural), structural);
+const tokened = lib.control({ ...blocker, overrideSeenAs: "abc123" }, false);
+check("(a4) the Override button carries the blocker's page token (data-seen-as), which the action sends",
+  /<button[^>]*data-reviewer-override-action="override"[^>]*data-seen-as="abc123"/.test(tokened)
+  && /seenAs: btn\.getAttribute\("data-seen-as"\)/.test(cut("reviewerOverrideAction")), tokened);
+for (const fid of ["city.struct.stamped-engineering-missing", "city.struct.tile-stamped-engineering-missing"]) {
+  const structural = lib.control({ id: fid, severity: "blocker" }, false);
+  check(`(b) ${fid} gets no Override button, and names its own door`,
+    !structural.includes("data-reviewer-override-action") && /structural-letter card/.test(structural), structural);
+}
 
 const overridden = { id: RSD, severity: "callout", overriddenFrom: "blocker", override: { id: "o1", by: "Jane Example", at: "2026-11-09T12:00:00.000Z", reason: "Engineer confirmed on E-2" } };
 const note = lib.note(overridden);
@@ -64,6 +70,8 @@ check("(d) every value is esc()'d: a hostile name or reason never becomes markup
 const voided = lib.control({ ...blocker, overrideVoided: { id: "o3", by: "<b>Jane</b>", at: "2026-11-08T00:00:00Z", reason: "ok", why: "the plan set was replaced since the override was recorded" } }, false);
 check("(d2) a void override says who, when, and why it no longer applies — esc()'d",
   /no longer applies: the plan set was replaced since the override was recorded/.test(voided) && voided.includes("&lt;b&gt;Jane") && !voided.includes("<b>Jane"), voided);
+check("(d3) a void override keeps a Withdraw button, so the stale row can be cleared",
+  /kx-override-void[\s\S]*<button[^>]*data-reviewer-override-action="withdraw"[^>]*data-finding-id="city\.elec\.rapid-shutdown-missing"[^>]*>Withdraw<\/button>/.test(voided), voided);
 
 const gate = cut("renderReviewerGate");
 check("(e) renderReviewerGate puts the control on each issue card, the note in the checks column, and wires both",

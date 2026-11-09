@@ -3408,8 +3408,8 @@ app.post("/api/projects/:id/structural-letter/withdraw", asyncHandler(async (req
 // Any signed-in account may (every role is staff: superadmin / admin / operator, auth.ts). WHO comes
 // from the session when sign-in is on, never the body; with it off it is the typed name, and a
 // placeholder is refused (feeConfirm.isConfirmingPerson) — the structuralLetterPerson rule, own
-// wording. A non-empty reason is required. city.struct.stamped-engineering-missing is refused with
-// 409 naming its own door (/structural-letter/confirm). The finding must be a blocker on the gate as
+// wording. A non-empty reason is required. city.struct.stamped-engineering-missing (and its tile
+// twin) is refused with 409 naming its own door (/structural-letter/confirm). The finding must be a blocker on the gate as
 // it stands, else 409. Under /api/projects/:id, so the tenant scope guard answers 404 for another
 // org's project (rule 6). The override is folded into the gate by reviewerGateReportFor alone.
 function reviewerOverridePerson(
@@ -3430,8 +3430,12 @@ app.post("/api/projects/:id/reviewer-blockers/:findingId/override", asyncHandler
   const { overrideReviewerBlocker } = await import("./reviewerOverrides");
   const detail = getProjectDetail(db, String(req.params.id));
   const who = reviewerOverridePerson(req, req.body?.overriddenBy, isConfirmingPerson, "override");
+  // Bound to what the person looked at: the page echoes the blocker's overrideSeenAs. Always passed
+  // (as "" when absent), so the writer requires it from this route — 400 when missing, 409 when the
+  // finding or the plan set changed since the page was drawn.
   const outcome = await overrideReviewerBlocker(db, detail.project.id, String(req.params.findingId), {
     reason: String(req.body?.reason ?? ""), by: who.name, userId: who.userId,
+    seenAs: typeof req.body?.seenAs === "string" ? req.body.seenAs : "",
   });
   res.json({ outcome, reviewerReport: getReviewerReport(db, detail.project.id) });
 }));
