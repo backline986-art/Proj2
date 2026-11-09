@@ -28,7 +28,8 @@
 //   9  resubmit_awaiting_me    a reopened correction form waits for the human resubmit
 //  10  staged_awaiting_submit  a staged draft waits for review + approval (per track)
 //  11  approved_awaiting_filing  approval recorded, the human filing not captured yet
-//  12  fee_due                 the AHJ approved a permit; a person pays the issuance fee
+//  12  fee_due                 the AHJ approved a permit (or emailed a fee request); a person pays,
+//                              then presses Paid (feeDue.ts)
 //  13  correction_open         an open (not overdue) correction — owner by triage bucket
 //  14  payment_due             a per-submission client's payment gates staging (the 402)
 //      ready_to_stage          required tracks with nothing on the portal yet
@@ -77,6 +78,7 @@ import { SIGNATURE_REQUEST_CONFIRMED_ACTION, reduceNemSignatureState } from "./s
 import { visionRelaxedBlockers } from "./reviewerVision";
 import { startedAtLabel } from "./formAcquisitionPlan";
 import { paymentNeededForRun } from "./feePause";
+import { feeDueReadings, feePaidMarks, trackFeeDueFrom } from "./feeDue";
 import {
   getProjectDetail,
   getSubmitGateReport,
@@ -232,6 +234,8 @@ export interface TrackFacts {
   gapFillMissing: string[];
   /** A tracking target of this track's kind reads ready_for_issue (approved, fee due). */
   feeDue: boolean;
+  /** The fee due follows an approval (ready for issue); false = an agency asked for a fee (#576). */
+  feeDueApproved?: boolean;
   /** The CLIENT's payment for this track is outstanding: a per-submission client with no paid /
    *  waived submission_payments row — exactly what assertSubmissionPaid's 402 refuses on. */
   paymentDue: boolean;
@@ -417,10 +421,9 @@ export function loadNextStepFacts(db: AppDb, projects: ProjectRecord[]): Map<str
   // The installer handoff email (#491), read only for handed-off projects.
   const handedOffIds = projects.filter((p) => p.status === "handoff_ready").map((p) => p.id);
   const handoffs = installerHandoffRecords(db, handedOffIds);
-  const feeDueKinds = groupBy(
-    db.query<Row>(`SELECT project_id, target_type, permit_type FROM permit_check_targets WHERE project_id IN (${ph}) AND active = 1 AND latest_outcome = 'ready_for_issue'`, ids),
-    (r) => s(r.project_id),
-  );
+  // A fee asked for (ready for issue, or an emailed fee request) that no Paid has answered (#576).
+  const feeReadings = feeDueReadings(db, ids);
+  const feePaid = feePaidMarks(db, ids);
 
   const stagedRunIds: string[] = [];
   for (const project of projects) {
@@ -441,6 +444,7 @@ export function loadNextStepFacts(db: AppDb, projects: ProjectRecord[]): Map<str
       const ownsTarget = (r: Row): boolean => family.includes(s(r.permit_type))
         || (trackKind(s(r.target_type), s(r.permit_type)) === kind && !claimed.has(s(r.permit_type)));
       const targetEvidence = (numberedTargets.get(pid) ?? []).some(ownsTarget);
+      const feeAsk = trackFeeDueFrom(feeReadings.get(pid) ?? [], feePaid.get(pid) ?? [], track, family, kind, claimed);
       return {
         track,
         filed: Boolean(filedRow) || targetEvidence,
@@ -453,7 +457,9 @@ export function loadNextStepFacts(db: AppDb, projects: ProjectRecord[]): Map<str
         // THIS track's filing reads ready-for-issue — not "some permit filing does". Matched by kind
         // alone, one permit's fee made every permit track "approved", and the banner told the
         // operator the electrical permit was approved while it sat in plan review.
-        feeDue: (feeDueKinds.get(pid) ?? []).some(ownsTarget),
+        // A person's Paid since the reading clears it (feeDue.ts, the card's answer too).
+        feeDue: Boolean(feeAsk),
+        feeDueApproved: Boolean(feeAsk?.approved),
         paymentDue: perSubmissionClients.has(s(project.clientId))
           && !(payments.get(pid) ?? []).some((r) => s(r.track) === billingTrack(track) && (s(r.status) === "paid" || s(r.status) === "waived")),
         // A registry read (permitProcess), never the db — the "reads write nothing" invariant holds.
@@ -899,7 +905,9 @@ export function decideNextStep(facts: NextStepFacts): NextStep {
   const feeDue = facts.tracks.filter((t) => t.feeDue && !t.done);
   if (feeDue.length) {
     return make("fee_due", "me", "today",
-      `${joinNames(feeDue.map((t) => `${agencyOf(facts, t)} approved the ${TRACK_NAME[t.track]}`))} — pay the issuance fee in the portal (automation never pays fees).`,
+      feeDue.every((t) => t.feeDueApproved !== false)
+        ? `${joinNames(feeDue.map((t) => `${agencyOf(facts, t)} approved the ${TRACK_NAME[t.track]}`))} — pay the issuance fee in the portal, then press Paid on the track with the permit number and the amount (automation never pays fees).`
+        : `Fee due: ${joinNames(feeDue.map((t) => `${agencyOf(facts, t)} asked for the ${TRACK_NAME[t.track]} fee`))} — pay it in the portal, then press Paid on the track with the record number and the amount (automation never pays fees).`,
       [], null);
   }
 

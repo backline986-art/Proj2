@@ -75,7 +75,7 @@ await check("derivePortalRunOutcome: a fee stop is awaiting_payment, clicked or 
 });
 await check("the sentence: amount and portal; unread is said, never $0; no MFA, no 'stage again'", () => {
   const read = fp.paymentNeededForRun(feeResult({ clicked: true, read: true }));
-  assert.match(read, /^Payment needed: \$412\.50 on Portland permits\. Pay there, then record the confirmation number\./);
+  assert.match(read, /^Payment needed: \$412\.50 on Portland permits\. Pay there, then press Paid on the track with the record number and the amount paid\./);
   const unread = fp.paymentNeededForRun(feeResult({ clicked: false, read: false }));
   assert.match(unread, /^Payment needed on Portland permits \(the amount could not be read from the page; see the screenshot\)\./);
   for (const s of [read, unread, fp.paymentNeededForRun(null)]) {

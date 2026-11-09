@@ -3093,6 +3093,40 @@ const VERSIONED_MIGRATIONS: VersionedMigration[] = [
       `);
     },
   },
+  {
+    version: 62,
+    name: "track_fee_payments",
+    up: (db) => {
+      // "PAID" (#576 item 4): a person paid a fee ON THE PORTAL for a track — the filing fee a staging
+      // run stopped on (awaiting_payment), or the issuance fee after approval (fee_due). One row per
+      // press of Paid, written ONLY by trackPaid.markTrackPaid. Automation never pays (rule 1): every
+      // row is a person's record of their own payment, with who and when.
+      //   kind: 'filing' (closed an awaiting_payment run) | 'issuance' (cleared fee_due).
+      //   track: the submittal track (combo, electrical, nem...), never the billing track.
+      //   amount_usd: what was actually paid; the track family's sum is the actual fee
+      //     (submission_payments.permit_fee_actual_usd), which fee accuracy (#494) reads.
+      //   record_number: the record / permit number the portal showed.
+      //   run_id: the awaiting_payment run it closed ('' for an issuance fee).
+      //   confirmation_shot_path: the #569 confirmation screenshot when one exists ('' until then).
+      // Created here, never lazily: nextStep and the track card read it, and reads write nothing.
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS track_fee_payments (
+          id TEXT PRIMARY KEY,
+          project_id TEXT NOT NULL,
+          track TEXT NOT NULL,
+          kind TEXT NOT NULL,
+          amount_usd REAL NOT NULL,
+          record_number TEXT NOT NULL DEFAULT '',
+          run_id TEXT NOT NULL DEFAULT '',
+          confirmation_shot_path TEXT NOT NULL DEFAULT '',
+          paid_by TEXT NOT NULL DEFAULT '',
+          paid_at TEXT NOT NULL,
+          FOREIGN KEY (project_id) REFERENCES projects(id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_track_fee_payments_project ON track_fee_payments(project_id, track, paid_at);
+      `);
+    },
+  },
 ];
 
 /** v47 was edited in place while #218 was open (Helm's review at 0116f98a): a DB that ran an earlier

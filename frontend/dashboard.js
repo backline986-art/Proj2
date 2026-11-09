@@ -5348,8 +5348,39 @@ function trackPaymentHtml(t) {
     <p style="margin:0 0 2px">Login: ${p.loginUsername ? esc(p.loginUsername) : "no login on file for this portal"} · Who pays: ${esc(who)}</p>
     ${app ? `<p style="margin:0 0 2px"><a href="${esc(app)}" target="_blank" rel="noopener">Open the saved application</a></p>` : ""}
     ${p.screenshotUrl ? `<a href="${esc(p.screenshotUrl)}" target="_blank" rel="noopener" title="The fee page as the run saw it (secrets and card fields masked)"><img src="${esc(p.screenshotUrl)}" alt="The portal's fee page" class="review-shot" style="max-width:100%;border:1px solid var(--border);border-radius:var(--radius-sm)" /></a>` : ""}
-    <p class="muted" style="margin:2px 0 0">Pay on the portal, then record the confirmation number below. Staging this track again is refused while it waits: it would open a second application.</p>
+    <p class="muted" style="margin:2px 0 0">Pay on the portal, then press Paid below with the record number and the amount paid. Staging this track again is refused while it waits: it would open a second application.</p>
+    ${trackPaidFormHtml(t)}
   </div>`;
+}
+
+// "PAID" (#576 item 4): one form under a payment wait or a fee due — the record / permit number the
+// portal shows and the amount actually paid. Server data esc()'d; the press posts to the track's own
+// project-scoped route.
+function trackPaidFormHtml(t) {
+  if (!t || !(t.payment || t.feeDue)) return "";
+  const type = esc(t.type);
+  const numberLabel = t.payment ? "Record / application number" : "Permit / record number";
+  return `<div class="track-paid-form" style="display:flex;flex-wrap:wrap;gap:6px;align-items:flex-end;margin:6px 0 2px" data-track-paid-form="${type}">
+    <label class="track-field"><span>${esc(numberLabel)}</span><input data-track-paid-field="recordNumber" data-track="${type}" placeholder="as the portal shows it" /></label>
+    <label class="track-field"><span>Amount paid ($)</span><input data-track-paid-field="amountPaidUsd" data-track="${type}" inputmode="decimal" placeholder="0.00" /></label>
+    <button type="button" class="primary" data-track-paid="${type}" title="Record that a person paid this fee on the portal. Automation never pays."><i data-lucide="badge-dollar-sign"></i><span>Paid</span></button>
+  </div>`;
+}
+
+// A FEE DUE (#576 item 4): approved and the issuance fee is owed, or the agency asked for a fee.
+// Paid clears it; the amount becomes the actual fee. Plus every Paid recorded on the track.
+function trackFeeDueHtml(t) {
+  const money = (n) => `$${Number(n).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+  const due = t && t.feeDue && !t.payment
+    ? `<div class="submit-gate-check warning" style="margin:4px 0 6px;font-size:12px" data-track-fee-due="${esc(t.type)}">
+        <p style="margin:0 0 4px"><strong>Fee due</strong>${t.feeDue.label ? ` <span class="muted">(${esc(t.feeDue.label)})</span>` : ""}: ${esc(t.feeDue.sentence || "")} Automation never pays.</p>
+        ${trackPaidFormHtml(t)}
+      </div>`
+    : "";
+  const paid = Array.isArray(t && t.paid) && t.paid.length
+    ? `<p class="muted" style="margin:0 0 4px;font-size:11px" data-track-paid-list="${esc(t.type)}">Paid: ${t.paid.map((p) => `${esc(money(p.amountUsd))} (${esc(p.kind === "filing" ? "filing fee" : "fee")}, ${esc(p.recordNumber)}, ${esc(String(p.paidAt || "").slice(0, 10))}${p.paidBy ? `, ${esc(p.paidBy)}` : ""})`).join("; ")}</p>`
+    : "";
+  return due + paid;
 }
 
 function trackStageGapsHtml(t) {
@@ -5493,6 +5524,7 @@ function trackCardHtml(t) {
     ${trackEssStepHtml(t)}
     <p style="margin:0 0 6px;font-size:12px">→ ${linkifyText(trackNextActionText(t))}</p>
     ${trackPaymentHtml(t)}
+    ${trackFeeDueHtml(t)}
     ${trackStageGapsHtml(t)}
     ${captured ? `<p style="margin:0 0 4px">${captured} ${trackLink ? "&nbsp;·&nbsp; " + trackLink : ""}</p>` : (trackLink ? `<p style="margin:0 0 4px">${trackLink}</p>` : "")}
     ${t.recipeId && (t.recipeStatus === "complete" || t.recipeStatus === "recording")
@@ -5586,6 +5618,9 @@ function renderSubmittalTracks() {
   wrap.innerHTML = group(utilityGroupTitle(utility), utility) + group("AHJ — Permit(s)", permits) + closeoutGroupHtml();
   bindCloseoutMilestones(wrap);
 
+  wrap.querySelectorAll("button[data-track-paid]").forEach((btn) => {
+    btn.addEventListener("click", () => markTrackPaid(btn.dataset.trackPaid, btn));
+  });
   wrap.querySelectorAll("button[data-track-submit]").forEach((btn) => {
     btn.addEventListener("click", () => markSubmittalTrack(btn.dataset.trackSubmit));
   });
@@ -5840,7 +5875,7 @@ async function stageSubmittalTrack(type, btn, autoSubmit = false, extra = null, 
     }
     // A FEE STOP (#576): the payment sentence — amount, portal, pay there. Never MFA wording.
     if (job.result && job.result.status === "awaiting_payment") {
-      showMessage(job.result.message || `${humanize(type)}: payment needed on the portal. Pay there, then record the confirmation number.`, "warning");
+      showMessage(job.result.message || `${humanize(type)}: payment needed on the portal. Pay there, then press Paid on the track.`, "warning");
       await loadSubmittalTracks();
       renderDetail();
       return;
@@ -6200,6 +6235,34 @@ async function saveProjectMilestone(key, at, btn, method) {
   } catch (err) {
     if (btn) btn.disabled = false;
     showMessage(err.message || "Could not save the milestone.", "error");
+  }
+}
+
+// "PAID" (#576 item 4): a person paid the track's fee on the portal.
+async function markTrackPaid(type, btn) {
+  if (!state.selectedProjectId || !type) return;
+  const field = (name) => {
+    const el = document.querySelector(`[data-track-paid-field="${name}"][data-track="${type}"]`);
+    return (el?.value || "").trim();
+  };
+  const body = { recordNumber: field("recordNumber"), amountPaidUsd: field("amountPaidUsd") };
+  if (!body.recordNumber || !body.amountPaidUsd) {
+    showMessage("Enter the record number and the amount paid on the portal, then press Paid.", "warning");
+    return;
+  }
+  if (btn) btn.disabled = true;
+  try {
+    const res = await api(`/api/projects/${state.selectedProjectId}/submittal-tracks/${type}/paid`, {
+      method: "POST", body: JSON.stringify(body),
+    });
+    state.submittalTracks = res.tracks || state.submittalTracks;
+    state.detail = await api(`/api/projects/${state.selectedProjectId}`);
+    await loadProcessMap();
+    renderDetail();
+    showMessage(res.message || "Payment recorded.", "info");
+  } catch (err) {
+    if (btn) btn.disabled = false;
+    showMessage(err.message || "Could not record the payment.", "error");
   }
 }
 
@@ -9745,7 +9808,7 @@ async function prepareSubmission() {
       return;
     }
     if (job.result && job.result.status === "awaiting_payment") {
-      showMessage(job.result.message || "Payment needed on the portal. Pay there, then record the confirmation number.", "warning");
+      showMessage(job.result.message || "Payment needed on the portal. Pay there, then press Paid on the track.", "warning");
       return;
     }
     if (job.result && job.result.status === "paused_for_human") {

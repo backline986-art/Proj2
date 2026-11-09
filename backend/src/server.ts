@@ -3652,7 +3652,7 @@ app.post("/api/projects/:id/prepare-submission", (req, res) => {
       if (!run) return;
       if (run.status === "awaiting_payment") {
         // A FEE STOP (#576): the payment sentence (amount, portal, pay there) — never MFA wording.
-        sseBroadcast({ type: "run_paused", projectId, message: run.errorMessage || "Payment needed on the portal. Pay there, then record the confirmation number.", data: { pauseReason: "fee_payment" } });
+        sseBroadcast({ type: "run_paused", projectId, message: run.errorMessage || "Payment needed on the portal. Pay there, then press Paid on the track.", data: { pauseReason: "fee_payment" } });
       } else if (run.pauseReason === "mfa_captcha") {
         sseBroadcast({ type: "run_paused", projectId, message: "Portal requires attention — MFA or CAPTCHA detected. Complete it in the browser, then resume.", data: { pauseReason: run.pauseReason } });
       } else if (run.status === "failed") {
@@ -3969,6 +3969,30 @@ app.post("/api/projects/:id/submittal-tracks/:type/signature-request-sent", asyn
   const confirmedBy = AUTH_ENABLED ? String(user?.name || user?.email || "").trim() : String(req.body?.confirmedBy || "").trim();
   const signature = confirmSignatureRequestSent(db, detail.project.id, { confirmedBy, userId: user?.id ?? null });
   res.json({ ok: true, signature, tracks: getSubmittalTracks(db, detail.project) });
+}));
+// "PAID" (#576 item 4): a person paid this track's fee ON THE PORTAL — the fee a staging run stopped
+// on (awaiting_payment: the filing is recorded with the portal's record number) or a fee due after
+// approval / an emailed fee request (fee_due is cleared). The amount actually paid becomes the actual
+// fee fee accuracy reads. Automation never pays (rule 1); this records a person's payment. Under
+// /api/projects/:id, so the org scope guard answers another org's project with a 404 (rule 6). The
+// name is the signed-in user's when auth is on, never the body's.
+app.post("/api/projects/:id/submittal-tracks/:type/paid", asyncHandler(async (req, res) => {
+  const type = String(req.params.type) as SubmittalTrackType;
+  if (!SUBMITTAL_TRACK_TYPES.includes(type)) throw new HttpError(400, "Unknown submittal track type.");
+  const detail = getProjectDetail(db, String(req.params.id));
+  const user = currentUser(db, req);
+  if (AUTH_ENABLED && !user) throw new HttpError(401, "Sign in to record a payment.");
+  const paidBy = AUTH_ENABLED ? String(user?.name || user?.email || "").trim() : String(req.body?.paidBy || "").trim();
+  const { markTrackPaid } = await import("./trackPaid");
+  const result = markTrackPaid(db, detail.project, type, {
+    recordNumber: req.body?.recordNumber,
+    amountPaidUsd: req.body?.amountPaidUsd,
+    paidBy,
+  });
+  addAuditLog(db, detail.project.id, "human", paidBy || "operator", "track.fee_paid", {
+    track: type, kind: result.paid.kind, amountUsd: result.paid.amountUsd, actualFeeUsd: result.actualFeeUsd,
+  });
+  res.json({ ok: true, message: result.message, paid: result.paid, tracks: getSubmittalTracks(db, detail.project) });
 }));
 app.post("/api/projects/:id/submittal-tracks/:type/mark-submitted", asyncHandler(async (req, res) => {
   const type = String(req.params.type) as SubmittalTrackType;

@@ -1157,6 +1157,9 @@ function insertExtractedFields(db: AppDb, projectId: string, payload: ParserPayl
   }
 }
 
+/** The label an emailed fee request reads as (#576): the track's fee_due, not a generic review. */
+const FEE_REQUESTED_LABEL = "Fee requested";
+
 function outcomeFromEmailBucket(bucket: EmailProjectMatch["emailBucket"]): PermitCheckOutcome {
   if (bucket === "permit_correction" || bucket === "nem_correction" || bucket === "missing_info_request") return "correction_flagged";
   if (bucket === "fee_request") return "needs_human_review";
@@ -1236,11 +1239,11 @@ export function computeLaneStatusSummary(
     || Boolean(latestNemEmail && latestNemEmail.emailBucket === "nem_approval");
 
   return {
-    latestPermitLabel: statusLabel(latestPermitCheck?.statusLabel, latestPermitCheck?.outcome ?? permitEmailOutcome),
+    latestPermitLabel: statusLabel(latestPermitCheck?.statusLabel || (!latestPermitCheck && latestPermitEmail?.emailBucket === "fee_request" ? FEE_REQUESTED_LABEL : ""), latestPermitCheck?.outcome ?? permitEmailOutcome),
     latestPermitOutcome: latestPermitCheck?.outcome ?? permitEmailOutcome,
     latestPermitCheckedAt: latestPermitCheck?.createdAt ?? latestPermitEmail?.createdAt ?? null,
     readyForIssue,
-    latestNemLabel: statusLabel(latestNemCheck?.statusLabel, latestNemCheck?.outcome ?? nemEmailOutcome),
+    latestNemLabel: statusLabel(latestNemCheck?.statusLabel || (!latestNemCheck && latestNemEmail?.emailBucket === "fee_request" ? FEE_REQUESTED_LABEL : ""), latestNemCheck?.outcome ?? nemEmailOutcome),
     latestNemOutcome: latestNemCheck?.outcome ?? nemEmailOutcome,
     latestNemCheckedAt: latestNemCheck?.createdAt ?? latestNemEmail?.createdAt ?? null,
     nemApproved,
@@ -1489,6 +1492,8 @@ export function deleteProject(db: AppDb, projectId: string): { deleted: true; pr
     db.run("DELETE FROM portal_record_documents WHERE project_id = ?", [projectId]);
     // The filing-time quote (migration v56, #494) carries the same FK.
     db.run("DELETE FROM fee_quote_snapshots WHERE project_id = ?", [projectId]);
+    // A person's "Paid" records (migration v62, #576) carry the same FK.
+    db.run("DELETE FROM track_fee_payments WHERE project_id = ?", [projectId]);
     // Keep permit_fee_history (learned real fees) but unlink the deleted project.
     db.run("UPDATE permit_fee_history SET project_id = NULL WHERE project_id = ?", [projectId]);
     // Communications may belong to a customer too — unlink rather than destroy correspondence.
@@ -4876,6 +4881,8 @@ export async function runEmailTracker(
           applicationNumber,
           permitNumber,
           noticedAt: message.record.occurredAt || null,
+          // The agency's fee request reads as the track's fee due (#576), not a generic review.
+          feeRequested: message.record.type === "fee_request",
         });
         const statusCheck = updated.permitStatusChecks[0] || null;
         const beforeCorrectionIds = new Set(before.corrections.map((item) => item.id));
@@ -6644,6 +6651,11 @@ export async function recordPermitStatusCheck(
      *  reading raises starts there, not at ingestion. Omitted: the status date the page prints
      *  (permitMonitor.extractStatusDate), if any. */
     noticedAt?: string | null;
+    /** THE AGENCY EMAILED A FEE REQUEST (#576): the email tracker's own bucket said so. A reading
+     *  that would otherwise land as needs_human_review is recorded as "Fee requested" with
+     *  issue_fee_due set, so the track reads fee_due (feeDue.ts) — pay on the portal, then Paid —
+     *  instead of a generic review item. It never finishes or approves anything. */
+    feeRequested?: boolean;
   },
 ): Promise<PermitStatusCheckResult> {
   const detail = getProjectDetail(db, projectId);
@@ -6728,6 +6740,21 @@ export async function recordPermitStatusCheck(
           + `Confirm it on the ${writtenTrack === "nem" ? "utility's" : "jurisdiction's"} portal — a poll or a manual re-check against the filing's own active tracking target — before it counts.`,
       }
     : read;
+  // AN EMAILED FEE REQUEST IS A FEE DUE (#576), not a generic review. A reading that would land as
+  // needs_human_review (no rule matched) or waiting (a "plan review fee" reads as in review) keeps its
+  // outcome and is re-worded "Fee requested" with the fee due; a correction, an approval or an issue
+  // reading keeps its own. A refused (unconfirmed) approval keeps its label and its review item; the
+  // fee is still due.
+  const feeRequest = Boolean(input.feeRequested) && (classification.outcome === "needs_human_review" || classification.outcome === "waiting");
+  if (feeRequest) {
+    Object.assign(classification, refused
+      ? { issueFeeDue: true }
+      : {
+          statusLabel: FEE_REQUESTED_LABEL,
+          issueFeeDue: true,
+          message: "The agency emailed a fee request. Pay it on the portal, then press Paid on the track with the record number and the amount (automation never pays fees).",
+        });
+  }
   // A HISTORY OF CHANGES, NOT A LOG OF LOOKUPS.
   //
   // This table was written on every CHECK. A permit sitting in "In review" for three weeks got a
@@ -6824,7 +6851,7 @@ export async function recordPermitStatusCheck(
           ts,
         ],
       );
-    } else if (recordCheck && classification.outcome === "needs_human_review") {
+    } else if (recordCheck && classification.outcome === "needs_human_review" && !feeRequest) {
       db.run(
         `INSERT INTO human_review_items
           (id, project_id, issue_type, field_name, parser_value, llm_suggested_value, source_excerpt, status, notes, created_at, updated_at)

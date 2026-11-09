@@ -44,6 +44,7 @@ import { snapshotFilingQuote } from "./feeAccuracy";
 import { nemSignatureState, type NemSignatureView } from "./signatureTrack";
 import { notifyClientOfFiling } from "./clientFilingUpdate";
 import { trackPaymentView, type TrackPaymentView } from "./feePauseView";
+import { feeDueReadings, feePaidMarks, trackFeeDueFrom, type FeeDueReading } from "./feeDue";
 
 /** Words that claim the statewide portal ("Oregon ePermitting", "OR E-permitting") with no URL —
  *  on a learned row, often the generic fallback's own words laundered in (portal-truth D2/D4). */
@@ -95,6 +96,11 @@ export interface SubmittalTrackView extends SubmittalTrack {
   /** The track's newest staging run stopped on a fee (#576): what to pay, where, with whose card,
    *  and the way back to the application. Absent unless the track waits on payment. */
   payment?: TrackPaymentView;
+  /** A fee is due on this track (#576 item 4, feeDue.ts): the agency approved it (ready for issue)
+   *  or asked for a fee, and no person has pressed Paid since. Absent otherwise. */
+  feeDue?: { label: string; since: string; approved: boolean; sentence: string };
+  /** Every Paid a person recorded on this track, newest first (track_fee_payments). */
+  paid?: Array<{ kind: string; amountUsd: number; recordNumber: string; paidBy: string; paidAt: string }>;
   /** #436 PR1 — NEM only, while the track is staged: the newest staged review the server holds (the
    *  masked picture of the review page, and what the draft's pages show). Shown beside Approve,
    *  which stays held exactly as #449 holds it. null = none recorded. */
@@ -497,6 +503,21 @@ export function isTrackDone(db: AppDb, projectId: string, track: SubmittalTrackT
   if (own) return targetFinishedTrack(db, track, own);
   if (pool.length === 0 || pool.length < poolDemand) return false;
   return pool.every((r) => targetFinishedTrack(db, track, r));
+}
+
+/** IS A FEE DUE ON THIS TRACK? (#576 item 4) The reading that asks for it, or null — the same
+ *  answer nextStep's fee_due gives (feeDue.ts: own target or the kind's unclaimed pool, and no Paid
+ *  since the reading). A read. */
+export function trackFeeDue(db: AppDb, projectId: string, track: SubmittalTrackType, required: readonly SubmittalTrackType[]): FeeDueReading | null {
+  const claimed = new Set([...required, track].flatMap(trackPermitTypes));
+  return trackFeeDueFrom(
+    feeDueReadings(db, [projectId]).get(projectId) ?? [],
+    feePaidMarks(db, [projectId]).get(projectId) ?? [],
+    track,
+    trackPermitTypes(track),
+    targetTypeFor(track),
+    claimed,
+  );
 }
 
 /**
@@ -1023,6 +1044,22 @@ export function getSubmittalTracks(db: AppDb, project: ProjectRecord): Submittal
     // WAITING ON PAYMENT (#576): the newest staging run of this track stopped on a fee. The card's
     // portal is its own (rule 5 — the same filtered URL shown above); a link elsewhere is never shown.
     const payment = status === "issued" ? null : trackPaymentView(db, project, type, family, (recipeRow ? s(recipeRow.portal_url) : undefined) || kbPortalUrl);
+    // A FEE DUE (#576 item 4): the one answer nextStep's fee_due reads too (feeDue.ts). Paid clears it.
+    const feeAsk = status === "issued" || payment ? null : trackFeeDue(db, project.id, type, required);
+    const feeDue = feeAsk
+      ? {
+          label: feeAsk.label,
+          since: feeAsk.readAt,
+          approved: feeAsk.approved,
+          sentence: feeAsk.approved
+            ? "Approved: pay the issuance fee on the portal, then press Paid with the permit number and the amount."
+            : "The agency asked for a fee: pay it on the portal, then press Paid with the record number and the amount.",
+        }
+      : null;
+    const paid = db.query<Row>(
+      "SELECT kind, amount_usd, record_number, paid_by, paid_at FROM track_fee_payments WHERE project_id = ? AND track = ? ORDER BY paid_at DESC, rowid DESC",
+      [project.id, type],
+    ).map((r) => ({ kind: s(r.kind), amountUsd: Number(r.amount_usd), recordNumber: s(r.record_number), paidBy: s(r.paid_by), paidAt: s(r.paid_at) }));
 
     return {
       type,
@@ -1062,6 +1099,8 @@ export function getSubmittalTracks(db: AppDb, project: ProjectRecord): Submittal
       ...(type === "nem" ? { signatureRequest } : {}),
       ...(issuer ? { issuer } : {}),
       ...(payment ? { payment } : {}),
+      ...(feeDue ? { feeDue } : {}),
+      ...(paid.length ? { paid } : {}),
       // #436 PR1: the staged draft's review (NEM, while staged), and ruling 5's Stage block.
       ...(type === "nem" && status === "staged" ? { stagedReview: stagedReviewViewFor(db, project.id) } : {}),
       ...(stageBlocked ? { stageBlocked } : {}),
