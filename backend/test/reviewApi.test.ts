@@ -6,6 +6,7 @@ import { spawn } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { PDFDocument, StandardFonts } from "pdf-lib";
 
 const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "review-api-test-"));
 const PORT = 4970 + Math.floor(Math.random() * 20);
@@ -15,6 +16,8 @@ const env = {
   ...process.env,
   AUTOPILOT_DB_PATH: path.join(tmpDir, "test.sqlite"),
   BACKUP_DIR: path.join(tmpDir, "backups"),
+  // Uploaded plan sets land under the temp state root, not the repo's backend/data (#392 uploads one).
+  AUTOPILOT_STATE_DIR: path.join(tmpDir, "state"),
   AUTOPILOT_AUTO_START: "0", // deterministic tests — no background autopilot
   PORT: String(PORT),
   SEED_TEST_INSTALLER: "false",
@@ -138,6 +141,40 @@ try {
     const html = await htmlRes.text();
     assert.ok(htmlRes.headers.get("content-type")?.includes("text/html"));
     assert.ok(html.includes("Golden Test") || html.includes("123 Snowy Ridge Rd") || html.length > 500, "HTML report renders");
+  });
+
+  // #392: the submission detail is serialized to every tenant (the plan review API is API-key
+  // reachable). It used to carry `plansetPath`, the absolute path the upload was written to on the
+  // server's disk. Nothing serves that file, so the path told a client only the server's layout.
+  await run("plan-set upload: submission detail carries no server file path (#392)", async () => {
+    const pdf = await PDFDocument.create();
+    const page = pdf.addPage([612, 792]);
+    page.drawText("PV-1 SITE PLAN  synthetic plan set for the #392 test", { x: 40, y: 740, size: 12, font: await pdf.embedFont(StandardFonts.Helvetica) });
+    const up = await api("/api/review/upload?filename=synthetic-planset.pdf", {
+      method: "POST",
+      headers: { "content-type": "application/pdf", "x-review-subject": JSON.stringify(oregonSubject) },
+      body: Buffer.from(await pdf.save()),
+    });
+    const upText = await up.text();
+    assert.equal(up.status, 201, upText.slice(0, 400));
+    const uploadedId = JSON.parse(upText).submissionId as string;
+    assert.ok(uploadedId, "upload returns a submission id");
+    // The upload really was persisted server-side (so the old field would have been non-empty).
+    assert.ok(fs.existsSync(path.join(tmpDir, "state", "review-submissions", `${uploadedId}.pdf`)), "plan set stored on the server");
+    for (const text of [upText, await (await api(`/api/review/submissions/${uploadedId}`)).text(), await (await api("/api/review/submissions")).text()]) {
+      assert.ok(!text.includes("review-submissions"), "no server storage directory in the response");
+      assert.ok(!text.includes(tmpDir), "no server-side absolute path in the response");
+      assert.ok(!text.includes(path.join(process.cwd(), "backend")), "no server source-tree path in the response");
+    }
+    const detail = await (await api(`/api/review/submissions/${uploadedId}`)).json();
+    assert.ok(!("plansetPath" in detail), "plansetPath is not part of the API shape");
+    assert.equal(detail.hasPlanset, true, "the client still learns a plan set was stored");
+    const noUpload = await (await api(`/api/review/submissions/${submissionId}`)).json();
+    assert.equal(noUpload.hasPlanset, false, "a JSON-only review has no plan set");
+    // The printable report is unaffected.
+    const html = await api(`/api/review/submissions/${uploadedId}?format=html`);
+    assert.equal(html.status, 200);
+    assert.ok(html.headers.get("content-type")?.includes("text/html"));
   });
 
   await run("validation: bad subject → 400, missing submission → 404", async () => {
