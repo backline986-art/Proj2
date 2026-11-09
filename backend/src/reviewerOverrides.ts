@@ -60,8 +60,8 @@ export const REVIEWER_OVERRIDE_RELAXED_AT_STAGE_ACTION = "reviewer_gate.override
 
 /** Findings no override may release, each with the door that does (owner ruling 1). The tile twin
  *  (codeReviewRules: the same stamped-structural hold raised on the tile-roof path) is released by the
- *  very same structural-letter confirmation, so it keeps that door too — the ruling names only the
- *  non-tile id; listed here pending the owner's confirmation (#640 open question). */
+ *  very same structural-letter confirmation, so it keeps that door too (owner, 2026-11-09 on #640:
+ *  "keep it non-overridable"; a tile job that truly owes no engineering is a permit-path fix). */
 const STRUCTURAL_LETTER_DOOR =
   "The stamped-structural hold keeps its own door: a named person confirms the engineer's sealed letter (POST /api/projects/:id/structural-letter/confirm, the structural-letter card on the submit gate). It cannot be overridden.";
 export const NOT_OVERRIDABLE: ReadonlyMap<string, string> = new Map([
