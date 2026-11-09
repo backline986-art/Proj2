@@ -218,9 +218,11 @@ console.log("4. a code name keeps its stopwords and its title colon, and a yearl
 
 const GOV = (s: string): string => `GOVERNING CODES: ${s}`;
 /** "<code> <edition> sure|weak" per entry read: each code is checked alone against a VERIFIED
- *  profile recording it at another edition, where a sure reading blocks and a weak one is a callout. */
+ *  profile recording it at another edition, where a sure reading blocks and a weak one is a callout.
+ *  The profile's edition is LATER than any plan's (2099): a plan on a newer edition than a verified
+ *  profile only warns (#597), so only the older direction tells a sure reading from a weak one. */
 const readings = (text: string): string[] => read(text).codeBasis.map((b) => {
-  const f = get(findings(project({}), { ...VERIFIED_OR, adoptedCodes: [{ code: b.code, edition: "1999" }] }, [{ label: "Structural letter", text }]), BASIS);
+  const f = get(findings(project({}), { ...VERIFIED_OR, adoptedCodes: [{ code: b.code, edition: "2099" }] }, [{ label: "Structural letter", text }]), BASIS);
   return `${b.code} ${b.edition} ${f?.severity === "blocker" ? "sure" : "weak"}`;
 }).sort();
 
@@ -258,8 +260,10 @@ check("MUST-PASS: a correct LA package against a verified LABC 2023 raises no ba
   assert.equal(f, undefined, f?.message);
 });
 
-check("MUST-PASS: the five-code list against a verified IFC 2018 still blocks on the plan's IFC 2021 (the IFC was dropped)", () => {
-  const f = get(findings(project({}), { ...VERIFIED_OR, adoptedCodes: [{ code: "IFC", edition: "2018" }] }, [{ label: "Plan set", text: GOV(STOPWORD_ROWS[2][0]) }]), BASIS);
+// The profile is on a LATER IFC than the plan's 2021 (#597: a newer plan edition only warns), so a
+// blocker here still proves the IFC is read surely and compared, not dropped.
+check("MUST-PASS: the five-code list against a verified IFC 2024 still blocks on the plan's IFC 2021 (the IFC was dropped)", () => {
+  const f = get(findings(project({}), { ...VERIFIED_OR, adoptedCodes: [{ code: "IFC", edition: "2024" }] }, [{ label: "Plan set", text: GOV(STOPWORD_ROWS[2][0]) }]), BASIS);
   assert.equal(f?.severity, "blocker", f?.message ?? "no finding");
   assert.match(f!.message, /IFC 2021/);
 });
