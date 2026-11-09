@@ -296,6 +296,13 @@ interface StageOptions {
     /** The click only CREATED A DRAFT (#302): nothing was filed, recordNumber is "", and the
      *  caller records the draft for the next stage to continue — never a submission. */
     draftCreated?: DraftCreatedObserved;
+    /** #569 — the page after the person's submit read as the completion (the adapter's judgement,
+     *  never the number's confidence): what lets the caller keep the confirmation screenshot below
+     *  when no number was read. */
+    completionConfirmed?: boolean;
+    /** #569 — that page's MASKED full-page screenshot (maskedFullPageScreenshot proved the mask), or
+     *  absent when none was kept. */
+    confirmationShotPath?: string;
   }) => void;
   // Track-scoped portal login URL (resolved server-side from portal_credentials/recipe/KB).
   // Lets platform adapters that host many tenants (PowerClerk: PGE, PacifiCorp…) land on
@@ -378,6 +385,11 @@ export async function armSubmitCapture(
           // chooseSubmittedRecord): its confidence, its best link, and the unsure candidates. Every
           // other adapter keeps the reading below.
           const chosen = data.recordRead as SubmitRecordRead | undefined;
+          // #569: the masked confirmation screenshot of a page the adapter judged the completion.
+          const shot = {
+            ...(data.completionConfirmed === true ? { completionConfirmed: true } : {}),
+            ...(typeof data.confirmationShotPath === "string" && data.confirmationShotPath ? { confirmationShotPath: data.confirmationShotPath } : {}),
+          };
           if (chosen && typeof chosen === "object" && typeof chosen.confidence === "string") {
             options.onSubmitCaptured?.({
               recordNumber: chosen.confidence === "high" ? String(chosen.recordNumber ?? "") : "",
@@ -386,6 +398,7 @@ export async function armSubmitCapture(
               reason: String(chosen.reason || capture.message),
               recordLink: String(chosen.recordLink ?? ""),
               ...(chosen.confidence !== "high" && chosen.candidates?.length ? { candidates: chosen.candidates } : {}),
+              ...shot,
             });
             return;
           }
@@ -610,6 +623,10 @@ async function runAdapter(
     // point at the folder, and at the one shot that shows how the filing ended.
     const evidenceDir = steps.map((s) => String(s?.data?.pageShotDir ?? "")).filter(Boolean).pop() ?? "";
     const outcomeShotPath = steps.map((s) => String(s?.data?.outcomeShotPath ?? "")).filter(Boolean).pop() ?? "";
+    // #569 — THE MASKED CONFIRMATION SCREENSHOT of the page the portal confirmed the approved filing
+    // on (only when the mask was proven), or why none was kept. The backend saves it to the project.
+    const confirmationShotPath = finalSubmitClicked ? steps.map((s) => String(s?.data?.confirmationShotPath ?? "")).filter(Boolean).pop() ?? "" : "";
+    const confirmationShotRefused = finalSubmitClicked ? steps.map((s) => String(s?.data?.confirmationShotRefused ?? "")).filter(Boolean).pop() ?? "" : "";
     // This address already had an unsubmitted draft on the portal (#302): carried up for the caller.
     const existingDraft = steps.map((s) => s?.data?.existingDraft).find((d) => d && typeof d === "object") ?? null;
     // THE REPLAY CLICKED A KNOWN DRAFT-CREATING SUBMIT ITSELF (#330): the draft it made, for the
@@ -698,6 +715,8 @@ async function runAdapter(
       ...(replayStalled ? { replayStalled } : {}),
       evidenceDir,
       outcomeShotPath,
+      ...(confirmationShotPath ? { confirmationShotPath } : {}),
+      ...(confirmationShotRefused ? { confirmationShotRefused } : {}),
       ...(feeStop ? { feeStop } : {}),
       pauseReason: stepPause,
       internalFinalReviewPacketRequired: true,

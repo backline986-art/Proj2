@@ -3167,6 +3167,18 @@ const VERSIONED_MIGRATIONS: VersionedMigration[] = [
       `);
     },
   },
+  {
+    version: 64,
+    name: "submission_confirmation_document",
+    up: (db) => {
+      // THE CONFIRMATION SCREENSHOT OF A FILING (#569): the project document (doc_type
+      // submission_confirmation — the portal's own "submitted / your application number is …" page,
+      // secrets masked) that proves this submission went. '' = none kept. The track card and the
+      // filing record link it; GET /api/projects/:id/submissions/:submissionId/confirmation-screenshot
+      // serves only the document this column names, of the same project.
+      addColumnIfMissing(db, "submissions", "confirmation_document_id", "TEXT NOT NULL DEFAULT ''");
+    },
+  },
 ];
 
 /** v47 was edited in place while #218 was open (Helm's review at 0116f98a): a DB that ran an earlier

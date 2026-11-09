@@ -1175,6 +1175,13 @@ export class RecipeAdapter extends BasePortalAdapter {
   /** The one shot that says how the filing ended — the completion page with its record
    *  number, or the portal's refusal. Reported so the submission record can point at it. */
   private outcomeShotPath = "";
+  /** THE CONFIRMATION SCREENSHOT OF A FILING (#569): a full-page picture of the page the portal showed
+   *  after the filing went — the approved final submit the portal confirmed, or a person's own submit
+   *  in the hand-over window that read as the completion — with every known secret masked through
+   *  #588's maskedFullPageScreenshot (the one masking path). `path` is set ONLY when that call proved
+   *  the mask covered every secret (rule 2); otherwise `why` says why no picture was kept, and the
+   *  outcome shot stays the run's only picture. Taken, never clicked for (rule 1). */
+  private confirmationShot: { path: string; why: string } | null = null;
   /** THE FEE AT A fee_payment STOP (#576): amount, lines, masked shot and the page's link, read
    *  once, at the first fee stop. Carried on the step result (data.feeStop). Read only. */
   private feeStop: FeeStopReading | null = null;
@@ -2471,11 +2478,17 @@ export class RecipeAdapter extends BasePortalAdapter {
         const errorPage = /^chrome-error:/i.test(rawUrl);
         const read = errorPage ? null : await this.readPageForCapture();
         const judged = read ? this.judgeCompletion(read, this.lastCommittedClick?.at ?? 0) : { number: "", confirmed: false, stillReview: false };
+        // #569: A PAGE JUDGED THE COMPLETION OF THE PERSON'S OWN SUBMIT gets the masked confirmation
+        // screenshot — read only, after the read above (nothing is clicked). Never on the review page,
+        // an error page or a page that does not read as the completion.
+        const confirmed = judged.confirmed && !errorPage;
+        if (confirmed) await this.captureConfirmationShot("PERSON-SUBMITTED");
+        const shot = confirmed ? { ...this.confirmationShotData(), completionConfirmed: true } : {};
         if (judged.number) {
           const recordRead = await chooseRecord({ value: judged.number, confidence: "high", reason: `Captured submission confirmation: ${judged.number}.` });
           return ok(`Captured submission confirmation: ${judged.number}.`, {
             permitNumber: judged.number, confirmationNumber: judged.number,
-            discipline: judged.number.match(/-([A-Z]{2,4})$/)?.[1] ?? null, recordLink: recordRead.recordLink, recordRead,
+            discipline: judged.number.match(/-([A-Z]{2,4})$/)?.[1] ?? null, recordLink: recordRead.recordLink, recordRead, ...shot,
           });
         }
         if (judged.stillReview || errorPage) {
@@ -2499,7 +2512,7 @@ export class RecipeAdapter extends BasePortalAdapter {
           : listed.confidence === "low" && !listed.candidates.length ? { ...listed, reason: unread } : listed;
         return ok(
           recordRead.confidence === "high" ? `Submitted; ${recordRead.recordNumber} is the one new application in the account's list.` : unread,
-          { permitNumber: "", recordLink: recordRead.recordLink || cleanRecordLink(rawUrl), stillReview: false, errorPage: false, recordRead },
+          { permitNumber: "", recordLink: recordRead.recordLink || cleanRecordLink(rawUrl), stillReview: false, errorPage: false, recordRead, ...shot },
         );
       }
       // #448: this portal's own format (its account list's ids, the shapes confirmed on this recipe)
@@ -3783,6 +3796,7 @@ export class RecipeAdapter extends BasePortalAdapter {
         permitNumber: capture.data?.permitNumber || "",
         confirmationNumber: capture.data?.confirmationNumber || "",
         recordLink: capture.data?.recordLink || "",
+        ...this.confirmationShotData(),
         // What the LLM gap-fill added (and what it left blank for lack of real data) — same key
         // the hand-coded adapters surface, so the operator/UI sees a uniform report.
         gapFill: this.gapFillReport, healedSteps: this.healedSteps, driftWarnings: this.driftWarnings, agingNotes: this.agingNotes, slowSteps, requiredStillEmpty: this.requiredStillEmpty, unresolvedFields: this.unresolvedFields, fieldsVerified: this.fieldsVerified, fieldsUnverified: this.fieldsUnverified, requiredFieldsSeen: this.requiredFieldsSeen, stoppedAtPayment: this.stoppedAtPayment, pageShotDir: this.pageShotDir, outcomeShotPath: this.outcomeShotPath,
@@ -8069,6 +8083,9 @@ export class RecipeAdapter extends BasePortalAdapter {
       this.finalSubmitOutcome = outcome;
       if (outcome.verdict === "accepted") {
         await this.capturePageShot("SUBMITTED", true);
+        // #569: the portal confirmed it — the masked confirmation screenshot of that page. Only on
+        // "accepted": a refused or quiet page keeps the outcome shot alone and is never a confirmation.
+        await this.captureConfirmationShot("SUBMITTED");
         return true;
       }
       if (outcome.verdict === "rejected") {
@@ -9095,6 +9112,38 @@ export class RecipeAdapter extends BasePortalAdapter {
       await fs.promises.mkdir(this.pageShotDir, { recursive: true });
     }
     return this.pageShotDir;
+  }
+
+  /** #569 — THE CONFIRMATION SCREENSHOT: wait for the page to settle, then one masked full-page
+   *  picture through maskedFullPageScreenshot (#588's path, never a second one), with the run's known
+   *  secrets — the same set the fee stop and the staged review mask. Kept only on { ok: true }: a page
+   *  the mask cannot provably cover leaves no picture (the file is deleted there) and says why. Read
+   *  only: nothing is clicked, typed or navigated. Never throws. */
+  private async captureConfirmationShot(label: string): Promise<void> {
+    const page = this.page;
+    if (!page || typeof page.screenshot !== "function" || typeof page.evaluate !== "function") {
+      this.confirmationShot = { path: "", why: "no browser page to picture" };
+      return;
+    }
+    try {
+      await smartWait(page).catch(() => null);
+      const dir = await this.ensurePageShotDir();
+      const safe = String(label || "page").replace(/[^a-zA-Z0-9]+/g, "_").slice(0, 40) || "page";
+      const file = path.join(dir, `zzz-confirmation-${safe}.png`);
+      const secrets = Array.from(new Set([...secretValuesOf(this.fieldValues), String(this.fieldValues.accountNumber ?? ""), String(this.fieldValues.meterNumber ?? "")]
+        .map((v) => String(v ?? "").trim()).filter((v) => v.length >= 4)));
+      const m = await maskedFullPageScreenshot(page, secrets, file);
+      this.confirmationShot = m.ok ? { path: file, why: "" } : { path: "", why: m.why || "the secret mask could not be proven on this page" };
+    } catch (err) {
+      this.confirmationShot = { path: "", why: `the picture could not be taken (${err instanceof Error ? err.message.slice(0, 120) : String(err)})` };
+    }
+  }
+
+  /** #569 — the confirmation screenshot's fields for a step's data: the masked file, or why none. */
+  private confirmationShotData(): { confirmationShotPath?: string; confirmationShotRefused?: string } {
+    const c = this.confirmationShot;
+    if (!c) return {};
+    return c.path ? { confirmationShotPath: c.path } : { confirmationShotRefused: c.why };
   }
 
   private async capturePageShot(label: string, force = false): Promise<void> {

@@ -127,6 +127,7 @@ import { isPortalPaused } from "./portalPause";
 // imports repository, and the circular-import guard in CLAUDE.md is about that edge.
 import { ensureCheckTarget, refuseUtilityUrlOnPermitTarget, getSubmittalTracks, isTrackDone, requiredTracks, SUBMITTAL_TRACK_TYPES, trackHasFiling, trackPermitTypes, trackSubmittedAndTracked, trackSubmittedSentence, unfinishedTracks, unfinishedUnattributedTargets } from "./submittalTracks";
 import { recordStagedReview, supersedeStagedReviews, takeStagedReviewCapture } from "./stagedReviews";
+import { saveSubmissionConfirmation } from "./submissionConfirmation";
 import { projectSecretValues, projectSecretValuesById } from "./projectSecrets";
 import { lastUnreadableByTarget, scrubUnreadableReason, UNREADABLE_AUDIT_ACTION } from "./lastUnreadable";
 import { recordTimelineSample, trackForTarget } from "./timelineSamples";
@@ -9914,7 +9915,7 @@ export async function prepareSubmission(
   // OLDER staging row and the outcome below would overwrite the run's 'submitted' (live 2026-10-14,
   // Lincoln County: the filing went, the run read failed, the number was typed by hand). So a capture
   // that arrives first waits here, and is recorded right after the outcome, through the same door.
-  type SubmitCapture = { recordNumber: string; confidence: string; source?: string; reason: string; recordLink: string; candidates?: Array<{ recordNumber: string; recordLink: string; source: string }>; draftCreated?: ObservedDraft };
+  type SubmitCapture = { recordNumber: string; confidence: string; source?: string; reason: string; recordLink: string; candidates?: Array<{ recordNumber: string; recordLink: string; source: string }>; draftCreated?: ObservedDraft; completionConfirmed?: boolean; confirmationShotPath?: string };
   let runOutcomeRecorded = false;
   const capturesBeforeOutcome: SubmitCapture[] = [];
   const recordSubmitCapture = (capture: SubmitCapture): void => {
@@ -9954,6 +9955,16 @@ export async function prepareSubmission(
         const held = recordSubmitCaptureCandidates(db, runId, capture.candidates ?? [], capture.reason);
         addAuditLog(db, projectId, "portal_bot", "submit capture", "submission.record_number_unread", {
           track, reason: capture.reason.slice(0, 200), candidates: held,
+        });
+      }
+      // #569 — THE PERSON'S FILING FROM THE REVIEW WINDOW, PICTURED: the masked screenshot of the page
+      // portal-bot judged the completion of their submit, filed on the project and linked from this
+      // run's filing record. Named by the number only when it was read confidently off that page —
+      // a candidate or an unread page is "no-number-read", never a number nobody read.
+      if (capture.completionConfirmed && capture.confirmationShotPath) {
+        saveSubmissionConfirmation(db, {
+          projectId, submissionId, track: track ?? "permit", runId, filedBy: "person", shotPath: capture.confirmationShotPath,
+          recordNumber: capture.confidence === "high" && capture.source !== "account_list" ? capture.recordNumber : "",
         });
       }
     } catch { /* capture is a convenience; it must never disturb the run */ }
@@ -10964,6 +10975,29 @@ export async function prepareSubmission(
           finalSubmitButtonAloneIsEnough: reviewerReport.finalSubmitGate.finalSubmitButtonAloneIsEnough,
         });
     });
+
+    // #569 — THE CONFIRMATION SCREENSHOT OF AN APPROVED FILING THE PORTAL CONFIRMED: portal-bot's
+    // masked picture of the completion page (kept only when the mask was proven), filed on the project
+    // as a submission_confirmation document named by the number read off that page, and linked from
+    // this filing record. A click the portal did not confirm keeps the outcome shot alone, and its
+    // record already says it could not be confirmed — no confirmation is claimed for it. After the
+    // transaction: a picture that cannot be filed never undoes the run's record.
+    if (clicked && acceptedFiling) {
+      const shotPath = String((result as Record<string, unknown>).confirmationShotPath ?? "").trim();
+      const refusedWhy = String((result as Record<string, unknown>).confirmationShotRefused ?? "").trim();
+      const saved = saveSubmissionConfirmation(db, {
+        projectId, submissionId, track: permitTypeTag, runId, filedBy: "automation", shotPath,
+        recordNumber: capturedPermitNumber || capturedConfirmation,
+      });
+      try {
+        db.run("UPDATE submissions SET notes = notes || ? WHERE id = ?", [
+          saved.documentId
+            ? " Confirmation screenshot (secrets masked) saved to the project's documents."
+            : ` No masked confirmation screenshot was kept (${(refusedWhy || saved.why).slice(0, 160)}); the completion page is the run's outcome shot.`,
+          submissionId,
+        ]);
+      } catch { /* the note is a convenience; the record above stands */ }
+    }
 
     // THE CLIENT HEARS WE FILED (#490) — only on a filing the portal CONFIRMED (acceptedFiling). A
     // click the portal did not confirm (submitted_unconfirmed) may not have filed, so it says nothing

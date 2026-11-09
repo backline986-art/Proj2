@@ -3,7 +3,7 @@ import type { AppDb } from "./db";
 import { filledFormsByDocType, formContradictsPath } from "./ahjForms";
 import { generatedDocFilesByType } from "./generatedDocFiles";
 import { resolvePermitPath } from "./permitPath";
-import { projectDocsByType } from "./projectDocuments";
+import { projectDocsByType, SUBMISSION_CONFIRMATION_DOC_TYPE } from "./projectDocuments";
 import { docDisciplineFor, docFitsTrack } from "./docDiscipline";
 // A deliberate import cycle: requiredDocuments imports this module's uploadedSubmissionDocuments /
 // duplicateUploads, and this module asks requiredDocuments's requiredListCheck which utility
@@ -94,6 +94,8 @@ export function duplicateUploads(docs: Record<string, string>): Array<{ docType:
 
 export function uploadedSubmissionDocuments(db: AppDb, project: ProjectRecord): Record<string, string> {
   const docs = projectDocsByType(db, project.id);
+  // A filing's confirmation screenshot (#569) is evidence that it went, never a document to upload.
+  delete docs[SUBMISSION_CONFIRMATION_DOC_TYPE];
   for (const dup of duplicateUploads(docs)) delete docs[dup.docType];
   const permitPath = resolvePermitPath(project).path;
   const rows = db.query<{ doc_type: string; stored_path: string; original_filename: string }>(

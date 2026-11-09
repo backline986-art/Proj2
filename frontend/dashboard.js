@@ -5448,6 +5448,15 @@ function trackCardHtml(t) {
     ? `<a href="${esc(t.trackingUrl)}" target="_blank" rel="noopener">status page ↗</a>`
     : "";
   const submitted = t.status !== "not_started" && t.status !== "staged";
+  // #569 — THE FILING'S CONFIRMATION SCREENSHOT beside its number: "Submitted: APP-112491 · confirmation
+  // screenshot". The number is the filing record's (read off the portal's page, or entered by a person);
+  // with none, the line says so — never a number nobody read. Only the server's own project route.
+  const conf = t.confirmation && typeof t.confirmation === "object" && /^\/api\/projects\//.test(String(t.confirmation.url || "")) ? t.confirmation : null;
+  const confirmationLine = conf
+    ? `<p style="margin:0 0 4px" data-track-confirmation="${esc(t.type)}">${conf.recordNumber
+      ? `Submitted: <strong>${esc(conf.recordNumber)}</strong>`
+      : "Submitted — no number was read off the portal's page; enter it below"} &nbsp;·&nbsp; <a href="${esc(conf.url)}" target="_blank" rel="noopener" title="The portal's confirmation page, account and meter numbers masked">confirmation screenshot</a></p>`
+    : "";
   const fieldsHtml = (t.captureFields || []).map((f) =>
     `<label class="track-field"><span>${esc(f.label)}</span><input data-track-field="${esc(f.key)}" data-track="${esc(t.type)}" placeholder="${esc(f.placeholder)}" value="${esc(t[f.key] || "")}" /></label>`,
   ).join("");
@@ -5530,6 +5539,7 @@ function trackCardHtml(t) {
     ${trackPaymentHtml(t)}
     ${trackFeeDueHtml(t)}
     ${trackStageGapsHtml(t)}
+    ${confirmationLine}
     ${captured ? `<p style="margin:0 0 4px">${captured} ${trackLink ? "&nbsp;·&nbsp; " + trackLink : ""}</p>` : (trackLink ? `<p style="margin:0 0 4px">${trackLink}</p>` : "")}
     ${t.recipeId && (t.recipeStatus === "complete" || t.recipeStatus === "recording")
       && !screenshotMisses.has(screenshotKey(state.selectedProjectId, t.recipeId, t.recipeStatus))

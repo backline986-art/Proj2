@@ -26,6 +26,7 @@ import type {
   SubmittalTrackType,
 } from "../../shared/src/types";
 import { latestStagedReview, stagedReviewView } from "./stagedReviews";
+import { trackConfirmationView, type TrackConfirmationView } from "./submissionConfirmation";
 import { findApplicationProfile, describePermitType, permitStructureAnswer, permitStructureIsCitedOrVerified, type PermitPrerequisiteStep, type PermitStructureAnswer } from "./applicationDocs";
 import { findAhjProcessProfile, jurisdictionKind, jurisdictionKindsCompatible } from "./processProfiles";
 import { findAnyRecipeForProject, findCompleteRecipeForProject } from "./portalRecipes";
@@ -111,6 +112,9 @@ export interface SubmittalTrackView extends SubmittalTrack {
   /** #436 ruling 5 — why Stage (and Approve & auto-submit) is refused on this track: it is already
    *  submitted and tracked (trackSubmittedAndTracked). Absent when Stage may run. */
   stageBlocked?: string;
+  /** #569 — the newest filing of this track that keeps a confirmation screenshot (masked): the card's
+   *  "Submitted: <number> · confirmation screenshot". Absent when none was kept. */
+  confirmation?: TrackConfirmationView;
 }
 
 /** Every submittal track, derived from the label Record so it cannot go stale: adding a
@@ -1051,6 +1055,8 @@ export function getSubmittalTracks(db: AppDb, project: ProjectRecord): Submittal
     // WAITING ON PAYMENT (#576): the newest staging run of this track stopped on a fee. The card's
     // portal is its own (rule 5 — the same filtered URL shown above); a link elsewhere is never shown.
     const payment = status === "issued" ? null : trackPaymentView(db, project, type, family, (recipeRow ? s(recipeRow.portal_url) : undefined) || kbPortalUrl);
+    // #569: the filing's confirmation screenshot, on the card beside the number (a read).
+    const confirmation = trackConfirmationView(db, project.id, family);
     // A FEE DUE (#576 item 4): the one answer nextStep's fee_due reads too (feeDue.ts). Paid clears it.
     const feeAsk = status === "issued" || payment ? null : trackFeeDue(db, project.id, type, required);
     const feeDue = feeAsk
@@ -1112,6 +1118,7 @@ export function getSubmittalTracks(db: AppDb, project: ProjectRecord): Submittal
       // #436 PR1: the staged draft's review (NEM, while staged), and ruling 5's Stage block.
       ...(type === "nem" && status === "staged" ? { stagedReview: stagedReviewViewFor(db, project.id) } : {}),
       ...(stageBlocked ? { stageBlocked } : {}),
+      ...(confirmation ? { confirmation } : {}),
     };
   });
 }

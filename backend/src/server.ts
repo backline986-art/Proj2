@@ -172,6 +172,7 @@ import { createSignatureRequestApproval } from "./signatureRequestApproval";
 import { confirmSignatureRequestSent } from "./signatureTrack";
 import { getSubmittalTracks, markTrackSubmitted, requiredTracks, trackSubmittedAndTracked, trackSubmittedSentence } from "./submittalTracks";
 import { stagedReviewScreenshotFile } from "./stagedReviews";
+import { submissionConfirmationFile } from "./submissionConfirmation";
 import { buildApprovalSheet } from "./approvalSheet";
 import { getPermitProcessLookup, projectForTrack, verifyPermitProcessLookup } from "./permitProcess";
 import { ahjProcessKnowledgeStatus, AHJ_PROCESS_REFERENCE_ENV } from "./processProfiles";
@@ -3847,6 +3848,20 @@ app.get("/api/projects/:id/staged-reviews/:runId/screenshot", (req, res) => {
   const file = stagedReviewScreenshotFile(db, String(req.params.id), String(req.params.runId));
   if (!file) throw new HttpError(404, "No staged review picture for this project's run.");
   res.setHeader("Content-Type", "image/png");
+  res.setHeader("Cache-Control", "no-store");
+  res.sendFile(file);
+});
+
+// #569 — A FILING'S CONFIRMATION SCREENSHOT (the portal's "submitted / your application number is …"
+// page, every known secret masked). Serves ONLY the submission_confirmation document the submission row
+// names, of THIS project (submissionConfirmation.submissionConfirmationFile) — never the run's unmasked
+// outcome shot. Under /api/projects/:id, so the scope guard covers it (rule 6); another project's
+// submission, or none, is a 404.
+app.get("/api/projects/:id/submissions/:submissionId/confirmation-screenshot", (req, res) => {
+  const file = submissionConfirmationFile(db, String(req.params.id), String(req.params.submissionId));
+  if (!file) throw new HttpError(404, "No confirmation screenshot for this project's filing.");
+  res.setHeader("Content-Type", "image/png");
+  res.setHeader("X-Content-Type-Options", "nosniff");
   res.setHeader("Cache-Control", "no-store");
   res.sendFile(file);
 });
