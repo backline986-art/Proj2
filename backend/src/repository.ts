@@ -1515,6 +1515,9 @@ export function deleteProject(db: AppDb, projectId: string): { deleted: true; pr
     db.run("DELETE FROM filing_metrics WHERE project_id = ?", [projectId]);
     // A person's confirmation of the structural letter (migration v47) is bound to a document here.
     db.run("DELETE FROM structural_letter_confirmations WHERE project_id = ?", [projectId]);
+    // A person's reviewer-blocker overrides (migration v65, #640) carry the same FK. "Rows are never
+    // deleted" is about withdraw and re-override; deleting the project takes them with it.
+    db.run("DELETE FROM reviewer_blocker_overrides WHERE project_id = ?", [projectId]);
     db.run("DELETE FROM project_documents WHERE project_id = ?", [projectId]);
     db.run("DELETE FROM project_intake_requests WHERE project_id = ?", [projectId]);
     db.run("DELETE FROM submission_payments WHERE project_id = ?", [projectId]);
@@ -9544,17 +9547,26 @@ export async function prepareSubmission(
   // and applies again after a field was edited back. createRunApproval recorded which overrides were
   // releasing a blocker at the click; a blocker an override releases now is "released then" only when
   // THAT override id is on the list (or vision relaxed the finding then). Anything else is named
-  // (overriddenSinceApproval) and the run stops at review. For the vision comparison, "released then"
-  // is either fold: the approver saw a callout whichever one released it.
+  // (overriddenSinceApproval) and the run stops at review.
+  //
+  // For the VISION comparison, a finding vision relaxes now but did not relax then is exempt only
+  // when the override on the approval's list STILL releases it: in the as-approved read (vision as of
+  // the click; overrides recorded before it, unwithdrawn, and valid against the current finding and
+  // plan set) that same override id releases that finding. An override that was in force at the click
+  // but has since been withdrawn or voided (a field edit, a replaced plan set) exempts nothing, so a
+  // verdict cached after the approval cannot be what lets the run file (#226) — it is named
+  // (relaxedSinceApproval) and the run stops at review.
   const { relaxedSinceApproval, overriddenSinceApproval } = claimedApproval && (visionRelaxed.length > 0 || overrideRelaxed.length > 0)
     ? (() => {
       const asApproved = reviewerGateReportFor(db, detail.project, { verdictsWrittenBefore: claimedApproval.createdAt || "" });
       const visionRelaxedThen = new Set(visionRelaxedBlockers(asApproved).map((finding) => finding.id));
       const overridesThen = new Set(claimedApproval.releasedOverrides.map((r) => r.overrideId));
-      const overriddenFindingsThen = new Set(claimedApproval.releasedOverrides.map((r) => r.findingId));
+      const stillReleasedByListedOverride = new Set(overriddenBlockers(asApproved)
+        .filter((finding) => overridesThen.has(finding.override?.id ?? ""))
+        .map((finding) => finding.id));
       return {
         relaxedSinceApproval: visionRelaxed.map((finding) => finding.id)
-          .filter((findingId) => !visionRelaxedThen.has(findingId) && !overriddenFindingsThen.has(findingId)),
+          .filter((findingId) => !visionRelaxedThen.has(findingId) && !stillReleasedByListedOverride.has(findingId)),
         overriddenSinceApproval: overrideRelaxed
           .filter((finding) => !visionRelaxedThen.has(finding.id) && !overridesThen.has(finding.override?.id ?? ""))
           .map((finding) => finding.id),

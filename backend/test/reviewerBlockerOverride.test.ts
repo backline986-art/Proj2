@@ -22,6 +22,10 @@
 //       MUST-STOP    REVIVAL: an override VOID at the approval (a field edit changed the finding, so the
 //                    approver saw the blocker) that applies again after the field is edited back — that
 //                    run does not file either, and only the revived finding is named.
+//       MUST-STOP    an override in force at the click but WITHDRAWN (or void on a replaced plan set)
+//                    since, then a vision verdict cached after the approval relaxes the same findings:
+//                    the run does not file; the verdict is named.
+//       MUST-PASS    the same, with the override still standing: the run files (no false stop).
 //       MUST-PASS    the same override recorded BEFORE the approval: the run is allowed.
 //   (c) MUST-EXCLUDE a replaced plan set (new PDF bytes) voids it: the blocker blocks again and says why.
 //                    So does an edit that changes the finding's own content (the DC size it computed).
@@ -32,7 +36,8 @@
 //                    them even from a tampered row; an empty reason is refused; only a current blocker can
 //                    be overridden; a stale or missing page token (seenAs) is refused.
 //   (f)              withdraw restores the blocker; override and withdraw are audited; reads write nothing
-//                    (a write trap over standing AND void overrides).
+//                    (a write trap over standing AND void overrides); deleting the project takes its
+//                    override rows with it (the FK on projects would otherwise refuse the delete).
 //
 // Run: npx tsx backend/test/reviewerBlockerOverride.test.ts
 import "./_isolate"; // FIRST: generated files land in a temp cwd, never the repo's backend/data
@@ -50,7 +55,7 @@ const { reviewerBlockerList, reviewerBlockersFor } = await import("../src/nextSt
 const { readCorrectionNotice } = await import("../src/correctionNotice");
 const { runAutopilotApproval } = await import("../src/autopilot");
 const { findingHoldScope, scopeHoldsTrack } = await import("../src/gateScope");
-const { planSetIdentity } = await import("../src/reviewerVision");
+const { planSetIdentity, applyVisionToReviewerReport } = await import("../src/reviewerVision");
 const { computeNextStep } = await import("../src/nextStep");
 
 const RSD = "city.elec.rapid-shutdown-missing"; // electrical, permit-only scope (gateScope ELECTRICAL_PERMIT_ONLY)
@@ -301,6 +306,64 @@ await check("(b) MUST-STOP revival across an approval: an override VOID at the c
   assert.deepEqual(rows[0].recordedAfterApproval, [DC], "only the revived finding should be named; the others were in force at the click");
 });
 
+// AN OVERRIDE ON THE APPROVAL'S LIST SHIELDS A LATER VISION VERDICT ONLY WHILE IT STILL STANDS (#226).
+// The override released every blocker at the click; then it stops releasing (withdrawn, or void on a
+// replaced plan set), and a stage_step caches vision verdicts AFTER the approval that relax the same
+// findings. The approver never saw that verdict: the run stops at review, naming it as a vision verdict.
+/** The vision pass a stage_step runs (approvalGateSnapshot.test's): present/high for every question. */
+const fakeVision = {
+  async visionExtract(input: { prompt: string }): Promise<Record<string, unknown>> {
+    if (/Read the DIMENSIONS/.test(input.prompt)) return { confidence: "low" };
+    return { present: true, confidence: "high", observed: "synthetic sheet shows the item", missing: "" };
+  },
+} as never;
+async function visionPassAfter(projectId: string): Promise<string[]> {
+  await applyVisionToReviewerReport(db, fakeVision, repo.buildReviewerReportFor(db, repo.getProjectDetail(db, projectId).project));
+  const g = gate(projectId);
+  assert.deepEqual(blockersOf(g), [], "setup: the vision verdicts left a blocker");
+  return g.findings.filter((f) => f.visionRelaxedFrom === "blocker").map((f) => f.id).sort();
+}
+const OVERRIDE_STOPS_SHIELDING: Array<[string, (projectId: string) => Promise<void>]> = [
+  ["withdrawn", async (projectId) => { for (const fid of blockersOf(repo.buildReviewerReportFor(db, repo.getProjectDetail(db, projectId).project))) ov.withdrawReviewerBlockerOverride(db, projectId, fid, PERSON); }],
+  ["void on a replaced plan set", async (projectId) => { await attachPlanSet(projectId, "REVISION 2 - E-1 UPDATED"); }],
+];
+for (const [how, stopShielding] of OVERRIDE_STOPS_SHIELDING) {
+  await check(`(b) MUST-STOP an override in force at the click but ${how} since: a vision verdict cached after the approval does not let the run file`, async () => {
+    const projectId = await projectWith(RSD_BLOCKER);
+    const blockers = blockersOf(gate(projectId));
+    for (const fid of blockers) await override(projectId, fid);
+    assert.deepEqual(blockersOf(gate(projectId)), [], "setup: the overrides did not release every blocker");
+    await tick();
+    const approval = approve(projectId);
+    const listed = db.get<{ released_overrides_json: string }>("SELECT released_overrides_json FROM portal_run_approvals WHERE id = ?", [approval.id])!;
+    assert.deepEqual((JSON.parse(listed.released_overrides_json) as Array<{ findingId: string }>).map((r) => r.findingId).sort(), blockers,
+      "setup: the approval did not list every override in force at the click — this proves nothing");
+    await tick();
+    await stopShielding(projectId);
+    assert.deepEqual(blockersOf(gate(projectId)), blockers, `setup: the ${how} overrides still release a blocker`);
+    await tick();
+    const relaxedNow = await visionPassAfter(projectId);
+    assert.ok(relaxedNow.length > 0 && relaxedNow.every((fid) => blockers.includes(fid)), `setup: vision relaxed ${relaxedNow.join(", ")}`);
+    const seen = await stage(projectId, { approvalId: approval.id, final: true });
+    assert.equal(seen.autoSubmit, false, `ESCAPE: a vision verdict cached AFTER the approval let the run file, because a since-${how} override was on the approval's list`);
+    const declined = auditsFor("portal.auto_submit_declined", projectId);
+    assert.equal(declined.length, 1, "no decline was recorded");
+    assert.match((declined[0].reasons as string[]).join(" | "), new RegExp(`vision verdict cached after the approval relaxed .*${RSD.replace(/\./g, "\\.")}`));
+  });
+}
+
+await check("(b) MUST-PASS an override in force at the click that STILL stands: a vision verdict cached after the approval does not stop the run", async () => {
+  const projectId = await projectWith(RSD_BLOCKER);
+  for (const fid of blockersOf(gate(projectId))) await override(projectId, fid);
+  await tick();
+  const approval = approve(projectId);
+  await tick();
+  assert.ok((await visionPassAfter(projectId)).includes(RSD), "setup: the vision pass did not relax RSD");
+  const seen = await stage(projectId, { approvalId: approval.id, final: true });
+  assert.equal(seen.autoSubmit, true, "the approver saw these findings released by a standing override, yet the run was stopped — a false stop");
+  assert.equal(auditsFor("portal.auto_submit_declined", projectId).length, 0);
+});
+
 await check("(b) MUST-PASS the same override recorded BEFORE the approval → the run is allowed", async () => {
   const projectId = await projectWith(RSD_BLOCKER);
   for (const fid of blockersOf(gate(projectId))) await override(projectId, fid);
@@ -519,6 +582,19 @@ await check("(f) withdraw restores the blocker; override and withdraw are both i
   await override(aId, RSD, "Second look: device confirmed on the revised cut sheet");
   assert.equal(db.get<{ n: number }>("SELECT COUNT(*) AS n FROM reviewer_blocker_overrides WHERE project_id = ? AND finding_id = ?", [aId, RSD])!.n, 2);
   assert.equal(findingIn(gate(aId), RSD)?.severity, "callout");
+});
+
+await check("(f) deleting a project with override rows (standing and withdrawn) succeeds and takes them with it", async () => {
+  const projectId = await projectWith(RSD_BLOCKER);
+  await override(projectId, RSD);
+  ov.withdrawReviewerBlockerOverride(db, projectId, RSD, PERSON);
+  await override(projectId, RSD, "Second look: device confirmed on the revised cut sheet");
+  const count = () => db.get<{ n: number }>("SELECT COUNT(*) AS n FROM reviewer_blocker_overrides WHERE project_id = ?", [projectId])!.n;
+  assert.equal(count(), 2, "setup: expected a withdrawn and a standing override row");
+  const err = await statusOf(() => repo.deleteProject(db, projectId));
+  assert.equal(err, null, `deleteProject failed on a project with overrides: ${err?.message}`);
+  assert.equal(count(), 0, "the project's override rows outlived it");
+  assert.ok(!db.get("SELECT 1 FROM projects WHERE id = ?", [projectId]), "the project was not deleted");
 });
 
 finish("reviewerBlockerOverride");
