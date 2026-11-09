@@ -5066,23 +5066,9 @@ async function updatePortalLoginsSummary() {
   let creds = [];
   try { creds = (await api(`/api/clients/${client.id}/portal-credentials`)).credentials || []; }
   catch { summary.textContent = ""; return; }
-  let total = 0, ready = 0; const seen = new Set();
-  for (const t of tracks) {
-    const url = t.recipePortalUrl || ""; let host = "";
-    try { host = url ? new URL(url).hostname.toLowerCase() : ""; } catch { /* ignore */ }
-    const slug = plPortalSlug(t.channel || t.label || t.type);
-    const key = host || slug;
-    if (seen.has(key)) continue; seen.add(key);
-    total++;
-    const matched = creds.some((c) => {
-      if (host && c.portalUrl) { try { if (new URL(c.portalUrl).hostname.toLowerCase() === host) return true; } catch { /* continue */ } }
-      const ct = (c.portalType || "").toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "");
-      if (ct && ct === slug) return true;
-      if (ct && slug && (ct.includes(slug.slice(0, 10)) || slug.includes(ct.slice(0, 10)))) return true;
-      return false;
-    });
-    if (matched) ready++;
-  }
+  // The same reading as the modal's chips (plProjectPortals), so the two counts never disagree.
+  const portals = plProjectPortals(tracks, creds).portals;
+  const total = portals.length, ready = portals.filter((p) => p.matched).length;
   summary.textContent = total ? `${ready}/${total} portal logins saved` : (creds.length ? `${creds.length} saved` : "");
   if (ready < total) summary.style.color = "var(--warn, #b45309)";
   else summary.style.color = "var(--ok, #16a34a)";
@@ -5168,6 +5154,8 @@ const OFF_TOOL_CHANNEL = {
   in_person: { title: "IN-PERSON SUBMISSION", what: "This jurisdiction does not take this filing online. The bot prepares and fills the packet; a person must deliver it at the counter — outside this tool." },
   email: { title: "EMAIL SUBMISSION", what: "This filing is sent by email, not through a portal. The bot prepares and fills the packet; a person must email it — outside this tool — then record the confirmation here." },
   mail: { title: "SUBMISSION BY MAIL", what: "This filing is mailed. The bot prepares and fills the packet; a person must print and mail it — outside this tool." },
+  // #664 (NEM only): a person verified that the utility takes its application inside the permit application.
+  with_permit: { title: "FILED WITH THE PERMIT", what: "This utility takes its interconnection application inside the AHJ permit application. There is no separate utility filing: its documents go in the permit packet, this track follows the permit, and after approval a person calls the utility to set the meter." },
 };
 function offToolChannelHtml(t) {
   const k = OFF_TOOL_CHANNEL[t.channelKind];
@@ -5382,7 +5370,12 @@ function trackFeeDueHtml(t) {
       </div>`
     : "";
   const paid = Array.isArray(t && t.paid) && t.paid.length
-    ? `<p class="muted" style="margin:0 0 4px;font-size:11px" data-track-paid-list="${esc(t.type)}">Paid: ${t.paid.map((p) => `${esc(money(p.amountUsd))} (${esc(p.kind === "filing" ? "filing fee" : "fee")}, ${esc(p.recordNumber)}, ${esc(String(p.paidAt || "").slice(0, 10))}${p.paidBy ? `, ${esc(p.paidBy)}` : ""})`).join("; ")}</p>`
+    ? `<p class="muted" style="margin:0 0 4px;font-size:11px" data-track-paid-list="${esc(t.type)}">Paid: ${t.paid.map((p) => `${esc(money(p.amountUsd))} (${esc(p.kind === "filing" ? "filing fee" : "fee")}, ${esc(p.recordNumber)}, ${esc(String(p.paidAt || "").slice(0, 10))}${p.paidBy ? `, ${esc(p.paidBy)}` : ""})${
+      // #665: the filing's MASKED confirmation screenshot, one click from the fee record. Only the
+      // server's own project route — never a file path or a run's unmasked outcome shot.
+      /^\/api\/projects\/[^/]+\/submissions\/[^/]+\/confirmation-screenshot$/.test(String(p.confirmationUrl || ""))
+        ? ` · <a href="${esc(p.confirmationUrl)}" target="_blank" rel="noopener" data-track-paid-confirmation="${esc(t.type)}" title="The portal's confirmation page for this filing, account and meter numbers masked">confirmation screenshot</a>`
+        : ""}`).join("; ")}</p>`
     : "";
   return due + paid;
 }
@@ -5435,6 +5428,116 @@ function openStageGap(where, key) {
     return;
   }
   reveal($(STAGE_GAP_PROJECT_INPUT[key] || "") || $("manualEntryForm"));
+}
+
+// FILING BY EMAIL (#667 / #672). The track's authority (its utility, or the issuer of this permit) may
+// take applications by email. A NAMED PERSON records and verifies the address with the authority's own
+// page and the words on it that contain the address (PUT /filing-email: the server names the signed-in
+// person; with sign-in off, the name the person types — never one the screen fills in). The staged
+// drafts are listed and a draft downloads as an .eml for the person to send from their own mail client,
+// then "I submitted it" records the filing. THIS SCREEN NEVER SENDS: no route it calls reaches SMTP.
+// Automation sends only inside an approved staging run, behind the one final-submit gate
+// (portalSafety.finalSubmitRefusals, channel "email") with FILING_EMAIL_ALLOW_SEND=1 on the server.
+const FILING_EMAIL_STATUS_TEXT = {
+  draft: "draft — download it and send it yourself",
+  superseded: "superseded by a newer draft",
+  sending: "sending started and did not finish — check the filings mailbox's Sent folder before anything else",
+  sent: "sent by automation after a named approval",
+  failed: "send failed — it was not retried; send the draft yourself if it did not go",
+};
+function filingEmailPanelHtml(type, data, projectId) {
+  const d = data && typeof data === "object" ? data : {};
+  const a = d.authority && typeof d.authority === "object" ? d.authority : null;
+  if (!a) {
+    return `<p class="muted" style="font-size:12px" data-filing-email-none="${esc(type)}">This project names no ${type === "nem" ? "utility" : "issuing agency"} for this track, so no filing email can be recorded.</p>`;
+  }
+  const r = d.record && typeof d.record === "object" ? d.record : null;
+  const problems = Array.isArray(d.problems) ? d.problems : [];
+  const src = r ? httpUrl(r.sourceUrl) : "";
+  const recordHtml = r
+    ? `<p style="margin:0 0 4px" data-filing-email-record="${esc(type)}">${esc(a.name)} takes applications by email at <strong>${esc(r.address)}</strong>
+        — verified by ${esc(r.verifiedBy || "nobody")}${r.verifiedAt ? ` on ${esc(String(r.verifiedAt).slice(0, 10))}` : ""}${src ? `, per <a href="${esc(src)}" target="_blank" rel="noopener">${esc(portalHostname(src) || src)}</a>` : ""}.</p>
+       ${r.quote ? `<p class="muted" style="margin:0 0 4px;font-size:11px">“${esc(r.quote)}”</p>` : ""}
+       ${d.usable
+        ? `<p class="muted" style="margin:0 0 4px;font-size:11px" data-filing-email-usable="${esc(type)}">This track files by email: staging makes a draft for you to send. Automation sends only after Approve &amp; auto-submit, with FILING_EMAIL_ALLOW_SEND=1 on the server.</p>`
+        : `<div class="submit-gate-check warning" style="margin:0 0 4px;font-size:12px" data-filing-email-problems="${esc(type)}"><strong>Not usable:</strong><ul style="margin:2px 0 0 18px;padding:0">${problems.map((p) => `<li>${esc(p)}</li>`).join("")}</ul></div>`}
+       <button type="button" class="ghost" data-filing-email-withdraw="${esc(type)}" title="Withdraw this address: the track files on its portal again"><i data-lucide="x"></i><span>Withdraw</span></button>`
+    : `<p class="muted" style="margin:0 0 4px;font-size:12px" data-filing-email-empty="${esc(type)}">No filing email is on file for ${esc(a.name)}. If ${esc(a.name)} takes applications by email, record the address from its own page.</p>`;
+  const form = `<div class="track-filing-email-form" style="display:flex;flex-wrap:wrap;gap:6px;align-items:flex-end;margin:6px 0" data-filing-email-form="${esc(type)}">
+      <label class="track-field"><span>Application email address</span><input data-filing-email-field="address" data-track="${esc(type)}" placeholder="as the authority's page shows it" /></label>
+      <label class="track-field"><span>The authority's page (https://…)</span><input data-filing-email-field="sourceUrl" data-track="${esc(type)}" placeholder="where you read it" /></label>
+      <label class="track-field" style="flex:1 1 100%"><span>The page's own words, containing the address</span><input data-filing-email-field="quote" data-track="${esc(type)}" placeholder="copy the sentence from the page" /></label>
+      <label class="track-field"><span>Your name (only when sign-in is off)</span><input data-filing-email-field="verifiedBy" data-track="${esc(type)}" placeholder="" /></label>
+      <button type="button" class="secondary" data-filing-email-save="${esc(type)}" title="You checked the authority's page: it takes applications by email at this address. Recorded under your name."><i data-lucide="badge-check"></i><span>I verified this address</span></button>
+    </div>`;
+  const sends = Array.isArray(d.sends) ? d.sends : [];
+  const sendsHtml = sends.length
+    ? `<ul style="margin:4px 0 0 18px;padding:0;font-size:12px" data-filing-email-sends="${esc(type)}">${sends.map((x) => {
+        const status = String(x.status || "");
+        const downloadable = (status === "draft" || status === "failed") && projectId && x.id;
+        const refusals = Array.isArray(x.refusals) ? x.refusals : [];
+        return `<li data-filing-email-row="${esc(x.id)}" data-filing-email-status="${esc(status)}">
+          <strong>${esc(FILING_EMAIL_STATUS_TEXT[status] || status)}</strong> · to ${esc(x.recipient)} · ${esc(String(x.createdAt || "").slice(0, 16).replace("T", " "))}
+          ${Array.isArray(x.attachments) ? ` · ${x.attachments.length} attachment(s)` : ""}
+          ${downloadable ? ` · <a href="/api/projects/${encodeURIComponent(projectId)}/filing-email/drafts/${encodeURIComponent(x.id)}/eml" data-filing-email-download="${esc(x.id)}" title="Opens as a draft in your mail client. Send it yourself, then record the filing with “I submitted it”.">download .eml</a>` : ""}
+          ${x.subject ? `<br><span class="muted">${esc(x.subject)}</span>` : ""}
+          ${refusals.length ? `<br><span class="muted">Not sent automatically: ${esc(refusals.join("; "))}</span>` : ""}
+          ${x.detail ? `<br><span class="muted">${esc(x.detail)}</span>` : ""}
+        </li>`;
+      }).join("")}</ul>`
+    : `<p class="muted" style="margin:4px 0 0;font-size:12px">No filing email staged for this track yet.</p>`;
+  return `<div data-filing-email-panel="${esc(type)}" style="font-size:12px">${recordHtml}${form}<p style="margin:6px 0 0"><strong>Staged emails</strong></p>${sendsHtml}</div>`;
+}
+
+async function loadFilingEmailPanel(type, body) {
+  if (!state.selectedProjectId || !type || !body) return;
+  const projectId = state.selectedProjectId;
+  try {
+    const data = await api(`/api/projects/${projectId}/filing-email?track=${encodeURIComponent(type)}`);
+    body.innerHTML = filingEmailPanelHtml(type, data, projectId);
+  } catch (err) {
+    body.innerHTML = `<p class="muted" style="font-size:12px">Could not load the filing email: ${esc(err.message || "error")}</p>`;
+    return;
+  }
+  if (window.lucide && window.lucide.createIcons) window.lucide.createIcons();
+  const save = body.querySelector("button[data-filing-email-save]");
+  if (save) save.addEventListener("click", () => saveFilingEmail(type, body, save));
+  const withdraw = body.querySelector("button[data-filing-email-withdraw]");
+  if (withdraw) withdraw.addEventListener("click", () => withdrawFilingEmail(type, body, withdraw));
+}
+
+async function saveFilingEmail(type, body, btn) {
+  const field = (name) => String(body.querySelector(`[data-filing-email-field="${name}"]`)?.value || "").trim();
+  const payload = { track: type, address: field("address"), sourceUrl: field("sourceUrl"), quote: field("quote") };
+  // The person's own name, only as typed (the server ignores it when sign-in is on). Never filled in.
+  const typed = field("verifiedBy");
+  if (typed) payload.verifiedBy = typed;
+  if (btn) btn.disabled = true;
+  try {
+    await api(`/api/projects/${state.selectedProjectId}/filing-email`, { method: "PUT", body: JSON.stringify(payload) });
+    showMessage("Filing email verified and recorded under your name. This track now files by email.", "info");
+    await loadFilingEmailPanel(type, body);
+  } catch (err) {
+    if (btn) btn.disabled = false;
+    // The server's refusal as it is (a missing name, or each reason the address is not usable).
+    showMessage(err.message || "Could not record the filing email.", "error");
+  }
+}
+
+async function withdrawFilingEmail(type, body, btn) {
+  if (!confirm("Withdraw this filing email? The track goes back to filing on its portal. Drafts already staged stay listed.")) return;
+  const typed = String(body.querySelector('[data-filing-email-field="verifiedBy"]')?.value || "").trim();
+  if (btn) btn.disabled = true;
+  try {
+    await api(`/api/projects/${state.selectedProjectId}/filing-email?track=${encodeURIComponent(type)}`, {
+      method: "DELETE", body: JSON.stringify(typed ? { verifiedBy: typed } : {}),
+    });
+    showMessage("Filing email withdrawn.", "info");
+    await loadFilingEmailPanel(type, body);
+  } catch (err) {
+    if (btn) btn.disabled = false;
+    showMessage(err.message || "Could not withdraw the filing email.", "error");
+  }
 }
 
 function trackCardHtml(t) {
@@ -5569,6 +5672,10 @@ function trackCardHtml(t) {
     ${t.signatureRequest && t.signatureRequest.state ? `<p class="muted" style="font-size:12px;margin:4px 0" data-track-signature-state="${esc(t.signatureRequest.state)}">Signature step: ${esc(signatureStateText(t.signatureRequest))}</p>` : ""}
     ${recipeBlock}
     ${trackIssuerEditHtml(t)}
+    <details class="track-filing-email" data-filing-email="${esc(t.type)}">
+      <summary>Filing by email</summary>
+      <div data-filing-email-body="${esc(t.type)}"><p class="muted" style="font-size:12px">Loading…</p></div>
+    </details>
     <details class="track-submit"${t.status === "staged" || t.payment ? " open" : ""}>
       <summary>${submitted ? "Update numbers / status link" : "I submitted it → capture #"}</summary>
       <div class="track-submit-form">
@@ -5634,6 +5741,12 @@ function renderSubmittalTracks() {
 
   wrap.querySelectorAll("button[data-track-paid]").forEach((btn) => {
     btn.addEventListener("click", () => markTrackPaid(btn.dataset.trackPaid, btn));
+  });
+  // Filing by email (#672): loaded when a person opens it — a read; the panel never sends.
+  wrap.querySelectorAll("details[data-filing-email]").forEach((d) => {
+    d.addEventListener("toggle", () => {
+      if (d.open) loadFilingEmailPanel(d.dataset.filingEmail, d.querySelector("[data-filing-email-body]"));
+    });
   });
   wrap.querySelectorAll("button[data-track-submit]").forEach((btn) => {
     btn.addEventListener("click", () => markSubmittalTrack(btn.dataset.trackSubmit));
@@ -11214,9 +11327,94 @@ async function openPortalLogins() {
   if (status) status.textContent = "";
   $("pl_portalType").value = ""; $("pl_portalUrl").value = "";
   $("pl_username").value = ""; $("pl_password").value = "";
+  state.plShowAllLogins = false; // each opening starts on this project's logins only
   $("portalLoginsModal").hidden = false;
   if (window.lucide) window.lucide.createIcons();
   await renderPortalLogins();
+}
+
+// WHICH PORTALS, AND WHICH SAVED LOGINS, THE OPEN PROJECT NEEDS (owner, 2026-11-09: "just show
+// the ones needed to submit/missing for the portal we're working on"). The modal used to list every
+// login the client holds under the chips, so the two or three this job files with were buried among
+// every other portal the client ever used. The answer comes from the project's OWN tracks (their
+// recipe/KB portal URL and channel kind), never from a portal, utility or place name, so it holds
+// for any portal. Strictest reading where we cannot tell: tracks not loaded (or none) -> nothing is
+// hidden; a channel kind we don't know -> the portal still asks for a login. Only a track a person
+// files outside any portal (in person, email, mail) gets no chip. Everything else stays one click
+// away (plListHtml's toggle), and Delete works on every row either way.
+const PL_NO_LOGIN_CHANNELS = new Set(["in_person", "email", "mail"]);
+
+// Does this saved login fit this portal? The ONE match the chips, the list and the header summary
+// share (it used to be written out twice). Credential metadata only: never a secret.
+function plLoginFits(cred, portal) {
+  // 1. URL hostname match (most precise).
+  if (portal.host && cred.portalUrl) {
+    try { if (new URL(cred.portalUrl).hostname.toLowerCase() === portal.host) return true; } catch { /* continue */ }
+  }
+  // 2. portalType slug match: the chip pre-fills pl_portalType with the slug, so a
+  //    credential saved via this modal will have portalType === slug.
+  const ct = (cred.portalType || "").toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "");
+  if (ct && ct === portal.slug) return true;
+  // 3. Loose substring: handles minor slug variants (e.g. "accela" inside "accela_oregon").
+  if (ct && portal.slug && (ct.includes(portal.slug.slice(0, 10)) || portal.slug.includes(ct.slice(0, 10)))) return true;
+  return false;
+}
+
+// { known, portals: [{ label, url, slug, host, matched }] (missing logins first), used, others }.
+function plProjectPortals(tracks, creds) {
+  const all = Array.isArray(creds) ? creds : [];
+  const known = Array.isArray(tracks) && tracks.length > 0;
+  const portals = [];
+  const seen = new Set();
+  for (const t of known ? tracks : []) {
+    if (PL_NO_LOGIN_CHANNELS.has(t.channelKind)) continue;
+    const url = t.recipePortalUrl || "";
+    const slug = plPortalSlug(t.channel || t.label || t.type);
+    const key = (url || slug).toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    let host = ""; try { host = url ? new URL(url).hostname.toLowerCase() : ""; } catch { /* ignore */ }
+    const portal = { label: t.label || t.channel || t.type, url, slug, host, matched: false };
+    portal.matched = all.some((c) => plLoginFits(c, portal));
+    portals.push(portal);
+  }
+  // Missing first: that is what the operator opened the modal to fix. (Array sort is stable.)
+  portals.sort((a, b) => Number(a.matched) - Number(b.matched));
+  if (!known) return { known, portals, used: all.slice(), others: [] };
+  const used = all.filter((c) => portals.some((p) => plLoginFits(c, p)));
+  return { known, portals, used, others: all.filter((c) => !used.includes(c)) };
+}
+
+function plCredRowHtml(c) {
+  const name = portalDisplayName(c.portalType, c.portalUrl);
+  const host = portalHostname(c.portalUrl);
+  return `<div class="pl-cred-row">
+        <div>
+          <div class="pl-cred-meta"><strong>${esc(name)}</strong> · ${esc(c.usernameReference)} ${c.hasSecret ? "🔒" : ""}</div>
+          ${host && host !== name ? `<div class="pl-cred-url">${esc(host)}</div>` : ""}
+        </div>
+        <button type="button" class="danger-button danger-button-sm" data-pl-del="${esc(c.id)}">Delete</button>
+      </div>`;
+}
+
+// The list under the chips: this project's logins, then the client's other logins behind a toggle.
+function plListHtml(view, showAll, clientName) {
+  const empty = (text) => `<p class="muted" style="font-size:12px">${esc(text)}</p>`;
+  if (!view.known) {
+    return view.used.length ? view.used.map(plCredRowHtml).join("")
+      : empty("No saved logins yet. Pick a portal above to pre-fill, then enter the username and password.");
+  }
+  const parts = [view.used.length ? view.used.map(plCredRowHtml).join("")
+    : empty(view.portals.length
+      ? "No saved login fits this project's portals yet. Pick a portal above to pre-fill, then enter the username and password."
+      : "This project files outside any portal, so it needs no portal login.")];
+  const n = view.others.length;
+  if (n) {
+    parts.push(`<button type="button" class="ghost" data-pl-toggle="1" aria-expanded="${showAll ? "true" : "false"}" style="font-size:12px">
+      ${showAll ? "Hide" : "Show"} ${n} other saved login${n === 1 ? "" : "s"} for ${esc(clientName)}</button>`);
+    if (showAll) parts.push(view.others.map(plCredRowHtml).join(""));
+  }
+  return parts.join("");
 }
 
 async function renderPortalLogins() {
@@ -11227,52 +11425,23 @@ async function renderPortalLogins() {
   catch (err) { $("plStatus").textContent = err.message || "Could not load logins."; }
 
   // Quick-fill chips: one per portal this project actually files to (from its tracks).
-  const tracks = state.submittalTracks || [];
-  const chips = [];
-  const seen = new Set();
-  for (const t of tracks) {
-    const url = t.recipePortalUrl || "";
-    const label = t.label || t.channel || t.type;
-    const slug = plPortalSlug(t.channel || t.label || t.type);
-    const key = (url || slug).toLowerCase();
-    if (seen.has(key)) continue;
-    seen.add(key);
-    let host = ""; try { host = url ? new URL(url).hostname.toLowerCase() : ""; } catch { /* ignore */ }
-    const matched = creds.some((c) => {
-      // 1. URL hostname match (most precise).
-      if (host && c.portalUrl) {
-        try { if (new URL(c.portalUrl).hostname.toLowerCase() === host) return true; } catch { /* continue */ }
-      }
-      // 2. portalType slug match: the chip pre-fills pl_portalType with the slug, so a
-      //    credential saved via this modal will have portalType === slug.
-      const ct = (c.portalType || "").toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "");
-      if (ct && ct === slug) return true;
-      // 3. Loose substring: handles minor slug variants (e.g. "accela" inside "accela_oregon").
-      if (ct && slug && (ct.includes(slug.slice(0, 10)) || slug.includes(ct.slice(0, 10)))) return true;
-      return false;
-    });
-    chips.push(`<button type="button" class="pl-chip" data-pl-slug="${esc(slug)}" data-pl-url="${esc(url)}" data-has-secret="${matched ? 1 : 0}">
-      <i data-lucide="${matched ? "shield-check" : "key-round"}"></i>
-      <span>${esc(label)}</span>
-      <span class="pl-chip-state">${matched ? "login saved" : "needs login"}</span>
-    </button>`);
-  }
-  $("plPortalChips").innerHTML = chips.join("");
+  const view = plProjectPortals(state.submittalTracks, creds);
+  $("plPortalChips").innerHTML = view.portals.map((p) => `<button type="button" class="pl-chip" data-pl-slug="${esc(p.slug)}" data-pl-url="${esc(p.url)}" data-has-secret="${p.matched ? 1 : 0}">
+      <i data-lucide="${p.matched ? "shield-check" : "key-round"}"></i>
+      <span>${esc(p.label)}</span>
+      <span class="pl-chip-state">${p.matched ? "login saved" : "needs login"}</span>
+    </button>`).join("");
   $("plPortalChips").querySelectorAll("[data-pl-slug]").forEach((chip) => chip.addEventListener("click", () => {
     $("pl_portalType").value = chip.getAttribute("data-pl-slug");
     $("pl_portalUrl").value = chip.getAttribute("data-pl-url") || "";
     $("pl_username").focus();
   }));
 
-  $("plList").innerHTML = creds.length
-    ? creds.map((c) => `<div class="pl-cred-row">
-        <div>
-          <div class="pl-cred-meta"><strong>${esc(portalDisplayName(c.portalType, c.portalUrl))}</strong> · ${esc(c.usernameReference)} ${c.hasSecret ? "🔒" : ""}</div>
-          ${portalHostname(c.portalUrl) && portalHostname(c.portalUrl) !== portalDisplayName(c.portalType, c.portalUrl) ? `<div class="pl-cred-url">${esc(portalHostname(c.portalUrl))}</div>` : ""}
-        </div>
-        <button type="button" class="danger-button danger-button-sm" data-pl-del="${esc(c.id)}">Delete</button>
-      </div>`).join("")
-    : '<p class="muted" style="font-size:12px">No saved logins yet. Pick a portal above to pre-fill, then enter the username and password.</p>';
+  $("plList").innerHTML = plListHtml(view, !!state.plShowAllLogins, client.name);
+  $("plList").querySelectorAll("[data-pl-toggle]").forEach((b) => b.addEventListener("click", async () => {
+    state.plShowAllLogins = !state.plShowAllLogins;
+    await renderPortalLogins();
+  }));
   $("plList").querySelectorAll("[data-pl-del]").forEach((b) => b.addEventListener("click", async () => {
     try {
       if (!window.confirm("Permanently delete this stored portal login?\n\nIt cannot be recovered — you would re-enter the credentials to restore it.")) return;
@@ -11283,8 +11452,8 @@ async function renderPortalLogins() {
   // Header summary: X of Y portals have a saved login.
   const summary = $("portalLoginsSummary");
   if (summary) {
-    const total = chips.length;
-    const ready = $("plPortalChips").querySelectorAll('[data-has-secret="1"]').length;
+    const total = view.portals.length;
+    const ready = view.portals.filter((p) => p.matched).length;
     summary.textContent = total ? `${ready}/${total} portal logins saved` : (creds.length ? `${creds.length} saved` : "");
   }
   if (window.lucide) window.lucide.createIcons();

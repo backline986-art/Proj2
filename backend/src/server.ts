@@ -1,5 +1,5 @@
 import "dotenv/config";
-import { validate, portalCredentialCreateSchema, portalCredentialUpdateSchema, autoLearnSchema, codeProfileResearchSchema, codeProfileVerifySchema, permitProcessVerifySchema, reviewSubjectSchema } from "./validation";
+import { validate, portalCredentialCreateSchema, portalCredentialUpdateSchema, autoLearnSchema, codeProfileResearchSchema, codeProfileVerifySchema, permitProcessVerifySchema, reviewSubjectSchema, utilityFilingVerifySchema } from "./validation";
 import crypto from "node:crypto";
 import { spawn } from "node:child_process";
 import express, { type NextFunction, type Request, type Response } from "express";
@@ -170,7 +170,8 @@ import {
 } from "./repository";
 import { createSignatureRequestApproval } from "./signatureRequestApproval";
 import { confirmSignatureRequestSent } from "./signatureTrack";
-import { getSubmittalTracks, markTrackSubmitted, requiredTracks, trackSubmittedAndTracked, trackSubmittedSentence } from "./submittalTracks";
+import { getSubmittalTracks, markTrackSubmitted, requiredTracks, trackSubmittedAndTracked, trackSubmittedSentence, withPermitStageSentence } from "./submittalTracks";
+import { getUtilityFilingLookup, nemFiledWithPermit, verifyUtilityFilingLookup } from "./utilityFilingLookup";
 import { stagedReviewScreenshotFile } from "./stagedReviews";
 import { submissionConfirmationFile } from "./submissionConfirmation";
 import { reviewScreenshotFile } from "./reviewScreenshot";
@@ -2426,6 +2427,35 @@ app.post("/api/projects/:id/permit-process/refresh", asyncHandler(async (req, re
   res.status(202).json({ queued: true, jobId: r.jobId, reason: r.reason, lookupKey: r.lookupKey });
 }));
 
+// THIS PROJECT'S UTILITY FILING ROW: READ AND VERIFY (#664). Nothing could verify a utility filing
+// lookup, so the one fact that switches a NEM track to "filed inside the permit application" had no
+// door a person could use. Under /api/projects/:id, so each inherits the tenancy guard (rule 6) and
+// getProjectDetail 404s an unknown or out-of-scope project first; the row itself is SHARED knowledge
+// on purpose (one utility's filing location serves every tenant), keyed by the project's own state +
+// utility — a body never names another utility.
+//   GET  the row on file (null when none).
+//   PUT  .../verify — a NAMED PERSON (namedPersonDecider) verifies the row as it stands, or states the
+//        with-permit method with the page and words they read it on. Lands 'verified'; a lookup never
+//        overwrites it (rule 3). No URL can be stated here: nothing new reaches the NEM track (rule 5).
+app.get("/api/projects/:id/utility-filing", (req, res) => {
+  const { project } = getProjectDetail(db, String(req.params.id));
+  res.json({ state: project.state, utility: project.utility, lookup: String(project.utility || "").trim() ? getUtilityFilingLookup(db, project.state, project.utility) : null });
+});
+app.put("/api/projects/:id/utility-filing/verify", (req, res) => {
+  const projectId = String(req.params.id);
+  const { project } = getProjectDetail(db, projectId);
+  const b = validate(utilityFilingVerifySchema, req.body);
+  const verifiedBy = namedPersonDecider(req, "verifiedBy",
+    "Sign in to verify a utility filing location.",
+    "Name the person verifying: a utility filing location is verified by a named person.");
+  const r = verifyUtilityFilingLookup(db, { state: project.state, utility: project.utility }, { verifiedBy, ...(b.filedWithPermit ? { filedWithPermit: b.filedWithPermit } : {}) });
+  if (!r.saved) throw new HttpError(r.lookup ? 409 : 400, r.reason);
+  addAuditLog(db, projectId, "human", verifiedBy, b.filedWithPermit ? "utility_filing.stated_with_permit" : "utility_filing.verified", {
+    utility: project.utility, state: project.state, method: r.lookup?.filing?.value?.method ?? null, sourceUrl: r.lookup?.filing?.sourceUrl ?? "",
+  });
+  res.json({ lookup: r.lookup });
+});
+
 // THE EMAIL FILING CHANNEL (#667; filingEmail.ts). Under /api/projects/:id, so each inherits the
 // tenancy guard (rule 6) and getProjectDetail 404s an unknown or out-of-scope project first. The
 // record itself is SHARED knowledge (one authority's address serves every tenant), keyed by the
@@ -3643,8 +3673,13 @@ app.post("/api/projects/:id/prepare-submission", (req, res) => {
   // this (PowerClerk numbers a draft), and neither is a staged draft awaiting approval: both run.
   // The trackless legacy stage keeps its own refusals in the job.
   if (track) {
-    const filed = trackSubmittedAndTracked(db, projectId, track, requiredTracks(getProjectDetail(db, projectId).project));
+    const { project } = getProjectDetail(db, projectId);
+    const filed = trackSubmittedAndTracked(db, projectId, track, requiredTracks(project));
     if (filed) throw new HttpError(409, trackSubmittedSentence(filed), { track, submittedAndTracked: filed.via, number: filed.number, tracked: filed.tracked });
+    // #664: a utility a person verified as filing INSIDE the permit application has no NEM filing of
+    // its own to stage — refused here, before an approval is minted (the job asks again).
+    const withPermit = track === "nem" ? nemFiledWithPermit(db, project) : null;
+    if (withPermit) throw new HttpError(409, withPermitStageSentence(withPermit, project.utility), { track, nemFiledWithPermit: true });
   }
   // APPROVE & SUBMIT: A NAMED PERSON APPROVES THIS RUN. The approval row is the only thing that
   // lets the run click the portal's final submit (repository.maySubmitAutomatically also needs

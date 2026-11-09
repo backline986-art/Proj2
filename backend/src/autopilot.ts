@@ -34,6 +34,7 @@ import { auditVisionRelaxedAtStage, getProjectDetail, rerunQc, captureConfirmati
 import { parseJson } from "./json";
 import type { NextStep, ProjectRecord, StageDetail, SubmittalTrackType } from "../../shared/src/types";
 import { requiredTracks, SUBMITTAL_TRACK_TYPES, trackPermitTypes } from "./submittalTracks";
+import { nemFiledWithPermit } from "./utilityFilingLookup";
 import { stageForStatus } from "./projectStage";
 import { paymentNeededForRun } from "./feePause";
 import { decideNextStep, gateBlockerHoldsTrack, loadFullNextStepFacts, reviewInfoFromResultJson, reviewerBlockerList, reviewerBlockersFor, reviewerGateRead, stagingFailedFor, withoutCodeResearch, type NextStepFacts, type ReviewMismatch } from "./nextStep";
@@ -172,8 +173,11 @@ export function operatorBlockedOutcome(db: AppDb, projectId: string): AutopilotB
 // the AHJ's permit structure). Before this, a track-less run made ONE untracked stage:
 // the second permit discipline never filed at all, and the run was recorded against
 // permit_type 'permit' so it showed on no track.
+// #664: a utility a person VERIFIED as filing inside the AHJ permit application has no NEM filing of
+// its own — a track-less run stages the permit track(s) only (an explicit NEM request is refused by
+// prepareSubmission, in words).
 export function tracksToStage(db: AppDb, project: ProjectRecord, requested?: SubmittalTrackType): SubmittalTrackType[] {
-  const wanted = requested ? [requested] : requiredTracks(project);
+  const wanted = requested ? [requested] : requiredTracks(project).filter((t) => t !== "nem" || !nemFiledWithPermit(db, project));
   return wanted.filter((t) => !trackAlreadyStaged(db, project.id, t));
 }
 

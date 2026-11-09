@@ -48,7 +48,7 @@ import { text } from "./json";
 import { nowIso } from "./time";
 import { logger } from "./logger";
 import { isServiceLineBaseKind, serviceLineCounts, SERVICE_FEEDER_200A_LABEL, SERVICE_FEEDER_400A_LABEL } from "./batteryServiceFeeder";
-import { stateRulesFor } from "./permitProcess";
+import { stateSurchargeRuleFor } from "./stateFeeRules";
 import { localPermitReview, permitFeeProject } from "./feeIssuer";
 import { portalFeeSummary } from "./portalFeeReadings";
 import { printedFormCheck, printedFormQuote } from "./printedFormFees";
@@ -572,16 +572,28 @@ function surchargeGapsOf(r: Record<string, unknown>): string[] {
   return out.slice(0, 6);
 }
 
-/** THE STATE SURCHARGE THE QUOTE DOES NOT INCLUDE (close M3). A state that levies a surcharge on
- *  permit fees (a cited STATE_PERMIT_RULES entry — Oregon's ORS 455.210, at most 12%) and a quoted
- *  permit line that carries none: the amount is short by up to that percentage, and it must say so
- *  instead of reading as a complete price. "" when nothing is missing. */
-export function stateSurchargeNotice(state: string, gaps: string[]): string {
+/** THE STATE SURCHARGE THE QUOTE DOES NOT INCLUDE (close M3), read from the state's fee record
+ *  (state_permit_rules "fee" family, stateFeeRules.stateSurchargeRuleFor — #663):
+ *    · a cited rule (Oregon's ORS 455.210(4) + 455.220(1), at most 12%) and a quoted permit line that
+ *      carries none: the amount is short by up to that percentage, and it must say so instead of
+ *      reading as a complete price;
+ *    · NO RECORD for the state: "state surcharge: not researched" — the strictest baseline. Unknown
+ *      is a question, not a pass: the quote never reads a state nobody researched as levying none;
+ *    · a record this quote cannot apply: named, with its citation, as not applied.
+ *  "" when nothing is missing (no uncovered permit line, or a cited "no state surcharge"). */
+export function stateSurchargeNotice(db: AppDb, state: string, gaps: string[]): string {
   if (!gaps.length) return "";
-  const rule = stateRulesFor(state).surcharge;
-  if (!rule || typeof rule.value !== "number") return "";
-  const pct = Math.round(rule.value * 1000) / 10;
-  return ` PLUS the state surcharge on the ${gaps.join(" and ")} permit${gaps.length > 1 ? "s" : ""} (up to ${pct}% of the permit fee — ${rule.quote.split(":")[0]}) — NOT included in this amount; confirm the surcharge with the agency.`;
+  const rule = stateSurchargeRuleFor(db, state);
+  const permits = `the ${gaps.join(" and ")} permit${gaps.length > 1 ? "s" : ""}`;
+  if (rule.status === "not_researched") {
+    return ` State surcharge: not researched${rule.state ? ` for ${rule.state}` : ""} — no cited state fee rule is on file, so none is assumed on ${permits}; confirm any state surcharge with the agency.`;
+  }
+  if (rule.status === "none") return "";
+  const section = rule.quote.split(":")[0];
+  if (rule.status === "unmodeled") {
+    return ` PLUS the state surcharge on file (${section}), which this quote does not apply because ${rule.why} — NOT included in this amount; confirm the surcharge with the agency.`;
+  }
+  return ` PLUS the state surcharge on ${permits} (up to ${rule.percent}% of the permit fee — ${section}) — NOT included in this amount; confirm the surcharge with the agency.`;
 }
 
 /** The published schedule's answer for THIS project, or null if no schedule is
@@ -889,7 +901,7 @@ function computePaymentQuote(
         + evidenceClause
         + `${schedule.sourceUrl ? ` ${schedule.sourceUrl}` : ""}`
         + modeledSurchargeClause(schedule)
-        + (track === "permit" ? stateSurchargeNotice(project.state, schedule.surchargeGaps) : "");
+        + (track === "permit" ? stateSurchargeNotice(db, project.state, schedule.surchargeGaps) : "");
     } else if (schedule && floorUsd != null && floorWins()) {
       // A SCHEDULE THAT PRICED PART OF THE FILING IS A FLOOR, NEVER A REASON TO GUESS LOWER (#421).
       //
@@ -919,7 +931,7 @@ function computePaymentQuote(
         + `PLUS ${missing}, not yet priced: the real fee is higher by ${schedule.unpricedItems.length > 1 ? "those" : "that"}. `
         + `A published schedule for ${who} was found but did not resolve: ${schedule.reason}${schedule.sourceUrl ? ` (${schedule.sourceUrl})` : ""}`
         + modeledSurchargeClause(schedule)
-        + (track === "permit" ? stateSurchargeNotice(project.state, schedule.surchargeGaps) : "");
+        + (track === "permit" ? stateSurchargeNotice(db, project.state, schedule.surchargeGaps) : "");
     } else {
       const est = estimate();
       // THE PRINTED FORM IS THE LAST RUNG (#454), below the valuation estimate: it answers only
