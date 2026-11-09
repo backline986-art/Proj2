@@ -36,6 +36,7 @@
 // is rendered (scannedPlanSet.looksLikeBillOrMeterPage). The response is never logged; only a quote
 // that itself names the listing (listingAffirmed — the rule's own reader, negations refused) is kept.
 import type { LLMProvider } from "../../shared/src/types";
+import { VisionPageWithheldError } from "./visionPageMask";
 import { listingAffirmed, LISTING_PATTERNS_BY_PRODUCT, type ImageSheetListingReading, type ListingProduct } from "./codeReviewRules";
 import {
   bodyCharsPerPage, bodyTokensPerPage, looksLikeBillOrMeterPage, rasterPixelsPerPage,
@@ -186,7 +187,12 @@ export async function readImageSheetListings(
   llm: Pick<LLMProvider, "visionExtract"> | null,
   pdfBytes: Uint8Array,
   pageTexts: string[],
-  opts: { want: { module: boolean; racking: boolean }; cap?: number; countRaster?: (pdfBytes: Uint8Array) => Promise<number[]> },
+  opts: {
+    want: { module: boolean; racking: boolean }; cap?: number; countRaster?: (pdfBytes: Uint8Array) => Promise<number[]>;
+    /** The project's own secrets (projectSecretValues): painted over on every page image, or the
+     *  page is withheld (rule 2, #612). */
+    secrets?: readonly string[];
+  },
 ): Promise<ImageSheetListingRead> {
   const cap = Math.max(1, Math.floor(opts.cap ?? MAX_LISTING_VISION_PAGES));
   const result: ImageSheetListingRead = { readings: [], titleBlockOnlyPages: [], read: [], skipped: [], coverage: "" };
@@ -216,7 +222,7 @@ export async function readImageSheetListings(
   const { openPdfForVisionRender } = await import("./pageImages");
   let renderer: Renderer | null = null;
   try {
-    renderer = await openPdfForVisionRender(pdfBytes);
+    renderer = await openPdfForVisionRender(pdfBytes, { secrets: opts.secrets });
   } catch (err) {
     for (const page of toRead) result.skipped.push({ page, reason: `the plan set could not be rendered (${String((err as Error)?.message ?? err).slice(0, 60)})` });
   }
@@ -226,7 +232,7 @@ export async function readImageSheetListings(
         if (done()) { result.skipped.push({ page, reason: "not needed: the missing listings were already found" }); continue; }
         let img: Awaited<ReturnType<typeof renderForVision>>;
         try { img = await renderForVision(renderer, page); } catch (err) {
-          result.skipped.push({ page, reason: `could not be rendered (${String((err as Error)?.message ?? err).slice(0, 60)})` });
+          result.skipped.push({ page, reason: err instanceof VisionPageWithheldError ? err.message : `could not be rendered (${String((err as Error)?.message ?? err).slice(0, 60)})` });
           continue;
         }
         let raw: unknown;

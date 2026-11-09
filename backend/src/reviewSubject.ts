@@ -20,7 +20,8 @@ import { resolveEffectiveCodeContext, ensureCodeProfilesResearched } from "./cod
 import { runReviewPack, reviewPackFor } from "./reviewPacks";
 import { createLLMProvider, StubLLMProvider } from "./llm";
 import { extractPdfPagesCounted } from "./batchImport";
-import { renderPdfPageToPng } from "./pageImages";
+import { renderPdfPageForVision } from "./pageImages";
+import { projectSecretValues } from "./projectSecrets";
 import { readImageSheetListings } from "./imageSheetListings";
 import { IMAGE_SHEET_LISTING_COVERAGE_KEY, IMAGE_SHEET_LISTING_READINGS_KEY, packageListings } from "./codeReviewRules";
 import { addAuditLog } from "./audit";
@@ -177,6 +178,8 @@ export async function runStandaloneReview(
   // next review runs against seeded adopted-code data without anyone asking.
   if (!ctx.verified) ensureCodeProfilesResearched(db, subject.state, subject.ahj);
   const project = reviewSubjectToProject(subject, submissionId);
+  // The subject's own account/meter (and any parser alias): what no page image may show (rule 2).
+  const secrets = projectSecretValues(project);
   const snapshot = project.parserSnapshot as Record<string, string>;
   // What the title-block-only-sheet read found is written by that read alone, never by the caller.
   delete snapshot[IMAGE_SHEET_LISTING_READINGS_KEY];
@@ -206,10 +209,13 @@ export async function runStandaloneReview(
       if (fullText && !snapshot.splitPagesText) snapshot.splitPagesText = fullText;
       // Render the first sheets for the AI vision pass (intake triage).
       const renderCount = Math.min(pages.length || 1, REVIEW_AI_PAGE_IMAGES);
+      // RULE 2 (#612): each sheet through the reviewer's mask; a sheet carrying a secret it cannot
+      // paint over is not sent (the AI pass then sees fewer sheets, never the number).
       for (let p = 1; p <= renderCount; p++) {
         try {
-          const png = await renderPdfPageToPng(plansetPath, p, 1.4);
-          pageImagesBase64.push(png.toString("base64"));
+          const image = await renderPdfPageForVision(plansetPath, p, secrets, 1.4);
+          if (image.ok) pageImagesBase64.push(image.png.toString("base64"));
+          else logger.warn("review", `plan sheet ${p} not sent to the AI review: ${image.reason}`);
         } catch { /* skip unrenderable page */ }
       }
     } catch (err) {
@@ -226,7 +232,7 @@ export async function runStandaloneReview(
       const want = { module: !shown.module, racking: !shown.racking };
       if (want.module || want.racking) {
         try {
-          const read = await readImageSheetListings(llm instanceof StubLLMProvider ? null : llm, planset.buffer, pages, { want });
+          const read = await readImageSheetListings(llm instanceof StubLLMProvider ? null : llm, planset.buffer, pages, { want, secrets });
           snapshot[IMAGE_SHEET_LISTING_READINGS_KEY] = JSON.stringify(read.readings);
           if (read.coverage) snapshot[IMAGE_SHEET_LISTING_COVERAGE_KEY] = read.coverage;
         } catch (err) {

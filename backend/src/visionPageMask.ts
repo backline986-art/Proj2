@@ -32,6 +32,15 @@ export interface MaskAnnotation {
   alternativeText?: unknown;
 }
 
+/** Thrown by a page renderer when a page carries a project secret it cannot paint over: the page is
+ *  not encoded and not sent. The message is the reason, safe to show (it never holds the value). */
+export class VisionPageWithheldError extends Error {
+  constructor(reason: string) {
+    super(`withheld: ${reason}`);
+    this.name = "VisionPageWithheldError";
+  }
+}
+
 /** A quadrilateral in PDF user space (four [x, y] corners, in drawing order). */
 export type PdfQuad = Array<[number, number]>;
 
