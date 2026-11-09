@@ -364,8 +364,8 @@ export function looksLikeBillOrMeterPage(text: string): boolean {
   return BILL_OR_METER_PAGE.test(String(text ?? ""));
 }
 
-/** Datasheet kinds that DECIDE an undecided spec page: module / inverter go into those parts; the
- *  rest (combiner, racking, battery…) are datasheets that belong in neither. */
+/** Datasheet kinds that DECIDE an undecided spec page: module / inverter / battery go into those parts
+ *  (battery since #261); the rest (combiner, racking…) are datasheets that belong in none of them. */
 const DATASHEET_KINDS = new Set<PlanSheetKind>(["module_spec", "inverter_spec", "battery_spec", "racking_spec", "other_spec"]);
 
 export interface UndecidedSpecRead {
