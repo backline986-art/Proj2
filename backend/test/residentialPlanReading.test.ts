@@ -70,5 +70,32 @@ check("3a: nothing stated is still [verify]", () => {
   assert.equal(line(docText(project({}), "ahj-worksheet"), "- Service phase/voltage:"), "- Service phase/voltage: [verify] / [verify]");
 });
 
+// ---- 3b: the mount on the AHJ transfer sheet ------------------------------------------------------
+const MOUNTS: Array<[string, string, string]> = [
+  ["Roof mount, comp shingle", "Roof-mounted solar PV", "Install roof-mounted photovoltaic system."],
+  ["Ground mount", "Ground-mounted solar PV", "Install ground-mounted photovoltaic system."],
+  ["Carport", "Carport-mounted solar PV", "Install carport-mounted photovoltaic system."],
+];
+for (const [mounting, type, scope] of MOUNTS) {
+  check(`3b: blank projectType + mounting "${mounting}" -> "${type}"`, () => {
+    const md = docText(project({ mounting }), "ahj-worksheet");
+    assert.equal(line(md, "Project type:"), `Project type: ${type}`);
+    assert.ok(line(md, "Install ").startsWith(scope), line(md, "Install "));
+  });
+}
+check("3b: the older mountType key answers the same way", () => {
+  assert.equal(line(docText(project({ mountType: "Ground mount" }), "ahj-worksheet"), "Project type:"), "Project type: Ground-mounted solar PV");
+});
+check("3b: a mount the plans never state is not written as roof-mounted", () => {
+  const md = docText(project({}), "ahj-worksheet");
+  assert.doesNotMatch(md, /roof-mounted/i);
+  assert.match(line(md, "Project type:"), /\[verify\] roof, ground or carport mount/);
+});
+check("3b: a stated projectType still wins over the mount", () => {
+  const md = docText(project({ projectType: "Solar PV + battery storage", mounting: "Carport" }), "ahj-worksheet");
+  assert.equal(line(md, "Project type:"), "Project type: Solar PV + battery storage");
+  assert.ok(line(md, "Install ").startsWith("Install solar pv + battery storage."), line(md, "Install "));
+});
+
 if (failures) { console.error(`\n${failures} check(s) failed`); process.exit(1); }
 console.log("\nresidentialPlanReading: all checks passed");

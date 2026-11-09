@@ -20,6 +20,7 @@ import { describeQuotes, planSheets, readDeckMount } from "./planAttachmentRead"
 // Functions only: the service voltage as a plan writes it ("277/480Y", "120/240V") -> line to line.
 import { serviceVoltageOf } from "./iowaPvWorksheet";
 import { serviceFieldText } from "./normalize";
+import { mountAdjective, mountKindForProject } from "./mountKind";
 // Functions only (same cycle): the licences a document lists are licenceFor's (clients.ts).
 import { licenceJobState, stateLicenceLines } from "./clients";
 
@@ -1264,6 +1265,26 @@ ${profile.notes.map((note) => `- ${note}`).join("\n")}
   );
 }
 
+// THE MOUNT THE PLANS STATE, NOT A ROOF BY DEFAULT (#689 3b). A blank projectType printed "Roof-mounted
+// solar PV / Install roof-mounted photovoltaic system" on carports and ground arrays: the transfer sheet
+// never asked the mount. It now asks the one mount predicate (mountKindForProject: the `mounting` field,
+// then `mountType`, then the design text) and writes its adjective (mountAdjective) — the same words
+// the portal description and the PDF forms use. An unknown mount is never written as roof-mounted on an
+// application (leak sweep 2026-09-28): it is named for a person to verify. A stated projectType wins.
+function projectTypeText(project: ProjectRecord): string {
+  const stated = payload(project, "projectType");
+  if (stated) return stated;
+  const mount = mountAdjective(mountKindForProject(project));
+  return mount ? `${mount} solar PV` : "Solar PV ([verify] roof, ground or carport mount)";
+}
+
+function scopeSubject(project: ProjectRecord): string {
+  const stated = payload(project, "projectType");
+  if (stated) return stated.toLowerCase();
+  const mount = mountAdjective(mountKindForProject(project));
+  return mount ? `${mount.toLowerCase()} photovoltaic system` : "photovoltaic system ([verify] roof, ground or carport mount)";
+}
+
 function buildAhjWorksheet(project: ProjectRecord, profile: ApplicationRequirementProfile, client: ClientRecord | null): GeneratedApplicationDocument {
   const contractorLine = client
     ? (isOregonJob(project)
@@ -1285,9 +1306,9 @@ Contractor: ${contractorLine}
 
 ${commonProjectBlock(project)}
 
-Project type: ${payload(project, "projectType") || "Roof-mounted solar PV"}
+Project type: ${projectTypeText(project)}
 Scope of work:
-Install ${(payload(project, "projectType") || "roof-mounted photovoltaic system").toLowerCase()}. ${project.systemSizeDcKw ?? "[verify]"} kW DC / ${project.systemSizeAcKw ?? "[verify]"} kW AC. Interconnection method: ${project.interconnectionMethod || "[verify]"}.${/^yes$/i.test(payload(project, "hasExistingSystem")) || /^yes$/i.test(payload(project, "existingSystem")) ? ` ADDITION to an existing PV system${payload(project, "existingDcKw") ? ` (existing ${payload(project, "existingDcKw")} kW DC${payload(project, "combinedDcKw") ? `, combined ${payload(project, "combinedDcKw")} kW DC` : ""})` : ""} — existing system remains in service.` : ""}
+Install ${scopeSubject(project)}. ${project.systemSizeDcKw ?? "[verify]"} kW DC / ${project.systemSizeAcKw ?? "[verify]"} kW AC. Interconnection method: ${project.interconnectionMethod || "[verify]"}.${/^yes$/i.test(payload(project, "hasExistingSystem")) || /^yes$/i.test(payload(project, "existingSystem")) ? ` ADDITION to an existing PV system${payload(project, "existingDcKw") ? ` (existing ${payload(project, "existingDcKw")} kW DC${payload(project, "combinedDcKw") ? `, combined ${payload(project, "combinedDcKw")} kW DC` : ""})` : ""} — existing system remains in service.` : ""}
 
 Equipment:
 - Modules: ${yesNo(payload(project, "moduleQty"))} x ${yesNo(payload(project, "moduleMake"))} ${yesNo(payload(project, "moduleModel"))}, ${yesNo(payload(project, "moduleWattage"))} W

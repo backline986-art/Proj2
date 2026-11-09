@@ -26,7 +26,7 @@ import { engineerSealStates, stateName } from "./engineerSeal";
 import { readPlanFraming } from "./planFraming";
 import { describeQuotes, describeSnowLabelIssue, planSheets, readDeckMount, readSnowLabels, type PlanSheet, type SheetQuote } from "./planAttachmentRead";
 import { readNecEditionCitations, readOtherMethodItems, readRapidShutdownStatements, readServiceLocationConflicts, readSupplySideDisconnectRating } from "./planConsistency";
-export { designText, engineeredGroundMount, groundMountFromField, isGroundMount, mountKind, mountKindForProject, type MountKind } from "./mountKind";
+export { designText, engineeredGroundMount, groundMountFromField, isGroundMount, mountAdjective, mountKind, mountKindForProject, type MountKind } from "./mountKind";
 
 const oregonElectrical2023: CodeReference = {
   code: "2023 OESC / 2023 NEC",
@@ -203,15 +203,11 @@ function isOregon(project: ProjectRecord, _profile: AhjProcessProfile | null): b
   return usStateCode(project.state) === "OR";
 }
 
-// IS THIS ON A ROOF? — the one mount predicate (mountKind / mountKindForProject) lives in
-// mountKind.ts, so permitPath and requiredDocuments ask the same question without importing this
-// module (which imports permitPath). Re-exported here for the callers that always read it from here.
+// IS THIS ON A ROOF? — the one mount predicate (mountKind / mountKindForProject) and the adjective it
+// is written with (mountAdjective) live in mountKind.ts, so permitPath, requiredDocuments and
+// applicationDocs ask the same question without importing this module (which imports permitPath).
+// Re-exported here for the callers that always read it from here.
 
-/** The mount, as the scope-of-work sentence names it — "" when the mount is not known: an unknown
- *  mount is never written as "roof-mounted" on an application (leak sweep 2026-09-28). */
-export function mountAdjective(kind: MountKind): string {
-  return kind === "roof" ? "Roof-mounted" : kind === "ground" ? "Ground-mounted" : kind === "carport" ? "Carport-mounted" : "";
-}
 
 /** True when the array sits on a roof and the roof rule family applies. */
 export function isRoofMounted(project: ProjectRecord, allText: string): boolean {
