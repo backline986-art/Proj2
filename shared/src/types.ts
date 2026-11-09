@@ -1292,6 +1292,10 @@ export interface PermitCheckTarget {
   /** WHY THE MONITOR COULD NOT READ THIS FILING on its last check (#413), one actionable line ("No
    *  portal recipe learned for … yet", "Login wall: …"); absent once a status is read. */
   readGap?: string;
+  /** THE NEWEST CHECK THAT READ NOTHING, and why (#173): the reason the monitor audited
+   *  (`permit_status.unreadable`), scrubbed for staff (rule 2), and when. Only while it is newer than
+   *  this filing's last recorded reading; null once a later check reads a status. Staff-only. */
+  lastUnreadable?: LastUnreadableCheck | null;
   /** THE ISSUED PERMIT / APPROVAL LETTER the monitor downloaded off this filing's record once it
    *  read issued / approved (#492), each with its provenance; absent when none is on file. */
   issuedDocuments?: IssuedRecordDocument[];
@@ -1300,6 +1304,12 @@ export interface PermitCheckTarget {
   issuedDocsGap?: string;
   createdAt: string;
   updatedAt: string;
+}
+
+/** A status check that read nothing (#173): the scrubbed reason and the time it was audited. */
+export interface LastUnreadableCheck {
+  reason: string;
+  at: string;
 }
 
 /** A closeout document the permit monitor downloaded off a filed record (#492). */
@@ -1406,6 +1416,9 @@ export interface SubmittalTrack {
   trackingUrl: string;
   submittedAt: string | null;
   lastCheckedAt: string | null;
+  /** The track's filing's newest check that read nothing, while no later reading superseded it
+   *  (#173, the target's own `lastUnreadable`). Staff-only. */
+  lastUnreadable?: LastUnreadableCheck | null;
   /**
    * Which capture fields this track actually uses. NEM is an interconnection
    * application (no AHJ "permit number"); permits issue a permit number. The UI
@@ -4651,6 +4664,11 @@ export interface PortalRecipe {
    *  dimension. An AHJ holds ONE recipe PER DISCIPLINE: the city/structural and
    *  county/electrical filings drive different portal steps. */
   discipline?: string;
+  /** #448 — this portal's own record-number shapes ("PGENM-#####"), learned from numbers a person
+   *  confirmed after filing on THIS recipe (portal_recipes.record_number_formats_json). Shapes only,
+   *  never a number. The replay's completion read counts a number in one of them like a hand-written
+   *  portal shape (portal-bot recordNumber.ts learnRecordFormat). */
+  recordNumberShapes?: string[];
 }
 
 // ---------------------------------------------------------------------------

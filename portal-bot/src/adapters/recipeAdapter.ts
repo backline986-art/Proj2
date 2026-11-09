@@ -6,7 +6,7 @@ import { maskedFullPageScreenshot } from "../secretMask";
 import { stagedReviewShotsDir } from "../../../backend/src/statePaths";
 import { BasePortalAdapter, HUMAN_REVIEW_MESSAGE, ok, fail, type PortalContext, type PortalStepResult } from "../adapter";
 import { applyFormatHint } from "../formatHint";
-import { extractRecordNumber, pageConfirmsSubmission, recordNumberCandidates, RECORD_NUMBER_TIERS } from "../recordNumber";
+import { extractRecordNumber, learnRecordFormat, pageConfirmsSubmission, recordNumberCandidates, RECORD_NUMBER_TIERS, type LearnedRecordFormat } from "../recordNumber";
 import { findSiteDraft, readDraftCreated } from "../draftCreated";
 import { completeStamp, draftCreatingClickRefusals, draftLabelKey, draftStepLabel, draftTenantKey, readDraftAfterClick, type DraftCreatingStamp } from "../draftSubmitGate";
 import { armHumanCaptureOnPage, HUMAN_SUBMIT_OBSERVED_NOTE } from "../humanCapture";
@@ -1175,6 +1175,13 @@ export class RecipeAdapter extends BasePortalAdapter {
   /** The one shot that says how the filing ended — the completion page with its record
    *  number, or the portal's refusal. Reported so the submission record can point at it. */
   private outcomeShotPath = "";
+  /** THE CONFIRMATION SCREENSHOT OF A FILING (#569): a full-page picture of the page the portal showed
+   *  after the filing went — the approved final submit the portal confirmed, or a person's own submit
+   *  in the hand-over window that read as the completion — with every known secret masked through
+   *  #588's maskedFullPageScreenshot (the one masking path). `path` is set ONLY when that call proved
+   *  the mask covered every secret (rule 2); otherwise `why` says why no picture was kept, and the
+   *  outcome shot stays the run's only picture. Taken, never clicked for (rule 1). */
+  private confirmationShot: { path: string; why: string } | null = null;
   /** THE FEE AT A fee_payment STOP (#576): amount, lines, masked shot and the page's link, read
    *  once, at the first fee stop. Carried on the step result (data.feeStop). Read only. */
   private feeStop: FeeStopReading | null = null;
@@ -1282,6 +1289,12 @@ export class RecipeAdapter extends BasePortalAdapter {
   /** The account's application list as the sign-in landed on it (openSubmission) — the "before"
    *  of the person's filing (#400). null when the page could not be read. */
   private ledgerBefore: LedgerEntry[] | null = null;
+  /** #448 — THIS PORTAL'S OWN RECORD-NUMBER FORMAT: shapes learned from the ids its account list
+   *  showed at sign-in (ledgerBefore) and the shapes a person confirmed on this recipe before
+   *  (recipe.recordNumberShapes). Never another recipe's: the format is this tenant's alone. */
+  private learnedRecordFormat(): LearnedRecordFormat {
+    return learnRecordFormat((this.ledgerBefore ?? []).map((e) => e.id), this.recipe.recordNumberShapes ?? []);
+  }
   /** The recipe step index the loop is on — the final-submit gate's "is this the terminal step". */
   private currentStepIdx = -1;
   /** #340 — WHY THE REPLAY WAS STOPPED FROM OUTSIDE (a person's cancel, or no progress for too long).
@@ -2322,7 +2335,7 @@ export class RecipeAdapter extends BasePortalAdapter {
     const read = await this.readPageForCapture().catch(() => null);
     if (!read) return { numbers: new Set(), filingControl: "", completionPhrase: null };
     return {
-      numbers: new Set(recordNumberCandidates(read.text).map((c) => c.value)),
+      numbers: new Set(recordNumberCandidates(read.text, this.learnedRecordFormat()).map((c) => c.value)),
       filingControl: read.filingControl,
       reviewPage: read.reviewPage,
       completionPhrase: completionEvidence(read.cellFree).phrase,
@@ -2347,7 +2360,7 @@ export class RecipeAdapter extends BasePortalAdapter {
     const documentPostSince = (this.handedOverBackstop?.humanRequests ?? []).some((h) => h.document && h.page === this.page && typeof h.at === "number" && h.at >= clickAt - HUMAN_CLICK_EARLY_MS && String(h.method ?? "").toUpperCase() !== "GET")
       || this.lateHumanRequests.some((h) => h.document && h.at >= clickAt - HUMAN_CLICK_EARLY_MS);
     const navigationOnly = !!doc && doc.method === "GET" && doc.at > clickAt && !documentPostSince;
-    const candidates = recordNumberCandidates(read.text);
+    const candidates = recordNumberCandidates(read.text, this.learnedRecordFormat());
     const tier = RECORD_NUMBER_TIERS.find((t) => candidates.some((c) => c.source === t));
     const inTier = tier ? candidates.filter((c) => c.source === tier).map((c) => c.value) : [];
     const fresh = inTier.filter((v) => !rr.numbers.has(v));
@@ -2465,11 +2478,17 @@ export class RecipeAdapter extends BasePortalAdapter {
         const errorPage = /^chrome-error:/i.test(rawUrl);
         const read = errorPage ? null : await this.readPageForCapture();
         const judged = read ? this.judgeCompletion(read, this.lastCommittedClick?.at ?? 0) : { number: "", confirmed: false, stillReview: false };
+        // #569: A PAGE JUDGED THE COMPLETION OF THE PERSON'S OWN SUBMIT gets the masked confirmation
+        // screenshot — read only, after the read above (nothing is clicked). Never on the review page,
+        // an error page or a page that does not read as the completion.
+        const confirmed = judged.confirmed && !errorPage;
+        if (confirmed) await this.captureConfirmationShot("PERSON-SUBMITTED");
+        const shot = confirmed ? { ...this.confirmationShotData(), completionConfirmed: true } : {};
         if (judged.number) {
           const recordRead = await chooseRecord({ value: judged.number, confidence: "high", reason: `Captured submission confirmation: ${judged.number}.` });
           return ok(`Captured submission confirmation: ${judged.number}.`, {
             permitNumber: judged.number, confirmationNumber: judged.number,
-            discipline: judged.number.match(/-([A-Z]{2,4})$/)?.[1] ?? null, recordLink: recordRead.recordLink, recordRead,
+            discipline: judged.number.match(/-([A-Z]{2,4})$/)?.[1] ?? null, recordLink: recordRead.recordLink, recordRead, ...shot,
           });
         }
         if (judged.stillReview || errorPage) {
@@ -2493,10 +2512,12 @@ export class RecipeAdapter extends BasePortalAdapter {
           : listed.confidence === "low" && !listed.candidates.length ? { ...listed, reason: unread } : listed;
         return ok(
           recordRead.confidence === "high" ? `Submitted; ${recordRead.recordNumber} is the one new application in the account's list.` : unread,
-          { permitNumber: "", recordLink: recordRead.recordLink || cleanRecordLink(rawUrl), stillReview: false, errorPage: false, recordRead },
+          { permitNumber: "", recordLink: recordRead.recordLink || cleanRecordLink(rawUrl), stillReview: false, errorPage: false, recordRead, ...shot },
         );
       }
-      const read = extractRecordNumber(bodyText);
+      // #448: this portal's own format (its account list's ids, the shapes confirmed on this recipe)
+      // counts like a hand-written portal shape; the page must still say the submission completed.
+      const read = extractRecordNumber(bodyText, this.learnedRecordFormat());
       const permitNumber = read.value;
       // Accela record suffix encodes the discipline: -STR (structural), -ELE (electrical), etc.
       const discipline = permitNumber.match(/-([A-Z]{2,4})$/)?.[1] ?? null;
@@ -3775,6 +3796,7 @@ export class RecipeAdapter extends BasePortalAdapter {
         permitNumber: capture.data?.permitNumber || "",
         confirmationNumber: capture.data?.confirmationNumber || "",
         recordLink: capture.data?.recordLink || "",
+        ...this.confirmationShotData(),
         // What the LLM gap-fill added (and what it left blank for lack of real data) — same key
         // the hand-coded adapters surface, so the operator/UI sees a uniform report.
         gapFill: this.gapFillReport, healedSteps: this.healedSteps, driftWarnings: this.driftWarnings, agingNotes: this.agingNotes, slowSteps, requiredStillEmpty: this.requiredStillEmpty, unresolvedFields: this.unresolvedFields, fieldsVerified: this.fieldsVerified, fieldsUnverified: this.fieldsUnverified, requiredFieldsSeen: this.requiredFieldsSeen, stoppedAtPayment: this.stoppedAtPayment, pageShotDir: this.pageShotDir, outcomeShotPath: this.outcomeShotPath,
@@ -5339,7 +5361,7 @@ export class RecipeAdapter extends BasePortalAdapter {
    * worse ones — the exact mistake that broke a working replay earlier today.
    */
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  private async reanchorIfWrongControl(step: RecipeStep, scoped: any): Promise<any | "abort" | null> {
+  private async reanchorIfWrongControl(step: RecipeStep, scoped: any, rescued = false): Promise<any | "abort" | null> {
     const recorded = String(step.selector?.label || step.note || "").trim();
     if (!recorded || !scoped || typeof scoped.count !== "function") return null;
     // Nothing resolved at all is a different problem (a genuine miss); leave it alone.
@@ -5469,7 +5491,19 @@ export class RecipeAdapter extends BasePortalAdapter {
             return { label, section };
           }).catch(() => null) as { label: string; section: string } | null;
           const sectionAgrees = !!fp.section && !!meant?.section && meant.section.toLowerCase() === String(fp.section).replace(/\s+/g, " ").trim().toLowerCase();
-          if (meant && (sectionAgrees || (meant.label && agree(recorded, meant.label)))) {
+          // THE RESCUE ALREADY REJECTED THAT CONTROL (#408). When the section or hook rescue
+          // replaced an out-of-reach resolution, and the recorded element is an EMPTY concealed
+          // shadow standing beside the one control of its block that carries exactly its label,
+          // the two mechanisms are answering the same question and the rescue is right: writing
+          // "there" put PGE's inverter Model into an opacity:0 select holding only "Select...",
+          // the visible Model stayed empty, and the step was reported as a miss.
+          // shadowKeepsRescue is narrow on purpose; anything it cannot prove goes to MF5 as before.
+          const keepRescue = rescued && meant && await this.shadowKeepsRescue(step, target.first(), el0);
+          if (keepRescue) {
+            this.agingNotes.push(
+              `step "${recorded.slice(0, 44)}": the recorded control #${String(fp.id || fp.name).slice(0, 50)} is an empty concealed shadow beside #${(got!.id || got!.name).slice(0, 50)} in its own block — kept the rescue, re-record the step`,
+            );
+          } else if (meant && (sectionAgrees || (meant.label && agree(recorded, meant.label)))) {
             this.driftWarnings.push(
               `step "${recorded.slice(0, 44)}" resolved onto #${(got!.id || got!.name).slice(0, 50)}, but the recorded control #${String(fp.id || fp.name).slice(0, 50)}${fp.section ? ` (${String(fp.section).slice(0, 30)})` : ""} is on the page — written there, not into the other box`,
             );
@@ -6143,6 +6177,8 @@ export class RecipeAdapter extends BasePortalAdapter {
     // learned. Consulted last, because a working selector needs no rescue.
     // A PINNED RE-ASSERT (#362) writes the one element it checked, or nothing: no rescue.
     const pinned = isPinnedReassert(step);
+    // Whether a rescue below replaced the resolution: the fingerprint re-anchor asks it (#408).
+    let rescued = false;
     if (!pinned && !isToggle && await this.looksOutOfReach(scoped)) {
       // THE PORTAL'S OWN NAME FOR THE CONTROL FIRST. A test hook is stable across renders and
       // says which side it belongs to; a recorded id is neither.
@@ -6161,10 +6197,10 @@ export class RecipeAdapter extends BasePortalAdapter {
       const usable = async (loc: unknown): Promise<boolean> =>
         !!loc && await this.isTrulyVisible(loc as never).catch(() => false);
       const byHook = await this.resolveByTestHook(step);
-      if (await usable(byHook) && await this.insideArrayRow(byHook)) scoped = byHook as never;
+      if (await usable(byHook) && await this.insideArrayRow(byHook)) { scoped = byHook as never; rescued = true; }
       else if (step.fingerprint?.section) {
         const bySection = await this.resolveBySection(step);
-        if (await usable(bySection) && await this.insideArrayRow(bySection)) scoped = bySection as never;
+        if (await usable(bySection) && await this.insideArrayRow(bySection)) { scoped = bySection as never; rescued = true; }
         else if (bySection || byHook) {
           this.resolveTrail.push(`  ...rescue: ${byHook ? "the test hook" : "the section"} resolved a control that is STILL concealed — the portal puts its hook on the hidden native input; kept the original`);
         }
@@ -6209,7 +6245,7 @@ export class RecipeAdapter extends BasePortalAdapter {
     // nothing reported. So confirm the control's own label still agrees with what was
     // recorded before touching it, and re-anchor by label when it does not.
     if (IDENTITY_CHECKED.has(step.action) && !pinned) {
-      const anchored = await this.reanchorIfWrongControl(step, scoped);
+      const anchored = await this.reanchorIfWrongControl(step, scoped, rescued);
       if (anchored === "abort") return false;
       if (anchored) scoped = anchored;
     }
@@ -8047,6 +8083,9 @@ export class RecipeAdapter extends BasePortalAdapter {
       this.finalSubmitOutcome = outcome;
       if (outcome.verdict === "accepted") {
         await this.capturePageShot("SUBMITTED", true);
+        // #569: the portal confirmed it — the masked confirmation screenshot of that page. Only on
+        // "accepted": a refused or quiet page keeps the outcome shot alone and is never a confirmation.
+        await this.captureConfirmationShot("SUBMITTED");
         return true;
       }
       if (outcome.verdict === "rejected") {
@@ -8352,12 +8391,7 @@ export class RecipeAdapter extends BasePortalAdapter {
     if (!this.page || typeof this.page.evaluate !== "function") return null;
     const field = String(step.field ?? "");
     if (!field) return null;
-    // inverterModel -> inverter model ; array1ModuleQuantity -> array module quantity
-    const tokens = field
-      .replace(/([a-z0-9])([A-Z])/g, "$1 $2").toLowerCase()
-      .replace(/[^a-z ]+/g, " ").split(/\s+/)
-      .map((t) => (t === "module" ? "array" : t === "pv" ? "array" : t))
-      .filter((t) => t.length > 2 && !["the", "certified", "make"].includes(t));
+    const tokens = this.testHookTokens(field);
     if (tokens.length < 2) return null;
     const want = String(step.fingerprint?.section ?? "").trim();
     const found = await this.page.evaluate((arg: { toks: string[]; want: string }) => {
@@ -8425,6 +8459,146 @@ export class RecipeAdapter extends BasePortalAdapter {
       `"${String(step.note ?? field).slice(0, 34)}" resolved by the portal's own test hook ${JSON.stringify(found.slice(0, 40))} — stabler than the recorded id`,
     );
     return this.page.locator("[data-rc-hook-hit='1']").first();
+  }
+
+  /** The tokens a test hook must carry to name this field: inverterModel -> inverter model ;
+   *  array1ModuleQuantity -> array module quantity. One spelling for the hook rescue and for
+   *  shadowKeepsRescue's contest check, so the two can never read a hook differently. */
+  private testHookTokens(field: string): string[] {
+    return field
+      .replace(/([a-z0-9])([A-Z])/g, "$1 $2").toLowerCase()
+      .replace(/[^a-z ]+/g, " ").split(/\s+/)
+      .map((t) => (t === "module" ? "array" : t === "pv" ? "array" : t))
+      .filter((t) => t.length > 2 && !["the", "certified", "make"].includes(t));
+  }
+
+  /**
+   * MAY A RESCUE STAND AGAINST THE FINGERPRINT RE-ANCHOR? (#408, #327)
+   *
+   * Two mechanisms answer "which element does this step write". The section/hook rescue runs
+   * when the resolved control is out of reach and picks a usable one; MF5's fingerprint re-anchor
+   * (replayWrongElement) then sees a resolved id that is not the recorded one while the recorded
+   * one is on the page, and sends the write back there. On PGE's spec block (sectionDisambiguation)
+   * the recorded #pcInputBase34 is an opacity:0 "Model" select holding only "Select...", beside
+   * the visible inverter Model the rescue chose — so MF5 undid the rescue, the value went nowhere
+   * a person could see, and the step was reported as a miss. Red on main from b05a9a5e.
+   *
+   * A concealed recorded control is NOT always a stale shadow (sectionRedirectKept): a select2's
+   * real <select>, a styled select still carrying its list, a list still cascading in, a
+   * code-valued State twin. In each of those the rescue is the one that took a neighbour and
+   * MF5 is right. So the rescue stands ONLY when every one of these holds, and anything else
+   * goes to MF5 exactly as on main:
+   *   1. the recorded element is a <select>, concealed, with no option but placeholders: it
+   *      cannot take ANY answer, so writing there can only leave the step blank;
+   *   2. it has no widget of its own: no widget class or data attribute, no combobox/popup face
+   *      or widget wrapper beside it or around it (a select2 / bootstrap-select / Kendo / Chosen
+   *      native whose list arrives late is empty too, and its face is how you tell);
+   *   3. its BLOCK (the smallest ancestor holding another form control) holds exactly one
+   *      other control whose label contains the recorded label, that control is the rescued
+   *      one, its label is EXACTLY the recorded label, and it is usable. An "Existing Model"
+   *      beside it, a clone block, or a twin elsewhere in the block is a contest, not a shadow;
+   *   4. the shadow, its own label, and the rescued control all read exactly the recorded label
+   *      and section (the learner's section algorithm);
+   *   5. no test hook on the page names this field for a control other than the rescued one:
+   *      the portal's own name for the field pointing elsewhere is a contest too.
+   */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  private async shadowKeepsRescue(step: RecipeStep, target: any, rescued: any): Promise<boolean> {
+    if (!target || typeof target.evaluate !== "function" || !rescued || typeof rescued.elementHandle !== "function") return false;
+    const want = String(step.fingerprint?.section ?? "").trim();
+    const label = String(step.fingerprint?.ariaLabel ?? step.selector?.label ?? step.note ?? "").trim();
+    if (!want || !label) return false;
+    const toks = this.testHookTokens(String(step.field ?? ""));
+    const handle = await rescued.elementHandle().catch(() => null);
+    if (!handle) return false;
+    try {
+      return await target.evaluate((shadow: Element, arg: { r: Element; want: string; label: string; toks: string[] }) => {
+        const r = arg.r;
+        if (!r || r === shadow || shadow.tagName !== "SELECT") return false;
+        const clean = (t: string | null | undefined): string => (t || "").replace(/\s+/g, " ").trim().slice(0, 80);
+        const norm = (t: string): string => clean(t).toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+        const shown = (el: Element): boolean => {
+          const b = el.getBoundingClientRect();
+          const cs = getComputedStyle(el as HTMLElement);
+          return b.width > 2 && b.height > 2 && cs.visibility !== "hidden" && cs.display !== "none" && Number(cs.opacity) !== 0;
+        };
+        // 1. concealed, and empty but for placeholders.
+        if (shown(shadow)) return false;
+        const placeholder = /^(select|choose|please select|nothing selected|none|-+)\b|^$/i;
+        const opts = Array.from((shadow as HTMLSelectElement).options);
+        if (opts.some((o) => o.value !== "" && !placeholder.test(clean(o.text)))) return false;
+        // 2. no widget of its own.
+        const widget = /select2|selectpicker|bootstrap-select|chosen|selectize|choices|k-widget|k-combobox|k-dropdown|customselect|custom-select|ui-selectmenu|multiselect|dropdown/i;
+        const cls = (el: Element | null): string => (el && typeof el.className === "string" ? el.className : "");
+        if (widget.test(cls(shadow)) || ["data-role", "data-select2-id", "data-live-search", "data-placeholder"].some((a) => shadow.hasAttribute(a))) return false;
+        const faceLike = (el: Element | null): boolean => !!el && (widget.test(cls(el))
+          || el.matches('[role="combobox"], [aria-haspopup]')
+          || !!el.querySelector('[role="combobox"], [aria-haspopup], [class*="select2"], [class*="chosen"], [class*="bootstrap-select"], [class*="k-widget"]'));
+        if (faceLike(shadow.previousElementSibling) || faceLike(shadow.nextElementSibling) || widget.test(cls(shadow.parentElement))) return false;
+        // 3. the block, and the one control in it that carries the label.
+        const isControl = (el: Element): boolean => el !== shadow
+          && (el.tagName === "SELECT" || el.tagName === "TEXTAREA" || (el.tagName === "INPUT" && (el.getAttribute("type") || "").toLowerCase() !== "hidden"));
+        let blk: Element | null = shadow.parentElement;
+        while (blk && !Array.from(blk.querySelectorAll("input, select, textarea")).some(isControl)) blk = blk.parentElement;
+        if (!blk || !blk.contains(r)) return false;
+        const labelOf = (el: Element): string => {
+          const id = el.getAttribute("id");
+          const forLbl = id ? document.querySelector(`label[for="${CSS.escape(id)}"]`) : null;
+          return clean(
+            el.getAttribute("aria-label")
+            || (forLbl ? forLbl.textContent : "")
+            || (el.closest("label") ? (el.closest("label") as HTMLElement).textContent : "")
+            || el.getAttribute("placeholder")
+            || "",
+          );
+        };
+        const wantL = norm(arg.label);
+        if (!wantL) return false;
+        const carries = Array.from(blk.querySelectorAll("input, select, textarea"))
+          .filter((el) => isControl(el) && ` ${norm(labelOf(el))} `.includes(` ${wantL} `));
+        if (carries.length !== 1 || carries[0] !== r) return false;
+        if (norm(labelOf(r)) !== wantL || norm(labelOf(shadow)) !== wantL) return false;
+        if (!shown(r) || (r as HTMLInputElement).disabled) return false;
+        // 4. resolveBySection's sectionOf, verbatim: the learner's section algorithm.
+        const sectionOf = (el: Element): string => {
+          const fs = el.closest("fieldset");
+          const legend = fs ? fs.querySelector("legend") : null;
+          if (legend && clean(legend.textContent)) return clean(legend.textContent);
+          const container = el.closest('section, [class*="panel"], [class*="card"], [class*="section"], [class*="form-section"], [class*="block"], [role="group"], [role="region"]');
+          if (container) {
+            const h = container.querySelector('legend, h1, h2, h3, h4, h5, h6, .panel-title, .card-title, .card-header, .section-title, .panel-heading');
+            if (h && clean(h.textContent)) return clean(h.textContent);
+          }
+          let node: Element | null = el;
+          for (let hops = 0; node && hops < 6; hops++) {
+            let sib: Element | null = node.previousElementSibling;
+            while (sib) {
+              if (/^(H[1-6]|LEGEND)$/.test(sib.tagName) && clean(sib.textContent)) return clean(sib.textContent);
+              const inner = sib.querySelector ? sib.querySelector("h1, h2, h3, h4, h5, h6, legend") : null;
+              if (inner && clean(inner.textContent)) return clean(inner.textContent);
+              sib = sib.previousElementSibling;
+            }
+            node = node.parentElement;
+          }
+          return "";
+        };
+        const wantS = norm(arg.want);
+        if (!wantS || norm(sectionOf(shadow)) !== wantS || norm(sectionOf(r)) !== wantS) return false;
+        // 5. no test hook naming this field for another control.
+        if (arg.toks.length >= 2) {
+          for (const el of Array.from(document.querySelectorAll("[data-test-role], [data-testid], [data-test-id]"))) {
+            const hook = (el.getAttribute("data-test-role") || el.getAttribute("data-testid") || el.getAttribute("data-test-id") || "")
+              .toLowerCase().replace(/([a-z0-9])([A-Z])/g, "$1 $2").replace(/[^a-z]+/g, " ");
+            if (!hook || !arg.toks.every((t) => hook.includes(t))) continue;
+            const ctl = el.matches("input, select, textarea") ? el : el.querySelector("input, select, textarea");
+            if (ctl && ctl !== r) return false;
+          }
+        }
+        return true;
+      }, { r: handle, want, label, toks }).catch(() => false) as boolean;
+    } finally {
+      await handle.dispose().catch(() => null);
+    }
   }
 
   /**
@@ -8938,6 +9112,38 @@ export class RecipeAdapter extends BasePortalAdapter {
       await fs.promises.mkdir(this.pageShotDir, { recursive: true });
     }
     return this.pageShotDir;
+  }
+
+  /** #569 — THE CONFIRMATION SCREENSHOT: wait for the page to settle, then one masked full-page
+   *  picture through maskedFullPageScreenshot (#588's path, never a second one), with the run's known
+   *  secrets — the same set the fee stop and the staged review mask. Kept only on { ok: true }: a page
+   *  the mask cannot provably cover leaves no picture (the file is deleted there) and says why. Read
+   *  only: nothing is clicked, typed or navigated. Never throws. */
+  private async captureConfirmationShot(label: string): Promise<void> {
+    const page = this.page;
+    if (!page || typeof page.screenshot !== "function" || typeof page.evaluate !== "function") {
+      this.confirmationShot = { path: "", why: "no browser page to picture" };
+      return;
+    }
+    try {
+      await smartWait(page).catch(() => null);
+      const dir = await this.ensurePageShotDir();
+      const safe = String(label || "page").replace(/[^a-zA-Z0-9]+/g, "_").slice(0, 40) || "page";
+      const file = path.join(dir, `zzz-confirmation-${safe}.png`);
+      const secrets = Array.from(new Set([...secretValuesOf(this.fieldValues), String(this.fieldValues.accountNumber ?? ""), String(this.fieldValues.meterNumber ?? "")]
+        .map((v) => String(v ?? "").trim()).filter((v) => v.length >= 4)));
+      const m = await maskedFullPageScreenshot(page, secrets, file);
+      this.confirmationShot = m.ok ? { path: file, why: "" } : { path: "", why: m.why || "the secret mask could not be proven on this page" };
+    } catch (err) {
+      this.confirmationShot = { path: "", why: `the picture could not be taken (${err instanceof Error ? err.message.slice(0, 120) : String(err)})` };
+    }
+  }
+
+  /** #569 — the confirmation screenshot's fields for a step's data: the masked file, or why none. */
+  private confirmationShotData(): { confirmationShotPath?: string; confirmationShotRefused?: string } {
+    const c = this.confirmationShot;
+    if (!c) return {};
+    return c.path ? { confirmationShotPath: c.path } : { confirmationShotRefused: c.why };
   }
 
   private async capturePageShot(label: string, force = false): Promise<void> {

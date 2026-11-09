@@ -56,6 +56,15 @@ const SPACING_LABEL = new RegExp(
   String.raw`(?:RAFTER|TRUSS|JOIST|FRAMING)\s+SPACING\s*[:=]\s*(\d{1,2})\s*(?:"|''|”|IN\b\.?|INCH(?:ES)?)?\s*(?:O\.?\s*C\b\.?|ON[-\s]CENT(?:ER|RE))?`,
   "gi",
 );
+// A ROOF-PLANE SCHEDULE states the member, its size and spacing under one label: "TRUSS SIZE & SPACING
+// – 2x4 @ 24 in O.C.", "RAFTER SIZE/SPACING: 2X6 @ 16" O.C." (#336: every schedule on a real set said
+// TRUSS where the parse said rafter, and no reader took the member from the label).
+const SCHEDULE_LABEL = new RegExp(
+  String.raw`\b${MEMBER}\s+SIZE\s*(?:&|AND|\/)\s*SPACING\s*(?:[:=]|[-–—])?\s*${SIZE}\s*(?:${GRADE}\s*)?${SPACING}`,
+  "gi",
+);
+// "FRAMING TYPE: TRUSS", "ROOF FRAMING: (E) MANUFACTURED TRUSSES", "FRAMING MEMBER: RAFTERS".
+const FRAMING_TYPE_LABEL = /\b(?:ROOF\s+)?FRAMING(?:\s+(?:TYPE|MEMBERS?))?\s*[:=]\s*(?:\(E\)\s*|EXISTING\s+)?(?:(?:PRE[-\s]?)?(?:ENGINEERED|MANUFACTURED|FABRICATED)\s+|WOOD\s+|DIMENSIONAL\s+)?(RAFTERS?|TRUSS(?:ES)?)\b/gi;
 const GRADE_LABEL = new RegExp(
   String.raw`(?:LUMBER|WOOD|RAFTER|FRAMING)\s+(?:SPECIES\s*(?:\/|&|AND)\s*GRADE|GRADE\s*(?:\/|&|AND)\s*SPECIES|GRADE(?:\s+OF\s+WOOD)?|SPECIES)\s*[:=]\s*${GRADE}`,
   "gi",
@@ -165,6 +174,15 @@ export function readPlanFraming(planText: string): PlanFraming {
     const after = SPAN_AFTER_CALLOUT.exec(text.slice(c.end, c.end + 60));
     if (after) spanCands.push({ value: feet(after[1], after[2]), excerpt: `${c.excerpt}${after[0]}`.trim().slice(0, 200) });
   }
+  for (const m of text.matchAll(SCHEDULE_LABEL)) {
+    // Groups: 1 member; 2,3 size; 4,5 grade; 6 spacing.
+    const member = memberKind(m[1]);
+    if (member !== "joist") typeCands.push({ value: member, excerpt: excerptOf(m) });
+    sizeCands.push({ value: `${m[2]}x${m[3]}`, excerpt: excerptOf(m) });
+    spacingCands.push({ value: Number(m[6]), excerpt: excerptOf(m) });
+    if (m[4] && m[5]) gradeCands.push({ value: normalizeLumberGrade(m[4], m[5]), excerpt: excerptOf(m) });
+  }
+  for (const m of text.matchAll(FRAMING_TYPE_LABEL)) typeCands.push({ value: memberKind(m[1]) as "rafter" | "truss", excerpt: excerptOf(m) });
   for (const m of text.matchAll(SIZE_LABEL)) sizeCands.push({ value: `${m[1]}x${m[2]}`, excerpt: excerptOf(m) });
   for (const m of text.matchAll(SPACING_LABEL)) spacingCands.push({ value: Number(m[1]), excerpt: excerptOf(m) });
   for (const m of text.matchAll(GRADE_LABEL)) gradeCands.push({ value: normalizeLumberGrade(m[1], m[2]), excerpt: excerptOf(m) });

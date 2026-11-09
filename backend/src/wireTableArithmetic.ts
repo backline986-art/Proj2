@@ -32,6 +32,7 @@ import type { CodeReference, ProjectRecord, ReviewerFinding } from "../../shared
 import type { DesignTextSource } from "./designCriteria";
 import { AMPACITY, fillAdjustment, parseConductor, SMALL_CONDUCTOR_MAX, type ParsedConductor } from "./electricalSizing";
 import { nextStandardOcpd } from "./iowaPvWorksheet";
+import { sheetIdOf } from "./planAttachmentRead";
 
 export const WIRE_TABLE_FINDING_IDS = [
   "city.elec.wire-table-egc-undersized",
@@ -211,10 +212,8 @@ const TAG_MARK = /\b(?:WIRE\s+|CONDUCTOR\s+|CIRCUIT\s+)?TAG\s*(?:NO\.?\s*|#\s*)?
 // A row ends at the next tag, a notes block, a sentence break, or 260 characters.
 const ROW_END = /\bNOTES?\b|(?<!\b(?:IN|NO|SCH|MAX|MIN))\.\s/;
 
-function sheetOf(page: string): string {
-  const ids = new Set([...page.matchAll(/\bSHEET\s*(?:NO\.?|NUMBER|#|ID)?\s*[:#]?\s*([A-Z]{1,3}\s?-?\s?\d{1,2}(?:\.\d{1,2})?)\b/g)].map((m) => m[1].replace(/\s+/g, " ")));
-  return ids.size === 1 ? [...ids][0] : "";
-}
+// The sheet id a page's title block states: one predicate, shared with the attachment readers.
+const sheetOf = sheetIdOf;
 
 /** Every wire-table row the sheets state clearly enough to check; ambiguous rows are left out. */
 export function readWireTableRows(pages: Array<{ label: string; text: string }>, supplySideProject: boolean): WireTableRow[] {

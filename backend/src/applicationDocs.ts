@@ -16,6 +16,7 @@ import { resolvePermitPath, resolveStampRequirement, permitPathCallout, hasStamp
 // feeSchedules -> knowledgeBase -> applicationDocs import cycle (see applicationDocsAgency's header).
 import { agencyListReplacesLine, issuingAgencyDocumentList, type AgencyDocumentList, type AgencyLineStatusOf } from "./applicationDocsAgency";
 import { knownPowerClerkUtility } from "./utilityIdentity";
+import { describeQuotes, planSheets, readDeckMount } from "./planAttachmentRead";
 // Functions only (same cycle): the licences a document lists are licenceFor's (clients.ts).
 import { licenceJobState, stateLicenceLines } from "./clients";
 
@@ -1367,6 +1368,19 @@ ${hasMpu ? "\nMain panel / service upgrade (MPU) IS in scope — the electrical 
   );
 }
 
+// A DETAIL THAT EXISTS IS NOT A DETAIL THAT WAS READ (#336). "Yes" used to mean "a racking field was
+// parsed". An attachment detail that fastens into the decking, with no stated deck-mount basis, is not a
+// prescriptive attachment: the row says what the sheet says and asks for the basis, never Yes.
+function attachmentDetailAnswer(project: ProjectRecord): string {
+  const deck = readDeckMount(planSheets(project));
+  if (deck.basisMissing) {
+    return `[verify] — the attachment detail fastens into the roof decking, not the framing (${describeQuotes(deck.deckMount, 2)})`
+      + `${deck.toFraming.length ? `, while ${describeQuotes(deck.toFraming, 2)} puts the attachments on the framing members` : ""}`
+      + `; state the sheathing type/thickness and the deck mount's listed capacity, attach to the framing, or check with an engineer`;
+  }
+  return payload(project, "racking") ? "Yes" : "[verify]";
+}
+
 // The PRESCRIPTIVE solar application (with embedded prescriptive checklist). Generated
 // only on the prescriptive path. This is the application to upload when the project
 // meets prescriptive code — reduced fee, no plan review.
@@ -1400,7 +1414,7 @@ ${evaluatePrescriptiveCriteria(project).map((c) => `- ${c.label}: ${c.answer}${c
 - The itemized screen this tool carries is Oregon's (ORSC / BCD 440-5952). ${project.ahj || project.state || "This jurisdiction"} has its own rules, and printing Oregon's numbers here would state them as this AHJ's requirement.
 - Confirm ${project.ahj || "the AHJ"}'s prescriptive criteria against its own published checklist before filing, or record them on the jurisdiction's code profile so this screen fills in automatically next time.`}
 - Firefighter access/pathways shown: ${/pathway|fire|access/i.test(`${payload(project, "sitePlanNotesText")} ${payload(project, "splitPagesText")}`) ? "Yes" : "[verify]"}
-- Attachment/racking details included: ${payload(project, "racking") ? "Yes" : "[verify]"}
+- Attachment/racking details included: ${attachmentDetailAnswer(project)}
 
 If ANY item above is No, the project is NON-prescriptive — switch to the structural
 application, attach PE-stamped plans + a structural letter, and expect plan review + full fees.

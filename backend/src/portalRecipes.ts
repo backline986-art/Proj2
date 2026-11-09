@@ -22,6 +22,7 @@ import { nowIso } from "./time";
 import { batteryStatus } from "./batteryServiceFeeder";
 import { projectForTrack, sameRecordType } from "./permitProcess";
 import { parseStreetNumber, parseStreetName, parseStreetLine } from "../../portal-bot/src/addressParse";
+import { recordShapeOf } from "../../portal-bot/src/recordNumber";
 import { feeBracketFieldForLabel, feeBracketQuantityFields } from "./feeBracketFields";
 import { FEE_BRACKET_FIELD_PREFIX } from "../../portal-bot/src/feeBracketQuantity";
 import { filingValuationText } from "./valuation";
@@ -78,7 +79,63 @@ function mapRecipe(row: Row): PortalRecipeWithFlag {
     // bool() (not Boolean()) — a string "0" cell must read as false, never as trusted.
     autoSubmitEnabled: bool(row.auto_submit_enabled),
     discipline: s(row.discipline),
+    recordNumberShapes: recordNumberFormatsOf(row.record_number_formats_json).map((f) => f.shape),
   };
+}
+
+// ---------------------------------------------------------------------------
+// THIS PORTAL'S OWN RECORD-NUMBER FORMAT (#448). Owner: "Remember, universality."
+//
+// After a person confirms an unsure record number that was read off the page (the next-step panel's
+// "Confirm this number", #400), the number's SHAPE ("PGENM-#####": digit runs as #, letters and
+// separators literal) is stored on the recipe that filed it, so the next filing on that portal reads
+// its number as confidently as a hand-written Accela/PowerClerk shape (portal-bot recordNumber.ts).
+// Shapes only, never a number (a shape carries no digit). Stored on THIS recipe for THIS entity: a
+// borrowed recipe's run teaches nothing (the borrow strips the donor's shapes too), so a format
+// learned on one tenant is never applied to another. Rule 3: a learned shape lands `seeded`, and an
+// existing entry (a `verified` one above all) is never rewritten or dropped.
+// ---------------------------------------------------------------------------
+export interface RecordNumberFormat { shape: string; status: "seeded" | "verified"; learnedAt: string }
+
+const RECORD_NUMBER_FORMATS_CAP = 8;
+
+export function recordNumberFormatsOf(raw: unknown): RecordNumberFormat[] {
+  const list = parseJson<unknown[]>(s(raw) || "[]", []);
+  if (!Array.isArray(list)) return [];
+  return list
+    .map((e) => (e && typeof e === "object" ? e as Record<string, unknown> : {}))
+    .map((e) => ({ shape: s(e.shape).trim(), status: s(e.status) === "verified" ? "verified" as const : "seeded" as const, learnedAt: s(e.learnedAt) }))
+    // Re-validated on read: only what recordShapeOf itself would make is a shape.
+    .filter((e) => e.shape && recordShapeOf(e.shape.replace(/#/g, "1")) === e.shape);
+}
+
+/**
+ * Learn the record-number shape of a number a PERSON confirmed after filing on this recipe's portal.
+ * `entity` is the project the run filed for: the recipe must be its own (same state and AHJ, or same
+ * utility), never a borrowed donor's. Returns the shape learned, or null with nothing written: no
+ * recipe, another entity's recipe, a number with no structured shape (a bare digit run, a phone- or
+ * date-shaped value), a shape already stored, or the cap reached.
+ */
+export function learnRecordNumberFormat(
+  db: AppDb,
+  recipeId: string,
+  confirmedNumber: string,
+  entity: { state: string; ahj: string; utility: string },
+): string | null {
+  const shape = recordShapeOf(confirmedNumber);
+  if (!shape || !recipeId) return null;
+  const row = db.get<Row>("SELECT * FROM portal_recipes WHERE id = ?", [recipeId]);
+  if (!row) return null;
+  const own = s(row.scope_type) === "utility"
+    ? sameUtilityEntity(entity.state, s(row.utility), entity.utility) || sameEntity(entity.state, entity.utility, s(row.state), s(row.utility))
+    : sameEntity(entity.state, entity.ahj, s(row.state), s(row.ahj));
+  if (!own) return null;
+  const formats = recordNumberFormatsOf(row.record_number_formats_json);
+  if (formats.some((f) => f.shape === shape) || formats.length >= RECORD_NUMBER_FORMATS_CAP) return null;
+  // Append only: every stored entry is written back exactly as it was read.
+  const next = [...formats, { shape, status: "seeded" as const, learnedAt: nowIso() }];
+  db.run("UPDATE portal_recipes SET record_number_formats_json = ? WHERE id = ?", [JSON.stringify(next), recipeId]);
+  return shape;
 }
 
 // ---------------------------------------------------------------------------
@@ -641,7 +698,8 @@ export function findBorrowableRecipe(
       reject(`its record type "${recordType}" differs from the one ${ahj} recorded (${[...ownTypes].join(", ")})`);
       continue;
     }
-    eligible.push({ recipe: donor, learnedFor, learnedForState: donor.state, portalHost: portalHostOf(target), recordType, discipline });
+    // #448: the donor's learned record-number shapes are its own tenant's, never this one's.
+    eligible.push({ recipe: { ...donor, recordNumberShapes: [] }, learnedFor, learnedForState: donor.state, portalHost: portalHostOf(target), recordType, discipline });
   }
   if (!eligible.length) return none(rejected.length ? "no recipe on this portal qualifies" : "no complete recipe for this portal and discipline exists", rejected);
   const types = new Set(eligible.map((e) => e.recordType.toLowerCase()));

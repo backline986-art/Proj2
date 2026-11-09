@@ -77,7 +77,7 @@ import { checkStatusWithAdapter, runCorrectionReopen, stageWithAccela, stageWith
 import { readRecordLinkSignedIn } from "../../portal-bot/src/recordLinkRead";
 import { liveReviewSessionUnder } from "../../portal-bot/src/reviewSession";
 import { portalAutomationDisabled, resolveHeadless } from "../../portal-bot/src/browser";
-import { findCompleteRecipeForProject, findAnyRecipeForProject, resolveRecipeFieldValues, markPortalRecipeForRerecord, demoteOnReplayFailure, collectHealedSteps, persistHealedSteps, getPortalRecipe, portalEntityEvidence, recipeHostFit, findBorrowableRecipe, replayFailureBlamesRecipe, recipeStepsSignature, isNotServedRecipe, recordPortalNotServed, type BorrowedRecipeChoice } from "./portalRecipes";
+import { learnRecordNumberFormat, findCompleteRecipeForProject, findAnyRecipeForProject, resolveRecipeFieldValues, markPortalRecipeForRerecord, demoteOnReplayFailure, collectHealedSteps, persistHealedSteps, getPortalRecipe, portalEntityEvidence, recipeHostFit, findBorrowableRecipe, replayFailureBlamesRecipe, recipeStepsSignature, isNotServedRecipe, recordPortalNotServed, type BorrowedRecipeChoice } from "./portalRecipes";
 import { notServedInResult } from "../../shared/src/portalNotServed";
 import { notifyClientOfStatusChange, shouldNotifyClient } from "./clientNotifier";
 import { notifyClientOfFiling } from "./clientFilingUpdate";
@@ -127,7 +127,9 @@ import { isPortalPaused } from "./portalPause";
 // imports repository, and the circular-import guard in CLAUDE.md is about that edge.
 import { ensureCheckTarget, refuseUtilityUrlOnPermitTarget, getSubmittalTracks, isTrackDone, requiredTracks, SUBMITTAL_TRACK_TYPES, trackHasFiling, trackPermitTypes, trackSubmittedAndTracked, trackSubmittedSentence, unfinishedTracks, unfinishedUnattributedTargets } from "./submittalTracks";
 import { recordStagedReview, supersedeStagedReviews, takeStagedReviewCapture } from "./stagedReviews";
-import { projectSecretValues } from "./projectSecrets";
+import { saveSubmissionConfirmation } from "./submissionConfirmation";
+import { projectSecretValues, projectSecretValuesById } from "./projectSecrets";
+import { lastUnreadableByTarget, scrubUnreadableReason, UNREADABLE_AUDIT_ACTION } from "./lastUnreadable";
 import { recordTimelineSample, trackForTarget } from "./timelineSamples";
 import { buildApplicationDocumentPackage, findApplicationProfile } from "./applicationDocs";
 import { ensurePlanSetSplit } from "./docSplitter";
@@ -553,6 +555,8 @@ function mapPermitTarget(row: Row): PermitCheckTarget {
     portalPlatform: text(row.portal_platform),
     trackingUrl: row.tracking_url ? text(row.tracking_url) : undefined,
     readGap: text(row.read_gap) || undefined,
+    // Filled per project by withLastUnreadable (#173): the newest check that read nothing, and why.
+    lastUnreadable: null,
     // Only while the filing is finished: a gap from an earlier issued reading that a later
     // correction undid is not this filing's news any more.
     issuedDocsGap: isFinishedOutcome(trackKind(text(row.target_type), text(row.permit_type)), text(row.latest_outcome))
@@ -572,6 +576,15 @@ function withIssuedDocuments(db: AppDb, projectId: string, targets: PermitCheckT
     const docs = byTarget.get(t.id);
     return docs?.length ? { ...t, issuedDocuments: docs, issuedDocsGap: undefined } : t;
   });
+}
+
+/** Each target's newest check that read nothing, while no later reading superseded it (#173) — one
+ *  pass over the project's own audit rows (lastUnreadable.ts), never another project's. */
+function withLastUnreadable(db: AppDb, projectId: string, targets: PermitCheckTarget[]): PermitCheckTarget[] {
+  if (!targets.length) return targets;
+  const byTarget = lastUnreadableByTarget(db, projectId, projectSecretValuesById(db, projectId));
+  if (!byTarget.size) return targets;
+  return targets.map((t) => (byTarget.has(t.id) ? { ...t, lastUnreadable: byTarget.get(t.id)! } : t));
 }
 
 function mapPermitStatusCheck(row: Row): PermitStatusCheck {
@@ -1411,9 +1424,9 @@ export function getProjectDetail(db: AppDb, projectId: string): ProjectDetail {
       .query<Row>("SELECT * FROM human_review_items WHERE project_id = ? ORDER BY status DESC, created_at DESC", [projectId])
       .map(mapReview),
     corrections,
-    permitCheckTargets: withIssuedDocuments(db, projectId, db
+    permitCheckTargets: withLastUnreadable(db, projectId, withIssuedDocuments(db, projectId, db
       .query<Row>("SELECT * FROM permit_check_targets WHERE project_id = ? ORDER BY active DESC, created_at DESC", [projectId])
-      .map(mapPermitTarget)),
+      .map(mapPermitTarget))),
     permitStatusChecks: db
       .query<Row>("SELECT c.*, t.target_type, t.permit_type FROM permit_status_checks c LEFT JOIN permit_check_targets t ON t.id = c.target_id WHERE c.project_id = ? ORDER BY c.created_at DESC LIMIT 50", [projectId])
       .map(mapPermitStatusCheck),
@@ -6685,11 +6698,11 @@ export async function recordPermitStatusCheck(
   // check it wrote.
   if (target && source !== "email" && shouldSkipEmptyRead({ gatheredNothing: resolved.gatheredNothing, source, alreadyKnown: Boolean(text(target.latest_outcome)) })) {
     const track = trackKind(text(target.target_type), text(target.permit_type));
-    db.transaction(() => rescheduleUnreadTarget(db, projectId, target, track, resolved.why, nowIso()));
+    const why = db.transaction(() => rescheduleUnreadTarget(db, projectId, target, track, resolved.why, nowIso()));
     const kept = text(target.latest_status_label) || text(target.latest_outcome);
     return {
       ...getProjectDetail(db, projectId),
-      unreadable: `The portal gave no readable status (${resolved.why}) — nothing recorded.${kept ? ` The filing keeps its last known status: ${kept}.` : ""}`,
+      unreadable: `The portal gave no readable status (${why}) — nothing recorded.${kept ? ` The filing keeps its last known status: ${kept}.` : ""}`,
     };
   }
   const rawStatusText = resolved.text;
@@ -7074,8 +7087,11 @@ function sameNoticeAsPolledCorrection(db: AppDb, targetId: string, emailAt: stri
 
 /** WHAT A CHECK THAT READ NOTHING STILL DOES (shouldSkipEmptyRead), at both doors: it ALWAYS
  *  reschedules — a skip that left next_check_at alone kept an unreadable target permanently due
- *  and re-attempted on every sweep — and audits why. Nothing else on the target moves. */
-function rescheduleUnreadTarget(db: AppDb, projectId: string, target: Row, track: TrackKind | null, why: string, ts: string): void {
+ *  and re-attempted on every sweep — and audits why. Nothing else on the target moves. The reason
+ *  is scrubbed HERE, where it is recorded (rule 2, #173: the card shows it to staff), and the
+ *  scrubbed words are returned for the caller's own reply. */
+function rescheduleUnreadTarget(db: AppDb, projectId: string, target: Row, track: TrackKind | null, rawWhy: string, ts: string): string {
+  const why = scrubUnreadableReason(rawWhy, projectSecretValuesById(db, projectId)) || "no reason was recorded";
   const days = effectiveCheckDays(target.check_frequency_days, text(target.latest_outcome));
   db.run("UPDATE permit_check_targets SET last_checked_at = ?, next_check_at = ?, updated_at = ? WHERE id = ?", [
     ts,
@@ -7083,7 +7099,8 @@ function rescheduleUnreadTarget(db: AppDb, projectId: string, target: Row, track
     ts,
     text(target.id),
   ]);
-  addAuditLog(db, projectId, "system", "permit monitor", "permit_status.unreadable", { targetId: text(target.id), track, reason: why });
+  addAuditLog(db, projectId, "system", "permit monitor", UNREADABLE_AUDIT_ACTION, { targetId: text(target.id), track, reason: why });
+  return why;
 }
 
 /** The text a check classifies, and whether it GATHERED anything: `gatheredNothing` is true only
@@ -7810,7 +7827,8 @@ async function checkPermitTargets(
     // audits it. "no portal URL/recipe" is said only when there truly was neither.
     let unreadableReason = "";
     let portalRead = false; // a recipe or platform scrape was attempted
-    const noteReason = (r: string) => { if (r && !unreadableReason) unreadableReason = r; };
+    // Scrubbed where it is made (rule 2, #173): it reaches the log, the click's reply and the card.
+    const noteReason = (r: string) => { if (r && !unreadableReason) unreadableReason = scrubUnreadableReason(r, projectSecretValuesById(db, projectId)); };
     const applicationNumbers = [text(target.application_number), text(target.permit_number)].filter(Boolean);
     const projectDetail = getProjectDetail(db, projectId);
     const clientId = projectDetail.project.clientId ?? "";
@@ -8137,8 +8155,8 @@ async function checkPermitTargets(
           : `skipping status check for target ${text(target.id)}: ${why}`,
         { projectId },
       );
-      rescheduleUnreadTarget(db, projectId, target, track, why, now);
-      results.push(permitCheckResult(db, target, "unreadable", { reason: why }));
+      const said = rescheduleUnreadTarget(db, projectId, target, track, why, now);
+      results.push(permitCheckResult(db, target, "unreadable", { reason: said }));
       if (pacing) pacing.lastAt.set(paceKey, Date.now());
       continue;
     }
@@ -9897,7 +9915,7 @@ export async function prepareSubmission(
   // OLDER staging row and the outcome below would overwrite the run's 'submitted' (live 2026-10-14,
   // Lincoln County: the filing went, the run read failed, the number was typed by hand). So a capture
   // that arrives first waits here, and is recorded right after the outcome, through the same door.
-  type SubmitCapture = { recordNumber: string; confidence: string; source?: string; reason: string; recordLink: string; candidates?: Array<{ recordNumber: string; recordLink: string; source: string }>; draftCreated?: ObservedDraft };
+  type SubmitCapture = { recordNumber: string; confidence: string; source?: string; reason: string; recordLink: string; candidates?: Array<{ recordNumber: string; recordLink: string; source: string }>; draftCreated?: ObservedDraft; completionConfirmed?: boolean; confirmationShotPath?: string };
   let runOutcomeRecorded = false;
   const capturesBeforeOutcome: SubmitCapture[] = [];
   const recordSubmitCapture = (capture: SubmitCapture): void => {
@@ -9937,6 +9955,16 @@ export async function prepareSubmission(
         const held = recordSubmitCaptureCandidates(db, runId, capture.candidates ?? [], capture.reason);
         addAuditLog(db, projectId, "portal_bot", "submit capture", "submission.record_number_unread", {
           track, reason: capture.reason.slice(0, 200), candidates: held,
+        });
+      }
+      // #569 — THE PERSON'S FILING FROM THE REVIEW WINDOW, PICTURED: the masked screenshot of the page
+      // portal-bot judged the completion of their submit, filed on the project and linked from this
+      // run's filing record. Named by the number only when it was read confidently off that page —
+      // a candidate or an unread page is "no-number-read", never a number nobody read.
+      if (capture.completionConfirmed && capture.confirmationShotPath) {
+        saveSubmissionConfirmation(db, {
+          projectId, submissionId, track: track ?? "permit", runId, filedBy: "person", shotPath: capture.confirmationShotPath,
+          recordNumber: capture.confidence === "high" && capture.source !== "account_list" ? capture.recordNumber : "",
         });
       }
     } catch { /* capture is a convenience; it must never disturb the run */ }
@@ -10948,6 +10976,29 @@ export async function prepareSubmission(
         });
     });
 
+    // #569 — THE CONFIRMATION SCREENSHOT OF AN APPROVED FILING THE PORTAL CONFIRMED: portal-bot's
+    // masked picture of the completion page (kept only when the mask was proven), filed on the project
+    // as a submission_confirmation document named by the number read off that page, and linked from
+    // this filing record. A click the portal did not confirm keeps the outcome shot alone, and its
+    // record already says it could not be confirmed — no confirmation is claimed for it. After the
+    // transaction: a picture that cannot be filed never undoes the run's record.
+    if (clicked && acceptedFiling) {
+      const shotPath = String((result as Record<string, unknown>).confirmationShotPath ?? "").trim();
+      const refusedWhy = String((result as Record<string, unknown>).confirmationShotRefused ?? "").trim();
+      const saved = saveSubmissionConfirmation(db, {
+        projectId, submissionId, track: permitTypeTag, runId, filedBy: "automation", shotPath,
+        recordNumber: capturedPermitNumber || capturedConfirmation,
+      });
+      try {
+        db.run("UPDATE submissions SET notes = notes || ? WHERE id = ?", [
+          saved.documentId
+            ? " Confirmation screenshot (secrets masked) saved to the project's documents."
+            : ` No masked confirmation screenshot was kept (${(refusedWhy || saved.why).slice(0, 160)}); the completion page is the run's outcome shot.`,
+          submissionId,
+        ]);
+      } catch { /* the note is a convenience; the record above stands */ }
+    }
+
     // THE CLIENT HEARS WE FILED (#490) — only on a filing the portal CONFIRMED (acceptedFiling). A
     // click the portal did not confirm (submitted_unconfirmed) may not have filed, so it says nothing
     // until a person confirms it through captureConfirmation, which then announces it. Once per
@@ -11455,6 +11506,19 @@ export function captureConfirmation(
     via: "capture",
   });
   learnFromSubmissionConfirmation(db, detail.project, input);
+  // THE PORTAL'S OWN RECORD-NUMBER FORMAT (#448): a number a PERSON confirmed that was read off the
+  // page (one of this run's held candidates) teaches its shape to the recipe that filed it, so the
+  // next filing there is read without asking. A typed number teaches nothing (a typo would make a
+  // wrong number look certain), nor does the automatic read (it held no candidates). Never throws.
+  try {
+    const held = parseJson<{ candidates?: Array<{ recordNumber?: string }> }>(text(run.submit_capture_candidates) || "{}", {});
+    const confirmed = filingNumber.toUpperCase();
+    const recipeId = text(run.recipe_id);
+    if (confirmed && recipeId && (held.candidates ?? []).some((c) => String(c?.recordNumber ?? "").trim().toUpperCase() === confirmed)) {
+      const shape = learnRecordNumberFormat(db, recipeId, filingNumber, { state: projectForTarget.state, ahj: projectForTarget.ahj, utility: projectForTarget.utility });
+      if (shape) addAuditLog(db, projectId, "system", "submit capture", "portal.record_number_format_learned", { runId: portalRunId, recipeId, shape });
+    }
+  } catch { /* learning a format is a convenience; it never disturbs a confirmation */ }
   return getProjectDetail(db, projectId);
 }
 

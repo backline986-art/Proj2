@@ -2,6 +2,7 @@ import type { ParserLlmExtraction } from "../../shared/src/types";
 import { classifyRoofCovering, tileAttachmentFromText, tileSubtype } from "./roofCovering";
 import { readPlanFraming, readStatedPermitPath, type PlanFact } from "./planFraming";
 import { pathWordingScope } from "./permitPath";
+import { planSheets, readDeckMount } from "./planAttachmentRead";
 
 /** Explicit plan facts only. This supplements the text intake, including sheets
  * beyond the model's text budget. It never turns a missing fact into compliance. */
@@ -65,7 +66,13 @@ export function supplementStructuralIntake(result: ParserLlmExtraction, planText
     fields[key] = { value: fact.value, confidence: 0.95, evidence: { source: "plan_set", sheet, excerpt: fact.excerpt } };
   };
   const empty = (key: string) => fields[key]?.value == null || String(fields[key]?.value).trim() === "";
-  if (empty("framingType")) planFact("framingType", framing.framingType);
+  // The plans' framing type also corrects the model toward RAFTER, the stricter arm (span table and
+  // the rafter exception; a truss is exempt from both). Plans that say truss where the model said
+  // rafter keep the model's rafter: that disagreement is a review item (codeReviewRules
+  // city.struct.framing-type-conflict, #336), never a silent relaxation.
+  if (empty("framingType") || (framing.framingType?.value === "rafter" && /\btruss/i.test(String(fields.framingType.value)) && !/\brafter/i.test(String(fields.framingType.value)))) {
+    planFact("framingType", framing.framingType);
+  }
   if (empty("roofRafterSpacing")) planFact("roofRafterSpacing", framing.roofRafterSpacing);
   if (empty("roofRafterSize")) planFact("roofRafterSize", framing.roofRafterSize);
   if (empty("woodGrade")) planFact("woodGrade", framing.woodGrade);
@@ -88,6 +95,14 @@ export function supplementStructuralIntake(result: ParserLlmExtraction, planText
   add("attachmentToFraming", /SOLAR PANELS ARE TO BE MOUNTED TO THE ROOF\s*FRAMING/i, () => "yes");
   add("attachmentSpacingIn", /(?:NEW\s+)?PV ATTACHMENTS AT\s*(\d+)'[-\s]*(\d+)"\s*O\.?C/i, m => Number(m[1]) * 12 + Number(m[2]));
   add("attachmentEdgeSpacingIn", /ROOF ATTACHMENTS SHALL BE SPACED NO\s*GREATER THAN\s*(\d+)\s*IN\.?\s*OC IN ANY DIRECTION\s*WHERE LOCATED WITHIN\s*3\s*FT\.?\s*OF A ROOF\s*EDGE, HIP, EAVE OR RIDGE/i, m => Number(m[1]));
+  // A DECK MOUNT IS NOT AN ATTACHMENT TO THE FRAMING (#336). When an attachment detail fastens into
+  // the decking / sheathing, a general "mounted to the roof framing" note (or the model reading one)
+  // cannot answer the checklist's attached-to-framing fact: the sheets contradict each other, so the
+  // fact is left unread for a person, never a Yes.
+  const deck = readDeckMount(planSheets({ parserSnapshot: { planSetExtractedText: planText } }));
+  if (deck.deckMount.length && fields.attachmentToFraming && /^(?:yes|true)$/i.test(String(fields.attachmentToFraming.value ?? "").trim())) {
+    delete fields.attachmentToFraming;
+  }
   add("manufacturerInstallation", /RACKING SYSTEM\s*&\s*PV ARRAY WILL BE INSTALLED ACCORDING TO CODE[-\s]*COMPLIANT INSTALLATION MANUAL/i, () => "yes");
   return { ...result, fields };
 }

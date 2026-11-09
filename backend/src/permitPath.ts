@@ -22,6 +22,7 @@
 import type { PrescriptiveLimits, ProjectRecord } from "../../shared/src/types";
 import { assumedRoofLayersNote, classifyRoofCovering, oregonRoofingRowQualifies } from "./roofCovering";
 import { engineeredGroundMount } from "./mountKind";
+import { describeSnowLabelIssue, planSheets, readSnowLabels } from "./planAttachmentRead";
 
 export type PermitPath = "prescriptive" | "engineered" | "unknown";
 
@@ -848,6 +849,15 @@ export function evaluatePrescriptiveCriteria(
   });
 
   maxRow("snowLoad", "Ground snow load", "snow", L.maxGroundSnowPsf, "psf", (n) => `${n} psf`);
+  // THE SNOW ROW KEYS ON GROUND SNOW (#336). When the sheets label the parsed value ROOF snow (on one
+  // sheet, or on every sheet that states it), the row has not read a ground snow load: it answers
+  // [verify], never Yes. A No stays a No (a ground snow load is the larger of the two).
+  const snowRow = rows[rows.length - 1];
+  const snowIssue = snowRow.answer === "Yes" ? readSnowLabels(planSheets(project), num(project, "snow")) : null;
+  if (snowIssue) {
+    snowRow.answer = "[verify]";
+    snowRow.detail = `${snowRow.detail}; ${describeSnowLabelIssue(snowIssue)}: confirm the ground snow load, or check with an engineer`;
+  }
 
   // Wind exposure.
   const wind = snap(project, "wind").toUpperCase().replace(/[^A-D]/g, "");
