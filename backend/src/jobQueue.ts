@@ -28,6 +28,10 @@ export type JobType =
   // that exists but has none on file (codeProfiles.ensureDesignCriteriaResearched).
   | "design_criteria_research"
   | "fee_research"
+  // A STATE'S PERMIT-FEE RULES (#663): its surcharge on permit fees / a solar fee cap, cited verbatim
+  // and landed seeded, the first time a permit job lands in a state with none on file
+  // (stateFeeResearch.ensureStateFeeRulesResearched).
+  | "state_fee_research"
   // THE PER-JOB PERMIT-PROCESS LOOKUP (permitProcessLookup.ts): agency, combo vs separate, portal +
   // record type, documents and fees per permit — cited, seeded — for an AHJ with no process of its own.
   | "permit_process_lookup"
@@ -908,6 +912,11 @@ async function runClaimedJob(db: AppDb, job: JobRecord): Promise<boolean> {
       // with their citations only; never a verified row (codeProfiles.runDesignCriteriaResearch).
       const { runDesignCriteriaResearch } = await import("./codeProfiles");
       result = await runDesignCriteriaResearch(db, job.payload as Record<string, unknown>);
+    } else if (job.jobType === "state_fee_research") {
+      // One web-grounded lookup for the state's statute; only verbatim, page-checked rules land, as
+      // seeded, through the one write path that never touches a verified row (rule 3).
+      const { runStateFeeResearch } = await import("./stateFeeResearch");
+      result = await runStateFeeResearch(db, job.payload as Record<string, unknown>);
     } else if (job.jobType === "fee_research") {
       // Autonomous fee-schedule onboarding: web-research the jurisdiction's (or
       // utility's) published fee schedule and land it through the REAL save path —
