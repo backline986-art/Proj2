@@ -65,6 +65,7 @@ import type {
   SubmitGateReport,
   SubmittalTrack,
   SubmittalTrackType,
+  StatePermitRule,
 } from "../../shared/src/types";
 import { correctionFilingStamp, correctionOverdueSql, touchProjectMetrics, type CorrectionFilingInput } from "./kpi";
 import fs from "node:fs";
@@ -74,8 +75,9 @@ import { closeStageCancel, openStageCancel } from "./stageCancel";
 import os from "node:os";
 import { checkStatusWithAdapter, runCorrectionReopen, stageWithAccela, stageWithMockPortal, stageWithPowerClerk, stageWithRecipe } from "../../portal-bot/src/index";
 import { readRecordLinkSignedIn } from "../../portal-bot/src/recordLinkRead";
+import { liveReviewSessionUnder } from "../../portal-bot/src/reviewSession";
 import { portalAutomationDisabled, resolveHeadless } from "../../portal-bot/src/browser";
-import { findCompleteRecipeForProject, findAnyRecipeForProject, resolveRecipeFieldValues, markPortalRecipeForRerecord, demoteOnReplayFailure, collectHealedSteps, persistHealedSteps, getPortalRecipe, portalEntityEvidence, recipeHostFit, findBorrowableRecipe, replayFailureBlamesRecipe, recipeStepsSignature, isNotServedRecipe, recordPortalNotServed, type BorrowedRecipeChoice } from "./portalRecipes";
+import { learnRecordNumberFormat, findCompleteRecipeForProject, findAnyRecipeForProject, resolveRecipeFieldValues, markPortalRecipeForRerecord, demoteOnReplayFailure, collectHealedSteps, persistHealedSteps, getPortalRecipe, portalEntityEvidence, recipeHostFit, findBorrowableRecipe, replayFailureBlamesRecipe, recipeStepsSignature, isNotServedRecipe, recordPortalNotServed, type BorrowedRecipeChoice } from "./portalRecipes";
 import { notServedInResult } from "../../shared/src/portalNotServed";
 import { notifyClientOfStatusChange, shouldNotifyClient } from "./clientNotifier";
 import { notifyClientOfFiling } from "./clientFilingUpdate";
@@ -86,6 +88,7 @@ import { installerHandoffNoteBody, sendInstallerHandoff } from "./installerHando
 import { accelaModulesForNumber, detectPlatform, publicPermitStatusCheck, searchAccelaRecordByNumber } from "./publicPermitStatus";
 import { planSetTextForProject, projectDocsByType, DOCS_DIR, PLAN_TEXT_DOC_TYPES } from "./projectDocuments";
 import { activeStructuralLetterConfirmation, structuralLetterState } from "./structuralLetter";
+import { statePermitRulesFor } from "./stateRules";
 import type { DesignTextSource } from "./designCriteria";
 import { describeCited, lookedUpRecordType, issuingAgencyFor, permitAnswerForTrack, stateRulesFor, isStatewidePortalUrl, permitProcessKey, projectForTrack, refuseTrackIssuerValue, trackIssuer } from "./permitProcess";
 import { statewideDecisionFor, statewideUrlRefusal } from "./statewideEvidence";
@@ -124,7 +127,9 @@ import { isPortalPaused } from "./portalPause";
 // imports repository, and the circular-import guard in CLAUDE.md is about that edge.
 import { ensureCheckTarget, refuseUtilityUrlOnPermitTarget, getSubmittalTracks, isTrackDone, requiredTracks, SUBMITTAL_TRACK_TYPES, trackHasFiling, trackPermitTypes, trackSubmittedAndTracked, trackSubmittedSentence, unfinishedTracks, unfinishedUnattributedTargets } from "./submittalTracks";
 import { recordStagedReview, supersedeStagedReviews, takeStagedReviewCapture } from "./stagedReviews";
-import { projectSecretValues } from "./projectSecrets";
+import { saveSubmissionConfirmation } from "./submissionConfirmation";
+import { projectSecretValues, projectSecretValuesById } from "./projectSecrets";
+import { lastUnreadableByTarget, scrubUnreadableReason, UNREADABLE_AUDIT_ACTION } from "./lastUnreadable";
 import { recordTimelineSample, trackForTarget } from "./timelineSamples";
 import { buildApplicationDocumentPackage, findApplicationProfile } from "./applicationDocs";
 import { ensurePlanSetSplit } from "./docSplitter";
@@ -248,7 +253,11 @@ export function buildReviewerReportFor(db: AppDb, project: ProjectRecord): Revie
   // A named person's confirmation of the engineer's letter (#198; owner ruling 2026-10-08) — the
   // only thing that turns the stamped-structural hold into "verify the seal". Text never does.
   const structuralCertification = activeStructuralLetterConfirmation(db, project.id);
-  return buildReviewerReport(project, { codeContext, codeProfileRow, uploadedDocTypes, documentTexts: designDocumentTexts(db, project.id), pvWorksheet: filedPvWorksheetInput(db, project), structuralCertification });
+  // The job state's cited structural rules (state_permit_rules, #595 PR2). A failed read leaves them
+  // out, which raises nothing new: the rules only ever add findings.
+  let stateRules: StatePermitRule[] = [];
+  try { stateRules = statePermitRulesFor(db, project.state, "structural"); } catch { stateRules = []; }
+  return buildReviewerReport(project, { codeContext, codeProfileRow, uploadedDocTypes, documentTexts: designDocumentTexts(db, project.id), pvWorksheet: filedPvWorksheetInput(db, project), structuralCertification, stateRules });
 }
 
 // WHAT HOLDS THIS FILING: ONE ANSWER (#214). The text report with the cached vision verdicts folded
@@ -555,6 +564,8 @@ function mapPermitTarget(row: Row): PermitCheckTarget {
     portalPlatform: text(row.portal_platform),
     trackingUrl: row.tracking_url ? text(row.tracking_url) : undefined,
     readGap: text(row.read_gap) || undefined,
+    // Filled per project by withLastUnreadable (#173): the newest check that read nothing, and why.
+    lastUnreadable: null,
     // Only while the filing is finished: a gap from an earlier issued reading that a later
     // correction undid is not this filing's news any more.
     issuedDocsGap: isFinishedOutcome(trackKind(text(row.target_type), text(row.permit_type)), text(row.latest_outcome))
@@ -574,6 +585,15 @@ function withIssuedDocuments(db: AppDb, projectId: string, targets: PermitCheckT
     const docs = byTarget.get(t.id);
     return docs?.length ? { ...t, issuedDocuments: docs, issuedDocsGap: undefined } : t;
   });
+}
+
+/** Each target's newest check that read nothing, while no later reading superseded it (#173) — one
+ *  pass over the project's own audit rows (lastUnreadable.ts), never another project's. */
+function withLastUnreadable(db: AppDb, projectId: string, targets: PermitCheckTarget[]): PermitCheckTarget[] {
+  if (!targets.length) return targets;
+  const byTarget = lastUnreadableByTarget(db, projectId, projectSecretValuesById(db, projectId));
+  if (!byTarget.size) return targets;
+  return targets.map((t) => (byTarget.has(t.id) ? { ...t, lastUnreadable: byTarget.get(t.id)! } : t));
 }
 
 function mapPermitStatusCheck(row: Row): PermitStatusCheck {
@@ -1413,9 +1433,9 @@ export function getProjectDetail(db: AppDb, projectId: string): ProjectDetail {
       .query<Row>("SELECT * FROM human_review_items WHERE project_id = ? ORDER BY status DESC, created_at DESC", [projectId])
       .map(mapReview),
     corrections,
-    permitCheckTargets: withIssuedDocuments(db, projectId, db
+    permitCheckTargets: withLastUnreadable(db, projectId, withIssuedDocuments(db, projectId, db
       .query<Row>("SELECT * FROM permit_check_targets WHERE project_id = ? ORDER BY active DESC, created_at DESC", [projectId])
-      .map(mapPermitTarget)),
+      .map(mapPermitTarget))),
     permitStatusChecks: db
       .query<Row>("SELECT c.*, t.target_type, t.permit_type FROM permit_status_checks c LEFT JOIN permit_check_targets t ON t.id = c.target_id WHERE c.project_id = ? ORDER BY c.created_at DESC LIMIT 50", [projectId])
       .map(mapPermitStatusCheck),
@@ -6695,11 +6715,11 @@ export async function recordPermitStatusCheck(
   // check it wrote.
   if (target && source !== "email" && shouldSkipEmptyRead({ gatheredNothing: resolved.gatheredNothing, source, alreadyKnown: Boolean(text(target.latest_outcome)) })) {
     const track = trackKind(text(target.target_type), text(target.permit_type));
-    db.transaction(() => rescheduleUnreadTarget(db, projectId, target, track, resolved.why, nowIso()));
+    const why = db.transaction(() => rescheduleUnreadTarget(db, projectId, target, track, resolved.why, nowIso()));
     const kept = text(target.latest_status_label) || text(target.latest_outcome);
     return {
       ...getProjectDetail(db, projectId),
-      unreadable: `The portal gave no readable status (${resolved.why}) — nothing recorded.${kept ? ` The filing keeps its last known status: ${kept}.` : ""}`,
+      unreadable: `The portal gave no readable status (${why}) — nothing recorded.${kept ? ` The filing keeps its last known status: ${kept}.` : ""}`,
     };
   }
   const rawStatusText = resolved.text;
@@ -7084,8 +7104,11 @@ function sameNoticeAsPolledCorrection(db: AppDb, targetId: string, emailAt: stri
 
 /** WHAT A CHECK THAT READ NOTHING STILL DOES (shouldSkipEmptyRead), at both doors: it ALWAYS
  *  reschedules — a skip that left next_check_at alone kept an unreadable target permanently due
- *  and re-attempted on every sweep — and audits why. Nothing else on the target moves. */
-function rescheduleUnreadTarget(db: AppDb, projectId: string, target: Row, track: TrackKind | null, why: string, ts: string): void {
+ *  and re-attempted on every sweep — and audits why. Nothing else on the target moves. The reason
+ *  is scrubbed HERE, where it is recorded (rule 2, #173: the card shows it to staff), and the
+ *  scrubbed words are returned for the caller's own reply. */
+function rescheduleUnreadTarget(db: AppDb, projectId: string, target: Row, track: TrackKind | null, rawWhy: string, ts: string): string {
+  const why = scrubUnreadableReason(rawWhy, projectSecretValuesById(db, projectId)) || "no reason was recorded";
   const days = effectiveCheckDays(target.check_frequency_days, text(target.latest_outcome));
   db.run("UPDATE permit_check_targets SET last_checked_at = ?, next_check_at = ?, updated_at = ? WHERE id = ?", [
     ts,
@@ -7093,7 +7116,8 @@ function rescheduleUnreadTarget(db: AppDb, projectId: string, target: Row, track
     ts,
     text(target.id),
   ]);
-  addAuditLog(db, projectId, "system", "permit monitor", "permit_status.unreadable", { targetId: text(target.id), track, reason: why });
+  addAuditLog(db, projectId, "system", "permit monitor", UNREADABLE_AUDIT_ACTION, { targetId: text(target.id), track, reason: why });
+  return why;
 }
 
 /** The text a check classifies, and whether it GATHERED anything: `gatheredNothing` is true only
@@ -7662,6 +7686,58 @@ function interleaveByHost(targets: Row[]): Row[] {
 
 type PermitCheckPacing = { gapMs: number; sleep: (ms: number) => Promise<void>; lastAt: Map<string, number> };
 
+// ── A STATUS READ NEVER TAKES A PORTAL SESSION A PERSON OR A RUN HOLDS (#516) ─────────────────────
+// Some portals allow one session per account and end the older one when a second sign-in appears
+// (PowerClerk: recipeAdapter reports "THE PORTAL ENDED THIS SESSION mid-run … commonly a concurrent
+// login with the same account"). The monitor signs in with the CLIENT'S OWN login, so a read that
+// signed in while that account was in use would log a person out mid-review in the hand-over window
+// (#333 / #378: the submit is theirs, rule 1), or end a stage / learn run partway and leave a partial
+// draft (staging is not idempotent portal-side). So while the client's account is in use, no
+// signed-in door opens: the read waits for the next check (rescheduled like any unread target) and
+// the card says why (statusLinkGap "in_use"). Anonymous reads of a public link still run.
+//
+// IN USE means either:
+//   - a profile under the client's profile root carries a LIVE review marker (reviewSession.ts,
+//     age-bounded at 8 h) — a window left open for a person to verify and submit in; or
+//   - a portal run is in flight on one of the client's projects: a running portal-effect job
+//     (jobQueue PORTAL_EFFECT_JOB_TYPES: prepare_submission, auto_learn, autopilot) or a live
+//     'running' portal_runs row (a stage or a correction reopen; portalRunnerAlive, so a crashed
+//     run's row does not hold the account forever).
+// A clientless project's profiles sit at the profile root itself, beside every client's directory:
+// its root is scanned with the client directories left out, so another client's window never holds it.
+// Asked per target, at the door, so a long paced click sees a run that started mid-click.
+const STATUS_READ_HOLD_JOB_TYPES = ["prepare_submission", "auto_learn", "autopilot"];
+function portalAccountInUse(db: AppDb, clientId: string, profileBase: string, currentProjectId: string, now = Date.now()): string {
+  const clientClause = clientId ? "p.client_id = ?" : "(p.client_id IS NULL OR p.client_id = '')";
+  const clientParams = clientId ? [clientId] : [];
+  const marker = clientId
+    ? liveReviewSessionUnder(path.join(profileBase, clientId), { now })
+    : (() => {
+        const clientDirs = new Set(db.query<{ id: string }>("SELECT id FROM clients").map((r) => text(r.id)));
+        return liveReviewSessionUnder(profileBase, { now, skip: (name) => clientDirs.has(name) });
+      })();
+  if (marker) {
+    return "the client's portal account is in use: a review window is open for a person to verify and submit in, so a status read does not sign in (a second sign-in can end their session); it tries again on the next check";
+  }
+  const job = db.get<Row>(
+    `SELECT j.job_type, j.project_id FROM job_queue j JOIN projects p ON p.id = j.project_id
+      WHERE j.status = 'running' AND j.job_type IN (${STATUS_READ_HOLD_JOB_TYPES.map(() => "?").join(", ")}) AND ${clientClause}
+      LIMIT 1`,
+    [...STATUS_READ_HOLD_JOB_TYPES, ...clientParams],
+  );
+  const run = job ? null : db.query<Row>(
+    `SELECT r.runner, r.started_at, r.project_id FROM portal_runs r JOIN projects p ON p.id = r.project_id
+      WHERE r.status = 'running' AND ${clientClause}`,
+    clientParams,
+  ).find((r) => portalRunnerAlive(text(r.runner), text(r.started_at)));
+  const busy = job ?? run;
+  if (busy) {
+    const what = job ? `a ${text(job.job_type).replace(/_/g, " ")} run` : "a portal run";
+    return `the client's portal account is in use: ${what} is in progress on ${text(busy.project_id) === currentProjectId ? "this project" : "another of this client's projects"}, so a status read does not sign in (a second sign-in can end that run's session); it tries again on the next check`;
+  }
+  return "";
+}
+
 /** A PERSON'S CLICK: check every active target of this kind now, paced (see above). */
 export async function runPermitChecksNow(
   db: AppDb,
@@ -7768,7 +7844,8 @@ async function checkPermitTargets(
     // audits it. "no portal URL/recipe" is said only when there truly was neither.
     let unreadableReason = "";
     let portalRead = false; // a recipe or platform scrape was attempted
-    const noteReason = (r: string) => { if (r && !unreadableReason) unreadableReason = r; };
+    // Scrubbed where it is made (rule 2, #173): it reaches the log, the click's reply and the card.
+    const noteReason = (r: string) => { if (r && !unreadableReason) unreadableReason = scrubUnreadableReason(r, projectSecretValuesById(db, projectId)); };
     const applicationNumbers = [text(target.application_number), text(target.permit_number)].filter(Boolean);
     const projectDetail = getProjectDetail(db, projectId);
     const clientId = projectDetail.project.clientId ?? "";
@@ -7781,6 +7858,14 @@ async function checkPermitTargets(
     let signedInRan = false;
     let foundLink = "";
     let linkLookupStamp: string | null = null;
+    // #516: asked only when a signed-in door is about to open, once per target.
+    let accountHold: string | null = null;
+    const accountInUse = (): string => (accountHold ??= portalAccountInUse(db, clientId, profileBase, projectId));
+    const holdSignIn = (host: string): void => {
+      gap.signedIn = "in_use";
+      gap.portalHost ||= host;
+      noteReason(accountInUse());
+    };
     let publicReadUrl = "";
 
     // 0. A PERMIT FILING WITH A STATUS LINK IS READ ANONYMOUSLY FIRST (#413). The link is the record's
@@ -7827,11 +7912,19 @@ async function checkPermitTargets(
         noteReason("the account's record list was already searched for this filing in the last day");
         recipe = null;
       }
+      if (recipe?.portalUrl && accountInUse()) {
+        holdSignIn(portalHostOf(recipe.portalUrl));
+        recipe = null;
+      }
       if (recipe?.portalUrl) {
-        // Same credential/profile conventions as the learner/replay: portalType key is
-        // "utility" | "AHJ", persistent per-client browser profile carries the session.
+        // Same credential conventions as the learner/replay: portalType key is "utility" | "AHJ".
+        // A PROFILE OF ITS OWN (#517), as the #512 record-link read has: the correction reopen takes
+        // portalProfileDir(<client>, <type>, <host>) — the very dir this read used to take — and
+        // checkStatusWithAdapter first closes any window left open on its profile, so a status check
+        // of any target of that client on that host closed the reopen window a person was handed to
+        // verify and submit in. A status read never shares a profile with a window a person uses.
         const recipePortalType = scopeType === "utility" ? "utility" : "AHJ";
-        const userDataDir = portalProfileDir(profileBase, clientId ?? null, recipePortalType, recipe.portalUrl);
+        const userDataDir = portalProfileDir(profileBase, clientId ?? null, "status-read", recipe.portalUrl);
         const credential = clientId
           ? (getDecryptedCredential(db, clientId, recipePortalType)
               ?? getDecryptedCredentialByUrl(db, clientId, recipe.portalUrl)
@@ -7880,8 +7973,12 @@ async function checkPermitTargets(
        ORDER BY CASE WHEN client_id = ? THEN 0 ELSE 1 END, created_at DESC LIMIT 1`,
       [portalType, clientId, clientId],
     );
-    if (portalProfile?.encrypted_storage_state) {
-      const userDataDir = portalProfileDir(profileBase, clientId ?? null, portalType, safeTargetPortalUrl);
+    if (portalProfile?.encrypted_storage_state && accountInUse()) {
+      holdSignIn(portalHostOf(safeTargetPortalUrl));
+    } else if (portalProfile?.encrypted_storage_state) {
+      // A profile of its own (#517): with no portal URL this was <client>/<type> — staging's own
+      // profile (prepareSubmission), whose left-open review window checkStatusWithAdapter closes.
+      const userDataDir = portalProfileDir(profileBase, clientId ?? null, "status-read", safeTargetPortalUrl);
       const credential = clientId
         ? (getDecryptedCredential(db, clientId, portalType)
             ?? (safeTargetPortalUrl ? getDecryptedCredentialByUrl(db, clientId, safeTargetPortalUrl) : null)
@@ -7986,7 +8083,9 @@ async function checkPermitTargets(
       const hasLogin = Boolean(clientId && linkUrl && clientHasLoginOnHost(db, clientId, linkUrl));
       gap.portalHost ||= portalHostOf(linkUrl);
       gap.hasCredential ||= hasLogin;
-      if (linkUrl && hasLogin && appNums.length > 0) {
+      if (linkUrl && hasLogin && appNums.length > 0 && accountInUse()) {
+        holdSignIn(portalHostOf(linkUrl));
+      } else if (linkUrl && hasLogin && appNums.length > 0) {
         portalRead = true;
         signedInRan = true;
         const linkHost = portalHostOf(linkUrl);
@@ -8073,8 +8172,8 @@ async function checkPermitTargets(
           : `skipping status check for target ${text(target.id)}: ${why}`,
         { projectId },
       );
-      rescheduleUnreadTarget(db, projectId, target, track, why, now);
-      results.push(permitCheckResult(db, target, "unreadable", { reason: why }));
+      const said = rescheduleUnreadTarget(db, projectId, target, track, why, now);
+      results.push(permitCheckResult(db, target, "unreadable", { reason: said }));
       if (pacing) pacing.lastAt.set(paceKey, Date.now());
       continue;
     }
@@ -9853,7 +9952,7 @@ export async function prepareSubmission(
   // OLDER staging row and the outcome below would overwrite the run's 'submitted' (live 2026-10-14,
   // Lincoln County: the filing went, the run read failed, the number was typed by hand). So a capture
   // that arrives first waits here, and is recorded right after the outcome, through the same door.
-  type SubmitCapture = { recordNumber: string; confidence: string; source?: string; reason: string; recordLink: string; candidates?: Array<{ recordNumber: string; recordLink: string; source: string }>; draftCreated?: ObservedDraft };
+  type SubmitCapture = { recordNumber: string; confidence: string; source?: string; reason: string; recordLink: string; candidates?: Array<{ recordNumber: string; recordLink: string; source: string }>; draftCreated?: ObservedDraft; completionConfirmed?: boolean; confirmationShotPath?: string };
   let runOutcomeRecorded = false;
   const capturesBeforeOutcome: SubmitCapture[] = [];
   const recordSubmitCapture = (capture: SubmitCapture): void => {
@@ -9893,6 +9992,16 @@ export async function prepareSubmission(
         const held = recordSubmitCaptureCandidates(db, runId, capture.candidates ?? [], capture.reason);
         addAuditLog(db, projectId, "portal_bot", "submit capture", "submission.record_number_unread", {
           track, reason: capture.reason.slice(0, 200), candidates: held,
+        });
+      }
+      // #569 — THE PERSON'S FILING FROM THE REVIEW WINDOW, PICTURED: the masked screenshot of the page
+      // portal-bot judged the completion of their submit, filed on the project and linked from this
+      // run's filing record. Named by the number only when it was read confidently off that page —
+      // a candidate or an unread page is "no-number-read", never a number nobody read.
+      if (capture.completionConfirmed && capture.confirmationShotPath) {
+        saveSubmissionConfirmation(db, {
+          projectId, submissionId, track: track ?? "permit", runId, filedBy: "person", shotPath: capture.confirmationShotPath,
+          recordNumber: capture.confidence === "high" && capture.source !== "account_list" ? capture.recordNumber : "",
         });
       }
     } catch { /* capture is a convenience; it must never disturb the run */ }
@@ -10904,6 +11013,29 @@ export async function prepareSubmission(
         });
     });
 
+    // #569 — THE CONFIRMATION SCREENSHOT OF AN APPROVED FILING THE PORTAL CONFIRMED: portal-bot's
+    // masked picture of the completion page (kept only when the mask was proven), filed on the project
+    // as a submission_confirmation document named by the number read off that page, and linked from
+    // this filing record. A click the portal did not confirm keeps the outcome shot alone, and its
+    // record already says it could not be confirmed — no confirmation is claimed for it. After the
+    // transaction: a picture that cannot be filed never undoes the run's record.
+    if (clicked && acceptedFiling) {
+      const shotPath = String((result as Record<string, unknown>).confirmationShotPath ?? "").trim();
+      const refusedWhy = String((result as Record<string, unknown>).confirmationShotRefused ?? "").trim();
+      const saved = saveSubmissionConfirmation(db, {
+        projectId, submissionId, track: permitTypeTag, runId, filedBy: "automation", shotPath,
+        recordNumber: capturedPermitNumber || capturedConfirmation,
+      });
+      try {
+        db.run("UPDATE submissions SET notes = notes || ? WHERE id = ?", [
+          saved.documentId
+            ? " Confirmation screenshot (secrets masked) saved to the project's documents."
+            : ` No masked confirmation screenshot was kept (${(refusedWhy || saved.why).slice(0, 160)}); the completion page is the run's outcome shot.`,
+          submissionId,
+        ]);
+      } catch { /* the note is a convenience; the record above stands */ }
+    }
+
     // THE CLIENT HEARS WE FILED (#490) — only on a filing the portal CONFIRMED (acceptedFiling). A
     // click the portal did not confirm (submitted_unconfirmed) may not have filed, so it says nothing
     // until a person confirms it through captureConfirmation, which then announces it. Once per
@@ -11411,6 +11543,19 @@ export function captureConfirmation(
     via: "capture",
   });
   learnFromSubmissionConfirmation(db, detail.project, input);
+  // THE PORTAL'S OWN RECORD-NUMBER FORMAT (#448): a number a PERSON confirmed that was read off the
+  // page (one of this run's held candidates) teaches its shape to the recipe that filed it, so the
+  // next filing there is read without asking. A typed number teaches nothing (a typo would make a
+  // wrong number look certain), nor does the automatic read (it held no candidates). Never throws.
+  try {
+    const held = parseJson<{ candidates?: Array<{ recordNumber?: string }> }>(text(run.submit_capture_candidates) || "{}", {});
+    const confirmed = filingNumber.toUpperCase();
+    const recipeId = text(run.recipe_id);
+    if (confirmed && recipeId && (held.candidates ?? []).some((c) => String(c?.recordNumber ?? "").trim().toUpperCase() === confirmed)) {
+      const shape = learnRecordNumberFormat(db, recipeId, filingNumber, { state: projectForTarget.state, ahj: projectForTarget.ahj, utility: projectForTarget.utility });
+      if (shape) addAuditLog(db, projectId, "system", "submit capture", "portal.record_number_format_learned", { runId: portalRunId, recipeId, shape });
+    }
+  } catch { /* learning a format is a convenience; it never disturbs a confirmation */ }
   return getProjectDetail(db, projectId);
 }
 

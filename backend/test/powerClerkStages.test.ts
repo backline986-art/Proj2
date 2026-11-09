@@ -77,7 +77,7 @@ await check("one mapping by MEANING: another utility's prefix and wording read t
   assert.deepEqual(read(row("Pending Customer Signature", "PSE")), ["waiting", POWERCLERK_STAGE_LABELS.signatures]);
   assert.deepEqual(read(recordPage("Signatures and AHJ Inspection Pending")), ["waiting", POWERCLERK_STAGE_LABELS.inspectionAndSignatures]);
   assert.deepEqual(read(row("Supplemental Review")), ["waiting", "In review"]);
-  assert.deepEqual(read(row("Suspended - Changes Needed From Customer")), ["needs_human_review", POWERCLERK_STAGE_LABELS.changesNeeded]);
+  assert.deepEqual(read(row("Suspended - Changes Needed From Customer")), ["correction_flagged", POWERCLERK_STAGE_LABELS.changesNeeded]);
   assert.deepEqual(read(row("Withdrawn")), ["needs_human_review", POWERCLERK_STAGE_LABELS.closed]);
 });
 
@@ -118,7 +118,7 @@ await check("every new label has vetted client wording on both tracks (never the
     ["waiting", POWERCLERK_STAGE_LABELS.inspectionAndSignatures],
     ["waiting", POWERCLERK_STAGE_LABELS.inspection],
     ["waiting", POWERCLERK_STAGE_LABELS.signatures],
-    ["needs_human_review", POWERCLERK_STAGE_LABELS.changesNeeded],
+    ["correction_flagged", POWERCLERK_STAGE_LABELS.changesNeeded],
     ["needs_human_review", POWERCLERK_STAGE_LABELS.closed],
   ] as const) {
     for (const track of ["nem", "permit"] as const) {

@@ -3636,14 +3636,13 @@ function detectSplitPages(){
     /DUAL PASS 2KV RATED PV/i
   ]);
 
-  const batterySpecs = dsFind([
-    /INVERTER\/BATT DATA SHEET/i,
-    /BATTERY DATA SHEET/i,
-    /POWERWALL/i,
-    /TESLA GATEWAY/i,
-    /GATEWAY 3 DATA SHEET/i,
-    /ENERGY STORAGE/i
-  ]);
+  // The battery / ESS spec by the splitter's rule (parser-review.js batteryPage, #261), over the
+  // whole plan set: found by its content (a labelled kWh capacity, storage words, the datasheet's
+  // performance rows) or its sheet name, never by a DS sheet code. A page that also reads as an
+  // inverter (hybrid / combined INVERTER-BATTERY, MPPT) is undecided, and a gateway or calcs sheet is
+  // never the battery spec. The old DS-only list took POWERWALL / TESLA GATEWAY / ENERGY STORAGE
+  // anywhere on a DS page.
+  const batterySpecs = specs.batterySpecs;
 
   const gatewaySpecs = dsFind([
     /TESLA GATEWAY/i,

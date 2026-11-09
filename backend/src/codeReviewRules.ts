@@ -23,6 +23,9 @@ import { moduleLevelElectronicsEquipment, type ModuleLevelElectronicsEvidence } 
 import { designText, mountKind, type MountKind } from "./mountKind";
 import { microEvidenceSupersededIn } from "./normalize";
 import { engineerSealStates, stateName } from "./engineerSeal";
+import { readPlanFraming } from "./planFraming";
+import { describeQuotes, describeSnowLabelIssue, planSheets, readDeckMount, readSnowLabels, type PlanSheet, type SheetQuote } from "./planAttachmentRead";
+import { readNecEditionCitations, readOtherMethodItems, readRapidShutdownStatements, readServiceLocationConflicts, readSupplySideDisconnectRating } from "./planConsistency";
 export { designText, engineeredGroundMount, groundMountFromField, isGroundMount, mountKind, mountKindForProject, type MountKind } from "./mountKind";
 
 const oregonElectrical2023: CodeReference = {
@@ -634,10 +637,34 @@ export function packageListings(project: ProjectRecord, extraTexts: DesignTextSo
 // them is how the advisory and the reviewer finding end up disagreeing about the same plan set.
 /** city.elec.rapid-shutdown-missing: a rapid shutdown callout or equipment evidence. */
 export const RAPID_SHUTDOWN_PATTERNS: RegExp[] = [/rapid shutdown/i, /\bRSD\b/i, /690\.12/i];
-/** The NEC 705.10 power-source directory, by itself. */
-export const POWER_SOURCE_DIRECTORY_PATTERNS: RegExp[] = [/directory/i, /705\.10/i];
-/** city.elec.labels-missing: a PV label / placard schedule. */
-export const LABEL_SCHEDULE_PATTERNS: RegExp[] = [/label/i, /placard/i, ...POWER_SOURCE_DIRECTORY_PATTERNS, /690\.12/i];
+// THE DIRECTORY BY WHAT IT SAYS (#335). The placard rarely says "directory" or cites 705.10: the
+// installers' and label vendors' wording is "POWER TO THIS BUILDING IS ALSO SUPPLIED FROM THE
+// FOLLOWING SOURCES WITH DISCONNECT(S) LOCATED AS SHOWN". A label sheet carrying exactly that read
+// as "Power-source directory (705.10)" missing and blocked a permit until vision looked. The
+// wording counts only as a PAIR, in one sentence: power from other/multiple sources AND where the
+// disconnects are. Either half alone is another label: "DUAL POWER SOURCE" is the 705.12 backfed
+// breaker warning, "FED BY MULTIPLE SOURCES" the busbar-sum label, "AC DISCONNECT LOCATED …" a
+// disconnect marking — none of them is the directory. Nor is "ALL POWER SOURCES" (a de-energize
+// instruction).
+const DIRECTORY_SOURCES = String.raw`(?:also\s+(?:supplied|served|fed|powered)\s+(?:by|from)|multiple\s+(?:sources\s+of\s+power|power\s+sources)|(?:other|additional|following)\s+(?:power\s+|energy\s+)?sources|(?<!\ball\s)(?:power|energy)\s+sources)`;
+const DIRECTORY_DISCONNECTS = String.raw`disconnect(?:s|\s*\(\s*s\s*\)|ing\s+means(?:es)?)?\s+(?:(?:are|is)\s+)?located`;
+/** The NEC 705.10 power-source directory, by itself — the word, the section, or the placard's own
+ *  wording. One predicate: the reviewer rule (necLabelRequirements) and requiredDocuments' labels
+ *  sheet-content layer both read it. */
+export const POWER_SOURCE_DIRECTORY_PATTERNS: RegExp[] = [
+  /directory/i,
+  /705\.10/i,
+  new RegExp(String.raw`\b${DIRECTORY_SOURCES}\b[^.;]{0,160}?\b${DIRECTORY_DISCONNECTS}\b`, "i"),
+  new RegExp(String.raw`\b${DIRECTORY_DISCONNECTS}\b[^.;]{0,160}?\b${DIRECTORY_SOURCES}\b`, "i"),
+];
+/** city.elec.labels-missing: a PV label / placard schedule. The directory's word and section only,
+ *  as before #335 — the placard wording above answers the directory, not "is there a schedule". */
+export const LABEL_SCHEDULE_PATTERNS: RegExp[] = [/label/i, /placard/i, /directory/i, /705\.10/i, /690\.12/i];
+/** A dedicated label sheet, by its sheet name — the names the splitter files a labels part by
+ *  (docSplitter.ts, labels category). A "LABEL SCHEDULE" note on an E-1 is not one. */
+const LABEL_SHEET_NAMES: RegExp[] = [/\bWARNING\s+LABELS\b/i, /\bLABEL\s+LOCATIONS?\b/i];
+/** The uploaded labels document's source label (repository DESIGN_DOC_LABELS). */
+const LABELS_DOCUMENT_SOURCE = "Labels sheet";
 /** city.elec.load-side-calc-missing: the 705.12 busbar screen. */
 export const LOAD_SIDE_CALC_PATTERNS: RegExp[] = [/705\.12/i, /120%|120 percent/i, /busbar/i, /bus bar/i];
 /** city.elec.supply-side-detail-missing: what a tap detail actually contains. */
@@ -1178,6 +1205,67 @@ export function evaluateDesignCodeFindings(
     }));
   }
 
+  // A DETAIL THAT EXISTS IS NOT A DETAIL THAT WAS READ (#336). The prescriptive screen passed a real
+  // set on "attachment/racking details included" while its only attachment detail fastened into the
+  // DECKING, its roof-plane schedules said TRUSS where the parse said rafter, and one sheet called the
+  // design snow load ROOF snow where another called it GROUND snow. Each reading below is the sheets'
+  // own words (planAttachmentRead.ts, planFraming.ts), on the jurisdiction's prescriptive screen only,
+  // and each is a WARNING: it tightens a pass into a question, and an unread detail is "check with an
+  // engineer", never a pass. No state, city or utility is named here; the screen is the profile's.
+  if (roofMounted && prescriptiveScreening) {
+    const sheets = planSheets(project, documentTexts);
+    // (1) FASTENERS INTO THE DECKING with no stated deck-mount basis.
+    const deck = readDeckMount(sheets);
+    if (!hasStampedEngineering && deck.basisMissing) {
+      const contradiction = deck.toFraming.length
+        ? ` It also contradicts the set's own statement that the attachments go to the framing members (${describeQuotes(deck.toFraming)}).`
+        : "";
+      const half = deck.sheathing.length ? "the listed deck-mount capacity" : deck.capacity.length ? "the sheathing type and thickness" : "the sheathing type and thickness, or the listed deck-mount capacity";
+      out.push(finding({
+        id: "city.struct.deck-mount-basis-missing",
+        severity: "warning",
+        category: "structural",
+        title: "Attachment detail fastens into the roof decking, with no deck-mount basis",
+        message: `The attachment detail fastens into the decking / sheathing, not the framing (${describeQuotes(deck.deckMount)}), and the set does not state ${half}.${contradiction} The prescriptive attachment method assumes attachment to the roof framing; a deck mount needs its own basis, or check it with an engineer.`,
+        cityFeedback: "Provide the basis for the deck-mounted attachment: the roof sheathing type and thickness, and the listed capacity of the deck mount in that sheathing (manufacturer listing or evaluation report). Otherwise attach to the roof framing members.",
+        designTeamAction: "Either revise the attachment detail to fasten into the framing members (and match the framing note), or add the sheathing type/thickness and the deck mount's listed capacity to the attachment sheet; if neither can be stated, route the structure to an engineer.",
+        evidenceNeeded: ["Attachment detail showing the fastener target (framing member or decking)", "Roof sheathing type and thickness", "Deck-mount listed capacity (manufacturer listing / evaluation report)"],
+        codeReferences: [...oregonWorksheetRefs, roofLoadsRef],
+      }));
+    }
+    // (2) FRAMING TYPE: the parse against every schedule / callout on the sheets.
+    const planFrame = readPlanFraming(sheets.map((s) => s.text).join("\n")).framingType;
+    const parsedFrame = trussFraming ? "truss" : /\brafter/i.test(framingTypeText) && !/\btruss/i.test(framingTypeText) ? "rafter" : "";
+    if (planFrame && parsedFrame && planFrame.value !== parsedFrame) {
+      out.push(finding({
+        id: "city.struct.framing-type-conflict",
+        severity: "warning",
+        category: "structural",
+        title: `Framing type: the plans say ${planFrame.value}, the parse says ${parsedFrame}`,
+        message: `Every framing schedule / callout the plans state reads ${planFrame.value === "truss" ? "TRUSS" : "RAFTER"} ("${planFrame.excerpt}"), but the project records "${framingTypeText}". The prescriptive checklist asks truss vs rafter, and the two arms ask different things (a truss: spacing; a rafter: spacing, span table and the rafter exception), so the framing row cannot be answered until the framing type is confirmed.`,
+        cityFeedback: "Confirm the roof framing type (rafters or trusses) and make the framing schedule, the structural notes and the prescriptive checklist agree.",
+        designTeamAction: `Confirm the framing type on site or with the designer and correct the project's framing type (Manual entry) to match the plans${planFrame.value === "truss" ? "" : "; a rafter roof also needs the span and the rafter exception answered"}.`,
+        evidenceNeeded: ["Framing type (rafter or truss) per roof plane", "Framing schedule matching the structural notes"],
+        codeReferences: [...oregonWorksheetRefs, roofLoadsRef],
+      }));
+    }
+    // (3) ROOF vs GROUND SNOW labels across sheets — the screen keys on GROUND snow.
+    const snowIssue = readSnowLabels(sheets, num(project, ["snow", "groundSnowLoad"]));
+    if (snowIssue) {
+      out.push(finding({
+        id: "city.struct.snow-load-label-conflict",
+        severity: "warning",
+        category: "structural",
+        title: snowIssue.kind === "conflict" ? "Snow load labelled ground snow on one sheet and roof snow on another" : "Ground snow load not stated; the plans give only a roof snow load",
+        message: `${describeSnowLabelIssue(snowIssue).replace(/^./, (c) => c.toUpperCase())}. The prescriptive screen compares the GROUND snow load (Pg) with its limit; a roof snow load is a different, smaller quantity, so the screen's snow input is not read until the labels agree. Check it with an engineer.`,
+        cityFeedback: "State the ground snow load (Pg) and, if shown, the roof snow load (pf) with their own labels, consistently on every sheet.",
+        designTeamAction: "Correct the design-criteria labels so the ground snow load and the roof snow load are each stated once and agree across the cover sheet and the structural sheets.",
+        evidenceNeeded: ["Ground snow load (Pg), labelled", "Roof snow load (pf), labelled, if stated", "Same values on every sheet"],
+        codeReferences: [...oregonWorksheetRefs, roofLoadsRef],
+      }));
+    }
+  }
+
   // TILE ROOFS (roofCovering.ts is the one predicate). A tile roof is attached differently
   // (tile hook / tile-replacement mount / comp-out), leaks differently (the flashing detail is the
   // tile's, not a comp flashing), and weighs 9-12 psf where composition weighs 2-4 — so a calc
@@ -1646,10 +1734,17 @@ export function evaluateDesignCodeFindings(
     // rapid-shutdown evidence above. Each missing label is cited by the edition's own section.
     const missingLabels = necLabelRequirements(nec, { rsdApplies, standAlone: STAND_ALONE.test(all), dcCircuits: !isMicroinverterDesign(project, all) })
       .filter((l) => !affirmedIn(labelTexts, l.patterns));
+    // AN UNCERTAIN READING MUST NOT BLOCK (#335). With a dedicated label sheet in the package, a
+    // label the text did not find is far more often wording the patterns do not know (the directory
+    // above) or a placard drawn as an image than a label that is not there. From text alone that is
+    // at most a warning: the vision pass still looks at the sheet (needsVision takes warnings) and
+    // can relax it, and a human sees it either way. Without a label sheet the rule-3 severity stands.
+    const labelSheet = sheetTextSources(project, documentTexts)
+      .some((s) => s.label === LABELS_DOCUMENT_SOURCE || hasAny(s.text, LABEL_SHEET_NAMES));
     if (missingLabels.length) {
       out.push(finding({
         id: "city.elec.labels-edition-missing",
-        severity: ruleThreeSeverity,
+        severity: labelSheet ? "warning" : ruleThreeSeverity,
         category: "electrical",
         title: `PV label schedule is missing labels NEC ${nec.edition} requires`,
         message: `The package shows a label schedule, but not: ${missingLabels.map((l) => `${l.label} (${l.section})`).join("; ")}.`
@@ -1837,6 +1932,26 @@ export function evaluateDesignCodeFindings(
   out.push(...sizingFindings);
   out.push(...wireTableFindings);
 
+  // DOES THE SET AGREE WITH ITSELF? (#338) A reviewer reads the sheets against each other: the other
+  // interconnection method's boilerplate, the POI called interior on one sheet and exterior on another,
+  // labels citing an older NEC than the adopted one, rapid shutdown claimed and denied, a supply-side
+  // disconnect never called suitable for service equipment. Every one is a CALLOUT naming each sheet:
+  // it tells the designer what to make agree, and a fact a reader did not find yields nothing. The
+  // interconnection method is the classifier's above (saysSupplySide / loadSideBranch), never a second
+  // reading of it. Cut sheets are not read: a datasheet is not the designer's sheet.
+  out.push(...planConsistencyFindings({
+    sheets: planSheets(project, documentTexts.filter((d) => !SPEC_SHEET_SOURCE.test(d.label))),
+    method: saysSupplySide && !saysLoadSide ? "supply" : loadSideBranch ? "load" : null,
+    necAdopted,
+    rsdApplies,
+    editionRowKnown: nec != null,
+    supplySideRef,
+    loadSideRef,
+    rapidShutdownRef,
+    electricalRef,
+    cite,
+  }));
+
   const moduleFields = [str(project, "moduleMake"), str(project, "moduleModel"), str(project, "moduleWattage"), str(project, "moduleQty")].filter(Boolean);
   const inverterFields = [str(project, "invModel"), str(project, "pvMicroModel"), str(project, "inverterModel"), str(project, "invQty"), str(project, "pvMicroQty")].filter(Boolean);
   const hasModuleSpec = hasAny(all, [/module spec/i, /module data/i, ...MODULE_LISTING_PATTERNS]);
@@ -1928,3 +2043,199 @@ export function evaluateDesignCodeFindings(
 
   return out;
 }
+
+// ---------------------------------------------------------------------------------------------
+// THE PLAN-SET CONSISTENCY PASS (#338). The readers are planConsistency.ts (sheets' own words, one
+// quote per sheet and phrase); this is only the wording and the citations. All callouts: each names the
+// sheets so the designer can fix the set in one pass, and none can hold a filing.
+// ---------------------------------------------------------------------------------------------
+
+const NEC_SOURCE_URL = "https://www.nfpa.org/codes-and-standards/nfpa-70-standard-development/70";
+const serviceDisconnectLocation: CodeReference = {
+  code: "NEC",
+  section: "230.70(A)(1)",
+  title: "Service disconnecting means location",
+  adoptionScope: "Every service; verify the locally adopted NEC edition.",
+  sourceUrl: NEC_SOURCE_URL,
+  note: "The service disconnecting means is outside the building or inside nearest the point of entrance of the service conductors, so the plans must say which.",
+};
+const supplySideServiceEquipment: CodeReference = {
+  code: "NEC",
+  section: "230.82(6)",
+  title: "Equipment connected to the supply side of the service disconnect",
+  adoptionScope: "PV connected on the supply side of the service disconnecting means.",
+  sourceUrl: NEC_SOURCE_URL,
+  note: "PV ahead of the service disconnect is permitted with a disconnecting means suitable for use as service equipment and overcurrent protection per Article 230.",
+};
+const rapidShutdownInitiation: CodeReference = {
+  code: "NEC",
+  section: "690.12(C)",
+  title: "Rapid shutdown initiation device",
+  adoptionScope: "NEC 2017 and later; the strictest edition's requirement where the adopted edition is not on file.",
+  sourceUrl: NEC_SOURCE_URL,
+  note: "For one- and two-family dwellings the initiation device is at a readily accessible location outside the building.",
+};
+
+function sheetEvidence(q: SheetQuote, label: string, note: string): ReviewerFindingEvidence {
+  return { kind: "source_excerpt", label, source: q.sheet, excerpt: q.excerpt, confidence: "high", pageHint: q.sheet, screenshotPath: "", verifier: "rule_engine", note };
+}
+const sheetsOf = (qs: SheetQuote[]): string => [...new Set(qs.map((q) => q.sheet))].join(", ");
+const quoted = (qs: SheetQuote[], max = 4): string =>
+  `${qs.slice(0, max).map((q) => `${q.sheet}: "${q.excerpt}"`).join("; ")}${qs.length > max ? ` (+${qs.length - max} more)` : ""}`;
+
+function planConsistencyFindings(input: {
+  sheets: PlanSheet[];
+  /** The gate's own classification: supply side only, its load-side branch, or neither (no reading). */
+  method: "supply" | "load" | null;
+  necAdopted: number | null;
+  rsdApplies: boolean;
+  /** The adopted edition has a row in the edition table, so the edition-evidence rule owns 690.12(C). */
+  editionRowKnown: boolean;
+  supplySideRef: CodeReference;
+  loadSideRef: CodeReference;
+  rapidShutdownRef: CodeReference;
+  electricalRef: CodeReference;
+  cite: (code: string, fallback: CodeReference) => CodeReference;
+}): ReviewerFinding[] {
+  const { sheets, method, cite } = input;
+  if (!sheets.length) return [];
+  const out: ReviewerFinding[] = [];
+
+  // (1) THE OTHER METHOD'S BOILERPLATE.
+  if (method) {
+    const items = readOtherMethodItems(sheets, method);
+    if (items.length) {
+      const supply = method === "supply";
+      const listed = items.slice(0, 8).map((i) => `${i.item} (${i.quote.sheet}: "${i.quote.excerpt}")`).join("; ") + (items.length > 8 ? ` (+${items.length - 8} more)` : "");
+      out.push({
+        ...finding({
+          id: "city.elec.interconnection-boilerplate-mismatch",
+          severity: "callout",
+          category: "electrical",
+          title: supply ? "Load-side notes and labels on a supply-side (line-side) connection" : "Supply-side notes on a load-side connection",
+          message: `The interconnection is ${supply ? "a supply-side (line-side) connection" : "a load-side connection"}, but the sheets also carry ${supply ? "load-side" : "supply-side"} items: ${listed}. A reviewer reads these as the set describing the other method.`,
+          cityFeedback: supply
+            ? "Remove the load-side (busbar / back-fed breaker) notes and labels from the supply-side design, or state the interconnection method once and show the calculation and labels that match it."
+            : "Remove the supply-side (line-side tap) notes from the load-side design, or state the interconnection method once and show the calculation and labels that match it.",
+          designTeamAction: `Delete or correct each listed note and label (${sheetsOf(items.map((i) => i.quote))}) so every sheet describes the same interconnection method.`,
+          evidenceNeeded: items.slice(0, 8).map((i) => `${i.quote.sheet}: ${i.item}`),
+          codeReferences: supply ? [input.supplySideRef, input.loadSideRef] : [input.loadSideRef, input.supplySideRef],
+        }),
+        evidenceStatus: "verified",
+        evidenceFound: items.slice(0, 8).map((i) => sheetEvidence(i.quote, `Other-method item: ${i.item}`, `Read on ${i.quote.sheet}; the job is classified ${method} side.`)),
+      });
+    }
+  }
+
+  // (2) INTERIOR vs EXTERIOR, per fact.
+  const locations = readServiceLocationConflicts(sheets);
+  if (locations.length) {
+    out.push({
+      ...finding({
+        id: "city.elec.service-location-conflict",
+        severity: "callout",
+        category: "electrical",
+        title: `The sheets disagree on whether the ${locations.map((c) => c.fact).join(" / ")} is interior or exterior`,
+        message: locations.map((c) => `The ${c.fact} is INTERIOR on ${sheetsOf(c.interior)} (${quoted(c.interior, 2)}) and EXTERIOR on ${sheetsOf(c.exterior)} (${quoted(c.exterior, 2)})`).join(". ")
+          + ". The location decides where the service disconnect and the PV overcurrent device sit, so the reviewer cannot check either until the sheets agree.",
+        cityFeedback: "Show the point of interconnection and the service equipment at one location (interior or exterior), the same on every sheet.",
+        designTeamAction: `Confirm the actual location on site and correct the sheets that disagree (${sheetsOf(locations.flatMap((c) => [...c.interior, ...c.exterior]))}).`,
+        evidenceNeeded: locations.map((c) => `${c.fact}: one location on every sheet`),
+        codeReferences: [cite("NEC", serviceDisconnectLocation), method === "supply" ? input.supplySideRef : method === "load" ? input.loadSideRef : input.electricalRef],
+      }),
+      evidenceStatus: "verified",
+      evidenceFound: locations.flatMap((c) => [
+        ...c.interior.slice(0, 2).map((q) => sheetEvidence(q, `${c.fact}: interior`, `Read on ${q.sheet}.`)),
+        ...c.exterior.slice(0, 2).map((q) => sheetEvidence(q, `${c.fact}: exterior`, `Read on ${q.sheet}.`)),
+      ]),
+    });
+  }
+
+  // (3) NEC EDITION CITED ON THE SHEETS. Against the adopted edition when one is on file; otherwise
+  // only the set against itself (two editions cited), since an unknown adoption is not a finding here.
+  const cited = readNecEditionCitations(sheets);
+  const adopted = input.necAdopted;
+  const flagged = adopted != null ? cited.filter((c) => c.edition < adopted) : cited.length > 1 ? cited : [];
+  if (flagged.length) {
+    const describe = (c: EditionCitationsLike): string => `NEC ${c.edition} on ${sheetsOf(c.quotes)} (${c.count} citation${c.count === 1 ? "" : "s"}, e.g. "${c.quotes[0].excerpt}")`;
+    out.push({
+      ...finding({
+        id: "city.elec.nec-edition-cited-outdated",
+        severity: "callout",
+        category: "electrical",
+        title: adopted != null ? `Labels and notes cite an older NEC than the adopted NEC ${adopted}` : "The sheets cite more than one NEC edition",
+        message: adopted != null
+          ? `The sheets cite ${flagged.map(describe).join("; ")}, but the jurisdiction has adopted NEC ${adopted}. A reviewer reads an older edition on the labels and notes as the design having been checked against the wrong code.`
+          : `The sheets cite ${flagged.map(describe).join("; ")}. Only one can be the design basis; the labels and notes should all cite the edition the jurisdiction has adopted.`,
+        cityFeedback: adopted != null
+          ? `Update the code references on the labels and notes to NEC ${adopted} (the adopted edition), and confirm the label wording matches that edition.`
+          : "Cite one NEC edition, the locally adopted one, on every label and note.",
+        designTeamAction: `Correct the edition on every label and note (${sheetsOf(flagged.flatMap((c) => c.quotes))}) in one pass, and check each label's wording against that edition.`,
+        evidenceNeeded: ["Code edition on labels and notes matching the adopted NEC"],
+        codeReferences: [input.electricalRef],
+      }),
+      evidenceStatus: "verified",
+      evidenceFound: flagged.flatMap((c) => c.quotes.slice(0, 2).map((q) => sheetEvidence(q, `NEC ${c.edition} cited`, `${c.count} citation(s) of NEC ${c.edition} on the sheets.`))),
+    });
+  }
+
+  // (4) RAPID SHUTDOWN CLAIMED AND DENIED, or claimed with no initiation device named. The initiation
+  // gap is read here only where the adopted edition is not in the table: a known edition's 690.12(C)
+  // belongs to city.elec.rapid-shutdown-edition-evidence, which must not be asked twice.
+  if (input.rsdApplies) {
+    const rsd = readRapidShutdownStatements(sheets, RSD_INITIATION_PATTERNS);
+    const denied = rsd.claimed.length > 0 && rsd.denied.length > 0;
+    const noInitiation = rsd.claimed.length > 0 && rsd.initiation.length === 0 && !input.editionRowKnown;
+    if (denied || noInitiation) {
+      const parts = [
+        denied ? `Rapid shutdown is claimed on ${sheetsOf(rsd.claimed)} (${quoted(rsd.claimed, 2)}) and denied on ${sheetsOf(rsd.denied)} (${quoted(rsd.denied, 3)})` : "",
+        noInitiation ? `The sheets claim rapid shutdown (${quoted(rsd.claimed, 2)}) but no sheet names the initiation device or where it is (690.12(C), NEC 2017 and later)` : "",
+      ].filter(Boolean);
+      out.push({
+        ...finding({
+          id: "city.elec.rapid-shutdown-contradiction",
+          severity: "callout",
+          category: "electrical",
+          title: denied ? "Rapid shutdown is claimed on one sheet and denied on another" : "Rapid shutdown claimed with no initiation device named",
+          message: `${parts.join(". ")}.`,
+          cityFeedback: "State the rapid shutdown method once and consistently on every sheet, and show the initiation device and its location on the one-line and the site plan.",
+          designTeamAction: denied
+            ? `Correct the notes that deny rapid shutdown (${sheetsOf(rsd.denied)}) or the RSD note and placard, so the set says one thing; name the initiation device on the one-line.`
+            : "Name the rapid shutdown initiation device (switch / service disconnect) and its readily accessible outdoor location on the one-line and site plan.",
+          evidenceNeeded: [...(denied ? ["One rapid shutdown statement on every sheet"] : []), "Rapid shutdown initiation device and location"],
+          codeReferences: [input.rapidShutdownRef, ...(noInitiation ? [cite("NEC", rapidShutdownInitiation)] : [])],
+        }),
+        evidenceStatus: "verified",
+        evidenceFound: [
+          ...rsd.claimed.slice(0, 2).map((q) => sheetEvidence(q, "Rapid shutdown claimed", `Read on ${q.sheet}.`)),
+          ...(denied ? rsd.denied.slice(0, 3).map((q) => sheetEvidence(q, "Rapid shutdown denied", `Read on ${q.sheet}.`)) : []),
+        ],
+      });
+    }
+  }
+
+  // (5) A SUPPLY-SIDE DISCONNECT NOT CALLED SUITABLE FOR USE AS SERVICE EQUIPMENT.
+  if (method === "supply") {
+    const rating = readSupplySideDisconnectRating(sheets);
+    if (rating.disconnect.length && !rating.serviceRated.length) {
+      out.push({
+        ...finding({
+          id: "city.elec.supply-side-disconnect-service-rating",
+          severity: "callout",
+          category: "electrical",
+          title: "Supply-side disconnect not called out as suitable for use as service equipment",
+          message: `The supply-side disconnect is named (${quoted(rating.disconnect, 3)}), but no sheet describes it as suitable for use as service equipment (service rated). A disconnect ahead of the service disconnect is permitted only when it is.`,
+          cityFeedback: "Identify the PV disconnect on the supply side of the service as suitable for use as service equipment (service-entrance rated), on the one-line and the equipment schedule.",
+          designTeamAction: "Add \"SUITABLE FOR USE AS SERVICE EQUIPMENT\" (or the listed service-entrance rating) to the disconnect callout on the one-line and the equipment schedule; confirm the specified disconnect carries that listing.",
+          evidenceNeeded: ["Supply-side disconnect described as suitable for use as service equipment"],
+          codeReferences: [cite("NEC", supplySideServiceEquipment), input.supplySideRef],
+        }),
+        evidenceStatus: "verified",
+        evidenceFound: rating.disconnect.slice(0, 3).map((q) => sheetEvidence(q, "Supply-side disconnect named", `Read on ${q.sheet}; no service-equipment rating stated on any sheet.`)),
+      });
+    }
+  }
+
+  return out;
+}
+type EditionCitationsLike = ReturnType<typeof readNecEditionCitations>[number];

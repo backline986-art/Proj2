@@ -186,6 +186,19 @@ const baseTrack = {
   check("MUST-PASS: the utility group is headed 'Utility — interconnection'", /Utility — interconnection/.test(els.submittalTracks.innerHTML));
   check("MUST-EXCLUDE: …never 'Net Metering (NEM)' for every utility", !/Net Metering \(NEM\)/.test(els.submittalTracks.innerHTML));
 }
+// #569 — THE FILING'S CONFIRMATION SCREENSHOT ON THE CARD, beside its number.
+{
+  const url = "/api/projects/p1/submissions/s1/confirmation-screenshot";
+  const html = lib.trackCardHtml({ ...baseTrack, type: "nem", status: "submitted", confirmation: { submissionId: "s1", documentId: "d1", url, recordNumber: "APP-112491", submitted: true, at: "" } });
+  check("MUST-PASS (#569): the card says 'Submitted: APP-112491 · confirmation screenshot', linked to the project route",
+    /Submitted: APP-112491 (?:&nbsp;|\s)*·(?:&nbsp;|\s)* confirmation screenshot/.test(words(face(html))) && html.includes(`<a href="${url}" target="_blank" rel="noopener"`), words(face(html)).slice(0, 300));
+  const none = lib.trackCardHtml({ ...baseTrack, type: "nem", status: "staged", confirmation: { submissionId: "s1", documentId: "d1", url, recordNumber: "", submitted: false, at: "" } });
+  check("MUST-EXCLUDE (#569): with no number read, the card claims none ('no number was read')", /no number was read off the portal's page/.test(words(none)) && !/Submitted: <strong>/.test(none));
+  const foreign = lib.trackCardHtml({ ...baseTrack, confirmation: { url: "https://evil.example/x.png", recordNumber: "APP-1" } });
+  check("MUST-EXCLUDE (#569): a confirmation link that is not the project route is never drawn", !/confirmation screenshot/.test(foreign) && !/evil\.example/.test(foreign));
+  const escaped = lib.trackCardHtml({ ...baseTrack, confirmation: { url, recordNumber: "<img src=x onerror=alert(1)>" } });
+  check("MUST-EXCLUDE (#569): the number is escaped", !/<img/.test(escaped) && /&lt;img/.test(escaped));
+}
 
 if (failures) { console.error(`\nfeeTracksDisplay: ${failures} FAILED`); process.exit(1); }
 console.log("\nfeeTracksDisplay: all checks passed");

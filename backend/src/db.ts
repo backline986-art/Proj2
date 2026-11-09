@@ -140,6 +140,10 @@ export async function openDatabase(): Promise<AppDb> {
   try {
     (await import("./codeProfiles")).seedReferenceCodeProfiles(appDb);
   } catch { /* reference data is best-effort */ }
+  // Each state's cited permit rules (#595): the same idempotent seed, never over a verified row.
+  try {
+    (await import("./stateRules")).seedStatePermitRules(appDb);
+  } catch { /* reference data is best-effort */ }
   // Per-job permit process answers: loaded into the in-process registry that the pure
   // (db-less) track/document/fee resolvers read — the same pattern as the process-profile cache.
   try {
@@ -946,6 +950,11 @@ function migrate(db: AppDb): void {
   // has explicitly enabled one-click approve-submit for this portal, and the recipe was
   // recorded through the final application submit. Fee payment is never automated.
   addColumnIfMissing(db, "portal_recipes", "auto_submit_enabled", "INTEGER NOT NULL DEFAULT 0");
+
+  // #448 — this portal's own record-number shapes ("PGENM-#####"), learned from numbers a person
+  // confirmed after filing on this recipe: [{ shape, status: "seeded" | "verified", learnedAt }].
+  // Shapes only, never a number. Appended as seeded; an existing entry is never rewritten (rule 3).
+  addColumnIfMissing(db, "portal_recipes", "record_number_formats_json", "TEXT NOT NULL DEFAULT '[]'");
 
   // IMAP email source support — extend email_tracking_sources so a DB row can
   // represent a live IMAP inbox (central TML or per-client) in addition to the
@@ -3129,6 +3138,49 @@ const VERSIONED_MIGRATIONS: VersionedMigration[] = [
   },
   {
     version: 63,
+    name: "state_permit_rules",
+    up: (db) => {
+      // EACH STATE'S PERMIT RULES AS CITED DATA, NOT CODE (#595 PR2; the shape #586 asks for its fee
+      // rules). One row per (state, family, rule): `structural` holds the prescriptive-solar limits,
+      // what forces the engineered path and where a seal is valid (#595); #586's `fee` rules (state
+      // surcharges, caps) join the same table under their own family. Shared knowledge on purpose, like
+      // jurisdiction_code_profiles: no org_id.
+      //   value_json: the rule's value (a number, a list, an object) — stateRules.ts reads each key.
+      //   citation / source_url: the section and its words, and where they were read. Every row has one.
+      //   confidence: 'seeded' (shipped reference data or research) | 'verified' (a person checked it
+      //     against the official source). RULE 3: the seeder never writes a row whose verified_at is set.
+      // Created here, never lazily: the reviewer reads it, and reads write nothing.
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS state_permit_rules (
+          state TEXT NOT NULL,
+          family TEXT NOT NULL,
+          rule_key TEXT NOT NULL,
+          value_json TEXT NOT NULL,
+          citation TEXT NOT NULL,
+          source_url TEXT NOT NULL DEFAULT '',
+          confidence TEXT NOT NULL DEFAULT 'seeded',
+          verified_at TEXT NOT NULL DEFAULT '',
+          verified_by TEXT NOT NULL DEFAULT '',
+          updated_at TEXT NOT NULL,
+          PRIMARY KEY (state, family, rule_key)
+        );
+      `);
+    },
+  },
+  {
+    version: 64,
+    name: "submission_confirmation_document",
+    up: (db) => {
+      // THE CONFIRMATION SCREENSHOT OF A FILING (#569): the project document (doc_type
+      // submission_confirmation — the portal's own "submitted / your application number is …" page,
+      // secrets masked) that proves this submission went. '' = none kept. The track card and the
+      // filing record link it; GET /api/projects/:id/submissions/:submissionId/confirmation-screenshot
+      // serves only the document this column names, of the same project.
+      addColumnIfMissing(db, "submissions", "confirmation_document_id", "TEXT NOT NULL DEFAULT ''");
+    },
+  },
+  {
+    version: 65,
     name: "reviewer_blocker_overrides",
     up: (db) => {
       // A NAMED PERSON PUSHES PAST ONE REVIEWER BLOCKER ON ONE PROJECT, WITH A REASON (#640; owner

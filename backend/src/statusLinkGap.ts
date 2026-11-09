@@ -17,8 +17,10 @@ import type { TrackKind } from "./permitMonitor";
  *  a reason — the sweep sets them itself: `throttled`, and the two where it HELD a stored login back
  *  without typing it (#512): `login_refused` (the portal refused it the last time — repeated attempts
  *  lock an account) and `login_sends_code` (the client's record says the portal sends a code at every
- *  sign-in, which a scheduled read must never trigger). */
-export type SignedInOutcome = "not_tried" | "wall" | "mfa" | "not_found" | "failed" | "throttled" | "login_refused" | "login_sends_code";
+ *  sign-in, which a scheduled read must never trigger). And `in_use` (#516): the client's portal account
+ *  was in use — a review window open for a person to submit in, or a stage / learn / autopilot run on
+ *  one of the client's projects — so no read signed in (a second sign-in can end that session). */
+export type SignedInOutcome = "not_tried" | "wall" | "mfa" | "not_found" | "failed" | "throttled" | "login_refused" | "login_sends_code" | "in_use";
 
 export function signedInOutcome(ran: boolean, reason: string): SignedInOutcome {
   if (!ran) return "not_tried";
@@ -67,6 +69,9 @@ export function statusReadGap(f: ReadGapFacts): string {
   }
   if (f.signedIn === "login_sends_code") {
     return `Login sends a code: ${client}'s login${ON(host)} sends a code at every sign-in, so the monitor never signs in with it on a schedule (every check would send one). Record the status by hand.`;
+  }
+  if (f.signedIn === "in_use") {
+    return `Portal account in use: ${client}'s portal account is in use (a person reviewing an application, or a portal run), so the monitor did not sign in this check (a second sign-in can end that session). It tries again on the next check.`;
   }
   if (f.signedIn === "wall") {
     return `Login wall: ${host || "the portal"} showed its sign-in page. ${f.hasCredential ? "Refresh" : "Link"} a portal login for ${client}${ON(host)}, or record the status by hand.`;

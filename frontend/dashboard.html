@@ -1044,6 +1044,23 @@
           <div id="emailIntakeList" class="stack"></div>
         </div>
 
+        <!-- #538: a backlog as one zip, one folder per job: one project per folder, read like an emailed job. -->
+        <div id="jobDropPanel">
+          <div class="section-head subhead" style="margin-top:8px"><h2>New Jobs from a Zip</h2></div>
+          <div class="muted" style="font-size:12px">Put each job's files (plan set, utility bill, meter photo) in its own folder, zip the folders together, and drop the zip here. Each folder becomes one project for the client you choose, read and checked like an emailed job. You see the folder count before anything is read.</div>
+          <div class="batch-import-form">
+            <select id="jobDropClient" style="min-width:180px"></select>
+            <label class="drop-browse" for="jobDropInput" style="align-self:center">Choose a .zip…</label>
+            <input id="jobDropInput" type="file" accept=".zip" hidden />
+            <!-- #439: a folder path reads the SERVER's disk — hidden when the server is shared. -->
+            <input id="jobDropFolder" class="local-disk-only" placeholder="…or a folder on the server (operator)" style="flex:1;min-width:200px" />
+            <button id="jobDropFolderBtn" class="local-disk-only" type="button"><i data-lucide="folder-search"></i><span>List Folders</span></button>
+          </div>
+          <div id="jobDropStatus" class="muted" style="font-size:13px;padding:6px 0"></div>
+          <div id="jobDropPreview" hidden></div>
+          <div id="jobDropList" class="stack"></div>
+        </div>
+
         <!-- Batch PDF import -->
         <div class="section-head subhead" style="margin-top:8px">
           <h2>Learn from Past Projects</h2>

@@ -249,8 +249,8 @@ const PUBLIC_CHECK_LABELS = new Map<string, PublicCheckWording>([
     "Waiting on the final inspection — the utility needs it before it moves on"],
   [`waiting::${POWERCLERK_STAGE_LABELS.signatures.toLowerCase()}`,
     "Waiting on signatures — the utility needs them before it moves on"],
-  // Waiting on US, like a correction: we read the utility's notes and file its correction form.
-  [`needs_human_review::${POWERCLERK_STAGE_LABELS.changesNeeded.toLowerCase()}`,
+  // A correction (#617): waiting on US — we read the utility's notes and file its correction form.
+  [`correction_flagged::${POWERCLERK_STAGE_LABELS.changesNeeded.toLowerCase()}`,
     "Waiting on us — the utility asked for changes before it goes further"],
   [`needs_human_review::${POWERCLERK_STAGE_LABELS.closed.toLowerCase()}`,
     "Waiting on us — the utility shows this application closed, and we are checking it"],

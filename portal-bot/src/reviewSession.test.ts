@@ -14,6 +14,7 @@ import {
   REVIEW_MARKER_MAX_AGE_MS,
   clearReviewOpen,
   hasLiveReviewSession,
+  liveReviewSessionUnder,
   markReviewOpen,
   shouldSpareForReview,
   userDataDirFromCommandLine,
@@ -85,6 +86,24 @@ check("MUST EXCLUDE: a browser on an UNMARKED profile is still reaped", () => {
 
 check("MUST EXCLUDE: a command line with no profile at all is never spared", () => {
   assert.equal(shouldSpareForReview("chrome.exe --headless"), false);
+});
+
+check("#516 a live marker on any profile under a client's root is found; an expired one, a deeper one or a skipped one is not", () => {
+  const base = path.join(root, "under");
+  const reopen = path.join(base, "client-c", "utility", "testpower.powerclerk.com");
+  assert.equal(liveReviewSessionUnder(path.join(base, "client-c")), "", "an empty root reported a live session");
+  markReviewOpen(reopen);
+  assert.equal(liveReviewSessionUnder(path.join(base, "client-c")), reopen, "a reopen window two levels down was missed");
+  const old = (Date.now() - REVIEW_MARKER_MAX_AGE_MS - 60_000) / 1000;
+  fs.utimesSync(path.join(reopen, ".keelix-review-open"), old, old);
+  assert.equal(liveReviewSessionUnder(path.join(base, "client-c")), "", "an expired marker still held the account");
+  // Below a profile is Chromium's own tree: never walked, so a stray file there holds nothing.
+  markReviewOpen(path.join(reopen, "Default", "Cache"));
+  assert.equal(liveReviewSessionUnder(path.join(base, "client-c")), "", "the walk went into a profile's own tree");
+  const staging = path.join(base, "client-c", "powerclerk_pge");
+  markReviewOpen(staging);
+  assert.equal(liveReviewSessionUnder(base, { skip: (name) => name === "client-c" }), "", "a skipped client's window held the clientless root");
+  assert.equal(liveReviewSessionUnder(path.join(base, "client-c")), staging);
 });
 
 fs.rmSync(root, { recursive: true, force: true });

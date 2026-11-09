@@ -348,8 +348,14 @@ const SPLIT_PART_WITHDRAWN_ACTION = "project.split_part_withdrawn";
  * "Required document … not attached … Staging will refuse without it" rows, the bill-on-file
  * wait) is stale once this is newer than the verdict, and is re-judged (autoStageSteps STEP 1).
  */
+/** #569 — the slot a filing's confirmation screenshot is filed under (submissionConfirmation.ts). It is
+ *  evidence OF a filing, never a document FOR one: no portal upload set carries it, and it is not a
+ *  document change QC re-judges on. Declared here so this module needs no import of that one. */
+export const SUBMISSION_CONFIRMATION_DOC_TYPE = "submission_confirmation";
+
 export function documentsChangedAt(db: AppDb, projectId: string): string | null {
-  const uploaded = s(db.get<Row>("SELECT MAX(uploaded_at) AS t FROM project_documents WHERE project_id = ?", [projectId])?.t);
+  // A confirmation screenshot (#569) lands AFTER a filing and no verdict reads it: not a change.
+  const uploaded = s(db.get<Row>("SELECT MAX(uploaded_at) AS t FROM project_documents WHERE project_id = ? AND doc_type != ?", [projectId, SUBMISSION_CONFIRMATION_DOC_TYPE])?.t);
   const removed = s(db.get<Row>(
     "SELECT MAX(created_at) AS t FROM audit_logs WHERE project_id = ? AND action IN (?, ?)",
     [projectId, DOCUMENT_DELETED_ACTION, SPLIT_PART_WITHDRAWN_ACTION])?.t);

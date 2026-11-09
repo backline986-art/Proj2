@@ -1,4 +1,4 @@
-import type { AhjProcessProfile, CodeReference, ProjectRecord, ReviewerFinding, ReviewerFindingEvidence, ReviewerReport } from "../../shared/src/types";
+import type { AhjProcessProfile, CodeReference, ProjectRecord, ReviewerFinding, ReviewerFindingEvidence, ReviewerReport, StatePermitRule } from "../../shared/src/types";
 import { looksLikeEmail } from "../../shared/src/emailAddress";
 import { evaluateDesignCodeFindings, mountKindForProject, isMlpeDesignForProject } from "./codeReviewRules";
 import { pvWorksheetFindings, serviceRatingConsistencyFindings, type PvWorksheetGateInput } from "./pvWorksheetGate";
@@ -13,6 +13,7 @@ import { resolveValuation } from "./valuation";
 import { knownPowerClerkUtility, pacifiCorpBrand } from "./utilityIdentity";
 import { resolvePermitPath, resolveStampRequirement, hasStampedStructuralEvidence } from "./permitPath";
 import { evaluatePermitPrecedentFindings } from "./permitPrecedents";
+import { citeStateSealRule, statePrescriptiveFindings } from "./stateRules";
 import type { EffectiveCodeContext } from "./codeProfiles";
 
 function payload(project: ProjectRecord, key: string): string {
@@ -111,6 +112,9 @@ export function buildReviewerReport(
     /** A named person's standing confirmation that a `structural` document is the engineer's
      *  sealed letter (structuralLetter.activeStructuralLetterConfirmation, #198). Text never sets it. */
     structuralCertification?: { confirmedBy: string; confirmedAt: string } | null;
+    /** The job state's structural rules (state_permit_rules, #595 PR2): what refuses a prescriptive
+     *  filing, and the seal rule the out-of-state seal finding cites. Absent = none on file. */
+    stateRules?: StatePermitRule[];
   } = {},
 ): ReviewerReport {
   const profile = findAhjProcessProfile(project);
@@ -122,6 +126,12 @@ export function buildReviewerReport(
   // standalone gate files nothing and its form has none of those fields.
   if (!standalone) addSubmittalDataFindings(project, findings);
   findings.push(...evaluateDesignCodeFindings(project, profile, opts.codeContext, opts.uploadedDocTypes ?? [], opts.documentTexts ?? [], opts.structuralCertification ?? null));
+  // The state's own cited rules (#595 PR2): refuse a prescriptive filing the rules send engineered,
+  // name the reasons, and cite the state's seal rule on an out-of-state seal.
+  if (opts.stateRules?.length) {
+    findings.push(...statePrescriptiveFindings(project, opts.stateRules));
+    citeStateSealRule(findings, opts.stateRules);
+  }
   // What issued permits in this AHJ already carried (#147): a callout on a reused product, a
   // warning — never a blocker — on a departure along a dimension the AHJ has corrected before.
   if (opts.codeContext) findings.push(...evaluatePermitPrecedentFindings(project, opts.codeContext));

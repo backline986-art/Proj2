@@ -1040,6 +1040,7 @@ async function loadEmailTracker() {
     $("emailTrackerStatus").textContent = err.message || "Email tracker status unavailable.";
   }
   loadEmailIntake().catch(() => null);
+  loadJobDrops().catch(() => null);
 }
 
 // EMAILED JOBS (#489). Built with DOM calls, never innerHTML: every string here came from an email.
@@ -5180,7 +5181,10 @@ function trackChannelHtml(t) {
   const channel = String(t.channel || "");
   const basis = TRACK_CHANNEL_BASIS[t.channelBasis];
   const lines = [
-    `<p class="muted track-channel" style="margin:0 0 4px">Channel: ${linkifyText(channel)}${basis ? ` <span class="badge ${basis.badge}">${esc(basis.label)}</span>` : ""}${t.lastCheckedAt ? ` · last checked ${esc(fmtDate(t.lastCheckedAt))}` : ""}</p>`,
+    `<p class="muted track-channel" style="margin:0 0 4px">Channel: ${linkifyText(channel)}${basis ? ` <span class="badge ${basis.badge}">${esc(basis.label)}</span>` : ""}${t.lastCheckedAt ? ` · last checked ${esc(fmtDate(t.lastCheckedAt))}` : ""}${
+      // WHY THE LAST CHECK READ NOTHING (#173), beside "last checked" until a later check reads a
+      // status: a filing whose checks keep coming back empty must not look like one that is quiet.
+      t.lastUnreadable?.reason ? ` · <span data-last-unreadable style="color:var(--warning, #b7791f)">last check read nothing (${esc(fmtDate(t.lastUnreadable.at, true))}): ${esc(t.lastUnreadable.reason)}</span>` : ""}</p>`,
   ];
   // A portal URL the server resolved but did not write into the sentence.
   const portal = httpUrl(t.portalUrl);
@@ -5444,6 +5448,15 @@ function trackCardHtml(t) {
     ? `<a href="${esc(t.trackingUrl)}" target="_blank" rel="noopener">status page ↗</a>`
     : "";
   const submitted = t.status !== "not_started" && t.status !== "staged";
+  // #569 — THE FILING'S CONFIRMATION SCREENSHOT beside its number: "Submitted: APP-112491 · confirmation
+  // screenshot". The number is the filing record's (read off the portal's page, or entered by a person);
+  // with none, the line says so — never a number nobody read. Only the server's own project route.
+  const conf = t.confirmation && typeof t.confirmation === "object" && /^\/api\/projects\//.test(String(t.confirmation.url || "")) ? t.confirmation : null;
+  const confirmationLine = conf
+    ? `<p style="margin:0 0 4px" data-track-confirmation="${esc(t.type)}">${conf.recordNumber
+      ? `Submitted: <strong>${esc(conf.recordNumber)}</strong>`
+      : "Submitted — no number was read off the portal's page; enter it below"} &nbsp;·&nbsp; <a href="${esc(conf.url)}" target="_blank" rel="noopener" title="The portal's confirmation page, account and meter numbers masked">confirmation screenshot</a></p>`
+    : "";
   const fieldsHtml = (t.captureFields || []).map((f) =>
     `<label class="track-field"><span>${esc(f.label)}</span><input data-track-field="${esc(f.key)}" data-track="${esc(t.type)}" placeholder="${esc(f.placeholder)}" value="${esc(t[f.key] || "")}" /></label>`,
   ).join("");
@@ -5526,6 +5539,7 @@ function trackCardHtml(t) {
     ${trackPaymentHtml(t)}
     ${trackFeeDueHtml(t)}
     ${trackStageGapsHtml(t)}
+    ${confirmationLine}
     ${captured ? `<p style="margin:0 0 4px">${captured} ${trackLink ? "&nbsp;·&nbsp; " + trackLink : ""}</p>` : (trackLink ? `<p style="margin:0 0 4px">${trackLink}</p>` : "")}
     ${t.recipeId && (t.recipeStatus === "complete" || t.recipeStatus === "recording")
       && !screenshotMisses.has(screenshotKey(state.selectedProjectId, t.recipeId, t.recipeStatus))
@@ -8623,6 +8637,7 @@ function permitTargetCardHtml(target, checks, ui) {
       ${target.portalUrl ? `<p class="muted" style="word-break:break-all">${esc(target.portalUrl)}</p>` : ""}
       ${target.trackingUrl && target.trackingUrl !== target.portalUrl ? `<p class="muted" style="word-break:break-all">Status link: ${esc(target.trackingUrl)}</p>` : ""}
       ${target.readGap && !stopped ? `<p data-read-gap style="border-left:3px solid var(--warn, #b7791f);padding-left:6px"><strong>Can't read on its own:</strong> ${esc(target.readGap)}</p>` : ""}
+      ${target.lastUnreadable?.reason && !stopped ? `<p data-last-unreadable class="muted">Last check read nothing (${esc(new Date(target.lastUnreadable.at).toLocaleString())}): ${esc(target.lastUnreadable.reason)}</p>` : ""}
       ${issuedDocumentsHtml(target)}
       <p class="muted">${stopped ? "Tracking stopped — the monitor no longer reads this filing." : `Checks every ${esc(target.checkFrequencyDays)} day(s) · Next: ${target.nextCheckAt ? esc(new Date(target.nextCheckAt).toLocaleString()) : "not scheduled"}`} · Source strategy: ${esc(target.portalPlatform || "auto")}</p>
       ${ui?.editing || ui?.recording ? "" : `<div style="margin-top:6px">
@@ -10650,6 +10665,154 @@ async function handleBatchDrop(file) {
     if (file) handleBatchDrop(file);
     input.value = "";
   });
+})();
+
+// NEW JOBS FROM A ZIP (#538). One zip (or, for the operator, a server folder) with one folder per job
+// becomes one project per folder, through email intake's per-job pipeline. Two steps: the upload
+// only lists the folders, so the person sees the count (one Parser-cost read each) before Start.
+// Built with DOM calls, never innerHTML: folder and file names come from the archive.
+const jobDropEl = (tag, props = {}, children = []) => {
+  const node = document.createElement(tag);
+  Object.assign(node, props);
+  node.append(...children);
+  return node;
+};
+let jobDropPoll = null;
+
+async function fillJobDropClients() {
+  const sel = $("jobDropClient");
+  if (!sel) return;
+  if (!(state.clients || []).length) { try { await loadClients(); } catch { /* the select says there are none */ } }
+  const keep = sel.value;
+  sel.replaceChildren(
+    jobDropEl("option", { value: "", textContent: "Client these jobs are for…" }),
+    ...(state.clients || []).map((c) => jobDropEl("option", { value: c.id, textContent: c.companyName || c.legalBusinessName || "Unnamed" })),
+  );
+  if (keep) sel.value = keep;
+}
+
+function uploadJobDropZip(file, clientId) {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open("POST", `/api/batch-import/job-drop/upload?${new URLSearchParams({ clientId }).toString()}`);
+    xhr.setRequestHeader("Content-Type", "application/octet-stream");
+    xhr.upload.onprogress = (event) => {
+      if (!event.lengthComputable) return;
+      $("jobDropStatus").textContent = `Uploading ${file.name}… ${Math.round((event.loaded / event.total) * 100)}%`;
+    };
+    xhr.onload = () => {
+      let data = {};
+      try { data = JSON.parse(xhr.responseText || "{}"); } catch { data = {}; }
+      if (xhr.status < 200 || xhr.status >= 300) { reject(new Error(data.error || `Zip upload failed (status ${xhr.status}).`)); return; }
+      resolve(data);
+    };
+    xhr.onerror = () => reject(new Error("Browser could not upload the zip."));
+    $("jobDropStatus").textContent = `Reading ${file.name} (${formatBytes(file.size)})…`;
+    xhr.send(file);
+  });
+}
+
+/** The count, before anything is read: one model read per folder, the Parser's cost. */
+function renderJobDropPreview(preview, source) {
+  const box = $("jobDropPreview");
+  const n = (preview.jobs || []).length;
+  const clientName = $("jobDropClient").selectedOptions[0]?.textContent || "the client";
+  const start = jobDropEl("button", { type: "button", className: "primary", textContent: `Start ${n} job${n === 1 ? "" : "s"}` });
+  const cancel = jobDropEl("button", { type: "button", className: "secondary", textContent: "Cancel" });
+  cancel.addEventListener("click", () => { box.hidden = true; box.replaceChildren(); $("jobDropStatus").textContent = ""; });
+  start.addEventListener("click", async () => {
+    start.disabled = true;
+    try {
+      const out = await api("/api/batch-import/job-drop/start", { method: "POST", body: JSON.stringify({ clientId: preview.clientId, ...source }) });
+      showMessage(`Queued ${out.queued} job${out.queued === 1 ? "" : "s"}. Each folder is read and checked like an emailed job; the list below fills in as they finish.`);
+      box.hidden = true;
+      box.replaceChildren();
+      $("jobDropStatus").textContent = "";
+      await loadJobDrops();
+    } catch (err) { start.disabled = false; showMessage(err.message || "Could not start the jobs.", "error"); }
+  });
+  box.replaceChildren(jobDropEl("div", { className: "panel" }, [
+    jobDropEl("strong", { textContent: `${n} job folder${n === 1 ? "" : "s"} for ${clientName}` }),
+    jobDropEl("div", { className: "muted", textContent: `Each folder becomes one project and is read once by the model, the same cost as one Parser read: ${n} read${n === 1 ? "" : "s"} in all. Nothing is read until you press Start.` }),
+    jobDropEl("ul", {}, (preview.jobs || []).map((j) => jobDropEl("li", { textContent: `${j.folder} (${j.files} file${j.files === 1 ? "" : "s"})` }))),
+    ...((preview.looseFiles || []).length
+      ? [jobDropEl("div", { className: "muted", textContent: `Not in a job folder, so not read: ${preview.looseFiles.join(", ")}` })]
+      : []),
+    jobDropEl("div", {}, [start, " ", cancel]),
+  ]));
+  box.hidden = false;
+}
+
+const JOB_DROP_STATUS_TEXT = { queued: "Waiting", running: "Reading…", created: "Project created", attached: "Added to the project at that address", unsorted: "Needs a person" };
+
+async function loadJobDrops() {
+  const list = $("jobDropList");
+  if (!list) return;
+  const drops = await api("/api/batch-import/job-drops");
+  const rows = (drops || []).map((d) => {
+    const done = d.counts.created + d.counts.attached + d.counts.unsorted;
+    const folders = (d.folders || []).map((f) => {
+      const parts = [jobDropEl("strong", { textContent: f.folder }), `: ${JOB_DROP_STATUS_TEXT[f.status] || f.status}`];
+      if (f.projectId) {
+        const open = jobDropEl("a", { href: "#", textContent: "open" });
+        open.addEventListener("click", (e) => { e.preventDefault(); selectProject(f.projectId); });
+        parts.push(" (", open, ")");
+      }
+      if (f.reasonText) parts.push(jobDropEl("div", { className: "muted", textContent: f.reasonText }));
+      if ((f.missing || []).length) parts.push(jobDropEl("div", { className: "muted", textContent: `Still needed: ${f.missing.join(", ")}` }));
+      const refused = (f.files || []).filter((x) => x.refused);
+      if (refused.length) parts.push(jobDropEl("div", { className: "muted", textContent: `Not used: ${refused.map((x) => `${x.name} (${x.refused})`).join("; ")}` }));
+      return jobDropEl("li", {}, parts);
+    });
+    return jobDropEl("details", { className: "panel", open: done < d.total }, [
+      jobDropEl("summary", {}, [
+        jobDropEl("strong", { textContent: `${d.clientName || "Client"}: ${d.total} job${d.total === 1 ? "" : "s"}` }),
+        ` (${done}/${d.total} done: ${d.counts.created} created, ${d.counts.attached} added to existing, ${d.counts.unsorted} need a person; started ${new Date(d.createdAt).toLocaleString()}${d.startedBy ? ` by ${d.startedBy}` : ""})`,
+      ]),
+      jobDropEl("progress", { max: d.total, value: done, style: "width:100%" }),
+      jobDropEl("ul", {}, folders),
+    ]);
+  });
+  list.replaceChildren(...rows);
+  // Refresh while any folder is still waiting or being read; stop once every drop is done.
+  const busy = (drops || []).some((d) => d.counts.queued + d.counts.running > 0);
+  if (busy && !jobDropPoll) jobDropPoll = window.setTimeout(() => { jobDropPoll = null; loadJobDrops().catch(() => null); }, 5000);
+}
+
+(function () {
+  const input = $("jobDropInput");
+  if (!input) return;
+  fillJobDropClients().catch(() => null);
+  $("jobDropClient").addEventListener("focus", () => { fillJobDropClients().catch(() => null); });
+  const needClient = () => {
+    const clientId = $("jobDropClient").value;
+    if (!clientId) showMessage("Choose the client these jobs are for first.", "error");
+    return clientId;
+  };
+  input.addEventListener("change", async () => {
+    const file = input.files?.[0];
+    input.value = "";
+    if (!file) return;
+    if (!(file.name || "").toLowerCase().endsWith(".zip")) { showMessage("Choose a .zip with one folder per job.", "error"); return; }
+    const clientId = needClient();
+    if (!clientId) return;
+    try {
+      const preview = await uploadJobDropZip(file, clientId);
+      $("jobDropStatus").textContent = "";
+      renderJobDropPreview(preview, { uploadId: preview.uploadId });
+    } catch (err) { $("jobDropStatus").textContent = ""; showMessage(err.message || "Zip upload failed.", "error"); }
+  });
+  $("jobDropFolderBtn").addEventListener("click", async () => {
+    const folderPath = $("jobDropFolder").value.trim();
+    if (!folderPath) { showMessage("Type the server folder's full path, or choose a .zip.", "error"); return; }
+    const clientId = needClient();
+    if (!clientId) return;
+    try {
+      const preview = await api("/api/batch-import/job-drop/preview", { method: "POST", body: JSON.stringify({ clientId, folderPath }) });
+      renderJobDropPreview(preview, { folderPath });
+    } catch (err) { showMessage(err.message || "Could not read that folder.", "error"); }
+  });
+  loadJobDrops().catch(() => null);
 })();
 
 // ----- Clients & contractor licensing -----
