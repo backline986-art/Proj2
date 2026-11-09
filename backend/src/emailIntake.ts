@@ -195,9 +195,19 @@ export function isIntakeMessage(parsed: ParsedMail): boolean {
 // Client and sender.
 // ---------------------------------------------------------------------------
 
-interface ClientRow {
+export interface IntakeClient {
   id: string; org_id: string; company_name: string;
   contact_email: string; business_email: string; updates_inbox: string; billing_contact_email: string; intake_senders: string;
+}
+type ClientRow = IntakeClient;
+
+/** The client with this id IN THIS ORG, else null (rule 6: a person's choice of client never
+ *  reaches across orgs — "File under client" and the bulk job-folder drop both ask this). */
+export function intakeClientInOrg(db: AppDb, clientId: string, orgId: string): IntakeClient | null {
+  return db.get<IntakeClient>(
+    "SELECT id, org_id, company_name, contact_email, business_email, updates_inbox, billing_contact_email, intake_senders FROM clients WHERE id = ? AND org_id = ?",
+    [String(clientId || ""), orgId],
+  ) ?? null;
 }
 
 function clientsForTag(db: AppDb, tag: string, opts: IntakeOptions): ClientRow[] {
@@ -223,11 +233,15 @@ export function senderIsKnown(client: Pick<ClientRow, "contact_email" | "busines
 // Attachments.
 // ---------------------------------------------------------------------------
 
-interface WorkingFile extends EmailIntakeFile {
+export interface WorkingFile extends EmailIntakeFile {
   content: Buffer;
   kind: string;
   pdfText: string;
 }
+
+/** One file handed to the per-job pipeline: an email's attachment, or a file in one job folder of
+ *  a bulk drop (#538). Only its name and bytes: nothing else about where it came from is read. */
+export interface IntakeJobFile { filename?: string; content: Buffer | Uint8Array }
 
 function maxFileBytes(): number {
   const mb = Number(process.env.EMAIL_INTAKE_MAX_FILE_MB || 100);
@@ -254,14 +268,14 @@ async function pdfTextOf(content: Buffer): Promise<string> {
 }
 
 /** Sniff, refuse what no slot can take, read each PDF's text, and give every usable file a slot. */
-async function sortAttachments(attachments: Attachment[]): Promise<WorkingFile[]> {
+async function sortAttachments(attachments: IntakeJobFile[]): Promise<WorkingFile[]> {
   const files: WorkingFile[] = [];
   for (const [i, a] of attachments.entries()) {
     const name = (a.filename || `attachment-${i + 1}`).trim().slice(0, 200);
     const content = Buffer.isBuffer(a.content) ? a.content : Buffer.from(a.content ?? []);
     const kind = sniffFileKind(content);
     const f: WorkingFile = { name, size: content.length, content, kind, pdfText: "" };
-    if (i >= MAX_FILES) f.refused = `More than ${MAX_FILES} attachments; send the rest in another email.`;
+    if (i >= MAX_FILES) f.refused = `More than ${MAX_FILES} files in one job; send the rest separately.`;
     else if (!content.length) f.refused = "The file is empty.";
     else if (content.length > maxFileBytes()) f.refused = `Larger than ${Math.round(maxFileBytes() / 1024 / 1024)} MB.`;
     else if (looksLikeCad(name, kind)) f.refused = "A CAD drawing, not a submittable document: export the plan set to PDF and send that.";
@@ -596,6 +610,94 @@ const IDENTITY_FIELDS: Array<[keyof ProjectRecord, string]> = [
   ["homeownerName", "Homeowner name"], ["utility", "Utility"], ["ahj", "Permitting jurisdiction (AHJ)"], ["systemSizeDcKw", "System size (DC kW)"],
 ];
 
+/** What the per-job pipeline did with one job's files. */
+export type IntakeJobPlacement =
+  | { outcome: "unsorted"; reason: Extract<EmailIntakeReason, "no_usable_attachments" | "address_unreadable" | "plan_set_names_another_client">; files: WorkingFile[] }
+  | {
+    outcome: "created" | "attached"; projectId: string; project: ProjectRecord; files: WorkingFile[];
+    extraction: ParserExtractionResponse | null; unsure: string[]; missing: string[]; refused: EmailIntakeFile[];
+  };
+
+/**
+ * THE PER-JOB PIPELINE: one job's files, for a client already decided, become a project (or are
+ * attached to the same job sent again). Email intake calls it once per message, after the tag, the
+ * sender and its authentication have chosen the client; the bulk job-folder drop (#538) calls it
+ * once per folder with the client a person chose. ONE pipeline, so the two doors slot, read, dedupe
+ * and create alike:
+ *   slot the files (sortAttachments) → read the documents' text only (rule 2) → a plan set licensed
+ *   to another client stays unsorted → no address stays unsorted → the same address for the same
+ *   client within EMAIL_INTAKE_DEDUPE_DAYS attaches, else createProject → save each document →
+ *   enqueueStageSteps (the local chain, which stops at ready_to_stage: nothing here touches a portal).
+ * The org is the client's (rule 6) and nothing the files say changes it. Throws only on a failure
+ * the caller records as `failed`.
+ */
+export async function placeIntakeJob(db: AppDb, input: {
+  client: IntakeClient;
+  files: IntakeJobFile[];
+  extract?: IntakeExtractor;
+  /** Who the documents and audit name: "email intake", or the person who filed or dropped them. */
+  uploadedBy: string;
+  /** project_documents.source: "email_intake" or "bulk_drop". */
+  source: string;
+  /** A person already saw "the plan set's licence names another client" and vouched past it (#541). */
+  otherLicenceVouched?: boolean;
+}): Promise<IntakeJobPlacement> {
+  const { client } = input;
+  const orgId = client.org_id || DEFAULT_ORG_ID;
+  const files = await sortAttachments(input.files);
+  const usable = files.filter((f) => !f.refused);
+  if (!usable.length) return { outcome: "unsorted", reason: "no_usable_attachments", files };
+
+  // THE PARSE: the documents' own text only — never the email body (rule 2).
+  const textOf = (docType: string) => usable.find((f) => f.docType === docType)?.pdfText ?? "";
+  const texts = { planText: textOf("plan_set"), utilityBillText: textOf("utility_bill"), structuralLetterText: textOf("structural_letter") };
+  let extraction: ParserExtractionResponse | null = null;
+  if (texts.planText.trim() || texts.utilityBillText.trim() || texts.structuralLetterText.trim()) {
+    extraction = await (input.extract ?? defaultExtractor(db))(texts, orgId);
+  }
+  const resolution = extraction?.clientResolution;
+  if (resolution?.decision === "auto_assign" && resolution.clientId && resolution.clientId !== client.id
+    && !input.otherLicenceVouched) {
+    return { outcome: "unsorted", reason: "plan_set_names_another_client", files };
+  }
+  const { payload, unsure } = extraction ? payloadFromExtraction(extraction) : { payload: {} as ParserPayload, unsure: [] };
+  const probe = normalizeProject("probe", payload);
+  if (!probe.projectAddress.trim()) return { outcome: "unsorted", reason: "address_unreadable", files };
+
+  // CREATE, or ATTACH to the same job sent again.
+  const existingId = recentProjectAtAddress(db, orgId, client.id, probe);
+  let projectId: string;
+  if (existingId) {
+    projectId = existingId;
+  } else {
+    projectId = createProject(db, { ...payload, clientId: client.id }, orgId).project.id;
+  }
+  const existingDocs = new Set(
+    db.query<Row>("SELECT doc_type, original_filename, size_bytes FROM project_documents WHERE project_id = ?", [projectId])
+      .map((d) => `${text(d.doc_type)}|${text(d.original_filename)}|${Number(d.size_bytes)}`),
+  );
+  for (const f of usable) {
+    if (existingDocs.has(`${f.docType}|${f.name}|${f.size}`)) continue;
+    try {
+      saveProjectDocument(db, projectId, { filename: f.name, docType: f.docType, contentType: f.kind === "pdf" ? "application/pdf" : `image/${f.kind}`, buffer: f.content, source: input.source, uploadedBy: input.uploadedBy });
+    } catch (err) {
+      // The same door as an upload refuses it; it is reported, and the others still go on.
+      f.refused = err instanceof HttpError || err instanceof Error ? err.message : String(err);
+    }
+  }
+  // The chain is queued after the files are on the project, so its first step sees the plan set.
+  try { enqueueStageSteps(db, projectId); } catch { /* the chain is a convenience, not the intake */ }
+
+  const project = getProjectDetail(db, projectId).project;
+  const docTypes = new Set(db.query<Row>("SELECT doc_type FROM project_documents WHERE project_id = ?", [projectId]).map((d) => text(d.doc_type)));
+  const missing = [
+    ...IDENTITY_FIELDS.filter(([k]) => project[k] == null || String(project[k]).trim() === "").map(([, label]) => label),
+    ...MISSING_DOCS.filter(([t]) => !docTypes.has(t)).map(([, label]) => label),
+  ];
+  const refused = files.filter((f) => f.refused).map(({ name, size, refused: why }) => ({ name, size, refused: why }));
+  return { outcome: existingId ? "attached" : "created", projectId, project, files, extraction, unsure, missing, refused };
+}
+
 /** A person's re-run of one kept message (#541). */
 interface Rerun {
   rowId: string;
@@ -663,57 +765,13 @@ async function processOne(db: AppDb, raw: Buffer, opts: IntakeOptions, result: E
     return unsorted("sender_not_authenticated", orgId, client.id, null);
   }
 
-  const files = await sortAttachments(attachments);
-  const usable = files.filter((f) => !f.refused);
-  if (!usable.length) return unsorted("no_usable_attachments", orgId, client.id, files);
-
-  // THE PARSE: the documents' own text only — never the email body (rule 2).
-  const textOf = (docType: string) => usable.find((f) => f.docType === docType)?.pdfText ?? "";
-  const texts = { planText: textOf("plan_set"), utilityBillText: textOf("utility_bill"), structuralLetterText: textOf("structural_letter") };
-  let extraction: ParserExtractionResponse | null = null;
-  if (texts.planText.trim() || texts.utilityBillText.trim() || texts.structuralLetterText.trim()) {
-    extraction = await (opts.extract ?? defaultExtractor(db))(texts, orgId);
-  }
-  const resolution = extraction?.clientResolution;
-  if (resolution?.decision === "auto_assign" && resolution.clientId && resolution.clientId !== client.id
-    && rerun?.overridden !== "plan_set_names_another_client") {
-    return unsorted("plan_set_names_another_client", orgId, client.id, files);
-  }
-  const { payload, unsure } = extraction ? payloadFromExtraction(extraction) : { payload: {} as ParserPayload, unsure: [] };
-  const probe = normalizeProject("probe", payload);
-  if (!probe.projectAddress.trim()) return unsorted("address_unreadable", orgId, client.id, files);
-
-  // CREATE, or ATTACH to the same job sent again.
-  const existingId = recentProjectAtAddress(db, orgId, client.id, probe);
-  let projectId: string;
-  if (existingId) {
-    projectId = existingId;
-  } else {
-    projectId = createProject(db, { ...payload, clientId: client.id }, orgId).project.id;
-  }
-  const existingDocs = new Set(
-    db.query<Row>("SELECT doc_type, original_filename, size_bytes FROM project_documents WHERE project_id = ?", [projectId])
-      .map((d) => `${text(d.doc_type)}|${text(d.original_filename)}|${Number(d.size_bytes)}`),
-  );
-  for (const f of usable) {
-    if (existingDocs.has(`${f.docType}|${f.name}|${f.size}`)) continue;
-    try {
-      saveProjectDocument(db, projectId, { filename: f.name, docType: f.docType, contentType: f.kind === "pdf" ? "application/pdf" : `image/${f.kind}`, buffer: f.content, source: "email_intake", uploadedBy: rerun ? rerun.by : ACTOR });
-    } catch (err) {
-      // The same door as an upload refuses it; it is reported, and the others still go on.
-      f.refused = err instanceof HttpError || err instanceof Error ? err.message : String(err);
-    }
-  }
-  // The chain is queued after the files are on the project, so its first step sees the plan set.
-  try { enqueueStageSteps(db, projectId); } catch { /* the chain is a convenience, not the intake */ }
-
-  const project = getProjectDetail(db, projectId).project;
-  const docTypes = new Set(db.query<Row>("SELECT doc_type FROM project_documents WHERE project_id = ?", [projectId]).map((d) => text(d.doc_type)));
-  const missing = [
-    ...IDENTITY_FIELDS.filter(([k]) => project[k] == null || String(project[k]).trim() === "").map(([, label]) => label),
-    ...MISSING_DOCS.filter(([t]) => !docTypes.has(t)).map(([, label]) => label),
-  ];
-  const refused = files.filter((f) => f.refused).map(({ name, size, refused: why }) => ({ name, size, refused: why }));
+  const placed = await placeIntakeJob(db, {
+    client, files: attachments, extract: opts.extract, uploadedBy: rerun ? rerun.by : ACTOR, source: "email_intake",
+    otherLicenceVouched: rerun?.overridden === "plan_set_names_another_client",
+  });
+  if (placed.outcome === "unsorted") return unsorted(placed.reason, orgId, client.id, placed.files);
+  const { projectId, project, files, extraction, unsure, missing, refused } = placed;
+  const existingId = placed.outcome === "attached" ? projectId : null;
   // A sender only a PERSON vouched for (not one of the client's own addresses, or one whose mail
   // failed authentication) never gets an automatic reply: it is a draft a person sends.
   const draftOnly = !knownSender || authOverridden
@@ -891,10 +949,7 @@ export async function fileEmailIntake(
 ): Promise<EmailIntakeView> {
   const row = rowInScope(db, intakeId, orgFilter);
   const orgId = text(row.org_id) || DEFAULT_ORG_ID;
-  const client = db.get<ClientRow>(
-    "SELECT id, org_id, company_name, contact_email, business_email, updates_inbox, billing_contact_email, intake_senders FROM clients WHERE id = ? AND org_id = ?",
-    [String(clientId || ""), orgId],
-  );
+  const client = intakeClientInOrg(db, clientId, orgId);
   if (!client) throw new HttpError(404, "Client not found.");
   if (text(row.status) !== "unsorted") throw new HttpError(409, "Only an unsorted message can be filed; this one was already placed or dismissed.");
   const reason = text(row.reason);

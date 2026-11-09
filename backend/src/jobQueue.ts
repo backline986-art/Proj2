@@ -39,7 +39,10 @@ export type JobType =
   | "stage_step"
   // EMAILED JOBS, FILED OFF THE MONITOR TICK (#539): the intake mail one inbox poll found (IMAP
   // UIDs or Gmail ids, never the raw message), fetched again and run through emailIntake.ts.
-  | "email_intake";
+  | "email_intake"
+  // ONE JOB FOLDER OF A BULK DROP (#538): its files through email intake's per-job pipeline for the
+  // client a person chose (bulkJobDrop.ts). One job per folder, so one bad folder never sinks the drop.
+  | "bulk_job_folder";
 
 export type JobStatus = "pending" | "running" | "done" | "failed";
 
@@ -749,6 +752,10 @@ async function runClaimedJob(db: AppDb, job: JobRecord): Promise<boolean> {
         const { runImapIntakeJob } = await import("./emailPoller");
         result = await runImapIntakeJob(db, job.payload);
       }
+    } else if (job.jobType === "bulk_job_folder") {
+      // Dynamic: bulkJobDrop imports this module to enqueue its folder jobs.
+      const { runBulkJobFolder } = await import("./bulkJobDrop");
+      result = await runBulkJobFolder(db, job);
     } else if (job.jobType === "folder_scan") {
       result = await runFolderScanJob(db, job);
     } else if (job.jobType === "stage_step") {

@@ -2822,6 +2822,44 @@ export interface EmailIntakeRunResult {
   items: EmailIntakeView[];
 }
 
+// BULK JOB-FOLDER DROP (#538): one zip or server folder, one sub-folder per job, each run through
+// email intake's per-job pipeline (emailIntake.placeIntakeJob) for the client a person chose.
+export type BulkDropFolderStatus = "queued" | "running" | "created" | "attached" | "unsorted";
+
+export interface BulkDropFolderView {
+  /** The job folder's own name (never a server path). */
+  folder: string;
+  status: BulkDropFolderStatus;
+  /** Why it was not placed: no_usable_attachments, address_unreadable, plan_set_names_another_client or failed. */
+  reason: string;
+  reasonText: string;
+  projectId: string | null;
+  files: EmailIntakeFile[];
+  /** What the new project still needs (identity fields, a plan set or bill), in words. */
+  missing: string[];
+}
+
+export interface BulkDropView {
+  batchId: string;
+  clientId: string;
+  clientName: string;
+  startedBy: string;
+  createdAt: string;
+  total: number;
+  counts: Record<BulkDropFolderStatus, number>;
+  folders: BulkDropFolderView[];
+}
+
+/** What a drop holds, shown before anything is read: one model read per job folder, the Parser's. */
+export interface BulkDropPreview {
+  /** An uploaded zip's id (its extracted folder's name under the client's org root), else "". */
+  uploadId: string;
+  clientId: string;
+  jobs: Array<{ folder: string; files: number }>;
+  /** Files at the top level, outside any job folder: they are not read. */
+  looseFiles: string[];
+}
+
 export type OperationStepStatus = "not_started" | "in_progress" | "waiting" | "blocked" | "done";
 export type ProjectNoteType = "pm_note" | "blocker" | "client_update" | "handoff" | "system_note";
 

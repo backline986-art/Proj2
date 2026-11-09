@@ -3127,6 +3127,35 @@ app.post(
   },
 );
 
+// BULK JOB-FOLDER DROP (#538): one zip (or, for the operator, a server folder) with one sub-folder
+// per job becomes one project per folder, each through email intake's per-job pipeline
+// (bulkJobDrop.ts). Two steps: upload/preview lists the job folders and queues nothing, so the person
+// sees the count (one Parser-cost model read per folder) before starting. The org is the CHOSEN
+// client's, never the archive's (rule 6): a client outside the caller's org is a 404, the zip lands
+// under that org's root, and every folder job is stamped with it. No server path is returned.
+app.post(
+  "/api/batch-import/job-drop/upload",
+  express.raw({ type: "*/*", limit: process.env.BATCH_ZIP_LIMIT || "2gb" }),
+  asyncHandler(async (req, res) => {
+    const body = req.body;
+    if (!Buffer.isBuffer(body) || body.length === 0) throw new HttpError(400, "Uploaded zip was empty or unreadable.");
+    const { previewUploadedDrop } = await import("./bulkJobDrop");
+    res.status(201).json(previewUploadedDrop(db, requestScope(db, req), String(req.query.clientId || ""), body));
+  }),
+);
+app.post("/api/batch-import/job-drop/preview", asyncHandler(async (req, res) => {
+  const { previewFolderDrop } = await import("./bulkJobDrop");
+  res.json(previewFolderDrop(db, requestScope(db, req), (req.body || {}).clientId, (req.body || {}).folderPath));
+}));
+app.post("/api/batch-import/job-drop/start", asyncHandler(async (req, res) => {
+  const { startDrop } = await import("./bulkJobDrop");
+  res.status(201).json(startDrop(db, requestScope(db, req), req.body || {}, currentUser(db, req)?.email || "operator"));
+}));
+app.get("/api/batch-import/job-drops", asyncHandler(async (req, res) => {
+  const { listBulkDrops } = await import("./bulkJobDrop");
+  res.json(listBulkDrops(db, reqOrgFilter(db, req)));
+}));
+
 // Check folder scan job status + get full result. SCOPED to the caller's org: a folder_scan
 // job's payload carries a server folderPath and its results name every scanned PDF's path, and
 // /scan + /upload-zip stamp the caller's org on it. Without the orgId, listJobs fell back to the

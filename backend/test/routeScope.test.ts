@@ -136,7 +136,10 @@ const UNSCOPED_BY_DESIGN: Record<string, string> = {
   // Learns into the SHARED knowledge base, but each scan IS a tenant row: /scan and
   // /upload-zip stamp the caller's org on the folder_scan job (its historical-failure rows
   // land under the job's org), and GET /jobs lists through reqOrgFilter (#276).
-  "/api/batch-import": "folder_scan jobs stamped with the caller's org; GET /jobs lists via reqOrgFilter",
+  // The bulk job-folder drop (#538) lives here too: its client must be in the caller's org (404
+  // otherwise), its folder jobs are stamped with that client's org, and GET /job-drops lists through
+  // reqOrgFilter (bulkJobDrop.test).
+  "/api/batch-import": "folder_scan and bulk_job_folder jobs stamped with the caller's (client's) org; lists via reqOrgFilter",
 
   // Operator-level integrations and global background triggers. Reachable only by
   // autopilot-entitled orgs; in the service-bureau model that is the operator alone.
