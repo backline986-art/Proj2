@@ -169,6 +169,9 @@ export type PortalRunStatus =
   // delegated final submit — the resubmit confirmation is a human's click, recorded only.
   | "awaiting_human_resubmit"
   | "paused_for_human"
+  // The run stopped on a fee (#576: a pay-to-file submit, a pay-now dialog, a fee page after the
+  // approved click). A person pays on the portal; staging the track is refused while it waits.
+  | "awaiting_payment"
   | "submitted"
   | "failed";
 export type PermitCheckSource = "manual" | "portal" | "email" | "mock" | "public_url";
@@ -1035,6 +1038,7 @@ export type NextStepKey =
   | "operator_blocked"
   | "correction_overdue"
   | "portal_paused"
+  | "payment_needed"
   | "automation_running"
   | "staging_failed"
   | "qc_not_run"
@@ -1251,7 +1255,7 @@ export interface SubmissionRecord {
   /** The filing's discipline (`permit_type`: building, electrical, combo, mpu, nem, …) — names the
    *  filing in the dashboard's corrections picker (#58). */
   permitType?: string;
-  status: "staged" | "awaiting_human_submit" | "paused_for_human" | "submitted" | "failed" | "approved";
+  status: "staged" | "awaiting_human_submit" | "paused_for_human" | "awaiting_payment" | "submitted" | "failed" | "approved";
   applicationNumber: string;
   permitNumber: string;
   confirmationNumber: string;

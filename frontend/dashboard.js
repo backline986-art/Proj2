@@ -1362,6 +1362,7 @@ const NEXT_STEP_CHIP = {
   operator_blocked: { pill: "to_fix", tone: "danger", label: "Blocked" },
   correction_overdue: { pill: "corrections", tone: "danger", label: "Correction overdue" },
   portal_paused: { pill: "to_fix", tone: "warning", label: "Portal paused" },
+  payment_needed: { pill: "to_fix", tone: "warning", label: "Payment needed" },
   automation_running: { pill: "waiting", tone: "neutral", label: "Staging running" },
   staging_failed: { pill: "staging_failed", tone: "danger", label: "Staging failed" },
   qc_not_run: { pill: "to_fix", tone: "warning", label: "Run QC" },
@@ -5318,6 +5319,39 @@ const STAGE_GAP_LINK = {
   documents: "Upload it",
   portal_questions: "Answer it",
 };
+// WAITING ON PAYMENT (#576): what to pay, where, with whose card, and the way back to the
+// application. Everything here is server data: esc()'d, and a link is rendered only when it is
+// http(s) (the server already limits it to the track's own portal host — rule 5).
+const FEE_RESPONSIBILITY_TEXT = {
+  "card-on-file": "the card on file on this portal account",
+  "customer-pays": "the customer pays",
+  "mailed-check": "a mailed check",
+  "keelix-pays": "we pay (then invoice it)",
+};
+function trackPaymentHtml(t) {
+  const p = t && t.payment;
+  if (!p) return "";
+  const httpLink = (u) => (/^https?:\/\//i.test(String(u || "")) ? String(u) : "");
+  const money = (n) => `$${Number(n).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+  const amount = typeof p.amountUsd === "number" && p.amountUsd > 0
+    ? `<strong>${esc(money(p.amountUsd))}</strong>`
+    : `<strong>amount not read</strong>${p.unreadReason ? ` <span class="muted">(${esc(p.unreadReason)})</span>` : ""}`;
+  const lines = Array.isArray(p.lines) && p.lines.length
+    ? `<ul style="margin:2px 0 4px 16px;font-size:12px">${p.lines.map((l) => `<li>${esc(l.label)}: ${esc(money(l.amountUsd))}</li>`).join("")}</ul>`
+    : "";
+  const portal = httpLink(p.portalUrl);
+  const app = httpLink(p.applicationLink);
+  const who = p.feeResponsibility ? (FEE_RESPONSIBILITY_TEXT[p.feeResponsibility] || p.feeResponsibility) : "not recorded for this portal (set it on the client's portal login)";
+  return `<div class="submit-gate-check warning" style="margin:4px 0 6px;font-size:12px" data-track-payment="${esc(p.runId)}">
+    <p style="margin:0 0 4px">Payment needed: ${amount}${portal ? ` on <a href="${esc(portal)}" target="_blank" rel="noopener">${esc(portal)}</a>` : ""}. Automation never pays.</p>
+    ${lines}
+    <p style="margin:0 0 2px">Login: ${p.loginUsername ? esc(p.loginUsername) : "no login on file for this portal"} · Who pays: ${esc(who)}</p>
+    ${app ? `<p style="margin:0 0 2px"><a href="${esc(app)}" target="_blank" rel="noopener">Open the saved application</a></p>` : ""}
+    ${p.screenshotUrl ? `<a href="${esc(p.screenshotUrl)}" target="_blank" rel="noopener" title="The fee page as the run saw it (secrets and card fields masked)"><img src="${esc(p.screenshotUrl)}" alt="The portal's fee page" class="review-shot" style="max-width:100%;border:1px solid var(--border);border-radius:var(--radius-sm)" /></a>` : ""}
+    <p class="muted" style="margin:2px 0 0">Pay on the portal, then record the confirmation number below. Staging this track again is refused while it waits: it would open a second application.</p>
+  </div>`;
+}
+
 function trackStageGapsHtml(t) {
   const gaps = Array.isArray(t && t.stageGaps) ? t.stageGaps : [];
   if (!gaps.length) return "";
@@ -5458,13 +5492,16 @@ function trackCardHtml(t) {
     ${trackPrerequisitesHtml(t)}
     ${trackEssStepHtml(t)}
     <p style="margin:0 0 6px;font-size:12px">→ ${linkifyText(trackNextActionText(t))}</p>
+    ${trackPaymentHtml(t)}
     ${trackStageGapsHtml(t)}
     ${captured ? `<p style="margin:0 0 4px">${captured} ${trackLink ? "&nbsp;·&nbsp; " + trackLink : ""}</p>` : (trackLink ? `<p style="margin:0 0 4px">${trackLink}</p>` : "")}
     ${t.recipeId && (t.recipeStatus === "complete" || t.recipeStatus === "recording")
       && !screenshotMisses.has(screenshotKey(state.selectedProjectId, t.recipeId, t.recipeStatus))
       ? `<div style="margin:6px 0 4px" data-shot-wrap><a href="/api/projects/${esc(state.selectedProjectId)}/portal-runs/${esc(t.recipeId)}/review-screenshot" target="_blank" rel="noopener" title="Open the full-size capture"><img src="/api/projects/${esc(state.selectedProjectId)}/portal-runs/${esc(t.recipeId)}/review-screenshot" alt="Auto-captured portal page" class="review-shot" style="max-width:100%;border:1px solid var(--border);border-radius:var(--radius-sm)" data-shot-key="${esc(screenshotKey(state.selectedProjectId, t.recipeId, t.recipeStatus))}" onerror="window.__noteMissingReviewShot(this)" /></a><p class="muted" style="font-size:11px;margin:2px 0 0">${t.recipeStatus === "complete" ? "Portal review screen (auto-captured) — click for full size" : "Last captured page — recording not complete. If this is a login page, add this portal's login under “Manage logins” and re-stage."}</p></div>` : ""}
     <div class="track-actions">
-      ${stageBlocked
+      ${t.payment
+        ? `<button type="button" class="secondary" data-track-stage="${esc(t.type)}" disabled aria-disabled="true" title="This filing is waiting on a fee payment on its portal; staging again would open a second application."><i data-lucide="bot"></i><span>Stage in portal</span></button>`
+        : stageBlocked
         ? `<button type="button" class="secondary" data-track-stage="${esc(t.type)}" disabled aria-disabled="true" title="${esc(stageBlocked)}"><i data-lucide="bot"></i><span>Stage in portal</span></button>
       <span class="muted" style="font-size:11px" data-track-stage-blocked>${esc(stageBlocked)}</span>`
         : `<button type="button" class="secondary" data-track-stage="${esc(t.type)}" title="Auto-fill this filing's portal up to the final review screen — you submit manually"><i data-lucide="bot"></i><span>Stage in portal</span></button>`}
@@ -5486,7 +5523,7 @@ function trackCardHtml(t) {
     ${t.signatureRequest && t.signatureRequest.state ? `<p class="muted" style="font-size:12px;margin:4px 0" data-track-signature-state="${esc(t.signatureRequest.state)}">Signature step: ${esc(signatureStateText(t.signatureRequest))}</p>` : ""}
     ${recipeBlock}
     ${trackIssuerEditHtml(t)}
-    <details class="track-submit"${t.status === "staged" ? " open" : ""}>
+    <details class="track-submit"${t.status === "staged" || t.payment ? " open" : ""}>
       <summary>${submitted ? "Update numbers / status link" : "I submitted it → capture #"}</summary>
       <div class="track-submit-form">
         ${fieldsHtml}
@@ -5797,6 +5834,13 @@ async function stageSubmittalTrack(type, btn, autoSubmit = false, extra = null, 
     // false "staged to final review" success message.
     if (job.result && job.result.status === "failed") {
       showMessage(`Could not stage ${humanize(type)}: ${job.result.message || "see the run log on the project for details."}`, "error");
+      await loadSubmittalTracks();
+      renderDetail();
+      return;
+    }
+    // A FEE STOP (#576): the payment sentence — amount, portal, pay there. Never MFA wording.
+    if (job.result && job.result.status === "awaiting_payment") {
+      showMessage(job.result.message || `${humanize(type)}: payment needed on the portal. Pay there, then record the confirmation number.`, "warning");
       await loadSubmittalTracks();
       renderDetail();
       return;
@@ -9147,10 +9191,10 @@ function renderPortalRuns() {
   // reopen runs included, and offered them the Capture Confirmation form — which stamps a
   // submissions row and would have picked the newest FAILED staging row for a filing that is
   // already on file. The backend now refuses that run type with a 409; this stops offering it.
-  const paused = runs.find((run) => run.status === "paused_for_human" && run.runType !== "correction_reopen");
+  const paused = runs.find((run) => (run.status === "paused_for_human" || run.status === "awaiting_payment") && run.runType !== "correction_reopen");
   const runCard = (run) => {
     const isMfa = run.pauseReason === "mfa_captcha";
-    const cardClass = run.status === "failed" ? "fail" : isMfa ? "warning" : "info";
+    const cardClass = run.status === "failed" ? "fail" : isMfa || run.status === "awaiting_payment" ? "warning" : "info";
     const confirmLine = run.confirmationNumber ? `<p class="muted">Confirmation: <strong>${esc(run.confirmationNumber)}</strong></p>` : "";
     const mfaBanner = isMfa
       ? `<p class="submit-gate-check warning" style="margin-top:6px">Portal requires your attention — MFA or CAPTCHA detected. Complete it in the browser window, then click Retry to continue.</p>`
@@ -9184,7 +9228,7 @@ function renderPortalRuns() {
   // resubmit, and every paused run — the same states the capture form and the reopen action
   // are offered for. Everything else goes behind "Earlier runs (N · M failed)", so the failure
   // count is never hidden with the cards.
-  const pinnedStatuses = ["awaiting_human_submit", "awaiting_human_resubmit", "paused_for_human"];
+  const pinnedStatuses = ["awaiting_human_submit", "awaiting_human_resubmit", "paused_for_human", "awaiting_payment"];
   const pinned = runs.filter((run) => pinnedStatuses.includes(run.status));
   const earlier = runs.filter((run) => !pinnedStatuses.includes(run.status));
   const earlierFailed = earlier.filter((run) => run.status === "failed").length;
@@ -9698,6 +9742,10 @@ async function prepareSubmission() {
     }
     if (job.result && job.result.status === "failed") {
       showMessage(`Staging failed: ${job.result.message || "see the run log on the project for details."}`, "error");
+      return;
+    }
+    if (job.result && job.result.status === "awaiting_payment") {
+      showMessage(job.result.message || "Payment needed on the portal. Pay there, then record the confirmation number.", "warning");
       return;
     }
     if (job.result && job.result.status === "paused_for_human") {

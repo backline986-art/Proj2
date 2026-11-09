@@ -55,13 +55,14 @@ import { formatProjectAddress, sendEmail } from "./clientNotifier";
 import { renderEmail, type EmailContent, type EmailSection } from "./emailLayout";
 import { projectSecretValuesById } from "./projectSecrets";
 import { redactSecretValues } from "../../shared/src/portalSafety";
+import { usd } from "./feePause";
 import { configuredStaffOrgs, staffAlertChannels, staffDigestHour, type StaffAlertChannels } from "./staffAlertConfig";
 
 export type StaffAlertKind = "run" | "correction" | "status" | "digest" | "unmatched_email" | "unsorted_intake" | "stage_held";
 
 /** Stage-run endings that need a person. awaiting_human_submit (staged cleanly, waiting for
  *  review) is deliberately absent: it is the expected end of a run and the digest carries it. */
-export const RUN_STATES_THAT_ALERT = ["paused_for_human", "failed", "interrupted", "submitted_unconfirmed"] as const;
+export const RUN_STATES_THAT_ALERT = ["paused_for_human", "awaiting_payment", "failed", "interrupted", "submitted_unconfirmed"] as const;
 
 /** Tracking outcomes that are NOT news for staff. "waiting" is the agency holding the ball;
  *  correction_flagged has its own alert (the correction), so a status alert would double it. */
@@ -298,6 +299,7 @@ export function staffAlertEmail(input: { address: string; projectId: string; tra
 
 const RUN_WHAT: Record<string, string> = {
   paused_for_human: "run paused for a person",
+  awaiting_payment: "payment needed",
   failed: "run failed, nothing staged",
   interrupted: "run interrupted",
   submitted_unconfirmed: "submit clicked, portal did not confirm",
@@ -305,6 +307,7 @@ const RUN_WHAT: Record<string, string> = {
 /** The subject's / headline's words for each run ending. */
 const RUN_EVENT: Record<string, string> = {
   paused_for_human: "run paused",
+  awaiting_payment: "payment needed",
   failed: "run failed",
   interrupted: "run interrupted",
   submitted_unconfirmed: "submit not confirmed",
@@ -319,11 +322,12 @@ const STATUS_EVENT: Record<string, string> = {
 };
 
 /** A stage run ended on `runStatus`; `why` is already scrubbed (or one of our fixed sentences). */
-export function runAlertEmail(input: { address: string; projectId: string; track: string; runStatus: string; why: string }): StaffEmail {
+export function runAlertEmail(input: { address: string; projectId: string; track: string; runStatus: string; why: string; what?: string }): StaffEmail {
   return staffAlertEmail({
     ...input,
-    event: RUN_EVENT[input.runStatus] ?? "run needs a person",
-    what: RUN_WHAT[input.runStatus] ?? input.runStatus.replace(/_/g, " "),
+    // A fee stop's own words (#576) name the fee and its amount in the subject too.
+    event: input.what || (RUN_EVENT[input.runStatus] ?? "run needs a person"),
+    what: input.what || (RUN_WHAT[input.runStatus] ?? input.runStatus.replace(/_/g, " ")),
   });
 }
 
@@ -363,7 +367,7 @@ const RUN_FIXED_WHY: Record<string, string> = {
  *  scrubbed before it goes anywhere. Returns the send so a test can await it; callers `void` it. */
 export function alertStaffOnRunOutcome(
   db: AppDb,
-  input: { projectId: string; runId: string; track: string; runStatus: string; reason: string },
+  input: { projectId: string; runId: string; track: string; runStatus: string; reason: string; feeUsd?: number | null },
 ): Promise<void> {
   try {
     if (!(RUN_STATES_THAT_ALERT as readonly string[]).includes(input.runStatus)) return Promise.resolve();
@@ -372,7 +376,12 @@ export function alertStaffOnRunOutcome(
     // Fail closed on secrets: an unreadable project row means no free text at all.
     const secrets = projectSecretValuesById(db, input.projectId);
     const why = RUN_FIXED_WHY[input.runStatus] ?? (secrets ? scrubStaffText(input.reason, secrets) : "");
-    const mail = runAlertEmail({ address: facts.address, projectId: input.projectId, track: input.track, runStatus: input.runStatus, why });
+    // A FEE STOP NAMES THE FEE AND ITS AMOUNT (#576) in the "what" — read off the portal's page at
+    // the stop; an amount that was not read is said to be unread, never $0. Our own words.
+    const what = input.runStatus === "awaiting_payment"
+      ? `${RUN_WHAT.awaiting_payment} (${typeof input.feeUsd === "number" && input.feeUsd > 0 ? `fee ${usd(input.feeUsd)}` : "fee amount unread"})`
+      : undefined;
+    const mail = runAlertEmail({ address: facts.address, projectId: input.projectId, track: input.track, runStatus: input.runStatus, why, what });
     return recordAndSend(db, { orgId: facts.orgId, projectId: input.projectId, kind: "run", ref: input.runId, state: input.runStatus, ...mail });
   } catch (err) {
     logger.warn("staff-alert", `run alert skipped: ${err instanceof Error ? err.message : String(err)}`);

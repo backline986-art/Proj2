@@ -43,6 +43,7 @@ import { randomUUID } from "node:crypto";
 import { snapshotFilingQuote } from "./feeAccuracy";
 import { nemSignatureState, type NemSignatureView } from "./signatureTrack";
 import { notifyClientOfFiling } from "./clientFilingUpdate";
+import { trackPaymentView, type TrackPaymentView } from "./feePauseView";
 
 /** Words that claim the statewide portal ("Oregon ePermitting", "OR E-permitting") with no URL —
  *  on a learned row, often the generic fallback's own words laundered in (portal-truth D2/D4). */
@@ -91,6 +92,9 @@ export interface SubmittalTrackView extends SubmittalTrack {
   channelBasis?: string;
   /** Battery jobs only (#246): the fire review / separate ESS permit as the records on file say it. */
   essStep?: EssPermitStep;
+  /** The track's newest staging run stopped on a fee (#576): what to pay, where, with whose card,
+   *  and the way back to the application. Absent unless the track waits on payment. */
+  payment?: TrackPaymentView;
   /** #436 PR1 — NEM only, while the track is staged: the newest staged review the server holds (the
    *  masked picture of the review page, and what the draft's pages show). Shown beside Approve,
    *  which stays held exactly as #449 holds it. null = none recorded. */
@@ -507,7 +511,10 @@ export function trackFilingOnRecord(db: AppDb, projectId: string, track: Submitt
   const ph = family.map(() => "?").join(", ");
   return db.get<Row>(
     `SELECT permit_number, application_number, submitted_at, status AS via FROM submissions
-      WHERE project_id = ? AND permit_type IN (${ph}) AND status IN ('submitted', 'submitted_unconfirmed')
+      WHERE project_id = ? AND permit_type IN (${ph})
+        AND (status IN ('submitted', 'submitted_unconfirmed')
+          -- a fee stop AFTER the approved click (#576): submitted_at is stamped only on a click
+          OR (status = 'awaiting_payment' AND submitted_at IS NOT NULL))
       ORDER BY submitted_at DESC LIMIT 1`,
     [projectId, ...family],
   ) ?? db.get<Row>(
@@ -708,7 +715,9 @@ function deriveStatus(state: TrackState): SubmittalTrackStatus {
   if (state.submissionStatus === "submitted") {
     return fromOutcome === "in_review" || state.trackingUrl ? "in_review" : "submitted";
   }
-  if (state.submissionStatus === "awaiting_human_submit" || state.submissionStatus === "staged") {
+  // A fee stop (#576) left the application on the portal at its pay step: staged, waiting on a
+  // person to pay — the card's payment block says what and where.
+  if (state.submissionStatus === "awaiting_human_submit" || state.submissionStatus === "staged" || state.submissionStatus === "awaiting_payment") {
     return "staged";
   }
   // paused_for_human / failed runs staged NOTHING on the portal — the track genuinely
@@ -1011,6 +1020,10 @@ export function getSubmittalTracks(db: AppDb, project: ProjectRecord): Submittal
       }
     }
 
+    // WAITING ON PAYMENT (#576): the newest staging run of this track stopped on a fee. The card's
+    // portal is its own (rule 5 — the same filtered URL shown above); a link elsewhere is never shown.
+    const payment = status === "issued" ? null : trackPaymentView(db, project, type, family, (recipeRow ? s(recipeRow.portal_url) : undefined) || kbPortalUrl);
+
     return {
       type,
       label: type === "nem" ? (utility?.label ?? TRACK_LABELS.nem) : permitTrackLabel(type, answer),
@@ -1024,11 +1037,11 @@ export function getSubmittalTracks(db: AppDb, project: ProjectRecord): Submittal
       status,
       // The portal's own words — unless they say "issued" of a track isTrackDone did not accept
       // (one pooled target cannot finish two tracks), where they would contradict the status.
-      statusLabel: signatureHolds && signatureRequest
+      statusLabel: payment ? "Payment needed" : signatureHolds && signatureRequest
         ? SIGNATURE_STATUS_LABEL[signatureRequest.state] ?? statusLabelFor(status, category)
         : (!state.done && (state.outcome === "issued" || state.outcome === "nem_approved") ? "" : state.statusLabel)
           || statusLabelFor(status, category),
-      nextAction: signatureHolds && signatureRequest && SIGNATURE_NEXT_ACTION[signatureRequest.state]
+      nextAction: payment ? payment.sentence : signatureHolds && signatureRequest && SIGNATURE_NEXT_ACTION[signatureRequest.state]
         ? SIGNATURE_NEXT_ACTION[signatureRequest.state]
         : nextActionFor(status, channel, type, prerequisites, issuerProject.trackView ? issuerProject.ahj : ""),
       captureFields: captureFieldsFor(type),
@@ -1048,6 +1061,7 @@ export function getSubmittalTracks(db: AppDb, project: ProjectRecord): Submittal
       ...(stageGaps.length ? { stageGaps } : {}),
       ...(type === "nem" ? { signatureRequest } : {}),
       ...(issuer ? { issuer } : {}),
+      ...(payment ? { payment } : {}),
       // #436 PR1: the staged draft's review (NEM, while staged), and ruling 5's Stage block.
       ...(type === "nem" && status === "staged" ? { stagedReview: stagedReviewViewFor(db, project.id) } : {}),
       ...(stageBlocked ? { stageBlocked } : {}),
@@ -1123,11 +1137,20 @@ export function markTrackSubmitted(
     // If a staged run left an awaiting_human_submit submission for this track, the
     // operator's manual submit RESOLVES it — update that row in place rather than
     // inserting a second one, so the track never counts as both staged and submitted.
+    // A track that stopped on a fee (#576) resolves the same way: the person paid and filed on the
+    // portal, so its awaiting_payment row becomes the filing, and the run that waited on the fee is
+    // closed as submitted (staging is refused while a run waits on payment).
     const awaiting = db.get<Row>(
       `SELECT id FROM submissions
-        WHERE project_id = ? AND permit_type = ? AND status = 'awaiting_human_submit'
+        WHERE project_id = ? AND permit_type = ? AND status IN ('awaiting_human_submit', 'awaiting_payment')
         ORDER BY created_at DESC LIMIT 1`,
       [project.id, type],
+    );
+    const runFamily = trackPermitTypes(type);
+    db.run(
+      `UPDATE portal_runs SET status = 'submitted', finished_at = COALESCE(finished_at, ?)
+        WHERE project_id = ? AND permit_type IN (${runFamily.map(() => "?").join(",")}) AND status = 'awaiting_payment'`,
+      [nowIso(), project.id, ...runFamily],
     );
     if (awaiting) {
       submissionId = s(awaiting.id);

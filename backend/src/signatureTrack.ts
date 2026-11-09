@@ -113,7 +113,8 @@ export function nemSignatureState(db: AppDb, projectId: string): NemSignatureVie
   }
   const filedRow = db.get<Record<string, unknown>>(
     `SELECT COALESCE(submitted_at, created_at) AS at FROM submissions
-      WHERE project_id = ? AND permit_type IN (${ph}) AND status IN ('submitted', 'submitted_unconfirmed')
+      WHERE project_id = ? AND permit_type IN (${ph})
+        AND (status IN ('submitted', 'submitted_unconfirmed') OR (status = 'awaiting_payment' AND submitted_at IS NOT NULL))
       ORDER BY created_at DESC LIMIT 1`,
     [projectId, ...family],
   );

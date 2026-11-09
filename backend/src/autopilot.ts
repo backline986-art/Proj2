@@ -35,6 +35,7 @@ import { parseJson } from "./json";
 import type { NextStep, ProjectRecord, StageDetail, SubmittalTrackType } from "../../shared/src/types";
 import { requiredTracks, SUBMITTAL_TRACK_TYPES, trackPermitTypes } from "./submittalTracks";
 import { stageForStatus } from "./projectStage";
+import { paymentNeededForRun } from "./feePause";
 import { decideNextStep, gateBlockerHoldsTrack, loadFullNextStepFacts, reviewInfoFromResultJson, reviewerBlockerList, reviewerBlockersFor, reviewerGateRead, stagingFailedFor, withoutCodeResearch, type NextStepFacts, type ReviewMismatch } from "./nextStep";
 import { portalAutomationDisabled } from "../../portal-bot/src/browser";
 // STATIC, and the synchrony is load-bearing (see maybeResumeAutopilot). No load-time cycle:
@@ -146,7 +147,7 @@ export function trackAlreadyStaged(db: AppDb, projectId: string, track: Submitta
   const row = db.get<Row>(
     `SELECT id FROM portal_runs
       WHERE project_id = ? AND permit_type IN (${family.map(() => "?").join(", ")})
-        AND status IN ('awaiting_human_submit', 'submitted', 'paused_for_human')
+        AND status IN ('awaiting_human_submit', 'submitted', 'paused_for_human', 'awaiting_payment')
       LIMIT 1`,
     [projectId, ...family],
   );
@@ -255,6 +256,11 @@ export function segmentAOutcomeFromRun(
       || "The portal stage failed before reaching the review screen — see the run's debug bundle.";
     return { code: "stage_failed", detail };
   }
+  // A FEE IS NOT A CHALLENGE (#576): the run's own payment sentence (its error_message), never
+  // "complete the challenge" and never a relaunch — it is a portal-run outcome, not a gate.
+  if (status === "awaiting_payment") {
+    return { code: "payment_needed", detail: String(run?.error_message ?? "").trim() || paymentNeededForRun(null) };
+  }
   if (status === "paused_for_human") {
     const why = String(run?.pause_reason ?? "").trim() || "human input required";
     return { code: "paused_for_human", detail: `The portal run paused for a human (${why}). Complete the challenge and resume from the portal panel.` };
@@ -356,6 +362,20 @@ export function getAutopilotState(db: AppDb, projectId: string): AutopilotState 
   // A run that paused mid-fill for MFA/CAPTCHA needs a human at the browser. Per TRACK (the
   // same fact nextStep's portal_paused reads): the newest run of a track that is not filed,
   // or a correction reopen that paused.
+  // A TRACK WAITING ON PAYMENT (#576) says so in the payment's own words: the amount and the
+  // portal, pay there — never MFA wording, never "stage again" (a new run would open a second
+  // application). The run's error_message is the payment sentence (feePause.paymentNeededForRun).
+  const paymentRun = unfinished.find((t) => t.latestRun?.status === "awaiting_payment")?.latestRun ?? null;
+  if (paymentRun && !facts.reopenPause) {
+    const sentence = paymentRun.errorMessage || paymentNeededForRun(null);
+    return {
+      projectId, phase: "paused_for_human", stage: "Payment needed",
+      message: sentence,
+      blockers: [{ code: "payment_needed", detail: sentence }], canApprove: false, approveDisabledReason: "A filing is waiting on a fee payment on its portal.",
+      pauseReason: "fee_payment", portalRunId: paymentRun.id, updatedAt: ts,
+      ...noReview, ...stageInfo,
+    };
+  }
   const pausedRun = facts.reopenPause ?? unfinished.find((t) => t.latestRun?.status === "paused_for_human")?.latestRun ?? null;
   if (pausedRun) {
     return {
@@ -482,7 +502,7 @@ export function getAutopilotState(db: AppDb, projectId: string): AutopilotState 
   // meanwhile") is kept, marked as the last run's, until a newer portal run supersedes it.
   const LIVE_CODES = new Set([
     "qc_fail", "pending_review", "reviewer_blocker", "historical_missing", "missing_document", "permit_path", "needs_client", "needs_ccb",
-    "payment_required", "operator_blocked", "stage_failed", "paused_for_human", "not_pre_stage",
+    "payment_required", "operator_blocked", "stage_failed", "paused_for_human", "payment_needed", "not_pre_stage",
   ]);
   const jobFinishedAt = job?.finished_at == null ? "" : String(job.finished_at);
   const runSinceJob = Boolean(run && jobFinishedAt && String(run.started_at ?? "") > jobFinishedAt);
@@ -590,7 +610,7 @@ export function maybeResumeAutopilot(db: AppDb, projectId: string, trigger = "a 
       // failed job: the operator resumes explicitly. `operator_blocked` likewise: the
       // operator stopped this project on purpose, and lifting the block is not a request
       // to have an unrelated upload relaunch a live portal run.
-      if ((result.blockers ?? []).some((b) => b?.code === "stage_failed" || b?.code === "paused_for_human" || b?.code === "operator_blocked")) return;
+      if ((result.blockers ?? []).some((b) => b?.code === "stage_failed" || b?.code === "paused_for_human" || b?.code === "payment_needed" || b?.code === "operator_blocked")) return;
       // Carry the original run's track — a resume of an NEM-track run must not
       // restage the default track — and its ORIGIN, so the root's origin rides the chain.
       const payload = parseJson<{ track?: string; origin?: unknown } | null>(job.payload == null ? null : String(job.payload), null);

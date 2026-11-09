@@ -773,7 +773,12 @@ async function runClaimedJob(db: AppDb, job: JobRecord): Promise<boolean> {
       // (route kick, worker drain, auto-start, auto-resume). Best-effort.
       void import("./events").then(({ sseBroadcast }) => {
         const projectId = job.projectId ?? undefined;
-        if (seg.blocked && seg.blockers.some((b) => b.code === "paused_for_human")) {
+        const payment = seg.blockers.find((b) => b.code === "payment_needed");
+        if (payment || seg.state.pauseReason === "fee_payment") {
+          // A FEE STOP (#576) is a hand-over to the person who pays, worded as one: the amount and
+          // the portal — never "the portal needs human attention", never MFA.
+          sseBroadcast({ type: "run_paused", projectId, message: payment?.detail || seg.state.message, data: { pauseReason: "fee_payment" } });
+        } else if (seg.blocked && seg.blockers.some((b) => b.code === "paused_for_human")) {
           // An MFA/CAPTCHA pause is a designed human handoff, not an error — keep the
           // warning-severity pause toast even though Segment A reports it as blocked.
           sseBroadcast({ type: "run_paused", projectId, message: "Autopilot paused — the portal needs human attention." });

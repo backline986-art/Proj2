@@ -94,6 +94,7 @@ import { removeUploadStaging, uploadPayloadFor, type PreparedUpload } from "./up
 import { attachmentTypeFor, isDocumentTypeList } from "./attachmentTypes";
 import { chooseSubmittedRecord, cleanRecordLink, readApplicationLedgerInPage, recordLinkForNumberInPage, type LedgerEntry } from "./submissionLedger";
 import { exactUploadDocType, fileTypeAllowed, UPLOAD_LABEL_PATTERNS, uploadForbidsSubstitute } from "./autoLearnAdapter";
+import { readFeeStop, secretValuesOf, type FeeStopKind, type FeeStopReading } from "../feeStop";
 import { reviewComparison, scrapeReviewScreen as scrapeReviewScreenShared, utilityIdentifiersEnteredBySteps, type ReviewMismatch } from "../reviewScreenScraper";
 import { controlReadsUnanswered, pinEmptyRequiredControl, PINNED_CONTROL_ATTR, SWEPT_BLANK_ATTR, sweepEmptyRequiredControls, type EmptyRequired } from "../requiredControlSweep";
 import { openPortal } from "../browser";
@@ -1152,6 +1153,9 @@ export class RecipeAdapter extends BasePortalAdapter {
   /** The one shot that says how the filing ended — the completion page with its record
    *  number, or the portal's refusal. Reported so the submission record can point at it. */
   private outcomeShotPath = "";
+  /** THE FEE AT A fee_payment STOP (#576): amount, lines, masked shot and the page's link, read
+   *  once, at the first fee stop. Carried on the step result (data.feeStop). Read only. */
+  private feeStop: FeeStopReading | null = null;
   private pageShotCount = 0;
   private arrayPass = 1;
   /** Bounds of the recorded array block — the span of steps bound to array1*. -1 when the
@@ -3307,7 +3311,7 @@ export class RecipeAdapter extends BasePortalAdapter {
           if (err instanceof FinalSubmitStop) {
             closePrevStepTiming();
             const base = fail(err.pauseReason ? err.message : `Recipe step failed (${step.action}${step.note ? ` — ${step.note}` : ""}): ${err.message}`,
-              { executed, skipped, healedSteps: this.healedSteps, driftWarnings: this.driftWarnings, agingNotes: this.agingNotes, guardRefusals: this.guardRefusals, failedStepIndex: stepIdx, trace, slowSteps, finalSubmitClicked: this.finalSubmitClicked, ...(err.pauseReason ? { needsHuman: true } : {}), pageShotDir: this.pageShotDir, outcomeShotPath: this.outcomeShotPath });
+              { executed, skipped, healedSteps: this.healedSteps, driftWarnings: this.driftWarnings, agingNotes: this.agingNotes, guardRefusals: this.guardRefusals, failedStepIndex: stepIdx, trace, slowSteps, finalSubmitClicked: this.finalSubmitClicked, ...(err.pauseReason ? { needsHuman: true } : {}), pageShotDir: this.pageShotDir, outcomeShotPath: this.outcomeShotPath, ...(err.pauseReason === "fee_payment" && this.feeStop ? { feeStop: this.feeStop } : {}) });
             return err.pauseReason ? { ...base, pauseReason: err.pauseReason } : base;
           }
           // WHO IS FILING (#524): never retried, healed or skipped as optional — a retry or a heal
@@ -7713,9 +7717,9 @@ export class RecipeAdapter extends BasePortalAdapter {
           bsPay.closeApprovedSlot();
           this.finalSubmitClicked = false;
           this.finalSubmitNothingSent = true;
-          throw new FinalSubmitStop(`The approved final submit's confirmation asks for a payment — fees are never automated, the dialog was not answered, and NOTHING was filed (no request reached the portal). A person pays and submits on the portal. (${modal.blocked.slice(0, 120)})`, "fee_payment");
+          throw await this.feeStopError(`The approved final submit's confirmation asks for a payment — fees are never automated, the dialog was not answered, and NOTHING was filed (no request reached the portal). A person pays and submits on the portal. (${modal.blocked.slice(0, 120)})`, "pay_dialog");
         }
-        throw new FinalSubmitStop(`The submit raised a payment dialog — fees are never automated; a person pays and confirms the filing on the portal. (${modal.blocked.slice(0, 120)})`, "fee_payment");
+        throw await this.feeStopError(`The submit raised a payment dialog — fees are never automated; a person pays and confirms the filing on the portal. (${modal.blocked.slice(0, 120)})`, "pay_dialog");
       }
       // A MODAL IS ANSWERED ONLY WHILE THE FILING HAS NOT GONE (portal-run-close-2 C3). Its OK
       // opens a fresh approved slot — which is right for the submit's own confirmation ("Are you
@@ -7745,11 +7749,28 @@ export class RecipeAdapter extends BasePortalAdapter {
       const pay = await this.paymentOnPage();
       if (pay) {
         this.finalSubmitOutcome = { verdict: "unknown", evidence: `fee page: ${pay}` };
-        await this.capturePageShot("FEE-PAGE", true).catch(() => null);
-        throw new FinalSubmitStop(`The approved final submit landed on a fee-payment page (${pay}) — automation never pays. A person pays on the portal and confirms the filing (and its record number) there.`, "fee_payment");
+        throw await this.feeStopError(`The approved final submit landed on a fee-payment page (${pay}) — automation never pays. A person pays on the portal and confirms the filing (and its record number) there.`, "fee_page");
       }
     }
     return last;
+  }
+
+  /** THE ONE WAY A fee_payment STOP IS RAISED (#576): the fee the page asks is read (shared reader,
+   *  read only — nothing is clicked or typed), a full-page screenshot is taken with every secret and
+   *  card field masked (it becomes the run's outcome shot), and the stop carries both on the result.
+   *  Read at the first fee stop only. Never throws on a page it cannot read: the amount is then
+   *  UNREAD, never $0. */
+  private async feeStopError(message: string, where: FeeStopKind): Promise<FinalSubmitStop> {
+    if (!this.feeStop) {
+      const dir = await this.ensurePageShotDir().catch(() => "");
+      this.feeStop = await readFeeStop(this.page, {
+        where,
+        shotFile: dir ? path.join(dir, "zzz-outcome-FEE-STOP.png") : null,
+        secrets: secretValuesOf(this.fieldValues),
+      }).catch(() => null);
+      if (this.feeStop?.shotPath) this.outcomeShotPath = this.feeStop.shotPath;
+    }
+    return new FinalSubmitStop(message, "fee_payment");
   }
 
   /** A visible pay control (its label read by the shared isPayFee) or a payment-card field on the
@@ -7797,7 +7818,7 @@ export class RecipeAdapter extends BasePortalAdapter {
     //    in silence and the approved run read as an ordinary review stop.
     if (PAY_FEE_REPLAY_GATE.test(name)) {
       if (flaggedFinal && this.finalSubmitRefusalsNow().length === 0) {
-        throw new FinalSubmitStop(`The approved final submit "${name.slice(0, 60)}" pays a fee — automation never pays. Nothing was clicked; the application is staged at review for a person to pay and submit.`, "fee_payment");
+        throw await this.feeStopError(`The approved final submit "${name.slice(0, 60)}" pays a fee — automation never pays. Nothing was clicked; the application is staged at review for a person to pay and submit.`, "pay_to_file");
       }
       return false;
     }
@@ -7866,10 +7887,10 @@ export class RecipeAdapter extends BasePortalAdapter {
         this.finalSubmitNothingSent = true;
         const payment = /payment/.test(dismissed.why);
         this.finalSubmitOutcome = { verdict: "unknown", evidence: `${dismissed.type} dialog dismissed: ${dismissed.message.slice(0, 80)}` };
-        throw new FinalSubmitStop(payment
-          ? `The approved final submit's confirmation asks for a payment ("${dismissed.message.slice(0, 100)}") — dismissed, automation never pays. NOTHING was filed (no request reached the portal); a person pays and submits on the portal.`
-          : `The approved final submit opened a ${dismissed.type} ("${dismissed.message.slice(0, 100)}") that was dismissed (${dismissed.why}). NOTHING was filed (no request reached the portal); a person completes the submit on the portal.`,
-        payment ? "fee_payment" : null);
+        if (payment) {
+          throw await this.feeStopError(`The approved final submit's confirmation asks for a payment ("${dismissed.message.slice(0, 100)}") — dismissed, automation never pays. NOTHING was filed (no request reached the portal); a person pays and submits on the portal.`, "pay_dialog");
+        }
+        throw new FinalSubmitStop(`The approved final submit opened a ${dismissed.type} ("${dismissed.message.slice(0, 100)}") that was dismissed (${dismissed.why}). NOTHING was filed (no request reached the portal); a person completes the submit on the portal.`, null);
       }
       const postChallenge = await detectChallengeFrame(this.page);
       if (postChallenge) {
@@ -8768,6 +8789,21 @@ export class RecipeAdapter extends BasePortalAdapter {
    * One screenshot per completed wizard page, so a run can be reviewed by eye afterwards
    * instead of only when it fails. Capped, so a recipe that loops cannot fill the disk.
    */
+  /** This run's page-shot folder, made on first use. */
+  private async ensurePageShotDir(): Promise<string> {
+    if (!this.pageShotDir) {
+      const stamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
+      const who = String(this.recipe?.utility || this.recipe?.ahj || "portal")
+        .toLowerCase().replace(/[^a-z0-9]+/g, "-").slice(0, 28);
+      this.pageShotDir = path.join(
+        process.env.REPLAY_RUN_DIR || path.join(process.cwd(), "data", "replay-runs"),
+        stamp + "-" + who,
+      );
+      await fs.promises.mkdir(this.pageShotDir, { recursive: true });
+    }
+    return this.pageShotDir;
+  }
+
   private async capturePageShot(label: string, force = false): Promise<void> {
     if (!this.page || typeof this.page.screenshot !== "function") return;
     // The OUTCOME shot is never dropped for the cap. It is the one picture that says what
@@ -8775,16 +8811,7 @@ export class RecipeAdapter extends BasePortalAdapter {
     // refusal — and it is taken at the end of a long run, exactly where the cap bites.
     if (!force && this.pageShotCount >= 40) return;
     try {
-      if (!this.pageShotDir) {
-        const stamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
-        const who = String(this.recipe?.utility || this.recipe?.ahj || "portal")
-          .toLowerCase().replace(/[^a-z0-9]+/g, "-").slice(0, 28);
-        this.pageShotDir = path.join(
-          process.env.REPLAY_RUN_DIR || path.join(process.cwd(), "data", "replay-runs"),
-          stamp + "-" + who,
-        );
-        await fs.promises.mkdir(this.pageShotDir, { recursive: true });
-      }
+      await this.ensurePageShotDir();
       this.pageShotCount++;
       const safe = String(label || "page").replace(/[^a-zA-Z0-9]+/g, "_").slice(0, 40) || "page";
       // The outcome sorts last in the folder and is the file the submission record points at.

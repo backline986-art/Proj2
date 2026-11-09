@@ -76,6 +76,7 @@ import { installerHandoffRecords, type InstallerHandoffRecord } from "./installe
 import { SIGNATURE_REQUEST_CONFIRMED_ACTION, reduceNemSignatureState } from "./signatureTrack";
 import { visionRelaxedBlockers } from "./reviewerVision";
 import { startedAtLabel } from "./formAcquisitionPlan";
+import { paymentNeededForRun } from "./feePause";
 import {
   getProjectDetail,
   getSubmitGateReport,
@@ -283,7 +284,8 @@ export interface NextStepFacts {
   installerHandoff?: InstallerHandoffRecord | null;
 }
 
-const ON_PORTAL = new Set(["awaiting_human_submit", "submitted", "paused_for_human"]);
+// awaiting_payment (#576): the application sits on the portal waiting on its fee — never "to stage".
+const ON_PORTAL = new Set(["awaiting_human_submit", "submitted", "paused_for_human", "awaiting_payment"]);
 
 /** How long a queued/started automatic chain (stage_step) reads as "automation running". A real
  *  chain takes about three minutes (2026-09-28: 2m45s on a Newberg job); past this it is stuck, and
@@ -692,6 +694,18 @@ export function decideNextStep(facts: NextStepFacts): NextStep {
     return make("correction_overdue", owner.who, "overdue",
       `A correction is overdue (was due ${first.dueAt}) — ${owner.ask}.`,
       overdue.map(correctionWhy), null, first.dueAt);
+  }
+
+  // 3a. A filing waits on a fee (#576): the person who pays is told what, where, and how to get
+  //     back — never MFA wording, never "stage again" (staging is refused while it waits).
+  const awaitingPayment = unfinished.filter((t) => t.latestRun?.status === "awaiting_payment");
+  if (awaitingPayment.length && !facts.reopenPause) {
+    const first = awaitingPayment[0];
+    const sentence = first.latestRun?.errorMessage || paymentNeededForRun(null);
+    return make("payment_needed", "me", "today",
+      awaitingPayment.length === 1 ? `${TRACK_NAME[first.track]}: ${sentence}` : `${trackList(awaitingPayment)}: ${sentence}`,
+      awaitingPayment.map((t) => why(`${TRACK_NAME[t.track]}: stopped on the fee ${t.latestRun?.startedAt.slice(0, 16).replace("T", " ")} — automation never pays.`, "submittalTracks")),
+      null, first.latestRun?.startedAt);
   }
 
   // 3. A live browser is waiting on a human.

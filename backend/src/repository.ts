@@ -107,6 +107,7 @@ import { snapshotFilingQuote } from "./feeAccuracy";
 import { readAndRecordPortalFees } from "./portalFeeReadings";
 import { closeoutDocumentLines, fetchIssuedRecordDocuments, isFinishedOutcome, issuedDocumentsByTarget } from "./portalIssuedDocuments";
 import { clientHasLoginOnHost, getDecryptedCredential, getDecryptedCredentialByUrl, getDecryptedCredentialAny, listPortalCredentials, lockedOutCredential, recordLoginOutcome, storedCredentialFor } from "./portalCredentials";
+import { feeStopOf, paymentNeededForRun, AWAITING_PAYMENT } from "./feePause";
 import { annotateDraft, buildDraftTouch, recordDraftTouch } from "./draftLedger";
 import { logger } from "./logger";
 import { disarmDraftCreatingSubmit, draftContinuationGaps, draftSubmitStampForReplay, openPortalDraftFor, recordPortalDraft, DRAFT_SUBMIT_UNEXPECTED_ACTION, type ObservedDraft } from "./portalDraft";
@@ -8089,10 +8090,13 @@ export function extractStageFailureMessage(result: Record<string, unknown>): str
 //   submitted             — automation clicked the final submit and the portal CONFIRMED it
 //   submitted_unconfirmed — automation clicked the final submit and the portal did not say
 //                           (a human verifies on the portal; the duplicate guard counts it)
+//   awaiting_payment      — the run stopped on a fee (#576): a pay-to-file submit, a pay-now
+//                           dialog, or a fee page after the approved click. A person pays on the
+//                           portal; staging this track is refused while it waits (feePause.ts)
 //   interrupted           — a 'running' row whose runner process is gone
 // ---------------------------------------------------------------------------------------------
 export type StageRunStatus =
-  | "running" | "awaiting_human_submit" | "paused_for_human" | "submitted" | "submitted_unconfirmed" | "failed" | "interrupted";
+  | "running" | "awaiting_human_submit" | "paused_for_human" | "awaiting_payment" | "submitted" | "submitted_unconfirmed" | "failed" | "interrupted";
 
 /** A step message that can only exist after the final-submit click happened. "Final submit needs
  *  a human … stopped without clicking" is deliberately NOT here: that one did not click. */
@@ -8116,6 +8120,8 @@ const FINAL_SUBMIT_CLICKED_MESSAGE =
  *  pause (the kVA tier, a signer, a stop before the review page) left a draft on the portal and
  *  names why in its own step message — which this repeats, instead of calling it a "challenge". */
 export function pausedRunSentence(pauseReason: string, result: Record<string, unknown>): string {
+  // A FEE IS NOT A CHALLENGE (#576): the one payment sentence, the amount read at the stop.
+  if (pauseReason === "fee_payment") return paymentNeededForRun(result);
   if (pauseReason === "mfa_captcha") return "a verification challenge (MFA/CAPTCHA) — nothing was staged. Complete it in the open browser, then re-stage.";
   const steps = Array.isArray(result.steps) ? (result.steps as Array<{ pauseReason?: unknown; message?: unknown }>) : [];
   const own = steps.find((st) => st?.pauseReason === pauseReason)?.message;
@@ -8125,7 +8131,7 @@ export function pausedRunSentence(pauseReason: string, result: Record<string, un
 
 export function derivePortalRunOutcome(result: Record<string, unknown>): {
   status: Exclude<StageRunStatus, "running" | "interrupted">;
-  submissionStatus: "submitted" | "submitted_unconfirmed" | "paused_for_human" | "failed" | "awaiting_human_submit";
+  submissionStatus: "submitted" | "submitted_unconfirmed" | "paused_for_human" | "awaiting_payment" | "failed" | "awaiting_human_submit";
   finalSubmitClicked: boolean;
   submissionVerdict: "accepted" | "rejected" | "unknown" | null;
   pauseReason: string | null;
@@ -8143,6 +8149,16 @@ export function derivePortalRunOutcome(result: Record<string, unknown>): {
   const verdict = verdictOf(result.finalSubmitOutcome) ?? verdictOf(result.submissionOutcome)
     ?? steps.map((st) => verdictOf(st?.data?.finalSubmitOutcome)).find((v) => v !== null) ?? null;
   const pauseReason = typeof result.pauseReason === "string" && result.pauseReason ? result.pauseReason : null;
+  // ONE PAYMENT STATE (#576). A fee stop is 'awaiting_payment' whether or not the approved click
+  // happened — a fee page AFTER the click used to read 'submitted_unconfirmed' ("verify on the
+  // portal") and a pay-to-file stop 'paused_for_human' ("complete the challenge"). The click is still
+  // reported (finalSubmitClicked), so the duplicate guard and the audit keep it.
+  if (pauseReason === "fee_payment") {
+    return {
+      status: "awaiting_payment", submissionStatus: "awaiting_payment", finalSubmitClicked: clicked,
+      submissionVerdict: clicked ? (verdict ?? "unknown") : null, pauseReason, harnessAbort: false,
+    };
+  }
   if (clicked) {
     const status = verdict === "accepted" ? "submitted" : "submitted_unconfirmed";
     return { status, submissionStatus: status, finalSubmitClicked: true, submissionVerdict: verdict ?? "unknown", pauseReason, harnessAbort: false };
@@ -9206,6 +9222,25 @@ export async function prepareSubmission(
       `A portal run for the ${text(inFlightAtEntry.permit_type)} track started at ${text(inFlightAtEntry.started_at)} and is still running. `
       + "Staging again beside it would open a duplicate application on the portal — wait for it to finish.",
       { track: track ?? "permit", runInFlight: text(inFlightAtEntry.id) });
+  }
+  // A TRACK WAITING ON PAYMENT IS NOT STAGED AGAIN (#576). Its newest staging run stopped on a fee:
+  // the application sits on the portal (at its pay step, or filed-pending-payment after the
+  // approved click), and a new run would open a second one beside it. Refused before the duplicate
+  // guard, in the payment's own words — never "already filed" or "stage again". A person pays on the
+  // portal and records the confirmation, which moves the run on.
+  for (const t of stageCovers) {
+    const family = trackFamily(t);
+    const newest = db.get<Row>(
+      `SELECT id, status, result_json FROM portal_runs
+        WHERE project_id = ? AND permit_type IN (${family.map(() => "?").join(", ")}) AND run_type = 'prepare_submit'
+        ORDER BY started_at DESC, rowid DESC LIMIT 1`,
+      [projectId, ...family],
+    );
+    if (newest && text(newest.status) === AWAITING_PAYMENT) {
+      throw new HttpError(409,
+        `The ${t} track is waiting on payment. ${paymentNeededForRun(text(newest.result_json))}`,
+        { track: t, awaitingPayment: text(newest.id) });
+    }
   }
   if (track) {
     const filedEvidence = trackSubmittedAndTracked(db, projectId, track, required as SubmittalTrackType[]);
@@ -10552,6 +10587,9 @@ export async function prepareSubmission(
     const clicked = outcome.finalSubmitClicked;
     const acceptedFiling = outcome.status === "submitted";
     const adapterFailed = outcome.status === "failed";
+    // A FEE STOP (#576): its own sentence on the run, the submission, the project line and the alert.
+    const awaitingPayment = outcome.status === "awaiting_payment";
+    const paymentSentence = awaitingPayment ? paymentNeededForRun(result, portalLabel) : "";
     const failureMessage = adapterFailed
       ? `${outcome.harnessAbort ? "[our browser/harness went away — this says nothing about the portal] " : ""}${extractStageFailureMessage(result)}${replayVerdictNote}`
       : "";
@@ -10638,7 +10676,7 @@ export async function prepareSubmission(
         `UPDATE portal_runs SET status = ?, finished_at = ?, error_message = ?, human_action_required = ?,
            screenshots_path = ?, logs_path = ?, result_json = ?, pause_reason = ?
          WHERE id = ?`,
-        [runStatus, nowIso(), failureMessage || (pauseReason ? pausedRunSentence(pauseReason, result) : ""), 1,
+        [runStatus, nowIso(), failureMessage || paymentSentence || (pauseReason ? pausedRunSentence(pauseReason, result) : ""), 1,
           // A FILE, never a folder: /portal-runs/:id/review-screenshot sendFile()s this column.
           outcomeShotPath,
           // logs_path: the learn-run debug bundle folder (set by the self-seed path) — links a
@@ -10686,7 +10724,14 @@ export async function prepareSubmission(
               : `automation (final submit approved by ${runApproval?.approver || "no recorded approver"})`)
             : "",
           evidenceDir,
-          clicked
+          awaitingPayment
+            // A FEE STOP (#576): the payment sentence, and whether the approved click happened.
+            ? `${trackLabelText}${portalLabel}: ${paymentSentence}`
+              + (clicked
+                ? " Automation clicked the approved final submit and the portal asked for the fee before confirming the filing; automation never pays."
+                : " Nothing was filed; automation never pays.")
+              + `${outcomeShotPath ? ` Page: ${outcomeShotPath}` : ""}`
+          : clicked
             // WHAT WAS FILED, WHEN, AND WHERE THE PROOF IS — on the record itself, so a
             // completed run can be verified without reading a log. The elapsed time is the
             // measured cost of one replay: what a filing takes when nobody has to watch it.
@@ -10713,7 +10758,9 @@ export async function prepareSubmission(
         // to 'submitted' on a filing the portal did not confirm (the submissions row and the
         // duplicate guard carry the click).
         acceptedFiling ? "submitted" : (pauseReason || adapterFailed || clicked) ? detail.project.status : "awaiting_human_submit",
-        clicked
+        awaitingPayment
+          ? `${trackLabelText}${portalLabel}: ${paymentSentence}`
+          : clicked
           ? (acceptedFiling
             ? `${trackLabelText}${portalLabel} submitted by automation (approved run)${capturedPermitNumber ? ` — record ${capturedPermitNumber}` : ""}. Tracking status.`
             : `${trackLabelText}${portalLabel}: final submit CLICKED by automation, not confirmed by the portal — verify on the portal before anything else.`)
@@ -10781,7 +10828,8 @@ export async function prepareSubmission(
     // staffAlerts scrubs it before it leaves.
     void alertStaffOnRunOutcome(db, {
       projectId, runId, track: permitTypeTag, runStatus,
-      reason: failureMessage || (pauseReason ? pausedRunSentence(pauseReason, result) : ""),
+      reason: failureMessage || paymentSentence || (pauseReason ? pausedRunSentence(pauseReason, result) : ""),
+      ...(awaitingPayment ? { feeUsd: feeStopOf(result)?.totalUsd ?? null } : {}),
     });
 
     // #333: a filing the person made from the review window while this run was finishing — recorded
@@ -11086,7 +11134,7 @@ export function captureConfirmation(
       [projectId, ...(scopeByType ? [runPermitType] : [])],
     );
     const fallback = awaiting.length ? [] : db.query<Row>(
-      `SELECT id, permit_type, submission_type FROM submissions WHERE project_id = ? AND status IN ('failed', 'paused_for_human', 'submitted_unconfirmed')${scopeByType ? " AND permit_type = ?" : ""}
+      `SELECT id, permit_type, submission_type FROM submissions WHERE project_id = ? AND status IN ('failed', 'paused_for_human', 'awaiting_payment', 'submitted_unconfirmed')${scopeByType ? " AND permit_type = ?" : ""}
        ORDER BY created_at DESC LIMIT 1`,
       [projectId, ...(scopeByType ? [runPermitType] : [])],
     );

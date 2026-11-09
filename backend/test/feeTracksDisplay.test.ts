@@ -51,7 +51,7 @@ const NAMES = [
   // The permit card's issuer line and its set/clear control (split issuer) — trackCardHtml calls both.
   "TRACK_ISSUER_KEY", "TRACK_ISSUER_SOURCE", "trackIssuerHtml", "trackIssuerEditHtml", "saveTrackIssuer",
   // What the recipe will fill that the job has no value for (#445) — trackCardHtml calls it.
-  "STAGE_GAP_LINK", "trackStageGapsHtml",
+  "FEE_RESPONSIBILITY_TEXT", "trackPaymentHtml", "STAGE_GAP_LINK", "trackStageGapsHtml",
   "trackCardHtml", "utilityGroupTitle",
   // The closeout milestones group (#497) — renderSubmittalTracks draws and binds it.
   "closeoutGroupHtml", "bindCloseoutMilestones", "saveProjectMilestone",

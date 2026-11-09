@@ -647,12 +647,23 @@ async function runAdapter(
     // name it (PowerClerk's ProjectId). Never by navigating: this window is the one a person submits
     // in. An Accela wizard URL carries no record key, and the reference then says so (id "").
     let draftReference: { link: string; id: string } | null = null;
+    // THE FEE AT THE STOP (#576): what a fee_payment stop read off the page (amount, lines, the
+    // masked screenshot, the page's own link). Carried up for the backend's run row and card.
+    const feeStop = stepPause === "fee_payment"
+      ? steps.map((s) => s?.data?.feeStop).find((d) => d && typeof d === "object") ?? null
+      : null;
     if (reviewResult.ok && !finalSubmitClicked) {
       try {
         const pg = (adapter as unknown as { page?: { url?: () => string } | null }).page;
         const here = pg && typeof pg.url === "function" ? String(pg.url() ?? "") : "";
         if (here) draftReference = draftReferenceFromUrl(here);
       } catch { /* a page we cannot read names no draft */ }
+    }
+    // A FEE STOP NAMES ITS APPLICATION TOO (#576): the stop happened on the application's own page
+    // (the review page with "Submit & Pay", or the fee page after the click), and the person who
+    // pays needs the way back to it. Read off the page the stop read, never by navigating.
+    if (!draftReference && feeStop && typeof (feeStop as { pageLink?: unknown }).pageLink === "string" && (feeStop as { pageLink: string }).pageLink) {
+      draftReference = { link: (feeStop as { pageLink: string }).pageLink, id: String((feeStop as { pageRef?: unknown }).pageRef ?? "") };
     }
 
     return {
@@ -675,6 +686,7 @@ async function runAdapter(
       ...(stagedReview && typeof stagedReview === "object" ? { stagedReview } : {}),
       evidenceDir,
       outcomeShotPath,
+      ...(feeStop ? { feeStop } : {}),
       pauseReason: stepPause,
       internalFinalReviewPacketRequired: true,
       reviewerBlockerCount: options.reviewerReport?.findings.filter((f) => f.severity === "blocker").length ?? 0,
