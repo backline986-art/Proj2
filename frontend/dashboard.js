@@ -5168,6 +5168,8 @@ const OFF_TOOL_CHANNEL = {
   in_person: { title: "IN-PERSON SUBMISSION", what: "This jurisdiction does not take this filing online. The bot prepares and fills the packet; a person must deliver it at the counter — outside this tool." },
   email: { title: "EMAIL SUBMISSION", what: "This filing is sent by email, not through a portal. The bot prepares and fills the packet; a person must email it — outside this tool — then record the confirmation here." },
   mail: { title: "SUBMISSION BY MAIL", what: "This filing is mailed. The bot prepares and fills the packet; a person must print and mail it — outside this tool." },
+  // #664 (NEM only): a person verified that the utility takes its application inside the permit application.
+  with_permit: { title: "FILED WITH THE PERMIT", what: "This utility takes its interconnection application inside the AHJ permit application. There is no separate utility filing: its documents go in the permit packet, this track follows the permit, and after approval a person calls the utility to set the meter." },
 };
 function offToolChannelHtml(t) {
   const k = OFF_TOOL_CHANNEL[t.channelKind];

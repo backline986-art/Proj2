@@ -70,11 +70,11 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { AppDb } from "../backend/src/db";
 import type { PortalRecipe, ProjectRecord } from "../shared/src/types";
-import { findCompleteRecipeForProject, findAnyRecipeForProject } from "../backend/src/portalRecipes";
+import { findCompleteRecipeForProject, findAnyRecipeForProject, portalEntityEvidence } from "../backend/src/portalRecipes";
 import { findKnowledgeForLearn } from "../backend/src/knowledgeBase";
 import { listPortalCredentials, selectCredentialUrlsFor, mfaCodeDestinationFor } from "../backend/src/portalCredentials";
 import type { PortalCredentialView } from "../backend/src/portalCredentials";
-import { isUtilityPlatformUrl } from "../backend/src/portalChannel";
+import { hostFitsTrackAndEntity, isUtilityPlatformUrl } from "../backend/src/portalChannel";
 import { findAhjProcessProfile } from "../backend/src/processProfiles";
 
 const s = (v: unknown): string => (v === null || v === undefined ? "" : String(v));
@@ -245,8 +245,12 @@ function knowledgeBasePortalUrl(db: AppDb, j: JurisdictionSpec, track: CoverageT
   const name = track === "nem" ? j.utility : j.ahj;
   let url = "";
   if (!blank(name)) {
+    // #678: the NEM side asks the utility's OWN row first (no AHJ on it) — a city|utility row carries
+    // the CITY's permit portal, which is not where the utility takes its application. Whatever row
+    // answers, the NEM caller judges the URL through the one rule-5 predicate (nemSafe below).
     const row = db.get<{ portal_url?: string }>(
-      `SELECT portal_url FROM permit_utility_knowledge WHERE ${column} = ? AND portal_url IS NOT NULL AND portal_url != '' LIMIT 1`,
+      `SELECT portal_url FROM permit_utility_knowledge WHERE ${column} = ? AND portal_url IS NOT NULL AND portal_url != ''
+        ${track === "nem" ? "ORDER BY CASE WHEN ahj IS NULL OR ahj = '' THEN 0 ELSE 1 END" : ""} LIMIT 1`,
       [name],
     );
     url = s(row?.portal_url);
@@ -287,16 +291,25 @@ export interface TrackResolution {
 
 /** Resolve one track the way production stages it. NEVER crosses the tracks: the permit side
  *  asks an AHJ-scoped key and filters every candidate URL through `isUtilityPlatformUrl`;
- *  the NEM side asks a utility-scoped key and never looks at an AHJ row. */
+ *  the NEM side asks a utility-scoped key and judges every candidate URL through
+ *  `hostFitsTrackAndEntity` for the NEM track (#678). */
 export function resolveTrack(db: AppDb, j: JurisdictionSpec, track: CoverageTrack): TrackResolution {
   if (track === "nem") {
     const recipe = findCompleteRecipeForProject(db, { scopeType: "utility", state: j.state, utility: j.utility });
     const draft = recipe ? null : findAnyRecipeForProject(db, { scopeType: "utility", state: j.state, utility: j.utility });
     const kb = knowledgeBasePortalUrl(db, j, "nem");
+    // Rule 5 on the NEM side, the mirror of `permitSafe` below (#678): every candidate is judged by
+    // the ONE predicate production uses at every door — hostFitsTrackAndEntity for the NEM track and
+    // THIS utility's evidence — so a city's permit portal (a city|utility row's) is never reported as
+    // the utility's interconnection portal. Its single carve-out stays data: the utility's own
+    // human-VERIFIED record naming that exact portal. No host list here.
+    const entity = portalEntityEvidence(db, { scope: "utility", state: j.state, name: j.utility });
+    const nemSafe = (u: unknown, source: "recipe" | "kb"): string =>
+      (s(u) && hostFitsTrackAndEntity("nem", entity, s(u), source).fits ? s(u) : "");
     return {
       recipe,
       draft,
-      portalUrl: s(recipe?.portalUrl) || s(draft?.portalUrl) || kb.url,
+      portalUrl: nemSafe(recipe?.portalUrl, "recipe") || nemSafe(draft?.portalUrl, "recipe") || nemSafe(kb.url, "kb"),
       kbNotes: kb.notes,
       otherDisciplinesWithRecipe: [],
     };

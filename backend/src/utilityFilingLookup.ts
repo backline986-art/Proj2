@@ -31,11 +31,29 @@ import { isVerifiedKnowledge, knowledgeProfileKey } from "./knowledgeBase";
 import { portalEntityEvidence } from "./portalRecipes";
 
 export type UtilityProgramKind = "net_metering" | "net_billing" | "interconnection_only";
+/**
+ * HOW the application is filed, when that is not "on a portal of the utility's own" (#664).
+ *
+ * "with_ahj_permit": the utility takes its interconnection / net-metering application INSIDE the
+ * AHJ's permit application — one application in the city's permit system carries the building
+ * permit and the net-metering paperwork (municipal utilities in many states). It NEVER carries a URL:
+ * nothing is resolved or launched on the NEM track (hard rule 5 untouched — this is not the rule-5
+ * carve-out of a NEM run on the city's host; it is no NEM run at all). A SEEDED row with this method is
+ * a proposal: only a person's VERIFIED row switches the NEM track to it (nemFiledWithPermit, rule 3).
+ */
+export type UtilityFilingMethod = "with_ahj_permit";
+export const FILED_WITH_AHJ_PERMIT: UtilityFilingMethod = "with_ahj_permit";
 export interface UtilityFilingLocation {
   /** The portal or method as the utility names it ("PowerClerk", "Interconnection Portal", "email"). */
   name: string;
   /** The application portal's own entry URL — null when the utility names a method, not a URL. */
   url: string | null;
+  /** Set only for a method that is not a portal (#664). A with-permit location's url is always null. */
+  method?: UtilityFilingMethod;
+  /** With-permit only: the utility's own documents its page lists for the application that rides in
+   *  the permit packet ("net metering agreement signed by the property owner", "one-line diagram on
+   *  our form"), in its words. Absent when the page lists none. */
+  documents?: string[];
 }
 /** The filing fact as stored. `droppedUrls` (PR #369, review round 4): the filing URL(s) the answer
  *  named that the door (acceptFilingUrl) did NOT keep — a permit vendor's portal, a host the search
@@ -122,6 +140,114 @@ export function saveUtilityFilingLookup(
   return { saved: true, reason: payload.confidence, lookup: getUtilityFilingLookup(db, input.state, input.utility) };
 }
 
+// ── FILED WITH THE AHJ PERMIT APPLICATION (#664) ──────────────────────────────────────────────
+/** A utility that takes its application inside the AHJ's permit application, as a PERSON verified it. */
+export interface NemFiledWithPermit {
+  state: string;
+  utility: string;
+  /** The method in the utility's words ("City building permit application"). */
+  name: string;
+  sourceUrl: string;
+  quote: string;
+  /** The utility's own documents for the application, as the verified row lists them ([] = none listed). */
+  documents: string[];
+  verifiedBy: string;
+  verifiedAt: string;
+}
+
+/**
+ * THE ONE ANSWER to "does this job's NEM application ride in the permit application?" (#664) — read by
+ * the NEM track card (status follows the permit, no portal), Stage (refuses the NEM track: there is no
+ * separate filing to stage), autopilot (skips it), nextStep (the NEM track is filed when the permit is)
+ * and the document inventory (its documents join the permit packet).
+ *
+ * ONLY A PERSON'S VERIFIED ROW (hard rule 3 / Helm's strictest baseline): a seeded lookup that says
+ * "with the permit" is a proposal, and the track stays "filing location not yet identified" with a
+ * human step, exactly as an unknown utility does. The row must cite its page, and it never carries a
+ * URL (rule 5: nothing is resolved or launched on the NEM track). Fees and the owner's signature stay
+ * human whichever way the application travels (rule 1). A read: writes nothing.
+ */
+export function filedWithPermitOf(lookup: UtilityFilingLookup | null | undefined): NemFiledWithPermit | null {
+  if (!lookup || lookup.confidence !== "verified" || !lookup.verifiedAt) return null;
+  const v = lookup.filing?.value;
+  if (!v || v.method !== FILED_WITH_AHJ_PERMIT || v.url) return null;
+  const sourceUrl = str(lookup.filing.sourceUrl);
+  if (!/^https?:\/\//i.test(sourceUrl)) return null;
+  return {
+    state: lookup.state, utility: lookup.utility, name: str(v.name) || "AHJ permit application", sourceUrl, quote: str(lookup.filing.quote),
+    documents: (Array.isArray(v.documents) ? v.documents : []).map(str).filter(Boolean),
+    verifiedBy: str(lookup.verifiedBy), verifiedAt: str(lookup.verifiedAt),
+  };
+}
+export function nemFiledWithPermit(db: AppDb | null, project: Pick<ProjectRecord, "state" | "utility">): NemFiledWithPermit | null {
+  if (!db || !normalizeUtilityName(project.utility ?? "")) return null;
+  return filedWithPermitOf(getUtilityFilingLookup(db, project.state ?? "", project.utility ?? ""));
+}
+/** Every utility key (utilityFilingKey) a person verified as filing with the permit — ONE query, for the
+ *  batched readers (nextStep's list tier). A read. */
+export function verifiedWithPermitKeys(db: AppDb): Set<string> {
+  const out = new Set<string>();
+  try {
+    for (const row of db.query<Record<string, unknown>>("SELECT * FROM utility_filing_lookups WHERE verified_at IS NOT NULL AND verified_at != ''")) {
+      const lookup = rowToLookup(row);
+      if (filedWithPermitOf(lookup)) out.add(str(row.profile_key));
+    }
+  } catch { /* table missing on an old schema: nothing is verified */ }
+  return out;
+}
+
+/** What a named person states when the utility's application rides in the permit application. */
+export interface WithPermitStatement {
+  name?: string;
+  /** The page it was read on (the utility's or the city's own). */
+  sourceUrl: string;
+  /** The page's words that say so. */
+  quote: string;
+  /** The utility's own documents for it, as the page lists them. */
+  documents?: string[];
+}
+
+/**
+ * A NAMED PERSON VERIFIES this utility's filing row (#664) — as it stands, or replacing its filing with
+ * the with-permit method they read on a cited page. Lands 'verified'; a lookup never overwrites it
+ * again (rule 3). Only the with-permit method can be STATED here: a person-stated portal URL would be a
+ * new door onto the NEM track, which this does not open (rule 5). The program fact is kept as it was.
+ */
+export function verifyUtilityFilingLookup(
+  db: AppDb,
+  where: { state: string; utility: string },
+  opts: { verifiedBy: string; filedWithPermit?: WithPermitStatement },
+): { saved: boolean; reason: string; lookup: UtilityFilingLookup | null } {
+  const who = str(opts.verifiedBy).slice(0, 120);
+  if (!who) return { saved: false, reason: "a utility filing row is verified by a named person", lookup: null };
+  if (!normalizeUtilityName(where.utility) || !str(where.state)) return { saved: false, reason: "no utility name", lookup: null };
+  const existing = getUtilityFilingLookup(db, where.state, where.utility);
+  const stated = opts.filedWithPermit;
+  if (!existing && !stated) return { saved: false, reason: "no filing lookup is on file to verify — state the with-permit method you read, with its page and words", lookup: null };
+  let filing: UtilityFilingFact = existing?.filing ?? { value: null, sourceUrl: "", quote: "", origin: "operator", notFound: "not stated" };
+  if (stated) {
+    const sourceUrl = str(stated.sourceUrl);
+    const quote = str(stated.quote).slice(0, 300);
+    if (!/^https?:\/\//i.test(sourceUrl)) return { saved: false, reason: "a fact a person states carries the http(s) page it was read on", lookup: existing };
+    if (quote.length < 8) return { saved: false, reason: "a fact a person states carries the page's own words", lookup: existing };
+    const documents = (stated.documents ?? []).map((d) => str(d).slice(0, 200)).filter(Boolean).slice(0, 12);
+    filing = {
+      value: { name: str(stated.name).slice(0, 160) || "AHJ permit application", url: null, method: FILED_WITH_AHJ_PERMIT, ...(documents.length ? { documents } : {}) },
+      sourceUrl, quote, origin: "operator",
+      // The URLs an earlier lookup dropped stay evidence (infoPages reads them), never a portal.
+      ...(existing?.filing?.droppedUrls?.length ? { droppedUrls: existing.filing.droppedUrls } : {}),
+    };
+  } else if (!filing.value) {
+    return { saved: false, reason: "the row on file found no filing location — state what you read instead of verifying a blank", lookup: existing };
+  }
+  const program: CitedFact<UtilityProgramKind> = existing?.program ?? { value: null, sourceUrl: "", quote: "", origin: "operator", notFound: "not stated by the person who verified this row" };
+  return saveUtilityFilingLookup(db, {
+    state: existing?.state || where.state, utility: existing?.utility || where.utility, filing, program,
+    ...(existing?.programName ? { programName: existing.programName } : {}),
+    lookedUpAt: existing?.lookedUpAt || new Date().toISOString(), confidence: "verified",
+  }, { verifiedBy: who });
+}
+
 // ── Acceptance (the cited discipline) ────────────────────────────────────────────────────────
 type RawFact = { value?: unknown; sourceUrl?: unknown; quote?: unknown; notFound?: unknown; programName?: unknown } | null | undefined;
 
@@ -139,6 +265,24 @@ export function quoteNamesFiling(value: UtilityFilingLocation, quote: string): b
   if (words.length) return words.every((w) => q.includes(w));
   const all = str(value.name).toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
   return Boolean(all) && q.replace(/[^a-z0-9]+/g, " ").includes(all);
+}
+
+// THE APPLICATION RIDES IN THE PERMIT APPLICATION (#664): a filing word, and a link word that puts it
+// IN / WITH / THROUGH a permit within a few words ("apply through the city's building permit portal",
+// "submitted with your building permit application", "included in the permit packet"). A page that
+// keeps the two apart ("separate from", "in addition to", "also obtain a building permit") does not.
+const WITH_PERMIT_FILING_WORD = /\b(?:appl(?:y|ies|ied|ication|ications)|submit\w*|fil(?:e|ed|es|ing)|includ\w*|process\w*|accept\w*|tak(?:e|es|en))\b/i;
+const WITH_PERMIT_LINK = /\b(?:with|through|in|into|as part of|along with|inside|within|via)\s+(?:(?:the|your|a|an|its|our)\s+)?(?:[\w'\u2019-]+\s+){0,3}permit\b/i;
+const PERMIT_KEPT_APART = /\b(?:separate(?:ly)?(?: from)?|in addition to|apart from|independent(?:ly)? of|not (?:part of|through|with|in)|also (?:obtain|need|get|apply for))\b[^.;]{0,40}\bpermit\b/i;
+/** Does the quote STATE that the utility's application is filed with the AHJ's permit application? */
+export function quoteStatesFiledWithPermit(quote: string): boolean {
+  const q = str(quote);
+  return WITH_PERMIT_FILING_WORD.test(q) && WITH_PERMIT_LINK.test(q) && !PERMIT_KEPT_APART.test(q);
+}
+
+/** Does the quote support this filing location — a portal it names, or (#664) the with-permit method? */
+export function quoteSupportsFiling(value: UtilityFilingLocation, quote: string): boolean {
+  return value.method === FILED_WITH_AHJ_PERMIT ? quoteStatesFiledWithPermit(quote) : quoteNamesFiling(value, quote);
 }
 
 const DENIES_NEM = /\b(?:no|not|does not|doesn't|do not|don't|without)\b[^.;]{0,40}\bnet[- ]?(?:energy )?meter/i;
@@ -197,6 +341,17 @@ export function parseUtilityFilingAnswer(text: string, seenUrls: string[]): { fi
       const named = [str(o.name), str(rawFiling?.quote)];
       // A nameless answer whose quote names the platform is filed under that platform's name, so a
       // dropped off-platform URL still leaves "PowerClerk — tenant URL unconfirmed" on the card.
+      // FILED WITH THE AHJ PERMIT APPLICATION (#664): a method, never a portal. Any URL the answer
+      // gave (the city's permit portal, typically) is DROPPED — kept only as evidence, like every URL
+      // the door refuses — so nothing on the NEM track can resolve or launch it (hard rule 5).
+      if (str(o.method).toLowerCase() === FILED_WITH_AHJ_PERMIT) {
+        if (str(o.url)) {
+          dropped.push(`filing URL ${str(o.url)} dropped: the utility files with the AHJ permit application — that method never keeps a URL on the NEM track (hard rule 5)`);
+          if (portalHostOf(str(o.url))) droppedUrls.push(str(o.url).slice(0, 500));
+        }
+        const documents = (Array.isArray(o.documents) ? o.documents : []).map((d) => str(d).slice(0, 200)).filter(Boolean).slice(0, 12);
+        return { name: str(o.name).slice(0, 160) || "AHJ permit application", url: null, method: FILED_WITH_AHJ_PERMIT, ...(documents.length ? { documents } : {}) };
+      }
       const name = str(o.name) || namedInterconnectionPlatforms(named)[0] || "";
       const accepted = acceptFilingUrl(str(o.url), seenUrls, named);
       if (str(o.url) && !accepted.url) {
@@ -207,7 +362,7 @@ export function parseUtilityFilingAnswer(text: string, seenUrls: string[]): { fi
       if (!name && !accepted.url) return null;
       return { name: name || portalHostOf(accepted.url!), url: accepted.url };
     },
-    quoteNamesFiling, "filing location",
+    quoteSupportsFiling, "filing location",
   );
   const filing: UtilityFilingFact = droppedUrls.length ? { ...cites, droppedUrls } : cites;
   const rawProgram = (json?.program ?? null) as RawFact;
@@ -222,13 +377,13 @@ export function parseUtilityFilingAnswer(text: string, seenUrls: string[]): { fi
 // ── The lookup ───────────────────────────────────────────────────────────────────────────────
 export const UTILITY_FILING_SYSTEM = `You find, for ONE electric utility in the United States, WHERE a residential rooftop solar installer files that utility's interconnection application, and WHAT the utility's customer-generation program is.
 
-1. filing — where the interconnection / net-metering application is SUBMITTED: the online application portal (a PowerClerk tenant, the utility's own interconnection portal, an installer portal) or, when the utility takes it another way, that way (e.g. email to an address, a paper form). value: {"name": "<the portal or method, as the utility names it>", "url": "<the portal's own entry URL, or null>"}. NEVER a city or county PERMIT portal, never a help page or a PDF. Prefer the utility's own interconnection / "for contractors" / "for installers" page. When the utility files on PowerClerk (or another platform), the url is the utility's OWN tenant login on that platform's domain (e.g. <tenant>.powerclerk.com/MvcAccount/Login) — search for it and give it only when a search result or a page you opened shows that host; a program, resource or info page on the utility's own website is never the url. If you cannot find the tenant's host, give the name (e.g. "PowerClerk") with "url": null.
+1. filing — where the interconnection / net-metering application is SUBMITTED: the online application portal (a PowerClerk tenant, the utility's own interconnection portal, an installer portal) or, when the utility takes it another way, that way (e.g. email to an address, a paper form). value: {"name": "<the portal or method, as the utility names it>", "url": "<the portal's own entry URL, or null>"}. The url is NEVER a city or county PERMIT portal, never a help page or a PDF. ONE EXCEPTION, a method and not a portal: when the utility's OWN page says its interconnection / net-metering application is submitted WITH or THROUGH the city's or county's building PERMIT application (one application in the permit system carries both), value: {"name": "<as the page names it>", "url": null, "method": "with_ahj_permit", "documents": ["<each utility document the page lists for it, in its words>"]} — and the quote must say so. Never use that method for a utility that has its own portal or form, or when the page only says a building permit is ALSO required. Prefer the utility's own interconnection / "for contractors" / "for installers" page. When the utility files on PowerClerk (or another platform), the url is the utility's OWN tenant login on that platform's domain (e.g. <tenant>.powerclerk.com/MvcAccount/Login) — search for it and give it only when a search result or a page you opened shows that host; a program, resource or info page on the utility's own website is never the url. If you cannot find the tenant's host, give the name (e.g. "PowerClerk") with "url": null.
 2. program — "net_metering" when the utility credits exported energy under a net-metering tariff or rider; "net_billing" when exports are credited at a set export / buyback rate or price plan that is not net metering; "interconnection_only" when the utility only interconnects and does not itself credit exports (e.g. a wires-only distribution utility whose customers' retail electric provider sets any buyback). Also give "programName" in the utility's own words.
 
 EVERY value carries "sourceUrl" (a page your search returned or you opened) and "quote" (the exact words on that page that state it, under 250 characters, containing the answer itself: the portal's name or link for the filing; the words net metering / export credit / retail provider for the program). If no page states it, "value": null and say what you searched in "notFound". Never answer from memory. Never guess.
 
 Return ONLY JSON:
-{"filing": {"value": {"name": "", "url": null}|null, "sourceUrl": "", "quote": "", "notFound": ""},
+{"filing": {"value": {"name": "", "url": null, "method"?: "with_ahj_permit", "documents"?: []}|null, "sourceUrl": "", "quote": "", "notFound": ""},
  "program": {"value": "net_metering"|"net_billing"|"interconnection_only"|null, "programName": "", "sourceUrl": "", "quote": "", "notFound": ""}}`;
 
 const lookupTimeoutMs = () => Math.max(120000, Number(process.env.UTILITY_FILING_LOOKUP_TIMEOUT_MS) || 240000);
@@ -412,6 +567,9 @@ export interface UtilityTrackPresentation {
   program: UtilityProgramKind | "unknown";
   /** "cited" | "verified" | "known" | "profile" (a seeded KB row) | "unknown" — how the label/channel are known. */
   basis: "cited" | "verified" | "known" | "profile" | "unknown";
+  /** #664: a person VERIFIED that this utility's application rides in the AHJ permit application
+   *  (nemFiledWithPermit). Absent otherwise — a seeded with-permit row never sets it. */
+  filedWithPermit?: NemFiledWithPermit;
 }
 
 export const UTILITY_TRACK_LABELS: Record<UtilityProgramKind | "unknown", string> = {
@@ -467,6 +625,38 @@ export function utilityTrackPresentation(db: AppDb | null, project: Pick<Project
   const known = knownOregonNemUtility(project);
   const program: UtilityProgramKind | "unknown" = lookup?.program?.value ?? (known ? "net_metering" : "unknown");
   const lookupFiling = lookup?.filing?.value ?? null;
+  const programLabelFor = () => {
+    const programLabel = UTILITY_TRACK_LABELS[program];
+    return lookup?.program?.value && lookup.programName ? `${programLabel} — ${lookup.programName}` : programLabel;
+  };
+  // FILED WITH THE AHJ PERMIT APPLICATION, AS A PERSON VERIFIED IT (#664): no portal, no URL — the
+  // application rides in the permit's. Ahead of every portal source, a verified KB portal included:
+  // two verified records that disagree resolve to the one that launches nothing (strictest).
+  const withPermit = filedWithPermitOf(lookup);
+  if (withPermit) {
+    return {
+      label: programLabelFor(),
+      channel: `Filed inside the AHJ permit application (${withPermit.name}) — no separate utility filing (verified by ${withPermit.verifiedBy || "a person"}: ${withPermit.sourceUrl})`,
+      portalUrl: "",
+      program,
+      basis: "verified",
+      filedWithPermit: withPermit,
+    };
+  }
+  // A SEEDED with-permit answer is a proposal (rule 3): the track stays "not yet identified" with its
+  // human step, saying what the lookup read — never "included in the permit", never a portal.
+  if (lookupFiling?.method === FILED_WITH_AHJ_PERMIT) {
+    const kbSeeded = db ? utilityKbChannel(db, project, [lookupFiling.name, str(lookup?.filing?.quote)]) : null;
+    if (!kbSeeded?.verified) {
+      return {
+        label: programLabelFor(),
+        channel: `Utility interconnection filing location — not yet identified: the utility's page reads as filing with the AHJ permit application ("${lookupFiling.name}", cited: ${lookup!.filing.sourceUrl}) — filing location unverified until a named person verifies it (verify on the utility's interconnection page)`,
+        portalUrl: "",
+        program,
+        basis: "cited",
+      };
+    }
+  }
   // WHICH SOURCE NAMES THE PORTAL (issue #54): verified KB beats seeded lookup beats unconfirmed
   // research. The utility's KB row is consulted when the lookup has no URL ("PowerClerk — tenant URL
   // unconfirmed" from research, while #36's seeded row holds the tenant login), or when a PERSON
