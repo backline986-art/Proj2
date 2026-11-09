@@ -442,7 +442,9 @@ export async function buildUtilityPackage(
     const { readUndecidedSpecPages } = await import("./scannedPlanSet");
     // A read that cannot run (the renderer failed) leaves every page undecided, as before #79 —
     // never a failed split.
-    const read = await readUndecidedSpecPages(opts.llm, planBytes, undecidedSpec, pageTexts)
+    const { projectSecretValuesById } = await import("./projectSecrets");
+    // Rule 2 (#612): every thumbnail is masked with the project's own secrets; unreadable → no read.
+    const read = await readUndecidedSpecPages(opts.llm, planBytes, undecidedSpec, pageTexts, { secrets: projectSecretValuesById(db, projectId) })
       .catch(() => ({ decided: {} as Record<string, PlanSheetKind>, integratedInverter: [] as number[], withheld: [] as number[] }));
     specPagesByVision = read.decided;
     if (read.withheld.length) specPagesWithheld = read.withheld;

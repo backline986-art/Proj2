@@ -7,7 +7,7 @@ import type { EvidenceTopic } from "./projectEvidence";
 import { extractPdfPages } from "./batchImport";
 import { text as s } from "./json";
 import { pdfjsDocumentOptions } from "./pdfjsOptions";
-import { paintMaskRegions, planSecretMask, type MaskAnnotation, type MaskTextItem, type PdfQuad, type SecretMaskPlan } from "./visionPageMask";
+import { paintMaskRegions, planSecretMask, VisionPageWithheldError, type MaskAnnotation, type MaskRegion, type MaskTextItem, type PdfQuad, type SecretMaskPlan } from "./visionPageMask";
 
 // ---------------------------------------------------------------------------
 // Source-page image rendering for the AHJ Reviewer Gate "screenshot crop slot".
@@ -280,6 +280,35 @@ type PdfjsMaskPage = PdfjsRenderPage & {
 };
 type PdfjsMaskViewport = { width: number; height: number; convertToViewportPoint: (x: number, y: number) => number[] };
 
+/** The page's own text and form fields, checked against `secrets` (visionPageMask.planSecretMask).
+ *  A page whose text cannot be read is not known to be secret-free: { ok: false } (fail closed). */
+async function planPageMask(pdfPage: PdfjsMaskPage, secrets: readonly string[]): Promise<SecretMaskPlan> {
+  if (!secrets.length) return { ok: true, regions: [] };
+  try {
+    const [content, annotations] = await Promise.all([pdfPage.getTextContent(), pdfPage.getAnnotations()]);
+    return planSecretMask(content.items, annotations || [], secrets);
+  } catch {
+    return { ok: false, reason: "the page's text could not be read to check it for an account or meter number" };
+  }
+}
+
+/** Paint `regions` (PDF user space) onto a page already rendered at `viewport`. null when painted;
+ *  the refusal when a region cannot be placed on the canvas (the caller sends nothing). */
+function paintPlanOnCanvas(
+  ctx: { getImageData: (x: number, y: number, w: number, h: number) => { data: Uint8ClampedArray }; putImageData: (img: unknown, x: number, y: number) => void },
+  width: number, height: number, viewport: PdfjsMaskViewport, planRegions: MaskRegion[],
+): { ok: false; reason: string } | null {
+  const toDevice = (quad: PdfQuad) => quad.map(([x, y]) => viewport.convertToViewportPoint(x, y));
+  const regions = planRegions.map((r) => ({ paint: toDevice(r.paint), reach: toDevice(r.reach) }));
+  if (!regions.every((r) => [...r.paint, ...r.reach].every((p) => Number.isFinite(p[0]) && Number.isFinite(p[1])))) {
+    return { ok: false, reason: "an account or meter number on the page could not be placed on the rendered sheet" };
+  }
+  const image = ctx.getImageData(0, 0, width, height);
+  paintMaskRegions(image.data, width, height, regions);
+  ctx.putImageData(image, 0, 0);
+  return null;
+}
+
 /**
  * RULE 2 FOR THE PAGE IMAGE (#293). The page renderPdfPageToPng would give, for a vision prompt:
  * when the page's own text (or a form field drawn on it) carries one of the project's `secrets`,
@@ -304,14 +333,7 @@ export async function renderPdfPageForVision(pdfPath: string, page: number, secr
     const doc = await pdfjs.getDocument(pdfjsDocumentOptions({ data, useSystemFonts: true, disableWorker: true })).promise;
     const target = Math.min(Math.max(1, page), doc.numPages);
     const pdfPage = (await doc.getPage(target)) as PdfjsMaskPage;
-    let plan: SecretMaskPlan;
-    try {
-      const [content, annotations] = await Promise.all([pdfPage.getTextContent(), pdfPage.getAnnotations()]);
-      plan = planSecretMask(content.items, annotations || [], secrets);
-    } catch {
-      // The page's text could not be read, so whether it carries a secret is unknown: fail closed.
-      return { ok: false, reason: "the page's text could not be read to check it for an account or meter number" };
-    }
+    const plan = await planPageMask(pdfPage, secrets);
     if (!plan.ok) return plan;
     if (!plan.regions.length) return { ok: true, png: await renderPdfPageToPng(pdfPath, page, scale), masked: 0 };
 
@@ -320,14 +342,8 @@ export async function renderPdfPageForVision(pdfPath: string, page: number, secr
     const canvas = createCanvas(Math.ceil(viewport.width), Math.ceil(viewport.height));
     const ctx = canvas.getContext("2d");
     await pdfPage.render({ canvasContext: ctx, viewport, canvas }).promise;
-    const toDevice = (quad: PdfQuad) => quad.map(([x, y]) => viewport.convertToViewportPoint(x, y));
-    const regions = plan.regions.map((r) => ({ paint: toDevice(r.paint), reach: toDevice(r.reach) }));
-    if (!regions.every((r) => [...r.paint, ...r.reach].every((p) => Number.isFinite(p[0]) && Number.isFinite(p[1])))) {
-      return { ok: false, reason: "an account or meter number on the page could not be placed on the rendered sheet" };
-    }
-    const image = ctx.getImageData(0, 0, canvas.width, canvas.height);
-    paintMaskRegions(image.data, canvas.width, canvas.height, regions);
-    ctx.putImageData(image, 0, 0);
+    const painted = paintPlanOnCanvas(ctx, canvas.width, canvas.height, viewport, plan.regions);
+    if (painted) return painted;
     return { ok: true, png: canvas.toBuffer("image/png"), masked: plan.regions.length };
   } finally {
     console.warn = origWarn;
@@ -367,12 +383,20 @@ export function visionRenderScale(w: number, h: number, opts: Pick<VisionRenderO
 
 /** Open a PDF (bytes — nothing touches the disk cache) and render pages from it for a VISION
  *  read: fitted to the model's image limits, turned upright, JPEG-encoded. One parse of the PDF
- *  serves every page; call close() when done. */
-export async function openPdfForVisionRender(pdfBytes: Uint8Array): Promise<{
+ *  serves every page; call close() when done.
+ *
+ *  RULE 2 (#612): `secrets` are the project's own (projectSecretValues). Each page's text runs and
+ *  form fields that carry one are painted over before the JPEG is made, as renderPdfPageForVision
+ *  does for the PNG door; a carrier with no box to paint makes render() throw
+ *  VisionPageWithheldError, so the page is never sent. No secrets (or none on the page): the image
+ *  is exactly what it was. A page with no text layer (a scan) has nothing to check — what it prints
+ *  is out of reach of a text detector. */
+export async function openPdfForVisionRender(pdfBytes: Uint8Array, openOpts: { secrets?: readonly string[] } = {}): Promise<{
   numPages: number;
   render: (page: number, opts: VisionRenderOptions) => Promise<VisionRender>;
   close: () => Promise<void>;
 }> {
+  const secrets = openOpts.secrets ?? [];
   const { createCanvas } = await import("@napi-rs/canvas" as string);
   const pdfjs = await getPdfjs();
   const quiet = <T>(fn: () => Promise<T>): Promise<T> => {
@@ -389,7 +413,11 @@ export async function openPdfForVisionRender(pdfBytes: Uint8Array): Promise<{
     numPages: doc.numPages,
     render: (page, opts) => quiet(async () => {
       const target = Math.min(Math.max(1, Math.floor(page)), doc.numPages);
-      const pdfPage = await doc.getPage(target);
+      const pdfPage = (await doc.getPage(target)) as PdfjsMaskPage;
+      // RULE 2 (#612): checked before anything is drawn; a carrier with no box throws, so the page is
+      // never encoded, let alone sent (the caller names it as withheld).
+      const plan = await planPageMask(pdfPage, secrets);
+      if (!plan.ok) throw new VisionPageWithheldError(plan.reason);
       const unit = pdfPage.getViewport({ scale: 1 });
       const scale = visionRenderScale(unit.width, unit.height, opts);
       const viewport = pdfPage.getViewport({ scale });
@@ -401,6 +429,10 @@ export async function openPdfForVisionRender(pdfBytes: Uint8Array): Promise<{
       ctx.fillStyle = "#ffffff";
       ctx.fillRect(0, 0, w, h);
       await pdfPage.render({ canvasContext: ctx, viewport, canvas }).promise;
+      if (plan.regions.length) {
+        const refused = paintPlanOnCanvas(ctx, w, h, viewport as PdfjsMaskViewport, plan.regions);
+        if (refused) throw new VisionPageWithheldError(refused.reason);
+      }
       const rot = opts.rotate ?? 0;
       let out = canvas;
       if (rot === 90 || rot === 180 || rot === 270) {

@@ -9,7 +9,8 @@ import { docDisciplineFor, docFitsTrack } from "./docDiscipline";
 // duplicateUploads, and this module asks requiredDocuments's requiredListCheck which utility
 // documents an AHJ names (OD-4). Both use each other only inside function bodies, so ESM
 // instantiation resolves it (function declarations are bound before either module evaluates).
-import { requiredListCheck } from "./requiredDocuments";
+import { requiredListCheck, WITH_PERMIT_DOC_TYPE } from "./requiredDocuments";
+import { nemFiledWithPermit } from "./utilityFilingLookup";
 import { createHash } from "node:crypto";
 import fs from "node:fs";
 
@@ -59,6 +60,11 @@ export function submissionDocumentsByType(db: AppDb, project: ProjectRecord, tra
  */
 function utilityDocsNamedByAhj(db: AppDb, project: ProjectRecord): Set<string> {
   const named = new Set<string>();
+  // #664: a utility a person VERIFIED as filing inside the permit application — its application (and
+  // only that: never the bill or the meter photo) travels in the permit packet.
+  try {
+    if (nemFiledWithPermit(db, project)) named.add(WITH_PERMIT_DOC_TYPE);
+  } catch { /* fail closed: nothing added */ }
   try {
     const list = requiredListCheck(db, project, { required: [], presence: [], missingBlocking: [], missingAdvisory: [] });
     if (list.source === "unknown") return named;

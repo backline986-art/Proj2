@@ -365,6 +365,9 @@ try {
   {
     // ANOTHER ORIGIN. A benign hop is followed by Chromium as on main: the first origin's HttpOnly
     // session cookie and the page's Authorization header never travel to 127.0.0.2.
+    // #402: the form-POST cell was red on Chromium 149 (Playwright 1.61): any DevTools Fetch
+    // interception made Chromium itself fail the cross-origin leg (net::ERR_INVALID_ARGUMENT). Fixed
+    // by the browser (153, Playwright 1.63); filingBackstopCrossOrigin.test.ts pins it in CI.
     const withCookie = async (ctx: BrowserContext) => { await ctx.addCookies([{ name: "sess", value: "first-origin-secret", url: base, httpOnly: true }]); };
     REDIRECTS["/step/xorigin"] = [307, `${base2}/landing`];
     REDIRECTS["/step/xoriginFetch"] = [307, `${base2}/api/collect`];

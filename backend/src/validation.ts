@@ -101,6 +101,18 @@ export const permitProcessVerifySchema = z.object({
   })).min(1).max(6).optional(),
 });
 
+// #664: a named person verifies the project's utility filing row — as it stands, or stating that the
+// utility takes its application inside the AHJ permit application (a method, never a URL: rule 5).
+export const utilityFilingVerifySchema = z.object({
+  verifiedBy: z.string().max(120).optional(),
+  filedWithPermit: z.object({
+    name: z.string().trim().max(160).optional(),
+    sourceUrl: personFactUrl,
+    quote: z.string().trim().min(8).max(300),
+    documents: z.array(z.string().trim().min(1).max(200)).max(12).optional(),
+  }).strict().optional(),
+});
+
 export const codeProfileVerifySchema = z.object({
   state: z.string().min(2).max(40),
   ahj: z.string().max(160).optional().default(""),

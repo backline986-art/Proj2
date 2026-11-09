@@ -26,7 +26,7 @@ import type {
   SubmittalTrackType,
 } from "../../shared/src/types";
 import { latestStagedReview, stagedReviewView } from "./stagedReviews";
-import { trackConfirmationView, type TrackConfirmationView } from "./submissionConfirmation";
+import { paidConfirmationUrl, trackConfirmationView, type TrackConfirmationView } from "./submissionConfirmation";
 import { findApplicationProfile, describePermitType, permitStructureAnswer, permitStructureIsCitedOrVerified, type PermitPrerequisiteStep, type PermitStructureAnswer } from "./applicationDocs";
 import { findAhjProcessProfile, jurisdictionKind, jurisdictionKindsCompatible } from "./processProfiles";
 import { findAnyRecipeForProject, findCompleteRecipeForProject } from "./portalRecipes";
@@ -37,7 +37,7 @@ import { HttpError } from "./httpError";
 import { isInformationalPageUrl, isUtilityPlatformUrl, portalHostOf, recipeDisciplineForTrack, trackSafeUrl } from "./portalChannel";
 import { classifyChannelWords, normalizeAhjName, permitAnswerForTrackFrom, permitChannelLabel, permitProcessFor, projectForTrack, trackIssuer } from "./permitProcess";
 import { statewideDecisionFor, statewideUrlRefusal } from "./statewideEvidence";
-import { utilityTrackPresentation } from "./utilityFilingLookup";
+import { nemFiledWithPermit, utilityTrackPresentation, type NemFiledWithPermit } from "./utilityFilingLookup";
 import { nowIso } from "./time";
 import { hasMpuScope } from "./serviceScope";
 import { essPermitStep, type EssPermitStep } from "./essRequirements";
@@ -104,7 +104,7 @@ export interface SubmittalTrackView extends SubmittalTrack {
    *  or asked for a fee, and no person has pressed Paid since. Absent otherwise. */
   feeDue?: { label: string; since: string; approved: boolean; sentence: string };
   /** Every Paid a person recorded on this track, newest first (track_fee_payments). */
-  paid?: Array<{ kind: string; amountUsd: number; recordNumber: string; paidBy: string; paidAt: string }>;
+  paid?: Array<{ kind: string; amountUsd: number; recordNumber: string; paidBy: string; paidAt: string; confirmationUrl?: string }>;
   /** #436 PR1 — NEM only, while the track is staged: the newest staged review the server holds (the
    *  masked picture of the review page, and what the draft's pages show). Shown beside Approve,
    *  which stays held exactly as #449 holds it. null = none recorded. */
@@ -257,10 +257,10 @@ function verifiedAhjPortalUrl(db: AppDb | null, project: ProjectRecord, track: S
  * (cited) → the AHJ's hand-written / seeded profile → the AHJ's knowledge-base row (a person's
  * verified row, else research — said as such) → unknown.
  */
-function channelResolution(db: AppDb | null, track: SubmittalTrackType, project: ProjectRecord): { channel: string; basis: string; portalUrl: string } {
+function channelResolution(db: AppDb | null, track: SubmittalTrackType, project: ProjectRecord): { channel: string; basis: string; portalUrl: string; filedWithPermit?: boolean } {
   if (track === "nem") {
     const u = utilityTrackPresentation(db, project);
-    return { channel: u.channel, basis: u.basis, portalUrl: u.portalUrl };
+    return { channel: u.channel, basis: u.basis, portalUrl: u.portalUrl, ...(u.filedWithPermit ? { filedWithPermit: true } : {}) };
   }
   // THE LABEL IS THE RESOLVED PORTAL'S HOST (portal-truth D4, permitProcess.permitChannelLabel):
   // "Oregon ePermitting (Accela)" only on the statewide host; an AHJ's own Accela tenant is
@@ -348,8 +348,11 @@ function channelResolution(db: AppDb | null, track: SubmittalTrackType, project:
  *  us to go outside of the submission tool"). ONE answer, read from the channel resolution: a portal
  *  URL on file is a portal; otherwise the channel's own words decide in-person / email / mail; else
  *  unknown. "offTool" = a person must deliver the packet outside this tool. */
-export type TrackChannelKind = "portal" | "in_person" | "email" | "mail" | "unknown";
-export function channelKindOf(res: { channel: string; portalUrl: string }): TrackChannelKind {
+export type TrackChannelKind = "portal" | "in_person" | "email" | "mail" | "with_permit" | "unknown";
+export function channelKindOf(res: { channel: string; portalUrl: string; filedWithPermit?: boolean }): TrackChannelKind {
+  // #664: a person VERIFIED that this NEM application rides in the AHJ permit application — read off
+  // the resolution's flag (nemFiledWithPermit), never off the sentence's words.
+  if (res.filedWithPermit) return "with_permit";
   if (res.portalUrl) return "portal";
   const t = String(res.channel || "");
   // A guess is not a finding: "unknown — likely in-person ..." / "not yet identified" stay unknown.
@@ -758,6 +761,46 @@ function deriveStatus(state: TrackState): SubmittalTrackStatus {
   return "not_started";
 }
 
+// ── THE NEM TRACK THAT RIDES IN THE PERMIT APPLICATION (#664) ────────────────────────────────────
+// A person VERIFIED that the utility takes its application inside the AHJ permit application
+// (utilityFilingLookup.nemFiledWithPermit — a seeded row never gets here). There is no separate
+// filing: the track's status FOLLOWS THE PERMIT'S, until the NEM track has evidence of its own (a
+// person's tracking target or submission for it), which always wins. The permit approved = the net
+// metering approved PENDING THE METER SET — never "done": the track finishes only on its own approval
+// reading (isTrackDone, unchanged), which a person records once the utility has set the meter.
+const FOLLOW_RANK: SubmittalTrackStatus[] = ["not_started", "staged", "submitted", "in_review", "ready_for_issue", "issued"];
+/** The least advanced of the permit tracks (a correction on any of them first); approved → pending the meter set. */
+export function nemStatusFollowingPermit(permitStatuses: readonly SubmittalTrackStatus[]): { status: SubmittalTrackStatus; permitStatus: SubmittalTrackStatus } {
+  if (!permitStatuses.length) return { status: "not_started", permitStatus: "not_started" };
+  const permitStatus = permitStatuses.includes("correction")
+    ? "correction"
+    : permitStatuses.reduce((a, b) => (FOLLOW_RANK.indexOf(a) <= FOLLOW_RANK.indexOf(b) ? a : b));
+  return { status: permitStatus === "issued" ? "ready_for_issue" : permitStatus, permitStatus };
+}
+/** Has the NEM track evidence of its OWN (a submission or a tracking target speaking for it)? Then
+ *  its own readings decide, as on any other track. */
+function hasOwnTrackEvidence(state: TrackState): boolean {
+  return state.done || state.submissionStatus !== null || state.outcome !== null;
+}
+function withPermitStatusLabel(status: SubmittalTrackStatus, permitStatus: SubmittalTrackStatus): string {
+  if (status === "ready_for_issue") return "Approved with the permit — meter set pending";
+  return `With the permit — ${statusLabelFor(permitStatus, "permit")}`;
+}
+function withPermitNextAction(status: SubmittalTrackStatus, w: NemFiledWithPermit, utility: string): string {
+  const who = utility || w.utility || "the utility";
+  const human = `The property owner signs ${who}'s agreement and a person pays any utility fee (automation never signs for the owner and never pays).`;
+  if (status === "correction") return `The permit has a correction — resolve it on the permit track; ${who}'s application rides with it.`;
+  if (status === "ready_for_issue") {
+    return `The permit is approved, so ${who}'s net metering is approved pending the meter set: after the inspection a person calls ${who} to set the meter, pays any utility fee, then records the approval on this track's tracking card.`;
+  }
+  return `No separate utility filing: ${who}'s application is filed inside the AHJ permit application, and its documents are on the permit's checklist. Stage and submit the permit track. ${human}`;
+}
+/** Why Stage is held on the NEM track of a with-permit utility — the route, the job and the card. */
+export function withPermitStageSentence(w: NemFiledWithPermit, utility = ""): string {
+  const who = utility || w.utility || "the utility";
+  return `There is no separate utility filing to stage: ${who}'s interconnection application is filed inside the AHJ permit application (verified by ${w.verifiedBy || "a person"}: ${w.sourceUrl}). Stage the permit track; its packet carries ${who}'s documents.`;
+}
+
 /**
  * WHEN ONE TARGET FINISHED ITS TRACK: its first done reading after the last correction before it
  * (targetFinishedTrack's own rule — a correction after issuance re-opens the filing, and the
@@ -805,7 +848,7 @@ export interface TrackProgress {
  */
 export function trackProgress(db: AppDb, project: ProjectRecord): TrackProgress[] {
   const required = requiredTracks(project);
-  return required.map((type) => {
+  const out = required.map((type) => {
     const state = readTrackState(db, project.id, type, required);
     const status = deriveStatus(state);
     const types = trackPermitTypes(type);
@@ -821,8 +864,16 @@ export function trackProgress(db: AppDb, project: ProjectRecord): TrackProgress[
       const dates = (own ? [own] : pool).map((t) => targetDoneAt(db, type, t)).filter((d): d is string => Boolean(d));
       doneAt = dates.sort().pop() ?? null;
     }
-    return { type, status, filedAt: s(filed?.t) || null, doneAt };
+    return { type, status, filedAt: s(filed?.t) || null, doneAt, ownEvidence: hasOwnTrackEvidence(state) };
   });
+  // #664: the NEM track of a with-permit utility follows the permit (the panel's own rule).
+  const nem = out.find((t) => t.type === "nem");
+  if (nem && !nem.ownEvidence && nemFiledWithPermit(db, project)) {
+    const permits = out.filter((t) => t.type !== "nem");
+    nem.status = nemStatusFollowingPermit(permits.map((t) => t.status)).status;
+    nem.filedAt = permits.length && permits.every((t) => t.filedAt) ? permits.map((t) => t.filedAt!).sort()[0] : null;
+  }
+  return out.map(({ ownEvidence: _own, ...t }) => t);
 }
 
 function categoryFor(type: SubmittalTrackType): "utility" | "permit" {
@@ -938,13 +989,23 @@ export function getSubmittalTracks(db: AppDb, project: ProjectRecord): Submittal
   const utility = required.includes("nem") ? utilityTrackPresentation(db, project) : null;
   // A step on the permit card, never a track of its own (#246): null unless the job has a battery.
   const essStep = essPermitStep(project);
+  // Every track's own state first: the NEM track of a with-permit utility (#664) follows the permits'.
+  const states = new Map(required.map((type) => [type, readTrackState(db, project.id, type, required)] as const));
+  const withPermit = utility?.filedWithPermit ?? null;
+  const nemFollow = withPermit && !hasOwnTrackEvidence(states.get("nem")!)
+    ? nemStatusFollowingPermit(required.filter((t) => t !== "nem").map((t) => deriveStatus(states.get(t)!)))
+    : null;
   return required.map((type) => {
-    const state = readTrackState(db, project.id, type, required);
-    const status = deriveStatus(state);
+    const state = states.get(type)!;
+    const follows = type === "nem" ? nemFollow : null;
+    const status = follows ? follows.status : deriveStatus(state);
     const category = categoryFor(type);
     // #436 RULING 5: the reason the card holds Stage — the same predicate the route and the job refuse on.
+    // #664: the NEM track of a with-permit utility has nothing of its own to stage.
     const submittedEvidence = trackSubmittedAndTracked(db, project.id, type, required);
-    const stageBlocked = submittedEvidence ? trackSubmittedSentence(submittedEvidence) : "";
+    const stageBlocked = submittedEvidence
+      ? trackSubmittedSentence(submittedEvidence)
+      : type === "nem" && withPermit ? withPermitStageSentence(withPermit, project.utility) : "";
     // A PERMIT CARD IS ITS ISSUER'S (split issuer): channel, recipe and portal on file are the agency
     // that issues THIS track's permit — the same view staging stages with (projectForTrack; the
     // project itself when that is the project AHJ). The utility card: the project.
@@ -976,7 +1037,9 @@ export function getSubmittalTracks(db: AppDb, project: ProjectRecord): Submittal
     type CardRecipe = { id: string; status: string; portal_url: string };
     const cardRecipe = (r: { id: string; status?: unknown; portalUrl?: unknown } | null): CardRecipe | null =>
       r ? { id: r.id, status: s(r.status), portal_url: s(r.portalUrl) } : null;
-    const completeRecipe = findCompleteRecipeForProject(db, resolverInput);
+    // #664: a with-permit NEM track has no portal of its own — no recipe, no portal URL (rule 5).
+    const noPortal = type === "nem" && Boolean(withPermit);
+    const completeRecipe = noPortal ? null : findCompleteRecipeForProject(db, resolverInput);
     let recipeRow: CardRecipe | null = cardRecipe(completeRecipe);
     // WHAT THAT RECIPE WILL FILL THAT THIS JOB HAS NO VALUE FOR (#445) — the stage gate's own reading,
     // shown before anyone clicks Stage. Only for a complete recipe of the track's own (what the next
@@ -989,7 +1052,7 @@ export function getSubmittalTracks(db: AppDb, project: ProjectRecord): Submittal
     // entity on the same portal (portalRecipes.findBorrowableRecipe) and records it on the run
     // (result_json.borrowedRecipe). The card says which one THIS project's last run of this track used.
     let borrowedRecipe: SubmittalTrackView["borrowedRecipe"] = null;
-    if (!recipeRow) for (const r of db.query<Row>(
+    if (!recipeRow && !noPortal) for (const r of db.query<Row>(
       `SELECT recipe_id, result_json, started_at FROM portal_runs
         WHERE project_id = ? AND permit_type IN (${family.map(() => "?").join(",")}) AND run_type = 'prepare_submit'
         ORDER BY started_at DESC, rowid DESC LIMIT 5`,
@@ -1007,7 +1070,7 @@ export function getSubmittalTracks(db: AppDb, project: ProjectRecord): Submittal
       const used = s(r.recipe_id) ? db.get<Row>("SELECT id, status, portal_url FROM portal_recipes WHERE id = ?", [s(r.recipe_id)]) : undefined;
       if (used) { recipeRow = { id: s(used.id), status: s(used.status), portal_url: s(used.portal_url) }; break; }
     }
-    if (!recipeRow && !borrowedRecipe) recipeRow = cardRecipe(findAnyRecipeForProject(db, resolverInput));
+    if (!recipeRow && !borrowedRecipe && !noPortal) recipeRow = cardRecipe(findAnyRecipeForProject(db, resolverInput));
 
     // WHERE THE NEM TRACK STANDS BETWEEN THE SIGNATURE REQUEST AND THE FILING (#308, #310): the card
     // offers "Approve & request signatures" (and "I sent the signature request") only in front of
@@ -1036,7 +1099,7 @@ export function getSubmittalTracks(db: AppDb, project: ProjectRecord): Submittal
     // row can hold the other track's portal (rule 5).
     const fitsHere = (u: string) => Boolean(u) && Boolean(trackSafeUrl(type, u)) && !isInformationalPageUrl(u);
     let kbPortalUrl: string | undefined;
-    if (!recipeRow || !s(recipeRow.portal_url)) {
+    if (!noPortal && (!recipeRow || !s(recipeRow.portal_url))) {
       if (fitsHere(resolved.portalUrl)) kbPortalUrl = resolved.portalUrl;
       const kbField = scopeType === "utility" ? "utility" : "ahj";
       const kbVal = scopeType === "utility" ? project.utility : issuerProject.ahj;
@@ -1070,9 +1133,13 @@ export function getSubmittalTracks(db: AppDb, project: ProjectRecord): Submittal
         }
       : null;
     const paid = db.query<Row>(
-      "SELECT kind, amount_usd, record_number, paid_by, paid_at FROM track_fee_payments WHERE project_id = ? AND track = ? ORDER BY paid_at DESC, rowid DESC",
+      "SELECT kind, amount_usd, record_number, paid_by, paid_at, confirmation_shot_path FROM track_fee_payments WHERE project_id = ? AND track = ? ORDER BY paid_at DESC, rowid DESC",
       [project.id, type],
-    ).map((r) => ({ kind: s(r.kind), amountUsd: Number(r.amount_usd), recordNumber: s(r.record_number), paidBy: s(r.paid_by), paidAt: s(r.paid_at) }));
+    ).map((r) => {
+      // #665: the filing's masked confirmation route, re-checked to be this project's own (never a path).
+      const confirmationUrl = paidConfirmationUrl(project.id, r.confirmation_shot_path);
+      return { kind: s(r.kind), amountUsd: Number(r.amount_usd), recordNumber: s(r.record_number), paidBy: s(r.paid_by), paidAt: s(r.paid_at), ...(confirmationUrl ? { confirmationUrl } : {}) };
+    });
 
     return {
       type,
@@ -1087,11 +1154,12 @@ export function getSubmittalTracks(db: AppDb, project: ProjectRecord): Submittal
       status,
       // The portal's own words — unless they say "issued" of a track isTrackDone did not accept
       // (one pooled target cannot finish two tracks), where they would contradict the status.
-      statusLabel: payment ? "Payment needed" : signatureHolds && signatureRequest
+      statusLabel: payment ? "Payment needed" : follows ? withPermitStatusLabel(follows.status, follows.permitStatus) : signatureHolds && signatureRequest
         ? SIGNATURE_STATUS_LABEL[signatureRequest.state] ?? statusLabelFor(status, category)
         : (!state.done && (state.outcome === "issued" || state.outcome === "nem_approved") ? "" : state.statusLabel)
           || statusLabelFor(status, category),
-      nextAction: payment ? payment.sentence : signatureHolds && signatureRequest && SIGNATURE_NEXT_ACTION[signatureRequest.state]
+      nextAction: payment ? payment.sentence : follows && withPermit ? withPermitNextAction(follows.status, withPermit, project.utility)
+        : signatureHolds && signatureRequest && SIGNATURE_NEXT_ACTION[signatureRequest.state]
         ? SIGNATURE_NEXT_ACTION[signatureRequest.state]
         : nextActionFor(status, channel, type, prerequisites, issuerProject.trackView ? issuerProject.ahj : ""),
       captureFields: captureFieldsFor(type),
