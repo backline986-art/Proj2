@@ -363,17 +363,29 @@ check("#108 MUST-PASS: verified, plan prints the UPCOMING edition due within 90 
   assert.match(f!.message, /upcoming NEC 2026/);
 });
 
-check("#108 MUST-PASS: the upcoming edition due beyond 90 days does not soften -> blocker", () => {
+// #597 (owner 2026-11-07): a plan edition NEWER than the verified profile is a warning that asks to
+// check the profile, whatever the upcoming window says, so the checks below that used to read
+// "blocker" outside the window now read the window by its WORDING: inside it the line names the
+// upcoming edition and its date (#124's softening); outside it the line says it is newer than the
+// profile. Both are warnings. An OLDER edition still blocks (codeBasisNewerEdition.test.ts).
+const UPCOMING_WORDING = /the plan's edition is the upcoming NEC 2026/;
+const NEWER_WORDING = /newer than the profile on file/;
+
+check("#108 MUST-PASS: the upcoming edition due beyond 90 days does not soften -> the newer-than-profile warning, not the upcoming wording (#597)", () => {
   const f = get(run(nextCycle, withUpcoming(inDays(200))), BASIS);
   assert.ok(f);
-  assert.equal(f!.severity, "blocker");
+  assert.equal(f!.severity, "warning");
+  assert.doesNotMatch(f!.message, UPCOMING_WORDING);
+  assert.match(f!.message, NEWER_WORDING);
 });
 
-check("#124 MUST-PASS: a PROPOSED upcoming edition due within the window does not soften -> blocker", () => {
+check("#124 MUST-PASS: a PROPOSED upcoming edition due within the window does not soften -> no upcoming wording; the newer-than-profile warning (#597)", () => {
   for (const status of ["proposed", "In Rulemaking", "draft", null, "not adopted", "Unadopted", "unfiled", "not yet effective", "ineffective", "non-adopted", "no"]) {
     const f = get(run(nextCycle, withUpcoming(inDays(30), status)), BASIS);
     assert.ok(f, String(status));
-    assert.equal(f!.severity, "blocker", `status ${status}`);
+    assert.equal(f!.severity, "warning", `status ${status}`);
+    assert.doesNotMatch(f!.message, UPCOMING_WORDING, `status ${status}`);
+    assert.match(f!.message, NEWER_WORDING, `status ${status}`);
   }
 });
 
@@ -393,29 +405,38 @@ check("#124 MUST-PASS: an adopted upcoming edition dated within 30 days past sti
   assert.ok(f!.message.includes(date), f!.message);
 });
 
-check("#124 MUST-PASS: an adopted upcoming edition dated beyond 30 days past does not soften -> blocker", () => {
+check("#124 MUST-PASS: an adopted upcoming edition dated beyond 30 days past does not soften -> no upcoming wording; the newer-than-profile warning (#597)", () => {
   const f = get(run(nextCycle, withUpcoming(inDays(-45))), BASIS);
   assert.ok(f);
-  assert.equal(f!.severity, "blocker");
+  assert.equal(f!.severity, "warning");
+  assert.doesNotMatch(f!.message, UPCOMING_WORDING);
+  assert.match(f!.message, NEWER_WORDING);
 });
 
-check("#124 MUST-PASS: the window holds at exactly its bounds and closes one day past each", () => {
-  const sev = (n: number): string | undefined => get(run(nextCycle, withUpcoming(inDays(n))), BASIS)?.severity;
-  assert.equal(sev(UPCOMING_SOFTEN_DAYS_BEFORE), "warning", "exactly 90 days ahead");
-  assert.equal(sev(UPCOMING_SOFTEN_DAYS_BEFORE + 1), "blocker", "91 days ahead");
-  assert.equal(sev(-UPCOMING_SOFTEN_DAYS_AFTER), "warning", "exactly 30 days past");
-  assert.equal(sev(-UPCOMING_SOFTEN_DAYS_AFTER - 1), "blocker", "31 days past");
+check("#124 MUST-PASS: the window holds at exactly its bounds and closes one day past each (read by its wording, #597)", () => {
+  const inWindow = (n: number): boolean => {
+    const f = get(run(nextCycle, withUpcoming(inDays(n))), BASIS);
+    assert.equal(f?.severity, "warning", `${n} days: a newer edition never blocks`);
+    return UPCOMING_WORDING.test(f!.message);
+  };
+  assert.equal(inWindow(UPCOMING_SOFTEN_DAYS_BEFORE), true, "exactly 90 days ahead");
+  assert.equal(inWindow(UPCOMING_SOFTEN_DAYS_BEFORE + 1), false, "91 days ahead");
+  assert.equal(inWindow(-UPCOMING_SOFTEN_DAYS_AFTER), true, "exactly 30 days past");
+  assert.equal(inWindow(-UPCOMING_SOFTEN_DAYS_AFTER - 1), false, "31 days past");
 });
 
-check("#124 MUST-PASS: the window is measured from an explicit asOf, not today", () => {
+check("#124 MUST-PASS: the window is measured from an explicit asOf, not today (read by its wording, #597)", () => {
   // A row dated in 2031: years away from today, so only asOf can put it in or out of the window.
   const ctx = withUpcoming("2031-06-01");
-  const sev = (asOf: string): string | undefined =>
-    get(evaluateDesignCriteriaFindings(nextCycle, ctx, { roofMounted: true, asOf }), BASIS)?.severity;
-  assert.equal(sev("2031-05-01"), "warning", "31 days ahead of asOf");
-  assert.equal(sev("2031-06-20"), "warning", "19 days past asOf");
-  assert.equal(sev("2031-01-01"), "blocker", "151 days ahead of asOf");
-  assert.equal(sev("2031-08-01"), "blocker", "61 days past asOf");
+  const inWindow = (asOf: string): boolean => {
+    const f = get(evaluateDesignCriteriaFindings(nextCycle, ctx, { roofMounted: true, asOf }), BASIS);
+    assert.equal(f?.severity, "warning", `${asOf}: a newer edition never blocks`);
+    return UPCOMING_WORDING.test(f!.message);
+  };
+  assert.equal(inWindow("2031-05-01"), true, "31 days ahead of asOf");
+  assert.equal(inWindow("2031-06-20"), true, "19 days past asOf");
+  assert.equal(inWindow("2031-01-01"), false, "151 days ahead of asOf");
+  assert.equal(inWindow("2031-08-01"), false, "61 days past asOf");
 });
 
 check("#124 MUST-PASS: the softening window and statuses are the named constants", () => {

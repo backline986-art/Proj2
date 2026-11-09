@@ -2524,6 +2524,18 @@ function graceWindowFor(ctx: EffectiveCodeContext, asOf: string | undefined): (s
   };
 }
 
+/** A plan edition NEWER than every edition the profile records for the compared code (#597; owner,
+ *  2026-11-07). Years only: an edition that is not a plain four-digit year, on either side, answers
+ *  false, so the line keeps its old answer (a blocker on a verified profile) instead of failing open.
+ *  Newer than one recorded row but not another (a state row and a city's own) is not newer. */
+function newerThanEvery(planEdition: string, profileEditions: string[]): boolean {
+  const year = (e: string): number | null => (/^\s*(19|20)\d{2}\s*$/.test(String(e ?? "")) ? Number(String(e).trim()) : null);
+  const plan = year(planEdition);
+  if (plan === null || !profileEditions.length) return false;
+  const recorded = profileEditions.map(year);
+  return recorded.every((y) => y !== null && plan > y);
+}
+
 /**
  * NO EDITIONS ON FILE — the plan's code basis next to the lookup state. A callout, never more:
  * the model-code defaults are placeholders (the "current cycle" says nothing about what this AHJ
@@ -3379,6 +3391,11 @@ export function evaluateDesignCriteriaFindings(
   //   · a plan on the PREVIOUS edition inside a recorded phase-in (effective <= asOf < mandatory,
   //     previous edition on file) -> not a mismatch: a callout naming the mandatory date, on a
   //     verified or a seeded profile (#216). From the mandatory date on it blocks as above.
+  //   · a plan NEWER than every edition a VERIFIED profile records for that code (years compared;
+  //     anything not a plain year fails closed) -> a warning that asks a person to check the profile,
+  //     never a blocker (#597; owner 2026-11-07). The profile lagging an adoption is the usual cause
+  //     (#596: Oregon's 2026 OESC against a verified 2023 row), and a plan built to the newer code
+  //     meets the older one. It never writes the profile (hard rule 3). OLDER keeps blocking.
   //
   // LIKE WITH LIKE. A plan entry is compared with the profile entry of the SAME named code
   // (state code to state code: ORSC with ORSC). Base model codes are compared only when a base
@@ -3408,18 +3425,29 @@ export function evaluateDesignCriteriaFindings(
     // another reading of the same code in the package matches the profile — not every reading
     // disagrees. These never block; they land as a callout naming the weak reading.
     const weakLines = new Set<string>();
-    const report = (key: string, line: string, rows: CodeEdition[], compared: { code: string; edition: string }, graceVia?: { code: string; edition: string }, weakWhy?: string): void => {
+    // Lines whose plan edition is NEWER than every edition the verified profile records for the
+    // compared code (#597): these never block; they ask a person to check the profile.
+    const newer = new Set<string>();
+    // `against`: the profile editions the line was compared with (the newer-than test reads them).
+    const report = (key: string, line: string, rows: CodeEdition[], compared: { code: string; edition: string }, against: string[], graceVia?: { code: string; edition: string }, weakWhy?: string): void => {
       if (seen.has(key)) return;
       seen.add(key);
       for (const r of rows) comparedRows.add(r);
       const due = upcomingFor(compared);
       const grace = due ? null : graceFor(compared) ?? (graceVia ? graceFor(graceVia) : null);
+      // The upcoming-edition (#124) and phase-in (#216) answers keep their own wording; only a line
+      // neither of them explains is read for "newer than the profile". A seeded profile already
+      // only warns, so the note is for a verified one.
+      const isNewer = !due && !grace && ctx.verified && newerThanEvery(compared.edition, against);
       const base = weakWhy ? `${line} — ${weakWhy}` : line;
       const text = due
         ? `${base} — the plan's edition is the upcoming ${due.code} ${due.edition}, anticipated effective ${due.anticipatedDate}`
-        : grace ? `${base} — still allowed during the phase-in: ${grace.note.replace(/\.$/, "")}` : base;
+        : grace ? `${base} — still allowed during the phase-in: ${grace.note.replace(/\.$/, "")}`
+          : isNewer ? `${base} — newer than the profile on file: if ${who} has adopted ${compared.code} ${compared.edition}, the profile is out of date (check the profile)`
+            : base;
       if (due) softened.add(text);
       if (grace) inGrace.add(text);
+      if (isNewer) newer.add(text);
       if (weakWhy) weakLines.add(text);
       lines.push(text);
     };
@@ -3437,7 +3465,7 @@ export function evaluateDesignCriteriaFindings(
       const same = profileEntries.filter((a) => a.code === code);
       if (same.length && !same.some((a) => a.edition === b.edition)) {
         const agreeing = stated.codeBasis.filter((o) => normCodeToken(o.code) === code && same.some((a) => a.edition === o.edition));
-        report(`${code}|${b.edition}`, `plan states ${b.code} ${b.edition} (${b.source}) — profile records ${same.map((a) => a.label).join(" / ")}`, same.map((a) => a.row), b, undefined, weakWhyFor(b, code, agreeing));
+        report(`${code}|${b.edition}`, `plan states ${b.code} ${b.edition} (${b.source}) — profile records ${same.map((a) => a.label).join(" / ")}`, same.map((a) => a.row), b, same.map((a) => a.edition), undefined, weakWhyFor(b, code, agreeing));
       }
       // The plan's printed base, compared with a base the profile states for that model code.
       if (b.baseCode && b.baseEdition) {
@@ -3451,7 +3479,7 @@ export function evaluateDesignCriteriaFindings(
           if (recorded.length && !recorded.some((r) => r.edition === b.baseEdition)) {
             const agreeing = stated.codeBasis.filter((o) => (normCodeToken(o.code) === model && recorded.some((r) => r.edition === o.edition))
               || (o.baseCode && normCodeToken(o.baseCode) === model && recorded.some((r) => r.edition === o.baseEdition)));
-            report(`${code}|${b.edition}|${model}|${b.baseEdition}`, `plan states ${b.code} ${b.edition} based on ${model} ${b.baseEdition} (${b.source}) — profile records ${recorded.map((r) => r.label).join(" / ")}`, recorded.map((r) => r.row), { code: model, edition: b.baseEdition }, b, weakWhyFor(b, model, agreeing));
+            report(`${code}|${b.edition}|${model}|${b.baseEdition}`, `plan states ${b.code} ${b.edition} based on ${model} ${b.baseEdition} (${b.source}) — profile records ${recorded.map((r) => r.label).join(" / ")}`, recorded.map((r) => r.row), { code: model, edition: b.baseEdition }, recorded.map((r) => r.edition), b, weakWhyFor(b, model, agreeing));
           }
         }
       }
@@ -3461,7 +3489,7 @@ export function evaluateDesignCriteriaFindings(
         const via = profileEntries.filter((a) => a.base?.code === code);
         if (via.length && !via.some((a) => a.base!.edition === b.edition)) {
           const agreeing = stated.codeBasis.filter((o) => normCodeToken(o.code) === code && via.some((a) => a.base!.edition === o.edition));
-          report(`${code}|${b.edition}`, `plan states ${b.code} ${b.edition} (${b.source}) — profile records ${via.map((a) => `${a.label} (based on ${code} ${a.base!.edition})`).join(" / ")}`, via.map((a) => a.row), b, undefined, weakWhyFor(b, code, agreeing));
+          report(`${code}|${b.edition}`, `plan states ${b.code} ${b.edition} (${b.source}) — profile records ${via.map((a) => `${a.label} (based on ${code} ${a.base!.edition})`).join(" / ")}`, via.map((a) => a.row), b, via.map((a) => a.base!.edition), undefined, weakWhyFor(b, code, agreeing));
         }
       }
     }
@@ -3471,23 +3499,31 @@ export function evaluateDesignCriteriaFindings(
       // plan wholly inside a recorded phase-in is no mismatch at all: a callout naming the date.
       // A line resting on a weak reading never blocks either (#312): when every line is weak (or
       // softened, or in grace) the finding is a callout naming the weak reading.
-      // Softening only ever lowers severity (rule 3): one line outside all three still blocks.
-      const blocks = ctx.verified && lines.some((l) => !softened.has(l) && !inGrace.has(l) && !weakLines.has(l));
+      // Softening only ever lowers severity (rule 3): one line outside all four still blocks — a mixed
+      // package (one line newer, one older) blocks on the older line, and says the newer one is not it.
+      const blocks = ctx.verified && lines.some((l) => !softened.has(l) && !inGrace.has(l) && !weakLines.has(l) && !newer.has(l));
       const graceOnly = inGrace.size === lines.length;
       const weakOnly = !graceOnly && weakLines.size > 0 && lines.every((l) => weakLines.has(l) || inGrace.has(l) || softened.has(l));
+      // Nothing blocks and at least one line is newer than the verified profile: the ask is to check
+      // the profile, not to change the plan (#597).
+      const newerOnly = !blocks && !graceOnly && !weakOnly && newer.size > 0;
       out.push({
         id: "city.code.basis-mismatch",
         severity: blocks ? "blocker" : graceOnly || weakOnly ? "callout" : "warning",
         category: "plan_set",
         title: graceOnly
           ? "Plan's code basis is the previous edition — still allowed during the phase-in"
-          : "Plan's code basis differs from the jurisdiction's adopted codes",
+          : newerOnly
+            ? "Plan cites a newer code edition than the profile on file — check the profile"
+            : "Plan's code basis differs from the jurisdiction's adopted codes",
         message: `${lines.join("; ")}. Profile: ${codeEditionsProvenance(ctx, [...comparedRows])}. ${blocks
-          ? "The adopted editions are verified — the plan's governing-codes block must state them."
+          ? `The adopted editions are verified — the plan's governing-codes block must state them.${newer.size ? " A line marked newer than the profile is not what blocks — check the profile for it." : ""}`
           : graceOnly
             ? "The jurisdiction still accepts the previous edition until the mandatory date — a submittal on or after that date must state the new edition."
             : weakOnly
               ? "A reading the extractor could not anchor surely, or one that another sheet of the package contradicts, never blocks — verify the named document before asking for a change."
+            : newerOnly
+              ? "The plan cites a newer edition than the verified profile records — usually the profile lagging an adoption. Check the profile; if the jurisdiction has adopted it, a person updates the profile through the research/verify flow. The plan needs no change for this."
             : softened.size === lines.length
               ? "The plan anticipates the upcoming edition — confirm which edition the jurisdiction will review under on the submittal date."
               : softened.size + inGrace.size === lines.length
@@ -3499,16 +3535,20 @@ export function evaluateDesignCriteriaFindings(
         // change; otherwise the ask is to confirm with the AHJ, and it is not an installer callout.
         cityFeedback: graceOnly
           ? `The plan's governing-codes block states the previous edition, which ${who} still accepts during its phase-in — submit before the mandatory date or update the block to the new edition.`
+          : newerOnly
+          ? `The plan's governing-codes block cites a newer edition than the code profile on file for ${who} — no change to the plan is asked while the profile is checked.`
           : ctx.verified
           ? `Update the plan's governing-codes block to the code editions currently adopted by ${who}.`
           : `Confirm with ${who} which code editions are currently adopted before changing the plan's governing-codes block — the editions on file are unverified.`,
-        designTeamAction: "Confirm the adopted editions with the jurisdiction; correct the plan's GOVERNING CODES block, or correct the jurisdiction's code profile if the plan is right.",
+        designTeamAction: newerOnly
+          ? "Check the jurisdiction's code profile: the plan cites a newer edition than the verified profile records. If the jurisdiction has adopted it, update the profile through the research/verify flow (a person re-verifies it); the plan needs no change."
+          : "Confirm the adopted editions with the jurisdiction; correct the plan's GOVERNING CODES block, or correct the jurisdiction's code profile if the plan is right.",
         evidenceNeeded: ["Governing-codes block on the cover sheet", ...lines].slice(0, 6),
         codeReferences: [...new Set(stated.codeBasis.map((b) => b.code))]
           .filter((code) => profileEntries.some((a) => a.code === normCodeToken(code)))
           .slice(0, 4)
           .map((code) => ctx.citationFor(code, "Adopted edition", `${code} as adopted by ${who}`)),
-        installerCallout: ctx.verified && !graceOnly && !weakOnly,
+        installerCallout: ctx.verified && !graceOnly && !weakOnly && !newerOnly,
         evidenceStatus: "verified",
         evidenceFound: stated.codeBasis.slice(0, 12).map((b) => ({
           kind: "source_excerpt" as const,
