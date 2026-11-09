@@ -23,6 +23,8 @@ import { moduleLevelElectronicsEquipment, type ModuleLevelElectronicsEvidence } 
 import { designText, mountKind, type MountKind } from "./mountKind";
 import { microEvidenceSupersededIn } from "./normalize";
 import { engineerSealStates, stateName } from "./engineerSeal";
+import { readPlanFraming } from "./planFraming";
+import { describeQuotes, describeSnowLabelIssue, planSheets, readDeckMount, readSnowLabels } from "./planAttachmentRead";
 export { designText, engineeredGroundMount, groundMountFromField, isGroundMount, mountKind, mountKindForProject, type MountKind } from "./mountKind";
 
 const oregonElectrical2023: CodeReference = {
@@ -1176,6 +1178,67 @@ export function evaluateDesignCodeFindings(
       evidenceNeeded: ["Racking/attachment detail", "Attachment spacing table", "Fastener/embedment callout", "Flashing/waterproofing note"],
       codeReferences: [roofLoadsRef],
     }));
+  }
+
+  // A DETAIL THAT EXISTS IS NOT A DETAIL THAT WAS READ (#336). The prescriptive screen passed a real
+  // set on "attachment/racking details included" while its only attachment detail fastened into the
+  // DECKING, its roof-plane schedules said TRUSS where the parse said rafter, and one sheet called the
+  // design snow load ROOF snow where another called it GROUND snow. Each reading below is the sheets'
+  // own words (planAttachmentRead.ts, planFraming.ts), on the jurisdiction's prescriptive screen only,
+  // and each is a WARNING: it tightens a pass into a question, and an unread detail is "check with an
+  // engineer", never a pass. No state, city or utility is named here; the screen is the profile's.
+  if (roofMounted && prescriptiveScreening) {
+    const sheets = planSheets(project, documentTexts);
+    // (1) FASTENERS INTO THE DECKING with no stated deck-mount basis.
+    const deck = readDeckMount(sheets);
+    if (!hasStampedEngineering && deck.basisMissing) {
+      const contradiction = deck.toFraming.length
+        ? ` It also contradicts the set's own statement that the attachments go to the framing members (${describeQuotes(deck.toFraming)}).`
+        : "";
+      const half = deck.sheathing.length ? "the listed deck-mount capacity" : deck.capacity.length ? "the sheathing type and thickness" : "the sheathing type and thickness, or the listed deck-mount capacity";
+      out.push(finding({
+        id: "city.struct.deck-mount-basis-missing",
+        severity: "warning",
+        category: "structural",
+        title: "Attachment detail fastens into the roof decking, with no deck-mount basis",
+        message: `The attachment detail fastens into the decking / sheathing, not the framing (${describeQuotes(deck.deckMount)}), and the set does not state ${half}.${contradiction} The prescriptive attachment method assumes attachment to the roof framing; a deck mount needs its own basis, or check it with an engineer.`,
+        cityFeedback: "Provide the basis for the deck-mounted attachment: the roof sheathing type and thickness, and the listed capacity of the deck mount in that sheathing (manufacturer listing or evaluation report). Otherwise attach to the roof framing members.",
+        designTeamAction: "Either revise the attachment detail to fasten into the framing members (and match the framing note), or add the sheathing type/thickness and the deck mount's listed capacity to the attachment sheet; if neither can be stated, route the structure to an engineer.",
+        evidenceNeeded: ["Attachment detail showing the fastener target (framing member or decking)", "Roof sheathing type and thickness", "Deck-mount listed capacity (manufacturer listing / evaluation report)"],
+        codeReferences: [...oregonWorksheetRefs, roofLoadsRef],
+      }));
+    }
+    // (2) FRAMING TYPE: the parse against every schedule / callout on the sheets.
+    const planFrame = readPlanFraming(sheets.map((s) => s.text).join("\n")).framingType;
+    const parsedFrame = trussFraming ? "truss" : /\brafter/i.test(framingTypeText) && !/\btruss/i.test(framingTypeText) ? "rafter" : "";
+    if (planFrame && parsedFrame && planFrame.value !== parsedFrame) {
+      out.push(finding({
+        id: "city.struct.framing-type-conflict",
+        severity: "warning",
+        category: "structural",
+        title: `Framing type: the plans say ${planFrame.value}, the parse says ${parsedFrame}`,
+        message: `Every framing schedule / callout the plans state reads ${planFrame.value === "truss" ? "TRUSS" : "RAFTER"} ("${planFrame.excerpt}"), but the project records "${framingTypeText}". The prescriptive checklist asks truss vs rafter, and the two arms ask different things (a truss: spacing; a rafter: spacing, span table and the rafter exception), so the framing row cannot be answered until the framing type is confirmed.`,
+        cityFeedback: "Confirm the roof framing type (rafters or trusses) and make the framing schedule, the structural notes and the prescriptive checklist agree.",
+        designTeamAction: `Confirm the framing type on site or with the designer and correct the project's framing type (Manual entry) to match the plans${planFrame.value === "truss" ? "" : "; a rafter roof also needs the span and the rafter exception answered"}.`,
+        evidenceNeeded: ["Framing type (rafter or truss) per roof plane", "Framing schedule matching the structural notes"],
+        codeReferences: [...oregonWorksheetRefs, roofLoadsRef],
+      }));
+    }
+    // (3) ROOF vs GROUND SNOW labels across sheets — the screen keys on GROUND snow.
+    const snowIssue = readSnowLabels(sheets, num(project, ["snow", "groundSnowLoad"]));
+    if (snowIssue) {
+      out.push(finding({
+        id: "city.struct.snow-load-label-conflict",
+        severity: "warning",
+        category: "structural",
+        title: snowIssue.kind === "conflict" ? "Snow load labelled ground snow on one sheet and roof snow on another" : "Ground snow load not stated; the plans give only a roof snow load",
+        message: `${describeSnowLabelIssue(snowIssue).replace(/^./, (c) => c.toUpperCase())}. The prescriptive screen compares the GROUND snow load (Pg) with its limit; a roof snow load is a different, smaller quantity, so the screen's snow input is not read until the labels agree. Check it with an engineer.`,
+        cityFeedback: "State the ground snow load (Pg) and, if shown, the roof snow load (pf) with their own labels, consistently on every sheet.",
+        designTeamAction: "Correct the design-criteria labels so the ground snow load and the roof snow load are each stated once and agree across the cover sheet and the structural sheets.",
+        evidenceNeeded: ["Ground snow load (Pg), labelled", "Roof snow load (pf), labelled, if stated", "Same values on every sheet"],
+        codeReferences: [...oregonWorksheetRefs, roofLoadsRef],
+      }));
+    }
   }
 
   // TILE ROOFS (roofCovering.ts is the one predicate). A tile roof is attached differently
