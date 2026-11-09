@@ -21,6 +21,7 @@ import {
 import { adoptedNecEdition, necEditionRequirements, NEC_EDITION_REQUIREMENTS } from "./necEditions";
 import { moduleLevelElectronicsEquipment, type ModuleLevelElectronicsEvidence } from "./moduleLevelElectronics";
 import { designText, mountKind, type MountKind } from "./mountKind";
+import { ballastedRackingEvidence } from "./ballastRacking";
 import { microEvidenceSupersededIn } from "./normalize";
 import { engineerSealStates, stateName } from "./engineerSeal";
 import { readPlanFraming } from "./planFraming";
@@ -191,6 +192,18 @@ function num(project: ProjectRecord, keys: string[]): number | null {
   }
   return null;
 }
+
+// WHAT A BALLAST PLAN CONTAINS (#689 3d): the layout or schedule of the ballast, its weights, the
+// manufacturer's ballast calculation, or the anchorage/seismic restraint. The bare word "ballast" is the
+// TRIGGER, never the evidence: a set that only says "ballasted racking" has said nothing about it.
+const BALLAST_PLAN_PATTERNS: RegExp[] = [
+  /ballast\w*\s*(?:layout|plan|schedule|map|calc\w*|design|weight|block\s*(?:count|weight|layout)|tray|bay)/i,
+  /\bblock\s*(?:count|weight|layout|schedule)/i,
+  /ballast\w*[^.\n]{0,60}?\b\d+(?:\.\d+)?\s*(?:lbs?|pounds|psf)\b/i,
+  /\b\d+(?:\.\d+)?\s*(?:lbs?|pounds)\s+(?:of\s+)?ballast/i,
+  /\banchorage\b/i,
+  /\bseismic\s*(?:anchor\w*|restraint|attachment|tie.?down)/i,
+];
 
 // THE DECLARED DC SIZE IS A ROUNDED FIGURE (#689 3c). A flat 0.15 kW tolerance blocked a set whose
 // 455 x 550 W modules make 250.25 kW against a declared "250 kW" (0.1%): the designer wrote the size to
@@ -1216,7 +1229,28 @@ export function evaluateDesignCodeFindings(
   // `mounting` FIELD reads "Roof mount". /rail/i was satisfied by a guardrail and /lag/i by
   // any word containing those three letters. Ask instead for what an attachment detail
   // actually contains.
-  if (roofMounted && !hasAny(all, [
+  //
+  // A BALLASTED ROOF HAS NO PENETRATIONS TO DETAIL (#689 3d). The screen asked every rooftop for lag
+  // screws and flashing, so a ballasted, non-penetrating array (the one predicate,
+  // ballastedRackingEvidence) was blocked for a detail it cannot have. On that positive evidence only,
+  // the question becomes what holds a ballasted array down: the ballast layout and weights, the roof's
+  // capacity for them, and the wind/seismic basis or anchorage. Asked as a warning when the package
+  // does not show it (Helm ruling on #689); without ballast evidence today's blocker stands unchanged.
+  const ballast = roofMounted ? ballastedRackingEvidence(project) : "";
+  if (roofMounted && ballast && !hasAny(all, BALLAST_PLAN_PATTERNS)) {
+    out.push(finding({
+      id: "city.struct.ballast-plan-missing",
+      severity: "warning",
+      category: "structural",
+      title: "Ballast / anchorage plan not shown",
+      message: `The racking is ballasted / non-penetrating (${ballast}), so a roof attachment detail does not apply, but the package does not show the ballast layout or what holds the array in place.`,
+      cityFeedback: "Provide the ballast layout and schedule (ballast count and weight per bay), the racking manufacturer's ballast calculation for wind uplift and sliding, the roof structure's capacity for the added ballast dead load, and the seismic basis for an unattached array or the anchorage that restrains it.",
+      designTeamAction: "Add the racking manufacturer's ballast layout/calculation and the roof capacity check, or the anchorage detail where the array is attached.",
+      evidenceNeeded: ["Ballast layout and schedule (count and weight per bay)", "Manufacturer ballast calculation (wind uplift, sliding)", "Roof capacity for the ballast dead load", "Seismic basis or anchorage detail"],
+      codeReferences: [roofLoadsRef],
+    }));
+  }
+  if (roofMounted && !ballast && !hasAny(all, [
     /attachment\s*(?:detail|schedule|spacing|point)/i,
     /standoff/i, /flashing/i, /flashfoot/i, /l.?foot/i,
     /lag\s*(?:screw|bolt)/i, /fastener/i, /embedment/i, /pull.?out/i,

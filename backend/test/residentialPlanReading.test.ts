@@ -130,5 +130,40 @@ check("3c: the arithmetic: the 0.15 kW floor, the declared rounding, the one-mod
   assert.equal(dcSizeAgrees(1250.4, 1250, "1,250", 0.55), true, "a thousands separator is not a decimal point");
 });
 
+// ---- 3d: a ballasted roof is asked for its ballast plan, not lag screws ----------------------------
+const BASE = '36" FIRE ACCESS PATHWAY PER IFC 1205.2. RAPID SHUTDOWN PER NEC 690.12. SITE PLAN AND ROOF PLAN. SINGLE LINE DIAGRAM.';
+const roofJob = (snap: Record<string, unknown>): ProjectRecord => project({ mounting: "Roof mount", ...snap });
+const finding = (p: ProjectRecord, id: string) => buildReviewerReport(p).findings.find((f) => f.id === id);
+check("3d: ballasted racking with no ballast plan -> a ballast/anchorage WARNING, not the attachment blocker", () => {
+  const p = roofJob({ mounting: "Roof - ballasted, low-slope", planSetExtractedText: `${BASE} LOW-SLOPE MEMBRANE ROOF.` });
+  assert.equal(finding(p, "city.struct.attachment-detail-missing"), undefined, "the lag-screw detail was demanded of a ballasted array");
+  const f = finding(p, "city.struct.ballast-plan-missing");
+  assert.equal(f?.severity, "warning", JSON.stringify(f));
+  assert.match(String(f?.message), /mounting: Roof - ballasted/);
+});
+check("3d: ballast evidence in the plan text answers the same way as the field", () => {
+  const p = roofJob({ planSetExtractedText: `${BASE} PV ARRAY ON NON-PENETRATING RACKING. MEMBRANE ROOF.` });
+  assert.equal(finding(p, "city.struct.attachment-detail-missing"), undefined);
+  assert.equal(finding(p, "city.struct.ballast-plan-missing")?.severity, "warning");
+});
+check("3d: a ballasted set that shows its ballast layout raises neither", () => {
+  const p = roofJob({ rackingSystem: "Example ballasted flat-roof racking", planSetExtractedText: `${BASE} BALLAST LAYOUT: 4 BLOCKS PER BAY AT 32 LBS EACH.` });
+  assert.equal(finding(p, "city.struct.attachment-detail-missing"), undefined);
+  assert.equal(finding(p, "city.struct.ballast-plan-missing"), undefined);
+});
+check("3d: the word 'ballasted' alone is not the plan", () => {
+  const p = roofJob({ rackingSystem: "Ballasted racking", planSetExtractedText: `${BASE} BALLASTED RACKING SYSTEM.` });
+  assert.equal(finding(p, "city.struct.ballast-plan-missing")?.severity, "warning");
+});
+check("3d: no ballast evidence -> today's attachment BLOCKER stands", () => {
+  const f = finding(roofJob({ planSetExtractedText: `${BASE} ROOF MOUNT SOLAR ARRAY.` }), "city.struct.attachment-detail-missing");
+  assert.equal(f?.severity, "blocker", JSON.stringify(f));
+  assert.equal(finding(roofJob({ planSetExtractedText: `${BASE} ROOF MOUNT SOLAR ARRAY.` }), "city.struct.ballast-plan-missing"), undefined);
+});
+check("3d: a denied ballast ('NON-BALLASTED') is not ballast evidence: the blocker stands", () => {
+  const f = finding(roofJob({ rackingSystem: "Non-ballasted rail system", planSetExtractedText: `${BASE} ROOF MOUNT SOLAR ARRAY.` }), "city.struct.attachment-detail-missing");
+  assert.equal(f?.severity, "blocker", JSON.stringify(f));
+});
+
 if (failures) { console.error(`\n${failures} check(s) failed`); process.exit(1); }
 console.log("\nresidentialPlanReading: all checks passed");
