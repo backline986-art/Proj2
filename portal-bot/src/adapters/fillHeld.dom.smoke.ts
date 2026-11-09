@@ -120,7 +120,10 @@ check("THE REGRESSION: a value the portal takes back is reported, not counted as
 });
 
 check("...and it says so in words an operator can act on", () => {
-  assert.ok(drift.some((w) => /did not hold the value/i.test(w)), JSON.stringify(drift));
+  // The report names the step and says the value did not hold. The wording after "did not hold"
+  // grew ("after commit + settle and one re-assert"), so pin the step and the verdict, not the
+  // tail of the sentence (#326).
+  assert.ok(drift.some((w) => /Total System Export/i.test(w) && /\bdid not hold\b/i.test(w)), JSON.stringify(drift));
 });
 
 // ---------------------------------------------------------------------------

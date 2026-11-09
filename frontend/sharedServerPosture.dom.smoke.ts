@@ -8,7 +8,7 @@
 //   MUST PASS (shared, sign-in on) — Import Path, Launch record session and Open recorder are not
 //             displayed; the email-watch and folder-scan controls say "on the server", with a plain
 //             note each; the record helper names this server's URL and points at the recorder token
-//             (#433); the record command's --api is this server.
+//             (#433: where to make one, RECORDER_TOKEN); the record command's --api is this server.
 //   MUST PASS (shared, sign-in off) — the same, minus the token sentence.
 //   MUST PASS (not shared) — nothing changes: no body class, every note hidden, every control
 //             displayed, placeholders and the Scan Folder label exactly as dashboard.html ships them.
@@ -164,8 +164,14 @@ async function main(): Promise<void> {
         }
         for (const id of ["recordSharedNote", "recordCmdSharedNote"]) {
           check(r.notes[id].text.includes(r.origin), `${id} names this server's URL (${r.origin})`, r.notes[id].text);
-          check(r.notes[id].text.includes("#433") === c.token && /recorder token/.test(r.notes[id].text) === c.token,
-            c.token ? `${id} points at the recorder token (#433) because sign-in is on` : `${id} asks for no token with sign-in off`, r.notes[id].text);
+          // Since #480 built recorder tokens (#433), the note no longer cites the issue ("not built
+          // yet"); it says where to make one and which variable carries it. Both must be there with
+          // sign-in on, and neither with sign-in off (#584).
+          const t = r.notes[id].text;
+          const pointsAtToken = /recorder token/.test(t) && /Team, Recorder tokens/.test(t) && /\bRECORDER_TOKEN\b/.test(t);
+          const mentionsToken = /recorder token|RECORDER_TOKEN/i.test(t);
+          check(c.token ? pointsAtToken : !mentionsToken,
+            c.token ? `${id} points at the recorder token (#433): where to make one and RECORDER_TOKEN, because sign-in is on` : `${id} asks for no token with sign-in off`, t);
         }
       } else {
         check(!r.bodyShared, "body does not carry server-shared");

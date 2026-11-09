@@ -734,6 +734,26 @@ const ROW_CONTROL_WORDS = /^(qty|quantity|(pv\s*)?array\s*quantity|module\s*quan
 const ROW_FIELD = /^(array\d+[A-Z]\w*|moduleMake|moduleModel|moduleModelCertified)$/;
 const ROW_HOOK_ROLES = new Set(Object.values(ROW_FIELD_HOOKS).map((h) => h.role));
 
+/** Is this select step's target a dropdown's CONCEALED BACKING INPUT — an <input> already on the
+ *  page that is type=hidden or display:none ITSELF (not merely inside a hidden section)? Such an
+ *  input never becomes visible, so a visibility wait on it only spends its timeout (#584). Every
+ *  read is capped; anything unreadable (not rendered yet, a browser-free test fake) answers false,
+ *  which keeps the wait. */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export async function isConcealedBackingInput(loc: any): Promise<boolean> {
+  if (!loc || typeof loc.count !== "function" || typeof loc.first !== "function") return false;
+  try {
+    if (!(await loc.count().catch(() => 0))) return false;
+    const first = loc.first();
+    if (typeof first?.evaluate !== "function") return false;
+    return (await first.evaluate((el: Element) => el.tagName === "INPUT"
+      && ((el as HTMLInputElement).type === "hidden" || getComputedStyle(el).display === "none"), undefined, { timeout: 1000 })
+      .catch(() => false)) === true;
+  } catch {
+    return false;
+  }
+}
+
 /** Which PV-array row a recorded step names, 0 when it names none: its field's array number, its
  *  section ("PV Array 3"), or a row hook css with an nth (nth 1 = row 2). */
 function recordedArrayRow(step: RecipeStep): number {
@@ -6337,7 +6357,13 @@ export class RecipeAdapter extends BasePortalAdapter {
             }
           }
         }
-        await waitForElement(scoped);
+        // A CONCEALED BACKING INPUT NEVER TURNS VISIBLE (#584). A Telerik/Kendo-style dropdown keeps
+        // its key in an <input> of its own with display:none (or type=hidden) and is driven through
+        // its face; waiting for THAT input to become visible burned the whole 10s budget on every
+        // such select step, every run. It is already on the page, so there is nothing to wait for:
+        // the select path below opens it through its face. A control not yet rendered (count 0), or
+        // hidden only by a section around it, still gets the visibility wait as before.
+        if (!(await isConcealedBackingInput(scoped))) await waitForElement(scoped);
         // WHO IS FILING (#524): never the contains match, the model rules, a certified alias or a
         // label re-resolve — this client's option exactly once, read back after the commit, or stop.
         if (filerIdentity) return this.selectFilerIdentityStep(step, scoped, v);

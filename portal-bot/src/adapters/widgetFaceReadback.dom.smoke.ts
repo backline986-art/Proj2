@@ -14,6 +14,7 @@ import http from "node:http";
 import { chromium } from "playwright";
 import type { PortalRecipe, RecipeStep } from "../../../shared/src/types";
 import { RecipeAdapter } from "./recipeAdapter";
+import { withDeadline } from "../smokeDeadline";
 
 let failures = 0;
 const check = (label: string, fn: () => void): void => {
@@ -152,7 +153,14 @@ const context = await browser.newContext();
 await context.addInitScript("globalThis.__name = globalThis.__name || function (fn) { return fn; };");
 
 type Outcome = { skipped: string[]; verified: string[]; key: string; opened: string[] };
-const run = async (name: string, rows: string, id: string, answer: string, readId = id): Promise<Outcome> => {
+// EACH CASE HAS ITS OWN DEADLINE (#584). 48 one-step cases once ran past the runner's 600s budget
+// as a bare TIMEOUT ("stops after pcEnphaseInc"): an uncapped 30s read in the combobox fill and a
+// 10s visibility wait on every concealed key input, each case 13-73s. A case is now ~2-3s; one that
+// does not settle in 45s is a named red.
+const CASE_DEADLINE_MS = 45_000;
+const run = (name: string, rows: string, id: string, answer: string, readId = id): Promise<Outcome> =>
+  withDeadline(`case ${name}`, CASE_DEADLINE_MS, runCase(name, rows, id, answer, readId));
+const runCase = async (name: string, rows: string, id: string, answer: string, readId = id): Promise<Outcome> => {
   PAGES[name] = page(rows);
   const p = await context.newPage();
   const url = `http://127.0.0.1:${port}/${name}`;

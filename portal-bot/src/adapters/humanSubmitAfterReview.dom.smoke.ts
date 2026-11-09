@@ -1,3 +1,10 @@
+// dom-smoke-timeout: 1500
+// (#584) 241 checks that take 10-13 minutes BY DESIGN: their settle waits pin a slow portal's
+// timing (C10's server answers 12 s after the click), and shortening them would weaken what they
+// pin. So the smoke declares its own budget above (scripts/run-dom-smokes.ts honours it), every
+// replay()/bed() has its own deadline, and a whole-run watchdog names the last case it started.
+// A hang is a named FAIL line here, never a bare runner TIMEOUT.
+//
 // #333 — THE PERSON'S OWN SUBMIT AT THE REVIEW PAGE GOES THROUGH; AUTOMATION'S STILL NEVER DOES.
 //
 // Live 2026-10-14 (Lincoln County, Oregon ePermitting): a replay stopped at review and, in its last
@@ -422,6 +429,7 @@ import { HUMAN_CLICK_HELD_NOTE, HUMAN_SUBMITTED_NOTE, NOT_HANDED_OVER_NOTE, PAYM
 // never a link-time SyntaxError that would take the whole smoke down.
 import * as recipeAdapterModule from "./recipeAdapter";
 import { armSubmitCapture } from "../index";
+import { smokeWatchdog, withDeadline } from "../smokeDeadline";
 
 let failures = 0;
 let total = 0;
@@ -677,6 +685,10 @@ const server2 = http.createServer((req, res) => { server.emit("request", req, re
 await new Promise<void>((r) => server2.listen(0, "127.0.0.2", () => r()));
 const base2 = `http://127.0.0.2:${(server2.address() as { port: number }).port}`;
 const browser = await chromium.launch();
+// The whole-run backstop, a minute inside the declared 1500s budget (#584).
+const watchdog = smokeWatchdog("humanSubmitAfterReview", 1440_000);
+/** One case's deadline: the longest settle here is 22 s, a case's whole replay well under a minute. */
+const CASE_DEADLINE_MS = 150_000;
 // Default headless Chromium keeps a cross-site iframe in its parent's process; with --site-per-process
 // (a headed window's default: production's) it is out of process and has a DevTools target of its own.
 // Launched only for the "o" cases, and closed right after them (memory).
@@ -731,7 +743,12 @@ async function personTouchesPage(page: Page): Promise<void> {
 // [A] The backstop, directly
 // ---------------------------------------------------------------------------------------------
 interface Bed { page: Page; bs: FilingBackstop; close: () => Promise<void> }
-async function bed(k: string, opts: { arm?: boolean; handOver?: boolean; lock?: boolean; browser?: Browser } = {}): Promise<Bed> {
+/** bed(), with its case's deadline (#584): a set-up that never settles is a named red. */
+function bed(k: string, opts: { arm?: boolean; handOver?: boolean; lock?: boolean; browser?: Browser } = {}): Promise<Bed> {
+  watchdog.at(`${k} (bed)`);
+  return withDeadline(`${k} (bed)`, CASE_DEADLINE_MS, bedCase(k, opts));
+}
+async function bedCase(k: string, opts: { arm?: boolean; handOver?: boolean; lock?: boolean; browser?: Browser } = {}): Promise<Bed> {
   const ctx = await (opts.browser ?? browser).newContext();
   const page = await ctx.newPage();
   // Installed BEFORE the page loads, as every production run's first step loads a fresh document
@@ -1420,7 +1437,13 @@ type Track = (p: Promise<unknown>) => void;
  *                  reports twice, so "as many captures as submits" can end the wait too early.
  *   afterReport    runs after stopAtReview, before the window closes (B20 calls the adapter's own
  *                  captureSubmissionConfirmation there); its value is `reported`. */
-async function replay(k: string, opts: {
+/** replay(), with its case's deadline (#584): a case that never settles fails by name, in time. */
+function replay(k: string, opts: ReplayOpts = {}): Promise<Replay> {
+  watchdog.at(k);
+  return withDeadline(k, CASE_DEADLINE_MS, replayCase(k, opts));
+}
+type ReplayOpts = NonNullable<Parameters<typeof replayCase>[1]>;
+async function replayCase(k: string, opts: {
   autoSubmit?: boolean; handOver?: boolean; at?: string; extraSteps?: RecipeStep[];
   onHandOver?: (page: Page, adapter: RecipeAdapter) => Promise<unknown>;
   onRefused?: (page: Page, adapter: RecipeAdapter) => Promise<unknown>;
@@ -2243,6 +2266,7 @@ for (const [k, n] of [["C17a", "BLD-2026-900777"], ["C17b", "BLD-2026-900778"]] 
   check(`${k} a completion with a new number and no review form is captured (${n})`, recorded(r).includes(n), cbrief(r));
 }
 
+watchdog.stop();
 await browser.close();
 server.close();
 server2.close();

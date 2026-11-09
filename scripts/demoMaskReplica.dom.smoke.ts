@@ -591,13 +591,17 @@ console.log("\n6. THE RECORDER'S --real-run, END TO END on the replica: real wri
   // recorder's own in-page audit (geometry) is the instrument that must see it boxed.
   const E2E_ELECTRICIAN = "Иван Петров";
   const db = await openDatabase();
-  const client = createClient(db, { companyName: B.installer.company, ccbLicenseNumber: "318822" });
+  // The supervising electrician is a LICENCE fact, so it lives on the CLIENT: the recipe resolver
+  // takes electricalSupervisorName only from this project's client (licenceOverlayForClient), and
+  // a project-row value is never read for it. Seeding it on the project (as this smoke once did)
+  // left the electrical contractor's required Name blank and the replica refused to advance (#584).
+  const client = createClient(db, { companyName: B.installer.company, ccbLicenseNumber: "318822", electricalSupervisorName: E2E_ELECTRICIAN });
   const project = createProject(db, {
     clientId: client.id, owner: `${B.ownerFirst} ${B.ownerLast}`, street: B.street, city: B.city, state: B.state, zip: B.zip,
     ahj: B.ahj, utility: B.utility, dcKw: B.dcKw, acKw: B.acKw, account: B.accountNumber, meter: B.meterNumber,
     homeownerEmail: B.ownerEmail, homeownerPhone: B.ownerPhone, county: B.county,
     installerCompanyName: B.installer.company, installerContactName: `${B.installer.contactFirst} ${B.installer.contactLast}`,
-    installerEmail: B.installer.email, installerPhone: B.installer.phone, electricalSupervisorName: E2E_ELECTRICIAN,
+    installerEmail: B.installer.email, installerPhone: B.installer.phone,
     moduleMake: B.moduleMake, moduleModel: B.moduleModel, moduleQty: B.moduleQty, inverterMake: B.inverterMake, inverterModel: B.inverterModel, inverterQty: B.inverterQty,
   } as never, undefined, { learningExcluded: true }).project;
   createPortalCredential(db, client.id, { portalType: "powerclerk", portalUrl: replica.entryUrl, username: B.portalUsername, password: B.portalPassword });
