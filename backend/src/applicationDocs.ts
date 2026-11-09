@@ -17,6 +17,9 @@ import { resolvePermitPath, resolveStampRequirement, permitPathCallout, hasStamp
 import { agencyListReplacesLine, issuingAgencyDocumentList, type AgencyDocumentList, type AgencyLineStatusOf } from "./applicationDocsAgency";
 import { knownPowerClerkUtility } from "./utilityIdentity";
 import { describeQuotes, planSheets, readDeckMount } from "./planAttachmentRead";
+// Functions only: the service voltage as a plan writes it ("277/480Y", "120/240V") -> line to line.
+import { serviceVoltageOf } from "./iowaPvWorksheet";
+import { serviceFieldText } from "./normalize";
 // Functions only (same cycle): the licences a document lists are licenceFor's (clients.ts).
 import { licenceJobState, stateLicenceLines } from "./clients";
 
@@ -566,6 +569,23 @@ function ampsOnly(value: string): string {
 
 function yesNo(value: string): string {
   return value ? value : "[verify]";
+}
+
+/** The service phase as the plan states it (the parser's `servicePhase`, else the legacy `phase`). */
+function servicePhase(project: ProjectRecord): string {
+  return serviceFieldText(project.parserSnapshot, "phase");
+}
+
+/** The service voltage, normalised (#689 3a): the plan's own wording plus the line-to-line voltage
+ *  serviceVoltageOf reads from it — "277/480Y" -> "277/480Y (480 V line to line)", "240V" -> "240 V".
+ *  Text that does not read as a voltage is not passed off as one: it is shown and marked [verify].
+ *  "" when the plan states none (the template prints [verify]). */
+function serviceVoltage(project: ProjectRecord): string {
+  const raw = serviceFieldText(project.parserSnapshot, "voltage");
+  if (!raw) return "";
+  const volts = serviceVoltageOf(raw);
+  if (volts == null) return `[verify] "${raw}" does not read as a service voltage`;
+  return /^\d{3}\s*(?:v|volts?)?\.?$/i.test(raw) ? `${volts} V` : `${raw} (${volts} V line to line)`;
 }
 
 // Synthesize an application profile from the AHJ PROCESS profile (the 380+ seeded
@@ -1276,7 +1296,7 @@ Equipment:
 - Racking: ${yesNo(payload(project, "racking"))}
 
 Electrical:
-- Service phase/voltage: ${yesNo(payload(project, "phase"))} / ${yesNo(payload(project, "voltage"))}
+- Service phase/voltage: ${yesNo(servicePhase(project))} / ${yesNo(serviceVoltage(project))}
 - MSP bus/main: ${yesNo(ampsOnly(payload(project, "busRating")))} A bus / ${yesNo(ampsOnly(payload(project, "mainBreaker")))} A main
 - PV breaker/OCPD: ${yesNo(payload(project, "pvBreaker"))}
 - AC disconnect: ${yesNo(payload(project, "acDiscReq"))} ${payload(project, "acDiscAmp") ? `(${payload(project, "acDiscAmp")} A)` : ""}
@@ -1358,7 +1378,7 @@ ${commonProjectBlock(project)}
 
 Electrical scope:
 - Interconnection: ${yesNo(project.interconnectionMethod)}
-- Service: ${yesNo(payload(project, "phase"))}, ${yesNo(payload(project, "voltage"))}
+- Service: ${yesNo(servicePhase(project))}, ${yesNo(serviceVoltage(project))}
 - Bus/main: ${yesNo(payload(project, "busRating"))} A / ${yesNo(payload(project, "mainBreaker"))} A
 - PV OCPD: ${yesNo(payload(project, "pvBreaker"))}
 - AC disconnect: ${yesNo(payload(project, "acDiscReq"))}
