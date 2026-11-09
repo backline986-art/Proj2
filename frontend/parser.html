@@ -4883,7 +4883,7 @@ function detectElectricalScope(plan){
   // any other utility the documents name (Eversource, Oncor, SRP…) is identified with no
   // utility-specific rules on file — generic rules apply and the words say so. Only when
   // nothing named a utility is it "not identified".
-  const utilityId = ParserReview.identifyUtility(plan.utility || getVal('utility') || '', rawText);
+  const utilityId = ParserReview.identifyUtility(plan.utility || getVal('utility') || '', rawText, plan.state || getVal('state') || '');
   const utilityNorm = utilityId.norm;
   const rule = utilityNorm === 'OTHER'
     ? { ...SCOPE_UTILITY_RULES_V40.UNKNOWN,

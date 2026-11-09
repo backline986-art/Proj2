@@ -1110,13 +1110,44 @@
     return `Plan-set installer read from the title block: ${bits.join(' | ')}`;
   }
 
+  // PacifiCorp's two brands (#602), mirroring backend/src/utilityIdentity.ts pacifiCorpBrand:
+  // Rocky Mountain Power in UT/ID/WY, Pacific Power in OR/WA/CA. One company, one identity; only
+  // the NAME the job goes by forks. The bare "RMP" means Rocky Mountain Power only in its own states.
+  const ROCKY_MOUNTAIN_POWER_STATES = ['UT', 'ID', 'WY'];
+  const PACIFICORP_STATES = ['OR', 'WA', 'CA', 'UT', 'ID', 'WY'];
+  const STATE_NAMES = { OREGON: 'OR', WASHINGTON: 'WA', CALIFORNIA: 'CA', UTAH: 'UT', IDAHO: 'ID', WYOMING: 'WY' };
+  const stateCode2 = (s) => {
+    const v = clean(s).toUpperCase().replace(/\.+$/, '');
+    return /^[A-Z]{2}$/.test(v) ? v : (STATE_NAMES[v] || '');
+  };
+  const PACIFICORP_WORDS = /PACIFICORP|PACIFIC\s*POWER|PAC\s*POWER/;
+  const ROCKY_MOUNTAIN_WORDS = /ROCKY\s*(?:MOUNTAIN|MTN\.?)\s*POWER/;
+  const RMP_WORD = /\bRMP\b/;
+
   /** PGE / PACIFICORP have operator SOP rule tables. Anything else is either IDENTIFIED
    *  (the documents name it — no rule table, generic rules apply) or UNKNOWN (nothing
-   *  named it). Those are different facts and get different words. */
-  function identifyUtility(utilityField, text) {
+   *  named it). Those are different facts and get different words.
+   *
+   *  PacifiCorp is NAMED by the job's state (#602): a Utah job typed "PacifiCorp" or "Pacific
+   *  Power" reads "Rocky Mountain Power", and "Rocky Mountain Power" / "RMP" are recognised as
+   *  PacifiCorp (pacifiCorp: true). The operator's SOP rule table (D/R + locates) is the PACIFIC
+   *  POWER one, written for Oregon: a Rocky Mountain Power job does NOT get it (Helm triage on
+   *  #602: not extended to Utah without a decision) — it is identified, with generic rules. With
+   *  no state, the name the documents use decides the brand (it never guesses Oregon for a
+   *  "Rocky Mountain Power" spelling); the bare "RMP" counts only on a UT/ID/WY job, as on the
+   *  backend. */
+  function identifyUtility(utilityField, text, projectState) {
     const u = `${utilityField || ''} ${String(text || '').slice(0, 6000)}`.toUpperCase();
     if (/\bPGE\b|PORTLAND\s+GENERAL/.test(u)) return { norm: 'PGE', name: 'PGE', identified: true, sop: true };
-    if (/PACIFICORP|PACIFIC\s+POWER|PAC\s*POWER/.test(u)) return { norm: 'PACIFICORP', name: 'Pacific Power', identified: true, sop: true };
+    const st = stateCode2(projectState);
+    const rmpSpelled = ROCKY_MOUNTAIN_WORDS.test(u) || (RMP_WORD.test(u) && ROCKY_MOUNTAIN_POWER_STATES.includes(st));
+    if (PACIFICORP_WORDS.test(u) || rmpSpelled) {
+      const brand = st && PACIFICORP_STATES.includes(st)
+        ? (ROCKY_MOUNTAIN_POWER_STATES.includes(st) ? 'Rocky Mountain Power' : 'Pacific Power')
+        : (rmpSpelled && !PACIFICORP_WORDS.test(u) ? 'Rocky Mountain Power' : 'Pacific Power');
+      if (brand === 'Rocky Mountain Power') return { norm: 'OTHER', name: brand, identified: true, sop: false, pacifiCorp: true };
+      return { norm: 'PACIFICORP', name: brand, identified: true, sop: true, pacifiCorp: true };
+    }
     const name = clean(utilityField);
     if (name && !/^(?:unknown|n\/?a|none|tbd)$/i.test(name)) return { norm: 'OTHER', name, identified: true, sop: false };
     return { norm: 'UNKNOWN', name: '', identified: false, sop: false };
