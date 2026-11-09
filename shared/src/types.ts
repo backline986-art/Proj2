@@ -4664,6 +4664,11 @@ export interface PortalRecipe {
    *  dimension. An AHJ holds ONE recipe PER DISCIPLINE: the city/structural and
    *  county/electrical filings drive different portal steps. */
   discipline?: string;
+  /** #448 — this portal's own record-number shapes ("PGENM-#####"), learned from numbers a person
+   *  confirmed after filing on THIS recipe (portal_recipes.record_number_formats_json). Shapes only,
+   *  never a number. The replay's completion read counts a number in one of them like a hand-written
+   *  portal shape (portal-bot recordNumber.ts learnRecordFormat). */
+  recordNumberShapes?: string[];
 }
 
 // ---------------------------------------------------------------------------

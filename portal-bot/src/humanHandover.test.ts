@@ -698,6 +698,7 @@ console.log("\n3. AFTER THE WATCH IS ARMED THE RUN ONLY READS (Helm Should-fix 8
     isSubmitOrPayRequestUrl: "shared/src/portalSafety.ts: a URL predicate",
     completionEvidence: "shared/src/portalSafety.ts: reads completion wording out of text",
     recordNumberCandidates: "recordNumber.ts: reads record numbers out of text",
+    learnRecordFormat: "recordNumber.ts: derives a portal's record-number shapes from ids already read (#448, pure)",
     readDraftCreated: "draftCreated.ts: reads whether the page shows a created draft (page.evaluate only)",
     smartWait: "safeAction.ts: waits for a load state",
     extractRecordNumber: "recordNumber.ts: reads a record number out of text",

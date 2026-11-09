@@ -77,7 +77,7 @@ import { checkStatusWithAdapter, runCorrectionReopen, stageWithAccela, stageWith
 import { readRecordLinkSignedIn } from "../../portal-bot/src/recordLinkRead";
 import { liveReviewSessionUnder } from "../../portal-bot/src/reviewSession";
 import { portalAutomationDisabled, resolveHeadless } from "../../portal-bot/src/browser";
-import { findCompleteRecipeForProject, findAnyRecipeForProject, resolveRecipeFieldValues, markPortalRecipeForRerecord, demoteOnReplayFailure, collectHealedSteps, persistHealedSteps, getPortalRecipe, portalEntityEvidence, recipeHostFit, findBorrowableRecipe, replayFailureBlamesRecipe, recipeStepsSignature, isNotServedRecipe, recordPortalNotServed, type BorrowedRecipeChoice } from "./portalRecipes";
+import { learnRecordNumberFormat, findCompleteRecipeForProject, findAnyRecipeForProject, resolveRecipeFieldValues, markPortalRecipeForRerecord, demoteOnReplayFailure, collectHealedSteps, persistHealedSteps, getPortalRecipe, portalEntityEvidence, recipeHostFit, findBorrowableRecipe, replayFailureBlamesRecipe, recipeStepsSignature, isNotServedRecipe, recordPortalNotServed, type BorrowedRecipeChoice } from "./portalRecipes";
 import { notServedInResult } from "../../shared/src/portalNotServed";
 import { notifyClientOfStatusChange, shouldNotifyClient } from "./clientNotifier";
 import { notifyClientOfFiling } from "./clientFilingUpdate";
@@ -11472,6 +11472,19 @@ export function captureConfirmation(
     via: "capture",
   });
   learnFromSubmissionConfirmation(db, detail.project, input);
+  // THE PORTAL'S OWN RECORD-NUMBER FORMAT (#448): a number a PERSON confirmed that was read off the
+  // page (one of this run's held candidates) teaches its shape to the recipe that filed it, so the
+  // next filing there is read without asking. A typed number teaches nothing (a typo would make a
+  // wrong number look certain), nor does the automatic read (it held no candidates). Never throws.
+  try {
+    const held = parseJson<{ candidates?: Array<{ recordNumber?: string }> }>(text(run.submit_capture_candidates) || "{}", {});
+    const confirmed = filingNumber.toUpperCase();
+    const recipeId = text(run.recipe_id);
+    if (confirmed && recipeId && (held.candidates ?? []).some((c) => String(c?.recordNumber ?? "").trim().toUpperCase() === confirmed)) {
+      const shape = learnRecordNumberFormat(db, recipeId, filingNumber, { state: projectForTarget.state, ahj: projectForTarget.ahj, utility: projectForTarget.utility });
+      if (shape) addAuditLog(db, projectId, "system", "submit capture", "portal.record_number_format_learned", { runId: portalRunId, recipeId, shape });
+    }
+  } catch { /* learning a format is a convenience; it never disturbs a confirmation */ }
   return getProjectDetail(db, projectId);
 }
 

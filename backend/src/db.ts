@@ -951,6 +951,11 @@ function migrate(db: AppDb): void {
   // recorded through the final application submit. Fee payment is never automated.
   addColumnIfMissing(db, "portal_recipes", "auto_submit_enabled", "INTEGER NOT NULL DEFAULT 0");
 
+  // #448 — this portal's own record-number shapes ("PGENM-#####"), learned from numbers a person
+  // confirmed after filing on this recipe: [{ shape, status: "seeded" | "verified", learnedAt }].
+  // Shapes only, never a number. Appended as seeded; an existing entry is never rewritten (rule 3).
+  addColumnIfMissing(db, "portal_recipes", "record_number_formats_json", "TEXT NOT NULL DEFAULT '[]'");
+
   // IMAP email source support — extend email_tracking_sources so a DB row can
   // represent a live IMAP inbox (central TML or per-client) in addition to the
   // existing mbox_path sources. Credentials stored encrypted (SESSION_ENCRYPTION_KEY).

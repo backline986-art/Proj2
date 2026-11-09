@@ -6,7 +6,7 @@ import { maskedFullPageScreenshot } from "../secretMask";
 import { stagedReviewShotsDir } from "../../../backend/src/statePaths";
 import { BasePortalAdapter, HUMAN_REVIEW_MESSAGE, ok, fail, type PortalContext, type PortalStepResult } from "../adapter";
 import { applyFormatHint } from "../formatHint";
-import { extractRecordNumber, pageConfirmsSubmission, recordNumberCandidates, RECORD_NUMBER_TIERS } from "../recordNumber";
+import { extractRecordNumber, learnRecordFormat, pageConfirmsSubmission, recordNumberCandidates, RECORD_NUMBER_TIERS, type LearnedRecordFormat } from "../recordNumber";
 import { findSiteDraft, readDraftCreated } from "../draftCreated";
 import { completeStamp, draftCreatingClickRefusals, draftLabelKey, draftStepLabel, draftTenantKey, readDraftAfterClick, type DraftCreatingStamp } from "../draftSubmitGate";
 import { armHumanCaptureOnPage, HUMAN_SUBMIT_OBSERVED_NOTE } from "../humanCapture";
@@ -1282,6 +1282,12 @@ export class RecipeAdapter extends BasePortalAdapter {
   /** The account's application list as the sign-in landed on it (openSubmission) — the "before"
    *  of the person's filing (#400). null when the page could not be read. */
   private ledgerBefore: LedgerEntry[] | null = null;
+  /** #448 — THIS PORTAL'S OWN RECORD-NUMBER FORMAT: shapes learned from the ids its account list
+   *  showed at sign-in (ledgerBefore) and the shapes a person confirmed on this recipe before
+   *  (recipe.recordNumberShapes). Never another recipe's: the format is this tenant's alone. */
+  private learnedRecordFormat(): LearnedRecordFormat {
+    return learnRecordFormat((this.ledgerBefore ?? []).map((e) => e.id), this.recipe.recordNumberShapes ?? []);
+  }
   /** The recipe step index the loop is on — the final-submit gate's "is this the terminal step". */
   private currentStepIdx = -1;
   /** #340 — WHY THE REPLAY WAS STOPPED FROM OUTSIDE (a person's cancel, or no progress for too long).
@@ -2322,7 +2328,7 @@ export class RecipeAdapter extends BasePortalAdapter {
     const read = await this.readPageForCapture().catch(() => null);
     if (!read) return { numbers: new Set(), filingControl: "", completionPhrase: null };
     return {
-      numbers: new Set(recordNumberCandidates(read.text).map((c) => c.value)),
+      numbers: new Set(recordNumberCandidates(read.text, this.learnedRecordFormat()).map((c) => c.value)),
       filingControl: read.filingControl,
       reviewPage: read.reviewPage,
       completionPhrase: completionEvidence(read.cellFree).phrase,
@@ -2347,7 +2353,7 @@ export class RecipeAdapter extends BasePortalAdapter {
     const documentPostSince = (this.handedOverBackstop?.humanRequests ?? []).some((h) => h.document && h.page === this.page && typeof h.at === "number" && h.at >= clickAt - HUMAN_CLICK_EARLY_MS && String(h.method ?? "").toUpperCase() !== "GET")
       || this.lateHumanRequests.some((h) => h.document && h.at >= clickAt - HUMAN_CLICK_EARLY_MS);
     const navigationOnly = !!doc && doc.method === "GET" && doc.at > clickAt && !documentPostSince;
-    const candidates = recordNumberCandidates(read.text);
+    const candidates = recordNumberCandidates(read.text, this.learnedRecordFormat());
     const tier = RECORD_NUMBER_TIERS.find((t) => candidates.some((c) => c.source === t));
     const inTier = tier ? candidates.filter((c) => c.source === tier).map((c) => c.value) : [];
     const fresh = inTier.filter((v) => !rr.numbers.has(v));
@@ -2496,7 +2502,9 @@ export class RecipeAdapter extends BasePortalAdapter {
           { permitNumber: "", recordLink: recordRead.recordLink || cleanRecordLink(rawUrl), stillReview: false, errorPage: false, recordRead },
         );
       }
-      const read = extractRecordNumber(bodyText);
+      // #448: this portal's own format (its account list's ids, the shapes confirmed on this recipe)
+      // counts like a hand-written portal shape; the page must still say the submission completed.
+      const read = extractRecordNumber(bodyText, this.learnedRecordFormat());
       const permitNumber = read.value;
       // Accela record suffix encodes the discipline: -STR (structural), -ELE (electrical), etc.
       const discipline = permitNumber.match(/-([A-Z]{2,4})$/)?.[1] ?? null;
