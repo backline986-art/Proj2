@@ -3225,6 +3225,18 @@ const VERSIONED_MIGRATIONS: VersionedMigration[] = [
     },
   },
   {
+    version: 66,
+    name: "state_permit_rules_fetched_at",
+    up: (db) => {
+      // WHEN A STATE RULE'S WORDS WERE READ (#663; the provenance every cited row carries, owner rule
+      // 2026-11-09 / #683). The reference seed stamps the date its citation was checked against the
+      // source; state fee research stamps the time it fetched the page the quote was found on.
+      // '' = not recorded (rows written before this column). `confidence` is free text on purpose:
+      // #683 adds an 'official' tier beside 'seeded' / 'verified' without a schema change.
+      addColumnIfMissing(db, "state_permit_rules", "fetched_at", "TEXT NOT NULL DEFAULT ''");
+    },
+  },
+  {
     version: 67,
     name: "authority_eligibility_limits",
     up: (db) => {

@@ -16,9 +16,14 @@
 //     out. Nobody looks at the flag, so an operator-fixable password reads as "the bot
 //     can't log in".
 //   - An AHJ or utility the shared knowledge base has never seen, with no recorded
-//     recipe and no known portal URL. Staging falls through to MockPortalAdapter, which
-//     reports a successful stage that never opened a browser. "Staged" is not proof of
-//     anything for a jurisdiction nobody has driven yet.
+//     recipe and no known portal URL. Stage stops there with nothing to drive (the mock
+//     adapter stands in only on an explicit MOCK_PORTAL=1 rehearsal), so the filing cannot
+//     be staged at all until a person supplies the portal.
+//   - A licence check that only knew Oregon. The named CCB / electrical columns fill ONLY
+//     Oregon jobs, so a Utah or Idaho company with every licence on file under State
+//     licences was warned "ccbLicenseNumber missing" forever (#682). Licences are now
+//     checked per state the client files in and per track, through clients.licenceFor —
+//     the one answer the submit gate, the portal overlay and the form fill all use.
 //
 // And one that destroys everything at once: SESSION_ENCRYPTION_KEY rotated without
 // running `npm run rekey:credentials`. Every decrypt then fails, and every failure is
@@ -83,7 +88,10 @@ const dbFlag = flag("db");
 process.env.AUTOPILOT_DB_PATH = dbFlag || process.env.AUTOPILOT_DB_PATH || "backend/data/autopilot.sqlite";
 
 const { openDatabase } = await import("../backend/src/db");
-const { listClients, clientStagingOverlay } = await import("../backend/src/clients");
+const { listClients, clientStagingOverlay, licenceFor, licenceJobState, parseStateLicenses } = await import("../backend/src/clients");
+const { licenceKindWords } = await import("../shared/src/licenceKinds");
+const { usStateCode } = await import("../backend/src/permitPath");
+const { filingChannel } = await import("./coverage-report");
 const { orgEntitlements } = await import("../backend/src/entitlements");
 const { listPortalCredentials } = await import("../backend/src/portalCredentials");
 const { findKnowledgeForLearn, isVerifiedKnowledge } = await import("../backend/src/knowledgeBase");
@@ -228,17 +236,15 @@ line(
 );
 
 // --- Licence and business fields -----------------------------------------------------
-// Grading, not just presence. Only ccbLicenseNumber is a hard gate that throws
-// (repository.ts:5278, HttpError 409 needsCcb). Everything else below is quiet: the
-// value feeds clientStagingOverlay, blanks are dropped so the portal field is simply
-// left empty, and the filing is rejected later rather than refused now.
-rule("CLIENT — LICENCE / BUSINESS FIELDS");
+// Grading, not just presence. Everything below is quiet: the value feeds
+// clientStagingOverlay, blanks are dropped so the portal field is simply left empty, and
+// the filing is rejected later rather than refused now. LICENCES are not here: they are
+// per state and per track, in the next section.
+rule("CLIENT — BUSINESS FIELDS");
 type Grade = "gate" | "nem" | "ilNem" | "portal" | "info";
 const FIELDS: [keyof typeof client, Grade, string][] = [
-  ["ccbLicenseNumber", "gate", "hard staging gate — prepareSubmission throws 409 needsCcb without it"],
   ["standardDisconnectMake", "nem", "utility portals require a disconnect make"],
   ["standardDisconnectModel", "nem", "utility portals require a disconnect model"],
-  ["electricalLicenseNumber", "nem", "installer electrical licence — demanded on interconnection applications"],
   ["docketNumber", "ilNem", "ICC docket number — required on every Illinois interconnection application"],
   ["legalBusinessName", "portal", "installerCompanyName (falls back to companyName)"],
   ["businessAddress", "portal", "installerStreet / installerAddress"],
@@ -251,9 +257,6 @@ const FIELDS: [keyof typeof client, Grade, string][] = [
   ["authorizedSignerName", "portal", "who signs the application — many AHJ forms require a named signer"],
   ["authorizedSignerTitle", "portal", "the signer's title, asked for beside the signature on most forms"],
   ["metroCityLicenseNumber", "info", "metro/city contractor licence — required by some AHJ forms"],
-  ["electricalSupervisorName", "info", "supervising electrician name — required by some AHJ forms"],
-  ["electricianLicenseNumber", "info", "supervising electrician's personal licence"],
-  ["ccbExpiration", "info", "contractor licence expiry"],
   ["ein", "info", "EIN — value never printed by this script"],
   ["bondCarrier", "info", "bond carrier"],
   ["insuranceCarrier", "info", "insurance carrier"],
@@ -299,11 +302,90 @@ for (const [field, grade, why] of FIELDS) {
   check(level, String(field), note, next);
 }
 
+// --- Licences, per state and per track --------------------------------------------
+// Asked of clients.licenceFor, the ONE answer every licence door uses (the submit gate, the
+// portal overlay, the form fill, the cover sheet), for each state this client's jobs are in
+// and each track they file. The named CCB / electrical / electrician columns are Oregon's and
+// fill only Oregon jobs; every other state reads Clients → State licences. Defaults start at
+// the strictest real requirement: a permit job with no contractor licence for its state is a
+// blocker (the authority rejects a blank licence slot), an Oregon job without the CCB column
+// is refused outright (prepareSubmission's needsCcb gate), and an interconnection job with no
+// electrical contractor licence for its state is a blocker (interconnection applications ask
+// for it). A building- or electrical-only slot that finds nothing is a gap: it bites only on an
+// AHJ that issues that trade's permit separately.
+rule("CLIENT — LICENCES BY STATE AND TRACK");
+interface StateScope { state: string; permit: boolean; nem: boolean; assumed: boolean }
+const stateScopes = new Map<string, StateScope>();
+for (const j of jurisdictions) {
+  const st = licenceJobState(j.state);
+  if (!st) continue;
+  const scope = stateScopes.get(st) ?? { state: st, permit: false, nem: false, assumed: false };
+  if (!blank(j.ahj)) scope.permit = true;
+  if (!blank(j.utility)) scope.nem = true;
+  stateScopes.set(st, scope);
+}
+if (jurisdictions.some((j) => !licenceJobState(j.state))) {
+  check("warn", "jurisdiction state", "a jurisdiction in scope names no state — which state's licence it takes is unknown", "Give every jurisdiction its state (\"STATE|AHJ|UTILITY\").");
+}
+if (!stateScopes.size) {
+  // No job states known yet: the state the client says issued its licence, else its home state —
+  // and say it is an assumption, so a clean result is not read as proof about other states.
+  const assumed = usStateCode(client.licenseState) || usStateCode(client.businessState);
+  if (assumed) stateScopes.set(assumed, { state: assumed, permit: true, nem: true, assumed: true });
+}
+if (!stateScopes.size) {
+  check("fail", "licence state", "no jurisdiction in scope and no licence or business state on the client — no state's licence can be checked",
+    "Set licenseState on the client, or re-run with --jurisdictions naming where this company files.");
+}
+const typedLicences = parseStateLicenses(client.stateLicenses);
+for (const scope of [...stateScopes.values()].sort((a, b) => a.state.localeCompare(b.state))) {
+  const st = scope.state;
+  const ctx = `${st}${scope.assumed ? " (assumed: no jurisdiction in scope)" : ""}`;
+  line();
+  line(`  ${ctx}`);
+  const onFile = typedLicences.filter((l) => l.state === st).map((l) => licenceKindWords(l.kind as never));
+  line(`         on file   ${st === "OR" ? `named columns (CCB ${blank(client.ccbLicenseNumber) ? "blank" : "set"})${onFile.length ? " + " : ""}` : ""}${onFile.length ? onFile.join(", ") : st === "OR" ? "" : "no State licences entry for this state"}`);
+  // Labels and kinds only, never a licence number (this script reports identifiers as set/missing);
+  // licenceFor's own reason can quote numbers, so it is summarised here, not printed.
+  const describe = (a: ReturnType<typeof licenceFor>): string => {
+    if (a.number) return `${a.label || "set"} — set`;
+    if (a.candidates.length) return `several ${st} licences could fill it (${onFile.join(", ")}) and neither the slot nor the permit says which — left blank`;
+    const notes = [
+      /placeholder/.test(a.reason) ? "a test / placeholder value is on file — correct it under Clients" : "",
+      /no recognised type/.test(a.reason) ? `a ${st} licence with no recognised type is on file — set its type under Clients` : "",
+    ].filter(Boolean);
+    return `none on file for this slot${notes.length ? ` (${notes.join("; ")})` : ""}`;
+  };
+  if (st === "OR") {
+    check(blank(client.ccbLicenseNumber) ? "fail" : "ok", "  CCB (Oregon's gate)",
+      blank(client.ccbLicenseNumber) ? "blank — an Oregon job is refused at staging (prepareSubmission 409 needsCcb)" : "set",
+      "Fill ccbLicenseNumber on the client row — every Oregon job is refused at staging without it.", ctx);
+  }
+  if (scope.permit) {
+    const generic = licenceFor(client, st, { track: "permit" });
+    check(generic.number ? "ok" : generic.candidates.length ? "warn" : "fail", "  permit: contractor slot", describe(generic),
+      generic.candidates.length
+        ? `Keep only the ${st} licence that applies under Clients → State licences, or a slot that does not name its kind cannot pick one.`
+        : `Add this company's ${st} contractor licence under Clients → State licences — a ${st} permit stages with its licence slot blank and the AHJ rejects it.`,
+      ctx);
+    for (const track of ["building", "electrical"] as const) {
+      const a = licenceFor(client, st, { track });
+      check(a.number ? "ok" : "warn", `  permit: ${track} slot`, describe(a),
+        `Add the ${st} licence a ${track} permit takes under Clients → State licences (needed where the AHJ issues the ${track} permit separately).`, ctx);
+    }
+  }
+  if (scope.nem) {
+    const ec = licenceFor(client, st, "electrical_contractor");
+    check(ec.number ? "ok" : "fail", "  NEM: electrical licence", ec.number ? describe(ec) : `${describe(ec)} — interconnection applications ask for the installer's electrical licence`,
+      `Add this company's ${st} electrical contractor licence under Clients → State licences before any ${st} interconnection filing.`, ctx);
+  }
+}
+
 // The overlay is the ground truth for what staging actually hands a portal: blanks are
-// dropped, so a missing key here IS a portal field that will be left empty.
+// dropped, so a missing key here IS a portal field that will be left empty. Asked per state
+// and track the jobs actually file (ccbLicenseNumber is "the contractor licence this filing
+// takes" — Oregon's CCB on an Oregon job, the generic-by-track licence anywhere else).
 rule("CLIENT — WHAT STAGING WOULD ACTUALLY SUPPLY (clientStagingOverlay)");
-// A job in the licence state (the named columns' state), track unknown — what a generic filing would carry.
-const overlay = clientStagingOverlay(db, client.id, "", { state: String(client.licenseState || "OR"), track: null });
 const OVERLAY_EXPECTED = [
   "installerCompanyName",
   "installerEmail",
@@ -315,18 +397,24 @@ const OVERLAY_EXPECTED = [
   "installerContactName",
   "ccbLicenseNumber",
 ];
-const overlayMissing = OVERLAY_EXPECTED.filter((k) => blank(overlay[k]));
-check(
-  overlayMissing.length ? "warn" : "ok",
-  "overlay keys supplied",
-  `${Object.keys(overlay).length} key(s); ${overlayMissing.length} core key(s) missing` +
-    (overlayMissing.length ? ` — ${overlayMissing.join(", ")}` : ""),
-  overlayMissing.length
-    ? `These portal fields will be filled blank, which is a rejected filing rather than an error: ${overlayMissing.join(", ")}.`
-    : "",
-);
+for (const scope of stateScopes.values()) {
+  for (const track of [...(scope.permit ? ["permit"] : []), ...(scope.nem ? ["nem"] : [])]) {
+    const overlay = clientStagingOverlay(db, client.id, "", { state: scope.state, track });
+    const overlayMissing = OVERLAY_EXPECTED.filter((k) => blank(overlay[k]));
+    check(
+      overlayMissing.length ? "warn" : "ok",
+      `overlay ${scope.state} ${track}`,
+      `${Object.keys(overlay).length} key(s); ${overlayMissing.length} core key(s) missing` +
+        (overlayMissing.length ? ` — ${overlayMissing.join(", ")}` : ""),
+      overlayMissing.length
+        ? `These portal fields will be filled blank on a ${scope.state} ${track} filing, which is a rejected filing rather than an error: ${overlayMissing.join(", ")}.`
+        : "",
+    );
+  }
+}
 if (anyNem) {
-  const dm = blank(overlay.disconnectMake) || blank(overlay.disconnectModel);
+  // The disconnect is the client's own default, the same in every state (the overlay copies it).
+  const dm = blank(client.standardDisconnectMake) || blank(client.standardDisconnectModel);
   check(
     dm ? "fail" : "ok",
     "disconnect make/model",
@@ -536,8 +624,14 @@ if (!probeRow) {
 // --- Knowledge coverage per jurisdiction --------------------------------------------
 // Resolved through the engine's OWN lookups, fuzzy name-alias fallback included, so this
 // reports what a real staging run would find rather than a naive key match. A jurisdiction
-// with neither a recipe nor a known portal URL is the mock trap: staging reports success
-// against MockPortalAdapter, which never opened a browser.
+// with neither a recipe nor a known portal URL cannot be staged: Stage stops with nothing to
+// drive (the mock adapter stands in only on a MOCK_PORTAL=1 rehearsal).
+//
+// NOT EVERY TRACK FILES ON A PORTAL (#682), and the authority's DATA says which — read through
+// coverage-report's filingChannel, the same records production reads: an authority a person
+// recorded as taking applications BY EMAIL (#667) needs a usable verified address, not a portal,
+// recipe or login; a utility a person verified as filed INSIDE THE AHJ PERMIT (#664) has no NEM
+// filing of its own. A seeded "email" is only a hint until a person verifies the address.
 rule("KNOWLEDGE / RECIPE COVERAGE");
 if (!jurisdictions.length) {
   check(
@@ -553,8 +647,30 @@ for (const j of jurisdictions) {
   line(`  ${label}`);
   const kb = findKnowledgeForLearn(db, { state: j.state, ahj: j.ahj, utility: j.utility });
 
+  const spec = { state: j.state, ahj: j.ahj, utility: j.utility, discipline: "", source: j.source };
+  /** The email channel's verdict for one track — true when it decided the track (skip the portal checks). */
+  const emailChannel = (ch: ReturnType<typeof filingChannel>, side: string, who: string): boolean => {
+    if (ch.kind === "email") {
+      check(
+        ch.problems.length ? "fail" : "ok",
+        `  ${side} files by email`,
+        ch.problems.length
+          ? `verified address needed — the recorded address ${ch.address} is not usable: ${ch.problems.join("; ")}`
+          : `${ch.address} (verified by ${ch.verifiedBy}${ch.verifiedAt ? `, ${ch.verifiedAt.slice(0, 10)}` : ""}) — no portal, recipe or login is used`,
+        `A named person records ${who}'s filing address again on the track card's "Filing by email" panel, from the authority's own page.`,
+        label,
+      );
+      return true;
+    }
+    if (ch.kind === "email_hint") {
+      check("warn", `  ${side} email (unverified)`, `${ch.evidence} — files by email only once a person verifies the address`,
+        `If ${who} takes applications by email, a named person records the address on the track card's "Filing by email" panel, from the authority's own page.`, label);
+    }
+    return false;
+  };
+
   // Permit side (AHJ).
-  if (!blank(j.ahj)) {
+  if (!blank(j.ahj) && !emailChannel(filingChannel(db, spec, "permit"), "permit", j.ahj)) {
     const row = kb.ahj;
     const recipe =
       findCompleteRecipeForProject(db, { scopeType: "ahj", state: j.state, ahj: j.ahj, utility: j.utility, discipline: "" }) ||
@@ -591,15 +707,26 @@ for (const j of jurisdictions) {
       check(
         "fail",
         "  permit portal URL",
-        "no recipe and no known portal URL — staging will fall through to MockPortalAdapter and report success without opening a browser",
-        `Give ${j.ahj} a real portal URL (record a draft recipe, or set permit_utility_knowledge.portal_url) before trusting any "staged" result for it.`,
+        "no recipe and no known portal URL — Stage stops with nothing to drive, so no permit can be filed here (the mock adapter stands in only on a MOCK_PORTAL=1 rehearsal)",
+        `Give ${j.ahj} a real portal URL (record a draft recipe, or set permit_utility_knowledge.portal_url), or have a person verify its filing-email address, before filing there.`,
         label,
       );
     }
   }
 
   // Utility side (NEM / interconnection).
-  if (!blank(j.utility)) {
+  const nemChannel = blank(j.utility) ? null : filingChannel(db, spec, "nem");
+  if (nemChannel?.kind === "with_permit") {
+    check(
+      blank(j.ahj) ? "fail" : "ok",
+      "  utility files with permit",
+      `"${nemChannel.name}" (verified by ${nemChannel.verifiedBy}${nemChannel.verifiedAt ? `, ${nemChannel.verifiedAt.slice(0, 10)}` : ""}) — ` +
+        (blank(j.ahj) ? "but no AHJ is named, so there is no permit application for it to ride in" : `rides in the ${j.ahj} permit application; no NEM portal, recipe or login is used`),
+      `Name the AHJ for this jurisdiction (--jurisdictions "STATE|AHJ|UTILITY").`,
+      label,
+    );
+  }
+  if (nemChannel && nemChannel.kind !== "with_permit" && !emailChannel(nemChannel, "utility", j.utility)) {
     const row = kb.utility;
     const recipe = findCompleteRecipeForProject(db, { scopeType: "utility", state: j.state, utility: j.utility, discipline: "" });
     const draft = recipe ? null : findAnyRecipeForProject(db, { scopeType: "utility", state: j.state, utility: j.utility, discipline: "" });
@@ -632,8 +759,8 @@ for (const j of jurisdictions) {
       check(
         "fail",
         "  utility portal URL",
-        "no recipe and no known portal URL — staging will fall through to MockPortalAdapter and report success without opening a browser",
-        `Give ${j.utility} a real interconnection portal URL before trusting any "staged" result for it.`,
+        "no recipe and no known portal URL — Stage stops with nothing to drive, so no interconnection can be filed here (the mock adapter stands in only on a MOCK_PORTAL=1 rehearsal)",
+        `Give ${j.utility} a real interconnection portal URL, or have a person verify its filing-email address or that it files with the permit, before filing there.`,
         label,
       );
     }

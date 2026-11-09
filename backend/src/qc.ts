@@ -723,6 +723,12 @@ export function runQcForProject(db: AppDb, projectId: string, options: QcRunOpti
       const queued = ahjInQuestion ? false : await ensurePermitProcessLookedUp(db, projectLike as never);
       const tracks = requiredTracks(projectLike);
       await ensureFeeSchedulesResearched(db, projectLike, queued || ahjInQuestion ? tracks.filter((t) => t === "nem") : tracks);
+      // THE STATE'S OWN FEE RULES (#663): the first permit job in a state with no surcharge on file
+      // queues one lookup for its statute (the quote says "not researched" until one lands).
+      if (tracks.some((t) => t !== "nem")) {
+        const { ensureStateFeeRulesResearched } = await import("./stateFeeResearch");
+        await ensureStateFeeRulesResearched(db, { id: projectId, state: String(projectLike.state ?? "") });
+      }
     })().catch(() => null);
   } catch (err) {
     logger.warn("qc", "fee-research trigger failed", { projectId, err: err instanceof Error ? err.message : String(err) });

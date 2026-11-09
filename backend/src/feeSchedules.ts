@@ -86,7 +86,9 @@ import {
 // files, under a label that names the jurisdiction.
 import { placeHistoryCacheBreakpoint, recordLlmCall, sanitizeApiKey, webSearchRequestsOf } from "./llm";
 import { routeFor } from "./modelRouting";
-import { getPermitProcessLookup, stateRulesFor } from "./permitProcess";
+import { getPermitProcessLookup } from "./permitProcess";
+import { stateSurchargeRuleFor, type StateSurchargeAnswer } from "./stateFeeRules";
+import { CURATED_AHJ_FORMS } from "./curatedAhjForms";
 import { localPermitReview, permitFeeProject, trackForFeeDiscipline } from "./feeIssuer";
 import { logger } from "./logger";
 import { agencyKind } from "./recipeReplayBinding";
@@ -1702,6 +1704,47 @@ function renderHtml(html: string, base: string, find: string, textBudget = DOC_M
   return { body, handed: uniq.length + picked.length };
 }
 
+/** THE APPLICATION FORMS RECORDED FOR THE AUTHORITY THAT PUBLISHED `sourceUrl`, for one discipline
+ *  (#668). Read from the curated forms registry (curatedAhjForms.ts: per-jurisdiction DATA), matched
+ *  by the form's own host — the same authority's site — and its form type: an electrical permit's
+ *  companion is an electrical application, a structural permit's a building application. No
+ *  jurisdiction is named here; a form recorded for a new authority is found the same way. */
+export function companionFeeFormUrls(
+  discipline: string | undefined,
+  sourceUrl: string,
+  forms: ReadonlyArray<{ formType: string; url: string; state?: string }> = CURATED_AHJ_FORMS,
+  state = "",
+): string[] {
+  const formType = discipline === "electrical" ? "electrical_application" : discipline === "structural" ? "building_application" : "";
+  const host = urlHost(sourceUrl);
+  if (!formType || !host) return [];
+  const st = clean(state).toUpperCase();
+  return [...new Set(forms
+    .filter((f) => f.formType === formType && urlHost(f.url) === host && f.url !== clean(sourceUrl) && (!st || !f.state || f.state === st))
+    .map((f) => f.url))].slice(0, 2);
+}
+
+function urlHost(u: string): string {
+  try { return new URL(clean(u)).hostname.toLowerCase(); } catch { return ""; }
+}
+
+/** Open the recorded companion forms of a finding's source, first page only (where an application
+ *  prints its fee block), each through openFeeDocument and only if not already read. Returns the
+ *  URLs it opened. `open` and `forms` are test seams. */
+export async function openCompanionFeeDocuments(
+  finding: { state: string; discipline?: string; sourceUrl: string },
+  ledger: FeeDocumentLedger,
+  seams: { open?: typeof openFeeDocument; forms?: ReadonlyArray<{ formType: string; url: string; state?: string }> } = {},
+): Promise<string[]> {
+  const opened: string[] = [];
+  for (const url of companionFeeFormUrls(finding.discipline, finding.sourceUrl, seams.forms, finding.state)) {
+    if (ledger.evidence.some((e) => e.url === url)) continue;
+    await (seams.open ?? openFeeDocument)({ url, pages: [1] }, ledger, { timeoutMs: 25_000 });
+    opened.push(url);
+  }
+  return opened;
+}
+
 /** The tool handler. Never throws: a tool that throws ends the loop, and a
  *  jurisdiction we could not retrieve is a REASON, not a crash. */
 export async function openFeeDocument(
@@ -1993,12 +2036,14 @@ export function corroborateBrackets(finding: FeeScheduleFinding, ledger: FeeDocu
     if ((surcharge || applicationSurcharge) && !feeIncludesSurcharges(`${b.label ?? ''} ${hitLine.raw}`)) {
       b.stateSurcharge = { percent: 12, quote: (surcharge || applicationSurcharge)![0], sourceUrl: b.corroboration.sourceUrl };
     }
-    // Coos County's published application supplies two surcharge rows while
-    // its separate schedule supplies the base. Require BOTH retrieved sources
-    // from the collecting authority, and the electrical discipline; this must
-    // never spread to Coos Bay's separate structural charge.
-    if (finding.discipline === 'electrical' && /^https:\/\/co\.coos\.or\.us\//i.test(b.corroboration.sourceUrl)) {
-      const formIndex = ledger.evidence.findIndex(e => e.url === 'https://co.coos.or.us/files/5bb0a81e5/electrical_permit.pdf');
+    // A published APPLICATION can supply two surcharge rows while the authority's separate schedule
+    // supplies the base (Coos County was the first). Require BOTH retrieved sources from the same
+    // authority (the schedule that corroborated this bracket, and its recorded application form for
+    // THIS discipline — companionFeeFormUrls, data, #668); a structural permit never reaches an
+    // electrical application's charges.
+    const companions = companionFeeFormUrls(finding.discipline, b.corroboration.sourceUrl);
+    if (companions.length) {
+      const formIndex = ledger.evidence.findIndex(e => companions.includes(e.url));
       const form = formIndex < 0 ? '' : String(ledger.corpus[formIndex]).replace(/\s+/g,' ');
       if (/12%\s*surcharge\s*\(?\s*\.?12\s*x\s*subtotal/i.test(form) && /Community Dev surcharge 5%/i.test(form)
         && !feeIncludesSurcharges(`${b.label ?? ''} ${hitLine.raw}`)) {
@@ -2930,9 +2975,11 @@ export const claudeFeeScheduleResearcher: FeeScheduleResearcher = async (input, 
     if (finding.found && finding.sourceUrl && !alreadyRead.has(clean(finding.sourceUrl)) && Date.now() < deadline) {
       await openFeeDocument({ url: finding.sourceUrl }, ledger, { timeoutMs: 25_000 });
     }
-    if (finding.found && finding.discipline === 'electrical' && /^https:\/\/co\.coos\.or\.us\//i.test(finding.sourceUrl)) {
-      const formUrl = 'https://co.coos.or.us/files/5bb0a81e5/electrical_permit.pdf';
-      if (!ledger.evidence.some(e => e.url === formUrl)) await openFeeDocument({url:formUrl,pages:[1]},ledger,{timeoutMs:25_000});
+    // THE AUTHORITY'S OWN APPLICATION FORM, WHERE ONE IS RECORDED (#668): some agencies print a
+    // surcharge on the application and only the base on the schedule. Which form is DATA (the
+    // curated forms registry), never a host in code — any jurisdiction with a recorded form gets it.
+    if (finding.found && Date.now() < deadline) {
+      await openCompanionFeeDocuments({ state: input.state, discipline: finding.discipline, sourceUrl: finding.sourceUrl }, ledger);
     }
     // Re-derived from retrieved bytes, and it discards anything the model may
     // have attached to its own brackets. Runs BEFORE the quote check so the
@@ -3641,7 +3688,7 @@ export function feeLinesForProject(
       : evaluateSchedule(schedule, { kw, kwSource: which, valuationUsd, valuationIsEstimate, track, permitPath, electricalReviewRequired: knownElectricalReviewRequired(project.parserSnapshot),
         // The FILING is the row asked for (a hopped city row is still the electrical
         // permit), not the collecting authority's row it hops to.
-        serviceFeeder: serviceFeederLinesFor(project, track, row.discipline) });
+        serviceFeeder: serviceFeederLinesFor(project, track, row.discipline), stateSurcharge: stateSurchargeRuleFor(db, schedule.state) });
     lines.push({
       discipline: row.discipline,
       authority: (track === "nem" ? schedule.utility : schedule.ahj) || (track === "nem" ? row.utility : row.ahj),
@@ -4276,9 +4323,10 @@ function conditionalChargeApplies(
 
 /** THE STATE'S SURCHARGE ON ONE PERMIT LINE, AND WHO HOLDS IT (#421).
  *
- *  Oregon levies a 12% surcharge on every permit fee (STATE_PERMIT_RULES.OR.surcharge, ORS
- *  455.210/455.220). A stored schedule holds it one of three ways or not at all, and the quote
- *  used to price it only in the first:
+ *  A state may levy a surcharge on every permit fee — Oregon's 12% (ORS 455.210(4) + 455.220(1)) is
+ *  the first row of state_permit_rules' "fee" family (stateFeeRules.stateSurchargeRuleFor, #663),
+ *  data, not code. A stored schedule holds it one of three ways or not at all, and the quote used
+ *  to price it only in the first:
  *    · "bracket"   — `b.stateSurcharge`, derived from a sentence in the retrieved document and
  *                    folded INTO the line's own fee (Coos County, Tigard);
  *    · "ancillary" — an unconditional percent "surcharge" charge riding this filing (the City of
@@ -4291,7 +4339,8 @@ function conditionalChargeApplies(
  *                    Portland permit bill carries "St. Sur." on BOTH permits (12% of each), and the
  *                    stored structural row held none.
  *  null off the permit track, in a state with no cited rule and nothing held, or where the
- *  printed line says its fee already includes surcharges.
+ *  printed line says its fee already includes surcharges. A state whose surcharge is NOT RESEARCHED
+ *  is null here too — never priced as zero: the quote says so (submissionFees.stateSurchargeNotice).
  *
  *  The SURCHARGE IS ON THE PERMIT, NEVER ON THE ANCILLARIES (rule 1 below) — and a services or
  *  feeders line IS a permit fee, so serviceFeederCharges reads this too. One answer for both, so
@@ -4308,13 +4357,16 @@ export function stateSurchargeFor(
   b: FeeBracket,
   track: FeeTrack,
   bracketQuote: string,
+  /** The state's surcharge record (stateFeeRules.stateSurchargeRuleFor(db, schedule.state)).
+   *  Required, not defaulted: a caller that forgot it would quietly price every state at zero. */
+  stateRule: StateSurchargeAnswer,
 ): LineStateSurcharge | null {
   if (track !== "permit") return null;
   if (b.stateSurcharge) {
     return { percent: b.stateSurcharge.percent, quote: clean(b.stateSurcharge.quote), sourceUrl: clean(b.stateSurcharge.sourceUrl), held: "bracket" };
   }
-  const rule = stateRulesFor(schedule.state).surcharge;
-  const rulePercent = rule && typeof rule.value === "number" && rule.value > 0 ? round2(rule.value * 100) : null;
+  const rule = stateRule.status === "rule" ? stateRule : null;
+  const rulePercent = rule ? rule.percent : null;
   // HELD AS A CHARGE: the same equality attachAncillaryCharges uses to refuse a double charge — a
   // surcharge at the state's percent IS the state's — and, in a state with no cited rule, a charge
   // whose own printed label names the state.
@@ -4723,7 +4775,10 @@ function serviceFeederCharges(
  *  evaluations would drift, and the boundary is the whole point of the table. */
 function evaluateSchedule(
   schedule: FeeScheduleRecord,
-  inputs: { kw: number | null; kwSource: string; valuationUsd: number | null; valuationIsEstimate?: boolean; track?: FeeTrack; permitPath?: FeePathInput; electricalReviewRequired?: boolean; serviceFeeder?: ServiceLineCounts | null },
+  inputs: { kw: number | null; kwSource: string; valuationUsd: number | null; valuationIsEstimate?: boolean; track?: FeeTrack; permitPath?: FeePathInput; electricalReviewRequired?: boolean; serviceFeeder?: ServiceLineCounts | null;
+    /** The schedule's state's surcharge record (stateFeeRules, #663) — read by the caller, which has
+     *  the db, so this evaluator stays pure. Required: forgetting it must not price a state at zero. */
+    stateSurcharge: StateSurchargeAnswer },
 ): { feeUsd: number | null; baseFeeUsd?: number; stateSurchargeUsd?: number; communitySurchargeUsd?: number; bracketLabel: string; bracketQuote: string; corroboration?: FeeBracketCorroboration; reason: string; charges?: FeeChargeBreakdown[]; fromEstimatedValuation?: boolean; modeledStateSurcharge?: ModeledStateSurcharge } {
   const miss = (reason: string) => ({ feeUsd: null, bracketLabel: "", bracketQuote: "", reason });
   const hit = (b: FeeBracket) => {
@@ -4855,7 +4910,7 @@ function evaluateSchedule(
     // line's amount — a Confirm, the printed-form cross-check, the electrical PDF's fee boxes —
     // means exactly that. It is reported on the line as `modeledStateSurcharge` (the percent, the
     // rule's citation, and the permit fees it is OF), and the QUOTE adds it (submissionFees).
-    const lineSurcharge = stateSurchargeFor(schedule, eb, inputs.track ?? "permit", bracketQuote);
+    const lineSurcharge = stateSurchargeFor(schedule, eb, inputs.track ?? "permit", bracketQuote, inputs.stateSurcharge);
     const heldSurcharge = lineSurcharge && lineSurcharge.held !== "modeled" ? lineSurcharge : null;
     const serviceCharges = serviceFeederCharges(schedule, eb, inputs, heldSurcharge);
     const pricedCharges = [
@@ -5052,7 +5107,7 @@ function lineFor(
   // Same ternary, same reason as feeLinesForProject — see the note there.
   const permitPath: FeePathInput = inputs ? inputs.permitPath : pathForProject(project, track);
   const evaluated = evaluateSchedule(schedule, { kw, kwSource: which, valuationUsd, valuationIsEstimate, track, permitPath, electricalReviewRequired: knownElectricalReviewRequired(project.parserSnapshot),
-    serviceFeeder: serviceFeederLinesFor(project, track, filing) });
+    serviceFeeder: serviceFeederLinesFor(project, track, filing), stateSurcharge: stateSurchargeRuleFor(db, schedule.state) });
   return {
     discipline: schedule.discipline,
     authority: track === "nem" ? schedule.utility : schedule.ahj,
@@ -5503,7 +5558,7 @@ interface ReceiptPart {
   modeledPercent: number;
 }
 
-function receiptParts(schedule: FeeScheduleRecord): ReceiptPart[] {
+function receiptParts(schedule: FeeScheduleRecord, stateRule: StateSurchargeAnswer): ReceiptPart[] {
   const parts: ReceiptPart[] = [];
   for (const b of schedule.brackets) {
     const baseUsd = Number(b.feeUsd);
@@ -5522,9 +5577,9 @@ function receiptParts(schedule: FeeScheduleRecord): ReceiptPart[] {
       }
     }
     // THE QUOTE'S OWN ANSWER (stateSurchargeFor), not a second reading of "does this line carry
-    // Oregon's 12%": the reconcile judges what the quote would charge, so it adds a surcharge
-    // exactly where the quote does — and nowhere the quote would not.
-    const s = stateSurchargeFor(schedule, b, schedule.track, "");
+    // the state's surcharge": the reconcile judges what the quote would charge, so it adds a
+    // surcharge exactly where the quote does — and nowhere the quote would not.
+    const s = stateSurchargeFor(schedule, b, schedule.track, "", stateRule);
     const modeledPercent = s?.held === "modeled" ? s.percent : 0;
     parts.push({ schedule, baseUsd, label: clean(b.label).slice(0, 60), heldPercents: [...held], filingFlatUsd, ownFlatUsd, modeledPercent });
   }
@@ -5594,7 +5649,7 @@ export function reconcileReceiptsWithSchedules(db: AppDb): ReceiptReconciliation
   for (const [key, rows] of groups) {
     const groupReceipts = byGroup.get(key) ?? [];
     if (!groupReceipts.length) { schedulesWithoutReceipts += rows.length; continue; }
-    const partsBySchedule = new Map(rows.map((s) => [s, receiptParts(s)] as const));
+    const partsBySchedule = new Map(rows.map((s) => [s, receiptParts(s, stateSurchargeRuleFor(db, s.state))] as const));
     const candidates: ReceiptCandidate[] = [];
     for (const [, parts] of partsBySchedule) for (const p of parts) candidates.push(...receiptCandidates([p]));
     // Combined filings: one electrical line + one structural line from distinct rows.
