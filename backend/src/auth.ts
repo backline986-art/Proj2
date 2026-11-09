@@ -322,6 +322,30 @@ export function me(db: AppDb, req: Request, res: Response): void {
   res.json({ enabled: AUTH_ENABLED, user: AUTH_ENABLED ? currentUser(db, req) : null, serverIsShared: serverIsShared(process.env) });
 }
 
+/**
+ * Is this request path an API path, judged the way the ROUTER judges it (#477)?
+ *
+ * Express routes case-insensitively (no `case sensitive routing` on this app), so `/API/projects`
+ * and `/Api/Projects/` reach the `/api/projects` handlers. Both gates used to ask
+ * `req.path.startsWith("/api/")`, which an upper-case spelling fails: requireAuth answered it like
+ * a page (302 to /login instead of 401 JSON), and entitlementGate WAVED IT THROUGH as a page, so
+ * a signed-in user of an org without the autopilot product reached autopilot routes by shouting
+ * (rule 6: the licensing gate is deny-by-default and this was a way round it).
+ *
+ * Only letter case needs bridging: on this Express (4.x) a doubled slash (`//api/x`, `/api//x`),
+ * a percent-encoded letter or slash in the prefix (`/%61pi/x`, `/api%2Fx`) and dot segments
+ * (`/./api/x`, `/x/../api/x`) route to NOTHING (404), so they cannot reach a handler past the
+ * gates; apiPathCase.test.ts pins that against the real router so an upgrade that starts
+ * normalizing them fails there first.
+ *
+ * This is the DENY side only: whether a path is gated at all. The allow-lists (public carve-outs,
+ * API-key prefixes, recorder routes, product prefixes) still compare the exact lower-case
+ * spelling, so a variant spelling of an open route is refused (fails closed) rather than opened.
+ */
+export function isApiPath(requestPath: string): boolean {
+  return /^\/api(?:\/|$)/i.test(String(requestPath || ""));
+}
+
 /** Brand images and vendored fonts a logged-out page needs. A single file name, no leading dot. */
 export const PUBLIC_STATIC_ASSET = /^\/(?:assets\/brand|vendor)\/[A-Za-z0-9_-][A-Za-z0-9._-]*$/;
 
@@ -384,7 +408,7 @@ export function requireAuth(db: AppDb) {
       return;
     }
     if (currentUser(db, req)) return next();
-    if (req.path.startsWith("/api/")) {
+    if (isApiPath(req.path)) {
       res.status(401).json({
         error: recorderToken
           ? "Not authenticated. A recorder token only reaches the portal recorder's own endpoints."
@@ -407,7 +431,9 @@ export function requireAuth(db: AppDb) {
 // ---------------------------------------------------------------------------
 export function entitlementGate(db: AppDb) {
   return (req: Request, res: Response, next: NextFunction) => {
-    if (!req.path.startsWith("/api/")) return next(); // pages handle their own redirects
+    // Pages handle their own redirects. isApiPath, not startsWith("/api/"): `/API/...` is routed to
+    // the same handlers, so it must meet the same licence check (#477).
+    if (!isApiPath(req.path)) return next();
     const org = requestOrg(db, req);
     (req as Request & { org?: OrgInfo }).org = org;
     const products = orgEntitlements(db, org.id);

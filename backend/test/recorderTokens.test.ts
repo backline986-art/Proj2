@@ -343,10 +343,9 @@ try {
       const init: RequestInit = body === undefined ? { method } : json(method, body);
       const res = await ownerRec(p, { ...init, redirect: "manual" });
       const text = await res.text();
-      // An upper-case /API/ path is not an /api/ path to the sign-in gate, so it answers the way it
-      // answers every page: a redirect to /login. Refused either way; never the handler.
-      const refused = res.status === 401 || (res.status === 302 && res.headers.get("location") === "/login");
-      assert.ok(refused, `${method} ${p}: ${res.status} ${text.slice(0, 200)}`);
+      // Every spelling here, upper-case /API/ included, is an API path to the sign-in gate (#477),
+      // so each answers 401 JSON: no principal, never the handler, never the page redirect.
+      assert.equal(res.status, 401, `${method} ${p}: ${res.status} ${text.slice(0, 200)}`);
     }
     const versionAfter = Number((await readDb(DB_PATH, (db) => db.get<{ version: number }>("SELECT version FROM portal_recipes WHERE id = ?", [recipeId])))?.version);
     assert.equal(versionAfter, versionBefore, "a denied variant spelling of the record route reset the recipe");
