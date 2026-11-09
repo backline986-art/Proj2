@@ -2234,7 +2234,7 @@ export interface EligibilityLimits {
 
 /** ONE AUTHORITY'S ELIGIBILITY RECORD (#679): a utility's customer-generation PROGRAM, or an AHJ's
  *  simplified permit PATH, with each limit cited. A row of authority_eligibility_limits (migration
- *  v66): seeded from shipped reference data or research, `verified` when a person checked it — and
+ *  v67): seeded from shipped reference data or research, `verified` when a person checked it — and
  *  then never overwritten (rule 3). Shared knowledge on purpose (no org). */
 export interface AuthorityEligibilityRecord {
   authorityKind: "utility_program" | "permit_path";
