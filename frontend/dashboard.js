@@ -7121,7 +7121,7 @@ function renderReviewerGate() {
     ? clears.slice(0, 14).map((item) => `
         <div class="kx-check ${item.severity === "callout" ? "is-warn" : ""}">
           <span class="kx-check-mark" aria-hidden="true">${item.severity === "callout" ? "!" : "✓"}</span>
-          <span class="kx-check-text">${esc(item.title)}${item.message || item.designTeamAction ? `<span class="kx-check-note">${esc([item.message, item.severity === "callout" ? item.designTeamAction : ""].filter(Boolean).join(" "))}</span>` : ""}${reviewerOverrideNoteHtml(item)}</span>
+          <span class="kx-check-text">${esc(item.title)}${item.message || item.designTeamAction ? `<span class="kx-check-note">${esc([item.message, item.severity === "callout" && item.overriddenFrom !== "blocker" ? item.designTeamAction : ""].filter(Boolean).join(" "))}</span>` : ""}${reviewerOverrideNoteHtml(item)}</span>
         </div>`).join("")
     : `<span class="kx-check-empty">The gate produced no cleared checks for this project yet — everything it looked at is on the right.</span>`;
 
