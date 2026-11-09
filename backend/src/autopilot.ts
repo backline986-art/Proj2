@@ -31,6 +31,7 @@ import { addAuditLog } from "./audit";
 import { logger } from "./logger";
 import { nowIso } from "./time";
 import { auditVisionRelaxedAtStage, getProjectDetail, rerunQc, captureConfirmation, draftDocumentGaps } from "./repository";
+import { auditOverrideRelaxedAtStage } from "./reviewerOverrides";
 import { parseJson } from "./json";
 import type { NextStep, ProjectRecord, StageDetail, SubmittalTrackType } from "../../shared/src/types";
 import { requiredTracks, SUBMITTAL_TRACK_TYPES, trackPermitTypes } from "./submittalTracks";
@@ -858,6 +859,10 @@ export async function runAutopilotApproval(
   // Approve went past a blocker only a cached vision verdict relaxed: say so in the run history (#226).
   auditVisionRelaxedAtStage(db, projectId, {
     via: "approve", runId, track: runTrack, relaxed: reviewerBlockersFor(gate.visionRelaxed, runTrack).map((b) => b.finding),
+  });
+  // …and past a blocker only a named person's override released (#640).
+  auditOverrideRelaxedAtStage(db, projectId, {
+    via: "approve", runId, track: runTrack, overridden: reviewerBlockersFor(gate.overridden, runTrack).map((b) => b.finding),
   });
   logger.info("autopilot", "Segment B — human approval authorized, attempting final submit", { project: projectId, portalRun: runId, approver: options.approverName, track: options.track ?? "permit" });
 

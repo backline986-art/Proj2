@@ -24,8 +24,11 @@
 //                rapid-shutdown-missing was a micro-inverter WARNING does not relax the string-inverter
 //                BLOCKER the same id becomes after an edit, with the same PDF on file.
 //   MUST-EXCLUDE No production module (backend/src, scripts) reaches the raw text builder, the cached
-//                fold, or a cache-only vision pass except through reviewerGateReportFor. Checked on the
-//                TypeScript syntax tree, so aliases, arrows, methods and comments cannot hide a call.
+//                fold, the blocker-override fold (#640) or a cache-only vision pass except through
+//                reviewerGateReportFor. Checked on the TypeScript syntax tree, so aliases, arrows,
+//                methods and comments cannot hide a call.
+//   The readers include "Run Reviewer Gate" (getReviewerReportWithVision), which returns the gate's
+//   own read after its pass (#640).
 //
 // Run: npx tsx backend/test/reviewerSeverityParity.test.ts
 import "./_isolate"; // FIRST: generated files land in a temp cwd, never the repo's backend/data
@@ -143,7 +146,12 @@ async function readers(id: string, raw: ReviewerReport): Promise<Record<string, 
   const html = db.get<{ details: string }>("SELECT details FROM audit_logs WHERE project_id = ? AND action = 'reviewer_report.html_opened' ORDER BY rowid DESC LIMIT 1", [id]);
   const packetBlockerCount = Number(JSON.parse(html?.details ?? "{}").blockerCount);
 
-  return { gateHolds, noticeHolds, approve, staging, reviewer, pageLoad, packetCount: [String(packetBlockerCount)] };
+  // "Run Reviewer Gate" (?vision=1). With no model key the pass is cache-only, so it buys nothing new;
+  // what it returns must be the gate's own answer (#640: it used to return the pass's report, which
+  // never saw a blocker override).
+  const vision = blockersOf(await repo.getReviewerReportWithVision(db, id));
+
+  return { gateHolds, noticeHolds, approve, staging, reviewer, pageLoad, vision, packetCount: [String(packetBlockerCount)] };
 }
 
 /** Assert every reader names `expected`; the packet audit carries the count only. */
@@ -240,6 +248,10 @@ const ALLOWED: Record<string, Record<string, number>> = {
   // the declaration and its fallback inside applyVisionToReviewerReport; repository's import and the
   // one call in reviewerGateReportFor
   applyCachedVisionVerdicts: { "reviewerVision.ts": 2, "repository.ts": 2 },
+  // A named person's blocker override (#640): the declaration; repository's import and the one call in
+  // reviewerGateReportFor. getReviewerReportWithVision returns reviewerGateReportFor's read, never a
+  // second fold of its own.
+  applyReviewerBlockerOverrides: { "reviewerOverrides.ts": 1, "repository.ts": 2 },
   // the engine itself; repository.buildReviewerReportFor (import + call); reviewPacks, the standalone
   // review product, which reviews an uploaded package, not a project's filing (import + call)
   buildReviewerReport: { "reviewerEngine.ts": 1, "repository.ts": 2, "reviewPacks.ts": 2 },

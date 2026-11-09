@@ -177,6 +177,7 @@ import { buildReviewerReport, renderReviewerReportHtml } from "./reviewerEngine"
 import type { PvWorksheetGateInput } from "./pvWorksheetGate";
 import { resolveEffectiveCodeContext, ensureCodeProfilesResearched, ownCodeProfileRow, resolvePermitPathForProject, recordApprovedDesignObservation, isStructuralPermitTrack } from "./codeProfiles";
 import { applyCachedVisionVerdicts, visionRelaxedBlockers } from "./reviewerVision";
+import { applyReviewerBlockerOverrides, auditOverrideRelaxedAtStage, overriddenBlockers } from "./reviewerOverrides";
 import { nowIso } from "./time";
 import { isHarnessAbort, looksBotBlocked } from "./runAbort";
 import { finalSubmitEnvAllows, recipeShapeProblems } from "../../shared/src/portalSafety";
@@ -273,8 +274,16 @@ export function buildReviewerReportFor(db: AppDb, project: ProjectRecord): Revie
 // verdictsWrittenBefore (#226): fold in only the verdicts cached BEFORE that instant. A final-submit
 // run reads the gate a second time this way, as of its approval, so a verdict a concurrent stage_step
 // wrote after the Approve click cannot be what lets that run's final submit through.
+//
+// A NAMED PERSON'S BLOCKER OVERRIDE (#640) is folded in here too, and only here, AFTER the vision
+// verdicts (reviewerOverrides.applyReviewerBlockerOverrides): a blocker vision did not relax, whose
+// standing override still covers this plan set and this finding's content, reads as a visible
+// callout on every path, exactly like a vision-relaxed one. verdictsWrittenBefore bounds the
+// overrides as well: only those recorded before that instant count, so an override recorded after
+// an Approve & auto-submit click cannot be what lets that run file.
 export function reviewerGateReportFor(db: AppDb, project: ProjectRecord, opts: { verdictsWrittenBefore?: string } = {}): ReviewerReport {
-  return applyCachedVisionVerdicts(db, buildReviewerReportFor(db, project), opts);
+  const withVision = applyCachedVisionVerdicts(db, buildReviewerReportFor(db, project), opts);
+  return applyReviewerBlockerOverrides(db, withVision, { recordedBefore: opts.verdictsWrittenBefore });
 }
 
 /** The audit row for a gate that let a filing through on a vision verdict (#226): staging
@@ -5461,9 +5470,17 @@ export async function getReviewerReportWithVision(db: AppDb, projectId: string):
     warningCount: enriched.findings.filter((item) => item.severity === "warning").length,
   });
   // The inner getReviewerReport already recorded the verdict of the gate as it stood. This pass can
-  // add new verdicts and change the blocker count, so the enriched report gets the last word.
-  recordReviewerGateVerdict(db, projectId, enriched);
-  return enriched;
+  // add new verdicts and change the blocker count, so the gate read AFTER the pass gets the last word.
+  //
+  // WHAT THIS RETURNS IS THE GATE ITSELF (#640): every verdict the pass produced that counts (checked)
+  // is now in the cache, so reviewerGateReportFor reads it back, and it also folds in the named
+  // blocker overrides, which the pass (starting from the text report) never sees. Returning `enriched`
+  // showed an overridden blocker as a blocker on "Run Reviewer Gate" and retracted the gate's
+  // approval over it. The only thing the read-back drops is an UNCHECKED verdict (a failed vision
+  // call), which never relaxed anything and which neither the dashboard nor the packet renders.
+  const gate = reviewerGateReportFor(db, getProjectDetail(db, projectId).project);
+  recordReviewerGateVerdict(db, projectId, gate);
+  return gate;
 }
 
 export async function getReviewerReportHtml(db: AppDb, projectId: string): Promise<string> {
@@ -8346,6 +8363,9 @@ export function automaticSubmitRefusals(
     /** Reviewer blockers this run's gate let through on a vision verdict cached AFTER the approval
      *  (#226): the approver was shown them as blockers, so such a run always stops at review. */
     relaxedSinceApproval?: string[];
+    /** Reviewer blockers this run's gate let through on a named person's override recorded AFTER the
+     *  approval (#640): the approver was shown them as blockers, so such a run always stops at review. */
+    overriddenSinceApproval?: string[];
   },
 ): string[] {
   const out: string[] = [];
@@ -8353,6 +8373,9 @@ export function automaticSubmitRefusals(
   if (input.borrowedFrom) out.push(`the recipe was learned for ${input.borrowedFrom}, not this jurisdiction — a borrowed recipe always stops at review`);
   if (input.relaxedSinceApproval?.length) {
     out.push(`a vision verdict cached after the approval relaxed ${input.relaxedSinceApproval.join(", ")} — the approver saw ${input.relaxedSinceApproval.length > 1 ? "them as blockers" : "it as a blocker"}; approve again to file`);
+  }
+  if (input.overriddenSinceApproval?.length) {
+    out.push(`a blocker override recorded after the approval released ${input.overriddenSinceApproval.join(", ")} — the approver saw ${input.overriddenSinceApproval.length > 1 ? "them as blockers" : "it as a blocker"}; approve again to file`);
   }
   const a = input.runApproval;
   const approver = a && typeof a.approver === "string" ? a.approver.trim() : "";
@@ -9381,6 +9404,8 @@ export async function prepareSubmission(
     && scopeHoldsTrack(findingHoldScope(finding), track ?? null));
   // The blockers that hold this filing only because a cached vision verdict relaxed them.
   const visionRelaxed = visionRelaxedBlockers(reviewerReport).filter((finding) => scopeHoldsTrack(findingHoldScope(finding), track ?? null));
+  // The blockers that hold this filing only because a named person overrode them (#640).
+  const overrideRelaxed = overriddenBlockers(reviewerReport).filter((finding) => scopeHoldsTrack(findingHoldScope(finding), track ?? null));
   const historicalReport = buildHistoricalFailureReport(db, projectId, null);
   const learnedHistoricalMissing = historicalReport.checklist.filter((item) => {
     const cause = historicalReport.topRejectionCauses.find((candidate) => candidate.signature === item.sourceCauseSignature);
@@ -9403,16 +9428,28 @@ export async function prepareSubmission(
   // blocker, so this run stages like an ordinary run and stops at review
   // (automaticSubmitRefusals.relaxedSinceApproval). Only a claimed approval with something relaxed pays
   // for the second read; it makes no model call.
-  const relaxedSinceApproval = claimedApproval && visionRelaxed.length > 0
+  //
+  // A NAMED PERSON'S OVERRIDE IS READ THE SAME WAY (#640): the as-approved read counts only overrides
+  // recorded before the approval, and a blocker an override releases now but nothing released then
+  // is named separately (overriddenSinceApproval). "Released then" is either fold: the approver saw a
+  // callout whichever one released it.
+  const { relaxedSinceApproval, overriddenSinceApproval } = claimedApproval && (visionRelaxed.length > 0 || overrideRelaxed.length > 0)
     ? (() => {
       const asApproved = reviewerGateReportFor(db, detail.project, { verdictsWrittenBefore: claimedApproval.createdAt || "" });
-      const relaxedThen = new Set(visionRelaxedBlockers(asApproved).map((finding) => finding.id));
-      return visionRelaxed.map((finding) => finding.id).filter((findingId) => !relaxedThen.has(findingId));
+      const relaxedThen = new Set([...visionRelaxedBlockers(asApproved), ...overriddenBlockers(asApproved)].map((finding) => finding.id));
+      return {
+        relaxedSinceApproval: visionRelaxed.map((finding) => finding.id).filter((findingId) => !relaxedThen.has(findingId)),
+        overriddenSinceApproval: overrideRelaxed.map((finding) => finding.id).filter((findingId) => !relaxedThen.has(findingId)),
+      };
     })()
-    : [];
+    : { relaxedSinceApproval: [] as string[], overriddenSinceApproval: [] as string[] };
   auditVisionRelaxedAtStage(db, projectId, {
     via: "stage", runId, track: track ?? null, relaxed: visionRelaxed,
     writtenAfterApproval: claimedApproval ? relaxedSinceApproval : undefined,
+  });
+  auditOverrideRelaxedAtStage(db, projectId, {
+    via: "stage", runId, track: track ?? null, overridden: overrideRelaxed,
+    recordedAfterApproval: claimedApproval ? overriddenSinceApproval : undefined,
   });
 
   // DOCUMENT-PRESENCE GATE: never stage a submittal that is missing a required file.
@@ -9713,7 +9750,7 @@ export async function prepareSubmission(
   // recipe, unchanged, and refuses: the resumed run stops in front of step 5's Submit for a person.
   const gateRecipeId = nemDraft ? null : (recipe?.id ?? null);
   const submitRefusals = wantsFinalSubmit
-    ? automaticSubmitRefusals(db, { recipeId: gateRecipeId, runApproval, runId, borrowedFrom: borrowed?.learnedFor ?? null, relaxedSinceApproval })
+    ? automaticSubmitRefusals(db, { recipeId: gateRecipeId, runApproval, runId, borrowedFrom: borrowed?.learnedFor ?? null, relaxedSinceApproval, overriddenSinceApproval })
     : [];
   const resolvedAutoSubmit = wantsFinalSubmit && submitRefusals.length === 0;
   if (wantsFinalSubmit && !resolvedAutoSubmit) {

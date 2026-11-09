@@ -3402,6 +3402,47 @@ app.post("/api/projects/:id/structural-letter/withdraw", asyncHandler(async (req
   res.json({ outcome, structuralLetter: structuralLetterState(db, detail.project.id) });
 }));
 
+// A NAMED PERSON OVERRIDES ONE REVIEWER BLOCKER ON ONE PROJECT, WITH A REASON (#640; owner request
+// 2026-11-09). The escape hatch past a reviewer blocker; defaults stay strict (reviewerOverrides.ts).
+// Any signed-in account may (every role is staff: superadmin / admin / operator, auth.ts). WHO comes
+// from the session when sign-in is on, never the body; with it off it is the typed name, and a
+// placeholder is refused (feeConfirm.isConfirmingPerson) — the structuralLetterPerson rule, own
+// wording. A non-empty reason is required. city.struct.stamped-engineering-missing is refused with
+// 409 naming its own door (/structural-letter/confirm). The finding must be a blocker on the gate as
+// it stands, else 409. Under /api/projects/:id, so the tenant scope guard answers 404 for another
+// org's project (rule 6). The override is folded into the gate by reviewerGateReportFor alone.
+function reviewerOverridePerson(
+  req: Request, typed: unknown, isConfirmingPerson: (n: string) => boolean, act: "override" | "withdraw",
+): { name: string; userId: string } {
+  const what = act === "override" ? "override a reviewer blocker" : "withdraw a reviewer-blocker override";
+  const user = currentUser(db, req);
+  if (AUTH_ENABLED && !user) throw new HttpError(401, `Sign in to ${what}.`);
+  // A signed-in account whose display name is a role ("Admin") is recorded by its email.
+  const name = AUTH_ENABLED
+    ? String((user?.name && isConfirmingPerson(user.name) ? user.name : user?.email) || "").trim()
+    : String(typed || "").trim();
+  if (!isConfirmingPerson(name)) throw new HttpError(400, `A named person must ${what} — type your name.`);
+  return { name, userId: user?.id ?? "" };
+}
+app.post("/api/projects/:id/reviewer-blockers/:findingId/override", asyncHandler(async (req, res) => {
+  const { isConfirmingPerson } = await import("./feeConfirm");
+  const { overrideReviewerBlocker } = await import("./reviewerOverrides");
+  const detail = getProjectDetail(db, String(req.params.id));
+  const who = reviewerOverridePerson(req, req.body?.overriddenBy, isConfirmingPerson, "override");
+  const outcome = await overrideReviewerBlocker(db, detail.project.id, String(req.params.findingId), {
+    reason: String(req.body?.reason ?? ""), by: who.name, userId: who.userId,
+  });
+  res.json({ outcome, reviewerReport: getReviewerReport(db, detail.project.id) });
+}));
+app.post("/api/projects/:id/reviewer-blockers/:findingId/withdraw", asyncHandler(async (req, res) => {
+  const { isConfirmingPerson } = await import("./feeConfirm");
+  const { withdrawReviewerBlockerOverride } = await import("./reviewerOverrides");
+  const detail = getProjectDetail(db, String(req.params.id));
+  const who = reviewerOverridePerson(req, req.body?.withdrawnBy ?? req.body?.overriddenBy, isConfirmingPerson, "withdraw");
+  const outcome = withdrawReviewerBlockerOverride(db, detail.project.id, String(req.params.findingId), who.name, who.userId);
+  res.json({ outcome, reviewerReport: getReviewerReport(db, detail.project.id) });
+}));
+
 // ---------------------------------------------------------------------------
 // HUMAN-VERIFIED INFORMATION PAGES (#344, owner ruling 2026-10-15: option B). A learn the network
 // backstop held at an information page (its Next held by rule 4b, nothing entered) records the page

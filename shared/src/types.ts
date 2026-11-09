@@ -2507,6 +2507,14 @@ export interface ReviewerVisionVerdict {
   question?: string;
 }
 
+/** One person's override of one reviewer blocker on one project (#640), as the gate shows it. */
+export interface ReviewerBlockerOverrideView {
+  id: string;
+  by: string;
+  at: string;
+  reason: string;
+}
+
 export interface ReviewerFinding {
   id: string;
   severity: "blocker" | "warning" | "callout" | "pass";
@@ -2525,6 +2533,15 @@ export interface ReviewerFinding {
   /** The text severity a vision verdict relaxed to a callout (reviewerVision.applyVerdict); absent
    *  when vision relaxed nothing. "blocker" = staging and Approve proceed past it on a vision read. */
   visionRelaxedFrom?: "warning" | "blocker";
+  /** Set when a NAMED PERSON's override released this blocker on this project (#640;
+   *  reviewerOverrides.applyReviewerBlockerOverrides): the finding reads as a callout, stays visible,
+   *  and staging and Approve proceed past it. Absent when no standing override applies. */
+  overriddenFrom?: "blocker";
+  /** Who released it, when, and why (set with overriddenFrom). */
+  override?: ReviewerBlockerOverrideView;
+  /** On a finding that still BLOCKS although an override was recorded for it: that override no longer
+   *  covers what is on file (the plan set was replaced, or the finding itself changed), and why. */
+  overrideVoided?: ReviewerBlockerOverrideView & { why: string };
   /** On city.fire.pathway-unmeasured only: what the roof plan must show, so the vision pass can
    *  compare a measured sheet against the same requirement the text rule used. */
   roofPlanRequired?: RoofPlanRequiredDimension[];

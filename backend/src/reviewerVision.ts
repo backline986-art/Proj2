@@ -56,6 +56,15 @@ function sourceSig(pdfPath: string): string {
   }
 }
 
+/** WHICH PLAN SET THE GATE JUDGES, AS ONE ANSWER: the PDF findPlanSetPdf picks and its signature
+ *  (path, mtime, size), the key the vision cache is stored under. A blocker override (#640) is bound
+ *  to it too, so "the plan set the person saw" and "the plan set a verdict answered" never disagree.
+ *  "none" when no plan-set PDF is on file. */
+export function planSetIdentity(db: AppDb, projectId: string): string {
+  const pdfPath = findPlanSetPdf(db, projectId);
+  return pdfPath ? sourceSig(pdfPath) : "none";
+}
+
 function readCache(db: AppDb, projectId: string, findingId: string, sig: string, writtenBefore?: string): ReviewerVisionVerdict | null {
   // writtenBefore: a verdict cached at or after that instant is no verdict (the gate as of an
   // approval, #226). A verdict re-written since then carries the new created_at and is excluded too.
