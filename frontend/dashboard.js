@@ -7126,7 +7126,8 @@ function findingPlanSetLine(finding) {
 // A void override keeps a Withdraw button, so a stale row can be cleared instead of waiting to apply
 // again. The Override button carries the blocker's overrideSeenAs: the server refuses (409) when the
 // finding or the plan set changed between this page and the click.
-const REVIEWER_OVERRIDE_OWN_DOOR = new Set(["city.struct.stamped-engineering-missing", "city.struct.tile-stamped-engineering-missing"]);
+// Which blockers cannot be overridden is the SERVER's answer (finding.overrideRefusal, from
+// reviewerOverrides.NOT_OVERRIDABLE): the dashboard keeps no list of its own.
 function reviewerOverrideControlHtml(finding, authOn) {
   if (!finding || finding.severity !== "blocker") return "";
   const v = finding.overrideVoided;
@@ -7134,8 +7135,8 @@ function reviewerOverrideControlHtml(finding, authOn) {
     ? `<p class="muted kx-override-void">The override by ${esc(v.by)} on ${esc(String(v.at || "").slice(0, 10))} (${esc(v.reason)}) no longer applies: ${esc(v.why)}.
       <button type="button" class="secondary" data-reviewer-override-action="withdraw" data-finding-id="${esc(finding.id)}">Withdraw</button></p>`
     : "";
-  if (REVIEWER_OVERRIDE_OWN_DOOR.has(finding.id)) {
-    return `${voidedNote}<p class="muted">This hold is released only by confirming the engineer's sealed letter (the structural-letter card on the submit gate); it cannot be overridden.</p>`;
+  if (finding.overrideRefusal) {
+    return `${voidedNote}<p class="muted">${esc(finding.overrideRefusal)}</p>`;
   }
   return `${voidedNote}<details class="kx-override" data-reviewer-override-form="${esc(finding.id)}">
       <summary>Override…</summary>

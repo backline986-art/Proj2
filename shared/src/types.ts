@@ -2579,6 +2579,10 @@ export interface ReviewerFinding {
    *  dashboard echoes it with an override, and the writer refuses 409 when the finding or the plan set
    *  changed between the page and the click, so an override binds to what the person looked at. */
   overrideSeenAs?: string;
+  /** On a blocker NO override may release (reviewerOverrides.NOT_OVERRIDABLE, owner ruling 1 on #640):
+   *  the door that does release it. The dashboard shows this instead of an Override control, so
+   *  "which blockers can be overridden" has one answer, the server's. */
+  overrideRefusal?: string;
   /** On city.fire.pathway-unmeasured only: what the roof plan must show, so the vision pass can
    *  compare a measured sheet against the same requirement the text rule used. */
   roofPlanRequired?: RoofPlanRequiredDimension[];

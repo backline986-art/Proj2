@@ -162,7 +162,14 @@ export function overrideLine(o: Pick<ReviewerBlockerOverrideView, "by" | "at" | 
  * and hashes to the same content, and it is not in NOT_OVERRIDABLE.
  */
 export function applyReviewerBlockerOverrides(db: AppDb, report: ReviewerReport, opts: { recordedBefore?: string } = {}): ReviewerReport {
-  if (!report.findings.some((finding) => finding.severity === "blocker" && !NOT_OVERRIDABLE.has(finding.id))) return report;
+  // A blocker no override may release carries the door that does (overrideRefusal): the dashboard
+  // reads it rather than keeping its own list, so the two can never disagree.
+  const refused = (finding: ReviewerFinding): ReviewerFinding => ({ ...finding, overrideRefusal: NOT_OVERRIDABLE.get(finding.id) });
+  if (!report.findings.some((finding) => finding.severity === "blocker" && !NOT_OVERRIDABLE.has(finding.id))) {
+    if (!report.findings.some((finding) => finding.severity === "blocker" && NOT_OVERRIDABLE.has(finding.id))) return report;
+    const findings = report.findings.map((finding) => (finding.severity === "blocker" && NOT_OVERRIDABLE.has(finding.id) ? refused(finding) : finding));
+    return { ...report, findings, installerCallouts: findings.filter((item) => item.installerCallout) };
+  }
   const standing = standingOverrides(db, report.projectId, opts.recordedBefore);
   let planSet: string | null = null;
   const currentPlanSet = (): string => (planSet ??= planSetIdentity(db, report.projectId));
@@ -170,7 +177,8 @@ export function applyReviewerBlockerOverrides(db: AppDb, report: ReviewerReport,
   const stillBlocking = (finding: ReviewerFinding, fingerprint: string, extra: Partial<ReviewerFinding> = {}): ReviewerFinding =>
     ({ ...finding, ...extra, overrideSeenAs: seenAsToken(fingerprint, currentPlanSet()) });
   const findings = report.findings.map((finding): ReviewerFinding => {
-    if (finding.severity !== "blocker" || NOT_OVERRIDABLE.has(finding.id)) return finding;
+    if (finding.severity !== "blocker") return finding;
+    if (NOT_OVERRIDABLE.has(finding.id)) return refused(finding);
     const fingerprint = findingFingerprint(finding);
     const row = standing.get(finding.id);
     if (!row) return stillBlocking(finding, fingerprint);

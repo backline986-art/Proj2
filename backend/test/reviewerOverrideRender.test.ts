@@ -31,9 +31,9 @@ const cut = (name: string): string => {
   }
   return dashboard.slice(m.index, end);
 };
-const ownDoor = /^const REVIEWER_OVERRIDE_OWN_DOOR = .*;$/m.exec(dashboard)?.[0];
-if (!ownDoor) throw new Error("dashboard.js: could not find REVIEWER_OVERRIDE_OWN_DOOR");
-const lib = new Function(`${cut("esc")}\n${ownDoor}\n${cut("reviewerOverrideControlHtml")}\n${cut("reviewerOverrideNoteHtml")}\nreturn { control: reviewerOverrideControlHtml, note: reviewerOverrideNoteHtml };`)() as {
+// The dashboard keeps no list of non-overridable findings: it reads the server's overrideRefusal.
+if (/REVIEWER_OVERRIDE_OWN_DOOR/.test(dashboard)) throw new Error("dashboard.js grew its own non-overridable list again; read finding.overrideRefusal");
+const lib = new Function(`${cut("esc")}\n${cut("reviewerOverrideControlHtml")}\n${cut("reviewerOverrideNoteHtml")}\nreturn { control: reviewerOverrideControlHtml, note: reviewerOverrideNoteHtml };`)() as {
   control: (finding: unknown, authOn: boolean) => string;
   note: (finding: unknown) => string;
 };
@@ -51,11 +51,14 @@ const tokened = lib.control({ ...blocker, overrideSeenAs: "abc123" }, false);
 check("(a4) the Override button carries the blocker's page token (data-seen-as), which the action sends",
   /<button[^>]*data-reviewer-override-action="override"[^>]*data-seen-as="abc123"/.test(tokened)
   && /seenAs: btn\.getAttribute\("data-seen-as"\)/.test(cut("reviewerOverrideAction")), tokened);
-for (const fid of ["city.struct.stamped-engineering-missing", "city.struct.tile-stamped-engineering-missing"]) {
-  const structural = lib.control({ id: fid, severity: "blocker" }, false);
+const { NOT_OVERRIDABLE } = await import("../src/reviewerOverrides");
+for (const [fid, door] of NOT_OVERRIDABLE) {
+  // The finding as the gate serves it: the fold attaches the server's refusal (reviewerBlockerOverride (e) pins that).
+  const structural = lib.control({ id: fid, severity: "blocker", overrideRefusal: door }, false);
   check(`(b) ${fid} gets no Override button, and names its own door`,
     !structural.includes("data-reviewer-override-action") && /structural-letter card/.test(structural), structural);
 }
+check("(b2) the refusal text is escaped", !lib.control({ id: "x", severity: "blocker", overrideRefusal: "<img src=x onerror=1>" }, false).includes("<img"));
 
 const overridden = { id: RSD, severity: "callout", overriddenFrom: "blocker", override: { id: "o1", by: "Jane Example", at: "2026-11-09T12:00:00.000Z", reason: "Engineer confirmed on E-2" } };
 const note = lib.note(overridden);

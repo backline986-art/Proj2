@@ -466,6 +466,9 @@ for (const [fid, over] of STRUCT_LIVE) {
     const live = findingIn(gate(projectId), fid);
     assert.equal(live?.severity, "blocker", `setup: ${fid} is not a live blocker (${live?.severity ?? "absent"}) — this proves nothing`);
     assert.equal(live?.overrideSeenAs, undefined, "the gate offers an override token on a hold no override may release");
+    // The server's own answer, which the dashboard renders instead of an Override control (one list).
+    assert.equal(live?.overrideRefusal, ov.NOT_OVERRIDABLE.get(fid), "the gate does not carry the hold's own door");
+    assert.match(live?.overrideRefusal ?? "", /structural-letter card/);
     const before = db.get<{ n: number }>("SELECT COUNT(*) AS n FROM reviewer_blocker_overrides")!.n;
     const refused = await statusOf(override(projectId, fid));
     assert.equal(refused?.status, 409);
