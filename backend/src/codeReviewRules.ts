@@ -24,7 +24,8 @@ import { designText, mountKind, type MountKind } from "./mountKind";
 import { microEvidenceSupersededIn } from "./normalize";
 import { engineerSealStates, stateName } from "./engineerSeal";
 import { readPlanFraming } from "./planFraming";
-import { describeQuotes, describeSnowLabelIssue, planSheets, readDeckMount, readSnowLabels } from "./planAttachmentRead";
+import { describeQuotes, describeSnowLabelIssue, planSheets, readDeckMount, readSnowLabels, type PlanSheet, type SheetQuote } from "./planAttachmentRead";
+import { readNecEditionCitations, readOtherMethodItems, readRapidShutdownStatements, readServiceLocationConflicts, readSupplySideDisconnectRating } from "./planConsistency";
 export { designText, engineeredGroundMount, groundMountFromField, isGroundMount, mountKind, mountKindForProject, type MountKind } from "./mountKind";
 
 const oregonElectrical2023: CodeReference = {
@@ -1900,6 +1901,26 @@ export function evaluateDesignCodeFindings(
   out.push(...sizingFindings);
   out.push(...wireTableFindings);
 
+  // DOES THE SET AGREE WITH ITSELF? (#338) A reviewer reads the sheets against each other: the other
+  // interconnection method's boilerplate, the POI called interior on one sheet and exterior on another,
+  // labels citing an older NEC than the adopted one, rapid shutdown claimed and denied, a supply-side
+  // disconnect never called suitable for service equipment. Every one is a CALLOUT naming each sheet:
+  // it tells the designer what to make agree, and a fact a reader did not find yields nothing. The
+  // interconnection method is the classifier's above (saysSupplySide / loadSideBranch), never a second
+  // reading of it. Cut sheets are not read: a datasheet is not the designer's sheet.
+  out.push(...planConsistencyFindings({
+    sheets: planSheets(project, documentTexts.filter((d) => !SPEC_SHEET_SOURCE.test(d.label))),
+    method: saysSupplySide && !saysLoadSide ? "supply" : loadSideBranch ? "load" : null,
+    necAdopted,
+    rsdApplies,
+    editionRowKnown: nec != null,
+    supplySideRef,
+    loadSideRef,
+    rapidShutdownRef,
+    electricalRef,
+    cite,
+  }));
+
   const moduleFields = [str(project, "moduleMake"), str(project, "moduleModel"), str(project, "moduleWattage"), str(project, "moduleQty")].filter(Boolean);
   const inverterFields = [str(project, "invModel"), str(project, "pvMicroModel"), str(project, "inverterModel"), str(project, "invQty"), str(project, "pvMicroQty")].filter(Boolean);
   const hasModuleSpec = hasAny(all, [/module spec/i, /module data/i, ...MODULE_LISTING_PATTERNS]);
@@ -1991,3 +2012,199 @@ export function evaluateDesignCodeFindings(
 
   return out;
 }
+
+// ---------------------------------------------------------------------------------------------
+// THE PLAN-SET CONSISTENCY PASS (#338). The readers are planConsistency.ts (sheets' own words, one
+// quote per sheet and phrase); this is only the wording and the citations. All callouts: each names the
+// sheets so the designer can fix the set in one pass, and none can hold a filing.
+// ---------------------------------------------------------------------------------------------
+
+const NEC_SOURCE_URL = "https://www.nfpa.org/codes-and-standards/nfpa-70-standard-development/70";
+const serviceDisconnectLocation: CodeReference = {
+  code: "NEC",
+  section: "230.70(A)(1)",
+  title: "Service disconnecting means location",
+  adoptionScope: "Every service; verify the locally adopted NEC edition.",
+  sourceUrl: NEC_SOURCE_URL,
+  note: "The service disconnecting means is outside the building or inside nearest the point of entrance of the service conductors, so the plans must say which.",
+};
+const supplySideServiceEquipment: CodeReference = {
+  code: "NEC",
+  section: "230.82(6)",
+  title: "Equipment connected to the supply side of the service disconnect",
+  adoptionScope: "PV connected on the supply side of the service disconnecting means.",
+  sourceUrl: NEC_SOURCE_URL,
+  note: "PV ahead of the service disconnect is permitted with a disconnecting means suitable for use as service equipment and overcurrent protection per Article 230.",
+};
+const rapidShutdownInitiation: CodeReference = {
+  code: "NEC",
+  section: "690.12(C)",
+  title: "Rapid shutdown initiation device",
+  adoptionScope: "NEC 2017 and later; the strictest edition's requirement where the adopted edition is not on file.",
+  sourceUrl: NEC_SOURCE_URL,
+  note: "For one- and two-family dwellings the initiation device is at a readily accessible location outside the building.",
+};
+
+function sheetEvidence(q: SheetQuote, label: string, note: string): ReviewerFindingEvidence {
+  return { kind: "source_excerpt", label, source: q.sheet, excerpt: q.excerpt, confidence: "high", pageHint: q.sheet, screenshotPath: "", verifier: "rule_engine", note };
+}
+const sheetsOf = (qs: SheetQuote[]): string => [...new Set(qs.map((q) => q.sheet))].join(", ");
+const quoted = (qs: SheetQuote[], max = 4): string =>
+  `${qs.slice(0, max).map((q) => `${q.sheet}: "${q.excerpt}"`).join("; ")}${qs.length > max ? ` (+${qs.length - max} more)` : ""}`;
+
+function planConsistencyFindings(input: {
+  sheets: PlanSheet[];
+  /** The gate's own classification: supply side only, its load-side branch, or neither (no reading). */
+  method: "supply" | "load" | null;
+  necAdopted: number | null;
+  rsdApplies: boolean;
+  /** The adopted edition has a row in the edition table, so the edition-evidence rule owns 690.12(C). */
+  editionRowKnown: boolean;
+  supplySideRef: CodeReference;
+  loadSideRef: CodeReference;
+  rapidShutdownRef: CodeReference;
+  electricalRef: CodeReference;
+  cite: (code: string, fallback: CodeReference) => CodeReference;
+}): ReviewerFinding[] {
+  const { sheets, method, cite } = input;
+  if (!sheets.length) return [];
+  const out: ReviewerFinding[] = [];
+
+  // (1) THE OTHER METHOD'S BOILERPLATE.
+  if (method) {
+    const items = readOtherMethodItems(sheets, method);
+    if (items.length) {
+      const supply = method === "supply";
+      const listed = items.slice(0, 8).map((i) => `${i.item} (${i.quote.sheet}: "${i.quote.excerpt}")`).join("; ") + (items.length > 8 ? ` (+${items.length - 8} more)` : "");
+      out.push({
+        ...finding({
+          id: "city.elec.interconnection-boilerplate-mismatch",
+          severity: "callout",
+          category: "electrical",
+          title: supply ? "Load-side notes and labels on a supply-side (line-side) connection" : "Supply-side notes on a load-side connection",
+          message: `The interconnection is ${supply ? "a supply-side (line-side) connection" : "a load-side connection"}, but the sheets also carry ${supply ? "load-side" : "supply-side"} items: ${listed}. A reviewer reads these as the set describing the other method.`,
+          cityFeedback: supply
+            ? "Remove the load-side (busbar / back-fed breaker) notes and labels from the supply-side design, or state the interconnection method once and show the calculation and labels that match it."
+            : "Remove the supply-side (line-side tap) notes from the load-side design, or state the interconnection method once and show the calculation and labels that match it.",
+          designTeamAction: `Delete or correct each listed note and label (${sheetsOf(items.map((i) => i.quote))}) so every sheet describes the same interconnection method.`,
+          evidenceNeeded: items.slice(0, 8).map((i) => `${i.quote.sheet}: ${i.item}`),
+          codeReferences: supply ? [input.supplySideRef, input.loadSideRef] : [input.loadSideRef, input.supplySideRef],
+        }),
+        evidenceStatus: "verified",
+        evidenceFound: items.slice(0, 8).map((i) => sheetEvidence(i.quote, `Other-method item: ${i.item}`, `Read on ${i.quote.sheet}; the job is classified ${method} side.`)),
+      });
+    }
+  }
+
+  // (2) INTERIOR vs EXTERIOR, per fact.
+  const locations = readServiceLocationConflicts(sheets);
+  if (locations.length) {
+    out.push({
+      ...finding({
+        id: "city.elec.service-location-conflict",
+        severity: "callout",
+        category: "electrical",
+        title: `The sheets disagree on whether the ${locations.map((c) => c.fact).join(" / ")} is interior or exterior`,
+        message: locations.map((c) => `The ${c.fact} is INTERIOR on ${sheetsOf(c.interior)} (${quoted(c.interior, 2)}) and EXTERIOR on ${sheetsOf(c.exterior)} (${quoted(c.exterior, 2)})`).join(". ")
+          + ". The location decides where the service disconnect and the PV overcurrent device sit, so the reviewer cannot check either until the sheets agree.",
+        cityFeedback: "Show the point of interconnection and the service equipment at one location (interior or exterior), the same on every sheet.",
+        designTeamAction: `Confirm the actual location on site and correct the sheets that disagree (${sheetsOf(locations.flatMap((c) => [...c.interior, ...c.exterior]))}).`,
+        evidenceNeeded: locations.map((c) => `${c.fact}: one location on every sheet`),
+        codeReferences: [cite("NEC", serviceDisconnectLocation), method === "supply" ? input.supplySideRef : method === "load" ? input.loadSideRef : input.electricalRef],
+      }),
+      evidenceStatus: "verified",
+      evidenceFound: locations.flatMap((c) => [
+        ...c.interior.slice(0, 2).map((q) => sheetEvidence(q, `${c.fact}: interior`, `Read on ${q.sheet}.`)),
+        ...c.exterior.slice(0, 2).map((q) => sheetEvidence(q, `${c.fact}: exterior`, `Read on ${q.sheet}.`)),
+      ]),
+    });
+  }
+
+  // (3) NEC EDITION CITED ON THE SHEETS. Against the adopted edition when one is on file; otherwise
+  // only the set against itself (two editions cited), since an unknown adoption is not a finding here.
+  const cited = readNecEditionCitations(sheets);
+  const adopted = input.necAdopted;
+  const flagged = adopted != null ? cited.filter((c) => c.edition < adopted) : cited.length > 1 ? cited : [];
+  if (flagged.length) {
+    const describe = (c: EditionCitationsLike): string => `NEC ${c.edition} on ${sheetsOf(c.quotes)} (${c.count} citation${c.count === 1 ? "" : "s"}, e.g. "${c.quotes[0].excerpt}")`;
+    out.push({
+      ...finding({
+        id: "city.elec.nec-edition-cited-outdated",
+        severity: "callout",
+        category: "electrical",
+        title: adopted != null ? `Labels and notes cite an older NEC than the adopted NEC ${adopted}` : "The sheets cite more than one NEC edition",
+        message: adopted != null
+          ? `The sheets cite ${flagged.map(describe).join("; ")}, but the jurisdiction has adopted NEC ${adopted}. A reviewer reads an older edition on the labels and notes as the design having been checked against the wrong code.`
+          : `The sheets cite ${flagged.map(describe).join("; ")}. Only one can be the design basis; the labels and notes should all cite the edition the jurisdiction has adopted.`,
+        cityFeedback: adopted != null
+          ? `Update the code references on the labels and notes to NEC ${adopted} (the adopted edition), and confirm the label wording matches that edition.`
+          : "Cite one NEC edition, the locally adopted one, on every label and note.",
+        designTeamAction: `Correct the edition on every label and note (${sheetsOf(flagged.flatMap((c) => c.quotes))}) in one pass, and check each label's wording against that edition.`,
+        evidenceNeeded: ["Code edition on labels and notes matching the adopted NEC"],
+        codeReferences: [input.electricalRef],
+      }),
+      evidenceStatus: "verified",
+      evidenceFound: flagged.flatMap((c) => c.quotes.slice(0, 2).map((q) => sheetEvidence(q, `NEC ${c.edition} cited`, `${c.count} citation(s) of NEC ${c.edition} on the sheets.`))),
+    });
+  }
+
+  // (4) RAPID SHUTDOWN CLAIMED AND DENIED, or claimed with no initiation device named. The initiation
+  // gap is read here only where the adopted edition is not in the table: a known edition's 690.12(C)
+  // belongs to city.elec.rapid-shutdown-edition-evidence, which must not be asked twice.
+  if (input.rsdApplies) {
+    const rsd = readRapidShutdownStatements(sheets, RSD_INITIATION_PATTERNS);
+    const denied = rsd.claimed.length > 0 && rsd.denied.length > 0;
+    const noInitiation = rsd.claimed.length > 0 && rsd.initiation.length === 0 && !input.editionRowKnown;
+    if (denied || noInitiation) {
+      const parts = [
+        denied ? `Rapid shutdown is claimed on ${sheetsOf(rsd.claimed)} (${quoted(rsd.claimed, 2)}) and denied on ${sheetsOf(rsd.denied)} (${quoted(rsd.denied, 3)})` : "",
+        noInitiation ? `The sheets claim rapid shutdown (${quoted(rsd.claimed, 2)}) but no sheet names the initiation device or where it is (690.12(C), NEC 2017 and later)` : "",
+      ].filter(Boolean);
+      out.push({
+        ...finding({
+          id: "city.elec.rapid-shutdown-contradiction",
+          severity: "callout",
+          category: "electrical",
+          title: denied ? "Rapid shutdown is claimed on one sheet and denied on another" : "Rapid shutdown claimed with no initiation device named",
+          message: `${parts.join(". ")}.`,
+          cityFeedback: "State the rapid shutdown method once and consistently on every sheet, and show the initiation device and its location on the one-line and the site plan.",
+          designTeamAction: denied
+            ? `Correct the notes that deny rapid shutdown (${sheetsOf(rsd.denied)}) or the RSD note and placard, so the set says one thing; name the initiation device on the one-line.`
+            : "Name the rapid shutdown initiation device (switch / service disconnect) and its readily accessible outdoor location on the one-line and site plan.",
+          evidenceNeeded: [...(denied ? ["One rapid shutdown statement on every sheet"] : []), "Rapid shutdown initiation device and location"],
+          codeReferences: [input.rapidShutdownRef, ...(noInitiation ? [cite("NEC", rapidShutdownInitiation)] : [])],
+        }),
+        evidenceStatus: "verified",
+        evidenceFound: [
+          ...rsd.claimed.slice(0, 2).map((q) => sheetEvidence(q, "Rapid shutdown claimed", `Read on ${q.sheet}.`)),
+          ...(denied ? rsd.denied.slice(0, 3).map((q) => sheetEvidence(q, "Rapid shutdown denied", `Read on ${q.sheet}.`)) : []),
+        ],
+      });
+    }
+  }
+
+  // (5) A SUPPLY-SIDE DISCONNECT NOT CALLED SUITABLE FOR USE AS SERVICE EQUIPMENT.
+  if (method === "supply") {
+    const rating = readSupplySideDisconnectRating(sheets);
+    if (rating.disconnect.length && !rating.serviceRated.length) {
+      out.push({
+        ...finding({
+          id: "city.elec.supply-side-disconnect-service-rating",
+          severity: "callout",
+          category: "electrical",
+          title: "Supply-side disconnect not called out as suitable for use as service equipment",
+          message: `The supply-side disconnect is named (${quoted(rating.disconnect, 3)}), but no sheet describes it as suitable for use as service equipment (service rated). A disconnect ahead of the service disconnect is permitted only when it is.`,
+          cityFeedback: "Identify the PV disconnect on the supply side of the service as suitable for use as service equipment (service-entrance rated), on the one-line and the equipment schedule.",
+          designTeamAction: "Add \"SUITABLE FOR USE AS SERVICE EQUIPMENT\" (or the listed service-entrance rating) to the disconnect callout on the one-line and the equipment schedule; confirm the specified disconnect carries that listing.",
+          evidenceNeeded: ["Supply-side disconnect described as suitable for use as service equipment"],
+          codeReferences: [cite("NEC", supplySideServiceEquipment), input.supplySideRef],
+        }),
+        evidenceStatus: "verified",
+        evidenceFound: rating.disconnect.slice(0, 3).map((q) => sheetEvidence(q, "Supply-side disconnect named", `Read on ${q.sheet}; no service-equipment rating stated on any sheet.`)),
+      });
+    }
+  }
+
+  return out;
+}
+type EditionCitationsLike = ReturnType<typeof readNecEditionCitations>[number];
