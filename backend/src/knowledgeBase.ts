@@ -2356,7 +2356,8 @@ export function saveVerifiedAhjProfile(
     submissionMethod?: string;
     requiredDocuments?: string[];
     notes?: string;
-    /** The verifying user's id (from the session, never the body). */
+    /** The named person verifying (server.ts kbProfileVerifier: the signed-in user, or with auth
+     *  off the name typed; a missing or placeholder name never reaches here). */
     verifiedBy?: string;
   },
 ): PermitUtilityKnowledgeProfile {
@@ -2531,7 +2532,8 @@ export function saveVerifiedUtilityProfile(
     acDisconnectRule?: string;
     exportLimitNote?: string;
     notes?: string;
-    /** The verifying user's id (from the session, never the body). */
+    /** The named person verifying (server.ts kbProfileVerifier: the signed-in user, or with auth
+     *  off the name typed; a missing or placeholder name never reaches here). */
     verifiedBy?: string;
   },
 ): PermitUtilityKnowledgeProfile {

@@ -1014,14 +1014,23 @@ app.post("/api/code-profiles/research", asyncHandler(async (req, res) => {
 // dashboard sends, and no name is a 400 — "operator" is not a person.
 // The same named person verifies a seeded code profile (#209): PUT /api/code-profiles/verify, from
 // /review or the dashboard's KB card, stamps verified_by the same way (body field `verifiedBy`).
-const namedPersonDecider = (req: Request, field: "decidedBy" | "verifiedBy", signIn: string, nameIt: string): string => {
+// `isPerson` (optional; the KB profile verify routes pass feeConfirm.isConfirmingPerson, #563) also
+// refuses a placeholder or automation label ("human", "operator", "system", "bot"…) as the name, the
+// same way fee confirm and the structural letter do; signed in, an account whose display name is a
+// role ("Admin") is recorded by its email, which names the person who holds it.
+const namedPersonDecider = (req: Request, field: "decidedBy" | "verifiedBy", signIn: string, nameIt: string, isPerson?: (name: string) => boolean): string => {
   if (AUTH_ENABLED) {
     const user = currentUser(db, req);
     if (!user) throw new HttpError(401, signIn);
+    if (isPerson) {
+      const who = String((user.name && isPerson(user.name) ? user.name : user.email) || "").trim();
+      if (!isPerson(who)) throw new HttpError(400, nameIt);
+      return who;
+    }
     return String(user.name || user.email || "").trim() || "authenticated user";
   }
   const named = String(req.body?.[field] || "").trim().slice(0, 120);
-  if (!named) throw new HttpError(400, nameIt);
+  if (!named || (isPerson && !isPerson(named))) throw new HttpError(400, nameIt);
   return named;
 };
 const editionProposalDecider = (req: Request): string => namedPersonDecider(req, "decidedBy",
@@ -1938,9 +1947,23 @@ app.post("/api/knowledge-base/research-ahj", asyncHandler(async (req, res) => {
 
 // Human-verified AHJ profile — a coordinator confirming/correcting the AI's guess
 // (e.g. "Hillsboro uses email + ProjectDox, not Accela"). Outranks AI research.
-app.post("/api/knowledge-base/ahj-profile", (req, res) => {
+// WHO VERIFIED IS A NAMED PERSON (#563, rule 3): the same namedPersonDecider as code-profile verify —
+// the signed-in user when auth is on (a body name is ignored); with auth off (how the live install
+// runs) the `verifiedBy` the caller sends, and a missing, placeholder or automation name is a 400 that
+// writes nothing. It used to stamp the session's user id, or "human" with auth off: a verified row
+// with no person behind it.
+const kbProfileVerifier = async (req: Request, what: string): Promise<string> => {
+  const { isConfirmingPerson } = await import("./feeConfirm");
+  return namedPersonDecider(req, "verifiedBy",
+    `Sign in to verify ${what}.`,
+    `Name the person verifying: ${what} is verified by a named person (type your name; "human", "operator" or a bot's name is not a person).`,
+    isConfirmingPerson);
+};
+app.post("/api/knowledge-base/ahj-profile", asyncHandler(async (req, res) => {
   const b = req.body || {};
   if (!String(b.ahj || "").trim()) throw new HttpError(400, "ahj is required.");
+  // Named BEFORE anything is written.
+  const verifiedBy = await kbProfileVerifier(req, "an AHJ profile");
   // RULE 5 AT THE KB WRITE: a person verifying an AHJ can still paste the utility's portal (the
   // Happy Valley row had PowerClerk in portal_url). A verified row outranks everything, so a wrong
   // one here would pin the permit track to the NEM portal. The entity half is the person's call.
@@ -1957,11 +1980,10 @@ app.post("/api/knowledge-base/ahj-profile", (req, res) => {
     submissionMethod: b.submissionMethod ? String(b.submissionMethod) : undefined,
     requiredDocuments: Array.isArray(b.requiredDocuments) ? b.requiredDocuments.map(String) : undefined,
     notes: b.notes ? String(b.notes) : undefined,
-    // WHO verified comes from the session, never the body.
-    verifiedBy: requestScope(db, req).userId || "human",
+    verifiedBy,
   });
   res.status(201).json({ saved: true, profileKey: profile.profileKey, profile });
-});
+}));
 
 // Onboard a new UTILITY with the LLM — the same easy "add a utility" workflow used for
 // AHJs: research the NEM/interconnection portal + required docs + smart-inverter/disconnect
@@ -1981,9 +2003,11 @@ app.post("/api/knowledge-base/research-utility", asyncHandler(async (req, res) =
 // Human-verified utility NEM profile — a coordinator confirming/correcting the AI's
 // guess, or teaching a utility from scratch (e.g. "Idaho Power uses PowerClerk; smart
 // inverter settings = Yes"). Outranks AI research.
-app.post("/api/knowledge-base/utility-profile", (req, res) => {
+app.post("/api/knowledge-base/utility-profile", asyncHandler(async (req, res) => {
   const b = req.body || {};
   if (!String(b.utility || "").trim()) throw new HttpError(400, "utility is required.");
+  // Named BEFORE anything is written (kbProfileVerifier, #563).
+  const verifiedBy = await kbProfileVerifier(req, "a utility profile");
   if (b.portalUrl && !trackSafeUrl("nem", String(b.portalUrl))) {
     throw new HttpError(409, `${String(b.portalUrl)} is an AHJ permit portal — it belongs on the AHJ's profile, not the utility's.`, { hostRefused: true, code: "track_conflict" });
   }
@@ -2001,11 +2025,10 @@ app.post("/api/knowledge-base/utility-profile", (req, res) => {
     acDisconnectRule: b.acDisconnectRule ? String(b.acDisconnectRule) : undefined,
     exportLimitNote: b.exportLimitNote ? String(b.exportLimitNote) : undefined,
     notes: b.notes ? String(b.notes) : undefined,
-    // WHO verified comes from the session, never the body.
-    verifiedBy: requestScope(db, req).userId || "human",
+    verifiedBy,
   });
   res.status(201).json({ saved: true, profileKey: profile.profileKey, profile });
-});
+}));
 
 // ---------------------------------------------------------------------------
 // Portal record/replay recipes — teach the bot a new AHJ or utility portal by
