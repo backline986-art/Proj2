@@ -117,7 +117,7 @@ async function main(): Promise<void> {
 
   const applied = spawnSync(
     process.execPath,
-    [TSX_CLI, APPLY_SCRIPT, findingsPath, "--db", process.env.AUTOPILOT_DB_PATH as string],
+    [TSX_CLI, APPLY_SCRIPT, findingsPath, "--db", process.env.AUTOPILOT_DB_PATH as string, "--apply"],
     { cwd: REPO_ROOT, encoding: "utf8", timeout: 180_000 },
   );
   const out = `${applied.stdout ?? ""}\n${applied.stderr ?? ""}`;
@@ -303,7 +303,7 @@ async function main(): Promise<void> {
     }, null, 2), "utf8");
     const r = spawnSync(
       process.execPath,
-      [TSX_CLI, APPLY_SCRIPT, p, "--db", process.env.AUTOPILOT_DB_PATH as string],
+      [TSX_CLI, APPLY_SCRIPT, p, "--db", process.env.AUTOPILOT_DB_PATH as string, "--apply"],
       { cwd: REPO_ROOT, encoding: "utf8", timeout: 180_000 },
     );
     return `${r.stdout ?? ""}\n${r.stderr ?? ""}`;

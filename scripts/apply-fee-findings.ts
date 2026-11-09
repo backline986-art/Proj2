@@ -1,7 +1,10 @@
 // APPLY THE FINDINGS A PERSON HAS READ — exactly those, and nothing else.
 //
-//   npx tsx scripts/apply-fee-findings.ts <findings.json> --db backend/data/autopilot.sqlite
-//   npx tsx scripts/apply-fee-findings.ts <findings.json> --db <path> --dry-run
+//   npx tsx scripts/apply-fee-findings.ts <findings.json> --db <path>            (dry run: writes nothing)
+//   npx tsx scripts/apply-fee-findings.ts <findings.json> --db <path> --apply    (writes, as SEEDED)
+//
+// DRY RUN BY DEFAULT (#661), the seed-portland-services-feeders-fee.ts pattern: a person reads
+// what would land, then re-runs with --apply. --dry-run is still accepted and still writes nothing.
 //
 // scripts/research-fee-schedules.ts runs against a COPY and writes a findings file. This
 // replays that file into a database named explicitly. The two halves are separate on purpose:
@@ -115,12 +118,14 @@ async function main(): Promise<void> {
   };
   const file = args.find((a) => !a.startsWith("--") && a !== flag("db")) || "";
   const dbPath = flag("db");
-  const dryRun = args.includes("--dry-run");
+  // Writing takes a word of its own; --dry-run wins over --apply if both are given.
+  const dryRun = args.includes("--dry-run") || !args.includes("--apply");
   const resolveConflicts = args.includes("--resolve-conflicts");
 
   if (!file || !dbPath) {
     console.error(
-      "Usage: npx tsx scripts/apply-fee-findings.ts <findings.json> --db <path> [--dry-run] [--resolve-conflicts]\n\n"
+      "Usage: npx tsx scripts/apply-fee-findings.ts <findings.json> --db <path> [--apply] [--resolve-conflicts]\n\n"
+      + "  A DRY RUN by default: it prints what would land and writes nothing. Pass --apply to write.\n\n"
       + "  The file and --db are required. The findings file comes from:\n"
       + "    npx tsx scripts/research-fee-schedules.ts --db <a copy> --out findings.json\n\n"
       + "  --resolve-conflicts  overwrite rows holding an UNRESOLVED FEE CONFLICT. Only pass it\n"
@@ -144,7 +149,7 @@ async function main(): Promise<void> {
   const rows = Array.isArray(parsed.findings) ? parsed.findings : [];
   console.log(`\n  findings file: ${path.resolve(file)}`);
   console.log(`  researched:    ${parsed.generatedAt || "(undated)"} against ${parsed.database || "(unnamed database)"}`);
-  console.log(`  applying to:   ${dbPath}${dryRun ? "   (--dry-run: nothing will be written)" : ""}\n`);
+  console.log(`  applying to:   ${dbPath}${dryRun ? "   (DRY RUN: nothing will be written; re-run with --apply to write)" : ""}\n`);
 
   let applied = 0; let refused = 0; let skipped = 0; let shadowing = 0;
   for (const row of rows) {
