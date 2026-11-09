@@ -271,8 +271,11 @@ interface ReferenceStateAdoption {
   upcoming?: UpcomingCodeEdition[];
   citations?: JurisdictionCodeProfile["citations"];
 }
+/** A shipped city / county profile. `asOf` (YYYY-MM-DD): the day every value was confirmed on its
+ *  cited official page. A profile that carries it is also landed on an EXISTING row (#561). */
+type ReferenceProfile = JurisdictionCodeProfile & { confidence?: string; asOf?: string };
 interface ReferenceFile {
-  profiles?: Array<JurisdictionCodeProfile & { confidence?: string }>;
+  profiles?: ReferenceProfile[];
   stateAdoptions?: ReferenceStateAdoption[];
 }
 
@@ -1132,14 +1135,28 @@ export function seedReferenceCodeProfiles(db: AppDb): void {
     const data = JSON.parse(fs.readFileSync(filePath, "utf8")) as ReferenceFile;
     referenceCache = { path: filePath, data };
     let seeded = 0;
+    const ahjLayers = { merged: 0, proposed: 0 };
     for (const p of data.profiles ?? []) {
       const key = codeProfileKey(p);
-      const existing = db.get<Row>("SELECT confidence FROM jurisdiction_code_profiles WHERE profile_key = ?", [key]);
-      if (existing) continue; // never clobber operator edits (verified OR re-seeded)
-      upsert(db, p, { confidence: p.confidence === "verified" ? "verified" : "seeded", verifiedBy: p.confidence === "verified" ? "reference-seed" : undefined });
-      seeded++;
+      const existing = db.get<Row>("SELECT * FROM jurisdiction_code_profiles WHERE profile_key = ?", [key]);
+      if (!existing) {
+        // A dated city profile lands research-shaped (provenance + origin "reference"), so the next
+        // boot sees it already carries this reference.
+        upsert(db, p.asOf && String(p.ahj || "").trim() ? referenceAhjProfile(p) : p, { confidence: p.confidence === "verified" ? "verified" : "seeded", verifiedBy: p.confidence === "verified" ? "reference-seed" : undefined });
+        seeded++;
+        continue;
+      }
+      // A ROW ALREADY THERE (#561): a city's reference used to be skipped whenever any row existed
+      // for it, and never reached a person. A state row is the state layer's (stateAdoptions below).
+      if (!String(p.ahj || "").trim()) continue;
+      const landed = seedReferenceAhjProfile(db, mapRow(existing), p);
+      if (landed === "merged") ahjLayers.merged++;
+      if (landed === "proposed") ahjLayers.proposed++;
     }
     if (seeded > 0) logger.info("code-profiles", `seeded ${seeded} jurisdiction code profile(s) from reference data`);
+    if (ahjLayers.merged || ahjLayers.proposed) {
+      logger.info("code-profiles", `reference city/county profiles: ${ahjLayers.merged} merged onto seeded rows, ${ahjLayers.proposed} proposal(s) for human-verified rows`);
+    }
     const layers = seedReferenceStateAdoptions(db, data.stateAdoptions ?? []);
     if (layers.created || layers.merged || layers.proposed) {
       logger.info("code-profiles", `reference state layers: ${layers.created} created, ${layers.merged} merged onto seeded rows, ${layers.proposed} proposal(s) for human-verified rows`);
@@ -1147,6 +1164,55 @@ export function seedReferenceCodeProfiles(db: AppDb): void {
   } catch (err) {
     logger.warn("code-profiles", `reference seed failed: ${err instanceof Error ? err.message : String(err)}`);
   }
+}
+
+/** A shipped city / county profile as a research-shaped one: provenance "reference_truth" as of its
+ *  `asOf`, every edition marked origin "reference" (machine-owned: a later grounded research replaces
+ *  it family by family; an operator's or an import's entry is kept). Seeded — the shipped data has no
+ *  page bytes read by this process, so it never lands official (#683). */
+export function referenceAhjProfile(p: ReferenceProfile): JurisdictionCodeProfile {
+  const asOf = String(p.asOf || "").slice(0, 10);
+  const { asOf: _a, ...rest } = p;
+  return {
+    ...rest, key: "", confidence: "seeded", updatedAt: "",
+    adoptedCodes: (p.adoptedCodes ?? []).map((c) => ({ ...c, origin: "reference" as const })),
+    amendments: p.amendments ?? [], designCriteria: p.designCriteria ?? {}, prescriptive: p.prescriptive ?? {},
+    fireSetbacks: p.fireSetbacks ?? [], citations: p.citations ?? [],
+    researchProvenance: { webGrounded: true, method: "reference_truth", at: asOf, notes: `Shipped reference data: each value confirmed on the cited official page as of ${asOf}.` },
+  };
+}
+
+const editionYear = (e: string): number => { const m = /\b(19|20)\d{2}\b/.exec(String(e)); return m ? Number(m[0]) : NaN; };
+
+/**
+ * A SHIPPED CITY / COUNTY PROFILE ONTO THE ROW ALREADY THERE (#561), as the state layers land:
+ *   a seeded row          -> merged through the research merge (machine-owned editions replaced per
+ *                            family, an operator's or an import's kept, blank criteria filled) —
+ *                            unless it already carries this reference or a grounded research newer
+ *                            than it; the row stays seeded, so it waits on a person's Review / verify;
+ *   a human-verified row  -> NEVER written (rule 3): editions (and effective dates) that differ become
+ *                            a proposal a person approves or dismisses. A family the row states with a
+ *                            NEWER edition than the reference is not proposed backwards.
+ * A profile with no `asOf` says nothing about how current it is: left alone, as before.
+ */
+export function seedReferenceAhjProfile(db: AppDb, existing: JurisdictionCodeProfile, p: ReferenceProfile): "merged" | "proposed" | "skipped" {
+  const asOf = String(p.asOf || "").slice(0, 10);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(asOf)) return "skipped";
+  const ref = referenceAhjProfile(p);
+  if (existing.confidence === "verified") {
+    const newer = (c: CodeEdition): boolean => {
+      const f = codeFamilyOf(c);
+      const y = editionYear(c.edition);
+      return !!f && existing.adoptedCodes.some((h) => codeFamilyOf(h) === f && editionYear(h.edition) > y);
+    };
+    const proposal = proposeEditionUpdate(db, existing, { ...ref, adoptedCodes: ref.adoptedCodes.filter((c) => !newer(c)) }, "reference");
+    return proposal?.isNew ? "proposed" : "skipped";
+  }
+  const prov = existing.researchProvenance;
+  const rowAt = String(prov?.at || "").slice(0, 10);
+  if (prov?.webGrounded && rowAt && rowAt >= asOf) return "skipped";
+  upsert(db, mergeResearchIntoRow(existing, ref), { confidence: "seeded" });
+  return "merged";
 }
 
 /** The state layer a reference entry describes, as a research-shaped profile (provenance
@@ -1241,7 +1307,22 @@ export function editionChanges(current: CodeEdition[], proposed: CodeEdition[], 
       ?? proposed.find((p) => codeFamilyOf(p) === family);
     if (!want) continue;
     const have = current.filter((c) => codeFamilyOf(c) === family);
-    if (have.some((h) => entryAgrees(h, want))) continue;
+    const agreeing = have.find((h) => entryAgrees(h, want));
+    if (agreeing) {
+      // THE SAME EDITION, DATED DIFFERENTLY (#561): an effective / mandatory date or a replaced
+      // edition the finding states and the row does not is a change too — without them the
+      // phase-in (editionsInEffect) can never apply to the row.
+      if (!editionDatesDiffer(agreeing, want)) continue;
+      changes.push({
+        family,
+        current: datedEditionLabel(agreeing),
+        proposed: datedEditionLabel(want),
+        datesOnly: true,
+        ...(want.sourceUrl ? { sourceUrl: want.sourceUrl } : {}),
+        ...(want.quote ? { quote: String(want.quote).slice(0, 300) } : {}),
+      });
+      continue;
+    }
     changes.push({
       family,
       current: have.length ? have.map((h) => `${h.code} ${h.edition}`).join(", ") : null,
@@ -1251,6 +1332,27 @@ export function editionChanges(current: CodeEdition[], proposed: CodeEdition[], 
     });
   }
   return changes;
+}
+
+/** The dates an edition entry carries, compared as days ("2024-01-18T00:00Z" is 2024-01-18). */
+const EDITION_DATE_FIELDS = ["effectiveDate", "mandatoryDate", "previousEdition"] as const;
+const editionDateValue = (e: CodeEdition, f: (typeof EDITION_DATE_FIELDS)[number]): string => {
+  const v = String(e[f] ?? "").trim();
+  return f === "previousEdition" ? v : (/^\d{4}-\d{2}-\d{2}/.test(v) ? v.slice(0, 10) : "");
+};
+/** The finding states a date (or replaced edition) the row's entry does not state, or states
+ *  differently. A date only the ROW states is not a change: a finding that is silent on it says
+ *  nothing against it. */
+export function editionDatesDiffer(have: CodeEdition, want: CodeEdition): boolean {
+  return EDITION_DATE_FIELDS.some((f) => { const w = editionDateValue(want, f); return !!w && w !== editionDateValue(have, f); });
+}
+/** "IRC 2021, effective 2024-01-18, mandatory 2025-01-18, replaces 2018" — the label a dates-only
+ *  change shows a person. */
+export function datedEditionLabel(e: CodeEdition): string {
+  const eff = editionDateValue(e, "effectiveDate");
+  const mand = editionDateValue(e, "mandatoryDate");
+  const prev = editionDateValue(e, "previousEdition");
+  return [editionLabel(e), eff ? `effective ${eff}` : "", mand ? `mandatory ${mand}` : "", prev ? `replaces ${prev}` : ""].filter(Boolean).join(", ");
 }
 
 function fingerprintOf(key: string, changes: JurisdictionEditionProposal["changes"]): string {
@@ -1382,10 +1484,21 @@ export function applyEditionProposal(db: AppDb, fingerprint: string, actor: stri
     return { status: "applied", note: `Adoption model of ${p.profileKey} set by ${actor || "operator"} (${p.changes.map((c) => `${c.family}: ${c.proposed}`).join(", ")}).`, profile: getCodeProfile(db, current) ?? current };
   }
   // Only the families the proposal CHANGES: a family the row already states correctly keeps the
-  // person's own entries (Oregon's verified "IRC 2021" beside "ORSC 2023" is not touched).
-  const families = new Set(p.changes.map((c) => c.family));
+  // person's own entries (Oregon's verified "IRC 2021" beside "ORSC 2023" is not touched). A
+  // DATES-ONLY change (#561) keeps them too: the dates land on the person's own entry of that
+  // edition, and its siblings in the family stay.
+  const families = new Set(p.changes.filter((c) => !c.datesOnly).map((c) => c.family));
+  const datedFamilies = new Set(p.changes.filter((c) => c.datesOnly).map((c) => c.family));
   const adding = p.proposedCodes.filter((c) => { const f = codeFamilyOf(c); return !!f && families.has(f); });
-  const keep = current.adoptedCodes.filter((c) => { const f = codeFamilyOf(c); return !f || !families.has(f); });
+  const keep = current.adoptedCodes.filter((c) => { const f = codeFamilyOf(c); return !f || !families.has(f); }).map((c) => {
+    const f = codeFamilyOf(c);
+    if (!f || !datedFamilies.has(f)) return c;
+    const want = p.proposedCodes.find((x) => codeFamilyOf(x) === f && entryAgrees(c, x) && editionDatesDiffer(c, x));
+    if (!want) return c;
+    const dated: CodeEdition = { ...c };
+    for (const k of EDITION_DATE_FIELDS) { if (editionDateValue(want, k)) dated[k] = editionDateValue(want, k); }
+    return dated;
+  });
   const cites = [...current.citations];
   for (const c of adding) {
     if (c.sourceUrl && !cites.some((x) => x.sourceUrl === c.sourceUrl)) cites.push({ label: `${editionLabel(c)} — adopted edition source`, sourceUrl: c.sourceUrl, ...(c.quote ? { quote: String(c.quote).slice(0, 240) } : {}) });
@@ -2504,7 +2617,7 @@ function officialLandings(db: AppDb, target: { state: string; ahj: string }, res
     if (!page || v.weakSource) { out.set(v, { tier: "seeded", host: sourceHostOf(String(v.sourceUrl || "")), fetchedAt: "", reasons: [v.weakSource ? "a project-type handout" : "the page was not read by this process"] }); continue; }
     hosts ??= personVerifiedAuthorityHostsSync(db, target.state, target.ahj);
     const value = criterionValue(v);
-    const r = landingTierFor({ sourceUrl: String(v.sourceUrl), quote: v.quote, value: value ?? String(v.value), publishedValue: v.value, fetchedAt: page.fetchedAt, retrievedText: page.text, verifiedAuthorityHosts: hosts });
+    const r = landingTierFor({ sourceUrl: String(v.sourceUrl), quote: v.quote, value: value ?? String(v.value), ...(v.publishedValue !== undefined ? { publishedValue: v.publishedValue } : {}), fetchedAt: page.fetchedAt, retrievedText: page.text, verifiedAuthorityHosts: hosts });
     out.set(v, { ...r, fetchedAt: page.fetchedAt });
   }
   return out;
