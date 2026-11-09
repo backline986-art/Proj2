@@ -270,9 +270,10 @@ await check("(b) the one door: automaticSubmitRefusals refuses overriddenSinceAp
 });
 
 await check("(b) MUST-STOP revival across an approval: an override VOID at the click that applies again after an edit-back does not let the run file", async () => {
-  const projectId = await projectWith({ dcKw: "10.0" });
+  // RSD and DC both block, so the approval has an override in force to record (RSD's) beside the void one.
+  const projectId = await projectWith({ ...RSD_BLOCKER, dcKw: "10.0" });
   const blockers = blockersOf(gate(projectId));
-  assert.ok(blockers.includes(DC), `setup: DC should be a blocker, got ${blockers.join(", ")}`);
+  assert.ok(blockers.includes(DC) && blockers.includes(RSD), `setup: DC and RSD should both block, got ${blockers.join(", ")}`);
   for (const fid of blockers) await override(projectId, fid);
   assert.deepEqual(blockersOf(gate(projectId)), [], "setup: the overrides did not release every blocker");
   // A field edit changes DC's content: its override is void, so DC BLOCKS when the approver clicks.
@@ -284,6 +285,7 @@ await check("(b) MUST-STOP revival across an approval: an override VOID at the c
   const approval = approve(projectId);
   const snapshot = db.get<{ released_overrides_json: string }>("SELECT released_overrides_json FROM portal_run_approvals WHERE id = ?", [approval.id])!;
   const released = (JSON.parse(snapshot.released_overrides_json) as Array<{ findingId: string }>).map((r) => r.findingId).sort();
+  assert.ok(released.length > 0, "setup: no override was in force at the click — the precision check proves nothing");
   assert.deepEqual(released, blockers.filter((fid) => fid !== DC), "the approval recorded a different set of overrides in force");
   await tick();
   // The field is edited back: DC's override matches again and DC reads as a callout.
