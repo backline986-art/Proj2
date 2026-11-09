@@ -479,15 +479,17 @@ function powerClerkVocabulary(stage: string): PermitStatusClassification | null 
       message: `PowerClerk stage "${stage}": the utility shows this application cancelled or withdrawn. Confirm whether that was intended before anything else is filed.`,
     };
   }
-  // Suspended for changes (or held for the customer's information): a person opens the utility's correction form on the record (the
-  // "correct" recipe phase). A human-review reading, not correction_flagged: the client's
-  // correction notice names the jurisdiction, never the utility (#617), so it is not sent from here.
+  // Suspended for changes (or held for the customer's information): the utility sent it back, and
+  // a person opens the utility's correction form on the record (the "correct" recipe phase). A
+  // correction like any other — the correction row, the due clock, the team alert and the client's
+  // "Correction requested" update — now that the client's notice names the UTILITY on the NEM track
+  // (#617); #170 held it as a human-review reading only because that notice named the city.
   if (STAGE_CHANGES.test(stage)) {
     return {
-      outcome: "needs_human_review",
+      outcome: "correction_flagged",
       statusLabel: POWERCLERK_STAGE_LABELS.changesNeeded,
       confidence: 0.85,
-      reviewedByAhj: false,
+      reviewedByAhj: true,
       readyForIssue: false,
       issueFeeDue: false,
       message: `PowerClerk stage "${stage}": the utility wants changes from the applicant before the application goes further. Read the reviewer's notes on the record and file the correction form.`,
