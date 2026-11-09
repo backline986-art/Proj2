@@ -13,7 +13,7 @@ import { HttpError } from "./httpError";
 import { parseJson, text } from "./json";
 import { normalizeTokens } from "./normalize";
 import { extractProjectFeatureTags, knowledgeProfileKey } from "./knowledgeBase";
-import { isPacifiCorp } from "./utilityIdentity";
+import { isPacifiCorp, pacifiCorpBrand } from "./utilityIdentity";
 import {
   allProjectEvidenceText,
   evidenceForTopic,
@@ -148,9 +148,10 @@ function fallbackCauses(project: ProjectRecord): HistoricalFailureCause[] {
     });
   };
   if (isPacifiCorp(project)) { // the one state-gated identity (utilityIdentity) — not any "Pacific…"
-    push("Missing account verification", "Pacific Power account/meter data is commonly rejected when it is not verified.", "Verify utility bill account and service/meter data before PowerClerk staging.", "Pacific Power / NEM precheck");
-    push("Incorrect or missing meter photo", "Pacific Power customer generation packages commonly require meter evidence.", "Confirm the meter photo is present, legible, and matches the parsed meter number.", "Pacific Power / meter photo precheck");
-    push("Missing inverter settings evidence", "Pacific Power packages commonly need inverter settings / UL 1741 SB evidence.", "Confirm inverter settings evidence is included in the utility upload package.", "Pacific Power / inverter settings precheck");
+    const brand = pacifiCorpBrand(project.state); // #562: Rocky Mountain Power in UT/ID/WY
+    push("Missing account verification", `${brand} account/meter data is commonly rejected when it is not verified.`, "Verify utility bill account and service/meter data before PowerClerk staging.", `${brand} / NEM precheck`);
+    push("Incorrect or missing meter photo", `${brand} customer generation packages commonly require meter evidence.`, "Confirm the meter photo is present, legible, and matches the parsed meter number.", `${brand} / meter photo precheck`);
+    push("Missing inverter settings evidence", `${brand} packages commonly need inverter settings / UL 1741 SB evidence.`, "Confirm inverter settings evidence is included in the utility upload package.", `${brand} / inverter settings precheck`);
   }
   if (/powerwall|tesla|battery|\bESS\b/i.test(all)) {
     push("Battery/Powerwall mode mismatch", "Battery projects fail when backup/non-backup mode is inconsistent between plan set, utility notes, and portal fields.", "Confirm Powerwall/ESS mode, backup panel scope, export setting, and utility notes all agree.", "ESS / Powerwall precheck");

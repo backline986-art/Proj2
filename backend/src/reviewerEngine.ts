@@ -10,7 +10,7 @@ import { evidenceForTopic, evidenceLines, fieldValue, requirementsForTopic, type
 import { nowIso } from "./time";
 import { hasMpuScope } from "./serviceScope";
 import { resolveValuation } from "./valuation";
-import { knownPowerClerkUtility } from "./utilityIdentity";
+import { knownPowerClerkUtility, pacifiCorpBrand } from "./utilityIdentity";
 import { resolvePermitPath, resolveStampRequirement, hasStampedStructuralEvidence } from "./permitPath";
 import { evaluatePermitPrecedentFindings } from "./permitPrecedents";
 import type { EffectiveCodeContext } from "./codeProfiles";
@@ -985,16 +985,18 @@ function addUtilityFindings(project: ProjectRecord, findings: ReviewerFinding[])
     ));
   }
   if (knownUtility === "pacificorp") {
+    // The name this job goes by (#562): Rocky Mountain Power in UT/ID/WY. Finding IDs stay.
+    const brand = pacifiCorpBrand(project.state);
     const meterPhoto = evidenceForTopic(project, "meterPhoto");
     if (meterPhoto.confidence !== "high") {
       findings.push(finding(
         "reviewer.utility.pacpower-meter-photo",
         meterPhoto.present ? "warning" : "blocker",
         "utility_nem",
-        meterPhoto.present ? "Verify Pacific Power meter photo" : "Pacific Power meter photo missing",
+        meterPhoto.present ? `Verify ${brand} meter photo` : `${brand} meter photo missing`,
         meterPhoto.present
           ? `Meter evidence needs review before customer generation staging. ${evidenceSummary(meterPhoto)}`
-          : "Pacific Power customer generation packages should not be staged without meter photo/evidence.",
+          : `${brand} customer generation packages should not be staged without meter photo/evidence.`,
         true,
         {
           cityFeedback: meterPhoto.present
@@ -1012,7 +1014,7 @@ function addUtilityFindings(project: ProjectRecord, findings: ReviewerFinding[])
         "reviewer.utility.pacpower-settings",
         "warning",
         "utility_nem",
-        inverterSettings.present ? "Verify Pacific Power inverter settings" : "Pacific Power inverter settings evidence missing",
+        inverterSettings.present ? `Verify ${brand} inverter settings` : `${brand} inverter settings evidence missing`,
         inverterSettings.present
           ? `UL 1741/inverter spec evidence was captured, but utility-specific settings are not fully proven. ${evidenceSummary(inverterSettings)}`
           : "Confirm UL 1741 SB / smart inverter settings evidence is included before NEM submission.",
@@ -1021,7 +1023,7 @@ function addUtilityFindings(project: ProjectRecord, findings: ReviewerFinding[])
           cityFeedback: inverterSettings.present
             ? "Utility-required inverter settings need human verification, not just a generic inverter spec."
             : "Utility-required inverter settings/UL 1741 SB evidence was not found.",
-          designTeamAction: "Add or verify Pacific Power inverter settings/UL 1741 SB evidence in the utility upload package.",
+          designTeamAction: `Add or verify ${brand} inverter settings/UL 1741 SB evidence in the utility upload package.`,
           evidenceNeeded: evidenceNeeded(inverterSettings),
         },
       ));

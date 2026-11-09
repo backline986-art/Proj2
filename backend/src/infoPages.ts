@@ -41,7 +41,7 @@ import { DEFAULT_ORG_ID, type AppDb } from "./db";
 import { trackKind } from "./permitMonitor";
 import { isInformationalPageUrl, isPermitPortalUrl, isUtilityPlatformUrl, namedInterconnectionPlatforms, namedPermitPlatforms, portalHostOf, portalUrlsInText, salesforceTenantKind } from "./portalChannel";
 import { utilityFilingKey } from "./utilityFilingLookup";
-import { KNOWN_POWERCLERK_PORTALS, knownPowerClerkUtility, sameUtilityEntity } from "./utilityIdentity";
+import { KNOWN_POWERCLERK_PORTALS, knownPowerClerkPortalFor, knownPowerClerkUtility, sameUtilityEntity } from "./utilityIdentity";
 import { isVerifiedKnowledge } from "./knowledgeBase";
 import { isNotServedRecipe, sameEntity } from "./portalRecipes";
 import { addAuditLog } from "./audit";
@@ -439,6 +439,8 @@ function utilityFilesOnlyOnInterconnectionPlatform(db: AppDb, state: string, uti
     ...mine.filter((x) => x.kb && x.urls.length > 0 && x.urls.every(positive) && (!x.verified || namedInterconnectionPlatforms(s(x.r.portal_name)).length > 0))
       .map((x) => norm(s(x.r.portal_name))),
     identity ? norm(KNOWN_POWERCLERK_PORTALS[identity].portalName) : "",
+    // …and the name this job's brand gives it (#562: "Rocky Mountain Power Customer Generation Portal").
+    identity ? norm(knownPowerClerkPortalFor(identity, state).portalName) : "",
   ].filter(Boolean));
   /** Words that name a portal but no interconnection platform — not a bare channel word, not this
    *  utility's own platform portal's name — for a utility whose tenant is not known by heart. */

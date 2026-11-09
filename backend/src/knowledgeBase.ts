@@ -35,7 +35,7 @@ import { logger } from "./logger";
 import { inferPlatform, isRecognizedPlatform, looksLikeBareUrl } from "./portalPlatformRules";
 import { isInformationalPageUrl, isUtilityPlatformUrl, portalHostOf } from "./portalChannel";
 import { HttpError } from "./httpError";
-import { KNOWN_POWERCLERK_PORTALS, foreignKnownTenant, knownPowerClerkUtility, knownTenantOwner, provablyDifferentUtility, sameUtilityEntity, utilityIdentityOf, type UtilityIdentity } from "./utilityIdentity";
+import { foreignKnownTenant, knownPowerClerkPortalFor, knownPowerClerkUtility, knownTenantOwner, pacifiCorpBrand, provablyDifferentUtility, sameUtilityEntity, utilityIdentityOf, type UtilityIdentity } from "./utilityIdentity";
 
 type Row = Record<string, unknown>;
 
@@ -416,7 +416,7 @@ export function purgeForeignKnownTenantPortals(db: AppDb): { cleared: string[]; 
       db.run(
         "UPDATE permit_utility_knowledge SET portal_url = '', portal_name = ?, portal_platform = ?, updated_at = ? WHERE profile_key = ?",
         [
-          /powerclerk|pacific power customer generation/i.test(portalName) ? "" : portalName,
+          /powerclerk|(?:pacific|rocky mountain) power customer generation/i.test(portalName) ? "" : portalName,
           /powerclerk/i.test(platform) ? "" : platform,
           ts, key,
         ],
@@ -1161,7 +1161,8 @@ function projectDocs(project: ProjectRecord): string[] {
     add("Utility account and meter verification");
   }
   if (knownUtility === "pacificorp") {
-    add("Pacific Power customer generation application");
+    // Named by the job's brand (#562): a Utah job files Rocky Mountain Power's application.
+    add(`${pacifiCorpBrand(project.state)} customer generation application`);
     add("Meter photo");
     add("UL 1741 SB / inverter settings evidence");
     add("Inspection and safety sign upload after install");
@@ -1196,7 +1197,8 @@ function portalFromProject(project: ProjectRecord): { portalName: string; portal
   // tenant as Pacific Gas & Electric's own portal (and Portland General's for a CA "PGE") into the
   // shared KB, and NEM staging launched it — leak sweep 2026-09-28.
   const knownUtility = knownPowerClerkUtility(project);
-  const known = knownUtility ? KNOWN_POWERCLERK_PORTALS[knownUtility] : null;
+  // Named by the job's brand (#562: Rocky Mountain Power in UT/ID/WY), same tenant either way.
+  const known = knownUtility ? knownPowerClerkPortalFor(knownUtility, project.state) : null;
   const utilityPortal = known ? { portalName: known.portalName, portalUrl: known.portalUrl } : null;
   return { portalName, portalUrl, utilityPortal };
 }
@@ -3075,6 +3077,31 @@ function seedOfficialKnowledge(db: AppDb): void {
       ],
       confidence: "seeded",
       notes: "Official Pacific Power seed for customer generation/NEM path. Smart inverter settings work like PGE: a Yes/No election to use the utility's recommended smart inverter settings — answer Yes for UL 1741-SB listed inverters, plus an inverter spec/cut-sheet upload (not a grid-profile drawing). Witness test + meter exchange may apply; some projects exceed 70 business days when equipment upgrades are needed.",
+    },
+    {
+      // Issue #562: Rocky Mountain Power is PacifiCorp's Utah brand, on the SAME PowerClerk tenant as
+      // Pacific Power (KNOWN_POWERCLERK_PORTALS; the rule-5 host checks are unchanged). Its program is
+      // Schedule 137, Net Billing Service (P.S.C.U. No. 52), read 2026-11-09 from the tariff sheets
+      // cited below. SEEDED, never verified (rule 3): a person verifies it in the UI, and on a row a
+      // person has verified this seed only fills blanks.
+      state: "UT",
+      ahj: "",
+      utility: "Rocky Mountain Power",
+      portalName: "Rocky Mountain Power Customer Generation Portal",
+      portalPlatform: "PowerClerk",
+      portalUrl: "https://pacificorpnetmetering.powerclerk.com/MvcAccount/Login",
+      sources: [
+        officialSource("Rocky Mountain Power Utah Schedule 137, Net Billing Service (tariff sheets 137.1-137.5)", "https://www.rockymountainpower.net/content/dam/pcorp/documents/en/rockymountainpower/rates-regulation/utah/rates/137_Net_Billing_Service.pdf"),
+        officialSource("Rocky Mountain Power filing, Utah PSC Docket 26-035-T03: Schedule 137 Sheet 137.3 revision (effective 2026-03-01)", "https://pscdocs.utah.gov/electric/26docs/26035T03/343554Trf1-26-2026.pdf"),
+      ],
+      confidence: "seeded",
+      notes: [
+        "Rocky Mountain Power (PacifiCorp's Utah brand) takes residential interconnection applications on PacifiCorp's PowerClerk tenant (pacificorpnetmetering.powerclerk.com), the same portal as Pacific Power; the program is Utah Schedule 137, Net Billing Service",
+        "Schedule 137 interconnection review request fee (non-refundable; Sheet 137.3, effective 2026-03-01), plus any other R746-312-13 charges: Level 1 $60 per application; Level 2 $75 per application plus $1.50 per kW of installed capacity; Level 3 $150 per application plus $3.00 per kW of installed capacity",
+        "Schedule 137 residential cap: not more than 25 kW for a residential facility (Sheet 137.1); installed capacity is nameplate DC (Sheet 137.2)",
+        "Schedule 137 utility disconnect (Sheet 137.4): none required for inverter-based systems of 10 kW or less; any other system needs a lockable, load-break manual disconnect showing open/closed, readily accessible to the utility and within 10 ft of the meter (except as R746-312-4(2)(a)(ii) provides)",
+        "Seeded from the tariff — verify before relying on it",
+      ].join(" | "),
     },
     {
       // Issue #31: research kept PNM's program page (www.pnm.com/customer-solar-program1) as the NEM
