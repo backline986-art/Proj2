@@ -21,7 +21,11 @@ import type { PortalRecipe, ProjectRecord, RecipeStep } from "../../../shared/sr
 
 const CAPTURE_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "replay-capture-smoke-"));
 process.env.REPLAY_CAPTURE_DIR = CAPTURE_DIR;
-delete process.env.REPLAY_RUN_DIR;
+// The run's page shots (and, since #316, the masked picture of the page a run stops on for a person)
+// go to their own scratch folder, never data/replay-runs — and never into CAPTURE_DIR, which this
+// smoke reads as "every file the capture wrote".
+const RUN_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "replay-capture-smoke-runs-"));
+process.env.REPLAY_RUN_DIR = RUN_DIR;
 const { RecipeAdapter } = await import("./recipeAdapter");
 
 let failures = 0;
@@ -115,6 +119,7 @@ console.log("\n3. MUST-EXCLUDE: the pre-filled 11-digit value is in no file repl
 await browser.close();
 server.close();
 fs.rmSync(CAPTURE_DIR, { recursive: true, force: true });
+fs.rmSync(RUN_DIR, { recursive: true, force: true });
 if (failures) { console.error(`\nreplayCapture: ${failures} check(s) FAILED`); process.exit(1); }
 console.log("\nreplayCapture: all checks passed (real Chromium, local fixture)");
 process.exit(0);

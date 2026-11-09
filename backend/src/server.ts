@@ -173,6 +173,7 @@ import { confirmSignatureRequestSent } from "./signatureTrack";
 import { getSubmittalTracks, markTrackSubmitted, requiredTracks, trackSubmittedAndTracked, trackSubmittedSentence } from "./submittalTracks";
 import { stagedReviewScreenshotFile } from "./stagedReviews";
 import { submissionConfirmationFile } from "./submissionConfirmation";
+import { reviewScreenshotFile } from "./reviewScreenshot";
 import { buildApprovalSheet } from "./approvalSheet";
 import { getPermitProcessLookup, projectForTrack, verifyPermitProcessLookup } from "./permitProcess";
 import { ahjProcessKnowledgeStatus, AHJ_PROCESS_REFERENCE_ENV } from "./processProfiles";
@@ -3935,14 +3936,15 @@ app.get("/api/projects/:id/submissions/:submissionId/confirmation-screenshot", (
 app.get("/api/projects/:id/portal-runs/:runId/review-screenshot", (req, res) => {
   const projectId = String(req.params.id);
   const runId = String(req.params.runId);
-  // Check portal_runs first (for recipe-replay runs that generate portal_run records).
-  const run = db.get<{ screenshots_path: string; project_id: string }>(
-    "SELECT screenshots_path, project_id FROM portal_runs WHERE id = ?",
-    [runId],
-  );
-  if (run && run.project_id === projectId && run.screenshots_path && fs.existsSync(run.screenshots_path)) {
+  // #316 — this project's runs first (reviewScreenshot.ts): the run's picture, its folder's masked
+  // review shot when the row names none, or — for the track card's recipe id — this project's newest
+  // run of that recipe by its masked review shot.
+  const own = reviewScreenshotFile(db, projectId, runId);
+  if (own) {
     res.setHeader("Content-Type", "image/png");
-    res.sendFile(run.screenshots_path);
+    res.setHeader("X-Content-Type-Options", "nosniff");
+    res.setHeader("Cache-Control", "no-store");
+    res.sendFile(own);
     return;
   }
   // Fall back to portal_recipes (auto-learn stores recipe id; screenshot path in notes).

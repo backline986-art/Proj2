@@ -125,6 +125,10 @@ export const REVIEW_READ_SKIPPED_SUMMARY = " The review screen was not read back
 /** #381: what the capture says when a native dialog waits for the person on the window. */
 export const DIALOG_WAITING_CAPTURE = "A dialog the portal opened is waiting in the window for your answer (automation never answers one): the page was not read and nothing was recorded.";
 /** #381: said beside a click the portal answered with a native dialog — never "click again" there. */
+/** #316 — the masked picture of the page a run stopped on for a person (captureReviewShot), in the run's
+ *  page-shot folder. backend/src/reviewScreenshot.ts serves a folder's picture only by this exact name:
+ *  the folder's other shots are unmasked. */
+export const REVIEW_SHOT_FILE = "zzz-review.png";
 const CONFIRMATION_ASKED = " The portal asked for a confirmation after that click: only you answer it, in the window (automation never answers one).";
 /** #333: why the run's own input is refused once it has started handing the page over. */
 const INPUT_CLOSED = "the run has stopped at review and is handing the page to a person — it makes no input of its own on the page from here";
@@ -1182,6 +1186,11 @@ export class RecipeAdapter extends BasePortalAdapter {
    *  the mask covered every secret (rule 2); otherwise `why` says why no picture was kept, and the
    *  outcome shot stays the run's only picture. Taken, never clicked for (rule 1). */
   private confirmationShot: { path: string; why: string } | null = null;
+  /** #316 — WHY A RUN THAT STOPPED FOR A PERSON KEPT NO REVIEW PICTURE: captureReviewShot takes the
+   *  page the run stopped on through maskedFullPageScreenshot (the one masking path) and makes it the
+   *  run's outcome shot only when the mask was proven; otherwise this says why (reported on the step
+   *  as reviewShotRefused) and the run has no picture of that page. "" when a picture was kept. */
+  private reviewShotRefused = "";
   /** THE FEE AT A fee_payment STOP (#576): amount, lines, masked shot and the page's link, read
    *  once, at the first fee stop. Carried on the step result (data.feeStop). Read only. */
   private feeStop: FeeStopReading | null = null;
@@ -3893,6 +3902,14 @@ export class RecipeAdapter extends BasePortalAdapter {
       this.stagedReviewCapture = await this.captureStagedReview(cfg).catch((e) =>
         unapprovableStagedReview(`the staged review could not be read (${String((e as { message?: string })?.message ?? e).replace(/\s+/g, " ").slice(0, 80)})`, this.pageUrlNoHash()));
     }
+    // #316 — THE PICTURE OF THE PAGE A PERSON IS HANDED (a replay that stopped at review, or before
+    // it): taken BEFORE the hand-over (after it the window is the person's, and the mask tags its
+    // DOM), and only when no stop has already pictured the run's ending. Masked or nothing (rule 2);
+    // read only (rule 1). It becomes the run's outcome shot, so portal_runs.screenshots_path names it
+    // and the review-screenshot route serves it.
+    if (!pastReview && !this.finalSubmitClicked && !this.stoppedAtPayment && !this.outcomeShotPath) {
+      await this.captureReviewShot();
+    }
     // THE REVIEW-PAGE LOCKDOWN (filingBackstop.ts): the run's last write to the page (the final
     // re-assert and gap-fill above, which a portal autosaves on blur) is done. From here until
     // fillApplication hands the page to a person (dispose), every state-changing request is
@@ -3966,6 +3983,7 @@ export class RecipeAdapter extends BasePortalAdapter {
       healedSteps: this.healedSteps, driftWarnings: this.driftWarnings, agingNotes: this.agingNotes, slowSteps,
       requiredStillEmpty: this.requiredStillEmpty, unresolvedFields: this.unresolvedFields, fieldsVerified: this.fieldsVerified, fieldsUnverified: this.fieldsUnverified, requiredFieldsSeen: this.requiredFieldsSeen, stoppedAtPayment: this.stoppedAtPayment, pageShotDir: this.pageShotDir,
       outcomeShotPath: this.outcomeShotPath,
+      ...(this.reviewShotRefused ? { reviewShotRefused: this.reviewShotRefused } : {}),
       reviewFieldsSeen: review.fieldsSeen, reviewFieldsConfirmed: review.confirmed, reviewMismatches: review.mismatches,
       ...(review.skipped ? { reviewReadSkipped: "a dialog waits for the person in the window" } : {}),
       attachmentLedger: this.attachmentLedger, unrecordedAnswered: this.unrecordedAnswered,
@@ -9130,12 +9148,37 @@ export class RecipeAdapter extends BasePortalAdapter {
       const dir = await this.ensurePageShotDir();
       const safe = String(label || "page").replace(/[^a-zA-Z0-9]+/g, "_").slice(0, 40) || "page";
       const file = path.join(dir, `zzz-confirmation-${safe}.png`);
-      const secrets = Array.from(new Set([...secretValuesOf(this.fieldValues), String(this.fieldValues.accountNumber ?? ""), String(this.fieldValues.meterNumber ?? "")]
-        .map((v) => String(v ?? "").trim()).filter((v) => v.length >= 4)));
-      const m = await maskedFullPageScreenshot(page, secrets, file);
+      const m = await maskedFullPageScreenshot(page, this.shotMaskSecrets(), file);
       this.confirmationShot = m.ok ? { path: file, why: "" } : { path: "", why: m.why || "the secret mask could not be proven on this page" };
     } catch (err) {
       this.confirmationShot = { path: "", why: `the picture could not be taken (${err instanceof Error ? err.message.slice(0, 120) : String(err)})` };
+    }
+  }
+
+  /** The run's known secrets for a masked picture — the one set the confirmation shot and the review
+   *  shot both mask (the fee stop and the staged review read the same field map). */
+  private shotMaskSecrets(): string[] {
+    return Array.from(new Set([...secretValuesOf(this.fieldValues), String(this.fieldValues.accountNumber ?? ""), String(this.fieldValues.meterNumber ?? "")]
+      .map((v) => String(v ?? "").trim()).filter((v) => v.length >= 4)));
+  }
+
+  /** #316 — THE REVIEW SCREENSHOT OF A RUN THAT STOPS FOR A PERSON: one full-page picture of the page
+   *  the run stopped on, through maskedFullPageScreenshot (#588's path, never a second one) with the
+   *  same secrets the confirmation shot masks. Kept — as the run's outcome shot, `zzz-review.png`
+   *  in the run's folder — only on { ok: true }; otherwise reviewShotRefused says why and no file is
+   *  left. Read only: nothing is clicked, typed or navigated. Never throws. */
+  private async captureReviewShot(): Promise<void> {
+    const page = this.page;
+    if (!page || typeof page.screenshot !== "function" || typeof page.evaluate !== "function") return;
+    try {
+      // A fixed name, never the page's own words (a title could carry a value the mask covers in the
+      // picture but not in a file name). The backend serves a folder's picture only by this name.
+      const file = path.join(await this.ensurePageShotDir(), REVIEW_SHOT_FILE);
+      const m = await maskedFullPageScreenshot(page, this.shotMaskSecrets(), file);
+      if (m.ok) { this.outcomeShotPath = file; this.reviewShotRefused = ""; }
+      else this.reviewShotRefused = m.why || "the secret mask could not be proven on this page";
+    } catch (err) {
+      this.reviewShotRefused = `the picture could not be taken (${err instanceof Error ? err.message.slice(0, 120) : String(err)})`;
     }
   }
 
