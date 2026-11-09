@@ -12,7 +12,7 @@
 //   - an installer certification the client record lacks, a required production meter the plans do
 //     not show, and a utility with no program record on file are warnings that say so, never a pass;
 //   - research keeps only limits cited to a page the search returned, in words that carry the value;
-//   - migration v66 + boot seed; a verified (or official) row is never overwritten (rule 3).
+//   - migration v67 + boot seed; a verified (or official) row is never overwritten (rule 3).
 // Run: tsx backend/test/eligibilityLimits.test.ts
 import "./_isolate";
 import assert from "node:assert/strict";
@@ -191,10 +191,10 @@ check("research keeps a limit only from a page the search returned, in words tha
   assert.equal(parsed.limits.maxDcKw?.value, 10);
 });
 
-// ── Store: migration v66, seed, rule 3 ───────────────────────────────────────────────────────
+// ── Store: migration v67, seed, rule 3 ───────────────────────────────────────────────────────
 const db = await openDatabase();
 
-check("migration v66 + boot seed: the shipped row is on file, seeded, cited with URL, quote and fetchedAt", () => {
+check("migration v67 + boot seed: the shipped row is on file, seeded, cited with URL, quote and fetchedAt", () => {
   const rows = eligibilityRecordsForState(db, "OR");
   const row = rows.find((r) => r.authorityKind === "utility_program" && r.authority === "");
   assert.ok(row);

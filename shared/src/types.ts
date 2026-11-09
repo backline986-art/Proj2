@@ -1441,8 +1441,10 @@ export interface SubmittalTrack {
   /** The scope type used to look up the recipe — "ahj" or "utility". */
   recipeScopeType?: "ahj" | "utility";
   /** How this track is filed, as a kind (submittalTracks.channelKindOf). in_person / email / mail =
-   *  a person delivers the packet outside this tool — shown as a bold banner, never grey text. */
-  channelKind?: "portal" | "in_person" | "email" | "mail" | "unknown";
+   *  a person delivers the packet outside this tool — shown as a bold banner, never grey text.
+   *  with_permit (#664, NEM only) = a person verified that the utility's application rides INSIDE the
+   *  AHJ permit application: no portal of its own, its status follows the permit's. */
+  channelKind?: "portal" | "in_person" | "email" | "mail" | "with_permit" | "unknown";
   /** No recipe of its own: the recipe this project's LAST run of this track borrowed (another entity's,
    *  same portal — portalRecipes.findBorrowableRecipe), read from that run's result. null = none used. */
   borrowedRecipe?: { recipeId: string; recipeVersion: number | null; learnedFor: string; recordType: string; portalHost: string; lastUsedAt: string } | null;

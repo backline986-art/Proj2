@@ -5066,23 +5066,9 @@ async function updatePortalLoginsSummary() {
   let creds = [];
   try { creds = (await api(`/api/clients/${client.id}/portal-credentials`)).credentials || []; }
   catch { summary.textContent = ""; return; }
-  let total = 0, ready = 0; const seen = new Set();
-  for (const t of tracks) {
-    const url = t.recipePortalUrl || ""; let host = "";
-    try { host = url ? new URL(url).hostname.toLowerCase() : ""; } catch { /* ignore */ }
-    const slug = plPortalSlug(t.channel || t.label || t.type);
-    const key = host || slug;
-    if (seen.has(key)) continue; seen.add(key);
-    total++;
-    const matched = creds.some((c) => {
-      if (host && c.portalUrl) { try { if (new URL(c.portalUrl).hostname.toLowerCase() === host) return true; } catch { /* continue */ } }
-      const ct = (c.portalType || "").toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "");
-      if (ct && ct === slug) return true;
-      if (ct && slug && (ct.includes(slug.slice(0, 10)) || slug.includes(ct.slice(0, 10)))) return true;
-      return false;
-    });
-    if (matched) ready++;
-  }
+  // The same reading as the modal's chips (plProjectPortals), so the two counts never disagree.
+  const portals = plProjectPortals(tracks, creds).portals;
+  const total = portals.length, ready = portals.filter((p) => p.matched).length;
   summary.textContent = total ? `${ready}/${total} portal logins saved` : (creds.length ? `${creds.length} saved` : "");
   if (ready < total) summary.style.color = "var(--warn, #b45309)";
   else summary.style.color = "var(--ok, #16a34a)";
@@ -5168,6 +5154,8 @@ const OFF_TOOL_CHANNEL = {
   in_person: { title: "IN-PERSON SUBMISSION", what: "This jurisdiction does not take this filing online. The bot prepares and fills the packet; a person must deliver it at the counter — outside this tool." },
   email: { title: "EMAIL SUBMISSION", what: "This filing is sent by email, not through a portal. The bot prepares and fills the packet; a person must email it — outside this tool — then record the confirmation here." },
   mail: { title: "SUBMISSION BY MAIL", what: "This filing is mailed. The bot prepares and fills the packet; a person must print and mail it — outside this tool." },
+  // #664 (NEM only): a person verified that the utility takes its application inside the permit application.
+  with_permit: { title: "FILED WITH THE PERMIT", what: "This utility takes its interconnection application inside the AHJ permit application. There is no separate utility filing: its documents go in the permit packet, this track follows the permit, and after approval a person calls the utility to set the meter." },
 };
 function offToolChannelHtml(t) {
   const k = OFF_TOOL_CHANNEL[t.channelKind];
@@ -11339,9 +11327,94 @@ async function openPortalLogins() {
   if (status) status.textContent = "";
   $("pl_portalType").value = ""; $("pl_portalUrl").value = "";
   $("pl_username").value = ""; $("pl_password").value = "";
+  state.plShowAllLogins = false; // each opening starts on this project's logins only
   $("portalLoginsModal").hidden = false;
   if (window.lucide) window.lucide.createIcons();
   await renderPortalLogins();
+}
+
+// WHICH PORTALS, AND WHICH SAVED LOGINS, THE OPEN PROJECT NEEDS (owner, 2026-11-09: "just show
+// the ones needed to submit/missing for the portal we're working on"). The modal used to list every
+// login the client holds under the chips, so the two or three this job files with were buried among
+// every other portal the client ever used. The answer comes from the project's OWN tracks (their
+// recipe/KB portal URL and channel kind), never from a portal, utility or place name, so it holds
+// for any portal. Strictest reading where we cannot tell: tracks not loaded (or none) -> nothing is
+// hidden; a channel kind we don't know -> the portal still asks for a login. Only a track a person
+// files outside any portal (in person, email, mail) gets no chip. Everything else stays one click
+// away (plListHtml's toggle), and Delete works on every row either way.
+const PL_NO_LOGIN_CHANNELS = new Set(["in_person", "email", "mail"]);
+
+// Does this saved login fit this portal? The ONE match the chips, the list and the header summary
+// share (it used to be written out twice). Credential metadata only: never a secret.
+function plLoginFits(cred, portal) {
+  // 1. URL hostname match (most precise).
+  if (portal.host && cred.portalUrl) {
+    try { if (new URL(cred.portalUrl).hostname.toLowerCase() === portal.host) return true; } catch { /* continue */ }
+  }
+  // 2. portalType slug match: the chip pre-fills pl_portalType with the slug, so a
+  //    credential saved via this modal will have portalType === slug.
+  const ct = (cred.portalType || "").toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "");
+  if (ct && ct === portal.slug) return true;
+  // 3. Loose substring: handles minor slug variants (e.g. "accela" inside "accela_oregon").
+  if (ct && portal.slug && (ct.includes(portal.slug.slice(0, 10)) || portal.slug.includes(ct.slice(0, 10)))) return true;
+  return false;
+}
+
+// { known, portals: [{ label, url, slug, host, matched }] (missing logins first), used, others }.
+function plProjectPortals(tracks, creds) {
+  const all = Array.isArray(creds) ? creds : [];
+  const known = Array.isArray(tracks) && tracks.length > 0;
+  const portals = [];
+  const seen = new Set();
+  for (const t of known ? tracks : []) {
+    if (PL_NO_LOGIN_CHANNELS.has(t.channelKind)) continue;
+    const url = t.recipePortalUrl || "";
+    const slug = plPortalSlug(t.channel || t.label || t.type);
+    const key = (url || slug).toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    let host = ""; try { host = url ? new URL(url).hostname.toLowerCase() : ""; } catch { /* ignore */ }
+    const portal = { label: t.label || t.channel || t.type, url, slug, host, matched: false };
+    portal.matched = all.some((c) => plLoginFits(c, portal));
+    portals.push(portal);
+  }
+  // Missing first: that is what the operator opened the modal to fix. (Array sort is stable.)
+  portals.sort((a, b) => Number(a.matched) - Number(b.matched));
+  if (!known) return { known, portals, used: all.slice(), others: [] };
+  const used = all.filter((c) => portals.some((p) => plLoginFits(c, p)));
+  return { known, portals, used, others: all.filter((c) => !used.includes(c)) };
+}
+
+function plCredRowHtml(c) {
+  const name = portalDisplayName(c.portalType, c.portalUrl);
+  const host = portalHostname(c.portalUrl);
+  return `<div class="pl-cred-row">
+        <div>
+          <div class="pl-cred-meta"><strong>${esc(name)}</strong> · ${esc(c.usernameReference)} ${c.hasSecret ? "🔒" : ""}</div>
+          ${host && host !== name ? `<div class="pl-cred-url">${esc(host)}</div>` : ""}
+        </div>
+        <button type="button" class="danger-button danger-button-sm" data-pl-del="${esc(c.id)}">Delete</button>
+      </div>`;
+}
+
+// The list under the chips: this project's logins, then the client's other logins behind a toggle.
+function plListHtml(view, showAll, clientName) {
+  const empty = (text) => `<p class="muted" style="font-size:12px">${esc(text)}</p>`;
+  if (!view.known) {
+    return view.used.length ? view.used.map(plCredRowHtml).join("")
+      : empty("No saved logins yet. Pick a portal above to pre-fill, then enter the username and password.");
+  }
+  const parts = [view.used.length ? view.used.map(plCredRowHtml).join("")
+    : empty(view.portals.length
+      ? "No saved login fits this project's portals yet. Pick a portal above to pre-fill, then enter the username and password."
+      : "This project files outside any portal, so it needs no portal login.")];
+  const n = view.others.length;
+  if (n) {
+    parts.push(`<button type="button" class="ghost" data-pl-toggle="1" aria-expanded="${showAll ? "true" : "false"}" style="font-size:12px">
+      ${showAll ? "Hide" : "Show"} ${n} other saved login${n === 1 ? "" : "s"} for ${esc(clientName)}</button>`);
+    if (showAll) parts.push(view.others.map(plCredRowHtml).join(""));
+  }
+  return parts.join("");
 }
 
 async function renderPortalLogins() {
@@ -11352,52 +11425,23 @@ async function renderPortalLogins() {
   catch (err) { $("plStatus").textContent = err.message || "Could not load logins."; }
 
   // Quick-fill chips: one per portal this project actually files to (from its tracks).
-  const tracks = state.submittalTracks || [];
-  const chips = [];
-  const seen = new Set();
-  for (const t of tracks) {
-    const url = t.recipePortalUrl || "";
-    const label = t.label || t.channel || t.type;
-    const slug = plPortalSlug(t.channel || t.label || t.type);
-    const key = (url || slug).toLowerCase();
-    if (seen.has(key)) continue;
-    seen.add(key);
-    let host = ""; try { host = url ? new URL(url).hostname.toLowerCase() : ""; } catch { /* ignore */ }
-    const matched = creds.some((c) => {
-      // 1. URL hostname match (most precise).
-      if (host && c.portalUrl) {
-        try { if (new URL(c.portalUrl).hostname.toLowerCase() === host) return true; } catch { /* continue */ }
-      }
-      // 2. portalType slug match: the chip pre-fills pl_portalType with the slug, so a
-      //    credential saved via this modal will have portalType === slug.
-      const ct = (c.portalType || "").toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "");
-      if (ct && ct === slug) return true;
-      // 3. Loose substring: handles minor slug variants (e.g. "accela" inside "accela_oregon").
-      if (ct && slug && (ct.includes(slug.slice(0, 10)) || slug.includes(ct.slice(0, 10)))) return true;
-      return false;
-    });
-    chips.push(`<button type="button" class="pl-chip" data-pl-slug="${esc(slug)}" data-pl-url="${esc(url)}" data-has-secret="${matched ? 1 : 0}">
-      <i data-lucide="${matched ? "shield-check" : "key-round"}"></i>
-      <span>${esc(label)}</span>
-      <span class="pl-chip-state">${matched ? "login saved" : "needs login"}</span>
-    </button>`);
-  }
-  $("plPortalChips").innerHTML = chips.join("");
+  const view = plProjectPortals(state.submittalTracks, creds);
+  $("plPortalChips").innerHTML = view.portals.map((p) => `<button type="button" class="pl-chip" data-pl-slug="${esc(p.slug)}" data-pl-url="${esc(p.url)}" data-has-secret="${p.matched ? 1 : 0}">
+      <i data-lucide="${p.matched ? "shield-check" : "key-round"}"></i>
+      <span>${esc(p.label)}</span>
+      <span class="pl-chip-state">${p.matched ? "login saved" : "needs login"}</span>
+    </button>`).join("");
   $("plPortalChips").querySelectorAll("[data-pl-slug]").forEach((chip) => chip.addEventListener("click", () => {
     $("pl_portalType").value = chip.getAttribute("data-pl-slug");
     $("pl_portalUrl").value = chip.getAttribute("data-pl-url") || "";
     $("pl_username").focus();
   }));
 
-  $("plList").innerHTML = creds.length
-    ? creds.map((c) => `<div class="pl-cred-row">
-        <div>
-          <div class="pl-cred-meta"><strong>${esc(portalDisplayName(c.portalType, c.portalUrl))}</strong> · ${esc(c.usernameReference)} ${c.hasSecret ? "🔒" : ""}</div>
-          ${portalHostname(c.portalUrl) && portalHostname(c.portalUrl) !== portalDisplayName(c.portalType, c.portalUrl) ? `<div class="pl-cred-url">${esc(portalHostname(c.portalUrl))}</div>` : ""}
-        </div>
-        <button type="button" class="danger-button danger-button-sm" data-pl-del="${esc(c.id)}">Delete</button>
-      </div>`).join("")
-    : '<p class="muted" style="font-size:12px">No saved logins yet. Pick a portal above to pre-fill, then enter the username and password.</p>';
+  $("plList").innerHTML = plListHtml(view, !!state.plShowAllLogins, client.name);
+  $("plList").querySelectorAll("[data-pl-toggle]").forEach((b) => b.addEventListener("click", async () => {
+    state.plShowAllLogins = !state.plShowAllLogins;
+    await renderPortalLogins();
+  }));
   $("plList").querySelectorAll("[data-pl-del]").forEach((b) => b.addEventListener("click", async () => {
     try {
       if (!window.confirm("Permanently delete this stored portal login?\n\nIt cannot be recovered — you would re-enter the credentials to restore it.")) return;
@@ -11408,8 +11452,8 @@ async function renderPortalLogins() {
   // Header summary: X of Y portals have a saved login.
   const summary = $("portalLoginsSummary");
   if (summary) {
-    const total = chips.length;
-    const ready = $("plPortalChips").querySelectorAll('[data-has-secret="1"]').length;
+    const total = view.portals.length;
+    const ready = view.portals.filter((p) => p.matched).length;
     summary.textContent = total ? `${ready}/${total} portal logins saved` : (creds.length ? `${creds.length} saved` : "");
   }
   if (window.lucide) window.lucide.createIcons();

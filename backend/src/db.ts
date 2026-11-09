@@ -3225,7 +3225,7 @@ const VERSIONED_MIGRATIONS: VersionedMigration[] = [
     },
   },
   {
-    version: 66,
+    version: 67,
     name: "authority_eligibility_limits",
     up: (db) => {
       // WHO QUALIFIES, AS CITED DATA (#679): one row per authority — a utility's customer-generation

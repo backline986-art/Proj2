@@ -9,7 +9,7 @@
 // qualify was filed and rejected. The owner's rule (2026-11-09): a generic mechanism plus data per
 // authority, never logic keyed to one state, utility or city.
 //
-// One record per authority (authority_eligibility_limits, migration v66), each limit cited by name,
+// One record per authority (authority_eligibility_limits, migration v67), each limit cited by name,
 // URL and the source's own words. Rows ship in backend/data/reference-eligibility-limits.json and
 // land SEEDED; research may propose more (cited, seeded); a row a person verified is never written
 // again (rule 3).
@@ -139,7 +139,7 @@ function sanitizeRecord(raw: unknown, confidence: AuthorityEligibilityRecord["co
   return { authorityKind: kind, state, authority: str(o.authority).slice(0, 200), programName: str(o.programName).slice(0, 200), limits, confidence };
 }
 
-// ── Store (authority_eligibility_limits: created by db.ts migration v66, never lazily) ──────────
+// ── Store (authority_eligibility_limits: created by db.ts migration v67, never lazily) ──────────
 type Row = Record<string, unknown>;
 function rowToRecord(row: Row): AuthorityEligibilityRecord | null {
   let limits: unknown = {};

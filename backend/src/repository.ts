@@ -125,7 +125,8 @@ import { isPortalPaused } from "./portalPause";
 // The ONE creator of permit_check_targets rows (extracted from markTrackSubmitted).
 // Direction matters: submittalTracks must never import repository — jobQueue statically
 // imports repository, and the circular-import guard in CLAUDE.md is about that edge.
-import { ensureCheckTarget, refuseUtilityUrlOnPermitTarget, getSubmittalTracks, isTrackDone, requiredTracks, SUBMITTAL_TRACK_TYPES, trackHasFiling, trackPermitTypes, trackSubmittedAndTracked, trackSubmittedSentence, unfinishedTracks, unfinishedUnattributedTargets } from "./submittalTracks";
+import { ensureCheckTarget, refuseUtilityUrlOnPermitTarget, getSubmittalTracks, isTrackDone, requiredTracks, SUBMITTAL_TRACK_TYPES, trackHasFiling, trackPermitTypes, trackSubmittedAndTracked, trackSubmittedSentence, unfinishedTracks, unfinishedUnattributedTargets, withPermitStageSentence } from "./submittalTracks";
+import { nemFiledWithPermit } from "./utilityFilingLookup";
 import { recordStagedReview, supersedeStagedReviews, takeStagedReviewCapture } from "./stagedReviews";
 import { saveSubmissionConfirmation } from "./submissionConfirmation";
 import { projectSecretValues, projectSecretValuesById } from "./projectSecrets";
@@ -9270,6 +9271,13 @@ export async function prepareSubmission(
       `This project is blocked by an operator: ${hold}. Nothing is staged while it is blocked — `
       + "lift the block (set the project's status) once the reason no longer applies.",
       { operatorBlocked: true, reason: hold });
+  }
+  // NO SEPARATE NEM FILING TO STAGE (#664): a person verified that this utility takes its application
+  // inside the AHJ permit application. Nothing opens on the NEM track (rule 5 — there is no URL to
+  // open), nothing is billed for it; the permit track's packet carries the utility's documents.
+  if (track === "nem") {
+    const withPermit = nemFiledWithPermit(db, detail.project);
+    if (withPermit) throw new HttpError(409, withPermitStageSentence(withPermit, detail.project.utility), { track, nemFiledWithPermit: true });
   }
   // PAYMENT GATE (first — the payment screen sits at the beginning of the flow):
   // a per-submission client must have this track's quote (real permit fees + the

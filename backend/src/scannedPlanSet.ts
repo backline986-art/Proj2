@@ -36,6 +36,7 @@ import type {
   LLMProvider, ParserExtractedField, ParserExtractionConflict, ParserExtractionUncertainty,
   ParserLlmExtraction, PlanPageClass, PlanPageIndex, PlanSheetKind,
 } from "../../shared/src/types";
+import { VisionPageWithheldError } from "./visionPageMask";
 
 /** At most this many DISTINCT pages are read by vision per read (one image per page). */
 export const MAX_VISION_PAGES = 8;
@@ -302,7 +303,7 @@ async function renderChosen(renderer: Renderer, chosen: PlanPageClass[], labelle
       if (img.bytes.length > MAX_IMAGE_BYTES) img = await renderer.render(p.page, { maxLongEdge: VISION_MAX_LONG_EDGE, maxPixels: VISION_MAX_PIXELS, rotate: p.rotate, quality: 65 });
       if (img.bytes.length > MAX_IMAGE_BYTES) img = await renderer.render(p.page, { maxLongEdge: 2000, maxPixels: 2_000_000, rotate: p.rotate, quality: 65 });
     } catch (err) {
-      skipped.push({ page: p.page, reason: `could not be rendered (${String((err as Error)?.message ?? err).slice(0, 80)})` });
+      skipped.push({ page: p.page, reason: err instanceof VisionPageWithheldError ? err.message : `could not be rendered (${String((err as Error)?.message ?? err).slice(0, 80)})` });
       continue;
     }
     if (img.bytes.length > MAX_IMAGE_BYTES) { skipped.push({ page: p.page, reason: `image over the ${MAX_IMAGE_BYTES}-byte per-image cap` }); continue; }
@@ -324,7 +325,7 @@ async function renderThumbs(renderer: Renderer, pages: number[], byteBudget = Nu
       if (total + img.bytes.length > byteBudget) continue;
       total += img.bytes.length;
       out.push({ page, base64: img.bytes.toString("base64"), mimeType: img.mimeType });
-    } catch { /* an unrenderable page is simply not indexed */ }
+    } catch { /* an unrenderable page — or one withheld for a secret it cannot mask (#612) — is simply not indexed */ }
   }
   return out;
 }
@@ -389,10 +390,16 @@ export async function readUndecidedSpecPages(
   pdfBytes: Uint8Array,
   pages: number[],
   pageTexts: string[],
-  opts: { maxBytes?: number } = {},
+  opts: {
+    maxBytes?: number;
+    /** The project's own secrets (projectSecretValuesById): painted over on every thumbnail, or the
+     *  page is not indexed (rule 2, #612). null = they could not be read: nothing is rendered or sent. */
+    secrets?: readonly string[] | null;
+  } = {},
 ): Promise<UndecidedSpecRead> {
   const out: UndecidedSpecRead = { decided: {}, integratedInverter: [], withheld: [] };
   if (!pages.length) return out;
+  if (opts.secrets === null) return { ...out, failure: "the project's account and meter numbers could not be read, so no page image was sent" };
   const send = pages.filter((p) => {
     if (!looksLikeBillOrMeterPage(pageTexts[p - 1] ?? "")) return true;
     out.withheld.push(p);
@@ -402,7 +409,7 @@ export async function readUndecidedSpecPages(
   if (typeof llm.classifyPlanPages !== "function") return { ...out, failure: "no page index was available" };
   const byteBudget = Math.max(1, Math.min(MAX_VISION_BYTES, Math.floor(opts.maxBytes ?? MAX_VISION_BYTES)));
   const { openPdfForVisionRender } = await import("./pageImages");
-  const renderer = await openPdfForVisionRender(pdfBytes);
+  const renderer = await openPdfForVisionRender(pdfBytes, { secrets: opts.secrets ?? [] });
   try {
     const { index, failure } = await readPageIndex(llm, renderer, send, byteBudget);
     if (!index) return { ...out, failure };
@@ -464,7 +471,14 @@ function describeSkipped(skipped: Array<{ page: number; reason: string }>): stri
 export async function readPlanSetForExtraction(
   llm: Pick<LLMProvider, "extractProjectFields" | "classifyPlanPages" | "orientPlanPages">,
   pdfBytes: Uint8Array,
-  opts: { defaultState?: string; maxPages?: number; maxBytes?: number } = {},
+  opts: {
+    defaultState?: string; maxPages?: number; maxBytes?: number;
+    /** The project's own secrets, when the plan set belongs to one (rule 2, #612): painted over on
+     *  every page image, or the page is not read. The parser's plan-scan door posts a bare PDF BEFORE
+     *  any project exists, so it has none to pass — that read is intake (CLAUDE.md rule 2's one
+     *  allowed read), and a scan's pages carry no text layer for a detector to check anyway. */
+    secrets?: readonly string[];
+  } = {},
 ): Promise<ScannedPlanRead> {
   const { PDFDocument } = await import("pdf-lib");
   const doc = await PDFDocument.load(pdfBytes, { ignoreEncryption: true });
@@ -487,7 +501,7 @@ export async function readPlanSetForExtraction(
   }
 
   const { openPdfForVisionRender } = await import("./pageImages");
-  const renderer = await openPdfForVisionRender(pdfBytes);
+  const renderer = await openPdfForVisionRender(pdfBytes, { secrets: opts.secrets });
   try {
     if (scan) {
       const all = Array.from({ length: pageCount }, (_, i) => i + 1);
