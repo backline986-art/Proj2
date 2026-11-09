@@ -192,6 +192,41 @@ function num(project: ProjectRecord, keys: string[]): number | null {
   return null;
 }
 
+// THE DECLARED DC SIZE IS A ROUNDED FIGURE (#689 3c). A flat 0.15 kW tolerance blocked a set whose
+// 455 x 550 W modules make 250.25 kW against a declared "250 kW" (0.1%): the designer wrote the size to
+// the kilowatt, and 250.25 kW written to the kilowatt IS 250. The tolerance is now what the declared
+// figure can round away, at the precision it is written in — half a unit of its last digit ("250" ->
+// 0.5 kW, "8.36" -> 0.005 kW) — or the 0.15 kW it has always allowed, whichever is looser. It stays
+// strict for a COUNT error: a gap of a whole module or more is never rounding, so a figure written
+// coarser than one module ("8" for 20 x 400 W) cannot absorb a miscounted module (21 x 400 W = 8.4 kW
+// still blocks). Nothing here is keyed to a place: it is arithmetic on the set's own numbers.
+const DC_SIZE_FLOOR_KW = 0.15;
+
+/** The declared DC size as it is WRITTEN, so its precision can be read: the snapshot's own dcKw text
+ *  when it states the same figure, else the number itself (a parser number loses trailing zeros:
+ *  "8.00" arrives as 8 — read as written to the kilowatt, and the one-module bound still holds). */
+function declaredDcText(project: ProjectRecord, dcKw: number): string {
+  const raw = str(project, "dcKw");
+  return raw && parseRating(raw) === dcKw ? raw : String(dcKw);
+}
+
+/** Decimal places the figure is written to: "250" -> 0, "8.36 kW" -> 2, "8.000" -> 3. */
+function writtenDecimals(text: string): number {
+  const m = text.replace(/,/g, "").match(/\d+(?:\.(\d+))?/);
+  return m?.[1]?.length ?? 0;
+}
+
+/** Does the modules' DC agree with the declared figure? Within the 0.15 kW floor, or within the
+ *  declared figure's own rounding AND short of one whole module. */
+export function dcSizeAgrees(calculatedKw: number, declaredKw: number, declaredText: string, moduleKw: number): boolean {
+  const gap = Math.abs(calculatedKw - declaredKw);
+  const EPS = 1e-9; // binary fractions: 455 * 550 / 1000 is not exactly 250.25
+  if (gap <= DC_SIZE_FLOOR_KW + EPS) return true;
+  const halfUnit = 0.5 * 10 ** -writtenDecimals(declaredText);
+  // A tie rounds away from the declared figure (250.5 written to the kilowatt is 251), so strictly less.
+  return gap < halfUnit - EPS && gap < moduleKw - EPS;
+}
+
 function hasAny(text: string, patterns: RegExp[]): boolean {
   return patterns.some((pattern) => pattern.test(text));
 }
@@ -1982,7 +2017,7 @@ export function evaluateDesignCodeFindings(
   const moduleWattage = num(project, ["moduleWattage"]);
   if (dcKw != null && moduleQty != null && moduleWattage != null) {
     const calculatedDc = (moduleQty * moduleWattage) / 1000;
-    if (Math.abs(calculatedDc - dcKw) > 0.15) {
+    if (!dcSizeAgrees(calculatedDc, dcKw, declaredDcText(project, dcKw), moduleWattage / 1000)) {
       out.push(finding({
         id: "city.elec.dc-size-mismatch",
         severity: "blocker",

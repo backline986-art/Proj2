@@ -15,6 +15,8 @@ const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "residential-plan-reading-"));
 process.env.AUTOPILOT_DB_PATH = path.join(tmp, "test.db");
 
 const { buildApplicationDocumentPackage } = await import("../src/applicationDocs");
+const { buildReviewerReport } = await import("../src/reviewerEngine");
+const { dcSizeAgrees } = await import("../src/codeReviewRules");
 type ProjectRecord = import("../../shared/src/types").ProjectRecord;
 
 let failures = 0;
@@ -95,6 +97,37 @@ check("3b: a stated projectType still wins over the mount", () => {
   const md = docText(project({ projectType: "Solar PV + battery storage", mounting: "Carport" }), "ahj-worksheet");
   assert.equal(line(md, "Project type:"), "Project type: Solar PV + battery storage");
   assert.ok(line(md, "Install ").startsWith("Install solar pv + battery storage."), line(md, "Install "));
+});
+
+// ---- 3c: the DC-size tolerance is the declared figure's own rounding -------------------------------
+const findingIds = (p: ProjectRecord): string[] => buildReviewerReport(p).findings.map((f) => f.id);
+const dcJob = (dcKw: number, dcText: string, qty: number, watts: number): ProjectRecord =>
+  project({ dcKw: dcText, moduleQty: String(qty), moduleWattage: String(watts), mounting: "Roof mount" }, { systemSizeDcKw: dcKw });
+check("3c: 455 x 550 W (250.25 kW) against a declared \"250\" kW is rounding, not a mismatch", () => {
+  assert.ok(!findingIds(dcJob(250, "250", 455, 550)).includes("city.elec.dc-size-mismatch"));
+});
+check("3c: the same set read as a parser number (250) passes too", () => {
+  assert.ok(!findingIds(project({ dcKw: 250, moduleQty: "455", moduleWattage: "550" }, { systemSizeDcKw: 250 })).includes("city.elec.dc-size-mismatch"));
+});
+check("3c: a one-module miscount on an 8 kW job still BLOCKS (21 x 400 W = 8.4 kW vs \"8\")", () => {
+  const f = buildReviewerReport(dcJob(8, "8", 21, 400)).findings.find((x) => x.id === "city.elec.dc-size-mismatch");
+  assert.equal(f?.severity, "blocker", JSON.stringify(f));
+});
+check("3c: a one-module miscount against a figure written to the hundredth still blocks (8.40 vs 20 x 400 W)", () => {
+  const f = buildReviewerReport(dcJob(8.4, "8.40", 20, 400)).findings.find((x) => x.id === "city.elec.dc-size-mismatch");
+  assert.equal(f?.severity, "blocker", JSON.stringify(f));
+});
+check("3c: ten modules short on a 250 kW job still blocks", () => {
+  assert.ok(findingIds(dcJob(250, "250", 445, 550)).includes("city.elec.dc-size-mismatch"));
+});
+check("3c: the arithmetic: the 0.15 kW floor, the declared rounding, the one-module bound, ties", () => {
+  assert.equal(dcSizeAgrees(8.12, 8.0, "8.0", 0.4), true, "inside the 0.15 kW floor");
+  assert.equal(dcSizeAgrees(8.2, 8, "8", 0.41), true, "20 x 410 W written to the kilowatt");
+  assert.equal(dcSizeAgrees(8.2, 8, "8.00", 0.41), false, "the same set written to the hundredth");
+  assert.equal(dcSizeAgrees(8.4, 8, "8", 0.4), false, "a whole module is never rounding");
+  assert.equal(dcSizeAgrees(250.5, 250, "250", 0.55), false, "a tie rounds away (250.5 -> 251)");
+  assert.equal(dcSizeAgrees(250.25, 250, "250 kW", 0.55), true, "units on the written figure");
+  assert.equal(dcSizeAgrees(1250.4, 1250, "1,250", 0.55), true, "a thousands separator is not a decimal point");
 });
 
 if (failures) { console.error(`\n${failures} check(s) failed`); process.exit(1); }
