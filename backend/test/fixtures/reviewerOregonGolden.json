@@ -137,7 +137,7 @@
       "severity": "blocker",
       "category": "structural",
       "title": "Prescriptive rafter span evidence incomplete",
-      "message": "Oregon-style prescriptive review needs rafter/truss spacing and span evidence or an engineered alternate path.",
+      "message": "Oregon-style prescriptive review needs rafter/truss spacing and span evidence or an engineered alternate path. Not stated on the plans: rafter span. Read from the plans: 32 in o.c.",
       "cityFeedback": "Provide the prescriptive rooftop PV checklist/worksheet information, including framing member size, spacing, span, species/grade, roof slope, dead load, snow load, and wind exposure. If this cannot be documented, provide stamped engineering.",
       "designTeamAction": "Complete the structural worksheet inputs or route the design to engineered review.",
       "evidenceNeeded": [
@@ -717,7 +717,7 @@
       "severity": "blocker",
       "category": "structural",
       "title": "Prescriptive rafter span evidence incomplete",
-      "message": "Oregon-style prescriptive review needs rafter/truss spacing and span evidence or an engineered alternate path.",
+      "message": "Oregon-style prescriptive review needs rafter/truss spacing and span evidence or an engineered alternate path. Not stated on the plans: rafter span. Read from the plans: 32 in o.c.",
       "cityFeedback": "Provide the prescriptive rooftop PV checklist/worksheet information, including framing member size, spacing, span, species/grade, roof slope, dead load, snow load, and wind exposure. If this cannot be documented, provide stamped engineering.",
       "designTeamAction": "Complete the structural worksheet inputs or route the design to engineered review.",
       "evidenceNeeded": [

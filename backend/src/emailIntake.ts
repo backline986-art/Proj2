@@ -304,7 +304,7 @@ export const PARSER_PROJECT_FIELDS: ReadonlySet<string> = new Set([
   "dwellingUnits", "constructionCategory", "invMaxDcInputV", "siteHighTempC", "acConductor",
   "acConductorCount", "acRunLengthFt", "roofMaterialSubtype", "tileAttachmentMethod", "attachmentHardware",
   "busRating", "mainBreaker", "pvBreaker", "acDiscReq", "acDiscMakeModel", "acDiscQty", "acDiscAmps",
-  "acDiscFused", "acDiscVoltage", "snow", "deadLoad", "roofRafterSpacing", "wind", "permitPath", "windSpeed",
+  "acDiscFused", "acDiscVoltage", "snow", "deadLoad", "roofRafterSpacing", "roofRafterSize", "woodGrade", "wind", "permitPath", "windSpeed",
   "riskCategory", "lightFrame", "framingType", "roofLayers", "moduleHeightAboveRoof", "gravityWindDesign",
   "manufacturerInstallation", "rafterExceptionCompliant", "moduleFiguresCompliant", "attachmentToFraming",
   "attachmentSpacingIn", "attachmentEdgeSpacingIn", "attachmentsOutsideEdgeZone",
@@ -499,7 +499,7 @@ const FIELD_LABELS: Record<string, string> = {
   batteryMake: "Battery make", batteryModel: "Battery model", batteryQty: "Battery count",
   pvMicroMake: "Microinverter make", pvMicroModel: "Microinverter model", pvMicroQty: "Microinverter count",
   roofMaterial: "Roof material", roofMaterialSubtype: "Roof material type", mounting: "Mounting type", rackingSystem: "Racking system",
-  roofRafterSpan: "Rafter span", roofRafterSpacing: "Rafter spacing", roofLayers: "Roof layers", framingType: "Roof framing type",
+  roofRafterSpan: "Rafter span", roofRafterSpacing: "Rafter spacing", roofRafterSize: "Rafter size", woodGrade: "Lumber grade", roofLayers: "Roof layers", framingType: "Roof framing type",
   interco: "Interconnection method", busRating: "Main panel bus rating (A)", mainBreaker: "Main breaker (A)", pvBreaker: "PV breaker (A)",
   snow: "Snow load", wind: "Wind speed", windSpeed: "Wind speed", existingSystem: "Existing solar system",
 };

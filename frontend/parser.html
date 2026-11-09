@@ -3970,6 +3970,8 @@ const LLM_SNAPSHOT_KEYS = new Set([
   // client's standard part is cross-checked against. Read before, never saved.
   'acDiscMakeModel','acDiscQty','acDiscAmps','acDiscFused','acDiscVoltage',
   'snow','deadLoad','roofRafterSpacing','roofRafterSpan','wind','permitPath',
+  // The rafter's size and lumber grade, read off the framing callouts (#595, planFraming.ts).
+  'roofRafterSize','woodGrade',
   // Structural prescriptive-screen fields — evaluatePrescriptiveCriteria answers
   // the AHJ checklist rows from these; dropping them here regresses to [verify].
   'windSpeed','riskCategory','lightFrame','framingType','roofLayers','moduleHeightAboveRoof',

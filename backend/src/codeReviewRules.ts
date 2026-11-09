@@ -21,6 +21,7 @@ import { adoptedNecEdition, necEditionRequirements, NEC_EDITION_REQUIREMENTS } f
 import { moduleLevelElectronicsEquipment, type ModuleLevelElectronicsEvidence } from "./moduleLevelElectronics";
 import { designText, mountKind, type MountKind } from "./mountKind";
 import { microEvidenceSupersededIn } from "./normalize";
+import { engineerSealStates, stateName } from "./engineerSeal";
 export { designText, engineeredGroundMount, groundMountFromField, isGroundMount, mountKind, mountKindForProject, type MountKind } from "./mountKind";
 
 const oregonElectrical2023: CodeReference = {
@@ -102,6 +103,19 @@ const oregonPrescriptive: CodeReference = {
   adoptionScope: "Oregon residential and commercial prescriptive rooftop PV path.",
   sourceUrl: "https://www.washingtoncountyor.gov/lut/building-services/documents/solar-checklist/download?inline=",
   note: "Common screens include PV dead load, ground snow load, wind exposure, roof slope, and framing spacing/span evidence.",
+};
+
+// AN ENGINEER'S SEAL IS VALID ONLY IN THE STATE THAT REGISTERED THE ENGINEER (#595). Every state
+// licenses engineers to practise within its own borders (Oregon: OSBEELS under ORS chapter 672), so
+// the seal on a job's engineering must be that job's state's. The per-state cited record of this rule
+// is #595's second PR (seeded state data); until then this reference states the rule itself.
+const engineerSealJurisdiction: CodeReference = {
+  code: "State engineering registration law",
+  section: "Seal of the state of registration",
+  title: "An engineer's seal is valid only in the state that registered the engineer",
+  adoptionScope: "Every US state (Oregon: OSBEELS, ORS chapter 672).",
+  sourceUrl: "",
+  note: "The per-state citation lands with #595's state record (seeded, cited data).",
 };
 
 const portlandRafterSpan: CodeReference = {
@@ -1035,8 +1049,8 @@ export function evaluateDesignCodeFindings(
       title: "Engineer's structural letter on file (confirmed) — verify the seal on the structural pages",
       message: `The engineer's structural letter is on file as the structural document, confirmed by ${by}. The text layer cannot see a PE seal, so whether it is sealed is for a person to verify, not missing.`,
       cityFeedback: "The structural calculations or engineer's letter must carry the engineer's wet or digital seal.",
-      designTeamAction: "Open the structural pages and confirm the engineer's seal and signature are on the letter before submittal.",
-      evidenceNeeded: ["PE seal and signature on the engineer's structural letter"],
+      designTeamAction: `Open the structural pages and confirm the engineer's seal and signature are on the letter${usStateCode(project.state) ? `, and that the seal is ${stateName(usStateCode(project.state))}'s (a seal is valid only in the state that registered the engineer)` : ""}, before submittal.`,
+      evidenceNeeded: [`PE seal and signature on the engineer's structural letter${usStateCode(project.state) ? ` (a ${stateName(usStateCode(project.state))} seal)` : ""}`],
       codeReferences: [...oregonWorksheetRefs, roofLoadsRef],
     }));
   } else if (roofMounted && claimsEngineered && !hasStampedEngineering) {
@@ -1055,6 +1069,34 @@ export function evaluateDesignCodeFindings(
       designTeamAction: "Obtain the sealed calculation package from the engineer of record before submittal — a review-block reference on the plan set is not the stamp, and strict jurisdictions (Portland among them) will issue a correction for it.",
       evidenceNeeded: ["Stamped/sealed structural calculation or engineer's letter", "Rafter size, spacing and clear span used in the calculation", "PV dead load and attachment point loads"],
       codeReferences: [...oregonWorksheetRefs, roofLoadsRef],
+    }));
+  }
+
+  // THE SEAL MUST BE THIS STATE'S (#595). A sealed letter in the package silences "stamped
+  // engineering missing" above, and a real Oregon job was returned because its letter carried another
+  // state's seal. Read the state each seal / licence line names from the sheets' own words (the plan
+  // set's text and each uploaded document; never the parser's narrative or its review flags), and
+  // block when the seals name states and none of them is the job's. A seal that is only an image names
+  // no state, so it raises nothing here: that is the person's check below. Tightens only.
+  const jobState = usStateCode(project.state) || usStateCode(str(project, "state"));
+  const sealSources = [
+    { label: "Plan set", text: str(project, "planSetExtractedText") },
+    ...documentTexts,
+  ];
+  const seals = jobState ? engineerSealStates(sealSources) : [];
+  if (seals.length && !seals.some((s) => s.state === jobState)) {
+    const named = [...new Set(seals.map((s) => s.state))].map(stateName);
+    const where = [...new Set(seals.map((s) => s.source))].join(", ");
+    out.push(finding({
+      id: "city.struct.seal-out-of-state",
+      severity: "blocker",
+      category: "structural",
+      title: `Engineer's seal is from ${named.join(" / ")}, not ${stateName(jobState)}`,
+      message: `The engineering in this package is sealed for ${named.join(" / ")} (read from: ${where}), but the job is in ${stateName(jobState)}. An engineer's seal is valid only in the state that registered the engineer, so ${stateName(jobState)} will not accept it.`,
+      cityFeedback: `Structural calculations and letters must be sealed by an engineer registered in ${stateName(jobState)}.`,
+      designTeamAction: `Get the structural letter / calculations sealed by an engineer registered in ${stateName(jobState)} before submittal.`,
+      evidenceNeeded: [`Structural letter / calculations sealed by a ${stateName(jobState)}-registered engineer`],
+      codeReferences: [engineerSealJurisdiction],
     }));
   }
 
@@ -1080,14 +1122,29 @@ export function evaluateDesignCodeFindings(
 
   // Suppression now requires the DOCUMENT, not a mention of one — see above.
   if (roofMounted && prescriptiveScreening && !hasStampedEngineering && spanEvidenceIncomplete) {
+    // SAY WHAT THE PLANS LACK (#595). The parser reads the framing off the plans (planFraming.ts),
+    // so a fact still missing here is one the plans did not state: name it, and name what WAS read,
+    // so the caution reads as the plans' gap rather than a guess.
+    const notStated = [
+      rafterSpacing == null ? (trussFraming ? "truss spacing" : "rafter spacing") : "",
+      !trussFraming && rafterSpan == null ? "rafter span" : "",
+    ].filter(Boolean);
+    const size = str(project, "roofRafterSize");
+    const grade = str(project, "woodGrade");
+    const read = [
+      size ? `${size}${grade ? ` ${grade}` : ""}${framingTypeText ? ` ${framingTypeText}` : ""}` : "",
+      rafterSpacing != null ? `${rafterSpacing} in o.c.` : "",
+      rafterSpan != null ? `span ${rafterSpan} ft` : "",
+    ].filter(Boolean);
+    const gap = ` Not stated on the plans: ${notStated.join(", ")}.${read.length ? ` Read from the plans: ${read.join(", ").replace(/\.?$/, ".")}` : ""}`;
     out.push(finding({
       id: "city.struct.span-table-incomplete",
       severity: screeningSeverity,
       category: "structural",
       title: "Prescriptive rafter span evidence incomplete",
-      message: ctx && !oregon
+      message: (ctx && !oregon
         ? `${ctx.ahj || ctx.state} prescriptive review needs rafter/truss spacing and span evidence or an engineered alternate path.`
-        : "Oregon-style prescriptive review needs rafter/truss spacing and span evidence or an engineered alternate path.",
+        : "Oregon-style prescriptive review needs rafter/truss spacing and span evidence or an engineered alternate path.") + gap,
       cityFeedback: "Provide the prescriptive rooftop PV checklist/worksheet information, including framing member size, spacing, span, species/grade, roof slope, dead load, snow load, and wind exposure. If this cannot be documented, provide stamped engineering.",
       designTeamAction: "Complete the structural worksheet inputs or route the design to engineered review.",
       evidenceNeeded: ["Framing spacing", "Framing clear span", "Species/grade or engineered truss evidence", "Dead load, snow load, wind exposure"],

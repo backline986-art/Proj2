@@ -1,5 +1,7 @@
 import type { ParserLlmExtraction } from "../../shared/src/types";
 import { classifyRoofCovering, tileAttachmentFromText, tileSubtype } from "./roofCovering";
+import { readPlanFraming, readStatedPermitPath, type PlanFact } from "./planFraming";
+import { pathWordingScope } from "./permitPath";
 
 /** Explicit plan facts only. This supplements the text intake, including sheets
  * beyond the model's text budget. It never turns a missing fact into compliance. */
@@ -51,9 +53,36 @@ export function supplementStructuralIntake(result: ParserLlmExtraction, planText
   add("moduleVoc", /\b(?:OPEN[-\s]CIRCUIT\s+VOLTAGE|V\s?OC)\s*(?:\(V\))?\s*[:=]?\s*(\d{2}(?:\.\d{1,2})?)\s*V\b/i, m => Number(m[1]));
   add("moduleIsc", /\b(?:SHORT[-\s]CIRCUIT\s+CURRENT|I\s?SC)\s*(?:\(A\))?\s*[:=]?\s*(\d{1,2}(?:\.\d{1,2})?)\s*A\b/i, m => Number(m[1]));
   add("moduleVocTempCoeff", /\bTEMPERATURE\s+COEFFICIENT\s+(?:OF\s+)?V\s?OC\s*(?:\(β\)|\(BETA\))?\s*[:=]?\s*(-\s?0?\.\d{1,3})\s*%\s*\/\s*°?\s*[CK]\b/i, m => Number(m[1].replace(/\s/g, "")));
-  add("framingType", /\d+\s*"\s*[x×]\s*\d+\s*"\s*(TRUSS|RAFTER)\s*@\s*\d+/i, m => m[1].toLowerCase());
-  add("roofRafterSpacing", /\d+\s*"\s*[x×]\s*\d+\s*"\s*(?:TRUSS|RAFTER)\s*@\s*(\d+)\s*"\s*O\.?\s*C/i, m => Number(m[1]));
-  add("lightFrame", /\d+\s*"\s*[x×]\s*\d+\s*"\s*(?:TRUSS|RAFTER)\s*@\s*\d+/i, () => "yes");
+  // THE ROOF FRAMING AND THE PERMIT PATH, OFF THE PLANS (#595; planFraming.ts). Member type, size,
+  // lumber grade and spacing fill only what the model left empty, from ONE stated value (two sheets
+  // that disagree are review). The span and the path may also correct the model, but only toward the
+  // stricter reading: a longer span than the model's (the longest span governs a span table), and
+  // "engineered" over a model "prescriptive" when the plans state the engineered path. A plan
+  // reading never relaxes what the model read.
+  const framing = readPlanFraming(planText);
+  const planFact = <T extends string | number>(key: string, fact: PlanFact<T> | null, sheet = "Structural plan / notes") => {
+    if (!fact) return;
+    fields[key] = { value: fact.value, confidence: 0.95, evidence: { source: "plan_set", sheet, excerpt: fact.excerpt } };
+  };
+  const empty = (key: string) => fields[key]?.value == null || String(fields[key]?.value).trim() === "";
+  if (empty("framingType")) planFact("framingType", framing.framingType);
+  if (empty("roofRafterSpacing")) planFact("roofRafterSpacing", framing.roofRafterSpacing);
+  if (empty("roofRafterSize")) planFact("roofRafterSize", framing.roofRafterSize);
+  if (empty("woodGrade")) planFact("woodGrade", framing.woodGrade);
+  if (empty("lightFrame") && framing.lightFrame) {
+    const first = framing.roofRafterSize ?? framing.roofRafterSpacing;
+    fields.lightFrame = { value: "yes", confidence: 0.95,
+      evidence: { source: "plan_set", sheet: "Structural plan / notes", excerpt: first?.excerpt ?? "Dimensioned lumber framing callout" } };
+  }
+  if (framing.roofRafterSpan) {
+    const modelSpan = empty("roofRafterSpan") ? null : spanFeet(fields.roofRafterSpan.value);
+    if (modelSpan == null || modelSpan < framing.roofRafterSpan.value) planFact("roofRafterSpan", framing.roofRafterSpan);
+  }
+  const statedPath = readStatedPermitPath(planText);
+  if (statedPath) {
+    const modelPath = pathWordingScope(empty("permitPath") ? "" : String(fields.permitPath.value));
+    if (!modelPath || (modelPath === "prescriptive" && statedPath.value === "engineered")) planFact("permitPath", statedPath, "Plan set (stated permit path)");
+  }
   add("moduleHeightAboveRoof", /PANELS? WILL NOT MOUNT HIGHER\s*THAN\s*(\d+)\s*INCHES ABOVE THE SURFACE OF\s*THE ROOF/i, m => Number(m[1]));
   add("roofLayers", /(?:EXISTING\s+)?(?:ROOF(?:ING)?\s+LAYERS?\s*[:=]\s*)(\d+)/i, m => Number(m[1]));
   add("attachmentToFraming", /SOLAR PANELS ARE TO BE MOUNTED TO THE ROOF\s*FRAMING/i, () => "yes");
@@ -61,6 +90,14 @@ export function supplementStructuralIntake(result: ParserLlmExtraction, planText
   add("attachmentEdgeSpacingIn", /ROOF ATTACHMENTS SHALL BE SPACED NO\s*GREATER THAN\s*(\d+)\s*IN\.?\s*OC IN ANY DIRECTION\s*WHERE LOCATED WITHIN\s*3\s*FT\.?\s*OF A ROOF\s*EDGE, HIP, EAVE OR RIDGE/i, m => Number(m[1]));
   add("manufacturerInstallation", /RACKING SYSTEM\s*&\s*PV ARRAY WILL BE INSTALLED ACCORDING TO CODE[-\s]*COMPLIANT INSTALLATION MANUAL/i, () => "yes");
   return { ...result, fields };
+}
+
+/** A span the model wrote, in feet: "11.5", "11'-6\"", "11 ft 6 in". NaN-free: null when unreadable. */
+function spanFeet(value: unknown): number | null {
+  const v = String(value ?? "").trim();
+  const ftIn = /(\d+(?:\.\d+)?)\s*(?:'|’|ft\b\.?|feet\b)\s*-?\s*(?:(\d+(?:\.\d+)?)\s*(?:"|”|in\b|inch))?/i.exec(v);
+  const n = ftIn ? Number(ftIn[1]) + (ftIn[2] ? Number(ftIn[2]) / 12 : 0) : Number.parseFloat(v);
+  return Number.isFinite(n) && n > 0 ? n : null;
 }
 
 /** Include later structural notes/datasheets instead of silently discarding
