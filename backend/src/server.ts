@@ -3024,12 +3024,13 @@ app.patch("/api/ahj-templates/:id/verify", (req, res) => {
   res.json({ id: String(req.params.id), verified });
 });
 
-// Fully delete a stored template (blob + map).
-app.delete("/api/ahj-templates/:id", (req, res) => {
-  // SHARED cross-tenant knowledge: one delete removes the template (and any
-  // human-verified field map) for EVERY tenant. Admin-only, and a verified map
-  // needs the explicit ?force=1 acknowledgement — verified mapping work is the
-  // product's asset and must never vanish on a casual click.
+// SHARED cross-tenant knowledge: a template row (and any human-verified field map on
+// it) serves EVERY tenant, so anything that destroys it — the row itself, or the PDF
+// blob the map is useless without (fill needs pdf_blob; remap and download answer 410
+// without it) — is admin-only, and a verified map needs the explicit ?force=1
+// acknowledgement. Verified mapping work is the product's asset and must never vanish,
+// or be made unusable, on a casual click (#393). One guard for both deletes.
+function guardSharedTemplateDestruction(req: Request): void {
   requireAdmin(req);
   const row = db.get<{ id: string; field_map?: string }>("SELECT id, field_map FROM ahj_form_templates WHERE id = ?", [String(req.params.id)]);
   if (!row) throw new HttpError(404, "Template not found.");
@@ -3037,13 +3038,20 @@ app.delete("/api/ahj-templates/:id", (req, res) => {
   if (map.verified === true && String(req.query.force || "") !== "1") {
     throw new HttpError(409, "This template's field map is HUMAN-VERIFIED. Deleting it destroys that work for every tenant — retry with ?force=1 if you really mean it.");
   }
+}
+
+// Fully delete a stored template (blob + map).
+app.delete("/api/ahj-templates/:id", (req, res) => {
+  guardSharedTemplateDestruction(req);
   db.run("DELETE FROM ahj_form_templates WHERE id = ?", [String(req.params.id)]);
   res.json({ deleted: true });
 });
 
-// Wipe the raw PDF blob (keep moat data + field map for submission prep)
+// Wipe the raw PDF blob (keep moat data + field map for submission prep). Same guard
+// as the full delete: without the blob the template cannot be filled for anyone.
 app.delete("/api/ahj-templates/:id/blob", (req, res) => {
-  db.run("UPDATE ahj_form_templates SET pdf_blob = NULL, updated_at = ? WHERE id = ?", [new Date().toISOString(), req.params.id]);
+  guardSharedTemplateDestruction(req);
+  db.run("UPDATE ahj_form_templates SET pdf_blob = NULL, updated_at = ? WHERE id = ?", [new Date().toISOString(), String(req.params.id)]);
   res.json({ wiped: true });
 });
 
