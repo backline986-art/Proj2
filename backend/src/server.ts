@@ -2425,6 +2425,71 @@ app.post("/api/projects/:id/permit-process/refresh", asyncHandler(async (req, re
   res.status(202).json({ queued: true, jobId: r.jobId, reason: r.reason, lookupKey: r.lookupKey });
 }));
 
+// THE EMAIL FILING CHANNEL (#667; filingEmail.ts). Under /api/projects/:id, so each inherits the
+// tenancy guard (rule 6) and getProjectDetail 404s an unknown or out-of-scope project first. The
+// record itself is SHARED knowledge (one authority's address serves every tenant), keyed by the
+// project's own utility / track issuer — a body never names another authority.
+//   GET     ?track=  the authority, its record, whether it is usable (and why not), the drafts/sends.
+//   PUT     a NAMED PERSON records (verifies) the address, the authority's page and its words. Refused
+//           unless usable (address verbatim in the words; government or the page's own domain).
+//   DELETE  ?track=  a named person withdraws it: the track files on its portal again.
+//   GET     .../drafts/:sendId/eml  the staged draft as an .eml for a person to send (rule 1: the
+//           person sends it; automation sends only through the gate, in the staging run).
+const filingEmailTrack = (raw: unknown): SubmittalTrackType => {
+  const t = String(raw ?? "").trim();
+  if (!SUBMITTAL_TRACK_TYPES.includes(t as SubmittalTrackType)) throw new HttpError(400, "Name the track (nem, building, electrical, combo, permit or mpu).");
+  return t as SubmittalTrackType;
+};
+app.get("/api/projects/:id/filing-email", asyncHandler(async (req, res) => {
+  const fe = await import("./filingEmail");
+  const { project } = getProjectDetail(db, String(req.params.id));
+  const track = filingEmailTrack(req.query.track);
+  const authority = fe.authorityForTrack(project, track);
+  const record = authority ? fe.readFilingEmail(db, authority).record : null;
+  const problems = record ? fe.filingEmailRecordProblems(record) : [];
+  res.json({ track, authority, record, usable: Boolean(record) && problems.length === 0, problems, sends: fe.listFilingEmailSends(db, project.id, track) });
+}));
+app.put("/api/projects/:id/filing-email", asyncHandler(async (req, res) => {
+  const fe = await import("./filingEmail");
+  const { isConfirmingPerson } = await import("./feeConfirm");
+  const projectId = String(req.params.id);
+  const { project } = getProjectDetail(db, projectId);
+  const track = filingEmailTrack(req.body?.track);
+  // Named BEFORE anything is written: no name (auth off) is a 400 that records nothing.
+  const verifiedBy = namedPersonDecider(req, "verifiedBy",
+    "Sign in to verify an authority's filing email.",
+    "Name the person verifying: an authority's filing email is verified by a named person.", isConfirmingPerson);
+  const authority = fe.authorityForTrack(project, track);
+  if (!authority) throw new HttpError(400, track === "nem" ? "The project names no utility." : "The project names no AHJ for this track.");
+  const r = fe.setFilingEmail(db, authority, { address: String(req.body?.address ?? ""), sourceUrl: String(req.body?.sourceUrl ?? ""), quote: String(req.body?.quote ?? "") }, verifiedBy);
+  if (!r.saved) throw new HttpError(r.problems.length ? 400 : 409, r.reason, { problems: r.problems });
+  addAuditLog(db, projectId, "human", verifiedBy, "filing_email.verified", { track, authority: authority.name, kind: authority.kind, address: r.record?.address, sourceUrl: r.record?.sourceUrl });
+  res.json({ track, authority, record: r.record, usable: true, problems: [] });
+}));
+app.delete("/api/projects/:id/filing-email", asyncHandler(async (req, res) => {
+  const fe = await import("./filingEmail");
+  const { isConfirmingPerson } = await import("./feeConfirm");
+  const projectId = String(req.params.id);
+  const { project } = getProjectDetail(db, projectId);
+  const track = filingEmailTrack(req.query.track ?? req.body?.track);
+  const by = namedPersonDecider(req, "verifiedBy",
+    "Sign in to withdraw an authority's filing email.",
+    "Name the person withdrawing an authority's filing email.", isConfirmingPerson);
+  const authority = fe.authorityForTrack(project, track);
+  if (!authority || !fe.clearFilingEmail(db, authority)) throw new HttpError(404, "No filing email is on file for this track's authority.");
+  addAuditLog(db, projectId, "human", by, "filing_email.withdrawn", { track, authority: authority.name, kind: authority.kind });
+  res.json({ track, authority, record: null, usable: false });
+}));
+app.get("/api/projects/:id/filing-email/drafts/:sendId/eml", asyncHandler(async (req, res) => {
+  const fe = await import("./filingEmail");
+  const { project } = getProjectDetail(db, String(req.params.id));
+  const eml = await fe.filingEmailDraftEml(db, project, String(req.params.sendId));
+  addAuditLog(db, project.id, "human", String(currentUser(db, req)?.email || "dashboard"), "filing_email.draft_downloaded", { sendId: String(req.params.sendId) });
+  res.setHeader("Content-Type", "message/rfc822");
+  res.setHeader("Content-Disposition", `attachment; filename="${eml.filename.replace(/[^a-z0-9._-]/gi, "_")}"`);
+  res.send(eml.content);
+}));
+
 // THE MANUAL WRITER. The body is passed through as recordPermitStatusCheck's input, so
 // `targetId`, `source`, `rawStatusText`, `applicationNumber`, `permitNumber` AND `track` are all
 // body fields. `track` carries NO authority: it only words the classification of a reading that

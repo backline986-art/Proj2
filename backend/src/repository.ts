@@ -184,7 +184,7 @@ import { resolveEffectiveCodeContext, ensureCodeProfilesResearched, ownCodeProfi
 import { applyCachedVisionVerdicts, visionRelaxedBlockers } from "./reviewerVision";
 import { nowIso } from "./time";
 import { isHarnessAbort, looksBotBlocked } from "./runAbort";
-import { finalSubmitEnvAllows, recipeShapeProblems } from "../../shared/src/portalSafety";
+import { finalSubmitEnvAllows, recipeShapeProblems, runApprovalRefusals } from "../../shared/src/portalSafety";
 import { PAGE_READ_MIN_GAP_MS } from "./agencyPageReader";
 import { parsePerJobPortalQuestion } from "../../shared/src/perJobQuestions";
 
@@ -1483,6 +1483,8 @@ export function deleteProject(db: AppDb, projectId: string): { deleted: true; pr
     db.run("DELETE FROM portal_run_approvals WHERE project_id = ?", [projectId]);
     // Approve & request signatures approvals (migration v48, #308) carry the same FK.
     db.run("DELETE FROM portal_signature_request_approvals WHERE project_id = ?", [projectId]);
+    // Filing emails composed for this project (migration v65, #667).
+    db.run("DELETE FROM filing_email_sends WHERE project_id = ?", [projectId]);
     // Information-page candidates (migration v50, #344) carry the same FK; the pass a person
     // verified on one of them is withdrawn with it (infoPages owns both tables).
     deleteProjectInfoPages(db, projectId);
@@ -4871,7 +4873,15 @@ export async function runEmailTracker(
           result.skippedDuplicates += 1;
           continue;
         }
-        const match = matchProjectForEmail(db, message, { orgId: sourceOrgId, clientId: sourceClientId });
+        // A REPLY TO ONE OF OUR FILING EMAILS (#667) is placed by its thread (our Message-ID in its
+        // In-Reply-To / References, else our Ref tag in its subject), on the track that filing was
+        // for — within this source's own scope. Otherwise the ordinary match runs.
+        const { filingEmailReplyProject } = await import("./filingEmail");
+        const threaded = filingEmailReplyProject(db, message, { orgId: sourceOrgId, clientId: sourceClientId });
+        const threadedRow = threaded ? db.get<ProjectRow>("SELECT * FROM projects WHERE id = ?", [threaded.projectId]) : undefined;
+        const match = threadedRow
+          ? { project: mapProject(threadedRow), confidence: 0.99, reason: `reply to our filing email (${threaded!.via === "message_id" ? "thread" : "Ref tag"})` }
+          : matchProjectForEmail(db, message, { orgId: sourceOrgId, clientId: sourceClientId });
         if (!match) {
           result.unmatchedMessages += 1;
           // A CORRECTION NOBODY CAN PLACE STILL REACHES THE TEAM (#522). It used to be a count and
@@ -4891,7 +4901,8 @@ export async function runEmailTracker(
 
         const before = getProjectDetail(db, match.project.id);
         // THE EMAIL'S OWN TRACK picks the target (emailTrackTargetId) — never the project's newest.
-        const filing = emailTrackTargetId(db, match.project.id, text(message.record.workflow));
+        // A threaded reply is about the track its filing email was for, whatever the classifier guessed.
+        const filing = emailTrackTargetId(db, match.project.id, threadedRow ? (threaded!.track === "nem" ? "nem" : "permit") : text(message.record.workflow));
         const applicationNumber = extractTrackingNumber(message.rawSearchText, [/\b(?:application|app|record)\s*(?:number|#|no\.?)?\s*[:#-]?\s*([A-Z0-9-]{4,})/i]);
         const permitNumber = extractTrackingNumber(message.rawSearchText, [/\bpermit\s*(?:number|#|no\.?)?\s*[:#-]?\s*([A-Z0-9-]{4,})/i]);
         const updated = await recordPermitStatusCheck(db, match.project.id, {
@@ -8453,14 +8464,8 @@ export function automaticSubmitRefusals(
   if (input.relaxedSinceApproval?.length) {
     out.push(`a vision verdict cached after the approval relaxed ${input.relaxedSinceApproval.join(", ")} — the approver saw ${input.relaxedSinceApproval.length > 1 ? "them as blockers" : "it as a blocker"}; approve again to file`);
   }
-  const a = input.runApproval;
-  const approver = a && typeof a.approver === "string" ? a.approver.trim() : "";
-  const runId = String(input.runId ?? "").trim();
-  if (!a) out.push("no named person approved this run");
-  else {
-    if (!approver) out.push("the approval names no approver");
-    if (!runId || String(a.runId ?? "").trim() !== runId) out.push("the approval is for a different run");
-  }
+  // The one approval check every filing door reads (shared/src/portalSafety.runApprovalRefusals).
+  out.push(...runApprovalRefusals(input.runApproval, String(input.runId ?? "")));
   const row = input.recipeId ? db.get<Row>("SELECT status, steps_json FROM portal_recipes WHERE id = ?", [input.recipeId]) : null;
   if (!row) {
     out.push("no recorded recipe drives this run (a final submit needs a recipe with a flagged, terminal submit step)");
@@ -9573,6 +9578,26 @@ export async function prepareSubmission(
   // licence a state requires is on its own form, and the gate reports it (never a CCB demand).
   if (["OR", ""].includes(String(detail.project.state || "").trim().toUpperCase()) && !submittingClient.ccbLicenseNumber?.trim()) {
     throw new HttpError(409, `Submitting client "${submittingClient.companyName || submittingClient.legalBusinessName || detail.project.clientId}" has no CCB license number on file. Add it in the Clients tab before staging.`, { needsCcb: true, clientId: detail.project.clientId });
+  }
+
+  // THE EMAIL DOOR (#667). A track whose authority a person has recorded as taking applications by
+  // email (filingEmail.ts: a verified filing-email record on its utility lookup / AHJ process row)
+  // files by email, not on a portal. Every gate above has passed (hold, payment, duplicate, QC and
+  // the reviewer gate, documents, permit path, client). The email is staged as a DRAFT; automation
+  // sends it only through the one gate (portalSafety.finalSubmitRefusals, channel "email": the
+  // approval claimed above for THIS run, FILING_EMAIL_ALLOW_SEND=1, a usable verified record, no
+  // earlier send). No browser opens, no portal URL is resolved.
+  if (track) {
+    const filingEmail = await import("./filingEmail");
+    if (filingEmail.filingEmailChannelFor(db, detail.project, track)) {
+      await filingEmail.fileTrackByEmail(db, {
+        project: detail.project, track, runId,
+        approval: claimedApproval ? { approver: claimedApproval.approver } : null,
+        wantsFinalSubmit, relaxedSinceApproval,
+        submitterName: submittingClient.companyName || submittingClient.legalBusinessName || "",
+      });
+      return getProjectDetail(db, projectId);
+    }
   }
 
   // (The approval was claimed at the top of this function, before the first gate — see there.)

@@ -99,6 +99,8 @@ export interface RunApproval {
 }
 
 export interface FinalSubmitContext {
+  /** The door the filing goes through. Omitted = "portal" (the recorded final-submit click). */
+  channel?: "portal";
   /** finalSubmitEnvAllows() — PORTAL_ALLOW_FINAL_SUBMIT=1 on this process. */
   envAllows: boolean;
   /** The approval for THIS run, or null. */
@@ -109,6 +111,29 @@ export interface FinalSubmitContext {
   stepIsTerminalFlagged: boolean;
   /** isRecipeShapeValid(recipe.steps). */
   recipeShapeValid: boolean;
+}
+
+/**
+ * THE EMAIL DOOR (#667): sending the application to an authority by email IS a filing (Helm ruling
+ * 2026-11-09, rule 1 in full). Same gate as the portal click, read by the same function: a named
+ * person's approval of exactly THIS run, its OWN process switch (FILING_EMAIL_ALLOW_SEND=1 — turning
+ * portals on never turns email on), and a usable, person-verified filing-email record. One send per
+ * filing: a track that already has a send on record (sent, in flight or failed) never sends again.
+ */
+export interface EmailFilingContext {
+  channel: "email";
+  /** filingEmailEnvAllows() — FILING_EMAIL_ALLOW_SEND=1 on this process. */
+  envAllows: boolean;
+  /** The approval for THIS run, or null. */
+  runApproval: RunApproval | null;
+  /** The run the send would happen in. The approval must name exactly this run. */
+  runId: string;
+  /** Why the authority's filing-email record is not usable (filingEmailRecordProblems). Empty = usable. */
+  recordProblems: string[];
+  /** A send for this track is already on record (sent, sending or failed): a retry never re-sends. */
+  priorSendOnTrack: boolean;
+  /** Reviewer blockers a vision verdict cached after the approval relaxed (#226): the approver saw them as blockers. */
+  relaxedSinceApproval?: string[];
 }
 
 /** The minimum a recipe step must carry for the shape check. */
@@ -2667,31 +2692,60 @@ export function finalSubmitEnvAllows(env: Record<string, string | undefined> = (
   return String(env.PORTAL_ALLOW_FINAL_SUBMIT ?? "").trim() === "1";
 }
 
-/** Every reason the click is refused. Empty only when ALL conditions hold. */
-export function finalSubmitRefusals(ctx: FinalSubmitContext | null | undefined): string[] {
-  if (!ctx) return ["no context"];
+/** The email door's own switch (#667), read by the CALLER and passed in. Exactly "1". Never
+ *  PORTAL_ALLOW_FINAL_SUBMIT: a new door gets its own opt-in. */
+export function filingEmailEnvAllows(env: Record<string, string | undefined> = (globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env ?? {}): boolean {
+  return String(env.FILING_EMAIL_ALLOW_SEND ?? "").trim() === "1";
+}
+
+/**
+ * THE ONE APPROVAL CHECK for every filing door (portal click, email send; repository's
+ * automaticSubmitRefusals reads it too): a named person approved exactly this run. Never copy it.
+ */
+export function runApprovalRefusals(runApproval: RunApproval | null | undefined, runId: string | null | undefined): string[] {
   const out: string[] = [];
-  if (ctx.envAllows !== true) out.push("PORTAL_ALLOW_FINAL_SUBMIT is not 1 on this process");
-  const a = ctx.runApproval;
+  const a = runApproval;
   const approver = a && typeof a.approver === "string" ? a.approver.trim() : "";
   const approvedRun = a && typeof a.runId === "string" ? a.runId.trim() : "";
-  const runId = typeof ctx.runId === "string" ? ctx.runId.trim() : "";
+  const run = typeof runId === "string" ? runId.trim() : "";
   if (!a) out.push("no named person approved this run");
   else {
     if (!approver) out.push("the approval names no approver");
-    if (!approvedRun || !runId || approvedRun !== runId) out.push("the approval is for a different run");
+    if (!approvedRun || !run || approvedRun !== run) out.push("the approval is for a different run");
   }
+  return out;
+}
+
+/** Every reason the filing (the portal click, or the email send) is refused. Empty only when ALL
+ *  conditions of that door hold. */
+export function finalSubmitRefusals(ctx: FinalSubmitContext | EmailFilingContext | null | undefined): string[] {
+  if (!ctx) return ["no context"];
+  const out: string[] = [];
+  if (ctx.channel === "email") {
+    if (ctx.envAllows !== true) out.push("FILING_EMAIL_ALLOW_SEND is not 1 on this process");
+    out.push(...runApprovalRefusals(ctx.runApproval, ctx.runId));
+    const problems = Array.isArray(ctx.recordProblems) ? ctx.recordProblems : ["the filing-email record was not checked"];
+    out.push(...problems.map((p) => `filing email: ${p}`));
+    if (ctx.priorSendOnTrack !== false) out.push("a filing email for this track is already on record (sent, in flight or failed) — a retry never re-sends");
+    if (ctx.relaxedSinceApproval?.length) out.push(`a vision verdict cached after the approval relaxed ${ctx.relaxedSinceApproval.join(", ")} — approve again to file`);
+    return out;
+  }
+  if (ctx.channel !== undefined && ctx.channel !== "portal") return ["unknown filing channel"];
+  if (ctx.envAllows !== true) out.push("PORTAL_ALLOW_FINAL_SUBMIT is not 1 on this process");
+  out.push(...runApprovalRefusals(ctx.runApproval, ctx.runId));
   if (ctx.stepIsTerminalFlagged !== true) out.push("the step is not the recipe's single terminal isFinalSubmit step");
   if (ctx.recipeShapeValid !== true) out.push("the recipe shape is invalid");
   return out;
 }
 
 /**
- * THE final-submit gate. True only when the environment switch is on, a named person approved
- * exactly this run, the step is the single terminal flagged step, and the recipe shape is valid.
- * No standing per-recipe arm exists. Until a caller passes a real approval, this is always false.
+ * THE final-submit gate, for every door that files. Portal: true only when the environment switch
+ * is on, a named person approved exactly this run, the step is the single terminal flagged step,
+ * and the recipe shape is valid. Email (#667): the approval of this run, FILING_EMAIL_ALLOW_SEND=1,
+ * a usable verified filing-email record, and no earlier send on the track. No standing arm exists.
+ * Until a caller passes a real approval, this is always false.
  */
-export function mayClickFinalSubmit(ctx: FinalSubmitContext | null | undefined): boolean {
+export function mayClickFinalSubmit(ctx: FinalSubmitContext | EmailFilingContext | null | undefined): boolean {
   return finalSubmitRefusals(ctx).length === 0;
 }
 

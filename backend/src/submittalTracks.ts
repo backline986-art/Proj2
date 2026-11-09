@@ -63,7 +63,7 @@ const s = (v: unknown): string => (v == null ? "" : String(v));
 // comes from permitTrackLabel() / utilityTrackPresentation: a permit card says what the ONE structure answer settled, and the
 // utility card says what the utility's program IS (utilityFilingLookup) — "net metering" only
 // where that is known, never by default.
-const TRACK_LABELS: Record<SubmittalTrackType, string> = {
+export const TRACK_LABELS: Record<SubmittalTrackType, string> = {
   nem: "Utility interconnection",
   building: "Building permit (BLD)",
   electrical: "Electrical permit (ELE)",

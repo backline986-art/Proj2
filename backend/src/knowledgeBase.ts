@@ -534,6 +534,9 @@ export interface ClassifiedMboxMessage {
   record: MboxExtractedLearningRecord;
   state: string;
   portalName: string;
+  /** The In-Reply-To and References headers, raw: a reply to one of our filing emails (#667) is
+   *  placed by the Message-ID they carry (filingEmail.filingEmailReplyProject). */
+  threadRefs?: string;
 }
 
 function signatureFor(value: string): string {
@@ -1916,6 +1919,7 @@ export async function classifyMboxMessages(input: {
       record,
       state: built.state,
       portalName: built.portalName,
+      threadRefs: `${parsed.headers["in-reply-to"] || ""} ${parsed.headers.references || ""}`.trim(),
     });
   }
 
