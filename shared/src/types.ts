@@ -2067,6 +2067,10 @@ export interface DesignCriteriaResearchResult {
    *  values; unparsed = a candidate page whose table did not parse — a criterion still missing is
    *  "candidate page found, not parsed", never "no jurisdiction-wide value". */
   issuerPage?: { url: string; parsed: boolean };
+  /** IN-PROCESS ONLY, never persisted (#683): the pages this process itself read for the lookup —
+   *  the issuer-site probe's page text and when it was read — so the merge can tell a value that is
+   *  in those bytes (official) from a model's answer (seeded). */
+  retrieved?: Array<{ url: string; text: string; fetchedAt: string }>;
   notes: string;
 }
 
@@ -2394,6 +2398,12 @@ export interface JurisdictionCodeProfile {
     at?: string;
     /** The page is a project-type handout, not a jurisdiction-wide design value: why (verify it). */
     weakSource?: string;
+    /** OFFICIAL SOURCE (#683, shared/src/officialSource.landingTierFor): this process read the
+     *  value on the authority's own official page at `fetchedAt` and the quote is in those bytes.
+     *  The field is USED at once, worded "from <host>" — never "verified by" (rule 3: a person's
+     *  verification is the row's verifiedAt, nothing else). Absent = seeded. */
+    tier?: "official";
+    fetchedAt?: string;
   }>;
   /** The last design-criteria lookup's checklist: each item found / weak / not found / not researched. */
   designCriteriaLookup?: DesignCriteriaLookupRecord;
@@ -2418,15 +2428,36 @@ export interface JurisdictionCodeProfile {
   researchProvenance?: CodeResearchProvenance;
   /** listCodeProfiles only, verified rows only: newer editions found that await a person. */
   editionProposals?: JurisdictionEditionProposal[];
+  /** listCodeProfiles only, verified rows only (#683): values the jurisdiction's own official page
+   *  states differently from the row. The row is never changed by them (rule 3); a person decides. */
+  officialConflicts?: OfficialConflict[];
+}
+
+/** An OFFICIAL read (#683) that disagrees with a human-verified code profile row. Recorded once per
+ *  finding in the audit log; listed while the row is still verified and still says otherwise. */
+export interface OfficialConflict {
+  profileKey: string;
+  /** "designCriteria.frostDepthIn". */
+  field: string;
+  current: number | string | null;
+  found: number | string;
+  sourceUrl: string;
+  quote?: string;
+  fetchedAt: string;
+  createdAt: string;
 }
 
 export interface JurisdictionFieldSource {
   /** "" for the state-level row. */
   ahj: string;
   state: string;
-  confidence: "seeded" | "verified";
+  /** "official" (#683): the row is not person-verified, but THIS field's value was read on the
+   *  authority's own official page (its citation's tier) — used, and worded "from <host>". */
+  confidence: "seeded" | "official" | "verified";
   verifiedBy?: string;
   verifiedAt?: string;
+  /** confidence "official" only: where and when the value was read. */
+  officialSource?: { host: string; sourceUrl: string; fetchedAt: string };
 }
 
 // Review work types (rule packs). "solar_pv_residential" is the deterministic pack;

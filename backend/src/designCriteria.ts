@@ -54,6 +54,7 @@ import type {
   UpcomingCodeEdition,
 } from "../../shared/src/types";
 import type { EffectiveCodeContext, PresentedCodeEdition } from "./codeProfiles";
+import { officialCitationFor } from "../../shared/src/officialSource";
 import { codeFamilyOf, editionsInEffect, type EditionsInEffect } from "./codeFamilies";
 
 export interface DesignTextSource {
@@ -2784,7 +2785,13 @@ function profileCodeEntry(a: { code: string; edition: string; title?: string; no
  *  field (JurisdictionCodeProfile.fieldSources); a single row answers for all its fields. */
 function fieldProvenance(ctx: EffectiveCodeContext, field: string): { verified: boolean; text: string; owner: string } {
   const src = ctx.profile?.fieldSources?.[field];
-  const verified = src ? src.confidence === "verified" : ctx.verified;
+  // OFFICIAL (#683): the value was read on the authority's own official page (a government host, or
+  // a domain a person verified as its own) and its quote is in the bytes read. It is USED as a
+  // confirmed value (a blocker may rest on it, under the #637 bar: it carries a verbatim citation),
+  // and worded "from <host>" — never "human-verified". A single row answers from its own citations.
+  const official = src ? (src.confidence === "official" ? src.officialSource ?? null : null)
+    : !ctx.verified && ctx.profile ? officialCitationFor(ctx.profile.citations, field) : null;
+  const verified = src ? src.confidence === "verified" || !!official : ctx.verified || !!official;
   const ahj = src ? src.ahj : ctx.profile?.ahj ?? "";
   const state = (src?.state || ctx.profile?.state || ctx.state || "").toUpperCase();
   const verifiedBy = src ? src.verifiedBy : ctx.profile?.verifiedBy;
@@ -2792,6 +2799,7 @@ function fieldProvenance(ctx: EffectiveCodeContext, field: string): { verified: 
   const who = ahj ? `${ahj} (${state})` : `${state || "state"} state-level`;
   // Whose minimum it is, in a sentence: the state's, unless the AHJ's own row carries it.
   const owner = ahj || state || "the state";
+  if (official) return { verified, owner, text: `${who} code profile (from ${official.host}, the jurisdiction's own official page, read ${official.fetchedAt.slice(0, 10)}: ${official.sourceUrl})` };
   if (!verified) return { verified, owner, text: `${who} code profile (seeded — researched/imported, not yet human-verified)` };
   if (verifiedBy === "reference-seed") return { verified, owner, text: `${who} code profile (verified via the shipped reference seed, not by an operator here)` };
   return { verified, owner, text: `${who} code profile (human-verified${verifiedBy ? ` by ${verifiedBy}` : ""}${verifiedAt ? ` on ${verifiedAt.slice(0, 10)}` : ""})` };
@@ -3213,8 +3221,10 @@ export function evaluateDesignCriteriaFindings(
       (c) => (c.value as number) < ahjRoofSnow,
       (hits) => [...new Set(hits.map((c) => c.value as number))].sort((a, b) => a - b).map((v) => `${v} psf < ${ahjRoofSnow} psf`).join("; "));
   }
-  const belowProvenance = ctx.profile?.fieldSources
-    ? [...new Set(belowFields.map((f) => fieldProvenance(ctx, f).text))].join(" / ")
+  // Per field on a layered read, and for a single row's OFFICIAL field (#683: "from <host>").
+  const officialOnRow = (f: string): boolean => !ctx.verified && !!ctx.profile && !!officialCitationFor(ctx.profile.citations, f);
+  const belowProvenance = ctx.profile?.fieldSources || belowFields.some(officialOnRow)
+    ? [...new Set(belowFields.map((f) => (ctx.profile?.fieldSources || officialOnRow(f) ? fieldProvenance(ctx, f).text : provenance(ctx))))].join(" / ")
     : provenance(ctx);
   if (belowLines.length) {
     out.push({
