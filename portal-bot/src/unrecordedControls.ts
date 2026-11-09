@@ -191,7 +191,7 @@ export const POLICY_QUESTION_JOB_KEYS: ReadonlyArray<Readonly<{ question: RegExp
  */
 const NO_EVIDENCE_KEYS: Readonly<Record<string, string>> = Object.freeze({ exportLimiting: EXPORT_LIMITING_NO_EVIDENCE_KEY });
 export const NO_JOB_EVIDENCE_WHY = "standing answer, no evidence on the job";
-function noJobEvidence(fieldValues: Record<string, string>, key: string): boolean {
+export function noJobEvidence(fieldValues: Record<string, string>, key: string): boolean {
   const flag = NO_EVIDENCE_KEYS[key];
   return !!flag && String(fieldValues?.[flag] ?? "").trim() === "1";
 }

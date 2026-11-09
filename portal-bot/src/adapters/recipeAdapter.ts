@@ -293,6 +293,7 @@ import { chooseCorrectionForm, correctionFormSelector, isRefusal, scanProjectFor
 import { type ExtractedField, type RawField, EXTRACT_SEL, extractFieldsInPage, toExtractedField, dismissPageModals, clearPageOverlays, equipmentMakeCandidates, pageFingerprintOf, collectValidationErrorsFrom, acaApplyEntryFrom, advanceSignatureOf } from "./autoLearnAdapter";
 import { tagUploadControls, visibleBodyText, policyScopeFor } from "./autoLearnAdapter";
 import { answerForUnrecordedControl, missingRequiredStopMessage, UNPINNED_CONTROL_WHY, type MissingRequired } from "../unrecordedControls";
+import { answerForRecordedPolicyStep, parsePolicyDefaultNote } from "../recordedPolicyAnswer";
 import { isComputeTotalsStep, prepareComputeSettle, waitForComputeSettled } from "../computeSettle";
 import { portalSaysNotServed } from "../../../shared/src/portalNotServed";
 
@@ -6268,6 +6269,24 @@ export class RecipeAdapter extends BasePortalAdapter {
           this.agingNotes.push(`"${this.stepLabel(step) || "Installer Company"}": the recorded company "${String(step.value).slice(0, 40)}" is the learn's — this client's own name is used instead`);
         }
         if (companyList) step = { ...step, field: "installerCompanyName", ...(literalCompany ? { value: undefined } : {}) };
+        // A RECORDED POLICY ANSWER YIELDS TO THE JOB'S OWN (#355) — the select-shaped twin of
+        // recordedPolicyRadio: a recorded "policy default: … → No" select commits THIS job's answer.
+        if (!step.field) {
+          const pol = answerForRecordedPolicyStep(step, this.fieldValues);
+          const shown = this.recordedPolicyShown(step);
+          if (pol?.kind === "unanswerable") {
+            this.noteUnresolved(step);
+            this.notePolicyOnce(this.driftWarnings, `"${shown}" left unanswered for a person: ${pol.why}`);
+            return false;
+          }
+          if (pol?.kind === "standing") this.notePolicyOnce(this.agingNotes, `"${shown}" answered "${pol.value}": ${pol.why}`);
+          if (pol?.kind === "job") {
+            this.notePolicyOnce(this.agingNotes, pol.value === pol.recorded
+              ? `"${shown}" answered "${pol.value}" from ${pol.key} (this job's own answer)`
+              : `"${shown}" answered "${pol.value}" from ${pol.key} (this job's own answer), not the recorded standing "${pol.recorded}"`);
+            step = { ...step, value: pol.value };
+          }
+        }
         const v = this.resolveValue(step);
         const filerIdentity = isFilerIdentityField(step.field);
         if (!v && filerIdentity) {
@@ -6592,15 +6611,21 @@ export class RecipeAdapter extends BasePortalAdapter {
           }
           return false;
         }
-        const target = recovered ?? scoped;
+        let target = recovered ?? scoped;
         await waitForElement(target);
         // force: a radio inside a styled widget is driven by its label, so the input itself
         // can be visually hidden while still being the thing that must end up checked.
         // A RECOVERED radio is usually exactly that hidden half (recovery only runs when
         // the recorded id was unusable) — force must follow !usable alone, or the check
         // waits out its full actionability timeout on an element that can never be visible.
+        let force = !usable;
+        // A RECORDED POLICY ANSWER YIELDS TO THE JOB'S OWN (#355): the export-capacity radio the
+        // learner recorded as the standing "No" is THIS job's exportLimiting when the job carries it.
+        const policyPick = await this.recordedPolicyRadio(step, target);
+        if (policyPick === "unanswered") return false;
+        if (policyPick) { target = policyPick.loc; force = !policyPick.visible; }
         try {
-          await withAutomationInput(this.page, () => target!.check({ force: !usable }));
+          await withAutomationInput(this.page, () => target!.check({ force }));
         } catch (err) {
           // "CLICKING THE CHECKBOX DID NOT CHANGE ITS STATE" IS NOT A MISSING CONTROL.
           //
@@ -10774,6 +10799,101 @@ export class RecipeAdapter extends BasePortalAdapter {
       if (!labels) return " (group unreadable)";
       return labels.length ? ` (${labels.length} candidate(s): ${labels.join(", ")})` : " (0 candidates — not rendered)";
     } catch { return " (group inspect failed)"; }
+  }
+
+  /** A step retried (or re-asked at the page's end) says whose answer it is once. */
+  private notePolicyOnce(list: string[], line: string): void {
+    if (!list.includes(line)) list.push(line);
+  }
+
+  /** The question a recorded policy-default step answers, for the run's notes. */
+  private recordedPolicyShown(step: RecipeStep): string {
+    const q = parsePolicyDefaultNote(step.note)?.question || this.stepLabel(step) || String(step.note ?? "");
+    return q.replace(/\s+/g, " ").trim().slice(0, 60);
+  }
+
+  /** A RECORDED POLICY RADIO WHOSE QUESTION THE JOB ANSWERS (#355). The learner's policy pass records
+   *  a `check` on the radio of its standing answer ("policy default: Do you propose to limit the
+   *  export capacity…? → No"); THIS job's exportLimiting decides it when the job carries one
+   *  (answerForRecordedPolicyStep). Reads the recorded radio's live group — its question, for a note
+   *  that names only an option, and its peers (same name, else the same container the learner read).
+   *    null         — check the recorded radio, as recorded (not such a step, the standing answer, or
+   *                   the job's answer IS the recorded one); the run's notes say whose answer it is;
+   *    a locator    — the peer whose label is the job's answer: check THAT one;
+   *    "unanswered" — the job's answer is not offered, or the question reads negated: nothing is
+   *                   checked (never the recorded standing answer in its place); named for a person,
+   *                   and the required sweep sees the group blank. */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  private async recordedPolicyRadio(step: RecipeStep, target: any): Promise<null | "unanswered" | { loc: any; visible: boolean }> {
+    if (!parsePolicyDefaultNote(step.note)) return null;
+    const first = typeof target?.first === "function" ? target.first() : target;
+    const GROUP = "fieldset, .form-group, [class*='form-group'], [class*='field'], .row, [class*='row']";
+    const readGroup = (el: Element, args: { group: string; want: string; attr: string; token: string }) => {
+      const norm = (s: string | null | undefined) => (s || "").trim().replace(/\s+/g, " ");
+      // The learner's own option label (autoLearnAdapter applyPolicyDefaults labelOf).
+      const labelOf = (r: Element): string => {
+        const id = r.getAttribute("id");
+        if (id) { const l = document.querySelector(`label[for="${CSS.escape(id)}"]`); if (l?.textContent?.trim()) return norm(l.textContent); }
+        const w = r.closest("label"); if (w?.textContent?.trim()) return norm(w.textContent);
+        return norm(r.getAttribute("aria-label") || r.getAttribute("value") || "");
+      };
+      const grp = el.closest(args.group);
+      const name = el.getAttribute("name") || "";
+      const isRadio = (r: Element) => (r as HTMLInputElement).type === "radio";
+      const peers = (name ? Array.from(document.getElementsByName(name)) : grp ? Array.from(grp.querySelectorAll('input[type="radio"]')) : [el]).filter(isRadio);
+      let picked = "";
+      if (args.want) {
+        const hit = peers.find((p) => labelOf(p).toLowerCase() === args.want.toLowerCase());
+        if (hit) {
+          const id = hit.getAttribute("id") || "";
+          if (id && document.querySelectorAll(`[id="${CSS.escape(id)}"]`).length === 1) picked = `[id=${JSON.stringify(id)}]`;
+          else { hit.setAttribute(args.attr, args.token); picked = `[${args.attr}="${args.token}"]`; }
+        }
+      }
+      // The QUESTION is the container's text without its options' own labels: options written
+      // before the question ("Yes No Do you propose…") would otherwise sit in its sentence.
+      let question = "";
+      if (grp) {
+        const own = new Set<Element>();
+        for (const p of peers) {
+          const id = p.getAttribute("id");
+          const forLabel = id ? document.querySelector(`label[for="${CSS.escape(id)}"]`) : null;
+          if (forLabel) own.add(forLabel);
+          const wrap = p.closest("label");
+          if (wrap) own.add(wrap);
+        }
+        const parts: string[] = [];
+        const walk = document.createTreeWalker(grp, NodeFilter.SHOW_TEXT);
+        for (let t = walk.nextNode(); t; t = walk.nextNode()) {
+          let inOption = false;
+          for (let n = t.parentElement; n && n !== grp.parentElement; n = n.parentElement) if (own.has(n)) { inOption = true; break; }
+          if (!inOption) parts.push(t.textContent || "");
+        }
+        question = norm(parts.join(" "));
+      }
+      return { question, picked };
+    };
+    const group = await first?.evaluate?.(readGroup, { group: GROUP, want: "", attr: "", token: "" }).catch(() => null) as { question: string } | null | undefined;
+    const ans = answerForRecordedPolicyStep(step, this.fieldValues, group?.question ?? null);
+    if (!ans) return null;
+    const shown = this.recordedPolicyShown(step);
+    if (ans.kind === "standing") { this.notePolicyOnce(this.agingNotes, `"${shown}" answered "${ans.value}": ${ans.why}`); return null; }
+    const unanswered = (why: string): "unanswered" => {
+      this.noteUnresolved(step);
+      this.notePolicyOnce(this.driftWarnings, `"${shown}" left unanswered for a person: ${why}`);
+      return "unanswered";
+    };
+    if (ans.kind === "unanswerable") return unanswered(ans.why);
+    if (ans.value === ans.recorded) { this.notePolicyOnce(this.agingNotes, `"${shown}" answered "${ans.value}" from ${ans.key} (this job's own answer)`); return null; }
+    const token = `p${++this.unrecordedPinSeq}`;
+    const read = await first?.evaluate?.(readGroup, { group: GROUP, want: ans.value, attr: "data-al-policy-answer", token }).catch(() => null) as { picked: string } | null | undefined;
+    if (!read?.picked) {
+      return unanswered(`this job's ${ans.key} is "${ans.value}", which the question does not offer as an option here, so the recorded standing "${ans.recorded}" was not used in its place`);
+    }
+    const loc = this.locator({ ...(step.selector?.frame ? { frame: step.selector.frame } : {}), css: read.picked })?.first();
+    if (!loc) return unanswered(`the "${ans.value}" option could not be located again`);
+    this.notePolicyOnce(this.agingNotes, `"${shown}" answered "${ans.value}" from ${ans.key} (this job's own answer), not the recorded standing "${ans.recorded}"`);
+    return { loc, visible: await this.isTrulyVisible(loc) };
   }
 
   private async recoverVolatileIdOption(step: RecipeStep) {
