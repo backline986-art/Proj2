@@ -26,6 +26,13 @@
 //                        login with nobody named to relay it. Software never clears an MFA
 //                        code — that is a person, every session, forever.
 //
+// NOT EVERY TRACK FILES ON A PORTAL (#682). The authority's own DATA decides, read exactly as
+// production reads it: a track whose authority a person recorded as taking applications BY EMAIL
+// (#667) is READY NOW when that record is usable ("files by email (verified)") and CANNOT FILE YET
+// when it is not, or when only seeded data says "email" ("verified address needed"). A utility a
+// person verified as taking its application INSIDE THE AHJ PERMIT (#664) has no NEM filing of its
+// own: its row follows the same jurisdiction's permit row. Nothing here writes or infers a record.
+//
 //   npx tsx scripts/coverage-report.ts --client <id>
 //   npx tsx scripts/coverage-report.ts --client <id> --jurisdictions "OR|City of Coos Bay|Pacific Power, IL||Ameren Illinois"
 //   npx tsx scripts/coverage-report.ts --client <id> --json > coverage.json
@@ -76,6 +83,8 @@ import { listPortalCredentials, selectCredentialUrlsFor, mfaCodeDestinationFor }
 import type { PortalCredentialView } from "../backend/src/portalCredentials";
 import { hostFitsTrackAndEntity, isUtilityPlatformUrl } from "../backend/src/portalChannel";
 import { findAhjProcessProfile } from "../backend/src/processProfiles";
+import { authorityForTrack, filingEmailRecordProblems, readFilingEmail } from "../backend/src/filingEmail";
+import { getUtilityFilingLookup, nemFiledWithPermit } from "../backend/src/utilityFilingLookup";
 
 const s = (v: unknown): string => (v === null || v === undefined ? "" : String(v));
 const blank = (v: unknown): boolean => !s(v).trim();
@@ -149,7 +158,26 @@ export interface CoverageSignals {
    *  produced an application number is the strongest evidence the login works — stronger than
    *  the flag, which only the LEARN path ever writes. */
   filedHere: { filed: boolean; at: string; reference: string };
+  /** HOW this track files, when it is not on a portal (#682). Absent = on a portal. */
+  channel?: FilingChannel;
 }
+
+/**
+ * HOW A TRACK FILES, read from the authority's DATA (#682) — the same records production reads:
+ *   email        a person recorded that the authority takes applications by email (#667,
+ *                filing_email_json). `problems` empty = usable, exactly filingEmailRecordProblems.
+ *   with_permit  NEM only: a person VERIFIED that the utility takes its application inside the AHJ
+ *                permit application (#664, nemFiledWithPermit). No portal, no NEM run at all.
+ *   email_hint   no record, but the authority's seeded data says it takes applications by email —
+ *                a proposal until a named person verifies the address (rule 3).
+ *   portal       everything else.
+ * A read: nothing here writes, and no record is ever inferred.
+ */
+export type FilingChannel =
+  | { kind: "portal" }
+  | { kind: "email"; address: string; problems: string[]; verifiedBy: string; verifiedAt: string; sourceHost: string }
+  | { kind: "with_permit"; name: string; verifiedBy: string; verifiedAt: string; sourceHost: string }
+  | { kind: "email_hint"; evidence: string };
 
 export interface CoverageRow extends CoverageSignals {
   bucket: CoverageBucket;
@@ -341,6 +369,41 @@ export function resolveTrack(db: AppDb, j: JurisdictionSpec, track: CoverageTrac
         Boolean(findCompleteRecipeForProject(db, { ...input, discipline: d })),
       );
   return { recipe, draft, portalUrl, kbNotes: kb.notes, otherDisciplinesWithRecipe };
+}
+
+const EMAIL_WORDS = /\be-?mail(?:ed)?\b/i;
+
+export function filingChannel(db: AppDb, j: JurisdictionSpec, track: CoverageTrack): FilingChannel {
+  const project = { state: j.state, ahj: j.ahj, city: j.ahj, utility: j.utility } as unknown as ProjectRecord;
+  if (track === "nem") {
+    const withPermit = nemFiledWithPermit(db, project);
+    if (withPermit) {
+      return { kind: "with_permit", name: withPermit.name, verifiedBy: withPermit.verifiedBy, verifiedAt: withPermit.verifiedAt, sourceHost: hostOf(withPermit.sourceUrl) };
+    }
+  }
+  // The authority production's email door asks (filingEmail.authorityForTrack): NEM → the utility;
+  // a permit track → the issuer of that track's permit.
+  const authority = authorityForTrack(project, track === "nem" ? "nem" : ((j.discipline || "permit") as "permit"));
+  if (authority) {
+    const { record } = readFilingEmail(db, authority);
+    if (record) {
+      return {
+        kind: "email", address: record.address, problems: filingEmailRecordProblems(record),
+        verifiedBy: record.verifiedBy, verifiedAt: record.verifiedAt, sourceHost: hostOf(record.sourceUrl),
+      };
+    }
+  }
+  // A SEEDED SAY-SO IS A HINT, NEVER A CHANNEL: the utility's own filing lookup naming email as its
+  // method, or the AHJ's seeded process profile naming email as its submission method.
+  if (track === "nem") {
+    const lookup = getUtilityFilingLookup(db, j.state, j.utility);
+    const named = s(lookup?.filing?.value?.name);
+    if (EMAIL_WORDS.test(named)) return { kind: "email_hint", evidence: `the utility's filing lookup names "${named.slice(0, 80)}"` };
+  } else if (!blank(j.ahj)) {
+    const method = s(findAhjProcessProfile({ state: j.state, ahj: j.ahj, city: j.ahj } as ProjectRecord)?.submissionMethod);
+    if (EMAIL_WORDS.test(method)) return { kind: "email_hint", evidence: `the AHJ's process profile says "${method.slice(0, 80)}"` };
+  }
+  return { kind: "portal" };
 }
 
 // ---------------------------------------------------------------------------------------
@@ -603,12 +666,51 @@ export function classifyCoverage(
   const what = context.track === "nem" ? "interconnection" : "permit";
   const host = sig.portalHost || context.portalLabel;
 
+  // FILES BY EMAIL (#667). A person recorded the authority's filing address, so production stages a
+  // draft email instead of driving a portal: no portal URL, login or recipe is involved, and a person
+  // sends it (automation only through the one final-submit gate). Usable only as
+  // filingEmailRecordProblems says — the same check the send gate makes.
+  const channel = sig.channel;
+  if (channel?.kind === "email") {
+    const who = `${channel.verifiedBy || "nobody named"}${channel.verifiedAt ? `, ${channel.verifiedAt.slice(0, 10)}` : ""}${channel.sourceHost ? `, from ${channel.sourceHost}` : ""}`;
+    if (channel.problems.length) {
+      return {
+        bucket: "cannot_file_yet",
+        reason: `files by email (verified address needed): ${context.portalLabel}'s recorded filing address ${channel.address} is not usable — ${channel.problems.join("; ")}.`,
+        unblocks:
+          `A named person records the address again on the track card's "Filing by email" panel, from the authority's ` +
+          `own page, quoting the words that name it. Until then nothing is sent to it.`,
+      };
+    }
+    return {
+      bucket: "ready_now",
+      reason:
+        `files by email (verified): ${context.portalLabel} takes the ${what} application at ${channel.address} (${who}). ` +
+        `Staging prepares the email with its forms attached; no portal login or recipe is involved.`,
+      unblocks:
+        `Nothing. File it through the normal queue — the email is staged as a draft and a person checks and sends it, ` +
+        `then marks the track submitted.`,
+    };
+  }
+
+  if (!sig.portalUrl && channel?.kind === "email_hint") {
+    return {
+      bucket: "cannot_file_yet",
+      reason:
+        `files by email (verified address needed): ${channel.evidence}, but no person has recorded and verified the ` +
+        `filing address, so nothing is sent to it — and no portal URL is known either.`,
+      unblocks:
+        `A named person reads the authority's own page and records its filing address on the track card's "Filing by ` +
+        `email" panel, quoting the words that name it. Seeded research never chooses a filing address.`,
+    };
+  }
+
   if (!sig.portalUrl) {
     return {
       bucket: "cannot_file_yet",
       reason:
-        `no portal URL is known for the ${what} side of ${context.portalLabel}. A stage here falls through to the ` +
-        `mock adapter, which reports success without ever opening a browser — "staged" would not mean anything.`,
+        `no portal URL is known for the ${what} side of ${context.portalLabel}. Stage stops here with nothing to drive ` +
+        `(the mock adapter stands in only on a MOCK_PORTAL=1 rehearsal), so nothing can be filed.`,
       unblocks:
         `Confirm the real portal entry URL (including any city or county path segment) and record it — a recorded ` +
         `recipe carries one, or set permit_utility_knowledge.portal_url from the authority's own site. Nothing here ` +
@@ -750,7 +852,28 @@ export function buildCoverageReport(
         feeResponsibility: s(credentialRow?.feeResponsibility),
         filedHere: filedInJurisdiction(db, client.id, j, track),
       };
-      const verdict = classifyCoverage(signals, { track, portalLabel });
+      signals.channel = filingChannel(db, j, track);
+      let verdict = classifyCoverage(signals, { track, portalLabel });
+      // FILED INSIDE THE PERMIT (#664): there is no NEM filing of its own — the utility's application
+      // rides in this jurisdiction's permit application, so this row is exactly as ready as that one.
+      if (signals.channel.kind === "with_permit") {
+        const c = signals.channel;
+        const permitRow = rows.find((r) => r.track === "permit" && r.jurisdiction === label);
+        const verified = `a person verified it (${c.verifiedBy}${c.verifiedAt ? `, ${c.verifiedAt.slice(0, 10)}` : ""}${c.sourceHost ? `, from ${c.sourceHost}` : ""})`;
+        verdict = permitRow
+          ? {
+            bucket: permitRow.bucket,
+            reason: `files inside the ${j.ahj} permit application ("${c.name}") — ${verified}. No interconnection portal is used; this row follows the permit row: ${permitRow.reason}`,
+            unblocks: permitRow.bucket === "ready_now" ? "Nothing beyond the permit: the utility's application goes in the permit packet." : `Whatever unblocks the ${j.ahj} permit row: ${permitRow.unblocks}`,
+          }
+          : {
+            bucket: "cannot_file_yet",
+            reason: `files inside the AHJ permit application ("${c.name}") — ${verified} — but no AHJ is named for this jurisdiction, so there is no permit application for it to ride in.`,
+            unblocks: `Name the AHJ for this jurisdiction (--jurisdictions "STATE|AHJ|UTILITY").`,
+          };
+        signals.portalUrl = "";
+        signals.portalHost = "";
+      }
       rows.push({
         ...signals,
         bucket: verdict.bucket,
@@ -783,7 +906,7 @@ export function buildCoverageReport(
 
 const BUCKET_BLURB: Record<CoverageBucket, string> = {
   ready_now:
-    "A recorded application replays here and this portal has accepted your login. A person still\n  verifies and submits every filing — that never changes.",
+    "A recorded application replays here and this portal has accepted your login, or the authority\n  takes it by email at an address a person verified. A person still verifies and submits every\n  filing — that never changes.",
   supervised_first_run:
     "Everything is in place except proof. We drive one real project on each of these with somebody\n  watching (your first week, days 3-6), one portal at a time, before it joins the normal queue.",
   cannot_file_yet:
@@ -826,7 +949,7 @@ export function renderCoverageReport(report: CoverageReport): string {
       line(`  ${row.jurisdiction}`);
       line(
         `    track     ${row.track === "nem" ? "NEM / interconnection" : `permit${row.discipline ? ` (${row.discipline})` : ""}`}` +
-          `   portal ${row.portalHost || "(no portal URL known)"}`,
+          `   ${describeChannel(row)}`,
       );
       // 14 = the 4-space row indent plus the 10-column label, so a wrapped continuation lines
       // up under the sentence it belongs to rather than under the label.
@@ -851,7 +974,16 @@ export function renderCoverageReport(report: CoverageReport): string {
   return out.join("\n");
 }
 
+/** Where the row files: a portal host, an email address, or inside the permit application. */
+function describeChannel(row: CoverageRow): string {
+  const c = row.channel;
+  if (c?.kind === "email") return `files by email ${c.address}${c.problems.length ? " (address NOT usable)" : " (verified)"}`;
+  if (c?.kind === "with_permit") return `files inside the permit application (verified)`;
+  return `portal ${row.portalHost || "(no portal URL known)"}`;
+}
+
 function describeCredential(row: CoverageRow): string {
+  if (row.channel?.kind === "email" || row.channel?.kind === "with_permit") return "none needed — no portal is used on this track";
   const c = row.credential;
   if (!c.stored) return "none stored for this portal";
   const health = c.stale
