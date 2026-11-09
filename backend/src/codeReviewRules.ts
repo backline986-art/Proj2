@@ -637,10 +637,34 @@ export function packageListings(project: ProjectRecord, extraTexts: DesignTextSo
 // them is how the advisory and the reviewer finding end up disagreeing about the same plan set.
 /** city.elec.rapid-shutdown-missing: a rapid shutdown callout or equipment evidence. */
 export const RAPID_SHUTDOWN_PATTERNS: RegExp[] = [/rapid shutdown/i, /\bRSD\b/i, /690\.12/i];
-/** The NEC 705.10 power-source directory, by itself. */
-export const POWER_SOURCE_DIRECTORY_PATTERNS: RegExp[] = [/directory/i, /705\.10/i];
-/** city.elec.labels-missing: a PV label / placard schedule. */
-export const LABEL_SCHEDULE_PATTERNS: RegExp[] = [/label/i, /placard/i, ...POWER_SOURCE_DIRECTORY_PATTERNS, /690\.12/i];
+// THE DIRECTORY BY WHAT IT SAYS (#335). The placard rarely says "directory" or cites 705.10: the
+// installers' and label vendors' wording is "POWER TO THIS BUILDING IS ALSO SUPPLIED FROM THE
+// FOLLOWING SOURCES WITH DISCONNECT(S) LOCATED AS SHOWN". A label sheet carrying exactly that read
+// as "Power-source directory (705.10)" missing and blocked a permit until vision looked. The
+// wording counts only as a PAIR, in one sentence: power from other/multiple sources AND where the
+// disconnects are. Either half alone is another label: "DUAL POWER SOURCE" is the 705.12 backfed
+// breaker warning, "FED BY MULTIPLE SOURCES" the busbar-sum label, "AC DISCONNECT LOCATED …" a
+// disconnect marking — none of them is the directory. Nor is "ALL POWER SOURCES" (a de-energize
+// instruction).
+const DIRECTORY_SOURCES = String.raw`(?:also\s+(?:supplied|served|fed|powered)\s+(?:by|from)|multiple\s+(?:sources\s+of\s+power|power\s+sources)|(?:other|additional|following)\s+(?:power\s+|energy\s+)?sources|(?<!\ball\s)(?:power|energy)\s+sources)`;
+const DIRECTORY_DISCONNECTS = String.raw`disconnect(?:s|\s*\(\s*s\s*\)|ing\s+means(?:es)?)?\s+(?:(?:are|is)\s+)?located`;
+/** The NEC 705.10 power-source directory, by itself — the word, the section, or the placard's own
+ *  wording. One predicate: the reviewer rule (necLabelRequirements) and requiredDocuments' labels
+ *  sheet-content layer both read it. */
+export const POWER_SOURCE_DIRECTORY_PATTERNS: RegExp[] = [
+  /directory/i,
+  /705\.10/i,
+  new RegExp(String.raw`\b${DIRECTORY_SOURCES}\b[^.;]{0,160}?\b${DIRECTORY_DISCONNECTS}\b`, "i"),
+  new RegExp(String.raw`\b${DIRECTORY_DISCONNECTS}\b[^.;]{0,160}?\b${DIRECTORY_SOURCES}\b`, "i"),
+];
+/** city.elec.labels-missing: a PV label / placard schedule. The directory's word and section only,
+ *  as before #335 — the placard wording above answers the directory, not "is there a schedule". */
+export const LABEL_SCHEDULE_PATTERNS: RegExp[] = [/label/i, /placard/i, /directory/i, /705\.10/i, /690\.12/i];
+/** A dedicated label sheet, by its sheet name — the names the splitter files a labels part by
+ *  (docSplitter.ts, labels category). A "LABEL SCHEDULE" note on an E-1 is not one. */
+const LABEL_SHEET_NAMES: RegExp[] = [/\bWARNING\s+LABELS\b/i, /\bLABEL\s+LOCATIONS?\b/i];
+/** The uploaded labels document's source label (repository DESIGN_DOC_LABELS). */
+const LABELS_DOCUMENT_SOURCE = "Labels sheet";
 /** city.elec.load-side-calc-missing: the 705.12 busbar screen. */
 export const LOAD_SIDE_CALC_PATTERNS: RegExp[] = [/705\.12/i, /120%|120 percent/i, /busbar/i, /bus bar/i];
 /** city.elec.supply-side-detail-missing: what a tap detail actually contains. */
@@ -1710,10 +1734,17 @@ export function evaluateDesignCodeFindings(
     // rapid-shutdown evidence above. Each missing label is cited by the edition's own section.
     const missingLabels = necLabelRequirements(nec, { rsdApplies, standAlone: STAND_ALONE.test(all), dcCircuits: !isMicroinverterDesign(project, all) })
       .filter((l) => !affirmedIn(labelTexts, l.patterns));
+    // AN UNCERTAIN READING MUST NOT BLOCK (#335). With a dedicated label sheet in the package, a
+    // label the text did not find is far more often wording the patterns do not know (the directory
+    // above) or a placard drawn as an image than a label that is not there. From text alone that is
+    // at most a warning: the vision pass still looks at the sheet (needsVision takes warnings) and
+    // can relax it, and a human sees it either way. Without a label sheet the rule-3 severity stands.
+    const labelSheet = sheetTextSources(project, documentTexts)
+      .some((s) => s.label === LABELS_DOCUMENT_SOURCE || hasAny(s.text, LABEL_SHEET_NAMES));
     if (missingLabels.length) {
       out.push(finding({
         id: "city.elec.labels-edition-missing",
-        severity: ruleThreeSeverity,
+        severity: labelSheet ? "warning" : ruleThreeSeverity,
         category: "electrical",
         title: `PV label schedule is missing labels NEC ${nec.edition} requires`,
         message: `The package shows a label schedule, but not: ${missingLabels.map((l) => `${l.label} (${l.section})`).join("; ")}.`
