@@ -144,30 +144,62 @@ export function recipeStageGaps(
   docsByType: Record<string, string>,
   opts: { clientKeys?: Iterable<string> } = {},
 ): RecipeStageGap[] {
+  return recipeStageKeys(steps, fieldValues, docsByType, opts)
+    .filter((k) => !k.filled)
+    .map(({ filled: _filled, ...gap }) => gap);
+}
+
+/** One key the gate reads, with whether THIS job has it (#647). */
+export type RecipeStageKey = RecipeStageGap & { filled: boolean };
+
+/**
+ * THE WALK THE GATE MAKES, KEEPING THE KEYS THAT ARE FILLED TOO (#647, the field-coverage report).
+ * recipeStageGaps is exactly this list with the filled entries dropped, so "how often is this box
+ * blank" has a denominator (every job whose recipe binds the key) read by the same predicate as
+ * the numerator. Same rules: optional steps, literals, steps the replay answers itself and
+ * battery documents on a job without storage are not keys at all. No entry carries a value.
+ */
+export function recipeStageKeys(
+  steps: RecipeStep[],
+  fieldValues: Record<string, string>,
+  docsByType: Record<string, string>,
+  opts: { clientKeys?: Iterable<string> } = {},
+): RecipeStageKey[] {
   const clientKeys = new Set(opts.clientKeys ?? []);
-  const out: RecipeStageGap[] = [];
+  const out: RecipeStageKey[] = [];
   const seen = new Set<string>();
   // The per-job questions: the existing predicate, unchanged (same keys, same labels).
   for (const q of openPerJobQuestions(steps, fieldValues)) {
     seen.add(`field:${q.key}`);
-    out.push({ kind: "question", key: q.key, label: q.label, fieldName: gapFieldName(q.key), where: "portal_questions", secret: false });
+    out.push({ kind: "question", key: q.key, label: q.label, fieldName: gapFieldName(q.key), where: "portal_questions", secret: false, filled: false });
+  }
+  // The answered ones (the same step test openPerJobQuestions makes, with a value).
+  for (const s of steps) {
+    if ((s.action !== "fill" && s.action !== "select") || s.optional || !isPerJobAnswerKey(s.field)) continue;
+    const key = String(s.field);
+    if (seen.has(`field:${key}`)) continue;
+    seen.add(`field:${key}`);
+    out.push({ kind: "question", key, label: one(s.selector?.label || s.note || key).slice(0, 140), fieldName: gapFieldName(key), where: "portal_questions", secret: false, filled: true });
   }
   for (const s of steps) {
     if (s.optional || s.phase === "correct") continue;
     if (s.action === "upload") {
       const docType = String(s.docType ?? "").trim();
-      if (!docType || docsByType[docType] || seen.has(`doc:${docType}`)) continue;
+      if (!docType || seen.has(`doc:${docType}`)) continue;
       // A battery's document on a job without storage is skipped by the replay.
       const battery = batteryControlKind(`${s.selector?.label ?? ""} ${s.note ?? ""} ${docType}`, { control: "file" });
       if (battery && parseHasBattery(fieldValues.hasBattery) !== true) continue;
       seen.add(`doc:${docType}`);
-      out.push({ kind: "document", key: docType, label: labelOf(s).replace(/^upload\s+[a-z0-9_]+:\s*/i, ""), fieldName: docTypeName(docType), where: "documents", secret: false });
+      out.push({
+        kind: "document", key: docType, label: labelOf(s).replace(/^upload\s+[a-z0-9_]+:\s*/i, ""), fieldName: docTypeName(docType),
+        where: "documents", secret: false, filled: Boolean(docsByType[docType]),
+      });
       continue;
     }
     if (s.action !== "fill" && s.action !== "select") continue;
     if (isPerJobAnswerKey(s.field)) continue;
     const key = gateKeyFor(s, fieldValues);
-    if (!key || seen.has(`field:${key}`) || hasGateValue(key, fieldValues)) continue;
+    if (!key || seen.has(`field:${key}`)) continue;
     seen.add(`field:${key}`);
     const secret = isPlannerSecretKey(key) || Boolean(s.sensitive);
     out.push({
@@ -177,6 +209,7 @@ export function recipeStageGaps(
       fieldName: gapFieldName(key),
       where: clientKeys.has(key) || CLIENT_KEY.test(key) ? "client" : "project",
       secret,
+      filled: hasGateValue(key, fieldValues),
     });
   }
   return out;

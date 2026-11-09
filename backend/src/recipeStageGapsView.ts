@@ -16,7 +16,7 @@ import { issuingAgencyFor, projectForTrack } from "./permitProcess";
 import { findCompleteRecipeForProject, resolveRecipeFieldValues } from "./portalRecipes";
 import { recipeDisciplineForTrack } from "./portalChannel";
 import { bindRecipeForReplay } from "./recipeReplayBinding";
-import { recipeStageGaps } from "./recipeStageGaps";
+import { recipeStageKeys, type RecipeStageKey } from "./recipeStageGaps";
 import { submissionDocumentsByType } from "./submissionDocuments";
 
 /** The portal type prepareSubmission keys the value dictionary and the overlay by: the newest
@@ -72,16 +72,30 @@ function trackRecipeUrl(db: AppDb, portalProject: ProjectRecord, track: Submitta
 export function stageGapsForTrack(
   db: AppDb, project: ProjectRecord, track: SubmittalTrackType, recipe: Pick<PortalRecipe, "steps" | "portalUrl"> | null,
 ): RecipeStageGap[] {
-  if (!recipe || !Array.isArray(recipe.steps) || !recipe.steps.length) return [];
   try {
-    const { portalProject, overlay, values } = stagingFieldValues(db, project, track, String(recipe.portalUrl ?? ""));
-    const binding = bindRecipeForReplay({
-      steps: recipe.steps, portalUrl: recipe.portalUrl, project: portalProject, fieldValues: values, track,
-      borrowed: null, agency: issuingAgencyFor(portalProject, track),
-    });
-    const docs = submissionDocumentsByType(db, project, track);
-    return recipeStageGaps(binding.steps, { ...values, ...binding.fieldValues }, docs, { clientKeys: Object.keys(overlay) });
+    return stageKeysForTrack(db, project, track, recipe).keys
+      .filter((k) => !k.filled)
+      .map(({ filled: _filled, ...gap }) => gap);
   } catch {
     return [];
   }
+}
+
+/** EVERY KEY THE TRACK'S RECIPE BINDS FOR THIS JOB, FILLED OR NOT (#647, the field-coverage report):
+ *  the same assembly stageGapsForTrack reads (stageGapsForTrack is this, filled entries dropped).
+ *  `values` is the replay's own dictionary, for the caller's in-memory provenance check only; it is
+ *  never to be printed (rule 2). THROWS on a read failure, so a report can count a project it could
+ *  not read instead of reading it as "nothing blank". Read-only. */
+export function stageKeysForTrack(
+  db: AppDb, project: ProjectRecord, track: SubmittalTrackType, recipe: Pick<PortalRecipe, "steps" | "portalUrl"> | null,
+): { keys: RecipeStageKey[]; values: Record<string, string> } {
+  if (!recipe || !Array.isArray(recipe.steps) || !recipe.steps.length) return { keys: [], values: {} };
+  const { portalProject, overlay, values } = stagingFieldValues(db, project, track, String(recipe.portalUrl ?? ""));
+  const binding = bindRecipeForReplay({
+    steps: recipe.steps, portalUrl: recipe.portalUrl, project: portalProject, fieldValues: values, track,
+    borrowed: null, agency: issuingAgencyFor(portalProject, track),
+  });
+  const docs = submissionDocumentsByType(db, project, track);
+  const merged = { ...values, ...binding.fieldValues };
+  return { keys: recipeStageKeys(binding.steps, merged, docs, { clientKeys: Object.keys(overlay) }), values: merged };
 }
