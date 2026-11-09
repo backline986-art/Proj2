@@ -16,6 +16,7 @@
 
 import type { AppDb } from "./db";
 import type {
+  LastUnreadableCheck,
   PermitCheckOutcome,
   ProjectRecord,
   StageDetail,
@@ -45,6 +46,8 @@ import { nemSignatureState, type NemSignatureView } from "./signatureTrack";
 import { notifyClientOfFiling } from "./clientFilingUpdate";
 import { trackPaymentView, type TrackPaymentView } from "./feePauseView";
 import { feeDueReadings, feePaidMarks, trackFeeDueFrom, type FeeDueReading } from "./feeDue";
+import { lastUnreadableByTarget } from "./lastUnreadable";
+import { projectSecretValuesById } from "./projectSecrets";
 
 /** Words that claim the statewide portal ("Oregon ePermitting", "OR E-permitting") with no URL —
  *  on a learned row, often the generic fallback's own words laundered in (portal-truth D2/D4). */
@@ -660,6 +663,8 @@ interface TrackState {
   outcome: PermitCheckOutcome | null;
   statusLabel: string;
   lastCheckedAt: string | null;
+  /** The target's newest check that read nothing, while no later reading superseded it (#173). */
+  lastUnreadable: LastUnreadableCheck | null;
   /** isTrackDone's verdict for this track (the ONE "is this track done" rule). */
   done: boolean;
 }
@@ -694,6 +699,8 @@ function readTrackState(db: AppDb, projectId: string, track: SubmittalTrackType,
     outcome: target?.latest_outcome ? (s(target.latest_outcome) as PermitCheckOutcome) : null,
     statusLabel: s(target?.latest_status_label),
     lastCheckedAt: target?.last_checked_at != null ? s(target.last_checked_at) : null,
+    // The SAME target the card's status came from, so "read nothing" is never another filing's.
+    lastUnreadable: target ? lastUnreadableByTarget(db, projectId, projectSecretValuesById(db, projectId)).get(s(target.id)) ?? null : null,
     done: isTrackDone(db, projectId, track, required),
   };
 }
@@ -1088,6 +1095,7 @@ export function getSubmittalTracks(db: AppDb, project: ProjectRecord): Submittal
       trackingUrl: state.trackingUrl,
       submittedAt: state.submittedAt,
       lastCheckedAt: state.lastCheckedAt,
+      lastUnreadable: state.lastUnreadable,
       outstanding: status !== "issued",
       hasRecipe: !!recipeRow,
       recipeStatus: recipeRow ? s(recipeRow.status) : undefined,

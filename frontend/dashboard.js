@@ -5181,7 +5181,10 @@ function trackChannelHtml(t) {
   const channel = String(t.channel || "");
   const basis = TRACK_CHANNEL_BASIS[t.channelBasis];
   const lines = [
-    `<p class="muted track-channel" style="margin:0 0 4px">Channel: ${linkifyText(channel)}${basis ? ` <span class="badge ${basis.badge}">${esc(basis.label)}</span>` : ""}${t.lastCheckedAt ? ` · last checked ${esc(fmtDate(t.lastCheckedAt))}` : ""}</p>`,
+    `<p class="muted track-channel" style="margin:0 0 4px">Channel: ${linkifyText(channel)}${basis ? ` <span class="badge ${basis.badge}">${esc(basis.label)}</span>` : ""}${t.lastCheckedAt ? ` · last checked ${esc(fmtDate(t.lastCheckedAt))}` : ""}${
+      // WHY THE LAST CHECK READ NOTHING (#173), beside "last checked" until a later check reads a
+      // status: a filing whose checks keep coming back empty must not look like one that is quiet.
+      t.lastUnreadable?.reason ? ` · <span data-last-unreadable style="color:var(--warning, #b7791f)">last check read nothing (${esc(fmtDate(t.lastUnreadable.at, true))}): ${esc(t.lastUnreadable.reason)}</span>` : ""}</p>`,
   ];
   // A portal URL the server resolved but did not write into the sentence.
   const portal = httpUrl(t.portalUrl);
@@ -8529,6 +8532,7 @@ function permitTargetCardHtml(target, checks, ui) {
       ${target.portalUrl ? `<p class="muted" style="word-break:break-all">${esc(target.portalUrl)}</p>` : ""}
       ${target.trackingUrl && target.trackingUrl !== target.portalUrl ? `<p class="muted" style="word-break:break-all">Status link: ${esc(target.trackingUrl)}</p>` : ""}
       ${target.readGap && !stopped ? `<p data-read-gap style="border-left:3px solid var(--warn, #b7791f);padding-left:6px"><strong>Can't read on its own:</strong> ${esc(target.readGap)}</p>` : ""}
+      ${target.lastUnreadable?.reason && !stopped ? `<p data-last-unreadable class="muted">Last check read nothing (${esc(new Date(target.lastUnreadable.at).toLocaleString())}): ${esc(target.lastUnreadable.reason)}</p>` : ""}
       ${issuedDocumentsHtml(target)}
       <p class="muted">${stopped ? "Tracking stopped — the monitor no longer reads this filing." : `Checks every ${esc(target.checkFrequencyDays)} day(s) · Next: ${target.nextCheckAt ? esc(new Date(target.nextCheckAt).toLocaleString()) : "not scheduled"}`} · Source strategy: ${esc(target.portalPlatform || "auto")}</p>
       ${ui?.editing || ui?.recording ? "" : `<div style="margin-top:6px">

@@ -127,7 +127,8 @@ import { isPortalPaused } from "./portalPause";
 // imports repository, and the circular-import guard in CLAUDE.md is about that edge.
 import { ensureCheckTarget, refuseUtilityUrlOnPermitTarget, getSubmittalTracks, isTrackDone, requiredTracks, SUBMITTAL_TRACK_TYPES, trackHasFiling, trackPermitTypes, trackSubmittedAndTracked, trackSubmittedSentence, unfinishedTracks, unfinishedUnattributedTargets } from "./submittalTracks";
 import { recordStagedReview, supersedeStagedReviews, takeStagedReviewCapture } from "./stagedReviews";
-import { projectSecretValues } from "./projectSecrets";
+import { projectSecretValues, projectSecretValuesById } from "./projectSecrets";
+import { lastUnreadableByTarget, scrubUnreadableReason, UNREADABLE_AUDIT_ACTION } from "./lastUnreadable";
 import { recordTimelineSample, trackForTarget } from "./timelineSamples";
 import { buildApplicationDocumentPackage, findApplicationProfile } from "./applicationDocs";
 import { ensurePlanSetSplit } from "./docSplitter";
@@ -553,6 +554,8 @@ function mapPermitTarget(row: Row): PermitCheckTarget {
     portalPlatform: text(row.portal_platform),
     trackingUrl: row.tracking_url ? text(row.tracking_url) : undefined,
     readGap: text(row.read_gap) || undefined,
+    // Filled per project by withLastUnreadable (#173): the newest check that read nothing, and why.
+    lastUnreadable: null,
     // Only while the filing is finished: a gap from an earlier issued reading that a later
     // correction undid is not this filing's news any more.
     issuedDocsGap: isFinishedOutcome(trackKind(text(row.target_type), text(row.permit_type)), text(row.latest_outcome))
@@ -572,6 +575,15 @@ function withIssuedDocuments(db: AppDb, projectId: string, targets: PermitCheckT
     const docs = byTarget.get(t.id);
     return docs?.length ? { ...t, issuedDocuments: docs, issuedDocsGap: undefined } : t;
   });
+}
+
+/** Each target's newest check that read nothing, while no later reading superseded it (#173) — one
+ *  pass over the project's own audit rows (lastUnreadable.ts), never another project's. */
+function withLastUnreadable(db: AppDb, projectId: string, targets: PermitCheckTarget[]): PermitCheckTarget[] {
+  if (!targets.length) return targets;
+  const byTarget = lastUnreadableByTarget(db, projectId, projectSecretValuesById(db, projectId));
+  if (!byTarget.size) return targets;
+  return targets.map((t) => (byTarget.has(t.id) ? { ...t, lastUnreadable: byTarget.get(t.id)! } : t));
 }
 
 function mapPermitStatusCheck(row: Row): PermitStatusCheck {
@@ -1411,9 +1423,9 @@ export function getProjectDetail(db: AppDb, projectId: string): ProjectDetail {
       .query<Row>("SELECT * FROM human_review_items WHERE project_id = ? ORDER BY status DESC, created_at DESC", [projectId])
       .map(mapReview),
     corrections,
-    permitCheckTargets: withIssuedDocuments(db, projectId, db
+    permitCheckTargets: withLastUnreadable(db, projectId, withIssuedDocuments(db, projectId, db
       .query<Row>("SELECT * FROM permit_check_targets WHERE project_id = ? ORDER BY active DESC, created_at DESC", [projectId])
-      .map(mapPermitTarget)),
+      .map(mapPermitTarget))),
     permitStatusChecks: db
       .query<Row>("SELECT c.*, t.target_type, t.permit_type FROM permit_status_checks c LEFT JOIN permit_check_targets t ON t.id = c.target_id WHERE c.project_id = ? ORDER BY c.created_at DESC LIMIT 50", [projectId])
       .map(mapPermitStatusCheck),
@@ -6685,11 +6697,11 @@ export async function recordPermitStatusCheck(
   // check it wrote.
   if (target && source !== "email" && shouldSkipEmptyRead({ gatheredNothing: resolved.gatheredNothing, source, alreadyKnown: Boolean(text(target.latest_outcome)) })) {
     const track = trackKind(text(target.target_type), text(target.permit_type));
-    db.transaction(() => rescheduleUnreadTarget(db, projectId, target, track, resolved.why, nowIso()));
+    const why = db.transaction(() => rescheduleUnreadTarget(db, projectId, target, track, resolved.why, nowIso()));
     const kept = text(target.latest_status_label) || text(target.latest_outcome);
     return {
       ...getProjectDetail(db, projectId),
-      unreadable: `The portal gave no readable status (${resolved.why}) — nothing recorded.${kept ? ` The filing keeps its last known status: ${kept}.` : ""}`,
+      unreadable: `The portal gave no readable status (${why}) — nothing recorded.${kept ? ` The filing keeps its last known status: ${kept}.` : ""}`,
     };
   }
   const rawStatusText = resolved.text;
@@ -7074,8 +7086,11 @@ function sameNoticeAsPolledCorrection(db: AppDb, targetId: string, emailAt: stri
 
 /** WHAT A CHECK THAT READ NOTHING STILL DOES (shouldSkipEmptyRead), at both doors: it ALWAYS
  *  reschedules — a skip that left next_check_at alone kept an unreadable target permanently due
- *  and re-attempted on every sweep — and audits why. Nothing else on the target moves. */
-function rescheduleUnreadTarget(db: AppDb, projectId: string, target: Row, track: TrackKind | null, why: string, ts: string): void {
+ *  and re-attempted on every sweep — and audits why. Nothing else on the target moves. The reason
+ *  is scrubbed HERE, where it is recorded (rule 2, #173: the card shows it to staff), and the
+ *  scrubbed words are returned for the caller's own reply. */
+function rescheduleUnreadTarget(db: AppDb, projectId: string, target: Row, track: TrackKind | null, rawWhy: string, ts: string): string {
+  const why = scrubUnreadableReason(rawWhy, projectSecretValuesById(db, projectId)) || "no reason was recorded";
   const days = effectiveCheckDays(target.check_frequency_days, text(target.latest_outcome));
   db.run("UPDATE permit_check_targets SET last_checked_at = ?, next_check_at = ?, updated_at = ? WHERE id = ?", [
     ts,
@@ -7083,7 +7098,8 @@ function rescheduleUnreadTarget(db: AppDb, projectId: string, target: Row, track
     ts,
     text(target.id),
   ]);
-  addAuditLog(db, projectId, "system", "permit monitor", "permit_status.unreadable", { targetId: text(target.id), track, reason: why });
+  addAuditLog(db, projectId, "system", "permit monitor", UNREADABLE_AUDIT_ACTION, { targetId: text(target.id), track, reason: why });
+  return why;
 }
 
 /** The text a check classifies, and whether it GATHERED anything: `gatheredNothing` is true only
@@ -7810,7 +7826,8 @@ async function checkPermitTargets(
     // audits it. "no portal URL/recipe" is said only when there truly was neither.
     let unreadableReason = "";
     let portalRead = false; // a recipe or platform scrape was attempted
-    const noteReason = (r: string) => { if (r && !unreadableReason) unreadableReason = r; };
+    // Scrubbed where it is made (rule 2, #173): it reaches the log, the click's reply and the card.
+    const noteReason = (r: string) => { if (r && !unreadableReason) unreadableReason = scrubUnreadableReason(r, projectSecretValuesById(db, projectId)); };
     const applicationNumbers = [text(target.application_number), text(target.permit_number)].filter(Boolean);
     const projectDetail = getProjectDetail(db, projectId);
     const clientId = projectDetail.project.clientId ?? "";
@@ -8137,8 +8154,8 @@ async function checkPermitTargets(
           : `skipping status check for target ${text(target.id)}: ${why}`,
         { projectId },
       );
-      rescheduleUnreadTarget(db, projectId, target, track, why, now);
-      results.push(permitCheckResult(db, target, "unreadable", { reason: why }));
+      const said = rescheduleUnreadTarget(db, projectId, target, track, why, now);
+      results.push(permitCheckResult(db, target, "unreadable", { reason: said }));
       if (pacing) pacing.lastAt.set(paceKey, Date.now());
       continue;
     }
