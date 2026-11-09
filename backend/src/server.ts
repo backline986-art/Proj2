@@ -104,6 +104,7 @@ import {
 import { acquireFromBytes, ensureAhjFormTemplate, formFindAuditDetails, templateProvenance } from "./ahjFormAuto";
 import { createSignature, deleteSignature, getSignatureImage, listSignatures, setDefaultSignature } from "./signatures";
 import { addAuditLog } from "./audit";
+import { cancelPortalRun } from "./stageCancel";
 import { buildAuthUrl, exchangeCodeForTokens, gmailStatus, pollGmail } from "./gmail";
 import { imapStatus, pollImap, upsertImapSource } from "./emailPoller";
 import { answerPortalQuestions, createIntakeRequest, getIntakeRequestPublic, submitIntakeRequest, portalQuestionStatus } from "./intakeRequests";
@@ -3805,6 +3806,15 @@ app.post("/api/projects/:id/autofill-specs", asyncHandler(async (req, res) => {
   const applied = Object.keys(suggestions).length ? suggestReviewValues(db, String(req.params.id), suggestions) : 0;
   res.json({ spec, suggestions, applied, detail: getProjectDetail(db, String(req.params.id)) });
 }));
+
+// #340 — STOP A RUNNING STAGE. A person asks a recipe replay this server is driving to stop: it ends
+// at its next step boundary (no further fill or click), closes its browser, and is recorded
+// 'cancelled' with who and when (stageCancel.ts). Never submits and never clicks to clean up (rule 1);
+// a run already at the review screen is refused (that window is the person's).
+// Scope: /api/portal-runs/:id, so the child scope guard 404s another tenant's run (rule 6).
+app.post("/api/portal-runs/:id/cancel", (req, res) => {
+  res.json(cancelPortalRun(db, String(req.params.id), currentUser(db, req)?.email || "operator"));
+});
 
 app.post("/api/portal-runs/:id/capture-confirmation", (req, res) => {
   res.json(captureConfirmation(db, req.params.id, req.body || {}));

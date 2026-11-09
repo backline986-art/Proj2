@@ -317,6 +317,12 @@ interface StageOptions {
    *  stagedReview; reviewDigest.ts). The backend passes it on a plain NEM recipe stage only. The
    *  capture comes back as the result's top-level `stagedReview`, in memory, for the one writer. */
   stagedReview?: { secrets: string[]; gapMs?: number } | null;
+  /** #340 — a person's cancel of THIS run (the backend aborts it; reason { by, at }). A recipe replay
+   *  stops at its next step boundary and closes its browser; the result carries `runCancelled`. */
+  abortSignal?: AbortSignal | null;
+  /** #340 — a replay with no new step for this long ends as a named failure (`replayStalled`).
+   *  Default PORTAL_REPLAY_STALL_MINUTES, 8 minutes. */
+  stallTimeoutMs?: number;
 }
 
 // Headed, guided-manual staging leaves the browser OPEN at the review screen so the human
@@ -614,6 +620,10 @@ async function runAdapter(
     // #436 PR1 — THE STAGED DRAFT'S REVIEW DIGEST, off the adapter itself (never a step's data): the
     // backend's one writer records it from this in-memory result and keeps it out of result_json.
     const stagedReview = (adapter as { stagedReviewCapture?: unknown }).stagedReviewCapture;
+    // #340 — A RUN STOPPED FROM OUTSIDE (a person's cancel, or the stall clock), lifted for the backend:
+    // it records `cancelled` / a named stall, never a filing.
+    const runCancelled = steps.map((s) => s?.data?.runCancelled).find((d) => d && typeof d === "object") ?? null;
+    const replayStalled = steps.map((s) => s?.data?.replayStalled).find((d) => d && typeof d === "object") ?? null;
 
     // Leave the browser OPEN for the human ONLY when: this is a guided-manual run (no
     // autosubmit), it's headed (the human is watching), it staged cleanly to review, and we
@@ -684,6 +694,8 @@ async function runAdapter(
       ...(draftCreatedByReplay ? { draftCreatedByReplay } : {}),
       ...(draftSubmitUnexpected ? { draftSubmitUnexpected } : {}),
       ...(stagedReview && typeof stagedReview === "object" ? { stagedReview } : {}),
+      ...(runCancelled ? { runCancelled } : {}),
+      ...(replayStalled ? { replayStalled } : {}),
       evidenceDir,
       outcomeShotPath,
       ...(feeStop ? { feeStop } : {}),
@@ -754,6 +766,8 @@ export async function stageWithRecipe(
     // The review page is handed to a person only when this caller watches for their submit (#333).
     handOverReview: typeof options.onSubmitCaptured === "function",
     stagedReview: options.stagedReview ?? null,
+    abortSignal: options.abortSignal ?? null,
+    stallTimeoutMs: options.stallTimeoutMs,
   }), project, files, options));
 }
 

@@ -256,6 +256,12 @@ export function segmentAOutcomeFromRun(
       || "The portal stage failed before reaching the review screen — see the run's debug bundle.";
     return { code: "stage_failed", detail };
   }
+  // #340 — A CANCELLED RUN STAGED NOTHING. Without this it fell through to null, which this function
+  // reads as "genuinely staged" — autopilot would have gone on as if the draft sat at review.
+  if (status === "cancelled") {
+    const detail = String(run?.error_message ?? "").trim() || "A person cancelled the portal stage before it reached the review screen.";
+    return { code: "stage_cancelled", detail };
+  }
   // A FEE IS NOT A CHALLENGE (#576): the run's own payment sentence (its error_message), never
   // "complete the challenge" and never a relaunch — it is a portal-run outcome, not a gate.
   if (status === "awaiting_payment") {

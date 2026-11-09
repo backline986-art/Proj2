@@ -173,7 +173,9 @@ export type PortalRunStatus =
   // approved click). A person pays on the portal; staging the track is refused while it waits.
   | "awaiting_payment"
   | "submitted"
-  | "failed";
+  | "failed"
+  // #340: a person stopped the run mid-fill (POST /api/portal-runs/:id/cancel). Nothing was filed.
+  | "cancelled";
 export type PermitCheckSource = "manual" | "portal" | "email" | "mock" | "public_url";
 export type PermitCheckOutcome =
   | "waiting"

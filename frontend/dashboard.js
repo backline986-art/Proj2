@@ -9257,7 +9257,7 @@ function renderPortalRuns() {
   const paused = runs.find((run) => (run.status === "paused_for_human" || run.status === "awaiting_payment") && run.runType !== "correction_reopen");
   const runCard = (run) => {
     const isMfa = run.pauseReason === "mfa_captcha";
-    const cardClass = run.status === "failed" ? "fail" : isMfa || run.status === "awaiting_payment" ? "warning" : "info";
+    const cardClass = run.status === "failed" ? "fail" : isMfa || run.status === "awaiting_payment" || run.status === "cancelled" ? "warning" : "info";
     const confirmLine = run.confirmationNumber ? `<p class="muted">Confirmation: <strong>${esc(run.confirmationNumber)}</strong></p>` : "";
     const mfaBanner = isMfa
       ? `<p class="submit-gate-check warning" style="margin-top:6px">Portal requires your attention — MFA or CAPTCHA detected. Complete it in the browser window, then click Retry to continue.</p>`
@@ -9275,6 +9275,15 @@ function renderPortalRuns() {
           <span class="muted" style="font-size:11px">Press this only AFTER you have clicked the portal's own resubmit. It records your click — it never submits anything — and closes the corrections this resubmission answers.</span>
         </div>`
       : "";
+    // #340 — STOP A RUNNING STAGE. Only on a stage that is still filling ('running'); a run at the
+    // review screen has no Stop (that window is the person's to submit or close). The server stops the
+    // replay at its next step, closes its browser and records the run cancelled — never submitted.
+    const stopAction = run.status === "running" && run.runType === "prepare_submit"
+      ? `<div style="margin-top:6px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+          <button class="secondary" data-stop-staging="${esc(run.id)}" style="font-size:12px">Stop staging</button>
+          <span class="muted" style="font-size:11px">Stops at the next step: nothing more is filled or clicked, nothing is submitted.</span>
+        </div>`
+      : "";
     return `
     <article class="item ${cardClass}">
       <div class="item-title"><span>${esc(humanize(run.runType))}</span>${statusBadge(run.status)}</div>
@@ -9283,6 +9292,7 @@ function renderPortalRuns() {
       ${confirmLine}
       <p class="muted">${esc(run.errorMessage || run.startedAt)}</p>
       ${resubmitAction}
+      ${stopAction}
     </article>`;
   };
   // PIN WHAT A PERSON MUST ACT ON; FOLD THE HISTORY WITH ITS COUNTS. On 7ec74634 the one
@@ -9291,7 +9301,8 @@ function renderPortalRuns() {
   // resubmit, and every paused run — the same states the capture form and the reopen action
   // are offered for. Everything else goes behind "Earlier runs (N · M failed)", so the failure
   // count is never hidden with the cards.
-  const pinnedStatuses = ["awaiting_human_submit", "awaiting_human_resubmit", "paused_for_human", "awaiting_payment"];
+  // A RUNNING stage is pinned too (#340): its Stop control must not sit folded under old runs.
+  const pinnedStatuses = ["running", "awaiting_human_submit", "awaiting_human_resubmit", "paused_for_human", "awaiting_payment"];
   const pinned = runs.filter((run) => pinnedStatuses.includes(run.status));
   const earlier = runs.filter((run) => !pinnedStatuses.includes(run.status));
   const earlierFailed = earlier.filter((run) => run.status === "failed").length;
@@ -9328,6 +9339,24 @@ function renderPortalRuns() {
         // An unknown must never read as reassurance: a resubmission the monitor cannot poll,
         // or corrections that did not close, is a WARNING even though the record was written.
         showMessage(result.message, result.checkTargetRefreshed && !result.correctionsStillOpen ? "info" : "warning");
+      } catch (err) {
+        showMessage(err.message, "error");
+        button.disabled = false;
+        button.textContent = originalLabel;
+      }
+    });
+  });
+
+  document.querySelectorAll("#portalRunsPinned button[data-stop-staging], #portalRuns button[data-stop-staging]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      if (!confirm("Stop this staging run at its next step? Nothing more is filled or clicked and nothing is submitted; whatever the portal already holds stays there.")) return;
+      button.disabled = true;
+      const originalLabel = button.textContent;
+      button.textContent = "Stopping…";
+      try {
+        const result = await api(`/api/portal-runs/${encodeURIComponent(button.dataset.stopStaging)}/cancel`, { method: "POST", body: "{}" });
+        showMessage(result.message, "info");
+        await selectProject(state.selectedProjectId);
       } catch (err) {
         showMessage(err.message, "error");
         button.disabled = false;

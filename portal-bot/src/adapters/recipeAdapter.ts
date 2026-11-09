@@ -110,6 +110,7 @@ import {
 import { commitField, installSettleProbe, waitForSettled } from "../settle";
 import { siteOfUrl } from "../siteOf";
 import { dialogOpenedSince, readUnlessDialog } from "../personDialogs";
+import { cancelledMessage, cancelRequestOf, ReplayStallWatch, replayStallMsFromEnv, type RunCancelRequest } from "./replayStopControl";
 import { installFilingBackstop, withBackstopWindow, withOwnWriteWindow, withAutomationInput, describeBackstopAbort, backstopSentLine, drainOwnWrites, unsavedAtReviewWarning, portalOwnCallsBlockedAtReview, reviewBlockedCallsLine, isStoppingAbort, type BackstopAbort, type FilingBackstop, type BackstopHumanRequest } from "../filingBackstop";
 
 /** #333: the run did not hand the review page over — its input watch could not be armed, or (Helm
@@ -1283,6 +1284,18 @@ export class RecipeAdapter extends BasePortalAdapter {
   private ledgerBefore: LedgerEntry[] | null = null;
   /** The recipe step index the loop is on — the final-submit gate's "is this the terminal step". */
   private currentStepIdx = -1;
+  /** #340 — WHY THE REPLAY WAS STOPPED FROM OUTSIDE (a person's cancel, or no progress for too long).
+   *  Set once; every later door (the step loop, fillApplication, stopAtReview) reads it and ends the
+   *  run named, without touching the page again. */
+  private replayStop: { kind: "cancelled"; message: string; stepIndex: number | null; request: RunCancelRequest }
+    | { kind: "stalled"; message: string; stepIndex: number | null; stalledMs: number } | null = null;
+  /** #340 — the stall clock for this replay (created when the step loop starts). */
+  private stallWatch: ReplayStallWatch | null = null;
+  /** #340 — may a stop interrupt the step in flight (close the page under it)? False from the moment
+   *  the loop reaches a click that can file or create a draft — the approved final submit, the
+   *  stamped draft submit, anything past the review marker — so a hung filing click is never cut
+   *  off half-way into an unknown. There, the stop waits for the step boundary. */
+  private stopMayInterrupt = true;
   /** #436 PR1 — the staged draft's review digest, read at the review stop (options.stagedReview).
    *  IN MEMORY ONLY: runAdapter hands it to the backend's one writer; it is never part of a step's
    *  data (result_json is not where it lives). null = not asked for, or the run did not stop at review. */
@@ -1337,6 +1350,13 @@ export class RecipeAdapter extends BasePortalAdapter {
        *  every label blank. Nothing is clicked on it; any failure is an unapprovable capture, never a
        *  failed Stage. */
       stagedReview?: { secrets: string[]; gapMs?: number } | null;
+      /** #340 — A PERSON CANCELLED THIS RUN: the backend aborts it (POST /api/portal-runs/:id/cancel),
+       *  its reason { by, at }. The replay stops at its next step boundary — no further fill or click
+       *  — and never clicks anything to clean up. */
+      abortSignal?: AbortSignal | null;
+      /** #340 — no new step for this long ends the run as a named failure. Default
+       *  PORTAL_REPLAY_STALL_MINUTES (8 minutes); never unbounded. */
+      stallTimeoutMs?: number;
     } = {},
   ) {
     super();
@@ -1510,16 +1530,26 @@ export class RecipeAdapter extends BasePortalAdapter {
     if (this.backstop?.redirectGuardNote) this.driftWarnings.push(this.backstop.redirectGuardNote);
     try {
       // A FilerIdentityStop that escaped the step loop (a click between steps) is the run's answer too.
+      const stopTimer = this.startStopWatchdog();
       const ranRaw = await this.runAll(project).catch((err: unknown) => {
+        // #340 — the watchdog closed the page under a hung step: the stop is the answer, not the
+        // "page closed" error it caused.
+        if (this.replayStop) return fail(this.replayStop.message, this.replayStopData());
         if (err instanceof FilerIdentityStop) return fail(err.message, { driftWarnings: this.driftWarnings, agingNotes: this.agingNotes, guardRefusals: this.guardRefusals });
         if (err instanceof TypeaheadStop) return fail(err.message, { driftWarnings: this.driftWarnings, agingNotes: this.agingNotes, guardRefusals: this.guardRefusals, fieldsVerified: this.fieldsVerified, fieldsUnverified: this.fieldsUnverified });
         throw err;
-      });
+      }).finally(() => clearInterval(stopTimer));
+      // #340 — a cancel or a stall is the run's answer however the step in flight ended (its own
+      // "page closed" failure, or a skip that let the loop run on to the boundary). Never over a
+      // click that happened: that is a fact the record must carry.
+      const ranOrStop = this.replayStop && !this.finalSubmitClicked
+        ? fail(this.replayStop.message, { ...(ranRaw.data ?? {}), ...this.replayStopData() })
+        : ranRaw;
       // ...and a stop recorded on a path that swallowed it never ends as "reached review".
       const stopped = this.filerIdentityStop || this.typeaheadStop;
-      const ran = stopped && ranRaw.ok
-        ? fail(stopped, { ...(ranRaw.data ?? {}), driftWarnings: this.driftWarnings, guardRefusals: this.guardRefusals })
-        : ranRaw;
+      const ran = stopped && ranOrStop.ok
+        ? fail(stopped, { ...(ranOrStop.data ?? {}), driftWarnings: this.driftWarnings, guardRefusals: this.guardRefusals })
+        : ranOrStop;
       // A dismissed dialog cancelled the approved click: the result says so in data too.
       const r = this.finalSubmitNothingSent ? { ...ran, data: { ...(ran.data ?? {}), finalSubmitClicked: false, finalSubmitRequestSent: false } } : ran;
       // Hand-off: the route comes off FIRST, then every abort up to that moment is counted (an
@@ -1954,6 +1984,8 @@ export class RecipeAdapter extends BasePortalAdapter {
         { finalSubmitClicked: false, draftSubmitClickedByAutomation: true },
       );
     }
+    // #340 — A STOPPED RUN HANDS NOTHING OVER: no review read, no staged-review walk, no page touched.
+    if (this.replayStop) return fail(this.replayStop.message, this.replayStopData());
     // A request the person sent may land after the run's tail read it, and before the run let the page
     // go: the handed-over backstop's record is read again now (round 3).
     if ((this.handedOverBackstop?.humanRequests.length ?? 0) > 0) this.personRequestWent = true;
@@ -2775,6 +2807,50 @@ export class RecipeAdapter extends BasePortalAdapter {
     return { fields, body, confirmed: cmp.confirmed, mismatches: cmp.mismatches };
   }
 
+  /** #340 — has a person cancelled this run, or has it stopped making progress? Records the first
+   *  answer in replayStop (it never changes after) and says whether the run must end. */
+  private checkReplayStop(stepIndex: number | null, inFlight = false): boolean {
+    if (this.replayStop) return true;
+    const req = cancelRequestOf(this.options.abortSignal);
+    if (req) {
+      this.replayStop = { kind: "cancelled", message: cancelledMessage(req, stepIndex, inFlight), stepIndex, request: req };
+      return true;
+    }
+    const stalledMs = this.stallWatch?.stalledMs() ?? null;
+    if (stalledMs != null && this.stallWatch) {
+      this.replayStop = { kind: "stalled", message: this.stallWatch.message(), stepIndex: this.stallWatch.current?.stepIndex ?? stepIndex, stalledMs };
+      return true;
+    }
+    return false;
+  }
+
+  /** #340 — what a stopped run reports in its data (index.ts lifts it to the run's result). */
+  private replayStopData(): Record<string, unknown> {
+    const st = this.replayStop;
+    if (!st) return {};
+    return st.kind === "cancelled"
+      ? { runCancelled: { by: st.request.by, at: st.request.at, stepIndex: st.stepIndex } }
+      : { replayStalled: { stepIndex: st.stepIndex, stalledMs: st.stalledMs } };
+  }
+
+  /** #340 — THE WATCHDOG for a step that never returns. Polls the cancel and the stall clock; when
+   *  either says stop and the step in flight may be interrupted, it closes the page, so the hung
+   *  Playwright call throws and the loop ends with the stop named. Inside a filing/draft click it
+   *  only records the stop; the loop ends at the next boundary. */
+  private startStopWatchdog(): ReturnType<typeof setInterval> {
+    const stallMs = this.options.stallTimeoutMs && this.options.stallTimeoutMs > 0 ? this.options.stallTimeoutMs : replayStallMsFromEnv();
+    this.stallWatch = new ReplayStallWatch(stallMs);
+    const every = Math.max(25, Math.min(5_000, Math.floor(stallMs / 8)));
+    const timer = setInterval(() => {
+      if (this.replayStop || !this.checkReplayStop(this.currentStepIdx >= 0 ? this.currentStepIdx : null, true)) return;
+      if (!this.stopMayInterrupt || this.finalSubmitClicked) return;
+      const pg = this.page as { close?: () => Promise<unknown> } | null;
+      if (pg && typeof pg.close === "function") void pg.close().catch(() => null);
+    }, every);
+    if (typeof timer.unref === "function") timer.unref();
+    return timer;
+  }
+
   private async runAll(project?: ProjectRecord): Promise<PortalStepResult> {
     if (!this.page) return fail("Recipe replay has no open page.");
     let executed = 0;
@@ -2878,6 +2954,13 @@ export class RecipeAdapter extends BasePortalAdapter {
       }
       const recordedStep = this.recipe.steps[stepIdx];
       this.currentStepIdx = stepIdx;
+      // #340 — THE STEP BOUNDARY: a person's cancel, or no new step for too long, ends the run HERE,
+      // before this step fills or clicks anything. Nothing is clicked to clean up.
+      this.stallWatch?.note(stepIdx, this.arrayPass, String(recordedStep?.note ?? recordedStep?.field ?? recordedStep?.action ?? ""));
+      if (this.checkReplayStop(stepIdx)) {
+        closePrevStepTiming();
+        return fail(this.replayStop!.message, { ...this.replayStopData(), executed, skipped, healedSteps: this.healedSteps, driftWarnings: this.driftWarnings, agingNotes: this.agingNotes, guardRefusals: this.guardRefusals, failedStepIndex: stepIdx, trace, slowSteps });
+      }
       // #382 — A RECORDED "ADD ARRAY" CLICK IS NEVER REPLAYED. It adds a fixed number of rows (the
       // learn project's), whatever this project has; the rows this project needs are added after
       // the array block, one per array (afterArrayBlock), and only there.
@@ -2956,6 +3039,8 @@ export class RecipeAdapter extends BasePortalAdapter {
       closePrevStepTiming();
       prevStart = Date.now();
       prevStep = { i: stepIdx, action: String(step?.action ?? ""), note: String(step?.note ?? "").slice(0, 52) };
+      // #340 — from a click that can file or create a draft on, a stop never cuts a step off mid-way.
+      if (pastReview || isFinalSubmitStep(step) || this.draftCreatingStepAt(stepIdx) >= 0) this.stopMayInterrupt = false;
       // Guided-manual: stop at review. autoSubmit (trusted, approved): proceed past
       // the review marker to replay ONLY allowlisted final-submit steps.
       // Sweep before leaving a page (an advancing click) and before review: those are the

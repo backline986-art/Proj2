@@ -70,6 +70,7 @@ import { correctionFilingStamp, correctionOverdueSql, touchProjectMetrics, type 
 import fs from "node:fs";
 import path from "node:path";
 import { portalProfilesDir } from "./statePaths";
+import { closeStageCancel, openStageCancel } from "./stageCancel";
 import os from "node:os";
 import { checkStatusWithAdapter, runCorrectionReopen, stageWithAccela, stageWithMockPortal, stageWithPowerClerk, stageWithRecipe } from "../../portal-bot/src/index";
 import { readRecordLinkSignedIn } from "../../portal-bot/src/recordLinkRead";
@@ -8121,9 +8122,11 @@ export function extractStageFailureMessage(result: Record<string, unknown>): str
 //                           dialog, or a fee page after the approved click. A person pays on the
 //                           portal; staging this track is refused while it waits (feePause.ts)
 //   interrupted           — a 'running' row whose runner process is gone
+//   cancelled             — a person stopped the run (#340, stageCancel.ts): nothing further was
+//                           filled or clicked after the stop, and nothing was filed
 // ---------------------------------------------------------------------------------------------
 export type StageRunStatus =
-  | "running" | "awaiting_human_submit" | "paused_for_human" | "awaiting_payment" | "submitted" | "submitted_unconfirmed" | "failed" | "interrupted";
+  | "running" | "awaiting_human_submit" | "paused_for_human" | "awaiting_payment" | "submitted" | "submitted_unconfirmed" | "failed" | "interrupted" | "cancelled";
 
 /** A step message that can only exist after the final-submit click happened. "Final submit needs
  *  a human … stopped without clicking" is deliberately NOT here: that one did not click. */
@@ -8158,7 +8161,7 @@ export function pausedRunSentence(pauseReason: string, result: Record<string, un
 
 export function derivePortalRunOutcome(result: Record<string, unknown>): {
   status: Exclude<StageRunStatus, "running" | "interrupted">;
-  submissionStatus: "submitted" | "submitted_unconfirmed" | "paused_for_human" | "awaiting_payment" | "failed" | "awaiting_human_submit";
+  submissionStatus: "submitted" | "submitted_unconfirmed" | "paused_for_human" | "awaiting_payment" | "failed" | "awaiting_human_submit" | "cancelled";
   finalSubmitClicked: boolean;
   submissionVerdict: "accepted" | "rejected" | "unknown" | null;
   pauseReason: string | null;
@@ -8190,6 +8193,11 @@ export function derivePortalRunOutcome(result: Record<string, unknown>): {
     const status = verdict === "accepted" ? "submitted" : "submitted_unconfirmed";
     return { status, submissionStatus: status, finalSubmitClicked: true, submissionVerdict: verdict ?? "unknown", pauseReason, harnessAbort: false };
   }
+  // #340 — A PERSON STOPPED THE RUN. Below the click check on purpose: a click is a fact, and a cancel
+  // that came after one cannot unfile it. Without a click, a cancelled run is 'cancelled' whatever
+  // else it reported — never staged, never a pause for someone, never a filing.
+  const cancelled = result.runCancelled && typeof result.runCancelled === "object";
+  if (cancelled) return { status: "cancelled", submissionStatus: "cancelled", finalSubmitClicked: false, submissionVerdict: null, pauseReason: null, harnessAbort: false };
   if (pauseReason) return { status: "paused_for_human", submissionStatus: "paused_for_human", finalSubmitClicked: false, submissionVerdict: null, pauseReason, harnessAbort: false };
   if (result.ok === true) return { status: "awaiting_human_submit", submissionStatus: "awaiting_human_submit", finalSubmitClicked: false, submissionVerdict: null, pauseReason: null, harnessAbort: false };
   // A failure that was OUR browser/process going away is kept distinct in the record (never scored,
@@ -10246,7 +10254,10 @@ export async function prepareSubmission(
         ? { secrets: projectSecretValues(stagedProject) }
         : null;
       if (stagedReview) stagedReviewFor = { recipeId: recipe.id, stepsSignature: replayStepsSig };
-      const replayOptions = { ...stageOptions, draftSubmitStamp, stagedReview };
+      // #340 — THIS REPLAY CAN BE STOPPED: a person's cancel (POST /api/portal-runs/:id/cancel) aborts
+      // this signal; the replay stops at its next step boundary. Closed in the finally below.
+      const cancelSignal = openStageCancel(runId);
+      const replayOptions = { ...stageOptions, draftSubmitStamp, stagedReview, abortSignal: cancelSignal };
       ledgerStagingLaunch(`staging replay (${track ?? "permit"} track, run ${runId})`, String(recipe.portalUrl || credentialUrl || ""));
       result = await recipeStageRunner(boundRecipe, stagedProject, boundValues, docsByType, files, replayOptions);
 
@@ -10269,7 +10280,10 @@ export async function prepareSubmission(
       // must stay this run's result (recorded and disarmed below), never be replaced by a retry's.
       const draftClickReachedPortal = Boolean((result as { draftSubmitUnexpected?: unknown }).draftSubmitUnexpected
         || (result as { draftCreatedByReplay?: unknown }).draftCreatedByReplay);
-      if (!result.ok && !draftClickReachedPortal && looksBotBlocked(stageFailureText(result)) && stageOptions.headless !== false
+      // Nor after a person's cancel or a stall (#340): a stopped run is not retried in a second browser.
+      const stoppedFromOutside = cancelSignal.aborted || Boolean((result as { runCancelled?: unknown }).runCancelled)
+        || Boolean((result as { replayStalled?: unknown }).replayStalled);
+      if (!result.ok && !draftClickReachedPortal && !stoppedFromOutside && looksBotBlocked(stageFailureText(result)) && stageOptions.headless !== false
           && process.env.PORTAL_HEADED_RETRY !== "0") {
         logger.info("portal", "portal refused a headless browser at staging — retrying with a real window", {
           projectId, portal: portalLabel,
@@ -10596,6 +10610,10 @@ export async function prepareSubmission(
     // above already exists), never as a 500 that leaves the row 'running' forever.
     const msg = `Portal run errored: ${err instanceof Error ? err.message : String(err)}`;
     result = { ok: false, finalSubmitClicked: false, pauseReason: null, message: msg, steps: [{ ok: false, message: msg }] };
+  } finally {
+    // #340 — the adapter has returned: this run can no longer be cancelled (a no-op for a run that
+    // never opened a replay).
+    closeStageCancel(runId);
   }
 
   // THE RUN'S OUTCOME COMES FROM ONE FUNCTION (derivePortalRunOutcome), and it answers from what
@@ -10617,6 +10635,9 @@ export async function prepareSubmission(
     // A FEE STOP (#576): its own sentence on the run, the submission, the project line and the alert.
     const awaitingPayment = outcome.status === "awaiting_payment";
     const paymentSentence = awaitingPayment ? paymentNeededForRun(result, portalLabel) : "";
+    // #340 — a person stopped this run: its own sentence (who, when, at which step) is the record.
+    const runCancelled = outcome.status === "cancelled";
+    const cancelMessage = runCancelled ? extractStageFailureMessage(result) : "";
     const failureMessage = adapterFailed
       ? `${outcome.harnessAbort ? "[our browser/harness went away — this says nothing about the portal] " : ""}${extractStageFailureMessage(result)}${replayVerdictNote}`
       : "";
@@ -10703,7 +10724,7 @@ export async function prepareSubmission(
         `UPDATE portal_runs SET status = ?, finished_at = ?, error_message = ?, human_action_required = ?,
            screenshots_path = ?, logs_path = ?, result_json = ?, pause_reason = ?
          WHERE id = ?`,
-        [runStatus, nowIso(), failureMessage || paymentSentence || (pauseReason ? pausedRunSentence(pauseReason, result) : ""), 1,
+        [runStatus, nowIso(), failureMessage || cancelMessage || paymentSentence || (pauseReason ? pausedRunSentence(pauseReason, result) : ""), 1,
           // A FILE, never a folder: /portal-runs/:id/review-screenshot sendFile()s this column.
           outcomeShotPath,
           // logs_path: the learn-run debug bundle folder (set by the self-seed path) — links a
@@ -10772,6 +10793,8 @@ export async function prepareSubmission(
                 + `${outcomeShotPath ? ` Page: ${outcomeShotPath}` : ""}`)
             : pauseReason
               ? `${trackLabelText}${portalLabel} run PAUSED for a human: ${pausedRunSentence(pauseReason, result)}`
+              : runCancelled
+                ? `${trackLabelText}${portalLabel} run CANCELLED — nothing was submitted. ${cancelMessage}`
               : adapterFailed
                 ? `${trackLabelText}${portalLabel} run FAILED before review — nothing was staged on the portal. ${failureMessage}`
                 : `${trackLabelText}${portalLabel} staged to final review only. Automation did not click final submit.${borrowedNote}`,
@@ -10784,7 +10807,7 @@ export async function prepareSubmission(
         // status — never advance it to awaiting_human_submit for a run that staged nothing, and never
         // to 'submitted' on a filing the portal did not confirm (the submissions row and the
         // duplicate guard carry the click).
-        acceptedFiling ? "submitted" : (pauseReason || adapterFailed || clicked) ? detail.project.status : "awaiting_human_submit",
+        acceptedFiling ? "submitted" : (pauseReason || adapterFailed || runCancelled || clicked) ? detail.project.status : "awaiting_human_submit",
         awaitingPayment
           ? `${trackLabelText}${portalLabel}: ${paymentSentence}`
           : clicked
@@ -10793,6 +10816,8 @@ export async function prepareSubmission(
             : `${trackLabelText}${portalLabel}: final submit CLICKED by automation, not confirmed by the portal — verify on the portal before anything else.`)
           : pauseReason
             ? `${trackLabelText}${portalLabel} run paused: ${pausedRunSentence(pauseReason, result)}`
+            : runCancelled
+              ? `${trackLabelText}${portalLabel} run cancelled — not staged. ${cancelMessage}`
             : adapterFailed
               ? `${trackLabelText}${portalLabel} run failed — not staged. ${failureMessage}`
               : `${trackLabelText}${portalLabel} staged. Human must verify and submit manually.${borrowedNote}`,
@@ -10803,7 +10828,9 @@ export async function prepareSubmission(
         // retry" was a sentence.
         (clicked ? "auto_submitted"
           : pauseReason ? "staging_paused"
-          : adapterFailed ? "staging_failed"
+          // A cancelled run staged nothing: the same operator move as a failure (look at the portal,
+          // stage again), never "staged for review".
+          : adapterFailed || runCancelled ? "staging_failed"
           : "staged_for_review") satisfies StageDetail,
         nowIso(),
         projectId,
@@ -10826,7 +10853,7 @@ export async function prepareSubmission(
       }
 
       addAuditLog(db, projectId, "portal_bot", runActorLabel,
-        clicked ? "portal.final_submit_clicked" : pauseReason ? "portal.paused_for_human" : adapterFailed ? "portal.run_failed" : "portal.staged_to_review", {
+        clicked ? "portal.final_submit_clicked" : pauseReason ? "portal.paused_for_human" : runCancelled ? "portal.run_cancelled" : adapterFailed ? "portal.run_failed" : "portal.staged_to_review", {
           runId,
           portalProfileId,
           portalType: auditPortalType,
@@ -10834,6 +10861,7 @@ export async function prepareSubmission(
           runStatus,
           finalSubmitClickedByAutomation: clicked,
           ...(adapterFailed ? { failureReason: failureMessage, harnessAbort: outcome.harnessAbort } : {}),
+          ...(runCancelled ? { cancelled: (result as { runCancelled?: unknown }).runCancelled } : {}),
           mustShowAhjPreviewWindow: reviewerReport.finalSubmitGate.mustShowAhjPreviewWindow,
           finalSubmitButtonAloneIsEnough: reviewerReport.finalSubmitGate.finalSubmitButtonAloneIsEnough,
         });

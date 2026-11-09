@@ -212,6 +212,14 @@ for (const expected of ["/api/corrections", "/api/portal-runs"]) {
   run(`${expected}/:id is behind a child scope guard`, guardedPrefixes.includes(expected), `guards: ${guardedPrefixes.join(", ")}`);
 }
 
+// #340 — stopping a running stage sits UNDER the portal-runs child guard (another tenant's run
+// 404s before the handler runs), never at a new top-level path.
+run(
+  "POST /api/portal-runs/:id/cancel exists and is under the /api/portal-runs child scope guard",
+  apiRoutes.some((r) => r.verb === "post" && r.path === "/api/portal-runs/:id/cancel") && guardedPrefixes.includes("/api/portal-runs"),
+  `routes: ${apiRoutes.filter((r) => r.path.includes("portal-runs")).map((r) => r.path).join(", ")}`,
+);
+
 // The declared list routes must still actually pass a filter. Matched on the handler
 // body between this route and the next app.<verb>( registration, so a long handler
 // (the project list is ~12 lines) is still covered.
