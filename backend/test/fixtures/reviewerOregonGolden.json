@@ -388,56 +388,6 @@
       "evidenceStatus": "weak"
     },
     {
-      "id": "city.elec.dc-size-mismatch",
-      "severity": "blocker",
-      "category": "electrical",
-      "title": "DC size mismatch",
-      "message": "Captured module count/wattage calculates 60.20 kW DC but project DC size is 60.00 kW.",
-      "cityFeedback": "Revise the equipment schedule/application so module quantity, module wattage, and DC system size match across all sheets and portal fields.",
-      "designTeamAction": "Correct either module quantity, module wattage, or DC kW and regenerate affected application fields.",
-      "evidenceNeeded": [
-        "Corrected equipment schedule",
-        "Corrected application DC size",
-        "Matching SLD/module sheet"
-      ],
-      "codeReferences": [
-        {
-          "code": "2023 OESC / 2023 NEC",
-          "section": "Articles 690 and 705",
-          "title": "Solar PV and interconnected power production sources",
-          "adoptionScope": "Oregon electrical submittals; verify local adopted NEC cycle outside Oregon.",
-          "sourceUrl": "https://www.oregon.gov/bcd/codes-stand/pages/electrical.aspx",
-          "note": "Oregon BCD lists the 2023 Oregon Electrical Specialty Code as effective Oct. 1, 2023 and based on the 2023 NEC."
-        }
-      ],
-      "installerCallout": true,
-      "evidenceFound": [
-        {
-          "kind": "source_excerpt",
-          "label": "SLD found — corrected equipment schedule not verified",
-          "source": "Split page mapping",
-          "excerpt": "one-line diagram rapid shutdown site plan roof plan",
-          "confidence": "high",
-          "pageHint": "Split page mapping",
-          "screenshotPath": "",
-          "verifier": "parser",
-          "note": "This shows the SLD is on the set. It does not show corrected equipment schedule; check the source sheet for that."
-        },
-        {
-          "kind": "screenshot_placeholder",
-          "label": "Screenshot crop slot",
-          "source": "Split page mapping",
-          "excerpt": "",
-          "confidence": "high",
-          "pageHint": "Split page mapping",
-          "screenshotPath": "/api/projects/golden-or-1/evidence-image?topic=sld&hint=Split%20page%20mapping&excerpt=one-line%20diagram%20rapid%20shutdown%20site%20plan%20roof%20plan",
-          "verifier": "parser",
-          "note": "Source page will render here. If no plan-set PDF is stored, upload it to Project Documents — then this slot shows the sheet. Use the source/page hint above meanwhile."
-        }
-      ],
-      "evidenceStatus": "weak"
-    },
-    {
       "id": "reviewer.plan.rapid-shutdown",
       "severity": "warning",
       "category": "plan_set",
@@ -952,56 +902,6 @@
           "screenshotPath": "",
           "verifier": "parser",
           "note": "This shows the SLD is on the set. It does not show module make/model/wattage/quantity; check the source sheet for that."
-        },
-        {
-          "kind": "screenshot_placeholder",
-          "label": "Screenshot crop slot",
-          "source": "Split page mapping",
-          "excerpt": "",
-          "confidence": "high",
-          "pageHint": "Split page mapping",
-          "screenshotPath": "/api/projects/golden-or-1/evidence-image?topic=sld&hint=Split%20page%20mapping&excerpt=one-line%20diagram%20rapid%20shutdown%20site%20plan%20roof%20plan",
-          "verifier": "parser",
-          "note": "Source page will render here. If no plan-set PDF is stored, upload it to Project Documents — then this slot shows the sheet. Use the source/page hint above meanwhile."
-        }
-      ],
-      "evidenceStatus": "weak"
-    },
-    {
-      "id": "city.elec.dc-size-mismatch",
-      "severity": "blocker",
-      "category": "electrical",
-      "title": "DC size mismatch",
-      "message": "Captured module count/wattage calculates 60.20 kW DC but project DC size is 60.00 kW.",
-      "cityFeedback": "Revise the equipment schedule/application so module quantity, module wattage, and DC system size match across all sheets and portal fields.",
-      "designTeamAction": "Correct either module quantity, module wattage, or DC kW and regenerate affected application fields.",
-      "evidenceNeeded": [
-        "Corrected equipment schedule",
-        "Corrected application DC size",
-        "Matching SLD/module sheet"
-      ],
-      "codeReferences": [
-        {
-          "code": "2023 OESC / 2023 NEC",
-          "section": "Articles 690 and 705",
-          "title": "Solar PV and interconnected power production sources",
-          "adoptionScope": "Oregon electrical submittals; verify local adopted NEC cycle outside Oregon.",
-          "sourceUrl": "https://www.oregon.gov/bcd/codes-stand/pages/electrical.aspx",
-          "note": "Oregon BCD lists the 2023 Oregon Electrical Specialty Code as effective Oct. 1, 2023 and based on the 2023 NEC."
-        }
-      ],
-      "installerCallout": true,
-      "evidenceFound": [
-        {
-          "kind": "source_excerpt",
-          "label": "SLD found — corrected equipment schedule not verified",
-          "source": "Split page mapping",
-          "excerpt": "one-line diagram rapid shutdown site plan roof plan",
-          "confidence": "high",
-          "pageHint": "Split page mapping",
-          "screenshotPath": "",
-          "verifier": "parser",
-          "note": "This shows the SLD is on the set. It does not show corrected equipment schedule; check the source sheet for that."
         },
         {
           "kind": "screenshot_placeholder",
