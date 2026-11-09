@@ -373,7 +373,154 @@ function nemApproved(statusLabel: string, confidence: number, message: string): 
 /** The fall-through reading's label: no rule matched the words at all. */
 const UNMATCHED_STATUS_LABEL = "Needs human review";
 
+// ---------------------------------------------------------------------------
+// POWERCLERK STAGES (#170). PowerClerk — the interconnection platform PGE, PacifiCorp (Pacific
+// Power / Rocky Mountain Power) and PSE all run — states each application's STAGE outright: a
+// grid row reads "APP-**0001 PP - AHJ Inspection And Signatures Needed 10/02/2026", a record page
+// "Status marked as PP - Application Submitted on 10/30/2026". The stage is the record's own
+// answer, the same way Accela's "Record Status:" is (see STATUS_LINE), so it is read on its own
+// and the rest of the page (the record page's tab strip prints "Application Received" and
+// "Technical Review" on EVERY application) never speaks for it.
+//
+// "PP - AHJ Inspection And Signatures Needed" fell through to "Needs human review" while a live
+// PacifiCorp filing sat in it: the utility waits on the jurisdiction's final inspection and the
+// customer's signatures, a known stage that names what is owed.
+//
+// ONE MAPPING FOR THE PLATFORM, NEVER A TENANT'S STRING. The "<PROGRAM> - " prefix ("PP" at
+// PacifiCorp) is the tenant's and is dropped; the stage is read for its MEANING (an inspection or
+// signatures owed, the application suspended for changes, a review desk), so the same stage worded
+// another way at another utility reads the same. The stage is first read by every rule above (a
+// stage saying "Approved", "Submitted" or "Engineering Review" reads exactly as it always has);
+// this vocabulary only answers a stage those rules have no words for, and a stage it does not know
+// either stays "Needs human review".
+//
+// PowerClerk is a utility platform, so this is read only on the NEM track; a permit reading, or
+// text with no PowerClerk shape, that happens to use the same words is classified as it always was.
+// ---------------------------------------------------------------------------
+
+/** The stage, from "Status marked as [<PROGRAM> - ]<stage>" on a record page. */
+const POWERCLERK_MARKED_STAGE =
+  /\b[Ss]tatus\s+[Mm]arked\s+[Aa]s\s+(?:[A-Z][A-Z0-9&]{0,5}\s+-\s+)?([A-Za-z][A-Za-z&/' -]{2,79}?)(?=\s+(?:on|as\s+of|at)\s+\d|\s*[\d(.;|,]|\s*$)/g;
+/** The stage, from "<PROGRAM> - <stage>" (the program code in capitals, as PowerClerk prints it). */
+const POWERCLERK_PROGRAM_STAGE =
+  /(?<![A-Za-z0-9])[A-Z][A-Z0-9&]{0,5}\s+-\s+([A-Za-z][A-Za-z&/' -]{2,79}?)(?=\s+(?:on|as\s+of|at)\s+\d|\s*[\d(.;|,]|\s*$)/g;
+/** PowerClerk's own record id ("APP-111651", masked "APP-**0001"). */
+const POWERCLERK_RECORD_ID = /(?<![A-Za-z0-9])APP-[0-9*]{3,}(?![0-9*])/;
+
+/**
+ * The PowerClerk stage this text states, without the tenant's program prefix — or "" when the text
+ * has no PowerClerk shape, or states more than one stage (a whole grid is not one application's
+ * reading; the page-wide scan answers it as before).
+ */
+export function powerClerkStageOf(rawStatusText: string): string {
+  const text = clean(String(rawStatusText || ""));
+  if (!text) return "";
+  const only = (pattern: RegExp): string => {
+    const stages = new Map<string, string>();
+    for (const m of text.matchAll(pattern)) {
+      const stage = m[1].replace(/[\s-]+$/, "").replace(/\s+/g, " ").trim();
+      if (stage) stages.set(stage.toLowerCase(), stage);
+    }
+    return stages.size === 1 ? Array.from(stages.values())[0] : "";
+  };
+  // "Status marked as …" IS the record's stage. It is asked first and alone: the same record page
+  // lists its forms in the same "<PROGRAM> - <name>" shape ("PP - Cancellation Form"), and those
+  // are things a person may begin, not where the application is.
+  if (/\bstatus\s+marked\s+as\b/i.test(text)) return only(POWERCLERK_MARKED_STAGE);
+  // A bare "<PROGRAM> - <stage>" (a grid row) is PowerClerk's only beside PowerClerk's own record id.
+  if (!POWERCLERK_RECORD_ID.test(text) && !/\bpowerclerk\b/i.test(text)) return "";
+  return only(POWERCLERK_PROGRAM_STAGE);
+}
+
+/** The stored labels the PowerClerk vocabulary writes. Matching keys for clientPortal's
+ *  PUBLIC_CHECK_LABELS, which words each for the client — never shown raw. */
+export const POWERCLERK_STAGE_LABELS = {
+  inspectionAndSignatures: "Waiting on inspection and signatures",
+  inspection: "Waiting on the inspection",
+  signatures: "Waiting on signatures",
+  changesNeeded: "Utility asked for changes",
+  closed: "Application cancelled or withdrawn",
+} as const;
+
+// What a stage says is OWED, and that it is still owed (never "Inspection Complete").
+const STAGE_INSPECTION = /\binspections?\b/i;
+const STAGE_SIGNATURES = /\b(?:signatures?|e-?sign(?:ature)?s?|sign(?:ing)?)\b/i;
+const STAGE_OWED = /\b(?:needed|required|pending|awaiting|waiting|outstanding|due)\b/i;
+const STAGE_DONE = /\b(?:complete[d]?|received|passed|approved|signed|done)\b/i;
+const STAGE_CHANGES = /\b(?:suspended|changes?\s+(?:needed|required|requested)|pending\s+customer|customer\s+(?:action|information|response)\s+(?:needed|required))\b/i;
+const STAGE_CLOSED = /\b(?:cancel(?:l)?ed|cancellation|withdrawn|withdrew)\b/i;
+const STAGE_REVIEW = /\b(?:review|screening|screen|study|studies)\b/i;
+
+function powerClerkVocabulary(stage: string): PermitStatusClassification | null {
+  const owed = STAGE_OWED.test(stage) && !STAGE_DONE.test(stage);
+  const inspection = owed && STAGE_INSPECTION.test(stage);
+  const signatures = owed && STAGE_SIGNATURES.test(stage);
+  const waitingOn = (statusLabel: string, what: string): PermitStatusClassification => ({
+    outcome: "waiting",
+    statusLabel,
+    confidence: 0.85,
+    reviewedByAhj: false,
+    readyForIssue: false,
+    issueFeeDue: false,
+    message: `PowerClerk stage "${stage}": the utility is waiting on ${what} before the application moves on — `
+      + "not reviewing it. Next: confirm the installer has the final inspection booked and the customer has the utility's documents to sign.",
+  });
+  if (inspection && signatures) return waitingOn(POWERCLERK_STAGE_LABELS.inspectionAndSignatures, "the jurisdiction's final inspection and the customer's signatures");
+  if (inspection) return waitingOn(POWERCLERK_STAGE_LABELS.inspection, "the jurisdiction's final inspection");
+  if (signatures) return waitingOn(POWERCLERK_STAGE_LABELS.signatures, "the customer's signatures");
+  if (STAGE_CLOSED.test(stage)) {
+    return {
+      outcome: "needs_human_review",
+      statusLabel: POWERCLERK_STAGE_LABELS.closed,
+      confidence: 0.85,
+      reviewedByAhj: false,
+      readyForIssue: false,
+      issueFeeDue: false,
+      message: `PowerClerk stage "${stage}": the utility shows this application cancelled or withdrawn. Confirm whether that was intended before anything else is filed.`,
+    };
+  }
+  // Suspended for changes (or held for the customer's information): a person opens the utility's correction form on the record (the
+  // "correct" recipe phase). A human-review reading, not correction_flagged: the client's
+  // correction notice names the jurisdiction, never the utility (#617), so it is not sent from here.
+  if (STAGE_CHANGES.test(stage)) {
+    return {
+      outcome: "needs_human_review",
+      statusLabel: POWERCLERK_STAGE_LABELS.changesNeeded,
+      confidence: 0.85,
+      reviewedByAhj: false,
+      readyForIssue: false,
+      issueFeeDue: false,
+      message: `PowerClerk stage "${stage}": the utility wants changes from the applicant before the application goes further. Read the reviewer's notes on the record and file the correction form.`,
+    };
+  }
+  // A review desk the rules above do not name ("Supplemental Review", "Fast Track Screening").
+  if (STAGE_REVIEW.test(stage) && !STAGE_DONE.test(stage)) {
+    return {
+      outcome: "waiting",
+      statusLabel: "In review",
+      confidence: 0.72,
+      reviewedByAhj: false,
+      readyForIssue: false,
+      issueFeeDue: false,
+      message: `PowerClerk stage "${stage}": the application is still in the utility's review.`,
+    };
+  }
+  return null;
+}
+
+/** A stated PowerClerk stage, read on its own: the general rules first, then the platform's
+ *  vocabulary, then the honest "Needs human review". */
+function classifyPowerClerkStage(stage: string, track: TrackKind): PermitStatusClassification {
+  const general = classifyScannedText(stage, stage, track);
+  if (!(general.outcome === "needs_human_review" && general.statusLabel === UNMATCHED_STATUS_LABEL)) return general;
+  return powerClerkVocabulary(stage) ?? general;
+}
+
 function classifyStatusOnly(rawStatusText: string, track: TrackKind): PermitStatusClassification {
+  if (track === "nem") {
+    const stage = powerClerkStageOf(rawStatusText);
+    if (stage) return classifyPowerClerkStage(stage, track);
+  }
   const stated = extractStatedStatus(rawStatusText);
   // Keep the full text when the portal states nothing — that is the old behaviour, and the
   // only behaviour available for portals that render status as prose.
