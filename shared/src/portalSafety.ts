@@ -2349,15 +2349,16 @@ export function capturedFieldIsSecret(p: { sensitive?: boolean; identity?: Field
  *  meter number into the portal (a review page echoes it back as text).
  *  Identifier-shaped secrets (5+ digits) are matched digit-for-digit with separators ignored
  *  (SECRET_SEPARATOR_CLASS: whitespace — line breaks and CRLF included, so a wrapped number is still
- *  one number — any dash: ASCII, U+2010-2015 and the U+2212 minus, dots, '#', '/', and — #436
- *  skeptic — the comma of "8,814,402,937", the underscore and the parentheses of "(8814) 402-937"),
+ *  one number — any dash (every \p{Dash}, #292), any invisible format character (\p{Cf}: a soft hyphen,
+ *  a zero-width space), dots, '#', '/', and — #436 skeptic — the comma of "8,814,402,937", the
+ *  underscore and the parentheses of "(8814) 402-937"; fullwidth forms of each, and fullwidth digits),
  *  never inside a longer digit run; the class wordingNamesProject reads too ('/' aside). Other
  *  secrets only when they carry a digit and are 6+ chars, as a case-insensitive LITERAL (a
  *  meter-keyed word like "exterior" is not an identifier and must not erase that word from the
  *  notes). `replace` decides what a hit becomes — default "[redacted]"; a caller whose downstream
  *  check reads a last-4 may keep one (maskId).
  *
- *  TWO PHASES, SO THE RESULT IS ALWAYS A SUPERSET OF THE ORIGINAL SCRUB'S (#436 fix round 1: a
+ *  THREE PHASES, SO THE RESULT IS ALWAYS A SUPERSET OF THE ORIGINAL SCRUB'S (#436 fix round 1: a
  *  widening that ran INSTEAD of the literal let "Sol@r2024", "SA:12AB34" and "AB*1234" through in
  *  clear, where the original scrub redacted them).
  *    1. THE ORIGINAL SCRUB, unchanged and first, for every secret: the digit match over the original
@@ -2365,15 +2366,53 @@ export function capturedFieldIsSecret(p: { sensitive?: boolean; identity?: Field
  *       original function's output, character for character (redactSecretValuesSuperset.test pins
  *       that against a copy of the original function, over a corpus).
  *    2. THE WIDENINGS, after it, on its output — each can only redact more:
- *       - the digit match over SECRET_SEPARATOR_CLASS (the comma, underscore and parentheses too);
+ *       - the digit match over #436's separators (the comma, underscore and parentheses too);
  *       - a secret that carries LETTERS as well (an alphanumeric meter number, "1ND4421") by its
- *         whole letter-and-digit sequence, case-insensitive, SECRET_SEPARATOR_CLASS ignored between
+ *         whole letter-and-digit sequence, case-insensitive, those separators ignored between
  *         them: its digits alone ("14421") are never written together in "1ND4421" or "1-ND-4421".
+ *    3. #292, after both, on their output: the same two matches over the ONE class below — every
+ *       \p{Dash}, every \p{Cf} format character (soft hyphen, zero-width characters, word joiner),
+ *       fullwidth punctuation — with fullwidth digits and letters matching their ASCII forms. Phases 1
+ *       and 2 keep their frozen classes, so the result is main's output with more redacted, never less.
  *  A secret holding a character that is neither a letter, a digit nor a separator ("Pass!2024",
- *  "Zürich12") is caught by phase 1's literal; phase 2 does not match it, and never has to. */
-export const SECRET_SEPARATOR_CLASS = "[\\s\\-\\u2010-\\u2015\\u2212.#/,_()]";
-/** The separators the original scrub read (phase 1). Never narrowed: phase 2 reads the wider class. */
+ *  "Zürich12") is caught by phase 1's literal; phases 2 and 3 do not match it, and never have to. */
+export const SECRET_SEPARATOR_DASHES = "\\p{Dash}";
+export const SECRET_SEPARATOR_INVISIBLE = "\\p{Cf}";
+export const SECRET_DIGIT_CLASS = "[0-9\\uFF10-\\uFF19]";
+/** THE ONE SEPARATOR CLASS (#292). Every regex that reads it is built with the `u` flag: it holds
+ *  \p{...} escapes, which mean something else without it. Its parts are exported so no caller keeps a
+ *  hand copy that drifts (the U+2013-only bug #286 fixed came from exactly that drift):
+ *    - SECRET_SEPARATOR_DASHES: every \p{Dash} code point — the ASCII hyphen, U+2010-2015, the U+2212
+ *      minus, the small and fullwidth hyphen-minus (U+FE58, U+FE63, U+FF0D) and the rest;
+ *    - SECRET_SEPARATOR_INVISIBLE: every \p{Cf} format character — the soft hyphen (U+00AD, which PDF
+ *      text layers emit at hyphenation points), zero-width space / non-joiner / joiner (U+200B-200D),
+ *      the word joiner (U+2060), the BOM — so an invisible character never splits a number;
+ *    - whitespace, ". # / , _ ( )", and the fullwidth form of each of those (U+FF0E, U+FF03, U+FF0F,
+ *      U+FF0C, U+FF3F, U+FF08, U+FF09).
+ *  The digits between them: SECRET_DIGIT_CLASS, ASCII and fullwidth (U+FF10-FF19). */
+export const SECRET_SEPARATOR_CLASS = secretSeparatorClass(true);
+/** The same class without "/" and its fullwidth form: "120/240 V" is a service voltage
+ *  (wordingNamesProject's identifier test). Built from the same parts, never hand-copied. */
+export const SECRET_SEPARATOR_CLASS_NO_SLASH = secretSeparatorClass(false);
+function secretSeparatorClass(withSlash: boolean): string {
+  const punctuation = withSlash ? ".#/,_()\\uFF0E\\uFF03\\uFF0F\\uFF0C\\uFF3F\\uFF08\\uFF09" : ".#,_()\\uFF0E\\uFF03\\uFF0C\\uFF3F\\uFF08\\uFF09";
+  return `[\\s${SECRET_SEPARATOR_DASHES}${SECRET_SEPARATOR_INVISIBLE}${punctuation}]`;
+}
+/** The separators the original scrub read (phase 1). FROZEN: never widened or narrowed, so phase 1's
+ *  output stays the original's character for character (redactSecretValuesSuperset.test). */
 const SECRET_SEPARATOR_CLASS_ORIGINAL = "[\\s\\-\\u2010-\\u2015\\u2212.#/]";
+/** The separators phase 2 read when #436 added it (main ca2c27c0). FROZEN like phase 1's, so phase 2's
+ *  output stays exactly main's and phase 3 only ever adds redactions on top of it
+ *  (redactSecretValuesUnicode.test pins that against a verbatim copy of main's function). */
+const SECRET_SEPARATOR_CLASS_436 = "[\\s\\-\\u2010-\\u2015\\u2212.#/,_()]";
+/** One character of a secret as a phase-3 pattern: a digit or a Latin letter also as its fullwidth
+ *  form (U+FF10-FF19, U+FF21-FF3A; the lowercase fullwidth forms come in through the `iu` flags). */
+const fullwidthAware = (ch: string): string => {
+  const hex = (n: number): string => n.toString(16).toUpperCase();
+  if (/^[0-9]$/.test(ch)) return `[${ch}\\u${hex(0xff10 + Number(ch))}]`;
+  if (/^[A-Za-z]$/.test(ch)) return `[${ch}\\u${hex(0xff21 + ch.toUpperCase().charCodeAt(0) - 65)}]`;
+  return ch;
+};
 export function redactSecretValues(text: string, secrets: Iterable<string>, replace: (hit: string) => string = () => "[redacted]"): string {
   let out = text;
   const list = Array.from(secrets ?? [], (secret) => String(secret ?? ""));
@@ -2391,8 +2430,8 @@ export function redactSecretValues(text: string, secrets: Iterable<string>, repl
       out = out.replace(new RegExp(literal, "gi"), (m) => replace(m));
     }
   }
-  // PHASE 2 — the widenings, on phase 1's output.
-  const sep = `${SECRET_SEPARATOR_CLASS}*`;
+  // PHASE 2 — the #436 widenings, on phase 1's output, exactly as main ran them.
+  const sep = `${SECRET_SEPARATOR_CLASS_436}*`;
   for (const raw of list) {
     const digits = raw.replace(/\D/g, "");
     const alnum = raw.replace(/[^0-9A-Za-z]/g, "");
@@ -2402,6 +2441,27 @@ export function redactSecretValues(text: string, secrets: Iterable<string>, repl
     if (/[A-Za-z]/.test(alnum) && /\d/.test(alnum) && (digits.length >= 5 || raw.trim().length >= 6)) {
       const pattern = alnum.split("").join(sep);
       out = out.replace(new RegExp(`${/^\d/.test(alnum) ? "(?<!\\d)" : ""}${pattern}${/\d$/.test(alnum) ? "(?!\\d)" : ""}`, "gi"), (m) => replace(m));
+    }
+  }
+  // PHASE 3 — #292, on phase 2's output: the same two matches over THE ONE CLASS
+  // (SECRET_SEPARATOR_CLASS: every dash, every format character, the fullwidth punctuation), each
+  // digit or letter also in its fullwidth form, a fullwidth digit counting as a digit at the edges,
+  // and the secret NFKC-normalised first (a value stored in fullwidth digits). Matched against the
+  // text as it is, so the replacement lands in the original text; nothing upstream normalises it.
+  const sepU = `${SECRET_SEPARATOR_CLASS}*`;
+  const noDigitBefore = `(?<!${SECRET_DIGIT_CLASS})`;
+  const noDigitAfter = `(?!${SECRET_DIGIT_CLASS})`;
+  for (const raw of list) {
+    const norm = raw.normalize("NFKC");
+    const digits = norm.replace(/\D/g, "");
+    const alnum = norm.replace(/[^0-9A-Za-z]/g, "");
+    if (digits.length >= 5) {
+      const pattern = digits.split("").map(fullwidthAware).join(sepU);
+      out = out.replace(new RegExp(`${noDigitBefore}${pattern}${noDigitAfter}`, "gu"), (m) => replace(m));
+    }
+    if (/[A-Za-z]/.test(alnum) && /\d/.test(alnum) && (digits.length >= 5 || norm.trim().length >= 6)) {
+      const pattern = alnum.split("").map(fullwidthAware).join(sepU);
+      out = out.replace(new RegExp(`${/^\d/.test(alnum) ? noDigitBefore : ""}${pattern}${/\d$/.test(alnum) ? noDigitAfter : ""}`, "giu"), (m) => replace(m));
     }
   }
   return out;
