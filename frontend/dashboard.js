@@ -5382,7 +5382,12 @@ function trackFeeDueHtml(t) {
       </div>`
     : "";
   const paid = Array.isArray(t && t.paid) && t.paid.length
-    ? `<p class="muted" style="margin:0 0 4px;font-size:11px" data-track-paid-list="${esc(t.type)}">Paid: ${t.paid.map((p) => `${esc(money(p.amountUsd))} (${esc(p.kind === "filing" ? "filing fee" : "fee")}, ${esc(p.recordNumber)}, ${esc(String(p.paidAt || "").slice(0, 10))}${p.paidBy ? `, ${esc(p.paidBy)}` : ""})`).join("; ")}</p>`
+    ? `<p class="muted" style="margin:0 0 4px;font-size:11px" data-track-paid-list="${esc(t.type)}">Paid: ${t.paid.map((p) => `${esc(money(p.amountUsd))} (${esc(p.kind === "filing" ? "filing fee" : "fee")}, ${esc(p.recordNumber)}, ${esc(String(p.paidAt || "").slice(0, 10))}${p.paidBy ? `, ${esc(p.paidBy)}` : ""})${
+      // #665: the filing's MASKED confirmation screenshot, one click from the fee record. Only the
+      // server's own project route — never a file path or a run's unmasked outcome shot.
+      /^\/api\/projects\/[^/]+\/submissions\/[^/]+\/confirmation-screenshot$/.test(String(p.confirmationUrl || ""))
+        ? ` · <a href="${esc(p.confirmationUrl)}" target="_blank" rel="noopener" data-track-paid-confirmation="${esc(t.type)}" title="The portal's confirmation page for this filing, account and meter numbers masked">confirmation screenshot</a>`
+        : ""}`).join("; ")}</p>`
     : "";
   return due + paid;
 }
@@ -5435,6 +5440,116 @@ function openStageGap(where, key) {
     return;
   }
   reveal($(STAGE_GAP_PROJECT_INPUT[key] || "") || $("manualEntryForm"));
+}
+
+// FILING BY EMAIL (#667 / #672). The track's authority (its utility, or the issuer of this permit) may
+// take applications by email. A NAMED PERSON records and verifies the address with the authority's own
+// page and the words on it that contain the address (PUT /filing-email: the server names the signed-in
+// person; with sign-in off, the name the person types — never one the screen fills in). The staged
+// drafts are listed and a draft downloads as an .eml for the person to send from their own mail client,
+// then "I submitted it" records the filing. THIS SCREEN NEVER SENDS: no route it calls reaches SMTP.
+// Automation sends only inside an approved staging run, behind the one final-submit gate
+// (portalSafety.finalSubmitRefusals, channel "email") with FILING_EMAIL_ALLOW_SEND=1 on the server.
+const FILING_EMAIL_STATUS_TEXT = {
+  draft: "draft — download it and send it yourself",
+  superseded: "superseded by a newer draft",
+  sending: "sending started and did not finish — check the filings mailbox's Sent folder before anything else",
+  sent: "sent by automation after a named approval",
+  failed: "send failed — it was not retried; send the draft yourself if it did not go",
+};
+function filingEmailPanelHtml(type, data, projectId) {
+  const d = data && typeof data === "object" ? data : {};
+  const a = d.authority && typeof d.authority === "object" ? d.authority : null;
+  if (!a) {
+    return `<p class="muted" style="font-size:12px" data-filing-email-none="${esc(type)}">This project names no ${type === "nem" ? "utility" : "issuing agency"} for this track, so no filing email can be recorded.</p>`;
+  }
+  const r = d.record && typeof d.record === "object" ? d.record : null;
+  const problems = Array.isArray(d.problems) ? d.problems : [];
+  const src = r ? httpUrl(r.sourceUrl) : "";
+  const recordHtml = r
+    ? `<p style="margin:0 0 4px" data-filing-email-record="${esc(type)}">${esc(a.name)} takes applications by email at <strong>${esc(r.address)}</strong>
+        — verified by ${esc(r.verifiedBy || "nobody")}${r.verifiedAt ? ` on ${esc(String(r.verifiedAt).slice(0, 10))}` : ""}${src ? `, per <a href="${esc(src)}" target="_blank" rel="noopener">${esc(portalHostname(src) || src)}</a>` : ""}.</p>
+       ${r.quote ? `<p class="muted" style="margin:0 0 4px;font-size:11px">“${esc(r.quote)}”</p>` : ""}
+       ${d.usable
+        ? `<p class="muted" style="margin:0 0 4px;font-size:11px" data-filing-email-usable="${esc(type)}">This track files by email: staging makes a draft for you to send. Automation sends only after Approve &amp; auto-submit, with FILING_EMAIL_ALLOW_SEND=1 on the server.</p>`
+        : `<div class="submit-gate-check warning" style="margin:0 0 4px;font-size:12px" data-filing-email-problems="${esc(type)}"><strong>Not usable:</strong><ul style="margin:2px 0 0 18px;padding:0">${problems.map((p) => `<li>${esc(p)}</li>`).join("")}</ul></div>`}
+       <button type="button" class="ghost" data-filing-email-withdraw="${esc(type)}" title="Withdraw this address: the track files on its portal again"><i data-lucide="x"></i><span>Withdraw</span></button>`
+    : `<p class="muted" style="margin:0 0 4px;font-size:12px" data-filing-email-empty="${esc(type)}">No filing email is on file for ${esc(a.name)}. If ${esc(a.name)} takes applications by email, record the address from its own page.</p>`;
+  const form = `<div class="track-filing-email-form" style="display:flex;flex-wrap:wrap;gap:6px;align-items:flex-end;margin:6px 0" data-filing-email-form="${esc(type)}">
+      <label class="track-field"><span>Application email address</span><input data-filing-email-field="address" data-track="${esc(type)}" placeholder="as the authority's page shows it" /></label>
+      <label class="track-field"><span>The authority's page (https://…)</span><input data-filing-email-field="sourceUrl" data-track="${esc(type)}" placeholder="where you read it" /></label>
+      <label class="track-field" style="flex:1 1 100%"><span>The page's own words, containing the address</span><input data-filing-email-field="quote" data-track="${esc(type)}" placeholder="copy the sentence from the page" /></label>
+      <label class="track-field"><span>Your name (only when sign-in is off)</span><input data-filing-email-field="verifiedBy" data-track="${esc(type)}" placeholder="" /></label>
+      <button type="button" class="secondary" data-filing-email-save="${esc(type)}" title="You checked the authority's page: it takes applications by email at this address. Recorded under your name."><i data-lucide="badge-check"></i><span>I verified this address</span></button>
+    </div>`;
+  const sends = Array.isArray(d.sends) ? d.sends : [];
+  const sendsHtml = sends.length
+    ? `<ul style="margin:4px 0 0 18px;padding:0;font-size:12px" data-filing-email-sends="${esc(type)}">${sends.map((x) => {
+        const status = String(x.status || "");
+        const downloadable = (status === "draft" || status === "failed") && projectId && x.id;
+        const refusals = Array.isArray(x.refusals) ? x.refusals : [];
+        return `<li data-filing-email-row="${esc(x.id)}" data-filing-email-status="${esc(status)}">
+          <strong>${esc(FILING_EMAIL_STATUS_TEXT[status] || status)}</strong> · to ${esc(x.recipient)} · ${esc(String(x.createdAt || "").slice(0, 16).replace("T", " "))}
+          ${Array.isArray(x.attachments) ? ` · ${x.attachments.length} attachment(s)` : ""}
+          ${downloadable ? ` · <a href="/api/projects/${encodeURIComponent(projectId)}/filing-email/drafts/${encodeURIComponent(x.id)}/eml" data-filing-email-download="${esc(x.id)}" title="Opens as a draft in your mail client. Send it yourself, then record the filing with “I submitted it”.">download .eml</a>` : ""}
+          ${x.subject ? `<br><span class="muted">${esc(x.subject)}</span>` : ""}
+          ${refusals.length ? `<br><span class="muted">Not sent automatically: ${esc(refusals.join("; "))}</span>` : ""}
+          ${x.detail ? `<br><span class="muted">${esc(x.detail)}</span>` : ""}
+        </li>`;
+      }).join("")}</ul>`
+    : `<p class="muted" style="margin:4px 0 0;font-size:12px">No filing email staged for this track yet.</p>`;
+  return `<div data-filing-email-panel="${esc(type)}" style="font-size:12px">${recordHtml}${form}<p style="margin:6px 0 0"><strong>Staged emails</strong></p>${sendsHtml}</div>`;
+}
+
+async function loadFilingEmailPanel(type, body) {
+  if (!state.selectedProjectId || !type || !body) return;
+  const projectId = state.selectedProjectId;
+  try {
+    const data = await api(`/api/projects/${projectId}/filing-email?track=${encodeURIComponent(type)}`);
+    body.innerHTML = filingEmailPanelHtml(type, data, projectId);
+  } catch (err) {
+    body.innerHTML = `<p class="muted" style="font-size:12px">Could not load the filing email: ${esc(err.message || "error")}</p>`;
+    return;
+  }
+  if (window.lucide && window.lucide.createIcons) window.lucide.createIcons();
+  const save = body.querySelector("button[data-filing-email-save]");
+  if (save) save.addEventListener("click", () => saveFilingEmail(type, body, save));
+  const withdraw = body.querySelector("button[data-filing-email-withdraw]");
+  if (withdraw) withdraw.addEventListener("click", () => withdrawFilingEmail(type, body, withdraw));
+}
+
+async function saveFilingEmail(type, body, btn) {
+  const field = (name) => String(body.querySelector(`[data-filing-email-field="${name}"]`)?.value || "").trim();
+  const payload = { track: type, address: field("address"), sourceUrl: field("sourceUrl"), quote: field("quote") };
+  // The person's own name, only as typed (the server ignores it when sign-in is on). Never filled in.
+  const typed = field("verifiedBy");
+  if (typed) payload.verifiedBy = typed;
+  if (btn) btn.disabled = true;
+  try {
+    await api(`/api/projects/${state.selectedProjectId}/filing-email`, { method: "PUT", body: JSON.stringify(payload) });
+    showMessage("Filing email verified and recorded under your name. This track now files by email.", "info");
+    await loadFilingEmailPanel(type, body);
+  } catch (err) {
+    if (btn) btn.disabled = false;
+    // The server's refusal as it is (a missing name, or each reason the address is not usable).
+    showMessage(err.message || "Could not record the filing email.", "error");
+  }
+}
+
+async function withdrawFilingEmail(type, body, btn) {
+  if (!confirm("Withdraw this filing email? The track goes back to filing on its portal. Drafts already staged stay listed.")) return;
+  const typed = String(body.querySelector('[data-filing-email-field="verifiedBy"]')?.value || "").trim();
+  if (btn) btn.disabled = true;
+  try {
+    await api(`/api/projects/${state.selectedProjectId}/filing-email?track=${encodeURIComponent(type)}`, {
+      method: "DELETE", body: JSON.stringify(typed ? { verifiedBy: typed } : {}),
+    });
+    showMessage("Filing email withdrawn.", "info");
+    await loadFilingEmailPanel(type, body);
+  } catch (err) {
+    if (btn) btn.disabled = false;
+    showMessage(err.message || "Could not withdraw the filing email.", "error");
+  }
 }
 
 function trackCardHtml(t) {
@@ -5569,6 +5684,10 @@ function trackCardHtml(t) {
     ${t.signatureRequest && t.signatureRequest.state ? `<p class="muted" style="font-size:12px;margin:4px 0" data-track-signature-state="${esc(t.signatureRequest.state)}">Signature step: ${esc(signatureStateText(t.signatureRequest))}</p>` : ""}
     ${recipeBlock}
     ${trackIssuerEditHtml(t)}
+    <details class="track-filing-email" data-filing-email="${esc(t.type)}">
+      <summary>Filing by email</summary>
+      <div data-filing-email-body="${esc(t.type)}"><p class="muted" style="font-size:12px">Loading…</p></div>
+    </details>
     <details class="track-submit"${t.status === "staged" || t.payment ? " open" : ""}>
       <summary>${submitted ? "Update numbers / status link" : "I submitted it → capture #"}</summary>
       <div class="track-submit-form">
@@ -5634,6 +5753,12 @@ function renderSubmittalTracks() {
 
   wrap.querySelectorAll("button[data-track-paid]").forEach((btn) => {
     btn.addEventListener("click", () => markTrackPaid(btn.dataset.trackPaid, btn));
+  });
+  // Filing by email (#672): loaded when a person opens it — a read; the panel never sends.
+  wrap.querySelectorAll("details[data-filing-email]").forEach((d) => {
+    d.addEventListener("toggle", () => {
+      if (d.open) loadFilingEmailPanel(d.dataset.filingEmail, d.querySelector("[data-filing-email-body]"));
+    });
   });
   wrap.querySelectorAll("button[data-track-submit]").forEach((btn) => {
     btn.addEventListener("click", () => markSubmittalTrack(btn.dataset.trackSubmit));

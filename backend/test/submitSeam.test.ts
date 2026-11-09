@@ -333,12 +333,19 @@ check("1k. and the approve button stays available (a later track still needs it)
   //                         handoff(5661) · prepareSubmission tail(6874) ·
   //                         captureConfirmation(7136) · markCorrectionResubmitted(7298)
   //   submittalTracks  1  — manual track capture
-  const EXPECTED: Record<string, number> = { "qc.ts": 1, "repository.ts": 13, "submittalTracks.ts": 1 };
+  // Classified 2026-11-09 (#667 / PR #671, which landed without this line — #672 adds it):
+  //   filingEmail.ts   1  — the email-filing STAGE (fileTrackByEmail): awaiting_human_submit only,
+  //                         the email twin of prepareSubmission's tail; never 'submitted' (8d)
+  const EXPECTED: Record<string, number> = { "filingEmail.ts": 1, "qc.ts": 1, "repository.ts": 13, "submittalTracks.ts": 1 };
   check("8a. autopilot.ts — the approve seam — writes NO project status anywhere",
     !perFile.has("autopilot.ts"), `autopilot.ts has ${perFile.get("autopilot.ts") ?? 0}`);
-  check("8b. the project-status writer census is unchanged (15 across 3 files); a new writer must be classified here",
-    total === 15 && JSON.stringify([...perFile].sort()) === JSON.stringify(Object.entries(EXPECTED).sort()),
+  check("8b. the project-status writer census is unchanged (16 across 4 files); a new writer must be classified here",
+    total === 16 && JSON.stringify([...perFile].sort()) === JSON.stringify(Object.entries(EXPECTED).sort()),
     `total=${total} ${JSON.stringify([...perFile].sort())}`);
+
+  const emailWrites = fs.readFileSync(path.join(srcDir, "filingEmail.ts"), "utf8").match(/UPDATE projects SET status\b\s*=\s*'[a-z_]+'/g) || [];
+  check("8d. the email-filing writer only STAGES (awaiting_human_submit) — sending never marks a project submitted",
+    emailWrites.length === 1 && emailWrites[0].endsWith("'awaiting_human_submit'"), JSON.stringify(emailWrites));
 
   // And the seam file cannot acquire a submit/pay/withdraw click by accident.
   const autopilotSrc = fs.readFileSync(path.join(srcDir, "autopilot.ts"), "utf8");

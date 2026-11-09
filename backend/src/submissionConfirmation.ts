@@ -173,3 +173,16 @@ export function trackConfirmationView(db: AppDb, projectId: string, permitTypes:
     at: s(row.at),
   };
 }
+
+const CONFIRMATION_ROUTE_RE = /^\/api\/projects\/([^/]+)\/submissions\/([^/]+)\/confirmation-screenshot$/;
+/**
+ * WHAT A PAID ROW MAY LINK (#665): only this project's own confirmation route — the one that serves
+ * the MASKED picture (submissionConfirmationFile), never a run's unmasked outcome shot or any file
+ * path (rule 2). Anything else stored in the column reads as ''.
+ */
+export function paidConfirmationUrl(projectId: string, stored: unknown): string {
+  const v = s(stored).trim();
+  const m = CONFIRMATION_ROUTE_RE.exec(v);
+  if (!m) return "";
+  try { return decodeURIComponent(m[1]) === projectId ? v : ""; } catch { return ""; }
+}

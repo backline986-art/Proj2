@@ -26,7 +26,7 @@ import type {
   SubmittalTrackType,
 } from "../../shared/src/types";
 import { latestStagedReview, stagedReviewView } from "./stagedReviews";
-import { trackConfirmationView, type TrackConfirmationView } from "./submissionConfirmation";
+import { paidConfirmationUrl, trackConfirmationView, type TrackConfirmationView } from "./submissionConfirmation";
 import { findApplicationProfile, describePermitType, permitStructureAnswer, permitStructureIsCitedOrVerified, type PermitPrerequisiteStep, type PermitStructureAnswer } from "./applicationDocs";
 import { findAhjProcessProfile, jurisdictionKind, jurisdictionKindsCompatible } from "./processProfiles";
 import { findAnyRecipeForProject, findCompleteRecipeForProject } from "./portalRecipes";
@@ -104,7 +104,7 @@ export interface SubmittalTrackView extends SubmittalTrack {
    *  or asked for a fee, and no person has pressed Paid since. Absent otherwise. */
   feeDue?: { label: string; since: string; approved: boolean; sentence: string };
   /** Every Paid a person recorded on this track, newest first (track_fee_payments). */
-  paid?: Array<{ kind: string; amountUsd: number; recordNumber: string; paidBy: string; paidAt: string }>;
+  paid?: Array<{ kind: string; amountUsd: number; recordNumber: string; paidBy: string; paidAt: string; confirmationUrl?: string }>;
   /** #436 PR1 — NEM only, while the track is staged: the newest staged review the server holds (the
    *  masked picture of the review page, and what the draft's pages show). Shown beside Approve,
    *  which stays held exactly as #449 holds it. null = none recorded. */
@@ -1070,9 +1070,13 @@ export function getSubmittalTracks(db: AppDb, project: ProjectRecord): Submittal
         }
       : null;
     const paid = db.query<Row>(
-      "SELECT kind, amount_usd, record_number, paid_by, paid_at FROM track_fee_payments WHERE project_id = ? AND track = ? ORDER BY paid_at DESC, rowid DESC",
+      "SELECT kind, amount_usd, record_number, paid_by, paid_at, confirmation_shot_path FROM track_fee_payments WHERE project_id = ? AND track = ? ORDER BY paid_at DESC, rowid DESC",
       [project.id, type],
-    ).map((r) => ({ kind: s(r.kind), amountUsd: Number(r.amount_usd), recordNumber: s(r.record_number), paidBy: s(r.paid_by), paidAt: s(r.paid_at) }));
+    ).map((r) => {
+      // #665: the filing's masked confirmation route, re-checked to be this project's own (never a path).
+      const confirmationUrl = paidConfirmationUrl(project.id, r.confirmation_shot_path);
+      return { kind: s(r.kind), amountUsd: Number(r.amount_usd), recordNumber: s(r.record_number), paidBy: s(r.paid_by), paidAt: s(r.paid_at), ...(confirmationUrl ? { confirmationUrl } : {}) };
+    });
 
     return {
       type,
