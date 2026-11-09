@@ -153,7 +153,9 @@ try {
 
   console.log("\n[W] the production caller");
   const card = cut("function", "trackCardHtml");
-  check("trackCardHtml renders the list under the next action", /trackNextActionText\(t\)\)\}<\/p>\s*\$\{trackStageGapsHtml\(t\)\}/.test(card));
+  // Below the next action, with only other card parts between them (#620 put the payment and
+  // fee-due lines there, #634). Removing the list, or moving it above the next action, fails.
+  check("trackCardHtml renders the list under the next action", /trackNextActionText\(t\)\)\}<\/p>(?:\s*\$\{\w+\(t\)\})*\s*\$\{trackStageGapsHtml\(t\)\}/.test(card));
   const wire = cut("function", "renderSubmittalTracks");
   check("renderSubmittalTracks wires every gap link to openStageGap", /a\[data-stage-gap-open\][\s\S]{0,200}openStageGap\(a\.dataset\.stageGapOpen, a\.dataset\.stageGapKey\)/.test(wire));
 } finally {
