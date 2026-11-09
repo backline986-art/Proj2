@@ -7,6 +7,7 @@ import type { EvidenceTopic } from "./projectEvidence";
 import { extractPdfPages } from "./batchImport";
 import { text as s } from "./json";
 import { pdfjsDocumentOptions } from "./pdfjsOptions";
+import { paintMaskRegions, planSecretMask, type MaskAnnotation, type MaskTextItem, type PdfQuad, type SecretMaskPlan } from "./visionPageMask";
 
 // ---------------------------------------------------------------------------
 // Source-page image rendering for the AHJ Reviewer Gate "screenshot crop slot".
@@ -263,6 +264,71 @@ export async function renderPdfPageToPng(pdfPath: string, page: number, scale = 
     fs.mkdirSync(CACHE_DIR, { recursive: true });
     fs.writeFileSync(cachePath, buffer);
     return buffer;
+  } finally {
+    console.warn = origWarn;
+  }
+}
+
+/** A plan-set page as it may go to a vision model, or why it may not (#293). */
+export type VisionPageImage =
+  | { ok: true; png: Buffer; masked: number }
+  | { ok: false; reason: string };
+
+type PdfjsMaskPage = PdfjsRenderPage & {
+  getTextContent: () => Promise<{ items: MaskTextItem[] }>;
+  getAnnotations: () => Promise<MaskAnnotation[]>;
+};
+type PdfjsMaskViewport = { width: number; height: number; convertToViewportPoint: (x: number, y: number) => number[] };
+
+/**
+ * RULE 2 FOR THE PAGE IMAGE (#293). The page renderPdfPageToPng would give, for a vision prompt:
+ * when the page's own text (or a form field drawn on it) carries one of the project's `secrets`,
+ * the carrying text runs are painted over before the PNG is made (visionPageMask.planSecretMask).
+ * A carrier with no box to paint → { ok: false } and the caller does not send the page.
+ *
+ * A page with no secret, or a project with none, is renderPdfPageToPng's own PNG, byte for byte
+ * (disk cache included). A masked page is never written to that cache: the cache serves the
+ * operator's crop, which shows the unmasked sheet. Throws only where renderPdfPageToPng would
+ * (the page cannot be read or rendered); the caller treats that as before.
+ */
+export async function renderPdfPageForVision(pdfPath: string, page: number, secrets: readonly string[], scale = 1.6): Promise<VisionPageImage> {
+  if (!secrets.length) return { ok: true, png: await renderPdfPageToPng(pdfPath, page, scale), masked: 0 };
+  const pdfjs = await getPdfjs();
+  const data = new Uint8Array(fs.readFileSync(pdfPath));
+  const origWarn = console.warn;
+  console.warn = (...args: unknown[]) => {
+    if (typeof args[0] === "string" && PDFJS_WARN_RE.test(args[0])) return;
+    origWarn.apply(console, args);
+  };
+  try {
+    const doc = await pdfjs.getDocument(pdfjsDocumentOptions({ data, useSystemFonts: true, disableWorker: true })).promise;
+    const target = Math.min(Math.max(1, page), doc.numPages);
+    const pdfPage = (await doc.getPage(target)) as PdfjsMaskPage;
+    let plan: SecretMaskPlan;
+    try {
+      const [content, annotations] = await Promise.all([pdfPage.getTextContent(), pdfPage.getAnnotations()]);
+      plan = planSecretMask(content.items, annotations || [], secrets);
+    } catch {
+      // The page's text could not be read, so whether it carries a secret is unknown: fail closed.
+      return { ok: false, reason: "the page's text could not be read to check it for an account or meter number" };
+    }
+    if (!plan.ok) return plan;
+    if (!plan.regions.length) return { ok: true, png: await renderPdfPageToPng(pdfPath, page, scale), masked: 0 };
+
+    const { createCanvas } = await import("@napi-rs/canvas" as string);
+    const viewport = pdfPage.getViewport({ scale }) as PdfjsMaskViewport;
+    const canvas = createCanvas(Math.ceil(viewport.width), Math.ceil(viewport.height));
+    const ctx = canvas.getContext("2d");
+    await pdfPage.render({ canvasContext: ctx, viewport, canvas }).promise;
+    const toDevice = (quad: PdfQuad) => quad.map(([x, y]) => viewport.convertToViewportPoint(x, y));
+    const regions = plan.regions.map((r) => ({ paint: toDevice(r.paint), reach: toDevice(r.reach) }));
+    if (!regions.every((r) => [...r.paint, ...r.reach].every((p) => Number.isFinite(p[0]) && Number.isFinite(p[1])))) {
+      return { ok: false, reason: "an account or meter number on the page could not be placed on the rendered sheet" };
+    }
+    const image = ctx.getImageData(0, 0, canvas.width, canvas.height);
+    paintMaskRegions(image.data, canvas.width, canvas.height, regions);
+    ctx.putImageData(image, 0, 0);
+    return { ok: true, png: canvas.toBuffer("image/png"), masked: plan.regions.length };
   } finally {
     console.warn = origWarn;
   }

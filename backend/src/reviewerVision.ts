@@ -4,7 +4,7 @@ import type { LLMProvider, ReviewerFinding, ReviewerReport, ReviewerVisionVerdic
 import type { AppDb } from "./db";
 import { topicForFinding } from "./reviewerEngine";
 import { StubLLMProvider } from "./llm";
-import { findPlanSetPdf, renderPdfPageToPng, selectTopPagesForTopic } from "./pageImages";
+import { findPlanSetPdf, renderPdfPageForVision, selectTopPagesForTopic } from "./pageImages";
 import { extractPdfPages } from "./batchImport";
 import type { EvidenceTopic } from "./projectEvidence";
 import { applyRoofPlanMeasurement, FIRE_PATHWAY_BELOW_ID, FIRE_PATHWAY_UNMEASURED_ID } from "./designCriteria";
@@ -217,6 +217,14 @@ function answersQuestion(verdict: ReviewerVisionVerdict, finding: ReviewerFindin
   return Boolean(verdict.question) && verdict.question === visionQuestionFor(finding);
 }
 
+// A sheet withheld from vision because its own text carries a project secret that could not be
+// painted over (#293). Never cached (checked: false), so a later pass looks at the sheet again.
+const NOT_SENT_PREFIX = "Not sent to vision";
+const notSentNote = (page: number, reason: string) => `${NOT_SENT_PREFIX} (page ${page}): ${reason}.`;
+function isNotSent(verdict: ReviewerVisionVerdict): boolean {
+  return !verdict.checked && verdict.note.startsWith(NOT_SENT_PREFIX);
+}
+
 async function verifyOne(
   llm: LLMProvider,
   pdfPath: string,
@@ -240,11 +248,18 @@ async function verifyOne(
   // sheet ("no structural information appears on this sheet" — true, and no
   // one should have been looking at it).
   let firstVerdict: ReviewerVisionVerdict | null = null;
+  // RULE 2 FOR THE IMAGE (#293): a candidate sheet whose own text carries a project secret goes
+  // with that text painted over; one where it cannot be placed is not sent at all, and why is kept.
+  const skipped: string[] = [];
   for (const page of candidates) {
     let base64: string;
     try {
-      const png = await renderPdfPageToPng(pdfPath, page);
-      base64 = png.toString("base64");
+      const image = await renderPdfPageForVision(pdfPath, page, secrets);
+      if (!image.ok) {
+        skipped.push(notSentNote(page, image.reason));
+        continue;
+      }
+      base64 = image.png.toString("base64");
     } catch {
       continue;
     }
@@ -265,7 +280,8 @@ async function verifyOne(
     if (present) return verdict; // found it — stop retrying
     if (!firstVerdict) firstVerdict = verdict;
   }
-  return firstVerdict ?? { checked: false, present: false, confidence: "low", page: candidates[0], observed: "", note: "Could not render any plan-set page for vision." };
+  if (firstVerdict && skipped.length) return { ...firstVerdict, note: `${firstVerdict.note}\n${skipped.join(" ")}` };
+  return firstVerdict ?? { checked: false, present: false, confidence: "low", page: candidates[0], observed: "", note: skipped.length ? skipped.join(" ") : "Could not render any plan-set page for vision." };
 }
 
 // THE ONE MEASUREMENT (issue #142). Every other vision call asks "is it on the sheet?"; this one
@@ -298,11 +314,13 @@ function inchesOf(raw: unknown): number | null {
   return Number.isFinite(n) && n > 0 && n <= 240 ? n : null;
 }
 
-async function measureOne(llm: LLMProvider, pdfPath: string, pages: string[], finding: ReviewerFinding): Promise<ReviewerVisionVerdict> {
+async function measureOne(llm: LLMProvider, pdfPath: string, pages: string[], finding: ReviewerFinding, secrets: string[] = []): Promise<ReviewerVisionVerdict> {
   const page = selectTopPagesForTopic(pages, "firePathway", "", "", 1)[0] ?? 1;
   let base64: string;
   try {
-    base64 = (await renderPdfPageToPng(pdfPath, page)).toString("base64");
+    const image = await renderPdfPageForVision(pdfPath, page, secrets);
+    if (!image.ok) return { checked: false, present: false, confidence: "low", page, observed: "", note: notSentNote(page, image.reason) };
+    base64 = image.png.toString("base64");
   } catch {
     return { checked: false, present: false, confidence: "low", page, observed: "", note: "Could not render the roof plan page for a vision measurement." };
   }
@@ -431,8 +449,13 @@ export async function applyVisionToReviewerReport(
       let measured = readCache(db, report.projectId, finding.id, sig);
       if (!measured && budget > 0) {
         budget -= 1;
-        measured = await measureOne(llm, pdfPath, pages, finding);
+        measured = await measureOne(llm, pdfPath, pages, finding, secrets);
         if (measured.checked) writeCache(db, report.projectId, finding.id, sig, measured);
+        // Not cached, so the next pass asks again; this pass's finding says why nothing was read.
+        else if (isNotSent(measured)) {
+          findings.push({ ...finding, visionVerification: measured });
+          continue;
+        }
       }
       findings.push(measured && measured.checked ? applyRoofPlanMeasurement(finding, measured) : finding);
       continue;
