@@ -3,6 +3,7 @@ import { isPlaceholderBatteryModel } from "../../shared/src/batteryControls";
 import type { EffectiveCodeContext } from "./codeProfiles";
 import { FIRE_PATHWAY_PATTERNS, packageShowsSld } from "./projectEvidence";
 import { evaluateElectricalSizingFindings } from "./electricalSizing";
+import { evaluateWireTableFindings } from "./wireTableArithmetic";
 import { evaluateAmendmentFindings } from "./amendmentChecks";
 import { evaluatePriorCorrectionFindings } from "./ahjReviewRules";
 import { pathWordingScope, resolvePermitPath, usStateCode } from "./permitPath";
@@ -1720,6 +1721,14 @@ export function evaluateDesignCodeFindings(
     busbarSection: busbarArt,
     cite,
   });
+  // THE WIRE TABLE, TAG BY TAG (#334): EGC vs Table 250.122, the tap's supply-side bonding jumper
+  // (250.102(C)(1), only on a supply-side-only classification), ampacity vs OCPD, 40 % fill, and
+  // load center spaces vs breaker poles — read from the sheets, an unclear row read as nothing.
+  const wireTableFindings = evaluateWireTableFindings(project, {
+    documentTexts,
+    supplySide: saysSupplySide && !saysLoadSide,
+    cite,
+  });
 
   if (saysSupplySide && !saysLoadSide) {
     out.push(finding({
@@ -1826,6 +1835,7 @@ export function evaluateDesignCodeFindings(
   // RECOMPUTE THE SIZING (#144), evaluated above so the load-side branch can see the busbar
   // result; pushed here so the report's finding order is unchanged.
   out.push(...sizingFindings);
+  out.push(...wireTableFindings);
 
   const moduleFields = [str(project, "moduleMake"), str(project, "moduleModel"), str(project, "moduleWattage"), str(project, "moduleQty")].filter(Boolean);
   const inverterFields = [str(project, "invModel"), str(project, "pvMicroModel"), str(project, "inverterModel"), str(project, "invQty"), str(project, "pvMicroQty")].filter(Boolean);

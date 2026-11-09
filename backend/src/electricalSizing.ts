@@ -58,8 +58,9 @@ const voltageDropRef: CodeReference = {
   note: "The informational notes recommend no more than 3 percent drop on a branch circuit or feeder.",
 };
 
-// NEC Table 310.16 (60 / 75 / 90 C columns), copper and aluminum, AWG 14 - 4/0.
-const AMPACITY: Record<"CU" | "AL", Record<string, [number, number, number]>> = {
+// NEC Table 310.16 (60 / 75 / 90 C columns), copper and aluminum, AWG 14 - 4/0. Exported for the
+// per-tag wire table check (wireTableArithmetic.ts, #334): one ampacity table, not two copies.
+export const AMPACITY: Record<"CU" | "AL", Record<string, [number, number, number]>> = {
   CU: {
     "14": [15, 20, 25], "12": [20, 25, 30], "10": [30, 35, 40], "8": [40, 50, 55], "6": [55, 65, 75],
     "4": [70, 85, 95], "3": [85, 100, 115], "2": [95, 115, 130], "1": [110, 130, 145],
@@ -77,14 +78,14 @@ const RESISTANCE: Record<"CU" | "AL", Record<string, number>> = {
   AL: { "12": 3.25, "10": 2.04, "8": 1.28, "6": 0.808, "4": 0.508, "3": 0.403, "2": 0.319, "1": 0.253, "1/0": 0.201, "2/0": 0.159, "3/0": 0.126, "4/0": 0.1 },
 };
 // 240.4(D) small-conductor OCPD ceilings.
-const SMALL_CONDUCTOR_MAX: Record<"CU" | "AL", Record<string, number>> = { CU: { "14": 15, "12": 20, "10": 30 }, AL: { "12": 15, "10": 25 } };
+export const SMALL_CONDUCTOR_MAX: Record<"CU" | "AL", Record<string, number>> = { CU: { "14": 15, "12": 20, "10": 30 }, AL: { "12": 15, "10": 25 } };
 // NEC Table 310.15(B)(1) ambient correction (30 C basis): [upper bound C, 60 C, 75 C, 90 C column].
 const AMBIENT: Array<[number, number, number, number]> = [
   [30, 1, 1, 1], [35, 0.91, 0.94, 0.96], [40, 0.82, 0.88, 0.91], [45, 0.71, 0.82, 0.87], [50, 0.58, 0.75, 0.82],
   [55, 0.41, 0.67, 0.76], [60, 0, 0.58, 0.71], [65, 0, 0.47, 0.65], [70, 0, 0.33, 0.58], [75, 0, 0, 0.5], [80, 0, 0, 0.41], [85, 0, 0, 0.29],
 ];
 // NEC Table 310.15(C)(1): more than three current-carrying conductors in a raceway.
-function fillAdjustment(count: number): number {
+export function fillAdjustment(count: number): number {
   if (count <= 3) return 1;
   if (count <= 6) return 0.8;
   if (count <= 9) return 0.7;

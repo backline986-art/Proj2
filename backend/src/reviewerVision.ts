@@ -11,6 +11,7 @@ import { applyRoofPlanMeasurement, FIRE_PATHWAY_BELOW_ID, FIRE_PATHWAY_UNMEASURE
 import { AMENDMENT_NOT_MET_ID } from "./amendmentChecks";
 import { PRIOR_CORRECTION_ID } from "./ahjReviewRules";
 import { PRECEDENT_DEPARTURE_ID } from "./permitPrecedents";
+import { WIRE_TABLE_FINDING_IDS } from "./wireTableArithmetic";
 import { nowIso } from "./time";
 import { redactSecretValues } from "../../shared/src/portalSafety";
 import { projectSecretValuesById } from "./projectSecrets";
@@ -136,6 +137,10 @@ export const MEASURED_FINDING_IDS: ReadonlySet<string> = new Set([
   "city.elec.sizing-string-voc",
   "city.elec.sizing-voltage-drop",
   "city.elec.sizing-inputs-missing",
+  // The wire table's own arithmetic, tag by tag (wireTableArithmetic.ts, #334): EGC vs 250.122,
+  // the supply-side bonding jumper, ampacity vs OCPD, raceway fill, load center spaces. A picture of
+  // the table shows it is there, never that its numbers add up.
+  ...WIRE_TABLE_FINDING_IDS,
   // A stated (or vision-measured) pathway width / ridge setback against the required one is
   // arithmetic (issue #142). A sheet showing a pathway does not make it wide enough.
   FIRE_PATHWAY_BELOW_ID,
