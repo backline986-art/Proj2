@@ -13,8 +13,9 @@
 //     plain-HTTP fetch per document through fetchPublicDocument, never a browser;
 //   - print its own amount: a surcharge's excerpts state the percentages that add up to it, a cap's
 //     excerpt prints its dollar figure.
-// What passes lands SEEDED through the one write path (stateRules.writeSeededStatePermitRule), which
-// never writes a verified row (rule 3). An answer of "the state levies none" is NOT stored: there is
+// What passes goes through the one write path (stateRules.writeSeededStatePermitRule), whose landing
+// function decides the tier (#683): OFFICIAL when every quote that names the amount is in the bytes we
+// read from a government page, else seeded. It never writes a verified row (rule 3). An answer of "the state levies none" is NOT stored: there is
 // rarely a sentence that says so, and an uncited zero is exactly the silent assumption this replaces.
 // The prompt carries the state's name and nothing about the project (rule 2: no secret can ride it).
 //
@@ -27,7 +28,7 @@ import { logger } from "./logger";
 import { extractPdfTextItems } from "./pdfTables";
 import { usStateCode } from "./permitPath";
 import { foldForQuote } from "./pvPlacementRules";
-import { writeSeededStatePermitRule } from "./stateRules";
+import { writeSeededStatePermitRule, type RuleLandingEvidence } from "./stateRules";
 import {
   STATE_FEE_FAMILY, STATE_SOLAR_FEE_CAP_KEY, STATE_SURCHARGE_KEY, SURCHARGE_APPLIES_TO_PERMIT_FEES, stateSurchargeResearched,
 } from "./stateFeeRules";
@@ -62,6 +63,9 @@ export interface StateFeeRuleFinding {
   section: string;
   excerpts: string[];
   sourceUrl: string;
+  /** The text this process read from `sourceUrl` (verifyStateFeeQuotes), for the landing function.
+   *  In-process only: never stored, never sent to a model. */
+  retrievedText?: string;
 }
 
 const WORD_NUMBERS: Record<string, number> = {
@@ -158,7 +162,19 @@ async function readPageText(url: string): Promise<{ ok: boolean; text: string; s
       return { ok: true, text: items.map((i) => i.str ?? "").join(" "), status: doc.status };
     } catch { return { ok: false, text: "", status: doc.status }; }
   }
-  return { ok: true, text: String(doc.text ?? "").replace(/<script[\s\S]*?<\/script>|<style[\s\S]*?<\/style>/gi, " ").replace(/<[^>]+>/g, " "), status: doc.status };
+  return { ok: true, text: decodeEntities(String(doc.text ?? "").replace(/<script[\s\S]*?<\/script>|<style[\s\S]*?<\/style>/gi, " ").replace(/<[^>]+>/g, " ")), status: doc.status };
+}
+
+const NAMED_ENTITIES: Record<string, string> = { nbsp: " ", amp: "&", sect: "§", quot: '"', apos: "'", lt: "<", gt: ">", ndash: "–", mdash: "—", rsquo: "’", lsquo: "‘", rdquo: "”", ldquo: "“" };
+/** A page's character references as the characters a reader sees ("&sect;&nbsp;12" is "§ 12"). */
+export function decodeEntities(s: string): string {
+  return s.replace(/&(#x[0-9a-f]+|#\d+|[a-z]+);/gi, (m, e: string) => {
+    if (e[0] === "#") {
+      const n = e[1] === "x" || e[1] === "X" ? parseInt(e.slice(2), 16) : Number(e.slice(1));
+      return Number.isFinite(n) && n > 0 && n < 0x110000 ? String.fromCodePoint(n) : m;
+    }
+    return NAMED_ENTITIES[e.toLowerCase()] ?? m;
+  });
 }
 
 let pageReaderForTests: StateFeePageReader | null = null;
@@ -172,7 +188,7 @@ export function setStateFeePageReaderForTests(fn: StateFeePageReader | null): vo
 export async function verifyStateFeeQuotes(rules: StateFeeRuleFinding[]): Promise<{ rules: StateFeeRuleFinding[]; dropped: string[]; fetched: number; fetchedAt: string }> {
   const fetchedAt = new Date().toISOString();
   const reader = pageReaderForTests ?? readPageText;
-  const pages = new Map<string, { ok: boolean; text: string; status: number }>();
+  const pages = new Map<string, { ok: boolean; text: string; raw: string; status: number }>();
   const kept: StateFeeRuleFinding[] = [];
   const dropped: string[] = [];
   for (const r of rules) {
@@ -180,15 +196,26 @@ export async function verifyStateFeeQuotes(rules: StateFeeRuleFinding[]): Promis
     if (!pages.has(key)) {
       let page = { ok: false, text: "", status: 0 };
       try { page = await reader(r.sourceUrl); } catch { /* unreadable */ }
-      pages.set(key, { ...page, text: foldForQuote(page.text) });
+      pages.set(key, { ...page, raw: page.text, text: foldForQuote(page.text) });
     }
     const page = pages.get(key)!;
     if (!page.ok) { dropped.push(`page not retrievable (status ${page.status}) — ${r.key} not stored: ${r.sourceUrl}`); continue; }
     const missing = r.excerpts.find((e) => { const n = foldForQuote(e); return n.length < 12 || !page.text.includes(n); });
     if (missing) { dropped.push(`quote not found on the page we retrieved — "${missing.slice(0, 60)}": ${r.sourceUrl}`); continue; }
-    kept.push(r);
+    kept.push({ ...r, retrievedText: page.raw });
   }
   return { rules: kept, dropped, fetched: pages.size, fetchedAt };
+}
+
+/** The quotes that NAME the amount, each with the amount it names, for the landing function (#683):
+ *  a surcharge's parts each print their own percentage, a cap's excerpt prints its dollar figure. A
+ *  percentage printed in words ("four percent") names no digits, so such a rule lands seeded. */
+export function feeRuleLandingEvidence(r: StateFeeRuleFinding): RuleLandingEvidence | undefined {
+  if (r.retrievedText === undefined) return undefined;
+  const quotes = r.key === STATE_SURCHARGE_KEY
+    ? r.excerpts.map((e) => ({ quote: e, value: percentStated(e) ?? NaN }))
+    : r.excerpts.filter((e) => printsDollars(e, Number(r.value.maxUsd))).map((e) => ({ quote: e, value: Number(r.value.maxUsd) }));
+  return { retrievedText: r.retrievedText, quotes };
 }
 
 /** The citation a row carries: the section, then its words, verbatim. */
@@ -220,12 +247,12 @@ export async function runStateFeeResearch(db: AppDb, payload: Record<string, unk
   let saved = 0;
   const now = new Date().toISOString();
   for (const r of checked.rules) {
-    // Seeded until #683's landing function decides the tier; fetchedAt = when the page that holds
-    // the quote was read (verifyStateFeeQuotes), so the row carries its full provenance.
-    saved += writeSeededStatePermitRule(db, { state, family: STATE_FEE_FAMILY, key: r.key, value: r.value, citation: citationOf(r), sourceUrl: r.sourceUrl, fetchedAt: checked.fetchedAt }, now);
+    // The landing function decides the tier (#683) from the bytes verifyStateFeeQuotes read; fetchedAt
+    // = when that page was read, so the row carries its full provenance.
+    saved += writeSeededStatePermitRule(db, { state, family: STATE_FEE_FAMILY, key: r.key, value: r.value, citation: citationOf(r), sourceUrl: r.sourceUrl, fetchedAt: checked.fetchedAt }, now, feeRuleLandingEvidence(r));
   }
   const dropped = [...parsed.dropped, ...checked.dropped];
-  if (saved) logger.info("state-fee-rules", `seeded ${saved} researched fee rule(s) for ${state}`);
+  if (saved) logger.info("state-fee-rules", `stored ${saved} researched fee rule(s) for ${state}`);
   return {
     state, saved, found: checked.rules.map((r) => r.key), documentsFetched: checked.fetched, webGrounded: result.groundedSearches > 0,
     ...(dropped.length ? { dropped: dropped.slice(0, 8) } : {}),

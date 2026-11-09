@@ -290,6 +290,79 @@ await check("MUST-EXCLUDE: an official page never makes a filing-email record us
   assert.ok(problems.some((p) => /named person/.test(p)), problems.join("; "));
 });
 
+// ── 6. State permit rules: the one write path lands official, and the re-seed keeps it ───
+console.log("6. state permit rules land through the landing function; the boot re-seed keeps an official row");
+{
+  const SR = await import("../src/stateRules");
+  const RES = await import("../src/stateFeeResearch");
+  const STAT = "https://legislature.lakemont.gov/title-9/9-4-210";
+  const OTHER = "https://rules.lakemont-codes.gov/9-4-210";
+  const page = "<p>(1) A city shall collect a surcharge of 2% of the total building permit fees.</p><p>(2) The fee for a residential solar permit may not exceed $400.</p>";
+  const capRule = (maxUsd: number, sourceUrl = STAT, excerpt = `The fee for a residential solar permit may not exceed $${maxUsd}.`) =>
+    ({ state: "WY", family: "fee" as const, key: "solarPermitFeeCap", value: { maxUsd, section: "Lakemont Code 9-4-210(2)" }, citation: `Lakemont Code 9-4-210(2): "${excerpt}"`, sourceUrl, fetchedAt: new Date().toISOString() });
+  const row = () => db.get<{ value_json: string; confidence: string; source_url: string }>("SELECT value_json, confidence, source_url FROM state_permit_rules WHERE state = 'WY' AND family = 'fee' AND rule_key = 'solarPermitFeeCap'");
+  const reference = path.join(tmp, "reference-state-permit-rules.json");
+  const said = (usd: number) => `The fee for a residential solar permit may not exceed $${usd}.`;
+
+  await check("a fee rule whose quote is in the bytes read from a .gov page lands OFFICIAL", () => {
+    assert.equal(SR.writeSeededStatePermitRule(db, capRule(400), undefined, { retrievedText: page, quotes: [{ quote: said(400), value: 400 }] }), 1);
+    assert.equal(row()?.confidence, "official");
+    const rule = SR.statePermitRulesFor(db, "WY", "fee").find((x) => x.key === "solarPermitFeeCap")!;
+    assert.equal(rule.confidence, "official");
+    assert.match(SR.ruleReference(rule).note ?? "", /^Read on legislature\.lakemont\.gov, the state's own official page, \d{4}-\d{2}-\d{2}\.$/);
+  });
+  await check("REGRESSION: the boot-time reference re-seed leaves an official row official, with its value", () => {
+    // The shipped reference carries the same rule with an older amount and no retrieved bytes.
+    fs.writeFileSync(reference, JSON.stringify({ rules: [{ ...capRule(350), fetchedAt: "" }] }));
+    SR.seedStatePermitRules(db, reference);
+    assert.equal(row()?.confidence, "official");
+    assert.equal(JSON.parse(row()!.value_json).maxUsd, 400);
+  });
+  await check("a seeded write without evidence never downgrades it; an official read from ANOTHER host does not replace it", () => {
+    assert.equal(SR.writeSeededStatePermitRule(db, capRule(375)), 0);
+    assert.equal(SR.writeSeededStatePermitRule(db, capRule(425, OTHER), undefined, { retrievedText: said(425), quotes: [{ quote: said(425), value: 425 }] }), 0);
+    assert.equal(JSON.parse(row()!.value_json).maxUsd, 400);
+    assert.equal(row()?.confidence, "official");
+  });
+  await check("an official read from the SAME host refreshes it", () => {
+    assert.equal(SR.writeSeededStatePermitRule(db, capRule(450), undefined, { retrievedText: said(450), quotes: [{ quote: said(450), value: 450 }] }), 1);
+    assert.equal(JSON.parse(row()!.value_json).maxUsd, 450);
+    assert.equal(row()?.confidence, "official");
+  });
+  await check("lands SEEDED: the quote not in the retrieved bytes, a quote without the amount, a non-government host, no fetched-at, no bytes", () => {
+    const ev = (value: number, text = page) => ({ retrievedText: text, quotes: [{ quote: said(400), value }] });
+    assert.equal(SR.stateRuleLandingTier(capRule(400), ev(400, "nothing here")), "seeded");
+    assert.equal(SR.stateRuleLandingTier(capRule(400), ev(500)), "seeded");
+    assert.equal(SR.stateRuleLandingTier(capRule(400, "https://lakemont-statutes.example.com/9-4-210"), ev(400)), "seeded");
+    assert.equal(SR.stateRuleLandingTier({ ...capRule(400), fetchedAt: "" }, ev(400)), "seeded");
+    assert.equal(SR.stateRuleLandingTier(capRule(400)), "seeded");
+    assert.equal(SR.stateRuleLandingTier(capRule(400), ev(400)), "official");
+  });
+  await check("rule 3: an official read never touches a row a person verified", () => {
+    db.run("UPDATE state_permit_rules SET confidence = 'verified', verified_at = ?, verified_by = 'Pat Operator' WHERE state = 'WY' AND family = 'fee' AND rule_key = 'solarPermitFeeCap'", [new Date().toISOString()]);
+    assert.equal(SR.writeSeededStatePermitRule(db, capRule(475), undefined, { retrievedText: said(475), quotes: [{ quote: said(475), value: 475 }] }), 0);
+    assert.equal(JSON.parse(row()!.value_json).maxUsd, 450);
+    assert.equal(row()?.confidence, "verified");
+  });
+  await check("research: a surcharge each of whose parts prints its percentage lands official; one printed in words stays seeded", async () => {
+    const statPage = "<p>(1) A city shall collect a surcharge of 1&#37; of the total building permit fees.</p><p>(2)&nbsp;An additional surcharge of 0.5% of the total permit fees is imposed.</p>";
+    RES.setStateFeePageReaderForTests(async () => ({ ok: true, text: RES.decodeEntities(statPage.replace(/<[^>]+>/g, " ")), status: 200 }));
+    const ask = (excerpts: string[], percent: number): Pick<LLMProvider, "webLookup"> => ({
+      webLookup: async () => ({ text: JSON.stringify({ rules: [{ key: "surcharge", percent, appliesTo: "permit_fees", section: "Lakemont Code 9-4-200", sourceUrl: STAT, excerpts }] }), groundedSearches: 1, stopReason: "end_turn", resultUrls: [STAT], pagesRead: 1, fetchedUrls: [] }),
+    });
+    const first = await RES.runStateFeeResearch(db, { state: "MT" }, ask(["A city shall collect a surcharge of 1% of the total building permit fees.", "An additional surcharge of 0.5% of the total permit fees is imposed."], 1.5));
+    const mt = SR.statePermitRulesFor(db, "MT", "fee").find((x) => x.key === "surcharge");
+    assert.equal(mt?.confidence, "official", JSON.stringify({ first, mt }));
+    RES.setStateFeePageReaderForTests(async () => ({ ok: true, text: "A city shall collect a surcharge of two percent of the total building permit fees.", status: 200 }));
+    const second = await RES.runStateFeeResearch(db, { state: "ND" }, ask(["A city shall collect a surcharge of two percent of the total building permit fees."], 2));
+    assert.equal(SR.statePermitRulesFor(db, "ND", "fee").find((x) => x.key === "surcharge")?.confidence, "seeded", JSON.stringify(second));
+    RES.setStateFeePageReaderForTests(null);
+  });
+  await check("a page's character references read as the characters a reader sees", () => {
+    assert.equal(RES.decodeEntities("&sect;&nbsp;12 &amp; 1&#37; &#x24;400"), "§ 12 & 1% $400");
+  });
+}
+
 if (failures) { console.error(`\n${failures} check(s) failed`); process.exit(1); }
 console.log("\nall official-source tier checks passed");
 process.exit(0);

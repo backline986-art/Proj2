@@ -187,7 +187,7 @@ console.log("\n5. research lands only verbatim, page-checked rules, seeded");
       && mt.citation.startsWith("Synthetic Code 7-1-101(1)-(2): \"A municipality shall collect a surcharge of one percent"),
     JSON.stringify({ r, mt }));
   check("5a2. …and records WHEN the page holding its words was fetched (provenance, #683)", /^\d{4}-\d{2}-\d{2}T/.test(mt.status === "rule" ? mt.fetchedAt : "") && /^\d{4}-\d{2}-\d{2}T/.test(String(feeRow("MT")?.fetched_at)), JSON.stringify(feeRow("MT")));
-  check("5b. the solar fee cap lands as data ($450, cited)", !!cap && JSON.parse(String(cap.value_json)).maxUsd === 450 && cap.confidence === "seeded", JSON.stringify(cap));
+  check("5b. the solar fee cap lands as data ($450, cited), OFFICIAL: its excerpt is in the bytes read from a .gov page (#683)", !!cap && JSON.parse(String(cap.value_json)).maxUsd === 450 && cap.confidence === "official", JSON.stringify(cap));
   check("5c. gentle: ONE fetch for the one document both rules cite", fetched.length === 1, JSON.stringify(fetched));
   check("5d. a researched state's quote now prices its surcharge instead of saying not researched",
     stateSurchargeNotice(db, "MT", ["x"]).includes("up to 1.5% of the permit fee"), stateSurchargeNotice(db, "MT", ["x"]));

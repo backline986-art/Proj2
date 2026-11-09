@@ -2193,7 +2193,11 @@ export interface StatePermitRule {
   /** The section, with its words quoted. */
   citation: string;
   sourceUrl: string;
-  confidence: "seeded" | "verified";
+  /** "official" (#683): every quote was found in the bytes read from the state's own official page —
+   *  used at once, never "verified by" anyone, and never overwrites a person's row. */
+  confidence: "seeded" | "official" | "verified";
+  /** When the citation's words were read from `sourceUrl` (ISO); absent when not recorded. */
+  fetchedAt?: string;
 }
 
 export interface FireSetbackRule {
