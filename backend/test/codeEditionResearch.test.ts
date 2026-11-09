@@ -665,6 +665,25 @@ await check("#596 MUST-PASS: after approval, a Washington County plan on '2023 O
   assert.match(String(later?.message), /ORSC 2023/);
 });
 
+await check("#596 MUST-PASS (the install's shape): a verified row still on 'OESC 2023, NEC 2023' gets an electrical proposal; approving it leaves no NEC 2023 and cites the 2026 edition", () => {
+  // The live row was verified before this seed: OESC and NEC 2023 are two separate entries.
+  const cur = CP.getCodeProfile(db, { state: "OR", ahj: "" })!;
+  const stale = cur.adoptedCodes.filter((c) => !["OESC", "NEC"].includes(c.code))
+    .concat([{ code: "OESC", edition: "2023", title: "Oregon Electrical Specialty Code (based on the 2023 NEC)" }, { code: "NEC", edition: "2023" }]);
+  CP.saveVerifiedCodeProfile(db, { ...cur, adoptedCodes: stale }, "tester");
+  CP.seedReferenceCodeProfiles(db);
+  const props = CP.listEditionProposals(db, OR_KEY);
+  assert.equal(props.length, 1, JSON.stringify(props));
+  const electrical = props[0].changes.find((c) => c.family === "electrical");
+  assert.equal(electrical?.current, "OESC 2023, NEC 2023");
+  assert.match(String(electrical?.proposed), /^OESC 2026 \(2026 NEC/);
+  assert.equal(CP.applyEditionProposal(db, props[0].fingerprint, "operator@test").status, "applied");
+  const after = codesOf(payloadOf(OR_KEY));
+  assert.ok(after.includes("OESC 2026") && !after.includes("NEC 2023") && !after.includes("OESC 2023"), after.join(", "));
+  const ctx = CP.resolveEffectiveCodeContext(db, "OR", "Washington County");
+  assert.match(ctx.citationFor("NEC", "690.12", "Rapid shutdown").code, /2026/);
+});
+
 await check("B4 MUST-EXCLUDE: an IFC citation never borrows a non-IFC fire code (Florida's FFPC is NFPA 1)", () => {
   const ctx = CP.resolveEffectiveCodeContext(db, "FL", "City of Testmiami2");
   const fire = ctx.citationFor("IFC", "1205", "Solar PV systems");
