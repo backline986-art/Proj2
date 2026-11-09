@@ -1135,6 +1135,37 @@ export interface NextStepCompact {
   hasStagedDraft: boolean;
 }
 
+/**
+ * WHAT A JOB INSTALLS (#673): new PV, new PV plus storage, storage added to an existing PV system, or
+ * storage alone. QC chooses its equipment blockers by it (backend/src/jobScope.ts). Unknown or
+ * conflicting evidence is "pv", so today's PV blockers stay; a storage scope is reached only when
+ * nothing on the job names new modules.
+ */
+export type JobScope = "pv" | "pv+storage" | "storage-added-to-existing-pv" | "storage-only";
+export const JOB_SCOPES: readonly JobScope[] = ["pv", "pv+storage", "storage-added-to-existing-pv", "storage-only"];
+
+/** The battery's operating mode as QC and the utility's storage record read it. */
+export type StorageOperatingMode = "export" | "non-export" | "backup-only";
+export const STORAGE_OPERATING_MODES: readonly StorageOperatingMode[] = ["export", "non-export", "backup-only"];
+
+/** The job's scope with its basis, as QC used it (jobScope.resolveJobScope). */
+export interface JobScopeView {
+  scope: JobScope;
+  /** "person": a named person set it on the job; "plan_set": the plan set's own evidence;
+   *  "default": nothing settles it, so the strict default (pv) applies. */
+  basis: "person" | "plan_set" | "default";
+  /** One sentence: why this scope. */
+  reason: string;
+  /** Fields on the job that name NEW modules (a storage scope is refused while any is present). */
+  newModuleEvidence: string[];
+  /** A person's scope that the job's evidence contradicts; "" when none. The evidence wins. */
+  conflict: string;
+  /** The person's own setting, when one is on file (kept even when it is overruled). */
+  personScope?: JobScope;
+  setBy?: string;
+  setAt?: string;
+}
+
 export interface QcResult {
   id: string;
   projectId: string;
@@ -3420,6 +3451,8 @@ export interface ProjectDetail {
   stageLabel: string;
   stageCount: number;
   isBlocked: boolean;
+  /** What the job installs, as QC reads it (#673). */
+  jobScope?: JobScopeView;
 }
 
 /** POST /api/projects/:id/permit-checks (recordPermitStatusCheck). `unreadable` is set when the

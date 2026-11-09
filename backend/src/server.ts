@@ -1,5 +1,5 @@
 import "dotenv/config";
-import { validate, portalCredentialCreateSchema, portalCredentialUpdateSchema, autoLearnSchema, codeProfileResearchSchema, codeProfileVerifySchema, permitProcessVerifySchema, reviewSubjectSchema, utilityFilingVerifySchema } from "./validation";
+import { validate, portalCredentialCreateSchema, portalCredentialUpdateSchema, autoLearnSchema, codeProfileResearchSchema, codeProfileVerifySchema, permitProcessVerifySchema, reviewSubjectSchema, utilityFilingVerifySchema, jobScopeSchema } from "./validation";
 import crypto from "node:crypto";
 import { spawn } from "node:child_process";
 import express, { type NextFunction, type Request, type Response } from "express";
@@ -172,6 +172,8 @@ import { createSignatureRequestApproval } from "./signatureRequestApproval";
 import { confirmSignatureRequestSent } from "./signatureTrack";
 import { getSubmittalTracks, markTrackSubmitted, requiredTracks, trackSubmittedAndTracked, trackSubmittedSentence, withPermitStageSentence } from "./submittalTracks";
 import { getUtilityFilingLookup, nemFiledWithPermit, verifyUtilityFilingLookup } from "./utilityFilingLookup";
+import { runQcForProject } from "./qc";
+import { personJobScope, setPersonJobScope } from "./jobScope";
 import { stagedReviewScreenshotFile } from "./stagedReviews";
 import { submissionConfirmationFile } from "./submissionConfirmation";
 import { reviewScreenshotFile } from "./reviewScreenshot";
@@ -2454,6 +2456,26 @@ app.put("/api/projects/:id/utility-filing/verify", (req, res) => {
     utility: project.utility, state: project.state, method: r.lookup?.filing?.value?.method ?? null, sourceUrl: r.lookup?.filing?.sourceUrl ?? "",
   });
   res.json({ lookup: r.lookup });
+});
+
+// WHAT THE JOB INSTALLS, SET BY A PERSON (#673; jobScope.ts). Under /api/projects/:id, so it
+// inherits the tenancy guard (rule 6) and getProjectDetail 404s an unknown or out-of-scope project
+// first. A NAMED PERSON (namedPersonDecider) sets pv / pv+storage / storage-added-to-existing-pv /
+// storage-only, or clears it (null) so the plan set's evidence decides again. A storage scope never
+// drops a PV row on a job whose fields name new modules (jobScope.deriveJobScope: the evidence
+// wins, QC says so). QC re-runs at once so the rows match the scope.
+app.put("/api/projects/:id/job-scope", (req, res) => {
+  const projectId = String(req.params.id);
+  getProjectDetail(db, projectId);
+  const b = validate(jobScopeSchema, req.body);
+  const setBy = namedPersonDecider(req, "decidedBy",
+    "Sign in to set what this job installs.",
+    "Name the person setting the job scope: it decides which equipment QC checks.");
+  const before = personJobScope(db, projectId);
+  setPersonJobScope(db, projectId, b.scope, setBy);
+  addAuditLog(db, projectId, "human", setBy, b.scope ? "job_scope.set" : "job_scope.cleared", { from: before?.scope ?? null, to: b.scope });
+  runQcForProject(db, projectId);
+  res.json(getProjectDetail(db, projectId));
 });
 
 // THE EMAIL FILING CHANNEL (#667; filingEmail.ts). Under /api/projects/:id, so each inherits the

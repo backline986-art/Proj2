@@ -3220,6 +3220,30 @@ const VERSIONED_MIGRATIONS: VersionedMigration[] = [
       `);
     },
   },
+  {
+    version: 67,
+    name: "job_scope_and_storage_modes",
+    up: (db) => {
+      // WHAT THE JOB INSTALLS, AS A PERSON SET IT (#673, backend/src/jobScope.ts): one row per
+      // project — pv / pv+storage / storage-added-to-existing-pv / storage-only — written only by
+      // PUT /api/projects/:id/job-scope with a named person. Never by the parser or a model: a
+      // storage scope drops the PV module blockers, so the parser's guess cannot set it.
+      // Reaches an org through its project (no org_id).
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS project_job_scopes (
+          project_id TEXT PRIMARY KEY,
+          scope TEXT NOT NULL,
+          set_by TEXT NOT NULL,
+          set_at TEXT NOT NULL
+        );
+      `);
+      // WHICH STORAGE MODES THE UTILITY TAKES AN APPLICATION FOR (#673 item 3): a PERSON's cited
+      // record on the utility's filing row — { modesWithoutApplication, sourceUrl, quote, verifiedBy,
+      // verifiedAt } (utilityFilingLookup.storageModeExemption). Its own column, so a lookup's write
+      // (which replaces payload_json) never touches it (rule 3). Never written by a lookup or a model.
+      addColumnIfMissing(db, "utility_filing_lookups", "storage_modes_json", "TEXT NOT NULL DEFAULT ''");
+    },
+  },
 ];
 
 /** v47 was edited in place while #218 was open (Helm's review at 0116f98a): a DB that ran an earlier

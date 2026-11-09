@@ -174,6 +174,7 @@ import {
 import { linkLookupRanRecently, signedInOutcome, statusReadGap, type ReadGapFacts } from "./statusLinkGap";
 import { evidenceForTopic, evidenceLines, type EvidenceTopic } from "./projectEvidence";
 import { customerBillOnFile, runQcForProject, WAITING_ON_BILL_ISSUE_TYPE, type QcRunOptions } from "./qc";
+import { resolveJobScope } from "./jobScope";
 import { loadStoredTemplates, formAllowedForPath } from "./ahjForms";
 import { submissionDocumentsByType, uploadDocumentGuard } from "./submissionDocuments";
 import { disciplineFor } from "./docDiscipline";
@@ -1438,6 +1439,7 @@ export function getProjectDetail(db: AppDb, projectId: string): ProjectDetail {
     submissions: db.query<Row>("SELECT * FROM submissions WHERE project_id = ? ORDER BY created_at DESC", [projectId]).map(mapSubmission),
     auditLogs: db.query<Row>("SELECT * FROM audit_logs WHERE project_id = ? ORDER BY created_at DESC LIMIT 100", [projectId]).map(mapAudit),
     projectNotes: db.query<Row>("SELECT * FROM project_notes WHERE project_id = ? ORDER BY created_at DESC LIMIT 50", [projectId]).map(mapProjectNote),
+    jobScope: resolveJobScope(db, projectId, project.parserSnapshot),
   };
 }
 
@@ -1486,6 +1488,7 @@ export function deleteProject(db: AppDb, projectId: string): { deleted: true; pr
     db.run("DELETE FROM portal_signature_request_approvals WHERE project_id = ?", [projectId]);
     // Filing emails composed for this project (migration v65, #667).
     db.run("DELETE FROM filing_email_sends WHERE project_id = ?", [projectId]);
+    db.run("DELETE FROM project_job_scopes WHERE project_id = ?", [projectId]);
     // Information-page candidates (migration v50, #344) carry the same FK; the pass a person
     // verified on one of them is withdrawn with it (infoPages owns both tables).
     deleteProjectInfoPages(db, projectId);

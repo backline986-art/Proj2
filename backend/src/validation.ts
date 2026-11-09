@@ -102,6 +102,13 @@ export const utilityFilingVerifySchema = z.object({
   }).strict().optional(),
 });
 
+/** PUT /api/projects/:id/job-scope (#673): a named person sets what the job installs, or clears it
+ *  (scope null) so the plan set's evidence decides again. */
+export const jobScopeSchema = z.object({
+  scope: z.enum(["pv", "pv+storage", "storage-added-to-existing-pv", "storage-only"]).nullable(),
+  decidedBy: z.string().max(120).optional(),
+}).strict();
+
 export const codeProfileVerifySchema = z.object({
   state: z.string().min(2).max(40),
   ahj: z.string().max(160).optional().default(""),
