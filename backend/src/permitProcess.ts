@@ -326,8 +326,8 @@ export interface StatePermitRules {
   prescriptiveFeeBasis?: CitedFact<string>;
   /** The electrical renewable-energy fee tiers (kVA). */
   electricalRenewableTiers?: CitedFact<Array<{ maxKva: number; amountUsd: number; label: string }>>;
-  /** State surcharge on permit fees (fraction), when the state sets a maximum. */
-  surcharge?: CitedFact<number>;
+  // The state surcharge on permit fees is NOT here: it is data in state_permit_rules' "fee" family
+  // (stateFeeRules.stateSurchargeRuleFor, #663), seeded from reference-state-permit-rules.json.
   /** Portal application-info vocabulary guidance (Category of Construction / Type of Work). */
   applicationInfoGuidance?: CitedFact<{ categoryOfConstruction: "structure_type"; typeOfWorkExisting: string; solarIsNotOther: boolean }>;
   /** A state PV worksheet the electrical inspection asks for (Iowa: the SFM Electrical Bureau
@@ -402,12 +402,6 @@ export const STATE_PERMIT_RULES: Record<string, StatePermitRules> = {
       ],
       sourceUrl: OAR_918_309_0070,
       quote: "(11)(a) (A) 5 KVA or less: $79; (B) 5.01 KVA to 15 KVA: $94; (C) 15.01 KVA to 25 KVA: $156",
-      origin: "state_rule",
-    },
-    surcharge: {
-      value: 0.12,
-      sourceUrl: "https://oregon.public.law/statutes/ors_455.210",
-      quote: "ORS 455.210(4) + 455.220(1): state surcharge on permit fees, at most 12%",
       origin: "state_rule",
     },
     applicationInfoGuidance: {

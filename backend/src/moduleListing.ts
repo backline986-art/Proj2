@@ -17,7 +17,12 @@ Report ONLY the certification / listing marks and standards printed for the PV M
 Return ONLY JSON: {"listingAgency": "UL" | "ETL (Intertek)" | "CSA" | "TÜV" | "", "standards": ["<each standard printed, e.g. UL 61730-1>"], "quote": "<the exact printed words naming the mark/standard>"}
 If the page shows no listing for the module, return {"listingAgency": "", "standards": [], "quote": ""}. Never guess.`;
 
-export interface ListingReading { agency: string; quote: string; source: "snapshot" | "text" | "vision" | "none" }
+export interface ListingReading {
+  agency: string; quote: string; source: "snapshot" | "text" | "vision" | "none";
+  /** Pages not sent to vision because they carry a project secret that could not be painted over
+   *  (rule 2, #612), with why. Such a read is not recorded as "looked": nothing was looked at. */
+  withheld?: string[];
+}
 
 export async function ensureModuleListingAgency(
   db: AppDb,
@@ -44,11 +49,20 @@ export async function ensureModuleListingAgency(
   if (!llm || String(snap.moduleListingAgencyLookedAt ?? "").trim()) return { agency: "", quote: "", source: "none" };
   const pdfPath = String(row.stored_path ?? "");
   if (!pdfPath || !/pdf/i.test(`${row.content_type ?? ""} ${pdfPath}`)) return { agency: "", quote: "", source: "none" };
-  const { renderPdfPageToPng } = await import("./pageImages");
+  // RULE 2 (#612): a datasheet split out of the plan set can carry the plan's title block, meter
+  // number included. Each page goes through the same mask as the reviewer's vision door.
+  const { renderPdfPageForVision } = await import("./pageImages");
+  const { projectSecretValues } = await import("./projectSecrets");
+  const secrets = projectSecretValues(project);
+  const withheld: string[] = [];
   let found: { agency: string; quote: string } = { agency: "", quote: "" };
   for (const page of [1, 2]) {
     let png: Buffer;
-    try { png = await renderPdfPageToPng(pdfPath, page); } catch { break; }
+    try {
+      const image = await renderPdfPageForVision(pdfPath, page, secrets);
+      if (!image.ok) { withheld.push(`page ${page}: ${image.reason}`); continue; }
+      png = image.png;
+    } catch { break; }
     let raw: Record<string, unknown> = {};
     try { raw = await llm.visionExtract({ imageBase64: png.toString("base64"), mimeType: "image/png", prompt: LISTING_VISION_PROMPT }); } catch { break; }
     const agency = String(raw.listingAgency ?? "").trim();
@@ -62,6 +76,7 @@ export async function ensureModuleListingAgency(
     await save(found.agency, found.quote, "vision");
     return { ...found, source: "vision" };
   }
+  if (withheld.length) return { agency: "", quote: "", source: "none", withheld };
   updateProject(db, project.id, { moduleListingAgencyLookedAt: new Date().toISOString() } as never);
   return { agency: "", quote: "", source: "none" };
 }

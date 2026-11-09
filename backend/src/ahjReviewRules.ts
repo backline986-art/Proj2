@@ -42,9 +42,10 @@ import type {
 import type { EffectiveCodeContext } from "./codeProfiles";
 import { checkFieldLabel, compareCheckWithPlan, describeCheckRequirement, parseAmendmentCheck } from "./amendmentChecks";
 import type { DesignTextSource } from "./designCriteria";
-import { redactSecretValues, SECRET_SEPARATOR_CLASS } from "../../shared/src/portalSafety";
-/** 5+ digits with any of redactSecretValues' separators between them but "/" (wordingNamesProject). */
-const LONG_DIGIT_RUN = new RegExp(String.raw`\d(?:${SECRET_SEPARATOR_CLASS.replace("/", "")}*\d){4,}`);
+import { redactSecretValues, SECRET_DIGIT_CLASS, SECRET_SEPARATOR_CLASS_NO_SLASH } from "../../shared/src/portalSafety";
+/** 5+ digits (fullwidth too) with any of redactSecretValues' separators between them but "/"
+ *  (wordingNamesProject): the one class, read with the `u` flag it needs (#292). */
+const LONG_DIGIT_RUN = new RegExp(`${SECRET_DIGIT_CLASS}(?:${SECRET_SEPARATOR_CLASS_NO_SLASH}*${SECRET_DIGIT_CLASS}){4,}`, "u");
 
 export const PRIOR_CORRECTION_ID = "city.ahj.prior-correction";
 export const PRIOR_CORRECTION_UNCONFIRMED_ID = "city.ahj.prior-correction-unconfirmed";
@@ -183,7 +184,7 @@ export function wordingNamesProject(
   secrets: Iterable<string> = [],
 ): boolean {
   const raw = String(phrase || "");
-  // Separators as redactSecretValues reads them (SECRET_SEPARATOR_CLASS, the one class), except "/":
+  // Separators as redactSecretValues reads them (SECRET_SEPARATOR_CLASS_NO_SLASH, the one class), except "/":
   // "120/240 V" is a service voltage.
   if (/@/.test(raw) || LONG_DIGIT_RUN.test(raw)) return true;
   if (redactSecretValues(raw, secrets) !== raw) return true;

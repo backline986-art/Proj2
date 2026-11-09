@@ -3181,6 +3181,59 @@ const VERSIONED_MIGRATIONS: VersionedMigration[] = [
   },
   {
     version: 65,
+    name: "filing_email",
+    up: (db) => {
+      // THE EMAIL FILING CHANNEL (#667). filing_email_json: a PERSON's record that this authority
+      // takes applications by email at an address — { address, sourceUrl, quote, verifiedBy,
+      // verifiedAt } (backend/src/filingEmail.ts). Its own column, so a lookup's write (which
+      // replaces payload_json) never touches it (rule 3). Never written by a lookup or a model.
+      // filing_email_sends: one row per run that composed a filing email (draft, sending, sent,
+      // failed). The audit copy is the template body and the attachment NAMES — never a file's
+      // contents, a path, or a secret. run_id UNIQUE: one send per run, and the send path refuses a
+      // track that has any sending/sent/failed row (a retry never re-sends).
+      addColumnIfMissing(db, "utility_filing_lookups", "filing_email_json", "TEXT NOT NULL DEFAULT ''");
+      addColumnIfMissing(db, "permit_process_lookups", "filing_email_json", "TEXT NOT NULL DEFAULT ''");
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS filing_email_sends (
+          id TEXT PRIMARY KEY,
+          project_id TEXT NOT NULL,
+          track TEXT NOT NULL,
+          run_id TEXT NOT NULL UNIQUE,
+          status TEXT NOT NULL,
+          authority_kind TEXT NOT NULL DEFAULT '',
+          authority_name TEXT NOT NULL DEFAULT '',
+          recipient TEXT NOT NULL DEFAULT '',
+          subject TEXT NOT NULL DEFAULT '',
+          body TEXT NOT NULL DEFAULT '',
+          ref_tag TEXT NOT NULL DEFAULT '',
+          message_id TEXT NOT NULL DEFAULT '',
+          attachments_json TEXT NOT NULL DEFAULT '[]',
+          approved_by TEXT NOT NULL DEFAULT '',
+          refusals_json TEXT NOT NULL DEFAULT '[]',
+          detail TEXT NOT NULL DEFAULT '',
+          created_at TEXT NOT NULL,
+          sent_at TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_filing_email_sends_project ON filing_email_sends(project_id, track, status);
+        CREATE INDEX IF NOT EXISTS idx_filing_email_sends_message ON filing_email_sends(message_id);
+        CREATE INDEX IF NOT EXISTS idx_filing_email_sends_ref ON filing_email_sends(ref_tag);
+      `);
+    },
+  },
+  {
+    version: 66,
+    name: "state_permit_rules_fetched_at",
+    up: (db) => {
+      // WHEN A STATE RULE'S WORDS WERE READ (#663; the provenance every cited row carries, owner rule
+      // 2026-11-09 / #683). The reference seed stamps the date its citation was checked against the
+      // source; state fee research stamps the time it fetched the page the quote was found on.
+      // '' = not recorded (rows written before this column). `confidence` is free text on purpose:
+      // #683 adds an 'official' tier beside 'seeded' / 'verified' without a schema change.
+      addColumnIfMissing(db, "state_permit_rules", "fetched_at", "TEXT NOT NULL DEFAULT ''");
+    },
+  },
+  {
+    version: 67,
     name: "reviewer_blocker_overrides",
     up: (db) => {
       // A NAMED PERSON PUSHES PAST ONE REVIEWER BLOCKER ON ONE PROJECT, WITH A REASON (#640; owner

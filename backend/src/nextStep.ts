@@ -66,6 +66,7 @@ import type {
 } from "../../shared/src/types";
 import { stageForStatus } from "./projectStage";
 import { isTrackDone, requiredTracks, trackPermitTypes } from "./submittalTracks";
+import { utilityFilingKey, verifiedWithPermitKeys } from "./utilityFilingLookup";
 import { trackKind } from "./permitMonitor";
 import { parseJson } from "./json";
 import { billingTrack } from "./submissionFees";
@@ -255,6 +256,10 @@ export interface TrackFacts {
    *  electrical permit is named as the county's. Optional: absent, the answer falls back to the
    *  AHJ / utility on the facts record (agencyOf). */
   agency?: string;
+  /** #664, NEM only: a person verified that the utility takes its application INSIDE the AHJ permit
+   *  application (utilityFilingLookup.nemFiledWithPermit) and the track has no evidence of its own —
+   *  it is filed when the permit tracks are, and it is never "to stage". */
+  followsPermit?: boolean;
   /** UNSURE RECORD NUMBERS read after a person's submit in this track's left-open window (#400,
    *  portal_runs.submit_capture_candidates of the staged run) — offered for one-click
    *  confirmation, never treated as a filing. Absent when there are none. */
@@ -432,6 +437,9 @@ export function loadNextStepFacts(db: AppDb, projects: ProjectRecord[]): Map<str
   const feeReadings = feeDueReadings(db, ids);
   const feePaid = feePaidMarks(db, ids);
 
+  // #664: the utilities a person verified as filing inside the permit application — one query.
+  const withPermitKeys = verifiedWithPermitKeys(db);
+
   const stagedRunIds: string[] = [];
   for (const project of projects) {
     const pid = project.id;
@@ -473,6 +481,16 @@ export function loadNextStepFacts(db: AppDb, projects: ProjectRecord[]): Map<str
         agency: track === "nem" ? s(project.utility).trim() : issuingAuthorityForTrack(project, track),
       };
     });
+    // #664: the NEM track of a with-permit utility follows the permit tracks while it has no
+    // evidence of its own (no run, no filing, no finished target).
+    const nemFacts = tracks.find((t) => t.track === "nem");
+    if (nemFacts && !nemFacts.filed && !nemFacts.done && !nemFacts.latestRun
+      && withPermitKeys.has(utilityFilingKey(s(project.state), s(project.utility)))) {
+      const permits = tracks.filter((t) => t.track !== "nem");
+      nemFacts.followsPermit = true;
+      nemFacts.filed = permits.length > 0 && permits.every((t) => t.filed);
+      nemFacts.filedAt = nemFacts.filed ? permits.map((t) => t.filedAt ?? "").filter(Boolean).sort()[0] ?? null : null;
+    }
     const pending = (pendingReview.get(pid) ?? []).map((r) => ({ status: "pending", fieldName: s(r.field_name), issueType: s(r.issue_type) }));
     const status = project.status;
     let operatorHold: NextStepFacts["operatorHold"] = null;
@@ -662,7 +680,9 @@ function correctionWhy(c: CorrectionRecord): NextStepWhy {
 export function decideNextStep(facts: NextStepFacts): NextStep {
   const stageIndex = stageForStatus(facts.status).index;
   const gateChecked = Boolean(facts.gate);
-  const unfinished = facts.tracks.filter((t) => !t.filed && !t.done);
+  // A track that rides in the permit application (#664) is unfinished only THROUGH the permit: it is
+  // never staged, held or failed on its own.
+  const unfinished = facts.tracks.filter((t) => !t.filed && !t.done && !t.followsPermit);
   // THE THREE FLAGS THE CLIENT USED TO RE-DERIVE FROM `key` — each computed here, once, from the
   // facts (allFiled, hasStagedDraft) or from where the rule table actually stopped
   // (gateCanOverrule), so a reordered rule cannot leave a client-side key list behind.
@@ -971,6 +991,14 @@ export function decideNextStep(facts: NextStepFacts): NextStep {
       notDone.map((t) => why(`${TRACK_NAME[t.track]}: waiting on ${agencyOf(facts, t)}`, "permitTargets")), null);
   }
 
+  // 17a. #664: every permit is approved and the one track left rides in it — the net metering is
+  //      approved pending the meter set, which is a person's call to the utility, never automation's.
+  if (notDone.length && notDone.every((t) => t.followsPermit) && facts.tracks.some((t) => t.track !== "nem")) {
+    const who = facts.utility || "the utility";
+    return make("waiting_on_agency", "me", "today",
+      `The permit is approved, so ${who}'s net metering (filed with it) is approved pending the meter set — call ${who} to set the meter after the inspection, then record the approval on the utility track.`,
+      [why(`${who} takes its interconnection application inside the AHJ permit application (verified by a person); the meter set is a person's call.`, "permitTargets")], null);
+  }
   // 17. Filed; the agency has the ball.
   if (notDone.length) {
     const permitWaiting = notDone.some((t) => t.track !== "nem");

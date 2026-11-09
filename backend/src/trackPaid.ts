@@ -22,6 +22,7 @@ import { randomUUID } from "node:crypto";
 import { AWAITING_PAYMENT, usd } from "./feePause";
 import { billingTrack, recordActualPermitFee } from "./submissionFees";
 import { markTrackSubmitted, requiredTracks, trackFeeDue, trackPermitTypes } from "./submittalTracks";
+import { paidConfirmationUrl, trackConfirmationView } from "./submissionConfirmation";
 
 type Row = Record<string, unknown>;
 const s = (v: unknown): string => (v == null ? "" : String(v));
@@ -37,6 +38,9 @@ export interface TrackPaidRecord {
   recordNumber: string;
   paidBy: string;
   paidAt: string;
+  /** #665: the project-scoped route of the filing's masked confirmation screenshot (#569), when the
+   *  track's newest submission kept one at the time of the Paid; '' otherwise. Never a file path. */
+  confirmationUrl: string;
 }
 
 export interface TrackPaidResult {
@@ -71,7 +75,20 @@ export function listTrackPaid(db: AppDb, projectId: string): TrackPaidRecord[] {
     recordNumber: s(r.record_number),
     paidBy: s(r.paid_by),
     paidAt: s(r.paid_at),
+    confirmationUrl: paidConfirmationUrl(projectId, r.confirmation_shot_path),
   }));
+}
+
+/** The confirmation the Paid points at: the track's NEWEST submission, when it links a masked
+ *  confirmation screenshot (#569 / #645). Links what is already saved; captures nothing. */
+function newestSubmissionConfirmationUrl(db: AppDb, projectId: string, family: string[]): string {
+  const newest = db.get<Row>(
+    `SELECT id FROM submissions WHERE project_id = ? AND permit_type IN (${family.map(() => "?").join(",")})
+      ORDER BY created_at DESC, rowid DESC LIMIT 1`,
+    [projectId, ...family],
+  );
+  const conf = trackConfirmationView(db, projectId, family);
+  return newest && conf && conf.submissionId === s(newest.id) ? paidConfirmationUrl(projectId, conf.url) : "";
 }
 
 /**
@@ -114,15 +131,16 @@ export function markTrackPaid(
 
   // The Paid row and the actual fee land together.
   const paidAt = nowIso();
-  const paid: TrackPaidRecord = { id: randomUUID(), track: type, kind, amountUsd, recordNumber, paidBy, paidAt };
+  const confirmationUrl = newestSubmissionConfirmationUrl(db, project.id, family);
+  const paid: TrackPaidRecord = { id: randomUUID(), track: type, kind, amountUsd, recordNumber, paidBy, paidAt, confirmationUrl };
   const bill = billingTrack(type);
   const tracksOfBill = required.filter((t) => billingTrack(t) === bill);
   let sum = 0;
   db.transaction(() => {
     db.run(
       `INSERT INTO track_fee_payments (id, project_id, track, kind, amount_usd, record_number, run_id, confirmation_shot_path, paid_by, paid_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, '', ?, ?)`,
-      [paid.id, project.id, type, kind, amountUsd, recordNumber, run ? s(run.id) : "", paidBy, paidAt],
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [paid.id, project.id, type, kind, amountUsd, recordNumber, run ? s(run.id) : "", confirmationUrl, paidBy, paidAt],
     );
 
     // THE ACTUAL FEE: every Paid on the billing track (a filing fee then an issuance fee, or two

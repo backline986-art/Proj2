@@ -62,6 +62,7 @@ import { FIRE_PATHWAY_PATTERNS } from "./projectEvidence";
 import { groundMountFromField } from "./mountKind";
 import { adoptedNecEdition } from "./necEditions";
 import { essDocumentRows, projectHasBattery } from "./essRequirements";
+import { nemFiledWithPermit, type NemFiledWithPermit } from "./utilityFilingLookup";
 
 export interface RequiredDocItem {
   /** project_documents.doc_type this maps to (or a synthetic key for path docs). */
@@ -535,6 +536,33 @@ export function requiredDocuments(
   // one of the two never acquired, never filled and never attached.
   items.push(...requiredApplicationDocs(project, opts.application ?? {}));
   return items;
+}
+
+/** The utility-lane docType the with-permit application files under (docDiscipline: lane "nem"; a
+ *  permit track carries it only when the utility files with the permit — submissionDocuments). */
+export const WITH_PERMIT_DOC_TYPE = "utility_application";
+
+/**
+ * THE NEM APPLICATION THAT RIDES IN THE PERMIT APPLICATION (#664), as a PERMIT-lane row: every permit
+ * track's packet owes it (discipline "" — the utility names no trade). It BLOCKS only when the verified
+ * record lists the utility's documents (cited, verified — Helm's bar); a record that lists none leaves
+ * an advisory row that says to check the utility's page, never a guess and never silence. The owner's
+ * signature on the utility's agreement is a person's to obtain; nothing here signs it.
+ */
+export function withPermitDocItem(project: Pick<ProjectRecord, "utility">, w: NemFiledWithPermit): RequiredDocItem {
+  const who = (project.utility || "").trim() || w.utility || "The utility";
+  const basis = `${who} takes its interconnection / net-metering application inside the AHJ permit application (verified by ${w.verifiedBy || "a person"}: ${w.sourceUrl}).`;
+  const human = "The property owner signs the utility's agreement and a person attaches it — nothing here signs for the owner.";
+  return {
+    docType: WITH_PERMIT_DOC_TYPE,
+    label: `${who}'s net-metering / interconnection application (filed with the permit)`,
+    why: w.documents.length
+      ? `${basis} Its page lists: ${w.documents.join("; ")}. Attach them under this row. ${human}`
+      : `${basis} The verified record lists none of its documents — check ${who}'s page for its agreement, one-line form or questionnaire and attach what it asks for. ${human}`,
+    lane: "permit",
+    discipline: "",
+    blocking: w.documents.length > 0,
+  };
 }
 
 /**
@@ -1057,6 +1085,12 @@ export function documentInventory(db: AppDb, project: ProjectRecord): DocumentIn
     }
   } catch { /* KB optional */ }
   const required = [...baselineItems, ...kbItems];
+  // THE UTILITY'S APPLICATION RIDES IN THE PERMIT PACKET (#664) — only when a person VERIFIED that this
+  // utility files inside the AHJ permit application (nemFiledWithPermit; a seeded row adds nothing).
+  try {
+    const withPermit = nemFiledWithPermit(db, project);
+    if (withPermit && !required.some((r) => r.docType === WITH_PERMIT_DOC_TYPE)) required.push(withPermitDocItem(project, withPermit));
+  } catch { /* the lookup is optional — the rows stay as they were */ }
   // A PERSON-VERIFIED REQUIRED LIST BLOCKS; A SEEDED ONE ADVISES (hard rule 3's shape). Each line of
   // the verified lookup's cited list that maps to a slot becomes a blocking row — an existing row for
   // that slot is made blocking and cites the list; a slot nothing here tracks gets its own row. A

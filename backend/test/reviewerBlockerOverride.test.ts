@@ -411,6 +411,24 @@ await check("(c) MUST-EXCLUDE an edit that changes the finding's content voids i
   assert.notEqual(ov.findingFingerprint(after), ov.findingFingerprint(before));
 });
 
+await check("(c) MUST-PASS a provenance-only change keeps the override: re-verifying the code profile (seeded -> human-verified, or a new verifier/date) does not void it; a plan-content change does", () => {
+  // The live case behind #596: approving the Oregon profile's edition proposal rewrites only the
+  // provenance a code-basis message carries. A person's override of that blocker must survive it.
+  const basis = (provenance: string, plan = "OESC 2026") => ({
+    id: "city.code.basis-mismatch", category: "plan_set", severity: "blocker" as const,
+    title: "Plan's code basis differs from the jurisdiction's adopted codes",
+    message: `plan states ${plan} (Plan set) — profile records OESC 2023. Profile: OR state-level code profile (${provenance}; source https://example.gov/codes) for OESC 2023, inherited by Testington County.`,
+    evidenceNeeded: ["Governing-codes block on the cover sheet"],
+    evidenceFound: [{ kind: "source_excerpt" as const, label: plan, source: "Plan set", excerpt: `GOVERNING CODES: ${plan}`, confidence: "high" as const, pageHint: "", screenshotPath: "", verifier: "rule_engine" as const, note: "" }],
+  }) as unknown as Parameters<typeof ov.findingFingerprint>[0];
+  const seeded = ov.findingFingerprint(basis("seeded from research 2026-09-24"));
+  const verifiedA = ov.findingFingerprint(basis("human-verified by Operator A on 2026-10-06"));
+  const verifiedB = ov.findingFingerprint(basis("human-verified by Operator B on 2026-11-09"));
+  assert.equal(verifiedA, seeded, "seeded -> human-verified voided the override");
+  assert.equal(verifiedB, verifiedA, "a new verifier/date voided the override");
+  assert.notEqual(ov.findingFingerprint(basis("human-verified by Operator A on 2026-10-06", "OESC 2029")), verifiedA, "a different plan edition must void it");
+});
+
 // (d) ---------------------------------------------------------------------------------------------
 await check("(d) MUST-EXCLUDE overriding X (RSD) never releases Y (DC, or any other blocker); the NEM filing's holds are untouched", async () => {
   const projectId = await projectWith({ ...RSD_BLOCKER, dcKw: "10.0" });

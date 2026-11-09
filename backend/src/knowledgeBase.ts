@@ -36,6 +36,7 @@ import { inferPlatform, isRecognizedPlatform, looksLikeBareUrl } from "./portalP
 import { isInformationalPageUrl, isUtilityPlatformUrl, portalHostOf } from "./portalChannel";
 import { HttpError } from "./httpError";
 import { foreignKnownTenant, knownPowerClerkPortalFor, knownPowerClerkUtility, knownTenantOwner, pacifiCorpBrand, provablyDifferentUtility, sameUtilityEntity, utilityIdentityOf, type UtilityIdentity } from "./utilityIdentity";
+import { SECRET_DIGIT_CLASS, SECRET_SEPARATOR_DASHES, SECRET_SEPARATOR_INVISIBLE } from "../../shared/src/portalSafety";
 
 type Row = Record<string, unknown>;
 
@@ -436,14 +437,20 @@ function correctionSignature(correction: KnowledgeFacts["correction"]): string {
   return normalize(`${correction.bucket} ${correction.rootCause} ${correction.requiredAction}`);
 }
 
-// A digit run grouped by spaces/tabs, a dash (ASCII, U+2010-2015 or minus), "#", a dot with a
-// digit straight after it, or a single line break — the separators wordingNamesProject ignores
-// ("/" aside: "120/240 V" is a service voltage). Identifier-shaped once it holds 5+ digits:
+// A digit run grouped by spaces/tabs, any dash (\p{Dash}: ASCII, U+2010-2015, minus, the small and
+// fullwidth hyphen-minus...), any invisible format character (\p{Cf}: a soft hyphen, a zero-width
+// space), "#", a dot with a digit straight after it, or a single line break — the dash and format
+// sets are the shared ones redactSecretValues and wordingNamesProject read (portalSafety, #292),
+// never a hand copy; "/" stays out ("120/240 V" is a service voltage). Fullwidth digits and
+// "＃"/"．" count as their ASCII forms. Identifier-shaped once it holds 5+ digits:
 // "80 000 1234", "1234-5678-90", "SA# 1234 5678", a bare "8000012345", or a number a line wrap
 // split ("1234\n5678": clean() rejoins it afterwards). NOT a separator: a sentence-ending ". ",
 // or a line break into a list item (a numbered letter's "2." must not join the line above it).
 // Applied after the phone rule so a phone keeps its own tag.
-const GROUPED_DIGITS = /(?<!\d)\d+(?:(?:[ \t\-‐-―−#]|\.(?=\d)|\n(?!\d{1,3}[.)](?:\s|$)))+\d+)*(?!\d)/g;
+const GROUPED_DIGITS = new RegExp(
+  `(?<!${SECRET_DIGIT_CLASS})${SECRET_DIGIT_CLASS}+(?:(?:[ \\t${SECRET_SEPARATOR_DASHES}${SECRET_SEPARATOR_INVISIBLE}#\\uFF03]|[.\\uFF0E](?=${SECRET_DIGIT_CLASS})|\\n(?!\\d{1,3}[.)](?:\\s|$)))+${SECRET_DIGIT_CLASS}+)*(?!${SECRET_DIGIT_CLASS})`,
+  "gu",
+);
 // ...unless EVERY whitespace-separated chunk of the run is a shape a reviewer must still read: a
 // plausible date ("2026-10-08", "10.08.2026" — a 19xx/20xx year, month 1-12, day 1-31, one
 // separator), a code section ("690.12", "R324.6.1" — its letter is outside the run; no leading
@@ -472,7 +479,7 @@ const RATING_WORD_BEFORE = /\b(?:voltage|current|amperage|rating)\s+$/i;
 const STANDARD_NUMBER = /^[1-9]\d{2,4}(?:-(?:19|20)\d{2})?$/;
 const RATING_NUMBER = /^[1-9]\d{2,3}$/;
 const scrubDigitRun = (run: string, offset = 0, whole = ""): string => {
-  if (run.replace(/\D/g, "").length < 5) return run;
+  if (run.replace(/[^0-9\uFF10-\uFF19]/g, "").length < 5) return run;
   const chunks = run.split(/\s+/);
   const before = whole.slice(Math.max(0, offset - 40), offset);
   const citedHead = (STANDARDS_BODY_BEFORE.test(before) && STANDARD_NUMBER.test(chunks[0])) ||
@@ -527,6 +534,9 @@ export interface ClassifiedMboxMessage {
   record: MboxExtractedLearningRecord;
   state: string;
   portalName: string;
+  /** The In-Reply-To and References headers, raw: a reply to one of our filing emails (#667) is
+   *  placed by the Message-ID they carry (filingEmail.filingEmailReplyProject). */
+  threadRefs?: string;
 }
 
 function signatureFor(value: string): string {
@@ -1909,6 +1919,7 @@ export async function classifyMboxMessages(input: {
       record,
       state: built.state,
       portalName: built.portalName,
+      threadRefs: `${parsed.headers["in-reply-to"] || ""} ${parsed.headers.references || ""}`.trim(),
     });
   }
 

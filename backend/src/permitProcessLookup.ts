@@ -39,6 +39,7 @@ import { CONNECTOR_WORDS, DEPARTMENT_WORDS, GENERIC_ORG_WORDS, agencyNameKey, sa
 export { agencyNameKey, sameAgencyName };
 import { logger } from "./logger";
 import { feeScheduleProfileKey, saveFeeSchedule } from "./feeSchedules";
+import { stateSurchargeRuleFor } from "./stateFeeRules";
 import { parseBracketRow } from "./pdfTables";
 import { candidateNamedBy, chooseRecordType, classifyDocument, DOCUMENT_URL, staleOrOtherFeeSource, detectPlatform, documentLinks, excerptFor, extractCodeEditions, extractPrerequisites, isAgencyOwnUrl, isOfficialAgencyHost, linksAnotherModule, platformOfUrl, readPortalCatalog, registrableDomain, resolvePortalFromPages, solarRecordTypeCandidates, tenantContradictsAgency, wordsNameAnotherJurisdiction, type PortalCatalog, type PortalResolution, type RecordTypeCandidate } from "./permitPlatformCatalog";
 import { createPageReader, feeLinePrintedTogether, quoteOnPage, type PageReader, type ReadPage } from "./agencyPageReader";
@@ -1619,16 +1620,17 @@ const SURCHARGE_WORDS = /\bsurcharge/i;
 /**
  * A STATE SURCHARGE THE AGENCY'S OWN SOURCE STATES (close M3: Marion County's E-01 prints "State
  * surcharge (12% of permit fee)"; the answer held $94 + $11.28, the schedule dropped it, and the
- * cited STATE_PERMIT_RULES surcharge was read nowhere). Applied only when ALL hold:
- *   - the state has a cited surcharge rule, and the percentage is within its maximum;
+ * cited state surcharge was read nowhere). Applied only when ALL hold:
+ *   - the state has a cited surcharge rule (state_permit_rules "fee" family, stateFeeRules — #663),
+ *     and the percentage is within its maximum;
  *   - the fee's QUOTE (the words that passed acceptCited) itself prints a state surcharge AND its
  *     percentage — the basis prose and the line labels alone never apply one;
  *   - a surcharge line the answer itemised, if any, is that percentage of the base (±$0.02).
  * Anything short of that is left to the quote's "state surcharge not included" note.
  */
-export function citedStateSurcharge(state: string, fee: CitedFact<PermitFeeAnswer>): { percent: number; quote: string; sourceUrl: string } | null {
-  const rule = stateRulesFor(state).surcharge;
-  const max = typeof rule?.value === "number" ? rule.value * 100 : null;
+export function citedStateSurcharge(db: AppDb, state: string, fee: CitedFact<PermitFeeAnswer>): { percent: number; quote: string; sourceUrl: string } | null {
+  const rule = stateSurchargeRuleFor(db, state);
+  const max = rule.status === "rule" ? rule.percent : null;
   if (max == null || !fee.value) return null;
   const quote = str(fee.quote);
   const m = /state\s+surcharge[^.;$]{0,40}?(\d+(?:\.\d+)?)\s*%|(\d+(?:\.\d+)?)\s*%[^.;$]{0,20}?state\s+surcharge/i.exec(quote);
@@ -1689,7 +1691,7 @@ export function applyLookupFees(db: AppDb, lookup: PermitProcessLookup): Array<{
     // as 5 made this project's bracket keys (feeBracketQuantity:5-15) differ from the SAME row as a
     // recorded recipe names it (5.01-15), so a borrowed recipe's recorded quantity replayed
     // unbound. The previous row's upper bound is only the fallback for a label that prints none.
-    const surcharge = citedStateSurcharge(lookup.state, fee);
+    const surcharge = citedStateSurcharge(db, lookup.state, fee);
     // With a surcharge applied by the evaluator, a flat fee's bracket is the BASE line (the
     // surcharge's own line and a total that already includes it would count it twice).
     const baseLines = fee.value.lines.filter((l) => !SURCHARGE_WORDS.test(l.label ?? "") && typeof l.amountUsd === "number");

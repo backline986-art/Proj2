@@ -98,14 +98,14 @@ const line = (out: string, name: string): string => out.split(/\r?\n/).find((l) 
 
 console.log("preflight: today's production shape");
 const today = preflight({
-  AUTOPILOT_DB_PATH: noPw, SESSION_ENCRYPTION_KEY: SECRETS.session, AUTH_ENABLED: "false", PORTAL_ALLOW_FINAL_SUBMIT: "1",
+  AUTOPILOT_DB_PATH: noPw, SESSION_ENCRYPTION_KEY: SECRETS.session, AUTH_ENABLED: "false", PORTAL_ALLOW_FINAL_SUBMIT: "1", FILING_EMAIL_ALLOW_SEND: "1",
   PUBLIC_BASE_URL: "http://localhost:4173", BACKUP_DIR: backupDir, BACKUP_INTERVAL_HOURS: "24", BACKUP_KEEP: "14",
   SMTP_HOST: "smtp.invalid", SMTP_FROM: "x@ops.invalid", SMTP_PASS: SECRETS.smtpPw,
   WATCHDOG_STATE_FILE: path.join(ISOLATED_CWD, "never-ran.json"),
 });
 check("exits 1", () => assert.equal(today.code, 1, today.out));
 for (const [name, re] of [
-  ["AUTH_ENABLED", /FAIL/], ["admin login", /FAIL/], ["PORTAL_ALLOW_FINAL_SUBMIT", /FAIL .*with no login/],
+  ["AUTH_ENABLED", /FAIL/], ["admin login", /FAIL/], ["PORTAL_ALLOW_FINAL_SUBMIT", /FAIL .*with no login/], ["FILING_EMAIL_ALLOW_SEND", /FAIL .*with no login/],
   ["PUBLIC_BASE_URL", /FAIL/], ["BACKUP_SECOND_DIR", /FAIL/], ["watchdog channel", /FAIL .*SMTP set but WATCHDOG_ALERT_TO is empty/],
   ["watchdog running", /FAIL/], ["BACKUP_INTERVAL_HOURS", /WARN .*1-4 h recommended/], ["BACKUP_KEEP", /PASS .*14\.0 days/], ["WATCHDOG_HEARTBEAT_URL", /WARN/],
 ] as [string, RegExp][]) {
@@ -132,6 +132,7 @@ check("no FAIL, exit 0", () => {
 });
 check("the seeded admin is seen (by email, never by password)", () => assert.match(line(good.out, "admin login"), /PASS .*owner@ops\.invalid/));
 check("final submit unset reads PASS", () => assert.match(line(good.out, "PORTAL_ALLOW_FINAL_SUBMIT"), /PASS/));
+check("filing email unset reads PASS (#667)", () => assert.match(line(good.out, "FILING_EMAIL_ALLOW_SEND"), /PASS .*staged as a draft/));
 check("NOTIFICATIONS all PASS on the configured shape (#493)", () => {
   assert.match(line(good.out, "client email (SMTP)"), /PASS .*test-email\.ts --to/);
   assert.match(line(good.out, "tracking inbox"), /PASS .*IMAP inbox \(EMAIL_IMAP_\*\)/);
@@ -141,11 +142,12 @@ check("NOTIFICATIONS all PASS on the configured shape (#493)", () => {
 });
 const armed = preflight({
   AUTOPILOT_DB_PATH: withAdmin, SESSION_ENCRYPTION_KEY: SECRETS.session, AUTH_ENABLED: "true", AUTH_SECRET: SECRETS.session,
-  PORTAL_ALLOW_FINAL_SUBMIT: "1", BACKUP_DIR: backupDir,
+  PORTAL_ALLOW_FINAL_SUBMIT: "1", FILING_EMAIL_ALLOW_SEND: "1", BACKUP_DIR: backupDir,
 });
 check("MUST-EXCLUDE: AUTH_SECRET equal to the session key is a FAIL, not a PASS", () => assert.match(line(armed.out, "AUTH_SECRET"), /FAIL .*identical/));
 check("final submit armed WITH a login is a WARN naming the per-run approval (the operator's ruling), not a FAIL", () => {
   assert.match(line(armed.out, "PORTAL_ALLOW_FINAL_SUBMIT"), /WARN .*per-run approval/);
+  assert.match(line(armed.out, "FILING_EMAIL_ALLOW_SEND"), /WARN .*per-run approval/);
 });
 console.log("preflight: SERVER_HOST reports the server's own bind decision (listenHost.ts)");
 const hostCase = (extra: Record<string, string>): string =>

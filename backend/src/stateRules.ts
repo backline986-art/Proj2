@@ -40,13 +40,40 @@ function referencePath(): string {
   return path.resolve(moduleDir, "..", "data", "reference-state-permit-rules.json");
 }
 
-interface ReferenceRule {
+export interface ReferenceRule {
   state: string;
   family: StatePermitRule["family"];
   key: string;
   value: unknown;
   citation: string;
   sourceUrl?: string;
+  /** When the citation's words were read from `sourceUrl` (ISO date or time); '' = not recorded. */
+  fetchedAt?: string;
+}
+
+/** THE ONE WRITE PATH into state_permit_rules, for the shipped reference and for research
+ *  (stateFeeResearch.ts) alike. Rows always land SEEDED; a seeded row is refreshed (a corrected
+ *  citation lands), a row a person verified is never touched (rule 3: the WHERE is in the statement,
+ *  so no caller can skip it). A rule with no citation is refused, and a FEE rule — it changes an
+ *  amount the quote charges — also needs the URL its words were read from (Helm's #637 bar).
+ *  Returns 1 when a row was written, else 0. */
+export function writeSeededStatePermitRule(db: AppDb, r: ReferenceRule, now = new Date().toISOString()): number {
+  const state = usStateCode(r.state);
+  if (!state || !r.key || !String(r.citation ?? "").trim() || (r.family !== "structural" && r.family !== "fee")) return 0;
+  if (r.family === "fee" && !/^https?:\/\//i.test(String(r.sourceUrl ?? "").trim())) return 0;
+  db.run(
+    `INSERT INTO state_permit_rules (state, family, rule_key, value_json, citation, source_url, confidence, fetched_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, 'seeded', ?, ?)
+     ON CONFLICT(state, family, rule_key) DO UPDATE SET
+       value_json = excluded.value_json, citation = excluded.citation, source_url = excluded.source_url,
+       confidence = 'seeded', fetched_at = excluded.fetched_at, updated_at = excluded.updated_at
+     WHERE state_permit_rules.verified_at = ''
+       AND (state_permit_rules.value_json != excluded.value_json OR state_permit_rules.citation != excluded.citation
+            OR state_permit_rules.source_url != excluded.source_url OR state_permit_rules.confidence != 'seeded'
+            OR state_permit_rules.fetched_at != excluded.fetched_at)`,
+    [state, r.family, r.key, JSON.stringify(r.value ?? null), r.citation, r.sourceUrl ?? "", String(r.fetchedAt ?? "").trim().slice(0, 40), now],
+  );
+  return Number(db.get<{ n: number }>("SELECT changes() AS n")?.n ?? 0);
 }
 
 /** Seed the shipped rules. Idempotent: a seeded row is refreshed from the reference (a corrected
@@ -56,22 +83,7 @@ export function seedStatePermitRules(db: AppDb, filePath = referencePath()): num
   const data = JSON.parse(fs.readFileSync(filePath, "utf8")) as { rules?: ReferenceRule[] };
   const now = new Date().toISOString();
   let written = 0;
-  for (const r of data.rules ?? []) {
-    const state = usStateCode(r.state);
-    if (!state || !r.key || !r.citation || (r.family !== "structural" && r.family !== "fee")) continue;
-    db.run(
-      `INSERT INTO state_permit_rules (state, family, rule_key, value_json, citation, source_url, confidence, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, 'seeded', ?)
-       ON CONFLICT(state, family, rule_key) DO UPDATE SET
-         value_json = excluded.value_json, citation = excluded.citation, source_url = excluded.source_url,
-         confidence = 'seeded', updated_at = excluded.updated_at
-       WHERE state_permit_rules.verified_at = ''
-         AND (state_permit_rules.value_json != excluded.value_json OR state_permit_rules.citation != excluded.citation
-              OR state_permit_rules.source_url != excluded.source_url OR state_permit_rules.confidence != 'seeded')`,
-      [state, r.family, r.key, JSON.stringify(r.value ?? null), r.citation, r.sourceUrl ?? "", now],
-    );
-    written += Number(db.get<{ n: number }>("SELECT changes() AS n")?.n ?? 0);
-  }
+  for (const r of data.rules ?? []) written += writeSeededStatePermitRule(db, r, now);
   if (written) logger.info("state-rules", `seeded ${written} state permit rule(s) from reference data`);
   return written;
 }

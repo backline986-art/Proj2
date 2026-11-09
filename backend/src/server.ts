@@ -1,5 +1,5 @@
 import "dotenv/config";
-import { validate, portalCredentialCreateSchema, portalCredentialUpdateSchema, autoLearnSchema, codeProfileResearchSchema, codeProfileVerifySchema, permitProcessVerifySchema, reviewSubjectSchema } from "./validation";
+import { validate, portalCredentialCreateSchema, portalCredentialUpdateSchema, autoLearnSchema, codeProfileResearchSchema, codeProfileVerifySchema, permitProcessVerifySchema, reviewSubjectSchema, utilityFilingVerifySchema } from "./validation";
 import crypto from "node:crypto";
 import { spawn } from "node:child_process";
 import express, { type NextFunction, type Request, type Response } from "express";
@@ -170,9 +170,11 @@ import {
 } from "./repository";
 import { createSignatureRequestApproval } from "./signatureRequestApproval";
 import { confirmSignatureRequestSent } from "./signatureTrack";
-import { getSubmittalTracks, markTrackSubmitted, requiredTracks, trackSubmittedAndTracked, trackSubmittedSentence } from "./submittalTracks";
+import { getSubmittalTracks, markTrackSubmitted, requiredTracks, trackSubmittedAndTracked, trackSubmittedSentence, withPermitStageSentence } from "./submittalTracks";
+import { getUtilityFilingLookup, nemFiledWithPermit, verifyUtilityFilingLookup } from "./utilityFilingLookup";
 import { stagedReviewScreenshotFile } from "./stagedReviews";
 import { submissionConfirmationFile } from "./submissionConfirmation";
+import { reviewScreenshotFile } from "./reviewScreenshot";
 import { buildApprovalSheet } from "./approvalSheet";
 import { getPermitProcessLookup, projectForTrack, verifyPermitProcessLookup } from "./permitProcess";
 import { ahjProcessKnowledgeStatus, AHJ_PROCESS_REFERENCE_ENV } from "./processProfiles";
@@ -2425,6 +2427,100 @@ app.post("/api/projects/:id/permit-process/refresh", asyncHandler(async (req, re
   res.status(202).json({ queued: true, jobId: r.jobId, reason: r.reason, lookupKey: r.lookupKey });
 }));
 
+// THIS PROJECT'S UTILITY FILING ROW: READ AND VERIFY (#664). Nothing could verify a utility filing
+// lookup, so the one fact that switches a NEM track to "filed inside the permit application" had no
+// door a person could use. Under /api/projects/:id, so each inherits the tenancy guard (rule 6) and
+// getProjectDetail 404s an unknown or out-of-scope project first; the row itself is SHARED knowledge
+// on purpose (one utility's filing location serves every tenant), keyed by the project's own state +
+// utility — a body never names another utility.
+//   GET  the row on file (null when none).
+//   PUT  .../verify — a NAMED PERSON (namedPersonDecider) verifies the row as it stands, or states the
+//        with-permit method with the page and words they read it on. Lands 'verified'; a lookup never
+//        overwrites it (rule 3). No URL can be stated here: nothing new reaches the NEM track (rule 5).
+app.get("/api/projects/:id/utility-filing", (req, res) => {
+  const { project } = getProjectDetail(db, String(req.params.id));
+  res.json({ state: project.state, utility: project.utility, lookup: String(project.utility || "").trim() ? getUtilityFilingLookup(db, project.state, project.utility) : null });
+});
+app.put("/api/projects/:id/utility-filing/verify", (req, res) => {
+  const projectId = String(req.params.id);
+  const { project } = getProjectDetail(db, projectId);
+  const b = validate(utilityFilingVerifySchema, req.body);
+  const verifiedBy = namedPersonDecider(req, "verifiedBy",
+    "Sign in to verify a utility filing location.",
+    "Name the person verifying: a utility filing location is verified by a named person.");
+  const r = verifyUtilityFilingLookup(db, { state: project.state, utility: project.utility }, { verifiedBy, ...(b.filedWithPermit ? { filedWithPermit: b.filedWithPermit } : {}) });
+  if (!r.saved) throw new HttpError(r.lookup ? 409 : 400, r.reason);
+  addAuditLog(db, projectId, "human", verifiedBy, b.filedWithPermit ? "utility_filing.stated_with_permit" : "utility_filing.verified", {
+    utility: project.utility, state: project.state, method: r.lookup?.filing?.value?.method ?? null, sourceUrl: r.lookup?.filing?.sourceUrl ?? "",
+  });
+  res.json({ lookup: r.lookup });
+});
+
+// THE EMAIL FILING CHANNEL (#667; filingEmail.ts). Under /api/projects/:id, so each inherits the
+// tenancy guard (rule 6) and getProjectDetail 404s an unknown or out-of-scope project first. The
+// record itself is SHARED knowledge (one authority's address serves every tenant), keyed by the
+// project's own utility / track issuer — a body never names another authority.
+//   GET     ?track=  the authority, its record, whether it is usable (and why not), the drafts/sends.
+//   PUT     a NAMED PERSON records (verifies) the address, the authority's page and its words. Refused
+//           unless usable (address verbatim in the words; government or the page's own domain).
+//   DELETE  ?track=  a named person withdraws it: the track files on its portal again.
+//   GET     .../drafts/:sendId/eml  the staged draft as an .eml for a person to send (rule 1: the
+//           person sends it; automation sends only through the gate, in the staging run).
+const filingEmailTrack = (raw: unknown): SubmittalTrackType => {
+  const t = String(raw ?? "").trim();
+  if (!SUBMITTAL_TRACK_TYPES.includes(t as SubmittalTrackType)) throw new HttpError(400, "Name the track (nem, building, electrical, combo, permit or mpu).");
+  return t as SubmittalTrackType;
+};
+app.get("/api/projects/:id/filing-email", asyncHandler(async (req, res) => {
+  const fe = await import("./filingEmail");
+  const { project } = getProjectDetail(db, String(req.params.id));
+  const track = filingEmailTrack(req.query.track);
+  const authority = fe.authorityForTrack(project, track);
+  const record = authority ? fe.readFilingEmail(db, authority).record : null;
+  const problems = record ? fe.filingEmailRecordProblems(record) : [];
+  res.json({ track, authority, record, usable: Boolean(record) && problems.length === 0, problems, sends: fe.listFilingEmailSends(db, project.id, track) });
+}));
+app.put("/api/projects/:id/filing-email", asyncHandler(async (req, res) => {
+  const fe = await import("./filingEmail");
+  const { isConfirmingPerson } = await import("./feeConfirm");
+  const projectId = String(req.params.id);
+  const { project } = getProjectDetail(db, projectId);
+  const track = filingEmailTrack(req.body?.track);
+  // Named BEFORE anything is written: no name (auth off) is a 400 that records nothing.
+  const verifiedBy = namedPersonDecider(req, "verifiedBy",
+    "Sign in to verify an authority's filing email.",
+    "Name the person verifying: an authority's filing email is verified by a named person.", isConfirmingPerson);
+  const authority = fe.authorityForTrack(project, track);
+  if (!authority) throw new HttpError(400, track === "nem" ? "The project names no utility." : "The project names no AHJ for this track.");
+  const r = fe.setFilingEmail(db, authority, { address: String(req.body?.address ?? ""), sourceUrl: String(req.body?.sourceUrl ?? ""), quote: String(req.body?.quote ?? "") }, verifiedBy);
+  if (!r.saved) throw new HttpError(r.problems.length ? 400 : 409, r.reason, { problems: r.problems });
+  addAuditLog(db, projectId, "human", verifiedBy, "filing_email.verified", { track, authority: authority.name, kind: authority.kind, address: r.record?.address, sourceUrl: r.record?.sourceUrl });
+  res.json({ track, authority, record: r.record, usable: true, problems: [] });
+}));
+app.delete("/api/projects/:id/filing-email", asyncHandler(async (req, res) => {
+  const fe = await import("./filingEmail");
+  const { isConfirmingPerson } = await import("./feeConfirm");
+  const projectId = String(req.params.id);
+  const { project } = getProjectDetail(db, projectId);
+  const track = filingEmailTrack(req.query.track ?? req.body?.track);
+  const by = namedPersonDecider(req, "verifiedBy",
+    "Sign in to withdraw an authority's filing email.",
+    "Name the person withdrawing an authority's filing email.", isConfirmingPerson);
+  const authority = fe.authorityForTrack(project, track);
+  if (!authority || !fe.clearFilingEmail(db, authority)) throw new HttpError(404, "No filing email is on file for this track's authority.");
+  addAuditLog(db, projectId, "human", by, "filing_email.withdrawn", { track, authority: authority.name, kind: authority.kind });
+  res.json({ track, authority, record: null, usable: false });
+}));
+app.get("/api/projects/:id/filing-email/drafts/:sendId/eml", asyncHandler(async (req, res) => {
+  const fe = await import("./filingEmail");
+  const { project } = getProjectDetail(db, String(req.params.id));
+  const eml = await fe.filingEmailDraftEml(db, project, String(req.params.sendId));
+  addAuditLog(db, project.id, "human", String(currentUser(db, req)?.email || "dashboard"), "filing_email.draft_downloaded", { sendId: String(req.params.sendId) });
+  res.setHeader("Content-Type", "message/rfc822");
+  res.setHeader("Content-Disposition", `attachment; filename="${eml.filename.replace(/[^a-z0-9._-]/gi, "_")}"`);
+  res.send(eml.content);
+}));
+
 // THE MANUAL WRITER. The body is passed through as recordPermitStatusCheck's input, so
 // `targetId`, `source`, `rawStatusText`, `applicationNumber`, `permitNumber` AND `track` are all
 // body fields. `track` carries NO authority: it only words the classification of a reading that
@@ -3622,8 +3718,13 @@ app.post("/api/projects/:id/prepare-submission", (req, res) => {
   // this (PowerClerk numbers a draft), and neither is a staged draft awaiting approval: both run.
   // The trackless legacy stage keeps its own refusals in the job.
   if (track) {
-    const filed = trackSubmittedAndTracked(db, projectId, track, requiredTracks(getProjectDetail(db, projectId).project));
+    const { project } = getProjectDetail(db, projectId);
+    const filed = trackSubmittedAndTracked(db, projectId, track, requiredTracks(project));
     if (filed) throw new HttpError(409, trackSubmittedSentence(filed), { track, submittedAndTracked: filed.via, number: filed.number, tracked: filed.tracked });
+    // #664: a utility a person verified as filing INSIDE the permit application has no NEM filing of
+    // its own to stage — refused here, before an approval is minted (the job asks again).
+    const withPermit = track === "nem" ? nemFiledWithPermit(db, project) : null;
+    if (withPermit) throw new HttpError(409, withPermitStageSentence(withPermit, project.utility), { track, nemFiledWithPermit: true });
   }
   // APPROVE & SUBMIT: A NAMED PERSON APPROVES THIS RUN. The approval row is the only thing that
   // lets the run click the portal's final submit (repository.maySubmitAutomatically also needs
@@ -3915,14 +4016,15 @@ app.get("/api/projects/:id/submissions/:submissionId/confirmation-screenshot", (
 app.get("/api/projects/:id/portal-runs/:runId/review-screenshot", (req, res) => {
   const projectId = String(req.params.id);
   const runId = String(req.params.runId);
-  // Check portal_runs first (for recipe-replay runs that generate portal_run records).
-  const run = db.get<{ screenshots_path: string; project_id: string }>(
-    "SELECT screenshots_path, project_id FROM portal_runs WHERE id = ?",
-    [runId],
-  );
-  if (run && run.project_id === projectId && run.screenshots_path && fs.existsSync(run.screenshots_path)) {
+  // #316 — this project's runs first (reviewScreenshot.ts): the run's picture, its folder's masked
+  // review shot when the row names none, or — for the track card's recipe id — this project's newest
+  // run of that recipe by its masked review shot.
+  const own = reviewScreenshotFile(db, projectId, runId);
+  if (own) {
     res.setHeader("Content-Type", "image/png");
-    res.sendFile(run.screenshots_path);
+    res.setHeader("X-Content-Type-Options", "nosniff");
+    res.setHeader("Cache-Control", "no-store");
+    res.sendFile(own);
     return;
   }
   // Fall back to portal_recipes (auto-learn stores recipe id; screenshot path in notes).
