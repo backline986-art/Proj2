@@ -1,6 +1,7 @@
 import type { AppDb } from "./db";
 import { cecListing, cecTableCount } from "./cecEquipment";
 import { evaluateBaselineRules } from "./baselineRules";
+import { certificationList, eligibilityRecordsForState } from "./eligibilityLimits";
 import { id } from "./ids";
 import { parseJson } from "./json";
 import { fieldAliases, parserField } from "./normalize";
@@ -514,8 +515,8 @@ export function runQcForProject(db: AppDb, projectId: string, options: QcRunOpti
     // utility identity (utilityIdentity) can answer for a project the parser did not fully read.
     const clientId = clean(project.client_id);
     const std = clientId
-      ? db.get<{ standard_disconnect_make?: string | null; standard_disconnect_model?: string | null }>(
-        "SELECT standard_disconnect_make, standard_disconnect_model FROM clients WHERE id = ?", [clientId])
+      ? db.get<{ standard_disconnect_make?: string | null; standard_disconnect_model?: string | null; installer_certifications?: string | null }>(
+        "SELECT standard_disconnect_make, standard_disconnect_model, installer_certifications FROM clients WHERE id = ?", [clientId])
       : undefined;
     // A PLACEHOLDER ON THE CLIENT RECORD IS NAMED HERE, the day the job is parsed (leak sweep
     // 2026-09-28): the portal filing leaves a placeholder licence / docket / registration blank
@@ -549,7 +550,14 @@ export function runQcForProject(db: AppDb, projectId: string, options: QcRunOpti
       ...(clean(payload.utility) ? {} : project.utility ? { utility: project.utility } : {}),
       ...(clean(std?.standard_disconnect_model) ? { standardDisconnectModel: clean(std?.standard_disconnect_model), standardDisconnectMake: clean(std?.standard_disconnect_make) } : {}),
     };
-    for (const baseline of evaluateBaselineRules(baselinePayload, codeCtx)) {
+    // PROGRAM / PERMIT-PATH ELIGIBILITY (#679): the cited records on file for the job's state, and the
+    // project's OWN client's certifications (null when the project has no client row to read).
+    const eligibility = {
+      records: eligibilityRecordsForState(db, clean(baselinePayload.state)),
+      clientCertifications: std ? certificationList(std.installer_certifications) : null,
+      reportUnknownProgram: true,
+    };
+    for (const baseline of evaluateBaselineRules(baselinePayload, codeCtx, eligibility)) {
       if (baseline.qcStatus === "fail") failCount += 1;
       if (baseline.qcStatus === "fail" && !priorFails.has(baseline.ruleId)) newFailsOutsideBill += 1;
       if (baseline.qcStatus === "warning") warningCount += 1;

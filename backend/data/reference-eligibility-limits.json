@@ -1,0 +1,26 @@
+{
+  "_comment": "Cited eligibility limits per authority (#679): a utility's customer-generation program or an AHJ's simplified permit path. Loaded by backend/src/eligibilityLimits.ts and seeded into authority_eligibility_limits; a verified row is never overwritten (rule 3). Every limit carries its source by name, URL and verbatim words.",
+  "records": [
+    {
+      "authorityKind": "utility_program",
+      "state": "OR",
+      "authority": "",
+      "programName": "residential OAR 860-039 net metering project",
+      "limits": {
+        "maxDcKw": {
+          "value": 25,
+          "appliesOnlyTo": "residential customer-generators of a public utility",
+          "ruleId": "or-nem-residential-25kw",
+          "ruleName": "Oregon residential NEM size screen",
+          "message": "DC size is {value} kW{combinedNote}. Confirm this is not a {program} capped at {limit} kW.",
+          "citation": {
+            "sourceName": "OAR 860-039-0010",
+            "sourceUrl": "https://oregon.public.law/rules/oar_860-039-0010",
+            "quote": "For residential customer-generators of a public utility, these rules apply to net metering facilities that have a generating capacity of 25 kilowatts or less.",
+            "fetchedAt": "2026-11-09"
+          }
+        }
+      }
+    }
+  ]
+}
