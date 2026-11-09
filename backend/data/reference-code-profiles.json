@@ -2307,8 +2307,8 @@
      "effectiveDate": "2026-10-01",
      "mandatoryDate": "2027-04-01",
      "previousEdition": "2023",
-     "sourceUrl": "https://www.oregon.gov/bcd/codes-stand/Pages/adopted-codes.aspx",
-     "quote": "2026 Oregon Residential Specialty Code (ORSC) ... Chapter 1 ~ Effective and mandatory Oct. 1, 2026 ... Chapters 2 - 44 and appendices ~ Effective Oct. 1, 2026 and mandatory April 1, 2027"
+     "sourceUrl": "https://www.oregon.gov/bcd/laws-rules/Documents/20261001-2026orsc-adoption-pr.pdf",
+     "quote": "The 2026 ORSC is based on the 2024 edition of the International Residential Code for One-and Two-Family Dwellings (IRC) ... Administrative provisions (Chapter 1): effective and mandatory Oct. 1, 2026 ... Construction provisions (Chapters 2 - 44 and appendices): effective Oct. 1, 2026, with a six-month phase-in period and mandatory April 1, 2027"
     },
     {
      "family": "building",
@@ -2327,9 +2327,10 @@
      "edition": "2026",
      "basedOn": "2026 NEC (NFPA 70)",
      "effectiveDate": "2026-10-01",
+     "mandatoryDate": "2026-10-01",
      "previousEdition": "2023",
-     "sourceUrl": "https://www.oregon.gov/bcd/codes-stand/Pages/oesc-adoption.aspx",
-     "quote": "2026 Oregon Electrical Specialty Code (OESC) ... Effective Oct. 1, 2026 ... Based on the 2026 NFPA 70 / National Electrical Code (NEC)"
+     "sourceUrl": "https://content.govdelivery.com/accounts/ORDCBS/bulletins/42e1509",
+     "quote": "2026 Oregon Electrical Specialty Code (OESC) ... adopted through permanent rule ... Effective and mandatory Oct. 1, 2026 ... 2026 NEC"
     },
     {
      "family": "fire",
@@ -2366,22 +2367,13 @@
     {
      "family": "plumbing",
      "code": "OPSC",
-     "edition": "2023",
-     "basedOn": "2021 UPC",
-     "effectiveDate": "2023-10-01",
-     "sourceUrl": "https://www.oregon.gov/bcd/codes-stand/Pages/adopted-codes.aspx",
-     "quote": "2023 Oregon Plumbing Specialty Code (OPSC) ... Effective Oct. 1, 2023 ... Based on the 2021 OPSC and 2021 Uniform Plumbing Code (UPC)"
-    }
-   ],
-   "upcoming": [
-    {
-     "family": "plumbing",
-     "code": "OPSC",
      "edition": "2026",
      "basedOn": "2024 UPC",
-     "anticipatedDate": "2026-10-01",
-     "status": "in rulemaking",
-     "sourceUrl": "https://www.oregon.gov/bcd/codes-stand/Pages/OPSC-adoption.aspx"
+     "effectiveDate": "2026-10-01",
+     "mandatoryDate": "2026-10-01",
+     "previousEdition": "2023",
+     "sourceUrl": "https://www.oregon.gov/bcd/codes-stand/Pages/OPSC-adoption.aspx",
+     "quote": "Effective Oct. 1, 2026 ... Based on the 2024 Uniform Plumbing Code (UPC) (adoption page); \"2026 OPSC ... Effective and mandatory: Oct. 1, 2026 ... adopted through permanent rule\" (BCD bulletin 2026-10-05)"
     }
    ],
    "citations": [
