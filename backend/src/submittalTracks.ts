@@ -37,7 +37,8 @@ import { HttpError } from "./httpError";
 import { isInformationalPageUrl, isUtilityPlatformUrl, portalHostOf, recipeDisciplineForTrack, trackSafeUrl } from "./portalChannel";
 import { classifyChannelWords, normalizeAhjName, permitAnswerForTrackFrom, permitChannelLabel, permitProcessFor, projectForTrack, trackIssuer } from "./permitProcess";
 import { statewideDecisionFor, statewideUrlRefusal } from "./statewideEvidence";
-import { nemFiledWithPermit, utilityTrackPresentation, type NemFiledWithPermit } from "./utilityFilingLookup";
+import { getUtilityFilingLookup, nemFiledWithPermit, utilityTrackPresentation, type NemFiledWithPermit } from "./utilityFilingLookup";
+import { shippedRecordFor } from "./utilityRequirements";
 import { nemTrackDropFor } from "./utilityStorageModes";
 import { nowIso } from "./time";
 import { hasMpuScope } from "./serviceScope";
@@ -97,6 +98,10 @@ export interface SubmittalTrackView extends SubmittalTrack {
   prerequisites?: PermitPrerequisiteStep[];
   /** How the channel is known: "cited" (per-job lookup), "verified", "profile", "researched", "unknown". */
   channelBasis?: string;
+  /** The page and its verbatim words a NOT-YET-VERIFIED channel came from (Helm nit on the filing-
+   *  destination PR): shown beside the channel so a person reads the source before confirming it.
+   *  Display only: it never decides the channel, its kind or a URL. Absent when verified or uncited. */
+  channelCitation?: { sourceUrl: string; quote: string; fetchedAt?: string };
   /** Battery jobs only (#246): the fire review / separate ESS permit as the records on file say it. */
   essStep?: EssPermitStep;
   /** The track's newest staging run stopped on a fee (#576): what to pay, where, with whose card,
@@ -253,6 +258,48 @@ function verifiedAhjPortalUrl(db: AppDb | null, project: ProjectRecord, track: S
     }
   } catch { /* table missing on an old schema */ }
   return "";
+}
+
+/**
+ * THE WORDS BEHIND A NOT-YET-VERIFIED CHANNEL (display only). The utility's own filing lookup or its
+ * shipped door when that is what the channel names; the per-job permit lookup's cited portal; the AHJ's
+ * reference profile citation for its submission method. Never read by channelKindOf, staging or a gate.
+ */
+function channelCitationFor(
+  db: AppDb | null, track: SubmittalTrackType, project: ProjectRecord, res: { basis: string; portalUrl: string },
+): { sourceUrl: string; quote: string; fetchedAt?: string } | undefined {
+  if (res.basis === "verified") return undefined;
+  const cite = (sourceUrl: unknown, quote: unknown, fetchedAt?: unknown) => {
+    const u = s(sourceUrl).trim(); const q = s(quote).trim();
+    return /^https?:\/\//i.test(u) && q.length >= 3 ? { sourceUrl: u, quote: q.slice(0, 400), ...(s(fetchedAt).trim() ? { fetchedAt: s(fetchedAt).trim() } : {}) } : undefined;
+  };
+  try {
+    if (track === "nem") {
+      const lookup = db ? getUtilityFilingLookup(db, project.state, project.utility) : null;
+      const f = lookup?.filing;
+      if (f?.value && (!res.portalUrl || s(f.value.url) === res.portalUrl)) {
+        const c = cite(f.sourceUrl, f.quote, lookup?.lookedUpAt);
+        if (c) return c;
+      }
+      const door = shippedRecordFor(project.state, project.utility)?.filingDoor;
+      if (door && res.portalUrl && door.url === res.portalUrl) return cite(door.sourceUrl, door.quote, door.fetchedAt);
+      return undefined;
+    }
+    if (res.basis === "cited" && res.portalUrl) {
+      for (const p of permitProcessFor(project)?.permits ?? []) {
+        if (s(p.portalUrl?.value) === res.portalUrl) { const c = cite(p.portalUrl.sourceUrl, p.portalUrl.quote); if (c) return c; }
+      }
+    }
+    if (res.basis === "profile") {
+      const raw = (findAhjProcessProfile(project) as unknown as { citations?: unknown } | null)?.citations;
+      for (const c of Array.isArray(raw) ? raw as Array<Record<string, unknown>> : []) {
+        if (s(c?.field) !== "submissionMethod") continue;
+        const got = cite(c.sourceUrl, c.quote, c.fetchedAt);
+        if (got) return got;
+      }
+    }
+  } catch { /* display only: a failed read shows no citation */ }
+  return undefined;
 }
 
 /**
@@ -1158,6 +1205,10 @@ export function getSubmittalTracks(db: AppDb, project: ProjectRecord): Submittal
       category,
       channel,
       channelBasis: resolved.basis,
+      ...((): { channelCitation?: { sourceUrl: string; quote: string; fetchedAt?: string } } => {
+        const c = channelCitationFor(db, type, issuerProject, resolved);
+        return c ? { channelCitation: c } : {};
+      })(),
       channelKind: channelKindOf(resolved),
       ...(category === "permit" ? { structureBasis: answer.basis, prerequisites } : {}),
       // On the card the prerequisites ride (the building-side filing, or the one permit).

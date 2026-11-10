@@ -15,13 +15,15 @@
 //     portal or sends an email can read one: channelResolution / utilityTrackPresentation /
 //     filingEmailChannelFor / the stage read only the person-verified records below. Only server.ts's
 //     filing-destination routes import this module (pinned by filingDestinationProposals.test).
-//   · It comes ONLY from a row that carries an http(s) source page on the authority's OWN official
-//     host (shared/src/officialSource.isOfficialSourceHost — a government host, or a domain a person
-//     verified as the authority's own), a verbatim quote and a fetched-at time. Anything else is
-//     listed under `skipped` with why, never proposed.
+//   · It comes ONLY from a row that carries an http(s) source page, a verbatim quote and a fetched-at
+//     time (anything less is listed under `skipped` with why). One-click CONFIRM is offered only when
+//     that page is on the authority's own OFFICIAL host (shared/src/officialSource.citationShortfalls —
+//     a government host, or a domain a person verified as the authority's own); a cited page off that
+//     host (a utility's .com) is shown for Edit only, where the person states it as their own check.
 //   · Its sources: an AHJ's reference process profile citations (field "submissionMethod", the value
 //     read), the AHJ's per-job permit-process lookup (a permit's cited portal), and the utility's
-//     filing lookup (its cited portal, a with-permit method, or an email address in its words). A NEM
+//     filing lookup (its cited portal, a with-permit method, or an email address in its words), and the
+//     utility's shipped cited door (utilityRequirements `filingDoor`, seeded into its KB row). A NEM
 //     destination is NEVER taken from an AHJ's row (rule 5: never the AHJ's row for the NEM track).
 //
 // WHAT CONFIRMING WRITES — THE EXISTING PERSON-VERIFIED RECORD, NOTHING NEW:
@@ -48,7 +50,7 @@ import { getPermitProcessLookup, projectForTrack } from "./permitProcess";
 import { findAhjProcessProfile } from "./processProfiles";
 import { personVerifiedAuthorityHosts } from "./officialAuthorityHosts";
 import { FILED_WITH_AHJ_PERMIT, getUtilityFilingLookup, verifyUtilityFilingLookup } from "./utilityFilingLookup";
-import { utilityPersonVerifiedHosts } from "./utilityRequirements";
+import { shippedRecordFor, utilityPersonVerifiedHosts } from "./utilityRequirements";
 import { hostFitsTrackAndEntity, isInformationalPageUrl, trackSafeUrl } from "./portalChannel";
 import { assertOperatorPortalUrlFits, portalEntityEvidence } from "./portalRecipes";
 import { saveVerifiedAhjProfile, saveVerifiedUtilityProfile } from "./knowledgeBase";
@@ -72,6 +74,10 @@ export interface DestinationProposal {
   quote: string;
   fetchedAt: string;
   from: DestinationSource;
+  /** The page is on the authority's own OFFICIAL host (officialSource.citationShortfalls). When it is not
+   *  (a utility's .com nobody has verified as its own), the proposal is shown for Edit only: Confirm is
+   *  refused and a person states it as their own check. */
+  official: boolean;
   /** The words contain the address (else the address is the link behind the words: open the page). */
   quoteNamesAddress: boolean;
   /** Why Confirm would be refused right now; empty = one click confirms it. */
@@ -187,9 +193,21 @@ export function utilityCandidates(lookup: ReturnType<typeof getUtilityFilingLook
   return out;
 }
 
+/** The utility's shipped, cited filing door (reference-utility-application-requirements.json
+ *  `filingDoor`, seeded into its KB row at boot): a candidate like any other, never a verified door. */
+export function shippedDoorCandidates(state: string, utility: string): Candidate[] {
+  let door;
+  try { door = shippedRecordFor(state, utility)?.filingDoor; } catch { door = undefined; }
+  if (!door) return [];
+  const url = addressAsUrl(door.url);
+  return url ? [{ kind: "portal", address: url, name: door.name, sourceUrl: door.sourceUrl, quote: door.quote, fetchedAt: door.fetchedAt, from: "reference" }] : [];
+}
+
 /** The words do not contain the address: the one shortfall that does NOT stop a proposal (an official
  *  page usually links its portal from words like "Apply online"). It is shown on the card instead. */
 const QUOTE_LACKS_VALUE = "the quote does not contain the value";
+/** citationShortfalls' host reason: the page is not on the authority's own official host. */
+const OFFICIAL_HOST_SHORTFALL = /is not a government host or a domain a person verified/;
 
 /**
  * Why a candidate is not proposed at all (empty = it is): the ONE citation test every official-source
@@ -301,7 +319,7 @@ export function filingDestinationsFor(
     let candidates: Candidate[];
     let hosts: string[];
     if (authority.kind === "utility") {
-      candidates = utilityCandidates(getUtilityFilingLookup(db, authority.state, authority.name));
+      candidates = [...utilityCandidates(getUtilityFilingLookup(db, authority.state, authority.name)), ...shippedDoorCandidates(authority.state, authority.name)];
       try { hosts = utilityPersonVerifiedHosts(db, authority.state, authority.name); } catch { hosts = []; }
     } else {
       const issuer = projectForTrack(project, tracks[0]);
@@ -318,13 +336,21 @@ export function filingDestinationsFor(
       seen.add(id);
       const label = c.kind === "with_permit" ? "filed with the permit" : c.address;
       const skip = candidateSkipReasons(c, hosts);
-      if (skip.length) { skipped.push(`${label} (${c.sourceUrl || "no page"}): ${skip.join("; ")}`); continue; }
+      // A page off the authority's official host, with its words and read time, is still shown — for
+      // Edit only (a person states it as their own check); a row missing its words or time is not.
+      const notHost = skip.filter((r) => !OFFICIAL_HOST_SHORTFALL.test(r));
+      if (notHost.length) { skipped.push(`${label} (${c.sourceUrl || "no page"}): ${skip.join("; ")}`); continue; }
       if (rejectedIds.has(id)) continue;
+      const official = skip.length === 0;
       proposals.push({
         id, kind: c.kind, address: c.address, ...(c.name ? { name: c.name } : {}),
         sourceUrl: c.sourceUrl, sourceHost: sourceHostOf(c.sourceUrl), quote: c.quote, fetchedAt: c.fetchedAt, from: c.from,
+        official,
         quoteNamesAddress: quoteNames(c.kind, c.address, c.quote),
-        problems: confirmProblems(db, authority, tracks[0], c),
+        problems: [
+          ...(official ? [] : [`${sourceHostOf(c.sourceUrl)} is not a government host or a domain a person verified as ${authority.name}'s own, so one-click Confirm is not offered: open the page, then use Edit to record it as your own check`]),
+          ...confirmProblems(db, authority, tracks[0], c),
+        ],
       });
     }
     out.push({ authority: head, tracks, status: proposals.length ? "proposed" : "none", proposals, rejected, skipped });

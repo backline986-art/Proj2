@@ -42,7 +42,7 @@ import type { AppDb } from "./db";
 import { usStateCode } from "./permitPath";
 import { getUtilityFilingLookup, normalizeUtilityName, utilityFilingKey } from "./utilityFilingLookup";
 import { isUtilityPlatformUrl } from "./portalChannel";
-import { importSeededUtilityKnowledge } from "./knowledgeBase";
+import { importSeededUtilityKnowledge, knowledgeProfileKey } from "./knowledgeBase";
 
 const str = (v: unknown): string => (typeof v === "string" ? v.trim() : v == null ? "" : String(v).trim());
 
@@ -287,20 +287,29 @@ function sanitizeFilingDoor(raw: unknown): ShippedUtilityFilingDoor | null {
  * reference writer (importSeededUtilityKnowledge: confidence "seeded", skips a row a person verified).
  * Nothing here is official or verified, and nothing here sends or clicks: the door is read where every
  * utility door is read (utilityFilingLookup's KB channel and the stage's utility read), each through
- * portalChannel.hostFitsTrackAndEntity (rule 5). Idempotent; returns the number of rows written.
+ * portalChannel.hostFitsTrackAndEntity (rule 5). Idempotent, and a no-op for a row that already carries the same door; returns the number of rows written.
  */
 export function seedShippedUtilityFilingDoors(db: AppDb, records = shippedUtilityRequirementRecords()): number {
   let written = 0;
   for (const rec of records) {
     const door = rec.filingDoor;
     if (!door || !rec.utility) continue;
+    const notes = `Filing door seeded from ${door.sourceName || door.sourceUrl} (${door.sourceUrl}), read ${door.fetchedAt.slice(0, 10)}: "${door.quote}" links ${door.url}. Seeded, not verified: a person verifies where the application goes.`;
     for (const state of rec.states) {
+      // UNCHANGED → NO WRITE (Helm nit): the row already carries this door, its name and its note, so a
+      // boot re-seed would only bump updated_at and log a knowledge event every start.
+      try {
+        const cur = db.get<{ portal_url?: string; portal_name?: string; notes?: string }>(
+          "SELECT portal_url, portal_name, notes FROM permit_utility_knowledge WHERE profile_key = ?",
+          [knowledgeProfileKey({ state, ahj: "", utility: rec.utility })]);
+        if (cur && str(cur.portal_url) === door.url && str(cur.portal_name) === door.name && str(cur.notes).includes(notes)) continue;
+      } catch { /* no table yet: write */ }
       const outcome = importSeededUtilityKnowledge(db, {
         state,
         utility: rec.utility,
         portalName: door.name,
         portalUrl: door.url,
-        notes: `Filing door seeded from ${door.sourceName || door.sourceUrl} (${door.sourceUrl}), read ${door.fetchedAt.slice(0, 10)}: "${door.quote}" links ${door.url}. Seeded, not verified: a person verifies where the application goes.`,
+        notes,
         sourceLabel: `${door.sourceName || "Utility page"} (${door.sourceUrl})`,
       });
       if (outcome === "imported") written += 1;

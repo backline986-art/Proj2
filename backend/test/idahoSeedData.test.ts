@@ -161,7 +161,11 @@ await run("the utility door lands SEEDED on the utility row and is what the NEM 
   const view = utilityTrackPresentation(db, { state: STATE, utility: rec.utility });
   assert.equal(view.portalUrl, rec.filingDoor!.url, "the NEM track names the door");
   assert.match(view.channel, /seeded/i, "and says it is seeded");
-  assert.equal(seedShippedUtilityFilingDoors(db), 1, "re-seeding is idempotent (rewrites the same seeded row)");
+  const stamp = String(row!.updated_at);
+  const events = db.get<{ n: number }>("SELECT COUNT(*) AS n FROM knowledge_events")?.n ?? 0;
+  assert.equal(seedShippedUtilityFilingDoors(db), 0, "re-seeding an unchanged door writes nothing");
+  assert.equal(String(db.get<Record<string, unknown>>("SELECT updated_at FROM permit_utility_knowledge WHERE profile_key = ?", [knowledgeProfileKey({ state: STATE, utility: rec.utility })])!.updated_at), stamp);
+  assert.equal(db.get<{ n: number }>("SELECT COUNT(*) AS n FROM knowledge_events")?.n ?? 0, events, "and logs no knowledge event");
 });
 
 await run("a person's verified utility row is never overwritten by the shipped door — rule 3", () => {

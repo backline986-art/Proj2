@@ -5504,6 +5504,13 @@ function trackChannelHtml(t) {
       // status: a filing whose checks keep coming back empty must not look like one that is quiet.
       t.lastUnreadable?.reason ? ` · <span data-last-unreadable style="color:var(--warning, #b7791f)">last check read nothing (${esc(fmtDate(t.lastUnreadable.at, true))}): ${esc(t.lastUnreadable.reason)}</span>` : ""}</p>`,
   ];
+  // THE PAGE AND WORDS BEHIND A NOT-YET-VERIFIED CHANNEL (server: channelCitation), so a person reads
+  // the source before confirming where the filing goes. Display only; a link only for http(s).
+  const cite = t.channelCitation;
+  if (cite && cite.quote) {
+    const src = httpUrl(cite.sourceUrl);
+    lines.push(`<p class="muted track-channel-citation" style="margin:0 0 4px;font-size:12px">Read on ${src ? `<a href="${esc(src)}" target="_blank" rel="noopener">${esc(portalHostname(src) || src)}</a>` : esc(cite.sourceUrl)}${cite.fetchedAt ? ` (${esc(String(cite.fetchedAt).slice(0, 10))})` : ""}: “${esc(cite.quote)}” — not yet confirmed by a person</p>`);
+  }
   // A portal URL the server resolved but did not write into the sentence.
   const portal = httpUrl(t.portalUrl);
   if (portal && !channel.includes(portal)) {

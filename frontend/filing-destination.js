@@ -67,7 +67,7 @@
     const attrs = `data-fd-track="${esc(track)}" data-fd-id="${esc(p.id)}"`;
     return `<div class="fd-proposal" data-fd-proposal="${esc(p.id)}">
   <div>${addressLine(p)} <span class="badge">Proposed — not yet confirmed</span></div>
-  <div class="muted">From ${source} (official page), read ${esc(day(p.fetchedAt))}, via the ${esc(FROM[p.from] || p.from)}.</div>
+  <div class="muted">From ${source} (${p.official === false ? 'not an official page: Edit only' : 'official page'}), read ${esc(day(p.fetchedAt))}, via the ${esc(FROM[p.from] || p.from)}.</div>
   <blockquote class="fd-quote">${esc(p.quote)}</blockquote>
   ${names}
   ${problems}

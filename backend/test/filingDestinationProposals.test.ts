@@ -52,6 +52,9 @@ const UTIL_A_PAGE = "https://www.brightwater-zz.gov/solar/apply";
 const UTIL_A_PORTAL = "https://brightwater.powerclerk.com/MvcAccount/Login";
 const UTIL_B_PAGE = "https://www.alderbank-zz.gov/light/net-metering";
 const READ_AT = "2026-11-10T08:19:28Z";
+const AHJ_E = "Hamlet of Wrenfield";
+const E_PAGE = "https://www.wrenfield-zz.gov/permits";
+const E_QUOTE = "Submit building permit applications in person at the Hamlet Hall counter.";
 
 const blankProfile = (ahj: string) => ({
   state: "ZZ", ahj, submissionMethod: "", timeline: "",
@@ -61,7 +64,7 @@ const blankProfile = (ahj: string) => ({
   requiresJurisdictionCheck: false, otherRequirements: "", reviewerNotes: "", sourceSheet: "ZZ synthetic",
 });
 const reference = {
-  generatedFrom: "filingDestinationProposals.test", count: 2,
+  generatedFrom: "filingDestinationProposals.test", count: 3,
   profiles: [
     {
       ...blankProfile(AHJ_A), submissionMethod: `Online portal ${A_PORTAL_VALUE}`,
@@ -78,6 +81,10 @@ const reference = {
     {
       ...blankProfile(AHJ_B), submissionMethod: "Email",
       citations: [{ field: "submissionMethod", sourceUrl: B_PAGE, quote: B_QUOTE, fetchedAt: READ_AT }],
+    },
+    {
+      ...blankProfile(AHJ_E), submissionMethod: "In person at the counter",
+      citations: [{ field: "submissionMethod", sourceUrl: E_PAGE, quote: E_QUOTE, fetchedAt: READ_AT }],
     },
   ],
 };
@@ -131,11 +138,17 @@ assert.ok(s2.saved, `setup: ${s2.reason}`);
 
 const changes = () => (db.get<{ n: number }>("SELECT total_changes() AS n")?.n ?? 0);
 
-await check("(a) the permit portal is proposed from the city's official page; the directory site, the undated row and a non-door email are not", () => {
+await check("(a) the permit portal is proposed from the city's official page; the directory site is Edit-only; the undated row and a non-door email are not proposed", () => {
   const g = group(projA, "ahj");
   assert.equal(g.status, "proposed");
-  assert.equal(g.proposals.length, 1, JSON.stringify(g.proposals, null, 1));
+  assert.equal(g.proposals.length, 2, JSON.stringify(g.proposals, null, 1));
   const p = g.proposals[0];
+  assert.equal(p.official, true);
+  // The directory site's citation is shown for Edit only: Confirm is refused with why.
+  const vendor = g.proposals[1];
+  assert.equal(vendor.official, false);
+  assert.equal(vendor.sourceUrl, VENDOR_PAGE);
+  assert.match(vendor.problems.join(" "), /not a government host or a domain a person verified as City of Fernhollow's own.*use Edit/);
   assert.equal(p.kind, "portal");
   assert.equal(p.address, A_PORTAL);
   assert.equal(p.sourceUrl, A_PAGE);
@@ -145,8 +158,7 @@ await check("(a) the permit portal is proposed from the city's official page; th
   assert.equal(p.from, "reference");
   assert.equal(p.quoteNamesAddress, false, "the words do not contain the address: the card must say so");
   assert.deepEqual(p.problems, []);
-  assert.equal(g.skipped.length, 2, g.skipped.join("\n"));
-  assert.match(g.skipped.join("\n"), /permit-directory\.example.*not a government host or a domain a person verified/);
+  assert.equal(g.skipped.length, 1, g.skipped.join("\n"));
   assert.match(g.skipped.join("\n"), /no fetched-at time/);
   assert.ok(!JSON.stringify(g).includes("solar@brightwater-zz.gov"), "an email in a non-door field became a door");
 });
@@ -319,6 +331,32 @@ await check("(d) a shared platform's bare host is not confirmable; a tenant path
   assert.equal(fdp.bareSharedHostProblem("https://fernhollow.zz.sharedpermits.example", AHJ_A, page), "");
   assert.equal(fdp.bareSharedHostProblem("https://permits.fernhollow-zz.gov", AHJ_A, page), "", "the authority's own site is its own");
   assert.equal(fdp.bareSharedHostProblem("https://aca-prod.vendor.example/ABCREF", AHJ_A, page), "");
+});
+
+await check("(k) a utility's shipped cited door is proposed (Edit-only off an official host), and the track shows its page and words", async () => {
+  const shipped = (await import("../src/utilityRequirements")).shippedUtilityRequirementRecords().find((r) => r.filingDoor);
+  assert.ok(shipped, "no shipped door in the reference data");
+  const door = shipped!.filingDoor!;
+  const cands = fdp.shippedDoorCandidates(shipped!.states[0], shipped!.utility);
+  assert.deepEqual(cands.map((c) => [c.kind, c.address, c.sourceUrl, c.from]), [["portal", door.url, door.sourceUrl, "reference"]]);
+  const projD = repo.createProject(db, { clientId: client.id, owner: "Synthetic Owner", street: "1 Test Way", city: "Testville", state: shipped!.states[0], zip: "99999", ahj: "Testville City", utility: shipped!.utility } as never).project.id as string;
+  const g = group(projD, "utility");
+  const p = g.proposals.find((x) => x.address === door.url);
+  assert.ok(p, JSON.stringify(g, null, 1));
+  assert.equal(p!.quote, door.quote);
+  if (!p!.official) assert.match(p!.problems.join(" "), /use Edit/);
+  const nem = views(projD).find((x) => x.type === "nem")!;
+  assert.notEqual(nem.channelBasis, "verified");
+  assert.deepEqual(nem.channelCitation, { sourceUrl: door.sourceUrl, quote: door.quote, fetchedAt: door.fetchedAt });
+  // The permit card shows its reference citation too, when its channel is the seeded profile...
+  const projE = mk(AHJ_E, "Wrenfield Electric");
+  const permitE = views(projE).find((x) => x.category === "permit")!;
+  assert.equal(permitE.channelBasis, "profile", permitE.channel);
+  assert.deepEqual(permitE.channelCitation, { sourceUrl: E_PAGE, quote: E_QUOTE, fetchedAt: READ_AT });
+  // ...and none once a person verified it.
+  const permitA = views(projA).find((x) => x.category === "permit")!;
+  assert.equal(permitA.channelBasis, "verified");
+  assert.equal(permitA.channelCitation, undefined);
 });
 
 await check("(j) the routes sit under /api/projects/:id, read the project first and name the person before writing", () => {
