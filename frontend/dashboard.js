@@ -5236,12 +5236,15 @@ async function decideFilingDestination(btn, action, where) {
   const projectId = ctx.projectId;
   const payload = ctx.payload;
   const notify = ctx.notify || showMessage;
-  if (!FD || !projectId) return;
+  if (!FD || !(projectId || ctx.path)) return;
   const id = btn.dataset.fdId;
   const track = btn.dataset.fdTrack;
   const auth = await authForDecision();
   let method = "PUT";
+  // The track card and a job's queue entry: that job's route. A service-area entry: its client's twin
+  // route (ctx.path), with the entry and authority shown (ctx.extra) added to the SAME body.
   let path = `/api/projects/${projectId}/filing-destinations`;
+  if (ctx.path) path = ctx.path;
   let body;
   let done;
   if (action === "unreject") {
@@ -5278,6 +5281,7 @@ Why (optional):`, "");
       done = "Rejected. Nothing was filed or sent.";
     } else return;
   }
+  if (ctx.extra) body = { ...body, ...ctx.extra };
   btn.disabled = true;
   try {
     await api(path, { method, body: JSON.stringify(body) });
@@ -5314,10 +5318,17 @@ function destinationQueueContext(btn) {
   const FD = window.FilingDestination;
   return {
     projectId: btn.dataset.fdProject,
+    ...serviceAreaQueueTarget(btn),
     payload: FD ? FD.queuePayload(state.destinationQueue) : null,
     notify: (message, kind) => showToast(message, kind === "error" ? "error" : kind === "warning" ? "warning" : "success"),
     after: () => loadDestinationQueue(),
   };
+}
+// A service-area authority (no job yet): its client's twin route, and the entry and authority the queue
+// showed, added to the same body. A job's proposal names its job and gets nothing here.
+function serviceAreaQueueTarget(btn) {
+  if (!btn.dataset.fdClient || btn.dataset.fdProject) return {};
+  return { path: `/api/clients/${encodeURIComponent(btn.dataset.fdClient)}/service-area/filing-destinations`, extra: { areaEntry: btn.dataset.fdAreaEntry || "", authorityKey: btn.dataset.fdAuthorityKey || "" } };
 }
 async function loadDestinationQueue() {
   const body = $("destQueueBody");

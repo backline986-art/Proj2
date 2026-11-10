@@ -456,9 +456,10 @@ export function decideFilingDestination(
     if (!r.saved) throw new DestinationRefused(r.lookup ? 409 : 400, r.reason);
     address = "";
   }
-  addAuditLog(db, project.id, "human", who, `filing_destination.${action}`, {
+  const audit = auditTarget(project);
+  addAuditLog(db, audit.projectId, "human", who, `filing_destination.${action}`, {
     authorityKind: authority.kind, authority: authority.name, state: authority.state, track: decision.track,
-    kind, address, sourceUrl, ...(action === "confirmed" ? { proposalId: str(decision.proposalId) } : {}),
+    kind, address, sourceUrl, ...(action === "confirmed" ? { proposalId: str(decision.proposalId) } : {}), ...audit.extra,
   });
   return { action, authority: { kind: authority.kind, name: authority.name, state: authority.state, profileKey: authority.profileKey }, kind, address };
 }
@@ -486,8 +487,9 @@ export function rejectFilingDestination(
      ON CONFLICT(proposal_id) DO UPDATE SET reason = excluded.reason, rejected_by = excluded.rejected_by, rejected_at = excluded.rejected_at`,
     [p.id, authority.kind, authority.profileKey, authority.state, authority.name, p.kind, p.address, p.sourceUrl, reason, who, nowIso()],
   );
-  addAuditLog(db, project.id, "human", who, "filing_destination.rejected", {
-    authorityKind: authority.kind, authority: authority.name, state: authority.state, track: input.track, kind: p.kind, address: p.address, sourceUrl: p.sourceUrl, proposalId: p.id, reason,
+  const audit = auditTarget(project);
+  addAuditLog(db, audit.projectId, "human", who, "filing_destination.rejected", {
+    authorityKind: authority.kind, authority: authority.name, state: authority.state, track: input.track, kind: p.kind, address: p.address, sourceUrl: p.sourceUrl, proposalId: p.id, reason, ...audit.extra,
   });
   return { rejected: true, proposalId: p.id };
 }
@@ -506,8 +508,9 @@ export function withdrawDestinationRejection(
   const row = db.get<Record<string, unknown>>("SELECT proposal_id, kind, address FROM filing_destination_rejections WHERE proposal_id = ? AND authority_kind = ? AND profile_key = ?", [str(input.proposalId), authority.kind, authority.profileKey]);
   if (!row) return { withdrawn: false };
   db.run("DELETE FROM filing_destination_rejections WHERE proposal_id = ?", [str(input.proposalId)]);
-  addAuditLog(db, project.id, "human", who, "filing_destination.rejection_withdrawn", {
-    authorityKind: authority.kind, authority: authority.name, state: authority.state, track: input.track, kind: str(row.kind), address: str(row.address), proposalId: str(input.proposalId),
+  const audit = auditTarget(project);
+  addAuditLog(db, audit.projectId, "human", who, "filing_destination.rejection_withdrawn", {
+    authorityKind: authority.kind, authority: authority.name, state: authority.state, track: input.track, kind: str(row.kind), address: str(row.address), proposalId: str(input.proposalId), ...audit.extra,
   });
   return { withdrawn: true };
 }
@@ -532,7 +535,11 @@ export function withdrawDestinationRejection(
 export interface QueueAct { projectId: string; track: SubmittalTrackType }
 /** A proposal in the queue. `act` = the open job and track whose card shows it; absent on an
  *  authority only the client's service area names (no job yet). */
-export interface QueueProposal extends DestinationProposal { act?: QueueAct }
+export interface QueueProposal extends DestinationProposal { act?: QueueAct; areaAct?: QueueAreaAct }
+/** A service-area authority's route: the client, the entry and the authority the queue shows, and the
+ *  track. Its Confirm / Edit / Reject go to /api/clients/:id/service-area/filing-destinations, which
+ *  runs the SAME decision functions on the entry's in-memory job and refuses a changed authority. */
+export interface QueueAreaAct { clientId: string; entryKey: string; authorityKey: string; track: SubmittalTrackType }
 /** An authority listed because the client's SERVICE AREA names it and none of its open jobs does. */
 export interface QueueServiceArea {
   entry: ClientServiceAreaEntry;
@@ -547,7 +554,7 @@ export interface QueueAuthority {
   /** proposed: at least one proposal to Confirm or Edit; none: nothing on file to propose (Edit on a job). */
   status: "proposed" | "none";
   proposals: QueueProposal[];
-  rejected: Array<AuthorityDestinations["rejected"][number] & { act?: QueueAct }>;
+  rejected: Array<AuthorityDestinations["rejected"][number] & { act?: QueueAct; areaAct?: QueueAreaAct }>;
   skipped: string[];
   /** The open jobs that wait on this authority ([] for a service-area authority). */
   jobs: Array<{ projectId: string; label: string; tracks: SubmittalTrackType[] }>;
@@ -571,7 +578,9 @@ export interface DestinationQueue {
 // so its tracks resolve only to that authority (or the per-track issuer that authority's own data
 // names, as on a real job — permitProcess.projectForTrack).
 const AREA_JOB_ID_PREFIX = "service-area:";
-const areaJobs = new WeakSet<object>();
+/** serviceAreaJob's jobs, with the client and entry each was built from (a record merely shaped like
+ *  one, or carrying a look-alike id, is not in here). */
+const areaJobs = new WeakMap<object, { clientId: string; entryKey: string }>();
 
 /** The in-memory job for one service-area authority. Reads nothing; stores nothing. */
 export function serviceAreaJob(client: { id: string }, a: ServiceAreaAuthority): ProjectRecord {
@@ -585,13 +594,43 @@ export function serviceAreaJob(client: { id: string }, a: ServiceAreaAuthority):
     interconnection_method: "", status: "intake", current_stage: "intake", parser_confidence_summary: "", parser_json: "{}",
     assigned_user_id: null, created_at: now, updated_at: now, archived_at: "",
   } as never);
-  areaJobs.add(job);
+  areaJobs.set(job, { clientId: client.id, entryKey: a.entryKey });
   return job;
 }
 
 /** Is this one of serviceAreaJob's in-memory jobs (never a stored project)? */
 export function isServiceAreaJob(project: ProjectRecord): boolean {
   return areaJobs.has(project) && project.id.startsWith(AREA_JOB_ID_PREFIX);
+}
+
+/** Where a decision is audited: the job's own row, or — for a service-area job, which is never stored —
+ *  no project row, with the client and the area entry named in the details instead. */
+function auditTarget(project: ProjectRecord): { projectId: string | null; extra: Record<string, unknown> } {
+  const area = isServiceAreaJob(project) ? areaJobs.get(project)! : null;
+  return area ? { projectId: null, extra: { serviceArea: { clientId: area.clientId, entryKey: area.entryKey } } } : { projectId: project.id, extra: {} };
+}
+
+/**
+ * A DECISION FROM THE SERVICE AREA (the client-scoped twins of the per-job routes). The route names the
+ * client (its scope guard has run), the area entry and the authority the queue SHOWED; this builds the
+ * in-memory job for that entry and refuses unless the track it names resolves to exactly that authority.
+ * The decision itself then runs through the SAME decideFilingDestination / rejectFilingDestination /
+ * withdrawDestinationRejection, unchanged. Reads only.
+ */
+export function serviceAreaDecisionJob(
+  db: AppDb,
+  client: { id: string },
+  input: { entryKey: string; authorityKey: string; track: SubmittalTrackType },
+): ProjectRecord {
+  const sa = serviceAreaAuthorities(db, client.id).find((a) => a.entryKey === str(input.entryKey));
+  if (!sa) throw new DestinationRefused(404, "That place is not in this client's service area (it was removed, or never added). Reload and look again.");
+  const job = serviceAreaJob(client, sa);
+  const authority = authorityForTrack(job, input.track);
+  const shown = str(input.authorityKey);
+  if (!authority || authority.kind !== sa.kind || `${authority.kind}|${authority.profileKey}` !== shown) {
+    throw new DestinationRefused(409, `This service-area entry now names ${authority ? `${authority.name} (${authority.state})` : "no authority"} on the ${input.track} track, not the one shown. Reload and look again.`);
+  }
+  return job;
 }
 
 /** The clients of the org that have a service area on file; `null` reads every org. Reads only. */
@@ -686,9 +725,10 @@ export function filingDestinationQueue(
           for (const t of g.tracks) if (!existing.tracks.includes(t)) existing.tracks.push(t);
           continue;
         }
+        const areaAct: QueueAreaAct = { clientId: client.id, entryKey: sa.entryKey, authorityKey: key, track: g.tracks[0] };
         c.authorities.set(key, {
           authority: g.authority, tracks: [...g.tracks], status: g.proposals.length ? "proposed" : "none",
-          proposals: g.proposals.map((p) => ({ ...p })), rejected: g.rejected.map((r) => ({ ...r })), skipped: [...g.skipped],
+          proposals: g.proposals.map((p) => ({ ...p, areaAct })), rejected: g.rejected.map((r) => ({ ...r, areaAct })), skipped: [...g.skipped],
           jobs: [], open: null,
           handCheck: handCheckPagesFor(g.authority.kind, g.authority.state, g.authority.name, pages),
           serviceArea: { entry: sa.entry, entryKey: sa.entryKey, matchedFrom: sa.matchedFrom },

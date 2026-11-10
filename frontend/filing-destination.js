@@ -55,7 +55,11 @@
    *  track card shows it); on a track card it is that card's job (no project attribute) and first track. */
   function actAttrs(d, item) {
     const act = item && item.act && typeof item.act === 'object' ? item.act : null;
-    const track = act ? str(act.track) : ((d.tracks || [])[0] || '');
+    // A SERVICE-AREA authority (no job names it yet): its client, the area entry and the authority the
+    // queue shows; the click goes to that client's service-area route (the same decision functions).
+    const area = !act && item && item.areaAct && typeof item.areaAct === 'object' ? item.areaAct : null;
+    const track = act ? str(act.track) : area ? str(area.track) : ((d.tracks || [])[0] || '');
+    if (area) return `data-fd-track="${esc(track)}" data-fd-client="${esc(area.clientId)}" data-fd-area-entry="${esc(area.entryKey)}" data-fd-authority-key="${esc(area.authorityKey)}"`;
     return `data-fd-track="${esc(track)}"${act ? ` data-fd-project="${esc(act.projectId)}"` : ''}`;
   }
 
@@ -151,7 +155,9 @@
   // ── DESTINATIONS TO CONFIRM: every authority still waiting on a person, across the org's open jobs ──
   // (GET /api/filing-destinations). The SAME proposal block, the same Confirm / Edit / Reject buttons;
   // each button carries the job and track whose card shows that proposal (data-fd-project), so the
-  // click sends that job's existing route exactly as the track card does. No bulk action.
+  // click sends that job's existing route exactly as the track card does. An authority only a client's
+  // SERVICE AREA names carries that client, entry and authority instead (data-fd-client …): its click
+  // goes to the client's service-area route, which runs the same decision. No bulk action.
 
   const AUTHORITY_KIND = { ahj: 'Permit issuer', utility: 'Utility' };
 

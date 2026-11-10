@@ -367,6 +367,22 @@ for (const [verb, routePath] of [["get", "/api/projects/:id/permit-process"], ["
   );
 }
 
+// THE SERVICE-AREA DESTINATION TWINS (filingDestinationProposals.serviceAreaDecisionJob): they write a
+// person-verified door from a client's service area, so they must sit under the client scope guard —
+// another org's client is a 404 before the handler runs (pinned over HTTP in tenancy.test). Exactly three.
+{
+  const twins = apiRoutes.filter((r) => r.path.startsWith("/api/clients/:id/service-area/"));
+  run(
+    "the service-area destination twins are exactly three, all under /api/clients/:id",
+    JSON.stringify(twins.map((r) => `${r.verb} ${r.path}`)) === JSON.stringify([
+      "put /api/clients/:id/service-area/filing-destinations",
+      "post /api/clients/:id/service-area/filing-destinations/reject",
+      "delete /api/clients/:id/service-area/filing-destinations/reject",
+    ]) && guardedPrefixes.includes("/api/clients"),
+    JSON.stringify(twins),
+  );
+}
+
 // The guards must not have been quietly removed.
 for (const expected of ["/api/projects", "/api/clients", "/api/customers"]) {
   run(`${expected}/:id is behind a scope guard`, guardedPrefixes.includes(expected), `guards: ${guardedPrefixes.join(", ")}`);

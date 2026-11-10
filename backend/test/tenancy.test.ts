@@ -310,6 +310,16 @@ try {
     assert.equal((await b(`/api/clients/${clientA}/portal-credentials`)).status, 404);
   });
 
+  await run("a tenant cannot confirm, reject or re-offer a filing destination through ANOTHER tenant's client's service area", async () => {
+    // The client-scoped twins of the per-job destination routes (filingDestinationProposals
+    // serviceAreaDecisionJob). Out of scope is a 404 from the client guard, before any handler runs.
+    const body = JSON.stringify({ track: "combo", areaEntry: "city|OR|salem", authorityKey: "ahj|or|city of salem", proposalId: "x", kind: "portal", address: "https://example.invalid/", sourceUrl: "https://example.invalid/", quote: "synthetic words", decidedBy: "Bob B" });
+    for (const [method, suffix] of [["PUT", ""], ["POST", "/reject"], ["DELETE", "/reject"]] as const) {
+      const res = await b(`/api/clients/${clientA}/service-area/filing-destinations${suffix}`, { method, body });
+      assert.equal(res.status, 404, `${method} ${suffix || "(confirm)"} on another tenant's client returned ${res.status}: ${(await res.text()).slice(0, 200)}`);
+    }
+  });
+
   await run("the user list is scoped", async () => {
     const usersA = await (await a("/api/users")).json();
     const emails = (Array.isArray(usersA) ? usersA : usersA.users || []).map((u: { email: string }) => u.email);

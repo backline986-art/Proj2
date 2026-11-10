@@ -190,7 +190,7 @@ await check("(c) the queue lists each area authority with no open job, marked se
   // Exactly what a real job naming the same authority shows on its track card.
   const probe = mk(fresh2(), CITY, "", "Synthetic Owner Probe");
   const card = fdp.filingDestinationsFor(db, repo.getProjectDetail(db, probe).project, readTracks(repo.getProjectDetail(db, probe).project)).find((g) => g.authority.kind === "ahj")!;
-  assert.deepEqual(city.proposals.map(({ act, ...p }) => p), card.proposals);
+  assert.deepEqual(city.proposals.map(({ act, areaAct, ...p }) => p), card.proposals);
   db.run("UPDATE projects SET archived_at = ? WHERE id = ?", [new Date().toISOString(), probe]);
   const util = entry(q, areaClient.id, "utility", UTIL)!;
   assert.ok(util?.serviceArea, "the service-area utility is not listed as service area");

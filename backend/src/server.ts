@@ -2766,6 +2766,58 @@ app.delete("/api/projects/:id/filing-destinations/reject", asyncHandler(async (r
   res.json({ ...r, destinations: filingDestinationsFor(db, project, getSubmittalTracks(db, project)) });
 }));
 
+// THE SAME DECISIONS FROM A CLIENT'S SERVICE AREA (the area entries on its row): the client-scoped twins of
+// the three routes above, for an authority the client's area names before any job does. Under
+// /api/clients/:id, so each inherits the client scope guard (rule 6: another org's client is a 404);
+// getClient 404s an unknown one. The body names the area entry and the authority the queue SHOWED;
+// serviceAreaDecisionJob builds the entry's in-memory job (never stored) and refuses (409) unless the
+// track resolves to exactly that authority. The person is named BEFORE anything is written, and the
+// decision runs through the SAME decideFilingDestination / rejectFilingDestination /
+// withdrawDestinationRejection: no new decision logic, no bulk, one authority per click, the same
+// records written, audited with the person and time (the client and entry in the details).
+const areaDecisionInput = (req: Request) => {
+  const client = getClient(db, String(req.params.id));
+  const b = req.body || {};
+  return { client, b, track: destinationTrack(b.track), entryKey: String(b.areaEntry ?? ""), authorityKey: String(b.authorityKey ?? "") };
+};
+app.put("/api/clients/:id/service-area/filing-destinations", asyncHandler(async (req, res) => {
+  const { client, b, track, entryKey, authorityKey } = areaDecisionInput(req);
+  const by = await destinationPerson(req, "confirm where this filing goes");
+  const { decideFilingDestination, serviceAreaDecisionJob } = await import("./filingDestinationProposals");
+  let r;
+  try {
+    const job = serviceAreaDecisionJob(db, client, { entryKey, authorityKey, track });
+    r = decideFilingDestination(db, job, getSubmittalTracks(db, job), {
+      track, ...(b.proposalId ? { proposalId: String(b.proposalId) } : {}),
+      kind: String(b.kind ?? "") as never, address: String(b.address ?? ""), ...(b.name ? { name: String(b.name) } : {}),
+      sourceUrl: String(b.sourceUrl ?? ""), quote: String(b.quote ?? ""),
+    }, by);
+  } catch (err) { destinationRefusal(err); }
+  res.json(r);
+}));
+app.post("/api/clients/:id/service-area/filing-destinations/reject", asyncHandler(async (req, res) => {
+  const { client, b, track, entryKey, authorityKey } = areaDecisionInput(req);
+  const by = await destinationPerson(req, "reject this proposed destination");
+  const { rejectFilingDestination, serviceAreaDecisionJob } = await import("./filingDestinationProposals");
+  let r;
+  try {
+    const job = serviceAreaDecisionJob(db, client, { entryKey, authorityKey, track });
+    r = rejectFilingDestination(db, job, getSubmittalTracks(db, job), { track, proposalId: String(b.proposalId ?? ""), reason: b.reason ? String(b.reason) : "" }, by);
+  } catch (err) { destinationRefusal(err); }
+  res.json(r);
+}));
+app.delete("/api/clients/:id/service-area/filing-destinations/reject", asyncHandler(async (req, res) => {
+  const { client, b, track, entryKey, authorityKey } = areaDecisionInput(req);
+  const by = await destinationPerson(req, "offer this proposed destination again");
+  const { withdrawDestinationRejection, serviceAreaDecisionJob } = await import("./filingDestinationProposals");
+  let r;
+  try {
+    const job = serviceAreaDecisionJob(db, client, { entryKey, authorityKey, track });
+    r = withdrawDestinationRejection(db, job, { track, proposalId: String(b.proposalId ?? "") }, by);
+  } catch (err) { destinationRefusal(err); }
+  res.json(r);
+}));
+
 // WHICH STORAGE MODES THIS PROJECT'S UTILITY TAKES NO APPLICATION FOR (#673 item 3;
 // utilityStorageModes.ts). Same tenancy and keying as the utility-filing routes above: the record is
 // shared knowledge on the utility's filing row, keyed by the project's own state + utility. A NAMED
