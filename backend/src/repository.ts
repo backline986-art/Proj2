@@ -411,7 +411,7 @@ function nemTrackExemptionFromRow(row: ProjectRow): { nemTrackExemption?: NemTra
   return state && typeof state === "object" && (state.drop || state.keptBy) ? { nemTrackExemption: state } : {};
 }
 
-function mapProject(row: ProjectRow): ProjectRecord {
+export function mapProject(row: ProjectRow): ProjectRecord {
   const parserSnapshot = parseJson<ParserPayload>(row.parser_json, {});
   return {
     id: row.id,
@@ -461,7 +461,7 @@ function mapProject(row: ProjectRow): ProjectRecord {
     // THE OPERATOR'S PER-TRACK ISSUER (split issuer): flat snapshot keys, mapped here so every
     // ProjectRecord carries it; no key at all when none is set. Read only via permitProcess.trackIssuer.
     ...withTrackIssuers(parserSnapshot),
-    // THE UTILITY TRACK QC DROPPED ON A PERSON'S RECORD (draft 10, v73). Mapped here so requiredTracks
+    // THE UTILITY TRACK QC DROPPED ON A PERSON'S RECORD (draft 10, v74). Mapped here so requiredTracks
     // — which has no db — reads it at every door; no key at all when nothing is dropped or kept.
     ...nemTrackExemptionFromRow(row),
     assignedUserId: row.assigned_user_id ?? null,

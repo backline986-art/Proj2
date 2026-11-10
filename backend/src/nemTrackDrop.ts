@@ -3,7 +3,7 @@
 //
 // The strict default stands: every job with a utility files an interconnection application. A track
 // comes off ONE job only when ALL of these hold, decided here at each QC run and stamped on the job
-// (projects.nem_track_exemption_json, v73) so requiredTracks() — the one predicate every door asks,
+// (projects.nem_track_exemption_json, v74) so requiredTracks() — the one predicate every door asks,
 // through utilityStorageModes.nemTrackDropFor — reads it without a db:
 //   - the job adds no new PV and its battery mode is classified (nemStorageExemption);
 //   - the utility's storage record that lists that mode is a PERSON's: tier "person", a named
