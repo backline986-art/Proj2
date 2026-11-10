@@ -517,8 +517,13 @@ await check("B4 MUST-PASS: the stale VERIFIED Oregon row gets a proposal from th
   assert.match(String(byFamily.fire?.proposed), /^OFC 2025 \(2024 IFC\)/);
   assert.equal(byFamily.building?.current, null, "OSSC is missing from the verified row");
   assert.match(String(byFamily.building?.proposed), /^OSSC 2025/);
-  assert.equal(byFamily.residential, undefined, "ORSC 2023 (2021 IRC) already agrees with the row");
-  assert.equal(byFamily.electrical, undefined, "OESC 2023 already agrees with the row");
+  // ORSC 2023 (2021 IRC) agrees with the row's edition; the reference only adds its dates (#561),
+  // so the proposal is dates-only and never a different edition.
+  assert.equal(byFamily.residential?.datesOnly, true, "ORSC 2023 agrees with the row: only its dates are proposed");
+  assert.equal(byFamily.residential?.current, "ORSC 2023");
+  assert.match(String(byFamily.residential?.proposed), /^ORSC 2023 \(2021 IRC\), effective 2023-10-01/);
+  assert.equal(byFamily.electrical?.datesOnly, true, "OESC 2023 agrees with the row: only its effective date is proposed");
+  assert.equal(byFamily.electrical?.current, "OESC 2023");
   assert.ok(byFamily.fire.sourceUrl?.includes("oregon.gov/osfm"), "the proposal lost its official source");
   // Surfaced on the listing GET /api/code-profiles returns.
   assert.equal(CP.listCodeProfiles(db).find((p) => p.key === OR_KEY)?.editionProposals?.length, 1);
