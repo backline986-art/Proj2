@@ -122,6 +122,9 @@ ${letter}` });
     "(1) EXAMPLECELL BATTERY 13.5 KWH. BATTERY LOCATION: BEDROOM.",
     "(1) EXAMPLECELL BATTERY 13.5 KWH. BATTERY LOCATION: EXTERIOR WALL. BATTERY 12 IN FROM NEAREST WINDOW.",
   ]) for (const f of buildReviewerReport(mk({ hasBattery: "Yes", batteryModel: "EXC-13", planSetExtractedText: sheet })).findings) allProducibleIds.add(f.id);
+  // Modules below an emergency escape and rescue opening with no 36 in path (review-audit draft 08).
+  const eero = '36" FIRE ACCESS PATHWAY. 36" SETBACK FROM RIDGE. MODULES BELOW EERO ON ROOF PLANE 2.';
+  for (const f of buildReviewerReport(mk({ planSetExtractedText: eero }), { codeContext: buildCodeContext("OR", "City of Coos Bay", null), documentTexts: [{ label: "Plan set", text: eero }] }).findings) allProducibleIds.add(f.id);
 }
 for (const id of [...MEASURED_FINDING_IDS]) {
   check(`MUST PASS: ${id} is still a real finding this engine emits`, () => {

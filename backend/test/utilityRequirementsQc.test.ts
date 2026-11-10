@@ -39,6 +39,8 @@ const VARIANTS: Array<Record<string, string>> = [
   { splitPagesText: "E-1 SLD; PV-1 site plan; module spec; inverter spec", utilityUploadNotesText: "UL 1741 SB listed", meter: "123456", account: "1234567890" },
   { splitPagesText: "single line diagram, plot plan", utilityDownloadChecklistText: "microinverter cut sheet", projectDescriptionText: "smart inverter settings", ubAccountNumber: "1234567890" },
   { splitPagesText: "3-line diagram", ubMeterNumber: "654321", hasBattery: "yes", batteryQty: "1" },
+  // Added with the one-line SLD read: a package that names only a one-line diagram.
+  { splitPagesText: "PV-3 one-line diagram; PV-1 site plan; module spec; inverter spec", utilityUploadNotesText: "UL 1741 SB listed", meter: "123456", account: "1234567890" },
 ];
 const payloads: Array<Record<string, string>> = [];
 for (const utility of UTILITIES) for (const state of STATES) for (const v of VARIANTS) payloads.push({ state, utility, ahj: "City of Testville", dcKw: "8", ...v });
@@ -70,6 +72,15 @@ check("the Utah brand and the PGE package read from data (spot check)", () => {
   assert.deepEqual(ut.map((r) => r.ruleName), ["Rocky Mountain Power UL 1741 SB inverter settings", "Rocky Mountain Power meter photo requirement"]);
   const pge = evaluateBaselineRules({ state: "OR", utility: "PGE", ahj: "City of Testville" } as never).find((r) => r.ruleId === "pge-powerclerk-docs");
   assert.equal(pge?.message, "PGE package may be missing: SLD/3-line, site/plot plan, module spec, inverter spec, utility account.");
+});
+
+check("ONE-LINE IS AN SLD: a package naming its diagram 'one-line', 'one line', '1-line' or 'single-line' is not missing the SLD", () => {
+  for (const name of ["one-line diagram", "One Line Diagram", "PV-3 1-line", "single-line diagram"]) {
+    const rs = evaluateBaselineRules({ state: "OR", utility: "PGE", ahj: "City of Testville", splitPagesText: `${name}; site plan; module spec; inverter spec`, account: "1234567890" } as never);
+    assert.ok(!ids(rs).includes("pge-powerclerk-docs"), `${name}: ${rs.find((r) => r.ruleId === "pge-powerclerk-docs")?.message}`);
+  }
+  const none = evaluateBaselineRules({ state: "OR", utility: "PGE", ahj: "City of Testville", splitPagesText: "online permit; site plan; module spec; inverter spec", account: "1234567890" } as never);
+  assert.equal(none.find((r) => r.ruleId === "pge-powerclerk-docs")?.message, "PGE package may be missing: SLD/3-line.", "'online' is not a one-line diagram");
 });
 
 console.log("\na utility with no list: the strict default, as a warning that says so");
