@@ -34,6 +34,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { recorderRequestHeaders } from "../../portal-bot/src/recordRecipe";
+import { removeTempDir } from "./_tmpdir";
 
 const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "recorder-tokens-test-"));
 
@@ -446,6 +447,6 @@ try {
   two.server.kill();
 }
 
-fs.rmSync(tmpDir, { recursive: true, force: true });
+removeTempDir(tmpDir);
 console.log(failures === 0 ? "\nrecorderTokens: all checks passed" : `\nrecorderTokens: ${failures} FAILURE(S)`);
 process.exit(failures === 0 ? 0 : 1);

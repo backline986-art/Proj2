@@ -32,6 +32,8 @@ import http from "node:http";
 import type { AddressInfo } from "node:net";
 import os from "node:os";
 import path from "node:path";
+import { removeTempDir } from "./_tmpdir";
+import { fileURLToPath } from "node:url";
 
 const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "document-fetch-ssrf-"));
 process.env.AUTOPILOT_DB_PATH = path.join(tmpDir, "inproc.sqlite");
@@ -282,7 +284,7 @@ function freePortInBand(start: number, count: number): number {
 }
 const PORT = freePortInBand(5420, 20);
 const BASE = `http://127.0.0.1:${PORT}`;
-const REPO = path.resolve(path.dirname(new URL(import.meta.url).pathname), "../..");
+const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 const env: Record<string, string | undefined> = {
   ...process.env,
   AUTOPILOT_DB_PATH: path.join(tmpDir, "server.sqlite"),
@@ -357,7 +359,7 @@ try {
   server.kill();
   publicStub.close();
   privateStub.close();
-  fs.rmSync(tmpDir, { recursive: true, force: true });
+  removeTempDir(tmpDir);
 }
 
 if (failures) {

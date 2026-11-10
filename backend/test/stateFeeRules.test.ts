@@ -19,6 +19,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import type { ProjectRecord, WebLookupResult } from "../../shared/src/types";
+import { removeTempDir } from "./_tmpdir";
 
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), "state-fee-rules-"));
 process.env.AUTOPILOT_DB_PATH = path.join(dir, "test.sqlite");
@@ -234,7 +235,7 @@ console.log("\n6. the first-job trigger");
   process.env.FEE_RESEARCH = "off";
 }
 
-fs.rmSync(dir, { recursive: true, force: true });
+removeTempDir(dir);
 if (failures) { console.error(`\n${failures} check(s) failed`); process.exit(1); }
 console.log("\nstate fee rules: all checks passed");
 process.exit(0);

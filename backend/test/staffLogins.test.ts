@@ -28,6 +28,7 @@ import { execFileSync, spawn, type ChildProcess } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { removeTempDir } from "./_tmpdir";
 
 const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "staff-logins-test-"));
 
@@ -383,6 +384,6 @@ try {
   two.server.kill();
 }
 
-fs.rmSync(tmpDir, { recursive: true, force: true });
+removeTempDir(tmpDir);
 console.log(failures === 0 ? "\nstaffLogins: all checks passed" : `\nstaffLogins: ${failures} FAILURE(S)`);
 process.exit(failures === 0 ? 0 : 1);

@@ -33,6 +33,7 @@ import os from "node:os";
 import path from "node:path";
 import express from "express";
 import { isApiPath } from "../src/auth";
+import { removeTempDir } from "./_tmpdir";
 
 const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "api-path-case-test-"));
 
@@ -246,7 +247,7 @@ try {
   console.error(`  FAIL - setup\n         ${err instanceof Error ? err.stack : String(err)}`);
 } finally {
   server.kill();
-  fs.rmSync(tmpDir, { recursive: true, force: true });
+  removeTempDir(tmpDir);
 }
 
 if (failures) {

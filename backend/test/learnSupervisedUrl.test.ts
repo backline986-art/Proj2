@@ -19,6 +19,7 @@ import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "learn-supervised-url-"));
 const dbPath = path.join(tmpDir, "test.sqlite");
@@ -37,7 +38,7 @@ db.run(
   [projectId, now, now],
 );
 
-const repoRoot = path.resolve(path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, "$1")), "..", "..");
+const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url).replace(/^\/([A-Za-z]:)/, "$1")), "..", "..");
 const tsxCli = path.join(repoRoot, "node_modules", "tsx", "dist", "cli.mjs");
 const script = path.join(repoRoot, "scripts", "learn-supervised.ts");
 

@@ -10,6 +10,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import { infrastructureFailure, runValidity, type CellForInfra } from "./benchInfra";
+import { fileURLToPath } from "node:url";
 
 let failures = 0;
 const check = (label: string, fn: () => void): void => {
@@ -59,7 +60,7 @@ check("MUST-PASS: a normal run (real bot failures included) is measured", () => 
 // The real reports, when this checkout has them (the .probe scratch is not in git): after2.json is
 // NOT MEASURED; the healthy corrected baseline and the mid-stage after.json are measured.
 {
-  const dir = path.resolve(path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, "$1")), "../../../.probe/brar2-replay-engine");
+  const dir = path.resolve(path.dirname(fileURLToPath(import.meta.url).replace(/^\/([A-Za-z]:)/, "$1")), "../../../.probe/brar2-replay-engine");
   const load = (f: string): CellForInfra[] | null => {
     const p = path.join(dir, f);
     if (!fs.existsSync(p)) return null;
