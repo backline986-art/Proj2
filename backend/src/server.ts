@@ -127,6 +127,7 @@ import {
   createProject,
   updateProject,
   setProjectStatusByOperator,
+  setProjectClass,
   researchAndSaveAhj,
   researchAndSaveUtility,
   deleteProject,
@@ -186,6 +187,7 @@ import type { ClientResolution, EditionProposalDecisionResult, ParserExtractionR
 import { FINAL_SUBMIT_GATE_SENTENCE } from "../../shared/src/portalSafety";
 import { resolveListenHost } from "./listenHost";
 import { disableConsoleQuickEdit } from "./consoleQuickEdit";
+import { projectClassHoldReason } from "./projectClassHold";
 
 // First thing, before the first log line: a click in this window must never freeze the
 // server (#360). Runs only when stdout is a real Windows console; see consoleQuickEdit.ts.
@@ -527,6 +529,8 @@ app.post("/api/projects", (req, res) => {
   if (!client) {
     throw new HttpError(400, `No client "${clientId}" exists here. Pick the client this project is filed for from the Client / Contractor list, or create it first under Clients.`, { needsClient: true });
   }
+  // The intake form's "Job class" (#688) rides in the payload; createProject takes it as the
+  // class column, never a parser key.
   const created = createProject(db, payload, scope.orgId);
   // THE LOCAL PIPELINE RUNS ITSELF from here (operator ruling 2026-09-21): a freshly parsed
   // project queues QC -> doc package -> reviewer gate automatically, stopping cold at
@@ -1752,6 +1756,19 @@ app.post("/api/projects/:id/status", (req, res) => {
   res.json(detail);
 });
 
+// A PERSON SETS OR CONFIRMS THE JOB'S CLASS (#688; repository.setProjectClass). Named like every
+// decision that releases a hold: the signed-in person, or with sign-in off the `decidedBy` the
+// caller sends — a blank, placeholder or automation name is a 400 that writes nothing. Under
+// /api/projects/:id, so the project scope guard covers it.
+app.post("/api/projects/:id/class", asyncHandler(async (req, res) => {
+  const { isConfirmingPerson } = await import("./feeConfirm");
+  const by = namedPersonDecider(req, "decidedBy",
+    "Sign in to confirm the job's class.",
+    'Name the person confirming the job\'s class (type your name; "human", "operator" or a bot\'s name is not a person).',
+    isConfirmingPerson);
+  res.json(setProjectClass(db, String(req.params.id), { projectClass: String(req.body?.projectClass ?? ""), by }));
+}));
+
 app.get("/api/projects/:id/application-docs", (req, res) => {
   const pkg = getApplicationDocumentPackage(db, req.params.id);
   if (req.query.format === "html") {
@@ -2294,6 +2311,11 @@ app.post("/api/projects/:id/auto-learn", (req, res) => {
   // Fail fast on a bad project id — a 404 at enqueue time beats a failed job later.
   if (!db.get<{ id?: string }>("SELECT id FROM projects WHERE id = ?", [projectId])) {
     throw new HttpError(404, "Project not found.");
+  }
+  // …and on a job held by its class (#688): autoLearnPortal refuses it at its own door too.
+  const learnClassHold = projectClassHoldReason(db, projectId);
+  if (learnClassHold) {
+    throw new HttpError(409, `${learnClassHold} A held job is never used to learn a portal: its recording would replace the portal's residential recipe.`, { classHeld: true, reason: learnClassHold });
   }
   // RULE 5 BOTH WAYS + THE ENTITY, AT ENQUEUE — a 409 now beats a job that fails later (and
   // autoLearnPortal asks the same question again at its own door). The project's own recipe for
@@ -4198,7 +4220,9 @@ app.post("/api/projects/:id/submittal-tracks/:type/mark-submitted", asyncHandler
     const scoped = type === "nem"
       ? { scopeType: "utility" as const, state: detail.project.state, utility: detail.project.utility }
       : { scopeType: "ahj" as const, state: detail.project.state, ahj: detail.project.ahj, utility: detail.project.utility };
-    const draft = findAnyRecipeForProject(db, scoped);
+    // A job held by its class (#688) is not evidence that a residential draft works: its manual
+    // filing promotes nothing.
+    const draft = projectClassHoldReason(db, detail.project.id) ? null : findAnyRecipeForProject(db, scoped);
     if (draft) {
       // Eligibility-guarded (reached-review) promotion — a paused/partial or stale
       // abandoned recording must NOT be silently promoted by an unrelated manual submit.

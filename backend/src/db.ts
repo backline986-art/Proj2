@@ -3288,6 +3288,23 @@ const VERSIONED_MIGRATIONS: VersionedMigration[] = [
       addColumnIfMissing(db, "utility_filing_lookups", "storage_modes_json", "TEXT NOT NULL DEFAULT ''");
     },
   },
+  {
+    // NOTE FOR THE MERGE (#688): v68 is expected to be worker-673's (#673); this takes v69. Whichever
+    // lands out of order renumbers — nothing else here depends on the number.
+    version: 69,
+    name: "project_class",
+    up: (db) => {
+      // THE JOB'S CLASS (#688; shared/src/projectClass.ts). Every existing row is residential —
+      // the class every job has been worked as until now — and nothing about an existing row's
+      // automation changes unless its own evidence raises a "probably commercial" signal.
+      // project_class_confirmation: a named person's confirmation as JSON ({by, at, projectClass,
+      // signalKeys}); '' = nobody confirmed. Lifecycle-like columns written only by
+      // setProjectClass: not in the edit_version trigger's OF list (v51), so a class decision never
+      // refuses a teammate's open edit.
+      addColumnIfMissing(db, "projects", "project_class", "TEXT NOT NULL DEFAULT 'residential'");
+      addColumnIfMissing(db, "projects", "project_class_confirmation", "TEXT NOT NULL DEFAULT ''");
+    },
+  },
 ];
 
 /** v47 was edited in place while #218 was open (Helm's review at 0116f98a): a DB that ran an earlier

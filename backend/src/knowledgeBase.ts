@@ -37,6 +37,8 @@ import { isInformationalPageUrl, isUtilityPlatformUrl, portalHostOf } from "./po
 import { HttpError } from "./httpError";
 import { foreignKnownTenant, knownPowerClerkPortalFor, knownPowerClerkUtility, knownTenantOwner, pacifiCorpBrand, provablyDifferentUtility, sameUtilityEntity, utilityIdentityOf, type UtilityIdentity } from "./utilityIdentity";
 import { SECRET_DIGIT_CLASS, SECRET_SEPARATOR_DASHES, SECRET_SEPARATOR_INVISIBLE } from "../../shared/src/portalSafety";
+import { addAuditLog } from "./audit";
+import { projectClassHoldReason } from "./projectClassHold";
 
 type Row = Record<string, unknown>;
 
@@ -981,10 +983,34 @@ function upsertProjectFingerprint(db: AppDb, project: ProjectRecord): void {
 // the top of every project-sourced learn write: the project-event upsert below, the failure
 // example insert, the fingerprint, and the timeline sample. One predicate, read from the row.
 // ---------------------------------------------------------------------------
+//
+// THE CLASS GUARD (#688) rides the same predicate: a job held by its class — a commercial job, or one
+// whose own evidence says "probably commercial" and no person has confirmed — teaches NOTHING to the
+// shared rows. Every shared row here is a residential profile (its project_count, required
+// documents, confidence tier, timeline and failure examples are what every residential job reads),
+// and a 750 kW warehouse is not evidence about any of them. Nothing stored is deleted or rewritten;
+// the job simply is not counted. Once a person confirms it residential it learns like any other.
 export function isLearningExcluded(db: AppDb, projectId: string | null | undefined): boolean {
   if (!projectId) return false;
   const row = db.get<Row>("SELECT learning_excluded FROM projects WHERE id = ?", [projectId]);
-  return Number(row?.learning_excluded ?? 0) === 1;
+  if (Number(row?.learning_excluded ?? 0) === 1) return true;
+  return row ? projectClassHoldReason(db, projectId) !== null : false;
+}
+
+/** ONE AUDIT LINE when the class guard skips a project's learn (#688) — written by learnFromProject
+ *  (the learn every save runs), and only when the newest such line for the project does not already
+ *  say the same, so a held job saved twenty times leaves one line, not twenty. */
+function auditClassSkippedLearn(db: AppDb, projectId: string, eventType: string): void {
+  const reason = projectClassHoldReason(db, projectId);
+  if (!reason) return;
+  const last = db.get<Row>(
+    "SELECT details FROM audit_logs WHERE project_id = ? AND action = 'knowledge.learn_skipped_class_hold' ORDER BY created_at DESC, rowid DESC LIMIT 1",
+    [projectId],
+  );
+  let lastReason = "";
+  try { lastReason = String(JSON.parse(String(last?.details ?? "{}")).reason ?? ""); } catch { lastReason = ""; }
+  if (last && lastReason === reason) return;
+  addAuditLog(db, projectId, "system", "knowledge base", "knowledge.learn_skipped_class_hold", { eventType, reason });
 }
 
 /** upsertKnowledge for a PROJECT-sourced fact: null (nothing written) when the project is
@@ -1214,6 +1240,8 @@ function portalFromProject(project: ProjectRecord): { portalName: string; portal
 }
 
 export function learnFromProject(db: AppDb, project: ProjectRecord, eventType = "project.saved"): PermitUtilityKnowledgeProfile | null {
+  // A job held by its class teaches nothing (isLearningExcluded), and says so once (#688).
+  auditClassSkippedLearn(db, project.id, eventType);
   const portal = portalFromProject(project);
   // The utility's interconnection portal lands on the UTILITY's own row — never on the AHJ-keyed
   // row below (upsertKnowledge refuses it there too).
