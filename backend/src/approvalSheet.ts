@@ -14,6 +14,12 @@
 // assembles them — never from a second copy of that resolution. What the sheet adds is the cross-
 // check against the bill readings and the plan set's own equipment schedule.
 //
+// AND THIS FILING'S OPEN REVIEW ITEMS (review-audit draft 01, approvalReviewItems.ts): every reviewer
+// warning and submit-gate warning whose scope holds this track, and each unverified form mapping on a
+// form it files, the MEASURED ones and the form mappings first — the dashboard holds Approve until each
+// of those is ticked, the approve route refuses an approval without the ticks, and the run checks them
+// again. The sheet itself still only shows them.
+//
 // WHAT IT NEVER DOES:
 //   · Rule 1: it decides nothing. The approve request and the gate (mayClickFinalSubmit /
 //     automaticSubmitRefusals) are untouched; a mismatch here is shown, not enforced. Approving is
@@ -23,7 +29,7 @@
 //     is returned (belt and braces: no row is meant to carry one). Nothing here reaches a model.
 //   · It writes nothing (a read path; approvalSheet.test pins total_changes()).
 import type {
-  ApprovalSheet, ApprovalSheetIssue, ApprovalSheetRow, ApprovalSheetSource, ProjectRecord, SubmittalTrackType,
+  ApprovalSheet, ApprovalSheetIssue, ApprovalSheetRow, ApprovalSheetSource, ProjectRecord, SubmitGateCheck, SubmittalTrackType,
 } from "../../shared/src/types";
 import type { AppDb } from "./db";
 import { batteryStatus } from "./batteryServiceFeeder";
@@ -32,6 +38,8 @@ import { projectSecretValues } from "./projectSecrets";
 import { stagingFieldValues } from "./recipeStageGapsView";
 import { redactSecretValues } from "../../shared/src/portalSafety";
 import { parseStreetName, parseStreetNumber } from "../../portal-bot/src/addressParse";
+import { openReviewItems, planSetBinding, unverifiedFormMappings } from "./approvalReviewItems";
+import { getSubmitGateReport, reviewerGateReportFor } from "./repository";
 
 /** An account / meter number as the sheet shows it: the last 4 only. A value of 4 characters or
  *  fewer is not shown at all — its "last 4" would be the whole number. */
@@ -304,7 +312,21 @@ export function buildApprovalSheet(db: AppDb, project: ProjectRecord, track: Sub
   }
   for (const i of issues) i.text = scrub(i.text);
 
+  // ── OPEN REVIEW ITEMS OF THIS FILING (review-audit draft 01) ────────────────────────────────
+  // Every reviewer warning and submit-gate warning check whose scope holds THIS track, and every
+  // unverified form mapping on a form it files — the measured ones and the form mappings first, each
+  // to be ticked before Approve enables. Read from the gate's own report and form list; the sheet
+  // still decides nothing (the approve route and the run check the acknowledgements).
+  let gateChecks: SubmitGateCheck[] = [];
+  try { gateChecks = getSubmitGateReport(db, project.id).checks; } catch { gateChecks = []; }
+  const openItems = openReviewItems(reviewerGateReportFor(db, project).findings, unverifiedFormMappings(db, project), gateChecks, track);
+  for (const i of openItems) {
+    i.title = scrub(i.title);
+    i.text = scrub(i.text);
+    i.action = scrub(i.action);
+  }
+
   const order = { mismatch: 0, missing: 1, note: 2 } as const;
   issues.sort((a, b) => order[a.kind] - order[b.kind]);
-  return { projectId: project.id, track, category, rows, issues };
+  return { projectId: project.id, track, category, rows, issues, openItems, planSet: planSetBinding(db, project.id) };
 }
