@@ -61,7 +61,13 @@ const tasksNamed = async (pattern: string): Promise<number> => {
 // ---------------------------------------------------------------------------
 console.log("installers: -WhatIf prints the plan and registers nothing");
 const testPort = await freePort();
-let r = await ps(["-File", path.join(OPS, "install-autostart.ps1"), "-WhatIf", "-Port", String(testPort), "-TaskName", `${TEST_TASK}-server`]);
+// The installer refuses a start script that does not exist (its default, .probe\start-prod-pinned.cmd,
+// lives only on the production install, never in a checkout or CI), so the plan is asked for with
+// a stand-in of the same name: the check is the plan's shape, not that machine's file (#618).
+const standInStart = path.join(ISOLATED_CWD, "whatif", "start-prod-pinned.cmd");
+fs.mkdirSync(path.dirname(standInStart), { recursive: true });
+fs.writeFileSync(standInStart, "@echo off\r\nrem stand-in for the -WhatIf plan; never run\r\n");
+let r = await ps(["-File", path.join(OPS, "install-autostart.ps1"), "-WhatIf", "-Port", String(testPort), "-TaskName", `${TEST_TASK}-server`, "-StartScript", standInStart]);
 await check("install-autostart -WhatIf exits 0 with the full plan", () => {
   assert.equal(r.code, 0, r.out);
   assert.match(r.out, /action\s+powershell\.exe .*run-prod-supervised\.ps1" -Port \d+ -PollSeconds 30 -StartScript ".*start-prod-pinned\.cmd"/);
