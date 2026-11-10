@@ -1179,6 +1179,13 @@ app.post("/api/clients/:id/onboarding/decide", asyncHandler(async (req, res) => 
   const accept = body.acceptAll === true ? pendingOnboardingProposalIds(db, clientId) : body.accept;
   res.json(decideOnboardingProposals(db, clientId, { accept, reject: body.reject, edits: body.edits }, by));
 }));
+// A named person sets a client's "how we file there" answer aside (wrong, or the verified door
+// stands). The client's own row only: no door, no proposal source of the authority's is touched.
+app.post("/api/clients/:id/onboarding/filing-statements/:statementId/dismiss", asyncHandler(async (req, res) => {
+  const by = await onboardingDecider(req, "set a client's filing answer aside");
+  const { dismissFilingStatement } = await import("./clientFilingStatements");
+  res.json(dismissFilingStatement(db, String(req.params.id), String(req.params.statementId), by));
+}));
 app.get("/api/clients/:id/onboarding/files/:fileId", (req, res) => {
   const f = getOnboardingFile(db, String(req.params.id), String(req.params.fileId));
   res.setHeader("Content-Type", f.mime);
@@ -1194,15 +1201,23 @@ const onboardingPublic = [onboardingLimiter, (_req: Request, res: Response, next
   res.setHeader("Referrer-Policy", "no-referrer");
   next();
 }];
-app.get("/api/public/onboarding/:token", ...onboardingPublic, (req, res) => {
-  res.json(getOnboardingPublic(db, String(req.params.token)));
-});
-app.post("/api/public/onboarding/:token/draft", ...onboardingPublic, (req, res) => {
-  res.json(saveOnboardingDraft(db, String(req.params.token), req.body));
-});
-app.post("/api/public/onboarding/:token/submit", ...onboardingPublic, (req, res) => {
-  res.json(submitOnboarding(db, String(req.params.token), req.body));
-});
+// HOW THE CLIENT FILES IN EACH PLACE (clientFilingStatements.ts): the page asks about the authorities
+// the client's service area names, resolved as the Destinations queue resolves them. Names only go to
+// the page; an answer is stored as the client's word and shown to staff as a "client-supplied"
+// proposal in that queue. It is never a door: a named person confirms through the queue as before.
+const onboardingContext = async (): Promise<import("./clientOnboarding").OnboardingContext> => {
+  const { clientFilingAuthorities } = await import("./filingDestinationProposals");
+  return { filingAuthorities: (clientId, draftArea) => clientFilingAuthorities(db, clientId, draftArea) };
+};
+app.get("/api/public/onboarding/:token", ...onboardingPublic, asyncHandler(async (req, res) => {
+  res.json(getOnboardingPublic(db, String(req.params.token), await onboardingContext()));
+}));
+app.post("/api/public/onboarding/:token/draft", ...onboardingPublic, asyncHandler(async (req, res) => {
+  res.json(saveOnboardingDraft(db, String(req.params.token), req.body, await onboardingContext()));
+}));
+app.post("/api/public/onboarding/:token/submit", ...onboardingPublic, asyncHandler(async (req, res) => {
+  res.json(submitOnboarding(db, String(req.params.token), req.body, await onboardingContext()));
+}));
 app.post("/api/public/onboarding/:token/portal-logins", ...onboardingPublic, (req, res) => {
   res.json(requestOnboardingPortalLogins(db, String(req.params.token), req.body));
 });

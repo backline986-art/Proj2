@@ -26,6 +26,13 @@
 //     filing lookup (its cited portal, a with-permit method, or an email address in its words), and the
 //     utility's shipped cited door (utilityRequirements `filingDoor`, seeded into its KB row). A NEM
 //     destination is NEVER taken from an AHJ's row (rule 5: never the AHJ's row for the NEM track).
+//   · A CLIENT'S OWN WORD (clientFilingStatements.ts, the Company setup page) is one more source,
+//     "client_supplied": shown on THAT client's jobs and service area only, after the same refusals
+//     as every door (rule 5's fit, the information-page refusal, the filing-email address rules). It
+//     has no page of the authority's and no words from it, so it is never official and one-click
+//     Confirm is always refused: a person checks it and states it through Edit, as their own check.
+//     Where a person's record already names the door and the client says otherwise, the difference
+//     is listed under `conflicts` for a person; the verified record is never touched.
 //
 // WHAT CONFIRMING WRITES — THE EXISTING PERSON-VERIFIED RECORD, NOTHING NEW:
 //   · a permit portal  → saveVerifiedAhjProfile (verified permit_utility_knowledge row, portal_url);
@@ -58,12 +65,20 @@ import { assertOperatorPortalUrlFits, portalEntityEvidence } from "./portalRecip
 import { saveVerifiedAhjProfile, saveVerifiedUtilityProfile } from "./knowledgeBase";
 import { mapProject } from "./repository";
 import { handCheckPages, handCheckPagesFor, type HandCheckPage } from "./handCheckPages";
-import { serviceAreaAuthorities, type ClientServiceAreaEntry, type ServiceAreaAuthority } from "./clientServiceArea";
+import { clientJobNames, resolveServiceAreaEntry, serviceAreaAuthorities, serviceAreaEntryKey, type ClientServiceAreaEntry, type ServiceAreaAuthority } from "./clientServiceArea";
+import { filingStatementsFor, type FilingAuthorityOption, type FilingStatement, type HasAccount } from "./clientFilingStatements";
 
 const str = (v: unknown): string => (typeof v === "string" ? v.trim() : v == null ? "" : String(v).trim());
 
 export type DestinationKind = "portal" | "email" | "with_permit";
-export type DestinationSource = "reference" | "permit_lookup" | "utility_lookup";
+export type DestinationSource = "reference" | "permit_lookup" | "utility_lookup" | "client_supplied";
+
+/** What the client said beside the address: whether it holds an account there (never the login) and
+ *  an example record number. Present on a client-supplied proposal, and on a cited proposal the
+ *  client's own answer agrees with. */
+export interface ClientSuppliedNote { statementId: string; hasAccount: HasAccount; example: string; statedAt: string }
+/** A client's answer that differs from the destination a person already verified. */
+export interface DestinationConflict extends ClientSuppliedNote { kind: "portal" | "email"; address: string }
 
 export interface DestinationProposal {
   /** A fingerprint of the authority, kind, address, page and words: a changed source is a new proposal. */
@@ -87,6 +102,8 @@ export interface DestinationProposal {
   quoteNamesAddress: boolean;
   /** Why Confirm would be refused right now; empty = one click confirms it. */
   problems: string[];
+  /** The client's own answer names this address (from "client_supplied": it is the only source). */
+  clientSupplied?: ClientSuppliedNote;
 }
 
 export interface AuthorityDestinations {
@@ -101,6 +118,9 @@ export interface AuthorityDestinations {
   rejected: Array<{ id: string; kind: string; address: string; rejectedBy: string; rejectedAt: string; reason: string }>;
   /** Candidates that were NOT proposed, and why (not an official page, no words, no read time). */
   skipped: string[];
+  /** status verified only: this client's answers that differ from the verified destination. The
+   *  verified record stands; a person looks at the difference. Absent when there is none. */
+  conflicts?: DestinationConflict[];
 }
 
 /** A cited door candidate, before the official-page test. */
@@ -284,6 +304,51 @@ function confirmProblems(db: AppDb, authority: FilingAuthority, track: Submittal
   return out;
 }
 
+// ── A CLIENT'S OWN WORD AS A SOURCE (clientFilingStatements.ts) ─────────────────────────────────
+
+/** The id's source component for a client-supplied proposal (it has no page): the address alone
+ *  names it, so a rejection holds for the address whichever client says it. */
+const CLIENT_SUPPLIED_MARK = "client-supplied";
+const hostKey = (address: string): string => sourceHostOf(address).replace(/^www\./, "");
+const sameDestination = (kind: string, a: string, b: string): boolean =>
+  kind === "email" ? a.toLowerCase() === b.toLowerCase() : !!hostKey(a) && hostKey(a) === hostKey(b) && a.replace(/\/+$/, "").toLowerCase() === b.replace(/\/+$/, "").toLowerCase();
+const noteOf = (st: FilingStatement): ClientSuppliedNote => ({ statementId: st.id, hasAccount: st.hasAccount, example: st.example, statedAt: st.statedAt });
+
+/**
+ * Why a client's answer is NOT shown as a proposal (empty = it is): the refusals every door passes —
+ * rule 5 (the track's kind of portal, then hostFitsTrackAndEntity), the information-page refusal, and
+ * for an email the address rules of filingEmailRecordProblems (one address; never a personal mailbox).
+ * The rules that need the authority's page and words are the confirming person's (Edit). Reads only.
+ */
+export function clientStatementRefusals(db: AppDb, authority: FilingAuthority, track: SubmittalTrackType, st: Pick<FilingStatement, "kind" | "address">): string[] {
+  if (st.kind === "email") {
+    return filingEmailRecordProblems({ address: st.address, sourceUrl: "", quote: "", verifiedBy: "check", verifiedAt: "check" })
+      .filter((r) => /is not one email address|personal mailbox provider/.test(r));
+  }
+  const t = authority.kind === "utility" ? "nem" : track;
+  if (!trackSafeUrl(t, st.address)) return [authority.kind === "utility" ? "this is a permit portal, not a utility's (rule 5)" : "this is a utility interconnection portal, not a permit portal (rule 5)"];
+  if (isInformationalPageUrl(st.address)) return ["this address is an information page, not an application portal"];
+  try {
+    const entity = portalEntityEvidence(db, { scope: authority.kind === "utility" ? "utility" : "ahj", state: authority.state, name: authority.name });
+    const fit = hostFitsTrackAndEntity(t, entity, st.address, "operator");
+    return fit.fits ? [] : [fit.reason];
+  } catch (err) { return [`the portal fit check could not run: ${err instanceof Error ? err.message : String(err)}`]; }
+}
+
+/** This client's answers that DIFFER from what a person verified for the authority (its verified
+ *  filing email, its verified portals). An answer that names the verified destination is no conflict. */
+function statementConflicts(db: AppDb, authority: FilingAuthority, statements: FilingStatement[]): DestinationConflict[] {
+  if (!statements.length) return [];
+  const email = readFilingEmail(db, authority).record;
+  const verifiedEmail = email && !filingEmailRecordProblems(email).length ? email.address.toLowerCase() : "";
+  let portals: string[] = [];
+  try { portals = portalEntityEvidence(db, { scope: authority.kind === "utility" ? "utility" : "ahj", state: authority.state, name: authority.name })?.verifiedPortals ?? []; } catch { portals = []; }
+  const hosts = new Set(portals.map(hostKey).filter(Boolean));
+  return statements
+    .filter((st) => (st.kind === "email" ? st.address.toLowerCase() !== verifiedEmail : !hosts.has(hostKey(st.address))))
+    .map((st) => ({ ...noteOf(st), kind: st.kind, address: st.address }));
+}
+
 function rejectionsFor(db: AppDb, profileKey: string, kind: string): AuthorityDestinations["rejected"] {
   try {
     return db.query<Record<string, unknown>>(
@@ -329,8 +394,12 @@ export function filingDestinationsFor(
     const head = { kind: authority.kind, name: authority.name, state: authority.state, profileKey: authority.profileKey };
     const rejected = rejectionsFor(db, authority.profileKey, authority.kind);
     const verified = verifiedDestination(db, authority, views);
+    // THIS client's own answers about the authority (its jobs and its service area only: rule 6).
+    const statements = filingStatementsFor(db, str(project.clientId), authority);
     if (verified) {
-      out.push({ authority: head, tracks, status: "verified", verified, proposals: [], rejected, skipped: [] });
+      // A client answer NEVER replaces a person-verified door: a difference is shown, nothing more.
+      const conflicts = statementConflicts(db, authority, statements);
+      out.push({ authority: head, tracks, status: "verified", verified, proposals: [], rejected, skipped: [], ...(conflicts.length ? { conflicts } : {}) });
       continue;
     }
     let candidates: Candidate[];
@@ -368,6 +437,26 @@ export function filingDestinationsFor(
           ...(official ? [] : [`${sourceHostOf(c.sourceUrl)} is not a government host or a domain a person verified as ${authority.name}'s own, so one-click Confirm is not offered: open the page, then use Edit to record it as your own check`]),
           ...confirmProblems(db, authority, tracks[0], c),
         ],
+      });
+    }
+    for (const st of statements) {
+      // A cited proposal already names this address: the client's answer agrees with it, no second card.
+      const same = proposals.find((p) => p.kind === st.kind && sameDestination(st.kind, p.address, st.address));
+      if (same) { same.clientSupplied ??= noteOf(st); continue; }
+      const refused = clientStatementRefusals(db, authority, tracks[0], st);
+      if (refused.length) { skipped.push(`${st.address} (the client's own answer): ${refused.join("; ")}`); continue; }
+      const id = proposalId(authority.profileKey, { kind: st.kind, address: st.address, sourceUrl: CLIENT_SUPPLIED_MARK, quote: "" });
+      if (seen.has(id) || rejectedIds.has(id)) continue;
+      seen.add(id);
+      const shared = st.kind === "portal" ? bareSharedHostProblem(st.address, authority.name, "") : "";
+      proposals.push({
+        id, kind: st.kind, address: st.address, sourceUrl: "", sourceHost: "", quote: "", fetchedAt: st.statedAt, from: "client_supplied",
+        official: false, quoteNamesAddress: false,
+        problems: [
+          `the client told us this; it is not from a page of ${authority.name}'s own, so one-click Confirm is not offered: open the address, then use Edit to record the page you checked and its words as your own check`,
+          ...(shared ? [shared] : []),
+        ],
+        clientSupplied: noteOf(st),
       });
     }
     out.push({ authority: head, tracks, status: proposals.length ? "proposed" : "none", proposals, rejected, skipped });
@@ -575,9 +664,13 @@ export interface QueueAuthority {
   /** Pages that refused an automated read for this authority (data): a person checks them by hand. */
   handCheck: HandCheckPage[];
 }
+/** An authority a person ALREADY verified, where this client's own answer names a different
+ *  destination. The verified record stands; a person looks, then sets the answer aside or re-verifies. */
+export interface QueueConflict { authority: AuthorityDestinations["authority"]; verified: string; conflicts: DestinationConflict[] }
 export interface DestinationQueue {
-  clients: Array<{ clientId: string; clientName: string; authorities: QueueAuthority[] }>;
-  counts: { jobs: number; authorities: number; oneClick: number; editOnly: number; noProposal: number; handCheck: number; alreadyVerified: number; serviceArea: number };
+  /** `conflicts` is present only on a client that has one. */
+  clients: Array<{ clientId: string; clientName: string; authorities: QueueAuthority[]; conflicts?: QueueConflict[] }>;
+  counts: { jobs: number; authorities: number; oneClick: number; editOnly: number; noProposal: number; handCheck: number; alreadyVerified: number; serviceArea: number; conflicts: number };
 }
 
 // ── A CLIENT'S SERVICE AREA IN THE QUEUE (clientServiceArea.ts) ────────────────────────────────────
@@ -642,6 +735,40 @@ export function serviceAreaDecisionJob(
   return job;
 }
 
+/**
+ * THE AUTHORITIES THE COMPANY SETUP PAGE ASKS A CLIENT ABOUT: every permit issuer and utility its
+ * service area names — the stored area, plus the places it has typed on the page but staff have not
+ * accepted yet (`draftArea`) — resolved exactly as the queue resolves them (the in-memory job, the
+ * per-track issuer its own data names). Names and keys only: nothing about what is on file for any of
+ * them. Reads only.
+ */
+export function clientFilingAuthorities(db: AppDb, clientId: string, draftArea: readonly ClientServiceAreaEntry[] = []): FilingAuthorityOption[] {
+  let area: ServiceAreaAuthority[];
+  try { area = serviceAreaAuthorities(db, clientId); } catch { area = []; }
+  const have = new Set(area.map((a) => a.entryKey));
+  if (draftArea.length) {
+    let jobs: ReturnType<typeof clientJobNames> = { ahj: [], utility: [] };
+    try { jobs = clientJobNames(db, clientId); } catch { /* no jobs */ }
+    for (const e of draftArea.slice(0, 300)) {
+      if (have.has(serviceAreaEntryKey(e))) continue;
+      const r = resolveServiceAreaEntry(db, e, jobs);
+      if (r) { area.push(r); have.add(r.entryKey); }
+    }
+  }
+  const out = new Map<string, FilingAuthorityOption>();
+  for (const sa of area) {
+    const job = serviceAreaJob({ id: clientId }, sa);
+    for (const track of (sa.kind === "utility" ? ["nem"] : ["building", "electrical"]) as SubmittalTrackType[]) {
+      let a: FilingAuthority | null = null;
+      try { a = track !== "nem" && separateCounterFor(projectForTrack(job, track), track) ? null : authorityForTrack(job, track); } catch { a = null; }
+      if (!a || a.kind !== sa.kind) continue;
+      const key = `${a.kind}|${a.profileKey}`;
+      if (!out.has(key)) out.set(key, { key, kind: a.kind, name: a.name, state: a.state, profileKey: a.profileKey });
+    }
+  }
+  return [...out.values()].sort((x, y) => x.kind.localeCompare(y.kind) || x.state.localeCompare(y.state) || x.name.localeCompare(y.name));
+}
+
 /** The clients of the org that have a service area on file; `null` reads every org. Reads only. */
 function clientsWithServiceArea(db: AppDb, orgId: string | null): Array<{ id: string; name: string }> {
   const scope = orgId ? " AND org_id = ?" : "";
@@ -680,7 +807,12 @@ export function filingDestinationQueue(
   pages: readonly HandCheckPage[] = handCheckPages(),
 ): DestinationQueue {
   const verifiedKeys = new Set<string>();
-  const byClient = new Map<string, { clientId: string; clientName: string; authorities: Map<string, QueueAuthority> }>();
+  const byClient = new Map<string, { clientId: string; clientName: string; authorities: Map<string, QueueAuthority>; conflicts?: Map<string, QueueConflict> }>();
+  // A verified authority leaves the queue; this client's differing answer about it is kept beside it.
+  const noteConflict = (c: { conflicts?: Map<string, QueueConflict> }, key: string, g: AuthorityDestinations): void => {
+    if (!g.conflicts?.length) return;
+    (c.conflicts ??= new Map()).set(key, { authority: g.authority, verified: str(g.verified), conflicts: g.conflicts });
+  };
   let jobs = 0;
   for (const { project, clientName } of openJobsForQueue(db, orgId)) {
     let views;
@@ -695,7 +827,7 @@ export function filingDestinationQueue(
     byClient.set(clientId, c);
     for (const g of groups) {
       const key = `${g.authority.kind}|${g.authority.profileKey}`;
-      if (g.status === "verified") { verifiedKeys.add(key); continue; }
+      if (g.status === "verified") { verifiedKeys.add(key); noteConflict(c, key, g); continue; }
       const act: QueueAct = { projectId: project.id, track: g.tracks[0] };
       const a = c.authorities.get(key) ?? {
         authority: g.authority, tracks: [], status: "none" as const, proposals: [], rejected: [], skipped: [], jobs: [], open: act,
@@ -727,7 +859,7 @@ export function filingDestinationQueue(
         // Only the authority the entry names (its per-track issuer included, as on a real job).
         if (g.authority.kind !== sa.kind) continue;
         const key = `${g.authority.kind}|${g.authority.profileKey}`;
-        if (g.status === "verified") { verifiedKeys.add(key); continue; }
+        if (g.status === "verified") { verifiedKeys.add(key); noteConflict(c, key, g); continue; }
         const existing = c.authorities.get(key);
         if (existing) {
           // Already listed for this client: by one of its jobs (that listing wins), or by another entry.
@@ -745,7 +877,7 @@ export function filingDestinationQueue(
       }
     }
   }
-  const counts = { jobs, authorities: 0, oneClick: 0, editOnly: 0, noProposal: 0, handCheck: 0, alreadyVerified: 0, serviceArea: 0 };
+  const counts = { jobs, authorities: 0, oneClick: 0, editOnly: 0, noProposal: 0, handCheck: 0, alreadyVerified: 0, serviceArea: 0, conflicts: 0 };
   const clients: DestinationQueue["clients"] = [];
   const counted = new Set<string>();
   const jobKeys = new Set<string>();
@@ -764,7 +896,9 @@ export function filingDestinationQueue(
       else counts.noProposal++;
       if (a.handCheck.length) counts.handCheck++;
     }
-    if (authorities.length) clients.push({ clientId: c.clientId, clientName: c.clientName, authorities });
+    const conflicts = [...(c.conflicts?.values() ?? [])].sort((x, y) => x.authority.name.localeCompare(y.authority.name));
+    counts.conflicts += conflicts.length;
+    if (authorities.length || conflicts.length) clients.push({ clientId: c.clientId, clientName: c.clientName, authorities, ...(conflicts.length ? { conflicts } : {}) });
   }
   counts.alreadyVerified = verifiedKeys.size;
   // Waiting ONLY because a service area names it: no open job of any client listed here names it.

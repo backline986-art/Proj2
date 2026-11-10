@@ -124,6 +124,19 @@ async function main(): Promise<void> {
     const missingAfter = await page.locator("#checklist li").count();
     check(missingAfter < missingBefore, "the checklist shrinks as answers arrive", `${missingBefore} → ${missingAfter}`);
 
+    // HOW YOU FILE IN EACH PLACE: the saved place is listed; the row takes an address, a yes/no and an
+    // example number, and nothing that could hold a login.
+    await page.waitForSelector("#filingList [data-filing-row]", { timeout: 10000 }).catch(() => undefined);
+    check(await page.locator("#filingList [data-filing-row]").count() === 1, "the place just saved is listed under How you file", await page.textContent("#filingCard") || "");
+    check(/Fernhollow/.test(await page.textContent("#filingList [data-filing-row]") || ""), "the filing row names the place");
+    check(await page.locator("#filingCard input[type=password]").count() === 0 && await page.locator("#filingList [data-filing-row] input").count() === 2, "a filing row has an address and an example number, no login field");
+    await page.fill('#filingList [data-filing="address"]', "permits.fernhollow.example.gov/apply");
+    await page.selectOption('#filingList [data-filing="account"]', "yes");
+    await page.fill('#filingList [data-filing="example"]', "BLD-2026-00123");
+    await page.click("#saveBtn");
+    await page.waitForFunction(() => /^Saved\. You can come back/.test(document.getElementById("status")?.textContent || ""), null, { timeout: 10000 })
+      .catch(async () => check(false, "the filing answer saves without a problem", await page.textContent("#status") || ""));
+
     // Across sessions: a fresh page on the same link shows the draft.
     await page.reload({ waitUntil: "load" });
     await page.waitForSelector("#f_businessCity", { timeout: 15000 });
@@ -131,8 +144,11 @@ async function main(): Promise<void> {
       make: await page.inputValue("#f_standardDisconnectMake"),
       lic: await page.inputValue('[data-lic-row="0"] [data-lic="number"]'),
       area: await page.inputValue('[data-area-row="0"] [data-area="name"]'),
+      filing: await page.inputValue('#filingList [data-filing="address"]').catch(() => ""),
+      account: await page.inputValue('#filingList [data-filing="account"]').catch(() => ""),
     };
     check(persisted.make === "Examplecorp" && persisted.lic === "ZZ-C-4471" && persisted.area === "Fernhollow", "the draft survives a reload", JSON.stringify(persisted));
+    check(persisted.filing === "permits.fernhollow.example.gov/apply" && persisted.account === "yes", "the filing answer survives a reload", JSON.stringify(persisted));
 
     // Portal hand-off: the existing one-time credential link.
     await page.fill('#portalList [data-portal="name"]', "Fernhollow permits");
@@ -149,6 +165,10 @@ async function main(): Promise<void> {
     const after = await api(`/api/clients/${client.id}/onboarding`);
     const fields = after.proposals.map((p: { field: string }) => p.field).sort();
     check(JSON.stringify(fields) === JSON.stringify(["serviceArea", "standardDisconnectMake", "standardDisconnectModel", "stateLicenses"]), "the answers wait as client-supplied proposals", JSON.stringify(fields));
+    const said = (after.filingStatements || []).map((f: { kind: string; address: string; hasAccount: string; example: string }) => [f.kind, f.address, f.hasAccount, f.example]);
+    check(JSON.stringify(said) === JSON.stringify([["portal", "https://permits.fernhollow.example.gov/apply", "yes", "BLD-2026-00123"]]), "the filing answer is kept as the client's word", JSON.stringify(said));
+    const kbRows = JSON.stringify(await api("/api/knowledge-base"));
+    check(kbRows.length > 2 && !kbRows.includes("permits.fernhollow.example.gov"), "the client's address is in no knowledge row", kbRows.slice(0, 120));
     const record = (await api("/api/clients")).clients.find((c: { id: string }) => c.id === client.id);
     check(record.standardDisconnectMake === "" && (record.stateLicenses || []).length === 0, "the client record is unchanged until a person accepts", JSON.stringify({ make: record.standardDisconnectMake, lic: record.stateLicenses }));
     check(pageErrors.length === 0, "no uncaught page errors", pageErrors.join(" | "));

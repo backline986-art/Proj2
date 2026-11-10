@@ -524,7 +524,7 @@ export function alertStaffOnUnsortedIntake(
 
 /** The Company setup alert: the company's name (it is our client, not a homeowner) and how many
  *  answers wait for a person. Never a value the client typed. */
-export function clientOnboardingAlert(input: { companyName: string; proposals: number; files: number }): StaffEmail {
+export function clientOnboardingAlert(input: { companyName: string; proposals: number; files: number; filingAnswers?: number }): StaffEmail {
   const company = scrubStaffText(input.companyName || "A client", []);
   const n = Math.max(0, Math.floor(input.proposals));
   const f = Math.max(0, Math.floor(input.files));
@@ -538,6 +538,7 @@ export function clientOnboardingAlert(input: { companyName: string; proposals: n
       ["Client", company],
       ["Answers to review", String(n)],
       ["Certificates", String(f)],
+      ...(Number(input.filingAnswers) > 0 ? [["How they file", `${Math.floor(Number(input.filingAnswers))} answer(s), in Destinations to confirm`] as [string, string]] : []),
       ["Next", "open Clients, pick the company, and review Company setup."],
     ],
     action: { label: `Open ${BRAND}`, url: dashboardLink() },
@@ -548,7 +549,7 @@ export function clientOnboardingAlert(input: { companyName: string; proposals: n
  *  once. RULE 6: the org is the client row's own. Callers `void` it. */
 export function alertStaffOnClientOnboarding(
   db: AppDb,
-  input: { orgId: string; linkId: string; companyName: string; proposals: number; files: number },
+  input: { orgId: string; linkId: string; companyName: string; proposals: number; files: number; filingAnswers?: number },
 ): Promise<void> {
   try {
     const mail = clientOnboardingAlert(input);
