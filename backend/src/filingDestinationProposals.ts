@@ -55,6 +55,8 @@ import { shippedRecordFor, utilityPersonVerifiedHosts } from "./utilityRequireme
 import { hostFitsTrackAndEntity, isInformationalPageUrl, trackSafeUrl } from "./portalChannel";
 import { assertOperatorPortalUrlFits, portalEntityEvidence } from "./portalRecipes";
 import { saveVerifiedAhjProfile, saveVerifiedUtilityProfile } from "./knowledgeBase";
+import { mapProject } from "./repository";
+import { handCheckPages, handCheckPagesFor, type HandCheckPage } from "./handCheckPages";
 
 const str = (v: unknown): string => (typeof v === "string" ? v.trim() : v == null ? "" : String(v).trim());
 
@@ -503,4 +505,124 @@ export function withdrawDestinationRejection(
     authorityKind: authority.kind, authority: authority.name, state: authority.state, track: input.track, kind: str(row.kind), address: str(row.address), proposalId: str(input.proposalId),
   });
   return { withdrawn: true };
+}
+
+// ── THE QUEUE: EVERY AUTHORITY STILL TO CONFIRM, ACROSS THE ORG'S OPEN JOBS ─────────────────────
+//
+// "Destinations to confirm" (owner, 2026-11-10): since the door gate, every authority needs one named
+// person's Confirm or Verify before automation may file there. The track card does that one job at a
+// time; this lists, on one screen, every authority (each AHJ or per-track issuer, and each utility)
+// that an open job's outstanding track files with and whose door no person has verified, grouped by
+// client. Onboarding a client's ~20 authorities becomes one sitting.
+//
+// NOTHING NEW DECIDES OR WRITES HERE. Each authority's proposals are exactly what the job's own
+// filingDestinationsFor returns (the same function the track card reads), and every proposal carries
+// the job and track whose card shows it (`act`): the dashboard's Confirm / Edit / Reject send that
+// job's EXISTING routes (PUT / POST / DELETE /api/projects/:id/filing-destinations), unchanged, one
+// authority per named person's click. There is no bulk confirm and no new write path. Reading the queue
+// writes nothing (filingDestinationQueue.test pins total_changes() and the track views), and it reads
+// only the org it is handed (the route passes reqOrgFilter; rule 6).
+// Universal: no state, city, utility or portal is named; hand-check pages are per-authority DATA.
+
+export interface QueueAct { projectId: string; track: SubmittalTrackType }
+export interface QueueProposal extends DestinationProposal { act: QueueAct }
+export interface QueueAuthority {
+  authority: AuthorityDestinations["authority"];
+  /** Every outstanding track type, across the client's open jobs, that files with this authority. */
+  tracks: SubmittalTrackType[];
+  /** proposed: at least one proposal to Confirm or Edit; none: nothing on file to propose (Edit on a job). */
+  status: "proposed" | "none";
+  proposals: QueueProposal[];
+  rejected: Array<AuthorityDestinations["rejected"][number] & { act: QueueAct }>;
+  skipped: string[];
+  /** The open jobs that wait on this authority. */
+  jobs: Array<{ projectId: string; label: string; tracks: SubmittalTrackType[] }>;
+  /** The first such job and track: where a person opens the track card to state a destination by hand. */
+  open: QueueAct;
+  /** Pages that refused an automated read for this authority (data): a person checks them by hand. */
+  handCheck: HandCheckPage[];
+}
+export interface DestinationQueue {
+  clients: Array<{ clientId: string; clientName: string; authorities: QueueAuthority[] }>;
+  counts: { jobs: number; authorities: number; oneClick: number; editOnly: number; noProposal: number; handCheck: number; alreadyVerified: number };
+}
+
+/** The org's open jobs (not archived), newest last; `null` reads every org (superadmin), like every
+ *  scoped list. Reads only. */
+function openJobsForQueue(db: AppDb, orgId: string | null, limit = 500): Array<{ project: ProjectRecord; clientName: string }> {
+  const scope = orgId ? " AND p.org_id = ?" : "";
+  const rows = db.query<Record<string, unknown>>(
+    `SELECT p.*, COALESCE(c.company_name, '') AS queue_client_name FROM projects p LEFT JOIN clients c ON c.id = p.client_id
+      WHERE COALESCE(p.archived_at, '') = ''${scope} ORDER BY p.created_at ASC, p.id ASC LIMIT ?`,
+    orgId ? [orgId, limit] : [limit],
+  );
+  return rows.map((r) => ({ project: mapProject(r as never), clientName: str(r.queue_client_name) }));
+}
+
+const jobLabel = (p: ProjectRecord): string =>
+  [str(p.homeownerName), str(p.projectAddress) || str(p.city)].filter(Boolean).join(", ") || p.id;
+
+/**
+ * THE QUEUE, for one org. For each open job: its OUTSTANDING tracks (a track already submitted is not
+ * waiting on a door), read through the job's own filingDestinationsFor. An authority a person already
+ * verified (on any job's read) is left out and counted. Pure reads.
+ */
+export function filingDestinationQueue(
+  db: AppDb,
+  orgId: string | null,
+  readTracks: (project: ProjectRecord) => Array<{ type: SubmittalTrackType; channel?: string; channelBasis?: string; outstanding?: boolean }>,
+  pages: readonly HandCheckPage[] = handCheckPages(),
+): DestinationQueue {
+  const verifiedKeys = new Set<string>();
+  const byClient = new Map<string, { clientId: string; clientName: string; authorities: Map<string, QueueAuthority> }>();
+  let jobs = 0;
+  for (const { project, clientName } of openJobsForQueue(db, orgId)) {
+    let views;
+    try { views = readTracks(project).filter((t) => t.outstanding !== false); } catch { continue; }
+    if (!views.length) continue;
+    let groups: AuthorityDestinations[];
+    try { groups = filingDestinationsFor(db, project, views); } catch { continue; }
+    if (!groups.length) continue;
+    jobs++;
+    const clientId = str(project.clientId);
+    const c = byClient.get(clientId) ?? { clientId, clientName: clientName || (clientId ? clientId : "No client"), authorities: new Map<string, QueueAuthority>() };
+    byClient.set(clientId, c);
+    for (const g of groups) {
+      const key = `${g.authority.kind}|${g.authority.profileKey}`;
+      if (g.status === "verified") { verifiedKeys.add(key); continue; }
+      const act: QueueAct = { projectId: project.id, track: g.tracks[0] };
+      const a = c.authorities.get(key) ?? {
+        authority: g.authority, tracks: [], status: "none" as const, proposals: [], rejected: [], skipped: [], jobs: [], open: act,
+        handCheck: handCheckPagesFor(g.authority.kind, g.authority.state, g.authority.name, pages),
+      };
+      for (const t of g.tracks) if (!a.tracks.includes(t)) a.tracks.push(t);
+      a.jobs.push({ projectId: project.id, label: jobLabel(project), tracks: [...g.tracks] });
+      for (const p of g.proposals) if (!a.proposals.some((x) => x.id === p.id)) a.proposals.push({ ...p, act });
+      for (const r of g.rejected) if (!a.rejected.some((x) => x.id === r.id)) a.rejected.push({ ...r, act });
+      for (const s of g.skipped) if (!a.skipped.includes(s)) a.skipped.push(s);
+      a.status = a.proposals.length ? "proposed" : "none";
+      c.authorities.set(key, a);
+    }
+  }
+  const counts = { jobs, authorities: 0, oneClick: 0, editOnly: 0, noProposal: 0, handCheck: 0, alreadyVerified: 0 };
+  const clients: DestinationQueue["clients"] = [];
+  const counted = new Set<string>();
+  for (const c of [...byClient.values()].sort((x, y) => x.clientName.localeCompare(y.clientName))) {
+    // A verified read on ANY job means a person's record names the door: not waiting.
+    const authorities = [...c.authorities.entries()].filter(([k]) => !verifiedKeys.has(k)).map(([, a]) => a)
+      .sort((x, y) => x.authority.kind.localeCompare(y.authority.kind) || x.authority.state.localeCompare(y.authority.state) || x.authority.name.localeCompare(y.authority.name));
+    for (const a of authorities) {
+      const k = `${a.authority.kind}|${a.authority.profileKey}`;
+      if (counted.has(k)) continue; // shared across clients: counted once
+      counted.add(k);
+      counts.authorities++;
+      if (a.proposals.some((p) => !p.problems.length)) counts.oneClick++;
+      else if (a.proposals.length) counts.editOnly++;
+      else counts.noProposal++;
+      if (a.handCheck.length) counts.handCheck++;
+    }
+    if (authorities.length) clients.push({ clientId: c.clientId, clientName: c.clientName, authorities });
+  }
+  counts.alreadyVerified = verifiedKeys.size;
+  return { clients, counts };
 }

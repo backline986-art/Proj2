@@ -125,6 +125,7 @@
           <button id="openClientsBtn" class="secondary"><i data-lucide="building-2"></i><span>Clients</span></button>
           <button id="openUsersBtn" class="secondary"><i data-lucide="users"></i><span>Team</span></button>
           <button id="openKpiBtn" class="secondary"><i data-lucide="bar-chart-2"></i><span>KPIs</span></button>
+          <button id="openDestQueueBtn" class="secondary"><i data-lucide="map-pin-check"></i><span>Destinations to confirm</span></button>
           <button id="openKnowledgeBtn" class="secondary"><i data-lucide="brain"></i><span>Knowledge</span></button>
           <!-- A standalone tool: still shipping, just no longer competing with
                the pipeline for top-level space. -->
@@ -1642,6 +1643,24 @@
       </div>
       <div id="kpiBody" class="kpi-body">
         <p class="muted">Loading KPIs...</p>
+      </div>
+    </div>
+  </div>
+
+  <!-- DESTINATIONS TO CONFIRM: every authority the open jobs file with whose destination no person has
+       verified, grouped by client (GET /api/filing-destinations; filing-destination.js renderQueue).
+       Its Confirm / Edit / Reject are the track card's, on the job each proposal names. -->
+  <div id="destQueueModal" class="modal" hidden role="dialog" aria-modal="true" aria-labelledby="destQueueTitle">
+    <div class="modal-card modal-wide">
+      <div class="modal-head">
+        <h2 id="destQueueTitle">Destinations to confirm</h2>
+        <div class="actions">
+          <button id="refreshDestQueueBtn" class="secondary"><i data-lucide="refresh-cw"></i><span>Refresh</span></button>
+          <button id="closeDestQueueBtn" class="secondary"><i data-lucide="x"></i><span>Close</span></button>
+        </div>
+      </div>
+      <div id="destQueueBody" class="dest-queue-body">
+        <p class="muted">Loading…</p>
       </div>
     </div>
   </div>

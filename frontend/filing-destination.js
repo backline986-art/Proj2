@@ -51,8 +51,15 @@
     return `${esc(KIND[p.kind] || p.kind)}: <code>${esc(p.address)}</code>`;
   }
 
+  /** The job and track a button acts on: the queue's proposal carries its own (`act`, the job whose
+   *  track card shows it); on a track card it is that card's job (no project attribute) and first track. */
+  function actAttrs(d, item) {
+    const act = item && item.act && typeof item.act === 'object' ? item.act : null;
+    const track = act ? str(act.track) : ((d.tracks || [])[0] || '');
+    return `data-fd-track="${esc(track)}"${act ? ` data-fd-project="${esc(act.projectId)}"` : ''}`;
+  }
+
   function proposalHtml(d, p) {
-    const track = (d.tracks || [])[0] || '';
     const link = httpUrl(p.sourceUrl);
     const source = link
       ? `<a href="${esc(link)}" target="_blank" rel="noopener">${esc(p.sourceHost || link)}</a>`
@@ -64,7 +71,7 @@
     const problems = (p.problems || []).length
       ? `<p class="warn">Cannot be confirmed: ${esc(p.problems.join('; '))}</p>` : '';
     const disabled = (p.problems || []).length ? ' disabled' : '';
-    const attrs = `data-fd-track="${esc(track)}" data-fd-id="${esc(p.id)}"`;
+    const attrs = `${actAttrs(d, p)} data-fd-id="${esc(p.id)}"`;
     return `<div class="fd-proposal" data-fd-proposal="${esc(p.id)}">
   <div>${addressLine(p)} <span class="badge">Proposed — not yet confirmed</span></div>
   <div class="muted">From ${source} (${p.official === false ? 'not an official page: Edit only' : 'official page'}), read ${esc(day(p.fetchedAt))}, via the ${esc(FROM[p.from] || p.from)}.</div>
@@ -88,10 +95,9 @@
   }
 
   function rejectedHtml(d) {
-    const track = (d.tracks || [])[0] || '';
     if (!(d.rejected || []).length) return '';
     return `<details class="fd-rejected"><summary>${esc(d.rejected.length)} rejected proposal(s)</summary><ul>${d.rejected.map((r) =>
-      `<li><code>${esc(r.address || r.kind)}</code>, rejected by ${esc(r.rejectedBy)} on ${esc(day(r.rejectedAt))}${r.reason ? `: ${esc(r.reason)}` : ''} <button type="button" class="btn btn-link" data-fd-unreject data-fd-track="${esc(track)}" data-fd-id="${esc(r.id)}">Offer again</button></li>`).join('')}</ul></details>`;
+      `<li><code>${esc(r.address || r.kind)}</code>, rejected by ${esc(r.rejectedBy)} on ${esc(day(r.rejectedAt))}${r.reason ? `: ${esc(r.reason)}` : ''} <button type="button" class="btn btn-link" data-fd-unreject ${actAttrs(d, r)} data-fd-id="${esc(r.id)}">Offer again</button></li>`).join('')}</ul></details>`;
   }
 
   function skippedHtml(d) {
@@ -137,5 +143,56 @@
     return `Confirm where ${name} takes this filing?\n\n${what}\nRead on: ${p.sourceUrl}\n"${p.quote}"\n\nThis is recorded under your name as checked by a person. Nothing is filed or sent by this click.`;
   }
 
-  return { renderGroup, findProposal, confirmBody, editBody, confirmMessage, KIND };
+  // ── DESTINATIONS TO CONFIRM: every authority still waiting on a person, across the org's open jobs ──
+  // (GET /api/filing-destinations). The SAME proposal block, the same Confirm / Edit / Reject buttons;
+  // each button carries the job and track whose card shows that proposal (data-fd-project), so the
+  // click sends that job's existing route exactly as the track card does. No bulk action.
+
+  const AUTHORITY_KIND = { ahj: 'Permit issuer', utility: 'Utility' };
+
+  /** A page link's text: the address without its scheme or trailing slash. */
+  const pageLabel = (u) => httpUrl(u).replace(/^https?:\/\//i, '').replace(/\/$/, '');
+
+  function handCheckHtml(a) {
+    const pages = (a.handCheck || []).filter((h) => httpUrl(h.pageUrl));
+    if (!pages.length) return '';
+    return `<div class="fd-handcheck" data-fd-handcheck><strong>Check by hand</strong> <span class="muted">These pages refused an automated read, so what they say may be missing here. Open each in your browser; record what you find with Confirm, Edit or the job's Verify.</span><ul>${pages.map((h) =>
+      `<li><a href="${esc(httpUrl(h.pageUrl))}" target="_blank" rel="noopener">${esc(pageLabel(h.pageUrl))}</a> <span class="muted">(${esc(h.happened)}${h.recordedAt ? `, ${esc(h.recordedAt)}` : ''})</span>${h.check ? `: ${esc(h.check)}` : ''}</li>`).join('')}</ul></div>`;
+  }
+
+  const jobLink = (j) => `<a href="#/project/${esc(encodeURIComponent(str(j.projectId)))}">${esc(j.label || j.projectId)}</a>`;
+
+  function queueAuthorityHtml(a) {
+    const kind = AUTHORITY_KIND[a.authority.kind] || a.authority.kind;
+    const jobs = a.jobs || [];
+    const shown = jobs.slice(0, 5).map(jobLink).join(', ') + (jobs.length > 5 ? ` and ${esc(jobs.length - 5)} more` : '');
+    const proposals = (a.proposals || []).map((p) => proposalHtml(a, p)).join('');
+    const none = proposals ? '' : `<p class="warn" data-fd-none>Nothing on file to propose. Open ${jobs[0] ? jobLink(jobs[0]) : 'the job'} and state where ${esc(a.authority.name)} takes this filing on its track card.</p>`;
+    return `<div class="fd-block fd-queue-authority" data-fd-authority="${esc(a.authority.profileKey)}" data-fd-kind="${esc(a.authority.kind)}">
+  <div class="fd-head"><strong>${esc(a.authority.name)}</strong> <span class="badge">${esc(kind)}${a.authority.state ? `, ${esc(a.authority.state)}` : ''}</span> <span class="muted">${esc((a.tracks || []).join(', '))} · waiting: ${shown}</span></div>
+  ${handCheckHtml(a)}
+  ${proposals}${none}
+  ${rejectedHtml(a)}${skippedHtml(a)}
+</div>`;
+  }
+
+  /** The whole view. '' never: an empty queue says so. */
+  function renderQueue(q) {
+    const clients = (q && Array.isArray(q.clients)) ? q.clients : [];
+    const c = (q && q.counts) || {};
+    const lede = `<p class="fd-queue-lede">Each Confirm is one named person's click on one authority, recorded under your name. Nothing is filed or sent by these clicks. An authority is shared: confirming it here confirms it for every job that files there.</p>`;
+    if (!clients.length) {
+      return `${lede}<p class="muted" data-fd-queue-empty>Every authority your open jobs file with has a person-verified destination${c.alreadyVerified ? ` (${esc(c.alreadyVerified)} verified)` : ''}.</p>`;
+    }
+    const summary = `<p class="fd-queue-summary" data-fd-queue-summary><strong>${esc(c.authorities || 0)}</strong> ${(c.authorities || 0) === 1 ? 'authority waits' : 'authorities wait'} on a person: ${esc(c.oneClick || 0)} one-click, ${esc(c.editOnly || 0)} need Edit, ${esc(c.noProposal || 0)} with nothing to propose${c.handCheck ? `, ${esc(c.handCheck)} with pages to check by hand` : ''}. ${esc(c.alreadyVerified || 0)} already verified.</p>`;
+    return lede + summary + clients.map((cl) =>
+      `<section class="fd-queue-client" data-fd-client="${esc(cl.clientId)}"><h3>${esc(cl.clientName)} <span class="muted">(${esc((cl.authorities || []).length)})</span></h3>${(cl.authorities || []).map(queueAuthorityHtml).join('')}</section>`).join('');
+  }
+
+  /** The queue as the payload findProposal reads (every authority, flat). */
+  function queuePayload(q) {
+    return { destinations: ((q && q.clients) || []).flatMap((cl) => cl.authorities || []) };
+  }
+
+  return { renderGroup, findProposal, confirmBody, editBody, confirmMessage, KIND, renderQueue, queuePayload };
 });

@@ -1109,6 +1109,14 @@ body.recorder-needs-token .shared-server-note { display: block; margin: 6px 0; p
 body.server-shared .local-disk-only,
 body.server-shared [data-track-open-recorder] { display: none !important; }
 
+/* Destinations to confirm (filing-destination.js renderQueue) */
+.dest-queue-body { padding: 20px; overflow-y: auto; }
+.fd-queue-client { margin-top: 16px; }
+.fd-queue-client h3 { margin: 0 0 8px; }
+.fd-queue-authority { border: 1px solid var(--line); border-radius: var(--radius-sm); padding: 10px 12px; margin-bottom: 10px; }
+.fd-handcheck { margin: 6px 0; padding: 6px 9px; border: 1px dashed var(--line); border-radius: var(--radius-sm); }
+.fd-handcheck ul { margin: 4px 0 0 18px; padding: 0; }
+
 /* KPI dashboard */
 .kpi-body { padding: 20px; overflow-y: auto; }
 .kpi-period { font-size: 13px; color: var(--muted); margin-bottom: 16px; }

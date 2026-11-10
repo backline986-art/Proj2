@@ -2705,6 +2705,16 @@ const destinationRefusal = (err: unknown): never => {
   }
   throw err;
 };
+// DESTINATIONS TO CONFIRM (owner, 2026-11-10): every authority an open job of the caller's org files
+// with and whose door no person has verified, grouped by client — one screen instead of one track
+// card at a time. A READ: it writes nothing and adds no write path. Each proposal names the job and
+// track whose card shows it, and the dashboard's Confirm / Edit / Reject send THAT job's routes above
+// and below, unchanged. A new top-level path, so it is tenant-scoped here (reqOrgFilter) and declared
+// in routeScope.test.
+app.get("/api/filing-destinations", asyncHandler(async (req, res) => {
+  const { filingDestinationQueue } = await import("./filingDestinationProposals");
+  res.json(filingDestinationQueue(db, reqOrgFilter(db, req), (project) => getSubmittalTracks(db, project)));
+}));
 app.get("/api/projects/:id/filing-destinations", asyncHandler(async (req, res) => {
   const { project } = getProjectDetail(db, String(req.params.id));
   const { filingDestinationsFor } = await import("./filingDestinationProposals");
