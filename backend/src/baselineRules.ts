@@ -691,7 +691,9 @@ const QC_SHOWN: Record<UtilityRequirementKey, (t: QcReadInput) => boolean> = {
   meter_photo: ({ payload }) => Boolean(str(payload, "meter") || str(payload, "ubMeterNumber")),
   inverter_settings: ({ split, notes }) => hasAny(`${split}\n${notes}`, [/UL\s*1741\s*SB/i, /inverter settings/i, /smart inverter/i]),
   inverter_listing_ul1741sb: ({ split, notes }) => hasAny(`${split}\n${notes}`, [/UL\s*1741\s*SB/i]),
-  one_line: ({ split }) => hasAny(split, [/SLD/i, /3-line/i, /single line/i]),
+  // A ONE-LINE DIAGRAM IS AN SLD: "one-line", "one line", "1-line" and "single-line" name the same sheet,
+  // so a package that calls it only that must not read as missing it.
+  one_line: ({ split }) => hasAny(split, [/SLD/i, /3-line/i, /single line/i, /\b(?:one|1|single)[\s-]line\b/i]),
   site_plan: ({ split }) => hasAny(split, [/site/i, /plot/i]),
   module_spec: ({ split }) => hasAny(split, [/module/i]),
   inverter_spec: ({ split }) => hasAny(split, [/inverter/i, /microinverter/i]),
