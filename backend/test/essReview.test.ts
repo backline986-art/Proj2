@@ -277,6 +277,17 @@ await check("the verify route's schema keeps ESS rules and each citation's field
   assert.equal(b.citations[0].field, "essRules.maxAggregateKwhGarage");
 });
 
+await check("the verify panel shows a row's ESS rules and sends them, so a person never locks rules they were not shown", async () => {
+  const { createRequire } = await import("node:module");
+  const panel = createRequire(import.meta.url)("../../frontend/code-profile-verify.js") as { renderVerifyPanel: (p: unknown) => string };
+  const html = panel.renderVerifyPanel(profile({ essRules: { maxAggregateKwhGarage: 40 }, citations: [{ ...CITED_GARAGE_40, tier: "official", fetchedAt: "2026-11-09T12:00:00Z" } as never] }));
+  assert.match(html, /Battery \/ ESS rules/);
+  assert.match(html, /Max aggregate kwh garage:<\/b> 40/i);
+  assert.match(html, /data-official-source="maxAggregateKwhGarage"/);
+  assert.match(html, /&quot;essRules&quot;: \{/);
+  assert.doesNotMatch(panel.renderVerifyPanel(profile()), /Battery \/ ESS rules/, "no section when the row records none");
+});
+
 fs.rmSync(tmpDir, { recursive: true, force: true });
 if (failures) { console.error(`\n${failures} ESS review check(s) FAILED.`); process.exit(1); }
 console.log("\nAll ESS review checks passed.");
