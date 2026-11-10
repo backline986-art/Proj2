@@ -103,7 +103,7 @@ await check("reference: one seeded AHJ code row — Title 18 editions, IFC confl
   assert.match(ifc.notes ?? "", /15A-5-103/);
   assert.deepEqual(
     { ...codeRow!.designCriteria, sourceUrl: undefined },
-    { groundSnowLoadPsf: 31, windSpeedMph: 103, seismicDesignCategory: "D2", frostDepthIn: 30, sourceUrl: undefined },
+    { groundSnowLoadPsf: 31, roofSnowLoadPsf: 30, windSpeedMph: 103, seismicDesignCategory: "D2", frostDepthIn: 30, sourceUrl: undefined },
   );
   assert.match(codeRow!.designCriteria.sourceUrl ?? "", /\/213\/Design-Criteria$/);
   assert.ok(codeRow!.citations.some((c) => /103 \[51\]/.test(c.label)), "the wind value is recorded verbatim with its note");

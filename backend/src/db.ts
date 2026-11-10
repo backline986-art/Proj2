@@ -3265,9 +3265,49 @@ const VERSIONED_MIGRATIONS: VersionedMigration[] = [
     },
   },
   {
-    // Next free number on this branch's base. #673 (and #688) were open with their own: whichever
-    // merges second renumbers above the first (migrationVersions.test.ts enforces 1..n, no gaps).
     version: 68,
+    name: "job_scope_and_storage_modes",
+    up: (db) => {
+      // WHAT THE JOB INSTALLS, AS A PERSON SET IT (#673, backend/src/jobScope.ts): one row per
+      // project — pv / pv+storage / storage-added-to-existing-pv / storage-only — written only by
+      // PUT /api/projects/:id/job-scope with a named person. Never by the parser or a model: a
+      // storage scope drops the PV module blockers, so the parser's guess cannot set it.
+      // Reaches an org through its project (no org_id).
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS project_job_scopes (
+          project_id TEXT PRIMARY KEY,
+          scope TEXT NOT NULL,
+          set_by TEXT NOT NULL,
+          set_at TEXT NOT NULL
+        );
+      `);
+      // WHICH STORAGE MODES THE UTILITY TAKES AN APPLICATION FOR (#673 item 3): a PERSON's cited
+      // record on the utility's filing row — { modesWithoutApplication, sourceUrl, quote, verifiedBy,
+      // verifiedAt } (utilityStorageModes.nemStorageExemption). Its own column, so a lookup's write
+      // (which replaces payload_json) never touches it (rule 3). Never written by a lookup or a model.
+      addColumnIfMissing(db, "utility_filing_lookups", "storage_modes_json", "TEXT NOT NULL DEFAULT ''");
+    },
+  },
+  {
+    // NOTE FOR THE MERGE (#688): v68 is expected to be worker-673's (#673); this takes v69. Whichever
+    // lands out of order renumbers — nothing else here depends on the number.
+    version: 69,
+    name: "project_class",
+    up: (db) => {
+      // THE JOB'S CLASS (#688; shared/src/projectClass.ts). Every existing row is residential —
+      // the class every job has been worked as until now — and nothing about an existing row's
+      // automation changes unless its own evidence raises a "probably commercial" signal.
+      // project_class_confirmation: a named person's confirmation as JSON ({by, at, projectClass,
+      // signalKeys}); '' = nobody confirmed. Lifecycle-like columns written only by
+      // setProjectClass: not in the edit_version trigger's OF list (v51), so a class decision never
+      // refuses a teammate's open edit.
+      addColumnIfMissing(db, "projects", "project_class", "TEXT NOT NULL DEFAULT 'residential'");
+      addColumnIfMissing(db, "projects", "project_class_confirmation", "TEXT NOT NULL DEFAULT ''");
+    },
+  },
+  {
+    // v70: after #673's v68 and #688's v69 (Helm's final numbering, 2026-11-10).
+    version: 70,
     name: "submission_payments_gate_collected",
     up: (db) => {
       // WHAT THE PER-SUBMISSION GATE ACTUALLY TOOK (#699). The gate used to ask for the

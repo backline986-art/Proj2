@@ -1,5 +1,5 @@
 import "dotenv/config";
-import { validate, portalCredentialCreateSchema, portalCredentialUpdateSchema, autoLearnSchema, codeProfileResearchSchema, codeProfileVerifySchema, permitProcessVerifySchema, reviewSubjectSchema, utilityFilingVerifySchema } from "./validation";
+import { validate, portalCredentialCreateSchema, portalCredentialUpdateSchema, autoLearnSchema, codeProfileResearchSchema, codeProfileVerifySchema, permitProcessVerifySchema, reviewSubjectSchema, utilityFilingVerifySchema, jobScopeSchema, utilityStorageModesSchema } from "./validation";
 import crypto from "node:crypto";
 import { spawn } from "node:child_process";
 import express, { type NextFunction, type Request, type Response } from "express";
@@ -127,6 +127,7 @@ import {
   createProject,
   updateProject,
   setProjectStatusByOperator,
+  setProjectClass,
   researchAndSaveAhj,
   researchAndSaveUtility,
   deleteProject,
@@ -172,6 +173,9 @@ import { createSignatureRequestApproval } from "./signatureRequestApproval";
 import { confirmSignatureRequestSent } from "./signatureTrack";
 import { getSubmittalTracks, markTrackSubmitted, requiredTracks, trackSubmittedAndTracked, trackSubmittedSentence, withPermitStageSentence } from "./submittalTracks";
 import { getUtilityFilingLookup, nemFiledWithPermit, verifyUtilityFilingLookup } from "./utilityFilingLookup";
+import { runQcForProject } from "./qc";
+import { personJobScope, setPersonJobScope } from "./jobScope";
+import { clearUtilityStorageModes, recordUtilityStorageModes } from "./utilityStorageModes";
 import { stagedReviewScreenshotFile } from "./stagedReviews";
 import { submissionConfirmationFile } from "./submissionConfirmation";
 import { reviewScreenshotFile } from "./reviewScreenshot";
@@ -183,6 +187,7 @@ import type { ClientResolution, EditionProposalDecisionResult, ParserExtractionR
 import { FINAL_SUBMIT_GATE_SENTENCE } from "../../shared/src/portalSafety";
 import { resolveListenHost } from "./listenHost";
 import { disableConsoleQuickEdit } from "./consoleQuickEdit";
+import { projectClassHoldReason } from "./projectClassHold";
 
 // First thing, before the first log line: a click in this window must never freeze the
 // server (#360). Runs only when stdout is a real Windows console; see consoleQuickEdit.ts.
@@ -524,6 +529,8 @@ app.post("/api/projects", (req, res) => {
   if (!client) {
     throw new HttpError(400, `No client "${clientId}" exists here. Pick the client this project is filed for from the Client / Contractor list, or create it first under Clients.`, { needsClient: true });
   }
+  // The intake form's "Job class" (#688) rides in the payload; createProject takes it as the
+  // class column, never a parser key.
   const created = createProject(db, payload, scope.orgId);
   // THE LOCAL PIPELINE RUNS ITSELF from here (operator ruling 2026-09-21): a freshly parsed
   // project queues QC -> doc package -> reviewer gate automatically, stopping cold at
@@ -1749,6 +1756,19 @@ app.post("/api/projects/:id/status", (req, res) => {
   res.json(detail);
 });
 
+// A PERSON SETS OR CONFIRMS THE JOB'S CLASS (#688; repository.setProjectClass). Named like every
+// decision that releases a hold: the signed-in person, or with sign-in off the `decidedBy` the
+// caller sends — a blank, placeholder or automation name is a 400 that writes nothing. Under
+// /api/projects/:id, so the project scope guard covers it.
+app.post("/api/projects/:id/class", asyncHandler(async (req, res) => {
+  const { isConfirmingPerson } = await import("./feeConfirm");
+  const by = namedPersonDecider(req, "decidedBy",
+    "Sign in to confirm the job's class.",
+    'Name the person confirming the job\'s class (type your name; "human", "operator" or a bot\'s name is not a person).',
+    isConfirmingPerson);
+  res.json(setProjectClass(db, String(req.params.id), { projectClass: String(req.body?.projectClass ?? ""), by }));
+}));
+
 app.get("/api/projects/:id/application-docs", (req, res) => {
   const pkg = getApplicationDocumentPackage(db, req.params.id);
   if (req.query.format === "html") {
@@ -2292,6 +2312,11 @@ app.post("/api/projects/:id/auto-learn", (req, res) => {
   if (!db.get<{ id?: string }>("SELECT id FROM projects WHERE id = ?", [projectId])) {
     throw new HttpError(404, "Project not found.");
   }
+  // …and on a job held by its class (#688): autoLearnPortal refuses it at its own door too.
+  const learnClassHold = projectClassHoldReason(db, projectId);
+  if (learnClassHold) {
+    throw new HttpError(409, `${learnClassHold} A held job is never used to learn a portal: its recording would replace the portal's residential recipe.`, { classHeld: true, reason: learnClassHold });
+  }
   // RULE 5 BOTH WAYS + THE ENTITY, AT ENQUEUE — a 409 now beats a job that fails later (and
   // autoLearnPortal asks the same question again at its own door). The project's own recipe for
   // this key is not evidence for the URL being judged.
@@ -2454,6 +2479,56 @@ app.put("/api/projects/:id/utility-filing/verify", (req, res) => {
     utility: project.utility, state: project.state, method: r.lookup?.filing?.value?.method ?? null, sourceUrl: r.lookup?.filing?.sourceUrl ?? "",
   });
   res.json({ lookup: r.lookup });
+});
+
+// WHICH STORAGE MODES THIS PROJECT'S UTILITY TAKES NO APPLICATION FOR (#673 item 3;
+// utilityStorageModes.ts). Same tenancy and keying as the utility-filing routes above: the record is
+// shared knowledge on the utility's filing row, keyed by the project's own state + utility. A NAMED
+// PERSON records it with the page and its words (rule 3: never a lookup, never a model, not the
+// official tier); DELETE withdraws it. QC re-runs so the job says what now stands.
+app.put("/api/projects/:id/utility-filing/storage-modes", (req, res) => {
+  const projectId = String(req.params.id);
+  const { project } = getProjectDetail(db, projectId);
+  const b = validate(utilityStorageModesSchema, req.body);
+  const verifiedBy = namedPersonDecider(req, "decidedBy",
+    "Sign in to record a utility's storage-mode rule.",
+    "Name the person recording it: a utility's storage-mode rule is recorded by a named person.");
+  const r = recordUtilityStorageModes(db, { state: project.state, utility: project.utility }, { modesWithoutApplication: b.modesWithoutApplication, sourceUrl: b.sourceUrl, quote: b.quote, verifiedBy });
+  if (!r.saved) throw new HttpError(r.reason.startsWith("No filing record") ? 409 : 400, r.reason);
+  addAuditLog(db, projectId, "human", verifiedBy, "utility_filing.storage_modes_recorded", { utility: project.utility, state: project.state, modes: b.modesWithoutApplication, sourceUrl: b.sourceUrl });
+  runQcForProject(db, projectId);
+  res.json({ record: r.record });
+});
+app.delete("/api/projects/:id/utility-filing/storage-modes", (req, res) => {
+  const projectId = String(req.params.id);
+  const { project } = getProjectDetail(db, projectId);
+  const verifiedBy = namedPersonDecider(req, "decidedBy",
+    "Sign in to withdraw a utility's storage-mode rule.",
+    "Name the person withdrawing it.");
+  clearUtilityStorageModes(db, { state: project.state, utility: project.utility });
+  addAuditLog(db, projectId, "human", verifiedBy, "utility_filing.storage_modes_withdrawn", { utility: project.utility, state: project.state });
+  runQcForProject(db, projectId);
+  res.json({ record: null });
+});
+
+// WHAT THE JOB INSTALLS, SET BY A PERSON (#673; jobScope.ts). Under /api/projects/:id, so it
+// inherits the tenancy guard (rule 6) and getProjectDetail 404s an unknown or out-of-scope project
+// first. A NAMED PERSON (namedPersonDecider) sets pv / pv+storage / storage-added-to-existing-pv /
+// storage-only, or clears it (null) so the plan set's evidence decides again. A storage scope never
+// drops a PV row on a job whose fields name new modules (jobScope.deriveJobScope: the evidence
+// wins, QC says so). QC re-runs at once so the rows match the scope.
+app.put("/api/projects/:id/job-scope", (req, res) => {
+  const projectId = String(req.params.id);
+  getProjectDetail(db, projectId);
+  const b = validate(jobScopeSchema, req.body);
+  const setBy = namedPersonDecider(req, "decidedBy",
+    "Sign in to set what this job installs.",
+    "Name the person setting the job scope: it decides which equipment QC checks.");
+  const before = personJobScope(db, projectId);
+  setPersonJobScope(db, projectId, b.scope, setBy);
+  addAuditLog(db, projectId, "human", setBy, b.scope ? "job_scope.set" : "job_scope.cleared", { from: before?.scope ?? null, to: b.scope });
+  runQcForProject(db, projectId);
+  res.json(getProjectDetail(db, projectId));
 });
 
 // THE EMAIL FILING CHANNEL (#667; filingEmail.ts). Under /api/projects/:id, so each inherits the
@@ -4145,7 +4220,9 @@ app.post("/api/projects/:id/submittal-tracks/:type/mark-submitted", asyncHandler
     const scoped = type === "nem"
       ? { scopeType: "utility" as const, state: detail.project.state, utility: detail.project.utility }
       : { scopeType: "ahj" as const, state: detail.project.state, ahj: detail.project.ahj, utility: detail.project.utility };
-    const draft = findAnyRecipeForProject(db, scoped);
+    // A job held by its class (#688) is not evidence that a residential draft works: its manual
+    // filing promotes nothing.
+    const draft = projectClassHoldReason(db, detail.project.id) ? null : findAnyRecipeForProject(db, scoped);
     if (draft) {
       // Eligibility-guarded (reached-review) promotion — a paused/partial or stale
       // abandoned recording must NOT be silently promoted by an unrelated manual submit.

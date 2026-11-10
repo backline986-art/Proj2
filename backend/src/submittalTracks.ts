@@ -49,6 +49,7 @@ import { trackPaymentView, type TrackPaymentView } from "./feePauseView";
 import { feeDueReadings, feePaidMarks, trackFeeDueFrom, type FeeDueReading } from "./feeDue";
 import { lastUnreadableByTarget } from "./lastUnreadable";
 import { projectSecretValuesById } from "./projectSecrets";
+import { projectClassHoldReason } from "./projectClassHold";
 
 /** Words that claim the statewide portal ("Oregon ePermitting", "OR E-permitting") with no URL —
  *  on a learned row, often the generic fallback's own words laundered in (portal-truth D2/D4). */
@@ -991,6 +992,9 @@ export function getSubmittalTracks(db: AppDb, project: ProjectRecord): Submittal
   const essStep = essPermitStep(project);
   // Every track's own state first: the NEM track of a with-permit utility (#664) follows the permits'.
   const states = new Map(required.map((type) => [type, readTrackState(db, project.id, type, required)] as const));
+  // THE CLASS HOLD (#688): one read for every card. A held job's cards say so and name no recipe
+  // (none on file was learned for a job like this one) — a read, like the rest of this view.
+  const classHold = projectClassHoldReason(db, project.id);
   const withPermit = utility?.filedWithPermit ?? null;
   const nemFollow = withPermit && !hasOwnTrackEvidence(states.get("nem")!)
     ? nemStatusFollowingPermit(required.filter((t) => t !== "nem").map((t) => deriveStatus(states.get(t)!)))
@@ -1005,7 +1009,8 @@ export function getSubmittalTracks(db: AppDb, project: ProjectRecord): Submittal
     const submittedEvidence = trackSubmittedAndTracked(db, project.id, type, required);
     const stageBlocked = submittedEvidence
       ? trackSubmittedSentence(submittedEvidence)
-      : type === "nem" && withPermit ? withPermitStageSentence(withPermit, project.utility) : "";
+      : type === "nem" && withPermit ? withPermitStageSentence(withPermit, project.utility)
+      : classHold ? classHold : "";
     // A PERMIT CARD IS ITS ISSUER'S (split issuer): channel, recipe and portal on file are the agency
     // that issues THIS track's permit — the same view staging stages with (projectForTrack; the
     // project itself when that is the project AHJ). The utility card: the project.
@@ -1039,7 +1044,9 @@ export function getSubmittalTracks(db: AppDb, project: ProjectRecord): Submittal
       r ? { id: r.id, status: s(r.status), portal_url: s(r.portalUrl) } : null;
     // #664: a with-permit NEM track has no portal of its own — no recipe, no portal URL (rule 5).
     const noPortal = type === "nem" && Boolean(withPermit);
-    const completeRecipe = noPortal ? null : findCompleteRecipeForProject(db, resolverInput);
+    // A held job (#688) replays no recipe, so its card names none.
+    const noRecipe = noPortal || Boolean(classHold);
+    const completeRecipe = noRecipe ? null : findCompleteRecipeForProject(db, resolverInput);
     let recipeRow: CardRecipe | null = cardRecipe(completeRecipe);
     // WHAT THAT RECIPE WILL FILL THAT THIS JOB HAS NO VALUE FOR (#445) — the stage gate's own reading,
     // shown before anyone clicks Stage. Only for a complete recipe of the track's own (what the next
@@ -1052,7 +1059,7 @@ export function getSubmittalTracks(db: AppDb, project: ProjectRecord): Submittal
     // entity on the same portal (portalRecipes.findBorrowableRecipe) and records it on the run
     // (result_json.borrowedRecipe). The card says which one THIS project's last run of this track used.
     let borrowedRecipe: SubmittalTrackView["borrowedRecipe"] = null;
-    if (!recipeRow && !noPortal) for (const r of db.query<Row>(
+    if (!recipeRow && !noRecipe) for (const r of db.query<Row>(
       `SELECT recipe_id, result_json, started_at FROM portal_runs
         WHERE project_id = ? AND permit_type IN (${family.map(() => "?").join(",")}) AND run_type = 'prepare_submit'
         ORDER BY started_at DESC, rowid DESC LIMIT 5`,
@@ -1070,7 +1077,7 @@ export function getSubmittalTracks(db: AppDb, project: ProjectRecord): Submittal
       const used = s(r.recipe_id) ? db.get<Row>("SELECT id, status, portal_url FROM portal_recipes WHERE id = ?", [s(r.recipe_id)]) : undefined;
       if (used) { recipeRow = { id: s(used.id), status: s(used.status), portal_url: s(used.portal_url) }; break; }
     }
-    if (!recipeRow && !borrowedRecipe && !noPortal) recipeRow = cardRecipe(findAnyRecipeForProject(db, resolverInput));
+    if (!recipeRow && !borrowedRecipe && !noRecipe) recipeRow = cardRecipe(findAnyRecipeForProject(db, resolverInput));
 
     // WHERE THE NEM TRACK STANDS BETWEEN THE SIGNATURE REQUEST AND THE FILING (#308, #310): the card
     // offers "Approve & request signatures" (and "I sent the signature request") only in front of

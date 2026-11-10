@@ -18,6 +18,8 @@
 //
 // FIRST MATCH WINS, in this order (derived from "who is stopped, and how badly"):
 //   1  operator_blocked        a person said stop — nothing else matters until lifted
+//   1b class_held              the job is commercial / probably commercial (#688) and still has a
+//                              filing to make: a person works it or confirms the class
 //   2  correction_overdue      an agency stopped a filing AND our clock ran out
 //   3  portal_paused           a live browser is waiting on a human at MFA/CAPTCHA
 //   4  automation_running      a staging/autopilot job is in flight — wait for it
@@ -80,6 +82,7 @@ import { visionRelaxedBlockers } from "./reviewerVision";
 import { startedAtLabel } from "./formAcquisitionPlan";
 import { paymentNeededForRun } from "./feePause";
 import { feeDueReadings, feePaidMarks, trackFeeDueFrom } from "./feeDue";
+import { projectClassStatusFor } from "./projectClassHold";
 import {
   getProjectDetail,
   getSubmitGateReport,
@@ -267,6 +270,9 @@ export interface NextStepFacts {
   ahj: string;
   utility: string;
   operatorHold: { reason: string; since: string | null } | null;
+  /** The job is held for a person by its class (#688; shared/src/projectClass.ts): a commercial job,
+   *  or "probably commercial" with nobody's confirmation. Optional so hand-built facts stay valid. */
+  classHold?: { reason: string; commercial: boolean } | null;
   openCorrections: CorrectionRecord[];
   /** step: what the job says it is doing right now (job_queue.progress_note — the automatic chain
    *  names each step), so the banner can show "Checking the AHJ's required official forms… (started
@@ -502,6 +508,11 @@ export function loadNextStepFacts(db: AppDb, projects: ProjectRecord[]): Map<str
       ahj: s(project.ahj).trim(),
       utility: s(project.utility).trim(),
       operatorHold,
+      classHold: (() => {
+        // The same read every door makes (projectClassHold — the stored row), never a second derivation.
+        const cs = projectClassStatusFor(db, pid);
+        return cs?.held && cs.holdReason ? { reason: cs.holdReason, commercial: cs.projectClass === "commercial" } : null;
+      })(),
       openCorrections: openCorr.get(pid) ?? [],
       jobInFlight: jobs.get(pid) ?? null,
       tracks,
@@ -574,6 +585,7 @@ export const NEXT_STEP_BUTTON_IDS = [
   "addPermitTargetBtn",
   "copyHandoffPacketBtn",
   "sendHandoffPacketBtn",
+  "confirmProjectClassBtn",
 ] as const;
 /** Every fixTarget id the rule table can emit — same test. */
 export const NEXT_STEP_FIX_TARGETS = [
@@ -589,6 +601,7 @@ export const NEXT_STEP_FIX_TARGETS = [
   "submittalTracks",
   "permitTargets",
   "paymentPanel",
+  "projectClassPanel",
 ] as const;
 type ButtonId = typeof NEXT_STEP_BUTTON_IDS[number];
 type FixTarget = typeof NEXT_STEP_FIX_TARGETS[number];
@@ -710,6 +723,19 @@ export function decideNextStep(facts: NextStepFacts): NextStep {
       "Blocked by an operator — nothing is staged or filed until the block is lifted.",
       [why(`Reason given: ${facts.operatorHold.reason}`, "statusOverrideWrap")],
       btn("applyStatusOverrideBtn", "Change status"), facts.operatorHold.since);
+  }
+
+  // 1b. The job is held for a person by its class (#688) while something is still to file: nothing
+  // below (QC, the gate, staging) is automation's to do. A commercial job a person filed by hand
+  // falls through to the tracking steps like any other.
+  if (facts.classHold && unfinished.length) {
+    return facts.classHold.commercial
+      ? make("class_held", "me", "today",
+        "Commercial job — held for a person. Automation does not stage, replay or file it; file it by hand.",
+        [why(facts.classHold.reason, "projectClassPanel")], null)
+      : make("class_held", "me", "today",
+        "Probably commercial — confirm the job's class. Automation holds it until a person does.",
+        [why(facts.classHold.reason, "projectClassPanel")], btn("confirmProjectClassBtn", "Confirm class"));
   }
 
   // 2. An agency stopped a filing and our clock ran out.

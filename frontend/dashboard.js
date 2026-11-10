@@ -60,6 +60,7 @@ const state = {
   // Which project the status-override panel is currently holding an unsent edit for.
   // Lets a background re-render keep a half-typed reason, and a project switch drop it.
   statusOverrideFor: null,
+  projectClassFor: null,
   knowledgeProfiles: [],
   ahjForms: [],
   signatures: [],
@@ -1361,6 +1362,7 @@ function renderProjectTable() {
 // reading(s)…"), so the chip's count is the server's count, never a second client tally.
 const NEXT_STEP_CHIP = {
   operator_blocked: { pill: "to_fix", tone: "danger", label: "Blocked" },
+  class_held: { pill: "to_fix", tone: "warning", label: "Held: class" },
   correction_overdue: { pill: "corrections", tone: "danger", label: "Correction overdue" },
   portal_paused: { pill: "to_fix", tone: "warning", label: "Portal paused" },
   payment_needed: { pill: "to_fix", tone: "warning", label: "Payment needed" },
@@ -3576,6 +3578,7 @@ const NEXT_STEP_BUTTON_LABELS = {
   addPermitTargetBtn: "Add tracking target",
   copyHandoffPacketBtn: "Copy handoff packet",
   sendHandoffPacketBtn: "Send handoff packet",
+  confirmProjectClassBtn: "Confirm class",
 };
 
 // Take the operator TO a control or panel: open every <details> it sits in (stage accordion,
@@ -3747,6 +3750,66 @@ function renderNextStep() {
 // round cannot reappear here, and `blocked` (whose only writer is this control)
 // cannot fall out of it by omission.
 const STATUS_OVERRIDE_EXCLUDED = ["handoff_ready"];
+
+// THE JOB'S CLASS PANEL (#688). Shows where the job stands (detail.classStatus — the same read every
+// automation door makes), the evidence behind a "probably commercial" flag, and the control a named
+// person uses to confirm it. Every value is esc()'d.
+function renderProjectClass() {
+  const panel = $("projectClassPanel");
+  if (!panel) return;
+  const detail = state.detail || {};
+  const project = detail.project;
+  const cs = detail.classStatus;
+  if (!project || !cs) { panel.hidden = true; state.projectClassFor = null; return; }
+  panel.hidden = false;
+  const summary = $("projectClassSummary");
+  const list = $("projectClassSignals");
+  const select = $("projectClassSelect");
+  const by = $("projectClassBy");
+  const confirmed = cs.confirmation
+    ? ` Confirmed ${esc(cs.confirmation.projectClass)} by ${esc(cs.confirmation.by)}${cs.confirmation.at ? ` on ${esc(String(cs.confirmation.at).slice(0, 10))}` : ""}.`
+    : "";
+  if (summary) {
+    summary.innerHTML = cs.projectClass === "commercial"
+      ? `<strong>Commercial job — held for a person.</strong> Automation does not stage, replay, file or learn from it.${confirmed}`
+      : cs.held
+        ? `<strong>Probably commercial — confirm class.</strong> Automation holds this job until a person confirms it.${confirmed}`
+        : `Residential.${confirmed}`;
+  }
+  if (list) {
+    const shown = cs.projectClass === "commercial" ? [] : (cs.unconfirmed || []);
+    list.innerHTML = shown.map((sig) => `<li>${sig.severity === "blocker" ? "<strong>Blocker:</strong> " : ""}${esc(sig.message)}</li>`).join("");
+    list.hidden = shown.length === 0;
+  }
+  // A half-typed name survives a background re-render of the same project (renderStatusOverride's idiom).
+  const sameProject = state.projectClassFor === project.id;
+  if (select && !sameProject) select.value = cs.projectClass === "commercial" ? "commercial" : "residential";
+  if (by && !sameProject) by.value = "";
+  state.projectClassFor = project.id;
+}
+
+async function confirmProjectClass() {
+  const projectId = state.selectedProjectId;
+  if (!projectId) return;
+  const projectClass = ($("projectClassSelect")?.value || "").trim();
+  const decidedBy = ($("projectClassBy")?.value || "").trim();
+  if (!projectClass) { showMessage("Pick the job's class.", "error"); return; }
+  const btn = $("confirmProjectClassBtn");
+  if (btn) btn.disabled = true;
+  try {
+    await api(`/api/projects/${projectId}/class`, { method: "POST", body: JSON.stringify({ projectClass, decidedBy }) });
+    state.projectClassFor = null;
+    await loadProjects();
+    await selectProject(projectId);
+    showMessage(projectClass === "commercial"
+      ? "Class set to commercial — the job is held for a person."
+      : "Class confirmed residential — recorded with your name.", "info");
+  } catch (err) {
+    showMessage(err.message || "Could not set the class.", "error");
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
 
 function renderStatusOverride() {
   const select = $("statusOverrideSelect");
@@ -4704,6 +4767,7 @@ function renderDetail() {
   safeRender("assignSelect", syncProjectAssignSelect);
   safeRender("nextStep", renderNextStep);
   safeRender("statusOverride", renderStatusOverride);
+  safeRender("projectClass", renderProjectClass);
   safeRender("handoffBanner", renderHandoffBanner);
   safeRender("permitForm", syncPermitForm);
   safeRender("workflow", renderWorkflow);
@@ -7280,16 +7344,59 @@ function qcCounts(results) {
   return { fails: verdicts.filter((v) => v === "fail").length, warnings: verdicts.filter((v) => v === "warning").length };
 }
 
+// WHAT THE JOB INSTALLS (#673). QC checks battery facts instead of module facts only on a storage
+// scope; the plan set settles it, or a named person sets it here. A storage scope on a job whose
+// fields still name new modules does not drop the module checks (the QC row says why).
+const JOB_SCOPE_LABELS = {
+  "pv": "New PV",
+  "pv+storage": "New PV with storage",
+  "storage-added-to-existing-pv": "Storage added to an existing PV system",
+  "storage-only": "Storage only",
+};
+function jobScopeHtml(view) {
+  if (!view) return "";
+  const basis = view.basis === "person" ? `set by ${esc(view.setBy || "a person")}` : view.basis === "plan_set" ? "from the plan set" : "default";
+  const options = [`<option value="">Plan set decides</option>`].concat(Object.entries(JOB_SCOPE_LABELS).map(([value, label]) =>
+    `<option value="${esc(value)}"${view.personScope === value ? " selected" : ""}>${esc(label)}</option>`)).join("");
+  return `<article class="item ${view.conflict ? "warning" : "info"}" id="jobScopeCard">
+      <div class="item-title"><span>Job scope: ${esc(JOB_SCOPE_LABELS[view.scope] || view.scope)} (${basis})</span></div>
+      <p>${esc(view.conflict || view.reason)}</p>
+      <p><label>Set it: <select id="jobScopeSelect">${options}</select></label>
+        <button type="button" class="secondary" id="jobScopeSave">Save scope</button></p>
+    </article>`;
+}
+async function saveJobScope() {
+  const select = $("jobScopeSelect");
+  if (!select || !state.selectedProjectId) return;
+  const scope = select.value || null;
+  const auth = await authForDecision();
+  const lede = scope
+    ? `Set this job's scope to "${JOB_SCOPE_LABELS[scope]}"? QC re-runs and checks the equipment that scope installs.`
+    : "Clear the job scope? The plan set's own evidence decides again.";
+  const decidedBy = namedPersonConsent(auth, lede, "set the job scope", "the job scope is set by a named person");
+  if (decidedBy == null) return;
+  try {
+    const detail = await api(`/api/projects/${state.selectedProjectId}/job-scope`, { method: "PUT", body: JSON.stringify({ scope, ...(decidedBy ? { decidedBy } : {}) }) });
+    if (detail && detail.project) state.detail = detail;
+    renderDetail();
+    showMessage("Job scope saved; QC re-ran.", "info");
+  } catch (err) {
+    showMessage(`Saving the job scope failed: ${err.message}`, "error");
+  }
+}
+
 function renderQc() {
   const results = state.detail.qcResults || [];
   const { fails, warnings } = qcCounts(results);
   $("qcCounts").textContent = `${fails} fail / ${warnings} warn`;
-  $("qcResults").innerHTML = results.length ? results.map((result) => `
+  $("qcResults").innerHTML = jobScopeHtml(state.detail.jobScope) + (results.length ? results.map((result) => `
     <article class="item ${esc(qcVerdict(result))}">
       <div class="item-title"><span>${esc(result.ruleName)}</span>${statusBadge(qcVerdict(result))}</div>
       <p>${esc(result.message)}</p>
     </article>
-  `).join("") : `<p class="muted">No QC results yet.</p>`;
+  `).join("") : `<p class="muted">No QC results yet.</p>`);
+  const save = $("jobScopeSave");
+  if (save) save.addEventListener("click", saveJobScope);
 }
 
 // Human-readable labels + a short "what to enter" hint for the QC review fields,
@@ -7331,6 +7438,17 @@ const REVIEW_FIELD_LABELS = {
   meter: ["Meter number", "the meter number from the plan set / bill / meter photo"],
   ubAccountNumber: ["Utility-bill account number", "the account number printed on the utility bill"],
   ubMeterNumber: ["Utility-bill meter number", "the meter number printed on the utility bill / meter photo"],
+  // Storage-scope rows (#673).
+  batteryMake: ["Battery make", "the battery manufacturer"],
+  batteryModel: ["Battery model", "the battery model number"],
+  batteryQty: ["Battery quantity", "the number of battery units"],
+  batteryCapacityKwh: ["Battery usable energy (kWh)", "the usable kWh of all units together"],
+  batteryOutputKw: ["Battery power (kW)", "the battery inverter / PCS continuous AC output in kW"],
+  essInverterModel: ["Battery inverter / PCS model", "the battery inverter or PCS model number"],
+  batteryMode: ["Battery operating mode", "export, non-export or backup-only"],
+  essBreaker: ["Battery breaker / OCPD (A)", "the backfed breaker the battery inverter lands on, in amps"],
+  existingDcKw: ["Existing PV system size (kW)", "the existing system's DC (or AC) size in kW"],
+  nemTariff: ["Existing system tariff", "the net-metering tariff the existing system is on"],
 };
 function camelToTitle(key) {
   return String(key || "")
@@ -10567,6 +10685,7 @@ $("startAutopilotBtn").addEventListener("click", startAutopilot);
 $("approveSubmitBtn").addEventListener("click", approveAndSubmit);
 $("deleteProjectBtn").addEventListener("click", deleteSelectedProject);
 $("applyStatusOverrideBtn")?.addEventListener("click", applyStatusOverride);
+$("confirmProjectClassBtn")?.addEventListener("click", confirmProjectClass);
 $("addCorrectionBtn").addEventListener("click", addCorrection);
 $("addPermitTargetBtn").addEventListener("click", addPermitTarget);
 $("recordPermitStatusBtn").addEventListener("click", () => recordPermitStatus("manual"));

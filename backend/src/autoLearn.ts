@@ -48,6 +48,7 @@ import { logger } from "./logger";
 import { ensurePlanSetSplit } from "./docSplitter";
 import { addAuditLog } from "./audit";
 import { HttpError } from "./httpError";
+import { projectClassHoldReason } from "./projectClassHold";
 import { expiredInfoPagePassFor, infoPagePriorProgress, isCleanInfoPageHold, liveInfoPagePasses, recordInfoPageCandidate, recordInfoPageHeldVerified, recordInfoPageLearnClean, recordInfoPageLearnStart, recordInfoPagePassIncidents, recordInfoPagePassUses, reserveInfoPagePassUse } from "./infoPages";
 import { formPurposeMismatch } from "./formPurpose";
 import { looksBotBlocked } from "./runAbort";
@@ -1039,6 +1040,22 @@ export async function autoLearnPortal(
 ): Promise<AutoLearnResult> {
   const projectRow = db.get<Record<string, unknown>>("SELECT * FROM projects WHERE id = ?", [projectId]);
   if (!projectRow) throw new HttpError(404, "Project not found.");
+  // THE LEARN DOOR REFUSES A JOB HELD BY ITS CLASS (#688) — first, before any recipe lookup, KB
+  // read, recording or browser. portal_recipes is unique on (profile_key, discipline) and a
+  // utility's key carries no class, so startPortalRecording on a commercial job would RESET that
+  // portal's residential recipe (and park its steps), and the learn would write the job's facts into
+  // the shared rows. Until recipes are keyed by class, a held job learns nothing, automatically or
+  // supervised (scripts/learn-supervised.ts calls this same function).
+  const learnClassHold = projectClassHoldReason(db, projectId);
+  if (learnClassHold) {
+    addAuditLog(db, projectId, "system", "auto-learn", "portal.learn_refused_class_hold", {
+      scope: input.scope, reason: learnClassHold,
+    });
+    throw new HttpError(409,
+      `${learnClassHold} A held job is never used to learn a portal: its recording would replace the portal's residential recipe. `
+      + "Learn the portal on a residential job, or confirm this job's class first if it really is residential.",
+      { classHeld: true, reason: learnClassHold });
+  }
   // getProjectDetail is the canonical mapper; import lazily to avoid a cycle. A caller may pass
   // a pre-overlaid project (staging self-seed); otherwise load the canonical record.
   const { getProjectDetail } = await import("./repository");

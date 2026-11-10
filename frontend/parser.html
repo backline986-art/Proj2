@@ -3960,6 +3960,8 @@ const LLM_SNAPSHOT_KEYS = new Set([
   // 310.15 conductor ampacity and voltage drop on the inverter output circuit.
   'invMaxDcInputV','siteHighTempC','acConductor','acConductorCount','acRunLengthFt',
   'batteryMake','batteryModel','batteryQty',
+  // Storage facts QC checks on a battery job, and the two sheet answers a storage scope needs (#673).
+  'batteryCapacityKwh','batteryOutputKw','essInverterModel','essBreaker','batteryMode','newModulesOnSchedule','newModulesOnSld',
   'roofMaterial','roofMaterialSubtype','tileAttachmentMethod','mounting',
   // Issued-permit precedents (permitPrecedents.ts, #147): the racking and roof-attachment products.
   'rackingSystem','attachmentHardware',

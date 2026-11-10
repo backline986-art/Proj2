@@ -174,6 +174,7 @@ import {
 import { linkLookupRanRecently, signedInOutcome, statusReadGap, type ReadGapFacts } from "./statusLinkGap";
 import { evidenceForTopic, evidenceLines, type EvidenceTopic } from "./projectEvidence";
 import { customerBillOnFile, runQcForProject, WAITING_ON_BILL_ISSUE_TYPE, type QcRunOptions } from "./qc";
+import { resolveJobScope } from "./jobScope";
 import { loadStoredTemplates, formAllowedForPath } from "./ahjForms";
 import { submissionDocumentsByType, uploadDocumentGuard } from "./submissionDocuments";
 import { disciplineFor } from "./docDiscipline";
@@ -188,6 +189,8 @@ import { isHarnessAbort, looksBotBlocked } from "./runAbort";
 import { finalSubmitEnvAllows, recipeShapeProblems, runApprovalRefusals } from "../../shared/src/portalSafety";
 import { PAGE_READ_MIN_GAP_MS } from "./agencyPageReader";
 import { parsePerJobPortalQuestion } from "../../shared/src/perJobQuestions";
+import { normalizeProjectClass, parseProjectClassConfirmation, servicePhaseOf, serviceVoltageOf } from "../../shared/src/projectClass";
+import { projectClassHoldReason, projectClassStatusFor } from "./projectClassHold";
 
 // THE ONE SEAM A TEST MAY STUB: the recipe-replay launcher prepareSubmission calls. Everything
 // around it — the gates, the run row, the outcome, the demotion, the heal write, the approval —
@@ -446,6 +449,12 @@ function mapProject(row: ProjectRow): ProjectRecord {
     // The edit version an editor saves against (#440, migration v51). Read via the cast, like
     // stage_detail, so row literals elsewhere keep compiling.
     editVersion: Number((row as Record<string, unknown>).edit_version ?? 0) || 0,
+    // THE JOB'S CLASS (#688, migration v67) and the person who confirmed it, read via the cast like
+    // stage_detail. The service phase / voltage are the parser's keys (legacy keys as fallbacks).
+    projectClass: normalizeProjectClass((row as Record<string, unknown>).project_class),
+    projectClassConfirmation: parseProjectClassConfirmation((row as Record<string, unknown>).project_class_confirmation),
+    servicePhase: servicePhaseOf(parserSnapshot as Record<string, unknown>),
+    serviceVoltage: serviceVoltageOf(parserSnapshot as Record<string, unknown>),
   };
 }
 
@@ -767,10 +776,21 @@ export function createProject(
   orgId: string = DEFAULT_ORG_ID,
   /** learningExcluded: a demo / benchmark / fixture project that must never teach the SHARED
    *  knowledge base (L3). Written in the INSERT, so even the birth learn below skips it. */
-  options: { learningExcluded?: boolean } = {},
+  options: {
+    learningExcluded?: boolean;
+    /** The class a person chose at intake (#688). Only "commercial" changes anything: it holds the
+     *  job for a person from birth (the birth learn below skips it too). */
+    projectClass?: string;
+  } = {},
 ): ProjectDetail {
   // A new project is parser/intake output: it never carries a human micro-supersession (#270).
-  const { [MICRO_SUPERSEDED_KEY]: _forgedMarker, ...parsed } = payload as Record<string, unknown>;
+  // THE INTAKE FORM'S "Job class" (#688) is the class column, never a parser key or an extracted field.
+  const { [MICRO_SUPERSEDED_KEY]: _forgedMarker, projectClass: intakeClass, ...parsed } = payload as Record<string, unknown>;
+  if (intakeClass !== undefined) {
+    const { projectClass: _class, ...rest } = payload as Record<string, unknown>;
+    payload = rest as ParserPayload;
+  }
+  const projectClass = options.projectClass ?? (typeof intakeClass === "string" ? intakeClass : undefined);
   const project = normalizeProject(id(), parsed as ParserPayload);
   db.transaction(() => {
     db.run(
@@ -778,8 +798,8 @@ export function createProject(
         id, client_id, homeowner_name, project_address, city, state, zip, ahj, utility,
         account_number, meter_number, system_size_dc_kw, system_size_ac_kw, total_export_kw,
         interconnection_method, status, current_stage, stage_detail, parser_confidence_summary, parser_json,
-        created_at, updated_at, org_id, learning_excluded
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        created_at, updated_at, org_id, learning_excluded, project_class
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         project.id,
         project.clientId,
@@ -808,6 +828,7 @@ export function createProject(
         project.updatedAt,
         orgId,
         options.learningExcluded ? 1 : 0,
+        normalizeProjectClass(projectClass),
       ],
     );
 
@@ -1092,6 +1113,42 @@ const OVERRIDABLE_STATUS: Record<ProjectStatus, "operator" | "computed"> = {
  * only lasting record of why the pipeline was overruled). Returns the refreshed detail so the
  * caller can re-render without a second read.
  */
+/**
+ * A PERSON SETS OR CONFIRMS THE JOB'S CLASS (#688). The only writer of project_class /
+ * project_class_confirmation after intake. `by` is a named person (the route's namedPersonDecider):
+ * the confirmation records exactly which "probably commercial" signals they confirmed against, so a
+ * later change in the evidence raises the flag again (shared/src/projectClass.ts).
+ *
+ * Confirming RESIDENTIAL releases the hold and lets the job teach the shared knowledge as any
+ * residential job does — the birth learn it skipped while held runs now. Setting COMMERCIAL holds
+ * it. Nothing stored about the job is deleted or rewritten; the decision is audited with its signals.
+ */
+export function setProjectClass(db: AppDb, projectId: string, input: { projectClass: string; by: string }): ProjectDetail {
+  const row = db.get<Row>("SELECT id FROM projects WHERE id = ?", [projectId]);
+  if (!row) throw new HttpError(404, "Project not found.");
+  const wanted = String(input.projectClass ?? "").trim().toLowerCase();
+  if (wanted !== "residential" && wanted !== "commercial") {
+    throw new HttpError(400, 'The class is "residential" or "commercial".');
+  }
+  const by = String(input.by ?? "").trim();
+  if (!by) throw new HttpError(400, "Name the person confirming the job's class.");
+  const before = projectClassStatusFor(db, projectId)!;
+  const ts = nowIso();
+  const confirmation = { by, at: ts, projectClass: wanted, signalKeys: before.signals.map((sig) => sig.key) };
+  db.run("UPDATE projects SET project_class = ?, project_class_confirmation = ?, updated_at = ? WHERE id = ?",
+    [wanted, JSON.stringify(confirmation), ts, projectId]);
+  addAuditLog(db, projectId, "human", by, "project.class_set", {
+    from: before.projectClass, to: wanted,
+    signals: before.signals.map((sig) => ({ code: sig.code, severity: sig.severity, message: sig.message })),
+  });
+  // QC carries the class flag (qc.ts); re-run it so the board reflects the decision now.
+  runQcForProject(db, projectId);
+  const detail = getProjectDetail(db, projectId);
+  // Released to residential: the learn the hold skipped (knowledgeBase.isLearningExcluded) runs now.
+  if (!projectClassHoldReason(db, projectId)) learnFromProject(db, detail.project, "project.class_confirmed");
+  return detail;
+}
+
 export function setProjectStatusByOperator(
   db: AppDb,
   projectId: string,
@@ -1438,6 +1495,9 @@ export function getProjectDetail(db: AppDb, projectId: string): ProjectDetail {
     submissions: db.query<Row>("SELECT * FROM submissions WHERE project_id = ? ORDER BY created_at DESC", [projectId]).map(mapSubmission),
     auditLogs: db.query<Row>("SELECT * FROM audit_logs WHERE project_id = ? ORDER BY created_at DESC LIMIT 100", [projectId]).map(mapAudit),
     projectNotes: db.query<Row>("SELECT * FROM project_notes WHERE project_id = ? ORDER BY created_at DESC LIMIT 50", [projectId]).map(mapProjectNote),
+    jobScope: resolveJobScope(db, projectId, project.parserSnapshot),
+    // THE CLASS HOLD AS EVERY DOOR READS IT (#688) — for the project page's class panel.
+    classStatus: projectClassStatusFor(db, projectId) ?? undefined,
   };
 }
 
@@ -1486,6 +1546,7 @@ export function deleteProject(db: AppDb, projectId: string): { deleted: true; pr
     db.run("DELETE FROM portal_signature_request_approvals WHERE project_id = ?", [projectId]);
     // Filing emails composed for this project (migration v65, #667).
     db.run("DELETE FROM filing_email_sends WHERE project_id = ?", [projectId]);
+    db.run("DELETE FROM project_job_scopes WHERE project_id = ?", [projectId]);
     // Information-page candidates (migration v50, #344) carry the same FK; the pass a person
     // verified on one of them is withdrawn with it (infoPages owns both tables).
     deleteProjectInfoPages(db, projectId);
@@ -3818,7 +3879,28 @@ export function getSubmitGateReport(db: AppDb, projectId: string): SubmitGateRep
   const submittedOrBeyond = unfiledTracks.length === 0 || (noFilingEvidence && statusSaysFiled);
   const activeEmailSource = activeEmailSources[0];
 
+  // THE CLASS HOLD (#688) — present ONLY while the job is held, so a residential job's gate report
+  // is exactly what it was. A blocker on every track: prepareSubmission refuses the same job.
+  const gateClassHold = projectClassStatusFor(db, projectId);
+  const classHoldChecks: SubmitGateCheck[] = gateClassHold?.held
+    ? [submitGateCheck({
+      id: "project-class-hold",
+      title: gateClassHold.projectClass === "commercial" ? "Commercial job — held for a person" : "Probably commercial — confirm class",
+      lane: "intake",
+      status: "blocker",
+      ownerRole: "Intake Coordinator",
+      requirement: "Automation works residential jobs only. A commercial job, or one whose own evidence says it may be commercial, is held for a person: no recipe replay, no staging, no automatic filing, no learn.",
+      evidence: gateClassHold.projectClass === "commercial"
+        ? [`Class set to commercial${gateClassHold.confirmation ? ` by ${gateClassHold.confirmation.by}` : " at intake"}.`]
+        : gateClassHold.unconfirmed.map((sig) => `${sig.severity === "blocker" ? "Blocker" : "Warning"}: ${sig.message}`),
+      nextAction: gateClassHold.projectClass === "commercial"
+        ? "A person files this job by hand. Automation will not stage it."
+        : "Confirm the job's class on the project page: residential releases the hold, commercial keeps it for a person.",
+      source: "project.class",
+    })]
+    : [];
   const checks: SubmitGateCheck[] = [
+    ...classHoldChecks,
     submitGateCheck({
       id: "single-project-record",
       title: "Single project record",
@@ -6272,6 +6354,16 @@ export async function reopenCorrectionOnPortal(
   const reopenDiscipline = recipeDisciplineForTarget(text(target.target_type), text(target.permit_type));
   const recipeInput = { scopeType, state: detail.project.state, ahj: detail.project.ahj, utility: detail.project.utility, discipline: reopenDiscipline };
   let recipe = findCompleteRecipeForProject(db, recipeInput) ?? findAnyRecipeForProject(db, recipeInput);
+  // A JOB HELD BY ITS CLASS (#688) REPLAYS NO RECIPE: the recipes on file were learned on residential
+  // jobs. The reopen runs on the target's own URL with no steps (as for a host misfit below), for a
+  // person to work.
+  const reopenClassHold = projectClassHoldReason(db, projectId);
+  if (recipe && reopenClassHold) {
+    addAuditLog(db, projectId, "system", "correction reopen", "portal.recipe_skipped_class_hold", {
+      correctionId, targetId: text(target.id), recipeId: recipe.id, reason: reopenClassHold,
+    });
+    recipe = null;
+  }
   // LEGACY-ROW DISCIPLINE CHECK — staging's (prepareSubmission): a '' row recorded before recipes
   // were keyed per discipline is still accepted as the fallback, and if its steps were learned for
   // the OTHER discipline they pick the other jurisdiction row and record type. A reopen replays
@@ -9271,6 +9363,18 @@ export async function prepareSubmission(
       `This project is blocked by an operator: ${hold}. Nothing is staged while it is blocked — `
       + "lift the block (set the project's status) once the reason no longer applies.",
       { operatorBlocked: true, reason: hold });
+  }
+  // A JOB HELD FOR A PERSON BY ITS CLASS (#688) — a commercial job, or one whose evidence says
+  // "probably commercial" and nobody has confirmed — is never staged, replayed or filed by
+  // automation: the residential recipes, KB rows and filing paths are not evidence for it. An
+  // ADDITIONAL refusal beside the operator's hold; every gate below runs unchanged for every other job.
+  const classHold = projectClassHoldReason(db, projectId);
+  if (classHold !== null) {
+    addAuditLog(db, projectId, "system", "class hold", "portal.stage_refused_class_hold", { track: track ?? null, reason: classHold });
+    throw new HttpError(409,
+      `${classHold} Nothing is staged, replayed or filed automatically for this job — a person works it, `
+      + "or confirms the class on the project page if it really is residential.",
+      { classHeld: true, reason: classHold });
   }
   // NO SEPARATE NEM FILING TO STAGE (#664): a person verified that this utility takes its application
   // inside the AHJ permit application. Nothing opens on the NEM track (rule 5 — there is no URL to

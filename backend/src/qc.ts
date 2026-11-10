@@ -21,6 +21,12 @@ import { ensureFeeSchedulesResearched } from "./feeSchedules";
 import { requiredTracks } from "./submittalTracks";
 import { qcMayMoveStatus } from "./projectStage";
 import { looksLikePlaceholderIdentifier } from "../../shared/src/companyFacts";
+import { jobScopeLabel, resolveJobScope, scopeHasNewPv, storageOperatingMode } from "./jobScope";
+import { nemStorageExemption } from "./utilityStorageModes";
+import { isPlaceholderBatteryModel } from "../../shared/src/batteryControls";
+import type { JobScope } from "../../shared/src/types";
+import { COMMERCIAL_HOLD_LABEL, PROBABLY_COMMERCIAL_LABEL } from "../../shared/src/projectClass";
+import { projectClassStatusFor } from "./projectClassHold";
 
 // Look up whether the AHJ for this project uses a portal platform that requires
 // individual sheets to be split and uploaded separately (e.g. ProjectDox, EnerGov).
@@ -64,6 +70,12 @@ interface Check {
   required: boolean;
   aliases?: string[];
   message: string;
+  /** The value must read as a number above zero (a quantity, a kWh, a kW). */
+  positiveNumber?: boolean;
+  /** The value must classify as a storage operating mode (jobScope.classifyStorageMode). */
+  storageMode?: boolean;
+  /** A placeholder battery model ("N/A", "None") is no model (isPlaceholderBatteryModel). */
+  batteryModel?: boolean;
 }
 
 const criticalChecks: Check[] = [
@@ -90,6 +102,62 @@ const criticalChecks: Check[] = [
   { ruleId: "critical.locates", ruleName: "Required locates", fieldName: "locates", required: true, severity: "warning", message: "Utility locates: does this system require underground conduit or trenching? If roof-mount with no digging, type 'N/A - roof mount, no excavation'. If trenching is needed, type '811 call required before dig' or note the plan-set callout. This is a warning, not a blocker — it just needs a value so the reviewer can confirm." },
   { ruleId: "critical.required_files", ruleName: "Required files", fieldName: "splitPages", required: true, severity: "warning", message: "Confirm the plan-set sheets are correctly identified for splitting (SLD, site/plot plan, structural, module/inverter specs, labels). Type 'confirmed' once the sheet mapping looks right, or note any missing sheet." },
 ];
+
+// ---------------------------------------------------------------------------
+// QC BY JOB SCOPE (#673). The PV equipment rows below assume new PV. On a job whose scope adds no
+// modules (jobScope.ts — reached only when nothing on the job names a new module, from the plan
+// set's own SLD + equipment schedule or a named person), they are swapped for battery rows of the
+// SAME strictness: a missing battery fact is a blocker, exactly as a missing module fact is. The
+// storage rows also carry the storage meaning of AC kW / inverter output (the battery inverter /
+// PCS continuous output) and of the PV breaker (the breaker the battery inverter backfeeds).
+// pv and pv+storage keep today's rows unchanged.
+// ---------------------------------------------------------------------------
+const PV_EQUIPMENT_FIELDS = new Set([
+  "systemSizeDcKw", "systemSizeAcKw", "moduleMake", "moduleModel", "moduleWattage", "moduleQty",
+  "inverterModel", "inverterQty", "inverterOutput", "pvBreaker",
+]);
+
+// pcs_model also reads invModel / inverterModel and ess_breaker also reads pvBreaker: the parser puts an
+// ESS inverter in inv* (parser.html) and a storage plan set's backfeed breaker in pvBreaker. On an
+// ADDITION the existing PV system's inverter / breaker could satisfy these rows only if the parser put
+// them in the new-equipment keys; the existing system has its own keys (existingInv*), so this is
+// accepted for now (Helm review of #673).
+const storageChecks: Check[] = [
+  { ruleId: "critical.storage.battery_make", ruleName: "Battery make", fieldName: "batteryMake", aliases: ["batteryMake", "batteryManufacturer"], required: true, severity: "blocker", message: "Enter the battery manufacturer as the ESS spec sheet / equipment schedule names it." },
+  { ruleId: "critical.storage.battery_model", ruleName: "Battery model", fieldName: "batteryModel", aliases: ["batteryModel"], batteryModel: true, required: true, severity: "blocker", message: "Enter the battery model exactly as on the ESS spec sheet / equipment schedule (it must match the submitted battery spec)." },
+  { ruleId: "critical.storage.battery_qty", ruleName: "Battery quantity", fieldName: "batteryQty", aliases: ["batteryQty", "batteryQuantity"], positiveNumber: true, required: true, severity: "blocker", message: "Enter the number of battery units. Confirm it matches the equipment schedule and the SLD." },
+  { ruleId: "critical.storage.usable_kwh", ruleName: "Battery usable energy (kWh)", fieldName: "batteryCapacityKwh", aliases: ["batteryCapacityKwh", "essKwh"], positiveNumber: true, required: true, severity: "blocker", message: "Enter the battery system's usable energy in kWh (all units together). Read it off the ESS spec sheet or the equipment schedule." },
+  { ruleId: "critical.storage.power_kw", ruleName: "Battery power (kW)", fieldName: "batteryOutputKw", aliases: ["batteryOutputKw"], positiveNumber: true, required: true, severity: "blocker", message: "Enter the battery inverter / PCS continuous AC output in kW. On a storage job this is the system's AC rating and the output the breaker is sized from." },
+  { ruleId: "critical.storage.pcs_model", ruleName: "Battery inverter / PCS model", fieldName: "essInverterModel", aliases: ["essInverterModel", "invModel", "inverterModel"], required: true, severity: "blocker", message: "Enter the battery inverter / power conversion system (PCS) model exactly as on its spec sheet (for an all-in-one battery, its own inverter model). It must match the submitted spec." },
+  { ruleId: "critical.storage.operating_mode", ruleName: "Battery operating mode", fieldName: "batteryMode", aliases: ["batteryMode", "exportMode"], storageMode: true, required: true, severity: "blocker", message: "Enter the battery's operating mode as the plan set states it: 'export', 'non-export' (export-limited / PCS-controlled to zero) or 'backup-only'. The utility's application and its requirements depend on it." },
+  { ruleId: "critical.storage.ess_breaker", ruleName: "Battery breaker/OCPD", fieldName: "essBreaker", aliases: ["essBreaker", "pvBreaker"], required: true, severity: "blocker", message: "Enter the backfed breaker / OCPD the battery inverter lands on, in amps. Read it off the SLD — it must be ≥ 1.25 × the battery inverter's output current and pass the 120% rule." },
+];
+
+/** A battery added to an already-interconnected PV system discloses that system (ExistingSystemInfo). */
+const storageAdditionChecks: Check[] = [
+  { ruleId: "critical.storage.existing_size", ruleName: "Existing PV system size", fieldName: "existingDcKw", aliases: ["existingDcKw", "existingAcKw"], positiveNumber: true, required: true, severity: "blocker", message: "Enter the existing PV system's size in kW (DC nameplate, or AC). The utility's application for a battery added to an existing system asks for it." },
+  { ruleId: "critical.storage.existing_tariff", ruleName: "Existing system tariff", fieldName: "nemTariff", aliases: ["nemTariff", "existingNemTariff"], required: true, severity: "blocker", message: "Enter the net-metering / interconnection tariff the existing PV system is on (as the bill or its interconnection agreement names it). Adding storage can change or keep it, so the utility asks." },
+];
+
+/** The rows QC runs for a scope: today's rows on a PV scope; on a storage scope the PV equipment rows
+ *  are replaced, in place, by the battery rows (and, for an addition, the existing-system rows). */
+export function checksForScope(scope: JobScope): Check[] {
+  if (scopeHasNewPv(scope)) return criticalChecks;
+  const extra = scope === "storage-added-to-existing-pv" ? [...storageChecks, ...storageAdditionChecks] : storageChecks;
+  const out: Check[] = [];
+  let inserted = false;
+  for (const check of criticalChecks) {
+    if (!PV_EQUIPMENT_FIELDS.has(check.fieldName)) { out.push(check); continue; }
+    if (!inserted) { out.push(...extra); inserted = true; }
+  }
+  return out;
+}
+
+/** The rows a scope does NOT run (the pending review items THEY filed are closed). */
+function checksOutOfScope(scope: JobScope): Check[] {
+  const inScope = new Set(checksForScope(scope).map((c) => c.ruleId));
+  return [...criticalChecks, ...storageChecks, ...storageAdditionChecks].filter((c) => !inScope.has(c.ruleId));
+}
 
 export interface QcRunResult {
   failCount: number;
@@ -238,6 +306,9 @@ function statusFor(check: Check, ctx: QcContext): QcStatus {
   if (check.fieldName === "ahj" && value && ctx.ahjNearMiss) return "warning";
 
   if (!value) return check.severity === "warning" ? "warning" : "fail";
+  if (check.positiveNumber && !(Number.parseFloat(value.replace(/[^0-9.-]/g, "")) > 0)) return "fail";
+  if (check.storageMode && !storageOperatingMode(payload)) return "fail";
+  if (check.batteryModel && isPlaceholderBatteryModel(value)) return "fail";
   if (check.fieldName === "locates") {
     if (/not run|waiting/i.test(value)) return "warning";
     // Roof mount with no excavation — locates are not applicable.
@@ -291,7 +362,48 @@ export function runQcForProject(db: AppDb, projectId: string, options: QcRunOpti
       "SELECT rule_id FROM qc_results WHERE project_id = ? AND qc_status = 'fail'", [projectId]).map((r) => String(r.rule_id)));
     db.run("DELETE FROM qc_results WHERE project_id = ?", [projectId]);
 
-    for (const check of criticalChecks) {
+    // WHAT THE JOB INSTALLS decides the equipment rows (#673): said first, as its own row, so the
+    // operator sees why a battery job is checked for battery facts (or why it is still checked for
+    // modules). A person's storage scope that the job's own fields contradict is a WARNING here and
+    // the PV rows stay — the evidence wins.
+    const scope = resolveJobScope(db, projectId, payload);
+    if (scope.conflict) warningCount += 1;
+    db.run(
+      `INSERT INTO qc_results (id, project_id, qc_status, rule_id, rule_name, message, severity, created_at)
+       VALUES (?, ?, ?, 'qc.job_scope', 'Job scope', ?, ?, ?)`,
+      [id(), projectId, scope.conflict ? "warning" : "pass",
+        scope.conflict || `Checked as ${jobScopeLabel(scope.scope)}: ${scope.reason}`,
+        scope.conflict ? "warning" : "info", createdAt],
+    );
+    // A row this scope does not run leaves no stale pending item behind (it would hold the submit
+    // gate on a module field a storage-only job does not have). Only the PENDING item that row
+    // itself filed (its issue type is the row's name — a parser or reviewer question on the same
+    // field is not this row's to close), and the note says why; a scope change back reopens a
+    // still-failing blocker (ensureReviewItem).
+    for (const check of checksOutOfScope(scope.scope)) {
+      db.run(
+        "UPDATE human_review_items SET status = 'approved', notes = ?, updated_at = ? WHERE project_id = ? AND field_name = ? AND issue_type = ? AND status = 'pending'",
+        [`Auto-resolved: not checked for a job scoped as ${jobScopeLabel(scope.scope)}.`, nowIso(), projectId, check.fieldName, check.ruleName],
+      );
+    }
+
+    // A STORAGE JOB THE UTILITY TAKES NO APPLICATION FOR, SAID — only from a person's cited record on
+    // the utility's filing row (utilityStorageModes.ts, rule 3; never a lookup, never a seeded row).
+    // Information only: the NEM track stays on.
+    try {
+      const exemption = nemStorageExemption(db, { id: projectId, state: ctx.state, utility: clean(project.utility) || clean(payload.utility), parserSnapshot: payload });
+      if (exemption) {
+        db.run(
+          `INSERT INTO qc_results (id, project_id, qc_status, rule_id, rule_name, message, severity, created_at)
+           VALUES (?, ?, 'pass', 'qc.nem_storage_mode', 'Utility application for storage', ?, 'info', ?)`,
+          [id(), projectId,
+            `${exemption.utility} takes no interconnection application for a ${exemption.mode} battery, as recorded by ${exemption.record.verifiedBy} from ${exemption.record.sourceUrl}: "${exemption.record.quote}". The utility track stays on the board; close it once you have confirmed this job matches.`,
+            createdAt],
+        );
+      }
+    } catch { /* advisory: a missing column on an old schema never breaks QC */ }
+
+    for (const check of checksForScope(scope.scope)) {
       const qcStatus = statusFor(check, ctx);
       if (qcStatus === "fail") failCount += 1;
       if (qcStatus === "fail" && !BILL_FIELDS.has(check.fieldName) && !priorFails.has(check.ruleId)) newFailsOutsideBill += 1;
@@ -585,6 +697,37 @@ export function runQcForProject(db: AppDb, projectId: string, options: QcRunOpti
           baseline.fieldName ? parserField(payload, baseline.fieldName) : "",
           baseline.message,
           baseline.qcStatus === "fail",
+        );
+      }
+    }
+
+    // THE CLASS SCREEN (#688; shared/src/projectClass.ts). Rows appear ONLY for a job a person set
+    // to commercial or whose own evidence raises an UNCONFIRMED "probably commercial" signal, so a
+    // residential job's QC is exactly what it was. A signal crossing a verbatim-cited cap is a
+    // blocker (fail); every other signal, the strict 25 kW default included, is a warning. The way
+    // out is a person confirming the class (setProjectClass), not a review item.
+    const classStatus = projectClassStatusFor(db, projectId);
+    if (classStatus?.projectClass === "commercial") {
+      warningCount += 1;
+      db.run(
+        `INSERT INTO qc_results (id, project_id, qc_status, rule_id, rule_name, message, severity, created_at)
+         VALUES (?, ?, 'warning', 'project-class.commercial', ?, ?, 'warning', ?)`,
+        [id(), projectId, COMMERCIAL_HOLD_LABEL,
+          "A person set this job's class to commercial. Automation does not stage, replay, file or learn from it; a person works it.",
+          createdAt],
+      );
+    } else if (classStatus) {
+      for (const sig of classStatus.unconfirmed) {
+        const qcStatus = sig.severity === "blocker" ? "fail" : "warning";
+        if (qcStatus === "fail") failCount += 1;
+        if (qcStatus === "fail" && !priorFails.has(`project-class.${sig.code}`)) newFailsOutsideBill += 1;
+        if (qcStatus === "warning") warningCount += 1;
+        db.run(
+          `INSERT INTO qc_results (id, project_id, qc_status, rule_id, rule_name, message, severity, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+          [id(), projectId, qcStatus, `project-class.${sig.code}`, PROBABLY_COMMERCIAL_LABEL,
+            `${sig.message} Confirm the job's class on the project page — until a person does, automation holds this job.`,
+            sig.severity, createdAt],
         );
       }
     }
