@@ -69,8 +69,28 @@ export function folderScanJobAllowed(payload: Record<string, unknown>, jobOrgId:
   return folderWithinRoot(String(payload.folderPath || ""), batchUploadRoot(jobOrgId));
 }
 
+/** The names in a zip that this file system cannot store, and what they became on disk (#119). */
+export const ZIP_NAMES_MANIFEST = ".job-drop-names.json";
+
+// Windows refuses < > : " | ? * and control characters in a name, a trailing dot or space, and the
+// device names (CON, PRN, AUX, NUL, COM1-9, LPT1-9). Applied on every platform so a drop extracts
+// the same way wherever it lands.
+const UNSTORABLE = /[<>:"|?*\u0000-\u001f]/g;
+const DEVICE_NAME = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])(\.|$)/i;
+
+/** A zip path segment as this file system can store it; the segment itself when it already can. */
+export function safeZipSegment(name: string): string {
+  let out = name.replace(UNSTORABLE, "_").replace(/[. ]+$/, "");
+  if (DEVICE_NAME.test(out)) out = `_${out}`;
+  return out || "_";
+}
+
 // Extract a zip buffer into a fresh working folder under the org's own root and report
 // how many PDFs it contains. The folder scanner walks this directory recursively afterward.
+// A segment the file system cannot store (a Mac-made folder "Smith: 123 Main St", a name with
+// `<`) is written under a safe name and the original is kept in ZIP_NAMES_MANIFEST at the
+// folder's root, so the person still sees the name they gave it. One bad name used to throw
+// and fail the WHOLE upload on Windows (#119).
 export function extractZipToWorkdir(zipBuffer: Buffer, label: string, orgId: string): ExtractedZip {
   const root = batchUploadRoot(orgId);
   fs.mkdirSync(root, { recursive: true });
@@ -82,15 +102,51 @@ export function extractZipToWorkdir(zipBuffer: Buffer, label: string, orgId: str
   const zip = new AdmZip(zipBuffer);
   const entries = zip.getEntries();
   let pdfCount = 0;
+  // original segment -> on-disk segment, per parent folder (two originals that clean to the same
+  // name get distinct names); on-disk relative path -> original segment, for the manifest.
+  const taken = new Map<string, Map<string, string>>();
+  const renamed: Record<string, string> = {};
+  const segmentOnDisk = (parent: string, original: string): string => {
+    const siblings = taken.get(parent) ?? new Map<string, string>();
+    taken.set(parent, siblings);
+    const known = siblings.get(original);
+    if (known) return known;
+    const base = safeZipSegment(original);
+    const used = new Set(siblings.values());
+    let candidate = base;
+    for (let n = 2; used.has(candidate); n++) candidate = `${base}~${n}`;
+    siblings.set(original, candidate);
+    if (candidate !== original) renamed[parent ? `${parent}/${candidate}` : candidate] = original;
+    return candidate;
+  };
   for (const entry of entries) {
     if (entry.isDirectory) continue;
+    const parts = entry.entryName.split(/[\\/]+/).filter(Boolean);
+    const onDisk: string[] = [];
+    for (const part of parts) {
+      // `..` and `.` keep their meaning so the zip-slip guard below still sees them.
+      onDisk.push(part === ".." || part === "." ? part : segmentOnDisk(onDisk.join("/"), part));
+    }
     // Guard against zip-slip: resolve and confirm the target stays inside folderPath.
-    const target = path.join(folderPath, entry.entryName);
+    const target = path.join(folderPath, ...onDisk);
     const resolved = path.resolve(target);
     if (!resolved.startsWith(path.resolve(folderPath) + path.sep)) continue;
     fs.mkdirSync(path.dirname(resolved), { recursive: true });
     fs.writeFileSync(resolved, entry.getData());
     if (/\.pdf$/i.test(entry.entryName)) pdfCount++;
   }
+  if (Object.keys(renamed).length) fs.writeFileSync(path.join(folderPath, ZIP_NAMES_MANIFEST), JSON.stringify(renamed, null, 2));
   return { folderPath, pdfCount, totalEntries: entries.length };
+}
+
+/** The names a drop's folders and files were given in the zip, by on-disk path relative to
+ *  `folderPath` (posix separators); empty when nothing was renamed or the folder is not an upload. */
+export function zipNamesManifest(folderPath: string): Record<string, string> {
+  try {
+    const raw = JSON.parse(fs.readFileSync(path.join(folderPath, ZIP_NAMES_MANIFEST), "utf8")) as unknown;
+    if (!raw || typeof raw !== "object") return {};
+    const out: Record<string, string> = {};
+    for (const [k, v] of Object.entries(raw as Record<string, unknown>)) if (typeof v === "string") out[k] = v;
+    return out;
+  } catch { return {}; }
 }
