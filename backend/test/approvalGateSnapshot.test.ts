@@ -113,7 +113,7 @@ async function stage(projectId: string, opts: { approvalId?: string | null; fina
   assert.ok(seen, "the run never reached the bot");
   return seen as unknown as Seen;
 }
-const approve = (projectId: string) => repo.createRunApproval(db, { projectId, track: "permit", approver: "A. Person", approverUserId: null });
+const approve = (projectId: string) => repo.createRunApproval(db, { projectId, track: "permit", approver: "A. Person", approverUserId: null, acknowledgements: fx.acknowledgeAll(projectId, null) });
 const auditsFor = (action: string, projectId: string) =>
   fx.audits(action).filter((a) => a.project_id === projectId).map((a) => JSON.parse(String(a.details)) as Record<string, unknown>);
 

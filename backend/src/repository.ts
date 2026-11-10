@@ -1,5 +1,7 @@
 import type {
   ApplicationDocumentPackage,
+  ApprovalAcknowledgements,
+  ApprovalSheetOpenItem,
   AuditLog,
   CorrectionReadingOrigin,
   CorrectionRecord,
@@ -176,6 +178,7 @@ import { evidenceForTopic, evidenceLines, type EvidenceTopic } from "./projectEv
 import { customerBillOnFile, runQcForProject, WAITING_ON_BILL_ISSUE_TYPE, type QcRunOptions } from "./qc";
 import { resolveJobScope } from "./jobScope";
 import { loadStoredTemplates, formAllowedForPath } from "./ahjForms";
+import { acknowledgementItems, acknowledgementProblems, planSetBinding, readAcknowledgements, unverifiedFormMappings } from "./approvalReviewItems";
 import { submissionDocumentsByType, uploadDocumentGuard } from "./submissionDocuments";
 import { disciplineFor } from "./docDiscipline";
 import { resolvePermitPath, usStateCode } from "./permitPath";
@@ -3855,8 +3858,9 @@ export function getSubmitGateReport(db: AppDb, projectId: string): SubmitGateRep
   // ahjForms.effectiveStoredFieldMap) was never derived automatically: it is not asked for a
   // "Mark verified" (dry-run 2026-09-28 B6 — the gate asked a person to verify the BCD 5952 and the
   // Coos County electrical maps, and verifying would have locked in their outdated stored copies).
-  const unverifiedForms = loadStoredTemplates(db, project.ahj, project.state)
-    .filter((t) => !t.verified && !t.builtInMap && formAllowedForPath(t.def.formName, gatePermitPath, t.applicationKind));
+  // ONE LIST (review-audit draft 01): the approval sheet asks the same function which forms of
+  // THIS filing need a person's acknowledgement before Approve & auto-submit.
+  const unverifiedForms = unverifiedFormMappings(db, project);
   const stagedRun = detail.portalRuns.find((run) => run.status === "awaiting_human_submit");
   // "SUBMITTED" MEANS EVERY REQUIRED FILING, NOT ANY ONE (S7). This was "any submission is
   // submitted, or the status says so" — so a project whose NEM application was filed while its
@@ -8433,22 +8437,62 @@ const RUN_APPROVAL_TTL_MS = 30 * 60_000;
  *  is the Approve & Submit route. Refuses a blank approver: "dashboard" is not a person. */
 export function createRunApproval(
   db: AppDb,
-  input: { projectId: string; track: string; approver: string; approverUserId?: string | null },
+  input: {
+    projectId: string; track: string; approver: string; approverUserId?: string | null;
+    /** What the approver acknowledged on the approval sheet (review-audit draft 01), already checked
+     *  by the route against the items needing one (approvalAcknowledgementRefusals). Recorded with the
+     *  approval; the run reads it back (claimRunApproval) and stops at review if it no longer covers
+     *  what needs one. Omitted = nothing acknowledged. */
+    acknowledgements?: ApprovalAcknowledgements | null;
+  },
 ): { id: string; approver: string; expiresAt: string } {
   const approver = String(input.approver ?? "").trim();
   if (!approver) throw new HttpError(400, "A final submit needs a named approver — sign in, or give your name, before approving.");
   const approvalId = id();
   const now = Date.now();
   const expiresAt = new Date(now + RUN_APPROVAL_TTL_MS).toISOString();
+  const acknowledgements = input.acknowledgements ?? null;
   db.run(
-    `INSERT INTO portal_run_approvals (id, project_id, track, approver, approver_user_id, created_at, expires_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?)`,
-    [approvalId, input.projectId, input.track || "permit", approver, input.approverUserId ?? null, new Date(now).toISOString(), expiresAt],
+    `INSERT INTO portal_run_approvals (id, project_id, track, approver, approver_user_id, created_at, expires_at, acknowledgements_json)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    [approvalId, input.projectId, input.track || "permit", approver, input.approverUserId ?? null, new Date(now).toISOString(), expiresAt,
+      acknowledgements ? JSON.stringify(acknowledgements) : ""],
   );
   addAuditLog(db, input.projectId, "human", approver, "portal.final_submit_approved", {
     approvalId, track: input.track || "permit", expiresAt,
+    ...(acknowledgements && acknowledgements.items.length ? { acknowledged: acknowledgements.items, planSet: acknowledgements.planSet } : {}),
   });
   return { id: approvalId, approver, expiresAt };
+}
+
+/**
+ * THE ITEMS A PERSON MUST ACKNOWLEDGE BEFORE APPROVING THIS FILING (review-audit draft 01): the
+ * measured reviewer warnings that hold this track and the unverified form mappings on a form it
+ * files (approvalReviewItems.acknowledgementItems), read from the gate's own report. null track =
+ * a trackless stage: every item.
+ */
+export function requiredAcknowledgementItems(db: AppDb, project: ProjectRecord, track: SubmittalTrackType | null): ApprovalSheetOpenItem[] {
+  return acknowledgementItems(reviewerGateReportFor(db, project).findings, unverifiedFormMappings(db, project), track);
+}
+
+/**
+ * WHY AN APPROVE REQUEST'S ACKNOWLEDGEMENTS DO NOT COVER THIS FILING NOW — the approve route's check,
+ * before an approval is minted. Empty when nothing needs one, or every item needing one was ticked
+ * with the content the server holds now against the plan set on file. `raw` is the request body's
+ * `acknowledgements`, read defensively. Returns the acknowledgements to record with the approval.
+ */
+export function approvalAcknowledgementRefusals(
+  db: AppDb, project: ProjectRecord, track: SubmittalTrackType | null, raw: unknown,
+): { problems: string[]; acknowledgements: ApprovalAcknowledgements | null } {
+  const required = requiredAcknowledgementItems(db, project, track);
+  const given = raw == null ? null : readAcknowledgements(raw);
+  const problems = acknowledgementProblems(required, given, planSetBinding(db, project.id));
+  // Record only what was asked and matched: the plan set the server holds and the items it needs.
+  const wanted = new Set(required.map((i) => `${i.id}\u0000${i.contentHash}`));
+  const acknowledgements = given
+    ? { planSet: planSetBinding(db, project.id), items: given.items.filter((i) => wanted.has(`${i.id}\u0000${i.contentHash}`)) }
+    : null;
+  return { problems, acknowledgements };
 }
 
 /**
@@ -8464,18 +8508,22 @@ export function createRunApproval(
  * The id alone is not the check: the row must still be this project's, this track's, unconsumed
  * and unexpired.
  */
-function claimRunApproval(db: AppDb, projectId: string, track: string, approvalId: string | null | undefined): { id: string; approver: string; createdAt: string } | null {
+function claimRunApproval(db: AppDb, projectId: string, track: string, approvalId: string | null | undefined): { id: string; approver: string; createdAt: string; acknowledgements: ApprovalAcknowledgements | null } | null {
   const wanted = String(approvalId ?? "").trim();
   if (!wanted) return null;
   const row = db.get<Row>(
-    `SELECT id, approver, created_at FROM portal_run_approvals
+    `SELECT id, approver, created_at, acknowledgements_json FROM portal_run_approvals
       WHERE id = ? AND project_id = ? AND track = ? AND consumed_at IS NULL AND expires_at > ?`,
     [wanted, projectId, track || "permit", nowIso()],
   );
   if (!row) return null;
   db.run("UPDATE portal_run_approvals SET consumed_at = ? WHERE id = ? AND consumed_at IS NULL", [nowIso(), text(row.id)]);
   if (Number(db.get<{ n: number }>("SELECT changes() AS n")?.n ?? 0) === 0) return null; // another run took it
-  return { id: text(row.id), approver: text(row.approver), createdAt: text(row.created_at) };
+  const acks = text(row.acknowledgements_json);
+  return {
+    id: text(row.id), approver: text(row.approver), createdAt: text(row.created_at),
+    acknowledgements: acks ? readAcknowledgements(parseJson<unknown>(acks, null)) : null,
+  };
 }
 
 /** The approval id the RUNNING prepare_submission job for this project carries in its payload —
@@ -8549,6 +8597,10 @@ export function automaticSubmitRefusals(
     /** Reviewer blockers this run's gate let through on a vision verdict cached AFTER the approval
      *  (#226): the approver was shown them as blockers, so such a run always stops at review. */
     relaxedSinceApproval?: string[];
+    /** Review-audit draft 01: why the approval's acknowledgements do not cover the measured warnings
+     *  and unverified form mappings this filing carries NOW (approvalReviewItems.acknowledgementProblems):
+     *  new, changed, not acknowledged, or a plan set replaced since. Such a run always stops at review. */
+    unacknowledgedSinceApproval?: string[];
   },
 ): string[] {
   const out: string[] = [];
@@ -8556,6 +8608,9 @@ export function automaticSubmitRefusals(
   if (input.borrowedFrom) out.push(`the recipe was learned for ${input.borrowedFrom}, not this jurisdiction — a borrowed recipe always stops at review`);
   if (input.relaxedSinceApproval?.length) {
     out.push(`a vision verdict cached after the approval relaxed ${input.relaxedSinceApproval.join(", ")} — the approver saw ${input.relaxedSinceApproval.length > 1 ? "them as blockers" : "it as a blocker"}; approve again to file`);
+  }
+  if (input.unacknowledgedSinceApproval?.length) {
+    out.push(`the approval does not cover this filing's open review items (${input.unacknowledgedSinceApproval.join("; ")}) — read them on the approval sheet and approve again to file`);
   }
   // The one approval check every filing door reads (shared/src/portalSafety.runApprovalRefusals).
   out.push(...runApprovalRefusals(input.runApproval, String(input.runId ?? "")));
@@ -9630,6 +9685,16 @@ export async function prepareSubmission(
     via: "stage", runId, track: track ?? null, relaxed: visionRelaxed,
     writtenAfterApproval: claimedApproval ? relaxedSinceApproval : undefined,
   });
+  // THE APPROVER ACKNOWLEDGED THESE, AND ONLY THESE (review-audit draft 01). The measured warnings
+  // and unverified form mappings this filing carries NOW, against what the approval recorded: an
+  // item new or changed since, one never acknowledged, or a plan set replaced since makes this run
+  // stop at review (automaticSubmitRefusals / the email door). Only a claimed approval pays for it.
+  const unacknowledgedSinceApproval = claimedApproval
+    ? acknowledgementProblems(
+      acknowledgementItems(reviewerReport.findings, unverifiedFormMappings(db, detail.project), track ?? null),
+      claimedApproval.acknowledgements, planSetBinding(db, projectId),
+    )
+    : [];
 
   // DOCUMENT-PRESENCE GATE: never stage a submittal that is missing a required file.
   // This is the guardrail against the "AHJ emailed back: documents still missing"
@@ -9705,7 +9770,7 @@ export async function prepareSubmission(
       await filingEmail.fileTrackByEmail(db, {
         project: detail.project, track, runId,
         approval: claimedApproval ? { approver: claimedApproval.approver } : null,
-        wantsFinalSubmit, relaxedSinceApproval,
+        wantsFinalSubmit, relaxedSinceApproval, unacknowledgedSinceApproval,
         submitterName: submittingClient.companyName || submittingClient.legalBusinessName || "",
       });
       return getProjectDetail(db, projectId);
@@ -9949,7 +10014,7 @@ export async function prepareSubmission(
   // recipe, unchanged, and refuses: the resumed run stops in front of step 5's Submit for a person.
   const gateRecipeId = nemDraft ? null : (recipe?.id ?? null);
   const submitRefusals = wantsFinalSubmit
-    ? automaticSubmitRefusals(db, { recipeId: gateRecipeId, runApproval, runId, borrowedFrom: borrowed?.learnedFor ?? null, relaxedSinceApproval })
+    ? automaticSubmitRefusals(db, { recipeId: gateRecipeId, runApproval, runId, borrowedFrom: borrowed?.learnedFor ?? null, relaxedSinceApproval, unacknowledgedSinceApproval })
     : [];
   const resolvedAutoSubmit = wantsFinalSubmit && submitRefusals.length === 0;
   if (wantsFinalSubmit && !resolvedAutoSubmit) {

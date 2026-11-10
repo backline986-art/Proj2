@@ -113,6 +113,16 @@ export function gateCheckDefaultScope(checkId: string): GateHoldScope {
   return checkId === "permit-path" ? "permit" : "all";
 }
 
+/** A gate WARNING check's scope, for the approval sheet's "open review items" (it carries no
+ *  per-item `holds`, which only blockers have): a check laned to the utility filing is the NEM
+ *  filing's, one laned to the AHJ permit is every permit filing's, and anything else (intake, QC,
+ *  portal…) takes the blocker default above — every filing. An unknown never clears. */
+export function gateWarningScope(check: { id: string; lane?: string | null }): GateHoldScope {
+  if (check.lane === "nem") return "nem";
+  if (check.lane === "permit") return "permit";
+  return gateCheckDefaultScope(check.id);
+}
+
 /** The scope of a learned historical blocker, from classifyCorrectionTrack's three answers
  *  (strong filing signals only; "unclassified" holds every filing — an unknown never clears). */
 export function correctionHoldScope(track: "permit" | "nem" | "unclassified"): GateHoldScope {

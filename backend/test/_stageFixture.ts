@@ -13,7 +13,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import type { RecipeStep } from "../../shared/src/types";
+import type { RecipeStep, SubmittalTrackType } from "../../shared/src/types";
 
 export async function setupStageFixture(tag: string) {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), `${tag}-`));
@@ -40,6 +40,7 @@ export async function setupStageFixture(tag: string) {
   const docs = await import("../src/projectDocuments");
   const repo = await import("../src/repository");
   const recipes = await import("../src/portalRecipes");
+  const { planSetBinding } = await import("../src/approvalReviewItems");
   const db = await dbMod.openDatabase();
   if (/autopilot\.sqlite$/.test(String(process.env.AUTOPILOT_DB_PATH))) throw new Error("tests must run on a scratch DB");
 
@@ -118,7 +119,18 @@ export async function setupStageFixture(tag: string) {
   const audits = (action: string) => db.query<{ details: string; project_id: string | null; actor_name: string }>(
     "SELECT details, project_id, actor_name FROM audit_logs WHERE action = ? ORDER BY created_at", [action]);
 
-  return { db, repo, recipes, client, newProject, completeRecipe, fills, REVIEW, FINAL, stubRunner, failingStep, latestRun, recipeRow, audits };
+  /** WHAT A PERSON TICKS ON THE APPROVAL SHEET (review-audit draft 01): every item this filing needs
+   *  acknowledged NOW (the fixture's own 25 psf ground snow is a measured warning on the building /
+   *  trackless filing), bound to the shipped plan set — for a test whose approved run must be allowed. */
+  const acknowledgeAll = (projectId: string, track: SubmittalTrackType | null) => {
+    const project = repo.getProjectDetail(db, projectId).project;
+    return {
+      planSet: planSetBinding(db, projectId),
+      items: repo.requiredAcknowledgementItems(db, project, track).map((i) => ({ id: i.id, contentHash: i.contentHash })),
+    };
+  };
+
+  return { db, repo, recipes, client, newProject, completeRecipe, fills, REVIEW, FINAL, stubRunner, failingStep, latestRun, recipeRow, audits, acknowledgeAll };
 }
 
 let failures = 0;
