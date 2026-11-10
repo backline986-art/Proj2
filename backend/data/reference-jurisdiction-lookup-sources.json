@@ -3,42 +3,6 @@
   "records": [
     {
       "state": "UT",
-      "county": "Utah County",
-      "covers": {
-        "cities": ["Alpine", "American Fork", "Cedar Fort", "Cedar Hills", "Eagle Mountain", "Elk Ridge", "Fairfield", "Genola", "Goshen", "Highland", "Lehi", "Lindon", "Mapleton", "Orem", "Payson", "Pleasant Grove", "Provo", "Salem", "Santaquin", "Saratoga Springs", "Spanish Fork", "Springville", "Vineyard", "Woodland Hills", "Benjamin", "Lake Shore", "Palmyra", "Elberta"],
-        "zips": ["84003", "84004", "84005", "84013", "84020", "84042", "84043", "84045", "84048", "84057", "84058", "84059", "84062", "84065", "84097", "84601", "84602", "84604", "84606", "84626", "84628", "84629", "84633", "84651", "84653", "84655", "84660", "84663", "84664"]
-      },
-      "queryUrl": "https://maps.utahcounty.gov/arcgis/rest/services/Parcels/Parcel_AddressPoints/MapServer/0/query?where=FULLADDR%20LIKE%20%27{street}%20%25%27%20AND%20ZIPCODE%3D%27{zip}%27&outFields=CITY&returnDistinctValues=true&returnGeometry=false&f=json",
-      "recordsPath": "features",
-      "jurisdictionField": "attributes.CITY",
-      "unincorporatedValues": ["UNINCORPORATED"],
-      "addressStyle": "usps",
-      "tier": "official",
-      "sourceName": "Utah County GIS Division (Information Systems) home page",
-      "sourceUrl": "https://gis.utahcounty.gov/",
-      "quote": "href=\"https://maps.utahcounty.gov/ParcelMap/ParcelMap.html\">Parcel Map</a>",
-      "fetchedAt": "2026-11-10"
-    },
-    {
-      "state": "UT",
-      "county": "Salt Lake County",
-      "covers": {
-        "cities": ["Salt Lake City", "West Valley City", "West Jordan", "Sandy", "South Jordan", "Millcreek", "Murray", "Herriman", "Taylorsville", "Draper", "Riverton", "Midvale", "Cottonwood Heights", "South Salt Lake", "Holladay", "Bluffdale", "Alta", "Brighton"],
-        "zips": ["84009", "84020", "84047", "84065", "84070", "84081", "84084", "84088", "84092", "84093", "84094", "84095", "84096", "84101", "84102", "84103", "84104", "84105", "84106", "84107", "84108", "84109", "84111", "84112", "84113", "84115", "84116", "84117", "84118", "84119", "84120", "84121", "84122", "84123", "84124", "84128", "84129"]
-      },
-      "queryUrl": "https://apps.saltlakecounty.gov/slcogis/rest/services/Reference/MapServer/5/query?where=ADDRESS%3D%27{street}%27%20AND%20ZIP_CODE%3D%27{zip}%27&outFields=CITY&returnGeometry=false&f=json",
-      "recordsPath": "features",
-      "jurisdictionField": "attributes.CITY",
-      "unincorporatedValues": ["UNINCORPORATED"],
-      "addressStyle": "usps",
-      "tier": "seeded",
-      "sourceName": "Salt Lake County ArcGIS Online org item 'Address Points' (owner SLCounty, source Salt Lake County Addressing Office)",
-      "sourceUrl": "https://slco.maps.arcgis.com/sharing/rest/content/items/da6eb9ffc2ff426ea3ffcd5f80a19b4c?f=json",
-      "quote": "\"url\":\"https://apps.saltlakecounty.gov/slcogis/rest/services/Reference/MapServer/5\"",
-      "fetchedAt": "2026-11-10"
-    },
-    {
-      "state": "UT",
       "county": "Weber County",
       "covers": {
         "cities": ["Ogden", "North Ogden", "South Ogden", "Roy", "Riverdale", "Washington Terrace", "Pleasant View", "Harrisville", "Farr West", "Plain City", "Hooper", "West Haven", "Marriott-Slaterville", "Uintah"],
