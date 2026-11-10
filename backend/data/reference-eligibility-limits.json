@@ -3,6 +3,27 @@
   "records": [
     {
       "authorityKind": "utility_program",
+      "state": "ID",
+      "authority": "Idaho Power",
+      "programName": "Idaho Power on-site generation (residential Schedule 1 / small general service Schedule 7)",
+      "limits": {
+        "maxAcKw": {
+          "value": 25,
+          "appliesOnlyTo": "residential (Schedule 1) and small general service (Schedule 7) customers; inverter AC nameplate, energy storage not counted",
+          "ruleId": "id-power-residential-25kw-ac",
+          "ruleName": "Idaho Power residential size screen",
+          "message": "AC size is {value} kW{combinedNote}. Idaho Power caps residential and small general service generation at {limit} kW AC (inverter nameplate; storage not counted). Confirm before filing.",
+          "citation": {
+            "sourceName": "Idaho Power — Customer generation frequently asked questions",
+            "sourceUrl": "https://www.idahopower.com/accounts-service/clean-choices/solar-power-options-customer-generation/frequently-asked-questions/",
+            "quote": "Idaho and Oregon residential (Schedule 1) and small general service (Schedule 7) customers may connect energy generation sources (e.g. solar) with a total nameplate capacity of 25 kilowatts (kW) AC or less.",
+            "fetchedAt": "2026-11-10T08:25:08Z"
+          }
+        }
+      }
+    },
+    {
+      "authorityKind": "utility_program",
       "state": "OR",
       "authority": "",
       "programName": "residential OAR 860-039 net metering project",

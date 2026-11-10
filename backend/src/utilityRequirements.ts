@@ -40,6 +40,7 @@ import type { AppDb } from "./db";
 import { usStateCode } from "./permitPath";
 import { getUtilityFilingLookup, normalizeUtilityName, utilityFilingKey } from "./utilityFilingLookup";
 import { isUtilityPlatformUrl } from "./portalChannel";
+import { importSeededUtilityKnowledge } from "./knowledgeBase";
 
 const str = (v: unknown): string => (typeof v === "string" ? v.trim() : v == null ? "" : String(v).trim());
 
@@ -157,6 +158,20 @@ export interface ShippedUtilityRequirementRecord {
   /** Names this record answers to, as whole words of the job's normalized utility name. Data, not code. */
   matchNames: string[];
   requirements: UtilityApplicationRequirement[];
+  /** WHERE the utility takes its application, as the utility's own page links it (cited, SEEDED). */
+  filingDoor?: ShippedUtilityFilingDoor;
+}
+
+/** A utility's filing door as cited data: the link and the page that names it. It lands only as a
+ *  SEEDED utility KB row (seedShippedUtilityFilingDoors), never official and never over a row a person
+ *  verified: where a filing goes stays a person's word (rule 3). */
+export interface ShippedUtilityFilingDoor {
+  name: string;
+  url: string;
+  sourceName: string;
+  sourceUrl: string;
+  quote: string;
+  fetchedAt: string;
 }
 
 const moduleDir = path.dirname(fileURLToPath(import.meta.url));
@@ -234,10 +249,50 @@ function parseRecords(data: { records?: unknown[] }): ShippedUtilityRequirementR
       const matchNames = (Array.isArray(o.matchNames) ? o.matchNames : []).map((n) => utilityMatchText(str(n))).filter(Boolean);
       const requirements = (Array.isArray(o.requirements) ? o.requirements : []).map((r) => sanitizeRequirement(r, "seeded")).filter((r): r is UtilityApplicationRequirement => r != null);
       if (!states.length || !matchNames.length || !requirements.length) continue;
-      records.push({ states, utility: str(o.utility), displayName: str(o.displayName) || str(o.utility), matchNames, requirements });
+      const filingDoor = sanitizeFilingDoor(o.filingDoor);
+      records.push({ states, utility: str(o.utility), displayName: str(o.displayName) || str(o.utility), matchNames, requirements, ...(filingDoor ? { filingDoor } : {}) });
     }
   }
   return records;
+}
+
+/** A door is kept only whole: an https link, the page that names it, that page's own words and when they
+ *  were read. Anything less is no door (the track keeps asking). */
+function sanitizeFilingDoor(raw: unknown): ShippedUtilityFilingDoor | null {
+  const o = (raw && typeof raw === "object" ? raw : {}) as Record<string, unknown>;
+  const door: ShippedUtilityFilingDoor = {
+    name: str(o.name).slice(0, 200), url: str(o.url).slice(0, 500), sourceName: str(o.sourceName).slice(0, 200),
+    sourceUrl: str(o.sourceUrl).slice(0, 500), quote: str(o.quote).slice(0, 600), fetchedAt: str(o.fetchedAt).slice(0, 40),
+  };
+  if (!/^https:\/\/\S+$/i.test(door.url) || !/^https?:\/\//i.test(door.sourceUrl) || door.quote.length < 8 || !/^\d{4}-\d{2}-\d{2}/.test(door.fetchedAt)) return null;
+  return door;
+}
+
+/**
+ * THE SHIPPED FILING DOORS, SEEDED INTO THE UTILITY'S KB ROW (state, "", utility) through the existing
+ * reference writer (importSeededUtilityKnowledge: confidence "seeded", skips a row a person verified).
+ * Nothing here is official or verified, and nothing here sends or clicks: the door is read where every
+ * utility door is read (utilityFilingLookup's KB channel and the stage's utility read), each through
+ * portalChannel.hostFitsTrackAndEntity (rule 5). Idempotent; returns the number of rows written.
+ */
+export function seedShippedUtilityFilingDoors(db: AppDb, records = shippedUtilityRequirementRecords()): number {
+  let written = 0;
+  for (const rec of records) {
+    const door = rec.filingDoor;
+    if (!door || !rec.utility) continue;
+    for (const state of rec.states) {
+      const outcome = importSeededUtilityKnowledge(db, {
+        state,
+        utility: rec.utility,
+        portalName: door.name,
+        portalUrl: door.url,
+        notes: `Filing door seeded from ${door.sourceName || door.sourceUrl} (${door.sourceUrl}), read ${door.fetchedAt.slice(0, 10)}: "${door.quote}" links ${door.url}. Seeded, not verified: a person verifies where the application goes.`,
+        sourceLabel: `${door.sourceName || "Utility page"} (${door.sourceUrl})`,
+      });
+      if (outcome === "imported") written += 1;
+    }
+  }
+  return written;
 }
 
 /** The shipped record for this job's state and utility name, or null. An unknown state matches nothing. */

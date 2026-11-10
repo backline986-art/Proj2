@@ -600,6 +600,7 @@ function serviceVoltage(project: ProjectRecord): string {
 // process knowledge for gets its true required-document set + submission method, even
 // without a hand-written static profile — so the doc builder pulls the right forms
 // for "the AHJs we give it" instead of falling back to a generic package.
+const EMAIL_ADDRESS = /[\w.+-]+@[\w-]+(?:\.[\w-]+)+/;
 function applicationProfileFromProcess(project: ProjectRecord): ApplicationRequirementProfile | null {
   const proc = findAhjProcessProfile(project);
   if (!proc) return null;
@@ -675,7 +676,9 @@ function applicationProfileFromProcess(project: ProjectRecord): ApplicationRequi
     : accela ? "Accela Citizen Access (online portal)"
     : isEpermitting ? (proc.submissionMethod || "Online e-permitting portal")
     : isProjectDox ? "ProjectDox (online plan review)"
-    : isEmail ? "Email"
+    // A seeded method that NAMES the intake address keeps it, so the card shows where it goes; sending
+    // still needs a person-verified address (filingEmail.ts), so a seeded address is only shown.
+    : isEmail ? (EMAIL_ADDRESS.test(proc.submissionMethod || "") ? (proc.submissionMethod || "").trim() : "Email")
     : (proc.submissionMethod || "Verify on the AHJ site");
 
   // A SEEDED NOTE IS A NOTE, NOT AN INSTRUCTION. Scottsdale's reads 'Select "Solar Systems/Green

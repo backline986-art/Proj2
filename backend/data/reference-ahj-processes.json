@@ -1,7 +1,7 @@
 {
   "generatedFrom": "Permit Processes.xlsx",
   "redaction": "Credential/contact columns and credential-like values removed; credential-bearing notes dropped. Customer-specific files excluded.",
-  "count": 386,
+  "count": 389,
   "profiles": [
     {
       "state": "NJ",
@@ -5006,13 +5006,13 @@
     {
       "state": "ID",
       "ahj": "Boise",
-      "submissionMethod": "Boise Portal EPlans upload",
+      "submissionMethod": "https://permits.cityofboise.org/",
       "timeline": "",
       "requiresElectricianSign": false,
       "requiresElectricalStamp": false,
       "requiresStructuralStamp": false,
-      "requiresElectricalPermitApplication": false,
-      "requiresBuildingPermitApplication": false,
+      "requiresElectricalPermitApplication": true,
+      "requiresBuildingPermitApplication": true,
       "requiresSolarChecklist": false,
       "requiresPlanSet": true,
       "requiresUtilityApproval": false,
@@ -5020,7 +5020,73 @@
       "requiresFloodplainCheck": false,
       "requiresJurisdictionCheck": true,
       "otherRequirements": "",
-      "reviewerNotes": "For Electrical Fixtures mark \"1\" for \"photovoltaic system\" Apply for Solar on portal first. After issued, apply for the electrical portion. Upload files separate sheets and rename. When/If resubmitting corrections, please only upload affected sheets with same naming conventions.",
+      "reviewerNotes": "For Electrical Fixtures mark \"1\" for \"photovoltaic system\" Apply for Solar on portal first. After issued, apply for the electrical portion. Upload files separate sheets and rename. When/If resubmitting corrections, please only upload affected sheets with same naming conventions. Operator sheet channel: Boise Portal EPlans upload. City of Boise pages (read 2026-11-10): city permits are applied for through its Permitting & Licensing portal; PV needs a building permit and an electrical permit, and the electrical trade permit is obtained separately with its own fee. Battery backup jobs: the #406 checklist asks for battery specifications showing UL 9540 testing, the battery manufacturer's installation guidelines, and floor plans showing the battery location and any bollard or ventilation. Fire: the Boise Fire Department's battery systems permit applies to installing a stationary battery system. Seeded from the authority's own pages, NOT verified.",
+      "documents": {
+        "items": [
+          "Form #406 Residential Addition, Alteration & Accessory Building Application",
+          "Roof plan drawn to scale with the exact location of panels and the fire-fighter access clearances",
+          "Structural calculations, where applicable, stamped and signed by an Idaho licensed engineer",
+          "Manufacturer specifications for panels, inverters, racking and other equipment showing the UL listing",
+          "One-line electrical diagram (equipment location, voltage and current ratings, wire size, disconnect and overcurrent ratings)",
+          "ICC-ES Evaluation Services Report for all mounting brackets",
+          "Certificate of Appropriateness from Planning (installations in a Historic District)",
+          "Battery backup: battery NRTL certification (UL 9540), manufacturer installation guidelines, floor plans with the battery location"
+        ],
+        "sourceUrl": "https://www.cityofboise.org/media/17322/406-residential-photovoltaic-system-submittal-checklist-_fillable_oct-2022.pdf",
+        "quote": "Please check in at the Permit Counter with a completed #406 Application, this checklist, and all other required documents (see below).",
+        "observedAt": "2026-11-10"
+      },
+      "citations": [
+        {
+          "field": "submissionMethod",
+          "value": "https://permits.cityofboise.org/",
+          "sourceUrl": "https://www.cityofboise.org/permitting-and-licensing-portal/",
+          "quote": "To apply for a city permit, license or file a code compliance complaint, you'll be required to do so through our new Permitting & Licensing portal.",
+          "fetchedAt": "2026-11-10T08:20:10Z"
+        },
+        {
+          "field": "requiresElectricalPermitApplication",
+          "value": true,
+          "sourceUrl": "https://www.cityofboise.org/media/3698/solar_photovoltaic_pv_field_inspection_process_pdf-a.pdf",
+          "quote": "Boise City Code requires a Building permit and an Electrical permit prior to commencing installation of Photovoltaic panels.",
+          "fetchedAt": "2026-11-10T08:20:53Z"
+        },
+        {
+          "field": "requiresBuildingPermitApplication",
+          "value": true,
+          "sourceUrl": "https://www.cityofboise.org/media/3698/solar_photovoltaic_pv_field_inspection_process_pdf-a.pdf",
+          "quote": "Boise City Code requires a Building permit and an Electrical permit prior to commencing installation of Photovoltaic panels.",
+          "fetchedAt": "2026-11-10T08:20:53Z"
+        },
+        {
+          "field": "electricalPermitIssuer",
+          "value": "city",
+          "sourceUrl": "https://www.cityofboise.org/media/9168/solar-photovoltaic-systems-fee-guide_dec-2019_final.pdf",
+          "quote": "Note: Trade permits, such as electrical, are obtained separately with a separate fee.",
+          "fetchedAt": "2026-11-10T08:20:52Z"
+        },
+        {
+          "field": "ess",
+          "value": "battery specifications showing UL 9540 testing",
+          "sourceUrl": "https://www.cityofboise.org/media/17322/406-residential-photovoltaic-system-submittal-checklist-_fillable_oct-2022.pdf",
+          "quote": "Battery NRTL certification Specifications need to show batteries as tested in accordance with UL 9540.",
+          "fetchedAt": "2026-11-10T08:20:43Z"
+        },
+        {
+          "field": "ess",
+          "value": "floor plans with the battery location",
+          "sourceUrl": "https://www.cityofboise.org/media/17322/406-residential-photovoltaic-system-submittal-checklist-_fillable_oct-2022.pdf",
+          "quote": "Include exact location of batteries in the home and any required bollard or ventilation locations.",
+          "fetchedAt": "2026-11-10T08:20:43Z"
+        },
+        {
+          "field": "ess",
+          "value": "Fire Department battery systems permit for a stationary battery system",
+          "sourceUrl": "https://www.cityofboise.org/departments/fire/fire-prevention/permits/special-use-and-operations/battery-systems-permit/",
+          "quote": "The battery systems permit applies to the installation of a stationary battery system.",
+          "fetchedAt": "2026-11-10T08:20:04Z"
+        }
+      ],
       "sourceSheet": "ID PROCESS"
     },
     {
@@ -5040,7 +5106,16 @@
       "requiresFloodplainCheck": false,
       "requiresJurisdictionCheck": true,
       "otherRequirements": "Credit Card Authorization",
-      "reviewerNotes": "",
+      "reviewerNotes": "Canyon County building department page (read 2026-11-10): mechanical, electrical and plumbing permits and inspections are handled by the State of Idaho (DOPL), not the county. Seeded from the authority's own pages, NOT verified.",
+      "citations": [
+        {
+          "field": "electricalPermitIssuer",
+          "value": "state (DOPL)",
+          "sourceUrl": "https://www.canyoncounty.id.gov/building-department",
+          "quote": "all Mechanical, Electrical and Plumbing permits and inspections are handled by the State of Idaho, Division of Occupational and Professional Licenses (DOPL)",
+          "fetchedAt": "2026-11-10T08:24:31Z"
+        }
+      ],
       "sourceSheet": "ID PROCESS"
     },
     {
@@ -5066,7 +5141,7 @@
     {
       "state": "ID",
       "ahj": "Eagle",
-      "submissionMethod": "EMAIL",
+      "submissionMethod": "https://eagle_permit.portal.iworq.net/portalhome/EAGLE_permit",
       "timeline": "",
       "requiresElectricianSign": false,
       "requiresElectricalStamp": false,
@@ -5080,7 +5155,30 @@
       "requiresFloodplainCheck": false,
       "requiresJurisdictionCheck": true,
       "otherRequirements": "Bid sheet/cost of materials and install",
-      "reviewerNotes": "Online payment portal",
+      "reviewerNotes": "Online payment portal City of Eagle pages (read 2026-11-10): building forms and applications that may be submitted online go through its Contractor Portal (iWorQ); the city issues electrical permits through the same Contractor Portal. Seeded from the authority's own pages, NOT verified.",
+      "citations": [
+        {
+          "field": "submissionMethod",
+          "value": "https://eagle_permit.portal.iworq.net/portalhome/EAGLE_permit",
+          "sourceUrl": "https://www.cityofeagle.org/2153/Building-Permits-Applications-Forms",
+          "quote": "Forms/Applications that may be submitted online are accessed through the Contractor Portal.",
+          "fetchedAt": "2026-11-10T08:24:03Z"
+        },
+        {
+          "field": "electricalPermitIssuer",
+          "value": "city",
+          "sourceUrl": "https://www.cityofeagle.org/1835/Electrical-Permits",
+          "quote": "Please use the Contractor Portal for Electrical Permits.",
+          "fetchedAt": "2026-11-10T08:24:08Z"
+        },
+        {
+          "field": "electricalPermitIssuer",
+          "value": "city (application may also be faxed, emailed, mailed or brought in)",
+          "sourceUrl": "https://www.cityofeagle.org/1835/Electrical-Permits",
+          "quote": "You have the option of faxing, emailing, mailing or bringing the application into the Building Department.",
+          "fetchedAt": "2026-11-10T08:24:08Z"
+        }
+      ],
       "sourceSheet": "ID PROCESS"
     },
     {
@@ -5260,8 +5358,182 @@
       "requiresFloodplainCheck": false,
       "requiresJurisdictionCheck": true,
       "otherRequirements": "",
-      "reviewerNotes": "Bid sheet and plan set. Fill out solar application on portal. Upload plans and bid sheet.",
+      "reviewerNotes": "Bid sheet and plan set. Fill out solar application on portal. Upload plans and bid sheet. City of Star pages (read 2026-11-10): all plans are uploaded to the city's iWorQ portal; electrical, mechanical and plumbing permits are in addition to the building permit and are bought at City Hall, in person. Seeded from the authority's own pages, NOT verified.",
+      "citations": [
+        {
+          "field": "submissionMethod",
+          "value": "https://staridpermit.portal.iworq.net/portalhome/staridpermit",
+          "sourceUrl": "https://staridaho.org/DocumentCenter/View/1639/Residential-Submittal-Requirements-2026-02",
+          "quote": "All plans must be submitted and uploaded to the IWORQ Portal.",
+          "fetchedAt": "2026-11-10T08:23:32Z"
+        },
+        {
+          "field": "submissionMethod",
+          "value": "https://staridpermit.portal.iworq.net/portalhome/staridpermit",
+          "sourceUrl": "https://staridaho.org/1243/Building-Department",
+          "quote": "All contractors are required to complete the portal registration form before they can access the permit portal.",
+          "fetchedAt": "2026-11-10T08:23:28Z"
+        },
+        {
+          "field": "electricalPermitIssuer",
+          "value": "city (bought at City Hall)",
+          "sourceUrl": "https://staridaho.org/1249/Fee-Information",
+          "quote": "Electrical, Mechanical, and Plumbing permits are in addition to the building permit and are purchased separately at City Hall.",
+          "fetchedAt": "2026-11-10T08:23:37Z"
+        }
+      ],
       "sourceSheet": "ID PROCESS"
+    },
+    {
+      "state": "ID",
+      "ahj": "Kuna",
+      "submissionMethod": "Email: BuildingPermits@KunaID.gov",
+      "timeline": "",
+      "requiresElectricianSign": false,
+      "requiresElectricalStamp": false,
+      "requiresStructuralStamp": false,
+      "requiresElectricalPermitApplication": false,
+      "requiresBuildingPermitApplication": true,
+      "requiresSolarChecklist": false,
+      "requiresPlanSet": true,
+      "requiresUtilityApproval": false,
+      "requiresCustomerSignature": false,
+      "requiresFloodplainCheck": false,
+      "requiresJurisdictionCheck": true,
+      "otherRequirements": "",
+      "reviewerNotes": "City of Kuna pages (read 2026-11-10): residential digital submittals are emailed to the Building Department as individual PDFs, starting with the application. The city's Building Department issues electrical permits. Seeded from the authority's own pages, NOT verified.",
+      "citations": [
+        {
+          "field": "submissionMethod",
+          "value": "BuildingPermits@KunaID.gov",
+          "sourceUrl": "https://kunacity.id.gov/99/Forms-Applications",
+          "quote": "Please email individual PDFs of the following to BuildingPermits@KunaID.gov : Application",
+          "fetchedAt": "2026-11-10T08:22:41Z"
+        },
+        {
+          "field": "electricalPermitIssuer",
+          "value": "city",
+          "sourceUrl": "https://kunacity.id.gov/119/Building-Department",
+          "quote": "Electrical permits are available at City of Kuna Building Department.",
+          "fetchedAt": "2026-11-10T08:21:50Z"
+        }
+      ],
+      "sourceSheet": "ID seeded (authority pages read 2026-11-10)"
+    },
+    {
+      "state": "ID",
+      "ahj": "Caldwell",
+      "submissionMethod": "https://www2.citizenserve.com/Portal/PortalController?Action=showHomePage&ctzPagePrefix=Portal_&installationID=263",
+      "timeline": "",
+      "requiresElectricianSign": false,
+      "requiresElectricalStamp": false,
+      "requiresStructuralStamp": false,
+      "requiresElectricalPermitApplication": false,
+      "requiresBuildingPermitApplication": true,
+      "requiresSolarChecklist": true,
+      "requiresPlanSet": true,
+      "requiresUtilityApproval": false,
+      "requiresCustomerSignature": false,
+      "requiresFloodplainCheck": false,
+      "requiresJurisdictionCheck": true,
+      "otherRequirements": "",
+      "reviewerNotes": "City of Caldwell pages (read 2026-11-10): one- and two-family permits are submitted digitally through the city's Online Portal (Citizenserve); paper submittals are no longer accepted. The Building Safety Division takes building and electrical permits through the same portal. The PV checklist says the submittal is reviewed by the Plans Examiner, the Electrical Inspector and Planning & Zoning before the building permit is issued. Seeded from the authority's own pages, NOT verified.",
+      "documents": {
+        "items": [
+          "Residential building permit application",
+          "Residential Photovoltaic Systems Installation Checklist, signed and dated",
+          "Roof plan drawn to scale with exact locations and dimensions",
+          "Structural calculations (where applicable) stamped by a registered design professional; engineering is required over 5 psf added load",
+          "Manufacturer specifications showing listing and label per UL 1703, UL 1741, NEC 110.3(B) and NEC 690.4(B)",
+          "Diagram with equipment location, voltage and current ratings, wire size, disconnect and overcurrent ratings",
+          "ICC-ES Evaluation Report for all mounting hardware",
+          "Certificate of Appropriateness (only in a Historic District)"
+        ],
+        "sourceUrl": "https://www.cityofcaldwell.org/files/assets/city/v/1/building/documents/permit-apps/photovoltaic-checklist.pdf",
+        "quote": "When applying for a Building permit for the installation of Residential Photovoltaic Systems, this checklist must be completed and accompany the required documents and building permit application.",
+        "observedAt": "2026-11-10"
+      },
+      "citations": [
+        {
+          "field": "submissionMethod",
+          "value": "https://www2.citizenserve.com/Portal/PortalController?Action=showHomePage&ctzPagePrefix=Portal_&installationID=263",
+          "sourceUrl": "https://www.cityofcaldwell.org/Departments/Community-Development/Building-Safety-Division/Online-Portal-Services",
+          "quote": "Here you will be able to submit permits, request inspections, and monitor your projects.",
+          "fetchedAt": "2026-11-10T08:24:14Z"
+        },
+        {
+          "field": "submissionMethod",
+          "value": "https://www2.citizenserve.com/Portal/PortalController?Action=showHomePage&ctzPagePrefix=Portal_&installationID=263",
+          "sourceUrl": "https://www.cityofcaldwell.org/Departments/Community-Development/Building-Safety-Division/Applications-and-Forms",
+          "quote": "Note: All Commercial, One- and Two-Family Dwelling, and Multi-Family permits must be submitted digitally through the Online Portal System. Paper submittals will no longer be accepted.",
+          "fetchedAt": "2026-11-10T08:24:16Z"
+        },
+        {
+          "field": "electricalPermitIssuer",
+          "value": "city",
+          "sourceUrl": "https://www.cityofcaldwell.org/Departments/Community-Development/Building-Safety-Division",
+          "quote": "The Building Safety Division utilizes an online permit portal for the submission of the various type of building, electrical, plumbing, mechanical permits, and sign permits.",
+          "fetchedAt": "2026-11-10T08:24:15Z"
+        },
+        {
+          "field": "requiresSolarChecklist",
+          "value": true,
+          "sourceUrl": "https://www.cityofcaldwell.org/files/assets/city/v/1/building/documents/permit-apps/photovoltaic-checklist.pdf",
+          "quote": "When applying for a Building permit for the installation of Residential Photovoltaic Systems, this checklist must be completed and accompany the required documents and building permit application.",
+          "fetchedAt": "2026-11-10T08:24:23Z"
+        },
+        {
+          "field": "requiresBuildingPermitApplication",
+          "value": true,
+          "sourceUrl": "https://www.cityofcaldwell.org/files/assets/city/v/1/building/documents/permit-apps/photovoltaic-checklist.pdf",
+          "quote": "This submittal will require a review by the Caldwell Plans Examiner, Electrical Inspector, and Planning & Zoning Department, prior to the issuance of the building permit.",
+          "fetchedAt": "2026-11-10T08:24:23Z"
+        }
+      ],
+      "sourceSheet": "ID seeded (authority pages read 2026-11-10)"
+    },
+    {
+      "state": "ID",
+      "ahj": "Twin Falls",
+      "submissionMethod": "https://cityworks.tfid.org/permits/template/login.aspx",
+      "timeline": "",
+      "requiresElectricianSign": false,
+      "requiresElectricalStamp": false,
+      "requiresStructuralStamp": false,
+      "requiresElectricalPermitApplication": true,
+      "requiresBuildingPermitApplication": false,
+      "requiresSolarChecklist": false,
+      "requiresPlanSet": true,
+      "requiresUtilityApproval": false,
+      "requiresCustomerSignature": false,
+      "requiresFloodplainCheck": false,
+      "requiresJurisdictionCheck": true,
+      "otherRequirements": "",
+      "reviewerNotes": "City of Twin Falls pages (read 2026-11-10): solar is applied for through the city's online portal (Cityworks), with plans attached to the application; all electrical work must be permitted by the city; a building permit is needed only when changes to the roof are required. Seeded from the authority's own pages, NOT verified.",
+      "citations": [
+        {
+          "field": "submissionMethod",
+          "value": "https://cityworks.tfid.org/permits/template/login.aspx",
+          "sourceUrl": "https://www.tfid.org/DocumentCenter/View/3510/Solar-Installation-Instructions-Updated-12-4-18",
+          "quote": "Apply for permit through online Portal & attach plans to portal. https://cityworks.tfid.org/permits/template/login.aspx",
+          "fetchedAt": "2026-11-10T08:23:05Z"
+        },
+        {
+          "field": "electricalPermitIssuer",
+          "value": "city",
+          "sourceUrl": "https://www.tfid.org/215/Permit-Requirements",
+          "quote": "All electrical, plumbing, mechanical and gas work must be permitted",
+          "fetchedAt": "2026-11-10T08:22:52Z"
+        },
+        {
+          "field": "requiresBuildingPermitApplication",
+          "value": false,
+          "sourceUrl": "https://www.tfid.org/DocumentCenter/View/3510/Solar-Installation-Instructions-Updated-12-4-18",
+          "quote": "building permits will be needed if changes to the roof are required",
+          "fetchedAt": "2026-11-10T08:23:05Z"
+        }
+      ],
+      "sourceSheet": "ID seeded (authority pages read 2026-11-10)"
     },
     {
       "state": "TX",

@@ -3,6 +3,75 @@
   "records": [
     {
       "states": [
+        "ID"
+      ],
+      "utility": "Idaho Power",
+      "displayName": "Idaho Power",
+      "matchNames": [
+        "idaho power",
+        "idahopower"
+      ],
+      "filingDoor": {
+        "name": "Idaho Power customer generation application form",
+        "url": "https://tools.idahopower.com/forms/CustomerGenerationApplication/Submit",
+        "sourceName": "Idaho Power — Apply to connect your system",
+        "sourceUrl": "https://www.idahopower.com/accounts-service/clean-choices/solar-power-options-customer-generation/apply-to-connect-your-system/",
+        "quote": "Application Form – Solar PV, Wind, Hydroelectric, & Other Projects",
+        "fetchedAt": "2026-11-10T08:25:03Z"
+      },
+      "requirements": [
+        {
+          "key": "owner_signature",
+          "whenMissing": "warning",
+          "sourceName": "Idaho Power — Apply to connect your system",
+          "sourceUrl": "https://www.idahopower.com/accounts-service/clean-choices/solar-power-options-customer-generation/apply-to-connect-your-system/",
+          "quote": "Applications will be considered complete once a signed application and fee, plus any requested documentation (i.e. single line), have been received.",
+          "fetchedAt": "2026-11-10T08:25:03Z"
+        },
+        {
+          "key": "one_line",
+          "whenMissing": "warning",
+          "sourceName": "Idaho Power — Apply to connect your system",
+          "sourceUrl": "https://www.idahopower.com/accounts-service/clean-choices/solar-power-options-customer-generation/apply-to-connect-your-system/",
+          "quote": "Applications will be considered complete once a signed application and fee, plus any requested documentation (i.e. single line), have been received.",
+          "fetchedAt": "2026-11-10T08:25:03Z"
+        },
+        {
+          "key": "inverter_settings",
+          "whenMissing": "warning",
+          "sourceName": "Idaho Power — Apply to connect your system",
+          "sourceUrl": "https://www.idahopower.com/accounts-service/clean-choices/solar-power-options-customer-generation/apply-to-connect-your-system/",
+          "quote": "Required inverter settings in a downloadable CSV common file format",
+          "fetchedAt": "2026-11-10T08:25:03Z"
+        },
+        {
+          "key": "inverter_listing_ul1741sb",
+          "whenMissing": "warning",
+          "sourceName": "Idaho Power — Customer generation frequently asked questions",
+          "sourceUrl": "https://www.idahopower.com/accounts-service/clean-choices/solar-power-options-customer-generation/frequently-asked-questions/",
+          "quote": "Idaho Power requires smart inverters that comply with IEEE 1547-2018 and are UL 1741 SB certified.",
+          "fetchedAt": "2026-11-10T08:25:08Z"
+        },
+        {
+          "key": "ac_disconnect",
+          "whenMissing": "blocker",
+          "sourceName": "Idaho Power — Customer generation frequently asked questions",
+          "sourceUrl": "https://www.idahopower.com/accounts-service/clean-choices/solar-power-options-customer-generation/frequently-asked-questions/",
+          "quote": "Idaho Power also requires an AC disconnect switch on the customer’s side of the meter. Breakers do not meet these requirements.",
+          "fetchedAt": "2026-11-10T08:25:08Z"
+        },
+        {
+          "key": "storage_mode_declaration",
+          "whenMissing": "warning",
+          "sourceName": "Idaho Power — Customer generation frequently asked questions",
+          "sourceUrl": "https://www.idahopower.com/accounts-service/clean-choices/solar-power-options-customer-generation/frequently-asked-questions/",
+          "quote": "A battery storage system was installed but not disclosed on the System Verification Form.",
+          "fetchedAt": "2026-11-10T08:25:08Z"
+        }
+      ]
+    },
+    {
+      "states": [
         "UT",
         "ID",
         "WY"
