@@ -206,13 +206,22 @@ export function sourcesCovering(state: string, city: string, zip: string): Juris
 }
 
 // ── The address ───────────────────────────────────────────────────────────────────────────────
-const USPS_SUFFIX: Record<string, string> = {
-  STREET: "ST", AVENUE: "AVE", ROAD: "RD", DRIVE: "DR", LANE: "LN", COURT: "CT", BOULEVARD: "BLVD", PLACE: "PL",
-  CIRCLE: "CIR", TERRACE: "TER", PARKWAY: "PKWY", HIGHWAY: "HWY", TRAIL: "TRL", SQUARE: "SQ", LOOP: "LOOP", WAY: "WAY",
-};
-const USPS_DIRECTION: Record<string, string> = {
-  NORTH: "N", SOUTH: "S", EAST: "E", WEST: "W", NORTHEAST: "NE", NORTHWEST: "NW", SOUTHEAST: "SE", SOUTHWEST: "SW",
-};
+/** USPS street-word abbreviations, as data (backend/data/usps-street-abbreviations.json). Read once; a
+ *  missing file abbreviates nothing (the street is sent as written, upper-cased). */
+let uspsCache: { suffixes: Record<string, string>; directionals: Record<string, string> } | null = null;
+function uspsWords(): { suffixes: Record<string, string>; directionals: Record<string, string> } {
+  if (uspsCache) return uspsCache;
+  const clean = (v: unknown): Record<string, string> => {
+    const out: Record<string, string> = {};
+    if (v && typeof v === "object") for (const [k, x] of Object.entries(v as Record<string, unknown>)) if (str(k) && str(x)) out[str(k).toUpperCase()] = str(x).toUpperCase();
+    return out;
+  };
+  try {
+    const raw = JSON.parse(fs.readFileSync(path.resolve(moduleDir, "..", "data", "usps-street-abbreviations.json"), "utf8")) as Record<string, unknown>;
+    uspsCache = { suffixes: clean(raw.suffixes), directionals: clean(raw.directionals) };
+  } catch { uspsCache = { suffixes: {}, directionals: {} }; }
+  return uspsCache;
+}
 
 /** The street line of a project address ("1200 Example Rd, Town, ST 00000" -> "1200 EXAMPLE RD"),
  *  unit dropped, upper-cased, punctuation removed; USPS abbreviations unless the record says "full". */
@@ -222,9 +231,10 @@ export function normalizeStreet(projectAddress: string, style: "usps" | "full" =
   // A unit is not part of the parcel's site address.
   s = s.replace(/\s+(?:APT|APARTMENT|UNIT|STE|SUITE|SPC|SPACE|LOT|BLDG)\s+\S+$/, "").trim();
   if (style === "usps") {
+    const { suffixes, directionals } = uspsWords();
     s = s.split(" ").map((w, i, all) => {
-      if (USPS_DIRECTION[w] && (i === 1 || i === all.length - 1)) return USPS_DIRECTION[w];
-      if (USPS_SUFFIX[w] && i > 1) return USPS_SUFFIX[w];
+      if (directionals[w] && (i === 1 || i === all.length - 1)) return directionals[w];
+      if (suffixes[w] && i > 1) return suffixes[w];
       return w;
     }).join(" ");
   }
