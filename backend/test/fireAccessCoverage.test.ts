@@ -139,6 +139,12 @@ await check("a person-verified policy with its page: the design built to it pass
   assert.equal(get(fs, BELOW), undefined, get(fs, BELOW)?.message);
   assert.equal(get(fs, POLICY_ASK), undefined);
 });
+await check("a design short of the applied policy is measured against it, with the policy's own tier and page", () => {
+  const f = get(run('30" FIRE ACCESS PATHWAY. 6" SETBACK FROM RIDGE. TOTAL ARRAY AREA: 400 SQ FT.', { confidence: "verified", verifiedBy: "Dana Plans", firePathwayPolicy: POLICY }), BELOW);
+  assert.match(f?.message ?? "", /requires at least 12 in/);
+  assert.equal(f?.ruleBasis?.tier, "verified");
+  assert.equal(f?.ruleBasis?.sourceUrl, POLICY.sourceUrl);
+});
 await check("an OFFICIAL read of the policy (#683) is applied too", () => {
   const fs = run(POLICY_PLAN, {
     firePathwayPolicy: POLICY,
