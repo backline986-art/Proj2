@@ -15,6 +15,8 @@
 //   - landingTierFor(...): "official" only when the host passes, the quote names the value, and the
 //     quote is found in the bytes this process RETRIEVED from that page at `fetchedAt` (never a
 //     model's memory, never a model's own quote of a page we did not read); else "seeded".
+//   - shippedRowTier(...): a shipped reference row's own "official" claim, honoured at load only when
+//     the row's host, quote and fetched-at pass (its bytes were checked when it was built); else "seeded".
 // Pure: no DB, no network.
 
 export type LandingTier = "official" | "seeded";
@@ -88,19 +90,53 @@ export interface LandingInput {
   verifiedAuthorityHosts?: readonly string[];
 }
 
-/** "official" or "seeded", and every reason it is not official (empty when it is). */
-export function landingTierFor(input: LandingInput): { tier: LandingTier; host: string; reasons: string[] } {
+/** What a citation can show on its own: the host passes the one predicate, the quote states the
+ *  value (the caller's test: a number among its numbers, the item named), and it carries a fetched-at
+ *  time. Every reason it falls short (empty when it does not). */
+export interface CitationEvidence {
+  sourceUrl: string;
+  quote?: string;
+  fetchedAt?: string;
+  /** Does the quote state the row's value? */
+  quoteStatesValue: (quote: string) => boolean;
+  /** Hosts cited by this authority's HUMAN-verified rows (see isOfficialSourceHost). */
+  verifiedAuthorityHosts?: readonly string[];
+}
+export function citationShortfalls(input: CitationEvidence): { host: string; quote: string; reasons: string[] } {
   const reasons: string[] = [];
   const host = sourceHostOf(input.sourceUrl);
   if (!host) reasons.push("no http(s) source page");
   else if (!isOfficialSourceHost(input.sourceUrl, input.verifiedAuthorityHosts ?? [])) reasons.push(`${host} is not a government host or a domain a person verified as the authority's own`);
   const quote = quoteText(input.quote ?? "");
   if (quote.length < 3) reasons.push("no verbatim quote");
-  else if (!quoteNamesValue(quote, input.value) && !(input.publishedValue !== undefined && quoteNamesValue(quote, input.publishedValue))) reasons.push("the quote does not contain the value");
+  else if (!input.quoteStatesValue(quote)) reasons.push("the quote does not contain the value");
   const fetched = str(input.fetchedAt);
   if (!/^\d{4}-\d{2}-\d{2}T/.test(fetched) || Number.isNaN(Date.parse(fetched))) reasons.push("no fetched-at time");
+  return { host, quote, reasons };
+}
+
+/** "official" or "seeded", and every reason it is not official (empty when it is). */
+export function landingTierFor(input: LandingInput): { tier: LandingTier; host: string; reasons: string[] } {
+  const { host, quote, reasons } = citationShortfalls({
+    sourceUrl: input.sourceUrl, quote: input.quote, fetchedAt: input.fetchedAt, verifiedAuthorityHosts: input.verifiedAuthorityHosts,
+    quoteStatesValue: (q) => quoteNamesValue(q, input.value) || (input.publishedValue !== undefined && quoteNamesValue(q, input.publishedValue)),
+  });
   if (input.retrievedText === undefined) reasons.push("the page's bytes were not retrieved (a model's answer, not a read)");
   else if (quote && !quoteText(input.retrievedText).includes(quote)) reasons.push("the quote is not in the retrieved page");
+  return { tier: reasons.length ? "seeded" : "official", host, reasons };
+}
+
+/**
+ * A SHIPPED REFERENCE ROW THAT CLAIMS "official" (Helm, 2026-11-10). The page's bytes were read when
+ * the row was built, and the delivery's evidence folder holds that text with the quote in it; at load
+ * the row is re-checked against what it can show itself (citationShortfalls). The claim is honoured
+ * only when it holds; otherwise the row lands seeded, with the reasons. It never throws. Callers never
+ * pass a filing door (a portal, an email address, where a filing goes or whether one is sent): those
+ * stay seeded until a person verifies them, whatever the host.
+ */
+export function shippedRowTier(claimed: unknown, input: CitationEvidence): { tier: LandingTier; host: string; reasons: string[] } {
+  const { host, reasons } = citationShortfalls(input);
+  if (str(claimed) !== "official") return { tier: "seeded", host, reasons: ["the row does not claim official", ...reasons] };
   return { tier: reasons.length ? "seeded" : "official", host, reasons };
 }
 

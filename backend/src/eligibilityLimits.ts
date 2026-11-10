@@ -29,6 +29,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { AuthorityEligibilityRecord, EligibilityCitation, EligibilityLimit, EligibilityLimits, QcStatus, Severity } from "../../shared/src/types";
+import { shippedRowTier, sourceHostOf } from "../../shared/src/officialSource";
 import type { AppDb } from "./db";
 import { usStateCode } from "./permitPath";
 
@@ -68,13 +69,19 @@ function referencePath(): string {
 }
 
 let shippedCache: { file: string; records: AuthorityEligibilityRecord[] } | null = null;
-/** The shipped reference rows (seeded). Read once per file; a missing or broken file is no rows. */
+/** The shipped reference rows. Read once per file; a missing or broken file is no rows. A row lands
+ *  seeded unless it claims "official" and every one of its limits passes the shared bar
+ *  (shippedRowTier: an official host, words that carry the value, fetched-at); a row that falls short
+ *  lands seeded and never throws. */
 export function shippedEligibilityRecords(filePath = referencePath()): AuthorityEligibilityRecord[] {
   if (shippedCache?.file === filePath) return shippedCache.records;
   let records: AuthorityEligibilityRecord[] = [];
   try {
     const data = JSON.parse(fs.readFileSync(filePath, "utf8")) as { records?: unknown[] };
-    records = (data.records ?? []).map((r) => sanitizeRecord(r, "seeded")).filter((r): r is AuthorityEligibilityRecord => r != null);
+    records = (data.records ?? []).map((r): AuthorityEligibilityRecord | null => {
+      const rec = sanitizeRecord(r, "seeded");
+      return rec ? { ...rec, confidence: shippedRecordTier((r as Record<string, unknown> | null)?.tier, rec) } : null;
+    }).filter((r): r is AuthorityEligibilityRecord => r != null);
   } catch { records = []; }
   shippedCache = { file: filePath, records };
   return records;
@@ -139,6 +146,22 @@ function sanitizeRecord(raw: unknown, confidence: AuthorityEligibilityRecord["co
   return { authorityKind: kind, state, authority: str(o.authority).slice(0, 200), programName: str(o.programName).slice(0, 200), limits, confidence };
 }
 
+/** A shipped record's honoured tier: "official" only when it claims it and EVERY limit's citation
+ *  passes shippedRowTier with its own words carrying the limit (quoteCarries, the one test the
+ *  research path and the #637 bar already use). A program cap is a fact, never a filing door. */
+export function shippedRecordTier(claimed: unknown, rec: Pick<AuthorityEligibilityRecord, "limits">): "official" | "seeded" {
+  const limits = Object.entries(rec.limits) as Array<[keyof EligibilityLimits, EligibilityLimit<unknown>]>;
+  if (!limits.length) return "seeded";
+  return limits.every(([key, limit]) => shippedRowTier(claimed, {
+    sourceUrl: limit.citation.sourceUrl, quote: limit.citation.quote, fetchedAt: limit.citation.fetchedAt,
+    quoteStatesValue: (q) => quoteCarries(key, limit.value, q),
+  }).tier === "official") ? "official" : "seeded";
+}
+
+/** The hosts a record's limits cite (an official row is refreshed only from the same hosts). */
+const citedHosts = (limits: EligibilityLimits): string =>
+  [...new Set(Object.values(limits).map((l) => sourceHostOf(str((l as EligibilityLimit<unknown>)?.citation?.sourceUrl))))].sort().join(" ");
+
 // ── Store (authority_eligibility_limits: created by db.ts migration v67, never lazily) ──────────
 type Row = Record<string, unknown>;
 function rowToRecord(row: Row): AuthorityEligibilityRecord | null {
@@ -146,7 +169,7 @@ function rowToRecord(row: Row): AuthorityEligibilityRecord | null {
   try { limits = JSON.parse(str(row.limits_json) || "{}"); } catch { limits = {}; }
   const verified = Boolean(str(row.verified_at));
   // 'official' (#683: read from the authority's own official source) is usable like verified; this
-  // module never writes it — only that landing function does.
+  // module writes it only for a shipped row honoured as official (seedEligibilityRecords, shippedRowTier).
   const confidence = verified ? "verified" : str(row.confidence) === "official" ? "official" : "seeded";
   const rec = sanitizeRecord({ authorityKind: row.authority_kind, state: row.state, authority: row.authority, programName: row.program_name, limits }, confidence);
   if (!rec) return null;
@@ -187,14 +210,36 @@ export function saveEligibilityRecord(
   return { saved: true, reason: verifiedBy ? "verified" : "seeded" };
 }
 
-/** Seed the shipped rows. Idempotent; never over a verified row (rule 3). */
+/** Seed the shipped rows. Idempotent; never over a verified row (rule 3). A shipped row honoured as
+ *  official (shippedEligibilityRecords) lands official: it replaces a seeded row, refreshes an official
+ *  row only from the same hosts, and never touches a person's row. */
 export function seedEligibilityRecords(db: AppDb, filePath = referencePath()): number {
   let written = 0;
   for (const rec of shippedEligibilityRecords(filePath)) {
     const key = eligibilityKey(rec.authorityKind, rec.state, rec.authority);
     const row = db.get<Row>("SELECT limits_json, program_name, verified_at, confidence FROM authority_eligibility_limits WHERE record_key = ?", [key]);
-    if (row && (str(row.verified_at) || str(row.confidence) === "official" || (str(row.limits_json) === JSON.stringify(rec.limits) && str(row.program_name) === rec.programName))) continue;
-    if (saveEligibilityRecord(db, rec).saved) written += 1;
+    if (row && str(row.verified_at)) continue;
+    const storedTier = str(row?.confidence) === "official" ? "official" : "seeded";
+    if (row && str(row.limits_json) === JSON.stringify(rec.limits) && str(row.program_name) === rec.programName && storedTier === rec.confidence) continue;
+    if (rec.confidence !== "official") {
+      if (row && storedTier === "official") continue;
+      if (saveEligibilityRecord(db, rec).saved) written += 1;
+      continue;
+    }
+    if (row && storedTier === "official") {
+      let stored: EligibilityLimits = {};
+      try { stored = sanitizeLimits(JSON.parse(str(row.limits_json) || "{}")); } catch { stored = {}; }
+      if (citedHosts(stored) !== citedHosts(rec.limits)) continue;
+    }
+    db.run(
+      `INSERT INTO authority_eligibility_limits (record_key, authority_kind, state, authority, program_name, limits_json, confidence, verified_at, verified_by, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, 'official', '', '', ?)
+       ON CONFLICT(record_key) DO UPDATE SET authority = excluded.authority, program_name = excluded.program_name,
+         limits_json = excluded.limits_json, confidence = excluded.confidence, verified_at = excluded.verified_at,
+         verified_by = excluded.verified_by, updated_at = excluded.updated_at`,
+      [key, rec.authorityKind, rec.state, rec.authority, rec.programName, JSON.stringify(rec.limits), new Date().toISOString()],
+    );
+    written += 1;
   }
   return written;
 }
@@ -298,7 +343,7 @@ function matches(rec: AuthorityEligibilityRecord, job: EligibilityJob): boolean 
 const kindSlug = (k: Kind) => (k === "utility_program" ? "utility-program" : "permit-path");
 const recordLabel = (rec: AuthorityEligibilityRecord) => rec.programName || (rec.authorityKind === "utility_program" ? "the utility's program" : "the simplified permit path");
 const citeText = (c: EligibilityCitation, conf: AuthorityEligibilityRecord["confidence"]) =>
-  `${c.sourceName || c.sourceUrl}${c.quote ? `: "${c.quote}"` : ""}${c.sourceUrl && c.sourceName ? ` (${c.sourceUrl})` : ""}${conf === "seeded" ? " — seeded, verify" : ""}`;
+  `${c.sourceName || c.sourceUrl}${c.quote ? `: "${c.quote}"` : ""}${c.sourceUrl && c.sourceName ? ` (${c.sourceUrl})` : ""}${conf === "seeded" ? " — seeded, verify" : conf === "official" ? ` — from ${sourceHostOf(c.sourceUrl) || "the official source"} (official source, not verified by a person)` : ""}`;
 const fill = (template: string, vars: Record<string, string>) => template.replace(/\{(\w+)\}/g, (m, k: string) => (k in vars ? vars[k] : m));
 
 interface Screen { finding: EligibilityFinding; excludes: boolean }

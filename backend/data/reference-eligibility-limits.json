@@ -45,6 +45,7 @@
       "state": "UT",
       "authority": "Murray City Power",
       "programName": "Murray City Power Net Metering Pilot Program",
+      "tier": "official",
       "limits": {
         "maxDcKw": {
           "value": 10,
@@ -83,6 +84,7 @@
       "state": "UT",
       "authority": "Bountiful City Light & Power",
       "programName": "Bountiful City Light & Power NET metered photovoltaic service",
+      "tier": "official",
       "limits": {
         "maxDcKw": {
           "value": 10,
@@ -110,6 +112,7 @@
       "state": "UT",
       "authority": "Kaysville City Power",
       "programName": "Kaysville City net metering",
+      "tier": "official",
       "limits": {
         "maxDcKw": {
           "value": 15,
@@ -136,6 +139,7 @@
       "state": "UT",
       "authority": "Kaysville City",
       "programName": "Kaysville City net metering",
+      "tier": "official",
       "limits": {
         "maxDcKw": {
           "value": 15,
