@@ -1,6 +1,75 @@
 {
-  "_comment": "What each utility's own interconnection application asks for (review-audit draft 03), as cited DATA: loaded by backend/src/utilityRequirements.ts and read by the reviewer gate for the job's utility. Rows land SEEDED. A missing item is a warning unless the row quotes the utility's own page verbatim with a named source and the quote names the item (Helm's #637 bar); only then may whenMissing 'blocker' block. Records match the job's state and utility name (any of matchNames, as whole words, after lower-casing and '&' -> 'and'). A person's verified items or an official read on the utility's filing row (utility_filing_lookups.application_requirements_json) override these per key. To add a utility, add a record here: no code. Quotes were read from the page bytes on fetchedAt. Each item may carry `gates` (reviewer / qc; absent = both) and a `qc` block: how the QC baseline (baselineRules) reports it missing — items sharing a ruleId report as one result listing each item's label in {missing}; {utility} is the record's displayName. `strictDefault` is what QC checks for a utility with NO record (uncited, so it only warns and says the utility is not researched). `qcRuleDefinitions` is the QC rule catalogue for those rule ids (the rules table).",
+  "_comment": "What each utility's own interconnection application asks for (review-audit draft 03), as cited DATA: loaded by backend/src/utilityRequirements.ts and read by the reviewer gate for the job's utility. Rows land SEEDED. A missing item is a warning unless the row quotes the utility's own page verbatim with a named source and the quote names the item (Helm's #637 bar); only then may whenMissing 'blocker' block. Records match the job's state and utility name (any of matchNames, as whole words, after lower-casing and '&' -> 'and'). A person's verified items or an official read on the utility's filing row (utility_filing_lookups.application_requirements_json) override these per key. To add a utility, add a record here: no code. Quotes were read from the page bytes on fetchedAt. Each item may carry `gates` (reviewer / qc; absent = both) and a `qc` block: how the QC baseline (baselineRules) reports it missing — items sharing a ruleId report as one result listing each item's label in {missing}; {utility} is the record's displayName. `strictDefault` is what QC checks for a utility with NO record (uncited, so it only warns and says the utility is not researched). `qcRuleDefinitions` is the QC rule catalogue for those rule ids (the rules table). A record may carry `filingDoor` {name, url, sourceName, sourceUrl, quote, fetchedAt}: where the utility takes its application, as its own page links it; kept only whole (https link, https source, quote, fetchedAt) and seeded at boot into the utility's KB row as SEEDED (utilityRequirements.seedShippedUtilityFilingDoors), never official and never over a row a person verified: a person verifies where a filing goes.",
   "records": [
+    {
+      "states": [
+        "ID"
+      ],
+      "utility": "Idaho Power",
+      "displayName": "Idaho Power",
+      "matchNames": [
+        "idaho power",
+        "idahopower"
+      ],
+      "filingDoor": {
+        "name": "Idaho Power customer generation application form",
+        "url": "https://tools.idahopower.com/forms/CustomerGenerationApplication/Submit",
+        "sourceName": "Idaho Power — Apply to connect your system",
+        "sourceUrl": "https://www.idahopower.com/accounts-service/clean-choices/solar-power-options-customer-generation/apply-to-connect-your-system/",
+        "quote": "Application Form – Solar PV, Wind, Hydroelectric, & Other Projects",
+        "fetchedAt": "2026-11-10T08:25:03Z"
+      },
+      "requirements": [
+        {
+          "key": "owner_signature",
+          "whenMissing": "warning",
+          "sourceName": "Idaho Power — Apply to connect your system",
+          "sourceUrl": "https://www.idahopower.com/accounts-service/clean-choices/solar-power-options-customer-generation/apply-to-connect-your-system/",
+          "quote": "Applications will be considered complete once a signed application and fee, plus any requested documentation (i.e. single line), have been received.",
+          "fetchedAt": "2026-11-10T08:25:03Z"
+        },
+        {
+          "key": "one_line",
+          "whenMissing": "warning",
+          "sourceName": "Idaho Power — Apply to connect your system",
+          "sourceUrl": "https://www.idahopower.com/accounts-service/clean-choices/solar-power-options-customer-generation/apply-to-connect-your-system/",
+          "quote": "Applications will be considered complete once a signed application and fee, plus any requested documentation (i.e. single line), have been received.",
+          "fetchedAt": "2026-11-10T08:25:03Z"
+        },
+        {
+          "key": "inverter_settings",
+          "whenMissing": "warning",
+          "sourceName": "Idaho Power — Apply to connect your system",
+          "sourceUrl": "https://www.idahopower.com/accounts-service/clean-choices/solar-power-options-customer-generation/apply-to-connect-your-system/",
+          "quote": "Required inverter settings in a downloadable CSV common file format",
+          "fetchedAt": "2026-11-10T08:25:03Z"
+        },
+        {
+          "key": "inverter_listing_ul1741sb",
+          "whenMissing": "warning",
+          "sourceName": "Idaho Power — Customer generation frequently asked questions",
+          "sourceUrl": "https://www.idahopower.com/accounts-service/clean-choices/solar-power-options-customer-generation/frequently-asked-questions/",
+          "quote": "Idaho Power requires smart inverters that comply with IEEE 1547-2018 and are UL 1741 SB certified.",
+          "fetchedAt": "2026-11-10T08:25:08Z"
+        },
+        {
+          "key": "ac_disconnect",
+          "whenMissing": "blocker",
+          "sourceName": "Idaho Power — Customer generation frequently asked questions",
+          "sourceUrl": "https://www.idahopower.com/accounts-service/clean-choices/solar-power-options-customer-generation/frequently-asked-questions/",
+          "quote": "Idaho Power also requires an AC disconnect switch on the customer’s side of the meter. Breakers do not meet these requirements.",
+          "fetchedAt": "2026-11-10T08:25:08Z"
+        },
+        {
+          "key": "storage_mode_declaration",
+          "whenMissing": "warning",
+          "sourceName": "Idaho Power — Customer generation frequently asked questions",
+          "sourceUrl": "https://www.idahopower.com/accounts-service/clean-choices/solar-power-options-customer-generation/frequently-asked-questions/",
+          "quote": "A battery storage system was installed but not disclosed on the System Verification Form.",
+          "fetchedAt": "2026-11-10T08:25:08Z"
+        }
+      ]
+    },
     {
       "states": [
         "UT",

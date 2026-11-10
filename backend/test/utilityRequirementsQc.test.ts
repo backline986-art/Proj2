@@ -47,18 +47,35 @@ for (const utility of UTILITIES) for (const state of STATES) for (const v of VAR
 
 const pinned = JSON.parse(fs.readFileSync(path.join(here, "fixtures", "utilityRequirementsQcPinned.json"), "utf8")) as { results: unknown[][]; defs: Array<Record<string, string>> };
 const ids = (rs: Array<{ ruleId: string }>) => rs.map((r) => r.ruleId);
+const researchedSinceCapture = (p: Record<string, string>) => p.state === "ID" && p.utility === "Idaho Power";
 
 console.log("\ntoday's outputs, from data");
 check(`PINNED: every result for ${payloads.length} payloads is byte-identical to before the move`, () => {
   assert.equal(pinned.results.length, payloads.length);
   const drift: string[] = [];
   payloads.forEach((p, i) => {
+    // Researched since the capture (Idaho reference data, 2026-11-10): its own cited list now answers,
+    // pinned in the check below instead of byte-for-byte.
+    if (researchedSinceCapture(p)) return;
     const now = JSON.stringify(evaluateBaselineRules(p as never));
     if (now !== JSON.stringify(pinned.results[i])) drift.push(`${p.state || "-"} ${p.utility || "-"} v${i % VARIANTS.length}: ${now}`);
   });
   assert.equal(drift.length, 0, drift.slice(0, 3).join("\n"));
   const withUtilityRules = pinned.results.filter((rs) => (rs as Array<{ ruleId: string }>).some((r) => /^(pacpower-|pge-)/.test(r.ruleId))).length;
   assert.ok(withUtilityRules > 50, `the matrix exercises the utility rules (${withUtilityRules} payloads)`);
+});
+check("RESEARCHED SINCE THE CAPTURE: Idaho Power in ID reads its own cited list (generic package rule), never the strict default", () => {
+  const changed = payloads.filter(researchedSinceCapture);
+  assert.equal(changed.length, VARIANTS.length);
+  const empty = evaluateBaselineRules(changed[0] as never, undefined, undefined, { reportUnresearched: true });
+  assert.ok(!ids(empty).includes("utility-requirements-not-researched"), ids(empty).join(","));
+  const pkg = empty.find((r) => r.ruleId === "utility-application-package");
+  assert.ok(pkg, ids(empty).join(","));
+  assert.match(pkg!.message, /AC disconnect/);
+  // Outside its state the name still reads the pin (the record is ID only).
+  payloads.forEach((p, i) => {
+    if (p.utility === "Idaho Power" && p.state !== "ID") assert.equal(JSON.stringify(evaluateBaselineRules(p as never)), JSON.stringify(pinned.results[i]), `${p.state || "-"} v${i % VARIANTS.length}`);
+  });
 });
 check("PINNED: the rule catalogue keeps pacpower-ul1741sb, pacpower-meter-photo and pge-powerclerk-docs with the same words", () => {
   for (const before of pinned.defs) {
@@ -84,22 +101,22 @@ check("ONE-LINE IS AN SLD: a package naming its diagram 'one-line', 'one line', 
 });
 
 console.log("\na utility with no list: the strict default, as a warning that says so");
-check("NOT RESEARCHED: Idaho Power with an empty package warns once, naming what the strictest common set lacks", () => {
-  const rs = evaluateBaselineRules({ state: "ID", utility: "Idaho Power" } as never, undefined, undefined, { reportUnresearched: true });
+check("NOT RESEARCHED: an unresearched utility with an empty package warns once, naming what the strictest common set lacks", () => {
+  const rs = evaluateBaselineRules({ state: "ID", utility: "Synthetic Valley Electric" } as never, undefined, undefined, { reportUnresearched: true });
   const f = rs.filter((r) => r.ruleId === "utility-requirements-not-researched");
   assert.equal(f.length, 1, ids(rs).join(","));
   assert.equal(f[0].severity, "warning");
   assert.equal(f[0].qcStatus, "warning");
-  assert.equal(f[0].ruleName, "Idaho Power application requirements not researched");
-  assert.equal(f[0].message, "Idaho Power's application requirements are not researched, so the strictest common set was checked; the package may be missing: SLD/3-line, site/plot plan, module spec, inverter spec, utility account, meter evidence, UL 1741 SB / inverter settings evidence, AC disconnect. Confirm against the utility's own application.");
+  assert.equal(f[0].ruleName, "Synthetic Valley Electric application requirements not researched");
+  assert.equal(f[0].message, "Synthetic Valley Electric's application requirements are not researched, so the strictest common set was checked; the package may be missing: SLD/3-line, site/plot plan, module spec, inverter spec, utility account, meter evidence, UL 1741 SB / inverter settings evidence, AC disconnect. Confirm against the utility's own application.");
 });
 check("NOT RESEARCHED: a battery job also owes its operating mode; a complete package says nothing; off for bare callers and with no state", () => {
   const full = { splitPagesText: "SLD, site plan, module spec, inverter spec, AC disconnect", utilityUploadNotesText: "UL 1741 SB", meter: "123456", account: "1234567890" };
-  const battery = evaluateBaselineRules({ state: "ID", utility: "Idaho Power", ...full, hasBattery: "yes", batteryQty: "1" } as never, undefined, undefined, { reportUnresearched: true });
+  const battery = evaluateBaselineRules({ state: "ID", utility: "Synthetic Valley Electric", ...full, hasBattery: "yes", batteryQty: "1" } as never, undefined, undefined, { reportUnresearched: true });
   assert.match(battery.find((r) => r.ruleId === "utility-requirements-not-researched")?.message ?? "", /missing: battery operating mode\./);
-  assert.ok(!ids(evaluateBaselineRules({ state: "ID", utility: "Idaho Power", ...full } as never, undefined, undefined, { reportUnresearched: true })).includes("utility-requirements-not-researched"));
-  assert.ok(!ids(evaluateBaselineRules({ state: "ID", utility: "Idaho Power" } as never)).includes("utility-requirements-not-researched"), "bare caller");
-  assert.ok(!ids(evaluateBaselineRules({ state: "", utility: "Idaho Power" } as never, undefined, undefined, { reportUnresearched: true })).includes("utility-requirements-not-researched"), "no state");
+  assert.ok(!ids(evaluateBaselineRules({ state: "ID", utility: "Synthetic Valley Electric", ...full } as never, undefined, undefined, { reportUnresearched: true })).includes("utility-requirements-not-researched"));
+  assert.ok(!ids(evaluateBaselineRules({ state: "ID", utility: "Synthetic Valley Electric" } as never)).includes("utility-requirements-not-researched"), "bare caller");
+  assert.ok(!ids(evaluateBaselineRules({ state: "", utility: "Synthetic Valley Electric" } as never, undefined, undefined, { reportUnresearched: true })).includes("utility-requirements-not-researched"), "no state");
   assert.ok(!ids(evaluateBaselineRules({ state: "UT", utility: "Rocky Mountain Power" } as never, undefined, undefined, { reportUnresearched: true })).includes("utility-requirements-not-researched"), "a researched utility gets its own list");
 });
 

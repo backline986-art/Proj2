@@ -148,6 +148,11 @@ export async function openDatabase(): Promise<AppDb> {
   try {
     (await import("./eligibilityLimits")).seedEligibilityRecords(appDb);
   } catch { /* reference data is best-effort */ }
+  // Each utility's cited filing door (reference-utility-application-requirements.json `filingDoor`):
+  // a SEEDED utility KB row, never over a verified one (rule 3); read through hostFitsTrackAndEntity.
+  try {
+    (await import("./utilityRequirements")).seedShippedUtilityFilingDoors(appDb);
+  } catch { /* reference data is best-effort */ }
   // Per-job permit process answers: loaded into the in-process registry that the pure
   // (db-less) track/document/fee resolvers read — the same pattern as the process-profile cache.
   try {

@@ -110,10 +110,12 @@ await check("MUST-EXCLUDE: PG&E (California, or spelled with '&' anywhere) and a
 });
 
 console.log("\nevery other utility: data, or a callout that says nothing was checked");
-await check("NO LIST ON FILE: Idaho Power gets one callout that its requirements are not on file (never silence)", () => {
-  const f = find(job({ state: "ID", utility: "Idaho Power" }), "reviewer.utility.requirements-not-on-file");
+// (Idaho Power has a shipped, cited list since the Idaho reference data of 2026-11-10, so the
+// unresearched example is a synthetic utility.)
+await check("NO LIST ON FILE: an unresearched utility gets one callout that its requirements are not on file (never silence)", () => {
+  const f = find(job({ state: "ID", utility: "Synthetic Valley Electric" }), "reviewer.utility.requirements-not-on-file");
   assert.equal(f?.severity, "callout");
-  assert.equal(f?.message, "Idaho Power's application requirements are not on file; the utility side was not reviewed.");
+  assert.equal(f?.message, "Synthetic Valley Electric's application requirements are not on file; the utility side was not reviewed.");
   assert.ok(!find(job({ state: "ID", utility: "" }), "reviewer.utility.requirements-not-on-file"), "no utility named: the core field finding covers it");
 });
 await check("DATA ONLY: a person records Idaho Power's items on its filing row; the gate checks them (storage only on a battery job), cited", () => {
