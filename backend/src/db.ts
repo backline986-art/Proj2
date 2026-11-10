@@ -3461,9 +3461,69 @@ const VERSIONED_MIGRATIONS: VersionedMigration[] = [
     },
   },
   {
-    // v76 (review-audit draft 09): the next free number on offline staging 5d1db1ba (up to #696's
-    // v75). #701 may also want v76: Helm renumbers at merge — nothing here depends on the number.
+    // v76 (#701, Helm's numbering 2026-11-10): after #700's v73, draft 10's v74 and #696's v75.
+    // Renumber at merge if the queue changes; nothing depends on the number.
     version: 76,
+    name: "quickbooks_connection",
+    up: (db) => {
+      // QUICKBOOKS ONLINE (#701): ONE company per org (org_id is the key), connected by a named person.
+      //
+      // quickbooks_connections.encrypted_tokens is the ONLY place the OAuth access and refresh tokens
+      // live: an encryptStorageState envelope (SESSION_ENCRYPTION_KEY, the portal-secret pattern).
+      // Never a plaintext column, never logged, never read outside backend/src/quickbooks.ts (a test
+      // fences that). The three Item ids are a person's choice in settings, never code.
+      //
+      // quickbooks_oauth_states: the single-use, expiring `state` a named person mints with Connect;
+      // the callback binds the org through it and nothing else.
+      //
+      // client_invoices.external_ref (v73) carries the QuickBooks invoice Id; the partial UNIQUE index
+      // means one of our invoices maps to one QuickBooks invoice and no QuickBooks invoice is claimed
+      // twice. qb_push_started_at is the in-flight claim that keeps two clicks (or a click and a
+      // restart) from creating two.
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS quickbooks_connections (
+          org_id TEXT PRIMARY KEY,
+          realm_id TEXT NOT NULL DEFAULT '',
+          encrypted_tokens TEXT NOT NULL DEFAULT '',
+          access_expires_at TEXT NOT NULL DEFAULT '',
+          refresh_expires_at TEXT NOT NULL DEFAULT '',
+          service_item_id TEXT NOT NULL DEFAULT '',
+          service_item_name TEXT NOT NULL DEFAULT '',
+          passthrough_item_id TEXT NOT NULL DEFAULT '',
+          passthrough_item_name TEXT NOT NULL DEFAULT '',
+          onboarding_item_id TEXT NOT NULL DEFAULT '',
+          onboarding_item_name TEXT NOT NULL DEFAULT '',
+          connected_by TEXT NOT NULL DEFAULT '',
+          connected_at TEXT NOT NULL DEFAULT '',
+          settings_by TEXT NOT NULL DEFAULT '',
+          last_status_sync_at TEXT NOT NULL DEFAULT '',
+          last_error TEXT NOT NULL DEFAULT '',
+          updated_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS quickbooks_oauth_states (
+          state TEXT PRIMARY KEY,
+          org_id TEXT NOT NULL,
+          created_by TEXT NOT NULL DEFAULT '',
+          created_at TEXT NOT NULL,
+          expires_at TEXT NOT NULL,
+          used_at TEXT NOT NULL DEFAULT ''
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS ux_client_invoices_external_ref
+          ON client_invoices(external_ref) WHERE external_ref != '';
+      `);
+      addColumnIfMissing(db, "clients", "quickbooks_customer_id", "TEXT NOT NULL DEFAULT ''");
+      addColumnIfMissing(db, "client_invoices", "qb_push_started_at", "TEXT NOT NULL DEFAULT ''");
+      addColumnIfMissing(db, "client_invoices", "qb_pushed_by", "TEXT NOT NULL DEFAULT ''");
+      addColumnIfMissing(db, "client_invoices", "qb_pushed_at", "TEXT NOT NULL DEFAULT ''");
+      addColumnIfMissing(db, "client_invoices", "qb_balance_usd", "REAL");
+      addColumnIfMissing(db, "client_invoices", "qb_status", "TEXT NOT NULL DEFAULT ''");
+      addColumnIfMissing(db, "client_invoices", "qb_checked_at", "TEXT NOT NULL DEFAULT ''");
+    },
+  },
+  {
+    // v77 (review-audit draft 09): the next free number on offline staging 93b73064 (#701 holds v76).
+    // Helm renumbers at merge if the queue changes — nothing here depends on the number.
+    version: 77,
     name: "parcel_jurisdiction_checks",
     up: (db) => {
       // WHICH JURISDICTION A PARCEL IS IN, AS THE COUNTY'S OWN SERVICE ANSWERED (parcelJurisdiction.ts).

@@ -1253,11 +1253,29 @@ export type UtilityRequirementKey =
   | "site_plan"
   | "ac_disconnect"
   | "storage_mode_declaration"
-  | "owner_signature";
+  | "owner_signature"
+  | "module_spec"
+  | "inverter_spec";
 export const UTILITY_REQUIREMENT_KEYS: readonly UtilityRequirementKey[] = [
   "account_verification", "meter_photo", "inverter_settings", "inverter_listing_ul1741sb", "one_line",
-  "site_plan", "ac_disconnect", "storage_mode_declaration", "owner_signature",
+  "site_plan", "ac_disconnect", "storage_mode_declaration", "owner_signature", "module_spec", "inverter_spec",
 ];
+/** Which gate reads an item: the reviewer gate (reviewerEngine), the QC baseline (baselineRules), or both. */
+export type UtilityRequirementGate = "reviewer" | "qc";
+/** How the QC baseline reports a missing item (baselineRules). Items sharing a ruleId report as ONE
+ *  result listing each missing item's label. {utility} and {missing} are filled in. */
+export interface UtilityRequirementQc {
+  ruleId: string;
+  ruleName: string;
+  message: string;
+  fieldName: string;
+  /** This item's words in a {missing} list ("SLD/3-line"). */
+  label?: string;
+  /** "blocker" only counts when the item may block (utilityRequirements.requirementMayBlock). */
+  severity?: "blocker" | "warning";
+  /** Where the result sits among the utility's QC results (lower first). */
+  order?: number;
+}
 /** seeded (shipped reference / a lookup's proposal) < official (#683: the utility's own official page,
  *  quote confirmed in the bytes read) < verified (a named person). */
 export type UtilityRequirementTier = "seeded" | "official" | "verified";
@@ -1275,6 +1293,10 @@ export interface UtilityApplicationRequirement {
   /** A finding id kept from before this data existed (the two first seeded utilities), so the gate's
    *  history, dedupe and tests keep reading the same id. Absent = reviewer.utility.<key>. */
   findingId?: string;
+  /** Which gates read it. Absent = both. */
+  gates?: UtilityRequirementGate[];
+  /** How the QC baseline reports it when missing. Absent = the generic per-kind wording. */
+  qc?: UtilityRequirementQc;
   verifiedBy?: string;
   verifiedAt?: string;
 }
@@ -1590,6 +1612,23 @@ export interface ApprovalSheet {
   openItems: ApprovalSheetOpenItem[];
   /** The plan set the package ships, which the acknowledgements are bound to (null = none on file). */
   planSet: ApprovalPlanSetBinding | null;
+  /** Review-audit draft 07: what the gate's measured rules checked for THIS filing — passed with the
+   *  arithmetic, or not checked for want of an input. Display only: nothing here needs a tick, blocks
+   *  or relaxes anything. */
+  checks: ApprovalSheetCheck[];
+}
+
+/** Review-audit draft 07: one check record of a filing, as the approval sheet lists it. */
+export interface ApprovalSheetCheck {
+  /** The record's finding id ("city.elec.sizing-busbar-120.pass"). */
+  id: string;
+  outcome: "passed" | "not_checked";
+  category: ReviewerFinding["category"];
+  title: string;
+  /** The arithmetic that passed, or "Not checked: <input> is not on the plans." */
+  text: string;
+  /** The rule basis in words (#683's wording), "" when the rule measured against no jurisdiction data. */
+  basis: string;
 }
 
 /** Review-audit draft 01: one open review item of a filing, as the approval sheet lists it. */
@@ -2912,6 +2951,21 @@ export interface ReviewerVisionVerdict {
   question?: string;
 }
 
+/** WHERE A RULE'S VALUE CAME FROM (review-audit draft 07; words: shared/src/ruleBasis.ruleBasisLabel). */
+export type RuleBasisTier = "model_code" | "seeded" | "official" | "verified";
+export interface ReviewerRuleBasis {
+  tier: RuleBasisTier;
+  /** What the value was compared against: "NEC 2023 705.12(B)(3)(2)", "Salt Lake City (UT) code profile". */
+  source: string;
+  /** The page the value was read from, "" when none is on file. */
+  sourceUrl: string;
+  /** tier "verified" only: who verified the row (never printed when it is an email address). */
+  verifiedBy?: string;
+  /** The tier in words, as every screen prints it: "from le.utah.gov", "seeded, not verified",
+   *  "person-verified by …", "model code (NEC 2023 690.7)". Official is never worded as verified. */
+  label: string;
+}
+
 export interface ReviewerFinding {
   id: string;
   severity: "blocker" | "warning" | "callout" | "pass";
@@ -2933,6 +2987,15 @@ export interface ReviewerFinding {
   /** On city.fire.pathway-unmeasured only: what the roof plan must show, so the vision pass can
    *  compare a measured sheet against the same requirement the text rule used. */
   roofPlanRequired?: RoofPlanRequiredDimension[];
+  /** A CHECK RECORD, not a correction (review-audit draft 07): "passed" = a measured rule ran and
+   *  passed (severity "pass", its arithmetic in the message); "not_checked" = it could not run because
+   *  an input is not on the plans (severity "callout"). Display only: never blocks, never relaxes,
+   *  never in the correction notice, never needs an acknowledgement. Its id is the rule's id plus
+   *  ".pass" / ".not-checked" (backend/src/checkRecords.ts). Absent on every other finding. */
+  checkOutcome?: "passed" | "not_checked";
+  /** The tier of the jurisdiction data (or the model code) this finding measured against, in words
+   *  matching #683 (shared/src/ruleBasis). Absent where the finding measured against nothing. */
+  ruleBasis?: ReviewerRuleBasis;
 }
 
 export interface FinalSubmitGate {

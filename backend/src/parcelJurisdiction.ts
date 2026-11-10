@@ -17,7 +17,7 @@
 // plain HTTP GET — only when the query URL is on a GOVERNMENT host (the one shared predicate,
 // officialSource.isOfficialSourceHost, with no other domain admitted), no redirect followed, no model
 // anywhere — and caches the answer by a HASH of the address (parcel_jurisdiction_checks, migration
-// v76): the address itself is never stored there, never put in the job's payload or result, and
+// v77): the address itself is never stored there, never put in the job's payload or result, and
 // never logged. The gate reads only that cache (readParcelJurisdiction), so "reads write nothing"
 // stays true.
 //
@@ -351,7 +351,7 @@ export async function askParcelService(source: JurisdictionLookupSource, project
   }
 }
 
-// ── The cache (parcel_jurisdiction_checks, migration v76) ─────────────────────────────────────
+// ── The cache (parcel_jurisdiction_checks, migration v77) ─────────────────────────────────────
 /** A found answer is good for 180 days; "nothing matched" for 30; a service that did not answer is
  *  asked again after 6 hours (the gate says "not checked" meanwhile). */
 const FOUND_TTL_MS = 180 * 24 * 3600_000;

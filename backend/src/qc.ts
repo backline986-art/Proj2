@@ -2,6 +2,8 @@ import type { AppDb } from "./db";
 import { cecListing, cecTableCount } from "./cecEquipment";
 import { evaluateBaselineRules } from "./baselineRules";
 import { certificationList, eligibilityRecordsForState } from "./eligibilityLimits";
+import { resolveUtilityRequirements } from "./utilityRequirements";
+import type { UtilityRequirementList } from "../../shared/src/types";
 import { id } from "./ids";
 import { parseJson } from "./json";
 import { fieldAliases, parserField } from "./normalize";
@@ -684,7 +686,11 @@ export function runQcForProject(db: AppDb, projectId: string, options: QcRunOpti
       clientCertifications: std ? certificationList(std.installer_certifications) : null,
       reportUnknownProgram: true,
     };
-    for (const baseline of evaluateBaselineRules(baselinePayload, codeCtx, eligibility)) {
+    // WHAT THE JOB'S UTILITY'S APPLICATION ASKS FOR (utilityRequirements.ts): the shipped seed overlaid by
+    // the utility's filing row; with nothing on file, the strict default, said as not researched.
+    let utilityRequirements: UtilityRequirementList | null;
+    try { utilityRequirements = resolveUtilityRequirements(db, clean(baselinePayload.state), clean(baselinePayload.utility)); } catch { utilityRequirements = resolveUtilityRequirements(null, clean(baselinePayload.state), clean(baselinePayload.utility)); }
+    for (const baseline of evaluateBaselineRules(baselinePayload, codeCtx, eligibility, { requirements: utilityRequirements, reportUnresearched: true })) {
       if (baseline.qcStatus === "fail") failCount += 1;
       if (baseline.qcStatus === "fail" && !priorFails.has(baseline.ruleId)) newFailsOutsideBill += 1;
       if (baseline.qcStatus === "warning") warningCount += 1;

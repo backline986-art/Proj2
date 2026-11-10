@@ -5,6 +5,9 @@
 // including under a jurisdiction whose profile carries ESS rules (cited, verified). The golden was
 // captured from the engine WITHOUT the ESS review: first on Helm staging ae6eaca3, then recaptured on
 // staging 7d706055 (draft 04's AC-size check and draft 06 changed PV reports there, not this work).
+// Recaptured again on Helm staging f91b0dd7 + approval draft 07 (8061e757): draft 07 adds pass /
+// not-checked check records and a ruleBasis to findings on every report, PV-only ones included; the
+// ESS review itself still adds nothing to a PV job (Helm's merge resolution, 2026-11-10).
 //
 // Every job, address and jurisdiction here is invented.
 //

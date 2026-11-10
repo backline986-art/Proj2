@@ -6108,6 +6108,35 @@ function approvalOpenItemsHtml(sheet) {
     </div>`;
 }
 
+// WHAT THE GATE CHECKED (review-audit draft 07): check records (passed with the arithmetic, or not
+// checked for want of an input), grouped by category, each group collapsed. Display only: none is a
+// correction. `list` items carry { outcome, category, title, text, basis }.
+const CHECK_CATEGORY_LABEL = { electrical: "Electrical", structural: "Structural", plan_set: "Plan set and fire access", ahj_profile: "Local rules", utility_nem: "Utility", project_data: "Project data" };
+function checkRecordsHtml(list, opts = {}) {
+  const items = Array.isArray(list) ? list : [];
+  if (!items.length) return "";
+  const groups = new Map();
+  for (const c of items) {
+    const key = CHECK_CATEGORY_LABEL[c.category] || humanize(c.category || "Other");
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(c);
+  }
+  const line = (c) => `<li data-check-record="${esc(c.id || "")}" data-check-outcome="${esc(c.outcome)}" style="margin:4px 0">
+      <span aria-hidden="true" style="color:${c.outcome === "passed" ? "var(--ink-pass)" : "var(--ink-warn, inherit)"}">${c.outcome === "passed" ? "✓" : "?"}</span>
+      <strong>${c.outcome === "passed" ? "" : "Not checked — "}${esc(c.title)}</strong>
+      <div style="font-size:12px">${esc(c.text)}</div>
+      ${c.basis ? `<div class="muted" style="font-size:12px">Rule basis: ${esc(c.basis)}</div>` : ""}
+    </li>`;
+  return `<div data-check-records${opts.tag ? ` ${opts.tag}` : ""}>
+      ${opts.heading ? `<strong>${esc(opts.heading)}</strong>` : ""}
+      ${[...groups].map(([label, list]) => {
+        const passed = list.filter((c) => c.outcome === "passed").length;
+        const unchecked = list.length - passed;
+        return `<details data-check-group="${esc(label)}" style="margin:4px 0"><summary>${esc(label)}: ${passed} passed${unchecked ? `, ${unchecked} not checked` : ""}</summary><ul style="list-style:none;margin:4px 0 0 0;padding:0">${list.map(line).join("")}</ul></details>`;
+      }).join("")}
+    </div>`;
+}
+
 function approvalSheetHtml(sheet, recordedAs) {
   const issues = Array.isArray(sheet.issues) ? sheet.issues : [];
   const red = issues.filter((i) => i.kind === "mismatch" || i.kind === "missing");
@@ -6129,6 +6158,7 @@ function approvalSheetHtml(sheet, recordedAs) {
       : `<div data-approval-clean style="border:1px solid var(--edge-pass);background:var(--tint-pass);color:var(--ink-pass);border-radius:var(--radius-sm);padding:10px 12px">No disagreement found between the project, the bill and the plan set.</div>`}
     ${approvalOpenItemsHtml(sheet)}
     ${notes.length ? `<div data-approval-notes style="border:1px solid var(--edge-warn);background:var(--tint-warn);border-radius:var(--radius-sm);padding:10px 12px"><strong>Worth a look</strong>${issueList(notes, "inherit")}</div>` : ""}
+    ${checkRecordsHtml(sheet.checks, { heading: "What the gate checked for this filing (display only)", tag: "data-approval-checks" })}
     <table style="width:100%;border-collapse:collapse"><thead><tr><th style="text-align:left" class="muted">Field</th><th style="text-align:left" class="muted">What will be filed</th><th style="text-align:left" class="muted">Source</th></tr></thead><tbody>${rows}</tbody></table>
     <p class="muted" style="font-size:12px;white-space:pre-line">${esc(APPROVE_AUTO_SUBMIT_LEDE.replace(/^Approve & auto-submit this filing\?\n\n/, ""))}</p>
     ${recordedAs ? `<p style="margin:0"><strong>Recorded as:</strong> ${esc(recordedAs)}</p>` : ""}`;
@@ -7418,7 +7448,10 @@ function renderReviewerGate() {
   const findings = report.findings || [];
   const blockers = findings.filter((item) => item.severity === "blocker");
   const warnings = findings.filter((item) => item.severity === "warning");
-  const clears = findings.filter((item) => item.severity === "pass" || item.severity === "callout");
+  // Check records (review-audit draft 07) are grouped apart from the callouts: passes with their
+  // arithmetic and the checks that could not run, by category, collapsed.
+  const records = findings.filter((item) => item.checkOutcome === "passed" || item.checkOutcome === "not_checked");
+  const clears = findings.filter((item) => (item.severity === "pass" || item.severity === "callout") && !records.includes(item));
   $("reviewerCounts").textContent = `${blockers.length} blocker / ${warnings.length} warn`;
 
   const issues = [...blockers, ...warnings].slice(0, 18);
@@ -7427,8 +7460,9 @@ function renderReviewerGate() {
   const subject = (profile && profile.ahj) || state.detail?.project?.ahj || "This jurisdiction";
   const submitButtonEnough = report.finalSubmitGate?.finalSubmitButtonAloneIsEnough;
 
-  const checksColumn = clears.length
-    ? clears.slice(0, 14).map((item) => `
+  const recordsHtml = checkRecordsHtml(records.map((r) => ({ id: r.id, outcome: r.checkOutcome, category: r.category, title: r.title, text: r.message, basis: r.ruleBasis?.label || "" })), { heading: "Measured checks" });
+  const checksColumn = (clears.length || records.length)
+    ? recordsHtml + clears.slice(0, 14).map((item) => `
         <div class="kx-check ${item.severity === "callout" ? "is-warn" : ""}">
           <span class="kx-check-mark" aria-hidden="true">${item.severity === "callout" ? "!" : "✓"}</span>
           <span class="kx-check-text">${esc(item.title)}${item.message || item.designTeamAction ? `<span class="kx-check-note">${esc([item.message, item.severity === "callout" ? item.designTeamAction : ""].filter(Boolean).join(" "))}</span>` : ""}</span>
@@ -7452,6 +7486,7 @@ function renderReviewerGate() {
             <span class="kx-action-label">Recommended action</span>
             <span class="kx-action-text">${esc(finding.designTeamAction || "Resolve before submittal.")}</span>
           </div>
+          ${finding.ruleBasis ? `<div class="kx-issue-field"><span class="kx-issue-field-label">Rule basis</span><span class="kx-issue-field-value">${esc(finding.ruleBasis.label)}${finding.ruleBasis.source ? ` — ${esc(finding.ruleBasis.source)}` : ""}</span></div>` : ""}
           <details class="provenance">
             <summary>${esc(humanize(finding.category))} · evidence and code anchors</summary>
             <div class="provenance-body">
@@ -11429,6 +11464,7 @@ function billingStatus(message, kind) {
 const BILLING_KIND_TITLE = {
   reimbursement: "Fees we paid on the client's behalf, at cost",
   service: "Our service fees",
+  onboarding: "Onboarding fees and credits",
   received: "Payments already received",
 };
 
@@ -11442,7 +11478,7 @@ function billingLineFlags(l) {
 }
 
 function billingLinesHtml(lines) {
-  const kinds = ["reimbursement", "service", "received"];
+  const kinds = ["reimbursement", "service", "onboarding", "received"];
   return kinds.map((kind) => {
     const list = (lines || []).filter((l) => l.kind === kind);
     if (!list.length) return "";
@@ -11499,16 +11535,121 @@ function renderBillingInvoices(invoices) {
     return `<div class="cred-row" style="flex-wrap:wrap;gap:6px">
       <div class="cred-row-text"><strong>${esc(inv.number)}</strong>
         <span class="badge ${esc(INVOICE_STATUS_BADGE[inv.status] || "")}">${esc(inv.status)}</span>
-        <span class="muted">${esc(inv.periodStart)} to ${esc(inv.periodEnd)} · due ${billingMoney(inv.dueTotalUsd)}${inv.dueAt ? ` by ${esc(inv.dueAt)}` : ""}${inv.paidAt ? ` · paid ${esc(inv.paidAt.slice(0, 10))}${inv.paidReference ? ` (${esc(inv.paidReference)})` : ""}` : ""}${inv.voidReason ? ` · void: ${esc(inv.voidReason)}` : ""}</span></div>
+        <span class="muted">${esc(inv.periodStart)} to ${esc(inv.periodEnd)} · due ${billingMoney(inv.dueTotalUsd)}${inv.dueAt ? ` by ${esc(inv.dueAt)}` : ""}${inv.paidAt ? ` · paid ${esc(inv.paidAt.slice(0, 10))}${inv.paidReference ? ` (${esc(inv.paidReference)})` : ""}` : ""}${inv.voidReason ? ` · void: ${esc(inv.voidReason)}` : ""}</span>
+        ${inv.externalRef ? `<span class="badge badge-info" title="Sent to QuickBooks by ${esc(inv.qbPushedBy)}">QuickBooks #${esc(inv.externalRef)}${inv.qbStatus ? `: ${esc(inv.qbStatus)}` : ""}</span>` : ""}</div>
       <div class="actions" style="margin:0">
         <button type="button" class="secondary" data-inv-action="print" data-inv-id="${esc(inv.id)}"><span style="white-space:nowrap">View / print</span></button>
         ${open ? `<button type="button" class="secondary" data-inv-action="send" data-inv-id="${esc(inv.id)}"><span style="white-space:nowrap">Email</span></button>` : ""}
         ${inv.status === "draft" ? `<button type="button" class="secondary" data-inv-action="mark-sent" data-inv-id="${esc(inv.id)}"><span style="white-space:nowrap">Mark sent</span></button>` : ""}
+        ${inv.status === "draft" && !inv.externalRef ? `<button type="button" class="secondary" data-inv-action="add-line" data-inv-id="${esc(inv.id)}"><span style="white-space:nowrap">Add onboarding line</span></button>` : ""}
+        ${open && !inv.externalRef && state.quickbooks && state.quickbooks.connected && state.quickbooks.syncOn ? `<button type="button" class="secondary" data-inv-action="quickbooks" data-inv-id="${esc(inv.id)}"><span style="white-space:nowrap">Send to QuickBooks</span></button>` : ""}
         ${open ? `<button type="button" class="secondary" data-inv-action="mark-paid" data-inv-id="${esc(inv.id)}"><span style="white-space:nowrap">Mark paid</span></button>` : ""}
         ${open ? `<button type="button" class="danger-button" data-inv-action="void" data-inv-id="${esc(inv.id)}"><span style="white-space:nowrap">Void</span></button>` : ""}
       </div></div>`;
   }).join("");
   box.querySelectorAll("[data-inv-action]").forEach((b) => b.addEventListener("click", () => billingInvoiceAction(b.dataset.invAction, b.dataset.invId)));
+}
+
+/* ===========================================================================
+   QUICKBOOKS ONLINE (#701) — connect, Item choice, payment check.
+   One company per organisation. Every action that writes to QuickBooks or
+   changes the connection is a named person's click (namedPersonConsent).
+   The status never carries a token. Every server string goes through esc().
+   =========================================================================== */
+async function loadQuickBooksStatus() {
+  const box = $("quickbooksBlock");
+  if (!box) return;
+  try {
+    const data = await api("/api/quickbooks/status");
+    state.quickbooks = data.quickbooks;
+  } catch (err) {
+    state.quickbooks = null;
+    box.innerHTML = `<p class="muted clients-creds-hint">${esc(err.message || "Could not read the QuickBooks status.")}</p>`;
+    return;
+  }
+  renderQuickBooksBlock();
+}
+
+function renderQuickBooksBlock() {
+  const box = $("quickbooksBlock");
+  const qb = state.quickbooks;
+  if (!box || !qb) return;
+  if (!qb.syncOn) {
+    box.innerHTML = '<p class="muted clients-creds-hint">QuickBooks sync is off (QUICKBOOKS_SYNC is not 1). Nothing is sent to QuickBooks.</p>';
+    return;
+  }
+  if (!qb.appConfigured) {
+    box.innerHTML = '<p class="muted clients-creds-hint">The QuickBooks app is not configured (QUICKBOOKS_CLIENT_ID and QUICKBOOKS_CLIENT_SECRET).</p>';
+    return;
+  }
+  const item = (i) => (i && i.id ? esc(i.name || `#${i.id}`) : '<span class="badge badge-warning">NOT CHOSEN</span>');
+  box.innerHTML = qb.connected
+    ? `<p class="clients-creds-hint" style="margin:0 0 4px">Connected to company ${esc(qb.realmId)}${qb.connectedBy ? ` by ${esc(qb.connectedBy)}` : ""}${qb.connectedAt ? ` on ${esc(qb.connectedAt.slice(0, 10))}` : ""}.
+        Payments last checked ${qb.lastStatusSyncAt ? esc(qb.lastStatusSyncAt.slice(0, 16).replace("T", " ")) : "never"}.</p>
+      ${qb.lastError ? `<p class="clients-creds-hint" style="color:var(--danger);margin:0 0 4px">${esc(qb.lastError)}</p>` : ""}
+      <p class="clients-creds-hint" style="margin:0 0 4px">Service fees → ${item(qb.items.service)} · Pass-through fees → ${item(qb.items.passthrough)} · Onboarding → ${item(qb.items.onboarding)}</p>
+      <div id="quickbooksItemPicker"></div>
+      <div class="actions" style="margin:0">
+        <button type="button" class="secondary" id="qbChooseItemsBtn"><span style="white-space:nowrap">Choose Items</span></button>
+        <button type="button" class="secondary" id="qbCheckPaymentsBtn"><span style="white-space:nowrap">Check payments now</span></button>
+        <button type="button" class="danger-button" id="qbDisconnectBtn"><span style="white-space:nowrap">Disconnect</span></button>
+      </div>`
+    : `<p class="muted clients-creds-hint" style="margin:0 0 4px">Not connected. Connecting opens QuickBooks in a new tab to approve access to one company.</p>
+      <div class="actions" style="margin:0"><button type="button" class="secondary" id="qbConnectBtn"><span style="white-space:nowrap">Connect QuickBooks</span></button></div>`;
+  $("qbConnectBtn")?.addEventListener("click", () => quickBooksAction("connect"));
+  $("qbDisconnectBtn")?.addEventListener("click", () => quickBooksAction("disconnect"));
+  $("qbCheckPaymentsBtn")?.addEventListener("click", () => quickBooksAction("payments"));
+  $("qbChooseItemsBtn")?.addEventListener("click", () => quickBooksAction("items"));
+}
+
+async function quickBooksAction(action) {
+  try {
+    if (action === "connect") {
+      const decidedBy = namedPersonConsent(await authForDecision(), "Connect this organisation to QuickBooks? QuickBooks opens in a new tab to approve access.", "connected QuickBooks", "QuickBooks is connected by a named person");
+      if (decidedBy == null) return;
+      const { url } = await api("/api/quickbooks/connect", { method: "POST", body: JSON.stringify({ decidedBy }) });
+      if (/^https?:\/\//i.test(String(url || ""))) window.open(url, "_blank", "noopener");
+      billingStatus("Approve access in the QuickBooks tab, then come back and press Choose Items.");
+    } else if (action === "disconnect") {
+      const decidedBy = namedPersonConsent(await authForDecision(), "Disconnect QuickBooks? The stored access is deleted; invoices already sent stay in QuickBooks.", "disconnected QuickBooks", "QuickBooks is disconnected by a named person");
+      if (decidedBy == null) return;
+      await api("/api/quickbooks/disconnect", { method: "POST", body: JSON.stringify({ decidedBy }) });
+    } else if (action === "payments") {
+      const decidedBy = namedPersonConsent(await authForDecision(), "Read payment status from QuickBooks now? This only reads.", "checked payments", "a payment check is run by a named person");
+      if (decidedBy == null) return;
+      const { result } = await api("/api/quickbooks/payment-status", { method: "POST", body: JSON.stringify({ decidedBy }) });
+      billingStatus(`Checked ${result.checked}: ${result.paid} paid, ${result.partial} partly paid, ${result.missing} not found in QuickBooks.`);
+      if (state.editingClientId) await loadClientBilling(state.editingClientId);
+    } else if (action === "items") {
+      const { items } = await api("/api/quickbooks/items");
+      const qb = state.quickbooks || { items: {} };
+      const opts = (sel) => ['<option value="">— choose —</option>'].concat((items || []).map((i) =>
+        `<option value="${esc(i.id)}"${sel && sel.id === i.id ? " selected" : ""}>${esc(i.name)}${i.type ? ` (${esc(i.type)})` : ""}</option>`)).join("");
+      const picker = $("quickbooksItemPicker");
+      if (!picker) return;
+      picker.innerHTML = `<div class="form-row">
+          <label>Service fees<select id="qbItemService">${opts(qb.items.service)}</select></label>
+          <label>Pass-through fees<select id="qbItemPass">${opts(qb.items.passthrough)}</select></label>
+          <label>Onboarding fee<select id="qbItemOnboarding">${opts(qb.items.onboarding)}</select></label>
+        </div>
+        <div class="actions" style="margin:0 0 6px"><button type="button" class="primary" id="qbSaveItemsBtn"><span style="white-space:nowrap">Save Items</span></button></div>`;
+      $("qbSaveItemsBtn")?.addEventListener("click", async () => {
+        const decidedBy = namedPersonConsent(await authForDecision(), "Save which QuickBooks Item each kind of line posts to?", "chose the Items", "the Items are chosen by a named person");
+        if (decidedBy == null) return;
+        try {
+          await api("/api/quickbooks/settings", { method: "PUT", body: JSON.stringify({
+            serviceItemId: $("qbItemService").value, passthroughItemId: $("qbItemPass").value, onboardingItemId: $("qbItemOnboarding").value, decidedBy,
+          }) });
+          await loadQuickBooksStatus();
+          billingStatus("QuickBooks Items saved.");
+        } catch (err) { billingStatus(err.message || "Could not save the Items.", "error"); }
+      });
+      return;
+    }
+    await loadQuickBooksStatus();
+  } catch (err) {
+    billingStatus(err.message || "QuickBooks did not answer.", "error");
+  }
 }
 
 async function loadClientBilling(clientId) {
@@ -11519,6 +11660,8 @@ async function loadClientBilling(clientId) {
   if ($("billingCreateBtn")) $("billingCreateBtn").disabled = true;
   if ($("billingMonth") && !$("billingMonth").value) $("billingMonth").value = new Date().toISOString().slice(0, 7);
   try {
+    // The QuickBooks status first: the invoice rows offer "Send to QuickBooks" only when connected.
+    await loadQuickBooksStatus();
     const data = await api(`/api/clients/${encodeURIComponent(clientId)}/invoices`);
     if (state.editingClientId === clientId) renderBillingInvoices(data.invoices || []);
   } catch (err) {
@@ -11568,7 +11711,7 @@ function printInvoiceHtml(inv) {
     Period: ${esc(inv.periodStart)} to ${esc(inv.periodEnd)} (end not included)<br>
     ${inv.issuedAt ? `Issued: ${esc(inv.issuedAt.slice(0, 10))}<br>` : ""}${inv.dueAt ? `Due: ${esc(inv.dueAt)}<br>` : ""}
     Status: ${esc(inv.status)}${inv.status === "void" ? ` (${esc(inv.voidReason)})` : ""}</p>
-    ${["reimbursement", "service", "received"].map((kind) => {
+    ${["reimbursement", "service", "onboarding", "received"].map((kind) => {
       const list = (inv.lines || []).filter((l) => l.kind === kind);
       if (!list.length) return "";
       return `<div class="k">${esc(BILLING_KIND_TITLE[kind])}</div><table>${list.map((l) => `<tr>
@@ -11598,9 +11741,29 @@ async function billingInvoiceAction(action, invoiceId) {
       return;
     }
     if (action === "send") {
-      if (!window.confirm("Email this invoice to the client's billing contact?")) return;
-      const res = await api(`${base}/send`, { method: "POST", body: "{}" });
+      // A named person sends an invoice email (Helm, #700 review): signed in, the server records the
+      // user; signed out, the person types their name.
+      const decidedBy = namedPersonConsent(await authForDecision(), "Email this invoice to the client's billing contact?", "emailed it", "an invoice is emailed by a named person");
+      if (decidedBy == null) return;
+      const res = await api(`${base}/send`, { method: "POST", body: JSON.stringify({ decidedBy }) });
       billingStatus(res.delivered ? `Emailed ${res.invoice.number}.` : `Not emailed: ${res.detail} Saved as a draft message; send it by hand, then press Mark sent.`, res.delivered ? "" : "error");
+    } else if (action === "quickbooks") {
+      const decidedBy = namedPersonConsent(await authForDecision(),
+        "Send this invoice to QuickBooks? It is created there once, as an open invoice. QuickBooks does not email the client and no payment is taken: you send it to the client from QuickBooks yourself.",
+        "sent it to QuickBooks", "an invoice is sent to QuickBooks by a named person");
+      if (decidedBy == null) return;
+      const res = await api(`${base}/quickbooks`, { method: "POST", body: JSON.stringify({ decidedBy }) });
+      billingStatus(res.created ? `In QuickBooks as invoice #${res.externalRef}.` : `Already in QuickBooks as invoice #${res.externalRef}; nothing new was created.`);
+    } else if (action === "add-line") {
+      const raw = window.prompt("Onboarding fee amount in dollars. Use a negative amount for a credit back (for example -250).", "");
+      if (raw === null) return;
+      const amountUsd = Number(String(raw).replace(/[$,\s]/g, ""));
+      if (!Number.isFinite(amountUsd) || amountUsd === 0) { billingStatus("Enter an amount, not zero.", "error"); return; }
+      const description = window.prompt("Description on the invoice:", amountUsd < 0 ? "Client onboarding fee — credit" : "Client onboarding fee");
+      if (description === null) return;
+      const decidedBy = namedPersonConsent(await authForDecision(), `Add ${amountUsd < 0 ? "a credit of" : "a fee of"} ${billingMoney(amountUsd)} to this draft invoice?`, "added the line", "a line is added by a named person");
+      if (decidedBy == null) return;
+      await api(`${base}/lines`, { method: "POST", body: JSON.stringify({ kind: "onboarding", amountUsd, description, decidedBy }) });
     } else if (action === "mark-sent") {
       await api(`${base}/mark-sent`, { method: "POST", body: "{}" });
     } else if (action === "mark-paid") {
@@ -11614,7 +11777,7 @@ async function billingInvoiceAction(action, invoiceId) {
     }
     const keep = $("billingStatus")?.textContent || "";
     await loadClientBilling(clientId);
-    if (action === "send") billingStatus(keep);
+    if (action === "send" || action === "quickbooks") billingStatus(keep);
   } catch (err) {
     billingStatus(err.message || "That did not work.", "error");
   }
