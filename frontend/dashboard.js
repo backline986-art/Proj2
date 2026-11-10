@@ -5051,9 +5051,61 @@ async function loadSubmittalTracks() {
   } catch {
     state.submittalTracks = null;
   }
+  await loadTrackLookups();
   await loadProjectMilestones();
   updatePortalLoginsSummary();
   syncRecordPermitType();
+}
+
+// THE JOB'S PERMIT-PROCESS AND UTILITY-FILING ROWS (#695), read for the verify control on the track
+// groups (lookup-verify.js). The two GET routes are reads (no lookup runs); a failed read shows no
+// block, never a stale one from another project.
+async function loadTrackLookups() {
+  const projectId = state.selectedProjectId;
+  state.trackLookups = { projectId, "permit-process": null, "utility-filing": null };
+  if (!projectId) return;
+  const read = (kind) => api(`/api/projects/${projectId}/${kind}`).catch(() => null);
+  const [pp, uf] = await Promise.all([read("permit-process"), read("utility-filing")]);
+  if (state.selectedProjectId !== projectId) return;
+  state.trackLookups = { projectId, "permit-process": pp, "utility-filing": uf };
+}
+
+// The verify control's block for one row, '' when the module is missing or the row is not this
+// project's (a reload in flight).
+function trackLookupHtml(kind) {
+  const LV = typeof window !== "undefined" ? window.LookupVerify : null;
+  const tl = state.trackLookups;
+  if (!LV || !tl || tl.projectId !== state.selectedProjectId) return "";
+  return LV.renderLookupVerify(kind, tl[kind]);
+}
+
+// VERIFY A JOB'S PERMIT-PROCESS / UTILITY-FILING ROW (#695): the person-only routes, as the signed-in
+// person (with sign-in off, the name they type). Rule 3: a verification is a named person's
+// attestation, so nothing is written without the confirm. The routes verify the row AS IT STANDS (no
+// body but the name); nothing is sent or filed. Afterwards the project is re-read: a verified process
+// row re-judges QC's document rows on the server.
+async function verifyTrackLookup(kind, btn) {
+  const LV = window.LookupVerify;
+  const projectId = state.selectedProjectId;
+  const payload = state.trackLookups && state.trackLookups.projectId === projectId ? state.trackLookups[kind] : null;
+  if (!LV || !LV.KINDS[kind] || !projectId || !payload || !payload.lookup) return;
+  if (LV.verifyBlockers(kind, payload.lookup).length) return;
+  const name = LV.entityName(kind, payload);
+  const auth = await authForDecision();
+  const verifiedBy = namedPersonConsent(auth, LV.confirmMessage(kind, name), "verified this row", `a ${LV.KINDS[kind].noun} is verified by a named person`);
+  if (verifiedBy == null) return;
+  if (btn) btn.disabled = true;
+  try {
+    await api(`/api/projects/${projectId}/${kind}/verify`, { method: "PUT", body: JSON.stringify(verifiedBy ? { verifiedBy } : {}) });
+  } catch (err) {
+    if (btn) btn.disabled = false;
+    showMessage(`Verify failed: ${err.message}`, "error");
+    return;
+  }
+  showMessage(`Verified — the ${LV.KINDS[kind].noun} for ${name} is recorded as checked by a person.`, "info");
+  try { state.detail = await api(`/api/projects/${projectId}`); } catch { /* the message above says what happened */ }
+  await loadSubmittalTracks();
+  renderDetail();
 }
 
 // Header chip: how many of this project's portals have a saved login. Best-effort.
@@ -5727,8 +5779,11 @@ function renderSubmittalTracks() {
   // can be worked in either order (do NEM first, then permits, or vice-versa).
   const utility = tracks.filter((t) => t.category === "utility");
   const permits = tracks.filter((t) => t.category === "permit");
-  const group = (title, list) => list.length
-    ? `<div class="track-group"><div class="track-group-head">${esc(title)}</div>${list.map(trackCardHtml).join("")}</div>`
+  // Each group carries the job's row it files by (#695): the AHJ's permit process above the permit
+  // cards, the utility's filing location above the utility card — one row, one control, however many
+  // cards read it.
+  const group = (title, list, lookupKind) => list.length
+    ? `<div class="track-group"><div class="track-group-head">${esc(title)}</div>${trackLookupHtml(lookupKind)}${list.map(trackCardHtml).join("")}</div>`
     : "";
   // THE UTILITY GROUP IS HEADED BY THE TRACK'S OWN PROGRAM (e2e-gap close, 2026-09-26): "Net
   // Metering (NEM)" was hard-coded for every utility — Texas (Oncor) and SRP jobs have no utility
@@ -5736,8 +5791,11 @@ function renderSubmittalTracks() {
   // "Utility net metering (NEM) / interconnection", "… interconnection + export credit (net
   // billing …)", "… interconnection only …", or "… (net-metering program not yet confirmed)");
   // the header repeats that phrase and falls back to the neutral "interconnection".
-  wrap.innerHTML = group(utilityGroupTitle(utility), utility) + group("AHJ — Permit(s)", permits) + closeoutGroupHtml();
+  wrap.innerHTML = group(utilityGroupTitle(utility), utility, "utility-filing") + group("AHJ — Permit(s)", permits, "permit-process") + closeoutGroupHtml();
   bindCloseoutMilestones(wrap);
+  wrap.querySelectorAll("button[data-lookup-verify]").forEach((btn) => {
+    btn.addEventListener("click", () => verifyTrackLookup(btn.dataset.lookupVerify, btn));
+  });
 
   wrap.querySelectorAll("button[data-track-paid]").forEach((btn) => {
     btn.addEventListener("click", () => markTrackPaid(btn.dataset.trackPaid, btn));
