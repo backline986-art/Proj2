@@ -82,7 +82,7 @@ const { trackIssuer, projectForTrack, unknownStateAuthorityName } = await import
 const { getSubmittalTracks, requiredTracks, personVerifiedFilingDoor } = await import("../src/submittalTracks");
 const { findApplicationProfile, permitStructureAnswer } = await import("../src/applicationDocs");
 const { essPermitStep } = await import("../src/essRequirements");
-const { filingDestinationsFor } = await import("../src/filingDestinationProposals");
+const { filingDestinationsFor, decideFilingDestination } = await import("../src/filingDestinationProposals");
 const { buildApprovalSheet } = await import("../src/approvalSheet");
 const { separateCounterFor } = await import("../src/ahjRowCitations");
 
@@ -170,6 +170,8 @@ await run("3. a separate counter of the same AHJ: its own (in-person) door, neve
   assert.equal(separateCounterFor(p, "building"), null);
   const city = filingDestinationsFor(db, p, tracksOf(p)).find((g) => g.authority.name === "City of Countertown");
   assert.ok(city && !city.tracks.includes("electrical"), "confirming the AHJ's portal does not claim the counter's track");
+  assert.throws(() => decideFilingDestination(db, p, tracksOf(p), { track: "electrical", kind: "portal", address: COUNTER_DOOR, sourceUrl: PAGE("countertown"), quote: "Electrical permits are purchased separately at City Hall." } as never, "Dana Verifier"),
+    (err: { status?: number }) => err.status === 409, "no destination is recorded for the counter's track");
   await assert.rejects(() => repo.prepareSubmission(db, p.id, "electrical"), (err: { status?: number; message?: string; details?: Record<string, unknown> }) => {
     assert.equal(err.status, 409);
     assert.match(String(err.message), /separate counter/);

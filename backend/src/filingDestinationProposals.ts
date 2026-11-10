@@ -403,6 +403,10 @@ export function decideFilingDestination(
   const who = str(verifiedBy).slice(0, 120);
   if (!who) throw new DestinationRefused(400, "A filing destination is confirmed by a named person.");
   if (!trackViews.some((t) => t.type === decision.track)) throw new DestinationRefused(400, `This job has no ${decision.track} track.`);
+  // A track filed at ANOTHER COUNTER of the same AHJ: the AHJ's door is not its destination, so a
+  // destination recorded "for" it would only ever be the AHJ's (where its building permit files).
+  const counter = decision.track !== "nem" ? separateCounterFor(projectForTrack(project, decision.track), decision.track) : null;
+  if (counter) throw new DestinationRefused(409, `The ${decision.track} permit here is filed at a separate counter (${counter.value}), per the AHJ's own page: it has no portal or address of the AHJ's to confirm. A person files it there.`);
   const authority = authorityForTrack(project, decision.track);
   if (!authority) throw new DestinationRefused(400, "This track names no authority to file with.");
   const kind = decision.kind;
