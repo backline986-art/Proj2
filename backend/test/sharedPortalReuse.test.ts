@@ -248,7 +248,7 @@ await check("(x2) MF2 MUST-EXCLUDE: end to end through prepareSubmission, a borr
     });
     // Borrowed: a Salem project on the Newport recipe, with Salem's own named approval of THIS run.
     const salem = salemProject();
-    const approval = repo.createRunApproval(db, { projectId: salem, track: "building", approver: "Dana Operator" });
+    const approval = repo.createRunApproval(db, { projectId: salem, track: "building", approver: "Dana Operator", acknowledgements: fx.acknowledgeAll(salem, "building") });
     await repo.prepareSubmission(db, salem, "building", true, true, approval.id);
     const run = fx.latestRun(salem)!;
     assert.equal(JSON.parse(String(run.result_json)).borrowedRecipe?.learnedFor, "City of Newport", "setup: the run did not borrow");
@@ -259,7 +259,7 @@ await check("(x2) MF2 MUST-EXCLUDE: end to end through prepareSubmission, a borr
     assert.ok(declined[0].reasons.some((r: string) => /borrowed/.test(r)), JSON.stringify(declined[0].reasons));
     // MUST-PASS: Newport's own project, its own recipe, the same kind of approval → allowed.
     const newport = fx.newProject({ ahj: "City of Newport", city: "Newport", zip: "97365" });
-    const own = repo.createRunApproval(db, { projectId: newport, track: "building", approver: "Dana Operator" });
+    const own = repo.createRunApproval(db, { projectId: newport, track: "building", approver: "Dana Operator", acknowledgements: fx.acknowledgeAll(newport, "building") });
     await repo.prepareSubmission(db, newport, "building", true, true, own.id);
     assert.equal(seen.length, 2, "the owner's run did not reach the runner");
     assert.equal(seen[1].autoSubmit, true, "the owner's own approved run was refused");

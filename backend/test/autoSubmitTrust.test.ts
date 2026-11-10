@@ -47,7 +47,7 @@ async function stageAsking(projectId: string, opts: { env?: string | null; fail?
   return { seen: seen as unknown as Seen, run };
 }
 const approve = (projectId: string, approver = "A. Person") =>
-  repo.createRunApproval(db, { projectId, track: "permit", approver, approverUserId: null });
+  repo.createRunApproval(db, { projectId, track: "permit", approver, approverUserId: null, acknowledgements: fx.acknowledgeAll(projectId, null) });
 const declined = (projectId: string) => fx.audits("portal.auto_submit_declined").filter((a) => a.project_id === projectId);
 
 await check("(g) MUST-PASS: a named approval of THIS run + PORTAL_ALLOW_FINAL_SUBMIT=1 + a complete, well-shaped recipe → allowed, and the approval names this run", async () => {

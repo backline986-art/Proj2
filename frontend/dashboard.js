@@ -5982,6 +5982,24 @@ const APPROVER_NAME_KEY = "feeConfirmName";
 // true/false exactly where confirm() did, and the name prompt, the request and the server's gate
 // (mayClickFinalSubmit / automaticSubmitRefusals) are unchanged. If the sheet cannot be read (an older
 // server, a network error) the plain confirm is shown and says so: the sheet never blocks an approval.
+// OPEN REVIEW ITEMS (review-audit draft 01): every reviewer warning and gate warning that holds THIS
+// filing is listed above the table. A measured one (arithmetic against the plan's own numbers) and an
+// unverified form mapping each carry a tick box, and Approve stays disabled until every one is ticked;
+// the ticks go with the approval (the server checks them against what it holds now, and the run again).
+function approvalOpenItemsHtml(sheet) {
+  const items = Array.isArray(sheet.openItems) ? sheet.openItems : [];
+  if (!items.length) return "";
+  const toAck = items.filter((i) => i.needsAcknowledgement);
+  const others = items.filter((i) => !i.needsAcknowledgement);
+  const line = (i) => `${esc(i.title)}${i.text ? `<div style="font-size:12px">${esc(i.text)}</div>` : ""}${i.action ? `<div class="muted" style="font-size:12px">${esc(i.action)}</div>` : ""}`;
+  return `<div data-approval-open-items style="border:1px solid var(--edge-warn);background:var(--tint-warn);border-radius:var(--radius-sm);padding:10px 12px">
+      <strong>Open review items for this filing (${items.length})</strong>
+      ${toAck.length ? `<p style="margin:6px 0 4px">${toAck.length === 1 ? "This one is" : "These are"} measured against the plan's own numbers or a form no person has checked. Tick each to say you read it; Approve stays off until every box is ticked.</p>
+      <ul style="list-style:none;margin:0;padding:0">${toAck.map((i) => `<li style="margin:6px 0"><label style="display:flex;gap:8px;align-items:flex-start"><input type="checkbox" data-approval-ack="${esc(i.id)}" data-approval-ack-hash="${esc(i.contentHash)}"><span>${line(i)}</span></label></li>`).join("")}</ul>` : ""}
+      ${others.length ? `<ul data-approval-other-items style="margin:6px 0 0 18px;padding:0">${others.map((i) => `<li style="margin:4px 0">${line(i)}</li>`).join("")}</ul>` : ""}
+    </div>`;
+}
+
 function approvalSheetHtml(sheet, recordedAs) {
   const issues = Array.isArray(sheet.issues) ? sheet.issues : [];
   const red = issues.filter((i) => i.kind === "mismatch" || i.kind === "missing");
@@ -6001,13 +6019,16 @@ function approvalSheetHtml(sheet, recordedAs) {
   return `${red.length
       ? `<div data-approval-mismatches style="border:1px solid var(--edge-fail);background:var(--tint-fail);color:var(--ink-fail);border-radius:var(--radius-sm);padding:10px 12px"><strong>${red.length === 1 ? "1 thing disagrees or is missing" : `${red.length} things disagree or are missing`} — check before approving</strong>${issueList(red, "var(--ink-fail)")}</div>`
       : `<div data-approval-clean style="border:1px solid var(--edge-pass);background:var(--tint-pass);color:var(--ink-pass);border-radius:var(--radius-sm);padding:10px 12px">No disagreement found between the project, the bill and the plan set.</div>`}
+    ${approvalOpenItemsHtml(sheet)}
     ${notes.length ? `<div data-approval-notes style="border:1px solid var(--edge-warn);background:var(--tint-warn);border-radius:var(--radius-sm);padding:10px 12px"><strong>Worth a look</strong>${issueList(notes, "inherit")}</div>` : ""}
     <table style="width:100%;border-collapse:collapse"><thead><tr><th style="text-align:left" class="muted">Field</th><th style="text-align:left" class="muted">What will be filed</th><th style="text-align:left" class="muted">Source</th></tr></thead><tbody>${rows}</tbody></table>
     <p class="muted" style="font-size:12px;white-space:pre-line">${esc(APPROVE_AUTO_SUBMIT_LEDE.replace(/^Approve & auto-submit this filing\?\n\n/, ""))}</p>
     ${recordedAs ? `<p style="margin:0"><strong>Recorded as:</strong> ${esc(recordedAs)}</p>` : ""}`;
 }
 
-async function confirmApprovalSheet(type, recordedAs = "") {
+// `out` (optional) receives `acknowledgements` — the plan set the sheet showed and each ticked item's
+// id + content hash — when the approver ticked any. The answer itself stays true/false.
+async function confirmApprovalSheet(type, recordedAs = "", out = null) {
   let sheet = null;
   try {
     const res = await api(`/api/projects/${state.selectedProjectId}/approval-sheet?track=${encodeURIComponent(type)}`);
@@ -6045,7 +6066,22 @@ async function confirmApprovalSheet(type, recordedAs = "") {
     const onKey = (e) => { if (e.key === "Escape") { e.preventDefault(); done(false); } };
     document.addEventListener("keydown", onKey, true);
     modal.querySelector("[data-approval-cancel]").addEventListener("click", () => done(false));
-    modal.querySelector("[data-approval-approve]").addEventListener("click", () => done(true));
+    const approveBtn = modal.querySelector("[data-approval-approve]");
+    const boxes = Array.from(modal.querySelectorAll("[data-approval-ack]"));
+    const allTicked = () => boxes.every((b) => b.checked);
+    const sync = () => { approveBtn.disabled = !allTicked(); };
+    boxes.forEach((b) => b.addEventListener("change", sync));
+    sync();
+    approveBtn.addEventListener("click", () => {
+      if (!allTicked()) return;
+      if (out && boxes.length) {
+        out.acknowledgements = {
+          planSet: sheet.planSet || null,
+          items: boxes.map((b) => ({ id: b.getAttribute("data-approval-ack"), contentHash: b.getAttribute("data-approval-ack-hash") })),
+        };
+      }
+      done(true);
+    });
     modal.addEventListener("click", (e) => { if (e.target === modal) done(false); }, { once: true });
     const title = modal.querySelector("#approvalSheetTitle");
     if (title && title.focus) title.focus();
@@ -6059,11 +6095,15 @@ async function approveAndAutoSubmitTrack(type, btn) {
   const track = (state.submittalTracks || []).find((t) => t.type === type);
   if (track && track.type === "nem" && track.status === "staged") { showMessage(APPROVE_HELD_BY_STAGED_DRAFT, "warning"); return; }
   const auth = await authForDecision();
+  // What the approver ticked on the sheet (review-audit draft 01) rides with the approval; nothing
+  // ticked → the body is exactly as before.
+  const sheetOut = {};
+  const acks = () => (sheetOut.acknowledgements ? { acknowledgements: sheetOut.acknowledgements } : null);
   if (auth && auth.enabled) {
-    if (!(await confirmApprovalSheet(type, (auth.user && (auth.user.name || auth.user.email)) || "you"))) return;
-    return stageSubmittalTrack(type, btn, true);
+    if (!(await confirmApprovalSheet(type, (auth.user && (auth.user.name || auth.user.email)) || "you", sheetOut))) return;
+    return stageSubmittalTrack(type, btn, true, acks());
   }
-  if (!(await confirmApprovalSheet(type))) return;
+  if (!(await confirmApprovalSheet(type, "", sheetOut))) return;
   let last = "";
   try { last = localStorage.getItem(APPROVER_NAME_KEY) || ""; } catch { last = ""; }
   const typed = prompt("Your name, recorded as the approver of this run:", last);
@@ -6073,7 +6113,7 @@ async function approveAndAutoSubmitTrack(type, btn) {
     return stageSubmittalTrack(type, btn, false, null, { noApproval: true });
   }
   try { localStorage.setItem(APPROVER_NAME_KEY, approverName); } catch { /* per-viewer convenience only */ }
-  return stageSubmittalTrack(type, btn, true, { approverName });
+  return stageSubmittalTrack(type, btn, true, { approverName, ...(acks() || {}) });
 }
 
 // THREE OUTCOMES, THREE LINES (#422): filed by automation under a named approval; stopped at review
