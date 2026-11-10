@@ -7,6 +7,7 @@ import type { EvidenceTopic } from "./projectEvidence";
 import { extractPdfPages } from "./batchImport";
 import { text as s } from "./json";
 import { pdfjsDocumentOptions } from "./pdfjsOptions";
+import { isOutlinedPdfjsPage, OUTLINED_TEXT_WHY, type OperatorListLike } from "./outlinedTextPages";
 import { paintMaskRegions, planSecretMask, VisionPageWithheldError, type MaskAnnotation, type MaskRegion, type MaskTextItem, type PdfQuad, type SecretMaskPlan } from "./visionPageMask";
 
 // ---------------------------------------------------------------------------
@@ -278,7 +279,19 @@ export type VisionPageImage =
 type PdfjsMaskPage = PdfjsRenderPage & {
   getTextContent: () => Promise<{ items: MaskTextItem[] }>;
   getAnnotations: () => Promise<MaskAnnotation[]>;
+  getOperatorList: () => Promise<OperatorListLike>;
 };
+
+/** #696: a page whose text is drawn as outlines has no text layer for the mask to check (rule 2), so
+ *  it is never rendered for a model. null = the page may go on to the mask; otherwise the refusal.
+ *  A page whose drawing cannot be read fails closed, like planPageMask. */
+async function outlinedPageRefusal(pdfPage: PdfjsMaskPage): Promise<{ ok: false; reason: string } | null> {
+  try {
+    return (await isOutlinedPdfjsPage(pdfPage)) ? { ok: false, reason: OUTLINED_TEXT_WHY } : null;
+  } catch {
+    return { ok: false, reason: "the page's drawing could not be read to check whether its text is drawn as outlines" };
+  }
+}
 type PdfjsMaskViewport = { width: number; height: number; convertToViewportPoint: (x: number, y: number) => number[] };
 
 /** The page's own text and form fields, checked against `secrets` (visionPageMask.planSecretMask).
@@ -316,13 +329,15 @@ function paintPlanOnCanvas(
  * the carrying text runs are painted over before the PNG is made (visionPageMask.planSecretMask).
  * A carrier with no box to paint → { ok: false } and the caller does not send the page.
  *
+ * A page whose text is drawn as outlines (#696, outlinedTextPages.ts) → { ok: false } whatever the
+ * secrets: the mask reads the text layer, and that page has none.
+ *
  * A page with no secret, or a project with none, is renderPdfPageToPng's own PNG, byte for byte
  * (disk cache included). A masked page is never written to that cache: the cache serves the
  * operator's crop, which shows the unmasked sheet. Throws only where renderPdfPageToPng would
  * (the page cannot be read or rendered); the caller treats that as before.
  */
 export async function renderPdfPageForVision(pdfPath: string, page: number, secrets: readonly string[], scale = 1.6): Promise<VisionPageImage> {
-  if (!secrets.length) return { ok: true, png: await renderPdfPageToPng(pdfPath, page, scale), masked: 0 };
   const pdfjs = await getPdfjs();
   const data = new Uint8Array(fs.readFileSync(pdfPath));
   const origWarn = console.warn;
@@ -334,6 +349,9 @@ export async function renderPdfPageForVision(pdfPath: string, page: number, secr
     const doc = await pdfjs.getDocument(pdfjsDocumentOptions({ data, useSystemFonts: true, disableWorker: true })).promise;
     const target = Math.min(Math.max(1, page), doc.numPages);
     const pdfPage = (await doc.getPage(target)) as PdfjsMaskPage;
+    // #696: an outlined-text page is refused before the mask, with or without secrets.
+    const outlined = await outlinedPageRefusal(pdfPage);
+    if (outlined) return outlined;
     const plan = await planPageMask(pdfPage, secrets);
     if (!plan.ok) return plan;
     if (!plan.regions.length) return { ok: true, png: await renderPdfPageToPng(pdfPath, page, scale), masked: 0 };
@@ -391,7 +409,9 @@ export function visionRenderScale(w: number, h: number, opts: Pick<VisionRenderO
  *  does for the PNG door; a carrier with no box to paint makes render() throw
  *  VisionPageWithheldError, so the page is never sent. No secrets (or none on the page): the image
  *  is exactly what it was. A page with no text layer (a scan) has nothing to check — what it prints
- *  is out of reach of a text detector. */
+ *  is out of reach of a text detector. A page whose text is drawn as OUTLINES (no text layer, no
+ *  raster, a vector-heavy drawing: outlinedTextPages.ts, #696) throws VisionPageWithheldError
+ *  before anything is drawn, so it never reaches any model. */
 export async function openPdfForVisionRender(pdfBytes: Uint8Array, openOpts: { secrets?: readonly string[] } = {}): Promise<{
   numPages: number;
   render: (page: number, opts: VisionRenderOptions) => Promise<VisionRender>;
@@ -415,6 +435,10 @@ export async function openPdfForVisionRender(pdfBytes: Uint8Array, openOpts: { s
     render: (page, opts) => quiet(async () => {
       const target = Math.min(Math.max(1, Math.floor(page)), doc.numPages);
       const pdfPage = (await doc.getPage(target)) as PdfjsMaskPage;
+      // #696: a page whose text is drawn as outlines is never drawn for a model (the mask below reads
+      // the text layer, and such a page has none). The caller names it as withheld, with the reason.
+      const outlined = await outlinedPageRefusal(pdfPage);
+      if (outlined) throw new VisionPageWithheldError(outlined.reason);
       // RULE 2 (#612): checked before anything is drawn; a carrier with no box throws, so the page is
       // never encoded, let alone sent (the caller names it as withheld).
       const plan = await planPageMask(pdfPage, secrets);
