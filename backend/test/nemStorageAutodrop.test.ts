@@ -11,7 +11,8 @@
 //       lose the track;
 //   (d) a person can put the track back on one job, and let the record drop it again;
 //   (e) withdrawing the record brings the track back on every job it dropped;
-//   (f) work already on the track keeps it; a stale stamp never drops a track.
+//   (f) work already on the track keeps it; a stale stamp never drops a track;
+//   (g) the tracks screen shows why (escaped) with a restore control.
 // Kill test: make requiredTracks ignore nemTrackDropFor → (a) fails; drop on any tier in
 // settleNemTrackDrop → (b) fails.
 // Run: npx tsx backend/test/nemStorageAutodrop.test.ts
@@ -202,6 +203,24 @@ await check("(e) withdrawing the record brings the track back on every job it dr
     assert.equal(detail(id).nemTrackDrop ?? null, null);
   }
   assert.deepEqual(projectsDroppedFor(db, STATE, UTILITY), []);
+});
+
+// (g) the tracks screen says why, escaped, with the restore control.
+await check("(g) the tracks screen shows the dropped track's person, page and quote, escaped, with a restore button", () => {
+  const src = fs.readFileSync(new URL("../../frontend/dashboard.js", import.meta.url), "utf8");
+  const start = src.indexOf("function nemTrackDropHtml(");
+  const end = src.indexOf("\nasync function saveNemTrackKeep(", start);
+  assert.ok(start > 0 && end > start, "nemTrackDropHtml not found");
+  const esc = (v: unknown) => String(v ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+  const fn = new Function("esc", `${src.slice(start, end)}\nreturn nemTrackDropHtml;`)(esc) as (d: unknown) => string;
+  const html = fn({ nemTrackDrop: { utility: UTILITY, mode: "backup-only", sourceUrl: SOURCE, quote: "<b>Backup</b> batteries need no application.", verifiedBy: "Pat Reviewer", verifiedAt: "2026-11-10T00:00:00Z" } });
+  assert.match(html, /not required/);
+  assert.ok(html.includes("Pat Reviewer") && html.includes(SOURCE) && html.includes("2026-11-10"), html);
+  assert.ok(html.includes("&lt;b&gt;Backup") && !html.includes("<b>Backup"), "quote not escaped");
+  assert.match(html, /data-nem-track-keep="1"/);
+  assert.match(fn({ nemTrackKept: { by: "Lee Operator", at: "2026-11-10" } }), /Lee Operator kept[\s\S]*data-nem-track-keep="0"/);
+  assert.equal(fn({}), "");
+  assert.equal(fn(null), "");
 });
 
 if (failures) { console.error(`\n${failures} nemStorageAutodrop check(s) FAILED.`); process.exit(1); }
