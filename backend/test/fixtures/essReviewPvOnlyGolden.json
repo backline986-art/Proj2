@@ -510,6 +510,32 @@
         ]
       },
       {
+        "id": "reviewer.utility.requirements-not-on-file",
+        "severity": "callout",
+        "category": "utility_nem",
+        "title": "Example Valley Power's application requirements are not on file",
+        "message": "Example Valley Power's application requirements are not on file; the utility side was not reviewed.",
+        "cityFeedback": "What Example Valley Power's own interconnection application asks for (meter photo, one-line, inverter listing, disconnect, storage mode…) is not recorded, so none of it was checked.",
+        "designTeamAction": "Check Example Valley Power's application requirements by hand, and record them with their page and words so the gate checks them next time.",
+        "evidenceNeeded": [],
+        "codeReferences": [],
+        "installerCallout": true,
+        "evidenceStatus": "missing",
+        "evidenceFound": [
+          {
+            "kind": "absence_check",
+            "label": "Utility application requirements — none on file",
+            "source": "Utility requirement list (shipped seed and the utility's filing record)",
+            "excerpt": "No requirement list for Example Valley Power in ZZ.",
+            "confidence": "low",
+            "pageHint": "",
+            "screenshotPath": "",
+            "verifier": "rule_engine",
+            "note": "Not a finding about the package: the utility's requirements were not checked at all."
+          }
+        ]
+      },
+      {
         "id": "reviewer.permit-path.stamped-review",
         "severity": "warning",
         "category": "structural",
@@ -1073,6 +1099,32 @@
             "screenshotPath": "/api/projects/ess-pin-1/evidence-image?topic=rapidShutdown&hint=Split%20page%20mapping&excerpt=rapid%20shutdown%20site%20plan%20roof%20plan",
             "verifier": "parser",
             "note": "Source page will render here. If no plan-set PDF is stored, upload it to Project Documents — then this slot shows the sheet. Use the source/page hint above meanwhile."
+          }
+        ]
+      },
+      {
+        "id": "reviewer.utility.requirements-not-on-file",
+        "severity": "callout",
+        "category": "utility_nem",
+        "title": "Example Valley Power's application requirements are not on file",
+        "message": "Example Valley Power's application requirements are not on file; the utility side was not reviewed.",
+        "cityFeedback": "What Example Valley Power's own interconnection application asks for (meter photo, one-line, inverter listing, disconnect, storage mode…) is not recorded, so none of it was checked.",
+        "designTeamAction": "Check Example Valley Power's application requirements by hand, and record them with their page and words so the gate checks them next time.",
+        "evidenceNeeded": [],
+        "codeReferences": [],
+        "installerCallout": true,
+        "evidenceStatus": "missing",
+        "evidenceFound": [
+          {
+            "kind": "absence_check",
+            "label": "Utility application requirements — none on file",
+            "source": "Utility requirement list (shipped seed and the utility's filing record)",
+            "excerpt": "No requirement list for Example Valley Power in ZZ.",
+            "confidence": "low",
+            "pageHint": "",
+            "screenshotPath": "",
+            "verifier": "rule_engine",
+            "note": "Not a finding about the package: the utility's requirements were not checked at all."
           }
         ]
       },
@@ -1869,6 +1921,32 @@
         ]
       },
       {
+        "id": "reviewer.utility.requirements-not-on-file",
+        "severity": "callout",
+        "category": "utility_nem",
+        "title": "Example Valley Power's application requirements are not on file",
+        "message": "Example Valley Power's application requirements are not on file; the utility side was not reviewed.",
+        "cityFeedback": "What Example Valley Power's own interconnection application asks for (meter photo, one-line, inverter listing, disconnect, storage mode…) is not recorded, so none of it was checked.",
+        "designTeamAction": "Check Example Valley Power's application requirements by hand, and record them with their page and words so the gate checks them next time.",
+        "evidenceNeeded": [],
+        "codeReferences": [],
+        "installerCallout": true,
+        "evidenceStatus": "missing",
+        "evidenceFound": [
+          {
+            "kind": "absence_check",
+            "label": "Utility application requirements — none on file",
+            "source": "Utility requirement list (shipped seed and the utility's filing record)",
+            "excerpt": "No requirement list for Example Valley Power in ZZ.",
+            "confidence": "low",
+            "pageHint": "",
+            "screenshotPath": "",
+            "verifier": "rule_engine",
+            "note": "Not a finding about the package: the utility's requirements were not checked at all."
+          }
+        ]
+      },
+      {
         "id": "reviewer.permit-path.stamped-review",
         "severity": "warning",
         "category": "structural",
@@ -2550,6 +2628,32 @@
         ]
       },
       {
+        "id": "reviewer.utility.requirements-not-on-file",
+        "severity": "callout",
+        "category": "utility_nem",
+        "title": "Example Valley Power's application requirements are not on file",
+        "message": "Example Valley Power's application requirements are not on file; the utility side was not reviewed.",
+        "cityFeedback": "What Example Valley Power's own interconnection application asks for (meter photo, one-line, inverter listing, disconnect, storage mode…) is not recorded, so none of it was checked.",
+        "designTeamAction": "Check Example Valley Power's application requirements by hand, and record them with their page and words so the gate checks them next time.",
+        "evidenceNeeded": [],
+        "codeReferences": [],
+        "installerCallout": true,
+        "evidenceStatus": "missing",
+        "evidenceFound": [
+          {
+            "kind": "absence_check",
+            "label": "Utility application requirements — none on file",
+            "source": "Utility requirement list (shipped seed and the utility's filing record)",
+            "excerpt": "No requirement list for Example Valley Power in ZZ.",
+            "confidence": "low",
+            "pageHint": "",
+            "screenshotPath": "",
+            "verifier": "rule_engine",
+            "note": "Not a finding about the package: the utility's requirements were not checked at all."
+          }
+        ]
+      },
+      {
         "id": "reviewer.permit-path.stamped-review",
         "severity": "warning",
         "category": "structural",
@@ -3056,6 +3160,32 @@
         "evidenceStatus": "weak"
       },
       {
+        "id": "reviewer.utility.requirements-not-on-file",
+        "severity": "callout",
+        "category": "utility_nem",
+        "title": "Example Valley Power's application requirements are not on file",
+        "message": "Example Valley Power's application requirements are not on file; the utility side was not reviewed.",
+        "cityFeedback": "What Example Valley Power's own interconnection application asks for (meter photo, one-line, inverter listing, disconnect, storage mode…) is not recorded, so none of it was checked.",
+        "designTeamAction": "Check Example Valley Power's application requirements by hand, and record them with their page and words so the gate checks them next time.",
+        "evidenceNeeded": [],
+        "codeReferences": [],
+        "installerCallout": true,
+        "evidenceStatus": "missing",
+        "evidenceFound": [
+          {
+            "kind": "absence_check",
+            "label": "Utility application requirements — none on file",
+            "source": "Utility requirement list (shipped seed and the utility's filing record)",
+            "excerpt": "No requirement list for Example Valley Power in ZZ.",
+            "confidence": "low",
+            "pageHint": "",
+            "screenshotPath": "",
+            "verifier": "rule_engine",
+            "note": "Not a finding about the package: the utility's requirements were not checked at all."
+          }
+        ]
+      },
+      {
         "id": "reviewer.permit-path.stamped-review",
         "severity": "warning",
         "category": "structural",
@@ -3543,6 +3673,32 @@
           }
         ],
         "evidenceStatus": "weak"
+      },
+      {
+        "id": "reviewer.utility.requirements-not-on-file",
+        "severity": "callout",
+        "category": "utility_nem",
+        "title": "Example Valley Power's application requirements are not on file",
+        "message": "Example Valley Power's application requirements are not on file; the utility side was not reviewed.",
+        "cityFeedback": "What Example Valley Power's own interconnection application asks for (meter photo, one-line, inverter listing, disconnect, storage mode…) is not recorded, so none of it was checked.",
+        "designTeamAction": "Check Example Valley Power's application requirements by hand, and record them with their page and words so the gate checks them next time.",
+        "evidenceNeeded": [],
+        "codeReferences": [],
+        "installerCallout": true,
+        "evidenceStatus": "missing",
+        "evidenceFound": [
+          {
+            "kind": "absence_check",
+            "label": "Utility application requirements — none on file",
+            "source": "Utility requirement list (shipped seed and the utility's filing record)",
+            "excerpt": "No requirement list for Example Valley Power in ZZ.",
+            "confidence": "low",
+            "pageHint": "",
+            "screenshotPath": "",
+            "verifier": "rule_engine",
+            "note": "Not a finding about the package: the utility's requirements were not checked at all."
+          }
+        ]
       },
       {
         "id": "reviewer.permit-path.stamped-review",
@@ -4206,6 +4362,32 @@
         "evidenceStatus": "weak"
       },
       {
+        "id": "reviewer.utility.requirements-not-on-file",
+        "severity": "callout",
+        "category": "utility_nem",
+        "title": "Example Valley Power's application requirements are not on file",
+        "message": "Example Valley Power's application requirements are not on file; the utility side was not reviewed.",
+        "cityFeedback": "What Example Valley Power's own interconnection application asks for (meter photo, one-line, inverter listing, disconnect, storage mode…) is not recorded, so none of it was checked.",
+        "designTeamAction": "Check Example Valley Power's application requirements by hand, and record them with their page and words so the gate checks them next time.",
+        "evidenceNeeded": [],
+        "codeReferences": [],
+        "installerCallout": true,
+        "evidenceStatus": "missing",
+        "evidenceFound": [
+          {
+            "kind": "absence_check",
+            "label": "Utility application requirements — none on file",
+            "source": "Utility requirement list (shipped seed and the utility's filing record)",
+            "excerpt": "No requirement list for Example Valley Power in ZZ.",
+            "confidence": "low",
+            "pageHint": "",
+            "screenshotPath": "",
+            "verifier": "rule_engine",
+            "note": "Not a finding about the package: the utility's requirements were not checked at all."
+          }
+        ]
+      },
+      {
         "id": "reviewer.permit-path.stamped-review",
         "severity": "warning",
         "category": "structural",
@@ -4810,6 +4992,32 @@
         "evidenceStatus": "weak"
       },
       {
+        "id": "reviewer.utility.requirements-not-on-file",
+        "severity": "callout",
+        "category": "utility_nem",
+        "title": "Example Valley Power's application requirements are not on file",
+        "message": "Example Valley Power's application requirements are not on file; the utility side was not reviewed.",
+        "cityFeedback": "What Example Valley Power's own interconnection application asks for (meter photo, one-line, inverter listing, disconnect, storage mode…) is not recorded, so none of it was checked.",
+        "designTeamAction": "Check Example Valley Power's application requirements by hand, and record them with their page and words so the gate checks them next time.",
+        "evidenceNeeded": [],
+        "codeReferences": [],
+        "installerCallout": true,
+        "evidenceStatus": "missing",
+        "evidenceFound": [
+          {
+            "kind": "absence_check",
+            "label": "Utility application requirements — none on file",
+            "source": "Utility requirement list (shipped seed and the utility's filing record)",
+            "excerpt": "No requirement list for Example Valley Power in ZZ.",
+            "confidence": "low",
+            "pageHint": "",
+            "screenshotPath": "",
+            "verifier": "rule_engine",
+            "note": "Not a finding about the package: the utility's requirements were not checked at all."
+          }
+        ]
+      },
+      {
         "id": "reviewer.permit-path.stamped-review",
         "severity": "warning",
         "category": "structural",
@@ -5352,6 +5560,32 @@
         "evidenceStatus": "weak"
       },
       {
+        "id": "reviewer.utility.requirements-not-on-file",
+        "severity": "callout",
+        "category": "utility_nem",
+        "title": "Example Valley Power's application requirements are not on file",
+        "message": "Example Valley Power's application requirements are not on file; the utility side was not reviewed.",
+        "cityFeedback": "What Example Valley Power's own interconnection application asks for (meter photo, one-line, inverter listing, disconnect, storage mode…) is not recorded, so none of it was checked.",
+        "designTeamAction": "Check Example Valley Power's application requirements by hand, and record them with their page and words so the gate checks them next time.",
+        "evidenceNeeded": [],
+        "codeReferences": [],
+        "installerCallout": true,
+        "evidenceStatus": "missing",
+        "evidenceFound": [
+          {
+            "kind": "absence_check",
+            "label": "Utility application requirements — none on file",
+            "source": "Utility requirement list (shipped seed and the utility's filing record)",
+            "excerpt": "No requirement list for Example Valley Power in ZZ.",
+            "confidence": "low",
+            "pageHint": "",
+            "screenshotPath": "",
+            "verifier": "rule_engine",
+            "note": "Not a finding about the package: the utility's requirements were not checked at all."
+          }
+        ]
+      },
+      {
         "id": "reviewer.permit-path.stamped-review",
         "severity": "warning",
         "category": "structural",
@@ -5875,6 +6109,32 @@
           }
         ],
         "evidenceStatus": "weak"
+      },
+      {
+        "id": "reviewer.utility.requirements-not-on-file",
+        "severity": "callout",
+        "category": "utility_nem",
+        "title": "Example Valley Power's application requirements are not on file",
+        "message": "Example Valley Power's application requirements are not on file; the utility side was not reviewed.",
+        "cityFeedback": "What Example Valley Power's own interconnection application asks for (meter photo, one-line, inverter listing, disconnect, storage mode…) is not recorded, so none of it was checked.",
+        "designTeamAction": "Check Example Valley Power's application requirements by hand, and record them with their page and words so the gate checks them next time.",
+        "evidenceNeeded": [],
+        "codeReferences": [],
+        "installerCallout": true,
+        "evidenceStatus": "missing",
+        "evidenceFound": [
+          {
+            "kind": "absence_check",
+            "label": "Utility application requirements — none on file",
+            "source": "Utility requirement list (shipped seed and the utility's filing record)",
+            "excerpt": "No requirement list for Example Valley Power in ZZ.",
+            "confidence": "low",
+            "pageHint": "",
+            "screenshotPath": "",
+            "verifier": "rule_engine",
+            "note": "Not a finding about the package: the utility's requirements were not checked at all."
+          }
+        ]
       },
       {
         "id": "reviewer.permit-path.stamped-review",
@@ -6627,6 +6887,32 @@
         "evidenceStatus": "weak"
       },
       {
+        "id": "reviewer.utility.requirements-not-on-file",
+        "severity": "callout",
+        "category": "utility_nem",
+        "title": "Example Valley Power's application requirements are not on file",
+        "message": "Example Valley Power's application requirements are not on file; the utility side was not reviewed.",
+        "cityFeedback": "What Example Valley Power's own interconnection application asks for (meter photo, one-line, inverter listing, disconnect, storage mode…) is not recorded, so none of it was checked.",
+        "designTeamAction": "Check Example Valley Power's application requirements by hand, and record them with their page and words so the gate checks them next time.",
+        "evidenceNeeded": [],
+        "codeReferences": [],
+        "installerCallout": true,
+        "evidenceStatus": "missing",
+        "evidenceFound": [
+          {
+            "kind": "absence_check",
+            "label": "Utility application requirements — none on file",
+            "source": "Utility requirement list (shipped seed and the utility's filing record)",
+            "excerpt": "No requirement list for Example Valley Power in ZZ.",
+            "confidence": "low",
+            "pageHint": "",
+            "screenshotPath": "",
+            "verifier": "rule_engine",
+            "note": "Not a finding about the package: the utility's requirements were not checked at all."
+          }
+        ]
+      },
+      {
         "id": "reviewer.permit-path.stamped-review",
         "severity": "warning",
         "category": "structural",
@@ -7264,6 +7550,32 @@
           }
         ],
         "evidenceStatus": "weak"
+      },
+      {
+        "id": "reviewer.utility.requirements-not-on-file",
+        "severity": "callout",
+        "category": "utility_nem",
+        "title": "Example Valley Power's application requirements are not on file",
+        "message": "Example Valley Power's application requirements are not on file; the utility side was not reviewed.",
+        "cityFeedback": "What Example Valley Power's own interconnection application asks for (meter photo, one-line, inverter listing, disconnect, storage mode…) is not recorded, so none of it was checked.",
+        "designTeamAction": "Check Example Valley Power's application requirements by hand, and record them with their page and words so the gate checks them next time.",
+        "evidenceNeeded": [],
+        "codeReferences": [],
+        "installerCallout": true,
+        "evidenceStatus": "missing",
+        "evidenceFound": [
+          {
+            "kind": "absence_check",
+            "label": "Utility application requirements — none on file",
+            "source": "Utility requirement list (shipped seed and the utility's filing record)",
+            "excerpt": "No requirement list for Example Valley Power in ZZ.",
+            "confidence": "low",
+            "pageHint": "",
+            "screenshotPath": "",
+            "verifier": "rule_engine",
+            "note": "Not a finding about the package: the utility's requirements were not checked at all."
+          }
+        ]
       },
       {
         "id": "reviewer.permit-path.stamped-review",

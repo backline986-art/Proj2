@@ -476,7 +476,14 @@ const inchesWords = (n: number): string => (n % 12 === 0 && n > 0 ? `${n / 12} f
  * The ESS review for a job WITH storage (the caller decides that). `ctx` absent: the model-code
  * baseline only, cited generically.
  */
-export function evaluateEssFindings(project: ProjectRecord, ctx: EffectiveCodeContext | undefined, documentTexts: DesignTextSource[] = []): ReviewerFinding[] {
+export function evaluateEssFindings(
+  project: ProjectRecord,
+  ctx: EffectiveCodeContext | undefined,
+  documentTexts: DesignTextSource[] = [],
+  /** quantityAskedByScope: the job is on a storage scope (#673, draft 06), whose gate already requires
+   *  the battery quantity and usable kWh as a blocker — not asked a second time here. */
+  opts: { quantityAskedByScope?: boolean } = {},
+): ReviewerFinding[] {
   const facts = readEssFacts(project, documentTexts);
   const rules = resolveEssRules(ctx);
   const out: ReviewerFinding[] = [];
@@ -502,7 +509,7 @@ export function evaluateEssFindings(project: ProjectRecord, ctx: EffectiveCodeCo
   if (rules.listingRequired.value && !facts.ul9540) missing.push("UL 9540 listing of the ESS (the spec sheet or equipment schedule naming it)");
 
   // 2. One unit's rating.
-  if (!unit) missing.push("Energy rating of each battery unit (kWh) and the number of units");
+  if (!unit) { if (!opts.quantityAskedByScope) missing.push("Energy rating of each battery unit (kWh) and the number of units"); }
   else if (!exempt && unit.reading.value > rules.maxUnitKwh.value) {
     out.push(measured({
       id: ESS_UNIT_RATING_OVER_ID,

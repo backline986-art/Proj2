@@ -7,7 +7,6 @@ import { evaluateElectricalSizingFindings } from "./electricalSizing";
 import { evaluateWireTableFindings } from "./wireTableArithmetic";
 import { evaluateAmendmentFindings } from "./amendmentChecks";
 import { evaluateEssFindings } from "./essReview";
-import { batteryStatus } from "../../shared/src/batteryControls";
 import { evaluatePriorCorrectionFindings } from "./ahjReviewRules";
 import { pathWordingScope, resolvePermitPath, usStateCode } from "./permitPath";
 import { classifyRoofCovering, statedRoofDeadLoads, tileAttachmentFromText, tileAttachmentMethodOf, TILE_MIN_ROOF_DEAD_LOAD_PSF } from "./roofCovering";
@@ -2147,7 +2146,9 @@ export function evaluateDesignCodeFindings(
   const storagePresent = batteryStatus(project.parserSnapshot as Record<string, unknown> | undefined) === "yes"
     || !!affirmedIn(batterySources, ESS_TRIGGER_PATTERNS, essMentionDenied);
   if (storagePresent) {
-    out.push(...evaluateEssFindings(project, ctx, documentTexts).map((f) => (f.id === "city.ess.details-missing"
+    // A storage scope's quantity and usable kWh are already required by reviewer.storage.facts-missing
+    // (draft 06, a blocker); the ESS review does not ask for them a second time.
+    out.push(...evaluateEssFindings(project, ctx, documentTexts, { quantityAskedByScope: !newArray }).map((f) => (f.id === "city.ess.details-missing"
       // The generic ESS reference the keyword check cited stays, under the adopted edition.
       ? { ...f, codeReferences: [...f.codeReferences, essRef] }
       : f)));

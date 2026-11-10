@@ -225,6 +225,16 @@ await check("a job with hasBattery 'Yes' but no storage words on the sheets stil
   const p = job("", { batteryModel: "", batteryMake: "", hasBattery: "Yes" });
   assert.ok(find(findings(p), "city.ess.details-missing"));
 });
+await check("on a storage scope (draft 06) the quantity/kWh ask is the scope's blocker, not repeated in the ESS warning", () => {
+  const storageOnly = { moduleMake: "", moduleModel: "", moduleWattage: "", moduleQty: "", dcKw: "", newModulesOnSchedule: "No", newModulesOnSld: "No" };
+  const r = buildReviewerReport(job("EXAMPLECELL BATTERY. BATTERY LOCATION: GARAGE.", storageOnly), { codeContext: buildCodeContext(STATE, AHJ, profile()) });
+  assert.ok(r.findings.some((f) => f.id === "reviewer.storage.facts-missing" && /battery quantity/.test(f.message)), "draft 06's storage facts blocker");
+  const d = r.findings.find((f) => f.id === "city.ess.details-missing");
+  assert.ok(d, "the ESS review still runs");
+  assert.doesNotMatch(d!.message, /Energy rating of each battery unit/);
+  const pvStorage = buildReviewerReport(job("EXAMPLECELL BATTERY. BATTERY LOCATION: GARAGE."), { codeContext: buildCodeContext(STATE, AHJ, profile()) });
+  assert.match(pvStorage.findings.find((f) => f.id === "city.ess.details-missing")!.message, /Energy rating of each battery unit/, "a PV+storage job is asked here");
+});
 await check("every measured ESS finding is out of vision's reach; the 'not shown' warning is not", () => {
   for (const id of ESS_MEASURED_FINDING_IDS) assert.ok(MEASURED_FINDING_IDS.has(id), id);
   assert.ok(!MEASURED_FINDING_IDS.has("city.ess.details-missing"));

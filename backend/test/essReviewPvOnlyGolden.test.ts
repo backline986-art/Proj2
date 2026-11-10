@@ -3,7 +3,8 @@
 // The battery review reads storage facts and per-jurisdiction ESS rules. A job with NO storage must
 // get exactly the reviewer report it got before that work — finding for finding, word for word —
 // including under a jurisdiction whose profile carries ESS rules (cited, verified). The golden was
-// captured from the engine BEFORE the ESS review landed (Helm staging ae6eaca3).
+// captured from the engine WITHOUT the ESS review: first on Helm staging ae6eaca3, then recaptured on
+// staging 7d706055 (draft 04's AC-size check and draft 06 changed PV reports there, not this work).
 //
 // Every job, address and jurisdiction here is invented.
 //
