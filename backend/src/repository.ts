@@ -90,7 +90,7 @@ import { installerHandoffNoteBody, sendInstallerHandoff } from "./installerHando
 // detectPlatform moved with the target INSERT into submittalTracks.ts's ensureCheckTarget; the
 // card's Edit (updatePermitCheckTarget) re-detects with the same function when the URL changes.
 import { accelaModulesForNumber, detectPlatform, publicPermitStatusCheck, searchAccelaRecordByNumber } from "./publicPermitStatus";
-import { planSetTextForProject, projectDocsByType, DOCS_DIR, PLAN_TEXT_DOC_TYPES } from "./projectDocuments";
+import { planSetTextForProject, projectDocsByType, shippedPlanSetOutlinedPages, DOCS_DIR, PLAN_TEXT_DOC_TYPES } from "./projectDocuments";
 import { activeStructuralLetterConfirmation, structuralLetterState } from "./structuralLetter";
 import { statePermitRulesFor } from "./stateRules";
 import type { DesignTextSource } from "./designCriteria";
@@ -3785,6 +3785,8 @@ export function getSubmitGateReport(db: AppDb, projectId: string): SubmitGateRep
   const gateDocs = owedMissingDocuments(db, project, docInventory);
   // Found-but-dead form links for this AHJ/path (issue #205), read once for every owed row.
   const deadFormLinks = gateDocs.owed.length ? formDeadLinks(db, project) : [];
+  // Plan-set pages whose text is drawn as outlines (#696): a "missing" sheet may be on one of them.
+  const unreadPlanPages = gateDocs.owed.length ? shippedPlanSetOutlinedPages(db, projectId) : [];
   const processMap = getProjectProcessMap(db, projectId);
   const installerPacket = getInstallerActionPacket(db, projectId);
   const activeEmailSources = db.query<Row>(
@@ -4170,7 +4172,7 @@ export function getSubmitGateReport(db: AppDb, projectId: string): SubmitGateRep
         ? docInventory.applicationSetUnknown
         : gateDocs.owed.length
         ? `Missing before staging: ${gateDocs.owed
-            .map((d) => `${d.docType === "structural_letter" && d.why ? `${d.label} (${d.why})` : d.label} — ${owedDocumentAction(d, deadFormLinks)}`)
+            .map((d) => `${d.docType === "structural_letter" && d.why ? `${d.label} (${d.why})` : d.label} — ${owedDocumentAction(d, deadFormLinks, unreadPlanPages)}`)
             .join("; ")}.`
         : docInventory.missingAdvisory.length
           ? "Confirm the advisory document(s) are included in the plan set."
@@ -4185,7 +4187,7 @@ export function getSubmitGateReport(db: AppDb, projectId: string): SubmitGateRep
       ...(gateDocs.owed.length ? {
         holds: gateDocs.owed.map((d) => ({
           label: d.label,
-          action: owedDocumentAction(d, deadFormLinks),
+          action: owedDocumentAction(d, deadFormLinks, unreadPlanPages),
           tracks: GATE_TRACKS.filter((t) => stagingMissingDocuments({ ...docInventory, missingBlocking: [d] }, t).length > 0),
         })),
       } : {}),
@@ -9754,9 +9756,12 @@ export async function prepareSubmission(
   const missingDocs = stagingMissingDocuments(inv, track);
   if (missingDocs.length > 0) {
     const deadFormLinks = formDeadLinks(db, detail.project);
+    // A plan sheet "missing" from a set whose pages nobody could read (text drawn as outlines, #696)
+    // says which pages a person checks.
+    const unreadPlanPages = shippedPlanSetOutlinedPages(db, detail.project.id);
     // Each document says its own fix (owedDocumentAction — the gate's words): a form Stage could not
     // acquire is found / uploaded as a blank; a file is attached or split out of the plan set.
-    throw new HttpError(409, `Submission staging blocked: required document(s) not attached${track !== "nem" ? " after Stage's own form acquisition and fill" : ""} — ${missingDocs.map((d) => `${d.label} (${owedDocumentAction(d, deadFormLinks)})`).join("; ")}. The AHJ/utility must receive a complete package.`, {
+    throw new HttpError(409, `Submission staging blocked: required document(s) not attached${track !== "nem" ? " after Stage's own form acquisition and fill" : ""} — ${missingDocs.map((d) => `${d.label} (${owedDocumentAction(d, deadFormLinks, unreadPlanPages)})`).join("; ")}. The AHJ/utility must receive a complete package.`, {
       missingDocuments: missingDocs.map((d) => ({ docType: d.docType, label: d.label, lane: d.lane })),
     });
   }

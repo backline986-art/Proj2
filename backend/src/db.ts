@@ -3446,6 +3446,20 @@ const VERSIONED_MIGRATIONS: VersionedMigration[] = [
       addColumnIfMissing(db, "projects", "nem_track_exemption_json", "TEXT NOT NULL DEFAULT ''");
     },
   },
+  {
+    // v75: after the utility checks' v72, #700's v73 and #673 draft 10's v74 (offline staging
+    // 5d8973d0). Helm renumbers at merge if the queue changes — nothing here depends on the number.
+    version: 75,
+    name: "project_documents_outlined_pages",
+    up: (db) => {
+      // PLAN PAGES WHOSE TEXT IS DRAWN AS OUTLINES (#696, outlinedTextPages.ts): the 1-based pages of
+      // a plan-set document that neither the text path nor vision reads, as a JSON array, written
+      // with the document's extracted text and by the splitter. '' = not checked yet (the reader
+      // starts the check and says nothing until it lands); '[]' = checked, none. QC and the submit
+      // gate read it synchronously to name the unread pages.
+      addColumnIfMissing(db, "project_documents", "outlined_pages_json", "TEXT NOT NULL DEFAULT ''");
+    },
+  },
 ];
 
 /** v47 was edited in place while #218 was open (Helm's review at 0116f98a): a DB that ran an earlier
