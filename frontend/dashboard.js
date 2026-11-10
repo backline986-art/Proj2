@@ -10838,7 +10838,7 @@ const CLIENT_TEXT_FIELDS = [
   "companyName", "legalBusinessName", "dba", "contactName", "contactEmail", "phone", "billingStatus", "billingMode", "serviceFeeUsd",
   "requestLinksAutoSend", "handoffAutoSend", "intakeTag", "intakeSenders",
   "ccbLicenseNumber", "ccbExpiration", "electricalLicenseNumber", "metroCityLicenseNumber",
-  "electricalSupervisorName", "electricianLicenseNumber",
+  "electricalSupervisorName", "electricianLicenseNumber", "installerCertifications",
   "ein", "bondCarrier", "insuranceCarrier", "businessAddress", "businessCity", "businessState",
   "businessZip", "businessPhone", "businessEmail", "authorizedSignerName", "authorizedSignerTitle", "notes",
 ];

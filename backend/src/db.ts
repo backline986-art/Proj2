@@ -144,6 +144,10 @@ export async function openDatabase(): Promise<AppDb> {
   try {
     (await import("./stateRules")).seedStatePermitRules(appDb);
   } catch { /* reference data is best-effort */ }
+  // Each authority's cited eligibility limits (#679): the same idempotent seed, never over a verified row.
+  try {
+    (await import("./eligibilityLimits")).seedEligibilityRecords(appDb);
+  } catch { /* reference data is best-effort */ }
   // Per-job permit process answers: loaded into the in-process registry that the pure
   // (db-less) track/document/fee resolvers read — the same pattern as the process-profile cache.
   try {
@@ -3232,6 +3236,34 @@ const VERSIONED_MIGRATIONS: VersionedMigration[] = [
       addColumnIfMissing(db, "state_permit_rules", "fetched_at", "TEXT NOT NULL DEFAULT ''");
     },
   },
+  {
+    version: 67,
+    name: "authority_eligibility_limits",
+    up: (db) => {
+      // WHO QUALIFIES, AS CITED DATA (#679): one row per authority — a utility's customer-generation
+      // PROGRAM (authority_kind 'utility_program') or an AHJ's simplified permit PATH ('permit_path') —
+      // holding its limits (max DC/AC kW, strings per inverter, production meter, installer
+      // certification), each with its source name, URL and verbatim words (eligibilityLimits.ts).
+      // authority '' = every utility / AHJ in the state. Shared knowledge on purpose: no org_id.
+      // RULE 3: a seed or research write never touches a row whose verified_at is set.
+      // Created here, never lazily: QC reads it, and reads write nothing.
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS authority_eligibility_limits (
+          record_key TEXT PRIMARY KEY,
+          authority_kind TEXT NOT NULL,
+          state TEXT NOT NULL,
+          authority TEXT NOT NULL DEFAULT '',
+          program_name TEXT NOT NULL DEFAULT '',
+          limits_json TEXT NOT NULL DEFAULT '{}',
+          confidence TEXT NOT NULL DEFAULT 'seeded',
+          verified_at TEXT NOT NULL DEFAULT '',
+          verified_by TEXT NOT NULL DEFAULT '',
+          updated_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_authority_eligibility_state ON authority_eligibility_limits(state, authority_kind);
+      `);
+    },
+  },
 ];
 
 /** v47 was edited in place while #218 was open (Helm's review at 0116f98a): a DB that ran an earlier
@@ -3383,6 +3415,9 @@ const CLIENT_LICENSING_COLUMNS: [string, string][] = [
   // plan set does name a part.
   ["standard_disconnect_make", "TEXT NOT NULL DEFAULT ''"],
   ["standard_disconnect_model", "TEXT NOT NULL DEFAULT ''"],
+  // The installer's certifications (#679), one per line: checked against a program's or permit path's
+  // cited installer-certification requirement. Blank = none on record (a warning, never a pass).
+  ["installer_certifications", "TEXT NOT NULL DEFAULT ''"],
   ["legal_business_name", "TEXT NOT NULL DEFAULT ''"],
   ["dba", "TEXT NOT NULL DEFAULT ''"],
   ["ccb_license_number", "TEXT NOT NULL DEFAULT ''"],

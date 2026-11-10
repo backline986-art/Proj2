@@ -1,7 +1,9 @@
-import type { ParserPayload, QcStatus, Severity } from "../../shared/src/types";
+import type { AuthorityEligibilityRecord, ParserPayload, QcStatus, Severity } from "../../shared/src/types";
 import type { EffectiveCodeContext } from "./codeProfiles";
 import { knownPowerClerkUtility, pacifiCorpBrand } from "./utilityIdentity";
 import { isBillHolderName, nemApplicantName } from "./accountHolders";
+import { evaluateEligibility, productionMeterShown, shippedEligibilityRecords, stringsPerInverterOf } from "./eligibilityLimits";
+import { usStateCode } from "./permitPath";
 
 export interface BaselineRuleDefinition {
   id: string;
@@ -297,7 +299,19 @@ export function namesAgree(applicant: string, accountHolder: string): boolean {
   });
 }
 
-export function evaluateBaselineRules(payload: ParserPayload, ctx?: EffectiveCodeContext): BaselineQcResult[] {
+/** The eligibility inputs QC supplies (#679). Omitted: the shipped reference rows only, no
+ *  certification read, and no "program not on file" notice (the pure legacy callers). */
+export interface BaselineEligibilityContext {
+  /** The records on file for the job's state (eligibilityRecordsForState). */
+  records: AuthorityEligibilityRecord[];
+  /** The project's client's certifications; null when there is no client record. */
+  clientCertifications: string[] | null;
+  /** Say so when no utility-program record matches the job's utility (strictest baseline). */
+  reportUnknownProgram?: boolean;
+  today?: string;
+}
+
+export function evaluateBaselineRules(payload: ParserPayload, ctx?: EffectiveCodeContext, eligibility?: BaselineEligibilityContext): BaselineQcResult[] {
   const out: BaselineQcResult[] = [];
   const state = str(payload, "state").toUpperCase();
   const ahj = str(payload, "ahj");
@@ -335,9 +349,9 @@ export function evaluateBaselineRules(payload: ParserPayload, ctx?: EffectiveCod
   // provided (the per-AHJ adopted-codes profile), so any state/county with limits
   // recorded gets the same screening Oregon always had. Without a context, the
   // legacy behavior is preserved exactly: Oregon regex + the historical constants.
-  // The Oregon NEM PROGRAM rules below (25 kW residential cap, manual disconnect)
-  // stay Oregon-gated — they are OAR 860-039 utility-program policy, not adopted
-  // building-code data. Rule IDs keep their legacy "or-…" form for Oregon (blocker
+  // Utility-PROGRAM size caps are not adopted building-code data either: they are cited
+  // per-authority records (eligibilityLimits.ts, #679). The manual-disconnect screen below
+  // is still state-gated (outside #679's scope). Rule IDs keep their legacy "or-…" form for Oregon (blocker
   // gating, QC history, and the goldens key off them) and use "<state>-…" elsewhere.
   // A LIMIT FRAGMENT IS NOT A PRESCRIPTIVE PATH (permitPath.ts says the same): Florida's seeded
   // state profile carries allowedWindExposures ["B","C","D"] — correct design-criteria data that
@@ -499,16 +513,28 @@ export function evaluateBaselineRules(payload: ParserPayload, ctx?: EffectiveCod
     ));
   }
 
-  if (isOregon && screenDcKw != null && screenDcKw > 25) {
-    out.push(result(
-      "or-nem-residential-25kw",
-      "Oregon residential NEM size screen",
-      "warning",
-      "warning",
-      `DC size is ${screenDcKw} kW${combinedNote}. Confirm this is not a residential OAR 860-039 net metering project capped at 25 kW.`,
-      "dcKw",
-    ));
-  }
+  // PROGRAM AND PERMIT-PATH ELIGIBILITY, AS CITED PER-AUTHORITY DATA (#679). The 25 kW residential
+  // net-metering screen that used to be coded here under a state test is now the first shipped row
+  // of backend/data/reference-eligibility-limits.json, with the same rule id, name and wording; any
+  // utility program or simplified permit path with cited limits screens the same way. The job's
+  // state is its own, or — for a payload with none — the AHJ-name inference this function already
+  // makes above (the legacy fallback the rest of these screens use).
+  const combinedAcKw = num(payload, "combinedAcKw");
+  const eligibilityState = usStateCode(state) || (isOregon ? "OR" : "");
+  const eligibilityRecords = eligibility?.records ?? shippedEligibilityRecords().filter((r) => r.state === eligibilityState);
+  const findings = evaluateEligibility(eligibilityRecords, {
+    state: eligibilityState, utility, ahj,
+    programDcKw: screenDcKw,
+    programAcKw: combinedAcKw != null && (acKw == null || combinedAcKw > acKw) ? combinedAcKw : acKw,
+    combinedNote,
+    dcKw, acKw,
+    stringsPerInverter: stringsPerInverterOf((k) => num(payload, k)),
+    micro: !str(payload, "invModel") && Boolean(str(payload, "pvMicroModel")),
+    productionMeterShown: productionMeterShown([split, notes, str(payload, "planSetExtractedText"), str(payload, "meterNotes")]),
+    clientCertifications: eligibility?.clientCertifications ?? null,
+    today: eligibility?.today ?? new Date().toISOString().slice(0, 10),
+  }, { reportUnknownProgram: eligibility?.reportUnknownProgram === true });
+  for (const f of findings) out.push(result(f.ruleId, f.ruleName, f.qcStatus, f.severity, f.message, f.fieldName));
 
   // Export-study screen: threshold from the jurisdiction profile (Oregon Tier 1 = 25 kW
   // export / 50 kW DC). The DC arm stays at 2x the export limit, matching the legacy 25/50 pair.
