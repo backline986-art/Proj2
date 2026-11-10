@@ -15,6 +15,8 @@ import { resolvePermitPath, resolveStampRequirement, hasStampedStructuralEvidenc
 import { evaluatePermitPrecedentFindings } from "./permitPrecedents";
 import { citeStateSealRule, statePrescriptiveFindings } from "./stateRules";
 import type { EffectiveCodeContext } from "./codeProfiles";
+import type { JobScope } from "../../shared/src/types";
+import { deriveJobScope, jobScopeLabel, scopeHasNewPv, storageFactGaps } from "./jobScope";
 
 function payload(project: ProjectRecord, key: string): string {
   return fieldValue(project, key);
@@ -115,17 +117,27 @@ export function buildReviewerReport(
     /** The job state's structural rules (state_permit_rules, #595 PR2): what refuses a prescriptive
      *  filing, and the seal rule the out-of-state seal finding cites. Absent = none on file. */
     stateRules?: StatePermitRule[];
+    /** What the job installs (#673, jobScope.resolveJobScope — a person's scope included). Absent:
+     *  the plan set's own evidence decides (deriveJobScope), which is pv unless the job names no new
+     *  module AND the plan set says so on both sheets. */
+    jobScope?: JobScope;
   } = {},
 ): ReviewerReport {
   const profile = findAhjProcessProfile(project);
   const findings: ReviewerFinding[] = [];
+  // THE GATE READS #673'S ONE SCOPE (draft 06). A storage scope installs no new array: the roof,
+  // fire-pathway, framing, attachment, rapid-shutdown and module findings do not run, and the
+  // storage facts are required instead, as blockers. Every PV scope — and the unknown one, which is
+  // pv — runs exactly today's findings.
+  const scope: JobScope = opts.jobScope ?? deriveJobScope(project.parserSnapshot).scope;
+  const newArray = scopeHasNewPv(scope);
 
   const standalone = isStandaloneReviewSubject(project);
-  addCoreProjectFindings(project, findings);
+  addCoreProjectFindings(project, findings, scope);
   // Valuation, homeowner email/phone and company assignment feed the portal APPLICATION; the
   // standalone gate files nothing and its form has none of those fields.
   if (!standalone) addSubmittalDataFindings(project, findings);
-  findings.push(...evaluateDesignCodeFindings(project, profile, opts.codeContext, opts.uploadedDocTypes ?? [], opts.documentTexts ?? [], opts.structuralCertification ?? null));
+  findings.push(...evaluateDesignCodeFindings(project, profile, opts.codeContext, opts.uploadedDocTypes ?? [], opts.documentTexts ?? [], opts.structuralCertification ?? null, scope));
   // The state's own cited rules (#595 PR2): refuse a prescriptive filing the rules send engineered,
   // name the reasons, and cite the state's seal rule on an out-of-state seal.
   if (opts.stateRules?.length) {
@@ -139,8 +151,9 @@ export function buildReviewerReport(
   // service ratings against the rest of the set (the package's own words, not parser notes).
   if (opts.pvWorksheet) findings.push(...pvWorksheetFindings(project, opts.pvWorksheet));
   findings.push(...serviceRatingConsistencyFindings(project, [String(project.parserSnapshot?.planSetExtractedText ?? ""), ...(opts.documentTexts ?? []).map((d) => d.text)].join("\n")));
-  addPlanSetFindings(project, findings);
-  addPlacementRuleFindings(project, opts.codeContext, findings, opts.documentTexts ?? []);
+  addPlanSetFindings(project, findings, newArray);
+  // The AHJ's array-placement rules (roof pathways, setbacks) are about an array; a storage scope has none.
+  if (newArray) addPlacementRuleFindings(project, opts.codeContext, findings, opts.documentTexts ?? []);
   addUtilityFindings(project, findings);
   addProfileFindings(project, profile, findings, opts.uploadedDocTypes ?? []);
   addPermitPathFindings(project, findings);
@@ -726,8 +739,10 @@ function addStandaloneCoreFindings(project: ProjectRecord, findings: ReviewerFin
   }
 }
 
-function addCoreProjectFindings(project: ProjectRecord, findings: ReviewerFinding[]): void {
+function addCoreProjectFindings(project: ProjectRecord, findings: ReviewerFinding[], scope: JobScope = "pv"): void {
   if (isStandaloneReviewSubject(project)) { addStandaloneCoreFindings(project, findings); return; }
+  const newArray = scopeHasNewPv(scope);
+  const batteryKw = Number.parseFloat(payload(project, "batteryOutputKw").replace(/[^0-9.-]/g, ""));
   const required: Array<[string, string | number | null, string]> = [
     ["homeowner", project.homeownerName, "Homeowner name missing."],
     ["address", project.projectAddress, "Service/project address missing."],
@@ -735,12 +750,29 @@ function addCoreProjectFindings(project: ProjectRecord, findings: ReviewerFindin
     ["utility", project.utility, "Utility missing."],
     ["account", project.accountNumber, "Utility account number missing."],
     ["meter", project.meterNumber, "Meter number missing."],
-    ["dc", project.systemSizeDcKw, "DC system size missing."],
-    ["ac", project.systemSizeAcKw, "AC system size missing."],
+    // A storage scope has no new DC array; its AC rating is the battery inverter / PCS output (#673).
+    ...(newArray
+      ? [["dc", project.systemSizeDcKw, "DC system size missing."], ["ac", project.systemSizeAcKw, "AC system size missing."]] as Array<[string, string | number | null, string]>
+      : [["ac", batteryKw > 0 ? batteryKw : null, "Battery inverter / PCS AC output (kW) missing — on a storage job this is the system's AC rating."]] as Array<[string, string | number | null, string]>),
     ["interconnection", project.interconnectionMethod, "Interconnection method missing."],
   ];
   for (const [id, value, message] of required) {
     if (value == null || value === "") findings.push(finding(`reviewer.core.${id}`, "blocker", "project_data", "Critical project field missing", message, true));
+  }
+  // THE STORAGE FACTS, REQUIRED (#673's list, jobScope.storageFactGaps — the same facts QC's storage
+  // rows ask for). One blocker naming every missing fact.
+  const gaps = storageFactGaps(project.parserSnapshot, scope);
+  if (gaps.length) {
+    const list = gaps.map((g) => g.label).join(", ");
+    findings.push(finding("reviewer.storage.facts-missing", "blocker", "project_data",
+      `Storage facts missing (${jobScopeLabel(scope)})`,
+      `This job is checked as ${jobScopeLabel(scope)}, so the reviewer needs the storage system's facts instead of module facts. Missing: ${list}.`,
+      true,
+      {
+        cityFeedback: `Provide the energy storage system's ${list} on the equipment schedule / ESS spec sheet and the one-line.`,
+        designTeamAction: `Add the missing storage facts (${list}) to the plan set and the job.`,
+        evidenceNeeded: gaps.map((g) => g.label),
+      }));
   }
 }
 
@@ -819,7 +851,7 @@ function addSubmittalDataFindings(project: ProjectRecord, findings: ReviewerFind
   }
 }
 
-function addPlanSetFindings(project: ProjectRecord, findings: ReviewerFinding[]): void {
+function addPlanSetFindings(project: ProjectRecord, findings: ReviewerFinding[], newArray = true): void {
   // THE SAME MOUNT QUESTION, ANSWERED IN ONE PLACE. These rules are paired with the
   // code-rule engine's via DEDUPE_ALIASES (topic:fire, topic:rapid-shutdown), and the
   // code-rule side wins. So while codeReviewRules was the only mount-aware layer, a ground
@@ -829,7 +861,9 @@ function addPlanSetFindings(project: ProjectRecord, findings: ReviewerFinding[])
   // Import the predicate rather than re-deriving it: two vocabularies is what caused this.
   const kind = mountKindForProject(project);
   const onARoof = kind === "roof" || kind === "unknown";
-  const rsdApplies = kind !== "ground";
+  // A storage scope (#673) installs no array: no rapid-shutdown, fire-pathway or ground-array question
+  // here. The SLD and site plan rows stay — the ESS, its disconnect and its location live on them.
+  const rsdApplies = newArray && kind !== "ground";
 
   const requiredDocs: Array<[string, ReturnType<typeof evidenceForTopic>, string, string]> = [
     ["sld", evidenceForTopic(project, "sld"), "SLD/one-line sheet not clearly mapped", "Provide or remap the one-line/SLD sheet so interconnection and equipment can be reviewed."],
@@ -878,7 +912,7 @@ function addPlanSetFindings(project: ProjectRecord, findings: ReviewerFinding[])
   // access/setback question is replaced by the questions a ground array actually raises, so
   // the operator gets a prompt instead of silence. Six of the eight supply-side projects on
   // the live book taught that lesson: the finding that never fires reads as approval.
-  if (!onARoof) {
+  if (newArray && !onARoof) {
     findings.push(finding(
       "reviewer.plan.ground-array-site",
       "callout",
@@ -895,7 +929,7 @@ function addPlanSetFindings(project: ProjectRecord, findings: ReviewerFinding[])
   }
 
   const firePathway = evidenceForTopic(project, "firePathway");
-  if (onARoof && firePathway.confidence !== "high") {
+  if (newArray && onARoof && firePathway.confidence !== "high") {
     findings.push(finding(
       "reviewer.plan.fire-path",
       firePathway.present ? "warning" : "blocker",

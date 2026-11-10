@@ -27,6 +27,8 @@ import { engineerSealStates, stateName } from "./engineerSeal";
 import { readPlanFraming } from "./planFraming";
 import { describeQuotes, describeSnowLabelIssue, planSheets, readDeckMount, readSnowLabels, type PlanSheet, type SheetQuote } from "./planAttachmentRead";
 import { readNecEditionCitations, readOtherMethodItems, readRapidShutdownStatements, readServiceLocationConflicts, readSupplySideDisconnectRating } from "./planConsistency";
+import type { JobScope } from "../../shared/src/types";
+import { scopeHasNewPv } from "./jobScope";
 export { designText, engineeredGroundMount, groundMountFromField, isGroundMount, mountAdjective, mountKind, mountKindForProject, type MountKind } from "./mountKind";
 
 const oregonElectrical2023: CodeReference = {
@@ -924,13 +926,20 @@ export function evaluateDesignCodeFindings(
    *  ruling 2026-10-08): the letter is in the package and only its seal — an image the text layer
    *  cannot read — is left to verify. Never set from text. */
   structuralCertification: { confirmedBy: string; confirmedAt: string } | null = null,
+  /** What the job installs (#673; draft 06). Default pv: today's findings, exactly. A storage scope
+   *  installs no array, so the roof / fire-pathway / framing / attachment / rapid-shutdown / module
+   *  rules below do not run; the storage facts are required by the reviewer engine instead. */
+  scope: JobScope = "pv",
 ): ReviewerFinding[] {
   const out: ReviewerFinding[] = [];
   const all = designText(project);
+  const newArray = scopeHasNewPv(scope);
   // A STAMP IS A DOCUMENT, NOT A SENTENCE ABOUT ONE.
   const hasStampedEngineering = uploadedDocTypes.some((t) => STAMPED_ENGINEERING_DOC_TYPES.includes(String(t)));
-  const roofMounted = isRoofMounted(project, all);
-  const rsdApplies = rapidShutdownApplies(project, all);
+  // No new array, no roof array and no PV rapid shutdown (NEC 690.12 governs PV): every rule gated on
+  // these two is an array rule.
+  const roofMounted = newArray && isRoofMounted(project, all);
+  const rsdApplies = newArray && rapidShutdownApplies(project, all);
   const oregon = isOregon(project, profile);
   // "NON-PRESCRIPTIVE" CONTAINS "PRESCRIPTIVE". A bare substring test therefore read an
   // explicitly engineered project as a prescriptive one and inverted the structural gate:
@@ -1527,7 +1536,7 @@ export function evaluateDesignCodeFindings(
   // exactly as a roof array does; the gate used to be `ctx && roofMounted`, so a job read as ground
   // or carport never had the listings checked at all. Only the racking's words follow the mount —
   // the roof wording is unchanged, and so is the severity (listingEvidenceRequired).
-  if (ctx) {
+  if (ctx && newArray) {
     const listingMount = roofMounted ? "roof" : mountKind(project, all);
     const racking = listingMount === "ground" ? "ground-mount racking" : listingMount === "carport" ? "carport racking/mounting" : "racking/mounting";
     const mountNote = listingMount === "ground"
@@ -1844,7 +1853,8 @@ export function evaluateDesignCodeFindings(
   const intercoText = `${project.interconnectionMethod}\n${str(project, "interco")}`;
   const bus = num(project, ["busRating"]);
   const mainBreaker = num(project, ["mainBreaker"]);
-  const pvBreaker = num(project, ["pvBreaker"]);
+  // On a storage scope the backfed breaker is the battery inverter's (#673: essBreaker, else pvBreaker).
+  const pvBreaker = num(project, newArray ? ["pvBreaker"] : ["essBreaker", "pvBreaker"]);
 
   // WHICH SIDE OF THE SERVICE IS THIS? The 120% busbar screen is NEC 705.12(B)(3)(2) — a
   // LOAD-SIDE rule. A SUPPLY-SIDE (line-side) tap is 705.11 and is not governed by it at all:
@@ -2027,7 +2037,9 @@ export function evaluateDesignCodeFindings(
   // confirms — not a warning that the equipment is "missing". The warning/blocker
   // is reserved for genuinely missing core fields.
   const coreEquipmentPresent = moduleFields.length >= 4 && inverterFields.length >= 2;
-  if (moduleFields.length < 4 || inverterFields.length < 2 || !hasModuleSpec || !hasInverterSpec) {
+  // The module / inverter schedule is an array question; a storage scope's equipment facts are asked by
+  // reviewer.storage.facts-missing, and the ESS spec sheet by the required documents (battery_spec).
+  if (newArray && (moduleFields.length < 4 || inverterFields.length < 2 || !hasModuleSpec || !hasInverterSpec)) {
     const severity = !coreEquipmentPresent ? "blocker" : "callout";
     out.push(finding({
       id: "city.elec.equipment-specs-incomplete",

@@ -28,7 +28,7 @@
 import type { AppDb } from "./db";
 import type { JobScope, JobScopeView, ParserPayload, StorageOperatingMode } from "../../shared/src/types";
 import { JOB_SCOPES } from "../../shared/src/types";
-import { batteryStatus } from "../../shared/src/batteryControls";
+import { batteryStatus, isPlaceholderBatteryModel } from "../../shared/src/batteryControls";
 import { existingSystemFromSnapshot } from "./normalize";
 
 function clean(value: unknown): string {
@@ -239,4 +239,37 @@ export function setPersonJobScope(db: AppDb, projectId: string, scope: JobScope 
     [projectId, scope, setBy, setAt],
   );
   return { scope, setBy, setAt };
+}
+
+/** One storage fact a storage-scope job owes, with its label. */
+export interface StorageFactGap {
+  field: string;
+  label: string;
+}
+
+/**
+ * THE STORAGE FACTS A STORAGE-SCOPE JOB IS MISSING (#673 list; the reviewer gate reads it, draft 06).
+ * The same facts and the same tests as QC's storage rows: battery make, model (a placeholder is none),
+ * quantity > 0, usable kWh > 0, power kW > 0, battery inverter / PCS model, a classified operating
+ * mode; and for an addition, the existing system's size and tariff. [] on a PV scope.
+ */
+export function storageFactGaps(snapshot: ParserPayload | null | undefined, scope: JobScope): StorageFactGap[] {
+  if (scopeHasNewPv(scope)) return [];
+  const s = (snapshot ?? {}) as Record<string, unknown>;
+  const firstOf = (keys: string[]): string => keys.map((k) => clean(s[k])).find(Boolean) ?? "";
+  const positive = (keys: string[]): boolean => Number.parseFloat(firstOf(keys).replace(/[^0-9.-]/g, "")) > 0;
+  const gaps: StorageFactGap[] = [];
+  if (!firstOf(["batteryMake", "batteryManufacturer"])) gaps.push({ field: "batteryMake", label: "battery make" });
+  const model = firstOf(["batteryModel"]);
+  if (!model || isPlaceholderBatteryModel(model)) gaps.push({ field: "batteryModel", label: "battery model" });
+  if (!positive(["batteryQty", "batteryQuantity"])) gaps.push({ field: "batteryQty", label: "battery quantity" });
+  if (!positive(["batteryCapacityKwh", "essKwh"])) gaps.push({ field: "batteryCapacityKwh", label: "usable energy (kWh)" });
+  if (!positive(["batteryOutputKw"])) gaps.push({ field: "batteryOutputKw", label: "battery inverter / PCS power (kW)" });
+  if (!firstOf(["essInverterModel", "invModel", "inverterModel"])) gaps.push({ field: "essInverterModel", label: "battery inverter / PCS model" });
+  if (!storageOperatingMode(snapshot)) gaps.push({ field: "batteryMode", label: "operating mode (export, non-export or backup-only)" });
+  if (scope === "storage-added-to-existing-pv") {
+    if (!positive(["existingDcKw", "existingAcKw"])) gaps.push({ field: "existingDcKw", label: "existing PV system size (kW)" });
+    if (!firstOf(["nemTariff", "existingNemTariff"])) gaps.push({ field: "nemTariff", label: "existing system's tariff" });
+  }
+  return gaps;
 }
