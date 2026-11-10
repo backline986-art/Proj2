@@ -23,8 +23,10 @@
 //   7. snapshot the DB (online backup + .sha256 sidecar, verified) -> no snapshot, no pull
 //   8. stop this install's server (the process LISTENING on PORT whose command line is server.ts)
 //   9. `git merge --ff-only origin/main`; failure -> restart the old code, install unchanged
-//  10. `npm ci` only when package-lock.json changed; failure -> `git reset --keep` back to the old
-//      commit and `npm ci` again, BEFORE any start (so no migration of the new code has run)
+//  10. `npm ci` only when package-lock.json changed, then `npm run portal:install` (the Chromium build
+//      THAT Playwright drives: npm ci never fetches it, so a Playwright bump left every portal run
+//      without a browser); failure of either -> `git reset --keep` back to the old commit and both
+//      again, BEFORE any start (so no migration of the new code has run)
 //  11. restart `npm start` in its own minimized window (unless the server vanished between 4c and 8) and
 //      wait for /health to report the new commit (source "git" only: an env-stamped BUILD_SHA
 //      names a build, not this checkout). Failure is logged loudly; no automatic rollback,
@@ -192,7 +194,7 @@ export function touchLock(lockFile) {
 /**
  * @returns {Promise<{ outcome: string, from?: string, to?: string, reasons?: string[] }>}
  * Outcomes: paused | refused | fetch-failed | up-to-date | failed-before | no-server | busy | supervised |
- * would-update | snapshot-failed | stop-failed | pull-failed | npm-ci-failed | updated | unhealthy
+ * would-update | snapshot-failed | stop-failed | pull-failed | npm-ci-failed | browser-install-failed | updated | unhealthy
  */
 export async function runCycle(deps, opts = {}) {
   const { branch = "main", remote = "origin", dryRun = false } = opts;
@@ -256,7 +258,7 @@ export async function runCycle(deps, opts = {}) {
   const lockfileChanged = git("diff", "--quiet", from, to, "--", "package-lock.json").code !== 0;
   if (dryRun) {
     log(`dry-run: would snapshot the DB, stop the server, fast-forward ${short(from)} -> ${short(to)}, ` +
-      `${lockfileChanged ? "run npm ci (package-lock.json changed)" : "skip npm ci (package-lock.json unchanged)"}, restart, check /health`);
+      `${lockfileChanged ? "run npm ci and install its Playwright browser (package-lock.json changed)" : "skip npm ci (package-lock.json unchanged)"}, restart, check /health`);
     return { outcome: "would-update", from, to, lockfileChanged };
   }
 
@@ -293,16 +295,27 @@ export async function runCycle(deps, opts = {}) {
   if (lockfileChanged) {
     beat();
     const ci = deps.npmCi();
-    if (ci.code !== 0) {
-      log(`NPM CI FAILED (exit ${ci.code}); rolling back to ${short(from)} before any start`);
+    // npm ci installs the Playwright package but never the browser build that version drives; without
+    // it every portal run fails at launch while /health still looks fine.
+    let browser = null;
+    if (ci.code === 0) { beat(); browser = deps.browserInstall(); }
+    if (ci.code !== 0 || browser?.code !== 0) {
+      const what = ci.code !== 0 ? `NPM CI FAILED (exit ${ci.code})` : `PLAYWRIGHT BROWSER INSTALL FAILED (exit ${browser?.code})`;
+      log(`${what}; rolling back to ${short(from)} before any start`);
       git("reset", "--keep", from);
       beat();
       const back = deps.npmCi();
       log(back.code === 0 ? `rolled back to ${short(from)} and reinstalled its dependencies` : `ROLLBACK npm ci ALSO FAILED (exit ${back.code}); run "npm ci" by hand`);
+      if (back.code === 0) {
+        // The new version's install may have pruned the old browser build: put it back for the old code.
+        beat();
+        const backBrowser = deps.browserInstall();
+        if (backBrowser.code !== 0) log(`ROLLBACK browser install ALSO FAILED (exit ${backBrowser.code}); portal runs cannot start a browser until "npm run portal:install" succeeds`);
+      }
       if (wasRunning && back.code === 0) { beat(); deps.startServer(); log("restarted server on the old install"); }
-      return fail("npm-ci-failed");
+      return fail(ci.code !== 0 ? "npm-ci-failed" : "browser-install-failed");
     }
-    log("npm ci done (package-lock.json changed)");
+    log("npm ci and the Playwright browser install done (package-lock.json changed)");
   } else {
     log("npm ci skipped (package-lock.json unchanged)");
   }
@@ -407,6 +420,7 @@ function realDeps(cfg, log) {
     clearFailed: () => { try { fs.unlinkSync(cfg.failedFile); } catch { /* none */ } },
     git: (args) => run("git", args, cfg.root),
     npmCi: () => run("npm", ["ci"], cfg.root, 900_000),
+    browserInstall: () => run("npm", ["run", "portal:install"], cfg.root, 900_000),
     // Up = /health answered. A process that listens but does not answer is not an install worth
     // updating under; skipping is the conservative reading of "only while the server is up".
     serverUp: async () => (await getHealth(cfg.port)) !== null,
