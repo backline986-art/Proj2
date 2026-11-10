@@ -3184,6 +3184,61 @@ function renderFeeSheetPanel() {
   });
 }
 
+// THE PROJECT'S INVOICE (#700): what this project bills the client, from GET /api/projects/:id/invoice
+// (read-only; asking never creates a row), and which client invoice each line already sits on.
+// Collapsed, and fetched only when opened, so opening a project costs nothing more.
+function renderProjectInvoicePanel() {
+  let panel = $("projectInvoicePanel");
+  if (!panel) {
+    const anchor = $("feeSheetPanel") || $("paymentPanel");
+    if (!anchor) return;
+    panel = document.createElement("div");
+    panel.id = "projectInvoicePanel";
+    anchor.insertAdjacentElement("afterend", panel);
+  }
+  const projectId = state.selectedProjectId;
+  panel.innerHTML = `
+    <section class="panel" style="margin-top:10px">
+      <details class="provenance" id="projectInvoiceDetails"${state.projectInvoiceOpenFor === projectId ? " open" : ""}>
+        <summary><strong>Invoice for this project</strong> <span class="muted">what the client owes us, and which invoice it is on</span></summary>
+        <div class="provenance-body" id="projectInvoiceBody"><p class="muted" style="font-size:12px">Loading…</p></div>
+      </details>
+    </section>`;
+  $("projectInvoiceDetails")?.addEventListener("toggle", async (ev) => {
+    // Remembered per project, so a re-render of the detail view does not fold it shut.
+    state.projectInvoiceOpenFor = ev.target.open ? projectId : "";
+    if (!ev.target.open) return;
+    const body = $("projectInvoiceBody");
+    try {
+      const data = await api(`/api/projects/${encodeURIComponent(projectId)}/invoice`);
+      if (state.selectedProjectId !== projectId || !body) return;
+      body.innerHTML = projectInvoiceHtml(data.invoice, data.ledger || []);
+    } catch (err) {
+      if (body) body.innerHTML = `<p class="muted" style="font-size:12px">${esc(err.message || "Could not load the invoice.")}</p>`;
+    }
+  });
+}
+
+function projectInvoiceHtml(inv, ledger) {
+  const where = (track, kind) => {
+    const hits = ledger.filter((e) => e.track === track && e.kind === kind);
+    return hits.length
+      ? ` <span class="badge badge-info">on ${esc([...new Set(hits.map((h) => `${h.invoiceNumber} (${h.invoiceStatus})`))].join(", "))}</span>`
+      : ' <span class="muted">not invoiced yet</span>';
+  };
+  const lines = inv.lines || [];
+  return `
+    <p style="font-size:12px;margin:0 0 4px">Client: <strong>${esc(inv.clientName || "none")}</strong> · billed ${esc(inv.billingMode)} · bill to ${inv.billTo ? esc(inv.billTo) : '<span class="badge badge-warning">NO ADDRESS</span>'}</p>
+    ${lines.length ? `<table style="font-size:12px;width:100%;border-collapse:collapse">${lines.map((l) => `<tr>
+        <td style="padding:1px 8px 1px 0">${esc(l.description)}${l.provisional ? ' <span class="muted">(provisional)</span>' : ""}${l.alreadyPaid ? ' <span class="muted">(already paid)</span>' : ""}${where(l.track, l.kind)}</td>
+        <td style="text-align:right;white-space:nowrap">${billingMoney(l.amountUsd)}</td></tr>`).join("")}</table>` : '<p class="muted" style="font-size:12px">No billable line on this project.</p>'}
+    <p style="font-size:12px;margin:4px 0">Still due: fees at cost ${billingMoney(inv.reimbursementTotalUsd)} · service ${billingMoney(inv.serviceTotalUsd)}</p>
+    ${(inv.paymentsReceived || []).map((p) => `<p class="muted" style="font-size:12px;margin:2px 0">Received: ${p.amountUsd == null ? "amount not on file" : billingMoney(p.amountUsd)}, ${esc(p.description)}${p.paymentReference ? ` (ref ${esc(p.paymentReference)})` : ""}</p>`).join("")}
+    ${(inv.notInvoiceable || []).length ? `<details class="provenance"><summary>${esc(String(inv.notInvoiceable.length))} not billed, and why</summary><div class="provenance-body"><ul style="margin:2px 0;padding-left:18px;font-size:12px">
+      ${inv.notInvoiceable.map((x) => `<li>${esc(x.reason)}<br><span class="muted">${esc(x.resolution)}</span></li>`).join("")}</ul></div></details>` : ""}
+    <p class="muted" style="font-size:12px;margin:4px 0">Invoices are made per client and month under Clients → Billing.</p>`;
+}
+
 // "READ THE FEE FROM THE PORTAL" — offered only where there is a filed permit record whose own
 // page we can read (an Accela record-detail link on an active permit target). The permit monitor
 // does this on its weekly sweep; this is the same read, now.
@@ -4780,6 +4835,7 @@ function renderDetail() {
   safeRender("portalQuestions", renderPortalQuestionChip);
   safeRender("paymentPanel", renderPaymentPanel);
   safeRender("feeSheetPanel", renderFeeSheetPanel);
+  safeRender("projectInvoicePanel", renderProjectInvoicePanel);
   safeRender("submittalTracks", renderSubmittalTracks);
   safeRender("processMap", renderProcessMap);
   safeRender("liveReadiness", renderLiveTestReadiness);
@@ -11302,6 +11358,221 @@ async function loadClientCredentials(clientId) {
   }
 }
 
+/* ===========================================================================
+   CLIENT BILLING (#700) — statement, invoices, the ledger.
+   ---------------------------------------------------------------------------
+   The statement is a PREVIEW (the server writes nothing for it). "Create
+   invoice" saves it as a draft and claims its lines: a line sits on one live
+   invoice only, so the next statement leaves it out. Every value from the
+   server goes through esc(); homeowner names and addresses are tenant data.
+   =========================================================================== */
+function billingMoney(v) {
+  const n = Number(v) || 0;
+  const s = `$${Math.abs(n).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+  return n < 0 ? `−${s}` : s;
+}
+
+function billingStatus(message, kind) {
+  const el = $("billingStatus");
+  if (!el) return;
+  el.textContent = message || "";
+  el.style.color = kind === "error" ? "var(--danger)" : "";
+}
+
+const BILLING_KIND_TITLE = {
+  reimbursement: "Fees we paid on the client's behalf, at cost",
+  service: "Our service fees",
+  received: "Payments already received",
+};
+
+function billingLineFlags(l) {
+  const flags = [];
+  if (l.role === "adjustment") flags.push("true-up");
+  if (l.provisional) flags.push("provisional: from the published schedule");
+  if (l.alreadyPaid && l.kind !== "received") flags.push("already paid");
+  if (l.carriedForward) flags.push("from an earlier period");
+  return flags.length ? ` <span class="muted">(${esc(flags.join("; "))})</span>` : "";
+}
+
+function billingLinesHtml(lines) {
+  const kinds = ["reimbursement", "service", "received"];
+  return kinds.map((kind) => {
+    const list = (lines || []).filter((l) => l.kind === kind);
+    if (!list.length) return "";
+    return `<div class="billing-kind"><strong style="font-size:12px">${esc(BILLING_KIND_TITLE[kind])}</strong>
+      <table style="font-size:12px;width:100%;border-collapse:collapse;margin:2px 0 6px">
+        ${list.map((l) => `<tr>
+          <td style="padding:1px 8px 1px 0;white-space:nowrap;vertical-align:top">${esc(String(l.eventAt || "").slice(0, 10))}</td>
+          <td style="padding:1px 8px 1px 0;vertical-align:top">${esc(l.projectLabel)}<br><span class="muted">${esc(l.description)}</span>${billingLineFlags(l)}
+            ${l.reconciliation ? `<br><span class="muted">⚠ ${esc(l.reconciliation)}</span>` : ""}</td>
+          <td style="padding:1px 0;text-align:right;white-space:nowrap;vertical-align:top">${kind === "received" ? "" : l.alreadyPaid ? '<span class="muted">paid</span> ' : ""}${billingMoney(l.amountUsd)}</td>
+        </tr>`).join("")}
+      </table></div>`;
+  }).join("");
+}
+
+function billingTotalsHtml(t) {
+  return `<table style="font-size:12px;border-collapse:collapse;max-width:340px;width:100%;margin:4px 0">
+    <tr><td style="padding:1px 14px 1px 0">Fees at cost (pass-through)</td><td style="text-align:right">${billingMoney(t.reimbursementTotalUsd)}</td></tr>
+    <tr><td style="padding:1px 14px 1px 0">Service fees</td><td style="text-align:right">${billingMoney(t.serviceTotalUsd)}</td></tr>
+    <tr style="border-top:1px solid var(--border)"><td style="padding:3px 14px 1px 0"><strong>Amount due</strong></td><td style="text-align:right"><strong>${billingMoney(t.dueTotalUsd)}</strong></td></tr>
+    ${Number(t.receivedTotalUsd) ? `<tr><td style="padding:1px 14px 1px 0" class="muted">Already received at the gate (not due)</td><td style="text-align:right" class="muted">${billingMoney(t.receivedTotalUsd)}</td></tr>` : ""}
+  </table>`;
+}
+
+function renderBillingStatement(st) {
+  const box = $("billingStatement");
+  if (!box) return;
+  if (!st) { box.innerHTML = ""; return; }
+  const excluded = st.excluded || [];
+  const logins = st.loginsWithoutFeeAgreement || [];
+  box.innerHTML = `
+    <div class="billing-statement" style="border:1px solid var(--border);border-radius:6px;padding:8px;margin:6px 0">
+      <p style="margin:0 0 4px;font-size:12px"><strong>Draft statement, ${esc(st.periodStart)} to ${esc(st.periodEnd)}</strong> (end not included) ·
+        bill to ${st.billTo ? esc(st.billTo) : '<span class="badge badge-warning">NO ADDRESS</span>'}
+        <span class="muted">(${esc(String(st.billToSource || "").replaceAll("_", " "))}; billed ${esc(st.billingMode)})</span></p>
+      ${(st.lines || []).length ? billingLinesHtml(st.lines) + billingTotalsHtml(st) : '<p class="muted" style="font-size:12px">Nothing new to bill for this period: every billable line is already on an invoice, or nothing is billable yet.</p>'}
+      ${(st.notes || []).map((n) => `<p class="muted" style="font-size:12px;margin:4px 0">${esc(n)}</p>`).join("")}
+      ${logins.length ? `<p style="font-size:12px;margin:4px 0"><strong>⚠ ${esc(String(logins.length))} portal login${logins.length === 1 ? " has" : "s have"} no fee agreement on file</strong> (${esc(logins.join(", "))}). A fee we pay through ${logins.length === 1 ? "it" : "them"} cannot be invoiced until who pays is recorded on the login.</p>` : ""}
+      ${excluded.length ? `<details class="provenance"><summary><strong>${esc(String(excluded.length))} not on this statement, and why</strong></summary>
+        <div class="provenance-body"><ul style="margin:2px 0;padding-left:18px;font-size:12px">
+          ${excluded.map((x) => `<li><strong>${esc(x.projectLabel)}</strong> (${esc(x.track)}): ${esc(x.reason)}${x.amountSeenUsd != null ? ` <span class="muted">[${billingMoney(x.amountSeenUsd)} seen]</span>` : ""}<br><span class="muted">${esc(x.resolution)}</span></li>`).join("")}
+        </ul></div></details>` : ""}
+    </div>`;
+}
+
+const INVOICE_STATUS_BADGE = { draft: "badge-warning", sent: "badge-info", paid: "badge-pass", void: "" };
+
+function renderBillingInvoices(invoices) {
+  const box = $("billingInvoices");
+  if (!box) return;
+  if (!invoices || !invoices.length) { box.innerHTML = '<p class="muted clients-creds-hint">No invoices yet.</p>'; return; }
+  box.innerHTML = invoices.map((inv) => {
+    const open = inv.status === "draft" || inv.status === "sent";
+    return `<div class="cred-row" style="flex-wrap:wrap;gap:6px">
+      <div class="cred-row-text"><strong>${esc(inv.number)}</strong>
+        <span class="badge ${esc(INVOICE_STATUS_BADGE[inv.status] || "")}">${esc(inv.status)}</span>
+        <span class="muted">${esc(inv.periodStart)} to ${esc(inv.periodEnd)} · due ${billingMoney(inv.dueTotalUsd)}${inv.dueAt ? ` by ${esc(inv.dueAt)}` : ""}${inv.paidAt ? ` · paid ${esc(inv.paidAt.slice(0, 10))}${inv.paidReference ? ` (${esc(inv.paidReference)})` : ""}` : ""}${inv.voidReason ? ` · void: ${esc(inv.voidReason)}` : ""}</span></div>
+      <div class="actions" style="margin:0">
+        <button type="button" class="secondary" data-inv-action="print" data-inv-id="${esc(inv.id)}"><span style="white-space:nowrap">View / print</span></button>
+        ${open ? `<button type="button" class="secondary" data-inv-action="send" data-inv-id="${esc(inv.id)}"><span style="white-space:nowrap">Email</span></button>` : ""}
+        ${inv.status === "draft" ? `<button type="button" class="secondary" data-inv-action="mark-sent" data-inv-id="${esc(inv.id)}"><span style="white-space:nowrap">Mark sent</span></button>` : ""}
+        ${open ? `<button type="button" class="secondary" data-inv-action="mark-paid" data-inv-id="${esc(inv.id)}"><span style="white-space:nowrap">Mark paid</span></button>` : ""}
+        ${open ? `<button type="button" class="danger-button" data-inv-action="void" data-inv-id="${esc(inv.id)}"><span style="white-space:nowrap">Void</span></button>` : ""}
+      </div></div>`;
+  }).join("");
+  box.querySelectorAll("[data-inv-action]").forEach((b) => b.addEventListener("click", () => billingInvoiceAction(b.dataset.invAction, b.dataset.invId)));
+}
+
+async function loadClientBilling(clientId) {
+  if (!$("clientBillingBlock")) return;
+  state.billingStatement = null;
+  renderBillingStatement(null);
+  billingStatus("");
+  if ($("billingCreateBtn")) $("billingCreateBtn").disabled = true;
+  if ($("billingMonth") && !$("billingMonth").value) $("billingMonth").value = new Date().toISOString().slice(0, 7);
+  try {
+    const data = await api(`/api/clients/${encodeURIComponent(clientId)}/invoices`);
+    if (state.editingClientId === clientId) renderBillingInvoices(data.invoices || []);
+  } catch (err) {
+    billingStatus(err.message || "Could not load invoices.", "error");
+  }
+}
+
+async function previewBillingStatement() {
+  const clientId = state.editingClientId;
+  const month = $("billingMonth")?.value || "";
+  if (!clientId || !month) { billingStatus("Pick a client and a month.", "error"); return; }
+  billingStatus("Building the statement…");
+  try {
+    const data = await api(`/api/clients/${encodeURIComponent(clientId)}/billing/statement?month=${encodeURIComponent(month)}`);
+    if (state.editingClientId !== clientId) return;
+    state.billingStatement = data.statement;
+    renderBillingStatement(data.statement);
+    if ($("billingCreateBtn")) $("billingCreateBtn").disabled = !(data.statement.lines || []).length;
+    billingStatus("");
+  } catch (err) {
+    billingStatus(err.message || "Could not build the statement.", "error");
+  }
+}
+
+async function createBillingInvoice() {
+  const clientId = state.editingClientId;
+  const month = $("billingMonth")?.value || "";
+  if (!clientId || !month) return;
+  if (!window.confirm(`Create a draft invoice for ${month}? Its lines will not appear on another invoice unless you void it.`)) return;
+  try {
+    const data = await api(`/api/clients/${encodeURIComponent(clientId)}/invoices`, { method: "POST", body: JSON.stringify({ month }) });
+    billingStatus(`Created ${data.invoice.number} (draft).`);
+    await loadClientBilling(clientId);
+    billingStatus(`Created ${data.invoice.number} (draft).`);
+  } catch (err) {
+    billingStatus(err.message || "Could not create the invoice.", "error");
+  }
+}
+
+function printInvoiceHtml(inv) {
+  return `<!doctype html><html><head><meta charset="utf-8"><title>${esc(inv.number)}</title>
+    <style>body{font:13px/1.4 system-ui,sans-serif;margin:32px;color:#111}h1{font-size:20px;margin:0 0 4px}
+    table{border-collapse:collapse;width:100%}td{padding:3px 8px 3px 0;vertical-align:top}.r{text-align:right;white-space:nowrap}
+    .m{color:#555}.k{margin-top:14px;font-weight:600}.tot td{border-top:1px solid #999}</style></head><body>
+    <h1>Invoice ${esc(inv.number)}</h1>
+    <p>To: <strong>${esc(inv.clientName)}</strong>${inv.billTo ? ` &lt;${esc(inv.billTo)}&gt;` : ""}<br>
+    Period: ${esc(inv.periodStart)} to ${esc(inv.periodEnd)} (end not included)<br>
+    ${inv.issuedAt ? `Issued: ${esc(inv.issuedAt.slice(0, 10))}<br>` : ""}${inv.dueAt ? `Due: ${esc(inv.dueAt)}<br>` : ""}
+    Status: ${esc(inv.status)}${inv.status === "void" ? ` (${esc(inv.voidReason)})` : ""}</p>
+    ${["reimbursement", "service", "received"].map((kind) => {
+      const list = (inv.lines || []).filter((l) => l.kind === kind);
+      if (!list.length) return "";
+      return `<div class="k">${esc(BILLING_KIND_TITLE[kind])}</div><table>${list.map((l) => `<tr>
+        <td>${esc(String(l.eventAt || "").slice(0, 10))}</td>
+        <td>${esc(l.projectLabel)}<br><span class="m">${esc(l.description)}${l.provisional ? " (provisional)" : ""}${l.alreadyPaid && kind !== "received" ? " (already paid)" : ""}</span></td>
+        <td class="r">${billingMoney(l.amountUsd)}</td></tr>`).join("")}</table>`;
+    }).join("")}
+    <table style="max-width:360px;margin-top:16px">
+      <tr><td>Fees at cost</td><td class="r">${billingMoney(inv.reimbursementTotalUsd)}</td></tr>
+      <tr><td>Service fees</td><td class="r">${billingMoney(inv.serviceTotalUsd)}</td></tr>
+      <tr class="tot"><td><strong>Amount due</strong></td><td class="r"><strong>${billingMoney(inv.dueTotalUsd)}</strong></td></tr>
+    </table></body></html>`;
+}
+
+async function billingInvoiceAction(action, invoiceId) {
+  const clientId = state.editingClientId;
+  if (!clientId || !invoiceId) return;
+  const base = `/api/clients/${encodeURIComponent(clientId)}/invoices/${encodeURIComponent(invoiceId)}`;
+  try {
+    if (action === "print") {
+      const { invoice } = await api(base);
+      const w = window.open("", "_blank");
+      if (!w) { billingStatus("The browser blocked the print window. Allow pop-ups for this page.", "error"); return; }
+      w.document.open();
+      w.document.write(printInvoiceHtml(invoice));
+      w.document.close();
+      return;
+    }
+    if (action === "send") {
+      if (!window.confirm("Email this invoice to the client's billing contact?")) return;
+      const res = await api(`${base}/send`, { method: "POST", body: "{}" });
+      billingStatus(res.delivered ? `Emailed ${res.invoice.number}.` : `Not emailed: ${res.detail} Saved as a draft message; send it by hand, then press Mark sent.`, res.delivered ? "" : "error");
+    } else if (action === "mark-sent") {
+      await api(`${base}/mark-sent`, { method: "POST", body: "{}" });
+    } else if (action === "mark-paid") {
+      const ref = window.prompt("Payment reference (cheque number, transfer id), optional:", "");
+      if (ref === null) return;
+      await api(`${base}/mark-paid`, { method: "POST", body: JSON.stringify({ paymentReference: ref }) });
+    } else if (action === "void") {
+      const reason = window.prompt("Why is this invoice void? Its lines go back on the next statement.", "");
+      if (!reason || !reason.trim()) return;
+      await api(`${base}/void`, { method: "POST", body: JSON.stringify({ reason }) });
+    }
+    const keep = $("billingStatus")?.textContent || "";
+    await loadClientBilling(clientId);
+    if (action === "send") billingStatus(keep);
+  } catch (err) {
+    billingStatus(err.message || "That did not work.", "error");
+  }
+}
+
 function editClient(clientId) {
   const client = (state.clients || []).find((c) => c.id === clientId);
   if (!client) return;
@@ -11320,6 +11591,7 @@ function editClient(clientId) {
   renderStateLicences();
   clientFormStatus("");
   loadClientCredentials(clientId);
+  loadClientBilling(clientId);
   renderClientsList();
 }
 
@@ -13113,6 +13385,9 @@ async function createClientLink(kind) {
 }
 $("clientTrackingLinkBtn")?.addEventListener("click", () => createClientLink("tracking"));
 $("clientCredentialLinkBtn")?.addEventListener("click", () => createClientLink("credentials"));
+$("billingPreviewBtn")?.addEventListener("click", () => previewBillingStatement());
+$("billingCreateBtn")?.addEventListener("click", () => createBillingInvoice());
+$("billingMonth")?.addEventListener("change", () => { renderBillingStatement(null); if ($("billingCreateBtn")) $("billingCreateBtn").disabled = true; });
 
 // ---------------------------------------------------------------------------
 // MODAL FOCUS AND BACKGROUND. Opening a modal left focus on <body>, and Tab walked into the
