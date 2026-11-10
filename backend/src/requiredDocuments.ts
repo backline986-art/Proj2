@@ -35,7 +35,8 @@
 // ---------------------------------------------------------------------------
 
 import type { AppDb } from "./db";
-import type { CodeEdition, ProjectRecord } from "../../shared/src/types";
+import type { CodeEdition, JobScope, ProjectRecord } from "../../shared/src/types";
+import { deriveJobScope, resolveJobScope, scopeHasNewPv } from "./jobScope";
 import { projectDocsByType } from "./projectDocuments";
 import { activeStructuralLetterConfirmation, confirmedByLine } from "./structuralLetter";
 import { duplicateUploads, uploadedSubmissionDocuments } from "./submissionDocuments";
@@ -474,6 +475,9 @@ export function requiredDocuments(
      *  APPLICATION is demanded at all, which is what keeps this function safe to
      *  call with a bare project that has no ahj/state. */
     application?: ApplicationDocContext;
+    /** What the job installs (#673). Absent: the plan set's own evidence (deriveJobScope) — pv unless
+     *  the job names no new module and both sheets say so. */
+    jobScope?: JobScope;
   } = {},
 ): RequiredDocItem[] {
   const hasUtility = Boolean((project.utility || "").trim());
@@ -487,11 +491,26 @@ export function requiredDocuments(
     { docType: "labels", label: "Label / placard schedule", why: "Placard/label schedule (705.10 directory, RSD, disconnects) — usually a plan-set sheet.", lane: "permit", blocking: false },
   ];
 
+  // A STORAGE SCOPE INSTALLS NO ARRAY (#673; draft 06). No roof framing / attachment detail and no
+  // module cut sheet; the site plan is asked for the ESS location, the one-line for the ESS, and the
+  // inverter sheet is the battery inverter / PCS sheet. The ESS rows (battery_spec, ess_detail) join
+  // below as on any battery job. Every PV scope — and an unknown one, which is pv — keeps the set as is.
+  const scope: JobScope = opts.jobScope ?? deriveJobScope(project.parserSnapshot).scope;
+  if (!scopeHasNewPv(scope)) {
+    for (let i = items.length - 1; i >= 0; i--) if (items[i].docType === "structural" || items[i].docType === "module_spec") items.splice(i, 1);
+    for (const it of items) {
+      if (it.docType === "site_plan") { it.label = "Site plan with the ESS location + service equipment"; it.why = "The AHJ reviews where the battery and its disconnect are installed (NEC 706 / IRC R328) relative to the service equipment."; }
+      if (it.docType === "sld") { it.label = "Electrical one-line / SLD (ESS + NEC 705.12)"; it.why = "Shows the battery inverter / PCS, its disconnect and backfed breaker, and the point of interconnection — for the electrical permit and the utility application."; }
+      if (it.docType === "inverter_spec") { it.label = "Battery inverter / PCS spec sheet (UL 1741)"; }
+      if (it.docType === "labels") { it.why = "Placard/label schedule (705.10 directory, ESS and disconnect labels) — usually a plan-set sheet."; }
+    }
+  }
+
   // A GROUND / POLE ARRAY HAS NO ROOF (#247). The mounting FIELD decides (mountKind.groundMountFromField
   // — plan prose never does): a pure ground array's rows replace roof framing in place; a roof + ground
   // combination keeps roof framing and adds them after it. Rooftop, carport and unknown-mount jobs never
   // take this branch — their set is unchanged.
-  const groundMount = groundMountFromField(project);
+  const groundMount = scopeHasNewPv(scope) ? groundMountFromField(project) : null;
   if (groundMount) {
     const at = items.findIndex((i) => i.docType === "structural");
     if (at < 0) items.push(...groundMountDocItems(project));
@@ -1054,7 +1073,9 @@ export function documentInventory(db: AppDb, project: ProjectRecord): DocumentIn
       { ahjKnowledgeUnavailable: true },
     );
   }
-  const docOpts = { stampThresholdKwDc, stampThresholdConfirmed, stampThresholdBasis, jurisdictionLabel, processProfileRequiresStamp, application };
+  // What the job installs (#673; draft 06), a person's scope included.
+  const jobScope = resolveJobScope(db, String(project.id ?? ""), project.parserSnapshot).scope;
+  const docOpts = { stampThresholdKwDc, stampThresholdConfirmed, stampThresholdBasis, jurisdictionLabel, processProfileRequiresStamp, application, jobScope };
   const baselineItems = requiredDocuments(project, docOpts);
   // A HELD BUT UNFILLABLE AGENCY APPLICATION IS STILL REQUIRED — AS A FILE TO ATTACH. The row
   // keeps blocking exactly as before; its words stop promising a fill that cannot happen.

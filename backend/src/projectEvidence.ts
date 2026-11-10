@@ -18,6 +18,7 @@ export type EvidenceTopic =
   | "rapidShutdown"
   | "labels"
   | "inverterSettings"
+  | "acDisconnect"
   | "batteryMode"
   | "utilityApproval"
   | "ownerAuthorization";
@@ -55,6 +56,7 @@ const topicRequirements: Record<EvidenceTopic, string[]> = {
   rapidShutdown: ["Rapid shutdown equipment", "RSD initiation/control location", "RSD label/placard callout"],
   labels: ["PV label schedule", "Placard locations", "Power source directory"],
   inverterSettings: ["UL 1741 SB listing", "Utility-required inverter settings", "Inverter spec sheet"],
+  acDisconnect: ["AC / utility disconnect on the one-line", "Disconnect location (lockable, visible break if the utility asks)", "Disconnect label"],
   batteryMode: ["Battery model/quantity", "Backup/non-backup mode", "Export setting", "Backup panel scope"],
   utilityApproval: ["Utility approval or interconnection approval", "Utility application confirmation", "Approval letter if AHJ requires it"],
   ownerAuthorization: ["Signed application", "Owner authorization", "Customer/owner signature"],
@@ -70,11 +72,14 @@ function maskIdentifier(value: string): string {
   return `${"*".repeat(Math.max(0, cleaned.length - 4))}${cleaned.slice(-4)}`;
 }
 
+// An identifier after "account" / "meter" is masked only when it holds a digit: a WORD there
+// ("account number captured: ******7890") is not a number, and masking it printed
+// "account number ****ured: ******7890" on the submit gate (review-audit draft 04).
 function cleanExcerpt(value: string): string {
   return value
     .replace(/\s+/g, " ")
-    .replace(/\b(account(?:\s*(?:number|#|no\.?))?\s*[:#]?\s*)([A-Z0-9-]{5,})/gi, (_match, label: string, account: string) => `${label}${maskIdentifier(account)}`)
-    .replace(/\b(meter(?:\s*(?:number|#|no\.?))?\s*[:#]?\s*)([A-Z0-9-]{5,})/gi, (_match, label: string, meter: string) => `${label}${maskIdentifier(meter)}`)
+    .replace(/\b(account(?:\s*(?:number|#|no\.?))?\s*[:#]?\s*)((?=[A-Z-]*\d)[A-Z0-9-]{5,})/gi, (_match, label: string, account: string) => `${label}${maskIdentifier(account)}`)
+    .replace(/\b(meter(?:\s*(?:number|#|no\.?))?\s*[:#]?\s*)((?=[A-Z-]*\d)[A-Z0-9-]{5,})/gi, (_match, label: string, meter: string) => `${label}${maskIdentifier(meter)}`)
     .trim()
     .slice(0, 220);
 }
@@ -484,6 +489,15 @@ export function evidenceForTopic(project: ProjectRecord, topic: EvidenceTopic): 
         hasAny(project, [/inverter spec/i, /microinverter spec/i, /cut ?sheet/i, /\bUL\s*1741\b/i, /datasheet/i])
       );
       return evidence(project, topic, present || specOnly, present ? "high" : specOnly ? "medium" : "low", patterns);
+    }
+    case "acDisconnect": {
+      // The utility's AC disconnect (a utility asks for it on its application: an external, lockable,
+      // visible-break switch near the meter). Shown = the set names an AC / utility disconnect; proven =
+      // the set also says where it is or what kind it is.
+      const patterns = [/\bAC\s+disconnect/i, /\butility\s+(?:accessible\s+|external\s+)?disconnect/i, /\bexternal\s+disconnect/i, /\blockable\s+disconnect/i, /\bvisible[-\s]?(?:break|blade|open)/i, /\bPV\s+system\s+disconnect/i, /\b690\.13\b/i];
+      const present = hasAny(project, patterns);
+      const high = present && /lockable|visible|within sight|adjacent to (?:the )?meter|location|sheet|page/i.test(all);
+      return evidence(project, topic, present, high ? "high" : present ? "medium" : "low", patterns);
     }
     case "batteryMode": {
       const batteryScope = /battery|\bESS\b|powerwall|encharge|backup/i.test(all);

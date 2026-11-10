@@ -434,14 +434,14 @@
       "severity": "warning",
       "category": "utility_nem",
       "title": "Verify PGE account evidence",
-      "message": "PGE/NEM submission has an account value, but parsed utility bill/account match evidence is not strong enough. Found medium-confidence evidence: Project account number ****ured: ******7890",
+      "message": "PGE/NEM submission has an account value, but parsed utility bill/account match evidence is not strong enough. Found medium-confidence evidence: Project account number captured: ******7890",
       "cityFeedback": "Utility account evidence is incomplete: account number alone is not enough for a clean intake pass.",
       "designTeamAction": "Verify utility bill/account holder/service address match before staging the NEM application.",
       "evidenceNeeded": [
         "Utility bill/account holder match",
         "Utility account number",
         "Service address match",
-        "Parsed evidence: Project account number ****ured: ******7890"
+        "Parsed evidence: Project account number captured: ******7890"
       ],
       "codeReferences": [],
       "installerCallout": true,
@@ -451,7 +451,7 @@
           "kind": "source_excerpt",
           "label": "Utility account text found — utility bill/account holder match not verified",
           "source": "Normalized project field",
-          "excerpt": "Project account number ****ured: ******7890",
+          "excerpt": "Project account number captured: ******7890",
           "confidence": "medium",
           "pageHint": "Project field",
           "screenshotPath": "",
@@ -465,7 +465,7 @@
           "excerpt": "",
           "confidence": "medium",
           "pageHint": "Project field",
-          "screenshotPath": "/api/projects/golden-or-1/evidence-image?topic=accountVerification&hint=Project%20field&excerpt=Project%20account%20number%20****ured%3A%20******7890",
+          "screenshotPath": "/api/projects/golden-or-1/evidence-image?topic=accountVerification&hint=Project%20field&excerpt=Project%20account%20number%20captured%3A%20******7890",
           "verifier": "parser",
           "note": "Source page will render here. If no plan-set PDF is stored, upload it to Project Documents — then this slot shows the sheet. Use the source/page hint above meanwhile."
         }
@@ -964,14 +964,14 @@
       "severity": "warning",
       "category": "utility_nem",
       "title": "Verify PGE account evidence",
-      "message": "PGE/NEM submission has an account value, but parsed utility bill/account match evidence is not strong enough. Found medium-confidence evidence: Project account number ****ured: ******7890",
+      "message": "PGE/NEM submission has an account value, but parsed utility bill/account match evidence is not strong enough. Found medium-confidence evidence: Project account number captured: ******7890",
       "cityFeedback": "Utility account evidence is incomplete: account number alone is not enough for a clean intake pass.",
       "designTeamAction": "Verify utility bill/account holder/service address match before staging the NEM application.",
       "evidenceNeeded": [
         "Utility bill/account holder match",
         "Utility account number",
         "Service address match",
-        "Parsed evidence: Project account number ****ured: ******7890"
+        "Parsed evidence: Project account number captured: ******7890"
       ],
       "codeReferences": [],
       "installerCallout": true,
@@ -981,7 +981,7 @@
           "kind": "source_excerpt",
           "label": "Utility account text found — utility bill/account holder match not verified",
           "source": "Normalized project field",
-          "excerpt": "Project account number ****ured: ******7890",
+          "excerpt": "Project account number captured: ******7890",
           "confidence": "medium",
           "pageHint": "Project field",
           "screenshotPath": "",
@@ -995,7 +995,7 @@
           "excerpt": "",
           "confidence": "medium",
           "pageHint": "Project field",
-          "screenshotPath": "/api/projects/golden-or-1/evidence-image?topic=accountVerification&hint=Project%20field&excerpt=Project%20account%20number%20****ured%3A%20******7890",
+          "screenshotPath": "/api/projects/golden-or-1/evidence-image?topic=accountVerification&hint=Project%20field&excerpt=Project%20account%20number%20captured%3A%20******7890",
           "verifier": "parser",
           "note": "Source page will render here. If no plan-set PDF is stored, upload it to Project Documents — then this slot shows the sheet. Use the source/page hint above meanwhile."
         }
