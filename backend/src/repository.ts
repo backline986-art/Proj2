@@ -404,7 +404,7 @@ interface ProjectRow extends Row {
 
 
 
-function mapProject(row: ProjectRow): ProjectRecord {
+export function mapProject(row: ProjectRow): ProjectRecord {
   const parserSnapshot = parseJson<ParserPayload>(row.parser_json, {});
   return {
     id: row.id,

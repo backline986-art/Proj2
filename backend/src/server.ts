@@ -633,6 +633,64 @@ app.post("/api/projects/:id/client", (req, res) => {
   res.json(assigned);
 });
 
+// --- Client billing (#700): statement, invoices and the ledger ---
+// Under /api/clients/:id, so the client scope guard covers every one of them. An invoice id is read
+// only through its own client (getClientInvoice), so another client's invoice is a 404.
+// Nothing here pays or charges anything (rule 1): "Mark paid" records money a person saw arrive.
+function billingActor(req: Request): string {
+  const user = currentUser(db, req);
+  return String(user?.name || user?.email || req.body?.by || "operator").trim().slice(0, 120) || "operator";
+}
+app.get("/api/clients/:id/billing/statement", asyncHandler(async (req, res) => {
+  const { buildClientStatement, resolvePeriod } = await import("./clientInvoices");
+  const period = resolvePeriod({ month: req.query.month, periodStart: req.query.periodStart, periodEnd: req.query.periodEnd });
+  res.json({ statement: buildClientStatement(db, String(req.params.id), period) });
+}));
+app.get("/api/clients/:id/invoices", asyncHandler(async (req, res) => {
+  const { listClientInvoices } = await import("./clientInvoices");
+  res.json({ invoices: listClientInvoices(db, String(req.params.id)) });
+}));
+app.post("/api/clients/:id/invoices", asyncHandler(async (req, res) => {
+  const { createClientInvoice, resolvePeriod } = await import("./clientInvoices");
+  const period = resolvePeriod({ month: req.body?.month, periodStart: req.body?.periodStart, periodEnd: req.body?.periodEnd });
+  const by = billingActor(req);
+  const invoice = createClientInvoice(db, String(req.params.id), period, by);
+  addAuditLog(db, null, "human", by, "invoice.created", { clientId: invoice.clientId, invoiceId: invoice.id, number: invoice.number, dueTotalUsd: invoice.dueTotalUsd, lines: invoice.lines.length });
+  res.status(201).json({ invoice });
+}));
+app.get("/api/clients/:id/invoices/:invoiceId", asyncHandler(async (req, res) => {
+  const { getClientInvoice } = await import("./clientInvoices");
+  res.json({ invoice: getClientInvoice(db, String(req.params.id), String(req.params.invoiceId)) });
+}));
+app.post("/api/clients/:id/invoices/:invoiceId/mark-sent", asyncHandler(async (req, res) => {
+  const { markClientInvoiceSent } = await import("./clientInvoices");
+  const invoice = markClientInvoiceSent(db, String(req.params.id), String(req.params.invoiceId));
+  addAuditLog(db, null, "human", billingActor(req), "invoice.marked_sent", { clientId: invoice.clientId, invoiceId: invoice.id, number: invoice.number });
+  res.json({ invoice });
+}));
+app.post("/api/clients/:id/invoices/:invoiceId/mark-paid", asyncHandler(async (req, res) => {
+  const { markClientInvoicePaid } = await import("./clientInvoices");
+  const reference = typeof req.body?.paymentReference === "string" ? req.body.paymentReference : "";
+  const invoice = markClientInvoicePaid(db, String(req.params.id), String(req.params.invoiceId), reference);
+  addAuditLog(db, null, "human", billingActor(req), "invoice.marked_paid", { clientId: invoice.clientId, invoiceId: invoice.id, number: invoice.number, reference: invoice.paidReference });
+  res.json({ invoice });
+}));
+app.post("/api/clients/:id/invoices/:invoiceId/void", asyncHandler(async (req, res) => {
+  const { voidClientInvoice } = await import("./clientInvoices");
+  const invoice = voidClientInvoice(db, String(req.params.id), String(req.params.invoiceId), String(req.body?.reason || ""));
+  addAuditLog(db, null, "human", billingActor(req), "invoice.voided", { clientId: invoice.clientId, invoiceId: invoice.id, number: invoice.number, reason: invoice.voidReason });
+  res.json({ invoice });
+}));
+// Emails the invoice through the one client-email switch (clientEmailsOffFor); silenced or without
+// SMTP it is saved as a draft communication and the invoice is left as it was.
+app.post("/api/clients/:id/invoices/:invoiceId/send", asyncHandler(async (req, res) => {
+  const { sendClientInvoice } = await import("./clientInvoices");
+  const by = billingActor(req);
+  const result = await sendClientInvoice(db, String(req.params.id), String(req.params.invoiceId), by);
+  addAuditLog(db, null, "human", by, result.delivered ? "invoice.emailed" : "invoice.email_not_sent", { clientId: result.invoice.clientId, invoiceId: result.invoice.id, number: result.invoice.number, detail: result.detail });
+  res.json(result);
+}));
+
 // --- Per-client portal credentials (encrypted; plaintext never returned) ---
 app.get("/api/clients/:id/portal-credentials", (req, res) => {
   res.json({ credentials: listPortalCredentials(db, String(req.params.id)) });
@@ -3759,8 +3817,10 @@ app.post("/api/projects/:id/fee-sheet/read-portal", asyncHandler(async (req, res
 // only — unlike the payment-quote route below it, asking for an invoice never creates a row.
 app.get("/api/projects/:id/invoice", asyncHandler(async (req, res) => {
   const { buildProjectInvoice } = await import("./invoices");
+  const { projectLedgerEntries } = await import("./clientInvoices");
   const detail = getProjectDetail(db, String(req.params.id));
-  res.json({ invoice: buildProjectInvoice(db, detail.project) });
+  // ledger (#700): which of this project's lines are already on a client invoice, and which one.
+  res.json({ invoice: buildProjectInvoice(db, detail.project), ledger: projectLedgerEntries(db, detail.project.id) });
 }));
 
 app.post("/api/projects/:id/prepare-submission", (req, res) => {
