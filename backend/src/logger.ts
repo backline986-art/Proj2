@@ -131,7 +131,10 @@ export const logger = {
 };
 
 // --- Sensitive-data hygiene --------------------------------------------------
-const SENSITIVE_QUERY = /token|key|secret|password|cookie|auth|account|meter|mfa|otp/i;
+// `code` and `state` are an OAuth callback's single-use authorization code and its CSRF state (#701,
+// QuickBooks): matched as whole parameter names, so a US-state filter like `?state=OR` is also hidden
+// (harmless) but `postalCode`-style names are not swept up by accident.
+const SENSITIVE_QUERY = /token|key|secret|password|cookie|auth|account|meter|mfa|otp|^code$|^state$/i;
 
 function safePath(req: Request): string {
   const base = req.path || req.url.split("?")[0];

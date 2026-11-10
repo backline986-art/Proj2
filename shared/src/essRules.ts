@@ -15,7 +15,8 @@
 // fire testing, and an exemption for a UL 9540 unit marked for residential dwelling units. A baseline
 // value is never a person's or an authority's statement, so a finding resting on it only warns.
 
-import type { JurisdictionEssRules } from "./types";
+import type { JurisdictionEssRuleRead, JurisdictionEssRules } from "./types";
+import { quoteNamesValue, quoteText } from "./officialSource";
 
 export type EssRuleKey = keyof JurisdictionEssRules;
 
@@ -93,4 +94,47 @@ export function essRulesOf(raw: unknown): JurisdictionEssRules | undefined {
     }
   }
   return Object.keys(out).length ? (out as JurisdictionEssRules) : undefined;
+}
+
+// ── A RESEARCHED READ OF ONE RULE (ESS data follow-up) ──────────────────────────────────────────
+// Research proposes a jurisdiction's ESS rules field by field, each with the page that states it and
+// the words on that page. What a model answered is shape-checked here; where it LANDS (official or
+// seeded, never over a person's value) is decided by the one landing function (#683) at the write.
+
+/** One researched value: the key, its value, the page that states it and the verbatim words. */
+export type EssRuleRead = JurisdictionEssRuleRead;
+
+const READ_URL = /^https?:\/\/[^\s]+$/i;
+
+/**
+ * A model's (or a parser's) list of ESS rule reads, shape-checked. A read is KEPT only with a known key,
+ * a value of that key's kind within essRulesOf's bounds, an http(s) page and a verbatim quote; a NUMBER
+ * must be among the quote's own numbers (as stored, or as published) — a quote that does not state the
+ * value is not a citation of it. The first read of a key wins. Every dropped read says why.
+ */
+export function essRuleReadsOf(raw: unknown): { reads: EssRuleRead[]; dropped: string[] } {
+  const reads: EssRuleRead[] = [];
+  const dropped: string[] = [];
+  for (const item of Array.isArray(raw) ? raw.slice(0, 40) : []) {
+    if (!item || typeof item !== "object") continue;
+    const o = item as Record<string, unknown>;
+    const key = String(o.key ?? "").trim() as EssRuleKey;
+    if (!(key in ESS_RULE_KINDS)) { dropped.push(`${String(o.key ?? "(no key)").slice(0, 40)}: not an ESS rule key`); continue; }
+    if (reads.some((r) => r.key === key)) { dropped.push(`${key}: a second value for the same rule`); continue; }
+    const numeric = ESS_RULE_KINDS[key] === "max" || ESS_RULE_KINDS[key] === "min";
+    const value = numeric ? (typeof o.value === "number" ? o.value : typeof o.value === "string" && /^\s*\d+(?:\.\d+)?\s*$/.test(o.value) ? Number(o.value) : NaN) : o.value;
+    const clean = essRulesOf({ [key]: value });
+    if (!clean) { dropped.push(`${key}: ${numeric ? "not a usable number" : "not true/false"}`); continue; }
+    const sourceUrl = String(o.sourceUrl ?? "").trim().slice(0, 500);
+    if (!READ_URL.test(sourceUrl)) { dropped.push(`${key}: no source page`); continue; }
+    const quote = quoteText(String(o.quote ?? "")).slice(0, 300);
+    if (quote.length < 3) { dropped.push(`${key}: no verbatim quote`); continue; }
+    const published = typeof o.publishedValue === "number" && Number.isFinite(o.publishedValue) ? o.publishedValue : undefined;
+    const v = (clean as Record<string, number | boolean>)[key];
+    if (numeric) {
+      if (!quoteNamesValue(quote, v as number) && !(published !== undefined && quoteNamesValue(quote, published))) { dropped.push(`${key}: the quote does not state ${String(v)}`); continue; }
+    }
+    reads.push({ key, value: v, sourceUrl, quote, ...(numeric && published !== undefined && published !== v ? { publishedValue: published } : {}) });
+  }
+  return { reads, dropped };
 }

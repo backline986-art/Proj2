@@ -48,8 +48,10 @@ type Row = Record<string, unknown>;
 const round2 = (n: number): number => Math.round(n * 100) / 100;
 
 export type ClientInvoiceStatus = "draft" | "sent" | "paid" | "void";
-export type LedgerLineKind = "reimbursement" | "service" | "received";
-export type LedgerLineRole = "charge" | "adjustment" | "received";
+/** onboarding (#701): a line a PERSON adds to a draft invoice (the client onboarding fee, or its credit
+ *  back as a negative amount). Revenue like service; never generated, never priced by code. */
+export type LedgerLineKind = "reimbursement" | "service" | "received" | "onboarding";
+export type LedgerLineRole = "charge" | "adjustment" | "received" | "manual";
 
 /** One line of a statement or invoice. */
 export interface LedgerLine {
@@ -87,7 +89,7 @@ export interface StatementExclusion extends InvoiceExclusion {
 export interface StatementTotals {
   /** Fees we advanced, still due, adjustments included. Pass-through. */
   reimbursementTotalUsd: number;
-  /** Our own service fees still due. Revenue. */
+  /** Our own service fees still due, onboarding fees and credits included. Revenue. */
   serviceTotalUsd: number;
   /** Paid at the gate before this invoice: shown, never charged. */
   receivedTotalUsd: number;
@@ -129,6 +131,12 @@ export interface ClientInvoice extends StatementTotals {
   voidedAt: string;
   voidReason: string;
   externalRef: string;
+  /** QuickBooks (#701): who sent it there and when, and what the daily read last saw. */
+  qbPushedBy: string;
+  qbPushedAt: string;
+  qbStatus: string;
+  qbBalanceUsd: number | null;
+  qbCheckedAt: string;
   createdBy: string;
   createdAt: string;
   updatedAt: string;
@@ -201,7 +209,8 @@ function totalsOf(lines: LedgerLine[]): StatementTotals {
   const due = (kind: LedgerLineKind): number =>
     round2(lines.filter((l) => l.kind === kind && !l.alreadyPaid).reduce((t, l) => t + l.amountUsd, 0));
   const reimbursementTotalUsd = due("reimbursement");
-  const serviceTotalUsd = due("service");
+  // An onboarding line (fee or credit) is our own revenue, so it sits in the service total.
+  const serviceTotalUsd = round2(due("service") + due("onboarding"));
   const receivedTotalUsd = round2(lines.filter((l) => l.kind === "received").reduce((t, l) => t + l.amountUsd, 0));
   return { reimbursementTotalUsd, serviceTotalUsd, receivedTotalUsd, dueTotalUsd: round2(reimbursementTotalUsd + serviceTotalUsd) };
 }
@@ -442,6 +451,11 @@ function mapInvoice(db: AppDb, r: Row, withLines = true): ClientInvoice {
     voidedAt: text(r.voided_at),
     voidReason: text(r.void_reason),
     externalRef: text(r.external_ref),
+    qbPushedBy: text(r.qb_pushed_by),
+    qbPushedAt: text(r.qb_pushed_at),
+    qbStatus: text(r.qb_status),
+    qbBalanceUsd: r.qb_balance_usd == null || r.qb_balance_usd === "" ? null : Number(r.qb_balance_usd),
+    qbCheckedAt: text(r.qb_checked_at),
     createdBy: text(r.created_by),
     createdAt: text(r.created_at),
     updatedAt: text(r.updated_at),
@@ -477,7 +491,8 @@ function nextInvoiceNumber(db: AppDb, at: string): string {
 /** Payment terms in days, for the due date set when an invoice is sent. */
 export function invoiceTermsDays(): number {
   const raw = Number(process.env.INVOICE_TERMS_DAYS);
-  return Number.isFinite(raw) && raw >= 0 && raw <= 365 ? Math.floor(raw) : 30;
+  // Default Net 15: the owner's stated terms (2026-11-10). Data, not a price.
+  return Number.isFinite(raw) && raw >= 0 && raw <= 365 ? Math.floor(raw) : 15;
 }
 
 /**
@@ -528,6 +543,55 @@ function requireStatus(inv: ClientInvoice, allowed: ClientInvoiceStatus[], actio
   if (!allowed.includes(inv.status)) {
     throw new HttpError(409, `Invoice ${inv.number} is ${inv.status}; it cannot be ${action}.`);
   }
+}
+
+/** Recompute an invoice's stored totals from its own live lines. */
+function refreshInvoiceTotals(db: AppDb, invoiceId: string): void {
+  const lines = db.query<Row>("SELECT * FROM client_invoice_lines WHERE invoice_id = ? AND released_at IS NULL", [invoiceId]).map(mapLine);
+  const t = totalsOf(lines);
+  db.run(
+    "UPDATE client_invoices SET reimbursement_total_usd = ?, service_total_usd = ?, received_total_usd = ?, due_total_usd = ?, updated_at = ? WHERE id = ?",
+    [t.reimbursementTotalUsd, t.serviceTotalUsd, t.receivedTotalUsd, t.dueTotalUsd, nowIso(), invoiceId],
+  );
+}
+
+/**
+ * A LINE A PERSON ADDS to a DRAFT invoice (#701): the client onboarding fee, or its credit back as a
+ * negative amount. The amount is whatever the person types: nothing here knows a price. A draft only,
+ * and never once it has gone to QuickBooks, so what was sent is what the ledger says.
+ */
+export function addManualInvoiceLine(
+  db: AppDb,
+  clientId: string,
+  invoiceId: string,
+  input: { kind?: unknown; amountUsd?: unknown; description?: unknown; serviceDate?: unknown },
+  by: string,
+): ClientInvoice {
+  const inv = getClientInvoice(db, clientId, invoiceId);
+  requireStatus(inv, ["draft"], "changed (only a draft takes a new line)");
+  if (inv.externalRef) throw new HttpError(409, `Invoice ${inv.number} is already in QuickBooks; it cannot be changed here.`);
+  const kind = text(input.kind) || "onboarding";
+  if (kind !== "onboarding") throw new HttpError(400, "Only an onboarding fee or credit line can be added by hand.");
+  const amount = Number(input.amountUsd);
+  if (!Number.isFinite(amount) || amount === 0 || Math.abs(amount) > 1_000_000) {
+    throw new HttpError(400, "Enter the amount: positive for a fee, negative for a credit back.");
+  }
+  const description = text(input.description).trim().slice(0, 300)
+    || (amount < 0 ? "Client onboarding fee — credit" : "Client onboarding fee");
+  const serviceDate = text(input.serviceDate).trim();
+  if (serviceDate && !ISO_DATE.test(serviceDate)) throw new HttpError(400, "serviceDate must be YYYY-MM-DD.");
+  const ts = nowIso();
+  db.transaction(() => {
+    db.run(
+      `INSERT INTO client_invoice_lines (id, invoice_id, line_key, project_id, payment_id, track, kind, role, basis,
+         provisional, already_paid, amount_usd, description, project_label, payment_reference, event_at, detail_json, created_at)
+       VALUES (?, ?, ?, '', '', '', 'onboarding', 'manual', 'manual', 0, 0, ?, ?, ?, '', ?, ?, ?)`,
+      [newId(), invoiceId, `manual:${newId()}`, round2(amount), description, inv.clientName,
+        serviceDate || ts.slice(0, 10), JSON.stringify({ addedBy: text(by).slice(0, 120) }), ts],
+    );
+    refreshInvoiceTotals(db, invoiceId);
+  });
+  return getClientInvoice(db, clientId, invoiceId);
 }
 
 /** Mark sent: the invoice has gone to the client (by our email or by hand). Sets issued and due dates once. */
@@ -606,7 +670,7 @@ export function invoiceText(inv: ClientInvoice, company: string): string {
     out.push("");
   };
   section("Fees we paid on your behalf, billed at cost:", inv.lines.filter((l) => l.kind === "reimbursement"));
-  section("Our service fees:", inv.lines.filter((l) => l.kind === "service"));
+  section("Our service fees:", inv.lines.filter((l) => l.kind === "service" || l.kind === "onboarding"));
   section("Payments already received:", inv.lines.filter((l) => l.kind === "received"));
   out.push(`Fees at cost: ${usd(inv.reimbursementTotalUsd)}`);
   out.push(`Service fees: ${usd(inv.serviceTotalUsd)}`);
