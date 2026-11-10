@@ -695,7 +695,7 @@ export function runQcForProject(db: AppDb, projectId: string, options: QcRunOpti
     // "qc" rows in state_permit_rules (a person's or an official read).
     let jurisdictionRecords: JurisdictionQcRecord[];
     try { jurisdictionRecords = resolveJurisdictionQcRecords(db, clean(baselinePayload.state), clean(baselinePayload.ahj)); } catch { jurisdictionRecords = resolveJurisdictionQcRecords(null, clean(baselinePayload.state), clean(baselinePayload.ahj)); }
-    for (const baseline of evaluateBaselineRules(baselinePayload, codeCtx, eligibility, { requirements: utilityRequirements, reportUnresearched: true }, { records: jurisdictionRecords })) {
+    for (const baseline of evaluateBaselineRules(baselinePayload, codeCtx, eligibility, { requirements: utilityRequirements, reportUnresearched: true, scope: scope.scope }, { records: jurisdictionRecords })) {
       if (baseline.qcStatus === "fail") failCount += 1;
       if (baseline.qcStatus === "fail" && !priorFails.has(baseline.ruleId)) newFailsOutsideBill += 1;
       if (baseline.qcStatus === "warning") warningCount += 1;

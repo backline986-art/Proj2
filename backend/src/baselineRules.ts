@@ -1,4 +1,4 @@
-import type { AuthorityEligibilityRecord, ParserPayload, QcStatus, Severity, UtilityApplicationRequirement, UtilityRequirementKey, UtilityRequirementList } from "../../shared/src/types";
+import type { AuthorityEligibilityRecord, JobScope, ParserPayload, QcStatus, Severity, UtilityApplicationRequirement, UtilityRequirementKey, UtilityRequirementList } from "../../shared/src/types";
 import type { EffectiveCodeContext } from "./codeProfiles";
 import { requirementForGate, requirementMayBlock, resolveUtilityRequirements, shippedQcRuleDefinitions, strictDefaultRequirements } from "./utilityRequirements";
 import { batteryStatus } from "../../shared/src/batteryControls";
@@ -6,6 +6,7 @@ import { jurisdictionScreenMayBlock, matchJurisdiction, recordForIdPrefix, shipp
 import { isBillHolderName, nemApplicantName } from "./accountHolders";
 import { evaluateEligibility, productionMeterShown, shippedEligibilityRecords, stringsPerInverterOf } from "./eligibilityLimits";
 import { usStateCode } from "./permitPath";
+import { deriveJobScope, scopeHasNewPv, storageOperatingMode } from "./jobScope";
 
 export interface BaselineRuleDefinition {
   id: string;
@@ -208,6 +209,10 @@ export interface BaselineUtilityContext {
   /** With no list on file, check the strictest common set and say the utility is not researched
    *  (qc.ts sets it; like eligibility's reportUnknownProgram, off for bare callers). */
   reportUnresearched?: boolean;
+  /** What the job installs (#673), resolved with the DB (qc.ts: resolveJobScope, a named person's scope
+   *  included). Absent = what the job's own evidence says (deriveJobScope), which stays "pv" unless the
+   *  plan set itself shows no new modules: the strict default keeps every PV item. */
+  scope?: JobScope;
 }
 
 /** The jurisdiction records the QC baseline reads (jurisdictionQcRules.ts). */
@@ -604,7 +609,7 @@ export function evaluateBaselineRules(payload: ParserPayload, ctx?: EffectiveCod
 // ── THE UTILITY'S APPLICATION REQUIREMENTS, CHECKED ON THE PACKAGE (QC) ─────────────────────────
 // What QC reads for each KIND of item: the package text the plan-set split and the upload notes carry,
 // and the parser's account / meter fields. Kinds, never utilities.
-type QcReadInput = { payload: ParserPayload; split: string; notes: string };
+type QcReadInput = { payload: ParserPayload; split: string; notes: string; newPv: boolean };
 const QC_SHOWN: Record<UtilityRequirementKey, (t: QcReadInput) => boolean> = {
   account_verification: ({ payload }) => Boolean(str(payload, "account") || str(payload, "ubAccountNumber")),
   meter_photo: ({ payload }) => Boolean(str(payload, "meter") || str(payload, "ubMeterNumber")),
@@ -615,9 +620,12 @@ const QC_SHOWN: Record<UtilityRequirementKey, (t: QcReadInput) => boolean> = {
   one_line: ({ split }) => hasAny(split, [/SLD/i, /3-line/i, /single line/i, /\b(?:one|1|single)[\s-]line\b/i]),
   site_plan: ({ split }) => hasAny(split, [/site/i, /plot/i]),
   module_spec: ({ split }) => hasAny(split, [/module/i]),
-  inverter_spec: ({ split }) => hasAny(split, [/inverter/i, /microinverter/i]),
+  // On a scope that adds no modules the inverter is the battery inverter / PCS (#673's storage rows), whose
+  // sheet may name it only that.
+  inverter_spec: ({ split, newPv }) => hasAny(split, newPv ? [/inverter/i, /microinverter/i] : [/inverter/i, /microinverter/i, /\bPCS\b/i, /power conversion/i]),
   ac_disconnect: ({ split, notes }) => hasAny(`${split}\n${notes}`, [/disconnect/i]),
-  storage_mode_declaration: ({ split, notes }) => hasAny(`${split}\n${notes}`, [/operating mode/i, /back[-\s]?up/i, /self[-\s]?consumption/i, /export/i]),
+  // The job's own operating-mode field counts (the one reader QC's storage row and the reviewer gate use).
+  storage_mode_declaration: ({ payload, split, notes }) => Boolean(storageOperatingMode(payload)) || hasAny(`${split}\n${notes}`, [/operating mode/i, /back[-\s]?up/i, /self[-\s]?consumption/i, /export/i]),
   owner_signature: ({ split, notes }) => hasAny(`${split}\n${notes}`, [/signature/i, /signed/i, /owner authorization/i]),
 };
 const QC_LABEL: Record<UtilityRequirementKey, string> = {
@@ -668,15 +676,22 @@ function utilityRequirementResults(payload: ParserPayload, state: string, utilit
     return [];
   }
   const battery = batteryStatus(payload as Record<string, unknown>) === "yes";
-  const read: QcReadInput = { payload, split, notes };
+  // WHAT THE JOB INSTALLS (#673): a job that adds no modules is never asked for a module spec, and its
+  // inverter is the battery inverter / PCS.
+  const newPv = scopeHasNewPv(ctx.scope ?? deriveJobScope(payload).scope);
+  const read: QcReadInput = { payload, split, notes, newPv };
   const groups = new Map<string, { qc: { ruleId: string; ruleName: string; message: string; fieldName: string }; order: number; first: number; missing: string[]; block: boolean }>();
   items.forEach((item, index) => {
     if (!requirementForGate(item, "qc")) return;
     if (item.key === "storage_mode_declaration" && !battery) return;
+    if (item.key === "module_spec" && !newPv) return;
     if (QC_SHOWN[item.key](read)) return;
     const qc = item.qc ?? GENERIC_QC;
     const held = groups.get(qc.ruleId) ?? { qc, order: item.qc?.order ?? 100, first: index, missing: [], block: false };
-    held.missing.push(item.qc?.label || QC_LABEL[item.key]);
+    const label = item.qc?.label || QC_LABEL[item.key];
+    // On a job that adds no modules the generic "inverter spec" is worded as what it is there (the battery
+    // inverter / PCS); a record's own, different wording stays as written.
+    held.missing.push(item.key === "inverter_spec" && !newPv && label === QC_LABEL.inverter_spec ? "battery inverter / PCS spec" : label);
     if (item.qc?.severity === "blocker" && requirementMayBlock(item)) held.block = true;
     groups.set(qc.ruleId, held);
   });
