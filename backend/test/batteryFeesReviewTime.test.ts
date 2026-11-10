@@ -9,6 +9,7 @@
 //
 // KILL TESTS (each verified red by hand with the change removed):
 //   K1 quoteStatesBatteryPermitting without the storage-word test     → (a) fails.
+//   K1b the storage-page test without the path-only rule               → (a) fails.
 //   K2 quoteStatesReviewTime without the span match                    → (c) fails.
 //   K3 essPermitStep without the lookup's battery answers              → (d) fails.
 //   K4 quoteStatesFee without the printed-amount test                  → (e) fails.
@@ -55,6 +56,11 @@ await check("(a) a battery answer must name the storage AND state its kind; a na
   assert.equal(t({ kind: "separatePermit" }, "A separate permit is required for all detached structures."), false, "no storage word");
   assert.equal(t({ kind: "fireReview", agency: "Larchmont Fire" }, "Battery systems require a permit from the Maplecrest Fire District."), false, "another agency");
   assert.equal(t({ kind: "sameReview" }, "Battery systems require a separate permit."), false, "the words state another kind");
+  // A line printed in a battery packet need not repeat the word: the page's own address is about storage.
+  const letter = "MAPLECREST FIRE DISTRICT: Approval Letter (see attachment)";
+  assert.equal(t({ kind: "fireApprovalLetter" }, letter), false, "no storage word, no storage page");
+  assert.equal(t({ kind: "fireApprovalLetter" }, letter, "https://www.maplecrest.example.gov/docs/View/9/Solar-Packet-Battery-System-PDF"), true);
+  assert.equal(t({ kind: "fireApprovalLetter" }, letter, "https://battery.example.gov/docs/solar-packet"), false, "the host alone is not the page's subject");
 });
 
 await check("(b) the process part keeps cited battery answers (one per kind) and a cited review time", () => {

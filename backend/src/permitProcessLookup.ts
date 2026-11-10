@@ -464,15 +464,20 @@ function coerceBattery(v: unknown): BatteryPermittingAnswer | null {
   const documents = (Array.isArray(o.documents) ? o.documents : []).map(str).filter(Boolean).slice(0, 8);
   return { kind, ...(agency ? { agency } : {}), ...(documents.length ? { documents } : {}) };
 }
-export function quoteStatesBatteryPermitting(v: BatteryPermittingAnswer, quote: string): boolean {
+/** The quote must name the storage, unless the cited page's own address is about storage (a battery
+ *  packet's line "FIRE AGENCY: Approval Letter" is about the battery job it is printed in). */
+export function quoteStatesBatteryPermitting(v: BatteryPermittingAnswer, quote: string, sourceUrl = ""): boolean {
   const q = str(quote);
-  if (!STORAGE_WORDS.test(q) || !BATTERY_KIND_WORDS[v.kind].test(q)) return false;
+  let onStoragePage = false;
+  try { onStoragePage = STORAGE_WORDS.test(decodeURIComponent(new URL(sourceUrl).pathname).replace(/[-_/+.]+/g, " ")); } catch { /* no URL */ }
+  if (!(STORAGE_WORDS.test(q) || onStoragePage) || !BATTERY_KIND_WORDS[v.kind].test(q)) return false;
   return !v.agency || supportsName(v.agency, q);
 }
 export function acceptBatteryPermitting(raw: unknown, seenUrls: string[]): Array<CitedFact<BatteryPermittingAnswer>> {
   const out: Array<CitedFact<BatteryPermittingAnswer>> = [];
   for (const r of (Array.isArray(raw) ? raw : []).slice(0, 6)) {
-    const c = acceptCited<BatteryPermittingAnswer>(r as RawFact, { seenUrls, what: "battery permitting answer", coerce: coerceBattery, supports: quoteStatesBatteryPermitting });
+    const src = str((r as RawFact)?.sourceUrl);
+    const c = acceptCited<BatteryPermittingAnswer>(r as RawFact, { seenUrls, what: "battery permitting answer", coerce: coerceBattery, supports: (v, q) => quoteStatesBatteryPermitting(v, q, src) });
     if (c.value && !out.some((x) => x.value?.kind === c.value!.kind)) out.push(c);
   }
   return out;
