@@ -33,6 +33,7 @@ import { resolvePermitPath, usStateCode } from "./permitPath";
 import { structureTypeForProject } from "./codeReviewRules";
 import { mountKindForProject } from "./mountKind";
 import { ballastedRackingEvidence } from "./ballastRacking";
+import { isValidQcScreenValue } from "./jurisdictionQcRules";
 
 type Row = Record<string, unknown>;
 
@@ -85,8 +86,12 @@ export function stateRuleLandingTier(r: ReferenceRule, evidence?: RuleLandingEvi
  *  needs the URL its words were read from (Helm's #637 bar). Returns 1 when a row was written, else 0. */
 export function writeSeededStatePermitRule(db: AppDb, r: ReferenceRule, now = new Date().toISOString(), evidence?: RuleLandingEvidence): number {
   const state = usStateCode(r.state);
-  if (!state || !r.key || !String(r.citation ?? "").trim() || (r.family !== "structural" && r.family !== "fee")) return 0;
-  if (r.family === "fee" && !/^https?:\/\//i.test(String(r.sourceUrl ?? "").trim())) return 0;
+  if (!state || !r.key || !String(r.citation ?? "").trim() || (r.family !== "structural" && r.family !== "fee" && r.family !== "qc")) return 0;
+  // A FEE rule changes an amount the quote charges, and a QC screen (family "qc", draft 14) changes what
+  // the baseline flags: both need the URL their words were read from (Helm's #637 bar). A "qc" row must
+  // also be a screen jurisdictionQcRules can read (kind, ids, words), or it is refused, never half-read.
+  if ((r.family === "fee" || r.family === "qc") && !/^https?:\/\//i.test(String(r.sourceUrl ?? "").trim())) return 0;
+  if (r.family === "qc" && !isValidQcScreenValue(r.key, r.value)) return 0;
   const tier = stateRuleLandingTier(r, evidence);
   const existing = db.get<{ source_url: string; confidence: string }>(
     "SELECT source_url, confidence FROM state_permit_rules WHERE state = ? AND family = ? AND rule_key = ?", [state, r.family, r.key]);
@@ -106,6 +111,31 @@ export function writeSeededStatePermitRule(db: AppDb, r: ReferenceRule, now = ne
     [state, r.family, r.key, JSON.stringify(r.value ?? null), r.citation, r.sourceUrl ?? "", tier, String(r.fetchedAt ?? "").trim().slice(0, 40), now, sameOfficialHost],
   );
   return Number(db.get<{ n: number }>("SELECT changes() AS n")?.n ?? 0);
+}
+
+/** A PERSON RECORDS OR REWORDS A JURISDICTION QC SCREEN (review-audit draft 14): one state_permit_rules
+ *  row of family "qc", PERSON-VERIFIED (verified_at / verified_by), carrying the source's own words and
+ *  the page they were read on. Rule 3 runs the other way here: a person's write replaces any tier (a
+ *  seeded or official row, or an earlier person's wording), and nothing automatic ever replaces it
+ *  (writeSeededStatePermitRule's WHERE refuses a verified row). Returns the row as the overlay reads it,
+ *  or null when the state, the screen, the quote or the URL is not usable (nothing is written). */
+export function writeVerifiedQcScreen(db: AppDb, input: { state: string; ruleId: string; screen: unknown; quote: string; sourceUrl: string }, verifiedBy: string, now = new Date().toISOString()): StatePermitRule | null {
+  const state = usStateCode(input.state);
+  const quote = String(input.quote ?? "").trim();
+  const sourceUrl = String(input.sourceUrl ?? "").trim();
+  const who = String(verifiedBy ?? "").trim();
+  if (!state || !who || quote.length < 8 || !/^https?:\/\//i.test(sourceUrl) || !isValidQcScreenValue(input.ruleId, input.screen)) return null;
+  const { ruleId: _ignored, quote: _q, sourceUrl: _u, tier: _t, ...value } = { ...(input.screen as Record<string, unknown>) };
+  db.run(
+    `INSERT INTO state_permit_rules (state, family, rule_key, value_json, citation, source_url, confidence, fetched_at, verified_at, verified_by, updated_at)
+     VALUES (?, 'qc', ?, ?, ?, ?, 'verified', ?, ?, ?, ?)
+     ON CONFLICT(state, family, rule_key) DO UPDATE SET
+       value_json = excluded.value_json, citation = excluded.citation, source_url = excluded.source_url,
+       confidence = 'verified', fetched_at = excluded.fetched_at, verified_at = excluded.verified_at,
+       verified_by = excluded.verified_by, updated_at = excluded.updated_at`,
+    [state, input.ruleId, JSON.stringify(value), quote, sourceUrl, now.slice(0, 40), now, who.slice(0, 120), now],
+  );
+  return { state, family: "qc", key: input.ruleId, value, citation: quote, sourceUrl, confidence: "verified", fetchedAt: now.slice(0, 40) };
 }
 
 /** Seed the shipped rules. Idempotent: a seeded row is refreshed from the reference (a corrected

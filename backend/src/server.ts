@@ -1,5 +1,5 @@
 import "dotenv/config";
-import { validate, portalCredentialCreateSchema, portalCredentialUpdateSchema, autoLearnSchema, codeProfileResearchSchema, codeProfileVerifySchema, permitProcessVerifySchema, reviewSubjectSchema, utilityFilingVerifySchema, jobScopeSchema, utilityStorageModesSchema, utilityApplicationRequirementsSchema, nemTrackKeepSchema } from "./validation";
+import { validate, portalCredentialCreateSchema, portalCredentialUpdateSchema, autoLearnSchema, codeProfileResearchSchema, codeProfileVerifySchema, jurisdictionQcScreenSchema, permitProcessVerifySchema, reviewSubjectSchema, utilityFilingVerifySchema, jobScopeSchema, utilityStorageModesSchema, utilityApplicationRequirementsSchema, nemTrackKeepSchema } from "./validation";
 import crypto from "node:crypto";
 import { spawn } from "node:child_process";
 import express, { type NextFunction, type Request, type Response } from "express";
@@ -1209,6 +1209,35 @@ app.put("/api/code-profiles/verify", (req, res) => {
   }, verifiedBy);
   res.json({ profile: saved });
 });
+// JURISDICTION QC SCREENS, WRITTEN BY A PERSON (review-audit draft 14). Draft 12 moved each state's and
+// city's QC baseline screens to data (reference-jurisdiction-qc-rules.json, overlaid by state_permit_rules
+// rows of family "qc") but left nothing that writes those rows. GET shows the screens a state's jobs are
+// checked against, each with its tier; PUT records or rewords one: a NAMED person (namedPersonDecider, the
+// placeholder names refused), the source's own words verbatim (quote) and the page they were read on. It
+// lands person-verified (rule 3: nothing automatic replaces it), and it may block only under the #637 bar
+// (jurisdictionQcRules.jurisdictionScreenMayBlock). Under the existing /api/code-profiles path (rule 6:
+// shared jurisdiction knowledge, scoped in routeScope.test.ts).
+app.get("/api/code-profiles/qc-screens", asyncHandler(async (req, res) => {
+  const { usStateCode } = await import("./usState");
+  const { resolveJurisdictionQcRecords } = await import("./jurisdictionQcRules");
+  const state = usStateCode(req.query.state);
+  if (!state) throw new HttpError(400, "state is required (a two-letter US state code or name).");
+  const records = resolveJurisdictionQcRecords(db, state, String(req.query.ahj ?? "")).filter((r) => r.state === state);
+  res.json({ state, records });
+}));
+app.put("/api/code-profiles/qc-screens", asyncHandler(async (req, res) => {
+  const b = validate(jurisdictionQcScreenSchema, req.body);
+  const { isConfirmingPerson } = await import("./feeConfirm");
+  // Named BEFORE anything is written: a blank or placeholder name (auth off) is a 400 that writes nothing.
+  const verifiedBy = namedPersonDecider(req, "verifiedBy",
+    "Sign in to record a jurisdiction QC screen.",
+    "Name the person recording this screen: a jurisdiction screen is recorded by a named person (\"operator\" or a bot's name is not a person).",
+    isConfirmingPerson);
+  const { writeVerifiedQcScreen } = await import("./stateRules");
+  const row = writeVerifiedQcScreen(db, { state: b.state, ruleId: b.ruleId, screen: b.screen, quote: b.quote, sourceUrl: b.sourceUrl }, verifiedBy);
+  if (!row) throw new HttpError(400, "That screen cannot be recorded: check the state, the screen's kind and fields (a submittal-documents screen lists its items), the quote and the source URL.");
+  res.json({ rule: row, verifiedBy });
+}));
 const editionProposalFingerprint = (req: Request): string => {
   const fp = String(req.body?.fingerprint || "").trim();
   if (!fp || fp.length > 400) throw new HttpError(400, "fingerprint is required.");
