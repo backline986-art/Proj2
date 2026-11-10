@@ -120,6 +120,13 @@ export const jobScopeSchema = z.object({
   decidedBy: z.string().max(120).optional(),
 }).strict();
 
+/** PUT /api/projects/:id/utility-track/keep (draft 10): a named person puts the utility track back on
+ *  this job (keep: true) though a person's storage record drops it, or lets the record drop it again. */
+export const nemTrackKeepSchema = z.object({
+  keep: z.boolean(),
+  decidedBy: z.string().max(120).optional(),
+}).strict();
+
 /** PUT /api/projects/:id/utility-filing/storage-modes (#673 item 3): a named person records which
  *  storage modes this project's utility takes NO application for, with the page and its words. */
 export const utilityStorageModesSchema = z.object({
@@ -185,9 +192,33 @@ export const codeProfileVerifySchema = z.object({
     id: z.string().min(1).max(60),
     description: z.string().min(1).max(500),
   })).max(20).default([]),
+  // The battery (ESS) rules a person checked against their cited sources (review-audit draft 05).
+  // Optional: a verify that sends none stores none (codeProfiles.upsert).
+  essRules: z.object({
+    maxUnitKwh: z.number().finite().positive().max(10000).optional(),
+    maxAggregateKwhUtilitySpace: z.number().finite().positive().max(10000).optional(),
+    maxAggregateKwhGarage: z.number().finite().positive().max(10000).optional(),
+    maxAggregateKwhAccessory: z.number().finite().positive().max(10000).optional(),
+    maxAggregateKwhExteriorWall: z.number().finite().positive().max(10000).optional(),
+    maxAggregateKwhOutdoor: z.number().finite().positive().max(10000).optional(),
+    minUnitSpacingIn: z.number().finite().positive().max(10000).optional(),
+    spacingReductionBy9540A: z.boolean().optional(),
+    minOpeningClearanceIn: z.number().finite().positive().max(10000).optional(),
+    listingRequired: z.boolean().optional(),
+    habitableLocationProhibited: z.boolean().optional(),
+    impactProtectionInGarage: z.boolean().optional(),
+    alarmRequired: z.boolean().optional(),
+    wallProtectionRequired: z.boolean().optional(),
+    disconnectOutside: z.boolean().optional(),
+    listedResidentialExemption: z.boolean().optional(),
+  }).optional(),
   citations: z.array(z.object({
     label: z.string().max(200),
     sourceUrl: z.string().min(1).max(500),
+    // Which value a citation backs ("essRules.maxUnitKwh") and the source's own words: a battery rule
+    // blocks only when its citation quotes the value (Helm's #637 bar), so a verify keeps both.
+    field: z.string().max(80).optional(),
+    quote: z.string().max(600).optional(),
   })).max(30).default([]),
 });
 

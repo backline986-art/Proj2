@@ -3432,9 +3432,24 @@ const VERSIONED_MIGRATIONS: VersionedMigration[] = [
     },
   },
   {
-    // v74 (#701): the next free number on offline staging bdde3b57 (after #700's v73). Another
-    // unmerged branch may take v74 first; the reviewer renumbers at merge. Nothing depends on it.
+    // v74: the next free version on the offline staging base (bdde3b57: v72 = utility application
+    // requirements, v73 = #700's invoices). Renumber at merge if the queue changes (Helm rules it).
     version: 74,
+    name: "nem_track_storage_exemption",
+    up: (db) => {
+      // THE UTILITY TRACK A PERSON'S RECORD TOOK OFF THIS JOB (draft 10, utilityStorageModes.ts). QC writes
+      // it: { drop: { utility, mode, sourceUrl, quote, verifiedBy, verifiedAt, decidedAt } } when the
+      // utility's PERSON-verified storage record says this job's battery mode needs no application, and
+      // { keptBy, keptAt } when a named person put the track back on this job. requiredTracks() reads it
+      // through mapProject, so every door (done-ness, nextStep, Stage, autopilot, the tracks screen)
+      // asks the same question. '' = nothing dropped, the strict default.
+      addColumnIfMissing(db, "projects", "nem_track_exemption_json", "TEXT NOT NULL DEFAULT ''");
+    },
+  },
+  {
+    // v75 (#701, Helm's numbering 2026-11-10): after #700's v73 and draft 10's v74. Renumber at merge
+    // if the queue changes; nothing depends on the number.
+    version: 75,
     name: "quickbooks_connection",
     up: (db) => {
       // QUICKBOOKS ONLINE (#701): ONE company per org (org_id is the key), connected by a named person.
