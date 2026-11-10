@@ -80,6 +80,44 @@ const check = (label: string, ok: boolean, detail = ""): void => {
   else { failures++; console.error(`  FAIL - ${label}\n         ${detail}`); }
 };
 
+// A CASE THAT STALLS FAILS, NAMED — IT NEVER HANGS THE RUNNER (draft 17, CI stability round). In the
+// cloud container (Chromium 1243) a walk whose filing hop was blocked ("redirectSubmit", "metaSubmit")
+// never returned: the blocked hop's error page commits late, the next step's goto is "interrupted" by
+// it, and the walk's close() then waits forever in page.close() on a page still committing a
+// navigation (traced with pw:api; closing after the page settled returns at once). The runner killed
+// the smoke at its 600 s budget with no word of where. Each walk below now has a budget of its own,
+// far above a real walk (2-15 s alone): past it the case FAILS, naming the navigator call in flight,
+// and the smoke exits red — the same red, minutes sooner, with the cause in the log. The checks
+// themselves are unchanged.
+const CASE_BUDGET_MS = 120_000;
+let inFlight = "";
+function watchCalls<N extends object>(navr: N): N {
+  for (const k of ["openReview", "read", "stepLinks", "openStep", "close"] as const) {
+    const f = (navr as Record<string, unknown>)[k];
+    if (typeof f !== "function") continue;
+    (navr as Record<string, unknown>)[k] = async (...a: unknown[]) => {
+      const href = (a[0] as { href?: string } | undefined)?.href;
+      inFlight = `navigator.${k}(${href ? new URL(href).pathname + new URL(href).search : ""})`;
+      try { return await (f as (...x: unknown[]) => Promise<unknown>).apply(navr, a); } finally { inFlight = `after navigator.${k}`; }
+    };
+  }
+  return navr;
+}
+async function bounded<T>(label: string, work: Promise<T>): Promise<T> {
+  inFlight = "";
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const stalled = new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error("stalled")), CASE_BUDGET_MS); });
+  try {
+    return await Promise.race([work, stalled]);
+  } catch (e) {
+    if ((e as Error)?.message !== "stalled") throw e;
+    check(`${label}: the walk finished within ${CASE_BUDGET_MS / 1000} s`, false, `stalled in ${inFlight || "(no navigator call yet: the stage or the navigator's set-up)"}`);
+    // The browser is wedged in the call above; closing it would wait on the same thing. Exit red now.
+    console.error(`\n${failures} stagedReviewWalk check(s) FAILED (a case stalled; the cases after it did not run).`);
+    process.exit(1);
+  } finally { clearTimeout(timer); }
+}
+
 // Synthetic only.
 const ACCOUNT = "7720419385";
 const requests: Array<{ method: string; path: string }> = [];
@@ -223,9 +261,9 @@ const stageRecipe = (pid: number): PortalRecipe => ({
   ],
 } as PortalRecipe);
 const stage = async (pid: number) => {
-  const r = await stageWithRecipe(stageRecipe(pid), { id: `p-staged-walk-${pid}` } as ProjectRecord, { accountNumber: ACCOUNT }, {}, [], {
+  const r = await bounded(`stage ${MODES[pid] ?? pid}`, stageWithRecipe(stageRecipe(pid), { id: `p-staged-walk-${pid}` } as ProjectRecord, { accountNumber: ACCOUNT }, {}, [], {
     runId: `smoke-staged-walk-${pid}`, headless: true, stagedReview: { secrets: [ACCOUNT], gapMs: 400 },
-  });
+  }));
   return { r, c: r.stagedReview as StagedReviewCapture | undefined };
 };
 /** Pixels of the mask colour (Playwright's default #FF00FF) in a PNG's rectangle, read through a canvas. */
@@ -321,13 +359,13 @@ try {
     const runPage = await ctx.newPage();
     const KEY: DigestKey = { key: crypto.createHash("sha256").update("smoke-digest-key").digest(), keyId: "5050505050505050" };
     const NONCE = "abcdefabcdefabcdefabcdefabcdef00";
-    const walkOnce = async (pid: number, rp: Page = runPage, mutate?: (n: Awaited<ReturnType<typeof openPlaywrightDigestNavigator>>) => void) => {
+    const walkOnce = (pid: number, rp: Page = runPage, mutate?: (n: Awaited<ReturnType<typeof openPlaywrightDigestNavigator>>) => void) => bounded(`walk ${MODES[pid] ?? pid}`, (async () => {
       await rp.goto(reviewOf(pid));
       const navr = await openPlaywrightDigestNavigator(rp, reviewOf(pid));
       mutate?.(navr);
-      const walk = await walkStagedDraft(navr, { reviewUrl: reviewOf(pid), gapMs: 400 });
+      const walk = await walkStagedDraft(watchCalls(navr), { reviewUrl: reviewOf(pid), gapMs: 400 });
       return buildStagedReviewCapture({ walk, secrets: [ACCOUNT], key: KEY, nonce: NONCE });
-    };
+    })());
     console.log("\n2. MUST-PASS: the digest is stable across two reads of the same draft");
     const before = requests.length;
     const a = await walkOnce(4417);
@@ -426,8 +464,10 @@ try {
       await runPage.waitForTimeout(300);
       const from = requests.length;
       const upFrom = upgrades;
-      const navr = await openPlaywrightDigestNavigator(runPage, reviewOf(4425));
-      const walk = await walkStagedDraft(navr, { reviewUrl: reviewOf(4425), gapMs: 400 });
+      const walk = await bounded("walk scripted", (async () => {
+        const navr = await openPlaywrightDigestNavigator(runPage, reviewOf(4425));
+        return walkStagedDraft(watchCalls(navr), { reviewUrl: reviewOf(4425), gapMs: 400 });
+      })());
       await new Promise((res) => setTimeout(res, 1500)); // anything sent as the walk page closed has arrived
       const K = Buffer.alloc(32, 9);
       const N = "00000000000000000000000000000001";
