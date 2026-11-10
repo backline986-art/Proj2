@@ -21,6 +21,7 @@ import { fileURLToPath } from "node:url";
 import type { UtilityApplicationRequirement, UtilityRequirementList } from "../../shared/src/types";
 
 const { evaluateBaselineRules, baselineRuleDefinitions } = await import("../src/baselineRules");
+const { mergeRequirements } = await import("../src/utilityRequirements");
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 let failures = 0;
@@ -114,6 +115,15 @@ check("#637 BAR: an item whose QC wording asks for a blocker blocks only when it
     const r = evaluateBaselineRules({ state: "NV", utility: "x" } as never, undefined, undefined, { requirements: list([weak]) }).find((x) => x.ruleId === "example-meter");
     assert.equal(r?.severity, "warning", JSON.stringify(weak));
   }
+});
+check("RULE 3: a person's item replacing a seeded one keeps the seeded QC rule id and words", () => {
+  const seeded = item({ tier: "seeded", qc: { ruleId: "example-meter", ruleName: "{utility} meter", message: "{utility} wants {missing}.", fieldName: "meter" } });
+  const person = item({ tier: "verified", verifiedBy: "A. Person" });
+  const [merged] = mergeRequirements([seeded], [person]);
+  assert.equal(merged.tier, "verified");
+  assert.equal(merged.qc?.ruleId, "example-meter");
+  const r = evaluateBaselineRules({ state: "NV", utility: "x" } as never, undefined, undefined, { requirements: list([merged]) });
+  assert.equal(r.find((x) => x.ruleId === "example-meter")?.message, "Example Light & Power wants meter evidence.");
 });
 check("GATES: a reviewer-only item is not a QC item", () => {
   const rs = evaluateBaselineRules({ state: "NV", utility: "x" } as never, undefined, undefined, { requirements: list([item({ gates: ["reviewer"] })]) });

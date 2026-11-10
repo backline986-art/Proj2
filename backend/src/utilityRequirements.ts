@@ -140,7 +140,9 @@ export function mergeRequirements(...lists: UtilityApplicationRequirement[][]): 
   for (const list of lists) {
     for (const item of list) {
       const held = byKey.get(item.key);
-      if (!held || TIER_RANK[item.tier] >= TIER_RANK[held.tier]) byKey.set(item.key, item);
+      // A higher tier takes the item; the QC wording it replaces stays with it (same rule id and words in
+      // the QC baseline) unless the new item brings its own.
+      if (!held || TIER_RANK[item.tier] >= TIER_RANK[held.tier]) byKey.set(item.key, !item.qc && held?.qc ? { ...item, qc: held.qc } : item);
     }
   }
   return [...byKey.values()];
