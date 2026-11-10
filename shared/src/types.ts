@@ -988,6 +988,11 @@ export interface ProjectRecord {
    *  — and mapped here by mapProject / normalizeProject. Absent when none is set. Read ONLY through
    *  permitProcess.trackIssuer; MPU follows electrical unless its own is set. */
   trackIssuers?: TrackIssuerOverrides;
+  /** THE UTILITY TRACK A PERSON'S RECORD TOOK OFF THIS JOB (draft 10, migration v72). Written only by
+   *  QC from the utility's PERSON-verified storage record (utilityStorageModes.nemStorageExemption),
+   *  read only through submittalTracks.nemTrackDropFor — never set from a request body. Absent when
+   *  nothing is dropped. */
+  nemTrackExemption?: NemTrackExemptionState;
   /** Set ONLY by permitProcess.projectForTrack on the TRACK-SCOPED VIEW it returns (ahj replaced by
    *  the track's issuer) — never persisted, never mapped from a row. It names the project's own AHJ
    *  so the per-job lookup's cited answer about this permit still reaches the view, and makes the
@@ -1233,6 +1238,26 @@ export const JOB_SCOPES: readonly JobScope[] = ["pv", "pv+storage", "storage-add
 /** The battery's operating mode as QC and the utility's storage record read it. */
 export type StorageOperatingMode = "export" | "non-export" | "backup-only";
 export const STORAGE_OPERATING_MODES: readonly StorageOperatingMode[] = ["export", "non-export", "backup-only"];
+
+/** Why a job's utility (NEM) track was dropped: the person-verified utility record QC read it from. */
+export interface NemTrackDrop {
+  utility: string;
+  mode: StorageOperatingMode;
+  sourceUrl: string;
+  quote: string;
+  verifiedBy: string;
+  verifiedAt: string;
+  /** When QC last confirmed the drop on this job. */
+  decidedAt: string;
+}
+
+/** The per-job state behind the utility track's drop (projects.nem_track_exemption_json). */
+export interface NemTrackExemptionState {
+  drop?: NemTrackDrop | null;
+  /** A named person put the track back on this job: no record drops it again until they undo it. */
+  keptBy?: string;
+  keptAt?: string;
+}
 
 /** The job's scope with its basis, as QC used it (jobScope.resolveJobScope). */
 export interface JobScopeView {
@@ -3674,6 +3699,11 @@ export interface ProjectDetail {
   isBlocked: boolean;
   /** What the job installs, as QC reads it (#673). */
   jobScope?: JobScopeView;
+  /** The utility track a person's storage record dropped on this job, with why (draft 10). Null when
+   *  the track is on. Read through nemTrackDropFor — the same predicate requiredTracks asks. */
+  nemTrackDrop?: NemTrackDrop | null;
+  /** A named person put the utility track back on this job (it stays until they let the record drop it). */
+  nemTrackKept?: { by: string; at: string } | null;
 }
 
 /** POST /api/projects/:id/permit-checks (recordPermitStatusCheck). `unreadable` is set when the

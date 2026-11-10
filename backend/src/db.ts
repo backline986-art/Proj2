@@ -3338,6 +3338,21 @@ const VERSIONED_MIGRATIONS: VersionedMigration[] = [
       addColumnIfMissing(db, "portal_run_approvals", "acknowledgements_json", "TEXT NOT NULL DEFAULT ''");
     },
   },
+  {
+    // v72: the next free version on the offline staging base (v71 = run approvals). #700 had v72
+    // pencilled in; whichever of the two lands second takes the next free number.
+    version: 72,
+    name: "nem_track_storage_exemption",
+    up: (db) => {
+      // THE UTILITY TRACK A PERSON'S RECORD TOOK OFF THIS JOB (draft 10, utilityStorageModes.ts). QC writes
+      // it: { drop: { utility, mode, sourceUrl, quote, verifiedBy, verifiedAt, decidedAt } } when the
+      // utility's PERSON-verified storage record says this job's battery mode needs no application, and
+      // { keptBy, keptAt } when a named person put the track back on this job. requiredTracks() reads it
+      // through mapProject, so every door (done-ness, nextStep, Stage, autopilot, the tracks screen)
+      // asks the same question. '' = nothing dropped, the strict default.
+      addColumnIfMissing(db, "projects", "nem_track_exemption_json", "TEXT NOT NULL DEFAULT ''");
+    },
+  },
 ];
 
 /** v47 was edited in place while #218 was open (Helm's review at 0116f98a): a DB that ran an earlier

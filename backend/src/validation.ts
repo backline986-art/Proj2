@@ -120,6 +120,13 @@ export const jobScopeSchema = z.object({
   decidedBy: z.string().max(120).optional(),
 }).strict();
 
+/** PUT /api/projects/:id/utility-track/keep (draft 10): a named person puts the utility track back on
+ *  this job (keep: true) though a person's storage record drops it, or lets the record drop it again. */
+export const nemTrackKeepSchema = z.object({
+  keep: z.boolean(),
+  decidedBy: z.string().max(120).optional(),
+}).strict();
+
 /** PUT /api/projects/:id/utility-filing/storage-modes (#673 item 3): a named person records which
  *  storage modes this project's utility takes NO application for, with the page and its words. */
 export const utilityStorageModesSchema = z.object({

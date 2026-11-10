@@ -5830,6 +5830,50 @@ function utilityGroupTitle(utilityTracks) {
   return `Utility — ${phrase || "interconnection"}`;
 }
 
+// THE UTILITY TRACK A PERSON'S STORAGE RECORD DROPPED (draft 10): said where the card would be, with the
+// person, the page and its words, and a control to put the track back on this job. A person who kept
+// the track sees that too, with the control to let the record drop it again.
+function nemTrackDropHtml(detail) {
+  const drop = detail && detail.nemTrackDrop;
+  const kept = detail && detail.nemTrackKept;
+  if (drop) {
+    return `<div class="track-group"><div class="track-group-head">Utility application: not required</div>
+      <article class="item pass">
+        <p>${esc(drop.utility)} takes no interconnection application for a ${esc(drop.mode)} battery, as ${esc(drop.verifiedBy)} recorded on ${esc(String(drop.verifiedAt || "").slice(0, 10))}:</p>
+        <blockquote>${esc(drop.quote)}</blockquote>
+        <p class="muted">Source: <a href="${esc(drop.sourceUrl)}" target="_blank" rel="noopener noreferrer">${esc(drop.sourceUrl)}</a></p>
+        <button type="button" class="secondary" data-nem-track-keep="1">Put the utility track back on this job</button>
+      </article></div>`;
+  }
+  if (kept) {
+    return `<p class="muted">${esc(kept.by)} kept the utility track on this job${kept.at ? ` on ${esc(String(kept.at).slice(0, 10))}` : ""}.
+      <button type="button" class="secondary" data-nem-track-keep="0">Let the utility's record drop it again</button></p>`;
+  }
+  return "";
+}
+
+async function saveNemTrackKeep(keep, btn) {
+  if (!state.selectedProjectId) return;
+  const auth = await authForDecision();
+  const lede = keep
+    ? "Put the utility track back on this job? It files an interconnection application as usual."
+    : "Let the utility's recorded storage rule drop this job's utility track again? QC re-runs and decides.";
+  const decidedBy = namedPersonConsent(auth, lede, "decide whether this job files its utility application", "whether a job files its utility application is decided by a named person");
+  if (decidedBy == null) return;
+  if (btn) btn.disabled = true;
+  try {
+    const detail = await api(`/api/projects/${state.selectedProjectId}/utility-track/keep`, { method: "PUT", body: JSON.stringify({ keep, ...(decidedBy ? { decidedBy } : {}) }) });
+    if (detail && detail.project) state.detail = detail;
+    await loadSubmittalTracks();
+    renderDetail();
+    showMessage(keep ? "The utility track is back on this job." : "QC re-ran; the utility's record decides the track again.", "info");
+  } catch (err) {
+    showMessage(`Saving failed: ${err.message}`, "error");
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
 function renderSubmittalTracks() {
   const tracks = state.submittalTracks;
   const wrap = $("submittalTracks");
@@ -5859,8 +5903,11 @@ function renderSubmittalTracks() {
   // "Utility net metering (NEM) / interconnection", "… interconnection + export credit (net
   // billing …)", "… interconnection only …", or "… (net-metering program not yet confirmed)");
   // the header repeats that phrase and falls back to the neutral "interconnection".
-  wrap.innerHTML = group(utilityGroupTitle(utility), utility, "utility-filing") + group("AHJ — Permit(s)", permits, "permit-process") + closeoutGroupHtml();
+  wrap.innerHTML = nemTrackDropHtml(state.detail) + group(utilityGroupTitle(utility), utility, "utility-filing") + group("AHJ — Permit(s)", permits, "permit-process") + closeoutGroupHtml();
   bindCloseoutMilestones(wrap);
+  wrap.querySelectorAll("button[data-nem-track-keep]").forEach((btn) => {
+    btn.addEventListener("click", () => saveNemTrackKeep(btn.dataset.nemTrackKeep === "1", btn));
+  });
   wrap.querySelectorAll("button[data-lookup-verify]").forEach((btn) => {
     btn.addEventListener("click", () => verifyTrackLookup(btn.dataset.lookupVerify, btn));
   });

@@ -38,6 +38,7 @@ import { isInformationalPageUrl, isUtilityPlatformUrl, portalHostOf, recipeDisci
 import { classifyChannelWords, normalizeAhjName, permitAnswerForTrackFrom, permitChannelLabel, permitProcessFor, projectForTrack, trackIssuer } from "./permitProcess";
 import { statewideDecisionFor, statewideUrlRefusal } from "./statewideEvidence";
 import { nemFiledWithPermit, utilityTrackPresentation, type NemFiledWithPermit } from "./utilityFilingLookup";
+import { nemTrackDropFor } from "./utilityStorageModes";
 import { nowIso } from "./time";
 import { hasMpuScope } from "./serviceScope";
 import { essPermitStep, type EssPermitStep } from "./essRequirements";
@@ -162,14 +163,17 @@ function hasUtility(project: ProjectRecord): boolean {
 }
 
 /**
- * The tracks a project must file. NEM whenever there's a utility, plus the AHJ
+ * The tracks a project must file. NEM whenever there's a utility (unless a person's cited storage
+ * record dropped it on this job: nemTrackDropFor), plus the AHJ
  * permit(s): one combo permit, or separate building + electrical when the AHJ
  * files them apart. "unknown" structure defaults to a single combo permit (the
  * common case) so the operator always has at least one actionable permit track.
  */
 export function requiredTracks(project: ProjectRecord): SubmittalTrackType[] {
   const tracks: SubmittalTrackType[] = [];
-  if (hasUtility(project)) tracks.push("nem");
+  // A storage job whose utility's PERSON-verified record says its battery mode needs no application
+  // (draft 10): THE ONE PREDICATE, read here so every door that asks for the tracks loses it together.
+  if (hasUtility(project) && !nemTrackDropFor(project)) tracks.push("nem");
 
   // Resolve combo vs separate across all signals (AHJ process notes/flags included),
   // so AHJs like Beaverton that file SEPARATE building + electrical permits split into

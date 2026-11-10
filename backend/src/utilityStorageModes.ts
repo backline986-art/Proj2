@@ -11,26 +11,38 @@
 //   - the page it was read on and the page's own words, which must name storage AND each mode,
 //   - the NAMED PERSON who recorded it, and when.
 //
-// RULE 3, STRICTER THAN THE OFFICIAL TIER: only a person writes it (PUT
-// /api/projects/:id/utility-filing/storage-modes). A lookup never writes the column (its own column, so
-// a lookup's payload write never touches it), a model never does, and an official-source row is not
-// enough (coordinator note on #673: a storage exemption stays person-verified only).
+// RULE 3, STRICTER THAN THE OFFICIAL TIER: the one writer today is a person (PUT
+// /api/projects/:id/utility-filing/storage-modes, tier "person"). A lookup never writes the column (its
+// own column, so a lookup's payload write never touches it) and a model never does. A future import or
+// official-source read must stamp its own tier ("seeded" / "official"): such a record is SHOWN, never
+// acted on (coordinator note on #673 and draft 10: a storage exemption drops a track only when a
+// person verified it).
 //
-// What it does in this PR: nemStorageExemption() is the ONE answer to "does this job's battery need
-// no utility application?", and QC says it on the job (qc.nem_storage_mode). The NEM track itself is
-// NOT dropped automatically yet (requiredTracks has no db handle, and dropping it reaches done-ness,
-// nextStep, Stage and autopilot): it stays on the board, so nothing about the filing flow changes.
+// nemStorageExemption() is the ONE answer to "does this job's battery need no utility application?".
+// QC (nemTrackDrop.ts) acts on it ONLY when the record is a person's (tier "person", a named verifier
+// and a date): it stamps the drop on the job (projects.nem_track_exemption_json, v72) and
+// requiredTracks() reads the stamp through nemTrackDropFor() below, so done-ness, nextStep, Stage,
+// autopilot and the tracks screen all lose the track together, with the reason. A record on any
+// other tier (a seeded import, an official-source read: draft 10, rule 3 — the official tier never
+// decides WHETHER a filing is sent) is shown on the job as information for a person to verify, and
+// the track stays. A named person can put the track back on one job (keptBy), and withdrawing the
+// record brings it back on every job at its next QC run.
 // ---------------------------------------------------------------------------
 
 import type { AppDb } from "./db";
-import type { ParserPayload, ProjectRecord, StorageOperatingMode } from "../../shared/src/types";
+import type { NemTrackDrop, ParserPayload, ProjectRecord, StorageOperatingMode } from "../../shared/src/types";
 import { STORAGE_OPERATING_MODES } from "../../shared/src/types";
 import { normalizeUtilityName, utilityFilingKey } from "./utilityFilingLookup";
-import { resolveJobScope, scopeHasNewPv, storageOperatingMode } from "./jobScope";
+import { newModuleEvidence, resolveJobScope, scopeHasNewPv, storageOperatingMode } from "./jobScope";
+
+/** Who stands behind a record. Only "person" ever drops a track; a record with no tier is treated as
+ *  NOT a person's (fail closed: a writer that forgets the tier never drops anything). */
+export type StorageModeTier = "person" | "official" | "seeded";
 
 export interface UtilityStorageModeRecord {
   /** The modes this utility takes NO application for, as its page says. */
   modesWithoutApplication: StorageOperatingMode[];
+  tier?: StorageModeTier;
   sourceUrl: string;
   quote: string;
   verifiedBy: string;
@@ -51,14 +63,18 @@ export const quoteNamesStorageMode: Record<StorageOperatingMode, (quote: string)
   export: (q) => /\bexport/i.test(q.replace(NEGATED_EXPORT, " ")),
 };
 
-/** The record is one a person stated with a page and words that name storage and every mode it lists. */
-export function storageModeRecordUsable(r: UtilityStorageModeRecord | null | undefined): r is UtilityStorageModeRecord {
-  if (!r || !str(r.verifiedBy) || !str(r.verifiedAt)) return false;
-  if (!/^https?:\/\//i.test(str(r.sourceUrl))) return false;
+/** The record cites a page whose words name storage and every mode it lists (any tier). */
+export function storageModeRecordCited(r: UtilityStorageModeRecord | null | undefined): r is UtilityStorageModeRecord {
+  if (!r || !/^https?:\/\//i.test(str(r.sourceUrl))) return false;
   const quote = str(r.quote);
   if (quote.length < 8 || !NAMES_STORAGE.test(quote)) return false;
   const modes = Array.isArray(r.modesWithoutApplication) ? r.modesWithoutApplication : [];
   return modes.length > 0 && modes.every((m) => (STORAGE_OPERATING_MODES as readonly string[]).includes(m) && quoteNamesStorageMode[m](quote));
+}
+
+/** The record is a PERSON's: cited, tier "person", a named verifier and a date. The only kind that drops a track. */
+export function storageModeRecordUsable(r: UtilityStorageModeRecord | null | undefined): r is UtilityStorageModeRecord {
+  return storageModeRecordCited(r) && r.tier === "person" && Boolean(str(r.verifiedBy)) && Boolean(str(r.verifiedAt));
 }
 
 function parseRecord(raw: unknown): UtilityStorageModeRecord | null {
@@ -94,6 +110,7 @@ export function recordUtilityStorageModes(
   if (!rowExists) return { saved: false, reason: "No filing record is on file for this utility yet; its filing lookup runs first.", record: null };
   const record: UtilityStorageModeRecord = {
     modesWithoutApplication: [...new Set(input.modesWithoutApplication)],
+    tier: "person",
     sourceUrl: str(input.sourceUrl),
     quote: str(input.quote).slice(0, 300),
     verifiedBy: str(input.verifiedBy).slice(0, 120),
@@ -116,14 +133,18 @@ export interface NemStorageExemption {
   utility: string;
   mode: StorageOperatingMode;
   record: UtilityStorageModeRecord;
+  /** A person's record (storageModeRecordUsable): the only kind that may drop the track. Otherwise the
+   *  exemption is information for a person to verify. */
+  personVerified: boolean;
 }
 
 /**
  * THE ONE ANSWER: does this job's battery need no utility application? Only when ALL hold:
  *   - the job adds no new PV (a storage scope from jobScope.ts — new PV always files);
  *   - its operating mode is classified (an unstated mode files);
- *   - the utility's usable, person-recorded storage record lists that mode.
- * Anything else is null, and the NEM track stays exactly as it is. A read.
+ *   - the utility's cited storage record lists that mode.
+ * Anything else is null. `personVerified` says whether the record may act (a person's) or is only
+ * information (seeded / official / no tier). A read.
  */
 export function nemStorageExemption(
   db: AppDb | null,
@@ -135,6 +156,24 @@ export function nemStorageExemption(
   const mode = storageOperatingMode(project.parserSnapshot);
   if (!mode) return null;
   const { record } = utilityStorageModes(db, project.state ?? "", project.utility ?? "");
-  if (!storageModeRecordUsable(record) || !record.modesWithoutApplication.includes(mode)) return null;
-  return { utility: project.utility, mode, record };
+  if (!storageModeRecordCited(record) || !record.modesWithoutApplication.includes(mode)) return null;
+  return { utility: project.utility, mode, record, personVerified: storageModeRecordUsable(record) };
+}
+
+/**
+ * THE ONE PREDICATE EVERY DOOR ASKS (through requiredTracks): has this job's utility track been dropped?
+ * The QC-written stamp, re-checked against the record in hand so a stale stamp never drops a track:
+ * no person kept the track, the stamp names this job's utility, a named verifier, a cited page, the
+ * job shows no new modules and its battery mode is still the one the record covers. No db: a read
+ * of the ProjectRecord (mapProject maps the column).
+ */
+export function nemTrackDropFor(project: Pick<ProjectRecord, "utility" | "parserSnapshot" | "nemTrackExemption">): NemTrackDrop | null {
+  const state = project.nemTrackExemption;
+  const drop = state?.drop;
+  if (!drop || str(state?.keptBy)) return null;
+  if (!normalizeUtilityName(project.utility ?? "") || normalizeUtilityName(drop.utility) !== normalizeUtilityName(project.utility ?? "")) return null;
+  if (!str(drop.verifiedBy) || !str(drop.verifiedAt) || !/^https?:\/\//i.test(str(drop.sourceUrl)) || !str(drop.quote)) return null;
+  if (newModuleEvidence(project.parserSnapshot).length > 0) return null;
+  if (storageOperatingMode(project.parserSnapshot) !== drop.mode) return null;
+  return drop;
 }
