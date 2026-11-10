@@ -749,6 +749,13 @@ export interface ResearchedPermitQuote {
   jurisdiction: string;
 }
 
+/** The same quote buildPaymentQuote answers (the portal's own figure on top of the researched
+ *  ladder), WITHOUT writing the submission_payments row: for a read path that must write nothing
+ *  (the approval sheet, review-audit draft 02). */
+export function readPaymentQuote(db: AppDb, project: ProjectRecord, trackInput?: string | null): SubmissionPaymentQuote {
+  return computePaymentQuote(db, project, trackInput, false).quote;
+}
+
 export function researchedPermitQuote(db: AppDb, project: ProjectRecord, trackInput?: string | null): ResearchedPermitQuote {
   return computePaymentQuote(db, project, trackInput, false).researched;
 }
