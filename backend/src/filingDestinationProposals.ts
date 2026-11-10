@@ -39,7 +39,7 @@
 // ---------------------------------------------------------------------------
 import crypto from "node:crypto";
 import type { AhjProcessProfile, ProjectRecord, SubmittalTrackType } from "../../shared/src/types";
-import { isOfficialSourceHost, quoteText, siteOfHost, sourceHostOf } from "../../shared/src/officialSource";
+import { citationShortfalls, quoteText, siteOfHost, sourceHostOf } from "../../shared/src/officialSource";
 import type { AppDb } from "./db";
 import { addAuditLog } from "./audit";
 import { nowIso } from "./time";
@@ -104,7 +104,6 @@ interface Candidate {
 }
 
 const EMAIL_IN_TEXT = /[a-z0-9.!#$%&'*+/=?^_`{|}~-]+@(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,}/gi;
-const ISO_TIME = /^\d{4}-\d{2}-\d{2}(?:T|$)/;
 
 /** A scheme-less value ("permits.example.gov/apply") as an https URL; "" when it is not a URL. */
 export function addressAsUrl(value: string): string {
@@ -188,15 +187,22 @@ export function utilityCandidates(lookup: ReturnType<typeof getUtilityFilingLook
   return out;
 }
 
-/** Why a candidate is not proposed at all (empty = it is). The official-page rule, words and time. */
+/** The words do not contain the address: the one shortfall that does NOT stop a proposal (an official
+ *  page usually links its portal from words like "Apply online"). It is shown on the card instead. */
+const QUOTE_LACKS_VALUE = "the quote does not contain the value";
+
+/**
+ * Why a candidate is not proposed at all (empty = it is): the ONE citation test every official-source
+ * reader uses (shared/src/officialSource.citationShortfalls — the authority's own official host, a
+ * verbatim quote, a fetched-at time). Whether the quote contains the address is answered separately
+ * (quoteNamesAddress) and shown; it never makes a proposal confirmable without a person.
+ */
 export function candidateSkipReasons(c: Candidate, verifiedAuthorityHosts: readonly string[]): string[] {
-  const reasons: string[] = [];
-  const host = sourceHostOf(c.sourceUrl);
-  if (!host) reasons.push("no http(s) source page");
-  else if (!isOfficialSourceHost(c.sourceUrl, verifiedAuthorityHosts)) reasons.push(`${host} is not the authority's own official host (a government host, or a domain a person verified as its own)`);
-  if (quoteText(c.quote).length < 3) reasons.push("no verbatim words from the page");
-  if (!ISO_TIME.test(str(c.fetchedAt))) reasons.push("no time the page was read");
-  return reasons;
+  const { reasons } = citationShortfalls({
+    sourceUrl: c.sourceUrl, quote: c.quote, fetchedAt: c.fetchedAt, verifiedAuthorityHosts,
+    quoteStatesValue: (q) => quoteNames(c.kind, c.address, q),
+  });
+  return reasons.filter((r) => r !== QUOTE_LACKS_VALUE);
 }
 
 /** Words in an authority's name that say what KIND of body it is, not WHICH one ("City of", "Power"). */

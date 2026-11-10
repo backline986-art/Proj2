@@ -146,8 +146,8 @@ await check("(a) the permit portal is proposed from the city's official page; th
   assert.equal(p.quoteNamesAddress, false, "the words do not contain the address: the card must say so");
   assert.deepEqual(p.problems, []);
   assert.equal(g.skipped.length, 2, g.skipped.join("\n"));
-  assert.match(g.skipped.join("\n"), /permit-directory\.example.*not the authority's own official host/);
-  assert.match(g.skipped.join("\n"), /no time the page was read/);
+  assert.match(g.skipped.join("\n"), /permit-directory\.example.*not a government host or a domain a person verified/);
+  assert.match(g.skipped.join("\n"), /no fetched-at time/);
   assert.ok(!JSON.stringify(g).includes("solar@brightwater-zz.gov"), "an email in a non-door field became a door");
 });
 
