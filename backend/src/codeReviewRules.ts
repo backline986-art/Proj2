@@ -1,6 +1,6 @@
 import type { AhjProcessProfile, CodeReference, NecEditionRequirements, ProjectRecord, ReviewerFinding, ReviewerFindingEvidence, StructureTypeFact } from "../../shared/src/types";
 import { batteryStatus, isPlaceholderBatteryModel } from "../../shared/src/batteryControls";
-import { sizesDisagree } from "./sizesAgree";
+import { acSizesDisagree, inverterAcFromPlan } from "./sizesAgree";
 import type { EffectiveCodeContext } from "./codeProfiles";
 import { FIRE_PATHWAY_PATTERNS, packageShowsSld } from "./projectEvidence";
 import { evaluateElectricalSizingFindings } from "./electricalSizing";
@@ -2081,29 +2081,22 @@ export function evaluateDesignCodeFindings(
 
   // THE AC SIZE AGAINST THE INVERTERS (review-audit draft 04): the AC nameplate is what the utility
   // application carries and what its reviewer checks, and the gate only cross-checked DC. The inverters'
-  // AC = units x per-unit output. invOutputW / pvMicroOutputW hold the per-unit output CURRENT in amps
-  // (the parser prompt, despite the name); real payloads sometimes carry watts instead, so a value above
-  // 100 is read as watts (baselineRules' plausibility guard) and an amp value as amps x the service's
-  // single-phase voltage (208 when the plan says so, else 240). Skipped where the sum is a different
-  // number on purpose, as the approval sheet skips it: a battery (a hybrid or battery inverter adds or
-  // caps AC) or an existing system on the same service. Same tolerance as the sheet (sizesAgree.ts).
+  // AC comes from sizesAgree.inverterAcFromPlan, the ONE reader the approval sheet's AC row uses too
+  // (draft 11): per-unit output in amps x the service's single-phase voltage (or watts above 100),
+  // skipped on a battery, an existing system or a three-phase service. Same tolerance as the sheet.
   // A WARNING, not a blocker: the voltage is the plan's or a single-phase assumption, so the derived
   // figure is an estimate, unlike the DC product of module count and wattage.
   const acKw = project.systemSizeAcKw ?? num(project, ["acKw"]);
-  const stringOut = num(project, ["invOutputW"]);
-  const unitOut = stringOut ?? num(project, ["pvMicroOutputW"]);
-  const unitQty = stringOut != null ? num(project, ["invQty"]) : (num(project, ["pvMicroQty"]) ?? num(project, ["invQty"]));
-  const voltsRaw = str(project, "serviceVoltage");
-  const threePhase = /\b(?:277|480)\b|3\s*(?:ph|phase)|three[-\s]?phase/i.test(voltsRaw);
-  const batteryJob = batteryStatus(project.parserSnapshot as Record<string, unknown> | undefined) === "yes";
-  if (acKw != null && acKw > 0 && unitOut != null && unitOut > 0 && unitQty != null && unitQty > 0
-      && !threePhase && !batteryJob && !project.existingSystem?.hasExistingSystem) {
-    const volts = /\b208\b/.test(voltsRaw) ? 208 : 240;
-    const asWatts = unitOut > 100;
-    const perUnitKw = asWatts ? unitOut / 1000 : (unitOut * volts) / 1000;
-    const derivedAc = unitQty * perUnitKw;
-    if (sizesDisagree(acKw, derivedAc)) {
-      const how = asWatts ? `${unitQty} x ${unitOut} W` : `${unitQty} x ${unitOut} A x ${volts} V${voltsRaw ? "" : " (assumed)"}`;
+  const acReading = acKw != null && acKw > 0
+    ? inverterAcFromPlan(
+      { num: (key) => num(project, [key]), text: (key) => str(project, key) },
+      { battery: batteryStatus(project.parserSnapshot as Record<string, unknown> | undefined) === "yes", existingSystem: Boolean(project.existingSystem?.hasExistingSystem) },
+    )
+    : null;
+  if (acKw != null && acReading) {
+    const derivedAc = acReading.kw;
+    if (acSizesDisagree(acKw, acReading)) {
+      const how = acReading.how;
       out.push(finding({
         id: "city.elec.ac-size-mismatch",
         severity: "warning",
