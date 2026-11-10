@@ -21,6 +21,8 @@ import { ensureFeeSchedulesResearched } from "./feeSchedules";
 import { requiredTracks } from "./submittalTracks";
 import { qcMayMoveStatus } from "./projectStage";
 import { looksLikePlaceholderIdentifier } from "../../shared/src/companyFacts";
+import { COMMERCIAL_HOLD_LABEL, PROBABLY_COMMERCIAL_LABEL } from "../../shared/src/projectClass";
+import { projectClassStatusFor } from "./projectClassHold";
 
 // Look up whether the AHJ for this project uses a portal platform that requires
 // individual sheets to be split and uploaded separately (e.g. ProjectDox, EnerGov).
@@ -585,6 +587,37 @@ export function runQcForProject(db: AppDb, projectId: string, options: QcRunOpti
           baseline.fieldName ? parserField(payload, baseline.fieldName) : "",
           baseline.message,
           baseline.qcStatus === "fail",
+        );
+      }
+    }
+
+    // THE CLASS SCREEN (#688; shared/src/projectClass.ts). Rows appear ONLY for a job a person set
+    // to commercial or whose own evidence raises an UNCONFIRMED "probably commercial" signal, so a
+    // residential job's QC is exactly what it was. A signal crossing a verbatim-cited cap is a
+    // blocker (fail); every other signal, the strict 25 kW default included, is a warning. The way
+    // out is a person confirming the class (setProjectClass), not a review item.
+    const classStatus = projectClassStatusFor(db, projectId);
+    if (classStatus?.projectClass === "commercial") {
+      warningCount += 1;
+      db.run(
+        `INSERT INTO qc_results (id, project_id, qc_status, rule_id, rule_name, message, severity, created_at)
+         VALUES (?, ?, 'warning', 'project-class.commercial', ?, ?, 'warning', ?)`,
+        [id(), projectId, COMMERCIAL_HOLD_LABEL,
+          "A person set this job's class to commercial. Automation does not stage, replay, file or learn from it; a person works it.",
+          createdAt],
+      );
+    } else if (classStatus) {
+      for (const sig of classStatus.unconfirmed) {
+        const qcStatus = sig.severity === "blocker" ? "fail" : "warning";
+        if (qcStatus === "fail") failCount += 1;
+        if (qcStatus === "fail" && !priorFails.has(`project-class.${sig.code}`)) newFailsOutsideBill += 1;
+        if (qcStatus === "warning") warningCount += 1;
+        db.run(
+          `INSERT INTO qc_results (id, project_id, qc_status, rule_id, rule_name, message, severity, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+          [id(), projectId, qcStatus, `project-class.${sig.code}`, PROBABLY_COMMERCIAL_LABEL,
+            `${sig.message} Confirm the job's class on the project page — until a person does, automation holds this job.`,
+            sig.severity, createdAt],
         );
       }
     }

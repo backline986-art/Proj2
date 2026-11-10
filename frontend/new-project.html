@@ -175,6 +175,15 @@
           <div class="np-field"><label for="acKw">System size AC (kW)</label><input id="acKw" name="acKw" inputmode="decimal" /></div>
           <div class="np-field"><label for="exportKw">Total export (kW)</label><input id="exportKw" name="exportKw" inputmode="decimal" /></div>
           <div class="np-field"><label for="jobValue">Job value ($)</label><input id="jobValue" name="jobValue" inputmode="decimal" placeholder="Installed contract price" /></div>
+          <!-- THE JOB'S CLASS (#688). Commercial holds the job for a person from the start: no
+               staging, replay, automatic filing or learning. Residential is the default; a job whose
+               own evidence looks commercial is still flagged for a person to confirm. -->
+          <div class="np-field"><label for="projectClass">Job class</label>
+            <select id="projectClass" name="projectClass">
+              <option value="residential">Residential</option>
+              <option value="commercial">Commercial — held for a person</option>
+            </select>
+          </div>
         </div>
       </section>
 

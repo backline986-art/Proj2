@@ -438,6 +438,30 @@
              rail with no JS change. Every id is unchanged. -->
         <aside class="detail-rail" aria-label="Project status and next step">
           <div id="nextStepBanner" class="next-step-banner" hidden></div>
+          <!-- THE JOB'S CLASS (#688). Residential unless a person says commercial. A commercial job,
+               or one whose own evidence says "probably commercial" (not a dwelling, a three-phase /
+               208-480 V service, or over the residential size cap) is HELD for a person: automation
+               does not stage, replay, file or learn from it. A named person confirms the class here;
+               the confirmation covers exactly the evidence shown, so a changed size or service asks
+               again. Rendered by dashboard.js renderProjectClass from detail.classStatus. -->
+          <section id="projectClassPanel" class="project-class-panel" hidden>
+            <div id="projectClassSummary" class="muted" style="font-size:12px;margin:4px 0"></div>
+            <ul id="projectClassSignals" style="font-size:12px;margin:4px 0 6px 18px;padding:0"></ul>
+            <div class="form-row">
+              <label style="flex:1">Job class
+                <select id="projectClassSelect">
+                  <option value="residential">Residential</option>
+                  <option value="commercial">Commercial</option>
+                </select>
+              </label>
+              <label style="flex:1">Your name
+                <input id="projectClassBy" type="text" maxlength="120" placeholder="Who is confirming" autocomplete="name" />
+              </label>
+            </div>
+            <div class="actions">
+              <button id="confirmProjectClassBtn" class="secondary"><i data-lucide="badge-check"></i><span>Confirm class</span></button>
+            </div>
+          </section>
           <div class="actions autopilot-actions">
             <span class="actions-label">Autopilot:</span>
             <button id="startAutopilotBtn" class="primary"><i data-lucide="rocket"></i><span>Stage portals · Autopilot</span></button>

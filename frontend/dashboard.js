@@ -60,6 +60,7 @@ const state = {
   // Which project the status-override panel is currently holding an unsent edit for.
   // Lets a background re-render keep a half-typed reason, and a project switch drop it.
   statusOverrideFor: null,
+  projectClassFor: null,
   knowledgeProfiles: [],
   ahjForms: [],
   signatures: [],
@@ -1361,6 +1362,7 @@ function renderProjectTable() {
 // reading(s)…"), so the chip's count is the server's count, never a second client tally.
 const NEXT_STEP_CHIP = {
   operator_blocked: { pill: "to_fix", tone: "danger", label: "Blocked" },
+  class_held: { pill: "to_fix", tone: "warning", label: "Held: class" },
   correction_overdue: { pill: "corrections", tone: "danger", label: "Correction overdue" },
   portal_paused: { pill: "to_fix", tone: "warning", label: "Portal paused" },
   payment_needed: { pill: "to_fix", tone: "warning", label: "Payment needed" },
@@ -3572,6 +3574,7 @@ const NEXT_STEP_BUTTON_LABELS = {
   addPermitTargetBtn: "Add tracking target",
   copyHandoffPacketBtn: "Copy handoff packet",
   sendHandoffPacketBtn: "Send handoff packet",
+  confirmProjectClassBtn: "Confirm class",
 };
 
 // Take the operator TO a control or panel: open every <details> it sits in (stage accordion,
@@ -3743,6 +3746,66 @@ function renderNextStep() {
 // round cannot reappear here, and `blocked` (whose only writer is this control)
 // cannot fall out of it by omission.
 const STATUS_OVERRIDE_EXCLUDED = ["handoff_ready"];
+
+// THE JOB'S CLASS PANEL (#688). Shows where the job stands (detail.classStatus — the same read every
+// automation door makes), the evidence behind a "probably commercial" flag, and the control a named
+// person uses to confirm it. Every value is esc()'d.
+function renderProjectClass() {
+  const panel = $("projectClassPanel");
+  if (!panel) return;
+  const detail = state.detail || {};
+  const project = detail.project;
+  const cs = detail.classStatus;
+  if (!project || !cs) { panel.hidden = true; state.projectClassFor = null; return; }
+  panel.hidden = false;
+  const summary = $("projectClassSummary");
+  const list = $("projectClassSignals");
+  const select = $("projectClassSelect");
+  const by = $("projectClassBy");
+  const confirmed = cs.confirmation
+    ? ` Confirmed ${esc(cs.confirmation.projectClass)} by ${esc(cs.confirmation.by)}${cs.confirmation.at ? ` on ${esc(String(cs.confirmation.at).slice(0, 10))}` : ""}.`
+    : "";
+  if (summary) {
+    summary.innerHTML = cs.projectClass === "commercial"
+      ? `<strong>Commercial job — held for a person.</strong> Automation does not stage, replay, file or learn from it.${confirmed}`
+      : cs.held
+        ? `<strong>Probably commercial — confirm class.</strong> Automation holds this job until a person confirms it.${confirmed}`
+        : `Residential.${confirmed}`;
+  }
+  if (list) {
+    const shown = cs.projectClass === "commercial" ? [] : (cs.unconfirmed || []);
+    list.innerHTML = shown.map((sig) => `<li>${sig.severity === "blocker" ? "<strong>Blocker:</strong> " : ""}${esc(sig.message)}</li>`).join("");
+    list.hidden = shown.length === 0;
+  }
+  // A half-typed name survives a background re-render of the same project (renderStatusOverride's idiom).
+  const sameProject = state.projectClassFor === project.id;
+  if (select && !sameProject) select.value = cs.projectClass === "commercial" ? "commercial" : "residential";
+  if (by && !sameProject) by.value = "";
+  state.projectClassFor = project.id;
+}
+
+async function confirmProjectClass() {
+  const projectId = state.selectedProjectId;
+  if (!projectId) return;
+  const projectClass = ($("projectClassSelect")?.value || "").trim();
+  const decidedBy = ($("projectClassBy")?.value || "").trim();
+  if (!projectClass) { showMessage("Pick the job's class.", "error"); return; }
+  const btn = $("confirmProjectClassBtn");
+  if (btn) btn.disabled = true;
+  try {
+    await api(`/api/projects/${projectId}/class`, { method: "POST", body: JSON.stringify({ projectClass, decidedBy }) });
+    state.projectClassFor = null;
+    await loadProjects();
+    await selectProject(projectId);
+    showMessage(projectClass === "commercial"
+      ? "Class set to commercial — the job is held for a person."
+      : "Class confirmed residential — recorded with your name.", "info");
+  } catch (err) {
+    showMessage(err.message || "Could not set the class.", "error");
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
 
 function renderStatusOverride() {
   const select = $("statusOverrideSelect");
@@ -4700,6 +4763,7 @@ function renderDetail() {
   safeRender("assignSelect", syncProjectAssignSelect);
   safeRender("nextStep", renderNextStep);
   safeRender("statusOverride", renderStatusOverride);
+  safeRender("projectClass", renderProjectClass);
   safeRender("handoffBanner", renderHandoffBanner);
   safeRender("permitForm", syncPermitForm);
   safeRender("workflow", renderWorkflow);
@@ -10563,6 +10627,7 @@ $("startAutopilotBtn").addEventListener("click", startAutopilot);
 $("approveSubmitBtn").addEventListener("click", approveAndSubmit);
 $("deleteProjectBtn").addEventListener("click", deleteSelectedProject);
 $("applyStatusOverrideBtn")?.addEventListener("click", applyStatusOverride);
+$("confirmProjectClassBtn")?.addEventListener("click", confirmProjectClass);
 $("addCorrectionBtn").addEventListener("click", addCorrection);
 $("addPermitTargetBtn").addEventListener("click", addPermitTarget);
 $("recordPermitStatusBtn").addEventListener("click", () => recordPermitStatus("manual"));
