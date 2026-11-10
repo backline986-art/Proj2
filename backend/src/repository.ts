@@ -448,7 +448,7 @@ function mapProject(row: ProjectRow): ProjectRecord {
     // The edit version an editor saves against (#440, migration v51). Read via the cast, like
     // stage_detail, so row literals elsewhere keep compiling.
     editVersion: Number((row as Record<string, unknown>).edit_version ?? 0) || 0,
-    // THE JOB'S CLASS (#688, migration v67) and the person who confirmed it, read via the cast like
+    // THE JOB'S CLASS (#688, migration v69) and the person who confirmed it, read via the cast like
     // stage_detail. The service phase / voltage are the parser's keys (legacy keys as fallbacks).
     projectClass: normalizeProjectClass((row as Record<string, unknown>).project_class),
     projectClassConfirmation: parseProjectClassConfirmation((row as Record<string, unknown>).project_class_confirmation),
@@ -784,11 +784,9 @@ export function createProject(
 ): ProjectDetail {
   // A new project is parser/intake output: it never carries a human micro-supersession (#270).
   // THE INTAKE FORM'S "Job class" (#688) is the class column, never a parser key or an extracted field.
-  const { [MICRO_SUPERSEDED_KEY]: _forgedMarker, projectClass: intakeClass, ...parsed } = payload as Record<string, unknown>;
-  if (intakeClass !== undefined) {
-    const { projectClass: _class, ...rest } = payload as Record<string, unknown>;
-    payload = rest as ParserPayload;
-  }
+  const { projectClass: intakeClass, ...withoutClass } = payload as Record<string, unknown>;
+  payload = withoutClass as ParserPayload;
+  const { [MICRO_SUPERSEDED_KEY]: _forgedMarker, ...parsed } = withoutClass;
   const projectClass = options.projectClass ?? (typeof intakeClass === "string" ? intakeClass : undefined);
   const project = normalizeProject(id(), parsed as ParserPayload);
   db.transaction(() => {
