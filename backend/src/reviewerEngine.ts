@@ -1359,8 +1359,21 @@ function addParcelJurisdictionFindings(project: ProjectRecord, profile: AhjProce
       true,
       {
         cityFeedback: `The parcel is in ${reading.parcelAgency}, not ${ahj}.`,
-        designTeamAction: `Confirm the parcel's jurisdiction, then correct the project AHJ to ${reading.parcelAgency} (or record ${ahj} as the agency that issues for it in the permit-process lookup) before filing the permit.`,
+        designTeamAction: `Confirm the parcel's jurisdiction, then correct the project AHJ to ${reading.parcelAgency} before filing the permit — or, if ${ahj} does file for this parcel, record that with your name and the reason (Accept on this finding).`,
       },
+    ));
+    return;
+  }
+  if (reading?.status === "agrees" && reading.parcelAgency && reading.acceptedBy) {
+    // A NAMED PERSON accepted that this AHJ files for the parcel (draft 16 A): a pass that names them and
+    // keeps the parcel's own answer in view — never automatic, and gone when the address, AHJ or answer changes.
+    const a = reading.acceptedBy;
+    findings.push(finding(
+      "reviewer.jurisdiction.parcel",
+      "pass",
+      "ahj_profile",
+      `Jurisdiction accepted by ${a.by}: ${ahj} files for this parcel`,
+      `${from} places the job's address in ${reading.parcelAgency}, not ${ahj}. ${a.by} accepted on ${a.at.slice(0, 10)} that ${ahj} files for this parcel: "${a.reason}".`,
     ));
     return;
   }

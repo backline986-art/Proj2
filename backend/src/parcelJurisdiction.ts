@@ -429,6 +429,101 @@ export interface ParcelJurisdictionReading {
   checkedAt?: string;
   tier?: LookupSourceTier;
   mayBlock?: boolean;
+  /** A NAMED PERSON accepted that the project AHJ files for this parcel although the parcel lies in
+   *  another jurisdiction (draft 16 A). Present only on an "agrees" reading that this record turned. */
+  acceptedBy?: { by: string; at: string; reason: string };
+}
+
+// ── A named person's acceptance (draft 16 A) ───────────────────────────────────────────────────
+/** "This AHJ files for this parcel": a named person's answer to ONE disagreement, bound to the address
+ *  (hash), the project AHJ and the parcel's jurisdiction it was given against. */
+export interface ParcelJurisdictionAcceptance {
+  ahj: string;
+  parcelAgency: string;
+  addressKey: string;
+  reason: string;
+  by: string;
+  at: string;
+}
+
+/** The job's acceptance record, or null. Reads only. */
+export function parcelAcceptanceOf(db: AppDb, projectId: string): ParcelJurisdictionAcceptance | null {
+  try {
+    const row = db.get<Row>("SELECT parcel_jurisdiction_acceptance_json AS j FROM projects WHERE id = ?", [projectId]);
+    const raw = str(row?.j);
+    if (!raw) return null;
+    const o = JSON.parse(raw) as Record<string, unknown>;
+    const rec = { ahj: str(o.ahj), parcelAgency: str(o.parcelAgency), addressKey: str(o.addressKey), reason: str(o.reason), by: str(o.by), at: str(o.at) };
+    return rec.by && rec.ahj && rec.parcelAgency && rec.addressKey ? rec : null;
+  } catch { return null; }
+}
+
+/** Does the acceptance answer THIS disagreement? The same address, the same AHJ and the same parcel
+ *  jurisdiction it was given against; anything changed and the blocker is back. */
+function acceptanceApplies(a: ParcelJurisdictionAcceptance | null, addressKey: string, ahj: string, parcelAgency: string): boolean {
+  return !!a && a.addressKey === addressKey && sameAgencyName(a.ahj, ahj) && sameAgencyName(a.parcelAgency, parcelAgency);
+}
+
+/** Why an acceptance cannot be recorded now (null = it can): only a CURRENT disagreement can be accepted. */
+function acceptRefusal(reading: ParcelJurisdictionReading): string | null {
+  if (reading.status === "disagrees") return null;
+  if (reading.acceptedBy) return "This parcel's jurisdiction is already accepted for this AHJ.";
+  if (reading.status === "agrees") return "The parcel already agrees with the project AHJ: there is nothing to accept.";
+  return `The parcel's jurisdiction has not been checked (${reading.reason}): there is nothing to accept yet.`;
+}
+
+/**
+ * A NAMED PERSON ACCEPTS THAT THE PROJECT AHJ FILES FOR THIS PARCEL (draft 16 A). Only against a
+ * current disagreement, with a reason; `by` is the person the route named (server.namedPersonDecider —
+ * never automatic). The gate then shows a pass naming the person instead of the blocker, until the
+ * address, the AHJ or the parcel's answer changes. Audited; the gate is re-judged.
+ */
+export async function acceptParcelJurisdiction(
+  db: AppDb,
+  project: Pick<ProjectRecord, "id" | "projectAddress" | "city" | "state" | "zip" | "ahj">,
+  input: { reason: string; by: string },
+): Promise<ParcelJurisdictionReading> {
+  const { HttpError } = await import("./httpError");
+  const by = str(input.by).slice(0, 120);
+  if (!by) throw new HttpError(400, "Name the person accepting the parcel's jurisdiction.");
+  const reason = str(input.reason).replace(/\s+/g, " ").slice(0, 500);
+  if (reason.length < 8) throw new HttpError(400, "Say why this AHJ files for this parcel (for example, the agreement or the agency's own words).");
+  const reading = readParcelJurisdiction(db, project);
+  const refusal = acceptRefusal(reading);
+  if (refusal) throw new HttpError(409, refusal);
+  const record: ParcelJurisdictionAcceptance = {
+    ahj: str(project.ahj), parcelAgency: str(reading.parcelAgency), addressKey: parcelAddressKey(project), reason, by, at: nowIso(),
+  };
+  db.run("UPDATE projects SET parcel_jurisdiction_acceptance_json = ? WHERE id = ?", [JSON.stringify(record), project.id]);
+  const { addAuditLog } = await import("./audit");
+  addAuditLog(db, project.id, "human", by, "parcel_jurisdiction.accepted", {
+    ahj: record.ahj, parcelAgency: record.parcelAgency, reason, county: reading.county ?? "", host: reading.host ?? "",
+  });
+  await rejudgeAfterAcceptance(db, project.id, "parcel_jurisdiction_accepted");
+  return readParcelJurisdiction(db, project);
+}
+
+/** A named person withdraws the job's acceptance: the blocker returns if the parcel still disagrees. */
+export async function withdrawParcelJurisdictionAcceptance(db: AppDb, projectId: string, by: string): Promise<boolean> {
+  const { HttpError } = await import("./httpError");
+  const who = str(by).slice(0, 120);
+  if (!who) throw new HttpError(400, "Name the person withdrawing the acceptance.");
+  const held = parcelAcceptanceOf(db, projectId);
+  if (!held) return false;
+  db.run("UPDATE projects SET parcel_jurisdiction_acceptance_json = '' WHERE id = ?", [projectId]);
+  const { addAuditLog } = await import("./audit");
+  addAuditLog(db, projectId, "human", who, "parcel_jurisdiction.acceptance_withdrawn", { ahj: held.ahj, parcelAgency: held.parcelAgency, acceptedBy: held.by });
+  await rejudgeAfterAcceptance(db, projectId, "parcel_jurisdiction_acceptance_withdrawn");
+  return true;
+}
+
+async function rejudgeAfterAcceptance(db: AppDb, projectId: string, trigger: string): Promise<void> {
+  try {
+    const { rejudgeReviewerGateForProject } = await import("./repository");
+    await rejudgeReviewerGateForProject(db, projectId, trigger);
+  } catch (err) {
+    logger.warn("parcel-jurisdiction", `re-judge after ${trigger} failed: ${err instanceof Error ? err.message : String(err)}`);
+  }
 }
 
 /** An AHJ that is a STATE agency (a state's electrical division) is not a local jurisdiction: the
@@ -491,9 +586,14 @@ export function readParcelJurisdiction(db: AppDb, project: Pick<ProjectRecord, "
   if (!ahj) return { ...notChecked("the job has no AHJ to compare", true), ...at, parcelAgency: cached.agency };
   if (isStateLevelAgency(ahj, project.state)) return { ...notChecked(`the project AHJ (${ahj}) is a state agency; the parcel is in ${cached.agency}`, true), ...at, parcelAgency: cached.agency };
   const agree = agenciesAgree(db, project.state, ahj, cached.agency);
+  // A NAMED PERSON'S ACCEPTANCE (draft 16 A) answers this disagreement only — the same address, AHJ
+  // and parcel answer it was given against.
+  const accepted = !agree ? parcelAcceptanceOf(db, project.id) : null;
+  const applies = acceptanceApplies(accepted, addressKey, ahj, cached.agency);
   return {
-    status: agree ? "agrees" : "disagrees", reason: "", covered: true, ...at,
+    status: agree || applies ? "agrees" : "disagrees", reason: "", covered: true, ...at,
     parcelAgency: cached.agency, tier: source.tier, mayBlock: source.mayBlock,
+    ...(applies && accepted ? { acceptedBy: { by: accepted.by, at: accepted.at, reason: accepted.reason } } : {}),
   };
 }
 

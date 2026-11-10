@@ -3550,6 +3550,19 @@ const VERSIONED_MIGRATIONS: VersionedMigration[] = [
       `);
     },
   },
+  {
+    // v78 (draft 16 A): the next free number on offline staging 30f8509d (#701 v76, draft 09 v77).
+    // Helm renumbers at merge if the queue changes — nothing here depends on the number.
+    version: 78,
+    name: "parcel_jurisdiction_acceptance",
+    up: (db) => {
+      // A NAMED PERSON'S "THIS AHJ FILES FOR THIS PARCEL" (draft 16 A, parcelJurisdiction.ts):
+      // { ahj, parcelAgency, addressKey, reason, by, at } — bound to the disagreement it answers, so a
+      // changed address, AHJ or parcel answer brings the blocker back. Written only by a named person
+      // (POST /api/projects/:id/parcel-jurisdiction/accept); '' = none.
+      addColumnIfMissing(db, "projects", "parcel_jurisdiction_acceptance_json", "TEXT NOT NULL DEFAULT ''");
+    },
+  },
 ];
 
 /** v47 was edited in place while #218 was open (Helm's review at 0116f98a): a DB that ran an earlier

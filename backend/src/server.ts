@@ -1943,6 +1943,33 @@ app.post("/api/projects/:id/class", asyncHandler(async (req, res) => {
   res.json(setProjectClass(db, String(req.params.id), { projectClass: String(req.body?.projectClass ?? ""), by }));
 }));
 
+// A NAMED PERSON ACCEPTS THAT THE PROJECT AHJ FILES FOR THIS PARCEL (draft 16 A; parcelJurisdiction.ts).
+// Only against a current parcel disagreement, with a reason; the gate's parcel blocker becomes a pass
+// naming the person until the address, AHJ or parcel answer changes. Named like every decision that
+// releases a hold (the signed-in person, or the `decidedBy` the caller sends; a blank, placeholder or
+// automation name is a 400 that writes nothing). Under /api/projects/:id, so the scope guard covers it.
+app.post("/api/projects/:id/parcel-jurisdiction/accept", asyncHandler(async (req, res) => {
+  const { isConfirmingPerson } = await import("./feeConfirm");
+  const by = namedPersonDecider(req, "decidedBy",
+    "Sign in to accept the parcel's jurisdiction.",
+    'Name the person accepting that this AHJ files for the parcel (type your name; "human", "operator" or a bot\'s name is not a person).',
+    isConfirmingPerson);
+  const { acceptParcelJurisdiction } = await import("./parcelJurisdiction");
+  const project = getProjectDetail(db, String(req.params.id)).project;
+  res.json({ parcelJurisdiction: await acceptParcelJurisdiction(db, project, { reason: String(req.body?.reason ?? ""), by }) });
+}));
+app.delete("/api/projects/:id/parcel-jurisdiction/accept", asyncHandler(async (req, res) => {
+  const { isConfirmingPerson } = await import("./feeConfirm");
+  const by = namedPersonDecider(req, "decidedBy",
+    "Sign in to withdraw the parcel acceptance.",
+    'Name the person withdrawing the acceptance ("human", "operator" or a bot\'s name is not a person).',
+    isConfirmingPerson);
+  const { withdrawParcelJurisdictionAcceptance, readParcelJurisdiction } = await import("./parcelJurisdiction");
+  const projectId = String(req.params.id);
+  const withdrawn = await withdrawParcelJurisdictionAcceptance(db, projectId, by);
+  res.json({ withdrawn, parcelJurisdiction: readParcelJurisdiction(db, getProjectDetail(db, projectId).project) });
+}));
+
 app.get("/api/projects/:id/application-docs", (req, res) => {
   const pkg = getApplicationDocumentPackage(db, req.params.id);
   if (req.query.format === "html") {

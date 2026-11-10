@@ -7424,6 +7424,56 @@ function renderHistoricalFailures() {
 // preflight column and an is-warn modifier instead of an .item tint. Removed
 // rather than left behind as a helper with no callers.)
 
+// A NAMED PERSON ACCEPTS THAT THE PROJECT AHJ FILES FOR THIS PARCEL (draft 16 A): a reason and a name on
+// the parcel finding; POST /api/projects/:id/parcel-jurisdiction/accept. Never automatic.
+function parcelAcceptFormHtml() {
+  return `
+          <div class="kx-issue-field" data-parcel-accept-form>
+            <span class="kx-issue-field-label">This AHJ files for the parcel anyway?</span>
+            <span class="kx-issue-field-value">
+              <input type="text" data-parcel-accept-reason placeholder="Why (e.g. the county issues for this city by agreement)" maxlength="500">
+              <input type="text" data-parcel-accept-by placeholder="Your name" maxlength="120">
+              <button type="button" class="secondary" data-parcel-accept>Accept with my name</button>
+            </span>
+          </div>`;
+}
+function parcelWithdrawHtml() {
+  return ` <span class="kx-check-note"><input type="text" data-parcel-withdraw-by placeholder="Your name" maxlength="120"> <button type="button" class="secondary" data-parcel-withdraw>Withdraw acceptance</button></span>`;
+}
+function wireParcelAcceptance(root) {
+  if (!root) return;
+  const projectId = state.selectedProjectId;
+  root.querySelectorAll("[data-parcel-accept]").forEach((btn) => btn.addEventListener("click", async () => {
+    const form = btn.closest("[data-parcel-accept-form]");
+    const reason = (form?.querySelector("[data-parcel-accept-reason]")?.value || "").trim();
+    const decidedBy = (form?.querySelector("[data-parcel-accept-by]")?.value || "").trim();
+    if (!reason) { showMessage("Say why this AHJ files for the parcel.", "error"); return; }
+    btn.disabled = true;
+    try {
+      await api(`/api/projects/${projectId}/parcel-jurisdiction/accept`, { method: "POST", body: JSON.stringify({ reason, decidedBy }) });
+      await selectProject(projectId);
+      showMessage("Accepted with your name: the parcel finding now names you.", "info");
+    } catch (err) {
+      showMessage(err.message || "Could not record the acceptance.", "error");
+    } finally {
+      btn.disabled = false;
+    }
+  }));
+  root.querySelectorAll("[data-parcel-withdraw]").forEach((btn) => btn.addEventListener("click", async () => {
+    const decidedBy = (btn.parentElement?.querySelector("[data-parcel-withdraw-by]")?.value || "").trim();
+    btn.disabled = true;
+    try {
+      await api(`/api/projects/${projectId}/parcel-jurisdiction/accept`, { method: "DELETE", body: JSON.stringify({ decidedBy }) });
+      await selectProject(projectId);
+      showMessage("Acceptance withdrawn.", "info");
+    } catch (err) {
+      showMessage(err.message || "Could not withdraw the acceptance.", "error");
+    } finally {
+      btn.disabled = false;
+    }
+  }));
+}
+
 function renderCodeRefs(refs = []) {
   if (!refs.length) return "";
   return `
@@ -7533,7 +7583,7 @@ function renderReviewerGate() {
     ? recordsHtml + clears.slice(0, 14).map((item) => `
         <div class="kx-check ${item.severity === "callout" ? "is-warn" : ""}">
           <span class="kx-check-mark" aria-hidden="true">${item.severity === "callout" ? "!" : "✓"}</span>
-          <span class="kx-check-text">${esc(item.title)}${item.message || item.designTeamAction ? `<span class="kx-check-note">${esc([item.message, item.severity === "callout" ? item.designTeamAction : ""].filter(Boolean).join(" "))}</span>` : ""}</span>
+          <span class="kx-check-text">${esc(item.title)}${item.message || item.designTeamAction ? `<span class="kx-check-note">${esc([item.message, item.severity === "callout" ? item.designTeamAction : ""].filter(Boolean).join(" "))}</span>` : ""}${item.id === "reviewer.jurisdiction.parcel" && /^Jurisdiction accepted by /.test(String(item.title || "")) ? parcelWithdrawHtml() : ""}</span>
         </div>`).join("")
     : `<span class="kx-check-empty">The gate produced no cleared checks for this project yet — everything it looked at is on the right.</span>`;
 
@@ -7554,6 +7604,7 @@ function renderReviewerGate() {
             <span class="kx-action-label">Recommended action</span>
             <span class="kx-action-text">${esc(finding.designTeamAction || "Resolve before submittal.")}</span>
           </div>
+          ${finding.id === "reviewer.jurisdiction.parcel" ? parcelAcceptFormHtml() : ""}
           ${finding.ruleBasis ? `<div class="kx-issue-field"><span class="kx-issue-field-label">Rule basis</span><span class="kx-issue-field-value">${esc(finding.ruleBasis.label)}${finding.ruleBasis.source ? ` — ${esc(finding.ruleBasis.source)}` : ""}</span></div>` : ""}
           <details class="provenance">
             <summary>${esc(humanize(finding.category))} · evidence and code anchors</summary>
@@ -7598,6 +7649,7 @@ function renderReviewerGate() {
       </article>
     </div>
   `;
+  wireParcelAcceptance($("reviewerGate"));
   // Note: installer callouts are a subset of the findings rendered above (each
   // carries installerCallout=true), so they're intentionally NOT shown again as a
   // separate block — that was duplicating the city-style correction comments.
