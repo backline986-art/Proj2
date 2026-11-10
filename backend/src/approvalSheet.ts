@@ -26,6 +26,7 @@ import type {
   ApprovalSheet, ApprovalSheetIssue, ApprovalSheetRow, ApprovalSheetSource, ProjectRecord, SubmittalTrackType,
 } from "../../shared/src/types";
 import type { AppDb } from "./db";
+import { sizesDisagree } from "./sizesAgree";
 import { batteryStatus } from "./batteryServiceFeeder";
 import { compactAlnum, fieldAliases } from "./normalize";
 import { projectSecretValues } from "./projectSecrets";
@@ -49,9 +50,7 @@ const num = (v: unknown): number | null => {
   return Number.isFinite(n) ? n : null;
 };
 const kw = (n: number): string => `${Math.round(n * 100) / 100} kW`;
-/** Two sizes disagree when they differ by more than 3% (and more than 0.05 kW): a rounding on the
- *  title block never reads as a mismatch, a missing panel or a wrong inverter count does. */
-const sizesDisagree = (a: number, b: number): boolean => Math.abs(a - b) > Math.max(0.05, 0.03 * Math.max(a, b));
+// Two sizes disagree past one shared tolerance (sizesAgree.ts), the same the gate's AC-size rule uses.
 
 /** WHO WROTE THIS FIELD LAST, as far as the audit trail can prove it. Read newest first: a
  *  review-queue verification of this field is a person's word; the bill-image read that wrote it is

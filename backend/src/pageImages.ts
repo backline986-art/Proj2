@@ -121,6 +121,7 @@ const TOPIC_KEYWORDS: Record<EvidenceTopic, string[]> = {
   rapidShutdown: ["rapid shutdown", "rsd", "690.12", "initiator"],
   labels: ["label", "placard", "directory", "705.10"],
   inverterSettings: ["ul 1741", "smart inverter", "ieee 1547", "inverter settings", "spec", "datasheet"],
+  acDisconnect: ["ac disconnect", "utility disconnect", "disconnect", "lockable", "visible break", "690.13"],
   batteryMode: ["battery", "ess", "powerwall", "encharge", "backup", "export"],
   utilityApproval: ["utility approval", "interconnection", "approval letter"],
   ownerAuthorization: ["signature", "owner authorization", "signed", "notary"],

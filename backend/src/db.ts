@@ -3305,6 +3305,21 @@ const VERSIONED_MIGRATIONS: VersionedMigration[] = [
       addColumnIfMissing(db, "projects", "project_class_confirmation", "TEXT NOT NULL DEFAULT ''");
     },
   },
+  {
+    // NOTE FOR THE MERGE: v70 is the next free number on the offline staging base (e8ea579e, up to v69);
+    // #699 also claims v70 provisionally. Whichever lands second renumbers — nothing depends on the number.
+    version: 70,
+    name: "utility_application_requirements",
+    up: (db) => {
+      // WHAT THE UTILITY'S OWN APPLICATION ASKS FOR (review-audit draft 03, backend/src/utilityRequirements.ts):
+      // { requirements: [{ key, whenMissing, tier, sourceName, sourceUrl, quote, fetchedAt, verifiedBy?, verifiedAt? }] }
+      // on the utility's filing row — official reads and a NAMED PERSON's items (the shipped seed lives in
+      // backend/data/reference-utility-application-requirements.json). Its own column, so a lookup's write
+      // (which replaces payload_json) never touches it (rule 3), and beside #673's storage_modes_json,
+      // which it never reads or writes.
+      addColumnIfMissing(db, "utility_filing_lookups", "application_requirements_json", "TEXT NOT NULL DEFAULT ''");
+    },
+  },
 ];
 
 /** v47 was edited in place while #218 was open (Helm's review at 0116f98a): a DB that ran an earlier
