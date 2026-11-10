@@ -155,7 +155,9 @@ async function main(): Promise<void> {
   check("junk utility import skipped", importSeededUtilityKnowledge(db, { state: "ID", utility: "Idaho", notes: "x" }) === "skipped_empty");
   db.run("INSERT INTO permit_utility_knowledge (id, profile_key, state, ahj, utility, notes, first_seen_at, last_learned_at, updated_at) VALUES ('junk1','id||idaho','ID','','Idaho','junk', '2026-01-01','2026-01-01','2026-01-01')");
   const junkMatch = findKnowledgeForLearn(db, { state: "ID", utility: "Idaho Power" });
-  check("fuzzy never matches a junk state-name row", junkMatch.utility === null, JSON.stringify(junkMatch.utility?.utility));
+  // (The boot seed now ships a real cited utility row for this name, so the lookup may answer with
+  // that row; what it must never answer with is the junk state-name row.)
+  check("fuzzy never matches a junk state-name row", junkMatch.utility?.utility !== "Idaho" && junkMatch.utility?.profileKey !== "id||idaho", JSON.stringify(junkMatch.utility?.utility));
 
   // SAFETY RULE 3: a human-verified profile (confidence "mixed") must never have
   // its verified scalar facts field-overwritten by a learn path. learnFromProject
