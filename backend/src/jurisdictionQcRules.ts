@@ -215,6 +215,12 @@ export function recordForIdPrefix(records: JurisdictionQcRecord[], prefix: strin
   return records.find((r) => !r.ahj && r.state.toLowerCase() === prefix && r.prescriptive?.ruleIds) ?? null;
 }
 
+/** Is `value` a screen a "qc" row may carry for `ruleId`? (The one validator for every write path:
+ *  stateRules.writeSeededStatePermitRule and the person's route both ask it.) */
+export function isValidQcScreenValue(ruleId: string, value: unknown): boolean {
+  return sanitizeScreen({ ...obj(value), ruleId }, "seeded") != null;
+}
+
 /** THE #637 BAR: only a person's screen, or one that quotes its named source verbatim, may block. */
 export function jurisdictionScreenMayBlock(s: JurisdictionQcScreen): boolean {
   if (s.tier === "verified") return true;

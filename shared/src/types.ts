@@ -1774,6 +1774,19 @@ export interface ApplicationRequirementProfile {
   permitStructure?: "combo" | "separate" | "unknown";
   /** How the completed application is submitted: email | online portal | in-person | combination. */
   submissionMethod?: string;
+  /** A STATEWIDE FALLBACK PROFILE (review-audit draft 14): used for a job in `state` whose AHJ has no
+   *  profile of its own. The flag lives on the profile, so no code compares a profile id or a state
+   *  name to recognise it; the reviewer words its process finding from these fields. */
+  statewide?: {
+    /** Two-letter state code the profile covers. */
+    state: string;
+    /** How the finding names the state ("<name> statewide profile applied"). */
+    name: string;
+    /** The profile as the packet names it ("the <label> (<permits>)"). */
+    label: string;
+    /** The statewide permit structure and its citation. */
+    permits: string;
+  };
 }
 
 export interface GeneratedApplicationDocument {

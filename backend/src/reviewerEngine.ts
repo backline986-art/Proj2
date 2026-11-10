@@ -234,7 +234,9 @@ export function buildReviewerReport(
   // matched" while the packet had used the Oregon statewide profile read as a contradiction.
   const appProfile = findApplicationProfile(project);
   const looked = permitProcessFor(project);
-  const statewideApplied = appProfile.id === "oregon-generic-epermitting";
+  // The statewide fallback is a flag on the profile (draft 14), worded from the profile's own fields.
+  const statewide = appProfile.statewide;
+  const statewideApplied = Boolean(statewide);
   if (!profile) {
     // THIS FINDING IS ABOUT THE PERMIT PROCESS RECORD, AND SAYS SO (#217). Its trigger is only that
     // the shipped reference file (reference-ahj-processes.json, seeded) has no row for this AHJ; it
@@ -271,13 +273,13 @@ export function buildReviewerReport(
       "ahj_profile",
     looked
       ? `${processRecord}: per-job lookup found it (${lookupStatus}); not in the shipped reference file`
-      : statewideApplied
-        ? `${processRecord}: Oregon statewide profile applied; no ${project.ahj || "City"}-specific process record (per-job lookup found none)`
+      : statewide
+        ? `${processRecord}: ${statewide.name} statewide profile applied; no ${project.ahj || "City"}-specific process record (per-job lookup found none)`
         : `${processRecord}: not in the shipped reference file and the per-job lookup found none`,
     `${looked
       ? lookedMessage(looked)
-      : statewideApplied
-        ? "The packet used the Oregon ePermitting statewide profile (separate structural + electrical permits, OAR 918-050-0180(2)); verify any local application, stamp or signature requirement."
+      : statewide
+        ? `The packet used the ${statewide.label} (${statewide.permits}); verify any local application, stamp or signature requirement.`
         : "Use generic AHJ docs and verify local application/stamp/signature requirements manually before submittal."} ${codeRecord}`,
     true,
     {

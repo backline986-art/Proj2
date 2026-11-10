@@ -1465,7 +1465,7 @@ export function requiredListCheck(db: AppDb, project: ProjectRecord, inventory: 
   const knownProfile = (): { label: string; lines: string[] } | null => {
     let profile: ReturnType<typeof findApplicationProfile> | null = null;
     try { profile = findApplicationProfile(project); } catch { profile = null; }
-    if (!profile || !(profile.id.startsWith("process-") || (applicationProfiles.includes(profile) && profile.id !== "oregon-generic-epermitting"))) return null;
+    if (!profile || !(profile.id.startsWith("process-") || (applicationProfiles.includes(profile) && !profile.statewide))) return null;
     return {
       label: profile.id.startsWith("process-") ? `the seeded ${project.ahj || "AHJ"} process profile (not confirmed on an agency page)` : `the ${profile.name} profile`,
       lines: profile.requiredDocuments.filter((t) => String(t || "").trim()),

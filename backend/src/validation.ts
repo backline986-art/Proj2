@@ -4,6 +4,7 @@
 
 import { z } from "zod";
 import { HttpError } from "./httpError";
+import { UTILITY_REQUIREMENT_KEYS, type UtilityRequirementKey } from "../../shared/src/types";
 
 export { z };
 
@@ -140,13 +141,45 @@ export const utilityStorageModesSchema = z.object({
  *  records what this project's utility's own application asks for, each item with the page and its words. */
 export const utilityApplicationRequirementsSchema = z.object({
   requirements: z.array(z.object({
-    key: z.enum(["account_verification", "meter_photo", "inverter_settings", "inverter_listing_ul1741sb", "one_line", "site_plan", "ac_disconnect", "storage_mode_declaration", "owner_signature"]),
+    // Every kind the requirement data knows (shared UTILITY_REQUIREMENT_KEYS), so a person can cite any item
+    // the seed or a lookup carries (module_spec / inverter_spec included).
+    key: z.enum(UTILITY_REQUIREMENT_KEYS as unknown as [UtilityRequirementKey, ...UtilityRequirementKey[]]),
     whenMissing: z.enum(["blocker", "warning"]),
     sourceName: z.string().trim().max(200).optional(),
     sourceUrl: personFactUrl,
     quote: z.string().trim().min(8).max(600),
   }).strict()).min(1).max(12),
+  /** "merge": add, edit or verify these items and keep the person's other items (the dashboard panel);
+   *  absent / "replace": these items become the person-recorded list. */
+  mode: z.enum(["replace", "merge"]).optional(),
   decidedBy: z.string().max(120).optional(),
+}).strict();
+
+/** A PERSON records or rewords one jurisdiction QC screen (review-audit draft 14): PUT
+ *  /api/code-profiles/qc-screens. Lands as a state_permit_rules row of family "qc", person-verified,
+ *  with the source's own words (quote) and the page they were read on (sourceUrl). */
+export const jurisdictionQcScreenSchema = z.object({
+  state: z.string().trim().min(2).max(40),
+  ruleId: z.string().trim().regex(/^[a-z0-9][a-z0-9_-]{2,60}$/, "lower-case letters, digits, - and _ (3-61 characters)"),
+  screen: z.object({
+    kind: z.enum(["manual_disconnect", "submittal_documents"]),
+    ruleName: z.string().trim().min(1).max(200),
+    message: z.string().trim().min(1).max(600),
+    fieldName: z.string().trim().regex(/^[A-Za-z][A-Za-z0-9]{0,60}$/),
+    items: z.array(z.object({
+      key: z.enum(["site_plan", "fire_access_path", "roof_framing", "roof_cross_section", "racking_attachment"]),
+      label: z.string().trim().min(1).max(120),
+    }).strict()).min(1).max(12).optional(),
+    severity: z.enum(["warning", "blocker"]).optional(),
+    source: z.string().trim().max(200).optional(),
+    /** A NEW city / county screen: the AHJ it narrows to and how that AHJ is named (lower-case substrings). */
+    ahj: z.string().trim().max(160).optional(),
+    ahjNames: z.array(z.string().trim().min(2).max(80)).max(12).optional(),
+    displayName: z.string().trim().max(120).optional(),
+  }).strict(),
+  quote: z.string().trim().min(8).max(1200),
+  sourceUrl: personFactUrl,
+  verifiedBy: z.string().max(120).optional(),
 }).strict();
 
 export const codeProfileVerifySchema = z.object({

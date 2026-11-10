@@ -1090,14 +1090,17 @@ export function resolvePermitPathForProject(
   project: ProjectRecord,
 ): ReturnType<typeof resolvePermitPath> {
   let limits: PrescriptiveLimits | undefined;
+  let limitsTier: "seeded" | "verified" | undefined;
   try {
     const profile = getCodeProfile(db, { state: project.state, ahj: project.ahj });
     limits = profile?.prescriptive;
+    // A person-verified profile's limits overlay the jurisdiction's permit-path record (draft 14).
+    limitsTier = profile ? profile.confidence : undefined;
     // No profile at all for a jurisdiction we are actually filing in → go find out.
     // ensureCodeProfilesResearched owns its own dedupe and 6-hour backoff.
     if (!profile) ensureCodeProfilesResearched(db, project.state, project.ahj);
   } catch { /* research is best-effort; never break a path resolution */ }
-  return resolvePermitPath(project, { limits });
+  return resolvePermitPath(project, { limits, limitsTier });
 }
 
 /** Pure context builder (also used by tests and the Oregon-constants fallback). */
