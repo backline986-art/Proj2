@@ -4169,6 +4169,15 @@ async function runLlmAssist(){
   // (scannedPlanSet.planTextIsNearEmpty): under 40 letters/digits per page is no text layer.
   let scanRead = false;
   state.planReadRoles = [];
+  // PAGES WHOSE TEXT IS DRAWN AS OUTLINES (#696). The server finds them (outlinedTextPages.ts) and
+  // names them on every plan-scan answer — a scan's read, a hybrid read, or the 409 for a plain text
+  // set (details.outlinedTextPages). Neither the text pass nor vision reads them and nothing on them
+  // goes to any model, so the review says which sheets a person reads.
+  let outlinedPages = [];
+  const noteOutlined = (v) => {
+    const pages = (v && (Array.isArray(v.outlinedTextPages) ? v.outlinedTextPages : v.details && Array.isArray(v.details.outlinedTextPages) ? v.details.outlinedTextPages : [])) || [];
+    for (const n of pages) if (Number.isInteger(n) && n > 0 && !outlinedPages.includes(n)) outlinedPages.push(n);
+  };
   const planChars = String(planText || '').replace(/---\s*(?:OCR\s+)?PAGE\s+\d+\s*---/gi, '').replace(/[^A-Za-z0-9]/g, '').length;
   const planIsPdf = Boolean(state.planFile && /pdf/i.test(`${state.planFile.type} ${state.planFile.name}`));
   const planScanQuery = getVal('state') ? `?defaultState=${encodeURIComponent(getVal('state'))}` : '';
@@ -4177,6 +4186,7 @@ async function runLlmAssist(){
     try {
       const resp = await fetch(`/api/parser/plan-scan-extract${planScanQuery}`, { method:'POST', headers:{'Content-Type':'application/pdf'}, body: state.planFile });
       const v = await resp.json().catch(() => ({}));
+      noteOutlined(v);
       if (!resp.ok) throw Object.assign(new Error(v.error || `Request failed (${resp.status})`), { status: resp.status });
       if (v.provider === 'stub'){ authOff = true; }
       else {
@@ -4203,6 +4213,7 @@ async function runLlmAssist(){
     try {
       const resp = await fetch(`/api/parser/plan-scan-extract${planScanQuery}`, { method:'POST', headers:{'Content-Type':'application/pdf'}, body: state.planFile });
       const v = await resp.json().catch(() => ({}));
+      noteOutlined(v);
       if (resp.ok && v.provider !== 'stub' && v.planReadMode === 'hybrid' && (v.visionPages || []).length) planImageRead = v;
       else if (!resp.ok && resp.status !== 409) state.reviewFlags.push(`The plan set's image-only pages could not be read by vision: ${v.error || `Request failed (${resp.status})`}. Check the datasheet values by hand.`);
     } catch (e){
@@ -4244,6 +4255,11 @@ async function runLlmAssist(){
     state.planReadRoles = Array.isArray(planImageRead.visionPageRoles) ? planImageRead.visionPageRoles : [];
     state.reviewFlags.push(`Image-only pages in the plan set: read by VISION from pages ${(planImageRead.visionPages || []).join(', ')} — ${(planImageRead.visionFields || []).length ? `fields from vision: ${(planImageRead.visionFields || []).join(', ')}` : 'no field could be read'}. The text pass did not run, so nothing was checked against the text layer. Verify each against the sheet.`);
     ranAny = true;
+  }
+
+  if (outlinedPages.length){
+    outlinedPages.sort((a, b) => a - b);
+    state.reviewFlags.push(`Plan-set page${outlinedPages.length === 1 ? '' : 's'} ${outlinedPages.join(', ')} unread: text drawn as outlines; a person reads this page. Nothing on ${outlinedPages.length === 1 ? 'it' : 'them'} was sent to any model — read ${outlinedPages.length === 1 ? 'that sheet' : 'those sheets'} and enter or check ${outlinedPages.length === 1 ? 'its' : 'their'} values by hand.`);
   }
 
   if (authOff && !ranAny){

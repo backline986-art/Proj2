@@ -62,6 +62,7 @@ import { FIRE_PATHWAY_PATTERNS } from "./projectEvidence";
 import { groundMountFromField } from "./mountKind";
 import { adoptedNecEdition } from "./necEditions";
 import { essDocumentRows, projectHasBattery } from "./essRequirements";
+import { outlinedPagesMissingSheetNote } from "./outlinedTextPages";
 import { nemFiledWithPermit, type NemFiledWithPermit } from "./utilityFilingLookup";
 
 export interface RequiredDocItem {
@@ -1644,12 +1645,16 @@ export function isApplicationFormRow(d: Pick<DocPresence, "docType" | "altDocTyp
  * county's application). Anything else (a plan sheet, a PE letter, a spec, a bill) is attached or
  * split out of the plan set.
  */
-export function owedDocumentAction(d: Pick<DocPresence, "docType" | "altDocTypes" | "lane">, deadLinks: string[] = []): string {
+export function owedDocumentAction(d: Pick<DocPresence, "docType" | "altDocTypes" | "lane">, deadLinks: string[] = [], unreadPlanPages: readonly number[] = []): string {
   // FOUND, DEAD LINK (issue #205): the search found the blank and its link answered 404 — said so, with
   // the URL, so the operator looks for where the AHJ moved the file rather than for a form "none exists".
-  return d.lane === "permit" && isApplicationFormRow(d)
-    ? `${deadLinks.length ? `${deadLinkSentence(deadLinks)}; ` : ""}find the official form (App Docs → Find missing official forms) or upload the blank`
-    : "attach it or split it out of the plan set";
+  if (d.lane === "permit" && isApplicationFormRow(d)) {
+    return `${deadLinks.length ? `${deadLinkSentence(deadLinks)}; ` : ""}find the official form (App Docs → Find missing official forms) or upload the blank`;
+  }
+  // A plan sheet "missing" from a set with pages whose text is drawn as outlines (#696) may be on one
+  // of them: nobody read those pages, so the reason names them (shippedPlanSetOutlinedPages).
+  const unread = outlinedPagesMissingSheetNote(d.docType, unreadPlanPages);
+  return `attach it or split it out of the plan set${unread ? `; ${unread}` : ""}`;
 }
 
 // ---------------------------------------------------------------------------

@@ -8,7 +8,8 @@ import { fieldAliases, parserField } from "./normalize";
 import { logger } from "./logger";
 import { documentInventory, owedMissingDocuments, requiredListCheck, sheetContentGaps } from "./requiredDocuments";
 import { startedAtLabel } from "./formAcquisitionPlan";
-import { planSetTextForProject } from "./projectDocuments";
+import { planSetTextForProject, shippedPlanSetOutlinedPages } from "./projectDocuments";
+import { outlinedPagesMissingSheetNote, outlinedPagesReport } from "./outlinedTextPages";
 import { nowIso } from "./time";
 import { addAuditLog } from "./audit";
 import { QC_STATUS_WRITTEN_ACTION, touchProjectMetrics } from "./kpi";
@@ -528,10 +529,23 @@ export function runQcForProject(db: AppDb, projectId: string, options: QcRunOpti
       // project would stall at QC the moment it is parsed, before anyone has had a chance to
       // attach anything. The hard refusal already exists at staging and stays there. This exists
       // so an operator SEES, on the day the plan set lands, what this AHJ is going to want.
+      // PLAN PAGES NOBODY READ (#696): pages whose text is drawn as outlines — no text layer, no
+      // picture — are read by neither the text path nor vision, and nothing on them goes to a model.
+      // Said once as its own row, and on every "missing" plan sheet, which may be on one of them.
+      const unreadPlanPages = shippedPlanSetOutlinedPages(db, projectId);
+      if (unreadPlanPages.length) {
+        warningCount += 1;
+        db.run(
+          `INSERT INTO qc_results (id, project_id, qc_status, rule_id, rule_name, message, severity, created_at)
+           VALUES (?, ?, 'warning', 'docs.plan_set_unread_pages', 'Plan-set pages unread', ?, 'warning', ?)`,
+          [id(), projectId, `${outlinedPagesReport(unreadPlanPages)} Read ${unreadPlanPages.length === 1 ? "that sheet" : "those sheets"} and check ${unreadPlanPages.length === 1 ? "its" : "their"} values by hand.`, createdAt],
+        );
+      }
       for (const d of gateDocs.owed) {
         warningCount += 1;
+        const unread = outlinedPagesMissingSheetNote(d.docType, unreadPlanPages);
         say("warning", "error", d.docType, d.label,
-          `${String(d.why || "")} Staging will refuse without it.`.trim());
+          `${String(d.why || "")}${unread ? ` The ${unread}.` : ""} Staging will refuse without it.`.trim());
       }
       for (const d of gateDocs.filledAtStaging) {
         db.run(
@@ -551,7 +565,8 @@ export function runQcForProject(db: AppDb, projectId: string, options: QcRunOpti
       }
       for (const d of inv.missingAdvisory) {
         warningCount += 1;
-        say("warning", "warning", d.docType, d.label, String(d.why || ""));
+        const unread = outlinedPagesMissingSheetNote(d.docType, unreadPlanPages);
+        say("warning", "warning", d.docType, d.label, `${String(d.why || "")}${unread ? ` The ${unread}.` : ""}`.trim());
       }
       // PRESENT IS NOT THE SAME AS SHOWING WHAT IT PROMISES. A sheet counts as present from its
       // title; sheetContentGaps reads the plan-set text for the elements the row's `why` names
