@@ -39,14 +39,14 @@ import type {
   ApprovalSheet, ApprovalSheetIssue, ApprovalSheetRow, ApprovalSheetSource, ParserPayload, ProjectRecord, SubmitGateCheck, SubmittalTrackType,
 } from "../../shared/src/types";
 import type { AppDb } from "./db";
-import { sizesDisagree } from "./sizesAgree";
+import { acSizesDisagree, inverterAcFromPlan, sizesDisagree } from "./sizesAgree";
 import { batteryStatus } from "./batteryServiceFeeder";
 import { compactAlnum, fieldAliases } from "./normalize";
 import { projectSecretValues } from "./projectSecrets";
 import { stagingFieldValues } from "./recipeStageGapsView";
 import { redactSecretValues } from "../../shared/src/portalSafety";
 import { parseStreetName, parseStreetNumber } from "../../portal-bot/src/addressParse";
-import { openReviewItems, planSetBinding, unverifiedFormMappings } from "./approvalReviewItems";
+import { checkRecordsForTrack, openReviewItems, planSetBinding, unverifiedFormMappings } from "./approvalReviewItems";
 import { contractorLicenceForClient } from "./clients";
 import { composeFilingEmail, filingEmailChannelFor, filingPacket, filingRefTag } from "./filingEmail";
 import { recipeDisciplineForTrack } from "./portalChannel";
@@ -296,19 +296,24 @@ export function buildApprovalSheet(db: AppDb, project: ProjectRecord, track: Sub
     else { dcRow.check = "match"; dcRow.checkNote = `Matches the modules: ${moduleQty} × ${moduleW} W.`; }
   }
   const invQty = num(values.inverterQty || values.inverterQuantity);
-  const invOutRaw = num(values.invOutputW || values.pvMicroOutputW);
   const invName = [str(values.inverterMake || values.inverterManufacturer), str(values.inverterModel)].filter(Boolean).join(" ");
   const battery = batteryStatus(values as Record<string, unknown>);
-  // AC = inverters × inverter output — only where that is the whole story: a battery (a hybrid or
-  // battery inverter adds or caps AC) or an existing system on the same service (the totals are
-  // combined) makes the sum a different number on purpose, so no cross-check is claimed there.
-  if (ac != null && invQty && invOutRaw && invQty > 0 && invOutRaw > 0 && battery !== "yes" && !project.existingSystem?.hasExistingSystem) {
-    // An output written in kW (≤ 30) is read as kW; a residential inverter's watts never are.
-    const perUnitKw = invOutRaw <= 30 ? invOutRaw : invOutRaw / 1000;
-    const derived = invQty * perUnitKw;
-    const perUnit = invOutRaw <= 30 ? kw(invOutRaw) : `${invOutRaw} W`;
-    if (sizesDisagree(ac, derived)) mismatch(acRow, `the plan set's inverters add up to ${kw(derived)} (${invQty} × ${perUnit}), not ${kw(ac)}.`);
-    else { acRow.check = "match"; acRow.checkNote = `Matches the inverters: ${invQty} × ${perUnit}.`; }
+  // AC = inverters × each one's rated AC output (review-audit draft 11). invOutputW / pvMicroOutputW
+  // are the per-unit output CURRENT in amps, not kW or W: the sheet used to read 1.6 A as 1.6 kW and
+  // 32 A as 0.03 kW. Read by the gate's own reader (sizesAgree.inverterAcFromPlan, the one the
+  // city.elec.ac-size-mismatch rule uses) on the parser's own keys, so the sheet and the gate cannot
+  // disagree about the same plan set. No cross-check is claimed where the sum is a different number on
+  // purpose (a battery, an existing system, a three-phase service) or the plan set gives no output.
+  const acReading = ac != null
+    ? inverterAcFromPlan(
+      { num: (key) => num(snap[key]), text: (key) => str(snap[key]) },
+      { battery: battery === "yes", existingSystem: Boolean(project.existingSystem?.hasExistingSystem) },
+    )
+    : null;
+  if (ac != null && acReading) {
+    const how = acReading.how.replace(/ x /g, " × ");
+    if (acSizesDisagree(ac, acReading)) mismatch(acRow, `the plan set's inverters add up to about ${kw(acReading.kw)} AC (${how}), not ${kw(ac)}.`);
+    else { acRow.check = "match"; acRow.checkNote = `Matches the inverters: about ${kw(acReading.kw)} AC (${how}).`; }
   }
 
   const certifiedModule = str(values.moduleModelCertified);
@@ -474,14 +479,24 @@ export function buildApprovalSheet(db: AppDb, project: ProjectRecord, track: Sub
   // still decides nothing (the approve route and the run check the acknowledgements).
   let gateChecks: SubmitGateCheck[] = [];
   try { gateChecks = getSubmitGateReport(db, project.id).checks; } catch { gateChecks = []; }
-  const openItems = openReviewItems(reviewerGateReportFor(db, project).findings, unverifiedFormMappings(db, project), gateChecks, track);
+  const gateFindings = reviewerGateReportFor(db, project).findings;
+  const openItems = openReviewItems(gateFindings, unverifiedFormMappings(db, project), gateChecks, track);
   for (const i of openItems) {
     i.title = scrub(i.title);
     i.text = scrub(i.text);
     i.action = scrub(i.action);
   }
 
+  // ── WHAT THE GATE CHECKED (review-audit draft 07) ───────────────────────────────────────────
+  // The measured rules' check records whose rule holds this filing: passed with the arithmetic, or
+  // not checked for want of an input. Display only, scrubbed like every other string here.
+  const checks = checkRecordsForTrack(gateFindings, track);
+  for (const c of checks) {
+    c.title = scrub(c.title);
+    c.text = scrub(c.text);
+  }
+
   const order = { mismatch: 0, missing: 1, note: 2 } as const;
   issues.sort((a, b) => order[a.kind] - order[b.kind]);
-  return { projectId: project.id, track, category, rows, issues, openItems, planSet: planSetBinding(db, project.id) };
+  return { projectId: project.id, track, category, rows, issues, openItems, planSet: planSetBinding(db, project.id), checks };
 }
