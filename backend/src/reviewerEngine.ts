@@ -1347,7 +1347,9 @@ function addProfileFindings(project: ProjectRecord, profile: AhjProcessProfile |
 function addParcelJurisdictionFindings(project: ProjectRecord, profile: AhjProcessProfile | null, reading: ParcelJurisdictionReading | undefined, findings: ReviewerFinding[]): void {
   const ahj = String(project.ahj ?? "").trim();
   const when = reading?.checkedAt ? `, checked ${reading.checkedAt.slice(0, 10)}` : "";
-  const from = reading ? `${reading.county ? `${reading.county}'s` : "the county's"} parcel service${reading.host ? ` (${reading.host}${when})` : ""}` : "";
+  // A hosted map platform (draft 16 B) is named as such, with the person who verified the county links it.
+  const hosted = reading?.serviceVerifiedBy ? `, a hosted map ${reading.serviceVerifiedBy} verified the county links` : "";
+  const from = reading ? `${reading.county ? `${reading.county}'s` : "the county's"} parcel service${reading.host ? ` (${reading.host}${hosted}${when})` : ""}` : "";
   if (reading?.status === "disagrees" && reading.parcelAgency) {
     const blocks = reading.mayBlock === true;
     findings.push(finding(

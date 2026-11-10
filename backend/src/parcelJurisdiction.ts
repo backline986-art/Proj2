@@ -21,6 +21,15 @@
 // never logged. The gate reads only that cache (readParcelJurisdiction), so "reads write nothing"
 // stays true.
 //
+// ONE EXCEPTION TO "GOVERNMENT HOSTS ONLY" (draft 16 B; owner 2026-11-10, "Yes that is okay"; Helm's
+// conditions): many counties publish their parcel map on a hosted map platform (ArcGIS Online, run by
+// Esri), never a government host. Such a record is usable ONLY when a NAMED PERSON verified it: the
+// county's own GOVERNMENT page links that service, its URL and a verbatim quote naming the linked
+// host are recorded, and the record names the exact service root (host + path) it was checked
+// against. It is never seeded or official tier, the shared #683 predicate never learns the platform,
+// and any other third-party host is still refused. What goes there is the address the template asks
+// for (street, city / ZIP), nothing else: no name, no account, no credential.
+//
 // WHAT THE GATE DOES WITH IT (strictest default; Helm's #637 bar for when data may block):
 //   - the parcel's jurisdiction disagrees with the project AHJ -> a BLOCKER on permit tracks (a filing
 //     to the wrong agency), when the record may block (verified, official, or a seeded record that
@@ -34,7 +43,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ProjectRecord } from "../../shared/src/types";
-import { isOfficialSourceHost, quoteText, sourceHostOf } from "../../shared/src/officialSource";
+import { isGovernmentHost, isOfficialSourceHost, quoteText, sourceHostOf } from "../../shared/src/officialSource";
 import type { AppDb } from "./db";
 import { agencyNameKey, sameAgencyName } from "./agencyName";
 import { usStateCode } from "./permitPath";
@@ -75,6 +84,12 @@ export interface JurisdictionLookupSource {
   quote: string;
   fetchedAt: string;
   verifiedBy: string;
+  /** Where the service lives: "government" (the #683 predicate), or "map_platform" — a hosted map
+   *  platform, admitted only on a person-verified record (draft 16 B). */
+  hostedOn: "government" | "map_platform";
+  /** map_platform only: the exact service root (https://host/path...) the person verified; every query
+   *  must sit under it. "" for a government host. */
+  verifiedService: string;
   /** A hash of everything that decides the answer: a cached answer from an older record is stale. */
   fingerprint: string;
 }
@@ -114,8 +129,48 @@ export function sourceMayBlock(s: Pick<JurisdictionLookupSource, "tier" | "sourc
   return Boolean(str(s.sourceName)) && /^https?:\/\//i.test(str(s.sourceUrl)) && quoteNamesHost(s.quote, sourceHostOf(s.queryUrl));
 }
 
+/** HOSTED MAP PLATFORMS a person-verified county record may name (draft 16 B; owner 2026-11-10, for
+ *  Esri-hosted county maps). A vendor, not a place: widening this list needs the owner's word, so it
+ *  is code, reviewed, never data. officialSource's predicate never learns these. */
+const PERSON_VERIFIED_MAP_PLATFORMS: readonly string[] = ["arcgis.com"];
+
+export function isPersonVerifiedMapPlatformHost(host: string): boolean {
+  const h = str(host).toLowerCase().replace(/\.$/, "");
+  return !!h && PERSON_VERIFIED_MAP_PLATFORMS.some((p) => h === p || h.endsWith(`.${p}`));
+}
+
+/** Does `url` sit under the verified service root (the root, then "/", "?" or the end)? */
+function underServiceRoot(url: string, root: string): boolean {
+  if (!root || !url.startsWith(root)) return false;
+  const next = url.charAt(root.length);
+  return next === "" || next === "/" || next === "?";
+}
+
+/** Why a record on a hosted map platform cannot be used ("" = it can). Draft 16 B: a named person
+ *  verified it; the county's own GOVERNMENT page links the service and is quoted naming the linked
+ *  host; the record names the exact service root, with a path (on a shared platform host the path
+ *  names the county's own organisation); never seeded, never official. */
+function mapPlatformRefusal(o: Record<string, unknown>, queryUrl: string, serviceHost: string): string {
+  if (str(o.tier) !== "verified" || !str(o.verifiedBy)) return "a hosted map service is used only on a person-verified record (tier verified, verifiedBy)";
+  const root = str(o.verifiedService).replace(/\/+$/, "");
+  if (!root) return "no verifiedService (the exact service root the person checked)";
+  if (!/^https:\/\//i.test(root) || sourceHostOf(root) !== serviceHost) return `verifiedService is not on ${serviceHost}`;
+  let rootPath = "";
+  try { rootPath = new URL(root).pathname.replace(/\/+$/, ""); } catch { rootPath = ""; }
+  if (!rootPath) return "verifiedService names a host but no service path";
+  if (!underServiceRoot(queryUrl.replace(/\{[a-zA-Z]+\}/g, "x"), root)) return "queryUrl is not under verifiedService";
+  const pageHost = sourceHostOf(str(o.sourceUrl));
+  if (!pageHost || !isGovernmentHost(pageHost)) return `sourceUrl${pageHost ? ` (${pageHost})` : ""} is not the county's own government page`;
+  const linked = str(o.pageLinksHost).toLowerCase() || serviceHost;
+  if (!isPersonVerifiedMapPlatformHost(linked)) return "pageLinksHost is not on the hosted map platform";
+  if (!quoteNamesHost(str(o.quote), linked)) return `the quote does not name ${linked}`;
+  if (!/^\d{4}-\d{2}-\d{2}/.test(str(o.fetchedAt))) return "no fetchedAt";
+  return "";
+}
+
 /** One record, cleaned; null (with the reason) when it cannot be used. A query URL off a government
- *  host is refused here, so no code path can ever be handed one. */
+ *  host is refused here — the one exception being a person-verified record on a hosted map platform
+ *  (draft 16 B, mapPlatformRefusal) — so no code path can ever be handed any other host. */
 export function sanitizeLookupSource(raw: unknown): { source: JurisdictionLookupSource | null; problem: string } {
   const o = (raw && typeof raw === "object" ? raw : {}) as Record<string, unknown>;
   const state = usStateCode(o.state);
@@ -124,8 +179,17 @@ export function sanitizeLookupSource(raw: unknown): { source: JurisdictionLookup
   if (!state || !county) return { source: null, problem: `${label}: no state or county` };
   const queryUrl = str(o.queryUrl).slice(0, 2000);
   if (!/^https:\/\//i.test(queryUrl)) return { source: null, problem: `${label}: queryUrl is not https` };
-  // THE ONE PREDICATE (#683), with no authority domain admitted: a government host only.
-  if (!isOfficialSourceHost(queryUrl.replace(/\{[a-zA-Z]+\}/g, "x"))) return { source: null, problem: `${label}: ${sourceHostOf(queryUrl.replace(/\{[a-zA-Z]+\}/g, "x")) || "queryUrl"} is not a government host` };
+  // THE ONE PREDICATE (#683), with no authority domain admitted: a government host only — or, draft
+  // 16 B, a person-verified record on a hosted map platform.
+  const probeHost = sourceHostOf(queryUrl.replace(/\{[a-zA-Z]+\}/g, "x"));
+  let hostedOn: "government" | "map_platform" = "government";
+  if (!isOfficialSourceHost(queryUrl.replace(/\{[a-zA-Z]+\}/g, "x"))) {
+    const notGov = `${label}: ${probeHost || "queryUrl"} is not a government host`;
+    if (!isPersonVerifiedMapPlatformHost(probeHost)) return { source: null, problem: notGov };
+    const why = mapPlatformRefusal(o, queryUrl, probeHost);
+    if (why) return { source: null, problem: `${notGov} (${why})` };
+    hostedOn = "map_platform";
+  }
   const jurisdictionField = str(o.jurisdictionField);
   if (!jurisdictionField) return { source: null, problem: `${label}: no jurisdictionField` };
   const covers = (o.covers && typeof o.covers === "object" ? o.covers : {}) as Record<string, unknown>;
@@ -152,8 +216,12 @@ export function sanitizeLookupSource(raw: unknown): { source: JurisdictionLookup
     tier,
     sourceName: str(o.sourceName).slice(0, 200),
     sourceUrl, quote, fetchedAt, verifiedBy,
+    hostedOn,
+    verifiedService: hostedOn === "map_platform" ? str(o.verifiedService).replace(/\/+$/, "") : "",
   };
-  const fingerprint = sha(JSON.stringify([base.key, base.queryUrl, base.recordsPath, base.jurisdictionField, base.unincorporatedValues, base.cityNames, base.addressStyle])).slice(0, 16);
+  // Belt and braces: a map-platform record is verified tier or nothing.
+  if (hostedOn === "map_platform" && tier !== "verified") return { source: null, problem: `${label}: ${probeHost} is not a government host (not person-verified)` };
+  const fingerprint = sha(JSON.stringify([base.key, base.queryUrl, base.verifiedService, base.recordsPath, base.jurisdictionField, base.unincorporatedValues, base.cityNames, base.addressStyle])).slice(0, 16);
   return { source: { ...base, mayBlock: sourceMayBlock(base), fingerprint }, problem: "" };
 }
 
@@ -345,12 +413,24 @@ export function setParcelFetchForTests(fn: ParcelFetch | null): void {
   fetchForTests = fn;
 }
 
-/** Ask one record's service about one address. Refuses (unavailable) any URL off a government host. */
+/** May this built URL be asked for this record? A government host; or, for a person-verified
+ *  map-platform record (draft 16 B), the record's own verified service root and nothing else. */
+export function mayAskServiceUrl(source: Pick<JurisdictionLookupSource, "hostedOn" | "tier" | "verifiedService" | "verifiedBy">, url: string): boolean {
+  if (isOfficialSourceHost(url)) return true;
+  const host = sourceHostOf(url);
+  return source.hostedOn === "map_platform" && source.tier === "verified" && !!source.verifiedBy
+    && isPersonVerifiedMapPlatformHost(host) && host === sourceHostOf(source.verifiedService)
+    && underServiceRoot(url, source.verifiedService);
+}
+
+/** Ask one record's service about one address. Refuses (unavailable) any URL off a government host,
+ *  except a person-verified map-platform record's own service root (mayAskServiceUrl). */
 export async function askParcelService(source: JurisdictionLookupSource, project: Pick<ProjectRecord, "projectAddress" | "city" | "state" | "zip">): Promise<ParcelAnswer & { host: string }> {
   const url = buildQueryUrl(source, project);
   const host = sourceHostOf(url);
-  // At the door as well as at load: nothing but a government host is ever asked.
-  if (!isOfficialSourceHost(url)) return { status: "unavailable", detail: `${host || "the query URL"} is not a government host`, host };
+  // At the door as well as at load: nothing but a government host (or the person-verified service
+  // root, draft 16 B) is ever asked.
+  if (!mayAskServiceUrl(source, url)) return { status: "unavailable", detail: `${host || "the query URL"} is not a government host or the person-verified service`, host };
   try {
     const res = await (fetchForTests ?? defaultFetch)(url);
     if (res.status < 200 || res.status >= 300) return { status: "unavailable", detail: `the service answered HTTP ${res.status}`, host };
@@ -429,6 +509,8 @@ export interface ParcelJurisdictionReading {
   checkedAt?: string;
   tier?: LookupSourceTier;
   mayBlock?: boolean;
+  /** The answer came from a hosted map platform (draft 16 B): who verified that the county links it. */
+  serviceVerifiedBy?: string;
   /** A NAMED PERSON accepted that the project AHJ files for this parcel although the parcel lies in
    *  another jurisdiction (draft 16 A). Present only on an "agrees" reading that this record turned. */
   acceptedBy?: { by: string; at: string; reason: string };
@@ -578,7 +660,10 @@ export function readParcelJurisdiction(db: AppDb, project: Pick<ProjectRecord, "
     return notChecked(checkQueued(db, project.id) ? "the parcel lookup is queued" : "the parcel has not been looked up yet", true);
   }
   const source = sources.find((s) => s.key === cached!.sourceKey);
-  const at = { county: source?.county ?? sources[0].county, host: cached.host, checkedAt: cached.checkedAt };
+  const at = {
+    county: source?.county ?? sources[0].county, host: cached.host, checkedAt: cached.checkedAt,
+    ...(source?.hostedOn === "map_platform" && source.verifiedBy ? { serviceVerifiedBy: source.verifiedBy } : {}),
+  };
   if (cached.status === "unavailable") return { ...notChecked(`the county's parcel service did not answer: ${cached.detail}`, true), ...at };
   if (cached.status === "no_match") return { ...notChecked(`the county's parcel service could not place the address: ${cached.detail}`, true), ...at };
   if (!source) return notChecked("the parcel has not been looked up yet", true);
