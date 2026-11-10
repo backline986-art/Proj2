@@ -12,6 +12,7 @@ import { AMENDMENT_NOT_MET_ID } from "./amendmentChecks";
 import { PRIOR_CORRECTION_ID } from "./ahjReviewRules";
 import { PRECEDENT_DEPARTURE_ID } from "./permitPrecedents";
 import { WIRE_TABLE_FINDING_IDS } from "./wireTableArithmetic";
+import { ESS_MEASURED_FINDING_IDS } from "./essReview";
 import { nowIso } from "./time";
 import { redactSecretValues } from "../../shared/src/portalSafety";
 import { projectSecretValuesById } from "./projectSecrets";
@@ -156,6 +157,11 @@ export const MEASURED_FINDING_IDS: ReadonlySet<string> = new Set([
   // recorded values; a sheet showing an attachment detail cannot say it is the accepted one (and
   // "attachment" in its title would map it to rackingAttachment).
   PRECEDENT_DEPARTURE_ID,
+  // A stated battery fact against an ESS rule (essReview.ts, review-audit draft 05): kWh per unit and
+  // by location, a habitable-room location, spacing, distance to doors and windows. A sheet showing
+  // the battery does not make it small enough or far enough away. (Its "detail not shown" twin is
+  // absence, so vision may relax that one.)
+  ...ESS_MEASURED_FINDING_IDS,
 ]);
 
 /** False when the finding reports a measured result rather than missing evidence. */

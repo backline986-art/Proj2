@@ -24,6 +24,8 @@
 // change verdict on framing, ESS or truss. Only projects with no plan text at all newly flag.
 // (That ESS measurement predates #245 and #257, which changed the ESS screen again: the bare
 // acronym no longer clears it, and parser labels and negated mentions no longer raise it.)
+// Review-audit draft 05 replaced the ESS suppression list altogether: the review reads the battery
+// facts themselves (essReview.ts), so no citation word clears it any more.
 // Run: tsx backend/test/evidenceSpecificity.test.ts
 import assert from "node:assert/strict";
 import type { ProjectRecord } from "../../shared/src/types";
@@ -107,6 +109,8 @@ for (const [label, detail] of [
 
 console.log("\n3. ESS — 'address' and 'fire access pathway' are not battery clearances");
 const BATT = { batteryMake: "Tesla", batteryModel: "Powerwall 3", batteryQty: "1" };
+// Every fact the ESS review reads, for one 13.5 kWh unit on an exterior wall (invented equipment).
+const FULL_ESS_DETAIL = "ESS DETAIL SHEET E-5: (1) EXAMPLECELL 13.5 KWH BATTERY, UL 9540 LISTED. BATTERY LOCATION: EXTERIOR WALL. BATTERY 48 IN FROM NEAREST WINDOW. ESS DISCONNECT ON EXTERIOR WALL. LABEL: ENERGY STORAGE SYSTEM DISCONNECT, 240 V.";
 check("MUST PASS: the fire-pathway note does not silence the ESS detail check", () => {
   // BASE contains "FIRE ACCESS PATHWAY", and the old suppression list held a bare /fire/i —
   // so the fire-pathway work would itself have switched off every battery review.
@@ -117,9 +121,15 @@ check("MUST PASS: the word 'address' does not silence it", () => {
   assert.equal(has("city.ess.details-missing", `${BASE} SERVICE ADDRESS AND PROCESS NOTES.`, BATT), true,
     "/ESS/i matched 'addrESS' and cleared the battery review");
 });
-check("MUST EXCLUDE: real ESS clearances satisfy it", () => {
-  assert.equal(has("city.ess.details-missing", `${BASE} ESS WORKING SPACE 36 IN CLEARANCE PER NEC 706 AND IRC R328.`, BATT), false,
-    "a package showing ESS working space and clearances was still asked for them");
+// Review-audit draft 05: the review now reads the FACTS an AHJ checks (essReview.ts). A citation or a
+// clearance note alone no longer clears it — that was the gap ("any one of those words clears it").
+check("MUST PASS: a clearance note citing NEC 706 and IRC R328 is not the ESS facts (draft 05)", () => {
+  assert.equal(has("city.ess.details-missing", `${BASE} ESS WORKING SPACE 36 IN CLEARANCE PER NEC 706 AND IRC R328.`, BATT), true,
+    "two citation words cleared a review that needs listing, kWh, location and the disconnect");
+});
+check("MUST EXCLUDE: a full ESS detail satisfies it", () => {
+  assert.equal(has("city.ess.details-missing", `${BASE} ${FULL_ESS_DETAIL}`, BATT), false,
+    "a package stating every ESS fact was still told the detail is missing");
 });
 check("MUST EXCLUDE: a project with no battery raises no ESS finding at all", () => {
   assert.equal(has("city.ess.details-missing", BASE), false,
@@ -147,9 +157,9 @@ for (const [label, detail] of [
   ["IRC R328 detail", "ESS DETAIL SHEET E-5: LOCATION PER IRC R328.4, GARAGE WALL."],
   ["NFPA 855 detail", "ESS DETAIL SHEET E-5: INSTALLATION PER NFPA 855, GARAGE WALL."],
 ] as const) {
-  check(`MUST EXCLUDE: an ESS detail sheet citing ${label} satisfies it`, () => {
-    assert.equal(has("city.ess.details-missing", `${BASE} ${SCHEDULE_ESS} ${detail}`), false,
-      `a package with an ESS detail (${label}) was still told the detail is missing`);
+  check(`MUST PASS: an ESS detail sheet that only cites ${label} still owes the facts (draft 05)`, () => {
+    assert.equal(has("city.ess.details-missing", `${BASE} ${SCHEDULE_ESS} ${detail}`), true,
+      `a citation (${label}) cleared the ESS review without the listing, location or disconnect`);
   });
 }
 // #257 (1): the parser's own split map and download checklist always print a Battery / ESS line,
