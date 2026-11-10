@@ -114,6 +114,14 @@ ${letter}` });
     ahjCorrections: [{ signature: "s", bucket: "B_designer_fix" as const, rootCause: "Attachment detail not per listing", requiredAction: "", count: 1, lastSeenAt: "2026-06-01" }],
   };
   for (const f of buildReviewerReport(mk({ attachmentHardware: "Otherco Mount Z" }), { codeContext: precedentCtx }).findings) allProducibleIds.add(f.id);
+  // The battery (ESS) comparisons (essReview.ts, review-audit draft 05), on invented equipment: a unit
+  // over 20 kWh, 3 x 24 kWh in a utility closet and a bedroom, 6 in between units, an exterior-wall
+  // unit 12 in from a window.
+  for (const sheet of [
+    "(3) EXAMPLECELL BATTERY 24 KWH. BATTERY LOCATION: UTILITY CLOSET. BATTERIES 6 IN APART.",
+    "(1) EXAMPLECELL BATTERY 13.5 KWH. BATTERY LOCATION: BEDROOM.",
+    "(1) EXAMPLECELL BATTERY 13.5 KWH. BATTERY LOCATION: EXTERIOR WALL. BATTERY 12 IN FROM NEAREST WINDOW.",
+  ]) for (const f of buildReviewerReport(mk({ hasBattery: "Yes", batteryModel: "EXC-13", planSetExtractedText: sheet })).findings) allProducibleIds.add(f.id);
 }
 for (const id of [...MEASURED_FINDING_IDS]) {
   check(`MUST PASS: ${id} is still a real finding this engine emits`, () => {
