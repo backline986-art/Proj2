@@ -31,7 +31,7 @@
 // and then discarded.
 import type { CitedFact, LLMProvider, PermitFeeAnswer, PermitFilingChannel, PermitFilingChannelKind, PermitProcessDiscipline, PermitProcessLookup, PermitProcessPermitAnswer, WebLookupResult } from "../../shared/src/types";
 import type { AppDb } from "./db";
-import { hostFitsTrackAndEntity, isInformationalPageUrl, isPathTenantedHost, isPermitPlatformUrl, isVendorDomain, isVendorRootOrMarketing, portalHostOf, portalTenantKey, portalTenantOf, salesforceTenantKind, trackSafeUrl, type PortalEntity } from "./portalChannel";
+import { hostFitsTrackAndEntity, isInformationalPageUrl, isPathTenantedHost, portalUrlsInText, isPermitPlatformUrl, isVendorDomain, isVendorRootOrMarketing, portalHostOf, portalTenantKey, portalTenantOf, salesforceTenantKind, trackSafeUrl, type PortalEntity } from "./portalChannel";
 import { ahjNameCore, channelPhrase, getPermitProcessLookup, normalizeAhjName, savePermitProcessLookup, servingIssuerNamed, stateRulesFor, trackIssuer, unknownStateAuthorityName, ZONING_SIGNOFF } from "./permitProcess";
 import { CONNECTOR_WORDS, DEPARTMENT_WORDS, GENERIC_ORG_WORDS, agencyNameKey, sameAgencyName, stripDepartmentPhrase } from "./agencyName";
 // Re-exported: the agency-name identity helpers moved to agencyName.ts (pure, no lookup stack) so
@@ -42,7 +42,7 @@ import { feeScheduleProfileKey, saveFeeSchedule } from "./feeSchedules";
 import { stateSurchargeRuleFor } from "./stateFeeRules";
 import { parseBracketRow } from "./pdfTables";
 import { candidateNamedBy, chooseRecordType, classifyDocument, DOCUMENT_URL, staleOrOtherFeeSource, detectPlatform, documentLinks, excerptFor, extractCodeEditions, extractPrerequisites, isAgencyOwnUrl, isOfficialAgencyHost, linksAnotherModule, platformOfUrl, readPortalCatalog, registrableDomain, resolvePortalFromPages, solarRecordTypeCandidates, tenantContradictsAgency, wordsNameAnotherJurisdiction, type PortalCatalog, type PortalResolution, type RecordTypeCandidate } from "./permitPlatformCatalog";
-import { createPageReader, feeLinePrintedTogether, quoteOnPage, type PageReader, type ReadPage } from "./agencyPageReader";
+import { createPageReader, feeLinePrintedTogether, isRefusal, quoteOnPage, type PageReader, type ReadPage } from "./agencyPageReader";
 import { documentFetchDisabled } from "./documentFetch";
 import { classifyPrerequisites } from "./permitProcessPrerequisites";
 export { registrableDomain };
@@ -199,7 +199,7 @@ const supportsName = (value: string, quote: string) => {
 // a prerequisite clause — named BEFORE a "first"/"before going to" marker, or as a zoning/land-use
 // sign-off — does not state that the value ISSUES the permit. A name AFTER the marker (the county it
 // then goes to) is the destination and still counts.
-const PREREQ_MARKER = /\bfirst\b[^.;]{0,40}?\b(?:before|then|prior to)\b|\bbefore (?:going|submitting|applying|being (?:sent|submitted)|it goes|they go) to\b|\bprior to (?:submitting|applying|going)\b/i;
+const PREREQ_MARKER = /\bfirst\b[^.;]{0,40}?\b(?:before|then|prior to)\b|\bbefore (?:going|submitting|applying|being (?:sent|submitted)|it goes|they go) to\b|\bprior to (?:submitting|applying|going|(?:the )?submittal|(?:the )?submission|filing)\b|\bmust be (?:paid|submitted|approved|obtained|completed) (?:prior to|before)\b/i;
 export function namesOnlyAsPrerequisite(value: string, quote: string): boolean {
   const need = words(value).filter((x) => !GENERIC_ORG_WORDS.has(x));
   const w = need.length ? need : words(value);
@@ -260,7 +260,9 @@ export interface PortalDoorContext {
   /** URLs we read whose own markers name a permit platform (the R3 self-citation door). */
   platformPages?: string[];
   /** Links on pages WE read (page -> href): a page we read linking exactly the URL attests it. */
-  agencyLinks?: Array<{ page: string; href: string }>;
+  /** Links on the pages we read; `printed`: an address PRINTED in the words of a page or document we
+   *  read on the agency's own official domain (a checklist PDF that prints the portal's address). */
+  agencyLinks?: Array<{ page: string; href: string; printed?: boolean }>;
   /** Every name in play (the AHJ, the top agency, this permit's agency) — their distinctive keys. */
   names?: string[];
   /** The names whose jurisdiction TYPE the portal must not contradict (see (c)); no type check when empty. */
@@ -342,10 +344,10 @@ export function acceptPortalForPermit(raw: RawFact, source: PortalCandidateSourc
     const seenSelf = ctx.seenUrls.some((u) => portalHostOf(u) === host && (!shared || portalTenantKey(u) === portalTenantKey(url)));
     const ownDomainLink = !shared && !isVendorDomain(host) && registrableDomain(host) === registrableDomain(sourceHost)
       && quote.toLowerCase().includes(host) && ctx.seenUrls.some((u) => portalHostOf(u) === sourceHost);
-    const linkedFrom = (ctx.agencyLinks ?? []).find((l) => pageKey(l.href) === pageKey(url));
+    const linkedFrom = (ctx.agencyLinks ?? []).find((l) => (l.printed ? printedKey(l.href) === printedKey(url) : pageKey(l.href) === pageKey(url)));
     attestedBy = seenSelf ? (shared ? "its tenant on the shared host was a search result / a page opened or read" : "its host was a search result / a page opened or read")
       : ownDomainLink ? `the agency's own seen page (${sourceHost}) quotes this link on its own domain`
-        : linkedFrom ? `a page we read links it (${linkedFrom.page})` : null;
+        : linkedFrom ? (linkedFrom.printed ? `a page or document we read on the agency's own domain prints it (${linkedFrom.page})` : `a page we read links it (${linkedFrom.page})`) : null;
     if (!attestedBy) {
       return refused("unattested", `the portal ${url} was never returned by the search, opened by the lookup, or linked by a page we read${shared ? " (that tenant on the shared host)" : ""} — not kept`);
     }
@@ -722,6 +724,10 @@ function onOurPage<T>(fact: CitedFact<T>, pageTexts: Map<string, string>, what: 
   return { ...fact, value: null, notFound: `the quoted words are not on the ${what}'s source page as we read it ("${fact.quote.slice(0, 80)}") — not kept` };
 }
 /** One key per page: no fragment, no trailing slash, host lower-cased. */
+/** A printed address carries no scheme and may drop "www.": compared host (no www) + path + query. */
+function printedKey(url: string): string {
+  return pageKey(url).toLowerCase().replace(/^https?:\/\/(?:www\.)?/, "");
+}
 export function pageKey(url: string): string {
   try { const u = new URL(str(url)); u.hash = ""; return `${u.protocol}//${u.host.toLowerCase()}${u.pathname.replace(/\/+$/, "")}${u.search}`; } catch { return str(url); }
 }
@@ -788,11 +794,37 @@ export function parseDocsFeesPart(text: string, seenUrls: string[], stopReason: 
         if (tiers.length) answer.tiers = tiers;
         return answer.amountUsd == null && !lines.length && !tiers.length ? null : answer;
       },
-      supports: supportsAmount,
+      // A PRINTED FEE TABLE (several lines + TOTAL) is quoted by its TOTAL row: the lines are on the
+      // page, not in a 250-character quote (bot-vs-research 2026-11-10: "TOTAL $1,033.00" over five
+      // lines). Supported when the quote states it (every line + the total, whitespace normalised), or
+      // when the quote is ON the page we read and that page prints every line and the total — the fee
+      // tie below then holds each amount to its own label on that page.
+      supports: (v, q) => supportsAmount(v, q.replace(/\s+/g, " ")) || feeTableOnOurPage(v, q, pageTexts.get(pageKey(str((p.fee as RawFact)?.sourceUrl)))),
     });
     out.set(discipline, { documents: onOurPage(refuseGoneCitation(documents, gone, "required documents"), pageTexts, "required documents"), fee: tiedFee(onOurPage(currentFeeSource(fee, gone), pageTexts, "fee"), pageTexts) });
   }
   return { byDiscipline: out, problem: "" };
+}
+/** The reads a PERSON must make: refused (401 / 403 / 429, a challenge or wall) or skipped because
+ *  the host refused an earlier read. A missing page (404 / 410), a spent budget, a sign-in page or
+ *  downloads switched off are not refusals. One entry per page. */
+export function readsNeedingAPerson(log: ReadonlyArray<{ url: string; ok: boolean; reason: string }>): Array<{ url: string; reason: string }> {
+  const out: Array<{ url: string; reason: string }> = [];
+  for (const l of log) {
+    if (l.ok) continue;
+    const reason = str(l.reason);
+    const status = Number(/HTTP (\d{3})\b/.exec(reason)?.[1] ?? 0);
+    if (!isRefusal(status, reason) && !/backed off/i.test(reason)) continue;
+    if (out.some((o) => pageKey(o.url) === pageKey(l.url))) continue;
+    out.push({ url: l.url, reason: reason.slice(0, 120) });
+  }
+  return out.slice(0, 10);
+}
+/** The quote is on the page we read, and that page prints every line amount and the total. */
+export function feeTableOnOurPage(fee: PermitFeeAnswer, quote: string, pageText: string | undefined): boolean {
+  if (!pageText || !fee.lines.length) return false;
+  if (!quoteOnPage(quote, pageText)) return false;
+  return supportsAmount(fee, pageText);
 }
 /** THE FEE TIE (lookup-close-4, D3): every (label, amount) pair the answer carries — each line, each
  *  tier — is printed together (agencyPageReader.feeLinePrintedTogether) on the page we read when we
@@ -889,7 +921,7 @@ export interface AgencyEvidence {
   gone: string[];
   /** Every link on a page we read (page -> href), the resolved portal's included: a page we read
    *  linking exactly a URL attests it (the one portal door, kind (b)). */
-  agencyLinks: Array<{ page: string; href: string }>;
+  agencyLinks: Array<{ page: string; href: string; printed?: boolean }>;
 }
 // A document URL (a PDF, a DocumentCenter / WebLink / eDoc view) is permitPlatformCatalog.DOCUMENT_URL —
 // ONE pattern (lookup-close-5: this file kept a narrower copy, DOC_URL).
@@ -1034,7 +1066,22 @@ export async function readAgencyEvidence(reader: PageReader, input: {
     pageTexts.set(pageKey(pg.finalUrl), pg.text);
   }
   for (const u of platformPages) seen.push(u);
-  const agencyLinks = okPages.flatMap((pg) => pg.links.map((l) => ({ page: pg.finalUrl, href: l.href })));
+  const agencyLinks: AgencyEvidence["agencyLinks"] = okPages.flatMap((pg) => pg.links.map((l) => ({ page: pg.finalUrl, href: l.href })));
+  // A PORTAL ADDRESS PRINTED on a page or document WE READ on the agency's own official domain
+  // attests that address as a link on it would (bot-vs-research 2026-11-10: a city's solar checklist
+  // PDF prints its portal's address; a PDF has no anchors) — a permit platform's address or one on the
+  // agency's own domain, never a vanity host (read for its redirect instead). The door still judges it whole:
+  // rule 5, the information-page refusal, the issuer's jurisdiction type, another module.
+  for (const pg of [...okPages, ...docPages.map((d) => d.page)]) {
+    if (!pg.ok || !pg.text || !onAgency(pg.finalUrl || pg.url)) continue;
+    for (const u of portalUrlsInText(pg.text).slice(0, 40)) {
+      // Only a permit platform's address or one on the agency's own domain: a vanity host printed in
+      // words ("Apply online at www.<city>permits.com") may redirect anywhere, so it stays unattested
+      // and the door READS it (portal-truth D3) before anything is kept.
+      if (!isPermitPlatformUrl(u) && domOf(u) !== agencyDomain) continue;
+      if (!agencyLinks.some((l) => printedKey(l.href) === printedKey(u))) agencyLinks.push({ page: pg.finalUrl || pg.url, href: u, printed: true });
+    }
+  }
   // The resolver read the page that links the portal it resolved (a hop page is not in okPages).
   if (portal) agencyLinks.push({ page: portal.sourceUrl, href: portal.url });
   return { agencyDomain, pages, portal, platformPages: [...new Set(platformPages)], platformReads, docs, prerequisites: prerequisites.slice(0, 6), codes, seen: [...new Set(seen)], pageTexts, gone, agencyLinks };
@@ -1622,6 +1669,10 @@ export async function runPermitProcessLookup(
   // establish (an aborted part, a search that came up empty) keeps the earlier cited answer — unless
   // its cited page is gone now (withoutGoneCitations, the last door before the write).
   // The earlier row's portal goes through the ONE door with THIS run's issuer (mergeWithEarlier).
+  // A REFUSED READ IS NOT SILENT (lookup-door-fixes): every page the reader was refused is listed for
+  // a person to read, on the row and in its notes. The reader's one try and host back-off are unchanged.
+  const needsPersonRead = reader ? readsNeedingAPerson(reader.log) : [];
+  for (const r of needsPersonRead) notes.push(`Needs a person to read: ${r.url} (${r.reason})`);
   const merged = withoutGoneCitations(mergeWithEarlier(existing, { issuingAgency, permitStructure: part1.permitStructure, permits },
     (d, earlierPortal) => acceptPortalForPermit({ value: earlierPortal.value, sourceUrl: earlierPortal.sourceUrl, quote: earlierPortal.quote }, "process part", doorContextFor(d, { seen: [], platformPages: [] })),
     (d, earlierRecordType, portalUrl) => recordTypeBelongsToPortal(earlierRecordType, portalUrl, rtCtx(d))), gone);
@@ -1641,6 +1692,7 @@ export async function runPermitProcessLookup(
     groundMountZoning: part1.groundMountZoning?.value ? part1.groundMountZoning : existing?.groundMountZoning?.value ? existing.groundMountZoning : part1.groundMountZoning,
     ...(ev?.codes ? { codes: ev.codes } : existing?.codes ? { codes: existing.codes } : {}),
     ...(reader ? { pagesRead: reader.log.map((l) => ({ url: l.url, ok: l.ok, reason: l.reason.slice(0, 160) })) } : {}),
+    ...(needsPersonRead.length ? { needsPersonRead } : {}),
   });
   if (res.saved && res.lookup) {
     try { applyLookupFees(db, res.lookup); } catch (err) { logger.warn("permit-process", `fee landing failed: ${err instanceof Error ? err.message : String(err)}`); }

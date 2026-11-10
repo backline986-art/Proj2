@@ -391,9 +391,13 @@ export function wordsNameAnotherJurisdiction(text: string, names: string[], type
   const own = new Set(names.flatMap((n) => String(n ?? "").toLowerCase().split(/[^a-z]+/)).filter(Boolean));
   const ownTypes = jurisdictionTypes(typeNames);
   const found: Array<{ name: string; type: string }> = [];
-  for (const m of String(text ?? "").matchAll(/\b(city|town|township|county|borough|village|parish) of ((?:[A-Z][a-zA-Z'.-]+)(?: [A-Z][a-zA-Z'.-]+)?)/gi)) found.push({ name: m[2], type: m[1] });
-  for (const m of String(text ?? "").matchAll(/\b((?:[A-Z][a-zA-Z'.-]+)(?: [A-Z][a-zA-Z'.-]+)?) (Township|County|City|Borough|Village|Parish)\b/gi)) found.push({ name: m[1], type: m[2] });
-  const generic = /^(?:the|our|your|this|a|an|apply|online|permit|permits|portal|building|residential|commercial|unincorporated|inside|outside|citizen|public|new|search|for|in|of|with|to|at|and|or)$/i;
+  // A NAMED jurisdiction is CAPITALISED, and so is its type when it follows the name (bot-vs-research
+  // 2026-11-10: "…Apply Now The city regulates…" read case-insensitively was a place called "Now The
+  // City", and the city's own portal was refused as another jurisdiction's). "City of X" may start a
+  // sentence or not; lowercase "the city" never names one.
+  for (const m of String(text ?? "").matchAll(/\b([Cc]ity|[Tt]own|[Tt]ownship|[Cc]ounty|[Bb]orough|[Vv]illage|[Pp]arish|CITY|TOWN|TOWNSHIP|COUNTY|BOROUGH|VILLAGE|PARISH) (?:of|OF) ((?:[A-Z][a-zA-Z'.-]+)(?: [A-Z][a-zA-Z'.-]+)?)/g)) found.push({ name: m[2], type: m[1].toLowerCase() });
+  for (const m of String(text ?? "").matchAll(/\b((?:[A-Z][a-zA-Z'.-]+)(?: [A-Z][a-zA-Z'.-]+)?) (Township|County|City|Borough|Village|Parish|TOWNSHIP|COUNTY|CITY|BOROUGH|VILLAGE|PARISH)\b/g)) found.push({ name: m[1], type: m[2].toLowerCase() });
+  const generic = /^(?:the|our|your|this|a|an|apply|online|permit|permits|portal|building|residential|commercial|unincorporated|inside|outside|citizen|public|new|search|for|in|of|with|to|at|and|or|now|here|click|visit|welcome|contact|about)$/i;
   return found.some((f) => {
     const ws = f.name.toLowerCase().split(/[^a-z]+/).filter((w) => w && !generic.test(w));
     if (!ws.length) return false;

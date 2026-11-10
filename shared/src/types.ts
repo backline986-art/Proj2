@@ -5438,6 +5438,9 @@ export interface PermitProcessLookup {
   /** Pages the lookup READ ITSELF (agency pages, the portal's public catalog, fee schedules), each
    *  with what came of the read — the audit trail for every value cited to one of them. */
   pagesRead?: Array<{ url: string; ok: boolean; reason: string }>;
+  /** Pages the lookup was REFUSED (a challenge, 401/403/429, a host backed off after a refusal): a
+   *  person reads them (lookup-door-fixes, 2026-11-10). Never retried in another style. */
+  needsPersonRead?: Array<{ url: string; reason: string }>;
   lookedUpAt: string;
   model?: string;
   costUsd?: number;

@@ -77,6 +77,8 @@ export interface PermitStructureAnswer {
   prerequisites: PermitPrerequisiteStep[];
   /** A STATE agency issues the permits instead of the AHJ (stateTradeIssuerFor: New Mexico CID / MHD). */
   issuer?: string;
+  /** Pages the per-job lookup was refused (lookup-door-fixes): a person reads them. */
+  needsPersonRead?: Array<{ url: string; reason: string }>;
 }
 
 const HEDGED = /\?|\blooks like\b|\bmaybe\b|\bmight\b|\bpossibly\b|\bprobably\b|\bnot sure\b|\bunclear\b|\bi think\b|\bseems\b/i;
@@ -123,6 +125,15 @@ function citedPrerequisites(project: ProjectRecord): PermitPrerequisiteStep[] {
 export function permitStructureAnswer(
   project: ProjectRecord,
   opts: { researched?: "separate" | "combo" | "unknown" | null; researchedFrom?: string } = {},
+): PermitStructureAnswer {
+  const a = structureAnswerFromSources(project, opts);
+  // The per-job lookup's refused reads ride with the answer, whichever source settled it.
+  const unread = permitProcessFor(project)?.needsPersonRead ?? [];
+  return unread.length ? { ...a, needsPersonRead: unread.slice(0, 5) } : a;
+}
+function structureAnswerFromSources(
+  project: ProjectRecord,
+  opts: { researched?: "separate" | "combo" | "unknown" | null; researchedFrom?: string },
 ): PermitStructureAnswer {
   const prerequisites = citedPrerequisites(project);
   const settle = (structure: "separate" | "combo", level: PermitStructureLevel, basis: string, sourceUrl = "", quote = ""): PermitStructureAnswer =>
@@ -276,7 +287,8 @@ function permitStructureParts(a: PermitStructureAnswer): { core: string; pre: st
       ? `One combined building + electrical permit (${where})`
       : `One permit or separate building + electrical permits: not yet confirmed — verify on the AHJ site${a.hint ? ` (unconfirmed lead: ${a.hint})` : ""}`;
   const pre = a.prerequisites.length ? ` FIRST, at another office: ${a.prerequisites.map((p) => p.step).join("; then ")}.` : "";
-  return { core, pre };
+  const unread = a.needsPersonRead?.length ? ` Needs a person to read (the site refused Keelix's read): ${a.needsPersonRead.map((r) => `${r.url} (${r.reason})`).join("; ")}.` : "";
+  return { core, pre: `${pre}${unread}` };
 }
 
 /**
