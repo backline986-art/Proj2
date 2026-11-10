@@ -37,7 +37,7 @@ import type {
   BulkDropFolderStatus, BulkDropFolderView, BulkDropPreview, BulkDropView, EmailIntakeFile,
 } from "../../shared/src/types";
 import { addAuditLog } from "./audit";
-import { batchUploadRoot, extractZipToWorkdir, folderScanJobAllowed, folderWithinRoot, mayScanFolder } from "./batchZip";
+import { batchUploadRoot, extractZipToWorkdir, folderScanJobAllowed, folderWithinRoot, mayScanFolder, zipNamesManifest } from "./batchZip";
 import { HttpError } from "./httpError";
 import { intakeClientInOrg, placeIntakeJob, type IntakeClient, type IntakeExtractor } from "./emailIntake";
 import { enqueueJob, type JobRecord } from "./jobQueue";
@@ -90,7 +90,12 @@ export function jobFolders(root: string): { base: string; jobs: Array<{ folder: 
     base = path.join(base, top.dirs[0]);
   }
   const top = entriesOf(base);
-  return { base, jobs: top.dirs.map((folder) => ({ folder, dir: path.join(base, folder) })), looseFiles: top.files };
+  // A name the file system could not store was written under a safe one (batchZip, #119): the
+  // person sees the name they gave the folder, and the job runs on the folder as it is on disk.
+  const given = zipNamesManifest(root);
+  const rel = path.relative(root, base).split(path.sep).filter(Boolean).join("/");
+  const nameOf = (onDisk: string): string => given[rel ? `${rel}/${onDisk}` : onDisk] ?? onDisk;
+  return { base, jobs: top.dirs.map((folder) => ({ folder: nameOf(folder), dir: path.join(base, folder) })), looseFiles: top.files.map(nameOf) };
 }
 
 /** Every visible file in a job folder, nested folders included, in name order (capped). */
