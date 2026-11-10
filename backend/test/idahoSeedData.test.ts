@@ -211,5 +211,17 @@ await run("the utility's program limit loads SEEDED, cited, and only warns (appl
   }
 });
 
+await run("nothing here claims official or verified: doors stay seeded whatever the host (rule 3, #683)", () => {
+  const util = read("reference-utility-application-requirements.json") as { records: Array<{ states: string[] }> };
+  const elig = read("reference-eligibility-limits.json") as { records: Array<{ state: string }> };
+  const rows: unknown[] = [...cited, ...util.records.filter((r) => r.states.includes(STATE)), ...elig.records.filter((r) => r.state === STATE)];
+  for (const r of rows) assert.doesNotMatch(JSON.stringify(r), /"verified(?:By|At)?"\s*:|"official"|"tier"\s*:/, "no verified / official claim");
+  // A door on a government host is still only seeded: it never claims a tier.
+  for (const p of cited) {
+    const door = doorOf(p);
+    if (door) assert.equal((door as { tier?: string }).tier, undefined, `${p.ahj}: the door claims no tier`);
+  }
+});
+
 console.log(failures ? `\n${failures} failure(s)` : "\nall ok");
 if (failures) process.exit(1);
