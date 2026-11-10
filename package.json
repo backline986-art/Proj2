@@ -16,6 +16,7 @@
     "portal:login": "tsx portal-bot/src/testRun.ts login",
     "portal:test": "tsx portal-bot/src/testRun.ts",
     "ops": "tsx scripts/ops-status.ts",
+    "golive:check": "tsx scripts/golive-check.ts",
     "coverage:report": "tsx scripts/coverage-report.ts",
     "fee:sheet": "tsx scripts/fee-sheet.ts",
     "harvest:jurisdiction": "tsx scripts/harvest-jurisdiction.ts",

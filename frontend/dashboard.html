@@ -126,6 +126,7 @@
           <button id="openUsersBtn" class="secondary"><i data-lucide="users"></i><span>Team</span></button>
           <button id="openKpiBtn" class="secondary"><i data-lucide="bar-chart-2"></i><span>KPIs</span></button>
           <button id="openDestQueueBtn" class="secondary"><i data-lucide="map-pin-check"></i><span>Destinations to confirm</span></button>
+          <button id="openGoLiveBtn" class="secondary"><i data-lucide="rocket"></i><span>Go-live check</span></button>
           <button id="openKnowledgeBtn" class="secondary"><i data-lucide="brain"></i><span>Knowledge</span></button>
           <!-- A standalone tool: still shipping, just no longer competing with
                the pipeline for top-level space. -->
@@ -1665,6 +1666,23 @@
     </div>
   </div>
 
+  <!-- GO-LIVE CHECK: every switch and setting this server reads, set / not set, and what each means
+       (GET /api/go-live, admin-only; go-live.js render). A read: it changes nothing and never shows a value. -->
+  <div id="goLiveModal" class="modal" hidden role="dialog" aria-modal="true" aria-labelledby="goLiveTitle">
+    <div class="modal-card modal-wide">
+      <div class="modal-head">
+        <h2 id="goLiveTitle">Go-live check</h2>
+        <div class="actions">
+          <button id="refreshGoLiveBtn" class="secondary"><i data-lucide="refresh-cw"></i><span>Refresh</span></button>
+          <button id="closeGoLiveBtn" class="secondary"><i data-lucide="x"></i><span>Close</span></button>
+        </div>
+      </div>
+      <div id="goLiveBody" class="golive-body">
+        <p class="muted">Loading…</p>
+      </div>
+    </div>
+  </div>
+
   <!-- Keyboard shortcuts help — toggled with ? ; closed with Esc. -->
   <div id="shortcutsOverlay" class="shortcuts-overlay" hidden role="dialog" aria-modal="true" aria-labelledby="shortcutsTitle">
     <div class="shortcuts-card">
@@ -1694,6 +1712,7 @@
   <script src="/utility-requirements.js"></script>
   <!-- Proposed filing destinations from the authority's official page, confirmed by a named person (window.FilingDestination). -->
   <script src="/filing-destination.js"></script>
+  <script src="/go-live.js"></script>
   <script src="/parser-review.js?v=13"></script>
   <script type="module" src="/dashboard.js"></script>
 </body>

@@ -181,6 +181,8 @@ const SCOPED_LIST_ROUTES: Record<string, string> = {
   "/api/fee-accuracy": "reqOrgFilter",
   // Destinations to confirm (owner 2026-11-10): the org's open jobs' unverified filing doors; a read.
   "/api/filing-destinations": "reqOrgFilter",
+  // Go-live check (owner 2026-11-10): admin-gated; process settings as set/not set, the org's own counts.
+  "/api/go-live": "reqOrgFilter",
 };
 
 const topLevel = (p: string): string => {
