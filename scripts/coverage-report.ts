@@ -965,6 +965,16 @@ export function renderCoverageReport(report: CoverageReport): string {
   for (const bucket of COVERAGE_BUCKETS) {
     line(`  ${BUCKET_LABEL[bucket].padEnd(22)} ${String(report.counts[bucket]).padStart(3)} of ${report.rows.length}`);
   }
+  // BILLING (#700): a fee we advance through a login with no recorded agreement can never be
+  // invoiced (invoices.ts holds it as "no fee responsibility on file"), so say it here, in the
+  // report the customer actually reads at kickoff, not only on each row.
+  const unagreed = feesNotAgreed(report.rows);
+  if (unagreed.length) {
+    line();
+    line(`  ⚠ FEES NOT AGREED on ${unagreed.length} stored login(s): ${wrap(unagreed.join(", "), 4)}`);
+    line("    Who pays each portal's fees (S3.7) is blank there. A fee we pay through one of these");
+    line("    cannot be invoiced back until it is recorded on the login.");
+  }
   line();
   line("  What this report is NOT: a claim that any filing will succeed. READY NOW means a recorded");
   line("  application replays and the portal has accepted the login — it is evidence, not proof, and");
@@ -1004,6 +1014,16 @@ const FEE_WORDS: Record<string, string> = {
   "mailed-check": "a cheque they post (Ameren Illinois' $50 Level 1 fee is one of these)",
   "keelix-pays": "we pay it and invoice it back",
 };
+
+/** The distinct stored logins (by portal host) whose fee agreement is blank. */
+export function feesNotAgreed(rows: CoverageRow[]): string[] {
+  const out = new Set<string>();
+  for (const row of rows) {
+    if (row.channel?.kind === "email" || row.channel?.kind === "with_permit") continue;
+    if (row.credential.stored && !s(row.feeResponsibility)) out.add(row.portalHost || row.jurisdiction);
+  }
+  return [...out];
+}
 
 /** S3.7 is agreed PER PORTAL at kickoff, so it belongs on a per-portal row. It never moves a
  *  row between buckets: automation never pays a portal fee under any value of this column.
