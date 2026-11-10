@@ -1855,7 +1855,9 @@ export interface JurisdictionEditionProposal {
   fingerprint: string;
   source: "reference" | "research";
   createdAt: string;
-  changes: Array<{ family: CodeFamily; current: string | null; proposed: string | null; sourceUrl?: string; quote?: string }>;
+  /** `datesOnly`: the row states the same edition, but not the effective / mandatory date or the
+   *  replaced edition the finding states (#561); approving adds them to the row's own entry. */
+  changes: Array<{ family: CodeFamily; current: string | null; proposed: string | null; datesOnly?: boolean; sourceUrl?: string; quote?: string }>;
   /** The full adopted-code list a re-verification would record. */
   proposedCodes: CodeEdition[];
   adoptionModel?: JurisdictionAdoptionModel;
@@ -2052,6 +2054,9 @@ export interface DesignCriteriaResearchResult {
     value: number | string;
     sourceUrl: string;
     quote?: string;
+    /** The number as the page printed it, when it was published in another unit and converted to
+     *  the field's own (#561: "2.5 feet" of frost is stored 30 in; this is 2.5). */
+    publishedValue?: number;
     /** Ground snow only: "pg" (strength) or "pg_asd" (allowable-stress, stored as groundSnowLoadAsdPsf). */
     qualifier?: "pg" | "pg_asd";
     /** Set when the page is NOT a jurisdiction-wide design value (a project-type handout: a storage

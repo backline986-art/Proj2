@@ -1043,6 +1043,55 @@ function numbersIn(quote: string): Array<{ n: number; at: number; end: number }>
   return out;
 }
 
+/** The units a published design value is printed in, each as the words right after its number.
+ *  Order matters: kPa before a bare "k…", m/s and km/h before metres, inches ('' / ") before feet ('). */
+const UNIT_WORDS: Array<{ unit: string; re: RegExp }> = [
+  { unit: "kPa", re: /^\s*(?:kpa\b|kn\s*\/\s*m\s*(?:\^?2|²))/i },
+  { unit: "psf", re: /^\s*(?:psf\b|p\.s\.f\.?|(?:lbs?|pounds?|#)\.?\s*(?:\/|per)\s*(?:sq(?:uare)?\.?\s*(?:ft|feet|foot)\b\.?|ft\s*(?:\^?2|²)|sf\b)|pounds?\b|lbs?\b\.?)/i },
+  { unit: "km/h", re: /^\s*(?:km\s*\/\s*hr?\b|kph\b|kilomet(?:er|re)s?\s+per\s+hour)/i },
+  { unit: "m/s", re: /^\s*(?:m\s*\/\s*s(?:ec)?\b|met(?:er|re)s?\s+per\s+second)/i },
+  { unit: "mph", re: /^\s*(?:mph\b|mi(?:les)?\.?\s*(?:\/|per)\s*h(?:ou)?r\b)/i },
+  { unit: "in", re: /^\s*(?:in(?:ch(?:es)?)?\b\.?|"|”|″|'')/i },
+  { unit: "ft", re: /^\s*(?:f(?:ee|oo)?t\b\.?|'|’|′)/i },
+  { unit: "cm", re: /^\s*(?:cm\b|centimet(?:er|re)s?\b)/i },
+  { unit: "mm", re: /^\s*(?:mm\b|millimet(?:er|re)s?\b)/i },
+  { unit: "m", re: /^\s*(?:m\b(?!\s*\/)|met(?:er|re)s?\b)/i },
+];
+/** Per field: each unit it can hold, as a factor into the field's own unit (psf, mph, in), and how
+ *  finely the converted value is kept. A unit missing here is one the field cannot hold. */
+const FIELD_UNITS: Record<"load" | "speed" | "depth", { factors: Record<string, number>; step: number }> = {
+  load: { factors: { "": 1, psf: 1, kPa: 20.8854 }, step: 1 },
+  speed: { factors: { "": 1, mph: 1, "km/h": 0.621371, "m/s": 2.23694 }, step: 1 },
+  depth: { factors: { "": 1, in: 1, ft: 12, cm: 1 / 2.54, mm: 1 / 25.4, m: 39.3701 }, step: 0.1 },
+};
+function unitAfter(quote: string, end: number): string {
+  const after = quote.slice(end, end + 40);
+  return UNIT_WORDS.find((u) => u.re.test(after))?.unit ?? "";
+}
+/**
+ * ONE PUBLISHED NUMBER IN THE FIELD'S OWN UNIT (#561). `norm` is the number converted (psf for a
+ * load, mph for a wind speed, inches for a frost depth), or null when its unit is one the field
+ * cannot hold ("30 inches" of snow is a depth; "30 psf" is not a frost line) or when it is only the
+ * inches tail of a feet-and-inches length ("2 ft 6 in": the 6 is not a depth on its own). A bare
+ * number is read in the field's own unit, as a design-criteria table prints it ("31 pounds").
+ */
+export function publishedMeasure(criterion: string, quote: string, nums: Array<{ n: number; at: number; end: number }>, i: number): { norm: number | null; unit: string } {
+  const kind = criterion === "windSpeedMph" ? "speed" : criterion === "frostDepthIn" ? "depth"
+    : /SnowLoad|soilBearing/.test(criterion) ? "load" : null;
+  const unit = unitAfter(quote, nums[i].end);
+  if (!kind) return { norm: nums[i].n, unit };
+  // The inches of "2 ft 6 in" / 2'-6": the feet number before it carries the whole length.
+  if (kind === "depth" && unit === "in" && i > 0 && unitAfter(quote, nums[i - 1].end) === "ft"
+    && /^\s*(?:f(?:ee|oo)?t\b\.?|'|’|′)\s*(?:-|–|and\b)?\s*$/i.test(quote.slice(nums[i - 1].end, nums[i].at))) return { norm: null, unit: "in (part of a feet-and-inches length)" };
+  const { factors, step } = FIELD_UNITS[kind];
+  const factor = factors[unit];
+  if (factor === undefined) return { norm: null, unit };
+  let n = nums[i].n * factor;
+  if (kind === "depth" && unit === "ft" && i + 1 < nums.length && unitAfter(quote, nums[i + 1].end) === "in"
+    && /^\s*(?:f(?:ee|oo)?t\b\.?|'|’|′)\s*(?:-|–|and\b)?\s*$/i.test(quote.slice(nums[i].end, nums[i + 1].at))) n += nums[i + 1].n;
+  return { norm: Number((Math.round(n / step) * step).toFixed(step < 1 ? 1 : 0)), unit };
+}
+
 /** The number sits in a range or a list ("20-25 psf", "115/125/140", "25 or 30 psf"): not ONE value. */
 function inRangeOrList(quote: string, at: number, end: number): boolean {
   const before = quote.slice(Math.max(0, at - 8), at);
@@ -1198,7 +1247,7 @@ export function parseDesignCriteriaLookup(
       const rawText = String(v.value ?? "").trim().toUpperCase();
       // Weathering is one of three words, stored lower-case; termite is kept as published ("Slight
       // to Moderate"), whitespace collapsed — too long for the field is dropped below, never cut.
-      const value = criterion === "weathering" ? String(v.value ?? "").trim().toLowerCase()
+      let value = criterion === "weathering" ? String(v.value ?? "").trim().toLowerCase()
         : criterion === "termite" ? String(v.value ?? "").trim().replace(/\s+/g, " ")
         : criterion === "windExposure" ? exposureValue(rawText) ?? rawText
         : isText ? (criterion === "riskCategory" ? romanRisk[rawText] ?? rawText : rawText) : typeof v.value === "number" ? v.value : Number.NaN;
@@ -1247,8 +1296,14 @@ export function parseDesignCriteriaLookup(
         // not a "1, 500" list. Only there — a comma between two loads is a list.
         const q = criterion === "soilBearingPsf" ? quote.replace(/(\d),(?=\d{3}(?!\d))/g, "$1") : quote;
         const nums = numbersIn(q);
-        const hits = nums.map((x, i) => ({ ...x, i })).filter((x) => x.n === value);
-        if (!hits.length) why = "quote does not contain the value";
+        // EVERY NUMBER IS READ WITH ITS UNIT (#561): "2.5 feet" of frost is 30 in, "1.44 kPa" of snow
+        // is 30 psf, and "30 inches" of snow is a depth, never a load. A number matches the answer
+        // as published or once converted to the field's unit; a unit the field cannot hold drops it.
+        const measured = nums.map((x, i) => ({ ...x, i, ...publishedMeasure(criterion, q, nums, i) }));
+        const hits = measured.filter((x) => x.norm !== null && (x.n === value || x.norm === value));
+        const misfit = measured.find((x) => x.norm === null && x.n === value);
+        if (!hits.length && misfit) why = `the value is published in ${misfit.unit}, not a unit this field holds`;
+        else if (!hits.length) why = "quote does not contain the value";
         else if (hits.every((h) => inRangeOrList(q, h.at, h.end))) why = "value sits in a range or list";
         else if (SITE_CONDITIONAL.test(q)) why = "quote makes the value site-specific";
         else if (criterion === "frostDepthIn") {
@@ -1296,11 +1351,23 @@ export function parseDesignCriteriaLookup(
       // page must not become a jurisdiction's seeded value).
       if (!why && !isOfficialCodeSource(sourceUrl, jurisdiction)) why = "source is not an official government or code-publisher page";
       if (why) { dropped.push(`${key} ${value} (${why})`); continue; }
+      // The number as the page printed it, when a unit was converted ("2.5" feet -> 30 in): the
+      // official-source landing checks the quote for THIS number (#683).
+      let publishedValue: number | undefined;
+      // Stored in the field's own unit: the converted reading of the number the checks above bound.
+      if (typeof value === "number" && !isText) {
+        const q = criterion === "soilBearingPsf" ? quote.replace(/(\d),(?=\d{3}(?!\d))/g, "$1") : quote;
+        const nums = numbersIn(q);
+        const read = nums.map((x, i) => ({ ...x, ...publishedMeasure(criterion, q, nums, i) }))
+          .find((x) => x.norm !== null && (x.n === value || x.norm === value) && !inRangeOrList(q, x.at, x.end));
+        if (read?.norm != null && read.norm !== value) { publishedValue = read.n; value = read.norm; }
+        else if (read?.norm != null && read.n !== read.norm) publishedValue = read.n;
+      }
       // One value per stored field: a strength Pg and a pg(asd) may both land; two answers for the
       // same one (the model put a pg(asd) quote under groundSnowLoadPsf and also answered the asd key) keep the first.
       if (values.some((x) => x.criterion === criterion && (x.qualifier ?? "") === (qualifier ?? ""))) { dropped.push(`${key} ${value} (a second value for the same field)`); continue; }
       const weakSource = weakDesignSourceReason(sourceUrl, v.sourceKind);
-      const item: LookupValue = { criterion, value, sourceUrl, quote: quote.slice(0, 240), ...(qualifier ? { qualifier } : {}), ...(weakSource ? { weakSource } : {}) };
+      const item: LookupValue = { criterion, value, sourceUrl, quote: quote.slice(0, 240), ...(publishedValue !== undefined ? { publishedValue } : {}), ...(qualifier ? { qualifier } : {}), ...(weakSource ? { weakSource } : {}) };
       values.push(item);
     }
   }

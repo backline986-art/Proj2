@@ -49,7 +49,7 @@
     const section = (title, items) => rows.push(`<div class="rv-vsec"><h4>${esc(title)}</h4>${items.length
       ? `<ul>${items.join('')}</ul>` : '<p class="rv-muted muted">None recorded.</p>'}</div>`);
     section('Adopted codes', ((p && p.adoptedCodes) || []).map((c) =>
-      `<li><b>${esc(c.code)} ${esc(c.edition)}</b>${c.title ? ` — ${esc(c.title)}` : ''}${c.basedOn ? ` <span class="rv-muted muted">(based on ${esc(c.basedOn)})</span>` : ''}${c.effectiveDate ? ` <span class="rv-muted muted">effective ${esc(c.effectiveDate)}</span>` : ''}${sourceLink(c.sourceUrl)}</li>`));
+      `<li><b>${esc(c.code)} ${esc(c.edition)}</b>${c.title ? ` — ${esc(c.title)}` : ''}${c.basedOn ? ` <span class="rv-muted muted">(based on ${esc(c.basedOn)})</span>` : ''}${c.effectiveDate ? ` <span class="rv-muted muted">effective ${esc(c.effectiveDate)}</span>` : ''}${c.mandatoryDate ? ` <span class="rv-muted muted">mandatory ${esc(c.mandatoryDate)}</span>` : ''}${c.previousEdition ? ` <span class="rv-muted muted">replaces ${esc(c.previousEdition)}</span>` : ''}${sourceLink(c.sourceUrl)}</li>`));
     section('Amendments', ((p && p.amendments) || []).map((a) =>
       `<li><b>${esc([a.code, a.section].filter(Boolean).join(' '))}</b>${a.summary ? ` — ${esc(a.summary)}` : ''}${sourceLink(a.sourceUrl)}</li>`));
     // OFFICIAL (#683): a value read on the jurisdiction's own official page is shown "from <host>",
