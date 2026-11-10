@@ -4,6 +4,7 @@
 
 import { z } from "zod";
 import { HttpError } from "./httpError";
+import { UTILITY_REQUIREMENT_KEYS, type UtilityRequirementKey } from "../../shared/src/types";
 
 export { z };
 
@@ -140,12 +141,17 @@ export const utilityStorageModesSchema = z.object({
  *  records what this project's utility's own application asks for, each item with the page and its words. */
 export const utilityApplicationRequirementsSchema = z.object({
   requirements: z.array(z.object({
-    key: z.enum(["account_verification", "meter_photo", "inverter_settings", "inverter_listing_ul1741sb", "one_line", "site_plan", "ac_disconnect", "storage_mode_declaration", "owner_signature"]),
+    // Every kind the requirement data knows (shared UTILITY_REQUIREMENT_KEYS), so a person can cite any item
+    // the seed or a lookup carries (module_spec / inverter_spec included).
+    key: z.enum(UTILITY_REQUIREMENT_KEYS as unknown as [UtilityRequirementKey, ...UtilityRequirementKey[]]),
     whenMissing: z.enum(["blocker", "warning"]),
     sourceName: z.string().trim().max(200).optional(),
     sourceUrl: personFactUrl,
     quote: z.string().trim().min(8).max(600),
   }).strict()).min(1).max(12),
+  /** "merge": add, edit or verify these items and keep the person's other items (the dashboard panel);
+   *  absent / "replace": these items become the person-recorded list. */
+  mode: z.enum(["replace", "merge"]).optional(),
   decidedBy: z.string().max(120).optional(),
 }).strict();
 
