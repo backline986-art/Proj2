@@ -2,6 +2,7 @@ import type { AuthorityEligibilityRecord, ParserPayload, QcStatus, Severity, Uti
 import type { EffectiveCodeContext } from "./codeProfiles";
 import { requirementForGate, requirementMayBlock, resolveUtilityRequirements, shippedQcRuleDefinitions, strictDefaultRequirements } from "./utilityRequirements";
 import { batteryStatus } from "../../shared/src/batteryControls";
+import { jurisdictionScreenMayBlock, matchJurisdiction, recordForIdPrefix, shippedJurisdictionQcRecords, shippedJurisdictionRuleDefinitions, type JurisdictionQcRecord, type JurisdictionQcScreen, type SubmittalItemKey } from "./jurisdictionQcRules";
 import { isBillHolderName, nemApplicantName } from "./accountHolders";
 import { evaluateEligibility, productionMeterShown, shippedEligibilityRecords, stringsPerInverterOf } from "./eligibilityLimits";
 import { usStateCode } from "./permitPath";
@@ -50,94 +51,9 @@ export const baselineRuleDefinitions: BaselineRuleDefinition[] = [
     trigger: "Residential net metering facility over 25 kW DC",
     action: "Flag for non-standard NEM review or commercial/non-residential confirmation.",
   },
-  {
-    id: "or-nem-tier1-export-25kw",
-    ruleType: "qc",
-    name: "Oregon Tier 1 export screen",
-    jurisdictionScope: "Oregon",
-    utilityScope: "Oregon public utilities",
-    source: "OAR 860-039-0030",
-    severity: "warning",
-    trigger: "Export capacity over 25 kW or generation over 50 kW",
-    action: "Flag likely Tier 2/3 utility review path before submission.",
-  },
-  {
-    id: "or-nem-manual-disconnect",
-    ruleType: "qc",
-    name: "Oregon NEM manual disconnect",
-    jurisdictionScope: "Oregon",
-    utilityScope: "Oregon public utilities",
-    source: "OAR 860-039-0005",
-    severity: "warning",
-    trigger: "AC disconnect requirement not identified",
-    action: "Confirm lockable load-break disconnect or documented utility exception.",
-  },
-  {
-    id: "or-prescriptive-snow-70",
-    ruleType: "qc",
-    name: "Oregon prescriptive snow limit",
-    jurisdictionScope: "Oregon",
-    utilityScope: "",
-    source: "Oregon BCD Form 440-5952",
-    severity: "warning",
-    trigger: "Ground snow load over 70 psf or missing",
-    action: "Route to engineered path or human structural review.",
-  },
-  {
-    id: "or-prescriptive-deadload-4_5",
-    ruleType: "qc",
-    name: "Oregon prescriptive dead load limit",
-    jurisdictionScope: "Oregon",
-    utilityScope: "",
-    source: "Oregon BCD Form 440-5952",
-    severity: "warning",
-    trigger: "PV system dead load over 4.5 psf or missing",
-    action: "Route to engineered path or verify stamped structural basis.",
-  },
-  {
-    id: "or-prescriptive-roof-framing",
-    ruleType: "qc",
-    name: "Oregon prescriptive roof framing",
-    jurisdictionScope: "Oregon",
-    utilityScope: "",
-    source: "Oregon BCD Form 440-5952",
-    severity: "warning",
-    trigger: "Rafter/truss spacing missing or over 24 inches",
-    action: "Require engineered path or verified framing exception.",
-  },
-  {
-    id: "or-fire-pathways",
-    ruleType: "qc",
-    name: "Oregon PV firefighter pathways",
-    jurisdictionScope: "Oregon",
-    utilityScope: "",
-    source: "Oregon BCD PV Pathways Technical Bulletin",
-    severity: "warning",
-    trigger: "Rooftop PV with no pathway/site plan evidence",
-    action: "Confirm site plan shows required firefighter access and escape pathways.",
-  },
-  {
-    id: "portland-submittal-docs",
-    ruleType: "qc",
-    name: "Portland solar submittal documents",
-    jurisdictionScope: "Portland",
-    utilityScope: "",
-    source: "Portland Solar Permits",
-    severity: "warning",
-    trigger: "Portland project missing site/fire/framing/cross-section/racking evidence",
-    action: "Flag missing plan sheets before DevHub submission.",
-  },
-  {
-    id: "portland-ready-for-issue",
-    ruleType: "monitor",
-    name: "Portland ready for issue status",
-    jurisdictionScope: "Portland",
-    utilityScope: "",
-    source: "Portland Solar Permits pre-issuance section",
-    severity: "info",
-    trigger: "Pre-issuance complete / ready to issue / fees due",
-    action: "Flag ready_for_issue and queue human fee/payment/download step.",
-  },
+  // Each jurisdiction's screens (prescriptive, export, disconnect, city submittal lists) are catalogued
+  // by the shipped jurisdiction data (reference-jurisdiction-qc-rules.json), in this place in the list.
+  ...shippedJurisdictionRuleDefinitions(),
   // The per-utility QC rules (pacpower-*, pge-powerclerk-docs, utility-application-package,
   // utility-requirements-not-researched) are catalogued by the shipped requirement data, appended below.
 ];
@@ -294,7 +210,14 @@ export interface BaselineUtilityContext {
   reportUnresearched?: boolean;
 }
 
-export function evaluateBaselineRules(payload: ParserPayload, ctx?: EffectiveCodeContext, eligibility?: BaselineEligibilityContext, utilityCtx: BaselineUtilityContext = {}): BaselineQcResult[] {
+/** The jurisdiction records the QC baseline reads (jurisdictionQcRules.ts). */
+export interface BaselineJurisdictionContext {
+  /** Resolved with the DB (shipped seed + the state's "qc" rows in state_permit_rules). Absent = the
+   *  shipped seed alone. */
+  records?: JurisdictionQcRecord[];
+}
+
+export function evaluateBaselineRules(payload: ParserPayload, ctx?: EffectiveCodeContext, eligibility?: BaselineEligibilityContext, utilityCtx: BaselineUtilityContext = {}, jurisdictionCtx: BaselineJurisdictionContext = {}): BaselineQcResult[] {
   const out: BaselineQcResult[] = [];
   const state = str(payload, "state").toUpperCase();
   const ahj = str(payload, "ahj");
@@ -313,41 +236,55 @@ export function evaluateBaselineRules(payload: ParserPayload, ctx?: EffectiveCod
   const wind = str(payload, "wind");
   const split = `${str(payload, "splitPagesText")}\n${str(payload, "utilityDownloadChecklistText")}`;
   const notes = `${str(payload, "utilityUploadNotesText")}\n${str(payload, "projectDescriptionText")}\n${str(payload, "sitePlanNotesText")}`;
-  // A KNOWN NON-OREGON STATE IS NEVER OREGON. The AHJ-name fallback exists for payloads with no
-  // state; with one, "Portland" (Maine), "Salem" (Massachusetts) or "Washington County"
-  // (Pennsylvania) must not pull Oregon's NEM program or prescriptive limits in.
-  const nonOregonState = !!state && state !== "OR";
-  const isOregon = state === "OR" || (!nonOregonState && /oregon|portland|hillsboro|beaverton|gresham|clackamas|washington county/i.test(ahj));
-  const isPortland = isOregon && /portland/i.test(ahj);
+  // WHICH JURISDICTION'S RECORDS APPLY, as data (jurisdictionQcRules.ts; no state or city is named
+  // here). A job that names its state falls under that state's record; the AHJ-name fallback is only
+  // for a job with no state, so "Portland" (Maine), "Salem" (Massachusetts) or "Washington County"
+  // (Pennsylvania) never pull another state's program, prescriptive limits or city list in.
+  const jurisdictionRecords = jurisdictionCtx.records ?? shippedJurisdictionQcRecords();
+  const jurisdiction = matchJurisdiction(jurisdictionRecords, state, ahj);
+  const jurisdictionPrescriptive = jurisdiction.stateRecord?.prescriptive;
 
   // PRESCRIPTIVE-PATH SCREENS — data-driven when a jurisdiction code context is
   // provided (the per-AHJ adopted-codes profile), so any state/county with limits
-  // recorded gets the same screening Oregon always had. Without a context, the
-  // legacy behavior is preserved exactly: Oregon regex + the historical constants.
+  // recorded gets the same screening. Without a context, the jurisdiction record's own
+  // defaults are screened (the historical constants, now data).
   // Utility-PROGRAM size caps are not adopted building-code data either: they are cited
-  // per-authority records (eligibilityLimits.ts, #679). The manual-disconnect screen below
-  // is still state-gated (outside #679's scope). Rule IDs keep their legacy "or-…" form for Oregon (blocker
-  // gating, QC history, and the goldens key off them) and use "<state>-…" elsewhere.
+  // per-authority records (eligibilityLimits.ts, #679). Rule ids keep the legacy form a jurisdiction
+  // record names (blocker gating, QC history, and the goldens key off them) and use
+  // "<state>-…" elsewhere.
   // A LIMIT FRAGMENT IS NOT A PRESCRIPTIVE PATH (permitPath.ts says the same): Florida's seeded
   // state profile carries allowedWindExposures ["B","C","D"] — correct design-criteria data that
   // says nothing about a prescriptive PV path — and this file's screens printed "should be B or C
-  // or D for the prescriptive path" from it. Outside Oregon the screens run only where the
-  // jurisdiction's own research names a prescriptive path, or a NUMERIC structural limit (snow,
-  // dead load, spacing) is recorded for it — an exposure list alone is not a screen. A researched
-  // "publishes no prescriptive path" (false) switches every screen off.
+  // or D for the prescriptive path" from it. The screens run where the jurisdiction's record says it
+  // publishes a prescriptive path, where its own research names one, or where a NUMERIC structural
+  // limit (snow, dead load, spacing) is recorded for it — an exposure list alone is not a screen. A
+  // researched "publishes no prescriptive path" (false) switches every screen off, unless the record
+  // says it publishes one.
   const rawLimits = ctx
     ? ctx.prescriptive
-    : isOregon
-      ? { maxGroundSnowPsf: 70, maxPvDeadLoadPsf: 4.5, maxRafterSpacingIn: 24, allowedWindExposures: ["B", "C"], maxExportKwWithoutStudy: 25 }
-      : {};
-  const screensApply = isOregon || rawLimits.hasPrescriptivePath === true
+    : jurisdictionPrescriptive?.defaults ?? {};
+  const screensApply = jurisdictionPrescriptive?.publishesPath === true || rawLimits.hasPrescriptivePath === true
     || (rawLimits.hasPrescriptivePath !== false && [rawLimits.maxGroundSnowPsf, rawLimits.maxPvDeadLoadPsf, rawLimits.maxRafterSpacingIn].some((v) => typeof v === "number"));
   const limits = screensApply ? rawLimits : { ...(rawLimits.maxExportKwWithoutStudy != null ? { maxExportKwWithoutStudy: rawLimits.maxExportKwWithoutStudy } : {}) };
-  const jurisLabel = ctx && !(state === "OR" || /oregon/i.test(ahj)) ? (ctx.ahj || ctx.state || "the jurisdiction") : "Oregon";
-  const idPrefix = (ctx ? (ctx.state || "jurisdiction") : "OR").toLowerCase() === "or" ? "or" : (ctx?.state || "jurisdiction").toLowerCase();
-  const prescriptiveIds = idPrefix === "or"
-    ? { snow: "or-prescriptive-snow-70", dead: "or-prescriptive-deadload-4_5", framing: "or-prescriptive-roof-framing", wind: "or-prescriptive-wind-exposure", fire: "or-fire-pathways", export: "or-nem-tier1-export-25kw" }
-    : { snow: `${idPrefix}-prescriptive-snow`, dead: `${idPrefix}-prescriptive-deadload`, framing: `${idPrefix}-prescriptive-roof-framing`, wind: `${idPrefix}-prescriptive-wind-exposure`, fire: `${idPrefix}-fire-pathways`, export: `${idPrefix}-export-study-screen` };
+  // What the screens call the jurisdiction: the state record that names it; with a context and none,
+  // the context's own AHJ or state.
+  const jurisLabel = ctx
+    ? (jurisdiction.labelRecord ? jurisdiction.labelRecord.displayName : (ctx.ahj || ctx.state || "the jurisdiction"))
+    : (jurisdiction.stateRecord?.displayName ?? "the jurisdiction");
+  // Whose rule ids: the context's state (or, with no context, the job's record); a record that names
+  // its own ids keeps them.
+  const idRecord = ctx ? recordForIdPrefix(jurisdictionRecords, (ctx.state || "jurisdiction").toLowerCase()) : jurisdiction.stateRecord;
+  const idPrefix = (ctx ? ctx.state || "jurisdiction" : jurisdiction.stateRecord?.state || "jurisdiction").toLowerCase();
+  const legacyIds = idRecord?.prescriptive?.ruleIds ?? {};
+  const prescriptiveIds = {
+    snow: legacyIds.snow ?? `${idPrefix}-prescriptive-snow`,
+    dead: legacyIds.dead ?? `${idPrefix}-prescriptive-deadload`,
+    framing: legacyIds.framing ?? `${idPrefix}-prescriptive-roof-framing`,
+    wind: legacyIds.wind ?? `${idPrefix}-prescriptive-wind-exposure`,
+    fire: legacyIds.fire ?? `${idPrefix}-fire-pathways`,
+    export: legacyIds.export ?? `${idPrefix}-export-study-screen`,
+  };
+  const exportWords = idRecord?.prescriptive?.exportScreen;
 
   // -------------------------------------------------------------------------
   // DETERMINISTIC PARSER CROSS-CHECKS — jurisdiction-agnostic arithmetic over
@@ -495,7 +432,7 @@ export function evaluateBaselineRules(payload: ParserPayload, ctx?: EffectiveCod
   // state is its own, or — for a payload with none — the AHJ-name inference this function already
   // makes above (the legacy fallback the rest of these screens use).
   const combinedAcKw = num(payload, "combinedAcKw");
-  const eligibilityState = usStateCode(state) || (isOregon ? "OR" : "");
+  const eligibilityState = usStateCode(state) || (jurisdiction.stateRecord?.state ?? "");
   const eligibilityRecords = eligibility?.records ?? shippedEligibilityRecords().filter((r) => r.state === eligibilityState);
   const findings = evaluateEligibility(eligibilityRecords, {
     state: eligibilityState, utility, ahj,
@@ -511,31 +448,26 @@ export function evaluateBaselineRules(payload: ParserPayload, ctx?: EffectiveCod
   }, { reportUnknownProgram: eligibility?.reportUnknownProgram === true });
   for (const f of findings) out.push(result(f.ruleId, f.ruleName, f.qcStatus, f.severity, f.message, f.fieldName));
 
-  // Export-study screen: threshold from the jurisdiction profile (Oregon Tier 1 = 25 kW
-  // export / 50 kW DC). The DC arm stays at 2x the export limit, matching the legacy 25/50 pair.
+  // Export-study screen: threshold from the jurisdiction profile. The DC arm stays at 2x the export
+  // limit, matching the legacy export/generation pair. A jurisdiction record may name the screen in its
+  // own words (its program's tier names).
   const exportLimit = limits.maxExportKwWithoutStudy;
   if (exportLimit != null && ((screenDcKw != null && screenDcKw > exportLimit * 2) || (exportKw != null && exportKw > exportLimit))) {
+    const fill = (t: string) => t.replace(/\{dcKw\}/g, String(screenDcKw ?? "?")).replace(/\{combinedNote\}/g, combinedNote).replace(/\{exportKw\}/g, String(exportKw ?? "?")).replace(/\{limit\}/g, String(exportLimit));
     out.push(result(
       prescriptiveIds.export,
-      idPrefix === "or" ? "Oregon Tier 1 export screen" : `${jurisLabel} export/interconnection study screen`,
+      exportWords ? exportWords.ruleName : `${jurisLabel} export/interconnection study screen`,
       "warning",
       "warning",
-      idPrefix === "or"
-        ? `Generation/export may exceed Tier 1 screens (${screenDcKw ?? "?"} kW DC${combinedNote} / ${exportKw ?? "?"} kW export). Confirm Tier 2/3 utility path.`
-        : `Generation/export may exceed the ${exportLimit} kW screen (${screenDcKw ?? "?"} kW DC${combinedNote} / ${exportKw ?? "?"} kW export). Confirm the utility study path.`,
+      fill(exportWords ? exportWords.message : "Generation/export may exceed the {limit} kW screen ({dcKw} kW DC{combinedNote} / {exportKw} kW export). Confirm the utility study path."),
       "exportKw",
     ));
   }
 
-  if (isOregon && !/yes|required|provided|shown|lockable|visible/i.test(str(payload, "acDiscReq"))) {
-    out.push(result(
-      "or-nem-manual-disconnect",
-      "Oregon NEM manual disconnect",
-      "warning",
-      "warning",
-      "AC/manual disconnect requirement was not clearly identified. Confirm lockable load-break disconnect or documented utility exception.",
-      "acDiscReq",
-    ));
+  // THE JURISDICTION'S MANUAL-DISCONNECT SCREEN (data: a "manual_disconnect" screen on its record).
+  for (const screen of jurisdictionScreens(jurisdiction.stateRecord, jurisdiction.cityRecords, "manual_disconnect")) {
+    if (/yes|required|provided|shown|lockable|visible/i.test(str(payload, "acDiscReq"))) continue;
+    out.push(screenResult(screen, screen.message));
   }
 
   if (limits.maxGroundSnowPsf != null && (snow == null || snow > limits.maxGroundSnowPsf)) {
@@ -597,23 +529,10 @@ export function evaluateBaselineRules(payload: ParserPayload, ctx?: EffectiveCod
     ));
   }
 
-  if (isPortland) {
-    const missing: string[] = [];
-    if (!hasAny(split, [/site/i, /plot/i])) missing.push("site/plot plan");
-    if (!hasAny(`${split}\n${notes}`, [/fire/i, /pathway/i, /access path/i])) missing.push("fire access path");
-    if (!hasAny(split, [/roof/i, /framing/i])) missing.push("roof framing/roof plan");
-    if (!hasAny(split, [/section/i, /cross/i])) missing.push("roof cross-section");
-    if (!hasAny(split, [/rack/i, /mount/i, /attachment/i])) missing.push("racking attachment");
-    if (missing.length) {
-      out.push(result(
-        "portland-submittal-docs",
-        "Portland solar submittal documents",
-        "warning",
-        "warning",
-        `Portland package may be missing: ${missing.join(", ")}.`,
-        "splitPagesText",
-      ));
-    }
+  // THE JURISDICTION'S SUBMITTAL-DOCUMENT LIST (data: a "submittal_documents" screen, usually a city's).
+  for (const screen of jurisdictionScreens(jurisdiction.stateRecord, jurisdiction.cityRecords, "submittal_documents")) {
+    const missing = (screen.items ?? []).filter((item) => !SUBMITTAL_SHOWN[item.key](split, notes)).map((item) => item.label);
+    if (missing.length) out.push(screenResult(screen, screen.message.replace(/\{missing\}/g, missing.join(", "))));
   }
 
   // WHAT THE JOB'S UTILITY'S OWN APPLICATION ASKS FOR, as cited per-utility data (utilityRequirements.ts),
@@ -691,7 +610,9 @@ const QC_SHOWN: Record<UtilityRequirementKey, (t: QcReadInput) => boolean> = {
   meter_photo: ({ payload }) => Boolean(str(payload, "meter") || str(payload, "ubMeterNumber")),
   inverter_settings: ({ split, notes }) => hasAny(`${split}\n${notes}`, [/UL\s*1741\s*SB/i, /inverter settings/i, /smart inverter/i]),
   inverter_listing_ul1741sb: ({ split, notes }) => hasAny(`${split}\n${notes}`, [/UL\s*1741\s*SB/i]),
-  one_line: ({ split }) => hasAny(split, [/SLD/i, /3-line/i, /single line/i]),
+  // A ONE-LINE DIAGRAM IS AN SLD: "one-line", "one line", "1-line" and "single-line" name the same sheet,
+  // so a package that calls it only that must not read as missing it.
+  one_line: ({ split }) => hasAny(split, [/SLD/i, /3-line/i, /single line/i, /\b(?:one|1|single)[\s-]line\b/i]),
   site_plan: ({ split }) => hasAny(split, [/site/i, /plot/i]),
   module_spec: ({ split }) => hasAny(split, [/module/i]),
   inverter_spec: ({ split }) => hasAny(split, [/inverter/i, /microinverter/i]),
@@ -769,4 +690,25 @@ function utilityRequirementResults(payload: ParserPayload, state: string, utilit
       fill(g.qc.message, name, g.missing),
       g.qc.fieldName,
     ));
+}
+
+// ── EACH JURISDICTION'S SCREENS, READ BY KIND (jurisdictionQcRules.ts) ──────────────────────────────
+// What the package must show for each item a submittal-documents screen can ask for. Kinds, never places.
+const SUBMITTAL_SHOWN: Record<SubmittalItemKey, (split: string, notes: string) => boolean> = {
+  site_plan: (split) => hasAny(split, [/site/i, /plot/i]),
+  fire_access_path: (split, notes) => hasAny(`${split}\n${notes}`, [/fire/i, /pathway/i, /access path/i]),
+  roof_framing: (split) => hasAny(split, [/roof/i, /framing/i]),
+  roof_cross_section: (split) => hasAny(split, [/section/i, /cross/i]),
+  racking_attachment: (split) => hasAny(split, [/rack/i, /mount/i, /attachment/i]),
+};
+
+/** The screens of one kind the job's state record and city records carry, state first. */
+function jurisdictionScreens(stateRecord: JurisdictionQcRecord | null, cityRecords: JurisdictionQcRecord[], kind: JurisdictionQcScreen["kind"]): JurisdictionQcScreen[] {
+  return [stateRecord, ...cityRecords].flatMap((r) => (r ? r.screens.filter((s) => s.kind === kind) : []));
+}
+
+/** A screen's result: a blocker only when it asks for one and passes the #637 bar; else a warning. */
+function screenResult(screen: JurisdictionQcScreen, message: string): BaselineQcResult {
+  const blocks = screen.severity === "blocker" && jurisdictionScreenMayBlock(screen);
+  return result(screen.ruleId, screen.ruleName, blocks ? "fail" : "warning", blocks ? "blocker" : "warning", message, screen.fieldName);
 }

@@ -3,6 +3,7 @@ import { cecListing, cecTableCount } from "./cecEquipment";
 import { evaluateBaselineRules } from "./baselineRules";
 import { certificationList, eligibilityRecordsForState } from "./eligibilityLimits";
 import { resolveUtilityRequirements } from "./utilityRequirements";
+import { resolveJurisdictionQcRecords, type JurisdictionQcRecord } from "./jurisdictionQcRules";
 import type { UtilityRequirementList } from "../../shared/src/types";
 import { id } from "./ids";
 import { parseJson } from "./json";
@@ -690,7 +691,11 @@ export function runQcForProject(db: AppDb, projectId: string, options: QcRunOpti
     // the utility's filing row; with nothing on file, the strict default, said as not researched.
     let utilityRequirements: UtilityRequirementList | null;
     try { utilityRequirements = resolveUtilityRequirements(db, clean(baselinePayload.state), clean(baselinePayload.utility)); } catch { utilityRequirements = resolveUtilityRequirements(null, clean(baselinePayload.state), clean(baselinePayload.utility)); }
-    for (const baseline of evaluateBaselineRules(baselinePayload, codeCtx, eligibility, { requirements: utilityRequirements, reportUnresearched: true })) {
+    // THE JURISDICTION'S OWN SCREENS (jurisdictionQcRules.ts): the shipped seed overlaid by the state's
+    // "qc" rows in state_permit_rules (a person's or an official read).
+    let jurisdictionRecords: JurisdictionQcRecord[];
+    try { jurisdictionRecords = resolveJurisdictionQcRecords(db, clean(baselinePayload.state), clean(baselinePayload.ahj)); } catch { jurisdictionRecords = resolveJurisdictionQcRecords(null, clean(baselinePayload.state), clean(baselinePayload.ahj)); }
+    for (const baseline of evaluateBaselineRules(baselinePayload, codeCtx, eligibility, { requirements: utilityRequirements, reportUnresearched: true }, { records: jurisdictionRecords })) {
       if (baseline.qcStatus === "fail") failCount += 1;
       if (baseline.qcStatus === "fail" && !priorFails.has(baseline.ruleId)) newFailsOutsideBill += 1;
       if (baseline.qcStatus === "warning") warningCount += 1;
