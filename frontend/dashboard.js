@@ -5336,6 +5336,30 @@ async function loadDestinationQueue() {
   body.querySelectorAll('a[href^="#/project/"]').forEach((a) => a.addEventListener("click", () => { $("destQueueModal").hidden = true; }));
   if (window.lucide) window.lucide.createIcons();
 }
+// GO-LIVE CHECK (owner, 2026-11-10): GET /api/go-live, a read, rendered by go-live.js. A line the
+// Destinations to confirm view resolves opens that view.
+async function loadGoLive() {
+  const body = $("goLiveBody");
+  if (!body || !window.GoLive) return;
+  let report;
+  try {
+    report = await api("/api/go-live");
+  } catch (err) {
+    body.innerHTML = `<p class="muted">The go-live check did not load: ${esc(err.message)}</p>`;
+    return;
+  }
+  body.innerHTML = window.GoLive.render(report);
+  body.querySelectorAll('button[data-golive-open="destinations"]').forEach((btn) => btn.addEventListener("click", () => {
+    $("goLiveModal").hidden = true;
+    openDestinationQueue();
+  }));
+  if (window.lucide) window.lucide.createIcons();
+}
+async function openGoLive() {
+  $("goLiveModal").hidden = false;
+  $("goLiveBody").innerHTML = `<p class="muted">Loading…</p>`;
+  await loadGoLive();
+}
 async function openDestinationQueue() {
   $("destQueueModal").hidden = false;
   $("destQueueBody").innerHTML = `<p class="muted">Loading…</p>`;
@@ -13563,6 +13587,10 @@ $("openDestQueueBtn").addEventListener("click", openDestinationQueue);
 $("closeDestQueueBtn").addEventListener("click", () => { $("destQueueModal").hidden = true; });
 $("refreshDestQueueBtn").addEventListener("click", loadDestinationQueue);
 $("destQueueModal").addEventListener("click", (e) => { if (e.target.id === "destQueueModal") $("destQueueModal").hidden = true; });
+$("openGoLiveBtn").addEventListener("click", openGoLive);
+$("closeGoLiveBtn").addEventListener("click", () => { $("goLiveModal").hidden = true; });
+$("refreshGoLiveBtn").addEventListener("click", loadGoLive);
+$("goLiveModal").addEventListener("click", (e) => { if (e.target.id === "goLiveModal") $("goLiveModal").hidden = true; });
 $("closeKpiBtn").addEventListener("click", closeKpiModal);
 $("refreshKpiBtn").addEventListener("click", loadKpi);
 $("kpiModal").addEventListener("click", (e) => { if (e.target.id === "kpiModal") closeKpiModal(); });
@@ -13739,7 +13767,7 @@ connectSse();
 // shortcuts (Esc and Ctrl/Cmd+K still work) so normal data entry is unaffected.
 // ---------------------------------------------------------------------------
 (function installKeyboardShortcuts() {
-  const MODAL_IDS = ["portalLoginsModal", "knowledgeModal", "customersModal", "clientsModal", "usersModal", "kpiModal", "destQueueModal"];
+  const MODAL_IDS = ["portalLoginsModal", "knowledgeModal", "customersModal", "clientsModal", "usersModal", "kpiModal", "destQueueModal", "goLiveModal"];
   const MODAL_CLOSERS = {
     knowledgeModal: () => $("closeKnowledgeBtn")?.click(),
     customersModal: () => $("closeCustomersBtn")?.click(),
@@ -13747,6 +13775,7 @@ connectSse();
     usersModal: () => $("closeUsersBtn")?.click(),
     kpiModal: () => $("closeKpiBtn")?.click(),
     destQueueModal: () => $("closeDestQueueBtn")?.click(),
+    goLiveModal: () => $("closeGoLiveBtn")?.click(),
     portalLoginsModal: () => $("closePortalLoginsBtn")?.click(),
   };
 

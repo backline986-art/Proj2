@@ -98,6 +98,7 @@ import { BRAND } from "./clientUpdates";
 import { clientEmailsOffFor, ensureStatusShareToken, formatProjectAddress, sendEmail, smtpConfigured, statusShareUrl } from "./clientNotifier";
 import { mapEmailText, renderEmail, type EmailContent, type EmailSection } from "./emailLayout";
 import { addCommunication } from "./crm";
+import { clientLinkRefusal } from "./clientLinkGuard";
 import { describeKind, isImageKind, looksLikeCad, sniffFileKind } from "./fileTypes";
 import { HttpError } from "./httpError";
 import { intakeAuthRefusal } from "./intakeAuth";
@@ -641,8 +642,12 @@ const sendWithLayout: IntakeSender = (to, subject, body, html, headers) => sendE
 async function reply(db: AppDb, input: { project: ProjectRecord; orgId: string; to: string; subject: string; body: string; html: string; headers: IntakeReplyHeaders; draftOnly?: string }, opts: IntakeOptions): Promise<string> {
   let status: "sent" | "draft" | "failed" = "draft";
   let detail = input.draftOnly || autoReplyOff(input.project.clientId);
+  // NO DEAD LINK TO A CLIENT (clientLinkGuard.ts): the other dead bases, and a scan of the reply's links.
+  const linkRefusal = clientLinkRefusal({ body: input.body, html: input.html });
   if (detail) { /* stays a draft */ }
   else if (!String(process.env.PUBLIC_BASE_URL ?? "").trim()) detail = "PUBLIC_BASE_URL is not set, so the status link would point at this machine; nothing was sent.";
+  // NO DEAD LINK TO A CLIENT (clientLinkGuard.ts): the other dead bases, and a scan of the reply's links.
+  else if (linkRefusal) detail = linkRefusal;
   else if (!opts.send && !smtpConfigured()) detail = "SMTP is not configured (SMTP_HOST / SMTP_FROM are unset), so no send was attempted.";
   else {
     try { await (opts.send ?? sendWithLayout)(input.to, input.subject, input.body, input.html, input.headers); status = "sent"; }
