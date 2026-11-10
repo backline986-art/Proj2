@@ -35,6 +35,7 @@ import { acceptProposedLimits, saveEligibilityRecord } from "./eligibilityLimits
 import { UTILITY_REQUIREMENTS_RESEARCH_RULE, UTILITY_REQUIREMENTS_RESEARCH_SCHEMA } from "./utilityRequirementsResearchPrompt";
 import type { UtilityRequirementsLanding } from "./utilityRequirementsResearch";
 import type { PageReader, ReadPage } from "./agencyPageReader";
+import { quoteStatesFee, quoteStatesReviewTime } from "./citedReviewTime";
 
 export type UtilityProgramKind = "net_metering" | "net_billing" | "interconnection_only";
 /**
@@ -67,6 +68,7 @@ export interface UtilityFilingLocation {
  *  own lookup says it files (infoPages reads it as caution, and by host), never as a portal: nothing
  *  resolves, shows or launches it. Rows written before round 4 do not carry it. */
 export type UtilityFilingFact = CitedFact<UtilityFilingLocation> & { droppedUrls?: string[] };
+export interface UtilityFee { label: string; amountUsd: number }
 export interface UtilityFilingLookup {
   profileKey: string;
   state: string;
@@ -76,6 +78,11 @@ export interface UtilityFilingLookup {
   program: CitedFact<UtilityProgramKind>;
   /** The program in the utility's own words ("Customer Generation", "Net Metering Rider"). */
   programName?: string;
+  /** The utility's own fees for a residential application (lookup-battery-and-fees), each cited, the
+   *  quote printing the amount. Display (the utility track) and available to pricing; never a gate. */
+  fees?: Array<CitedFact<UtilityFee>>;
+  /** The review time the utility's page states, cited. Display only. */
+  reviewTime?: CitedFact<string>;
   lookedUpAt: string;
   verifiedAt?: string | null;
   verifiedBy?: string | null;
@@ -351,7 +358,7 @@ export function acceptFilingUrl(url: string, seenUrls: string[], namedPlatform: 
   return { url: u, why: "" };
 }
 
-export function parseUtilityFilingAnswer(text: string, seenUrls: string[], ctx: { permitSystemNames?: readonly string[] } = {}): { filing: UtilityFilingFact; program: CitedFact<UtilityProgramKind>; programName: string; dropped: string[]; limits: EligibilityLimits; rawRequirements?: unknown } {
+export function parseUtilityFilingAnswer(text: string, seenUrls: string[], ctx: { permitSystemNames?: readonly string[] } = {}): { filing: UtilityFilingFact; program: CitedFact<UtilityProgramKind>; programName: string; dropped: string[]; limits: EligibilityLimits; rawRequirements?: unknown; fees?: Array<CitedFact<UtilityFee>>; reviewTime?: CitedFact<string> } {
   let json: Record<string, unknown> | null = null;
   const t = str(text);
   const start = t.indexOf("{");
@@ -404,7 +411,20 @@ export function parseUtilityFilingAnswer(text: string, seenUrls: string[], ctx: 
   dropped.push(...proposed.dropped.map((d) => `limit ${d}`));
   // THE APPLICATION'S REQUIREMENT ITEMS (utilityRequirementsResearch.ts): passed through raw; the run
   // shape-checks and lands them after the row is saved.
+  // FEES AND REVIEW TIME (lookup-battery-and-fees): the same cited discipline; display only.
+  const fees: Array<CitedFact<UtilityFee>> = [];
+  for (const r of (Array.isArray(json?.fees) ? json!.fees as unknown[] : []).slice(0, 6)) {
+    const f = cited<UtilityFee>(r as RawFact, seenUrls, (v) => {
+      const o = (v && typeof v === "object" ? v : {}) as Record<string, unknown>;
+      const amountUsd = typeof o.amountUsd === "number" ? o.amountUsd : Number(str(o.amountUsd).replace(/[$,]/g, ""));
+      return str(o.label) && Number.isFinite(amountUsd) ? { label: str(o.label).slice(0, 120), amountUsd } : null;
+    }, quoteStatesFee, "utility fee");
+    if (f.value) fees.push(f); else dropped.push(`fee: ${f.notFound}`);
+  }
+  const reviewTime = json?.reviewTime != null ? cited<string>(json.reviewTime as RawFact, seenUrls, (v) => str(v).slice(0, 120) || null, quoteStatesReviewTime, "review time") : null;
+  if (reviewTime && !reviewTime.value && json?.reviewTime && (json.reviewTime as Record<string, unknown>).value) dropped.push(`review time: ${reviewTime.notFound}`);
   return { filing, program, programName: program.value ? str(rawProgram?.programName).slice(0, 120) : "", dropped, limits: proposed.limits,
+    ...(fees.length ? { fees } : {}), ...(reviewTime?.value ? { reviewTime } : {}),
     ...(json && json.applicationRequirements !== undefined ? { rawRequirements: json.applicationRequirements } : {}) };
 }
 
@@ -492,6 +512,8 @@ export const UTILITY_FILING_SYSTEM = `You find, for ONE electric utility in the 
 
 EVERY value carries "sourceUrl" (a page your search returned or you opened) and "quote" (the exact words on that page that state it, under 250 characters, containing the answer itself: the portal's name or link for the filing; the words net metering / export credit / retail provider for the program). If no page states it, "value": null and say what you searched in "notFound". Never answer from memory. Never guess.
 
+4. fees — the utility's OWN fees for a residential application (an application / net-metering / meter fee), each {"value": {"label": "<as printed>", "amountUsd": <number>}, "sourceUrl": "", "quote": "<the printed words with the amount>"}; [] when no page prints one. reviewTime — the review / processing time the utility's page states ("up to 10 business days"), {"value": "<as printed>", "sourceUrl": "", "quote": ""}, or null.
+
 3. limits — ONLY where the program page or tariff you read states them for residential customers: "maxDcKw" / "maxAcKw" (the program's size cap in kW), "productionMeterRequired" (true when a separate production / generation meter is required), "installerCertification" ({"name": "<the certification>", "effectiveFrom": "YYYY-MM-DD" or ""}). Each as {"value": ..., "citation": {"sourceName": "<the page or tariff by name>", "sourceUrl": "", "quote": "<the exact words, containing the value>"}}. Leave out any limit no page states; {} when none.
 
 ${UTILITY_REQUIREMENTS_RESEARCH_RULE}
@@ -500,6 +522,8 @@ Return ONLY JSON:
 {"filing": {"value": {"name": "", "url": null, "method"?: "with_ahj_permit", "documents"?: []}|null, "sourceUrl": "", "quote": "", "notFound": ""},
  "program": {"value": "net_metering"|"net_billing"|"interconnection_only"|null, "programName": "", "sourceUrl": "", "quote": "", "notFound": ""},
  "limits": {},
+ "fees": [{"value": {"label": "", "amountUsd": 0}, "sourceUrl": "", "quote": ""}],
+ "reviewTime": {"value": null, "sourceUrl": "", "quote": ""},
  ${UTILITY_REQUIREMENTS_RESEARCH_SCHEMA}}`;
 
 const lookupTimeoutMs = () => Math.max(120000, Number(process.env.UTILITY_FILING_LOOKUP_TIMEOUT_MS) || 240000);
@@ -633,6 +657,9 @@ export async function runUtilityFilingLookup(
     filing: (keepFiling ? existing!.filing : parsed.filing) as UtilityFilingFact,
     program: (keepProgram ? existing!.program : parsed.program) as CitedFact<UtilityProgramKind>,
     ...(programName ? { programName } : {}),
+    // A re-run that found none keeps the earlier cited fees / review time.
+    ...(parsed.fees?.length ? { fees: parsed.fees } : existing?.fees?.length ? { fees: existing.fees } : {}),
+    ...(parsed.reviewTime?.value ? { reviewTime: parsed.reviewTime } : existing?.reviewTime?.value ? { reviewTime: existing.reviewTime } : {}),
     lookedUpAt: new Date().toISOString(),
   });
   // The cited program limits land as the utility's own eligibility record, SEEDED (never over a
@@ -830,6 +857,21 @@ function utilityKbChannel(db: AppDb, project: Pick<ProjectRecord, "state" | "uti
   return { url, name, verified: isVerifiedKnowledge(row), source };
 }
 
+/** THE UTILITY'S OWN FEES AND REVIEW TIME, as its cited page prints them (lookup-battery-and-fees):
+ *  one sentence for the utility track card, "" when none is on file. Display only. */
+export function utilityFeesAndReviewSentence(db: AppDb | null, project: Pick<ProjectRecord, "state" | "utility">): string {
+  if (!db || !str(project.utility)) return "";
+  let lookup: UtilityFilingLookup | null = null;
+  try { lookup = getUtilityFilingLookup(db, project.state, project.utility); } catch { return ""; }
+  const fees = (lookup?.fees ?? []).filter((f) => f.value);
+  const parts: string[] = [];
+  if (fees.length) {
+    const money = (n: number) => "$" + n.toLocaleString("en-US", { minimumFractionDigits: n % 1 ? 2 : 0, maximumFractionDigits: 2 });
+    parts.push(`Utility fees (from its page): ${fees.map((f) => `${f.value!.label} ${money(f.value!.amountUsd)}`).join("; ")} — ${[...new Set(fees.map((f) => f.sourceUrl))].join(", ")}`);
+  }
+  if (lookup?.reviewTime?.value) parts.push(`Utility review time (from its page): ${lookup.reviewTime.value} — ${lookup.reviewTime.sourceUrl}`);
+  return parts.length ? ` ${parts.join(". ")}.` : "";
+}
 export function utilityTrackPresentation(db: AppDb | null, project: Pick<ProjectRecord, "state" | "utility">): UtilityTrackPresentation {
   const lookup = db ? getUtilityFilingLookup(db, project.state, project.utility) : null;
   const verified = lookup?.confidence === "verified";

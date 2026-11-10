@@ -37,7 +37,7 @@ import { HttpError } from "./httpError";
 import { isInformationalPageUrl, isUtilityPlatformUrl, portalHostOf, recipeDisciplineForTrack, trackSafeUrl } from "./portalChannel";
 import { classifyChannelWords, normalizeAhjName, permitAnswerForTrackFrom, permitChannelLabel, permitProcessFor, projectForTrack, trackIssuer } from "./permitProcess";
 import { statewideDecisionFor, statewideUrlRefusal } from "./statewideEvidence";
-import { getUtilityFilingLookup, nemFiledWithPermit, utilityTrackPresentation, type NemFiledWithPermit } from "./utilityFilingLookup";
+import { getUtilityFilingLookup, nemFiledWithPermit, utilityFeesAndReviewSentence, utilityTrackPresentation, type NemFiledWithPermit } from "./utilityFilingLookup";
 import { shippedRecordFor } from "./utilityRequirements";
 import { nemTrackDropFor } from "./utilityStorageModes";
 import { nowIso } from "./time";
@@ -323,7 +323,7 @@ function channelCitationFor(
 function channelResolution(db: AppDb | null, track: SubmittalTrackType, project: ProjectRecord): { channel: string; basis: string; portalUrl: string; filedWithPermit?: boolean; citation?: { sourceUrl: string; quote: string; fetchedAt?: string } } {
   if (track === "nem") {
     const u = utilityTrackPresentation(db, project);
-    return { channel: u.channel, basis: u.basis, portalUrl: u.portalUrl, ...(u.filedWithPermit ? { filedWithPermit: true } : {}) };
+    return { channel: `${u.channel}${utilityFeesAndReviewSentence(db, project)}`, basis: u.basis, portalUrl: u.portalUrl, ...(u.filedWithPermit ? { filedWithPermit: true } : {}) };
   }
   // ANOTHER COUNTER OF THE SAME AHJ (worker-trackissuer): the AHJ's page says its electrical permit is
   // filed somewhere other than its building permit ("purchased separately at City Hall"). This track's

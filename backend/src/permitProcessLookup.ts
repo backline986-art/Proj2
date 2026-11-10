@@ -29,7 +29,7 @@
 // never overwritten), and its fees land through feeSchedules.saveFeeSchedule — including the
 // DELEGATION (City of Jefferson's fees are collected by Marion County) the fee researcher had read
 // and then discarded.
-import type { CitedFact, LLMProvider, PermitFeeAnswer, PermitFilingChannel, PermitFilingChannelKind, PermitProcessDiscipline, PermitProcessLookup, PermitProcessPermitAnswer, WebLookupResult } from "../../shared/src/types";
+import type { BatteryPermittingAnswer, BatteryPermittingKind, CitedFact, LLMProvider, PermitFeeAnswer, PermitFilingChannel, PermitFilingChannelKind, PermitProcessDiscipline, PermitProcessLookup, PermitProcessPermitAnswer, WebLookupResult } from "../../shared/src/types";
 import type { AppDb } from "./db";
 import { hostFitsTrackAndEntity, isInformationalPageUrl, isPathTenantedHost, portalUrlsInText, isPermitPlatformUrl, isVendorDomain, isVendorRootOrMarketing, portalHostOf, portalTenantKey, portalTenantOf, salesforceTenantKind, trackSafeUrl, type PortalEntity } from "./portalChannel";
 import { ahjNameCore, channelPhrase, getPermitProcessLookup, normalizeAhjName, savePermitProcessLookup, servingIssuerNamed, stateRulesFor, trackIssuer, unknownStateAuthorityName, ZONING_SIGNOFF } from "./permitProcess";
@@ -45,6 +45,7 @@ import { candidateNamedBy, chooseRecordType, classifyDocument, DOCUMENT_URL, sta
 import { createPageReader, feeLinePrintedTogether, isRefusal, quoteOnPage, type PageReader, type ReadPage } from "./agencyPageReader";
 import { documentFetchDisabled } from "./documentFetch";
 import { classifyPrerequisites } from "./permitProcessPrerequisites";
+import { quoteStatesReviewTime } from "./citedReviewTime";
 export { registrableDomain };
 
 export const PROCESS_LOOKUP_SYSTEM = `You look up how RESIDENTIAL ROOFTOP SOLAR PV permits are issued for ONE jurisdiction in the United States.
@@ -65,10 +66,15 @@ Where answers may come from: the jurisdiction's own site; its county's building-
 4. prerequisites — a step at ANOTHER office that must happen BEFORE the application is filed or the permit is issued ("submit to City Hall first, then to the County", a zoning sign-off). A prerequisite office is NOT the issuing agency: the issuing agency is the one that issues the permit. What happens AFTER the permit is approved or issued (copies of approved plans, inspections, final, occupancy) is NEVER a prerequisite. Take prerequisites only from pages about THIS permit (residential solar / electrical / building) — never from another permit type's page (basement, deck, fence, pool…). List each step once, however many pages repeat it.
    groundMountZoning — how this jurisdiction permits a residential GROUND-MOUNTED array (not on a roof): "required" when a page says it needs a zoning / land-use approval (a zoning permit, setback or accessory-structure review, planning sign-off) beside the building permit; "not_required" when a page says it does not. null when no page says so — never inferred from the rooftop answer.
 
+5. batteryPermitting — how this jurisdiction permits a residential BATTERY / energy storage system (ESS) added to a PV system, as its pages say it: each of "sameReview" (reviewed in the same PV permit / plan review), "separatePermit" (its own storage / battery permit or packet), "fireReview" (a fire department / district review or permit), "fireApprovalLetter" (a fire approval letter submitted with the application) that a page states, with the agency and the documents it names. [] when no page says.
+   reviewTime — the review / processing time a page states for this permit ("Allow 10 business days for review"), in its words. null when none does.
+
 EVERY value carries "sourceUrl" (a page your search returned or you opened) and "quote" (the exact words on that page that state it, under 250 characters, containing the answer itself). If you cannot find a page that states it, set "value": null and say what you searched in "notFound". Never answer from memory. Never guess.
 
 Return ONLY JSON (no prose):
 {"issuingAgency": {"value": "<agency>"|null, "sourceUrl": "", "quote": "", "notFound": ""},
+ "batteryPermitting": [{"value": {"kind": "sameReview"|"separatePermit"|"fireReview"|"fireApprovalLetter", "agency": "", "documents": []}, "sourceUrl": "", "quote": ""}],
+ "reviewTime": {"value": "<as the page says it>"|null, "sourceUrl": "", "quote": "", "notFound": ""},
  "permitStructure": {"value": "separate"|"combo"|null, "sourceUrl": "", "quote": "", "notFound": ""},
  "prerequisites": [{"value": "<the step, naming the office>", "sourceUrl": "", "quote": ""}],
  "groundMountZoning": {"value": "required"|"not_required"|null, "sourceUrl": "", "quote": "", "notFound": ""},
@@ -437,6 +443,44 @@ export function acceptRecordType(raw: RawFact, seenUrls: string[]): CitedFact<st
   if (rt.value && FORM_TITLE.test(rt.value)) return { ...rt, value: null, notFound: `"${rt.value}" is a form's title, not an online record type — not kept` };
   return rt;
 }
+// ── BATTERY (ESS) PERMITTING AND REVIEW TIME (lookup-battery-and-fees, 2026-11-10) ─────────────
+// Four of nine cities in the comparison published how a battery job is permitted, and the lookup
+// never asked. Each answer is cited and kept only when the quote itself names the storage and states
+// the kind; it is read on a storage job only, as a warning (essRequirements.essPermitStep).
+const STORAGE_WORDS = /\bbatter(?:y|ies)\b|\benergy[\s-]+storage\b|\bstorage[\s-]+(?:battery|system)s?\b|\bess\b/i;
+const BATTERY_KIND_WORDS: Record<BatteryPermittingKind, RegExp> = {
+  sameReview: /\b(?:same|together|included|along with|as part of|combined|with the)\b[^.;]{0,60}?\b(?:pv|solar|photovoltaic|plan review|review|permit)\b|\b(?:pv|solar)\b[^.;]{0,40}?\b(?:review|permit)\b[^.;]{0,40}?\b(?:includ\w*|covers?)\b/i,
+  separatePermit: /\b(?:separate|own|additional|its own)\b[^.;]{0,40}?\b(?:permit|packet|application)s?\b|\b(?:battery|storage)[\w\s-]{0,30}?\b(?:permit|packet)s?\b/i,
+  fireReview: /\bfire\b[^.;]{0,60}?\b(?:review\w*|permits?|inspect\w*|approv\w*|plan check)\b|\b(?:review\w*|permits?|approv\w*)\b[^.;]{0,60}?\bfire\b/i,
+  fireApprovalLetter: /\bfire\b[^.;]{0,60}?\b(?:letter|sign[\s-]?off|approval)\b|\b(?:letter|sign[\s-]?off|approval)\b[^.;]{0,60}?\bfire\b/i,
+};
+const BATTERY_KINDS = Object.keys(BATTERY_KIND_WORDS) as BatteryPermittingKind[];
+function coerceBattery(v: unknown): BatteryPermittingAnswer | null {
+  const o = (v && typeof v === "object" ? v : { kind: v }) as Record<string, unknown>;
+  const k = str(o.kind);
+  const kind = BATTERY_KINDS.find((x) => x.toLowerCase() === k.toLowerCase().replace(/[\s_-]+/g, ""));
+  if (!kind) return null;
+  const agency = str(o.agency).slice(0, 120);
+  const documents = (Array.isArray(o.documents) ? o.documents : []).map(str).filter(Boolean).slice(0, 8);
+  return { kind, ...(agency ? { agency } : {}), ...(documents.length ? { documents } : {}) };
+}
+export function quoteStatesBatteryPermitting(v: BatteryPermittingAnswer, quote: string): boolean {
+  const q = str(quote);
+  if (!STORAGE_WORDS.test(q) || !BATTERY_KIND_WORDS[v.kind].test(q)) return false;
+  return !v.agency || supportsName(v.agency, q);
+}
+export function acceptBatteryPermitting(raw: unknown, seenUrls: string[]): Array<CitedFact<BatteryPermittingAnswer>> {
+  const out: Array<CitedFact<BatteryPermittingAnswer>> = [];
+  for (const r of (Array.isArray(raw) ? raw : []).slice(0, 6)) {
+    const c = acceptCited<BatteryPermittingAnswer>(r as RawFact, { seenUrls, what: "battery permitting answer", coerce: coerceBattery, supports: quoteStatesBatteryPermitting });
+    if (c.value && !out.some((x) => x.value?.kind === c.value!.kind)) out.push(c);
+  }
+  return out;
+}
+export function acceptReviewTime(raw: unknown): (seenUrls: string[]) => CitedFact<string> {
+  return (seenUrls) => acceptCited<string>(raw as RawFact, { seenUrls, what: "review time", coerce: (v) => str(v).slice(0, 120) || null, supports: quoteStatesReviewTime });
+}
+
 // ── HOW A PERMIT IS FILED (lookup-permit-filing-channel, 2026-11-10) ─────────────────────────────
 // The lookup used to have one slot for where a permit is filed: a portal URL. A city that takes
 // permits by EMAIL or at the COUNTER had nowhere to land, and the vendor-link resolver filled the hole
@@ -616,6 +660,7 @@ const supportsBuildingProgram = (value: "own" | "state", quote: string, names: N
 export function parseProcessPart(text: string, seenUrls: string[], stopReason: string | null, platformPages: string[] = [], entity: PortalEntity | null = null, where: { state: string; ahj: string } | null = null): {
   issuingAgency: CitedFact<string>; permitStructure: CitedFact<"separate" | "combo">; permits: PermitProcessPermitAnswer[]; prerequisites: CitedFact<string>[]; problem: string;
   buildingProgram?: CitedFact<"own" | "state">; unincorporatedZoning?: CitedFact<string>; groundMountZoning?: CitedFact<"required" | "not_required">;
+  batteryPermitting?: Array<CitedFact<BatteryPermittingAnswer>>; reviewTime?: CitedFact<string>;
 } {
   const truncated = stopReason === "max_tokens" || stopReason === "pause_turn";
   const json = parseJsonLoose(text);
@@ -660,7 +705,9 @@ export function parseProcessPart(text: string, seenUrls: string[], stopReason: s
     seenUrls, what: "ground-mount zoning answer", coerce: (v) => (/^not[_\s-]?required\b/i.test(str(v)) ? "not_required" : /^required\b/i.test(str(v)) ? "required" : null),
     supports: (v, q) => GROUND_ZONING_WORDS.test(q) && groundZoningPolarity(q) === v,
   });
-  return { issuingAgency, permitStructure, permits, buildingProgram, unincorporatedZoning, groundMountZoning, prerequisites: parsePrerequisites(json.prerequisites, seenUrls), problem: truncated ? "answer was cut off (kept only fully parsed, cited values)" : "" };
+  const batteryPermitting = acceptBatteryPermitting(json.batteryPermitting, seenUrls);
+  const reviewTime = json.reviewTime != null ? acceptReviewTime(json.reviewTime)(seenUrls) : undefined;
+  return { issuingAgency, permitStructure, permits, buildingProgram, unincorporatedZoning, groundMountZoning, batteryPermitting, ...(reviewTime ? { reviewTime } : {}), prerequisites: parsePrerequisites(json.prerequisites, seenUrls), problem: truncated ? "answer was cut off (kept only fully parsed, cited values)" : "" };
 }
 
 type PortalStepAnswer = { portalUrl: CitedFact<string>; recordType: CitedFact<string> } & Pick<PermitProcessPermitAnswer, "channel" | "alternateChannels">;
@@ -1267,7 +1314,7 @@ export async function runPermitProcessLookup(
   const platformPages = ev?.platformPages ?? [];
   const part1 = first
     ? (ev ? parseProcessPart(p1.text, [...seenOf(p1), ...ev.seen], p1.stopReason, platformPages, entity, input) : first)
-    : { issuingAgency: ungrounded(p1.error ? `lookup failed: ${p1.error.slice(0, 120)}` : "no web search returned results — nothing kept from memory"), permitStructure: ungrounded("no grounded search"), permits: [] as PermitProcessPermitAnswer[], prerequisites: [] as CitedFact<string>[], problem: p1.error ?? "ungrounded", buildingProgram: undefined, unincorporatedZoning: undefined, groundMountZoning: undefined };
+    : { issuingAgency: ungrounded(p1.error ? `lookup failed: ${p1.error.slice(0, 120)}` : "no web search returned results — nothing kept from memory"), permitStructure: ungrounded("no grounded search"), permits: [] as PermitProcessPermitAnswer[], prerequisites: [] as CitedFact<string>[], problem: p1.error ?? "ungrounded", buildingProgram: undefined, unincorporatedZoning: undefined, groundMountZoning: undefined, batteryPermitting: undefined, reviewTime: undefined };
 
   // ASK THE AGENCY THAT ISSUES EACH PERMIT. Lift an agency every permit agrees on; then group.
   const issuer = issuerOf(part1.permits, part1.issuingAgency);
@@ -1691,6 +1738,10 @@ export async function runPermitProcessLookup(
     // Asked everywhere (#247), kept the same way: a re-run that could not establish it keeps the earlier answer.
     groundMountZoning: part1.groundMountZoning?.value ? part1.groundMountZoning : existing?.groundMountZoning?.value ? existing.groundMountZoning : part1.groundMountZoning,
     ...(ev?.codes ? { codes: ev.codes } : existing?.codes ? { codes: existing.codes } : {}),
+    // Battery permitting and review time (lookup-battery-and-fees): this run's cited answers, else the
+    // earlier row's (a re-run that found none forgets nothing).
+    ...(part1.batteryPermitting?.length ? { batteryPermitting: part1.batteryPermitting } : existing?.batteryPermitting?.length ? { batteryPermitting: existing.batteryPermitting } : {}),
+    ...(part1.reviewTime?.value ? { reviewTime: part1.reviewTime } : existing?.reviewTime?.value ? { reviewTime: existing.reviewTime } : {}),
     ...(reader ? { pagesRead: reader.log.map((l) => ({ url: l.url, ok: l.ok, reason: l.reason.slice(0, 160) })) } : {}),
     ...(needsPersonRead.length ? { needsPersonRead } : {}),
   });

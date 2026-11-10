@@ -5410,6 +5410,14 @@ export interface PermitProcessPermitAnswer {
    *  it in"), each cited; never the primary. */
   alternateChannels?: Array<CitedFact<PermitFilingChannel>>;
 }
+export type BatteryPermittingKind = "sameReview" | "separatePermit" | "fireReview" | "fireApprovalLetter";
+export interface BatteryPermittingAnswer {
+  kind: BatteryPermittingKind;
+  /** The agency named for it (a fire district, the building division), as the page names it. */
+  agency?: string;
+  /** Documents the page names for the battery (a storage packet, a fire approval letter). */
+  documents?: string[];
+}
 export interface PermitProcessLookup {
   profileKey: string;
   state: string;
@@ -5438,6 +5446,13 @@ export interface PermitProcessLookup {
   /** Pages the lookup READ ITSELF (agency pages, the portal's public catalog, fee schedules), each
    *  with what came of the read — the audit trail for every value cited to one of them. */
   pagesRead?: Array<{ url: string; ok: boolean; reason: string }>;
+  /** HOW A BATTERY (ESS) JOB IS PERMITTED here (lookup-battery-and-fees, 2026-11-10), each cited:
+   *  in the same PV review, a separate storage permit, a fire review, a fire approval letter (several
+   *  may hold). Read only on a storage job, as a warning (essRequirements.essPermitStep); never a
+   *  blocker by itself. */
+  batteryPermitting?: Array<CitedFact<BatteryPermittingAnswer>>;
+  /** The review time a page states ("Allow 10 business days for review"), cited. Display only. */
+  reviewTime?: CitedFact<string>;
   /** Pages the lookup was REFUSED (a challenge, 401/403/429, a host backed off after a refusal): a
    *  person reads them (lookup-door-fixes, 2026-11-10). Never retried in another style. */
   needsPersonRead?: Array<{ url: string; reason: string }>;

@@ -79,6 +79,8 @@ export interface PermitStructureAnswer {
   issuer?: string;
   /** Pages the per-job lookup was refused (lookup-door-fixes): a person reads them. */
   needsPersonRead?: Array<{ url: string; reason: string }>;
+  /** The review time the AHJ's page states (lookup-battery-and-fees), cited. Display only. */
+  reviewTime?: { value: string; sourceUrl: string; quote: string };
 }
 
 const HEDGED = /\?|\blooks like\b|\bmaybe\b|\bmight\b|\bpossibly\b|\bprobably\b|\bnot sure\b|\bunclear\b|\bi think\b|\bseems\b/i;
@@ -128,8 +130,14 @@ export function permitStructureAnswer(
 ): PermitStructureAnswer {
   const a = structureAnswerFromSources(project, opts);
   // The per-job lookup's refused reads ride with the answer, whichever source settled it.
-  const unread = permitProcessFor(project)?.needsPersonRead ?? [];
-  return unread.length ? { ...a, needsPersonRead: unread.slice(0, 5) } : a;
+  const lk = permitProcessFor(project);
+  const unread = lk?.needsPersonRead ?? [];
+  const rt = lk?.reviewTime;
+  return {
+    ...a,
+    ...(unread.length ? { needsPersonRead: unread.slice(0, 5) } : {}),
+    ...(rt?.value && /^https?:\/\//i.test(String(rt.sourceUrl || "")) ? { reviewTime: { value: String(rt.value), sourceUrl: String(rt.sourceUrl), quote: String(rt.quote || "") } } : {}),
+  };
 }
 function structureAnswerFromSources(
   project: ProjectRecord,
@@ -288,7 +296,8 @@ function permitStructureParts(a: PermitStructureAnswer): { core: string; pre: st
       : `One permit or separate building + electrical permits: not yet confirmed — verify on the AHJ site${a.hint ? ` (unconfirmed lead: ${a.hint})` : ""}`;
   const pre = a.prerequisites.length ? ` FIRST, at another office: ${a.prerequisites.map((p) => p.step).join("; then ")}.` : "";
   const unread = a.needsPersonRead?.length ? ` Needs a person to read (the site refused Keelix's read): ${a.needsPersonRead.map((r) => `${r.url} (${r.reason})`).join("; ")}.` : "";
-  return { core, pre: `${pre}${unread}` };
+  const review = a.reviewTime ? ` Review time (the AHJ's page): ${a.reviewTime.value} — ${a.reviewTime.sourceUrl}.` : "";
+  return { core, pre: `${pre}${unread}${review}` };
 }
 
 /**
