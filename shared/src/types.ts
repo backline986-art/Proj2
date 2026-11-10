@@ -3968,6 +3968,9 @@ export interface ParserLlmExtraction {
   visionPageRoles?: Array<{ page: number; kind: PlanSheetKind; sheet?: string; title?: string; rotate?: number }>;
   /** Pages that were candidates but NOT read, and why (cap, byte budget, render failure). */
   visionSkipped?: Array<{ page: number; reason: string }>;
+  /** Plan-set pages whose TEXT was left out of the text read because the plan text was over the
+   *  prompt's character bound (whole pages dropped from the middle, #697). Absent when all fit. */
+  planTextPagesNotRead?: number[];
 }
 
 /** What a plan-set page is, as the page-index read names it (scannedPlanSet.ts chooses the
