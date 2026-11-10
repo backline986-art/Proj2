@@ -11,6 +11,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { removeTempDir } from "./_tmpdir";
 
 const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "ess-review-test-"));
 process.env.AUTOPILOT_DB_PATH = path.join(tmpDir, "test.sqlite");
@@ -288,6 +289,6 @@ await check("the verify panel shows a row's ESS rules and sends them, so a perso
   assert.doesNotMatch(panel.renderVerifyPanel(profile()), /Battery \/ ESS rules/, "no section when the row records none");
 });
 
-fs.rmSync(tmpDir, { recursive: true, force: true });
+removeTempDir(tmpDir);
 if (failures) { console.error(`\n${failures} ESS review check(s) FAILED.`); process.exit(1); }
 console.log("\nAll ESS review checks passed.");
