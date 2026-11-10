@@ -174,6 +174,15 @@ export function isAgencyOwnDomain(host: string, names: string[], state?: string,
   if (!h || isPermitPlatformUrl(`https://${h}/`)) return false;
   const st2 = String(state ?? "").toLowerCase();
   const gov = /\.(?:gov|mil)$/.test(h);
+  // A LOCALITY UNDER ITS STATE'S .gov (westjordan.utah.gov, permit.westjordan.utah.gov, sjc.utah.gov):
+  // the label just before the state's is the locality's own, judged as <label>.gov — in this job's
+  // state only. A state body's host (dopl.idaho.gov) still falls through to the state's own label below.
+  if (gov) {
+    const parts = h.split(".");
+    const stateOfReg = parts.length >= 3 ? stateCodeOfLabel(registrableDomain(h).split(".")[0]) : "";
+    const sub = parts[parts.length - 3];
+    if (stateOfReg && (!st2 || st2 === stateOfReg) && sub && !stateCodeOfLabel(sub) && isAgencyOwnDomain(`${sub}.gov`, names, state, keys)) return true;
+  }
   let label: string;
   const us = /\.([a-z]{2})\.us$/.exec(h);
   if (us && US_STATES.has(us[1])) {
