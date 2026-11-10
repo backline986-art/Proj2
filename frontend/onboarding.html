@@ -50,8 +50,11 @@
     .row.lic { grid-template-columns: 70px 1.4fr 1fr 140px auto; }
     .row.area { grid-template-columns: 120px 70px 1fr auto; }
     .row.portal { grid-template-columns: 1fr 1.4fr auto; }
+    .row.filing { grid-template-columns: 1.6fr 170px 1fr; }
+    .row.filing .filing-name { grid-column: 1 / -1; }
+    .row.filing .muted { color: var(--muted); font-size: 13px; }
     .row label { margin-top: 0; }
-    @media (max-width: 640px) { .grid2, .row.lic, .row.area, .row.portal { grid-template-columns: 1fr; } }
+    @media (max-width: 640px) { .grid2, .row.lic, .row.area, .row.portal, .row.filing { grid-template-columns: 1fr; } }
     button { margin-top: 14px; padding: 10px 18px; border: 1px solid transparent; border-radius: var(--radius-sm); background: var(--primary); color: var(--primary-foreground); font: inherit; font-size: var(--text-sm); font-weight: 600; cursor: pointer; }
     button:hover { background: var(--primary-strong); }
     button.secondary { background: var(--card); color: var(--text); border-color: var(--border); }
@@ -129,6 +132,8 @@ let view = null;
 const inputs = {};          // scalar field key -> input
 let licRows = [];           // [{state, kind, number, expires}]
 let areaRows = [];          // [{kind, state, name}]
+let filingRows = {};        // authority key -> {address, hasAccount, example}
+let drawFiling = () => {};  // redraws the "how you file" rows after the places change
 let saveTimer = null;
 
 function setStatus(text, kind) { statusEl.textContent = text; statusEl.className = kind || ""; }
@@ -260,6 +265,43 @@ function filesSection() {
   return card;
 }
 
+// HOW YOU FILE IN EACH PLACE: one row per permit office and utility your places name. An address, a
+// yes/no and an example number only. A login never goes here (the server refuses one).
+const AUTHORITY_KINDS = { ahj: "Permit office", utility: "Utility" };
+function filingSection() {
+  const card = el("section", { class: "ob-card", id: "filingCard" }, el("h2", { text: "How you file in each place (optional)" }),
+    el("p", { class: "lede", text: "If you already file with these offices, tell us where: the portal's web address or the email address applications go to. A person at Keelix checks every address before anything is filed there. Never type a login or password here." }));
+  const list = el("div", { id: "filingList" });
+  let shown = "";
+  drawFiling = (force) => {
+    const authorities = Array.isArray(view.filingAuthorities) ? view.filingAuthorities : [];
+    const keys = authorities.map((a) => a.key).join("\n");
+    if (!force && keys === shown) return; // the same places: leave what is being typed alone
+    shown = keys;
+    list.replaceChildren();
+    if (!authorities.length) {
+      list.append(el("p", { class: "lede", id: "filingEmpty", text: "Add the cities, counties and utilities you work in under “Where you work”. Each one is listed here once it is saved." }));
+      return;
+    }
+    for (const a of authorities) {
+      const r = filingRows[a.key] || (filingRows[a.key] = { address: "", hasAccount: "", example: "" });
+      const address = el("input", { type: "text", "data-filing": "address", value: r.address, maxlength: "400", placeholder: "https://… or an email address", "aria-label": "Portal web address or application email for " + a.name });
+      const account = el("select", { "data-filing": "account", "aria-label": "Do you have an account with " + a.name });
+      for (const [v, label] of [["", "Not sure"], ["yes", "Yes"], ["no", "No"]]) account.append(el("option", { value: v, text: label, selected: r.hasAccount === v }));
+      const example = el("input", { type: "text", "data-filing": "example", value: r.example, maxlength: "40", placeholder: "optional", "aria-label": "A recent permit or application number at " + a.name });
+      address.addEventListener("input", () => { r.address = address.value; queueSave(); });
+      account.addEventListener("change", () => { r.hasAccount = account.value; queueSave(); });
+      example.addEventListener("input", () => { r.example = example.value; queueSave(); });
+      list.append(el("div", { class: "row filing", "data-filing-row": a.key },
+        el("div", { class: "filing-name" }, el("strong", { text: a.name }), el("span", { class: "muted", text: " " + (AUTHORITY_KINDS[a.kind] || "") + (a.state ? ", " + a.state : "") })),
+        el("label", {}, "Where applications go", address), el("label", {}, "You have an account there", account), el("label", {}, "A recent permit or application number", example)));
+    }
+  };
+  drawFiling(true);
+  card.append(list);
+  return card;
+}
+
 function portalSection() {
   const card = el("section", { class: "ob-card", id: "portalCard" }, el("h2", { text: "Portal logins" }),
     el("p", { class: "lede", text: "If you already have accounts on city or utility portals we will file on, name them here. You will get a separate one-time secure link to send the logins — never on this page." }));
@@ -298,6 +340,8 @@ function render() {
   const v = view.values || {};
   licRows = (Array.isArray(v.stateLicenses) ? v.stateLicenses : []).map((l) => ({ state: l.state || "", kind: l.kind || "", number: l.number || "", expires: l.expires || "" }));
   areaRows = (Array.isArray(v.serviceArea) ? v.serviceArea : []).map((a) => ({ kind: a.kind || "city", state: a.state || "", name: a.name || "" }));
+  filingRows = {};
+  for (const f of Array.isArray(view.filing) ? view.filing : []) if (f && f.authorityKey) filingRows[f.authorityKey] = { address: f.address || "", hasAccount: f.hasAccount || "", example: f.example || "" };
   for (const [group, title] of GROUPS) {
     const card = el("section", { class: "ob-card", "data-group": group }, el("h2", { text: title }));
     const fields = view.fields.filter((f) => f.group === group);
@@ -310,7 +354,7 @@ function render() {
     }
     formEl.append(card);
   }
-  formEl.append(filesSection(), portalSection());
+  formEl.append(filingSection(), filesSection(), portalSection());
 }
 
 function collect() {
@@ -318,6 +362,11 @@ function collect() {
   for (const [k, i] of Object.entries(inputs)) fields[k] = i.value.trim();
   fields.stateLicenses = licRows.map((r) => ({ state: r.state.trim(), kind: r.kind, number: r.number.trim(), expires: r.expires }));
   fields.serviceArea = areaRows.map((r) => ({ kind: r.kind, state: r.state.trim(), name: r.kind === "state" ? "" : r.name.trim() }));
+  // Only the places listed now, and only rows with something in them.
+  const listed = new Set((Array.isArray(view.filingAuthorities) ? view.filingAuthorities : []).map((a) => a.key));
+  fields.filing = Object.entries(filingRows)
+    .filter(([key, r]) => listed.has(key) && (r.address.trim() || r.hasAccount || r.example.trim()))
+    .map(([key, r]) => ({ authorityKey: key, address: r.address.trim(), hasAccount: r.hasAccount, example: r.example.trim() }));
   return { fields };
 }
 
@@ -333,6 +382,7 @@ async function save(announce) {
   if (!res) { setStatus("Could not reach the server. Your answers are still on this page.", "error"); return false; }
   if (!res.ok) { setStatus(out.error || "Could not save.", "error"); return false; }
   renderChecklist(out.checklist);
+  if (Array.isArray(out.filingAuthorities)) { view.filingAuthorities = out.filingAuthorities; drawFiling(false); }
   if (announce) setStatus(out.problems && out.problems.length ? "Saved. Still to fix: " + out.problems[0] : "Saved. You can come back to this link later.", out.problems && out.problems.length ? "error" : "ok");
   else setStatus("Saved.", "ok");
   return true;

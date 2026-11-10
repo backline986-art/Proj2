@@ -737,8 +737,8 @@ export function deleteClient(db: AppDb, clientId: string): { deleted: boolean } 
   }
   return db.transaction(() => {
     // The Company setup link (clientOnboarding.ts, v81): its links, the client's proposals and its
-    // uploaded certificates are this client's data and leave with it.
-    for (const t of ["client_onboarding_files", "client_onboarding_proposals", "client_onboarding_links"]) {
+    // uploaded certificates, and what it said about how it files (v82), are its data and leave with it.
+    for (const t of ["client_onboarding_files", "client_onboarding_proposals", "client_onboarding_links", "client_filing_statements"]) {
       try { db.run(`DELETE FROM ${t} WHERE client_id = ?`, [clientId]); }
       catch { /* a database older than v81: no such table, nothing to purge */ }
     }
@@ -993,8 +993,8 @@ export async function offboardClient(db: AppDb, clientId: string, opts: Offboard
     try { db.run("DELETE FROM credential_requests WHERE client_id = ?", [clientId]); }
     catch { /* pre-secure-link database: no such table, nothing to purge */ }
     // The Company setup link (clientOnboarding.ts, v81): its links, the client's proposals and its
-    // uploaded certificates are this client's data and leave with it.
-    for (const t of ["client_onboarding_files", "client_onboarding_proposals", "client_onboarding_links"]) {
+    // uploaded certificates, and what it said about how it files (v82), are its data and leave with it.
+    for (const t of ["client_onboarding_files", "client_onboarding_proposals", "client_onboarding_links", "client_filing_statements"]) {
       try { db.run(`DELETE FROM ${t} WHERE client_id = ?`, [clientId]); }
       catch { /* a database older than v81: no such table, nothing to purge */ }
     }
