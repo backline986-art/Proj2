@@ -22,6 +22,7 @@ git fetch origin
 git checkout main
 git pull
 npm ci
+npm run portal:install
 node scripts/doctor.mjs
 ```
 
@@ -129,7 +130,8 @@ the difference. The constitution forbids them, and Helm treats any bot-applied a
 `git pull` by hand. Every 15 minutes, if the server is up, `main` has moved and nothing is in progress, it:
 snapshots the database into `BACKUP_DIR` (`autopilot-pre-update-<sha>-<time>.sqlite` plus its
 `.sha256`; the normal backup rotation never deletes these, and the updater keeps the newest 3),
-stops this install's server, fast-forwards, runs `npm ci` only when `package-lock.json` changed,
+stops this install's server, fast-forwards, runs `npm ci` only when `package-lock.json` changed (and then `npm run portal:install`, the Chromium
+build that Playwright version drives; if either fails it rolls back to the old commit before any start),
 restarts `npm start` in its own minimized window, and waits for `/health` to report the new commit.
 
 The first update closes the `cmd /k "npm start"` window you started by hand and replaces it with a
