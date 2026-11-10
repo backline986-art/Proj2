@@ -34,7 +34,7 @@ import { acceptProposedLimits, saveEligibilityRecord } from "./eligibilityLimits
 // utilityRequirements.ts (which reads this one's keys) never load each other at start-up.
 import { UTILITY_REQUIREMENTS_RESEARCH_RULE, UTILITY_REQUIREMENTS_RESEARCH_SCHEMA } from "./utilityRequirementsResearchPrompt";
 import type { UtilityRequirementsLanding } from "./utilityRequirementsResearch";
-import type { PageReader } from "./agencyPageReader";
+import type { PageReader, ReadPage } from "./agencyPageReader";
 
 export type UtilityProgramKind = "net_metering" | "net_billing" | "interconnection_only";
 /**
@@ -277,18 +277,40 @@ export function quoteNamesFiling(value: UtilityFilingLocation, quote: string): b
 // IN / WITH / THROUGH a permit within a few words ("apply through the city's building permit portal",
 // "submitted with your building permit application", "included in the permit packet"). A page that
 // keeps the two apart ("separate from", "in addition to", "also obtain a building permit") does not.
+// Two more shapes real municipal pages use (bot-vs-research comparison, 2026-11-10):
+//   - THE PERMIT SYSTEM BY ITS OWN NAME: "submitted on-line through the <system> portal", where <system>
+//     is the AHJ's own permit portal already on file for the service city (permitSystemNames: its host's
+//     distinctive label, its platform name) — the caller supplies the names, this module names none;
+//   - THE UTILITY'S DOCUMENT ATTACHED TO THE APPLICATION: "net meter agreement … (attachment available
+//     on-line w/application)" — an attach/upload/submit word, the utility's own agreement or
+//     interconnection document, and "with / w/ the (online) application".
+// Either way it stays a SEEDED proposal: only a person-VERIFIED row switches the NEM track to it
+// (nemFiledWithPermit, rule 3), and no URL is ever kept on the NEM track for this method (rule 5).
 const WITH_PERMIT_FILING_WORD = /\b(?:appl(?:y|ies|ied|ication|ications)|submit\w*|fil(?:e|ed|es|ing)|includ\w*|process\w*|accept\w*|tak(?:e|es|en))\b/i;
 const WITH_PERMIT_LINK = /\b(?:with|through|in|into|as part of|along with|inside|within|via)\s+(?:(?:the|your|a|an|its|our)\s+)?(?:[\w'\u2019-]+\s+){0,3}permit\b/i;
 const PERMIT_KEPT_APART = /\b(?:separate(?:ly)?(?: from)?|in addition to|apart from|independent(?:ly)? of|not (?:part of|through|with|in)|also (?:obtain|need|get|apply for))\b[^.;]{0,40}\bpermit\b/i;
-/** Does the quote STATE that the utility's application is filed with the AHJ's permit application? */
-export function quoteStatesFiledWithPermit(quote: string): boolean {
-  const q = str(quote);
-  return WITH_PERMIT_FILING_WORD.test(q) && WITH_PERMIT_LINK.test(q) && !PERMIT_KEPT_APART.test(q);
+const UTILITY_DOCUMENT = /\bnet[- ]?(?:energy )?meter(?:ing|ed)?\b[^.;]{0,40}\b(?:agreement|application|form)\b|\binterconnection\b[^.;]{0,40}\b(?:agreement|application|form)\b/i;
+const ATTACH_WORD = /\b(?:attach\w*|upload\w*|submit\w*|includ\w*)\b/i;
+const WITH_APPLICATION = /\bwith\s+(?:(?:the|your|its)\s+)?(?:on-?line\s+)?(?:building\s+)?(?:permit\s+)?application\b/i;
+const escapeRe = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+/** Does the quote STATE that the utility's application is filed with the AHJ's permit application?
+ *  `permitSystemNames`: the service city's own permit system as it is on file (caller-supplied). */
+export function quoteStatesFiledWithPermit(quote: string, permitSystemNames: readonly string[] = []): boolean {
+  // "w/" is how checklists write "with".
+  const q = str(quote).replace(/\bw\/\s*/gi, "with ");
+  if (PERMIT_KEPT_APART.test(q)) return false;
+  if (WITH_PERMIT_FILING_WORD.test(q) && WITH_PERMIT_LINK.test(q)) return true;
+  const names = permitSystemNames.map((n) => str(n).toLowerCase()).filter((n) => n.length >= 4);
+  if (names.length) {
+    const viaSystem = new RegExp(`\\b(?:with|through|in|into|via|on)\\s+(?:(?:the|your|a|an|its|our)\\s+)?(?:[\\w'\\u2019-]+\\s+){0,2}(?:${names.map(escapeRe).join("|")})\\b`, "i");
+    if (WITH_PERMIT_FILING_WORD.test(q) && viaSystem.test(q)) return true;
+  }
+  return ATTACH_WORD.test(q) && UTILITY_DOCUMENT.test(q) && WITH_APPLICATION.test(q);
 }
 
 /** Does the quote support this filing location — a portal it names, or (#664) the with-permit method? */
-export function quoteSupportsFiling(value: UtilityFilingLocation, quote: string): boolean {
-  return value.method === FILED_WITH_AHJ_PERMIT ? quoteStatesFiledWithPermit(quote) : quoteNamesFiling(value, quote);
+export function quoteSupportsFiling(value: UtilityFilingLocation, quote: string, permitSystemNames: readonly string[] = []): boolean {
+  return value.method === FILED_WITH_AHJ_PERMIT ? quoteStatesFiledWithPermit(quote, permitSystemNames) : quoteNamesFiling(value, quote);
 }
 
 const DENIES_NEM = /\b(?:no|not|does not|doesn't|do not|don't|without)\b[^.;]{0,40}\bnet[- ]?(?:energy )?meter/i;
@@ -329,7 +351,7 @@ export function acceptFilingUrl(url: string, seenUrls: string[], namedPlatform: 
   return { url: u, why: "" };
 }
 
-export function parseUtilityFilingAnswer(text: string, seenUrls: string[]): { filing: UtilityFilingFact; program: CitedFact<UtilityProgramKind>; programName: string; dropped: string[]; limits: EligibilityLimits; rawRequirements?: unknown } {
+export function parseUtilityFilingAnswer(text: string, seenUrls: string[], ctx: { permitSystemNames?: readonly string[] } = {}): { filing: UtilityFilingFact; program: CitedFact<UtilityProgramKind>; programName: string; dropped: string[]; limits: EligibilityLimits; rawRequirements?: unknown } {
   let json: Record<string, unknown> | null = null;
   const t = str(text);
   const start = t.indexOf("{");
@@ -368,7 +390,7 @@ export function parseUtilityFilingAnswer(text: string, seenUrls: string[]): { fi
       if (!name && !accepted.url) return null;
       return { name: name || portalHostOf(accepted.url!), url: accepted.url };
     },
-    quoteSupportsFiling, "filing location",
+    (v, q) => quoteSupportsFiling(v, q, ctx.permitSystemNames ?? []), "filing location",
   );
   const filing: UtilityFilingFact = droppedUrls.length ? { ...cites, droppedUrls } : cites;
   const rawProgram = (json?.program ?? null) as RawFact;
@@ -386,10 +408,86 @@ export function parseUtilityFilingAnswer(text: string, seenUrls: string[]): { fi
     ...(json && json.applicationRequirements !== undefined ? { rawRequirements: json.applicationRequirements } : {}) };
 }
 
+// ── THE FILING DOOR FROM THE UTILITY'S OWN LINKS (bot-vs-research comparison, 2026-11-10) ─────────
+// A utility's page usually LINKS its application ("Submit an online application", "Application Form –
+// Solar PV…") without naming the form's host in words, so quoteNamesFiling refused a door the model had
+// found. The permit lookup already reads the agency's page itself ("agency page (our read)"); this is the
+// same read for the utility: the page the answer cited, read by Keelix's polite reader, and a LINK ON IT
+// attests the filing URL — the link's words must be about applying, the target must pass the same door
+// as every filing URL (acceptFilingUrl: the NEM track's rule-5 fit, never an information page or a
+// document), and when the answer named a URL the link must point at that URL. The quote becomes
+// "<link words>" -> <target>, so the citation shows exactly what attested it. The result lands SEEDED,
+// like every lookup answer: where a filing goes stays a person's fact (rule 3), offered for the one-click
+// Confirm (filingDestinationProposals). Nothing here names a utility, a platform tenant or a state.
+const APPLY_LINK_WORDS = /\b(?:apply|applications?|submit\w*|interconnection request|interconnect(?:ion)? application|new request|start (?:a |an |your )?(?:new )?(?:application|request))\b/i;
+const NOT_APPLY_LINK_WORDS = /\b(?:inspection|schedule|pay(?:ment)?s?|bill|status|track(?:ing)?|faq|guide|handbook|checklist|instructions?|rates?|tariff|schedule \d+|outage|contact)\b/i;
+/** Is this link's wording about applying (and not about inspections, payments, status or help)? */
+export function isApplyLinkWords(words: string): boolean {
+  const w = str(words);
+  return APPLY_LINK_WORDS.test(w) && !NOT_APPLY_LINK_WORDS.test(w);
+}
+const sameTarget = (a: string, b: string): boolean => {
+  const norm = (u: string) => { try { const x = new URL(u); return `${x.hostname.toLowerCase().replace(/^www\./, "")}${x.pathname.replace(/\/+$/, "").toLowerCase()}`; } catch { return ""; } };
+  const na = norm(a), nb = norm(b);
+  return Boolean(na) && na === nb;
+};
+/** The filing location, attested by a link on the page the answer cited (a page WE read), or null.
+ *  `raw` is the answer's filing member; `page` our read of raw.sourceUrl; `seenUrls` the search's. */
+export function filingFromPageLinks(
+  raw: RawFact,
+  page: Pick<ReadPage, "ok" | "url" | "finalUrl" | "links"> | null,
+  seenUrls: string[],
+): { fact: UtilityFilingFact | null; why: string } {
+  const o = (raw?.value && typeof raw.value === "object" ? raw.value : null) as Record<string, unknown> | null;
+  if (!o) return { fact: null, why: "no filing answer" };
+  if (str(o.method).toLowerCase() === FILED_WITH_AHJ_PERMIT) return { fact: null, why: "a with-permit method never takes a URL (rule 5)" };
+  if (!page?.ok) return { fact: null, why: "the cited page was not read" };
+  const cited = str(raw?.sourceUrl);
+  const host = portalHostOf(cited);
+  if (!host || !seenUrls.some((u) => portalHostOf(u) === host)) return { fact: null, why: "the cited page is not one the search returned" };
+  const claimed = str(o.url);
+  const named = [str(o.name), str(raw?.quote)];
+  const candidates = (page.links ?? []).filter((l) => isApplyLinkWords(l.text)).filter((l) => {
+    // The link on a page we read is the attestation of its host (the permit side's agencyLinks rule).
+    return Boolean(acceptFilingUrl(l.href, [...seenUrls, l.href], named).url);
+  });
+  const uniq = [...new Map(candidates.map((l) => [l.href, l])).values()];
+  const pick = claimed ? uniq.find((l) => sameTarget(l.href, claimed)) : uniq.length === 1 ? uniq[0] : undefined;
+  if (!pick) {
+    return { fact: null, why: claimed ? `no application link on ${cited} points at ${claimed}` : uniq.length ? `${uniq.length} application links on ${cited} and the answer named none` : `no application link on ${cited} fits the NEM track` };
+  }
+  const name = str(o.name) || namedInterconnectionPlatforms([pick.text, pick.href])[0] || portalHostOf(pick.href);
+  return {
+    fact: { value: { name: name.slice(0, 160), url: pick.href }, sourceUrl: page.finalUrl || page.url || cited, quote: `"${str(pick.text).slice(0, 120)}" -> ${pick.href}`.slice(0, 300), origin: "lookup" },
+    why: "",
+  };
+}
+
+/** The service city's own permit system as it is on file — the names quoteStatesFiledWithPermit may
+ *  read "through the <system> portal" against: each portal host's distinctive label (the registrable
+ *  domain's first label, e.g. a vendor's name) and the portal name a row records. Shared tables only. */
+export function permitSystemNamesFor(db: AppDb | null, state: string, city: string | undefined, permitPortalUrls: readonly string[] = []): string[] {
+  if (!db || !str(city)) return [];
+  const out = new Set<string>();
+  const addUrl = (u: string) => {
+    const h = portalHostOf(u);
+    if (!h) return;
+    const parts = h.split(".");
+    const label = parts.length >= 2 ? parts[parts.length - 2] : parts[0];
+    if (label && label.length >= 4) out.add(label);
+  };
+  permitPortalUrls.forEach(addUrl);
+  try {
+    const row = db.get<{ portal_url?: string }>("SELECT portal_url FROM permit_utility_knowledge WHERE profile_key = ?", [knowledgeProfileKey({ state, ahj: str(city) })]);
+    if (row?.portal_url) addUrl(row.portal_url);
+  } catch { /* the table is created by migrations; a read failure leaves the names empty */ }
+  return [...out];
+}
+
 // ── The lookup ───────────────────────────────────────────────────────────────────────────────
 export const UTILITY_FILING_SYSTEM = `You find, for ONE electric utility in the United States, WHERE a residential rooftop solar installer files that utility's interconnection application, and WHAT the utility's customer-generation program is.
 
-1. filing — where the interconnection / net-metering application is SUBMITTED: the online application portal (a PowerClerk tenant, the utility's own interconnection portal, an installer portal) or, when the utility takes it another way, that way (e.g. email to an address, a paper form). value: {"name": "<the portal or method, as the utility names it>", "url": "<the portal's own entry URL, or null>"}. The url is NEVER a city or county PERMIT portal, never a help page or a PDF. ONE EXCEPTION, a method and not a portal: when the utility's OWN page says its interconnection / net-metering application is submitted WITH or THROUGH the city's or county's building PERMIT application (one application in the permit system carries both), value: {"name": "<as the page names it>", "url": null, "method": "with_ahj_permit", "documents": ["<each utility document the page lists for it, in its words>"]} — and the quote must say so. Never use that method for a utility that has its own portal or form, or when the page only says a building permit is ALSO required. Prefer the utility's own interconnection / "for contractors" / "for installers" page. When the utility files on PowerClerk (or another platform), the url is the utility's OWN tenant login on that platform's domain (e.g. <tenant>.powerclerk.com/MvcAccount/Login) — search for it and give it only when a search result or a page you opened shows that host; a program, resource or info page on the utility's own website is never the url. If you cannot find the tenant's host, give the name (e.g. "PowerClerk") with "url": null.
+1. filing — where the interconnection / net-metering application is SUBMITTED: the online application portal (a PowerClerk tenant, the utility's own interconnection portal, an installer portal) or, when the utility takes it another way, that way (e.g. email to an address, a paper form). value: {"name": "<the portal or method, as the utility names it>", "url": "<the portal's own entry URL, or null>"}. The url is NEVER a city or county PERMIT portal, never a help page or a PDF. ONE EXCEPTION, a method and not a portal: when the utility's OWN page says its interconnection / net-metering application is submitted WITH or THROUGH the city's or county's building PERMIT application (one application in the permit system carries both), value: {"name": "<as the page names it>", "url": null, "method": "with_ahj_permit", "documents": ["<each utility document the page lists for it, in its words>"]} — and the quote must say so. Never use that method for a utility that has its own portal or form, or when the page only says a building permit is ALSO required. Prefer the utility's own interconnection / "for contractors" / "for installers" page. When the utility files on PowerClerk (or another platform), the url is the utility's OWN tenant login on that platform's domain (e.g. <tenant>.powerclerk.com/MvcAccount/Login) — search for it and give it only when a search result or a page you opened shows that host; a program, resource or info page on the utility's own website is never the url. If you cannot find the tenant's host, give the name (e.g. "PowerClerk") with "url": null. When the utility's own page LINKS its application ("Submit an online application", "Apply online") without naming it, give that link's target as the url, that page as sourceUrl and the link's words as the quote: Keelix reads the page and keeps the url only if the link is there.
 2. program — "net_metering" when the utility credits exported energy under a net-metering tariff or rider; "net_billing" when exports are credited at a set export / buyback rate or price plan that is not net metering; "interconnection_only" when the utility only interconnects and does not itself credit exports (e.g. a wires-only distribution utility whose customers' retail electric provider sets any buyback). Also give "programName" in the utility's own words.
 
 EVERY value carries "sourceUrl" (a page your search returned or you opened) and "quote" (the exact words on that page that state it, under 250 characters, containing the answer itself: the portal's name or link for the filing; the words net metering / export credit / retail provider for the program). If no page states it, "value": null and say what you searched in "notFound". Never answer from memory. Never guess.
@@ -428,6 +526,14 @@ export interface UtilityFilingLookupRun {
   requirements?: UtilityRequirementsLanding;
 }
 
+/** The answer's filing member as the model wrote it (null when the text is not JSON). */
+function rawFilingOf(text: string): RawFact {
+  const t = str(text);
+  const a = t.indexOf("{"), b = t.lastIndexOf("}");
+  if (a < 0 || b <= a) return null;
+  try { return ((JSON.parse(t.slice(a, b + 1)) as Record<string, unknown>).filing ?? null) as RawFact; } catch { return null; }
+}
+
 const isTimeout = (r: Pick<WebLookupResult, "timedOut" | "error">) => Boolean(r.timedOut) || /\b(?:abort(?:ed)?|timed? ?out)\b/i.test(str(r.error));
 
 export async function runUtilityFilingLookup(
@@ -459,13 +565,55 @@ export async function runUtilityFilingLookup(
   const timedOut = isTimeout(r);
   const seen = [...r.resultUrls, ...(r.fetchedUrls ?? [])];
   const ungrounded = r.groundedSearches <= 0;
+  // The service city's own permit system, for "filed through the <system> portal" (#664 widened).
+  let permitSystemNames: string[] = [];
+  if (!ungrounded && str(input.city)) {
+    try {
+      const pp = await import("./permitProcess");
+      const lk = pp.getPermitProcessLookup(db, input.state, str(input.city));
+      const urls = (lk?.permits ?? []).map((p) => str(p.portalUrl?.value)).filter(Boolean);
+      permitSystemNames = permitSystemNamesFor(db, input.state, input.city, urls);
+    } catch { permitSystemNames = []; }
+  }
   const parsed = ungrounded
     ? {
       filing: { value: null, sourceUrl: "", quote: "", origin: "lookup" as const, notFound: r.error ? `lookup failed: ${r.error.slice(0, 120)}` : "no web search returned results — nothing kept from memory" },
       program: { value: null, sourceUrl: "", quote: "", origin: "lookup" as const, notFound: "no grounded search" },
       programName: "", dropped: [] as string[], limits: {} as EligibilityLimits,
     }
-    : parseUtilityFilingAnswer(r.text, seen);
+    : parseUtilityFilingAnswer(r.text, seen, { permitSystemNames });
+  // THE DOOR FROM THE UTILITY'S OWN LINKS: when the answer's filing came back with no URL (its words did
+  // not name the form, or its host was not a search result), read the page it cited and let an
+  // application link on it attest the URL (filingFromPageLinks). One read, on the lookup's reader.
+  let reader: PageReader | null | undefined = input.reader;
+  const getReader = async (): Promise<PageReader | null> => {
+    if (reader === undefined) reader = (await import("./permitProcessLookup")).defaultLookupReader(6);
+    return reader ?? null;
+  };
+  if (!ungrounded) {
+    const rawFiling = rawFilingOf(r.text);
+    const f = parsed.filing;
+    // Read only when the door REFUSED the answer's filing, or kept its name but dropped the URL it gave —
+    // a name the quote already states with no URL claimed (an email address, a named office) needs no read.
+    const claimedUrl = str((rawFiling?.value as Record<string, unknown> | undefined)?.url);
+    const noUrl = !f.value || (!f.value.url && f.value.method !== FILED_WITH_AHJ_PERMIT && Boolean(claimedUrl));
+    const cite = str(rawFiling?.sourceUrl);
+    if (noUrl && rawFiling && /^https?:\/\//i.test(cite)) {
+      try {
+        const rd = await getReader();
+        const page = rd ? await rd.read(cite) : null;
+        const got = filingFromPageLinks(rawFiling, page, seen);
+        if (got.fact) {
+          parsed.dropped.push(`filing URL ${got.fact.value?.url} attested by a link on ${cite} (our read)`);
+          parsed.filing = f.droppedUrls ? { ...got.fact, droppedUrls: f.droppedUrls } : got.fact;
+        } else if (page) {
+          parsed.dropped.push(`filing link read of ${cite}: ${got.why}`);
+        }
+      } catch (err) {
+        logger.warn("utility-filing", `could not read ${cite} for the filing link: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
+  }
   // An aborted call that found nothing is not stored — a retry later may succeed. A grounded
   // "not found" IS stored, so the same utility is not searched on every project.
   if (ungrounded && r.error) return { saved: false, reason: `lookup failed: ${r.error.slice(0, 160)}`, lookup: existing, grounded: 0, dropped: [], error: r.error, timedOut };
