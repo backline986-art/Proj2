@@ -5191,12 +5191,73 @@ async function loadSubmittalTracks() {
 // block, never a stale one from another project.
 async function loadTrackLookups() {
   const projectId = state.selectedProjectId;
-  state.trackLookups = { projectId, "permit-process": null, "utility-filing": null };
+  state.trackLookups = { projectId, "permit-process": null, "utility-filing": null, "utility-requirements": null };
   if (!projectId) return;
   const read = (kind) => api(`/api/projects/${projectId}/${kind}`).catch(() => null);
-  const [pp, uf] = await Promise.all([read("permit-process"), read("utility-filing")]);
+  // The utility's application requirement list (utility-requirements.js) rides the same read: a GET,
+  // no lookup runs.
+  const [pp, uf, ur] = await Promise.all([read("permit-process"), read("utility-filing"), read("utility-filing/application-requirements")]);
   if (state.selectedProjectId !== projectId) return;
-  state.trackLookups = { projectId, "permit-process": pp, "utility-filing": uf };
+  state.trackLookups = { projectId, "permit-process": pp, "utility-filing": uf, "utility-requirements": ur };
+}
+
+// The utility's application requirement panel (utility-requirements.js), '' when the module is missing
+// or the list is not this project's (a reload in flight).
+function utilityRequirementsHtml() {
+  const UR = typeof window !== "undefined" ? window.UtilityRequirements : null;
+  const tl = state.trackLookups;
+  if (!UR || !tl || tl.projectId !== state.selectedProjectId) return "";
+  return UR.renderRequirementsPanel(tl["utility-requirements"]);
+}
+
+// Verify / Edit fill the panel's form with the item (nothing is saved until Save).
+function fillUtilityRequirementForm(wrap, index) {
+  const UR = window.UtilityRequirements;
+  const tl = state.trackLookups;
+  const item = tl && tl.projectId === state.selectedProjectId && tl["utility-requirements"] ? (tl["utility-requirements"].items || [])[index] : null;
+  const panel = wrap.querySelector("[data-utility-requirements]");
+  if (!UR || !item || !panel) return;
+  const values = UR.prefill(item);
+  for (const [field, value] of Object.entries(values)) {
+    const el = panel.querySelector(`[data-req-field="${field}"]`);
+    if (el) el.value = value;
+  }
+  const form = panel.querySelector("details[data-req-form]");
+  if (form) form.open = true;
+  const quote = panel.querySelector('[data-req-field="quote"]');
+  if (quote) quote.focus();
+}
+
+// RECORD ONE ITEM OF THE UTILITY'S APPLICATION REQUIREMENTS (review-audit draft 03's PUT), as the
+// signed-in person (with sign-in off, the name they type). Rule 3: a named person's record, so nothing
+// is written without the confirm. mode "merge": other people's items stay as recorded. QC re-runs on
+// the server; the project is re-read.
+async function saveUtilityRequirement(wrap, btn) {
+  const UR = window.UtilityRequirements;
+  const projectId = state.selectedProjectId;
+  const panel = wrap.querySelector("[data-utility-requirements]");
+  if (!UR || !projectId || !panel) return;
+  const values = {};
+  panel.querySelectorAll("[data-req-field]").forEach((el) => { values[el.dataset.reqField] = el.value; });
+  const built = UR.formPayload(values);
+  if (!built.ok) { showMessage(built.reason, "warning"); return; }
+  const payload = state.trackLookups && state.trackLookups["utility-requirements"];
+  const utility = (payload && (payload.displayName || payload.utility)) || "this utility";
+  const auth = await authForDecision();
+  const decidedBy = namedPersonConsent(auth, UR.confirmMessage(utility, built.body.requirements[0].key), "recorded this requirement", "a utility's application requirements are recorded by a named person");
+  if (decidedBy == null) return;
+  if (btn) btn.disabled = true;
+  try {
+    await api(`/api/projects/${projectId}/utility-filing/application-requirements`, { method: "PUT", body: JSON.stringify({ ...built.body, ...(decidedBy ? { decidedBy } : {}) }) });
+  } catch (err) {
+    if (btn) btn.disabled = false;
+    showMessage(`Not recorded: ${err.message}`, "error");
+    return;
+  }
+  showMessage(`Recorded under your name: ${utility}'s application asks for ${UR.KINDS[built.body.requirements[0].key] || built.body.requirements[0].key}. QC re-ran; nothing was sent or filed.`, "info");
+  try { state.detail = await api(`/api/projects/${projectId}`); } catch { /* the message above says what happened */ }
+  await loadSubmittalTracks();
+  renderDetail();
 }
 
 // The verify control's block for one row, '' when the module is missing or the row is not this
@@ -5955,8 +6016,9 @@ function renderSubmittalTracks() {
   // Each group carries the job's row it files by (#695): the AHJ's permit process above the permit
   // cards, the utility's filing location above the utility card — one row, one control, however many
   // cards read it.
+  // The utility group also carries what the utility's application asks for (utility-requirements.js).
   const group = (title, list, lookupKind) => list.length
-    ? `<div class="track-group"><div class="track-group-head">${esc(title)}</div>${trackLookupHtml(lookupKind)}${list.map(trackCardHtml).join("")}</div>`
+    ? `<div class="track-group"><div class="track-group-head">${esc(title)}</div>${trackLookupHtml(lookupKind)}${lookupKind === "utility-filing" ? utilityRequirementsHtml() : ""}${list.map(trackCardHtml).join("")}</div>`
     : "";
   // THE UTILITY GROUP IS HEADED BY THE TRACK'S OWN PROGRAM (e2e-gap close, 2026-09-26): "Net
   // Metering (NEM)" was hard-coded for every utility — Texas (Oncor) and SRP jobs have no utility
@@ -5971,6 +6033,12 @@ function renderSubmittalTracks() {
   });
   wrap.querySelectorAll("button[data-lookup-verify]").forEach((btn) => {
     btn.addEventListener("click", () => verifyTrackLookup(btn.dataset.lookupVerify, btn));
+  });
+  wrap.querySelectorAll("button[data-req-verify], button[data-req-edit]").forEach((btn) => {
+    btn.addEventListener("click", () => fillUtilityRequirementForm(wrap, Number(btn.dataset.reqVerify ?? btn.dataset.reqEdit)));
+  });
+  wrap.querySelectorAll("button[data-req-save]").forEach((btn) => {
+    btn.addEventListener("click", () => saveUtilityRequirement(wrap, btn));
   });
 
   wrap.querySelectorAll("button[data-track-paid]").forEach((btn) => {

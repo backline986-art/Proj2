@@ -144,21 +144,26 @@ await check("MUST PASS: no AHJ rule — the adopted IRC 2021 default (36 in path
   assert.equal(f?.severity, "warning");
   assert.match(f!.message, /IRC 2021 R324\.6\.1 model-code default/);
 });
-await check("MUST PASS: the edition decides the default ridge setback (IRC 2012: 36 in; IRC 2015 on: the 18 in floor)", () => {
-  // IRC 2015 R324.6.2 (mirroring IFC 2015 605.11.3.2.3) already splits on roof coverage: 18 in at
-  // no more than 33%, 36 in above. Coverage is not read, so the floor applies and the message
-  // names the 36 in case. The 36-in-only text is the 2012 IFC's.
+await check("MUST PASS: the edition decides the default ridge setback (IRC 2012: 36 in; IRC 2015 on: 18 in at no more than 33% coverage)", () => {
+  // IRC 2015 R324.6.2 (mirroring IFC 2015 605.11.3.2.3) splits on roof coverage: 18 in at no more
+  // than 33%, 36 in above. Draft 08 reads the coverage (fireAccess.ts); with it stated under 33% the
+  // answer is today's 18 in. Not stated → the stricter 36 in, said (fireAccessCoverage.test pins the
+  // rest). The 36-in-only text is the 2012 IFC's.
   const at = (edition: string) => buildCodeContext("OR", "City of Testport", profile({ adoptedCodes: [{ code: "IRC", edition }] }));
-  assert.equal(requiredRoofPlanDimensions(at("2012")).find((r) => r.kind === "ridgeSetback")?.inches, 36);
+  const under = { coverage: { pct: 25, basis: "stated" as const, source: "Plan set", excerpt: "ROOF COVERAGE: 25%" }, arrayAreaSqFt: null, sprinklered: null, policy: null };
+  assert.equal(requiredRoofPlanDimensions(at("2012"), under).find((r) => r.kind === "ridgeSetback")?.inches, 36);
   for (const edition of ["2015", "2018", "2021"]) {
-    const ridge = requiredRoofPlanDimensions(at(edition)).find((r) => r.kind === "ridgeSetback");
+    const ridge = requiredRoofPlanDimensions(at(edition), under).find((r) => r.kind === "ridgeSetback");
     assert.equal(ridge?.inches, 18, `IRC ${edition}`);
     assert.match(ridge!.source, /R324\.6\.2 \/ IFC 605\.11\.3\.2\.3 .*36 in where it covers more/);
+    const unknown = requiredRoofPlanDimensions(at(edition)).find((r) => r.kind === "ridgeSetback");
+    assert.equal(unknown?.inches, 36, `IRC ${edition}, coverage not stated`);
+    assert.match(unknown!.source, /roof coverage not stated/);
   }
-  const docs = plan('36" FIRE ACCESS PATHWAY. 12" SETBACK FROM RIDGE.');
+  const docs = plan('36" FIRE ACCESS PATHWAY. 12" SETBACK FROM RIDGE. ROOF COVERAGE: 25%');
   assert.equal(get(run(project({}), at("2012"), docs), BELOW)?.severity, "warning");
   assert.equal(get(run(project({}), at("2015"), docs), BELOW)?.severity, "warning", "12 in is under the 18 in floor");
-  assert.equal(get(run(project({}), at("2015"), plan('36" FIRE ACCESS PATHWAY. 24" SETBACK FROM RIDGE.')), BELOW), undefined);
+  assert.equal(get(run(project({}), at("2015"), plan('36" FIRE ACCESS PATHWAY. 24" SETBACK FROM RIDGE. ROOF COVERAGE: 25%')), BELOW), undefined);
 });
 await check("MUST EXCLUDE: a ground mount is never measured for roof pathways", () => {
   const fs = run(project({ mounting: "Ground mount" }), withRule("verified"), plan('18" FIRE ACCESS PATHWAY'));

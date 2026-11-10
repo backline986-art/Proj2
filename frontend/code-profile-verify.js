@@ -79,6 +79,18 @@
     // The battery (ESS) rules (review-audit draft 05): only where the row records its own; the model-code
     // baseline applies to everything else. Shown so a person never verifies a rule they were not shown.
     if (p && p.essRules && Object.keys(p.essRules).length) section('Battery / ESS rules', kv(p.essRules, {}, 'essRules'));
+    // The alternative roof-access policy (review-audit draft 08): shown so a person never verifies a
+    // policy they were not shown; verifying it lets it replace the model-code pathway numbers.
+    if (p && p.firePathwayPolicy) {
+      const fp = kv(p.firePathwayPolicy, {
+        arrayAreaMaxSqFt: ['Applies to arrays up to', ' sq ft'],
+        ridgeSetbackIn: ['Ridge setback', ' in'],
+        pathwayWidthIn: ['Pathway width', ' in'],
+        pathwaysExemptMaxCoveragePct: ['No pathways at or below roof coverage of', '%'],
+      });
+      if (httpUrl(p.firePathwayPolicy.sourceUrl)) fp.push(`<li class="rv-muted muted">Policy page${sourceLink(p.firePathwayPolicy.sourceUrl)}</li>`);
+      section('Alternative roof-access policy', fp);
+    }
     section('Citations', ((p && p.citations) || []).map((c) =>
       `<li>${esc(c.label || httpUrl(c.sourceUrl) || 'Source')}${sourceLink(c.sourceUrl)}</li>`));
     return rows.join('');
@@ -92,6 +104,7 @@
       designCriteria: p.designCriteria, prescriptive: p.prescriptive,
       fireSetbacks: p.fireSetbacks, citations: p.citations,
       ...(p.essRules ? { essRules: p.essRules } : {}),
+      ...(p.firePathwayPolicy ? { firePathwayPolicy: p.firePathwayPolicy } : {}),
     };
   }
 

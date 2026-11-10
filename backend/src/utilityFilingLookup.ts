@@ -30,6 +30,11 @@ import { knownPowerClerkUtility } from "./utilityIdentity";
 import { isVerifiedKnowledge, knowledgeProfileKey } from "./knowledgeBase";
 import { portalEntityEvidence } from "./portalRecipes";
 import { acceptProposedLimits, saveEligibilityRecord } from "./eligibilityLimits";
+// Text constants only (the prompt); the landing is imported where it runs, so this module and
+// utilityRequirements.ts (which reads this one's keys) never load each other at start-up.
+import { UTILITY_REQUIREMENTS_RESEARCH_RULE, UTILITY_REQUIREMENTS_RESEARCH_SCHEMA } from "./utilityRequirementsResearchPrompt";
+import type { UtilityRequirementsLanding } from "./utilityRequirementsResearch";
+import type { PageReader } from "./agencyPageReader";
 
 export type UtilityProgramKind = "net_metering" | "net_billing" | "interconnection_only";
 /**
@@ -324,7 +329,7 @@ export function acceptFilingUrl(url: string, seenUrls: string[], namedPlatform: 
   return { url: u, why: "" };
 }
 
-export function parseUtilityFilingAnswer(text: string, seenUrls: string[]): { filing: UtilityFilingFact; program: CitedFact<UtilityProgramKind>; programName: string; dropped: string[]; limits: EligibilityLimits } {
+export function parseUtilityFilingAnswer(text: string, seenUrls: string[]): { filing: UtilityFilingFact; program: CitedFact<UtilityProgramKind>; programName: string; dropped: string[]; limits: EligibilityLimits; rawRequirements?: unknown } {
   let json: Record<string, unknown> | null = null;
   const t = str(text);
   const start = t.indexOf("{");
@@ -375,7 +380,10 @@ export function parseUtilityFilingAnswer(text: string, seenUrls: string[]): { fi
   // PROGRAM LIMITS (#679), under the same cited discipline: a page the search returned, words that carry the value.
   const proposed = acceptProposedLimits(json?.limits, seenUrls);
   dropped.push(...proposed.dropped.map((d) => `limit ${d}`));
-  return { filing, program, programName: program.value ? str(rawProgram?.programName).slice(0, 120) : "", dropped, limits: proposed.limits };
+  // THE APPLICATION'S REQUIREMENT ITEMS (utilityRequirementsResearch.ts): passed through raw; the run
+  // shape-checks and lands them after the row is saved.
+  return { filing, program, programName: program.value ? str(rawProgram?.programName).slice(0, 120) : "", dropped, limits: proposed.limits,
+    ...(json && json.applicationRequirements !== undefined ? { rawRequirements: json.applicationRequirements } : {}) };
 }
 
 // ── The lookup ───────────────────────────────────────────────────────────────────────────────
@@ -388,10 +396,13 @@ EVERY value carries "sourceUrl" (a page your search returned or you opened) and 
 
 3. limits — ONLY where the program page or tariff you read states them for residential customers: "maxDcKw" / "maxAcKw" (the program's size cap in kW), "productionMeterRequired" (true when a separate production / generation meter is required), "installerCertification" ({"name": "<the certification>", "effectiveFrom": "YYYY-MM-DD" or ""}). Each as {"value": ..., "citation": {"sourceName": "<the page or tariff by name>", "sourceUrl": "", "quote": "<the exact words, containing the value>"}}. Leave out any limit no page states; {} when none.
 
+${UTILITY_REQUIREMENTS_RESEARCH_RULE}
+
 Return ONLY JSON:
 {"filing": {"value": {"name": "", "url": null, "method"?: "with_ahj_permit", "documents"?: []}|null, "sourceUrl": "", "quote": "", "notFound": ""},
  "program": {"value": "net_metering"|"net_billing"|"interconnection_only"|null, "programName": "", "sourceUrl": "", "quote": "", "notFound": ""},
- "limits": {}}`;
+ "limits": {},
+ ${UTILITY_REQUIREMENTS_RESEARCH_SCHEMA}}`;
 
 const lookupTimeoutMs = () => Math.max(120000, Number(process.env.UTILITY_FILING_LOOKUP_TIMEOUT_MS) || 240000);
 
@@ -413,6 +424,8 @@ export interface UtilityFilingLookupRun {
   error?: string;
   /** The call hit its time budget (the trigger retries it once, tighter). */
   timedOut?: boolean;
+  /** The application requirement items the lookup proposed, landed (utilityRequirementsResearch.ts). */
+  requirements?: UtilityRequirementsLanding;
 }
 
 const isTimeout = (r: Pick<WebLookupResult, "timedOut" | "error">) => Boolean(r.timedOut) || /\b(?:abort(?:ed)?|timed? ?out)\b/i.test(str(r.error));
@@ -420,7 +433,12 @@ const isTimeout = (r: Pick<WebLookupResult, "timedOut" | "error">) => Boolean(r.
 export async function runUtilityFilingLookup(
   db: AppDb,
   llm: Pick<LLMProvider, "webLookup">,
-  input: { state: string; utility: string; city?: string; force?: boolean; budget?: UtilityFilingBudget },
+  input: {
+    state: string; utility: string; city?: string; force?: boolean; budget?: UtilityFilingBudget;
+    /** Reads the official pages that confirm requirement items (undefined = the default reader;
+     *  null = none, everything lands seeded). Tests pass one over a fake fetch. */
+    reader?: PageReader | null;
+  },
 ): Promise<UtilityFilingLookupRun> {
   const existing = getUtilityFilingLookup(db, input.state, input.utility);
   if (existing?.confidence === "verified") return { saved: false, reason: "a person verified this utility's filing location", lookup: existing, grounded: 0, dropped: [] };
@@ -478,8 +496,37 @@ export async function runUtilityFilingLookup(
       logger.warn("utility-filing", `could not store program limits for ${input.utility}: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
+  // WHAT THE UTILITY'S APPLICATION ASKS FOR, as the search's pages state it: proposals, landed on the row
+  // just saved (official only through #683's landing on bytes read here; never over a person's item).
+  const requirements = save.saved && !ungrounded ? await landLookupRequirements(db, input, parsed.rawRequirements, seen, r.groundedSearches > 0) : undefined;
+  if (requirements) parsed.dropped.push(...requirements.dropped);
   return { saved: save.saved, reason: r.error ? `${save.reason} (partial results kept after: ${r.error.slice(0, 120)})` : save.reason, lookup: save.lookup, grounded: r.groundedSearches, dropped: parsed.dropped,
+    ...(requirements?.landing ? { requirements: requirements.landing } : {}),
     ...(r.error ? { error: r.error, timedOut } : {}) };
+}
+
+/** The lookup's requirement proposals, shape-checked and landed. Never throws: a failure here never
+ *  costs the filing row the lookup just saved. */
+async function landLookupRequirements(
+  db: AppDb,
+  input: { state: string; utility: string; reader?: PageReader | null },
+  raw: unknown,
+  seenUrls: string[],
+  webGrounded: boolean,
+): Promise<{ landing?: UtilityRequirementsLanding; dropped: string[] } | undefined> {
+  if (raw === undefined) return undefined;
+  try {
+    const research = await import("./utilityRequirementsResearch");
+    const { reads, dropped } = research.utilityRequirementReadsOf(raw, seenUrls, webGrounded);
+    if (!reads.length) return { dropped };
+    const reader = input.reader !== undefined ? input.reader : (await import("./permitProcessLookup")).defaultLookupReader(research.UTILITY_REQUIREMENTS_CONFIRM_MAX_READS);
+    const landing = await research.landResearchedUtilityRequirements(db, { state: input.state, utility: input.utility }, reads, { reader });
+    logger.info("utility-filing", `application requirements for ${input.utility} (${input.state}): ${landing.reason}`, { landed: landing.landed, skipped: landing.skipped.length, conflicts: landing.conflicts.length });
+    return { landing, dropped };
+  } catch (err) {
+    logger.warn("utility-filing", `could not land application requirements for ${input.utility}: ${err instanceof Error ? err.message : String(err)}`);
+    return { dropped: [] };
+  }
 }
 
 /** INCOMPLETE for the retry rule: nothing found at all, OR a named interconnection platform with

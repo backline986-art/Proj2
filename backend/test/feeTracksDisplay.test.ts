@@ -55,6 +55,8 @@ const NAMES = [
   "trackCardHtml", "utilityGroupTitle",
   // The job's permit-process / utility-filing row above each group (#695); with no window.LookupVerify it draws nothing.
   "trackLookupHtml",
+  // What the utility's application asks for, under the utility group's lookup row (utility requirements panel); with no window.UtilityRequirements it draws nothing.
+  "utilityRequirementsHtml",
   // The closeout milestones group (#497) — renderSubmittalTracks draws and binds it.
   "closeoutGroupHtml", "bindCloseoutMilestones", "saveProjectMilestone",
   // The utility track a person's storage record dropped (draft 10) — renderSubmittalTracks draws it first.

@@ -1,5 +1,5 @@
 import "dotenv/config";
-import { validate, portalCredentialCreateSchema, portalCredentialUpdateSchema, autoLearnSchema, codeProfileResearchSchema, codeProfileVerifySchema, permitProcessVerifySchema, reviewSubjectSchema, utilityFilingVerifySchema, jobScopeSchema, utilityStorageModesSchema, utilityApplicationRequirementsSchema, nemTrackKeepSchema } from "./validation";
+import { validate, portalCredentialCreateSchema, portalCredentialUpdateSchema, autoLearnSchema, codeProfileResearchSchema, codeProfileVerifySchema, jurisdictionQcScreenSchema, permitProcessVerifySchema, reviewSubjectSchema, utilityFilingVerifySchema, jobScopeSchema, utilityStorageModesSchema, utilityApplicationRequirementsSchema, nemTrackKeepSchema } from "./validation";
 import crypto from "node:crypto";
 import { spawn } from "node:child_process";
 import express, { type NextFunction, type Request, type Response } from "express";
@@ -69,7 +69,7 @@ import type { RequestScope } from "./scope";
 import { DEFAULT_ORG_ID } from "./db";
 import { ensureStatusShareToken, statusShareUrl } from "./clientNotifier";
 import { sendInstallerHandoff } from "./installerHandoff";
-import { listCodeProfiles, listRowlessDesignLookups, getCodeProfile, saveResearchedCodeProfile, saveVerifiedCodeProfile, codeProfileKey, applyEditionProposal, dismissEditionProposal } from "./codeProfiles";
+import { listCodeProfiles, listRowlessDesignLookups, getCodeProfile, saveResearchedCodeProfile, essRulesOutcome, saveVerifiedCodeProfile, codeProfileKey, applyEditionProposal, dismissEditionProposal } from "./codeProfiles";
 import { applyCorrectionApproval } from "./correctionAgent";
 import { runStandaloneReview, getReviewSubmission, listReviewSubmissions, reviewSubjectToProject } from "./reviewSubject";
 import { renderReviewerReportHtml } from "./reviewerEngine";
@@ -178,7 +178,7 @@ import { runQcForProject } from "./qc";
 import { personJobScope, setPersonJobScope } from "./jobScope";
 import { clearUtilityStorageModes, recordUtilityStorageModes } from "./utilityStorageModes";
 import { projectsDroppedFor, setNemTrackKept } from "./nemTrackDrop";
-import { clearUtilityApplicationRequirements, recordUtilityApplicationRequirements } from "./utilityRequirements";
+import { clearUtilityApplicationRequirements, recordUtilityApplicationRequirements, utilityRequirementsView } from "./utilityRequirements";
 import { stagedReviewScreenshotFile } from "./stagedReviews";
 import { submissionConfirmationFile } from "./submissionConfirmation";
 import { reviewScreenshotFile } from "./reviewScreenshot";
@@ -1154,7 +1154,10 @@ app.post("/api/code-profiles/research", asyncHandler(async (req, res) => {
   addAuditLog(db, null, "llm", "code-profile research", "code_profile.researched", {
     key: codeProfileKey(b), state: b.state, ahj: b.ahj, webGrounded: research.webGrounded,
   });
-  res.json({ profile: saved, webGrounded: research.webGrounded, notes: research.notes, needsHumanVerification: true });
+  // The jurisdiction's own battery (ESS) rules the research read land field by field (official only on
+  // a page this process read; never over a person's value). Absent when it read none.
+  const ess = await essRulesOutcome(db, { state: b.state, ahj: b.ahj }, research, undefined);
+  res.json({ profile: ess.essRules?.saved ? getCodeProfile(db, saved) ?? saved : saved, ...ess, webGrounded: research.webGrounded, notes: research.notes, needsHumanVerification: true });
 }));
 
 // EDITION PROPOSALS (#172): a due verify check on a HUMAN-VERIFIED row stores a proposal, never a
@@ -1198,7 +1201,7 @@ app.put("/api/code-profiles/verify", (req, res) => {
     "Name the person verifying: a code profile is verified by a named person.");
   const saved = saveVerifiedCodeProfile(db, {
     key: "", confidence: "verified", updatedAt: "",
-    state: b.state, ahj: b.ahj,
+    state: b.state, ahj: b.ahj, ...(b.firePathwayPolicy ? { firePathwayPolicy: b.firePathwayPolicy } : {}),
     adoptedCodes: b.adoptedCodes, amendments: b.amendments,
     designCriteria: b.designCriteria, prescriptive: b.prescriptive,
     fireSetbacks: b.fireSetbacks.map((f) => ({ ...f })), citations: b.citations,
@@ -1206,6 +1209,35 @@ app.put("/api/code-profiles/verify", (req, res) => {
   }, verifiedBy);
   res.json({ profile: saved });
 });
+// JURISDICTION QC SCREENS, WRITTEN BY A PERSON (review-audit draft 14). Draft 12 moved each state's and
+// city's QC baseline screens to data (reference-jurisdiction-qc-rules.json, overlaid by state_permit_rules
+// rows of family "qc") but left nothing that writes those rows. GET shows the screens a state's jobs are
+// checked against, each with its tier; PUT records or rewords one: a NAMED person (namedPersonDecider, the
+// placeholder names refused), the source's own words verbatim (quote) and the page they were read on. It
+// lands person-verified (rule 3: nothing automatic replaces it), and it may block only under the #637 bar
+// (jurisdictionQcRules.jurisdictionScreenMayBlock). Under the existing /api/code-profiles path (rule 6:
+// shared jurisdiction knowledge, scoped in routeScope.test.ts).
+app.get("/api/code-profiles/qc-screens", asyncHandler(async (req, res) => {
+  const { usStateCode } = await import("./usState");
+  const { resolveJurisdictionQcRecords } = await import("./jurisdictionQcRules");
+  const state = usStateCode(req.query.state);
+  if (!state) throw new HttpError(400, "state is required (a two-letter US state code or name).");
+  const records = resolveJurisdictionQcRecords(db, state, String(req.query.ahj ?? "")).filter((r) => r.state === state);
+  res.json({ state, records });
+}));
+app.put("/api/code-profiles/qc-screens", asyncHandler(async (req, res) => {
+  const b = validate(jurisdictionQcScreenSchema, req.body);
+  const { isConfirmingPerson } = await import("./feeConfirm");
+  // Named BEFORE anything is written: a blank or placeholder name (auth off) is a 400 that writes nothing.
+  const verifiedBy = namedPersonDecider(req, "verifiedBy",
+    "Sign in to record a jurisdiction QC screen.",
+    "Name the person recording this screen: a jurisdiction screen is recorded by a named person (\"operator\" or a bot's name is not a person).",
+    isConfirmingPerson);
+  const { writeVerifiedQcScreen } = await import("./stateRules");
+  const row = writeVerifiedQcScreen(db, { state: b.state, ruleId: b.ruleId, screen: b.screen, quote: b.quote, sourceUrl: b.sourceUrl }, verifiedBy);
+  if (!row) throw new HttpError(400, "That screen cannot be recorded: check the state, the screen's kind and fields (a submittal-documents screen lists its items), the quote and the source URL.");
+  res.json({ rule: row, verifiedBy });
+}));
 const editionProposalFingerprint = (req: Request): string => {
   const fp = String(req.body?.fingerprint || "").trim();
   if (!fp || fp.length > 400) throw new HttpError(400, "fingerprint is required.");
@@ -2683,6 +2715,15 @@ app.put("/api/projects/:id/utility-track/keep", (req, res) => {
 // keyed by the project's own state + utility. A NAMED PERSON records each item with the page and its words
 // (rule 3: lands 'verified'; a verified item may block when the job lacks it); DELETE withdraws the
 // person's items (the shipped seed and any official reads stand). QC re-runs so the gate reads it.
+// The panel's read (dashboard utility-requirements.js): every item the shipped seed and the utility's
+// filing row carry, with its tier, source and words, and which one the gates read per kind. A read: no
+// lookup runs, nothing is written.
+app.get("/api/projects/:id/utility-filing/application-requirements", (req, res) => {
+  const { project } = getProjectDetail(db, String(req.params.id));
+  const utility = String(project.utility || "").trim();
+  const view = utility ? utilityRequirementsView(db, project.state, utility) : { displayName: "", rowExists: false, items: [] };
+  res.json({ state: project.state, utility: project.utility, ...view });
+});
 app.put("/api/projects/:id/utility-filing/application-requirements", (req, res) => {
   const projectId = String(req.params.id);
   const { project } = getProjectDetail(db, projectId);
@@ -2690,10 +2731,10 @@ app.put("/api/projects/:id/utility-filing/application-requirements", (req, res) 
   const verifiedBy = namedPersonDecider(req, "decidedBy",
     "Sign in to record a utility's application requirements.",
     "Name the person recording them: a utility's application requirements are recorded by a named person.");
-  const r = recordUtilityApplicationRequirements(db, { state: project.state, utility: project.utility }, { requirements: b.requirements, verifiedBy });
+  const r = recordUtilityApplicationRequirements(db, { state: project.state, utility: project.utility }, { requirements: b.requirements, verifiedBy, ...(b.mode ? { mode: b.mode } : {}) });
   if (!r.saved) throw new HttpError(r.reason.startsWith("No filing record") ? 409 : 400, r.reason);
   addAuditLog(db, projectId, "human", verifiedBy, "utility_filing.application_requirements_recorded", {
-    utility: project.utility, state: project.state, keys: b.requirements.map((x) => x.key), sources: b.requirements.map((x) => x.sourceUrl),
+    utility: project.utility, state: project.state, keys: b.requirements.map((x) => x.key), sources: b.requirements.map((x) => x.sourceUrl), mode: b.mode ?? "replace",
   });
   runQcForProject(db, projectId);
   res.json({ requirements: r.requirements });

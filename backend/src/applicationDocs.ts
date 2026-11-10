@@ -143,7 +143,7 @@ export function permitStructureAnswer(
 
   // 2. A hand-written (human-curated) application profile.
   const profile = findApplicationProfile(project);
-  const handWritten = applicationProfiles.includes(profile) && profile.id !== "oregon-generic-epermitting";
+  const handWritten = applicationProfiles.includes(profile) && !profile.statewide;
   if (handWritten && profile.permitStructure && profile.permitStructure !== "unknown") {
     return settle(profile.permitStructure, "curated", `Permit structure: ${profile.permitStructure} — the hand-written ${profile.name} profile${profile.sourceUrl ? `, ${profile.sourceUrl}` : ""}`, profile.sourceUrl);
   }
@@ -272,7 +272,7 @@ function permitStructureParts(a: PermitStructureAnswer): { core: string; pre: st
  */
 export function shippedProfileNeedsPerJobLookup(project: ProjectRecord): boolean {
   const profile = findApplicationProfile(project);
-  if (applicationProfiles.includes(profile) && profile.id !== "oregon-generic-epermitting") return false;
+  if (applicationProfiles.includes(profile) && !profile.statewide) return false;
   // A STATE issuer (New Mexico CID) rests on a seeded list of state-served jurisdictions — never a
   // reason to skip asking about this AHJ: a cited lookup outranks it.
   const a = permitStructureAnswer(project);
@@ -296,7 +296,7 @@ export function shippedProfileIsAuthoritative(project: ProjectRecord): boolean {
     // A hand-written application profile (Portland, Marion County…) is authoritative on its own.
     try {
       const profile = findApplicationProfile(project);
-      return applicationProfiles.includes(profile) && profile.id !== "oregon-generic-epermitting";
+      return applicationProfiles.includes(profile) && !profile.statewide;
     } catch { return false; }
   }
   try { return !shippedProfileNeedsPerJobLookup(project); } catch { return false; }
@@ -552,6 +552,12 @@ export const applicationProfiles: ApplicationRequirementProfile[] = [
     requiresPortalEntryOnly: true,
     requiredDocuments: ["Residential/Commercial Structural Solar PV portal entry", "Prescriptive/non-prescriptive checklist", "Plan set and specs"],
     notes: ["Use this fallback when the AHJ is in Oregon but no specific local profile is seeded yet."],
+    statewide: {
+      state: "OR",
+      name: "Oregon",
+      label: "Oregon ePermitting statewide profile",
+      permits: "separate structural + electrical permits, OAR 918-050-0180(2)",
+    },
   },
 ];
 
@@ -759,10 +765,12 @@ export function registryApplicationProfileFor(project: Pick<ProjectRecord, "stat
 /** Profiles that are NOT an AHJ's own knowledge: the generic Oregon fallback, the generic package,
  *  the per-job lookup's shell. Their portal name / source URL is never written or read as the AHJ's
  *  portal (learnFromProject, the channel label). */
-export const FALLBACK_PROFILE_IDS: ReadonlySet<string> = new Set(["oregon-generic-epermitting", "generic-unknown-ahj", "lookup-per-job"]);
+export const FALLBACK_PROFILE_IDS: ReadonlySet<string> = new Set([...applicationProfiles.filter((p) => p.statewide).map((p) => p.id), "generic-unknown-ahj", "lookup-per-job"]);
 
 export function findApplicationProfile(project: ProjectRecord): ApplicationRequirementProfile {
-  const oregonProject = usStateCode(project.state) === "OR";
+  // A STATEWIDE fallback profile is recognised by its flag (draft 14), never by an id or a state name.
+  const stateCode = usStateCode(project.state);
+  const statewide = stateCode ? applicationProfiles.find((profile) => profile.statewide?.state === stateCode) : undefined;
   const specific = registryApplicationProfileFor(project);
   if (specific) return specific;
   // No hand-written profile — synthesize from the AHJ's seeded process knowledge so
@@ -770,9 +778,8 @@ export function findApplicationProfile(project: ProjectRecord): ApplicationRequi
   const found = lookedUpDocuments(project);
   const synthesized = applicationProfileFromProcess(project);
   if (synthesized) return found ? { ...synthesized, requiredDocuments: found.documents, notes: [found.note, ...synthesized.notes] } : synthesized;
-  if (oregonProject) {
-    const generic = applicationProfiles.find((profile) => profile.id === "oregon-generic-epermitting")!;
-    return found ? { ...generic, requiredDocuments: found.documents, notes: [found.note, ...generic.notes] } : generic;
+  if (statewide) {
+    return found ? { ...statewide, requiredDocuments: found.documents, notes: [found.note, ...statewide.notes] } : statewide;
   }
   if (found) {
     return {

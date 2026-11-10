@@ -1774,6 +1774,19 @@ export interface ApplicationRequirementProfile {
   permitStructure?: "combo" | "separate" | "unknown";
   /** How the completed application is submitted: email | online portal | in-person | combination. */
   submissionMethod?: string;
+  /** A STATEWIDE FALLBACK PROFILE (review-audit draft 14): used for a job in `state` whose AHJ has no
+   *  profile of its own. The flag lives on the profile, so no code compares a profile id or a state
+   *  name to recognise it; the reviewer words its process finding from these fields. */
+  statewide?: {
+    /** Two-letter state code the profile covers. */
+    state: string;
+    /** How the finding names the state ("<name> statewide profile applied"). */
+    name: string;
+    /** The profile as the packet names it ("the <label> (<permits>)"). */
+    label: string;
+    /** The statewide permit structure and its citation. */
+    permits: string;
+  };
 }
 
 export interface GeneratedApplicationDocument {
@@ -2455,8 +2468,9 @@ export interface StatePermitRule {
   /** Two-letter state code. */
   state: string;
   /** "structural" (#595: prescriptive-solar limits, what forces the engineered path, seal validity);
-   *  "fee" is #586's (state surcharges, caps). */
-  family: "structural" | "fee";
+   *  "fee" is #586's (state surcharges, caps); "qc" is a QC baseline screen (jurisdictionQcRules.ts,
+   *  review-audit draft 12: rule_key = the screen's ruleId, value = the screen). */
+  family: "structural" | "fee" | "qc";
   key: string;
   value: unknown;
   /** The section, with its words quoted. */
@@ -2598,12 +2612,59 @@ export interface StatedRoofPlanDimension {
 export interface RoofPlanRequiredDimension {
   kind: RoofPlanDimensionKind;
   inches: number;
-  /** "ahj": parsed from the jurisdiction's fireSetbacks; "model_code": the adopted IRC edition's default. */
+  /** "ahj": parsed from the jurisdiction's fireSetbacks, or its APPLIED alternative pathway policy (draft 08); "model_code": the adopted IRC edition's default. */
   basis: "ahj" | "model_code";
   /** The fireSetbacks row is human-verified (always false for a model-code default). */
   verified: boolean;
+  /** The number is the AHJ's APPLIED alternative pathway policy's (draft 08), not a fireSetbacks rule. */
+  fromPolicy?: boolean;
   /** Where the number came from, said for the operator. */
   source: string;
+}
+
+/**
+ * A JURISDICTION'S ALTERNATIVE ROOF-ACCESS (FIRE PATHWAY) POLICY (review-audit draft 08): where the AHJ
+ * relaxes the model code's R324.6 pathways for small arrays or low coverage. Typed per-jurisdiction
+ * DATA on its code profile, never code per city. It replaces the model-code numbers only when APPLIED:
+ * the row is person-verified and the policy carries its source page, or a citation with field
+ * "firePathwayPolicy" was read on the authority's official page (#683). A seeded policy is shown as a
+ * callout and the model code applies.
+ */
+export interface JurisdictionFirePathwayPolicy {
+  /** The policy's own name, as the AHJ titles it. */
+  name?: string;
+  /** The policy covers arrays up to this plan-view area, sq ft (absent: any size). */
+  arrayAreaMaxSqFt?: number;
+  /** Ridge setback the policy asks for, inches. */
+  ridgeSetbackIn?: number;
+  /** Pathway width the policy asks for, inches. */
+  pathwayWidthIn?: number;
+  /** At or below this roof coverage (percent of plan-view roof area) the policy needs no pathways. */
+  pathwaysExemptMaxCoveragePct?: number;
+  /** The page the policy was read on, and its own words. */
+  sourceUrl?: string;
+  quote?: string;
+}
+
+/** How much of the roof the array covers, as the package states it (fireAccess.readRoofCoverage). */
+export interface RoofCoverageReading {
+  /** Percent of the plan-view roof area. */
+  pct: number;
+  /** "stated": the plan prints the percentage; "areas": array area / roof area, both stated. */
+  basis: "stated" | "areas";
+  source: string;
+  excerpt: string;
+}
+
+/** The job facts and the jurisdiction policy the fire access requirement reads (draft 08). */
+export interface FireAccessFacts {
+  coverage: RoofCoverageReading | null;
+  /** Total array plan-view area the package states (or modules x module size), sq ft. */
+  arrayAreaSqFt: number | null;
+  /** The plan states the dwelling has an automatic sprinkler system (statement of fact, never a code note). */
+  sprinklered: { source: string; excerpt: string } | null;
+  /** The jurisdiction's alternative pathway policy, and whether it is applied (verified / official). */
+  policy: { policy: JurisdictionFirePathwayPolicy; applied: boolean; provenance: string } | null;
 }
 
 /** A design criterion a submittal package STATES (label-anchored), per source. */
@@ -2775,7 +2836,9 @@ export interface JurisdictionCodeProfile {
   citations: Array<{
     label: string;
     sourceUrl: string;
-    kind?: "ahj_correction" | "design_criteria_research";
+    /** "ess_rules_research": an ESS rule a code research read (ESS data follow-up); "reference": an ESS
+     *  rule the shipped reference file carried onto an existing row, field by field. */
+    kind?: "ahj_correction" | "design_criteria_research" | "ess_rules_research" | "reference";
     field?: string;
     quote?: string;
     at?: string;
@@ -2803,6 +2866,9 @@ export interface JurisdictionCodeProfile {
    *  value it compared against and whether a person verified THAT row. Absent on a single row:
    *  the row's own confidence applies. Never persisted. */
   fieldSources?: Record<string, JurisdictionFieldSource>;
+  /** The jurisdiction's alternative roof-access (fire pathway) policy (review-audit draft 08); absent =
+   *  the model code. Taken whole from one layer (the AHJ's, else the state's): fieldSources.firePathwayPolicy. */
+  firePathwayPolicy?: JurisdictionFirePathwayPolicy;
   /** State rows only: how the state adopts each code family (research or the reference data). */
   adoptionModel?: JurisdictionAdoptionModel;
   /** State rows only: announced editions not yet in effect. */
@@ -2841,6 +2907,10 @@ export interface JurisdictionFieldSource {
   verifiedAt?: string;
   /** confidence "official" only: where and when the value was read. */
   officialSource?: { host: string; sourceUrl: string; fetchedAt: string };
+  /** essRules fields only: who put THIS value on its row — a person (the row is person-verified, or
+   *  a person applied it from an AHJ correction), a code research's read, or the shipped reference
+   *  file. Absent = the row does not say (an import, a legacy row). */
+  origin?: "person" | "research" | "reference";
 }
 
 // Review work types (rule packs). "solar_pv_residential" is the deterministic pack;
@@ -2887,9 +2957,23 @@ export interface JurisdictionCodeResearchInput {
   asOf?: string;
 }
 
+/** One ESS rule a research read (ESS data follow-up): shape-checked by essRuleReadsOf; where it lands
+ *  (official or seeded, never over a person's value) is decided at the write (#683). */
+export interface JurisdictionEssRuleRead {
+  key: keyof JurisdictionEssRules;
+  value: number | boolean;
+  sourceUrl: string;
+  quote: string;
+  /** The number as the page printed it, when it differs from `value`. */
+  publishedValue?: number;
+}
+
 export interface JurisdictionCodeResearchResult {
   provider: "claude" | "stub";
   profile: JurisdictionCodeProfile;
+  /** The jurisdiction's battery / ESS rules the research read, each with its page and quote. Kept
+   *  apart from `profile`: each value lands through the official-source landing, field by field. */
+  essRules?: JurisdictionEssRuleRead[];
   webGrounded: boolean;
   needsHumanVerification: true;
   notes: string;
