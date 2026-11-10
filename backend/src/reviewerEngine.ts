@@ -10,7 +10,7 @@ import { evidenceForTopic, evidenceLines, fieldValue, requirementsForTopic, type
 import { nowIso } from "./time";
 import { hasMpuScope } from "./serviceScope";
 import { resolveValuation } from "./valuation";
-import { requirementMayBlock, resolveUtilityRequirements } from "./utilityRequirements";
+import { requirementForGate, requirementMayBlock, resolveUtilityRequirements } from "./utilityRequirements";
 import { batteryStatus } from "../../shared/src/batteryControls";
 import { sourceHostOf } from "../../shared/src/officialSource";
 import { resolvePermitPath, resolveStampRequirement, hasStampedStructuralEvidence } from "./permitPath";
@@ -1036,7 +1036,9 @@ function addPlacementRuleFindings(project: ProjectRecord, ctx: EffectiveCodeCont
 
 // ── THE UTILITY SIDE, FROM EACH UTILITY'S OWN RECORDED REQUIREMENTS (review-audit draft 03) ─────
 // What a requirement item asks the package to show, read with the existing evidence readers.
-const REQUIREMENT_TOPIC: Record<UtilityRequirementKey, EvidenceTopic> = {
+// A kind with no evidence reader here (module_spec, inverter_spec: the QC baseline reads those) is not
+// asked by the gate.
+const REQUIREMENT_TOPIC: Partial<Record<UtilityRequirementKey, EvidenceTopic>> = {
   account_verification: "accountVerification",
   meter_photo: "meterPhoto",
   inverter_settings: "inverterSettings",
@@ -1115,6 +1117,8 @@ const REQUIREMENT_WORDS: Record<UtilityRequirementKey, RequirementWords> = {
   ac_disconnect: genericWords("AC disconnect"),
   storage_mode_declaration: genericWords("battery operating mode declaration"),
   owner_signature: genericWords("owner signature"),
+  module_spec: genericWords("module spec sheet"),
+  inverter_spec: genericWords("inverter spec sheet"),
 };
 
 /** The item's citation as the finding shows it — only when its row quotes the source (an uncited item
@@ -1157,7 +1161,9 @@ function addUtilityFindings(project: ProjectRecord, findings: ReviewerFinding[],
     const battery = batteryStatus(project.parserSnapshot as Record<string, unknown> | undefined) === "yes";
     for (const item of list.requirements) {
       if (item.key === "storage_mode_declaration" && !battery) continue;
-      const check = evidenceForTopic(project, REQUIREMENT_TOPIC[item.key]);
+      const topic = REQUIREMENT_TOPIC[item.key];
+      if (!topic || !requirementForGate(item, "reviewer")) continue;
+      const check = evidenceForTopic(project, topic);
       if (check.confidence === "high") continue;
       const words = REQUIREMENT_WORDS[item.key];
       const mayBlock = requirementMayBlock(item);
