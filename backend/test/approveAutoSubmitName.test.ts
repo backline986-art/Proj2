@@ -288,6 +288,8 @@ const held = () => {
   return pid;
 };
 const heldFor = { c1: held(), c2: held(), c3: held() };
+// What the approval sheet's ticks send (review-audit draft 01), read before the server owns the DB.
+const c2Acks = fx.acknowledgeAll(heldFor.c2, "building");
 const dbPath = String(process.env.AUTOPILOT_DB_PATH);
 const PORT = 5380 + Math.floor(Math.random() * 15); // never 4173 / 4270
 const BASE = `http://127.0.0.1:${PORT}`;
@@ -342,7 +344,7 @@ try {
 
   await check("(c2) sign-in off: a named autoSubmit mints exactly one approval under that name and the 202 names it", async () => {
     const pid = heldFor.c2;
-    const res = await post(`/api/projects/${pid}/prepare-submission`, { track: "building", autoSubmit: true, approverName: "  Pat Approver " });
+    const res = await post(`/api/projects/${pid}/prepare-submission`, { track: "building", autoSubmit: true, approverName: "  Pat Approver ", acknowledgements: c2Acks });
     const text = await res.text();
     assert.equal(res.status, 202, text);
     const body = JSON.parse(text) as { jobId: string; finalSubmitApproval?: { recorded: boolean; approver: string | null } };

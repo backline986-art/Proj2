@@ -1397,6 +1397,43 @@ export interface ApprovalSheet {
   rows: ApprovalSheetRow[];
   /** Mismatches first, then missing values, then notes. */
   issues: ApprovalSheetIssue[];
+  /** Review-audit draft 01: every open review item of THIS filing (backend/src/approvalReviewItems.ts),
+   *  those to acknowledge first. Approve stays disabled until each `needsAcknowledgement` item is ticked. */
+  openItems: ApprovalSheetOpenItem[];
+  /** The plan set the package ships, which the acknowledgements are bound to (null = none on file). */
+  planSet: ApprovalPlanSetBinding | null;
+}
+
+/** Review-audit draft 01: one open review item of a filing, as the approval sheet lists it. */
+export interface ApprovalSheetOpenItem {
+  /** Unique on the sheet ("finding:<id>", "form:<templateId>", "gate:<checkId>"). */
+  key: string;
+  kind: "reviewer_warning" | "form_mapping" | "gate_warning";
+  /** What an acknowledgement names: the finding id, "form:<templateId>", or the gate check id. */
+  id: string;
+  title: string;
+  /** The AHJ-facing sentence (a finding's cityFeedback) or the check's evidence. */
+  text: string;
+  action: string;
+  /** Arithmetic against the plan's own numbers (reviewerVision.MEASURED_FINDING_IDS). */
+  measured: boolean;
+  /** A measured warning or an unverified form mapping: a named person ticks it before approving. */
+  needsAcknowledgement: boolean;
+  /** What the person read; a changed item is a new one to acknowledge. */
+  contentHash: string;
+}
+
+/** The plan set an acknowledgement covers: its document id and the sha256 of its stored bytes. */
+export interface ApprovalPlanSetBinding {
+  documentId: string;
+  sha256: string;
+}
+
+/** What Approve & auto-submit sends with the approval, and what the approval records (review-audit
+ *  draft 01): the plan set the sheet showed and each acknowledged item's id + content hash. */
+export interface ApprovalAcknowledgements {
+  planSet: ApprovalPlanSetBinding | null;
+  items: Array<{ id: string; contentHash: string }>;
 }
 
 export interface SubmittalTrack {

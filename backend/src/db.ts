@@ -3232,6 +3232,21 @@ const VERSIONED_MIGRATIONS: VersionedMigration[] = [
       addColumnIfMissing(db, "state_permit_rules", "fetched_at", "TEXT NOT NULL DEFAULT ''");
     },
   },
+  {
+    // v71, NOT v67: v67-v70 are held by unmerged work (#679, #673, #688, #699). Until those land,
+    // migrationVersions.test reads this as a gap — red by design (its own header), the merge-order
+    // guard. Renumber to the next free version at merge if the queue changes.
+    version: 71,
+    name: "run_approval_acknowledgements",
+    up: (db) => {
+      // WHAT THE APPROVER ACKNOWLEDGED (review-audit draft 01). Approve & auto-submit records, with the
+      // approval, each measured reviewer warning and unverified form mapping the person ticked on the
+      // approval sheet (its id and content hash) and the shipped plan set's document id + sha256
+      // (approvalReviewItems.ts). The run reads it back at the claim and stops at review when it no
+      // longer covers what needs one. '' = nothing acknowledged (every approval minted before this).
+      addColumnIfMissing(db, "portal_run_approvals", "acknowledgements_json", "TEXT NOT NULL DEFAULT ''");
+    },
+  },
 ];
 
 /** v47 was edited in place while #218 was open (Helm's review at 0116f98a): a DB that ran an earlier
