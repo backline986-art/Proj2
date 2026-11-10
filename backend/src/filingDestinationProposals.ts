@@ -39,7 +39,7 @@
 // ---------------------------------------------------------------------------
 import crypto from "node:crypto";
 import type { AhjProcessProfile, ProjectRecord, SubmittalTrackType } from "../../shared/src/types";
-import { isOfficialSourceHost, quoteText, sourceHostOf } from "../../shared/src/officialSource";
+import { isOfficialSourceHost, quoteText, siteOfHost, sourceHostOf } from "../../shared/src/officialSource";
 import type { AppDb } from "./db";
 import { addAuditLog } from "./audit";
 import { nowIso } from "./time";
@@ -199,6 +199,29 @@ export function candidateSkipReasons(c: Candidate, verifiedAuthorityHosts: reado
   return reasons;
 }
 
+/** Words in an authority's name that say what KIND of body it is, not WHICH one ("City of", "Power"). */
+const GENERIC_NAME_WORDS = new Set(["city", "town", "village", "county", "borough", "township", "of", "the", "and", "department",
+  "power", "light", "electric", "electrical", "energy", "utility", "utilities", "municipal", "public", "district", "cooperative", "coop"]);
+
+/**
+ * A SHARED PLATFORM'S BARE HOST IS NOT A CITY'S PORTAL. A proposed portal off the authority's own site
+ * (a vendor's host) must show WHOSE tenant it is: a path ("/application/<id>", "/SLCREF") or a host
+ * label that names the authority ("<city>.vendor.com"). A bare vendor host that many cities share
+ * ("<region>.vendor.com") says nothing about which city files there, so Confirm is refused and Edit
+ * asks for the city's own link. "" when the address shows its tenant. Pure.
+ */
+export function bareSharedHostProblem(address: string, authorityName: string, sourceUrl: string): string {
+  let u: URL;
+  try { u = new URL(address); } catch { return ""; }
+  const host = u.hostname.toLowerCase();
+  if (siteOfHost(host) === siteOfHost(sourceHostOf(sourceUrl))) return "";
+  if (u.pathname.replace(/\/+$/, "") || u.search) return "";
+  const tokens = str(authorityName).toLowerCase().split(/[^a-z0-9]+/).filter((t) => t.length >= 3 && !GENERIC_NAME_WORDS.has(t));
+  const hostWords = host.replace(/\./g, " ");
+  if (tokens.some((t) => hostWords.includes(t))) return "";
+  return `${host} is a shared platform's address that does not show ${authorityName}'s own tenant (no path, and the host does not name it): use Edit with ${authorityName}'s own link (its registration link or application address)`;
+}
+
 /** Why confirming would be refused now (empty = confirmable). Reads only. */
 function confirmProblems(db: AppDb, authority: FilingAuthority, track: SubmittalTrackType, c: Candidate): string[] {
   const out: string[] = [];
@@ -206,6 +229,7 @@ function confirmProblems(db: AppDb, authority: FilingAuthority, track: Submittal
     const t = authority.kind === "utility" ? "nem" : track;
     if (!trackSafeUrl(t, c.address)) out.push(authority.kind === "utility" ? "this is a permit portal, not a utility's (rule 5)" : "this is a utility interconnection portal, not a permit portal (rule 5)");
     else if (isInformationalPageUrl(c.address)) out.push("this address is an information page, not an application portal");
+    else if (bareSharedHostProblem(c.address, authority.name, c.sourceUrl)) out.push(bareSharedHostProblem(c.address, authority.name, c.sourceUrl));
     else {
       try {
         const entity = portalEntityEvidence(db, { scope: authority.kind === "utility" ? "utility" : "ahj", state: authority.state, name: authority.name });

@@ -311,6 +311,16 @@ await check("(i) Edit needs its page and words, and passes rule 5 like every doo
   assert.equal(views(projC).find((x) => x.category === "permit")!.channelBasis, "verified");
 });
 
+await check("(d) a shared platform's bare host is not confirmable; a tenant path or a host naming the authority is", () => {
+  const page = "https://www.fernhollow-zz.gov/building";
+  assert.match(fdp.bareSharedHostProblem("https://region.sharedpermits.example", AHJ_A, page), /does not show City of Fernhollow's own tenant/);
+  assert.match(fdp.bareSharedHostProblem("https://region.sharedpermits.example/", "Fernhollow City Light & Power", page), /own tenant/);
+  assert.equal(fdp.bareSharedHostProblem("https://region.sharedpermits.example/application/63bf35f1", AHJ_A, page), "");
+  assert.equal(fdp.bareSharedHostProblem("https://fernhollow.zz.sharedpermits.example", AHJ_A, page), "");
+  assert.equal(fdp.bareSharedHostProblem("https://permits.fernhollow-zz.gov", AHJ_A, page), "", "the authority's own site is its own");
+  assert.equal(fdp.bareSharedHostProblem("https://aca-prod.vendor.example/ABCREF", AHJ_A, page), "");
+});
+
 await check("(j) the routes sit under /api/projects/:id, read the project first and name the person before writing", () => {
   const src = fs.readFileSync(path.join(REPO, "backend/src/server.ts"), "utf8");
   for (const [verb, route] of [["get", "/api/projects/:id/filing-destinations"], ["put", "/api/projects/:id/filing-destinations"], ["post", "/api/projects/:id/filing-destinations/reject"], ["delete", "/api/projects/:id/filing-destinations/reject"]]) {
