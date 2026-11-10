@@ -11584,6 +11584,78 @@ function renderStateLicences() {
   if (window.lucide) window.lucide.createIcons();
 }
 
+// ── SERVICE AREA (clientServiceArea.ts): where the company works. A list of { kind, state, name }
+// rows; the save sends the editor's FULL list, and only a list loaded from THIS client (as licences do).
+const SERVICE_AREA_KIND_OPTIONS = [
+  { kind: "city", label: "City / town" },
+  { kind: "county", label: "County" },
+  { kind: "utility", label: "Utility" },
+  { kind: "state", label: "Whole state" },
+];
+
+function serviceAreaFromClient(client) {
+  const list = client && Array.isArray(client.serviceArea) ? client.serviceArea : [];
+  return list.map((e) => ({ kind: String(e.kind || ""), state: String(e.state || ""), name: String(e.name || "") }));
+}
+
+function serviceAreaRowHtml(entry, idx) {
+  const options = SERVICE_AREA_KIND_OPTIONS.map((k) => `<option value="${esc(k.kind)}"${k.kind === entry.kind ? " selected" : ""}>${esc(k.label)}</option>`).join("");
+  const isState = entry.kind === "state";
+  return `<div class="service-area-row" data-sa-row="${idx}">
+      <select data-sa="kind" data-idx="${idx}" aria-label="Kind of place">${entry.kind ? "" : `<option value="" selected>Kind...</option>`}${options}</select>
+      <input data-sa="state" data-idx="${idx}" maxlength="2" placeholder="ST" aria-label="State" value="${esc(entry.state)}" />
+      <input data-sa="name" data-idx="${idx}" placeholder="${isState ? "(the whole state)" : entry.kind === "utility" ? "Utility name" : entry.kind === "county" ? "County name" : "City or town name"}" aria-label="Name" value="${esc(isState ? "" : entry.name)}"${isState ? " disabled" : ""} />
+      <button type="button" class="danger-button" data-remove-sa="${idx}" aria-label="Remove place"><i data-lucide="x"></i><span>Remove</span></button>
+    </div>`;
+}
+
+/** The rows as the API takes them, and what is wrong with a half-filled row (never silently dropped). */
+function serviceAreaPayload(drafts) {
+  const list = [];
+  const errors = [];
+  (drafts || []).forEach((d, i) => {
+    const kind = String(d.kind || "").trim();
+    const st = String(d.state || "").trim().toUpperCase();
+    const name = kind === "state" ? "" : String(d.name || "").trim();
+    if (!kind && !st && !name) return;
+    const isState = st.length === 2 && st.split("").every((c) => c >= "A" && c <= "Z");
+    if (!kind) errors.push(`Service area row ${i + 1}: pick city, county, utility or whole state.`);
+    else if (!isState) errors.push(`Service area row ${i + 1}: the state must be two letters.`);
+    else if (kind !== "state" && !name) errors.push(`Service area row ${i + 1}: name the ${kind}.`);
+    else list.push({ kind, state: st, name });
+  });
+  return { list, errors };
+}
+
+function withServiceArea(payload, drafts, loadedFor, clientId) {
+  if (loadedFor !== clientId) return payload;
+  return { ...payload, serviceArea: serviceAreaPayload(drafts).list };
+}
+
+function renderServiceArea() {
+  const wrap = $("serviceAreaList");
+  if (!wrap) return;
+  const drafts = state.serviceAreaDraft || [];
+  wrap.innerHTML = drafts.length
+    ? drafts.map(serviceAreaRowHtml).join("")
+    : `<p class="muted">No service area yet. Add a row per state, city or county, and utility this company works in.</p>`;
+  wrap.querySelectorAll("[data-sa]").forEach((el) => {
+    el.addEventListener(el.tagName === "SELECT" ? "change" : "input", () => {
+      const row = state.serviceAreaDraft[Number(el.dataset.idx)];
+      if (!row) return;
+      row[el.dataset.sa] = el.value;
+      if (el.dataset.sa === "kind") renderServiceArea();
+    });
+  });
+  wrap.querySelectorAll("[data-remove-sa]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      state.serviceAreaDraft.splice(Number(btn.dataset.removeSa), 1);
+      renderServiceArea();
+    });
+  });
+  if (window.lucide) window.lucide.createIcons();
+}
+
 function clientFormStatus(message, kind) {
   const el = $("clientFormStatus");
   if (!message) { el.hidden = true; el.textContent = ""; return; }
@@ -11689,6 +11761,9 @@ function blankClientForm() {
   state.stateLicencesDraft = [];
   state.stateLicencesLoadedFor = "";
   renderStateLicences();
+  state.serviceAreaDraft = [];
+  state.serviceAreaLoadedFor = "";
+  renderServiceArea();
   clientFormStatus("");
   if ($("clientCredentials")) $("clientCredentials").hidden = true;
   renderClientsList();
@@ -12080,6 +12155,9 @@ function editClient(clientId) {
   state.stateLicencesDraft = stateLicencesFromClient(client);
   state.stateLicencesLoadedFor = clientId;
   renderStateLicences();
+  state.serviceAreaDraft = serviceAreaFromClient(client);
+  state.serviceAreaLoadedFor = clientId;
+  renderServiceArea();
   clientFormStatus("");
   loadClientCredentials(clientId);
   loadClientBilling(clientId);
@@ -12123,7 +12201,8 @@ function renderPortalIdentities() {
 function collectClientPayload() {
   const payload = { portalIdentities: state.portalIdentitiesDraft || [] };
   CLIENT_TEXT_FIELDS.forEach((field) => { payload[field] = $("c_" + field)?.value ?? ""; });
-  return withStateLicences(payload, state.stateLicencesDraft, state.stateLicencesLoadedFor, $("clientId").value || "");
+  const withLicences = withStateLicences(payload, state.stateLicencesDraft, state.stateLicencesLoadedFor, $("clientId").value || "");
+  return withServiceArea(withLicences, state.serviceAreaDraft, state.serviceAreaLoadedFor, $("clientId").value || "");
 }
 
 async function saveClient(event) {
@@ -12136,6 +12215,11 @@ async function saveClient(event) {
   const licenceProblems = "stateLicenses" in payload ? stateLicencesPayload(state.stateLicencesDraft).errors : [];
   if (licenceProblems.length) {
     clientFormStatus(licenceProblems[0], "error");
+    return;
+  }
+  const areaProblems = "serviceArea" in payload ? serviceAreaPayload(state.serviceAreaDraft).errors : [];
+  if (areaProblems.length) {
+    clientFormStatus(areaProblems[0], "error");
     return;
   }
   try {
@@ -12475,6 +12559,11 @@ $("addStateLicenceBtn")?.addEventListener("click", () => {
   state.stateLicencesDraft = state.stateLicencesDraft || [];
   state.stateLicencesDraft.push({ state: "", kind: "", number: "", expires: "", holder: "" });
   renderStateLicences();
+});
+$("addServiceAreaBtn")?.addEventListener("click", () => {
+  state.serviceAreaDraft = state.serviceAreaDraft || [];
+  state.serviceAreaDraft.push({ kind: "city", state: "", name: "" });
+  renderServiceArea();
 });
 $("addPortalIdentityBtn").addEventListener("click", () => {
   state.portalIdentitiesDraft = state.portalIdentitiesDraft || [];

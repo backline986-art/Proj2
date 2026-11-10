@@ -138,6 +138,11 @@ const EXAMPLE_INTAKE = {
     "OREGON's licences and fill only Oregon jobs; an Oregon job also refuses to stage without the CCB",
     "column. A re-run only ADDS licences: one already on file is never removed by this script.",
     "",
+    "SERVICE AREA: client.serviceArea lists where the company works, one entry per place:",
+    "  { \"kind\": \"city\" | \"county\" | \"utility\", \"state\": \"XX\", \"name\": \"...\" } or { \"kind\": \"state\", \"state\": \"XX\" }.",
+    "\"Destinations to confirm\" and the coverage report then list every authority it names that no job",
+    "does yet, so its filing destination can be confirmed before the first job. A re-run only ADDS places.",
+    "",
     "EMAIL INTAKE: client.intakeTag routes jobs mailed to intake+<tag>@ the filings mailbox to this",
     "client; client.intakeSenders lists the other addresses allowed to send them (\"@domain\" allows a",
     "whole domain). The client's own contact, business, updates and billing addresses always count.",
@@ -192,6 +197,15 @@ const EXAMPLE_INTAKE = {
     // a whole domain). Letters, digits, dot, dash and underscore; one client per tag.
     intakeTag: "brightfield",
     intakeSenders: ["@brightfield-solar.invalid"],
+    // WHERE THE COMPANY WORKS: each state, city or county, and utility it files with (kind state / city /
+    // county / utility; a state entry takes no name). Additive: a re-run never removes a place on file
+    // (remove one under Clients -> Service area).
+    serviceArea: [
+      { kind: "state", state: "XX" },
+      { kind: "city", state: "XX", name: "REPLACE-ME" },
+      { kind: "county", state: "XX", name: "REPLACE-ME" },
+      { kind: "utility", state: "XX", name: "REPLACE-ME" },
+    ],
     portalIdentities: [
       { portalType: "XX · <Platform>", installerCompanyLabel: "BRIGHTFIELD SOLAR CO", installerContactCode: "", notes: "" },
     ],
@@ -249,6 +263,7 @@ process.env.AUTOPILOT_DB_PATH = process.env.AUTOPILOT_DB_PATH || "backend/data/a
 
 const { openDatabase, DEFAULT_ORG_ID } = await import("../backend/src/db");
 const { createClient, updateClient, getClient, normalizeIntakeTag, parseStateLicenses, licenceFor, licenceJobState } = await import("../backend/src/clients");
+const { mergeServiceArea, parseServiceArea, serviceAreaProblems } = await import("../backend/src/serviceAreaEntries");
 const { canonicalLicenceKind, licenceKindWords, LICENCE_KINDS } = await import("../shared/src/licenceKinds");
 const { looksLikePlaceholderIdentifier } = await import("../shared/src/companyFacts");
 const { usStateCode } = await import("../backend/src/permitPath");
@@ -483,6 +498,28 @@ arr(clientIn.stateLicenses).forEach((raw, i) => {
     stateLicencesIn.push(entry);
   }
 });
+// SERVICE AREA: the shape of every entry, checked like the licences (a US state; a place that names
+// something). Universal: any state, any city, county or utility — the names are data.
+const serviceAreaIn: Json[] = [];
+if ("serviceArea" in clientIn) {
+  if (!Array.isArray(clientIn.serviceArea)) problems.push("client.serviceArea must be a list of { kind, state, name } entries.");
+  else {
+    const usable: Json[] = [];
+    arr(clientIn.serviceArea).forEach((raw, i) => {
+      const e = obj(raw);
+      const where = `client.serviceArea[${i}]`;
+      const state = usStateCode(str(e.state));
+      if (!state) { problems.push(`${where}.state "${str(e.state)}" is not a US state. Use its two-letter code.`); return; }
+      if (str(e.kind).toLowerCase() !== "state" && placeholderValue(str(e.name))) { problems.push(`${where}.name "${str(e.name)}" is a placeholder. Name the place or remove the entry.`); return; }
+      for (const key of Object.keys(e)) {
+        if (!["kind", "state", "name"].includes(key) && !key.startsWith("_")) warnings.push(`${where}.${key} is not a service-area field — dropped. Known: kind, state, name.`);
+      }
+      usable.push({ kind: str(e.kind).toLowerCase(), state, name: str(e.name) });
+    });
+    for (const p of serviceAreaProblems(usable)) problems.push(`client.${p}`);
+    if (!problems.some((p) => p.startsWith("client.serviceArea"))) serviceAreaIn.push(...parseServiceArea(usable) as unknown as Json[]);
+  }
+}
 if ("intakeTag" in clientIn) {
   try {
     normalizeIntakeTag(clientIn.intakeTag);
@@ -500,7 +537,7 @@ for (const sender of intakeSendersIn.split(/[\s,;]+/).filter(Boolean)) {
   }
 }
 for (const key of Object.keys(clientIn)) {
-  if (key === "id" || key === "portalIdentities" || key === "stateLicenses" || key.startsWith("_")) continue;
+  if (key === "id" || key === "portalIdentities" || key === "stateLicenses" || key === "serviceArea" || key.startsWith("_")) continue;
   if (key === "logoBase64" || key === "logoMime") {
     warnings.push(`client.${key} cannot be set by any code path today (not in FIELD_COLUMNS; the logo routes UPDATE a clients.updated_at column that does not exist). Ignored.`);
     continue;
@@ -920,6 +957,18 @@ try {
     }
   }
 
+  // --- SERVICE AREA ---------------------------------------------------------
+  // ADDITIVE, like the licences: the intake's places are added to what is on file; nothing is removed.
+  const storedArea = clientId ? parseServiceArea((getClient(db, clientId) as unknown as Json).serviceArea) : [];
+  const mergedArea = mergeServiceArea(storedArea, serviceAreaIn);
+  if (serviceAreaIn.length && mergedArea.length !== storedArea.length) {
+    clientPayload.serviceArea = mergedArea;
+    if (clientId) {
+      clientChanged.push("serviceArea");
+      clientVerdict = "update";
+    }
+  }
+
   // INTAKE TAG: one client per tag inside an org (clients.assertIntakeTagFree). Checked here so a
   // clash is an intake problem (exit 1, nothing written), not a 400 thrown mid-transaction.
   const tagWanted = str(clientPayload.intakeTag);
@@ -1207,6 +1256,7 @@ try {
     line(`  licence ${p.state.padEnd(19)}${p.contractor ? `contractor slot: ${p.contractor}` : "contractor slot: NONE"}${p.others.length ? `   on file: ${p.others.join(", ")}` : ""}`);
   }
   if ("stateLicenses" in clientPayload) line(`  state licences             ${stateLicencesIn.length} in intake, ${parseStateLicenses(clientPayload.stateLicenses).length} after merge (never removes one on file)`);
+  if (serviceAreaIn.length) line(`  service area               ${serviceAreaIn.length} place(s) in intake, ${mergedArea.length} after merge (never removes one on file)`);
   if (tagWanted) line(`  intake tag                 ${tagWanted}   senders ${intakeSendersIn ? intakeSendersIn.split(/[\s,;]+/).filter(Boolean).length : 0} listed`);
   line(`  ein                        ${secretState(str(clientIn.ein))}`);
   if (clientChanged.length) line(`  fields to update           ${clientChanged.join(", ")}`);

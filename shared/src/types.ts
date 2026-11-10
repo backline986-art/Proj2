@@ -283,7 +283,21 @@ export interface ClientRecord {
   /** A PARTNER contractor this client files through, per portal and/or AHJ (Iowa City: the plan
    *  set is the solar company's, the permit's "Contractor (Electrical)" is a local licensed EC). */
   partnerContacts?: ClientPartnerContact[];
+  /** WHERE THIS COMPANY WORKS: the states, the cities or counties and the utilities it files with
+   *  (backend/src/clientServiceArea.ts). CLIENT DATA: it lives on this client's row (org-scoped, rule 6),
+   *  never in a shared knowledge table and never in a prompt. It names authorities so their filing
+   *  destinations can be confirmed before the first job; it decides nothing about any job. */
+  serviceArea?: ClientServiceAreaEntry[];
   createdAt: string;
+}
+
+/** One place a client works. `state` is the two-letter code; `name` is the city, county or utility as
+ *  staff typed it ("" for a whole-state entry). The authority it names is resolved on read through the
+ *  existing name matching, inside that state only. */
+export interface ClientServiceAreaEntry {
+  kind: "state" | "city" | "county" | "utility";
+  state: string;
+  name: string;
 }
 
 export interface ClientStateLicense {

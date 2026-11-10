@@ -57,6 +57,7 @@ import { assertOperatorPortalUrlFits, portalEntityEvidence } from "./portalRecip
 import { saveVerifiedAhjProfile, saveVerifiedUtilityProfile } from "./knowledgeBase";
 import { mapProject } from "./repository";
 import { handCheckPages, handCheckPagesFor, type HandCheckPage } from "./handCheckPages";
+import { serviceAreaAuthorities, type ClientServiceAreaEntry, type ServiceAreaAuthority } from "./clientServiceArea";
 
 const str = (v: unknown): string => (typeof v === "string" ? v.trim() : v == null ? "" : String(v).trim());
 
@@ -529,7 +530,16 @@ export function withdrawDestinationRejection(
 // Universal: no state, city, utility or portal is named; hand-check pages are per-authority DATA.
 
 export interface QueueAct { projectId: string; track: SubmittalTrackType }
-export interface QueueProposal extends DestinationProposal { act: QueueAct }
+/** A proposal in the queue. `act` = the open job and track whose card shows it; absent on an
+ *  authority only the client's service area names (no job yet). */
+export interface QueueProposal extends DestinationProposal { act?: QueueAct }
+/** An authority listed because the client's SERVICE AREA names it and none of its open jobs does. */
+export interface QueueServiceArea {
+  entry: ClientServiceAreaEntry;
+  entryKey: string;
+  /** Where the listed name came from (a name on file in that state, or the entry as typed). */
+  matchedFrom: ServiceAreaAuthority["matchedFrom"];
+}
 export interface QueueAuthority {
   authority: AuthorityDestinations["authority"];
   /** Every outstanding track type, across the client's open jobs, that files with this authority. */
@@ -537,18 +547,62 @@ export interface QueueAuthority {
   /** proposed: at least one proposal to Confirm or Edit; none: nothing on file to propose (Edit on a job). */
   status: "proposed" | "none";
   proposals: QueueProposal[];
-  rejected: Array<AuthorityDestinations["rejected"][number] & { act: QueueAct }>;
+  rejected: Array<AuthorityDestinations["rejected"][number] & { act?: QueueAct }>;
   skipped: string[];
-  /** The open jobs that wait on this authority. */
+  /** The open jobs that wait on this authority ([] for a service-area authority). */
   jobs: Array<{ projectId: string; label: string; tracks: SubmittalTrackType[] }>;
-  /** The first such job and track: where a person opens the track card to state a destination by hand. */
-  open: QueueAct;
+  /** The first such job and track: where a person opens the track card to state a destination by hand.
+   *  null for a service-area authority (no job names it yet). */
+  open: QueueAct | null;
+  /** Present when the client's service area names this authority and no open job of the client does. */
+  serviceArea?: QueueServiceArea;
   /** Pages that refused an automated read for this authority (data): a person checks them by hand. */
   handCheck: HandCheckPage[];
 }
 export interface DestinationQueue {
   clients: Array<{ clientId: string; clientName: string; authorities: QueueAuthority[] }>;
-  counts: { jobs: number; authorities: number; oneClick: number; editOnly: number; noProposal: number; handCheck: number; alreadyVerified: number };
+  counts: { jobs: number; authorities: number; oneClick: number; editOnly: number; noProposal: number; handCheck: number; alreadyVerified: number; serviceArea: number };
+}
+
+// ── A CLIENT'S SERVICE AREA IN THE QUEUE (clientServiceArea.ts) ────────────────────────────────────
+// An authority the client's area names is read exactly as a job's: through filingDestinationsFor on an
+// IN-MEMORY job that carries only the client, the state and the one authority the entry resolved to
+// (a city's AHJ, or a utility). The job is never stored (nothing here writes) and names nothing else,
+// so its tracks resolve only to that authority (or the per-track issuer that authority's own data
+// names, as on a real job — permitProcess.projectForTrack).
+const AREA_JOB_ID_PREFIX = "service-area:";
+const areaJobs = new WeakSet<object>();
+
+/** The in-memory job for one service-area authority. Reads nothing; stores nothing. */
+export function serviceAreaJob(client: { id: string }, a: ServiceAreaAuthority): ProjectRecord {
+  const now = nowIso();
+  const job = mapProject({
+    id: `${AREA_JOB_ID_PREFIX}${client.id}:${a.entryKey}`,
+    client_id: client.id,
+    homeowner_name: "", project_address: "", city: a.kind === "ahj" && a.entry.kind === "city" ? a.entry.name : "",
+    state: a.state, zip: "", ahj: a.kind === "ahj" ? a.name : "", utility: a.kind === "utility" ? a.name : "",
+    account_number: "", meter_number: "", system_size_dc_kw: null, system_size_ac_kw: null, total_export_kw: null,
+    interconnection_method: "", status: "intake", current_stage: "intake", parser_confidence_summary: "", parser_json: "{}",
+    assigned_user_id: null, created_at: now, updated_at: now, archived_at: "",
+  } as never);
+  areaJobs.add(job);
+  return job;
+}
+
+/** Is this one of serviceAreaJob's in-memory jobs (never a stored project)? */
+export function isServiceAreaJob(project: ProjectRecord): boolean {
+  return areaJobs.has(project) && project.id.startsWith(AREA_JOB_ID_PREFIX);
+}
+
+/** The clients of the org that have a service area on file; `null` reads every org. Reads only. */
+function clientsWithServiceArea(db: AppDb, orgId: string | null): Array<{ id: string; name: string }> {
+  const scope = orgId ? " AND org_id = ?" : "";
+  try {
+    return db.query<{ id: string; company_name: string; legal_business_name?: string }>(
+      `SELECT id, company_name, legal_business_name FROM clients WHERE COALESCE(service_area_json, '[]') NOT IN ('', '[]')${scope} ORDER BY company_name, id`,
+      orgId ? [orgId] : [],
+    ).map((r) => ({ id: str(r.id), name: str(r.company_name) || str(r.legal_business_name) || str(r.id) }));
+  } catch { return []; }
 }
 
 /** The org's open jobs (not archived), newest last; `null` reads every org (superadmin), like every
@@ -608,15 +662,51 @@ export function filingDestinationQueue(
       c.authorities.set(key, a);
     }
   }
-  const counts = { jobs, authorities: 0, oneClick: 0, editOnly: 0, noProposal: 0, handCheck: 0, alreadyVerified: 0 };
+  // THE SERVICE AREA: every authority a client's area names that none of ITS open jobs names yet,
+  // marked "service area". Read through the same filingDestinationsFor, on an in-memory job.
+  for (const client of clientsWithServiceArea(db, orgId)) {
+    let area: ServiceAreaAuthority[];
+    try { area = serviceAreaAuthorities(db, client.id); } catch { continue; }
+    for (const sa of area) {
+      const job = serviceAreaJob(client, sa);
+      let views;
+      try { views = readTracks(job).filter((t) => t.outstanding !== false); } catch { continue; }
+      let groups: AuthorityDestinations[];
+      try { groups = filingDestinationsFor(db, job, views); } catch { continue; }
+      const c = byClient.get(client.id) ?? { clientId: client.id, clientName: client.name, authorities: new Map<string, QueueAuthority>() };
+      byClient.set(client.id, c);
+      for (const g of groups) {
+        // Only the authority the entry names (its per-track issuer included, as on a real job).
+        if (g.authority.kind !== sa.kind) continue;
+        const key = `${g.authority.kind}|${g.authority.profileKey}`;
+        if (g.status === "verified") { verifiedKeys.add(key); continue; }
+        const existing = c.authorities.get(key);
+        if (existing) {
+          // Already listed for this client: by one of its jobs (that listing wins), or by another entry.
+          for (const t of g.tracks) if (!existing.tracks.includes(t)) existing.tracks.push(t);
+          continue;
+        }
+        c.authorities.set(key, {
+          authority: g.authority, tracks: [...g.tracks], status: g.proposals.length ? "proposed" : "none",
+          proposals: g.proposals.map((p) => ({ ...p })), rejected: g.rejected.map((r) => ({ ...r })), skipped: [...g.skipped],
+          jobs: [], open: null,
+          handCheck: handCheckPagesFor(g.authority.kind, g.authority.state, g.authority.name, pages),
+          serviceArea: { entry: sa.entry, entryKey: sa.entryKey, matchedFrom: sa.matchedFrom },
+        });
+      }
+    }
+  }
+  const counts = { jobs, authorities: 0, oneClick: 0, editOnly: 0, noProposal: 0, handCheck: 0, alreadyVerified: 0, serviceArea: 0 };
   const clients: DestinationQueue["clients"] = [];
   const counted = new Set<string>();
+  const jobKeys = new Set<string>();
   for (const c of [...byClient.values()].sort((x, y) => x.clientName.localeCompare(y.clientName))) {
     // A verified read on ANY job means a person's record names the door: not waiting.
     const authorities = [...c.authorities.entries()].filter(([k]) => !verifiedKeys.has(k)).map(([, a]) => a)
       .sort((x, y) => x.authority.kind.localeCompare(y.authority.kind) || x.authority.state.localeCompare(y.authority.state) || x.authority.name.localeCompare(y.authority.name));
     for (const a of authorities) {
       const k = `${a.authority.kind}|${a.authority.profileKey}`;
+      if (!a.serviceArea) jobKeys.add(k);
       if (counted.has(k)) continue; // shared across clients: counted once
       counted.add(k);
       counts.authorities++;
@@ -628,5 +718,7 @@ export function filingDestinationQueue(
     if (authorities.length) clients.push({ clientId: c.clientId, clientName: c.clientName, authorities });
   }
   counts.alreadyVerified = verifiedKeys.size;
+  // Waiting ONLY because a service area names it: no open job of any client listed here names it.
+  counts.serviceArea = [...counted].filter((k) => !jobKeys.has(k)).length;
   return { clients, counts };
 }

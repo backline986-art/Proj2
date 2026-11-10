@@ -946,6 +946,9 @@ tbody tr:hover, tbody tr.active { background: var(--tint-select); }
 .state-licence-row { display: grid; grid-template-columns: 56px minmax(0, 1.4fr) minmax(0, 1fr) minmax(0, 1fr) minmax(0, 1fr) auto; gap: 6px; align-items: center; margin-bottom: 6px; }
 .state-licence-row input, .state-licence-row select { min-width: 0; width: 100%; }
 .state-licence-row .danger-button { padding: 6px 8px; }
+.service-area-row { display: grid; grid-template-columns: minmax(0, 1fr) 56px minmax(0, 2fr) auto; gap: 6px; align-items: center; margin-bottom: 6px; }
+.service-area-row input, .service-area-row select { min-width: 0; width: 100%; }
+.service-area-row .danger-button { padding: 6px 8px; }
 
 /* --- Clients & Contractor Licensing: list column + selected-client editor -----------------
    Scoped to .clients-modal-body; the Customers and Users modals share .modal-body /
@@ -1046,6 +1049,9 @@ tbody tr:hover, tbody tr.active { background: var(--tint-select); }
   .clients-modal-body .portal-identity-row .danger-button { justify-self: end; }
   .clients-modal-body .state-licence-row { grid-template-columns: 56px minmax(0, 1fr); }
   .clients-modal-body .state-licence-row .danger-button { justify-self: end; grid-column: 2; }
+  .clients-modal-body .service-area-row { grid-template-columns: minmax(0, 1fr) 56px; }
+  .clients-modal-body .service-area-row input[data-sa="name"] { grid-column: 1 / -1; }
+  .clients-modal-body .service-area-row .danger-button { justify-self: end; grid-column: 2; }
 }
 @media (min-width: 721px) and (max-width: 1180px) {
   .clients-modal-body .state-licence-row { grid-template-columns: 56px minmax(0, 1fr) minmax(0, 1fr) auto; }

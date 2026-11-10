@@ -59,6 +59,11 @@
     return `data-fd-track="${esc(track)}"${act ? ` data-fd-project="${esc(act.projectId)}"` : ''}`;
   }
 
+  /** A service-area authority whose proposal carries no route to act on: shown, not actionable here. */
+  function noActionHere(d, p) {
+    return Boolean(d && d.serviceArea && !(p && (p.act || p.areaAct)));
+  }
+
   function proposalHtml(d, p) {
     const link = httpUrl(p.sourceUrl);
     const source = link
@@ -78,26 +83,26 @@
   <blockquote class="fd-quote">${esc(p.quote)}</blockquote>
   ${names}
   ${problems}
-  <div class="fd-actions">
+  ${noActionHere(d, p) ? `<p class="muted" data-fd-area-noact>No job names ${esc(d.authority.name)} yet: Confirm, Edit and Reject open on the first job's track card.</p>` : `<div class="fd-actions">
     <button type="button" class="btn btn-primary" data-fd-confirm ${attrs}${disabled}>Confirm (I checked the page)</button>
     <button type="button" class="btn" data-fd-edit ${attrs}>Edit</button>
     <button type="button" class="btn" data-fd-reject ${attrs}>Reject</button>
-  </div>
-  <div class="fd-edit" data-fd-edit-slot="${esc(p.id)}" hidden>
+  </div>`}
+  ${noActionHere(d, p) ? '' : `<div class="fd-edit" data-fd-edit-slot="${esc(p.id)}" hidden>
     <label>Address <input type="text" data-fd-field="address" value="${esc(p.address)}"${p.kind === 'with_permit' ? ' disabled' : ''}></label>
     <label>Page you read it on <input type="url" data-fd-field="sourceUrl" value="${esc(p.sourceUrl)}"></label>
     <label>The page's words <textarea data-fd-field="quote" rows="3">${esc(p.quote)}</textarea></label>
     <input type="hidden" data-fd-field="kind" value="${esc(p.kind)}">
     <input type="hidden" data-fd-field="name" value="${esc(p.name || '')}">
     <button type="button" class="btn btn-primary" data-fd-save ${attrs}>Save as confirmed by me</button>
-  </div>
+  </div>`}
 </div>`;
   }
 
   function rejectedHtml(d) {
     if (!(d.rejected || []).length) return '';
     return `<details class="fd-rejected"><summary>${esc(d.rejected.length)} rejected proposal(s)</summary><ul>${d.rejected.map((r) =>
-      `<li><code>${esc(r.address || r.kind)}</code>, rejected by ${esc(r.rejectedBy)} on ${esc(day(r.rejectedAt))}${r.reason ? `: ${esc(r.reason)}` : ''} <button type="button" class="btn btn-link" data-fd-unreject ${actAttrs(d, r)} data-fd-id="${esc(r.id)}">Offer again</button></li>`).join('')}</ul></details>`;
+      `<li><code>${esc(r.address || r.kind)}</code>, rejected by ${esc(r.rejectedBy)} on ${esc(day(r.rejectedAt))}${r.reason ? `: ${esc(r.reason)}` : ''}${noActionHere(d, r) ? '' : ` <button type="button" class="btn btn-link" data-fd-unreject ${actAttrs(d, r)} data-fd-id="${esc(r.id)}">Offer again</button>`}</li>`).join('')}</ul></details>`;
   }
 
   function skippedHtml(d) {
@@ -167,9 +172,16 @@
     const jobs = a.jobs || [];
     const shown = jobs.slice(0, 5).map(jobLink).join(', ') + (jobs.length > 5 ? ` and ${esc(jobs.length - 5)} more` : '');
     const proposals = (a.proposals || []).map((p) => proposalHtml(a, p)).join('');
-    const none = proposals ? '' : `<p class="warn" data-fd-none>Nothing on file to propose. Open ${jobs[0] ? jobLink(jobs[0]) : 'the job'} and state where ${esc(a.authority.name)} takes this filing on its track card.</p>`;
+    const area = a.serviceArea || null;
+    const none = proposals ? ''
+      : area ? `<p class="warn" data-fd-none>Nothing on file to propose. No job names ${esc(a.authority.name)} yet: state where it takes filings on the first job's track card.</p>`
+      : `<p class="warn" data-fd-none>Nothing on file to propose. Open ${jobs[0] ? jobLink(jobs[0]) : 'the job'} and state where ${esc(a.authority.name)} takes this filing on its track card.</p>`;
+    const typed = area && area.entry ? `${str(area.entry.name)}, ${str(area.entry.state)}` : '';
+    const where = area
+      ? `<span class="badge" data-fd-service-area>Service area</span> <span class="muted">${esc((a.tracks || []).join(', '))} · no open job yet${area.matchedFrom === 'typed' ? ` · as typed (${esc(typed)}): no record on file matches it yet` : ` · from the service area entry "${esc(typed)}"`}</span>`
+      : `<span class="muted">${esc((a.tracks || []).join(', '))} · waiting: ${shown}</span>`;
     return `<div class="fd-block fd-queue-authority" data-fd-authority="${esc(a.authority.profileKey)}" data-fd-kind="${esc(a.authority.kind)}">
-  <div class="fd-head"><strong>${esc(a.authority.name)}</strong> <span class="badge">${esc(kind)}${a.authority.state ? `, ${esc(a.authority.state)}` : ''}</span> <span class="muted">${esc((a.tracks || []).join(', '))} · waiting: ${shown}</span></div>
+  <div class="fd-head"><strong>${esc(a.authority.name)}</strong> <span class="badge">${esc(kind)}${a.authority.state ? `, ${esc(a.authority.state)}` : ''}</span> ${where}</div>
   ${handCheckHtml(a)}
   ${proposals}${none}
   ${rejectedHtml(a)}${skippedHtml(a)}
@@ -182,9 +194,9 @@
     const c = (q && q.counts) || {};
     const lede = `<p class="fd-queue-lede">Each Confirm is one named person's click on one authority, recorded under your name. Nothing is filed or sent by these clicks. An authority is shared: confirming it here confirms it for every job that files there.</p>`;
     if (!clients.length) {
-      return `${lede}<p class="muted" data-fd-queue-empty>Every authority your open jobs file with has a person-verified destination${c.alreadyVerified ? ` (${esc(c.alreadyVerified)} verified)` : ''}.</p>`;
+      return `${lede}<p class="muted" data-fd-queue-empty>Every authority your open jobs and your clients' service areas name has a person-verified destination${c.alreadyVerified ? ` (${esc(c.alreadyVerified)} verified)` : ''}.</p>`;
     }
-    const summary = `<p class="fd-queue-summary" data-fd-queue-summary><strong>${esc(c.authorities || 0)}</strong> ${(c.authorities || 0) === 1 ? 'authority waits' : 'authorities wait'} on a person: ${esc(c.oneClick || 0)} one-click, ${esc(c.editOnly || 0)} need Edit, ${esc(c.noProposal || 0)} with nothing to propose${c.handCheck ? `, ${esc(c.handCheck)} with pages to check by hand` : ''}. ${esc(c.alreadyVerified || 0)} already verified.</p>`;
+    const summary = `<p class="fd-queue-summary" data-fd-queue-summary><strong>${esc(c.authorities || 0)}</strong> ${(c.authorities || 0) === 1 ? 'authority waits' : 'authorities wait'} on a person: ${esc(c.oneClick || 0)} one-click, ${esc(c.editOnly || 0)} need Edit, ${esc(c.noProposal || 0)} with nothing to propose${c.handCheck ? `, ${esc(c.handCheck)} with pages to check by hand` : ''}${c.serviceArea ? `; ${esc(c.serviceArea)} only in a service area, with no job yet` : ''}. ${esc(c.alreadyVerified || 0)} already verified.</p>`;
     return lede + summary + clients.map((cl) =>
       `<section class="fd-queue-client" data-fd-client="${esc(cl.clientId)}"><h3>${esc(cl.clientName)} <span class="muted">(${esc((cl.authorities || []).length)})</span></h3>${(cl.authorities || []).map(queueAuthorityHtml).join('')}</section>`).join('');
   }

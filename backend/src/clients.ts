@@ -15,6 +15,7 @@ import { text as s } from "./json";
 import { addAuditLog } from "./audit";
 import { deleteCustomer } from "./crm";
 import { filingContactEmailSetting } from "./filingContact";
+import { parseServiceArea, serviceAreaProblems } from "./serviceAreaEntries";
 
 type Row = Record<string, unknown>;
 
@@ -83,6 +84,7 @@ function mapClient(row: Row, identities: ClientPortalIdentity[]): ClientRecord {
     portalIdentities: identities,
     stateLicenses: parseStateLicenses(row.state_licenses_json),
     partnerContacts: parsePartnerContacts(row.partner_contacts_json),
+    serviceArea: parseServiceArea(row.service_area_json),
     createdAt: s(row.created_at),
   };
 }
@@ -623,6 +625,7 @@ function replaceIdentities(db: AppDb, clientId: string, identities: PortalIdenti
 export function createClient(db: AppDb, payload: Record<string, unknown>, orgId: string = DEFAULT_ORG_ID): ClientRecord {
   const companyName = s(payload.companyName).trim() || s(payload.legalBusinessName).trim();
   if (!companyName) throw new HttpError(400, "companyName (or legalBusinessName) is required.");
+  assertServiceAreaWritable(payload);
 
   const clientId = id();
   const columns = ["id", "created_at", "org_id", ...FIELD_COLUMNS.map(([, col]) => col)];
@@ -641,6 +644,7 @@ export function createClient(db: AppDb, payload: Record<string, unknown>, orgId:
 export function updateClient(db: AppDb, clientId: string, payload: Record<string, unknown>): ClientRecord {
   const existing = db.get<Row>("SELECT id, org_id FROM clients WHERE id = ?", [clientId]);
   if (!existing) throw new HttpError(404, "Client not found.");
+  assertServiceAreaWritable(payload);
   if ("intakeTag" in payload) assertIntakeTagFree(db, s(existing.org_id) || DEFAULT_ORG_ID, normalizeIntakeTag(payload.intakeTag), clientId);
 
   // Only update fields present in the payload (partial update supported).
@@ -695,8 +699,18 @@ export function mergeStateLicenceSave(storedRaw: unknown, incoming: unknown): Re
   return [...out, ...invisible];
 }
 
-/** stateLicenses / partnerContacts: written only when present in the payload (partial update). */
+/** A service area that cannot be stored is refused with every reason, before anything is written:
+ *  an entry that names nothing must not be kept and then silently ignored. */
+function assertServiceAreaWritable(payload: Record<string, unknown>): void {
+  if (!("serviceArea" in payload)) return;
+  const problems = serviceAreaProblems(payload.serviceArea);
+  if (problems.length) throw new HttpError(400, `Service area not saved: ${problems.join(" ")}`);
+}
+
+/** stateLicenses / partnerContacts / serviceArea: written only when present in the payload (partial
+ *  update). serviceArea is the editor's FULL list (the client screen sends what it loaded and edited). */
 function writeLicenceAndPartnerJson(db: AppDb, clientId: string, payload: Record<string, unknown>): void {
+  if ("serviceArea" in payload) db.run("UPDATE clients SET service_area_json = ? WHERE id = ?", [JSON.stringify(parseServiceArea(payload.serviceArea ?? [])), clientId]);
   if ("stateLicenses" in payload) {
     const stored = db.get<Row>("SELECT state_licenses_json FROM clients WHERE id = ?", [clientId])?.state_licenses_json;
     db.run("UPDATE clients SET state_licenses_json = ? WHERE id = ?", [JSON.stringify(mergeStateLicenceSave(stored, payload.stateLicenses)), clientId]);

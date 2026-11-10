@@ -3598,6 +3598,18 @@ const VERSIONED_MIGRATIONS: VersionedMigration[] = [
       db.exec("CREATE INDEX IF NOT EXISTS idx_filing_destination_rejections_authority ON filing_destination_rejections (authority_kind, profile_key)");
     },
   },
+  {
+    // v80 (client service area): the next free number on offline staging 1472b867 (v79 = filing-
+    // destination rejections). Helm renumbers at merge if the queue changes — nothing depends on it.
+    version: 80,
+    name: "client_service_area",
+    up: (db) => {
+      // WHERE A CLIENT WORKS (clientServiceArea.ts): a JSON list of { kind, state, name } entries, kind
+      // state / city / county / utility. CLIENT DATA on the client's own row (org-scoped through
+      // clients.org_id, rule 6) — never a shared knowledge table, never a prompt. '[]' = none on file.
+      addColumnIfMissing(db, "clients", "service_area_json", "TEXT NOT NULL DEFAULT '[]'");
+    },
+  },
 ];
 
 /** v47 was edited in place while #218 was open (Helm's review at 0116f98a): a DB that ran an earlier
