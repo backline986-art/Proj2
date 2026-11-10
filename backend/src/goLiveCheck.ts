@@ -443,7 +443,8 @@ async function dataLines(env: Env, db: AppDb | null, orgId: string | null, opts:
     meaning: have === want ? `Up to date (v${have}).`
       : have < want ? `v${have}, this build expects v${want}: start the server once and it upgrades (take a backup first).`
         : `v${have}, newer than this build's v${want}: this code is older than the database. Deploy the newer build.`,
-    settings: settings(env, "AUTOPILOT_DB_PATH", "AUTOPILOT_STATE_DIR"),
+    // AUTOPILOT_ALLOW_OLDER_BUILD=1 is the boot guard's override (db.ts): shown here so a person sees it is set.
+    settings: settings(env, "AUTOPILOT_DB_PATH", "AUTOPILOT_STATE_DIR", "AUTOPILOT_ALLOW_OLDER_BUILD"),
   });
 
   // The job worker.
@@ -618,7 +619,7 @@ export function goLiveKnownSettings(): Set<string> {
   const env: Env = {};
   for (const l of [...filingLines(env, false), ...clientLines(env), ...accessLines(env, false), ...lookupLines(env), ...integrationLines(env),
     browserLine(env, null), ...backupLines(env, 0), ...testOnlyLines(env)]) for (const s of l.settings) names.add(s.name);
-  for (const n of ["BACKGROUND_WORKERS", "JOB_CONCURRENCY", "JOB_WORKER_INTERVAL_MS", "JOB_MAX_RUNTIME_MS", "MAX_JOBS_PER_TICK", "MONITOR_INTERVAL_MINUTES", "AUTOPILOT_DB_PATH", "AUTOPILOT_STATE_DIR"]) names.add(n);
+  for (const n of ["BACKGROUND_WORKERS", "JOB_CONCURRENCY", "JOB_WORKER_INTERVAL_MS", "JOB_MAX_RUNTIME_MS", "MAX_JOBS_PER_TICK", "MONITOR_INTERVAL_MINUTES", "AUTOPILOT_DB_PATH", "AUTOPILOT_STATE_DIR", "AUTOPILOT_ALLOW_OLDER_BUILD"]) names.add(n);
   return names;
 }
 
