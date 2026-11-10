@@ -4,6 +4,7 @@ import { sizesDisagree } from "./sizesAgree";
 import type { EffectiveCodeContext } from "./codeProfiles";
 import { FIRE_PATHWAY_PATTERNS, packageShowsSld } from "./projectEvidence";
 import { evaluateElectricalSizingFindings } from "./electricalSizing";
+import { evaluateEeroFindings, evaluatePolicyFindings, readFireAccessFacts } from "./fireAccess";
 import { evaluateWireTableFindings } from "./wireTableArithmetic";
 import { evaluateAmendmentFindings } from "./amendmentChecks";
 import { evaluateEssFindings } from "./essReview";
@@ -1044,8 +1045,19 @@ export function evaluateDesignCodeFindings(
   // MEASURED FIRST (issue #142): the plan's stated pathway widths and ridge setback against the
   // jurisdiction's fireSetbacks, else the adopted edition's model-code default. The word list
   // below is now only the fallback, for a plan with no pathway text AND no readable dimension.
-  const fire = ctx ? evaluateFirePathwayFindings(project, ctx, { roofMounted, extraTexts: documentTexts }) : { findings: [], measured: false };
+  //
+  // WHAT THE REQUIREMENT READS (review-audit draft 08, fireAccess.ts): the roof coverage (33% / 66%
+  // sprinklered → 18 or 36 in from the ridge; not stated → 36 in, said), a stated sprinkler system,
+  // and the jurisdiction's alternative pathway policy where it is applied (verified with its page, or
+  // official). Then the emergency escape and rescue openings (R324.6), and a policy on file that is
+  // not applied, shown for a person to verify.
+  const fireFacts = ctx && roofMounted ? readFireAccessFacts(project, ctx, documentTexts) : null;
+  const fire = ctx ? evaluateFirePathwayFindings(project, ctx, { roofMounted, extraTexts: documentTexts, facts: fireFacts }) : { findings: [], measured: false };
   out.push(...fire.findings);
+  if (ctx && roofMounted && fireFacts) {
+    out.push(...evaluateEeroFindings(project, ctx, documentTexts));
+    out.push(...evaluatePolicyFindings(ctx, fireFacts));
+  }
   if (roofMounted && !fire.measured && !hasAny(all, FIRE_PATHWAY_PATTERNS)) {
     out.push(finding({
       id: "city.fire.pathways-missing",

@@ -1342,9 +1342,9 @@
         "severity": "callout",
         "category": "plan_set",
         "title": "Fire pathway width and ridge setback not dimensioned in the plan text — not measured",
-        "message": "No fire access pathway width or ridge setback could be read from the package text, so neither has been measured against fire access pathway width at least 36 in (IRC 2021 R324.6.1 model-code default; no City of Sample Falls pathway width on file); array setback from the ridge at least 18 in (IRC 2021 R324.6.2 / IFC 605.11.3.2.3 model-code default (18 in each side of a horizontal ridge where the array covers no more than 33% of the roof; 36 in where it covers more, which is not read here); no City of Sample Falls ridge setback on file). The package text does not mention fire access pathways at all.",
-        "cityFeedback": "Dimension the fire access pathways and the ridge setback on the roof plan; City of Sample Falls reviews them against 36 in / 18 in.",
-        "designTeamAction": "Confirm the roof plan dimensions each fire access pathway (at least 36 in) and the ridge setback (at least 18 in).",
+        "message": "No fire access pathway width or ridge setback could be read from the package text, so neither has been measured against fire access pathway width at least 36 in (IRC 2021 R324.6.1 model-code default; no City of Sample Falls pathway width on file); array setback from the ridge at least 36 in (IRC 2021 R324.6.2 / IFC 605.11.3.2.3 model-code default (18 in each side of a horizontal ridge where the array covers no more than 33% of the roof, 66% on a sprinklered dwelling; 36 in where it covers more): roof coverage not stated on the plan, so the stricter 36 in applies; no City of Sample Falls ridge setback on file). The package text does not mention fire access pathways at all.",
+        "cityFeedback": "Dimension the fire access pathways and the ridge setback on the roof plan; City of Sample Falls reviews them against 36 in / 36 in.",
+        "designTeamAction": "Confirm the roof plan dimensions each fire access pathway (at least 36 in) and the ridge setback (at least 36 in).",
         "evidenceNeeded": [
           "Dimensioned fire access pathways on the roof plan",
           "Dimensioned ridge setback on the roof plan"
@@ -1384,10 +1384,47 @@
           },
           {
             "kind": "ridgeSetback",
-            "inches": 18,
+            "inches": 36,
             "basis": "model_code",
             "verified": false,
-            "source": "IRC 2021 R324.6.2 / IFC 605.11.3.2.3 model-code default (18 in each side of a horizontal ridge where the array covers no more than 33% of the roof; 36 in where it covers more, which is not read here); no City of Sample Falls ridge setback on file"
+            "source": "IRC 2021 R324.6.2 / IFC 605.11.3.2.3 model-code default (18 in each side of a horizontal ridge where the array covers no more than 33% of the roof, 66% on a sprinklered dwelling; 36 in where it covers more): roof coverage not stated on the plan, so the stricter 36 in applies; no City of Sample Falls ridge setback on file"
+          }
+        ]
+      },
+      {
+        "id": "city.fire.eero-unconfirmed",
+        "severity": "callout",
+        "category": "plan_set",
+        "title": "Emergency escape and rescue openings not addressed on the roof plan",
+        "message": "The package text does not mention emergency escape and rescue openings (EEROs). The model code (R324.6) keeps modules off the roof below an EERO and asks for a 36 in pathway to it; confirm the roof plan does.",
+        "cityFeedback": "Show any emergency escape and rescue openings on the roof plan, keep modules off the roof below them, and dimension a 36 in pathway to each — or note that none face the array.",
+        "designTeamAction": "Confirm whether any emergency escape and rescue opening (a bedroom egress window) sits above the array's roof plane; mark it on the roof plan with the 36 in path, or add a note that there is none.",
+        "evidenceNeeded": [
+          "EEROs marked on the roof plan, or a note that none face the array"
+        ],
+        "codeReferences": [
+          {
+            "code": "2021 IRC",
+            "section": "R324.6",
+            "title": "Roof access and pathways: emergency escape and rescue openings",
+            "adoptionScope": "City of Sample Falls: adopted IRC 2021.",
+            "sourceUrl": "https://codes.iccsafe.org/content/IRC2021P1/chapter-3-building-planning",
+            "note": "Panels and modules are not placed on the portion of a roof below an emergency escape and rescue opening, and a pathway not less than 36 in wide is provided to it."
+          }
+        ],
+        "installerCallout": false,
+        "evidenceStatus": "missing",
+        "evidenceFound": [
+          {
+            "kind": "absence_check",
+            "label": "No EERO mention",
+            "source": "Package text",
+            "excerpt": "No emergency escape and rescue opening is mentioned in the package text.",
+            "confidence": "low",
+            "pageHint": "",
+            "screenshotPath": "",
+            "verifier": "rule_engine",
+            "note": "Absence check over the package text."
           }
         ]
       },
@@ -3910,6 +3947,43 @@
         ]
       },
       {
+        "id": "city.fire.eero-unconfirmed",
+        "severity": "callout",
+        "category": "plan_set",
+        "title": "Emergency escape and rescue openings not addressed on the roof plan",
+        "message": "The package text does not mention emergency escape and rescue openings (EEROs). The model code (R324.6) keeps modules off the roof below an EERO and asks for a 36 in pathway to it; confirm the roof plan does.",
+        "cityFeedback": "Show any emergency escape and rescue openings on the roof plan, keep modules off the roof below them, and dimension a 36 in pathway to each — or note that none face the array.",
+        "designTeamAction": "Confirm whether any emergency escape and rescue opening (a bedroom egress window) sits above the array's roof plane; mark it on the roof plan with the 36 in path, or add a note that there is none.",
+        "evidenceNeeded": [
+          "EEROs marked on the roof plan, or a note that none face the array"
+        ],
+        "codeReferences": [
+          {
+            "code": "2021 IRC",
+            "section": "R324.6",
+            "title": "Roof access and pathways: emergency escape and rescue openings",
+            "adoptionScope": "City of Sample Falls: adopted IRC 2021.",
+            "sourceUrl": "https://codes.iccsafe.org/content/IRC2021P1/chapter-3-building-planning",
+            "note": "Panels and modules are not placed on the portion of a roof below an emergency escape and rescue opening, and a pathway not less than 36 in wide is provided to it."
+          }
+        ],
+        "installerCallout": false,
+        "evidenceStatus": "missing",
+        "evidenceFound": [
+          {
+            "kind": "absence_check",
+            "label": "No EERO mention",
+            "source": "Package text",
+            "excerpt": "No emergency escape and rescue opening is mentioned in the package text.",
+            "confidence": "low",
+            "pageHint": "",
+            "screenshotPath": "",
+            "verifier": "rule_engine",
+            "note": "Absence check over the package text."
+          }
+        ]
+      },
+      {
         "id": "city.struct.framing-missing",
         "severity": "blocker",
         "category": "structural",
@@ -6350,9 +6424,9 @@
         "severity": "callout",
         "category": "plan_set",
         "title": "Fire pathway width and ridge setback not dimensioned in the plan text — not measured",
-        "message": "No fire access pathway width or ridge setback could be read from the package text, so neither has been measured against fire access pathway width at least 36 in (IRC 2021 R324.6.1 model-code default; no City of Sample Falls pathway width on file); array setback from the ridge at least 18 in (IRC 2021 R324.6.2 / IFC 605.11.3.2.3 model-code default (18 in each side of a horizontal ridge where the array covers no more than 33% of the roof; 36 in where it covers more, which is not read here); no City of Sample Falls ridge setback on file). The package text does not mention fire access pathways at all.",
-        "cityFeedback": "Dimension the fire access pathways and the ridge setback on the roof plan; City of Sample Falls reviews them against 36 in / 18 in.",
-        "designTeamAction": "Confirm the roof plan dimensions each fire access pathway (at least 36 in) and the ridge setback (at least 18 in).",
+        "message": "No fire access pathway width or ridge setback could be read from the package text, so neither has been measured against fire access pathway width at least 36 in (IRC 2021 R324.6.1 model-code default; no City of Sample Falls pathway width on file); array setback from the ridge at least 36 in (IRC 2021 R324.6.2 / IFC 605.11.3.2.3 model-code default (18 in each side of a horizontal ridge where the array covers no more than 33% of the roof, 66% on a sprinklered dwelling; 36 in where it covers more): roof coverage not stated on the plan, so the stricter 36 in applies; no City of Sample Falls ridge setback on file). The package text does not mention fire access pathways at all.",
+        "cityFeedback": "Dimension the fire access pathways and the ridge setback on the roof plan; City of Sample Falls reviews them against 36 in / 36 in.",
+        "designTeamAction": "Confirm the roof plan dimensions each fire access pathway (at least 36 in) and the ridge setback (at least 36 in).",
         "evidenceNeeded": [
           "Dimensioned fire access pathways on the roof plan",
           "Dimensioned ridge setback on the roof plan"
@@ -6392,10 +6466,47 @@
           },
           {
             "kind": "ridgeSetback",
-            "inches": 18,
+            "inches": 36,
             "basis": "model_code",
             "verified": false,
-            "source": "IRC 2021 R324.6.2 / IFC 605.11.3.2.3 model-code default (18 in each side of a horizontal ridge where the array covers no more than 33% of the roof; 36 in where it covers more, which is not read here); no City of Sample Falls ridge setback on file"
+            "source": "IRC 2021 R324.6.2 / IFC 605.11.3.2.3 model-code default (18 in each side of a horizontal ridge where the array covers no more than 33% of the roof, 66% on a sprinklered dwelling; 36 in where it covers more): roof coverage not stated on the plan, so the stricter 36 in applies; no City of Sample Falls ridge setback on file"
+          }
+        ]
+      },
+      {
+        "id": "city.fire.eero-unconfirmed",
+        "severity": "callout",
+        "category": "plan_set",
+        "title": "Emergency escape and rescue openings not addressed on the roof plan",
+        "message": "The package text does not mention emergency escape and rescue openings (EEROs). The model code (R324.6) keeps modules off the roof below an EERO and asks for a 36 in pathway to it; confirm the roof plan does.",
+        "cityFeedback": "Show any emergency escape and rescue openings on the roof plan, keep modules off the roof below them, and dimension a 36 in pathway to each — or note that none face the array.",
+        "designTeamAction": "Confirm whether any emergency escape and rescue opening (a bedroom egress window) sits above the array's roof plane; mark it on the roof plan with the 36 in path, or add a note that there is none.",
+        "evidenceNeeded": [
+          "EEROs marked on the roof plan, or a note that none face the array"
+        ],
+        "codeReferences": [
+          {
+            "code": "2021 IRC",
+            "section": "R324.6",
+            "title": "Roof access and pathways: emergency escape and rescue openings",
+            "adoptionScope": "City of Sample Falls: adopted IRC 2021.",
+            "sourceUrl": "https://codes.iccsafe.org/content/IRC2021P1/chapter-3-building-planning",
+            "note": "Panels and modules are not placed on the portion of a roof below an emergency escape and rescue opening, and a pathway not less than 36 in wide is provided to it."
+          }
+        ],
+        "installerCallout": false,
+        "evidenceStatus": "missing",
+        "evidenceFound": [
+          {
+            "kind": "absence_check",
+            "label": "No EERO mention",
+            "source": "Package text",
+            "excerpt": "No emergency escape and rescue opening is mentioned in the package text.",
+            "confidence": "low",
+            "pageHint": "",
+            "screenshotPath": "",
+            "verifier": "rule_engine",
+            "note": "Absence check over the package text."
           }
         ]
       },

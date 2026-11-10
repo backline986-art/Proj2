@@ -37,6 +37,7 @@
 import type {
   CodeEdition,
   CodeReference,
+  FireAccessFacts,
   JurisdictionCriterionKey,
   JurisdictionDesignCriteria,
   ProjectRecord,
@@ -55,6 +56,7 @@ import type {
 } from "../../shared/src/types";
 import type { EffectiveCodeContext, PresentedCodeEdition } from "./codeProfiles";
 import { officialCitationFor } from "../../shared/src/officialSource";
+import { COVERAGE_LIMIT_PCT, COVERAGE_LIMIT_SPRINKLERED_PCT, describePolicy, policyCoversArray } from "../../shared/src/firePathwayPolicy";
 import { codeFamilyOf, editionsInEffect, type EditionsInEffect } from "./codeFamilies";
 
 export interface DesignTextSource {
@@ -1951,21 +1953,45 @@ function fireCodeEditionYear(ctx: EffectiveCodeContext): number | null {
 }
 
 /**
- * WHAT THE ROOF PLAN MUST SHOW, per dimension: the jurisdiction's own number where one of its
- * fireSetbacks rules states it (the strictest, when several do), else the model-code default for
- * the adopted edition: 36 in pathways (IRC R324.6.1); a ridge setback of 18 in from the 2015 IRC
- * on (R324.6.2, mirroring IFC 2015 605.11.3.2.3: 18 in where the array covers no more than 33% of
- * the roof, 36 in above; coverage is not read here, so 18 in is the floor and the message names the
- * 36 in case), and 36 in before it (the 36-in-only text is the 2012 IFC's). Model-code lines never
- * block, so the floor can only under-warn, never stop a compliant plan.
+ * WHAT THE ROOF PLAN MUST SHOW, per dimension:
+ *   1. the jurisdiction's APPLIED alternative pathway policy (review-audit draft 08, fireAccess.ts:
+ *      person-verified with its page, or official #683), where it covers this array (its area ceiling)
+ *      and states that dimension — or, for pathways, where the roof coverage is at or below its
+ *      exemption (then no pathway width is required);
+ *   2. else the jurisdiction's own number where one of its fireSetbacks rules states it (the
+ *      strictest, when several do);
+ *   3. else the model-code default for the adopted edition: 36 in pathways (IRC R324.6.1); a ridge
+ *      setback from the 2015 IRC on (R324.6.2, mirroring IFC 2015 605.11.3.2.3) of 18 in where the
+ *      array covers no more than 33% of the plan-view roof (66% where the dwelling is stated to be
+ *      sprinklered) and 36 in above — and 36 in when the coverage is NOT STATED (the strictest
+ *      default, said in the source); 36 in before 2015 (the 2012 IFC's text).
+ * `facts` are the job's (fireAccess.readFireAccessFacts); without them coverage is unknown. Model-code
+ * lines never block, so the strict default can only warn, never stop a compliant plan.
  */
-export function requiredRoofPlanDimensions(ctx: EffectiveCodeContext): RoofPlanRequiredDimension[] {
+export function requiredRoofPlanDimensions(ctx: EffectiveCodeContext, facts: FireAccessFacts | null = null): RoofPlanRequiredDimension[] {
   const who = ctx.ahj || ctx.state || "the jurisdiction";
   const prov = fieldProvenance(ctx, "fireSetbacks");
   const year = fireCodeEditionYear(ctx);
   const edition = year != null ? `IRC ${year}` : "IRC (adopted edition not on file; 2015 or later assumed)";
+  const coverage = facts?.coverage ?? null;
+  const policyOnFile = facts?.policy?.applied ? facts.policy : null;
+  const policy = policyOnFile && policyCoversArray(policyOnFile.policy, facts?.arrayAreaSqFt ?? null) ? policyOnFile : null;
+  // An applied policy whose area ceiling this array is over (or whose area is not stated): said, not used.
+  const policyNote = policyOnFile && !policy
+    ? `; ${policyOnFile.provenance} covers arrays up to ${policyOnFile.policy.arrayAreaMaxSqFt} sq ft, and ${facts?.arrayAreaSqFt != null ? `this array is ${facts.arrayAreaSqFt} sq ft` : "the array's area is not stated"}`
+    : "";
   const out: RoofPlanRequiredDimension[] = [];
   for (const kind of ["pathwayWidth", "ridgeSetback"] as const) {
+    if (policy) {
+      const p = policy.policy;
+      if (kind === "pathwayWidth" && p.pathwaysExemptMaxCoveragePct !== undefined && coverage && coverage.pct <= p.pathwaysExemptMaxCoveragePct) continue;
+      const inches = kind === "pathwayWidth" ? p.pathwayWidthIn : p.ridgeSetbackIn;
+      if (inches !== undefined) {
+        // A policy may back a blocker only with its own words on file (Helm's #637 bar).
+        out.push({ kind, inches, basis: "ahj", verified: Boolean(p.quote), source: `${policy.provenance}: ${describePolicy(p)}` });
+        continue;
+      }
+    }
     let best: { inches: number; description: string } | null = null;
     for (const rule of ctx.fireSetbacks ?? []) {
       for (const d of readRoofPlanDimensions(rule.description)) {
@@ -1975,11 +2001,19 @@ export function requiredRoofPlanDimensions(ctx: EffectiveCodeContext): RoofPlanR
     if (best) {
       out.push({ kind, inches: best.inches, basis: "ahj", verified: prov.verified, source: `${who}'s rule "${flat(best.description).slice(0, 160)}" (${prov.text})` });
     } else if (kind === "pathwayWidth") {
-      out.push({ kind, inches: 36, basis: "model_code", verified: false, source: `${edition} R324.6.1 model-code default; no ${who} pathway width on file` });
+      out.push({ kind, inches: 36, basis: "model_code", verified: false, source: `${edition} R324.6.1 model-code default; no ${who} pathway width on file${policyNote}` });
     } else if (year != null && year < 2015) {
-      out.push({ kind, inches: 36, basis: "model_code", verified: false, source: `${edition} model-code default (3 ft from the ridge, IFC 2012); no ${who} ridge setback on file` });
+      out.push({ kind, inches: 36, basis: "model_code", verified: false, source: `${edition} model-code default (3 ft from the ridge, IFC 2012); no ${who} ridge setback on file${policyNote}` });
     } else {
-      out.push({ kind, inches: 18, basis: "model_code", verified: false, source: `${edition} R324.6.2 / IFC 605.11.3.2.3 model-code default (18 in each side of a horizontal ridge where the array covers no more than 33% of the roof; 36 in where it covers more, which is not read here); no ${who} ridge setback on file` });
+      const limit = facts?.sprinklered ? COVERAGE_LIMIT_SPRINKLERED_PCT : COVERAGE_LIMIT_PCT;
+      const rule = `${edition} R324.6.2 / IFC 605.11.3.2.3 model-code default (18 in each side of a horizontal ridge where the array covers no more than 33% of the roof, 66% on a sprinklered dwelling; 36 in where it covers more)`;
+      const sprinkler = facts?.sprinklered ? `; the dwelling is stated to be sprinklered ("${facts.sprinklered.excerpt}", ${facts.sprinklered.source})` : "";
+      if (!coverage) {
+        out.push({ kind, inches: 36, basis: "model_code", verified: false, source: `${rule}: roof coverage not stated on the plan, so the stricter 36 in applies${sprinkler}; no ${who} ridge setback on file${policyNote}` });
+      } else {
+        const covers = `the array covers ${coverage.pct}% of the roof (${coverage.basis === "stated" ? "stated" : "array area / roof area"}: "${coverage.excerpt}", ${coverage.source})`;
+        out.push({ kind, inches: coverage.pct <= limit ? 18 : 36, basis: "model_code", verified: false, source: `${rule}: ${covers}${coverage.pct <= limit ? `, no more than ${limit}%` : `, more than ${limit}%`}${sprinkler}; no ${who} ridge setback on file${policyNote}` });
+      }
     }
   }
   return out;
@@ -2058,11 +2092,11 @@ function roofPlanRef(ctx: EffectiveCodeContext): CodeReference {
 export function evaluateFirePathwayFindings(
   project: ProjectRecord,
   ctx: EffectiveCodeContext,
-  opts: { roofMounted: boolean; extraTexts?: DesignTextSource[] },
+  opts: { roofMounted: boolean; extraTexts?: DesignTextSource[]; facts?: FireAccessFacts | null },
 ): { findings: ReviewerFinding[]; measured: boolean } {
   if (!opts.roofMounted) return { findings: [], measured: false };
   const stated = extractRoofPlanDimensions(project, opts.extraTexts ?? []);
-  const required = requiredRoofPlanDimensions(ctx);
+  const required = requiredRoofPlanDimensions(ctx, opts.facts ?? null);
   const codeReferences = [roofPlanRef(ctx)];
   if (!stated.length) {
     const who = ctx.ahj || ctx.state || "the jurisdiction";
@@ -2088,7 +2122,7 @@ export function evaluateFirePathwayFindings(
         message: `No fire access pathway width or ridge setback could be read from the package text, so neither has been measured against ${wants.join("; ")}.`
           + (quote ? ` The plan says: "${quote.excerpt}" (${quote.source}).` : " The package text does not mention fire access pathways at all."),
         cityFeedback: `Dimension the fire access pathways and the ridge setback on the roof plan; ${who} reviews them against ${required.map((r) => `${r.inches} in`).join(" / ")}.`,
-        designTeamAction: `Confirm the roof plan dimensions each fire access pathway (at least ${required.find((r) => r.kind === "pathwayWidth")?.inches} in) and the ridge setback (at least ${required.find((r) => r.kind === "ridgeSetback")?.inches} in).`,
+        designTeamAction: `Confirm the roof plan dimensions ${required.map((r) => r.kind === "pathwayWidth" ? `each fire access pathway (at least ${r.inches} in)` : `the ridge setback (at least ${r.inches} in)`).join(" and ")}.`,
         evidenceNeeded: ["Dimensioned fire access pathways on the roof plan", "Dimensioned ridge setback on the roof plan"],
         codeReferences,
         installerCallout: false,

@@ -30,3 +30,23 @@ export function firePathwayPolicyOf(raw: unknown): JurisdictionFirePathwayPolicy
   const states = policy.ridgeSetbackIn !== undefined || policy.pathwayWidthIn !== undefined || policy.pathwaysExemptMaxCoveragePct !== undefined;
   return states ? policy : null;
 }
+
+/** Model-code coverage thresholds (IRC R324.6.2): above them the ridge setback is 36 in. */
+export const COVERAGE_LIMIT_PCT = 33;
+export const COVERAGE_LIMIT_SPRINKLERED_PCT = 66;
+
+/** The policy covers this array: no area ceiling, or the array's stated area is within it. */
+export function policyCoversArray(policy: JurisdictionFirePathwayPolicy, arrayAreaSqFt: number | null): boolean {
+  if (policy.arrayAreaMaxSqFt === undefined) return true;
+  return arrayAreaSqFt !== null && arrayAreaSqFt <= policy.arrayAreaMaxSqFt;
+}
+
+/** The policy's rules, in a phrase. */
+export function describePolicy(p: JurisdictionFirePathwayPolicy): string {
+  return [
+    p.arrayAreaMaxSqFt !== undefined ? `arrays up to ${p.arrayAreaMaxSqFt} sq ft` : "",
+    p.ridgeSetbackIn !== undefined ? `${p.ridgeSetbackIn} in from the ridge` : "",
+    p.pathwayWidthIn !== undefined ? `${p.pathwayWidthIn} in pathways` : "",
+    p.pathwaysExemptMaxCoveragePct !== undefined ? `no pathways at or below ${p.pathwaysExemptMaxCoveragePct}% roof coverage` : "",
+  ].filter(Boolean).join("; ");
+}
