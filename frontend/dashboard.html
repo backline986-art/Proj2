@@ -1456,6 +1456,20 @@
             <label id="clientLinkResultWrap" hidden>Link to share<input id="clientLinkResult" readonly /></label>
             <p id="clientLinkStatus" role="status" class="muted clients-creds-hint"></p>
           </section>
+          <!-- COMPANY SETUP (clientOnboarding.ts): the client fills in its own details on a link. Nothing
+               it sends changes the client record until a named person accepts it here. -->
+          <section class="clients-creds-block" id="clientOnboardingBlock">
+            <h3>Company setup</h3>
+            <p class="muted clients-creds-hint">A link where this client fills in its own company details, licences and service area. Every answer waits here until you accept, edit or reject it. Portal logins go through the secure login link, never this page.</p>
+            <div class="actions">
+              <button type="button" id="onboardingLinkBtn" class="secondary"><i data-lucide="clipboard-list"></i><span>Create company setup link</span></button>
+            </div>
+            <label id="onboardingLinkResultWrap" hidden>Link to share (shown once)<input id="onboardingLinkResult" readonly /></label>
+            <p id="onboardingStatus" role="status" class="muted clients-creds-hint"></p>
+            <div id="onboardingLinks"></div>
+            <div id="onboardingProposals"></div>
+            <div id="onboardingFiles"></div>
+          </section>
           <section class="clients-creds-block">
             <h3>Portal logins (encrypted)</h3>
             <p class="muted clients-creds-hint">Passwords are stored encrypted (AES-256-GCM) and never shown again. Used by the bot to log in for this client only.</p>

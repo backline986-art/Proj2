@@ -165,6 +165,8 @@ traffic in. **(untested: no Cloudflare account in the sandbox.)**
 | `/api/public/credential-request/*` | the drop box's data, token-scoped, one use |
 | `/portal` | per-client tracker page (link carries a token) |
 | `/api/public/portal/*` | the tracker's data, token-scoped, read-only |
+| `/onboarding` | client Company setup page (link carries a token) |
+| `/api/public/onboarding/*` | the setup page's data, token-scoped; answers wait for a staff accept |
 | `/api/public/review/*` | shared review report, token-scoped, read-only |
 | `/styles.css` | stylesheet the logged-out pages load |
 | `/favicon.ico` | tab icon |

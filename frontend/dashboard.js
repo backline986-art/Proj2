@@ -12196,6 +12196,9 @@ function editClient(clientId) {
   clientFormStatus("");
   loadClientCredentials(clientId);
   loadClientBilling(clientId);
+  if ($("onboardingLinkResultWrap")) $("onboardingLinkResultWrap").hidden = true;
+  onboardingStatus("");
+  loadClientOnboarding(clientId);
   renderClientsList();
 }
 
@@ -14008,6 +14011,111 @@ async function createClientLink(kind) {
     status.textContent = kind === "tracking" ? "Read-only company tracking link. Copy and share it with this client." : "One-time login request, valid for 72 hours. Copy and share it with this client.";
   } catch (err) { status.textContent = err.message || "Could not create link."; }
 }
+// ---------------------------------------------------------------------------
+// COMPANY SETUP (backend/src/clientOnboarding.ts). Staff mint the client's own setup link, then accept,
+// edit or reject each "client-supplied" answer. Only an accept changes the client record, and it is
+// recorded against the named person (signed in, or the name typed when sign-in is off).
+// ---------------------------------------------------------------------------
+function onboardingValueText(p, value) {
+  if (Array.isArray(value)) {
+    if (!value.length) return "(none)";
+    if (p.type === "licences") return value.map((l) => `${l.state} ${String(l.kind || "").replace(/_/g, " ")} ${l.number}${l.expires ? ` (expires ${l.expires})` : ""}`).join("; ");
+    if (p.type === "serviceArea") return value.map((a) => (a.kind === "state" ? `${a.state} (whole state)` : `${a.kind}: ${a.name}, ${a.state}`)).join("; ");
+    return value.join("; ");
+  }
+  return value == null || value === "" ? "(blank)" : String(value);
+}
+function onboardingStatus(text, kind) {
+  const el = $("onboardingStatus");
+  if (!el) return;
+  el.textContent = text || "";
+  el.className = `muted clients-creds-hint${kind === "error" ? " error" : ""}`;
+}
+async function loadClientOnboarding(clientId) {
+  const linksEl = $("onboardingLinks"); const propsEl = $("onboardingProposals"); const filesEl = $("onboardingFiles");
+  if (!linksEl || !propsEl || !filesEl) return;
+  let data;
+  try { data = await api(`/api/clients/${clientId}/onboarding`); }
+  catch (err) { onboardingStatus(err.message || "Could not load company setup.", "error"); return; }
+  if (state.editingClientId !== clientId) return;
+  state.onboarding = data;
+  const links = data.links || [];
+  linksEl.innerHTML = links.length
+    ? `<ul class="cred-list">${links.slice(0, 5).map((l) => `<li class="cred-row"><span>Link ${esc(l.state)} · created ${esc(String(l.createdAt || "").slice(0, 10))} by ${esc(l.createdBy || "")}${l.state === "open" ? ` · expires ${esc(String(l.expiresAt || "").slice(0, 10))}${l.draftSavedAt ? " · client has saved a draft" : ""}` : ""}${l.submittedAt ? ` · sent ${esc(String(l.submittedAt).slice(0, 10))}` : ""}</span>${l.state === "open" ? `<button type="button" class="secondary" data-onboarding-revoke="${esc(l.id)}">Revoke</button>` : ""}</li>`).join("")}</ul>`
+    : `<p class="muted clients-creds-hint">No setup link yet.</p>`;
+  const props = data.proposals || [];
+  propsEl.innerHTML = props.length
+    ? `<h4 style="margin:10px 0 4px">Answers waiting (${props.length}, client-supplied)</h4>
+       <table class="onboarding-proposals"><thead><tr><th>Field</th><th>On file</th><th>Client sent</th><th></th></tr></thead><tbody>
+       ${props.map((p) => `<tr data-proposal-id="${esc(p.id)}"><td>${esc(p.label)}</td><td>${esc(onboardingValueText(p, p.current))}</td><td>${esc(onboardingValueText(p, p.proposed))}${p.type === "licences" || p.type === "serviceArea" ? ` <span class="muted">(added to what is on file)</span>` : ""}</td>
+         <td><button type="button" class="secondary" data-onboarding-accept="${esc(p.id)}">Accept</button>${p.type === "licences" || p.type === "serviceArea" ? "" : `<button type="button" class="secondary" data-onboarding-edit="${esc(p.id)}">Edit…</button>`}<button type="button" class="danger-button" data-onboarding-reject="${esc(p.id)}">Reject</button></td></tr>`).join("")}
+       </tbody></table>
+       <div class="actions"><button type="button" class="primary" id="onboardingAcceptAllBtn">Accept all</button></div>`
+    : "";
+  const files = data.files || [];
+  filesEl.innerHTML = files.length
+    ? `<h4 style="margin:10px 0 4px">Certificates the client uploaded</h4><ul class="cred-list">${files.map((f) => `<li class="cred-row"><a href="/api/clients/${encodeURIComponent(clientId)}/onboarding/files/${encodeURIComponent(f.id)}">${esc(f.fileName)}</a> <span class="muted">${esc(String(f.kind).replace(/_/g, " "))} · ${esc(String(Math.ceil(Number(f.sizeBytes) / 1024)))} KB</span></li>`).join("")}</ul>`
+    : "";
+  linksEl.querySelectorAll("[data-onboarding-revoke]").forEach((b) => b.addEventListener("click", () => revokeOnboardingLink(b.dataset.onboardingRevoke)));
+  propsEl.querySelectorAll("[data-onboarding-accept]").forEach((b) => b.addEventListener("click", () => decideOnboarding({ accept: [b.dataset.onboardingAccept] })));
+  propsEl.querySelectorAll("[data-onboarding-reject]").forEach((b) => b.addEventListener("click", () => decideOnboarding({ reject: [b.dataset.onboardingReject] })));
+  propsEl.querySelectorAll("[data-onboarding-edit]").forEach((b) => b.addEventListener("click", () => {
+    const p = props.find((x) => x.id === b.dataset.onboardingEdit);
+    if (!p) return;
+    const typed = window.prompt(`${p.label}: the value to save (the client sent "${onboardingValueText(p, p.proposed)}")`, onboardingValueText(p, p.proposed));
+    if (typed == null) return;
+    decideOnboarding({ edits: { [p.id]: typed } });
+  }));
+  $("onboardingAcceptAllBtn")?.addEventListener("click", () => decideOnboarding({ acceptAll: true }));
+}
+async function onboardingPerson(lede) {
+  const auth = await authForDecision();
+  return namedPersonConsent(auth, lede, "decided", "a client's company setup is reviewed by a named person");
+}
+async function decideOnboarding(body) {
+  const clientId = state.editingClientId;
+  if (!clientId) return;
+  const lede = body.acceptAll ? "Accept every answer this client sent? They are written to the client record." : body.reject ? "Reject this answer? The client record stays as it is." : "Accept this answer? It is written to the client record.";
+  const by = await onboardingPerson(lede);
+  if (by == null) return;
+  try {
+    const out = await api(`/api/clients/${clientId}/onboarding/decide`, { method: "POST", body: JSON.stringify({ ...body, ...(by ? { decidedBy: by } : {}) }) });
+    onboardingStatus(`${out.accepted} accepted, ${out.rejected} rejected.`);
+    await loadClients();
+    editClient(clientId);
+  } catch (err) { onboardingStatus(err.message || "That did not work.", "error"); }
+}
+async function revokeOnboardingLink(linkId) {
+  const clientId = state.editingClientId;
+  if (!clientId) return;
+  const by = await onboardingPerson("Revoke this company setup link? The client can no longer open it.");
+  if (by == null) return;
+  try {
+    await api(`/api/clients/${clientId}/onboarding-links/${encodeURIComponent(linkId)}/revoke`, { method: "POST", body: JSON.stringify(by ? { decidedBy: by } : {}) });
+    onboardingStatus("Link revoked.");
+    await loadClientOnboarding(clientId);
+  } catch (err) { onboardingStatus(err.message || "Could not revoke.", "error"); }
+}
+async function createOnboardingLink() {
+  const clientId = state.editingClientId;
+  if (!clientId) return;
+  const by = await onboardingPerson("Create a company setup link for this client? Any open setup link is replaced (its draft carries over).");
+  if (by == null) return;
+  $("onboardingLinkResultWrap").hidden = true;
+  try {
+    const out = await api(`/api/clients/${clientId}/onboarding-links`, { method: "POST", body: JSON.stringify(by ? { decidedBy: by } : {}) });
+    if (state.editingClientId !== clientId) return;
+    $("onboardingLinkResult").value = new URL(out.url, location.origin).href;
+    $("onboardingLinkResultWrap").hidden = false;
+    $("onboardingLinkResult").select();
+    // The go-live link guard: a link built on a base the client cannot open is said so, before it is shared.
+    onboardingStatus(out.linkProblem
+      ? `Do not send this yet: ${out.linkProblem}. Fix PUBLIC_BASE_URL, then create the link again.`
+      : `Valid until ${String(out.expiresAt || "").slice(0, 10)}. Copy and share it with this client; it is not shown again.`, out.linkProblem ? "error" : "");
+    await loadClientOnboarding(clientId);
+  } catch (err) { onboardingStatus(err.message || "Could not create the link.", "error"); }
+}
+$("onboardingLinkBtn")?.addEventListener("click", () => createOnboardingLink());
 $("clientTrackingLinkBtn")?.addEventListener("click", () => createClientLink("tracking"));
 $("clientCredentialLinkBtn")?.addEventListener("click", () => createClientLink("credentials"));
 $("billingPreviewBtn")?.addEventListener("click", () => previewBillingStatement());

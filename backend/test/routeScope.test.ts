@@ -67,6 +67,21 @@ const UNSCOPED_BY_DESIGN: Record<string, string> = {
   // another company's project reaches the payload. Note this token is STABLE and unrotatable by
   // design, so it is a permanent bearer credential for one company's project list.
   "/api/public/portal/:token": "tokenized per-client tracking page - the token resolves to one client_id and filters on it",
+  // The client's own Company setup page (clientOnboarding.ts). Unscoped by session for the same reason
+  // as its siblings (the company has no login), but the token resolves to exactly ONE clients.id (only
+  // its SHA-256 is stored) and every read and write below it touches only that client's rows: so the
+  // token IS the tenancy boundary. Revocable, expiring (404 for a bad, expired or revoked token, one
+  // message), rate-limited (publicRateLimit.ts), and WRITE-THROUGH-NOTHING: every answer lands as a
+  // "client-supplied" proposal that a named staff person must accept before the client record changes.
+  // It never takes a password (refused by key and by shape); portal logins go through the one-time
+  // credential link above. Asserted in clientOnboarding.test.ts (one client's token can neither read
+  // nor write another's; expiry and revoke; the secret refusal; no write before accept).
+  "/api/public/onboarding/:token": "tokenized Company setup page - token resolves to one client_id; read-only view of that client",
+  "/api/public/onboarding/:token/draft": "Company setup draft save - token-scoped to one client; writes only that link's draft",
+  "/api/public/onboarding/:token/submit": "Company setup submit - token-scoped; writes only proposals that wait for a staff accept",
+  "/api/public/onboarding/:token/portal-logins": "hands off to the unchanged one-time credential link for the token's client - no login passes through",
+  "/api/public/onboarding/:token/files": "Company setup certificate upload - token-scoped, type and size capped, never sent to a model",
+  "/api/public/onboarding/:token/files/:fileId": "removes one of that link's own uploads - token-scoped to its link and client",
 
   // Auth surface — must be reachable before you have an identity.
   "/api/auth/login": "establishes the session",
