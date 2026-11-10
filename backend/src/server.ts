@@ -178,7 +178,7 @@ import { runQcForProject } from "./qc";
 import { personJobScope, setPersonJobScope } from "./jobScope";
 import { clearUtilityStorageModes, recordUtilityStorageModes } from "./utilityStorageModes";
 import { projectsDroppedFor, setNemTrackKept } from "./nemTrackDrop";
-import { clearUtilityApplicationRequirements, recordUtilityApplicationRequirements } from "./utilityRequirements";
+import { clearUtilityApplicationRequirements, recordUtilityApplicationRequirements, utilityRequirementsView } from "./utilityRequirements";
 import { stagedReviewScreenshotFile } from "./stagedReviews";
 import { submissionConfirmationFile } from "./submissionConfirmation";
 import { reviewScreenshotFile } from "./reviewScreenshot";
@@ -2686,6 +2686,15 @@ app.put("/api/projects/:id/utility-track/keep", (req, res) => {
 // keyed by the project's own state + utility. A NAMED PERSON records each item with the page and its words
 // (rule 3: lands 'verified'; a verified item may block when the job lacks it); DELETE withdraws the
 // person's items (the shipped seed and any official reads stand). QC re-runs so the gate reads it.
+// The panel's read (dashboard utility-requirements.js): every item the shipped seed and the utility's
+// filing row carry, with its tier, source and words, and which one the gates read per kind. A read: no
+// lookup runs, nothing is written.
+app.get("/api/projects/:id/utility-filing/application-requirements", (req, res) => {
+  const { project } = getProjectDetail(db, String(req.params.id));
+  const utility = String(project.utility || "").trim();
+  const view = utility ? utilityRequirementsView(db, project.state, utility) : { displayName: "", rowExists: false, items: [] };
+  res.json({ state: project.state, utility: project.utility, ...view });
+});
 app.put("/api/projects/:id/utility-filing/application-requirements", (req, res) => {
   const projectId = String(req.params.id);
   const { project } = getProjectDetail(db, projectId);
@@ -2693,10 +2702,10 @@ app.put("/api/projects/:id/utility-filing/application-requirements", (req, res) 
   const verifiedBy = namedPersonDecider(req, "decidedBy",
     "Sign in to record a utility's application requirements.",
     "Name the person recording them: a utility's application requirements are recorded by a named person.");
-  const r = recordUtilityApplicationRequirements(db, { state: project.state, utility: project.utility }, { requirements: b.requirements, verifiedBy });
+  const r = recordUtilityApplicationRequirements(db, { state: project.state, utility: project.utility }, { requirements: b.requirements, verifiedBy, ...(b.mode ? { mode: b.mode } : {}) });
   if (!r.saved) throw new HttpError(r.reason.startsWith("No filing record") ? 409 : 400, r.reason);
   addAuditLog(db, projectId, "human", verifiedBy, "utility_filing.application_requirements_recorded", {
-    utility: project.utility, state: project.state, keys: b.requirements.map((x) => x.key), sources: b.requirements.map((x) => x.sourceUrl),
+    utility: project.utility, state: project.state, keys: b.requirements.map((x) => x.key), sources: b.requirements.map((x) => x.sourceUrl), mode: b.mode ?? "replace",
   });
   runQcForProject(db, projectId);
   res.json({ requirements: r.requirements });

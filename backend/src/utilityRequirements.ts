@@ -35,10 +35,11 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { UtilityApplicationRequirement, UtilityRequirementGate, UtilityRequirementKey, UtilityRequirementList, UtilityRequirementQc, UtilityRequirementTier } from "../../shared/src/types";
 import { UTILITY_REQUIREMENT_KEYS } from "../../shared/src/types";
-import { isOfficialSourceHost } from "../../shared/src/officialSource";
+import { isOfficialSourceHost, sourceHostOf } from "../../shared/src/officialSource";
 import type { AppDb } from "./db";
 import { usStateCode } from "./permitPath";
-import { normalizeUtilityName, utilityFilingKey } from "./utilityFilingLookup";
+import { getUtilityFilingLookup, normalizeUtilityName, utilityFilingKey } from "./utilityFilingLookup";
+import { isUtilityPlatformUrl } from "./portalChannel";
 
 const str = (v: unknown): string => (typeof v === "string" ? v.trim() : v == null ? "" : String(v).trim());
 
@@ -252,18 +253,40 @@ interface StoredRequirements {
   requirements: unknown[];
 }
 
-/** An item stored as official still has to pass the shared predicate when read; one that does not is seeded. */
-function honouredTier(item: UtilityApplicationRequirement): UtilityApplicationRequirement {
+/** An item stored as official still has to pass the shared predicate when read (a government host, or a
+ *  domain a person verified as the utility's own: `hosts`); one that does not is seeded, and warns (it
+ *  was never confirmed, so it never stands in for a cited seed). */
+function honouredTier(item: UtilityApplicationRequirement, hosts: readonly string[]): UtilityApplicationRequirement {
   if (item.tier === "verified") return str(item.verifiedBy) && str(item.verifiedAt) ? item : { ...item, tier: "seeded" };
   if (item.tier === "official") {
-    const ok = isOfficialSourceHost(item.sourceUrl) && str(item.quote).length >= 8 && Boolean(item.fetchedAt);
-    return ok ? item : { ...item, tier: "seeded" };
+    const ok = isOfficialSourceHost(item.sourceUrl, hosts) && str(item.quote).length >= 8 && Boolean(item.fetchedAt);
+    return ok ? item : { ...item, tier: "seeded", whenMissing: "warning" };
   }
   return item;
 }
 
-/** The items on the utility's filing row (seeded proposals, official reads, a person's), and whether the row exists. A read. */
-export function filingRowRequirements(db: AppDb | null, state: string, utility: string): { rowExists: boolean; requirements: UtilityApplicationRequirement[] } {
+/** Hosts a PERSON verified as this utility's own: the pages its person-verified filing row and its
+ *  person-recorded requirement items cite (`rowItems`: the row's items as stored, when the caller has
+ *  them). An interconnection platform's host (a vendor) never counts. A read. */
+export function utilityPersonVerifiedHosts(db: AppDb, state: string, utility: string, rowItems?: UtilityApplicationRequirement[]): string[] {
+  const urls: string[] = [];
+  const lookup = getUtilityFilingLookup(db, state, utility);
+  if (lookup && lookup.confidence === "verified" && str(lookup.verifiedBy)) urls.push(str(lookup.filing?.sourceUrl), str(lookup.program?.sourceUrl));
+  for (const item of rowItems ?? filingRowRequirements(db, state, utility, { honour: false }).requirements) {
+    if (item.tier === "verified" && str(item.verifiedBy) && str(item.verifiedAt)) urls.push(item.sourceUrl);
+  }
+  const hosts = new Set<string>();
+  for (const u of urls) {
+    const host = sourceHostOf(u);
+    if (host && !isUtilityPlatformUrl(u)) hosts.add(host);
+  }
+  return [...hosts];
+}
+
+/** The items on the utility's filing row (seeded proposals, official reads, a person's), and whether the
+ *  row exists. A read. `honour: false` = the tiers as stored (for writers, so a re-check never writes a
+ *  downgrade back); by default each official item is re-checked against the shared predicate. */
+export function filingRowRequirements(db: AppDb | null, state: string, utility: string, opts: { honour?: boolean } = {}): { rowExists: boolean; requirements: UtilityApplicationRequirement[] } {
   if (!db || !normalizeUtilityName(utility)) return { rowExists: false, requirements: [] };
   try {
     const row = db.get<{ application_requirements_json?: string }>("SELECT application_requirements_json FROM utility_filing_lookups WHERE profile_key = ?", [utilityFilingKey(state, utility)]);
@@ -275,9 +298,10 @@ export function filingRowRequirements(db: AppDb | null, state: string, utility: 
         const tier = str((r as Record<string, unknown>)?.tier);
         return sanitizeRequirement(r, tier === "verified" || tier === "official" ? tier : "seeded");
       })
-      .filter((r): r is UtilityApplicationRequirement => r != null)
-      .map(honouredTier);
-    return { rowExists: true, requirements };
+      .filter((r): r is UtilityApplicationRequirement => r != null);
+    if (opts.honour === false) return { rowExists: true, requirements };
+    const hosts = utilityPersonVerifiedHosts(db, state, utility, requirements);
+    return { rowExists: true, requirements: requirements.map((r) => honouredTier(r, hosts)) };
   } catch {
     return { rowExists: false, requirements: [] };
   }
@@ -306,11 +330,18 @@ export function resolveUtilityRequirements(db: AppDb | null, state: string, util
 export function recordUtilityApplicationRequirements(
   db: AppDb,
   where: { state: string; utility: string },
-  input: { requirements: Array<{ key: UtilityRequirementKey; whenMissing: "blocker" | "warning"; sourceName?: string; sourceUrl: string; quote: string }>; verifiedBy: string },
+  input: {
+    requirements: Array<{ key: UtilityRequirementKey; whenMissing: "blocker" | "warning"; sourceName?: string; sourceUrl: string; quote: string }>;
+    verifiedBy: string;
+    /** "replace" (the default): the stated items become the person-recorded list. "merge": the stated
+     *  items are added or replace that key's item; other people's items for other keys stay as recorded
+     *  (the dashboard panel adds, edits or verifies one item at a time). */
+    mode?: "replace" | "merge";
+  },
 ): { saved: boolean; reason: string; requirements: UtilityApplicationRequirement[] } {
   const who = str(input.verifiedBy).slice(0, 120);
   if (!who) return { saved: false, reason: "A utility's application requirements are recorded by a named person.", requirements: [] };
-  const { rowExists, requirements: onRow } = filingRowRequirements(db, where.state, where.utility);
+  const { rowExists, requirements: onRow } = filingRowRequirements(db, where.state, where.utility, { honour: false });
   if (!rowExists) return { saved: false, reason: "No filing record is on file for this utility yet; its filing lookup runs first.", requirements: [] };
   const now = new Date().toISOString();
   const stated: UtilityApplicationRequirement[] = [];
@@ -322,7 +353,7 @@ export function recordUtilityApplicationRequirements(
     stated.push(item);
   }
   const statedKeys = new Set(stated.map((s) => s.key));
-  const kept = onRow.filter((r) => r.tier !== "verified" && !statedKeys.has(r.key));
+  const kept = onRow.filter((r) => (input.mode === "merge" || r.tier !== "verified") && !statedKeys.has(r.key));
   const all = [...kept, ...stated];
   db.run("UPDATE utility_filing_lookups SET application_requirements_json = ? WHERE profile_key = ?", [JSON.stringify({ requirements: all }), utilityFilingKey(where.state, where.utility)]);
   return { saved: true, reason: "recorded", requirements: all };
@@ -330,8 +361,32 @@ export function recordUtilityApplicationRequirements(
 
 /** A named person withdraws the person-recorded items (the shipped seed and any official reads stand). */
 export function clearUtilityApplicationRequirements(db: AppDb, where: { state: string; utility: string }): void {
-  const { rowExists, requirements } = filingRowRequirements(db, where.state, where.utility);
+  const { rowExists, requirements } = filingRowRequirements(db, where.state, where.utility, { honour: false });
   if (!rowExists) return;
   const kept = requirements.filter((r) => r.tier !== "verified");
   db.run("UPDATE utility_filing_lookups SET application_requirements_json = ? WHERE profile_key = ?", [kept.length ? JSON.stringify({ requirements: kept }) : "", utilityFilingKey(where.state, where.utility)]);
+}
+
+// ── What the dashboard panel shows (a read) ───────────────────────────────────────────────────
+/** One item as the panel lists it: where it comes from (the shipped seed or the utility's filing row),
+ *  and whether it is the one the gates read for its kind. */
+export interface UtilityRequirementView extends UtilityApplicationRequirement {
+  origin: "shipped" | "row";
+  /** The item the gates read for this kind (the higher tier; the row at the same tier). */
+  inEffect: boolean;
+}
+
+/** The panel's view of one utility's requirement list: every item the shipped seed and the filing row
+ *  carry, each marked with where it comes from and whether it is in effect. A read: writes nothing. */
+export function utilityRequirementsView(db: AppDb | null, state: string, utility: string): {
+  displayName: string; rowExists: boolean; items: UtilityRequirementView[];
+} {
+  const shipped = str(utility) ? shippedRecordFor(state, utility) : null;
+  const row = filingRowRequirements(db, state, utility);
+  const effective = mergeRequirements(shipped?.requirements ?? [], row.requirements);
+  const items: UtilityRequirementView[] = [
+    ...(shipped?.requirements ?? []).map((r) => ({ ...r, origin: "shipped" as const, inEffect: effective.includes(r) })),
+    ...row.requirements.map((r) => ({ ...r, origin: "row" as const, inEffect: effective.some((e) => e.key === r.key && e.tier === r.tier && e.sourceUrl === r.sourceUrl && e.quote === r.quote) })),
+  ];
+  return { displayName: shipped?.displayName || str(utility), rowExists: row.rowExists, items };
 }
