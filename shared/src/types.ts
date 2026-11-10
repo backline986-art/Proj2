@@ -1951,8 +1951,24 @@ export interface AhjProcessProfile {
    *  permit_process_lookups as one 'seeded' permit's documents (knowledgeBase.seedSanitizedAhjProfiles),
    *  so lookupRequiredList and the verified-list gate have a cited list to read. */
   documents?: AhjProcessDocuments;
+  /** Per-fact evidence for a researched row: which field (or "ess") each page backs, the page, its own
+   *  words and when it was read. Evidence for the person who verifies the row; it never raises a row's
+   *  tier (rows from the reference file are seeded, rule 3) and never makes a door launchable. */
+  citations?: AhjProcessCitation[];
   reviewerNotes: string;
   sourceSheet: string;
+}
+
+export interface AhjProcessCitation {
+  /** The profile field this backs ("submissionMethod", "requiresStructuralStamp", …) or "ess". */
+  field: string;
+  /** The value read, where it is a single value (a portal host and path). */
+  value?: string;
+  sourceUrl: string;
+  /** The page's exact words. */
+  quote: string;
+  /** ISO time the page was read. */
+  fetchedAt: string;
 }
 
 export interface AhjProcessDocuments {

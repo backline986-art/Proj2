@@ -42,6 +42,141 @@
           }
         }
       }
+    },
+    {
+      "authorityKind": "utility_program",
+      "state": "UT",
+      "authority": "Rocky Mountain Power",
+      "programName": "Utah Schedule 137 Net Billing Service",
+      "limits": {
+        "maxDcKw": {
+          "value": 25,
+          "appliesOnlyTo": "residential facilities (installed capacity is nameplate DC, Sheet 137.2)",
+          "citation": {
+            "sourceName": "Rocky Mountain Power Utah Schedule 137, Net Billing Service (Sheet 137.1)",
+            "sourceUrl": "https://www.rockymountainpower.net/content/dam/pcorp/documents/en/rockymountainpower/rates-regulation/utah/rates/137_Net_Billing_Service.pdf",
+            "quote": "with a capacity of not more than twenty-five (25) kilowatts for a residential facility",
+            "fetchedAt": "2026-11-10T08:22:58Z"
+          }
+        }
+      }
+    },
+    {
+      "authorityKind": "utility_program",
+      "state": "UT",
+      "authority": "Murray City Power",
+      "programName": "Murray City Power Net Metering Pilot Program",
+      "limits": {
+        "maxDcKw": {
+          "value": 10,
+          "citation": {
+            "sourceName": "Murray City Net Metering Pilot Program Interconnection & Service Agreement (Residential 2025)",
+            "sourceUrl": "https://www.murray.utah.gov/DocumentCenter/View/16495",
+            "quote": "Electric Generation Systems of 10kW DC or Less",
+            "fetchedAt": "2026-11-10T08:22:27Z"
+          }
+        },
+        "productionMeterRequired": {
+          "value": true,
+          "citation": {
+            "sourceName": "Murray City Power Net Metering Checklist",
+            "sourceUrl": "https://murray.utah.gov/DocumentCenter/View/15321/Solar-Check-List-042524",
+            "quote": "Solar system must include a production/generation meter, in addition to the net meter",
+            "fetchedAt": "2026-11-10T08:19:28Z"
+          }
+        },
+        "installerCertification": {
+          "value": {
+            "name": "NABCEP Installation Certification",
+            "effectiveFrom": "2025-04-01"
+          },
+          "citation": {
+            "sourceName": "Murray City Net Metering and Solar Information",
+            "sourceUrl": "https://murray.utah.gov/77/Net-Metering-and-Solar-Information",
+            "quote": "Starting in April 2025, a NABCEP Installation Certification will be mandatory for all solar installers in Murray City.",
+            "fetchedAt": "2026-11-10T08:22:26Z"
+          }
+        }
+      }
+    },
+    {
+      "authorityKind": "utility_program",
+      "state": "UT",
+      "authority": "Bountiful City Light & Power",
+      "programName": "Bountiful City Light & Power NET metered photovoltaic service",
+      "limits": {
+        "maxDcKw": {
+          "value": 10,
+          "appliesOnlyTo": "residential single-phase customers",
+          "citation": {
+            "sourceName": "Bountiful City Light & Power, Solar Packet - Net Meter (Attachment 4)",
+            "sourceUrl": "https://www.bountiful.gov/DocumentCenter/View/343/Solar-Packet-Net-Meter-PDF",
+            "quote": "For residential single-phase customers, the maximum allowable photovoltaic system size is 10 kW.",
+            "fetchedAt": "2026-11-10T08:21:07Z"
+          }
+        },
+        "productionMeterRequired": {
+          "value": true,
+          "citation": {
+            "sourceName": "Bountiful City Light & Power, Solar Packet - Net Meter (Attachment 4)",
+            "sourceUrl": "https://www.bountiful.gov/DocumentCenter/View/343/Solar-Packet-Net-Meter-PDF",
+            "quote": "NET Metered Production Meter Base The customer is required to provide and install a meter base in-line between the inverter disconnect switch and the customer's service entrance cable.",
+            "fetchedAt": "2026-11-10T08:21:07Z"
+          }
+        }
+      }
+    },
+    {
+      "authorityKind": "utility_program",
+      "state": "UT",
+      "authority": "Kaysville City Power",
+      "programName": "Kaysville City net metering",
+      "limits": {
+        "maxDcKw": {
+          "value": 15,
+          "citation": {
+            "sourceName": "Kaysville City Net Metering and Interconnection Agreement (2018)",
+            "sourceUrl": "https://www.kaysville.gov/DocumentCenter/View/1921/RESIDENTIAL-NET-METERING-AGREEMENT",
+            "quote": "Not to exceed 15KW (DC) in total capacity.",
+            "fetchedAt": "2026-11-10T08:20:30Z"
+          }
+        },
+        "productionMeterRequired": {
+          "value": true,
+          "citation": {
+            "sourceName": "Kaysville City Net Metering and Interconnection Agreement (2018)",
+            "sourceUrl": "https://www.kaysville.gov/DocumentCenter/View/1921/RESIDENTIAL-NET-METERING-AGREEMENT",
+            "quote": "Customer must pay for and have a production meter installed to capture all of the kWh produced by the Customer’s GF.",
+            "fetchedAt": "2026-11-10T08:20:30Z"
+          }
+        }
+      }
+    },
+    {
+      "authorityKind": "utility_program",
+      "state": "UT",
+      "authority": "Kaysville City",
+      "programName": "Kaysville City net metering",
+      "limits": {
+        "maxDcKw": {
+          "value": 15,
+          "citation": {
+            "sourceName": "Kaysville City Net Metering and Interconnection Agreement (2018)",
+            "sourceUrl": "https://www.kaysville.gov/DocumentCenter/View/1921/RESIDENTIAL-NET-METERING-AGREEMENT",
+            "quote": "Not to exceed 15KW (DC) in total capacity.",
+            "fetchedAt": "2026-11-10T08:20:30Z"
+          }
+        },
+        "productionMeterRequired": {
+          "value": true,
+          "citation": {
+            "sourceName": "Kaysville City Net Metering and Interconnection Agreement (2018)",
+            "sourceUrl": "https://www.kaysville.gov/DocumentCenter/View/1921/RESIDENTIAL-NET-METERING-AGREEMENT",
+            "quote": "Customer must pay for and have a production meter installed to capture all of the kWh produced by the Customer’s GF.",
+            "fetchedAt": "2026-11-10T08:20:30Z"
+          }
+        }
+      }
     }
   ]
 }

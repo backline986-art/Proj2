@@ -1,7 +1,7 @@
 {
   "generatedFrom": "Permit Processes.xlsx",
   "redaction": "Credential/contact columns and credential-like values removed; credential-bearing notes dropped. Customer-specific files excluded.",
-  "count": 389,
+  "count": 397,
   "profiles": [
     {
       "state": "NJ",
@@ -7911,7 +7911,7 @@
       "requiresCustomerSignature": false,
       "requiresFloodplainCheck": false,
       "requiresJurisdictionCheck": false,
-      "otherRequirements": "Solar Permit Application with a completed Solar PV Packet; site plan showing the location of major components; electrical diagram showing PV array configuration, wiring system, overcurrent protection, inverter, disconnects, required labels and AC connection to the building. Permit is void if work is not commenced within 180 days.",
+      "otherRequirements": "Solar Permit Application with a completed Solar PV Packet; site plan showing the location of major components; electrical diagram showing PV array configuration, wiring system, overcurrent protection, inverter, disconnects, required labels and AC connection to the building. Permit is void if work is not commenced within 180 days. Battery (ESS) jobs: Salt Lake City publishes its own Residential Energy Storage System (ESS) Plan Review Checklist; the solar PV checklist applies in addition. Whether an ESS permit of its own or a fire review is required is not stated on the page.",
       "documents": {
         "items": [
           "Solar Permit Application",
@@ -7924,7 +7924,22 @@
         "observedAt": "2026-10-04"
       },
       "reviewerNotes": "Seeded 2026-10-04 from the city's public information pages (worker-60 web research, issue #109); NOT verified - confirm before relying on it. Information pages are sources, not the portal. Sources: https://www.slc.gov/buildingservices/2026/04/22/solar-pv-systems/ ; https://www.slc.gov/buildingservices/building-permits/electronic-plan-review/",
-      "sourceSheet": "UT seeded (web research 2026-10-04)"
+      "sourceSheet": "UT seeded (web research 2026-10-04)",
+      "citations": [
+        {
+          "field": "submissionMethod",
+          "value": "aca-prod.accela.com/SLCREF",
+          "sourceUrl": "https://www.slc.gov/buildingservices/2026/04/22/solar-pv-systems/",
+          "quote": "Apply for a Permit",
+          "fetchedAt": "2026-11-10T08:24:09Z"
+        },
+        {
+          "field": "ess",
+          "sourceUrl": "https://www.slc.gov/buildingservices/irc-energy-checklist/",
+          "quote": "Salt Lake City Residential ENERGY STORAGE SYSTEM (ESS) Plan Review Checklist For ESS systems also utilizing a string inverter or micro inverter solar PV system, please also see the appropriate City plan review checklist requirements for such solar PV system.",
+          "fetchedAt": "2026-11-10T08:22:21Z"
+        }
+      ]
     },
     {
       "state": "UT",
@@ -8061,6 +8076,444 @@
       },
       "reviewerNotes": "Seeded 2026-10-06 from the city's public information pages (issue #228; read-only sweep, the Cityworks portal itself was never opened); NOT verified - confirm before relying on it. Information pages are sources, not the portal. Retired solar application IDs: DocumentCenter/View/152 and View/12292 (404) — no solar-specific blank expected; generic application View/8000 is a scanned blank. Sources: https://www.saratogasprings-ut.gov/201/Building ; https://www.saratogasprings-ut.gov/221/Additional-Building-Permit-Requirements ; https://www.saratogasprings-ut.gov/265/Permits-Forms ; https://www.saratogasprings-ut.gov/220/Obtaining-a-Building-Permit ; https://www.saratogasprings-ut.gov/209/Applications-Forms ; https://www.saratogasprings-ut.gov/213/Design-Criteria",
       "sourceSheet": "UT seeded (web research 2026-10-06)"
+    },
+    {
+      "state": "UT",
+      "ahj": "Murray City",
+      "submissionMethod": "Murray eProcess360 portal (eProcess360, murray.ut.eprocess360.com): building permit application and plans submitted online",
+      "timeline": "",
+      "requiresElectricianSign": false,
+      "requiresElectricalStamp": false,
+      "requiresStructuralStamp": true,
+      "requiresElectricalPermitApplication": false,
+      "requiresBuildingPermitApplication": true,
+      "requiresSolarChecklist": true,
+      "requiresPlanSet": true,
+      "requiresUtilityApproval": true,
+      "requiresCustomerSignature": false,
+      "requiresFloodplainCheck": false,
+      "requiresJurisdictionCheck": false,
+      "otherRequirements": "Murray City Power (the city-owned utility) approval is required first: the Net Metering Interconnection & Service Agreement goes to Murray City Power (where it is sent is on the city's net metering page; a person verifies that address before anything is sent), which reviews it and returns a signed copy. Residential net meter $250, paid to Murray City Power. The system must include a production/generation meter in addition to the net meter, and a manually operated safety disconnect of its own, with visible contacts, between the inverter and the production meter base, within several feet of the net meter base (meter-base breakers and inverter-integrated disconnects do not satisfy it). One-line diagram: maximum system kW output not to exceed 10 kW. Inside Murray City Power's service area the Murray City Electrical Permit questionnaire is uploaded with the online building permit application. From April 2025 Murray requires NABCEP certification for solar installers, sales and engineers and an S200/S202 electrical license for electricians.",
+      "documents": {
+        "items": [
+          "Murray Power approval: Net Metering Interconnection & Service Agreement (to Murray City Power before the permit)",
+          "Building permit application online, with owner, contractor and subcontractor information and project valuation",
+          "Site plan: north arrow, home, all PV components (main meter, production meter, AC disconnect, arrays, panels, inverters, pass-through boxes) grouped within 6 feet",
+          "One-line diagram: PV system type, main and production meters, disconnect and inverter type and rating, module layout and connection, maximum system kW output (not to exceed 10 kW), labeling, wiring and conduit, fuse/breaker ratings, grounding",
+          "Module, inverter and combiner box list with manufacturer specification sheets and installation guides; engineer of record confirms the roof carries the added load",
+          "Photo of the interconnection panel and any other boxes to be mounted",
+          "Other system components with their UL listing and installation information",
+          "Safety and warning labels: engraved, mechanically fastened labels on meter bases and the safety disconnect, with samples and locations"
+        ],
+        "sourceUrl": "https://murray.utah.gov/DocumentCenter/View/15321/Solar-Check-List-042524",
+        "quote": "The following is a list of items required for residential SOLAR PANEL plan submittal.",
+        "observedAt": "2026-11-10"
+      },
+      "citations": [
+        {
+          "field": "submissionMethod",
+          "value": "murray.ut.eprocess360.com",
+          "sourceUrl": "https://murray.utah.gov/DocumentCenter/View/15321/Solar-Check-List-042524",
+          "quote": "BUILDING PERMIT APPLICATION –online at https://murray.ut.eprocess360.com/",
+          "fetchedAt": "2026-11-10T08:19:28Z"
+        },
+        {
+          "field": "requiresUtilityApproval",
+          "sourceUrl": "https://murray.utah.gov/DocumentCenter/View/15321/Solar-Check-List-042524",
+          "quote": "MURRAY POWER APPROVAL REQUIRED - Please contact Murray Power at netmetering@murray.utah.gov",
+          "fetchedAt": "2026-11-10T08:19:28Z"
+        },
+        {
+          "field": "requiresStructuralStamp",
+          "sourceUrl": "https://murray.utah.gov/DocumentCenter/View/15321/Solar-Check-List-042524",
+          "quote": "Please have engineer of record confirm roof is capable of supporting the additional loads from the new solar array.",
+          "fetchedAt": "2026-11-10T08:19:28Z"
+        },
+        {
+          "field": "otherRequirements",
+          "sourceUrl": "https://murray.utah.gov/DocumentCenter/View/15321/Solar-Check-List-042524",
+          "quote": "Solar system must include a production/generation meter, in addition to the net meter; Murray City Power covers the cost of this meter",
+          "fetchedAt": "2026-11-10T08:19:28Z"
+        },
+        {
+          "field": "otherRequirements",
+          "sourceUrl": "https://murray.utah.gov/DocumentCenter/View/14619/Electrical-Permit-Questionnaire",
+          "quote": "please complete and upload the attached form when submitting your on-line building permit application",
+          "fetchedAt": "2026-11-10T08:19:29Z"
+        },
+        {
+          "field": "otherRequirements",
+          "sourceUrl": "https://murray.utah.gov/77/Net-Metering-and-Solar-Information",
+          "quote": "Starting in April 2025, a NABCEP Installation Certification will be mandatory for all solar installers in Murray City.",
+          "fetchedAt": "2026-11-10T08:22:26Z"
+        }
+      ],
+      "reviewerNotes": "Seeded 2026-11-10 from the city's own public pages (worker-refdata-ut, plain reads; no portal was opened); NOT verified - confirm before relying on it. A person verifies the portal in the dashboard before anything files. Information pages are sources, not the portal. Sources: https://murray.utah.gov/DocumentCenter/View/15321/Solar-Check-List-042524 ; https://murray.utah.gov/DocumentCenter/View/14619/Electrical-Permit-Questionnaire ; https://murray.utah.gov/77/Net-Metering-and-Solar-Information",
+      "sourceSheet": "UT seeded (web research 2026-11-10)"
+    },
+    {
+      "state": "UT",
+      "ahj": "South Jordan",
+      "submissionMethod": "South Jordan CityView Online Portal (CityView, cityview.southjordanutah.gov/cityviewportal): apply for a permit online",
+      "timeline": "",
+      "requiresElectricianSign": false,
+      "requiresElectricalStamp": false,
+      "requiresStructuralStamp": true,
+      "requiresElectricalPermitApplication": false,
+      "requiresBuildingPermitApplication": true,
+      "requiresSolarChecklist": false,
+      "requiresPlanSet": true,
+      "requiresUtilityApproval": false,
+      "requiresCustomerSignature": false,
+      "requiresFloodplainCheck": false,
+      "requiresJurisdictionCheck": false,
+      "otherRequirements": "Photo-voltaic (PV) system plan review requirements: permit application with valuation, address, owner and contractor with state license number; for a roof array a structural engineer's letter (Utah licensed for existing construction) that the roof carries the added load and snow drift; scaled site plan with roof access and IFC 605.11.3 walking clearances (ridge 3 ft, valleys and hips 18 in, eave to ridge 36 in); service size and bus rating, back-fed breaker location and NEC 705.12 compliance with a photo of the service panel; inverter and module cut sheets; rapid shutdown (NEC 690.12) unless micro-inverters; mounting and flashing details; span tables for 115 mph wind; warning signs and their locations. Batteries are reviewed in the same PV plan review: submit cut sheets for batteries, if used, with connection diagrams, fusing and amp-hour and charging capacity, and show how the batteries will be ventilated and protected for their location. Electric utility: Rocky Mountain Power.",
+      "documents": {
+        "items": [
+          "Permit application: valuation, project address, property owner, general contractor and state license number, contact person and other contractors",
+          "Structural engineer's letter that the roof supports the array and added snow drift load (Utah licensed structural engineer for existing construction)",
+          "Scaled site plan: roof access, equipment locations, connections, conductors, disconnects, array wiring, grounding, IFC 605.11.3 walking clearances",
+          "Electrical service size and bus rating, back-fed breaker location and NEC 705.12 compliance, photo of the service panel",
+          "Inverter cut sheets and instructions with model numbers highlighted and listings noted",
+          "Rapid shutdown (NEC 690.12) specification sheets and installation instructions (not for micro-inverter systems)",
+          "PV module cut sheets (Voc, Isc, Pmax, maximum series fuse, Vmp, Imp)",
+          "Battery cut sheets and connection diagrams, if batteries are used",
+          "Array mounting and attachment details, flashing and sealing; span tables for 115 mph wind",
+          "Warning signs (stickers) and their locations"
+        ],
+        "sourceUrl": "https://www.sjc.utah.gov/DocumentCenter/View/427/Residential-Solar-Photovoltaic-System-Plan-Review-Requirements-PDF",
+        "quote": "PHOTO-VOLTAIC (PV) SYSTEM PLAN REVIEW REQUIREMENTS",
+        "observedAt": "2026-11-10"
+      },
+      "citations": [
+        {
+          "field": "submissionMethod",
+          "value": "cityview.southjordanutah.gov/cityviewportal",
+          "sourceUrl": "https://www.sjc.utah.gov/266/Building-Department",
+          "quote": "Apply for a permit or request an inspection on our Online Portal",
+          "fetchedAt": "2026-11-10T08:19:30Z"
+        },
+        {
+          "field": "requiresStructuralStamp",
+          "sourceUrl": "https://www.sjc.utah.gov/DocumentCenter/View/427/Residential-Solar-Photovoltaic-System-Plan-Review-Requirements-PDF",
+          "quote": "If PV array is to be installed on the roof, provide a letter from a structural engineer",
+          "fetchedAt": "2026-11-10T08:20:03Z"
+        },
+        {
+          "field": "ess",
+          "sourceUrl": "https://www.sjc.utah.gov/DocumentCenter/View/427/Residential-Solar-Photovoltaic-System-Plan-Review-Requirements-PDF",
+          "quote": "Submit cut sheets for batteries, if used, and connection diagrams with cable sizes.",
+          "fetchedAt": "2026-11-10T08:20:03Z"
+        },
+        {
+          "field": "ess",
+          "sourceUrl": "https://www.sjc.utah.gov/DocumentCenter/View/427/Residential-Solar-Photovoltaic-System-Plan-Review-Requirements-PDF",
+          "quote": "Show how batteries will be properly ventilated, and how they will be protected depending on their location",
+          "fetchedAt": "2026-11-10T08:20:03Z"
+        }
+      ],
+      "reviewerNotes": "Seeded 2026-11-10 from the city's own public pages (worker-refdata-ut, plain reads; no portal was opened); NOT verified - confirm before relying on it. A person verifies the portal in the dashboard before anything files. Information pages are sources, not the portal. Sources: https://www.sjc.utah.gov/266/Building-Department ; https://www.sjc.utah.gov/DocumentCenter/View/427/Residential-Solar-Photovoltaic-System-Plan-Review-Requirements-PDF",
+      "sourceSheet": "UT seeded (web research 2026-11-10)"
+    },
+    {
+      "state": "UT",
+      "ahj": "West Jordan",
+      "submissionMethod": "West Jordan Public Portal (Cityworks, permit.westjordan.utah.gov/CityworksPortal-LIVE): New Application, Building & Safety, attach plans and submit",
+      "timeline": "Residential: up to 10 business days for the initial review",
+      "requiresElectricianSign": false,
+      "requiresElectricalStamp": false,
+      "requiresStructuralStamp": false,
+      "requiresElectricalPermitApplication": false,
+      "requiresBuildingPermitApplication": true,
+      "requiresSolarChecklist": false,
+      "requiresPlanSet": true,
+      "requiresUtilityApproval": false,
+      "requiresCustomerSignature": false,
+      "requiresFloodplainCheck": false,
+      "requiresJurisdictionCheck": false,
+      "otherRequirements": "From the portal: New Application (Business License or Building Permit), choose Building & Safety, then the category that fits the project; fill in required fields, attach plans and submit. Corrections come with a plan check report in the portal; resubmittals are reviewed within 5 business days. Fees are invoiced after approval. The city's building page publishes no solar-specific checklist. Electric utility: Rocky Mountain Power.",
+      "citations": [
+        {
+          "field": "submissionMethod",
+          "value": "permit.westjordan.utah.gov/CityworksPortal-LIVE",
+          "sourceUrl": "https://www.westjordan.utah.gov/community-development/building-and-safety/",
+          "quote": "Submit your building permit application on the West Jordan Public Portal by clicking the ‘Apply Online’ button below.",
+          "fetchedAt": "2026-11-10T08:20:04Z"
+        },
+        {
+          "field": "submissionMethod",
+          "sourceUrl": "https://www.westjordan.utah.gov/permit-portal-guide/",
+          "quote": "Choose “Building & Safety”, then choose the category that most applies to your project.",
+          "fetchedAt": "2026-11-10T08:19:31Z"
+        },
+        {
+          "field": "timeline",
+          "sourceUrl": "https://www.westjordan.utah.gov/permit-portal-guide/",
+          "quote": "Residential Projects: Allow up to 10 business days (excluding holidays) for the initial review by the Building and Planning Departments (if applicable).",
+          "fetchedAt": "2026-11-10T08:19:31Z"
+        }
+      ],
+      "reviewerNotes": "Seeded 2026-11-10 from the city's own public pages (worker-refdata-ut, plain reads; no portal was opened); NOT verified - confirm before relying on it. A person verifies the portal in the dashboard before anything files. Information pages are sources, not the portal. Sources: https://www.westjordan.utah.gov/community-development/building-and-safety/ ; https://www.westjordan.utah.gov/permit-portal-guide/",
+      "sourceSheet": "UT seeded (web research 2026-11-10)"
+    },
+    {
+      "state": "UT",
+      "ahj": "Ogden",
+      "submissionMethod": "Ogden EnerGov Self Service portal (EnerGov, egselfservice.ogdencity.com/EnerGovProd/SelfService): apply online, Residential category",
+      "timeline": "Allow 1-3 days to process applications",
+      "requiresElectricianSign": false,
+      "requiresElectricalStamp": false,
+      "requiresStructuralStamp": true,
+      "requiresElectricalPermitApplication": false,
+      "requiresBuildingPermitApplication": true,
+      "requiresSolarChecklist": false,
+      "requiresPlanSet": true,
+      "requiresUtilityApproval": false,
+      "requiresCustomerSignature": false,
+      "requiresFloodplainCheck": false,
+      "requiresJurisdictionCheck": false,
+      "otherRequirements": "Apply online in the city's self-service portal (Residential: single family, duplex, triplex and townhomes); verify the address is in Ogden City's jurisdiction first. Construction documents as applicable, one PDF each; drawings sealed, signed and dated by a Utah-licensed design professional; partial submittals are not accepted; $70.50 deposit at application acceptance, deducted from the permit. The page does not name solar among the listed permit types. Electric utility: Rocky Mountain Power.",
+      "citations": [
+        {
+          "field": "submissionMethod",
+          "value": "egselfservice.ogdencity.com/EnerGovProd/SelfService",
+          "sourceUrl": "https://www.ogdencity.gov/188/Permit-Applications",
+          "quote": "Apply online for the following permits: Commercial",
+          "fetchedAt": "2026-11-10T08:21:29Z"
+        },
+        {
+          "field": "submissionMethod",
+          "sourceUrl": "https://www.ogdencity.gov/188/Permit-Applications",
+          "quote": "Residential : Includes Single Family, Duplex, Triplex and Townhomes",
+          "fetchedAt": "2026-11-10T08:21:29Z"
+        },
+        {
+          "field": "requiresStructuralStamp",
+          "sourceUrl": "https://www.ogdencity.gov/188/Permit-Applications",
+          "quote": "Drawings must be sealed, signed and dated by a Utah-licensed design professional.",
+          "fetchedAt": "2026-11-10T08:21:29Z"
+        },
+        {
+          "field": "otherRequirements",
+          "sourceUrl": "https://www.ogdencity.gov/188/Permit-Applications",
+          "quote": "A deposit of $70.50 is due at time of application acceptance.",
+          "fetchedAt": "2026-11-10T08:21:29Z"
+        }
+      ],
+      "reviewerNotes": "Seeded 2026-11-10 from the city's own public pages (worker-refdata-ut, plain reads; no portal was opened); NOT verified - confirm before relying on it. A person verifies the portal in the dashboard before anything files. Information pages are sources, not the portal. Sources: https://www.ogdencity.gov/188/Permit-Applications",
+      "sourceSheet": "UT seeded (web research 2026-11-10)"
+    },
+    {
+      "state": "UT",
+      "ahj": "Syracuse",
+      "submissionMethod": "Syracuse Building Permit Application Portal (CivicReview, app.civicreview.com/application/63bf35f1cc1ef01f6e69f1c9): residential applications and plans submitted digitally",
+      "timeline": "",
+      "requiresElectricianSign": false,
+      "requiresElectricalStamp": false,
+      "requiresStructuralStamp": false,
+      "requiresElectricalPermitApplication": false,
+      "requiresBuildingPermitApplication": true,
+      "requiresSolarChecklist": false,
+      "requiresPlanSet": true,
+      "requiresUtilityApproval": false,
+      "requiresCustomerSignature": false,
+      "requiresFloodplainCheck": false,
+      "requiresJurisdictionCheck": false,
+      "otherRequirements": "All residential building permit applications and their plans are submitted digitally through the city's application portal; review the application portal checklist first. Every permit needs inspections to close. The page names no solar-specific checklist. The portal host is a shared vendor platform: the application id names the city's form. Electric utility: Rocky Mountain Power.",
+      "citations": [
+        {
+          "field": "submissionMethod",
+          "value": "app.civicreview.com/application/63bf35f1cc1ef01f6e69f1c9",
+          "sourceUrl": "https://www.syracuseut.gov/160/Building",
+          "quote": "All residential and commercial building permit applications and associated plans should be submitted digitally by completing the online form: CLICK HERE FOR THE BUILDING PERMIT APPLICATION PORTAL",
+          "fetchedAt": "2026-11-10T08:20:36Z"
+        }
+      ],
+      "reviewerNotes": "Seeded 2026-11-10 from the city's own public pages (worker-refdata-ut, plain reads; no portal was opened); NOT verified - confirm before relying on it. A person verifies the portal in the dashboard before anything files. Information pages are sources, not the portal. Sources: https://www.syracuseut.gov/160/Building",
+      "sourceSheet": "UT seeded (web research 2026-11-10)"
+    },
+    {
+      "state": "UT",
+      "ahj": "Clearfield",
+      "submissionMethod": "Clearfield online building permit application portal (CivicReview, app.civicreview.com/application/626ac1803c76f2ee6a5ff584): Apply Now",
+      "timeline": "",
+      "requiresElectricianSign": false,
+      "requiresElectricalStamp": false,
+      "requiresStructuralStamp": false,
+      "requiresElectricalPermitApplication": false,
+      "requiresBuildingPermitApplication": true,
+      "requiresSolarChecklist": false,
+      "requiresPlanSet": true,
+      "requiresUtilityApproval": false,
+      "requiresCustomerSignature": false,
+      "requiresFloodplainCheck": false,
+      "requiresJurisdictionCheck": false,
+      "otherRequirements": "Building permits: Apply Now on the city's page opens the online application; the application carries its own checklist of required items (no checklist = no additional documents). Plans must meet the state and local design loads. The city's link to the application is wrapped in a link-protection redirect; the target is the CivicReview application above. The portal host is a shared vendor platform: the application id names the city's form. Electric utility: Rocky Mountain Power.",
+      "citations": [
+        {
+          "field": "submissionMethod",
+          "value": "app.civicreview.com/application/626ac1803c76f2ee6a5ff584",
+          "sourceUrl": "https://clearfield.city/business-development/",
+          "quote": "Building Permits Apply Now The city regulates construction and provides safeguards to ensure public safety through its permitting process.",
+          "fetchedAt": "2026-11-10T08:21:47Z"
+        },
+        {
+          "field": "otherRequirements",
+          "sourceUrl": "https://clearfield.city/business-development/",
+          "quote": "All plans must meet the individual design loads for State and Local codes.",
+          "fetchedAt": "2026-11-10T08:21:47Z"
+        }
+      ],
+      "reviewerNotes": "Seeded 2026-11-10 from the city's own public pages (worker-refdata-ut, plain reads; no portal was opened); NOT verified - confirm before relying on it. A person verifies the portal in the dashboard before anything files. Information pages are sources, not the portal. Sources: https://clearfield.city/business-development/",
+      "sourceSheet": "UT seeded (web research 2026-11-10)"
+    },
+    {
+      "state": "UT",
+      "ahj": "Bountiful",
+      "submissionMethod": "Bountiful CityInspect portal (CityInspect, utah.cityinspect.com, Bountiful's registration link): all permits, including the solar permit packet",
+      "timeline": "",
+      "requiresElectricianSign": false,
+      "requiresElectricalStamp": false,
+      "requiresStructuralStamp": true,
+      "requiresElectricalPermitApplication": false,
+      "requiresBuildingPermitApplication": true,
+      "requiresSolarChecklist": true,
+      "requiresPlanSet": true,
+      "requiresUtilityApproval": true,
+      "requiresCustomerSignature": true,
+      "requiresFloodplainCheck": false,
+      "requiresJurisdictionCheck": false,
+      "otherRequirements": "Bountiful City Light & Power (BCLP, the city-owned utility) net metering is applied for inside the same CityInspect solar permit application: the packet carries the Photovoltaic System NET Metered Agreement signed by the property owner and the BCLP One-Line Diagram form, and Planning, Engineering/Building, Fire and Power all approve in CityInspect. $50 application fee paid before submittal (by phone to Engineering); NET Metering $578; building permit $300 city + $3.50 state + $101.50 plan check (total $1,033, packet dated 9/30/25). BCLP approves the production meter base and the visible disconnect switch locations before construction. Residential single-phase PV is limited to 10 kW. Design wind 145 mph Exp B (ASCE 7). On-site inspection only, no Friday inspections. Battery (ESS) systems: a Storage Battery System permit packet of its own through CityInspect, which requires a South Davis Metro Fire Agency approval letter.",
+      "documents": {
+        "items": [
+          "Site plan (bird's-eye) with panel placement, north arrow, scale, date, street names and addresses (more for ground mounts)",
+          "One-line diagram, two sets, following the BCLP sample diagram (Attachment 4)",
+          "Engineer analysis letter on the existing roof structure with the added solar equipment and uplift resistance",
+          "Solar Panel Questions (Attachment 2)",
+          "Photovoltaic System NET Metered Agreement signed by the property owner (Attachment 3)",
+          "Bountiful City Light & Power One Line Diagram form (Attachment 4)",
+          "Spec sheets: solar product information",
+          "Photos of the electrical service (city meter main with disconnect): location 10 ft either side, panel dead front on, panel dead front off",
+          "$50 application fee paid before submittal"
+        ],
+        "sourceUrl": "https://www.bountiful.gov/DocumentCenter/View/343/Solar-Packet-Net-Meter-PDF",
+        "quote": "SOLAR PANEL APPLICATION PACKET ** Applications will be submitted on-line through the Cityinspect portal ** INCOMPLETE APPLICATIONS WILL NOT BE ACCEPTED",
+        "observedAt": "2026-11-10"
+      },
+      "citations": [
+        {
+          "field": "submissionMethod",
+          "value": "utah.cityinspect.com",
+          "sourceUrl": "https://www.bountiful.gov/177/Building",
+          "quote": "All permits are now completed through CityInspect, which is our online portal.",
+          "fetchedAt": "2026-11-10T08:21:01Z"
+        },
+        {
+          "field": "requiresCustomerSignature",
+          "sourceUrl": "https://www.bountiful.gov/DocumentCenter/View/343/Solar-Packet-Net-Meter-PDF",
+          "quote": "Photo Voltaic System NET Metered Agreement (signed by prop. owner) (Attachment 3)",
+          "fetchedAt": "2026-11-10T08:21:07Z"
+        },
+        {
+          "field": "requiresUtilityApproval",
+          "sourceUrl": "https://www.bountiful.gov/DocumentCenter/View/343/Solar-Packet-Net-Meter-PDF",
+          "quote": "Approvals, rejection or comments will be recorded in Cityinspect and available for applicant review.",
+          "fetchedAt": "2026-11-10T08:21:07Z"
+        },
+        {
+          "field": "otherRequirements",
+          "sourceUrl": "https://www.bountiful.gov/DocumentCenter/View/343/Solar-Packet-Net-Meter-PDF",
+          "quote": "For residential single-phase customers, the maximum allowable photovoltaic system size is 10 kW.",
+          "fetchedAt": "2026-11-10T08:21:07Z"
+        },
+        {
+          "field": "otherRequirements",
+          "sourceUrl": "https://www.bountiful.gov/DocumentCenter/View/343/Solar-Packet-Net-Meter-PDF",
+          "quote": "The location of the meter base for the NET Metered Production Meter must be approved by BCL&P prior to construction.",
+          "fetchedAt": "2026-11-10T08:21:07Z"
+        },
+        {
+          "field": "ess",
+          "sourceUrl": "https://www.bountiful.gov/DocumentCenter/View/342/Solar-Packet-Battery-System-PDF",
+          "quote": "SOUTH DAVIS METRO FIRE AGENCY: Approval Letter (See Attachment 5 for guidelines)",
+          "fetchedAt": "2026-11-10T08:21:07Z"
+        },
+        {
+          "field": "ess",
+          "sourceUrl": "https://www.bountiful.gov/DocumentCenter/View/342/Solar-Packet-Battery-System-PDF",
+          "quote": "SUBMIT COMPLETED BATTERY SYSTEM PERMIT APPLICATION PACKET ON THE CITYINSPECT PORTAL",
+          "fetchedAt": "2026-11-10T08:21:07Z"
+        }
+      ],
+      "reviewerNotes": "Seeded 2026-11-10 from the city's own public pages (worker-refdata-ut, plain reads; no portal was opened); NOT verified - confirm before relying on it. A person verifies the portal in the dashboard before anything files. Information pages are sources, not the portal. Sources: https://www.bountiful.gov/177/Building ; https://www.bountiful.gov/DocumentCenter/View/343/Solar-Packet-Net-Meter-PDF ; https://www.bountiful.gov/DocumentCenter/View/342/Solar-Packet-Battery-System-PDF",
+      "sourceSheet": "UT seeded (web research 2026-11-10)"
+    },
+    {
+      "state": "UT",
+      "ahj": "Kaysville",
+      "submissionMethod": "Kaysville online building permit portal (CityInspect, utah.cityinspect.com, Kaysville's registration link): plans submitted online",
+      "timeline": "Allow 10 business days for review",
+      "requiresElectricianSign": false,
+      "requiresElectricalStamp": false,
+      "requiresStructuralStamp": true,
+      "requiresElectricalPermitApplication": false,
+      "requiresBuildingPermitApplication": true,
+      "requiresSolarChecklist": true,
+      "requiresPlanSet": true,
+      "requiresUtilityApproval": true,
+      "requiresCustomerSignature": true,
+      "requiresFloodplainCheck": false,
+      "requiresJurisdictionCheck": false,
+      "otherRequirements": "Kaysville City Power (the city-owned utility): the Net Metering and Interconnection Agreement, signed and notarized, is attached to the online building permit application. The agreement is between Kaysville City and the homeowner (no third parties); not to exceed 15 kW (DC) total; the customer pays for and has a production meter installed; a facility of 11-15 kW needs a lockable, load-break manual disconnect within 10 feet of the utility meter; the city inspects and approves in writing before parallel operation. One-line diagram: maximum system kW output not to exceed 15 kW. Allow 10 business days for review.",
+      "documents": {
+        "items": [
+          "Net meter agreement, signed and notarized (attached online with the application)",
+          "Site plan: home, all PV components (main meter, production meter, AC disconnect, arrays, panels, inverters, pass-through boxes) grouped within 6 feet",
+          "One-line diagram: PV system type, main and production meters, disconnect and inverter type and rating, module layout and connection, maximum system kW output (not to exceed 15 kW), labeling, wiring and conduit, fuse/breaker ratings, grounding",
+          "Module, inverter and combiner box list with manufacturer specification sheets and installation guides; engineer of record confirms the roof carries the added load",
+          "Photo of the interconnection panel and any other boxes to be mounted",
+          "Other system components with their UL listing and installation information",
+          "Signage: engraved, mechanically fastened labels on meter bases and the safety disconnect, with samples and locations"
+        ],
+        "sourceUrl": "https://www.kaysville.gov/DocumentCenter/View/5290/Solar-Checklist",
+        "quote": "Net meter agreement- signed and notarized (attachment available on-line w/application)",
+        "observedAt": "2026-11-10"
+      },
+      "citations": [
+        {
+          "field": "submissionMethod",
+          "value": "utah.cityinspect.com",
+          "sourceUrl": "https://kaysville.gov/182/Building-Permits",
+          "quote": "We are digital! Please submit your plans through our ONLINE BUILDING PERMIT PORTAL",
+          "fetchedAt": "2026-11-10T08:20:29Z"
+        },
+        {
+          "field": "otherRequirements",
+          "sourceUrl": "https://www.kaysville.gov/DocumentCenter/View/1921/RESIDENTIAL-NET-METERING-AGREEMENT",
+          "quote": "Not to exceed 15KW (DC) in total capacity.",
+          "fetchedAt": "2026-11-10T08:20:30Z"
+        },
+        {
+          "field": "otherRequirements",
+          "sourceUrl": "https://www.kaysville.gov/DocumentCenter/View/1921/RESIDENTIAL-NET-METERING-AGREEMENT",
+          "quote": "The net metering agreement is between Kaysville City and the Kaysville City homeowner. No third parties.",
+          "fetchedAt": "2026-11-10T08:20:30Z"
+        },
+        {
+          "field": "requiresStructuralStamp",
+          "sourceUrl": "https://www.kaysville.gov/DocumentCenter/View/5290/Solar-Checklist",
+          "quote": "Please have engineer of record confirm roof is capable of supporting the additional loads from the new solar array.",
+          "fetchedAt": "2026-11-10T08:20:45Z"
+        },
+        {
+          "field": "timeline",
+          "sourceUrl": "https://www.kaysville.gov/DocumentCenter/View/5290/Solar-Checklist",
+          "quote": "Please allow 10 business days for the review.",
+          "fetchedAt": "2026-11-10T08:20:45Z"
+        }
+      ],
+      "reviewerNotes": "Seeded 2026-11-10 from the city's own public pages (worker-refdata-ut, plain reads; no portal was opened); NOT verified - confirm before relying on it. A person verifies the portal in the dashboard before anything files. Information pages are sources, not the portal. Sources: https://kaysville.gov/182/Building-Permits ; https://www.kaysville.gov/DocumentCenter/View/1921/RESIDENTIAL-NET-METERING-AGREEMENT ; https://www.kaysville.gov/DocumentCenter/View/5290/Solar-Checklist",
+      "sourceSheet": "UT seeded (web research 2026-11-10)"
     }
   ]
 }

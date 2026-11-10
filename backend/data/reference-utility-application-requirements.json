@@ -284,6 +284,165 @@
           }
         }
       ]
+    },
+    {
+      "states": [
+        "UT"
+      ],
+      "utility": "Murray City Power",
+      "displayName": "Murray City Power",
+      "matchNames": [
+        "murray city power",
+        "murray power",
+        "murray city light and power",
+        "murray city"
+      ],
+      "requirements": [
+        {
+          "key": "ac_disconnect",
+          "whenMissing": "blocker",
+          "sourceName": "Murray City Power Net Metering Checklist / Residential Solar Panel Plan Submittal Requirements",
+          "sourceUrl": "https://murray.utah.gov/DocumentCenter/View/15321/Solar-Check-List-042524",
+          "quote": "A separate safety disconnect must be installed between the solar system inverter and the production meter base, and located within several feet of the net meter base.",
+          "fetchedAt": "2026-11-10T08:19:28Z"
+        },
+        {
+          "key": "one_line",
+          "whenMissing": "warning",
+          "sourceName": "Murray City Power Net Metering Checklist / Residential Solar Panel Plan Submittal Requirements",
+          "sourceUrl": "https://murray.utah.gov/DocumentCenter/View/15321/Solar-Check-List-042524",
+          "quote": "ONE-LINE DIAGRAM showing the following information:",
+          "fetchedAt": "2026-11-10T08:19:28Z"
+        },
+        {
+          "key": "site_plan",
+          "whenMissing": "warning",
+          "sourceName": "Murray City Power Net Metering Checklist / Residential Solar Panel Plan Submittal Requirements",
+          "sourceUrl": "https://murray.utah.gov/DocumentCenter/View/15321/Solar-Check-List-042524",
+          "quote": "SITE PLAN (PLOT PLAN):",
+          "fetchedAt": "2026-11-10T08:19:28Z"
+        },
+        {
+          "key": "module_spec",
+          "whenMissing": "warning",
+          "sourceName": "Murray City Power Net Metering Checklist / Residential Solar Panel Plan Submittal Requirements",
+          "sourceUrl": "https://murray.utah.gov/DocumentCenter/View/15321/Solar-Check-List-042524",
+          "quote": "Provide manufacturer’s detailed specification sheets including installation guides for above items",
+          "fetchedAt": "2026-11-10T08:19:28Z"
+        },
+        {
+          "key": "inverter_spec",
+          "whenMissing": "warning",
+          "sourceName": "Murray City Power Net Metering Checklist / Residential Solar Panel Plan Submittal Requirements",
+          "sourceUrl": "https://murray.utah.gov/DocumentCenter/View/15321/Solar-Check-List-042524",
+          "quote": "Provide manufacturer’s detailed specification sheets including installation guides for above items",
+          "fetchedAt": "2026-11-10T08:19:28Z"
+        }
+      ]
+    },
+    {
+      "states": [
+        "UT"
+      ],
+      "utility": "Bountiful City Light & Power",
+      "displayName": "Bountiful City Light & Power",
+      "matchNames": [
+        "bountiful city light and power",
+        "bountiful light and power",
+        "bountiful city power",
+        "bountiful power",
+        "bcl and p",
+        "bclp"
+      ],
+      "requirements": [
+        {
+          "key": "ac_disconnect",
+          "whenMissing": "blocker",
+          "sourceName": "Bountiful City Light & Power, Solar Packet - Net Meter",
+          "sourceUrl": "https://www.bountiful.gov/DocumentCenter/View/343/Solar-Packet-Net-Meter-PDF",
+          "quote": "The customer is required to provide and install a visible disconnect switch between the photovoltaic system inverter and the customer's breaker panel.",
+          "fetchedAt": "2026-11-10T08:21:07Z"
+        },
+        {
+          "key": "one_line",
+          "whenMissing": "warning",
+          "sourceName": "Bountiful City Light & Power, Solar Packet - Net Meter",
+          "sourceUrl": "https://www.bountiful.gov/DocumentCenter/View/343/Solar-Packet-Net-Meter-PDF",
+          "quote": "ONE-LINE DIAGRAM (electrical diagram or block diagram): Two sets (diagram must follow Bountiful City Light & Power sample diagram included in the solar packet – Attachment 4).",
+          "fetchedAt": "2026-11-10T08:21:07Z"
+        },
+        {
+          "key": "site_plan",
+          "whenMissing": "warning",
+          "sourceName": "Bountiful City Light & Power, Solar Packet - Net Meter",
+          "sourceUrl": "https://www.bountiful.gov/DocumentCenter/View/343/Solar-Packet-Net-Meter-PDF",
+          "quote": "SITE PLAN: The proposed site plan shall include:",
+          "fetchedAt": "2026-11-10T08:21:07Z"
+        },
+        {
+          "key": "owner_signature",
+          "whenMissing": "warning",
+          "sourceName": "Bountiful City Light & Power, Solar Packet - Net Meter",
+          "sourceUrl": "https://www.bountiful.gov/DocumentCenter/View/343/Solar-Packet-Net-Meter-PDF",
+          "quote": "Photo Voltaic System NET Metered Agreement (signed by prop. owner) (Attachment 3)",
+          "fetchedAt": "2026-11-10T08:21:07Z"
+        },
+        {
+          "key": "meter_photo",
+          "whenMissing": "warning",
+          "sourceName": "Bountiful City Light & Power, Solar Packet - Net Meter",
+          "sourceUrl": "https://www.bountiful.gov/DocumentCenter/View/343/Solar-Packet-Net-Meter-PDF",
+          "quote": "PHOTOS: Electrical service (City meter main with disconnect)",
+          "fetchedAt": "2026-11-10T08:21:07Z"
+        }
+      ]
+    },
+    {
+      "states": [
+        "UT"
+      ],
+      "utility": "Kaysville City Power",
+      "displayName": "Kaysville City Power",
+      "matchNames": [
+        "kaysville city power",
+        "kaysville power",
+        "kaysville city light and power",
+        "kaysville city"
+      ],
+      "requirements": [
+        {
+          "key": "owner_signature",
+          "whenMissing": "warning",
+          "sourceName": "Kaysville City Solar Checklist",
+          "sourceUrl": "https://www.kaysville.gov/DocumentCenter/View/5290/Solar-Checklist",
+          "quote": "Net meter agreement- signed and notarized (attachment available on-line w/application)",
+          "fetchedAt": "2026-11-10T08:20:45Z"
+        },
+        {
+          "key": "one_line",
+          "whenMissing": "warning",
+          "sourceName": "Kaysville City Solar Checklist",
+          "sourceUrl": "https://www.kaysville.gov/DocumentCenter/View/5290/Solar-Checklist",
+          "quote": "One-line diagram showing the following information:",
+          "fetchedAt": "2026-11-10T08:20:45Z"
+        },
+        {
+          "key": "site_plan",
+          "whenMissing": "warning",
+          "sourceName": "Kaysville City Solar Checklist",
+          "sourceUrl": "https://www.kaysville.gov/DocumentCenter/View/5290/Solar-Checklist",
+          "quote": "Site plan",
+          "fetchedAt": "2026-11-10T08:20:45Z"
+        },
+        {
+          "key": "ac_disconnect",
+          "whenMissing": "warning",
+          "sourceName": "Kaysville City Net Metering and Interconnection Agreement (2018), for 11-15 kW facilities",
+          "sourceUrl": "https://www.kaysville.gov/DocumentCenter/View/1921/RESIDENTIAL-NET-METERING-AGREEMENT",
+          "quote": "An interconnection Customer of the City must install and maintain a manual disconnect switch which will disconnect the generating facility from the utility’s distribution system.",
+          "fetchedAt": "2026-11-10T08:20:30Z"
+        }
+      ]
     }
   ],
   "strictDefault": {
