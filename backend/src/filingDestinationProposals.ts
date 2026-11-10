@@ -1,0 +1,445 @@
+// ---------------------------------------------------------------------------
+// PROPOSED FILING DESTINATIONS, CONFIRMED BY ONE CLICK (owner, 2026-11-10).
+//
+// The owner's decision: where a filing is SENT (a permit portal's address, a utility's portal, an
+// email address, "filed inside the city's permit") stays a PERSON's fact and is never trusted
+// automatically (CLAUDE.md rule 3's last sentence, rule 1, rule 5's carve-out). But the bot already
+// read most of these on the authority's own official page, with the page's words. So Keelix
+// PRE-FILLS a proposed destination from that page — the address, the page link and its verbatim
+// words — and a staff member confirms it with one click, once per city or utility. Editing it or
+// rejecting it is one click too.
+//
+// WHAT A PROPOSAL IS, AND IS NOT:
+//   · It is COMPUTED on read from rows already on file, and stored NOWHERE. No table, column or
+//     cache holds a proposed address, so nothing that decides a channel, stages a run, launches a
+//     portal or sends an email can read one: channelResolution / utilityTrackPresentation /
+//     filingEmailChannelFor / the stage read only the person-verified records below. Only server.ts's
+//     filing-destination routes import this module (pinned by filingDestinationProposals.test).
+//   · It comes ONLY from a row that carries an http(s) source page on the authority's OWN official
+//     host (shared/src/officialSource.isOfficialSourceHost — a government host, or a domain a person
+//     verified as the authority's own), a verbatim quote and a fetched-at time. Anything else is
+//     listed under `skipped` with why, never proposed.
+//   · Its sources: an AHJ's reference process profile citations (field "submissionMethod", the value
+//     read), the AHJ's per-job permit-process lookup (a permit's cited portal), and the utility's
+//     filing lookup (its cited portal, a with-permit method, or an email address in its words). A NEM
+//     destination is NEVER taken from an AHJ's row (rule 5: never the AHJ's row for the NEM track).
+//
+// WHAT CONFIRMING WRITES — THE EXISTING PERSON-VERIFIED RECORD, NOTHING NEW:
+//   · a permit portal  → saveVerifiedAhjProfile (verified permit_utility_knowledge row, portal_url);
+//   · a utility portal → saveVerifiedUtilityProfile (same, the utility's row);
+//   · an email address → filingEmail.setFilingEmail (filing_email_json on the authority's lookup row);
+//   · with the permit  → utilityFilingLookup.verifyUtilityFilingLookup with the with-permit statement.
+//   Each with the named person (verified_by) and the time (verified_at), and an audit row on the job.
+//   The same fit checks the manual doors run (rule 5's hostFitsTrackAndEntity through
+//   assertOperatorPortalUrlFits, the information-page refusal, the filing-email record rules) run
+//   before the write, and on the read too, so a proposal that would be refused says why and cannot
+//   be confirmed. Whether automation may then FILE is still rule 1's gate, unchanged.
+//
+// Universal: reads whatever authority the job names. No state, city, utility or portal is named here.
+// ---------------------------------------------------------------------------
+import crypto from "node:crypto";
+import type { AhjProcessProfile, ProjectRecord, SubmittalTrackType } from "../../shared/src/types";
+import { isOfficialSourceHost, quoteText, sourceHostOf } from "../../shared/src/officialSource";
+import type { AppDb } from "./db";
+import { addAuditLog } from "./audit";
+import { nowIso } from "./time";
+import { authorityForTrack, filingEmailRecordProblems, readFilingEmail, setFilingEmail, type FilingAuthority } from "./filingEmail";
+import { getPermitProcessLookup, projectForTrack } from "./permitProcess";
+import { findAhjProcessProfile } from "./processProfiles";
+import { personVerifiedAuthorityHosts } from "./officialAuthorityHosts";
+import { FILED_WITH_AHJ_PERMIT, getUtilityFilingLookup, verifyUtilityFilingLookup } from "./utilityFilingLookup";
+import { utilityPersonVerifiedHosts } from "./utilityRequirements";
+import { hostFitsTrackAndEntity, isInformationalPageUrl, trackSafeUrl } from "./portalChannel";
+import { assertOperatorPortalUrlFits, portalEntityEvidence } from "./portalRecipes";
+import { saveVerifiedAhjProfile, saveVerifiedUtilityProfile } from "./knowledgeBase";
+
+const str = (v: unknown): string => (typeof v === "string" ? v.trim() : v == null ? "" : String(v).trim());
+
+export type DestinationKind = "portal" | "email" | "with_permit";
+export type DestinationSource = "reference" | "permit_lookup" | "utility_lookup";
+
+export interface DestinationProposal {
+  /** A fingerprint of the authority, kind, address, page and words: a changed source is a new proposal. */
+  id: string;
+  kind: DestinationKind;
+  /** The portal URL or the email address; "" for "filed with the permit". */
+  address: string;
+  /** with_permit: the permit application it rides in, as the row names it. */
+  name?: string;
+  sourceUrl: string;
+  sourceHost: string;
+  /** The page's own words, verbatim as the row carries them. */
+  quote: string;
+  fetchedAt: string;
+  from: DestinationSource;
+  /** The words contain the address (else the address is the link behind the words: open the page). */
+  quoteNamesAddress: boolean;
+  /** Why Confirm would be refused right now; empty = one click confirms it. */
+  problems: string[];
+}
+
+export interface AuthorityDestinations {
+  authority: { kind: "ahj" | "utility"; name: string; state: string; profileKey: string };
+  /** The job's tracks that file with this authority. */
+  tracks: SubmittalTrackType[];
+  /** verified: a person's record already says where these tracks file (no proposal is offered). */
+  status: "verified" | "proposed" | "none";
+  /** The verified destination in words, when status is verified. */
+  verified?: string;
+  proposals: DestinationProposal[];
+  rejected: Array<{ id: string; kind: string; address: string; rejectedBy: string; rejectedAt: string; reason: string }>;
+  /** Candidates that were NOT proposed, and why (not an official page, no words, no read time). */
+  skipped: string[];
+}
+
+/** A cited door candidate, before the official-page test. */
+interface Candidate {
+  kind: DestinationKind;
+  address: string;
+  name?: string;
+  sourceUrl: string;
+  quote: string;
+  fetchedAt: string;
+  from: DestinationSource;
+}
+
+const EMAIL_IN_TEXT = /[a-z0-9.!#$%&'*+/=?^_`{|}~-]+@(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,}/gi;
+const ISO_TIME = /^\d{4}-\d{2}-\d{2}(?:T|$)/;
+
+/** A scheme-less value ("permits.example.gov/apply") as an https URL; "" when it is not a URL. */
+export function addressAsUrl(value: string): string {
+  const v = str(value).replace(/[).,;]+$/, "");
+  if (!v || /\s/.test(v)) return "";
+  const withScheme = /^https?:\/\//i.test(v) ? v : /^[a-z0-9-]+(?:\.[a-z0-9-]+)+(?:[/?#]\S*)?$/i.test(v) ? `https://${v}` : "";
+  if (!withScheme) return "";
+  try { return new URL(withScheme).hostname.includes(".") ? withScheme : ""; } catch { return ""; }
+}
+
+export function proposalId(authorityKey: string, c: Pick<Candidate, "kind" | "address" | "sourceUrl" | "quote">): string {
+  return crypto.createHash("sha256").update([authorityKey, c.kind, c.address.toLowerCase(), c.sourceUrl, quoteText(c.quote)].join("\u0000")).digest("hex").slice(0, 24);
+}
+
+function quoteNames(kind: DestinationKind, address: string, quote: string): boolean {
+  const q = quoteText(quote).toLowerCase();
+  if (kind === "with_permit") return true;
+  if (kind === "email") return q.includes(address.toLowerCase());
+  const host = sourceHostOf(address);
+  return !!host && q.includes(host.replace(/^www\./, ""));
+}
+
+/** Citations on a reference process profile (the optional `citations` evidence field), read
+ *  structurally so this works whether or not the shared type declares it yet. */
+function profileCitations(profile: AhjProcessProfile | null): Array<{ field: string; value: string; sourceUrl: string; quote: string; fetchedAt: string }> {
+  const raw = (profile as unknown as { citations?: unknown } | null)?.citations;
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .filter((c): c is Record<string, unknown> => !!c && typeof c === "object")
+    .map((c) => ({ field: str(c.field), value: str(c.value), sourceUrl: str(c.sourceUrl), quote: str(c.quote), fetchedAt: str(c.fetchedAt) }));
+}
+
+/** Which of a permit lookup's permits answer for a track. */
+function disciplinesFor(track: SubmittalTrackType): string[] {
+  if (track === "building") return ["structural", "combo"];
+  if (track === "electrical") return ["electrical", "combo"];
+  return ["combo", "structural", "electrical", "other"];
+}
+
+/** Every cited door candidate for an AHJ (permit side). Pure over the rows it is handed. */
+export function permitCandidates(input: {
+  profile: AhjProcessProfile | null;
+  lookup: ReturnType<typeof getPermitProcessLookup>;
+  tracks: SubmittalTrackType[];
+}): Candidate[] {
+  const out: Candidate[] = [];
+  for (const c of profileCitations(input.profile)) {
+    if (c.field !== "submissionMethod") continue;
+    const url = addressAsUrl(c.value);
+    if (url) out.push({ kind: "portal", address: url, sourceUrl: c.sourceUrl, quote: c.quote, fetchedAt: c.fetchedAt, from: "reference" });
+    for (const email of c.quote.match(EMAIL_IN_TEXT) ?? []) {
+      out.push({ kind: "email", address: email.toLowerCase(), sourceUrl: c.sourceUrl, quote: c.quote, fetchedAt: c.fetchedAt, from: "reference" });
+    }
+  }
+  const lookup = input.lookup;
+  if (lookup && lookup.confidence !== "verified") {
+    const wanted = new Set(input.tracks.flatMap(disciplinesFor));
+    for (const p of lookup.permits ?? []) {
+      if (!wanted.has(str(p.discipline))) continue;
+      const url = addressAsUrl(str(p.portalUrl?.value));
+      if (url) out.push({ kind: "portal", address: url, sourceUrl: str(p.portalUrl.sourceUrl), quote: str(p.portalUrl.quote), fetchedAt: str(lookup.lookedUpAt), from: "permit_lookup" });
+    }
+  }
+  return out;
+}
+
+/** Every cited door candidate for a utility (NEM side): its own filing lookup only, never an AHJ's row. */
+export function utilityCandidates(lookup: ReturnType<typeof getUtilityFilingLookup>): Candidate[] {
+  if (!lookup || lookup.confidence === "verified") return [];
+  const f = lookup.filing;
+  const v = f?.value;
+  if (!v) return [];
+  const base = { sourceUrl: str(f.sourceUrl), quote: str(f.quote), fetchedAt: str(lookup.lookedUpAt), from: "utility_lookup" as const };
+  const out: Candidate[] = [];
+  if (v.method === FILED_WITH_AHJ_PERMIT) out.push({ ...base, kind: "with_permit", address: "", name: str(v.name) || "AHJ permit application" });
+  else {
+    const url = addressAsUrl(str(v.url));
+    if (url) out.push({ ...base, kind: "portal", address: url });
+    for (const email of str(f.quote).match(EMAIL_IN_TEXT) ?? []) out.push({ ...base, kind: "email", address: email.toLowerCase() });
+  }
+  return out;
+}
+
+/** Why a candidate is not proposed at all (empty = it is). The official-page rule, words and time. */
+export function candidateSkipReasons(c: Candidate, verifiedAuthorityHosts: readonly string[]): string[] {
+  const reasons: string[] = [];
+  const host = sourceHostOf(c.sourceUrl);
+  if (!host) reasons.push("no http(s) source page");
+  else if (!isOfficialSourceHost(c.sourceUrl, verifiedAuthorityHosts)) reasons.push(`${host} is not the authority's own official host (a government host, or a domain a person verified as its own)`);
+  if (quoteText(c.quote).length < 3) reasons.push("no verbatim words from the page");
+  if (!ISO_TIME.test(str(c.fetchedAt))) reasons.push("no time the page was read");
+  return reasons;
+}
+
+/** Why confirming would be refused now (empty = confirmable). Reads only. */
+function confirmProblems(db: AppDb, authority: FilingAuthority, track: SubmittalTrackType, c: Candidate): string[] {
+  const out: string[] = [];
+  if (c.kind === "portal") {
+    const t = authority.kind === "utility" ? "nem" : track;
+    if (!trackSafeUrl(t, c.address)) out.push(authority.kind === "utility" ? "this is a permit portal, not a utility's (rule 5)" : "this is a utility interconnection portal, not a permit portal (rule 5)");
+    else if (isInformationalPageUrl(c.address)) out.push("this address is an information page, not an application portal");
+    else {
+      try {
+        const entity = portalEntityEvidence(db, { scope: authority.kind === "utility" ? "utility" : "ahj", state: authority.state, name: authority.name });
+        const fit = hostFitsTrackAndEntity(t, entity, c.address, "operator");
+        if (!fit.fits) out.push(fit.reason);
+      } catch (err) { out.push(`the portal fit check could not run: ${err instanceof Error ? err.message : String(err)}`); }
+    }
+  } else if (c.kind === "email") {
+    out.push(...filingEmailRecordProblems({ address: c.address, sourceUrl: c.sourceUrl, quote: c.quote, verifiedBy: "check", verifiedAt: "check" }));
+    if (!readFilingEmail(db, authority).rowExists) out.push(`no ${authority.kind === "utility" ? "utility filing lookup" : "permit process lookup"} is on file for ${authority.name} yet: run its lookup first, the email record lives on that row`);
+  } else if (c.kind === "with_permit") {
+    if (authority.kind !== "utility") out.push("only a utility's application rides inside a permit");
+    if (quoteText(c.quote).length < 8) out.push("a with-permit statement carries the page's own words");
+  }
+  return out;
+}
+
+function rejectionsFor(db: AppDb, profileKey: string, kind: string): AuthorityDestinations["rejected"] {
+  try {
+    return db.query<Record<string, unknown>>(
+      "SELECT proposal_id, kind, address, rejected_by, rejected_at, reason FROM filing_destination_rejections WHERE authority_kind = ? AND profile_key = ? ORDER BY rejected_at DESC",
+      [kind, profileKey],
+    ).map((r) => ({ id: str(r.proposal_id), kind: str(r.kind), address: str(r.address), rejectedBy: str(r.rejected_by), rejectedAt: str(r.rejected_at), reason: str(r.reason) }));
+  } catch { return []; }
+}
+
+/** The verified destination in words, or "" — a person's record only (the same records confirming writes). */
+function verifiedDestination(db: AppDb, authority: FilingAuthority, trackViews: Array<{ type: SubmittalTrackType; channel?: string; channelBasis?: string }>): string {
+  const email = readFilingEmail(db, authority).record;
+  if (email && !filingEmailRecordProblems(email).length) return `Email ${email.address} (verified by ${email.verifiedBy})`;
+  const v = trackViews.find((t) => t.channelBasis === "verified");
+  return v ? str(v.channel) : "";
+}
+
+/**
+ * THE JOB'S FILING DESTINATIONS, PER AUTHORITY. Reads only: nothing is written, nothing is cached.
+ * `trackViews` are the job's tracks as getSubmittalTracks resolved them (type, channel, basis).
+ */
+export function filingDestinationsFor(
+  db: AppDb,
+  project: ProjectRecord,
+  trackViews: Array<{ type: SubmittalTrackType; channel?: string; channelBasis?: string }>,
+): AuthorityDestinations[] {
+  const groups = new Map<string, { authority: FilingAuthority; tracks: SubmittalTrackType[]; views: typeof trackViews }>();
+  for (const t of trackViews) {
+    const a = authorityForTrack(project, t.type);
+    if (!a) continue;
+    const key = `${a.kind}|${a.profileKey}`;
+    const g = groups.get(key) ?? { authority: a, tracks: [], views: [] };
+    g.tracks.push(t.type);
+    g.views.push(t);
+    groups.set(key, g);
+  }
+  const out: AuthorityDestinations[] = [];
+  for (const { authority, tracks, views } of groups.values()) {
+    const head = { kind: authority.kind, name: authority.name, state: authority.state, profileKey: authority.profileKey };
+    const rejected = rejectionsFor(db, authority.profileKey, authority.kind);
+    const verified = verifiedDestination(db, authority, views);
+    if (verified) {
+      out.push({ authority: head, tracks, status: "verified", verified, proposals: [], rejected, skipped: [] });
+      continue;
+    }
+    let candidates: Candidate[];
+    let hosts: string[];
+    if (authority.kind === "utility") {
+      candidates = utilityCandidates(getUtilityFilingLookup(db, authority.state, authority.name));
+      try { hosts = utilityPersonVerifiedHosts(db, authority.state, authority.name); } catch { hosts = []; }
+    } else {
+      const issuer = projectForTrack(project, tracks[0]);
+      candidates = permitCandidates({ profile: findAhjProcessProfile(issuer), lookup: getPermitProcessLookup(db, authority.state, authority.name), tracks });
+      try { hosts = personVerifiedAuthorityHosts(db, authority.state, authority.name); } catch { hosts = []; }
+    }
+    const rejectedIds = new Set(rejected.map((r) => r.id));
+    const proposals: DestinationProposal[] = [];
+    const skipped: string[] = [];
+    const seen = new Set<string>();
+    for (const c of candidates) {
+      const id = proposalId(authority.profileKey, c);
+      if (seen.has(id)) continue;
+      seen.add(id);
+      const label = c.kind === "with_permit" ? "filed with the permit" : c.address;
+      const skip = candidateSkipReasons(c, hosts);
+      if (skip.length) { skipped.push(`${label} (${c.sourceUrl || "no page"}): ${skip.join("; ")}`); continue; }
+      if (rejectedIds.has(id)) continue;
+      proposals.push({
+        id, kind: c.kind, address: c.address, ...(c.name ? { name: c.name } : {}),
+        sourceUrl: c.sourceUrl, sourceHost: sourceHostOf(c.sourceUrl), quote: c.quote, fetchedAt: c.fetchedAt, from: c.from,
+        quoteNamesAddress: quoteNames(c.kind, c.address, c.quote),
+        problems: confirmProblems(db, authority, tracks[0], c),
+      });
+    }
+    out.push({ authority: head, tracks, status: proposals.length ? "proposed" : "none", proposals, rejected, skipped });
+  }
+  return out;
+}
+
+// ── A PERSON'S DECISION ────────────────────────────────────────────────────────────────────────
+
+export interface DestinationDecision {
+  track: SubmittalTrackType;
+  /** The proposal the person saw (Confirm). Absent, or naming nothing current, = a person's own statement (Edit). */
+  proposalId?: string;
+  kind: DestinationKind;
+  address: string;
+  name?: string;
+  sourceUrl: string;
+  quote: string;
+}
+
+export class DestinationRefused extends Error {
+  constructor(public status: number, message: string) { super(message); }
+}
+
+/** One segment of a KB note: the record's own " | " separator never appears inside it. */
+const noteSegment = (s: string): string => str(s).replace(/\s*\|\s*/g, " / ").slice(0, 400);
+
+/**
+ * CONFIRM A PROPOSAL, OR STATE AN EDITED DESTINATION, AS A NAMED PERSON. Writes the existing
+ * person-verified record for the kind and audits it on the job. A Confirm must name a proposal
+ * that is still current and confirmable, with exactly the address, page and words shown (the server
+ * re-derives it; a stale or altered click is refused, not re-read as an edit). An Edit (no proposal)
+ * is the person's own statement: it carries its page and the page's words, and passes the same
+ * fit checks as every manual door. `verifiedBy` is already a named person (server.namedPersonDecider).
+ */
+export function decideFilingDestination(
+  db: AppDb,
+  project: ProjectRecord,
+  trackViews: Array<{ type: SubmittalTrackType; channel?: string; channelBasis?: string }>,
+  decision: DestinationDecision,
+  verifiedBy: string,
+): { action: "confirmed" | "stated"; authority: AuthorityDestinations["authority"]; kind: DestinationKind; address: string } {
+  const who = str(verifiedBy).slice(0, 120);
+  if (!who) throw new DestinationRefused(400, "A filing destination is confirmed by a named person.");
+  if (!trackViews.some((t) => t.type === decision.track)) throw new DestinationRefused(400, `This job has no ${decision.track} track.`);
+  const authority = authorityForTrack(project, decision.track);
+  if (!authority) throw new DestinationRefused(400, "This track names no authority to file with.");
+  const kind = decision.kind;
+  if (!["portal", "email", "with_permit"].includes(kind)) throw new DestinationRefused(400, "kind is portal, email or with_permit.");
+  const sourceUrl = str(decision.sourceUrl).slice(0, 600);
+  const quote = str(decision.quote).slice(0, 600);
+  let address = kind === "email" ? str(decision.address).toLowerCase() : kind === "portal" ? addressAsUrl(decision.address) : "";
+  if (kind === "portal" && !address) throw new DestinationRefused(400, `"${str(decision.address).slice(0, 200)}" is not a portal address.`);
+
+  let action: "confirmed" | "stated" = "stated";
+  if (str(decision.proposalId)) {
+    const group = filingDestinationsFor(db, project, trackViews).find((g) => g.authority.kind === authority.kind && g.authority.profileKey === authority.profileKey);
+    const p = group?.proposals.find((x) => x.id === str(decision.proposalId));
+    if (!p) throw new DestinationRefused(409, "That proposal is no longer current (the source changed, it was rejected, or a person already recorded this authority's destination). Reload and look again.");
+    if (p.kind !== kind || p.address !== address || p.sourceUrl !== sourceUrl || quoteText(p.quote) !== quoteText(quote)) {
+      throw new DestinationRefused(409, "What was sent is not the proposal shown. Reload, or use Edit to state a different destination.");
+    }
+    if (p.problems.length) throw new DestinationRefused(409, `This proposal cannot be confirmed: ${p.problems.join("; ")}`);
+    action = "confirmed";
+  } else {
+    // A PERSON'S OWN STATEMENT: the page they read it on and its words, like every manual door.
+    if (!/^https?:\/\/\S+$/i.test(sourceUrl) || !sourceHostOf(sourceUrl)) throw new DestinationRefused(400, "Say which http(s) page you read this destination on.");
+    if (quoteText(quote).length < 8) throw new DestinationRefused(400, "Copy the page's own words that say where applications go.");
+  }
+
+  const fromNote = `Filing destination ${action} by ${who} from ${sourceUrl}: "${noteSegment(quote)}"`;
+  if (kind === "portal") {
+    const t = authority.kind === "utility" ? "nem" : decision.track;
+    if (!trackSafeUrl(t, address)) throw new DestinationRefused(409, `${address} belongs on the ${authority.kind === "utility" ? "AHJ's permit" : "utility's interconnection"} track, not this one (rule 5).`);
+    if (isInformationalPageUrl(address)) throw new DestinationRefused(409, `${address} is an information page, not an application portal.`);
+    try {
+      assertOperatorPortalUrlFits(db, { track: t, state: authority.state, name: authority.name, url: address });
+    } catch (err) {
+      throw new DestinationRefused(409, err instanceof Error ? err.message : String(err));
+    }
+    if (authority.kind === "utility") saveVerifiedUtilityProfile(db, { state: authority.state, utility: authority.name, portalUrl: address, notes: fromNote, verifiedBy: who });
+    else saveVerifiedAhjProfile(db, { state: authority.state, ahj: authority.name, portalUrl: address, notes: fromNote, verifiedBy: who });
+  } else if (kind === "email") {
+    const r = setFilingEmail(db, authority, { address, sourceUrl, quote }, who);
+    if (!r.saved) throw new DestinationRefused(r.problems.length ? 400 : 409, r.reason);
+  } else {
+    if (authority.kind !== "utility") throw new DestinationRefused(400, "Only a utility's application rides inside a permit.");
+    const r = verifyUtilityFilingLookup(db, { state: authority.state, utility: authority.name }, {
+      verifiedBy: who, filedWithPermit: { name: str(decision.name).slice(0, 160) || "AHJ permit application", sourceUrl, quote },
+    });
+    if (!r.saved) throw new DestinationRefused(r.lookup ? 409 : 400, r.reason);
+    address = "";
+  }
+  addAuditLog(db, project.id, "human", who, `filing_destination.${action}`, {
+    authorityKind: authority.kind, authority: authority.name, state: authority.state, track: decision.track,
+    kind, address, sourceUrl, ...(action === "confirmed" ? { proposalId: str(decision.proposalId) } : {}),
+  });
+  return { action, authority: { kind: authority.kind, name: authority.name, state: authority.state, profileKey: authority.profileKey }, kind, address };
+}
+
+/** REJECT A PROPOSAL (a named person): it stops being offered for this authority until its source
+ *  changes (a new page or new words make a new proposal). Shared like the authority's rows. */
+export function rejectFilingDestination(
+  db: AppDb,
+  project: ProjectRecord,
+  trackViews: Array<{ type: SubmittalTrackType; channel?: string; channelBasis?: string }>,
+  input: { track: SubmittalTrackType; proposalId: string; reason?: string },
+  rejectedBy: string,
+): { rejected: true; proposalId: string } {
+  const who = str(rejectedBy).slice(0, 120);
+  if (!who) throw new DestinationRefused(400, "A proposal is rejected by a named person.");
+  const authority = authorityForTrack(project, input.track);
+  if (!authority || !trackViews.some((t) => t.type === input.track)) throw new DestinationRefused(400, `This job has no ${input.track} track to reject a destination on.`);
+  const group = filingDestinationsFor(db, project, trackViews).find((g) => g.authority.kind === authority.kind && g.authority.profileKey === authority.profileKey);
+  const p = group?.proposals.find((x) => x.id === str(input.proposalId));
+  if (!p) throw new DestinationRefused(409, "That proposal is no longer current. Reload and look again.");
+  const reason = str(input.reason).slice(0, 300);
+  db.run(
+    `INSERT INTO filing_destination_rejections (proposal_id, authority_kind, profile_key, state, authority, kind, address, source_url, reason, rejected_by, rejected_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT(proposal_id) DO UPDATE SET reason = excluded.reason, rejected_by = excluded.rejected_by, rejected_at = excluded.rejected_at`,
+    [p.id, authority.kind, authority.profileKey, authority.state, authority.name, p.kind, p.address, p.sourceUrl, reason, who, nowIso()],
+  );
+  addAuditLog(db, project.id, "human", who, "filing_destination.rejected", {
+    authorityKind: authority.kind, authority: authority.name, state: authority.state, track: input.track, kind: p.kind, address: p.address, sourceUrl: p.sourceUrl, proposalId: p.id, reason,
+  });
+  return { rejected: true, proposalId: p.id };
+}
+
+/** UNDO A REJECTION (a named person): the proposal is offered again. */
+export function withdrawDestinationRejection(
+  db: AppDb,
+  project: ProjectRecord,
+  input: { track: SubmittalTrackType; proposalId: string },
+  by: string,
+): { withdrawn: boolean } {
+  const who = str(by).slice(0, 120);
+  if (!who) throw new DestinationRefused(400, "A rejection is withdrawn by a named person.");
+  const authority = authorityForTrack(project, input.track);
+  if (!authority) throw new DestinationRefused(400, "This track names no authority.");
+  const row = db.get<Record<string, unknown>>("SELECT proposal_id, kind, address FROM filing_destination_rejections WHERE proposal_id = ? AND authority_kind = ? AND profile_key = ?", [str(input.proposalId), authority.kind, authority.profileKey]);
+  if (!row) return { withdrawn: false };
+  db.run("DELETE FROM filing_destination_rejections WHERE proposal_id = ?", [str(input.proposalId)]);
+  addAuditLog(db, project.id, "human", who, "filing_destination.rejection_withdrawn", {
+    authorityKind: authority.kind, authority: authority.name, state: authority.state, track: input.track, kind: str(row.kind), address: str(row.address), proposalId: str(input.proposalId),
+  });
+  return { withdrawn: true };
+}

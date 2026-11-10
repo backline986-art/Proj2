@@ -57,6 +57,8 @@ const NAMES = [
   "trackLookupHtml",
   // What the utility's application asks for, under the utility group's lookup row (utility requirements panel); with no window.UtilityRequirements it draws nothing.
   "utilityRequirementsHtml",
+  // The proposed filing destinations above each group (filing-destination.js); with no window.FilingDestination it draws nothing.
+  "filingDestinationHtml", "decideFilingDestination", "bindFilingDestinationButtons",
   // The closeout milestones group (#497) — renderSubmittalTracks draws and binds it.
   "closeoutGroupHtml", "bindCloseoutMilestones", "saveProjectMilestone",
   // The utility track a person's storage record dropped (draft 10) — renderSubmittalTracks draws it first.

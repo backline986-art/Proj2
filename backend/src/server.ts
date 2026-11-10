@@ -2682,6 +2682,80 @@ app.put("/api/projects/:id/utility-filing/verify", (req, res) => {
   res.json({ lookup: r.lookup });
 });
 
+// THIS JOB'S FILING DESTINATIONS: PROPOSED FROM THE AUTHORITY'S OFFICIAL PAGE, CONFIRMED BY A PERSON
+// (owner, 2026-11-10; filingDestinationProposals.ts). Where a filing goes stays a person's fact (rule
+// 3's last sentence): the GET computes proposals on read and stores nothing; Confirm / Edit write the
+// EXISTING person-verified record (a verified KB portal, the filing-email record, the with-permit
+// statement) under a named person and audit it; Reject stops a proposal being offered. Under
+// /api/projects/:id, so each inherits the tenancy guard (rule 6) and getProjectDetail 404s an unknown
+// or out-of-scope project first; the authority is always the project's own (a body never names one).
+const destinationPerson = async (req: Request, what: string): Promise<string> => {
+  const { isConfirmingPerson } = await import("./feeConfirm");
+  return namedPersonDecider(req, "decidedBy", `Sign in to ${what}.`,
+    `Name the person who will ${what}: it is recorded against them, and "operator" is not a person.`, isConfirmingPerson);
+};
+const destinationTrack = (v: unknown): SubmittalTrackType => {
+  const t = String(v ?? "").trim() as SubmittalTrackType;
+  if (!SUBMITTAL_TRACK_TYPES.includes(t)) throw new HttpError(400, "track is one of nem, building, electrical, combo, permit, mpu.");
+  return t;
+};
+const destinationRefusal = (err: unknown): never => {
+  if (err && typeof err === "object" && "status" in err && err instanceof Error && (err as { status?: unknown }).status) {
+    throw new HttpError(Number((err as { status: number }).status), err.message);
+  }
+  throw err;
+};
+app.get("/api/projects/:id/filing-destinations", asyncHandler(async (req, res) => {
+  const { project } = getProjectDetail(db, String(req.params.id));
+  const { filingDestinationsFor } = await import("./filingDestinationProposals");
+  res.json({ destinations: filingDestinationsFor(db, project, getSubmittalTracks(db, project)) });
+}));
+app.put("/api/projects/:id/filing-destinations", asyncHandler(async (req, res) => {
+  const projectId = String(req.params.id);
+  const { project } = getProjectDetail(db, projectId);
+  const b = req.body || {};
+  const track = destinationTrack(b.track);
+  // Named BEFORE anything is written.
+  const by = await destinationPerson(req, "confirm where this filing goes");
+  const { decideFilingDestination, filingDestinationsFor } = await import("./filingDestinationProposals");
+  let r;
+  try {
+    r = decideFilingDestination(db, project, getSubmittalTracks(db, project), {
+      track, ...(b.proposalId ? { proposalId: String(b.proposalId) } : {}),
+      kind: String(b.kind ?? "") as never, address: String(b.address ?? ""), ...(b.name ? { name: String(b.name) } : {}),
+      sourceUrl: String(b.sourceUrl ?? ""), quote: String(b.quote ?? ""),
+    }, by);
+  } catch (err) { destinationRefusal(err); }
+  const fresh = getProjectDetail(db, projectId).project;
+  res.json({ ...r, destinations: filingDestinationsFor(db, fresh, getSubmittalTracks(db, fresh)) });
+}));
+app.post("/api/projects/:id/filing-destinations/reject", asyncHandler(async (req, res) => {
+  const projectId = String(req.params.id);
+  const { project } = getProjectDetail(db, projectId);
+  const b = req.body || {};
+  const track = destinationTrack(b.track);
+  const by = await destinationPerson(req, "reject this proposed destination");
+  const { rejectFilingDestination, filingDestinationsFor } = await import("./filingDestinationProposals");
+  let r;
+  try {
+    r = rejectFilingDestination(db, project, getSubmittalTracks(db, project), { track, proposalId: String(b.proposalId ?? ""), reason: b.reason ? String(b.reason) : "" }, by);
+  } catch (err) { destinationRefusal(err); }
+  res.json({ ...r, destinations: filingDestinationsFor(db, project, getSubmittalTracks(db, project)) });
+}));
+app.delete("/api/projects/:id/filing-destinations/reject", asyncHandler(async (req, res) => {
+  const projectId = String(req.params.id);
+  const { project } = getProjectDetail(db, projectId);
+  const b = req.body || {};
+  const track = destinationTrack(b.track);
+  const by = await destinationPerson(req, "offer this proposed destination again");
+  const { withdrawDestinationRejection, filingDestinationsFor } = await import("./filingDestinationProposals");
+  let r;
+  try {
+    r = withdrawDestinationRejection(db, project, { track, proposalId: String(b.proposalId ?? "") }, by);
+  } catch (err) { destinationRefusal(err); }
+  res.json({ ...r, destinations: filingDestinationsFor(db, project, getSubmittalTracks(db, project)) });
+}));
+
 // WHICH STORAGE MODES THIS PROJECT'S UTILITY TAKES NO APPLICATION FOR (#673 item 3;
 // utilityStorageModes.ts). Same tenancy and keying as the utility-filing routes above: the record is
 // shared knowledge on the utility's filing row, keyed by the project's own state + utility. A NAMED

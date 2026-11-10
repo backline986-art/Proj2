@@ -3563,6 +3563,36 @@ const VERSIONED_MIGRATIONS: VersionedMigration[] = [
       addColumnIfMissing(db, "projects", "parcel_jurisdiction_acceptance_json", "TEXT NOT NULL DEFAULT ''");
     },
   },
+  {
+    // v79 (filing-destination proposals): the next free number on offline staging 73115a27
+    // (parcel 16 A holds v78). Helm renumbers at merge if the queue changes — nothing depends on it.
+    version: 79,
+    name: "filing_destination_rejections",
+    up: (db) => {
+      // A NAMED PERSON'S "NO" TO A PROPOSED FILING DESTINATION (filingDestinationProposals.ts). The
+      // proposals themselves are computed on read and stored nowhere; this table holds only which
+      // ones a person turned down, so they stop being offered. A changed page or changed words make a
+      // new proposal_id (a fingerprint of the authority, kind, address, page and words). Shared on
+      // purpose like the authority rows it answers (no tenant data: an authority's public address).
+      // Nothing that decides a channel, stages, launches or sends reads this table.
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS filing_destination_rejections (
+          proposal_id TEXT PRIMARY KEY,
+          authority_kind TEXT NOT NULL,
+          profile_key TEXT NOT NULL,
+          state TEXT NOT NULL DEFAULT '',
+          authority TEXT NOT NULL DEFAULT '',
+          kind TEXT NOT NULL,
+          address TEXT NOT NULL DEFAULT '',
+          source_url TEXT NOT NULL DEFAULT '',
+          reason TEXT NOT NULL DEFAULT '',
+          rejected_by TEXT NOT NULL,
+          rejected_at TEXT NOT NULL
+        )
+      `);
+      db.exec("CREATE INDEX IF NOT EXISTS idx_filing_destination_rejections_authority ON filing_destination_rejections (authority_kind, profile_key)");
+    },
+  },
 ];
 
 /** v47 was edited in place while #218 was open (Helm's review at 0116f98a): a DB that ran an earlier

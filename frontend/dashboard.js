@@ -5191,14 +5191,102 @@ async function loadSubmittalTracks() {
 // block, never a stale one from another project.
 async function loadTrackLookups() {
   const projectId = state.selectedProjectId;
-  state.trackLookups = { projectId, "permit-process": null, "utility-filing": null, "utility-requirements": null };
+  state.trackLookups = { projectId, "permit-process": null, "utility-filing": null, "utility-requirements": null, "filing-destinations": null };
   if (!projectId) return;
   const read = (kind) => api(`/api/projects/${projectId}/${kind}`).catch(() => null);
   // The utility's application requirement list (utility-requirements.js) rides the same read: a GET,
-  // no lookup runs.
-  const [pp, uf, ur] = await Promise.all([read("permit-process"), read("utility-filing"), read("utility-filing/application-requirements")]);
+  // no lookup runs. So do the proposed filing destinations (filing-destination.js): computed on read,
+  // stored nowhere.
+  const [pp, uf, ur, fd] = await Promise.all([read("permit-process"), read("utility-filing"), read("utility-filing/application-requirements"), read("filing-destinations")]);
   if (state.selectedProjectId !== projectId) return;
-  state.trackLookups = { projectId, "permit-process": pp, "utility-filing": uf, "utility-requirements": ur };
+  state.trackLookups = { projectId, "permit-process": pp, "utility-filing": uf, "utility-requirements": ur, "filing-destinations": fd };
+}
+
+// The proposed filing destinations for one track group (filing-destination.js): the utility's above
+// the utility card, the AHJ's above the permit cards. '' when the module is missing or the payload is
+// not this project's (a reload in flight).
+function filingDestinationHtml(lookupKind) {
+  const FD = typeof window !== "undefined" ? window.FilingDestination : null;
+  const tl = state.trackLookups;
+  if (!FD || !tl || tl.projectId !== state.selectedProjectId) return "";
+  return FD.renderGroup(tl["filing-destinations"], lookupKind === "utility-filing" ? "utility" : "ahj");
+}
+
+// CONFIRM / EDIT / REJECT A PROPOSED FILING DESTINATION, as the signed-in person (with sign-in off, the
+// name they type). Where a filing goes is a person's fact (rule 3): nothing is written without the
+// named-person confirm, and nothing is filed or sent by these clicks. Confirm sends exactly the
+// proposal shown (the server re-derives it and refuses a stale one); Edit sends the person's own
+// statement with its page and words; Reject stops the proposal being offered. The tracks re-read after.
+async function decideFilingDestination(btn, action) {
+  const FD = window.FilingDestination;
+  const projectId = state.selectedProjectId;
+  const tl = state.trackLookups;
+  const payload = tl && tl.projectId === projectId ? tl["filing-destinations"] : null;
+  if (!FD || !projectId) return;
+  const id = btn.dataset.fdId;
+  const track = btn.dataset.fdTrack;
+  const auth = await authForDecision();
+  let method = "PUT";
+  let path = `/api/projects/${projectId}/filing-destinations`;
+  let body;
+  let done;
+  if (action === "unreject") {
+    const by = namedPersonConsent(auth, "Offer this proposed destination again? It is still only a proposal until a person confirms it.", "offered it again", "a rejection is withdrawn by a named person");
+    if (by == null) return;
+    method = "DELETE"; path += "/reject"; body = { track, proposalId: id, ...(by ? { decidedBy: by } : {}) };
+    done = "The proposal is offered again. Nothing was filed or sent.";
+  } else {
+    const found = FD.findProposal(payload, id);
+    if (!found) { showMessage("That proposal is no longer shown — reload the job.", "warning"); return; }
+    const name = found.destination.authority.name;
+    if (action === "confirm") {
+      const by = namedPersonConsent(auth, FD.confirmMessage(name, found.proposal), "confirmed this destination", "a filing destination is confirmed by a named person");
+      if (by == null) return;
+      body = { ...FD.confirmBody(track, found.proposal), ...(by ? { decidedBy: by } : {}) };
+      done = `Confirmed under your name: where ${name} takes this filing. Nothing was filed or sent.`;
+    } else if (action === "save") {
+      const slot = btn.closest("[data-fd-edit-slot]");
+      const values = {};
+      slot?.querySelectorAll("[data-fd-field]").forEach((el) => { values[el.dataset.fdField] = el.value; });
+      const edited = FD.editBody(track, values);
+      const by = namedPersonConsent(auth, FD.confirmMessage(name, edited), "stated this destination", "a filing destination is confirmed by a named person");
+      if (by == null) return;
+      body = { ...edited, ...(by ? { decidedBy: by } : {}) };
+      done = `Recorded under your name: where ${name} takes this filing. Nothing was filed or sent.`;
+    } else if (action === "reject") {
+      const reason = window.prompt(`Reject this proposed destination for ${name}? It stops being offered until the page or its words change.
+
+Why (optional):`, "");
+      if (reason == null) return;
+      const by = namedPersonConsent(auth, `Reject the proposed destination for ${name}?`, "rejected this proposal", "a proposal is rejected by a named person");
+      if (by == null) return;
+      method = "POST"; path += "/reject"; body = { track, proposalId: id, reason, ...(by ? { decidedBy: by } : {}) };
+      done = "Rejected. Nothing was filed or sent.";
+    } else return;
+  }
+  btn.disabled = true;
+  try {
+    await api(path, { method, body: JSON.stringify(body) });
+  } catch (err) {
+    btn.disabled = false;
+    showMessage(`Not recorded: ${err.message}`, "error");
+    return;
+  }
+  showMessage(done, "info");
+  try { state.detail = await api(`/api/projects/${projectId}`); } catch { /* the message above says what happened */ }
+  await loadSubmittalTracks();
+  renderDetail();
+}
+
+function bindFilingDestinationButtons(wrap) {
+  wrap.querySelectorAll("button[data-fd-confirm]").forEach((btn) => btn.addEventListener("click", () => decideFilingDestination(btn, "confirm")));
+  wrap.querySelectorAll("button[data-fd-reject]").forEach((btn) => btn.addEventListener("click", () => decideFilingDestination(btn, "reject")));
+  wrap.querySelectorAll("button[data-fd-unreject]").forEach((btn) => btn.addEventListener("click", () => decideFilingDestination(btn, "unreject")));
+  wrap.querySelectorAll("button[data-fd-save]").forEach((btn) => btn.addEventListener("click", () => decideFilingDestination(btn, "save")));
+  wrap.querySelectorAll("button[data-fd-edit]").forEach((btn) => btn.addEventListener("click", () => {
+    const slot = btn.closest("[data-fd-proposal]")?.querySelector("[data-fd-edit-slot]");
+    if (slot) slot.hidden = !slot.hidden;
+  }));
 }
 
 // The utility's application requirement panel (utility-requirements.js), '' when the module is missing
@@ -6018,7 +6106,7 @@ function renderSubmittalTracks() {
   // cards read it.
   // The utility group also carries what the utility's application asks for (utility-requirements.js).
   const group = (title, list, lookupKind) => list.length
-    ? `<div class="track-group"><div class="track-group-head">${esc(title)}</div>${trackLookupHtml(lookupKind)}${lookupKind === "utility-filing" ? utilityRequirementsHtml() : ""}${list.map(trackCardHtml).join("")}</div>`
+    ? `<div class="track-group"><div class="track-group-head">${esc(title)}</div>${trackLookupHtml(lookupKind)}${filingDestinationHtml(lookupKind)}${lookupKind === "utility-filing" ? utilityRequirementsHtml() : ""}${list.map(trackCardHtml).join("")}</div>`
     : "";
   // THE UTILITY GROUP IS HEADED BY THE TRACK'S OWN PROGRAM (e2e-gap close, 2026-09-26): "Net
   // Metering (NEM)" was hard-coded for every utility — Texas (Oncor) and SRP jobs have no utility
@@ -6034,6 +6122,7 @@ function renderSubmittalTracks() {
   wrap.querySelectorAll("button[data-lookup-verify]").forEach((btn) => {
     btn.addEventListener("click", () => verifyTrackLookup(btn.dataset.lookupVerify, btn));
   });
+  bindFilingDestinationButtons(wrap);
   wrap.querySelectorAll("button[data-req-verify], button[data-req-edit]").forEach((btn) => {
     btn.addEventListener("click", () => fillUtilityRequirementForm(wrap, Number(btn.dataset.reqVerify ?? btn.dataset.reqEdit)));
   });
