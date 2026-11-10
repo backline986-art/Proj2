@@ -128,6 +128,10 @@ export async function openDatabase(): Promise<AppDb> {
   db.pragma("busy_timeout = 5000");
 
   const appDb = new AppDb(db);
+  // CODE OLDER THAN THE DATABASE (#203). Checked BEFORE migrate(), which writes (CREATE TABLE IF NOT
+  // EXISTS, addColumnIfMissing) to any schema it opens: an old pinned build started on a database a
+  // newer build already migrated must not run against it at all.
+  refuseOlderBuild(appDb, dbPath);
   migrate(appDb);
   // LLM-6: every model call this process makes is written to THIS database's llm_calls
   // (best-effort; llmAccounting has no imports that could close a cycle).
@@ -3301,6 +3305,30 @@ export function currentSchemaVersion(db: AppDb): number {
   } catch {
     return 0;
   }
+}
+
+/** Why this build must not open a database, or null when it may (#203). A database whose
+ *  schema_meta reaches past the newest migration this code carries was migrated by a NEWER build:
+ *  this one does not know those tables or columns, and its own boot-time writes and reads can damage
+ *  them. A database at or below this build's version (including a fresh one, version 0) is fine. */
+export function olderBuildProblem(databaseVersion: number, codeVersion: number, dbPath = "the database"): string | null {
+  if (databaseVersion <= codeVersion) return null;
+  return `This build knows the database schema up to v${codeVersion}, but ${dbPath} is at v${databaseVersion}: `
+    + "a newer build already migrated it. Starting an older build against it can damage data (#203). "
+    + "Start the newer build (check /health build.sha), or set AUTOPILOT_ALLOW_OLDER_BUILD=1 to run this one anyway.";
+}
+
+/** The boot guard: refuses (closing the handle first) unless AUTOPILOT_ALLOW_OLDER_BUILD=1, which
+ *  only downgrades the refusal to a loud warning. Reads schema_meta only; writes nothing. */
+function refuseOlderBuild(db: AppDb, dbPath: string): void {
+  const problem = olderBuildProblem(currentSchemaVersion(db), latestSchemaVersion(), dbPath);
+  if (!problem) return;
+  if (process.env.AUTOPILOT_ALLOW_OLDER_BUILD === "1") {
+    console.warn(`[db] WARNING: ${problem} Continuing because AUTOPILOT_ALLOW_OLDER_BUILD=1.`);
+    return;
+  }
+  db.close();
+  throw new Error(`[db] REFUSED: ${problem}`);
 }
 
 function runVersionedMigrations(db: AppDb): void {
