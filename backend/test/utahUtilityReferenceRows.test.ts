@@ -8,7 +8,9 @@
 //     installer certification — each with the page, its words and fetchedAt;
 //   - backend/data/reference-utility-application-requirements.json (draft 03 shape): what each
 //     utility's own application asks for.
-// Pins: every row loads SEEDED (never verified, never official — rule 3); each matches the names a
+// Pins: every row loads at its honoured tier — OFFICIAL where it claims it and passes the shared bar
+// (the city utilities' own .gov pages; shippedOfficialRows.test pins the bar), SEEDED otherwise
+// (Rocky Mountain Power's tariff is on a non-government domain), never verified (rule 3); each matches the names a
 // job carries; a blocker only where the row's own words name the item or carry the limit (Helm's
 // #637 bar); Rocky Mountain Power keeps its ONE existing requirement record (its PowerClerk door is
 // the existing KB seed, not duplicated); and no row here names a filing door, so a city utility's
@@ -55,13 +57,16 @@ const SPELLINGS: Array<[string, string]> = [
   ["Kaysville City", "Kaysville City Power"], ["Kaysville City Power", "Kaysville City Power"],
 ];
 
-check("each city utility's requirement list resolves for the names a job carries, every item seeded and cited", () => {
+// The items whose own words do not name the item stay seeded (Murray's spec-sheet line names neither a
+// module nor an inverter).
+const SEEDED_ITEMS = new Set(["Murray City Power/module_spec", "Murray City Power/inverter_spec"]);
+check("each city utility's requirement list resolves for the names a job carries, every item cited, official from the city's .gov page", () => {
   for (const [spelling, display] of SPELLINGS) {
     const list = UR.resolveUtilityRequirements(null, "UT", spelling);
     assert.ok(list, `${spelling}: a list`);
     assert.equal(list!.displayName, display, `${spelling}: ${display}`);
     for (const item of list!.requirements) {
-      assert.equal(item.tier, "seeded", `${spelling}/${item.key}: seeded`);
+      assert.equal(item.tier, SEEDED_ITEMS.has(`${display}/${item.key}`) ? "seeded" : "official", `${spelling}/${item.key}: tier`);
       assert.ok(!item.verifiedBy && !item.verifiedAt, `${spelling}/${item.key}: no person's mark`);
       assert.match(new URL(item.sourceUrl).hostname, OWN_HOST[display], `${spelling}/${item.key}: the utility's own page`);
       assert.ok(item.quote.length >= 8, `${spelling}/${item.key}: the page's words`);
@@ -94,13 +99,13 @@ const job = (utility: string, dcKw: number, extra: Partial<Parameters<typeof EL.
 const records = EL.eligibilityRecordsForState(null, "UT");
 const ids = (findings: Array<{ ruleId: string; severity: string }>) => findings.map((f) => `${f.ruleId}:${f.severity}`).sort();
 
-check("the shipped program rows seed SEEDED (never verified or official) and a reboot writes nothing new", () => {
+check("the shipped program rows seed OFFICIAL from the cities' .gov pages, SEEDED from RMP's .net tariff, never verified; a reboot writes nothing new", () => {
   EL.seedEligibilityRecords(db);
   const rows = db.query<{ authority: string; confidence: string; verified_at: string; verified_by: string }>(
     "SELECT authority, confidence, verified_at, verified_by FROM authority_eligibility_limits WHERE state = 'UT' ORDER BY authority");
   assert.deepEqual(rows.map((r) => r.authority), ["Bountiful City Light & Power", "Kaysville City", "Kaysville City Power", "Murray City Power", "Rocky Mountain Power"]);
   for (const r of rows) {
-    assert.equal(r.confidence, "seeded", `${r.authority}: seeded`);
+    assert.equal(r.confidence, r.authority === "Rocky Mountain Power" ? "seeded" : "official", `${r.authority}: tier`);
     assert.equal(r.verified_at, "", `${r.authority}: no verified_at`);
     assert.equal(r.verified_by, "", `${r.authority}: no verified_by`);
   }

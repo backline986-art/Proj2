@@ -10,7 +10,9 @@
 // One list of typed items per utility (UtilityRequirementKey: meter_photo, one_line, …), each carrying
 // its source by name, URL and the page's own words, at a tier:
 //   - SEEDED: backend/data/reference-utility-application-requirements.json (shipped; matched by state
-//     and the utility's names as data), or a lookup's proposal;
+//     and the utility's names as data), or a lookup's proposal. A shipped item that claims "official"
+//     is honoured at load only through shippedRowTier (official host, a quote naming the item,
+//     fetched-at); short of that it is seeded;
 //   - OFFICIAL (#683): read from the utility's own official page, the quote found in the bytes read —
 //     honoured only when the row still passes the shared predicate (isOfficialSourceHost + fetchedAt +
 //     a quote); otherwise read as seeded;
@@ -35,7 +37,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { UtilityApplicationRequirement, UtilityRequirementGate, UtilityRequirementKey, UtilityRequirementList, UtilityRequirementQc, UtilityRequirementTier } from "../../shared/src/types";
 import { UTILITY_REQUIREMENT_KEYS } from "../../shared/src/types";
-import { isOfficialSourceHost, sourceHostOf } from "../../shared/src/officialSource";
+import { isOfficialSourceHost, shippedRowTier, sourceHostOf } from "../../shared/src/officialSource";
 import type { AppDb } from "./db";
 import { usStateCode } from "./permitPath";
 import { getUtilityFilingLookup, normalizeUtilityName, utilityFilingKey } from "./utilityFilingLookup";
@@ -240,6 +242,18 @@ export function shippedUtilityRequirementRecords(filePath = referencePath()): Sh
   return shippedFile(filePath).records;
 }
 
+/** One shipped item: seeded, unless it claims "official" and passes the shared bar (shippedRowTier:
+ *  an official host, a quote that names the item, fetched-at). Short of that it lands seeded and never
+ *  throws; a shipped item never claims "verified" (only a person writes that). An application item is
+ *  what the utility asks for, never where the filing goes. */
+function shippedRequirement(raw: unknown): UtilityApplicationRequirement | null {
+  const item = sanitizeRequirement(raw, "seeded");
+  if (!item) return null;
+  const claimed = (raw && typeof raw === "object" ? (raw as Record<string, unknown>).tier : undefined);
+  const { tier } = shippedRowTier(claimed, { sourceUrl: item.sourceUrl, quote: item.quote, fetchedAt: item.fetchedAt, quoteStatesValue: QUOTE_NAMES_REQUIREMENT[item.key] });
+  return tier === "official" ? { ...item, tier } : item;
+}
+
 function parseRecords(data: { records?: unknown[] }): ShippedUtilityRequirementRecord[] {
   const records: ShippedUtilityRequirementRecord[] = [];
   {
@@ -247,7 +261,7 @@ function parseRecords(data: { records?: unknown[] }): ShippedUtilityRequirementR
       const o = (raw && typeof raw === "object" ? raw : {}) as Record<string, unknown>;
       const states = (Array.isArray(o.states) ? o.states : []).map((s) => usStateCode(s)).filter(Boolean);
       const matchNames = (Array.isArray(o.matchNames) ? o.matchNames : []).map((n) => utilityMatchText(str(n))).filter(Boolean);
-      const requirements = (Array.isArray(o.requirements) ? o.requirements : []).map((r) => sanitizeRequirement(r, "seeded")).filter((r): r is UtilityApplicationRequirement => r != null);
+      const requirements = (Array.isArray(o.requirements) ? o.requirements : []).map(shippedRequirement).filter((r): r is UtilityApplicationRequirement => r != null);
       if (!states.length || !matchNames.length || !requirements.length) continue;
       const filingDoor = sanitizeFilingDoor(o.filingDoor);
       records.push({ states, utility: str(o.utility), displayName: str(o.displayName) || str(o.utility), matchNames, requirements, ...(filingDoor ? { filingDoor } : {}) });
