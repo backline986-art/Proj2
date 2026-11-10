@@ -3432,9 +3432,24 @@ const VERSIONED_MIGRATIONS: VersionedMigration[] = [
     },
   },
   {
-    // v74: after the utility checks' v72 and #700's v73 (offline staging bdde3b57). Helm renumbers at
-    // merge if the queue changes — nothing here depends on the number.
+    // v74: the next free version on the offline staging base (bdde3b57: v72 = utility application
+    // requirements, v73 = #700's invoices). Renumber at merge if the queue changes (Helm rules it).
     version: 74,
+    name: "nem_track_storage_exemption",
+    up: (db) => {
+      // THE UTILITY TRACK A PERSON'S RECORD TOOK OFF THIS JOB (draft 10, utilityStorageModes.ts). QC writes
+      // it: { drop: { utility, mode, sourceUrl, quote, verifiedBy, verifiedAt, decidedAt } } when the
+      // utility's PERSON-verified storage record says this job's battery mode needs no application, and
+      // { keptBy, keptAt } when a named person put the track back on this job. requiredTracks() reads it
+      // through mapProject, so every door (done-ness, nextStep, Stage, autopilot, the tracks screen)
+      // asks the same question. '' = nothing dropped, the strict default.
+      addColumnIfMissing(db, "projects", "nem_track_exemption_json", "TEXT NOT NULL DEFAULT ''");
+    },
+  },
+  {
+    // v75: after the utility checks' v72, #700's v73 and #673 draft 10's v74 (offline staging
+    // 5d8973d0). Helm renumbers at merge if the queue changes — nothing here depends on the number.
+    version: 75,
     name: "project_documents_outlined_pages",
     up: (db) => {
       // PLAN PAGES WHOSE TEXT IS DRAWN AS OUTLINES (#696, outlinedTextPages.ts): the 1-based pages of

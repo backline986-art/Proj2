@@ -56,6 +56,7 @@ import type {
   ProjectTimelineEvent,
   ProjectTimelineReport,
   ProjectRecord,
+  NemTrackExemptionState,
   ProjectStatus,
   ProjectWorkflow,
   QcResult,
@@ -129,6 +130,7 @@ import { isPortalPaused } from "./portalPause";
 // Direction matters: submittalTracks must never import repository — jobQueue statically
 // imports repository, and the circular-import guard in CLAUDE.md is about that edge.
 import { ensureCheckTarget, refuseUtilityUrlOnPermitTarget, getSubmittalTracks, isTrackDone, requiredTracks, SUBMITTAL_TRACK_TYPES, trackHasFiling, trackPermitTypes, trackSubmittedAndTracked, trackSubmittedSentence, unfinishedTracks, unfinishedUnattributedTargets, withPermitStageSentence } from "./submittalTracks";
+import { nemTrackDropFor } from "./utilityStorageModes";
 import { nemFiledWithPermit } from "./utilityFilingLookup";
 import { recordStagedReview, supersedeStagedReviews, takeStagedReviewCapture } from "./stagedReviews";
 import { saveSubmissionConfirmation } from "./submissionConfirmation";
@@ -404,6 +406,11 @@ interface ProjectRow extends Row {
 
 
 
+function nemTrackExemptionFromRow(row: ProjectRow): { nemTrackExemption?: NemTrackExemptionState } {
+  const state = parseJson<NemTrackExemptionState | null>(text((row as Record<string, unknown>).nem_track_exemption_json), null);
+  return state && typeof state === "object" && (state.drop || state.keptBy) ? { nemTrackExemption: state } : {};
+}
+
 export function mapProject(row: ProjectRow): ProjectRecord {
   const parserSnapshot = parseJson<ParserPayload>(row.parser_json, {});
   return {
@@ -454,6 +461,9 @@ export function mapProject(row: ProjectRow): ProjectRecord {
     // THE OPERATOR'S PER-TRACK ISSUER (split issuer): flat snapshot keys, mapped here so every
     // ProjectRecord carries it; no key at all when none is set. Read only via permitProcess.trackIssuer.
     ...withTrackIssuers(parserSnapshot),
+    // THE UTILITY TRACK QC DROPPED ON A PERSON'S RECORD (draft 10, v74). Mapped here so requiredTracks
+    // — which has no db — reads it at every door; no key at all when nothing is dropped or kept.
+    ...nemTrackExemptionFromRow(row),
     assignedUserId: row.assigned_user_id ?? null,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
@@ -1505,6 +1515,8 @@ export function getProjectDetail(db: AppDb, projectId: string): ProjectDetail {
     auditLogs: db.query<Row>("SELECT * FROM audit_logs WHERE project_id = ? ORDER BY created_at DESC LIMIT 100", [projectId]).map(mapAudit),
     projectNotes: db.query<Row>("SELECT * FROM project_notes WHERE project_id = ? ORDER BY created_at DESC LIMIT 50", [projectId]).map(mapProjectNote),
     jobScope: resolveJobScope(db, projectId, project.parserSnapshot),
+    nemTrackDrop: nemTrackDropFor(project),
+    nemTrackKept: project.nemTrackExemption?.keptBy ? { by: project.nemTrackExemption.keptBy, at: project.nemTrackExemption.keptAt ?? "" } : null,
     // THE CLASS HOLD AS EVERY DOOR READS IT (#688) — for the project page's class panel.
     classStatus: projectClassStatusFor(db, projectId) ?? undefined,
   };
@@ -9419,6 +9431,16 @@ export async function prepareSubmission(
   }
   const runId = claimedApproval?.id ?? claimedSignatureApproval?.id ?? id();
   const signatureRequestApproval = claimedSignatureApproval ? { approver: claimedSignatureApproval.approver, runId } : null;
+  // A UTILITY TRACK A PERSON'S RECORD DROPPED IS NOT STAGED (draft 10): the same predicate requiredTracks
+  // reads (nemTrackDropFor), asked here for an explicit "nem" request too, so no door stages a filing
+  // the job no longer owes. After the approval claims above: a refused run has spent its approval.
+  const droppedNem = track === "nem" ? nemTrackDropFor(detail.project) : null;
+  if (droppedNem) {
+    throw new HttpError(409,
+      `This job's utility track was dropped: ${droppedNem.utility} takes no interconnection application for a ${droppedNem.mode} battery, `
+      + `as ${droppedNem.verifiedBy} recorded from ${droppedNem.sourceUrl}. Put the track back on this job first if the filing is still wanted.`,
+      { track: "nem", nemTrackDropped: true });
+  }
   // AN OPERATOR'S HOLD STOPS STAGING — first, before anything is billed, built or opened.
   const hold = operatorHoldReason(db, projectId);
   if (hold !== null) {

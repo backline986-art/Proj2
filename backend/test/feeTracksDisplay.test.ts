@@ -57,6 +57,8 @@ const NAMES = [
   "trackLookupHtml",
   // The closeout milestones group (#497) — renderSubmittalTracks draws and binds it.
   "closeoutGroupHtml", "bindCloseoutMilestones", "saveProjectMilestone",
+  // The utility track a person's storage record dropped (draft 10) — renderSubmittalTracks draws it first.
+  "nemTrackDropHtml", "saveNemTrackKeep",
   "renderSubmittalTracks",
 ];
 const preamble = "const screenshotMisses = new Set(); const screenshotKey = (a, b, c) => `${a}:${b}:${c}`;";
