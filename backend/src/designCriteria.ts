@@ -55,6 +55,9 @@ import type {
 } from "../../shared/src/types";
 import type { EffectiveCodeContext, PresentedCodeEdition } from "./codeProfiles";
 import { officialCitationFor } from "../../shared/src/officialSource";
+import { makeRuleBasis, weakestRuleBasis } from "../../shared/src/ruleBasis";
+import type { ReviewerRuleBasis } from "../../shared/src/types";
+import { notCheckedRecord, passRecord } from "./checkRecords";
 import { codeFamilyOf, editionsInEffect, type EditionsInEffect } from "./codeFamilies";
 
 export interface DesignTextSource {
@@ -1985,6 +1988,16 @@ export function requiredRoofPlanDimensions(ctx: EffectiveCodeContext): RoofPlanR
   return out;
 }
 
+/** The rule basis of one roof-plan requirement: the jurisdiction's fireSetbacks row (its tier), or
+ *  the adopted edition's model-code default (review-audit draft 07). */
+function roofPlanRuleBasis(ctx: EffectiveCodeContext, req: RoofPlanRequiredDimension): ReviewerRuleBasis {
+  if (req.basis === "model_code") {
+    const year = fireCodeEditionYear(ctx);
+    return makeRuleBasis("model_code", `IRC${year != null ? ` ${year}` : ""} R324.6 default`, roofPlanRef(ctx).sourceUrl);
+  }
+  return fieldRuleBasis(ctx, "fireSetbacks");
+}
+
 export const FIRE_PATHWAY_BELOW_ID = "city.fire.pathway-below-required";
 export const FIRE_PATHWAY_UNMEASURED_ID = "city.fire.pathway-unmeasured";
 const ROOF_DIM_NAME: Record<RoofPlanDimensionKind, string> = {
@@ -2003,7 +2016,7 @@ interface RoofPlanBelowLine {
  * other short dimension (a model-code default, a seeded rule, a parser summary, a number vision
  * read off the sheet image) is a WARNING that says which of those it lacks.
  */
-function roofPlanBelowFinding(lines: RoofPlanBelowLine[], codeReferences: CodeReference[], vision: ReviewerVisionVerdict | null): ReviewerFinding {
+function roofPlanBelowFinding(lines: RoofPlanBelowLine[], codeReferences: CodeReference[], vision: ReviewerVisionVerdict | null, ruleBasis: ReviewerRuleBasis | null = null): ReviewerFinding {
   const blocks = !vision && lines.some((l) => l.req.basis === "ahj" && l.req.verified && l.values.some((v) => !v.derived));
   const text = lines.map((l) => {
     const stated = [...new Set(l.values.map((v) => `${v.inches} in (${v.source})`))].join(", ");
@@ -2017,6 +2030,7 @@ function roofPlanBelowFinding(lines: RoofPlanBelowLine[], codeReferences: CodeRe
   });
   const asks = lines.map((l) => l.req.kind === "pathwayWidth" ? `fire access pathways at least ${l.req.inches} in wide` : `the array at least ${l.req.inches} in from the ridge`);
   return {
+    ...(ruleBasis ? { ruleBasis } : {}),
     id: FIRE_PATHWAY_BELOW_ID,
     severity: blocks ? "blocker" : "warning",
     category: "plan_set",
@@ -2081,6 +2095,7 @@ export function evaluateFirePathwayFindings(
     return {
       measured: false,
       findings: [{
+        ...(() => { const b = weakestRuleBasis(required.map((r) => roofPlanRuleBasis(ctx, r))); return b ? { ruleBasis: b } : {}; })(),
         id: FIRE_PATHWAY_UNMEASURED_ID,
         severity: "callout",
         category: "plan_set",
@@ -2105,7 +2120,26 @@ export function evaluateFirePathwayFindings(
     const values = stated.filter((s) => s.kind === req.kind && s.inches < req.inches);
     if (values.length) lines.push({ req, values });
   }
-  return { measured: true, findings: lines.length ? [roofPlanBelowFinding(lines, codeReferences, null)] : [] };
+  // CHECK RECORDS (review-audit draft 07): each required dimension the plan states and meets, and
+  // each it does not state at all (the other one was read, so the unmeasured callout is not raised).
+  const records: ReviewerFinding[] = [];
+  const check = { ruleId: FIRE_PATHWAY_BELOW_ID, category: "plan_set" as const, codeReferences };
+  const meets = required.filter((r) => !lines.some((l) => l.req === r) && stated.some((s) => s.kind === r.kind));
+  const absent = required.filter((r) => !stated.some((s) => s.kind === r.kind));
+  if (meets.length) {
+    records.push(passRecord({
+      ...check, title: "Fire access pathway / ridge setback dimensions", ruleBasis: weakestRuleBasis(meets.map((r) => roofPlanRuleBasis(ctx, r))),
+      arithmetic: `${meets.map((r) => `${ROOF_DIM_NAME[r.kind]}: stated ${[...new Set(stated.filter((s) => s.kind === r.kind).map((s) => `${s.inches} in (${s.source})`))].join(", ")} >= ${r.inches} in — ${r.source}`).join(". ")}.`,
+    }));
+  }
+  if (absent.length) {
+    records.push(notCheckedRecord({
+      ...check, title: "Fire access pathway / ridge setback dimensions", ruleBasis: weakestRuleBasis(absent.map((r) => roofPlanRuleBasis(ctx, r))),
+      inputs: absent.map((r) => `the ${ROOF_DIM_NAME[r.kind].toLowerCase()} (at least ${r.inches} in)`),
+    }));
+  }
+  const belowBasis = weakestRuleBasis(lines.map((l) => roofPlanRuleBasis(ctx, l.req)));
+  return { measured: true, findings: [...(lines.length ? [roofPlanBelowFinding(lines, codeReferences, null, belowBasis)] : []), ...records] };
 }
 
 /**
@@ -2127,7 +2161,7 @@ export function applyRoofPlanMeasurement(finding: ReviewerFinding, verdict: Revi
     }
   }
   if (!lines.length) return out;
-  return { ...roofPlanBelowFinding(lines, finding.codeReferences, verdict), visionVerification: verdict };
+  return { ...roofPlanBelowFinding(lines, finding.codeReferences, verdict, finding.ruleBasis ?? null), visionVerification: verdict };
 }
 
 /**
@@ -2552,6 +2586,7 @@ function codeBasisUnverified(ctx: EffectiveCodeContext, basis: StatedCodeBasisEn
     .filter((b) => defaults.has(normCodeToken(b.code)) && defaults.get(normCodeToken(b.code)) !== b.edition)
     .map((b) => `${b.code} ${b.edition} (current model edition ${defaults.get(normCodeToken(b.code))})`))];
   return {
+    ruleBasis: fieldRuleBasis(ctx, "adoptedCodes"),
     id: "city.code.basis-unverified",
     severity: "callout",
     category: "plan_set",
@@ -2805,6 +2840,25 @@ function fieldProvenance(ctx: EffectiveCodeContext, field: string): { verified: 
   return { verified, owner, text: `${who} code profile (human-verified${verifiedBy ? ` by ${verifiedBy}` : ""}${verifiedAt ? ` on ${verifiedAt.slice(0, 10)}` : ""})` };
 }
 
+/** THE RULE BASIS OF ONE PROFILE FIELD (review-audit draft 07): the same answer fieldProvenance gives
+ *  in a sentence, as { tier, source, sourceUrl } in #683's words (shared/src/ruleBasis). Official is
+ *  "from <host>", never person-verified; a row a person verified names the person. */
+export function fieldRuleBasis(ctx: EffectiveCodeContext, field: string): ReviewerRuleBasis {
+  const src = ctx.profile?.fieldSources?.[field];
+  const official = src ? (src.confidence === "official" ? src.officialSource ?? null : null)
+    : !ctx.verified && ctx.profile ? officialCitationFor(ctx.profile.citations, field) : null;
+  const ahj = src ? src.ahj : ctx.profile?.ahj ?? "";
+  const state = (src?.state || ctx.profile?.state || ctx.state || "").toUpperCase();
+  const source = `${ahj ? `${ahj} (${state})` : `${state || "state"} state-level`} code profile`;
+  if (official) return makeRuleBasis("official", source, official.sourceUrl);
+  const verified = src ? src.confidence === "verified" : ctx.verified;
+  const cited = ctx.profile?.citations?.find((c) => c.field === field && c.sourceUrl)?.sourceUrl
+    || (field.startsWith("designCriteria.") ? ctx.designCriteria?.sourceUrl : "") || "";
+  return verified
+    ? makeRuleBasis("verified", source, cited, (src ? src.verifiedBy : ctx.profile?.verifiedBy) || undefined)
+    : makeRuleBasis("seeded", source, cited);
+}
+
 /** The minimum ground snow load that applies to this project's path, and which profile field holds
  *  it. Path known: its own minimum (none on file for that path -> null). Path unknown: the stricter
  *  of the minimums on file. */
@@ -2871,6 +2925,26 @@ function ambiguousPgNote(reading: Extract<GroundSnowReading, { status: "ambiguou
   return `The package's ground snow load ${what} (${describeGroundReadings(reading)}), so the ground snow load is a warning here, not a blocker: confirm which value is the design Pg on the plan set and in the engineer's letter/calculations.`;
 }
 
+/** THE STATE-MINIMUM CHECK'S RECORD (draft 07): passed (every stated Pg at or above the minimum for
+ *  the path) or not checked (the package states no Pg). Null when no minimum is on file for the path
+ *  (nothing to check against) or when the violation fires. Display only. */
+function groundSnowMinimumRecord(stated: StatedReading, ctx: EffectiveCodeContext, path: "prescriptive" | "engineered" | ""): ReviewerFinding | null {
+  const applies = groundSnowMinimumFor(ctx, path);
+  if (!applies) return null;
+  const { required, field } = applies;
+  const pg = stated.criteria.filter((c) => c.criterion === "groundSnowPsf" && c.qualifier === "ground" && typeof c.value === "number");
+  const check = {
+    ruleId: "city.struct.ground-snow-below-state-minimum", category: "structural" as const,
+    title: "Ground snow load against the state's minimum", ruleBasis: fieldRuleBasis(ctx, field),
+    codeReferences: [ref(ctx, "R301.2.3", "Snow loads", `Minimum ground snow load ${required} psf.`)],
+  };
+  if (!pg.length) return notCheckedRecord({ ...check, inputs: ["the design ground snow load (Pg)"] });
+  if (pg.some((c) => (c.value as number) < required)) return null;
+  const values = [...new Set(pg.map((c) => c.value as number))].sort((a, b) => a - b);
+  const citation = String(ctx.prescriptive?.minGroundSnowCitation || "").trim();
+  return passRecord({ ...check, arithmetic: `Ground snow load Pg: stated ${values.map((v) => `${v} psf`).join(", ")} >= the ${fieldProvenance(ctx, field).owner} minimum of ${required} psf${path ? ` for ${path === "prescriptive" ? "prescriptive" : "non-prescriptive"} design` : " (the stricter minimum: the permit path is unknown)"}${citation ? ` (${citation})` : ""}.` });
+}
+
 function groundSnowMinimumFinding(
   stated: StatedReading,
   ctx: EffectiveCodeContext,
@@ -2913,6 +2987,7 @@ function groundSnowMinimumFinding(
     ambiguous ? ambiguousPgNote(ambiguous) : "",
   ].filter(Boolean).join(" ");
   return {
+    ruleBasis: fieldRuleBasis(ctx, field),
     id: "city.struct.ground-snow-below-state-minimum",
     // A BLOCKER only on an UNAMBIGUOUS reading (readGroundSnow): the minimum never fires from a
     // number the extractor itself was unsure of, nor from one the package contradicts elsewhere.
@@ -2999,6 +3074,9 @@ export function evaluateDesignCriteriaFindings(
   const sources = readSources(project, opts.extraTexts ?? []);
   const stated = extractFromSources(project, sources);
   const out: ReviewerFinding[] = [];
+  // CHECK RECORDS (review-audit draft 07, checkRecords.ts): the comparisons that ran clean and the
+  // criteria the package does not state, appended after the findings. Display only.
+  const records: ReviewerFinding[] = [];
   // ONE DOCUMENT, NOT TWO: a text wholly contained in another (a sheet re-uploaded on its own,
   // a page copied into a combined PDF) is the same pages, not a second document agreeing or
   // disagreeing with the first.
@@ -3106,6 +3184,19 @@ export function evaluateDesignCriteriaFindings(
     : null;
   const below: StatedDesignCriterion[] = [];
   const belowLines: string[] = [];
+  // DRAFT 07: what each comparison found when it did NOT fire — the stated values that meet the
+  // jurisdiction's (a pass line) or the criterion the package does not state (not checked).
+  const meetLines: string[] = [];
+  const meetFields: string[] = [];
+  const notStated: string[] = [];
+  const notStatedFields: string[] = [];
+  const track = (field: string, label: string, unit: string, required: string, same: (c: StatedDesignCriterion) => boolean, isBelow: (c: StatedDesignCriterion) => boolean): void => {
+    const all = stated.criteria.filter(same);
+    if (!all.length) { notStated.push(label.toLowerCase()); notStatedFields.push(`designCriteria.${field}`); return; }
+    if (all.some(isBelow)) return;
+    meetFields.push(`designCriteria.${field}`);
+    meetLines.push(`${label}: stated ${[...new Set(all.map((c) => `${c.value}${unit}`))].join(", ")} — ${who} requires ${required}`);
+  };
   // The profile field behind each line: its severity is THAT field's row's (fieldProvenance).
   const belowFields: string[] = [];
   const collect = (field: string, label: string, unit: string, required: string, pick: (c: StatedDesignCriterion) => boolean): void => {
@@ -3122,9 +3213,11 @@ export function evaluateDesignCriteriaFindings(
     belowLines.push(`${label}: stated ${describeValues([...byValue.values()], unit)} — ${who} requires ${required}`);
   };
   if (ahjWind != null) {
+    track("windSpeedMph", "Wind speed", " mph", `${ahjWind} mph (ultimate)`, (c) => c.criterion === "windSpeedMph" && c.qualifier !== "nominal" && typeof c.value === "number", (c) => (c.value as number) < ahjWind);
     collect("windSpeedMph", "Wind speed", " mph", `${ahjWind} mph (ultimate)`, (c) => c.criterion === "windSpeedMph" && c.qualifier !== "nominal" && typeof c.value === "number" && c.value < ahjWind);
   }
   if (ahjExposure) {
+    track("windExposure", "Wind exposure", "", `Exposure ${ahjExposure}`, (c) => c.criterion === "windExposure", (c) => (EXPOSURE_RANK[String(c.value)] ?? 99) < EXPOSURE_RANK[ahjExposure]);
     collect("windExposure", "Wind exposure", "", `Exposure ${ahjExposure}`, (c) => c.criterion === "windExposure" && (EXPOSURE_RANK[String(c.value)] ?? 99) < EXPOSURE_RANK[ahjExposure]);
   }
   // The wind lines can block; the ground snow line blocks only on an UNAMBIGUOUS reading
@@ -3132,6 +3225,7 @@ export function evaluateDesignCriteriaFindings(
   const linesBeforeSnow = belowLines.length;
   let snowAmbiguous = false;
   if (ahjSnow != null) {
+    track("groundSnowLoadPsf", "Ground snow load", " psf", `${ahjSnow} psf`, (c) => c.criterion === "groundSnowPsf" && c.qualifier === "ground" && typeof c.value === "number", (c) => (c.value as number) < ahjSnow);
     collect("groundSnowLoadPsf", "Ground snow load", " psf", `${ahjSnow} psf`, (c) => c.criterion === "groundSnowPsf" && c.qualifier === "ground" && typeof c.value === "number" && c.value < ahjSnow);
     const reading = belowLines.length > linesBeforeSnow ? readGroundSnow(stated) : null;
     if (reading?.status === "ambiguous") {
@@ -3169,6 +3263,7 @@ export function evaluateDesignCriteriaFindings(
     arithmetic?: (hits: StatedDesignCriterion[]) => string,
   ): void => {
     const before = belowLines.length;
+    track(field, label, unit, required, same, isBelow);
     collect(field, label, unit, required, (c) => same(c) && isBelow(c));
     if (belowLines.length === before) return;
     const hits = stated.criteria.filter((c) => same(c) && isBelow(c));
@@ -3226,8 +3321,19 @@ export function evaluateDesignCriteriaFindings(
   const belowProvenance = ctx.profile?.fieldSources || belowFields.some(officialOnRow)
     ? [...new Set(belowFields.map((f) => (ctx.profile?.fieldSources || officialOnRow(f) ? fieldProvenance(ctx, f).text : provenance(ctx))))].join(" / ")
     : provenance(ctx);
+  const belowCheck = {
+    ruleId: "city.struct.design-criteria-below-ahj", category: "structural" as const, title: "Design criteria against the jurisdiction's",
+    codeReferences: [ref(ctx, "Table R301.2", "Climatic and geographic design criteria (established by the jurisdiction)", "The jurisdiction sets wind speed, exposure and ground snow load.")],
+  };
+  if (meetLines.length) {
+    records.push(passRecord({ ...belowCheck, ruleBasis: weakestRuleBasis(meetFields.map((f) => fieldRuleBasis(ctx, f))), arithmetic: `${meetLines.join(". ")}.` }));
+  }
+  if (notStated.length) {
+    records.push(notCheckedRecord({ ...belowCheck, ruleBasis: weakestRuleBasis(notStatedFields.map((f) => fieldRuleBasis(ctx, f))), inputs: notStated.map((l) => `the design ${l}`) }));
+  }
   if (belowLines.length) {
     out.push({
+      ruleBasis: weakestRuleBasis(belowFields.map((f) => fieldRuleBasis(ctx, f))) ?? undefined,
       id: "city.struct.design-criteria-below-ahj",
       severity: belowBlocks || moreBlocks ? "blocker" : "warning",
       category: "structural",
@@ -3259,6 +3365,8 @@ export function evaluateDesignCriteriaFindings(
   // warning that says so.
   const minFinding = groundSnowMinimumFinding(stated, ctx, opts.permitPath ?? "");
   if (minFinding) out.push(minFinding);
+  const minRecord = minFinding ? null : groundSnowMinimumRecord(stated, ctx, opts.permitPath ?? "");
+  if (minRecord) records.push(minRecord);
 
   // (b3) ABOVE THE PRESCRIPTIVE PATH'S WIND CAP — the plan's stated Vult against the cap for the
   // exposure it states (maxWindSpeedMphExpB / ExpC), on the prescriptive path only. Always a
@@ -3275,10 +3383,16 @@ export function evaluateDesignCriteriaFindings(
     const capLines: string[] = [];
     const capItems: StatedDesignCriterion[] = [];
     const capFields: string[] = [];
+    const withinLines: string[] = [];
+    const withinFields: string[] = [];
     for (const letter of [...new Set(exposures.map((c) => String(c.value)))]) {
       const cap = caps[letter];
       if (cap == null) continue;
       const over = winds.filter((c) => (c.value as number) > cap);
+      if (!over.length && winds.length) {
+        withinFields.push(`prescriptive.maxWindSpeedMphExp${letter}`);
+        withinLines.push(`Wind speed: stated ${[...new Set(winds.map((c) => `${c.value} mph`))].join(", ")} in Exposure ${letter} <= ${who}'s prescriptive limit of ${cap} mph in Exposure ${letter}`);
+      }
       if (!over.length) continue;
       const byValue = new Map<string, { value: string | number; sources: Set<string> }>();
       for (const c of over) {
@@ -3291,8 +3405,19 @@ export function evaluateDesignCriteriaFindings(
       capLines.push(`Wind speed: stated ${describeValues([...byValue.values()], " mph")} in Exposure ${letter} — ${who}'s prescriptive path allows at most ${cap} mph in Exposure ${letter} (${fieldProvenance(ctx, field).text})`);
       capItems.push(...over, ...exposures.filter((c) => String(c.value) === letter));
     }
+    const capCheck = {
+      ruleId: "city.struct.wind-exceeds-prescriptive-cap", category: "structural" as const, title: "Wind speed within the prescriptive path's limit",
+      codeReferences: [ref(ctx, "R301.2.1", "Wind design criteria", "The prescriptive path applies only up to the jurisdiction's wind-speed limit for the exposure.")],
+    };
+    if (!capLines.length && withinLines.length) {
+      records.push(passRecord({ ...capCheck, ruleBasis: weakestRuleBasis(withinFields.map((f) => fieldRuleBasis(ctx, f))), arithmetic: `${withinLines.join(". ")}.` }));
+    } else if (!capLines.length && (caps.B != null || caps.C != null) && (!winds.length || !exposures.length)) {
+      const capFieldsOnFile = (["B", "C"] as const).filter((l) => caps[l] != null).map((l) => `prescriptive.maxWindSpeedMphExp${l}`);
+      records.push(notCheckedRecord({ ...capCheck, ruleBasis: weakestRuleBasis(capFieldsOnFile.map((f) => fieldRuleBasis(ctx, f))), inputs: [!winds.length ? "the design wind speed" : "", !exposures.length ? "the wind exposure category" : ""] }));
+    }
     if (capLines.length) {
       out.push({
+        ruleBasis: weakestRuleBasis(capFields.map((f) => fieldRuleBasis(ctx, f))) ?? undefined,
         id: "city.struct.wind-exceeds-prescriptive-cap",
         severity: "warning",
         category: "structural",
@@ -3486,6 +3611,7 @@ export function evaluateDesignCriteriaFindings(
       const graceOnly = inGrace.size === lines.length;
       const weakOnly = !graceOnly && weakLines.size > 0 && lines.every((l) => weakLines.has(l) || inGrace.has(l) || softened.has(l));
       out.push({
+        ruleBasis: fieldRuleBasis(ctx, "adoptedCodes"),
         id: "city.code.basis-mismatch",
         severity: blocks ? "blocker" : graceOnly || weakOnly ? "callout" : "warning",
         category: "plan_set",
@@ -3535,5 +3661,5 @@ export function evaluateDesignCriteriaFindings(
     }
   }
 
-  return out;
+  return [...out, ...records];
 }

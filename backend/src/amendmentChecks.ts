@@ -33,6 +33,8 @@ import type {
   ReviewerFindingEvidence,
 } from "../../shared/src/types";
 import type { EffectiveCodeContext } from "./codeProfiles";
+import { passRecord } from "./checkRecords";
+import { makeRuleBasis, weakestRuleBasis } from "../../shared/src/ruleBasis";
 import {
   extractAttachmentSpacings,
   extractRoofPlanDimensions,
@@ -235,6 +237,14 @@ function amendmentVerified(ctx: EffectiveCodeContext, a: JurisdictionCodeAmendme
   return src ? src.confidence === "verified" : ctx.verified;
 }
 
+/** The amendment's row tier in #683's words (review-audit draft 07). */
+function amendmentBasis(ctx: EffectiveCodeContext, a: JurisdictionCodeAmendment, verified: boolean) {
+  const src = ctx.profile?.fieldSources?.[amendmentSourceKey(a)];
+  return verified
+    ? makeRuleBasis("verified", `${amendmentLabel(a)} local amendment`, a.sourceUrl ?? "", (src ? src.verifiedBy : ctx.profile?.verifiedBy) || undefined)
+    : makeRuleBasis("seeded", `${amendmentLabel(a)} local amendment`, a.sourceUrl ?? "");
+}
+
 function amendmentRef(a: JurisdictionCodeAmendment, verified: boolean): CodeReference {
   return {
     code: a.code,
@@ -342,6 +352,7 @@ export function evaluateAmendmentFindings(project: ProjectRecord, ctx: Effective
   const missingWording: Array<{ amendment: JurisdictionCodeAmendment; phrase: string; verified: boolean; docsRead: boolean }> = [];
   const byHand: Array<{ amendment: JurisdictionCodeAmendment; why: string; verified: boolean }> = [];
   const cache: { sources?: ReturnType<typeof packageReadSources> } = {};
+  const met: Array<{ amendment: JurisdictionCodeAmendment; verified: boolean }> = [];
 
   amendments.forEach((a) => {
     const verified = amendmentVerified(ctx, a);
@@ -349,7 +360,7 @@ export function evaluateAmendmentFindings(project: ProjectRecord, ctx: Effective
     if (!check) { byHand.push({ amendment: a, why: "", verified }); return; }
     const label = amendmentLabel(a);
     const r = compareCheckWithPlan(project, check, extraTexts, cache);
-    if (r.outcome === "met") return;
+    if (r.outcome === "met") { met.push({ amendment: a, verified }); return; }
     if (r.outcome === "not_stated") { byHand.push({ amendment: a, why: r.why, verified }); return; }
     if (r.outcome === "wording_missing") { missingWording.push({ amendment: a, phrase: String(check.value), verified, docsRead: r.docsRead }); return; }
     failed.push({
@@ -369,6 +380,7 @@ export function evaluateAmendmentFindings(project: ProjectRecord, ctx: Effective
     const blocker = failed.some((f) => f.blocker);
     const softened = failed.filter((f) => !f.blocker);
     out.push({
+      ...(() => { const b = weakestRuleBasis(failed.map((f) => amendmentBasis(ctx, f.amendment, f.verified))); return b ? { ruleBasis: b } : {}; })(),
       id: AMENDMENT_NOT_MET_ID,
       severity: blocker ? "blocker" : "warning",
       category: "ahj_profile",
@@ -399,6 +411,20 @@ export function evaluateAmendmentFindings(project: ProjectRecord, ctx: Effective
       codeReferences: missingWording.map((m) => amendmentRef(m.amendment, m.verified)),
       installerCallout: true,
     });
+  }
+  // CHECK RECORD (review-audit draft 07): the classified amendments the plan was compared with and meets.
+  if (met.length) {
+    out.push(passRecord({
+      ruleId: AMENDMENT_NOT_MET_ID, category: "ahj_profile", title: "Local code amendments compared with the plan",
+      codeReferences: met.map((m) => amendmentRef(m.amendment, m.verified)),
+      ruleBasis: weakestRuleBasis(met.map((m) => amendmentBasis(ctx, m.amendment, m.verified))),
+      arithmetic: `${met.map((m) => {
+        const c = m.amendment.check!;
+        return c.kind === "prohibited" ? `${amendmentLabel(m.amendment)}: the plan does not show "${String(c.value)}"`
+          : c.kind === "min_value" || c.kind === "max_value" ? `${FIELD_LABEL[c.field]}: within ${amendmentLabel(m.amendment)}'s ${c.kind === "min_value" ? "minimum" : "maximum"} of ${fmt(Number(c.value))} ${FIELD_UNIT[c.field as keyof typeof FIELD_UNIT]}`
+            : `${amendmentLabel(m.amendment)}: the plan carries "${String(c.value)}"`;
+      }).join(". ")}.`,
+    }));
   }
   if (byHand.length) {
     out.push({

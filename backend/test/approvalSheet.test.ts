@@ -202,7 +202,7 @@ const lift = (name: string): string => {
   return dashboard.slice(m.index, i) + (isConst ? ";" : "");
 };
 const ui = (stubs: Record<string, unknown>) => new Function(...Object.keys(stubs),
-  `${["esc", "humanize", "APPROVE_AUTO_SUBMIT_LEDE", "approvalOpenItemsHtml", "approvalSheetHtml", "confirmApprovalSheet"].map(lift).join("\n\n")}\nreturn { approvalSheetHtml, confirmApprovalSheet };`,
+  `${["esc", "humanize", "APPROVE_AUTO_SUBMIT_LEDE", "CHECK_CATEGORY_LABEL", "checkRecordsHtml", "approvalOpenItemsHtml", "approvalSheetHtml", "confirmApprovalSheet"].map(lift).join("\n\n")}\nreturn { approvalSheetHtml, confirmApprovalSheet };`,
 )(...Object.values(stubs)) as { approvalSheetHtml: (s: unknown, who: string) => string; confirmApprovalSheet: (t: string, who?: string) => Promise<boolean> };
 
 await check("(D1) the sheet's HTML lists the red items before the table, and escapes every value", () => {

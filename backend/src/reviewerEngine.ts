@@ -1,4 +1,5 @@
 import type { AhjProcessProfile, CodeReference, ProjectRecord, ReviewerFinding, ReviewerFindingEvidence, ReviewerReport, StatePermitRule, UtilityApplicationRequirement, UtilityRequirementKey, UtilityRequirementList } from "../../shared/src/types";
+import { isCheckRecord } from "./checkRecords";
 import { looksLikeEmail } from "../../shared/src/emailAddress";
 import { evaluateDesignCodeFindings, mountKindForProject, isMlpeDesignForProject } from "./codeReviewRules";
 import { pvWorksheetFindings, serviceRatingConsistencyFindings, type PvWorksheetGateInput } from "./pvWorksheetGate";
@@ -596,6 +597,26 @@ export function borrowedTopicEvidence(
 
 function attachEvidence(project: ProjectRecord, profile: AhjProcessProfile | null, finding: ReviewerFinding): ReviewerFinding {
   if (finding.evidenceFound?.length) return finding;
+  // A CHECK RECORD (review-audit draft 07) is its own evidence: the recompute that passed, or the
+  // input it lacked. Never a topic's borrowed sheet excerpt, which would read as "the check found this".
+  if (isCheckRecord(finding)) {
+    const passed = finding.checkOutcome === "passed";
+    return {
+      ...finding,
+      evidenceStatus: passed ? "verified" : "missing",
+      evidenceFound: [{
+        kind: passed ? "field_value" : "absence_check",
+        label: passed ? "Recomputed from the plan's own values" : "Input not on the plans",
+        source: "Rule engine",
+        excerpt: finding.message,
+        confidence: passed ? "high" : "low",
+        pageHint: "",
+        screenshotPath: "",
+        verifier: "rule_engine",
+        note: passed ? "A check record: the rule ran and passed. It never blocks or relaxes anything." : "A check record: the rule could not run. It never blocks or relaxes anything.",
+      }],
+    };
+  }
   const topic = topicForFinding(finding);
   if (topic) return { ...finding, ...borrowedTopicEvidence(project.id, finding, evidenceForTopic(project, topic)) };
   const evidenceFound = genericEvidence(project, profile, finding);
@@ -658,6 +679,7 @@ function renderFinding(finding: ReviewerFinding): string {
         <span>${esc(finding.severity)} | ${esc(finding.category)} | evidence: ${esc(finding.evidenceStatus || "unknown")}</span>
       </div>
       ${visionHtml}
+      ${finding.ruleBasis ? `<p class="meta"><strong>Rule basis:</strong> ${esc(finding.ruleBasis.label)}${finding.ruleBasis.source ? ` — ${esc(finding.ruleBasis.source)}` : ""}</p>` : ""}
       <p><strong>Reviewer comment:</strong> ${esc(finding.cityFeedback)}</p>
       <p><strong>Required correction:</strong> ${esc(finding.designTeamAction)}</p>
       <div class="grid">
@@ -721,8 +743,14 @@ export function renderReviewerReportHtml(project: ProjectRecord, report: Reviewe
     </section>
     <section>
       <h2>City-Style Correction Comments</h2>
-      ${report.findings.map(renderFinding).join("")}
+      ${report.findings.filter((f) => !isCheckRecord(f)).map(renderFinding).join("")}
     </section>
+    ${report.findings.some(isCheckRecord) ? `
+    <section class="summary">
+      <h2>Checks Run</h2>
+      <p class="meta">What the measured rules checked: passed with the arithmetic, or not checked because an input is not on the plans. Display only; none of these is a correction.</p>
+      <ul>${report.findings.filter(isCheckRecord).map((f) => `<li><strong>${f.checkOutcome === "passed" ? "Passed" : "Not checked"} — ${esc(f.title)}:</strong> ${esc(f.message)}${f.ruleBasis ? ` <span>(${esc(f.ruleBasis.label)})</span>` : ""}</li>`).join("")}</ul>
+    </section>` : ""}
     ${report.installerCallouts.length ? `
     <section class="summary">
       <h2>Installer Callouts — Quick Checklist</h2>

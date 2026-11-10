@@ -1565,6 +1565,23 @@ export interface ApprovalSheet {
   openItems: ApprovalSheetOpenItem[];
   /** The plan set the package ships, which the acknowledgements are bound to (null = none on file). */
   planSet: ApprovalPlanSetBinding | null;
+  /** Review-audit draft 07: what the gate's measured rules checked for THIS filing — passed with the
+   *  arithmetic, or not checked for want of an input. Display only: nothing here needs a tick, blocks
+   *  or relaxes anything. */
+  checks: ApprovalSheetCheck[];
+}
+
+/** Review-audit draft 07: one check record of a filing, as the approval sheet lists it. */
+export interface ApprovalSheetCheck {
+  /** The record's finding id ("city.elec.sizing-busbar-120.pass"). */
+  id: string;
+  outcome: "passed" | "not_checked";
+  category: ReviewerFinding["category"];
+  title: string;
+  /** The arithmetic that passed, or "Not checked: <input> is not on the plans." */
+  text: string;
+  /** The rule basis in words (#683's wording), "" when the rule measured against no jurisdiction data. */
+  basis: string;
 }
 
 /** Review-audit draft 01: one open review item of a filing, as the approval sheet lists it. */
@@ -2835,6 +2852,21 @@ export interface ReviewerVisionVerdict {
   question?: string;
 }
 
+/** WHERE A RULE'S VALUE CAME FROM (review-audit draft 07; words: shared/src/ruleBasis.ruleBasisLabel). */
+export type RuleBasisTier = "model_code" | "seeded" | "official" | "verified";
+export interface ReviewerRuleBasis {
+  tier: RuleBasisTier;
+  /** What the value was compared against: "NEC 2023 705.12(B)(3)(2)", "Salt Lake City (UT) code profile". */
+  source: string;
+  /** The page the value was read from, "" when none is on file. */
+  sourceUrl: string;
+  /** tier "verified" only: who verified the row (never printed when it is an email address). */
+  verifiedBy?: string;
+  /** The tier in words, as every screen prints it: "from le.utah.gov", "seeded, not verified",
+   *  "person-verified by …", "model code (NEC 2023 690.7)". Official is never worded as verified. */
+  label: string;
+}
+
 export interface ReviewerFinding {
   id: string;
   severity: "blocker" | "warning" | "callout" | "pass";
@@ -2856,6 +2888,15 @@ export interface ReviewerFinding {
   /** On city.fire.pathway-unmeasured only: what the roof plan must show, so the vision pass can
    *  compare a measured sheet against the same requirement the text rule used. */
   roofPlanRequired?: RoofPlanRequiredDimension[];
+  /** A CHECK RECORD, not a correction (review-audit draft 07): "passed" = a measured rule ran and
+   *  passed (severity "pass", its arithmetic in the message); "not_checked" = it could not run because
+   *  an input is not on the plans (severity "callout"). Display only: never blocks, never relaxes,
+   *  never in the correction notice, never needs an acknowledgement. Its id is the rule's id plus
+   *  ".pass" / ".not-checked" (backend/src/checkRecords.ts). Absent on every other finding. */
+  checkOutcome?: "passed" | "not_checked";
+  /** The tier of the jurisdiction data (or the model code) this finding measured against, in words
+   *  matching #683 (shared/src/ruleBasis). Absent where the finding measured against nothing. */
+  ruleBasis?: ReviewerRuleBasis;
 }
 
 export interface FinalSubmitGate {

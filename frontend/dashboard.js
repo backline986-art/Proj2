@@ -6000,6 +6000,35 @@ function approvalOpenItemsHtml(sheet) {
     </div>`;
 }
 
+// WHAT THE GATE CHECKED (review-audit draft 07): check records (passed with the arithmetic, or not
+// checked for want of an input), grouped by category, each group collapsed. Display only: none is a
+// correction. `list` items carry { outcome, category, title, text, basis }.
+const CHECK_CATEGORY_LABEL = { electrical: "Electrical", structural: "Structural", plan_set: "Plan set and fire access", ahj_profile: "Local rules", utility_nem: "Utility", project_data: "Project data" };
+function checkRecordsHtml(list, opts = {}) {
+  const items = Array.isArray(list) ? list : [];
+  if (!items.length) return "";
+  const groups = new Map();
+  for (const c of items) {
+    const key = CHECK_CATEGORY_LABEL[c.category] || humanize(c.category || "Other");
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(c);
+  }
+  const line = (c) => `<li data-check-record="${esc(c.id || "")}" data-check-outcome="${esc(c.outcome)}" style="margin:4px 0">
+      <span aria-hidden="true" style="color:${c.outcome === "passed" ? "var(--ink-pass)" : "var(--ink-warn, inherit)"}">${c.outcome === "passed" ? "✓" : "?"}</span>
+      <strong>${c.outcome === "passed" ? "" : "Not checked — "}${esc(c.title)}</strong>
+      <div style="font-size:12px">${esc(c.text)}</div>
+      ${c.basis ? `<div class="muted" style="font-size:12px">Rule basis: ${esc(c.basis)}</div>` : ""}
+    </li>`;
+  return `<div data-check-records${opts.tag ? ` ${opts.tag}` : ""}>
+      ${opts.heading ? `<strong>${esc(opts.heading)}</strong>` : ""}
+      ${[...groups].map(([label, list]) => {
+        const passed = list.filter((c) => c.outcome === "passed").length;
+        const unchecked = list.length - passed;
+        return `<details data-check-group="${esc(label)}" style="margin:4px 0"><summary>${esc(label)}: ${passed} passed${unchecked ? `, ${unchecked} not checked` : ""}</summary><ul style="list-style:none;margin:4px 0 0 0;padding:0">${list.map(line).join("")}</ul></details>`;
+      }).join("")}
+    </div>`;
+}
+
 function approvalSheetHtml(sheet, recordedAs) {
   const issues = Array.isArray(sheet.issues) ? sheet.issues : [];
   const red = issues.filter((i) => i.kind === "mismatch" || i.kind === "missing");
@@ -6021,6 +6050,7 @@ function approvalSheetHtml(sheet, recordedAs) {
       : `<div data-approval-clean style="border:1px solid var(--edge-pass);background:var(--tint-pass);color:var(--ink-pass);border-radius:var(--radius-sm);padding:10px 12px">No disagreement found between the project, the bill and the plan set.</div>`}
     ${approvalOpenItemsHtml(sheet)}
     ${notes.length ? `<div data-approval-notes style="border:1px solid var(--edge-warn);background:var(--tint-warn);border-radius:var(--radius-sm);padding:10px 12px"><strong>Worth a look</strong>${issueList(notes, "inherit")}</div>` : ""}
+    ${checkRecordsHtml(sheet.checks, { heading: "What the gate checked for this filing (display only)", tag: "data-approval-checks" })}
     <table style="width:100%;border-collapse:collapse"><thead><tr><th style="text-align:left" class="muted">Field</th><th style="text-align:left" class="muted">What will be filed</th><th style="text-align:left" class="muted">Source</th></tr></thead><tbody>${rows}</tbody></table>
     <p class="muted" style="font-size:12px;white-space:pre-line">${esc(APPROVE_AUTO_SUBMIT_LEDE.replace(/^Approve & auto-submit this filing\?\n\n/, ""))}</p>
     ${recordedAs ? `<p style="margin:0"><strong>Recorded as:</strong> ${esc(recordedAs)}</p>` : ""}`;
@@ -7310,7 +7340,10 @@ function renderReviewerGate() {
   const findings = report.findings || [];
   const blockers = findings.filter((item) => item.severity === "blocker");
   const warnings = findings.filter((item) => item.severity === "warning");
-  const clears = findings.filter((item) => item.severity === "pass" || item.severity === "callout");
+  // Check records (review-audit draft 07) are grouped apart from the callouts: passes with their
+  // arithmetic and the checks that could not run, by category, collapsed.
+  const records = findings.filter((item) => item.checkOutcome === "passed" || item.checkOutcome === "not_checked");
+  const clears = findings.filter((item) => (item.severity === "pass" || item.severity === "callout") && !records.includes(item));
   $("reviewerCounts").textContent = `${blockers.length} blocker / ${warnings.length} warn`;
 
   const issues = [...blockers, ...warnings].slice(0, 18);
@@ -7319,8 +7352,9 @@ function renderReviewerGate() {
   const subject = (profile && profile.ahj) || state.detail?.project?.ahj || "This jurisdiction";
   const submitButtonEnough = report.finalSubmitGate?.finalSubmitButtonAloneIsEnough;
 
-  const checksColumn = clears.length
-    ? clears.slice(0, 14).map((item) => `
+  const recordsHtml = checkRecordsHtml(records.map((r) => ({ id: r.id, outcome: r.checkOutcome, category: r.category, title: r.title, text: r.message, basis: r.ruleBasis?.label || "" })), { heading: "Measured checks" });
+  const checksColumn = (clears.length || records.length)
+    ? recordsHtml + clears.slice(0, 14).map((item) => `
         <div class="kx-check ${item.severity === "callout" ? "is-warn" : ""}">
           <span class="kx-check-mark" aria-hidden="true">${item.severity === "callout" ? "!" : "✓"}</span>
           <span class="kx-check-text">${esc(item.title)}${item.message || item.designTeamAction ? `<span class="kx-check-note">${esc([item.message, item.severity === "callout" ? item.designTeamAction : ""].filter(Boolean).join(" "))}</span>` : ""}</span>
@@ -7344,6 +7378,7 @@ function renderReviewerGate() {
             <span class="kx-action-label">Recommended action</span>
             <span class="kx-action-text">${esc(finding.designTeamAction || "Resolve before submittal.")}</span>
           </div>
+          ${finding.ruleBasis ? `<div class="kx-issue-field"><span class="kx-issue-field-label">Rule basis</span><span class="kx-issue-field-value">${esc(finding.ruleBasis.label)}${finding.ruleBasis.source ? ` — ${esc(finding.ruleBasis.source)}` : ""}</span></div>` : ""}
           <details class="provenance">
             <summary>${esc(humanize(finding.category))} · evidence and code anchors</summary>
             <div class="provenance-body">

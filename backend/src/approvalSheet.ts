@@ -46,7 +46,7 @@ import { projectSecretValues } from "./projectSecrets";
 import { stagingFieldValues } from "./recipeStageGapsView";
 import { redactSecretValues } from "../../shared/src/portalSafety";
 import { parseStreetName, parseStreetNumber } from "../../portal-bot/src/addressParse";
-import { openReviewItems, planSetBinding, unverifiedFormMappings } from "./approvalReviewItems";
+import { checkRecordsForTrack, openReviewItems, planSetBinding, unverifiedFormMappings } from "./approvalReviewItems";
 import { contractorLicenceForClient } from "./clients";
 import { composeFilingEmail, filingEmailChannelFor, filingPacket, filingRefTag } from "./filingEmail";
 import { recipeDisciplineForTrack } from "./portalChannel";
@@ -479,14 +479,24 @@ export function buildApprovalSheet(db: AppDb, project: ProjectRecord, track: Sub
   // still decides nothing (the approve route and the run check the acknowledgements).
   let gateChecks: SubmitGateCheck[] = [];
   try { gateChecks = getSubmitGateReport(db, project.id).checks; } catch { gateChecks = []; }
-  const openItems = openReviewItems(reviewerGateReportFor(db, project).findings, unverifiedFormMappings(db, project), gateChecks, track);
+  const gateFindings = reviewerGateReportFor(db, project).findings;
+  const openItems = openReviewItems(gateFindings, unverifiedFormMappings(db, project), gateChecks, track);
   for (const i of openItems) {
     i.title = scrub(i.title);
     i.text = scrub(i.text);
     i.action = scrub(i.action);
   }
 
+  // ── WHAT THE GATE CHECKED (review-audit draft 07) ───────────────────────────────────────────
+  // The measured rules' check records whose rule holds this filing: passed with the arithmetic, or
+  // not checked for want of an input. Display only, scrubbed like every other string here.
+  const checks = checkRecordsForTrack(gateFindings, track);
+  for (const c of checks) {
+    c.title = scrub(c.title);
+    c.text = scrub(c.text);
+  }
+
   const order = { mismatch: 0, missing: 1, note: 2 } as const;
   issues.sort((a, b) => order[a.kind] - order[b.kind]);
-  return { projectId: project.id, track, category, rows, issues, openItems, planSet: planSetBinding(db, project.id) };
+  return { projectId: project.id, track, category, rows, issues, openItems, planSet: planSetBinding(db, project.id), checks };
 }

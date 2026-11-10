@@ -41,10 +41,8 @@ export function inverterAcFromPlan(
   const unitOut = stringOut ?? read.num("pvMicroOutputW");
   const unitQty = stringOut != null ? read.num("invQty") : (read.num("pvMicroQty") ?? read.num("invQty"));
   if (unitOut == null || !(unitOut > 0) || unitQty == null || !(unitQty > 0)) return null;
+  if (threePhaseService(read)) return null;
   const voltsRaw = read.text("serviceVoltage") || read.text("voltage");
-  const phaseRaw = read.text("servicePhase") || read.text("phase");
-  const service = `${voltsRaw} ${phaseRaw}`;
-  if (/(?<!\d)(?:277|480)(?!\d)|\b3\s*-?\s*(?:ph|phase)\b|three[-\s]?phase|\b3\s*(?:Ø|φ)/i.test(service)) return null;
   const asWatts = unitOut > 100;
   const volts = /(?<!\d)208(?!\d)/.test(voltsRaw) ? 208 : 240;
   const kw = unitQty * (asWatts ? unitOut / 1000 : (unitOut * volts) / 1000);
@@ -55,4 +53,20 @@ export function inverterAcFromPlan(
   const roundingKw = unitQty * (asWatts ? halfStep / 1000 : (halfStep * volts) / 1000);
   const how = asWatts ? `${unitQty} x ${unitOut} W` : `${unitQty} x ${unitOut} A x ${volts} V${voltageAssumed ? " (assumed)" : ""}`;
   return { kw, how, voltageAssumed, unit: asWatts ? "W" : "A", roundingKw };
+}
+
+/** The plan states a three-phase service (277/480 V, "3 phase", "3Ø"): a single-phase sum is wrong there. */
+export function threePhaseService(read: { text: (key: string) => string }): boolean {
+  const service = `${read.text("serviceVoltage") || read.text("voltage")} ${read.text("servicePhase") || read.text("phase")}`;
+  return /(?<!\d)(?:277|480)(?!\d)|\b3\s*-?\s*(?:ph|phase)\b|three[-\s]?phase|\b3\s*(?:Ø|φ)/i.test(service);
+}
+
+/** What the AC cross-check needs and the plan set does not state (in words), for a "not checked" record. */
+export function inverterAcMissingInputs(read: { num: (key: string) => number | null }): string[] {
+  const out = read.num("invOutputW") ?? read.num("pvMicroOutputW");
+  const qty = read.num("invOutputW") != null ? read.num("invQty") : (read.num("pvMicroQty") ?? read.num("invQty"));
+  return [
+    out == null || !(out > 0) ? "the inverter's rated output per unit" : "",
+    qty == null || !(qty > 0) ? "the inverter quantity" : "",
+  ].filter(Boolean);
 }
