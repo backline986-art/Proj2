@@ -63,7 +63,7 @@ function isPlanSetDocType(docType: string): boolean {
 }
 
 // PLAN PAGES WHOSE TEXT IS DRAWN AS OUTLINES (#696, outlinedTextPages.ts). Checked once per plan-set
-// document and stored (outlined_pages_json, v72), so QC and the submit gate — synchronous readers —
+// document and stored (outlined_pages_json, v75), so QC and the submit gate — synchronous readers —
 // can name the pages nobody read. One check in flight per document, like the text extraction.
 const outlinedChecksInFlight = new Set<string>();
 
@@ -91,7 +91,7 @@ export function recordOutlinedPagesValue(db: AppDb, docId: string, pages: readon
  * The shipped plan set's pages whose text is drawn as outlines (#696): "unread: text drawn as
  * outlines; a person reads this page". [] when there are none, when there is no plan set, or when
  * the check has not run yet — in that last case it is started in the background (a plan set uploaded
- * before v72), and the next read has the answer. Synchronous: QC and the submit gate call it.
+ * before v75), and the next read has the answer. Synchronous: QC and the submit gate call it.
  */
 export function shippedPlanSetOutlinedPages(db: AppDb, projectId: string): number[] {
   const docId = shippedPlanSetDocumentId(db, projectId);

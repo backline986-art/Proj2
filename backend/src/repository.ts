@@ -71,6 +71,7 @@ import type {
   StatePermitRule,
   UtilityRequirementList,
 } from "../../shared/src/types";
+import { isCheckRecord } from "./checkRecords";
 import { correctionFilingStamp, correctionOverdueSql, touchProjectMetrics, type CorrectionFilingInput } from "./kpi";
 import fs from "node:fs";
 import path from "node:path";
@@ -2927,9 +2928,10 @@ export function getLiveProjectReadinessReport(db: AppDb, projectId: string): Liv
       title: "AHJ reviewer gate",
       status: reviewerBlockers.length ? "blocked" : reviewerWarnings.length ? "needs_review" : "done",
       ownerRole: "Permit Ops",
-      detail: `${reviewerBlockers.length} blocker(s), ${reviewerWarnings.length} warning(s), ${reviewerReport.findings.length} total callout(s).`,
+      // Check records (review-audit draft 07) are not callouts: counted and listed apart.
+      detail: `${reviewerBlockers.length} blocker(s), ${reviewerWarnings.length} warning(s), ${reviewerReport.findings.filter((f) => !isCheckRecord(f)).length} total callout(s), ${reviewerReport.findings.filter((f) => f.checkOutcome === "passed").length} check(s) passed, ${reviewerReport.findings.filter((f) => f.checkOutcome === "not_checked").length} not checked.`,
       nextAction: reviewerBlockers.length ? "Send blocker callouts to installer/design before submittal." : reviewerWarnings.length ? "Confirm warnings with evidence before staging." : "Reviewer gate has no blockers.",
-      evidence: reviewerReport.findings.slice(0, 5).map((finding) => `${finding.title}: ${finding.evidenceStatus}`),
+      evidence: reviewerReport.findings.filter((f) => !isCheckRecord(f)).slice(0, 5).map((finding) => `${finding.title}: ${finding.evidenceStatus}`),
       source: "reviewer_gate",
     }),
     readinessItem({

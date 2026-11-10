@@ -30,7 +30,7 @@
 // approve route import it; it imports none of them (repository's reviewer report is passed in).
 import crypto from "node:crypto";
 import type {
-  ApprovalAcknowledgements, ApprovalPlanSetBinding, ApprovalSheetOpenItem, ProjectRecord, ReviewerFinding,
+  ApprovalAcknowledgements, ApprovalPlanSetBinding, ApprovalSheetCheck, ApprovalSheetOpenItem, ProjectRecord, ReviewerFinding,
   SubmitGateCheck, SubmittalTrackType,
 } from "../../shared/src/types";
 import type { AppDb } from "./db";
@@ -38,6 +38,7 @@ import { formAllowedForPath, loadStoredTemplates, type StoredTemplate } from "./
 import { formTrackForSubmittalTrack } from "./applicationDocsAgency";
 import { resolvePermitPathForProject } from "./codeProfiles";
 import { findingHoldScope, gateWarningScope, scopeHoldsTrack } from "./gateScope";
+import { checkRuleId, isCheckRecord } from "./checkRecords";
 import { shippedPlanSet } from "./projectDocuments";
 import { MEASURED_FINDING_IDS } from "./reviewerVision";
 import { fileSha256 } from "./structuralLetterVoid";
@@ -204,4 +205,21 @@ export function acknowledgementProblems(
     else if (hash !== item.contentHash) out.push(`changed since it was acknowledged: ${item.title}`);
   }
   return out;
+}
+
+/** THE CHECK RECORDS OF ONE FILING (review-audit draft 07): every passed / not-checked record whose
+ *  RULE's scope holds this track (findingHoldScope on the rule's own id, the predicate every open
+ *  item uses), passes last. Display only: never acknowledged, never a stop. */
+export function checkRecordsForTrack(findings: ReviewerFinding[], track: SubmittalTrackType): ApprovalSheetCheck[] {
+  return findings
+    .filter((f) => isCheckRecord(f) && scopeHoldsTrack(findingHoldScope({ id: checkRuleId(f), category: f.category }), track))
+    .map((f) => ({
+      id: f.id,
+      outcome: f.checkOutcome as ApprovalSheetCheck["outcome"],
+      category: f.category,
+      title: f.title,
+      text: f.message,
+      basis: f.ruleBasis?.label ?? "",
+    }))
+    .sort((a, b) => (a.outcome === b.outcome ? 0 : a.outcome === "not_checked" ? -1 : 1));
 }
