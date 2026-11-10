@@ -3324,9 +3324,40 @@ const VERSIONED_MIGRATIONS: VersionedMigration[] = [
     },
   },
   {
-    // v71 on helm-staging-offline 43a683df (#700). Another unmerged branch may also hold v71; the
-    // reviewer renumbers at merge. Nothing here depends on the number.
+    // v71, NOT v67: v67-v70 are held by unmerged work (#679, #673, #688, #699). Until those land,
+    // migrationVersions.test reads this as a gap — red by design (its own header), the merge-order
+    // guard. Renumber to the next free version at merge if the queue changes.
     version: 71,
+    name: "run_approval_acknowledgements",
+    up: (db) => {
+      // WHAT THE APPROVER ACKNOWLEDGED (review-audit draft 01). Approve & auto-submit records, with the
+      // approval, each measured reviewer warning and unverified form mapping the person ticked on the
+      // approval sheet (its id and content hash) and the shipped plan set's document id + sha256
+      // (approvalReviewItems.ts). The run reads it back at the claim and stops at review when it no
+      // longer covers what needs one. '' = nothing acknowledged (every approval minted before this).
+      addColumnIfMissing(db, "portal_run_approvals", "acknowledgements_json", "TEXT NOT NULL DEFAULT ''");
+    },
+  },
+  {
+    // v72: the next free number on the offline staging base (ae6eaca3, up to v71: #699's v70, approval
+    // draft 01's v71). Renumber at merge if the queue changes — nothing depends on the number.
+    version: 72,
+    name: "utility_application_requirements",
+    up: (db) => {
+      // WHAT THE UTILITY'S OWN APPLICATION ASKS FOR (review-audit draft 03, backend/src/utilityRequirements.ts):
+      // { requirements: [{ key, whenMissing, tier, sourceName, sourceUrl, quote, fetchedAt, verifiedBy?, verifiedAt? }] }
+      // on the utility's filing row — official reads and a NAMED PERSON's items (the shipped seed lives in
+      // backend/data/reference-utility-application-requirements.json). Its own column, so a lookup's write
+      // (which replaces payload_json) never touches it (rule 3), and beside #673's storage_modes_json,
+      // which it never reads or writes.
+      addColumnIfMissing(db, "utility_filing_lookups", "application_requirements_json", "TEXT NOT NULL DEFAULT ''");
+    },
+  },
+  {
+    // v73 (#700): after approval draft 01's v71 and the utility checks' v72 on offline staging
+    // 7d706055 (Helm's numbering, 2026-11-10). Renumber at merge if the queue changes; nothing here
+    // depends on the number.
+    version: 73,
     name: "client_invoices_ledger",
     up: (db) => {
       // THE BILLING LEDGER (#700): what was actually invoiced, so a line is billed once.

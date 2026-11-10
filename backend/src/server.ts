@@ -1,5 +1,5 @@
 import "dotenv/config";
-import { validate, portalCredentialCreateSchema, portalCredentialUpdateSchema, autoLearnSchema, codeProfileResearchSchema, codeProfileVerifySchema, permitProcessVerifySchema, reviewSubjectSchema, utilityFilingVerifySchema, jobScopeSchema, utilityStorageModesSchema } from "./validation";
+import { validate, portalCredentialCreateSchema, portalCredentialUpdateSchema, autoLearnSchema, codeProfileResearchSchema, codeProfileVerifySchema, permitProcessVerifySchema, reviewSubjectSchema, utilityFilingVerifySchema, jobScopeSchema, utilityStorageModesSchema, utilityApplicationRequirementsSchema } from "./validation";
 import crypto from "node:crypto";
 import { spawn } from "node:child_process";
 import express, { type NextFunction, type Request, type Response } from "express";
@@ -167,6 +167,7 @@ import {
   runProjectWorkflow,
   runPermitChecksNow,
   createRunApproval,
+  approvalAcknowledgementRefusals,
   finalSubmitJobPayload,
 } from "./repository";
 import { createSignatureRequestApproval } from "./signatureRequestApproval";
@@ -176,6 +177,7 @@ import { getUtilityFilingLookup, nemFiledWithPermit, verifyUtilityFilingLookup }
 import { runQcForProject } from "./qc";
 import { personJobScope, setPersonJobScope } from "./jobScope";
 import { clearUtilityStorageModes, recordUtilityStorageModes } from "./utilityStorageModes";
+import { clearUtilityApplicationRequirements, recordUtilityApplicationRequirements } from "./utilityRequirements";
 import { stagedReviewScreenshotFile } from "./stagedReviews";
 import { submissionConfirmationFile } from "./submissionConfirmation";
 import { reviewScreenshotFile } from "./reviewScreenshot";
@@ -2569,6 +2571,38 @@ app.delete("/api/projects/:id/utility-filing/storage-modes", (req, res) => {
   res.json({ record: null });
 });
 
+// WHAT THIS PROJECT'S UTILITY'S OWN APPLICATION ASKS FOR (review-audit draft 03; utilityRequirements.ts).
+// Same tenancy and keying as the storage-mode routes above: shared knowledge on the utility's filing row,
+// keyed by the project's own state + utility. A NAMED PERSON records each item with the page and its words
+// (rule 3: lands 'verified'; a verified item may block when the job lacks it); DELETE withdraws the
+// person's items (the shipped seed and any official reads stand). QC re-runs so the gate reads it.
+app.put("/api/projects/:id/utility-filing/application-requirements", (req, res) => {
+  const projectId = String(req.params.id);
+  const { project } = getProjectDetail(db, projectId);
+  const b = validate(utilityApplicationRequirementsSchema, req.body);
+  const verifiedBy = namedPersonDecider(req, "decidedBy",
+    "Sign in to record a utility's application requirements.",
+    "Name the person recording them: a utility's application requirements are recorded by a named person.");
+  const r = recordUtilityApplicationRequirements(db, { state: project.state, utility: project.utility }, { requirements: b.requirements, verifiedBy });
+  if (!r.saved) throw new HttpError(r.reason.startsWith("No filing record") ? 409 : 400, r.reason);
+  addAuditLog(db, projectId, "human", verifiedBy, "utility_filing.application_requirements_recorded", {
+    utility: project.utility, state: project.state, keys: b.requirements.map((x) => x.key), sources: b.requirements.map((x) => x.sourceUrl),
+  });
+  runQcForProject(db, projectId);
+  res.json({ requirements: r.requirements });
+});
+app.delete("/api/projects/:id/utility-filing/application-requirements", (req, res) => {
+  const projectId = String(req.params.id);
+  const { project } = getProjectDetail(db, projectId);
+  const verifiedBy = namedPersonDecider(req, "decidedBy",
+    "Sign in to withdraw a utility's application requirements.",
+    "Name the person withdrawing them.");
+  clearUtilityApplicationRequirements(db, { state: project.state, utility: project.utility });
+  addAuditLog(db, projectId, "human", verifiedBy, "utility_filing.application_requirements_withdrawn", { utility: project.utility, state: project.state });
+  runQcForProject(db, projectId);
+  res.json({ requirements: null });
+});
+
 // WHAT THE JOB INSTALLS, SET BY A PERSON (#673; jobScope.ts). Under /api/projects/:id, so it
 // inherits the tenancy guard (rule 6) and getProjectDetail 404s an unknown or out-of-scope project
 // first. A NAMED PERSON (namedPersonDecider) sets pv / pv+storage / storage-added-to-existing-pv /
@@ -3831,7 +3865,19 @@ app.post("/api/projects/:id/prepare-submission", (req, res) => {
     if (AUTH_ENABLED && !user) throw new HttpError(401, "Sign in to approve a final submit.");
     const approverName = AUTH_ENABLED ? String(user?.name || user?.email || "").trim() : String(req.body?.approverName || "").trim();
     if (approverName) {
-      approval = createRunApproval(db, { projectId, track: track ?? "permit", approver: approverName, approverUserId: user?.id ?? null });
+      // THE OPEN REVIEW ITEMS ARE ACKNOWLEDGED FIRST (review-audit draft 01). Each measured reviewer
+      // warning and unverified form mapping this filing carries must have been ticked on the approval
+      // sheet — with the content the server holds now, against the plan set on file — or no approval
+      // is minted and nothing is enqueued. Adds a stop only: what is acknowledged is recorded with the
+      // approval, and the run checks it again (automaticSubmitRefusals).
+      const ack = approvalAcknowledgementRefusals(db, getProjectDetail(db, projectId).project, track ?? null, req.body?.acknowledgements);
+      if (ack.problems.length) {
+        addAuditLog(db, projectId, "human", approverName, "portal.final_submit_acknowledgement_missing", { track: track ?? "permit", problems: ack.problems });
+        throw new HttpError(409,
+          `Approve & auto-submit needs each open review item acknowledged on the approval sheet first: ${ack.problems.join("; ")}. Nothing was approved or started — reopen the approval sheet, read the items and tick each one.`,
+          { acknowledgementsNeeded: true, problems: ack.problems });
+      }
+      approval = createRunApproval(db, { projectId, track: track ?? "permit", approver: approverName, approverUserId: user?.id ?? null, acknowledgements: ack.acknowledgements });
     } else {
       addAuditLog(db, projectId, "human", "dashboard", "portal.final_submit_not_approved", {
         track: track ?? "permit", reason: "no named approver — the run will stop at review",

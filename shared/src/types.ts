@@ -1234,6 +1234,52 @@ export const JOB_SCOPES: readonly JobScope[] = ["pv", "pv+storage", "storage-add
 export type StorageOperatingMode = "export" | "non-export" | "backup-only";
 export const STORAGE_OPERATING_MODES: readonly StorageOperatingMode[] = ["export", "non-export", "backup-only"];
 
+/**
+ * WHAT A UTILITY'S OWN APPLICATION ASKS FOR (review-audit draft 03; backend/src/utilityRequirements.ts).
+ * One typed item per thing the utility's interconnection application requires; the reviewer gate checks
+ * each against the project's evidence. Universal: the keys are kinds of evidence, never a utility.
+ */
+export type UtilityRequirementKey =
+  | "account_verification"
+  | "meter_photo"
+  | "inverter_settings"
+  | "inverter_listing_ul1741sb"
+  | "one_line"
+  | "site_plan"
+  | "ac_disconnect"
+  | "storage_mode_declaration"
+  | "owner_signature";
+export const UTILITY_REQUIREMENT_KEYS: readonly UtilityRequirementKey[] = [
+  "account_verification", "meter_photo", "inverter_settings", "inverter_listing_ul1741sb", "one_line",
+  "site_plan", "ac_disconnect", "storage_mode_declaration", "owner_signature",
+];
+/** seeded (shipped reference / a lookup's proposal) < official (#683: the utility's own official page,
+ *  quote confirmed in the bytes read) < verified (a named person). */
+export type UtilityRequirementTier = "seeded" | "official" | "verified";
+export interface UtilityApplicationRequirement {
+  key: UtilityRequirementKey;
+  /** What a missing item is at most: "blocker" only counts when the item may block (a verbatim quote
+   *  from a named source page that names the item, or the official / verified tier); "warning" never blocks. */
+  whenMissing: "blocker" | "warning";
+  tier: UtilityRequirementTier;
+  sourceName: string;
+  sourceUrl: string;
+  /** The page's own words. Empty = uncited: the item warns, never blocks (Helm's #637 bar). */
+  quote: string;
+  fetchedAt?: string;
+  /** A finding id kept from before this data existed (the two first seeded utilities), so the gate's
+   *  history, dedupe and tests keep reading the same id. Absent = reviewer.utility.<key>. */
+  findingId?: string;
+  verifiedBy?: string;
+  verifiedAt?: string;
+}
+/** The requirement list the reviewer reads for one job's utility (utilityRequirements.resolveUtilityRequirements). */
+export interface UtilityRequirementList {
+  /** The utility as the findings name it ("Rocky Mountain Power", "PGE"). */
+  displayName: string;
+  requirements: UtilityApplicationRequirement[];
+}
+
 /** The job's scope with its basis, as QC used it (jobScope.resolveJobScope). */
 export interface JobScopeView {
   scope: JobScope;
@@ -1514,6 +1560,43 @@ export interface ApprovalSheet {
   rows: ApprovalSheetRow[];
   /** Mismatches first, then missing values, then notes. */
   issues: ApprovalSheetIssue[];
+  /** Review-audit draft 01: every open review item of THIS filing (backend/src/approvalReviewItems.ts),
+   *  those to acknowledge first. Approve stays disabled until each `needsAcknowledgement` item is ticked. */
+  openItems: ApprovalSheetOpenItem[];
+  /** The plan set the package ships, which the acknowledgements are bound to (null = none on file). */
+  planSet: ApprovalPlanSetBinding | null;
+}
+
+/** Review-audit draft 01: one open review item of a filing, as the approval sheet lists it. */
+export interface ApprovalSheetOpenItem {
+  /** Unique on the sheet ("finding:<id>", "form:<templateId>", "gate:<checkId>"). */
+  key: string;
+  kind: "reviewer_warning" | "form_mapping" | "gate_warning";
+  /** What an acknowledgement names: the finding id, "form:<templateId>", or the gate check id. */
+  id: string;
+  title: string;
+  /** The AHJ-facing sentence (a finding's cityFeedback) or the check's evidence. */
+  text: string;
+  action: string;
+  /** Arithmetic against the plan's own numbers (reviewerVision.MEASURED_FINDING_IDS). */
+  measured: boolean;
+  /** A measured warning or an unverified form mapping: a named person ticks it before approving. */
+  needsAcknowledgement: boolean;
+  /** What the person read; a changed item is a new one to acknowledge. */
+  contentHash: string;
+}
+
+/** The plan set an acknowledgement covers: its document id and the sha256 of its stored bytes. */
+export interface ApprovalPlanSetBinding {
+  documentId: string;
+  sha256: string;
+}
+
+/** What Approve & auto-submit sends with the approval, and what the approval records (review-audit
+ *  draft 01): the plan set the sheet showed and each acknowledged item's id + content hash. */
+export interface ApprovalAcknowledgements {
+  planSet: ApprovalPlanSetBinding | null;
+  items: Array<{ id: string; contentHash: string }>;
 }
 
 export interface SubmittalTrack {
@@ -3885,6 +3968,9 @@ export interface ParserLlmExtraction {
   visionPageRoles?: Array<{ page: number; kind: PlanSheetKind; sheet?: string; title?: string; rotate?: number }>;
   /** Pages that were candidates but NOT read, and why (cap, byte budget, render failure). */
   visionSkipped?: Array<{ page: number; reason: string }>;
+  /** Plan-set pages whose TEXT was left out of the text read because the plan text was over the
+   *  prompt's character bound (whole pages dropped from the middle, #697). Absent when all fit. */
+  planTextPagesNotRead?: number[];
 }
 
 /** What a plan-set page is, as the page-index read names it (scannedPlanSet.ts chooses the

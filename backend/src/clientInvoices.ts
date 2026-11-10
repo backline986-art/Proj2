@@ -6,7 +6,7 @@
 // on an invoice, with the payment row it came from.
 //
 // ONE LINE, ONE INVOICE. A line key names what is billed — "<payment row id>:<kind>" — and the
-// schema lets a key sit on at most one live line (ux_client_invoice_lines_live_key, migration v71).
+// schema lets a key sit on at most one live line (ux_client_invoice_lines_live_key, migration v73).
 // A statement leaves out every key already on a live invoice, so billing the same project in two
 // periods, or pressing "Create invoice" twice, never repeats a charge. Voiding an invoice releases
 // its lines (released_at) and a later invoice may carry them again.

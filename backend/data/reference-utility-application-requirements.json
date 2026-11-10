@@ -1,0 +1,74 @@
+{
+  "_comment": "What each utility's own interconnection application asks for (review-audit draft 03), as cited DATA: loaded by backend/src/utilityRequirements.ts and read by the reviewer gate for the job's utility. Rows land SEEDED. A missing item is a warning unless the row quotes the utility's own page verbatim with a named source and the quote names the item (Helm's #637 bar); only then may whenMissing 'blocker' block. Records match the job's state and utility name (any of matchNames, as whole words, after lower-casing and '&' -> 'and'). A person's verified items or an official read on the utility's filing row (utility_filing_lookups.application_requirements_json) override these per key. To add a utility, add a record here: no code. Quotes were read from the page bytes on fetchedAt.",
+  "records": [
+    {
+      "states": ["UT", "ID", "WY"],
+      "utility": "Rocky Mountain Power",
+      "displayName": "Rocky Mountain Power",
+      "matchNames": ["rocky mountain power", "rocky mtn power", "rockymountain power", "rocky mountainpower", "rockymountainpower", "rockymtn power", "pacificorp", "pacific power", "pacificpower", "pac power", "pacpower", "rmp"],
+      "requirements": [
+        {
+          "key": "meter_photo",
+          "whenMissing": "blocker",
+          "findingId": "reviewer.utility.pacpower-meter-photo",
+          "sourceName": "Rocky Mountain Power — Customer generation",
+          "sourceUrl": "https://www.rockymountainpower.net/savings-energy-choices/customer-generation.html",
+          "quote": "APPLY: Submit an online application with the proposed system, including a picture of the meter.",
+          "fetchedAt": "2026-11-10T01:12:00Z"
+        },
+        {
+          "key": "inverter_settings",
+          "whenMissing": "warning",
+          "findingId": "reviewer.utility.pacpower-settings",
+          "sourceName": "Rocky Mountain Power — Customer generation",
+          "sourceUrl": "https://www.rockymountainpower.net/savings-energy-choices/customer-generation.html",
+          "quote": "Please note: All inverter-based Customer Generation applications need to use the provided settings.",
+          "fetchedAt": "2026-11-10T01:12:00Z"
+        }
+      ]
+    },
+    {
+      "states": ["OR", "WA", "CA"],
+      "utility": "Pacific Power",
+      "displayName": "Pacific Power",
+      "matchNames": ["pacific power", "pacificpower", "pac power", "pacpower", "pacificorp", "rocky mountain power", "rocky mtn power", "rockymountain power", "rocky mountainpower", "rockymountainpower", "rockymtn power"],
+      "requirements": [
+        {
+          "key": "meter_photo",
+          "whenMissing": "blocker",
+          "findingId": "reviewer.utility.pacpower-meter-photo",
+          "sourceName": "Pacific Power — Customer generation",
+          "sourceUrl": "https://www.pacificpower.net/savings-energy-choices/customer-generation.html",
+          "quote": "APPLY: Submit an online application with the proposed system, including a picture of the meter.",
+          "fetchedAt": "2026-11-10T01:12:00Z"
+        },
+        {
+          "key": "inverter_settings",
+          "whenMissing": "warning",
+          "findingId": "reviewer.utility.pacpower-settings",
+          "sourceName": "Pacific Power — Customer generation",
+          "sourceUrl": "https://www.pacificpower.net/savings-energy-choices/customer-generation.html",
+          "quote": "Please note: All inverter-based Customer Generation applications need to use the provided settings.",
+          "fetchedAt": "2026-11-10T01:12:00Z"
+        }
+      ]
+    },
+    {
+      "states": ["OR"],
+      "utility": "Portland General Electric",
+      "displayName": "PGE",
+      "matchNames": ["portland general", "portland ge", "portland g e", "pge", "p g e", "pg e", "p ge"],
+      "requirements": [
+        {
+          "key": "account_verification",
+          "whenMissing": "blocker",
+          "findingId": "reviewer.utility.pge-account",
+          "sourceName": "PGE Interconnection Resource Library",
+          "sourceUrl": "https://portlandgeneral.com/renewable-installers/interconnection-process-overview",
+          "quote": "",
+          "_note": "UNCITED: PGE's page refused an automated read on 2026-11-10, so no verbatim words are on file and this item warns (the generic account-number blocker still holds a job with no account number). A person who reads the page can record its words (PUT /api/projects/:id/utility-filing/application-requirements) to let it block."
+        }
+      ]
+    }
+  ]
+}

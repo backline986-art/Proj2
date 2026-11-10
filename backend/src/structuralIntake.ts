@@ -3,6 +3,7 @@ import { classifyRoofCovering, tileAttachmentFromText, tileSubtype } from "./roo
 import { readPlanFraming, readStatedPermitPath, type PlanFact } from "./planFraming";
 import { pathWordingScope } from "./permitPath";
 import { planSheets, readDeckMount } from "./planAttachmentRead";
+import { planTextWindow, textOncePerPage, type PlanTextWindow } from "../../shared/src/planText";
 
 /** Explicit plan facts only. This supplements the text intake, including sheets
  * beyond the model's text budget. It never turns a missing fact into compliance. */
@@ -116,7 +117,13 @@ function spanFeet(value: unknown): number | null {
 }
 
 /** Include later structural notes/datasheets instead of silently discarding
- * everything after the first 24k characters. Bound the request at 80k. */
+ * everything after the first 24k characters. Bound the request at 80k.
+ * EACH PAGE ONCE, CUT BY WHOLE PAGES (#697): a page posted twice (the parser page's old layout +
+ * raw-order copy, or a tab opened before the fix) is collapsed to one copy first, and over the bound
+ * whole pages are dropped from the middle under a marker that names them (shared/src/planText.ts). */
+export function planTextForExtractionWindow(text: string): PlanTextWindow {
+  return planTextWindow(textOncePerPage(text));
+}
 export function planTextForExtraction(text: string): string {
-  return text.length <= 80000 ? text : text.slice(0, 60000) + "\n[Middle text omitted]\n" + text.slice(-20000);
+  return planTextForExtractionWindow(text).text;
 }

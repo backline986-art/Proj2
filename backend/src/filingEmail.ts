@@ -359,6 +359,8 @@ export async function fileTrackByEmail(db: AppDb, input: {
   approval: { approver: string } | null;
   wantsFinalSubmit: boolean;
   relaxedSinceApproval: string[];
+  /** Review-audit draft 01: the approval's acknowledgements no longer cover this filing's open items. */
+  unacknowledgedSinceApproval?: string[];
   submitterName: string;
   env?: Record<string, string | undefined>;
 }): Promise<FilingEmailSendView> {
@@ -378,6 +380,7 @@ export async function fileTrackByEmail(db: AppDb, input: {
     ? finalSubmitRefusals({
       channel: "email", envAllows: filingEmailEnvAllows(input.env ?? process.env), runApproval, runId,
       recordProblems, priorSendOnTrack: priorFilingEmailSend(db, project.id, track), relaxedSinceApproval: input.relaxedSinceApproval,
+      unacknowledgedSinceApproval: input.unacknowledgedSinceApproval,
     })
     : ["no automatic send was asked for — the email is staged for a person to send"];
   if (input.wantsFinalSubmit && refusals.length === 0 && !senderForTests && !smtpConfigured()) {

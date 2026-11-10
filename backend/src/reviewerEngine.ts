@@ -1,4 +1,4 @@
-import type { AhjProcessProfile, CodeReference, ProjectRecord, ReviewerFinding, ReviewerFindingEvidence, ReviewerReport, StatePermitRule } from "../../shared/src/types";
+import type { AhjProcessProfile, CodeReference, ProjectRecord, ReviewerFinding, ReviewerFindingEvidence, ReviewerReport, StatePermitRule, UtilityApplicationRequirement, UtilityRequirementKey, UtilityRequirementList } from "../../shared/src/types";
 import { looksLikeEmail } from "../../shared/src/emailAddress";
 import { evaluateDesignCodeFindings, mountKindForProject, isMlpeDesignForProject } from "./codeReviewRules";
 import { pvWorksheetFindings, serviceRatingConsistencyFindings, type PvWorksheetGateInput } from "./pvWorksheetGate";
@@ -10,11 +10,15 @@ import { evidenceForTopic, evidenceLines, fieldValue, requirementsForTopic, type
 import { nowIso } from "./time";
 import { hasMpuScope } from "./serviceScope";
 import { resolveValuation } from "./valuation";
-import { knownPowerClerkUtility, pacifiCorpBrand } from "./utilityIdentity";
+import { requirementMayBlock, resolveUtilityRequirements } from "./utilityRequirements";
+import { batteryStatus } from "../../shared/src/batteryControls";
+import { sourceHostOf } from "../../shared/src/officialSource";
 import { resolvePermitPath, resolveStampRequirement, hasStampedStructuralEvidence } from "./permitPath";
 import { evaluatePermitPrecedentFindings } from "./permitPrecedents";
 import { citeStateSealRule, statePrescriptiveFindings } from "./stateRules";
 import type { EffectiveCodeContext } from "./codeProfiles";
+import type { JobScope } from "../../shared/src/types";
+import { deriveJobScope, jobScopeLabel, scopeHasNewPv, storageFactGaps } from "./jobScope";
 
 function payload(project: ProjectRecord, key: string): string {
   return fieldValue(project, key);
@@ -67,6 +71,7 @@ const TOPIC_LABEL: Record<EvidenceTopic, string> = {
   rapidShutdown: "Rapid shutdown",
   labels: "PV labels / placards",
   inverterSettings: "Inverter listing / settings",
+  acDisconnect: "AC / utility disconnect",
   batteryMode: "Battery operating mode",
   utilityApproval: "Utility approval",
   ownerAuthorization: "Owner authorization",
@@ -115,17 +120,31 @@ export function buildReviewerReport(
     /** The job state's structural rules (state_permit_rules, #595 PR2): what refuses a prescriptive
      *  filing, and the seal rule the out-of-state seal finding cites. Absent = none on file. */
     stateRules?: StatePermitRule[];
+    /** What the job installs (#673, jobScope.resolveJobScope — a person's scope included). Absent:
+     *  the plan set's own evidence decides (deriveJobScope), which is pv unless the job names no new
+     *  module AND the plan set says so on both sheets. */
+    jobScope?: JobScope;
+    /** What the job's utility's own application asks for (utilityRequirements.resolveUtilityRequirements:
+     *  the shipped seed overlaid by the utility's filing row). undefined = not read here, so the shipped
+     *  seed alone is used; null = read, and nothing is on file for this utility. */
+    utilityRequirements?: UtilityRequirementList | null;
   } = {},
 ): ReviewerReport {
   const profile = findAhjProcessProfile(project);
   const findings: ReviewerFinding[] = [];
+  // THE GATE READS #673'S ONE SCOPE (draft 06). A storage scope installs no new array: the roof,
+  // fire-pathway, framing, attachment, rapid-shutdown and module findings do not run, and the
+  // storage facts are required instead, as blockers. Every PV scope — and the unknown one, which is
+  // pv — runs exactly today's findings.
+  const scope: JobScope = opts.jobScope ?? deriveJobScope(project.parserSnapshot).scope;
+  const newArray = scopeHasNewPv(scope);
 
   const standalone = isStandaloneReviewSubject(project);
-  addCoreProjectFindings(project, findings);
+  addCoreProjectFindings(project, findings, scope);
   // Valuation, homeowner email/phone and company assignment feed the portal APPLICATION; the
   // standalone gate files nothing and its form has none of those fields.
   if (!standalone) addSubmittalDataFindings(project, findings);
-  findings.push(...evaluateDesignCodeFindings(project, profile, opts.codeContext, opts.uploadedDocTypes ?? [], opts.documentTexts ?? [], opts.structuralCertification ?? null));
+  findings.push(...evaluateDesignCodeFindings(project, profile, opts.codeContext, opts.uploadedDocTypes ?? [], opts.documentTexts ?? [], opts.structuralCertification ?? null, scope));
   // The state's own cited rules (#595 PR2): refuse a prescriptive filing the rules send engineered,
   // name the reasons, and cite the state's seal rule on an out-of-state seal.
   if (opts.stateRules?.length) {
@@ -139,9 +158,11 @@ export function buildReviewerReport(
   // service ratings against the rest of the set (the package's own words, not parser notes).
   if (opts.pvWorksheet) findings.push(...pvWorksheetFindings(project, opts.pvWorksheet));
   findings.push(...serviceRatingConsistencyFindings(project, [String(project.parserSnapshot?.planSetExtractedText ?? ""), ...(opts.documentTexts ?? []).map((d) => d.text)].join("\n")));
-  addPlanSetFindings(project, findings);
-  addPlacementRuleFindings(project, opts.codeContext, findings, opts.documentTexts ?? []);
-  addUtilityFindings(project, findings);
+  addPlanSetFindings(project, findings, newArray);
+  // The AHJ's array-placement rules (roof pathways, setbacks) are about an array; a storage scope has none.
+  if (newArray) addPlacementRuleFindings(project, opts.codeContext, findings, opts.documentTexts ?? []);
+  const utilityAliases = addUtilityFindings(project, findings,
+    opts.utilityRequirements === undefined ? resolveUtilityRequirements(null, project.state, project.utility) : opts.utilityRequirements);
   addProfileFindings(project, profile, findings, opts.uploadedDocTypes ?? []);
   addPermitPathFindings(project, findings);
   addInstallerCallouts(project, profile, findings);
@@ -162,11 +183,11 @@ export function buildReviewerReport(
     "city.elec.rapid-shutdown-missing": "topic:rapid-shutdown",
     "reviewer.plan.rapid-shutdown": "topic:rapid-shutdown",
     "reviewer.core.account": "topic:account",
-    "reviewer.utility.pge-account": "topic:account",
     "reviewer.core.meter": "topic:meter",
-    "reviewer.utility.pacpower-meter-photo": "topic:meter",
   };
-  const dedupeKey = (f: ReviewerFinding): string => DEDUPE_ALIASES[f.id] || f.id;
+  // A utility requirement finding joins its topic's family by what it checks (its item key), never by
+  // which utility it is for (addUtilityFindings returns the aliases).
+  const dedupeKey = (f: ReviewerFinding): string => DEDUPE_ALIASES[f.id] || utilityAliases.get(f.id) || f.id;
   // KEEP THE MOST ACTIONABLE of an aliased pair, not merely the first one added.
   // addCoreProjectFindings runs before addUtilityFindings, so first-wins always kept the
   // generic "Utility account number missing." and discarded the utility-specific finding
@@ -190,8 +211,8 @@ export function buildReviewerReport(
     if (!keep.has(findings[i])) { findings.splice(i, 1); i--; continue; }
     keep.delete(findings[i]); // a duplicate object reference must not survive twice
   }
-  // On the standalone gate a utility-specific account / meter finding (PGE account, Pacific
-  // Power meter photo) asks for something the form cannot take — advisory there, never a blocker.
+  // On the standalone gate a utility-specific account / meter finding (a utility's own account
+  // verification or meter photo requirement) asks for something the form cannot take — advisory there, never a blocker.
   if (standalone) {
     for (let i = 0; i < findings.length; i++) {
       const key = dedupeKey(findings[i]);
@@ -347,7 +368,26 @@ export function findingOutranks(candidate: ReviewerFinding, held: ReviewerFindin
   return isGeneric(held) && !isGeneric(candidate);
 }
 
+// A UTILITY REQUIREMENT FINDING NAMES ITS ITEM IN ITS ID (utilityRequirements keys, dashed, or the
+// legacy ids the seed rows keep): the topic comes from there, never from the title, which carries the
+// utility's own name — "Verify Rocky MOUNTain Power inverter settings" was read as the racking topic
+// and showed "Racking/attachment text found" on every Rocky Mountain Power job (review-audit draft 04).
+const UTILITY_ID_TOPIC: Array<[RegExp, EvidenceTopic]> = [
+  [/account/, "accountVerification"],
+  [/meter-photo/, "meterPhoto"],
+  [/settings|1741/, "inverterSettings"],
+  [/one-line/, "sld"],
+  [/site-plan/, "siteRoofPlan"],
+  [/ac-disconnect/, "acDisconnect"],
+  [/storage-mode/, "batteryMode"],
+  [/owner-signature/, "ownerAuthorization"],
+];
+
 export function topicForFinding(finding: ReviewerFinding): EvidenceTopic | null {
+  if (finding.id.startsWith("reviewer.utility.")) {
+    const byId = UTILITY_ID_TOPIC.find(([re]) => re.test(finding.id));
+    if (byId) return byId[1];
+  }
   const idTitle = `${finding.id} ${finding.title}`.toLowerCase();
   if (/account/.test(idTitle)) return "accountVerification";
   if (/meter/.test(idTitle)) return "meterPhoto";
@@ -355,11 +395,13 @@ export function topicForFinding(finding: ReviewerFinding): EvidenceTopic | null 
   if (/site|roof plan|layout/.test(idTitle)) return "siteRoofPlan";
   if (/fire|pathway|setback/.test(idTitle)) return "firePathway";
   if (/framing|rafter|truss|span/.test(idTitle)) return "roofFraming";
-  if (/attachment|racking|flashing|mount/.test(idTitle)) return "rackingAttachment";
+  // The specific listing / settings words before racking, and "mount" as a word: a bare /mount/
+  // matched "Mountain" in a utility's name (review-audit draft 04).
+  if (/inverter settings|1741|smart inverter/.test(idTitle)) return "inverterSettings";
+  if (/attachment|racking|flashing|\bmount(?:s|ing|ed)?\b/.test(idTitle)) return "rackingAttachment";
   if (/load criteria|snow|dead load|wind/.test(idTitle)) return "structuralLoads";
   if (/rapid|rsd|690\.12/.test(idTitle)) return "rapidShutdown";
   if (/label|placard|directory/.test(idTitle)) return "labels";
-  if (/inverter settings|1741|smart inverter/.test(idTitle)) return "inverterSettings";
   if (/equipment schedule|spec package|equipment.*spec|spec.*sheet|dc.size|equipment field/.test(idTitle)) return "sld";
   // "ess" as a WORD: a bare /ess/ matched "process" / "access", routing the permit-process
   // finding to the battery topic (its evidence then read "Battery operating mode — not found").
@@ -522,6 +564,7 @@ const TOPIC_NOUN: Record<EvidenceTopic, string> = {
   rapidShutdown: "Rapid shutdown callout",
   labels: "Label callouts",
   inverterSettings: "Inverter listing/settings text",
+  acDisconnect: "Disconnect callout",
   batteryMode: "Battery text",
   utilityApproval: "Utility approval text",
   ownerAuthorization: "Authorization text",
@@ -726,8 +769,10 @@ function addStandaloneCoreFindings(project: ProjectRecord, findings: ReviewerFin
   }
 }
 
-function addCoreProjectFindings(project: ProjectRecord, findings: ReviewerFinding[]): void {
+function addCoreProjectFindings(project: ProjectRecord, findings: ReviewerFinding[], scope: JobScope = "pv"): void {
   if (isStandaloneReviewSubject(project)) { addStandaloneCoreFindings(project, findings); return; }
+  const newArray = scopeHasNewPv(scope);
+  const batteryKw = Number.parseFloat(payload(project, "batteryOutputKw").replace(/[^0-9.-]/g, ""));
   const required: Array<[string, string | number | null, string]> = [
     ["homeowner", project.homeownerName, "Homeowner name missing."],
     ["address", project.projectAddress, "Service/project address missing."],
@@ -735,12 +780,29 @@ function addCoreProjectFindings(project: ProjectRecord, findings: ReviewerFindin
     ["utility", project.utility, "Utility missing."],
     ["account", project.accountNumber, "Utility account number missing."],
     ["meter", project.meterNumber, "Meter number missing."],
-    ["dc", project.systemSizeDcKw, "DC system size missing."],
-    ["ac", project.systemSizeAcKw, "AC system size missing."],
+    // A storage scope has no new DC array; its AC rating is the battery inverter / PCS output (#673).
+    ...(newArray
+      ? [["dc", project.systemSizeDcKw, "DC system size missing."], ["ac", project.systemSizeAcKw, "AC system size missing."]] as Array<[string, string | number | null, string]>
+      : [["ac", batteryKw > 0 ? batteryKw : null, "Battery inverter / PCS AC output (kW) missing — on a storage job this is the system's AC rating."]] as Array<[string, string | number | null, string]>),
     ["interconnection", project.interconnectionMethod, "Interconnection method missing."],
   ];
   for (const [id, value, message] of required) {
     if (value == null || value === "") findings.push(finding(`reviewer.core.${id}`, "blocker", "project_data", "Critical project field missing", message, true));
+  }
+  // THE STORAGE FACTS, REQUIRED (#673's list, jobScope.storageFactGaps — the same facts QC's storage
+  // rows ask for). One blocker naming every missing fact.
+  const gaps = storageFactGaps(project.parserSnapshot, scope);
+  if (gaps.length) {
+    const list = gaps.map((g) => g.label).join(", ");
+    findings.push(finding("reviewer.storage.facts-missing", "blocker", "project_data",
+      `Storage facts missing (${jobScopeLabel(scope)})`,
+      `This job is checked as ${jobScopeLabel(scope)}, so the reviewer needs the storage system's facts instead of module facts. Missing: ${list}.`,
+      true,
+      {
+        cityFeedback: `Provide the energy storage system's ${list} on the equipment schedule / ESS spec sheet and the one-line.`,
+        designTeamAction: `Add the missing storage facts (${list}) to the plan set and the job.`,
+        evidenceNeeded: gaps.map((g) => g.label),
+      }));
   }
 }
 
@@ -819,7 +881,7 @@ function addSubmittalDataFindings(project: ProjectRecord, findings: ReviewerFind
   }
 }
 
-function addPlanSetFindings(project: ProjectRecord, findings: ReviewerFinding[]): void {
+function addPlanSetFindings(project: ProjectRecord, findings: ReviewerFinding[], newArray = true): void {
   // THE SAME MOUNT QUESTION, ANSWERED IN ONE PLACE. These rules are paired with the
   // code-rule engine's via DEDUPE_ALIASES (topic:fire, topic:rapid-shutdown), and the
   // code-rule side wins. So while codeReviewRules was the only mount-aware layer, a ground
@@ -829,7 +891,9 @@ function addPlanSetFindings(project: ProjectRecord, findings: ReviewerFinding[])
   // Import the predicate rather than re-deriving it: two vocabularies is what caused this.
   const kind = mountKindForProject(project);
   const onARoof = kind === "roof" || kind === "unknown";
-  const rsdApplies = kind !== "ground";
+  // A storage scope (#673) installs no array: no rapid-shutdown, fire-pathway or ground-array question
+  // here. The SLD and site plan rows stay — the ESS, its disconnect and its location live on them.
+  const rsdApplies = newArray && kind !== "ground";
 
   const requiredDocs: Array<[string, ReturnType<typeof evidenceForTopic>, string, string]> = [
     ["sld", evidenceForTopic(project, "sld"), "SLD/one-line sheet not clearly mapped", "Provide or remap the one-line/SLD sheet so interconnection and equipment can be reviewed."],
@@ -878,7 +942,7 @@ function addPlanSetFindings(project: ProjectRecord, findings: ReviewerFinding[])
   // access/setback question is replaced by the questions a ground array actually raises, so
   // the operator gets a prompt instead of silence. Six of the eight supply-side projects on
   // the live book taught that lesson: the finding that never fires reads as approval.
-  if (!onARoof) {
+  if (newArray && !onARoof) {
     findings.push(finding(
       "reviewer.plan.ground-array-site",
       "callout",
@@ -895,7 +959,7 @@ function addPlanSetFindings(project: ProjectRecord, findings: ReviewerFinding[])
   }
 
   const firePathway = evidenceForTopic(project, "firePathway");
-  if (onARoof && firePathway.confidence !== "high") {
+  if (newArray && onARoof && firePathway.confidence !== "high") {
     findings.push(finding(
       "reviewer.plan.fire-path",
       firePathway.present ? "warning" : "blocker",
@@ -970,78 +1034,186 @@ function addPlacementRuleFindings(project: ProjectRecord, ctx: EffectiveCodeCont
   ));
 }
 
-function addUtilityFindings(project: ProjectRecord, findings: ReviewerFinding[]): void {
-  const account = evidenceForTopic(project, "accountVerification");
-  // WHICH UTILITY, by the one state-gated identity (utilityIdentity): a CA PG&E job ("Pacific Gas and
-  // Electric", or typed "PGE") is neither Portland General nor PacifiCorp, and was blocked on both.
-  const knownUtility = knownPowerClerkUtility(project);
-  if (knownUtility === "portland_general" && account.confidence !== "high") {
+// ── THE UTILITY SIDE, FROM EACH UTILITY'S OWN RECORDED REQUIREMENTS (review-audit draft 03) ─────
+// What a requirement item asks the package to show, read with the existing evidence readers.
+const REQUIREMENT_TOPIC: Record<UtilityRequirementKey, EvidenceTopic> = {
+  account_verification: "accountVerification",
+  meter_photo: "meterPhoto",
+  inverter_settings: "inverterSettings",
+  inverter_listing_ul1741sb: "inverterSettings",
+  one_line: "sld",
+  site_plan: "siteRoofPlan",
+  ac_disconnect: "acDisconnect",
+  storage_mode_declaration: "batteryMode",
+  owner_signature: "ownerAuthorization",
+};
+// The family a requirement finding dedupes with: the same thing asked by the core field check or the
+// plan-set pass is one finding on the gate, the most severe kept (findingOutranks).
+const REQUIREMENT_ALIAS: Partial<Record<UtilityRequirementKey, string>> = {
+  account_verification: "topic:account",
+  meter_photo: "topic:meter",
+  one_line: "topic:sld",
+  site_plan: "topic:site-roof",
+};
+
+interface RequirementWords {
+  verifyTitle: (u: string) => string;
+  missingTitle: (u: string) => string;
+  shownMessage: (u: string, check: ProjectEvidence) => string;
+  missingMessage: (u: string) => string;
+  shownFeedback: string;
+  missingFeedback: string;
+  action: (u: string) => string;
+}
+// Worded per KIND of item, with the utility's name as data. The first three keep the wording the gate
+// used before this list existed (pinned by utilityRequirementsGate.test.ts).
+function genericWords(noun: string): RequirementWords {
+  return {
+    verifyTitle: (u) => `Verify ${u} ${noun}`,
+    missingTitle: (u) => `${u} ${noun} missing`,
+    shownMessage: (u, check) => `${u}'s application asks for the ${noun}; what the package shows needs review. ${evidenceSummary(check)}`,
+    missingMessage: (u) => `${u}'s application asks for the ${noun}; it was not found in the package.`,
+    shownFeedback: `The ${noun} the utility asks for is not clearly shown.`,
+    missingFeedback: `The ${noun} the utility asks for was not found.`,
+    action: (u) => `Add or confirm the ${noun} in the ${u} application package.`,
+  };
+}
+const REQUIREMENT_WORDS: Record<UtilityRequirementKey, RequirementWords> = {
+  account_verification: {
+    verifyTitle: (u) => `Verify ${u} account evidence`,
+    missingTitle: (u) => `${u} account verification unresolved`,
+    shownMessage: (u, check) => `${u}/NEM submission has an account value, but parsed utility bill/account match evidence is not strong enough. ${evidenceSummary(check)}`,
+    missingMessage: (u) => `${u}/NEM submission should not be staged without a verified utility account number.`,
+    shownFeedback: "Utility account evidence is incomplete: account number alone is not enough for a clean intake pass.",
+    missingFeedback: "Utility account number and account verification were not found.",
+    action: () => "Verify utility bill/account holder/service address match before staging the NEM application.",
+  },
+  meter_photo: {
+    verifyTitle: (u) => `Verify ${u} meter photo`,
+    missingTitle: (u) => `${u} meter photo missing`,
+    shownMessage: (_u, check) => `Meter evidence needs review before customer generation staging. ${evidenceSummary(check)}`,
+    missingMessage: (u) => `${u} customer generation packages should not be staged without meter photo/evidence.`,
+    shownFeedback: "A meter number or weak meter evidence was captured, but a meter photo/evidence match was not proven.",
+    missingFeedback: "Meter photo/evidence was not found in the parsed project package.",
+    action: () => "Confirm the meter photo is present, legible, and matches the parsed meter number before staging.",
+  },
+  inverter_settings: {
+    verifyTitle: (u) => `Verify ${u} inverter settings`,
+    missingTitle: (u) => `${u} inverter settings evidence missing`,
+    // SAID FROM WHAT WAS READ (review-audit draft 04): "shown" here is an inverter model or a spec
+    // sheet with no listing / settings words (evidenceForTopic's medium), so the old "UL 1741 evidence
+    // was captured … No parsed inverter listing / settings evidence was found" contradicted itself.
+    shownMessage: (_u, check) => `An inverter model or spec sheet is on file; no UL 1741 SB / settings text was found.${check.excerpts.length ? ` ${evidenceSummary(check)}` : ""}`,
+    missingMessage: () => "Confirm UL 1741 SB / smart inverter settings evidence is included before NEM submission.",
+    shownFeedback: "Utility-required inverter settings need human verification, not just a generic inverter spec.",
+    missingFeedback: "Utility-required inverter settings/UL 1741 SB evidence was not found.",
+    action: (u) => `Add or verify ${u} inverter settings/UL 1741 SB evidence in the utility upload package.`,
+  },
+  inverter_listing_ul1741sb: genericWords("UL 1741 SB inverter listing"),
+  one_line: genericWords("one-line diagram"),
+  site_plan: genericWords("site plan"),
+  ac_disconnect: genericWords("AC disconnect"),
+  storage_mode_declaration: genericWords("battery operating mode declaration"),
+  owner_signature: genericWords("owner signature"),
+};
+
+/** The item's citation as the finding shows it — only when its row quotes the source (an uncited item
+ *  cites nothing, and says so in its message when that is why it does not block). */
+function requirementReference(u: string, item: UtilityApplicationRequirement): CodeReference[] {
+  if (!item.quote) return [];
+  const status = item.tier === "verified"
+    ? `Recorded by ${item.verifiedBy && !looksLikeEmail(item.verifiedBy) ? item.verifiedBy : "a person"}`
+    : item.tier === "official"
+      ? `From ${sourceHostOf(item.sourceUrl) || "the utility's official page"} (official source)`
+      : "Seeded from the utility's page; verify locally";
+  return [{
+    code: item.sourceName || u,
+    section: "",
+    title: `${u} application requirement`,
+    adoptionScope: status,
+    sourceUrl: item.sourceUrl,
+    note: `"${item.quote}"${item.fetchedAt ? ` (read ${item.fetchedAt.slice(0, 10)})` : ""}`,
+  }];
+}
+
+/** The finding id a requirement reports under: the seed's kept id, else reviewer.utility.<key>. */
+export function requirementFindingId(item: Pick<UtilityApplicationRequirement, "key" | "findingId">): string {
+  return item.findingId || `reviewer.utility.${item.key.replace(/_/g, "-")}`;
+}
+
+/**
+ * THE UTILITY SIDE OF THE REVIEW: each item the job's utility's own application asks for, checked
+ * against the package's evidence. Met (high confidence) = nothing; shown but not proven = a warning;
+ * missing = a warning, or a blocker only when the item may block (requirementMayBlock: a person's or an
+ * official item, or a seeded row quoting its named source in words that name the item — Helm's #637
+ * bar). No list on file = one callout that the utility side was not reviewed, never silence. A storage
+ * item is asked only on a job with a battery. Returns each finding's dedupe family (id -> alias).
+ */
+function addUtilityFindings(project: ProjectRecord, findings: ReviewerFinding[], list: UtilityRequirementList | null): Map<string, string> {
+  const aliases = new Map<string, string>();
+  const utilityName = String(project.utility ?? "").trim();
+  if (list && list.requirements.length) {
+    const u = list.displayName || utilityName;
+    const battery = batteryStatus(project.parserSnapshot as Record<string, unknown> | undefined) === "yes";
+    for (const item of list.requirements) {
+      if (item.key === "storage_mode_declaration" && !battery) continue;
+      const check = evidenceForTopic(project, REQUIREMENT_TOPIC[item.key]);
+      if (check.confidence === "high") continue;
+      const words = REQUIREMENT_WORDS[item.key];
+      const mayBlock = requirementMayBlock(item);
+      const severity: ReviewerFinding["severity"] = !check.present && mayBlock ? "blocker" : "warning";
+      // Why a "blocker" item only warns: its row does not quote the utility's own words for it.
+      const uncitedNote = !check.present && item.whenMissing === "blocker" && !mayBlock
+        ? " Not a blocker: the utility's own words for this item are not on file — a person can record them."
+        : "";
+      const id = requirementFindingId(item);
+      findings.push(finding(
+        id,
+        severity,
+        "utility_nem",
+        check.present ? words.verifyTitle(u) : words.missingTitle(u),
+        check.present ? words.shownMessage(u, check) : `${words.missingMessage(u)}${uncitedNote}`,
+        true,
+        {
+          cityFeedback: check.present ? words.shownFeedback : words.missingFeedback,
+          designTeamAction: words.action(u),
+          evidenceNeeded: evidenceNeeded(check),
+          codeReferences: requirementReference(u, item),
+        },
+      ));
+      const alias = REQUIREMENT_ALIAS[item.key];
+      if (alias) aliases.set(id, alias);
+    }
+  } else if (utilityName) {
     findings.push(finding(
-      "reviewer.utility.pge-account",
-      account.present ? "warning" : "blocker",
+      "reviewer.utility.requirements-not-on-file",
+      "callout",
       "utility_nem",
-      account.present ? "Verify PGE account evidence" : "PGE account verification unresolved",
-      account.present
-        ? `PGE/NEM submission has an account value, but parsed utility bill/account match evidence is not strong enough. ${evidenceSummary(account)}`
-        : "PGE/NEM submission should not be staged without a verified utility account number.",
+      `${utilityName}'s application requirements are not on file`,
+      `${utilityName}'s application requirements are not on file; the utility side was not reviewed.`,
       true,
       {
-        cityFeedback: account.present
-          ? "Utility account evidence is incomplete: account number alone is not enough for a clean intake pass."
-          : "Utility account number and account verification were not found.",
-        designTeamAction: "Verify utility bill/account holder/service address match before staging the NEM application.",
-        evidenceNeeded: evidenceNeeded(account),
+        cityFeedback: `What ${utilityName}'s own interconnection application asks for (meter photo, one-line, inverter listing, disconnect, storage mode…) is not recorded, so none of it was checked.`,
+        designTeamAction: `Check ${utilityName}'s application requirements by hand, and record them with their page and words so the gate checks them next time.`,
+        evidenceFound: [{
+          kind: "absence_check",
+          label: "Utility application requirements — none on file",
+          source: "Utility requirement list (shipped seed and the utility's filing record)",
+          excerpt: `No requirement list for ${utilityName} in ${project.state || "this state"}.`,
+          confidence: "low",
+          pageHint: "",
+          screenshotPath: "",
+          verifier: "rule_engine",
+          note: "Not a finding about the package: the utility's requirements were not checked at all.",
+        }],
+        evidenceStatus: "missing",
       },
     ));
-  }
-  if (knownUtility === "pacificorp") {
-    // The name this job goes by (#562): Rocky Mountain Power in UT/ID/WY. Finding IDs stay.
-    const brand = pacifiCorpBrand(project.state);
-    const meterPhoto = evidenceForTopic(project, "meterPhoto");
-    if (meterPhoto.confidence !== "high") {
-      findings.push(finding(
-        "reviewer.utility.pacpower-meter-photo",
-        meterPhoto.present ? "warning" : "blocker",
-        "utility_nem",
-        meterPhoto.present ? `Verify ${brand} meter photo` : `${brand} meter photo missing`,
-        meterPhoto.present
-          ? `Meter evidence needs review before customer generation staging. ${evidenceSummary(meterPhoto)}`
-          : `${brand} customer generation packages should not be staged without meter photo/evidence.`,
-        true,
-        {
-          cityFeedback: meterPhoto.present
-            ? "A meter number or weak meter evidence was captured, but a meter photo/evidence match was not proven."
-            : "Meter photo/evidence was not found in the parsed project package.",
-          designTeamAction: "Confirm the meter photo is present, legible, and matches the parsed meter number before staging.",
-          evidenceNeeded: evidenceNeeded(meterPhoto),
-        },
-      ));
-    }
-
-    const inverterSettings = evidenceForTopic(project, "inverterSettings");
-    if (inverterSettings.confidence !== "high") {
-      findings.push(finding(
-        "reviewer.utility.pacpower-settings",
-        "warning",
-        "utility_nem",
-        inverterSettings.present ? `Verify ${brand} inverter settings` : `${brand} inverter settings evidence missing`,
-        inverterSettings.present
-          ? `UL 1741/inverter spec evidence was captured, but utility-specific settings are not fully proven. ${evidenceSummary(inverterSettings)}`
-          : "Confirm UL 1741 SB / smart inverter settings evidence is included before NEM submission.",
-        true,
-        {
-          cityFeedback: inverterSettings.present
-            ? "Utility-required inverter settings need human verification, not just a generic inverter spec."
-            : "Utility-required inverter settings/UL 1741 SB evidence was not found.",
-          designTeamAction: `Add or verify ${brand} inverter settings/UL 1741 SB evidence in the utility upload package.`,
-          evidenceNeeded: evidenceNeeded(inverterSettings),
-        },
-      ));
-    }
   }
   if (payload(project, "ubMeterVerification") && /mismatch/i.test(payload(project, "ubMeterVerification"))) {
     findings.push(finding("reviewer.utility.meter-mismatch", "blocker", "utility_nem", "Meter mismatch", payload(project, "ubMeterVerification"), true));
   }
+  return aliases;
 }
 
 function addProfileFindings(project: ProjectRecord, profile: AhjProcessProfile | null, findings: ReviewerFinding[], uploadedDocTypes: string[] = []): void {

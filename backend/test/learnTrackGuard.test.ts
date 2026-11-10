@@ -277,7 +277,8 @@ try {
     // A project an early gate refuses before any browser: an operator hold (the first gate).
     const held = fx.newProject();
     repo.setProjectStatusByOperator(db, held, "blocked", "waiting on the homeowner", "operator");
-    const res = await post(`/api/projects/${held}/prepare-submission`, { track: "building", autoSubmit: true });
+    // The sheet's ticks ride with the approval (review-audit draft 01): the fixture's measured warning.
+    const res = await post(`/api/projects/${held}/prepare-submission`, { track: "building", autoSubmit: true, acknowledgements: fx.acknowledgeAll(held, "building") });
     const body = await res.text();
     assert.equal(res.status, 202, body);
     const { jobId } = JSON.parse(body) as { jobId: string };
