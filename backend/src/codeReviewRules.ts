@@ -21,12 +21,13 @@ import {
 import { adoptedNecEdition, necEditionRequirements, NEC_EDITION_REQUIREMENTS } from "./necEditions";
 import { moduleLevelElectronicsEquipment, type ModuleLevelElectronicsEvidence } from "./moduleLevelElectronics";
 import { designText, mountKind, type MountKind } from "./mountKind";
+import { ballastedRackingEvidence } from "./ballastRacking";
 import { microEvidenceSupersededIn } from "./normalize";
 import { engineerSealStates, stateName } from "./engineerSeal";
 import { readPlanFraming } from "./planFraming";
 import { describeQuotes, describeSnowLabelIssue, planSheets, readDeckMount, readSnowLabels, type PlanSheet, type SheetQuote } from "./planAttachmentRead";
 import { readNecEditionCitations, readOtherMethodItems, readRapidShutdownStatements, readServiceLocationConflicts, readSupplySideDisconnectRating } from "./planConsistency";
-export { designText, engineeredGroundMount, groundMountFromField, isGroundMount, mountKind, mountKindForProject, type MountKind } from "./mountKind";
+export { designText, engineeredGroundMount, groundMountFromField, isGroundMount, mountAdjective, mountKind, mountKindForProject, type MountKind } from "./mountKind";
 
 const oregonElectrical2023: CodeReference = {
   code: "2023 OESC / 2023 NEC",
@@ -192,6 +193,53 @@ function num(project: ProjectRecord, keys: string[]): number | null {
   return null;
 }
 
+// WHAT A BALLAST PLAN CONTAINS (#689 3d): the layout or schedule of the ballast, its weights, the
+// manufacturer's ballast calculation, or the anchorage/seismic restraint. The bare word "ballast" is the
+// TRIGGER, never the evidence: a set that only says "ballasted racking" has said nothing about it.
+const BALLAST_PLAN_PATTERNS: RegExp[] = [
+  /ballast\w*\s*(?:layout|plan|schedule|map|calc\w*|design|weight|block\s*(?:count|weight|layout)|tray|bay)/i,
+  /\bblock\s*(?:count|weight|layout|schedule)/i,
+  /ballast\w*[^.\n]{0,60}?\b\d+(?:\.\d+)?\s*(?:lbs?|pounds|psf)\b/i,
+  /\b\d+(?:\.\d+)?\s*(?:lbs?|pounds)\s+(?:of\s+)?ballast/i,
+  /\banchorage\b/i,
+  /\bseismic\s*(?:anchor\w*|restraint|attachment|tie.?down)/i,
+];
+
+// THE DECLARED DC SIZE IS A ROUNDED FIGURE (#689 3c). A flat 0.15 kW tolerance blocked a set whose
+// 455 x 550 W modules make 250.25 kW against a declared "250 kW" (0.1%): the designer wrote the size to
+// the kilowatt, and 250.25 kW written to the kilowatt IS 250. The tolerance is now what the declared
+// figure can round away, at the precision it is written in — half a unit of its last digit ("250" ->
+// 0.5 kW, "8.36" -> 0.005 kW) — or the 0.15 kW it has always allowed, whichever is looser. It stays
+// strict for a COUNT error: a gap of a whole module or more is never rounding, so a figure written
+// coarser than one module ("8" for 20 x 400 W) cannot absorb a miscounted module (21 x 400 W = 8.4 kW
+// still blocks). Nothing here is keyed to a place: it is arithmetic on the set's own numbers.
+const DC_SIZE_FLOOR_KW = 0.15;
+
+/** The declared DC size as it is WRITTEN, so its precision can be read: the snapshot's own dcKw text
+ *  when it states the same figure, else the number itself (a parser number loses trailing zeros:
+ *  "8.00" arrives as 8 — read as written to the kilowatt, and the one-module bound still holds). */
+function declaredDcText(project: ProjectRecord, dcKw: number): string {
+  const raw = str(project, "dcKw");
+  return raw && parseRating(raw) === dcKw ? raw : String(dcKw);
+}
+
+/** Decimal places the figure is written to: "250" -> 0, "8.36 kW" -> 2, "8.000" -> 3. */
+function writtenDecimals(text: string): number {
+  const m = text.replace(/,/g, "").match(/\d+(?:\.(\d+))?/);
+  return m?.[1]?.length ?? 0;
+}
+
+/** Does the modules' DC agree with the declared figure? Within the 0.15 kW floor, or within the
+ *  declared figure's own rounding AND short of one whole module. */
+export function dcSizeAgrees(calculatedKw: number, declaredKw: number, declaredText: string, moduleKw: number): boolean {
+  const gap = Math.abs(calculatedKw - declaredKw);
+  const EPS = 1e-9; // binary fractions: 455 * 550 / 1000 is not exactly 250.25
+  if (gap <= DC_SIZE_FLOOR_KW + EPS) return true;
+  const halfUnit = 0.5 * 10 ** -writtenDecimals(declaredText);
+  // A tie rounds away from the declared figure (250.5 written to the kilowatt is 251), so strictly less.
+  return gap < halfUnit - EPS && gap < moduleKw - EPS;
+}
+
 function hasAny(text: string, patterns: RegExp[]): boolean {
   return patterns.some((pattern) => pattern.test(text));
 }
@@ -203,15 +251,11 @@ function isOregon(project: ProjectRecord, _profile: AhjProcessProfile | null): b
   return usStateCode(project.state) === "OR";
 }
 
-// IS THIS ON A ROOF? — the one mount predicate (mountKind / mountKindForProject) lives in
-// mountKind.ts, so permitPath and requiredDocuments ask the same question without importing this
-// module (which imports permitPath). Re-exported here for the callers that always read it from here.
+// IS THIS ON A ROOF? — the one mount predicate (mountKind / mountKindForProject) and the adjective it
+// is written with (mountAdjective) live in mountKind.ts, so permitPath, requiredDocuments and
+// applicationDocs ask the same question without importing this module (which imports permitPath).
+// Re-exported here for the callers that always read it from here.
 
-/** The mount, as the scope-of-work sentence names it — "" when the mount is not known: an unknown
- *  mount is never written as "roof-mounted" on an application (leak sweep 2026-09-28). */
-export function mountAdjective(kind: MountKind): string {
-  return kind === "roof" ? "Roof-mounted" : kind === "ground" ? "Ground-mounted" : kind === "carport" ? "Carport-mounted" : "";
-}
 
 /** True when the array sits on a roof and the roof rule family applies. */
 export function isRoofMounted(project: ProjectRecord, allText: string): boolean {
@@ -1185,7 +1229,28 @@ export function evaluateDesignCodeFindings(
   // `mounting` FIELD reads "Roof mount". /rail/i was satisfied by a guardrail and /lag/i by
   // any word containing those three letters. Ask instead for what an attachment detail
   // actually contains.
-  if (roofMounted && !hasAny(all, [
+  //
+  // A BALLASTED ROOF HAS NO PENETRATIONS TO DETAIL (#689 3d). The screen asked every rooftop for lag
+  // screws and flashing, so a ballasted, non-penetrating array (the one predicate,
+  // ballastedRackingEvidence) was blocked for a detail it cannot have. On that positive evidence only,
+  // the question becomes what holds a ballasted array down: the ballast layout and weights, the roof's
+  // capacity for them, and the wind/seismic basis or anchorage. Asked as a warning when the package
+  // does not show it (Helm ruling on #689); without ballast evidence today's blocker stands unchanged.
+  const ballast = roofMounted ? ballastedRackingEvidence(project) : "";
+  if (roofMounted && ballast && !hasAny(all, BALLAST_PLAN_PATTERNS)) {
+    out.push(finding({
+      id: "city.struct.ballast-plan-missing",
+      severity: "warning",
+      category: "structural",
+      title: "Ballast / anchorage plan not shown",
+      message: `The racking is ballasted / non-penetrating (${ballast}), so a roof attachment detail does not apply, but the package does not show the ballast layout or what holds the array in place.`,
+      cityFeedback: "Provide the ballast layout and schedule (ballast count and weight per bay), the racking manufacturer's ballast calculation for wind uplift and sliding, the roof structure's capacity for the added ballast dead load, and the seismic basis for an unattached array or the anchorage that restrains it.",
+      designTeamAction: "Add the racking manufacturer's ballast layout/calculation and the roof capacity check, or the anchorage detail where the array is attached.",
+      evidenceNeeded: ["Ballast layout and schedule (count and weight per bay)", "Manufacturer ballast calculation (wind uplift, sliding)", "Roof capacity for the ballast dead load", "Seismic basis or anchorage detail"],
+      codeReferences: [roofLoadsRef],
+    }));
+  }
+  if (roofMounted && !ballast && !hasAny(all, [
     /attachment\s*(?:detail|schedule|spacing|point)/i,
     /standoff/i, /flashing/i, /flashfoot/i, /l.?foot/i,
     /lag\s*(?:screw|bolt)/i, /fastener/i, /embedment/i, /pull.?out/i,
@@ -1986,7 +2051,7 @@ export function evaluateDesignCodeFindings(
   const moduleWattage = num(project, ["moduleWattage"]);
   if (dcKw != null && moduleQty != null && moduleWattage != null) {
     const calculatedDc = (moduleQty * moduleWattage) / 1000;
-    if (Math.abs(calculatedDc - dcKw) > 0.15) {
+    if (!dcSizeAgrees(calculatedDc, dcKw, declaredDcText(project, dcKw), moduleWattage / 1000)) {
       out.push(finding({
         id: "city.elec.dc-size-mismatch",
         severity: "blocker",

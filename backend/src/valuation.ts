@@ -135,6 +135,38 @@ export function resolveValuation(
   };
 }
 
+/** THE TOTAL COST OF THE SYSTEM: the contract the client pays, NOT the permit valuation (#692).
+ *
+ *  A fee printed as a percentage "of cost" / "of the total cost of the system" is taken on what the
+ *  work costs, which is the contract. The declared valuation above is the operator's formula OF the
+ *  contract (40% by default), and pricing a cost-based fee on it would under-quote it 2.5x. Same
+ *  inputs and same per-watt fallback as resolveValuation, without the factor or the battery adders
+ *  (those belong to the valuation formula; the contract already covers the battery). */
+export function resolveContractCost(
+  snapshot: ParserPayload | null | undefined,
+  systemSizeDcKw: number | null | undefined,
+): ValuationResult {
+  const rate = valuationPerWattRate();
+  const snap = snapshot || {};
+  const contract = parseMoney(snap.jobValue) ?? parseMoney(snap.contractAmount);
+  if (contract != null) {
+    return { value: contract, method: "contract", perWattRate: rate, basis: `contract $${contract.toLocaleString()}` };
+  }
+  const dcKw = typeof systemSizeDcKw === "number" && Number.isFinite(systemSizeDcKw)
+    ? systemSizeDcKw
+    : parseMoney(snap.systemSizeDcKw);
+  if (dcKw != null && dcKw > 0) {
+    const contractEstimate = Math.round(dcKw * 1000 * rate);
+    return {
+      value: contractEstimate,
+      method: "per_watt_estimate",
+      perWattRate: rate,
+      basis: `an ESTIMATED contract ($${rate.toFixed(2)}/W × ${dcKw} kW DC ≈ $${contractEstimate.toLocaleString()})`,
+    };
+  }
+  return { value: null, method: "unavailable", perWattRate: rate, basis: "No contract value provided and system size unknown." };
+}
+
 /**
  * THE VALUATION AS AN APPLICATION BOX TAKES IT — whole dollars, "" when there is nothing to
  * compute from. The SAME number the PDF side files (ahjForms computed.declaredValuation /

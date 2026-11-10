@@ -215,6 +215,9 @@ export interface ClientRecord {
    *  part to the installer, and utility portals require a make and model. */
   standardDisconnectMake: string;
   standardDisconnectModel: string;
+  /** The installer's certifications, one per line (#679): checked against a program's or permit
+   *  path's cited installer-certification requirement. */
+  installerCertifications: string;
   ccbExpiration: string;
   electricalLicenseNumber: string;
   /** ICC/state docket number for the installer's DG certification (Illinois Part 468).
@@ -1883,7 +1886,9 @@ export interface JurisdictionEditionProposal {
   fingerprint: string;
   source: "reference" | "research";
   createdAt: string;
-  changes: Array<{ family: CodeFamily; current: string | null; proposed: string | null; sourceUrl?: string; quote?: string }>;
+  /** `datesOnly`: the row states the same edition, but not the effective / mandatory date or the
+   *  replaced edition the finding states (#561); approving adds them to the row's own entry. */
+  changes: Array<{ family: CodeFamily; current: string | null; proposed: string | null; datesOnly?: boolean; sourceUrl?: string; quote?: string }>;
   /** The full adopted-code list a re-verification would record. */
   proposedCodes: CodeEdition[];
   adoptionModel?: JurisdictionAdoptionModel;
@@ -2080,6 +2085,9 @@ export interface DesignCriteriaResearchResult {
     value: number | string;
     sourceUrl: string;
     quote?: string;
+    /** The number as the page printed it, when it was published in another unit and converted to
+     *  the field's own (#561: "2.5 feet" of frost is stored 30 in; this is 2.5). */
+    publishedValue?: number;
     /** Ground snow only: "pg" (strength) or "pg_asd" (allowable-stress, stored as groundSnowLoadAsdPsf). */
     qualifier?: "pg" | "pg_asd";
     /** Set when the page is NOT a jurisdiction-wide design value (a project-type handout: a storage
@@ -2100,6 +2108,10 @@ export interface DesignCriteriaResearchResult {
    *  values; unparsed = a candidate page whose table did not parse — a criterion still missing is
    *  "candidate page found, not parsed", never "no jurisdiction-wide value". */
   issuerPage?: { url: string; parsed: boolean };
+  /** IN-PROCESS ONLY, never persisted (#683): the pages this process itself read for the lookup —
+   *  the issuer-site probe's page text and when it was read — so the merge can tell a value that is
+   *  in those bytes (official) from a model's answer (seeded). */
+  retrieved?: Array<{ url: string; text: string; fetchedAt: string }>;
   notes: string;
 }
 
@@ -2220,7 +2232,67 @@ export interface StatePermitRule {
   /** The section, with its words quoted. */
   citation: string;
   sourceUrl: string;
-  confidence: "seeded" | "verified";
+  /** "official" (#683): every quote was found in the bytes read from the state's own official page —
+   *  used at once, never "verified by" anyone, and never overwrites a person's row. */
+  confidence: "seeded" | "official" | "verified";
+  /** When the citation's words were read from `sourceUrl` (ISO); absent when not recorded. */
+  fetchedAt?: string;
+}
+
+/** WHERE ONE ELIGIBILITY LIMIT WAS READ (#679). `quote` is the published words, verbatim; a limit
+ *  raises a BLOCKER only when the quote carries the limit's own value and the source is named with
+ *  its URL (Helm's #637 bar) — anything less is a warning. */
+export interface EligibilityCitation {
+  /** The source by name ("OAR 860-039-0010", "City solar permit packet, rev. 2025"). */
+  sourceName: string;
+  sourceUrl: string;
+  /** The source's own words, verbatim; "" when not quoted. */
+  quote: string;
+  /** When the words were read (ISO date or timestamp); "" when not recorded. */
+  fetchedAt?: string;
+}
+
+/** One cited limit of an authority's program or permit path. */
+export interface EligibilityLimit<T> {
+  value: T;
+  citation: EligibilityCitation;
+  /** A condition on WHO the limit binds that job data cannot confirm ("residential customer-generators
+   *  of a public utility"). While set, exceeding the limit stays a warning that asks to confirm it. */
+  appliesOnlyTo?: string;
+  /** Display overrides, so a row that replaced a coded screen keeps its rule id, name and wording.
+   *  `message` placeholders: {value} {limit} {combinedNote} {program}. */
+  ruleId?: string;
+  ruleName?: string;
+  message?: string;
+}
+
+export interface EligibilityLimits {
+  maxDcKw?: EligibilityLimit<number>;
+  maxAcKw?: EligibilityLimit<number>;
+  maxStringsPerInverter?: EligibilityLimit<number>;
+  productionMeterRequired?: EligibilityLimit<boolean>;
+  /** The installer must hold this certification for applications made on or after effectiveFrom
+   *  (YYYY-MM-DD; "" = already in force). Checked against the client record. */
+  installerCertification?: EligibilityLimit<{ name: string; effectiveFrom: string }>;
+}
+
+/** ONE AUTHORITY'S ELIGIBILITY RECORD (#679): a utility's customer-generation PROGRAM, or an AHJ's
+ *  simplified permit PATH, with each limit cited. A row of authority_eligibility_limits (migration
+ *  v67): seeded from shipped reference data or research, `verified` when a person checked it — and
+ *  then never overwritten (rule 3). Shared knowledge on purpose (no org). */
+export interface AuthorityEligibilityRecord {
+  authorityKind: "utility_program" | "permit_path";
+  /** Two-letter state code. */
+  state: string;
+  /** The utility (utility_program) or the AHJ (permit_path) as named; "" = every one in the state. */
+  authority: string;
+  /** The program or permit path in the authority's own words. */
+  programName: string;
+  limits: EligibilityLimits;
+  /** 'official' is written only by the official-source landing function (#683), never here. */
+  confidence: "seeded" | "official" | "verified";
+  verifiedAt?: string;
+  verifiedBy?: string;
 }
 
 export interface FireSetbackRule {
@@ -2427,6 +2499,12 @@ export interface JurisdictionCodeProfile {
     at?: string;
     /** The page is a project-type handout, not a jurisdiction-wide design value: why (verify it). */
     weakSource?: string;
+    /** OFFICIAL SOURCE (#683, shared/src/officialSource.landingTierFor): this process read the
+     *  value on the authority's own official page at `fetchedAt` and the quote is in those bytes.
+     *  The field is USED at once, worded "from <host>" — never "verified by" (rule 3: a person's
+     *  verification is the row's verifiedAt, nothing else). Absent = seeded. */
+    tier?: "official";
+    fetchedAt?: string;
   }>;
   /** The last design-criteria lookup's checklist: each item found / weak / not found / not researched. */
   designCriteriaLookup?: DesignCriteriaLookupRecord;
@@ -2451,15 +2529,36 @@ export interface JurisdictionCodeProfile {
   researchProvenance?: CodeResearchProvenance;
   /** listCodeProfiles only, verified rows only: newer editions found that await a person. */
   editionProposals?: JurisdictionEditionProposal[];
+  /** listCodeProfiles only, verified rows only (#683): values the jurisdiction's own official page
+   *  states differently from the row. The row is never changed by them (rule 3); a person decides. */
+  officialConflicts?: OfficialConflict[];
+}
+
+/** An OFFICIAL read (#683) that disagrees with a human-verified code profile row. Recorded once per
+ *  finding in the audit log; listed while the row is still verified and still says otherwise. */
+export interface OfficialConflict {
+  profileKey: string;
+  /** "designCriteria.frostDepthIn". */
+  field: string;
+  current: number | string | null;
+  found: number | string;
+  sourceUrl: string;
+  quote?: string;
+  fetchedAt: string;
+  createdAt: string;
 }
 
 export interface JurisdictionFieldSource {
   /** "" for the state-level row. */
   ahj: string;
   state: string;
-  confidence: "seeded" | "verified";
+  /** "official" (#683): the row is not person-verified, but THIS field's value was read on the
+   *  authority's own official page (its citation's tier) — used, and worded "from <host>". */
+  confidence: "seeded" | "official" | "verified";
   verifiedBy?: string;
   verifiedAt?: string;
+  /** confidence "official" only: where and when the value was read. */
+  officialSource?: { host: string; sourceUrl: string; fetchedAt: string };
 }
 
 // Review work types (rule packs). "solar_pv_residential" is the deterministic pack;

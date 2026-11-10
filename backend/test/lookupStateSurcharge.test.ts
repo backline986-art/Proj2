@@ -3,7 +3,7 @@
 // Measured on the Jefferson job: the quote was $161.25 (county $67.25 structural + $94 electrical)
 // against a real $180.60 ($75.32 + $105.28 — both carry Oregon's 12% state surcharge). The per-job
 // lookup had returned the surcharge line ($11.28) quoted from the county's own electrical form;
-// applyLookupFees dropped it, STATE_PERMIT_RULES.OR.surcharge was read nowhere, and the quote's
+// applyLookupFees dropped it, the state's cited surcharge rule was read nowhere, and the quote's
 // basis never said a surcharge was missing — on the item the operator said "look to be off".
 //
 // The lookup answer is stubbed data written through the REAL lookup writer; fees land through the
@@ -80,16 +80,16 @@ await check("(s2) MUST-EXCLUDE: a surcharge only the basis prose mentions is nev
   assert.ok(sched.brackets.every((b) => !b.stateSurcharge), JSON.stringify(sched.brackets));
   const line = fees.feeForProject(db, projectRow, "permit")!.lines.find((l) => l.discipline === "structural")!;
   assert.equal(line.feeUsd, 67.25);
-  assert.equal(ppl.citedStateSurcharge("OR", STRUCTURAL_FEE), null);
+  assert.equal(ppl.citedStateSurcharge(db, "OR", STRUCTURAL_FEE), null);
 });
 
 await check("(s3) MUST-EXCLUDE: over the state's cited maximum, an inconsistent surcharge line, or a state with no surcharge rule → not applied", () => {
-  assert.deepEqual(ppl.citedStateSurcharge("OR", ELECTRICAL_FEE)?.percent, 12, "MUST-PASS control");
+  assert.deepEqual(ppl.citedStateSurcharge(db, "OR", ELECTRICAL_FEE)?.percent, 12, "MUST-PASS control");
   const over = { ...ELECTRICAL_FEE, quote: ELECTRICAL_FEE.quote.replace("12%", "15%"), value: { ...ELECTRICAL_FEE.value!, lines: [ELECTRICAL_FEE.value!.lines[0], { label: "State surcharge (15% of permit fee)", amountUsd: 14.1 }] } };
-  assert.equal(ppl.citedStateSurcharge("OR", over), null, "15% exceeds ORS 455.210's 12% maximum");
+  assert.equal(ppl.citedStateSurcharge(db, "OR", over), null, "15% exceeds ORS 455.210's 12% maximum");
   const inconsistent = { ...ELECTRICAL_FEE, value: { ...ELECTRICAL_FEE.value!, lines: [ELECTRICAL_FEE.value!.lines[0], { label: "State surcharge", amountUsd: 30 }] } };
-  assert.equal(ppl.citedStateSurcharge("OR", inconsistent), null, "$30 is not 12% of $94");
-  assert.equal(ppl.citedStateSurcharge("WA", ELECTRICAL_FEE), null, "no cited surcharge rule for WA");
+  assert.equal(ppl.citedStateSurcharge(db, "OR", inconsistent), null, "$30 is not 12% of $94");
+  assert.equal(ppl.citedStateSurcharge(db, "WA", ELECTRICAL_FEE), null, "no cited surcharge rule for WA");
 });
 
 await check("(b1) MUST-PASS: a surcharged tier still computes this project's fee-tier quantity keys (the evaluator veto compares the bracket before its surcharge)", async () => {
@@ -115,10 +115,11 @@ await check("(q1) MUST-PASS: the quote prices the stated surcharge AND adds the 
   assert.equal(structural.feeUsd, 67.25);
   assert.equal(structural.modeledStateSurcharge?.percent, 12);
 });
-await check("(q2) MUST-EXCLUDE: a permit whose surcharge IS priced is not named as missing; outside a surcharge state nothing is added", () => {
+await check("(q2) MUST-EXCLUDE: a permit whose surcharge IS priced is not named as missing; a state with no record is named not researched", () => {
   assert.ok(!/surcharge on the [^.]*electrical/i.test(quote.permitFeeBasis), quote.permitFeeBasis);
-  assert.equal(quotes.stateSurchargeNotice("WA", ["Some County structural"]), "");
-  assert.equal(quotes.stateSurchargeNotice("OR", []), "");
+  // #663: a state with no researched surcharge record is SAID, never silently assumed to levy none.
+  assert.match(quotes.stateSurchargeNotice(db, "WA", ["Some County structural"]), /State surcharge: not researched for WA/);
+  assert.equal(quotes.stateSurchargeNotice(db, "OR", []), "");
 });
 
 finish("lookup-state-surcharge");

@@ -40,10 +40,15 @@ export interface UtilityStorageModeRecord {
 const str = (v: unknown): string => (typeof v === "string" ? v.trim() : v == null ? "" : String(v).trim());
 
 const NAMES_STORAGE = /\bbatter(?:y|ies)\b|\b(?:energy\s+)?storage\b|\bESS\b/i;
-const NAMES_MODE: Record<StorageOperatingMode, RegExp> = {
-  "backup-only": /\bback[-\s]?up\b|\bstand[-\s]?by\b|\boff[-\s]?grid\b|\bnot? (?:operate|connected) in parallel\b/i,
-  "non-export": /\bnon[-\s]?export|\bno[-\s]export|\bzero[-\s]export|\bnot export|\bdoes not export|\bexport[-\s]?limit/i,
-  export: /\bexport/i,
+/** Every phrase in which "export" is negated or limited away: none of them names the export mode. */
+const NEGATED_EXPORT = /\b(?:non|no|zero|not|never|without)[-\s]?(?:to\s+)?export(?:s|ed|ing)?\b|\b(?:does|do|will|shall|may|can|cannot|must)\s+not\s+export(?:s|ed|ing)?\b|\bexport[-\s]?(?:limit(?:s|ed|ing)?|control(?:s|led)?)\b|\bnon[-\s]?exporting\b/gi;
+/** Do the page's words name this mode? */
+export const quoteNamesStorageMode: Record<StorageOperatingMode, (quote: string) => boolean> = {
+  "backup-only": (q) => /\bback[-\s]?up\b|\bstand[-\s]?by\b|\boff[-\s]?grid\b|\bnot? (?:operate|connected) in parallel\b/i.test(q),
+  "non-export": (q) => /\bnon[-\s]?export|\bno[-\s]export|\bzero[-\s]export|\bnot export|\bdoes not export|\bexport[-\s]?limit/i.test(q),
+  // A NON-NEGATED "export": the negated phrases are struck first, so a page about non-export,
+  // zero-export or export-limited batteries never names the export mode (Helm review of #673).
+  export: (q) => /\bexport/i.test(q.replace(NEGATED_EXPORT, " ")),
 };
 
 /** The record is one a person stated with a page and words that name storage and every mode it lists. */
@@ -53,7 +58,7 @@ export function storageModeRecordUsable(r: UtilityStorageModeRecord | null | und
   const quote = str(r.quote);
   if (quote.length < 8 || !NAMES_STORAGE.test(quote)) return false;
   const modes = Array.isArray(r.modesWithoutApplication) ? r.modesWithoutApplication : [];
-  return modes.length > 0 && modes.every((m) => (STORAGE_OPERATING_MODES as readonly string[]).includes(m) && NAMES_MODE[m].test(quote));
+  return modes.length > 0 && modes.every((m) => (STORAGE_OPERATING_MODES as readonly string[]).includes(m) && quoteNamesStorageMode[m](quote));
 }
 
 function parseRecord(raw: unknown): UtilityStorageModeRecord | null {

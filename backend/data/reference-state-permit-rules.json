@@ -1,5 +1,5 @@
 {
-  "about": "Each state's permit rules as cited data (#595 PR2; the table #586's fee rules join). Seeded: stateRules.seedStatePermitRules writes these into state_permit_rules and never over a row a person verified (rule 3). Every rule quotes its source. A state is left out of a rule it publishes nothing citable for: Utah, Idaho, Nevada and Arizona publish no statewide prescriptive rooftop-PV path that could be found (as of 2026-11-09), so they carry only the seal rule, and rooftop PV there goes through the standard structural review (permitPath.ts).",
+  "about": "Each state's permit rules as cited data (#595 PR2; family \"fee\" holds #586/#663's fee rules: a state surcharge on permit fees, a solar permit-fee cap). Seeded: stateRules.seedStatePermitRules writes these into state_permit_rules and never over a row a person verified (rule 3). Every rule quotes its source. A state is left out of a rule it publishes nothing citable for: Utah, Idaho, Nevada and Arizona publish no statewide prescriptive rooftop-PV path that could be found (as of 2026-11-09), so they carry only the seal rule, and rooftop PV there goes through the standard structural review (permitPath.ts).",
   "asOf": "2026-11-09",
   "rules": [
     {
@@ -49,6 +49,13 @@
       "value": { "board": "OSBEELS" },
       "citation": "ORS 672.020(1): \"no person shall practice or offer to practice engineering in this state ... unless the person is registered and has a valid certificate to practice engineering issued under ORS 672.002 to 672.325\"; ORS 672.020(2): every final document \"shall be stamped with the seal and signed by the registrant.\"",
       "sourceUrl": "https://www.oregonlegislature.gov/bills_laws/ors/ors672.html"
+    },
+    {
+      "state": "OR", "family": "fee", "key": "surcharge",
+      "value": {"percent": 12, "appliesTo": "permit_fees", "maximum": true, "section": "ORS 455.210(4) + 455.220(1)"},
+      "citation": "ORS 455.210(4): \"(a) For the purpose of partially defraying state administrative costs, there is imposed a surcharge in the amount of four percent of the total permit fees or, if the applicant chooses to pay an hourly rate instead of purchasing a permit, four percent of the total hourly charges collected. (b) For the purpose of partially defraying state inspection costs, there is imposed a surcharge in the amount of two percent of the total permit fees or, if the applicant chooses to pay an hourly rate instead of purchasing a permit, two percent of the total hourly charges collected. (c) For the purpose of defraying the cost of administering and enforcing the state building code, there is imposed a surcharge on permit fees and on hourly charges collected instead of permit fees. The surcharge may not exceed one percent of the total permit fees or, if the applicant chooses to pay an hourly rate instead of purchasing a permit, one percent of the total hourly charges collected. (d) For the purpose of defraying the cost of developing and administering the electronic building codes information system described in ORS 455.095 and 455.097, there is imposed a surcharge in the amount of four percent on permit fees, or if the applicant chooses to pay an hourly rate instead of purchasing a permit, four percent of the total hourly charges collected.\" ORS 455.220(1): \"There is hereby imposed a surcharge in the amount of one percent of the total building permit fees or, if the applicant chooses to pay an hourly rate instead of purchasing a permit, one percent of the total hourly charges collected in connection with the construction of, or addition or alteration to, buildings and equipment or appurtenances.\" Together 4 + 2 + (at most) 1 + 4 + 1 = at most 12 percent of the total permit fees; ORS 455.210(5): \"Municipalities shall collect and remit surcharges imposed under subsection (4) of this section to the director as provided in ORS 455.220.\"",
+      "sourceUrl": "https://www.oregonlegislature.gov/bills_laws/ors/ors455.html",
+      "fetchedAt": "2026-11-09"
     },
     {
       "state": "UT", "family": "structural", "key": "sealStateOnly",

@@ -144,6 +144,10 @@ export async function openDatabase(): Promise<AppDb> {
   try {
     (await import("./stateRules")).seedStatePermitRules(appDb);
   } catch { /* reference data is best-effort */ }
+  // Each authority's cited eligibility limits (#679): the same idempotent seed, never over a verified row.
+  try {
+    (await import("./eligibilityLimits")).seedEligibilityRecords(appDb);
+  } catch { /* reference data is best-effort */ }
   // Per-job permit process answers: loaded into the in-process registry that the pure
   // (db-less) track/document/fee resolvers read — the same pattern as the process-profile cache.
   try {
@@ -3221,6 +3225,46 @@ const VERSIONED_MIGRATIONS: VersionedMigration[] = [
     },
   },
   {
+    version: 66,
+    name: "state_permit_rules_fetched_at",
+    up: (db) => {
+      // WHEN A STATE RULE'S WORDS WERE READ (#663; the provenance every cited row carries, owner rule
+      // 2026-11-09 / #683). The reference seed stamps the date its citation was checked against the
+      // source; state fee research stamps the time it fetched the page the quote was found on.
+      // '' = not recorded (rows written before this column). `confidence` is free text on purpose:
+      // #683 adds an 'official' tier beside 'seeded' / 'verified' without a schema change.
+      addColumnIfMissing(db, "state_permit_rules", "fetched_at", "TEXT NOT NULL DEFAULT ''");
+    },
+  },
+  {
+    version: 67,
+    name: "authority_eligibility_limits",
+    up: (db) => {
+      // WHO QUALIFIES, AS CITED DATA (#679): one row per authority — a utility's customer-generation
+      // PROGRAM (authority_kind 'utility_program') or an AHJ's simplified permit PATH ('permit_path') —
+      // holding its limits (max DC/AC kW, strings per inverter, production meter, installer
+      // certification), each with its source name, URL and verbatim words (eligibilityLimits.ts).
+      // authority '' = every utility / AHJ in the state. Shared knowledge on purpose: no org_id.
+      // RULE 3: a seed or research write never touches a row whose verified_at is set.
+      // Created here, never lazily: QC reads it, and reads write nothing.
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS authority_eligibility_limits (
+          record_key TEXT PRIMARY KEY,
+          authority_kind TEXT NOT NULL,
+          state TEXT NOT NULL,
+          authority TEXT NOT NULL DEFAULT '',
+          program_name TEXT NOT NULL DEFAULT '',
+          limits_json TEXT NOT NULL DEFAULT '{}',
+          confidence TEXT NOT NULL DEFAULT 'seeded',
+          verified_at TEXT NOT NULL DEFAULT '',
+          verified_by TEXT NOT NULL DEFAULT '',
+          updated_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_authority_eligibility_state ON authority_eligibility_limits(state, authority_kind);
+      `);
+    },
+  },
+  {
     version: 68,
     name: "job_scope_and_storage_modes",
     up: (db) => {
@@ -3239,7 +3283,7 @@ const VERSIONED_MIGRATIONS: VersionedMigration[] = [
       `);
       // WHICH STORAGE MODES THE UTILITY TAKES AN APPLICATION FOR (#673 item 3): a PERSON's cited
       // record on the utility's filing row — { modesWithoutApplication, sourceUrl, quote, verifiedBy,
-      // verifiedAt } (utilityFilingLookup.storageModeExemption). Its own column, so a lookup's write
+      // verifiedAt } (utilityStorageModes.nemStorageExemption). Its own column, so a lookup's write
       // (which replaces payload_json) never touches it (rule 3). Never written by a lookup or a model.
       addColumnIfMissing(db, "utility_filing_lookups", "storage_modes_json", "TEXT NOT NULL DEFAULT ''");
     },
@@ -3395,6 +3439,9 @@ const CLIENT_LICENSING_COLUMNS: [string, string][] = [
   // plan set does name a part.
   ["standard_disconnect_make", "TEXT NOT NULL DEFAULT ''"],
   ["standard_disconnect_model", "TEXT NOT NULL DEFAULT ''"],
+  // The installer's certifications (#679), one per line: checked against a program's or permit path's
+  // cited installer-certification requirement. Blank = none on record (a warning, never a pass).
+  ["installer_certifications", "TEXT NOT NULL DEFAULT ''"],
   ["legal_business_name", "TEXT NOT NULL DEFAULT ''"],
   ["dba", "TEXT NOT NULL DEFAULT ''"],
   ["ccb_license_number", "TEXT NOT NULL DEFAULT ''"],

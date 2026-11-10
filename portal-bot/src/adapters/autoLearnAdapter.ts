@@ -16,7 +16,7 @@ import { applyFormatHint } from "../formatHint";
 import { scrapeReviewScreen as scrapeReviewScreenShared } from "../reviewScreenScraper";
 import { performLogin, lastRevealTrail, loginFormPresent, holdForPerson } from "./loginFlow";
 import { enterApplicationFlow, isExcludedEntryLabel, normalizeEntryLabel, chooseApplicationType, scanChoiceTiles } from "./applicationEntry";
-import { chooseProgram, offeredLabels, programSelector, scanProgramGroups, type ProgramGroup } from "./applicationProgram";
+import { explainProgramChoice, jobClassOf, offeredLabels, programSelector, scanProgramGroups, type ProgramGroup, type ProgramJob } from "./applicationProgram";
 import { planHiddenReveal, planLabelProxy } from "./revealHidden";
 import { looksLikeConsentWall, planConsentDismissal } from "./consentBanner";
 import { chooseRow, scanRowChoices, markAddressRow, type AddressRowPick } from "./rowChooser";
@@ -2592,6 +2592,9 @@ export class AutoLearnAdapter extends BasePortalAdapter {
   /** The permit discipline this run is filing ("electrical", "structural", …). Empty when
    *  the caller didn't say — the record-type guard then only checks label-vs-control. */
   private permitDiscipline = "";
+  /** #693: the job's class and size, so the program chooser prefers THIS job's program
+   *  over the first one in DOM order (a commercial program listed above the residential one). */
+  private programJob: ProgramJob = {};
   /** Set when the review page's own save was still pending when the learn handed over (B3). */
   private reviewUnsavedWarning = "";
   /** THE PROJECT'S OWN SECRETS, READ BY NAME AT FILL TIME (hard rule 2). Live on PGE (2026-09-28):
@@ -4653,6 +4656,12 @@ export class AutoLearnAdapter extends BasePortalAdapter {
       // What discipline this run is filing. Held on the instance so the fill guard can refuse
       // a record type that contradicts it — the planner sees one page at a time and does not.
       this.permitDiscipline = String(project.permitType ?? "");
+      this.programJob = {
+        jobClass: jobClassOf(project),
+        // Program thresholds are printed against the size the utility rates the system at;
+        // AC where the plan gives it, else DC.
+        sizeKw: project.systemSizeAcKw ?? project.systemSizeDcKw ?? null,
+      };
       // #575: the job's own address, which a typeahead's address suggestion must be unmistakably.
       this.typeaheadSite = {
         street: String(project.projectAddress ?? "").split(",")[0].trim(),
@@ -6188,12 +6197,21 @@ export class AutoLearnAdapter extends BasePortalAdapter {
     const list = Array.isArray(groups) ? groups : [];
     if (list.length === 0) return false; // no revealed panel offering a choice
 
-    const picked = chooseProgram(list, this.permitDiscipline);
+    const choice = explainProgramChoice(list, this.permitDiscipline, this.programJob);
+    const picked = choice.pick;
     if (!picked) {
+      // Left for the supervising person: whatever they click is what the recipe records, by
+      // label. An ambiguous or other-class choice is never settled by DOM order (#693).
+      const why = choice.reason === "ambiguous"
+        ? `more than one program fits and the labels do not say which is this ${this.programJob.jobClass ?? "residential"} job's: ${choice.candidates.join(" | ")}`
+        : choice.reason === "other_class"
+          ? `only the other class's program is offered for this ${this.programJob.jobClass ?? "residential"} job: ${choice.candidates.join(" | ")}`
+          : "no option reads as an interconnection/generation application";
       this.debug?.event({
         type: "application_program_unmatched",
+        reason: choice.reason,
         offered: offeredLabels(list).slice(0, 8).join(" | ").slice(0, 200),
-        why: "no option reads as an interconnection/generation application",
+        why: why.slice(0, 240),
       });
       return false;
     }

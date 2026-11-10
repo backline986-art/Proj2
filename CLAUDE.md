@@ -62,6 +62,10 @@ production data.
    (shared/src/portalSafety.ts) / `automaticSubmitRefusals` (repository.ts), the
    single answer at every door. `portal_recipes.auto_submit_enabled` is never
    authority. Without that approval, automation never files.
+   This gate covers EVERY filing door, not only a portal click (owner, 2026-11-09): an
+   emailed application (#667) is staged as a draft by default and sent automatically only
+   through the same predicate (with its channel), its own switch `FILING_EMAIL_ALLOW_SEND=1`
+   and a person-verified recipient address — one send per filing, never re-sent on retry.
    One carve-out, which is NOT a filing (operator ruling 2026-10-16 on #330, "Yes to PSE"):
    a NEM replay may click a submit that was SEEN to only create a draft (PSE Part 1) —
    only when the backend's server-owned stamp (`portal_recipe_draft_submits`, written
@@ -83,7 +87,18 @@ production data.
    `permit_utility_knowledge` (read ONLY via `isVerifiedKnowledge()` — NOT
    `confidence === "mixed"`, which an automatic seeded+learned merge also wrote),
    `"verified"` in `jurisdiction_code_profiles`, `map.verified` on form
-   templates. Imports/research land as `seeded`.
+   templates. Imports/research land as `seeded`, with one exception (owner, 2026-11-09:
+   "if it came from an official/trusted source we should implement that automatically"):
+   a fact read from an OFFICIAL source lands as `official` and is used at once
+   (`isVerifiedKnowledge()` accepts it). Official = the document's own host passes the one
+   shared predicate (government domain — .gov, .mil, state.xx.us / .xx.us, .gov.xx — or the
+   authority's own domain where that domain is recorded human-verified for the authority) AND the row carries its source URL, a verbatim quote
+   containing the value and fetched-at, the quote confirmed in the retrieved bytes, never
+   model memory. It is shown as "from [source]", never as person-verified. It never
+   overwrites a human-verified row (a differing read becomes a conflict for a person),
+   refreshes only from the same official host, and replaces a seeded row. It never stands
+   in for a person on WHERE a filing goes or WHETHER one is sent (rule 1, rule 5's
+   carve-out, a filing email address): those targets stay person-verified.
 4. Agent tools are narrow local handlers (no shell/network); agent data-update
    proposals require human approval (`/api/corrections/:id/apply`).
 5. A permit track must never resolve/launch a utility portal URL (PowerClerk)

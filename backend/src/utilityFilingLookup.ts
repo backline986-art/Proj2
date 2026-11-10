@@ -23,12 +23,13 @@
 // ---------------------------------------------------------------------------
 
 import type { AppDb } from "./db";
-import type { CitedFact, LLMProvider, ProjectRecord, WebLookupResult } from "../../shared/src/types";
+import type { CitedFact, EligibilityLimits, LLMProvider, ProjectRecord, WebLookupResult } from "../../shared/src/types";
 import { hostFitsTrackAndEntity, isInformationalPageUrl, namedInterconnectionPlatforms, portalHostOf } from "./portalChannel";
 import { logger } from "./logger";
 import { knownPowerClerkUtility } from "./utilityIdentity";
 import { isVerifiedKnowledge, knowledgeProfileKey } from "./knowledgeBase";
 import { portalEntityEvidence } from "./portalRecipes";
+import { acceptProposedLimits, saveEligibilityRecord } from "./eligibilityLimits";
 
 export type UtilityProgramKind = "net_metering" | "net_billing" | "interconnection_only";
 /**
@@ -323,7 +324,7 @@ export function acceptFilingUrl(url: string, seenUrls: string[], namedPlatform: 
   return { url: u, why: "" };
 }
 
-export function parseUtilityFilingAnswer(text: string, seenUrls: string[]): { filing: UtilityFilingFact; program: CitedFact<UtilityProgramKind>; programName: string; dropped: string[] } {
+export function parseUtilityFilingAnswer(text: string, seenUrls: string[]): { filing: UtilityFilingFact; program: CitedFact<UtilityProgramKind>; programName: string; dropped: string[]; limits: EligibilityLimits } {
   let json: Record<string, unknown> | null = null;
   const t = str(text);
   const start = t.indexOf("{");
@@ -371,7 +372,10 @@ export function parseUtilityFilingAnswer(text: string, seenUrls: string[]): { fi
     (v) => (["net_metering", "net_billing", "interconnection_only"].includes(str(v)) ? (str(v) as UtilityProgramKind) : null),
     quoteStatesProgram, "program",
   );
-  return { filing, program, programName: program.value ? str(rawProgram?.programName).slice(0, 120) : "", dropped };
+  // PROGRAM LIMITS (#679), under the same cited discipline: a page the search returned, words that carry the value.
+  const proposed = acceptProposedLimits(json?.limits, seenUrls);
+  dropped.push(...proposed.dropped.map((d) => `limit ${d}`));
+  return { filing, program, programName: program.value ? str(rawProgram?.programName).slice(0, 120) : "", dropped, limits: proposed.limits };
 }
 
 // ── The lookup ───────────────────────────────────────────────────────────────────────────────
@@ -382,9 +386,12 @@ export const UTILITY_FILING_SYSTEM = `You find, for ONE electric utility in the 
 
 EVERY value carries "sourceUrl" (a page your search returned or you opened) and "quote" (the exact words on that page that state it, under 250 characters, containing the answer itself: the portal's name or link for the filing; the words net metering / export credit / retail provider for the program). If no page states it, "value": null and say what you searched in "notFound". Never answer from memory. Never guess.
 
+3. limits — ONLY where the program page or tariff you read states them for residential customers: "maxDcKw" / "maxAcKw" (the program's size cap in kW), "productionMeterRequired" (true when a separate production / generation meter is required), "installerCertification" ({"name": "<the certification>", "effectiveFrom": "YYYY-MM-DD" or ""}). Each as {"value": ..., "citation": {"sourceName": "<the page or tariff by name>", "sourceUrl": "", "quote": "<the exact words, containing the value>"}}. Leave out any limit no page states; {} when none.
+
 Return ONLY JSON:
 {"filing": {"value": {"name": "", "url": null, "method"?: "with_ahj_permit", "documents"?: []}|null, "sourceUrl": "", "quote": "", "notFound": ""},
- "program": {"value": "net_metering"|"net_billing"|"interconnection_only"|null, "programName": "", "sourceUrl": "", "quote": "", "notFound": ""}}`;
+ "program": {"value": "net_metering"|"net_billing"|"interconnection_only"|null, "programName": "", "sourceUrl": "", "quote": "", "notFound": ""},
+ "limits": {}}`;
 
 const lookupTimeoutMs = () => Math.max(120000, Number(process.env.UTILITY_FILING_LOOKUP_TIMEOUT_MS) || 240000);
 
@@ -438,7 +445,7 @@ export async function runUtilityFilingLookup(
     ? {
       filing: { value: null, sourceUrl: "", quote: "", origin: "lookup" as const, notFound: r.error ? `lookup failed: ${r.error.slice(0, 120)}` : "no web search returned results — nothing kept from memory" },
       program: { value: null, sourceUrl: "", quote: "", origin: "lookup" as const, notFound: "no grounded search" },
-      programName: "", dropped: [] as string[],
+      programName: "", dropped: [] as string[], limits: {} as EligibilityLimits,
     }
     : parseUtilityFilingAnswer(r.text, seen);
   // An aborted call that found nothing is not stored — a retry later may succeed. A grounded
@@ -462,6 +469,15 @@ export async function runUtilityFilingLookup(
     ...(programName ? { programName } : {}),
     lookedUpAt: new Date().toISOString(),
   });
+  // The cited program limits land as the utility's own eligibility record, SEEDED (never over a
+  // verified or official row — saveEligibilityRecord refuses those, rule 3).
+  if (Object.keys(parsed.limits).length) {
+    try {
+      saveEligibilityRecord(db, { authorityKind: "utility_program", state: input.state, authority: input.utility, programName: programName || `${input.utility} customer-generation program`, limits: parsed.limits });
+    } catch (err) {
+      logger.warn("utility-filing", `could not store program limits for ${input.utility}: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
   return { saved: save.saved, reason: r.error ? `${save.reason} (partial results kept after: ${r.error.slice(0, 120)})` : save.reason, lookup: save.lookup, grounded: r.groundedSearches, dropped: parsed.dropped,
     ...(r.error ? { error: r.error, timedOut } : {}) };
 }

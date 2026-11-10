@@ -35,7 +35,7 @@ const { openDatabase } = await import("../src/db");
 const repo = await import("../src/repository");
 const { runQcForProject, checksForScope } = await import("../src/qc");
 const { deriveJobScope, setPersonJobScope, classifyStorageMode } = await import("../src/jobScope");
-const { recordUtilityStorageModes, nemStorageExemption, storageModeRecordUsable } = await import("../src/utilityStorageModes");
+const { recordUtilityStorageModes, nemStorageExemption, storageModeRecordUsable, quoteNamesStorageMode } = await import("../src/utilityStorageModes");
 const { saveUtilityFilingLookup } = await import("../src/utilityFilingLookup");
 const { requiredTracks } = await import("../src/submittalTracks");
 const db = await openDatabase();
@@ -230,6 +230,20 @@ check("(8) a record whose words do not name the mode is refused", () => {
   const r = recordUtilityStorageModes(db, { state: "ZZ", utility: "Fernvale Valley Electric" }, { modesWithoutApplication: ["backup-only"], sourceUrl: "https://fernvale-electric.invalid/storage", quote: "Battery systems are reviewed case by case.", verifiedBy: "Pat Reviewer" });
   assert.equal(r.saved, false);
   assert.equal(storageModeRecordUsable({ modesWithoutApplication: ["backup-only"], sourceUrl: "https://x.invalid", quote: "Backup-only battery systems need no application.", verifiedBy: "", verifiedAt: "2026-11-10" }), false, "unnamed person");
+});
+check("(8) words about NON-export storage never name the export mode", () => {
+  for (const q of [
+    "Non-export battery systems do not need an interconnection application.",
+    "Zero-export storage with a PCS needs no application.",
+    "Batteries that do not export to the grid are exempt.",
+    "Export-limited energy storage is reviewed without an application.",
+  ]) {
+    assert.equal(quoteNamesStorageMode.export(q), false, q);
+    assert.equal(quoteNamesStorageMode["non-export"](q), true, q);
+  }
+  assert.equal(quoteNamesStorageMode.export("Battery systems that export to the grid need no separate application."), true);
+  const r = recordUtilityStorageModes(db, { state: "ZZ", utility: "Fernvale Valley Electric" }, { modesWithoutApplication: ["export"], sourceUrl: "https://fernvale-electric.invalid/storage", quote: "Non-export battery systems do not need an interconnection application.", verifiedBy: "Pat Reviewer" });
+  assert.equal(r.saved, false, "a non-export quote recorded the export mode");
 });
 check("(8) no exemption before a person records one (the default files)", () => {
   assert.equal(nemStorageExemption(db, repo.getProjectDetail(db, storageOk).project), null);

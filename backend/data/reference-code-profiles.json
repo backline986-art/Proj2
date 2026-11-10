@@ -1,5 +1,5 @@
 {
- "comment": "Jurisdiction code profiles seeded at boot (codeProfiles.seedReferenceCodeProfiles). NEVER overwrites rows that already exist in the DB \u2014 operator edits and verifications always win. 'verified' here is reserved for values lifted verbatim from the previously hardcoded, production-proven rule constants (Oregon). Everything else ships 'seeded' and MUST be verified against official sources (research flow + human verify) before its citations are treated as authoritative.",
+ "comment": "Jurisdiction code profiles seeded at boot (codeProfiles.seedReferenceCodeProfiles). A profile that carries 'asOf' (the day every value was confirmed on its cited official page) also lands on a city/county row that already exists (#561): merged onto a SEEDED row unless a grounded research newer than asOf is there; on a HUMAN-VERIFIED row it is never written \u2014 differing editions or effective dates become a proposal a person decides. A profile with no asOf never touches an existing row. 'verified' here is reserved for values lifted verbatim from the previously hardcoded, production-proven rule constants (Oregon). Everything else ships 'seeded' and MUST be verified against official sources (research flow + human verify) before its citations are treated as authoritative.",
  "profiles": [
   {
    "key": "",
@@ -721,6 +721,7 @@
    "key": "",
    "state": "UT",
    "ahj": "City of Saratoga Springs",
+   "asOf": "2026-10-06",
    "confidence": "seeded",
    "adoptedCodes": [
     {
@@ -775,6 +776,7 @@
    ],
    "designCriteria": {
     "groundSnowLoadPsf": 31,
+    "roofSnowLoadPsf": 30,
     "windSpeedMph": 103,
     "seismicDesignCategory": "D2",
     "frostDepthIn": 30,

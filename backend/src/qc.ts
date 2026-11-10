@@ -1,6 +1,7 @@
 import type { AppDb } from "./db";
 import { cecListing, cecTableCount } from "./cecEquipment";
 import { evaluateBaselineRules } from "./baselineRules";
+import { certificationList, eligibilityRecordsForState } from "./eligibilityLimits";
 import { id } from "./ids";
 import { parseJson } from "./json";
 import { fieldAliases, parserField } from "./normalize";
@@ -114,6 +115,11 @@ const PV_EQUIPMENT_FIELDS = new Set([
   "inverterModel", "inverterQty", "inverterOutput", "pvBreaker",
 ]);
 
+// pcs_model also reads invModel / inverterModel and ess_breaker also reads pvBreaker: the parser puts an
+// ESS inverter in inv* (parser.html) and a storage plan set's backfeed breaker in pvBreaker. On an
+// ADDITION the existing PV system's inverter / breaker could satisfy these rows only if the parser put
+// them in the new-equipment keys; the existing system has its own keys (existingInv*), so this is
+// accepted for now (Helm review of #673).
 const storageChecks: Check[] = [
   { ruleId: "critical.storage.battery_make", ruleName: "Battery make", fieldName: "batteryMake", aliases: ["batteryMake", "batteryManufacturer"], required: true, severity: "blocker", message: "Enter the battery manufacturer as the ESS spec sheet / equipment schedule names it." },
   { ruleId: "critical.storage.battery_model", ruleName: "Battery model", fieldName: "batteryModel", aliases: ["batteryModel"], batteryModel: true, required: true, severity: "blocker", message: "Enter the battery model exactly as on the ESS spec sheet / equipment schedule (it must match the submitted battery spec)." },
@@ -619,8 +625,8 @@ export function runQcForProject(db: AppDb, projectId: string, options: QcRunOpti
     // utility identity (utilityIdentity) can answer for a project the parser did not fully read.
     const clientId = clean(project.client_id);
     const std = clientId
-      ? db.get<{ standard_disconnect_make?: string | null; standard_disconnect_model?: string | null }>(
-        "SELECT standard_disconnect_make, standard_disconnect_model FROM clients WHERE id = ?", [clientId])
+      ? db.get<{ standard_disconnect_make?: string | null; standard_disconnect_model?: string | null; installer_certifications?: string | null }>(
+        "SELECT standard_disconnect_make, standard_disconnect_model, installer_certifications FROM clients WHERE id = ?", [clientId])
       : undefined;
     // A PLACEHOLDER ON THE CLIENT RECORD IS NAMED HERE, the day the job is parsed (leak sweep
     // 2026-09-28): the portal filing leaves a placeholder licence / docket / registration blank
@@ -654,7 +660,14 @@ export function runQcForProject(db: AppDb, projectId: string, options: QcRunOpti
       ...(clean(payload.utility) ? {} : project.utility ? { utility: project.utility } : {}),
       ...(clean(std?.standard_disconnect_model) ? { standardDisconnectModel: clean(std?.standard_disconnect_model), standardDisconnectMake: clean(std?.standard_disconnect_make) } : {}),
     };
-    for (const baseline of evaluateBaselineRules(baselinePayload, codeCtx)) {
+    // PROGRAM / PERMIT-PATH ELIGIBILITY (#679): the cited records on file for the job's state, and the
+    // project's OWN client's certifications (null when the project has no client row to read).
+    const eligibility = {
+      records: eligibilityRecordsForState(db, clean(baselinePayload.state)),
+      clientCertifications: std ? certificationList(std.installer_certifications) : null,
+      reportUnknownProgram: true,
+    };
+    for (const baseline of evaluateBaselineRules(baselinePayload, codeCtx, eligibility)) {
       if (baseline.qcStatus === "fail") failCount += 1;
       if (baseline.qcStatus === "fail" && !priorFails.has(baseline.ruleId)) newFailsOutsideBill += 1;
       if (baseline.qcStatus === "warning") warningCount += 1;
@@ -820,6 +833,12 @@ export function runQcForProject(db: AppDb, projectId: string, options: QcRunOpti
       const queued = ahjInQuestion ? false : await ensurePermitProcessLookedUp(db, projectLike as never);
       const tracks = requiredTracks(projectLike);
       await ensureFeeSchedulesResearched(db, projectLike, queued || ahjInQuestion ? tracks.filter((t) => t === "nem") : tracks);
+      // THE STATE'S OWN FEE RULES (#663): the first permit job in a state with no surcharge on file
+      // queues one lookup for its statute (the quote says "not researched" until one lands).
+      if (tracks.some((t) => t !== "nem")) {
+        const { ensureStateFeeRulesResearched } = await import("./stateFeeResearch");
+        await ensureStateFeeRulesResearched(db, { id: projectId, state: String(projectLike.state ?? "") });
+      }
     })().catch(() => null);
   } catch (err) {
     logger.warn("qc", "fee-research trigger failed", { projectId, err: err instanceof Error ? err.message : String(err) });

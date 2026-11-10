@@ -67,12 +67,23 @@ export const codeProfileResearchSchema = z.object({
   ahj: z.string().max(160).optional().default(""),
 });
 
+// A calendar day ("2025-01-18"), checked as a real date: an edition's phase-in reads these.
+const isoDay = z.string().trim().regex(/^\d{4}-\d{2}-\d{2}$/, "must be a date, YYYY-MM-DD")
+  .refine((d) => { const t = Date.parse(`${d}T00:00:00Z`); return !Number.isNaN(t) && new Date(t).toISOString().slice(0, 10) === d; }, "must be a real calendar date");
+// EFFECTIVE DATES (#561): the verify route kept only code/edition/title/source/notes, so a person
+// could not record when an edition took effect, when it became mandatory, or which edition it
+// replaced — and the edition phase-in (codeFamilies.editionsInEffect) could never apply.
 const codeEditionSchema = z.object({
   code: z.string().min(1).max(24),
   edition: z.string().min(1).max(12),
   title: z.string().max(240).optional(),
   sourceUrl: z.string().max(500).optional(),
   notes: z.string().max(500).optional(),
+  effectiveDate: isoDay.optional(),
+  mandatoryDate: isoDay.optional(),
+  previousEdition: z.string().trim().min(1).max(12).optional(),
+}).refine((c) => !c.effectiveDate || !c.mandatoryDate || c.mandatoryDate >= c.effectiveDate, {
+  message: "mandatoryDate cannot be before effectiveDate", path: ["mandatoryDate"],
 });
 
 // A PERSON VERIFIES OR REPLACES AN AHJ'S PERMIT-PROCESS LOOKUP (#560). No `permits`: verify the row
