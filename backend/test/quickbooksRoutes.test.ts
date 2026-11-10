@@ -147,9 +147,19 @@ try {
     assert.equal(put.status, 409);
   });
   await run("an OAuth callback with an unknown state connects nothing", async () => {
-    const r = await fetch(`${BASE}/api/quickbooks/oauth/callback?code=x&state=forged&realmId=1`);
+    const r = await fetch(`${BASE}/api/quickbooks/oauth/callback?code=SENTINELCODE7731&state=SENTINELSTATE4402&realmId=1`);
     assert.notEqual(r.status, 200);
     assert.equal(peek<{ n: number }>("SELECT COUNT(*) AS n FROM quickbooks_connections WHERE encrypted_tokens != ''").n, 0);
+  });
+  // Helm's #701 review: the request log must not record the single-use authorization code or the
+  // state (logger.ts SENSITIVE_QUERY). The refused callback is a 4xx, so it IS logged at warn.
+  await run("the request log line for the OAuth callback records neither the code nor the state", async () => {
+    for (let i = 0; i < 20 && !/oauth\/callback/.test(log); i++) await new Promise((res) => setTimeout(res, 100));
+    const line = log.split("\n").find((l) => /oauth\/callback/.test(l)) || "";
+    assert.ok(line, `no request log line for the callback. log tail:\n${log.slice(-800)}`);
+    assert.match(line, /code=\[redacted\]/);
+    assert.match(line, /state=\[redacted\]/);
+    assert.doesNotMatch(log, /SENTINELCODE7731|SENTINELSTATE4402/);
   });
   await run("status: not connected, sync off, and no token field of any kind", async () => {
     const r = await fetch(`${BASE}/api/quickbooks/status`);
