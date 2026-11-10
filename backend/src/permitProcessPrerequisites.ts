@@ -36,6 +36,11 @@ function statesBeforeFiling(words: string): boolean {
 /** Another permit type, by name. Building / electrical / solar / residential are THIS job's. */
 const OTHER_PERMIT_TYPE = /\b(?:basements?|decks?|fences?|fencing|(?:swimming\s+)?pools?|spas?|hot\s+tubs?|signs?(?![\s-]*off)|signage|demolition|sheds?|accessory\s+(?:dwelling|structures?|buildings?)|adus?|grading|excavation|right[\s-]+of[\s-]+way|encroachments?|driveways?|trees?|sewers?|septic|irrigation|retaining\s+walls?|short[\s-]+term\s+rentals?|business\s+licen[cs]es?|home\s+occupations?|fireworks|special\s+events?|water\s+heaters?|re-?roof\w*|siding|windows?|fireplaces?|chimneys?)\b/i;
 const THIS_PERMIT = /\b(?:solar|photo-?voltaic|pv|electrical)\b/i;
+const STORAGE_PAGE = /\b(?:batter(?:y|ies)|energy[\s-]+storage|storage[\s-]+systems?|ess)\b/i;
+/** A sentence that only PRICES something ("subjected to a plan review fee of $100 for the first hour")
+ *  is not a step; "the $50 fee must be paid prior to submittal" is one (a payment before filing). */
+const FEE_STATEMENT = /\b(?:subject(?:ed)? to|charged|assessed)\b[^.;]{0,40}?\bfees?\b|\bfees?\s+(?:of|is|are|will be)\s+\$\s?\d/i;
+const PAYMENT_BEFORE_FILING = /\b(?:paid|pay|payment)\b[^.;]{0,40}?\b(?:before|prior to)\b/i;
 
 /** The words of a page's URL path ("/221/Obtaining-a-Basement-Permit" -> "221 obtaining a basement
  *  permit"). The host is not the page's subject. */
@@ -47,6 +52,11 @@ function pathWords(url: string): string {
  *  sheds" page that merely lists examples; "Obtaining a Basement Permit" does not.) */
 export function pageIsOtherPermitType(sourceUrl: string, title = ""): boolean {
   const subject = `${pathWords(sourceUrl)} ${String(title ?? "")}`;
+  // A BATTERY / ENERGY-STORAGE packet is the storage permit's page, even when its path also says
+  // "solar" ("Solar Packet - Battery System"): its steps and fees are not the PV permit's
+  // (bot-vs-research 2026-11-10: a battery packet's plan-review fee sentence was stored as a PV
+  // prerequisite). A battery job's own question is asked apart (lookup-battery-and-fees).
+  if (STORAGE_PAGE.test(subject)) return true;
   if (THIS_PERMIT.test(subject)) return false;
   const named = new Set([...subject.matchAll(new RegExp(OTHER_PERMIT_TYPE.source, "gi"))].map((m) => m[0].toLowerCase().replace(/s$/, "")));
   return named.size === 1;
@@ -78,6 +88,7 @@ export function prerequisiteRefusal(text: string, sourceUrl = "", opts: { title?
   const words = `${s} ${String(opts.quote ?? "")}`;
   if (!s) return "empty";
   if (pageIsOtherPermitType(sourceUrl, opts.title)) return "the source page is about another permit type";
+  if (FEE_STATEMENT.test(words) && !PAYMENT_BEFORE_FILING.test(words)) return "it only states a fee, not a step";
   const beforeFiling = statesBeforeFiling(words);
   // "a basement permit requires…", "fence permits must…": another permit type's own process. An
   // encroachment / right-of-way permit this job must obtain FIRST is a prerequisite, not that.

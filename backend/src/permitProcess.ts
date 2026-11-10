@@ -28,6 +28,7 @@
 import type {
   CitedFact,
   IssuerTrackKey,
+  PermitFilingChannel,
   PermitProcessLookup,
   PermitProcessPermitAnswer,
   ProjectRecord,
@@ -733,6 +734,35 @@ export function permitAnswerForTrackFrom(project: Pick<ProjectRecord, "state" | 
   if (!lk?.permits?.length) return null;
   const own = lk.permits.find((p) => p.discipline === want);
   return own ? { answer: own, from: "issuer" } : null;
+}
+
+/** "by email to x@y", "in person at City Hall", "by mail", "with the Building permit", "online"
+ *  (lookup-permit-filing-channel): the words a card and a note use for a cited filing channel. */
+export function channelPhrase(c: PermitFilingChannel): string {
+  switch (c.kind) {
+    case "email": return c.value ? `by email to ${c.value}` : "by email (no address stated)";
+    case "in_person": return c.value ? `in person at ${c.value}` : "in person";
+    case "mail": return c.value ? `by mail to ${c.value}` : "by mail";
+    case "with_other_permit": return `with the ${c.value || "other"} permit`;
+    case "portal": return c.value ? `online at ${c.value}` : "online";
+  }
+}
+/** THIS TRACK'S PERMIT IS FILED SOME WAY OTHER THAN A PORTAL, as the per-job lookup's cited page says
+ *  (email, in person, by mail, with another permit) — or null (a portal, or no channel on file). The
+ *  lookup's portal is then never launched for the track (repository's stage), and the stop says where
+ *  it is filed instead (filingChannelStopSentence). A person-verified portal still outranks it. */
+export function citedNonPortalChannelFor(project: Pick<ProjectRecord, "state" | "ahj"> & Partial<Pick<ProjectRecord, "trackView">>, track: string | null | undefined): CitedFact<PermitFilingChannel> | null {
+  const c = permitAnswerForTrack(project, track)?.channel;
+  return c?.value && c.value.kind !== "portal" ? c : null;
+}
+/** The stop's words for such a track: "file at <office>" with the page's own words — no launch. */
+export function filingChannelStopSentence(project: Pick<ProjectRecord, "state" | "ahj"> & Partial<Pick<ProjectRecord, "trackView">>, track: string | null | undefined): string {
+  const c = citedNonPortalChannelFor(project, track);
+  if (!c?.value) return "";
+  const where = String(project.ahj ?? "").trim() || "This AHJ";
+  const alts = (permitAnswerForTrack(project, track)?.alternateChannels ?? []).map((a) => a.value).filter((v): v is PermitFilingChannel => Boolean(v));
+  const how = c.value.kind === "in_person" ? `File it ${channelPhrase(c.value)}` : c.value.kind === "email" ? `File it ${channelPhrase(c.value)} (the address becomes a filing destination to confirm; nothing is sent automatically)` : `File it ${channelPhrase(c.value)}`;
+  return `${where}'s ${track ?? "permit"} permit is not filed in a portal: the lookup's cited page says "${String(c.quote).slice(0, 160)}" (${c.sourceUrl}). ${how}. Nothing was opened.${alts.length ? ` The page also allows: ${alts.map(channelPhrase).join("; ")}.` : ""}`;
 }
 
 /** The agency that issues this track's permit: the OPERATOR's per-track issuer (trackIssuer's first

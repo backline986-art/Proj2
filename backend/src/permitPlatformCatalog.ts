@@ -257,6 +257,22 @@ export const PORTAL_LINK_WORDS = /apply online|apply for (?:a |your )?(?:buildin
 /** Words that name something ELSE (a transparency / payment / GIS / records portal, a 311 / request /
  *  concern system, a property viewer, a video, a guide, the vendor's own credit line). */
 const NOT_PORTAL_WORDS = /transparen|pay (?:a |your )?(?:bill|utility|invoice)|utility bill|job|employ|career|parks?\b|librar|\bgis\b|\bmaps?\b|open data|records request|public records|agenda|video|youtube|how[- ]to|tutorial|guide|faq|help|creating an account|translate|facebook|twitter|instagram|linkedin|nextdoor|newsletter|concern|complain|\b311\b|request|report (?:a|an)\b|code enforcement|property (?:viewer|search|information|lookup)|parcel|assessor|powered by|business licen|licen[cs]e renewal|dog licen|pet licen/i;
+/** Words of a link that does something OTHER than take an application (lookup-permit-filing-channel,
+ *  2026-11-10: a city's "Schedule an Inspection" link into its permit vendor's tenant was taken as the
+ *  permit portal): scheduling, inspections, payment, status / tracking, contractor registration.
+ *  "Permits & Inspections" still names permits, so an inspection word alone refuses only a link whose
+ *  words say nothing of applying or permits. */
+const NOT_APPLY_LINK_WORDS = /\bschedul\w*|\bpay(?:ments?|ing)?\b|\bstatus\b|\btrack(?:ing)?\b|\bregistration\b/i;
+const INSPECTION_WORDS = /\binspections?\b/i;
+/** The verb of filing ("Apply & Pay Online" is an application link; "Application status" is not). */
+const APPLY_VERB = /\bapply\b|\bsubmit\w*/i;
+const APPLY_OR_PERMIT_WORDS = /\bapply\b|\bapplications?\b|\bpermits?\b|\bsubmit\w*|\bsubmittals?\b/i;
+/** The one test: these link words are about something other than filing an application. */
+export function linkWordsAreNotApplying(text: string): boolean {
+  const t = String(text ?? "");
+  if (NOT_APPLY_LINK_WORDS.test(t) && !APPLY_VERB.test(t)) return true;
+  return INSPECTION_WORDS.test(t) && !APPLY_OR_PERMIT_WORDS.test(t);
+}
 const PLATFORMISH_PATH = /selfservice|citizenaccess|citizen-access|energov|\/aca\b|etrakit|\/cap\/|permits?portal|epermit/i;
 /** A link TARGET whose path (never its host: "<city>.portal.iworq.net/portalhome" is iWorQ's
  *  landing for a concern form) names an application portal. */
@@ -375,9 +391,13 @@ export function wordsNameAnotherJurisdiction(text: string, names: string[], type
   const own = new Set(names.flatMap((n) => String(n ?? "").toLowerCase().split(/[^a-z]+/)).filter(Boolean));
   const ownTypes = jurisdictionTypes(typeNames);
   const found: Array<{ name: string; type: string }> = [];
-  for (const m of String(text ?? "").matchAll(/\b(city|town|township|county|borough|village|parish) of ((?:[A-Z][a-zA-Z'.-]+)(?: [A-Z][a-zA-Z'.-]+)?)/gi)) found.push({ name: m[2], type: m[1] });
-  for (const m of String(text ?? "").matchAll(/\b((?:[A-Z][a-zA-Z'.-]+)(?: [A-Z][a-zA-Z'.-]+)?) (Township|County|City|Borough|Village|Parish)\b/gi)) found.push({ name: m[1], type: m[2] });
-  const generic = /^(?:the|our|your|this|a|an|apply|online|permit|permits|portal|building|residential|commercial|unincorporated|inside|outside|citizen|public|new|search|for|in|of|with|to|at|and|or)$/i;
+  // A NAMED jurisdiction is CAPITALISED, and so is its type when it follows the name (bot-vs-research
+  // 2026-11-10: "…Apply Now The city regulates…" read case-insensitively was a place called "Now The
+  // City", and the city's own portal was refused as another jurisdiction's). "City of X" may start a
+  // sentence or not; lowercase "the city" never names one.
+  for (const m of String(text ?? "").matchAll(/\b([Cc]ity|[Tt]own|[Tt]ownship|[Cc]ounty|[Bb]orough|[Vv]illage|[Pp]arish|CITY|TOWN|TOWNSHIP|COUNTY|BOROUGH|VILLAGE|PARISH) (?:of|OF) ((?:[A-Z][a-zA-Z'.-]+)(?: [A-Z][a-zA-Z'.-]+)?)/g)) found.push({ name: m[2], type: m[1].toLowerCase() });
+  for (const m of String(text ?? "").matchAll(/\b((?:[A-Z][a-zA-Z'.-]+)(?: [A-Z][a-zA-Z'.-]+)?) (Township|County|City|Borough|Village|Parish|TOWNSHIP|COUNTY|CITY|BOROUGH|VILLAGE|PARISH)\b/g)) found.push({ name: m[1], type: m[2].toLowerCase() });
+  const generic = /^(?:the|our|your|this|a|an|apply|online|permit|permits|portal|building|residential|commercial|unincorporated|inside|outside|citizen|public|new|search|for|in|of|with|to|at|and|or|now|here|click|visit|welcome|contact|about)$/i;
   return found.some((f) => {
     const ws = f.name.toLowerCase().split(/[^a-z]+/).filter((w) => w && !generic.test(w));
     if (!ws.length) return false;
@@ -417,6 +437,7 @@ function candidatesOn(page: ReadPage, names: string[], typeNames: string[] = nam
   for (const link of page.links) {
     const host = portalHostOf(link.href);
     if (!host || NOT_PORTAL_WORDS.test(link.text)) continue;
+    if (linkWordsAreNotApplying(link.text)) continue; // an inspection scheduler / payment / status / registration link
     if (!hostFitsTrackAndEntity("building", null, link.href, "research").fits) continue; // rule 5 + no help page / document
     const vendor = isPermitPlatformUrl(link.href);
     const ownDomain = !vendor && registrableDomain(host) === pageDom;

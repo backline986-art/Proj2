@@ -95,7 +95,7 @@ import { planSetTextForProject, projectDocsByType, shippedPlanSetOutlinedPages, 
 import { activeStructuralLetterConfirmation, structuralLetterState } from "./structuralLetter";
 import { statePermitRulesFor } from "./stateRules";
 import type { DesignTextSource } from "./designCriteria";
-import { describeCited, lookedUpRecordType, issuingAgencyFor, permitAnswerForTrack, stateRulesFor, isStatewidePortalUrl, permitProcessKey, projectForTrack, refuseTrackIssuerValue, trackIssuer } from "./permitProcess";
+import { citedNonPortalChannelFor, describeCited, filingChannelStopSentence, lookedUpRecordType, issuingAgencyFor, permitAnswerForTrack, stateRulesFor, isStatewidePortalUrl, permitProcessKey, projectForTrack, refuseTrackIssuerValue, trackIssuer } from "./permitProcess";
 import { statewideDecisionFor, statewideUrlRefusal } from "./statewideEvidence";
 import { RESEARCH_UNCONFIRMED_REASON, researchNamedPlatform, researchSaysPortalUnconfirmed, researchWithFittedUrl } from "./researchedPortalUrl";
 import { bindRecipeForReplay, describeReplayBinding } from "./recipeReplayBinding";
@@ -9323,7 +9323,9 @@ export function resolveStagePortal(db: AppDb, input: {
   // THE PER-JOB LOOKUP'S PORTAL for this track's permit (cited, seeded) — judged like research
   // (a verified portal for the AHJ outranks it; an information page never fits). The statewide
   // portal is not taken here: that answer is the statewide fallback below, labelled as such.
-  if (track !== "nem" && !ahjPortalUrl) {
+  // A permit the lookup's cited page says is filed by email / in person / by mail / with another
+  // permit (lookup-permit-filing-channel) launches nothing from the lookup.
+  if (track !== "nem" && !ahjPortalUrl && !citedNonPortalChannelFor(project, track)) {
     const looked = permitAnswerForTrack(project, track)?.portalUrl.value ?? "";
     if (looked && !isStatewidePortalUrl(project.state, looked)) ahjPortalUrl = fitUrl(looked, "research");
   }
@@ -11010,7 +11012,11 @@ export async function prepareSubmission(
       // THE STATEWIDE PORTAL WAS WITHHELD (portal-truth D1): say why — the operator confirms the
       // AHJ's own portal; "no portal automation" would read as a missing URL.
       const withheld = refusedUrls.find((r) => r.code === "withheld")?.reason ?? "";
-      const msg = refused
+      // FILED SOME OTHER WAY (lookup-permit-filing-channel): the lookup's cited page says this permit
+      // is emailed / bought in person / mailed / filed with another permit — say where, open nothing.
+      let channelStop = "";
+      if (track !== "nem" && !hasLaunchablePortal && !credentialUrl) { try { channelStop = filingChannelStopSentence(portalProject, track); } catch { channelStop = ""; } }
+      const msg = channelStop ? channelStop : refused
         ? `No recording exists yet for ${where}'s ${track} permit${ownPortalUrl ? ` on ${portalHostOf(ownPortalUrl) || ownPortalUrl}` : ""}, and the recording learned elsewhere on that portal was not reused: ${refused}. Nothing was opened. This permit needs one supervised learn or recording for its issuing agency; then re-stage.`
         : withheld
           ? `No portal is confirmed for ${where}'s ${track ?? "permit"} permit, so nothing was opened. ${withheld}`
