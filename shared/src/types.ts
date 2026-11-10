@@ -980,7 +980,7 @@ export interface ProjectRecord {
    *  so the per-job lookup's cited answer about this permit still reaches the view, and makes the
    *  view idempotent (a view of a view is itself). */
   trackView?: { track: string; projectAhj: string; source: "operator" | "lookup" | "state_rule" };
-  /** THE JOB'S CLASS (#688, migration v67): "residential" (every existing row, and every job
+  /** THE JOB'S CLASS (#688, migration v69): "residential" (every existing row, and every job
    *  nobody has said otherwise about) or "commercial". A PERSON sets it — at intake or on the
    *  detail view; a model may suggest it, never set it. A commercial job is HELD for a person:
    *  no recipe replay, no staging, no automatic filing, no learn, no shared-knowledge write
