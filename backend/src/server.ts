@@ -641,6 +641,14 @@ function billingActor(req: Request): string {
   const user = currentUser(db, req);
   return String(user?.name || user?.email || req.body?.by || "operator").trim().slice(0, 120) || "operator";
 }
+/** The named person behind an outward billing action (an invoice email, a QuickBooks write or connect):
+ *  the signed-in user, or with sign-in off the name the dashboard sends (`decidedBy`). A placeholder
+ *  such as "operator" is not a person. */
+async function billingPerson(req: Request, what: string): Promise<string> {
+  const { isConfirmingPerson } = await import("./feeConfirm");
+  return namedPersonDecider(req, "decidedBy", `Sign in to ${what}.`,
+    `Name the person who will ${what}: it is recorded against them, and "operator" is not a person.`, isConfirmingPerson);
+}
 app.get("/api/clients/:id/billing/statement", asyncHandler(async (req, res) => {
   const { buildClientStatement, resolvePeriod } = await import("./clientInvoices");
   const period = resolvePeriod({ month: req.query.month, periodStart: req.query.periodStart, periodEnd: req.query.periodEnd });
@@ -685,10 +693,82 @@ app.post("/api/clients/:id/invoices/:invoiceId/void", asyncHandler(async (req, r
 // SMTP it is saved as a draft communication and the invoice is left as it was.
 app.post("/api/clients/:id/invoices/:invoiceId/send", asyncHandler(async (req, res) => {
   const { sendClientInvoice } = await import("./clientInvoices");
-  const by = billingActor(req);
+  // AN OUTWARD EMAIL IS A NAMED PERSON'S CLICK (Helm, #700 review): never billingActor's "operator"
+  // fallback. Named before anything is sent: an unnamed caller is a 400 (401 signed out) that sends nothing.
+  const by = await billingPerson(req, "email an invoice");
   const result = await sendClientInvoice(db, String(req.params.id), String(req.params.invoiceId), by);
   addAuditLog(db, null, "human", by, result.delivered ? "invoice.emailed" : "invoice.email_not_sent", { clientId: result.invoice.clientId, invoiceId: result.invoice.id, number: result.invoice.number, detail: result.detail });
   res.json(result);
+}));
+
+// A line a PERSON adds to a draft invoice (#701): the client onboarding fee, or its credit back
+// (negative). The amount is typed by the person; nothing in code knows a price.
+app.post("/api/clients/:id/invoices/:invoiceId/lines", asyncHandler(async (req, res) => {
+  const { addManualInvoiceLine } = await import("./clientInvoices");
+  const by = await billingPerson(req, "add a line to an invoice");
+  const invoice = addManualInvoiceLine(db, String(req.params.id), String(req.params.invoiceId), {
+    kind: req.body?.kind, amountUsd: req.body?.amountUsd, description: req.body?.description, serviceDate: req.body?.serviceDate,
+  }, by);
+  addAuditLog(db, null, "human", by, "invoice.line_added", { clientId: invoice.clientId, invoiceId: invoice.id, number: invoice.number, dueTotalUsd: invoice.dueTotalUsd });
+  res.json({ invoice });
+}));
+// SEND TO QUICKBOOKS (#701, safety-critical): a named person's click, never automatic or scheduled.
+// Creates the QuickBooks invoice once (external_ref UNIQUE; a retry returns the one already made).
+// Never emails the customer and never takes a payment. QUICKBOOKS_SYNC off = refused, zero network.
+app.post("/api/clients/:id/invoices/:invoiceId/quickbooks", asyncHandler(async (req, res) => {
+  const { pushInvoiceToQuickBooks } = await import("./quickbooks");
+  const by = await billingPerson(req, "send an invoice to QuickBooks");
+  res.json(await pushInvoiceToQuickBooks(db, String(req.params.id), String(req.params.invoiceId), by));
+}));
+
+// --- QuickBooks Online connection (#701): ONE company per org ---
+// Every handler takes the org from requestScope(db, req).orgId, never the body; the OAuth callback
+// binds the org only through the single-use, expiring state a named person of that org minted.
+// Connect, disconnect and the Item choice are admin-gated when sign-in is on, and named.
+app.get("/api/quickbooks/status", asyncHandler(async (req, res) => {
+  const { quickBooksStatus } = await import("./quickbooks");
+  res.json({ quickbooks: quickBooksStatus(db, requestScope(db, req).orgId) });
+}));
+app.post("/api/quickbooks/connect", asyncHandler(async (req, res) => {
+  requireAdmin(req);
+  const { beginQuickBooksConnect } = await import("./quickbooks");
+  const by = await billingPerson(req, "connect QuickBooks");
+  res.json(beginQuickBooksConnect(db, requestScope(db, req).orgId, by));
+}));
+app.get("/api/quickbooks/oauth/callback", asyncHandler(async (req, res) => {
+  const { completeQuickBooksConnect } = await import("./quickbooks");
+  const { escapeHtml } = await import("./emailLayout");
+  try {
+    await completeQuickBooksConnect(db, { code: req.query.code, state: req.query.state, realmId: req.query.realmId });
+    res.type("html").send("<h2>QuickBooks connected</h2><p>You can close this tab and return to the dashboard (Clients, Billing) to choose the Items.</p>");
+  } catch (err) {
+    const status = err instanceof HttpError ? err.status : 500;
+    res.status(status).type("html").send(`<h2>QuickBooks was not connected</h2><p>${escapeHtml(err instanceof Error ? err.message : "Unknown error.")}</p>`);
+  }
+}));
+app.post("/api/quickbooks/disconnect", asyncHandler(async (req, res) => {
+  requireAdmin(req);
+  const { disconnectQuickBooks } = await import("./quickbooks");
+  const by = await billingPerson(req, "disconnect QuickBooks");
+  res.json({ quickbooks: disconnectQuickBooks(db, requestScope(db, req).orgId, by) });
+}));
+app.get("/api/quickbooks/items", asyncHandler(async (req, res) => {
+  const { listQuickBooksItems } = await import("./quickbooks");
+  res.json({ items: await listQuickBooksItems(db, requestScope(db, req).orgId) });
+}));
+app.put("/api/quickbooks/settings", asyncHandler(async (req, res) => {
+  requireAdmin(req);
+  const { saveQuickBooksItemSettings } = await import("./quickbooks");
+  const by = await billingPerson(req, "choose the QuickBooks Items");
+  res.json({ quickbooks: await saveQuickBooksItemSettings(db, requestScope(db, req).orgId, {
+    serviceItemId: req.body?.serviceItemId, passthroughItemId: req.body?.passthroughItemId, onboardingItemId: req.body?.onboardingItemId,
+  }, by) });
+}));
+// "Check payments now": the same read-only payment status read the daily tick runs.
+app.post("/api/quickbooks/payment-status", asyncHandler(async (req, res) => {
+  const { syncQuickBooksPaymentStatus } = await import("./quickbooks");
+  await billingPerson(req, "check QuickBooks payments");
+  res.json({ result: await syncQuickBooksPaymentStatus(db, requestScope(db, req).orgId) });
 }));
 
 // --- Per-client portal credentials (encrypted; plaintext never returned) ---
@@ -4456,6 +4536,8 @@ const server = app.listen(port, listen.host, () => {
   startBackupScheduler(db);
   startArtifactRetention();
   startMonitorScheduler(db);
+  // #701: the daily READ of QuickBooks payment status. Does nothing unless QUICKBOOKS_SYNC=1; never sends.
+  void import("./quickbooks").then((m) => m.startQuickBooksStatusScheduler(db)).catch(() => undefined);
   startStaffDigestScheduler(db);
   startAhjFormRefreshScheduler(db);
   startKbLinkCheckScheduler(db);

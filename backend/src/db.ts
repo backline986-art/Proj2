@@ -3431,6 +3431,66 @@ const VERSIONED_MIGRATIONS: VersionedMigration[] = [
       `);
     },
   },
+  {
+    // v74 (#701): the next free number on offline staging bdde3b57 (after #700's v73). Another
+    // unmerged branch may take v74 first; the reviewer renumbers at merge. Nothing depends on it.
+    version: 74,
+    name: "quickbooks_connection",
+    up: (db) => {
+      // QUICKBOOKS ONLINE (#701): ONE company per org (org_id is the key), connected by a named person.
+      //
+      // quickbooks_connections.encrypted_tokens is the ONLY place the OAuth access and refresh tokens
+      // live: an encryptStorageState envelope (SESSION_ENCRYPTION_KEY, the portal-secret pattern).
+      // Never a plaintext column, never logged, never read outside backend/src/quickbooks.ts (a test
+      // fences that). The three Item ids are a person's choice in settings, never code.
+      //
+      // quickbooks_oauth_states: the single-use, expiring `state` a named person mints with Connect;
+      // the callback binds the org through it and nothing else.
+      //
+      // client_invoices.external_ref (v73) carries the QuickBooks invoice Id; the partial UNIQUE index
+      // means one of our invoices maps to one QuickBooks invoice and no QuickBooks invoice is claimed
+      // twice. qb_push_started_at is the in-flight claim that keeps two clicks (or a click and a
+      // restart) from creating two.
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS quickbooks_connections (
+          org_id TEXT PRIMARY KEY,
+          realm_id TEXT NOT NULL DEFAULT '',
+          encrypted_tokens TEXT NOT NULL DEFAULT '',
+          access_expires_at TEXT NOT NULL DEFAULT '',
+          refresh_expires_at TEXT NOT NULL DEFAULT '',
+          service_item_id TEXT NOT NULL DEFAULT '',
+          service_item_name TEXT NOT NULL DEFAULT '',
+          passthrough_item_id TEXT NOT NULL DEFAULT '',
+          passthrough_item_name TEXT NOT NULL DEFAULT '',
+          onboarding_item_id TEXT NOT NULL DEFAULT '',
+          onboarding_item_name TEXT NOT NULL DEFAULT '',
+          connected_by TEXT NOT NULL DEFAULT '',
+          connected_at TEXT NOT NULL DEFAULT '',
+          settings_by TEXT NOT NULL DEFAULT '',
+          last_status_sync_at TEXT NOT NULL DEFAULT '',
+          last_error TEXT NOT NULL DEFAULT '',
+          updated_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS quickbooks_oauth_states (
+          state TEXT PRIMARY KEY,
+          org_id TEXT NOT NULL,
+          created_by TEXT NOT NULL DEFAULT '',
+          created_at TEXT NOT NULL,
+          expires_at TEXT NOT NULL,
+          used_at TEXT NOT NULL DEFAULT ''
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS ux_client_invoices_external_ref
+          ON client_invoices(external_ref) WHERE external_ref != '';
+      `);
+      addColumnIfMissing(db, "clients", "quickbooks_customer_id", "TEXT NOT NULL DEFAULT ''");
+      addColumnIfMissing(db, "client_invoices", "qb_push_started_at", "TEXT NOT NULL DEFAULT ''");
+      addColumnIfMissing(db, "client_invoices", "qb_pushed_by", "TEXT NOT NULL DEFAULT ''");
+      addColumnIfMissing(db, "client_invoices", "qb_pushed_at", "TEXT NOT NULL DEFAULT ''");
+      addColumnIfMissing(db, "client_invoices", "qb_balance_usd", "REAL");
+      addColumnIfMissing(db, "client_invoices", "qb_status", "TEXT NOT NULL DEFAULT ''");
+      addColumnIfMissing(db, "client_invoices", "qb_checked_at", "TEXT NOT NULL DEFAULT ''");
+    },
+  },
 ];
 
 /** v47 was edited in place while #218 was open (Helm's review at 0116f98a): a DB that ran an earlier

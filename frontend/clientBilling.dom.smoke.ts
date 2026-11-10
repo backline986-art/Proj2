@@ -8,6 +8,11 @@
 //               never as an element (CLAUDE.md: frontend esc() everything).
 //   MUST PASS — at 390px the billing block does not scroll the page sideways and no button wraps
 //               mid-word.
+//   MUST PASS (#701) — with QuickBooks connected, an open invoice not yet in QuickBooks offers "Send to
+//               QuickBooks" and a draft offers "Add onboarding line"; an invoice already in QuickBooks
+//               shows its QuickBooks number and status (escaped) and offers neither. "Send to
+//               QuickBooks" POSTs the typed person's name. The QuickBooks block shows the chosen Items
+//               and never a token.
 //
 // Hermetic: a throwaway static server over frontend/, stubbed /api/clients/... with FAKE data,
 // everything else 404. No backend, no database, nothing emailed.
@@ -55,8 +60,15 @@ const STATEMENT = {
 };
 const INVOICES = [
   { id: "inv-a", number: "INV-2026-0002", clientId: CLIENT.id, periodStart: "2026-10-01", periodEnd: "2026-11-01", status: "draft", dueTotalUsd: 200, dueAt: "", paidAt: "", paidReference: "", voidReason: "", lines: [] },
+  { id: "inv-q", number: "INV-2026-0003", clientId: CLIENT.id, periodStart: "2026-08-01", periodEnd: "2026-09-01", status: "sent", dueTotalUsd: 80, dueAt: "2026-09-16", paidAt: "", paidReference: "", voidReason: "", lines: [],
+    externalRef: "501", qbPushedBy: "Test Person", qbStatus: "partly paid <b>x</b>", qbBalanceUsd: 40 },
   { id: "inv-b", number: "INV-2026-0001", clientId: CLIENT.id, periodStart: "2026-09-01", periodEnd: "2026-10-01", status: "paid", dueTotalUsd: 120, dueAt: "2026-10-31", paidAt: "2026-10-20T00:00:00Z", paidReference: "ach-1", voidReason: "", lines: [] },
 ];
+const QB_STATUS = {
+  syncOn: true, appConfigured: true, connected: true, realmId: "9130-TEST", connectedBy: "Test Person", connectedAt: "2026-11-10T00:00:00Z",
+  lastStatusSyncAt: "", lastError: "", settingsBy: "Test Person",
+  items: { service: { id: "11", name: "Filing service fee" }, passthrough: { id: "12", name: "Permit & portal fee (pass-through)" }, onboarding: { id: "", name: "" } },
+};
 const posted: string[] = [];
 const MIME: Record<string, string> = { ".html": "text/html; charset=utf-8", ".css": "text/css; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".woff2": "font/woff2" };
 
@@ -71,6 +83,13 @@ const startServer = async (): Promise<{ base: string; close: () => Promise<void>
       if (p === "/api/clients") return json({ clients: [CLIENT] });
       if (/^\/api\/users/.test(p)) return json({ users: [] });
       if (/^\/api\/clients\/[^/]+\/portal-credentials$/.test(p)) return json({ credentials: [] });
+      if (p === "/api/quickbooks/status") return json({ quickbooks: QB_STATUS });
+      if (/^\/api\/clients\/[^/]+\/invoices\/[^/]+\/quickbooks$/.test(p) && req.method === "POST") {
+        let body = "";
+        req.on("data", (c) => { body += c; });
+        req.on("end", () => { posted.push(`POST quickbooks ${p.split("/")[5]} ${body}`); json({ created: true, adopted: false, externalRef: "502", invoice: { ...INVOICES[0], externalRef: "502" } }); });
+        return;
+      }
       if (/^\/api\/clients\/[^/]+\/billing\/statement$/.test(p)) {
         posted.push(`GET statement ${url.searchParams.get("month")}`);
         return json({ statement: STATEMENT });
@@ -111,7 +130,7 @@ async function main(): Promise<void> {
       const ctx = await browser.newContext({ viewport: { width: vp.w, height: vp.h } });
       await ctx.addInitScript("globalThis.__name = (f) => f;");
       const page = await ctx.newPage();
-      page.on("dialog", (d: { accept(): Promise<void> }) => { void d.accept(); });
+      page.on("dialog", (d: { type(): string; accept(v?: string): Promise<void> }) => { void (d.type() === "prompt" ? d.accept("Test Person") : d.accept()); });
       await page.route("**://*/**", (route: { request(): { url(): string }; abort(): Promise<void>; continue(): Promise<void> }) =>
         route.request().url().startsWith(base) ? route.continue() : route.abort());
       await page.goto(`${base}/#/dashboard`, { waitUntil: "load", timeout: 30000 });
@@ -125,9 +144,18 @@ async function main(): Promise<void> {
         const rows = [...document.querySelectorAll("#billingInvoices .cred-row")];
         return rows.map((r) => ({ text: (r.textContent || "").replace(/\s+/g, " ").trim(), actions: [...r.querySelectorAll("[data-inv-action]")].map((b) => b.getAttribute("data-inv-action")) }));
       });
-      check(list.length === 2, `${tag}: both invoices are listed`, JSON.stringify(list));
-      check(list[0]?.actions.join(",") === "print,send,mark-sent,mark-paid,void", `${tag}: a DRAFT offers print, email, mark sent, mark paid, void`, JSON.stringify(list[0]));
-      check(list[1]?.actions.join(",") === "print" && /paid/.test(list[1]?.text || ""), `${tag}: a PAID invoice offers print only`, JSON.stringify(list[1]));
+      check(list.length === 3, `${tag}: every invoice is listed`, JSON.stringify(list));
+      check(list[0]?.actions.join(",") === "print,send,mark-sent,add-line,quickbooks,mark-paid,void", `${tag}: a DRAFT offers print, email, mark sent, add onboarding line, send to QuickBooks, mark paid, void`, JSON.stringify(list[0]));
+      check(list[1]?.actions.join(",") === "print,send,mark-paid,void" && /QuickBooks #501: partly paid <b>x<\/b>/.test(list[1]?.text || ""),
+        `${tag}: an invoice already in QuickBooks shows its number and status as text and is not offered again`, JSON.stringify(list[1]));
+      check(list[2]?.actions.join(",") === "print" && /paid/.test(list[2]?.text || ""), `${tag}: a PAID invoice offers print only`, JSON.stringify(list[2]));
+      const qb = await page.evaluate(() => (document.getElementById("quickbooksBlock")?.textContent || "").replace(/\s+/g, " "));
+      check(/9130-TEST/.test(qb) && /Pass-through fees → Permit & portal fee \(pass-through\)/.test(qb) && /NOT CHOSEN/.test(qb) && !/token/i.test(qb),
+        `${tag}: the QuickBooks block shows the company and the chosen Items, flags the unchosen one, and no token`, qb);
+      check(await page.evaluate(() => !document.querySelector("#billingInvoices b")), `${tag}: a QuickBooks status carrying markup renders as text`);
+      await page.evaluate(() => (document.querySelector('[data-inv-action="quickbooks"]') as HTMLButtonElement).click());
+      await page.waitForFunction(() => /In QuickBooks as invoice #502/.test(document.getElementById("billingStatus")?.textContent || ""), null, { timeout: 15000 });
+      check(posted.some((x) => x === 'POST quickbooks inv-a {"decidedBy":"Test Person"}'), `${tag}: Send to QuickBooks POSTs the named person, for that invoice only`, posted.join(" | "));
 
       check(await page.evaluate(() => (document.getElementById("billingCreateBtn") as HTMLButtonElement).disabled), `${tag}: Create invoice is disabled before a statement is shown`);
       await page.evaluate(() => (document.getElementById("billingPreviewBtn") as HTMLButtonElement).click());
