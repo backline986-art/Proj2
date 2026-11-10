@@ -108,6 +108,7 @@ function writeCache(db: AppDb, projectId: string, findingId: string, sig: string
 // hardcoded set like this otherwise rots silently the first time a rule is renamed.
 export const MEASURED_FINDING_IDS: ReadonlySet<string> = new Set([
   "city.elec.dc-size-mismatch",     // module count x wattage vs declared DC size
+  "city.elec.ac-size-mismatch",     // inverter count x output vs declared AC size
   "city.elec.interconnection-ambiguous",    // the design names two sides; a photo cannot pick
   "city.elec.interconnection-unclassified", // seeing an SLD does not classify the method
   // Design criteria compared for VALUE (designCriteria.ts): two documents disagree, a stated

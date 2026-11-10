@@ -129,6 +129,19 @@ export const utilityStorageModesSchema = z.object({
   decidedBy: z.string().max(120).optional(),
 }).strict();
 
+/** PUT /api/projects/:id/utility-filing/application-requirements (review-audit draft 03): a named person
+ *  records what this project's utility's own application asks for, each item with the page and its words. */
+export const utilityApplicationRequirementsSchema = z.object({
+  requirements: z.array(z.object({
+    key: z.enum(["account_verification", "meter_photo", "inverter_settings", "inverter_listing_ul1741sb", "one_line", "site_plan", "ac_disconnect", "storage_mode_declaration", "owner_signature"]),
+    whenMissing: z.enum(["blocker", "warning"]),
+    sourceName: z.string().trim().max(200).optional(),
+    sourceUrl: personFactUrl,
+    quote: z.string().trim().min(8).max(600),
+  }).strict()).min(1).max(12),
+  decidedBy: z.string().max(120).optional(),
+}).strict();
+
 export const codeProfileVerifySchema = z.object({
   state: z.string().min(2).max(40),
   ahj: z.string().max(160).optional().default(""),
