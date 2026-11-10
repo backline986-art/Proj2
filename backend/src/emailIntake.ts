@@ -360,7 +360,8 @@ async function sortAttachments(attachments: IntakeJobFile[]): Promise<WorkingFil
 export const PARSER_PROJECT_FIELDS: ReadonlySet<string> = new Set([
   "owner", "street", "city", "state", "zip", "ahj", "utility", "account", "meter", "dcKw", "acKw", "interco",
   "moduleMake", "moduleModel", "moduleWattage", "moduleQty", "invMake", "invModel", "invQty", "batteryMake",
-  "batteryModel", "batteryQty", "roofMaterial", "mounting", "rackingSystem", "roofRafterSpan", "invOutputW",
+  "batteryModel", "batteryQty", "batteryCapacityKwh", "batteryOutputKw", "essInverterModel", "essBreaker", "batteryMode",
+  "newModulesOnSchedule", "newModulesOnSld", "roofMaterial", "mounting", "rackingSystem", "roofRafterSpan", "invOutputW",
   "pvMicroMake", "pvMicroModel", "pvMicroQty", "pvMicroOutputW", "inverterSettings", "moduleVoc",
   "moduleIsc", "moduleVocTempCoeff", "pvMicroMaxDcInputV", "modulesPerString", "siteLowTempC",
   "dwellingUnits", "constructionCategory", "invMaxDcInputV", "siteHighTempC", "acConductor",
