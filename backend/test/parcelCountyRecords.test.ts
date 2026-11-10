@@ -5,8 +5,9 @@
 // county's own GIS page. A record that is quietly dropped at load (a non-government service host, a
 // missing field) or quietly downgraded (claims "official" or "verified" without meeting the bar) would
 // make the parcel check say "not checked" or warn where its author meant it to block — with nobody told.
-// This pins: every shipped record loads, at exactly the tier it claims, on a government host, never on
-// an ArcGIS Online host (Helm's ruling 2026-11-10: those wait on draft 16 B and the owner's word).
+// This pins: every shipped record loads, at exactly the tier it claims, on a government host — or, on
+// an ArcGIS Online host, only as a person-verified record bound to its service root (draft 16 B; the
+// owner's yes 2026-11-10; Helm's conditions, parcelMapPlatform.test.ts).
 //
 // Reads the shipped file only; no database, no network.
 //   npx tsx backend/test/parcelCountyRecords.test.ts
@@ -41,8 +42,10 @@ function recordProblems(records: unknown[]): string[] {
     const claimed = String(o.tier ?? "seeded").trim() || "seeded";
     if (source.tier !== claimed) out.push(`${label}: claims tier "${claimed}" but loads as "${source.tier}"`);
     const host = sourceHostOf(source.queryUrl.replace(/\{[a-zA-Z]+\}/g, "x"));
-    if (!isGovernmentHost(host)) out.push(`${label}: service host ${host} is not a government host`);
-    if (/(^|\.)arcgis\.com$/.test(host)) out.push(`${label}: ArcGIS Online host ${host} (waits on draft 16 B)`);
+    const platform = source.hostedOn === "map_platform";
+    if (!isGovernmentHost(host) && !platform) out.push(`${label}: service host ${host} is not a government host`);
+    if (/(^|\.)arcgis\.com$/.test(host) && !(platform && source.tier === "verified" && source.verifiedBy && source.verifiedService))
+      out.push(`${label}: ArcGIS Online host ${host} without a person-verified service root`);
     if (!/^\d{4}-\d{2}-\d{2}/.test(source.fetchedAt)) out.push(`${label}: no fetchedAt`);
     if (!source.sourceUrl || !source.quote) out.push(`${label}: no source page or quote`);
     if (keys.has(source.key)) out.push(`${label}: a second record for ${source.key}`);
@@ -80,6 +83,14 @@ await check("a record claiming verified with no named person is caught", () => {
 await check("a record on ArcGIS Online is caught (dropped at load: not a government host)", () => {
   const p = recordProblems([{ ...GOOD, queryUrl: "https://services1.arcgis.com/abc/ArcGIS/rest/services/Parcels/FeatureServer/0/query?where={street}" }]);
   assert.match(p.join(" | "), /dropped at load — .*services1\.arcgis\.com is not a government host/);
+});
+await check("a person-verified ArcGIS Online record bound to its service root passes (draft 16 B)", () => {
+  const root = "https://services9.arcgis.com/SyntheticOrg0001/arcgis/rest/services/Parcels/FeatureServer";
+  assert.deepEqual(recordProblems([{
+    ...GOOD, tier: "verified", verifiedBy: "Synthetic Reviewer", verifiedService: root,
+    queryUrl: `${root}/0/query?where=SITE_ADDR%3D%27{street}%27&outFields=JURIS&f=json`,
+    pageLinksHost: "examplecounty.maps.arcgis.com", quote: "Parcel maps: examplecounty.maps.arcgis.com",
+  }]), []);
 });
 await check("two records for one county, or one with no source, are caught", () => {
   assert.match(recordProblems([GOOD, GOOD]).join(" | "), /a second record for ID\|example county/);
