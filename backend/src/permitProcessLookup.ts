@@ -41,7 +41,7 @@ import { logger } from "./logger";
 import { feeScheduleProfileKey, saveFeeSchedule } from "./feeSchedules";
 import { stateSurchargeRuleFor } from "./stateFeeRules";
 import { parseBracketRow } from "./pdfTables";
-import { candidateNamedBy, chooseRecordType, classifyDocument, DOCUMENT_URL, staleOrOtherFeeSource, detectPlatform, documentLinks, excerptFor, extractCodeEditions, extractPrerequisites, isAgencyOwnUrl, isOfficialAgencyHost, linksAnotherModule, platformOfUrl, readPortalCatalog, registrableDomain, resolvePortalFromPages, solarRecordTypeCandidates, tenantContradictsAgency, wordsNameAnotherJurisdiction, type PortalCatalog, type PortalResolution, type RecordTypeCandidate } from "./permitPlatformCatalog";
+import { candidateNamedBy, chooseRecordType, classifyDocument, DOCUMENT_URL, staleOrOtherFeeSource, detectPlatform, documentLinks, excerptFor, extractCodeEditions, extractPrerequisites, isAgencyOwnDomain, isAgencyOwnUrl, isOfficialAgencyHost, linksAnotherModule, platformOfUrl, readPortalCatalog, registrableDomain, resolvePortalFromPages, solarRecordTypeCandidates, tenantContradictsAgency, wordsNameAnotherJurisdiction, type PortalCatalog, type PortalResolution, type RecordTypeCandidate } from "./permitPlatformCatalog";
 import { createPageReader, feeLinePrintedTogether, isRefusal, quoteOnPage, type PageReader, type ReadPage } from "./agencyPageReader";
 import { documentFetchDisabled } from "./documentFetch";
 import { classifyPrerequisites } from "./permitProcessPrerequisites";
@@ -192,6 +192,11 @@ export function acceptCited<T>(
   return { value, sourceUrl, quote, origin: "lookup" };
 }
 
+// A CALL TO APPLY on the page that links the (already attested) portal: "Apply for a Permit", "Building
+// Permits Apply Now", "Here you will be able to submit permits" (bot-vs-research 2026-11-10: three city
+// portals were refused for these words). The host must still be attested and rule 5 still holds; this
+// only answers "do the words say this link is where you apply".
+const APPLY_CALL = /\bapply (?:now|here|for (?:a |an |your )?(?:[a-z]+ )?permits?)\b|\bsubmit (?:your |a |an )?(?:[a-z]+ )?(?:permits?|permit applications?|plans)\b/i;
 // The DISTINCTIVE words of a name must be in the quote ("Marion" of "Marion County Public Works –
 // Building Inspection Division"); the generic organisational words need not be.
 const supportsName = (value: string, quote: string) => {
@@ -221,6 +226,24 @@ export function namesOnlyAsPrerequisite(value: string, quote: string): boolean {
   });
 }
 const supportsAgency = (value: string, quote: string) => supportsName(value, quote) && !namesOnlyAsPrerequisite(value, quote);
+// THE AGENCY'S OWN PAGE STATES IT (bot-vs-research 2026-11-10): a city's page that says "Trade permits,
+// such as electrical, are obtained separately" or "The Building Safety Division utilizes an online permit
+// portal" does not repeat the city's name; the page's own host carries it. Kept only when the source
+// host is the value's OWN domain (isAgencyOwnDomain, every TLD, never merely .gov), the words are about
+// obtaining / applying for / submitting a permit there, they name no other jurisdiction and no state
+// body (unless the value is one), and every distinctive word the host does not carry is in the words.
+const ISSUED_HERE = /\bpermits?\b[^.;]{0,80}?\b(?:obtain\w*|issu\w*|appl(?:y|ied|ies|ication)|submi\w*|purchas\w*|portal)\b|\b(?:obtain\w*|issu\w*|apply|submi\w*|purchas\w*)\b[^.;]{0,80}?\bpermits?\b/i;
+export function agencyStatedOnOwnPage(value: string, quote: string, sourceUrl: string, state?: string): boolean {
+  if (supportsAgency(value, quote)) return true;
+  const host = portalHostOf(sourceUrl);
+  if (!host || !isAgencyOwnDomain(host, [value], state)) return false;
+  const q = str(quote);
+  if (!ISSUED_HERE.test(q) || namesOnlyAsPrerequisite(value, q)) return false;
+  if (/\bstate\b/i.test(q) && !/\bstate\b/i.test(value)) return false;
+  if (wordsNameAnotherJurisdiction(q, [value])) return false;
+  const label = host.replace(/^www\./, "").replace(/[^a-z0-9]/g, "");
+  return words(value).filter((x) => !GENERIC_ORG_WORDS.has(x) && !label.includes(x)).every((x) => q.toLowerCase().includes(x));
+}
 const supportsPrerequisite = (value: string, quote: string) =>
   (PREREQ_MARKER.test(quote) || ZONING_SIGNOFF.test(quote) || /\b(?:approv|sign[- ]?off|clearance)/i.test(quote)) && words(value).some((w) => quote.toLowerCase().includes(w));
 
@@ -366,7 +389,7 @@ export function acceptPortalForPermit(raw: RawFact, source: PortalCandidateSourc
       if (!h) return false;
       const selfCited = portalHostOf(str(raw?.sourceUrl)) === h
         && platformPages.some((u) => portalHostOf(u) === h && (!isPathTenantedHost(h) || portalTenantKey(u) === portalTenantKey(v)));
-      return selfCited || q.toLowerCase().includes(h) || /portal|apply online|e-?permitting|citizen access|self[- ]?service|online permit|accela/i.test(q);
+      return selfCited || q.toLowerCase().includes(h) || /portal|apply online|e-?permitting|citizen access|self[- ]?service|online permit|accela/i.test(q) || APPLY_CALL.test(q);
     },
   });
   if (!portal.value) {
@@ -674,7 +697,8 @@ export function parseProcessPart(text: string, seenUrls: string[], stopReason: s
     const why = truncated ? "the lookup's answer was cut off before it finished — not kept" : "the lookup returned no readable answer";
     return { issuingAgency: nf(why), permitStructure: nf(why), permits: [], prerequisites: [], problem: why };
   }
-  const issuingAgency = acceptCited<string>(json.issuingAgency as RawFact, { seenUrls, what: "issuing agency", coerce: agencyName, supports: supportsAgency });
+  const agencySupports = (raw: unknown) => (v: string, q: string) => agencyStatedOnOwnPage(v, q, str((raw as RawFact)?.sourceUrl), where?.state);
+  const issuingAgency = acceptCited<string>(json.issuingAgency as RawFact, { seenUrls, what: "issuing agency", coerce: agencyName, supports: agencySupports(json.issuingAgency) });
   const permitStructure = acceptCited<"separate" | "combo">(json.permitStructure as RawFact, {
     seenUrls, what: "permit structure", coerce: (v) => (/separ/i.test(str(v)) ? "separate" : /combo|combin/i.test(str(v)) ? "combo" : null), supports: supportsStructure,
   });
@@ -685,7 +709,7 @@ export function parseProcessPart(text: string, seenUrls: string[], stopReason: s
     permits.push({
       discipline,
       label: str(p.label) || discipline,
-      issuingAgency: acceptCited<string>(p.issuingAgency as RawFact, { seenUrls, what: "issuing agency", coerce: agencyName, supports: supportsAgency }),
+      issuingAgency: acceptCited<string>(p.issuingAgency as RawFact, { seenUrls, what: "issuing agency", coerce: agencyName, supports: agencySupports(p.issuingAgency) }),
       portalUrl: acceptPortal(p.portalUrl as RawFact, seenUrls, platformPages, entity),
       recordType: acceptRecordType(p.recordType as RawFact, seenUrls),
       ...channelFields(p, seenUrls),
@@ -1031,15 +1055,19 @@ export async function readAgencyEvidence(reader: PageReader, input: {
   // cites most, preferring one that carries the AHJ's own name (a state agency's page is read only
   // when it IS the agency's domain — a state portal link must not stand in for a city's).
   let agencyDomain = input.agencyCitation && official(input.agencyCitation) ? domOf(input.agencyCitation) : "";
+  const own = names.flatMap((n) => n.toLowerCase().split(/[^a-z]+/)).filter((w) => w.length >= 4 && !["city", "county", "town", "village", "unincorporated"].includes(w));
   if (!agencyDomain) {
     const counts = new Map<string, number>();
-    const own = names.flatMap((n) => n.toLowerCase().split(/[^a-z]+/)).filter((w) => w.length >= 4 && !["city", "county", "town", "village", "unincorporated"].includes(w));
     for (const u of input.citedUrls.filter(official)) {
       const d = domOf(u);
       counts.set(d, (counts.get(d) ?? 0) + 1 + (own.some((w) => d.includes(w)) ? 10 : 0));
     }
     agencyDomain = [...counts.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] ?? "";
   }
+  // NOTHING CITED (bot-vs-research round 2, a city whose whole site refuses automated reads): the
+  // search's own results on the agency's official domain that carries its name are read, so a refusal
+  // is recorded for a person's browser (needsPersonRead) instead of the lookup silently finding nothing.
+  if (!agencyDomain) agencyDomain = input.resultUrls.filter(official).map(domOf).find((d) => own.some((w) => d.includes(w))) ?? "";
   const onAgency = (u: string) => Boolean(agencyDomain) && domOf(u) === agencyDomain && official(u);
   const pageUrls: string[] = [];
   const addPage = (u: string) => { if (pageUrls.length < MAX_AGENCY_PAGES && !pageUrls.some((x) => pageKey(x) === pageKey(u))) pageUrls.push(u); };

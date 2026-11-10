@@ -228,7 +228,14 @@ async function parseFetched(url: string, finalUrl: string, status: number, conte
 export async function pdfText(bytes: Uint8Array): Promise<string> {
   const { extractPdfRows } = await import("./pdfTables");
   const rows = await extractPdfRows(bytes, { maxPages: 150 });
-  return rows.map((r) => r.cells.join("  ")).join("\n");
+  return rows.map((r) => r.cells.map(joinSplitAmounts).join("  ")).join("\n");
+}
+/** A DOLLAR AMOUNT SPLIT BY A GLYPH GAP inside one PDF cell ("$5 78.00", "$1,033 .00": the PDF places
+ *  the digits as separate runs) is one amount: rejoined only when the pieces end in cents, inside one
+ *  cell (cells are joined by two spaces, so two columns never merge). Found by the bot-vs-research
+ *  comparison 2026-11-10: a city's fee table read "$5 78.00" and its TOTAL "$1,033 .00". */
+export function joinSplitAmounts(cell: string): string {
+  return String(cell ?? "").replace(/(\$\s?\d[\d,]*) (?=[\d,]*\.\d{2}\b)/g, "$1");
 }
 
 /** Outlook safelinks wrap the real target in ?url= — the page's author meant that target. */
