@@ -56,6 +56,7 @@ import {
   isCodeFamily, isFamilyAdoptionModel, locallyAdoptedFamilies, modelBaseOf, upcomingDue,
 } from "./codeFamilies";
 import { isAutoSeedDisabled } from "./portalChannel";
+import { firePathwayPolicyOf } from "../../shared/src/firePathwayPolicy";
 import { id as newId } from "./ids";
 import { logger } from "./logger";
 import { resolvePermitPath } from "./permitPath";
@@ -221,7 +222,14 @@ function mapRow(row: Row): JurisdictionCodeProfile {
     verifiedBy: text(row.verified_by) || undefined,
     updatedAt: text(row.updated_at),
     ...optionalLayerFields(payload),
+    // The alternative roof-access policy (review-audit draft 08), shape-checked; absent when none.
+    ...firePathwayPolicyField((payload as { firePathwayPolicy?: unknown }).firePathwayPolicy),
   };
+}
+
+function firePathwayPolicyField(raw: unknown): Pick<JurisdictionCodeProfile, "firePathwayPolicy"> {
+  const firePathwayPolicy = firePathwayPolicyOf(raw);
+  return firePathwayPolicy ? { firePathwayPolicy } : {};
 }
 
 function optionalLayerFields(payload: unknown): Pick<JurisdictionCodeProfile, "adoptionModel" | "upcoming" | "researchProvenance" | "designCriteriaLookup"> {
@@ -592,6 +600,13 @@ export function getCodeProfile(db: AppDb, input: { state?: string; ahj?: string 
   fieldSources["adoptedCodes.ahj"] = sourceOf(exact);
   const setbackLayer = exact.fireSetbacks.length ? exact : base.fireSetbacks.length ? base : null;
   if (setbackLayer) fieldSources.fireSetbacks = sourceOf(setbackLayer);
+  // The alternative roof-access policy (draft 08) likewise, whole from one layer: the AHJ's own, else the
+  // state's. Its row answers whether it is verified; an official read of it (#683) answers "official".
+  const policyLayer = exact.firePathwayPolicy ? exact : base.firePathwayPolicy ? base : null;
+  if (policyLayer) {
+    const official = policyLayer.confidence !== "verified" ? officialCitationFor(policyLayer.citations, "firePathwayPolicy") : null;
+    fieldSources.firePathwayPolicy = official ? { ...sourceOf(policyLayer), confidence: "official", officialSource: official } : sourceOf(policyLayer);
+  }
   // Amendments are concatenated state-then-AHJ: each records its own row, so the amendment check
   // (amendmentChecks.ts, #145) blocks only on an amendment a person verified.
   // Keyed by the amendment itself (amendmentSourceKey), not its position: the AHJ's row wins a tie.
@@ -609,6 +624,7 @@ export function getCodeProfile(db: AppDb, input: { state?: string; ahj?: string 
     prescriptive: { ...base.prescriptive, ...exact.prescriptive },
     fireSetbacks: exact.fireSetbacks.length ? exact.fireSetbacks : base.fireSetbacks,
     citations: [...base.citations, ...exact.citations],
+    ...(policyLayer?.firePathwayPolicy ? { firePathwayPolicy: policyLayer.firePathwayPolicy } : {}),
   };
 }
 
@@ -674,6 +690,12 @@ function upsert(db: AppDb, profile: JurisdictionCodeProfile, opts: { confidence:
   // through the PUT route edits codes/criteria and says nothing about the adoption model).
   const adoptionModel = adoptionModelOf(profile.adoptionModel) ?? adoptionModelOf(priorPayload.adoptionModel);
   const upcoming = upcomingOf(profile.upcoming) ?? upcomingOf(priorPayload.upcoming);
+  // The alternative roof-access policy (review-audit draft 08). A SEEDED re-save that does not carry one
+  // keeps the row's; a VERIFIED save stores exactly what the person sent (rule 3: a policy they were not
+  // shown is never locked as person-verified under their name).
+  const firePathwayPolicy = opts.confidence === "verified"
+    ? firePathwayPolicyOf(profile.firePathwayPolicy)
+    : firePathwayPolicyOf(profile.firePathwayPolicy) ?? firePathwayPolicyOf(priorPayload.firePathwayPolicy);
   // The last lookup's checklist rides every re-save that does not carry its own.
   const designCriteriaLookup = designCriteriaLookupOf(profile.designCriteriaLookup) ?? designCriteriaLookupOf(priorPayload.designCriteriaLookup);
   const payload = JSON.stringify({
@@ -688,6 +710,7 @@ function upsert(db: AppDb, profile: JurisdictionCodeProfile, opts: { confidence:
     ...(adoptionModel ? { adoptionModel } : {}),
     ...(upcoming && upcoming.length ? { upcoming } : {}),
     ...(designCriteriaLookup ? { designCriteriaLookup } : {}),
+    ...(firePathwayPolicy ? { firePathwayPolicy } : {}),
     ...(researchProvenance && opts.confidence === "seeded" ? { researchProvenance } : {}),
   });
   if (existing) {
