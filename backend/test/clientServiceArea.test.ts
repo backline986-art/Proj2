@@ -241,6 +241,15 @@ await check("(f) the coverage report lists the area's jurisdictions after the jo
   assert.match(renderCoverageReport(report), /ZZ \| City of Larkspur Hollow \| \(no utility\)\s+\(service area: no job here yet\)/);
 });
 
+await check("(c2) the go-live check's destinations line says how many waiting doors are only in a service area", async () => {
+  const G = await import("../src/goLiveCheck");
+  const c = queue().counts;
+  assert.ok(c.serviceArea > 0, "the fixture should have a service-area authority waiting here");
+  const r = await G.goLiveReport({}, db, DEFAULT_ORG_ID, { browserExecutable: path.join(tmpDir, "chrome"), destinationCounts: () => c });
+  const l = r.lines.find((x) => x.id === "destinations");
+  assert.ok(l && l.meaning.includes(`${c.serviceArea} of them are only in a client's service area, with no job yet.`), l?.meaning);
+});
+
 await check("(g) the area stays client data: only its readers read it, no model door imports it, nothing shared is written from it", () => {
   const files: string[] = [];
   const walk = (dir: string): void => {

@@ -419,7 +419,7 @@ export interface GoLiveDbOptions {
   /** The Destinations to confirm queue's counts for an org (filingDestinationProposals.filingDestinationQueue,
    *  handed in by the caller: only server.ts, of the server-side modules, may import the proposals
    *  module — filingDestinationProposals.test). Unset: the line says it was not checked. */
-  destinationCounts?: (orgId: string | null) => { authorities: number; oneClick: number };
+  destinationCounts?: (orgId: string | null) => { authorities: number; oneClick: number; serviceArea?: number };
 }
 
 const scoped = (orgId: string | null, col = "org_id"): { clause: string; params: string[] } =>
@@ -483,8 +483,8 @@ async function dataLines(env: Env, db: AppDb | null, orgId: string | null, opts:
         id: "destinations", area: "data", label: "Filing destinations to confirm",
         state: n ? "warn" : "ok",
         meaning: n
-          ? `${n} authority(ies) an open job files with have no person-verified destination, so nothing files there automatically (${c.oneClick} can be confirmed in one click).`
-          : "Every authority an open job files with has a person-verified destination.",
+          ? `${n} authority(ies) an open job files with have no person-verified destination, so nothing files there automatically (${c.oneClick} can be confirmed in one click).${c.serviceArea ? ` ${c.serviceArea} of them are only in a client's service area, with no job yet.` : ""}`
+          : "Every authority an open job or a client's service area names has a person-verified destination.",
         settings: [],
         ...(n ? { view: "destinations" as const } : {}),
       });
