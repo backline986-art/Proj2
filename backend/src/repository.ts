@@ -68,6 +68,7 @@ import type {
   SubmittalTrack,
   SubmittalTrackType,
   StatePermitRule,
+  UtilityRequirementList,
 } from "../../shared/src/types";
 import { correctionFilingStamp, correctionOverdueSql, touchProjectMetrics, type CorrectionFilingInput } from "./kpi";
 import fs from "node:fs";
@@ -175,6 +176,7 @@ import {
 } from "./permitMonitor";
 import { linkLookupRanRecently, signedInOutcome, statusReadGap, type ReadGapFacts } from "./statusLinkGap";
 import { evidenceForTopic, evidenceLines, type EvidenceTopic } from "./projectEvidence";
+import { resolveUtilityRequirements } from "./utilityRequirements";
 import { customerBillOnFile, runQcForProject, WAITING_ON_BILL_ISSUE_TYPE, type QcRunOptions } from "./qc";
 import { resolveJobScope } from "./jobScope";
 import { loadStoredTemplates, formAllowedForPath } from "./ahjForms";
@@ -265,7 +267,11 @@ export function buildReviewerReportFor(db: AppDb, project: ProjectRecord): Revie
   try { stateRules = statePermitRulesFor(db, project.state, "structural"); } catch { stateRules = []; }
   // What the job installs (#673): a person's scope included, so the gate and QC read one answer.
   const jobScope = resolveJobScope(db, project.id, project.parserSnapshot).scope;
-  return buildReviewerReport(project, { codeContext, codeProfileRow, uploadedDocTypes, documentTexts: designDocumentTexts(db, project.id), pvWorksheet: filedPvWorksheetInput(db, project), structuralCertification, stateRules, jobScope });
+  // What the job's utility's own application asks for (review-audit draft 03): the shipped seed overlaid
+  // by the utility's filing row (official reads, a person's items). A failed read falls back to the seed.
+  let utilityRequirements: UtilityRequirementList | null;
+  try { utilityRequirements = resolveUtilityRequirements(db, project.state, project.utility); } catch { utilityRequirements = resolveUtilityRequirements(null, project.state, project.utility); }
+  return buildReviewerReport(project, { codeContext, codeProfileRow, uploadedDocTypes, documentTexts: designDocumentTexts(db, project.id), pvWorksheet: filedPvWorksheetInput(db, project), structuralCertification, stateRules, jobScope, utilityRequirements });
 }
 
 // WHAT HOLDS THIS FILING: ONE ANSWER (#214). The text report with the cached vision verdicts folded
