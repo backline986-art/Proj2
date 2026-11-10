@@ -5377,6 +5377,16 @@ export interface PermitFeeAnswer {
   basis: string;
   lines: Array<{ label: string; amountUsd: number }>;
 }
+/** HOW a permit is filed, as the AHJ's own page says it (lookup-permit-filing-channel, 2026-11-10).
+ *  `value`: the portal URL (portal), the address (email), the office ("City Hall", in_person), the
+ *  mailing address or office (mail), or the other permit it rides in (with_other_permit). A channel is
+ *  NEVER a door by itself: an email lands only as a proposal a person confirms
+ *  (filingDestinationProposals), in_person / mail only as words on the track ("file at <office>"). */
+export type PermitFilingChannelKind = "portal" | "email" | "in_person" | "mail" | "with_other_permit";
+export interface PermitFilingChannel {
+  kind: PermitFilingChannelKind;
+  value: string;
+}
 export interface PermitProcessPermitAnswer {
   discipline: PermitProcessDiscipline;
   /** The permit as the AHJ names it ("Residential Structural"). */
@@ -5392,6 +5402,13 @@ export interface PermitProcessPermitAnswer {
   recordTypeCandidates?: Array<{ label: string; condition: string; sourceUrl: string; quote: string }>;
   /** The portal's platform as its own page shows it ("accela" / "energov" / "other"). */
   portalPlatform?: string;
+  /** HOW this permit is filed, cited (an email address in the quote, "in person at City Hall"…).
+   *  Absent on older rows (= unknown, the portal answer stands). A cited channel that is not "portal"
+   *  takes no portal from the vendor-link resolver and launches nothing from the lookup. */
+  channel?: CitedFact<PermitFilingChannel>;
+  /** Other ways the same page says the permit may be filed ("you may also fax, email, mail or bring
+   *  it in"), each cited; never the primary. */
+  alternateChannels?: Array<CitedFact<PermitFilingChannel>>;
 }
 export interface PermitProcessLookup {
   profileKey: string;

@@ -29,10 +29,10 @@
 // never overwritten), and its fees land through feeSchedules.saveFeeSchedule — including the
 // DELEGATION (City of Jefferson's fees are collected by Marion County) the fee researcher had read
 // and then discarded.
-import type { CitedFact, LLMProvider, PermitFeeAnswer, PermitProcessDiscipline, PermitProcessLookup, PermitProcessPermitAnswer, WebLookupResult } from "../../shared/src/types";
+import type { CitedFact, LLMProvider, PermitFeeAnswer, PermitFilingChannel, PermitFilingChannelKind, PermitProcessDiscipline, PermitProcessLookup, PermitProcessPermitAnswer, WebLookupResult } from "../../shared/src/types";
 import type { AppDb } from "./db";
 import { hostFitsTrackAndEntity, isInformationalPageUrl, isPathTenantedHost, isPermitPlatformUrl, isVendorDomain, isVendorRootOrMarketing, portalHostOf, portalTenantKey, portalTenantOf, salesforceTenantKind, trackSafeUrl, type PortalEntity } from "./portalChannel";
-import { ahjNameCore, getPermitProcessLookup, normalizeAhjName, savePermitProcessLookup, servingIssuerNamed, stateRulesFor, trackIssuer, unknownStateAuthorityName, ZONING_SIGNOFF } from "./permitProcess";
+import { ahjNameCore, channelPhrase, getPermitProcessLookup, normalizeAhjName, savePermitProcessLookup, servingIssuerNamed, stateRulesFor, trackIssuer, unknownStateAuthorityName, ZONING_SIGNOFF } from "./permitProcess";
 import { CONNECTOR_WORDS, DEPARTMENT_WORDS, GENERIC_ORG_WORDS, agencyNameKey, sameAgencyName, stripDepartmentPhrase } from "./agencyName";
 // Re-exported: the agency-name identity helpers moved to agencyName.ts (pure, no lookup stack) so
 // permitProcess can ask the same question without importing this module back (a cycle).
@@ -57,6 +57,8 @@ Find, with web search (search several times with different queries: the city, it
    - portalUrl: the ONLINE PORTAL where that permit is APPLIED FOR (a citizen-access / permitting-system entry page). NEVER an information, help, FAQ or guide page, and NEVER a PDF.
    - recordType: the RECORD TYPE selected when applying ONLINE on that portal (e.g. Accela's "Residential Structural"), as the portal or a public record on it shows it. A paper application FORM's title is NOT a record type — if you only find form titles, set recordType to null.
    - issuingAgency: the agency that issues THIS permit, when it differs by permit.
+   - channel: HOW this permit is filed, as the page says it: "portal" (applied for online), "email" (value: the address the page gives), "in_person" (value: the office or counter, e.g. "City Hall"), "mail" (value: the address or office, if given), or "with_other_permit" (value: the permit it is filed with, e.g. "Building"). A page that says the permit is bought or brought in at an office is "in_person" even when the city also has a portal for OTHER permits.
+   - alternateChannels: other ways the SAME page says this permit may be filed ("you may also fax, email, mail or bring it in"), each cited the same way; [] when none.
 
 Where answers may come from: the jurisdiction's own site; its county's building-inspection site; the state building agency; the permitting portal's public pages and public permit records.
 
@@ -73,7 +75,9 @@ Return ONLY JSON (no prose):
  "permits": [{"discipline": "structural"|"electrical"|"combo", "label": "<permit name>",
    "issuingAgency": {"value": ..., "sourceUrl": "", "quote": ""},
    "portalUrl": {"value": "<url>"|null, "sourceUrl": "", "quote": "", "notFound": ""},
-   "recordType": {"value": "<type>"|null, "sourceUrl": "", "quote": "", "notFound": ""}}]}`;
+   "recordType": {"value": "<type>"|null, "sourceUrl": "", "quote": "", "notFound": ""},
+   "channel": {"value": {"kind": "portal"|"email"|"in_person"|"mail"|"with_other_permit", "value": "<url | address | office | permit>"}|null, "sourceUrl": "", "quote": "", "notFound": ""},
+   "alternateChannels": [{"value": {"kind": "...", "value": "..."}, "sourceUrl": "", "quote": ""}]}]}`;
 
 /** PROCESS_LOOKUP_SYSTEM, plus — where a state rule names a state issuer (New Mexico CID, issue #44)
  *  — whether THIS jurisdiction runs its own building program or is served by that agency, and where
@@ -130,6 +134,8 @@ Start from the agency's own building/permit pages (they usually say "apply onlin
 For each permit named in the request:
 - portalUrl: the ONLINE PORTAL's entry page where that permit is APPLIED FOR (a citizen-access / self-service / permitting-system page). NEVER an information, help, FAQ or guide page, NEVER a PDF, and NEVER a utility's interconnection / net-metering portal.
 - recordType: the record / permit type selected when applying ONLINE on that portal, in the portal's or the agency's own words (e.g. "Residential Electrical - Solar"). A paper application FORM's title is NOT a record type — if you only find form titles, set it to null.
+- channel: HOW the agency's page says this permit is filed — "portal", "email" (value: the address), "in_person" (value: the office), "mail", or "with_other_permit" (value: the permit it rides in). When the page says it is emailed or bought / brought in at an office, say so here and set portalUrl to null: a link on that page to an inspection scheduler, a payment page or another permit's portal is NOT this permit's portal.
+- alternateChannels: other ways the same page lists ("may also be faxed, emailed, mailed or brought in"), each cited; [] when none.
 
 EVERY value carries "sourceUrl" (a page your search returned or you opened) and "quote" (the exact words on that page that state it, under 250 characters: for a portal, the words naming or linking it; for a record type, the words naming it). If no page states it, "value": null with "notFound". Never answer from memory. Never guess.
 
@@ -138,7 +144,9 @@ prerequisites: only a step at another office that must happen BEFORE filing or i
 Return ONLY JSON:
 {"permits": [{"discipline": "structural"|"electrical"|"combo",
   "portalUrl": {"value": "<url>"|null, "sourceUrl": "", "quote": "", "notFound": ""},
-  "recordType": {"value": "<type>"|null, "sourceUrl": "", "quote": "", "notFound": ""}}],
+  "recordType": {"value": "<type>"|null, "sourceUrl": "", "quote": "", "notFound": ""},
+  "channel": {"value": {"kind": "portal"|"email"|"in_person"|"mail"|"with_other_permit", "value": "<url | address | office | permit>"}|null, "sourceUrl": "", "quote": "", "notFound": ""},
+  "alternateChannels": [{"value": {"kind": "...", "value": "..."}, "sourceUrl": "", "quote": ""}]}],
  "prerequisites": [{"value": "<a step at another office>", "sourceUrl": "", "quote": ""}]}`;
 
 type RawFact = { value?: unknown; sourceUrl?: unknown; quote?: unknown; notFound?: unknown } | null | undefined;
@@ -427,6 +435,95 @@ export function acceptRecordType(raw: RawFact, seenUrls: string[]): CitedFact<st
   if (rt.value && FORM_TITLE.test(rt.value)) return { ...rt, value: null, notFound: `"${rt.value}" is a form's title, not an online record type — not kept` };
   return rt;
 }
+// ── HOW A PERMIT IS FILED (lookup-permit-filing-channel, 2026-11-10) ─────────────────────────────
+// The lookup used to have one slot for where a permit is filed: a portal URL. A city that takes
+// permits by EMAIL or at the COUNTER had nowhere to land, and the vendor-link resolver filled the hole
+// with whatever vendor link its page carried (an inspection scheduler; the city portal for a permit
+// the same page says is bought at City Hall). The channel is a cited answer like every other: kept
+// only when the quote itself states it. It is never a door: an email address becomes a pre-filled
+// proposal a person confirms (filingDestinationProposals), in person / by mail only words on the card.
+const EMAIL_ADDRESS = /[A-Z0-9._%+-]+@[A-Z0-9-]+(?:\.[A-Z0-9-]+)*\.[A-Z]{2,}/i;
+/** The quote says the permit is filed in person: "in person", "at the counter", "walk-in", or a
+ *  verb of handing over / buying followed by WHERE ("purchased separately at City Hall", "bring the
+ *  application into the Building Department"). "Available at <office>" alone is not one. */
+const IN_PERSON_WORDS = /\bin[- ]person\b|\bover[- ]the[- ]counter\b|\b(?:at|to) the (?:\w+ )?(?:counter|front desk|permit desk)\b|\bwalk[- ]ins?\b|\b(?:bring\w*|brought|drop(?:ped|ping)? off|hand[- ]deliver\w*|purchas\w*|bought|buy|pick(?:ed)? up)\b[^.;]{0,60}?\b(?:at|to|into|in to)\b/i;
+/** By (postal) mail. Read with every e-mail word taken out first ("emailed" is not "mailed"). */
+const MAIL_WORDS = /\b(?:by|via|through the) (?:u\.?s\.? |postal )?mail\b|\bmail(?:ed|ing)?\b/i;
+const EMAIL_WORDS = /\be-?mail\w*/gi;
+/** Online: the page speaks of a portal / applying online / uploading. */
+const PORTAL_CHANNEL_WORDS = /\bon-?line\b|\bportal\b|\belectronic\w*|\be-?permit\w*|\bupload\w*/i;
+/** Rides in another permit: "with / included in / part of / covered by the building permit". */
+const WITH_OTHER_PERMIT_WORDS = /\b(?:with|included? (?:with|in)|part of|under|covered by)\b[^.;]{0,40}?\bpermit\b/i;
+
+function channelKind(v: unknown): PermitFilingChannelKind | null {
+  const k = str(v).toLowerCase().replace(/[\s-]+/g, "_");
+  if (k === "portal" || k === "online") return "portal";
+  if (k === "email" || k === "e_mail") return "email";
+  if (k === "in_person" || k === "counter" || k === "walk_in") return "in_person";
+  if (k === "mail" || k === "postal_mail" || k === "by_mail") return "mail";
+  if (k === "with_other_permit" || k === "with_another_permit") return "with_other_permit";
+  return null;
+}
+function coerceChannel(v: unknown): PermitFilingChannel | null {
+  const o = (v && typeof v === "object" ? v : { kind: v }) as Record<string, unknown>;
+  const kind = channelKind(o.kind);
+  if (!kind) return null;
+  const value = str(o.value ?? o.address ?? o.office ?? o.url).slice(0, 200);
+  if (kind === "email") {
+    // An email channel's value is ONE address or nothing ("may also be emailed": no address stated).
+    if (!value) return { kind, value: "" };
+    const m = value.match(EMAIL_ADDRESS);
+    return m && m[0].length === value.replace(/^mailto:/i, "").length ? { kind, value: m[0] } : null;
+  }
+  if (kind === "portal") return { kind, value: /^https?:\/\//i.test(value) ? value : "" };
+  // In person / by mail / with another permit: WHERE (or which permit), or nothing.
+  return { kind, value };
+}
+/** THE ONE TEST of "the quote states this channel". Exported for the tests. */
+export function quoteStatesChannel(c: PermitFilingChannel, quote: string): boolean {
+  const q = str(quote);
+  switch (c.kind) {
+    case "email":
+      return c.value ? q.toLowerCase().includes(c.value.toLowerCase()) : /\be-?mail(?:ed|ing|s)?\b/i.test(q);
+    case "in_person":
+      return IN_PERSON_WORDS.test(q) && (!c.value || supportsName(c.value, q));
+    case "mail":
+      return MAIL_WORDS.test(q.replace(EMAIL_WORDS, " ")) && (!c.value || supportsName(c.value, q));
+    case "portal":
+      return PORTAL_CHANNEL_WORDS.test(q);
+    case "with_other_permit":
+      return Boolean(c.value) && WITH_OTHER_PERMIT_WORDS.test(q) && supportsName(c.value, q);
+  }
+}
+export function acceptChannel(raw: RawFact, seenUrls: string[]): CitedFact<PermitFilingChannel> {
+  return acceptCited<PermitFilingChannel>(raw, { seenUrls, what: "filing channel", coerce: coerceChannel, supports: quoteStatesChannel });
+}
+/** Other ways the page lists ("faxing, emailing, mailing or bringing it in"): each cited, one per
+ *  kind, never the primary's kind. */
+export function acceptAlternateChannels(raw: unknown, seenUrls: string[], primary: CitedFact<PermitFilingChannel> | null): CitedFact<PermitFilingChannel>[] {
+  const out: CitedFact<PermitFilingChannel>[] = [];
+  for (const r of (Array.isArray(raw) ? raw : []).slice(0, 5)) {
+    const c = acceptChannel(r as RawFact, seenUrls);
+    if (!c.value || c.value.kind === primary?.value?.kind || out.some((x) => x.value?.kind === c.value!.kind)) continue;
+    out.push(c);
+  }
+  return out;
+}
+/** A permit whose CITED channel is something other than a portal (email, in person, mail, with
+ *  another permit): the vendor-link resolver gives it no portal and the lookup launches nothing. */
+export function citedNonPortalChannel(p: Pick<PermitProcessPermitAnswer, "channel"> | null | undefined): PermitFilingChannel | null {
+  const c = p?.channel?.value;
+  return c && c.kind !== "portal" ? c : null;
+}
+/** The channel fields of a raw permit answer, for the permit entry (absent when the answer gave none,
+ *  so an older-shaped answer keeps its older-shaped row). */
+function channelFields(p: Record<string, unknown>, seenUrls: string[]): Pick<PermitProcessPermitAnswer, "channel" | "alternateChannels"> {
+  if (p.channel == null && p.alternateChannels == null) return {};
+  const channel = acceptChannel(p.channel as RawFact, seenUrls);
+  const alternateChannels = acceptAlternateChannels(p.alternateChannels, seenUrls, channel);
+  return { channel, ...(alternateChannels.length ? { alternateChannels } : {}) };
+}
+
 function parsePrerequisites(raw: unknown, seenUrls: string[]): CitedFact<string>[] {
   return (Array.isArray(raw) ? raw : []).slice(0, 5)
     .map((r) => acceptCited<string>(r as RawFact, { seenUrls, what: "prerequisite", coerce: (v) => str(v).slice(0, 200) || null, supports: supportsPrerequisite }))
@@ -539,6 +636,7 @@ export function parseProcessPart(text: string, seenUrls: string[], stopReason: s
       issuingAgency: acceptCited<string>(p.issuingAgency as RawFact, { seenUrls, what: "issuing agency", coerce: agencyName, supports: supportsAgency }),
       portalUrl: acceptPortal(p.portalUrl as RawFact, seenUrls, platformPages, entity),
       recordType: acceptRecordType(p.recordType as RawFact, seenUrls),
+      ...channelFields(p, seenUrls),
       documents: { value: null, sourceUrl: "", quote: "", origin: "lookup", notFound: "not looked up yet" },
       fee: { value: null, sourceUrl: "", quote: "", origin: "lookup", notFound: "not looked up yet" },
     });
@@ -563,18 +661,19 @@ export function parseProcessPart(text: string, seenUrls: string[], stopReason: s
   return { issuingAgency, permitStructure, permits, buildingProgram, unincorporatedZoning, groundMountZoning, prerequisites: parsePrerequisites(json.prerequisites, seenUrls), problem: truncated ? "answer was cut off (kept only fully parsed, cited values)" : "" };
 }
 
+type PortalStepAnswer = { portalUrl: CitedFact<string>; recordType: CitedFact<string> } & Pick<PermitProcessPermitAnswer, "channel" | "alternateChannels">;
 /** The portal step's answer: per discipline, the cited portal and record type (the same doors as
- *  the process part), plus any cited prerequisite the agency's pages state. */
+ *  the process part), its cited filing channel, plus any cited prerequisite the agency's pages state. */
 export function parsePortalPart(text: string, seenUrls: string[], stopReason: string | null, platformPages: string[] = [], entity: PortalEntity | null = null): {
-  byDiscipline: Map<PermitProcessDiscipline, { portalUrl: CitedFact<string>; recordType: CitedFact<string> }>; prerequisites: CitedFact<string>[]; problem: string;
+  byDiscipline: Map<PermitProcessDiscipline, PortalStepAnswer>; prerequisites: CitedFact<string>[]; problem: string;
 } {
-  const out = new Map<PermitProcessDiscipline, { portalUrl: CitedFact<string>; recordType: CitedFact<string> }>();
+  const out = new Map<PermitProcessDiscipline, PortalStepAnswer>();
   const json = parseJsonLoose(text);
   if (!json) return { byDiscipline: out, prerequisites: [], problem: stopReason === "max_tokens" || stopReason === "pause_turn" ? "portal answer was cut off — not kept" : "portal lookup returned no readable answer" };
   for (const p of (Array.isArray(json.permits) ? json.permits : []) as Array<Record<string, unknown>>) {
     const discipline = asDiscipline(p?.discipline);
     if (!discipline) continue;
-    out.set(discipline, { portalUrl: acceptPortal(p.portalUrl as RawFact, seenUrls, platformPages, entity), recordType: acceptRecordType(p.recordType as RawFact, seenUrls) });
+    out.set(discipline, { portalUrl: acceptPortal(p.portalUrl as RawFact, seenUrls, platformPages, entity), recordType: acceptRecordType(p.recordType as RawFact, seenUrls), ...channelFields(p, seenUrls) });
   }
   return { byDiscipline: out, prerequisites: parsePrerequisites(json.prerequisites, seenUrls), problem: "" };
 }
@@ -1150,6 +1249,9 @@ export async function runPermitProcessLookup(
   // PUBLISHER ISSUES (issuerOf above).
   const detPortal: CitedFact<string> | null = ev?.portal ? { value: ev.portal.url, sourceUrl: ev.portal.sourceUrl, quote: ev.portal.quote, origin: "lookup" } : null;
   const issuedByPublisher = issuer.publisher;
+  const resolverWithheld = new Map<PermitProcessDiscipline, PermitFilingChannel>();
+  // The portal step's answers (filled below), declared here because the channel is read from it.
+  const portalFor = new Map<PermitProcessDiscipline, PortalStepAnswer>();
   const platformReads = ev?.platformReads ?? new Map<string, ReadPage>();
   const ourSeen = ev?.seen ?? [];
   // THE ONE DOOR, TWICE: every candidate — ours from the agency's page, part one's cited, (later) the
@@ -1173,9 +1275,21 @@ export async function runPermitProcessLookup(
     const chosen = accepted ?? decisions.find((x) => x.claimed) ?? decisions.find((x) => x.source === "portal step") ?? decisions.find((x) => x.source === "process part") ?? decisions[0] ?? notDecided;
     return { decisions, accepted, chosen };
   };
+  // THE CITED FILING CHANNEL of each permit: part one's, else the portal step's (asked of the issuer).
+  const channelOf = (d: PermitProcessDiscipline): Pick<PermitProcessPermitAnswer, "channel" | "alternateChannels"> => {
+    const one = byDiscipline.get(d);
+    const step = portalFor.get(d);
+    const pick = one?.channel?.value ? one : step?.channel?.value ? step : one?.channel ? one : step;
+    return pick?.channel ? { channel: pick.channel, ...(pick.alternateChannels?.length ? { alternateChannels: pick.alternateChannels } : {}) } : {};
+  };
   const baseCandidates = (d: PermitProcessDiscipline, partOne: CitedFact<string> | undefined): Array<{ raw: RawFact; source: PortalCandidateSource }> => {
     const out: Array<{ raw: RawFact; source: PortalCandidateSource }> = [];
-    if (detPortal && issuedByPublisher(d)) out.push({ raw: { value: detPortal.value, sourceUrl: detPortal.sourceUrl, quote: detPortal.quote }, source: "agency page (our read)" });
+    // A PERMIT FILED BY EMAIL / IN PERSON / BY MAIL / WITH ANOTHER PERMIT, as a cited page says, takes
+    // no portal from the vendor-link resolver (the vendor link on that page is something else: an
+    // inspection scheduler, the portal for the OTHER permit). A model-cited portal is still judged.
+    const nonPortal = citedNonPortalChannel(channelOf(d));
+    if (detPortal && issuedByPublisher(d) && nonPortal) resolverWithheld.set(d, nonPortal);
+    if (detPortal && issuedByPublisher(d) && !nonPortal) out.push({ raw: { value: detPortal.value, sourceUrl: detPortal.sourceUrl, quote: detPortal.quote }, source: "agency page (our read)" });
     // A claim the PARSE-TIME door refused for want of evidence stays a candidate (its `claimed`), so
     // the final door can judge it with everything read since (portal-truth D3: a redirect we read).
     if (partOne) out.push({ raw: { value: partOne.value ?? (partOne.claimed || null), sourceUrl: partOne.sourceUrl, quote: partOne.quote, notFound: partOne.notFound }, source: "process part" });
@@ -1254,7 +1368,6 @@ export async function runPermitProcessLookup(
   const answers = await Promise.all(tasks);
 
   // Keyed by (agency, discipline): each group's answer fills only the permits asked of that agency.
-  const portalFor = new Map<PermitProcessDiscipline, { portalUrl: CitedFact<string>; recordType: CitedFact<string> }>();
   const docsFor = new Map<PermitProcessDiscipline, { documents: CitedFact<string[]>; fee: CitedFact<PermitFeeAnswer> }>();
   const problems: string[] = [part1.problem];
   const prerequisites = [...part1.prerequisites];
@@ -1455,6 +1568,7 @@ export async function runPermitProcessLookup(
       ...(portalUrl.value ? { portalPlatform: (ev?.portal && decided.get(p.discipline)?.source === "agency page (our read)" ? ev.portal.platform : platformOfUrl(portalUrl.value)) ?? undefined } : {}),
       documents: df?.documents ?? ungrounded("not found"),
       fee: df?.fee ?? ungrounded("not found"),
+      ...channelOf(p.discipline),
     };
   });
   prerequisites.push(...(ev?.prerequisites ?? []));
@@ -1466,6 +1580,7 @@ export async function runPermitProcessLookup(
     ...(issuingAgency !== part1.issuingAgency ? [`Issuing agency lifted from the permits' agreeing cited agencies (${issuingAgency.value}).`] : []),
     ...(ev?.portal ? [`Portal resolved from the agency's own page (${ev.portal.via}): ${ev.portal.quote} — ${ev.portal.sourceUrl}`] : []),
     ...portalNotes,
+    ...[...resolverWithheld.entries()].map(([d, c]) => `Portal (${d}): the agency page's vendor link was not taken — the cited page says this permit is filed ${channelPhrase(c)}.`),
     ...questions.map((q) => `Operator question: ${q}`),
     ...uniquePrereqs.map((x) => `Prerequisite: ${x.value} — ${x.sourceUrl}`),
   ];
@@ -1574,7 +1689,10 @@ export function mergeWithEarlier(
     const b = earlier.permits.find((e) => e.discipline === p.discipline);
     if (!b) return p;
     if (p.issuingAgency.value && b.issuingAgency.value && !sameAgencyName(p.issuingAgency.value, b.issuingAgency.value)) return p;
-    let portalUrl = keep(p.portalUrl, b.portalUrl);
+    // A permit THIS run reads as filed some other way (a cited non-portal channel) does not get the
+    // earlier row's portal back (it was the resolver's vendor link, typically).
+    const channelNow = p.channel?.value ? p : b.channel?.value ? b : p;
+    let portalUrl = citedNonPortalChannel(p) ? p.portalUrl : keep(p.portalUrl, b.portalUrl);
     if (portalUrl === b.portalUrl && b.portalUrl.value) {
       const dec = judgePortal(p.discipline, b.portalUrl);
       if (OUTRIGHT_REFUSALS.has(dec.code)) portalUrl = { ...p.portalUrl, notFound: `the earlier row's ${dec.fact.notFound ?? "portal is refused"}` };
@@ -1583,6 +1701,8 @@ export function mergeWithEarlier(
     return {
       ...p, issuingAgency: keep(p.issuingAgency, b.issuingAgency), portalUrl,
       recordType: carryType ? b.recordType : p.recordType, documents: keep(p.documents, b.documents), fee: keep(p.fee, b.fee),
+      ...(channelNow.channel ? { channel: channelNow.channel } : {}),
+      ...(channelNow.alternateChannels?.length ? { alternateChannels: channelNow.alternateChannels } : {}),
     };
   });
   // A permit only the earlier row lists is carried too — through the same doors (its portal and the

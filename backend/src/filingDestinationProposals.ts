@@ -21,7 +21,8 @@
 //     a government host, or a domain a person verified as the authority's own); a cited page off that
 //     host (a utility's .com) is shown for Edit only, where the person states it as their own check.
 //   · Its sources: an AHJ's reference process profile citations (field "submissionMethod", the value
-//     read), the AHJ's per-job permit-process lookup (a permit's cited portal), and the utility's
+//     read), the AHJ's per-job permit-process lookup (a permit's cited portal, or the email address
+//     its cited filing channel gives), and the utility's
 //     filing lookup (its cited portal, a with-permit method, or an email address in its words), and the
 //     utility's shipped cited door (utilityRequirements `filingDoor`, seeded into its KB row). A NEM
 //     destination is NEVER taken from an AHJ's row (rule 5: never the AHJ's row for the NEM track).
@@ -175,6 +176,14 @@ export function permitCandidates(input: {
       if (!wanted.has(str(p.discipline))) continue;
       const url = addressAsUrl(str(p.portalUrl?.value));
       if (url) out.push({ kind: "portal", address: url, sourceUrl: str(p.portalUrl.sourceUrl), quote: str(p.portalUrl.quote), fetchedAt: str(lookup.lookedUpAt), from: "permit_lookup" });
+      // THE PERMIT'S CITED EMAIL CHANNEL (lookup-permit-filing-channel): an address the page gives for
+      // filing this permit becomes a PROPOSAL only — confirming it writes the filing-email record
+      // (setFilingEmail) like any other email proposal; nothing sends to it until rule 1's gate.
+      for (const c of [p.channel, ...(p.alternateChannels ?? [])]) {
+        const v = c?.value;
+        if (!v || v.kind !== "email" || !v.value) continue;
+        out.push({ kind: "email", address: v.value.toLowerCase(), sourceUrl: str(c!.sourceUrl), quote: str(c!.quote), fetchedAt: str(lookup.lookedUpAt), from: "permit_lookup" });
+      }
     }
   }
   return out;
