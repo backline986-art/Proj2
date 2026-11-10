@@ -42,6 +42,7 @@ import path from "node:path";
 import type { AppDb } from "./db";
 import type { ProjectRecord, SubmittalTrackType } from "../../shared/src/types";
 import { filingEmailEnvAllows, finalSubmitRefusals, redactSecretValues } from "../../shared/src/portalSafety";
+import { isGovernmentHost } from "../../shared/src/officialSource";
 import { normalizeUtilityName, utilityFilingKey } from "./utilityFilingLookup";
 import { normalizeAhjName, permitProcessKey, projectForTrack } from "./permitProcess";
 import { projectSecretValues } from "./projectSecrets";
@@ -128,8 +129,8 @@ const PERSONAL_MAIL_DOMAINS = new Set([
 /** A government domain: .gov / .mil, a US locality's .us (ci.salem.or.us, state.ut.us), or a
  *  country's gov second level (gov.uk, gc.ca stays out on purpose: unknown is not reassurance). */
 export function isGovernmentDomain(domain: string): boolean {
-  const d = str(domain).toLowerCase();
-  return /\.(gov|mil)$/.test(d) || /\.[a-z]{2}\.us$/.test(d) || /(^|\.)state\.[a-z]{2}\.us$/.test(d) || /\.gov\.[a-z]{2}$/.test(d);
+  // The ONE government-host predicate (#683), shared with the official-source landing function.
+  return isGovernmentHost(domain);
 }
 /** The registrable part of a host, for "is this the authority's own domain": its last two labels. */
 const siteOf = (host: string): string => str(host).toLowerCase().replace(/\.$/, "").split(".").slice(-2).join(".");
