@@ -4087,6 +4087,11 @@ export interface ParserLlmExtraction {
   uncertainties?: ParserExtractionUncertainty[];
   /** Deterministic server-side resolutions (no model): e.g. moduleMake from the CEC list. */
   resolutions?: ParserExtractionResolution[];
+  /** Plan-set pages whose text is DRAWN AS OUTLINES (no text layer, no raster, a vector-heavy
+   *  drawing: backend/src/outlinedTextPages.ts, #696). Read by neither the text path nor vision —
+   *  "unread: text drawn as outlines; a person reads this page" — and nothing on them was sent to
+   *  any model. Absent when there are none. */
+  outlinedTextPages?: number[];
   /** Set when the plan set had no text layer and was read by VISION from page images: the
    *  field ids that came from vision, and which pages were read (scannedPlanSet.ts). */
   visionFields?: string[];

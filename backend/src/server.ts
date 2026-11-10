@@ -3503,7 +3503,9 @@ app.post(
     const { readPlanSetForExtraction } = await import("./scannedPlanSet");
     try {
       const read = await readPlanSetForExtraction(createLLMProvider(), bytes, { defaultState });
-      if (read.mode === "text" || !read.extraction) throw new HttpError(409, `This plan set has a text layer (${read.textChars} characters over ${read.pageCount} page(s)) and no image-only page; the text parser reads it.`);
+      // Pages whose text is drawn as outlines (#696) are named even here: the text parser reads the
+      // rest, those pages are read by nobody, and the parser review says so.
+      if (read.mode === "text" || !read.extraction) throw new HttpError(409, `This plan set has a text layer (${read.textChars} characters over ${read.pageCount} page(s)) and no image-only page; the text parser reads it.`, read.outlinedPages?.length ? { outlinedTextPages: read.outlinedPages } : {});
       // Hybrid: the image pages' read goes back to the parser page, which merges it under the text
       // read (the text read resolves the client).
       if (read.mode === "hybrid") { res.json(read.extraction satisfies ParserExtractionResponse); return; }
