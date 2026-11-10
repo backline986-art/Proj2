@@ -50,7 +50,14 @@ export const CATEGORY_PATTERNS: Array<{ docType: string; label: string; patterns
   // diagram went unsplit and the submit gate reported the SLD missing from a plan set that
   // plainly contains one. Anchored on LINE DIAGRAM with an electrical qualifier; a bare
   // /LINE DIAGRAM/ is deliberately NOT used ("property line", "setback line" prose risk).
-  { docType: "sld", label: "SLD / one-line", patterns: [/\b3-?LINE DIAGRAM\b/i, /\bONE-?LINE\b/i, /\bSINGLE-?LINE\b/i, /\bELECTRICAL\s+LINE\s+DIAGRAM\b/i], sheetNumbers: [/\bE\s*1\.1\b/i] },
+  //
+  // A SPACE IS A HYPHEN IN A SHEET TITLE (#691). "-?" let "SINGLE-LINE" and "3-LINE DIAGRAM" through
+  // but not "SINGLE LINE DIAGRAM" or "3 LINE DIAGRAM", and "THREE LINE DIAGRAM" / "ELECTRICAL
+  // SCHEMATIC" had no pattern, so a NEM package reported the SLD missing from a set that has one.
+  // Hyphen OR whitespace now, by title wording, never by jurisdiction. Two words stay anchored so prose
+  // cannot pass for a title: the 3 / THREE form needs DIAGRAM ("THREE LINE ITEMS", "PROPERTY LINE"),
+  // and a SPACED "ONE LINE" needs a diagram noun after it ("ONE LINE PER CIRCUIT" is a note).
+  { docType: "sld", label: "SLD / one-line", patterns: [/\b(?:3|THREE)[\s-]?LINE\s+DIAGRAM\b/i, /\bONE(?:-?LINE\b|\s+LINE\s+(?:DIAGRAM|DWG|DRAWING|SCHEMATIC)\b)/i, /\bSINGLE[\s-]?LINE\b/i, /\bELECTRICAL\s+LINE\s+DIAGRAM\b/i, /\bELECTRICAL\s+SCHEMATIC\b/i], sheetNumbers: [/\bE\s*1\.1\b/i] },
   // Fire access pathways / setbacks are drawn and labeled on the site plan (the fire-access
   // sheet the gate asks for), so they identify it alongside the sheet name.
   { docType: "site_plan", label: "Site / plot plan", patterns: [/\bSITE PLAN\b/i, /\bPLOT PLAN\b/i, /\bFIRE\s+(?:PATHWAYS?|SETBACKS?|ACCESS)\b/i], sheetNumbers: [/\bPV\s*1\.[01]\b/i] },

@@ -1333,7 +1333,8 @@
   const ELECTRICAL_SHEET = /\bE\s*-?\s*\d+\.\d+\b/i;
   const COMBINED_SPEC = /MODULE\s*[\/&]?\s*INV(?:ERTER)?\.?\s*SPEC/i;
   const SPLIT_CATEGORIES = [
-    { docType: 'sld', patterns: [/\b3-?LINE DIAGRAM\b/i, /\bONE-?LINE\b/i, /\bSINGLE-?LINE\b/i, /\bELECTRICAL\s+LINE\s+DIAGRAM\b/i], sheetNumbers: [/\bE\s*1\.1\b/i] },
+    // Hyphen OR whitespace between the title words (#691) — the backend list, kept identical.
+    { docType: 'sld', patterns: [/\b(?:3|THREE)[\s-]?LINE\s+DIAGRAM\b/i, /\bONE(?:-?LINE\b|\s+LINE\s+(?:DIAGRAM|DWG|DRAWING|SCHEMATIC)\b)/i, /\bSINGLE[\s-]?LINE\b/i, /\bELECTRICAL\s+LINE\s+DIAGRAM\b/i, /\bELECTRICAL\s+SCHEMATIC\b/i], sheetNumbers: [/\bE\s*1\.1\b/i] },
     { docType: 'site_plan', patterns: [/\bSITE PLAN\b/i, /\bPLOT PLAN\b/i, /\bFIRE\s+(?:PATHWAYS?|SETBACKS?|ACCESS)\b/i], sheetNumbers: [/\bPV\s*1\.[01]\b/i] },
     { docType: 'structural', patterns: [/\bMOUNT DETAIL\b/i, /\bATTACHMENT DETAIL\b/i], sheetNumbers: [/\bS\s*1\.\d\b/i], words: [/STRUCTURAL/i], vocabulary: [/\bROOF SECTION\b/i, /\bRAFTER\b/i, /\bTRUSS\b/i] },
     { docType: 'module_spec', patterns: [COMBINED_SPEC, /MODULE\s+SPECIFICATION\s+SHEET/i, /PV MODULE SPEC/i] },
