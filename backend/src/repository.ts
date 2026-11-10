@@ -263,7 +263,9 @@ export function buildReviewerReportFor(db: AppDb, project: ProjectRecord): Revie
   // out, which raises nothing new: the rules only ever add findings.
   let stateRules: StatePermitRule[] = [];
   try { stateRules = statePermitRulesFor(db, project.state, "structural"); } catch { stateRules = []; }
-  return buildReviewerReport(project, { codeContext, codeProfileRow, uploadedDocTypes, documentTexts: designDocumentTexts(db, project.id), pvWorksheet: filedPvWorksheetInput(db, project), structuralCertification, stateRules });
+  // What the job installs (#673): a person's scope included, so the gate and QC read one answer.
+  const jobScope = resolveJobScope(db, project.id, project.parserSnapshot).scope;
+  return buildReviewerReport(project, { codeContext, codeProfileRow, uploadedDocTypes, documentTexts: designDocumentTexts(db, project.id), pvWorksheet: filedPvWorksheetInput(db, project), structuralCertification, stateRules, jobScope });
 }
 
 // WHAT HOLDS THIS FILING: ONE ANSWER (#214). The text report with the cached vision verdicts folded
