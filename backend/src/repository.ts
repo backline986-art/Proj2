@@ -179,6 +179,7 @@ import {
 import { linkLookupRanRecently, signedInOutcome, statusReadGap, type ReadGapFacts } from "./statusLinkGap";
 import { evidenceForTopic, evidenceLines, type EvidenceTopic } from "./projectEvidence";
 import { resolveUtilityRequirements } from "./utilityRequirements";
+import { readParcelJurisdiction, type ParcelJurisdictionReading } from "./parcelJurisdiction";
 import { customerBillOnFile, runQcForProject, WAITING_ON_BILL_ISSUE_TYPE, type QcRunOptions } from "./qc";
 import { resolveJobScope } from "./jobScope";
 import { loadStoredTemplates, formAllowedForPath } from "./ahjForms";
@@ -273,7 +274,12 @@ export function buildReviewerReportFor(db: AppDb, project: ProjectRecord): Revie
   // by the utility's filing row (official reads, a person's items). A failed read falls back to the seed.
   let utilityRequirements: UtilityRequirementList | null;
   try { utilityRequirements = resolveUtilityRequirements(db, project.state, project.utility); } catch { utilityRequirements = resolveUtilityRequirements(null, project.state, project.utility); }
-  return buildReviewerReport(project, { codeContext, codeProfileRow, uploadedDocTypes, documentTexts: designDocumentTexts(db, project.id), pvWorksheet: filedPvWorksheetInput(db, project), structuralCertification, stateRules, jobScope, utilityRequirements });
+  // WHICH JURISDICTION THE PARCEL IS IN (review-audit draft 09): the cached answer of the county's own
+  // parcel service, read only — the network read is a job QC queues, never this read. A failed read is
+  // "not checked", which raises only today's callout.
+  let parcelJurisdiction: ParcelJurisdictionReading | undefined;
+  try { parcelJurisdiction = readParcelJurisdiction(db, project); } catch { parcelJurisdiction = undefined; }
+  return buildReviewerReport(project, { codeContext, codeProfileRow, uploadedDocTypes, documentTexts: designDocumentTexts(db, project.id), pvWorksheet: filedPvWorksheetInput(db, project), structuralCertification, stateRules, jobScope, utilityRequirements, parcelJurisdiction });
 }
 
 // WHAT HOLDS THIS FILING: ONE ANSWER (#214). The text report with the cached vision verdicts folded
@@ -5534,6 +5540,34 @@ export async function rejudgeReviewerGatesAfterLookup(
     }
   }
   return rejudged;
+}
+
+/**
+ * RE-JUDGE ONE PROJECT'S GATE WHEN ITS PARCEL CHECK LANDS (review-audit draft 09). The answer is about
+ * one address, so one project: the same population rule as rejudgeReviewerGatesAfterLookup (pre-stage —
+ * qc_passed / ready_to_stage — and its gate has already run), a new reviewer_report.generated audit
+ * row, the verdict recorded, and an SSE event so an open page refetches. Reads cached vision verdicts
+ * only (no model call). Returns whether it re-judged.
+ */
+export async function rejudgeReviewerGateForProject(db: AppDb, projectId: string, trigger: string): Promise<boolean> {
+  const row = db.get<Row>(
+    `SELECT p.id FROM projects p WHERE p.id = ? AND p.status IN ('qc_passed', 'ready_to_stage')
+        AND EXISTS (SELECT 1 FROM audit_logs a WHERE a.project_id = p.id AND a.action = 'reviewer_report.generated')`,
+    [projectId],
+  );
+  if (!row) return false;
+  const detail = getProjectDetail(db, projectId);
+  const report = reviewerGateReportFor(db, detail.project);
+  addAuditLog(db, projectId, "system", "ahj reviewer gate", "reviewer_report.generated", {
+    trigger,
+    blockerCount: report.findings.filter((item) => item.severity === "blocker").length,
+    warningCount: report.findings.filter((item) => item.severity === "warning").length,
+    installerCalloutCount: report.installerCallouts.length,
+  });
+  recordReviewerGateVerdict(db, projectId, report);
+  const { sseBroadcast } = await import("./events");
+  sseBroadcast({ type: "reviewer_gate_rejudged", projectId, message: "Reviewer gate re-judged: the parcel's jurisdiction check landed." });
+  return true;
 }
 
 /**

@@ -17,6 +17,7 @@ import { resolvePermitPath, resolveStampRequirement, hasStampedStructuralEvidenc
 import { evaluatePermitPrecedentFindings } from "./permitPrecedents";
 import { citeStateSealRule, statePrescriptiveFindings } from "./stateRules";
 import type { EffectiveCodeContext } from "./codeProfiles";
+import type { ParcelJurisdictionReading } from "./parcelJurisdiction";
 import type { JobScope } from "../../shared/src/types";
 import { deriveJobScope, jobScopeLabel, scopeHasNewPv, storageFactGaps } from "./jobScope";
 
@@ -128,6 +129,10 @@ export function buildReviewerReport(
      *  the shipped seed overlaid by the utility's filing row). undefined = not read here, so the shipped
      *  seed alone is used; null = read, and nothing is on file for this utility. */
     utilityRequirements?: UtilityRequirementList | null;
+    /** Which jurisdiction the job's parcel is in, as the county's own service answered (review-audit
+     *  draft 09, parcelJurisdiction.readParcelJurisdiction — the cache, read only). undefined = not
+     *  read here: the profile's callout stands, worded "not checked". */
+    parcelJurisdiction?: ParcelJurisdictionReading;
   } = {},
 ): ReviewerReport {
   const profile = findAhjProcessProfile(project);
@@ -164,6 +169,7 @@ export function buildReviewerReport(
   const utilityAliases = addUtilityFindings(project, findings,
     opts.utilityRequirements === undefined ? resolveUtilityRequirements(null, project.state, project.utility) : opts.utilityRequirements);
   addProfileFindings(project, profile, findings, opts.uploadedDocTypes ?? []);
+  addParcelJurisdictionFindings(project, profile, opts.parcelJurisdiction, findings);
   addPermitPathFindings(project, findings);
   addInstallerCallouts(project, profile, findings);
 
@@ -1287,9 +1293,62 @@ function addProfileFindings(project: ProjectRecord, profile: AhjProcessProfile |
     // Jurisdiction/FEMA determination — external to the autopilot. Advisory only.
     findings.push(finding("reviewer.profile.flood", "callout", "ahj_profile", "Floodplain/FEMA check (jurisdiction-determined)", `${profile.ahj} references flood/FEMA review. Confirm the jurisdiction/design team has addressed it before submittal.`, true));
   }
-  if (profile.requiresJurisdictionCheck) {
-    findings.push(finding("reviewer.profile.jurisdiction", "callout", "ahj_profile", "Jurisdiction/address verification recommended", `${profile.ahj} process profile calls out jurisdiction or address verification. Confirm before submittal.`, true));
+  // The profile's jurisdiction / address check is answered by the parcel (addParcelJurisdictionFindings).
+}
+
+/**
+ * IS THE PARCEL IN THE PROJECT AHJ? (review-audit draft 09.) A mailing city is a postal name: an
+ * address that says one city can sit on a parcel in the unincorporated county, and a permit filed
+ * with the wrong agency is refused (its fee often kept). The answer is the county's own parcel
+ * service, read by a job and cached (parcelJurisdiction.ts); this only reads it.
+ *   - disagrees -> a BLOCKER on permit tracks (category ahj_profile: gateScope holds the permit lane
+ *     only) when the lookup record may block (verified, official, or a seeded record that names and
+ *     quotes its source — Helm's #637 bar); a WARNING from an uncited seeded record;
+ *   - agrees -> a pass;
+ *   - not checked -> the profile's callout, worded "not checked" with the reason — shown where the
+ *     process profile asks for the check (today's callout) or a lookup record covers the address.
+ */
+function addParcelJurisdictionFindings(project: ProjectRecord, profile: AhjProcessProfile | null, reading: ParcelJurisdictionReading | undefined, findings: ReviewerFinding[]): void {
+  const ahj = String(project.ahj ?? "").trim();
+  const when = reading?.checkedAt ? `, checked ${reading.checkedAt.slice(0, 10)}` : "";
+  const from = reading ? `${reading.county ? `${reading.county}'s` : "the county's"} parcel service${reading.host ? ` (${reading.host}${when})` : ""}` : "";
+  if (reading?.status === "disagrees" && reading.parcelAgency) {
+    const blocks = reading.mayBlock === true;
+    findings.push(finding(
+      "reviewer.jurisdiction.parcel",
+      blocks ? "blocker" : "warning",
+      "ahj_profile",
+      `Parcel is in ${reading.parcelAgency}, not ${ahj}`,
+      `${from} places the job's address in ${reading.parcelAgency}; the project AHJ is ${ahj}. A permit filed with the wrong agency is refused, and its fee is often not refunded.${blocks ? "" : " The lookup record is seeded and uncited, so this is a warning: confirm the parcel's jurisdiction before filing."}`,
+      true,
+      {
+        cityFeedback: `The parcel is in ${reading.parcelAgency}, not ${ahj}.`,
+        designTeamAction: `Confirm the parcel's jurisdiction, then correct the project AHJ to ${reading.parcelAgency} (or record ${ahj} as the agency that issues for it in the permit-process lookup) before filing the permit.`,
+      },
+    ));
+    return;
   }
+  if (reading?.status === "agrees" && reading.parcelAgency) {
+    findings.push(finding(
+      "reviewer.jurisdiction.parcel",
+      "pass",
+      "ahj_profile",
+      `Jurisdiction confirmed from the parcel: ${reading.parcelAgency}`,
+      `${from} places the job's address in ${reading.parcelAgency}, which matches the project AHJ (${ahj}).`,
+    ));
+    return;
+  }
+  if (!profile?.requiresJurisdictionCheck && !reading?.covered) return;
+  const why = reading?.reason ? ` (${reading.reason})` : "";
+  const asks = profile?.requiresJurisdictionCheck ? `${profile.ahj} process profile calls out jurisdiction or address verification. ` : "";
+  findings.push(finding(
+    "reviewer.profile.jurisdiction",
+    "callout",
+    "ahj_profile",
+    "Jurisdiction/address not checked against the parcel",
+    `${asks}The parcel's jurisdiction was not checked${why}. Confirm the address is inside ${ahj || "the AHJ"} and not in the unincorporated county before submittal.`,
+    true,
+  ));
 }
 
 // Permit-path findings — prescriptive vs engineered (non-prescriptive). On the

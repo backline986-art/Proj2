@@ -3460,6 +3460,36 @@ const VERSIONED_MIGRATIONS: VersionedMigration[] = [
       addColumnIfMissing(db, "project_documents", "outlined_pages_json", "TEXT NOT NULL DEFAULT ''");
     },
   },
+  {
+    // v76 (review-audit draft 09): the next free number on offline staging 5d1db1ba (up to #696's
+    // v75). #701 may also want v76: Helm renumbers at merge — nothing here depends on the number.
+    version: 76,
+    name: "parcel_jurisdiction_checks",
+    up: (db) => {
+      // WHICH JURISDICTION A PARCEL IS IN, AS THE COUNTY'S OWN SERVICE ANSWERED (parcelJurisdiction.ts).
+      // Written ONLY by the parcel_jurisdiction_check job; the gate reads it and writes nothing.
+      // address_key is a sha256 of state + normalized street + ZIP (or mailing city): the address
+      // itself is never stored. Shared on purpose like the other jurisdiction tables: a row says only
+      // which public jurisdiction a hashed address lies in, so it carries no tenant data.
+      // status: found | no_match | unavailable. source_fingerprint = the data records the answer was
+      // read against (a changed record makes the answer stale).
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS parcel_jurisdiction_checks (
+          address_key TEXT PRIMARY KEY,
+          state TEXT NOT NULL DEFAULT '',
+          source_key TEXT NOT NULL DEFAULT '',
+          source_fingerprint TEXT NOT NULL DEFAULT '',
+          status TEXT NOT NULL,
+          jurisdiction_raw TEXT NOT NULL DEFAULT '',
+          parcel_agency TEXT NOT NULL DEFAULT '',
+          incorporated INTEGER NOT NULL DEFAULT 0,
+          service_host TEXT NOT NULL DEFAULT '',
+          detail TEXT NOT NULL DEFAULT '',
+          checked_at TEXT NOT NULL
+        )
+      `);
+    },
+  },
 ];
 
 /** v47 was edited in place while #218 was open (Helm's review at 0116f98a): a DB that ran an earlier

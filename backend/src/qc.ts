@@ -888,6 +888,11 @@ export function runQcForProject(db: AppDb, projectId: string, options: QcRunOpti
       if (tracks.some((t) => t !== "nem")) {
         const { ensureStateFeeRulesResearched } = await import("./stateFeeResearch");
         await ensureStateFeeRulesResearched(db, { id: projectId, state: String(projectLike.state ?? "") });
+        // WHICH JURISDICTION THE PARCEL IS IN (review-audit draft 09): where the county's parcel service
+        // is on file and the address has no fresh answer, one background read of it (government hosts
+        // only, cached by address hash). QC is a write path; the gate only reads the cache.
+        const { ensureParcelJurisdictionChecked } = await import("./parcelJurisdiction");
+        await ensureParcelJurisdictionChecked(db, projectId);
       }
     })().catch(() => null);
   } catch (err) {
