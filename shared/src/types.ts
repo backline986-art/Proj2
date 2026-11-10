@@ -2455,8 +2455,9 @@ export interface StatePermitRule {
   /** Two-letter state code. */
   state: string;
   /** "structural" (#595: prescriptive-solar limits, what forces the engineered path, seal validity);
-   *  "fee" is #586's (state surcharges, caps). */
-  family: "structural" | "fee";
+   *  "fee" is #586's (state surcharges, caps); "qc" is a QC baseline screen (jurisdictionQcRules.ts,
+   *  review-audit draft 12: rule_key = the screen's ruleId, value = the screen). */
+  family: "structural" | "fee" | "qc";
   key: string;
   value: unknown;
   /** The section, with its words quoted. */
