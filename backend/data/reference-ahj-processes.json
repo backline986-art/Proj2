@@ -1286,21 +1286,146 @@
     {
       "state": "OR",
       "ahj": "Deschutes Co (La Pine)",
-      "submissionMethod": "OR E-permitting",
-      "timeline": "1 day..... to 5 weeks",
+      "submissionMethod": "https://aca-oregon.accela.com/oregon/",
+      "timeline": "Intake about 1 week; residential building review 8-9 weeks in queue (county posted times, from a complete application); electrical permits auto-issue",
       "requiresElectricianSign": false,
       "requiresElectricalStamp": false,
       "requiresStructuralStamp": false,
-      "requiresElectricalPermitApplication": false,
-      "requiresBuildingPermitApplication": false,
+      "requiresElectricalPermitApplication": true,
+      "requiresBuildingPermitApplication": true,
       "requiresSolarChecklist": true,
       "requiresPlanSet": true,
       "requiresUtilityApproval": false,
       "requiresCustomerSignature": false,
       "requiresFloodplainCheck": false,
       "requiresJurisdictionCheck": false,
-      "otherRequirements": "Electrical stickers",
-      "reviewerNotes": "",
+      "otherRequirements": "Electrical stickers; PDF uploads only (no ZIP); site plan as its own PDF",
+      "reviewerNotes": "Deschutes County's own row (unincorporated addresses). Operator sheet: OR E-permitting, timeline 1 day..... to 5 weeks. Deschutes County pages (read 2026-11-10): permits are applied for on the Oregon ePermitting website (the county links BuildingPermits.Oregon.gov, which opens the state's Accela portal); the county issues residential electrical permits there itself, they auto-issue but can be retracted within one business day, and no documents are uploaded for them. The building side is a Residential Structural permit (Oregon BCD: a structural permit is required for all qualifying solar installs). Fees (FY2027 schedule): prescriptive solar building permit $109.75 including plan review; non-prescriptive by structural valuation; renewable energy electrical $79 up to 5 kVA, $94 for 5.01-15 kVA, $156 for 15.01-25 kVA. Posted times: intake about 1 week, building review 8-9 weeks, counted from a complete application. Battery storage: nothing found on the county's pages (check by hand). Seeded from the authority's own pages, NOT verified.",
+      "documents": {
+        "items": [
+          "Residential Structural permit application on Oregon ePermitting (prescriptive or non-prescriptive solar)",
+          "Site plan, uploaded as a separate, individual PDF",
+          "Plans and documents as PDF only (ZIP files are not accepted)",
+          "Residential Electrical permit application on Oregon ePermitting (no documents uploaded)"
+        ],
+        "sourceUrl": "https://www.deschutescounty.gov/620/Construction-Plan-Requirements-Residenti",
+        "quote": "Site Plan shall be uploaded as a separate, individual PDF.",
+        "observedAt": "2026-11-10"
+      },
+      "citations": [
+        {
+          "field": "submissionMethod",
+          "value": "https://aca-oregon.accela.com/oregon/",
+          "sourceUrl": "https://www.deschutescounty.gov/611/Electrical-Mechanical-and-Plumbing-Permi",
+          "quote": "Step 1: Log into your account on the Oregon ePermitting website:",
+          "fetchedAt": "2026-11-10T18:25:05Z"
+        },
+        {
+          "field": "permitSystem",
+          "value": "Oregon ePermitting",
+          "sourceUrl": "https://www.deschutescounty.gov/601/Oregon-ePermitting-FAQs",
+          "quote": "The Oregon ePermitting Website allows licensed contractors and homeowners to apply for building permits with just a few clicks of a mouse.",
+          "fetchedAt": "2026-11-10T18:25:08Z"
+        },
+        {
+          "field": "electricalPermitIssuer",
+          "value": "county",
+          "sourceUrl": "https://www.deschutescounty.gov/611/Electrical-Mechanical-and-Plumbing-Permi",
+          "quote": "Step 5: Electrical, Mechanical and Plumbing permits auto issue ,but can be retracted within one business day if deemed incomplete",
+          "fetchedAt": "2026-11-10T18:25:05Z"
+        },
+        {
+          "field": "requiresElectricalPermitApplication",
+          "value": "true",
+          "sourceUrl": "https://www.deschutescounty.gov/611/Electrical-Mechanical-and-Plumbing-Permi",
+          "quote": "You need a residential electrical permit to Install, change or repair any hard-wired electrical system",
+          "fetchedAt": "2026-11-10T18:25:05Z"
+        },
+        {
+          "field": "requiresBuildingPermitApplication",
+          "value": "true",
+          "sourceUrl": "https://www.oregon.gov/bcd/epermitting/help/records/Pages/permit-for-solar.aspx",
+          "quote": "A structural permit is required for all qualifying Solar/PV Installs.",
+          "fetchedAt": "2026-11-10T18:27:00Z"
+        },
+        {
+          "field": "requiresBuildingPermitApplication",
+          "value": "true",
+          "sourceUrl": "https://www.oregon.gov/bcd/epermitting/help/records/Pages/permit-for-solar.aspx",
+          "quote": "Applicant applies for a Commercial or Residential Structural permit",
+          "fetchedAt": "2026-11-10T18:27:00Z"
+        },
+        {
+          "field": "documents",
+          "value": "no documents uploaded for the electrical permit",
+          "sourceUrl": "https://www.deschutescounty.gov/611/Electrical-Mechanical-and-Plumbing-Permi",
+          "quote": "Note: No documents are required to be uploaded for these types of permits.",
+          "fetchedAt": "2026-11-10T18:25:05Z"
+        },
+        {
+          "field": "documents",
+          "value": "PDF only, no ZIP",
+          "sourceUrl": "https://www.deschutescounty.gov/613/1-2-Family-Dwelling-and-Structural-Appli",
+          "quote": "PDF documents are the only document file type that will be reviewed,.ZIP files will not be accepted.",
+          "fetchedAt": "2026-11-10T18:25:40Z"
+        },
+        {
+          "field": "timeline",
+          "value": "application intake 1 week",
+          "sourceUrl": "https://www.deschutescounty.gov/598/Processing-Times-for-Permits",
+          "quote": "Application Intake 1 Week",
+          "fetchedAt": "2026-11-10T18:25:07Z"
+        },
+        {
+          "field": "timeline",
+          "value": "building review 8-9 weeks",
+          "sourceUrl": "https://www.deschutescounty.gov/598/Processing-Times-for-Permits",
+          "quote": "Building Review 8 - 9 Weeks",
+          "fetchedAt": "2026-11-10T18:25:07Z"
+        },
+        {
+          "field": "timeline",
+          "value": "counted from a complete application",
+          "sourceUrl": "https://www.deschutescounty.gov/598/Processing-Times-for-Permits",
+          "quote": "The Review times are calculated off of a complete application to include all required documents, not when the application was submitted.",
+          "fetchedAt": "2026-11-10T18:25:07Z"
+        },
+        {
+          "field": "fees",
+          "value": "109.75",
+          "sourceUrl": "https://www.deschutescounty.gov/DocumentCenter/View/8607/FY-2027-Fee-Schedule_Revised-08-18-26",
+          "quote": "Solar Building Permit - Prescriptive (includes plan review) $ 109.75",
+          "fetchedAt": "2026-11-10T18:25:54Z"
+        },
+        {
+          "field": "fees",
+          "value": "prescriptive fee includes plan review",
+          "sourceUrl": "https://www.oregon.gov/bcd/epermitting/help/records/Pages/permit-for-solar.aspx",
+          "quote": "the Prescriptive Photovoltaic fee already includes plan review, so plan review is not separately charged with this system type.",
+          "fetchedAt": "2026-11-10T18:27:00Z"
+        },
+        {
+          "field": "fees",
+          "value": "79.00",
+          "sourceUrl": "https://www.deschutescounty.gov/DocumentCenter/View/8607/FY-2027-Fee-Schedule_Revised-08-18-26",
+          "quote": "5 KVA or less $ 79.00",
+          "fetchedAt": "2026-11-10T18:25:54Z"
+        },
+        {
+          "field": "fees",
+          "value": "94.00",
+          "sourceUrl": "https://www.deschutescounty.gov/DocumentCenter/View/8607/FY-2027-Fee-Schedule_Revised-08-18-26",
+          "quote": "5.01 KVA to 15KVA $ 94.00",
+          "fetchedAt": "2026-11-10T18:25:54Z"
+        },
+        {
+          "field": "fees",
+          "value": "156.00",
+          "sourceUrl": "https://www.deschutescounty.gov/DocumentCenter/View/8607/FY-2027-Fee-Schedule_Revised-08-18-26",
+          "quote": "15.01 KVA to 25 KVA $ 156.00",
+          "fetchedAt": "2026-11-10T18:25:54Z"
+        }
+      ],
       "sourceSheet": "OR PROCESS"
     },
     {

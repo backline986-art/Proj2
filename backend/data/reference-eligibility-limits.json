@@ -3,6 +3,48 @@
   "records": [
     {
       "authorityKind": "utility_program",
+      "state": "OR",
+      "authority": "Central Electric Cooperative",
+      "programName": "Central Electric Cooperative small net-metering agreement",
+      "limits": {
+        "maxDcKw": {
+          "value": 25,
+          "appliesOnlyTo": "the small net-metering agreement (larger systems use a different agreement)",
+          "ruleId": "or-cec-small-nem-25kw",
+          "ruleName": "Central Electric small net-metering size screen",
+          "message": "DC size is {value} kW{combinedNote}. Central Electric Cooperative's small net-metering agreement covers systems of not more than {limit} kW nameplate. Confirm the agreement before filing.",
+          "citation": {
+            "sourceName": "Central Electric Cooperative — Net metering",
+            "sourceUrl": "https://www.cec.coop/energy-programs/renewable-power/net-metering/",
+            "quote": "Small Net-Metering Agreement (for qualifying Net-Metering Facilities with a maximum nameplate generating capacity of not more than 25 kW)",
+            "fetchedAt": "2026-11-10T18:27:31Z"
+          }
+        }
+      }
+    },
+    {
+      "authorityKind": "utility_program",
+      "state": "OR",
+      "authority": "Midstate Electric Cooperative",
+      "programName": "Midstate Electric Cooperative net metering program",
+      "limits": {
+        "maxDcKw": {
+          "value": 25,
+          "appliesOnlyTo": "residential members with a photovoltaic system (nameplate capacity)",
+          "ruleId": "or-midstate-nem-25kw",
+          "ruleName": "Midstate Electric net metering size screen",
+          "message": "DC size is {value} kW{combinedNote}. Midstate Electric Cooperative's net metering program is for residential PV of {limit} kW nameplate or less. Confirm before filing.",
+          "citation": {
+            "sourceName": "Midstate Electric Cooperative — Solar",
+            "sourceUrl": "https://www.midstateelectric.coop/energy-efficiency/solar/",
+            "quote": "Midstate Electric Cooperative’s (MEC) Net Metering Program is available to residential members who install a photovoltaic (PV) system with a nameplate capacity of 25kW or less.",
+            "fetchedAt": "2026-11-10T18:27:35Z"
+          }
+        }
+      }
+    },
+    {
+      "authorityKind": "utility_program",
       "state": "ID",
       "authority": "Idaho Power",
       "programName": "Idaho Power on-site generation (residential Schedule 1 / small general service Schedule 7)",
