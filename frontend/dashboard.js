@@ -10,6 +10,8 @@ const state = {
   // The server's full next-step answer for the open project (GET /api/projects/:id/next-step,
   // refreshed by every autopilot state), and which project it belongs to.
   nextStep: null,
+  // "Destinations to confirm" (GET /api/filing-destinations): the last queue read, for its buttons.
+  destinationQueue: null,
   nextStepProjectId: null,
   // THE GATE'S ANSWER PER BOARD CARD. The project list carries the list-tier answer, which never
   // runs the submit gate (gateChecked:false); a card must not say "Ready to stage" on it. Each such
@@ -5217,11 +5219,23 @@ function filingDestinationHtml(lookupKind) {
 // named-person confirm, and nothing is filed or sent by these clicks. Confirm sends exactly the
 // proposal shown (the server re-derives it and refuses a stale one); Edit sends the person's own
 // statement with its page and words; Reject stops the proposal being offered. The tracks re-read after.
-async function decideFilingDestination(btn, action) {
-  const FD = window.FilingDestination;
+//
+// `where` says which screen the button is on. The track card (none given): the open job and its payload,
+// and the job re-reads after. "Destinations to confirm" (destinationQueueContext): the job and track
+// the proposal itself names (data-fd-project / data-fd-track), the queue's payload, and the queue
+// re-reads after (`after`). Everything between — the named-person confirm, the body, the route — is
+// this one function, so a Confirm from the queue lands exactly as it does from the job's card.
+function trackCardDestinationContext() {
   const projectId = state.selectedProjectId;
   const tl = state.trackLookups;
-  const payload = tl && tl.projectId === projectId ? tl["filing-destinations"] : null;
+  return { projectId, payload: tl && tl.projectId === projectId ? tl["filing-destinations"] : null };
+}
+async function decideFilingDestination(btn, action, where) {
+  const FD = window.FilingDestination;
+  const ctx = (where || trackCardDestinationContext)(btn);
+  const projectId = ctx.projectId;
+  const payload = ctx.payload;
+  const notify = ctx.notify || showMessage;
   if (!FD || !projectId) return;
   const id = btn.dataset.fdId;
   const track = btn.dataset.fdTrack;
@@ -5237,7 +5251,7 @@ async function decideFilingDestination(btn, action) {
     done = "The proposal is offered again. Nothing was filed or sent.";
   } else {
     const found = FD.findProposal(payload, id);
-    if (!found) { showMessage("That proposal is no longer shown — reload the job.", "warning"); return; }
+    if (!found) { notify("That proposal is no longer shown — reload the job.", "warning"); return; }
     const name = found.destination.authority.name;
     if (action === "confirm") {
       const by = namedPersonConsent(auth, FD.confirmMessage(name, found.proposal), "confirmed this destination", "a filing destination is confirmed by a named person");
@@ -5269,24 +5283,63 @@ Why (optional):`, "");
     await api(path, { method, body: JSON.stringify(body) });
   } catch (err) {
     btn.disabled = false;
-    showMessage(`Not recorded: ${err.message}`, "error");
+    notify(`Not recorded: ${err.message}`, "error");
     return;
   }
-  showMessage(done, "info");
+  notify(done, "info");
+  if (ctx.after) { await ctx.after(); return; }
   try { state.detail = await api(`/api/projects/${projectId}`); } catch { /* the message above says what happened */ }
   await loadSubmittalTracks();
   renderDetail();
 }
 
-function bindFilingDestinationButtons(wrap) {
-  wrap.querySelectorAll("button[data-fd-confirm]").forEach((btn) => btn.addEventListener("click", () => decideFilingDestination(btn, "confirm")));
-  wrap.querySelectorAll("button[data-fd-reject]").forEach((btn) => btn.addEventListener("click", () => decideFilingDestination(btn, "reject")));
-  wrap.querySelectorAll("button[data-fd-unreject]").forEach((btn) => btn.addEventListener("click", () => decideFilingDestination(btn, "unreject")));
-  wrap.querySelectorAll("button[data-fd-save]").forEach((btn) => btn.addEventListener("click", () => decideFilingDestination(btn, "save")));
+function bindFilingDestinationButtons(wrap, where) {
+  wrap.querySelectorAll("button[data-fd-confirm]").forEach((btn) => btn.addEventListener("click", () => decideFilingDestination(btn, "confirm", where)));
+  wrap.querySelectorAll("button[data-fd-reject]").forEach((btn) => btn.addEventListener("click", () => decideFilingDestination(btn, "reject", where)));
+  wrap.querySelectorAll("button[data-fd-unreject]").forEach((btn) => btn.addEventListener("click", () => decideFilingDestination(btn, "unreject", where)));
+  wrap.querySelectorAll("button[data-fd-save]").forEach((btn) => btn.addEventListener("click", () => decideFilingDestination(btn, "save", where)));
   wrap.querySelectorAll("button[data-fd-edit]").forEach((btn) => btn.addEventListener("click", () => {
     const slot = btn.closest("[data-fd-proposal]")?.querySelector("[data-fd-edit-slot]");
     if (slot) slot.hidden = !slot.hidden;
   }));
+}
+
+// DESTINATIONS TO CONFIRM (owner, 2026-11-10): one screen with every authority the org's open jobs
+// file with whose destination no person has verified, grouped by client (GET /api/filing-destinations,
+// a read). The proposals render with the SAME block and buttons as the track card
+// (filing-destination.js); each button names the job and track whose card shows it, and the click goes
+// through decideFilingDestination above with this context — so the same named-person confirm, the same
+// body and the same /api/projects/:id/filing-destinations route. One authority per click; no bulk.
+function destinationQueueContext(btn) {
+  const FD = window.FilingDestination;
+  return {
+    projectId: btn.dataset.fdProject,
+    payload: FD ? FD.queuePayload(state.destinationQueue) : null,
+    notify: (message, kind) => showToast(message, kind === "error" ? "error" : kind === "warning" ? "warning" : "success"),
+    after: () => loadDestinationQueue(),
+  };
+}
+async function loadDestinationQueue() {
+  const body = $("destQueueBody");
+  const FD = window.FilingDestination;
+  if (!body || !FD) return;
+  try {
+    state.destinationQueue = await api("/api/filing-destinations");
+  } catch (err) {
+    state.destinationQueue = null;
+    body.innerHTML = `<p class="muted">Destinations to confirm did not load: ${esc(err.message)}</p>`;
+    return;
+  }
+  body.innerHTML = FD.renderQueue(state.destinationQueue);
+  bindFilingDestinationButtons(body, destinationQueueContext);
+  // A job link closes the view and opens that job (its track card has the same buttons).
+  body.querySelectorAll('a[href^="#/project/"]').forEach((a) => a.addEventListener("click", () => { $("destQueueModal").hidden = true; }));
+  if (window.lucide) window.lucide.createIcons();
+}
+async function openDestinationQueue() {
+  $("destQueueModal").hidden = false;
+  $("destQueueBody").innerHTML = `<p class="muted">Loading…</p>`;
+  await loadDestinationQueue();
 }
 
 // The utility's application requirement panel (utility-requirements.js), '' when the module is missing
@@ -13494,6 +13547,10 @@ async function openKpiModal() {
 function closeKpiModal() { $("kpiModal").hidden = true; }
 
 $("openKpiBtn").addEventListener("click", openKpiModal);
+$("openDestQueueBtn").addEventListener("click", openDestinationQueue);
+$("closeDestQueueBtn").addEventListener("click", () => { $("destQueueModal").hidden = true; });
+$("refreshDestQueueBtn").addEventListener("click", loadDestinationQueue);
+$("destQueueModal").addEventListener("click", (e) => { if (e.target.id === "destQueueModal") $("destQueueModal").hidden = true; });
 $("closeKpiBtn").addEventListener("click", closeKpiModal);
 $("refreshKpiBtn").addEventListener("click", loadKpi);
 $("kpiModal").addEventListener("click", (e) => { if (e.target.id === "kpiModal") closeKpiModal(); });
@@ -13670,13 +13727,14 @@ connectSse();
 // shortcuts (Esc and Ctrl/Cmd+K still work) so normal data entry is unaffected.
 // ---------------------------------------------------------------------------
 (function installKeyboardShortcuts() {
-  const MODAL_IDS = ["portalLoginsModal", "knowledgeModal", "customersModal", "clientsModal", "usersModal", "kpiModal"];
+  const MODAL_IDS = ["portalLoginsModal", "knowledgeModal", "customersModal", "clientsModal", "usersModal", "kpiModal", "destQueueModal"];
   const MODAL_CLOSERS = {
     knowledgeModal: () => $("closeKnowledgeBtn")?.click(),
     customersModal: () => $("closeCustomersBtn")?.click(),
     clientsModal: () => $("closeClientsBtn")?.click(),
     usersModal: () => $("closeUsersBtn")?.click(),
     kpiModal: () => $("closeKpiBtn")?.click(),
+    destQueueModal: () => $("closeDestQueueBtn")?.click(),
     portalLoginsModal: () => $("closePortalLoginsBtn")?.click(),
   };
 
