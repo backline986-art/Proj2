@@ -1253,11 +1253,29 @@ export type UtilityRequirementKey =
   | "site_plan"
   | "ac_disconnect"
   | "storage_mode_declaration"
-  | "owner_signature";
+  | "owner_signature"
+  | "module_spec"
+  | "inverter_spec";
 export const UTILITY_REQUIREMENT_KEYS: readonly UtilityRequirementKey[] = [
   "account_verification", "meter_photo", "inverter_settings", "inverter_listing_ul1741sb", "one_line",
-  "site_plan", "ac_disconnect", "storage_mode_declaration", "owner_signature",
+  "site_plan", "ac_disconnect", "storage_mode_declaration", "owner_signature", "module_spec", "inverter_spec",
 ];
+/** Which gate reads an item: the reviewer gate (reviewerEngine), the QC baseline (baselineRules), or both. */
+export type UtilityRequirementGate = "reviewer" | "qc";
+/** How the QC baseline reports a missing item (baselineRules). Items sharing a ruleId report as ONE
+ *  result listing each missing item's label. {utility} and {missing} are filled in. */
+export interface UtilityRequirementQc {
+  ruleId: string;
+  ruleName: string;
+  message: string;
+  fieldName: string;
+  /** This item's words in a {missing} list ("SLD/3-line"). */
+  label?: string;
+  /** "blocker" only counts when the item may block (utilityRequirements.requirementMayBlock). */
+  severity?: "blocker" | "warning";
+  /** Where the result sits among the utility's QC results (lower first). */
+  order?: number;
+}
 /** seeded (shipped reference / a lookup's proposal) < official (#683: the utility's own official page,
  *  quote confirmed in the bytes read) < verified (a named person). */
 export type UtilityRequirementTier = "seeded" | "official" | "verified";
@@ -1275,6 +1293,10 @@ export interface UtilityApplicationRequirement {
   /** A finding id kept from before this data existed (the two first seeded utilities), so the gate's
    *  history, dedupe and tests keep reading the same id. Absent = reviewer.utility.<key>. */
   findingId?: string;
+  /** Which gates read it. Absent = both. */
+  gates?: UtilityRequirementGate[];
+  /** How the QC baseline reports it when missing. Absent = the generic per-kind wording. */
+  qc?: UtilityRequirementQc;
   verifiedBy?: string;
   verifiedAt?: string;
 }
