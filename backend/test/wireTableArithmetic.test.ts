@@ -118,7 +118,8 @@ check("the same tag read twice with different values (two tables, a revision) yi
 });
 check("the same tag read twice with the same values (plan set + uploaded document) reports once", () => {
   const row = "TAG 3: (3) #2 THWN-2, (1) #10 THWN-2 EGC, (2) 90A FUSES";
-  const fs = evaluateWireTableFindings(mk(row), { documentTexts: [{ label: "Plan set PDF", text: row }] });
+  // Check records (review-audit draft 07) aside: one finding.
+  const fs = evaluateWireTableFindings(mk(row), { documentTexts: [{ label: "Plan set PDF", text: row }] }).filter((f) => !f.checkOutcome);
   assert.equal(fs.length, 1);
   assert.equal((fs[0].message.match(/Tag 3/g) ?? []).length, 1);
 });
@@ -153,7 +154,9 @@ check("ampacity: the inverter output circuit electricalSizing already recomputes
   assert.equal(byId(evaluateWireTableFindings(mk(row, "Line-side tap", { acConductor: "#10 AWG THWN-2", pvBreaker: "40" })), "city.elec.wire-table-ocpd-over-ampacity"), undefined);
 });
 check("no sheet text: no findings", () => {
-  assert.deepEqual(evaluateWireTableFindings(mk("")), []);
+  // Only the "not checked: a wire table is not on the plans" record (review-audit draft 07).
+  const fs = evaluateWireTableFindings(mk(""));
+  assert.deepEqual(fs.map((f) => [f.id, f.severity, f.checkOutcome]), [["city.elec.wire-table.not-checked", "callout", "not_checked"]]);
 });
 
 console.log("\n5. MEASURED: A PICTURE OF THE TABLE NEVER RELAXES ITS ARITHMETIC");

@@ -409,6 +409,100 @@
         "evidenceStatus": "weak"
       },
       {
+        "id": "city.elec.sizing-busbar-120.pass",
+        "severity": "pass",
+        "category": "electrical",
+        "title": "Busbar 120 percent screen (705.12(B)(3)(2))",
+        "message": "705.12(B)(3)(2): PV breaker 40 A (parser) + 200 A main (parser) = 240 A, within 120 % of the 200 A (parser) busbar (1.2 x 200 = 240 A). Measured on the PV breaker rating. Values marked (parser) were read by the parser but not found stated on the sheets (pvBreaker, busRating, mainBreaker); confirm them before treating this as a rejection.",
+        "cityFeedback": "",
+        "designTeamAction": "",
+        "evidenceNeeded": [],
+        "codeReferences": [
+          {
+            "code": "NEC",
+            "section": "705.12(B)(3)(2)",
+            "title": "Load-side connections — the 120 percent busbar rule",
+            "adoptionScope": "PV connected on the load side of service equipment.",
+            "sourceUrl": "https://www.nfpa.org/codes-and-standards/nfpa-70-standard-development/70",
+            "note": "125 percent of the power source output circuit current (before the 2017 edition: the PV breaker rating) plus the busbar's main OCPD may not exceed 120 percent of the busbar rating."
+          }
+        ],
+        "installerCallout": false,
+        "checkOutcome": "passed",
+        "ruleBasis": {
+          "tier": "model_code",
+          "source": "NEC 705.12(B)(3)(2)",
+          "sourceUrl": "https://www.nfpa.org/codes-and-standards/nfpa-70-standard-development/70",
+          "label": "model code (NEC 705.12(B)(3)(2))"
+        },
+        "evidenceStatus": "verified",
+        "evidenceFound": [
+          {
+            "kind": "field_value",
+            "label": "Recomputed from the plan's own values",
+            "source": "Rule engine",
+            "excerpt": "705.12(B)(3)(2): PV breaker 40 A (parser) + 200 A main (parser) = 240 A, within 120 % of the 200 A (parser) busbar (1.2 x 200 = 240 A). Measured on the PV breaker rating. Values marked (parser) were read by the parser but not found stated on the sheets (pvBreaker, busRating, mainBreaker); confirm them before treating this as a rejection.",
+            "confidence": "high",
+            "pageHint": "",
+            "screenshotPath": "",
+            "verifier": "rule_engine",
+            "note": "A check record: the rule ran and passed. It never blocks or relaxes anything."
+          }
+        ]
+      },
+      {
+        "id": "city.elec.wire-table.not-checked",
+        "severity": "callout",
+        "category": "electrical",
+        "title": "Wire table arithmetic (EGC, ampacity vs OCPD, raceway fill)",
+        "message": "Not checked: a wire table (conductor, OCPD, ground and raceway per tag) is not on the plans.",
+        "cityFeedback": "",
+        "designTeamAction": "State a wire table (conductor, OCPD, ground and raceway per tag) on the plan set so this check can run.",
+        "evidenceNeeded": [
+          "a wire table (conductor, OCPD, ground and raceway per tag)"
+        ],
+        "codeReferences": [
+          {
+            "code": "NEC",
+            "section": "250.122",
+            "title": "Size of equipment grounding conductors",
+            "adoptionScope": "Equipment grounding conductors of every circuit.",
+            "sourceUrl": "https://www.nfpa.org/codes-and-standards/nfpa-70-standard-development/70",
+            "note": "Not smaller than Table 250.122 for the rating of the overcurrent device ahead of the circuit; 250.122(A): need not be larger than the circuit conductors."
+          },
+          {
+            "code": "NEC",
+            "section": "240.4 / 310.15 / 110.14(C)",
+            "title": "Conductor protection against overcurrent",
+            "adoptionScope": "Every conductor and its overcurrent device.",
+            "sourceUrl": "https://www.nfpa.org/codes-and-standards/nfpa-70-standard-development/70",
+            "note": "The OCPD may not exceed the conductor's ampacity after the 310.15(C)(1) fill adjustment and the 110.14(C) termination limit (next standard size up per 240.4(B); 240.4(D) small-conductor limits)."
+          }
+        ],
+        "installerCallout": false,
+        "checkOutcome": "not_checked",
+        "ruleBasis": {
+          "tier": "model_code",
+          "source": "NEC 250.122",
+          "sourceUrl": "https://www.nfpa.org/codes-and-standards/nfpa-70-standard-development/70",
+          "label": "model code (NEC 250.122)"
+        },
+        "evidenceStatus": "missing",
+        "evidenceFound": [
+          {
+            "kind": "absence_check",
+            "label": "Input not on the plans",
+            "source": "Rule engine",
+            "excerpt": "Not checked: a wire table (conductor, OCPD, ground and raceway per tag) is not on the plans.",
+            "confidence": "low",
+            "pageHint": "",
+            "screenshotPath": "",
+            "verifier": "rule_engine",
+            "note": "A check record: the rule could not run. It never blocks or relaxes anything."
+          }
+        ]
+      },
+      {
         "id": "city.elec.equipment-specs-incomplete",
         "severity": "blocker",
         "category": "electrical",
@@ -466,6 +560,81 @@
           }
         ],
         "evidenceStatus": "weak"
+      },
+      {
+        "id": "city.elec.dc-size-mismatch.pass",
+        "severity": "pass",
+        "category": "electrical",
+        "title": "DC size against the modules",
+        "message": "20 x 430 W = 8.60 kW DC, matching the project's 8.60 kW DC.",
+        "cityFeedback": "",
+        "designTeamAction": "",
+        "evidenceNeeded": [],
+        "codeReferences": [
+          {
+            "code": "2023 OESC / 2023 NEC",
+            "section": "Articles 690 and 705",
+            "title": "Solar PV and interconnected power production sources",
+            "adoptionScope": "Oregon electrical submittals; verify local adopted NEC cycle outside Oregon.",
+            "sourceUrl": "https://www.oregon.gov/bcd/codes-stand/pages/electrical.aspx",
+            "note": "Oregon BCD lists the 2023 Oregon Electrical Specialty Code as effective Oct. 1, 2023 and based on the 2023 NEC."
+          }
+        ],
+        "installerCallout": false,
+        "checkOutcome": "passed",
+        "evidenceStatus": "verified",
+        "evidenceFound": [
+          {
+            "kind": "field_value",
+            "label": "Recomputed from the plan's own values",
+            "source": "Rule engine",
+            "excerpt": "20 x 430 W = 8.60 kW DC, matching the project's 8.60 kW DC.",
+            "confidence": "high",
+            "pageHint": "",
+            "screenshotPath": "",
+            "verifier": "rule_engine",
+            "note": "A check record: the rule ran and passed. It never blocks or relaxes anything."
+          }
+        ]
+      },
+      {
+        "id": "city.elec.ac-size-mismatch.not-checked",
+        "severity": "callout",
+        "category": "electrical",
+        "title": "AC size against the inverters",
+        "message": "Not checked: the inverter's rated output per unit; the inverter quantity are not on the plans.",
+        "cityFeedback": "",
+        "designTeamAction": "State the inverter's rated output per unit; the inverter quantity on the plan set so this check can run.",
+        "evidenceNeeded": [
+          "the inverter's rated output per unit",
+          "the inverter quantity"
+        ],
+        "codeReferences": [
+          {
+            "code": "2023 OESC / 2023 NEC",
+            "section": "Articles 690 and 705",
+            "title": "Solar PV and interconnected power production sources",
+            "adoptionScope": "Oregon electrical submittals; verify local adopted NEC cycle outside Oregon.",
+            "sourceUrl": "https://www.oregon.gov/bcd/codes-stand/pages/electrical.aspx",
+            "note": "Oregon BCD lists the 2023 Oregon Electrical Specialty Code as effective Oct. 1, 2023 and based on the 2023 NEC."
+          }
+        ],
+        "installerCallout": false,
+        "checkOutcome": "not_checked",
+        "evidenceStatus": "missing",
+        "evidenceFound": [
+          {
+            "kind": "absence_check",
+            "label": "Input not on the plans",
+            "source": "Rule engine",
+            "excerpt": "Not checked: the inverter's rated output per unit; the inverter quantity are not on the plans.",
+            "confidence": "low",
+            "pageHint": "",
+            "screenshotPath": "",
+            "verifier": "rule_engine",
+            "note": "A check record: the rule could not run. It never blocks or relaxes anything."
+          }
+        ]
       },
       {
         "id": "reviewer.plan.rapid-shutdown",
@@ -1338,6 +1507,12 @@
         ]
       },
       {
+        "ruleBasis": {
+          "tier": "model_code",
+          "source": "IRC 2021 R324.6 default",
+          "sourceUrl": "https://codes.iccsafe.org/content/IRC2021P1/chapter-3-building-planning",
+          "label": "model code (IRC 2021 R324.6 default)"
+        },
         "id": "city.fire.pathway-unmeasured",
         "severity": "callout",
         "category": "plan_set",
@@ -1857,6 +2032,100 @@
         "evidenceStatus": "weak"
       },
       {
+        "id": "city.elec.sizing-busbar-120.pass",
+        "severity": "pass",
+        "category": "electrical",
+        "title": "Busbar 120 percent screen (705.12)",
+        "message": "705.12: PV breaker 40 A (parser) + 200 A main (parser) = 240 A, within 120 % of the 200 A (parser) busbar (1.2 x 200 = 240 A). Measured on the PV breaker rating. Values marked (parser) were read by the parser but not found stated on the sheets (pvBreaker, busRating, mainBreaker); confirm them before treating this as a rejection.",
+        "cityFeedback": "",
+        "designTeamAction": "",
+        "evidenceNeeded": [],
+        "codeReferences": [
+          {
+            "code": "2023 NEC",
+            "section": "705.12",
+            "title": "Load-side connections — the 120 percent busbar rule",
+            "adoptionScope": "City of Sample Falls: adopted NEC 2023.",
+            "sourceUrl": "https://www.nfpa.org/codes-and-standards/nfpa-70-standard-development/70",
+            "note": "125 percent of the power source output circuit current (before the 2017 edition: the PV breaker rating) plus the busbar's main OCPD may not exceed 120 percent of the busbar rating."
+          }
+        ],
+        "installerCallout": false,
+        "checkOutcome": "passed",
+        "ruleBasis": {
+          "tier": "model_code",
+          "source": "NEC 2023 705.12",
+          "sourceUrl": "https://www.nfpa.org/codes-and-standards/nfpa-70-standard-development/70",
+          "label": "model code (NEC 2023 705.12)"
+        },
+        "evidenceStatus": "verified",
+        "evidenceFound": [
+          {
+            "kind": "field_value",
+            "label": "Recomputed from the plan's own values",
+            "source": "Rule engine",
+            "excerpt": "705.12: PV breaker 40 A (parser) + 200 A main (parser) = 240 A, within 120 % of the 200 A (parser) busbar (1.2 x 200 = 240 A). Measured on the PV breaker rating. Values marked (parser) were read by the parser but not found stated on the sheets (pvBreaker, busRating, mainBreaker); confirm them before treating this as a rejection.",
+            "confidence": "high",
+            "pageHint": "",
+            "screenshotPath": "",
+            "verifier": "rule_engine",
+            "note": "A check record: the rule ran and passed. It never blocks or relaxes anything."
+          }
+        ]
+      },
+      {
+        "id": "city.elec.wire-table.not-checked",
+        "severity": "callout",
+        "category": "electrical",
+        "title": "Wire table arithmetic (EGC, ampacity vs OCPD, raceway fill)",
+        "message": "Not checked: a wire table (conductor, OCPD, ground and raceway per tag) is not on the plans.",
+        "cityFeedback": "",
+        "designTeamAction": "State a wire table (conductor, OCPD, ground and raceway per tag) on the plan set so this check can run.",
+        "evidenceNeeded": [
+          "a wire table (conductor, OCPD, ground and raceway per tag)"
+        ],
+        "codeReferences": [
+          {
+            "code": "2023 NEC",
+            "section": "250.122",
+            "title": "Size of equipment grounding conductors",
+            "adoptionScope": "City of Sample Falls: adopted NEC 2023.",
+            "sourceUrl": "https://www.nfpa.org/codes-and-standards/nfpa-70-standard-development/70",
+            "note": "Not smaller than Table 250.122 for the rating of the overcurrent device ahead of the circuit; 250.122(A): need not be larger than the circuit conductors."
+          },
+          {
+            "code": "2023 NEC",
+            "section": "240.4 / 310.15 / 110.14(C)",
+            "title": "Conductor protection against overcurrent",
+            "adoptionScope": "City of Sample Falls: adopted NEC 2023.",
+            "sourceUrl": "https://www.nfpa.org/codes-and-standards/nfpa-70-standard-development/70",
+            "note": "The OCPD may not exceed the conductor's ampacity after the 310.15(C)(1) fill adjustment and the 110.14(C) termination limit (next standard size up per 240.4(B); 240.4(D) small-conductor limits)."
+          }
+        ],
+        "installerCallout": false,
+        "checkOutcome": "not_checked",
+        "ruleBasis": {
+          "tier": "model_code",
+          "source": "NEC 250.122",
+          "sourceUrl": "https://www.nfpa.org/codes-and-standards/nfpa-70-standard-development/70",
+          "label": "model code (NEC 250.122)"
+        },
+        "evidenceStatus": "missing",
+        "evidenceFound": [
+          {
+            "kind": "absence_check",
+            "label": "Input not on the plans",
+            "source": "Rule engine",
+            "excerpt": "Not checked: a wire table (conductor, OCPD, ground and raceway per tag) is not on the plans.",
+            "confidence": "low",
+            "pageHint": "",
+            "screenshotPath": "",
+            "verifier": "rule_engine",
+            "note": "A check record: the rule could not run. It never blocks or relaxes anything."
+          }
+        ]
+      },
+      {
         "id": "city.elec.equipment-specs-incomplete",
         "severity": "blocker",
         "category": "electrical",
@@ -1914,6 +2183,81 @@
           }
         ],
         "evidenceStatus": "weak"
+      },
+      {
+        "id": "city.elec.dc-size-mismatch.pass",
+        "severity": "pass",
+        "category": "electrical",
+        "title": "DC size against the modules",
+        "message": "20 x 430 W = 8.60 kW DC, matching the project's 8.60 kW DC.",
+        "cityFeedback": "",
+        "designTeamAction": "",
+        "evidenceNeeded": [],
+        "codeReferences": [
+          {
+            "code": "2023 NEC",
+            "section": "Articles 690 and 705",
+            "title": "Solar PV and interconnected power production sources",
+            "adoptionScope": "City of Sample Falls: adopted NEC 2023.",
+            "sourceUrl": "",
+            "note": "Oregon BCD lists the 2023 Oregon Electrical Specialty Code as effective Oct. 1, 2023 and based on the 2023 NEC."
+          }
+        ],
+        "installerCallout": false,
+        "checkOutcome": "passed",
+        "evidenceStatus": "verified",
+        "evidenceFound": [
+          {
+            "kind": "field_value",
+            "label": "Recomputed from the plan's own values",
+            "source": "Rule engine",
+            "excerpt": "20 x 430 W = 8.60 kW DC, matching the project's 8.60 kW DC.",
+            "confidence": "high",
+            "pageHint": "",
+            "screenshotPath": "",
+            "verifier": "rule_engine",
+            "note": "A check record: the rule ran and passed. It never blocks or relaxes anything."
+          }
+        ]
+      },
+      {
+        "id": "city.elec.ac-size-mismatch.not-checked",
+        "severity": "callout",
+        "category": "electrical",
+        "title": "AC size against the inverters",
+        "message": "Not checked: the inverter's rated output per unit; the inverter quantity are not on the plans.",
+        "cityFeedback": "",
+        "designTeamAction": "State the inverter's rated output per unit; the inverter quantity on the plan set so this check can run.",
+        "evidenceNeeded": [
+          "the inverter's rated output per unit",
+          "the inverter quantity"
+        ],
+        "codeReferences": [
+          {
+            "code": "2023 NEC",
+            "section": "Articles 690 and 705",
+            "title": "Solar PV and interconnected power production sources",
+            "adoptionScope": "City of Sample Falls: adopted NEC 2023.",
+            "sourceUrl": "",
+            "note": "Oregon BCD lists the 2023 Oregon Electrical Specialty Code as effective Oct. 1, 2023 and based on the 2023 NEC."
+          }
+        ],
+        "installerCallout": false,
+        "checkOutcome": "not_checked",
+        "evidenceStatus": "missing",
+        "evidenceFound": [
+          {
+            "kind": "absence_check",
+            "label": "Input not on the plans",
+            "source": "Rule engine",
+            "excerpt": "Not checked: the inverter's rated output per unit; the inverter quantity are not on the plans.",
+            "confidence": "low",
+            "pageHint": "",
+            "screenshotPath": "",
+            "verifier": "rule_engine",
+            "note": "A check record: the rule could not run. It never blocks or relaxes anything."
+          }
+        ]
       },
       {
         "id": "reviewer.plan.rapid-shutdown",
@@ -3138,6 +3482,100 @@
         "evidenceStatus": "weak"
       },
       {
+        "id": "city.elec.sizing-busbar-120.pass",
+        "severity": "pass",
+        "category": "electrical",
+        "title": "Busbar 120 percent screen (705.12(B)(3)(2))",
+        "message": "705.12(B)(3)(2): PV breaker 40 A (parser) + 200 A main (parser) = 240 A, within 120 % of the 200 A (parser) busbar (1.2 x 200 = 240 A). Measured on the PV breaker rating. Values marked (parser) were read by the parser but not found stated on the sheets (pvBreaker, busRating, mainBreaker); confirm them before treating this as a rejection.",
+        "cityFeedback": "",
+        "designTeamAction": "",
+        "evidenceNeeded": [],
+        "codeReferences": [
+          {
+            "code": "NEC",
+            "section": "705.12(B)(3)(2)",
+            "title": "Load-side connections — the 120 percent busbar rule",
+            "adoptionScope": "PV connected on the load side of service equipment.",
+            "sourceUrl": "https://www.nfpa.org/codes-and-standards/nfpa-70-standard-development/70",
+            "note": "125 percent of the power source output circuit current (before the 2017 edition: the PV breaker rating) plus the busbar's main OCPD may not exceed 120 percent of the busbar rating."
+          }
+        ],
+        "installerCallout": false,
+        "checkOutcome": "passed",
+        "ruleBasis": {
+          "tier": "model_code",
+          "source": "NEC 705.12(B)(3)(2)",
+          "sourceUrl": "https://www.nfpa.org/codes-and-standards/nfpa-70-standard-development/70",
+          "label": "model code (NEC 705.12(B)(3)(2))"
+        },
+        "evidenceStatus": "verified",
+        "evidenceFound": [
+          {
+            "kind": "field_value",
+            "label": "Recomputed from the plan's own values",
+            "source": "Rule engine",
+            "excerpt": "705.12(B)(3)(2): PV breaker 40 A (parser) + 200 A main (parser) = 240 A, within 120 % of the 200 A (parser) busbar (1.2 x 200 = 240 A). Measured on the PV breaker rating. Values marked (parser) were read by the parser but not found stated on the sheets (pvBreaker, busRating, mainBreaker); confirm them before treating this as a rejection.",
+            "confidence": "high",
+            "pageHint": "",
+            "screenshotPath": "",
+            "verifier": "rule_engine",
+            "note": "A check record: the rule ran and passed. It never blocks or relaxes anything."
+          }
+        ]
+      },
+      {
+        "id": "city.elec.wire-table.not-checked",
+        "severity": "callout",
+        "category": "electrical",
+        "title": "Wire table arithmetic (EGC, ampacity vs OCPD, raceway fill)",
+        "message": "Not checked: a wire table (conductor, OCPD, ground and raceway per tag) is not on the plans.",
+        "cityFeedback": "",
+        "designTeamAction": "State a wire table (conductor, OCPD, ground and raceway per tag) on the plan set so this check can run.",
+        "evidenceNeeded": [
+          "a wire table (conductor, OCPD, ground and raceway per tag)"
+        ],
+        "codeReferences": [
+          {
+            "code": "NEC",
+            "section": "250.122",
+            "title": "Size of equipment grounding conductors",
+            "adoptionScope": "Equipment grounding conductors of every circuit.",
+            "sourceUrl": "https://www.nfpa.org/codes-and-standards/nfpa-70-standard-development/70",
+            "note": "Not smaller than Table 250.122 for the rating of the overcurrent device ahead of the circuit; 250.122(A): need not be larger than the circuit conductors."
+          },
+          {
+            "code": "NEC",
+            "section": "240.4 / 310.15 / 110.14(C)",
+            "title": "Conductor protection against overcurrent",
+            "adoptionScope": "Every conductor and its overcurrent device.",
+            "sourceUrl": "https://www.nfpa.org/codes-and-standards/nfpa-70-standard-development/70",
+            "note": "The OCPD may not exceed the conductor's ampacity after the 310.15(C)(1) fill adjustment and the 110.14(C) termination limit (next standard size up per 240.4(B); 240.4(D) small-conductor limits)."
+          }
+        ],
+        "installerCallout": false,
+        "checkOutcome": "not_checked",
+        "ruleBasis": {
+          "tier": "model_code",
+          "source": "NEC 250.122",
+          "sourceUrl": "https://www.nfpa.org/codes-and-standards/nfpa-70-standard-development/70",
+          "label": "model code (NEC 250.122)"
+        },
+        "evidenceStatus": "missing",
+        "evidenceFound": [
+          {
+            "kind": "absence_check",
+            "label": "Input not on the plans",
+            "source": "Rule engine",
+            "excerpt": "Not checked: a wire table (conductor, OCPD, ground and raceway per tag) is not on the plans.",
+            "confidence": "low",
+            "pageHint": "",
+            "screenshotPath": "",
+            "verifier": "rule_engine",
+            "note": "A check record: the rule could not run. It never blocks or relaxes anything."
+          }
+        ]
+      },
+      {
         "id": "city.elec.equipment-specs-incomplete",
         "severity": "blocker",
         "category": "electrical",
@@ -3195,6 +3633,81 @@
           }
         ],
         "evidenceStatus": "weak"
+      },
+      {
+        "id": "city.elec.dc-size-mismatch.pass",
+        "severity": "pass",
+        "category": "electrical",
+        "title": "DC size against the modules",
+        "message": "20 x 430 W = 8.60 kW DC, matching the project's 8.60 kW DC.",
+        "cityFeedback": "",
+        "designTeamAction": "",
+        "evidenceNeeded": [],
+        "codeReferences": [
+          {
+            "code": "2023 OESC / 2023 NEC",
+            "section": "Articles 690 and 705",
+            "title": "Solar PV and interconnected power production sources",
+            "adoptionScope": "Oregon electrical submittals; verify local adopted NEC cycle outside Oregon.",
+            "sourceUrl": "https://www.oregon.gov/bcd/codes-stand/pages/electrical.aspx",
+            "note": "Oregon BCD lists the 2023 Oregon Electrical Specialty Code as effective Oct. 1, 2023 and based on the 2023 NEC."
+          }
+        ],
+        "installerCallout": false,
+        "checkOutcome": "passed",
+        "evidenceStatus": "verified",
+        "evidenceFound": [
+          {
+            "kind": "field_value",
+            "label": "Recomputed from the plan's own values",
+            "source": "Rule engine",
+            "excerpt": "20 x 430 W = 8.60 kW DC, matching the project's 8.60 kW DC.",
+            "confidence": "high",
+            "pageHint": "",
+            "screenshotPath": "",
+            "verifier": "rule_engine",
+            "note": "A check record: the rule ran and passed. It never blocks or relaxes anything."
+          }
+        ]
+      },
+      {
+        "id": "city.elec.ac-size-mismatch.not-checked",
+        "severity": "callout",
+        "category": "electrical",
+        "title": "AC size against the inverters",
+        "message": "Not checked: the inverter's rated output per unit; the inverter quantity are not on the plans.",
+        "cityFeedback": "",
+        "designTeamAction": "State the inverter's rated output per unit; the inverter quantity on the plan set so this check can run.",
+        "evidenceNeeded": [
+          "the inverter's rated output per unit",
+          "the inverter quantity"
+        ],
+        "codeReferences": [
+          {
+            "code": "2023 OESC / 2023 NEC",
+            "section": "Articles 690 and 705",
+            "title": "Solar PV and interconnected power production sources",
+            "adoptionScope": "Oregon electrical submittals; verify local adopted NEC cycle outside Oregon.",
+            "sourceUrl": "https://www.oregon.gov/bcd/codes-stand/pages/electrical.aspx",
+            "note": "Oregon BCD lists the 2023 Oregon Electrical Specialty Code as effective Oct. 1, 2023 and based on the 2023 NEC."
+          }
+        ],
+        "installerCallout": false,
+        "checkOutcome": "not_checked",
+        "evidenceStatus": "missing",
+        "evidenceFound": [
+          {
+            "kind": "absence_check",
+            "label": "Input not on the plans",
+            "source": "Rule engine",
+            "excerpt": "Not checked: the inverter's rated output per unit; the inverter quantity are not on the plans.",
+            "confidence": "low",
+            "pageHint": "",
+            "screenshotPath": "",
+            "verifier": "rule_engine",
+            "note": "A check record: the rule could not run. It never blocks or relaxes anything."
+          }
+        ]
       },
       {
         "id": "reviewer.utility.requirements-not-on-file",
@@ -3947,6 +4460,92 @@
         ]
       },
       {
+        "id": "city.fire.pathway-below-required.pass",
+        "severity": "pass",
+        "category": "plan_set",
+        "title": "Fire access pathway / ridge setback dimensions",
+        "message": "Fire access pathway width: stated 36 in (Uploaded plan-set document text) >= 36 in — IRC 2021 R324.6.1 model-code default; no City of Sample Falls pathway width on file.",
+        "cityFeedback": "",
+        "designTeamAction": "",
+        "evidenceNeeded": [],
+        "codeReferences": [
+          {
+            "code": "2021 IRC",
+            "section": "R324.6",
+            "title": "Roof access and pathways",
+            "adoptionScope": "City of Sample Falls: adopted IRC 2021.",
+            "sourceUrl": "https://codes.iccsafe.org/content/IRC2021P1/chapter-3-building-planning",
+            "note": "Fire access pathway widths and ridge setbacks for rooftop PV; the jurisdiction may amend them."
+          }
+        ],
+        "installerCallout": false,
+        "checkOutcome": "passed",
+        "ruleBasis": {
+          "tier": "model_code",
+          "source": "IRC 2021 R324.6 default",
+          "sourceUrl": "https://codes.iccsafe.org/content/IRC2021P1/chapter-3-building-planning",
+          "label": "model code (IRC 2021 R324.6 default)"
+        },
+        "evidenceStatus": "verified",
+        "evidenceFound": [
+          {
+            "kind": "field_value",
+            "label": "Recomputed from the plan's own values",
+            "source": "Rule engine",
+            "excerpt": "Fire access pathway width: stated 36 in (Uploaded plan-set document text) >= 36 in — IRC 2021 R324.6.1 model-code default; no City of Sample Falls pathway width on file.",
+            "confidence": "high",
+            "pageHint": "",
+            "screenshotPath": "",
+            "verifier": "rule_engine",
+            "note": "A check record: the rule ran and passed. It never blocks or relaxes anything."
+          }
+        ]
+      },
+      {
+        "id": "city.fire.pathway-below-required.not-checked",
+        "severity": "callout",
+        "category": "plan_set",
+        "title": "Fire access pathway / ridge setback dimensions",
+        "message": "Not checked: the array setback from the ridge (at least 36 in) is not on the plans.",
+        "cityFeedback": "",
+        "designTeamAction": "State the array setback from the ridge (at least 36 in) on the plan set so this check can run.",
+        "evidenceNeeded": [
+          "the array setback from the ridge (at least 36 in)"
+        ],
+        "codeReferences": [
+          {
+            "code": "2021 IRC",
+            "section": "R324.6",
+            "title": "Roof access and pathways",
+            "adoptionScope": "City of Sample Falls: adopted IRC 2021.",
+            "sourceUrl": "https://codes.iccsafe.org/content/IRC2021P1/chapter-3-building-planning",
+            "note": "Fire access pathway widths and ridge setbacks for rooftop PV; the jurisdiction may amend them."
+          }
+        ],
+        "installerCallout": false,
+        "checkOutcome": "not_checked",
+        "ruleBasis": {
+          "tier": "model_code",
+          "source": "IRC 2021 R324.6 default",
+          "sourceUrl": "https://codes.iccsafe.org/content/IRC2021P1/chapter-3-building-planning",
+          "label": "model code (IRC 2021 R324.6 default)"
+        },
+        "evidenceStatus": "missing",
+        "evidenceFound": [
+          {
+            "kind": "absence_check",
+            "label": "Input not on the plans",
+            "source": "Rule engine",
+            "excerpt": "Not checked: the array setback from the ridge (at least 36 in) is not on the plans.",
+            "confidence": "low",
+            "pageHint": "",
+            "screenshotPath": "",
+            "verifier": "rule_engine",
+            "note": "A check record: the rule could not run. It never blocks or relaxes anything."
+          }
+        ]
+      },
+      {
         "id": "city.fire.eero-unconfirmed",
         "severity": "callout",
         "category": "plan_set",
@@ -4377,6 +4976,100 @@
         "evidenceStatus": "weak"
       },
       {
+        "id": "city.elec.sizing-busbar-120.pass",
+        "severity": "pass",
+        "category": "electrical",
+        "title": "Busbar 120 percent screen (705.12)",
+        "message": "705.12: PV breaker 40 A (parser) + 200 A main (parser) = 240 A, within 120 % of the 200 A (parser) busbar (1.2 x 200 = 240 A). Measured on the PV breaker rating. Values marked (parser) were read by the parser but not found stated on the sheets (pvBreaker, busRating, mainBreaker); confirm them before treating this as a rejection.",
+        "cityFeedback": "",
+        "designTeamAction": "",
+        "evidenceNeeded": [],
+        "codeReferences": [
+          {
+            "code": "2023 NEC",
+            "section": "705.12",
+            "title": "Load-side connections — the 120 percent busbar rule",
+            "adoptionScope": "City of Sample Falls: adopted NEC 2023.",
+            "sourceUrl": "https://www.nfpa.org/codes-and-standards/nfpa-70-standard-development/70",
+            "note": "125 percent of the power source output circuit current (before the 2017 edition: the PV breaker rating) plus the busbar's main OCPD may not exceed 120 percent of the busbar rating."
+          }
+        ],
+        "installerCallout": false,
+        "checkOutcome": "passed",
+        "ruleBasis": {
+          "tier": "model_code",
+          "source": "NEC 2023 705.12",
+          "sourceUrl": "https://www.nfpa.org/codes-and-standards/nfpa-70-standard-development/70",
+          "label": "model code (NEC 2023 705.12)"
+        },
+        "evidenceStatus": "verified",
+        "evidenceFound": [
+          {
+            "kind": "field_value",
+            "label": "Recomputed from the plan's own values",
+            "source": "Rule engine",
+            "excerpt": "705.12: PV breaker 40 A (parser) + 200 A main (parser) = 240 A, within 120 % of the 200 A (parser) busbar (1.2 x 200 = 240 A). Measured on the PV breaker rating. Values marked (parser) were read by the parser but not found stated on the sheets (pvBreaker, busRating, mainBreaker); confirm them before treating this as a rejection.",
+            "confidence": "high",
+            "pageHint": "",
+            "screenshotPath": "",
+            "verifier": "rule_engine",
+            "note": "A check record: the rule ran and passed. It never blocks or relaxes anything."
+          }
+        ]
+      },
+      {
+        "id": "city.elec.wire-table.not-checked",
+        "severity": "callout",
+        "category": "electrical",
+        "title": "Wire table arithmetic (EGC, ampacity vs OCPD, raceway fill)",
+        "message": "Not checked: a wire table (conductor, OCPD, ground and raceway per tag) is not on the plans.",
+        "cityFeedback": "",
+        "designTeamAction": "State a wire table (conductor, OCPD, ground and raceway per tag) on the plan set so this check can run.",
+        "evidenceNeeded": [
+          "a wire table (conductor, OCPD, ground and raceway per tag)"
+        ],
+        "codeReferences": [
+          {
+            "code": "2023 NEC",
+            "section": "250.122",
+            "title": "Size of equipment grounding conductors",
+            "adoptionScope": "City of Sample Falls: adopted NEC 2023.",
+            "sourceUrl": "https://www.nfpa.org/codes-and-standards/nfpa-70-standard-development/70",
+            "note": "Not smaller than Table 250.122 for the rating of the overcurrent device ahead of the circuit; 250.122(A): need not be larger than the circuit conductors."
+          },
+          {
+            "code": "2023 NEC",
+            "section": "240.4 / 310.15 / 110.14(C)",
+            "title": "Conductor protection against overcurrent",
+            "adoptionScope": "City of Sample Falls: adopted NEC 2023.",
+            "sourceUrl": "https://www.nfpa.org/codes-and-standards/nfpa-70-standard-development/70",
+            "note": "The OCPD may not exceed the conductor's ampacity after the 310.15(C)(1) fill adjustment and the 110.14(C) termination limit (next standard size up per 240.4(B); 240.4(D) small-conductor limits)."
+          }
+        ],
+        "installerCallout": false,
+        "checkOutcome": "not_checked",
+        "ruleBasis": {
+          "tier": "model_code",
+          "source": "NEC 250.122",
+          "sourceUrl": "https://www.nfpa.org/codes-and-standards/nfpa-70-standard-development/70",
+          "label": "model code (NEC 250.122)"
+        },
+        "evidenceStatus": "missing",
+        "evidenceFound": [
+          {
+            "kind": "absence_check",
+            "label": "Input not on the plans",
+            "source": "Rule engine",
+            "excerpt": "Not checked: a wire table (conductor, OCPD, ground and raceway per tag) is not on the plans.",
+            "confidence": "low",
+            "pageHint": "",
+            "screenshotPath": "",
+            "verifier": "rule_engine",
+            "note": "A check record: the rule could not run. It never blocks or relaxes anything."
+          }
+        ]
+      },
+      {
         "id": "city.elec.equipment-specs-incomplete",
         "severity": "blocker",
         "category": "electrical",
@@ -4434,6 +5127,81 @@
           }
         ],
         "evidenceStatus": "weak"
+      },
+      {
+        "id": "city.elec.dc-size-mismatch.pass",
+        "severity": "pass",
+        "category": "electrical",
+        "title": "DC size against the modules",
+        "message": "20 x 430 W = 8.60 kW DC, matching the project's 8.60 kW DC.",
+        "cityFeedback": "",
+        "designTeamAction": "",
+        "evidenceNeeded": [],
+        "codeReferences": [
+          {
+            "code": "2023 NEC",
+            "section": "Articles 690 and 705",
+            "title": "Solar PV and interconnected power production sources",
+            "adoptionScope": "City of Sample Falls: adopted NEC 2023.",
+            "sourceUrl": "",
+            "note": "Oregon BCD lists the 2023 Oregon Electrical Specialty Code as effective Oct. 1, 2023 and based on the 2023 NEC."
+          }
+        ],
+        "installerCallout": false,
+        "checkOutcome": "passed",
+        "evidenceStatus": "verified",
+        "evidenceFound": [
+          {
+            "kind": "field_value",
+            "label": "Recomputed from the plan's own values",
+            "source": "Rule engine",
+            "excerpt": "20 x 430 W = 8.60 kW DC, matching the project's 8.60 kW DC.",
+            "confidence": "high",
+            "pageHint": "",
+            "screenshotPath": "",
+            "verifier": "rule_engine",
+            "note": "A check record: the rule ran and passed. It never blocks or relaxes anything."
+          }
+        ]
+      },
+      {
+        "id": "city.elec.ac-size-mismatch.not-checked",
+        "severity": "callout",
+        "category": "electrical",
+        "title": "AC size against the inverters",
+        "message": "Not checked: the inverter's rated output per unit; the inverter quantity are not on the plans.",
+        "cityFeedback": "",
+        "designTeamAction": "State the inverter's rated output per unit; the inverter quantity on the plan set so this check can run.",
+        "evidenceNeeded": [
+          "the inverter's rated output per unit",
+          "the inverter quantity"
+        ],
+        "codeReferences": [
+          {
+            "code": "2023 NEC",
+            "section": "Articles 690 and 705",
+            "title": "Solar PV and interconnected power production sources",
+            "adoptionScope": "City of Sample Falls: adopted NEC 2023.",
+            "sourceUrl": "",
+            "note": "Oregon BCD lists the 2023 Oregon Electrical Specialty Code as effective Oct. 1, 2023 and based on the 2023 NEC."
+          }
+        ],
+        "installerCallout": false,
+        "checkOutcome": "not_checked",
+        "evidenceStatus": "missing",
+        "evidenceFound": [
+          {
+            "kind": "absence_check",
+            "label": "Input not on the plans",
+            "source": "Rule engine",
+            "excerpt": "Not checked: the inverter's rated output per unit; the inverter quantity are not on the plans.",
+            "confidence": "low",
+            "pageHint": "",
+            "screenshotPath": "",
+            "verifier": "rule_engine",
+            "note": "A check record: the rule could not run. It never blocks or relaxes anything."
+          }
+        ]
       },
       {
         "id": "reviewer.utility.requirements-not-on-file",
@@ -5575,6 +6343,100 @@
         "evidenceStatus": "weak"
       },
       {
+        "id": "city.elec.sizing-busbar-120.pass",
+        "severity": "pass",
+        "category": "electrical",
+        "title": "Busbar 120 percent screen (705.12(B)(3)(2))",
+        "message": "705.12(B)(3)(2): PV breaker 40 A (parser) + 200 A main (parser) = 240 A, within 120 % of the 200 A (parser) busbar (1.2 x 200 = 240 A). Measured on the PV breaker rating. Values marked (parser) were read by the parser but not found stated on the sheets (pvBreaker, busRating, mainBreaker); confirm them before treating this as a rejection.",
+        "cityFeedback": "",
+        "designTeamAction": "",
+        "evidenceNeeded": [],
+        "codeReferences": [
+          {
+            "code": "NEC",
+            "section": "705.12(B)(3)(2)",
+            "title": "Load-side connections — the 120 percent busbar rule",
+            "adoptionScope": "PV connected on the load side of service equipment.",
+            "sourceUrl": "https://www.nfpa.org/codes-and-standards/nfpa-70-standard-development/70",
+            "note": "125 percent of the power source output circuit current (before the 2017 edition: the PV breaker rating) plus the busbar's main OCPD may not exceed 120 percent of the busbar rating."
+          }
+        ],
+        "installerCallout": false,
+        "checkOutcome": "passed",
+        "ruleBasis": {
+          "tier": "model_code",
+          "source": "NEC 705.12(B)(3)(2)",
+          "sourceUrl": "https://www.nfpa.org/codes-and-standards/nfpa-70-standard-development/70",
+          "label": "model code (NEC 705.12(B)(3)(2))"
+        },
+        "evidenceStatus": "verified",
+        "evidenceFound": [
+          {
+            "kind": "field_value",
+            "label": "Recomputed from the plan's own values",
+            "source": "Rule engine",
+            "excerpt": "705.12(B)(3)(2): PV breaker 40 A (parser) + 200 A main (parser) = 240 A, within 120 % of the 200 A (parser) busbar (1.2 x 200 = 240 A). Measured on the PV breaker rating. Values marked (parser) were read by the parser but not found stated on the sheets (pvBreaker, busRating, mainBreaker); confirm them before treating this as a rejection.",
+            "confidence": "high",
+            "pageHint": "",
+            "screenshotPath": "",
+            "verifier": "rule_engine",
+            "note": "A check record: the rule ran and passed. It never blocks or relaxes anything."
+          }
+        ]
+      },
+      {
+        "id": "city.elec.wire-table.not-checked",
+        "severity": "callout",
+        "category": "electrical",
+        "title": "Wire table arithmetic (EGC, ampacity vs OCPD, raceway fill)",
+        "message": "Not checked: a wire table (conductor, OCPD, ground and raceway per tag) is not on the plans.",
+        "cityFeedback": "",
+        "designTeamAction": "State a wire table (conductor, OCPD, ground and raceway per tag) on the plan set so this check can run.",
+        "evidenceNeeded": [
+          "a wire table (conductor, OCPD, ground and raceway per tag)"
+        ],
+        "codeReferences": [
+          {
+            "code": "NEC",
+            "section": "250.122",
+            "title": "Size of equipment grounding conductors",
+            "adoptionScope": "Equipment grounding conductors of every circuit.",
+            "sourceUrl": "https://www.nfpa.org/codes-and-standards/nfpa-70-standard-development/70",
+            "note": "Not smaller than Table 250.122 for the rating of the overcurrent device ahead of the circuit; 250.122(A): need not be larger than the circuit conductors."
+          },
+          {
+            "code": "NEC",
+            "section": "240.4 / 310.15 / 110.14(C)",
+            "title": "Conductor protection against overcurrent",
+            "adoptionScope": "Every conductor and its overcurrent device.",
+            "sourceUrl": "https://www.nfpa.org/codes-and-standards/nfpa-70-standard-development/70",
+            "note": "The OCPD may not exceed the conductor's ampacity after the 310.15(C)(1) fill adjustment and the 110.14(C) termination limit (next standard size up per 240.4(B); 240.4(D) small-conductor limits)."
+          }
+        ],
+        "installerCallout": false,
+        "checkOutcome": "not_checked",
+        "ruleBasis": {
+          "tier": "model_code",
+          "source": "NEC 250.122",
+          "sourceUrl": "https://www.nfpa.org/codes-and-standards/nfpa-70-standard-development/70",
+          "label": "model code (NEC 250.122)"
+        },
+        "evidenceStatus": "missing",
+        "evidenceFound": [
+          {
+            "kind": "absence_check",
+            "label": "Input not on the plans",
+            "source": "Rule engine",
+            "excerpt": "Not checked: a wire table (conductor, OCPD, ground and raceway per tag) is not on the plans.",
+            "confidence": "low",
+            "pageHint": "",
+            "screenshotPath": "",
+            "verifier": "rule_engine",
+            "note": "A check record: the rule could not run. It never blocks or relaxes anything."
+          }
+        ]
+      },
+      {
         "id": "city.elec.equipment-specs-incomplete",
         "severity": "blocker",
         "category": "electrical",
@@ -5632,6 +6494,81 @@
           }
         ],
         "evidenceStatus": "weak"
+      },
+      {
+        "id": "city.elec.dc-size-mismatch.pass",
+        "severity": "pass",
+        "category": "electrical",
+        "title": "DC size against the modules",
+        "message": "20 x 430 W = 8.60 kW DC, matching the project's 8.60 kW DC.",
+        "cityFeedback": "",
+        "designTeamAction": "",
+        "evidenceNeeded": [],
+        "codeReferences": [
+          {
+            "code": "2023 OESC / 2023 NEC",
+            "section": "Articles 690 and 705",
+            "title": "Solar PV and interconnected power production sources",
+            "adoptionScope": "Oregon electrical submittals; verify local adopted NEC cycle outside Oregon.",
+            "sourceUrl": "https://www.oregon.gov/bcd/codes-stand/pages/electrical.aspx",
+            "note": "Oregon BCD lists the 2023 Oregon Electrical Specialty Code as effective Oct. 1, 2023 and based on the 2023 NEC."
+          }
+        ],
+        "installerCallout": false,
+        "checkOutcome": "passed",
+        "evidenceStatus": "verified",
+        "evidenceFound": [
+          {
+            "kind": "field_value",
+            "label": "Recomputed from the plan's own values",
+            "source": "Rule engine",
+            "excerpt": "20 x 430 W = 8.60 kW DC, matching the project's 8.60 kW DC.",
+            "confidence": "high",
+            "pageHint": "",
+            "screenshotPath": "",
+            "verifier": "rule_engine",
+            "note": "A check record: the rule ran and passed. It never blocks or relaxes anything."
+          }
+        ]
+      },
+      {
+        "id": "city.elec.ac-size-mismatch.not-checked",
+        "severity": "callout",
+        "category": "electrical",
+        "title": "AC size against the inverters",
+        "message": "Not checked: the inverter's rated output per unit; the inverter quantity are not on the plans.",
+        "cityFeedback": "",
+        "designTeamAction": "State the inverter's rated output per unit; the inverter quantity on the plan set so this check can run.",
+        "evidenceNeeded": [
+          "the inverter's rated output per unit",
+          "the inverter quantity"
+        ],
+        "codeReferences": [
+          {
+            "code": "2023 OESC / 2023 NEC",
+            "section": "Articles 690 and 705",
+            "title": "Solar PV and interconnected power production sources",
+            "adoptionScope": "Oregon electrical submittals; verify local adopted NEC cycle outside Oregon.",
+            "sourceUrl": "https://www.oregon.gov/bcd/codes-stand/pages/electrical.aspx",
+            "note": "Oregon BCD lists the 2023 Oregon Electrical Specialty Code as effective Oct. 1, 2023 and based on the 2023 NEC."
+          }
+        ],
+        "installerCallout": false,
+        "checkOutcome": "not_checked",
+        "evidenceStatus": "missing",
+        "evidenceFound": [
+          {
+            "kind": "absence_check",
+            "label": "Input not on the plans",
+            "source": "Rule engine",
+            "excerpt": "Not checked: the inverter's rated output per unit; the inverter quantity are not on the plans.",
+            "confidence": "low",
+            "pageHint": "",
+            "screenshotPath": "",
+            "verifier": "rule_engine",
+            "note": "A check record: the rule could not run. It never blocks or relaxes anything."
+          }
+        ]
       },
       {
         "id": "reviewer.utility.requirements-not-on-file",
@@ -6420,6 +7357,12 @@
         ]
       },
       {
+        "ruleBasis": {
+          "tier": "model_code",
+          "source": "IRC 2021 R324.6 default",
+          "sourceUrl": "https://codes.iccsafe.org/content/IRC2021P1/chapter-3-building-planning",
+          "label": "model code (IRC 2021 R324.6 default)"
+        },
         "id": "city.fire.pathway-unmeasured",
         "severity": "callout",
         "category": "plan_set",
@@ -6939,6 +7882,100 @@
         "evidenceStatus": "weak"
       },
       {
+        "id": "city.elec.sizing-busbar-120.pass",
+        "severity": "pass",
+        "category": "electrical",
+        "title": "Busbar 120 percent screen (705.12)",
+        "message": "705.12: PV breaker 40 A (parser) + 200 A main (parser) = 240 A, within 120 % of the 200 A (parser) busbar (1.2 x 200 = 240 A). Measured on the PV breaker rating. Values marked (parser) were read by the parser but not found stated on the sheets (pvBreaker, busRating, mainBreaker); confirm them before treating this as a rejection.",
+        "cityFeedback": "",
+        "designTeamAction": "",
+        "evidenceNeeded": [],
+        "codeReferences": [
+          {
+            "code": "2023 NEC",
+            "section": "705.12",
+            "title": "Load-side connections — the 120 percent busbar rule",
+            "adoptionScope": "City of Sample Falls: adopted NEC 2023.",
+            "sourceUrl": "https://www.nfpa.org/codes-and-standards/nfpa-70-standard-development/70",
+            "note": "125 percent of the power source output circuit current (before the 2017 edition: the PV breaker rating) plus the busbar's main OCPD may not exceed 120 percent of the busbar rating."
+          }
+        ],
+        "installerCallout": false,
+        "checkOutcome": "passed",
+        "ruleBasis": {
+          "tier": "model_code",
+          "source": "NEC 2023 705.12",
+          "sourceUrl": "https://www.nfpa.org/codes-and-standards/nfpa-70-standard-development/70",
+          "label": "model code (NEC 2023 705.12)"
+        },
+        "evidenceStatus": "verified",
+        "evidenceFound": [
+          {
+            "kind": "field_value",
+            "label": "Recomputed from the plan's own values",
+            "source": "Rule engine",
+            "excerpt": "705.12: PV breaker 40 A (parser) + 200 A main (parser) = 240 A, within 120 % of the 200 A (parser) busbar (1.2 x 200 = 240 A). Measured on the PV breaker rating. Values marked (parser) were read by the parser but not found stated on the sheets (pvBreaker, busRating, mainBreaker); confirm them before treating this as a rejection.",
+            "confidence": "high",
+            "pageHint": "",
+            "screenshotPath": "",
+            "verifier": "rule_engine",
+            "note": "A check record: the rule ran and passed. It never blocks or relaxes anything."
+          }
+        ]
+      },
+      {
+        "id": "city.elec.wire-table.not-checked",
+        "severity": "callout",
+        "category": "electrical",
+        "title": "Wire table arithmetic (EGC, ampacity vs OCPD, raceway fill)",
+        "message": "Not checked: a wire table (conductor, OCPD, ground and raceway per tag) is not on the plans.",
+        "cityFeedback": "",
+        "designTeamAction": "State a wire table (conductor, OCPD, ground and raceway per tag) on the plan set so this check can run.",
+        "evidenceNeeded": [
+          "a wire table (conductor, OCPD, ground and raceway per tag)"
+        ],
+        "codeReferences": [
+          {
+            "code": "2023 NEC",
+            "section": "250.122",
+            "title": "Size of equipment grounding conductors",
+            "adoptionScope": "City of Sample Falls: adopted NEC 2023.",
+            "sourceUrl": "https://www.nfpa.org/codes-and-standards/nfpa-70-standard-development/70",
+            "note": "Not smaller than Table 250.122 for the rating of the overcurrent device ahead of the circuit; 250.122(A): need not be larger than the circuit conductors."
+          },
+          {
+            "code": "2023 NEC",
+            "section": "240.4 / 310.15 / 110.14(C)",
+            "title": "Conductor protection against overcurrent",
+            "adoptionScope": "City of Sample Falls: adopted NEC 2023.",
+            "sourceUrl": "https://www.nfpa.org/codes-and-standards/nfpa-70-standard-development/70",
+            "note": "The OCPD may not exceed the conductor's ampacity after the 310.15(C)(1) fill adjustment and the 110.14(C) termination limit (next standard size up per 240.4(B); 240.4(D) small-conductor limits)."
+          }
+        ],
+        "installerCallout": false,
+        "checkOutcome": "not_checked",
+        "ruleBasis": {
+          "tier": "model_code",
+          "source": "NEC 250.122",
+          "sourceUrl": "https://www.nfpa.org/codes-and-standards/nfpa-70-standard-development/70",
+          "label": "model code (NEC 250.122)"
+        },
+        "evidenceStatus": "missing",
+        "evidenceFound": [
+          {
+            "kind": "absence_check",
+            "label": "Input not on the plans",
+            "source": "Rule engine",
+            "excerpt": "Not checked: a wire table (conductor, OCPD, ground and raceway per tag) is not on the plans.",
+            "confidence": "low",
+            "pageHint": "",
+            "screenshotPath": "",
+            "verifier": "rule_engine",
+            "note": "A check record: the rule could not run. It never blocks or relaxes anything."
+          }
+        ]
+      },
+      {
         "id": "city.elec.equipment-specs-incomplete",
         "severity": "blocker",
         "category": "electrical",
@@ -6996,6 +8033,81 @@
           }
         ],
         "evidenceStatus": "weak"
+      },
+      {
+        "id": "city.elec.dc-size-mismatch.pass",
+        "severity": "pass",
+        "category": "electrical",
+        "title": "DC size against the modules",
+        "message": "20 x 430 W = 8.60 kW DC, matching the project's 8.60 kW DC.",
+        "cityFeedback": "",
+        "designTeamAction": "",
+        "evidenceNeeded": [],
+        "codeReferences": [
+          {
+            "code": "2023 NEC",
+            "section": "Articles 690 and 705",
+            "title": "Solar PV and interconnected power production sources",
+            "adoptionScope": "City of Sample Falls: adopted NEC 2023.",
+            "sourceUrl": "",
+            "note": "Oregon BCD lists the 2023 Oregon Electrical Specialty Code as effective Oct. 1, 2023 and based on the 2023 NEC."
+          }
+        ],
+        "installerCallout": false,
+        "checkOutcome": "passed",
+        "evidenceStatus": "verified",
+        "evidenceFound": [
+          {
+            "kind": "field_value",
+            "label": "Recomputed from the plan's own values",
+            "source": "Rule engine",
+            "excerpt": "20 x 430 W = 8.60 kW DC, matching the project's 8.60 kW DC.",
+            "confidence": "high",
+            "pageHint": "",
+            "screenshotPath": "",
+            "verifier": "rule_engine",
+            "note": "A check record: the rule ran and passed. It never blocks or relaxes anything."
+          }
+        ]
+      },
+      {
+        "id": "city.elec.ac-size-mismatch.not-checked",
+        "severity": "callout",
+        "category": "electrical",
+        "title": "AC size against the inverters",
+        "message": "Not checked: the inverter's rated output per unit; the inverter quantity are not on the plans.",
+        "cityFeedback": "",
+        "designTeamAction": "State the inverter's rated output per unit; the inverter quantity on the plan set so this check can run.",
+        "evidenceNeeded": [
+          "the inverter's rated output per unit",
+          "the inverter quantity"
+        ],
+        "codeReferences": [
+          {
+            "code": "2023 NEC",
+            "section": "Articles 690 and 705",
+            "title": "Solar PV and interconnected power production sources",
+            "adoptionScope": "City of Sample Falls: adopted NEC 2023.",
+            "sourceUrl": "",
+            "note": "Oregon BCD lists the 2023 Oregon Electrical Specialty Code as effective Oct. 1, 2023 and based on the 2023 NEC."
+          }
+        ],
+        "installerCallout": false,
+        "checkOutcome": "not_checked",
+        "evidenceStatus": "missing",
+        "evidenceFound": [
+          {
+            "kind": "absence_check",
+            "label": "Input not on the plans",
+            "source": "Rule engine",
+            "excerpt": "Not checked: the inverter's rated output per unit; the inverter quantity are not on the plans.",
+            "confidence": "low",
+            "pageHint": "",
+            "screenshotPath": "",
+            "verifier": "rule_engine",
+            "note": "A check record: the rule could not run. It never blocks or relaxes anything."
+          }
+        ]
       },
       {
         "id": "reviewer.utility.requirements-not-on-file",

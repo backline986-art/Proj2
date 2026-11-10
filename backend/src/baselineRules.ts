@@ -1,6 +1,7 @@
-import type { AuthorityEligibilityRecord, ParserPayload, QcStatus, Severity } from "../../shared/src/types";
+import type { AuthorityEligibilityRecord, ParserPayload, QcStatus, Severity, UtilityApplicationRequirement, UtilityRequirementKey, UtilityRequirementList } from "../../shared/src/types";
 import type { EffectiveCodeContext } from "./codeProfiles";
-import { knownPowerClerkUtility, pacifiCorpBrand } from "./utilityIdentity";
+import { requirementForGate, requirementMayBlock, resolveUtilityRequirements, shippedQcRuleDefinitions, strictDefaultRequirements } from "./utilityRequirements";
+import { batteryStatus } from "../../shared/src/batteryControls";
 import { isBillHolderName, nemApplicantName } from "./accountHolders";
 import { evaluateEligibility, productionMeterShown, shippedEligibilityRecords, stringsPerInverterOf } from "./eligibilityLimits";
 import { usStateCode } from "./permitPath";
@@ -33,7 +34,7 @@ export const baselineRuleDefinitions: BaselineRuleDefinition[] = [
     name: "Applicant vs utility account holder",
     jurisdictionScope: "Any",
     utilityScope: "Any interconnection portal",
-    source: "Utility interconnection practice (observed: PacifiCorp APP-111681 suspension)",
+    source: "Utility interconnection practice (observed: application APP-111681 suspended)",
     severity: "warning",
     trigger: "The name on the application differs from the account holder printed on the utility bill",
     action: "Add the applicant to the account, put the service in their name, or name the account holder on the application — before filing.",
@@ -54,7 +55,7 @@ export const baselineRuleDefinitions: BaselineRuleDefinition[] = [
     ruleType: "qc",
     name: "Oregon Tier 1 export screen",
     jurisdictionScope: "Oregon",
-    utilityScope: "PGE/Pacific Power/general Oregon public utility",
+    utilityScope: "Oregon public utilities",
     source: "OAR 860-039-0030",
     severity: "warning",
     trigger: "Export capacity over 25 kW or generation over 50 kW",
@@ -65,7 +66,7 @@ export const baselineRuleDefinitions: BaselineRuleDefinition[] = [
     ruleType: "qc",
     name: "Oregon NEM manual disconnect",
     jurisdictionScope: "Oregon",
-    utilityScope: "PGE/Pacific Power/general Oregon public utility",
+    utilityScope: "Oregon public utilities",
     source: "OAR 860-039-0005",
     severity: "warning",
     trigger: "AC disconnect requirement not identified",
@@ -137,40 +138,12 @@ export const baselineRuleDefinitions: BaselineRuleDefinition[] = [
     trigger: "Pre-issuance complete / ready to issue / fees due",
     action: "Flag ready_for_issue and queue human fee/payment/download step.",
   },
-  {
-    id: "pacpower-ul1741sb",
-    ruleType: "qc",
-    name: "Pacific Power UL 1741 SB inverter settings",
-    jurisdictionScope: "PacifiCorp states (OR/WA/CA Pacific Power; UT/ID/WY Rocky Mountain Power)",
-    utilityScope: "Pacific Power/Rocky Mountain Power/PacifiCorp",
-    source: "Pacific Power Customer Generation",
-    severity: "warning",
-    trigger: "Pacific Power project lacks UL 1741 SB / inverter settings evidence",
-    action: "Confirm inverter spec/settings package before NEM submission.",
-  },
-  {
-    id: "pacpower-meter-photo",
-    ruleType: "qc",
-    name: "Pacific Power meter photo requirement",
-    jurisdictionScope: "PacifiCorp states (OR/WA/CA Pacific Power; UT/ID/WY Rocky Mountain Power)",
-    utilityScope: "Pacific Power/Rocky Mountain Power/PacifiCorp",
-    source: "Pacific Power Customer Generation",
-    severity: "warning",
-    trigger: "Pacific Power project missing meter evidence",
-    action: "Require meter number/photo before application.",
-  },
-  {
-    id: "pge-powerclerk-docs",
-    ruleType: "qc",
-    name: "PGE interconnection package",
-    jurisdictionScope: "Oregon",
-    utilityScope: "PGE",
-    source: "PGE Interconnection Resource Library",
-    severity: "warning",
-    trigger: "PGE project missing SLD/site/spec package evidence",
-    action: "Confirm SLD, site/plot plan, equipment specs, and utility bill/meter data.",
-  },
+  // The per-utility QC rules (pacpower-*, pge-powerclerk-docs, utility-application-package,
+  // utility-requirements-not-researched) are catalogued by the shipped requirement data, appended below.
 ];
+for (const def of shippedQcRuleDefinitions()) {
+  if (!baselineRuleDefinitions.some((d) => d.id === def.id)) baselineRuleDefinitions.push({ ...def, ruleType: "qc", severity: "warning" });
+}
 
 function str(payload: ParserPayload, key: string): string {
   const value = payload[key];
@@ -311,7 +284,17 @@ export interface BaselineEligibilityContext {
   today?: string;
 }
 
-export function evaluateBaselineRules(payload: ParserPayload, ctx?: EffectiveCodeContext, eligibility?: BaselineEligibilityContext): BaselineQcResult[] {
+/** The job's utility's requirement list for the QC baseline (utilityRequirements.ts). */
+export interface BaselineUtilityContext {
+  /** The list resolved with the DB (shipped seed + the utility's filing row). undefined = the shipped
+   *  seed alone; null = read, and nothing is on file for this utility. */
+  requirements?: UtilityRequirementList | null;
+  /** With no list on file, check the strictest common set and say the utility is not researched
+   *  (qc.ts sets it; like eligibility's reportUnknownProgram, off for bare callers). */
+  reportUnresearched?: boolean;
+}
+
+export function evaluateBaselineRules(payload: ParserPayload, ctx?: EffectiveCodeContext, eligibility?: BaselineEligibilityContext, utilityCtx: BaselineUtilityContext = {}): BaselineQcResult[] {
   const out: BaselineQcResult[] = [];
   const state = str(payload, "state").toUpperCase();
   const ahj = str(payload, "ahj");
@@ -332,18 +315,10 @@ export function evaluateBaselineRules(payload: ParserPayload, ctx?: EffectiveCod
   const notes = `${str(payload, "utilityUploadNotesText")}\n${str(payload, "projectDescriptionText")}\n${str(payload, "sitePlanNotesText")}`;
   // A KNOWN NON-OREGON STATE IS NEVER OREGON. The AHJ-name fallback exists for payloads with no
   // state; with one, "Portland" (Maine), "Salem" (Massachusetts) or "Washington County"
-  // (Pennsylvania) must not pull Oregon's NEM program, prescriptive limits or PGE's package in.
+  // (Pennsylvania) must not pull Oregon's NEM program or prescriptive limits in.
   const nonOregonState = !!state && state !== "OR";
   const isOregon = state === "OR" || (!nonOregonState && /oregon|portland|hillsboro|beaverton|gresham|clackamas|washington county/i.test(ahj));
   const isPortland = isOregon && /portland/i.test(ahj);
-  // WHICH UTILITY, by the one anchored, state-gated identity (utilityIdentity) — a CA PG&E job
-  // ("Pacific Gas and Electric", "PGE") or WA's "Pacific County PUD" is neither Pacific Power nor
-  // Portland General, and must not be told a Pacific Power meter photo is missing.
-  const knownUtility = knownPowerClerkUtility({ state, utility });
-  const isPacific = knownUtility === "pacificorp";
-  // The name a PacifiCorp job goes by (#562): Rocky Mountain Power in UT/ID/WY. Rule IDs stay.
-  const pacBrand = pacifiCorpBrand(state);
-  const isPge = knownUtility === "portland_general";
 
   // PRESCRIPTIVE-PATH SCREENS — data-driven when a jurisdiction code context is
   // provided (the per-AHJ adopted-codes profile), so any state/county with limits
@@ -641,46 +616,10 @@ export function evaluateBaselineRules(payload: ParserPayload, ctx?: EffectiveCod
     }
   }
 
-  if (isPacific && !hasAny(`${split}\n${notes}`, [/UL\s*1741\s*SB/i, /inverter settings/i, /smart inverter/i])) {
-    out.push(result(
-      "pacpower-ul1741sb",
-      `${pacBrand} UL 1741 SB inverter settings`,
-      "warning",
-      "warning",
-      `${pacBrand} project lacks clear UL 1741 SB / inverter settings evidence.`,
-      "utilityUploadNotesText",
-    ));
-  }
-
-  if (isPacific && !str(payload, "meter") && !str(payload, "ubMeterNumber")) {
-    out.push(result(
-      "pacpower-meter-photo",
-      `${pacBrand} meter photo requirement`,
-      "warning",
-      "warning",
-      `${pacBrand} application should include meter evidence; no meter number was captured.`,
-      "meter",
-    ));
-  }
-
-  if (isPge) {
-    const pgeMissing: string[] = [];
-    if (!hasAny(split, [/SLD/i, /3-line/i, /single line/i])) pgeMissing.push("SLD/3-line");
-    if (!hasAny(split, [/site/i, /plot/i])) pgeMissing.push("site/plot plan");
-    if (!hasAny(split, [/module/i])) pgeMissing.push("module spec");
-    if (!hasAny(split, [/inverter/i, /microinverter/i])) pgeMissing.push("inverter spec");
-    if (!str(payload, "account") && !str(payload, "ubAccountNumber")) pgeMissing.push("utility account");
-    if (pgeMissing.length) {
-      out.push(result(
-        "pge-powerclerk-docs",
-        "PGE interconnection package",
-        "warning",
-        "warning",
-        `PGE package may be missing: ${pgeMissing.join(", ")}.`,
-        "utilityDownloadChecklistText",
-      ));
-    }
-  }
+  // WHAT THE JOB'S UTILITY'S OWN APPLICATION ASKS FOR, as cited per-utility data (utilityRequirements.ts),
+  // read by one generic rule — no utility is named here. A utility with no list on file gets the strict
+  // default (the strictest common set), as a warning that says it is not researched.
+  out.push(...utilityRequirementResults(payload, state, utility, split, notes, utilityCtx));
 
   // EXISTING-SYSTEM / NEM-ADDITION SCREENS (advisory — warnings only, never a
   // blocker). Additions must disclose the existing system on interconnection
@@ -743,3 +682,91 @@ export function evaluateBaselineRules(payload: ParserPayload, ctx?: EffectiveCod
   return out;
 }
 
+// ── THE UTILITY'S APPLICATION REQUIREMENTS, CHECKED ON THE PACKAGE (QC) ─────────────────────────
+// What QC reads for each KIND of item: the package text the plan-set split and the upload notes carry,
+// and the parser's account / meter fields. Kinds, never utilities.
+type QcReadInput = { payload: ParserPayload; split: string; notes: string };
+const QC_SHOWN: Record<UtilityRequirementKey, (t: QcReadInput) => boolean> = {
+  account_verification: ({ payload }) => Boolean(str(payload, "account") || str(payload, "ubAccountNumber")),
+  meter_photo: ({ payload }) => Boolean(str(payload, "meter") || str(payload, "ubMeterNumber")),
+  inverter_settings: ({ split, notes }) => hasAny(`${split}\n${notes}`, [/UL\s*1741\s*SB/i, /inverter settings/i, /smart inverter/i]),
+  inverter_listing_ul1741sb: ({ split, notes }) => hasAny(`${split}\n${notes}`, [/UL\s*1741\s*SB/i]),
+  one_line: ({ split }) => hasAny(split, [/SLD/i, /3-line/i, /single line/i]),
+  site_plan: ({ split }) => hasAny(split, [/site/i, /plot/i]),
+  module_spec: ({ split }) => hasAny(split, [/module/i]),
+  inverter_spec: ({ split }) => hasAny(split, [/inverter/i, /microinverter/i]),
+  ac_disconnect: ({ split, notes }) => hasAny(`${split}\n${notes}`, [/disconnect/i]),
+  storage_mode_declaration: ({ split, notes }) => hasAny(`${split}\n${notes}`, [/operating mode/i, /back[-\s]?up/i, /self[-\s]?consumption/i, /export/i]),
+  owner_signature: ({ split, notes }) => hasAny(`${split}\n${notes}`, [/signature/i, /signed/i, /owner authorization/i]),
+};
+const QC_LABEL: Record<UtilityRequirementKey, string> = {
+  account_verification: "utility account",
+  meter_photo: "meter evidence",
+  inverter_settings: "UL 1741 SB / inverter settings evidence",
+  inverter_listing_ul1741sb: "UL 1741 SB inverter listing",
+  one_line: "SLD/3-line",
+  site_plan: "site/plot plan",
+  module_spec: "module spec",
+  inverter_spec: "inverter spec",
+  ac_disconnect: "AC disconnect",
+  storage_mode_declaration: "battery operating mode",
+  owner_signature: "owner signature",
+};
+// An item with no QC wording of its own reports in this one generic result.
+const GENERIC_QC = {
+  ruleId: "utility-application-package",
+  ruleName: "{utility} application package",
+  message: "{utility}'s application may be missing: {missing}.",
+  fieldName: "utilityDownloadChecklistText",
+};
+
+function fill(template: string, utility: string, missing: string[]): string {
+  return template.replaceAll("{utility}", utility).replaceAll("{missing}", missing.join(", "));
+}
+
+/**
+ * ONE GENERIC RULE: each item of the job's utility's list (or, with none on file and
+ * `reportUnresearched`, the strict default) that the package does not show. Items sharing a QC rule id
+ * report as one result naming each missing item. A WARNING, unless every condition for a block holds:
+ * the item's QC wording asks for a blocker AND the item may block (a person's, an official one, or a
+ * seeded row quoting its named source in words that name it — Helm's #637 bar). A storage item is
+ * checked only on a battery job.
+ */
+function utilityRequirementResults(payload: ParserPayload, state: string, utility: string, split: string, notes: string, ctx: BaselineUtilityContext): BaselineQcResult[] {
+  if (!utility) return [];
+  const list = ctx.requirements === undefined ? resolveUtilityRequirements(null, state, utility) : ctx.requirements;
+  let items: UtilityApplicationRequirement[];
+  let name: string;
+  if (list && list.requirements.length) {
+    items = list.requirements;
+    name = list.displayName || utility;
+  } else if (ctx.reportUnresearched && usStateCode(state)) {
+    items = strictDefaultRequirements();
+    name = utility;
+  } else {
+    return [];
+  }
+  const battery = batteryStatus(payload as Record<string, unknown>) === "yes";
+  const read: QcReadInput = { payload, split, notes };
+  const groups = new Map<string, { qc: { ruleId: string; ruleName: string; message: string; fieldName: string }; order: number; first: number; missing: string[]; block: boolean }>();
+  items.forEach((item, index) => {
+    if (!requirementForGate(item, "qc")) return;
+    if (item.key === "storage_mode_declaration" && !battery) return;
+    if (QC_SHOWN[item.key](read)) return;
+    const qc = item.qc ?? GENERIC_QC;
+    const held = groups.get(qc.ruleId) ?? { qc, order: item.qc?.order ?? 100, first: index, missing: [], block: false };
+    held.missing.push(item.qc?.label || QC_LABEL[item.key]);
+    if (item.qc?.severity === "blocker" && requirementMayBlock(item)) held.block = true;
+    groups.set(qc.ruleId, held);
+  });
+  return [...groups.values()]
+    .sort((a, b) => a.order - b.order || a.first - b.first)
+    .map((g) => result(
+      g.qc.ruleId,
+      fill(g.qc.ruleName, name, g.missing),
+      g.block ? "fail" : "warning",
+      g.block ? "blocker" : "warning",
+      fill(g.qc.message, name, g.missing),
+      g.qc.fieldName,
+    ));
+}
