@@ -3431,6 +3431,21 @@ const VERSIONED_MIGRATIONS: VersionedMigration[] = [
       `);
     },
   },
+  {
+    // v74: the next free version on the offline staging base (bdde3b57: v72 = utility application
+    // requirements, v73 = #700's invoices). Renumber at merge if the queue changes (Helm rules it).
+    version: 74,
+    name: "nem_track_storage_exemption",
+    up: (db) => {
+      // THE UTILITY TRACK A PERSON'S RECORD TOOK OFF THIS JOB (draft 10, utilityStorageModes.ts). QC writes
+      // it: { drop: { utility, mode, sourceUrl, quote, verifiedBy, verifiedAt, decidedAt } } when the
+      // utility's PERSON-verified storage record says this job's battery mode needs no application, and
+      // { keptBy, keptAt } when a named person put the track back on this job. requiredTracks() reads it
+      // through mapProject, so every door (done-ness, nextStep, Stage, autopilot, the tracks screen)
+      // asks the same question. '' = nothing dropped, the strict default.
+      addColumnIfMissing(db, "projects", "nem_track_exemption_json", "TEXT NOT NULL DEFAULT ''");
+    },
+  },
 ];
 
 /** v47 was edited in place while #218 was open (Helm's review at 0116f98a): a DB that ran an earlier

@@ -76,6 +76,9 @@
     section('Design criteria', dc);
     section('Prescriptive limits', kv(p && p.prescriptive));
     section('Fire setbacks', ((p && p.fireSetbacks) || []).map((f) => `<li>${esc(plainValue(f))}</li>`));
+    // The battery (ESS) rules (review-audit draft 05): only where the row records its own; the model-code
+    // baseline applies to everything else. Shown so a person never verifies a rule they were not shown.
+    if (p && p.essRules && Object.keys(p.essRules).length) section('Battery / ESS rules', kv(p.essRules, {}, 'essRules'));
     section('Citations', ((p && p.citations) || []).map((c) =>
       `<li>${esc(c.label || httpUrl(c.sourceUrl) || 'Source')}${sourceLink(c.sourceUrl)}</li>`));
     return rows.join('');
@@ -88,6 +91,7 @@
       adoptedCodes: p.adoptedCodes, amendments: p.amendments,
       designCriteria: p.designCriteria, prescriptive: p.prescriptive,
       fireSetbacks: p.fireSetbacks, citations: p.citations,
+      ...(p.essRules ? { essRules: p.essRules } : {}),
     };
   }
 

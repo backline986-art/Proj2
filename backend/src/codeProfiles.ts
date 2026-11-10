@@ -62,6 +62,7 @@ import { logger } from "./logger";
 import { resolvePermitPath } from "./permitPath";
 import { nowIso } from "./time";
 import { landingTierFor, officialCitationFor, sourceHostOf } from "../../shared/src/officialSource";
+import { essRulesOf } from "../../shared/src/essRules";
 import { personVerifiedAuthorityHosts, urlsIn as issuerUrlsIn } from "./officialAuthorityHosts";
 
 interface Row { [key: string]: unknown }
@@ -216,6 +217,7 @@ function mapRow(row: Row): JurisdictionCodeProfile {
     designCriteria: payload.designCriteria ?? {},
     prescriptive: payload.prescriptive ?? {},
     fireSetbacks: Array.isArray(payload.fireSetbacks) ? payload.fireSetbacks : [],
+    ...essRulesField(payload.essRules),
     citations: sanitizeCitations(payload),
     researchedAt: text(row.researched_at) || undefined,
     verifiedAt: text(row.verified_at) || undefined,
@@ -225,6 +227,12 @@ function mapRow(row: Row): JurisdictionCodeProfile {
     // The alternative roof-access policy (review-audit draft 08), shape-checked; absent when none.
     ...firePathwayPolicyField((payload as { firePathwayPolicy?: unknown }).firePathwayPolicy),
   };
+}
+
+/** The battery (ESS) rules block (review-audit draft 05), shape-checked; absent when none. */
+function essRulesField(raw: unknown): Pick<JurisdictionCodeProfile, "essRules"> {
+  const essRules = essRulesOf(raw);
+  return essRules ? { essRules } : {};
 }
 
 function firePathwayPolicyField(raw: unknown): Pick<JurisdictionCodeProfile, "firePathwayPolicy"> {
@@ -581,13 +589,14 @@ export function getCodeProfile(db: AppDb, input: { state?: string; ahj?: string 
     ahj: p.ahj, state: p.state, confidence: p.confidence,
     ...(p.verifiedBy ? { verifiedBy: p.verifiedBy } : {}), ...(p.verifiedAt ? { verifiedAt: p.verifiedAt } : {}),
   });
-  for (const block of ["designCriteria", "prescriptive"] as const) {
+  for (const block of ["designCriteria", "prescriptive", "essRules"] as const) {
     for (const layer of [base, exact]) {
       for (const [field, value] of Object.entries(layer[block] ?? {})) {
         if (value === undefined) continue;
         // A field read on the authority's own official page (#683) answers as "official" when its
-        // row is not person-verified: used, and worded "from <host>".
-        const official = block === "designCriteria" && layer.confidence !== "verified" ? officialCitationFor(layer.citations, `${block}.${field}`) : null;
+        // row is not person-verified: used, and worded "from <host>". The battery rules (draft 05)
+        // take the same tier the same way.
+        const official = block !== "prescriptive" && layer.confidence !== "verified" ? officialCitationFor(layer.citations, `${block}.${field}`) : null;
         fieldSources[`${block}.${field}`] = official ? { ...sourceOf(layer), confidence: "official", officialSource: official } : sourceOf(layer);
       }
     }
@@ -622,6 +631,8 @@ export function getCodeProfile(db: AppDb, input: { state?: string; ahj?: string 
     amendments: [...base.amendments, ...exact.amendments],
     designCriteria: { ...base.designCriteria, ...exact.designCriteria },
     prescriptive: { ...base.prescriptive, ...exact.prescriptive },
+    // Field by field, the AHJ's over the state's (fieldSources["essRules.<key>"] says whose).
+    ...essRulesField({ ...(base.essRules ?? {}), ...(exact.essRules ?? {}) }),
     fireSetbacks: exact.fireSetbacks.length ? exact.fireSetbacks : base.fireSetbacks,
     citations: [...base.citations, ...exact.citations],
     ...(policyLayer?.firePathwayPolicy ? { firePathwayPolicy: policyLayer.firePathwayPolicy } : {}),
@@ -698,6 +709,10 @@ function upsert(db: AppDb, profile: JurisdictionCodeProfile, opts: { confidence:
     : firePathwayPolicyOf(profile.firePathwayPolicy) ?? firePathwayPolicyOf(priorPayload.firePathwayPolicy);
   // The last lookup's checklist rides every re-save that does not carry its own.
   const designCriteriaLookup = designCriteriaLookupOf(profile.designCriteriaLookup) ?? designCriteriaLookupOf(priorPayload.designCriteriaLookup);
+  // The battery (ESS) rules (review-audit draft 05). A SEEDED re-save that does not carry them (research,
+  // an import of other fields) keeps the row's. A VERIFIED save stores exactly what the person sent:
+  // rules they were not shown are never locked as person-verified under their name (rule 3).
+  const essRules = opts.confidence === "verified" ? essRulesOf(profile.essRules) : essRulesOf(profile.essRules) ?? essRulesOf(priorPayload.essRules);
   const payload = JSON.stringify({
     // Read-time presentation (inheritedFrom, layer, layerLabel) never lands in a row: a verify
     // through the PUT route sends the read back, and "not confirmed" must not be stored as a fact.
@@ -706,6 +721,7 @@ function upsert(db: AppDb, profile: JurisdictionCodeProfile, opts: { confidence:
     designCriteria: profile.designCriteria ?? {},
     prescriptive: profile.prescriptive ?? {},
     fireSetbacks: profile.fireSetbacks ?? [],
+    ...(essRules ? { essRules } : {}),
     citations: profile.citations ?? [],
     ...(adoptionModel ? { adoptionModel } : {}),
     ...(upcoming && upcoming.length ? { upcoming } : {}),

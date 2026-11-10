@@ -988,6 +988,11 @@ export interface ProjectRecord {
    *  — and mapped here by mapProject / normalizeProject. Absent when none is set. Read ONLY through
    *  permitProcess.trackIssuer; MPU follows electrical unless its own is set. */
   trackIssuers?: TrackIssuerOverrides;
+  /** THE UTILITY TRACK A PERSON'S RECORD TOOK OFF THIS JOB (draft 10, migration v74). Written only by
+   *  QC from the utility's PERSON-verified storage record (utilityStorageModes.nemStorageExemption),
+   *  read only through submittalTracks.nemTrackDropFor — never set from a request body. Absent when
+   *  nothing is dropped. */
+  nemTrackExemption?: NemTrackExemptionState;
   /** Set ONLY by permitProcess.projectForTrack on the TRACK-SCOPED VIEW it returns (ahj replaced by
    *  the track's issuer) — never persisted, never mapped from a row. It names the project's own AHJ
    *  so the per-job lookup's cited answer about this permit still reaches the view, and makes the
@@ -1278,6 +1283,26 @@ export interface UtilityRequirementList {
   /** The utility as the findings name it ("Rocky Mountain Power", "PGE"). */
   displayName: string;
   requirements: UtilityApplicationRequirement[];
+}
+
+/** Why a job's utility (NEM) track was dropped: the person-verified utility record QC read it from. */
+export interface NemTrackDrop {
+  utility: string;
+  mode: StorageOperatingMode;
+  sourceUrl: string;
+  quote: string;
+  verifiedBy: string;
+  verifiedAt: string;
+  /** When QC last confirmed the drop on this job. */
+  decidedAt: string;
+}
+
+/** The per-job state behind the utility track's drop (projects.nem_track_exemption_json). */
+export interface NemTrackExemptionState {
+  drop?: NemTrackDrop | null;
+  /** A named person put the track back on this job: no record drops it again until they undo it. */
+  keptBy?: string;
+  keptAt?: string;
 }
 
 /** The job's scope with its basis, as QC used it (jobScope.resolveJobScope). */
@@ -2461,6 +2486,55 @@ export interface AuthorityEligibilityRecord {
   verifiedBy?: string;
 }
 
+/** WHERE AN ENERGY STORAGE SYSTEM SITS, as the residential code classes it (IRC R328.4 / R328.5 in the
+ *  2021 model; review-audit draft 05). "habitable" covers sleeping rooms, closets or spaces opening
+ *  into them, and habitable rooms: the model code permits no ESS there. */
+export type EssLocationClass = "garage" | "accessory" | "exteriorWall" | "outdoor" | "utilitySpace" | "habitable";
+
+/** A JURISDICTION'S ESS RULES (review-audit draft 05): the AHJ's (or state's) own values where they
+ *  differ from the model-code baseline (essRules.ts ESS_MODEL_DEFAULTS), on its code profile. Each
+ *  value is cited by a `citations` entry whose field is "essRules.<key>" (label = the source by name,
+ *  sourceUrl, quote = its words verbatim). A value is APPLIED only when its row is person-verified or
+ *  the field is official (#683); a seeded value applies only where it is stricter than the baseline,
+ *  and then only warns. A BLOCKER rests only on an applied value whose citation names its source,
+ *  gives the URL and quotes words carrying the value (Helm's #637 bar). Shared knowledge, no org. */
+export interface JurisdictionEssRules {
+  /** Largest rating of one ESS unit, kWh (model: 20). */
+  maxUnitKwh?: number;
+  /** Largest aggregate rating per location class, kWh (model: 40 utility spaces, 80 elsewhere). */
+  maxAggregateKwhUtilitySpace?: number;
+  maxAggregateKwhGarage?: number;
+  maxAggregateKwhAccessory?: number;
+  maxAggregateKwhExteriorWall?: number;
+  maxAggregateKwhOutdoor?: number;
+  /** Least spacing between units, inches (model: 36). */
+  minUnitSpacingIn?: number;
+  /** The AHJ accepts less spacing where large-scale fire testing (UL 9540A) supports it. Strict
+   *  baseline: not on file = not accepted (warns, never blocks). */
+  spacingReductionBy9540A?: boolean;
+  /** Least distance from an outdoor / exterior-wall ESS to doors and windows into the dwelling, inches
+   *  (model: 36). */
+  minOpeningClearanceIn?: number;
+  /** An ESS must be listed and labelled to UL 9540. */
+  listingRequired?: boolean;
+  /** No ESS in sleeping rooms, spaces opening into them, or habitable rooms. */
+  habitableLocationProhibited?: boolean;
+  /** A garage ESS is protected from vehicle impact. */
+  impactProtectionInGarage?: boolean;
+  /** A smoke alarm (or interconnected heat detector) covers an indoor / attached-garage ESS. */
+  alarmRequired?: boolean;
+  /** Finished or noncombustible walls and ceilings (5/8" Type X on unfinished wood framing) at a
+   *  utility-space ESS, and the dwelling separation at an attached-garage ESS. */
+  wallProtectionRequired?: boolean;
+  /** The ESS disconnecting means (or its remote control) is outside the dwelling (NEC 2020+ 706.15(A)
+   *  for one- and two-family dwellings; the 2017 NEC asks only for a readily accessible one). */
+  disconnectOutside?: boolean;
+  /** A UL 9540 unit marked for use in residential dwelling units is exempt from the kWh rating and
+   *  spacing limits (an exception some jurisdictions adopt). Strict baseline: no exemption. The
+   *  habitable-room prohibition, door/window distance, protection and disconnect still apply. */
+  listedResidentialExemption?: boolean;
+}
+
 export interface FireSetbackRule {
   id: string;
   description: string;
@@ -2696,6 +2770,9 @@ export interface JurisdictionCodeProfile {
   designCriteria: JurisdictionDesignCriteria;
   prescriptive: PrescriptiveLimits;
   fireSetbacks: FireSetbackRule[];
+  /** The jurisdiction's battery / ESS rules where they differ from the model-code baseline (review-audit
+   *  draft 05); each value cited under citations[].field "essRules.<key>". Absent = the baseline. */
+  essRules?: JurisdictionEssRules;
   /** Official sources backing this profile (the human-verification checklist). An applied AHJ
    *  correction has no URL: it is cited by kind "ahj_correction", the field it set, the value and
    *  the date, under a generic label — never the AHJ's sentence, the correction id or the record
@@ -3768,6 +3845,11 @@ export interface ProjectDetail {
   isBlocked: boolean;
   /** What the job installs, as QC reads it (#673). */
   jobScope?: JobScopeView;
+  /** The utility track a person's storage record dropped on this job, with why (draft 10). Null when
+   *  the track is on. Read through nemTrackDropFor — the same predicate requiredTracks asks. */
+  nemTrackDrop?: NemTrackDrop | null;
+  /** A named person put the utility track back on this job (it stays until they let the record drop it). */
+  nemTrackKept?: { by: string; at: string } | null;
 }
 
 /** POST /api/projects/:id/permit-checks (recordPermitStatusCheck). `unreadable` is set when the

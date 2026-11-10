@@ -1,5 +1,5 @@
 import "dotenv/config";
-import { validate, portalCredentialCreateSchema, portalCredentialUpdateSchema, autoLearnSchema, codeProfileResearchSchema, codeProfileVerifySchema, permitProcessVerifySchema, reviewSubjectSchema, utilityFilingVerifySchema, jobScopeSchema, utilityStorageModesSchema, utilityApplicationRequirementsSchema } from "./validation";
+import { validate, portalCredentialCreateSchema, portalCredentialUpdateSchema, autoLearnSchema, codeProfileResearchSchema, codeProfileVerifySchema, permitProcessVerifySchema, reviewSubjectSchema, utilityFilingVerifySchema, jobScopeSchema, utilityStorageModesSchema, utilityApplicationRequirementsSchema, nemTrackKeepSchema } from "./validation";
 import crypto from "node:crypto";
 import { spawn } from "node:child_process";
 import express, { type NextFunction, type Request, type Response } from "express";
@@ -177,6 +177,7 @@ import { getUtilityFilingLookup, nemFiledWithPermit, verifyUtilityFilingLookup }
 import { runQcForProject } from "./qc";
 import { personJobScope, setPersonJobScope } from "./jobScope";
 import { clearUtilityStorageModes, recordUtilityStorageModes } from "./utilityStorageModes";
+import { projectsDroppedFor, setNemTrackKept } from "./nemTrackDrop";
 import { clearUtilityApplicationRequirements, recordUtilityApplicationRequirements } from "./utilityRequirements";
 import { stagedReviewScreenshotFile } from "./stagedReviews";
 import { submissionConfirmationFile } from "./submissionConfirmation";
@@ -1121,6 +1122,7 @@ app.put("/api/code-profiles/verify", (req, res) => {
     adoptedCodes: b.adoptedCodes, amendments: b.amendments,
     designCriteria: b.designCriteria, prescriptive: b.prescriptive,
     fireSetbacks: b.fireSetbacks.map((f) => ({ ...f })), citations: b.citations,
+    ...(b.essRules ? { essRules: b.essRules } : {}),
   }, verifiedBy);
   res.json({ profile: saved });
 });
@@ -2565,10 +2567,35 @@ app.delete("/api/projects/:id/utility-filing/storage-modes", (req, res) => {
   const verifiedBy = namedPersonDecider(req, "decidedBy",
     "Sign in to withdraw a utility's storage-mode rule.",
     "Name the person withdrawing it.");
+  // Every job the record dropped a track on, read BEFORE the record goes (its stamp names the utility).
+  const dropped = projectsDroppedFor(db, project.state, project.utility);
   clearUtilityStorageModes(db, { state: project.state, utility: project.utility });
   addAuditLog(db, projectId, "human", verifiedBy, "utility_filing.storage_modes_withdrawn", { utility: project.utility, state: project.state });
-  runQcForProject(db, projectId);
+  // The utility track comes back on each of them now (draft 10), not at some later QC run. System
+  // work, like the scheduler's: the record is shared knowledge, so its jobs may sit in any org, and
+  // nothing about them — not even how many — reaches this response or this job's audit (rule 6).
+  for (const id of new Set([projectId, ...dropped])) {
+    try { runQcForProject(db, id); } catch { /* one job's QC failing never stops the others */ }
+  }
   res.json({ record: null });
+});
+
+// PUT THE UTILITY TRACK BACK ON THIS JOB (draft 10; nemTrackDrop.ts). A person's storage record dropped
+// the track; a NAMED PERSON can keep it on this one job (keep: true) — the customer wants the
+// application anyway, the job differs from the page — or let the record drop it again (keep: false).
+// Under /api/projects/:id, so it inherits the tenancy guard (rule 6). QC re-runs and writes the stamp;
+// the response is the job as it now stands.
+app.put("/api/projects/:id/utility-track/keep", (req, res) => {
+  const projectId = String(req.params.id);
+  getProjectDetail(db, projectId);
+  const b = validate(nemTrackKeepSchema, req.body);
+  const decidedBy = namedPersonDecider(req, "decidedBy",
+    "Sign in to change whether this job files a utility application.",
+    "Name the person deciding: whether a job files its utility application is decided by a named person.");
+  setNemTrackKept(db, projectId, b.keep, decidedBy);
+  addAuditLog(db, projectId, "human", decidedBy, b.keep ? "utility_track.kept" : "utility_track.released", {});
+  runQcForProject(db, projectId);
+  res.json(getProjectDetail(db, projectId));
 });
 
 // WHAT THIS PROJECT'S UTILITY'S OWN APPLICATION ASKS FOR (review-audit draft 03; utilityRequirements.ts).
