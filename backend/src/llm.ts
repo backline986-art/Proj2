@@ -8,6 +8,7 @@ import { RESEARCH_PORTAL_UNCONFIRMED_NOTE } from "./researchedPortalUrl";
 import { documentNameQueries, scopeResultsToState, stateScopeOf, stateScopedFormQueries } from "./formSearchScope";
 import { logger } from "./logger";
 import { persistLlmCall } from "./llmAccounting";
+import { createModelClient, ModelPayloadLeakError, projectKnownSecrets, runInModelCallScope, withIntakeDocumentRead, withModelSecrets } from "./modelPayloadScan";
 import { routeFor, taskForLabel, takeAdvisorSlot, describeRoutes, BASELINE_MODEL, type LlmEffort, type LlmTask, type ResolvedRoute, type AdvisorConfig } from "./modelRouting";
 import { lookupCecInverter, lookupCecModuleMake } from "./cecEquipment";
 import { planTextForExtraction } from "./structuralIntake";
@@ -1537,7 +1538,10 @@ export class ClaudeLLMProvider implements LLMProvider {
     // window closed by hand, killing the run at page 9). The heaviest legitimate planner
     // calls finish in well under two minutes; four bounds the stall while retries recover
     // it, and instrument() logs the ✗ so the wait is at least visible.
-    this.client = new Anthropic({ apiKey, maxRetries: 5, timeout: 240000 });
+    //
+    // createModelClient, never `new Anthropic`: every request this client sends passes the rule-2
+    // payload scan first (modelPayloadScan.ts — the one door to the model).
+    this.client = createModelClient({ apiKey, maxRetries: 5, timeout: 240000 });
   }
 
   // ---------------------------------------------------------------------------
@@ -1613,7 +1617,8 @@ export class ClaudeLLMProvider implements LLMProvider {
     const sent: CallTarget = target.advisor && !takeAdvisorSlot() ? { ...target, advisor: null } : target;
     for (let attempt = 0; attempt <= TRANSIENT_RETRY_DELAYS_MS.length; attempt++) {
       try {
-        msg = await exec(sent);
+        // The label rides the call scope so the payload scan can name the builder in its audit row.
+        msg = await runInModelCallScope({ label }, () => exec(sent));
         if (attempt > 0) logger.info("llm", `✓ ${label} recovered after ${attempt} retry(ies)`, { ...meta });
         lastErr = undefined;
         break;
@@ -1775,16 +1780,17 @@ export class ClaudeLLMProvider implements LLMProvider {
     const startedAt = Date.now();
     const t0 = performance.now();
     try {
-      const whole = await this.client.messages.countTokens({
+      // count_tokens sends the prompt too, so it is scanned under its own label.
+      const whole = await runInModelCallScope({ label: `${label}.countTokens` }, () => this.client.messages.countTokens({
         model: MODEL,
         system: this.cachedSystem(systemPrompt),
         messages: [{ role: "user", content: userMessage }],
-      });
-      const systemOnly = await this.client.messages.countTokens({
+      }));
+      const systemOnly = await runInModelCallScope({ label: `${label}.countTokens` }, () => this.client.messages.countTokens({
         model: MODEL,
         system: this.cachedSystem(systemPrompt),
         messages: [{ role: "user", content: "." }],
-      });
+      }));
       const userTokens = Math.max(0, whole.input_tokens - systemOnly.input_tokens);
       recordLlmCall({
         at: startedAt,
@@ -1976,7 +1982,15 @@ Set confidence (0-1) for each field. Return only valid JSON.`;
     return this.textOf(msg);
   }
 
-  async extractProjectFields(input: {
+  /** RULE 2'S ONE ALLOWED READ. Intake reads the customer's own documents (the utility bill's text,
+   *  the meter photo's OCR, beside the plan set) to FIND the account/meter, so this call — and only
+   *  this one and extractProjectFieldsFromImages — runs as INTAKE_DOCUMENT_READ: the payload scan
+   *  lets account/meter/utility ids through here and nowhere else (modelPayloadScan.ts). */
+  extractProjectFields(input: Parameters<ClaudeLLMProvider["extractProjectFieldsUnscoped"]>[0]): Promise<ParserLlmExtraction> {
+    return withIntakeDocumentRead(() => this.extractProjectFieldsUnscoped(input));
+  }
+
+  private async extractProjectFieldsUnscoped(input: {
     planText?: string;
     utilityBillText?: string;
     meterText?: string;
@@ -2371,7 +2385,12 @@ Return ONLY JSON, no prose: {"pages":[{"page":<n>,"rotate":<the D of the upright
     };
   }
 
-  async extractProjectFieldsFromImages(input: {
+  /** Rule 2's one allowed read, from photos/scans of the bill and meter (see extractProjectFields). */
+  extractProjectFieldsFromImages(input: Parameters<ClaudeLLMProvider["extractProjectFieldsFromImagesUnscoped"]>[0]): Promise<ParserLlmExtraction> {
+    return withIntakeDocumentRead(() => this.extractProjectFieldsFromImagesUnscoped(input));
+  }
+
+  private async extractProjectFieldsFromImagesUnscoped(input: {
     images: { kind: "utility_bill" | "meter_photo" | "plan_page"; base64: string; mimeType: "image/png" | "image/jpeg" | "image/webp" }[];
     defaultState?: string;
   }): Promise<ParserLlmExtraction> {
@@ -2429,7 +2448,13 @@ CRITICAL accuracy rules:
     );
   }
 
-  async classifyCorrection(input: { correctionText: string; project?: ProjectRecord }): Promise<{ bucket: CorrectionBucket; confidence: number; notes: string }> {
+  /** The project object a caller hands in is a source of known secrets too: the payload scan matches
+   *  its account/meter in the correction text even outside a job's context. */
+  classifyCorrection(input: { correctionText: string; project?: ProjectRecord }): Promise<{ bucket: CorrectionBucket; confidence: number; notes: string }> {
+    return withModelSecrets(projectKnownSecrets(input.project), () => this.classifyCorrectionScoped(input));
+  }
+
+  private async classifyCorrectionScoped(input: { correctionText: string; project?: ProjectRecord }): Promise<{ bucket: CorrectionBucket; confidence: number; notes: string }> {
     const system = `You are a solar permit correction classifier for AHJ (Authority Having Jurisdiction) permit applications.
 Classify the correction request into exactly one bucket:
 - permit_approval: permit was approved
@@ -2470,12 +2495,17 @@ Return JSON: {"bucket": "<bucket>", "confidence": 0.0-1.0, "notes": "<brief reas
       if (!out) return fallback;
       return { bucket: out.bucket as CorrectionBucket, confidence: out.confidence, notes: out.notes };
     } catch (err) {
+      if (err instanceof ModelPayloadLeakError) throw err; // a rule-2 leak under test is not a parse failure
       logger.warn("llm", "classifyCorrection could not be read", { err: errMsg(err).slice(0, 160) });
       return fallback;
     }
   }
 
-  async draftResponse(input: { correctionText: string; project?: ProjectRecord }): Promise<{ draft: string; confidence: number }> {
+  draftResponse(input: { correctionText: string; project?: ProjectRecord }): Promise<{ draft: string; confidence: number }> {
+    return withModelSecrets(projectKnownSecrets(input.project), () => this.draftResponseScoped(input));
+  }
+
+  private async draftResponseScoped(input: { correctionText: string; project?: ProjectRecord }): Promise<{ draft: string; confidence: number }> {
     const system = `You are a solar permit specialist drafting a response to an AHJ correction request.
 Write a professional, factual response. Be concise. Do NOT invent specifications — only reference what is provided.
 IMPORTANT: This is an advisory draft only. A human must review before sending. Note that at the top.
