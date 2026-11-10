@@ -15,6 +15,9 @@ import os from "node:os";
 import path from "node:path";
 import type { RecipeStep, SubmittalTrackType } from "../../shared/src/types";
 
+/** The fixture AHJ's own permit portal: the URL completeRecipe records and verifyDoor verifies. */
+export const FIXTURE_DOOR = "https://permits.portland.example/apply";
+
 export async function setupStageFixture(tag: string) {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), `${tag}-`));
   process.env.AUTOPILOT_DB_PATH = path.join(tmpDir, "test.sqlite");
@@ -40,6 +43,7 @@ export async function setupStageFixture(tag: string) {
   const docs = await import("../src/projectDocuments");
   const repo = await import("../src/repository");
   const recipes = await import("../src/portalRecipes");
+  const kb = await import("../src/knowledgeBase");
   const { planSetBinding } = await import("../src/approvalReviewItems");
   const db = await dbMod.openDatabase();
   if (/autopilot\.sqlite$/.test(String(process.env.AUTOPILOT_DB_PATH))) throw new Error("tests must run on a scratch DB");
@@ -95,9 +99,23 @@ export async function setupStageFixture(tag: string) {
   const completeRecipe = (steps: RecipeStep[] = [...fills(4), REVIEW, FINAL]) => {
     const r = recipes.startPortalRecording(db, {
       scopeType: "ahj", state: "OR", ahj: "Portland", utility: "PGE",
-      portalUrl: "https://permits.portland.example/apply", portalPlatform: "accela", createdBy: "test",
+      portalUrl: FIXTURE_DOOR, portalPlatform: "accela", createdBy: "test",
     });
     return recipes.savePortalRecipeSteps(db, r.id, steps, { status: "complete", notes: "Auto-learned and verified (high confidence)." });
+  };
+
+  /** A NAMED PERSON VERIFIES WHERE A TRACK FILES — through the same person-verified writers the
+   *  track card's Verify / Confirm use (knowledgeBase.saveVerifiedAhjProfile / saveVerifiedUtilityProfile).
+   *  The final-submit gate refuses a run whose filing door nobody verified (automaticSubmitRefusals
+   *  filingDoor), so a test whose approved run must be ALLOWED verifies its door first. Defaults: the
+   *  fixture AHJ's own portal, the URL completeRecipe records. */
+  const verifyDoor = (opts: { scope?: "ahj" | "utility"; state?: string; ahj?: string; utility?: string; portalUrl?: string; verifiedBy?: string } = {}) => {
+    const state = opts.state ?? "OR";
+    const portalUrl = opts.portalUrl ?? FIXTURE_DOOR;
+    const verifiedBy = opts.verifiedBy ?? "Door Verifier";
+    return opts.scope === "utility"
+      ? kb.saveVerifiedUtilityProfile(db, { state, utility: opts.utility ?? "PGE", portalUrl, verifiedBy })
+      : kb.saveVerifiedAhjProfile(db, { state, ahj: opts.ahj ?? "Portland", portalUrl, verifiedBy });
   };
 
   type Runner = Parameters<typeof repo.setRecipeStageRunnerForTests>[0];
@@ -130,7 +148,7 @@ export async function setupStageFixture(tag: string) {
     };
   };
 
-  return { db, repo, recipes, client, newProject, completeRecipe, fills, REVIEW, FINAL, stubRunner, failingStep, latestRun, recipeRow, audits, acknowledgeAll };
+  return { db, repo, recipes, client, newProject, completeRecipe, verifyDoor, FIXTURE_DOOR, fills, REVIEW, FINAL, stubRunner, failingStep, latestRun, recipeRow, audits, acknowledgeAll };
 }
 
 let failures = 0;

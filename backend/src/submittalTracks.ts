@@ -395,6 +395,26 @@ function channelResolution(db: AppDb | null, track: SubmittalTrackType, project:
   return { channel: `Unknown — verify on ${site}`, basis: "unknown", portalUrl: "" };
 }
 
+/**
+ * THE FILING DOOR A NAMED PERSON VERIFIED FOR THIS TRACK, or null. The same answer the track card
+ * shows as "verified by a person" (channelResolution basis "verified" with a portal URL: a person's
+ * verified knowledge-base row for the AHJ / utility, or the utility filing lookup a named person
+ * verified); every other basis (cited, seeded profile, shipped door, researched, known, unknown) is
+ * null, and so is a verified "filed inside the permit application" (it names no portal). Read by
+ * the final-submit gate (repository.automaticSubmitRefusals): automation clicks a final submit only
+ * on this door. `trackProject` is the track's own view (permitProcess.projectForTrack: the issuer
+ * for a permit track, the project for NEM). Reads only; a failed read is null (the gate refuses).
+ */
+export function personVerifiedFilingDoor(db: AppDb, track: SubmittalTrackType, trackProject: ProjectRecord): { url: string } | null {
+  try {
+    const res = channelResolution(db, track, trackProject);
+    const url = s(res.portalUrl).trim();
+    return res.basis === "verified" && /^https?:\/\//i.test(url) && !res.filedWithPermit ? { url } : null;
+  } catch {
+    return null;
+  }
+}
+
 /** HOW THIS TRACK IS FILED, AS A KIND (operator 09-28: "City of Waltham only does in-person permit
  *  submission ... ensure they're bold enough to know, same with email submissions as it will require
  *  us to go outside of the submission tool"). ONE answer, read from the channel resolution: a portal

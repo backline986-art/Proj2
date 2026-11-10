@@ -125,12 +125,12 @@ import { deleteProjectInfoPages } from "./infoPages";
 import { nemSignatureState, nemStageIsResume } from "./signatureTrack";
 import { siteKey } from "../../portal-bot/src/draftCreated";
 import { safeRecordLink } from "../../portal-bot/src/adapters/submissionLedger";
-import { selectAdapterActor, selectStagingActor, learnEntryUrl, resolvePortalChannel, seedOutcomeToStageResult, isAutoSeedDisabled, recipeDisciplineFromSteps, disciplineConflictsWithTrack, recipeDisciplineForTrack, hostFitsTrackAndEntity, scopeForTrack, trackSafeUrl, portalHostOf, sameHost, samePortal, type HostFit, type PortalUrlSource } from "./portalChannel";
+import { selectAdapterActor, selectStagingActor, learnEntryUrl, resolvePortalChannel, seedOutcomeToStageResult, isAutoSeedDisabled, recipeDisciplineFromSteps, disciplineConflictsWithTrack, recipeDisciplineForTrack, hostFitsTrackAndEntity, scopeForTrack, trackSafeUrl, portalHostOf, sameHost, samePortal, sameFilingDoor, type HostFit, type PortalUrlSource } from "./portalChannel";
 import { isPortalPaused } from "./portalPause";
 // The ONE creator of permit_check_targets rows (extracted from markTrackSubmitted).
 // Direction matters: submittalTracks must never import repository — jobQueue statically
 // imports repository, and the circular-import guard in CLAUDE.md is about that edge.
-import { ensureCheckTarget, refuseUtilityUrlOnPermitTarget, getSubmittalTracks, isTrackDone, requiredTracks, SUBMITTAL_TRACK_TYPES, trackHasFiling, trackPermitTypes, trackSubmittedAndTracked, trackSubmittedSentence, unfinishedTracks, unfinishedUnattributedTargets, withPermitStageSentence } from "./submittalTracks";
+import { ensureCheckTarget, refuseUtilityUrlOnPermitTarget, getSubmittalTracks, isTrackDone, personVerifiedFilingDoor, requiredTracks, SUBMITTAL_TRACK_TYPES, trackHasFiling, trackPermitTypes, trackSubmittedAndTracked, trackSubmittedSentence, unfinishedTracks, unfinishedUnattributedTargets, withPermitStageSentence } from "./submittalTracks";
 import { nemTrackDropFor } from "./utilityStorageModes";
 import { nemFiledWithPermit } from "./utilityFilingLookup";
 import { recordStagedReview, supersedeStagedReviews, takeStagedReviewCapture } from "./stagedReviews";
@@ -8657,9 +8657,20 @@ export function automaticSubmitRefusals(
      *  and unverified form mappings this filing carries NOW (approvalReviewItems.acknowledgementProblems):
      *  new, changed, not acknowledged, or a plan set replaced since. Such a run always stops at review. */
     unacknowledgedSinceApproval?: string[];
+    /** THE FILING DOOR A NAMED PERSON VERIFIED for this run's track (submittalTracks.
+     *  personVerifiedFilingDoor), or null when nobody has. Required, so every caller says which:
+     *  null, or absent at runtime, refuses. A seeded, cited, shipped, researched or official door
+     *  is null here (owner 2026-11-10: filing doors stay person-verified, never automatic). */
+    filingDoor: { url: string } | null;
   },
 ): string[] {
   const out: string[] = [];
+  // WHERE THIS RUN FILES MUST BE A DOOR A PERSON CONFIRMED (tightening only; staging a draft to
+  // review is untouched, and the email door already needs a person-verified recipient).
+  const doorUrl = String(input.filingDoor?.url ?? "").trim();
+  if (!doorUrl) {
+    out.push("this track's filing destination is not person-verified — a named person confirms where it files (the track card's Confirm or Verify) before a run may file automatically");
+  }
   if (!finalSubmitEnvAllows(input.env ?? process.env)) out.push("PORTAL_ALLOW_FINAL_SUBMIT is not 1 on this process");
   if (input.borrowedFrom) out.push(`the recipe was learned for ${input.borrowedFrom}, not this jurisdiction — a borrowed recipe always stops at review`);
   if (input.relaxedSinceApproval?.length) {
@@ -8670,15 +8681,33 @@ export function automaticSubmitRefusals(
   }
   // The one approval check every filing door reads (shared/src/portalSafety.runApprovalRefusals).
   out.push(...runApprovalRefusals(input.runApproval, String(input.runId ?? "")));
-  const row = input.recipeId ? db.get<Row>("SELECT status, steps_json FROM portal_recipes WHERE id = ?", [input.recipeId]) : null;
+  const row = input.recipeId ? db.get<Row>("SELECT status, steps_json, portal_url FROM portal_recipes WHERE id = ?", [input.recipeId]) : null;
   if (!row) {
     out.push("no recorded recipe drives this run (a final submit needs a recipe with a flagged, terminal submit step)");
   } else {
     if (text(row.status) !== "complete") out.push(`the recipe is ${text(row.status) || "unknown"}, not complete`);
-    const steps = parseJson<Array<{ action: string; isFinalSubmit?: boolean }>>(text(row.steps_json) || "[]", []);
+    const steps = parseJson<Array<{ action: string; isFinalSubmit?: boolean; value?: unknown }>>(text(row.steps_json) || "[]", []);
     const flagged = steps.filter((st) => st && st.isFinalSubmit === true).length;
     if (flagged === 0) out.push("the recipe has no flagged final-submit step");
     out.push(...recipeShapeProblems(steps).map((p) => `recipe shape: ${p}`));
+    // THE RECIPE MUST DRIVE THAT DOOR: its entry URL and every page it navigates to by URL are on the
+    // verified door's host (and named tenant, on a shared vendor instance) — portalChannel.sameFilingDoor.
+    if (doorUrl) {
+      const entry = text(row.portal_url).trim();
+      const gotos = steps
+        .filter((st) => st && String(st.action) === "goto" && /^https?:\/\//i.test(String(st.value ?? "").trim()))
+        .map((st) => String(st.value).trim());
+      const doorHost = portalHostOf(doorUrl) || doorUrl;
+      if (!entry) {
+        out.push(`the recipe names no portal URL, so it cannot be matched to the person-verified filing destination (${doorHost})`);
+      } else {
+        const off = [entry, ...gotos].filter((u) => !sameFilingDoor(doorUrl, u));
+        if (off.length) {
+          const hosts = [...new Set(off.map((u) => portalHostOf(u) || u))];
+          out.push(`the recipe drives ${hosts.join(", ")}, not the person-verified filing destination (${doorHost}) — confirm this track's destination, or re-record on it`);
+        }
+      }
+    }
   }
   return out;
 }
@@ -10082,8 +10111,11 @@ export async function prepareSubmission(
   // would let an approval reach a Submit the recipe never named. So the gate is asked with no
   // recipe, unchanged, and refuses: the resumed run stops in front of step 5's Submit for a person.
   const gateRecipeId = nemDraft ? null : (recipe?.id ?? null);
+  // WHERE THIS TRACK FILES, AS A NAMED PERSON VERIFIED IT (the card's "verified by a person"), read
+  // for the track's own view — the issuer for a permit track; a trackless stage files as a permit.
+  const filingDoor = wantsFinalSubmit ? personVerifiedFilingDoor(db, track ?? "permit", portalProject) : null;
   const submitRefusals = wantsFinalSubmit
-    ? automaticSubmitRefusals(db, { recipeId: gateRecipeId, runApproval, runId, borrowedFrom: borrowed?.learnedFor ?? null, relaxedSinceApproval, unacknowledgedSinceApproval })
+    ? automaticSubmitRefusals(db, { recipeId: gateRecipeId, runApproval, runId, borrowedFrom: borrowed?.learnedFor ?? null, relaxedSinceApproval, unacknowledgedSinceApproval, filingDoor })
     : [];
   const resolvedAutoSubmit = wantsFinalSubmit && submitRefusals.length === 0;
   if (wantsFinalSubmit && !resolvedAutoSubmit) {
@@ -10094,6 +10126,7 @@ export async function prepareSubmission(
   } else if (resolvedAutoSubmit) {
     addAuditLog(db, projectId, "system", "submit gate", "portal.auto_submit_allowed", {
       track: track ?? "permit", runId, approvedBy: runApproval?.approver ?? null, recipeId: recipe?.id ?? null, recipeVersion: recipe?.version ?? null,
+      filingDoor: filingDoor?.url ?? null,
     });
   }
 

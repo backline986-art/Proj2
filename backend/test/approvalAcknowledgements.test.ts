@@ -31,6 +31,9 @@ import { setupStageFixture, check, finish } from "./_stageFixture";
 
 const fx = await setupStageFixture("approval-acknowledgements");
 const { db, repo } = fx;
+// The fixture AHJ's filing door, verified by a named person: the gate refuses a run on an unverified door
+// (automaticSubmitRefusals filingDoor; filingDoorGate.test pins that), and these runs are about other checks.
+fx.verifyDoor();
 const { buildApprovalSheet } = await import("../src/approvalSheet");
 const { planSetBinding, acknowledgementProblems } = await import("../src/approvalReviewItems");
 const docs = await import("../src/projectDocuments");

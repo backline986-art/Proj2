@@ -217,8 +217,9 @@ await check("(s4) a borrowed recipe never clicks a final submit, even with a nam
   const donor = ahjRecipe({ state: "OR", ahj: "City of Newport", portalUrl: ACA_OREGON, discipline: "combo", steps: withFinal });
   const env = { PORTAL_ALLOW_FINAL_SUBMIT: "1" };
   const approval = { approver: "Dana Operator", runId: "run-1" };
-  const own = repo.automaticSubmitRefusals(db, { recipeId: donor.id, runApproval: approval, runId: "run-1", env });
-  const borrowedRun = repo.automaticSubmitRefusals(db, { recipeId: donor.id, runApproval: approval, runId: "run-1", env, borrowedFrom: "City of Newport" });
+  const filingDoor = { url: ACA_OREGON };
+  const own = repo.automaticSubmitRefusals(db, { recipeId: donor.id, runApproval: approval, runId: "run-1", env, filingDoor });
+  const borrowedRun = repo.automaticSubmitRefusals(db, { recipeId: donor.id, runApproval: approval, runId: "run-1", env, borrowedFrom: "City of Newport", filingDoor });
   assert.equal(own.some((r) => /borrowed/.test(r)), false, "MUST-PASS: the owner's own run is not refused for borrowing");
   assert.ok(borrowedRun.some((r) => /borrowed recipe always stops at review/.test(r)), JSON.stringify(borrowedRun));
 });
@@ -259,6 +260,8 @@ await check("(x2) MF2 MUST-EXCLUDE: end to end through prepareSubmission, a borr
     assert.ok(declined[0].reasons.some((r: string) => /borrowed/.test(r)), JSON.stringify(declined[0].reasons));
     // MUST-PASS: Newport's own project, its own recipe, the same kind of approval → allowed.
     const newport = fx.newProject({ ahj: "City of Newport", city: "Newport", zip: "97365" });
+    // A named person verified where Newport files (the gate refuses an unverified door).
+    fx.verifyDoor({ ahj: "City of Newport", portalUrl: ACA_OREGON });
     const own = repo.createRunApproval(db, { projectId: newport, track: "building", approver: "Dana Operator", acknowledgements: fx.acknowledgeAll(newport, "building") });
     await repo.prepareSubmission(db, newport, "building", true, true, own.id);
     assert.equal(seen.length, 2, "the owner's run did not reach the runner");

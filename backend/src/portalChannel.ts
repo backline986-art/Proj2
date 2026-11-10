@@ -923,6 +923,21 @@ export function samePortal(a: string | null | undefined, b: string | null | unde
   return !ta || !tb || ta === tb;
 }
 
+/**
+ * IS THIS URL ON THE FILING DOOR A PERSON VERIFIED? (the final-submit gate's door check,
+ * repository.automaticSubmitRefusals). Same host, and on a shared vendor instance (one host serving
+ * many agencies by path or query tenant) the same NAMED tenant: a door that names no tenant on such
+ * a host is the vendor's shared site, which is nobody's door, so it matches nothing. Strict by
+ * design: a run whose URL fails this stops at review; nothing here opens or files anything.
+ */
+export function sameFilingDoor(door: string | null | undefined, url: string | null | undefined): boolean {
+  const host = portalHostOf(door);
+  if (!host || host !== portalHostOf(url)) return false;
+  if (!isPathTenantedHost(host)) return true;
+  const key = portalTenantKey(door);
+  return key !== "" && key !== portalTenantKey(`https://${host}/`) && key === portalTenantKey(url);
+}
+
 /** The recipe scope a track files under: NEM → the utility; every permit track (and a
  *  trackless legacy stage) → the AHJ. */
 export function scopeForTrack(track: string | null | undefined): "ahj" | "utility" {

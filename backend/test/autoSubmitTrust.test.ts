@@ -25,6 +25,9 @@ import { setupStageFixture, check, finish } from "./_stageFixture";
 
 const fx = await setupStageFixture("auto-submit-trust");
 const { db, repo, recipes } = fx;
+// The fixture AHJ's filing door, verified by a named person: the gate refuses a run on an unverified door
+// (automaticSubmitRefusals filingDoor; filingDoorGate.test pins that), and these runs are about other checks.
+fx.verifyDoor();
 
 type Seen = { autoSubmit?: boolean; runApproval?: { approver: string; runId: string } | null; runId?: string; allowFinalSubmit?: boolean };
 /** Stage once with autoSubmit requested, handing in the approval THIS request minted (the job
@@ -153,7 +156,7 @@ await check("(i) an EXPIRED approval is never honoured", async () => {
 await check("(j) the decision re-reads the recipe: a recipe that is not complete, or no recipe at all, is refused", () => {
   const recipe = fx.completeRecipe();
   const runId = "run-j";
-  const ok = { recipeId: recipe.id, runApproval: { approver: "A. Person", runId }, runId, env: { PORTAL_ALLOW_FINAL_SUBMIT: "1" } };
+  const ok = { recipeId: recipe.id, runApproval: { approver: "A. Person", runId }, runId, env: { PORTAL_ALLOW_FINAL_SUBMIT: "1" }, filingDoor: { url: fx.FIXTURE_DOOR } };
   assert.equal(repo.maySubmitAutomatically(db, ok), true, "setup: the same inputs on a complete recipe must pass");
   recipes.markPortalRecipeForRerecord(db, recipe.id, { actor: "test" });
   assert.equal(repo.maySubmitAutomatically(db, ok), false, "a needs_rerecord recipe may submit");
