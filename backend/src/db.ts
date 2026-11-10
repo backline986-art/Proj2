@@ -3614,6 +3614,71 @@ const VERSIONED_MIGRATIONS: VersionedMigration[] = [
       addColumnIfMissing(db, "clients", "service_area_json", "TEXT NOT NULL DEFAULT '[]'");
     },
   },
+  {
+    // v81 (client self-onboarding): the Company setup link, the client's proposals and its
+    // certificate uploads. Client data, scoped by client_id (rule 6); nothing here is shared knowledge.
+    version: 81,
+    name: "client_onboarding",
+    up: (db) => {
+      // A CLIENT FILLS IN ITS OWN COMPANY SETUP (clientOnboarding.ts). Three tables, all CLIENT DATA
+      // keyed on client_id (org-scoped through the client row, rule 6), none of them shared knowledge
+      // and none of them read by a prompt.
+      //   client_onboarding_links: the staff-minted, revocable, expiring link. Only the SHA-256 of the
+      //     token is stored (the URL is shown once, at mint). draft_json is the client's work in
+      //     progress, saved across sessions until it submits; status open / submitted / revoked.
+      //   client_onboarding_proposals: what the client submitted, one row per field that differs from
+      //     the client record. NOTHING here writes the client row: a named staff person accepts (as
+      //     sent or edited) or rejects each one, and only the accept calls updateClient.
+      //   client_onboarding_files: the optional certificate uploads (type and size capped). Bytes in
+      //     the row, so a purge of the client takes them; never parsed, never sent to a model.
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS client_onboarding_links (
+          id TEXT PRIMARY KEY,
+          client_id TEXT NOT NULL,
+          token_hash TEXT NOT NULL UNIQUE,
+          status TEXT NOT NULL DEFAULT 'open',
+          draft_json TEXT NOT NULL DEFAULT '{}',
+          draft_saved_at TEXT,
+          created_by TEXT NOT NULL DEFAULT '',
+          created_at TEXT NOT NULL,
+          expires_at TEXT NOT NULL,
+          submitted_at TEXT,
+          revoked_at TEXT,
+          revoked_by TEXT NOT NULL DEFAULT '',
+          portal_requests INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE INDEX IF NOT EXISTS idx_client_onboarding_links_client ON client_onboarding_links(client_id, created_at);
+        CREATE TABLE IF NOT EXISTS client_onboarding_proposals (
+          id TEXT PRIMARY KEY,
+          client_id TEXT NOT NULL,
+          link_id TEXT NOT NULL,
+          field TEXT NOT NULL,
+          proposed_json TEXT NOT NULL,
+          current_json TEXT NOT NULL DEFAULT 'null',
+          source TEXT NOT NULL DEFAULT 'client-supplied',
+          status TEXT NOT NULL DEFAULT 'pending',
+          created_at TEXT NOT NULL,
+          decided_by TEXT NOT NULL DEFAULT '',
+          decided_at TEXT,
+          applied_json TEXT NOT NULL DEFAULT ''
+        );
+        CREATE INDEX IF NOT EXISTS idx_client_onboarding_proposals_client ON client_onboarding_proposals(client_id, status);
+        CREATE TABLE IF NOT EXISTS client_onboarding_files (
+          id TEXT PRIMARY KEY,
+          client_id TEXT NOT NULL,
+          link_id TEXT NOT NULL,
+          kind TEXT NOT NULL,
+          file_name TEXT NOT NULL DEFAULT '',
+          mime TEXT NOT NULL,
+          size_bytes INTEGER NOT NULL,
+          sha256 TEXT NOT NULL,
+          bytes BLOB NOT NULL,
+          created_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_client_onboarding_files_client ON client_onboarding_files(client_id, created_at);
+      `);
+    },
+  },
 ];
 
 /** v47 was edited in place while #218 was open (Helm's review at 0116f98a): a DB that ran an earlier

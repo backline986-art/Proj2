@@ -11,7 +11,7 @@ import { openDatabase } from "./db";
 import { HttpError } from "./httpError";
 import { llmUsageForProject, runWithLlmContext } from "./llmAccounting";
 import { parseJson } from "./json";
-import { collectDiagnostics, logErrorBlock, logger, requestLogger, startupBanner } from "./logger";
+import { collectDiagnostics, logErrorBlock, logger, maskPublicTokenPath, requestLogger, startupBanner } from "./logger";
 import { buildInfo, publicBuildInfo, versionString } from "./buildInfo";
 import { COPYRIGHT_NOTICE, PROVENANCE_ID } from "../../shared/src/provenance";
 import { checkConcurrencyConfig, readConcurrencyConfig } from "./concurrencyConfig";
@@ -109,6 +109,12 @@ import { buildAuthUrl, exchangeCodeForTokens, gmailStatus, pollGmail } from "./g
 import { imapStatus, pollImap, upsertImapSource } from "./emailPoller";
 import { answerPortalQuestions, createIntakeRequest, getIntakeRequestPublic, submitIntakeRequest, portalQuestionStatus } from "./intakeRequests";
 import { createCredentialRequest, getCredentialRequestPublic, listCredentialRequests, submitCredentialRequest } from "./credentialRequests";
+import {
+  addOnboardingFile, decideOnboardingProposals, getOnboardingFile, getOnboardingPublic, listOnboardingProposals, mintOnboardingLink,
+  ONBOARDING_FILE_MAX_BYTES, pendingOnboardingProposalIds, removeOnboardingFile, requestOnboardingPortalLogins, revokeOnboardingLink,
+  saveOnboardingDraft, submitOnboarding,
+} from "./clientOnboarding";
+import { publicRateLimit } from "./publicRateLimit";
 import { ensureHeartbeat, sseBroadcast, sseSubscribe, setSseOrgResolver } from "./events";
 import {
   addManualCorrection,
@@ -358,6 +364,8 @@ app.get("/credentials", (_req, res) => res.sendFile(path.join(frontendDir, "cred
 app.get("/status", (_req, res) => res.sendFile(path.join(frontendDir, "status.html")));
 // The per-CLIENT tracker: one stable link listing every job we are filing for that company.
 app.get("/portal", (_req, res) => res.sendFile(path.join(frontendDir, "portal.html")));
+// The client's own Company setup page (clientOnboarding.ts): tokenized, no login, draft-saving.
+app.get("/onboarding", (_req, res) => res.sendFile(path.join(frontendDir, "onboarding.html")));
 app.use(requireAuth(db));
 // Licensing: an org reaches only the routes of the products it holds. Deny-by-default,
 // driven by the product registry in entitlements.ts.
@@ -1134,6 +1142,80 @@ app.get("/api/public/credential-request/:token", (req, res) => {
 app.post("/api/public/credential-request/:token", (req, res) => {
   const body = (req.body ?? {}) as { portals?: unknown[] };
   res.json(submitCredentialRequest(db, String(req.params.token), (body.portals ?? []) as never));
+});
+
+// ---------------------------------------------------------------------------
+// COMPANY SETUP: the client fills in its own onboarding (backend/src/clientOnboarding.ts).
+// Staff mint / revoke the link and decide each answer under /api/clients/:id (scope-guarded). The
+// public routes are scoped to ONE client by the token (rule 6), rate-limited, and answer 404 for a
+// bad, expired or revoked token. Nothing a client sends writes the client record: each answer waits
+// as a "client-supplied" proposal until a named person accepts it. Portal logins go through the
+// existing one-time credential link, never through these routes (rule 2).
+// ---------------------------------------------------------------------------
+// Per caller, per 10 minutes: 300 requests (a person filling in the form never gets near it) and 20
+// refused tokens, after which that caller waits out the window.
+const onboardingLimiter = publicRateLimit({ windowMs: 10 * 60_000, max: 300, maxMisses: 20 });
+const onboardingDecider = async (req: Request, what: string): Promise<string> => {
+  const { isConfirmingPerson } = await import("./feeConfirm");
+  return namedPersonDecider(req, "decidedBy", `Sign in to ${what}.`,
+    `Name the person who will ${what}: it is recorded against them, and "operator" is not a person.`, isConfirmingPerson);
+};
+app.post("/api/clients/:id/onboarding-links", asyncHandler(async (req, res) => {
+  const by = await onboardingDecider(req, "create a company setup link");
+  res.json(mintOnboardingLink(db, String(req.params.id), { createdBy: by, ttlDays: Number((req.body ?? {}).ttlDays) || undefined }));
+}));
+app.post("/api/clients/:id/onboarding-links/:linkId/revoke", asyncHandler(async (req, res) => {
+  const by = await onboardingDecider(req, "revoke a company setup link");
+  res.json(revokeOnboardingLink(db, String(req.params.id), String(req.params.linkId), by));
+}));
+app.get("/api/clients/:id/onboarding", (req, res) => {
+  res.json(listOnboardingProposals(db, String(req.params.id), { all: req.query.all === "1" }));
+});
+app.post("/api/clients/:id/onboarding/decide", asyncHandler(async (req, res) => {
+  const body = (req.body ?? {}) as { accept?: unknown; reject?: unknown; edits?: unknown; acceptAll?: boolean };
+  // Named BEFORE anything is written: a blank name (sign-in off) is a 400 that changes nothing.
+  const by = await onboardingDecider(req, "decide a client's company setup answers");
+  const clientId = String(req.params.id);
+  const accept = body.acceptAll === true ? pendingOnboardingProposalIds(db, clientId) : body.accept;
+  res.json(decideOnboardingProposals(db, clientId, { accept, reject: body.reject, edits: body.edits }, by));
+}));
+app.get("/api/clients/:id/onboarding/files/:fileId", (req, res) => {
+  const f = getOnboardingFile(db, String(req.params.id), String(req.params.fileId));
+  res.setHeader("Content-Type", f.mime);
+  res.setHeader("Content-Disposition", `attachment; filename="${f.fileName.replace(/"/g, "")}"`);
+  res.setHeader("Cache-Control", "no-store");
+  res.send(f.bytes);
+});
+// Public (no auth): the page's data and its writes.
+// Rate limit + no caching on every public onboarding route (a page holding a company's details is
+// never cached by a browser or a proxy). Attached per route, so each stays a plain registration.
+const onboardingPublic = [onboardingLimiter, (_req: Request, res: Response, next: NextFunction) => {
+  res.setHeader("Cache-Control", "no-store");
+  res.setHeader("Referrer-Policy", "no-referrer");
+  next();
+}];
+app.get("/api/public/onboarding/:token", ...onboardingPublic, (req, res) => {
+  res.json(getOnboardingPublic(db, String(req.params.token)));
+});
+app.post("/api/public/onboarding/:token/draft", ...onboardingPublic, (req, res) => {
+  res.json(saveOnboardingDraft(db, String(req.params.token), req.body));
+});
+app.post("/api/public/onboarding/:token/submit", ...onboardingPublic, (req, res) => {
+  res.json(submitOnboarding(db, String(req.params.token), req.body));
+});
+app.post("/api/public/onboarding/:token/portal-logins", ...onboardingPublic, (req, res) => {
+  res.json(requestOnboardingPortalLogins(db, String(req.params.token), req.body));
+});
+app.post(
+  "/api/public/onboarding/:token/files",
+  ...onboardingPublic,
+  express.raw({ type: ["application/pdf", "image/png", "image/jpeg", "application/octet-stream"], limit: ONBOARDING_FILE_MAX_BYTES + 1024 }),
+  (req, res) => {
+    res.json(addOnboardingFile(db, String(req.params.token), { kind: req.query.kind, fileName: req.query.name, bytes: req.body }));
+  },
+);
+app.delete("/api/public/onboarding/:token/files/:fileId", ...onboardingPublic, (req, res) => {
+  res.json(removeOnboardingFile(db, String(req.params.token), String(req.params.fileId)));
 });
 
 // Public (no auth): read an intake request by token.
@@ -4711,8 +4793,12 @@ app.use((err: unknown, req: Request, res: Response, _next: NextFunction) => {
         ? new HttpError(413, `Upload is too large. For a big .zip of project PDFs, raise BATCH_ZIP_LIMIT in your .env (default 2gb) or unzip it locally and use the "Scan Folder" path instead. For a big .mbox file, paste its full local path and click Import Path.`)
         : new HttpError(bodyParserStatus && bodyParserStatus >= 400 && bodyParserStatus < 600 ? bodyParserStatus : 500, err instanceof Error ? err.message : "Unknown error.");
   // 5xx are real bugs — print a copy-pasteable block. 4xx are client errors — one line.
-  if (httpError.status >= 500) logErrorBlock("http", err, { route: `${req.method} ${req.path}`, status: httpError.status });
-  else logger.warn("http", `${httpError.status} ${req.method} ${req.path}`, { reason: httpError.message });
+  // A tokenized public path logs with its token masked; a client's onboarding answer (a refusal can
+  // quote what was typed) is never logged at all (rule 2, clientOnboarding.ts).
+  const logPath = maskPublicTokenPath(req.path);
+  const withheld = /^\/api\/public\/onboarding\//i.test(req.path);
+  if (httpError.status >= 500) logErrorBlock("http", withheld ? new Error("onboarding route failed (detail withheld: client answers)") : err, { route: `${req.method} ${logPath}`, status: httpError.status });
+  else logger.warn("http", `${httpError.status} ${req.method} ${logPath}`, { reason: withheld ? "(withheld: a client's onboarding answer)" : httpError.message });
   // A 5xx whose message was WRITTEN FOR THE OPERATOR (normalizeLlmError: "add credits", "rate-
   // limited", "rejected the API key") reaches the dashboard as written; the generic line stands in
   // only when no safe message exists (an uncaught Error's message may carry a path or a stack).

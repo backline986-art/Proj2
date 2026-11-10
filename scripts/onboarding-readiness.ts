@@ -88,9 +88,8 @@ const dbFlag = flag("db");
 process.env.AUTOPILOT_DB_PATH = dbFlag || process.env.AUTOPILOT_DB_PATH || "backend/data/autopilot.sqlite";
 
 const { openDatabase } = await import("../backend/src/db");
-const { listClients, clientStagingOverlay, licenceFor, licenceJobState, parseStateLicenses } = await import("../backend/src/clients");
-const { licenceKindWords } = await import("../shared/src/licenceKinds");
-const { usStateCode } = await import("../backend/src/permitPath");
+const { listClients, clientStagingOverlay } = await import("../backend/src/clients");
+const readiness = await import("../backend/src/onboardingReadiness");
 const { filingChannel } = await import("./coverage-report");
 const { orgEntitlements } = await import("../backend/src/entitlements");
 const { listPortalCredentials } = await import("../backend/src/portalCredentials");
@@ -241,65 +240,28 @@ line(
 // the filing is rejected later rather than refused now. LICENCES are not here: they are
 // per state and per track, in the next section.
 rule("CLIENT — BUSINESS FIELDS");
-type Grade = "gate" | "nem" | "ilNem" | "portal" | "info";
-const FIELDS: [keyof typeof client, Grade, string][] = [
-  ["standardDisconnectMake", "nem", "utility portals require a disconnect make"],
-  ["standardDisconnectModel", "nem", "utility portals require a disconnect model"],
-  ["docketNumber", "ilNem", "ICC docket number — required on every Illinois interconnection application"],
-  ["legalBusinessName", "portal", "installerCompanyName (falls back to companyName)"],
-  ["businessAddress", "portal", "installerStreet / installerAddress"],
-  ["businessCity", "portal", "installerCity"],
-  ["businessState", "portal", "installerState"],
-  ["businessZip", "portal", "installerZip (ACA validates exactly 5 digits)"],
-  ["businessPhone", "portal", "installerPhone + phone segments (falls back to phone)"],
-  ["businessEmail", "portal", "installerEmail (falls back to contactEmail)"],
-  ["contactName", "portal", "installerContactName (falls back to authorizedSignerName)"],
-  ["authorizedSignerName", "portal", "who signs the application — many AHJ forms require a named signer"],
-  ["authorizedSignerTitle", "portal", "the signer's title, asked for beside the signature on most forms"],
-  ["metroCityLicenseNumber", "info", "metro/city contractor licence — required by some AHJ forms"],
-  ["ein", "info", "EIN — value never printed by this script"],
-  ["bondCarrier", "info", "bond carrier"],
-  ["insuranceCarrier", "info", "insurance carrier"],
-];
+// The grading is backend/src/onboardingReadiness.ts — the same answer the client's own Company setup
+// page reads its "still missing" checklist from. The one state-specific rule this report keeps is its
+// own data here: the docket number one state's interconnection application asks for.
+const ILLINOIS_DOCKET = { field: "docketNumber" as const, why: "ICC docket number — required on every Illinois interconnection application" };
+const fieldRules = [...readiness.CLIENT_FIELD_RULES.slice(0, 2), ILLINOIS_DOCKET, ...readiness.CLIENT_FIELD_RULES.slice(2)];
 // Identity fields are printed as values because that is how the operator confirms they
 // are looking at the right company. Everything else is set/blank only.
-check(
-  blank(client.companyName) && blank(client.legalBusinessName) ? "fail" : "ok",
-  "companyName",
-  client.companyName || `(blank; legal name "${client.legalBusinessName}")`,
-  "Set a company name or legal business name on the client row.",
-);
-for (const [field, grade, why] of FIELDS) {
-  const isBlank = blank(client[field]);
-  if (!isBlank) {
-    check("ok", String(field), "set");
+{
+  const c = readiness.companyNameCheck(client);
+  check(c.level, c.label, c.detail, c.nextStep);
+}
+for (const rule of fieldRules) {
+  if (rule === ILLINOIS_DOCKET) {
+    const isBlank = blank(client[rule.field]);
+    if (!isBlank) { check("ok", rule.field, "set"); continue; }
+    const level: Level = anyIllinoisNem ? "fail" : "ok";
+    const note = anyIllinoisNem ? `blank — BLOCKS Illinois interconnection: ${rule.why}` : "blank — Illinois only, not in scope";
+    check(level, rule.field, note, `Fill ${rule.field} on the client row (${rule.why}).`);
     continue;
   }
-  let level: Level = "warn";
-  let note = `blank — ${why}`;
-  let next = `Fill ${String(field)} on the client row (${why}).`;
-  if (grade === "gate") {
-    level = "fail";
-    next = `Fill ${String(field)} on the client row — staging is refused outright without it.`;
-  } else if (grade === "nem") {
-    level = anyNem ? "fail" : "warn";
-    note = anyNem
-      ? `blank — BLOCKS interconnection: ${why}`
-      : `blank — ${why} (no NEM jurisdiction in scope, so not blocking today)`;
-  } else if (grade === "ilNem") {
-    level = anyIllinoisNem ? "fail" : "warn";
-    note = anyIllinoisNem
-      ? `blank — BLOCKS Illinois interconnection: ${why}`
-      : `blank — ${why} (no Illinois NEM jurisdiction in scope)`;
-    if (!anyIllinoisNem) level = "ok";
-    if (level === "ok") note = "blank — Illinois only, not in scope";
-  } else if (grade === "info") {
-    // No current gate reads these, and no portal fill depends on them, so a blank is not
-    // a gap in itself — it only matters if a specific AHJ form asks for it.
-    level = "ok";
-    note = `blank — ${why} (no gate reads it; supply it if an AHJ form asks)`;
-  }
-  check(level, String(field), note, next);
+  const c = readiness.gradeField(client, rule as (typeof readiness.CLIENT_FIELD_RULES)[number], { anyNem });
+  check(c.level, c.label, c.detail, c.nextStep);
 }
 
 // --- Licences, per state and per track --------------------------------------------
@@ -314,71 +276,25 @@ for (const [field, grade, why] of FIELDS) {
 // for it). A building- or electrical-only slot that finds nothing is a gap: it bites only on an
 // AHJ that issues that trade's permit separately.
 rule("CLIENT — LICENCES BY STATE AND TRACK");
-interface StateScope { state: string; permit: boolean; nem: boolean; assumed: boolean }
-const stateScopes = new Map<string, StateScope>();
-for (const j of jurisdictions) {
-  const st = licenceJobState(j.state);
-  if (!st) continue;
-  const scope = stateScopes.get(st) ?? { state: st, permit: false, nem: false, assumed: false };
-  if (!blank(j.ahj)) scope.permit = true;
-  if (!blank(j.utility)) scope.nem = true;
-  stateScopes.set(st, scope);
-}
-if (jurisdictions.some((j) => !licenceJobState(j.state))) {
-  check("warn", "jurisdiction state", "a jurisdiction in scope names no state — which state's licence it takes is unknown", "Give every jurisdiction its state (\"STATE|AHJ|UTILITY\").");
-}
-if (!stateScopes.size) {
-  // No job states known yet: the state the client says issued its licence, else its home state —
-  // and say it is an assumption, so a clean result is not read as proof about other states.
-  const assumed = usStateCode(client.licenseState) || usStateCode(client.businessState);
-  if (assumed) stateScopes.set(assumed, { state: assumed, permit: true, nem: true, assumed: true });
-}
-if (!stateScopes.size) {
-  check("fail", "licence state", "no jurisdiction in scope and no licence or business state on the client — no state's licence can be checked",
-    "Set licenseState on the client, or re-run with --jurisdictions naming where this company files.");
-}
-const typedLicences = parseStateLicenses(client.stateLicenses);
-for (const scope of [...stateScopes.values()].sort((a, b) => a.state.localeCompare(b.state))) {
+// Asked through backend/src/onboardingReadiness.ts (readinessScopes / licenceChecks), which asks
+// clients.licenceFor — the one answer every licence door uses. Oregon's CCB column gate stays here:
+// it is that state's own staging refusal (prepareSubmission's needsCcb), not a licence question.
+const scoped = readiness.readinessScopes(client, jurisdictions);
+for (const c of scoped.checks) check(c.level, c.label, c.detail, c.nextStep, c.context);
+const stateScopes = new Map(scoped.scopes.map((s) => [s.state, s]));
+for (const scope of scoped.scopes) {
   const st = scope.state;
   const ctx = `${st}${scope.assumed ? " (assumed: no jurisdiction in scope)" : ""}`;
   line();
   line(`  ${ctx}`);
-  const onFile = typedLicences.filter((l) => l.state === st).map((l) => licenceKindWords(l.kind as never));
+  const onFile = readiness.licenceKindsOnFile(client, st);
   line(`         on file   ${st === "OR" ? `named columns (CCB ${blank(client.ccbLicenseNumber) ? "blank" : "set"})${onFile.length ? " + " : ""}` : ""}${onFile.length ? onFile.join(", ") : st === "OR" ? "" : "no State licences entry for this state"}`);
-  // Labels and kinds only, never a licence number (this script reports identifiers as set/missing);
-  // licenceFor's own reason can quote numbers, so it is summarised here, not printed.
-  const describe = (a: ReturnType<typeof licenceFor>): string => {
-    if (a.number) return `${a.label || "set"} — set`;
-    if (a.candidates.length) return `several ${st} licences could fill it (${onFile.join(", ")}) and neither the slot nor the permit says which — left blank`;
-    const notes = [
-      /placeholder/.test(a.reason) ? "a test / placeholder value is on file — correct it under Clients" : "",
-      /no recognised type/.test(a.reason) ? `a ${st} licence with no recognised type is on file — set its type under Clients` : "",
-    ].filter(Boolean);
-    return `none on file for this slot${notes.length ? ` (${notes.join("; ")})` : ""}`;
-  };
   if (st === "OR") {
     check(blank(client.ccbLicenseNumber) ? "fail" : "ok", "  CCB (Oregon's gate)",
       blank(client.ccbLicenseNumber) ? "blank — an Oregon job is refused at staging (prepareSubmission 409 needsCcb)" : "set",
       "Fill ccbLicenseNumber on the client row — every Oregon job is refused at staging without it.", ctx);
   }
-  if (scope.permit) {
-    const generic = licenceFor(client, st, { track: "permit" });
-    check(generic.number ? "ok" : generic.candidates.length ? "warn" : "fail", "  permit: contractor slot", describe(generic),
-      generic.candidates.length
-        ? `Keep only the ${st} licence that applies under Clients → State licences, or a slot that does not name its kind cannot pick one.`
-        : `Add this company's ${st} contractor licence under Clients → State licences — a ${st} permit stages with its licence slot blank and the AHJ rejects it.`,
-      ctx);
-    for (const track of ["building", "electrical"] as const) {
-      const a = licenceFor(client, st, { track });
-      check(a.number ? "ok" : "warn", `  permit: ${track} slot`, describe(a),
-        `Add the ${st} licence a ${track} permit takes under Clients → State licences (needed where the AHJ issues the ${track} permit separately).`, ctx);
-    }
-  }
-  if (scope.nem) {
-    const ec = licenceFor(client, st, "electrical_contractor");
-    check(ec.number ? "ok" : "fail", "  NEM: electrical licence", ec.number ? describe(ec) : `${describe(ec)} — interconnection applications ask for the installer's electrical licence`,
-      `Add this company's ${st} electrical contractor licence under Clients → State licences before any ${st} interconnection filing.`, ctx);
-  }
+  for (const c of readiness.licenceChecks(client, scope)) check(c.level, c.label, c.detail, c.nextStep, c.context);
 }
 
 // The overlay is the ground truth for what staging actually hands a portal: blanks are
@@ -414,13 +330,8 @@ for (const scope of stateScopes.values()) {
 }
 if (anyNem) {
   // The disconnect is the client's own default, the same in every state (the overlay copies it).
-  const dm = blank(client.standardDisconnectMake) || blank(client.standardDisconnectModel);
-  check(
-    dm ? "fail" : "ok",
-    "disconnect make/model",
-    dm ? "not supplied — the utility application has two required fields with nothing to put in them" : "supplied",
-    "Set standardDisconnectMake and standardDisconnectModel on the client row before any NEM filing.",
-  );
+  const d = readiness.disconnectCheck(client);
+  check(d.level, d.label, d.detail, d.nextStep);
 }
 
 // --- Org and entitlements ------------------------------------------------------------
