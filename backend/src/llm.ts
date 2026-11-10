@@ -1973,6 +1973,10 @@ SYSTEM / EQUIPMENT
 - acRunLengthFt (number, feet): the ONE-WAY length of that circuit when the SLD or voltage-drop calc states it. Omit if not stated — never estimate it from a drawing.
 - inverterSettings: note grid-support listing / settings, e.g. "UL 1741 SB" or "UL 1741 SA, PCS profile" (needed for utility interconnection)
 - batteryMake, batteryModel, batteryQty (number)
+- batteryCapacityKwh (number): the battery system's USABLE energy in kWh, all units together; batteryOutputKw (number): the battery inverter / PCS continuous AC output in kW
+- essInverterModel: the battery inverter / PCS model (an all-in-one battery's own inverter model); essBreaker: the backfed breaker / OCPD the battery inverter lands on, in amps
+- batteryMode: the storage operating mode the plan set states: "export", "non-export" (export-limited / PCS to zero) or "backup-only"; omit when it does not say
+- newModulesOnSchedule, newModulesOnSld: "yes" or "no" — does the EQUIPMENT SCHEDULE (resp. the SLD / one-line) show NEW modules or a new PV array? Existing modules shown remaining in service are not new. Omit either when that sheet is not in the set
 - roofMaterial (e.g. "Composition Shingle"), mounting (e.g. "Roof Mount"). A TILE roof is tile — never "shingle": write e.g. "Concrete Tile", "Clay S-Tile", "Flat Concrete Tile" exactly as the sheets say (a "concrete shake tile" is tile, not wood shake)
 - roofMaterialSubtype: tile roofs only — "Concrete", "Clay", "S-tile", "Flat tile" (or two joined with " / ", e.g. "Concrete / S-tile"); omit for non-tile roofs
 - tileAttachmentMethod: tile roofs only — "tile hook", "tile-replacement mount" or "comp-out", from the attachment detail / racking notes; omit if the sheets do not say

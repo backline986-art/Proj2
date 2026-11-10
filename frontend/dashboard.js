@@ -7276,16 +7276,59 @@ function qcCounts(results) {
   return { fails: verdicts.filter((v) => v === "fail").length, warnings: verdicts.filter((v) => v === "warning").length };
 }
 
+// WHAT THE JOB INSTALLS (#673). QC checks battery facts instead of module facts only on a storage
+// scope; the plan set settles it, or a named person sets it here. A storage scope on a job whose
+// fields still name new modules does not drop the module checks (the QC row says why).
+const JOB_SCOPE_LABELS = {
+  "pv": "New PV",
+  "pv+storage": "New PV with storage",
+  "storage-added-to-existing-pv": "Storage added to an existing PV system",
+  "storage-only": "Storage only",
+};
+function jobScopeHtml(view) {
+  if (!view) return "";
+  const basis = view.basis === "person" ? `set by ${esc(view.setBy || "a person")}` : view.basis === "plan_set" ? "from the plan set" : "default";
+  const options = [`<option value="">Plan set decides</option>`].concat(Object.entries(JOB_SCOPE_LABELS).map(([value, label]) =>
+    `<option value="${esc(value)}"${view.personScope === value ? " selected" : ""}>${esc(label)}</option>`)).join("");
+  return `<article class="item ${view.conflict ? "warning" : "info"}" id="jobScopeCard">
+      <div class="item-title"><span>Job scope: ${esc(JOB_SCOPE_LABELS[view.scope] || view.scope)} (${basis})</span></div>
+      <p>${esc(view.conflict || view.reason)}</p>
+      <p><label>Set it: <select id="jobScopeSelect">${options}</select></label>
+        <button type="button" class="secondary" id="jobScopeSave">Save scope</button></p>
+    </article>`;
+}
+async function saveJobScope() {
+  const select = $("jobScopeSelect");
+  if (!select || !state.selectedProjectId) return;
+  const scope = select.value || null;
+  const auth = await authForDecision();
+  const lede = scope
+    ? `Set this job's scope to "${JOB_SCOPE_LABELS[scope]}"? QC re-runs and checks the equipment that scope installs.`
+    : "Clear the job scope? The plan set's own evidence decides again.";
+  const decidedBy = namedPersonConsent(auth, lede, "set the job scope", "the job scope is set by a named person");
+  if (decidedBy == null) return;
+  try {
+    const detail = await api(`/api/projects/${state.selectedProjectId}/job-scope`, { method: "PUT", body: JSON.stringify({ scope, ...(decidedBy ? { decidedBy } : {}) }) });
+    if (detail && detail.project) state.detail = detail;
+    renderDetail();
+    showMessage("Job scope saved; QC re-ran.", "info");
+  } catch (err) {
+    showMessage(`Saving the job scope failed: ${err.message}`, "error");
+  }
+}
+
 function renderQc() {
   const results = state.detail.qcResults || [];
   const { fails, warnings } = qcCounts(results);
   $("qcCounts").textContent = `${fails} fail / ${warnings} warn`;
-  $("qcResults").innerHTML = results.length ? results.map((result) => `
+  $("qcResults").innerHTML = jobScopeHtml(state.detail.jobScope) + (results.length ? results.map((result) => `
     <article class="item ${esc(qcVerdict(result))}">
       <div class="item-title"><span>${esc(result.ruleName)}</span>${statusBadge(qcVerdict(result))}</div>
       <p>${esc(result.message)}</p>
     </article>
-  `).join("") : `<p class="muted">No QC results yet.</p>`;
+  `).join("") : `<p class="muted">No QC results yet.</p>`);
+  const save = $("jobScopeSave");
+  if (save) save.addEventListener("click", saveJobScope);
 }
 
 // Human-readable labels + a short "what to enter" hint for the QC review fields,
@@ -7327,6 +7370,17 @@ const REVIEW_FIELD_LABELS = {
   meter: ["Meter number", "the meter number from the plan set / bill / meter photo"],
   ubAccountNumber: ["Utility-bill account number", "the account number printed on the utility bill"],
   ubMeterNumber: ["Utility-bill meter number", "the meter number printed on the utility bill / meter photo"],
+  // Storage-scope rows (#673).
+  batteryMake: ["Battery make", "the battery manufacturer"],
+  batteryModel: ["Battery model", "the battery model number"],
+  batteryQty: ["Battery quantity", "the number of battery units"],
+  batteryCapacityKwh: ["Battery usable energy (kWh)", "the usable kWh of all units together"],
+  batteryOutputKw: ["Battery power (kW)", "the battery inverter / PCS continuous AC output in kW"],
+  essInverterModel: ["Battery inverter / PCS model", "the battery inverter or PCS model number"],
+  batteryMode: ["Battery operating mode", "export, non-export or backup-only"],
+  essBreaker: ["Battery breaker / OCPD (A)", "the backfed breaker the battery inverter lands on, in amps"],
+  existingDcKw: ["Existing PV system size (kW)", "the existing system's DC (or AC) size in kW"],
+  nemTariff: ["Existing system tariff", "the net-metering tariff the existing system is on"],
 };
 function camelToTitle(key) {
   return String(key || "")

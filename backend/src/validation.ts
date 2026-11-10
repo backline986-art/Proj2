@@ -109,6 +109,15 @@ export const jobScopeSchema = z.object({
   decidedBy: z.string().max(120).optional(),
 }).strict();
 
+/** PUT /api/projects/:id/utility-filing/storage-modes (#673 item 3): a named person records which
+ *  storage modes this project's utility takes NO application for, with the page and its words. */
+export const utilityStorageModesSchema = z.object({
+  modesWithoutApplication: z.array(z.enum(["export", "non-export", "backup-only"])).min(1).max(3),
+  sourceUrl: personFactUrl,
+  quote: z.string().trim().min(8).max(300),
+  decidedBy: z.string().max(120).optional(),
+}).strict();
+
 export const codeProfileVerifySchema = z.object({
   state: z.string().min(2).max(40),
   ahj: z.string().max(160).optional().default(""),

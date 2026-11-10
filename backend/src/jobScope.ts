@@ -89,7 +89,13 @@ export function planSetStatesNoNewModules(snapshot: ParserPayload | null | undef
 
 /** An existing PV system remains in service on site (the existing-system disclosure block). */
 export function hasExistingPv(snapshot: ParserPayload | null | undefined): boolean {
-  return Boolean(existingSystemFromSnapshot((snapshot ?? {}) as ParserPayload)?.hasExistingSystem);
+  const info = existingSystemFromSnapshot((snapshot ?? {}) as ParserPayload);
+  if (!info) return false;
+  // exportMode rides in the existing-system block but describes THIS job's export (exportLimiting.ts):
+  // on its own it is no evidence that a PV system is already on site.
+  const { exportMode: _exportMode, hasExistingSystem: _flag, ...facts } = info;
+  const s = (snapshot ?? {}) as Record<string, unknown>;
+  return Object.keys(facts).length > 0 || YES.test(clean(s.hasExistingSystem)) || YES.test(clean(s.existingSystem));
 }
 
 /** Does the scope install new PV? The PV module blockers apply exactly when it does. */
@@ -131,7 +137,7 @@ export interface PersonJobScope {
   setAt: string;
 }
 
-/** The scope a named person set on the job, or null. Never throws (a pre-v67 schema reads null). */
+/** The scope a named person set on the job, or null. Never throws (a pre-v68 schema reads null). */
 export function personJobScope(db: AppDb | null, projectId: string): PersonJobScope | null {
   if (!db || !projectId) return null;
   try {

@@ -3221,7 +3221,7 @@ const VERSIONED_MIGRATIONS: VersionedMigration[] = [
     },
   },
   {
-    version: 67,
+    version: 68,
     name: "job_scope_and_storage_modes",
     up: (db) => {
       // WHAT THE JOB INSTALLS, AS A PERSON SET IT (#673, backend/src/jobScope.ts): one row per

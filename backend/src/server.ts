@@ -1,5 +1,5 @@
 import "dotenv/config";
-import { validate, portalCredentialCreateSchema, portalCredentialUpdateSchema, autoLearnSchema, codeProfileResearchSchema, codeProfileVerifySchema, permitProcessVerifySchema, reviewSubjectSchema, utilityFilingVerifySchema, jobScopeSchema } from "./validation";
+import { validate, portalCredentialCreateSchema, portalCredentialUpdateSchema, autoLearnSchema, codeProfileResearchSchema, codeProfileVerifySchema, permitProcessVerifySchema, reviewSubjectSchema, utilityFilingVerifySchema, jobScopeSchema, utilityStorageModesSchema } from "./validation";
 import crypto from "node:crypto";
 import { spawn } from "node:child_process";
 import express, { type NextFunction, type Request, type Response } from "express";
@@ -174,6 +174,7 @@ import { getSubmittalTracks, markTrackSubmitted, requiredTracks, trackSubmittedA
 import { getUtilityFilingLookup, nemFiledWithPermit, verifyUtilityFilingLookup } from "./utilityFilingLookup";
 import { runQcForProject } from "./qc";
 import { personJobScope, setPersonJobScope } from "./jobScope";
+import { clearUtilityStorageModes, recordUtilityStorageModes } from "./utilityStorageModes";
 import { stagedReviewScreenshotFile } from "./stagedReviews";
 import { submissionConfirmationFile } from "./submissionConfirmation";
 import { reviewScreenshotFile } from "./reviewScreenshot";
@@ -2456,6 +2457,36 @@ app.put("/api/projects/:id/utility-filing/verify", (req, res) => {
     utility: project.utility, state: project.state, method: r.lookup?.filing?.value?.method ?? null, sourceUrl: r.lookup?.filing?.sourceUrl ?? "",
   });
   res.json({ lookup: r.lookup });
+});
+
+// WHICH STORAGE MODES THIS PROJECT'S UTILITY TAKES NO APPLICATION FOR (#673 item 3;
+// utilityStorageModes.ts). Same tenancy and keying as the utility-filing routes above: the record is
+// shared knowledge on the utility's filing row, keyed by the project's own state + utility. A NAMED
+// PERSON records it with the page and its words (rule 3: never a lookup, never a model, not the
+// official tier); DELETE withdraws it. QC re-runs so the job says what now stands.
+app.put("/api/projects/:id/utility-filing/storage-modes", (req, res) => {
+  const projectId = String(req.params.id);
+  const { project } = getProjectDetail(db, projectId);
+  const b = validate(utilityStorageModesSchema, req.body);
+  const verifiedBy = namedPersonDecider(req, "decidedBy",
+    "Sign in to record a utility's storage-mode rule.",
+    "Name the person recording it: a utility's storage-mode rule is recorded by a named person.");
+  const r = recordUtilityStorageModes(db, { state: project.state, utility: project.utility }, { modesWithoutApplication: b.modesWithoutApplication, sourceUrl: b.sourceUrl, quote: b.quote, verifiedBy });
+  if (!r.saved) throw new HttpError(r.reason.startsWith("No filing record") ? 409 : 400, r.reason);
+  addAuditLog(db, projectId, "human", verifiedBy, "utility_filing.storage_modes_recorded", { utility: project.utility, state: project.state, modes: b.modesWithoutApplication, sourceUrl: b.sourceUrl });
+  runQcForProject(db, projectId);
+  res.json({ record: r.record });
+});
+app.delete("/api/projects/:id/utility-filing/storage-modes", (req, res) => {
+  const projectId = String(req.params.id);
+  const { project } = getProjectDetail(db, projectId);
+  const verifiedBy = namedPersonDecider(req, "decidedBy",
+    "Sign in to withdraw a utility's storage-mode rule.",
+    "Name the person withdrawing it.");
+  clearUtilityStorageModes(db, { state: project.state, utility: project.utility });
+  addAuditLog(db, projectId, "human", verifiedBy, "utility_filing.storage_modes_withdrawn", { utility: project.utility, state: project.state });
+  runQcForProject(db, projectId);
+  res.json({ record: null });
 });
 
 // WHAT THE JOB INSTALLS, SET BY A PERSON (#673; jobScope.ts). Under /api/projects/:id, so it

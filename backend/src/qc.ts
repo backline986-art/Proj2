@@ -21,6 +21,7 @@ import { requiredTracks } from "./submittalTracks";
 import { qcMayMoveStatus } from "./projectStage";
 import { looksLikePlaceholderIdentifier } from "../../shared/src/companyFacts";
 import { jobScopeLabel, resolveJobScope, scopeHasNewPv, storageOperatingMode } from "./jobScope";
+import { nemStorageExemption } from "./utilityStorageModes";
 import { isPlaceholderBatteryModel } from "../../shared/src/batteryControls";
 import type { JobScope } from "../../shared/src/types";
 
@@ -377,6 +378,22 @@ export function runQcForProject(db: AppDb, projectId: string, options: QcRunOpti
         [`Auto-resolved: not checked for a job scoped as ${jobScopeLabel(scope.scope)}.`, nowIso(), projectId, check.fieldName, check.ruleName],
       );
     }
+
+    // A STORAGE JOB THE UTILITY TAKES NO APPLICATION FOR, SAID — only from a person's cited record on
+    // the utility's filing row (utilityStorageModes.ts, rule 3; never a lookup, never a seeded row).
+    // Information only: the NEM track stays on.
+    try {
+      const exemption = nemStorageExemption(db, { id: projectId, state: ctx.state, utility: clean(project.utility) || clean(payload.utility), parserSnapshot: payload });
+      if (exemption) {
+        db.run(
+          `INSERT INTO qc_results (id, project_id, qc_status, rule_id, rule_name, message, severity, created_at)
+           VALUES (?, ?, 'pass', 'qc.nem_storage_mode', 'Utility application for storage', ?, 'info', ?)`,
+          [id(), projectId,
+            `${exemption.utility} takes no interconnection application for a ${exemption.mode} battery, as recorded by ${exemption.record.verifiedBy} from ${exemption.record.sourceUrl}: "${exemption.record.quote}". The utility track stays on the board; close it once you have confirmed this job matches.`,
+            createdAt],
+        );
+      }
+    } catch { /* advisory: a missing column on an old schema never breaks QC */ }
 
     for (const check of checksForScope(scope.scope)) {
       const qcStatus = statusFor(check, ctx);
