@@ -33,7 +33,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import type { UtilityApplicationRequirement, UtilityRequirementKey, UtilityRequirementList, UtilityRequirementTier } from "../../shared/src/types";
+import type { UtilityApplicationRequirement, UtilityRequirementGate, UtilityRequirementKey, UtilityRequirementList, UtilityRequirementQc, UtilityRequirementTier } from "../../shared/src/types";
 import { UTILITY_REQUIREMENT_KEYS } from "../../shared/src/types";
 import { isOfficialSourceHost } from "../../shared/src/officialSource";
 import type { AppDb } from "./db";
@@ -53,6 +53,8 @@ export const QUOTE_NAMES_REQUIREMENT: Record<UtilityRequirementKey, (quote: stri
   ac_disconnect: (q) => /\bdisconnect/i.test(q),
   storage_mode_declaration: (q) => /\bbatter(?:y|ies)\b|\bstorage\b|\bESS\b/i.test(q),
   owner_signature: (q) => /\bsign(?:ed|ature|s)?\b/i.test(q),
+  module_spec: (q) => /\bmodules?\b|\bpanels?\b/i.test(q) && /\bspec|\bdata\s*sheet|\bcut\s*sheet/i.test(q),
+  inverter_spec: (q) => /\binverters?\b/i.test(q) && /\bspec|\bdata\s*sheet|\bcut\s*sheet/i.test(q),
 };
 
 const TIER_RANK: Record<UtilityRequirementTier, number> = { seeded: 0, official: 1, verified: 2 };
@@ -80,9 +82,43 @@ export function sanitizeRequirement(raw: unknown, tier: UtilityRequirementTier):
     ...(/^\d{4}-\d{2}-\d{2}/.test(fetchedAt) ? { fetchedAt: fetchedAt.slice(0, 40) } : {}),
     // Only the reviewer's own namespace: a data row can keep a legacy id, never mint another rule's.
     ...(/^reviewer\.utility\.[a-z0-9-]+$/.test(findingId) ? { findingId } : {}),
+    ...sanitizeGates(o.gates),
+    ...sanitizeQc(o.qc),
     ...(str(o.verifiedBy) ? { verifiedBy: str(o.verifiedBy).slice(0, 120) } : {}),
     ...(str(o.verifiedAt) ? { verifiedAt: str(o.verifiedAt).slice(0, 40) } : {}),
   };
+}
+
+function sanitizeGates(raw: unknown): { gates?: UtilityRequirementGate[] } {
+  if (!Array.isArray(raw)) return {};
+  const gates = [...new Set(raw.map(str).filter((g): g is UtilityRequirementGate => g === "reviewer" || g === "qc"))];
+  return gates.length ? { gates } : {};
+}
+
+/** A QC presentation, cleaned. A data row can name only a QC rule id of its own shape, never the
+ *  reviewer's or another subsystem's namespace. */
+function sanitizeQc(raw: unknown): { qc?: UtilityRequirementQc } {
+  if (!raw || typeof raw !== "object") return {};
+  const o = raw as Record<string, unknown>;
+  const ruleId = str(o.ruleId);
+  const ruleName = str(o.ruleName).slice(0, 160);
+  const message = str(o.message).slice(0, 400);
+  const fieldName = str(o.fieldName);
+  if (!/^[a-z0-9][a-z0-9-]{2,60}$/.test(ruleId) || !ruleName || !message || !/^[A-Za-z][A-Za-z0-9]{0,60}$/.test(fieldName)) return {};
+  const order = Number(o.order);
+  return {
+    qc: {
+      ruleId, ruleName, message, fieldName,
+      ...(str(o.label) ? { label: str(o.label).slice(0, 80) } : {}),
+      ...(str(o.severity) === "blocker" ? { severity: "blocker" as const } : {}),
+      ...(Number.isFinite(order) ? { order } : {}),
+    },
+  };
+}
+
+/** Does this gate read the item? An item with no gates listed is read by both. */
+export function requirementForGate(item: Pick<UtilityApplicationRequirement, "gates">, gate: UtilityRequirementGate): boolean {
+  return !item.gates?.length || item.gates.includes(gate);
 }
 
 /**
@@ -104,7 +140,9 @@ export function mergeRequirements(...lists: UtilityApplicationRequirement[][]): 
   for (const list of lists) {
     for (const item of list) {
       const held = byKey.get(item.key);
-      if (!held || TIER_RANK[item.tier] >= TIER_RANK[held.tier]) byKey.set(item.key, item);
+      // A higher tier takes the item; the QC wording it replaces stays with it (same rule id and words in
+      // the QC baseline) unless the new item brings its own.
+      if (!held || TIER_RANK[item.tier] >= TIER_RANK[held.tier]) byKey.set(item.key, !item.qc && held?.qc ? { ...item, qc: held.qc } : item);
     }
   }
   return [...byKey.values()];
@@ -132,13 +170,63 @@ export function utilityMatchText(name: string): string {
   return str(name).toLowerCase().replace(/&/g, " and ").replace(/[^a-z0-9]+/g, " ").replace(/\s+/g, " ").trim();
 }
 
-let shippedCache: { file: string; records: ShippedUtilityRequirementRecord[] } | null = null;
+/** A QC rule's catalogue entry (the `rules` table, db.ts seedBaselineRuleRows), as data. */
+export interface ShippedQcRuleDefinition {
+  id: string;
+  name: string;
+  jurisdictionScope: string;
+  utilityScope: string;
+  source: string;
+  trigger: string;
+  action: string;
+}
+interface ShippedFile {
+  records: ShippedUtilityRequirementRecord[];
+  /** THE STRICT DEFAULT (owner, 2026-11-09): what the QC baseline checks for a utility with no list on
+   *  file — the strictest common set the researched utilities ask for, uncited, so it only warns and says
+   *  the utility is not researched. Empty = none. */
+  strictDefault: UtilityApplicationRequirement[];
+  qcRuleDefinitions: ShippedQcRuleDefinition[];
+}
+
+let shippedCache: { file: string; data: ShippedFile } | null = null;
+function shippedFile(filePath = referencePath()): ShippedFile {
+  if (shippedCache?.file === filePath) return shippedCache.data;
+  const data: ShippedFile = { records: [], strictDefault: [], qcRuleDefinitions: [] };
+  try {
+    const raw = JSON.parse(fs.readFileSync(filePath, "utf8")) as { records?: unknown[]; strictDefault?: unknown; qcRuleDefinitions?: unknown };
+    data.records = parseRecords(raw);
+    const sd = (raw.strictDefault && typeof raw.strictDefault === "object" ? raw.strictDefault : {}) as Record<string, unknown>;
+    data.strictDefault = (Array.isArray(sd.requirements) ? sd.requirements : []).map((r) => sanitizeRequirement(r, "seeded")).filter((r): r is UtilityApplicationRequirement => r != null)
+      // The default is never a person's or an official word, and never blocks.
+      .map((r) => ({ ...r, quote: "", whenMissing: "warning" as const, qc: r.qc ? { ...r.qc, severity: undefined } : r.qc }));
+    for (const d of Array.isArray(raw.qcRuleDefinitions) ? raw.qcRuleDefinitions : []) {
+      const o = (d && typeof d === "object" ? d : {}) as Record<string, unknown>;
+      const def: ShippedQcRuleDefinition = { id: str(o.id), name: str(o.name), jurisdictionScope: str(o.jurisdictionScope), utilityScope: str(o.utilityScope), source: str(o.source), trigger: str(o.trigger), action: str(o.action) };
+      if (/^[a-z0-9][a-z0-9-]{2,60}$/.test(def.id) && def.name) data.qcRuleDefinitions.push(def);
+    }
+  } catch { /* a missing or broken file is no data */ }
+  shippedCache = { file: filePath, data };
+  return data;
+}
+
+/** The strict default list for a utility with no list on file (see ShippedFile.strictDefault). */
+export function strictDefaultRequirements(filePath = referencePath()): UtilityApplicationRequirement[] {
+  return shippedFile(filePath).strictDefault;
+}
+/** The QC rule catalogue entries the shipped data defines (baselineRuleDefinitions appends them). */
+export function shippedQcRuleDefinitions(filePath = referencePath()): ShippedQcRuleDefinition[] {
+  return shippedFile(filePath).qcRuleDefinitions;
+}
+
 /** The shipped reference records. Read once per file; a missing or broken file is no records. */
 export function shippedUtilityRequirementRecords(filePath = referencePath()): ShippedUtilityRequirementRecord[] {
-  if (shippedCache?.file === filePath) return shippedCache.records;
-  let records: ShippedUtilityRequirementRecord[] = [];
-  try {
-    const data = JSON.parse(fs.readFileSync(filePath, "utf8")) as { records?: unknown[] };
+  return shippedFile(filePath).records;
+}
+
+function parseRecords(data: { records?: unknown[] }): ShippedUtilityRequirementRecord[] {
+  const records: ShippedUtilityRequirementRecord[] = [];
+  {
     for (const raw of data.records ?? []) {
       const o = (raw && typeof raw === "object" ? raw : {}) as Record<string, unknown>;
       const states = (Array.isArray(o.states) ? o.states : []).map((s) => usStateCode(s)).filter(Boolean);
@@ -147,8 +235,7 @@ export function shippedUtilityRequirementRecords(filePath = referencePath()): Sh
       if (!states.length || !matchNames.length || !requirements.length) continue;
       records.push({ states, utility: str(o.utility), displayName: str(o.displayName) || str(o.utility), matchNames, requirements });
     }
-  } catch { records = []; }
-  shippedCache = { file: filePath, records };
+  }
   return records;
 }
 
