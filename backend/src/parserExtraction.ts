@@ -73,5 +73,10 @@ export async function extractParserFields(
       error: err instanceof Error ? err.message : String(err),
     });
   }
-  return { ...extraction, clientResolution };
+  // PAGES THE TEXT READ NEVER SAW (#697). Over the prompt's bound whole pages are dropped from the
+  // middle of the set (structuralIntake.planTextForExtractionWindow, the same window the prompt
+  // used); the parser page names them so a person checks those sheets by hand.
+  const { planTextForExtractionWindow } = await import("./structuralIntake");
+  const notRead = planText.trim() ? planTextForExtractionWindow(planText).omittedPages : [];
+  return { ...extraction, clientResolution, ...(notRead.length ? { planTextPagesNotRead: notRead } : {}) };
 }

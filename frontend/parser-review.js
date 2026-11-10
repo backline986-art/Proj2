@@ -1520,6 +1520,91 @@
   }
 
   // -------------------------------------------------------------------------
+  // PLAN TEXT — each PDF page's text as the page reads it, and each page ONCE when posted (#697).
+  // pdfPageText is the page's own reader (moved here from parser.html so a test runs it on real
+  // pdf.js items): a layout-ordered copy (items grouped by line, left to right) then the raw item
+  // order of the same words. The page's local readers keep both. The smart read is POSTED one copy
+  // per page (textOncePerPage, the mirror of shared/src/planText.ts, pinned to it by
+  // backend/test/planTextOnce.test.ts): the doubled copy halved what fit in the backend's 80k
+  // bound and dropped the middle sheets.
+  // -------------------------------------------------------------------------
+  function normalizeText(raw) {
+    return String(raw || '')
+      .replace(/\u2013|\u2014|\u2212/g, '-')
+      .replace(/\u00a0/g, ' ')
+      .replace(/[|]/g, '1')
+      .replace(/[\u201c\u201d]/g, '"')
+      .replace(/[\u2018\u2019]/g, "'")
+      .replace(/[ \t]+/g, ' ')
+      .replace(/\n{3,}/g, '\n\n');
+  }
+
+  function layoutTextFromItems(items) {
+    const mapped = (items || [])
+      .map(item => {
+        const tx = item.transform || [1, 0, 0, 1, 0, 0];
+        return { str: String(item.str || '').trim(), x: Number(tx[4] || 0), y: Number(tx[5] || 0) };
+      })
+      .filter(item => item.str);
+    if (!mapped.length) return '';
+    // PDF text item order is not always visual order. Group by Y position and sort X left to right.
+    mapped.sort((a, b) => {
+      if (Math.abs(b.y - a.y) > 3) return b.y - a.y;
+      return a.x - b.x;
+    });
+    const lines = [];
+    for (const item of mapped) {
+      const last = lines[lines.length - 1];
+      if (!last || Math.abs(last.y - item.y) > 3) lines.push({ y: item.y, items: [item] });
+      else last.items.push(item);
+    }
+    return lines.map(line => line.items.sort((a, b) => a.x - b.x).map(i => i.str).join(' ')).join('\n');
+  }
+
+  /** One page's text as the page's local readers see it: layout copy, blank line, raw item order. */
+  function pdfPageText(items) {
+    const linear = (items || []).map(item => item.str || '').join(' ');
+    return normalizeText(`${layoutTextFromItems(items)}\n\n${linear}`);
+  }
+
+  const PLAN_PAGE_MARKER = /---\s*(?:OCR\s+)?PAGE\s+(\d+)\s*---/gi;
+  const planWords = (s) => s.split(/\s+/).filter(Boolean);
+  function sameWords(a, b) {
+    if (a.length !== b.length) return false;
+    const x = [...a].sort();
+    const y = [...b].sort();
+    return x.every((w, i) => w === y[i]);
+  }
+  function collapseDoubledPage(body) {
+    const all = planWords(body);
+    if (all.length < 2 || all.length % 2) return body;
+    const half = all.length / 2;
+    const blank = /\n[ \t]*\n/g;
+    for (let m = blank.exec(body); m; m = blank.exec(body)) {
+      const first = body.slice(0, m.index);
+      const firstWords = planWords(first);
+      if (firstWords.length > half) break;
+      if (firstWords.length < half) continue;
+      const rest = body.slice(m.index + m[0].length);
+      if (sameWords(firstWords, planWords(rest))) return first + ((/\s*$/.exec(rest) || [''])[0]);
+    }
+    return body;
+  }
+  /** The text with every doubled page collapsed to its first (layout) copy. */
+  function textOncePerPage(text) {
+    const src = String(text == null ? '' : text);
+    const hits = [...src.matchAll(PLAN_PAGE_MARKER)];
+    if (!hits.length) return collapseDoubledPage(src);
+    let out = src.slice(0, hits[0].index);
+    hits.forEach((m, i) => {
+      const start = m.index + m[0].length;
+      const end = i + 1 < hits.length ? hits[i + 1].index : src.length;
+      out += m[0] + collapseDoubledPage(src.slice(start, end));
+    });
+    return out;
+  }
+
+  // -------------------------------------------------------------------------
   // EMAIL — the mirror of shared/src/emailAddress.ts (#92). Every entry page checks the homeowner
   // email box with it at save and says "not an email address" inline instead of saving a name.
   // backend/test/emailAddressMirror.test.ts pins the two copies to the same answers.
@@ -1560,5 +1645,6 @@
     formatReviewList,
     isCalcsSheet, specSheetPages, specMapValue, SPEC_MAP_RULE, scoreSplitPage, SPLIT_CATEGORIES,
     indexSpecSheets, isUndecidedSpecPage, batteryPage,
+    normalizeText, layoutTextFromItems, pdfPageText, collapseDoubledPage, textOncePerPage,
   };
 });

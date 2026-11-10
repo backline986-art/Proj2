@@ -18,6 +18,7 @@ import { REPO, ISOLATED_CWD } from "./_isolate";
 import express from "express";
 import { chromium } from "playwright";
 import { PDFDocument, StandardFonts } from "pdf-lib";
+import { textOncePerPage as sandboxOnce } from "../../shared/src/planText";
 
 // ---- synthetic plan set: cover + notes + SLD (look-alike text, no real project) ----
 async function makePlanPdf(): Promise<Buffer> {
@@ -134,9 +135,11 @@ const browser = await chromium.launch();
 try {
   const page = await browser.newPage();
   const calls: string[] = [];
+  let posted: { planText?: string; structuralLetterText?: string } = {};
   await page.route("**/api/parser/**", async (route) => {
     const url = new URL(route.request().url()).pathname;
     calls.push(url);
+    if (url.endsWith("llm-extract")) posted = JSON.parse(route.request().postData() || "{}");
     const body = url.endsWith("vision-extract") ? VISION : TEXT;
     await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(body) });
   });
@@ -167,11 +170,22 @@ try {
       critical: v("criticalWarnings"), flags: v("reviewFlags"),
       scope: s?.electricalScope ? { nonBreakerTypes: s.electricalScope.decision?.nonBreakerTypes, locates: s.electricalScope.flags?.locatesNeeded, utility: s.electricalScope.decision?.utility, rule: s.electricalScope.decision?.rule, tapIgnored: (s.electricalScope.tapIgnored || []).length, tapKept: (s.electricalScope.evidence || []).filter((e: { type: string }) => e.type === "TAP").map((e: { text: string; snippet: string; page: number }) => ({ page: e.page, text: e.text, snippet: String(e.snippet).slice(0, 300) })) } : null,
       priority: s?.utilityPriorityFlags ?? [],
+      planDocText: String(s?.planDoc?.text ?? ""), letterDocText: String(s?.structuralDoc?.text ?? ""),
     };
   });
 
   check("both smart-read passes were called through the page", () => { assert.ok(calls.some((c) => c.endsWith("vision-extract")) && calls.some((c) => c.endsWith("llm-extract")), calls.join(",")); });
   check("no page errors", () => assert.deepEqual(pageErrors, []));
+  // #697: the page's own text keeps the layout copy AND the raw item order; the smart read is
+  // posted ONE copy per page (the browser's pdf.js, the page's own textOncePerPage).
+  check("#697: the smart read is posted each page once (plan set and letter)", () => {
+    const once = (t: string) => sandboxOnce(t);
+    assert.ok(out.planDocText.length > 0 && posted.planText, "plan text read and posted");
+    assert.equal(posted.planText, once(out.planDocText));
+    assert.ok(posted.planText!.length <= out.planDocText.length * 0.6, `posted ${posted.planText!.length} of ${out.planDocText.length} chars`);
+    assert.equal(posted.structuralLetterText, once(out.letterDocText));
+    assert.ok(posted.structuralLetterText!.length <= out.letterDocText.length * 0.6, `letter posted ${posted.structuralLetterText!.length} of ${out.letterDocText.length} chars`);
+  });
   check("1. meter: verdict recomputed after the passes — DIGITS MATCH from plan meter vs UB meter", () => {
     assert.equal(out.planMeter, "3141592"); assert.equal(out.ubMeter, "3141592");
     assert.equal(out.verdict, "DIGITS MATCH");
