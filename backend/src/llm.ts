@@ -13,6 +13,7 @@ import { lookupCecInverter, lookupCecModuleMake } from "./cecEquipment";
 import { planTextForExtraction } from "./structuralIntake";
 import { CONTRACT_PRICE_LABEL, VALUATION_BOX_LABEL } from "./valuation";
 import { parseAmendmentCheck } from "./amendmentChecks";
+import { ESS_RULES_RESEARCH_RULE, ESS_RULES_RESEARCH_SCHEMA, researchedEssRules } from "./essRulesResearch";
 import { exposureValue } from "./designCriteria";
 import type { CodeResearchProvenance } from "./codeProfiles";
 
@@ -2811,6 +2812,7 @@ Rules:
   "amendments": [{"code": "<family>", "section": "<section if known>", "summary": "<what the state/local amendment changes>", "sourceUrl": "<source>", "check": {"kind": "min_value|max_value|required_text|prohibited", "field": "groundSnowPsf|windSpeedMph|pvDeadLoadPsf|pathwayWidthIn|ridgeSetbackIn|attachmentSpacingIn|planText", "value": <number, or the exact wording>, "unit": "psf|mph|in|ft"} or omit}],
   "designCriteria": {"groundSnowLoadPsf": <number or omit>, "windSpeedMph": <number or omit>, "windExposure": "<B|C|D or omit>", "seismicDesignCategory": "<or omit>", "frostDepthIn": <number or omit>, "sourceUrl": "<the county/city design-criteria page>"},
   "prescriptive": {"hasPrescriptivePath": <true|false — omit ONLY if you genuinely could not tell>, "maxGroundSnowPsf": <number or omit>, "maxPvDeadLoadPsf": <number or omit>, "maxRafterSpacingIn": <number or omit>, "allowedWindExposures": ["<B>","<C>"] or omit, "maxWindSpeedMphExpB": <number or omit>, "maxWindSpeedMphExpC": <number or omit>, "engineerStampOverKwDc": <number or omit>, "sourceUrl": "<the page publishing the prescriptive path>"},
+  ${ESS_RULES_RESEARCH_SCHEMA}
   "citations": [{"label": "<what this source establishes>", "sourceUrl": "<url>"}],
   "confidenceNotes": "<what you could and could not confirm>"
 }
@@ -2828,6 +2830,7 @@ Rules:${stateLayer ? `
   jurisdiction has no published prescriptive PV path. Never copy Oregon's numbers into
   another state: omit any limit you did not find published for THIS jurisdiction.
 - An amendment's "check" makes it comparable with a plan set — give one ONLY when the cited page states it plainly, else omit it: min_value / max_value with a numeric field and its unit (a ground snow minimum, a minimum pathway width or ridge setback, a maximum PV dead load or attachment spacing, a minimum design wind speed); required_text with field "planText" and the exact wording the plans must carry (a required placard); prohibited with field "planText" and the wording a plan would show for the prohibited item (e.g. "roof-mounted disconnect"). Anything else stays a summary with no check.
+${ESS_RULES_RESEARCH_RULE}
 - This is ADVISORY and will be human-verified — never invent a sourceUrl.
 - Return valid JSON only.`;
     const system = `${intro}\n\n${searchStep}\n\n${body}`;
@@ -2835,6 +2838,7 @@ Rules:${stateLayer ? `
     interface Raw {
       adoptionModel?: Record<string, unknown>; adoptedCodes?: unknown; upcoming?: unknown; amendments?: unknown;
       designCriteria?: Record<string, unknown>; prescriptive?: Record<string, unknown>; citations?: unknown; confidenceNotes?: unknown;
+      essRules?: unknown;
     }
     let parsed: Raw = {};
     let webGrounded = false;
@@ -2970,12 +2974,16 @@ Rules:${stateLayer ? `
         ...(evidence.outputTokens !== undefined ? { outputTokens: evidence.outputTokens } : {}),
       },
     };
+    // The jurisdiction's own battery / ESS rules, each cited and quoted (ESS data follow-up): kept apart
+    // from the profile, because each value lands field by field through the official-source landing.
+    const ess = researchedEssRules(parsed.essRules, webGrounded);
     return {
       provider: "claude",
       profile,
+      ...(ess.reads.length ? { essRules: ess.reads } : {}),
       webGrounded,
       needsHumanVerification: true,
-      notes: researchNotes,
+      notes: ess.dropped.length ? `${researchNotes} ESS rules dropped: ${ess.dropped.slice(0, 6).join("; ")}.`.slice(0, 1600) : researchNotes,
     };
   }
 

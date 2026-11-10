@@ -2776,7 +2776,9 @@ export interface JurisdictionCodeProfile {
   citations: Array<{
     label: string;
     sourceUrl: string;
-    kind?: "ahj_correction" | "design_criteria_research";
+    /** "ess_rules_research": an ESS rule a code research read (ESS data follow-up); "reference": an ESS
+     *  rule the shipped reference file carried onto an existing row, field by field. */
+    kind?: "ahj_correction" | "design_criteria_research" | "ess_rules_research" | "reference";
     field?: string;
     quote?: string;
     at?: string;
@@ -2842,6 +2844,10 @@ export interface JurisdictionFieldSource {
   verifiedAt?: string;
   /** confidence "official" only: where and when the value was read. */
   officialSource?: { host: string; sourceUrl: string; fetchedAt: string };
+  /** essRules fields only: who put THIS value on its row — a person (the row is person-verified, or
+   *  a person applied it from an AHJ correction), a code research's read, or the shipped reference
+   *  file. Absent = the row does not say (an import, a legacy row). */
+  origin?: "person" | "research" | "reference";
 }
 
 // Review work types (rule packs). "solar_pv_residential" is the deterministic pack;
@@ -2888,9 +2894,23 @@ export interface JurisdictionCodeResearchInput {
   asOf?: string;
 }
 
+/** One ESS rule a research read (ESS data follow-up): shape-checked by essRuleReadsOf; where it lands
+ *  (official or seeded, never over a person's value) is decided at the write (#683). */
+export interface JurisdictionEssRuleRead {
+  key: keyof JurisdictionEssRules;
+  value: number | boolean;
+  sourceUrl: string;
+  quote: string;
+  /** The number as the page printed it, when it differs from `value`. */
+  publishedValue?: number;
+}
+
 export interface JurisdictionCodeResearchResult {
   provider: "claude" | "stub";
   profile: JurisdictionCodeProfile;
+  /** The jurisdiction's battery / ESS rules the research read, each with its page and quote. Kept
+   *  apart from `profile`: each value lands through the official-source landing, field by field. */
+  essRules?: JurisdictionEssRuleRead[];
   webGrounded: boolean;
   needsHumanVerification: true;
   notes: string;

@@ -69,7 +69,7 @@ import type { RequestScope } from "./scope";
 import { DEFAULT_ORG_ID } from "./db";
 import { ensureStatusShareToken, statusShareUrl } from "./clientNotifier";
 import { sendInstallerHandoff } from "./installerHandoff";
-import { listCodeProfiles, listRowlessDesignLookups, getCodeProfile, saveResearchedCodeProfile, saveVerifiedCodeProfile, codeProfileKey, applyEditionProposal, dismissEditionProposal } from "./codeProfiles";
+import { listCodeProfiles, listRowlessDesignLookups, getCodeProfile, saveResearchedCodeProfile, essRulesOutcome, saveVerifiedCodeProfile, codeProfileKey, applyEditionProposal, dismissEditionProposal } from "./codeProfiles";
 import { applyCorrectionApproval } from "./correctionAgent";
 import { runStandaloneReview, getReviewSubmission, listReviewSubmissions, reviewSubjectToProject } from "./reviewSubject";
 import { renderReviewerReportHtml } from "./reviewerEngine";
@@ -1154,7 +1154,10 @@ app.post("/api/code-profiles/research", asyncHandler(async (req, res) => {
   addAuditLog(db, null, "llm", "code-profile research", "code_profile.researched", {
     key: codeProfileKey(b), state: b.state, ahj: b.ahj, webGrounded: research.webGrounded,
   });
-  res.json({ profile: saved, webGrounded: research.webGrounded, notes: research.notes, needsHumanVerification: true });
+  // The jurisdiction's own battery (ESS) rules the research read land field by field (official only on
+  // a page this process read; never over a person's value). Absent when it read none.
+  const ess = await essRulesOutcome(db, { state: b.state, ahj: b.ahj }, research, undefined);
+  res.json({ profile: ess.essRules?.saved ? getCodeProfile(db, saved) ?? saved : saved, ...ess, webGrounded: research.webGrounded, notes: research.notes, needsHumanVerification: true });
 }));
 
 // EDITION PROPOSALS (#172): a due verify check on a HUMAN-VERIFIED row stores a proposal, never a
