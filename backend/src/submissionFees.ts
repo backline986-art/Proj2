@@ -90,6 +90,7 @@ function mapPayment(row: Row): SubmissionPaymentRecord {
     feeRecordedAt: text(row.fee_recorded_at),
     quotedAt: text(row.quoted_at),
     paidAt: row.paid_at ? text(row.paid_at) : null,
+    gateCollectedUsd: num(row.gate_collected_usd),
     updatedAt: text(row.updated_at),
   };
 }
@@ -749,6 +750,13 @@ export interface ResearchedPermitQuote {
   jurisdiction: string;
 }
 
+/** The same quote buildPaymentQuote answers (the portal's own figure on top of the researched
+ *  ladder), WITHOUT writing the submission_payments row: for a read path that must write nothing
+ *  (the approval sheet, review-audit draft 02). */
+export function readPaymentQuote(db: AppDb, project: ProjectRecord, trackInput?: string | null): SubmissionPaymentQuote {
+  return computePaymentQuote(db, project, trackInput, false).quote;
+}
+
 export function researchedPermitQuote(db: AppDb, project: ProjectRecord, trackInput?: string | null): ResearchedPermitQuote {
   return computePaymentQuote(db, project, trackInput, false).researched;
 }
@@ -1107,6 +1115,11 @@ function computePaymentQuote(
     paymentMethod,
     serviceFeeUsd,
     totalUsd,
+    // The gate takes our own fee and nothing else (#699), whoever the jurisdiction fee belongs
+    // to. A 'card-on-file' or 'customer-pays' fee is never ours to collect; a 'keelix-pays' fee is
+    // not owed until we have paid it, and then it is invoiced at its real figure. totalUsd above
+    // stays the filing's whole cost, which is what the fee sheet and the quote are about.
+    gateAmountUsd: billing.billingMode === "per_submission" ? serviceFeeUsd : 0,
     payment: getSubmissionPayment(db, project.id, track),
     // RESOLVED FOR EVERY QUOTE, WHICHEVER TIER WON THE AMOUNT — deliberately not
     // gated on `permitFeeSource === "published_schedule"`.
@@ -1250,9 +1263,12 @@ export function markSubmissionPaid(
   const track = billingTrack(trackInput);
   const existing = getSubmissionPayment(db, project.id, track)!;
   const ts = nowIso();
+  // "CLIENT PAID US": the gate's own payment, which is the service fee and only that (#699).
+  // Stamped so the invoice can show it as received rather than bill it again. Marking paid twice
+  // re-stamps the same row, never a second payment: the row is one per (project, track).
   db.run(
-    `UPDATE submission_payments SET status = 'paid', payment_reference = ?, paid_at = ?, updated_at = ? WHERE id = ?`,
-    [text(input.paymentReference).slice(0, 200), ts, ts, existing.id],
+    `UPDATE submission_payments SET status = 'paid', payment_reference = ?, paid_at = ?, gate_collected_usd = ?, updated_at = ? WHERE id = ?`,
+    [text(input.paymentReference).slice(0, 200), ts, round2(existing.serviceFeeUsd), ts, existing.id],
   );
   return buildPaymentQuote(db, project, track);
 }
@@ -1552,7 +1568,9 @@ export function assertSubmissionPaid(db: AppDb, project: ProjectRecord, trackInp
   if (!quote.required) return;
   const status = quote.payment?.status;
   if (status === "paid" || status === "waived") return;
-  throw new HttpError(402, `Payment required before staging: this client bills per submission. Collect ${quote.totalUsd != null ? `$${quote.totalUsd.toFixed(2)}` : "the submission total"} (permit fees${quote.permitFeeUsd != null ? ` $${quote.permitFeeUsd.toFixed(2)}` : ""} + service fee $${quote.serviceFeeUsd.toFixed(2)}) on the Payment screen, then mark it paid.`, {
+  // The service fee only (#699). The jurisdiction fee is not collected here: it is paid on the
+  // portal, and re-billed on the invoice only when we advanced it.
+  throw new HttpError(402, `Payment required before staging: this client bills per submission. Collect the service fee $${quote.gateAmountUsd.toFixed(2)} on the Payment screen, then press "Client paid us". The permit fee is not collected here: it is invoiced after it is paid, and only if we paid it.`, {
     paymentRequired: true,
     quote,
   });

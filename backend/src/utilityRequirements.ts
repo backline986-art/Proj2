@@ -16,7 +16,7 @@
 //     a quote); otherwise read as seeded;
 //   - VERIFIED: a NAMED PERSON recorded it (PUT /api/projects/:id/utility-filing/application-requirements).
 // The non-seeded items live on the utility's filing row (utility_filing_lookups.application_requirements_
-// json, migration v70): its own column, so a lookup's payload write never touches it (rule 3), and
+// json, migration v72): its own column, so a lookup's payload write never touches it (rule 3), and
 // beside #673's storage_modes_json, which it never reads or writes. Per key, the higher tier wins; a
 // verified item is never replaced by anything less.
 //
@@ -160,7 +160,7 @@ export function shippedRecordFor(state: string, utility: string, records = shipp
   return records.find((r) => r.states.includes(st) && r.matchNames.some((m) => name.includes(` ${m} `))) ?? null;
 }
 
-// ── The utility's filing row (utility_filing_lookups.application_requirements_json, v70) ─────────
+// ── The utility's filing row (utility_filing_lookups.application_requirements_json, v72) ─────────
 interface StoredRequirements {
   requirements: unknown[];
 }

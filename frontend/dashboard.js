@@ -2529,6 +2529,8 @@ function renderHandoffBanner() {
 // Quote = real permit fees (portal-calculated actual > learned per-AHJ history >
 // valuation estimate) + the client's service fee. Staging is blocked for
 // per-submission clients until each track's payment is marked paid or waived.
+// The gate COLLECTS the service fee only (#699, quote.gateAmountUsd): the permit fee is
+// paid on the portal and invoiced afterwards, and only when we advanced it.
 async function loadPaymentQuotes() {
   const id = state.selectedProjectId;
   const [permit, nem] = await Promise.all([
@@ -2566,17 +2568,19 @@ function renderPaymentQuoteCard(quote) {
         <tr><td style="padding:1px 14px 1px 0">Permit fees</td><td style="text-align:right"><strong>${quote.permitFeeIsFloor && quote.permitFeeUsd != null ? "at least " : ""}${money(quote.permitFeeUsd)}</strong></td>
             <td style="padding-left:10px" class="muted">${esc(FEE_SOURCE_LABELS[quote.permitFeeSource] || "")}</td></tr>
         <tr><td style="padding:1px 14px 1px 0">Our service fee</td><td style="text-align:right"><strong>${money(quote.serviceFeeUsd)}</strong></td><td></td></tr>
-        <tr style="border-top:1px solid var(--border)"><td style="padding:3px 14px 1px 0"><strong>Client total</strong></td><td style="text-align:right"><strong>${money(quote.totalUsd)}</strong></td><td></td></tr>
+        <tr class="muted"><td style="padding:1px 14px 1px 0">Filing cost, all fees</td><td style="text-align:right">${money(quote.totalUsd)}</td><td></td></tr>
+        <tr style="border-top:1px solid var(--border)"><td style="padding:3px 14px 1px 0"><strong>Collect from client now</strong></td><td style="text-align:right"><strong>${money(quote.gateAmountUsd)}</strong></td>
+            <td style="padding-left:10px" class="muted">service fee only — the permit fee is paid on the portal and invoiced after, only if we paid it</td></tr>
       </table>
       <p class="muted" style="margin:2px 0;font-size:11px">${esc(quote.permitFeeBasis || "")}</p>
       ${printedFormCheckHtml(quote.printedFormCheck)}
-      ${status === "paid" ? `<p style="margin:2px 0;font-size:12px">Paid ${p.paidAt ? new Date(p.paidAt).toLocaleString() : ""}${p.paymentReference ? ` — ref: ${esc(p.paymentReference)}` : ""}</p>` : ""}
+      ${status === "paid" ? `<p style="margin:2px 0;font-size:12px">Client paid us${p.gateCollectedUsd != null ? ` ${esc(money(p.gateCollectedUsd))}` : ""} ${p.paidAt ? esc(new Date(p.paidAt).toLocaleString()) : ""}${p.paymentReference ? ` — ref: ${esc(p.paymentReference)}` : ""}</p>` : ""}
       ${status !== "paid" ? `
         <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:6px">
           <input id="payFee-${quote.track}" type="number" min="0" step="0.01" placeholder="Actual portal fee $" style="width:150px;font-size:12px;padding:4px 8px" title="The real fee the portal calculated on its fee/review screen — replaces the estimate and teaches future quotes for this AHJ.">
           <button class="secondary" style="font-size:12px" data-pay-action="record-fee" data-pay-track="${quote.track}">Record real fee</button>
           <input id="payRef-${quote.track}" placeholder="Payment reference (invoice #, Stripe id…)" style="width:220px;font-size:12px;padding:4px 8px">
-          <button style="font-size:12px" data-pay-action="mark-paid" data-pay-track="${quote.track}">✓ Mark paid</button>
+          <button style="font-size:12px" data-pay-action="mark-paid" data-pay-track="${quote.track}" title="The client paid us the service fee above. Not the portal's fee: record that with We paid the portal on the track.">✓ Client paid us</button>
           <button class="secondary" style="font-size:12px" data-pay-action="waive" data-pay-track="${quote.track}" title="Skip the gate for this submission (comped / billed elsewhere).">Waive</button>
         </div>` : ""}
     </article>`;
@@ -2601,7 +2605,7 @@ function renderPaymentPanel() {
         <span>💳 Payment — per-submission billing</span>
         ${statusBadge(unpaid.length ? "payment required before staging" : "cleared")}
       </div>
-      ${unpaid.length ? `<p style="margin:0 0 8px;font-size:12px">This client pays per submission: collect the total below, then <strong>Mark paid</strong> to unlock <em>3 · Prepare Submittal</em>. Enter the portal's real fee when you see it on the fee/review screen — it replaces the estimate and is remembered for this AHJ. <span class="muted">The portal's own fee checkout is always completed by a human, never automated.</span></p>` : ""}
+      ${unpaid.length ? `<p style="margin:0 0 8px;font-size:12px">This client pays per submission: collect the service fee below, then <strong>Client paid us</strong> to unlock <em>3 · Prepare Submittal</em>. The permit fee is not collected here: it is paid on the portal and, when we pay it, invoiced afterwards at the real figure. Enter the portal's real fee when you see it on the fee/review screen — it replaces the estimate and is remembered for this AHJ. <span class="muted">The portal's own fee checkout is always completed by a human, never automated.</span></p>` : ""}
       ${visible.map(renderPaymentQuoteCard).join("")}
     </section>` : ""}`;
   panel.querySelectorAll("[data-pay-action]").forEach((btn) => {
@@ -2628,7 +2632,7 @@ async function handlePaymentAction(action, track, btn) {
     const res = await api(`/api/projects/${id}/payment/${path}`, { method: "POST", body: JSON.stringify(body) });
     state.paymentQuotes = { ...(state.paymentQuotes || {}), [res.quote.track]: res.quote };
     renderPaymentPanel();
-    if (action === "mark-paid") showMessage(`Payment recorded — ${res.quote.track} staging unlocked.`);
+    if (action === "mark-paid") showMessage(`Client payment recorded — ${res.quote.track} staging unlocked.`);
   } catch (err) {
     showMessage(`Payment update failed: ${err.message}`, "error");
     btn.disabled = false;
@@ -5115,9 +5119,61 @@ async function loadSubmittalTracks() {
   } catch {
     state.submittalTracks = null;
   }
+  await loadTrackLookups();
   await loadProjectMilestones();
   updatePortalLoginsSummary();
   syncRecordPermitType();
+}
+
+// THE JOB'S PERMIT-PROCESS AND UTILITY-FILING ROWS (#695), read for the verify control on the track
+// groups (lookup-verify.js). The two GET routes are reads (no lookup runs); a failed read shows no
+// block, never a stale one from another project.
+async function loadTrackLookups() {
+  const projectId = state.selectedProjectId;
+  state.trackLookups = { projectId, "permit-process": null, "utility-filing": null };
+  if (!projectId) return;
+  const read = (kind) => api(`/api/projects/${projectId}/${kind}`).catch(() => null);
+  const [pp, uf] = await Promise.all([read("permit-process"), read("utility-filing")]);
+  if (state.selectedProjectId !== projectId) return;
+  state.trackLookups = { projectId, "permit-process": pp, "utility-filing": uf };
+}
+
+// The verify control's block for one row, '' when the module is missing or the row is not this
+// project's (a reload in flight).
+function trackLookupHtml(kind) {
+  const LV = typeof window !== "undefined" ? window.LookupVerify : null;
+  const tl = state.trackLookups;
+  if (!LV || !tl || tl.projectId !== state.selectedProjectId) return "";
+  return LV.renderLookupVerify(kind, tl[kind]);
+}
+
+// VERIFY A JOB'S PERMIT-PROCESS / UTILITY-FILING ROW (#695): the person-only routes, as the signed-in
+// person (with sign-in off, the name they type). Rule 3: a verification is a named person's
+// attestation, so nothing is written without the confirm. The routes verify the row AS IT STANDS (no
+// body but the name); nothing is sent or filed. Afterwards the project is re-read: a verified process
+// row re-judges QC's document rows on the server.
+async function verifyTrackLookup(kind, btn) {
+  const LV = window.LookupVerify;
+  const projectId = state.selectedProjectId;
+  const payload = state.trackLookups && state.trackLookups.projectId === projectId ? state.trackLookups[kind] : null;
+  if (!LV || !LV.KINDS[kind] || !projectId || !payload || !payload.lookup) return;
+  if (LV.verifyBlockers(kind, payload.lookup).length) return;
+  const name = LV.entityName(kind, payload);
+  const auth = await authForDecision();
+  const verifiedBy = namedPersonConsent(auth, LV.confirmMessage(kind, name), "verified this row", `a ${LV.KINDS[kind].noun} is verified by a named person`);
+  if (verifiedBy == null) return;
+  if (btn) btn.disabled = true;
+  try {
+    await api(`/api/projects/${projectId}/${kind}/verify`, { method: "PUT", body: JSON.stringify(verifiedBy ? { verifiedBy } : {}) });
+  } catch (err) {
+    if (btn) btn.disabled = false;
+    showMessage(`Verify failed: ${err.message}`, "error");
+    return;
+  }
+  showMessage(`Verified — the ${LV.KINDS[kind].noun} for ${name} is recorded as checked by a person.`, "info");
+  try { state.detail = await api(`/api/projects/${projectId}`); } catch { /* the message above says what happened */ }
+  await loadSubmittalTracks();
+  renderDetail();
 }
 
 // Header chip: how many of this project's portals have a saved login. Best-effort.
@@ -5404,7 +5460,7 @@ function trackPaymentHtml(t) {
     <p style="margin:0 0 2px">Login: ${p.loginUsername ? esc(p.loginUsername) : "no login on file for this portal"} · Who pays: ${esc(who)}</p>
     ${app ? `<p style="margin:0 0 2px"><a href="${esc(app)}" target="_blank" rel="noopener">Open the saved application</a></p>` : ""}
     ${p.screenshotUrl ? `<a href="${esc(p.screenshotUrl)}" target="_blank" rel="noopener" title="The fee page as the run saw it (secrets and card fields masked)"><img src="${esc(p.screenshotUrl)}" alt="The portal's fee page" class="review-shot" style="max-width:100%;border:1px solid var(--border);border-radius:var(--radius-sm)" /></a>` : ""}
-    <p class="muted" style="margin:2px 0 0">Pay on the portal, then press Paid below with the record number and the amount paid. Staging this track again is refused while it waits: it would open a second application.</p>
+    <p class="muted" style="margin:2px 0 0">Pay on the portal, then press We paid the portal below with the record number and the amount paid. Staging this track again is refused while it waits: it would open a second application.</p>
     ${trackPaidFormHtml(t)}
   </div>`;
 }
@@ -5419,7 +5475,7 @@ function trackPaidFormHtml(t) {
   return `<div class="track-paid-form" style="display:flex;flex-wrap:wrap;gap:6px;align-items:flex-end;margin:6px 0 2px" data-track-paid-form="${type}">
     <label class="track-field"><span>${esc(numberLabel)}</span><input data-track-paid-field="recordNumber" data-track="${type}" placeholder="as the portal shows it" /></label>
     <label class="track-field"><span>Amount paid ($)</span><input data-track-paid-field="amountPaidUsd" data-track="${type}" inputmode="decimal" placeholder="0.00" /></label>
-    <button type="button" class="primary" data-track-paid="${type}" title="Record that a person paid this fee on the portal. Automation never pays."><i data-lucide="badge-dollar-sign"></i><span>Paid</span></button>
+    <button type="button" class="primary" data-track-paid="${type}" title="Record that a person paid this fee on the portal. Automation never pays."><i data-lucide="badge-dollar-sign"></i><span>We paid the portal</span></button>
   </div>`;
 }
 
@@ -5791,8 +5847,11 @@ function renderSubmittalTracks() {
   // can be worked in either order (do NEM first, then permits, or vice-versa).
   const utility = tracks.filter((t) => t.category === "utility");
   const permits = tracks.filter((t) => t.category === "permit");
-  const group = (title, list) => list.length
-    ? `<div class="track-group"><div class="track-group-head">${esc(title)}</div>${list.map(trackCardHtml).join("")}</div>`
+  // Each group carries the job's row it files by (#695): the AHJ's permit process above the permit
+  // cards, the utility's filing location above the utility card — one row, one control, however many
+  // cards read it.
+  const group = (title, list, lookupKind) => list.length
+    ? `<div class="track-group"><div class="track-group-head">${esc(title)}</div>${trackLookupHtml(lookupKind)}${list.map(trackCardHtml).join("")}</div>`
     : "";
   // THE UTILITY GROUP IS HEADED BY THE TRACK'S OWN PROGRAM (e2e-gap close, 2026-09-26): "Net
   // Metering (NEM)" was hard-coded for every utility — Texas (Oncor) and SRP jobs have no utility
@@ -5800,8 +5859,11 @@ function renderSubmittalTracks() {
   // "Utility net metering (NEM) / interconnection", "… interconnection + export credit (net
   // billing …)", "… interconnection only …", or "… (net-metering program not yet confirmed)");
   // the header repeats that phrase and falls back to the neutral "interconnection".
-  wrap.innerHTML = group(utilityGroupTitle(utility), utility) + group("AHJ — Permit(s)", permits) + closeoutGroupHtml();
+  wrap.innerHTML = group(utilityGroupTitle(utility), utility, "utility-filing") + group("AHJ — Permit(s)", permits, "permit-process") + closeoutGroupHtml();
   bindCloseoutMilestones(wrap);
+  wrap.querySelectorAll("button[data-lookup-verify]").forEach((btn) => {
+    btn.addEventListener("click", () => verifyTrackLookup(btn.dataset.lookupVerify, btn));
+  });
 
   wrap.querySelectorAll("button[data-track-paid]").forEach((btn) => {
     btn.addEventListener("click", () => markTrackPaid(btn.dataset.trackPaid, btn));
@@ -5920,6 +5982,24 @@ const APPROVER_NAME_KEY = "feeConfirmName";
 // true/false exactly where confirm() did, and the name prompt, the request and the server's gate
 // (mayClickFinalSubmit / automaticSubmitRefusals) are unchanged. If the sheet cannot be read (an older
 // server, a network error) the plain confirm is shown and says so: the sheet never blocks an approval.
+// OPEN REVIEW ITEMS (review-audit draft 01): every reviewer warning and gate warning that holds THIS
+// filing is listed above the table. A measured one (arithmetic against the plan's own numbers) and an
+// unverified form mapping each carry a tick box, and Approve stays disabled until every one is ticked;
+// the ticks go with the approval (the server checks them against what it holds now, and the run again).
+function approvalOpenItemsHtml(sheet) {
+  const items = Array.isArray(sheet.openItems) ? sheet.openItems : [];
+  if (!items.length) return "";
+  const toAck = items.filter((i) => i.needsAcknowledgement);
+  const others = items.filter((i) => !i.needsAcknowledgement);
+  const line = (i) => `${esc(i.title)}${i.text ? `<div style="font-size:12px">${esc(i.text)}</div>` : ""}${i.action ? `<div class="muted" style="font-size:12px">${esc(i.action)}</div>` : ""}`;
+  return `<div data-approval-open-items style="border:1px solid var(--edge-warn);background:var(--tint-warn);border-radius:var(--radius-sm);padding:10px 12px">
+      <strong>Open review items for this filing (${items.length})</strong>
+      ${toAck.length ? `<p style="margin:6px 0 4px">${toAck.length === 1 ? "This one is" : "These are"} measured against the plan's own numbers or a form no person has checked. Tick each to say you read it; Approve stays off until every box is ticked.</p>
+      <ul style="list-style:none;margin:0;padding:0">${toAck.map((i) => `<li style="margin:6px 0"><label style="display:flex;gap:8px;align-items:flex-start"><input type="checkbox" data-approval-ack="${esc(i.id)}" data-approval-ack-hash="${esc(i.contentHash)}"><span>${line(i)}</span></label></li>`).join("")}</ul>` : ""}
+      ${others.length ? `<ul data-approval-other-items style="margin:6px 0 0 18px;padding:0">${others.map((i) => `<li style="margin:4px 0">${line(i)}</li>`).join("")}</ul>` : ""}
+    </div>`;
+}
+
 function approvalSheetHtml(sheet, recordedAs) {
   const issues = Array.isArray(sheet.issues) ? sheet.issues : [];
   const red = issues.filter((i) => i.kind === "mismatch" || i.kind === "missing");
@@ -5939,13 +6019,16 @@ function approvalSheetHtml(sheet, recordedAs) {
   return `${red.length
       ? `<div data-approval-mismatches style="border:1px solid var(--edge-fail);background:var(--tint-fail);color:var(--ink-fail);border-radius:var(--radius-sm);padding:10px 12px"><strong>${red.length === 1 ? "1 thing disagrees or is missing" : `${red.length} things disagree or are missing`} — check before approving</strong>${issueList(red, "var(--ink-fail)")}</div>`
       : `<div data-approval-clean style="border:1px solid var(--edge-pass);background:var(--tint-pass);color:var(--ink-pass);border-radius:var(--radius-sm);padding:10px 12px">No disagreement found between the project, the bill and the plan set.</div>`}
+    ${approvalOpenItemsHtml(sheet)}
     ${notes.length ? `<div data-approval-notes style="border:1px solid var(--edge-warn);background:var(--tint-warn);border-radius:var(--radius-sm);padding:10px 12px"><strong>Worth a look</strong>${issueList(notes, "inherit")}</div>` : ""}
     <table style="width:100%;border-collapse:collapse"><thead><tr><th style="text-align:left" class="muted">Field</th><th style="text-align:left" class="muted">What will be filed</th><th style="text-align:left" class="muted">Source</th></tr></thead><tbody>${rows}</tbody></table>
     <p class="muted" style="font-size:12px;white-space:pre-line">${esc(APPROVE_AUTO_SUBMIT_LEDE.replace(/^Approve & auto-submit this filing\?\n\n/, ""))}</p>
     ${recordedAs ? `<p style="margin:0"><strong>Recorded as:</strong> ${esc(recordedAs)}</p>` : ""}`;
 }
 
-async function confirmApprovalSheet(type, recordedAs = "") {
+// `out` (optional) receives `acknowledgements` — the plan set the sheet showed and each ticked item's
+// id + content hash — when the approver ticked any. The answer itself stays true/false.
+async function confirmApprovalSheet(type, recordedAs = "", out = null) {
   let sheet = null;
   try {
     const res = await api(`/api/projects/${state.selectedProjectId}/approval-sheet?track=${encodeURIComponent(type)}`);
@@ -5983,7 +6066,22 @@ async function confirmApprovalSheet(type, recordedAs = "") {
     const onKey = (e) => { if (e.key === "Escape") { e.preventDefault(); done(false); } };
     document.addEventListener("keydown", onKey, true);
     modal.querySelector("[data-approval-cancel]").addEventListener("click", () => done(false));
-    modal.querySelector("[data-approval-approve]").addEventListener("click", () => done(true));
+    const approveBtn = modal.querySelector("[data-approval-approve]");
+    const boxes = Array.from(modal.querySelectorAll("[data-approval-ack]"));
+    const allTicked = () => boxes.every((b) => b.checked);
+    const sync = () => { approveBtn.disabled = !allTicked(); };
+    boxes.forEach((b) => b.addEventListener("change", sync));
+    sync();
+    approveBtn.addEventListener("click", () => {
+      if (!allTicked()) return;
+      if (out && boxes.length) {
+        out.acknowledgements = {
+          planSet: sheet.planSet || null,
+          items: boxes.map((b) => ({ id: b.getAttribute("data-approval-ack"), contentHash: b.getAttribute("data-approval-ack-hash") })),
+        };
+      }
+      done(true);
+    });
     modal.addEventListener("click", (e) => { if (e.target === modal) done(false); }, { once: true });
     const title = modal.querySelector("#approvalSheetTitle");
     if (title && title.focus) title.focus();
@@ -5997,11 +6095,15 @@ async function approveAndAutoSubmitTrack(type, btn) {
   const track = (state.submittalTracks || []).find((t) => t.type === type);
   if (track && track.type === "nem" && track.status === "staged") { showMessage(APPROVE_HELD_BY_STAGED_DRAFT, "warning"); return; }
   const auth = await authForDecision();
+  // What the approver ticked on the sheet (review-audit draft 01) rides with the approval; nothing
+  // ticked → the body is exactly as before.
+  const sheetOut = {};
+  const acks = () => (sheetOut.acknowledgements ? { acknowledgements: sheetOut.acknowledgements } : null);
   if (auth && auth.enabled) {
-    if (!(await confirmApprovalSheet(type, (auth.user && (auth.user.name || auth.user.email)) || "you"))) return;
-    return stageSubmittalTrack(type, btn, true);
+    if (!(await confirmApprovalSheet(type, (auth.user && (auth.user.name || auth.user.email)) || "you", sheetOut))) return;
+    return stageSubmittalTrack(type, btn, true, acks());
   }
-  if (!(await confirmApprovalSheet(type))) return;
+  if (!(await confirmApprovalSheet(type, "", sheetOut))) return;
   let last = "";
   try { last = localStorage.getItem(APPROVER_NAME_KEY) || ""; } catch { last = ""; }
   const typed = prompt("Your name, recorded as the approver of this run:", last);
@@ -6011,7 +6113,7 @@ async function approveAndAutoSubmitTrack(type, btn) {
     return stageSubmittalTrack(type, btn, false, null, { noApproval: true });
   }
   try { localStorage.setItem(APPROVER_NAME_KEY, approverName); } catch { /* per-viewer convenience only */ }
-  return stageSubmittalTrack(type, btn, true, { approverName });
+  return stageSubmittalTrack(type, btn, true, { approverName, ...(acks() || {}) });
 }
 
 // THREE OUTCOMES, THREE LINES (#422): filed by automation under a named approval; stopped at review
@@ -6066,7 +6168,7 @@ async function stageSubmittalTrack(type, btn, autoSubmit = false, extra = null, 
     }
     // A FEE STOP (#576): the payment sentence — amount, portal, pay there. Never MFA wording.
     if (job.result && job.result.status === "awaiting_payment") {
-      showMessage(job.result.message || `${humanize(type)}: payment needed on the portal. Pay there, then press Paid on the track.`, "warning");
+      showMessage(job.result.message || `${humanize(type)}: payment needed on the portal. Pay there, then press We paid the portal on the track.`, "warning");
       await loadSubmittalTracks();
       renderDetail();
       return;
@@ -6438,7 +6540,7 @@ async function markTrackPaid(type, btn) {
   };
   const body = { recordNumber: field("recordNumber"), amountPaidUsd: field("amountPaidUsd") };
   if (!body.recordNumber || !body.amountPaidUsd) {
-    showMessage("Enter the record number and the amount paid on the portal, then press Paid.", "warning");
+    showMessage("Enter the record number and the amount paid on the portal, then press We paid the portal.", "warning");
     return;
   }
   if (btn) btn.disabled = true;
@@ -10083,7 +10185,7 @@ async function prepareSubmission() {
       return;
     }
     if (job.result && job.result.status === "awaiting_payment") {
-      showMessage(job.result.message || "Payment needed on the portal. Pay there, then press Paid on the track.", "warning");
+      showMessage(job.result.message || "Payment needed on the portal. Pay there, then press We paid the portal on the track.", "warning");
       return;
     }
     if (job.result && job.result.status === "paused_for_human") {

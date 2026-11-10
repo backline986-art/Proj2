@@ -167,6 +167,7 @@ import {
   runProjectWorkflow,
   runPermitChecksNow,
   createRunApproval,
+  approvalAcknowledgementRefusals,
   finalSubmitJobPayload,
 } from "./repository";
 import { createSignatureRequestApproval } from "./signatureRequestApproval";
@@ -3804,7 +3805,19 @@ app.post("/api/projects/:id/prepare-submission", (req, res) => {
     if (AUTH_ENABLED && !user) throw new HttpError(401, "Sign in to approve a final submit.");
     const approverName = AUTH_ENABLED ? String(user?.name || user?.email || "").trim() : String(req.body?.approverName || "").trim();
     if (approverName) {
-      approval = createRunApproval(db, { projectId, track: track ?? "permit", approver: approverName, approverUserId: user?.id ?? null });
+      // THE OPEN REVIEW ITEMS ARE ACKNOWLEDGED FIRST (review-audit draft 01). Each measured reviewer
+      // warning and unverified form mapping this filing carries must have been ticked on the approval
+      // sheet — with the content the server holds now, against the plan set on file — or no approval
+      // is minted and nothing is enqueued. Adds a stop only: what is acknowledged is recorded with the
+      // approval, and the run checks it again (automaticSubmitRefusals).
+      const ack = approvalAcknowledgementRefusals(db, getProjectDetail(db, projectId).project, track ?? null, req.body?.acknowledgements);
+      if (ack.problems.length) {
+        addAuditLog(db, projectId, "human", approverName, "portal.final_submit_acknowledgement_missing", { track: track ?? "permit", problems: ack.problems });
+        throw new HttpError(409,
+          `Approve & auto-submit needs each open review item acknowledged on the approval sheet first: ${ack.problems.join("; ")}. Nothing was approved or started — reopen the approval sheet, read the items and tick each one.`,
+          { acknowledgementsNeeded: true, problems: ack.problems });
+      }
+      approval = createRunApproval(db, { projectId, track: track ?? "permit", approver: approverName, approverUserId: user?.id ?? null, acknowledgements: ack.acknowledgements });
     } else {
       addAuditLog(db, projectId, "human", "dashboard", "portal.final_submit_not_approved", {
         track: track ?? "permit", reason: "no named approver — the run will stop at review",
@@ -3863,7 +3876,7 @@ app.post("/api/projects/:id/prepare-submission", (req, res) => {
       if (!run) return;
       if (run.status === "awaiting_payment") {
         // A FEE STOP (#576): the payment sentence (amount, portal, pay there) — never MFA wording.
-        sseBroadcast({ type: "run_paused", projectId, message: run.errorMessage || "Payment needed on the portal. Pay there, then press Paid on the track.", data: { pauseReason: "fee_payment" } });
+        sseBroadcast({ type: "run_paused", projectId, message: run.errorMessage || "Payment needed on the portal. Pay there, then press We paid the portal on the track.", data: { pauseReason: "fee_payment" } });
       } else if (run.pauseReason === "mfa_captcha") {
         sseBroadcast({ type: "run_paused", projectId, message: "Portal requires attention — MFA or CAPTCHA detected. Complete it in the browser, then resume.", data: { pauseReason: run.pauseReason } });
       } else if (run.status === "failed") {

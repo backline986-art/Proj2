@@ -3306,9 +3306,42 @@ const VERSIONED_MIGRATIONS: VersionedMigration[] = [
     },
   },
   {
-    // NOTE FOR THE MERGE: v70 is the next free number on the offline staging base (e8ea579e, up to v69);
-    // #699 also claims v70 provisionally. Whichever lands second renumbers — nothing depends on the number.
+    // v70: after #673's v68 and #688's v69 (Helm's final numbering, 2026-11-10).
     version: 70,
+    name: "submission_payments_gate_collected",
+    up: (db) => {
+      // WHAT THE PER-SUBMISSION GATE ACTUALLY TOOK (#699). The gate used to ask for the
+      // jurisdiction fee + our service fee before staging; it now asks for the service fee only,
+      // and the jurisdiction fee reaches the client on the invoice once its real figure is
+      // recorded (pay-then-rebill). The invoice must show a gate payment as money RECEIVED, not
+      // bill it again, so it has to know what that payment covered.
+      //
+      // Stamped by markSubmissionPaid: the service fee collected. NULL on every row paid before
+      // this column existed, deliberately not back-filled: those payments went through the old
+      // gate, which may also have taken a permit-fee ESTIMATE, and nothing on the row says which.
+      // The invoice treats NULL on a paid row as "ask a person before re-billing the fee".
+      addColumnIfMissing(db, "submission_payments", "gate_collected_usd", "REAL");
+    },
+  },
+  {
+    // v71, NOT v67: v67-v70 are held by unmerged work (#679, #673, #688, #699). Until those land,
+    // migrationVersions.test reads this as a gap — red by design (its own header), the merge-order
+    // guard. Renumber to the next free version at merge if the queue changes.
+    version: 71,
+    name: "run_approval_acknowledgements",
+    up: (db) => {
+      // WHAT THE APPROVER ACKNOWLEDGED (review-audit draft 01). Approve & auto-submit records, with the
+      // approval, each measured reviewer warning and unverified form mapping the person ticked on the
+      // approval sheet (its id and content hash) and the shipped plan set's document id + sha256
+      // (approvalReviewItems.ts). The run reads it back at the claim and stops at review when it no
+      // longer covers what needs one. '' = nothing acknowledged (every approval minted before this).
+      addColumnIfMissing(db, "portal_run_approvals", "acknowledgements_json", "TEXT NOT NULL DEFAULT ''");
+    },
+  },
+  {
+    // v72: the next free number on the offline staging base (ae6eaca3, up to v71: #699's v70, approval
+    // draft 01's v71). Renumber at merge if the queue changes — nothing depends on the number.
+    version: 72,
     name: "utility_application_requirements",
     up: (db) => {
       // WHAT THE UTILITY'S OWN APPLICATION ASKS FOR (review-audit draft 03, backend/src/utilityRequirements.ts):

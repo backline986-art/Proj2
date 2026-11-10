@@ -952,8 +952,8 @@ export function decideNextStep(facts: NextStepFacts): NextStep {
   if (feeDue.length) {
     return make("fee_due", "me", "today",
       feeDue.every((t) => t.feeDueApproved !== false)
-        ? `${joinNames(feeDue.map((t) => `${agencyOf(facts, t)} approved the ${TRACK_NAME[t.track]}`))} — pay the issuance fee in the portal, then press Paid on the track with the permit number and the amount (automation never pays fees).`
-        : `Fee due: ${joinNames(feeDue.map((t) => `${agencyOf(facts, t)} asked for the ${TRACK_NAME[t.track]} fee`))} — pay it in the portal, then press Paid on the track with the record number and the amount (automation never pays fees).`,
+        ? `${joinNames(feeDue.map((t) => `${agencyOf(facts, t)} approved the ${TRACK_NAME[t.track]}`))} — pay the issuance fee in the portal, then press We paid the portal on the track with the permit number and the amount (automation never pays fees).`
+        : `Fee due: ${joinNames(feeDue.map((t) => `${agencyOf(facts, t)} asked for the ${TRACK_NAME[t.track]} fee`))} — pay it in the portal, then press We paid the portal on the track with the record number and the amount (automation never pays fees).`,
       [], null);
   }
 

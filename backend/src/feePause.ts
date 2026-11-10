@@ -57,7 +57,7 @@ export function usd(n: number): string {
 }
 
 /**
- * THE SENTENCE. "Payment needed: $X on <portal>. Pay there, then press Paid." An
+ * THE SENTENCE. "Payment needed: $X on <portal>. Pay there, then press We paid the portal." An
  * amount that could not be read is said to be unread — never $0. Never MFA wording, never "stage
  * again". Paid (trackPaid.ts, #576 item 4) records the payment and the filing it completed.
  */
@@ -67,7 +67,7 @@ export function paymentNeededSentence(input: { feeStop: FeeStopRecord | null; po
   const what = fee?.read && fee.totalUsd !== null
     ? `Payment needed: ${usd(fee.totalUsd)} on ${portal}.`
     : `Payment needed on ${portal} (the amount could not be read from the page${fee?.shotPath ? "; see the screenshot" : ""}).`;
-  return `${what} Pay there, then press Paid on the track with the record number and the amount paid. Do not stage this track again: the application is waiting on the portal.`;
+  return `${what} Pay there, then press We paid the portal on the track with the record number and the amount paid. Do not stage this track again: the application is waiting on the portal.`;
 }
 
 /** The sentence for a run row (its result_json and portal name). */
