@@ -1055,15 +1055,19 @@ export async function readAgencyEvidence(reader: PageReader, input: {
   // cites most, preferring one that carries the AHJ's own name (a state agency's page is read only
   // when it IS the agency's domain — a state portal link must not stand in for a city's).
   let agencyDomain = input.agencyCitation && official(input.agencyCitation) ? domOf(input.agencyCitation) : "";
+  const own = names.flatMap((n) => n.toLowerCase().split(/[^a-z]+/)).filter((w) => w.length >= 4 && !["city", "county", "town", "village", "unincorporated"].includes(w));
   if (!agencyDomain) {
     const counts = new Map<string, number>();
-    const own = names.flatMap((n) => n.toLowerCase().split(/[^a-z]+/)).filter((w) => w.length >= 4 && !["city", "county", "town", "village", "unincorporated"].includes(w));
     for (const u of input.citedUrls.filter(official)) {
       const d = domOf(u);
       counts.set(d, (counts.get(d) ?? 0) + 1 + (own.some((w) => d.includes(w)) ? 10 : 0));
     }
     agencyDomain = [...counts.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] ?? "";
   }
+  // NOTHING CITED (bot-vs-research round 2, a city whose whole site refuses automated reads): the
+  // search's own results on the agency's official domain that carries its name are read, so a refusal
+  // is recorded for a person's browser (needsPersonRead) instead of the lookup silently finding nothing.
+  if (!agencyDomain) agencyDomain = input.resultUrls.filter(official).map(domOf).find((d) => own.some((w) => d.includes(w))) ?? "";
   const onAgency = (u: string) => Boolean(agencyDomain) && domOf(u) === agencyDomain && official(u);
   const pageUrls: string[] = [];
   const addPage = (u: string) => { if (pageUrls.length < MAX_AGENCY_PAGES && !pageUrls.some((x) => pageKey(x) === pageKey(u))) pageUrls.push(u); };

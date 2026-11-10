@@ -473,7 +473,9 @@ export function parseUtilityFilingAnswer(text: string, seenUrls: string[], ctx: 
 // "<link words>" -> <target>, so the citation shows exactly what attested it. The result lands SEEDED,
 // like every lookup answer: where a filing goes stays a person's fact (rule 3), offered for the one-click
 // Confirm (filingDestinationProposals). Nothing here names a utility, a platform tenant or a state.
-const APPLY_LINK_WORDS = /\b(?:apply|applications?|submit\w*|interconnection request|interconnect(?:ion)? application|new request|start (?:a |an |your )?(?:new )?(?:application|request))\b/i;
+// A net-metering / interconnection AGREEMENT link is the application at many co-ops and munis ("Small
+// Net-Metering Agreement" -> its online form; bot-vs-research round 2).
+const APPLY_LINK_WORDS = /\b(?:apply|applications?|submit\w*|interconnection request|interconnect(?:ion)? application|new request|start (?:a |an |your )?(?:new )?(?:application|request)|net[\s-]?meter(?:ing|ed)?[\s-]+(?:interconnection )?agreement|interconnection agreement)\b/i;
 const NOT_APPLY_LINK_WORDS = /\b(?:inspection|schedule|pay(?:ment)?s?|bill|status|track(?:ing)?|faq|guide|handbook|checklist|instructions?|rates?|tariff|schedule \d+|outage|contact)\b/i;
 /** Is this link's wording about applying (and not about inspections, payments, status or help)? */
 export function isApplyLinkWords(words: string): boolean {

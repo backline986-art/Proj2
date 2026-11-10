@@ -7,6 +7,9 @@
 //   5. "net billing" glued to the word before it by the page's text ("callednet billing").
 //   6. A utility page that says some locations are served by ANOTHER utility (a shared service area).
 //   7. A utility page the reader was refused is recorded for a person, not silently dropped.
+//   8. A net-metering AGREEMENT link is the utility's application link (a co-op's online agreement form).
+//   9. A lookup whose answer cites nothing still reads the agency's own result pages, so a site that
+//      refuses every read is recorded for a person instead of the lookup silently finding nothing.
 //
 // Names, hosts and pages are invented; the reads are a fake transport.
 //
@@ -18,6 +21,8 @@
 //   K5 "\bnet billing" again                                  → (5) fails.
 //   K6 quoteStatesServiceArea always false                    → (6a) fails.
 //   K7 the utility lookup without readsNeedingAPerson         → (7) fails.
+//   K8 APPLY_LINK_WORDS without the agreement words           → (8) fails.
+//   K9 readAgencyEvidence without the nothing-cited fallback  → (9) fails.
 //
 // Run: npx tsx backend/test/lookupAlignResearch.test.ts
 import "./_isolate"; // FIRST
@@ -142,6 +147,28 @@ await check("(6b+7) end to end: the shared area and a refused page land on the r
   const s = ufl.utilityFeesAndReviewSentence(db, { state: "ZZ", utility: "Maplecrest Electric" });
   assert.match(s, /Check which utility serves the address: Maplecrest Electric's page says some locations are served by Larchmont Power \(https:\/\/www\.maplecrestelectric\.coop\/about\/service-area\/\)/);
   assert.match(s, /Needs a person to read \(the site refused Keelix's read\): https:\/\/www\.maplecrestelectric\.coop\/net-metering\//);
+});
+
+await check("(8) a net-metering AGREEMENT link on the utility's page is its application link", () => {
+  assert.equal(ufl.isApplyLinkWords("Small Net-Metering Agreement"), true);
+  assert.equal(ufl.isApplyLinkWords("Interconnection Agreement"), true);
+  assert.equal(ufl.isApplyLinkWords("Net metering FAQ"), false);
+  const NM = "https://www.maplecrestelectric.coop/net-metering/";
+  const FORM = "https://www.maplecrestelectric.coop/net-metering/small-net-metering-agreement/";
+  const got = ufl.filingFromPageLinks(
+    { value: { name: "Small Net-Metering Agreement online form", url: FORM }, sourceUrl: NM, quote: "Small Net-Metering Agreement (for systems of not more than 25 kW)" } as never,
+    { ok: true, url: NM, finalUrl: NM, links: [{ href: FORM, text: "Small Net-Metering Agreement" }, { href: `${NM}faq/`, text: "Net metering FAQ" }] } as never, [NM]);
+  assert.equal(got.fact?.value?.url, FORM, got.why);
+});
+
+await check("(9) nothing cited: the search's own results on the agency's named official domain are read, and a refusal is recorded", async () => {
+  const CD = "https://www.maplecrestoregon.gov/community-development";
+  reader._resetPoliteness();
+  const fetch: import("../src/agencyPageReader").RawFetch = async (url) => ({ ok: false, status: 403, contentType: "text/html", finalUrl: url, reason: "HTTP 403 — refused" });
+  const empty = JSON.stringify({ issuingAgency: { value: null }, permitStructure: { value: null }, permits: [] });
+  const run = await ppl.runPermitProcessLookup(db, { webLookup: async () => g(empty, [CD, "https://www.solarguides.example.com/maplecrest-permits"]) } as never,
+    { state: "OR", ahj: "Maplecrest", force: true, reader: reader.createPageReader({ fetch, minGapMs: 0, maxReads: 6 }) });
+  assert.deepEqual(run.lookup?.needsPersonRead?.map((r) => r.url), [CD], JSON.stringify({ npr: run.lookup?.needsPersonRead, reason: run.reason }));
 });
 
 if (failures) { console.error(`\n${failures} check(s) failed`); process.exit(1); }
