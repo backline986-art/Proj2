@@ -37,6 +37,7 @@ import type { AppDb } from "./db";
 import type { ProjectRecord } from "../../shared/src/types";
 import { addAuditLog } from "./audit";
 import { addCommunication, undeliveredCommunications } from "./crm";
+import { clientLinkRefusal } from "./clientLinkGuard";
 import {
   clientEmailsOffFor, clientUpdatesSilenced, ensureStatusShareToken, formatProjectAddress, sendEmail, smtpConfigured, statusShareUrl,
 } from "./clientNotifier";
@@ -321,7 +322,12 @@ export async function sendInstallerHandoff(
     }
 
     // Recorded BEFORE the first await: this row is the one-send marker (see the header).
-    const configured = smtpConfigured();
+    // NO DEAD LINK TO A CLIENT (clientLinkGuard.ts): the packet's status link must open off this
+    // machine. Asked only when a send would happen (SMTP set), so the "never tried" draft keeps its
+    // reason; refused = the row is a draft with the guard's reason, sent by a person once the base is set.
+    const linkRefusal = smtpConfigured() ? clientLinkRefusal({ body, html }) : null;
+    const configured = smtpConfigured() && !linkRefusal;
+    const notTried = linkRefusal || "SMTP is not configured (SMTP_HOST / SMTP_FROM are unset), so no send was attempted.";
     const comm = addCommunication(db, {
       projectId: project.id,
       orgId: text(row.org_id) || undefined,
@@ -331,11 +337,11 @@ export async function sendInstallerHandoff(
       body,
       loggedBy: INSTALLER_HANDOFF_SENDER,
       deliveryStatus: configured ? "pending" : "draft",
-      deliveryDetail: configured ? "" : "SMTP is not configured (SMTP_HOST / SMTP_FROM are unset), so no send was attempted.",
+      deliveryDetail: configured ? "" : notTried,
       recipient: to,
     });
     let deliveryStatus: "sent" | "draft" | "failed" = "draft";
-    let detail = configured ? "" : "SMTP is not configured (SMTP_HOST / SMTP_FROM are unset), so no send was attempted.";
+    let detail = configured ? "" : notTried;
     if (configured) {
       try {
         await sendEmail(to, subject, body, attachments, { html });

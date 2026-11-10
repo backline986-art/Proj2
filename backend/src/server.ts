@@ -49,7 +49,7 @@ import { sniffFileKind } from "./fileTypes";
 import { buildSubmittalEmailDraft } from "./applicationDocs";
 import type { EvidenceTopic } from "./projectEvidence";
 import { createClient, deleteClient, getClient, listClients, updateClient } from "./clients";
-import { enqueueJob, getJob, inFlightJobCount, listJobs, processNextJob, startJobWorker } from "./jobQueue";
+import { enqueueJob, getJob, inFlightJobCount, jobWorkerRunning, listJobs, processNextJob, startJobWorker } from "./jobQueue";
 import { isPublicJobType } from "./publicJobTypes";
 import { createUser, getUserWorkload, listUsers, updateUser, assignProjectToUser } from "./users";
 import { listBackups, runBackup, startBackupScheduler } from "./backup";
@@ -502,6 +502,21 @@ app.get("/api/diagnostics", (req, res) => {
   requireAdmin(req);
   res.json(collectDiagnostics(db, { build: BUILD, port, dbPath }));
 });
+
+// GO-LIVE CHECK (owner, 2026-11-10): every switch and setting this server reads, set / not set, and
+// what each means, with the database version, the destinations waiting on a person and the job
+// worker. A READ: env, SELECTs and file stats only; it never shows a value (goLiveCheck.ts). Staff
+// only (requireAdmin), and the database counts are the caller's org (reqOrgFilter, routeScope.test).
+app.get("/api/go-live", asyncHandler(async (req, res) => {
+  requireAdmin(req);
+  const { goLiveReport } = await import("./goLiveCheck");
+  const { filingDestinationQueue } = await import("./filingDestinationProposals");
+  res.json(await goLiveReport(process.env, db, reqOrgFilter(db, req), {
+    source: "server",
+    workerRunning: jobWorkerRunning(),
+    destinationCounts: (orgId) => filingDestinationQueue(db, orgId, (project) => getSubmittalTracks(db, project)).counts,
+  }));
+}));
 
 app.post("/api/projects", (req, res) => {
   const payload = req.body?.parserPayload ?? req.body?.payload ?? req.body;

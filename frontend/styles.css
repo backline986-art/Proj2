@@ -1123,6 +1123,18 @@ body.server-shared [data-track-open-recorder] { display: none !important; }
 .fd-handcheck { margin: 6px 0; padding: 6px 9px; border: 1px dashed var(--line); border-radius: var(--radius-sm); }
 .fd-handcheck ul { margin: 4px 0 0 18px; padding: 0; }
 
+/* Go-live check (go-live.js render) */
+.golive-body { padding: 20px; overflow-y: auto; }
+.golive-area { margin-top: 14px; }
+.golive-area h3 { margin: 0 0 6px; }
+.golive-lines { list-style: none; margin: 0; padding: 0; }
+.golive-line { border: 1px solid var(--line); border-radius: var(--radius-sm); padding: 8px 10px; margin-bottom: 6px; }
+.golive-meaning { margin-top: 4px; }
+.golive-settings { margin-top: 4px; font-size: 12px; }
+.golive-setting { margin-right: 8px; white-space: nowrap; }
+.golive-setting.is-set code { font-weight: 600; }
+.golive-other { margin-top: 16px; }
+
 /* KPI dashboard */
 .kpi-body { padding: 20px; overflow-y: auto; }
 .kpi-period { font-size: 13px; color: var(--muted); margin-bottom: 16px; }

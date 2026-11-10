@@ -703,6 +703,7 @@ export async function sendClientInvoice(
   const client = loadClient(db, clientId);
   const { billTo } = billToFor(client);
   const { clientEmailsOffFor, smtpConfigured, sendEmail } = await import("./clientNotifier");
+  const { clientLinkRefusal } = await import("./clientLinkGuard");
   const { addCommunication } = await import("./crm");
   const company = BRAND;
   const subject = `Invoice ${inv.number}: ${inv.periodStart} to ${inv.periodEnd}`;
@@ -715,9 +716,13 @@ export async function sendClientInvoice(
     });
   };
 
+  // NO DEAD LINK TO A CLIENT (clientLinkGuard.ts). The invoice text builds no link from PUBLIC_BASE_URL
+  // today (carriesLink false), so only a local link in its own text refuses it; one added later is caught.
+  const linkRefusal = clientLinkRefusal({ body, carriesLink: false });
   let detail = "";
   if (!billTo) detail = "No billing contact, business email or primary contact on file for this client.";
   else if (clientEmailsOffFor(clientId)) detail = "Client email is switched off (CLIENT_NOTIFICATIONS) and this client is not on the allow list.";
+  else if (linkRefusal) detail = linkRefusal;
   else if (!deps.send && !smtpConfigured()) detail = "SMTP is not configured; the email is saved as a draft to send by hand.";
   if (detail) {
     record("draft", detail);

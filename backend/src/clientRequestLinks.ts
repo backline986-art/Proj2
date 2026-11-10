@@ -57,6 +57,7 @@ import { BRAND, clientEmailSubject } from "./clientUpdates";
 import { clientEmailsOffFor, formatProjectAddress, sendEmail, smtpConfigured } from "./clientNotifier";
 import { mapEmailText, renderEmail, type EmailContent } from "./emailLayout";
 import { addCommunication } from "./crm";
+import { clientLinkRefusal } from "./clientLinkGuard";
 import { createCredentialRequest } from "./credentialRequests";
 import { createIntakeRequest, missingIntakeFields, unansweredPortalQuestions, type IntakeField } from "./intakeRequests";
 import { logger } from "./logger";
@@ -354,8 +355,14 @@ async function deliver(
 ): Promise<{ status: "sent" | "draft" | "failed"; detail: string }> {
   let status: "sent" | "draft" | "failed" = "draft";
   let detail = "";
+  // NO DEAD LINK TO A CLIENT (clientLinkGuard.ts). The unset-base line stays first and word for word;
+  // the guard adds the other dead bases (localhost, a private address, a LAN-only name) and a scan
+  // of the message's own links.
+  const linkRefusal = publicBase() ? clientLinkRefusal({ body: input.body, html: input.html }) : null;
   if (!publicBase()) {
     detail = "PUBLIC_BASE_URL is not set, so the link would point at this machine; nothing was sent. Set it, then send this by hand.";
+  } else if (linkRefusal) {
+    detail = linkRefusal;
   } else if (!opts.send && !smtpConfigured()) {
     detail = "SMTP is not configured (SMTP_HOST / SMTP_FROM are unset), so no send was attempted.";
   } else {
