@@ -28,6 +28,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
+import { fileURLToPath } from "node:url";
 
 // --- The verified truth: one loader (the reference-data generator reuses it) --------------------
 
@@ -230,7 +231,7 @@ interface FamilyScore {
   officialSource: boolean;
 }
 
-const REPO_ROOT = path.resolve(path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, "$1")), "..");
+const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url).replace(/^\/([A-Za-z]:)/, "$1")), "..");
 
 /** `deps.provider` is a test seam (a fake researcher; no API key needed). */
 export async function main(argv: string[], deps: { provider?: { researchJurisdictionCodes(input: Record<string, unknown>): Promise<unknown> } } = {}): Promise<number> {

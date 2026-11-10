@@ -26,6 +26,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
+import { fileURLToPath } from "node:url";
 
 type AppDb = {
   query<T>(sql: string, params?: unknown[]): T[];
@@ -73,7 +74,7 @@ const OPUS_PRICE = { input: 5, output: 25 };
 type CP = typeof import("../backend/src/codeProfiles");
 
 async function modules(): Promise<{ CP: CP; F: typeof import("../backend/src/codeFamilies"); acct: typeof import("../backend/src/llmAccounting") }> {
-  const root = path.resolve(path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, "$1")), "..");
+  const root = path.resolve(path.dirname(fileURLToPath(import.meta.url).replace(/^\/([A-Za-z]:)/, "$1")), "..");
   const imp = (p: string) => import(pathToFileURL(path.join(root, p)).href);
   return { CP: await imp("backend/src/codeProfiles.ts"), F: await imp("backend/src/codeFamilies.ts"), acct: await imp("backend/src/llmAccounting.ts") };
 }
@@ -238,7 +239,7 @@ export async function main(argv: string[], out: (s: string) => void = (s) => con
   }
   const prev = process.env.AUTOPILOT_DB_PATH;
   process.env.AUTOPILOT_DB_PATH = dbPath;
-  const root = path.resolve(path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, "$1")), "..");
+  const root = path.resolve(path.dirname(fileURLToPath(import.meta.url).replace(/^\/([A-Za-z]:)/, "$1")), "..");
   const { openDatabase } = await import(pathToFileURL(path.join(root, "backend/src/db.ts")).href);
   const db = (await openDatabase()) as AppDb;
   process.env.AUTOPILOT_DB_PATH = prev;

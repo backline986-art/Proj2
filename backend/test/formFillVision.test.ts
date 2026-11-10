@@ -10,6 +10,7 @@ import path from "node:path";
 import { PDFDocument, StandardFonts } from "pdf-lib";
 import { autoFillByFieldName } from "../src/formFiller";
 import { compareReadBack, fillVerifyPrompt, intendedFromAcroForm, sameLabel, verifyFilledForm, fillReportMarkdown } from "../src/formFillVision";
+import { fileURLToPath } from "node:url";
 
 let failures = 0;
 let passed = 0;
@@ -18,7 +19,7 @@ const check = async (label: string, fn: () => void | Promise<void>): Promise<voi
   catch (err) { failures++; console.error(`  FAIL - ${label}\n         ${err instanceof Error ? err.message : String(err)}`); }
 };
 
-const FIXTURES = path.join(path.dirname(new URL(import.meta.url).pathname), "fixtures");
+const FIXTURES = path.join(path.dirname(fileURLToPath(import.meta.url)), "fixtures");
 const ROW = {
   name: "Jordan Samplehouse", street: "1428 Example Ave", city: "Sampleton", state: "OR", zip: "97999",
   installer: "Example Solar Co LLC", mailingAddress: "500 Vendor Way", phone: "(555) 010-4280", email: "permits@example-solar.test",

@@ -21,6 +21,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { createHash } from "node:crypto";
+import { removeTempDir } from "./_tmpdir";
 
 const temp = fs.mkdtempSync(path.join(os.tmpdir(), "printed-form-fee-check-"));
 process.env.AUTOPILOT_DB_PATH = path.join(temp, "test.sqlite");
@@ -252,7 +253,7 @@ try {
   const scheduleRows = db.query<{ n: number }>("SELECT COUNT(*) AS n FROM fee_schedules WHERE notes LIKE '%printed%form%'");
   check("nothing printed is ever written to the fee store", Number(scheduleRows[0]?.n ?? 0) === 0);
 } finally {
-  fs.rmSync(temp, { recursive: true, force: true });
+  removeTempDir(temp);
 }
 
 if (failed.length) {

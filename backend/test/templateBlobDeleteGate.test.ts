@@ -22,6 +22,7 @@ import { execFileSync, spawn } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { removeTempDir } from "./_tmpdir";
 
 const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "template-blob-gate-test-"));
 
@@ -198,7 +199,7 @@ try {
   console.error(`  FAIL - suite aborted: ${err instanceof Error ? err.message : String(err)}`);
 } finally {
   server.kill();
-  fs.rmSync(tmpDir, { recursive: true, force: true });
+  removeTempDir(tmpDir);
 }
 
 if (failures) {
