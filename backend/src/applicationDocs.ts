@@ -10,6 +10,7 @@ import { isBillHolderName } from "./accountHolders";
 import { nowIso } from "./time";
 import { hasMpuScope } from "./serviceScope";
 import { findAhjProcessProfile, ahjProcessKnowledgeStatus, jurisdictionCore, registryTermMatches } from "./processProfiles";
+import { citedRowStructure, isStateAuthorityRow } from "./ahjRowCitations";
 import { describeCited, isStatewidePortalUrl, permitChannelLabel, permitProcessFor, statePermitStructure, stateRulesFor, stateTradeIssuerFor, unincorporatedZoningFor, ZONING_SIGNOFF } from "./permitProcess";
 import { resolvePermitPath, resolveStampRequirement, permitPathCallout, hasStampedStructuralEvidence, evaluatePrescriptiveCriteria, usStateCode, type PermitPathResolution } from "./permitPath";
 // Functions only, called at run time: this module sits inside the permitProcessLookup ->
@@ -54,7 +55,7 @@ const isOregonJob = (project: Pick<ProjectRecord, "state">): boolean => licenceJ
 // (a fire review, a zoning sign-off, a plan examination that "is not a permit") is its own
 // step, from the lookup's cited prerequisites, and is never the issuing agency.
 // ---------------------------------------------------------------------------
-export type PermitStructureLevel = "verified" | "cited" | "curated" | "reference" | "state_rule" | "unknown";
+export type PermitStructureLevel = "verified" | "cited" | "curated" | "reference_cited" | "reference" | "state_rule" | "unknown";
 export interface PermitPrerequisiteStep {
   /** The step in the source's words ("Fire Prevention plan review before the building permit"). */
   step: string;
@@ -151,8 +152,23 @@ export function permitStructureAnswer(
     return settle("separate", "curated", `Permit structure: separate — the hand-written ${profile.name} profile names both a structural and an electrical application${profile.sourceUrl ? `, ${profile.sourceUrl}` : ""}`, profile.sourceUrl);
   }
 
-  // 3. The seeded process profile's own words, unhedged.
-  const note = processNoteStructure(project);
+  // 3a. THE SEEDED ROW'S STRUCTURED FIELDS, BACKED BY ITS PAGES (ahjRowCitations.citedRowStructure,
+  //     worker-trackissuer): the state issues the electrical permit, it is bought at another counter,
+  //     the page says "separate"/"combo", or the page requires both a building and an electrical
+  //     permit. Read as cited — the AHJ's own page and its words — never as the operator's note. A row
+  //     with such a field that does not settle the structure is not read by word at all (3b): a field
+  //     outranks prose, so a note's wording can never split or join what the fields say.
+  // A state-issuer AHJ (4a) keeps its own answer, with the zoning step and the state issuer it names.
+  const rowFields = stateTradeIssuerFor(project) ? null : citedRowStructure(findAhjProcessProfile(project));
+  if (rowFields && "structure" in rowFields) {
+    const c = rowFields.citation;
+    return settle(rowFields.structure, "reference_cited",
+      `Permit structure: ${rowFields.structure} — ${rowFields.why}: from the AHJ's own page (${c.sourceUrl}), quoted: "${c.quote.slice(0, 160)}" (reference row, not person-verified)`,
+      c.sourceUrl, c.quote);
+  }
+
+  // 3b. The seeded process profile's own words, unhedged — only for a row with no structure field.
+  const note = rowFields ? null : processNoteStructure(project);
   if (note && "structure" in note) {
     return settle(note.structure, "reference", `Permit structure: ${note.structure} — the operator's seeded process note for this AHJ ("${note.note}"), not confirmed on an agency page`, "", note.note);
   }
@@ -239,7 +255,7 @@ export function permitStructureWithBasis(project: ProjectRecord): { structure: "
 /** May this answer be printed as "both must be filed" / "one permit"? Levels 1, 2 and 4 only —
  *  a seeded note is the operator's reference, stated as such. */
 export function permitStructureIsCitedOrVerified(a: Pick<PermitStructureAnswer, "level">): boolean {
-  return a.level === "verified" || a.level === "cited" || a.level === "curated" || a.level === "state_rule";
+  return a.level === "verified" || a.level === "cited" || a.level === "curated" || a.level === "reference_cited" || a.level === "state_rule";
 }
 
 /** The one sentence every surface prints for the structure (tracks, form finder, package, email). */
@@ -250,6 +266,7 @@ export function permitStructureSentence(a: PermitStructureAnswer): string {
 function permitStructureParts(a: PermitStructureAnswer): { core: string; pre: string } {
   const firm = permitStructureIsCitedOrVerified(a);
   const where = a.level === "state_rule" ? "state rule" : a.level === "cited" ? "cited agency page" : a.level === "verified" ? "verified by a person"
+    : a.level === "reference_cited" ? `the AHJ's own page, quoted: ${a.sourceUrl}`
     : a.level === "curated" ? "hand-written AHJ profile" : "operator's seeded note — not confirmed on an agency page";
   const core = a.issuer && a.structure === "separate"
     ? `Separate building (BLD) + electrical (ELE) permits issued by ${a.issuer} on the state's application, not by the local AHJ — both must be filed (${where})`
@@ -615,12 +632,21 @@ function applicationProfileFromProcess(project: ProjectRecord): ApplicationRequi
   if (!hasSignal) return null;
 
   const method = (proc.submissionMethod || "").toLowerCase();
+  // THE CHANNEL IS THE FIELD, NOT THE PROSE (draft 18 A, worker-trackissuer). A row whose
+  // submissionMethod field names how it files decides its channel by that field: a note that merely
+  // mentions email ("returns a signed copy by email", "corrections come by email") never turns a
+  // portal filing into an email one. The notes may still NAME THE PLATFORM of a portal the field
+  // already says it is (an online/portal/URL method), and decide the channel only for a row whose
+  // field is empty — the word reading is the fallback, not the answer.
+  const methodSaysPortal = /\bportal\b|\bonline\b|https?:\/\/|\baccela\b|\baca\b|e-?permitting|projectdox|avolve/.test(method);
+  const notesMay = !method.trim() || methodSaysPortal;
+  const notesDecide = !method.trim();
   // WHOLE WORDS: a bare "aca" substring matched "placa", "vacaville"; "accela" and "e-permitting"
   // name a platform, not a state.
-  const accela = /\baccela\b|\baca\b/.test(method) || /\baccela\b/.test(notes);
-  const isEpermitting = accela || /\be-?permitting\b/.test(method) || /\be-?permitting\b/.test(notes);
-  const isProjectDox = /projectdox|avolve/.test(method) || /projectdox|avolve/.test(notes);
-  const isEmail = /email/.test(method) || /email/.test(notes);
+  const accela = /\baccela\b|\baca\b/.test(method) || (notesMay && /\baccela\b/.test(notes));
+  const isEpermitting = accela || /\be-?permitting\b/.test(method) || (notesMay && /\be-?permitting\b/.test(notes));
+  const isProjectDox = /projectdox|avolve/.test(method) || (notesMay && /projectdox|avolve/.test(notes));
+  const isEmail = /email/.test(method) || (notesDecide && /email/.test(notes));
   const portalOnly = isEpermitting || isProjectDox || /portal|online/.test(method);
   // AN IN-PERSON CLAUSE IN THE SEEDED METHOD IS THE CHANNEL. Bernalillo County's reads "BPA: In person
   // EPA: Bernalillo County accela" — the building permit is filed at the counter; labelling the whole
@@ -679,7 +705,9 @@ function applicationProfileFromProcess(project: ProjectRecord): ApplicationRequi
     // A seeded method that NAMES the intake address keeps it, so the card shows where it goes; sending
     // still needs a person-verified address (filingEmail.ts), so a seeded address is only shown.
     : isEmail ? (EMAIL_ADDRESS.test(proc.submissionMethod || "") ? (proc.submissionMethod || "").trim() : "Email")
-    : (proc.submissionMethod || "Verify on the AHJ site");
+    // A STATE AUTHORITY's row with no method on file (ahjRowCitations): its door is unknown, said so —
+    // the channel then falls through to what a person verified for it, else "Unknown — verify".
+    : (proc.submissionMethod || (isStateAuthorityRow(proc) ? "Unknown — verify on the issuer's site" : "Verify on the AHJ site"));
 
   // A SEEDED NOTE IS A NOTE, NOT AN INSTRUCTION. Scottsdale's reads 'Select "Solar Systems/Green
   // Including Commercial Solar Projects"' — the portal's real type is "Residential Solar" — and the

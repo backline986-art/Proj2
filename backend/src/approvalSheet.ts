@@ -56,6 +56,9 @@ import { readPaymentQuote } from "./submissionFees";
 import { nemFiledWithPermit } from "./utilityFilingLookup";
 import { resolveValuation } from "./valuation";
 import { getSubmitGateReport, reviewerGateReportFor } from "./repository";
+import { personVerifiedFilingDoor } from "./submittalTracks";
+import { authorityForTrack } from "./filingEmail";
+import { separateCounterFor } from "./ahjRowCitations";
 
 /** An account / meter number as the sheet shows it: the last 4 only. A value of 4 characters or
  *  fewer is not shown at all — its "last 4" would be the whole number. */
@@ -405,6 +408,25 @@ export function buildApprovalSheet(db: AppDb, project: ProjectRecord, track: Sub
     if (!host) {
       ch.check = "missing";
       note("channel", "No complete portal recipe of this filing's own is on file, so an approved run cannot reach the portal's submit: it stops at the review screen for a person to submit.");
+    }
+    // WHERE IT FILES, AS A PERSON VERIFIED IT (Helm's doorgate follow-on, display only): the gate
+    // (automaticSubmitRefusals) clicks a final submit only on a door a named person verified for this
+    // track — the card's "verified by a person" (personVerifiedFilingDoor, the same read). Without one,
+    // say so up front, with the way to confirm it. The sheet decides nothing; the gate is unchanged.
+    let door: ReturnType<typeof personVerifiedFilingDoor> = null;
+    try { door = personVerifiedFilingDoor(db, track, portalProject); } catch { door = null; }
+    if (!door) {
+      let counter: ReturnType<typeof separateCounterFor> = null;
+      try { counter = separateCounterFor(portalProject, track); } catch { counter = null; }
+      let authorityKey = "";
+      try { authorityKey = counter ? "" : authorityForTrack(project, track)?.profileKey ?? ""; } catch { authorityKey = ""; }
+      issues.push({
+        kind: "note", rowKey: "channel",
+        text: counter
+          ? `This track's destination is not person-verified: it is filed at a separate counter (${counter.value}), so Approve & auto-submit will stop at review and a person files it there.`
+          : "This track's destination is not person-verified; Approve & auto-submit will stop at review. Confirm the destination on the track card first if automation should file it.",
+        ...(authorityKey ? { confirmAuthority: authorityKey } : {}),
+      });
     }
     let docs: Record<string, string> = {};
     try { docs = submissionDocumentsByType(db, project, track); } catch { docs = {}; }

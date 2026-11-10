@@ -247,11 +247,17 @@ await run("a seeded door is never launchable: the KB row holds the method as tex
 
 const batteryJob = (ahj: string) => ({ state: "UT", ahj, city: ahj, parserSnapshot: { hasBattery: "Yes", batteryMake: "Examplecell", batteryModel: "EX-13", batteryQty: "1" } }) as unknown as ProjectRecord;
 await run("a battery job reads the city's ESS words where its page has them, and 'not on file' where it does not", () => {
+  // The rows cite their pages for storage (citations[field=ess]): read as CITED, the page's own words,
+  // not as the operator's seeded note (worker-trackissuer; the brief's item 2).
   const bountiful = essPermitStep(batteryJob("Bountiful"))!;
-  assert.equal(bountiful.status, "process_note", "Bountiful: the seeded note names its battery permit");
-  assert.ok(bountiful.entries.some((e) => /fire agency approval letter/i.test(e.step)), "Bountiful: the fire agency letter is named");
-  assert.equal(essPermitStep(batteryJob("South Jordan"))!.status, "process_note", "South Jordan: batteries in the PV plan review");
-  assert.equal(essPermitStep(batteryJob("Salt Lake City"))!.status, "process_note", "Salt Lake City: its ESS checklist");
+  assert.equal(bountiful.status, "cited", "Bountiful: its page names its battery permit packet");
+  assert.ok(bountiful.entries.every((e) => e.basis === "reference_cited" && /^https:\/\//.test(e.sourceUrl)), "Bountiful: every entry is its page, quoted");
+  assert.ok(bountiful.entries.some((e) => /fire agency/i.test(e.step) && /approval letter/i.test(e.step)), "Bountiful: the fire agency letter is named");
+  for (const city of ["South Jordan", "Salt Lake City"]) {
+    const step = essPermitStep(batteryJob(city))!;
+    assert.equal(step.status, "cited", `${city}: its page's battery words, cited`);
+    assert.ok(step.entries.length && step.entries.every((e) => e.basis === "reference_cited"), `${city}: no seeded-note entries beside the cited ones`);
+  }
   for (const city of ["Murray City", "West Jordan", "Ogden", "Syracuse", "Clearfield", "Kaysville"]) {
     assert.equal(essPermitStep(batteryJob(city))!.status, "not_on_file", `${city}: nothing read, so not on file (never assumed)`);
   }

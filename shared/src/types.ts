@@ -997,7 +997,7 @@ export interface ProjectRecord {
    *  the track's issuer) — never persisted, never mapped from a row. It names the project's own AHJ
    *  so the per-job lookup's cited answer about this permit still reaches the view, and makes the
    *  view idempotent (a view of a view is itself). */
-  trackView?: { track: string; projectAhj: string; source: "operator" | "lookup" | "state_rule" };
+  trackView?: { track: string; projectAhj: string; source: "operator" | "lookup" | "reference" | "state_rule" };
   /** THE JOB'S CLASS (#688, migration v69): "residential" (every existing row, and every job
    *  nobody has said otherwise about) or "commercial". A PERSON sets it — at intake or on the
    *  detail view; a model may suggest it, never set it. A commercial job is HELD for a person:
@@ -1078,8 +1078,10 @@ export type TrackIssuerOverrides = Partial<Record<IssuerTrackKey, string>>;
  *  CID / MHD where the AHJ has no building department), else the project AHJ. */
 export interface TrackIssuerAnswer {
   name: string;
-  source: "operator" | "lookup" | "state_rule" | "project";
-  /** The lookup's (or state rule's) source page and words (source "lookup" / "state_rule"). */
+  source: "operator" | "lookup" | "reference" | "state_rule" | "project";
+  /** The lookup's (or state rule's, or the AHJ reference row's) source page and words (source
+   *  "lookup" / "state_rule" / "reference": the AHJ's own cited page naming the state as this
+   *  permit's issuer). */
   sourceUrl?: string;
   quote?: string;
   /** The operator's value on file for this track ("" when none) — what the card's input shows. */
@@ -1595,6 +1597,9 @@ export interface ApprovalSheetIssue {
   kind: "mismatch" | "missing" | "note";
   rowKey: string;
   text: string;
+  /** Display only: the filing authority (filing-destinations profileKey) whose destination a person
+   *  can confirm on the track card — the sheet shows a link to it beside this note. */
+  confirmAuthority?: string;
 }
 
 /** #486: GET /api/projects/:id/approval-sheet — what Approve & auto-submit is about to file. A read:
@@ -1955,6 +1960,10 @@ export interface AhjProcessProfile {
    *  words and when it was read. Evidence for the person who verifies the row; it never raises a row's
    *  tier (rows from the reference file are seeded, rule 3) and never makes a door launchable. */
   citations?: AhjProcessCitation[];
+  /** A STATE AUTHORITY's row, not a local jurisdiction's: the permit kinds it issues across its state
+   *  ("electrical"). A local row's citations[field=electricalPermitIssuer] "state" names this row as
+   *  that track's issuer (ahjRowCitations.stateAuthorityRowFor). Absent on every local row. */
+  stateAuthorityFor?: string[];
   reviewerNotes: string;
   sourceSheet: string;
 }

@@ -43,6 +43,7 @@ import { nemTrackDropFor } from "./utilityStorageModes";
 import { nowIso } from "./time";
 import { hasMpuScope } from "./serviceScope";
 import { essPermitStep, type EssPermitStep } from "./essRequirements";
+import { separateCounterFor } from "./ahjRowCitations";
 import { randomUUID } from "node:crypto";
 import { snapshotFilingQuote } from "./feeAccuracy";
 import { nemSignatureState, type NemSignatureView } from "./signatureTrack";
@@ -82,6 +83,13 @@ function permitTrackLabel(type: SubmittalTrackType, answer: PermitStructureAnswe
   if (type === "combo" || type === "permit") {
     if (answer.structure === "combo") return "Building + electrical permit (combo)";
     return "AHJ permit — one permit or separate building + electrical not yet confirmed";
+  }
+  // THE AHJ'S OWN PAGE, QUOTED (the reference row's citations, worker-trackissuer): said as what it is —
+  // a page and its words, not a person's check — instead of "the operator's seeded note".
+  if ((type === "building" || type === "electrical") && answer.level === "reference_cited") {
+    let host = "";
+    try { host = answer.sourceUrl ? new URL(answer.sourceUrl).host : ""; } catch { host = ""; }
+    return `${TRACK_LABELS[type]} — from the AHJ's own page${host ? ` (${host})` : ""}, quoted; not person-verified`;
   }
   if ((type === "building" || type === "electrical") && !permitStructureIsCitedOrVerified(answer)) {
     return `${TRACK_LABELS[type]} — per the operator's seeded note, not confirmed on an agency page`;
@@ -266,9 +274,12 @@ function verifiedAhjPortalUrl(db: AppDb | null, project: ProjectRecord, track: S
  * reference profile citation for its submission method. Never read by channelKindOf, staging or a gate.
  */
 function channelCitationFor(
-  db: AppDb | null, track: SubmittalTrackType, project: ProjectRecord, res: { basis: string; portalUrl: string },
+  db: AppDb | null, track: SubmittalTrackType, project: ProjectRecord,
+  res: { basis: string; portalUrl: string; citation?: { sourceUrl: string; quote: string; fetchedAt?: string } },
 ): { sourceUrl: string; quote: string; fetchedAt?: string } | undefined {
   if (res.basis === "verified") return undefined;
+  // The resolution names its own page (a separate counter's): that page, never the AHJ's door's.
+  if (res.citation) return res.citation;
   const cite = (sourceUrl: unknown, quote: unknown, fetchedAt?: unknown) => {
     const u = s(sourceUrl).trim(); const q = s(quote).trim();
     return /^https?:\/\//i.test(u) && q.length >= 3 ? { sourceUrl: u, quote: q.slice(0, 400), ...(s(fetchedAt).trim() ? { fetchedAt: s(fetchedAt).trim() } : {}) } : undefined;
@@ -309,10 +320,24 @@ function channelCitationFor(
  * (cited) → the AHJ's hand-written / seeded profile → the AHJ's knowledge-base row (a person's
  * verified row, else research — said as such) → unknown.
  */
-function channelResolution(db: AppDb | null, track: SubmittalTrackType, project: ProjectRecord): { channel: string; basis: string; portalUrl: string; filedWithPermit?: boolean } {
+function channelResolution(db: AppDb | null, track: SubmittalTrackType, project: ProjectRecord): { channel: string; basis: string; portalUrl: string; filedWithPermit?: boolean; citation?: { sourceUrl: string; quote: string; fetchedAt?: string } } {
   if (track === "nem") {
     const u = utilityTrackPresentation(db, project);
     return { channel: u.channel, basis: u.basis, portalUrl: u.portalUrl, ...(u.filedWithPermit ? { filedWithPermit: true } : {}) };
+  }
+  // ANOTHER COUNTER OF THE SAME AHJ (worker-trackissuer): the AHJ's page says its electrical permit is
+  // filed somewhere other than its building permit ("purchased separately at City Hall"). This track's
+  // door is that counter, as the page words it — never the AHJ's own door, not even one a person
+  // verified for the AHJ (they verified where the building permit files), and no URL: it starts
+  // unknown, so the gate (personVerifiedFilingDoor) never finds a verified door here.
+  const counter = separateCounterFor(project, track);
+  if (counter) {
+    return {
+      channel: `${counter.value} — a separate counter from ${String(project.ahj ?? "").trim() || "the AHJ"}'s building permit (from the AHJ's own page, quoted — verify)`,
+      basis: "profile",
+      portalUrl: "",
+      citation: { sourceUrl: counter.sourceUrl, quote: counter.quote.slice(0, 400), ...(counter.fetchedAt ? { fetchedAt: counter.fetchedAt } : {}) },
+    };
   }
   // THE LABEL IS THE RESOLVED PORTAL'S HOST (portal-truth D4, permitProcess.permitChannelLabel):
   // "Oregon ePermitting (Accela)" only on the statewide host; an AHJ's own Accela tenant is
@@ -1177,7 +1202,9 @@ export function getSubmittalTracks(db: AppDb, project: ProjectRecord): Submittal
     // row can hold the other track's portal (rule 5).
     const fitsHere = (u: string) => Boolean(u) && Boolean(trackSafeUrl(type, u)) && !isInformationalPageUrl(u);
     let kbPortalUrl: string | undefined;
-    if (!noPortal && (!recipeRow || !s(recipeRow.portal_url))) {
+    // A separate counter's track has no portal of the AHJ's to fall back on (its door is the counter).
+    const ownCounter = category === "permit" && Boolean(separateCounterFor(issuerProject, type));
+    if (!noPortal && !ownCounter && (!recipeRow || !s(recipeRow.portal_url))) {
       if (fitsHere(resolved.portalUrl)) kbPortalUrl = resolved.portalUrl;
       const kbField = scopeType === "utility" ? "utility" : "ahj";
       const kbVal = scopeType === "utility" ? project.utility : issuerProject.ahj;

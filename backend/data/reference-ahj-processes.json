@@ -1,7 +1,7 @@
 {
   "generatedFrom": "Permit Processes.xlsx",
   "redaction": "Credential/contact columns and credential-like values removed; credential-bearing notes dropped. Customer-specific files excluded.",
-  "count": 397,
+  "count": 398,
   "profiles": [
     {
       "state": "NJ",
@@ -5120,6 +5120,38 @@
     },
     {
       "state": "ID",
+      "ahj": "Idaho Division of Occupational and Professional Licenses (DOPL)",
+      "submissionMethod": "",
+      "timeline": "",
+      "requiresElectricianSign": false,
+      "requiresElectricalStamp": false,
+      "requiresStructuralStamp": false,
+      "requiresElectricalPermitApplication": true,
+      "requiresBuildingPermitApplication": false,
+      "requiresSolarChecklist": false,
+      "requiresPlanSet": false,
+      "requiresUtilityApproval": false,
+      "requiresCustomerSignature": false,
+      "requiresFloodplainCheck": false,
+      "requiresJurisdictionCheck": false,
+      "otherRequirements": "",
+      "reviewerNotes": "The state's electrical permit authority, as Canyon County's building department page names it: where a local jurisdiction's own page says the State issues electrical permits, the electrical permit track files with this office. How and where it takes an application is NOT on file: its door starts unknown and needs a person's Confirm. Seeded from a local authority's own page, NOT verified.",
+      "stateAuthorityFor": [
+        "electrical"
+      ],
+      "citations": [
+        {
+          "field": "ahj",
+          "value": "State of Idaho, Division of Occupational and Professional Licenses (DOPL)",
+          "sourceUrl": "https://www.canyoncounty.id.gov/building-department",
+          "quote": "all Mechanical, Electrical and Plumbing permits and inspections are handled by the State of Idaho, Division of Occupational and Professional Licenses (DOPL)",
+          "fetchedAt": "2026-11-10T08:24:31Z"
+        }
+      ],
+      "sourceSheet": "ID seeded (authority pages read 2026-11-10)"
+    },
+    {
+      "state": "ID",
       "ahj": "Couer d'Alene",
       "submissionMethod": "Coeur d'Alene Portal",
       "timeline": "Usually 2 weeks, but could be 4 due to short staffed",
@@ -5377,6 +5409,13 @@
         {
           "field": "electricalPermitIssuer",
           "value": "city (bought at City Hall)",
+          "sourceUrl": "https://staridaho.org/1249/Fee-Information",
+          "quote": "Electrical, Mechanical, and Plumbing permits are in addition to the building permit and are purchased separately at City Hall.",
+          "fetchedAt": "2026-11-10T08:23:37Z"
+        },
+        {
+          "field": "electricalSubmissionMethod",
+          "value": "In person at City Hall",
           "sourceUrl": "https://staridaho.org/1249/Fee-Information",
           "quote": "Electrical, Mechanical, and Plumbing permits are in addition to the building permit and are purchased separately at City Hall.",
           "fetchedAt": "2026-11-10T08:23:37Z"

@@ -5543,7 +5543,7 @@ function trackPrerequisitesHtml(t) {
 // (unverified), or "not on file, verify". Present only on a battery job's permit card. A cited
 // prerequisite already listed above is not listed twice. Untrusted text: esc() everything; URLs
 // only through httpUrl + linkifyText.
-const ESS_STEP_BASIS = { lookup_permit: "per-job lookup, cited", lookup_prerequisite: "per-job lookup, cited", process_note: "seeded process note, unverified" };
+const ESS_STEP_BASIS = { lookup_permit: "per-job lookup, cited", lookup_prerequisite: "per-job lookup, cited", reference_cited: "the AHJ's own page, quoted", process_note: "seeded process note, unverified" };
 function trackEssStepHtml(t) {
   const e = t && t.essStep;
   if (!e || !e.summary) return "";
@@ -5555,7 +5555,8 @@ function trackEssStepHtml(t) {
   const item = (x) => {
     const u = httpUrl(x.sourceUrl);
     const hedge = x.basis !== "process_note" && x.namesStorage === false ? "; whether it covers the battery is not stated — verify" : "";
-    return `<li>${esc(x.step)} <span class="muted">(${esc(ESS_STEP_BASIS[x.basis] || "on file")}${esc(hedge)})</span>${u ? ` — ${linkifyText(u)}` : ""}</li>`;
+    const quoted = x.basis === "reference_cited" && x.quote && x.quote !== x.step ? ` <q>${esc(String(x.quote).slice(0, 300))}</q>` : "";
+    return `<li>${esc(x.step)} <span class="muted">(${esc(ESS_STEP_BASIS[x.basis] || "on file")}${esc(hedge)})</span>${quoted}${u ? ` — ${linkifyText(u)}` : ""}</li>`;
   };
   return `<div class="track-ess" style="margin:0 0 6px;font-size:12px"><span class="badge ${badge}">ESS</span> ${esc(e.summary)}${esc(listedAbove)}${entries.length ? `
     <ul style="margin:2px 0 0 18px;padding:0">${entries.map(item).join("")}</ul>` : ""}</div>`;
@@ -5578,6 +5579,7 @@ const TRACK_ISSUER_SOURCE = {
   operator: { badge: "badge-info", label: "set by an operator" },
   lookup: { badge: "badge-info", label: "per-job lookup, cited" },
   state_rule: { badge: "badge-info", label: "state rule, seeded" },
+  reference: { badge: "badge-info", label: "the AHJ's own page, quoted (not person-verified)" },
   project: { badge: "badge-none", label: "the project's AHJ" },
 };
 // The line sits on the card's FACE (above the channel); its set/clear control is a collapsed
@@ -5587,7 +5589,7 @@ function trackIssuerHtml(t) {
   if (t.category !== "permit" || !t.issuer || !TRACK_ISSUER_KEY[t.type]) return "";
   const i = t.issuer;
   const src = TRACK_ISSUER_SOURCE[i.source];
-  const cited = (i.source === "lookup" || i.source === "state_rule") && httpUrl(i.sourceUrl) ? ` — ${linkifyText(httpUrl(i.sourceUrl))}` : "";
+  const cited = (i.source === "lookup" || i.source === "state_rule" || i.source === "reference") && httpUrl(i.sourceUrl) ? ` — ${linkifyText(httpUrl(i.sourceUrl))}` : "";
   const refused = i.refused ? `<div style="margin-top:2px;color:var(--warning)">${esc(i.refused)}</div>` : "";
   return `<div class="track-issuer" style="margin:0 0 6px;font-size:12px">
     <strong>Issued by:</strong> ${esc(i.name || "—")}${src ? ` <span class="badge ${src.badge}">${esc(src.label)}</span>` : ""}${cited}
@@ -6305,7 +6307,10 @@ function approvalSheetHtml(sheet, recordedAs) {
   const issues = Array.isArray(sheet.issues) ? sheet.issues : [];
   const red = issues.filter((i) => i.kind === "mismatch" || i.kind === "missing");
   const notes = issues.filter((i) => i.kind === "note");
-  const issueList = (list, color) => `<ul style="margin:4px 0 0 18px;padding:0;color:${color}">${list.map((i) => `<li>${esc(i.text)}</li>`).join("")}</ul>`;
+  // A note about a destination no person verified carries the way to confirm it (display only: the
+  // link closes the sheet and scrolls to that authority's proposed destination on the track card).
+  const confirmLink = (i) => i.confirmAuthority ? ` <button type="button" class="ghost" data-approval-confirm-dest="${esc(i.confirmAuthority)}">Confirm the destination</button>` : "";
+  const issueList = (list, color) => `<ul style="margin:4px 0 0 18px;padding:0;color:${color}">${list.map((i) => `<li>${esc(i.text)}${confirmLink(i)}</li>`).join("")}</ul>`;
   const rows = (Array.isArray(sheet.rows) ? sheet.rows : []).map((r) => {
     const bad = r.check === "mismatch" || r.check === "missing";
     const value = r.value ? esc(r.value) : `<span style="color:var(--destructive)">Not on file</span>`;
@@ -6368,6 +6373,13 @@ async function confirmApprovalSheet(type, recordedAs = "", out = null) {
     const onKey = (e) => { if (e.key === "Escape") { e.preventDefault(); done(false); } };
     document.addEventListener("keydown", onKey, true);
     modal.querySelector("[data-approval-cancel]").addEventListener("click", () => done(false));
+    modal.querySelectorAll("[data-approval-confirm-dest]").forEach((b) => b.addEventListener("click", () => {
+      const key = b.getAttribute("data-approval-confirm-dest") || "";
+      done(false);
+      const target = Array.from(document.querySelectorAll("[data-fd-authority]")).find((el) => el.getAttribute("data-fd-authority") === key);
+      if (target && target.scrollIntoView) target.scrollIntoView({ behavior: "smooth", block: "center" });
+      else showMessage("No proposed destination is on file for this authority yet: open the track card's lookup, or use Edit on its destination, to confirm where it files.", "warning");
+    }));
     const approveBtn = modal.querySelector("[data-approval-approve]");
     const boxes = Array.from(modal.querySelectorAll("[data-approval-ack]"));
     const allTicked = () => boxes.every((b) => b.checked);

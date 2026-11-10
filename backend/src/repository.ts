@@ -200,6 +200,7 @@ import { PAGE_READ_MIN_GAP_MS } from "./agencyPageReader";
 import { parsePerJobPortalQuestion } from "../../shared/src/perJobQuestions";
 import { normalizeProjectClass, parseProjectClassConfirmation, servicePhaseOf, serviceVoltageOf } from "../../shared/src/projectClass";
 import { projectClassHoldReason, projectClassStatusFor } from "./projectClassHold";
+import { separateCounterFor } from "./ahjRowCitations";
 
 // THE ONE SEAM A TEST MAY STUB: the recipe-replay launcher prepareSubmission calls. Everything
 // around it — the gates, the run row, the outcome, the demotion, the heal write, the approval —
@@ -9532,6 +9533,19 @@ export async function prepareSubmission(
   if (track === "nem") {
     const withPermit = nemFiledWithPermit(db, detail.project);
     if (withPermit) throw new HttpError(409, withPermitStageSentence(withPermit, detail.project.utility), { track, nemFiledWithPermit: true });
+  }
+  // A TRACK FILED AT ANOTHER COUNTER OF THE SAME AHJ (worker-trackissuer: the AHJ's own page says its
+  // electrical permit is bought elsewhere, e.g. in person at City Hall). The AHJ's portal is NOT this
+  // track's door, so nothing is staged on it: a person files this one. An added stop only.
+  if (track === "electrical" || track === "mpu") {
+    const counter = separateCounterFor(projectForTrack(detail.project, track), track);
+    if (counter) {
+      addAuditLog(db, projectId, "system", "separate counter", "portal.stage_refused_separate_counter", { track, counter: counter.value, sourceUrl: counter.sourceUrl });
+      throw new HttpError(409,
+        `The ${track} permit here is filed at a separate counter (${counter.value}), not on ${detail.project.ahj}'s portal, per the AHJ's own page (${counter.sourceUrl}). `
+        + "Nothing is staged for it: a person files it there.",
+        { track, separateCounter: true });
+    }
   }
   // PAYMENT GATE (first — the payment screen sits at the beginning of the flow):
   // a per-submission client must have this track's quote (real permit fees + the

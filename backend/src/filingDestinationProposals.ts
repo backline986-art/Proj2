@@ -48,6 +48,7 @@ import { nowIso } from "./time";
 import { authorityForTrack, filingEmailRecordProblems, readFilingEmail, setFilingEmail, type FilingAuthority } from "./filingEmail";
 import { getPermitProcessLookup, projectForTrack } from "./permitProcess";
 import { findAhjProcessProfile } from "./processProfiles";
+import { separateCounterFor } from "./ahjRowCitations";
 import { personVerifiedAuthorityHosts } from "./officialAuthorityHosts";
 import { FILED_WITH_AHJ_PERMIT, getUtilityFilingLookup, verifyUtilityFilingLookup } from "./utilityFilingLookup";
 import { shippedRecordFor, utilityPersonVerifiedHosts } from "./utilityRequirements";
@@ -299,6 +300,10 @@ export function filingDestinationsFor(
 ): AuthorityDestinations[] {
   const groups = new Map<string, { authority: FilingAuthority; tracks: SubmittalTrackType[]; views: typeof trackViews }>();
   for (const t of trackViews) {
+    // A track filed at ANOTHER COUNTER of the same AHJ (ahjRowCitations.separateCounterFor) is not
+    // filed where the AHJ's door goes: confirming the AHJ's portal must not read as confirming it, so it
+    // joins no authority's group here. Its door is the counter its card names, and stays unverified.
+    if (t.type !== "nem" && separateCounterFor(projectForTrack(project, t.type), t.type)) continue;
     const a = authorityForTrack(project, t.type);
     if (!a) continue;
     const key = `${a.kind}|${a.profileKey}`;

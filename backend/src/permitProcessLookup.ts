@@ -32,7 +32,7 @@
 import type { CitedFact, LLMProvider, PermitFeeAnswer, PermitProcessDiscipline, PermitProcessLookup, PermitProcessPermitAnswer, WebLookupResult } from "../../shared/src/types";
 import type { AppDb } from "./db";
 import { hostFitsTrackAndEntity, isInformationalPageUrl, isPathTenantedHost, isPermitPlatformUrl, isVendorDomain, isVendorRootOrMarketing, portalHostOf, portalTenantKey, portalTenantOf, salesforceTenantKind, trackSafeUrl, type PortalEntity } from "./portalChannel";
-import { ahjNameCore, getPermitProcessLookup, normalizeAhjName, savePermitProcessLookup, servingIssuerNamed, stateRulesFor, trackIssuer, ZONING_SIGNOFF } from "./permitProcess";
+import { ahjNameCore, getPermitProcessLookup, normalizeAhjName, savePermitProcessLookup, servingIssuerNamed, stateRulesFor, trackIssuer, unknownStateAuthorityName, ZONING_SIGNOFF } from "./permitProcess";
 import { CONNECTOR_WORDS, DEPARTMENT_WORDS, GENERIC_ORG_WORDS, agencyNameKey, sameAgencyName, stripDepartmentPhrase } from "./agencyName";
 // Re-exported: the agency-name identity helpers moved to agencyName.ts (pure, no lookup stack) so
 // permitProcess can ask the same question without importing this module back (a cycle).
@@ -1816,7 +1816,9 @@ function stateIssuersToLookUp(project: { state: string; ahj: string; parserSnaps
     for (const track of ["building", "electrical"]) {
       const issuer = trackIssuer(project as never, track);
       const name = str(issuer.name);
-      if (issuer.source !== "state_rule" || !name || sameAgencyName(name, project.ahj)) continue;
+      if ((issuer.source !== "state_rule" && issuer.source !== "reference") || !name || sameAgencyName(name, project.ahj)) continue;
+      // A placeholder for a state authority not on file is not an agency to research.
+      if (name === unknownStateAuthorityName(project.state)) continue;
       if (!out.some((n) => normalizeAhjName(n) === normalizeAhjName(name))) out.push(name);
     }
   } catch { /* an unreadable issuer is simply not looked up */ }

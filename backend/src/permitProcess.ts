@@ -41,6 +41,8 @@ import { hostAliasesOf } from "./portalCredentials";
 import { isApplicationPortalShapedUrl } from "./portalChannel";
 import { structureType } from "./codeReviewRules";
 import { classifyPrerequisites } from "./permitProcessPrerequisites";
+import { findAhjProcessProfile } from "./processProfiles";
+import { citedElectricalIssuer, isStateAuthorityRow, stateAuthorityRowFor } from "./ahjRowCitations";
 
 // ── Keys ────────────────────────────────────────────────────────────────────────────────
 /** "City of Jefferson, OR" / "city of  jefferson" → "city of jefferson". A trailing state code
@@ -882,6 +884,8 @@ function baseOfView<T extends IssuerProject>(project: T): T {
  *      permit's own answer, else the AHJ-wide one) when it clears the cited bar AND names another
  *      agency than the project AHJ (sameAgencyName — "City of Salem Permit Center" is Salem, a
  *      department suffix never re-keys a project) AND is not a known utility's name;
+ *   b2. the AHJ's own reference row, cited, saying the STATE issues the electrical permit (electrical /
+ *      MPU only): the state's authority row (referenceStateIssuerFor) — its own door, never the AHJ's;
  *   c. a cited STATE rule naming a state issuer for this AHJ (stateTradeIssuerFor: New Mexico CID,
  *      or MHD for a manufactured home, where the AHJ has no building department);
  *   d. the project AHJ.
@@ -915,6 +919,11 @@ export function trackIssuer(project: IssuerProject, track: string | null | undef
       override, ...(refused ? { refused } : {}),
     };
   }
+  // b2. THE AHJ'S OWN REFERENCE ROW, CITED, NAMES THE STATE as this track's issuer (electrical / MPU):
+  //     the state authority's own row (data), whose door is its own and starts unknown — the AHJ's
+  //     door is never copied onto it (referenceStateIssuerFor).
+  const ref = ahj ? referenceStateIssuerFor(base, key) : null;
+  if (ref) return { name: ref.name, source: "reference", sourceUrl: ref.sourceUrl, quote: ref.quote, override, ...(refused ? { refused } : {}) };
   const st = ahj ? stateTradeIssuerFor(base) : null;
   // Source "state_rule" whether the seed or the lookup's cited buildingProgram put this AHJ on the
   // state issuer: the ISSUER is the state rule's agency either way, and the fee path
@@ -922,6 +931,33 @@ export function trackIssuer(project: IssuerProject, track: string | null | undef
   // review). The citation travels in sourceUrl/quote — the lookup's page when the lookup decided.
   if (st) return { name: st.value, source: "state_rule", sourceUrl: st.sourceUrl, quote: st.quote, override, ...(refused ? { refused } : {}) };
   return { name: ahj, source: "project", override, ...(refused ? { refused } : {}) };
+}
+
+/** The name a track's issuer takes when the AHJ's page says the STATE issues it and no state
+ *  authority row is on file for that state: a name, never an address, so its door stays unknown. */
+export function unknownStateAuthorityName(state: string | null | undefined): string {
+  return `State electrical permit authority (${String(state ?? "").trim().toUpperCase() || "state"}) — not on file`;
+}
+
+/** LAYER b2 OF trackIssuer (worker-trackissuer): the AHJ's own reference row cites, on its page, that
+ *  the STATE issues the electrical permit (citations[field=electricalPermitIssuer], first word
+ *  "state"). The issuer is then the state's authority row for electrical permits (stateAuthorityFor,
+ *  data) — or, with none on file, unknownStateAuthorityName. Electrical and MPU tracks only (MPU
+ *  follows electrical); a state authority's own row never names itself. The citation is the AHJ's page. */
+export function referenceStateIssuerFor(project: IssuerProject, track: string | null | undefined): { name: string; sourceUrl: string; quote: string } | null {
+  const key = issuerTrackKey(track);
+  if (key !== "electrical" && key !== "mpu") return null;
+  const base = baseOfView(project);
+  if (!String(base.ahj ?? "").trim()) return null;
+  let row;
+  try { row = findAhjProcessProfile(base as unknown as ProjectRecord); } catch { row = null; }
+  if (!row || isStateAuthorityRow(row)) return null;
+  const cited = citedElectricalIssuer(row);
+  if (cited?.kind !== "state") return null;
+  const authority = stateAuthorityRowFor(base.state, "electrical");
+  const name = authority ? String(authority.ahj).trim() : unknownStateAuthorityName(base.state);
+  if (!name || sameAgencyName(name, String(base.ahj ?? ""))) return null;
+  return { name, sourceUrl: cited.citation.sourceUrl, quote: cited.citation.quote };
 }
 
 /**
@@ -948,7 +984,7 @@ export function projectForTrack<T extends IssuerProject>(project: T, track: stri
     ...base,
     ahj: issuer.name,
     ...(snap !== undefined ? { parserSnapshot: snap } : {}),
-    trackView: { track: key, projectAhj: ahj, source: issuer.source as "operator" | "lookup" | "state_rule" },
+    trackView: { track: key, projectAhj: ahj, source: issuer.source as "operator" | "lookup" | "reference" | "state_rule" },
   } as T;
 }
 
