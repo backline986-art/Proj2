@@ -1201,7 +1201,7 @@ app.put("/api/code-profiles/verify", (req, res) => {
     "Name the person verifying: a code profile is verified by a named person.");
   const saved = saveVerifiedCodeProfile(db, {
     key: "", confidence: "verified", updatedAt: "",
-    state: b.state, ahj: b.ahj,
+    state: b.state, ahj: b.ahj, ...(b.firePathwayPolicy ? { firePathwayPolicy: b.firePathwayPolicy } : {}),
     adoptedCodes: b.adoptedCodes, amendments: b.amendments,
     designCriteria: b.designCriteria, prescriptive: b.prescriptive,
     fireSetbacks: b.fireSetbacks.map((f) => ({ ...f })), citations: b.citations,

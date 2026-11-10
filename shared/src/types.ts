@@ -2599,12 +2599,59 @@ export interface StatedRoofPlanDimension {
 export interface RoofPlanRequiredDimension {
   kind: RoofPlanDimensionKind;
   inches: number;
-  /** "ahj": parsed from the jurisdiction's fireSetbacks; "model_code": the adopted IRC edition's default. */
+  /** "ahj": parsed from the jurisdiction's fireSetbacks, or its APPLIED alternative pathway policy (draft 08); "model_code": the adopted IRC edition's default. */
   basis: "ahj" | "model_code";
   /** The fireSetbacks row is human-verified (always false for a model-code default). */
   verified: boolean;
+  /** The number is the AHJ's APPLIED alternative pathway policy's (draft 08), not a fireSetbacks rule. */
+  fromPolicy?: boolean;
   /** Where the number came from, said for the operator. */
   source: string;
+}
+
+/**
+ * A JURISDICTION'S ALTERNATIVE ROOF-ACCESS (FIRE PATHWAY) POLICY (review-audit draft 08): where the AHJ
+ * relaxes the model code's R324.6 pathways for small arrays or low coverage. Typed per-jurisdiction
+ * DATA on its code profile, never code per city. It replaces the model-code numbers only when APPLIED:
+ * the row is person-verified and the policy carries its source page, or a citation with field
+ * "firePathwayPolicy" was read on the authority's official page (#683). A seeded policy is shown as a
+ * callout and the model code applies.
+ */
+export interface JurisdictionFirePathwayPolicy {
+  /** The policy's own name, as the AHJ titles it. */
+  name?: string;
+  /** The policy covers arrays up to this plan-view area, sq ft (absent: any size). */
+  arrayAreaMaxSqFt?: number;
+  /** Ridge setback the policy asks for, inches. */
+  ridgeSetbackIn?: number;
+  /** Pathway width the policy asks for, inches. */
+  pathwayWidthIn?: number;
+  /** At or below this roof coverage (percent of plan-view roof area) the policy needs no pathways. */
+  pathwaysExemptMaxCoveragePct?: number;
+  /** The page the policy was read on, and its own words. */
+  sourceUrl?: string;
+  quote?: string;
+}
+
+/** How much of the roof the array covers, as the package states it (fireAccess.readRoofCoverage). */
+export interface RoofCoverageReading {
+  /** Percent of the plan-view roof area. */
+  pct: number;
+  /** "stated": the plan prints the percentage; "areas": array area / roof area, both stated. */
+  basis: "stated" | "areas";
+  source: string;
+  excerpt: string;
+}
+
+/** The job facts and the jurisdiction policy the fire access requirement reads (draft 08). */
+export interface FireAccessFacts {
+  coverage: RoofCoverageReading | null;
+  /** Total array plan-view area the package states (or modules x module size), sq ft. */
+  arrayAreaSqFt: number | null;
+  /** The plan states the dwelling has an automatic sprinkler system (statement of fact, never a code note). */
+  sprinklered: { source: string; excerpt: string } | null;
+  /** The jurisdiction's alternative pathway policy, and whether it is applied (verified / official). */
+  policy: { policy: JurisdictionFirePathwayPolicy; applied: boolean; provenance: string } | null;
 }
 
 /** A design criterion a submittal package STATES (label-anchored), per source. */
@@ -2806,6 +2853,9 @@ export interface JurisdictionCodeProfile {
    *  value it compared against and whether a person verified THAT row. Absent on a single row:
    *  the row's own confidence applies. Never persisted. */
   fieldSources?: Record<string, JurisdictionFieldSource>;
+  /** The jurisdiction's alternative roof-access (fire pathway) policy (review-audit draft 08); absent =
+   *  the model code. Taken whole from one layer (the AHJ's, else the state's): fieldSources.firePathwayPolicy. */
+  firePathwayPolicy?: JurisdictionFirePathwayPolicy;
   /** State rows only: how the state adopts each code family (research or the reference data). */
   adoptionModel?: JurisdictionAdoptionModel;
   /** State rows only: announced editions not yet in effect. */
