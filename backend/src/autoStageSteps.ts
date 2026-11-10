@@ -159,6 +159,8 @@ async function runLocalSteps(db: AppDb, projectId: string, opts: StageStepOption
             withdrawn: reconciled.withdrawn.join(","),
             ...(reconciled.undecidedSpecPages.length
               ? { undecidedSpecPages: undecidedSpecSummary(reconciled.undecidedSpecPages, reconciled.undecidedSpecFiledAs) } : {}),
+            // Pages whose text is drawn as outlines (#696): read by nobody, a person reads them.
+            ...(reconciled.outlinedTextPages.length ? { outlinedTextPages: reconciled.outlinedTextPages.join(",") } : {}),
           });
         }
       } catch { gaps = []; /* a failed check leaves the existing split standing */ }
@@ -183,6 +185,9 @@ async function runLocalSteps(db: AppDb, projectId: string, opts: StageStepOption
           parts: (pkg.parts || []).length,
           missing: (pkg.missingSheetTypes || []).join(",") || "none",
           unclassifiedPages: (pkg.unclassifiedPages || []).join(",") || "none",
+          // Of those, the pages whose text is drawn as outlines (#696): "unread: text drawn as outlines;
+          // a person reads this page" — why a sheet the set has can still be "missing".
+          ...(pkg.outlinedTextPages?.length ? { outlinedTextPages: pkg.outlinedTextPages.join(",") } : {}),
           // Title-only EQUIPMENT SPECIFICATION cut-sheets the splitter could not tell apart (#66):
           // why module_spec / inverter_spec may be "missing" from a set that has cut-sheets.
           ...(pkg.undecidedSpecPages?.length ? { undecidedSpecPages: undecidedSpecSummary(pkg.undecidedSpecPages, pkg.undecidedSpecFiledAs ?? {}) } : {}),

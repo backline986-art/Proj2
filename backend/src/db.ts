@@ -3447,9 +3447,23 @@ const VERSIONED_MIGRATIONS: VersionedMigration[] = [
     },
   },
   {
-    // v75 (#701, Helm's numbering 2026-11-10): after #700's v73 and draft 10's v74. Renumber at merge
-    // if the queue changes; nothing depends on the number.
+    // v75: after the utility checks' v72, #700's v73 and #673 draft 10's v74 (offline staging
+    // 5d8973d0). Helm renumbers at merge if the queue changes — nothing here depends on the number.
     version: 75,
+    name: "project_documents_outlined_pages",
+    up: (db) => {
+      // PLAN PAGES WHOSE TEXT IS DRAWN AS OUTLINES (#696, outlinedTextPages.ts): the 1-based pages of
+      // a plan-set document that neither the text path nor vision reads, as a JSON array, written
+      // with the document's extracted text and by the splitter. '' = not checked yet (the reader
+      // starts the check and says nothing until it lands); '[]' = checked, none. QC and the submit
+      // gate read it synchronously to name the unread pages.
+      addColumnIfMissing(db, "project_documents", "outlined_pages_json", "TEXT NOT NULL DEFAULT ''");
+    },
+  },
+  {
+    // v76 (#701, Helm's numbering 2026-11-10): after #700's v73, draft 10's v74 and #696's v75.
+    // Renumber at merge if the queue changes; nothing depends on the number.
+    version: 76,
     name: "quickbooks_connection",
     up: (db) => {
       // QUICKBOOKS ONLINE (#701): ONE company per org (org_id is the key), connected by a named person.

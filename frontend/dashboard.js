@@ -4443,6 +4443,11 @@ async function buildDocumentSplit() {
       const pages = res.undecidedSpecPages.map((n) => (filedAs[n] ? `${n} (filed as ${filedAs[n]})` : String(n))).join(", ");
       rows.push(`<div class="record-data-row"><span class="muted">Spec pages undecided</span><strong style="color:var(--warning,#b45309)">p. ${esc(pages)}</strong></div>`);
     }
+    // Pages whose text is drawn as outlines (#696): no text layer and no picture, so neither the text
+    // nor a vision read can name them, and nothing on them is sent to a model. A person reads them.
+    if (res.outlinedTextPages && res.outlinedTextPages.length) {
+      rows.push(`<div class="record-data-row"><span class="muted">Pages unread: text drawn as outlines; a person reads them</span><strong style="color:var(--warning,#b45309)">p. ${esc(res.outlinedTextPages.join(", "))}</strong></div>`);
+    }
     if (resultsEl) resultsEl.innerHTML = rows.join("") || `<p class="muted">No documents produced.</p>`;
     if (statusEl) { statusEl.textContent = `Built ${(res.parts || []).length} split doc(s); ${(res.packagedDocTypes || []).length} packaged into the ZIP.`; statusEl.className = ""; }
   } catch (err) {
