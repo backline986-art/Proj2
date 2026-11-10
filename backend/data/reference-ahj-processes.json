@@ -5046,14 +5046,14 @@
         },
         {
           "field": "requiresElectricalPermitApplication",
-          "value": true,
+          "value": "true",
           "sourceUrl": "https://www.cityofboise.org/media/3698/solar_photovoltaic_pv_field_inspection_process_pdf-a.pdf",
           "quote": "Boise City Code requires a Building permit and an Electrical permit prior to commencing installation of Photovoltaic panels.",
           "fetchedAt": "2026-11-10T08:20:53Z"
         },
         {
           "field": "requiresBuildingPermitApplication",
-          "value": true,
+          "value": "true",
           "sourceUrl": "https://www.cityofboise.org/media/3698/solar_photovoltaic_pv_field_inspection_process_pdf-a.pdf",
           "quote": "Boise City Code requires a Building permit and an Electrical permit prior to commencing installation of Photovoltaic panels.",
           "fetchedAt": "2026-11-10T08:20:53Z"
@@ -5477,14 +5477,14 @@
         },
         {
           "field": "requiresSolarChecklist",
-          "value": true,
+          "value": "true",
           "sourceUrl": "https://www.cityofcaldwell.org/files/assets/city/v/1/building/documents/permit-apps/photovoltaic-checklist.pdf",
           "quote": "When applying for a Building permit for the installation of Residential Photovoltaic Systems, this checklist must be completed and accompany the required documents and building permit application.",
           "fetchedAt": "2026-11-10T08:24:23Z"
         },
         {
           "field": "requiresBuildingPermitApplication",
-          "value": true,
+          "value": "true",
           "sourceUrl": "https://www.cityofcaldwell.org/files/assets/city/v/1/building/documents/permit-apps/photovoltaic-checklist.pdf",
           "quote": "This submittal will require a review by the Caldwell Plans Examiner, Electrical Inspector, and Planning & Zoning Department, prior to the issuance of the building permit.",
           "fetchedAt": "2026-11-10T08:24:23Z"
@@ -5527,7 +5527,7 @@
         },
         {
           "field": "requiresBuildingPermitApplication",
-          "value": false,
+          "value": "false",
           "sourceUrl": "https://www.tfid.org/DocumentCenter/View/3510/Solar-Installation-Instructions-Updated-12-4-18",
           "quote": "building permits will be needed if changes to the roof are required",
           "fetchedAt": "2026-11-10T08:23:05Z"

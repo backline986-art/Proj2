@@ -20,7 +20,7 @@ import { REPO } from "./_isolate";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
-import type { AhjProcessProfile, ProjectRecord } from "../../shared/src/types";
+import type { AhjProcessCitation, AhjProcessProfile, ProjectRecord } from "../../shared/src/types";
 
 const { openDatabase } = await import("../src/db");
 const { findAhjProcessProfile } = await import("../src/processProfiles");
@@ -45,8 +45,7 @@ const run = async (label: string, fn: () => void | Promise<void>) => {
   }
 };
 
-interface Citation { field: string; value?: unknown; sourceUrl: string; quote: string; fetchedAt: string }
-type CitedProfile = AhjProcessProfile & { citations?: Citation[] };
+type CitedProfile = AhjProcessProfile & { citations?: AhjProcessCitation[] };
 const read = (name: string) => JSON.parse(fs.readFileSync(path.join(REPO, "backend", "data", name), "utf8"));
 const ahjFile = read("reference-ahj-processes.json") as { count: number; profiles: CitedProfile[] };
 const STATE = "ID";
@@ -65,6 +64,7 @@ await run("the cited rows ship whole; count stays true", () => {
     assert.match(p.reviewerNotes, /NOT verified/, `${p.ahj}: notes say not verified`);
     for (const c of p.citations!) {
       assert.ok(c.field, `${p.ahj}: citation names its field`);
+      if (c.value !== undefined) assert.equal(typeof c.value, "string", `${p.ahj}: a citation's value is a string (AhjProcessCitation)`);
       assert.match(c.sourceUrl, URL_RE, `${p.ahj}: https source`);
       assert.ok(c.quote.trim().length >= 8, `${p.ahj}: verbatim quote`);
       assert.match(c.fetchedAt, /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/, `${p.ahj}: fetchedAt`);
