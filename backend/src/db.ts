@@ -3264,6 +3264,25 @@ const VERSIONED_MIGRATIONS: VersionedMigration[] = [
       `);
     },
   },
+  {
+    // Next free number on this branch's base. #673 (and #688) were open with their own: whichever
+    // merges second renumbers above the first (migrationVersions.test.ts enforces 1..n, no gaps).
+    version: 68,
+    name: "submission_payments_gate_collected",
+    up: (db) => {
+      // WHAT THE PER-SUBMISSION GATE ACTUALLY TOOK (#699). The gate used to ask for the
+      // jurisdiction fee + our service fee before staging; it now asks for the service fee only,
+      // and the jurisdiction fee reaches the client on the invoice once its real figure is
+      // recorded (pay-then-rebill). The invoice must show a gate payment as money RECEIVED, not
+      // bill it again, so it has to know what that payment covered.
+      //
+      // Stamped by markSubmissionPaid: the service fee collected. NULL on every row paid before
+      // this column existed, deliberately not back-filled: those payments went through the old
+      // gate, which may also have taken a permit-fee ESTIMATE, and nothing on the row says which.
+      // The invoice treats NULL on a paid row as "ask a person before re-billing the fee".
+      addColumnIfMissing(db, "submission_payments", "gate_collected_usd", "REAL");
+    },
+  },
 ];
 
 /** v47 was edited in place while #218 was open (Helm's review at 0116f98a): a DB that ran an earlier

@@ -3755,7 +3755,7 @@ app.post("/api/projects/:id/prepare-submission", (req, res) => {
       if (!run) return;
       if (run.status === "awaiting_payment") {
         // A FEE STOP (#576): the payment sentence (amount, portal, pay there) — never MFA wording.
-        sseBroadcast({ type: "run_paused", projectId, message: run.errorMessage || "Payment needed on the portal. Pay there, then press Paid on the track.", data: { pauseReason: "fee_payment" } });
+        sseBroadcast({ type: "run_paused", projectId, message: run.errorMessage || "Payment needed on the portal. Pay there, then press We paid the portal on the track.", data: { pauseReason: "fee_payment" } });
       } else if (run.pauseReason === "mfa_captcha") {
         sseBroadcast({ type: "run_paused", projectId, message: "Portal requires attention — MFA or CAPTCHA detected. Complete it in the browser, then resume.", data: { pauseReason: run.pauseReason } });
       } else if (run.status === "failed") {

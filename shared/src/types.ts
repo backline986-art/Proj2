@@ -368,6 +368,12 @@ export interface SubmissionPaymentRecord {
   feeRecordedAt: string;
   quotedAt: string;
   paidAt: string | null;
+  /** WHAT THE PER-SUBMISSION GATE ACTUALLY COLLECTED from the client when this row was marked
+   *  paid (#699): the service fee only, since the gate stopped asking for the jurisdiction fee.
+   *  null = not collected through that gate (quoted, waived) or paid BEFORE it recorded this —
+   *  when the gate still asked for permit fee + service fee, so what that payment covered is a
+   *  question for a person, never something an invoice may assume. */
+  gateCollectedUsd: number | null;
   updatedAt: string;
 }
 
@@ -628,7 +634,14 @@ export interface SubmissionPaymentQuote {
   portalFeeRecords: PortalFeeRecordSummary | null;
   paymentMethod: FeePaymentMethod;
   serviceFeeUsd: number;
+  /** What this filing costs in all: the jurisdiction fee plus our service fee. A fact about the
+   *  submission, NOT what the client hands us at the gate — see gateAmountUsd. */
   totalUsd: number | null;
+  /** WHAT THE PER-SUBMISSION GATE COLLECTS (#699): our service fee only. The jurisdiction fee is
+   *  never taken up front (pay-then-rebill): it is paid on the portal and, only when we advanced
+   *  it ('keelix-pays'), reaches the client on the invoice once its real figure is recorded.
+   *  0 when this client is not gated (`required` false). */
+  gateAmountUsd: number;
   payment: SubmissionPaymentRecord | null;
   /** The jurisdiction's bill for this track, itemised — see FeeChargeBreakdown.
    *  Resolved for EVERY quote, like `paymentMethod` and `permitFeeSourceUrl`:

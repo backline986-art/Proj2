@@ -1128,8 +1128,8 @@ export function getSubmittalTracks(db: AppDb, project: ProjectRecord): Submittal
           since: feeAsk.readAt,
           approved: feeAsk.approved,
           sentence: feeAsk.approved
-            ? "Approved: pay the issuance fee on the portal, then press Paid with the permit number and the amount."
-            : "The agency asked for a fee: pay it on the portal, then press Paid with the record number and the amount.",
+            ? "Approved: pay the issuance fee on the portal, then press We paid the portal with the permit number and the amount."
+            : "The agency asked for a fee: pay it on the portal, then press We paid the portal with the record number and the amount.",
         }
       : null;
     const paid = db.query<Row>(

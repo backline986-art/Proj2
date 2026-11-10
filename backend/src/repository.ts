@@ -6785,7 +6785,7 @@ export async function recordPermitStatusCheck(
       : {
           statusLabel: FEE_REQUESTED_LABEL,
           issueFeeDue: true,
-          message: "The agency emailed a fee request. Pay it on the portal, then press Paid on the track with the record number and the amount (automation never pays fees).",
+          message: "The agency emailed a fee request. Pay it on the portal, then press We paid the portal on the track with the record number and the amount (automation never pays fees).",
         });
   }
   // A HISTORY OF CHANGES, NOT A LOG OF LOOKUPS.

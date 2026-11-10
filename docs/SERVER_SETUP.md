@@ -205,16 +205,17 @@ changes and no token is needed.
 
 Today (no code needed):
 1. Create a Stripe account → Payment Links (or Invoices) for your common
-   totals, or create one ad-hoc per quote (the Payment screen shows the
-   client total = real permit fees + your service fee).
-2. Send the client the link; when Stripe shows it paid, click **Mark paid**
+   totals, or create one ad-hoc per quote (the Payment screen shows
+   "Collect from client now" = your service fee only; the permit fee is paid
+   on the portal and invoiced afterwards, only when you advanced it).
+2. Send the client the link; when Stripe shows it paid, click **Client paid us**
    on the project's Payment panel and paste the Stripe payment/invoice id
    into the reference field — it lands in `submission_payments.payment_reference`
    and the staging gate unlocks. Waive covers comped jobs.
 
 When you want it automatic (small build, ~a day):
 - `npm i stripe`; env `STRIPE_SECRET_KEY` + `STRIPE_WEBHOOK_SECRET`.
-- On quote: create a Checkout Session/Payment Link for `totalUsd`, store its
+- On quote: create a Checkout Session/Payment Link for `gateAmountUsd`, store its
   id on the payment row, show the URL on the Payment panel.
 - Webhook `POST /api/public/stripe/webhook` (public prefix, signature-verified
   with the webhook secret): on `checkout.session.completed`, call

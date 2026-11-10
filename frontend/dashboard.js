@@ -2527,6 +2527,8 @@ function renderHandoffBanner() {
 // Quote = real permit fees (portal-calculated actual > learned per-AHJ history >
 // valuation estimate) + the client's service fee. Staging is blocked for
 // per-submission clients until each track's payment is marked paid or waived.
+// The gate COLLECTS the service fee only (#699, quote.gateAmountUsd): the permit fee is
+// paid on the portal and invoiced afterwards, and only when we advanced it.
 async function loadPaymentQuotes() {
   const id = state.selectedProjectId;
   const [permit, nem] = await Promise.all([
@@ -2564,17 +2566,19 @@ function renderPaymentQuoteCard(quote) {
         <tr><td style="padding:1px 14px 1px 0">Permit fees</td><td style="text-align:right"><strong>${quote.permitFeeIsFloor && quote.permitFeeUsd != null ? "at least " : ""}${money(quote.permitFeeUsd)}</strong></td>
             <td style="padding-left:10px" class="muted">${esc(FEE_SOURCE_LABELS[quote.permitFeeSource] || "")}</td></tr>
         <tr><td style="padding:1px 14px 1px 0">Our service fee</td><td style="text-align:right"><strong>${money(quote.serviceFeeUsd)}</strong></td><td></td></tr>
-        <tr style="border-top:1px solid var(--border)"><td style="padding:3px 14px 1px 0"><strong>Client total</strong></td><td style="text-align:right"><strong>${money(quote.totalUsd)}</strong></td><td></td></tr>
+        <tr class="muted"><td style="padding:1px 14px 1px 0">Filing cost, all fees</td><td style="text-align:right">${money(quote.totalUsd)}</td><td></td></tr>
+        <tr style="border-top:1px solid var(--border)"><td style="padding:3px 14px 1px 0"><strong>Collect from client now</strong></td><td style="text-align:right"><strong>${money(quote.gateAmountUsd)}</strong></td>
+            <td style="padding-left:10px" class="muted">service fee only — the permit fee is paid on the portal and invoiced after, only if we paid it</td></tr>
       </table>
       <p class="muted" style="margin:2px 0;font-size:11px">${esc(quote.permitFeeBasis || "")}</p>
       ${printedFormCheckHtml(quote.printedFormCheck)}
-      ${status === "paid" ? `<p style="margin:2px 0;font-size:12px">Paid ${p.paidAt ? new Date(p.paidAt).toLocaleString() : ""}${p.paymentReference ? ` — ref: ${esc(p.paymentReference)}` : ""}</p>` : ""}
+      ${status === "paid" ? `<p style="margin:2px 0;font-size:12px">Client paid us${p.gateCollectedUsd != null ? ` ${esc(money(p.gateCollectedUsd))}` : ""} ${p.paidAt ? esc(new Date(p.paidAt).toLocaleString()) : ""}${p.paymentReference ? ` — ref: ${esc(p.paymentReference)}` : ""}</p>` : ""}
       ${status !== "paid" ? `
         <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:6px">
           <input id="payFee-${quote.track}" type="number" min="0" step="0.01" placeholder="Actual portal fee $" style="width:150px;font-size:12px;padding:4px 8px" title="The real fee the portal calculated on its fee/review screen — replaces the estimate and teaches future quotes for this AHJ.">
           <button class="secondary" style="font-size:12px" data-pay-action="record-fee" data-pay-track="${quote.track}">Record real fee</button>
           <input id="payRef-${quote.track}" placeholder="Payment reference (invoice #, Stripe id…)" style="width:220px;font-size:12px;padding:4px 8px">
-          <button style="font-size:12px" data-pay-action="mark-paid" data-pay-track="${quote.track}">✓ Mark paid</button>
+          <button style="font-size:12px" data-pay-action="mark-paid" data-pay-track="${quote.track}" title="The client paid us the service fee above. Not the portal's fee: record that with We paid the portal on the track.">✓ Client paid us</button>
           <button class="secondary" style="font-size:12px" data-pay-action="waive" data-pay-track="${quote.track}" title="Skip the gate for this submission (comped / billed elsewhere).">Waive</button>
         </div>` : ""}
     </article>`;
@@ -2599,7 +2603,7 @@ function renderPaymentPanel() {
         <span>💳 Payment — per-submission billing</span>
         ${statusBadge(unpaid.length ? "payment required before staging" : "cleared")}
       </div>
-      ${unpaid.length ? `<p style="margin:0 0 8px;font-size:12px">This client pays per submission: collect the total below, then <strong>Mark paid</strong> to unlock <em>3 · Prepare Submittal</em>. Enter the portal's real fee when you see it on the fee/review screen — it replaces the estimate and is remembered for this AHJ. <span class="muted">The portal's own fee checkout is always completed by a human, never automated.</span></p>` : ""}
+      ${unpaid.length ? `<p style="margin:0 0 8px;font-size:12px">This client pays per submission: collect the service fee below, then <strong>Client paid us</strong> to unlock <em>3 · Prepare Submittal</em>. The permit fee is not collected here: it is paid on the portal and, when we pay it, invoiced afterwards at the real figure. Enter the portal's real fee when you see it on the fee/review screen — it replaces the estimate and is remembered for this AHJ. <span class="muted">The portal's own fee checkout is always completed by a human, never automated.</span></p>` : ""}
       ${visible.map(renderPaymentQuoteCard).join("")}
     </section>` : ""}`;
   panel.querySelectorAll("[data-pay-action]").forEach((btn) => {
@@ -2626,7 +2630,7 @@ async function handlePaymentAction(action, track, btn) {
     const res = await api(`/api/projects/${id}/payment/${path}`, { method: "POST", body: JSON.stringify(body) });
     state.paymentQuotes = { ...(state.paymentQuotes || {}), [res.quote.track]: res.quote };
     renderPaymentPanel();
-    if (action === "mark-paid") showMessage(`Payment recorded — ${res.quote.track} staging unlocked.`);
+    if (action === "mark-paid") showMessage(`Client payment recorded — ${res.quote.track} staging unlocked.`);
   } catch (err) {
     showMessage(`Payment update failed: ${err.message}`, "error");
     btn.disabled = false;
@@ -5340,7 +5344,7 @@ function trackPaymentHtml(t) {
     <p style="margin:0 0 2px">Login: ${p.loginUsername ? esc(p.loginUsername) : "no login on file for this portal"} · Who pays: ${esc(who)}</p>
     ${app ? `<p style="margin:0 0 2px"><a href="${esc(app)}" target="_blank" rel="noopener">Open the saved application</a></p>` : ""}
     ${p.screenshotUrl ? `<a href="${esc(p.screenshotUrl)}" target="_blank" rel="noopener" title="The fee page as the run saw it (secrets and card fields masked)"><img src="${esc(p.screenshotUrl)}" alt="The portal's fee page" class="review-shot" style="max-width:100%;border:1px solid var(--border);border-radius:var(--radius-sm)" /></a>` : ""}
-    <p class="muted" style="margin:2px 0 0">Pay on the portal, then press Paid below with the record number and the amount paid. Staging this track again is refused while it waits: it would open a second application.</p>
+    <p class="muted" style="margin:2px 0 0">Pay on the portal, then press We paid the portal below with the record number and the amount paid. Staging this track again is refused while it waits: it would open a second application.</p>
     ${trackPaidFormHtml(t)}
   </div>`;
 }
@@ -5355,7 +5359,7 @@ function trackPaidFormHtml(t) {
   return `<div class="track-paid-form" style="display:flex;flex-wrap:wrap;gap:6px;align-items:flex-end;margin:6px 0 2px" data-track-paid-form="${type}">
     <label class="track-field"><span>${esc(numberLabel)}</span><input data-track-paid-field="recordNumber" data-track="${type}" placeholder="as the portal shows it" /></label>
     <label class="track-field"><span>Amount paid ($)</span><input data-track-paid-field="amountPaidUsd" data-track="${type}" inputmode="decimal" placeholder="0.00" /></label>
-    <button type="button" class="primary" data-track-paid="${type}" title="Record that a person paid this fee on the portal. Automation never pays."><i data-lucide="badge-dollar-sign"></i><span>Paid</span></button>
+    <button type="button" class="primary" data-track-paid="${type}" title="Record that a person paid this fee on the portal. Automation never pays."><i data-lucide="badge-dollar-sign"></i><span>We paid the portal</span></button>
   </div>`;
 }
 
@@ -6002,7 +6006,7 @@ async function stageSubmittalTrack(type, btn, autoSubmit = false, extra = null, 
     }
     // A FEE STOP (#576): the payment sentence — amount, portal, pay there. Never MFA wording.
     if (job.result && job.result.status === "awaiting_payment") {
-      showMessage(job.result.message || `${humanize(type)}: payment needed on the portal. Pay there, then press Paid on the track.`, "warning");
+      showMessage(job.result.message || `${humanize(type)}: payment needed on the portal. Pay there, then press We paid the portal on the track.`, "warning");
       await loadSubmittalTracks();
       renderDetail();
       return;
@@ -6374,7 +6378,7 @@ async function markTrackPaid(type, btn) {
   };
   const body = { recordNumber: field("recordNumber"), amountPaidUsd: field("amountPaidUsd") };
   if (!body.recordNumber || !body.amountPaidUsd) {
-    showMessage("Enter the record number and the amount paid on the portal, then press Paid.", "warning");
+    showMessage("Enter the record number and the amount paid on the portal, then press We paid the portal.", "warning");
     return;
   }
   if (btn) btn.disabled = true;
@@ -9965,7 +9969,7 @@ async function prepareSubmission() {
       return;
     }
     if (job.result && job.result.status === "awaiting_payment") {
-      showMessage(job.result.message || "Payment needed on the portal. Pay there, then press Paid on the track.", "warning");
+      showMessage(job.result.message || "Payment needed on the portal. Pay there, then press We paid the portal on the track.", "warning");
       return;
     }
     if (job.result && job.result.status === "paused_for_human") {
