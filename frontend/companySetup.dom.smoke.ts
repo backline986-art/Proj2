@@ -74,8 +74,11 @@ async function main(): Promise<void> {
   let log = "";
   server.stdout?.on("data", (d) => { log += String(d); });
   server.stderr?.on("data", (d) => { log += String(d); });
-  const browser = await chromium.launch({ headless: true });
+  // Launched INSIDE the try: a browser that will not start must still kill the server, or the smoke
+  // hangs to its budget instead of exiting red.
+  let browser: Awaited<ReturnType<typeof chromium.launch>> | undefined;
   try {
+    browser = await chromium.launch({ headless: true });
     for (let i = 0; i < 90; i++) {
       try { if ((await fetch(`${BASE}/health`)).ok) break; } catch { /* not up */ }
       if (i === 89) throw new Error(`server never came up:\n${log.slice(-1500)}`);
@@ -151,7 +154,7 @@ async function main(): Promise<void> {
     check(pageErrors.length === 0, "no uncaught page errors", pageErrors.join(" | "));
     await ctx.close();
   } finally {
-    await browser.close();
+    await browser?.close().catch(() => undefined);
     server.kill();
     try { fs.rmSync(tmp, { recursive: true, force: true }); } catch { /* the OS cleans tmp */ }
   }

@@ -3615,11 +3615,9 @@ const VERSIONED_MIGRATIONS: VersionedMigration[] = [
     },
   },
   {
-    // v84 (client self-onboarding): the number the coordinator assigned. v81-v83 are held by other
-    // pieces (v83 = #640); until they land, migrationVersions.test reads this as a gap — red by design
-    // (its own header), the merge-order guard. Helm renumbers at merge if the queue changes —
-    // nothing here depends on the number.
-    version: 84,
+    // v81 (client self-onboarding): the Company setup link, the client's proposals and its
+    // certificate uploads. Client data, scoped by client_id (rule 6); nothing here is shared knowledge.
+    version: 81,
     name: "client_onboarding",
     up: (db) => {
       // A CLIENT FILLS IN ITS OWN COMPANY SETUP (clientOnboarding.ts). Three tables, all CLIENT DATA
