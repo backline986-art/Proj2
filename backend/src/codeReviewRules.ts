@@ -5,6 +5,8 @@ import { FIRE_PATHWAY_PATTERNS, packageShowsSld } from "./projectEvidence";
 import { evaluateElectricalSizingFindings } from "./electricalSizing";
 import { evaluateWireTableFindings } from "./wireTableArithmetic";
 import { evaluateAmendmentFindings } from "./amendmentChecks";
+import { evaluateEssFindings } from "./essReview";
+import { batteryStatus } from "../../shared/src/batteryControls";
 import { evaluatePriorCorrectionFindings } from "./ahjReviewRules";
 import { pathWordingScope, resolvePermitPath, usStateCode } from "./permitPath";
 import { classifyRoofCovering, statedRoofDeadLoads, tileAttachmentFromText, tileAttachmentMethodOf, TILE_MIN_ROOF_DEAD_LOAD_PSF } from "./roofCovering";
@@ -2076,34 +2078,27 @@ export function evaluateDesignCodeFindings(
     { label: "batteryQty", text: str(project, "batteryQty") },
     { label: "design text", text: designText(project, ["splitPagesText", "utilityDownloadChecklistText", "packetReadinessText"]) },
   ];
-  const batteryText = batterySources.map((s) => s.text).join("\n");
-  // The suppression list held a bare /fire/i — and since the fire-pathway work every plan set
-  // reliably carries "FIRE ACCESS PATHWAY", so that fix would itself have switched off every
-  // battery review. It also held an unbounded /ESS/i, which matches "addrESS" and "procESS".
-  // Word-boundary the acronym, and take fire SEPARATION/rating rather than the bare word.
-  // The acronym itself is a TRIGGER only (#245): it also sat in the suppression list, so an
-  // equipment-schedule line reading "ESS" both raised this review and cleared it. Suppression
-  // takes real detail evidence — a 706/R328/1207/NFPA 855 citation, clearances, fire separation.
+  // History: the keyword check this replaced was cleared by a bare /fire/i (every set carries "FIRE
+  // ACCESS PATHWAY"), by an unbounded /ESS/i ("addrESS"), and by the acronym that raised it (#245).
+  // The acronym stays a TRIGGER only; nothing clears the review but the facts themselves.
   // A NEGATED mention is not storage scope (#257): "ESS: N/A", "NO ESS PROPOSED",
   // "BATTERY / ESS: NONE" — affirmedIn's negation read, plus a run of storage words before the
   // denial ("BATTERY / ESS: NONE", "NO BATTERY / ESS").
-  if (affirmedIn(batterySources, ESS_TRIGGER_PATTERNS, essMentionDenied)
-    && !hasAny(batteryText, [
-      /clearance/i, /working\s*space/i,
-      /\b706\b/i, /R\s*328/i, /\b1207\b/i, /NFPA\s*855/i,
-      /fire\s*(?:separation|barrier|rating)|fire.?rated/i,
-    ])) {
-    out.push(finding({
-      id: "city.ess.details-missing",
-      severity: "warning",
-      category: "electrical",
-      title: "Battery/ESS detail not reviewable",
-      message: "Battery/ESS scope appears present but location, clearance, disconnect, and fire-code details are not obvious.",
-      cityFeedback: "Provide ESS equipment schedule, location plan, working clearance, ventilation/listing basis, disconnect/emergency shutdown details, labels, and local fire-code notes.",
-      designTeamAction: "Add ESS detail sheets and verify local fire/AHJ requirements.",
-      evidenceNeeded: ["ESS model/quantity", "ESS location plan", "Clearance and working space notes", "Disconnect/shutdown/label callouts"],
-      codeReferences: [essRef],
-    }));
+  //
+  // A JOB WITH STORAGE GETS THE ESS REVIEW (review-audit draft 05, essReview.ts): the facts an AHJ
+  // checks — listing, kWh per unit and by location, location, spacing, distance to openings,
+  // protection, alarm, the disconnecting means — read and compared with the jurisdiction's rules
+  // over the model-code baseline. Storage = the one battery predicate (batteryStatus, #673's too) or
+  // an affirmed storage mention on the sheets. Citation words alone no longer clear the review: a
+  // "706" or "R328" note is not the facts it asks for. A job with neither (PV-only) gets nothing
+  // here, exactly as before (essReviewPvOnlyGolden pins it).
+  const storagePresent = batteryStatus(project.parserSnapshot as Record<string, unknown> | undefined) === "yes"
+    || !!affirmedIn(batterySources, ESS_TRIGGER_PATTERNS, essMentionDenied);
+  if (storagePresent) {
+    out.push(...evaluateEssFindings(project, ctx, documentTexts).map((f) => (f.id === "city.ess.details-missing"
+      // The generic ESS reference the keyword check cited stays, under the adopted edition.
+      ? { ...f, codeReferences: [...f.codeReferences, essRef] }
+      : f)));
   }
 
   return out;

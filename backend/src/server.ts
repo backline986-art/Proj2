@@ -1062,6 +1062,7 @@ app.put("/api/code-profiles/verify", (req, res) => {
     adoptedCodes: b.adoptedCodes, amendments: b.amendments,
     designCriteria: b.designCriteria, prescriptive: b.prescriptive,
     fireSetbacks: b.fireSetbacks.map((f) => ({ ...f })), citations: b.citations,
+    ...(b.essRules ? { essRules: b.essRules } : {}),
   }, verifiedBy);
   res.json({ profile: saved });
 });
