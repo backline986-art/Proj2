@@ -301,7 +301,7 @@
   <script src="/vendor/tesseract-5.1.1.min.js"></script>
   <!-- The review-list rules (meter cross-check, notes, resolution, scope callout, locates)
        live in their own DOM-free file so the backend unit test loads the SAME code. -->
-  <script src="parser-review.js?v=12"></script>
+  <script src="parser-review.js?v=13"></script>
 </head>
 
 <body>
@@ -891,6 +891,7 @@ const setVal = (id, v) => { const el=$(id); if(el) el.value = v == null ? '' : S
 const getVal = id => { const el=$(id); return el ? el.value : ''; };
 const uniq = arr => [...new Set((arr || []).filter(Boolean).map(clean).filter(Boolean))];
 
+// parser-review.js keeps a copy for pdfPageText; backend/test/planTextOnce.test.ts pins the two equal.
 function normalizeText(raw=''){
   return String(raw || '')
     .replace(/\u2013|\u2014|\u2212/g,'-')
@@ -1011,39 +1012,6 @@ async function fileToDataURL(file){
   });
 }
 
-function pdfItemsToLayoutText(items){
-  const mapped = (items || [])
-    .map(item => {
-      const tx = item.transform || [1,0,0,1,0,0];
-      return {
-        str: String(item.str || '').trim(),
-        x: Number(tx[4] || 0),
-        y: Number(tx[5] || 0)
-      };
-    })
-    .filter(item => item.str);
-
-  if (!mapped.length) return '';
-
-  // PDF text item order is not always visual order. Group by Y position and sort X left to right.
-  mapped.sort((a,b) => {
-    if (Math.abs(b.y - a.y) > 3) return b.y - a.y;
-    return a.x - b.x;
-  });
-
-  const lines = [];
-  for (const item of mapped){
-    const last = lines[lines.length - 1];
-    if (!last || Math.abs(last.y - item.y) > 3){
-      lines.push({y:item.y, items:[item]});
-    } else {
-      last.items.push(item);
-    }
-  }
-
-  return lines.map(line => line.items.sort((a,b)=>a.x-b.x).map(i=>i.str).join(' ')).join('\n');
-}
-
 async function extractPdfText(file, maxPages=40){
   const buf = await fileToArrayBuffer(file);
   const loadingTask = pdfjsLib.getDocument({data:buf});
@@ -1054,10 +1022,9 @@ async function extractPdfText(file, maxPages=40){
   for (let p=1; p<=total; p++){
     const page = await pdf.getPage(p);
     const content = await page.getTextContent();
-    const linear = content.items.map(item => item.str || '').join(' ');
-    const layout = pdfItemsToLayoutText(content.items);
-    const combined = normalizeText(`${layout}\n\n${linear}`);
-    pages.push({page:p, text:combined});
+    // The layout copy AND the raw item order (parser-review.js pdfPageText): the page's own readers
+    // keep both. What is POSTED to the smart read is one copy per page (runLlmAssist, #697).
+    pages.push({page:p, text:ParserReview.pdfPageText(content.items)});
   }
 
   return {
@@ -4216,11 +4183,19 @@ async function runLlmAssist(){
     try {
       // A scan already read by vision sends no (empty) plan text to the text pass.
       const textPlan = scanRead ? '' : planText;
-      const t = await postJson('/api/parser/llm-extract', { planText: textPlan, utilityBillText, meterText, structuralLetterText, defaultState: getVal('state') || undefined, ...(planImageRead && textPlan.trim() ? { planImageRead } : {}) });
+      // EACH PAGE ONCE (#697). A PDF page's text here carries a layout copy AND the raw item order
+      // of the same words; posting both halved what fits in the backend's 80k bound and dropped the
+      // middle sheets (the three-line diagram, the structural notes). The model gets the layout copy.
+      const once = ParserReview.textOncePerPage;
+      const t = await postJson('/api/parser/llm-extract', { planText: once(textPlan), utilityBillText: once(utilityBillText), meterText: once(meterText), structuralLetterText: once(structuralLetterText), defaultState: getVal('state') || undefined, ...(planImageRead && textPlan.trim() ? { planImageRead } : {}) });
       if (t.provider === 'stub'){ authOff = true; }
       else {
         const docsGiven = [textPlan.trim() ? 'plan_set' : '', utilityBillText.trim() ? 'utility_bill' : '', meterText.trim() ? 'meter_photo' : '', structuralLetterText.trim() ? 'structural_letter' : ''].filter(Boolean);
         applyExtraction(t, applied, { vision: false, docsGiven });
+        // Over the backend's bound whole pages are dropped from the middle of the set; say which.
+        if (Array.isArray(t.planTextPagesNotRead) && t.planTextPagesNotRead.length){
+          state.reviewFlags.push(`Plan set too long for one smart read: page(s) ${t.planTextPagesNotRead.join(', ')} were not read. Check those sheets by hand.`);
+        }
         if (t.planReadMode === 'hybrid'){
           state.planReadRoles = Array.isArray(t.visionPageRoles) ? t.visionPageRoles : [];
           state.reviewFlags.push(`Image-only pages in the plan set: read by VISION from pages ${(t.visionPages || []).join(', ')} and merged under the text read — ${(t.visionFields || []).length ? `fields from vision: ${(t.visionFields || []).join(', ')}` : 'no field came from vision that the text had not answered'}. Verify each against the sheet.`);

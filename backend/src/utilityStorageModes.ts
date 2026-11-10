@@ -20,7 +20,7 @@
 //
 // nemStorageExemption() is the ONE answer to "does this job's battery need no utility application?".
 // QC (nemTrackDrop.ts) acts on it ONLY when the record is a person's (tier "person", a named verifier
-// and a date): it stamps the drop on the job (projects.nem_track_exemption_json, v72) and
+// and a date): it stamps the drop on the job (projects.nem_track_exemption_json, v73) and
 // requiredTracks() reads the stamp through nemTrackDropFor() below, so done-ness, nextStep, Stage,
 // autopilot and the tracks screen all lose the track together, with the reason. A record on any
 // other tier (a seeded import, an official-source read: draft 10, rule 3 — the official tier never

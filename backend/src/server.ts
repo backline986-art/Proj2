@@ -1,5 +1,5 @@
 import "dotenv/config";
-import { validate, portalCredentialCreateSchema, portalCredentialUpdateSchema, autoLearnSchema, codeProfileResearchSchema, codeProfileVerifySchema, permitProcessVerifySchema, reviewSubjectSchema, utilityFilingVerifySchema, jobScopeSchema, utilityStorageModesSchema, nemTrackKeepSchema } from "./validation";
+import { validate, portalCredentialCreateSchema, portalCredentialUpdateSchema, autoLearnSchema, codeProfileResearchSchema, codeProfileVerifySchema, permitProcessVerifySchema, reviewSubjectSchema, utilityFilingVerifySchema, jobScopeSchema, utilityStorageModesSchema, utilityApplicationRequirementsSchema, nemTrackKeepSchema } from "./validation";
 import crypto from "node:crypto";
 import { spawn } from "node:child_process";
 import express, { type NextFunction, type Request, type Response } from "express";
@@ -178,6 +178,7 @@ import { runQcForProject } from "./qc";
 import { personJobScope, setPersonJobScope } from "./jobScope";
 import { clearUtilityStorageModes, recordUtilityStorageModes } from "./utilityStorageModes";
 import { projectsDroppedFor, setNemTrackKept } from "./nemTrackDrop";
+import { clearUtilityApplicationRequirements, recordUtilityApplicationRequirements } from "./utilityRequirements";
 import { stagedReviewScreenshotFile } from "./stagedReviews";
 import { submissionConfirmationFile } from "./submissionConfirmation";
 import { reviewScreenshotFile } from "./reviewScreenshot";
@@ -2536,6 +2537,38 @@ app.put("/api/projects/:id/utility-track/keep", (req, res) => {
   addAuditLog(db, projectId, "human", decidedBy, b.keep ? "utility_track.kept" : "utility_track.released", {});
   runQcForProject(db, projectId);
   res.json(getProjectDetail(db, projectId));
+});
+
+// WHAT THIS PROJECT'S UTILITY'S OWN APPLICATION ASKS FOR (review-audit draft 03; utilityRequirements.ts).
+// Same tenancy and keying as the storage-mode routes above: shared knowledge on the utility's filing row,
+// keyed by the project's own state + utility. A NAMED PERSON records each item with the page and its words
+// (rule 3: lands 'verified'; a verified item may block when the job lacks it); DELETE withdraws the
+// person's items (the shipped seed and any official reads stand). QC re-runs so the gate reads it.
+app.put("/api/projects/:id/utility-filing/application-requirements", (req, res) => {
+  const projectId = String(req.params.id);
+  const { project } = getProjectDetail(db, projectId);
+  const b = validate(utilityApplicationRequirementsSchema, req.body);
+  const verifiedBy = namedPersonDecider(req, "decidedBy",
+    "Sign in to record a utility's application requirements.",
+    "Name the person recording them: a utility's application requirements are recorded by a named person.");
+  const r = recordUtilityApplicationRequirements(db, { state: project.state, utility: project.utility }, { requirements: b.requirements, verifiedBy });
+  if (!r.saved) throw new HttpError(r.reason.startsWith("No filing record") ? 409 : 400, r.reason);
+  addAuditLog(db, projectId, "human", verifiedBy, "utility_filing.application_requirements_recorded", {
+    utility: project.utility, state: project.state, keys: b.requirements.map((x) => x.key), sources: b.requirements.map((x) => x.sourceUrl),
+  });
+  runQcForProject(db, projectId);
+  res.json({ requirements: r.requirements });
+});
+app.delete("/api/projects/:id/utility-filing/application-requirements", (req, res) => {
+  const projectId = String(req.params.id);
+  const { project } = getProjectDetail(db, projectId);
+  const verifiedBy = namedPersonDecider(req, "decidedBy",
+    "Sign in to withdraw a utility's application requirements.",
+    "Name the person withdrawing them.");
+  clearUtilityApplicationRequirements(db, { state: project.state, utility: project.utility });
+  addAuditLog(db, projectId, "human", verifiedBy, "utility_filing.application_requirements_withdrawn", { utility: project.utility, state: project.state });
+  runQcForProject(db, projectId);
+  res.json({ requirements: null });
 });
 
 // WHAT THE JOB INSTALLS, SET BY A PERSON (#673; jobScope.ts). Under /api/projects/:id, so it

@@ -3339,9 +3339,24 @@ const VERSIONED_MIGRATIONS: VersionedMigration[] = [
     },
   },
   {
-    // v72: the next free version on the offline staging base (v71 = run approvals). #700 had v72
-    // pencilled in; whichever of the two lands second takes the next free number.
+    // v72: the next free number on the offline staging base (ae6eaca3, up to v71: #699's v70, approval
+    // draft 01's v71). Renumber at merge if the queue changes — nothing depends on the number.
     version: 72,
+    name: "utility_application_requirements",
+    up: (db) => {
+      // WHAT THE UTILITY'S OWN APPLICATION ASKS FOR (review-audit draft 03, backend/src/utilityRequirements.ts):
+      // { requirements: [{ key, whenMissing, tier, sourceName, sourceUrl, quote, fetchedAt, verifiedBy?, verifiedAt? }] }
+      // on the utility's filing row — official reads and a NAMED PERSON's items (the shipped seed lives in
+      // backend/data/reference-utility-application-requirements.json). Its own column, so a lookup's write
+      // (which replaces payload_json) never touches it (rule 3), and beside #673's storage_modes_json,
+      // which it never reads or writes.
+      addColumnIfMissing(db, "utility_filing_lookups", "application_requirements_json", "TEXT NOT NULL DEFAULT ''");
+    },
+  },
+  {
+    // v73: the next free version on the offline staging base (7d706055: v72 = utility application
+    // requirements). #700/#701 had v72/v73 pencilled in; whichever lands later takes the next free number.
+    version: 73,
     name: "nem_track_storage_exemption",
     up: (db) => {
       // THE UTILITY TRACK A PERSON'S RECORD TOOK OFF THIS JOB (draft 10, utilityStorageModes.ts). QC writes

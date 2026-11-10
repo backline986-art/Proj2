@@ -988,7 +988,7 @@ export interface ProjectRecord {
    *  — and mapped here by mapProject / normalizeProject. Absent when none is set. Read ONLY through
    *  permitProcess.trackIssuer; MPU follows electrical unless its own is set. */
   trackIssuers?: TrackIssuerOverrides;
-  /** THE UTILITY TRACK A PERSON'S RECORD TOOK OFF THIS JOB (draft 10, migration v72). Written only by
+  /** THE UTILITY TRACK A PERSON'S RECORD TOOK OFF THIS JOB (draft 10, migration v73). Written only by
    *  QC from the utility's PERSON-verified storage record (utilityStorageModes.nemStorageExemption),
    *  read only through submittalTracks.nemTrackDropFor — never set from a request body. Absent when
    *  nothing is dropped. */
@@ -1238,6 +1238,52 @@ export const JOB_SCOPES: readonly JobScope[] = ["pv", "pv+storage", "storage-add
 /** The battery's operating mode as QC and the utility's storage record read it. */
 export type StorageOperatingMode = "export" | "non-export" | "backup-only";
 export const STORAGE_OPERATING_MODES: readonly StorageOperatingMode[] = ["export", "non-export", "backup-only"];
+
+/**
+ * WHAT A UTILITY'S OWN APPLICATION ASKS FOR (review-audit draft 03; backend/src/utilityRequirements.ts).
+ * One typed item per thing the utility's interconnection application requires; the reviewer gate checks
+ * each against the project's evidence. Universal: the keys are kinds of evidence, never a utility.
+ */
+export type UtilityRequirementKey =
+  | "account_verification"
+  | "meter_photo"
+  | "inverter_settings"
+  | "inverter_listing_ul1741sb"
+  | "one_line"
+  | "site_plan"
+  | "ac_disconnect"
+  | "storage_mode_declaration"
+  | "owner_signature";
+export const UTILITY_REQUIREMENT_KEYS: readonly UtilityRequirementKey[] = [
+  "account_verification", "meter_photo", "inverter_settings", "inverter_listing_ul1741sb", "one_line",
+  "site_plan", "ac_disconnect", "storage_mode_declaration", "owner_signature",
+];
+/** seeded (shipped reference / a lookup's proposal) < official (#683: the utility's own official page,
+ *  quote confirmed in the bytes read) < verified (a named person). */
+export type UtilityRequirementTier = "seeded" | "official" | "verified";
+export interface UtilityApplicationRequirement {
+  key: UtilityRequirementKey;
+  /** What a missing item is at most: "blocker" only counts when the item may block (a verbatim quote
+   *  from a named source page that names the item, or the official / verified tier); "warning" never blocks. */
+  whenMissing: "blocker" | "warning";
+  tier: UtilityRequirementTier;
+  sourceName: string;
+  sourceUrl: string;
+  /** The page's own words. Empty = uncited: the item warns, never blocks (Helm's #637 bar). */
+  quote: string;
+  fetchedAt?: string;
+  /** A finding id kept from before this data existed (the two first seeded utilities), so the gate's
+   *  history, dedupe and tests keep reading the same id. Absent = reviewer.utility.<key>. */
+  findingId?: string;
+  verifiedBy?: string;
+  verifiedAt?: string;
+}
+/** The requirement list the reviewer reads for one job's utility (utilityRequirements.resolveUtilityRequirements). */
+export interface UtilityRequirementList {
+  /** The utility as the findings name it ("Rocky Mountain Power", "PGE"). */
+  displayName: string;
+  requirements: UtilityApplicationRequirement[];
+}
 
 /** Why a job's utility (NEM) track was dropped: the person-verified utility record QC read it from. */
 export interface NemTrackDrop {
@@ -3952,6 +3998,9 @@ export interface ParserLlmExtraction {
   visionPageRoles?: Array<{ page: number; kind: PlanSheetKind; sheet?: string; title?: string; rotate?: number }>;
   /** Pages that were candidates but NOT read, and why (cap, byte budget, render failure). */
   visionSkipped?: Array<{ page: number; reason: string }>;
+  /** Plan-set pages whose TEXT was left out of the text read because the plan text was over the
+   *  prompt's character bound (whole pages dropped from the middle, #697). Absent when all fit. */
+  planTextPagesNotRead?: number[];
 }
 
 /** What a plan-set page is, as the page-index read names it (scannedPlanSet.ts chooses the
