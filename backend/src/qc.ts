@@ -335,6 +335,25 @@ export interface QcRunOptions {
   holdStatusOnNewBillOnlyFails?: boolean;
 }
 
+// QC'S BACKGROUND TRIGGERS, COUNTED. The research trigger at the end of runQcForProject is
+// fire-and-forget on purpose (research must never slow or break QC), but its first step reads the
+// process's switches (PERMIT_PROCESS_LOOKUP, the model key) only after an `await import()`, which can
+// take tens of milliseconds under load. A caller that changes those switches right after a QC run (a
+// test flipping a lookup on for its next part) then raced a trigger still in flight: the late
+// trigger read the NEW switches and queued work for the OLD run (qcRejudgedOnLookup check 4 under
+// --concurrency 4). Each trigger is held here until it settles, so a caller can wait on the real
+// condition instead of a sleep. Nothing in QC waits on it; production behaviour is unchanged.
+const qcBackgroundTriggers = new Set<Promise<unknown>>();
+function trackQcBackgroundTrigger(p: Promise<unknown>): void {
+  qcBackgroundTriggers.add(p);
+  void p.finally(() => qcBackgroundTriggers.delete(p));
+}
+/** Resolves once every QC background trigger started so far (and any started while waiting) has
+ *  settled. The triggers swallow their own errors, so this never rejects. */
+export async function qcBackgroundTriggersSettled(): Promise<void> {
+  while (qcBackgroundTriggers.size) await Promise.allSettled([...qcBackgroundTriggers]);
+}
+
 export function runQcForProject(db: AppDb, projectId: string, options: QcRunOptions = {}): QcRunResult {
   const project = db.get<ProjectRow>("SELECT id, parser_json, ahj, city, state, utility, system_size_dc_kw, client_id FROM projects WHERE id = ?", [projectId]);
   if (!project) throw new Error("Project not found.");
@@ -889,7 +908,7 @@ export function runQcForProject(db: AppDb, projectId: string, options: QcRunOpti
     // it is pending on the firing run and answered on the QC the confirm / edit triggers (humanVerify,
     // updateProject), which is the run that queues the lookup.
     const ahjInQuestion = ahjNearMissPending(db, projectId);
-    void (async () => {
+    trackQcBackgroundTrigger((async () => {
       const { ensurePermitProcessLookedUp } = await import("./permitProcessLookup");
       const queued = ahjInQuestion ? false : await ensurePermitProcessLookedUp(db, projectLike as never);
       const tracks = requiredTracks(projectLike);
@@ -905,7 +924,7 @@ export function runQcForProject(db: AppDb, projectId: string, options: QcRunOpti
         const { ensureParcelJurisdictionChecked } = await import("./parcelJurisdiction");
         await ensureParcelJurisdictionChecked(db, projectId);
       }
-    })().catch(() => null);
+    })().catch(() => null));
   } catch (err) {
     logger.warn("qc", "fee-research trigger failed", { projectId, err: err instanceof Error ? err.message : String(err) });
   }

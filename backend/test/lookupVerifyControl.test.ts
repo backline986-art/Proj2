@@ -27,6 +27,7 @@ import vm from "node:vm";
 import assert from "node:assert/strict";
 import { spawn, type ChildProcess } from "node:child_process";
 import { REPO } from "./_isolate";
+import { captureOutput, waitForServer } from "./_serverBoot";
 import type { PermitProcessLookup } from "../../shared/src/types";
 import type { UtilityFilingLookup } from "../src/utilityFilingLookup";
 
@@ -297,19 +298,21 @@ async function boot(port: number): Promise<ChildProcess> {
   const server = spawn(process.execPath, [path.join(REPO, "node_modules/tsx/dist/cli.mjs"), path.join(REPO, "backend/src/server.ts")], {
     env: env as NodeJS.ProcessEnv, cwd: REPO, stdio: ["ignore", "pipe", "pipe"], detached: true,
   });
-  let log = "";
-  server.stdout?.on("data", (d) => { log += String(d); });
-  server.stderr?.on("data", (d) => { log += String(d); });
-  for (let i = 0; i < 90; i++) {
-    try { if ((await fetch(`http://127.0.0.1:${port}/health`)).ok) return server; } catch { /* not up yet */ }
-    await new Promise((r) => setTimeout(r, 1000));
+  // On the server's real state, not a count of tries (see _serverBoot.ts): an exit or a fetch-blocked
+  // port fails at once with the child's output, and the boot time is printed.
+  const output = captureOutput(server);
+  try {
+    const { bootMs } = await waitForServer(server, `http://127.0.0.1:${port}/health`, { output });
+    console.log(`  (server answered /health after ${bootMs} ms)`);
+    return server;
+  } catch (e) {
+    stop(server);
+    throw e;
   }
-  stop(server);
-  throw new Error(`server never came up. log tail:\n${log.slice(-2000)}`);
 }
 
 const projectId = await fixture();
-const PORT = 6695 + Math.floor(Math.random() * 15); // its own band
+const PORT = 6698 + Math.floor(Math.random() * 15); // its own band (6698-6712: 6697 is a fetch-blocked port, see _serverBoot.ts)
 const BASE = `http://127.0.0.1:${PORT}`;
 const server = await boot(PORT);
 const call = async (method: string, url: string, body?: unknown) => {

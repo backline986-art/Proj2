@@ -634,6 +634,15 @@ async function visibleMatches(page: Page, sel: RecipeSelector, max: number): Pro
  *  failed, because `{ label: "Username" }` is tried before the id/name selectors and matched
  *  something that is not a field. The reliable candidate was four entries further down the
  *  list and never got its turn. */
+// A READ OF AN ELEMENT WE JUST SAW IS BOUNDED. locator.evaluate re-resolves its selector and,
+// when the element is gone, WAITS for one to appear — up to Playwright's default 30 s. A login
+// that navigated between "a password box is visible" and this read (the submit's redirect landing
+// mid-poll) left the read waiting on the signed-in page, where no password box will ever appear:
+// the poll's whole 15 s window went by inside one call, and a GOOD login was reported as
+// still_on_login, "the stored username/password was likely rejected" (idpChallenge DOM smoke
+// under load, CI stability round 2026-11-10). The element was visible a moment ago, so a read of it
+// is immediate when it is still there; when it is not, it is not a box anything can be typed into.
+const ELEMENT_READ_TIMEOUT_MS = 2000;
 async function isFillable(loc: Locator): Promise<boolean> {
   try {
     return await loc.evaluate((el: Element) => {
@@ -649,7 +658,7 @@ async function isFillable(loc: Locator): Promise<boolean> {
         return !["checkbox", "radio", "button", "submit", "reset", "file", "image", "hidden"].includes(t);
       }
       return (el as HTMLElement).isContentEditable === true;
-    });
+    }, undefined, { timeout: ELEMENT_READ_TIMEOUT_MS });
   } catch { return false; }
 }
 
