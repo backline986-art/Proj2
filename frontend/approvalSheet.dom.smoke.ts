@@ -11,6 +11,14 @@
 //      dialog closes each time and a second opening still answers (no stale listener decides it).
 //   E  esc() everything: a hostile value from the server is text, never an element.
 //   F  no sheet (an older server / an error): the native confirm decides, as before.
+//   K  the acknowledgement ticks (review-audit draft 01): Approve stays disabled, and a click on it does
+//      nothing, until every data-approval-ack box is ticked; then it answers true and hands back the
+//      plan set and each ticked item's id and content hash. A sheet with nothing to tick hands back none.
+//   C  the check records (review-audit draft 07): grouped, collapsed, escaped, nothing to tick.
+//
+// The bundle cuts EVERY helper approvalSheetHtml calls (approvalOpenItemsHtml, CHECK_CATEGORY_LABEL,
+// checkRecordsHtml): a missing one throws inside the modal and the smoke times out waiting for it,
+// which is how this smoke went red from approval draft 01 (226d7ccd) until this fix.
 //
 // Discovered from disk by scripts/run-dom-smokes.ts: `npm run portal:test:dom`.
 // Alone: `npx tsx frontend/approvalSheet.dom.smoke.ts` (APPROVAL_SHEET_SCREENSHOT=<file.png> saves one)
@@ -61,6 +69,9 @@ const bundle = [
   cut("function", "esc"),
   cut("function", "humanize"),
   cut("const", "APPROVE_AUTO_SUBMIT_LEDE"),
+  cut("function", "approvalOpenItemsHtml"),
+  cut("const", "CHECK_CATEGORY_LABEL"),
+  cut("function", "checkRecordsHtml"),
   cut("function", "approvalSheetHtml"),
   cut("function", "confirmApprovalSheet"),
   "globalThis.__setSheet = (s) => { __sheet = s; }; globalThis.__confirms = () => __confirms;",
@@ -101,11 +112,31 @@ await page.evaluate((src: string) => {
 
 /** Open the sheet; `act` then answers it; returns what confirmApprovalSheet resolved to. */
 const open = (sheet: unknown) => page.evaluate((s: unknown) => {
-  const g = globalThis as unknown as { __setSheet(s: unknown): void; __lib: { confirmApprovalSheet(t: string, who?: string): Promise<boolean> }; __answer?: Promise<boolean> };
+  const g = globalThis as unknown as { __setSheet(s: unknown): void; __lib: { confirmApprovalSheet(t: string, who?: string, out?: unknown): Promise<boolean> }; __answer?: Promise<boolean>; __out?: Record<string, unknown> };
   g.__setSheet(s);
-  g.__answer = g.__lib.confirmApprovalSheet("nem", "Pat Approver");
+  g.__out = {};
+  g.__answer = g.__lib.confirmApprovalSheet("nem", "Pat Approver", g.__out);
 }, sheet);
 const answer = () => page.evaluate(() => (globalThis as unknown as { __answer: Promise<boolean> }).__answer);
+/** What the dialog handed back beside its answer (the acknowledgements, when any were ticked). */
+const handedBack = () => page.evaluate(() => (globalThis as unknown as { __out: Record<string, unknown> }).__out);
+/** "pending" while the dialog has not answered yet. */
+const settled = () => page.evaluate(() => Promise.race([
+  (globalThis as unknown as { __answer: Promise<boolean> }).__answer,
+  new Promise((r) => setTimeout(() => r("pending"), 250)),
+]));
+
+// Review-audit draft 01: a measured reviewer warning and an unverified form mapping to tick, and a
+// warning that is only listed. Synthetic ids and hashes.
+const ACK_SHEET = {
+  ...SHEET,
+  planSet: { documentId: "doc-plan-1", sha256: "a".repeat(64) },
+  openItems: [
+    { key: "reviewer_warning:city.elec.sizing-busbar-120", kind: "reviewer_warning", id: "city.elec.sizing-busbar-120", title: "Load-side busbar over 120 percent", text: "200 A + 60 A = 260 A, above 240 A.", action: "De-rate the main.", measured: true, needsAcknowledgement: true, contentHash: "h-busbar" },
+    { key: "form_mapping:tmpl-1", kind: "form_mapping", id: "form:tmpl-1", title: "Interconnection form mapped automatically", text: "No person has checked this mapping.", action: "Check every field.", measured: false, needsAcknowledgement: true, contentHash: "h-form" },
+    { key: "reviewer_warning:city.plan.labels", kind: "reviewer_warning", id: "city.plan.labels", title: "Label schedule incomplete", text: "", action: "", measured: false, needsAcknowledgement: false, contentHash: "h-labels" },
+  ],
+};
 const modalHidden = () => page.evaluate(() => { const m = document.getElementById("approvalSheetModal"); return !m || m.hidden; });
 
 try {
@@ -168,6 +199,75 @@ try {
     const asked = await page.evaluate(() => (globalThis as unknown as { __confirms(): string[] }).__confirms());
     check(`the native confirm decides (${want}) and says the sheet could not be loaded`, got === want && /approval sheet could not be loaded/.test(asked[asked.length - 1] || "") && await modalHidden(), JSON.stringify(asked));
   }
+
+  console.log("\n[K] the acknowledgement ticks hold Approve");
+  await page.evaluate(() => { (globalThis as unknown as { __confirms: () => string[] }).__confirms().length = 0; });
+  await open(ACK_SHEET);
+  await page.waitForSelector("#approvalSheetModal:not([hidden]) [data-approval-approve]");
+  const ackProbe = await page.evaluate(() => {
+    const m = document.getElementById("approvalSheetModal")!;
+    return {
+      boxes: Array.from(m.querySelectorAll("[data-approval-ack]")).map((b) => (b as HTMLElement).getAttribute("data-approval-ack")),
+      listed: (m.querySelector("[data-approval-other-items]")?.textContent || "").replace(/\s+/g, " "),
+      disabled: (m.querySelector("[data-approval-approve]") as HTMLButtonElement).disabled,
+    };
+  });
+  check("a box for each item to acknowledge, the other listed without one, and Approve disabled",
+    ackProbe.boxes.join(",") === "city.elec.sizing-busbar-120,form:tmpl-1" && /Label schedule incomplete/.test(ackProbe.listed) && ackProbe.disabled, JSON.stringify(ackProbe));
+  await page.evaluate(() => (document.querySelector("#approvalSheetModal [data-approval-approve]") as HTMLButtonElement).click());
+  check("a click on the disabled Approve answers nothing", (await settled()) === "pending" && !(await modalHidden()));
+  await page.check('#approvalSheetModal [data-approval-ack="city.elec.sizing-busbar-120"]');
+  const oneTicked = await page.evaluate(() => (document.querySelector("#approvalSheetModal [data-approval-approve]") as HTMLButtonElement).disabled);
+  check("one of two ticked: Approve still disabled", oneTicked === true);
+  await page.evaluate(() => (document.querySelector("#approvalSheetModal [data-approval-approve]") as HTMLButtonElement).click());
+  check("…and a click still answers nothing", (await settled()) === "pending");
+  await page.check('#approvalSheetModal [data-approval-ack="form:tmpl-1"]');
+  check("every box ticked: Approve enabled", await page.evaluate(() => !(document.querySelector("#approvalSheetModal [data-approval-approve]") as HTMLButtonElement).disabled));
+  await page.uncheck('#approvalSheetModal [data-approval-ack="form:tmpl-1"]');
+  check("a box unticked again: Approve disabled again", await page.evaluate(() => (document.querySelector("#approvalSheetModal [data-approval-approve]") as HTMLButtonElement).disabled));
+  await page.check('#approvalSheetModal [data-approval-ack="form:tmpl-1"]');
+  await page.click("#approvalSheetModal [data-approval-approve]");
+  const acked = await answer();
+  const back = await handedBack() as { acknowledgements?: { planSet: unknown; items: Array<{ id: string; contentHash: string }> } };
+  check("Approve answers true and hands back the plan set and each ticked item's id and hash",
+    acked === true && await modalHidden()
+      && JSON.stringify(back.acknowledgements?.planSet) === JSON.stringify(ACK_SHEET.planSet)
+      && JSON.stringify(back.acknowledgements?.items) === JSON.stringify([{ id: "city.elec.sizing-busbar-120", contentHash: "h-busbar" }, { id: "form:tmpl-1", contentHash: "h-form" }]),
+    JSON.stringify(back));
+  await open(ACK_SHEET);
+  await page.check('#approvalSheetModal [data-approval-ack="city.elec.sizing-busbar-120"]');
+  await page.click("[data-approval-cancel]");
+  check("Cancel with boxes ticked answers false and hands back nothing", (await answer()) === false && (await handedBack()).acknowledgements === undefined);
+  await open(SHEET);
+  await page.click("[data-approval-approve]");
+  check("a sheet with nothing to tick: Approve answers at once and hands back no acknowledgements", (await answer()) === true && (await handedBack()).acknowledgements === undefined);
+
+  console.log("\n[C] the check records");
+  await open({
+    ...SHEET,
+    checks: [
+      { id: "city.elec.sizing-busbar-120.pass", outcome: "passed", category: "electrical", title: "Busbar 120 percent screen", text: "40 A + 200 A = 240 A, within 120 % of the 200 A busbar.", basis: "model code (NEC 2023 705.12(B)(3)(2))" },
+      { id: "city.elec.sizing-string-voc.not-checked", outcome: "not_checked", category: "electrical", title: `Voc <img src=z onerror="document.title='pwned'">`, text: "Not checked: the module Voc (datasheet) is not on the plans.", basis: "" },
+    ],
+  });
+  await page.waitForSelector("#approvalSheetModal:not([hidden]) [data-approval-checks]");
+  const checksProbe = await page.evaluate(() => {
+    const m = document.getElementById("approvalSheetModal")!;
+    const group = m.querySelector('[data-approval-checks] details[data-check-group="Electrical"]') as HTMLDetailsElement | null;
+    return {
+      summary: (group?.querySelector("summary")?.textContent || "").trim(),
+      open: group?.open ?? null,
+      records: Array.from(m.querySelectorAll("[data-check-record]")).map((li) => (li as HTMLElement).dataset.checkOutcome),
+      imgs: m.querySelectorAll("img").length,
+      boxes: m.querySelectorAll("[data-approval-ack]").length,
+      disabled: (m.querySelector("[data-approval-approve]") as HTMLButtonElement).disabled,
+    };
+  });
+  check("grouped by category and collapsed: 'Electrical: 1 passed, 1 not checked'",
+    checksProbe.summary === "Electrical: 1 passed, 1 not checked" && checksProbe.open === false && checksProbe.records.join(",") === "passed,not_checked", JSON.stringify(checksProbe));
+  check("a hostile title stays text, and a check record is nothing to tick", checksProbe.imgs === 0 && (await page.title()) !== "pwned" && checksProbe.boxes === 0 && !checksProbe.disabled, JSON.stringify(checksProbe));
+  await page.click("[data-approval-cancel]");
+  await answer();
 } finally {
   await browser.close();
 }
