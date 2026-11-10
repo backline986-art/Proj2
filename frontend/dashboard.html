@@ -1469,6 +1469,24 @@
               </div>
             </div>
           </section>
+          <!-- BILLING (#700): this client's statement for a month, its invoices and their status.
+               Nothing here charges a card or pays a fee: "Mark paid" records money a person saw
+               arrive, and "Email" goes through the same client-email switch as every client email. -->
+          <section class="clients-creds-block" id="clientBillingBlock">
+            <h3>Billing</h3>
+            <p class="muted clients-creds-hint">Draft a statement for a month, turn it into an invoice, and track it. A line goes on one invoice only; voiding an invoice frees its lines for the next one.</p>
+            <div class="form-row">
+              <label>Month<input id="billingMonth" type="month" /></label>
+            </div>
+            <div class="actions">
+              <button type="button" id="billingPreviewBtn" class="secondary"><i data-lucide="file-search"></i><span>Show draft statement</span></button>
+              <button type="button" id="billingCreateBtn" class="primary" disabled><i data-lucide="file-plus"></i><span>Create invoice</span></button>
+            </div>
+            <p id="billingStatus" role="status" class="muted clients-creds-hint"></p>
+            <div id="billingStatement"></div>
+            <h4 style="margin:10px 0 4px">Invoices</h4>
+            <div id="billingInvoices"><p class="muted clients-creds-hint">No invoices yet.</p></div>
+          </section>
         </div>
         </div>
       </div>

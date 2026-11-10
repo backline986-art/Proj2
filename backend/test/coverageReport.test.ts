@@ -414,6 +414,10 @@ check("the per-portal fee agreement is carried, and an unagreed portal says so",
   assert.match(rendered, /NOT AGREED/, "an unagreed portal must be visible in the printed report");
   assert.match(rendered, /customer-pays/);
   assert.match(rendered, /never pays a portal fee/i);
+  // #700: the summary names the stored logins whose fees cannot be invoiced back yet.
+  assert.ok(rowFor("Thorncrest", report).credential.stored, "fixture: Thorncrest has a stored login");
+  assert.match(rendered, /FEES NOT AGREED on \d+ stored login/, "the summary must warn that an unagreed login's fees cannot be invoiced");
+  assert.match(rendered, /cannot be invoiced back/);
 });
 
 // ---------------------------------------------------------------------------

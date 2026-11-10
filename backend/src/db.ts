@@ -3323,6 +3323,83 @@ const VERSIONED_MIGRATIONS: VersionedMigration[] = [
       addColumnIfMissing(db, "submission_payments", "gate_collected_usd", "REAL");
     },
   },
+  {
+    // v71 on helm-staging-offline 43a683df (#700). Another unmerged branch may also hold v71; the
+    // reviewer renumbers at merge. Nothing here depends on the number.
+    version: 71,
+    name: "client_invoices_ledger",
+    up: (db) => {
+      // THE BILLING LEDGER (#700): what was actually invoiced, so a line is billed once.
+      //
+      // client_invoices — one invoice to one client for one period. status draft|sent|paid|void.
+      //   Totals are kept by KIND and never blended into one figure: reimbursement (fees we advanced,
+      //   pass-through, adjustments included), service (our own fee, revenue), received (paid at the
+      //   gate before the invoice, shown, never charged), due = reimbursement + service still owed.
+      //   external_ref is the accounting system's id once an invoice is pushed there (#701, later).
+      //
+      // client_invoice_lines — each billed line, with the payment row it came from.
+      //   line_key names WHAT is billed: "<payment row id>:<kind>" for a charge, and
+      //   "<payment row id>:reimbursement:adj:<fee_recorded_at>" for a true-up adjustment. THE
+      //   INVARIANT IS IN THE SCHEMA, not only in the builder: the partial unique index lets one
+      //   key sit on at most one live line, so two people pressing "Create invoice" at once cannot
+      //   bill the same fee twice. Voiding an invoice stamps released_at on its lines, which takes
+      //   them out of the index and lets a later invoice carry them.
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS client_invoices (
+          id TEXT PRIMARY KEY,
+          number TEXT NOT NULL UNIQUE,
+          client_id TEXT NOT NULL,
+          period_start TEXT NOT NULL,
+          period_end TEXT NOT NULL,
+          status TEXT NOT NULL DEFAULT 'draft',
+          bill_to TEXT NOT NULL DEFAULT '',
+          billing_mode TEXT NOT NULL DEFAULT '',
+          issued_at TEXT NOT NULL DEFAULT '',
+          due_at TEXT NOT NULL DEFAULT '',
+          paid_at TEXT NOT NULL DEFAULT '',
+          paid_reference TEXT NOT NULL DEFAULT '',
+          voided_at TEXT NOT NULL DEFAULT '',
+          void_reason TEXT NOT NULL DEFAULT '',
+          external_ref TEXT NOT NULL DEFAULT '',
+          reimbursement_total_usd REAL NOT NULL DEFAULT 0,
+          service_total_usd REAL NOT NULL DEFAULT 0,
+          received_total_usd REAL NOT NULL DEFAULT 0,
+          due_total_usd REAL NOT NULL DEFAULT 0,
+          created_by TEXT NOT NULL DEFAULT '',
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          FOREIGN KEY (client_id) REFERENCES clients(id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_client_invoices_client ON client_invoices(client_id, created_at);
+        CREATE TABLE IF NOT EXISTS client_invoice_lines (
+          id TEXT PRIMARY KEY,
+          invoice_id TEXT NOT NULL,
+          line_key TEXT NOT NULL,
+          project_id TEXT NOT NULL,
+          payment_id TEXT NOT NULL,
+          track TEXT NOT NULL,
+          kind TEXT NOT NULL,
+          role TEXT NOT NULL DEFAULT 'charge',
+          basis TEXT NOT NULL DEFAULT '',
+          provisional INTEGER NOT NULL DEFAULT 0,
+          already_paid INTEGER NOT NULL DEFAULT 0,
+          amount_usd REAL NOT NULL,
+          description TEXT NOT NULL DEFAULT '',
+          project_label TEXT NOT NULL DEFAULT '',
+          payment_reference TEXT NOT NULL DEFAULT '',
+          event_at TEXT NOT NULL DEFAULT '',
+          detail_json TEXT NOT NULL DEFAULT '{}',
+          released_at TEXT,
+          created_at TEXT NOT NULL,
+          FOREIGN KEY (invoice_id) REFERENCES client_invoices(id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_client_invoice_lines_invoice ON client_invoice_lines(invoice_id);
+        CREATE INDEX IF NOT EXISTS idx_client_invoice_lines_project ON client_invoice_lines(project_id);
+        CREATE UNIQUE INDEX IF NOT EXISTS ux_client_invoice_lines_live_key
+          ON client_invoice_lines(line_key) WHERE released_at IS NULL;
+      `);
+    },
+  },
 ];
 
 /** v47 was edited in place while #218 was open (Helm's review at 0116f98a): a DB that ran an earlier
