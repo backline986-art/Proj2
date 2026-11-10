@@ -10,7 +10,8 @@
 //       makes it an addition, which owes the existing-system disclosure (size + tariff);
 //   (6) the operating mode must classify (self-consumption alone does not);
 //   (7) a scope change closes the pending items the out-of-scope rows filed, and only those;
-//   (8) the utility track stays on for storage; a storage-mode exemption is only a person's cited
+//   (8) the utility track stays on for storage unless a person's cited record drops it (draft 10); a
+//       storage-mode exemption is only a person's cited
 //       record on the utility's row, and it never applies to a job with new PV.
 // Invented names; no network, no browser, no LLM.
 //
@@ -248,14 +249,15 @@ check("(8) words about NON-export storage never name the export mode", () => {
 check("(8) no exemption before a person records one (the default files)", () => {
   assert.equal(nemStorageExemption(db, repo.getProjectDetail(db, storageOk).project), null);
 });
-check("(8) a person's cited record exempts a backup-only storage job, and QC says so; the track stays", () => {
+check("(8) a person's cited record exempts a backup-only storage job, and QC says so (draft 10: the track drops)", () => {
   const r = recordUtilityStorageModes(db, { state: "ZZ", utility: "Fernvale Valley Electric" }, { modesWithoutApplication: ["backup-only"], sourceUrl: "https://fernvale-electric.invalid/storage", quote: "Backup-only battery systems that never operate in parallel do not need an interconnection application.", verifiedBy: "Pat Reviewer" });
   assert.equal(r.saved, true, r.reason);
   const p = repo.getProjectDetail(db, storageOk).project;
   assert.equal(nemStorageExemption(db, p)?.mode, "backup-only");
   runQcForProject(db, storageOk);
   assert.ok(rows(storageOk).get("qc.nem_storage_mode")?.message.includes("Pat Reviewer"));
-  assert.ok(requiredTracks(p).includes("nem"));
+  // Draft 10 (nemStorageAutodrop.test pins the rest): a person's record now drops the track on the job.
+  assert.ok(!requiredTracks(repo.getProjectDetail(db, storageOk).project).includes("nem"));
 });
 check("(8) the record never exempts a job with new PV, or a mode it does not list", () => {
   assert.equal(nemStorageExemption(db, repo.getProjectDetail(db, conflicting).project), null);
