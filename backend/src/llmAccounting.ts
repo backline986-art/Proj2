@@ -42,6 +42,12 @@ export function attachLlmCallStore(db: AppDb | null): void {
   store = db;
 }
 
+/** The same handle, for the rule-2 model payload scan (modelPayloadScan.ts): it reads the job's
+ *  known secrets and writes its audit row through the database this process opened. */
+export function llmCallStoreDb(): AppDb | null {
+  return store;
+}
+
 export interface PersistedLlmCall {
   at: number;
   label: string;

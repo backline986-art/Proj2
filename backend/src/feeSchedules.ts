@@ -39,7 +39,7 @@
 // surface when the API/dashboard build lands.
 // ---------------------------------------------------------------------------
 
-import Anthropic from "@anthropic-ai/sdk";
+import { createModelClient, runInModelCallScope } from "./modelPayloadScan";
 import { performance } from "node:perf_hooks";
 import type { AppDb } from "./db";
 import type { FeeChargeBreakdown, FeePaymentMethod, PaidFeeReceipt, ProjectRecord } from "../../shared/src/types";
@@ -2890,7 +2890,9 @@ export const claudeFeeScheduleResearcher: FeeScheduleResearcher = async (input, 
   const timer = setTimeout(() => { timedOut = true; controller.abort(); }, timeoutMs);
   const ledger = options?.ledger ?? newFeeDocumentLedger();
   try {
-    const client = new Anthropic({ apiKey, maxRetries: 3, timeout: FEE_RESEARCH_CLIENT_TIMEOUT_MS });
+    // createModelClient, never `new Anthropic`: this loop forwards fetched documents as tool results,
+    // and every request it sends passes the rule-2 payload scan (modelPayloadScan.ts) first.
+    const client = createModelClient({ apiKey, maxRetries: 3, timeout: FEE_RESEARCH_CLIENT_TIMEOUT_MS });
     logger.debug("fees", "→ researchFeeSchedule", { model, track: input.track, state: input.state });
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -2915,7 +2917,7 @@ export const claudeFeeScheduleResearcher: FeeScheduleResearcher = async (input, 
       if (Date.now() >= deadline) { timedOut = true; controller.abort(); break; }
       const startedAt = Date.now();
       const t0 = performance.now();
-      const msg = await client.messages
+      const msg = await runInModelCallScope({ label: `researchFeeSchedule[${who4}]#${turn + 1}` }, () => client.messages
         .stream(
           {
             model,
@@ -2940,7 +2942,7 @@ export const claudeFeeScheduleResearcher: FeeScheduleResearcher = async (input, 
           },
           { signal: controller.signal },
         )
-        .finalMessage();
+        .finalMessage());
       // EVERY TURN IS A RECORD, and it carries the cache columns on purpose: a
       // cache that silently stops hitting looks exactly like a cache that is
       // working, right up until the bill. cacheRead near zero on turn two of a pass
