@@ -238,6 +238,23 @@ if (process.env.PIN_ONLY !== "1") {
   });
   delete process.env.JURISDICTION_PERMIT_PATHS_REFERENCE_PATH;
 
+  // The shipped OR state code profile is PERSON-VERIFIED with the record's own four limits, so the overlay
+  // changes nothing for it: resolvePermitPathForProject (which passes the profile's tier) still answers
+  // exactly what the record alone answers.
+  {
+    const { openDatabase } = await import("../src/db");
+    const { resolvePermitPathForProject } = await import("../src/codeProfiles");
+    const db = await openDatabase();
+    try {
+      check("the shipped person-verified OR profile overlays to the same screen: resolvePermitPathForProject is unchanged", () => {
+        for (const snap of SNAPS) for (const ahj of ["Salem", "City of Portland", ""]) {
+          const j = job("OR", ahj, snap);
+          assert.deepEqual(resolvePermitPathForProject(db, j), P.resolvePermitPath(j), JSON.stringify({ ahj, snap }));
+        }
+      });
+    } finally { db.close(); }
+  }
+
   check("the statewide application profile is recognised by its flag, for the state it names", () => {
     const or = findApplicationProfile(job("Oregon", "City of Testville", {}));
     assert.equal(or.statewide?.state, "OR");
