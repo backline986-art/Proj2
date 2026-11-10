@@ -69,6 +69,12 @@ export interface UtilityFilingLocation {
  *  resolves, shows or launches it. Rows written before round 4 do not carry it. */
 export type UtilityFilingFact = CitedFact<UtilityFilingLocation> & { droppedUrls?: string[] };
 export interface UtilityFee { label: string; amountUsd: number }
+export interface UtilityServiceArea {
+  /** The other utilities the page names as serving some locations of this one's area. */
+  sharedWith: string[];
+  /** Where the page says to check an address (its service-area map), when it names one. */
+  mapUrl?: string;
+}
 export interface UtilityFilingLookup {
   profileKey: string;
   state: string;
@@ -83,6 +89,12 @@ export interface UtilityFilingLookup {
   fees?: Array<CitedFact<UtilityFee>>;
   /** The review time the utility's page states, cited. Display only. */
   reviewTime?: CitedFact<string>;
+  /** A SHARED SERVICE AREA (bot-vs-research 2026-11-10, a co-op and an investor-owned utility in one
+   *  city): the utility's own page says some locations are served by another utility, and where to check
+   *  an address (its map). Cited; a warning on the utility track, never a decision. */
+  serviceArea?: CitedFact<UtilityServiceArea>;
+  /** Pages Keelix's reader was refused (403 / challenge / back-off): a person reads them in a browser. */
+  needsPersonRead?: Array<{ url: string; reason: string }>;
   lookedUpAt: string;
   verifiedAt?: string | null;
   verifiedBy?: string | null;
@@ -325,7 +337,7 @@ const DENIES_NEM = /\b(?:no|not|does not|doesn't|do not|don't|without)\b[^.;]{0,
 export function quoteStatesProgram(kind: UtilityProgramKind, quote: string): boolean {
   const q = str(quote);
   if (kind === "net_metering") return /\bnet[- ]?(?:energy )?meter(?:ing|ed)?\b|\bNEM\b/i.test(q) && !DENIES_NEM.test(q);
-  if (kind === "net_billing") return /\bexport(?:ed|s)?\b[^.;]{0,80}\b(?:credit|price|rate|c(?:ents)?\/kwh|¢)|\bbuy[- ]?back\b|\bnet billing\b|\bavoided cost\b|\bcredited\b[^.;]{0,60}\b(?:price|rate)\b/i.test(q);
+  if (kind === "net_billing") return /\bexport(?:ed|s)?\b[^.;]{0,80}\b(?:credit|price|rate|c(?:ents)?\/kwh|¢)|\bbuy[- ]?back\b|net[\s-]?billing\b|\bavoided cost\b|\bcredited\b[^.;]{0,60}\b(?:price|rate)\b/i.test(q);
   return DENIES_NEM.test(q) || /\bretail electric provider\b|\bREPs?\b|\bwires[- ]only\b|\btransmission and distribution (?:service )?provider\b/i.test(q);
 }
 
@@ -358,7 +370,27 @@ export function acceptFilingUrl(url: string, seenUrls: string[], namedPlatform: 
   return { url: u, why: "" };
 }
 
-export function parseUtilityFilingAnswer(text: string, seenUrls: string[], ctx: { permitSystemNames?: readonly string[] } = {}): { filing: UtilityFilingFact; program: CitedFact<UtilityProgramKind>; programName: string; dropped: string[]; limits: EligibilityLimits; rawRequirements?: unknown; fees?: Array<CitedFact<UtilityFee>>; reviewTime?: CitedFact<string> } {
+/** The words say some locations are SERVED by each named other utility ("served by Central Electric or
+ *  Pacific Power, or … may be served by either utility"). */
+export function quoteStatesServiceArea(v: UtilityServiceArea, quote: string): boolean {
+  const q = str(quote).toLowerCase();
+  if (!/\bserv(?:ed|es|ice|ing)\b/.test(q) || !v.sharedWith.length) return false;
+  return v.sharedWith.every((name) => {
+    const w = normalizeUtilityName(name).split(" ").filter((x) => x.length > 2 && !["electric", "power", "energy", "cooperative", "utility", "utilities", "the"].includes(x));
+    return w.length > 0 && w.every((x) => q.includes(x));
+  });
+}
+const coerceServiceArea = (seenUrls: string[], sourceUrl: unknown) => (v: unknown): UtilityServiceArea | null => {
+  const o = (v && typeof v === "object" ? v : {}) as Record<string, unknown>;
+  const sharedWith = (Array.isArray(o.sharedWith) ? o.sharedWith : []).map(str).filter(Boolean).slice(0, 4);
+  if (!sharedWith.length) return null;
+  // The map is kept only when it is the cited page itself or a page the search returned / opened.
+  const map = str(o.mapUrl);
+  const seenKeys = new Set([...seenUrls, str(sourceUrl)].map((u) => u.replace(/[#?].*$/, "").replace(/\/+$/, "").toLowerCase()));
+  const mapUrl = /^https?:\/\//i.test(map) && seenKeys.has(map.replace(/[#?].*$/, "").replace(/\/+$/, "").toLowerCase()) ? map : undefined;
+  return { sharedWith, ...(mapUrl ? { mapUrl } : {}) };
+};
+export function parseUtilityFilingAnswer(text: string, seenUrls: string[], ctx: { permitSystemNames?: readonly string[] } = {}): { filing: UtilityFilingFact; program: CitedFact<UtilityProgramKind>; programName: string; dropped: string[]; limits: EligibilityLimits; rawRequirements?: unknown; fees?: Array<CitedFact<UtilityFee>>; reviewTime?: CitedFact<string>; serviceArea?: CitedFact<UtilityServiceArea> } {
   let json: Record<string, unknown> | null = null;
   const t = str(text);
   const start = t.indexOf("{");
@@ -423,8 +455,10 @@ export function parseUtilityFilingAnswer(text: string, seenUrls: string[], ctx: 
   }
   const reviewTime = json?.reviewTime != null ? cited<string>(json.reviewTime as RawFact, seenUrls, (v) => str(v).slice(0, 120) || null, quoteStatesReviewTime, "review time") : null;
   if (reviewTime && !reviewTime.value && json?.reviewTime && (json.reviewTime as Record<string, unknown>).value) dropped.push(`review time: ${reviewTime.notFound}`);
+  const serviceArea = json?.serviceArea != null ? cited<UtilityServiceArea>(json.serviceArea as RawFact, seenUrls, coerceServiceArea(seenUrls, (json.serviceArea as RawFact)?.sourceUrl), quoteStatesServiceArea, "shared service area") : null;
+  if (serviceArea && !serviceArea.value && (json?.serviceArea as Record<string, unknown> | undefined)?.value) dropped.push(`shared service area: ${serviceArea.notFound}`);
   return { filing, program, programName: program.value ? str(rawProgram?.programName).slice(0, 120) : "", dropped, limits: proposed.limits,
-    ...(fees.length ? { fees } : {}), ...(reviewTime?.value ? { reviewTime } : {}),
+    ...(fees.length ? { fees } : {}), ...(reviewTime?.value ? { reviewTime } : {}), ...(serviceArea?.value ? { serviceArea } : {}),
     ...(json && json.applicationRequirements !== undefined ? { rawRequirements: json.applicationRequirements } : {}) };
 }
 
@@ -439,7 +473,9 @@ export function parseUtilityFilingAnswer(text: string, seenUrls: string[], ctx: 
 // "<link words>" -> <target>, so the citation shows exactly what attested it. The result lands SEEDED,
 // like every lookup answer: where a filing goes stays a person's fact (rule 3), offered for the one-click
 // Confirm (filingDestinationProposals). Nothing here names a utility, a platform tenant or a state.
-const APPLY_LINK_WORDS = /\b(?:apply|applications?|submit\w*|interconnection request|interconnect(?:ion)? application|new request|start (?:a |an |your )?(?:new )?(?:application|request))\b/i;
+// A net-metering / interconnection AGREEMENT link is the application at many co-ops and munis ("Small
+// Net-Metering Agreement" -> its online form; bot-vs-research round 2).
+const APPLY_LINK_WORDS = /\b(?:apply|applications?|submit\w*|interconnection request|interconnect(?:ion)? application|new request|start (?:a |an |your )?(?:new )?(?:application|request)|net[\s-]?meter(?:ing|ed)?[\s-]+(?:interconnection )?agreement|interconnection agreement)\b/i;
 const NOT_APPLY_LINK_WORDS = /\b(?:inspection|schedule|pay(?:ment)?s?|bill|status|track(?:ing)?|faq|guide|handbook|checklist|instructions?|rates?|tariff|schedule \d+|outage|contact)\b/i;
 /** Is this link's wording about applying (and not about inspections, payments, status or help)? */
 export function isApplyLinkWords(words: string): boolean {
@@ -512,6 +548,7 @@ export const UTILITY_FILING_SYSTEM = `You find, for ONE electric utility in the 
 
 EVERY value carries "sourceUrl" (a page your search returned or you opened) and "quote" (the exact words on that page that state it, under 250 characters, containing the answer itself: the portal's name or link for the filing; the words net metering / export credit / retail provider for the program). If no page states it, "value": null and say what you searched in "notFound". Never answer from memory. Never guess.
 
+5. serviceArea — ONLY when the utility's own page says some locations in or near its area are served by ANOTHER utility (an overlapping or shared territory): {"value": {"sharedWith": ["<the other utility as named>"], "mapUrl": "<the page's service-area map, if it names one>"}, "sourceUrl": "", "quote": "<the words saying so>"}; null otherwise.
 4. fees — the utility's OWN fees for a residential application (an application / net-metering / meter fee), each {"value": {"label": "<as printed>", "amountUsd": <number>}, "sourceUrl": "", "quote": "<the printed words with the amount>"}; [] when no page prints one. reviewTime — the review / processing time the utility's page states ("up to 10 business days"), {"value": "<as printed>", "sourceUrl": "", "quote": ""}, or null.
 
 3. limits — ONLY where the program page or tariff you read states them for residential customers: "maxDcKw" / "maxAcKw" (the program's size cap in kW), "productionMeterRequired" (true when a separate production / generation meter is required), "installerCertification" ({"name": "<the certification>", "effectiveFrom": "YYYY-MM-DD" or ""}). Each as {"value": ..., "citation": {"sourceName": "<the page or tariff by name>", "sourceUrl": "", "quote": "<the exact words, containing the value>"}}. Leave out any limit no page states; {} when none.
@@ -524,6 +561,7 @@ Return ONLY JSON:
  "limits": {},
  "fees": [{"value": {"label": "", "amountUsd": 0}, "sourceUrl": "", "quote": ""}],
  "reviewTime": {"value": null, "sourceUrl": "", "quote": ""},
+ "serviceArea": null,
  ${UTILITY_REQUIREMENTS_RESEARCH_SCHEMA}}`;
 
 const lookupTimeoutMs = () => Math.max(120000, Number(process.env.UTILITY_FILING_LOOKUP_TIMEOUT_MS) || 240000);
@@ -660,6 +698,7 @@ export async function runUtilityFilingLookup(
     // A re-run that found none keeps the earlier cited fees / review time.
     ...(parsed.fees?.length ? { fees: parsed.fees } : existing?.fees?.length ? { fees: existing.fees } : {}),
     ...(parsed.reviewTime?.value ? { reviewTime: parsed.reviewTime } : existing?.reviewTime?.value ? { reviewTime: existing.reviewTime } : {}),
+    ...(parsed.serviceArea?.value ? { serviceArea: parsed.serviceArea } : existing?.serviceArea?.value ? { serviceArea: existing.serviceArea } : {}),
     lookedUpAt: new Date().toISOString(),
   });
   // The cited program limits land as the utility's own eligibility record, SEEDED (never over a
@@ -675,7 +714,15 @@ export async function runUtilityFilingLookup(
   // just saved (official only through #683's landing on bytes read here; never over a person's item).
   const requirements = save.saved && !ungrounded ? await landLookupRequirements(db, input, parsed.rawRequirements, seen, r.groundedSearches > 0) : undefined;
   if (requirements) parsed.dropped.push(...requirements.dropped);
-  return { saved: save.saved, reason: r.error ? `${save.reason} (partial results kept after: ${r.error.slice(0, 120)})` : save.reason, lookup: save.lookup, grounded: r.groundedSearches, dropped: parsed.dropped,
+  // A REFUSED READ IS NOT SILENT (as the permit lookup, lookup-door-fixes 5): pages the reader was refused
+  // are recorded on the row for a person's browser. The reader's one try and host back-off are unchanged.
+  let lookup = save.lookup;
+  const refused = (await import("./permitProcessLookup")).readsNeedingAPerson([...((reader ?? null)?.log ?? []), ...(requirements?.readLog ?? [])]);
+  if (save.saved && lookup && refused.length) {
+    const again = saveUtilityFilingLookup(db, { ...lookup, needsPersonRead: refused, confidence: "seeded" });
+    if (again.saved) lookup = again.lookup;
+  }
+  return { saved: save.saved, reason: r.error ? `${save.reason} (partial results kept after: ${r.error.slice(0, 120)})` : save.reason, lookup, grounded: r.groundedSearches, dropped: parsed.dropped,
     ...(requirements?.landing ? { requirements: requirements.landing } : {}),
     ...(r.error ? { error: r.error, timedOut } : {}) };
 }
@@ -688,7 +735,7 @@ async function landLookupRequirements(
   raw: unknown,
   seenUrls: string[],
   webGrounded: boolean,
-): Promise<{ landing?: UtilityRequirementsLanding; dropped: string[] } | undefined> {
+): Promise<{ landing?: UtilityRequirementsLanding; dropped: string[]; readLog?: PageReader["log"] } | undefined> {
   if (raw === undefined) return undefined;
   try {
     const research = await import("./utilityRequirementsResearch");
@@ -697,7 +744,7 @@ async function landLookupRequirements(
     const reader = input.reader !== undefined ? input.reader : (await import("./permitProcessLookup")).defaultLookupReader(research.UTILITY_REQUIREMENTS_CONFIRM_MAX_READS);
     const landing = await research.landResearchedUtilityRequirements(db, { state: input.state, utility: input.utility }, reads, { reader });
     logger.info("utility-filing", `application requirements for ${input.utility} (${input.state}): ${landing.reason}`, { landed: landing.landed, skipped: landing.skipped.length, conflicts: landing.conflicts.length });
-    return { landing, dropped };
+    return { landing, dropped, readLog: reader?.log ?? [] };
   } catch (err) {
     logger.warn("utility-filing", `could not land application requirements for ${input.utility}: ${err instanceof Error ? err.message : String(err)}`);
     return { dropped: [] };
@@ -870,6 +917,10 @@ export function utilityFeesAndReviewSentence(db: AppDb | null, project: Pick<Pro
     parts.push(`Utility fees (from its page): ${fees.map((f) => `${f.value!.label} ${money(f.value!.amountUsd)}`).join("; ")} — ${[...new Set(fees.map((f) => f.sourceUrl))].join(", ")}`);
   }
   if (lookup?.reviewTime?.value) parts.push(`Utility review time (from its page): ${lookup.reviewTime.value} — ${lookup.reviewTime.sourceUrl}`);
+  const area = lookup?.serviceArea?.value;
+  if (area) parts.push(`Check which utility serves the address: ${project.utility}'s page says some locations are served by ${area.sharedWith.join(" or ")} (${area.mapUrl ?? lookup!.serviceArea!.sourceUrl})`);
+  const blocked = lookup?.needsPersonRead ?? [];
+  if (blocked.length) parts.push(`Needs a person to read (the site refused Keelix's read): ${blocked.map((b) => b.url).join(", ")}`);
   return parts.length ? ` ${parts.join(". ")}.` : "";
 }
 export function utilityTrackPresentation(db: AppDb | null, project: Pick<ProjectRecord, "state" | "utility">): UtilityTrackPresentation {
