@@ -13,6 +13,13 @@
 // A bookkeeper treats those differently, so a single blended total would be wrong even when
 // the arithmetic is right. There is deliberately NO grand total on this object.
 //
+// MONEY ALREADY RECEIVED IS NEVER BILLED AGAIN (#699). A per-submission client pays our service
+// fee at the gate before staging ("Client paid us"). That payment is shown under
+// paymentsReceived and its line is marked alreadyPaid, out of the amounts due; the jurisdiction
+// fee is billed once, here, after it is paid. A row paid at the gate BEFORE the gate recorded what
+// it took (gateCollectedUsd null) went through the old gate, which also asked for a permit-fee
+// estimate, so its jurisdiction fee is held back for a person rather than risk billing it twice.
+//
 // AN ESTIMATE IS NOT AN INVOICE, and that is the load-bearing rule. submission_payments carries
 // permit_fee_estimate_usd (a quote — the published schedule, a learned median, or 1.5% of
 // valuation) alongside permit_fee_actual_usd (the number a person read off the portal's own fee
@@ -87,6 +94,20 @@ export interface InvoiceLine {
   reconciliation: string;
   paymentReference: string;
   recordedAt: string;
+  /** Already collected from the client (the per-submission gate, #699). Shown so the invoice
+   *  states the whole charge, and left out of the amounts due so it is never billed twice. */
+  alreadyPaid: boolean;
+}
+
+/** Money the client has ALREADY paid us against this project: a payment received, never a
+ *  charge. Today that is the per-submission gate's service fee. */
+export interface InvoicePaymentReceived {
+  track: InvoiceTrack;
+  /** null when the gate took a payment before it recorded the amount (see the header). */
+  amountUsd: number | null;
+  description: string;
+  paymentReference: string;
+  receivedAt: string;
 }
 
 /** Something real that is NOT on the invoice, and what would put it there. Never silently
@@ -114,10 +135,13 @@ export interface ProjectInvoice {
   billToSource: "billing_contact" | "business_email" | "primary_contact" | "none";
   billingMode: string;
   lines: InvoiceLine[];
-  /** Fees we advanced and are recovering. Pass-through. */
+  /** Fees we advanced and are recovering, still DUE (lines marked alreadyPaid are left out).
+   *  Pass-through. */
   reimbursementTotalUsd: number;
-  /** Our own service fees. Revenue. */
+  /** Our own service fees still DUE (a fee paid at the gate is left out). Revenue. */
   serviceTotalUsd: number;
+  /** What the client already paid us against this project, never a charge (#699). */
+  paymentsReceived: InvoicePaymentReceived[];
   notInvoiceable: InvoiceExclusion[];
   generatedAt: string;
 }
@@ -172,10 +196,11 @@ export function invoiceLinesForPayment(
   project: ProjectRecord,
   client: ClientRecord | null,
   row: SubmissionPaymentRecord,
-): { lines: InvoiceLine[]; excluded: InvoiceExclusion[] } {
+): { lines: InvoiceLine[]; excluded: InvoiceExclusion[]; received: InvoicePaymentReceived[] } {
   const track = (row.track === "nem" ? "nem" : "permit") as InvoiceTrack;
   const lines: InvoiceLine[] = [];
   const excluded: InvoiceExclusion[] = [];
+  const received: InvoicePaymentReceived[] = [];
   const actual = row.permitFeeActualUsd;
   const responsibility = text(row.feeResponsibility);
 
@@ -186,7 +211,26 @@ export function invoiceLinesForPayment(
       resolution: "Nothing to do — a waiver is a decision, not a gap.",
       amountSeenUsd: actual ?? row.permitFeeEstimateUsd,
     });
-    return { lines, excluded };
+    return { lines, excluded, received };
+  }
+
+  // ── what the client already paid us at the gate (#699) ─────────────────────────────────
+  const paidAtGate = row.status === "paid";
+  // Paid through the OLD gate, which asked for the permit fee (often an estimate) as well as the
+  // service fee and recorded neither amount. Whether the jurisdiction fee is already settled is
+  // unknowable from the row, so it is held for a person: an unbilled fee is a question, a fee
+  // billed twice is a wrong invoice in front of a customer.
+  const legacyGatePayment = paidAtGate && row.gateCollectedUsd == null;
+  if (paidAtGate) {
+    received.push({
+      track,
+      amountUsd: legacyGatePayment ? null : round2(row.gateCollectedUsd ?? 0),
+      description: legacyGatePayment
+        ? `Paid at the per-submission gate before it recorded what it collected — the gate then asked for the ${track === "nem" ? "interconnection" : "permit"} fee as well as the service fee, so the amount is not on file`
+        : `Service fee paid at the per-submission gate (${track === "nem" ? "interconnection" : "permit"} filing)`,
+      paymentReference: text(row.paymentReference),
+      receivedAt: text(row.paidAt),
+    });
   }
 
   // ── the jurisdiction fee ────────────────────────────────────────────────────────────
@@ -254,6 +298,13 @@ export function invoiceLinesForPayment(
       resolution: "Nothing to do. This is recorded for the project's history, not for billing.",
       amountSeenUsd: billable,
     });
+  } else if (legacyGatePayment && (actual != null || publishedTotal != null)) {
+    excluded.push({
+      track,
+      reason: `A fee of $${billable!.toFixed(2)} was advanced by us, but this track was paid at the per-submission gate before the gate recorded what it took — and that gate also asked for the ${track === "nem" ? "interconnection" : "permit"} fee. It may already be paid.`,
+      resolution: `Check the gate payment${row.paymentReference ? ` (ref ${text(row.paymentReference)})` : ""} against the fee. If it did not cover the fee, bill it by hand; the invoice will not risk billing it twice.`,
+      amountSeenUsd: billable,
+    });
   } else if (actual != null) {
     lines.push({
       track,
@@ -266,6 +317,7 @@ export function invoiceLinesForPayment(
       reconciliation: reconcile(actual, published),
       paymentReference: text(row.paymentReference),
       recordedAt: text(row.feeRecordedAt) || text(row.updatedAt),
+      alreadyPaid: false,
     });
   } else if (publishedTotal != null) {
     lines.push({
@@ -279,6 +331,7 @@ export function invoiceLinesForPayment(
       reconciliation: "",
       paymentReference: text(row.paymentReference),
       recordedAt: "",
+      alreadyPaid: false,
     });
   } else {
     excluded.push({
@@ -301,12 +354,23 @@ export function invoiceLinesForPayment(
       kind: "service",
       basis: "service",
       provisional: false,
-      description: `Submission service fee — ${track === "nem" ? "interconnection" : "permit"} filing prepared and staged`,
+      description: `Submission service fee — ${track === "nem" ? "interconnection" : "permit"} filing prepared and staged${paidAtGate ? " (paid at the gate)" : ""}`,
       amountUsd: serviceFee,
       composition: [],
       reconciliation: "",
       paymentReference: text(row.paymentReference),
       recordedAt: text(row.feeRecordedAt) || text(row.quotedAt),
+      // The gate collects exactly this fee before staging; a paid row has it, old gate or new.
+      alreadyPaid: paidAtGate,
+    });
+  } else if (paidAtGate && serviceFee > 0) {
+    // Billing mode changed after the gate was paid. The payment is under paymentsReceived; the
+    // fee is not charged a second time on a monthly arrangement either.
+    excluded.push({
+      track,
+      reason: `The service fee of $${serviceFee.toFixed(2)} was paid at the per-submission gate; this client is now billed ${billingMode || "monthly/none"}.`,
+      resolution: "Nothing to do — it is already paid, and is shown under payments received.",
+      amountSeenUsd: serviceFee,
     });
   } else if (serviceFee > 0) {
     excluded.push({
@@ -317,7 +381,7 @@ export function invoiceLinesForPayment(
     });
   }
 
-  return { lines, excluded };
+  return { lines, excluded, received };
 }
 
 /** A per-project invoice. Reads only; writes nothing. */
@@ -335,6 +399,7 @@ export function buildProjectInvoice(db: AppDb, project: ProjectRecord): ProjectI
 
   const lines: InvoiceLine[] = [];
   const notInvoiceable: InvoiceExclusion[] = [];
+  const paymentsReceived: InvoicePaymentReceived[] = [];
   let sawAnyRow = false;
 
   for (const track of TRACKS) {
@@ -344,6 +409,7 @@ export function buildProjectInvoice(db: AppDb, project: ProjectRecord): ProjectI
     const out = invoiceLinesForPayment(db, project, client, row);
     lines.push(...out.lines);
     notInvoiceable.push(...out.excluded);
+    paymentsReceived.push(...out.received);
   }
 
   if (!sawAnyRow) {
@@ -363,8 +429,9 @@ export function buildProjectInvoice(db: AppDb, project: ProjectRecord): ProjectI
     });
   }
 
+  // What is still DUE: a line the client already paid (the gate) is on the invoice, not in the sum.
   const sum = (kind: InvoiceLine["kind"]): number =>
-    round2(lines.filter((l) => l.kind === kind).reduce((t, l) => t + l.amountUsd, 0));
+    round2(lines.filter((l) => l.kind === kind && !l.alreadyPaid).reduce((t, l) => t + l.amountUsd, 0));
 
   return {
     projectId: project.id,
@@ -378,6 +445,7 @@ export function buildProjectInvoice(db: AppDb, project: ProjectRecord): ProjectI
     lines,
     reimbursementTotalUsd: sum("reimbursement"),
     serviceTotalUsd: sum("service"),
+    paymentsReceived,
     notInvoiceable,
     generatedAt: nowIso(),
   };

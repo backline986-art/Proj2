@@ -60,6 +60,7 @@ const state = {
   // Which project the status-override panel is currently holding an unsent edit for.
   // Lets a background re-render keep a half-typed reason, and a project switch drop it.
   statusOverrideFor: null,
+  projectClassFor: null,
   knowledgeProfiles: [],
   ahjForms: [],
   signatures: [],
@@ -1361,6 +1362,7 @@ function renderProjectTable() {
 // reading(s)…"), so the chip's count is the server's count, never a second client tally.
 const NEXT_STEP_CHIP = {
   operator_blocked: { pill: "to_fix", tone: "danger", label: "Blocked" },
+  class_held: { pill: "to_fix", tone: "warning", label: "Held: class" },
   correction_overdue: { pill: "corrections", tone: "danger", label: "Correction overdue" },
   portal_paused: { pill: "to_fix", tone: "warning", label: "Portal paused" },
   payment_needed: { pill: "to_fix", tone: "warning", label: "Payment needed" },
@@ -2527,6 +2529,8 @@ function renderHandoffBanner() {
 // Quote = real permit fees (portal-calculated actual > learned per-AHJ history >
 // valuation estimate) + the client's service fee. Staging is blocked for
 // per-submission clients until each track's payment is marked paid or waived.
+// The gate COLLECTS the service fee only (#699, quote.gateAmountUsd): the permit fee is
+// paid on the portal and invoiced afterwards, and only when we advanced it.
 async function loadPaymentQuotes() {
   const id = state.selectedProjectId;
   const [permit, nem] = await Promise.all([
@@ -2564,17 +2568,19 @@ function renderPaymentQuoteCard(quote) {
         <tr><td style="padding:1px 14px 1px 0">Permit fees</td><td style="text-align:right"><strong>${quote.permitFeeIsFloor && quote.permitFeeUsd != null ? "at least " : ""}${money(quote.permitFeeUsd)}</strong></td>
             <td style="padding-left:10px" class="muted">${esc(FEE_SOURCE_LABELS[quote.permitFeeSource] || "")}</td></tr>
         <tr><td style="padding:1px 14px 1px 0">Our service fee</td><td style="text-align:right"><strong>${money(quote.serviceFeeUsd)}</strong></td><td></td></tr>
-        <tr style="border-top:1px solid var(--border)"><td style="padding:3px 14px 1px 0"><strong>Client total</strong></td><td style="text-align:right"><strong>${money(quote.totalUsd)}</strong></td><td></td></tr>
+        <tr class="muted"><td style="padding:1px 14px 1px 0">Filing cost, all fees</td><td style="text-align:right">${money(quote.totalUsd)}</td><td></td></tr>
+        <tr style="border-top:1px solid var(--border)"><td style="padding:3px 14px 1px 0"><strong>Collect from client now</strong></td><td style="text-align:right"><strong>${money(quote.gateAmountUsd)}</strong></td>
+            <td style="padding-left:10px" class="muted">service fee only — the permit fee is paid on the portal and invoiced after, only if we paid it</td></tr>
       </table>
       <p class="muted" style="margin:2px 0;font-size:11px">${esc(quote.permitFeeBasis || "")}</p>
       ${printedFormCheckHtml(quote.printedFormCheck)}
-      ${status === "paid" ? `<p style="margin:2px 0;font-size:12px">Paid ${p.paidAt ? new Date(p.paidAt).toLocaleString() : ""}${p.paymentReference ? ` — ref: ${esc(p.paymentReference)}` : ""}</p>` : ""}
+      ${status === "paid" ? `<p style="margin:2px 0;font-size:12px">Client paid us${p.gateCollectedUsd != null ? ` ${esc(money(p.gateCollectedUsd))}` : ""} ${p.paidAt ? esc(new Date(p.paidAt).toLocaleString()) : ""}${p.paymentReference ? ` — ref: ${esc(p.paymentReference)}` : ""}</p>` : ""}
       ${status !== "paid" ? `
         <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:6px">
           <input id="payFee-${quote.track}" type="number" min="0" step="0.01" placeholder="Actual portal fee $" style="width:150px;font-size:12px;padding:4px 8px" title="The real fee the portal calculated on its fee/review screen — replaces the estimate and teaches future quotes for this AHJ.">
           <button class="secondary" style="font-size:12px" data-pay-action="record-fee" data-pay-track="${quote.track}">Record real fee</button>
           <input id="payRef-${quote.track}" placeholder="Payment reference (invoice #, Stripe id…)" style="width:220px;font-size:12px;padding:4px 8px">
-          <button style="font-size:12px" data-pay-action="mark-paid" data-pay-track="${quote.track}">✓ Mark paid</button>
+          <button style="font-size:12px" data-pay-action="mark-paid" data-pay-track="${quote.track}" title="The client paid us the service fee above. Not the portal's fee: record that with We paid the portal on the track.">✓ Client paid us</button>
           <button class="secondary" style="font-size:12px" data-pay-action="waive" data-pay-track="${quote.track}" title="Skip the gate for this submission (comped / billed elsewhere).">Waive</button>
         </div>` : ""}
     </article>`;
@@ -2599,7 +2605,7 @@ function renderPaymentPanel() {
         <span>💳 Payment — per-submission billing</span>
         ${statusBadge(unpaid.length ? "payment required before staging" : "cleared")}
       </div>
-      ${unpaid.length ? `<p style="margin:0 0 8px;font-size:12px">This client pays per submission: collect the total below, then <strong>Mark paid</strong> to unlock <em>3 · Prepare Submittal</em>. Enter the portal's real fee when you see it on the fee/review screen — it replaces the estimate and is remembered for this AHJ. <span class="muted">The portal's own fee checkout is always completed by a human, never automated.</span></p>` : ""}
+      ${unpaid.length ? `<p style="margin:0 0 8px;font-size:12px">This client pays per submission: collect the service fee below, then <strong>Client paid us</strong> to unlock <em>3 · Prepare Submittal</em>. The permit fee is not collected here: it is paid on the portal and, when we pay it, invoiced afterwards at the real figure. Enter the portal's real fee when you see it on the fee/review screen — it replaces the estimate and is remembered for this AHJ. <span class="muted">The portal's own fee checkout is always completed by a human, never automated.</span></p>` : ""}
       ${visible.map(renderPaymentQuoteCard).join("")}
     </section>` : ""}`;
   panel.querySelectorAll("[data-pay-action]").forEach((btn) => {
@@ -2626,7 +2632,7 @@ async function handlePaymentAction(action, track, btn) {
     const res = await api(`/api/projects/${id}/payment/${path}`, { method: "POST", body: JSON.stringify(body) });
     state.paymentQuotes = { ...(state.paymentQuotes || {}), [res.quote.track]: res.quote };
     renderPaymentPanel();
-    if (action === "mark-paid") showMessage(`Payment recorded — ${res.quote.track} staging unlocked.`);
+    if (action === "mark-paid") showMessage(`Client payment recorded — ${res.quote.track} staging unlocked.`);
   } catch (err) {
     showMessage(`Payment update failed: ${err.message}`, "error");
     btn.disabled = false;
@@ -3572,6 +3578,7 @@ const NEXT_STEP_BUTTON_LABELS = {
   addPermitTargetBtn: "Add tracking target",
   copyHandoffPacketBtn: "Copy handoff packet",
   sendHandoffPacketBtn: "Send handoff packet",
+  confirmProjectClassBtn: "Confirm class",
 };
 
 // Take the operator TO a control or panel: open every <details> it sits in (stage accordion,
@@ -3743,6 +3750,66 @@ function renderNextStep() {
 // round cannot reappear here, and `blocked` (whose only writer is this control)
 // cannot fall out of it by omission.
 const STATUS_OVERRIDE_EXCLUDED = ["handoff_ready"];
+
+// THE JOB'S CLASS PANEL (#688). Shows where the job stands (detail.classStatus — the same read every
+// automation door makes), the evidence behind a "probably commercial" flag, and the control a named
+// person uses to confirm it. Every value is esc()'d.
+function renderProjectClass() {
+  const panel = $("projectClassPanel");
+  if (!panel) return;
+  const detail = state.detail || {};
+  const project = detail.project;
+  const cs = detail.classStatus;
+  if (!project || !cs) { panel.hidden = true; state.projectClassFor = null; return; }
+  panel.hidden = false;
+  const summary = $("projectClassSummary");
+  const list = $("projectClassSignals");
+  const select = $("projectClassSelect");
+  const by = $("projectClassBy");
+  const confirmed = cs.confirmation
+    ? ` Confirmed ${esc(cs.confirmation.projectClass)} by ${esc(cs.confirmation.by)}${cs.confirmation.at ? ` on ${esc(String(cs.confirmation.at).slice(0, 10))}` : ""}.`
+    : "";
+  if (summary) {
+    summary.innerHTML = cs.projectClass === "commercial"
+      ? `<strong>Commercial job — held for a person.</strong> Automation does not stage, replay, file or learn from it.${confirmed}`
+      : cs.held
+        ? `<strong>Probably commercial — confirm class.</strong> Automation holds this job until a person confirms it.${confirmed}`
+        : `Residential.${confirmed}`;
+  }
+  if (list) {
+    const shown = cs.projectClass === "commercial" ? [] : (cs.unconfirmed || []);
+    list.innerHTML = shown.map((sig) => `<li>${sig.severity === "blocker" ? "<strong>Blocker:</strong> " : ""}${esc(sig.message)}</li>`).join("");
+    list.hidden = shown.length === 0;
+  }
+  // A half-typed name survives a background re-render of the same project (renderStatusOverride's idiom).
+  const sameProject = state.projectClassFor === project.id;
+  if (select && !sameProject) select.value = cs.projectClass === "commercial" ? "commercial" : "residential";
+  if (by && !sameProject) by.value = "";
+  state.projectClassFor = project.id;
+}
+
+async function confirmProjectClass() {
+  const projectId = state.selectedProjectId;
+  if (!projectId) return;
+  const projectClass = ($("projectClassSelect")?.value || "").trim();
+  const decidedBy = ($("projectClassBy")?.value || "").trim();
+  if (!projectClass) { showMessage("Pick the job's class.", "error"); return; }
+  const btn = $("confirmProjectClassBtn");
+  if (btn) btn.disabled = true;
+  try {
+    await api(`/api/projects/${projectId}/class`, { method: "POST", body: JSON.stringify({ projectClass, decidedBy }) });
+    state.projectClassFor = null;
+    await loadProjects();
+    await selectProject(projectId);
+    showMessage(projectClass === "commercial"
+      ? "Class set to commercial — the job is held for a person."
+      : "Class confirmed residential — recorded with your name.", "info");
+  } catch (err) {
+    showMessage(err.message || "Could not set the class.", "error");
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
 
 function renderStatusOverride() {
   const select = $("statusOverrideSelect");
@@ -4700,6 +4767,7 @@ function renderDetail() {
   safeRender("assignSelect", syncProjectAssignSelect);
   safeRender("nextStep", renderNextStep);
   safeRender("statusOverride", renderStatusOverride);
+  safeRender("projectClass", renderProjectClass);
   safeRender("handoffBanner", renderHandoffBanner);
   safeRender("permitForm", syncPermitForm);
   safeRender("workflow", renderWorkflow);
@@ -5051,9 +5119,61 @@ async function loadSubmittalTracks() {
   } catch {
     state.submittalTracks = null;
   }
+  await loadTrackLookups();
   await loadProjectMilestones();
   updatePortalLoginsSummary();
   syncRecordPermitType();
+}
+
+// THE JOB'S PERMIT-PROCESS AND UTILITY-FILING ROWS (#695), read for the verify control on the track
+// groups (lookup-verify.js). The two GET routes are reads (no lookup runs); a failed read shows no
+// block, never a stale one from another project.
+async function loadTrackLookups() {
+  const projectId = state.selectedProjectId;
+  state.trackLookups = { projectId, "permit-process": null, "utility-filing": null };
+  if (!projectId) return;
+  const read = (kind) => api(`/api/projects/${projectId}/${kind}`).catch(() => null);
+  const [pp, uf] = await Promise.all([read("permit-process"), read("utility-filing")]);
+  if (state.selectedProjectId !== projectId) return;
+  state.trackLookups = { projectId, "permit-process": pp, "utility-filing": uf };
+}
+
+// The verify control's block for one row, '' when the module is missing or the row is not this
+// project's (a reload in flight).
+function trackLookupHtml(kind) {
+  const LV = typeof window !== "undefined" ? window.LookupVerify : null;
+  const tl = state.trackLookups;
+  if (!LV || !tl || tl.projectId !== state.selectedProjectId) return "";
+  return LV.renderLookupVerify(kind, tl[kind]);
+}
+
+// VERIFY A JOB'S PERMIT-PROCESS / UTILITY-FILING ROW (#695): the person-only routes, as the signed-in
+// person (with sign-in off, the name they type). Rule 3: a verification is a named person's
+// attestation, so nothing is written without the confirm. The routes verify the row AS IT STANDS (no
+// body but the name); nothing is sent or filed. Afterwards the project is re-read: a verified process
+// row re-judges QC's document rows on the server.
+async function verifyTrackLookup(kind, btn) {
+  const LV = window.LookupVerify;
+  const projectId = state.selectedProjectId;
+  const payload = state.trackLookups && state.trackLookups.projectId === projectId ? state.trackLookups[kind] : null;
+  if (!LV || !LV.KINDS[kind] || !projectId || !payload || !payload.lookup) return;
+  if (LV.verifyBlockers(kind, payload.lookup).length) return;
+  const name = LV.entityName(kind, payload);
+  const auth = await authForDecision();
+  const verifiedBy = namedPersonConsent(auth, LV.confirmMessage(kind, name), "verified this row", `a ${LV.KINDS[kind].noun} is verified by a named person`);
+  if (verifiedBy == null) return;
+  if (btn) btn.disabled = true;
+  try {
+    await api(`/api/projects/${projectId}/${kind}/verify`, { method: "PUT", body: JSON.stringify(verifiedBy ? { verifiedBy } : {}) });
+  } catch (err) {
+    if (btn) btn.disabled = false;
+    showMessage(`Verify failed: ${err.message}`, "error");
+    return;
+  }
+  showMessage(`Verified — the ${LV.KINDS[kind].noun} for ${name} is recorded as checked by a person.`, "info");
+  try { state.detail = await api(`/api/projects/${projectId}`); } catch { /* the message above says what happened */ }
+  await loadSubmittalTracks();
+  renderDetail();
 }
 
 // Header chip: how many of this project's portals have a saved login. Best-effort.
@@ -5340,7 +5460,7 @@ function trackPaymentHtml(t) {
     <p style="margin:0 0 2px">Login: ${p.loginUsername ? esc(p.loginUsername) : "no login on file for this portal"} · Who pays: ${esc(who)}</p>
     ${app ? `<p style="margin:0 0 2px"><a href="${esc(app)}" target="_blank" rel="noopener">Open the saved application</a></p>` : ""}
     ${p.screenshotUrl ? `<a href="${esc(p.screenshotUrl)}" target="_blank" rel="noopener" title="The fee page as the run saw it (secrets and card fields masked)"><img src="${esc(p.screenshotUrl)}" alt="The portal's fee page" class="review-shot" style="max-width:100%;border:1px solid var(--border);border-radius:var(--radius-sm)" /></a>` : ""}
-    <p class="muted" style="margin:2px 0 0">Pay on the portal, then press Paid below with the record number and the amount paid. Staging this track again is refused while it waits: it would open a second application.</p>
+    <p class="muted" style="margin:2px 0 0">Pay on the portal, then press We paid the portal below with the record number and the amount paid. Staging this track again is refused while it waits: it would open a second application.</p>
     ${trackPaidFormHtml(t)}
   </div>`;
 }
@@ -5355,7 +5475,7 @@ function trackPaidFormHtml(t) {
   return `<div class="track-paid-form" style="display:flex;flex-wrap:wrap;gap:6px;align-items:flex-end;margin:6px 0 2px" data-track-paid-form="${type}">
     <label class="track-field"><span>${esc(numberLabel)}</span><input data-track-paid-field="recordNumber" data-track="${type}" placeholder="as the portal shows it" /></label>
     <label class="track-field"><span>Amount paid ($)</span><input data-track-paid-field="amountPaidUsd" data-track="${type}" inputmode="decimal" placeholder="0.00" /></label>
-    <button type="button" class="primary" data-track-paid="${type}" title="Record that a person paid this fee on the portal. Automation never pays."><i data-lucide="badge-dollar-sign"></i><span>Paid</span></button>
+    <button type="button" class="primary" data-track-paid="${type}" title="Record that a person paid this fee on the portal. Automation never pays."><i data-lucide="badge-dollar-sign"></i><span>We paid the portal</span></button>
   </div>`;
 }
 
@@ -5727,8 +5847,11 @@ function renderSubmittalTracks() {
   // can be worked in either order (do NEM first, then permits, or vice-versa).
   const utility = tracks.filter((t) => t.category === "utility");
   const permits = tracks.filter((t) => t.category === "permit");
-  const group = (title, list) => list.length
-    ? `<div class="track-group"><div class="track-group-head">${esc(title)}</div>${list.map(trackCardHtml).join("")}</div>`
+  // Each group carries the job's row it files by (#695): the AHJ's permit process above the permit
+  // cards, the utility's filing location above the utility card — one row, one control, however many
+  // cards read it.
+  const group = (title, list, lookupKind) => list.length
+    ? `<div class="track-group"><div class="track-group-head">${esc(title)}</div>${trackLookupHtml(lookupKind)}${list.map(trackCardHtml).join("")}</div>`
     : "";
   // THE UTILITY GROUP IS HEADED BY THE TRACK'S OWN PROGRAM (e2e-gap close, 2026-09-26): "Net
   // Metering (NEM)" was hard-coded for every utility — Texas (Oncor) and SRP jobs have no utility
@@ -5736,8 +5859,11 @@ function renderSubmittalTracks() {
   // "Utility net metering (NEM) / interconnection", "… interconnection + export credit (net
   // billing …)", "… interconnection only …", or "… (net-metering program not yet confirmed)");
   // the header repeats that phrase and falls back to the neutral "interconnection".
-  wrap.innerHTML = group(utilityGroupTitle(utility), utility) + group("AHJ — Permit(s)", permits) + closeoutGroupHtml();
+  wrap.innerHTML = group(utilityGroupTitle(utility), utility, "utility-filing") + group("AHJ — Permit(s)", permits, "permit-process") + closeoutGroupHtml();
   bindCloseoutMilestones(wrap);
+  wrap.querySelectorAll("button[data-lookup-verify]").forEach((btn) => {
+    btn.addEventListener("click", () => verifyTrackLookup(btn.dataset.lookupVerify, btn));
+  });
 
   wrap.querySelectorAll("button[data-track-paid]").forEach((btn) => {
     btn.addEventListener("click", () => markTrackPaid(btn.dataset.trackPaid, btn));
@@ -6002,7 +6128,7 @@ async function stageSubmittalTrack(type, btn, autoSubmit = false, extra = null, 
     }
     // A FEE STOP (#576): the payment sentence — amount, portal, pay there. Never MFA wording.
     if (job.result && job.result.status === "awaiting_payment") {
-      showMessage(job.result.message || `${humanize(type)}: payment needed on the portal. Pay there, then press Paid on the track.`, "warning");
+      showMessage(job.result.message || `${humanize(type)}: payment needed on the portal. Pay there, then press We paid the portal on the track.`, "warning");
       await loadSubmittalTracks();
       renderDetail();
       return;
@@ -6374,7 +6500,7 @@ async function markTrackPaid(type, btn) {
   };
   const body = { recordNumber: field("recordNumber"), amountPaidUsd: field("amountPaidUsd") };
   if (!body.recordNumber || !body.amountPaidUsd) {
-    showMessage("Enter the record number and the amount paid on the portal, then press Paid.", "warning");
+    showMessage("Enter the record number and the amount paid on the portal, then press We paid the portal.", "warning");
     return;
   }
   if (btn) btn.disabled = true;
@@ -10019,7 +10145,7 @@ async function prepareSubmission() {
       return;
     }
     if (job.result && job.result.status === "awaiting_payment") {
-      showMessage(job.result.message || "Payment needed on the portal. Pay there, then press Paid on the track.", "warning");
+      showMessage(job.result.message || "Payment needed on the portal. Pay there, then press We paid the portal on the track.", "warning");
       return;
     }
     if (job.result && job.result.status === "paused_for_human") {
@@ -10617,6 +10743,7 @@ $("startAutopilotBtn").addEventListener("click", startAutopilot);
 $("approveSubmitBtn").addEventListener("click", approveAndSubmit);
 $("deleteProjectBtn").addEventListener("click", deleteSelectedProject);
 $("applyStatusOverrideBtn")?.addEventListener("click", applyStatusOverride);
+$("confirmProjectClassBtn")?.addEventListener("click", confirmProjectClass);
 $("addCorrectionBtn").addEventListener("click", addCorrection);
 $("addPermitTargetBtn").addEventListener("click", addPermitTarget);
 $("recordPermitStatusBtn").addEventListener("click", () => recordPermitStatus("manual"));

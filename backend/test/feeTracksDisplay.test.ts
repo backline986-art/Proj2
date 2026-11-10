@@ -53,6 +53,8 @@ const NAMES = [
   // What the recipe will fill that the job has no value for (#445) — trackCardHtml calls it.
   "FEE_RESPONSIBILITY_TEXT", "trackPaymentHtml", "trackPaidFormHtml", "trackFeeDueHtml", "STAGE_GAP_LINK", "trackStageGapsHtml",
   "trackCardHtml", "utilityGroupTitle",
+  // The job's permit-process / utility-filing row above each group (#695); with no window.LookupVerify it draws nothing.
+  "trackLookupHtml",
   // The closeout milestones group (#497) — renderSubmittalTracks draws and binds it.
   "closeoutGroupHtml", "bindCloseoutMilestones", "saveProjectMilestone",
   "renderSubmittalTracks",

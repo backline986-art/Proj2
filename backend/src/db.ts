@@ -3288,6 +3288,41 @@ const VERSIONED_MIGRATIONS: VersionedMigration[] = [
       addColumnIfMissing(db, "utility_filing_lookups", "storage_modes_json", "TEXT NOT NULL DEFAULT ''");
     },
   },
+  {
+    // NOTE FOR THE MERGE (#688): v68 is expected to be worker-673's (#673); this takes v69. Whichever
+    // lands out of order renumbers — nothing else here depends on the number.
+    version: 69,
+    name: "project_class",
+    up: (db) => {
+      // THE JOB'S CLASS (#688; shared/src/projectClass.ts). Every existing row is residential —
+      // the class every job has been worked as until now — and nothing about an existing row's
+      // automation changes unless its own evidence raises a "probably commercial" signal.
+      // project_class_confirmation: a named person's confirmation as JSON ({by, at, projectClass,
+      // signalKeys}); '' = nobody confirmed. Lifecycle-like columns written only by
+      // setProjectClass: not in the edit_version trigger's OF list (v51), so a class decision never
+      // refuses a teammate's open edit.
+      addColumnIfMissing(db, "projects", "project_class", "TEXT NOT NULL DEFAULT 'residential'");
+      addColumnIfMissing(db, "projects", "project_class_confirmation", "TEXT NOT NULL DEFAULT ''");
+    },
+  },
+  {
+    // v70: after #673's v68 and #688's v69 (Helm's final numbering, 2026-11-10).
+    version: 70,
+    name: "submission_payments_gate_collected",
+    up: (db) => {
+      // WHAT THE PER-SUBMISSION GATE ACTUALLY TOOK (#699). The gate used to ask for the
+      // jurisdiction fee + our service fee before staging; it now asks for the service fee only,
+      // and the jurisdiction fee reaches the client on the invoice once its real figure is
+      // recorded (pay-then-rebill). The invoice must show a gate payment as money RECEIVED, not
+      // bill it again, so it has to know what that payment covered.
+      //
+      // Stamped by markSubmissionPaid: the service fee collected. NULL on every row paid before
+      // this column existed, deliberately not back-filled: those payments went through the old
+      // gate, which may also have taken a permit-fee ESTIMATE, and nothing on the row says which.
+      // The invoice treats NULL on a paid row as "ask a person before re-billing the fee".
+      addColumnIfMissing(db, "submission_payments", "gate_collected_usd", "REAL");
+    },
+  },
 ];
 
 /** v47 was edited in place while #218 was open (Helm's review at 0116f98a): a DB that ran an earlier

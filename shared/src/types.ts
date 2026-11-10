@@ -368,6 +368,12 @@ export interface SubmissionPaymentRecord {
   feeRecordedAt: string;
   quotedAt: string;
   paidAt: string | null;
+  /** WHAT THE PER-SUBMISSION GATE ACTUALLY COLLECTED from the client when this row was marked
+   *  paid (#699): the service fee only, since the gate stopped asking for the jurisdiction fee.
+   *  null = not collected through that gate (quoted, waived) or paid BEFORE it recorded this —
+   *  when the gate still asked for permit fee + service fee, so what that payment covered is a
+   *  question for a person, never something an invoice may assume. */
+  gateCollectedUsd: number | null;
   updatedAt: string;
 }
 
@@ -628,7 +634,14 @@ export interface SubmissionPaymentQuote {
   portalFeeRecords: PortalFeeRecordSummary | null;
   paymentMethod: FeePaymentMethod;
   serviceFeeUsd: number;
+  /** What this filing costs in all: the jurisdiction fee plus our service fee. A fact about the
+   *  submission, NOT what the client hands us at the gate — see gateAmountUsd. */
   totalUsd: number | null;
+  /** WHAT THE PER-SUBMISSION GATE COLLECTS (#699): our service fee only. The jurisdiction fee is
+   *  never taken up front (pay-then-rebill): it is paid on the portal and, only when we advanced
+   *  it ('keelix-pays'), reaches the client on the invoice once its real figure is recorded.
+   *  0 when this client is not gated (`required` false). */
+  gateAmountUsd: number;
   payment: SubmissionPaymentRecord | null;
   /** The jurisdiction's bill for this track, itemised — see FeeChargeBreakdown.
    *  Resolved for EVERY quote, like `paymentMethod` and `permitFeeSourceUrl`:
@@ -980,6 +993,75 @@ export interface ProjectRecord {
    *  so the per-job lookup's cited answer about this permit still reaches the view, and makes the
    *  view idempotent (a view of a view is itself). */
   trackView?: { track: string; projectAhj: string; source: "operator" | "lookup" | "state_rule" };
+  /** THE JOB'S CLASS (#688, migration v69): "residential" (every existing row, and every job
+   *  nobody has said otherwise about) or "commercial". A PERSON sets it — at intake or on the
+   *  detail view; a model may suggest it, never set it. A commercial job is HELD for a person:
+   *  no recipe replay, no staging, no automatic filing, no learn, no shared-knowledge write
+   *  (shared/src/projectClass.ts). Optional only because normalizeProject builds an in-memory
+   *  record before any row exists; absent reads as "residential". */
+  projectClass?: ProjectClass;
+  /** A NAMED PERSON'S CONFIRMATION of the class against the "probably commercial" signals that
+   *  stood when they confirmed (each signal's key carries its evidence, so a changed size or service
+   *  raises the flag again). null/absent = nobody has confirmed. */
+  projectClassConfirmation?: ProjectClassConfirmation | null;
+  /** The service as the plan set states it (#688), read from the parser keys `servicePhase` /
+   *  `serviceVoltage` (legacy `phase` / `voltage` / `serviceType` as fallbacks). "" = not stated. */
+  servicePhase?: string;
+  serviceVoltage?: string;
+}
+
+/** #688. Every job is one or the other; unknown stays residential with today's checks. */
+export type ProjectClass = "residential" | "commercial";
+
+export interface ProjectClassConfirmation {
+  /** The person's name (namedPersonDecider), never "operator" / a bot. */
+  by: string;
+  at: string;
+  /** The class they confirmed. */
+  projectClass: ProjectClass;
+  /** The keys (ProjectClassSignal.key) of the signals they confirmed it against. */
+  signalKeys: string[];
+}
+
+/** ONE "PROBABLY COMMERCIAL" SIGNAL (#688): deterministic evidence that the job may not be a
+ *  residential job. `severity` is "blocker" only when the limit it crossed is a verbatim-cited
+ *  per-authority cap (Helm's #637 bar); every other signal is a warning. Either way an UNCONFIRMED
+ *  signal holds the job for a person. */
+export interface ProjectClassSignal {
+  /** Stable code: "occupancy.non_dwelling" | "service.three_phase" | "size.dc_over_cap" | "size.ac_over_cap". */
+  code: string;
+  /** code + the evidence it read, so a confirmation covers exactly what the person saw. */
+  key: string;
+  severity: "warning" | "blocker";
+  /** One sentence naming the evidence (no homeowner data: fields, values, kW, sources). */
+  message: string;
+  /** The project/parser field the evidence came from. */
+  fieldName: string;
+}
+
+/** A RESIDENTIAL SIZE CAP read from per-authority data (#679's eligibility record, when wired):
+ *  the program's own limit with its citation. Absent: the strict default applies as a warning. */
+export interface ResidentialCapCitation {
+  basis: "dc" | "ac";
+  valueKw: number;
+  sourceName: string;
+  sourceUrl: string;
+  /** The source's own words, verbatim; must contain the value for the cap to block. */
+  quote: string;
+}
+
+/** WHERE THE JOB STANDS ON CLASS (#688): what the screen found, what a person confirmed, and
+ *  whether automation must leave the job to a person. */
+export interface ProjectClassStatus {
+  projectClass: ProjectClass;
+  confirmation: ProjectClassConfirmation | null;
+  /** Every signal the screen raised now. */
+  signals: ProjectClassSignal[];
+  /** The signals no person has confirmed (empty once a person confirmed against exactly these). */
+  unconfirmed: ProjectClassSignal[];
+  held: boolean;
+  /** Why the job is held, as one sentence; null when it is not. */
+  holdReason: string | null;
 }
 
 /** The permit tracks an issuing agency can be named for. NEM is never one: a utility files it. */
@@ -1042,6 +1124,7 @@ export type NextStepUrgency = "overdue" | "today" | "waiting" | "done";
 export type NextStepKey =
   | "operator_blocked"
   | "correction_overdue"
+  | "class_held"
   | "portal_paused"
   | "payment_needed"
   | "automation_running"
@@ -3534,6 +3617,8 @@ export interface AuditLog {
 
 export interface ProjectDetail {
   project: ProjectRecord;
+  /** Where the job stands on class (#688): the hold every automation door reads. */
+  classStatus?: ProjectClassStatus;
   qcResults: QcResult[];
   humanReviewItems: HumanReviewItem[];
   corrections: CorrectionRecord[];
