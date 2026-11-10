@@ -215,6 +215,17 @@ export const codeProfileVerifySchema = z.object({
     maxExportKwWithoutStudy: z.number().finite().optional(),
     engineerStampOverKwDc: z.number().finite().optional(),
   }).default({}),
+  // The AHJ's alternative roof-access policy a person checked against its page (review-audit draft 08).
+  // Optional: a verify that sends none stores none (codeProfiles.upsert); shape-checked again there.
+  firePathwayPolicy: z.object({
+    name: z.string().max(200).optional(),
+    arrayAreaMaxSqFt: z.number().finite().positive().max(100000).optional(),
+    ridgeSetbackIn: z.number().finite().positive().max(240).optional(),
+    pathwayWidthIn: z.number().finite().positive().max(240).optional(),
+    pathwaysExemptMaxCoveragePct: z.number().finite().positive().max(100).optional(),
+    sourceUrl: z.string().url().max(500).optional(),
+    quote: z.string().max(600).optional(),
+  }).optional(),
   fireSetbacks: z.array(z.object({
     id: z.string().min(1).max(60),
     description: z.string().min(1).max(500),
