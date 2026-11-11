@@ -881,7 +881,14 @@ async function main(): Promise<void> {
   // ceiling was the 10-document budget — per pass, with two passes per AHJ. The
   // owner's rule: one try per protected page, back off, mark the fee unconfirmed.
   // -------------------------------------------------------------------------
-  type RefusedLedger = ReturnType<typeof newFeeDocumentLedger> & { refused?: Array<{ url: string; host: string; reason: string }> };
+  //
+  // THE SCOPE OF A REFUSAL (fix round 1): one document refused is that document's answer — the
+  // model is told not to ask THAT URL again, and the host's siblings are still read. The SECOND
+  // document refused on the host (or a challenge / notice / 429) is the host refusing: only then
+  // is the model told to stop asking the host. The verdict is documentFetch's own (siteRefused /
+  // refusedHost), never re-derived here from status + reason.
+  // -------------------------------------------------------------------------
+  type RefusedLedger = ReturnType<typeof newFeeDocumentLedger> & { refused?: Array<{ url: string; host: string; reason: string; scope?: string }> };
   const fees = await import("../src/feeSchedules");
   // Optional access ON PURPOSE: with the fix stashed the field and the helper do not exist, and
   // the run must then fail on the window COUNT, not on a TypeError.
@@ -907,13 +914,19 @@ async function main(): Promise<void> {
     stops.push(await openFeeDocument({ url: `${base}/walled-${n}.pdf` }, walledLedger, { launcher: refusingLauncher, timeoutMs: 5_000, browserTimeoutMs: 10_000 }));
   }
   check("THE BITE: ten walled URLs on one host open exactly ONE window", refusingWindows === 1, `${refusingWindows} window(s)`);
-  check("…and the server saw ONE walled request, not ten", walledHits === 1, `${walledHits} hit(s)`);
-  check("the first result already tells the model to stop asking that host", stops[0].includes(STOP), stops[0].slice(0, 300));
-  check("…and names the refusal it is reporting", /refuses automated clients \(/.test(stops[0]) && /403/.test(stops[0]) && /cloudflare/i.test(stops[0]), stops[0].slice(0, 300));
-  check("…and says what to do instead: answer, or found:false naming the host as unconfirmed", /found:false/.test(stops[0]) && /unconfirmed \(bot-protected\)/.test(stops[0]), stops[0].slice(0, 300));
-  check("every later result is the same stop, in the budget-spent shape", stops.slice(1).every((s) => s.includes(STOP) && /^This site refuses automated clients/.test(s)), stops[1]?.slice(0, 200));
+  check("…and the server saw TWO walled requests, not ten (the window's document, and the plain try that proved the host)", walledHits === 2, `${walledHits} hit(s)`);
+  check("the FIRST result reports that one document refused — and does NOT stop the host on one object", !stops[0].includes(STOP) && /^This document refused automated clients/.test(stops[0]) && stops[0].includes(`Do not request ${base}/walled-1.pdf again`), stops[0].slice(0, 300));
+  check("…and names the refusal it is reporting", /refused automated clients \(/.test(stops[0]) && /403/.test(stops[0]) && /cloudflare/i.test(stops[0]), stops[0].slice(0, 300));
+  check("the SECOND document refused is the host refusing: the model is told to stop asking that host", stops[1].includes(STOP) && /^This site refuses automated clients/.test(stops[1]), stops[1]?.slice(0, 300));
+  check("…and says what to do instead: answer, or found:false naming the host as unconfirmed", /found:false/.test(stops[1]) && /unconfirmed \(bot-protected\)/.test(stops[1]), stops[1]?.slice(0, 300));
+  check("every later result is the same stop, in the budget-spent shape", stops.slice(2).every((s) => s.includes(STOP) && /^This site refuses automated clients/.test(s)), stops[2]?.slice(0, 200));
   check("every URL asked is still in `attempted`, so 'hosts tried' reports it", (walledLedger.attempted ?? []).length === 10, String((walledLedger.attempted ?? []).length));
   check("the ledger records each refused call, under the normalised host", refusedOf(walledLedger).length === 10 && refusedOf(walledLedger).every((r) => r.host === host), JSON.stringify(refusedOf(walledLedger).slice(0, 2)));
+  check(
+    "…the first as ONE document's refusal, every later one as the host's",
+    refusedOf(walledLedger)[0]?.scope === "document" && refusedOf(walledLedger).slice(1).every((r) => r.scope === "host"),
+    JSON.stringify(refusedOf(walledLedger).map((r) => r.scope)),
+  );
   check("a refusal is never evidence", walledLedger.evidence.length === 0, String(walledLedger.evidence.length));
   check("the hosts-tried split names the refused host", hostsRefused(walledLedger).length === 1 && hostsRefused(walledLedger)[0] === host, JSON.stringify(hostsRefused(walledLedger)));
 
@@ -944,9 +957,10 @@ async function main(): Promise<void> {
   const otherBase = `http://127.0.0.1:${(answering.address() as AddressInfo).port}`;
   const otherHost = new URL(otherBase).host;
   process.env.DOCUMENT_FETCH_ALLOW_ORIGINS = `${base},${otherBase}`;
-  // The loop passes no launcher, so a wall would open REAL Chromium: the window is switched off,
-  // which also means documentFetch's own back-off never stamps — what stops URLs 2-10 here is the
-  // pass's ledger, the belt to that brace.
+  // The loop passes no launcher, so a wall would open REAL Chromium: the window is switched off for
+  // the process, which makes the plain 403 the best permitted try — documentFetch counts it (the
+  // first as one document, the second as the host), and the pass's ledger stops URLs 3-10 before
+  // documentFetch is even asked.
   process.env.DOCUMENT_FETCH_BROWSER = "0";
   process.env.ANTHROPIC_API_KEY = "sk-ant-stub-key-no-network";
   delete process.env.ANTHROPIC_BASE_URL;
@@ -1002,10 +1016,16 @@ async function main(): Promise<void> {
   const toolResults = new Map<string, string>();
   for (const body of captured) for (const m of body.messages) if (Array.isArray(m.content)) for (const b of m.content) if (b.type === "tool_result" && b.tool_use_id) toolResults.set(b.tool_use_id, String(b.content ?? ""));
   check("the loop ran its three scripted turns", captured.length === 3, `${captured.length} request(s)`);
-  check("the walled host was asked ONCE across ten calls", walledHits === 1, `${walledHits} hit(s)`);
+  check("the walled host was asked TWICE across ten calls (one document, then the one that proved the host)", walledHits === 2, `${walledHits} hit(s)`);
   check(
-    "all ten walled calls came back as the stop, never as 'Document budget spent'",
-    [1, 2, 3, 4, 5, 6, 7, 8, 9, 10].every((n) => (toolResults.get(`tu_${n}`) ?? "").includes(STOP) && !/Document budget spent/.test(toolResults.get(`tu_${n}`) ?? "")),
+    "the first walled call reports that document refused, not the host",
+    /^This document refused automated clients/.test(toolResults.get("tu_1") ?? "") && !(toolResults.get("tu_1") ?? "").includes(STOP),
+    (toolResults.get("tu_1") ?? "(no result)").slice(0, 200),
+  );
+  check(
+    "the other nine came back as the host stop, and none of the ten as 'Document budget spent'",
+    [2, 3, 4, 5, 6, 7, 8, 9, 10].every((n) => (toolResults.get(`tu_${n}`) ?? "").includes(STOP))
+      && [1, 2, 3, 4, 5, 6, 7, 8, 9, 10].every((n) => !/Document budget spent/.test(toolResults.get(`tu_${n}`) ?? "")),
     JSON.stringify([...toolResults.entries()].map(([k, v]) => [k, v.slice(0, 80)])),
   );
   check(
@@ -1022,6 +1042,99 @@ async function main(): Promise<void> {
       && (loopOutcome?.reason ?? "").includes(`hosts that answered: ${otherHost}.`),
     loopOutcome?.reason ?? "(no outcome)",
   );
+
+  // -------------------------------------------------------------------------
+  // 7c. THE SCOPE AT THE PASS (fix round 1). ONE stale link's 403 must not stop
+  //     the host; a window that TIMED OUT is not a refusal at all; and the host
+  //     a stop names is the one that ANSWERED, not the city whose link 302'd.
+  // -------------------------------------------------------------------------
+  const notesOf = (ledger: RefusedLedger, sourceUrl: string): string => {
+    const f = base_finding({ sourceUrl, sourceQuote: "Solar | $200", brackets: [{ feeUsd: 200, label: "Solar" }] });
+    return retrievalNotes(f, ledger, checkQuoteSupport(f, ledger)).join(" | ");
+  };
+
+  // One document refused, its sibling read.
+  documentFetch._resetHostPoliteness?.();
+  refusingWindows = 0;
+  const oneDocLedger: RefusedLedger = newFeeDocumentLedger();
+  const oneDoc = await openFeeDocument({ url: `${base}/walled-1.pdf` }, oneDocLedger, { launcher: refusingLauncher, timeoutMs: 5_000, browserTimeoutMs: 10_000 });
+  const oneDocSibling = await openFeeDocument({ url: `${base}/anc-fees.pdf` }, oneDocLedger, { launcher: refusingLauncher, timeoutMs: 5_000, browserTimeoutMs: 10_000 });
+  check("ONE refused document does not stop the host: the result names the document, not the host", /^This document refused automated clients/.test(oneDoc) && !oneDoc.includes(STOP), oneDoc.slice(0, 300));
+  check("…and the host's sibling document is still READ in the same pass", /HTTP 200/.test(oneDocSibling) && oneDocLedger.evidence.length === 1, oneDocSibling.slice(0, 200));
+  check("…the host is not among the hosts that refused", hostsRefused(oneDocLedger).length === 0, JSON.stringify(hostsRefused(oneDocLedger)));
+  const oneDocNotes = notesOf(oneDocLedger, `${base}/anc-fees.pdf`);
+  check(
+    "…and the stored row names the DOCUMENT as refused (fee UNCONFIRMED from that document), never the host",
+    oneDocNotes.includes(`REFUSED: the document ${base}/walled-1.pdf refused automated clients`) && /fee UNCONFIRMED from that document/.test(oneDocNotes)
+      && !oneDocNotes.includes(`REFUSED: ${host} refused automated clients`),
+    oneDocNotes,
+  );
+  walledHits = 0;
+  const oneDocAgain = await openFeeDocument({ url: `${base}/walled-1.pdf` }, oneDocLedger, { launcher: refusingLauncher, timeoutMs: 5_000, browserTimeoutMs: 10_000 });
+  check("the SAME refused document asked again sends nothing and still does not stop the host", walledHits === 0 && /^This document refused/.test(oneDocAgain) && !oneDocAgain.includes(STOP), `${walledHits} hit(s): ${oneDocAgain.slice(0, 160)}`);
+
+  // A window that TIMES OUT is ours, not the site's.
+  documentFetch._resetHostPoliteness?.();
+  let timingOutWindows = 0;
+  const timingOutLauncher = async () => {
+    timingOutWindows++;
+    return {
+      async visit(url: string) { return { status: 200, html: "<html><body>warm</body></html>", url }; },
+      async fetchInPage(): Promise<{ status: number; contentType: string; bytes: Uint8Array }> { throw new Error("page.evaluate: Timeout 30000ms exceeded."); },
+      async close() { /* nothing to close */ },
+    };
+  };
+  const timeoutLedger: RefusedLedger = newFeeDocumentLedger();
+  const timedOut1 = await openFeeDocument({ url: `${base}/walled-1.pdf` }, timeoutLedger, { launcher: timingOutLauncher, timeoutMs: 5_000, browserTimeoutMs: 10_000 });
+  const timedOut2 = await openFeeDocument({ url: `${base}/walled-2.pdf` }, timeoutLedger, { launcher: timingOutLauncher, timeoutMs: 5_000, browserTimeoutMs: 10_000 });
+  const afterTimeout = await openFeeDocument({ url: `${base}/anc-fees.pdf` }, timeoutLedger, { launcher: timingOutLauncher, timeoutMs: 5_000, browserTimeoutMs: 10_000 });
+  check("a window that TIMED OUT is reported as a failed retrieval, not a refusal", /^Could not retrieve/.test(timedOut1) && /in-page retrieval failed/i.test(timedOut1) && !timedOut1.includes("Do not request"), timedOut1.slice(0, 300));
+  check("…it does NOT stop the pass: the next walled URL on the host is fetched and earns its own window", !timedOut2.includes(STOP) && /^Could not retrieve/.test(timedOut2) && timingOutWindows === 2, `${timingOutWindows} window(s): ${timedOut2.slice(0, 200)}`);
+  check("…and the host's other document is still read", /HTTP 200/.test(afterTimeout), afterTimeout.slice(0, 200));
+  check("…and the ledger holds NO refusal", refusedOf(timeoutLedger).length === 0, JSON.stringify(refusedOf(timeoutLedger)));
+  const timeoutNotes = notesOf(timeoutLedger, `${base}/anc-fees.pdf`);
+  check("…so the stored row carries no REFUSED note", !/REFUSED: /.test(timeoutNotes), timeoutNotes);
+
+  // The city's link 302s onto a vendor object that 403s: the vendor is the one refusing.
+  let vendorHits = 0;
+  const vendor = http.createServer((_req, res) => {
+    vendorHits++;
+    res.writeHead(403, { "content-type": "text/html", server: "Apache" });
+    res.end("<html><head><title>403 Forbidden</title></head><body><h1>Forbidden</h1><p>You don't have permission to access this resource.</p></body></html>");
+  });
+  await new Promise<void>((resolve) => vendor.listen(0, "127.0.0.1", resolve));
+  const vendorBase = `http://127.0.0.1:${(vendor.address() as AddressInfo).port}`;
+  const vendorHost = new URL(vendorBase).host;
+  const city = http.createServer((req, res) => {
+    const m = /^\/link-(\d+)/.exec(req.url || "");
+    if (m) { res.writeHead(302, { location: `${vendorBase}/objects/fees-${m[1]}.pdf` }); res.end(); return; }
+    if ((req.url || "").startsWith("/ok.pdf")) { res.writeHead(200, { "content-type": "application/pdf" }); res.end(Buffer.from(ancPdfBytes)); return; }
+    res.writeHead(404, { "content-type": "text/plain" }); res.end("not found");
+  });
+  await new Promise<void>((resolve) => city.listen(0, "127.0.0.1", resolve));
+  const cityBase = `http://127.0.0.1:${(city.address() as AddressInfo).port}`;
+  const cityHost = new URL(cityBase).host;
+  process.env.DOCUMENT_FETCH_ALLOW_ORIGINS = `${base},${otherBase},${vendorBase},${cityBase}`;
+  documentFetch._resetHostPoliteness?.();
+  refusingWindows = 0;
+  const vendorLedger: RefusedLedger = newFeeDocumentLedger();
+  const v1 = await openFeeDocument({ url: `${cityBase}/link-1` }, vendorLedger, { launcher: refusingLauncher, timeoutMs: 5_000, browserTimeoutMs: 10_000 });
+  const v2 = await openFeeDocument({ url: `${cityBase}/link-2` }, vendorLedger, { launcher: refusingLauncher, timeoutMs: 5_000, browserTimeoutMs: 10_000 });
+  const cityOk = await openFeeDocument({ url: `${cityBase}/ok.pdf` }, vendorLedger, { launcher: refusingLauncher, timeoutMs: 5_000, browserTimeoutMs: 10_000 });
+  const vendorHitsBefore = vendorHits;
+  const v3 = await openFeeDocument({ url: `${cityBase}/link-3` }, vendorLedger, { launcher: refusingLauncher, timeoutMs: 5_000, browserTimeoutMs: 10_000 });
+  await new Promise<void>((resolve) => city.close(() => resolve()));
+  await new Promise<void>((resolve) => vendor.close(() => resolve()));
+  check("a city link onto a vendor 403: one object, so no host stop yet", /^This document refused/.test(v1) && !v1.includes("Do not request any URL on"), v1.slice(0, 300));
+  check(
+    "the second vendor object refused stops the VENDOR, named as the host that answered — never the city",
+    v2.includes(`Do not request any URL on ${vendorHost} again in this pass`) && !v2.includes(`Do not request any URL on ${cityHost}`),
+    v2.slice(0, 300),
+  );
+  check("…the ledger counts the refusal against the vendor", refusedOf(vendorLedger).every((r) => r.host === vendorHost) && hostsRefused(vendorLedger).join(",") === vendorHost, JSON.stringify(refusedOf(vendorLedger)));
+  check("…and the city's own document is still read", /HTTP 200/.test(cityOk), cityOk.slice(0, 200));
+  check("…and a third city link onto the backed-off vendor sends the vendor nothing", vendorHits === vendorHitsBefore && v3.includes(`Do not request any URL on ${vendorHost}`), `${vendorHits - vendorHitsBefore} vendor hit(s): ${v3.slice(0, 200)}`);
+  process.env.DOCUMENT_FETCH_ALLOW_ORIGINS = `${base},${otherBase}`;
 
   await new Promise<void>((resolve) => server.close(() => resolve()));
   db.close();
