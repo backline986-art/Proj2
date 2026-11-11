@@ -147,4 +147,7 @@ function main(): void {
   console.log(`\nwritten: ${file}${path.resolve(file) !== latest ? " and latest.json" : ""}`);
 }
 
-main();
+// Only run the CLI when this file IS the entry point; outcomeFromBundle is imported by the unit
+// test (rescoreBenchmark.test.ts), which must not rescore a scorecard on import.
+const invokedDirectly = process.argv[1] ? process.argv[1].replace(/\\/g, "/").endsWith("rescoreBenchmark.ts") : false;
+if (invokedDirectly) main();
