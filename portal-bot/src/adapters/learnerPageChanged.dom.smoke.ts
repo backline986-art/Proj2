@@ -51,6 +51,16 @@
 //                time with the box present), and the signer is typed on that second look, bound
 //                with no literal. Before (c), the pass typed by the live marks into a box no
 //                inventory had seen — the City of Star failure without the tile.
+//   H. sigOnlyReview - (#131 round 2, RULE 1) a run whose ONLY recorded fills are the bot's own
+//                e-signature (a prefilled or continued flow: the signer page, then review), and
+//                whose review page is a no-field summary whose prose names "Terms and Conditions"
+//                beside an enabled Submit. "Has this run entered form data?" (the honesty question)
+//                and "is the walk still before the application's first entry?" (the entry-
+//                disclaimer door) are DIFFERENT questions: when the first answered the second, the
+//                typed signer no longer counted as entry, the review page read as the entry
+//                disclaimer, and c2a' converted the planner's final submit into an advance and
+//                CLICKED it. MUST: Submit is never clicked; it is recorded as the final submit;
+//                the run reaches review; no entry_disclaimer_pass_through event.
 //
 // Run: npx tsx portal-bot/src/adapters/learnerPageChanged.dom.smoke.ts
 import "../smokeArtifactDirs";
@@ -167,18 +177,38 @@ const LATE_SIG_FORM = `<!doctype html><html><head><title>Solar Permit</title></h
   </script>
 </body></html>`;
 
+// H: the signer-only flow. The signature page carries nothing but the Signature Name box and
+// Next; the review page is a no-field summary whose prose names the Terms and Conditions, with
+// Back and an ENABLED Submit that marks the filing in sessionStorage. The planner names Submit as
+// the final submit (atReview) — the walk must record it and never click it.
+const SIGN_PAGE = `<!doctype html><html><head><title>Sign</title></head><body>
+  <h1>Electronic Signature</h1>
+  <p>Type your name below as consent to electronically sign this application.</p>
+  <div><label for="signame">Signature Name</label><input type="text" id="signame" name="signame"></div>
+  <button type="button" id="next" onclick="location.href='/sig-review'">Next</button>
+</body></html>`;
+const SIG_REVIEW_PAGE = `<!doctype html><html><head><title>Review</title></head><body>
+  <h1>Review and Submit</h1>
+  <p>Review your application below. By clicking Submit you agree to the Terms and Conditions of the program.</p>
+  <table><tr><td>System size</td><td>7.2 kW</td></tr></table>
+  <button type="button" id="back" onclick="history.back()">Back</button>
+  <button type="button" id="submit" onclick="sessionStorage.setItem('submitted','1'); document.body.insertAdjacentHTML('beforeend','<p id=done>Application submitted.</p>')">Submit</button>
+</body></html>`;
+
 const server = http.createServer((req, res) => {
   const u = new URL(req.url || "/", "http://127.0.0.1");
   res.writeHead(200, { "content-type": "text/html" });
   if (u.pathname.startsWith("/portalhome")) { res.end(TILE_HOME); return; }
   if (u.pathname.startsWith("/new-permit/")) { res.end(TILE_FORM); return; }
   if (u.pathname.startsWith("/late-sig")) { res.end(LATE_SIG_FORM); return; }
+  if (u.pathname.startsWith("/sig-sign")) { res.end(SIGN_PAGE); return; }
+  if (u.pathname.startsWith("/sig-review")) { res.end(SIG_REVIEW_PAGE); return; }
   res.end(u.pathname.startsWith("/app/") ? APP : DASHBOARD);
 });
 await new Promise<void>((r) => server.listen(0, "127.0.0.1", () => r()));
 const base = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
 
-type Mode = "entry" | "moved" | "blank" | "stubborn" | "tile" | "tileNoFills" | "lateSig";
+type Mode = "entry" | "moved" | "blank" | "stubborn" | "tile" | "tileNoFills" | "lateSig" | "sigOnlyReview";
 const VALUES: Record<string, string> = { Name: "Test Solar Co", Address: "100 Example Way, Testville", Phone: "555-0100" };
 const TILE_VALUES = { desc: "Roof-mounted solar PV, 7.2 kW DC", value: "21000" };
 const SIGNER = "Dana Signer";
@@ -189,6 +219,7 @@ async function walk(mode: Mode): Promise<void> {
   console.log(`\n[${mode}]`);
   const tile = mode === "tile" || mode === "tileNoFills";
   const late = mode === "lateSig";
+  const sigOnly = mode === "sigOnlyReview";
   const ctx = await chromium.launch().then((b) => b.newContext().then((c) => ({ b, c })));
   await ctx.c.addInitScript({ content: "globalThis.__name = globalThis.__name || ((f) => f);" });
   ctx.c.setDefaultTimeout(8000);
@@ -198,6 +229,13 @@ async function walk(mode: Mode): Promise<void> {
   const offered: Array<{ url: string; labels: string[]; isDashboard: boolean }> = [];
   let movedOnce = false;
   const planner: LearnPlanner = async (req) => {
+    if (sigOnly) {
+      offered.push({ url: String(req.url ?? ""), labels: req.fields.map((f) => String(f.label ?? "")), isDashboard: req.isDashboard === true });
+      const idx = (re: RegExp): number => req.fields.findIndex((f) => f.fieldType === "button" && re.test(String(f.label ?? "").trim()));
+      // The planner reads the review page as review and names its Submit as the final submit.
+      if (/\/sig-review/.test(String(req.url ?? ""))) return { fills: [], atReview: true, finalSubmitSelectorIndex: idx(/^submit$/i) };
+      return { fills: [], atReview: false, advanceSelectorIndex: idx(/^next$/i) };
+    }
     if (late) {
       offered.push({ url: String(req.url ?? ""), labels: req.fields.map((f) => String(f.label ?? "")), isDashboard: req.isDashboard === true });
       const fills = [
@@ -242,10 +280,10 @@ async function walk(mode: Mode): Promise<void> {
       .filter((f) => f.selectorIndex >= 0);
     return { fills, atReview: false, ...(nextIdx >= 0 ? { advanceSelectorIndex: nextIdx } : {}) };
   };
-  await page.goto(tile ? `${base}/portalhome` : late ? `${base}/late-sig` : `${base}/`);
+  await page.goto(tile ? `${base}/portalhome` : late ? `${base}/late-sig` : sigOnly ? `${base}/sig-sign` : `${base}/`);
   // The tile portal has an e-signature box: the client record's signer (synthetic) is who the
   // bot may sign as; without one the signature pass pauses the run before anything to observe.
-  const adapter = new AutoLearnAdapter("Page Changed Smoke", planner, { maxPages: 8, ...(tile || late ? { contactIdentity: { signerName: SIGNER, lastName: "Signer" } } : {}) });
+  const adapter = new AutoLearnAdapter("Page Changed Smoke", planner, { maxPages: 8, ...(tile || late || sigOnly ? { contactIdentity: { signerName: SIGNER, lastName: "Signer" } } : {}) });
   (adapter as unknown as { page: unknown }).page = page;
   const T0 = Date.now();
   let r: Awaited<ReturnType<AutoLearnAdapter["learn"]>> | null = null;
@@ -259,9 +297,31 @@ async function walk(mode: Mode): Promise<void> {
     const v = (id: string): string => { const el = document.getElementById(id) as HTMLInputElement | null; return el ? (el.type === "checkbox" ? String(el.checked) : el.value) : "(absent)"; };
     return { path: location.pathname, desc: v("desc"), value: v("value"), consent: v("consent"), signame: v("signame") };
   }).catch(() => ({ path: "(unreadable)", desc: "", value: "", consent: "", signame: "" }));
+  // H: did anything click the review page's Submit? The page marks a filing in sessionStorage.
+  const submitted = await page.evaluate(() => sessionStorage.getItem("submitted")).catch(() => "(unreadable)");
   await ctx.b.close().catch(() => null);
   if (!r) return;
   const steps: RecipeStep[] = r.steps ?? [];
+  if (sigOnly) {
+    const noteOf = (s: RecipeStep): string => String(s.note ?? "");
+    const runDir = (adapter as unknown as { debug: { dir: string } | null }).debug?.dir;
+    const events = runDir ? fs.readFileSync(path.join(runDir, "events.jsonl"), "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l) as { type?: string; page?: number }) : [];
+    const trace = `pageTrace=${JSON.stringify(r.pageTrace ?? [])} offered=${JSON.stringify(offered.map((o) => `${o.url.replace(base, "")}: ${o.labels.join("|").slice(0, 120)}`))} ` +
+      `steps=${JSON.stringify(steps.map((s) => `${s.action}:${noteOf(s).slice(0, 50)}${s.isFinalSubmit ? " [isFinalSubmit]" : ""}`))} submitted=${String(submitted)} path=${form.path} ` +
+      `reachedReview=${String(r.reachedReview)} ok=${String(r.ok)} events=${JSON.stringify(events.filter((e) => /entry_disclaimer|terminal|review|advance/.test(String(e.type))).map((e) => `${e.type}@p${e.page ?? "?"}`))} message=${String(r.message ?? "").slice(0, 240)}`;
+    const sigAt = steps.findIndex((s) => s.action === "fill" && /^e-signature:/.test(noteOf(s)));
+    const last = steps[steps.length - 1];
+    check("sigOnlyReview: RULE 1 — the review page's Submit is never clicked (sessionStorage.submitted stays null)", submitted === null, trace);
+    check("sigOnlyReview: MUST the Submit is recorded as the final submit, un-clicked, and the walk reaches review",
+      !!last && last.isFinalSubmit === true && /submit/i.test(noteOf(last)) && r.reachedReview === true, trace);
+    check("sigOnlyReview: no step clicks Submit as an advance", !steps.some((s) => s.action === "click" && !s.isFinalSubmit && /^advance: Submit/i.test(noteOf(s))), trace);
+    check("sigOnlyReview: the review page is never read as the entry disclaimer", !events.some((e) => e.type === "entry_disclaimer_pass_through"), trace);
+    check("sigOnlyReview: the signer was typed before review, bound to authorizedSignerName with no literal",
+      sigAt >= 0 && steps[sigAt].field === "authorizedSignerName" && steps[sigAt].value === undefined && !JSON.stringify(steps).includes(SIGNER), trace);
+    check("sigOnlyReview: the honesty answer still holds — the e-signature alone is not form data (filledSomething false)", r.filledSomething === false, trace);
+    console.log(`  (took ${Math.round((Date.now() - T0) / 1000)} s)`);
+    return;
+  }
   if (late) {
     const noteOf = (s: RecipeStep): string => String(s.note ?? "");
     const trace = `pageTrace=${JSON.stringify(r.pageTrace ?? [])} offered=${JSON.stringify(offered.map((o) => `${o.url.replace(base, "")}: ${o.labels.join("|").slice(0, 160)}`))} ` +
@@ -360,7 +420,7 @@ async function walk(mode: Mode): Promise<void> {
 }
 
 try {
-  for (const m of (process.env.ONLY_MODES ? process.env.ONLY_MODES.split(",") : ["entry", "moved", "blank", "stubborn", "tile", "tileNoFills", "lateSig"]) as Mode[]) await walk(m);
+  for (const m of (process.env.ONLY_MODES ? process.env.ONLY_MODES.split(",") : ["entry", "moved", "blank", "stubborn", "tile", "tileNoFills", "lateSig", "sigOnlyReview"]) as Mode[]) await walk(m);
 } finally {
   server.close();
   fs.rmSync(process.env.AUTOLEARN_RUN_DIR!, { recursive: true, force: true });

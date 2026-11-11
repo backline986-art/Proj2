@@ -7535,9 +7535,9 @@ export class AutoLearnAdapter extends BasePortalAdapter {
       // checkbox) ALSO describes Accela's T&C page at the very START of the wizard
       // (CapApplyDisclaimer: terms text + agree box + "Continue Application »") — the live
       // Salem run stopped there at page 2 and promoted an EMPTY recipe to trusted. A true
-      // review/submit screen cannot precede the first recorded fill: when nothing has been
-      // filled yet and the page reads as terms/disclaimer, it is a pass-through page
-      // (accept + continue), never review.
+      // review/submit screen cannot precede the application's first entry: when the walk has
+      // entered nothing yet (beforeFirstEntry, below) and the page reads as terms/disclaimer,
+      // it is a pass-through page (accept + continue), never review.
       const disclaimerish =
         /disclaimer|(^|\/)terms/i.test(url) ||
         /terms and conditions/i.test((bodyText || "").slice(0, 4000));
@@ -7550,6 +7550,19 @@ export class AutoLearnAdapter extends BasePortalAdapter {
       // wizard still re-arms the guard through its earlier genuine fills.
       // (formDataEnteredThisRun — the one form-data question — is declared with the loop state.)
       const anyFormMutationRecorded = formDataEnteredThisRun();
+      // THE ONE "IS THE WALK STILL BEFORE THE APPLICATION'S FIRST ENTRY?" QUESTION (#131 round 2,
+      // rule 1). A DIFFERENT question from "has this run entered form data?": the bot's own typed
+      // e-signature is not THIS project's data (the honesty answer), but it IS an entry into the
+      // application — the walk is past the entry disclaimer once it has signed. When the honesty
+      // answer alone armed these doors, a signer-only run (a prefilled or continued flow) reached a
+      // no-field review page whose prose named "Terms and Conditions", read it as the ENTRY
+      // disclaimer, and c2a' converted the planner's final submit into an advance and clicked it.
+      // Run-scoped by the recorded e-signature steps (signatureDone is this iteration's alone),
+      // and never before an entry this run did not make: an opened draft (continuedDraft) or a
+      // record's signature (signatureCheck) carries entries, so the walk is past the start there
+      // too. Asked by the existing-notice guard, the entry-disclaimer door and the interstitial.
+      const beforeFirstEntry = !anyFormMutationRecorded && !steps.some(isESignatureStep)
+        && !this.continuedDraft && !this.signatureCheck && !signatureDone;
       // c2-) A PAGE THAT NAMES AN APPLICATION ALREADY IN PROGRESS IS NEVER RESUMED ON A PLANNER'S SAY-SO
       //      (#351). After the permit-type tile a portal can show a no-field notice — "You have an
       //      application in progress. Draft 2026-0141, 77 Other Ave." — whose Continue opens that
@@ -7562,7 +7575,7 @@ export class AutoLearnAdapter extends BasePortalAdapter {
       //      Resume, the draft's link, the interstitial pass's forward, no plan at all — stops the
       //      walk and names the notice; offered a start-new control the planner did not take, it is
       //      asked once more first. Before c2i (the interstitial's forward) and every other door.
-      if (!hasFillable && !anyFormMutationRecorded && !this.continuedDraft && !this.signatureCheck && !signatureDone) {
+      if (!hasFillable && beforeFirstEntry) {
         // Read from the page's visible LINES (a menu line never runs into the notice), secrets this run
         // knows scrubbed; the line the person reads is then redacted like any status text.
         const read = readExistingApplicationNotice(this.scrubSecrets(await visibleBodyText(this.page))) ?? readExistingApplicationNotice(bodyText);
@@ -7597,7 +7610,7 @@ export class AutoLearnAdapter extends BasePortalAdapter {
           }
         }
       }
-      const entryDisclaimer = disclaimerish && !anyFormMutationRecorded;
+      const entryDisclaimer = disclaimerish && beforeFirstEntry;
       // c2i) AN INFORMATION INTERSTITIAL IS NOT THE REVIEW SCREEN (#341). Portland DevHub, live
       //      2026-10-14: the page behind the "Solar Permit Request" tile is prose ("This is a
       //      permit request only. A Permit Tech will review your submission … click Continue.
@@ -7631,8 +7644,7 @@ export class AutoLearnAdapter extends BasePortalAdapter {
       const reviewShaped = hasSubmitIntentBtn || hasAcceptTermsCheckbox || looksLikeReviewUrl(url)
         || fields.some((f) => f.fieldType === "button" && onPageControl(f) && isFinalSubmitControl(f.label));
       const plannerSaidReview = plan.atReview === true;
-      const interstitial = !hasFillable && !reviewShaped && !anyFormMutationRecorded && !entryDisclaimer
-        && !this.continuedDraft && !this.signatureCheck && !signatureDone
+      const interstitial = !hasFillable && !reviewShaped && beforeFirstEntry && !entryDisclaimer
         && !this.formPageSeen
         && steps.some((s) => /^(application entry|permit type):/.test(String(s.note ?? "")))
         && (!isDashboard || plannerSaidReview);
