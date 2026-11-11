@@ -1000,6 +1000,8 @@ async function runClaimedJob(db: AppDb, job: JobRecord): Promise<boolean> {
           profileKey: outcome.profileKey, track: outcome.track, discipline,
           refusedVerified: outcome.refusedVerified, refusedConflicted: outcome.refusedConflicted,
           reason: outcome.reason || undefined,
+          // The documents a pass that saved nothing could not get: a person reads them (feeNeedsPerson).
+          ...(outcome.unread?.length ? { unread: outcome.unread } : {}),
         };
         // The attempt is a visible fact either way (the cold-start portal-URL
         // research does the same): a save says where the fee sheet's new number came

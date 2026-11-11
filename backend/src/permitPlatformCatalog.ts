@@ -798,11 +798,25 @@ export function extractCodeEditions(page: Pick<ReadPage, "ok" | "finalUrl" | "te
 const FEE_LINK = /fee schedule|master fee|fees? (?:and|&) charges|permit fees?|fee resolution|fee table|schedule of fees/i;
 const CHECKLIST_LINK = /checklist|submittal|solar|photovoltaic|\bpv\b|application requirements|required documents/i;
 export const DOCUMENT_URL = /\.pdf(?:$|[?#])|showpublisheddocument|\/documentcenter\/view\/|\/weblink\/|\/edoc\//i;
+/** The document's OWN file name as words (documentSlugWords), "" when the address is not a document
+ *  or its last segment is an id. */
+function feeDocumentNameWords(href: string): string {
+  if (!DOCUMENT_URL.test(href)) return "";
+  const words = documentSlugWords(href);
+  return /[a-z]{3}/i.test(words) ? words : "";
+}
+/** A FEE SCHEDULE NAMED BY ITS LINK'S WORDS OR BY ITS OWN FILE NAME. Measured on saved pages (fee
+ *  round, 2026-11): an agency's building page links its fee schedule as "CLICK HERE" / "PDF", so the
+ *  words alone never named it and the schedule was never read. The document's own file name is the
+ *  agency's naming of it; only a document address has one (a page path is navigation, not a name). */
+function namesFeeSchedule(words: string, href: string): boolean {
+  return FEE_LINK.test(words) || FEE_LINK.test(feeDocumentNameWords(href));
+}
 /** A fee schedule, a solar checklist / submittal requirement, or neither — by the words naming it
  *  (a link's text or a search result's title) and, for a checklist, its being a document or naming
  *  a checklist (a "Solar" news page is neither). */
 export function classifyDocument(words: string, href: string): "fees" | "checklist" | null {
-  if (FEE_LINK.test(words)) return staleOrOtherFeeSource(words, href) ? null : "fees";
+  if (namesFeeSchedule(words, href)) return staleOrOtherFeeSource(words, href) ? null : "fees";
   // A checklist is a SOLAR one (a deck or fence submittal guide is another job's).
   if (CHECKLIST_LINK.test(words) && /solar|photo-?voltaic|\bpv\b/i.test(words) && (DOCUMENT_URL.test(href) || /checklist|submittal|requirement|guide/i.test(words))) return "checklist";
   return null;
@@ -842,6 +856,32 @@ export function staleOrOtherFeeSource(words: string, href: string, now = new Dat
   if (years.length && Math.max(...years) < now) return `a prior-year schedule (${Math.max(...years)})`;
   if (OTHER_FEE_KIND.test(both) && !JOB_FEE_KIND.test(both)) return "a schedule for another permit kind";
   return null;
+}
+const NAMES_NO_OFFICE = /^(?:(?:fy|fees?|schedules?|of|and|the|charges|rates?|resolution|update[ds]?|approved|adopted|amended|revised|current|effective|final|pdf|click|here|view|download|city|county|town|village)\s*)+$/i;
+/** THE FEE SCHEDULES AN AGENCY'S PAGES LINK THAT KEELIX WILL NOT RELY ON: archived, superseded or
+ *  dated to a prior year (staleOrOtherFeeSource), on the agency's own pages. Never read as this job's
+ *  schedule; each is a named item for a PERSON, who can see whether the agency still charges it
+ *  (fee round, 2026-11: a city's only solar fee guide is dated years back and still linked). Another
+ *  permit kind's schedule is not one. */
+export function datedFeeScheduleLinks(pages: ReadPage[], names: string[], state?: string, now = new Date().getFullYear()): Array<{ url: string; reason: string }> {
+  const out: Array<{ url: string; reason: string }> = [];
+  for (const page of pages) {
+    if (!page.ok || page.kind !== "html") continue;
+    const dom = registrableDomain(portalHostOf(page.finalUrl));
+    for (const l of page.links) {
+      const host = portalHostOf(l.href);
+      if (!host || (registrableDomain(host) !== dom && !isOfficialAgencyHost(host, names, state))) continue;
+      if (!namesFeeSchedule(l.text, l.href)) continue;
+      const why = staleOrOtherFeeSource(l.text, l.href, now);
+      if (!why || /another permit kind/.test(why)) continue;
+      // This job's kind of schedule, or one that names no office at all ("Fee Schedule 2023"): a
+      // clerk's, a library's or an impact-fee schedule is another office's, not a lead for this fee.
+      const both = `${l.text} ${feeDocumentNameWords(l.href)}`;
+      if (!JOB_FEE_KIND.test(both) && !NAMES_NO_OFFICE.test(both.replace(/[^a-z]+/gi, " ").trim())) continue;
+      if (!out.some((o) => o.url === l.href)) out.push({ url: l.href, reason: `the agency's page links this fee schedule, but it is ${why}: Keelix does not rely on it` });
+    }
+  }
+  return out.slice(0, 3);
 }
 /** Current-year solar / building schedules first, then a master schedule, then the rest. */
 function feeRank(words: string, href: string, now = new Date().getFullYear()): number {

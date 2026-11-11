@@ -309,6 +309,18 @@ export interface FeeScheduleSource {
   documentDateIso: string;
   /** What THIS document printed, before anything was merged or tagged. */
   brackets: FeeBracket[];
+  /** WHEN KEELIX READ THIS DOCUMENT (ISO), "" when nobody can say. Stamped by saveFeeSchedule only
+   *  where the bytes were retrieved by this process (a research ledger) or the caller states the
+   *  read time (a lookup's own lookedUpAt): a hand-applied finding with no date stays "", never
+   *  the save time dressed up as a read. The row's updated_at is NOT this: a refused re-research
+   *  appends a note and moves it. Optional so a source built as a literal still types. */
+  fetchedAt?: string;
+}
+
+/** The read date a fee row can state: the most recent of its sources' own, "" when none carries one. */
+export function feeSourceReadAt(schedule: Pick<FeeScheduleRecord, "sources"> | null | undefined): string {
+  const dates = (schedule?.sources ?? []).map((x) => clean(x.fetchedAt)).filter(Boolean).sort();
+  return dates[dates.length - 1] ?? "";
 }
 
 export interface FeeScheduleRecord {
@@ -481,6 +493,10 @@ export interface FeeScheduleResearchOutcome {
    *  permit-process lookup had already landed a cited fee for this AHJ + discipline (its row is
    *  `schedule`). Distinct from found:false so a skip can never read as a miss. */
   skipped?: "lookup_fee_landed";
+  /** DOCUMENTS THIS PASS ASKED FOR AND DID NOT GET (fee round, 2026-11): on a pass that saved
+   *  nothing, every URL research tried that came back with no bytes. A person reads them; the
+   *  fee quote lists them (feeNeedsPerson). Public agency addresses only. */
+  unread?: Array<{ url: string; reason: string }>;
 }
 
 export interface ProjectFeeResolution {
@@ -503,6 +519,9 @@ export interface ProjectFeeResolution {
    *  about how the money moves, which is a fact about the schedule, not the
    *  bracket. */
   sourceQuote: string;
+  /** When Keelix read the source(s) behind this amount: the oldest line's read date, "" unless
+   *  every line states one. */
+  sourceReadAt?: string;
   /** THE EVIDENCE FOR *THIS AMOUNT*, verbatim, and the only quote that may be
    *  shown beside it. "" when the total is made of more than one permit: no
    *  single published line supports a sum that no document anywhere prints. */
@@ -580,6 +599,8 @@ export interface FeeScheduleLine {
   /** Present only when this bracket was found printed in the cited document. */
   corroboration?: FeeBracketCorroboration;
   confidence: FeeConfidence;
+  /** When Keelix read the source behind this line (feeSourceReadAt), "" when the row cannot say. */
+  sourceReadAt?: string;
   /** True when this amount was computed from a per-watt ESTIMATED valuation rather than a
    *  contract figure. The schedule can be perfect and the answer still a guess. */
   valuationEstimated?: boolean;
@@ -941,6 +962,12 @@ function parseSources(raw: unknown): FeeScheduleSource[] {
   return normalizeSources(parsed);
 }
 
+/** An ISO instant as stored ("2026-11-11T20:23:15.000Z"), or "" for anything else. */
+function isoInstant(value: unknown): string {
+  const v = clean(value).slice(0, 30);
+  return /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/.test(v) && Number.isFinite(Date.parse(v)) ? v : "";
+}
+
 function normalizeSources(raw: unknown[]): FeeScheduleSource[] {
   const out: FeeScheduleSource[] = [];
   for (const item of raw) {
@@ -957,6 +984,7 @@ function normalizeSources(raw: unknown[]): FeeScheduleSource[] {
       // the comparable date can never disagree about the same document.
       documentDateIso: isoForDocumentDate(documentDate),
       brackets: normalizeBrackets(Array.isArray(s.brackets) ? s.brackets : []),
+      ...(isoInstant(s.fetchedAt) ? { fetchedAt: isoInstant(s.fetchedAt) } : {}),
     });
     if (out.length >= 8) break;
   }
@@ -1370,6 +1398,10 @@ export function saveFeeSchedule(
      *  maximum (the state's cited fee record, stateFeeRules). Attached to every bracket whose label
      *  does not already include surcharges, after the same check against that record (#674). */
     citedStateSurcharge?: { percent: number; quote: string; sourceUrl: string };
+    /** WHEN THE CITED SOURCE WAS READ, stated by a caller that read it itself (a lookup's own
+     *  lookedUpAt). A research pass needs not say: its ledger is this process's own retrieval and
+     *  the save time is the read time. With neither, the sources carry no read date. */
+    fetchedAt?: string;
   } = {},
 ): FeeScheduleResearchOutcome {
   const track = input.track;
@@ -1488,6 +1520,9 @@ export function saveFeeSchedule(
       brackets,
     });
   }
+  // THE READ DATE, where one can honestly be stated (FeeScheduleSource.fetchedAt).
+  const readAt = isoInstant(opts.fetchedAt) || (opts.corroborateAgainst?.evidence.length ? ts : "");
+  if (readAt) for (const src of sources) if (!src.fetchedAt) src.fetchedAt = readAt;
 
   const notes = mergeNotes(existing?.notes, noteSegments(finding.notes));
   // A schedule that says nothing about payment does not erase what the row already
@@ -1597,6 +1632,9 @@ export interface FeeDocumentLedger {
    *  that refused us are the half of that sentence `evidence` cannot supply.
    *  Optional so a ledger built as a literal (tests, older callers) still types. */
   attempted?: string[];
+  /** The asks that came back with no bytes, each with the reason the fetch gave (fee round,
+   *  2026-11): what a pass that saved nothing hands a person to read (feeDocumentsNotRetrieved). */
+  notRetrieved?: Array<{ url: string; reason: string }>;
 }
 
 export function newFeeDocumentLedger(): FeeDocumentLedger {
@@ -1796,12 +1834,14 @@ export async function openFeeDocument(
   try {
     doc = await fetchPublicDocument(url, opts);
   } catch (err) {
+    (ledger.notRetrieved ??= []).push({ url, reason: err instanceof Error ? err.message : String(err) });
     return `Could not retrieve ${url}: ${err instanceof Error ? err.message : String(err)}`;
   }
   if (!doc.ok || !doc.bytes) {
     // The reason names what blocked us — status, Server header, whether a real
     // window was tried. That is a fact about this jurisdiction worth reporting
     // in notes, so it goes to the model rather than being flattened to "failed".
+    (ledger.notRetrieved ??= []).push({ url, reason: clean(doc.reason) });
     return `Could not retrieve ${url}. ${doc.reason}`;
   }
 
@@ -3190,6 +3230,21 @@ export async function researchFeeSchedule(
       return { found: true, saved: false, refusedVerified: false, refusedConflicted: false, profileKey, track, schedule: landed.schedule, finding: null, skipped: "lookup_fee_landed", reason };
     }
   }
+  // THE SAME FOR A UTILITY (fee round, 2026-11): the utility lookup now lands the application fee it
+  // read on the utility's own page (utilityFeeLanding). While that row stands as the lookup wrote
+  // it, a second paid search for the same fee is skipped, named the same way.
+  if (track === "nem") {
+    try {
+      const { getUtilityFilingLookup } = await import("./utilityFilingLookup");
+      const { lookupLandedUtilityFee } = await import("./utilityFeeLanding");
+      const landed = lookupLandedUtilityFee(getFeeSchedule(db, profileKey, "nem", ""), getUtilityFilingLookup(db, clean(input.state), subject));
+      if (landed) {
+        const reason = `Skipped — no research ran: the utility lookup already landed a cited application fee for ${subject} (${landed.summary}) from ${landed.schedule.sourceUrl}; the fee sheet shows that fee and its source.`;
+        logger.info("fees", "fee research skipped — the utility lookup already landed this fee", { profileKey, track, sourceUrl: landed.schedule.sourceUrl });
+        return { found: true, saved: false, refusedVerified: false, refusedConflicted: false, profileKey, track, schedule: landed.schedule, finding: null, skipped: "lookup_fee_landed", reason };
+      }
+    } catch { /* the lookup is optional here: research runs as before */ }
+  }
   // Seed the search with what the KB already holds — several permit_utility_knowledge
   // rows carry the AHJ's own fee-page URL in their notes, which is the page we want.
   let knownContext: string | undefined;
@@ -3232,7 +3287,26 @@ export async function researchFeeSchedule(
   // The caller's discipline travels on the INPUT side of saveFeeSchedule, where it
   // wins over anything the researcher inferred — the row that lands is keyed to the
   // permit the caller asked to price (see FeeScheduleResearchInput.discipline).
-  return saveFeeSchedule(db, { state: input.state, ahj: input.ahj, utility: input.utility, track, discipline: input.discipline }, finding, { corroborateAgainst: ledger });
+  const outcome = saveFeeSchedule(db, { state: input.state, ahj: input.ahj, utility: input.utility, track, discipline: input.discipline }, finding, { corroborateAgainst: ledger });
+  // A PASS THAT SAVED NOTHING NAMES WHAT IT COULD NOT READ, so a person knows which document to open.
+  if (!outcome.saved && !outcome.refusedVerified && !outcome.refusedConflicted) {
+    const unread = feeDocumentsNotRetrieved(ledger);
+    if (unread.length) outcome.unread = unread;
+  }
+  return outcome;
+}
+
+/** Every document this pass asked for that came back with no bytes and was not retrieved on a
+ *  later ask (FeeDocumentLedger.notRetrieved), in the order tried, with the fetch's own reason. */
+export function feeDocumentsNotRetrieved(ledger: FeeDocumentLedger): Array<{ url: string; reason: string }> {
+  const key = (u: string) => clean(u).replace(/[#?].*$/, "").replace(/\/+$/, "").toLowerCase();
+  const got = new Set(ledger.evidence.map((e) => key(e.url)));
+  const out: Array<{ url: string; reason: string }> = [];
+  for (const n of ledger.notRetrieved ?? []) {
+    if (!/^https?:\/\//i.test(clean(n.url)) || got.has(key(n.url)) || out.some((o) => key(o.url) === key(n.url))) continue;
+    out.push({ url: clean(n.url).slice(0, 500), reason: clean(n.reason).slice(0, 160) });
+  }
+  return out.slice(0, 6);
 }
 
 // ---------------------------------------------------------------------------
@@ -3792,6 +3866,7 @@ export function feeLinesForProject(
       paymentMethod: schedule.paymentMethod,
       sourceUrl: schedule.sourceUrl,
       sourceQuote: schedule.sourceQuote,
+      sourceReadAt: feeSourceReadAt(schedule),
       bracketQuote: evaluated.bracketQuote,
       ...(evaluated.corroboration ? { corroboration: evaluated.corroboration } : {}),
       // A hopped line's confidence is the WEAKER of the pointer and the collecting row — a
@@ -5386,6 +5461,7 @@ function lineFor(
     paymentMethod: schedule.paymentMethod,
     sourceUrl: schedule.sourceUrl,
     sourceQuote: schedule.sourceQuote,
+    sourceReadAt: feeSourceReadAt(schedule),
     bracketQuote: evaluated.bracketQuote,
     ...(evaluated.corroboration ? { corroboration: evaluated.corroboration } : {}),
     // WHO VOUCHES, at the grain a person saw it (lineGrade) — the same answer as the sibling
@@ -5501,6 +5577,9 @@ function resolutionFrom(lines: FeeScheduleLine[], track: FeeTrack): Omit<Project
     paymentMethod: lines.every((l) => l.paymentMethod === primary.paymentMethod) ? primary.paymentMethod : "unknown",
     sourceUrl: primary.sourceUrl,
     sourceQuote: primary.sourceQuote,
+    // The OLDEST read among the lines, and only when every line states one: a total is as fresh
+    // as its stalest part, and one undated line makes the total's date unknown.
+    sourceReadAt: lines.every((l) => l.sourceReadAt) ? lines.map((l) => l.sourceReadAt as string).sort()[0] : "",
     // NO SINGLE PUBLISHED LINE SUPPORTS A TOTAL OF TWO PERMITS. A Coos Bay
     // rooftop owes the city $200 and the county $135; no document anywhere
     // prints $335, so quoting ANY row beside it — which is what propagating

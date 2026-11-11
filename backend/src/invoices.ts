@@ -59,6 +59,22 @@ export interface InvoiceComposition {
   sourceUrl: string;
   /** Non-empty when this share is collected by an authority other than the project's AHJ. */
   collectedVia: string;
+  /** WHO VOUCHES FOR THIS SHARE (fee round, 2026-11): "verified" only when a person confirmed it
+   *  (hard rule 3); everything research or a lookup read is "seeded" and is never worded as verified. */
+  tier: "seeded" | "verified";
+  /** The printed line this share was read from, verbatim ("" when the schedule holds none). */
+  sourceQuote: string;
+  /** When Keelix read the source (ISO), "" when the fee row cannot say. */
+  sourceReadAt: string;
+}
+
+/** HOW A PUBLISHED FEE IS VOUCHED FOR, in the words an invoice line may carry: every share
+ *  person-verified, or seeded (with the oldest read date when every share states one). */
+export function publishedFeeProvenance(composition: InvoiceComposition[]): string {
+  if (!composition.length) return "";
+  if (composition.every((c) => c.tier === "verified")) return "person-verified schedule";
+  const dates = composition.map((c) => c.sourceReadAt.slice(0, 10)).filter(Boolean).sort();
+  return `seeded schedule, not person-verified${dates.length === composition.length ? `; source read ${dates[0]}` : ""}`;
 }
 
 /** WHERE THE NUMBER CAME FROM, and the invoice always says.
@@ -169,6 +185,9 @@ function compositionFor(db: AppDb, project: ProjectRecord, track: InvoiceTrack):
       amountUsd: l.feeUsd,
       sourceUrl: text(l.sourceUrl),
       collectedVia: text(l.hoppedFrom),
+      tier: l.confidence === "verified" ? "verified" : "seeded",
+      sourceQuote: text(l.bracketQuote).slice(0, 300),
+      sourceReadAt: text(l.sourceReadAt),
     }));
   } catch {
     return [];
@@ -325,7 +344,9 @@ export function invoiceLinesForPayment(
       kind: "reimbursement",
       basis: "published",
       provisional: true,
-      description: `${TRACK_LABEL[track]} — estimated from the published schedule, pending the portal's own figure`,
+      // The estimate says how far it is vouched for (fee round, 2026-11): a seeded schedule is named
+      // as seeded, with the date its source was read, and only a person's confirm reads "verified".
+      description: `${TRACK_LABEL[track]} — estimated from the published schedule${publishedFeeProvenance(published) ? ` (${publishedFeeProvenance(published)})` : ""}, pending the portal's own figure`,
       amountUsd: publishedTotal,
       composition: published,
       reconciliation: "",

@@ -616,6 +616,14 @@ export interface SubmissionPaymentQuote {
   /** The jurisdiction's own fee page, when a published schedule supplied or
    *  corroborated the number — so the operator can click through and check. */
   permitFeeSourceUrl: string | null;
+  /** WHEN KEELIX READ THAT SOURCE (ISO), "" when the fee row cannot say (fee round, 2026-11). Beside
+   *  permitFeeConfidence (the tier: seeded or person-verified) and permitFeeEvidenceQuote (the
+   *  printed line), this is what a fee needs before it is charged: who vouches, what was read, when. */
+  permitFeeSourceReadAt?: string;
+  /** FEE PAGES A PERSON READS while this amount is not from a schedule or the portal's own figure:
+   *  refused, dated or unreadable fee pages and cited fees that did not land (feeNeedsPerson).
+   *  Empty when there is nothing to read. Never a number. */
+  feeNeedsPersonRead?: Array<{ url: string; reason: string }>;
   /** The schedule line this project's size landed on ("5.01 kVA through 15 kVA").
    *  Carrying the bracket is the point: a replayed filing that freezes the learn
    *  project's bracket bills a 20 kW job at the 15 kVA rate. */
@@ -685,6 +693,8 @@ export interface PublishedFeeResult {
   bracketLabel?: string | null;
   /** The jurisdiction's published fee page. */
   sourceUrl?: string | null;
+  /** When Keelix read that page (ISO), "" / absent when the row cannot say. */
+  sourceReadAt?: string | null;
   /** The SCHEDULE's own citation — provenance of the table. Row grain, so on a
    *  bracketed schedule it agrees with at most one of the brackets: read it as a
    *  pointer back to the document (and, as below, as a mailed-check hint), never
@@ -5456,6 +5466,10 @@ export interface PermitProcessLookup {
   /** Pages the lookup was REFUSED (a challenge, 401/403/429, a host backed off after a refusal): a
    *  person reads them (lookup-door-fixes, 2026-11-10). Never retried in another style. */
   needsPersonRead?: Array<{ url: string; reason: string }>;
+  /** FEE PAGES A PERSON READS (fee round, 2026-11): a fee schedule Keelix found and does not rely
+   *  on (dated, archived, gone, or with no readable text). Shown on the fee quote while the fee is
+   *  not from a schedule or the portal's own figure. Never a number. */
+  feeReadsForPerson?: Array<{ url: string; reason: string }>;
   lookedUpAt: string;
   model?: string;
   costUsd?: number;
