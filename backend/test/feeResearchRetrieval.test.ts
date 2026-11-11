@@ -1016,6 +1016,16 @@ async function main(): Promise<void> {
   const toolResults = new Map<string, string>();
   for (const body of captured) for (const m of body.messages) if (Array.isArray(m.content)) for (const b of m.content) if (b.type === "tool_result" && b.tool_use_id) toolResults.set(b.tool_use_id, String(b.content ?? ""));
   check("the loop ran its three scripted turns", captured.length === 3, `${captured.length} request(s)`);
+  // THE PROMPT LAYER says the two scopes too: a model told "a refused result means stop the site"
+  // would undo the document scope after one stale link, and no scripted turn would notice.
+  const firstRequest = JSON.stringify(captured[0] ?? {});
+  check(
+    "the tool description and the system prompt tell ONE refused document apart from a refusing SITE",
+    /ONE DOCUMENT refused automated clients, do not request that URL again/.test(firstRequest)
+      && /ONE DOCUMENT refused automated clients, do not ask for that URL again/.test(firstRequest)
+      && !/when a result says the site refused automated clients, do not request that site again/.test(firstRequest),
+    firstRequest.slice(0, 200),
+  );
   check("the walled host was asked TWICE across ten calls (one document, then the one that proved the host)", walledHits === 2, `${walledHits} hit(s)`);
   check(
     "the first walled call reports that document refused, not the host",

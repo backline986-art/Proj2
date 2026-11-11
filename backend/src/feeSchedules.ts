@@ -1637,8 +1637,10 @@ const OPEN_DOCUMENT_TOOL = {
     "Retrieve a PUBLIC web page or PDF and read it. Escalates to a real browser window by itself when a site "
     + "refuses an ordinary HTTP client (many .gov sites sit behind a WAF that 403s every script), so a 403 from "
     + "your own knowledge of a site is not a reason to skip it — try it here, once. A real window is tried ONCE "
-    + "per site: when a result says the site refused automated clients, do not request that site again in this "
-    + "pass — report the fee unconfirmed from that source and move on. A PDF comes back as VISUAL ROWS: "
+    + "per site. When a result says ONE DOCUMENT refused automated clients, do not request that URL again — the "
+    + "site's other pages may still answer. When a result says the SITE refuses automated clients, do not request "
+    + "any URL on that site again in this pass — report the fee unconfirmed from that source and move on. A PDF "
+    + "comes back as VISUAL ROWS: "
     + "cells that share a printed line, left to right, joined with ' | '. That pairing is read from the glyph "
     + "coordinates, NOT from the PDF's text order, so the row you see is the row that is printed. An HTML page "
     + "comes back as its links (to follow into a document search) plus its text. Never authenticates and never "
@@ -2757,7 +2759,7 @@ So:
 HOW TO WORK: SEARCH FINDS THE DOOR, open_document WALKS THROUGH IT
 Use web_search to LOCATE the jurisdiction's fee page, document search or schedule PDF. Then use open_document to READ it. A search snippet is a lead, not a source: snippets and third-party summaries routinely staple a fee to the wrong line of a table. One real case — a summary of a county electrical schedule reported $346 and $796 for two solar brackets, because it had taken the amounts off the WIND GENERATION rows printed below them. The published numbers were $160 and $265. Only the document says which row a number is on.
 
-open_document climbs to a real browser window by itself when a site refuses an ordinary HTTP client, so DO NOT give up on a .gov page because it seems to block automation — try it, once. A real window is tried ONCE per site: a site that refused is not asked again this pass (the tool result will say so). When that happens, report the fee UNCONFIRMED from that source — a finding from another official source, or found:false naming the site as bot-protected — and move on; do not try other URLs on the same site. It reads PDF tables BY COORDINATE, returning the cells that share a printed line joined with " | ", which is the same pairing your eye makes and is NOT the order the text sits in the file.
+open_document climbs to a real browser window by itself when a site refuses an ordinary HTTP client, so DO NOT give up on a .gov page because it seems to block automation — try it, once. A real window is tried ONCE per site. When a tool result says ONE DOCUMENT refused automated clients, do not ask for that URL again — the site's other pages may still answer, and the fee is UNCONFIRMED from that document only. When a tool result says the SITE refuses automated clients ("do not request any URL on" it), that site is not asked again this pass: report the fee UNCONFIRMED from that source — a finding from another official source, or found:false naming the site as bot-protected — and move on; do not try other URLs on that site. It reads PDF tables BY COORDINATE, returning the cells that share a printed line joined with " | ", which is the same pairing your eye makes and is NOT the order the text sits in the file.
 
 A GOOD SEQUENCE: search → open_document on the fee page (read its links) → open_document on the schedule PDF with find:"solar" or find:"renewable" to locate the table → open_document again with pages:[N] to read that whole page, headings included → quote the row.
 
