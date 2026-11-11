@@ -12,6 +12,7 @@ import { logger } from "./logger";
 import { documentInventory, owedMissingDocuments, requiredListCheck, sheetContentGaps } from "./requiredDocuments";
 import { startedAtLabel } from "./formAcquisitionPlan";
 import { planSetTextForProject, shippedPlanSetOutlinedPages } from "./projectDocuments";
+import { capturedDisconnectPart } from "./acDisconnectIntake";
 import { outlinedPagesMissingSheetNote, outlinedPagesReport } from "./outlinedTextPages";
 import { nowIso } from "./time";
 import { addAuditLog } from "./audit";
@@ -714,7 +715,14 @@ export function runQcForProject(db: AppDb, projectId: string, options: QcRunOpti
     // "qc" rows in state_permit_rules (a person's or an official read).
     let jurisdictionRecords: JurisdictionQcRecord[];
     try { jurisdictionRecords = resolveJurisdictionQcRecords(db, clean(baselinePayload.state), clean(baselinePayload.ahj)); } catch { jurisdictionRecords = resolveJurisdictionQcRecords(null, clean(baselinePayload.state), clean(baselinePayload.ahj)); }
-    for (const baseline of evaluateBaselineRules(baselinePayload, codeCtx, eligibility, { requirements: utilityRequirements, reportUnresearched: true, scope: scope.scope }, { records: jurisdictionRecords })) {
+    // THE JOB'S AC DISCONNECT PART, ONLY WHEN ITS OWN PLAN SET NAMES IT (acDisconnectIntake, the one
+    // reader the reviewer gate uses too), read on the same plan-set text the gate sees: the parser's own
+    // text when the job carries it, else the uploaded plan-set documents' (getProjectDetail's overlay).
+    let disconnectPartOnPlanSet = "";
+    try {
+      disconnectPartOnPlanSet = capturedDisconnectPart(payload as Record<string, unknown>, clean(payload.planSetExtractedText) || planSetTextForProject(db, projectId));
+    } catch { disconnectPartOnPlanSet = ""; }
+    for (const baseline of evaluateBaselineRules(baselinePayload, codeCtx, eligibility, { requirements: utilityRequirements, reportUnresearched: true, scope: scope.scope, disconnectPartOnPlanSet }, { records: jurisdictionRecords })) {
       if (baseline.qcStatus === "fail") failCount += 1;
       if (baseline.qcStatus === "fail" && !priorFails.has(baseline.ruleId)) newFailsOutsideBill += 1;
       if (baseline.qcStatus === "warning") warningCount += 1;
