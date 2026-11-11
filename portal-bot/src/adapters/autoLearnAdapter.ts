@@ -55,7 +55,7 @@ export interface ContinueDraft {
    *  Submit; not signed, or unreadable, it stops on the record page and names why. */
   awaitingSignature?: boolean;
 }
-import { PORTAL_SAFETY_GLOBAL, PORTAL_SAFETY_IN_PAGE_SOURCE, isFinalSubmitControl, isInterstitialForwardLabel as sharedIsInterstitialForwardLabel, isSignatureNameLabel, isSignatureRequestControl, isTypeSignatureToggleLabel, looksLikeReviewUrl, redactSecretValues, reviewSignals as sharedReviewSignals, splitSignerName } from "../../../shared/src/portalSafety";
+import { PORTAL_SAFETY_GLOBAL, PORTAL_SAFETY_IN_PAGE_SOURCE, isAutocompleteWidgetClass, isFinalSubmitControl, isInterstitialForwardLabel as sharedIsInterstitialForwardLabel, isSignatureNameLabel, isSignatureRequestControl, isTypeSignatureToggleLabel, looksLikeReviewUrl, redactSecretValues, reviewSignals as sharedReviewSignals, splitSignerName } from "../../../shared/src/portalSafety";
 import { BATTERY_DECLARATION_QUESTION, batteryAttestationAnswer, batteryControlKind, batteryDeclarationAnswer } from "../../../shared/src/batteryControls";
 import { installFilingBackstop, withAutomationInput, withBackstopWindow, withOwnWriteWindow, describeBackstopAbort, backstopSentLine, backstopFor, isStoppingAbort, drainOwnWrites, unsavedAtReviewWarning, portalOwnCallsBlockedAtReview, reviewBlockedCallsLine } from "../filingBackstop";
 // Types only (erased): the information-page door is reached duck-typed on the installed backstop.
@@ -1533,6 +1533,9 @@ export interface RawField {
   /** A search-as-you-type box (#575): an editable <input role=combobox aria-autocomplete=list|both>.
    *  Its fieldType stays "text"; see ExtractedField.fillStrategy. */
   typeahead?: boolean;
+  /** #139: an editable text input's class attribute, read for an autocomplete widget's stamp
+   *  (portalSafety isAutocompleteWidgetClass) in toExtractedField. */
+  stampClass?: string;
 }
 
 // Serializable extractor — derives a label and selector hints for each interactive
@@ -1902,6 +1905,8 @@ export function extractFieldsInPage(els: Element[]): RawField[] {
     // TEXT field (the planner binds it like any address box) and carries its strategy apart from
     // its label, which remains the matching key; applyFill and the replay type, wait and pick.
     let typeahead = false;
+    // #139: an editable text input's class, for the widget-stamp reading in toExtractedField.
+    let stampClass = "";
     {
       const comboRole = (el.getAttribute("role") || "").toLowerCase();
       const comboPopup = (el.getAttribute("aria-haspopup") || "").toLowerCase();
@@ -1914,21 +1919,17 @@ export function extractFieldsInPage(els: Element[]): RawField[] {
         if (comboRole === "combobox" && (completes === "list" || completes === "both") && editable) typeahead = true;
         else fieldType = "select";
       }
-      // ...OR A BOX AN AUTOCOMPLETE WIDGET MARKS AS ITS OWN, WITH NO ARIA AT ALL (#139). jQuery UI's
-      // autocomplete stamps class "ui-autocomplete-input" on the input it drives and adds no role
-      // (CityView's "Search for location", live 2026-11-11: typed into as a plain box, the street
-      // core went in, nothing was selected, and the walk retried the page until the session
-      // expired); an iWorQ property / contractor search names itself "properties autocomplete".
-      // The same mark the shared Enter question reads as a positively identified autocomplete
-      // (portalSafety enterIdentityInPage) — an editable text input only; never autocomplete="off",
-      // which every kind of box carries.
+      // ...OR A BOX AN AUTOCOMPLETE WIDGET STAMPS AS ITS OWN, WITH NO ARIA AT ALL (#139). jQuery UI
+      // writes class "ui-autocomplete-input" on the input it drives and adds no role (CityView's
+      // "Search for location", live 2026-11-11: typed into as a plain box, nothing was selected, and the
+      // walk retried the page until the session expired). The class is read HERE (an editable text
+      // input only) and judged in Node by the ONE predicate the shared Enter question uses
+      // (portalSafety isAutocompleteWidgetClass, in toExtractedField) — never a second regex.
       if (!typeahead && tag === "input" && fieldType === "text") {
         const box = el as HTMLInputElement;
         const editable = !box.readOnly && !box.disabled && el.getAttribute("aria-readonly") !== "true"
           && el.getAttribute("aria-disabled") !== "true";
-        const cls = String(el.getAttribute("class") || "");
-        const named = `${el.getAttribute("aria-label") || ""} ${el.getAttribute("placeholder") || ""}`;
-        if (editable && (/(?:^|\s)[\w-]*(?:autocomplete|typeahead)[\w-]*(?=\s|$)/i.test(cls) || /\bautocomplete\b/i.test(named))) typeahead = true;
+        if (editable) stampClass = String(el.getAttribute("class") || "").slice(0, 300);
       }
     }
 
@@ -2147,6 +2148,7 @@ export function extractFieldsInPage(els: Element[]): RawField[] {
       label, fieldType, options, role, name, placeholder, id, text, href,
       tile: tileLabel ? true : undefined,
       typeahead: typeahead && fieldType === "text" ? true : undefined,
+      stampClass: !typeahead && fieldType === "text" && stampClass ? stampClass : undefined,
       required: required || undefined,
       section: sectionFor(el) || undefined,
       testCss,
@@ -2264,7 +2266,7 @@ export function toExtractedField(raw: RawField): ExtractedField {
   // `disabled` that stops at the RawField boundary would make every gated Next invisible to it.
   if (raw.disabled) field.disabled = true;
   if (raw.tile) field.tile = true;
-  if (raw.typeahead && raw.fieldType === "text") field.fillStrategy = "typeahead";
+  if ((raw.typeahead || isAutocompleteWidgetClass(raw.stampClass)) && raw.fieldType === "text") field.fillStrategy = "typeahead";
   // Fingerprint: raw element attributes for replay-heal tie-breaking. Attribute
   // NAMES/labels only — never values, so nothing sensitive can land in a recipe.
   if (raw.id || raw.name || raw.placeholder || raw.ariaLabel || raw.section) {
@@ -10847,8 +10849,33 @@ export class AutoLearnAdapter extends BasePortalAdapter {
       ? { street: this.typeaheadSite.street || v, city: this.typeaheadSite.city, zip: this.typeaheadSite.zip, state: this.typeaheadSite.state }
       : { street: v };
     const loc = await this.locator(field.selector).catch(() => null);
+    // THE LEARNER'S ENTER DOOR (#139 fix round), the one its own Enter fallback goes through
+    // (pressEnterInLastFilledField): the shared enterRefusalInPage — which judges the form's default
+    // button by the click gate's label rules (fee, submit / filing, signature request, a filing
+    // action, a review or read-only terminal page) and every control Enter can reach — asked in the
+    // box's own frame, the refusal recorded as that door records it (and in the box's miss line).
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const enterGate = async (box: any): Promise<string> => {
+      if (typeof box?.evaluate !== "function") return "the box could not be read";
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      let frame: any = this.page;
+      try {
+        const h = typeof box.elementHandle === "function" ? await box.elementHandle({ timeout: 1500 }) : null;
+        const f = h && typeof h.ownerFrame === "function" ? await h.ownerFrame() : null;
+        await h?.dispose?.().catch(() => null);
+        if (f && typeof f.evaluate === "function") frame = f;
+      } catch { /* the page, as before */ }
+      await frame?.evaluate?.(PORTAL_SAFETY_IN_PAGE_SOURCE).catch(() => null);
+      const refusal = String(await box.evaluate((el: Element, g: string) => {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const ps = (globalThis as any)[g];
+        return ps && typeof ps.enterRefusalInPage === "function" ? ps.enterRefusalInPage(el) : "the page's safety predicates are not installed";
+      }, PORTAL_SAFETY_GLOBAL).catch(() => "the box could not be read") ?? "the box could not be read");
+      if (refusal) this.debug?.event({ type: "enter_submit_refused", via: "typeahead", label: label.slice(0, 60), reason: refusal.slice(0, 160) });
+      return refusal;
+    };
     const out = loc
-      ? await fillTypeahead(this.page, loc, { value: v, mode, site })
+      ? await fillTypeahead(this.page, loc, { value: v, mode, site, enterGate })
       : { outcome: "unusable" as const, why: "the box could not be located" };
     // Outcome and counts only — never the address or the suggestions themselves.
     this.debug?.event({ type: "typeahead_fill", label: label.slice(0, 60), mode, outcome: out.outcome, ...("offered" in out ? { offered: out.offered.length } : {}), ...(out.outcome === "picked" && out.via ? { via: out.via } : {}) });

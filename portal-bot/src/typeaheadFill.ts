@@ -65,6 +65,11 @@ export interface TypeaheadRequest {
   mode: "site" | "address" | "exact";
   /** The job's address for "site" (street, city, ZIP); for "address" only `street` is read. */
   site?: TypeaheadSite;
+  /** #139 fix round — THE ENTER DOOR the caller's recorded Enter goes through: "" = Enter may be
+   *  pressed in this box, else the refusal (the caller records it where its own refusals go). The
+   *  replay passes its guardAction (the full click gate on the form's default button, then the shared
+   *  enterRefusalInPage); without one, the shared enterRefusalInPage alone. */
+  enterGate?: (loc: any) => Promise<string>;
   /** How long one query waits for its suggestions to settle. Default 5 s. */
   suggestWaitMs?: number;
   /** The whole fill's deadline, every query included. Default 30 s — far inside the walk's stall
@@ -385,8 +390,11 @@ export async function fillTypeahead(page: any, loc: any, req: TypeaheadRequest):
       const afterTyping = await readShows(doc);
       portalSaid = freshNoMatch(before?.notes, afterTyping?.notes) || portalSaid;
       if (!t.enter || Date.now() >= deadline) continue;
-      // No list for the whole address: a search that runs on Enter (#139), behind the shared gate.
-      const refusal = await enterRefusal(doc, loc);
+      // No list for the whole address: a search that runs on Enter (#139), through the caller's Enter
+      // door (the replay's guardAction), else the shared Enter question.
+      const refusal = req.enterGate
+        ? String(await req.enterGate(loc).catch((e: unknown) => `the Enter gate could not answer (${String((e as Error)?.message ?? e).slice(0, 80)})`) ?? "")
+        : await enterRefusal(doc, loc);
       if (refusal) { enterNote = ` (Enter was not pressed: ${refusal.slice(0, 160)})`; continue; }
       const sel = await enterAndReadSelection(page, doc, loc, site, before, deadline);
       if (sel.said) portalSaid = sel.said;

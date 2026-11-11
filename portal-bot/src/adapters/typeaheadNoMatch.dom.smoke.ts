@@ -38,6 +38,8 @@ const JOB = { street: "4821 W Quillfeather Dr", city: "Marrowvale", state: "UT",
 //   fullenter  the server matches ONLY the job's full one-line address (a partial is "did not match");
 //   door       nothing matches; a "Can't find address?" button reveals Street Address / City / Zip;
 //   nodoor     nothing matches and there is no door;
+//   sigdefault as fullenter, but the form's FIRST submit (what Enter activates) is a hidden "Request
+//              Signatures" — Enter must be refused at the door, so nothing is ever posted by it;
 //   blank      no search box: a required "Permit Holder Code" no data answers (the walk cannot fill
 //              it) — Next bounces to "Submission Error" with the same page.
 const LOC_FULL = `${JOB.street}, ${JOB.city}, ${JOB.state} ${JOB.zip}`;
@@ -56,7 +58,11 @@ const locPage = (mode: string, o: { selected?: string; error?: string; title?: s
 <h1>Permit Application</h1><h2>${blank ? "Permit Holder" : "Location of Work Being Done"}</h2>
 ${o.error ? `<div class="cv-error validation-summary-errors" role="alert"><ul><li>${escHtml(o.error)}</li></ul></div>` : ""}
 <form method="post" action="/loc?mode=${mode}">
-<input type="submit" name="brepeatlocation" aria-hidden="true" tabindex="-1" class="cv-default-submit" value="">
+${mode === "sigdefault"
+    // Hidden: a VISIBLE "Request Signatures" is the learner's signature step (#308), which stops in
+    // front of it before any fill. Hidden, it is still the form's default button — what Enter sends.
+    ? `<button type="submit" name="reqsig" value="1" style="display:none">Request Signatures</button>`
+    : `<input type="submit" name="brepeatlocation" aria-hidden="true" tabindex="-1" class="cv-default-submit" value="">`}
 <input type="hidden" name="selected" value="${escHtml(sel)}">
 ${blank ? `<label for="holder">Permit Holder Code:<span class="required">*</span></label><input type="text" id="holder" name="holder">` : `
 <div class="cv-input-container"><div id="help" class="cv-inline-help">Begin typing a street address or Tax Lot Number above and we will search existing locations within the jurisdiction.</div>
@@ -240,6 +246,45 @@ if (locRecorded) {
   check("(3) ...Enter searched the full address once, never twice", log.enters.length === 1, JSON.stringify(log.enters));
   check("(3) ...no page visited twice", noRepeat(visits(result)), JSON.stringify(visits(result)));
   await page.close();
+}
+
+// (3s) Enter would send "Request Signatures": refused at the door in the learn AND the replay — no
+//      request is posted, the learn ends as the named stop saying why, the replay records the refusal.
+{
+  const { result, page, ms } = await learnLoc("sigdefault");
+  const log = logOf("sigdefault");
+  console.log(`   loc sigdefault: ${ms} ms stop=${result.stopReason} pages=${result.pageCount} enters=${JSON.stringify(log.enters)} nexts=${log.nexts}`);
+  console.log(`   message: ${result.message.slice(0, 500)}`);
+  check("(3s) learn: Enter that would activate \"Request Signatures\" is never pressed (nothing posted)",
+    log.enters.length === 0 && log.nexts === 0, `enters=${JSON.stringify(log.enters)} nexts=${log.nexts}`);
+  check("(3s) ...the box ends as the NAMED stop, saying Enter was refused and why",
+    result.stopReason === "typeahead_no_match" && /Search for location/.test(result.message) && /Enter was not pressed/.test(result.message) && /signature request/.test(result.message),
+    `stop=${result.stopReason} message=${result.message.slice(0, 400)}`);
+  check("(3s) ...no page visited twice", noRepeat(visits(result)), JSON.stringify(visits(result)));
+  await page.close();
+  if (locRecorded) {
+    const rp = await ctx.newPage();
+    const url = `${base}/loc?mode=sigdefault`;
+    const before = log.enters.length;
+    const recipe = {
+      id: "r-loc-sig", scopeType: "ahj", profileKey: "ut|marrowvale|x", state: "UT", ahj: "Marrowvale", utility: "",
+      portalPlatform: "cityview", portalUrl: url, status: "complete", version: 1,
+      steps: [{ action: "goto", phase: "open", value: url, note: "entry url" }, locRecorded],
+      createdBy: "test", createdAt: "", updatedAt: "", notes: "", discipline: "structural",
+    } as unknown as PortalRecipe;
+    const adapter = new RecipeAdapter(recipe, { street: JOB.street, city: JOB.city, state: JOB.state, zip: JOB.zip, projectAddress: `${JOB.street}, ${JOB.city}, ${JOB.state}, ${JOB.zip}` }, {}, { autoSubmit: false });
+    (adapter as unknown as { page: unknown }).page = rp;
+    const r = await adapter.fillApplication({} as never);
+    const data = (r.data ?? {}) as Record<string, unknown>;
+    const warnings = (data.driftWarnings as string[] | undefined) ?? [];
+    console.log(`   replay sigdefault: ok=${r.ok} enters=${JSON.stringify(log.enters.slice(before))} warnings=${JSON.stringify(warnings).slice(0, 400)}`);
+    check("(3s) replay: the type-ahead's Enter goes through the recorded-Enter door — REFUSED and recorded, nothing posted",
+      log.enters.length === before && warnings.some((w) => /^REFUSED (?:press|click) \(type-ahead search/.test(w) && /signature request/.test(w)),
+      `enters=${JSON.stringify(log.enters.slice(before))} warnings=${JSON.stringify(warnings)}`);
+    await rp.close();
+  } else {
+    check("(3s) replay: a recorded location step to replay", false, "(1) recorded no step");
+  }
 }
 
 // (4) A required box the walk cannot fill: the bounce back is the named stop, not a loop.

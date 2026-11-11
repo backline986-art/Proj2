@@ -5037,7 +5037,11 @@ export class RecipeAdapter extends BasePortalAdapter {
         state: String(this.fieldValues.state ?? "").trim() || undefined,
       }
       : { street: v };
-    const out = await fillTypeahead(this.page, scoped, { value: v, mode, site });
+    // An Enter in this box goes through the SAME door as a recorded Enter (#139 fix round): the full
+    // click gate on the form's default button, then the shared Enter question; a refusal is recorded
+    // in guardRefusals / driftWarnings like any other.
+    const enterGate = (loc: unknown): Promise<string> => this.guardAction({ kind: "press", key: "Enter", target: loc, why: `type-ahead search in "${label}"` });
+    const out = await fillTypeahead(this.page, scoped, { value: v, mode, site, enterGate });
     if (out.outcome === "picked" && out.via === "enter") {
       // #139: the PORTAL selected the job's address on Enter and shows it outside the box (verified
       // by the address predicate inside fillTypeahead); the search box itself comes back empty, so
