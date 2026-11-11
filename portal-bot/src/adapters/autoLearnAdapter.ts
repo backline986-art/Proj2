@@ -8999,13 +8999,15 @@ export class AutoLearnAdapter extends BasePortalAdapter {
               ...fail(
                 steps,
                 this.portalName,
-                `Stopped for a person on page ${pageCount}: the required box "${bounced.slice(0, 80)}" could not be filled — the walk left page ${left.page} with it blank and the portal brought it straight back${others.length ? ` (also blank: ${others.map((o) => `"${o.slice(0, 60)}"`).join(", ")})` : ""}. Fill it by hand (or add the value to the project) and run again; the steps before this page were recorded.`,
+                `Stopped for a person on page ${pageCount}: the required box "${bounced.slice(0, 80)}" could not be filled — the walk left page ${left.page} with it blank and the portal brought it straight back${others.length ? ` (also blank: ${others.map((o) => `"${o.slice(0, 60)}"`).join(", ")})` : ""}. Fill it by hand (or add the value to the project) and run again; the steps before this page were recorded.`
+                  + (validationBlocks.length ? ` ⛔ The portal blocked an advance with ${validationBlocks.length} validation error(s): ${validationBlocks.slice(0, 8).join("; ")}.` : ""),
                 null,
                 pageCount,
                 portalNotices,
               ),
               stopReason: "required_blank",
               requiredFieldMisses: [...fillVerifyMisses],
+              ...(validationBlocks.length ? { validationBlocks: [...validationBlocks] } : {}),
               ...(this.typeaheadMisses.length ? { typeaheadMisses: [...this.typeaheadMisses] } : {}),
               pageTrace: pageTrace.slice(0, 40),
             };
