@@ -33,6 +33,13 @@
 //     Confirm is always refused: a person checks it and states it through Edit, as their own check.
 //     Where a person's record already names the door and the client says otherwise, the difference
 //     is listed under `conflicts` for a person; the verified record is never touched.
+//   · ONE EXCEPTION TO "CITED ONLY", FOR EDIT ONLY (soft run on main f280d056): a utility whose only
+//     door is its SEEDED knowledge-base row with no page words (the address the NEM track card already
+//     shows as "seeded knowledge base — verify") is offered as a proposal marked `seeded`, so the queue
+//     no longer hides it. It is NEVER a one-click Confirm (decideFilingDestination refuses it by its
+//     mark, whatever its problems say): a person opens the utility's page and uses Edit, stating the
+//     page and its words as their own check, through the same refusals as every door. A seeded address
+//     those refusals would turn away (rule 5, an information page) is listed under `skipped`, not offered.
 //
 // WHAT CONFIRMING WRITES — THE EXISTING PERSON-VERIFIED RECORD, NOTHING NEW:
 //   · a permit portal  → saveVerifiedAhjProfile (verified permit_utility_knowledge row, portal_url);
@@ -58,7 +65,7 @@ import { getPermitProcessLookup, projectForTrack } from "./permitProcess";
 import { findAhjProcessProfile } from "./processProfiles";
 import { separateCounterFor } from "./ahjRowCitations";
 import { personVerifiedAuthorityHosts } from "./officialAuthorityHosts";
-import { FILED_WITH_AHJ_PERMIT, getUtilityFilingLookup, verifyUtilityFilingLookup } from "./utilityFilingLookup";
+import { FILED_WITH_AHJ_PERMIT, getUtilityFilingLookup, utilityTrackPresentation, verifyUtilityFilingLookup } from "./utilityFilingLookup";
 import { shippedRecordFor, utilityPersonVerifiedHosts } from "./utilityRequirements";
 import { hostFitsTrackAndEntity, isInformationalPageUrl, trackSafeUrl } from "./portalChannel";
 import { assertOperatorPortalUrlFits, portalEntityEvidence } from "./portalRecipes";
@@ -71,7 +78,7 @@ import { filingStatementsFor, type FilingAuthorityOption, type FilingStatement, 
 const str = (v: unknown): string => (typeof v === "string" ? v.trim() : v == null ? "" : String(v).trim());
 
 export type DestinationKind = "portal" | "email" | "with_permit";
-export type DestinationSource = "reference" | "permit_lookup" | "utility_lookup" | "client_supplied";
+export type DestinationSource = "reference" | "permit_lookup" | "utility_lookup" | "client_supplied" | "seeded_kb";
 
 /** What the client said beside the address: whether it holds an account there (never the login) and
  *  an example record number. Present on a client-supplied proposal, and on a cited proposal the
@@ -104,6 +111,10 @@ export interface DestinationProposal {
   problems: string[];
   /** The client's own answer names this address (from "client_supplied": it is the only source). */
   clientSupplied?: ClientSuppliedNote;
+  /** The address is the utility's SEEDED knowledge-base row, with no page words on file (from
+   *  "seeded_kb"; quote and fetchedAt are empty, sourceUrl is the page the row names or ""). Edit only:
+   *  Confirm is always refused, and nothing files or sends to it until a named person states it. */
+  seeded?: true;
 }
 
 export interface AuthorityDestinations {
@@ -132,6 +143,8 @@ interface Candidate {
   quote: string;
   fetchedAt: string;
   from: DestinationSource;
+  /** A seeded knowledge-base address with no citation (seededUtilityDoorCandidates): Edit only. */
+  seeded?: true;
 }
 
 const EMAIL_IN_TEXT = /[a-z0-9.!#$%&'*+/=?^_`{|}~-]+@(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,}/gi;
@@ -235,6 +248,26 @@ export function shippedDoorCandidates(state: string, utility: string): Candidate
   const url = addressAsUrl(door.url);
   return url ? [{ kind: "portal", address: url, name: door.name, sourceUrl: door.sourceUrl, quote: door.quote, fetchedAt: door.fetchedAt, from: "reference" }] : [];
 }
+
+/**
+ * THE UTILITY'S SEEDED KNOWLEDGE-BASE DOOR, exactly as the NEM track card shows it
+ * (utilityTrackPresentation's `seededDoor`: the row's portal address, already through rule 5's
+ * hostFitsTrackAndEntity; absent once a person verified a door, or when a cited lookup names one).
+ * It carries no page words and no read time, so it can never be confirmed by one click: it is offered
+ * for Edit only, with the page the row names (if any) pre-filled for the person to open. Reads only.
+ */
+export function seededUtilityDoorCandidates(db: AppDb, state: string, utility: string): Candidate[] {
+  let door;
+  try { door = utilityTrackPresentation(db, { state, utility }).seededDoor; } catch { door = undefined; }
+  if (!door) return [];
+  const url = addressAsUrl(door.url);
+  if (!url) return [];
+  const page = /^https?:\/\/\S+$/i.test(str(door.source)) ? str(door.source) : "";
+  return [{ kind: "portal", address: url, name: door.name, sourceUrl: page, quote: "", fetchedAt: "", from: "seeded_kb", seeded: true }];
+}
+
+/** Two portal addresses that are the same door (case and a trailing slash aside). */
+const sameDoor = (address: string): string => str(address).toLowerCase().replace(/\/+$/, "");
 
 /** The words do not contain the address: the one shortfall that does NOT stop a proposal (an official
  *  page usually links its portal from words like "Apply online"). It is shown on the card instead. */
@@ -406,6 +439,8 @@ export function filingDestinationsFor(
     let hosts: string[];
     if (authority.kind === "utility") {
       candidates = [...utilityCandidates(getUtilityFilingLookup(db, authority.state, authority.name)), ...shippedDoorCandidates(authority.state, authority.name)];
+      // The seeded KB door LAST: a cited candidate naming the same address is the one shown (below).
+      candidates.push(...seededUtilityDoorCandidates(db, authority.state, authority.name));
       try { hosts = utilityPersonVerifiedHosts(db, authority.state, authority.name); } catch { hosts = []; }
     } else {
       const issuer = projectForTrack(project, tracks[0]);
@@ -416,16 +451,38 @@ export function filingDestinationsFor(
     const proposals: DestinationProposal[] = [];
     const skipped: string[] = [];
     const seen = new Set<string>();
+    // Portal addresses a CITED candidate already answers for: proposed with its page and words, or
+    // rejected by a person. The seeded twin of the same address is not offered beside or after it.
+    const citedDoors = new Set<string>();
     for (const c of candidates) {
       const id = proposalId(authority.profileKey, c);
       if (seen.has(id)) continue;
       seen.add(id);
       const label = c.kind === "with_permit" ? "filed with the permit" : c.address;
+      if (c.seeded) {
+        if (citedDoors.has(sameDoor(c.address))) continue;
+        // SEEDED, NO CITATION: it goes through the same citation test as every candidate
+        // (candidateSkipReasons) and always falls short of it (no page words, no read time): those
+        // shortfalls are why it is Edit only. It is offered only when the same refusals every door
+        // meets (rule 5's hostFitsTrackAndEntity, the information-page refusal) would let a person save it.
+        const shortfalls = candidateSkipReasons(c, hosts);
+        const refusals = confirmProblems(db, authority, tracks[0], c);
+        if (refusals.length) { skipped.push(`${label} (seeded knowledge base, no page words on file): ${refusals.join("; ")}`); continue; }
+        if (rejectedIds.has(id)) continue;
+        proposals.push({
+          id, kind: c.kind, address: c.address, ...(c.name ? { name: c.name } : {}),
+          sourceUrl: c.sourceUrl, sourceHost: sourceHostOf(c.sourceUrl), quote: "", fetchedAt: "", from: c.from,
+          official: false, quoteNamesAddress: false, seeded: true,
+          problems: [`this address is a seeded knowledge-base entry with no page words on file (${shortfalls.join("; ") || "never cited"}), so one-click Confirm is never offered: open ${authority.name}'s own application page, check the address, then use Edit to record the page and its words as your own check`],
+        });
+        continue;
+      }
       const skip = candidateSkipReasons(c, hosts);
       // A page off the authority's official host, with its words and read time, is still shown — for
       // Edit only (a person states it as their own check); a row missing its words or time is not.
       const notHost = skip.filter((r) => !OFFICIAL_HOST_SHORTFALL.test(r));
       if (notHost.length) { skipped.push(`${label} (${c.sourceUrl || "no page"}): ${skip.join("; ")}`); continue; }
+      if (c.kind === "portal") citedDoors.add(sameDoor(c.address));
       if (rejectedIds.has(id)) continue;
       const official = skip.length === 0;
       proposals.push({
@@ -520,6 +577,8 @@ export function decideFilingDestination(
     const group = filingDestinationsFor(db, project, trackViews).find((g) => g.authority.kind === authority.kind && g.authority.profileKey === authority.profileKey);
     const p = group?.proposals.find((x) => x.id === str(decision.proposalId));
     if (!p) throw new DestinationRefused(409, "That proposal is no longer current (the source changed, it was rejected, or a person already recorded this authority's destination). Reload and look again.");
+    // A SEEDED ADDRESS IS NEVER CONFIRMED BY ONE CLICK, by its mark (not only by its problems text).
+    if (p.seeded) throw new DestinationRefused(409, "A seeded address has no page words on file, so it cannot be confirmed by one click. Open the authority's own page, then use Edit to record the page and its words as your own check.");
     if (p.kind !== kind || p.address !== address || p.sourceUrl !== sourceUrl || quoteText(p.quote) !== quoteText(quote)) {
       throw new DestinationRefused(409, "What was sent is not the proposal shown. Reload, or use Edit to state a different destination.");
     }

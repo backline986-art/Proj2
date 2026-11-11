@@ -1,5 +1,6 @@
 import type { HistoricalChecklistItem, ProjectRecord } from "../../shared/src/types";
 import { text } from "./json";
+import { capturedDisconnectPart } from "./acDisconnectIntake";
 import { hasStampedStructuralEvidence } from "./permitPath";
 import { projectSecretValues } from "./projectSecrets";
 import { redactSecretValues } from "../../shared/src/portalSafety";
@@ -495,9 +496,23 @@ export function evidenceForTopic(project: ProjectRecord, topic: EvidenceTopic): 
       // visible-break switch near the meter). Shown = the set names an AC / utility disconnect; proven =
       // the set also says where it is or what kind it is.
       const patterns = [/\bAC\s+disconnect/i, /\butility\s+(?:accessible\s+|external\s+)?disconnect/i, /\bexternal\s+disconnect/i, /\blockable\s+disconnect/i, /\bvisible[-\s]?(?:break|blade|open)/i, /\bPV\s+system\s+disconnect/i, /\b690\.13\b/i];
-      const present = hasAny(project, patterns);
-      const high = present && /lockable|visible|within sight|adjacent to (?:the )?meter|location|sheet|page/i.test(all);
-      return evidence(project, topic, present, high ? "high" : present ? "medium" : "low", patterns);
+      //
+      // THE JOB'S PART THAT ITS OWN PLAN SET NAMES COUNTS AS SHOWN (soft run on main f280d056): the
+      // intake reads the part off the plan set's AC-disconnect label in forms the patterns above do not
+      // ("A.C. DISCONNECT", "AC SAFETY DISCONNECT", "VISIBLE, LOCKABLE, LABELED DISCONNECT"), so a job
+      // holding the part its plan set names could still read "missing" and be blocked by a utility
+      // whose cited list asks for the disconnect. capturedDisconnectPart is the ONE reader QC's
+      // ac_disconnect read uses too. The key alone is never evidence (a person can type it): the part
+      // counts only when this job's plan-set text names it at the AC-disconnect label — never acDiscReq
+      // alone, never the client's standard part. Otherwise exactly the text read above, and the blocker
+      // stays. A part alone is SHOWN, not proven (a part number does not say where the switch is): the
+      // finding stays as a warning for a person; only the patterns above prove it, as before.
+      const snapshot = (project.parserSnapshot || {}) as Record<string, unknown>;
+      const part = capturedDisconnectPart(snapshot, snapshot.planSetExtractedText);
+      const named = hasAny(project, patterns);
+      const present = named || Boolean(part);
+      const high = named && /lockable|visible|within sight|adjacent to (?:the )?meter|location|sheet|page/i.test(all);
+      return evidence(project, topic, present, high ? "high" : present ? "medium" : "low", patterns, part ? [`AC disconnect part named on the plan set: ${part}`] : []);
     }
     case "batteryMode": {
       const batteryScope = /battery|\bESS\b|powerwall|encharge|backup/i.test(all);
