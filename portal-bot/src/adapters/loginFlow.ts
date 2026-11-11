@@ -880,21 +880,22 @@ async function ownFormSubmit(passLoc: Locator): Promise<Locator | null> {
 }
 
 /** The clicked control's identity — never its value (see ClickedControl). */
-async function describeControl(loc: Locator, passLoc: Locator): Promise<ClickedControl | undefined> {
+async function describeControl(loc: Locator): Promise<ClickedControl | undefined> {
   try {
-    const inForm = (await passLoc.locator("xpath=ancestor::form[1]").locator(NATIVE_SUBMIT_SELECTOR + ", a, [role='button'], input[type='button'], input[type='image']").count().catch(() => 0)) > 0
-      && await (loc as unknown as { evaluate: (fn: (el: Element) => boolean, arg: undefined, o: { timeout: number }) => Promise<boolean> })
-        .evaluate((el) => { const f = el.closest("form"); const pw = f && f.querySelector('input[type="password"]'); return !!(f && pw); }, undefined, { timeout: ELEMENT_READ_TIMEOUT_MS }).catch(() => false);
-    const d = await (loc as unknown as { evaluate: (fn: (el: Element) => Omit<ClickedControl, "inForm">, arg: undefined, o: { timeout: number }) => Promise<Omit<ClickedControl, "inForm">> })
-      .evaluate((el) => ({
-        tag: el.tagName.toLowerCase(),
-        role: (el.getAttribute("role") || "").toLowerCase(),
-        id: (el.id || "").slice(0, 60),
-        name: (el.getAttribute("name") || "").slice(0, 60),
-        type: ((el as HTMLInputElement).type || el.getAttribute("type") || "").toLowerCase(),
-        ariaExpanded: el.getAttribute("aria-expanded"),
-      }), undefined, { timeout: ELEMENT_READ_TIMEOUT_MS });
-    return { ...d, inForm };
+    return await (loc as unknown as { evaluate: (fn: (el: Element) => ClickedControl, arg: undefined, o: { timeout: number }) => Promise<ClickedControl> })
+      .evaluate((el) => {
+        const form = el.closest("form");
+        return {
+          tag: el.tagName.toLowerCase(),
+          role: (el.getAttribute("role") || "").toLowerCase(),
+          id: (el.id || "").slice(0, 60),
+          name: (el.getAttribute("name") || "").slice(0, 60),
+          type: ((el as HTMLInputElement).type || el.getAttribute("type") || "").toLowerCase(),
+          ariaExpanded: el.getAttribute("aria-expanded"),
+          // Inside a form that holds the password box — the one the submit is meant to post.
+          inForm: !!(form && form.querySelector('input[type="password"]')),
+        };
+      }, undefined, { timeout: ELEMENT_READ_TIMEOUT_MS });
   } catch {
     return undefined;
   }
@@ -1773,19 +1774,19 @@ export async function performLogin(
     const canListen = typeof (page as unknown as { on?: unknown }).on === "function" && typeof (page as unknown as { off?: unknown }).off === "function";
     if (canListen) (page as unknown as { on: (ev: string, fn: typeof onRequest) => void }).on("request", onRequest);
     try {
-        if (submitLoc) {
-          detail.clicked = await describeControl(submitLoc, passLoc);
-          await waitForElement(submitLoc);
-          await submitLoc.click();
-        } else {
-          detail.submittedVia = "enter";
-          await passLoc.press("Enter").catch(() => null);
-        }
-        // The moment the artefacts used to miss: the page right after the submit, login fields
-        // masked (a never-posted form still holds the password; rule 2).
-        if (opts.onSubmitted) {
-          try { await opts.onSubmitted({ page, mask: [passLoc, ...(userLoc ? [userLoc] : [])] }); } catch { /* best-effort */ }
-        }
+      if (submitLoc) {
+        detail.clicked = await describeControl(submitLoc);
+        await waitForElement(submitLoc);
+        await submitLoc.click();
+      } else {
+        detail.submittedVia = "enter";
+        await passLoc.press("Enter").catch(() => null);
+      }
+      // The moment the artefacts used to miss: the page right after the submit, login fields
+      // masked (a never-posted form still holds the password; rule 2).
+      if (opts.onSubmitted) {
+        try { await opts.onSubmitted({ page, mask: [passLoc, ...(userLoc ? [userLoc] : [])] }); } catch { /* best-effort */ }
+      }
 
       // 7) Poll for the login to resolve. Many portals (PowerClerk) do an AJAX login + a JS
       //    redirect that takes several seconds, so a single short wait races the redirect and
