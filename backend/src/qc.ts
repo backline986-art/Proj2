@@ -13,6 +13,7 @@ import { documentInventory, owedMissingDocuments, requiredListCheck, sheetConten
 import { startedAtLabel } from "./formAcquisitionPlan";
 import { planSetTextForProject, shippedPlanSetOutlinedPages } from "./projectDocuments";
 import { capturedDisconnectPart, planTextNamesAcDisconnect } from "./acDisconnectIntake";
+import { planSetImageDisconnectRead } from "./planSetImageReads";
 import { outlinedPagesMissingSheetNote, outlinedPagesReport } from "./outlinedTextPages";
 import { nowIso } from "./time";
 import { addAuditLog } from "./audit";
@@ -726,7 +727,9 @@ export function runQcForProject(db: AppDb, projectId: string, options: QcRunOpti
     try {
       const planSetText = clean(payload.planSetExtractedText) || planSetTextForProject(db, projectId);
       disconnectPartOnPlanSet = capturedDisconnectPart(payload as Record<string, unknown>, planSetText);
-      planSetNamesAcDisconnect = planTextNamesAcDisconnect(planSetText);
+      // An image-only plan set has no text to name it: the server's own image read of the job's
+      // stored plan set answers instead (planSetImageReads, the one reader the gate uses too, #135).
+      planSetNamesAcDisconnect = planTextNamesAcDisconnect(planSetText) || Boolean(planSetImageDisconnectRead(db, projectId));
     } catch { disconnectPartOnPlanSet = ""; planSetNamesAcDisconnect = false; }
     for (const baseline of evaluateBaselineRules(baselinePayload, codeCtx, eligibility, { requirements: utilityRequirements, reportUnresearched: true, scope: scope.scope, disconnectPartOnPlanSet, planSetNamesAcDisconnect }, { records: jurisdictionRecords })) {
       if (baseline.qcStatus === "fail") failCount += 1;

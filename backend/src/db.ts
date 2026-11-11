@@ -3711,6 +3711,29 @@ const VERSIONED_MIGRATIONS: VersionedMigration[] = [
         CREATE INDEX IF NOT EXISTS idx_client_filing_statements_authority ON client_filing_statements(client_id, authority_kind, profile_key, status);
       `);
     },
+  },  {
+    // WHAT THE SERVER'S OWN IMAGE READ OF A PLAN SET SAID ABOUT ITS AC DISCONNECT (#135,
+    // planSetImageReads.ts). Written only by the plan-scan route, at the one place the intake reads a
+    // scanned plan set by vision, keyed by the PDF's bytes (sha-256) because no job exists yet, and by
+    // the org that posted it (rule 6: its own org_id, from the session). Only the AC disconnect's own
+    // fields, value and sheet; never the read's other fields. Created here, never lazily: the gate and
+    // QC read it, and a read writes nothing.
+    version: 86,
+    name: "plan_set_image_reads",
+    up: (db) => {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS plan_set_image_reads (
+          org_id TEXT NOT NULL,
+          pdf_sha256 TEXT NOT NULL,
+          field TEXT NOT NULL,
+          value TEXT NOT NULL,
+          sheet TEXT NOT NULL DEFAULT '',
+          read_mode TEXT NOT NULL DEFAULT 'vision',
+          read_at TEXT NOT NULL,
+          PRIMARY KEY (org_id, pdf_sha256, field)
+        );
+      `);
+    },
   },
 ];
 

@@ -219,7 +219,8 @@ export interface BaselineUtilityContext {
   disconnectPartOnPlanSet?: string;
   /** True when the job's plan-set text names an AC / utility disconnect in the wordings the reviewer
    *  gate reads (acDisconnectIntake.planTextNamesAcDisconnect, the one list; qc.ts hands it in on the
-   *  same plan-set text). Absent / false = the ac_disconnect item reads the split-page list and the
+   *  same plan-set text), or, for a plan set with no text, when the server's own image read of the
+   *  job's stored plan set named one (planSetImageReads, #135). Absent / false = the ac_disconnect item reads the split-page list and the
    *  upload notes alone, as before (#134). */
   planSetNamesAcDisconnect?: boolean;
 }
