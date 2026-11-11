@@ -855,6 +855,12 @@ export interface UtilityTrackPresentation {
   /** #664: a person VERIFIED that this utility's application rides in the AHJ permit application
    *  (nemFiledWithPermit). Absent otherwise — a seeded with-permit row never sets it. */
   filedWithPermit?: NemFiledWithPermit;
+  /** Set only when the address the track shows is the utility's SEEDED knowledge-base row (basis
+   *  "profile", no person's verify): the row's portal name, its address (already through rule 5's
+   *  hostFitsTrackAndEntity in utilityKbChannel) and the page the row names as its source ("" when it
+   *  names none). Read by the Destinations queue to offer it for a person's Edit-and-save
+   *  (filingDestinationProposals); it decides nothing here. */
+  seededDoor?: { name: string; url: string; source: string };
 }
 
 export const UTILITY_TRACK_LABELS: Record<UtilityProgramKind | "unknown", string> = {
@@ -978,6 +984,7 @@ export function utilityTrackPresentation(db: AppDb | null, project: Pick<Project
       portalUrl: kb.url,
       program,
       basis: kb.verified ? "verified" : "profile",
+      ...(kb.verified ? {} : { seededDoor: { name: kb.name, url: kb.url, source: kb.source } }),
     };
   }
   const filing = lookupFiling;
