@@ -236,8 +236,15 @@ async function enterRefusal(doc: any, loc: any): Promise<string> {
 async function enterAndReadSelection(
   page: any, doc: any, loc: any, site: TypeaheadSite, before: { shown: string[]; notes: string[] } | null, deadline: number,
 ): Promise<{ choice: ReturnType<typeof chooseAddressSuggestion> | null; said: string; pressed: boolean }> {
+  // A box inside a form posts the form back on Enter: wait for THAT navigation (a real postback can
+  // take seconds to start), never read the old document's stillness as "nothing selected".
+  const inForm = await loc.evaluate((el: Element) => !!(el as HTMLInputElement).form).catch(() => false);
+  const navigated = inForm && typeof doc.waitForNavigation === "function"
+    ? doc.waitForNavigation({ waitUntil: "domcontentloaded", timeout: Math.max(0, Math.min(8_000, deadline - Date.now())) }).then(() => true).catch(() => false)
+    : Promise.resolve(false);
   const pressed = await withAutomationInput(page, () => loc.press("Enter", { timeout: 3000 })).then(() => true).catch(() => false);
   if (!pressed) return { choice: null, said: "", pressed: false };
+  await navigated;
   const old = new Set(before?.shown ?? []);
   const until = Math.min(Date.now() + 6_000, deadline);
   let said = "";
