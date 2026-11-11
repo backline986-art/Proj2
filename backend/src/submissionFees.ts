@@ -52,6 +52,7 @@ import { stateSurchargeRuleFor } from "./stateFeeRules";
 import { localPermitReview, permitFeeProject } from "./feeIssuer";
 import { portalFeeSummary } from "./portalFeeReadings";
 import { printedFormCheck, printedFormQuote } from "./printedFormFees";
+import { feeReadsNeedingAPerson, feeReadsSentence } from "./feeNeedsPerson";
 
 /** The portal's own total for the filing — typed by a person ("actual") or read off the record
  *  ("portal_record"). Either already contains every line the jurisdiction billed. */
@@ -265,6 +266,8 @@ interface ScheduleFee {
   feeUsd: number | null;
   bracketLabel: string | null;
   sourceUrl: string | null;
+  /** When Keelix read the source (ISO), "" when the producer could not say. */
+  sourceReadAt: string;
   /** The ROW's citation. Read below by MAILED_CHECK_RE — a signal about how the
    *  money moves — and NEVER printed beside the amount: a bracketed schedule has
    *  one of these and N brackets, so it agrees with at most one of them. */
@@ -427,6 +430,7 @@ function normalizeScheduleResult(raw: unknown): ScheduleFee | null {
     feeUsd: usable ? round2(fee) : null,
     bracketLabel: text(r.bracketLabel).trim().slice(0, 200) || null,
     sourceUrl: /^https?:\/\//i.test(url) ? url.slice(0, 500) : null,
+    sourceReadAt: /^\d{4}-\d{2}-\d{2}T/.test(text(r.sourceReadAt).trim()) ? text(r.sourceReadAt).trim().slice(0, 30) : "",
     sourceQuote: quote,
     bracketQuote: text(r.bracketQuote).trim().slice(0, 400),
     corroborated: r.corroborated === true,
@@ -908,6 +912,9 @@ function computePaymentQuote(
         + `${vouching}.`
         + evidenceClause
         + `${schedule.sourceUrl ? ` ${schedule.sourceUrl}` : ""}`
+        // The read date beside the source (fee round, 2026-11): a fee that may be charged says when
+        // its page was read. Only where the row states one; never the row's last-touched time.
+        + `${schedule.sourceReadAt ? ` Source read ${schedule.sourceReadAt.slice(0, 10)}.` : ""}`
         + modeledSurchargeClause(schedule)
         + (track === "permit" ? stateSurchargeNotice(db, project.state, schedule.surchargeGaps) : "");
     } else if (schedule && floorUsd != null && floorWins()) {
@@ -1082,6 +1089,12 @@ function computePaymentQuote(
     );
   }
 
+  // THE FEE PAGES A PERSON READS, while the amount is not a schedule's or the portal's own figure
+  // (feeNeedsPerson). A display value like the archive notice below: computed per quote, so it
+  // stops being shown the moment a schedule lands or a person records the real fee.
+  const needsPerson = permitFeeSource === "published_schedule" || permitFeeSource === "actual" || permitFeeSource === "portal_record"
+    ? [] : [...feeReadsNeedingAPerson(db, feeProject, track), ...(feeProject !== project ? feeReadsNeedingAPerson(db, project, track) : [])]
+      .filter((r, i, all) => all.findIndex((x) => x.url === r.url) === i).slice(0, 6);
   const quote: SubmissionPaymentQuote = {
     track,
     required: billing.billingMode === "per_submission",
@@ -1094,9 +1107,11 @@ function computePaymentQuote(
     // and would have to be scrubbed on un-archive; computed per quote it simply
     // stops being true. The stored sentence stays the reason for the AMOUNT,
     // which is what a re-read of that column is for.
-    permitFeeBasis: archivedNotice(project) + permitFeeBasis,
+    permitFeeBasis: archivedNotice(project) + permitFeeBasis + feeReadsSentence(needsPerson),
     ...(permitFeeIsFloor ? { permitFeeIsFloor: true } : {}),
     permitFeeSourceUrl,
+    ...(permitFeeSource === "published_schedule" && schedule?.sourceReadAt ? { permitFeeSourceReadAt: schedule.sourceReadAt } : {}),
+    ...(needsPerson.length ? { feeNeedsPersonRead: needsPerson } : {}),
     permitFeeBracketLabel,
     // Named only when the payee is not the AHJ. "cited" is about the SCHEDULE: said only when the
     // amount came off a published (sourced) state schedule; otherwise the line says none is on file.
