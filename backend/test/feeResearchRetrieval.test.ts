@@ -40,6 +40,10 @@ async function main(): Promise<void> {
   } = await import("../src/feeSchedules");
   type Finding = import("../src/feeSchedules").FeeScheduleFinding;
   const { extractPdfTextItems } = await import("../src/pdfTables");
+  const documentFetch = await import("../src/documentFetch");
+  // One loopback stub plays every site below; the 10 s per-host gap (#130) is not what this
+  // suite measures, and the refused-host record is reset where a section needs a clean host.
+  documentFetch._setDocumentFetchPoliteness({ minGapMs: 0 });
   const db = await openDatabase();
 
   let failures = 0;

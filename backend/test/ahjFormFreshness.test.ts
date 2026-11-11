@@ -42,6 +42,8 @@ async function main(): Promise<void> {
   const base = `http://127.0.0.1:${port}`;
   // The stub stands in for a public AHJ site; the fetch guard (#391) refuses loopback otherwise.
   process.env.DOCUMENT_FETCH_ALLOW_ORIGINS = base;
+  // One loopback stub plays every AHJ; the 10 s per-host gap (#130) is not what this measures.
+  (await import("../src/documentFetch"))._setDocumentFetchPoliteness({ minGapMs: 0 });
 
   // Keep the sweep hermetic: blank the built-in seed rows' real portal URLs so
   // the test never probes the public internet.

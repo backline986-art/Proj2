@@ -29,7 +29,13 @@ delete process.env.DOCUMENT_FETCH_BROWSER;
 process.env.AUTOPILOT_LOG_FILE = "";
 process.env.AUTOPILOT_DB_PATH = path.join(os.tmpdir(), "document-fetch-test-never-opened.sqlite");
 
-const { fetchPublicDocument, findDocumentLinks } = await import("../src/documentFetch");
+const { fetchPublicDocument, findDocumentLinks, _resetHostPoliteness, _setDocumentFetchPoliteness } = await import("../src/documentFetch");
+// ONE ORIGIN PLAYS EVERY JURISDICTION HERE. The per-host politeness record (#130) would wait 10 s
+// between these checks and, after a check whose site REFUSED the window, answer the next one
+// "backed off" without sending — so the gap is zeroed, and _resetHostPoliteness is called before
+// exactly the checks an earlier refusal would otherwise flip. documentFetchHostPoliteness.test
+// owns the politeness assertions; the resets here are each annotated with what dirtied the host.
+_setDocumentFetchPoliteness({ minGapMs: 0 });
 // The caller this ladder was built for. Imported here, after the env above, and pure: the
 // module opens no database at import (verified) and fetchPdf touches nothing but the network.
 const { fetchPdf } = await import("../src/ahjFormAuto");
@@ -267,6 +273,7 @@ await check("a wall that survives the window ends the ladder — there is no run
 // The two refusals we do NOT climb. These are the constraints, not conveniences.
 // ---------------------------------------------------------------------------
 await check("a CAPTCHA ends it: ok:false, named, and no window is opened at the puzzle", async () => {
+  _resetHostPoliteness(); // the still-walled check above: a window refused backs the host off
   const { launcher, state } = grants();
   const res = await fetchPublicDocument(`${base}/captcha.pdf`, { launcher });
   assert.equal(res.ok, false);
@@ -276,6 +283,7 @@ await check("a CAPTCHA ends it: ok:false, named, and no window is opened at the 
 });
 
 await check("a stated no-robots refusal is honoured, not routed around", async () => {
+  _resetHostPoliteness(); // the CAPTCHA above backed the host off
   const { launcher, state } = grants();
   const res = await fetchPublicDocument(`${base}/norobots.pdf`, { launcher });
   assert.equal(res.ok, false);
@@ -301,6 +309,7 @@ await check("a non-http scheme is refused", async () => {
 });
 
 await check("the browser rung can be switched off, and says so", async () => {
+  _resetHostPoliteness(); // the no-robots notice above backed the host off
   const { launcher, state } = grants();
   const res = await fetchPublicDocument(`${base}/walled.pdf`, { launcher, allowBrowser: false });
   assert.equal(res.ok, false);
@@ -421,6 +430,7 @@ async function withWarnings<T>(fn: () => Promise<T>): Promise<{ value: T; warned
 }
 
 await check("fetchPdf still returns the bytes of a real PDF, and says nothing when it works", async () => {
+  _resetHostPoliteness(); // the findDocumentLinks CAPTCHA check above backed the host off
   const { value, warned } = await withWarnings(() => fetchPdf(`${base}/fee.pdf`));
   assert.ok(value, "the PDF came back null");
   assert.deepEqual(Array.from(value || []), Array.from(PDF_BYTES));

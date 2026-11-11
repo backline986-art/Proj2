@@ -78,6 +78,10 @@ export interface FetchedDocument {
    *  was refused before any request went there. The refused URL. A caller at a route edge
    *  answers this with a 400: the caller asked for something the server will not fetch. */
   privateTarget?: string;
+  /** Set when NOTHING was sent because this host refused automated clients within the last hour
+   *  (#130): the reason names that earlier refusal. A caller can tell this from a 404 or a dead
+   *  host — it is "do not ask this site again", not "this page is missing". */
+  hostBackedOff?: true;
 }
 
 export interface DocumentLink {
@@ -149,6 +153,100 @@ const WALL_BODY_MAX = 100_000;
 // ONE BROWSER AT A TIME. A research sweep over forty jurisdictions that escalated on ten of
 // them would otherwise open ten headed windows at once on somebody's laptop.
 const browserGate = pLimit(1);
+
+// ---------------------------------------------------------------------------
+// PER-HOST POLITENESS, PROCESS-WIDE (#130; memory: go gently on Cloudflare sites — same IP as the
+// production bot). Fee research opened 17 headed windows against one Cloudflare-walled host in 80 s:
+// browserGate serialises windows, it remembers nothing, so every walled URL earned its own window
+// and every window was refused the same way. ONE record per host, shared by every caller of this
+// module (fee research, the harvest, form acquisition, the lookup's page reader):
+//   - >= HOST_MIN_GAP_MS between the end of one ladder on a host and the start of the next, chained
+//     per host (two callers on one host queue; other hosts are not held up) — the same gap and the
+//     same shape as agencyPageReader, which used to be the only polite path;
+//   - a host that REFUSED our best permitted try is backed off for HOST_BACK_OFF_MS: a later call
+//     sends nothing and says so (hostBackedOff), so the caller can tell it from a 404.
+// "Refused our best permitted try" is: a challenge or a stated no-robots notice on the plain rung
+// (policy — no window is ever opened at those), or a real window refused (wall, challenge, notice).
+// It is NOT a plain 403 with the window forbidden by the caller (allowBrowser:false, allowUrl,
+// DOCUMENT_FETCH_BROWSER=0): the lookup's page reader runs on every AHJ host just BEFORE fee research
+// and forbids the window; had its 403 stamped the host, the one window the fee pass is allowed would
+// never open and Coos Bay — the reason this module exists — would be lost. Nor a launch failure, an
+// in-page throw or a private redirect: those are ours, not the site's.
+// ---------------------------------------------------------------------------
+/** The owner's rule, in one constant: >= 10 s between requests to one host. agencyPageReader's
+ *  PAGE_READ_MIN_GAP_MS is this value re-exported. */
+export const HOST_MIN_GAP_MS = 10_000;
+/** A refusal backs a host off for an hour (the server is long-running: one transient 429 must not
+ *  silence a host for the life of the process), then it may be asked again — once. */
+export const HOST_BACK_OFF_MS = 60 * 60 * 1000;
+interface HostRecord { lastRequestAt?: number; refusedAt?: number; refusedReason?: string }
+const hostRecords = new Map<string, HostRecord>();
+const hostChain = new Map<string, Promise<unknown>>();
+interface PolitenessSeams { sleep: (ms: number) => Promise<void>; now: () => number; minGapMs: number }
+const REAL_POLITENESS: PolitenessSeams = { sleep: (ms) => new Promise<void>((r) => setTimeout(r, ms)), now: () => Date.now(), minGapMs: HOST_MIN_GAP_MS };
+let politeness: PolitenessSeams = { ...REAL_POLITENESS };
+/** Tests only: forget every host (documentFetch.test plays several jurisdictions on one origin). */
+export function _resetHostPoliteness(): void { hostRecords.clear(); hostChain.clear(); }
+/** Tests only: a clock and a sleep that record instead of waiting, or a zero gap for a suite whose
+ *  loopback stub stands in for twenty public hosts. Not an operator knob — the gap is the rule. */
+export function _setDocumentFetchPoliteness(seams: Partial<PolitenessSeams>): void { politeness = { ...REAL_POLITENESS, ...seams }; }
+
+/** THE HOST A REQUEST IS COUNTED AGAINST: case folded, a leading "www." folded (the observed
+ *  failure hit bendoregon.gov AND www.bendoregon.gov — two records would halve the rule), the
+ *  port kept. Nothing else is folded: permits.example.gov is not example.gov, and a tenant
+ *  subdomain of a shared vendor host is its own host. "" for a non-URL. */
+export function politeHostOf(url: string | URL): string {
+  try {
+    const u = typeof url === "string" ? new URL(url) : url;
+    return u.host.toLowerCase().replace(/^www\./, "");
+  } catch {
+    return "";
+  }
+}
+const recordOf = (host: string): HostRecord => {
+  let r = hostRecords.get(host);
+  if (!r) { r = {}; hostRecords.set(host, r); }
+  return r;
+};
+/** The live refusal on a host, or null — an expired one is forgotten here. */
+function hostRefusal(host: string): Required<Pick<HostRecord, "refusedAt" | "refusedReason">> | null {
+  const r = hostRecords.get(host);
+  if (!r?.refusedAt) return null;
+  if (politeness.now() - r.refusedAt > HOST_BACK_OFF_MS) { delete r.refusedAt; delete r.refusedReason; return null; }
+  return { refusedAt: r.refusedAt, refusedReason: r.refusedReason ?? "" };
+}
+function noteRequest(host: string): void { if (host) recordOf(host).lastRequestAt = politeness.now(); }
+/** The site refused our best permitted try. The redirect landing host is stamped too: it is the
+ *  host that actually answered, and the next URL may name either. */
+function noteRefused(host: string, landing: string, reason: string): void {
+  for (const h of new Set([host, landing].filter(Boolean))) {
+    const r = recordOf(h);
+    r.refusedAt = politeness.now();
+    r.refusedReason = reason.slice(0, 200);
+  }
+  logger.info("document-fetch", "host refused automated clients — backed off, not asked again for an hour", { host, landing: landing !== host ? landing : undefined });
+}
+function backedOffResult(host: string, refusal: { refusedAt: number; refusedReason: string }, url: string): FetchedDocument {
+  const agoMin = Math.max(0, Math.round((politeness.now() - refusal.refusedAt) / 60_000));
+  const until = new Date(refusal.refusedAt + HOST_BACK_OFF_MS).toISOString();
+  return {
+    ok: false, status: 0, contentType: "", via: "http", finalUrl: url, hostBackedOff: true,
+    reason: `${host} refused automated clients ${agoMin} min ago (${refusal.refusedReason}) — backed off: nothing was sent, and the host is not asked again before ${until}.`,
+  };
+}
+
+const REFUSED_REASON = /refus|challenge|captcha|no automated|robots|wall|HTTP 40[13]\b|HTTP 429\b/i;
+/** A REFUSAL backs a host off; a MISSING PAGE does not (close F7: an Apache 404 on a county's site was
+ *  classed "refused an ordinary HTTP client" and silenced the host for an hour — its permit-packets
+ *  page was then never read). 401 / 403 / 429 always refuse; a challenge / wall / "no automated
+ *  access" notice refuses unless the server said the page is not there (404 / 410). ONE predicate for
+ *  "was this not-ok result the site refusing us?" — agencyPageReader, ahjFormAuto and the fee
+ *  researcher all ask it here. */
+export function isRefusal(status: number, reason: string): boolean {
+  if ([401, 403, 429].includes(status)) return true;
+  if (status === 404 || status === 410) return false;
+  return REFUSED_REASON.test(String(reason ?? ""));
+}
 
 // An INTERACTIVE human-verification puzzle. Not a thing we get past, by policy and by taste.
 const CAPTCHA =
@@ -364,11 +462,42 @@ export async function fetchPublicDocument(url: string, opts: FetchPublicDocument
   if (documentFetchDisabled()) {
     return { ok: false, status: 0, contentType: "", via: "http", reason: "Document downloads are off on this installation (DOCUMENT_FETCH=off).", finalUrl: url };
   }
+  const host = politeHostOf(checked.url);
+  // A host that refused us within the hour is not asked: nothing is sent, and the reason says so.
+  const refused = hostRefusal(host);
+  if (refused) return backedOffResult(host, refused, url);
+  // ONE HOST AT A TIME, >= the gap apart — chained per host, process-wide, the ladder held inside
+  // the chain so a window's own requests count too. The refusal is re-read after the wait: ten
+  // callers that arrived together must not all climb because none had stamped the host yet.
+  const prev = hostChain.get(host) ?? Promise.resolve();
+  const run = prev.catch(() => undefined).then(async (): Promise<FetchedDocument> => {
+    const wait = (hostRecords.get(host)?.lastRequestAt ?? 0) + politeness.minGapMs - politeness.now();
+    if (wait > 0 && politeness.minGapMs > 0) await politeness.sleep(wait);
+    const again = hostRefusal(host);
+    if (again) return backedOffResult(host, again, url);
+    return runLadder(checked.url, host, opts);
+  });
+  hostChain.set(host, run);
+  try {
+    return await run;
+  } finally {
+    if (hostChain.get(host) === run) hostChain.delete(host);
+  }
+}
+
+/** The ladder proper, for one URL whose host's turn it is. */
+async function runLadder(url: URL, host: string, opts: FetchPublicDocumentOptions): Promise<FetchedDocument> {
+  const checked = { url };
   const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const maxBytes = opts.maxBytes ?? DEFAULT_MAX_BYTES;
   const userAgent = opts.userAgent || BROWSER_UA;
 
   const attempt = await httpAttempt(checked.url.toString(), { timeoutMs, userAgent, maxBytes, allowUrl: opts.allowUrl });
+  // The gap clock starts when something was actually sent: a URL the guard refused at hop 0 was
+  // never a request. A redirect onto another host starts THAT host's clock too.
+  if (attempt.refusedUrl !== checked.url.toString()) noteRequest(host);
+  const landing = attempt.refusedUrl ? "" : politeHostOf(attempt.finalUrl);
+  if (landing && landing !== host) noteRequest(landing);
 
   if (attempt.refusedUrl && attempt.callerRefused) {
     // Not a private address: a place the caller's own door does not open onto. Nothing was sent.
@@ -430,29 +559,18 @@ export async function fetchPublicDocument(url: string, opts: FetchPublicDocument
   }
 
   if (refusal === "captcha") {
-    return {
-      ok: false,
-      status: attempt.status,
-      contentType: attempt.contentType,
-      text: peek,
-      via: "http",
-      reason: `${checked.url.host} answered with a human-verification challenge (${describeStatus(attempt.status, attempt.server)}). `
-        + "Automation never solves CAPTCHAs — a person must retrieve this one.",
-      finalUrl: attempt.finalUrl,
-    };
+    // Policy ends the ladder here, so this IS the site's answer to our best permitted try.
+    const reason = `${checked.url.host} answered with a human-verification challenge (${describeStatus(attempt.status, attempt.server)}). `
+      + "Automation never solves CAPTCHAs — a person must retrieve this one.";
+    noteRefused(host, landing, reason);
+    return { ok: false, status: attempt.status, contentType: attempt.contentType, text: peek, via: "http", reason, finalUrl: attempt.finalUrl };
   }
 
   if (refusal === "robots") {
-    return {
-      ok: false,
-      status: attempt.status,
-      contentType: attempt.contentType,
-      text: peek,
-      via: "http",
-      reason: `${checked.url.host} refuses automated clients by its own notice (${describeStatus(attempt.status, attempt.server)}). `
-        + "Not escalated: that is a stated policy, not a misdetected browser.",
-      finalUrl: attempt.finalUrl,
-    };
+    const reason = `${checked.url.host} refuses automated clients by its own notice (${describeStatus(attempt.status, attempt.server)}). `
+      + "Not escalated: that is a stated policy, not a misdetected browser.";
+    noteRefused(host, landing, reason);
+    return { ok: false, status: attempt.status, contentType: attempt.contentType, text: peek, via: "http", reason, finalUrl: attempt.finalUrl };
   }
 
   if (refusal !== "wall") {
@@ -482,30 +600,52 @@ export async function fetchPublicDocument(url: string, opts: FetchPublicDocument
     };
   }
 
-  logger.info("document-fetch", "plain fetch was refused — retrying with a real window", {
-    host: checked.url.host,
-    status: attempt.status,
-    server: attempt.server || undefined,
+  return browserGate(async () => {
+    // Re-read at the gate: another host's window may have run for a minute while this call
+    // queued, and in that time this host may have refused somebody else's window.
+    const meanwhile = hostRefusal(host);
+    if (meanwhile) return backedOffResult(host, meanwhile, checked.url.toString());
+    logger.info("document-fetch", "plain fetch was refused — retrying with a real window", {
+      host: checked.url.host,
+      status: attempt.status,
+      server: attempt.server || undefined,
+    });
+    try {
+      return await browserAttempt(checked.url, {
+        launcher: opts.launcher || headedChromiumLauncher,
+        timeoutMs: opts.browserTimeoutMs ?? DEFAULT_BROWSER_TIMEOUT_MS,
+        maxBytes,
+        render: opts.render === true,
+        blocked,
+        httpStatus: attempt.status,
+        // The window was the one try this host gets; refused, the host is backed off.
+        onSiteRefusal: (reason, finalUrl) => noteRefused(host, politeHostOf(finalUrl), reason),
+      });
+    } finally {
+      // The window's own requests (the warm-up, the document) move the gap clock too.
+      noteRequest(host);
+    }
   });
-
-  return browserGate(() => browserAttempt(checked.url, {
-    launcher: opts.launcher || headedChromiumLauncher,
-    timeoutMs: opts.browserTimeoutMs ?? DEFAULT_BROWSER_TIMEOUT_MS,
-    maxBytes,
-    render: opts.render === true,
-    blocked,
-    httpStatus: attempt.status,
-  }));
 }
 
 async function browserAttempt(
   url: URL,
-  cfg: { launcher: DocumentBrowserLauncher; timeoutMs: number; maxBytes: number; render: boolean; blocked: string; httpStatus: number },
+  cfg: {
+    launcher: DocumentBrowserLauncher; timeoutMs: number; maxBytes: number; render: boolean; blocked: string; httpStatus: number;
+    /** Called when the SITE refused the window (wall, challenge, notice) — not when the window
+     *  could not start, threw, or was sent somewhere private. */
+    onSiteRefusal?: (reason: string, finalUrl: string) => void;
+  },
 ): Promise<FetchedDocument> {
   const deadline = Date.now() + cfg.timeoutMs;
   const remaining = (): number => Math.max(1_000, deadline - Date.now());
   const fail = (reason: string, status = cfg.httpStatus): FetchedDocument =>
     ({ ok: false, status, contentType: "", via: "browser", reason, finalUrl: url.toString() });
+  /** The site's refusal of the window: reported like any failure, and the host told. */
+  const refusedBySite = (reason: string, status: number, finalUrl?: string): FetchedDocument => {
+    cfg.onSiteRefusal?.(reason, finalUrl || url.toString());
+    return fail(reason, status);
+  };
 
   // THE WINDOW ASKS THE SAME QUESTION (#407). Chromium follows a page's redirects itself, so the
   // URL the plain rung judged is only the first of the window's requests. Every request it sends
@@ -565,9 +705,11 @@ async function browserAttempt(
       const status = visited.status ?? 200;
       const html = visited.html || "";
       const refusal = classifyRefusal(status, "text/html", html);
-      if (refusal === "captcha") return fail(`${cfg.blocked}. A real window reached a human-verification challenge; automation stops there.`, status);
-      if (refusal === "robots") return fail(`${cfg.blocked}. A real window reached the site's own "no automated access" notice.`, status);
-      if (refusal === "wall" || status >= 400) {
+      if (refusal === "captcha") return refusedBySite(`${cfg.blocked}. A real window reached a human-verification challenge; automation stops there.`, status, visited.url);
+      if (refusal === "robots") return refusedBySite(`${cfg.blocked}. A real window reached the site's own "no automated access" notice.`, status, visited.url);
+      if (refusal === "wall") return refusedBySite(`${cfg.blocked}, and a real window was refused too (${describeStatus(status, "")}).`, status, visited.url);
+      if (status >= 400) {
+        // A 404 / 500 in the window is a missing page, not the site refusing us.
         return fail(`${cfg.blocked}, and a real window was refused too (${describeStatus(status, "")}).`, status);
       }
       const bytes = new TextEncoder().encode(html);
@@ -608,13 +750,16 @@ async function browserAttempt(
     const peek = peekText(got.bytes, got.contentType);
     const refusal = classifyRefusal(got.status, got.contentType, peek, got.bytes.length);
     if (refusal === "captcha") {
-      return fail(`${cfg.blocked}. A real window was answered with a human-verification challenge; automation never solves those — a person must retrieve this one.`, got.status);
+      return refusedBySite(`${cfg.blocked}. A real window was answered with a human-verification challenge; automation never solves those — a person must retrieve this one.`, got.status, got.url);
     }
     if (refusal === "robots") {
-      return fail(`${cfg.blocked}. A real window reached the site's own "no automated access" notice.`, got.status);
+      return refusedBySite(`${cfg.blocked}. A real window reached the site's own "no automated access" notice.`, got.status, got.url);
     }
-    if (refusal === "wall" || got.status < 200 || got.status >= 300) {
+    if (refusal === "wall") {
       // ONE escalation, not a loop: the ladder has no rung above a real window.
+      return refusedBySite(`${cfg.blocked}, and a real window was refused too (${describeStatus(got.status, "")}).`, got.status, got.url);
+    }
+    if (got.status < 200 || got.status >= 300) {
       return fail(`${cfg.blocked}, and a real window was refused too (${describeStatus(got.status, "")}).`, got.status);
     }
 

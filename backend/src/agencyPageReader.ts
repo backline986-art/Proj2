@@ -19,7 +19,11 @@
 // Nothing here writes anything anywhere; what it read is DATA for the lookup's doors, never an
 // instruction.
 import { load } from "cheerio";
-import { fetchPublicDocument, documentFetchDisabled } from "./documentFetch";
+import { fetchPublicDocument, documentFetchDisabled, isRefusal, HOST_MIN_GAP_MS, HOST_BACK_OFF_MS } from "./documentFetch";
+// The refusal predicate and the two politeness constants live in documentFetch now (#130: the
+// fee path needed the same rule and this module imports documentFetch, so the shared copy had to
+// sit below both). Re-exported under their old names for the readers' callers.
+export { isRefusal };
 import { looksBotBlocked } from "./runAbort";
 import { portalHostOf } from "./portalChannel";
 
@@ -59,7 +63,7 @@ function hopsOf(url: string, finalUrl: string, reported?: string[]): string[] {
   return finalUrl && finalUrl !== url ? [url, finalUrl] : [url];
 }
 
-export const PAGE_READ_MIN_GAP_MS = 10_000;
+export const PAGE_READ_MIN_GAP_MS = HOST_MIN_GAP_MS;
 const DEFAULT_TIMEOUT_MS = 20_000;
 const DEFAULT_MAX_BYTES = 15 * 1024 * 1024;
 const TEXT_CAP = 120_000;
@@ -123,7 +127,7 @@ const hostLast = new Map<string, number>();
 const backedOff = new Map<string, { reason: string; at: number }>();
 /** A refusal backs a host off for an hour (the server is long-running: one transient 429 must not
  *  silence a host for the life of the process), then it may be asked again — once. */
-export const BACK_OFF_MS = 60 * 60 * 1000;
+export const BACK_OFF_MS = HOST_BACK_OFF_MS;
 const isBackedOff = (host: string) => {
   const b = backedOff.get(host);
   if (b && Date.now() - b.at > BACK_OFF_MS) backedOff.delete(host);
@@ -131,17 +135,6 @@ const isBackedOff = (host: string) => {
 };
 /** Tests only: forget the process-wide host state. */
 export function _resetPoliteness(): void { hostChain.clear(); hostLast.clear(); backedOff.clear(); }
-const REFUSED_REASON = /refus|challenge|captcha|no automated|robots|wall|HTTP 40[13]\b|HTTP 429\b/i;
-/** A REFUSAL backs a host off; a MISSING PAGE does not (close F7: an Apache 404 on a county's site was
- *  classed "refused an ordinary HTTP client" and silenced the host for an hour — its permit-packets
- *  page was then never read). 401 / 403 / 429 always refuse; a challenge / wall / "no automated
- *  access" notice refuses unless the server said the page is not there (404 / 410). */
-export function isRefusal(status: number, reason: string): boolean {
-  if ([401, 403, 429].includes(status)) return true;
-  if (status === 404 || status === 410) return false;
-  return REFUSED_REASON.test(String(reason ?? ""));
-}
-
 export interface PageReader {
   read(url: string, opts?: { headers?: Record<string, string>; json?: boolean }): Promise<ReadPage>;
   /** Every read attempted, in order — for the run log and the eval. */
