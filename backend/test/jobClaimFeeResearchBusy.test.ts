@@ -120,6 +120,24 @@ check("a running fee_research does not block the project's other (non-portal) wo
   assert.equal(statusOf("A-local-pending"), "running");
 });
 
+// A LEGACY ROW MUST NOT HALT THE QUEUE. json_extract raises "malformed JSON" on a payload that is
+// not JSON, and the predicate runs in EVERY claim (and its subquery over every running
+// fee_research row), so one such row would make claimNextJob throw on every drain, for every
+// tenant. Probed: bare json_extract throws; a json_valid guard does not.
+db.run("UPDATE job_queue SET status = 'done' WHERE status IN ('running', 'pending')");
+db.run(
+  `INSERT INTO job_queue (id, job_type, payload, status, priority, project_id, created_at, started_at, progress, progress_total, retry_count, max_retries, org_id)
+   VALUES ('legacy-text-pending', 'stress_noop', 'not json', 'pending', 5, NULL, ?, NULL, 0, 0, 0, 0, 'default'),
+          ('legacy-empty-running', 'fee_research', '', 'running', 5, 'proj-E', ?, ?, 0, 0, 0, 0, 'default')`,
+  [new Date(now + (n++) * 10).toISOString(), new Date(now + (n++) * 10).toISOString(), new Date(now).toISOString()],
+);
+job("bend-after-legacy-pending", "proj-A", "pending", fee(BEND, "electrical"), 3);
+check("a payload that is not JSON (pending or running) never makes the claim throw, and claiming goes on", () => {
+  const wave = claimAll();
+  assert.ok(wave.includes("legacy-text-pending"), `claimed ${JSON.stringify(wave)}`);
+  assert.ok(wave.includes("bend-after-legacy-pending"), `an empty running payload holds nothing: ${JSON.stringify(wave)}`);
+});
+
 if (failures) { console.error(`\n${failures} job-claim-fee-busy check(s) FAILED.`); process.exit(1); }
 console.log("\nAll job-claim-fee-busy checks passed.");
 process.exit(0);

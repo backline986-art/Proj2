@@ -628,13 +628,16 @@ const PROJECT_BUSY_SQL = `NOT (
 // through the shared window queue. Keyed on the payload's profileKey (the AGENCY, not the project:
 // two projects at one AHJ collide too), outside the project wrapper above. A payload with no
 // profileKey (an older row) is never held. Same shape as PROJECT_BUSY_SQL: the candidate read and
-// the claim UPDATE enforce one predicate.
+// the claim UPDATE enforce one predicate. json_extract RAISES on a payload that is not JSON, and
+// this runs in every claim over every running fee_research row — one legacy row would halt the
+// whole queue — so each extract sits under json_valid (CASE is evaluated lazily; AND is not).
+const PROFILE_KEY_SQL = (col: string): string => `(CASE WHEN json_valid(${col}) THEN json_extract(${col}, '$.profileKey') END)`;
 const FEE_RESEARCH_BUSY_SQL = `NOT (
      job_type = 'fee_research'
-     AND json_extract(payload, '$.profileKey') IS NOT NULL
+     AND ${PROFILE_KEY_SQL("payload")} IS NOT NULL
      AND EXISTS (
        SELECT 1 FROM job_queue busy WHERE busy.status = 'running' AND busy.job_type = 'fee_research'
-          AND json_extract(busy.payload, '$.profileKey') = json_extract(job_queue.payload, '$.profileKey')))`;
+          AND ${PROFILE_KEY_SQL("busy.payload")} = ${PROFILE_KEY_SQL("job_queue.payload")}))`;
 
 // Claim the next runnable job: mark it 'running' and return it, or null when nothing is
 // claimable. FULLY SYNCHRONOUS — no await between the read and the claim — so concurrent
