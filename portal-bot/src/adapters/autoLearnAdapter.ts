@@ -6421,11 +6421,16 @@ export class AutoLearnAdapter extends BasePortalAdapter {
       if (steps.slice(tallyFrom).some(isFormData)) filledPages++;
       tallyFrom = steps.length;
     };
-    // The e-signature pass found boxes the inventory does not hold: ONE re-read PER PAGE (by
-    // identity, like requiredReplanned; #131 risk 3) before the pass may type by the live marks
-    // alone on that page. Per run, a stale read on the first signature page would have waived the
-    // detector-and-inventory agreement on every later one.
+    // The e-signature pass found boxes the inventory does not hold: ONE re-read PER PAGE (#131
+    // risk 3) before the pass may type by the live marks alone on that page. Per run, a stale read
+    // on the first signature page would have waived the detector-and-inventory agreement on every
+    // later one. Keyed by host + path, not the page identity's `where`: the heading can differ
+    // between the stale read (the live page, mid-reveal) and the next scrape, and a key that
+    // missed would refuse the pass again and ride the walk into the recovery budget.
     const signatureStaleReread = new Set<string>();
+    // host + pathname of a url — no query string (ids), no fragment. The page trace, the page
+    // event and the stale-reread key all speak this one spelling.
+    const hostPathOf = (u: string): string => { try { const p = new URL(u); return p.host + p.pathname; } catch { return (u || "").slice(0, 60); } };
     // A REQUIRED BLANK STOPS THE ADVANCE (#410): pages (by identity) already given their one
     // re-plan for required fields still blank, and a per-run cap on those planner calls.
     const requiredReplanned = new Set<string>();
@@ -7176,10 +7181,13 @@ export class AutoLearnAdapter extends BasePortalAdapter {
         // now, and the deep search's menu clicks and reload of the page it started on are page
         // changes no step records (PGE: the reload resumed the wizard at Preparer, under a plan made
         // for Welcome). A second entry on the page it opened is still found by the one look.
-        // Inside once ANY recorded open-phase click landed — the entry control, the permit type,
-        // the single tile, a programme (#131): after the type tile the walk stood on the form, and
+        // Inside once a recorded WAY IN landed — the entry control, the permit type, the single
+        // tile, a programme (#131): after the type tile the walk stood on the form, and
         // entryLabelsClicked alone would have sent the deep search's menu clicks and reload at it.
-        const insideApplication = this.entryLabelsClicked.size > 0 || steps.some((st) => st.action === "click" && st.phase === "open");
+        // By the step's note, not its phase: the planner's "navigate to application" click is also
+        // open-phase, and a dashboard link it chose has not necessarily entered anything.
+        const insideApplication = this.entryLabelsClicked.size > 0
+          || steps.some((st) => st.action === "click" && /^(application entry|permit type|choice tile|application program):/.test(String(st.note ?? "")));
         const entered = await enterApplicationFlow(this.page, { skipLabels: this.entryLabelsClicked, shallow: insideApplication }).catch(() => null);
         if (entered?.alreadyClicked) {
           this.debug?.event({ type: "application_entry_repeat_ignored", label: (entered.label || "").slice(0, 60) });
@@ -7435,15 +7443,14 @@ export class AutoLearnAdapter extends BasePortalAdapter {
               stopReason: "signature_no_signer",
             };
           }
-          const done = await this.completeTypedSignature(signer, steps, fields, { allowUninventoried: signatureStaleReread.has(scrapedIdentity?.where ?? url) });
+          const done = await this.completeTypedSignature(signer, steps, fields, { allowUninventoried: signatureStaleReread.has(hostPathOf(url)) });
           if (!done.ok && done.stale) {
             // THE DETECTOR AND THE INVENTORY DISAGREE: boxes on the live page, none among the
             // fields this iteration read. The page changed since it was read (#131) — re-read it,
-            // once per page. The LIVE page is the one that was not read, so it is the one keyed:
-            // the next iteration scrapes it, and a box its inventory cannot hold (a shadow root)
-            // is typed on that second look.
-            const live = await pageIdentityOf(this.page).catch(() => null);
-            signatureStaleReread.add(live?.where ?? String(this.page.url?.() ?? url));
+            // once per page. The LIVE page is the one that was not read, so its host + path is
+            // the key: the next iteration scrapes it, and a box its inventory cannot hold (a
+            // shadow root) is typed on that second look.
+            signatureStaleReread.add(hostPathOf(typeof this.page.url === "function" ? String(this.page.url() ?? "") : url));
             this.debug?.event({ type: "signature_inventory_stale", page: pageCount, why: done.why });
             continue;
           }
@@ -7771,7 +7778,6 @@ export class AutoLearnAdapter extends BasePortalAdapter {
       //      page. host+pathname only (NO query string — avoids leaking any ids), title
       //      capped, no field values. This is the trace surfaced when a run finds nothing.
       {
-        const hostPathOf = (u: string): string => { try { const p = new URL(u); return p.host + p.pathname; } catch { return (u || "").slice(0, 60); } };
         const hostPath = hostPathOf(url);
         // READ AT EMISSION, NOT FROM THE SCRAPE (#131): the event once described a page the
         // browser had left. When the live page differs from the one inventoried, the trace
