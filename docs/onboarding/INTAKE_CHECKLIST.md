@@ -1,20 +1,38 @@
 # Intake Checklist — what to ask a new solar company for, and what breaks without it
 
-Audience: the operator onboarding an installer. Work top to bottom on a call or a shared
-form, then transcribe into a copy of `docs/onboarding/intake-template.json` and run
-`scripts/onboard-company.ts`. Read `docs/onboarding/intake-template.json` alongside this
-file — it is the same list, laid out to fill in. Where the two ever disagree about a key
-name, the script's own `--example` output wins over both (see the note below the markers).
+Audience: the operator onboarding an installer. Read `docs/onboarding/intake-template.json`
+alongside this file — it is the same list, laid out to fill in. Where the two ever disagree
+about a key name, the script's own `--example` output wins over both (see the note below the
+markers).
+
+Last checked against the code on **2026-11-11**. The portal counts quoted in §5, §6 and
+"Collecting portal passwords safely" are still the 2026-09-09 measurements and are marked so.
+
+**Two ways to collect it, and they mix.**
+
+- **The client fills in its own block on its Company setup link** (`docs/ONBOARDING.md` §3.4).
+  Create the link on the Clients screen and send it. The page asks for §1 to §4 and §6 of this
+  checklist in the client's words (identity, contacts, licences per state, insurance and bond,
+  the signer, the standard disconnect, where it works, the billing contact), takes certificate
+  uploads, and hands off to the one-time login link for §5. Every answer waits as a proposal
+  until a signed-in person accepts, edits or rejects it. Rows below say **(setup link)** where
+  the page collects the field.
+- **You work top to bottom on a call**, then transcribe into a copy of
+  `docs/onboarding/intake-template.json` and run `scripts/onboard-company.ts`. This is the only
+  route that loads portal credentials in bulk and the only one for the fields the page does
+  not ask for.
 
 Markers: **REQUIRED** · **REQUIRED-IF (condition)** · **OPTIONAL** · **IGNORED**. "Required"
 here means one of two different things and the difference matters, so it is stated per item:
 
-- **A hard gate.** The code refuses. `ccbLicenseNumber` is the only one on the client
-  record: `prepareSubmission` throws a 409 `needsCcb` — *Submitting client "X" has no CCB
-  license number on file* (`backend/src/repository.ts:5278`).
-- **A blank portal field.** Everything else is unenforced. A missing licence number does
-  not throw; `clientStagingOverlay` (`backend/src/clients.ts:220`) simply drops the empty
-  key, the portal field stays blank, and the filing is REJECTED BY A HUMAN AT THE AHJ days
+- **A hard gate.** The code refuses. On the client record there is one, and it is Oregon's:
+  an Oregon job with no `ccbLicenseNumber` makes `prepareSubmission` throw a 409 `needsCcb` —
+  *Submitting client "X" has no CCB license number on file*. `onboard-company.ts` also refuses
+  to run with no licence on file at all, or with no contractor licence for a state it can see
+  the company is licensed in.
+- **A blank portal field.** Everything else is unenforced. A missing licence outside Oregon
+  does not throw: the submit gate shows a warning, `clientStagingOverlay` drops the empty key,
+  the portal field stays blank, and the filing is REJECTED BY A HUMAN AT THE AHJ days
   later. That is the quiet failure mode this checklist exists to prevent — the run says
   "staged" either way.
 
@@ -22,27 +40,22 @@ here means one of two different things and the difference matters, so it is stat
 looks for it. Collect the answer if it is useful to a human, but do not expect the system to
 act on it, and never tell a customer a setting exists because a field for it does.
 
-Three fields are **not in the dashboard client form at all** — `docketNumber`,
-`standardDisconnectMake`, `standardDisconnectModel` (verified: no reference to any of them
-in `frontend/dashboard.js`). They can only be set through the intake JSON, the API, or raw
-SQL. If you collect them on a call and then type them into the Clients screen, there is
-nowhere to put them and they are silently lost.
+**Some fields have no box on the Clients form** (checked against `frontend/dashboard.js`):
+`docketNumber`, `standardDisconnectMake`, `standardDisconnectModel`, `updatesInbox`,
+`billingContactEmail`, `licenseState`, `insuranceExpiry` and `bondExpiry`. If you collect
+them on a call and then look for somewhere to type them on the Clients screen, there is
+nowhere. They get in through the intake JSON, through the API, or — for all of them except
+`docketNumber` and `licenseState` — by accepting what the client sent on its Company setup
+link.
 
-**A fourth marker, new and temporary: COLLECT NOW / WRITE BY COLUMN.** Eight answers the
-onboarding guide's packet asks for got database columns in migration v18 —
-`updates_inbox`, `billing_contact_email`, `license_state`, `insurance_expiry`, `bond_expiry`
-on `clients`, and `mfa_required`, `mfa_code_destination`, `fee_responsibility` on
-`portal_credentials`. **Ask for all eight on the call.** But before you assume a run stored
-one, check `npx tsx scripts/onboard-company.ts --example`: a key that is not in that output
-is a key the script does not write, and it fails in the two different ways §"A field name
-the script does not recognise" describes — an unknown **client** key is named in the dry
-run's WARNINGS and dropped, an unknown key inside a `portalCredentials[]` entry is dropped
-**silently**. The REST API is the same story for the credential three: `validation.ts`
-declares neither, and zod strips what it does not declare (the same trap that has always
-eaten `securityAnswers`). Until the script and the schema list them, the column name is the
-contract — a one-line `UPDATE` per client, or per credential, is how the answer gets in.
-Record it in the intake file regardless: the file is where the answer survives the gap
-between the call and the column.
+**The onboarding guide's eight packet answers are written by the script.** They got columns
+in migration v18 — `updates_inbox`, `billing_contact_email`, `license_state`,
+`insurance_expiry`, `bond_expiry` on `clients`, and `mfa_required`, `mfa_code_destination`,
+`fee_responsibility` on `portal_credentials` — and `onboard-company.ts` now lists and writes
+all eight; the dry run prints a `fees` and an `mfa` line per portal so you can check them
+before the real run. The REST API accepts the three credential answers too. It still does
+**not** accept `securityAnswers` (§5). Earlier versions of this checklist marked these eight
+"write by column" because the script dropped them; that is no longer true.
 
 **A field name the script does not recognise is a field that does nothing**, so two habits
 before a real run. First, `npx tsx scripts/onboard-company.ts --example` prints the exact
@@ -50,10 +63,9 @@ shape the script consumes — that output, and the script's bare usage text, are
 on key and flag names, not this document. Second, read the dry run's WARNINGS block: it
 names every unrecognised key — in the `client` block **and** at the top level of the file, so
 a stray top-level key gets named rather than silently ignored (`jurisdictions[]` is warned
-about on every run for exactly that reason — §6; it is intelligence, not configuration). The
-gap that remains is one level down: a misspelled key **inside** an `org`, `users[]` or
-`portalCredentials[]` entry is read by nothing and warned about by nothing. Check those
-against `--example` character by character.
+about on every run for exactly that reason — §6; it is intelligence, not configuration). An
+unknown key inside a `portalCredentials[]` entry is named and dropped the same way. Still
+check an `org` or `users[]` entry against `--example` character by character.
 
 ---
 
@@ -88,10 +100,10 @@ against `--example` character by character.
 | `businessAddress` | **REQUIRED** | Fills `installerStreet` / `installerAddress`. Blank means a blank contractor-address block, which is a rejected permit application at most AHJs. |
 | `businessCity` / `businessState` / `businessZip` | **REQUIRED** | Filled separately AND recombined into `installerCityStateZip`, because some portals want one field and some want three. **Zip must be exactly 5 digits** — Accela's Add-Contact dialog validates `#####` and refuses ZIP+4. |
 | `businessPhone` | **REQUIRED** | Primary source for `installerPhone`, and it is also split into per-segment keys (`phoneSegmentKeys`) for portals with three separate area/prefix/line boxes. Give it as a plain 10-digit number; formatting is handled. |
-| `businessEmail` | **REQUIRED** | Primary source for `installerEmail`, and — this is the part that gets missed — **the only address we ever send the company anything at.** `notifyClientOfStatusChange` (`backend/src/clientNotifier.ts:118-123`) reads `clients.business_email` and returns silently if it is blank. There is **no** fallback to `contactEmail`. So a blank one means the installer is never told the permit was issued, never told a correction landed, and never gets the read-only status link — with no error anywhere, because in the service-bureau lane those emails are the only thing they receive from us at all (§8). Ask for a shared inbox, not one person's address. |
-| `updatesInbox` | **REQUIRED** (guide S3.1; column `clients.updates_inbox`, COLLECT NOW / WRITE BY COLUMN) | **Where *we* send confirmations, status updates and corrections — and the guide says in as many words "a shared inbox, not one person's".** This is deliberately **not** `businessEmail`. `businessEmail` is the installer address that goes **on the application**, which is where the *AHJ* mails its corrections (`clientStagingOverlay` maps it to `installerEmail`); `updatesInbox` is where *Keelix* writes. They are different addresses for different senders, and a company must be able to change one without changing the other — the person who answers permit-clerk mail is rarely the person who wants our status traffic. Ask for a distribution list or a shared mailbox and say why: one person's address means a week of updates sit unread while they are on holiday. **Today the notifier still reads `business_email` and nothing else** (`backend/src/clientNotifier.ts:118-123`), so filling this column does not yet reroute anything — repointing the notifier is a deliberate switch, not a side effect of the column arriving. Until it happens, `businessEmail` must still be a real monitored address (see its row). |
-| `billingContactEmail` | **REQUIRED** (guide S3.7; column `clients.billing_contact_email`, COLLECT NOW / WRITE BY COLUMN) | Who receives **our** invoices. A third address again, and the one most often given as "just send it to the same place" on the call and then disputed at the first invoice. Ask for accounts payable by name. Reaches no portal field; it is a fact about the relationship, not the filing. |
-| `ein` | **OPTIONAL** | Ask for it because AHJ business-licence paperwork wants it, but be clear-eyed: there is no overlay key feeding it, so a portal field labelled EIN or Tax ID is **not** auto-filled — and it never will be recorded as a literal either, because that label is in the sensitive set (`autoLearn.ts:970`, `autoLearnAdapter.ts:335`) and binds at replay or is redacted. An EIN-requiring portal is a human fill. **Write it, never echo it** — no log line, no console output, no support ticket. |
+| `businessEmail` | **REQUIRED** (setup link) | Primary source for `installerEmail`, and the **fallback address for our own updates** when `updatesInbox` is blank: the notifier (`backend/src/clientNotifier.ts`) sends to `updates_inbox`, else `business_email`, and there is **no** further fallback to `contactEmail`. With both blank the installer is never told the permit was issued, never told a correction landed, and never gets the read-only status link, with no error anywhere. Ask for a shared inbox, not one person's address. |
+| `updatesInbox` | **REQUIRED** (guide S3.1; column `clients.updates_inbox`; setup link) | **Where *we* send confirmations, status updates and corrections — and the guide says in as many words "a shared inbox, not one person's".** This is deliberately **not** `businessEmail`. `businessEmail` is the installer address that goes **on the application**, which is where the *AHJ* mails its corrections (`clientStagingOverlay` maps it to `installerEmail`); `updatesInbox` is where *Keelix* writes. They are different addresses for different senders, and a company must be able to change one without changing the other — the person who answers permit-clerk mail is rarely the person who wants our status traffic. Ask for a distribution list or a shared mailbox and say why: one person's address means a week of updates sit unread while they are on holiday. **The notifier sends to this address** and falls back to `businessEmail` only when it is blank (`backend/src/clientNotifier.ts`), so `businessEmail` should still be a real monitored address (see its row). |
+| `billingContactEmail` | **REQUIRED** (guide S3.7; column `clients.billing_contact_email`; setup link) | Who receives **our** invoices: the invoice email goes here, falling back to `businessEmail` and then `contactEmail`. A third address again, and the one most often given as "just send it to the same place" on the call and then disputed at the first invoice. Ask for accounts payable by name. Reaches no portal field; it is a fact about the relationship, not the filing. |
+| `ein` | **OPTIONAL** (never on the setup link) | Ask for it because AHJ business-licence paperwork wants it, but be clear-eyed: there is no overlay key feeding it, so a portal field labelled EIN or Tax ID is **not** auto-filled — and it never will be recorded as a literal either, because that label is in the sensitive set (`autoLearn.ts:970`, `autoLearnAdapter.ts:335`) and binds at replay or is redacted. An EIN-requiring portal is a human fill. **Write it, never echo it** — no log line, no console output, no support ticket. |
 | `notes` | **OPTIONAL** | Internal free text on the client row. Not fed to the LLM (the LLM-visible notes columns are `portal_credentials.notes` and `permit_utility_knowledge.notes`), but keep secrets out on principle. |
 
 ## 2 · Licensing
@@ -99,34 +111,45 @@ against `--example` character by character.
 Ask for the *number as printed on the licence*, and ask which state issued it. Every one of
 these lands in the staging overlay and is typed into a real application.
 
+**Licences are per state.** A company files in several states and one state can issue it
+several licences. `stateLicenses` holds one entry per licence per state; the named columns
+below it (`ccbLicenseNumber`, `electricalLicenseNumber`, `electricianLicenseNumber`,
+`electricalSupervisorName`) are **Oregon's** licences and fill only Oregon jobs. One function
+(`licenceFor` in `backend/src/clients.ts`) answers "which number goes in this slot" for the
+submit gate, the form fill and the portal overlay, by the job's state and the licence type the
+slot or the permit asks for. It never puts another state's number, or a general contractor's
+number in an electrical slot, and where several licences could fit and nothing says which, it
+leaves the slot blank and names the candidates.
+
 | Field | Marker | Why we need it / what breaks |
 | --- | --- | --- |
-| `ccbLicenseNumber` | **REQUIRED** (hard gate) | The contractor/CCB licence number. This is the **only** client field the code enforces: `prepareSubmission` throws 409 `{needsCcb: true, clientId}` and nothing stages until it is filled (`repository.ts:5278`). Digits only, no state prefix. |
-| `licenseState` | **REQUIRED** (guide S3.2 asks for the issuing state by name; column `clients.license_state`, COLLECT NOW / WRITE BY COLUMN) | **Which state issued the contractor licence above.** We stored the number with no issuer, and a bare number stops meaning anything the moment a company is licensed in two states — "223690" is a different licence in Oregon than in Washington, and the reciprocity question every multi-state installer asks ("are we licensed in the state this job is in?") cannot be answered from the number alone. Two letters, the USPS abbreviation, matching how `businessState` is stored. |
+| `stateLicenses[]` | **REQUIRED** — one entry per licence, per state they file in (setup link; Clients screen → State licences) | `{ state, kind, number, expires?, holder? }`. `kind` is one of `contractor`, `electrical_contractor`, `construction_supervisor`, `home_improvement_contractor`, `solar_contractor`, `master_electrician`, `business_registration` (a business registration is never offered as a contractor licence). A person's licence (`master_electrician`, `construction_supervisor`) also takes `holder`, the person's name. **What breaks without it, outside Oregon:** nothing throws. The submit gate warns, the licence slot on the application stays blank, and the AHJ rejects it. The readiness check fails the state for a missing contractor licence (permits) or electrical contractor licence (interconnection). An entry with a type the list does not recognise is kept as typed but never offered to a slot; a test-looking number is never filed. Accepting licences from the setup link, and re-running the script, only ever **adds**: neither removes a licence on file. |
+| `ccbLicenseNumber` | **REQUIRED-IF (they file in Oregon)** — the hard gate | Oregon's CCB number. On an Oregon job `prepareSubmission` throws 409 `{needsCcb: true, clientId}` and nothing stages until this field is filled; the gate reads this field itself, so an Oregon licence listed only under `stateLicenses` does not satisfy it. Outside Oregon it fills nothing. Digits only, no state prefix. Not on the setup link: type it on the Clients form. |
+| `licenseState` | **REQUIRED** (guide S3.2 asks for the issuing state by name; column `clients.license_state`) | **Which state issued the company's main contractor licence.** The readiness check uses it as the state to check when no jurisdiction is in scope, and the script counts it as a state the company files in. Two letters, the USPS abbreviation, matching how `businessState` is stored. The per-state list above is what actually fills applications. |
 | `ccbExpiration` | **OPTIONAL** (strongly recommended) | Free text, unvalidated, reaches no portal fill. Its whole value is that you can see an expiry coming — an expired licence is not a code failure, it is an AHJ rejection of every filing until renewed. Store ISO `YYYY-MM-DD` so it sorts. |
-| `electricalLicenseNumber` | **REQUIRED-IF (they pull electrical or combo permits, i.e. almost always)** | The *company's* electrical contractor licence. Distinct from the two fields below. Many AHJ permit forms require the company licence, the supervising electrician's name, and that electrician's personal licence — all three (`shared/src/types.ts:82-86`). A blank one is a blank required field on the electrical permit. |
-| `electricalSupervisorName` | **REQUIRED-IF (electrical/combo permits)** | The supervising electrician's full name, as licensed. |
-| `electricianLicenseNumber` | **REQUIRED-IF (electrical/combo permits)** | That individual's **personal** licence, not the company's. Installers routinely give the company number twice; ask explicitly for "the supervisor's own licence number". |
+| `electricalLicenseNumber` | **REQUIRED-IF (they pull electrical or combo permits in Oregon)**; in any other state it is a `stateLicenses` entry of kind `electrical_contractor` | The *company's* electrical contractor licence. Distinct from the two fields below. Many AHJ permit forms require the company licence, the supervising electrician's name, and that electrician's personal licence — all three (`shared/src/types.ts:82-86`). A blank one is a blank required field on the electrical permit. |
+| `electricalSupervisorName` | **REQUIRED-IF (electrical/combo permits in Oregon)**; elsewhere the `holder` of a `master_electrician` entry | The supervising electrician's full name, as licensed. |
+| `electricianLicenseNumber` | **REQUIRED-IF (electrical/combo permits in Oregon)**; elsewhere a `master_electrician` entry | That individual's **personal** licence, not the company's. Installers routinely give the company number twice; ask explicitly for "the supervisor's own licence number". |
 | `metroCityLicenseNumber` | **REQUIRED-IF (they file in a metro/city that licenses contractors separately — e.g. Portland Metro)** | A regional business licence number some AHJs require in addition to the state licence. Blank means a blank required field in exactly those jurisdictions and nowhere else, so it is easy to miss until the first Portland filing bounces. |
 | `docketNumber` | **REQUIRED-IF (they file in Illinois)** | The installer's ICC Part 468 Distributed Generation Installer certification docket number (83 Ill. Adm. Code Part 468). **Ameren Illinois' PowerClerk interconnection form has a REQUIRED "Docket Number" field** — before this became a client field, every Illinois learn left it blank (`backend/src/db.ts` migration v15). Enter it **digits-only: `16-0001` becomes `160001`** (`docs/IL_ONBOARDING.md`, confirmed against the source; the same portal wants account numbers digits-only too). It is per-installer, not per-project, so you collect it once. **Not settable from the dashboard** — intake JSON or API only. |
-| `authorizedSignerName` | **REQUIRED** | Who signs on behalf of the company. Fills `authorizedSignerName` on every portal with a signature block, and is the fallback for `installerContactName`. |
-| `authorizedSignerTitle` | **REQUIRED** | e.g. "Managing Member", "Operations Manager". Portals that ask for a signer title treat it as required; blank stalls the page. |
+| `authorizedSignerName` | **REQUIRED** (setup link) | Who signs on behalf of the company. Fills `authorizedSignerName` on every portal with a signature block, and is the fallback for `installerContactName`. |
+| `authorizedSignerTitle` | **REQUIRED** (setup link) | e.g. "Managing Member", "Operations Manager". Portals that ask for a signer title treat it as required; blank stalls the page. |
 
 ## 3 · Insurance and bond
 
 | Field | Marker | Why we need it / what breaks |
 | --- | --- | --- |
-| `bondCarrier` | **OPTIONAL** | Carrier name for the contractor's surety bond. **Reaches no portal fill and no AHJ form today** — it is not a key in `clientStagingOverlay`. Collect it because AHJ business-licence packets ask for it and because you need to know whether they *have* one; nothing automated breaks without it. |
-| `insuranceCarrier` | **OPTIONAL** | Same: stored, not filled. |
-| `insuranceExpiry` / `bondExpiry` | **REQUIRED** (guide S3.3 asks for the certificates "with expiry dates"; columns `clients.insurance_expiry` / `clients.bond_expiry`, COLLECT NOW / WRITE BY COLUMN) | **The dates, which are the half that is actionable without a file store.** An expired COI is not a code failure and nothing in the system will throw: it is every filing in the jurisdictions that check it rejected by a human until it is renewed, and the installer usually finds out from the AHJ rather than from us. Storing the date is what lets that be seen coming instead of discovered. Free text, unvalidated, reaches no portal fill — store ISO `YYYY-MM-DD` so it sorts, exactly as `ccbExpiration` is. Ask for both even when the carrier names are the only thing they have to hand; the renewal date is on the certificate. |
-| Certificates of insurance and the bond document itself (the PDFs) | **REQUIRED-IF (an AHJ in their list demands a COI upload)** — and **there is still nowhere to put the file** | The dates now have columns; the documents do not. `project_documents` is the only document table and it is **project**-grained (`project_id NOT NULL`), so a COI — which belongs to the company and outlives every project — has no home. Keep the PDFs where the human who does the upload can reach them, because a COI attachment is a human step either way. What closing this properly would take, so nobody re-derives it on the next call: a client-grained `client_documents` table (`client_id`, `doc_type` — `coi` / `bond` / `license` — `original_filename`, `stored_path`, `content_type`, `size_bytes`, `expires_at`, `uploaded_by`, `uploaded_at`), an upload/list route under `/api/clients/:id/documents` (which inherits the tenancy scope guard automatically), and reuse of the existing on-disk document storage. Until then: collect the dates here, keep the files out of band, and do not tell a customer we hold their certificates. |
+| `bondCarrier` | **OPTIONAL** (setup link) | Carrier name for the contractor's surety bond. **Reaches no portal fill and no AHJ form today** — it is not a key in `clientStagingOverlay`. Collect it because AHJ business-licence packets ask for it and because you need to know whether they *have* one; nothing automated breaks without it. |
+| `insuranceCarrier` | **OPTIONAL** (setup link) | Same: stored, not filled. |
+| `insuranceExpiry` / `bondExpiry` | **REQUIRED** (guide S3.3 asks for the certificates "with expiry dates"; columns `clients.insurance_expiry` / `clients.bond_expiry`; setup link) | **The dates, which are the half that is actionable without a file store.** An expired COI is not a code failure and nothing in the system will throw: it is every filing in the jurisdictions that check it rejected by a human until it is renewed, and the installer usually finds out from the AHJ rather than from us. Storing the date is what lets that be seen coming instead of discovered. Free text, unvalidated, reaches no portal fill — store ISO `YYYY-MM-DD` so it sorts, exactly as `ccbExpiration` is. Ask for both even when the carrier names are the only thing they have to hand; the renewal date is on the certificate. |
+| Certificates of insurance and the bond document itself (the files) | **REQUIRED-IF (an AHJ in their list demands a COI upload)** | **The client can upload them on its Company setup link** — PDF, PNG or JPEG, up to 10 MB each, eight per link — and staff open them from the Clients screen (*Company setup*). That is the whole of it: the files are stored for a person to open, are removed with the client at offboarding, and nothing reads them, attaches them to a filing or sends them to a model. A COI attachment on a portal is still a person's step, and there is no general client document store beyond these uploads (staff cannot add a file there themselves; a new setup link is how a renewed certificate arrives). Tell a customer we hold the copies they uploaded, not that we manage their certificates. |
 
 ## 4 · Standard equipment
 
 | Field | Marker | Why we need it / what breaks |
 | --- | --- | --- |
-| `standardDisconnectMake` | **REQUIRED-IF (they file any NEM/interconnection application — so: yes)** | The manufacturer of the AC disconnect they actually install, e.g. `Eaton`. |
-| `standardDisconnectModel` | **REQUIRED-IF (same)** | The full part number, e.g. `DG221URB`. **Why this is a per-installer field and not a per-project one:** a plan set's equipment schedule specifies only the RATING — "AC DISCONNECT 1 60A NON-FUSIBLE AC DISCONNECT, 240V" — and leaves the part to the installer, while utility interconnection portals require a manufacturer AND a model. A PacifiCorp learn failed promotion on exactly "Disconnect Switch Manufacturer" / "Model" for want of these two values (`backend/src/db.ts`, `CLIENT_LICENSING_COLUMNS`). **Not settable from the dashboard** — intake JSON or API only. |
+| `standardDisconnectMake` | **REQUIRED-IF (they file any NEM/interconnection application — so: yes)** (setup link) | The manufacturer of the AC disconnect they actually install, e.g. `Eaton`. |
+| `standardDisconnectModel` | **REQUIRED-IF (same)** | The full part number, e.g. `DG221URB`. **Why this is a per-installer field and not a per-project one:** a plan set's equipment schedule specifies only the RATING — "AC DISCONNECT 1 60A NON-FUSIBLE AC DISCONNECT, 240V" — and leaves the part to the installer, while utility interconnection portals require a manufacturer AND a model. A PacifiCorp learn failed promotion on exactly "Disconnect Switch Manufacturer" / "Model" for want of these two values (`backend/src/db.ts`, `CLIENT_LICENSING_COLUMNS`). **No box on the Clients form** — it arrives through the intake JSON, the API, or by accepting the client's answer from its setup link. |
 
 Two things to say out loud on the call. First, this is a CONSTANT that will be typed onto
 every job while the plan set varies per job, which is exactly where a silent mismatch
@@ -156,9 +179,9 @@ safely" below before you ask for any of this.
 | `username` | **REQUIRED** | 400 if blank. Stored twice: as a plaintext `username_reference` for display and audit, and inside the encrypted envelope. |
 | `password` | **REQUIRED-IF (this credential row does not exist yet — so: always, the first time)** | Goes **only** into the AES-256-GCM envelope; the API never returns it and the credential view exposes `hasSecret` only. Max 1024 chars. **On a credential that already exists, a blank `password` means "leave the stored secret alone"** — it is not an error and it does not blank the envelope. That is what makes a secret-stripped intake file re-runnable (§"Collecting portal passwords safely", item 6). It also means a blank password can never *fix* a wrong stored one: to change a password you have to supply the new one. Credential rows are keyed by `portalUrl` within the client, so a typo in the URL creates a second row rather than updating the first. |
 | `securityAnswers` | **REQUIRED-IF (the portal challenges security questions on a new device)** | Rides inside the same encrypted envelope, and is carried across a password rotation so re-encrypting cannot silently drop it. **CAVEAT: this key only works on the script path.** `portalCredentialCreateSchema` (`backend/src/validation.ts:25`) does not declare it and zod strips unknown keys, so over the REST API the answers vanish with no error. Without them, a portal that challenges on a new device stalls for human capture even though the installer told you the answers. Format is free text — `question: answer; question: answer`. **On a re-run, treat this differently from `password`:** the answers ride in the same envelope, so before applying a re-run of a file you stripped, read the dry run's PORTAL CREDENTIALS block. If a credential line reports `to update  secret …`, stop — you are about to rewrite an envelope you no longer hold the answers for. The safe move is to delete that credential's entry from the kept file entirely (§"Collecting portal passwords safely", item 6). |
-| `mfaRequired` | **REQUIRED** (guide S3.6 "Emailed code at login?"; column `portal_credentials.mfa_required`, COLLECT NOW / WRITE BY COLUMN) | `true` / `false`, per portal account. A portal that emails a one-time code or challenges MFA is **a human at the browser every session, forever** — automation never solves it under any flag (hard rule 1). Recording it per credential is what turns that from a surprise at the first run into a known staffing cost at kickoff. Note `portal_profiles.mfa_required` is a **different table** and nothing in the repo writes it; this is the column on the credential you actually log in with. |
-| `mfaCodeDestination` | **REQUIRED-IF (`mfaRequired` is true)** (guide S3.6 "Which inbox?"; column `portal_credentials.mfa_code_destination`, COLLECT NOW / WRITE BY COLUMN) | **Where the code arrives** — a shared inbox we can read, or, failing that, the named person who relays it, with a way to reach them. The guide commits to exactly this wording: *"route codes to a shared inbox we can access; otherwise name someone who can relay a code."* It is **not a secret** (it is who to ask, never the code), which is why it sits in the plain view rather than the encrypted envelope. Its point is operational: a paused run can name the inbox instead of saying only that it stopped — `mfaCodeDestinationFor(db, clientId, portalUrl)` in `backend/src/portalCredentials.ts` resolves it the same way the password itself was chosen, so it describes the account actually being logged into and says **nothing** rather than naming a neighbouring jurisdiction's inbox. A destination you cannot reach is the single most important thing to hear on the call: **that portal can never be driven unattended, and it should be priced and scheduled that way.** |
-| `feeResponsibility` | **REQUIRED** (guide S3.7 "Agreed **per portal** at kickoff"; column `portal_credentials.fee_responsibility`, COLLECT NOW / WRITE BY COLUMN) | Exactly one of `card-on-file`, `customer-pays`, `mailed-check`, `keelix-pays`, or `""` for "asked, not yet agreed". The code refuses anything else (400) on create **and** update — an invented value would read as an agreement nobody made. **Per portal, because that is how it is actually true**: one installer routinely has a card saved in their Accela account, a person who pays on a different city's portal, and a cheque in the post for Ameren Illinois' $50 Level 1 fee, which must land within 15 business days or the application is not reviewed. `clients.billingMode` answers a different question — how *we* invoice *them* (§7). **This column authorises nothing**: automation never pays a portal fee under any value of it, and a pay/checkout control is refused at the click gate. It records who is expected to do the paying, so that when a filing sits unreviewed there is a name rather than an argument. |
+| `mfaRequired` | **REQUIRED** (guide S3.6 "Emailed code at login?"; column `portal_credentials.mfa_required`) | `true` / `false`, per portal account. A portal that emails a one-time code or challenges MFA is **a human at the browser every session, forever** — automation never solves it under any flag (hard rule 1). Recording it per credential is what turns that from a surprise at the first run into a known staffing cost at kickoff. Note `portal_profiles.mfa_required` is a **different table** and nothing in the repo writes it; this is the column on the credential you actually log in with. |
+| `mfaCodeDestination` | **REQUIRED-IF (`mfaRequired` is true)** (guide S3.6 "Which inbox?"; column `portal_credentials.mfa_code_destination`) | **Where the code arrives** — a shared inbox we can read, or, failing that, the named person who relays it, with a way to reach them. The guide commits to exactly this wording: *"route codes to a shared inbox we can access; otherwise name someone who can relay a code."* It is **not a secret** (it is who to ask, never the code), which is why it sits in the plain view rather than the encrypted envelope. Its point is operational: a paused run can name the inbox instead of saying only that it stopped — `mfaCodeDestinationFor(db, clientId, portalUrl)` in `backend/src/portalCredentials.ts` resolves it the same way the password itself was chosen, so it describes the account actually being logged into and says **nothing** rather than naming a neighbouring jurisdiction's inbox. A destination you cannot reach is the single most important thing to hear on the call: **that portal can never be driven unattended, and it should be priced and scheduled that way.** |
+| `feeResponsibility` | **REQUIRED** (guide S3.7 "Agreed **per portal** at kickoff"; column `portal_credentials.fee_responsibility`) | Exactly one of `card-on-file`, `customer-pays`, `mailed-check`, `keelix-pays`, or `""` for "asked, not yet agreed". The code refuses anything else (400) on create **and** update — an invented value would read as an agreement nobody made. **Per portal, because that is how it is actually true**: one installer routinely has a card saved in their Accela account, a person who pays on a different city's portal, and a cheque in the post for Ameren Illinois' $50 Level 1 fee, which must land within 15 business days or the application is not reviewed. `clients.billingMode` answers a different question — how *we* invoice *them* (§7). **This column authorises nothing**: automation never pays a portal fee under any value of it, and a pay/checkout control is refused at the click gate. It records who is expected to do the paying, so that when a filing sits unreviewed there is a name rather than an argument. |
 | `notes` | **OPTIONAL** — and the only home the **account holder** has | **PLAINTEXT AND LLM-VISIBLE** — declared so in the column's own comment at `backend/src/portalCredentials.ts:70`; treat it as reaching a prompt. Operational hints only. **Never** a password, a security answer, an account number or a meter number. Max 2000 chars. **The guide's S3.6 asks for the ACCOUNT HOLDER per portal and there is no column for it — write it here**, as `Account holder: Alex Example (the electrician), not the office`. It matters for two reasons that are not cosmetic: the portal's own audit log shows every run we make under that person's name, and that person is usually the one who rotates the password without telling anybody. |
 
 **`client.portalIdentities[]` — OPTIONAL, and leave it out unless you have a reason.** It
@@ -280,11 +303,28 @@ every AHJ, portal URL, required-document list, form map and portal quirk already
 What the list buys you is knowing, before you promise anything, which of their jurisdictions
 we have actually driven.
 
-**What breaks without it** is the worst failure mode in the system, and it is silent: for a
-jurisdiction with no recipe and no known portal URL, staging routes to `MockPortalAdapter`
-and reports **a successful stage that never opened a browser**
-(`repository.ts:5629`, and `portal_profiles` has zero INSERT sites in the repo). "Staged"
-is not proof of anything for a jurisdiction nobody has pointed the recorder at.
+**What breaks without it:** for a jurisdiction with no recipe and no known portal URL there
+is nothing to drive, and the stage stops and says so (*"No portal URL is known for … so
+nothing was staged"*). That is a delay discovered on the customer's first job instead of on
+day two. (The simulated portal earlier versions of this checklist warned about now runs only
+when `MOCK_PORTAL=1` is set, for the smoke test and rehearsals; on a live install the go-live
+check shows that switch red.)
+
+**Also record where they work, as `client.serviceArea`** (setup link; Clients screen → Service
+area; the intake file): one entry per place, `{ "kind": "city" | "county" | "utility",
+"state", "name" }` or `{ "kind": "state", "state" }`. Unlike `jurisdictions[]` this one is
+stored, on the client's own row. It decides nothing about any job and is never sent to a
+model. What it buys: **Destinations to confirm** and the coverage report then list every
+authority it names that no job names yet, marked "service area", so a person can confirm
+where each one takes its filings before the first job (`docs/ONBOARDING.md` §3.5). That
+matters because nothing files automatically to a destination no named person confirmed.
+
+**And ask how they file in each place today.** For each permit office and utility: the portal
+address or intake email they use, whether they have an account there, and a recent permit or
+application number as an example. The setup link has a section for exactly this. Their answer
+is the client's word: it appears in Destinations to confirm marked **Client-supplied**, it is
+never confirmed in one click, and it never replaces a destination a person already verified.
+A person opens the authority's own page and records the destination as their own check.
 
 **"It has a recipe" is not readiness, and this is the trap that reads as a lie to a
 customer.** A `portal_recipes` row exists in one of three statuses and only ONE of them
@@ -300,7 +340,8 @@ were demoted as well as passes that never worked at all. Which of those a given 
 status alone does not tell you; either way there are nine times more of them than there are
 working recipes.
 
-So classify each jurisdiction into **five** states, not four, before you promise a date:
+So classify each jurisdiction into **five** states, not four, before you promise a date (the
+counts in this table are the 2026-09-09 ones; `npm run ops` prints today's):
 
 | State | What actually happens on their first filing |
 | --- | --- |
@@ -308,7 +349,7 @@ So classify each jurisdiction into **five** states, not four, before you promise
 | **Recording (draft)** | Does not replay. Carries an entry URL, so the run drives the portal — as a fresh learn. Seven of the fifteen hold no steps at all. |
 | **`needs_rerecord`** | **Does not replay, and reads as "we have that portal" in every list that only shows the AHJ name.** Every one of the 55 carries a portal URL, so this is *not* the mock trap — the run opens a real browser and re-learns from scratch: roughly 11 minutes, live LLM cost, and it can pause for MFA or fail the same way it failed last time. Plan it as "a supervised learn run", never as "covered". |
 | **KB portal URL only, no recipe row** | Same as above: a real browser, a from-scratch learn, supervised. |
-| **Nothing — no recipe, no KB portal URL** | Staging routes to `MockPortalAdapter` and reports **success without opening a browser.** Cannot be filed into. Never forward that "staged". |
+| **Nothing — no recipe, no KB portal URL** | The stage stops with nothing to drive and says so. Cannot be filed into until a person records the portal. |
 
 `npx tsx scripts/onboarding-readiness.ts --client <id>` prints this per jurisdiction and
 distinguishes `complete` from `draft only (status "…")`, which is the fastest way to get the
@@ -358,16 +399,25 @@ needs an explicit opt-in flag on the command line, so read the script's bare usa
 its exact name rather than trusting this document. Everyone who signs in is *your* staff.
 
 **What the customer gets instead of a login — say this, because "no login" sounds like less
-than it is.** Four things, all no-auth and all already built:
+than it is.** Six things, all no-auth and all already built. Each is a link to one page for
+that client; none is an account:
 
+- **A Company setup page** (`/onboarding?token=…`), where the company fills in its own
+  details, licences and service area, uploads certificates and says how it files in each
+  place. Staff create the link on the Clients screen; every answer waits for a person to
+  accept it (`docs/ONBOARDING.md` §3.4).
+- **A one-time login page** for handing us portal passwords (see "Collecting portal passwords
+  safely").
 - **A tokenized read-only status page** for each project, `/status?token=…`, created on the
-  first notification and **emailed to `businessEmail`** when the permit is issued, is ready
-  for issue, the NEM application is approved, or a correction lands
-  (`backend/src/clientNotifier.ts`). It needs `SMTP_HOST` + `SMTP_FROM` to actually send;
+  first notification and **emailed to `updatesInbox`** (falling back to `businessEmail`) when
+  the permit is issued, is ready for issue, the NEM application is approved, or a correction
+  lands (`backend/src/clientNotifier.ts`). It needs `SMTP_HOST` + `SMTP_FROM` to actually send;
   with SMTP unconfigured the same message is recorded as a **draft** communication on the
   project for a human to send by hand, so it degrades to "someone must remember" rather than
-  vanishing. It also needs `PUBLIC_BASE_URL`, or every link in it points at `localhost` and
-  is dead on arrival. Check both before you promise them updates.
+  vanishing. It also needs a public `PUBLIC_BASE_URL`: when that is unset or an address a
+  client cannot open, the email is **held as a draft** rather than sent with a dead link.
+  `npm run golive:check` shows all three (mail server, link address, whether client emails
+  are on) before you promise them updates.
 - **An intake link** — `POST /api/projects/:id/intake-request` returns a shareable URL where
   they type the job valuation and the homeowner's email/phone themselves. No login.
 - **A shareable read-only review report** — `POST /api/review/submissions/:id/share` returns
@@ -435,11 +485,14 @@ script has run.
    rule covers the EIN** (guide S3.2 — "sent securely"), the portal security answers, and
    any account or meter number. So: send the installer a one-time secret link they open
    themselves, or take the values verbally on the call and type them straight into your local
-   copy of the intake file. **There is no one-time-link feature in this product yet** —
-   `project_intake_requests` is the tokenized no-login pattern it would be built on, but it
-   collects project data, not credentials — so today that means a reputable external
-   one-time-secret service or the phone. If you promise a customer "our secure link", check
-   first that you have one to send.
+   copy of the intake file. **The one-time link is in the product**
+   (`POST /api/clients/:id/credential-requests`, `docs/ONBOARDING.md` §5; the Company setup
+   page hands off to the same link for each portal the client names): single-use, write-only,
+   72 hours by default, and limited to the portals the request named. It carries portal logins
+   and the per-portal MFA and fee answers only. It does **not** carry an EIN, an account number
+   or a meter number: those still come by phone. Before you promise a customer "our secure
+   link", run `npm run golive:check` and read the *Client link address* line — a link built on
+   an address they cannot open is no link.
 3. **Prefer accounts the installer created for us**, named so a portal audit log shows who
    acted. Shared personal logins mean their MFA device gates our runs and their password
    change breaks us with no notice.
@@ -486,7 +539,9 @@ script has run.
    own). Almost every entry is a password somebody rotated without telling us, which is why
    §5 asks the installer for a same-day notification as an explicit commitment. When the
    installer fixes a credential, clear the flag with
-   `npm run learn:benchmark -- --host <host>` rather than re-running the sweep.
+   `npm run learn:benchmark -- --host <host> --include-stale` rather than re-running the sweep
+   (without `--include-stale` the stale host is skipped; a successful login is what clears the
+   flag — `docs/ONBOARDING.md` §6).
 9. **`portal-profiles/<clientId>/<portalType>/` holds live portal session cookies in
    plaintext on disk** (`PORTAL_PROFILES_DIR`, defaulting to `./portal-profiles`) and is
    *not* covered by `SESSION_ENCRYPTION_KEY`. It is per-client so sessions never bleed
@@ -497,17 +552,27 @@ script has run.
 
 ## Before you tell them it is done
 
-- `ccbLicenseNumber` non-blank, or nothing will stage at all.
+- A licence on file for **every state they file in** (`stateLicenses`: contractor, and
+  electrical contractor where they file interconnection), and for an Oregon client
+  `ccbLicenseNumber` non-blank, or no Oregon job will stage at all.
+  `npx tsx scripts/onboarding-readiness.ts --client <id>` prints this per state.
+- If they used the Company setup link: every proposed answer accepted, edited or rejected on
+  the Clients screen. An answer nobody decided is not on the client record.
 - No value in the file still reads `EXAMPLE`, `000000`, `.invalid`, or `REPLACE-ME`.
 - Every `portalUrl` includes the jurisdiction path segment and was copied from a browser
   where that login worked.
-- `businessEmail` non-blank — it is the only address any update we send ever reaches, and a
-  blank one fails silently.
-- `updatesInbox` and `billingContactEmail` collected, and `updatesInbox` is a **shared**
-  inbox rather than one person's. Collected is not yet routed: the notifier still reads
-  `businessEmail`, so that one must still be monitored.
-- `licenseState` collected, and `insuranceExpiry` / `bondExpiry` recorded as ISO dates. The
-  certificate PDFs themselves are still out of band — do not tell them we hold the files.
+- `updatesInbox` set to a **shared** inbox rather than one person's, with `businessEmail`
+  non-blank behind it as the fallback: with both blank no update ever reaches them, silently.
+  `billingContactEmail` collected.
+- `licenseState` collected, and `insuranceExpiry` / `bondExpiry` recorded as ISO dates. We
+  hold only the certificate files they uploaded on the setup link, for staff to open.
+- `serviceArea` recorded, and each authority in it **confirmed in Destinations to confirm**
+  by a named person, or knowingly left for a person's click on the portal. Their own "how we
+  file" answers are leads to check, never confirmations.
+- `npm run golive:check` has no red line, in particular *Client link address*: otherwise the
+  links and emails you are about to promise them are held as drafts.
+- Nothing promised that we do not do: no fee payment, no CAPTCHA or MFA, no signatures, no
+  inspections, completion documents or permission to operate.
 - Every portal account answered for **MFA** (`mfaRequired`, and `mfaCodeDestination` whenever
   it is true) and for **fees** (`feeResponsibility`, one of the four values). Any portal whose
   code goes somewhere you cannot reach is a portal that needs a person every session — say so
@@ -516,7 +581,8 @@ script has run.
   recording draft, `needs_rerecord`, KB portal URL only, or nothing. Only *complete* means
   "we have driven this": there are 6 of those against 55 `needs_rerecord`, and a
   `needs_rerecord` jurisdiction is a supervised learn run, not coverage. The last category
-  cannot be filed into at all, and a "successful stage" there is a mock.
+  cannot be filed into at all until a person records the portal: a stage there stops with
+  nothing to drive.
 - The filled intake file deleted, or its secrets stripped — and if you kept it, you know it
   is still re-runnable (a blank `password` keeps the stored secret) and you deleted rather
   than emptied `portalIdentities`.

@@ -12,6 +12,7 @@ import { nowIso } from "./time";
 import { hasMpuScope } from "./serviceScope";
 import { resolveValuation } from "./valuation";
 import { requirementForGate, requirementMayBlock, resolveUtilityRequirements } from "./utilityRequirements";
+import { describeImageDisconnectRead, type PlanSetImageDisconnectRead } from "./acDisconnectIntake";
 import { batteryStatus } from "../../shared/src/batteryControls";
 import { sourceHostOf } from "../../shared/src/officialSource";
 import { resolvePermitPath, resolveStampRequirement, hasStampedStructuralEvidence } from "./permitPath";
@@ -130,6 +131,11 @@ export function buildReviewerReport(
      *  the shipped seed overlaid by the utility's filing row). undefined = not read here, so the shipped
      *  seed alone is used; null = read, and nothing is on file for this utility. */
     utilityRequirements?: UtilityRequirementList | null;
+    /** What the server's own image read of THIS job's stored plan set said about its AC disconnect
+     *  (planSetImageReads.planSetImageDisconnectRead, #135). undefined / null = no such read: the
+     *  utility's AC-disconnect item reads the package text alone, as before. Never taken from the
+     *  job's snapshot. */
+    planSetImageDisconnectRead?: PlanSetImageDisconnectRead | null;
     /** Which jurisdiction the job's parcel is in, as the county's own service answered (review-audit
      *  draft 09, parcelJurisdiction.readParcelJurisdiction — the cache, read only). undefined = not
      *  read here: the profile's callout stands, worded "not checked". */
@@ -168,7 +174,8 @@ export function buildReviewerReport(
   // The AHJ's array-placement rules (roof pathways, setbacks) are about an array; a storage scope has none.
   if (newArray) addPlacementRuleFindings(project, opts.codeContext, findings, opts.documentTexts ?? []);
   const utilityAliases = addUtilityFindings(project, findings,
-    opts.utilityRequirements === undefined ? resolveUtilityRequirements(null, project.state, project.utility) : opts.utilityRequirements);
+    opts.utilityRequirements === undefined ? resolveUtilityRequirements(null, project.state, project.utility) : opts.utilityRequirements,
+    opts.planSetImageDisconnectRead ?? null);
   addProfileFindings(project, profile, findings, opts.uploadedDocTypes ?? []);
   addParcelJurisdictionFindings(project, profile, opts.parcelJurisdiction, findings);
   addPermitPathFindings(project, findings);
@@ -1177,6 +1184,8 @@ function requirementReference(u: string, item: UtilityApplicationRequirement): C
 }
 
 /** The finding id a requirement reports under: the seed's kept id, else reviewer.utility.<key>. */
+const IMAGE_READ_SOURCE = "Plan set page image (intake read)";
+
 export function requirementFindingId(item: Pick<UtilityApplicationRequirement, "key" | "findingId">): string {
   return item.findingId || `reviewer.utility.${item.key.replace(/_/g, "-")}`;
 }
@@ -1189,7 +1198,7 @@ export function requirementFindingId(item: Pick<UtilityApplicationRequirement, "
  * bar). No list on file = one callout that the utility side was not reviewed, never silence. A storage
  * item is asked only on a job with a battery. Returns each finding's dedupe family (id -> alias).
  */
-function addUtilityFindings(project: ProjectRecord, findings: ReviewerFinding[], list: UtilityRequirementList | null): Map<string, string> {
+function addUtilityFindings(project: ProjectRecord, findings: ReviewerFinding[], list: UtilityRequirementList | null, imageDisconnectRead: PlanSetImageDisconnectRead | null = null): Map<string, string> {
   const aliases = new Map<string, string>();
   const utilityName = String(project.utility ?? "").trim();
   if (list && list.requirements.length) {
@@ -1199,8 +1208,18 @@ function addUtilityFindings(project: ProjectRecord, findings: ReviewerFinding[],
       if (item.key === "storage_mode_declaration" && !battery) continue;
       const topic = REQUIREMENT_TOPIC[item.key];
       if (!topic || !requirementForGate(item, "reviewer")) continue;
-      const check = evidenceForTopic(project, topic);
-      if (check.confidence === "high") continue;
+      const textCheck = evidenceForTopic(project, topic);
+      if (textCheck.confidence === "high") continue;
+      // AN IMAGE-ONLY PLAN SET (#135): the package text names no AC disconnect because the plan set
+      // has no text, but the server's own image read of this job's stored plan set did (the one
+      // reader, planSetImageReads). That counts as SHOWN, never proven: the item stays a warning for
+      // a person to check on the sheet, with the read as its evidence. Text that names the disconnect
+      // is read exactly as before, and a job with neither is held exactly as before.
+      const fromImage = topic === "acDisconnect" && !textCheck.present ? imageDisconnectRead : null;
+      const imageLine = fromImage ? describeImageDisconnectRead(fromImage) : "";
+      const check: ProjectEvidence = fromImage
+        ? { ...textCheck, present: true, confidence: "medium", excerpts: [imageLine], sources: [IMAGE_READ_SOURCE], hits: [{ sourceLabel: IMAGE_READ_SOURCE, excerpt: imageLine, pageHint: fromImage.sheet || "Plan set" }] }
+        : textCheck;
       const words = REQUIREMENT_WORDS[item.key];
       const mayBlock = requirementMayBlock(item);
       const severity: ReviewerFinding["severity"] = !check.present && mayBlock ? "blocker" : "warning";
@@ -1221,6 +1240,21 @@ function addUtilityFindings(project: ProjectRecord, findings: ReviewerFinding[],
           designTeamAction: words.action(u),
           evidenceNeeded: evidenceNeeded(check),
           codeReferences: requirementReference(u, item),
+          // Its own evidence, so attachEvidence does not borrow the (empty) text topic's "missing".
+          ...(fromImage ? {
+            evidenceStatus: "weak" as const,
+            evidenceFound: [{
+              kind: "field_value" as const,
+              label: "AC disconnect read off the plan set's page image — check the sheet",
+              source: IMAGE_READ_SOURCE,
+              excerpt: imageLine,
+              confidence: "medium" as const,
+              pageHint: fromImage.sheet || "Plan set",
+              screenshotPath: "",
+              verifier: "vision" as const,
+              note: "The plan set has no text to confirm this. The intake read it once from the page image; a person checks the sheet shows the utility's disconnect.",
+            }],
+          } : {}),
         },
       ));
       const alias = REQUIREMENT_ALIAS[item.key];

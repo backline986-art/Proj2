@@ -12,7 +12,8 @@ import { logger } from "./logger";
 import { documentInventory, owedMissingDocuments, requiredListCheck, sheetContentGaps } from "./requiredDocuments";
 import { startedAtLabel } from "./formAcquisitionPlan";
 import { planSetTextForProject, shippedPlanSetOutlinedPages } from "./projectDocuments";
-import { capturedDisconnectPart } from "./acDisconnectIntake";
+import { capturedDisconnectPart, planTextNamesAcDisconnect } from "./acDisconnectIntake";
+import { planSetImageDisconnectRead } from "./planSetImageReads";
 import { outlinedPagesMissingSheetNote, outlinedPagesReport } from "./outlinedTextPages";
 import { nowIso } from "./time";
 import { addAuditLog } from "./audit";
@@ -718,11 +719,19 @@ export function runQcForProject(db: AppDb, projectId: string, options: QcRunOpti
     // THE JOB'S AC DISCONNECT PART, ONLY WHEN ITS OWN PLAN SET NAMES IT (acDisconnectIntake, the one
     // reader the reviewer gate uses too), read on the same plan-set text the gate sees: the parser's own
     // text when the job carries it, else the uploaded plan-set documents' (getProjectDetail's overlay).
+    // The same text also answers "does the plan set name an AC / utility disconnect" in the gate's own
+    // wordings (planTextNamesAcDisconnect, the one list): QC then stops listing it as possibly missing
+    // where the gate is clear (#134).
     let disconnectPartOnPlanSet = "";
+    let planSetNamesAcDisconnect = false;
     try {
-      disconnectPartOnPlanSet = capturedDisconnectPart(payload as Record<string, unknown>, clean(payload.planSetExtractedText) || planSetTextForProject(db, projectId));
-    } catch { disconnectPartOnPlanSet = ""; }
-    for (const baseline of evaluateBaselineRules(baselinePayload, codeCtx, eligibility, { requirements: utilityRequirements, reportUnresearched: true, scope: scope.scope, disconnectPartOnPlanSet }, { records: jurisdictionRecords })) {
+      const planSetText = clean(payload.planSetExtractedText) || planSetTextForProject(db, projectId);
+      disconnectPartOnPlanSet = capturedDisconnectPart(payload as Record<string, unknown>, planSetText);
+      // An image-only plan set has no text to name it: the server's own image read of the job's
+      // stored plan set answers instead (planSetImageReads, the one reader the gate uses too, #135).
+      planSetNamesAcDisconnect = planTextNamesAcDisconnect(planSetText) || Boolean(planSetImageDisconnectRead(db, projectId));
+    } catch { disconnectPartOnPlanSet = ""; planSetNamesAcDisconnect = false; }
+    for (const baseline of evaluateBaselineRules(baselinePayload, codeCtx, eligibility, { requirements: utilityRequirements, reportUnresearched: true, scope: scope.scope, disconnectPartOnPlanSet, planSetNamesAcDisconnect }, { records: jurisdictionRecords })) {
       if (baseline.qcStatus === "fail") failCount += 1;
       if (baseline.qcStatus === "fail" && !priorFails.has(baseline.ruleId)) newFailsOutsideBill += 1;
       if (baseline.qcStatus === "warning") warningCount += 1;

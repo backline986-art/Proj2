@@ -3615,8 +3615,129 @@ const VERSIONED_MIGRATIONS: VersionedMigration[] = [
     },
   },
   {
-    // v84 (two-stage permit filings, #28 part 1): v81 and v82 are in Helm's merge queue (#99, #118)
-    // and v83 is reserved for #116, so this takes the next free number. Nothing depends on the number.
+    // v81 (client self-onboarding): the Company setup link, the client's proposals and its
+    // certificate uploads. Client data, scoped by client_id (rule 6); nothing here is shared knowledge.
+    version: 81,
+    name: "client_onboarding",
+    up: (db) => {
+      // A CLIENT FILLS IN ITS OWN COMPANY SETUP (clientOnboarding.ts). Three tables, all CLIENT DATA
+      // keyed on client_id (org-scoped through the client row, rule 6), none of them shared knowledge
+      // and none of them read by a prompt.
+      //   client_onboarding_links: the staff-minted, revocable, expiring link. Only the SHA-256 of the
+      //     token is stored (the URL is shown once, at mint). draft_json is the client's work in
+      //     progress, saved across sessions until it submits; status open / submitted / revoked.
+      //   client_onboarding_proposals: what the client submitted, one row per field that differs from
+      //     the client record. NOTHING here writes the client row: a named staff person accepts (as
+      //     sent or edited) or rejects each one, and only the accept calls updateClient.
+      //   client_onboarding_files: the optional certificate uploads (type and size capped). Bytes in
+      //     the row, so a purge of the client takes them; never parsed, never sent to a model.
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS client_onboarding_links (
+          id TEXT PRIMARY KEY,
+          client_id TEXT NOT NULL,
+          token_hash TEXT NOT NULL UNIQUE,
+          status TEXT NOT NULL DEFAULT 'open',
+          draft_json TEXT NOT NULL DEFAULT '{}',
+          draft_saved_at TEXT,
+          created_by TEXT NOT NULL DEFAULT '',
+          created_at TEXT NOT NULL,
+          expires_at TEXT NOT NULL,
+          submitted_at TEXT,
+          revoked_at TEXT,
+          revoked_by TEXT NOT NULL DEFAULT '',
+          portal_requests INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE INDEX IF NOT EXISTS idx_client_onboarding_links_client ON client_onboarding_links(client_id, created_at);
+        CREATE TABLE IF NOT EXISTS client_onboarding_proposals (
+          id TEXT PRIMARY KEY,
+          client_id TEXT NOT NULL,
+          link_id TEXT NOT NULL,
+          field TEXT NOT NULL,
+          proposed_json TEXT NOT NULL,
+          current_json TEXT NOT NULL DEFAULT 'null',
+          source TEXT NOT NULL DEFAULT 'client-supplied',
+          status TEXT NOT NULL DEFAULT 'pending',
+          created_at TEXT NOT NULL,
+          decided_by TEXT NOT NULL DEFAULT '',
+          decided_at TEXT,
+          applied_json TEXT NOT NULL DEFAULT ''
+        );
+        CREATE INDEX IF NOT EXISTS idx_client_onboarding_proposals_client ON client_onboarding_proposals(client_id, status);
+        CREATE TABLE IF NOT EXISTS client_onboarding_files (
+          id TEXT PRIMARY KEY,
+          client_id TEXT NOT NULL,
+          link_id TEXT NOT NULL,
+          kind TEXT NOT NULL,
+          file_name TEXT NOT NULL DEFAULT '',
+          mime TEXT NOT NULL,
+          size_bytes INTEGER NOT NULL,
+          sha256 TEXT NOT NULL,
+          bytes BLOB NOT NULL,
+          created_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_client_onboarding_files_client ON client_onboarding_files(client_id, created_at);
+      `);
+    },
+  },
+  {
+    // v82 (client filing details): what a CLIENT says about how it files with each authority in its
+    // service area (clientFilingStatements.ts) — a portal address or an intake email, whether it holds
+    // an account there (yes/no, never a login) and an example record number. CLIENT DATA, scoped by
+    // client_id (rule 6), and only ever a SOURCE for a destination proposal a person decides
+    // (filingDestinationProposals.ts): no channel, stage, launch or send reads this table. Created
+    // here, never lazily: reading a proposal writes nothing.
+    version: 82,
+    name: "client_filing_statements",
+    up: (db) => {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS client_filing_statements (
+          id TEXT PRIMARY KEY,
+          client_id TEXT NOT NULL,
+          link_id TEXT NOT NULL DEFAULT '',
+          authority_kind TEXT NOT NULL,
+          authority_state TEXT NOT NULL DEFAULT '',
+          authority_name TEXT NOT NULL,
+          profile_key TEXT NOT NULL,
+          kind TEXT NOT NULL,
+          address TEXT NOT NULL,
+          has_account TEXT NOT NULL DEFAULT '',
+          example_number TEXT NOT NULL DEFAULT '',
+          source TEXT NOT NULL DEFAULT 'client-supplied',
+          status TEXT NOT NULL DEFAULT 'current',
+          created_at TEXT NOT NULL,
+          dismissed_by TEXT NOT NULL DEFAULT '',
+          dismissed_at TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_client_filing_statements_authority ON client_filing_statements(client_id, authority_kind, profile_key, status);
+      `);
+    },
+  },  {
+    // WHAT THE SERVER'S OWN IMAGE READ OF A PLAN SET SAID ABOUT ITS AC DISCONNECT (#135,
+    // planSetImageReads.ts). Written only by the plan-scan route, at the one place the intake reads a
+    // scanned plan set by vision, keyed by the PDF's bytes (sha-256) because no job exists yet, and by
+    // the org that posted it (rule 6: its own org_id, from the session). Only the AC disconnect's own
+    // fields, value and sheet; never the read's other fields. Created here, never lazily: the gate and
+    // QC read it, and a read writes nothing.
+    version: 83,
+    name: "plan_set_image_reads",
+    up: (db) => {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS plan_set_image_reads (
+          org_id TEXT NOT NULL,
+          pdf_sha256 TEXT NOT NULL,
+          field TEXT NOT NULL,
+          value TEXT NOT NULL,
+          sheet TEXT NOT NULL DEFAULT '',
+          read_mode TEXT NOT NULL DEFAULT 'vision',
+          read_at TEXT NOT NULL,
+          PRIMARY KEY (org_id, pdf_sha256, field)
+        );
+      `);
+    },
+  },
+  {
+    // v84 (two-stage permit filings, #28 part 1): the number the coordinator assigned
+    // (v81 to v83 are on main). Nothing depends on the number.
     version: 84,
     name: "permit_second_stages",
     up: (db) => {

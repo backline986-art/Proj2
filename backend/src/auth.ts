@@ -382,6 +382,9 @@ export function requireAuth(db: AppDb) {
     if (req.path === "/credentials" || req.path.startsWith("/api/public/credential-request/")) return next();
     // Public per-client tracking page (tokenized, no login) — the page and its API.
     if (req.path === "/portal" || req.path.startsWith("/api/public/portal/")) return next();
+    // The client's own Company setup page (tokenized, no login) — the page and its API
+    // (clientOnboarding.ts). Every answer it sends waits for a named person's accept.
+    if (req.path === "/onboarding" || req.path.startsWith("/api/public/onboarding/")) return next();
     // Public shared review report (tokenized, no login).
     if (req.path.startsWith("/api/public/review/")) return next();
     // Programmatic access: an org API key authenticates the routes of products that

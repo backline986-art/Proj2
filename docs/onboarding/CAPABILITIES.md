@@ -5,15 +5,25 @@ questions in a sales call. Every number on this page is measured, dated, and car
 denominator. Where something is unproven, it says so in those words. There are no
 projected numbers here and no numbers from a build other than the one named.
 
-Measurement date for everything below: **2026-09-09** (one build). Source files are cited
-so any claim can be re-checked.
+**Two dates apply to this page, and they are not the same.**
+
+- **What the service does and does not do** — the first six sections, "Known limits", the
+  guide table, "What we do not do" and the first two weeks — was checked against the code on
+  **2026-11-11**.
+- **The measured numbers** — everything under "Measured reliability", and every count of
+  portals, credentials and recipes wherever it appears — were measured on **2026-09-09** (one
+  build) and **have not been re-measured since**. Portals change and recipes are demoted when
+  they stop replaying, so read those as a dated snapshot, not as today's coverage. Source files
+  are cited so any claim can be re-checked.
+
+There are no prices on this page. What the service costs is a separate conversation.
 
 If you read only two sections, read **"Where the onboarding guide's promises stand today"** —
 which checks the guide you were handed, clause by clause, against what this build actually does
 — and **"Read this before you sign"**, which collects the eight facts most likely to change
 your decision, including what this service does with knowledge learned from your jurisdictions,
-what it leaves behind in your portal accounts, and the fact that it has never onboarded a real
-company.
+what it leaves behind in your portal accounts, and the fact that it has not yet been run end to
+end for a paying company.
 
 ## What the service does, end to end
 
@@ -25,15 +35,27 @@ resolves the correct portal for that jurisdiction and track (permit portals and 
 interconnection portals are kept strictly separate), logs into that portal with your stored
 credentials, and walks the application forward — typing addresses, contacts, equipment
 makes and models, and the answers the portal demands — until it reaches the portal's review
-or payment screen. There it stops, leaves the filing staged with everything filled in, and
-tells you it is ready. Then **a human reviews and submits**.
+or payment screen. There it stops and leaves the filing staged with everything filled in.
+
+**Nothing is filed until a named person says so.** One of two things then happens:
+
+- a person opens the staged application on the portal, reads it and presses submit; or
+- a member of our team reads the approval sheet for that filing — what is about to be filed,
+  where, with which attachments, and every open review item — and approves **that one run**.
+  The run then clicks the portal's submit itself. This happens only where a named person has
+  already confirmed where that authority takes its filings, only when the server's own switch
+  for it is on, and only on a portal whose recorded steps end in exactly one submit. If any of
+  those is missing, the run stops at the review screen for a person's click.
+
+After filing we follow the application to issued or approved, and tell you when a correction
+lands. **We do not do what comes after approval**: see "What we do not do".
 
 ## What is automated, and what a human always does
 
 | Automated | Always a human |
 |---|---|
 | Plan-set parsing into structured project fields | **The reviewer gate** — QC findings must be cleared by a person before anything is staged |
-| QC against the AHJ's adopted code cycle | **Final submit** — the portal's Submit / Continue Application click |
+| QC against the AHJ's adopted code cycle | **Deciding a filing is submitted** — a person clicks the portal's Submit, or a named person approves that one run and the run clicks it (see above). Never unattended |
 | Building and filling the AHJ's permit documents | **Portal fees and payment** — never automated under any flag |
 | Working out what the AHJ and the utility will charge, and which line of their published schedule this job falls in | **Verifying a researched fee** before it is quoted to a homeowner (see Known limits) |
 | Pre-placing your stored signature PNG on prepared permit forms, at the operator's direction | **MFA and CAPTCHA** — never solved, never bypassed |
@@ -41,6 +63,10 @@ tells you it is ready. Then **a human reviews and submits**.
 | Walking the portal's pages and filling its fields | Registering the portal account itself (portals require this on their own site, often with an emailed code) |
 | Recording the final-submit step so a human can execute it | Confirming an AHJ's correct permit type the first time (see Known limits) |
 | Attaching required documents to the filing | Fixing a refused or expired portal credential |
+| Pre-filling where each authority takes its filings, from the authority's own page | **Confirming that destination** — once per city or utility, by a named person, before anything files there automatically |
+| Drafting the filing email where an authority takes applications by email | **Sending it** — a person, or the run a named person approved |
+| Watching the agency's and utility's status, and reading their emails onto the job | **Everything after approval** — inspections, completion documents, permission to operate |
+| Drafting your invoice from the filings and fees recorded on your jobs | **Sending the invoice, and every movement of money** |
 
 **On DocuSign specifically:** signing is always a human's job, and we hold no DocuSign
 integration and no DocuSign credentials. Where a portal routes signatures through DocuSign
@@ -54,12 +80,94 @@ The stored signature feature is not an e-signature service: it is a PNG you uplo
 which the system stamps onto a prepared PDF permit form at your direction. It does not
 substitute for a signature a portal or agency requires you to execute yourself.
 
+## Setting up your company
+
+You can give us your company details yourself. We send you a **Company setup link**: a page
+that needs no login, where you fill in your company's legal name and address, your contacts,
+the inbox you want updates sent to, your licences in each state you work in, your insurance and
+bond with their expiry dates, who signs for the company, the AC disconnect you normally
+install, where you work, and who receives invoices. You can upload your certificates there
+(PDF or a photo), save and come back, and you see a checklist of what is still missing once
+you submit. The link expires (14 days unless we set it otherwise) and we can issue a new one
+that keeps what you had entered.
+
+Four things to know about it:
+
+- **What you enter is reviewed before it is used.** Each answer is a proposal that one of our
+  team accepts, edits or rejects. Nothing you type changes your record by itself.
+- **Portal passwords never go on that page.** For each portal you name, it hands you to a
+  separate one-time login link: single-use, write-only, expiring, and limited to the portals
+  named. Never send a password by email, text or chat.
+- **You can tell us how you file in each place** — the portal address or the intake email you
+  use for each permit office and utility, whether you have an account there, and a recent
+  permit or application number. This saves us time. It is treated as your word, not as a
+  verified fact: one of our team still checks each destination against the authority's own
+  page before anything is filed there automatically.
+- **Your uploaded certificates are held as files for our team to open.** Nothing reads them
+  automatically, and where an agency wants a certificate uploaded, a person does that.
+
+**Licences are recorded per state.** Each licence you hold goes in with its state and its type
+(contractor, electrical contractor, construction supervisor, home improvement contractor,
+solar contractor, master electrician, business registration). The automation puts each number
+only in a slot that asks for that type, in that state. It never uses another state's licence,
+and where two licences could fit and nothing says which, it leaves the slot blank and tells us
+rather than guessing. A missing licence does not always stop a filing before it is staged: on
+an Oregon job it does; elsewhere the slot is blank and the agency would reject it, which is
+why we check your licences for every state you file in before your first job.
+
+## Where a filing is sent is confirmed by a person
+
+The automation reads where each city, county and utility takes its applications — a portal
+address, an email address, or "inside the city's permit application" — from the authority's
+own pages, and shows it to our team with the page and its words. **A named person confirms it
+once per authority.** Until that happens, nothing is filed there automatically: a filing can
+still be prepared and staged, and a person submits it by hand.
+
+When you tell us where you work, we confirm the destinations for your whole service area
+before your first job, not during it. A permit filing is never sent to a utility's portal or
+the reverse, and a help or information page is never treated as a portal.
+
+## Filing by email
+
+Some authorities take applications by email. Where a named person has recorded that address,
+the application is prepared as an email with the required forms attached and **held as a
+draft**. A person sends it; or, with a named person's approval of that one filing and a
+separate server switch, it is sent once and never re-sent automatically. Account and meter
+numbers are never written in the subject or body, only inside the forms the authority
+requires. The authority's reply is read back onto your job like any other agency email.
+
+## Battery jobs
+
+A job with battery storage is handled as one, not as solar with a note:
+
+- the storage system's spec sheet and installation detail are added to the documents the
+  permit needs;
+- the review reads the plan set's own storage facts (how many units and how large, where they
+  sit, spacing, the listing, the disconnect) against the model code and any rule your
+  jurisdiction publishes. A broken rule or a missing detail is raised for a person before
+  filing. It blocks only when the rule is the jurisdiction's own, checked by a person or read
+  on its official page, and the plan states the fact outright;
+- **an interconnection application is prepared for every battery job by default.** It is
+  skipped only where a person has recorded, from the utility's own page, that a storage mode
+  such as backup-only needs none;
+- the fee estimate adds the electrical permit's services/feeders line where one applies.
+
+Whether your city wants a separate fire review or storage permit is shown to our team from
+what is on file. Handling that step is a person's job, not something the automation files.
+
+## Billing
+
+Invoices are drafted from the filings and fees recorded on your jobs, each billable line
+appearing on one invoice only. **A person sends each invoice, and automation never charges a card, takes a
+payment or pays a fee.** Where we keep our books in accounting software, a person's click
+copies an invoice there; that does not charge or email you either.
+
 ## Measured reliability (2026-09-09)
 
 ### Method, stated plainly
 
 These are **our own portal accounts** driven against **our own benchmark project fixture**
-(the `tml-international-llc` installer fixture, with synthetic addresses). They are not a
+(an installer fixture of ours, with synthetic addresses). They are not a
 customer SLA, not a guarantee, and not a measurement of your portals or your jurisdictions.
 Nothing here was measured against a live customer filing.
 
@@ -233,12 +341,13 @@ after your first filing.
 
 Named concretely, with who unblocks each.
 
-- **A brand-new AHJ with no knowledge-base entry has no real portal URL, and "staged" is
-  not proof of anything until one exists.** With no recipe and no known portal URL, a run
-  resolves to a mock adapter that reports a successful stage without ever opening a
-  browser. The fix is operational, not automated: a human points the recorder at the real
-  portal first. Never trust a stage for a jurisdiction whose portal URL has not been
-  confirmed.
+- **A brand-new AHJ with no knowledge-base entry has no portal for us to drive, and its
+  first filing waits on a person.** With no recipe and no known portal address, staging
+  stops and says that nothing was staged because no portal is known. (Earlier versions of
+  this page warned that such a run could report a successful stage without opening a browser.
+  That simulated portal now runs only when a test switch is set, and our go-live check flags
+  that switch.) The fix is operational, not automated: a person records the real portal
+  first.
 - **Some AHJ permit taxonomies need a human to confirm the correct permit type once.**
   Miami is the live example: the walk gets as far as Job Description — the recorded trace
   runs to `p13`, and the sweep row for `apps.miami.gov` in `latest.json` measured 11 pages
@@ -249,12 +358,15 @@ Named concretely, with who unblocks each.
   knowledge the engine cannot derive and **must not guess** — guessing is exactly the
   wrong-record-type error the guard exists to prevent. One human answer, recorded once,
   unblocks it for everyone.
-- **Nothing enforces "verified before it files".** A portal we have a recipe for but have
-  never logged into with YOUR credentials is not blocked from a filing by any gate; the
-  coverage report puts it in "supervised first run" and a person schedules that run. The
-  distinction matters because a recipe recorded against our own account is evidence about the
-  portal, not about your access to it — a rotated password or an account registered to the
-  wrong person surfaces at the first login attempt, not before.
+- **The destination is enforced; your login is not.** An automatic submit is refused unless a
+  named person confirmed where that authority takes its filings, and unless the recorded steps
+  drive that same destination. What nothing enforces is that the portal has ever accepted
+  YOUR login: a portal we have a recipe for but have never logged into with your credentials
+  is not blocked from being staged by any gate; the coverage report puts it in "supervised
+  first run" and a person schedules that run. The distinction matters because a recipe
+  recorded against our own account is evidence about the portal, not about your access to
+  it — a rotated password or an account registered to the wrong person surfaces at the first
+  login attempt, not before.
 - **Refused or expired portal credentials are operator work, not an automation failure —
   and nothing warns you before a filing needs them.** As of 2026-09-09, **12 of the 68
   credentialed hosts are stale** (a refused login more recent than the last accepted one).
@@ -340,22 +452,23 @@ that are not, or that are true in a narrower sense than they read, are below in 
 words — because a customer-facing guide that over-promises is the expensive kind of wrong, and
 you would find these out anyway, later, at a worse moment.
 
-Checked against this build on **2026-09-11**.
+Checked against the build of **2026-09-11**; the rows marked *(2026-11-11)* were re-checked
+against the current code.
 
 | The guide says | Where it actually stands |
 |---|---|
 | S2 "Coverage report, D2-3: which of your jurisdictions are ready now, which need a supervised first run, and which can't be filed yet" | **True as of this build.** `scripts/coverage-report.ts` produces it, per jurisdiction and per track (permit and interconnection are separate rows, because you can be ready on one and blocked on the other). It reports what it can prove and refuses to guess: a jurisdiction whose portal URL no human has confirmed reads as "can't be filed yet" rather than being promised |
-| S2 "Portal verification, D3-6: we verify each portal with your credentials on a real project, one at a time" | **True as a process, and it is ONLY a process.** Nothing in the software enforces it. The staging gate refuses a filing for five reasons — missing documents, an unconfirmed permit path, no client bound, no licence number, a blank required portal field — and **none of them asks whether that portal has ever accepted your login**. So "supervised first run" is a commitment our operators keep by scheduling it, not a rail the product runs on. The coverage report is what makes the unverified portals visible; it does not block them |
+| S2 "Portal verification, D3-6: we verify each portal with your credentials on a real project, one at a time" | **True as a process, and it is ONLY a process.** Nothing in the software enforces it. *(2026-11-11)* The staging gate refuses a filing for five reasons — missing documents, an unconfirmed permit path, no client bound, no CCB number on an Oregon job, a blank required portal field — and **none of them asks whether that portal has ever accepted your login**. So "supervised first run" is a commitment our operators keep by scheduling it, not a rail the product runs on. The coverage report is what makes the unverified portals visible; it does not block them |
 | S2 "Ready, D7" | **Read this next to "What to expect in your first two weeks" below, which is the measured version and is longer.** D7 is achievable for jurisdictions already covered by pooled knowledge — those inherit an existing recipe on day one. A jurisdiction on a platform we have never driven does not fit in seven days: the honest unit is about two days of engineering for a genuinely new platform. If your set is all-familiar, D7 is real; if it is not, the report on D2-3 will say so, which is the point of producing it that early |
-| S4 "Send them through the one-time secure link we provide" | **True as of this build**, and new. The link is single-use, expires in 72 hours, is write-only (it never echoes anything you submitted, so forwarding it leaks nothing), and only accepts logins for the portals the request named. Before this existed, credentials arrived by whatever channel the operator arranged — which is exactly the gap this closes |
+| S4 "Send them through the one-time secure link we provide" | **True** *(2026-11-11)*. You reach it from a link we send, or from your Company setup page for each portal you name there. The link is single-use, expires in 72 hours, is write-only (it never echoes anything you submitted, so forwarding it leaks nothing), and only accepts logins for the portals the request named. Before this existed, credentials arrived by whatever channel the operator arranged — which is exactly the gap this closes |
 | S4 "We don't create portal accounts" | True, and it is a hard constraint rather than a policy preference. You register each portal account on the agency's own site; many of them email a code to do it |
 | S4 "MFA and one-time codes need a person each session — software never clears them" | True and permanent. Per portal, tell us which inbox the code arrives in or who relays it; we record it against that login. A portal that challenges a code with nobody named to relay it is reported as **can't be filed yet**, because it is |
 | S4 "Setup runs leave draft applications in your portal account… we'll flag each one" | **True.** Every live-portal run writes an append-only ledger entry before the browser opens, so a run that dies half way is still recorded. What is equally true, and worth planning for: **nothing removes those drafts.** Cancelling them is a person on your side, and who that is gets agreed at kickoff |
 | S6 "Logged-in portal sessions are kept so MFA isn't triggered on every run… isolated per customer" | **The isolation is true; "encrypted at rest" is NOT part of that sentence and must not be read into it.** Sessions live in a per-customer directory (`portal-profiles/<your id>/<portal>/`) that no other customer's run touches. They are stored as plain Chrome profile directories — cookies and saved logins, **not encrypted by us** — and a valid session cookie is functionally a login. Your *passwords* are AES-256-GCM encrypted; your *sessions* are not. See §4 below for what that means for whoever owns the server |
-| S6 "If you ever leave… we then remove your credentials, sessions, projects and documents from our live systems" | **True as of this build**, including the one-time credential links themselves — fixed the same day it was found. For about an hour after the secure link shipped, offboarding did not know that table existed: a departing customer with a link would have had their projects destroyed and then the purge would have ABORTED on a foreign-key error, keeping their portal passwords. Destructive and silent unless somebody read the stack trace. The audit that found it now has a test case, and the lesson is recorded: a purge test only covers the tables it remembers to create. One audited command removes the encrypted credentials, the on-disk sessions, every project and its documents, your homeowner records and correspondence. Three things it does not reach, each cleared by hand afterwards: the backup mirror of the session directories, the backup mirror of your documents, and raw portal screenshots under `data/learn-runs/`. **Deletion from historical backup snapshots is not something we can do short of deleting the snapshots**, so if your contract requires provable deletion, raise it before you sign |
+| S6 "If you ever leave… we then remove your credentials, sessions, projects and documents from our live systems" | **True** *(2026-11-11)*, including the one-time credential links, your Company setup answers and uploaded certificates, and what you told us about how you file. The credential links were added to the purge the same day their absence was found. For about an hour after the secure link shipped, offboarding did not know that table existed: a departing customer with a link would have had their projects destroyed and then the purge would have ABORTED on a foreign-key error, keeping their portal passwords. Destructive and silent unless somebody read the stack trace. The audit that found it now has a test case, and the lesson is recorded: a purge test only covers the tables it remembers to create. One audited command removes the encrypted credentials, the on-disk sessions, every project and its documents, your homeowner records and correspondence. Three things it does not reach, each cleared by hand afterwards: the backup mirror of the session directories, the backup mirror of your documents, and raw portal screenshots under `data/learn-runs/`. **Deletion from historical backup snapshots is not something we can do short of deleting the snapshots**, so if your contract requires provable deletion, raise it before you sign |
 | S6 "Your projects, homeowner records, documents and credentials are yours alone and never shared" | True — and read it alongside §3 below, which spells out what IS pooled. The line is procedural knowledge (how a portal behaves) versus your data. Some installers consider the first of those a competitive asset |
 | S3.7 "Who pays AHJ and utility fees, and how — agreed per portal at kickoff" | **True, and now a conversation you can have over a number.** The agreement is recorded per portal (`card-on-file` / `customer-pays` / `mailed-check` / `keelix-pays`) and both the coverage report and the fee sheet print `NOT AGREED` beside any portal where nobody has made one. `npm run fee:sheet -- --project <id>` puts the amount, the schedule line, the source page, the confidence and how it is paid next to that agreement, so kickoff settles who pays *this much*, rather than who pays in principle. Read it with the fee entries under Known limits above: on the day of writing, most permit amounts are still valuation estimates, and a researched fee is unverified until a person checks it. Recording an agreement authorises nothing — automation never pays a portal fee under any value of it |
-| S3 "every item goes straight onto permit and interconnection applications" | True for the licence and business block. Two intake items are stored but not yet consumed anywhere: the insurance and bond **expiry dates** are held, while the **certificate PDFs themselves have no document store** — send them, but expect us to hold them outside the system until that exists |
+| S3 "every item goes straight onto permit and interconnection applications" | *(2026-11-11)* True for the licence and business block, with licences now recorded per state and placed by type. Two intake items are stored but not consumed by any filing: the insurance and bond **expiry dates** are held, and the **certificates** you upload on the Company setup page are kept as files for our team to open. Nothing attaches a certificate to an application automatically |
 
 ## Read this before you sign
 
@@ -363,22 +476,23 @@ Eight things you would not otherwise find on this page, each of which changes th
 for at least some companies. All verified against the same build and date as everything
 above.
 
-### 1. This service has never onboarded a real company
+### 1. This service has not yet been run end to end for a paying company
 
-There is no first customer yet. Every number on this page comes from the operator's own
+Every number on this page comes from the operator's own
 portal accounts driven against a synthetic benchmark fixture. Nothing has been measured
 against a live customer's jurisdictions, credentials, or filings. **The first customer is
-also the first execution of the onboarding process itself** — the intake, the credential
-import, the readiness report, the inheritance check. Those steps exist as scripts and have
-never been run for a company that was paying for the outcome. Price and plan accordingly.
+also the first execution of the onboarding process itself** — the Company setup page, the
+credential import, the readiness report, the destination confirmations, the inheritance
+check. Those steps exist and are tested, and have
+not been run for a company that was paying for the outcome. Plan accordingly.
 
 ### 2. Learn and benchmark runs create real draft applications in your live portal accounts
 
 This is not a sandbox. When the engine learns a portal, it logs into **your** account and
 walks a real application forward, which means the portal creates a **real draft record**
 under your account. One Miami walk produced intake number `BD26-021147-001`. These drafts
-are never submitted — automation never clicks final submit — but **nothing in this system
-deletes or cancels them.** They accumulate under the account whose credentials we hold, and
+are never submitted — a learn or benchmark run never clicks final submit — but **nothing in
+this system deletes or cancels them.** They accumulate under the account whose credentials we hold, and
 a person has to go and cancel them.
 
 The replay self-test compounds this: when it is enabled it re-runs the live portal to prove
@@ -475,12 +589,18 @@ been repeat-measured to a review screen.
 
 ### 8. You do not get your own login to this software
 
-Today this is run **for** you, not **by** you. The operator's team holds the accounts, runs
-the filings and hands you the staged application to verify and submit; there is no
+Today this is run **for** you, not **by** you. The operator's team holds the accounts and runs
+the filings; a filing is submitted by a person, yours or ours, or by the one run a member of
+our team approved. There is no
 self-service tenant login, no customer-facing password reset, and no customer admin account
 for your company inside this system. If what you are buying is a portal you log into and
 operate yourself, that is not what exists today, and you should not sign expecting it.
 Everything on this page describes the service-bureau arrangement.
+
+What you do get is a set of pages that need no login, each opened by a link we send and each
+showing only your own company's information: the Company setup page, the one-time page for
+handing us a portal login, a page for supplying a job's missing details, and a read-only
+status page per job. A link is not an account, and it reaches nothing else.
 
 One consequence worth stating plainly, because it constrains scheduling: the person who
 verifies and submits has to be at the machine running the browser, or on a supervised remote
@@ -497,15 +617,27 @@ session to it. A staged or paused filing cannot be finished from somewhere else.
   route around the block. Operators can pause automation for a jurisdiction or an entire
   platform with a kill switch, and while paused every run hands off to a human instead of
   opening a browser.
-- **We do not file anything without human review.** The reviewer gate precedes staging, and
-  the portal's final submit is executed by a person. Past the review screen the automation
+- **We do not file anything without a named person's decision.** The reviewer gate precedes
+  staging. The portal's final submit is executed by a person, or by the one run a named person
+  approved after reading the approval sheet; that approval covers one run, is recorded under
+  their name, and is refused unless a person confirmed the destination, the server switch is
+  on, and nothing they acknowledged has changed since. Past the review screen the automation
   works from an allowlist: only a step a human explicitly marked as the final submit is even
   clickable, and anything that looks like a fee payment is refused before that check is
-  reached. A payment dialog aborts the run.
-- **We do not pay fees.** Ever, under any configuration flag. We will tell you what a fee is,
+  reached. A payment dialog aborts the run. The same rule covers a filing sent by email.
+- **We do not do what comes after approval.** No inspection scheduling, no completion or
+  as-built documents, no permission-to-operate (PTO) request. We file the permit application
+  and the interconnection application and follow each to issued or approved. Our team can note
+  later dates on a job's timeline; that is a record, not a service. Do not plan on us for PTO.
+- **We do not sign.** Signatures, including DocuSign and eSign steps on a portal, are a
+  person's. A stored signature image can be placed on a prepared permit form at your
+  direction; it never stands in for a signature a portal or agency requires you to make.
+- **We do not create portal accounts.** You register each one on the agency's own site.
+- **We do not pay fees, and we do not charge you automatically.** Ever, under any
+  configuration flag. We will tell you what a fee is,
   which line of the published schedule it came from and who agreed to pay it — that is a fee
   sheet, not a payment. The money is moved by a person, at the portal's own checkout or by the
-  cheque they post.
+  cheque they post. Our own invoices are sent by a person and no card is charged by software.
 - **We do not store secrets in plaintext.** Portal passwords and security answers exist only
   inside AES-256-GCM encrypted envelopes. The API never returns a password — a credential
   reports only whether a secret is set. Passwords, account and meter numbers, and similar
@@ -530,10 +662,13 @@ number for that.
 
 1. **Days 1-2 — accounts and credentials.** You register or confirm your own portal accounts
    on each AHJ and utility site (this is yours to do; many portals email a one-time code and
-   automation is not permitted to complete that). We load your company licence and business
-   details, and import your portal credentials encrypted — through the one-time secure link,
-   or by phone. Your contractor licence number is required — staging refuses to run without
-   it — and so is its issuing state.
+   automation is not permitted to complete that). You fill in your company, licence and
+   service-area details on your Company setup page, or we take them on a call, and we import
+   your portal credentials encrypted — through the one-time secure link, or by phone. We need
+   a contractor licence for every state you file in, each with its state and type; without
+   one the licence box on your applications is blank, and an Oregon job will not stage at all.
+   In the same days a member of our team confirms where each authority in your service area
+   takes its filings.
 2. **Days 2-3 — the coverage report.** Per jurisdiction you named, and per track (a permit
    filing and an interconnection filing are separate portals, separate logins and separate
    answers): ready now, needs a supervised first run, or can't be filed yet — with the reason
@@ -549,10 +684,10 @@ number for that.
    MFA/CAPTCHA portals to be identified as permanently human-assisted. Expect at least one
    AHJ to need you to confirm its correct permit type once.
 4. **Days 8-12 — first real filings, fully supervised.** Filings are staged to the portal's
-   review screen and a human on your side verifies and submits every one. Do not plan on
-   unattended filing in the first two weeks; the final submit is a person's job by design,
-   and for a new jurisdiction a person should also confirm the portal URL was real before
-   trusting that a stage happened. **"Fully supervised" is a commitment our operators keep by
+   review screen and a person verifies and submits every one. Do not plan on
+   unattended filing, in the first two weeks or after: a filing is submitted by a person, or
+   by the one run a named person approved, and for a new jurisdiction a person should also
+   check the first stage against the portal itself. **"Fully supervised" is a commitment our operators keep by
    scheduling it, not something the software enforces** — nothing in the staging gate asks
    whether a portal has been verified for you. Hold us to the schedule rather than assuming a
    rail exists.

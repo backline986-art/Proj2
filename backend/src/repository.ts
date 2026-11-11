@@ -181,6 +181,7 @@ import { linkLookupRanRecently, signedInOutcome, statusReadGap, type ReadGapFact
 import { evidenceForTopic, evidenceLines, type EvidenceTopic } from "./projectEvidence";
 import { resolveUtilityRequirements } from "./utilityRequirements";
 import { readParcelJurisdiction, type ParcelJurisdictionReading } from "./parcelJurisdiction";
+import { planSetImageDisconnectRead as planSetImageDisconnectReadOf } from "./planSetImageReads";
 import { customerBillOnFile, runQcForProject, WAITING_ON_BILL_ISSUE_TYPE, type QcRunOptions } from "./qc";
 import { resolveJobScope } from "./jobScope";
 import { loadStoredTemplates, formAllowedForPath } from "./ahjForms";
@@ -281,7 +282,12 @@ export function buildReviewerReportFor(db: AppDb, project: ProjectRecord): Revie
   // "not checked", which raises only today's callout.
   let parcelJurisdiction: ParcelJurisdictionReading | undefined;
   try { parcelJurisdiction = readParcelJurisdiction(db, project); } catch { parcelJurisdiction = undefined; }
-  return buildReviewerReport(project, { codeContext, codeProfileRow, uploadedDocTypes, documentTexts: designDocumentTexts(db, project.id), pvWorksheet: filedPvWorksheetInput(db, project), structuralCertification, stateRules, jobScope, utilityRequirements, parcelJurisdiction });
+  // What the server's own image read of this job's stored plan set said about its AC disconnect
+  // (#135): the one reader QC uses too, by the stored file's bytes — never the job's snapshot. A
+  // failed read is "no such read", which holds the job exactly as before.
+  let planSetImageDisconnectRead: ReturnType<typeof planSetImageDisconnectReadOf> = null;
+  try { planSetImageDisconnectRead = planSetImageDisconnectReadOf(db, project.id); } catch { planSetImageDisconnectRead = null; }
+  return buildReviewerReport(project, { planSetImageDisconnectRead, codeContext, codeProfileRow, uploadedDocTypes, documentTexts: designDocumentTexts(db, project.id), pvWorksheet: filedPvWorksheetInput(db, project), structuralCertification, stateRules, jobScope, utilityRequirements, parcelJurisdiction });
 }
 
 // WHAT HOLDS THIS FILING: ONE ANSWER (#214). The text report with the cached vision verdicts folded
