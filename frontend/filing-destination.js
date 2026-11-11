@@ -38,7 +38,7 @@
   const day = (iso) => str(iso).slice(0, 10);
 
   const KIND = { portal: 'Application portal', email: 'Applications by email to', with_permit: 'Filed inside the AHJ permit application' };
-  const FROM = { reference: 'reference data', permit_lookup: 'per-job permit lookup', utility_lookup: "utility's filing lookup" };
+  const FROM = { reference: 'reference data', permit_lookup: 'per-job permit lookup', utility_lookup: "utility's filing lookup", seeded_kb: 'seeded knowledge base' };
 
   /** Which authority kinds a track group shows: the utility group shows the utility's, the permit group the AHJ's. */
   function forGroup(payload, authorityKind) {
@@ -68,7 +68,34 @@
     return Boolean(d && d.serviceArea && !(p && (p.act || p.areaAct)));
   }
 
+  /** A SEEDED knowledge-base address with no page words on file: shown so the queue does not hide it,
+   *  for Edit only. No Confirm button is drawn (the server refuses one anyway); the person opens the
+   *  authority's page and saves the page and its words as their own check. */
+  function seededProposalHtml(d, p) {
+    const link = httpUrl(p.sourceUrl);
+    const page = link ? ` The entry names this page: <a href="${esc(link)}" target="_blank" rel="noopener">${esc(p.sourceHost || link)}</a>.` : '';
+    const attrs = `${actAttrs(d, p)} data-fd-id="${esc(p.id)}"`;
+    return `<div class="fd-proposal" data-fd-proposal="${esc(p.id)}" data-fd-seeded>
+  <div>${addressLine(p)} <span class="badge">Seeded — not yet confirmed</span></div>
+  <div class="muted">From the seeded knowledge base: no page words are on file, so it cannot be confirmed by one click.${page}</div>
+  <p class="warn">Edit only: open ${esc(d.authority.name)}'s own application page, check this address, then save the page and its words as your own check.</p>
+  ${noActionHere(d, p) ? `<p class="muted" data-fd-area-noact>No job names ${esc(d.authority.name)} yet: Edit and Reject open on the first job's track card.</p>` : `<div class="fd-actions">
+    <button type="button" class="btn btn-primary" data-fd-edit ${attrs}>Edit and save</button>
+    <button type="button" class="btn" data-fd-reject ${attrs}>Reject</button>
+  </div>`}
+  ${noActionHere(d, p) ? '' : `<div class="fd-edit" data-fd-edit-slot="${esc(p.id)}" hidden>
+    <label>Address <input type="text" data-fd-field="address" value="${esc(p.address)}"></label>
+    <label>Page you read it on <input type="url" data-fd-field="sourceUrl" value="${esc(link)}"></label>
+    <label>The page's words <textarea data-fd-field="quote" rows="3"></textarea></label>
+    <input type="hidden" data-fd-field="kind" value="${esc(p.kind)}">
+    <input type="hidden" data-fd-field="name" value="${esc(p.name || '')}">
+    <button type="button" class="btn btn-primary" data-fd-save ${attrs}>Save as confirmed by me</button>
+  </div>`}
+</div>`;
+  }
+
   function proposalHtml(d, p) {
+    if (p.seeded === true || p.from === 'seeded_kb') return seededProposalHtml(d, p);
     const link = httpUrl(p.sourceUrl);
     const source = link
       ? `<a href="${esc(link)}" target="_blank" rel="noopener">${esc(p.sourceHost || link)}</a>`

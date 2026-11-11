@@ -190,3 +190,28 @@ export function supplementAcDisconnect(result: ParserLlmExtraction, planText: st
   fillEmpty("acDiscFused", read.fused);
   return { ...result, fields, ...(conflicts.length ? { conflicts } : {}) };
 }
+
+/**
+ * THE JOB'S AC DISCONNECT PART, BACKED BY ITS OWN PLAN SET — the ONE reader for "does this job show an
+ * AC disconnect from a captured part", asked by the reviewer gate's acDisconnect topic
+ * (projectEvidence.evidenceForTopic) and by QC's ac_disconnect package read (qc.ts hands the answer to
+ * baselineRules). The part as one line ("Eaton DG222URB"), "" when it does not count.
+ *
+ * It counts ONLY when both hold:
+ *   - the job holds a part in its plan-set key (acDiscMakeModel; planSetDisconnectPart), AND
+ *   - the job's own plan-set text names THAT part at its AC-disconnect label (readAcDisconnect above,
+ *     the same plan_set read that fills the key at intake).
+ * The job's fields keep no record of where a value came from (a parse, a person's edit and an API
+ * body all save the same key), so the key alone is never evidence: the plan set is. A part a person
+ * typed that the plan set does not name, acDiscReq alone, a rating line that names no part, and the
+ * client's standard part (company data, never read off this plan set) all count for nothing, and a
+ * utility's AC-disconnect requirement then reads exactly as before.
+ */
+export function capturedDisconnectPart(snapshot: Record<string, unknown> | null | undefined, planSetText: unknown): string {
+  const held = planSetDisconnectPart(snapshot ?? {});
+  if (!held.named || !held.model) return "";
+  const text = String(planSetText ?? "");
+  if (!text.trim()) return "";
+  const onSet = readAcDisconnect(text).parts.find((p) => compact(p.model) === compact(held.model) && (!held.make || compact(p.make) === compact(held.make)));
+  return onSet ? `${onSet.make} ${onSet.model}` : "";
+}
