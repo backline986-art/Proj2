@@ -215,3 +215,19 @@ export function capturedDisconnectPart(snapshot: Record<string, unknown> | null 
   const onSet = readAcDisconnect(text).parts.find((p) => compact(p.model) === compact(held.model) && (!held.make || compact(p.make) === compact(held.make)));
   return onSet ? `${onSet.make} ${onSet.model}` : "";
 }
+
+/**
+ * THE WORDINGS THAT NAME AN AC DISCONNECT IN PLAN TEXT — the ONE list for "the text names an AC /
+ * utility disconnect", read by the reviewer gate's acDisconnect topic (projectEvidence, over all of the
+ * job's evidence text) and by QC's ac_disconnect package read (qc.ts hands the answer to baselineRules,
+ * on the plan-set text the gate sees). They were the gate's own; QC looked only at the split-page list
+ * and the upload notes, so a plan set that says "AC DISCONNECT" cleared the gate while QC still listed
+ * the disconnect as possibly missing (#134). A DC, rapid-shutdown or storage disconnect matches none.
+ */
+export const AC_DISCONNECT_TEXT_PATTERNS: readonly RegExp[] = [/\bAC\s+disconnect/i, /\butility\s+(?:accessible\s+|external\s+)?disconnect/i, /\bexternal\s+disconnect/i, /\blockable\s+disconnect/i, /\bvisible[-\s]?(?:break|blade|open)/i, /\bPV\s+system\s+disconnect/i, /\b690\.13\b/i];
+
+/** True when the job's plan-set text names an AC / utility disconnect in the gate's own wordings. */
+export function planTextNamesAcDisconnect(planSetText: unknown): boolean {
+  const text = String(planSetText ?? "");
+  return Boolean(text.trim()) && AC_DISCONNECT_TEXT_PATTERNS.some((pattern) => pattern.test(text));
+}
