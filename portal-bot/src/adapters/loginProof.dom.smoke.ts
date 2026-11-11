@@ -302,20 +302,29 @@ const POSTBACK_OTP = `<!doctype html><html><head><title>City Permits - Sign In</
 //   /cv/logon-refused    wrong password → the POST re-renders the form with a banner: a REFUSAL
 //   /cv/logon-nosubmit   no native submit, the legend the only "button" → Enter, never the legend
 // The page logs every click (tag#id) so a test can say WHICH control was clicked.
-const cityViewLogon = (path: string, opts: { collapsed?: boolean; nativeSubmit?: boolean; banner?: string } = {}): string => {
+//   /cv/logon-eye        a wordless type-less <button> (show/hide eye) right after the password
+//                        box → the <input type=submit> is still the one clicked
+//   /cv/logon-divtoggle  the heading is a <div role=button> with NO aria at all that hides the
+//                        panel on click, and there is no native submit → the fallback list
+//                        clicks it, nothing posts: step 8 must say so, not "two-step"
+const cityViewLogon = (path: string, opts: { collapsed?: boolean; nativeSubmit?: boolean; banner?: string; eye?: boolean; divToggle?: boolean } = {}): string => {
   const open = !opts.collapsed;
   const submit = opts.nativeSubmit === false ? "" : `<input data-cy="btnbnext" type="submit" name="bnext" id="bnext" value="" class="buttonSize1">`;
+  const eye = opts.eye ? `<button class="eye" id="eye" aria-label="Show password"><svg width="16" height="16"><circle cx="8" cy="8" r="6"/></svg></button>` : "";
   const banner = opts.banner ? `<div class="validation-summary-errors" role="alert"><ul><li>${opts.banner}</li></ul></div>` : "";
+  const heading = opts.divToggle
+    ? `<div class="hdr" role="button" tabindex="0" id="hdr"><h3>Sign In</h3></div>`
+    : `<legend class="collapsible" role="button" tabindex="0" aria-expanded="${open}" aria-controls="cv-signin-content"><h3>Sign In</h3></legend>`;
   return `<!doctype html><html><head><title>Log On | City Portal</title></head><body>
   <h1>Log On</h1>
   <p>Please sign in to apply for a permit. If your password is incorrect you may reset it below.</p>
   <form action="${path}" method="post">
     ${banner}
     <fieldset>
-      <legend class="collapsible" role="button" tabindex="0" aria-expanded="${open}" aria-controls="cv-signin-content"><h3>Sign In</h3></legend>
+      ${heading}
       <div id="cv-signin-content" aria-hidden="${!open}" style="${open ? "" : "display: none;"}">
         <label for="emailAddress">Email Address:*</label><input type="text" id="emailAddress" name="emailAddress">
-        <label for="password">Password:*</label><input type="password" id="password" name="password">
+        <label for="password">Password:*</label><input type="password" id="password" name="password">${eye}
         <a href="${path}/ForgotPassword">Forgot your password?</a>
         ${submit}
       </div>
@@ -340,22 +349,30 @@ const cityViewLogon = (path: string, opts: { collapsed?: boolean; nativeSubmit?:
         panel.setAttribute("aria-hidden", isOpen ? "true" : "false");
       });
     });
+    // The eye only toggles the password's visibility; it never submits.
+    var eye = document.getElementById("eye");
+    if (eye) eye.addEventListener("click", function (e) { e.preventDefault(); var pw = document.getElementById("password"); pw.type = pw.type === "password" ? "text" : "password"; });
+    // The aria-less heading hides the panel on click and posts nothing.
+    var hdr = document.getElementById("hdr");
+    if (hdr) hdr.addEventListener("click", function () { document.getElementById("cv-signin-content").style.display = "none"; });
     // No native submit: the form still posts on Enter in the password box (a two-field form
     // has no implicit submission without a submit button, so the page wires it itself).
-    document.getElementById("password").addEventListener("keydown", function (e) {
+    ${opts.divToggle ? "" : `document.getElementById("password").addEventListener("keydown", function (e) {
       if (e.key === "Enter") { e.preventDefault(); document.querySelector("form").submit(); }
-    });
+    });`}
   </script>
 </body></html>`;
 };
 const CV_SIGNED_IN = `<!doctype html><html><head><title>My Items | City Portal</title></head><body>
   <a href="/Portal/Account/LogOff">Log Off</a><h1>My Items</h1><p>You have no applications.</p>
 </body></html>`;
-const CV_ROUTES: Record<string, { collapsed?: boolean; nativeSubmit?: boolean }> = {
+const CV_ROUTES: Record<string, { collapsed?: boolean; nativeSubmit?: boolean; eye?: boolean; divToggle?: boolean }> = {
   "/cv/logon": {},
   "/cv/logon-collapsed": { collapsed: true },
   "/cv/logon-refused": {},
   "/cv/logon-nosubmit": { nativeSubmit: false },
+  "/cv/logon-eye": { eye: true },
+  "/cv/logon-divtoggle": { nativeSubmit: false, divToggle: true },
 };
 
 const routes: Record<string, string> = {
@@ -639,6 +656,34 @@ await check("a WRONG password re-rendered with 'Invalid email or password.' → 
     // The instructional sentence above the form ("If your password is incorrect…") is prose,
     // not the portal's answer, and must not be what the read returns.
     assert.doesNotMatch(res.message, /you may reset it/i, "instructional prose must not be read as the refusal banner");
+  } finally { await p.close(); }
+});
+
+await check("a wordless type-less <button> (show/hide eye) right after the password box is not the form's submit; the <input type=submit> is → logged_in", async () => {
+  const p = await context.newPage();
+  try {
+    await p.goto(`http://127.0.0.1:${port}/cv/logon-eye`);
+    const res = await performLogin(p, cred);
+    const clicks = await cvClicks(p);
+    assert.equal(clicks.some((c) => /^BUTTON#eye/.test(c)), false, `the eye was clicked as the submit: ${clicks.join(", ")}`);
+    assert.equal(res.detail?.clicked?.id, "bnext", `got ${JSON.stringify(res.detail?.clicked)}: ${res.message}`);
+    assert.equal(res.status, "logged_in", `got ${res.status}: ${res.message}`);
+  } finally { await p.close(); }
+});
+
+await check("an aria-less <div role=button> heading that hides the panel, no native submit → still_on_login that NAMES the never-posted click, not a two-step", async () => {
+  const p = await context.newPage();
+  try {
+    await p.goto(`http://127.0.0.1:${port}/cv/logon-divtoggle`);
+    const res = await performLogin(p, cred);
+    assert.equal(res.status, "still_on_login", `got ${res.status}: ${res.message}`);
+    assert.match(res.message, /did not post the form/i, `step 8 must name the real failure (got: ${res.message})`);
+    assert.doesNotMatch(res.message, /identifier-first|two-step/i, "the two-step diagnosis sent the last reader the wrong way");
+    assert.match(res.message, /<div role=button id=hdr/, `the clicked control's tag/role/id must be named (got: ${res.message})`);
+    assert.equal(res.detail?.cause, "toggle_click");
+    assert.equal(res.detail?.posted, false);
+    assert.equal(res.detail?.clicked?.tag, "div");
+    assert.equal(loginWasRefused(res.message), false, "a form that never posted says nothing about the password — it must not mark the credential stale");
   } finally { await p.close(); }
 });
 

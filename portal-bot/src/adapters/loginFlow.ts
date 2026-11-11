@@ -825,13 +825,15 @@ async function findPasswordField(page: Page): Promise<Locator | null> {
  * evidence there is, and it needs no label.
  *
  * Bounded, because ASP.NET pages wrap the WHOLE page in one <form>, where a header search
- * button is also a native submit: a candidate must follow the password field with no other
- * typeable field between them (the control that closes the password's own field group), or be
- * the form's only native submit. [type=submit] outranks a type-less <button> — a password
- * show/hide eye is routinely a type-less <button> right after the box. No owning form, or no
- * such control (Citizenserve's anchor, Accela's #hlLogin, eTRAKiT's input[type=button]): the
- * caller falls back to the ordered candidate list, as before. Never a disclosure toggle, never
- * a never-click control.
+ * button is also a native submit: every candidate must follow the password field with no other
+ * typeable field between them — the control that closes the password's own field group. A
+ * [type=submit] ATTRIBUTE (the DOM property reads "submit" on a type-less <button> too) wins
+ * over a type-less <button>, and a type-less <button> counts only when its own text carries a
+ * login/submit word (LOGIN_WORD_SOURCE — one vocabulary): a password show/hide eye is routinely
+ * a type-less, wordless <button> right after the box, and clicking it would then read as
+ * "likely rejected". No owning form, or no such control (Citizenserve's anchor, Accela's
+ * #hlLogin, eTRAKiT's input[type=button]): the caller falls back to the ordered candidate list,
+ * as before. Never a disclosure toggle, never a never-click control.
  */
 const NATIVE_SUBMIT_SELECTOR = 'input[type="submit"], button[type="submit"], button:not([type])';
 async function ownFormSubmit(passLoc: Locator): Promise<Locator | null> {
@@ -839,33 +841,31 @@ async function ownFormSubmit(passLoc: Locator): Promise<Locator | null> {
     const form = passLoc.locator("xpath=ancestor::form[1]");
     if ((await form.count().catch(() => 0)) !== 1) return null;
     // Ranked ordinals among the form's native submits, decided in-page in one read.
-    const ranked = await (passLoc as unknown as { evaluate: (fn: (el: Element, a: { sub: string; disc: string }) => number[], arg: { sub: string; disc: string }, o: { timeout: number }) => Promise<number[]> })
+    const ranked = await (passLoc as unknown as { evaluate: (fn: (el: Element, a: { sub: string; disc: string; word: string }) => number[], arg: { sub: string; disc: string; word: string }, o: { timeout: number }) => Promise<number[]> })
       .evaluate((pw, a) => {
         // Fully inline — no named helper (see the note in authenticatedSignalPresent).
         const form = pw.closest("form");
         if (!form) return [];
+        const word = new RegExp(`${a.word}|\\bsubmit\\b`, "i");
         const all = Array.from(form.querySelectorAll(a.sub));
-        const ok: number[] = [];
-        for (let i = 0; i < all.length; i++) {
-          const el = all[i] as HTMLElement;
-          const r = el.getBoundingClientRect();
-          if (r.width <= 0 || r.height <= 0 || (el as HTMLButtonElement).disabled || el.matches(a.disc)) continue;
-          ok.push(i);
-        }
-        if (ok.length === 0) return [];
-        if (ok.length === 1) return ok;
-        // The control that closes the password's field group: after the box, nothing typeable
-        // between. [type=submit] first, then a type-less <button>.
+        // Typeable fields: a submit must sit after the password box with none of these between.
         const typeable = Array.from(form.querySelectorAll("input, textarea, select")).filter((e) => {
           const t = ((e as HTMLInputElement).type || "text").toLowerCase();
           return e.tagName !== "INPUT" || !/^(hidden|checkbox|radio|submit|button|image|reset)$/.test(t);
         });
         const after = (el: Element) => (pw.compareDocumentPosition(el) & Node.DOCUMENT_POSITION_FOLLOWING) !== 0;
         const closes = (el: Element) => after(el) && !typeable.some((f) => f !== pw && after(f) && (f.compareDocumentPosition(el) & Node.DOCUMENT_POSITION_FOLLOWING) !== 0);
-        const typed = ok.filter((i) => closes(all[i]) && ((all[i] as HTMLInputElement).type || "").toLowerCase() === "submit");
-        const untyped = ok.filter((i) => closes(all[i]) && !typed.includes(i));
-        return typed.concat(untyped);
-      }, { sub: NATIVE_SUBMIT_SELECTOR, disc: DISCLOSURE_TOGGLE_SELECTOR }, { timeout: ELEMENT_READ_TIMEOUT_MS });
+        const typed: number[] = [];
+        const worded: number[] = [];
+        for (let i = 0; i < all.length; i++) {
+          const el = all[i] as HTMLElement;
+          const r = el.getBoundingClientRect();
+          if (r.width <= 0 || r.height <= 0 || (el as HTMLButtonElement).disabled || el.matches(a.disc) || !closes(el)) continue;
+          if ((el.getAttribute("type") || "").toLowerCase() === "submit" || el.tagName === "INPUT") typed.push(i);
+          else if (word.test(String(el.innerText || el.getAttribute("aria-label") || "").replace(/\s+/g, " "))) worded.push(i);
+        }
+        return typed.concat(worded);
+      }, { sub: NATIVE_SUBMIT_SELECTOR, disc: DISCLOSURE_TOGGLE_SELECTOR, word: LOGIN_WORD_SOURCE }, { timeout: ELEMENT_READ_TIMEOUT_MS });
     const all = form.locator(NATIVE_SUBMIT_SELECTOR);
     for (const i of ranked.slice(0, MAX_CANDIDATE_SCAN)) {
       const loc = all.nth(i);
@@ -1766,9 +1766,17 @@ export async function performLogin(
     // DID ANYTHING LEAVE THE BROWSER? A posted form sends a non-GET or navigates; a click that
     // only toggled a panel sends nothing. Read off the page's requests, never off the DOM.
     let posted = false;
-    const onRequest = (req: { method?: () => string; isNavigationRequest?: () => boolean }) => {
+    // Only the portal's own traffic counts: a non-GET to the login page's origin, or a
+    // main-frame navigation. A telemetry beacon POSTing to a third party during the 15 s poll
+    // must not turn a never-posted form back into "an unfinished two-step".
+    const loginOrigin = (() => { try { return new URL(loginUrl).origin; } catch { return ""; } })();
+    const onRequest = (req: { url?: () => string; method?: () => string; isNavigationRequest?: () => boolean; frame?: () => unknown }) => {
       try {
-        if ((typeof req.method === "function" && req.method() !== "GET") || (typeof req.isNavigationRequest === "function" && req.isNavigationRequest())) posted = true;
+        const origin = (() => { try { return new URL(typeof req.url === "function" ? req.url() : "").origin; } catch { return ""; } })();
+        const ownPost = typeof req.method === "function" && req.method() !== "GET" && origin !== "" && origin === loginOrigin;
+        const mainNav = typeof req.isNavigationRequest === "function" && req.isNavigationRequest()
+          && (typeof req.frame !== "function" || typeof (page as unknown as { mainFrame?: unknown }).mainFrame !== "function" || req.frame() === (page as unknown as { mainFrame: () => unknown }).mainFrame());
+        if (ownPost || mainNav) posted = true;
       } catch { /* a request that cannot be read is not evidence either way */ }
     };
     const canListen = typeof (page as unknown as { on?: unknown }).on === "function" && typeof (page as unknown as { off?: unknown }).off === "function";
@@ -1872,8 +1880,11 @@ export async function performLogin(
     // THE PORTAL'S OWN ANSWER. A refusal banner beside the form names a wrong or locked
     // credential and separates it from a form that never posted (bounded read, see
     // loginRefusalBanner). Read as REFUSED so the credential is marked stale.
-    const banner = await loginRefusalBanner(page);
-    if (banner && (formStillThere || samePageIgnoringQuery(endUrl, loginUrl))) {
+    // Only on this portal: a hand-off to ANOTHER origin's login that happens to say "try
+    // again" is never this credential's answer (the /idp-redirect pin).
+    const sameOrigin = (() => { try { return new URL(endUrl).origin === new URL(loginUrl).origin; } catch { return endUrl === loginUrl; } })();
+    const banner = sameOrigin ? await loginRefusalBanner(page) : "";
+    if (banner) {
       return {
         ok: false,
         status: "still_on_login",
