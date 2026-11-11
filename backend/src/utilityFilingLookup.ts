@@ -34,6 +34,7 @@ import { acceptProposedLimits, saveEligibilityRecord } from "./eligibilityLimits
 // utilityRequirements.ts (which reads this one's keys) never load each other at start-up.
 import { UTILITY_REQUIREMENTS_RESEARCH_RULE, UTILITY_REQUIREMENTS_RESEARCH_SCHEMA } from "./utilityRequirementsResearchPrompt";
 import type { UtilityRequirementsLanding } from "./utilityRequirementsResearch";
+import type { UtilityFeeLanding } from "./utilityFeeLanding";
 import type { PageReader, ReadPage } from "./agencyPageReader";
 import { quoteStatesFee, quoteStatesReviewTime } from "./citedReviewTime";
 
@@ -95,6 +96,10 @@ export interface UtilityFilingLookup {
   serviceArea?: CitedFact<UtilityServiceArea>;
   /** Pages Keelix's reader was refused (403 / challenge / back-off): a person reads them in a browser. */
   needsPersonRead?: Array<{ url: string; reason: string }>;
+  /** CITED FEES THAT DID NOT LAND IN THE FEE SCHEDULE and need a person (utilityFeeLanding: two
+   *  application fees, a fee by size or level, a page Keelix could not re-read, a difference from the
+   *  fee on file). Shown on the fee quote; never a number Keelix charges. */
+  feesHeld?: Array<{ label: string; amountUsd: number; sourceUrl: string; reason: string }>;
   lookedUpAt: string;
   verifiedAt?: string | null;
   verifiedBy?: string | null;
@@ -548,10 +553,9 @@ export const UTILITY_FILING_SYSTEM = `You find, for ONE electric utility in the 
 
 EVERY value carries "sourceUrl" (a page your search returned or you opened) and "quote" (the exact words on that page that state it, under 250 characters, containing the answer itself: the portal's name or link for the filing; the words net metering / export credit / retail provider for the program). If no page states it, "value": null and say what you searched in "notFound". Never answer from memory. Never guess.
 
-5. serviceArea — ONLY when the utility's own page says some locations in or near its area are served by ANOTHER utility (an overlapping or shared territory): {"value": {"sharedWith": ["<the other utility as named>"], "mapUrl": "<the page's service-area map, if it names one>"}, "sourceUrl": "", "quote": "<the words saying so>"}; null otherwise.
-4. fees — the utility's OWN fees for a residential application (an application / net-metering / meter fee), each {"value": {"label": "<as printed>", "amountUsd": <number>}, "sourceUrl": "", "quote": "<the printed words with the amount>"}; [] when no page prints one. reviewTime — the review / processing time the utility's page states ("up to 10 business days"), {"value": "<as printed>", "sourceUrl": "", "quote": ""}, or null.
-
 3. limits — ONLY where the program page or tariff you read states them for residential customers: "maxDcKw" / "maxAcKw" (the program's size cap in kW), "productionMeterRequired" (true when a separate production / generation meter is required), "installerCertification" ({"name": "<the certification>", "effectiveFrom": "YYYY-MM-DD" or ""}). Each as {"value": ..., "citation": {"sourceName": "<the page or tariff by name>", "sourceUrl": "", "quote": "<the exact words, containing the value>"}}. Leave out any limit no page states; {} when none.
+4. fees — the utility's OWN fees for a residential application (an application / net-metering / meter fee), ONE ENTRY PER PRINTED FEE: the fee every application owes under the name the page gives it, and each charge owed only in some cases (a return trip, a modification, a transfer of ownership, a study) as its own entry whose label names that case; a fee that depends on system size or application level is one entry per band, the band in its label. Each {"value": {"label": "<as printed>", "amountUsd": <number>}, "sourceUrl": "", "quote": "<the printed words with the amount>"}; [] when no page prints one. reviewTime — the review / processing time the utility's page states ("up to 10 business days"), {"value": "<as printed>", "sourceUrl": "", "quote": ""}, or null.
+5. serviceArea — ONLY when the utility's own page says some locations in or near its area are served by ANOTHER utility (an overlapping or shared territory): {"value": {"sharedWith": ["<the other utility as named>"], "mapUrl": "<the page's service-area map, if it names one>"}, "sourceUrl": "", "quote": "<the words saying so>"}; null otherwise.
 
 ${UTILITY_REQUIREMENTS_RESEARCH_RULE}
 
@@ -586,6 +590,8 @@ export interface UtilityFilingLookupRun {
   timedOut?: boolean;
   /** The application requirement items the lookup proposed, landed (utilityRequirementsResearch.ts). */
   requirements?: UtilityRequirementsLanding;
+  /** What became of the cited application fee: landed in the fee schedule, or held for a person. */
+  feeLanding?: UtilityFeeLanding;
 }
 
 /** The answer's filing member as the model wrote it (null when the text is not JSON). */
@@ -697,6 +703,8 @@ export async function runUtilityFilingLookup(
     ...(programName ? { programName } : {}),
     // A re-run that found none keeps the earlier cited fees / review time.
     ...(parsed.fees?.length ? { fees: parsed.fees } : existing?.fees?.length ? { fees: existing.fees } : {}),
+    // ...and the earlier fees' held-for-a-person list with them (a new set of fees is judged afresh below).
+    ...(!parsed.fees?.length && existing?.fees?.length && existing.feesHeld?.length ? { feesHeld: existing.feesHeld } : {}),
     ...(parsed.reviewTime?.value ? { reviewTime: parsed.reviewTime } : existing?.reviewTime?.value ? { reviewTime: existing.reviewTime } : {}),
     ...(parsed.serviceArea?.value ? { serviceArea: parsed.serviceArea } : existing?.serviceArea?.value ? { serviceArea: existing.serviceArea } : {}),
     lookedUpAt: new Date().toISOString(),
@@ -714,16 +722,32 @@ export async function runUtilityFilingLookup(
   // just saved (official only through #683's landing on bytes read here; never over a person's item).
   const requirements = save.saved && !ungrounded ? await landLookupRequirements(db, input, parsed.rawRequirements, seen, r.groundedSearches > 0) : undefined;
   if (requirements) parsed.dropped.push(...requirements.dropped);
+  // ONE STORE FOR FEES (fee round, 2026-11): the application fee this run cited lands in the fee
+  // schedule through saveFeeSchedule (seeded, never over a person's row), after Keelix re-reads its
+  // page. A fee the earlier row carried forward is not re-landed. What does not land is held for a person.
+  let feeLanding: UtilityFeeLanding | undefined;
+  if (save.saved && save.lookup && !ungrounded && parsed.fees?.length) {
+    try {
+      const { landUtilityLookupFees } = await import("./utilityFeeLanding");
+      const { utilityPersonVerifiedHosts } = await import("./utilityRequirements");
+      feeLanding = await landUtilityLookupFees(db, save.lookup, { reader: await getReader(), verifiedHosts: utilityPersonVerifiedHosts(db, input.state, input.utility) });
+      parsed.dropped.push(`utility fee: ${feeLanding.reason}`);
+    } catch (err) {
+      logger.warn("utility-filing", `could not land the utility fee for ${input.utility}: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
   // A REFUSED READ IS NOT SILENT (as the permit lookup, lookup-door-fixes 5): pages the reader was refused
   // are recorded on the row for a person's browser. The reader's one try and host back-off are unchanged.
   let lookup = save.lookup;
   const refused = (await import("./permitProcessLookup")).readsNeedingAPerson([...((reader ?? null)?.log ?? []), ...(requirements?.readLog ?? [])]);
-  if (save.saved && lookup && refused.length) {
-    const again = saveUtilityFilingLookup(db, { ...lookup, needsPersonRead: refused, confidence: "seeded" });
+  const feesHeld = feeLanding?.held ?? [];
+  if (save.saved && lookup && (refused.length || feesHeld.length)) {
+    const again = saveUtilityFilingLookup(db, { ...lookup, ...(refused.length ? { needsPersonRead: refused } : {}), ...(feesHeld.length ? { feesHeld } : {}), confidence: "seeded" });
     if (again.saved) lookup = again.lookup;
   }
   return { saved: save.saved, reason: r.error ? `${save.reason} (partial results kept after: ${r.error.slice(0, 120)})` : save.reason, lookup, grounded: r.groundedSearches, dropped: parsed.dropped,
     ...(requirements?.landing ? { requirements: requirements.landing } : {}),
+    ...(feeLanding ? { feeLanding } : {}),
     ...(r.error ? { error: r.error, timedOut } : {}) };
 }
 

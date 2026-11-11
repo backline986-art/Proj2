@@ -38,10 +38,10 @@ import { CONNECTOR_WORDS, DEPARTMENT_WORDS, GENERIC_ORG_WORDS, agencyNameKey, sa
 // permitProcess can ask the same question without importing this module back (a cycle).
 export { agencyNameKey, sameAgencyName };
 import { logger } from "./logger";
-import { feeScheduleProfileKey, saveFeeSchedule } from "./feeSchedules";
+import { bracketDescribesPercentOfCost, feeScheduleProfileKey, saveFeeSchedule } from "./feeSchedules";
 import { stateSurchargeRuleFor } from "./stateFeeRules";
 import { parseBracketRow } from "./pdfTables";
-import { candidateNamedBy, chooseRecordType, classifyDocument, DOCUMENT_URL, staleOrOtherFeeSource, detectPlatform, documentLinks, excerptFor, extractCodeEditions, extractPrerequisites, isAgencyOwnDomain, isAgencyOwnUrl, isOfficialAgencyHost, linksAnotherModule, platformOfUrl, readPortalCatalog, registrableDomain, resolvePortalFromPages, solarRecordTypeCandidates, tenantContradictsAgency, wordsNameAnotherJurisdiction, type PortalCatalog, type PortalResolution, type RecordTypeCandidate } from "./permitPlatformCatalog";
+import { candidateNamedBy, chooseRecordType, classifyDocument, datedFeeScheduleLinks, DOCUMENT_URL, staleOrOtherFeeSource, detectPlatform, documentLinks, excerptFor, extractCodeEditions, extractPrerequisites, isAgencyOwnDomain, isAgencyOwnUrl, isOfficialAgencyHost, linksAnotherModule, platformOfUrl, readPortalCatalog, registrableDomain, resolvePortalFromPages, solarRecordTypeCandidates, tenantContradictsAgency, wordsNameAnotherJurisdiction, type PortalCatalog, type PortalResolution, type RecordTypeCandidate } from "./permitPlatformCatalog";
 import { createPageReader, feeLinePrintedTogether, isRefusal, quoteOnPage, type PageReader, type ReadPage } from "./agencyPageReader";
 import { documentFetchDisabled } from "./documentFetch";
 import { classifyPrerequisites } from "./permitProcessPrerequisites";
@@ -818,6 +818,24 @@ function currentFeeSource(fee: CitedFact<PermitFeeAnswer>, gone: string[]): Cite
   return why ? { ...fee, value: null, notFound: `the cited source is ${why} — not this job's fee (${fee.sourceUrl})` } : fee;
 }
 
+/** A FORMULA IS NOT AN AMOUNT (Proj2 #150). Measured on a state's saved rule: its electrical permit
+ *  fee is "sixty dollars ($60) plus two percent (2%) of total wiring cost", and an answer giving that
+ *  sentence with a total of $60 was kept and landed as a flat $60 schedule, several times too low for
+ *  any real job. ONE predicate says what a share-of-cost formula is: the fee evaluator's own
+ *  (feeSchedules.bracketDescribesPercentOfCost, #692), so the lookup and the schedule cannot disagree
+ *  about the same sentence. Such a fee is not kept as a number at all: the citation stays on the
+ *  answer's notFound for a person to price (feeReadsForAPerson lists it), and nothing lands.
+ *  NOT YET (the second half of #150): landing it as a formula bracket. The evaluator can price a
+ *  percentage-of-cost bracket from its printed label, but a lookup answer quotes ONE clause, and one
+ *  band of a banded table landed alone would price every job on that band. A surcharge taken of the
+ *  PERMIT FEE is not a formula on cost; tiers by system size are not formulas. */
+export function formulaFeeNotANumber(fee: CitedFact<PermitFeeAnswer>): CitedFact<PermitFeeAnswer> {
+  if (!fee.value) return fee;
+  const words = `${fee.value.basis ?? ""} ${fee.quote ?? ""} ${fee.value.lines.map((l) => l.label ?? "").join(" ")}`;
+  if (!bracketDescribesPercentOfCost(words)) return fee;
+  return { ...fee, value: null, notFound: `the cited fee is a formula (a base plus a share of the job's cost), not an amount — not kept as a number; a person prices it from the job's cost: "${str(fee.quote).slice(0, 200)}" (${fee.sourceUrl})` };
+}
+
 /** A CITATION THE SERVER SAYS IS GONE IS NOT EVIDENCE (#560). Saratoga Springs, UT's documents list
  *  ("2 plan sets, a disk, 2014 NEC / 2015 I-codes") was cited to the city's retired solar PDF, a
  *  404 — and nothing ever looked. A documents list or a fee whose source page we read and found gone
@@ -877,7 +895,7 @@ export function parseDocsFeesPart(text: string, seenUrls: string[], stopReason: 
       // tie below then holds each amount to its own label on that page.
       supports: (v, q) => supportsAmount(v, q.replace(/\s+/g, " ")) || feeTableOnOurPage(v, q, pageTexts.get(pageKey(str((p.fee as RawFact)?.sourceUrl)))),
     });
-    out.set(discipline, { documents: onOurPage(refuseGoneCitation(documents, gone, "required documents"), pageTexts, "required documents"), fee: tiedFee(onOurPage(currentFeeSource(fee, gone), pageTexts, "fee"), pageTexts) });
+    out.set(discipline, { documents: onOurPage(refuseGoneCitation(documents, gone, "required documents"), pageTexts, "required documents"), fee: tiedFee(onOurPage(formulaFeeNotANumber(currentFeeSource(fee, gone)), pageTexts, "fee"), pageTexts) });
   }
   return { byDiscipline: out, problem: "" };
 }
@@ -895,6 +913,33 @@ export function readsNeedingAPerson(log: ReadonlyArray<{ url: string; ok: boolea
     out.push({ url: l.url, reason: reason.slice(0, 120) });
   }
   return out.slice(0, 10);
+}
+/** THE FEE PAGES A PERSON READS (fee round, 2026-11), beside the refused reads: a fee the answer
+ *  cited that the source door did not keep because its schedule is dated, archived or gone
+ *  (currentFeeSource words those), and the fee documents the agency's pages link that are dated or
+ *  came back unreadable (AgencyEvidence.feeLeads). A document whose fee WAS kept is never listed.
+ *  Never a number: the fee stays unknown until a person reads it or a current schedule is found. */
+export function feeReadsForAPerson(
+  permits: ReadonlyArray<{ discipline: string; fee: CitedFact<PermitFeeAnswer> }>,
+  leads: ReadonlyArray<{ url: string; reason: string }>,
+): Array<{ url: string; reason: string }> {
+  const kept = new Set(permits.filter((p) => p.fee?.value != null).map((p) => pageKey(p.fee.sourceUrl)));
+  const out: Array<{ url: string; reason: string }> = [];
+  const add = (url: string, reason: string) => {
+    if (!/^https?:\/\//i.test(url) || kept.has(pageKey(url)) || out.some((o) => pageKey(o.url) === pageKey(url))) return;
+    out.push({ url, reason: reason.slice(0, 200) });
+  };
+  for (const p of permits) {
+    const f = p.fee;
+    if (!f || f.value != null) continue;
+    const why = /the cited source is (.+?) — not this job's fee/.exec(str(f.notFound))?.[1]
+      ?? (/the cited schedule is no longer there/.test(str(f.notFound)) ? "no longer at its address" : "");
+    if (why && !/another permit kind/.test(why)) add(str(f.sourceUrl), `the ${p.discipline} fee was cited to this schedule, which is ${why}: Keelix does not rely on it`);
+    // A formula fee (formulaFeeNotANumber): the page is readable, the price is a person's to work out.
+    if (/^the cited fee is a formula/.test(str(f.notFound))) add(str(f.sourceUrl), `the ${p.discipline} fee is a formula on the job's cost, not an amount: a person prices it. Printed: "${str(f.quote).slice(0, 110)}"`);
+  }
+  for (const l of leads) add(l.url, l.reason);
+  return out.slice(0, 6);
 }
 /** The quote is on the page we read, and that page prints every line amount and the total. */
 export function feeTableOnOurPage(fee: PermitFeeAnswer, quote: string, pageText: string | undefined): boolean {
@@ -998,6 +1043,11 @@ export interface AgencyEvidence {
   /** Every link on a page we read (page -> href), the resolved portal's included: a page we read
    *  linking exactly a URL attests it (the one portal door, kind (b)). */
   agencyLinks: Array<{ page: string; href: string; printed?: boolean }>;
+  /** FEE DOCUMENTS FOUND AND NOT USABLE AS READ (fee round, 2026-11): a schedule the agency's page
+   *  links that is dated or archived, and a fee document that came back with nothing readable (a
+   *  spreadsheet, a scan, a failed read that was not a refusal). A person reads them; never a guess.
+   *  A REFUSED read is not here (readsNeedingAPerson lists those), nor a page that is gone. */
+  feeLeads?: Array<{ url: string; reason: string }>;
 }
 // A document URL (a PDF, a DocumentCenter / WebLink / eDoc view) is permitPlatformCatalog.DOCUMENT_URL —
 // ONE pattern (lookup-close-5: this file kept a narrower copy, DOC_URL).
@@ -1116,6 +1166,15 @@ export async function readAgencyEvidence(reader: PageReader, input: {
     return { page, kind: d.kind };
   }));
   const docs = docPages.filter((d) => d.page.ok && d.page.text).map((d) => ({ ...d, excerpt: excerptFor(d.page, d.kind) })).filter((d) => d.excerpt);
+  const feeLeads: Array<{ url: string; reason: string }> = datedFeeScheduleLinks(okPages, names, input.state);
+  for (const d of docPages) {
+    if (d.kind !== "fees") continue;
+    const pg = d.page;
+    const reason = !pg.ok
+      ? (pg.status === 404 || pg.status === 410 || isRefusal(pg.status, pg.reason) || /backed off/i.test(pg.reason) ? "" : `the fee schedule could not be read (${str(pg.reason).slice(0, 80)})`)
+      : !str(pg.text) || pg.kind === "other" ? "the fee schedule came back with no readable text (a scan or a spreadsheet)" : "";
+    if (reason && !feeLeads.some((l) => pageKey(l.url) === pageKey(pg.url))) feeLeads.push({ url: pg.url, reason });
+  }
 
   const prerequisites: CitedFact<string>[] = [];
   // A fee schedule prices steps; its "plan review" / "registration" rows are not steps to take — the
@@ -1164,7 +1223,7 @@ export async function readAgencyEvidence(reader: PageReader, input: {
   }
   // The resolver read the page that links the portal it resolved (a hop page is not in okPages).
   if (portal) agencyLinks.push({ page: portal.sourceUrl, href: portal.url });
-  return { agencyDomain, pages, portal, platformPages: [...new Set(platformPages)], platformReads, docs, prerequisites: prerequisites.slice(0, 6), codes, seen: [...new Set(seen)], pageTexts, gone, agencyLinks };
+  return { agencyDomain, pages, portal, platformPages: [...new Set(platformPages)], platformReads, docs, prerequisites: prerequisites.slice(0, 6), codes, seen: [...new Set(seen)], pageTexts, gone, agencyLinks, ...(feeLeads.length ? { feeLeads } : {}) };
 }
 
 /** THIS AHJ'S OWN KB EVIDENCE for the portal door: the portals its permit_utility_knowledge rows
@@ -1756,6 +1815,8 @@ export async function runPermitProcessLookup(
   const merged = withoutGoneCitations(mergeWithEarlier(existing, { issuingAgency, permitStructure: part1.permitStructure, permits },
     (d, earlierPortal) => acceptPortalForPermit({ value: earlierPortal.value, sourceUrl: earlierPortal.sourceUrl, quote: earlierPortal.quote }, "process part", doorContextFor(d, { seen: [], platformPages: [] })),
     (d, earlierRecordType, portalUrl) => recordTypeBelongsToPortal(earlierRecordType, portalUrl, rtCtx(d))), gone);
+  const feeReadsForPerson = feeReadsForAPerson(merged.permits, ev?.feeLeads ?? []);
+  for (const r of feeReadsForPerson) notes.push(`Fee needs a person to read: ${r.url} (${r.reason})`);
   const res = savePermitProcessLookup(db, {
     state: input.state, ahj: input.ahj, lookedUpAt: new Date().toISOString(),
     issuingAgency: merged.issuingAgency, permitStructure: merged.permitStructure, permits: merged.permits, notes,
@@ -1777,6 +1838,7 @@ export async function runPermitProcessLookup(
     ...(part1.reviewTime?.value ? { reviewTime: part1.reviewTime } : existing?.reviewTime?.value ? { reviewTime: existing.reviewTime } : {}),
     ...(reader ? { pagesRead: reader.log.map((l) => ({ url: l.url, ok: l.ok, reason: l.reason.slice(0, 160) })) } : {}),
     ...(needsPersonRead.length ? { needsPersonRead } : {}),
+    ...(feeReadsForPerson.length ? { feeReadsForPerson } : {}),
   });
   if (res.saved && res.lookup) {
     try { applyLookupFees(db, res.lookup); } catch (err) { logger.warn("permit-process", `fee landing failed: ${err instanceof Error ? err.message : String(err)}`); }
@@ -1836,7 +1898,7 @@ export function mergeWithEarlier(
     const carryType = !p.recordType.value && Boolean(b.recordType.value) && belongs(p.discipline, b.recordType, portalUrl.value);
     return {
       ...p, issuingAgency: keep(p.issuingAgency, b.issuingAgency), portalUrl,
-      recordType: carryType ? b.recordType : p.recordType, documents: keep(p.documents, b.documents), fee: keep(p.fee, b.fee),
+      recordType: carryType ? b.recordType : p.recordType, documents: keep(p.documents, b.documents), fee: keep(p.fee, formulaFeeNotANumber(b.fee)),
       ...(channelNow.channel ? { channel: channelNow.channel } : {}),
       ...(channelNow.alternateChannels?.length ? { alternateChannels: channelNow.alternateChannels } : {}),
     };
@@ -1957,7 +2019,7 @@ export function applyLookupFees(db: AppDb, lookup: PermitProcessLookup): Array<{
     // With a cited surcharge the evaluator adds it, so the bracket is the ONE printed base line; a
     // total (which may already include the surcharge) would count it twice.
     const flatUsd = surcharge ? (baseLine?.amountUsd ?? null) : fee.value.amountUsd;
-    if (!tiers.length && (flatUsd == null || RATED_FEE.test(`${fee.value.basis} ${fee.quote}`))) {
+    if (!tiers.length && (flatUsd == null || RATED_FEE.test(`${fee.value.basis} ${fee.quote}`) || bracketDescribesPercentOfCost(`${fee.value.basis} ${fee.quote}`))) {
       out.push({ discipline: permit.discipline, saved: false, reason: flatUsd == null ? "no stated total for this permit — not landed as a flat fee" : "priced by valuation or a rate — not a flat fee" });
       continue;
     }
@@ -1970,7 +2032,8 @@ export function applyLookupFees(db: AppDb, lookup: PermitProcessLookup): Array<{
     const r = saveFeeSchedule(db, { state: lookup.state, ahj: owner, track: "permit", discipline: permit.discipline }, {
       found: true, reason: "", basis: tiers.length ? "system_kw" : "flat", brackets, sourceUrl: fee.sourceUrl, sourceQuote: fee.quote, sourceKind: "official",
       notes: `Per-job lookup (seeded): ${fee.value.basis}`.slice(0, 400),
-    }, surcharge ? { citedStateSurcharge: surcharge } : {});
+      // The read date the fee quote shows beside the source: the lookup's own run time.
+    }, { ...(surcharge ? { citedStateSurcharge: surcharge } : {}), fetchedAt: lookup.lookedUpAt });
     out.push({ discipline: permit.discipline, saved: r.saved, reason: r.reason ?? "" });
   }
   return out;
