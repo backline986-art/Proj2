@@ -4155,7 +4155,7 @@ export class AutoLearnAdapter extends BasePortalAdapter {
           filled.push(slot.label);
           alreadyFilledLabels.push(slot.label);
         }
-        await this.fillUploadDescription(slot.key, resolved.docType, steps, alreadyFilledLabels);
+        await this.fillUploadDescription(slot.key, resolved.docType, steps, alreadyFilledLabels).catch(() => null);
       } else if (rejected) {
         this.debug?.event({ type: "upload_rejected", label: (slot.label || "").slice(0, 80), docType: resolved.docType, message: rejected.slice(0, 160) });
         // Only a REQUIRED slot's rejection blocks; an optional slot's is informational.
@@ -4222,7 +4222,8 @@ export class AutoLearnAdapter extends BasePortalAdapter {
       }
       return null;
     }, slotKey).catch(() => null) as { id: string; tag: string; name: string; placeholder: string; ariaLabel: string } | null;
-    if (!found) return;
+    // Only the shape this callback returns counts as a box (a stub or a navigated page answers otherwise).
+    if (!found || typeof found !== "object" || Array.isArray(found) || typeof found.tag !== "string" || typeof found.name !== "string") return;
     const value = AutoLearnAdapter.uploadDescriptionFor(docType);
     const ok = await this.page.locator("[data-al-upl-desc]").first().fill(value, { timeout: 4000 }).then(() => true).catch(() => false);
     this.debug?.event({ type: "upload_description", ok, docType, label: found.name.slice(0, 80) });
