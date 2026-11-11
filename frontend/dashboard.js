@@ -7119,12 +7119,21 @@ async function secondStageAction(type, action, btn) {
     shot = field("screenshot")?.files?.[0] || null;
   }
   if (!confirm(SECOND_STAGE_ASK[action])) return;
-  body.by = String(prompt("Your name, recorded with this:") || "").trim();
+  // WHO: the signed-in person when sign-in is on (the server takes the session, never a typed name);
+  // otherwise the name asked for here, as Approve & auto-submit asks. No name, nothing recorded.
+  const auth = await authForDecision();
+  if (!(auth && auth.enabled)) {
+    let last = "";
+    try { last = localStorage.getItem(APPROVER_NAME_KEY) || ""; } catch { last = ""; }
+    body.by = String(prompt("Your name, recorded with this:", last) || "").trim();
+    if (!body.by) { showMessage("Nothing was recorded: this is recorded under a person's name.", "warning"); return; }
+    try { localStorage.setItem(APPROVER_NAME_KEY, body.by); } catch { /* per-viewer convenience only */ }
+  }
   if (btn) btn.disabled = true;
   const base = `/api/projects/${state.selectedProjectId}/submittal-tracks/${encodeURIComponent(type)}/second-stage`;
   try {
     if (shot) {
-      const up = await fetch(`${base}/screenshot?by=${encodeURIComponent(body.by)}`, { method: "POST", headers: { "Content-Type": shot.type || "image/png" }, body: shot });
+      const up = await fetch(`${base}/screenshot${body.by ? `?by=${encodeURIComponent(body.by)}` : ""}`, { method: "POST", headers: { "Content-Type": shot.type || "image/png" }, body: shot });
       if (!up.ok) throw new Error((await up.json().catch(() => ({}))).error || "The screenshot could not be saved.");
     }
     const res = await api(`${base}/${action}`, { method: "POST", body: JSON.stringify(body) });

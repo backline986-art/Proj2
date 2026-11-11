@@ -21,7 +21,7 @@ import { nowIso } from "./time";
 import { randomUUID } from "node:crypto";
 import { AWAITING_PAYMENT, usd } from "./feePause";
 import { billingTrack, recordActualPermitFee } from "./submissionFees";
-import { markTrackFirstStage, markTrackSubmitted, requiredTracks, trackFeeDue, trackHasSecondStage, trackPermitTypes } from "./submittalTracks";
+import { markTrackFirstStage, markTrackSubmitted, requiredTracks, secondStageHold, trackFeeDue, trackPermitTypes } from "./submittalTracks";
 import { paidConfirmationUrl, trackConfirmationView } from "./submissionConfirmation";
 
 type Row = Record<string, unknown>;
@@ -126,7 +126,8 @@ export function markTrackPaid(
   // second system after the fee, paying does NOT file. The application is recorded as waiting on its
   // second stage (the run that waited is closed the same way), and the track is filed only when a
   // person marks the plan upload done.
-  const twoStage = kind === "filing" && trackHasSecondStage(db, project, type);
+  // (A track that filed before anyone confirmed the stage owes nothing, and files as ever.)
+  const twoStage = kind === "filing" && secondStageHold(db, project, type)?.owed === "application";
   if (twoStage) {
     markTrackFirstStage(db, project, type, {
       recordNumber, by: paidBy, via: "paid",

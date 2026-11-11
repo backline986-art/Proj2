@@ -51,7 +51,7 @@ const NAMES = [
   // The permit card's issuer line and its set/clear control (split issuer) — trackCardHtml calls both.
   "TRACK_ISSUER_KEY", "TRACK_ISSUER_SOURCE", "trackIssuerHtml", "trackIssuerEditHtml", "saveTrackIssuer",
   // What the recipe will fill that the job has no value for (#445) — trackCardHtml calls it.
-  "FEE_RESPONSIBILITY_TEXT", "trackPaymentHtml", "trackPaidFormHtml", "trackFeeDueHtml", "STAGE_GAP_LINK", "trackStageGapsHtml",
+  "FEE_RESPONSIBILITY_TEXT", "trackPaymentHtml", "trackPaidFormHtml", "trackFeeDueHtml", "trackSecondStageHtml", "STAGE_GAP_LINK", "trackStageGapsHtml",
   "trackCardHtml", "utilityGroupTitle",
   // The job's permit-process / utility-filing row above each group (#695); with no window.LookupVerify it draws nothing.
   "trackLookupHtml",

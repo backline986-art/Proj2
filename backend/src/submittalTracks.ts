@@ -1566,8 +1566,8 @@ export function secondStageHold(
   };
 }
 
-/** Does this track's agency have a person-verified second stage (secondStage.trackSecondStage)? The
- *  one question Paid asks before it decides what a payment at the fee stop means. */
+/** Does this track's agency have a person-verified second stage (secondStage.trackSecondStage)?
+ *  Yes/no only: a door deciding what to do asks secondStageHold above. */
 export function trackHasSecondStage(db: AppDb, project: ProjectRecord, type: SubmittalTrackType): boolean {
   return Boolean(trackSecondStage(db, project, type));
 }

@@ -22,7 +22,8 @@
 //   INVITE      the email the tracker places on the job (by the application number) is shown on the
 //               track; next step `second_stage_upload`. Its link on a host that is not this agency's
 //               person-verified permit portal is HIDDEN (host and reason only); a link on that portal
-//               is shown. A utility portal and an information page never fit. An email older than
+//               is shown. A utility portal and an information page never fit, and where nobody has
+//               verified the agency's portal no emailed link is shown at all. An email older than
 //               the application is not its invite. Nothing opens any of it.
 //   MARK        a named person marks the upload done with the confirmation number or a screenshot
 //               (PNG/JPEG by its bytes): audited, and only then is the track filed (submission
@@ -30,7 +31,7 @@
 //   PIN         a single-stage agency is unchanged: Paid files, an approved run is allowed.
 //
 // KILL TESTS (each run against the mutated source, then restored):
-//   K1 trackPaid: drop the `twoStage` branch (always markTrackSubmitted) → FEE STOP → PAID fails.
+//   K1 trackPaid: make `twoStage` always false (Paid always files) → FEE STOP → PAID fails.
 //   K2 submittalTracks.markTrackSubmitted: drop the secondStageHold refusal → DOORS ("I submitted it") fails.
 //   K3 secondStage.noteSecondStageInvite: show the first link without inviteLinkFit → INVITE (hidden) fails.
 //   K4 secondStage.beginSecondStageUpload: drop the confirmation-or-screenshot check → MARK fails.
@@ -368,6 +369,11 @@ await check("INVITE: a link on the agency's own person-verified permit portal is
   assert.equal(inv.linkHidden, undefined);
   assert.match(permitFiled(j4).detail, /^Application made\. /, "made by hand: the client is not told a fee was paid");
   assert.equal(ss.inviteLinkFit(db, p, "building", "https://twostep.powerclerk.com/MvcAccount/Login").fits, false, "a utility interconnection portal on a permit track");
+  // An agency whose permit portal nobody has verified: there is nothing to hold an emailed link
+  // against, so none is shown, not even one on the portal its own row names.
+  const unverified = ss.inviteLinkFit(db, project(newJob(MUMBLE)), "building", "https://permits.mumbleton.example.gov/upload");
+  assert.equal(unverified.fits, false);
+  assert.match(unverified.reason, /no person has verified where City of Mumbleton takes permit applications/);
   assert.equal(ss.inviteLinkFit(db, p, "building", "https://www.twostep.example.gov/docs/how-to-upload.pdf").fits, false, "an information page");
 });
 

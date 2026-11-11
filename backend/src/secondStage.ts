@@ -443,12 +443,20 @@ export function linksIn(text: string): string[] {
 /** May this link be SHOWN on this track? Rule 5's one predicate for a permit track and the agency
  *  that issues it, with the email treated as the weakest source there is ("research"): a utility's
  *  portal, another agency's portal, a host that is not the portal a person verified for this agency,
- *  and an information page are all refused. Shown is all it ever is: nothing opens it. */
+ *  and an information page are all refused. AND, stricter than the predicate alone: an email is a
+ *  third party's text placed on the job by a match, so where NO person has verified this agency's
+ *  permit portal there is nothing to hold its link against and it is not shown at all (the predicate
+ *  would pass any host no record claims). So a link that is shown always sits on the host a person
+ *  verified for this agency. Shown is all it ever is: nothing opens it. */
 export function inviteLinkFit(db: AppDb, project: ProjectRecord, track: string, url: string): { fits: boolean; host: string; reason: string } {
   const view = stageProject(project, track) ?? project;
   const entity = portalEntityEvidence(db, { scope: "ahj", state: view.state, name: view.ahj });
   const fit = hostFitsTrackAndEntity(track, entity, url, "research");
-  return { fits: fit.fits, host: portalHostOf(url), reason: fit.reason };
+  const host = portalHostOf(url);
+  if (fit.fits && !(entity?.verifiedPortals ?? []).length) {
+    return { fits: false, host, reason: `no person has verified where ${s(view.ahj).trim() || "this agency"} takes permit applications, so a link from an email is not shown` };
+  }
+  return { fits: fit.fits, host, reason: fit.reason };
 }
 
 /** The jobs whose application waits on a plan-upload invite that is not on file yet (every org:
