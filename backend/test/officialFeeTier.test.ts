@@ -30,6 +30,7 @@
 //   K9  the official words reading "verified by"                                        → (B1).
 //   K10 the state surcharge the quote adds not asked about                              → (G1).
 //   K11 a charge outside the lines needing no official quote                            → (E1).
+//   K12 a charge outside the lines vouched by any words, not by its own printed amount  → (E1).
 //
 // Run: npx tsx backend/test/officialFeeTier.test.ts
 import "./_isolate"; // FIRST
@@ -233,6 +234,9 @@ await check("(E1) a total with one official line and one seeded line is seeded; 
   const extra = { label: "Plan review", kind: "plan_review", amountUsd: 30, partOfLineFee: false, conditional: false, reason: "", quote: "", sourceUrl: GOV };
   assert.equal(fees.officialFeeResolutionSource({ feeUsd: 124, lines: [mk({})], charges: [extra], valuationEstimated: false } as never, "permit", none), null, "another charge in the total with no printed row");
   assert.ok(fees.officialFeeResolutionSource({ feeUsd: 124, lines: [mk({})], charges: [{ ...extra, quote: "Plan review | $30.00" }], valuationEstimated: false } as never, "permit", none));
+  const withCharge = (quote: string) => fees.officialFeeResolutionSource({ feeUsd: 124, lines: [mk({})], charges: [{ ...extra, quote }], valuationEstimated: false } as never, "permit", none);
+  assert.equal(withCharge("A plan review fee applies to every permit application"), null, "words on the official page that print no amount do not vouch for $30");
+  assert.equal(withCharge("Plan review | $45.00"), null, "a printed row for another amount does not vouch for $30");
 });
 
 // ── F. A lookup's own landing earns it the same way ─────────────────────────────────────────────

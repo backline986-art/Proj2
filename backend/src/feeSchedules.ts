@@ -2412,7 +2412,9 @@ export function officialFeeResolutionSource(
     if (c.partOfLineFee || c.amountUsd == null) continue;
     const short = citationShortfalls({
       sourceUrl: clean(c.sourceUrl), quote: c.quote, fetchedAt: officials[0].fetchedAt, verifiedAuthorityHosts: allHosts,
-      quoteStatesValue: (q) => q.length >= 3,
+      // THE SAME BAR A LINE MEETS (Helm, PR #157): the charge's own printed words must state ITS
+      // amount. A charge whose quote prints no amount, or another amount, leaves the total seeded.
+      quoteStatesValue: (q) => quoteNamesValue(q, c.amountUsd as number),
     });
     if (short.reasons.length) return null;
   }
