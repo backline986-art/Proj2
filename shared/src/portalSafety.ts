@@ -1776,12 +1776,6 @@ export function portalSafetyFactory() {
     const reviewPage = reviewPageInPage();
     if (form && reviewPage === true) return "this page names itself the review step — Enter in its form would submit it";
     const readOnlyPage = readOnlyPageInPage();
-    // A TERMINAL PAGE (#139 fix round, the replay click gate's own rule 3): read-only and showing a
-    // filing-shaped control. Enter in a form there is refused whatever its default button says.
-    if (form && readOnlyPage === true) {
-      const t = terminalPageInPage();
-      if (t.filingControl) return `the page is read-only and shows the filing control "${String(t.filingControl).slice(0, 40)}" — Enter in its form could move past it`;
-    }
     const ctx: ControlContext = { reviewPage: reviewPage === false ? false : undefined, readOnlyPage };
     // THE SCOPE IS ALWAYS THE PAGE (close3 skeptic MF1, enterFormScope). A document keydown maps
     // Enter to ANY control whatever form the box sits in: a type=search header box inside its

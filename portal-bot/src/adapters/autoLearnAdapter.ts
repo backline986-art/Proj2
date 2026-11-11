@@ -10852,7 +10852,7 @@ export class AutoLearnAdapter extends BasePortalAdapter {
     // THE LEARNER'S ENTER DOOR (#139 fix round), the one its own Enter fallback goes through
     // (pressEnterInLastFilledField): the shared enterRefusalInPage — which judges the form's default
     // button by the click gate's label rules (fee, submit / filing, signature request, a filing
-    // action, a review or read-only terminal page) and every control Enter can reach — asked in the
+    // action, a page naming itself the review step) and every control Enter can reach — asked in the
     // box's own frame, the refusal recorded as that door records it (and in the box's miss line).
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const enterGate = async (box: any): Promise<string> => {
