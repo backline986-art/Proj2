@@ -363,6 +363,29 @@ const cityViewLogon = (path: string, opts: { collapsed?: boolean; nativeSubmit?:
   </script>
 </body></html>`;
 };
+// (M) THE ASP.NET WHOLE-PAGE FORM (eTRAKiT-shaped). ONE <form> wraps the page; the login control
+// is <input type="button" value="Login"> with a postback handler, and a stray native submit
+// ("Go") follows the password with nothing typeable between. Form ownership alone would pick
+// "Go"; a wordless native submit is trusted only when the form offers no login-worded control.
+const MEGAFORM_LOGIN = `<!doctype html><html><head><title>Portal Login</title></head><body>
+  <form id="aspnetForm" action="/etrakit/search" method="post">
+    <div id="header"><span>Welcome</span></div>
+    <table><tr><td>User Name:</td><td><input type="text" id="ucLogin_txtLoginId" name="ucLogin$txtLoginId"></td></tr>
+    <tr><td>Password:</td><td><input type="password" id="ucLogin_txtPassword" name="ucLogin$txtPassword"></td></tr></table>
+    <input type="button" id="ucLogin_btnLogin" name="ucLogin$btnLogin" value="Login">
+    <div id="quicknav"><input type="submit" id="go" name="go" value="Go"></div>
+  </form>
+  <script>
+    window.__clicks = [];
+    document.addEventListener("click", function (e) {
+      var el = e.target && e.target.closest ? e.target.closest("input, button, a") : null;
+      if (el) window.__clicks.push(el.tagName + (el.id ? "#" + el.id : ""));
+    }, true);
+    document.getElementById("ucLogin_btnLogin").onclick = function () {
+      if (document.getElementById("ucLogin_txtPassword").value) location.href = "/cv/home";
+    };
+  </script>
+</body></html>`;
 const CV_SIGNED_IN = `<!doctype html><html><head><title>My Items | City Portal</title></head><body>
   <a href="/Portal/Account/LogOff">Log Off</a><h1>My Items</h1><p>You have no applications.</p>
 </body></html>`;
@@ -416,6 +439,8 @@ const server = http.createServer((q, r) => {
   r.writeHead(200, { "Content-Type": "text/html" });
   if (cv) { r.end(cityViewLogon(path, cv)); return; }
   if (path === "/cv/home") { r.end(CV_SIGNED_IN); return; }
+  if (path === "/etrakit/login") { r.end(MEGAFORM_LOGIN); return; }
+  if (path === "/etrakit/search") { r.end("<html><head><title>Search</title></head><body><h1>Search results</h1><p>Nothing found.</p></body></html>"); return; }
   r.end(routes[path] ?? "<html><body>?</body></html>");
 });
 await new Promise<void>((r) => server.listen(0, "127.0.0.1", () => r()));
@@ -684,6 +709,19 @@ await check("an aria-less <div role=button> heading that hides the panel, no nat
     assert.equal(res.detail?.posted, false);
     assert.equal(res.detail?.clicked?.tag, "div");
     assert.equal(loginWasRefused(res.message), false, "a form that never posted says nothing about the password — it must not mark the credential stale");
+  } finally { await p.close(); }
+});
+
+await check("ASP.NET whole-page form: the login-worded input[type=button] beats a stray native 'Go' submit after the password", async () => {
+  const p = await context.newPage();
+  try {
+    await p.goto(`http://127.0.0.1:${port}/etrakit/login`);
+    const res = await performLogin(p, cred);
+    const clicks = await cvClicks(p);
+    // Asserted FIRST: "Go" navigates off the login page, which the poll would read as a session.
+    assert.equal(res.detail?.clicked?.id, "ucLogin_btnLogin", `the wrong control was clicked (clicks: ${clicks.join(", ")}; got ${JSON.stringify(res.detail?.clicked)}): ${res.message}`);
+    assert.equal(clicks.some((c) => /#go$/.test(c)), false, `the stray submit was clicked: ${clicks.join(", ")}`);
+    assert.equal(res.status, "logged_in", `got ${res.status}: ${res.message}`);
   } finally { await p.close(); }
 });
 

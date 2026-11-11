@@ -855,16 +855,30 @@ async function ownFormSubmit(passLoc: Locator): Promise<Locator | null> {
         });
         const after = (el: Element) => (pw.compareDocumentPosition(el) & Node.DOCUMENT_POSITION_FOLLOWING) !== 0;
         const closes = (el: Element) => after(el) && !typeable.some((f) => f !== pw && after(f) && (f.compareDocumentPosition(el) & Node.DOCUMENT_POSITION_FOLLOWING) !== 0);
-        const typed: number[] = [];
+        // The control's own words — read in-page for the test only; a value never leaves.
+        const own = (el: Element) => String((el as HTMLElement).innerText || (el as HTMLInputElement).value || el.getAttribute("aria-label") || el.getAttribute("title") || "").replace(/\s+/g, " ").trim();
+        const shown = (el: Element) => { const r = (el as HTMLElement).getBoundingClientRect(); return r.width > 0 && r.height > 0 && !(el as HTMLButtonElement).disabled && !el.matches(a.disc); };
+        const typedWorded: number[] = [];
+        const typedWordless: number[] = [];
         const worded: number[] = [];
         for (let i = 0; i < all.length; i++) {
           const el = all[i] as HTMLElement;
-          const r = el.getBoundingClientRect();
-          if (r.width <= 0 || r.height <= 0 || (el as HTMLButtonElement).disabled || el.matches(a.disc) || !closes(el)) continue;
-          if ((el.getAttribute("type") || "").toLowerCase() === "submit" || el.tagName === "INPUT") typed.push(i);
-          else if (word.test(String(el.innerText || el.getAttribute("aria-label") || "").replace(/\s+/g, " "))) worded.push(i);
+          if (!shown(el) || !closes(el)) continue;
+          const hasWord = word.test(own(el));
+          if ((el.getAttribute("type") || "").toLowerCase() === "submit" || el.tagName === "INPUT") (hasWord ? typedWorded : typedWordless).push(i);
+          else if (hasWord) worded.push(i);
         }
-        return typed.concat(worded);
+        // A WORDLESS native submit is trusted only when the form offers no login-worded control
+        // at all. Accela's login is an anchor (#hlLogin), eTRAKiT's an input[type=button] — both
+        // inside an ASP.NET whole-page form where a stray "Go" submit can follow the password.
+        // Where a login-worded control exists, the ordered candidate list decides, as it always
+        // did. Bend's only worded control is the disclosure legend, which does not count.
+        const ranked = typedWorded.concat(worded, typedWordless);
+        if (ranked.length && ranked[0] === typedWordless[0]) {
+          const controls = Array.from(form.querySelectorAll("a, button, [role='button'], input[type='button'], input[type='submit'], input[type='image']"));
+          if (controls.some((el) => shown(el) && word.test(own(el)))) return [];
+        }
+        return ranked;
       }, { sub: NATIVE_SUBMIT_SELECTOR, disc: DISCLOSURE_TOGGLE_SELECTOR, word: LOGIN_WORD_SOURCE }, { timeout: ELEMENT_READ_TIMEOUT_MS });
     const all = form.locator(NATIVE_SUBMIT_SELECTOR);
     for (const i of ranked.slice(0, MAX_CANDIDATE_SCAN)) {
@@ -899,6 +913,19 @@ async function describeControl(loc: Locator): Promise<ClickedControl | undefined
   } catch {
     return undefined;
   }
+}
+
+/** The text with the submitted username replaced by a placeholder — case-insensitive indexOf on
+ *  the whole username, never a regex built from it (emails carry `.` and `+`). */
+function withoutUsername(text: string, username: string): string {
+  const u = String(username || "").trim();
+  if (u.length < 4) return text;
+  let out = text;
+  const low = u.toLowerCase();
+  for (let at = out.toLowerCase().indexOf(low); at >= 0; at = out.toLowerCase().indexOf(low)) {
+    out = `${out.slice(0, at)}<username>${out.slice(at + u.length)}`;
+  }
+  return out;
 }
 
 /** aria-expanded now, or null when the control is gone/unreadable (bounded). */
@@ -1763,6 +1790,10 @@ export async function performLogin(
     const loginUrl: string = typeof page.url === "function" ? page.url() : "";
     const submitLoc = (await ownFormSubmit(passLoc)) ?? (await firstVisible(page, SUBMIT_CANDIDATES, { clickable: true, submit: true }));
     const detail: LoginDetail = { submittedVia: "button" };
+    // The portal's ANSWER is text that was not there before the submit: a standing notice
+    // ("accounts are locked after 5 failed attempts") must not read as a refusal on a path that
+    // never posted. Read once now, compared at step 8.
+    const bannerBefore = await loginRefusalBanner(page);
     // DID ANYTHING LEAVE THE BROWSER? A posted form sends a non-GET or navigates; a click that
     // only toggled a panel sends nothing. Read off the page's requests, never off the DOM.
     let posted = false;
@@ -1883,7 +1914,9 @@ export async function performLogin(
     // Only on this portal: a hand-off to ANOTHER origin's login that happens to say "try
     // again" is never this credential's answer (the /idp-redirect pin).
     const sameOrigin = (() => { try { return new URL(endUrl).origin === new URL(loginUrl).origin; } catch { return endUrl === loginUrl; } })();
-    const banner = sameOrigin ? await loginRefusalBanner(page) : "";
+    const bannerNow = sameOrigin ? await loginRefusalBanner(page) : "";
+    // Never the username (a banner may echo it: "x@y is not recognised") — the module's own norm.
+    const banner = bannerNow && bannerNow !== bannerBefore ? withoutUsername(bannerNow, credential.username) : "";
     if (banner) {
       return {
         ok: false,
