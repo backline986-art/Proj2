@@ -3614,6 +3614,66 @@ const VERSIONED_MIGRATIONS: VersionedMigration[] = [
       addColumnIfMissing(db, "clients", "service_area_json", "TEXT NOT NULL DEFAULT '[]'");
     },
   },
+  {
+    // v84 (two-stage permit filings, #28 part 1): v81 and v82 are in Helm's merge queue (#99, #118)
+    // and v83 is reserved for #116, so this takes the next free number. Nothing depends on the number.
+    version: 84,
+    name: "permit_second_stages",
+    up: (db) => {
+      // (a) THE SECOND STAGE A PERSON CONFIRMED FOR AN ISSUING AGENCY (secondStage.ts): after the
+      //     application and its fee, the plans go into another system the agency opens with an invite.
+      //     SHARED per-agency process knowledge, like permit_process_lookups (an agency's process
+      //     learned once serves every tenant; it holds no job, client or homeowner data). Written ONLY
+      //     by a named person's Confirm (rule 3: a seeded or cited description never lands here by
+      //     itself). One row per (state, agency). It names a system, never an address: no door.
+      // (b) ONE JOB'S PROGRESS THROUGH IT: a child row of the project (org reached through the
+      //     project, rule 6). first_stage_*: the application a person recorded (Paid at the fee stop,
+      //     or made by hand). invite_*: the agency's invite email once the filings inbox matches it;
+      //     invite_link is kept only when its host passed rule 5's predicate at match time, and is
+      //     judged again at every read. uploaded_*: the named person's mark that the plans went in;
+      //     screenshot_path: that person's own picture of the confirmation (staff-only route).
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS permit_second_stages (
+          id TEXT PRIMARY KEY,
+          state TEXT NOT NULL,
+          agency_key TEXT NOT NULL,
+          agency TEXT NOT NULL DEFAULT '',
+          system_name TEXT NOT NULL,
+          trigger_text TEXT NOT NULL DEFAULT '',
+          source_url TEXT NOT NULL DEFAULT '',
+          quote TEXT NOT NULL DEFAULT '',
+          verified_by TEXT NOT NULL,
+          verified_at TEXT NOT NULL,
+          UNIQUE (state, agency_key)
+        );
+        CREATE TABLE IF NOT EXISTS track_second_stages (
+          id TEXT PRIMARY KEY,
+          project_id TEXT NOT NULL,
+          track TEXT NOT NULL,
+          submission_id TEXT NOT NULL DEFAULT '',
+          system_name TEXT NOT NULL DEFAULT '',
+          first_stage_at TEXT NOT NULL,
+          first_stage_number TEXT NOT NULL DEFAULT '',
+          first_stage_by TEXT NOT NULL DEFAULT '',
+          first_stage_via TEXT NOT NULL DEFAULT '',
+          invite_signature TEXT NOT NULL DEFAULT '',
+          invite_subject TEXT NOT NULL DEFAULT '',
+          invite_from TEXT NOT NULL DEFAULT '',
+          invite_received_at TEXT NOT NULL DEFAULT '',
+          invite_link TEXT NOT NULL DEFAULT '',
+          invite_link_hidden_host TEXT NOT NULL DEFAULT '',
+          invite_link_hidden_why TEXT NOT NULL DEFAULT '',
+          uploaded_at TEXT NOT NULL DEFAULT '',
+          uploaded_by TEXT NOT NULL DEFAULT '',
+          confirmation_number TEXT NOT NULL DEFAULT '',
+          screenshot_path TEXT NOT NULL DEFAULT '',
+          created_at TEXT NOT NULL,
+          UNIQUE (project_id, track),
+          FOREIGN KEY (project_id) REFERENCES projects(id)
+        );
+      `);
+    },
+  },
 ];
 
 /** v47 was edited in place while #218 was open (Helm's review at 0116f98a): a DB that ran an earlier

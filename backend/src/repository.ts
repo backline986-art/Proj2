@@ -130,7 +130,7 @@ import { isPortalPaused } from "./portalPause";
 // The ONE creator of permit_check_targets rows (extracted from markTrackSubmitted).
 // Direction matters: submittalTracks must never import repository — jobQueue statically
 // imports repository, and the circular-import guard in CLAUDE.md is about that edge.
-import { ensureCheckTarget, refuseUtilityUrlOnPermitTarget, getSubmittalTracks, isTrackDone, personVerifiedFilingDoor, requiredTracks, SUBMITTAL_TRACK_TYPES, trackHasFiling, trackPermitTypes, trackSubmittedAndTracked, trackSubmittedSentence, unfinishedTracks, unfinishedUnattributedTargets, withPermitStageSentence } from "./submittalTracks";
+import { ensureCheckTarget, refuseUtilityUrlOnPermitTarget, getSubmittalTracks, isTrackDone, markTrackFirstStage, personVerifiedFilingDoor, requiredTracks, secondStageHold, SUBMITTAL_TRACK_TYPES, trackHasFiling, trackPermitTypes, trackSubmittedAndTracked, trackSubmittedSentence, unfinishedTracks, unfinishedUnattributedTargets, withPermitStageSentence } from "./submittalTracks";
 import { nemTrackDropFor } from "./utilityStorageModes";
 import { nemFiledWithPermit } from "./utilityFilingLookup";
 import { recordStagedReview, supersedeStagedReviews, takeStagedReviewCapture } from "./stagedReviews";
@@ -1608,6 +1608,8 @@ export function deleteProject(db: AppDb, projectId: string): { deleted: true; pr
     db.run("DELETE FROM fee_quote_snapshots WHERE project_id = ?", [projectId]);
     // A person's "Paid" records (migration v62, #576) carry the same FK.
     db.run("DELETE FROM track_fee_payments WHERE project_id = ?", [projectId]);
+    // A two-stage filing's per-job progress (migration v84, #28) carries the same FK.
+    db.run("DELETE FROM track_second_stages WHERE project_id = ?", [projectId]);
     // Keep permit_fee_history (learned real fees) but unlink the deleted project.
     db.run("UPDATE permit_fee_history SET project_id = NULL WHERE project_id = ?", [projectId]);
     // Communications may belong to a customer too — unlink rather than destroy correspondence.
@@ -4983,8 +4985,30 @@ export async function runEmailTracker(
       messageCount = classified.messages.length;
       result.messagesScanned += messageCount;
 
+      // #28: jobs of this org whose application waits on a plan-upload invite. Usually none, and then
+      // an unbucketed email costs nothing more than it did.
+      const { noteSecondStageInvite, projectsAwaitingInvite } = await import("./secondStage");
+      const awaitingInvite = projectsAwaitingInvite(db);
       for (const message of classified.messages) {
-        if (message.record.type === "spam_irrelevant") continue;
+        if (message.record.type === "spam_irrelevant") {
+          // A PLAN-UPLOAD INVITE READS AS NOTHING TO THE CLASSIFIER ("you are invited to upload your
+          // plans" is no status, correction or fee). While a job waits on one, such an email is still
+          // placed by the same scoped match (thread, number, address) and, when it is that job's
+          // invite, shown on its track. Display only: no reading, no match row, nothing opened.
+          if (awaitingInvite.size) {
+            const { filingEmailReplyProject } = await import("./filingEmail");
+            const reply = filingEmailReplyProject(db, message, { orgId: sourceOrgId, clientId: sourceClientId });
+            const replyRow = reply ? db.get<ProjectRow>("SELECT * FROM projects WHERE id = ?", [reply.projectId]) : undefined;
+            const placed = replyRow ? mapProject(replyRow) : matchProjectForEmail(db, message, { orgId: sourceOrgId, clientId: sourceClientId })?.project;
+            if (placed && awaitingInvite.has(placed.id)) {
+              noteSecondStageInvite(db, placed, {
+                subject: message.subject, from: message.from, text: message.rawSearchText,
+                occurredAt: message.record.occurredAt || message.date, signature: message.sourceSignature,
+              }, replyRow ? reply!.track : null);
+            }
+          }
+          continue;
+        }
         if (db.get<Row>("SELECT id FROM email_project_matches WHERE source_signature IN (?, ?)", [message.sourceSignature, message.legacySourceSignature])) {
           result.skippedDuplicates += 1;
           continue;
@@ -5015,13 +5039,29 @@ export async function runEmailTracker(
           continue;
         }
 
+        // #28: an email placed on a job whose permit waits on its SECOND STAGE may be the agency's
+        // plan-upload invite. It is shown on that track (subject, sender, date; its link only when the
+        // host passes rule 5's predicate) — display only. An invite is not a reading of a filed
+        // application (nothing is filed yet and no tracking target exists), so the ordinary reading
+        // below is skipped for it: recorded with no target it would only raise a "needs a person's
+        // check" item in front of the upload. A correction notice is never taken as the invite, and
+        // an email the classifier read as a fee request keeps its fee reading as well as being shown
+        // (an invite often says the fee was received; a fee that IS due must still surface).
+        let secondStageInvite = false;
+        if (awaitingInvite.has(match.project.id) && !emailIsCorrectionNotice(message)) {
+          secondStageInvite = noteSecondStageInvite(db, match.project, {
+            subject: message.subject, from: message.from, text: message.rawSearchText,
+            occurredAt: message.record.occurredAt || message.date, signature: message.sourceSignature,
+          }, threadedRow ? threaded!.track : null).length > 0 && message.record.type !== "fee_request";
+        }
+
         const before = getProjectDetail(db, match.project.id);
         // THE EMAIL'S OWN TRACK picks the target (emailTrackTargetId) — never the project's newest.
         // A threaded reply is about the track its filing email was for, whatever the classifier guessed.
         const filing = emailTrackTargetId(db, match.project.id, threadedRow ? (threaded!.track === "nem" ? "nem" : "permit") : text(message.record.workflow));
         const applicationNumber = extractTrackingNumber(message.rawSearchText, [/\b(?:application|app|record)\s*(?:number|#|no\.?)?\s*[:#-]?\s*([A-Z0-9-]{4,})/i]);
         const permitNumber = extractTrackingNumber(message.rawSearchText, [/\bpermit\s*(?:number|#|no\.?)?\s*[:#-]?\s*([A-Z0-9-]{4,})/i]);
-        const updated = await recordPermitStatusCheck(db, match.project.id, {
+        const updated = secondStageInvite ? before : await recordPermitStatusCheck(db, match.project.id, {
           targetId: filing.targetId,
           track: filing.track,
           source: "email",
@@ -5032,7 +5072,7 @@ export async function runEmailTracker(
           // The agency's fee request reads as the track's fee due (#576), not a generic review.
           feeRequested: message.record.type === "fee_request",
         });
-        const statusCheck = updated.permitStatusChecks[0] || null;
+        const statusCheck = secondStageInvite ? null : updated.permitStatusChecks[0] || null;
         const beforeCorrectionIds = new Set(before.corrections.map((item) => item.id));
         const newCorrection = updated.corrections.find((item) => !beforeCorrectionIds.has(item.id)) || null;
         const matchId = id();
@@ -10133,6 +10173,16 @@ export async function prepareSubmission(
   const submitRefusals = wantsFinalSubmit
     ? automaticSubmitRefusals(db, { recipeId: gateRecipeId, runApproval, runId, borrowedFrom: borrowed?.learnedFor ?? null, relaxedSinceApproval, unacknowledgedSinceApproval, filingDoor })
     : [];
+  // #28 — A TWO-STAGE AGENCY (adds a stop only): what this portal's submit sends is the application;
+  // the filing is complete only when a person has uploaded the plans in the agency's second system.
+  // An approved run therefore does not click it: the run stops at review, a person submits the
+  // application and records it, and the upload's mark is what files the track.
+  if (wantsFinalSubmit && track && track !== "nem") {
+    const hold = secondStageHold(db, detail.project, track);
+    if (hold) {
+      submitRefusals.push(`this agency takes the plans in a second system (${hold.system}) by hand, so this portal's submit is not the whole filing — a person submits the application and marks the plan upload done`);
+    }
+  }
   const resolvedAutoSubmit = wantsFinalSubmit && submitRefusals.length === 0;
   if (wantsFinalSubmit && !resolvedAutoSubmit) {
     addAuditLog(db, projectId, "system", "submit gate", "portal.auto_submit_declined", {
@@ -11620,6 +11670,25 @@ export function captureConfirmation(
   // is not a record the status page can be searched by.
   const filingNumber = (input.applicationNumber || "").trim() || (input.permitNumber || "").trim();
   const recordLink = storableRecordLink(input.recordLink);
+  // #28 — ON A TWO-STAGE AGENCY THIS CONFIRMATION IS THE APPLICATION, NOT THE FILING. A person
+  // confirmed that the agency takes the plans in a second system afterwards, by hand: the number
+  // captured here (typed, or read off the completion page of the person's own submit) records the
+  // application as made and waiting on that upload — no 'submitted' row, no tracking target, no
+  // client "filed" notice. Only the upload's mark files the track (submittalTracks).
+  if (runPermitType && runPermitType !== "nem" && (SUBMITTAL_TRACK_TYPES as readonly string[]).includes(runPermitType)) {
+    const stageTrack = runPermitType as SubmittalTrackType;
+    const hold = secondStageHold(db, projectForTarget, stageTrack);
+    if (hold?.owed === "upload") throw new HttpError(409, hold.sentence, { track: stageTrack, secondStage: true, owed: hold.owed });
+    if (hold?.owed === "application") {
+      if (!filingNumber) {
+        throw new HttpError(400, `Enter the record or application number the portal shows. ${hold.sentence}`, { track: stageTrack, secondStage: true, owed: hold.owed });
+      }
+      markTrackFirstStage(db, projectForTarget, stageTrack, { recordNumber: filingNumber, by: input.submittedBy || "human", via: "by_hand" });
+      // The run this confirmation was captured on is closed with it, whatever state it was in.
+      db.run("UPDATE portal_runs SET status = 'submitted', finished_at = COALESCE(finished_at, ?) WHERE id = ? AND status != 'submitted'", [ts, portalRunId]);
+      return getProjectDetail(db, projectId);
+    }
+  }
   let recordLinkRefused = false;
   // Hoisted so the post-transaction correction close can read it — see below.
   let remainingTracks = 0;
@@ -11679,7 +11748,7 @@ export function captureConfirmation(
       // real tracks (4x interconnection/nem + 1x permit/building); Fixture cf1c56aa shows 9 rows
       // for 1 track. A row-count here made "are all tracks in?" unanswerable and left the
       // correction closer permanently waiting on filings that do not exist.
-      "SELECT COUNT(*) AS n FROM (SELECT status, ROW_NUMBER() OVER (PARTITION BY submission_type, COALESCE(permit_type, '') ORDER BY created_at DESC, id DESC) AS rn FROM submissions WHERE project_id = ?) WHERE rn = 1 AND status = 'awaiting_human_submit'",
+      "SELECT COUNT(*) AS n FROM (SELECT status, ROW_NUMBER() OVER (PARTITION BY submission_type, COALESCE(permit_type, '') ORDER BY created_at DESC, id DESC) AS rn FROM submissions WHERE project_id = ?) WHERE rn = 1 AND status IN ('awaiting_human_submit', 'awaiting_second_stage')",
       [projectId],
     );
     const remaining = Number(stillAwaiting?.n ?? 0);
@@ -11939,7 +12008,7 @@ export function markCorrectionResubmitted(
     // track and runs the same closer.
     const stillAwaiting = db.get<{ n: number }>(
       // Same track-not-row rule as captureConfirmation above, for the same reason.
-      "SELECT COUNT(*) AS n FROM (SELECT status, ROW_NUMBER() OVER (PARTITION BY submission_type, COALESCE(permit_type, '') ORDER BY created_at DESC, id DESC) AS rn FROM submissions WHERE project_id = ?) WHERE rn = 1 AND status = 'awaiting_human_submit'", [projectId],
+      "SELECT COUNT(*) AS n FROM (SELECT status, ROW_NUMBER() OVER (PARTITION BY submission_type, COALESCE(permit_type, '') ORDER BY created_at DESC, id DESC) AS rn FROM submissions WHERE project_id = ?) WHERE rn = 1 AND status IN ('awaiting_human_submit', 'awaiting_second_stage')", [projectId],
     );
     remainingTracks = Number(stillAwaiting?.n ?? 0);
 

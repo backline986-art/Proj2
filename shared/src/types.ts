@@ -1159,6 +1159,10 @@ export type NextStepKey =
   | "staged_awaiting_submit"
   | "awaiting_signature"
   | "approved_awaiting_filing"
+  // #28: a two-stage permit filing whose application is made and paid — waiting on the agency's
+  // plan-upload invite, then a person uploads the plans in the second system by hand.
+  | "second_stage_invite"
+  | "second_stage_upload"
   | "fee_due"
   | "correction_open"
   | "payment_due"
@@ -1483,7 +1487,9 @@ export interface SubmissionRecord {
   /** The filing's discipline (`permit_type`: building, electrical, combo, mpu, nem, …) — names the
    *  filing in the dashboard's corrections picker (#58). */
   permitType?: string;
-  status: "staged" | "awaiting_human_submit" | "paused_for_human" | "awaiting_payment" | "submitted" | "failed" | "approved";
+  /** awaiting_second_stage (#28): the application is made (and its fee paid) on a two-stage AHJ whose
+   *  plans go into a second system by hand — NOT filed until a named person marks that upload done. */
+  status: "staged" | "awaiting_human_submit" | "paused_for_human" | "awaiting_payment" | "awaiting_second_stage" | "submitted" | "failed" | "approved";
   applicationNumber: string;
   permitNumber: string;
   confirmationNumber: string;
@@ -5409,6 +5415,17 @@ export interface PermitProcessPermitAnswer {
   /** Other ways the same page says the permit may be filed ("you may also fax, email, mail or bring
    *  it in"), each cited; never the primary. */
   alternateChannels?: Array<CitedFact<PermitFilingChannel>>;
+  /** A SECOND STAGE of this permit's filing (#28), cited: after the application (and its fee) the
+   *  agency takes the plans in ANOTHER system, opened by something it sends (an emailed invite).
+   *  A description only: it never changes what a track asks for until a named person confirms it
+   *  (secondStage.ts), and it is never a filing door. Absent on older rows (= none stated). */
+  secondStage?: CitedFact<PermitSecondStageAnswer>;
+}
+/** A two-stage filing's second stage as a page states it: the system the plans are uploaded in, and
+ *  what opens it ("an invitation email after the fee is paid"), both in the page's own words. */
+export interface PermitSecondStageAnswer {
+  system: string;
+  trigger: string;
 }
 export type BatteryPermittingKind = "sameReview" | "separatePermit" | "fireReview" | "fireApprovalLetter";
 export interface BatteryPermittingAnswer {
