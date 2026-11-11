@@ -34,7 +34,7 @@ import { FILING_CONTACT_EMAIL_KEY } from "../../shared/src/filingContactEmail";
 import { usStateCode } from "./permitPath";
 import { provablyDifferentUtility, sameUtilityEntity } from "./utilityIdentity";
 import { sameAgencyName } from "./permitProcessLookup";
-import { labelWords } from "../../shared/src/portalSafety";
+import { isFormDataStep, labelWords, type FormDataStep } from "../../shared/src/portalSafety";
 // A cycle (portalDraft imports this module); safe because it is only called inside a function.
 import { disarmDraftCreatingSubmit } from "./portalDraft";
 import { firstEmail, looksLikeEmail } from "../../shared/src/emailAddress";
@@ -216,12 +216,12 @@ export function snapshotIsProven(notes: unknown): boolean {
 const stripPrevMarker = (notes: unknown): string => String(notes ?? "").replace(PREV_SNAPSHOT_MARKER_RE, "").trim();
 const carriedPrevMarker = (notes: unknown): string => (String(notes ?? "").match(PREV_SNAPSHOT_MARKER_RE) ?? [])[0]?.trim() ?? "";
 
-/** Fills, selects and checks — the steps that actually put data into a form, and the only
- *  depth measure available on both a stored snapshot and a freshly-saved recording.
- *  Deliberately duplicated from autoLearn.substantiveStepCount rather than imported:
- *  autoLearn imports THIS module, and the reverse import would close a cycle. */
-function recipeDepth(steps: Array<{ action?: unknown }> | undefined): number {
-  return (steps ?? []).filter((st) => ["fill", "select", "check"].includes(String(st?.action ?? ""))).length;
+/** THE ONE DEPTH MEASURE of a recording: its steps that entered form data (the shared
+ *  isFormDataStep — the e-signature steps and terms acknowledgments are not depth, #131). Read
+ *  by the save path and the rollback here and, as substantiveStepCount, by the trust gate and
+ *  the benchmark, so "deeper" can never keep a recipe those score as empty. */
+export function recipeDepth(steps: Array<{ action?: unknown }> | undefined): number {
+  return (steps ?? []).filter((st) => st && isFormDataStep({ ...(st as FormDataStep), action: String(st.action ?? "") })).length;
 }
 
 // Split a US phone into the three boxes segmented portal controls use (Accela renders

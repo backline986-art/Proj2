@@ -26,7 +26,7 @@ import { portalProfilesDir, screenshotsDir } from "./statePaths";
 import fs from "node:fs";
 import type { AppDb } from "./db";
 import type { InfoPageIncident, PortalRecipe, ProjectRecord, RecipeStep } from "../../shared/src/types";
-import { FINAL_SUBMIT_GATE_SENTENCE, isFormDataStep, redactSecretValues, type FormDataStep } from "../../shared/src/portalSafety";
+import { FINAL_SUBMIT_GATE_SENTENCE, redactSecretValues } from "../../shared/src/portalSafety";
 import { INFO_PAGE_PASS_EXPIRED, infoPageJobValues } from "../../shared/src/infoPagePass";
 import { isPlannerSecretKey, projectSecretValues } from "./projectSecrets";
 import { perJobAnswerKeyFor, perJobControlOfField } from "../../shared/src/perJobQuestions";
@@ -40,7 +40,7 @@ import { loginWasRefused } from "../../portal-bot/src/adapters/loginFlow";
 import { createLLMProvider, getRecentLlmCalls } from "./llm";
 import { getDecryptedCredentialForPortal, getDecryptedCredentialByUrl, listPortalCredentials, nearestStoredLogins, recordLoginOutcome } from "./portalCredentials";
 import { learnNoteTopicsFromMisses, activeLearnedNoteTerms } from "./noteTopics";
-import { RECIPE_FIELD_DESCRIPTIONS, deadFieldBindings, resolveRecipeFieldValues, startPortalRecording, savePortalRecipeSteps, getPortalRecipe, convertLiteralsToBoundFields, findAnyRecipeForProject, appendHumanPatchSteps, promoteRecordingIfEligible, recipeProfileKey, portalEntityEvidence, stampCompanyAttestations, withholdClientLicenceLiteralsFor, recordPortalNotServed } from "./portalRecipes";
+import { RECIPE_FIELD_DESCRIPTIONS, deadFieldBindings, resolveRecipeFieldValues, startPortalRecording, savePortalRecipeSteps, getPortalRecipe, convertLiteralsToBoundFields, findAnyRecipeForProject, appendHumanPatchSteps, promoteRecordingIfEligible, recipeDepth, recipeProfileKey, portalEntityEvidence, stampCompanyAttestations, withholdClientLicenceLiteralsFor, recordPortalNotServed } from "./portalRecipes";
 import { notServedInResult } from "../../shared/src/portalNotServed";
 import { HUMAN_SUBMIT_OBSERVED_NOTE } from "../../portal-bot/src/humanCapture";
 import { submissionDocumentsByType, uploadDocumentGuard } from "./submissionDocuments";
@@ -382,13 +382,10 @@ export function buildLearnKbContext(
 // plus the project's secret-free field values. Shared by autonomous learning AND the hybrid
 // staging gap-fill so both use identical data + safety handling. Secrets (account/meter/SSN/
 // password) are stripped here and NEVER reach the LLM — the adapter binds those deterministically.
-/** Fills, selects and checks - the steps that actually put data into a form. The only
- *  depth measure available on both a stored draft and a fresh learn. */
-export function substantiveStepCount(steps: Array<{ action?: unknown }> | undefined): number {
-  // Form data only (the shared predicate): the e-signature steps and terms acknowledgments are
-  // not depth — a run that typed only the signer has entered none of this project's data (#131).
-  return (steps ?? []).filter((st) => st && isFormDataStep({ ...(st as FormDataStep), action: String(st.action ?? "") })).length;
-}
+/** The steps that put form data into a portal — the depth of a learn, the trust floor's count and
+ *  the benchmark's fills. The SAME function the recipe save path and rollback rank drafts by
+ *  (portalRecipes.recipeDepth), so no path can call a recording deeper than the gate scores it. */
+export const substantiveStepCount = recipeDepth;
 
 /**
  * DEPTH IS INFORMATION, AND A SHORTER DRAFT MUST NOT ERASE A LONGER ONE.
