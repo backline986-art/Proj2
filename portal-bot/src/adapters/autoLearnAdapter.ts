@@ -821,7 +821,13 @@ export const UPLOAD_LABEL_PATTERNS: Array<{ re: RegExp; docType: string }> = [
   { re: /meter\s*(photo|picture|image|spec|reading|tag)|(photo|picture|image)\s+of\s+(the\s+)?meter/i, docType: "meter_photo" },
   { re: /label|placard/i, docType: "labels" },
   { re: /utility\s*bill|electric(ity)?\s*bill/i, docType: "utility_bill" },
-  { re: /plan\s*set|full\s*plan|construction\s*(plan|doc)|drawings?/i, docType: "plan_set" },
+  // THE INSTALLER'S BID (#140): iWorQ's "A copy of the bid is required for solar applications" slot,
+  // headed just "Bid". A sales document the plan set can never stand in for (EXACT_UPLOAD_TYPES):
+  // filled by the job's own bid when it holds one, else left empty and reported by name.
+  { re: /\bbids?\b/i, docType: "bid" },
+  // A slot named just "Plans" (#140: an iWorQ slot headed "Plans") is the plan set. The BARE word
+  // only: "Stamped plans" / "Landscape plans" name something else and keep their old reading.
+  { re: /plan\s*set|full\s*plan|construction\s*(plan|doc)|drawings?|^\W*plans?\W*$/i, docType: "plan_set" },
 ];
 
 // When an upload control's label doesn't name a specific document (a generic "Upload
@@ -890,7 +896,7 @@ const UPLOAD_NO_SUBSTITUTE = /insurance|invoice|\bw-?9\b|tax\s*form|voided\s*che
 // substitute (and combined mode filed the plan set there even when the photo WAS held). A photo of
 // the customer's meter is the one document that can fill that slot; with none it stays empty and
 // is reported missing, and a recipe that recorded the plan set against it is refused at replay.
-const EXACT_UPLOAD_TYPES = new Set(["building_application", "electrical_application", "permit_application", "solar_checklist", "structural_letter", "pv_worksheet", "meter_photo"]);
+const EXACT_UPLOAD_TYPES = new Set(["building_application", "electrical_application", "permit_application", "solar_checklist", "structural_letter", "pv_worksheet", "meter_photo", "bid"]);
 
 // A SLOT THAT ASKS FOR A PHOTO (#542). No plan sheet, spec or bill is a photograph of the installed
 // gear, so a required "Photo of the main service panel" / "Picture of signage…" slot whose own
@@ -2370,9 +2376,55 @@ export function tagUploadControls(): UploadSlot[] {
   // wrong control: an unrecorded slot read as filled and its document was never attached.
   for (const stale of deepQueryAll(document, "[data-al-upl]")) stale.removeAttribute("data-al-upl");
 
+  // A picker's FACE ("Choose File", "Browse", "Upload…") — the same words pass 2 below reads as a
+  // click-to-open trigger. Text that says only this names no document, so it is not a slot label.
+  const TRIGGER = /^(browse|upload|choose(\s+file)?|attach|add\s+file|select\s+file|choose\s+files?|upload\s+file)\.{0,3}$/i;
+
+  // A SLOT NAMED BY ITS HEADING (#140). iWorQ renders each required document as
+  //   <h3>Plans</h3> <div>(File Types: .pdf):</div>
+  //   <div><label for="newfile_…" class="btn">Choose File</label> <input type=file id="newfile_…"> <textarea …></div>
+  // — the label bound to the input is the BUTTON FACE, so every slot read "Choose File", matched
+  // no document, and on the review page (attach-only) the plan set we held went nowhere while the
+  // portal said "The required uploads were not found". The document word lives in the heading
+  // ABOVE the control. Owning heading = the nearest heading-like element before the control, inside
+  // a few ancestors, with NO other upload control between them: a second slot with no heading of
+  // its own never borrows the first slot's, and Accela's repeated unlabeled rows under one section
+  // title stay unlabeled. Null when nothing qualifies — the caller keeps its old label.
+  function owningHeading(el: Element): string | null {
+    const HEADING_SEL = "h1, h2, h3, h4, h5, h6, legend, label, .control-label, .field-label, strong, b, dt";
+    const FOLLOWING = 4; // Node.DOCUMENT_POSITION_FOLLOWING
+    const others = deepQueryAll(document, 'input[type="file"], [data-al-upl]').filter((o) => o !== el && !o.contains(el) && !el.contains(o));
+    let anc: Element | null = el.parentElement;
+    for (let depth = 0; anc && depth < 4; depth++, anc = anc.parentElement) {
+      const before = Array.from(anc.querySelectorAll(HEADING_SEL))
+        .filter((h) => !h.contains(el) && (h.compareDocumentPosition(el) & FOLLOWING) !== 0);
+      for (let i = before.length - 1; i >= 0; i--) {
+        const h = before[i];
+        // A label bound to ANOTHER control is that control's label ("Signature Name:"), not a heading.
+        const forId = h.tagName.toLowerCase() === "label" ? h.getAttribute("for") : null;
+        if (forId && forId !== el.getAttribute("id")) continue;
+        // …and so is text wrapping a control of its own (<label><input> I agree</label>).
+        if (h.querySelector("input, select, textarea, button")) continue;
+        const t = (h.textContent || "").trim().replace(/\s+/g, " ");
+        if (!t || t.length > 80 || TRIGGER.test(t)) continue;
+        // Another upload control between this heading and ours means the heading belongs to it.
+        if (others.some((o) => (h.compareDocumentPosition(o) & FOLLOWING) !== 0 && (o.compareDocumentPosition(el) & FOLLOWING) !== 0)) return null;
+        return t;
+      }
+    }
+    return null;
+  }
+
   // Derive the field label for an upload control: nearest <label>, else the closest
   // form-group/row container's leading label/heading/text, else the trigger's own text.
+  // A result that is only the picker's face is replaced by the slot's owning heading, if any.
   function deriveLabel(el: Element): string {
+    const read = deriveOwnLabel(el);
+    if (!TRIGGER.test(read.trim())) return read;
+    return owningHeading(el) ?? read;
+  }
+
+  function deriveOwnLabel(el: Element): string {
     const id = el.getAttribute("id");
     if (id) {
       // Element's own root, so a label inside the same shadow root is found too.
@@ -2415,7 +2467,7 @@ export function tagUploadControls(): UploadSlot[] {
 
   // 2) Browse/Upload/Choose-File triggers whose real input is created dynamically — these
   //    have NO file input anywhere in their container, so the scrape above missed them.
-  const TRIGGER = /^(browse|upload|choose(\s+file)?|attach|add\s+file|select\s+file|choose\s+files?|upload\s+file)\.{0,3}$/i;
+  //    (TRIGGER is the picker-face test declared above, shared with deriveLabel.)
   const clickables = deepQueryAll(document, 'button, a, [role="button"], input[type="button"], .btn, span[class*="upload"], span[class*="browse"]');
   for (const el of clickables) {
     const txt = ((el as HTMLInputElement).value || el.textContent || "").trim();
@@ -4103,6 +4155,7 @@ export class AutoLearnAdapter extends BasePortalAdapter {
           filled.push(slot.label);
           alreadyFilledLabels.push(slot.label);
         }
+        await this.fillUploadDescription(slot.key, resolved.docType, steps, alreadyFilledLabels);
       } else if (rejected) {
         this.debug?.event({ type: "upload_rejected", label: (slot.label || "").slice(0, 80), docType: resolved.docType, message: rejected.slice(0, 160) });
         // Only a REQUIRED slot's rejection blocks; an optional slot's is informational.
@@ -4113,6 +4166,83 @@ export class AutoLearnAdapter extends BasePortalAdapter {
       }
     }
     return { filled, missingRequired, attached };
+  }
+
+  /** The words a slot's description box gets: the document's KIND, never its file name. A recorded
+   *  fill is a literal in a recipe every tenant replays, and stored file names carry the homeowner's
+   *  name — the kind is true of every job that attaches the same slot. */
+  static uploadDescriptionFor(docType: string): string {
+    const KNOWN: Record<string, string> = {
+      plan_set: "Plan set", combined_plan_set: "Plan set", full_plan_set: "Plan set", sld: "Single-line diagram",
+      site_plan: "Site plan", structural: "Structural sheets", structural_letter: "Structural engineering letter",
+      module_spec: "Module spec sheet", inverter_spec: "Inverter spec sheet", battery_spec: "Battery spec sheet",
+      meter_photo: "Meter photo", utility_bill: "Utility bill", labels: "Labels and placards", bid: "Bid",
+    };
+    const t = String(docType || "").trim();
+    if (KNOWN[t]) return KNOWN[t];
+    const words = t.replace(/_/g, " ").trim();
+    return words ? words.charAt(0).toUpperCase() + words.slice(1) : "Document";
+  }
+
+  // A SLOT'S DESCRIPTION BOX (#140). iWorQ pairs each required file input with a textarea
+  // "Description of the Plans" in the same widget. After a document attaches, the box beside it —
+  // after the control, before the next upload control, within a few ancestors, labelled as a
+  // description — gets the document's kind, and the fill is recorded so replay types it too. A box
+  // that already holds text is left alone. Typing only: nothing is clicked, so the attach-only pass
+  // on a review page stays attach-only. Best-effort: a box that will not fill changes nothing else.
+  private async fillUploadDescription(slotKey: string, docType: string, steps: RecipeStep[], alreadyFilledLabels: string[]): Promise<void> {
+    if (!this.page || typeof this.page.evaluate !== "function") return;
+    // The callback below names a helper; keepNames wraps it in __name, which a raw page lacks.
+    await this.page.evaluate("globalThis.__name = globalThis.__name || function (f) { return f; };").catch(() => null);
+    const found = await this.page.evaluate((key: string) => {
+      for (const stale of Array.from(document.querySelectorAll("[data-al-upl-desc]"))) stale.removeAttribute("data-al-upl-desc");
+      const el = document.querySelector(`[data-al-upl="${key}"]`);
+      if (!el) return null;
+      const FOLLOWING = 4; // Node.DOCUMENT_POSITION_FOLLOWING
+      const nameOf = (b: Element): string => {
+        const id = b.getAttribute("id");
+        const forLbl = id ? document.querySelector(`label[for="${(window.CSS && CSS.escape) ? CSS.escape(id) : id}"]`) : null;
+        return [b.getAttribute("aria-label"), b.getAttribute("placeholder"), b.getAttribute("title"), forLbl?.textContent].filter(Boolean).join(" ").replace(/\s+/g, " ").trim();
+      };
+      const uploads = Array.from(document.querySelectorAll('input[type="file"], [data-al-upl]')).filter((o) => o !== el);
+      let anc: Element | null = el.parentElement;
+      for (let depth = 0; anc && depth < 3; depth++, anc = anc.parentElement) {
+        for (const b of Array.from(anc.querySelectorAll('textarea, input[type="text"], input:not([type])'))) {
+          if ((el.compareDocumentPosition(b) & FOLLOWING) === 0) continue;
+          if (uploads.some((o) => (el.compareDocumentPosition(o) & FOLLOWING) !== 0 && (o.compareDocumentPosition(b) & FOLLOWING) !== 0)) continue;
+          const name = nameOf(b);
+          if (!/\bdescri(ption|be)\b/i.test(name)) continue;
+          if (((b as HTMLTextAreaElement).value || "").trim()) return null;
+          b.setAttribute("data-al-upl-desc", "1");
+          return {
+            id: b.getAttribute("id") || "", tag: b.tagName.toLowerCase(), name: name.slice(0, 120),
+            placeholder: b.getAttribute("placeholder") || "", ariaLabel: b.getAttribute("aria-label") || "",
+          };
+        }
+      }
+      return null;
+    }, slotKey).catch(() => null) as { id: string; tag: string; name: string; placeholder: string; ariaLabel: string } | null;
+    if (!found) return;
+    const value = AutoLearnAdapter.uploadDescriptionFor(docType);
+    const ok = await this.page.locator("[data-al-upl-desc]").first().fill(value, { timeout: 4000 }).then(() => true).catch(() => false);
+    this.debug?.event({ type: "upload_description", ok, docType, label: found.name.slice(0, 80) });
+    if (!ok) return;
+    // Recorded by the box's own stable attributes (the data-al-upl-desc mark is this pass's only).
+    const q = (v: string) => v.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+    const css = found.id ? `${found.tag}[id="${q(found.id)}"]`
+      : found.placeholder ? `${found.tag}[placeholder="${q(found.placeholder)}"]`
+      : found.ariaLabel ? `${found.tag}[aria-label="${q(found.ariaLabel)}"]`
+      : "";
+    if (css) {
+      steps.push({
+        action: "fill",
+        phase: "upload",
+        selector: { css, ...(found.placeholder ? { fallbacks: [{ placeholder: found.placeholder }] } : {}) },
+        value,
+        note: `upload description: ${(found.ariaLabel || found.placeholder || found.name).slice(0, 80)}`,
+      });
+    }
+    alreadyFilledLabels.push(found.ariaLabel || found.placeholder || found.name);
   }
 
   // Snapshot the VISIBLE error-banner texts currently on the page. Two uses per upload:

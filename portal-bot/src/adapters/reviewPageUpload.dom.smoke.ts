@@ -19,6 +19,12 @@
 //   [B] the project holds NO meter photo (only the plan set): nothing is attached — the plan set
 //       is never substituted — no non-GET reaches the server, the meter-photo slot is named in
 //       the hand-off, and the run stops at review.
+//   [C] (#140) an iWorQ-shaped final page whose required slots are named only by their HEADING
+//       ("Bid", "Plans"; the input's own label is the "Choose File" button face) — the plan set
+//       goes into "Plans" and its description box, "Bid" is reported missing by name, nothing
+//       lands in "Bid" or the optional "Other Files", nothing reaches the server.
+//   [D] the slot-label reader alone: a heading is a slot's label only when no other upload control
+//       sits between them; a picker with no heading of its own keeps its old label.
 //
 // Run: npx tsx portal-bot/src/adapters/reviewPageUpload.dom.smoke.ts
 import "../smokeArtifactDirs";
@@ -27,7 +33,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { chromium } from "playwright";
-import { AutoLearnAdapter, type LearnPlanner } from "./autoLearnAdapter";
+import { AutoLearnAdapter, tagUploadControls, type LearnPlanner } from "./autoLearnAdapter";
 
 delete process.env.PORTAL_ALLOW_FINAL_SUBMIT;
 
@@ -66,6 +72,32 @@ const FINAL = `<h1>Review and Submit</h1>
     });
   </script>`;
 
+// [C] (#140) AN iWorQ-SHAPED FINAL PAGE: each required document is a slot NAMED BY ITS HEADING.
+// The label bound to the file input is the button face ("Choose File"); the document word ("Bid",
+// "Plans") is the <h3> above it, with a "(File Types: .pdf)" note between; a description textarea
+// sits beside each input; "Other Files" is an optional multi-file input. Synthetic, shaped on the
+// City of Star watched learn of 2026-11-11 (attached:0 missing:2 — both slots read "Choose File").
+const P1C = P1.replace('action="/final"', 'action="/star"');
+const slotHtml = (n: number, heading: string) => `
+      <div class="mr-4"><h3 class="application-item">${heading}</h3> <div class="mb-2">&nbsp;&nbsp;(File Types:   .pdf   ):</div>
+        <div class="form-group file-upload-widget"><label for="newfile_uploads_9_${n}" class="btn btn-primary btn-change">Choose File</label>
+          <p class="display-filename m-0"></p>
+          <input name="newfile_uploads[]" id="newfile_uploads_9_${n}" type="file" accept="  .pdf   " required="required" class="hidden required" style="display:none">
+          <textarea name="newfile_upload_description[]" aria-label="Description of the ${heading}" id="uploadDescription_9_${n}" placeholder="Description of the ${heading}" class="form-control mt-1"></textarea>
+        </div></div>`;
+const STAR = `<h1>Solar Permit or Panel Application</h1>
+  <p>Please review your application below before submitting.</p>
+  <div class="row"><div class="col-sm-12"><div class="col text-left">A copy of the bid is required for solar applications.</div></div></div>
+  <div class="row"><div class="col"><h2><strong>Required Files for Solar Permit or Panel Application</strong></h2>
+    <i>If submitted without file(s) listed below or with the wrong file type, application will not be accepted.</i>
+    <div class="cell"><div class="d-flex flex-wrap cell-inner">${slotHtml(0, "Bid")}${slotHtml(1, "Plans")}
+    </div></div></div></div>
+  <div class="row"><div class="col"><div class="cell"><div class="cell-inner"><h3 class="text-center">Other Files</h3>
+    <div class="form-group"><span>Files</span> <br><label for="newfile_uploads_9" class="btn btn-primary">Choose Files</label>
+      <input name="newfile_uploads[]" id="newfile_uploads_9" type="file" multiple="multiple" class="managed hidden" style="display:none"></div></div></div></div></div>
+  <div id="upload-warning"><i>*The required uploads were not found</i></div>
+  <button id="submit-webform" type="button" onclick="fetch('/SubmitApplication', {method:'POST', body:'x=1'}).catch(function(){});">Submit</button>`;
+
 const posts: string[] = [];
 const server = http.createServer((req, res) => {
   const url = new URL(req.url || "/", "http://127.0.0.1");
@@ -76,7 +108,8 @@ const server = http.createServer((req, res) => {
     return;
   }
   res.writeHead(200, { "content-type": "text/html" });
-  res.end(`<!doctype html><html><head><title>PowerClerk replica</title></head><body>${url.pathname === "/final" ? FINAL : P1}</body></html>`);
+  const body = url.pathname === "/final" ? FINAL : url.pathname === "/star" ? STAR : url.pathname === "/p1c" ? P1C : P1;
+  res.end(`<!doctype html><html><head><title>${url.pathname === "/star" || url.pathname === "/p1c" ? "iWorQ replica" : "PowerClerk replica"}</title></head><body>${body}</body></html>`);
 });
 await new Promise<void>((r) => server.listen(0, "127.0.0.1", () => r()));
 const base = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
@@ -153,6 +186,78 @@ try {
       check("[B] the hand-off names the empty meter-photo slot",
         missing.some((m) => /photo of meter/i.test(m)) && /photo of meter/i.test(msg), `missing=${JSON.stringify(missing)} ${msg.slice(0, 300)}`);
     }
+  }
+
+  // ---- [C] iWorQ: slots named by their heading (#140) ----
+  console.log("\n[C] iWorQ-shaped page: required slots headed \"Bid\" and \"Plans\"; the job holds only the plan set");
+  {
+    const ctx = await browser.newContext();
+    ctx.setDefaultTimeout(8000);
+    await ctx.addInitScript({ content: "globalThis.__name = globalThis.__name || ((f) => f);" });
+    const page = await ctx.newPage();
+    await page.goto(`${base}/p1c`);
+    posts.length = 0;
+    const adapter = new AutoLearnAdapter("iWorQ Replica", planner, { maxPages: 4, docsByType: { plan_set: planSet } });
+    const events: Array<Record<string, unknown>> = [];
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (adapter as any).page = page;
+    const holder = adapter as unknown as { debug?: { event: (e: Record<string, unknown>) => void } };
+    if (holder.debug && typeof holder.debug.event === "function") {
+      const orig = holder.debug.event.bind(holder.debug);
+      holder.debug.event = (e) => { events.push(e); orig(e); };
+    } else holder.debug = { event: (e) => { events.push(e); } };
+    let r: Awaited<ReturnType<AutoLearnAdapter["learn"]>> | null = null;
+    let threw = "";
+    try {
+      r = await adapter.learn({ portalUrl: `${base}/p1c` } as never,
+        { projectAddress: "1 Test St, Springfield, IL, 62701", city: "Springfield", state: "IL", zip: "62701", homeownerName: "T" } as never);
+    } catch (e) { threw = String(e).slice(0, 200); }
+    await new Promise((res) => setTimeout(res, 800));
+    const held = await page.evaluate(() => {
+      const n = (id: string) => (document.getElementById(id) as HTMLInputElement | null)?.files?.length ?? -1;
+      const v = (id: string) => (document.getElementById(id) as HTMLTextAreaElement | null)?.value ?? null;
+      return { bid: n("newfile_uploads_9_0"), plans: n("newfile_uploads_9_1"), other: n("newfile_uploads_9"), bidDesc: v("uploadDescription_9_0"), plansDesc: v("uploadDescription_9_1") };
+    }).catch(() => null);
+    await ctx.close().catch(() => null);
+    const msg = String(r?.message ?? threw);
+    const uploads = (r?.steps ?? []).filter((s) => s.action === "upload");
+    const descSteps = (r?.steps ?? []).filter((s) => s.action === "fill" && /^upload description/i.test(String(s.note ?? "")));
+    const missing = r?.missingRequiredDocs ?? [];
+    check("[C] premise: the upload pass ran on the review page, attach-only",
+      events.some((e) => e.type === "upload_phase_start" && e.attachOnly === true), JSON.stringify(events.filter((e) => /^upload/.test(String(e.type)))));
+    check("[C] the plan set went into the slot headed \"Plans\" — and only there",
+      held?.plans === 1 && held?.bid === 0 && held?.other === 0, `held=${JSON.stringify(held)}`);
+    check("[C] exactly one upload step, the plan set, recorded under the slot's heading",
+      uploads.length === 1 && uploads[0].docType === "plan_set" && /:\s*Plans$/.test(String(uploads[0].note ?? "")), JSON.stringify(uploads));
+    check("[C] the \"Description of the Plans\" box got the document's kind, and the fill is recorded for replay",
+      held?.plansDesc === "Plan set" && descSteps.length === 1 && descSteps[0].value === "Plan set"
+        && /uploadDescription_9_1/.test(String(descSteps[0].selector?.css ?? "")), `held=${JSON.stringify(held)} steps=${JSON.stringify(descSteps)}`);
+    check("[C] the Bid slot and its description are untouched", held?.bidDesc === "", `held=${JSON.stringify(held)}`);
+    check("[C] \"Bid\" is reported missing BY NAME, in the result and the run's message — never as \"Choose File\"",
+      missing.some((m) => /^bid\b/i.test(m)) && /\bBid\b/.test(msg) && !missing.some((m) => /choose file/i.test(m)),
+      `missing=${JSON.stringify(missing)} msg=${msg.slice(0, 300)}`);
+    check("[C] the optional \"Other Files\" slot is neither filled nor reported", !missing.some((m) => /other files/i.test(m)), JSON.stringify(missing));
+    check("[C] nothing reached the server (no submit, no upload POST)", posts.length === 0, `posts=[${posts.join(",")}]`);
+    check("[C] the run stopped at review", r?.reachedReview === true && /reached the review screen/.test(msg), `reachedReview=${r?.reachedReview} ${msg.slice(0, 300)}`);
+  }
+
+  // ---- [D] the slot-label reader on its own: heading-owned, heading shared across slots, no heading ----
+  console.log("\n[D] tagUploadControls reads a slot's heading only when the heading is that slot's own");
+  {
+    const ctx = await browser.newContext();
+    await ctx.addInitScript({ content: "globalThis.__name = globalThis.__name || ((f) => f);" });
+    const page = await ctx.newPage();
+    await page.setContent(`<div><h3>Plans</h3><div><label for="a" class="btn">Choose File</label><input type="file" id="a"></div></div>
+      <section><h4>Attachments</h4>
+        <div><label for="b" class="btn">Choose File</label><input type="file" id="b"></div>
+        <div><label for="c" class="btn">Choose File</label><input type="file" id="c"></div></section>
+      <div><div><label for="d" class="btn">Browse</label><input type="file" id="d"></div></div>`);
+    const slots = await page.evaluate(tagUploadControls);
+    await ctx.close().catch(() => null);
+    const labels = slots.map((s) => s.label);
+    check("[D] a picker face under its own heading reads as the heading", labels[0] === "Plans", JSON.stringify(labels));
+    check("[D] a heading two slots share goes to the first; the second keeps its face", labels[1] === "Attachments" && labels[2] === "Choose File", JSON.stringify(labels));
+    check("[D] a picker with no heading of its own keeps its old label", labels[3] === "Browse", JSON.stringify(labels));
   }
 } finally {
   await browser.close().catch(() => null);
