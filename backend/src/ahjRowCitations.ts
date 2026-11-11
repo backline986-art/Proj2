@@ -18,6 +18,9 @@
 //   · requiresBuildingPermitApplication / requiresElectricalPermitApplication — the row's flag, backed
 //     by a page. Both backed and both true = two permits.
 //   · ess — what a storage job owes, in the page's words.
+//   · secondStage — the plans go into ANOTHER system after the application and its fee (#28): value
+//     = that system's name, `trigger` = what opens it ("an invitation email after payment"). Read by
+//     secondStage.ts as a DESCRIPTION only; a named person's Confirm is what makes a track ask for it.
 //
 // A STATE AUTHORITY is data too: a row of the same file whose `stateAuthorityFor` lists the permit
 // kinds it issues for the whole state ("electrical"). No state, city or agency is named here.
@@ -36,6 +39,8 @@ export interface WholeCitation {
   sourceUrl: string;
   quote: string;
   fetchedAt: string;
+  /** field "secondStage" only (#28): what opens the second system, in the page's words. */
+  trigger?: string;
 }
 
 const str = (v: unknown): string => (typeof v === "string" ? v.trim() : v == null ? "" : String(v).trim());
@@ -48,7 +53,7 @@ export function wholeCitations(profile: AhjProcessProfile | null | undefined, fi
   for (const c of raw) {
     if (!c || typeof c !== "object") continue;
     const r = c as Record<string, unknown>;
-    const w = { field: str(r.field), value: str(r.value), sourceUrl: str(r.sourceUrl), quote: str(r.quote), fetchedAt: str(r.fetchedAt) };
+    const w: WholeCitation = { field: str(r.field), value: str(r.value), sourceUrl: str(r.sourceUrl), quote: str(r.quote), fetchedAt: str(r.fetchedAt), ...(str(r.trigger) ? { trigger: str(r.trigger) } : {}) };
     if (!w.field || (field && w.field !== field)) continue;
     if (!/^https?:\/\/\S+$/i.test(w.sourceUrl) || w.quote.length < 8 || !w.fetchedAt) continue;
     out.push(w);

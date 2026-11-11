@@ -29,8 +29,9 @@
 // never overwritten), and its fees land through feeSchedules.saveFeeSchedule — including the
 // DELEGATION (City of Jefferson's fees are collected by Marion County) the fee researcher had read
 // and then discarded.
-import type { BatteryPermittingAnswer, BatteryPermittingKind, CitedFact, LLMProvider, PermitFeeAnswer, PermitFilingChannel, PermitFilingChannelKind, PermitProcessDiscipline, PermitProcessLookup, PermitProcessPermitAnswer, WebLookupResult } from "../../shared/src/types";
+import type { BatteryPermittingAnswer, BatteryPermittingKind, CitedFact, LLMProvider, PermitFeeAnswer, PermitFilingChannel, PermitFilingChannelKind, PermitProcessDiscipline, PermitProcessLookup, PermitProcessPermitAnswer, PermitSecondStageAnswer, WebLookupResult } from "../../shared/src/types";
 import type { AppDb } from "./db";
+import { quoteNamesSystem } from "./secondStage";
 import { hostFitsTrackAndEntity, isInformationalPageUrl, isPathTenantedHost, portalUrlsInText, isPermitPlatformUrl, isVendorDomain, isVendorRootOrMarketing, portalHostOf, portalTenantKey, portalTenantOf, salesforceTenantKind, trackSafeUrl, type PortalEntity } from "./portalChannel";
 import { ahjNameCore, channelPhrase, getPermitProcessLookup, normalizeAhjName, savePermitProcessLookup, servingIssuerNamed, stateRulesFor, trackIssuer, unknownStateAuthorityName, ZONING_SIGNOFF } from "./permitProcess";
 import { CONNECTOR_WORDS, DEPARTMENT_WORDS, GENERIC_ORG_WORDS, agencyNameKey, sameAgencyName, stripDepartmentPhrase } from "./agencyName";
@@ -142,6 +143,7 @@ For each permit named in the request:
 - recordType: the record / permit type selected when applying ONLINE on that portal, in the portal's or the agency's own words (e.g. "Residential Electrical - Solar"). A paper application FORM's title is NOT a record type — if you only find form titles, set it to null.
 - channel: HOW the agency's page says this permit is filed — "portal", "email" (value: the address), "in_person" (value: the office), "mail", or "with_other_permit" (value: the permit it rides in). When the page says it is emailed or bought / brought in at an office, say so here and set portalUrl to null: a link on that page to an inspection scheduler, a payment page or another permit's portal is NOT this permit's portal.
 - alternateChannels: other ways the same page lists ("may also be faxed, emailed, mailed or brought in"), each cited; [] when none.
+- secondStage: ONLY when the agency's page says the application is made (and its fee paid) FIRST and the plans / documents are then uploaded in ANOTHER, separately named system that the agency opens for the applicant (for example by an emailed invitation): value {"system": the system's name as the page names it, "trigger": what opens it, in the page's words, e.g. "an invitation email after the fee is paid"}; the quote must name that system. Plans uploaded in the same portal as the application are NOT a second stage: null.
 
 EVERY value carries "sourceUrl" (a page your search returned or you opened) and "quote" (the exact words on that page that state it, under 250 characters: for a portal, the words naming or linking it; for a record type, the words naming it). If no page states it, "value": null with "notFound". Never answer from memory. Never guess.
 
@@ -152,7 +154,8 @@ Return ONLY JSON:
   "portalUrl": {"value": "<url>"|null, "sourceUrl": "", "quote": "", "notFound": ""},
   "recordType": {"value": "<type>"|null, "sourceUrl": "", "quote": "", "notFound": ""},
   "channel": {"value": {"kind": "portal"|"email"|"in_person"|"mail"|"with_other_permit", "value": "<url | address | office | permit>"}|null, "sourceUrl": "", "quote": "", "notFound": ""},
-  "alternateChannels": [{"value": {"kind": "...", "value": "..."}, "sourceUrl": "", "quote": ""}]}],
+  "alternateChannels": [{"value": {"kind": "...", "value": "..."}, "sourceUrl": "", "quote": ""}],
+  "secondStage": {"value": {"system": "<name>", "trigger": "<what opens it>"}|null, "sourceUrl": "", "quote": "", "notFound": ""}}],
  "prerequisites": [{"value": "<a step at another office>", "sourceUrl": "", "quote": ""}]}`;
 
 type RawFact = { value?: unknown; sourceUrl?: unknown; quote?: unknown; notFound?: unknown } | null | undefined;
@@ -598,6 +601,30 @@ function channelFields(p: Record<string, unknown>, seenUrls: string[]): Pick<Per
   return { channel, ...(alternateChannels.length ? { alternateChannels } : {}) };
 }
 
+/** A SECOND STAGE OF THE FILING (#28), cited: the plans go into another system the agency opens
+ *  after the application (and its fee). Kept only when the quote NAMES that system
+ *  (secondStage.quoteNamesSystem) on a page the lookup saw; a name that is an address is not a system.
+ *  A description for a person to confirm: it changes no track and is never a filing door. */
+export function acceptSecondStage(raw: RawFact, seenUrls: string[]): CitedFact<PermitSecondStageAnswer> {
+  return acceptCited<PermitSecondStageAnswer>(raw, {
+    seenUrls, what: "second stage",
+    coerce: (v) => {
+      const o = v && typeof v === "object" ? v as Record<string, unknown> : null;
+      const system = str(o?.system).replace(/\s+/g, " ").slice(0, 120);
+      if (!system || /https?:\/\/|www\.|@/i.test(system)) return null;
+      return { system, trigger: str(o?.trigger).replace(/\s+/g, " ").slice(0, 200) };
+    },
+    supports: (v, quote) => quoteNamesSystem(v.system, quote),
+  });
+}
+/** The second-stage field of a raw permit answer (absent when the answer gave none or none was kept,
+ *  so an older-shaped answer keeps its older-shaped row). */
+function secondStageField(p: Record<string, unknown>, seenUrls: string[]): Pick<PermitProcessPermitAnswer, "secondStage"> {
+  if (p.secondStage == null) return {};
+  const fact = acceptSecondStage(p.secondStage as RawFact, seenUrls);
+  return fact.value ? { secondStage: fact } : {};
+}
+
 function parsePrerequisites(raw: unknown, seenUrls: string[]): CitedFact<string>[] {
   return (Array.isArray(raw) ? raw : []).slice(0, 5)
     .map((r) => acceptCited<string>(r as RawFact, { seenUrls, what: "prerequisite", coerce: (v) => str(v).slice(0, 200) || null, supports: supportsPrerequisite }))
@@ -739,7 +766,7 @@ export function parseProcessPart(text: string, seenUrls: string[], stopReason: s
   return { issuingAgency, permitStructure, permits, buildingProgram, unincorporatedZoning, groundMountZoning, batteryPermitting, ...(reviewTime ? { reviewTime } : {}), prerequisites: parsePrerequisites(json.prerequisites, seenUrls), problem: truncated ? "answer was cut off (kept only fully parsed, cited values)" : "" };
 }
 
-type PortalStepAnswer = { portalUrl: CitedFact<string>; recordType: CitedFact<string> } & Pick<PermitProcessPermitAnswer, "channel" | "alternateChannels">;
+type PortalStepAnswer = { portalUrl: CitedFact<string>; recordType: CitedFact<string> } & Pick<PermitProcessPermitAnswer, "channel" | "alternateChannels" | "secondStage">;
 /** The portal step's answer: per discipline, the cited portal and record type (the same doors as
  *  the process part), its cited filing channel, plus any cited prerequisite the agency's pages state. */
 export function parsePortalPart(text: string, seenUrls: string[], stopReason: string | null, platformPages: string[] = [], entity: PortalEntity | null = null): {
@@ -751,7 +778,7 @@ export function parsePortalPart(text: string, seenUrls: string[], stopReason: st
   for (const p of (Array.isArray(json.permits) ? json.permits : []) as Array<Record<string, unknown>>) {
     const discipline = asDiscipline(p?.discipline);
     if (!discipline) continue;
-    out.set(discipline, { portalUrl: acceptPortal(p.portalUrl as RawFact, seenUrls, platformPages, entity), recordType: acceptRecordType(p.recordType as RawFact, seenUrls), ...channelFields(p, seenUrls) });
+    out.set(discipline, { portalUrl: acceptPortal(p.portalUrl as RawFact, seenUrls, platformPages, entity), recordType: acceptRecordType(p.recordType as RawFact, seenUrls), ...channelFields(p, seenUrls), ...secondStageField(p, seenUrls) });
   }
   return { byDiscipline: out, prerequisites: parsePrerequisites(json.prerequisites, seenUrls), problem: "" };
 }
@@ -1755,6 +1782,8 @@ export async function runPermitProcessLookup(
       documents: df?.documents ?? ungrounded("not found"),
       fee: df?.fee ?? ungrounded("not found"),
       ...channelOf(p.discipline),
+      // #28: the portal step's cited second stage (a description for a person to confirm).
+      ...(portalFor.get(p.discipline)?.secondStage ? { secondStage: portalFor.get(p.discipline)!.secondStage } : {}),
     };
   });
   prerequisites.push(...(ev?.prerequisites ?? []));
@@ -1901,6 +1930,8 @@ export function mergeWithEarlier(
       recordType: carryType ? b.recordType : p.recordType, documents: keep(p.documents, b.documents), fee: keep(p.fee, formulaFeeNotANumber(b.fee)),
       ...(channelNow.channel ? { channel: channelNow.channel } : {}),
       ...(channelNow.alternateChannels?.length ? { alternateChannels: channelNow.alternateChannels } : {}),
+      // A second stage this run did not establish is kept from the earlier row (same issuer).
+      ...((p.secondStage?.value ? p.secondStage : b.secondStage) ? { secondStage: p.secondStage?.value ? p.secondStage : b.secondStage } : {}),
     };
   });
   // A permit only the earlier row lists is carried too — through the same doors (its portal and the
