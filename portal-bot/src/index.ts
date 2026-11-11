@@ -1023,6 +1023,9 @@ export async function learnPortal(input: {
       userDataDir: input.userDataDir,
       startUrl: input.portalUrl,
     });
+    // How the login ended, carried on BOTH outcomes so the backend's login health is keyed on
+    // the status (a success clears a stale mark; a never-posted form writes nothing).
+    const login = (loginResult.data as { login?: import("./adapters/autoLearnAdapter").LearnResult["login"] } | undefined)?.login;
     if (!loginResult.ok) {
       adapter.debug?.finalize({ outcome: "login_failed", ok: false, pauseReason: loginResult.pauseReason ?? null, message: loginResult.message });
       return {
@@ -1035,6 +1038,7 @@ export async function learnPortal(input: {
         pauseReason: loginResult.pauseReason ?? null,
         message: loginResult.message,
         debugDir: adapter.debug?.dir,
+        ...(login ? { login } : {}),
       };
     }
     input.onProgress?.({
@@ -1064,6 +1068,7 @@ export async function learnPortal(input: {
     if (leaveOpen && input.onHumanStep) {
       try { await adapter.armHumanCapture(draftAwareHumanSink(adapter, input.onHumanStep, input.onDraftCreated)); } catch { /* capture is best-effort */ }
     }
+    if (login && !learnResult.login) learnResult.login = login;
     return learnResult;
   } catch (err) {
     // learn() already recorded the error + stack into the bundle and finalized it; make sure

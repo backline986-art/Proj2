@@ -1723,13 +1723,25 @@ async function autoLearnPortalInner(
   if (credential && project.clientId) {
     try {
       const msg = String(learn.message || "");
-      const rejected = loginWasRefused(msg);
-      const reachedPortal = learn.ok || learn.pageCount > 0 || /review|advance|fill/i.test(msg);
-      if (rejected) {
-        recordLoginOutcome(db, project.clientId, portalUrl, { ok: false, note: msg.slice(0, 240) });
-      } else if (reachedPortal) {
-        recordLoginOutcome(db, project.clientId, portalUrl, { ok: true, note: "login accepted" });
+      // KEYED ON THE LOGIN'S STATUS when the run carries one (LearnResult.login), on the
+      // message's wording only for a result written before it did. A refusal is recorded with
+      // the portal's own banner as the note; a success clears a stale mark. A submit click that
+      // never posted the form (City of Bend's panel toggle, detail.cause toggle_click) writes
+      // NOTHING — the password was never presented, so the page is not the portal's answer.
+      const login = (learn as { login?: { status?: string; detail?: { cause?: string; banner?: string } | null } }).login;
+      let verdict: { ok: boolean; note: string } | null = null;
+      if (login?.status) {
+        if (login.status === "logged_in" || login.status === "already_authenticated" || login.status === "no_login_required") {
+          verdict = { ok: true, note: "login accepted" };
+        } else if (login.detail?.cause !== "toggle_click" && loginWasRefused(msg)) {
+          verdict = { ok: false, note: (login.detail?.banner ? `the portal answered "${login.detail.banner}"` : msg).slice(0, 240) };
+        }
+      } else if (loginWasRefused(msg)) {
+        verdict = { ok: false, note: msg.slice(0, 240) };
+      } else if (learn.ok || learn.pageCount > 0 || /review|advance|fill/i.test(msg)) {
+        verdict = { ok: true, note: "login accepted" };
       }
+      if (verdict) recordLoginOutcome(db, project.clientId, portalUrl, verdict);
     } catch { /* diagnostic only */ }
   }
 

@@ -15,6 +15,7 @@ import { clearSecretTags, secretMaskPatterns, tagSecretsForMask } from "../secre
 import { applyFormatHint } from "../formatHint";
 import { scrapeReviewScreen as scrapeReviewScreenShared } from "../reviewScreenScraper";
 import { performLogin, lastRevealTrail, loginFormPresent, holdForPerson } from "./loginFlow";
+import type { LoginStatus, LoginDetail } from "./loginFlow";
 import { enterApplicationFlow, isExcludedEntryLabel, normalizeEntryLabel, chooseApplicationType, scanChoiceTiles } from "./applicationEntry";
 import { explainProgramChoice, jobClassOf, offeredLabels, programSelector, scanProgramGroups, type ProgramGroup, type ProgramJob } from "./applicationProgram";
 import { planHiddenReveal, planLabelProxy } from "./revealHidden";
@@ -261,6 +262,10 @@ export interface LearnResult {
   /** "mfa_captcha" if a challenge stopped us, else null. */
   pauseReason: string | null;
   message: string;
+  /** How the login ended — performLogin's status and its submit accounting (what was clicked,
+   *  whether the form posted, the refusal banner). The backend keys login health on THIS, not on
+   *  the message's wording. Absent when the run never reached a login. */
+  login?: { status: LoginStatus; detail: LoginDetail | null };
   /** A NAMED stop (machine-readable), when the walk ended itself for a reason it can name:
    *  login_needed_no_credential, login_repeated_on_host, login_midrun_failed,
    *  login_advance_with_empty_credentials, aca_wrong_module_cap, no_fill_progress. */
@@ -4224,9 +4229,24 @@ export class AutoLearnAdapter extends BasePortalAdapter {
       // Log in via the shared, portal-agnostic login flow. It detects/reveals the login
       // form, fills it (known + unknown portals), verifies success, and stops on MFA.
       // Never logs credentials.
-      const result = await performLogin(this.page, context.credential, { onPark: this.options.onPark, parkMs: this.options.parkMs });
-      // Status + redacted message only — performLogin never returns credentials.
-      this.debug?.event({ type: "login", status: result.status, startUrl: context.startUrl ? safeHostPath(context.startUrl) : null });
+      const result = await performLogin(this.page, context.credential, {
+        onPark: this.options.onPark,
+        parkMs: this.options.parkMs,
+        // THE PAGE RIGHT AFTER THE SUBMIT, not only the one ~17 s later when the poll gives up
+        // (City of Bend: the only capture showed the panel already collapsed, and nothing said
+        // what had been clicked). Value-stripping capture + a PNG with the login fields masked
+        // — never a raw snapshot (rule 2).
+        onSubmitted: async ({ page, mask }) => {
+          await this.debug?.capturePageHtml(page, "login-submitted").catch(() => {});
+          await this.debug?.screenshot(page, "login-submitted", { mask }).catch(() => {});
+        },
+      });
+      // Status + redacted message + what was clicked (tag/role/id, never a value) — performLogin
+      // never returns credentials.
+      this.debug?.event({ type: "login", status: result.status, startUrl: context.startUrl ? safeHostPath(context.startUrl) : null, detail: result.detail ?? null });
+      // The status travels with every return below (data.login), so the backend keys login
+      // health on it instead of regexing this adapter's own wording.
+      const login = { status: result.status, detail: result.detail ?? null };
       // A LOGIN FAILURE MUST LEAVE BEHIND THE PAGE IT FAILED ON.
       //
       // The 2026-09-04 baseline reported four portals as "the portal's login form was not
@@ -4252,10 +4272,10 @@ export class AutoLearnAdapter extends BasePortalAdapter {
         // no_login_required: the jurisdiction publishes its application directly, with no
         // account to sign in to. Proceeding is the correct outcome, not a fallback — the
         // form is already in front of us.
-        return { ok: true, message: `Opened ${this.portalName} for autonomous learning. ${result.message}` };
+        return { ok: true, message: `Opened ${this.portalName} for autonomous learning. ${result.message}`, data: { login } };
       }
       if (result.status === "mfa_captcha") {
-        return { ok: false, message: result.message, pauseReason: "mfa_captcha" };
+        return { ok: false, message: result.message, pauseReason: "mfa_captcha", data: { login } };
       }
       if (result.status === "no_credential") {
         // NAME THE PORTAL IT NEEDED. "No credential for this client/portal" sent an operator
@@ -4265,10 +4285,10 @@ export class AutoLearnAdapter extends BasePortalAdapter {
         // asked for is the whole answer, so it goes in the message.
         const host = context.startUrl ? safeHostPath(context.startUrl).split("/")[0] : "";
         const at = host ? ` at ${host}` : "";
-        return { ok: false, message: `${this.portalName}${at} is showing a login page but no stored credential was found for THIS portal. Add the username + password for ${host || "this portal"} under the client's logins, then retry. A login saved for a different portal is never reused — jurisdictions on the same platform still use separate hosts and accounts. (Or run \`npm run portal:login\` once to establish a persistent session.)` };
+        return { ok: false, message: `${this.portalName}${at} is showing a login page but no stored credential was found for THIS portal. Add the username + password for ${host || "this portal"} under the client's logins, then retry. A login saved for a different portal is never reused — jurisdictions on the same platform still use separate hosts and accounts. (Or run \`npm run portal:login\` once to establish a persistent session.)`, data: { login } };
       }
       // still_on_login / no_username_field / no_submit_control / error
-      return { ok: false, message: `${this.portalName}: ${result.message}` };
+      return { ok: false, message: `${this.portalName}: ${result.message}`, data: { login } };
     } catch (err) {
       this.debug?.event({ type: "login_error", message: err instanceof Error ? err.message : String(err) });
       return { ok: false, message: `Auto-learn login failed: ${err instanceof Error ? err.message : String(err)}` };
