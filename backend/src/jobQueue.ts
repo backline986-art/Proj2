@@ -621,6 +621,21 @@ const PROJECT_BUSY_SQL = `NOT (
           SELECT 1 FROM job_queue busy WHERE busy.project_id = job_queue.project_id
              AND busy.status = 'running' AND busy.job_type = 'stage_step'))))`;
 
+// ONE AGENCY, ONE FEE-RESEARCH PASS AT A TIME (#130). ensureFeeSchedulesResearched queues one
+// fee_research per (track, agency, discipline), so one permit project queues a structural AND an
+// electrical pass for one AHJ back to back; with JOB_CONCURRENCY > 1 one drain started both (4 ms
+// apart, measured), and two passes — two 10-document budgets — hammered one Cloudflare-walled host
+// through the shared window queue. Keyed on the payload's profileKey (the AGENCY, not the project:
+// two projects at one AHJ collide too), outside the project wrapper above. A payload with no
+// profileKey (an older row) is never held. Same shape as PROJECT_BUSY_SQL: the candidate read and
+// the claim UPDATE enforce one predicate.
+const FEE_RESEARCH_BUSY_SQL = `NOT (
+     job_type = 'fee_research'
+     AND json_extract(payload, '$.profileKey') IS NOT NULL
+     AND EXISTS (
+       SELECT 1 FROM job_queue busy WHERE busy.status = 'running' AND busy.job_type = 'fee_research'
+          AND json_extract(busy.payload, '$.profileKey') = json_extract(job_queue.payload, '$.profileKey')))`;
+
 // Claim the next runnable job: mark it 'running' and return it, or null when nothing is
 // claimable. FULLY SYNCHRONOUS — no await between the read and the claim — so concurrent
 // drain callers in this process each take a different job and cannot both pass the
@@ -646,6 +661,7 @@ export function claimNextJob(db: AppDb): JobRecord | null {
      WHERE status = 'pending'
        AND (scheduled_at IS NULL OR scheduled_at <= ?)
        AND ${PROJECT_BUSY_SQL}
+       AND ${FEE_RESEARCH_BUSY_SQL}
      ORDER BY priority DESC, created_at ASC
      LIMIT 50`,
     [now],
@@ -663,7 +679,7 @@ export function claimNextJob(db: AppDb): JobRecord | null {
   if (!row) return null;
 
   const job = mapJob(row);
-  db.run(`UPDATE job_queue SET status = 'running', started_at = ? WHERE id = ? AND status = 'pending' AND ${PROJECT_BUSY_SQL}`, [now, job.id]);
+  db.run(`UPDATE job_queue SET status = 'running', started_at = ? WHERE id = ? AND status = 'pending' AND ${PROJECT_BUSY_SQL} AND ${FEE_RESEARCH_BUSY_SQL}`, [now, job.id]);
 
   // Verify we won the claim (optimistic lock)
   const claimed = db.get<Row>("SELECT status FROM job_queue WHERE id = ?", [job.id]);
