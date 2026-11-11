@@ -6823,6 +6823,8 @@ export class AutoLearnAdapter extends BasePortalAdapter {
       // directive (capped at MAX_RECOVERY) so the model can choose a different action and heal.
       let recoveryHint = pendingHint;
       pendingHint = "";
+      // #139: the planner was told THIS iteration which validation errors blocked the last advance.
+      let validationHinted = false;
       const loopFp = await this.loopFingerprint();
       const consecutiveStuck = !!loopFp && loopFp === lastLoopFp;
       const cycling = !!loopFp && !consecutiveStuck && recentFingerprints.includes(loopFp);
@@ -6846,6 +6848,7 @@ export class AutoLearnAdapter extends BasePortalAdapter {
         const validationLine = lastValidationErrors.length > 0
           ? ` The portal BLOCKED the advance with these validation errors — fix these specific fields before advancing again: ${lastValidationErrors.slice(0, 10).join(" | ")}.`
           : "";
+        if (validationLine) validationHinted = true;
         recoveryHint =
           `${recoveryHint ? `${recoveryHint} ` : ""}${problem} Recent steps: ${pageTrace.slice(-4).join("  ->  ") || "(none)"}.${validationLine} ` +
           `Do NOT repeat the action that caused this. In particular, do NOT click a navigation link that RESTARTS the flow ` +
@@ -8979,7 +8982,12 @@ export class AutoLearnAdapter extends BasePortalAdapter {
             const shared = formLabels.filter((l) => prev.includes(l)).length;
             return shared / Math.max(prev.length, formLabels.length) >= 0.8;
           };
-          const bounced = unfilled.find((m) => {
+          // AN ADVANCE THE PORTAL REFUSED WITH VALIDATION ERRORS THE WALK READ is the validation
+          // guard's first: the planner is re-planned once with those errors (the stuck recovery).
+          // Only after that turn — or when the portal said nothing the walk could read — is the
+          // blank that came back the run's answer.
+          const guardOwesReplan = lastValidationErrors.length > 0 && !validationHinted;
+          const bounced = guardOwesReplan ? undefined : unfilled.find((m) => {
             const left = this.requiredBlankLeft.get(m);
             return !!left && left.path === path && left.page === pageCount - 1 && sameForm(left.form);
           });
