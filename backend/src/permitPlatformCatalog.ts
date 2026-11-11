@@ -883,6 +883,59 @@ export function datedFeeScheduleLinks(pages: ReadPage[], names: string[], state?
   }
   return out.slice(0, 3);
 }
+/** THE NEWEST SCHEDULE THE AGENCY STILL LINKS IS ITS CURRENT ONE (owner, 2026-11-11, asked whether a
+ *  schedule dated last year or older counts when it is still the newest the agency links: "this can
+ *  be done the same way as the auto verification thing. If its from an offical source we can use
+ *  it"). The prior-year rule (staleOrOtherFeeSource) stands everywhere else. A prior-year schedule
+ *  counts as this job's current one only when ALL of these hold:
+ *    · a page of the agency's own site that Keelix read in this run links it (never a search result,
+ *      never a URL an answer merely cites);
+ *    · it is a DOCUMENT of this job's kind, dated to a prior year and nothing else: an archived,
+ *      superseded, draft or proposed schedule, and another permit kind's, never count;
+ *    · none of those pages links a fee schedule DOCUMENT that is current (undated, or this year's):
+ *      where the agency links a current one, that one is its schedule and a dated one beside it is
+ *      history. The caller asks only after every current fee page and document it read priced nothing;
+ *    · it is the NEWEST dated one those pages link;
+ *    · its host is OFFICIAL by the caller's predicate (the one shared official-source predicate).
+ *  At most two (a building and an electrical schedule of the same year). */
+export function newestLinkedFeeSchedules(
+  pages: ReadPage[], names: string[], state: string | undefined, isOfficialHost: (url: string) => boolean, now = new Date().getFullYear(),
+): Array<{ url: string; year: number; linkedFrom: string }> {
+  const found: Array<{ url: string; year: number | null; linkedFrom: string }> = [];
+  for (const page of pages) {
+    if (!page.ok || page.kind !== "html") continue;
+    const dom = registrableDomain(portalHostOf(page.finalUrl));
+    for (const l of page.links) {
+      const host = portalHostOf(l.href);
+      if (!host || (registrableDomain(host) !== dom && !isOfficialAgencyHost(host, names, state))) continue;
+      if (/translate|facebook|twitter|mailto|[?&]splash=|isexternal/i.test(l.href)) continue;
+      if (!namesFeeSchedule(l.text, l.href)) continue;
+      const both = `${l.text} ${feeDocumentNameWords(l.href)}`;
+      const why = staleOrOtherFeeSource(l.text, l.href, now);
+      if (why && /another permit kind/.test(why)) continue;
+      // The same "this job's kind, or names no office" test the dated list uses: a clerk's or a
+      // library's schedule neither counts as current nor stands in the way.
+      if (!JOB_FEE_KIND.test(both) && !NAMES_NO_OFFICE.test(both.replace(/[^a-z]+/gi, " ").trim())) continue;
+      // A CURRENT schedule DOCUMENT is linked: the agency's schedule is that one. Nothing dated
+      // counts. (A current fee PAGE is navigation; the caller reads it first and asks here only
+      // when nothing current priced the fee.)
+      if (!why) { if (DOCUMENT_URL.test(l.href)) return []; continue; }
+      if (!/^a prior-year schedule/.test(why) || !DOCUMENT_URL.test(l.href)) continue;
+      const year = Math.max(...yearsNamed(l.text, l.href));
+      if (!found.some((f) => f.url === l.href)) found.push({ url: l.href, year: Number.isFinite(year) ? year : null, linkedFrom: page.finalUrl });
+    }
+  }
+  const dated = found.filter((f): f is { url: string; year: number; linkedFrom: string } => f.year != null);
+  if (!dated.length) return [];
+  const newest = Math.max(...dated.map((f) => f.year));
+  return dated.filter((f) => f.year === newest && isOfficialHost(f.url)).slice(0, 2);
+}
+/** The year a fee source is dated to when that is a PRIOR year, else null (the quote says so). */
+export function priorYearOfFeeSource(href: string, now = new Date().getFullYear()): number | null {
+  const why = staleOrOtherFeeSource("", href, now);
+  const m = why ? /^a prior-year schedule \((\d{4})\)/.exec(why) : null;
+  return m ? Number(m[1]) : null;
+}
 /** Current-year solar / building schedules first, then a master schedule, then the rest. */
 function feeRank(words: string, href: string, now = new Date().getFullYear()): number {
   const years = yearsNamed(words, href);
