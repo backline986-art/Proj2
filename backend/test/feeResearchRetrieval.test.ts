@@ -151,8 +151,17 @@ async function main(): Promise<void> {
   // The WAF, and the window that gets past it.
   // -------------------------------------------------------------------------
   let plainHits = 0;
+  let walledHits = 0;
   const server = http.createServer((req, res) => {
     const url = req.url || "/";
+    if (/^\/walled-\d+\.pdf/.test(url)) {
+      // Cloudflare's stock refusal (#130): ten distinct documents, every one of them 403 to a
+      // script and — in section 7 — to a real window too.
+      walledHits++;
+      res.writeHead(403, { "content-type": "text/html", server: "cloudflare" });
+      res.end("<html><head><title>Access denied</title></head><body>Access denied. Error code 1020.</body></html>");
+      return;
+    }
     if (url.startsWith("/fees.pdf")) {
       // Akamai's stock refusal, verbatim in shape: a 403 with an empty-ish body
       // and a Server header that names the CDN, aimed at the client and not at
@@ -861,6 +870,157 @@ async function main(): Promise<void> {
     "…but its ancillary charges are STRIPPED — untrusted input may not assert a printed row",
     !((blindRow?.brackets || [])[0]?.ancillaryCharges?.length),
     JSON.stringify((blindRow?.brackets || [])[0] ?? null),
+  );
+
+  // -------------------------------------------------------------------------
+  // 7. A HOST THAT REFUSED IS NOT ASKED AGAIN THIS PASS (#130).
+  //
+  // Fee research opened 17 headed windows against one Cloudflare-walled host in
+  // 80 s: each walled URL came back "Could not retrieve …" with no instruction to
+  // stop, the prompt told the model to keep trying .gov walls, and the only
+  // ceiling was the 10-document budget — per pass, with two passes per AHJ. The
+  // owner's rule: one try per protected page, back off, mark the fee unconfirmed.
+  // -------------------------------------------------------------------------
+  type RefusedLedger = ReturnType<typeof newFeeDocumentLedger> & { refused?: Array<{ url: string; host: string; reason: string }> };
+  const fees = await import("../src/feeSchedules");
+  // Optional access ON PURPOSE: with the fix stashed the field and the helper do not exist, and
+  // the run must then fail on the window COUNT, not on a TypeError.
+  const refusedOf = (l: RefusedLedger) => l.refused ?? [];
+  const hostsRefused = (fees as { feeResearchHostsRefused?: (l: RefusedLedger) => string[] }).feeResearchHostsRefused ?? (() => [] as string[]);
+  const host = new URL(base).host;
+  const STOP = `Do not request any URL on ${host} again in this pass`;
+
+  documentFetch._resetHostPoliteness?.();
+  let refusingWindows = 0;
+  const refusingLauncher = async () => {
+    refusingWindows++;
+    return {
+      async visit(url: string) { return { status: 200, html: "<html><body>warm</body></html>", url }; },
+      async fetchInPage() { return { status: 403, contentType: "text/html", bytes: new TextEncoder().encode("Access denied. Error code 1020.") }; },
+      async close() { /* nothing to close */ },
+    };
+  };
+  walledHits = 0;
+  const walledLedger: RefusedLedger = newFeeDocumentLedger();
+  const stops: string[] = [];
+  for (let n = 1; n <= 10; n++) {
+    stops.push(await openFeeDocument({ url: `${base}/walled-${n}.pdf` }, walledLedger, { launcher: refusingLauncher, timeoutMs: 5_000, browserTimeoutMs: 10_000 }));
+  }
+  check("THE BITE: ten walled URLs on one host open exactly ONE window", refusingWindows === 1, `${refusingWindows} window(s)`);
+  check("…and the server saw ONE walled request, not ten", walledHits === 1, `${walledHits} hit(s)`);
+  check("the first result already tells the model to stop asking that host", stops[0].includes(STOP), stops[0].slice(0, 300));
+  check("…and names the refusal it is reporting", /refuses automated clients \(/.test(stops[0]) && /403/.test(stops[0]) && /cloudflare/i.test(stops[0]), stops[0].slice(0, 300));
+  check("…and says what to do instead: answer, or found:false naming the host as unconfirmed", /found:false/.test(stops[0]) && /unconfirmed \(bot-protected\)/.test(stops[0]), stops[0].slice(0, 300));
+  check("every later result is the same stop, in the budget-spent shape", stops.slice(1).every((s) => s.includes(STOP) && /^This site refuses automated clients/.test(s)), stops[1]?.slice(0, 200));
+  check("every URL asked is still in `attempted`, so 'hosts tried' reports it", (walledLedger.attempted ?? []).length === 10, String((walledLedger.attempted ?? []).length));
+  check("the ledger records each refused call, under the normalised host", refusedOf(walledLedger).length === 10 && refusedOf(walledLedger).every((r) => r.host === host), JSON.stringify(refusedOf(walledLedger).slice(0, 2)));
+  check("a refusal is never evidence", walledLedger.evidence.length === 0, String(walledLedger.evidence.length));
+  check("the hosts-tried split names the refused host", hostsRefused(walledLedger).length === 1 && hostsRefused(walledLedger)[0] === host, JSON.stringify(hostsRefused(walledLedger)));
+
+  // The stored row must say so: ONE segment per refused host, merged by segment.
+  const refusedFinding = base_finding({ sourceUrl: `${base}/walled-1.pdf`, sourceQuote: "Solar | $200", brackets: [{ feeUsd: 200, label: "Solar" }] });
+  const refusedNotes = retrievalNotes(refusedFinding, walledLedger, checkQuoteSupport(refusedFinding, walledLedger)).join(" | ");
+  check(
+    "notes carry ONE 'REFUSED: <host> refused automated clients' segment with the fee UNCONFIRMED",
+    (refusedNotes.match(/REFUSED: /g) || []).length === 1 && refusedNotes.includes(`REFUSED: ${host} refused automated clients`) && /fee UNCONFIRMED from that source/.test(refusedNotes),
+    refusedNotes,
+  );
+  check("…beside the 'web search alone' admission, not instead of it", /web search alone/.test(refusedNotes), refusedNotes);
+  check("the REFUSED segment carries no ' | ' that would shred it", !refusedNotes.split(" | ").some((seg) => seg.startsWith("REFUSED") && seg.includes("|")), refusedNotes);
+  // A host that merely 404'd is NOT refused: the 404 above stays a dead end.
+  check("a 404 is still not a refusal in the ledger", refusedOf(htmlLedger as RefusedLedger).length === 0, JSON.stringify(refusedOf(htmlLedger as RefusedLedger)));
+
+  // -------------------------------------------------------------------------
+  // 7b. THE LOOP: a refusal costs nothing from the document budget, and the pass
+  //     reports refused hosts apart from the ones that answered.
+  //
+  // Scripted Messages API (the costLeaks.test stub): ten open_document calls on
+  // the walled host, then an eleventh on a host that answers. Ten refusals used
+  // to spend the whole 10-document budget, so the eleventh — the one that could
+  // have held the fee — came back "Document budget spent".
+  // -------------------------------------------------------------------------
+  const answering = http.createServer((_req, res) => { res.writeHead(200, { "content-type": "application/pdf" }); res.end(Buffer.from(ancPdfBytes)); });
+  await new Promise<void>((resolve) => answering.listen(0, "127.0.0.1", resolve));
+  const otherBase = `http://127.0.0.1:${(answering.address() as AddressInfo).port}`;
+  const otherHost = new URL(otherBase).host;
+  process.env.DOCUMENT_FETCH_ALLOW_ORIGINS = `${base},${otherBase}`;
+  // The loop passes no launcher, so a wall would open REAL Chromium: the window is switched off,
+  // which also means documentFetch's own back-off never stamps — what stops URLs 2-10 here is the
+  // pass's ledger, the belt to that brace.
+  process.env.DOCUMENT_FETCH_BROWSER = "0";
+  process.env.ANTHROPIC_API_KEY = "sk-ant-stub-key-no-network";
+  delete process.env.ANTHROPIC_BASE_URL;
+  documentFetch._resetHostPoliteness?.();
+  walledHits = 0;
+
+  type Block = { type: "text"; text: string } | { type: "tool_use"; id: string; name: string; input: Record<string, unknown> };
+  interface Scripted { blocks: Block[]; stop: string }
+  const ev = (name: string, data: unknown) => `event: ${name}\ndata: ${JSON.stringify(data)}\n\n`;
+  const sse = (s: Scripted, model: string): string => {
+    const usage = { input_tokens: 1000, output_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 };
+    const out = [ev("message_start", { type: "message_start", message: { id: "msg_stub", type: "message", role: "assistant", model, content: [], stop_reason: null, stop_sequence: null, usage } })];
+    s.blocks.forEach((b, index) => {
+      if (b.type === "text") {
+        out.push(ev("content_block_start", { type: "content_block_start", index, content_block: { type: "text", text: "", citations: null } }));
+        out.push(ev("content_block_delta", { type: "content_block_delta", index, delta: { type: "text_delta", text: b.text } }));
+      } else {
+        out.push(ev("content_block_start", { type: "content_block_start", index, content_block: { type: "tool_use", id: b.id, name: b.name, input: {} } }));
+        out.push(ev("content_block_delta", { type: "content_block_delta", index, delta: { type: "input_json_delta", partial_json: JSON.stringify(b.input) } }));
+      }
+      out.push(ev("content_block_stop", { type: "content_block_stop", index }));
+    });
+    out.push(ev("message_delta", { type: "message_delta", delta: { stop_reason: s.stop, stop_sequence: null }, usage: { output_tokens: 200 } }));
+    out.push(ev("message_stop", { type: "message_stop" }));
+    return out.join("");
+  };
+  const open = (id: string, url: string): Block => ({ type: "tool_use", id, name: "open_document", input: { url } });
+  const queue: Scripted[] = [
+    { blocks: [{ type: "text", text: "Opening the schedule." }, ...[1, 2, 3, 4, 5].map((n) => open(`tu_${n}`, `${base}/walled-${n}.pdf`))], stop: "tool_use" },
+    { blocks: [...[6, 7, 8, 9, 10].map((n) => open(`tu_${n}`, `${base}/walled-${n}.pdf`)), open("tu_11", `${otherBase}/anc-fees.pdf`)], stop: "tool_use" },
+    { blocks: [{ type: "text", text: JSON.stringify({ found: false, reason: "stub: the city's own site refused automated clients" }) }], stop: "end_turn" },
+  ];
+  type Msg = { role: string; content: string | Array<{ type: string; tool_use_id?: string; content?: string }> };
+  const captured: Array<{ messages: Msg[] }> = [];
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = String(input instanceof Request ? input.url : input);
+    if (!url.includes("/v1/messages")) return realFetch(input, init);
+    const body = JSON.parse(String(init?.body ?? "{}")) as { model?: string; messages: Msg[] };
+    captured.push(body);
+    const s = queue.shift() ?? { blocks: [{ type: "text", text: "{}" }], stop: "end_turn" };
+    return new Response(sse(s, String(body.model || "claude-opus-5")), { status: 200, headers: { "content-type": "text/event-stream" } });
+  }) as typeof fetch;
+  let loopOutcome: Awaited<ReturnType<typeof fees.researchFeeSchedule>> | null = null;
+  try {
+    loopOutcome = await fees.researchFeeSchedule(db, { state: "OR", ahj: "City of Walled Gates", track: "permit", discipline: "structural" });
+  } finally {
+    globalThis.fetch = realFetch;
+    delete process.env.DOCUMENT_FETCH_BROWSER;
+    process.env.ANTHROPIC_API_KEY = "";
+    await new Promise<void>((resolve) => answering.close(() => resolve()));
+  }
+  const toolResults = new Map<string, string>();
+  for (const body of captured) for (const m of body.messages) if (Array.isArray(m.content)) for (const b of m.content) if (b.type === "tool_result" && b.tool_use_id) toolResults.set(b.tool_use_id, String(b.content ?? ""));
+  check("the loop ran its three scripted turns", captured.length === 3, `${captured.length} request(s)`);
+  check("the walled host was asked ONCE across ten calls", walledHits === 1, `${walledHits} hit(s)`);
+  check(
+    "all ten walled calls came back as the stop, never as 'Document budget spent'",
+    [1, 2, 3, 4, 5, 6, 7, 8, 9, 10].every((n) => (toolResults.get(`tu_${n}`) ?? "").includes(STOP) && !/Document budget spent/.test(toolResults.get(`tu_${n}`) ?? "")),
+    JSON.stringify([...toolResults.entries()].map(([k, v]) => [k, v.slice(0, 80)])),
+  );
+  check(
+    "THE ELEVENTH DOCUMENT IS STILL READ — ten refusals spent none of the 10-document budget",
+    /HTTP 200/.test(toolResults.get("tu_11") ?? "") && !/Document budget spent/.test(toolResults.get("tu_11") ?? ""),
+    (toolResults.get("tu_11") ?? "(no result)").slice(0, 200),
+  );
+  check("the pass stored nothing (found:false)", loopOutcome !== null && !loopOutcome.saved && !loopOutcome.found, JSON.stringify({ saved: loopOutcome?.saved, found: loopOutcome?.found }));
+  check(
+    "the NOT FOUND reason splits the hosts that REFUSED from the hosts that ANSWERED",
+    /NOT FOUND/.test(loopOutcome?.reason ?? "")
+      && (loopOutcome?.reason ?? "").includes(`hosts that refused automated clients (fee UNCONFIRMED from them): ${host};`)
+      // The trailing full stop pins the answered list to the one host that answered.
+      && (loopOutcome?.reason ?? "").includes(`hosts that answered: ${otherHost}.`),
+    loopOutcome?.reason ?? "(no outcome)",
   );
 
   await new Promise<void>((resolve) => server.close(() => resolve()));

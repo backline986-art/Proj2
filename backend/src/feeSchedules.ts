@@ -48,7 +48,7 @@ import type { FeeChargeBreakdown, FeePaymentMethod, PaidFeeReceipt, ProjectRecor
 // column it is meant to explain, and a wrong date makes a stale schedule look
 // current — strictly worse than no date at all.
 import { isoForDocumentDate } from "./documentDate";
-import { fetchPublicDocument } from "./documentFetch";
+import { fetchPublicDocument, isRefusal, politeHostOf } from "./documentFetch";
 import type { FetchPublicDocumentOptions } from "./documentFetch";
 import { DEFAULT_FEE_KEYWORDS, groupItemsIntoRows, extractPdfTextItems } from "./pdfTables";
 import type { PdfTextRow } from "./pdfTables";
@@ -1597,10 +1597,24 @@ export interface FeeDocumentLedger {
    *  that refused us are the half of that sentence `evidence` cannot supply.
    *  Optional so a ledger built as a literal (tests, older callers) still types. */
   attempted?: string[];
+  /** EVERY CALL A HOST REFUSED THIS PASS (#130), one entry per call, under the host as
+   *  documentFetch counts it (politeHostOf). The first entry is the refusal that was actually
+   *  answered — a window tried and refused, a challenge, a notice; the rest are calls the pass
+   *  itself stopped before anything was sent. A refused call is not one of the model's ten
+   *  retrievals (the loop reads this list's growth), and the stored row says the fee is
+   *  UNCONFIRMED from that host. Optional so a ledger built as a literal still types. */
+  refused?: Array<{ url: string; host: string; reason: string }>;
 }
 
 export function newFeeDocumentLedger(): FeeDocumentLedger {
-  return { evidence: [], corpus: [], attempted: [] };
+  return { evidence: [], corpus: [], attempted: [], refused: [] };
+}
+
+/** The tool_result for a host that refused automated clients, in the shape of the budget-spent
+ *  message: a stop the model can act on, naming the host so the next URL on it is not asked. */
+function refusedHostToolResult(host: string, reason: string): string {
+  return `This site refuses automated clients (${reason}). Do not request any URL on ${host} again in this pass; `
+    + `answer from what you have, or return found:false and name ${host} as unconfirmed (bot-protected).`;
 }
 
 const OPEN_DOCUMENT_TOOL = {
@@ -1608,7 +1622,9 @@ const OPEN_DOCUMENT_TOOL = {
   description:
     "Retrieve a PUBLIC web page or PDF and read it. Escalates to a real browser window by itself when a site "
     + "refuses an ordinary HTTP client (many .gov sites sit behind a WAF that 403s every script), so a 403 from "
-    + "your own knowledge of a site is not a reason to skip it — try it here. A PDF comes back as VISUAL ROWS: "
+    + "your own knowledge of a site is not a reason to skip it — try it here, once. A real window is tried ONCE "
+    + "per site: when a result says the site refused automated clients, do not request that site again in this "
+    + "pass — report the fee unconfirmed from that source and move on. A PDF comes back as VISUAL ROWS: "
     + "cells that share a printed line, left to right, joined with ' | '. That pairing is read from the glyph "
     + "coordinates, NOT from the PDF's text order, so the row you see is the row that is printed. An HTML page "
     + "comes back as its links (to follow into a document search) plus its text. Never authenticates and never "
@@ -1787,6 +1803,15 @@ export async function openFeeDocument(
   const url = clean(args.url);
   if (!url) return "No url was given. Call open_document with an absolute http(s) URL.";
   (ledger.attempted ??= []).push(url);
+  // A HOST THAT REFUSED THIS PASS IS NOT ASKED AGAIN (#130): nothing is sent, the model is told
+  // to stop, and the URL still counts as attempted. documentFetch backs the host off too; this
+  // is the pass's own memory of it, which holds even where the window is switched off.
+  const host = politeHostOf(url);
+  const earlier = host ? (ledger.refused ?? []).find((r) => r.host === host) : undefined;
+  if (earlier) {
+    (ledger.refused ??= []).push({ url, host, reason: earlier.reason });
+    return refusedHostToolResult(host, earlier.reason);
+  }
   const find = clean(args.find);
   const pages = Array.isArray(args.pages)
     ? args.pages.map((p) => Number(p)).filter((p) => Number.isInteger(p) && p >= 1).slice(0, 8)
@@ -1799,6 +1824,15 @@ export async function openFeeDocument(
     return `Could not retrieve ${url}: ${err instanceof Error ? err.message : String(err)}`;
   }
   if (!doc.ok || !doc.bytes) {
+    // THE SITE REFUSED US, or refused us earlier (hostBackedOff): one predicate for "was this the
+    // site refusing, not a 404" — isRefusal, the same one the lookup's reader asks. Status 0
+    // means nothing was sent: those "Refused:" reasons (a private address, a non-http URL) are
+    // ours, and must not be reported as the site's.
+    if (host && (doc.hostBackedOff || (doc.status !== 0 && isRefusal(doc.status, doc.reason)))) {
+      const reason = doc.reason.slice(0, 300);
+      (ledger.refused ??= []).push({ url, host, reason });
+      return refusedHostToolResult(host, reason);
+    }
     // The reason names what blocked us — status, Server header, whether a real
     // window was tried. That is a fact about this jurisdiction worth reporting
     // in notes, so it goes to the model rather than being flattened to "failed".
@@ -2247,10 +2281,19 @@ export function corroborationNotes(brackets: FeeBracket[]): string[] {
 /** The note segments that carry the retrieval trail onto the stored row. */
 export function retrievalNotes(finding: FeeScheduleFinding, ledger: FeeDocumentLedger, support: QuoteSupport): string[] {
   const out: string[] = [];
+  // ONE SEGMENT PER HOST THAT REFUSED (#130), on every row this pass stores, found via search or
+  // not: the reader of the fee sheet must know the authority's own site was never read. Segments
+  // merge by segment, so the host's name is the dedupe key and the reason may not carry " | ".
+  const refusedSegments = feeResearchHostsRefused(ledger).map((host) => {
+    const reason = (ledger.refused ?? []).find((r) => r.host === host)?.reason ?? "";
+    return `REFUSED: ${host} refused automated clients (${reason.replace(/\s*\|\s*/g, " / ").slice(0, 160)}); fee UNCONFIRMED from that source`;
+  });
   if (!ledger.evidence.length) {
     out.push("RETRIEVAL: no document was opened this run — the finding rests on web search alone, and its quote could not be checked against any bytes we read.");
+    out.push(...refusedSegments);
     return out;
   }
+  out.push(...refusedSegments);
   const viaBrowser = ledger.evidence.filter((e) => e.via === "browser");
   out.push(
     `RETRIEVAL: read ${ledger.evidence.length} document(s) directly`
@@ -2526,6 +2569,14 @@ export function feeResearchHostsTried(ledger: FeeDocumentLedger): string[] {
   return hosts;
 }
 
+/** The hosts that REFUSED automated clients this pass (#130), in the order refused — the half
+ *  of "hosts tried" a reader must not take as "looked and found nothing there". */
+export function feeResearchHostsRefused(ledger: FeeDocumentLedger): string[] {
+  const hosts: string[] = [];
+  for (const r of ledger.refused ?? []) if (r.host && !hosts.includes(r.host)) hosts.push(r.host);
+  return hosts;
+}
+
 /** NAME EVERY LINE THIS FILING OWES THAT NOTHING PRICED.
  *
  *  Three sources, most-cited first, one line per kind:
@@ -2661,7 +2712,7 @@ So:
 HOW TO WORK: SEARCH FINDS THE DOOR, open_document WALKS THROUGH IT
 Use web_search to LOCATE the jurisdiction's fee page, document search or schedule PDF. Then use open_document to READ it. A search snippet is a lead, not a source: snippets and third-party summaries routinely staple a fee to the wrong line of a table. One real case — a summary of a county electrical schedule reported $346 and $796 for two solar brackets, because it had taken the amounts off the WIND GENERATION rows printed below them. The published numbers were $160 and $265. Only the document says which row a number is on.
 
-open_document climbs to a real browser window by itself when a site refuses an ordinary HTTP client, so DO NOT give up on a .gov page because it seems to block automation — try it. It reads PDF tables BY COORDINATE, returning the cells that share a printed line joined with " | ", which is the same pairing your eye makes and is NOT the order the text sits in the file.
+open_document climbs to a real browser window by itself when a site refuses an ordinary HTTP client, so DO NOT give up on a .gov page because it seems to block automation — try it, once. A real window is tried ONCE per site: a site that refused is not asked again this pass (the tool result will say so). When that happens, report the fee UNCONFIRMED from that source — a finding from another official source, or found:false naming the site as bot-protected — and move on; do not try other URLs on the same site. It reads PDF tables BY COORDINATE, returning the cells that share a printed line joined with " | ", which is the same pairing your eye makes and is NOT the order the text sits in the file.
 
 A GOOD SEQUENCE: search → open_document on the fee page (read its links) → open_document on the schedule PDF with find:"solar" or find:"renewable" to locate the table → open_document again with pages:[N] to read that whole page, headings included → quote the row.
 
@@ -2985,8 +3036,12 @@ export const claudeFeeScheduleResearcher: FeeScheduleResearcher = async (input, 
           continue;
         }
         if (Date.now() >= deadline) { timedOut = true; controller.abort(); break; }
-        opened++;
+        const refusedBefore = ledger.refused?.length ?? 0;
         const body = await openFeeDocument(call.input || {}, ledger, { timeoutMs: 25_000 });
+        // A call a host refused (or that the pass stopped because the host had refused) handed
+        // the model nothing to read; it is not one of its ten retrievals (#130). Windows are
+        // bounded by documentFetch's per-host record now, so the budget need not bound them.
+        if ((ledger.refused?.length ?? 0) === refusedBefore) opened++;
         results.push({ type: "tool_result", tool_use_id: call.id, content: body.slice(0, 60_000) });
       }
       if (timedOut) break;
@@ -3225,9 +3280,17 @@ export async function researchFeeSchedule(
   // "NOT FOUND" IS NEVER "NO FEES" (#661). A schedule we could not find is reported with the hosts
   // that were tried, so the next reader knows where not to look again, and no row is written.
   if (!finding.found) {
-    const hosts = feeResearchHostsTried(ledger);
+    // A host that REFUSED us is named apart from one that answered (#130): "tried X" would read
+    // as "looked at X and found nothing", and X was never read at all.
+    const refused = feeResearchHostsRefused(ledger);
+    const refusedKeys = new Set(refused);
+    const answered = feeResearchHostsTried(ledger).filter((h) => !refusedKeys.has(politeHostOf(`http://${h}`) || h));
+    const parts = [
+      refused.length ? `hosts that refused automated clients (fee UNCONFIRMED from them): ${refused.slice(0, 12).join(", ")}` : "",
+      answered.length ? `hosts that answered: ${answered.slice(0, 12).join(", ")}` : "",
+    ].filter(Boolean);
     finding.reason = `${clean(finding.reason) || "Research returned no usable fee schedule."} NOT FOUND — this is not a finding that ${subject} charges nothing; `
-      + (hosts.length ? `hosts tried: ${hosts.slice(0, 12).join(", ")}.` : "no document was retrieved from any host.");
+      + (parts.length ? `${parts.join("; ")}.` : "no document was retrieved from any host.");
   }
   // The caller's discipline travels on the INPUT side of saveFeeSchedule, where it
   // wins over anything the researcher inferred — the row that lands is keyed to the
