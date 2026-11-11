@@ -2088,8 +2088,12 @@ async function autoLearnPortalInner(
   const reachedReview = learn.reachedReview === true;
   const filledSomething = learn.filledSomething === true;
   if (!reachedReview || !filledSomething) {
+    // Says which of the two held. A run whose only fills were the e-signature (#131) has
+    // filledSomething false: "filled fields" would be the same false claim one layer up.
     const why = !reachedReview
-      ? "filled fields but never reached the portal's review screen"
+      ? (filledSomething
+        ? "filled fields but never reached the portal's review screen"
+        : "entered no form data and never reached the portal's review screen")
       : "reached a screen treated as review but filled no fields (likely a landing/disclaimer page misread as the review screen)";
     if (protectComplete) {
       return preserved("failed", null, { accurate: false, confidence: "low", matches: [], issues: [learn.message] }, `Nothing was staged — ${why}.`);
