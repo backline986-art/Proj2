@@ -257,6 +257,8 @@ await check("…and when the window does NOT say where it landed, the host the p
   const viaCity = await fetchPublicDocument(`${base}/fees-link`, { launcher });
   assert.equal(state.launches, 1);
   assert.equal(verdict(viaCity).siteRefused, true, viaCity.reason);
+  assert.equal(hostOf(viaCity.finalUrl), vendorHost, `the result's finalUrl is where the refusal was counted (a caller names that host): ${viaCity.finalUrl}`);
+  assert.ok(viaCity.reason.includes(`from ${new URL(other.base).host} (redirected from ${new URL(base).host})`), `the reason names the host that answered, not the city alone: ${viaCity.reason}`);
   const cityDoc = await fetchPublicDocument(`${base}/ok.pdf`, { launcher });
   assert.equal(cityDoc.ok, true, `the city must not carry the vendor's refusal: ${cityDoc.reason}`);
   const cityWall = await fetchPublicDocument(walled(1), { launcher });

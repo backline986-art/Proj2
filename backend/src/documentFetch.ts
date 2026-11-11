@@ -623,6 +623,14 @@ async function runLadder(url: URL, host: string, opts: FetchPublicDocumentOption
 
   const peek = peekText(attempt.bytes, attempt.contentType);
   const refusal = classifyRefusal(attempt.status, attempt.contentType, peek, attempt.bytes.length);
+  /** The host a refusal's reason names: the one whose bytes these are (the redirect landing), with
+   *  the URL's own host beside it when the link went elsewhere — a reason must not blame the city
+   *  for its vendor's 403. */
+  const answeredBy = (() => {
+    let landed = "";
+    try { landed = new URL(attempt.finalUrl).host; } catch { /* not a URL: the asked host stands */ }
+    return landed && landed !== checked.url.host ? `${landed} (redirected from ${checked.url.host})` : checked.url.host;
+  })();
 
   if (attempt.status >= 200 && attempt.status < 300 && refusal === "none") {
     return {
@@ -640,14 +648,14 @@ async function runLadder(url: URL, host: string, opts: FetchPublicDocumentOption
   if (refusal === "captcha") {
     // Policy ends the ladder here, so this IS the site's answer to our best permitted try — and a
     // challenge is the HOST's answer, not one object's.
-    const reason = `${checked.url.host} answered with a human-verification challenge (${describeStatus(attempt.status, attempt.server)}). `
+    const reason = `${answeredBy} answered with a human-verification challenge (${describeStatus(attempt.status, attempt.server)}). `
       + "Automation never solves CAPTCHAs — a person must retrieve this one.";
     const scope = noteRefused(answering, attempt.finalUrl, reason, "host");
     return { ok: false, status: attempt.status, contentType: attempt.contentType, text: peek, via: "http", reason, finalUrl: attempt.finalUrl, ...refusedFields(scope, answering) };
   }
 
   if (refusal === "robots") {
-    const reason = `${checked.url.host} refuses automated clients by its own notice (${describeStatus(attempt.status, attempt.server)}). `
+    const reason = `${answeredBy} refuses automated clients by its own notice (${describeStatus(attempt.status, attempt.server)}). `
       + "Not escalated: that is a stated policy, not a misdetected browser.";
     const scope = noteRefused(answering, attempt.finalUrl, reason, "host");
     return { ok: false, status: attempt.status, contentType: attempt.contentType, text: peek, via: "http", reason, finalUrl: attempt.finalUrl, ...refusedFields(scope, answering) };
@@ -656,7 +664,7 @@ async function runLadder(url: URL, host: string, opts: FetchPublicDocumentOption
   if (attempt.status === 429) {
     // "Too many requests" is the host asking us to stop; a window right behind it is the
     // opposite of polite, and no window makes a rate limit go away.
-    const reason = `${describeStatus(attempt.status, attempt.server)} from ${checked.url.host} — the host is rate-limiting automated clients. Not escalated: backed off instead.`;
+    const reason = `${describeStatus(attempt.status, attempt.server)} from ${answeredBy} — the host is rate-limiting automated clients. Not escalated: backed off instead.`;
     const scope = noteRefused(answering, attempt.finalUrl, reason, "host");
     return { ok: false, status: attempt.status, contentType: attempt.contentType, text: peek, via: "http", reason, finalUrl: attempt.finalUrl, ...refusedFields(scope, answering) };
   }
@@ -674,7 +682,7 @@ async function runLadder(url: URL, host: string, opts: FetchPublicDocumentOption
     };
   }
 
-  const blocked = `${describeStatus(attempt.status, attempt.server)} from ${checked.url.host} — the site refused an ordinary HTTP client`;
+  const blocked = `${describeStatus(attempt.status, attempt.server)} from ${answeredBy} — the site refused an ordinary HTTP client`;
   const processForbidsWindow = process.env.DOCUMENT_FETCH_BROWSER === "0";
   const browserAllowed = opts.allowBrowser !== false && !opts.allowUrl && !processForbidsWindow;
   if (!browserAllowed) {
@@ -738,7 +746,7 @@ async function runLadder(url: URL, host: string, opts: FetchPublicDocumentOption
         onSiteRefusal: (reason, finalUrl, scope) => {
           const at = finalUrl || attempt.finalUrl;
           const from = politeHostOf(at) || answering;
-          return { scope: noteRefused(from, at, reason, scope), host: from };
+          return { scope: noteRefused(from, at, reason, scope), host: from, at };
         },
       });
     } finally {
@@ -757,8 +765,9 @@ async function browserAttempt(
     /** Called when the SITE refused the window (wall, challenge, notice) — not when the window
      *  could not start, threw, or was sent somewhere private. `scope` is what the refusal read as
      *  (a bare wall on one object: "document"; a challenge, a notice, a 429: "host"); the answer is
-     *  the scope the host record ended up at, and the host it was counted against. */
-    onSiteRefusal?: (reason: string, finalUrl: string | undefined, scope: RefusalScope) => { scope: RefusalScope; host: string };
+     *  the scope the host record ended up at, the host it was counted against, and the URL it was
+     *  counted at (the result's finalUrl, so a caller names the host that answered). */
+    onSiteRefusal?: (reason: string, finalUrl: string | undefined, scope: RefusalScope) => { scope: RefusalScope; host: string; at: string };
   },
 ): Promise<FetchedDocument> {
   const deadline = Date.now() + cfg.timeoutMs;
@@ -772,8 +781,8 @@ async function browserAttempt(
     const scope: RefusalScope = kind === "wall" && status !== 429 ? "document" : "host";
     // The landing URL as the WINDOW reported it (undefined when it did not): the ladder falls back
     // to where its plain rung landed, which is the host that answered.
-    const noted = cfg.onSiteRefusal?.(reason, finalUrl || undefined, scope) ?? { scope, host: politeHostOf(from) };
-    return { ...fail(reason, status), finalUrl: from, ...refusedFields(noted.scope, noted.host) };
+    const noted = cfg.onSiteRefusal?.(reason, finalUrl || undefined, scope) ?? { scope, host: politeHostOf(from), at: from };
+    return { ...fail(reason, status), finalUrl: noted.at, ...refusedFields(noted.scope, noted.host) };
   };
 
   // THE WINDOW ASKS THE SAME QUESTION (#407). Chromium follows a page's redirects itself, so the
