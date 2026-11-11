@@ -54,7 +54,7 @@ import {
   type AgencyApplicationForm, type AgencyLineStatus, type AgencyLineStatusOf, type FormTrack,
 } from "./applicationDocsAgency";
 import { filledApplicationForms, heldUnfillableAgencyBlanks } from "./ahjForms";
-import { requirementSlots } from "./requirementSlots";
+import { parsePortalRequiredUpload, requirementSlots } from "./requirementSlots";
 import { deadLinkSentence, stageAcquiresForm, stageAcquisitionFor, type StageAcquiredForm, type StageAcquisition } from "./formAcquisitionPlan";
 import {
   designText, INVERTER_LISTING_PATTERNS, LOAD_SIDE_CALC_PATTERNS, MODULE_LISTING_PATTERNS, POWER_SOURCE_DIRECTORY_PATTERNS, RAPID_SHUTDOWN_PATTERNS, SUPPLY_SIDE_DETAIL_PATTERNS,
@@ -108,6 +108,12 @@ export interface RequiredDocItem {
    * the QC row and the packet can show whose requirement it is.
    */
   verifiedList?: { text: string; sourceUrl: string; quote: string };
+  /**
+   * Set when the row comes from a required upload slot a learn met on the AHJ's permit portal and
+   * could not fill (#140, portalRequiredUploadItems): the KB line it rests on. The portal's own form
+   * refuses the filing without it, so the row blocks staging and says "attach it".
+   */
+  portalRequired?: { line: string };
 }
 
 /** An application/checklist row, which always names its discipline. */
@@ -1039,6 +1045,7 @@ export function documentInventory(db: AppDb, project: ProjectRecord): DocumentIn
   // and/or checklist some AHJs want attached alongside the plan set. Learned data, so
   // advisory and never fatal to the inventory.
   let kbItems: RequiredDocItem[] = [];
+  let portalItems: RequiredDocItem[] = [];
   // Structure + process flags + the AHJ's own name for the path-chosen
   // application. Resolved HERE, where the guarded lookups belong, and threaded
   // into the pure function.
@@ -1103,10 +1110,14 @@ export function documentInventory(db: AppDb, project: ProjectRecord): DocumentIn
       // the same mutually-exclusive rule one layer down: on this path the PE stamp +
       // sealed structural letter is the evidence, and the checklist is simply not owed.
       if (permitPath === "engineered") baseline.add("solar_checklist");
-      kbItems = kbApplicationDocItems(reqs, baseline);
+      // A required upload the AHJ's own portal demanded (#140) — its own reader, ahead of the prose
+      // mapper, which never sees those lines.
+      portalItems = portalRequiredUploadItems(reqs, baseline);
+      for (const p of portalItems) for (const t of [p.docType, ...(p.altDocTypes || [])]) baseline.add(t);
+      kbItems = kbApplicationDocItems(reqs.filter((r) => !parsePortalRequiredUpload(r)), baseline);
     }
   } catch { /* KB optional */ }
-  const required = [...baselineItems, ...kbItems];
+  const required = [...baselineItems, ...kbItems, ...portalItems];
   // THE UTILITY'S APPLICATION RIDES IN THE PERMIT PACKET (#664) — only when a person VERIFIED that this
   // utility files inside the AHJ permit application (nemFiledWithPermit; a seeded row adds nothing).
   try {
@@ -1666,7 +1677,9 @@ export function isApplicationFormRow(d: Pick<DocPresence, "docType" | "altDocTyp
  * county's application). Anything else (a plan sheet, a PE letter, a spec, a bill) is attached or
  * split out of the plan set.
  */
-export function owedDocumentAction(d: Pick<DocPresence, "docType" | "altDocTypes" | "lane">, deadLinks: string[] = [], unreadPlanPages: readonly number[] = []): string {
+export function owedDocumentAction(d: Pick<DocPresence, "docType" | "altDocTypes" | "lane" | "portalRequired">, deadLinks: string[] = [], unreadPlanPages: readonly number[] = []): string {
+  // A slot the portal's own form requires (#140): a file only a person has — attach it.
+  if (d.portalRequired) return "attach it — the permit portal's own form requires this upload and will not submit without it";
   // FOUND, DEAD LINK (issue #205): the search found the blank and its link answered 404 — said so, with
   // the URL, so the operator looks for where the AHJ moved the file rather than for a form "none exists".
   if (d.lane === "permit" && isApplicationFormRow(d)) {
@@ -1716,6 +1729,41 @@ export const KB_APPLICATION_DOC_PATTERNS: Array<{ re: RegExp; docType: string; l
   { re: /checklist|worksheet|eligibilit/i, docType: "solar_checklist", label: "Solar prescriptive checklist (filled)" },
   { re: /(solar|permit|completed|signed)\s*application|application\s*(form|packet)/i, docType: "permit_application", label: "Permit application (filled)" },
 ];
+
+/**
+ * A REQUIRED UPLOAD THE AHJ'S OWN PORTAL DEMANDED (#140) — the KB lines a learn wrote
+ * (knowledgeBase.learnPortalRequiredUploads, parsed only by requirementSlots.parsePortalRequiredUpload).
+ *
+ * BLOCKING, unlike the prose rows below, and on purpose: those are research about what an AHJ
+ * wants, which varies in quality; this is a file input the portal's form marked required and would
+ * not submit without (City of Star: "The required uploads were not found", Submit disabled). Missing
+ * it, the job cannot be filed there anyway — the block only moves the stop from the portal to
+ * staging, where it names the document. The row carries the discipline the learn filed under, so it
+ * holds only that permit's track. A misread row is removed by a person editing the AHJ's profile.
+ * `alreadyRequired` suppresses a slot the baseline already demands (a "Plans" slot is the plan set).
+ */
+export function portalRequiredUploadItems(requirements: string[], alreadyRequired: Set<string> = new Set()): RequiredDocItem[] {
+  const seen = new Set<string>();
+  const out: RequiredDocItem[] = [];
+  for (const raw of requirements || []) {
+    const parsed = parsePortalRequiredUpload(raw);
+    if (!parsed) continue;
+    const slots = requirementSlots(parsed.label);
+    if (!slots.length || seen.has(slots[0]) || slots.some((s) => alreadyRequired.has(s))) continue;
+    seen.add(slots[0]);
+    out.push({
+      docType: slots[0],
+      ...(slots.length > 1 ? { altDocTypes: slots.slice(1) } : {}),
+      label: parsed.label,
+      why: `This AHJ's permit portal marks "${parsed.label}" as a required upload and will not take the application without it (learned on a previous filing). If that is wrong for this job, correct the AHJ's profile in the knowledge base.`,
+      lane: "permit",
+      blocking: true,
+      ...(parsed.discipline ? { discipline: parsed.discipline } : {}),
+      portalRequired: { line: String(raw) },
+    });
+  }
+  return out;
+}
 
 /**
  * Map a KB profile's required-documents prose to the application/checklist documents this
