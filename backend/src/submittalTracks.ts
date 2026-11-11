@@ -53,6 +53,9 @@ import { feeDueReadings, feePaidMarks, trackFeeDueFrom, type FeeDueReading } fro
 import { lastUnreadableByTarget } from "./lastUnreadable";
 import { projectSecretValuesById } from "./projectSecrets";
 import { projectClassHoldReason } from "./projectClassHold";
+import { AWAITING_SECOND_STAGE, beginSecondStageUpload, recordFirstStage, secondStagePending, secondStageView, trackSecondStage, trackSecondStageRow, type SecondStageView, type TrackSecondStageRow } from "./secondStage";
+import { documentInventory } from "./requiredDocuments";
+import { docFitsTrack } from "./docDiscipline";
 
 /** Words that claim the statewide portal ("Oregon ePermitting", "OR E-permitting") with no URL —
  *  on a learned row, often the generic fallback's own words laundered in (portal-truth D2/D4). */
@@ -130,6 +133,24 @@ export interface SubmittalTrackView extends SubmittalTrack {
   /** #569 — the newest filing of this track that keeps a confirmation screenshot (masked): the card's
    *  "Submitted: <number> · confirmation screenshot". Absent when none was kept. */
   confirmation?: TrackConfirmationView;
+  /** #28 — a two-stage filing's second stage (secondStage.ts): a cited description awaiting a
+   *  person's Confirm, or (confirmed) where this job stands in it, with the documents to upload by
+   *  hand while the plans are still out. Absent when the track's agency has none on file. */
+  secondStage?: SecondStageView & { documents?: SecondStageDocument[] };
+}
+
+/** One line of the hand-upload list: a document the job's required-documents list names for this
+ *  track, and whether the job holds it. Never a file path. */
+export interface SecondStageDocument { label: string; docType: string; present: boolean; via: string }
+
+/** WHAT TO UPLOAD IN THE SECOND SYSTEM: the job's own required-documents list (documentInventory),
+ *  narrowed to this track with the one doc/track table (docFitsTrack) the staging run uses. A read. */
+export function secondStageDocuments(db: AppDb, project: ProjectRecord, track: SubmittalTrackType): SecondStageDocument[] {
+  try {
+    return documentInventory(db, project).presence
+      .filter((d) => d.lane !== "nem" && docFitsTrack(d.docType, track, new Set()))
+      .map((d) => ({ label: d.label, docType: d.docType, present: d.present, via: d.via }));
+  } catch { return []; }
 }
 
 /** Every submittal track, derived from the label Record so it cannot go stale: adding a
@@ -642,7 +663,9 @@ export function trackFilingOnRecord(db: AppDb, projectId: string, track: Submitt
       WHERE project_id = ? AND permit_type IN (${ph})
         AND (status IN ('submitted', 'submitted_unconfirmed')
           -- a fee stop AFTER the approved click (#576): submitted_at is stamped only on a click
-          OR (status = 'awaiting_payment' AND submitted_at IS NOT NULL))
+          OR (status = 'awaiting_payment' AND submitted_at IS NOT NULL)
+          -- a two-stage filing's application, made on the first portal (#28): never staged again
+          OR status = 'awaiting_second_stage')
       ORDER BY submitted_at DESC LIMIT 1`,
     [projectId, ...family],
   ) ?? db.get<Row>(
@@ -667,7 +690,7 @@ export interface TrackSubmittedEvidence {
   track: SubmittalTrackType;
   /** How the filing is on record (trackFilingOnRecord): a person captured it ('submitted'), or
    *  automation clicked the final submit ('submitted_unconfirmed' / 'automation_click'). */
-  via: "submitted" | "submitted_unconfirmed" | "automation_click";
+  via: "submitted" | "submitted_unconfirmed" | "automation_click" | "awaiting_second_stage";
   /** The filing's number ("" when automation clicked and nothing was captured). */
   number: string;
   at: string | null;
@@ -701,7 +724,7 @@ export function trackSubmittedAndTracked(db: AppDb, projectId: string, track: Su
   const { own, pool, poolDemand } = trackTargets(db, projectId, track, Array.from(new Set([...required, track])));
   return {
     track,
-    via: via === "submitted" || via === "submitted_unconfirmed" ? via : "automation_click",
+    via: via === "submitted" || via === "submitted_unconfirmed" || via === AWAITING_SECOND_STAGE ? via : "automation_click",
     number: s(filed.permit_number) || s(filed.application_number),
     at: s(filed.submitted_at) || null,
     tracked: Boolean(own) || (poolDemand <= 1 && pool.length > 0),
@@ -711,6 +734,11 @@ export function trackSubmittedAndTracked(db: AppDb, projectId: string, track: Su
 /** The refusal a Stage of a filed track reads (the route's 409, the job's, the card) — main's
  *  duplicate-guard sentence, word for word. */
 export function trackSubmittedSentence(e: TrackSubmittedEvidence): string {
+  // A two-stage filing (#28): the application exists; what is left is the hand upload, never a Stage.
+  if (e.via === AWAITING_SECOND_STAGE) {
+    return `The ${e.track} track's application is already made on the portal${e.number ? ` as ${e.number}` : ""}; it is not filed until its plans are uploaded in the second system. `
+      + "Staging it again would open a duplicate application with the jurisdiction. Upload the plans by hand and mark the upload done on this card.";
+  }
   const when = e.at ? ` on ${e.at.slice(0, 10)}` : "";
   const num = e.number
     || (e.via !== "submitted"
@@ -852,6 +880,9 @@ function deriveStatus(state: TrackState): SubmittalTrackStatus {
   if (state.submissionStatus === "awaiting_human_submit" || state.submissionStatus === "staged" || state.submissionStatus === "awaiting_payment") {
     return "staged";
   }
+  // A two-stage filing whose application is made (#28): on the first portal, its plans not yet
+  // uploaded in the second system. NOT filed — the card's second-stage block says what is next.
+  if (state.submissionStatus === AWAITING_SECOND_STAGE) return "staged";
   // paused_for_human / failed runs staged NOTHING on the portal — the track genuinely
   // has not started; the portal-runs panel carries the pause/failure banner.
   if (fromOutcome) return fromOutcome; // a target exists even without a submission row
@@ -1237,6 +1268,12 @@ export function getSubmittalTracks(db: AppDb, project: ProjectRecord): Submittal
             : "The agency asked for a fee: pay it on the portal, then press We paid the portal with the record number and the amount.",
         }
       : null;
+    // A TWO-STAGE FILING (#28): the cited description, or where this job stands once a person
+    // confirmed it. While the application is made and the plans are out, the card says so in place
+    // of "staged — submit manually", and lists what to upload by hand.
+    const second = category === "permit" ? secondStageView(db, project, type) : null;
+    const secondHolds = Boolean(second?.pending) && status === "staged" && !payment;
+    const secondDocuments = second?.pending ? secondStageDocuments(db, project, type) : [];
     const paid = db.query<Row>(
       "SELECT kind, amount_usd, record_number, paid_by, paid_at, confirmation_shot_path FROM track_fee_payments WHERE project_id = ? AND track = ? ORDER BY paid_at DESC, rowid DESC",
       [project.id, type],
@@ -1263,11 +1300,11 @@ export function getSubmittalTracks(db: AppDb, project: ProjectRecord): Submittal
       status,
       // The portal's own words — unless they say "issued" of a track isTrackDone did not accept
       // (one pooled target cannot finish two tracks), where they would contradict the status.
-      statusLabel: payment ? "Payment needed" : follows ? withPermitStatusLabel(follows.status, follows.permitStatus) : signatureHolds && signatureRequest
+      statusLabel: payment ? "Payment needed" : secondHolds ? second!.statusLabel : follows ? withPermitStatusLabel(follows.status, follows.permitStatus) : signatureHolds && signatureRequest
         ? SIGNATURE_STATUS_LABEL[signatureRequest.state] ?? statusLabelFor(status, category)
         : (!state.done && (state.outcome === "issued" || state.outcome === "nem_approved") ? "" : state.statusLabel)
           || statusLabelFor(status, category),
-      nextAction: payment ? payment.sentence : follows && withPermit ? withPermitNextAction(follows.status, withPermit, project.utility)
+      nextAction: payment ? payment.sentence : secondHolds ? second!.sentence : follows && withPermit ? withPermitNextAction(follows.status, withPermit, project.utility)
         : signatureHolds && signatureRequest && SIGNATURE_NEXT_ACTION[signatureRequest.state]
         ? SIGNATURE_NEXT_ACTION[signatureRequest.state]
         : nextActionFor(status, channel, type, prerequisites, issuerProject.trackView ? issuerProject.ahj : ""),
@@ -1296,6 +1333,7 @@ export function getSubmittalTracks(db: AppDb, project: ProjectRecord): Submittal
       ...(type === "nem" && status === "staged" ? { stagedReview: stagedReviewViewFor(db, project.id) } : {}),
       ...(stageBlocked ? { stageBlocked } : {}),
       ...(confirmation ? { confirmation } : {}),
+      ...(second ? { secondStage: { ...second, ...(secondDocuments.length ? { documents: secondDocuments } : {}) } } : {}),
     };
   });
 }
@@ -1330,10 +1368,17 @@ export function markTrackSubmitted(
      *  would appear to start two days late. ISO date or datetime. */
     submittedAt?: string;
   },
+  /** Internal: true only from markSecondStageUploaded, the one door that files a track whose
+   *  application waits on its second stage. Never a request field. */
+  opts: { secondStageUploaded?: boolean } = {},
 ): void {
   if (!requiredTracks(project).includes(type)) {
     throw new HttpError(400, `This project does not require a "${type}" submittal track.`);
   }
+  // A TWO-STAGE FILING IS FILED BY THE UPLOAD MARK, NOT HERE (#28): while the application waits on
+  // its plan upload, "I submitted it" would call the track filed with the plans still out.
+  const hold = opts.secondStageUploaded ? null : secondStageHold(db, project, type);
+  if (hold) throw new HttpError(409, hold.sentence, { track: type, secondStage: true, owed: hold.owed });
   const ts = nowIso();
   // THE FILING DATE IS VALIDATED, NEVER COERCED. An unparseable string stored here reaches a
   // client's page as a confident wrong fact about the only date that matters to them, and a
@@ -1373,7 +1418,7 @@ export function markTrackSubmitted(
     // closed as submitted (staging is refused while a run waits on payment).
     const awaiting = db.get<Row>(
       `SELECT id FROM submissions
-        WHERE project_id = ? AND permit_type = ? AND status IN ('awaiting_human_submit', 'awaiting_payment')
+        WHERE project_id = ? AND permit_type = ? AND status IN ('awaiting_human_submit', 'awaiting_payment', 'awaiting_second_stage')
         ORDER BY created_at DESC LIMIT 1`,
       [project.id, type],
     );
@@ -1442,7 +1487,8 @@ export function markTrackSubmitted(
     // manual submit can be recorded against.
     if (project.status === "awaiting_human_submit") {
       const stillAwaiting = db.get<{ n: number }>(
-        "SELECT COUNT(*) AS n FROM submissions WHERE project_id = ? AND status = 'awaiting_human_submit'",
+        // An application waiting on its second stage (#28) is a track still to be filed too.
+        "SELECT COUNT(*) AS n FROM submissions WHERE project_id = ? AND status IN ('awaiting_human_submit', 'awaiting_second_stage')",
         [project.id],
       );
       const remaining = Number(stillAwaiting?.n ?? 0);
@@ -1479,6 +1525,91 @@ export function markTrackSubmitted(
   // THE QUOTE IN FORCE AS IT WAS FILED (#494), kept once per billing track for the fee accuracy
   // report. After the transaction and never throwing: the filing is the fact that matters.
   snapshotFilingQuote(db, project, type, submissionId);
+}
+
+// ── TWO-STAGE FILINGS (#28): the two person doors, here because they close and record filings ──
+
+/**
+ * WHAT A FILING DOOR OWES INSTEAD OF A FILING on this track, or null when it may file as ever:
+ *   "upload"       the application is on record and its plans are not marked uploaded — only the
+ *                  upload's mark (markSecondStageUploaded) files it;
+ *   "application"  a person confirmed a second stage for this track's agency and the track has no
+ *                  filing and no application on record yet — what a person submits at the first
+ *                  portal is the APPLICATION (markTrackFirstStage), never the filing.
+ * A track already filed (before anyone confirmed the stage, or by its upload's mark) owes nothing.
+ * Every door that would call a track filed asks this: "I submitted it", the confirmation capture,
+ * and the approved run's gate.
+ */
+export function secondStageHold(
+  db: AppDb,
+  project: ProjectRecord,
+  type: SubmittalTrackType,
+): { owed: "application" | "upload"; system: string; sentence: string } | null {
+  const waiting = secondStagePending(db, project.id, type);
+  if (waiting) {
+    return {
+      owed: "upload", system: waiting.system,
+      sentence: `The ${type} track's application (${waiting.firstStageNumber}) is made, and its plans are not marked as uploaded in ${waiting.system || "the second system"} yet. Mark the upload done on the track card (with the confirmation number or a screenshot): that records the filing.`,
+    };
+  }
+  const stage = trackSecondStage(db, project, type);
+  if (!stage || trackSecondStageRow(db, project.id, type)) return null;
+  const family = trackPermitTypes(type);
+  const filed = db.get<Record<string, unknown>>(
+    `SELECT id FROM submissions WHERE project_id = ? AND permit_type IN (${family.map(() => "?").join(",")}) AND status = 'submitted' LIMIT 1`,
+    [project.id, ...family],
+  );
+  if (filed) return null;
+  return {
+    owed: "application", system: stage.system,
+    sentence: `${stage.agency || "This agency"} takes the plans in a second system (${stage.system}) after the application, by hand. What is submitted at its portal is the application, not the filing: record it on the track card ("The application was made by hand", or Paid at a fee stop), then mark the plan upload done. That mark records the filing.`,
+  };
+}
+
+/** Does this track's agency have a person-verified second stage (secondStage.trackSecondStage)?
+ *  Yes/no only: a door deciding what to do asks secondStageHold above. */
+export function trackHasSecondStage(db: AppDb, project: ProjectRecord, type: SubmittalTrackType): boolean {
+  return Boolean(trackSecondStage(db, project, type));
+}
+
+/**
+ * THE APPLICATION IS MADE on a two-stage agency (a person paid at the fee stop, or made it by hand):
+ * recorded as waiting on its second stage, never as the filing. Refuses a track the project does not
+ * require and one whose agency has no person-verified second stage (secondStage.recordFirstStage).
+ */
+export function markTrackFirstStage(
+  db: AppDb,
+  project: ProjectRecord,
+  type: SubmittalTrackType,
+  input: { recordNumber: string; by: string; via: "paid" | "by_hand"; note?: string },
+): TrackSecondStageRow {
+  if (!requiredTracks(project).includes(type)) {
+    throw new HttpError(400, `This project does not require a "${type}" submittal track.`);
+  }
+  return recordFirstStage(db, project, type, input, trackPermitTypes(type));
+}
+
+/**
+ * A NAMED PERSON MARKS THE PLAN UPLOAD DONE (the second system, by hand), with its confirmation
+ * number or a screenshot. This — and only this — files a track that waits on its second stage: the
+ * ordinary filing door records it (the waiting row becomes the filing; tracking target; the client
+ * hears "filed"; the quote snapshot), then the mark is stamped and audited.
+ */
+export function markSecondStageUploaded(
+  db: AppDb,
+  project: ProjectRecord,
+  type: SubmittalTrackType,
+  input: { confirmationNumber?: unknown; uploadedBy?: unknown },
+): TrackSecondStageRow {
+  const mark = beginSecondStageUpload(db, project, type, input);
+  markTrackSubmitted(db, project, type, {
+    applicationNumber: mark.row.firstStageNumber,
+    confirmationNumber: mark.confirmationNumber || undefined,
+    submittedBy: mark.uploadedBy,
+    notes: `Plans uploaded in ${mark.row.system || "the second system"} by hand; filed. Application ${mark.row.firstStageNumber} was made ${mark.row.firstStageAt.slice(0, 10)}.`,
+  }, { secondStageUploaded: true });
+  mark.finish();
+  return { ...mark.row, uploadedAt: nowIso(), uploadedBy: mark.uploadedBy, confirmationNumber: mark.confirmationNumber };
 }
 
 // ---------------------------------------------------------------------------
