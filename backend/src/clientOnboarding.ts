@@ -56,6 +56,7 @@ import { id } from "./ids";
 import { clientOnboardingChecklist, jurisdictionsFromServiceArea, type ChecklistLine, type ReadinessJurisdiction } from "./onboardingReadiness";
 import { mergeServiceArea, parseServiceArea, serviceAreaEntryKey, serviceAreaProblems } from "./serviceAreaEntries";
 import { alertStaffOnClientOnboarding } from "./staffAlerts";
+import { listFilingStatements, normalizeFilingAnswers, recordFilingStatements, type FilingAuthorityOption, type FilingStatement } from "./clientFilingStatements";
 import { nowIso } from "./time";
 import { usStateCode } from "./usState";
 
@@ -415,6 +416,28 @@ function filesFor(db: AppDb, clientId: string, linkId?: string): OnboardingFileV
   return rows.map((r) => ({ id: r.id, kind: r.kind, fileName: r.file_name, sizeBytes: Number(r.size_bytes), createdAt: r.created_at }));
 }
 
+/** HOW THE CLIENT FILES WITH EACH AUTHORITY (clientFilingStatements.ts): the page asks about the
+ *  authorities the client's service area names. Which those are is resolved by the caller (server.ts
+ *  hands in filingDestinationProposals.clientFilingAuthorities, so this module reads no proposal and
+ *  no door); without it the page asks about none. */
+export interface OnboardingContext {
+  filingAuthorities?: (clientId: string, draftArea: ClientServiceAreaEntry[]) => FilingAuthorityOption[];
+}
+/** What the page is told about an authority: its name, kind and state. Nothing on file about it. */
+export interface OnboardingFilingAuthority { key: string; kind: "ahj" | "utility"; name: string; state: string }
+const FILING_KEY = "filing";
+
+function filingAuthoritiesFor(ctx: OnboardingContext | undefined, clientId: string, draftArea: unknown): FilingAuthorityOption[] {
+  if (!ctx?.filingAuthorities) return [];
+  try { return ctx.filingAuthorities(clientId, parseServiceArea(Array.isArray(draftArea) ? draftArea : [])); } catch { return []; }
+}
+const publicAuthorities = (list: FilingAuthorityOption[]): OnboardingFilingAuthority[] => list.map((a) => ({ key: a.key, kind: a.kind, name: a.name, state: a.state }));
+/** The page's answers without the filing rows, and the filing rows as sent. */
+function splitFiling(fields: Record<string, unknown>): { rest: Record<string, unknown>; filing: unknown } {
+  const { [FILING_KEY]: filing, ...rest } = fields;
+  return { rest, filing };
+}
+
 export interface OnboardingPublicView {
   status: "open" | "submitted";
   companyName: string;
@@ -431,14 +454,19 @@ export interface OnboardingPublicView {
   /** What is still missing, in plain words. */
   checklist: ChecklistLine[];
   portalRequestsLeft: number;
+  /** The authorities the page asks "how do you file here?" about. Absent once submitted. */
+  filingAuthorities?: OnboardingFilingAuthority[];
+  /** The filing rows as typed (the draft). Absent once submitted. */
+  filing?: Array<Record<string, string>>;
 }
 
 /** What the page renders. Scoped to the token's client; carries nothing from any other client and
  *  never a secret (the page asks for none, and the record's secret columns are not page fields). */
-export function getOnboardingPublic(db: AppDb, token: string): OnboardingPublicView {
+export function getOnboardingPublic(db: AppDb, token: string, ctx?: OnboardingContext): OnboardingPublicView {
   const row = linkFor(db, token, "read");
   const client = getClient(db, row.client_id);
-  const draft = normalizeOnboardingFields(parseDraft(row.draft_json)).values;
+  const saved = splitFiling(parseDraft(row.draft_json));
+  const draft = normalizeOnboardingFields(saved.rest).values;
   const base = {
     companyName: client.companyName || client.legalBusinessName,
     expiresAt: row.expires_at,
@@ -464,26 +492,37 @@ export function getOnboardingPublic(db: AppDb, token: string): OnboardingPublicV
     else if (f.type === "serviceArea") values[k] = rowsOf(typed[k], ["kind", "state", "name"]) as unknown as ClientServiceAreaEntry[];
     else values[k] = draft[k];
   }
-  return { status: "open", ...base, values, files: filesFor(db, client.id, row.id) };
+  const authorities = filingAuthoritiesFor(ctx, client.id, draft.serviceArea);
+  return {
+    status: "open", ...base, values, files: filesFor(db, client.id, row.id),
+    filingAuthorities: publicAuthorities(authorities), filing: normalizeFilingAnswers(saved.filing, authorities).typed,
+  };
 }
 
 /** Save the client's work in progress. Secret-shaped input is refused outright; a value that is not
  *  yet right is kept (it is a draft) and named in `problems`. */
-export function saveOnboardingDraft(db: AppDb, token: string, body: unknown): { savedAt: string; problems: string[]; checklist: ChecklistLine[] } {
+export function saveOnboardingDraft(db: AppDb, token: string, body: unknown, ctx?: OnboardingContext): { savedAt: string; problems: string[]; checklist: ChecklistLine[]; filingAuthorities: OnboardingFilingAuthority[] } {
   const row = linkFor(db, token, "write");
-  const fields = bodyFields(body);
-  assertNoSecretShapes(fields, "fields");
+  const sent = bodyFields(body);
+  assertNoSecretShapes(sent, "fields");
+  const { rest: fields, filing: filingRaw } = splitFiling(sent);
   const { values, problems } = normalizeOnboardingFields(fields);
   if (problems.some((p) => /is not a question on this page|Send the answers/.test(p))) throw new HttpError(400, problems[0]);
   // The draft keeps what was TYPED (so a half-finished licence row survives a reload), capped.
   const kept: Record<string, unknown> = {};
   for (const k of Object.keys(values)) kept[k] = (fields as Record<string, unknown>)[k];
+  // The filing rows are checked against the authorities the area names NOW (stored, plus the places
+  // typed in this draft); a row that is not right yet is kept as typed and named in `problems`.
+  const authorities = filingAuthoritiesFor(ctx, row.client_id, values.serviceArea);
+  const filing = normalizeFilingAnswers(filingRaw, authorities);
+  if (filing.typed.length) kept[FILING_KEY] = filing.typed;
+  problems.push(...filing.problems);
   const json = JSON.stringify(kept);
   if (json.length > 200_000) throw new HttpError(413, "That is more than this page can save. Remove some rows and try again.");
   const savedAt = nowIso();
   db.run("UPDATE client_onboarding_links SET draft_json = ?, draft_saved_at = ? WHERE id = ?", [json, savedAt, row.id]);
   const client = getClient(db, row.client_id);
-  return { savedAt, problems, checklist: checklistFor(db, client, values) };
+  return { savedAt, problems, checklist: checklistFor(db, client, values), filingAuthorities: publicAuthorities(authorities) };
 }
 
 function bodyFields(body: unknown): Record<string, unknown> {
@@ -526,17 +565,23 @@ function serviceAreaAdds(stored: ClientServiceAreaEntry[], incoming: ClientServi
   return incoming.filter((e) => !have.has(serviceAreaEntryKey(e)));
 }
 
-export function submitOnboarding(db: AppDb, token: string, body: unknown): { submitted: true; proposals: number; checklist: ChecklistLine[] } {
+export function submitOnboarding(db: AppDb, token: string, body: unknown, ctx?: OnboardingContext): { submitted: true; proposals: number; filingAnswers: number; checklist: ChecklistLine[] } {
   const row = linkFor(db, token, "write");
   // The submitted answers are the body's, else the saved draft's (a page may submit what it saved).
   const sent = bodyFields(body);
-  const fields = Object.keys(sent).length ? sent : parseDraft(row.draft_json);
-  assertNoSecretShapes(fields, "fields");
+  const all = Object.keys(sent).length ? sent : parseDraft(row.draft_json);
+  assertNoSecretShapes(all, "fields");
+  const { rest: fields, filing: filingRaw } = splitFiling(all);
   const { values, problems } = normalizeOnboardingFields(fields);
+  // HOW THEY FILE: each answer names an authority the area (stored, or sent with this form) names.
+  const authorities = filingAuthoritiesFor(ctx, row.client_id, values.serviceArea);
+  const filing = normalizeFilingAnswers(filingRaw, authorities);
+  problems.push(...filing.problems);
   if (problems.length) throw new HttpError(400, `Not sent yet: ${problems.slice(0, 5).join(" ")}`, { problems });
   const client = getClient(db, row.client_id);
   const now = nowIso();
   let proposals = 0;
+  let filingAnswers = 0;
   db.transaction(() => {
     for (const f of ONBOARDING_FIELDS) {
       const k = String(f.key);
@@ -556,13 +601,16 @@ export function submitOnboarding(db: AppDb, token: string, body: unknown): { sub
       );
       proposals++;
     }
-    db.run("UPDATE client_onboarding_links SET status = 'submitted', submitted_at = ?, draft_json = ?, draft_saved_at = ? WHERE id = ?", [now, JSON.stringify(fields), now, row.id]);
+    // Stored as the CLIENT's word only (never a door): the Destinations queue shows each as a
+    // "client-supplied" proposal for a named person, or as a conflict beside a verified door.
+    filingAnswers = recordFilingStatements(db, { clientId: client.id, linkId: row.id, answers: filing.answers, authorities, now });
+    db.run("UPDATE client_onboarding_links SET status = 'submitted', submitted_at = ?, draft_json = ?, draft_saved_at = ? WHERE id = ?", [now, JSON.stringify({ ...fields, ...(filing.typed.length ? { [FILING_KEY]: filing.typed } : {}) }), now, row.id]);
   });
-  // Field NAMES only in the audit row, never a value.
-  addAuditLog(db, null, "system", "client-onboarding", "client.onboarding_submitted", { clientId: client.id, linkId: row.id, proposals });
+  // Counts only in the audit row, never a value.
+  addAuditLog(db, null, "system", "client-onboarding", "client.onboarding_submitted", { clientId: client.id, linkId: row.id, proposals, filingAnswers });
   const orgId = db.get<{ org_id?: string }>("SELECT org_id FROM clients WHERE id = ?", [client.id])?.org_id || DEFAULT_ORG_ID;
-  void alertStaffOnClientOnboarding(db, { orgId, linkId: row.id, companyName: client.companyName || client.legalBusinessName, proposals, files: filesFor(db, client.id, row.id).length });
-  return { submitted: true, proposals, checklist: checklistFor(db, client, values) };
+  void alertStaffOnClientOnboarding(db, { orgId, linkId: row.id, companyName: client.companyName || client.legalBusinessName, proposals, files: filesFor(db, client.id, row.id).length, filingAnswers });
+  return { submitted: true, proposals, filingAnswers, checklist: checklistFor(db, client, values) };
 }
 
 // ---------------------------------------------------------------------------
@@ -677,7 +725,7 @@ export interface OnboardingProposalView {
 
 const parseJson = (raw: string): unknown => { try { return JSON.parse(raw); } catch { return null; } };
 
-export function listOnboardingProposals(db: AppDb, clientId: string, opts: { all?: boolean } = {}): { proposals: OnboardingProposalView[]; files: OnboardingFileView[]; links: OnboardingLinkView[] } {
+export function listOnboardingProposals(db: AppDb, clientId: string, opts: { all?: boolean } = {}): { proposals: OnboardingProposalView[]; files: OnboardingFileView[]; links: OnboardingLinkView[]; filingStatements: FilingStatement[] } {
   const rows = db.query<ProposalRow>(
     `SELECT * FROM client_onboarding_proposals WHERE client_id = ?${opts.all ? "" : " AND status = 'pending'"} ORDER BY created_at DESC, rowid`,
     [clientId],
@@ -690,7 +738,8 @@ export function listOnboardingProposals(db: AppDb, clientId: string, opts: { all
       createdAt: r.created_at, decidedBy: r.decided_by, decidedAt: r.decided_at,
     }))
     .sort((a, b) => (order.get(a.field) ?? 99) - (order.get(b.field) ?? 99));
-  return { proposals, files: filesFor(db, clientId), links: listOnboardingLinks(db, clientId) };
+  // How the client says it files with each authority: its word, decided in Destinations to confirm.
+  return { proposals, files: filesFor(db, clientId), links: listOnboardingLinks(db, clientId), filingStatements: listFilingStatements(db, clientId) };
 }
 
 /**

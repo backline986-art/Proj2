@@ -101,6 +101,9 @@ try {
     const r = await anon(`/api/clients/${clientId}/onboarding-links`, { method: "POST", body: "{}" });
     await r.text();
     assert.equal(r.status, 401);
+    const d = await anon(`/api/clients/${clientId}/onboarding/filing-statements/anything/dismiss`, { method: "POST", body: "{}" });
+    await d.text();
+    assert.equal(d.status, 401);
     const m = await owner(`/api/clients/${clientId}/onboarding-links`, { method: "POST", body: "{}" });
     const body = await m.json();
     assert.equal(m.status, 200, JSON.stringify(body));
@@ -119,6 +122,9 @@ try {
     const v = await r.json();
     assert.equal(r.status, 200, JSON.stringify(v));
     assert.equal(v.companyName, "Routeway Solar (TEST)");
+    // "How you file in each place" is wired: the page is told which authorities to ask about (none
+    // yet: this client has no service area on file).
+    assert.deepEqual(v.filingAuthorities, []);
     assert.equal(r.headers.get("cache-control"), "no-store");
   });
 

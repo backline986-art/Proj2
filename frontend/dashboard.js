@@ -5314,6 +5314,24 @@ function bindFilingDestinationButtons(wrap, where) {
 // (filing-destination.js); each button names the job and track whose card shows it, and the click goes
 // through decideFilingDestination above with this context — so the same named-person confirm, the same
 // body and the same /api/projects/:id/filing-destinations route. One authority per click; no bulk.
+// SET A CLIENT'S "HOW WE FILE THERE" ANSWER ASIDE, as a named person. It stops being shown as a
+// proposal or a conflict. No filing destination is written, changed or removed by this.
+async function dismissFilingStatement(clientId, statementId, btn) {
+  if (!clientId || !statementId) return false;
+  const auth = await authForDecision();
+  const by = namedPersonConsent(auth, "Set this answer of the client's aside? It stops being shown. No filing destination is changed.", "set it aside", "a client's filing answer is set aside by a named person");
+  if (by == null) return false;
+  if (btn) btn.disabled = true;
+  try {
+    await api(`/api/clients/${encodeURIComponent(clientId)}/onboarding/filing-statements/${encodeURIComponent(statementId)}/dismiss`, { method: "POST", body: JSON.stringify(by ? { decidedBy: by } : {}) });
+  } catch (err) {
+    if (btn) btn.disabled = false;
+    showToast(`Not recorded: ${err.message}`, "error");
+    return false;
+  }
+  showToast("Set aside. No filing destination was changed.", "success");
+  return true;
+}
 function destinationQueueContext(btn) {
   const FD = window.FilingDestination;
   return {
@@ -5343,6 +5361,11 @@ async function loadDestinationQueue() {
   }
   body.innerHTML = FD.renderQueue(state.destinationQueue);
   bindFilingDestinationButtons(body, destinationQueueContext);
+  // A client's own answer beside a verified destination: a named person sets it aside (the client's
+  // row only; the verified record is not touched).
+  body.querySelectorAll("button[data-fd-dismiss-statement]").forEach((btn) => btn.addEventListener("click", async () => {
+    if (await dismissFilingStatement(btn.dataset.fdClient, btn.dataset.fdDismissStatement, btn)) await loadDestinationQueue();
+  }));
   // A job link closes the view and opens that job (its track card has the same buttons).
   body.querySelectorAll('a[href^="#/project/"]').forEach((a) => a.addEventListener("click", () => { $("destQueueModal").hidden = true; }));
   if (window.lucide) window.lucide.createIcons();
@@ -14056,6 +14079,17 @@ async function loadClientOnboarding(clientId) {
   filesEl.innerHTML = files.length
     ? `<h4 style="margin:10px 0 4px">Certificates the client uploaded</h4><ul class="cred-list">${files.map((f) => `<li class="cred-row"><a href="/api/clients/${encodeURIComponent(clientId)}/onboarding/files/${encodeURIComponent(f.id)}">${esc(f.fileName)}</a> <span class="muted">${esc(String(f.kind).replace(/_/g, " "))} · ${esc(String(Math.ceil(Number(f.sizeBytes) / 1024)))} KB</span></li>`).join("")}</ul>`
     : "";
+  // HOW THE CLIENT SAYS IT FILES with each authority (its own word; never a destination). A person
+  // checks and confirms each in Destinations to confirm; here they can only set an answer aside.
+  const filing = data.filingStatements || [];
+  if (filing.length) {
+    filesEl.innerHTML += `<h4 style="margin:10px 0 4px">How the client says it files (${filing.length}, client-supplied)</h4>
+      <p class="muted clients-creds-hint">The client's word only. Check and confirm each one in Destinations to confirm; nothing files to an address until a person confirms it there.</p>
+      <ul class="cred-list">${filing.map((f) => `<li class="cred-row" data-filing-statement="${esc(f.id)}"><span><strong>${esc(f.authority.name)}</strong>${f.authority.state ? `, ${esc(f.authority.state)}` : ""} · ${f.kind === "email" ? "email" : "portal"}: <code>${esc(f.address)}</code>${f.hasAccount ? ` · account: ${esc(f.hasAccount)}` : ""}${f.example ? ` · example: ${esc(f.example)}` : ""} <span class="muted">${esc(String(f.statedAt || "").slice(0, 10))}</span></span> <button type="button" class="secondary" data-filing-dismiss="${esc(f.id)}">Set aside</button></li>`).join("")}</ul>`;
+    filesEl.querySelectorAll("[data-filing-dismiss]").forEach((b) => b.addEventListener("click", async () => {
+      if (await dismissFilingStatement(clientId, b.dataset.filingDismiss, b)) loadClientOnboarding(clientId);
+    }));
+  }
   linksEl.querySelectorAll("[data-onboarding-revoke]").forEach((b) => b.addEventListener("click", () => revokeOnboardingLink(b.dataset.onboardingRevoke)));
   propsEl.querySelectorAll("[data-onboarding-accept]").forEach((b) => b.addEventListener("click", () => decideOnboarding({ accept: [b.dataset.onboardingAccept] })));
   propsEl.querySelectorAll("[data-onboarding-reject]").forEach((b) => b.addEventListener("click", () => decideOnboarding({ reject: [b.dataset.onboardingReject] })));

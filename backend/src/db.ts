@@ -3679,6 +3679,39 @@ const VERSIONED_MIGRATIONS: VersionedMigration[] = [
       `);
     },
   },
+  {
+    // v82 (client filing details): what a CLIENT says about how it files with each authority in its
+    // service area (clientFilingStatements.ts) — a portal address or an intake email, whether it holds
+    // an account there (yes/no, never a login) and an example record number. CLIENT DATA, scoped by
+    // client_id (rule 6), and only ever a SOURCE for a destination proposal a person decides
+    // (filingDestinationProposals.ts): no channel, stage, launch or send reads this table. Created
+    // here, never lazily: reading a proposal writes nothing.
+    version: 82,
+    name: "client_filing_statements",
+    up: (db) => {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS client_filing_statements (
+          id TEXT PRIMARY KEY,
+          client_id TEXT NOT NULL,
+          link_id TEXT NOT NULL DEFAULT '',
+          authority_kind TEXT NOT NULL,
+          authority_state TEXT NOT NULL DEFAULT '',
+          authority_name TEXT NOT NULL,
+          profile_key TEXT NOT NULL,
+          kind TEXT NOT NULL,
+          address TEXT NOT NULL,
+          has_account TEXT NOT NULL DEFAULT '',
+          example_number TEXT NOT NULL DEFAULT '',
+          source TEXT NOT NULL DEFAULT 'client-supplied',
+          status TEXT NOT NULL DEFAULT 'current',
+          created_at TEXT NOT NULL,
+          dismissed_by TEXT NOT NULL DEFAULT '',
+          dismissed_at TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_client_filing_statements_authority ON client_filing_statements(client_id, authority_kind, profile_key, status);
+      `);
+    },
+  },
 ];
 
 /** v47 was edited in place while #218 was open (Helm's review at 0116f98a): a DB that ran an earlier
