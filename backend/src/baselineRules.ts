@@ -217,6 +217,12 @@ export interface BaselineUtilityContext {
    *  label (acDisconnectIntake.capturedDisconnectPart, computed by qc.ts on the plan-set text the gate
    *  sees). "" / absent = none: the ac_disconnect item reads the package text alone, as before. */
   disconnectPartOnPlanSet?: string;
+  /** True when the job's plan-set text names an AC / utility disconnect in the wordings the reviewer
+   *  gate reads (acDisconnectIntake.planTextNamesAcDisconnect, the one list; qc.ts hands it in on the
+   *  same plan-set text), or, for a plan set with no text, when the server's own image read of the
+   *  job's stored plan set named one (planSetImageReads, #135). Absent / false = the ac_disconnect item reads the split-page list and the
+   *  upload notes alone, as before (#134). */
+  planSetNamesAcDisconnect?: boolean;
 }
 
 /** The jurisdiction records the QC baseline reads (jurisdictionQcRules.ts). */
@@ -613,7 +619,7 @@ export function evaluateBaselineRules(payload: ParserPayload, ctx?: EffectiveCod
 // ── THE UTILITY'S APPLICATION REQUIREMENTS, CHECKED ON THE PACKAGE (QC) ─────────────────────────
 // What QC reads for each KIND of item: the package text the plan-set split and the upload notes carry,
 // and the parser's account / meter fields. Kinds, never utilities.
-type QcReadInput = { payload: ParserPayload; split: string; notes: string; newPv: boolean; disconnectPart: string };
+type QcReadInput = { payload: ParserPayload; split: string; notes: string; newPv: boolean; disconnectPart: string; disconnectNamed: boolean };
 const QC_SHOWN: Record<UtilityRequirementKey, (t: QcReadInput) => boolean> = {
   account_verification: ({ payload }) => Boolean(str(payload, "account") || str(payload, "ubAccountNumber")),
   meter_photo: ({ payload }) => Boolean(str(payload, "meter") || str(payload, "ubMeterNumber")),
@@ -629,8 +635,9 @@ const QC_SHOWN: Record<UtilityRequirementKey, (t: QcReadInput) => boolean> = {
   inverter_spec: ({ split, newPv }) => hasAny(split, newPv ? [/inverter/i, /microinverter/i] : [/inverter/i, /microinverter/i, /\bPCS\b/i, /power conversion/i]),
   // The job's part that its own plan set names counts (acDisconnectIntake.capturedDisconnectPart, the
   // ONE reader the reviewer gate's acDisconnect topic uses too; qc.ts hands its answer in, with the
-  // plan-set text the gate sees); else the package text names a disconnect.
-  ac_disconnect: ({ split, notes, disconnectPart }) => Boolean(disconnectPart) || hasAny(`${split}\n${notes}`, [/disconnect/i]),
+  // plan-set text the gate sees); or that plan-set text names an AC / utility disconnect in the gate's
+  // own wordings (the one list, also handed in by qc.ts, #134); else the package text names a disconnect.
+  ac_disconnect: ({ split, notes, disconnectPart, disconnectNamed }) => Boolean(disconnectPart) || disconnectNamed || hasAny(`${split}\n${notes}`, [/disconnect/i]),
   // The job's own operating-mode field counts (the one reader QC's storage row and the reviewer gate use).
   storage_mode_declaration: ({ payload, split, notes }) => Boolean(storageOperatingMode(payload)) || hasAny(`${split}\n${notes}`, [/operating mode/i, /back[-\s]?up/i, /self[-\s]?consumption/i, /export/i]),
   owner_signature: ({ split, notes }) => hasAny(`${split}\n${notes}`, [/signature/i, /signed/i, /owner authorization/i]),
@@ -686,7 +693,7 @@ function utilityRequirementResults(payload: ParserPayload, state: string, utilit
   // WHAT THE JOB INSTALLS (#673): a job that adds no modules is never asked for a module spec, and its
   // inverter is the battery inverter / PCS.
   const newPv = scopeHasNewPv(ctx.scope ?? deriveJobScope(payload).scope);
-  const read: QcReadInput = { payload, split, notes, newPv, disconnectPart: String(ctx.disconnectPartOnPlanSet ?? "").trim() };
+  const read: QcReadInput = { payload, split, notes, newPv, disconnectPart: String(ctx.disconnectPartOnPlanSet ?? "").trim(), disconnectNamed: ctx.planSetNamesAcDisconnect === true };
   const groups = new Map<string, { qc: { ruleId: string; ruleName: string; message: string; fieldName: string }; order: number; first: number; missing: string[]; block: boolean }>();
   items.forEach((item, index) => {
     if (!requirementForGate(item, "qc")) return;
