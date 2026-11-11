@@ -38,7 +38,7 @@ import { CONNECTOR_WORDS, DEPARTMENT_WORDS, GENERIC_ORG_WORDS, agencyNameKey, sa
 // permitProcess can ask the same question without importing this module back (a cycle).
 export { agencyNameKey, sameAgencyName };
 import { logger } from "./logger";
-import { bracketDescribesPercentOfCost, feeScheduleProfileKey, saveFeeSchedule } from "./feeSchedules";
+import { bracketDescribesPercentOfCost, feeLedgerFromPages, feeScheduleProfileKey, saveFeeSchedule } from "./feeSchedules";
 import { stateSurchargeRuleFor } from "./stateFeeRules";
 import { parseBracketRow } from "./pdfTables";
 import { candidateNamedBy, chooseRecordType, classifyDocument, datedFeeScheduleLinks, DOCUMENT_URL, staleOrOtherFeeSource, detectPlatform, documentLinks, excerptFor, extractCodeEditions, extractPrerequisites, isAgencyOwnDomain, isAgencyOwnUrl, isOfficialAgencyHost, linksAnotherModule, platformOfUrl, readPortalCatalog, registrableDomain, resolvePortalFromPages, solarRecordTypeCandidates, tenantContradictsAgency, wordsNameAnotherJurisdiction, type PortalCatalog, type PortalResolution, type RecordTypeCandidate } from "./permitPlatformCatalog";
@@ -1841,7 +1841,9 @@ export async function runPermitProcessLookup(
     ...(feeReadsForPerson.length ? { feeReadsForPerson } : {}),
   });
   if (res.saved && res.lookup) {
-    try { applyLookupFees(db, res.lookup); } catch (err) { logger.warn("permit-process", `fee landing failed: ${err instanceof Error ? err.message : String(err)}`); }
+    // The pages this run read itself travel with the landing, so a landed fee's printed line is
+    // checked against bytes Keelix retrieved (and can earn the official grade, feeOfficial).
+    try { applyLookupFees(db, res.lookup, [...pageTexts].map(([url, text]) => ({ url, text }))); } catch (err) { logger.warn("permit-process", `fee landing failed: ${err instanceof Error ? err.message : String(err)}`); }
   }
   return { saved: res.saved, reason: res.reason, lookup: res.lookup, calls, raw, ...(reader ? { reads: [...reader.log] } : {}) };
 }
@@ -1994,8 +1996,16 @@ export function saveLookupDelegation(
  * by the agency answer's citation); the agency's per-discipline fees are saved under ITS key.
  * saveFeeSchedule keeps every refusal it owns (verified rows, open conflicts, unsourced fees).
  */
-export function applyLookupFees(db: AppDb, lookup: PermitProcessLookup): Array<{ discipline: string; saved: boolean; reason: string }> {
+export function applyLookupFees(
+  db: AppDb,
+  lookup: PermitProcessLookup,
+  /** The pages THIS RUN read itself (address and text). With them, each landed bracket is
+   *  corroborated against those bytes exactly as a researched one is (feeLedgerFromPages); without
+   *  them the fee lands as before, uncorroborated. Never a claim: saveFeeSchedule re-derives it. */
+  pagesRead: ReadonlyArray<{ url: string; text: string }> = [],
+): Array<{ discipline: string; saved: boolean; reason: string }> {
   const out: Array<{ discipline: string; saved: boolean; reason: string }> = [];
+  const ledger = feeLedgerFromPages(pagesRead);
   for (const permit of lookup.permits) {
     if (permit.discipline === "other") continue;
     const delegation = saveLookupDelegation(db, lookup, permit);
@@ -2033,7 +2043,7 @@ export function applyLookupFees(db: AppDb, lookup: PermitProcessLookup): Array<{
       found: true, reason: "", basis: tiers.length ? "system_kw" : "flat", brackets, sourceUrl: fee.sourceUrl, sourceQuote: fee.quote, sourceKind: "official",
       notes: `Per-job lookup (seeded): ${fee.value.basis}`.slice(0, 400),
       // The read date the fee quote shows beside the source: the lookup's own run time.
-    }, { ...(surcharge ? { citedStateSurcharge: surcharge } : {}), fetchedAt: lookup.lookedUpAt });
+    }, { ...(surcharge ? { citedStateSurcharge: surcharge } : {}), fetchedAt: lookup.lookedUpAt, ...(ledger ? { corroborateAgainst: ledger } : {}) });
     out.push({ discipline: permit.discipline, saved: r.saved, reason: r.reason ?? "" });
   }
   return out;

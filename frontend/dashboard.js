@@ -2725,6 +2725,13 @@ const FEE_SOURCE_TEXT = {
 const FEE_CONFIDENCE = {
   actual: { badge: "badge-pass", label: "actual", note: "" },
   verified: { badge: "badge-pass", label: "verified", note: "" },
+  // READ ON THE AUTHORITY'S OWN OFFICIAL PAGE (rule 3's official tier): used as published. Never
+  // the word "verified": that is a person. The card names the host and the read date beside it.
+  official: {
+    badge: "badge-info",
+    label: "from the authority's own page",
+    note: "Keelix read this line on the authority's own published schedule and uses it as published. No person has checked it; Confirm fee puts your name to it.",
+  },
   seeded: {
     badge: "badge-warning",
     label: "provisional — not verified",
@@ -2968,6 +2975,10 @@ function renderFeeSheetLine(line) {
     : "";
   // THE ONE-CLICK CONFIRM, only where the server says a person may (a researched published-
   // schedule amount). The click asks who is confirming before anything is written.
+  // WHERE AN OFFICIAL AMOUNT WAS READ: the host and the date, never a person's name.
+  const officialNote = line.confidence === "official" && line.officialSource && line.officialSource.host
+    ? `<p class="fee-face-official" data-fee-official style="margin:2px 0;font-size:12px">From ${esc(line.officialSource.host)}${line.officialSource.fetchedAt ? `, read ${esc(String(line.officialSource.fetchedAt).slice(0, 10))}` : ""}. Not checked by a person.</p>`
+    : "";
   const confirmControl = line.confirmable === true
     ? `<p class="fee-confirm" style="margin:4px 0"><button class="secondary" style="font-size:12px" data-fee-confirm="${esc(line.track)}" title="Mark the brackets and amounts on this card as verified by you — only those. Automation never changes a schedule a person has verified.">Confirm fee — I checked it against the published schedule</button></p>`
     : "";
@@ -2975,7 +2986,7 @@ function renderFeeSheetLine(line) {
   // Keyed on "is there a number" rather than `known`: an ESTIMATE is known:false now
   // (an estimate is not knowledge) but it still has a figure to act on — it warns, it
   // does not block. Blocker stays for the line with no number at all.
-  const tone = line.confidence === "actual" || line.confidence === "verified" ? "pass" : line.feeUsd != null ? "warning" : "blocker";
+  const tone = line.confidence === "actual" || line.confidence === "verified" || line.confidence === "official" ? "pass" : line.feeUsd != null ? "warning" : "blocker";
   // "Utility interconnection", not "NEM": Oncor and SRP jobs have no utility net metering, and the
   // fee is the interconnection application's either way (new-AHJ e2e gap 3).
   const trackLabel = line.track === "nem" ? "Utility interconnection" : "Permit (AHJ)";
@@ -3005,6 +3016,7 @@ function renderFeeSheetLine(line) {
       ${matchEvidence}
       ${portalProvenance}
       ${verifiedNote}
+      ${officialNote}
       ${feeComparisonHtml(line)}
       ${printedFormCheckHtml(line.printedFormCheck)}
       ${confirmControl}
@@ -3089,7 +3101,7 @@ function renderFeeSheetPanel() {
   // and the human-checkout rule — an unknown must never read as a final number because the
   // detail is one click away. Plain text built from sheet fields, escaped.
   const foldMoney = (v) => (v == null ? "UNKNOWN" : `$${Number(v).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`);
-  const FOLD_QUALIFIER = { actual: "actual", verified: "verified", seeded: "provisional", estimated: "estimate", unknown: "unknown", schedule_match: "matches published schedule", portal_read: "actual, read from portal" };
+  const FOLD_QUALIFIER = { actual: "actual", verified: "verified", official: "from the authority's own page", seeded: "provisional", estimated: "estimate", unknown: "unknown", schedule_match: "matches published schedule", portal_read: "actual, read from portal" };
   const trackParts = sheet.lines.map((line) => {
     const name = line.track === "nem" ? "Utility" : line.role === "local_review" ? "Zoning review" : "Permit";
     const q = FOLD_QUALIFIER[feeConfidenceKey(line)] || "unknown";

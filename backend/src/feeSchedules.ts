@@ -88,6 +88,8 @@ import { placeHistoryCacheBreakpoint, recordLlmCall, sanitizeApiKey, webSearchRe
 import { routeFor } from "./modelRouting";
 import { getPermitProcessLookup } from "./permitProcess";
 import { stateSurchargeRuleFor, type StateSurchargeAnswer } from "./stateFeeRules";
+import { citationShortfalls, isOfficialSourceHost, quoteNamesValue, sourceHostOf } from "../../shared/src/officialSource";
+import { personVerifiedAuthorityHosts } from "./officialAuthorityHosts";
 import { CURATED_AHJ_FORMS } from "./curatedAhjForms";
 import { localPermitReview, permitFeeProject, trackForFeeDiscipline } from "./feeIssuer";
 import { logger } from "./logger";
@@ -483,6 +485,10 @@ export interface FeeScheduleResearchOutcome {
    *  distinct: a person reads the two candidates and picks, they do not go
    *  looking for a better source. */
   refusedConflicted: boolean;
+  /** True when the stored row's amounts were read on the authority's own OFFICIAL page and this
+   *  finding could not show a read of that same host (rule 3's official tier: an official row is
+   *  refreshed only from its own official host). Its finding went to notes; nothing else changed. */
+  refusedOfficial?: boolean;
   profileKey: string;
   track: FeeTrack;
   /** The row as it stands AFTER the pass — unchanged when refusedVerified. */
@@ -529,6 +535,10 @@ export interface ProjectFeeResolution {
   /** True only when EVERY line was found printed — label and fee on one row — in
    *  the cited document. Never a promotion: confidence stays 'seeded'. */
   corroborated: boolean;
+  /** READ ON THE AUTHORITY'S OWN OFFICIAL PAGE (officialFeeResolutionSource, owner 2026-11-11):
+   *  set by the callers that hold the person-verified hosts (feeOfficial.ts), never stored. Beside
+   *  `confidence`, never inside it: confidence stays 'seeded' and only a person writes 'verified'. */
+  official?: OfficialFeeSource;
   /** What the printed evidence says about the permit (corroborationVerdict), the WORST across the
    *  lines: "other_permit" when any line's row names another trade/scope/discipline — the quote
    *  must then not offer that row as this fee's published line (skeptic M8). */
@@ -599,6 +609,8 @@ export interface FeeScheduleLine {
   /** Present only when this bracket was found printed in the cited document. */
   corroboration?: FeeBracketCorroboration;
   confidence: FeeConfidence;
+  /** This line's official source (officialFeeLineSource), when a caller graded it. Never stored. */
+  official?: OfficialFeeSource;
   /** When Keelix read the source behind this line (feeSourceReadAt), "" when the row cannot say. */
   sourceReadAt?: string;
   /** True when this amount was computed from a per-watt ESTIMATED valuation rather than a
@@ -1386,6 +1398,44 @@ export function foreignMunicipalitySource(
     + `It may be another municipality's schedule (Halifax Township's was cited for Corry). Find ${clean(input.ahj)}'s own schedule, or record the agency that collects its fees as a delegation.`;
 }
 
+/** The hosts a person verified as this AHJ's own; a broken lookup row reads as none. */
+function safeVerifiedHosts(db: AppDb, state: string, ahj: string): string[] {
+  try { return state && ahj ? personVerifiedAuthorityHosts(db, state, ahj) : []; } catch { return []; }
+}
+
+/** THE OFFICIAL HOSTS A ROW'S PRINTED LINES WERE READ ON: every bracket whose corroboration (written
+ *  only by corroborateBrackets, from bytes this process retrieved) names a document on a host that
+ *  passes the one shared predicate, with a read time. Row grain, for the save guard only; whether a
+ *  LINE is official is officialFeeLineSource's answer. */
+export function officialBracketHosts(brackets: ReadonlyArray<FeeBracket>, verifiedAuthorityHosts: readonly string[] = []): string[] {
+  const out = new Set<string>();
+  for (const b of brackets ?? []) {
+    const c = b.corroboration;
+    if (!c?.corroborated || !clean(c.matchedLine) || Number.isNaN(Date.parse(clean(c.checkedAt)))) continue;
+    if (isOfficialSourceHost(clean(c.sourceUrl), verifiedAuthorityHosts)) out.add(sourceHostOf(clean(c.sourceUrl)));
+  }
+  return [...out].filter(Boolean);
+}
+
+/** A LEDGER FROM PAGES A LOOKUP READ ITSELF: the same retrieval trail a research pass keeps, built
+ *  from the page texts a lookup's own polite reader returned in this run, so a fee the lookup lands
+ *  is corroborated against bytes Keelix retrieved exactly as a researched one is. Pages with no
+ *  http(s) address or no text are left out; an empty result is no ledger at all. */
+export function feeLedgerFromPages(pages: ReadonlyArray<{ url: string; text: string }>): FeeDocumentLedger | undefined {
+  const seen = new Set<string>();
+  const evidence: FeeResearchEvidence[] = [];
+  const corpus: string[] = [];
+  for (const pg of pages ?? []) {
+    const url = clean(pg?.url);
+    const body = String(pg?.text ?? "");
+    if (!/^https?:\/\//i.test(url) || !body.trim() || seen.has(url)) continue;
+    seen.add(url);
+    evidence.push({ url, via: "http", status: 200, kind: /\.pdf(?:$|[?#])/i.test(url) ? "pdf" : "html", bytes: body.length, handed: 0 });
+    corpus.push(body);
+  }
+  return evidence.length ? { evidence, corpus } : undefined;
+}
+
 export function saveFeeSchedule(
   db: AppDb,
   input: { state: string; ahj?: string; utility?: string; track: FeeTrack; discipline?: string },
@@ -1402,6 +1452,11 @@ export function saveFeeSchedule(
      *  lookedUpAt). A research pass needs not say: its ledger is this process's own retrieval and
      *  the save time is the read time. With neither, the sources carry no read date. */
     fetchedAt?: string;
+    /** Hosts a PERSON verified as this authority's own, when the caller holds them (the utility
+     *  track: the utility's person-verified filing row). The permit track reads its own
+     *  (officialAuthorityHosts). Used only to tell whether a row's printed lines were read on an
+     *  official host (officialBracketHosts); never a promotion. */
+    verifiedAuthorityHosts?: readonly string[];
   } = {},
 ): FeeScheduleResearchOutcome {
   const track = input.track;
@@ -1503,6 +1558,28 @@ export function saveFeeSchedule(
       saved: false, refusedVerified: false, refusedConflicted: true,
       schedule: getFeeSchedule(db, profileKey, track, discipline),
     };
+  }
+
+  // AN OFFICIAL ROW IS REFRESHED ONLY FROM ITS OWN OFFICIAL HOST (rule 3's official tier, applied
+  // to fees 2026-11-11). Where the stored row's printed lines were read by Keelix on the
+  // authority's own official page, a later finding replaces them only when it, too, shows a read
+  // of a printed line on that same host. Anything else (a search answer with no document behind
+  // it, another site's copy, a hand-applied finding) is recorded in notes for a person, exactly as
+  // a finding against a person-verified row is, and nothing else changes. A person's Confirm, or a
+  // finding that resolves a conflict, is not stopped here.
+  if (existing && !finding.resolvesConflict && status !== "conflicted") {
+    const hosts = [...(opts.verifiedAuthorityHosts ?? []), ...(track === "permit" ? safeVerifiedHosts(db, clean(input.state), clean(input.ahj)) : [])];
+    const standing = officialBracketHosts(existing.brackets, hosts);
+    if (standing.length && !officialBracketHosts(brackets, hosts).some((h) => standing.includes(h))) {
+      const segment = `Research ${ts.slice(0, 10)} (NOT applied — the row's lines were read on ${standing.join(", ")}, the authority's own official page, and this finding shows no read of that site): ${findingSummary({ ...finding, brackets })}`;
+      db.run("UPDATE fee_schedules SET notes = ?, updated_at = ? WHERE id = ?", [mergeNotes(existing.notes, [segment]), ts, existing.id]);
+      logger.info("fees", "write refused against an official-source fee schedule", { profileKey, track, discipline });
+      return {
+        ...base, saved: false, refusedVerified: false, refusedConflicted: false, refusedOfficial: true,
+        reason: `Row was read on ${standing.join(", ")} (the authority's own official page) — finding recorded in notes, schedule unchanged. It is refreshed only by a read of that same site, or by a person.`,
+        schedule: getFeeSchedule(db, profileKey, track, discipline),
+      };
+    }
   }
 
   // EVERY ROW EXPLAINS ITSELF, conflicted or not. A finding that named its
@@ -2267,6 +2344,79 @@ export function corroborationNamesThisPermit(
   track: FeeTrack,
 ): boolean {
   return corroborationVerdict(line, track) === "names_permit";
+}
+
+/** WHERE AN OFFICIAL FEE WAS READ: the host as shown ("from <host>"), the document, and when. */
+export interface OfficialFeeSource { host: string; sourceUrl: string; fetchedAt: string }
+
+/**
+ * IS THIS LINE'S AMOUNT A FEE READ ON THE AUTHORITY'S OWN OFFICIAL PAGE? (owner, 2026-11-11: "If its
+ * from an official source we can use it to come into us as verified already" — rule 3's official
+ * tier, #683, applied to fees.)
+ *
+ * The evidence is the bracket's corroboration, which only corroborateBrackets writes and only from
+ * bytes this process retrieved: the printed row where the label and the fee sit together
+ * (matchedLine), the document it was read from (sourceUrl) and when (checkedAt). On top of that, ALL
+ * of these, or the line stays seeded:
+ *   - the document's host passes the ONE shared predicate (citationShortfalls: a government host, or
+ *     a domain a person verified as the authority's own — `verifiedAuthorityHosts`);
+ *   - the printed row itself states this line's base amount, and carries a read time;
+ *   - the row (with its heading) NAMES this permit (corroborationVerdict "names_permit"): a bare
+ *     size row or another trade's row is a machine's guess at which fee this is, never official;
+ *   - the amount is the printed one, not computed from a guessed valuation (a state surcharge the
+ *     quote adds from the state's own cited rule is a separate line with its own citation);
+ *   - a line reached through another authority's pointer has that hop vouched by a person (who
+ *     collects is not something a fee row's own print states).
+ * A person-verified line is not "official": a person outranks a page (rule 3). Pure; no DB.
+ */
+export function officialFeeLineSource(
+  line: Pick<FeeScheduleLine, "feeUsd" | "baseFeeUsd" | "corroboration" | "bracketLabel" | "discipline" | "confidence" | "valuationEstimated" | "delegatedFromScheduleId" | "hopVouched">,
+  track: FeeTrack,
+  verifiedAuthorityHosts: readonly string[] = [],
+): OfficialFeeSource | null {
+  if (line.feeUsd == null || line.confidence !== "seeded" || line.valuationEstimated === true) return null;
+  if (line.delegatedFromScheduleId && line.hopVouched !== true) return null;
+  const c = line.corroboration;
+  if (!c?.corroborated || corroborationVerdict(line, track) !== "names_permit") return null;
+  const printed = line.baseFeeUsd ?? line.feeUsd;
+  const { host, reasons } = citationShortfalls({
+    sourceUrl: clean(c.sourceUrl), quote: c.matchedLine, fetchedAt: clean(c.checkedAt), verifiedAuthorityHosts,
+    quoteStatesValue: (q) => quoteNamesValue(q, printed),
+  });
+  return reasons.length || !host ? null : { host, sourceUrl: clean(c.sourceUrl), fetchedAt: clean(c.checkedAt) };
+}
+
+/**
+ * THE TOTAL'S OFFICIAL SOURCE: only when the total exists, every line in it is person-verified or
+ * official (`hostsFor` gives each line's authority its person-verified hosts), at least one is
+ * official, and every other charge summed into it carries its own printed row from an official host.
+ * The weakest link, like confidence: one seeded line makes the total seeded. The source shown is the
+ * oldest official read among the lines.
+ */
+export function officialFeeResolutionSource(
+  resolution: Pick<ProjectFeeResolution, "feeUsd" | "lines" | "charges" | "valuationEstimated">,
+  track: FeeTrack,
+  hostsFor: (line: FeeScheduleLine) => readonly string[],
+): OfficialFeeSource | null {
+  if (resolution.feeUsd == null || resolution.valuationEstimated === true || !resolution.lines.length) return null;
+  const officials: OfficialFeeSource[] = [];
+  for (const line of resolution.lines) {
+    if (line.confidence === "verified") continue;
+    const o = officialFeeLineSource(line, track, hostsFor(line));
+    if (!o) return null;
+    officials.push(o);
+  }
+  if (!officials.length) return null;
+  const allHosts = [...new Set(resolution.lines.flatMap((l) => [...hostsFor(l)]))];
+  for (const c of resolution.charges ?? []) {
+    if (c.partOfLineFee || c.amountUsd == null) continue;
+    const short = citationShortfalls({
+      sourceUrl: clean(c.sourceUrl), quote: c.quote, fetchedAt: officials[0].fetchedAt, verifiedAuthorityHosts: allHosts,
+      quoteStatesValue: (q) => q.length >= 3,
+    });
+    if (short.reasons.length) return null;
+  }
+  return [...officials].sort((a, b) => a.fetchedAt.localeCompare(b.fetchedAt))[0];
 }
 
 /** One line for the notes trail, in the operator's vocabulary. Says CORROBORATED
