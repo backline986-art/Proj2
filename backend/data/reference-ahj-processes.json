@@ -5125,7 +5125,16 @@
       "requiresFloodplainCheck": false,
       "requiresJurisdictionCheck": true,
       "otherRequirements": "",
-      "reviewerNotes": "EPA comes from ID state. Form in prep folder and submit to ID state. Project value will only include the cost of the mounting system and the labor to install said system. Do not include the cost of the solar panels themselves in your valuation. Stamped plans on site.",
+      "reviewerNotes": "EPA comes from ID state. Form in prep folder and submit to ID state. Project value will only include the cost of the mounting system and the labor to install said system. Do not include the cost of the solar panels themselves in your valuation. Stamped plans on site. State chart (the Division's inspector list of 2023-01-19, which its electrical FAQ links as the chart showing jurisdiction; read 2026-11-11): in this county the state's electrical inspector covers the county outside the city limits, so the electrical permit for an unincorporated address is the state's. The chart is from 2023; the state's current answer for one address is its permit map. Seeded from the state's own pages, NOT verified.",
+      "citations": [
+        {
+          "field": "electricalPermitIssuer",
+          "value": "state (state chart: its electrical inspector covers the county outside city limits)",
+          "sourceUrl": "https://dopl.idaho.gov/wp-content/uploads/2023/09/BCRE-Inspector-List-with-Schedules-2023-01-19.pdf",
+          "quote": "BOISE 83705 ADA CLINT PIERCE MTW TODD MTW BRUCE HOLLAND MTW RUSS GARDINA 208-606-6951 SCHWENDIMAN 208-867-4192 208-606-5915 County Only",
+          "fetchedAt": "2026-11-11T20:23:00Z"
+        }
+      ],
       "sourceSheet": "ID PROCESS"
     },
     {
@@ -5145,7 +5154,7 @@
       "requiresFloodplainCheck": false,
       "requiresJurisdictionCheck": true,
       "otherRequirements": "",
-      "reviewerNotes": "For Electrical Fixtures mark \"1\" for \"photovoltaic system\" Apply for Solar on portal first. After issued, apply for the electrical portion. Upload files separate sheets and rename. When/If resubmitting corrections, please only upload affected sheets with same naming conventions. Operator sheet channel: Boise Portal EPlans upload. City of Boise pages (read 2026-11-10): city permits are applied for through its Permitting & Licensing portal; PV needs a building permit and an electrical permit, and the electrical trade permit is obtained separately with its own fee. Battery backup jobs: the #406 checklist asks for battery specifications showing UL 9540 testing, the battery manufacturer's installation guidelines, and floor plans showing the battery location and any bollard or ventilation. Fire: the Boise Fire Department's battery systems permit applies to installing a stationary battery system. Seeded from the authority's own pages, NOT verified.",
+      "reviewerNotes": "For Electrical Fixtures mark \"1\" for \"photovoltaic system\" Apply for Solar on portal first. After issued, apply for the electrical portion. Upload files separate sheets and rename. When/If resubmitting corrections, please only upload affected sheets with same naming conventions. Operator sheet channel: Boise Portal EPlans upload. City of Boise pages (read 2026-11-10): city permits are applied for through its Permitting & Licensing portal; PV needs a building permit and an electrical permit, and the electrical trade permit is obtained separately with its own fee. Battery backup jobs: the #406 checklist asks for battery specifications showing UL 9540 testing, the battery manufacturer's installation guidelines, and floor plans showing the battery location and any bollard or ventilation. Fire: the Boise Fire Department's battery systems permit applies to installing a stationary battery system. State chart (the Division's inspector list of 2023-01-19, which its electrical FAQ links as the chart showing jurisdiction; read 2026-11-11): for this city's ZIP the state's electrical inspector covers the county only, so inside the city limits the electrical permit is the city's own. The chart is from 2023; the state's current answer for one address is its permit map. Seeded from the authority's own pages and the state's, NOT verified.",
       "documents": {
         "items": [
           "Form #406 Residential Addition, Alteration & Accessory Building Application",
@@ -5210,6 +5219,13 @@
           "sourceUrl": "https://www.cityofboise.org/departments/fire/fire-prevention/permits/special-use-and-operations/battery-systems-permit/",
           "quote": "The battery systems permit applies to the installation of a stationary battery system.",
           "fetchedAt": "2026-11-10T08:20:04Z"
+        },
+        {
+          "field": "electricalPermitIssuer",
+          "value": "city (state chart: its electrical inspector covers 'County Only' here)",
+          "sourceUrl": "https://dopl.idaho.gov/wp-content/uploads/2023/09/BCRE-Inspector-List-with-Schedules-2023-01-19.pdf",
+          "quote": "BOISE 83709 ADA ALAN KLINE MTW TODD MTW JP SIMONS MTW RUSS GARDINA 208-807-0611 SCHWENDIMAN 208-514-6753 208-606-5915 County Only",
+          "fetchedAt": "2026-11-11T20:23:00Z"
         }
       ],
       "sourceSheet": "ID PROCESS"
@@ -5231,7 +5247,7 @@
       "requiresFloodplainCheck": false,
       "requiresJurisdictionCheck": true,
       "otherRequirements": "Credit Card Authorization",
-      "reviewerNotes": "Canyon County building department page (read 2026-11-10): mechanical, electrical and plumbing permits and inspections are handled by the State of Idaho (DOPL), not the county. Seeded from the authority's own pages, NOT verified.",
+      "reviewerNotes": "Canyon County building department page (read 2026-11-10): mechanical, electrical and plumbing permits and inspections are handled by the State of Idaho (DOPL), not the county. State chart (the Division's inspector list of 2023-01-19, which its electrical FAQ links as the chart showing jurisdiction; read 2026-11-11): in this county the state's electrical inspector covers the county outside the city limits, so the electrical permit for an unincorporated address is the state's. The chart is from 2023; the state's current answer for one address is its permit map. Seeded from the authority's own pages and the state's, NOT verified.",
       "citations": [
         {
           "field": "electricalPermitIssuer",
@@ -5239,6 +5255,13 @@
           "sourceUrl": "https://www.canyoncounty.id.gov/building-department",
           "quote": "all Mechanical, Electrical and Plumbing permits and inspections are handled by the State of Idaho, Division of Occupational and Professional Licenses (DOPL)",
           "fetchedAt": "2026-11-10T08:24:31Z"
+        },
+        {
+          "field": "electricalPermitIssuer",
+          "value": "state (state chart: its electrical inspector covers the county outside city limits)",
+          "sourceUrl": "https://dopl.idaho.gov/wp-content/uploads/2023/09/BCRE-Inspector-List-with-Schedules-2023-01-19.pdf",
+          "quote": "MIDDLETON 83644 CANYON MILENKO JOKIC MTW DANNY STRAIN MTW DARREN MCRAE MTW MIKE DAVIS 208-616-2901 208-870-6824 208-608-3690 County Only",
+          "fetchedAt": "2026-11-11T20:23:00Z"
         }
       ],
       "sourceSheet": "ID PROCESS"
@@ -5260,10 +5283,21 @@
       "requiresFloodplainCheck": false,
       "requiresJurisdictionCheck": false,
       "otherRequirements": "",
-      "reviewerNotes": "The state's electrical permit authority, as Canyon County's building department page names it: where a local jurisdiction's own page says the State issues electrical permits, the electrical permit track files with this office. How and where it takes an application is NOT on file: its door starts unknown and needs a person's Confirm. Seeded from a local authority's own page, NOT verified.",
+      "reviewerNotes": "The state's electrical permit authority: where a city or county does not run its own electrical program, the electrical permit track files with this office. State pages (read 2026-11-11): the Division offers online permits to licensed electrical contractors, bought in its online permit system after registering an account; since January 1, 2023 all state permits are bought online; its permit map takes the job address and sends the applicant to the right site, so the address decides whether a job is the state's. Permits are bought before work starts. Fee for a solar, renewable or storage job (the state's contractor worksheet lists them under other installations; IDAPA 24.39.10.500.02.b), on the total cost of the electrical system: up to $10,000, $60 plus 2 percent; over $10,000 up to $100,000, $260 plus 1 percent of the cost over $10,000; over $100,000, $1,160 plus 0.5 percent of the cost over $100,000. Renewable energy needs a plan check before final inspection: $65 minimum for the first hour, then $65 per hour. Reinspection $65. At the on-site inspection the inspector asks for a one-line diagram, manufacturer specification sheets, load calculations where the main breaker is downsized or a standby panel or transfer switch is used, and pictures of work in attics and basements; storage systems and transfer switches must be installed before final. Service changes or upgrades need their own permit. Its online permit system is cited here as a note only (the link the state's own FAQ gives), not as a filing door: a person opens it and records the filing address. Seeded from the state's own pages, NOT verified.",
       "stateAuthorityFor": [
         "electrical"
       ],
+      "documents": {
+        "items": [
+          "One-line diagram: service equipment, panels, disconnects, transfer switches, overcurrent devices, wiring methods, grounding electrode system, arrays and strings, point of connection",
+          "Manufacturer's specification sheets: modules, inverters, optimizers, rapid shutdown components, mounting system, charge controllers, energy storage systems, combiners",
+          "Load calculations (NEC 220 Part III or IV) when the main breaker is downsized, for an optional standby or stand-alone panel, or when an automatic transfer switch is used",
+          "Pictures of installation in areas like attics and basements"
+        ],
+        "sourceUrl": "https://dopl.idaho.gov/wp-content/uploads/2023/11/ELE-Renewable-Energy-and-Energy-Storage-Systems-on_site-Electrical-Inspection-Requirements-5_24_22.pdf",
+        "quote": "it is requested that you provide the following documentation at the time of on-site electrical inspection.",
+        "observedAt": "2026-11-11"
+      },
       "citations": [
         {
           "field": "ahj",
@@ -5271,6 +5305,160 @@
           "sourceUrl": "https://www.canyoncounty.id.gov/building-department",
           "quote": "all Mechanical, Electrical and Plumbing permits and inspections are handled by the State of Idaho, Division of Occupational and Professional Licenses (DOPL)",
           "fetchedAt": "2026-11-10T08:24:31Z"
+        },
+        {
+          "field": "permitSystem",
+          "value": "online permit system (the link the FAQ gives): https://web.dbs.idaho.gov/etrakit3/",
+          "sourceUrl": "https://dopl.idaho.gov/ele/ele-faqs/",
+          "quote": "Register and establish a free account and purchase your permit online",
+          "fetchedAt": "2026-11-11T20:22:45Z"
+        },
+        {
+          "field": "permitSystem",
+          "value": "online permits for licensed electrical contractors",
+          "sourceUrl": "https://dopl.idaho.gov/ele/ele-faqs/",
+          "quote": "The Division of Occupational and Professional Licenses offers online permits to licensed Electrical contractors as well as homeowners performing work on their primary or secondary residences.",
+          "fetchedAt": "2026-11-11T20:22:45Z"
+        },
+        {
+          "field": "permitSystem",
+          "value": "all permits bought online since 2023-01-01",
+          "sourceUrl": "https://dopl.idaho.gov/wp-content/uploads/2023/11/ELE-Contractor-Electrical-Permit-Application.pdf",
+          "quote": "As of January 1, 2023, all permits will need to be purchased Online at DBS.IDAHO.GOV",
+          "fetchedAt": "2026-11-11T20:22:58Z"
+        },
+        {
+          "field": "permitSystem",
+          "value": "the state permit map routes each address to the right site",
+          "sourceUrl": "https://dopl.idaho.gov/purchase-a-trade-permit/",
+          "quote": "Click the appropriate permit type in the list on the right. You will be directed to the appropriate website to purchase the permit needed.",
+          "fetchedAt": "2026-11-11T20:22:47Z"
+        },
+        {
+          "field": "requiresElectricalPermitApplication",
+          "value": "true",
+          "sourceUrl": "https://adminrules.idaho.gov/rules/current/24/243910.pdf",
+          "quote": "All electrical permits shall be purchased before work is commenced.",
+          "fetchedAt": "2026-11-11T20:22:56Z"
+        },
+        {
+          "field": "jurisdiction",
+          "value": "cities and counties may run their own electrical program",
+          "sourceUrl": "https://dopl.idaho.gov/ele/ele-faqs/",
+          "quote": "Because the legislature has authorized several cities and counties to assume jurisdiction within their boundaries, permit requirements vary widely throughout the state.",
+          "fetchedAt": "2026-11-11T20:22:45Z"
+        },
+        {
+          "field": "jurisdiction",
+          "value": "a city or county notifies the Division before running its own program",
+          "sourceUrl": "https://legislature.idaho.gov/statutesrules/idstat/Title54/T54CH10/SECT54-1001B/",
+          "quote": "A city or county that chooses to conduct its own electrical code enforcement inspections or to receive such inspections from another city or county shall provide the division of occupational and professional licenses notice of such decision in writing at least thirty (30) days prior to implementation.",
+          "fetchedAt": "2026-11-11T20:23:54Z"
+        },
+        {
+          "field": "jurisdiction",
+          "value": "the state chart of where its inspectors work",
+          "sourceUrl": "https://dopl.idaho.gov/ele/ele-faqs/",
+          "quote": "Please refer to this chart showing jurisdiction based on geographical location .",
+          "fetchedAt": "2026-11-11T20:22:45Z"
+        },
+        {
+          "field": "fees",
+          "value": "solar and renewable energy are priced as other installations",
+          "sourceUrl": "https://dopl.idaho.gov/wp-content/uploads/2023/11/ELE-Contractor-Electrical-Permit-Application.pdf",
+          "quote": "OTHER INSTALLATIONS including COMMERCIAL/INDUSTRIAL/SOLAR/RENEWABLE ENERGY",
+          "fetchedAt": "2026-11-11T20:22:58Z"
+        },
+        {
+          "field": "fees",
+          "value": "solar, renewable energy and energy storage systems",
+          "sourceUrl": "https://dopl.idaho.gov/wp-content/uploads/2023/11/ELE-Contractor-Electrical-Permit-Application.pdf",
+          "quote": "Check here if this is a Solar, Renewable Energy, power generation, power production, or energy storage systems:",
+          "fetchedAt": "2026-11-11T20:22:58Z"
+        },
+        {
+          "field": "fees",
+          "value": "on the total cost of the electrical system",
+          "sourceUrl": "https://adminrules.idaho.gov/rules/current/24/243910.pdf",
+          "quote": "The electrical cost shall be the cost to the owner of all labor charges and all other costs that are incurred to complete the installation of all wiring and equipment installed as part of the system.",
+          "fetchedAt": "2026-11-11T20:22:56Z"
+        },
+        {
+          "field": "fees",
+          "value": "$60 plus 2% up to $10,000",
+          "sourceUrl": "https://adminrules.idaho.gov/rules/current/24/243910.pdf",
+          "quote": "Wiring cost not exceeding ten thousand dollars ($10,000): sixty dollars ($60) plus two percent (2%) of total wiring cost.",
+          "fetchedAt": "2026-11-11T20:22:56Z"
+        },
+        {
+          "field": "fees",
+          "value": "$260 plus 1% over $10,000 up to $100,000",
+          "sourceUrl": "https://adminrules.idaho.gov/rules/current/24/243910.pdf",
+          "quote": "Wiring cost over ten thousand dollars ($10,000) but not exceeding one hundred thousand dollars ($100,000): two hundred sixty dollars ($260) plus one percent (1%) of wiring cost in excess of ten thousand dollars ($10,000).",
+          "fetchedAt": "2026-11-11T20:22:56Z"
+        },
+        {
+          "field": "fees",
+          "value": "$1,160 plus 0.5% over $100,000",
+          "sourceUrl": "https://adminrules.idaho.gov/rules/current/24/243910.pdf",
+          "quote": "Wiring cost over one hundred thousand dollars ($100,000): one thousand one hundred sixty dollars ($1,160) plus one-half of one percent (.5%) of the portion of wiring costs exceeding one hundred thousand dollars ($100,000).",
+          "fetchedAt": "2026-11-11T20:22:56Z"
+        },
+        {
+          "field": "fees",
+          "value": "renewable energy requires a plan check",
+          "sourceUrl": "https://dopl.idaho.gov/wp-content/uploads/2023/11/ELE-Contractor-Electrical-Permit-Application.pdf",
+          "quote": "Renewable Energy: Requires plan check prior to final inspection.",
+          "fetchedAt": "2026-11-11T20:22:58Z"
+        },
+        {
+          "field": "fees",
+          "value": "$65 minimum plan check",
+          "sourceUrl": "https://adminrules.idaho.gov/rules/current/24/243910.pdf",
+          "quote": "Plan Check Fee. Sixty-five dollar ($65) minimum for one (1) hour or less.",
+          "fetchedAt": "2026-11-11T20:22:56Z"
+        },
+        {
+          "field": "fees",
+          "value": "$65 reinspection",
+          "sourceUrl": "https://adminrules.idaho.gov/rules/current/24/243910.pdf",
+          "quote": "Reinspection Fees. A fee of sixty-five dollars ($65) per reinspection will be assessed for work not being ready for inspection",
+          "fetchedAt": "2026-11-11T20:22:56Z"
+        },
+        {
+          "field": "documents",
+          "value": "renewable energy and energy storage inspections",
+          "sourceUrl": "https://dopl.idaho.gov/wp-content/uploads/2023/11/ELE-Renewable-Energy-and-Energy-Storage-Systems-on_site-Electrical-Inspection-Requirements-5_24_22.pdf",
+          "quote": "Electrical Inspections for non-grid connected and grid connected renewable energy and energy storage systems.",
+          "fetchedAt": "2026-11-11T20:22:57Z"
+        },
+        {
+          "field": "documents",
+          "value": "one-line diagram",
+          "sourceUrl": "https://dopl.idaho.gov/wp-content/uploads/2023/11/ELE-Renewable-Energy-and-Energy-Storage-Systems-on_site-Electrical-Inspection-Requirements-5_24_22.pdf",
+          "quote": "A One-Line Diagram - To include but not limited to the following:",
+          "fetchedAt": "2026-11-11T20:22:57Z"
+        },
+        {
+          "field": "documents",
+          "value": "load calculations",
+          "sourceUrl": "https://dopl.idaho.gov/wp-content/uploads/2023/11/ELE-Renewable-Energy-and-Energy-Storage-Systems-on_site-Electrical-Inspection-Requirements-5_24_22.pdf",
+          "quote": "Load Calculations in accordance with NEC 220 Part III or IV as applicable",
+          "fetchedAt": "2026-11-11T20:22:57Z"
+        },
+        {
+          "field": "documents",
+          "value": "storage and transfer switches installed before final",
+          "sourceUrl": "https://dopl.idaho.gov/wp-content/uploads/2023/11/ELE-Renewable-Energy-and-Energy-Storage-Systems-on_site-Electrical-Inspection-Requirements-5_24_22.pdf",
+          "quote": "Charge Controllers, Energy Storage System/s, Transfer Switches, Generators, Optional Standby and/or Stand-Alone Panels are required to be installed.",
+          "fetchedAt": "2026-11-11T20:22:57Z"
+        },
+        {
+          "field": "documents",
+          "value": "service changes need their own permit",
+          "sourceUrl": "https://dopl.idaho.gov/wp-content/uploads/2023/11/ELE-Renewable-Energy-and-Energy-Storage-Systems-on_site-Electrical-Inspection-Requirements-5_24_22.pdf",
+          "quote": "Where Service changes and/or upgrades are required and/or done, they shall be done under a separate permit.",
+          "fetchedAt": "2026-11-11T20:22:57Z"
         }
       ],
       "sourceSheet": "ID seeded (authority pages read 2026-11-10)"
@@ -5312,7 +5500,7 @@
       "requiresFloodplainCheck": false,
       "requiresJurisdictionCheck": true,
       "otherRequirements": "Bid sheet/cost of materials and install",
-      "reviewerNotes": "Online payment portal City of Eagle pages (read 2026-11-10): building forms and applications that may be submitted online go through its Contractor Portal (iWorQ); the city issues electrical permits through the same Contractor Portal. Seeded from the authority's own pages, NOT verified.",
+      "reviewerNotes": "Online payment portal City of Eagle pages (read 2026-11-10): building forms and applications that may be submitted online go through its Contractor Portal (iWorQ); the city issues electrical permits through the same Contractor Portal. State chart (the Division's inspector list of 2023-01-19, which its electrical FAQ links as the chart showing jurisdiction; read 2026-11-11): for this city's ZIP the state's electrical inspector covers the county only, so inside the city limits the electrical permit is the city's own. The chart is from 2023; the state's current answer for one address is its permit map. Seeded from the authority's own pages and the state's, NOT verified.",
       "citations": [
         {
           "field": "submissionMethod",
@@ -5334,6 +5522,13 @@
           "sourceUrl": "https://www.cityofeagle.org/1835/Electrical-Permits",
           "quote": "You have the option of faxing, emailing, mailing or bringing the application into the Building Department.",
           "fetchedAt": "2026-11-10T08:24:08Z"
+        },
+        {
+          "field": "electricalPermitIssuer",
+          "value": "city (state chart: its electrical inspector covers 'County Only' here)",
+          "sourceUrl": "https://dopl.idaho.gov/wp-content/uploads/2023/09/BCRE-Inspector-List-with-Schedules-2023-01-19.pdf",
+          "quote": "EAGLE 83616 ADA MILENKO JOKIC MTW TODD MTW BRUCE HOLLAND MTW RUSS GARDINA 208-616-2901 SCHWENDIMAN 208-867-4192 208-606-5915 County Only",
+          "fetchedAt": "2026-11-11T20:23:00Z"
         }
       ],
       "sourceSheet": "ID PROCESS"
@@ -5415,7 +5610,16 @@
       "requiresFloodplainCheck": false,
       "requiresJurisdictionCheck": true,
       "otherRequirements": "",
-      "reviewerNotes": "Permit docs can be in one PDF, plan set needs to be separated into individual pages",
+      "reviewerNotes": "Permit docs can be in one PDF, plan set needs to be separated into individual pages. State chart (the Division's inspector list of 2023-01-19, which its electrical FAQ links as the chart showing jurisdiction; read 2026-11-11): for this city's ZIP the state's electrical inspector covers the county only, so inside the city limits the electrical permit is the city's own. The chart is from 2023; the state's current answer for one address is its permit map. Seeded from the state's own pages, NOT verified.",
+      "citations": [
+        {
+          "field": "electricalPermitIssuer",
+          "value": "city (state chart: its electrical inspector covers 'County Only' here)",
+          "sourceUrl": "https://dopl.idaho.gov/wp-content/uploads/2023/09/BCRE-Inspector-List-with-Schedules-2023-01-19.pdf",
+          "quote": "MERIDIAN 83642 ADA CLINT PIERCE MTW TODD MTW JP SIMONS MTW RUSS GARDINA 208-606-6951 SCHWENDIMAN 208-514-6753 208-606-5915 County Only",
+          "fetchedAt": "2026-11-11T20:23:00Z"
+        }
+      ],
       "sourceSheet": "ID PROCESS"
     },
     {
@@ -5435,7 +5639,16 @@
       "requiresFloodplainCheck": false,
       "requiresJurisdictionCheck": true,
       "otherRequirements": "",
-      "reviewerNotes": "",
+      "reviewerNotes": "State chart (the Division's inspector list of 2023-01-19, which its electrical FAQ links as the chart showing jurisdiction; read 2026-11-11): for this city's ZIP the state's electrical inspector covers the county only, so inside the city limits the electrical permit is the city's own. The chart is from 2023; the state's current answer for one address is its permit map. Seeded from the state's own pages, NOT verified.",
+      "citations": [
+        {
+          "field": "electricalPermitIssuer",
+          "value": "city (state chart: its electrical inspector covers 'County Only' here)",
+          "sourceUrl": "https://dopl.idaho.gov/wp-content/uploads/2023/09/BCRE-Inspector-List-with-Schedules-2023-01-19.pdf",
+          "quote": "NAMPA 83687 CANYON KELLY WEBB MTW DANNY STRAIN MTW DARREN MCRAE MTW ROBERT 208-550-5485 208-870-6824 208-608-3690 CONWAY County Only",
+          "fetchedAt": "2026-11-11T20:23:00Z"
+        }
+      ],
       "sourceSheet": "ID PROCESS"
     },
     {
@@ -5515,7 +5728,7 @@
       "requiresFloodplainCheck": false,
       "requiresJurisdictionCheck": true,
       "otherRequirements": "",
-      "reviewerNotes": "Bid sheet and plan set. Fill out solar application on portal. Upload plans and bid sheet. City of Star pages (read 2026-11-10): all plans are uploaded to the city's iWorQ portal; electrical, mechanical and plumbing permits are in addition to the building permit and are bought at City Hall, in person. Seeded from the authority's own pages, NOT verified.",
+      "reviewerNotes": "Bid sheet and plan set. Fill out solar application on portal. Upload plans and bid sheet. City of Star pages (read 2026-11-10): all plans are uploaded to the city's iWorQ portal; electrical, mechanical and plumbing permits are in addition to the building permit and are bought at City Hall, in person. State chart (the Division's inspector list of 2023-01-19, which its electrical FAQ links as the chart showing jurisdiction; read 2026-11-11): for this city's ZIP the state's electrical inspector covers the county only, so inside the city limits the electrical permit is the city's own. The chart is from 2023; the state's current answer for one address is its permit map. Seeded from the authority's own pages and the state's, NOT verified.",
       "citations": [
         {
           "field": "submissionMethod",
@@ -5544,6 +5757,13 @@
           "sourceUrl": "https://staridaho.org/1249/Fee-Information",
           "quote": "Electrical, Mechanical, and Plumbing permits are in addition to the building permit and are purchased separately at City Hall.",
           "fetchedAt": "2026-11-10T08:23:37Z"
+        },
+        {
+          "field": "electricalPermitIssuer",
+          "value": "city (state chart: its electrical inspector covers 'County Only' here)",
+          "sourceUrl": "https://dopl.idaho.gov/wp-content/uploads/2023/09/BCRE-Inspector-List-with-Schedules-2023-01-19.pdf",
+          "quote": "STAR 83669 ADA MILENKO JOKIC MTW TODD MTW DARREN MCRAE MTW RUSS GARDINA 208-616-2901 SCHWENDIMAN 208-608-3690 208-606-5915 County Only",
+          "fetchedAt": "2026-11-11T20:23:00Z"
         }
       ],
       "sourceSheet": "ID PROCESS"
@@ -5565,7 +5785,7 @@
       "requiresFloodplainCheck": false,
       "requiresJurisdictionCheck": true,
       "otherRequirements": "",
-      "reviewerNotes": "City of Kuna pages (read 2026-11-10): residential digital submittals are emailed to the Building Department as individual PDFs, starting with the application. The city's Building Department issues electrical permits. Seeded from the authority's own pages, NOT verified.",
+      "reviewerNotes": "City of Kuna pages (read 2026-11-10): residential digital submittals are emailed to the Building Department as individual PDFs, starting with the application. The city's Building Department issues electrical permits. State chart (the Division's inspector list of 2023-01-19, which its electrical FAQ links as the chart showing jurisdiction; read 2026-11-11): for this city's ZIP the state's electrical inspector covers the county only, so inside the city limits the electrical permit is the city's own. The chart is from 2023; the state's current answer for one address is its permit map. Seeded from the authority's own pages and the state's, NOT verified.",
       "citations": [
         {
           "field": "submissionMethod",
@@ -5580,6 +5800,13 @@
           "sourceUrl": "https://kunacity.id.gov/119/Building-Department",
           "quote": "Electrical permits are available at City of Kuna Building Department.",
           "fetchedAt": "2026-11-10T08:21:50Z"
+        },
+        {
+          "field": "electricalPermitIssuer",
+          "value": "city (state chart: its electrical inspector covers 'County Only' here)",
+          "sourceUrl": "https://dopl.idaho.gov/wp-content/uploads/2023/09/BCRE-Inspector-List-with-Schedules-2023-01-19.pdf",
+          "quote": "KUNA 83634 ADA CLINT PIERCE MTW TODD MTW DARREN MCRAE MTW RUSS GARDINA 208-606-6951 SCHWENDIMAN 208-608-3690 208-606-5915 County Only",
+          "fetchedAt": "2026-11-11T20:23:00Z"
         }
       ],
       "sourceSheet": "ID seeded (authority pages read 2026-11-10)"
@@ -5601,7 +5828,7 @@
       "requiresFloodplainCheck": false,
       "requiresJurisdictionCheck": true,
       "otherRequirements": "",
-      "reviewerNotes": "City of Caldwell pages (read 2026-11-10): one- and two-family permits are submitted digitally through the city's Online Portal (Citizenserve); paper submittals are no longer accepted. The Building Safety Division takes building and electrical permits through the same portal. The PV checklist says the submittal is reviewed by the Plans Examiner, the Electrical Inspector and Planning & Zoning before the building permit is issued. Seeded from the authority's own pages, NOT verified.",
+      "reviewerNotes": "City of Caldwell pages (read 2026-11-10): one- and two-family permits are submitted digitally through the city's Online Portal (Citizenserve); paper submittals are no longer accepted. The Building Safety Division takes building and electrical permits through the same portal. The PV checklist says the submittal is reviewed by the Plans Examiner, the Electrical Inspector and Planning & Zoning before the building permit is issued. State chart (the Division's inspector list of 2023-01-19, which its electrical FAQ links as the chart showing jurisdiction; read 2026-11-11): for this city's ZIP the state's electrical inspector covers the county only, so inside the city limits the electrical permit is the city's own. The chart is from 2023; the state's current answer for one address is its permit map. Seeded from the authority's own pages and the state's, NOT verified.",
       "documents": {
         "items": [
           "Residential building permit application",
@@ -5652,6 +5879,13 @@
           "sourceUrl": "https://www.cityofcaldwell.org/files/assets/city/v/1/building/documents/permit-apps/photovoltaic-checklist.pdf",
           "quote": "This submittal will require a review by the Caldwell Plans Examiner, Electrical Inspector, and Planning & Zoning Department, prior to the issuance of the building permit.",
           "fetchedAt": "2026-11-10T08:24:23Z"
+        },
+        {
+          "field": "electricalPermitIssuer",
+          "value": "city (state chart: its electrical inspector covers 'County Only' here)",
+          "sourceUrl": "https://dopl.idaho.gov/wp-content/uploads/2023/09/BCRE-Inspector-List-with-Schedules-2023-01-19.pdf",
+          "quote": "CALDWELL 83605 CANYON KELLY WEBB MTW DANNY STRAIN MTW DARREN MCRAE MTW MIKE DAVIS 208-550-5485 208-870-6824 208-608-3690 County Only",
+          "fetchedAt": "2026-11-11T20:23:00Z"
         }
       ],
       "sourceSheet": "ID seeded (authority pages read 2026-11-10)"
@@ -5673,7 +5907,7 @@
       "requiresFloodplainCheck": false,
       "requiresJurisdictionCheck": true,
       "otherRequirements": "",
-      "reviewerNotes": "City of Twin Falls pages (read 2026-11-10): solar is applied for through the city's online portal (Cityworks), with plans attached to the application; all electrical work must be permitted by the city; a building permit is needed only when changes to the roof are required. Seeded from the authority's own pages, NOT verified.",
+      "reviewerNotes": "City of Twin Falls pages (read 2026-11-10): solar is applied for through the city's online portal (Cityworks), with plans attached to the application; all electrical work must be permitted by the city; a building permit is needed only when changes to the roof are required. State chart (the Division's inspector list of 2023-01-19, which its electrical FAQ links as the chart showing jurisdiction; read 2026-11-11): for this city's ZIP the state's electrical inspector covers the county only, so inside the city limits the electrical permit is the city's own. The chart is from 2023; the state's current answer for one address is its permit map. Seeded from the authority's own pages and the state's, NOT verified.",
       "citations": [
         {
           "field": "submissionMethod",
@@ -5695,6 +5929,13 @@
           "sourceUrl": "https://www.tfid.org/DocumentCenter/View/3510/Solar-Installation-Instructions-Updated-12-4-18",
           "quote": "building permits will be needed if changes to the roof are required",
           "fetchedAt": "2026-11-10T08:23:05Z"
+        },
+        {
+          "field": "electricalPermitIssuer",
+          "value": "city (state chart: its electrical inspector covers 'County Only' here)",
+          "sourceUrl": "https://dopl.idaho.gov/wp-content/uploads/2023/09/BCRE-Inspector-List-with-Schedules-2023-01-19.pdf",
+          "quote": "TWIN FALLS 83303 TWIN FALLS MARK GREENE MTWRF SHANE MTWRF GARY JENKS MWF 208-490-6541 SCHMECHEL 208-867-9181 County Only",
+          "fetchedAt": "2026-11-11T20:23:00Z"
         }
       ],
       "sourceSheet": "ID seeded (authority pages read 2026-11-10)"
