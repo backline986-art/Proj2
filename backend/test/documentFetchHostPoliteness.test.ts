@@ -249,6 +249,24 @@ await check("the host STAMPED is the one that ANSWERED: a city link that 302s to
   assert.notEqual(cityHost, vendorHost);
 });
 
+await check("…and when the window does NOT say where it landed, the host the plain rung landed on is stamped, still never the city", async () => {
+  reset(); seenPaths.length = 0;
+  const vendorHost = hostOf(other.base);
+  // The default fake window: a 403 with no landing URL reported.
+  const { launcher, state } = makeLauncher();
+  const viaCity = await fetchPublicDocument(`${base}/fees-link`, { launcher });
+  assert.equal(state.launches, 1);
+  assert.equal(verdict(viaCity).siteRefused, true, viaCity.reason);
+  const cityDoc = await fetchPublicDocument(`${base}/ok.pdf`, { launcher });
+  assert.equal(cityDoc.ok, true, `the city must not carry the vendor's refusal: ${cityDoc.reason}`);
+  const cityWall = await fetchPublicDocument(walled(1), { launcher });
+  assert.equal(state.launches, 2, "the city never had its window refused, so its own wall earns one");
+  assert.equal(verdict(cityWall).refusedHost, undefined, cityWall.reason);
+  const second = await fetchPublicDocument(`${other.base}/vendor/denied2.pdf`, { launcher });
+  assert.equal(state.launches, 2, "the vendor had its window (through the city's link)");
+  assert.equal(verdict(second).refusedHost, vendorHost, second.reason);
+});
+
 await check("a 404 on the host is a missing page, not a refusal: the next wall still earns its window", async () => {
   reset();
   const { launcher, state } = makeLauncher();

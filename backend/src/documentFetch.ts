@@ -733,10 +733,12 @@ async function runLadder(url: URL, host: string, opts: FetchPublicDocumentOption
         httpStatus: attempt.status,
         // The window was the one try this host gets. Refused on one object: no second window this
         // hour. Refused with a challenge, a notice or a 429, or on a second object: backed off. The
-        // host counted is the one the window's bytes came from.
+        // host counted is the one the window's bytes came from — and when the window did not say
+        // where it landed, the host the plain rung landed on, never the URL's own host by default.
         onSiteRefusal: (reason, finalUrl, scope) => {
-          const from = politeHostOf(finalUrl) || answering;
-          return { scope: noteRefused(from, finalUrl, reason, scope), host: from };
+          const at = finalUrl || attempt.finalUrl;
+          const from = politeHostOf(at) || answering;
+          return { scope: noteRefused(from, at, reason, scope), host: from };
         },
       });
     } finally {
@@ -756,7 +758,7 @@ async function browserAttempt(
      *  could not start, threw, or was sent somewhere private. `scope` is what the refusal read as
      *  (a bare wall on one object: "document"; a challenge, a notice, a 429: "host"); the answer is
      *  the scope the host record ended up at, and the host it was counted against. */
-    onSiteRefusal?: (reason: string, finalUrl: string, scope: RefusalScope) => { scope: RefusalScope; host: string };
+    onSiteRefusal?: (reason: string, finalUrl: string | undefined, scope: RefusalScope) => { scope: RefusalScope; host: string };
   },
 ): Promise<FetchedDocument> {
   const deadline = Date.now() + cfg.timeoutMs;
@@ -768,7 +770,9 @@ async function browserAttempt(
   const refusedBySite = (kind: Exclude<Refusal, "none">, reason: string, status: number, finalUrl?: string): FetchedDocument => {
     const from = finalUrl || url.toString();
     const scope: RefusalScope = kind === "wall" && status !== 429 ? "document" : "host";
-    const noted = cfg.onSiteRefusal?.(reason, from, scope) ?? { scope, host: politeHostOf(from) };
+    // The landing URL as the WINDOW reported it (undefined when it did not): the ladder falls back
+    // to where its plain rung landed, which is the host that answered.
+    const noted = cfg.onSiteRefusal?.(reason, finalUrl || undefined, scope) ?? { scope, host: politeHostOf(from) };
     return { ...fail(reason, status), finalUrl: from, ...refusedFields(noted.scope, noted.host) };
   };
 
