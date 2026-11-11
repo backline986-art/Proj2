@@ -15,6 +15,7 @@ import type { Page, Frame, Locator } from "playwright";
 import type { RecipeSelector } from "../../../shared/src/types";
 import { detectChallengeFrame, detectSecondFactor, sleep, smartWait, waitForElement } from "../safeAction";
 import { resolveHeadless } from "../browser";
+import { DISCLOSURE_TOGGLE_SELECTOR, isDisclosureToggle } from "./disclosureToggle";
 
 export interface Credential {
   username: string;
@@ -33,10 +34,40 @@ export type LoginStatus =
   | "no_login_required" // the page IS the application form: a public submission portal with no account at all
   | "error";
 
+/** WHAT THE SUBMIT CLICKED — the control's identity, never its value (rule 2: a submit's value
+ *  is a label, but an <input> value is the one attribute a capture strips, so none is kept). */
+export interface ClickedControl {
+  tag: string;
+  role: string;
+  id: string;
+  name: string;
+  type: string;
+  /** The aria-expanded attribute at click time, null when the control carries none. */
+  ariaExpanded: string | null;
+  /** Inside the password field's own <form>. */
+  inForm: boolean;
+}
+
+/** The submit's accounting, carried out of performLogin so the learner's event, the bundle and
+ *  the backend's login health read the SAME facts instead of regexing the message. */
+export interface LoginDetail {
+  submittedVia: "button" | "enter";
+  clicked?: ClickedControl;
+  /** A request left the browser after the submit (a non-GET or a navigation). False means the
+   *  form was never posted — the page in front of us is not the portal's answer. */
+  posted?: boolean;
+  /** The portal's refusal banner read beside the form, when one was shown. */
+  banner?: string;
+  /** Named cause of a still_on_login: the click toggled a panel instead of posting, or the
+   *  portal answered with a refusal banner. */
+  cause?: "toggle_click" | "refused_banner";
+}
+
 export interface LoginResult {
   ok: boolean;
   status: LoginStatus;
   message: string;
+  detail?: LoginDetail;
 }
 
 /** DID THE PORTAL REFUSE THE STORED LOGIN? Read off performLogin's own wording — the one question
@@ -669,13 +700,19 @@ async function isFillable(loc: Locator): Promise<boolean> {
 async function firstVisible(
   page: Page,
   candidates: RecipeSelector[],
-  opts: { fillable?: boolean; clickable?: boolean } = {},
+  opts: { fillable?: boolean; clickable?: boolean; submit?: boolean } = {},
 ): Promise<Locator | null> {
   const scopes: Array<Page | Frame> = typeof page.frames === "function" ? page.frames() : [page];
   // opts.clickable: the match is about to be CLICKED — skip anything on the never-click list
   // (social sign-in, help, unlock, create-account, keep-me-signed-in…). See NEVER_CLICK_PATTERNS.
+  // opts.submit: the match is meant to POST the form or advance a step — a disclosure toggle
+  // (aria-expanded/aria-controls, <legend>, <summary>) only opens and shuts a panel, so it is
+  // never one. Scoped here, NOT in neverClickReason: the same control is the correct REVEAL
+  // trigger when the login panel arrives collapsed. See disclosureToggle.ts.
   const ok = async (loc: Locator): Promise<boolean> =>
-    (!opts.fillable || await isFillable(loc)) && (!opts.clickable || !(await neverClickReason(loc)));
+    (!opts.fillable || await isFillable(loc))
+    && (!opts.clickable || !(await neverClickReason(loc)))
+    && (!opts.submit || !(await isDisclosureToggle(loc, ELEMENT_READ_TIMEOUT_MS)));
   for (const sel of candidates) {
     for (const scope of scopes) {
       try {
@@ -774,6 +811,179 @@ async function findInputBeforePassword(page: Page): Promise<Locator | null> {
 }
 async function findPasswordField(page: Page): Promise<Locator | null> {
   return (await firstVisible(page, PASSWORD_CANDIDATES, { fillable: true })) ?? (await findInputByAdjacentLabel(page, "pass"));
+}
+
+/**
+ * THE SUBMIT THAT OWNS THE PASSWORD FIELD — picked by FORM OWNERSHIP before any name.
+ *
+ * City of Bend (CityView, 2026-11-11): the password's <form> held one native submit,
+ * <input type="submit" id="bnext" value=""> with no visible text, and the page ALSO held a
+ * <legend role="button" aria-expanded>Sign In</legend> heading the panel. The name-ordered
+ * SUBMIT_CANDIDATES reached {role:button, name:"Sign In"} first, the legend came first in the
+ * DOM, and the click collapsed the panel instead of posting. A native submit control inside the
+ * password's own <form> is what the browser itself would press on Enter — the strongest
+ * evidence there is, and it needs no label.
+ *
+ * Bounded, because ASP.NET pages wrap the WHOLE page in one <form>, where a header search
+ * button is also a native submit: a candidate must follow the password field with no other
+ * typeable field between them (the control that closes the password's own field group), or be
+ * the form's only native submit. [type=submit] outranks a type-less <button> — a password
+ * show/hide eye is routinely a type-less <button> right after the box. No owning form, or no
+ * such control (Citizenserve's anchor, Accela's #hlLogin, eTRAKiT's input[type=button]): the
+ * caller falls back to the ordered candidate list, as before. Never a disclosure toggle, never
+ * a never-click control.
+ */
+const NATIVE_SUBMIT_SELECTOR = 'input[type="submit"], button[type="submit"], button:not([type])';
+async function ownFormSubmit(passLoc: Locator): Promise<Locator | null> {
+  try {
+    const form = passLoc.locator("xpath=ancestor::form[1]");
+    if ((await form.count().catch(() => 0)) !== 1) return null;
+    // Ranked ordinals among the form's native submits, decided in-page in one read.
+    const ranked = await (passLoc as unknown as { evaluate: (fn: (el: Element, a: { sub: string; disc: string }) => number[], arg: { sub: string; disc: string }, o: { timeout: number }) => Promise<number[]> })
+      .evaluate((pw, a) => {
+        // Fully inline — no named helper (see the note in authenticatedSignalPresent).
+        const form = pw.closest("form");
+        if (!form) return [];
+        const all = Array.from(form.querySelectorAll(a.sub));
+        const ok: number[] = [];
+        for (let i = 0; i < all.length; i++) {
+          const el = all[i] as HTMLElement;
+          const r = el.getBoundingClientRect();
+          if (r.width <= 0 || r.height <= 0 || (el as HTMLButtonElement).disabled || el.matches(a.disc)) continue;
+          ok.push(i);
+        }
+        if (ok.length === 0) return [];
+        if (ok.length === 1) return ok;
+        // The control that closes the password's field group: after the box, nothing typeable
+        // between. [type=submit] first, then a type-less <button>.
+        const typeable = Array.from(form.querySelectorAll("input, textarea, select")).filter((e) => {
+          const t = ((e as HTMLInputElement).type || "text").toLowerCase();
+          return e.tagName !== "INPUT" || !/^(hidden|checkbox|radio|submit|button|image|reset)$/.test(t);
+        });
+        const after = (el: Element) => (pw.compareDocumentPosition(el) & Node.DOCUMENT_POSITION_FOLLOWING) !== 0;
+        const closes = (el: Element) => after(el) && !typeable.some((f) => f !== pw && after(f) && (f.compareDocumentPosition(el) & Node.DOCUMENT_POSITION_FOLLOWING) !== 0);
+        const typed = ok.filter((i) => closes(all[i]) && ((all[i] as HTMLInputElement).type || "").toLowerCase() === "submit");
+        const untyped = ok.filter((i) => closes(all[i]) && !typed.includes(i));
+        return typed.concat(untyped);
+      }, { sub: NATIVE_SUBMIT_SELECTOR, disc: DISCLOSURE_TOGGLE_SELECTOR }, { timeout: ELEMENT_READ_TIMEOUT_MS });
+    const all = form.locator(NATIVE_SUBMIT_SELECTOR);
+    for (const i of ranked.slice(0, MAX_CANDIDATE_SCAN)) {
+      const loc = all.nth(i);
+      if (!(await loc.isVisible().catch(() => false))) continue;
+      if (await neverClickReason(loc)) continue;
+      return loc;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+/** The clicked control's identity — never its value (see ClickedControl). */
+async function describeControl(loc: Locator, passLoc: Locator): Promise<ClickedControl | undefined> {
+  try {
+    const inForm = (await passLoc.locator("xpath=ancestor::form[1]").locator(NATIVE_SUBMIT_SELECTOR + ", a, [role='button'], input[type='button'], input[type='image']").count().catch(() => 0)) > 0
+      && await (loc as unknown as { evaluate: (fn: (el: Element) => boolean, arg: undefined, o: { timeout: number }) => Promise<boolean> })
+        .evaluate((el) => { const f = el.closest("form"); const pw = f && f.querySelector('input[type="password"]'); return !!(f && pw); }, undefined, { timeout: ELEMENT_READ_TIMEOUT_MS }).catch(() => false);
+    const d = await (loc as unknown as { evaluate: (fn: (el: Element) => Omit<ClickedControl, "inForm">, arg: undefined, o: { timeout: number }) => Promise<Omit<ClickedControl, "inForm">> })
+      .evaluate((el) => ({
+        tag: el.tagName.toLowerCase(),
+        role: (el.getAttribute("role") || "").toLowerCase(),
+        id: (el.id || "").slice(0, 60),
+        name: (el.getAttribute("name") || "").slice(0, 60),
+        type: ((el as HTMLInputElement).type || el.getAttribute("type") || "").toLowerCase(),
+        ariaExpanded: el.getAttribute("aria-expanded"),
+      }), undefined, { timeout: ELEMENT_READ_TIMEOUT_MS });
+    return { ...d, inForm };
+  } catch {
+    return undefined;
+  }
+}
+
+/** aria-expanded now, or null when the control is gone/unreadable (bounded). */
+async function readAriaExpanded(loc: Locator): Promise<string | null> {
+  try {
+    return await (loc as unknown as { evaluate: (fn: (el: Element) => string | null, arg: undefined, o: { timeout: number }) => Promise<string | null> })
+      .evaluate((el) => el.getAttribute("aria-expanded"), undefined, { timeout: ELEMENT_READ_TIMEOUT_MS });
+  } catch {
+    return null;
+  }
+}
+
+/** A password box still ATTACHED but not shown — a collapsed panel or a closed modal, not a
+ *  login that moved on. loginFormPresent reads such a box as "gone", which is how a never-posted
+ *  form was diagnosed as an unfinished two-step. */
+async function passwordAttachedButHidden(page: Page): Promise<boolean> {
+  try {
+    return await (page as unknown as { evaluate: (fn: () => boolean) => Promise<boolean> }).evaluate(() => {
+      const boxes = Array.from(document.querySelectorAll('input[type="password"]'));
+      if (!boxes.length) return false;
+      return boxes.every((el) => { const r = (el as HTMLElement).getBoundingClientRect(); return r.width <= 0 || r.height <= 0; });
+    });
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * THE PORTAL'S REFUSAL BANNER, read once after a submit, BOUNDED to the form's vicinity.
+ *
+ * "Still on the login form" used to be the whole diagnosis for a wrong password AND for a form
+ * that never posted; the portal's own words tell them apart ("Invalid email or password." /
+ * "Your account is locked"). Bounded on purpose — widening text inference is how a help
+ * paragraph ("if your password is incorrect, reset it below") would mark a good credential
+ * stale: only short elements (not prose), inside the password's <form> or within two ancestors
+ * of it, and never a sentence written as instruction (if/when/may/should, a question).
+ * Alert-shaped containers (role=alert, validation/error classes) are read first.
+ */
+const LOGIN_REFUSAL_SOURCE = "\\binvalid\\b|\\bincorrect\\b|\\blocked\\b|\\bdisabled\\b|\\bnot recogni[sz]ed\\b|\\btry again\\b";
+const INSTRUCTIONAL_PROSE_SOURCE = "^if\\b|\\bif (you|your|the)\\b|\\bwhen (you|your)\\b|\\byou (may|can|should|must|will)\\b|\\bplease (enter|type|use)\\b|\\?\\s*$";
+async function loginRefusalBanner(page: Page): Promise<string> {
+  try {
+    const scopes: Array<Page | Frame> = typeof page.frames === "function" ? page.frames() : [page];
+    for (const scope of scopes) {
+      const text = await (scope as unknown as { evaluate: (fn: (p: { refuse: string; prose: string }) => string, arg: { refuse: string; prose: string }) => Promise<string> })
+        .evaluate((p) => {
+          // Fully inline — no named helper (see the note in authenticatedSignalPresent).
+          const refuse = new RegExp(p.refuse, "i");
+          const prose = new RegExp(p.prose, "i");
+          const pw = document.querySelector('input[type="password"]') as HTMLElement | null;
+          let root: Element | null = pw ? (pw.closest("form") || pw.parentElement) : (document.querySelector("form") as Element | null);
+          if (!root) return "";
+          for (let hop = 0; hop < 2 && root.parentElement && root.parentElement !== document.body; hop++) root = root.parentElement;
+          const vis = (el: Element) => { const r = (el as HTMLElement).getBoundingClientRect(); return r.width > 0 && r.height > 0; };
+          const own = (el: Element) => String((el as HTMLElement).innerText || "").replace(/\s+/g, " ").trim();
+          const reads = (el: Element): string => {
+            if (!vis(el)) return "";
+            const t = own(el);
+            if (!t || t.length > 160 || !refuse.test(t) || prose.test(t)) return "";
+            return t;
+          };
+          // Alert-shaped first, then any short element; the innermost match wins (a wrapper's
+          // text repeats its child's).
+          const alerts = Array.from(root.querySelectorAll("[role='alert'], [aria-live], [class*='error' i], [class*='validation' i], [class*='alert' i], [class*='danger' i], [id*='error' i]"));
+          const others = Array.from(root.querySelectorAll("p, li, div, span, label, strong, b, em, td, small"));
+          for (const list of [alerts, others]) {
+            for (const el of list) {
+              const t = reads(el);
+              if (!t) continue;
+              let inner: Element = el;
+              for (;;) {
+                const child = Array.from(inner.children).find((c) => reads(c) === t || (reads(c) && t.indexOf(reads(c)) >= 0));
+                if (!child) break;
+                inner = child;
+              }
+              return (reads(inner) || t).slice(0, 160);
+            }
+          }
+          return "";
+        }, { refuse: LOGIN_REFUSAL_SOURCE, prose: INSTRUCTIONAL_PROSE_SOURCE });
+      if (text) return text;
+    }
+    return "";
+  } catch {
+    return "";
+  }
 }
 
 // If no login form is visible, click a "Log In" trigger to reveal one (Accela pattern).
@@ -988,7 +1198,7 @@ async function identifierFirstStep(
   if (await loginFormPresent(page)) return null;
   const idField = await firstVisible(page, USERNAME_CANDIDATES, { fillable: true });
   if (!idField) return null;
-  const nextCtl = await firstVisible(page, NEXT_STEP_CANDIDATES, { clickable: true });
+  const nextCtl = await firstVisible(page, NEXT_STEP_CANDIDATES, { clickable: true, submit: true });
   if (!nextCtl) return null;
   if (!(await loginWordingPresent(page))) return null;
   if (opts.preReveal && await wordedRevealTriggerVisible(page, nextCtl)) return null;
@@ -1100,6 +1310,11 @@ export interface LoginOptions {
   parkMs?: number;
   /** Told once when the run parks: the named reason and the bound. Never carries a credential. */
   onPark?: (info: { reason: string; waitMs: number }) => void;
+  /** Called right after the submit click/Enter, before the result poll — the moment the only
+   *  post-submit artefacts used to miss by ~17 s. `mask` holds the login fields: a never-posted
+   *  form still has the password in its box (a type=text one renders it in clear), so a
+   *  screenshot taken here masks them. Best-effort; a throw never changes the outcome. */
+  onSubmitted?: (info: { page: Page; mask: Locator[] }) => Promise<void> | void;
 }
 
 export async function resolveParkMs(page: Page, opts: LoginOptions): Promise<number> {
@@ -1538,75 +1753,133 @@ export async function performLogin(
     //    the part portals render most exotically (Citizenserve's is
     //    <a href="javascript:ajaxLogin();">Submit</a>). If Enter also does nothing, the poll
     //    below reports it honestly rather than claiming a button was missing.
+    //
+    //    FORM OWNERSHIP FIRST (ownFormSubmit): the native submit inside the password's own
+    //    <form> is what the browser would press on Enter and needs no label. Only without one
+    //    does the name-ordered candidate list decide — and a disclosure toggle (aria-expanded,
+    //    <legend>…) is never a submit there (opts.submit): City of Bend's panel heading was
+    //    clicked as "Sign In", collapsed the fields and posted nothing.
     const loginUrl: string = typeof page.url === "function" ? page.url() : "";
-    const submitLoc = await firstVisible(page, SUBMIT_CANDIDATES, { clickable: true });
-    let submittedVia: "button" | "enter" = "button";
-    if (submitLoc) {
-      await waitForElement(submitLoc);
-      await submitLoc.click();
-    } else {
-      submittedVia = "enter";
-      await passLoc.press("Enter").catch(() => null);
-    }
+    const submitLoc = (await ownFormSubmit(passLoc)) ?? (await firstVisible(page, SUBMIT_CANDIDATES, { clickable: true, submit: true }));
+    const detail: LoginDetail = { submittedVia: "button" };
+    // DID ANYTHING LEAVE THE BROWSER? A posted form sends a non-GET or navigates; a click that
+    // only toggled a panel sends nothing. Read off the page's requests, never off the DOM.
+    let posted = false;
+    const onRequest = (req: { method?: () => string; isNavigationRequest?: () => boolean }) => {
+      try {
+        if ((typeof req.method === "function" && req.method() !== "GET") || (typeof req.isNavigationRequest === "function" && req.isNavigationRequest())) posted = true;
+      } catch { /* a request that cannot be read is not evidence either way */ }
+    };
+    const canListen = typeof (page as unknown as { on?: unknown }).on === "function" && typeof (page as unknown as { off?: unknown }).off === "function";
+    if (canListen) (page as unknown as { on: (ev: string, fn: typeof onRequest) => void }).on("request", onRequest);
+    try {
+        if (submitLoc) {
+          detail.clicked = await describeControl(submitLoc, passLoc);
+          await waitForElement(submitLoc);
+          await submitLoc.click();
+        } else {
+          detail.submittedVia = "enter";
+          await passLoc.press("Enter").catch(() => null);
+        }
+        // The moment the artefacts used to miss: the page right after the submit, login fields
+        // masked (a never-posted form still holds the password; rule 2).
+        if (opts.onSubmitted) {
+          try { await opts.onSubmitted({ page, mask: [passLoc, ...(userLoc ? [userLoc] : [])] }); } catch { /* best-effort */ }
+        }
 
-    // 7) Poll for the login to resolve. Many portals (PowerClerk) do an AJAX login + a JS
-    //    redirect that takes several seconds, so a single short wait races the redirect and
-    //    falsely reports failure. Poll up to LOGIN_RESULT_TIMEOUT_MS for one of:
-    //      - a challenge appears (MFA/CAPTCHA) → stop for a human
-    //      - a POSITIVE proof of session → success
-    //
-    // A SESSION IS PROVEN BY A POSITIVE SIGNED-IN SIGNAL, NOT BY THE ABSENCE OF A PASSWORD
-    // FIELD.
-    //
-    // This poll used to read `if (formGone || urlMoved) return logged_in`, where formGone is
-    // `!loginFormPresent(page)` and loginFormPresent asks exactly one question: is a password
-    // field visible. On an identifier-first login — Cloudpermit, Okta, Microsoft, most SSO —
-    // step 1 HAS no password field, so "the password field is gone" is the normal state of a
-    // login that has not happened.
-    //
-    // us.cloudpermit.com is the measured case. Both traced pages were titled "Cloudpermit -
-    // Log In", `portal_credentials` was stamped `last_login_ok_at` "login accepted", the
-    // portal was counted in the fleet's "26 accessible", and the walk then spent its budget
-    // planning fills on the login form — which is how the recipe came to bind installerEmail
-    // to `#input-email-new`, and how a credential ends up typed into a field the planner
-    // chose. Baltimore County is the same bug through the URL clause: it moved to a SECOND
-    // login at `/auth/signin`, which the old bare `/login/i` did not recognise as a login URL.
-    //
-    // The engine already stated the correct rule 150 lines above, in the already_authenticated
-    // path — "the mere ABSENCE of a login form is NOT proof of a session" — and
-    // authenticatedSignalPresent was already written. The poll simply never called it.
-    //
-    // So: success needs a sign-out control (a control that exists only once signed in), OR a
-    // move to a URL that is not a login URL AND a page that is not shaped like a login. Both
-    // halves of the second clause are load-bearing: the URL alone is what Baltimore beat, and
-    // the shape alone would never fire on a portal that re-renders its login in place.
-    //
-    // KNOWN AND ACCEPTED COST: a portal that logs in without moving its URL and without
-    // rendering any sign-out control now times out as still_on_login instead of being called
-    // logged_in on no evidence. That is the trade the incident demands — a false "logged in"
-    // is banked as knowledge and spends LLM budget on a login form; a false "still on login"
-    // is a line in the run log that names exactly what it could not prove.
-    //
-    // The proof itself lives in sessionProof, shared with the second-factor park. A SECOND
-    // FACTOR (detectSecondFactor — by what the page says and holds, so Tyler's Okta on its own
-    // domain is seen; B6) or a challenge frame is handed to parkForSecondFactor: a headed run
-    // waits there for a person, a headless one returns mfa_captcha at once — never the
-    // "credential likely rejected" timeout that marked a good login stale.
-    const deadline = Date.now() + LOGIN_RESULT_TIMEOUT_MS;
-    await smartWait(page, 2000); // let the first navigation/AJAX settle
-    while (Date.now() < deadline) {
-      const proof = await sessionProof(page, loginUrl, credential.username);
-      if (proof) return { ok: true, status: "logged_in", message: `Logged in successfully (${proof}).` };
-      const challenge = (await detectSecondFactor(page)) || (await challengeBeyondPasswordStep(page));
-      if (challenge) return await parkForSecondFactor(page, challenge, credential.username, opts);
-      await sleep(500);
+      // 7) Poll for the login to resolve. Many portals (PowerClerk) do an AJAX login + a JS
+      //    redirect that takes several seconds, so a single short wait races the redirect and
+      //    falsely reports failure. Poll up to LOGIN_RESULT_TIMEOUT_MS for one of:
+      //      - a challenge appears (MFA/CAPTCHA) → stop for a human
+      //      - a POSITIVE proof of session → success
+      //
+      // A SESSION IS PROVEN BY A POSITIVE SIGNED-IN SIGNAL, NOT BY THE ABSENCE OF A PASSWORD
+      // FIELD.
+      //
+      // This poll used to read `if (formGone || urlMoved) return logged_in`, where formGone is
+      // `!loginFormPresent(page)` and loginFormPresent asks exactly one question: is a password
+      // field visible. On an identifier-first login — Cloudpermit, Okta, Microsoft, most SSO —
+      // step 1 HAS no password field, so "the password field is gone" is the normal state of a
+      // login that has not happened.
+      //
+      // us.cloudpermit.com is the measured case. Both traced pages were titled "Cloudpermit -
+      // Log In", `portal_credentials` was stamped `last_login_ok_at` "login accepted", the
+      // portal was counted in the fleet's "26 accessible", and the walk then spent its budget
+      // planning fills on the login form — which is how the recipe came to bind installerEmail
+      // to `#input-email-new`, and how a credential ends up typed into a field the planner
+      // chose. Baltimore County is the same bug through the URL clause: it moved to a SECOND
+      // login at `/auth/signin`, which the old bare `/login/i` did not recognise as a login URL.
+      //
+      // The engine already stated the correct rule 150 lines above, in the already_authenticated
+      // path — "the mere ABSENCE of a login form is NOT proof of a session" — and
+      // authenticatedSignalPresent was already written. The poll simply never called it.
+      //
+      // So: success needs a sign-out control (a control that exists only once signed in), OR a
+      // move to a URL that is not a login URL AND a page that is not shaped like a login. Both
+      // halves of the second clause are load-bearing: the URL alone is what Baltimore beat, and
+      // the shape alone would never fire on a portal that re-renders its login in place.
+      //
+      // KNOWN AND ACCEPTED COST: a portal that logs in without moving its URL and without
+      // rendering any sign-out control now times out as still_on_login instead of being called
+      // logged_in on no evidence. That is the trade the incident demands — a false "logged in"
+      // is banked as knowledge and spends LLM budget on a login form; a false "still on login"
+      // is a line in the run log that names exactly what it could not prove.
+      //
+      // The proof itself lives in sessionProof, shared with the second-factor park. A SECOND
+      // FACTOR (detectSecondFactor — by what the page says and holds, so Tyler's Okta on its own
+      // domain is seen; B6) or a challenge frame is handed to parkForSecondFactor: a headed run
+      // waits there for a person, a headless one returns mfa_captcha at once — never the
+      // "credential likely rejected" timeout that marked a good login stale.
+      const deadline = Date.now() + LOGIN_RESULT_TIMEOUT_MS;
+      await smartWait(page, 2000); // let the first navigation/AJAX settle
+      while (Date.now() < deadline) {
+        const proof = await sessionProof(page, loginUrl, credential.username);
+        if (proof) return { ok: true, status: "logged_in", message: `Logged in successfully (${proof}).`, detail: { ...detail, posted } };
+        const challenge = (await detectSecondFactor(page)) || (await challengeBeyondPasswordStep(page));
+        if (challenge) return await parkForSecondFactor(page, challenge, credential.username, opts);
+        await sleep(500);
+      }
+    } finally {
+      if (canListen) (page as unknown as { off: (ev: string, fn: typeof onRequest) => void }).off("request", onRequest);
     }
+    detail.posted = posted;
 
-    // 8) Timed out with no proof of a session. Three different failures reach here and they
-    //    need three different fixes, so say which one it is.
+    // 8) Timed out with no proof of a session. Four different failures reach here and they
+    //    need four different fixes, so say which one it is.
     const endShape = await loginPageShape(page);
     const formStillThere = await loginFormPresent(page);
     const endUrl: string = typeof page.url === "function" ? page.url() : "";
+    // THE CLICK THAT POSTED NOTHING (City of Bend). Nothing left the browser, and either the
+    // control we clicked flipped its own aria-expanded or the password box is still attached
+    // but hidden on the same page — a panel toggled shut, not a form submitted. Named FIRST,
+    // before the two-step diagnosis that used to claim it: the fix is the engine's, not a
+    // credential's, and nothing here is the portal's answer about the password.
+    if (!posted && submitLoc && samePageIgnoringQuery(endUrl, loginUrl)) {
+      const nowExpanded = await readAriaExpanded(submitLoc);
+      const flipped = detail.clicked?.ariaExpanded != null && nowExpanded != null && nowExpanded !== detail.clicked.ariaExpanded;
+      if (flipped || await passwordAttachedButHidden(page)) {
+        const c = detail.clicked;
+        const named = c ? `<${c.tag}${c.role ? ` role=${c.role}` : ""}${c.id ? ` id=${c.id}` : ""}${c.name ? ` name=${c.name}` : ""}${c.ariaExpanded != null ? ` aria-expanded=${c.ariaExpanded}→${nowExpanded}` : ""}>` : "the clicked control";
+        return {
+          ok: false,
+          status: "still_on_login",
+          message: `The submit click did not post the form (the control clicked was a panel toggle: ${named}); no request left the browser and the login panel ${flipped ? "toggled" : "is hidden"} on the same page. The stored username/password was never presented, so nothing is known about it. An engine fault in the submit pick — record this portal's login control manually.`,
+          detail: { ...detail, cause: "toggle_click" },
+        };
+      }
+    }
+    // THE PORTAL'S OWN ANSWER. A refusal banner beside the form names a wrong or locked
+    // credential and separates it from a form that never posted (bounded read, see
+    // loginRefusalBanner). Read as REFUSED so the credential is marked stale.
+    const banner = await loginRefusalBanner(page);
+    if (banner && (formStillThere || samePageIgnoringQuery(endUrl, loginUrl))) {
+      return {
+        ok: false,
+        status: "still_on_login",
+        message: `Still on the login form after submitting — the portal answered "${banner}" — the stored username/password was likely rejected. Verify the credential for this portal, then retry.`,
+        detail: { ...detail, banner, cause: "refused_banner" },
+      };
+    }
     if (!samePageIgnoringQuery(endUrl, loginUrl) && endShape) {
       // A SECOND LOGIN IS NOT A LOGGED-IN PAGE. Baltimore County's run followed
       // www.baltimorecountymd.gov -> cityworkspro.baltimorecountymd.gov — the right hop, same
@@ -1618,6 +1891,7 @@ export async function performLogin(
         ok: false,
         status: "still_on_login",
         message: `The login submitted and the portal handed off to ANOTHER login page (${endShape}). No session was established. If this portal fronts a separate system, that system needs its own stored credential; otherwise record the login manually.`,
+        detail,
       };
     }
     if (!formStillThere && endShape) {
@@ -1630,16 +1904,18 @@ export async function performLogin(
         ok: false,
         status: "still_on_login",
         message: `Submitted the login but the portal is STILL showing a login page (${endShape}) and no signed-in signal appeared — an unfinished identifier-first/two-step login, not a session. Nothing was learned and no application page was reached; record this portal's login manually.`,
+        detail,
       };
     }
     // Say WHICH submit path was taken: with no recognizable button, "credentials rejected"
     // would be a misleading diagnosis.
     return {
       ok: false,
-      status: submittedVia === "enter" ? "no_submit_control" : "still_on_login",
-      message: submittedVia === "enter"
+      status: detail.submittedVia === "enter" ? "no_submit_control" : "still_on_login",
+      message: detail.submittedVia === "enter"
         ? "Filled the login form but found no Log In button, and submitting with Enter did not advance the page — record this portal's login control manually."
         : "Still on the login form after submitting — the stored username/password was likely rejected. Verify the credential for this portal, then retry.",
+      detail,
     };
   } catch (err) {
     return { ok: false, status: "error", message: `Login failed: ${err instanceof Error ? err.message : String(err)}` };

@@ -290,6 +290,74 @@ const POSTBACK_OTP = `<!doctype html><html><head><title>City Permits - Sign In</
   </script>
 </body></html>`;
 
+// (L) THE COLLAPSIBLE SIGN-IN PANEL (City of Bend, CityView, 2026-11-11). The form's own
+// heading is a DISCLOSURE TOGGLE — <legend role="button" aria-expanded aria-controls> — sitting
+// BEFORE the fields, and the real submit is an <input type="submit"> with NO visible text. The
+// submit pick matched {role:button, name:"Sign In"} on the legend first, clicked it, the panel
+// collapsed, nothing posted, and the run was diagnosed as "an unfinished identifier-first
+// login". Four shapes of the same page:
+//   /cv/logon            panel open     → the <input type=submit> is clicked, the legend never
+//   /cv/logon-collapsed  panel SHUT     → the legend IS the reveal (must still be clicked), then
+//                                         the <input type=submit>
+//   /cv/logon-refused    wrong password → the POST re-renders the form with a banner: a REFUSAL
+//   /cv/logon-nosubmit   no native submit, the legend the only "button" → Enter, never the legend
+// The page logs every click (tag#id) so a test can say WHICH control was clicked.
+const cityViewLogon = (path: string, opts: { collapsed?: boolean; nativeSubmit?: boolean; banner?: string } = {}): string => {
+  const open = !opts.collapsed;
+  const submit = opts.nativeSubmit === false ? "" : `<input data-cy="btnbnext" type="submit" name="bnext" id="bnext" value="" class="buttonSize1">`;
+  const banner = opts.banner ? `<div class="validation-summary-errors" role="alert"><ul><li>${opts.banner}</li></ul></div>` : "";
+  return `<!doctype html><html><head><title>Log On | City Portal</title></head><body>
+  <h1>Log On</h1>
+  <p>Please sign in to apply for a permit. If your password is incorrect you may reset it below.</p>
+  <form action="${path}" method="post">
+    ${banner}
+    <fieldset>
+      <legend class="collapsible" role="button" tabindex="0" aria-expanded="${open}" aria-controls="cv-signin-content"><h3>Sign In</h3></legend>
+      <div id="cv-signin-content" aria-hidden="${!open}" style="${open ? "" : "display: none;"}">
+        <label for="emailAddress">Email Address:*</label><input type="text" id="emailAddress" name="emailAddress">
+        <label for="password">Password:*</label><input type="password" id="password" name="password">
+        <a href="${path}/ForgotPassword">Forgot your password?</a>
+        ${submit}
+      </div>
+    </fieldset>
+    <fieldset>
+      <legend class="collapsible" role="button" tabindex="0" aria-expanded="false" aria-controls="cv-register-content"><h3>Register a New Account</h3></legend>
+      <div id="cv-register-content" aria-hidden="true" style="display: none;"><a href="/Portal/Account/Register">Register</a></div>
+    </fieldset>
+  </form>
+  <script>
+    window.__clicks = [];
+    document.addEventListener("click", function (e) {
+      var el = e.target && e.target.closest ? e.target.closest("legend, input, button, a") : null;
+      if (el) window.__clicks.push(el.tagName + (el.id ? "#" + el.id : ""));
+    }, true);
+    Array.prototype.forEach.call(document.querySelectorAll("legend[role=button]"), function (lg) {
+      lg.addEventListener("click", function () {
+        var panel = document.getElementById(lg.getAttribute("aria-controls"));
+        var isOpen = lg.getAttribute("aria-expanded") === "true";
+        lg.setAttribute("aria-expanded", isOpen ? "false" : "true");
+        panel.style.display = isOpen ? "none" : "";
+        panel.setAttribute("aria-hidden", isOpen ? "true" : "false");
+      });
+    });
+    // No native submit: the form still posts on Enter in the password box (a two-field form
+    // has no implicit submission without a submit button, so the page wires it itself).
+    document.getElementById("password").addEventListener("keydown", function (e) {
+      if (e.key === "Enter") { e.preventDefault(); document.querySelector("form").submit(); }
+    });
+  </script>
+</body></html>`;
+};
+const CV_SIGNED_IN = `<!doctype html><html><head><title>My Items | City Portal</title></head><body>
+  <a href="/Portal/Account/LogOff">Log Off</a><h1>My Items</h1><p>You have no applications.</p>
+</body></html>`;
+const CV_ROUTES: Record<string, { collapsed?: boolean; nativeSubmit?: boolean }> = {
+  "/cv/logon": {},
+  "/cv/logon-collapsed": { collapsed: true },
+  "/cv/logon-refused": {},
+  "/cv/logon-nosubmit": { nativeSubmit: false },
+};
+
 const routes: Record<string, string> = {
   "/login-identifier-loop": IDENTIFIER_LOOP,
   "/gov/login": RERENDER_LOGIN,
@@ -309,8 +377,29 @@ const routes: Record<string, string> = {
   "/postback-otp": POSTBACK_OTP,
 };
 const server = http.createServer((q, r) => {
+  const path = (q.url || "").split("?")[0];
+  const cv = CV_ROUTES[path];
+  if (cv && q.method === "POST") {
+    // The portal's answer to the posted form: the signed-in page, or the same form with a
+    // refusal banner (the URL never moves — a refusal is not a hand-off).
+    let body = "";
+    q.on("data", (c) => { body += String(c); });
+    q.on("end", () => {
+      const pw = decodeURIComponent((body.match(/(?:^|&)password=([^&]*)/) || [])[1] ?? "").replace(/\+/g, " ");
+      if (path !== "/cv/logon-refused" && pw === cred.password) {
+        r.writeHead(302, { Location: "/cv/home" });
+        r.end();
+        return;
+      }
+      r.writeHead(200, { "Content-Type": "text/html" });
+      r.end(cityViewLogon(path, { ...cv, banner: "Invalid email or password." }));
+    });
+    return;
+  }
   r.writeHead(200, { "Content-Type": "text/html" });
-  r.end(routes[(q.url || "").split("?")[0]] ?? "<html><body>?</body></html>");
+  if (cv) { r.end(cityViewLogon(path, cv)); return; }
+  if (path === "/cv/home") { r.end(CV_SIGNED_IN); return; }
+  r.end(routes[path] ?? "<html><body>?</body></html>");
 });
 await new Promise<void>((r) => server.listen(0, "127.0.0.1", () => r()));
 const port = (server.address() as { port: number }).port;
@@ -498,6 +587,71 @@ await check("the identifier echoed by an OTP step is not a session", async () =>
   const res = await performLogin(page, cred);
   assert.notEqual(res.status, "logged_in", `"We sent a code to <you>" has no error wording, no password field and no session (got: ${res.message})`);
   assert.equal(res.ok, false);
+});
+
+// --- (L) THE COLLAPSIBLE SIGN-IN PANEL — a fresh page per check: the reveal pass remembers
+// which triggers it tried PER PAGE, so the collapsed variant must start clean.
+const cvClicks = async (p: Page): Promise<string[]> =>
+  await p.evaluate(() => ((window as unknown as { __clicks?: string[] }).__clicks ?? []).slice()).catch(() => [] as string[]);
+const legendExpanded = async (p: Page): Promise<string | null> =>
+  await p.locator('legend[aria-controls="cv-signin-content"]').getAttribute("aria-expanded").catch(() => null);
+
+await check("KILL TEST — a <legend role=button aria-expanded> before the fields is never the submit; the form's own <input type=submit> is → logged_in", async () => {
+  const p = await context.newPage();
+  try {
+    await p.goto(`http://127.0.0.1:${port}/cv/logon`);
+    const res = await performLogin(p, cred);
+    const clicks = await cvClicks(p);
+    // Asserted FIRST: with the fix stashed the failure must read "the legend was clicked",
+    // not a property of an undefined detail.
+    assert.equal(clicks.some((c) => /^LEGEND/.test(c)), false, `the disclosure toggle was clicked as the submit: ${clicks.join(", ")}`);
+    assert.equal(res.status, "logged_in", `got ${res.status}: ${res.message}`);
+    assert.equal(res.detail?.clicked?.tag, "input", `the recorded click must name the native submit (got ${JSON.stringify(res.detail?.clicked)})`);
+    assert.equal(res.detail?.clicked?.id, "bnext");
+    assert.equal(res.detail?.clicked?.inForm, true);
+    assert.match(p.url(), /\/cv\/home$/, "fixture sanity: the real submit posts and the portal signs in");
+  } finally { await p.close(); }
+});
+
+await check("the SAME legend is the reveal when the panel arrives collapsed — clicked once to open, then the <input type=submit> → logged_in", async () => {
+  const p = await context.newPage();
+  try {
+    await p.goto(`http://127.0.0.1:${port}/cv/logon-collapsed`);
+    assert.equal(await legendExpanded(p), "false", "fixture sanity: the panel starts shut");
+    const res = await performLogin(p, cred);
+    assert.equal(res.status, "logged_in", `the exclusion must be scoped to the SUBMIT pick, never the reveal — got ${res.status}: ${res.message}`);
+    assert.equal(res.detail?.clicked?.tag, "input", `the submit clicked must be the native one (got ${JSON.stringify(res.detail?.clicked)})`);
+    assert.match(p.url(), /\/cv\/home$/);
+  } finally { await p.close(); }
+});
+
+await check("a WRONG password re-rendered with 'Invalid email or password.' → still_on_login, REFUSED, the banner in the message", async () => {
+  const p = await context.newPage();
+  try {
+    await p.goto(`http://127.0.0.1:${port}/cv/logon-refused`);
+    const res = await performLogin(p, cred);
+    assert.equal(res.ok, false);
+    assert.equal(res.status, "still_on_login", `got ${res.status}: ${res.message}`);
+    assert.match(res.message, /Invalid email or password/, `the portal's own answer must reach the message (got: ${res.message})`);
+    assert.equal(loginWasRefused(res.message), true, `a banner refusal must read as refused, so the credential is marked stale (got: ${res.message})`);
+    assert.equal(res.detail?.banner, "Invalid email or password.");
+    assert.equal(res.detail?.posted, true, "the form was posted — this is the portal's answer, not a never-posted form");
+    // The instructional sentence above the form ("If your password is incorrect…") is prose,
+    // not the portal's answer, and must not be what the read returns.
+    assert.doesNotMatch(res.message, /you may reset it/i, "instructional prose must not be read as the refusal banner");
+  } finally { await p.close(); }
+});
+
+await check("no native submit and the legend the only 'button' → Enter in the password box, the legend never clicked → logged_in", async () => {
+  const p = await context.newPage();
+  try {
+    await p.goto(`http://127.0.0.1:${port}/cv/logon-nosubmit`);
+    const res = await performLogin(p, cred);
+    const clicks = await cvClicks(p);
+    assert.equal(clicks.some((c) => /^LEGEND/.test(c)), false, `the disclosure toggle was clicked as the submit: ${clicks.join(", ")}`);
+    assert.equal(res.detail?.submittedVia, "enter", `with no submit control Enter is the last resort (got ${JSON.stringify(res.detail)})`);
+    assert.equal(res.status, "logged_in", `got ${res.status}: ${res.message}`);
+  } finally { await p.close(); }
 });
 
 await browser.close();
