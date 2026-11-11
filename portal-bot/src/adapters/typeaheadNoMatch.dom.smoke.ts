@@ -148,7 +148,8 @@ async function learnLoc(mode: string, maxPages = 3): Promise<{ result: LearnResu
 }
 /** The walk's own page trace, reduced to "title @ path": a page visited twice repeats a line. */
 const visits = (r: LearnResult): string[] => (r.pageTrace ?? []).map((t) => (/^p\d+\s+("[^"]*"\s+\[[^\]]*\])/.exec(t)?.[1] ?? t));
-const noRepeat = (list: string[]): boolean => new Set(list).size === list.length;
+/** Non-vacuous: a run that reports no trace (a stop path) has not shown it visited nothing twice. */
+const noRepeat = (list: string[]): boolean => list.length > 0 && new Set(list).size === list.length;
 
 // (1) The box answers only the FULL one-line address + Enter; the pick shows in the Locations table.
 let locRecorded: RecipeStep | undefined;
@@ -237,6 +238,7 @@ if (locRecorded) {
   check("(3) ...the required box is a review item (required field left blank)",
     (result.requiredFieldMisses ?? []).some((m) => /Search for location/.test(m)), JSON.stringify(result.requiredFieldMisses));
   check("(3) ...Enter searched the full address once, never twice", log.enters.length === 1, JSON.stringify(log.enters));
+  check("(3) ...no page visited twice", noRepeat(visits(result)), JSON.stringify(visits(result)));
   await page.close();
 }
 
@@ -249,6 +251,7 @@ if (locRecorded) {
   check("(4) learn: a required box still blank after its re-plan, brought back by the portal, ends the walk NAMED",
     result.stopReason === "required_blank" && /Permit Holder Code/.test(result.message) && log.nexts === 1 && result.pageCount === 2,
     `stop=${result.stopReason} pages=${result.pageCount} nexts=${log.nexts} message=${result.message.slice(0, 300)}`);
+  check("(4) ...no page visited twice (the bounce is a new page: \"Submission Error\")", noRepeat(visits(result)), JSON.stringify(visits(result)));
   check("(4) ...and it is a review item", (result.requiredFieldMisses ?? []).some((m) => /Permit Holder Code/.test(m)), JSON.stringify(result.requiredFieldMisses));
   await page.close();
 }
