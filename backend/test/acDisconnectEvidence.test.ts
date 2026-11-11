@@ -18,7 +18,12 @@
 //       both read capturedDisconnectPart (qc.ts hands QC the same answer on the same text);
 //   (e) the plan text still proves it as before (high confidence: no finding at all), and a part alone
 //       never raises it above "shown";
-//   (f) END TO END on a stored job: QC (runQcForProject) and the gate (reviewerGateReportFor) agree.
+//   (f) END TO END on a stored job: QC (runQcForProject) and the gate (reviewerGateReportFor) agree;
+//   (g) THE PLAN SET'S WORDS ALONE (#134): a plan set that names an AC / utility disconnect in the
+//       gate's own wordings, with no part, is shown for QC too (QC read only the split-page list and
+//       the notes, so it listed the disconnect as missing where the gate was clear). One list of
+//       wordings (acDisconnectIntake.AC_DISCONNECT_TEXT_PATTERNS) for both; a DC, rapid-shutdown or
+//       storage disconnect is none of them.
 // Synthetic data only; scratch DB; no network.
 //   npx tsx backend/test/acDisconnectEvidence.test.ts
 import "./_isolate"; // FIRST
@@ -40,7 +45,7 @@ process.env.BACKUP_DIR = path.join(tmpDir, "backups");
 
 const { buildReviewerReport } = await import("../src/reviewerEngine");
 const { evaluateBaselineRules } = await import("../src/baselineRules");
-const { capturedDisconnectPart } = await import("../src/acDisconnectIntake");
+const { capturedDisconnectPart, planTextNamesAcDisconnect, AC_DISCONNECT_TEXT_PATTERNS } = await import("../src/acDisconnectIntake");
 const { evidenceForTopic } = await import("../src/projectEvidence");
 const UR = await import("../src/utilityRequirements");
 
@@ -86,7 +91,7 @@ const job = (snap: Record<string, string>): ProjectRecord => ({
 const gate = (snap: Record<string, string>) => buildReviewerReport(job(snap), { utilityRequirements: LIST } as never).findings.find((f) => f.id === FINDING);
 /** QC as qc.ts runs it: the one reader's answer, on the job's plan-set text, handed to the baseline. */
 const qc = (snap: Record<string, string>) => evaluateBaselineRules({ ...BASE, ...snap } as never, undefined, undefined,
-  { requirements: LIST, disconnectPartOnPlanSet: capturedDisconnectPart({ ...BASE, ...snap }, snap.planSetExtractedText) }).find((r) => r.ruleId === "synthetic-ac-disconnect");
+  { requirements: LIST, disconnectPartOnPlanSet: capturedDisconnectPart({ ...BASE, ...snap }, snap.planSetExtractedText), planSetNamesAcDisconnect: planTextNamesAcDisconnect(snap.planSetExtractedText) }).find((r) => r.ruleId === "synthetic-ac-disconnect");
 
 await check("setup: the synthetic item may block (a seeded row quoting its named page in words that name it)", () => {
   assert.equal(UR.requirementMayBlock(ITEM), true);
@@ -168,7 +173,7 @@ await check("(d) ONE FACT, ONE READER: the reviewer and QC agree on shown / miss
   assert.match(code("backend/src/projectEvidence.ts"), /capturedDisconnectPart\(/);
   assert.match(code("backend/src/qc.ts"), /disconnectPartOnPlanSet = capturedDisconnectPart\(/);
   assert.ok(!/acDisc(?:MakeModel|Make|Model)\b/.test(code("backend/src/projectEvidence.ts")), "projectEvidence reads the disconnect part keys itself");
-  assert.match(code("backend/src/baselineRules.ts"), /ac_disconnect: \(\{ split, notes, disconnectPart \}\) => Boolean\(disconnectPart\) \|\|/);
+  assert.match(code("backend/src/baselineRules.ts"), /ac_disconnect: \(\{ split, notes, disconnectPart, disconnectNamed \}\) => Boolean\(disconnectPart\) \|\| disconnectNamed \|\|/);
 });
 
 await check("(e) THE PLAN TEXT STILL PROVES IT, and a part alone never raises it above shown", () => {
@@ -180,6 +185,42 @@ await check("(e) THE PLAN TEXT STILL PROVES IT, and a part alone never raises it
   const withWords = { acDiscMakeModel: "Eaton DG222URB", planSetExtractedText: `${SCHEDULE}\nSEE SHEET E-1 FOR LOCATION. PAGE 3.` };
   assert.equal(evidenceForTopic(job(withWords), "acDisconnect").confidence, "medium");
   assert.equal(gate(withWords)?.severity, "warning");
+});
+
+// Plan text that names the AC disconnect in the gate's own wordings and nothing more (no part).
+const NAMED = "E-1 THREE-LINE DIAGRAM\n(N) 60A NON-FUSIBLE AC DISCONNECT";
+
+await check("(g) THE PLAN SET'S WORDS ALONE: QC reads the wordings the gate reads, on the plan-set text; other disconnects are not it", () => {
+  // Before #134 QC read only the split-page list and the notes: the gate was clear and QC still failed.
+  assert.equal(evidenceForTopic(job({ planSetExtractedText: NAMED }), "acDisconnect").present, true);
+  assert.notEqual(gate({ planSetExtractedText: NAMED })?.severity, "blocker", "the gate reads the plan set's words as shown");
+  assert.equal(qc({ planSetExtractedText: NAMED }), undefined, "QC still lists the disconnect as missing where the gate reads it as shown");
+  const drawn = { planSetExtractedText: "E-1 ONE-LINE DIAGRAM: 60A NON-FUSIBLE AC DISCONNECT, LOCKABLE, VISIBLE BREAK, ADJACENT TO METER" };
+  assert.equal(gate(drawn), undefined);
+  assert.equal(qc(drawn), undefined);
+  // Every wording on the one list is read by both, and both agree.
+  const wordings = ["AC DISCONNECT", "UTILITY DISCONNECT", "UTILITY ACCESSIBLE DISCONNECT", "EXTERNAL DISCONNECT", "LOCKABLE DISCONNECT", "VISIBLE-BREAK SWITCH", "PV SYSTEM DISCONNECT", "NEC 690.13"];
+  for (const w of wordings) {
+    const snap = { planSetExtractedText: `E-1 THREE-LINE DIAGRAM\n(N) 60A ${w}` };
+    assert.equal(planTextNamesAcDisconnect(snap.planSetExtractedText), true, w);
+    assert.equal(evidenceForTopic(job(snap), "acDisconnect").present, true, `reviewer: ${w}`);
+    assert.equal(qc(snap), undefined, `QC: ${w}`);
+  }
+  assert.ok(AC_DISCONNECT_TEXT_PATTERNS.every((re) => wordings.some((w) => re.test(w))), "a wording on the list is not exercised here");
+  // Not an AC / utility disconnect: both still read it as missing.
+  for (const text of [DC_SWITCH, "E-2 RAPID SHUTDOWN DISCONNECT 1", "E-2 ESS DISCONNECT 1 60A", "E-2 DC/AC INVERTER", SCHEDULE_NO_PART, "", "   "]) {
+    const snap = { planSetExtractedText: text };
+    assert.equal(planTextNamesAcDisconnect(text), false, text);
+    assert.equal(gate(snap)?.severity, "blocker", `reviewer: ${text}`);
+    assert.equal(qc(snap)?.severity, "blocker", `QC: ${text}`);
+  }
+  // A caller that hands QC no plan-set answer reads the split-page list and the notes alone, as before.
+  assert.equal(evaluateBaselineRules({ ...BASE, planSetExtractedText: NAMED } as never, undefined, undefined, { requirements: LIST }).find((r) => r.ruleId === "synthetic-ac-disconnect")?.severity, "blocker");
+  // One list: the gate and QC name it; neither keeps wordings of its own.
+  const code = (file: string) => fs.readFileSync(path.join(REPO, file), "utf8").replace(/\/\/[^\n]*/g, "");
+  assert.match(code("backend/src/projectEvidence.ts"), /const patterns = \[\.\.\.AC_DISCONNECT_TEXT_PATTERNS\]/);
+  assert.match(code("backend/src/qc.ts"), /planSetNamesAcDisconnect = planTextNamesAcDisconnect\(planSetText\)/);
+  assert.ok(!/utility\\s\+\(\?:accessible/.test(code("backend/src/projectEvidence.ts")), "projectEvidence keeps its own copy of the wordings");
 });
 
 // ── (f) end to end on a stored job ─────────────────────────────────────────────────────────────
@@ -216,6 +257,11 @@ await check("(f) END TO END: on a stored job QC and the gate agree — blocked w
   assert.deepEqual(read(mk({ acDiscMakeModel: "Eaton DG222URB" })), { qcMissing: true, gate: "blocker" }, "the key alone (a typed value)");
   assert.deepEqual(read(mk({ acDiscMakeModel: "Eaton DG222URB", planSetExtractedText: SCHEDULE_OTHER_PART })), { qcMissing: true, gate: "blocker" }, "the plan set names another part");
   assert.deepEqual(read(mk({ acDiscMakeModel: "Eaton DG222URB", planSetExtractedText: SCHEDULE })), { qcMissing: false, gate: "warning" }, "the job's plan set names the part");
+  // (g) on a stored job: the plan set's words alone, no part.
+  const named = read(mk({ planSetExtractedText: NAMED }));
+  assert.equal(named.qcMissing, false, "the plan set names an AC disconnect in words: QC");
+  assert.notEqual(named.gate, "blocker", "the plan set names an AC disconnect in words: gate");
+  assert.deepEqual(read(mk({ planSetExtractedText: DC_SWITCH })), { qcMissing: true, gate: "blocker" }, "the plan set names only a DC disconnect");
 });
 
 console.log(`\n${passed} passed, ${failures} failed`);

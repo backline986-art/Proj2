@@ -15,8 +15,17 @@ Read first, in this order:
 5. `docs/NEM_OPERATOR_RUNBOOK.md` — for the team member who files: what to click on a NEM
    filing, what the tool does after each click, and what to do when a run stops.
 
-If you only remember one thing, remember this: **we stage, a human files.** Every number,
-promise and caveat below follows from that.
+If you only remember one thing, remember this: **nothing is filed until a named person says
+so.** By default a run stops at the portal's review screen and a person presses submit. The one
+other way is Approve & auto-submit: a named person approves exactly that run on the approval
+sheet, and the run files it, only if every condition in §7 holds. Every number, promise and
+caveat below follows from that.
+
+Last checked against the code on **2026-11-11** for: the Company setup link (§3.4), licences per
+state (§1), the service area and Destinations to confirm (§3.5), the go-live check (§4.3), email
+filing, the approval sheet and battery jobs (§7), invoices (§7.1) and what we do not do (§2, §9).
+The measured portal numbers in §2 and §6 are still the 2026-09-09 counts; they were not re-run
+for this revision and say so where they appear.
 
 ---
 
@@ -24,7 +33,10 @@ promise and caveat below follows from that.
 
 The Autopilot takes a plan set and drives the AHJ or utility portal up to that portal's own
 review screen, with the application filled. It stops there. A person looks at the filled
-application in the browser and presses submit.
+application in the browser and presses submit, or a named person approves that one run with
+Approve & auto-submit and the run files it under the conditions in §7. Where a person has
+recorded that an authority takes its application by email, the "portal" is an email: it is
+staged as a draft, and sent by a person or under the same approval (§7).
 
 | Step | Who | Notes |
 |---|---|---|
@@ -36,16 +48,19 @@ application in the browser and presses submit.
 | Walk the application and fill every field | Automation | recipe replay, or a learn run for a new portal |
 | **Solve a CAPTCHA or MFA challenge** | **Human** | never automated, under any flag |
 | **Sign anything (DocuSign / eSign)** | **Human** | we hold no DocuSign integration; automation may type the notification email, never presses `eSign` |
-| **Press the portal's final submit** | **Human** | never automated by default |
+| **Confirm where each authority takes its filings** | **Human** | one Confirm (or Edit) per city or utility in Destinations to confirm. Nothing files automatically to a destination no named person confirmed (§3.5) |
+| **Press the portal's final submit, or send the filing email** | **Human**, or the run a named person approved | stops at review by default. Approve & auto-submit is one person's approval of exactly one run, and it files only when every condition in §7 holds |
 | **Pay a portal fee** | **Human** | never automated, under any flag, ever |
 | Watch for corrections and status changes | Automation | permit monitor |
 | Answer a correction / resubmit | Both | automation refills, a human files again |
 | **Cancel the draft applications a learn run leaves in the portal** | **Human, on the customer's side** | learning or benchmarking a portal mints real drafts under their account and nothing of ours deletes them — see §2 |
+| **Inspections, completion documents, permission to operate (PTO)** | **Not us** | we file the permit and the interconnection application and follow them to issued / approved. Staff can record the later dates on a job's timeline; nothing requests an inspection or PTO (§2) |
 
 The bolded human rows are not gaps we are closing. They are deliberate. Automation clicking
-"Pay $180" or "Submit Application" on a government portal on a customer's licence is the one
-mistake that ends the business, so the code refuses in several independent places. Do not
-promise a customer that this changes with a setting.
+"Pay $180" or "Submit Application" on a government portal on a customer's licence, unasked, is
+the one mistake that ends the business, so the code refuses in several independent places. Do
+not promise a customer that any of this changes with a setting: fees, CAPTCHA, MFA and
+signatures are never automated, and a submit is clicked only in the run a named person approved.
 
 ---
 
@@ -59,15 +74,18 @@ produces the deliverable.
 | Day | What the guide promises them | What you actually do | Where |
 |---|---|---|---|
 | **D0** | **Kickoff** — confirm jurisdictions and portals; agree who handles fees, portal passwords and setup-draft cleanup | Take the intake packet; get the three agreements in writing | §1, §2 |
-| **D1-2** | **Setup** — load company and licence details, store portal credentials encrypted | Fill the intake file outside the repo, run `onboard-company.ts`, mint the secure credential link | §3, §5 |
+| **D1-2** | **Setup** — load company and licence details, store portal credentials encrypted | Create the client and send its Company setup link (the client fills in its own block and you accept the answers), or fill the intake file outside the repo and run `onboard-company.ts`. Either way, mint the secure credential link for the logins | §3, §3.4, §5 |
+| **D1-3** | (ours, not in the guide) | Record the service area, confirm each authority's filing destination in Destinations to confirm, and run the go-live check before any email with a link goes to them | §3.5, §4.3 |
 | **D2-3** | **Coverage report** — "which of your jurisdictions are ready now, which need a supervised first run, and which can't be filed yet" | `npm run coverage:report -- --client <id> --jurisdictions "…"` | §4 |
 | **D3-6** | **Portal verification** — "we verify each portal with your credentials on a real project, one at a time" | A learn run per portal, watched, serialised | §6 |
 | **D7** | **Ready** | Nothing new — this is the day the coverage report's SUPERVISED FIRST RUN column has emptied | §4 |
 
 **Two items block everything else, and the guide says so in those words: their contractor
-licence number and their portal logins.** Chase both on D0. Everything else on the intake can
-arrive on D1 without stopping the clock; those two cannot. The licence number is a hard gate
-that throws (§1); the logins are a gate you cannot route around, because **we do not create
+licences and their portal logins.** Chase both on D0. Everything else on the intake can
+arrive on D1 without stopping the clock; those two cannot. A licence is needed for every state
+they file in (§1): an Oregon job refuses to stage without the CCB number, and in any other
+state a missing licence leaves the licence slot blank on the application. The logins are a gate
+you cannot route around, because **we do not create
 portal accounts** — a person at their company registers each one on the portal's own site,
 and several portals email a code to do it.
 
@@ -110,20 +128,35 @@ left to the first filing:
 ## 1. What we need from the company before we start
 
 The full list, with the exact field names and why each one matters, is
-`docs/onboarding/INTAKE_CHECKLIST.md`. Send them that. Do not retype it here or in an email —
-it drifts, and then two customers get provisioned differently.
+`docs/onboarding/INTAKE_CHECKLIST.md`. Do not retype it here or in an email —
+it drifts, and then two customers get provisioned differently. The client can answer most of it
+itself on its Company setup link (§3.4); the checklist is still what you read to know why each
+answer matters.
 
 Two items on that checklist BLOCK everything else, so chase them first:
 
-- **The contractor licence number** (the `ccbLicenseNumber` field — named for Oregon's CCB, but
-  it holds whatever the state calls the contractor licence). Without it, staging refuses with
-  a 409 and the message `Submitting client "X" has no CCB license number on file`. You will
-  not discover this until the first filing, so get it at intake.
+- **The contractor licences, one per licence per state they file in** (`stateLicenses`: state,
+  type, number, expiry, and the holder's name for a person's licence). Each number goes only
+  in a slot that asks for that type, in that state — never another state's number in a
+  "contractor licence" box. The types are a fixed list (contractor, electrical contractor,
+  construction supervisor, home improvement contractor, solar contractor, master electrician,
+  business registration); the Clients screen and the Company setup page both offer it.
+  What a missing one costs depends on the state:
+  - **Oregon:** the named columns are Oregon's licences (`ccbLicenseNumber`,
+    `electricalLicenseNumber`, `electricianLicenseNumber`). Without the CCB number, staging
+    refuses with a 409 and the message `Submitting client "X" has no CCB license number on
+    file`.
+  - **Any other state:** nothing refuses. The submit gate shows a warning naming the permit
+    whose licence is missing, the slot stays blank on the application, and the AHJ rejects it
+    days later. `onboarding-readiness.ts` reports it per state before that happens (§4.1), and
+    `onboard-company.ts` refuses a run when no licence is on file at all, or when a state it
+    can see (the licence state, or any state the company holds a licence in) has no contractor
+    licence.
 - **The portal logins.** See §5 — there is a safe way to receive these and several unsafe ways.
 
-Take the licence number's **issuing state** with it (`licenseState`). A bare licence number
-stops meaning anything the moment a company is licensed in two states, and a company that
-files in two states is the normal case, not the edge one.
+`licenseState` is still collected: it is the state that issued the Oregon-style named columns
+and the fallback the readiness check uses when no jurisdiction is in scope. A company that
+files in two states is the normal case, which is why the per-state list exists.
 
 The guide marks several other intake items REQUIRED and says setup stops until we have them.
 Two of those are easy to nod past because they look like duplicates of fields we already hold,
@@ -143,20 +176,34 @@ field, which is a rejected filing rather than an error message.** That is the qu
 mode of this whole process. Collect the licence/business block completely, not "enough to
 get started".
 
+**Also ask where they work** (`serviceArea`: each state, city or county, and utility). It
+decides nothing about any job, but it is what lets you confirm their filing destinations
+before their first job arrives (§3.5).
+
 ---
 
 ## 2. The honest conversation to have up front
 
 Have this conversation before provisioning, not after the first filing stalls. The customer
-is buying a staging service with a human in the loop. If they think they are buying a robot
+is buying a filing service with a human in the loop. If they think they are buying a robot
 that files permits while they sleep, the first MFA prompt reads as a broken product.
 
 Say these things plainly:
 
-**"We stage the application. One of your people, or one of ours, presses submit."** The run
+**"We stage the application, and a named person decides it is filed."** The run
 leaves the filled application on the portal's review screen and the project lands in the
 `awaiting_human_submit` state. A person opens it, reads the filled application, and files it.
-That is the design, not a limitation of the current version.
+The other route is Approve & auto-submit: one of our team reads the approval sheet (what is
+about to be filed, where, with which attachments, and every open review item) and approves that
+one run, and the run then clicks the portal's submit itself. That approval is per run, it is
+recorded under the approver's name, and it files only where a person has confirmed the
+destination and the server's switch is on (§7). There is no setting that makes filing
+unattended, and do not describe one.
+
+**"We file the permit and the interconnection application. We do not do what comes after."**
+No inspection scheduling, no completion or as-built uploads, no permission-to-operate request.
+The job's timeline has places for staff to record those dates, but nothing in the product
+requests an inspection or PTO. Never promise it.
 
 **"We never solve CAPTCHA or MFA, and we never pay a fee."** If their portal account
 challenges a new device, the run pauses and waits for a human at that browser. If the portal
@@ -221,14 +268,14 @@ repeat-measured portal:
 So the best case we can demonstrate today is: automation fills eight pages, then a human with
 an MFA-enabled account submits, then someone posts a cheque.
 
-**"You are the first."** This process has never been run against a real company. The live
-database holds exactly one client — `tml-international-llc`, the benchmark fixture — and one
-org, `org-default`. Say it to the customer in whatever register suits the relationship, but do
+**"You are the first."** As of this revision the process has not been run end to end for a
+paying company; the measured numbers below come from our own benchmark fixture client in
+`org-default`. Say it to the customer in whatever register suits the relationship, but do
 not skip it internally: **the first customer is the first execution of this runbook.** Budget
 for it. Expect a step in here to be wrong, and fix this document when it is.
 
-**Portal coverage, with the honest denominator.** Do not round these up, and do not quote them
-without the denominator — `docs/onboarding/CAPABILITIES.md` carries the per-platform detail
+**Portal coverage, with the honest denominator (counted 2026-09-09, not re-run since).** Do not
+round these up, and do not quote them without the denominator — `docs/onboarding/CAPABILITIES.md` carries the per-platform detail
 and the exclusions.
 
 | Measurement | Number | What it does NOT mean |
@@ -246,10 +293,12 @@ implying a fleet reliability figure. If the customer asks for an SLA per portal,
 is that we can produce one after `--repeat N` runs against their portals, not before.
 
 **The caveat that matters most for a new customer.** If a filing goes to an AHJ we have never
-touched, and there is no recorded recipe and no known portal URL for it, the run reports a
-successful stage **against a mock portal that never opened a browser**. Nothing was filed and
-nothing was staged. §6 and §8 tell you how to spot and fix this. Never forward a "staged"
-notification for a brand-new jurisdiction to a customer without checking it first.
+touched, and there is no recorded recipe and no known portal URL for it, the stage stops and
+says so: *"No portal URL is known for … so nothing was staged."* Nothing opens and nothing is
+marked staged. (It used to report a successful stage against a simulated portal; that now
+happens only when `MOCK_PORTAL=1` is set for a rehearsal, and the go-live check shows that
+switch red, §4.3.) What this means for the customer is a delay, not a false success: somebody
+has to record that portal before their first filing there. §6 and §8 tell you how.
 
 **Two questions their security or legal reviewer will ask, answered before they ask.** A
 company handing over government-portal logins gets a review, and both of these are in §5 with
@@ -278,8 +327,10 @@ Spelled out, because every other combination is a wrong turn:
 | optionally a `client_portal_identities` row per portal | **no user row for them** — see §3.2; the customer does not need one to be filed for |
 
 **The customer never logs in to our software.** They send us plan sets and logins; we stage;
-a human submits. That is the complete path to a filed permit, and it needs exactly the one
-client row.
+a named person files. That is the complete path to a filed permit, and it needs exactly the one
+client row. What they do get is a set of no-login pages, each opened by a link we send: the
+Company setup page (§3.4), the one-time login page (§5), the job intake page and the status
+page. A link is not an account: it reaches one client's own page and nothing else.
 
 **Do not create an org for them, and do not let a request for "their own dashboard" turn into
 one.** An org is the tenant that LOGS IN, and that lane is a documented dead end today — not
@@ -420,6 +471,97 @@ database by hand.
 **Then delete your filled intake file.** The passwords now live encrypted in the database; that
 file is a second plaintext copy with no encryption and no access control.
 
+### 3.4 The Company setup link — the client fills in its own block
+
+The alternative to typing the client block yourself. Create the client (a name is enough), open
+it on the **Clients** screen and press **Create company setup link** under *Company setup*
+(`POST /api/clients/:id/onboarding-links`). The link is shown once; copy it and send it.
+
+What the client sees is a no-login page that asks for the intake checklist's client block:
+company identity and business address, contacts, the updates inbox and the senders allowed to
+email jobs in, licences per state, insurance and bond with expiry dates, the authorized signer,
+the standard AC disconnect, where it works, and the billing contact. It can upload certificates
+(PDF, PNG or JPEG, up to 10 MB each, eight per link). Its answers save as a draft between
+visits until it presses submit. After submit the page shows a checklist of what is still
+missing for a first filing, graded by the same code as `onboarding-readiness.ts`.
+
+An optional section, **How you file in each place**, lists every permit office and utility its
+service area names and lets it say, for each, the portal address or intake email it uses,
+whether it has an account there (yes or no, never the login) and a recent permit or
+application number as an example.
+
+What you need to know about it:
+
+- **Nothing the client types changes the client record.** Each answer that differs from what
+  is on file becomes a proposal on the Clients screen. A signed-in person accepts it (as sent
+  or edited) or rejects it, one by one or with *Accept all*, and each decision is audited.
+  Licences and service-area places are accepted as additions only; a blank answer never blanks
+  a stored value. The EIN is not asked for on this page.
+- **What it says about how it files is never a destination.** Each answer shows in
+  *Destinations to confirm* as a proposal marked **Client-supplied**, on that client's jobs and
+  service area only. One-click Confirm is refused for it: you open the authority's own page
+  and record the destination through Edit, with the page and its words, as your own check.
+  Where a person already verified a different destination, both are shown under *The client
+  says otherwise* and the verified record is untouched (§3.5).
+- **Portal passwords never pass through it.** For each portal the client names, the page hands
+  off to the one-time login link of §5. A body carrying anything shaped like a password or a
+  security answer is refused.
+- **The link expires** (14 days by default, 60 at most), can be revoked, and there is one open
+  link per client: creating a new one revokes the old one and carries the draft and uploads
+  over, so a lost link costs the client nothing. Only a hash of the token is stored.
+- **It needs a public `PUBLIC_BASE_URL`.** When you create the link the Clients screen says so
+  if the address is one a client cannot open (§4.3). Do not send that link: fix the setting,
+  then create the link again.
+- **Uploaded certificates are files for staff to open** from the Clients screen. Nothing reads
+  them, fills a portal from them or sends them to a model, and an AHJ's certificate upload is
+  still a person's step.
+- **Not on the page, still yours to enter:** Oregon's named licence fields (the CCB number and
+  its expiry, the company electrical licence, the supervising electrician and their licence,
+  the metro/city licence), `docketNumber`, the EIN, and the billing mode and fee fields. An
+  Oregon job's staging gate reads the CCB field itself, so for an Oregon client type the CCB
+  number into the Clients form even when the client listed an Oregon licence on its setup page.
+
+The intake file and `onboard-company.ts` (§3.2, §3.3) remain the scripted route, and the only
+one that loads portal credentials in bulk. The two can be mixed: the script never removes a
+licence or a place already on file.
+
+### 3.5 Service area, and confirming where each authority takes its filings
+
+**Record where the client works** on the Clients screen under *Service area* (or in the intake
+file's `client.serviceArea`, or by accepting what the client sent on its setup link): each
+state, city or county, and utility. It is client data, it decides nothing about any job, and
+it is never sent to a model. Its one purpose is that **Destinations to confirm** (the button
+on the dashboard, `GET /api/filing-destinations`) and the coverage report then list every
+authority in the area that no open job names yet, marked "service area", so the destination
+can be confirmed before the first job.
+
+**Why this is an onboarding step now: nothing files automatically to a destination no named
+person confirmed.** Approve & auto-submit refuses a run whose track has no person-verified
+filing destination, and refuses a recipe that drives any host other than that destination. A
+destination read from a page, imported, shipped with the product or found by research does not
+count, however official the page. So every authority needs one Confirm (or Edit) by a named
+person before a filing there can be automatic. Staging to the review screen for a person to
+submit is not affected.
+
+For each row in the queue:
+
+- **Confirm** is offered when the proposed address was read on the authority's own official
+  page, and the row shows the page link and its words. Open the page, check it, press Confirm.
+- **Edit** is for everything else: a cited page that is not the authority's official site, a
+  seeded address with no page words, and anything a client supplied. You state the address,
+  the page you read and its words as your own check.
+- **Reject** removes a wrong proposal so it is not offered again.
+
+The destination can be a portal address, an email address, or "filed inside the city's
+permit". Every one of them passes the same refusals before it is written: a permit track never
+takes a utility portal and the reverse, an information page is never a portal, and a filing
+email must be one address and not a personal mailbox. What Confirm writes is the ordinary
+person-verified record, with the person's name and the time.
+
+Do this on D1-3 for the client's whole service area. A destination left unconfirmed does not
+stop a job being staged; it means every filing there ends with a person's click on the portal
+until someone confirms it.
+
 ---
 
 ## 4. Verifying — the config check, then the customer's coverage report
@@ -458,12 +600,13 @@ What it is checking, and what a failure means:
 | Check | If it fails |
 |---|---|
 | The client row exists and sits in the right org | Provisioning landed in the wrong tenant — escalate, do not patch |
-| Contractor licence number is present and non-blank | Staging will 409 `needsCcb`. Go back to §1 |
+| Per state in scope (the jurisdictions you passed, the client's jobs, or its service area): a contractor licence for the permit slot, the building and electrical slots, and an electrical contractor licence for interconnection | A missing contractor or interconnection licence FAILS; a missing building or electrical one warns. An Oregon job will 409 `needsCcb` without the CCB; elsewhere the slot files blank. Labels and types only are printed, never a number. Go back to §1 |
+| Standard disconnect make and model are set | The utility application has two required fields with nothing to put in them. §1 |
 | Licence/business block is complete | Blank portal fields → rejected filing. Go back to §1 |
 | At least one portal credential attached, each reporting `set` | The company has not sent logins yet, or the encryption key was missing when they were stored. §5 |
 | `SESSION_ENCRYPTION_KEY` is set (reported as `set`/`missing`, never its value) | Nothing can decrypt a login. §3.1 |
 | Each credential's stored portal URL is a real entry URL with its jurisdiction path segment | The credential will never be found at run time. §5 |
-| The jurisdictions on their first projects have a recipe or a known portal URL | Not a blocker — it means a learn run is needed first. §6. Read the wording: it separates `complete` (replays) from `draft only (status "needs_rerecord")` (does NOT replay — the next filing re-learns), and it FAILS the jurisdiction when there is neither a recipe nor a portal URL, which is the mock trap |
+| The jurisdictions on their first projects have a recipe or a known portal URL | Not a blocker — it means a learn run is needed first. §6. Read the wording: it separates `complete` (replays) from `draft only (status "needs_rerecord")` (does NOT replay — the next filing re-learns), and it FAILS the jurisdiction when there is neither a recipe nor a portal URL: a stage there stops with nothing to drive until a person records the portal |
 
 Two things to know about its output. It also flags credentials the portal has refused
 (`STALE`) — that is operator work, not a bot defect, and it is a warning rather than a blocker.
@@ -480,6 +623,10 @@ promise".
 A NOT-READY verdict names the failing check. Every one of them maps to a section above; fix
 it and re-run. Do not proceed with a NOT-READY client on the theory that the first filing
 will reveal the problem — it will, at the customer's expense.
+
+The client-data half of this check (company name, licences per state, the disconnect) is the
+same code that draws the checklist a client sees after submitting its Company setup page
+(`backend/src/onboardingReadiness.ts`), so the two cannot disagree about what is missing.
 
 ### 4.2 `coverage-report.ts` — the D2-3 deliverable, in the guide's own words
 
@@ -529,6 +676,43 @@ opening the database re-seeds the baseline knowledge base, which bumps a few hun
 `permit_utility_knowledge.updated_at` timestamps (no content, no row count). Pass
 `--db <copy>` if that matters.
 
+Jurisdictions that only the client's service area names (no job yet) are included and marked
+"service area" (§3.5).
+
+### 4.3 The go-live check — is the SERVER ready for a real client
+
+The readiness check asks whether the client's data is complete. This one asks whether the
+install is: which switches and settings are on, which are missing, and what each means, one
+plain line each.
+
+```
+npm run golive:check
+npm run golive:check -- --json
+npm run golive:check -- --org <id>
+```
+
+The same report is the **Go-live check** button on the dashboard (admins only,
+`GET /api/go-live`). It is read-only: the command opens the database with a read-only
+connection, and it never prints a setting's value, only set / not set. It exits 1 when any
+line is red. Each line is ok, off (deliberately off and safe), a warning, or red (a blocker
+for going live).
+
+The lines that matter on a client's first day:
+
+| Line | What to read it for |
+|---|---|
+| **Client link address** | `PUBLIC_BASE_URL`. Red when it is unset or an address a client cannot open (localhost, a private address, a name that only resolves inside a network). Until it is fixed, every client email carrying a link is **held as a draft** instead of being sent: the status update, the request links, the installer handoff and the invoice email. That is the client-link guard, and it also scans the message body for such a link whatever the setting says |
+| **Emails held for a dead link** / **Unsent client emails** | how many messages the guard or a missing mail server kept back. Each is a CRM draft carrying the reason; send it by hand once the setting is fixed |
+| **Client emails** | `CLIENT_NOTIFICATIONS`. Off silences every client email except for the client ids on `CLIENT_NOTIFICATIONS_ALLOW_CLIENTS` |
+| **Outgoing mail server** | not set up means every client email is only saved as a draft |
+| **Automatic portal submit** / **Automatic filing email** | `PORTAL_ALLOW_FINAL_SUBMIT` and `FILING_EMAIL_ALLOW_SEND`. Off is the safe default for a new install: every filing then ends with a person's click or a person's send (§7) |
+| **Filing destinations to confirm** | how many authorities are waiting on a person in Destinations to confirm, and how many of those are only in a service area (§3.5) |
+| **Saved-login encryption key**, **Sign-in**, **Who can reach the server** | the same preconditions as §3.1, plus whether the server is reachable by anyone but staff |
+| **Automatic backups** / **Off-machine copy** | whether a backup exists and how old it is |
+
+Run it before the first Company setup link or status email goes to a real client, and again
+after any change to `.env`. A red line is a reason not to send that client anything yet.
+
 ---
 
 ## 5. Portal credential intake — how the company hands us logins
@@ -556,7 +740,13 @@ a government system, filing under that company's licence. Treat them accordingly
    (72 hours by default, `ttlHours` to change it), and **constrained** (a token-holder can
    only supply logins for the portals the request named — no adding a portal, no repointing a
    URL). Unknown, spent and expired tokens all return the same message, so a prober learns
-   nothing. `PUBLIC_BASE_URL` must be set or the `url` comes back with an empty host.
+   nothing. `PUBLIC_BASE_URL` must be set to a public address or the `url` comes back with an
+   empty host (§4.3).
+
+   A client working through its Company setup page (§3.4) reaches the same one-time page from
+   there: for each portal it names, the setup page mints one of these requests (at most five
+   hand-offs per setup link, ten portals each). The password still goes only through this
+   page and its encryption, never through the setup page.
 
    The same form collects the two per-portal answers the intake packet asks for and that
    nothing else captures at the right grain: **"Emailed code at login? Which inbox?"** and
@@ -654,8 +844,10 @@ now executed by one command, and the order in it is load-bearing.
    from disk), `customers`, `communications` (deleted FIRST, because both cascades only unlink
    them and a row can otherwise survive both, orphaned, still carrying the homeowner's name),
    `email_tracking_sources` (which hold their own encrypted IMAP password),
-   `client_portal_identities`, `portal_profiles`, the `clients` row, and the on-disk session
-   directory `portal-profiles/<clientId>/`. It writes a `client.offboarded` audit row with a
+   `client_portal_identities`, `portal_profiles`, the one-time credential requests, the Company
+   setup links with the client's proposed answers and uploaded certificates, what the client
+   said about how it files (`client_filing_statements`), the `clients` row, and the on-disk
+   session directory `portal-profiles/<clientId>/`. It writes a `client.offboarded` audit row with a
    null project id, so the record outlives every project it names.
 
    **Read the session-directory result rather than assuming it.** Directories it failed to
@@ -732,23 +924,28 @@ jurisdiction's portal".
 
 ### What happens the first time we have not
 
-There are two outcomes, and only one of them is visible without looking:
+There are two outcomes:
 
 - **We have a recipe or a known portal URL for it.** The run opens a real browser, replays or
   drives the portal, and stages for review. Normal.
-- **We have neither.** The run reports a successful stage **against a mock portal that never
-  opened a browser**. It looks identical to a success in the project status. Nothing was filed;
-  nothing was staged. This is the single most important thing to check on a new customer's first
-  filing into a new jurisdiction.
+- **We have neither.** The stage stops with a message naming the reason: no portal URL is
+  known (and research could not confirm one), a recording learned elsewhere on that portal was
+  not reused for this agency, or the authority's own page says this permit is filed some other
+  way (by email, in person, by mail, with another permit). Nothing is opened and the project is
+  not marked staged.
 
-Spot it by checking whether the run produced any real artifacts — a learn-run bundle under
-`data/learn-runs/`, a review screenshot, a recipe row. `npm run ops` lists the recent portal
-recipes and the latest run artifacts; a "staged" project with nothing in either is a mock.
+The simulated portal that older versions of this runbook warned about runs only when
+`MOCK_PORTAL=1` is set on the server, which is for the smoke test and rehearsals. On a live
+install that switch must be off; the go-live check shows it red when it is on (§4.3). It is
+still worth confirming a first stage in a new jurisdiction by its artifacts — a learn-run
+bundle under `data/learn-runs/`, a review screenshot, a recipe row. `npm run ops` lists the
+recent portal recipes and the latest run artifacts.
 
 ### A recipe row is NOT readiness — read its status
 
-This is the trap that follows on from the mock: you check for a recipe, you find one, and you
-conclude the jurisdiction is covered. Most recipe rows do not replay. The live counts today:
+This is the trap: you check for a recipe, you find one, and you
+conclude the jurisdiction is covered. Most recipe rows do not replay. The counts as of
+2026-09-09 (not re-counted for the 2026-11-11 revision; `npm run ops` prints today's):
 
 | `portal_recipes.status` | Count (2026-09-09) | What it does at run time |
 |---|---|---|
@@ -765,9 +962,9 @@ row was invalidated. So:
   it per row.
 - A `needs_rerecord` row means the next filing there triggers a live LLM-driven learn — minutes,
   cost, a real browser, and a fresh draft application in the customer's account. It is not the
-  mock case: a recipe row of any status carries its own `portal_url`, so there is somewhere to
-  go. The mock case is having **no recipe row at all and no portal URL in the knowledge base**,
-  which is exactly the combination the readiness script fails on.
+  nothing-to-drive case: a recipe row of any status carries its own `portal_url`, so there is
+  somewhere to go. Nothing to drive means **no recipe row at all and no portal URL in the
+  knowledge base**, which is exactly the combination the readiness script fails on.
 - Six complete recipes against 68 portal hosts is the honest shape of coverage. Do not quote a
   recipe count to a customer as if it were a supported-jurisdiction count.
 
@@ -884,9 +1081,11 @@ Read the warnings before you run it:
 
 Once a recipe is complete, later projects in that jurisdiction replay it instead of learning
 again — for this customer and for every other. Final submit stays manual on a replay unless a
-named person approves that exact run with Approve & auto-submit (and the server has
-`PORTAL_ALLOW_FINAL_SUBMIT=1`, and the recipe was recorded through the submit) — a separate,
-per-run decision, not part of onboarding. There is no per-recipe "trusted" arm.
+named person approves that exact run with Approve & auto-submit, and every other condition in
+§7 holds: the track's filing destination is person-verified and the recipe drives that
+destination, the server has `PORTAL_ALLOW_FINAL_SUBMIT=1`, and the recipe is complete and was
+recorded through the submit. The approval is a separate, per-run decision. The destination
+Confirm is the part that belongs to onboarding (§3.5). There is no per-recipe "trusted" arm.
 
 ---
 
@@ -915,23 +1114,92 @@ tracking) is `docs/NEM_OPERATOR_RUNBOOK.md`.
    `POST /api/projects/:id/prepare-submission {"track":"nem"}` (or `building`, `electrical`,
    `combo`, `permit`, `mpu`). It refuses, each as a 409 naming the reason, if: required
    documents are missing (`missingDocuments`), the permit path is unconfirmed for a non-NEM
-   track (`permitPathUnknown`), no client is bound (`needsClient`), the client has no licence
-   number (`needsCcb`), or a required per-portal project field is blank
+   track (`permitPathUnknown`), no client is bound (`needsClient`), an Oregon job's client has
+   no CCB number (`needsCcb`; in other states a missing licence is a warning on the submit
+   gate and a blank slot, §1), or a required per-portal project field is blank
    (`missingPortalFields`). Each of those is a fixable data problem, not a failure.
 6. **Staged.** The project lands in `awaiting_human_submit`. The message is "Portal staged —
-   verify and submit manually." **Before telling the customer, confirm it is a real stage**: a
-   review screenshot and a learn or portal run artifact exist. For a brand-new jurisdiction,
-   see §6 — a mock stage looks exactly like this one.
-7. **A human submits.** A person opens the staged application on the portal, reads the filled
-   fields, and presses submit. Fees are paid there, by them. If they use our Approve & auto-submit
-   button (on the rail or the track card, the same action), it records their named approval of
-   that one run, because a filing must always be attributable to a person. It starts its own run
-   from the start of the application, and the bot clicks the portal's submit only with
-   `PORTAL_ALLOW_FINAL_SUBMIT=1` and a recipe recorded through submit; otherwise it stops at the
-   review screen for the human's final click. On a staged NEM draft it is held: the human
-   finishes that draft.
+   verify and submit manually." **Before telling the customer, confirm it by its artifacts**: a
+   review screenshot and a learn or portal run artifact exist. For a brand-new jurisdiction
+   with no portal on file the stage does not get this far; it stops and names why (§6).
+7. **A named person files.** Two ways, and the first is the default:
+   - **A person submits on the portal.** They open the staged application, read the filled
+     fields, and press submit. Fees are paid there, by them.
+   - **Approve & auto-submit** (on the rail or the track card, the same action). The button
+     opens the **approval sheet**: the applicant, owner and service address, the utility or
+     issuing agency, the account and meter numbers (last four only), system size and
+     equipment, the submitting company and signer, where each value came from, and every
+     disagreement between sources first. It also shows how and where this run files (the
+     portal host or the email recipient), every attachment, and this filing's open review
+     items. A measured reviewer finding and an unverified form mapping each need a tick before
+     Approve enables. The approval is recorded under the approver's name for exactly that one
+     run, which then starts from the beginning of the application.
+
+     The run clicks the portal's submit only when **all** of these hold, and stops at the
+     review screen for a person's click when any does not:
+     - the approval is for this run and has not been used;
+     - the track's filing destination is person-verified (§3.5) and the recipe's entry address
+       and every page it navigates to are on that destination;
+     - `PORTAL_ALLOW_FINAL_SUBMIT=1` is set on the server;
+     - the recipe is `complete`, was recorded for this jurisdiction (a borrowed recipe always
+       stops at review) and has one flagged, final submit step in a valid shape;
+     - nothing the approver acknowledged has changed since: no new or changed measured finding,
+       no replaced plan set.
+
+     It never pays a fee, and a payment control or dialog stops the run. On a staged NEM draft
+     it is held: the human finishes that draft.
 8. **After.** The permit monitor watches for status changes and corrections. A correction
-   reopens the filing through a named form; the automation refills and a human files again.
+   reopens the filing through a named form; the automation refills and a named person files
+   again.
+
+**When the authority takes the application by email.** Where a named person has recorded a
+filing email address for the authority (through Destinations to confirm, or on the job itself),
+that track files by email instead of on a portal. The message is **staged as a draft**: a
+person downloads it, sends it and marks the track submitted. Automation sends it only under the
+same approval as above plus its own switch, `FILING_EMAIL_ALLOW_SEND=1` (turning the portal
+switch on never turns email on), to the person-verified address, once per filing and never
+again on a retry. The approval sheet says in so many words that an email cannot be recalled.
+The subject and body carry no account or meter number; those travel only inside the attached
+forms. The authority's reply comes back to the filings mailbox and is filed on the job's track
+like any other agency email.
+
+**Battery jobs.** A plan set with battery storage changes four things, and they are worth
+saying to a client that installs batteries:
+
+- two more required documents on the permit side, the storage system's spec sheet (UL 9540)
+  and its installation detail (location, clearances, disconnect);
+- a storage review that reads the package's own facts (unit count and kWh, where it sits,
+  spacing, the listing, the disconnect) against the model code and any rule of the
+  jurisdiction's own. A broken rule is a warning unless the rule is the jurisdiction's,
+  person-verified or read on its official page with its words, and the fact is stated on the
+  plan's own sheets; a missing detail is one warning listing what is not shown;
+- the interconnection track **stays on for every battery job by default**. It is dropped only
+  where a named person recorded, from the utility's own page, that a given storage mode needs
+  no application; a record of any other kind is shown and decides nothing;
+- on an electrical permit the fee sheet adds a services/feeders line for the battery.
+
+Whether the AHJ wants a separate fire review or storage permit is shown on the permit card
+from what is on file, or as "not on file, verify". It is a step a person handles, not a track
+the automation files.
+
+### 7.1 Invoices
+
+Billing is the Clients screen's invoices (`/api/clients/:id/invoices`). A statement for a
+period carries every billable line not already on a live invoice, so creating one twice never
+repeats a charge. A person creates it, a person presses send (it is emailed to
+`billingContactEmail`, falling back to `businessEmail` and then `contactEmail`, through the
+same client-email switch and link guard as every other client email), and a person marks it
+paid when the money arrives. **Nothing here charges a card, takes a payment or pays a fee.**
+
+The QuickBooks push is optional and off unless `QUICKBOOKS_SYNC=1`. A named person connects
+one QuickBooks company, and a named person's click on an invoice creates that invoice in
+QuickBooks, once. It never charges, never takes a payment and never asks QuickBooks to email
+the customer; emailing from QuickBooks stays a person's click there. The only scheduled work is
+a daily read of payment status. Connecting the first real QuickBooks company is the owner's
+step, not an onboarding step.
+
+Say nothing to a client about prices from this runbook. What a filing costs them is the
+owner's to state.
 
 ---
 
@@ -944,11 +1212,15 @@ blocked. Add `--errors` for the tail of the backend log.
 
 | Symptom | Most likely cause | Diagnose with |
 |---|---|---|
-| "Can't submit yet" / the project will not stage | One of the five 409 gates in §7.5 — usually a missing document or a blank licence number | `npm run ops` — it names the blocker per project. Then `npx tsx scripts/onboarding-readiness.ts --client=<id>` if it is a client-data blocker |
+| "Can't submit yet" / the project will not stage | One of the five 409 gates in §7.5 — usually a missing document or, on an Oregon job, a blank CCB number | `npm run ops` — it names the blocker per project. Then `npx tsx scripts/onboarding-readiness.ts --client=<id>` if it is a client-data blocker |
 | The run says there is no stored credential, or it sits on the login form after submitting | Either `SESSION_ENCRYPTION_KEY` changed (decrypt fails SILENTLY and returns "no credential"), or the stored portal URL's host/path segment does not match the target | `curl -s localhost:4173/health` → `config.sessionKeySet`; then `npx tsx scripts/onboarding-readiness.ts --client=<id>` for the credential and URL checks. **Do not retry the login repeatedly — that is how accounts get locked** |
 | A learn or a stage failed, and the status message is not enough | Anything from a portal notice to an engine gap | The bundle at `data/learn-runs/<runId>/` — `result.json` for the verdict, `events.jsonl` for the timeline, `pNNN-before/after-*.png` for what the page actually looked like, `pNNN-plan.json` for what the planner decided. `GET /api/learn-runs` lists runs; `GET /api/learn-runs/<runId>/bundle.zip` downloads one to attach to a bug report |
 | The project is stuck, message mentions a challenge | `paused_for_human`, `pauseReason: mfa_captcha`. Expected behaviour, not a bug | `npm run ops`. A human clears the challenge in the open browser on the desktop running it, then re-stage. If the run happened on a headless server there is no browser to clear — re-run it somewhere with a visible browser |
-| A "staged" filing for a jurisdiction we have never touched, with no screenshot and no recipe | The mock adapter staged nothing (§6) | `npm run ops` — look for a recipe row and a run artifact for that jurisdiction. If both are absent, run the learn (§6) against the real portal URL and re-stage. **Do not tell the customer it was staged** |
+| The stage stopped with "No portal URL is known for …" or "No portal automation is available for …" | No recipe and no portal on file for that jurisdiction, so there was nothing to drive (§6) | Record the portal once, or run the learn (§6) against the real portal URL, and re-stage. If the message says the permit is filed by email, in person or by mail, that is the authority's own channel: see §7 |
+| A "staged" filing with no screenshot, no recipe and no run artifact | `MOCK_PORTAL=1` is set, so the run was simulated | `npm run golive:check` shows *Simulated portal* red. Remove the switch, restart, re-stage. **Do not tell the customer it was staged** |
+| Approve & auto-submit ran and stopped at the review screen | One of §7's conditions did not hold. The run's message names it: most often the track's destination is not person-verified, the server switch is off, or a review item changed after the approval | Confirm the destination in Destinations to confirm (§3.5), or submit by hand on the portal. A refused approval is spent: approve again for the next run |
+| A client says a link we sent does not open, or says it never got an email | `PUBLIC_BASE_URL` is unset or not public, so the link guard held the email as a draft; or the mail server is not set up; or client emails are off | `npm run golive:check`: *Client link address*, *Emails held for a dead link*, *Outgoing mail server*, *Client emails* (§4.3) |
+| A client's Company setup link says it is no longer valid | It expired (14 days by default), was revoked, or a newer link replaced it | Create a new one on the Clients screen; the draft and uploads carry over (§3.4) |
 | A jurisdiction "has a recipe" but every filing re-learns from scratch | The recipe's status is `recording` or `needs_rerecord`, which do not replay — only `complete` does. 55 of our 76 rows are `needs_rerecord` | `npm run ops` prints the status per recipe row. Treat anything but `complete` as no recipe (§6) |
 | A benchmark sweep returns nothing for the host you named | The credential is flagged stale, and the stale skip is applied after `--host` | Re-run with `--include-stale` once the credential is fixed; a SUCCESSFUL login is what clears the flag (§6). Do not keep re-running a refused login |
 | Two runs against one portal both "failed" at or after login | Session eviction — the portal allows one session per account and the learn lease is in-process only | Nothing to fix in the engine. Re-run them ONE at a time and compare. Assume the pair of results is void, not the portal (§6) |
@@ -985,12 +1257,14 @@ matching line:
 | We have never seen the jurisdiction | "This is a new jurisdiction for us. The first filing there needs a learn run against the live portal — roughly a quarter-hour of supervised driving, once. After that it replays, for you and for everyone. We would rather do that before your first filing than during it." | Us, before their first filing |
 | A required choice is operator knowledge we do not have | "The portal asks which permit category residential rooftop solar files under in that city. We will not guess — guessing files the wrong record type, which is worse than waiting. Tell us what your team files it as, and it is a one-time answer that then applies to every filing there." | Customer's knowledge, our data |
 
-Five things never to say: that the fee, the final submit, or the CAPTCHA will be automated in
-a future version; that a jurisdiction works because a filing showed as "staged" (check for the
-artifacts first); a per-portal success rate we have not measured with `--repeat`; that teaching
-a portal leaves no trace in their account (it leaves drafts they have to cancel — §2); or that
-their credentials are "encrypted at rest" full stop, when their live portal sessions sit
-unencrypted in `portal-profiles/` (§5).
+Seven things never to say: that the fee, the CAPTCHA, MFA or a signature will be automated in
+a future version; that filing is unattended (a submit is clicked only in the run a named person
+approved, and only where a person confirmed the destination — §7); that we handle inspections,
+completion documents or permission to operate (§2); that a jurisdiction works because a filing
+showed as "staged" (check for the artifacts first); a per-portal success rate we have not
+measured with `--repeat`; that teaching a portal leaves no trace in their account (it leaves
+drafts they have to cancel — §2); or that their credentials are "encrypted at rest" full stop,
+when their live portal sessions sit unencrypted in `portal-profiles/` (§5).
 
 ---
 
@@ -1002,15 +1276,22 @@ unencrypted in `portal-profiles/` (§5).
 | `AUTH_SECRET` | Set it to its OWN stable value. It defaults to falling back to `SESSION_ENCRYPTION_KEY`, which means a key rotation logs every user out. |
 | `AUTOPILOT_DB_PATH` | Which database the scripts write to. Wrong value = silently provisioning into a scratch DB. |
 | `PORTAL_HEADLESS` | `false` on an operator desktop, so a human can clear a challenge in the visible browser. A headless server cannot complete a paused filing at all. |
-| `PORTAL_ALLOW_FINAL_SUBMIT` | Leave it unset during onboarding. It is one of three conditions on the bot clicking a portal's final submit (with a named person's approval of that exact run from Approve & auto-submit, and a recipe recorded through submit — `mayClickFinalSubmit`); the operator turns it on at the re-pin, never a new customer. Fees, CAPTCHA and MFA are never automated. |
-| `PUBLIC_BASE_URL` | The host the one-time credential link is built against (§5). Unset, the link comes back with an empty host and the customer cannot open it. |
+| `PORTAL_ALLOW_FINAL_SUBMIT` | Leave it unset during onboarding. It is one of the conditions on the bot clicking a portal's final submit (§7: a named person's approval of that exact run, a person-verified destination the recipe drives, a complete recipe recorded through submit, nothing changed since the approval — `mayClickFinalSubmit` / `automaticSubmitRefusals`); the operator turns it on, never a new customer. Fees, CAPTCHA and MFA are never automated. |
+| `FILING_EMAIL_ALLOW_SEND` | The email door's own switch (§7). Unset, a filing email is always a draft a person sends. Turning the portal switch on does not turn this on. |
+| `PUBLIC_BASE_URL` | The address every client link is built against: the Company setup link, the one-time credential link, the status page (§3.4, §5). It must be an address a client can open. Otherwise the client-link guard holds every client email that carries a link as a draft, and the go-live check shows the line red (§4.3). |
+| `CLIENT_NOTIFICATIONS`, `CLIENT_NOTIFICATIONS_ALLOW_CLIENTS` | `off` silences every client email; the allow list names client ids that are still mailed while it is off. Know which state the server is in before telling a client to expect updates (§4.3). |
+| `MOCK_PORTAL` | Must be unset on a live install. `1` makes portal runs simulated (§6). |
+| `QUICKBOOKS_SYNC` | `1` turns the QuickBooks push on (§7.1). Anything else, including unset, means no call to QuickBooks at all. |
 
 Scripts this runbook uses, in the order the seven days need them:
 
 | Command | What it is for | Section |
 |---|---|---|
 | `npx tsx scripts/onboard-company.ts <intake.json> [--dry-run]` | D1-2 — create the client, licence block and credentials | §3 |
+| Clients screen → *Create company setup link* (`POST /api/clients/:id/onboarding-links`) | D1-2 — the client fills in its own block; you accept the answers | §3.4 |
 | `POST /api/clients/:id/credential-requests` | D1-2 — mint the one-time secure link for their logins | §5 |
+| Dashboard → *Destinations to confirm* (`GET /api/filing-destinations`) | D1-3 — confirm where each authority in their service area takes its filings | §3.5 |
+| `npm run golive:check` | before the first link or email reaches a real client, and after any `.env` change | §4.3 |
 | `npx tsx scripts/onboarding-readiness.ts --client=<id>` | D2 — is OUR configuration complete | §4.1 |
 | `npm run coverage:report -- --client <id>` | **D2-3 — the customer's coverage report** | §4.2 |
 | `npm run fee:sheet -- --project <id>` | D0 and any day after — what a job costs, where each number came from, and who agreed to pay it | §0.5 |

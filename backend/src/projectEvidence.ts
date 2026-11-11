@@ -1,6 +1,6 @@
 import type { HistoricalChecklistItem, ProjectRecord } from "../../shared/src/types";
 import { text } from "./json";
-import { capturedDisconnectPart } from "./acDisconnectIntake";
+import { AC_DISCONNECT_TEXT_PATTERNS, capturedDisconnectPart } from "./acDisconnectIntake";
 import { hasStampedStructuralEvidence } from "./permitPath";
 import { projectSecretValues } from "./projectSecrets";
 import { redactSecretValues } from "../../shared/src/portalSafety";
@@ -495,7 +495,8 @@ export function evidenceForTopic(project: ProjectRecord, topic: EvidenceTopic): 
       // The utility's AC disconnect (a utility asks for it on its application: an external, lockable,
       // visible-break switch near the meter). Shown = the set names an AC / utility disconnect; proven =
       // the set also says where it is or what kind it is.
-      const patterns = [/\bAC\s+disconnect/i, /\butility\s+(?:accessible\s+|external\s+)?disconnect/i, /\bexternal\s+disconnect/i, /\blockable\s+disconnect/i, /\bvisible[-\s]?(?:break|blade|open)/i, /\bPV\s+system\s+disconnect/i, /\b690\.13\b/i];
+      // The wordings are acDisconnectIntake's one list, which QC's ac_disconnect read uses too (#134).
+      const patterns = [...AC_DISCONNECT_TEXT_PATTERNS];
       //
       // THE JOB'S PART THAT ITS OWN PLAN SET NAMES COUNTS AS SHOWN (soft run on main f280d056): the
       // intake reads the part off the plan set's AC-disconnect label in forms the patterns above do not
