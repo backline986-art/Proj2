@@ -178,7 +178,8 @@ import {
 } from "./repository";
 import { createSignatureRequestApproval } from "./signatureRequestApproval";
 import { confirmSignatureRequestSent } from "./signatureTrack";
-import { getSubmittalTracks, markTrackSubmitted, requiredTracks, trackSubmittedAndTracked, trackSubmittedSentence, withPermitStageSentence } from "./submittalTracks";
+import { getSubmittalTracks, markSecondStageUploaded, markTrackFirstStage, markTrackSubmitted, requiredTracks, trackSubmittedAndTracked, trackSubmittedSentence, withPermitStageSentence } from "./submittalTracks";
+import { confirmSecondStage, removeSecondStage, saveSecondStageScreenshot, secondStageScreenshotFile } from "./secondStage";
 import { getUtilityFilingLookup, nemFiledWithPermit, verifyUtilityFilingLookup } from "./utilityFilingLookup";
 import { runQcForProject } from "./qc";
 import { personJobScope, setPersonJobScope } from "./jobScope";
@@ -4779,6 +4780,80 @@ app.post("/api/projects/:id/submittal-tracks/:type/mark-submitted", asyncHandler
   } catch { /* promotion/close are best-effort — marking submitted must never fail on them */ }
   res.status(201).json({ ok: true, tracks: getSubmittalTracks(db, getProjectDetail(db, String(req.params.id)).project) });
 }));
+
+// ── TWO-STAGE PERMIT FILINGS (#28 part 1): the second stage as a tracked HUMAN step ──────────────
+// Every route here records what a person did or decided; none opens, fills, uploads to or submits in
+// any system, and none stores a filing destination. All sit under /api/projects/:id, so the org scope
+// guard answers another org's project with a 404 before a handler runs (rule 6). The person's name is
+// the signed-in user's when auth is on, never the body's.
+function secondStageTrack(req: express.Request): SubmittalTrackType {
+  const type = String(req.params.type) as SubmittalTrackType;
+  if (!SUBMITTAL_TRACK_TYPES.includes(type)) throw new HttpError(400, "Unknown submittal track type.");
+  return type;
+}
+function secondStagePerson(req: express.Request, what: string): string {
+  const user = currentUser(db, req);
+  if (AUTH_ENABLED && !user) throw new HttpError(401, `Sign in to ${what}.`);
+  return AUTH_ENABLED ? String(user?.name || user?.email || "").trim() : String(req.body?.by || req.query?.by || "").trim();
+}
+// A named person CONFIRMS the agency's second stage (pre-filled from the cited description). Until
+// this, a described second stage changes nothing about the track (rule 3).
+app.post("/api/projects/:id/submittal-tracks/:type/second-stage/confirm", (req, res) => {
+  const type = secondStageTrack(req);
+  const detail = getProjectDetail(db, String(req.params.id));
+  const by = secondStagePerson(req, "confirm a second stage");
+  const stage = confirmSecondStage(db, detail.project, type, { system: req.body?.system, trigger: req.body?.trigger }, by);
+  res.json({ ok: true, stage, tracks: getSubmittalTracks(db, detail.project) });
+});
+// A named person says the agency has no second stage (any more).
+app.post("/api/projects/:id/submittal-tracks/:type/second-stage/remove", (req, res) => {
+  const type = secondStageTrack(req);
+  const detail = getProjectDetail(db, String(req.params.id));
+  const removed = removeSecondStage(db, detail.project, type, secondStagePerson(req, "remove a second stage"));
+  res.json({ ok: true, removed, tracks: getSubmittalTracks(db, detail.project) });
+});
+// The application was made BY HAND on a two-stage agency (no fee-stop run to press Paid on): recorded
+// as waiting on its second stage — not filed.
+app.post("/api/projects/:id/submittal-tracks/:type/second-stage/application-made", (req, res) => {
+  const type = secondStageTrack(req);
+  const detail = getProjectDetail(db, String(req.params.id));
+  const by = secondStagePerson(req, "record an application");
+  markTrackFirstStage(db, detail.project, type, { recordNumber: String(req.body?.recordNumber ?? ""), by, via: "by_hand" });
+  res.status(201).json({ ok: true, tracks: getSubmittalTracks(db, getProjectDetail(db, String(req.params.id)).project) });
+});
+// The person's own screenshot of the second system's confirmation (PNG / JPEG by its bytes): evidence
+// for the mark below. Staff-only; never a project document, never attached to a filing.
+app.post(
+  "/api/projects/:id/submittal-tracks/:type/second-stage/screenshot",
+  express.raw({ type: ["image/png", "image/jpeg"], limit: "10mb" }),
+  (req, res) => {
+    const type = secondStageTrack(req);
+    const detail = getProjectDetail(db, String(req.params.id));
+    const by = secondStagePerson(req, "attach a screenshot");
+    if (!Buffer.isBuffer(req.body) || req.body.length === 0) throw new HttpError(400, "PNG/JPEG image body required.");
+    saveSecondStageScreenshot(db, detail.project, type, req.body, by);
+    res.status(201).json({ ok: true, tracks: getSubmittalTracks(db, detail.project) });
+  },
+);
+app.get("/api/projects/:id/submittal-tracks/:type/second-stage/screenshot", (req, res) => {
+  const type = secondStageTrack(req);
+  getProjectDetail(db, String(req.params.id));
+  const file = secondStageScreenshotFile(db, String(req.params.id), type);
+  if (!file) throw new HttpError(404, "No screenshot is on file for this track's second stage.");
+  res.setHeader("Content-Type", file.contentType);
+  res.setHeader("Cache-Control", "private, no-store");
+  res.setHeader("X-Content-Type-Options", "nosniff");
+  res.sendFile(file.path);
+});
+// A NAMED PERSON MARKS THE PLAN UPLOAD DONE, with the confirmation number or a saved screenshot. This
+// is what files a track that waits on its second stage (submittalTracks.markSecondStageUploaded).
+app.post("/api/projects/:id/submittal-tracks/:type/second-stage/uploaded", (req, res) => {
+  const type = secondStageTrack(req);
+  const detail = getProjectDetail(db, String(req.params.id));
+  const uploadedBy = secondStagePerson(req, "mark an upload done");
+  markSecondStageUploaded(db, detail.project, type, { confirmationNumber: req.body?.confirmationNumber, uploadedBy });
+  res.status(201).json({ ok: true, tracks: getSubmittalTracks(db, getProjectDetail(db, String(req.params.id)).project) });
+});
 
 app.get("/parser", (_req, res) => {
   res.sendFile(path.join(frontendDir, "parser.html"));

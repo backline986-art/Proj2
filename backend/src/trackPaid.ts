@@ -21,7 +21,7 @@ import { nowIso } from "./time";
 import { randomUUID } from "node:crypto";
 import { AWAITING_PAYMENT, usd } from "./feePause";
 import { billingTrack, recordActualPermitFee } from "./submissionFees";
-import { markTrackSubmitted, requiredTracks, trackFeeDue, trackPermitTypes } from "./submittalTracks";
+import { markTrackFirstStage, markTrackSubmitted, requiredTracks, secondStageHold, trackFeeDue, trackPermitTypes } from "./submittalTracks";
 import { paidConfirmationUrl, trackConfirmationView } from "./submissionConfirmation";
 
 type Row = Record<string, unknown>;
@@ -121,7 +121,19 @@ export function markTrackPaid(
   // The filing the payment completed: the portal filed it once paid (markTrackSubmitted closes the
   // waiting run and turns its awaiting_payment submission into the filing). First, in its own
   // transaction: it tells the client after committing, and the filing is the fact that matters.
-  if (kind === "filing") {
+  //
+  // A TWO-STAGE FILING (#28): where a named person confirmed that this agency takes the plans in a
+  // second system after the fee, paying does NOT file. The application is recorded as waiting on its
+  // second stage (the run that waited is closed the same way), and the track is filed only when a
+  // person marks the plan upload done.
+  // (A track that filed before anyone confirmed the stage owes nothing, and files as ever.)
+  const twoStage = kind === "filing" && secondStageHold(db, project, type)?.owed === "application";
+  if (twoStage) {
+    markTrackFirstStage(db, project, type, {
+      recordNumber, by: paidBy, via: "paid",
+      note: `Paid ${usd(amountUsd)} on the portal; the plans go into the second system by hand. Not filed until that upload is marked done.`,
+    });
+  } else if (kind === "filing") {
     markTrackSubmitted(db, project, type, {
       applicationNumber: recordNumber,
       submittedBy: paidBy || undefined,
@@ -153,7 +165,9 @@ export function markTrackPaid(
     recordActualPermitFee(db, project, bill, sum, "operator");
   });
 
-  const message = kind === "filing"
+  const message = twoStage
+    ? `Paid ${usd(amountUsd)}: the ${type} application is on record as ${recordNumber}. It is NOT filed yet: this agency takes the plans in a second system, so the track waits for the plan-upload invite and the hand upload.`
+    : kind === "filing"
     ? `Paid ${usd(amountUsd)}: the ${type} track is filed as ${recordNumber} and tracked.`
     : `Paid ${usd(amountUsd)}: the ${type} fee is recorded against ${recordNumber}.`;
   return { paid, actualFeeUsd: sum, message };

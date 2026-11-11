@@ -34,6 +34,7 @@ import { HttpError } from "./httpError";
 import { text } from "./json";
 import { logger } from "./logger";
 import { projectForTrack } from "./permitProcess";
+import { secondStageClientLine } from "./secondStage";
 import { getProjectDetail } from "./repository";
 import { trackProgress, type TrackProgress } from "./submittalTracks";
 import { nowIso } from "./time";
@@ -140,6 +141,8 @@ export function buildClientTimeline(db: AppDb, project: ProjectRecord, now: Date
   const permitIssued = permits.length > 0 && permitsDone.length === permits.length;
   const permitOpen = permits.filter((t) => t.status !== "issued");
   const filedCount = permits.filter((t) => FILED.has(t.status)).length;
+  let secondStageWaiting: string | null = null;
+  try { secondStageWaiting = secondStageClientLine(db, project); } catch { /* the ordinary wording */ }
   steps.push({
     key: "permit_filed",
     label: permits.length > 1 ? "Permit applications" : "Permit application",
@@ -149,7 +152,10 @@ export function buildClientTimeline(db: AppDb, project: ProjectRecord, now: Date
     at: permitFiled ? latest(permits.map((t) => t.filedAt)) : null,
     start: null,
     ready: true,
-    detail: permitFiled ? "" : filedCount > 0 ? `${filedCount} of ${permits.length} filed` : preparingDetail(permits),
+    // #28: an application whose plans still wait on a hand upload in the agency's second system is
+    // NOT filed, and the client reads exactly that — before "1 of 2 filed" or "final submission in
+    // progress", either of which would understate what is still owed.
+    detail: permitFiled ? "" : secondStageWaiting ?? (filedCount > 0 ? `${filedCount} of ${permits.length} filed` : preparingDetail(permits)),
     typical: null,
   });
   // The usual days for the permit still open, at the agency that issues IT (a split-issuer job

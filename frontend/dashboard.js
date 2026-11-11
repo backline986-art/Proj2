@@ -1379,6 +1379,8 @@ const NEXT_STEP_CHIP = {
   staged_awaiting_submit: { pill: "your_submit", tone: "warning", label: "Your submit" },
   awaiting_signature: { pill: "waiting", tone: "neutral", label: "Awaiting signature" },
   approved_awaiting_filing: { pill: "your_submit", tone: "warning", label: "Approved — file it" },
+  second_stage_invite: { pill: "waiting", tone: "neutral", label: "Awaiting upload invite" },
+  second_stage_upload: { pill: "to_fix", tone: "warning", label: "Upload the plans" },
   fee_due: { pill: "to_fix", tone: "warning", label: "Fee due" },
   correction_open: { pill: "corrections", tone: "neutral", label: "Correction open" },
   payment_due: { pill: "ready", tone: "warning", label: "Payment due" },
@@ -5842,6 +5844,91 @@ function trackFeeDueHtml(t) {
   return due + paid;
 }
 
+// A TWO-STAGE FILING (#28): the application and its fee go into one portal; the plans are then uploaded
+// BY HAND in a second system the agency opens with an invite. The server's own block (secondStage.ts):
+// a cited description a person can Confirm (it changes nothing until then), or — confirmed — where this
+// job stands, the invite email once the inbox matched it, the documents to upload and the form that
+// marks the upload done. Nothing here opens the invite or the second system: the link, when the server
+// lets one through (rule 5's predicate), is a plain link a person clicks. Server data esc()'d.
+function trackSecondStageHtml(t) {
+  const ss = t && t.secondStage;
+  if (!ss || typeof ss !== "object") {
+    // Nothing on file for this agency. A person who knows it takes the plans in a second system says
+    // so here (their name is recorded); offered only on an agency track that has not filed.
+    if (!t || t.type === "nem" || (t.status !== "not_started" && t.status !== "staged") || t.payment) return "";
+    const ty = esc(t.type);
+    return `<details style="margin:2px 0 6px;font-size:12px" data-second-stage-add="${ty}"><summary class="muted">Plans uploaded in a second system after the application?</summary>
+      <div style="display:flex;flex-wrap:wrap;gap:6px;align-items:flex-end;margin:4px 0 0">
+        <label class="track-field"><span>System the plans are uploaded in (its name, not an address)</span><input data-second-stage-field="system" data-track="${ty}" /></label>
+        <button type="button" class="secondary" data-second-stage-confirm="${ty}" title="Recorded under your name. From then on this agency's permit track waits for the plan upload before it reads as filed. Nothing is opened or filed."><i data-lucide="check"></i><span>Confirm second stage</span></button>
+      </div>
+    </details>`;
+  }
+  const type = esc(t.type);
+  const http = (u) => (/^https?:\/\//i.test(String(u || "")) ? String(u) : "");
+  const source = http(ss.sourceUrl)
+    ? `<p class="muted" style="margin:2px 0;font-size:11px">Source: <a href="${esc(ss.sourceUrl)}" target="_blank" rel="noopener">${esc(ss.sourceUrl)}</a>${ss.quote ? ` — <q>${esc(ss.quote)}</q>` : ""}</p>`
+    : "";
+  if (ss.basis === "described") {
+    return `<div class="submit-gate-check info" style="margin:4px 0 6px;font-size:12px" data-second-stage="${type}" data-second-stage-state="described">
+      <p style="margin:0 0 2px"><strong>Second stage (described, not confirmed by a person):</strong> ${esc(ss.sentence || "")}</p>
+      ${source}
+      <div style="display:flex;flex-wrap:wrap;gap:6px;align-items:flex-end;margin:4px 0 0">
+        <label class="track-field"><span>System the plans are uploaded in</span><input data-second-stage-field="system" data-track="${type}" value="${esc(ss.system || "")}" /></label>
+        <button type="button" class="secondary" data-second-stage-confirm="${type}" title="Recorded under your name. From then on this agency's permit track waits for the plan upload before it reads as filed. Nothing is opened or filed."><i data-lucide="check"></i><span>Confirm second stage</span></button>
+      </div>
+    </div>`;
+  }
+  const who = ss.verifiedBy ? `<span class="muted"> (confirmed by ${esc(ss.verifiedBy)}${ss.verifiedAt ? `, ${esc(String(ss.verifiedAt).slice(0, 10))}` : ""})</span>` : "";
+  if (ss.state === "uploaded") {
+    const u = ss.uploaded || {};
+    const shot = /^\/api\/projects\/[^/]+\/submittal-tracks\/[^/]+\/second-stage\/screenshot$/.test(String(u.screenshotUrl || ""))
+      ? ` · <a href="${esc(u.screenshotUrl)}" target="_blank" rel="noopener">screenshot</a>` : "";
+    return `<p class="muted" style="margin:0 0 4px;font-size:11px" data-second-stage="${type}" data-second-stage-state="uploaded">Second stage: ${esc(ss.sentence || "")}${u.confirmationNumber ? ` Confirmation ${esc(u.confirmationNumber)}.` : ""}${shot}</p>`;
+  }
+  if (ss.state === "before_application") {
+    return `<div class="submit-gate-check info" style="margin:4px 0 6px;font-size:12px" data-second-stage="${type}" data-second-stage-state="before_application">
+      <p style="margin:0 0 2px"><strong>Two-stage filing${ss.system ? ` (plans go into ${esc(ss.system)})` : ""}</strong>${who}: ${esc(ss.sentence || "")}</p>
+      ${source}
+      <details style="margin:4px 0 0"><summary style="font-size:12px">The application was made by hand</summary>
+        <div style="display:flex;flex-wrap:wrap;gap:6px;align-items:flex-end;margin:4px 0 0">
+          <label class="track-field"><span>Record / application number</span><input data-second-stage-field="recordNumber" data-track="${type}" placeholder="as the portal shows it" /></label>
+          <button type="button" class="secondary" data-second-stage-application="${type}" title="Records that a person made the application (and paid its fee) on the portal. The track then waits for the plan upload; it is not filed yet."><i data-lucide="file-check"></i><span>Record the application</span></button>
+          <button type="button" class="ghost" data-second-stage-remove="${type}" title="This agency no longer takes the plans in a second system. Recorded under your name."><span>Not a two-stage filing</span></button>
+        </div>
+      </details>
+    </div>`;
+  }
+  // waiting_invite / upload: the application is made, the plans are not uploaded. NOT filed.
+  const inv = ss.invite;
+  const invite = inv
+    ? `<p style="margin:2px 0" data-second-stage-invite="${type}"><strong>Invite email</strong> ${esc(String(inv.receivedAt || "").slice(0, 10))}${inv.from ? ` from ${esc(inv.from)}` : ""}: “${esc(inv.subject || "(no subject)")}”${
+        http(inv.link)
+          ? ` · <a href="${esc(inv.link)}" target="_blank" rel="noopener" data-second-stage-invite-link="${type}">its link</a> <span class="muted">(you open it; nothing opens it for you)</span>`
+          : inv.linkHidden && inv.linkHidden.host
+            ? ` <span class="muted" data-second-stage-invite-hidden="${type}">Its link (on ${esc(inv.linkHidden.host)}) is not shown: ${esc(inv.linkHidden.why || "the host is not on file for this agency's permit filing")}. Open it from the email itself.</span>`
+            : ""}</p>`
+    : `<p class="muted" style="margin:2px 0" data-second-stage-no-invite="${type}">No invite matched in the filings inbox yet.</p>`;
+  const docs = Array.isArray(ss.documents) ? ss.documents : [];
+  const docList = docs.length
+    ? `<p style="margin:4px 0 0"><strong>Upload these by hand</strong> (the job's required-documents list for this permit):</p>
+       <ul style="margin:2px 0 4px 16px;font-size:12px" data-second-stage-documents="${type}">${docs.map((d) => `<li>${esc(d.label)} — ${d.present ? `<span class="muted">on file${d.via ? ` (${esc(d.via)})` : ""}</span>` : "<strong>not on file yet</strong>"}</li>`).join("")}</ul>`
+    : "";
+  const shotOnFile = /^\/api\/projects\/[^/]+\/submittal-tracks\/[^/]+\/second-stage\/screenshot$/.test(String(ss.screenshotUrl || ""))
+    ? `<a href="${esc(ss.screenshotUrl)}" target="_blank" rel="noopener" class="muted" style="font-size:11px">screenshot on file</a>` : "";
+  return `<div class="submit-gate-check warning" style="margin:4px 0 6px;font-size:12px" data-second-stage="${type}" data-second-stage-state="${esc(ss.state)}">
+    <p style="margin:0 0 2px"><strong>Second stage${ss.system ? `: ${esc(ss.system)}` : ""}</strong>${who}. Application ${esc((ss.application && ss.application.number) || "")} made ${esc(String((ss.application && ss.application.at) || "").slice(0, 10))}. <strong>Not filed yet.</strong></p>
+    ${invite}
+    ${docList}
+    <div style="display:flex;flex-wrap:wrap;gap:6px;align-items:flex-end;margin:6px 0 2px" data-second-stage-form="${type}">
+      <label class="track-field"><span>Confirmation number</span><input data-second-stage-field="confirmationNumber" data-track="${type}" placeholder="as the second system shows it" /></label>
+      <label class="track-field"><span>or a screenshot (PNG / JPEG)</span><input type="file" accept="image/png,image/jpeg" data-second-stage-field="screenshot" data-track="${type}" /></label>
+      ${shotOnFile}
+      <button type="button" class="primary" data-second-stage-uploaded="${type}" title="Recorded under your name: you uploaded the plans in the second system yourself. This is what files the track. Nothing is opened, uploaded or submitted for you."><i data-lucide="upload"></i><span>Plans uploaded: mark done</span></button>
+    </div>
+  </div>`;
+}
+
 function trackStageGapsHtml(t) {
   const gaps = Array.isArray(t && t.stageGaps) ? t.stageGaps : [];
   if (!gaps.length) return "";
@@ -6066,7 +6153,16 @@ function trackCardHtml(t) {
   // filed and the approval is spent) or, when the list row does not match the address, starts a
   // SECOND application. So while the track holds a staged draft the button is held with the reason.
   // (The words are APPROVE_HELD_BY_STAGED_DRAFT's, spelled here so the card renders on its own.)
-  const approveHeld = t.type === "nem" && t.status === "staged"
+  // #28: an application waiting on its second stage is filed by the hand upload's mark, never by a run.
+  const secondStagePending = Boolean(t.secondStage && t.secondStage.pending);
+  // A confirmed second stage with no application on record yet: this portal's submit is the
+  // application, which a person submits (the server's gate refuses an approved run the same way).
+  const secondStageOwed = Boolean(t.secondStage && t.secondStage.basis === "verified" && t.secondStage.state === "before_application" && !submitted);
+  const approveHeld = secondStagePending
+    ? "This application is made; its plans are uploaded by hand in the second system, then marked done below. There is nothing for a run to submit."
+    : secondStageOwed
+    ? "This agency takes the plans in a second system by hand, so this portal's submit is not the whole filing. Stage it to review, submit the application yourself and record it; the plan upload's mark files the track."
+    : t.type === "nem" && t.status === "staged"
     ? "This filing has a staged draft; finish it from the review window or by staging again, then a person submits."
     : "";
   // #436 RULING 5 (owner 2026-11-03): A FILING ALREADY SUBMITTED AND TRACKED IS NEVER STAGED AGAIN. The
@@ -6103,6 +6199,7 @@ function trackCardHtml(t) {
     <p style="margin:0 0 6px;font-size:12px">→ ${linkifyText(trackNextActionText(t))}</p>
     ${trackPaymentHtml(t)}
     ${trackFeeDueHtml(t)}
+    ${trackSecondStageHtml(t)}
     ${trackStageGapsHtml(t)}
     ${confirmationLine}
     ${captured ? `<p style="margin:0 0 4px">${captured} ${trackLink ? "&nbsp;·&nbsp; " + trackLink : ""}</p>` : (trackLink ? `<p style="margin:0 0 4px">${trackLink}</p>` : "")}
@@ -6138,13 +6235,13 @@ function trackCardHtml(t) {
       <summary>Filing by email</summary>
       <div data-filing-email-body="${esc(t.type)}"><p class="muted" style="font-size:12px">Loading…</p></div>
     </details>
-    <details class="track-submit"${t.status === "staged" || t.payment ? " open" : ""}>
+    ${secondStagePending || secondStageOwed ? "" : `<details class="track-submit"${t.status === "staged" || t.payment ? " open" : ""}>
       <summary>${submitted ? "Update numbers / status link" : "I submitted it → capture #"}</summary>
       <div class="track-submit-form">
         ${fieldsHtml}
         <button type="button" class="primary" data-track-submit="${esc(t.type)}"><i data-lucide="check"></i><span>Save &amp; track</span></button>
       </div>
-    </details>
+    </details>`}
   </article>`;
 }
 
@@ -6264,6 +6361,19 @@ function renderSubmittalTracks() {
 
   wrap.querySelectorAll("button[data-track-paid]").forEach((btn) => {
     btn.addEventListener("click", () => markTrackPaid(btn.dataset.trackPaid, btn));
+  });
+  // #28: the second stage of a two-stage filing — each press records what a person did or decided.
+  wrap.querySelectorAll("button[data-second-stage-confirm]").forEach((btn) => {
+    btn.addEventListener("click", () => secondStageAction(btn.dataset.secondStageConfirm, "confirm", btn));
+  });
+  wrap.querySelectorAll("button[data-second-stage-remove]").forEach((btn) => {
+    btn.addEventListener("click", () => secondStageAction(btn.dataset.secondStageRemove, "remove", btn));
+  });
+  wrap.querySelectorAll("button[data-second-stage-application]").forEach((btn) => {
+    btn.addEventListener("click", () => secondStageAction(btn.dataset.secondStageApplication, "application-made", btn));
+  });
+  wrap.querySelectorAll("button[data-second-stage-uploaded]").forEach((btn) => {
+    btn.addEventListener("click", () => secondStageAction(btn.dataset.secondStageUploaded, "uploaded", btn));
   });
   // Filing by email (#672): loaded when a person opens it — a read; the panel never sends.
   wrap.querySelectorAll("details[data-filing-email]").forEach((d) => {
@@ -6993,6 +7103,60 @@ async function markTrackPaid(type, btn) {
   } catch (err) {
     if (btn) btn.disabled = false;
     showMessage(err.message || "Could not record the payment.", "error");
+  }
+}
+
+// #28: ONE handler for the second-stage presses (confirm / remove / application-made / uploaded). Each
+// posts to the track's own project-scoped route; the server names the person from the session when
+// sign-in is on, else from the name asked for here. A screenshot, when chosen, is sent first as the
+// image itself. Nothing here opens the invite or the second system.
+const SECOND_STAGE_ASK = {
+  confirm: "Confirm this second stage?\n\nRecorded under your name. From now on this agency's permit track waits for the plan upload (by hand, in the second system) before it reads as filed. Nothing is opened or filed.",
+  remove: "Remove the second stage for this agency?\n\nRecorded under your name. New applications there will read as filed when recorded.",
+  "application-made": "Record that the application was made by hand?\n\nThe track then waits for the plan-upload invite and the hand upload. It is NOT filed yet.",
+  uploaded: "Did you upload the plans in the second system yourself?\n\nRecorded under your name. This is what files the track: the client is told it is filed and tracking starts.",
+};
+async function secondStageAction(type, action, btn) {
+  if (!state.selectedProjectId || !type || !SECOND_STAGE_ASK[action]) return;
+  const field = (name) => document.querySelector(`[data-second-stage-field="${name}"][data-track="${type}"]`);
+  const body = {};
+  let shot = null;
+  if (action === "confirm") body.system = String(field("system")?.value || "").trim();
+  if (action === "application-made") {
+    body.recordNumber = String(field("recordNumber")?.value || "").trim();
+    if (!body.recordNumber) { showMessage("Enter the record or application number the portal shows.", "warning"); return; }
+  }
+  if (action === "uploaded") {
+    body.confirmationNumber = String(field("confirmationNumber")?.value || "").trim();
+    shot = field("screenshot")?.files?.[0] || null;
+  }
+  if (!confirm(SECOND_STAGE_ASK[action])) return;
+  // WHO: the signed-in person when sign-in is on (the server takes the session, never a typed name);
+  // otherwise the name asked for here, as Approve & auto-submit asks. No name, nothing recorded.
+  const auth = await authForDecision();
+  if (!(auth && auth.enabled)) {
+    let last = "";
+    try { last = localStorage.getItem(APPROVER_NAME_KEY) || ""; } catch { last = ""; }
+    body.by = String(prompt("Your name, recorded with this:", last) || "").trim();
+    if (!body.by) { showMessage("Nothing was recorded: this is recorded under a person's name.", "warning"); return; }
+    try { localStorage.setItem(APPROVER_NAME_KEY, body.by); } catch { /* per-viewer convenience only */ }
+  }
+  if (btn) btn.disabled = true;
+  const base = `/api/projects/${state.selectedProjectId}/submittal-tracks/${encodeURIComponent(type)}/second-stage`;
+  try {
+    if (shot) {
+      const up = await fetch(`${base}/screenshot${body.by ? `?by=${encodeURIComponent(body.by)}` : ""}`, { method: "POST", headers: { "Content-Type": shot.type || "image/png" }, body: shot });
+      if (!up.ok) throw new Error((await up.json().catch(() => ({}))).error || "The screenshot could not be saved.");
+    }
+    const res = await api(`${base}/${action}`, { method: "POST", body: JSON.stringify(body) });
+    state.submittalTracks = res.tracks || state.submittalTracks;
+    state.detail = await api(`/api/projects/${state.selectedProjectId}`);
+    await loadProcessMap();
+    renderDetail();
+    showMessage(action === "uploaded" ? "Recorded: the plans are uploaded and the track is filed." : action === "application-made" ? "Recorded: the application is made. Not filed until the plan upload is marked done." : action === "confirm" ? "Second stage confirmed for this agency." : "Second stage removed for this agency.", "info");
+  } catch (err) {
+    if (btn) btn.disabled = false;
+    showMessage(err.message || "Could not record that.", "error");
   }
 }
 
