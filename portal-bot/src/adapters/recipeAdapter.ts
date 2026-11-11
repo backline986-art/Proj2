@@ -1674,6 +1674,10 @@ export class RecipeAdapter extends BasePortalAdapter {
    *  step, click and key press refuses — so a caller that swallows the stop (the re-assert pass)
    *  cannot carry the run on to Next without the address. */
   private typeaheadStop = "";
+  /** #139 — the names (note / label, loose) of search boxes the PORTAL answered on Enter: the box
+   *  comes back empty while the selection shows elsewhere, so the required sweep's re-assert must not
+   *  take it for a blank and search again (a second identical search, a second location row). */
+  private readonly typeaheadEnterSelected = new Set<string>();
   /** #333: after the hand-over, a person's own main-frame form request went (their submit, or a
    *  postback they made) — the run's end page is theirs now, not where the run "stopped". */
   private personMovedOn = false;
@@ -5026,9 +5030,26 @@ export class RecipeAdapter extends BasePortalAdapter {
     const projectStreet = String(this.fieldValues.street || this.fieldValues.projectAddress || "");
     const mode = typeaheadMatchMode({ field: step.field, label, value: v, projectStreet });
     const site: TypeaheadSite = mode === "site"
-      ? { street: projectStreet || v, city: String(this.fieldValues.city ?? "").trim() || undefined, zip: String(this.fieldValues.zip ?? "").trim() || undefined }
+      ? {
+        street: projectStreet || v,
+        city: String(this.fieldValues.city ?? "").trim() || undefined,
+        zip: String(this.fieldValues.zip ?? "").trim() || undefined,
+        state: String(this.fieldValues.state ?? "").trim() || undefined,
+      }
       : { street: v };
     const out = await fillTypeahead(this.page, scoped, { value: v, mode, site });
+    if (out.outcome === "picked" && out.via === "enter") {
+      // #139: the PORTAL selected the job's address on Enter and shows it outside the box (verified
+      // by the address predicate inside fillTypeahead); the search box itself comes back empty, so
+      // reading the box back here would call a good selection a failure.
+      await this.waitForAutosaveCommitted();
+      if (!this.fieldsVerified.includes(fieldName)) this.fieldsVerified.push(fieldName);
+      for (const n of [label, String(step.note ?? ""), String(step.selector?.label ?? "")]) {
+        const k = n.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+        if (k) this.typeaheadEnterSelected.add(k);
+      }
+      return true;
+    }
     if (out.outcome === "picked") {
       await this.waitForAutosaveCommitted();
       const shown = String((await scoped.inputValue?.({ timeout: 2000 }).catch(() => "")) ?? "").trim();
@@ -10486,7 +10507,12 @@ export class RecipeAdapter extends BasePortalAdapter {
 
   /** One pass of the re-assert. See reassertBlanksOnce for why there is more than one. */
   private async reassertPass(pastReview: boolean): Promise<string[]> {
-    const swept = await this.sweepRequired();
+    const sweptRaw = await this.sweepRequired();
+    // #139: a search box the portal answered on Enter reads empty by design — not a blank to re-run.
+    const looseName = (t: string): string => String(t ?? "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+    const swept = this.typeaheadEnterSelected.size
+      ? { ...sweptRaw, empty: sweptRaw.empty.filter((e) => !this.typeaheadEnterSelected.has(looseName(e.name))) }
+      : sweptRaw;
     const named = (f: { name: string; why: string }): string => (f.why === "complaint" || f.why === "unattributed-complaint"
       ? `${f.name} — the portal flagged this field`
       : f.name);

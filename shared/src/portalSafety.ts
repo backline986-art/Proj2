@@ -1697,7 +1697,8 @@ export function portalSafetyFactory() {
    * passes each found three new shapes a deny rule did not know):
    *   0. The box must be POSITIVELY identified as a search / autocomplete / login control
    *      (enterIdentityInPage: role searchbox/combobox, type=search, aria-autocomplete,
-   *      enterkeyhint/inputmode=search, a search landmark, a password form). Anything else —
+   *      enterkeyhint/inputmode=search, an autocomplete widget's mark (#139), a search landmark, a
+   *      password form). Anything else —
    *      "Parcel Number", an unnamed text box — is refused by name.
    *   2'. The scope is THE PAGE, whether or not the box sits in a form (a document keydown can
    *      map Enter to any control: checker's enterNoForm, and enterFormScope — a search box in
@@ -1716,6 +1717,13 @@ export function portalSafetyFactory() {
     const ac = attr("aria-autocomplete");
     if (ac && ac !== "none") return "aria-autocomplete";
     if (attr("enterkeyhint") === "search" || attr("inputmode") === "search") return "a search keyboard hint";
+    // AN AUTOCOMPLETE WIDGET'S OWN MARK ON THE BOX (#139): jQuery UI stamps class
+    // "ui-autocomplete-input" on the input it drives and adds no ARIA (a CityView location search);
+    // a box that names itself "… autocomplete". Identity only — every refusal below still applies.
+    // The learner's typeahead classifier (autoLearnAdapter extractFieldsInPage) reads the same mark.
+    if (el.tagName === "INPUT" && /^(text|search)$/.test(type || "text")
+      && (/(?:^|\s)[\w-]*(?:autocomplete|typeahead)[\w-]*(?=\s|$)/i.test(String(el.getAttribute("class") || ""))
+        || /\bautocomplete\b/i.test(`${attr("aria-label")} ${attr("placeholder")}`))) return "an autocomplete widget's mark";
     if (el.closest && el.closest("[role=search], search")) return "a search landmark";
     const form = ((el as HTMLInputElement).form || (el.closest ? el.closest("form") : null)) as HTMLFormElement | null;
     if (form && el.tagName === "INPUT" && /^(text|email|password|tel)$/.test(type || "text") && form.querySelector("input[type=password]")) return "a login form";
@@ -1729,7 +1737,7 @@ export function portalSafetyFactory() {
     if (own) return own;
     if (!enterIdentityInPage(el)) {
       const name = clean(controlLabelInPage(el)).slice(0, 40) || "(unlabelled box)";
-      return `Enter is pressed only in a positively identified search, autocomplete or login box (role searchbox/combobox, type=search, aria-autocomplete, a search landmark, a password form) — "${name}" is none of these`;
+      return `Enter is pressed only in a positively identified search, autocomplete or login box (role searchbox/combobox, type=search, aria-autocomplete, an autocomplete widget's mark, a search landmark, a password form) — "${name}" is none of these`;
     }
     const form = ((el as HTMLInputElement).form || (el.closest ? el.closest("form") : null)) as HTMLFormElement | null;
     const reviewPage = reviewPageInPage();
