@@ -90,7 +90,7 @@ export function outcomeFromBundle(dir: string): LearnOutcome | null {
   // that nothing was recorded. A live run scores from the persisted recipe and is always
   // the authority; this path is for reading a bundle after the fact, and it must not claim
   // more than the bundle can prove.
-  const saidNothingRecorded = /no steps recorded|nothing fillable/i.test(String(result?.message ?? ""));
+  const saidNothingRecorded = /no steps recorded|nothing fillable|none of (which|them) entered form data/i.test(String(result?.message ?? ""));
   const substantiveSteps = result && !saidNothingRecorded
     ? pageEvents.reduce((n, e) => n + Number(/fills=(\d+)/.exec(String(e.trace || ""))?.[1] ?? 0), 0)
     : 0;

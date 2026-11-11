@@ -26,7 +26,7 @@ import { portalProfilesDir, screenshotsDir } from "./statePaths";
 import fs from "node:fs";
 import type { AppDb } from "./db";
 import type { InfoPageIncident, PortalRecipe, ProjectRecord, RecipeStep } from "../../shared/src/types";
-import { FINAL_SUBMIT_GATE_SENTENCE, redactSecretValues } from "../../shared/src/portalSafety";
+import { FINAL_SUBMIT_GATE_SENTENCE, isFormDataStep, redactSecretValues, type FormDataStep } from "../../shared/src/portalSafety";
 import { INFO_PAGE_PASS_EXPIRED, infoPageJobValues } from "../../shared/src/infoPagePass";
 import { isPlannerSecretKey, projectSecretValues } from "./projectSecrets";
 import { perJobAnswerKeyFor, perJobControlOfField } from "../../shared/src/perJobQuestions";
@@ -385,7 +385,9 @@ export function buildLearnKbContext(
 /** Fills, selects and checks - the steps that actually put data into a form. The only
  *  depth measure available on both a stored draft and a fresh learn. */
 export function substantiveStepCount(steps: Array<{ action?: unknown }> | undefined): number {
-  return (steps ?? []).filter((st) => ["fill", "select", "check"].includes(String(st?.action ?? ""))).length;
+  // Form data only (the shared predicate): the e-signature steps and terms acknowledgments are
+  // not depth — a run that typed only the signer has entered none of this project's data (#131).
+  return (steps ?? []).filter((st) => st && isFormDataStep({ ...(st as FormDataStep), action: String(st.action ?? "") })).length;
 }
 
 /**
@@ -2286,7 +2288,7 @@ async function autoLearnPortalInner(
   // and was promoted with an EMPTY application — "accurate" was vacuous: nothing present,
   // nothing contradicted. Below these minimums the recipe stays draft for human
   // confirmation; it is never auto-trusted.
-  const substantiveSteps = (learn.steps ?? []).filter((s) => s.action === "fill" || s.action === "select" || s.action === "check").length;
+  const substantiveSteps = substantiveStepCount(learn.steps);
   const tooThin = (learn.pageCount ?? 0) < 3 || substantiveSteps < 5;
   if (tooThin) {
     verification.issues.push(

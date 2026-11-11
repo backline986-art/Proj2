@@ -28,7 +28,7 @@ import { REPLAY_BLANK_FIELD, openPerJobQuestions } from "./recipeReplayBinding";
 import { isPerJobAnswerKey } from "../../shared/src/perJobQuestions";
 import { licenceKeyForLabel } from "../../shared/src/licenceKinds";
 import { batteryControlKind, batteryControlOfStep, parseHasBattery } from "../../shared/src/batteryControls";
-import { isSignatureNameLabel } from "../../shared/src/portalSafety";
+import { isESignatureStep, isSignatureNameLabel } from "../../shared/src/portalSafety";
 import { parseFeeBracketFieldKey, readTierLabel } from "../../portal-bot/src/feeBracketQuantity";
 import { isPlannerSecretKey } from "./projectSecrets";
 
@@ -82,7 +82,7 @@ const labelOf = (s: RecipeStep): string =>
 /** The recorded e-signature box — the same reading the replay makes (recipeAdapter isSignatureStep):
  *  its value is always the client's authorized signer, whatever key it is bound to. */
 function isSignatureStep(step: RecipeStep): boolean {
-  if (/^e-signature:/i.test(String(step.note ?? ""))) return true;
+  if (isESignatureStep(step)) return true;
   if (step.action !== "fill") return false;
   const sel = (step.selector ?? {}) as NonNullable<RecipeStep["selector"]> & { fallbacks?: Array<{ label?: string; placeholder?: string; css?: string }> };
   const words = (s: unknown): string => String(s ?? "").replace(/([a-z0-9])([A-Z])/g, "$1 $2").replace(/[#_\-.[\]="']+/g, " ");

@@ -2341,22 +2341,41 @@ export const INFO_PAGE_IDENTITY_VERSION = impl.INFO_PAGE_IDENTITY_VERSION;
 export interface FormDataStep {
   action: string;
   note?: string;
-  selector?: { name?: string; label?: string } | Record<string, unknown> | null;
+  selector?: { name?: string; label?: string; css?: string } | Record<string, unknown> | null;
+}
+
+/** The learner's own e-signature steps: completeTypedSignature records the type-signature switch
+ *  and each signer-name box under this note prefix, bound to authorizedSignerName. */
+export function isESignatureStep(s: FormDataStep): boolean {
+  return /^e-signature:/i.test(String(s.note ?? ""));
 }
 
 /**
- * Has a recording entered real form data yet? A fill or a select does; a check/uncheck does
- * unless it is a terms/certification acknowledgment (the agree box on an entry disclaimer is not
- * form data). The ONE predicate both capture sinks use for ControlContext.formDataEntered — the
- * recorder over its whole recording, humanCapture over the steps it has emitted.
+ * THE ONE "DOES THIS RECORDED STEP ENTER FORM DATA?" PREDICATE. A fill or a select does; a
+ * check/uncheck does unless it is a terms/certification acknowledgment (the agree box on an
+ * entry disclaimer is not form data; its css words count too — Accela's `termAccept`). The
+ * e-signature steps never do (#131, City of Star): the signer is the client's name on every
+ * job, so a run that typed only the signer has put none of THIS project's data into the form —
+ * yet it read as "filled 1 page(s)", scored as a recipe with fills and armed the terminal-page
+ * guard. Read by the learner (formDataEnteredThisRun, filledSomething), the backend's depth and
+ * trust floor (substantiveStepCount), the benchmark, and both capture sinks.
+ */
+export function isFormDataStep(s: FormDataStep): boolean {
+  if (isESignatureStep(s)) return false;
+  if (s.action === "fill" || s.action === "select") return true;
+  if (s.action !== "check" && s.action !== "uncheck") return false;
+  const sel = (s.selector ?? {}) as { name?: unknown; label?: unknown; css?: unknown };
+  const cssWords = String(sel.css ?? "").replace(/([a-z0-9])([A-Z])/g, "$1 $2").replace(/[^A-Za-z0-9]+/g, " ");
+  return !isAcceptTermsLabel(`${s.note ?? ""} ${String(sel.name ?? "")} ${String(sel.label ?? "")} ${cssWords}`);
+}
+
+/**
+ * Has a recording entered real form data yet? The ONE predicate both capture sinks use for
+ * ControlContext.formDataEntered — the recorder over its whole recording, humanCapture over the
+ * steps it has emitted — and the learner for its own walk.
  */
 export function recordingHasFormData(steps: ReadonlyArray<FormDataStep>): boolean {
-  return steps.some((s) => {
-    if (s.action === "fill" || s.action === "select") return true;
-    if (s.action !== "check" && s.action !== "uncheck") return false;
-    const sel = (s.selector ?? {}) as { name?: unknown; label?: unknown };
-    return !isAcceptTermsLabel(`${s.note ?? ""} ${String(sel.name ?? "")} ${String(sel.label ?? "")}`);
-  });
+  return steps.some(isFormDataStep);
 }
 
 /**
