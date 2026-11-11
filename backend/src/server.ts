@@ -3902,6 +3902,14 @@ app.post(
       // Pages whose text is drawn as outlines (#696) are named even here: the text parser reads the
       // rest, those pages are read by nobody, and the parser review says so.
       if (read.mode === "text" || !read.extraction) throw new HttpError(409, `This plan set has a text layer (${read.textChars} characters over ${read.pageCount} page(s)) and no image-only page; the text parser reads it.`, read.outlinedPages?.length ? { outlinedTextPages: read.outlinedPages } : {});
+      // The server's own note of what this image read said about the AC disconnect, keyed by these
+      // bytes and the caller's org (#135, planSetImageReads): the read's result goes back to the parser
+      // page and returns on save as plain fields, which are never evidence by themselves. A failed
+      // note never takes down the read; the job is then held exactly as before.
+      try {
+        const { recordPlanSetImageRead } = await import("./planSetImageReads");
+        recordPlanSetImageRead(db, requestScope(db, req).orgId, bytes, read.extraction);
+      } catch (err) { logger.warn("parser", "could not note the plan set's image read", { err: err instanceof Error ? err.message : String(err) }); }
       // Hybrid: the image pages' read goes back to the parser page, which merges it under the text
       // read (the text read resolves the client).
       if (read.mode === "hybrid") { res.json(read.extraction satisfies ParserExtractionResponse); return; }
