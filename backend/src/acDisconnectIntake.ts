@@ -231,3 +231,33 @@ export function planTextNamesAcDisconnect(planSetText: unknown): boolean {
   const text = String(planSetText ?? "");
   return Boolean(text.trim()) && AC_DISCONNECT_TEXT_PATTERNS.some((pattern) => pattern.test(text));
 }
+
+/**
+ * True when a short quoted callout names the AC disconnect's own label: the intake's label forms
+ * (AC_LABEL above: "A.C. DISCONNECT", "AC SAFETY DISCONNECT", "VISIBLE, LOCKABLE, LABELED DISCONNECT")
+ * or the gate's wordings (the one list above). Asked of the callout a plan-set IMAGE read quoted for an
+ * AC-disconnect field (planSetImageReads, #135). A DC, rapid-shutdown or storage disconnect is not it.
+ */
+export function namesAcDisconnectLabel(callout: unknown): boolean {
+  const text = String(callout ?? "");
+  if (!text.trim()) return false;
+  return new RegExp(AC_LABEL.source, "i").test(text) || planTextNamesAcDisconnect(text);
+}
+
+/** What the server's own image read of a job's stored plan set said about its AC disconnect: the one
+ *  shape planSetImageReads writes and reads (#135), kept here so the reviewer gate can word it without
+ *  reaching the database module. */
+export interface PlanSetImageDisconnectRead {
+  field: "acDiscMakeModel" | "acDiscAmps" | "acDiscFused" | "acDiscReq";
+  /** "Eaton DG222URB", "60A", "non-fusible", "shown". */
+  value: string;
+  /** The sheet the read named ("E-1", "Page 3"); "" when it named none. */
+  sheet: string;
+  readAt: string;
+}
+
+/** One line for a finding's evidence and an operator's eye. */
+export function describeImageDisconnectRead(read: PlanSetImageDisconnectRead): string {
+  const what = read.field === "acDiscMakeModel" ? read.value : read.field === "acDiscReq" ? "an AC disconnect is shown" : `${read.value} AC disconnect`;
+  return `AC disconnect read off the plan set's page image at intake${read.sheet ? ` (${read.sheet})` : ""}: ${what}`;
+}
