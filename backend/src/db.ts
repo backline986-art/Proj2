@@ -3718,7 +3718,7 @@ const VERSIONED_MIGRATIONS: VersionedMigration[] = [
     // the org that posted it (rule 6: its own org_id, from the session). Only the AC disconnect's own
     // fields, value and sheet; never the read's other fields. Created here, never lazily: the gate and
     // QC read it, and a read writes nothing.
-    version: 86,
+    version: 83,
     name: "plan_set_image_reads",
     up: (db) => {
       db.exec(`

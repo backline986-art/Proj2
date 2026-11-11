@@ -257,7 +257,7 @@ await check("(e) ONE WRITER, ONE READER: only the plan-scan route writes the not
   assert.ok(!/parserSnapshot[^\n]*planSetImageDisconnectRead/.test(engine), "never from the job's snapshot");
   const cols = db.query<{ name: string }>("PRAGMA table_info(plan_set_image_reads)").map((c) => c.name).sort();
   assert.deepEqual(cols, ["field", "org_id", "pdf_sha256", "read_at", "read_mode", "sheet", "value"]);
-  assert.match(src("db.ts"), /version: 86,\s*name: "plan_set_image_reads"/);
+  assert.match(src("db.ts"), /version: 83,\s*name: "plan_set_image_reads"/);
 });
 
 console.log(`\n${passed} passed, ${failures} failed`);
