@@ -736,6 +736,12 @@ export function deleteClient(db: AppDb, clientId: string): { deleted: boolean } 
     throw new HttpError(409, `Cannot delete client: ${linked.count} project(s) are still linked to it.`);
   }
   return db.transaction(() => {
+    // The Company setup link (clientOnboarding.ts, v81): its links, the client's proposals and its
+    // uploaded certificates, and what it said about how it files (v82), are its data and leave with it.
+    for (const t of ["client_onboarding_files", "client_onboarding_proposals", "client_onboarding_links", "client_filing_statements"]) {
+      try { db.run(`DELETE FROM ${t} WHERE client_id = ?`, [clientId]); }
+      catch { /* a database older than v81: no such table, nothing to purge */ }
+    }
     db.run("DELETE FROM client_portal_identities WHERE client_id = ?", [clientId]);
     db.run("DELETE FROM portal_profiles WHERE client_id = ?", [clientId]);
     db.run("DELETE FROM clients WHERE id = ?", [clientId]);
@@ -986,6 +992,12 @@ export async function offboardClient(db: AppDb, clientId: string, opts: Offboard
     // way the runbook recommends.
     try { db.run("DELETE FROM credential_requests WHERE client_id = ?", [clientId]); }
     catch { /* pre-secure-link database: no such table, nothing to purge */ }
+    // The Company setup link (clientOnboarding.ts, v81): its links, the client's proposals and its
+    // uploaded certificates, and what it said about how it files (v82), are its data and leave with it.
+    for (const t of ["client_onboarding_files", "client_onboarding_proposals", "client_onboarding_links", "client_filing_statements"]) {
+      try { db.run(`DELETE FROM ${t} WHERE client_id = ?`, [clientId]); }
+      catch { /* a database older than v81: no such table, nothing to purge */ }
+    }
     // Per-client IMAP sources carry imap_pass_encrypted — another live secret.
     db.run("DELETE FROM email_tracking_sources WHERE client_id = ?", [clientId]);
     db.run("DELETE FROM client_portal_identities WHERE client_id = ?", [clientId]);

@@ -1,0 +1,425 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <link rel="icon" type="image/png" href="/assets/brand/keel-symbol-64.png" />
+  <link rel="apple-touch-icon" href="/assets/brand/keel-symbol-180.png" />
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="copyright" content="Copyright (c) 2026 Keelix. All rights reserved. Proprietary and confidential." />
+  <meta name="keelix-provenance" content="kx-fcd3ffd4aa792bbd" />
+  <!-- The token is in the URL: no referrer, no indexing. The API answers no-store too. -->
+  <meta name="referrer" content="no-referrer">
+  <meta name="robots" content="noindex, nofollow">
+  <title>Set up your company · Keelix Automation</title>
+  <link rel="stylesheet" href="/styles.css">
+  <style>
+    /* COMPANY SETUP (backend/src/clientOnboarding.ts). The same family as credentials.html,
+       portal.html and status.html: brand bar, eyebrow, sentence-case heading, hairline rules,
+       tokens only. Its own rules below; /styles.css supplies the tokens and the vendored font. */
+    body { margin: 0; font-family: var(--font-sans); font-size: var(--text-sm); line-height: 1.5; background: var(--bg); color: var(--text); }
+    .ob-topbar { border-bottom: 1px solid var(--line); background: var(--bg); }
+    .ob-topbar .bar { max-width: 760px; margin: 0 auto; padding: 16px 24px; display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+    .ob-mark { display: flex; align-items: center; gap: 9px; }
+    .ob-mark .name { font-size: 15px; font-weight: 800; letter-spacing: .07em; line-height: 1; }
+    .ob-mark .sub { font-size: 8px; font-weight: 700; letter-spacing: .2em; color: var(--muted); line-height: 1; margin-top: 3px; }
+    .ob-topbar .kicker { font-size: 11px; font-weight: 700; letter-spacing: .14em; text-transform: uppercase; color: var(--muted); text-align: right; }
+    .ob-wrap { max-width: 760px; margin: 0 auto; padding: 0 24px 110px; }
+    .ob-eyebrow { display: block; font-size: 11px; font-weight: 700; line-height: 1; letter-spacing: .16em; text-transform: uppercase; color: var(--primary); }
+    .ob-hero { padding: 48px 0 24px; }
+    h1 { margin: 18px 0 0; font-size: clamp(26px, 4vw, 38px); font-weight: 600; letter-spacing: -.028em; line-height: 1.12; }
+    .ob-hero > p { margin-top: 16px; font-size: var(--text-base); line-height: 1.65; color: var(--muted); }
+    .ob-rule { border-top: 1px solid var(--line); margin-bottom: 24px; }
+    .ob-card { border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 20px 22px; margin: 16px 0; background: var(--card); box-shadow: var(--shadow-sm); }
+    .ob-card h2 { margin: 0 0 4px; font-size: var(--text-base); font-weight: 600; letter-spacing: -.02em; }
+    .ob-card > p.lede { margin: 0 0 6px; color: var(--muted); }
+    .ob-checklist ul { margin: 10px 0 0; padding: 0; list-style: none; display: grid; gap: 7px; }
+    .ob-checklist li { display: grid; grid-template-columns: 76px 1fr; gap: 10px; align-items: baseline; }
+    .ob-tag { font-size: 11px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; padding: 2px 8px; border-radius: 999px; text-align: center; }
+    .ob-tag.fail { background: color-mix(in oklab, var(--danger) 12%, var(--surface)); color: oklch(45% .18 27); }
+    .ob-tag.warn { background: var(--surface-2); color: var(--muted); }
+    .ob-done-line { color: oklch(32% .08 160); font-weight: 600; }
+    label { display: block; margin-top: 14px; font-weight: 600; font-size: var(--text-xs); color: var(--muted); }
+    .hint { display: block; font-weight: 400; margin-top: 2px; }
+    input[type=text], input[type=email], input[type=tel], input[type=date], input[type=url], select {
+      width: 100%; box-sizing: border-box; margin-top: 6px; padding: 9px 11px; border: 1px solid var(--input);
+      border-radius: var(--radius-sm); font: inherit; font-size: var(--text-sm); background: var(--card); color: var(--text);
+    }
+    input:focus, select:focus { outline: none; border-color: var(--primary); box-shadow: 0 0 0 3px color-mix(in srgb, var(--primary) 16%, transparent); }
+    .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 0 14px; }
+    .row { display: grid; gap: 8px; align-items: end; margin-top: 10px; padding-top: 10px; border-top: 1px dashed var(--line); }
+    .row.lic { grid-template-columns: 70px 1.4fr 1fr 140px auto; }
+    .row.area { grid-template-columns: 120px 70px 1fr auto; }
+    .row.portal { grid-template-columns: 1fr 1.4fr auto; }
+    .row.filing { grid-template-columns: 1.6fr 170px 1fr; }
+    .row.filing .filing-name { grid-column: 1 / -1; }
+    .row.filing .muted { color: var(--muted); font-size: 13px; }
+    .row label { margin-top: 0; }
+    @media (max-width: 640px) { .grid2, .row.lic, .row.area, .row.portal, .row.filing { grid-template-columns: 1fr; } }
+    button { margin-top: 14px; padding: 10px 18px; border: 1px solid transparent; border-radius: var(--radius-sm); background: var(--primary); color: var(--primary-foreground); font: inherit; font-size: var(--text-sm); font-weight: 600; cursor: pointer; }
+    button:hover { background: var(--primary-strong); }
+    button.secondary { background: var(--card); color: var(--text); border-color: var(--border); }
+    button.link { background: none; color: var(--primary); padding: 4px 6px; margin-top: 0; border: 0; }
+    button[disabled] { opacity: .5; cursor: default; }
+    .ob-files li { display: flex; gap: 10px; align-items: center; justify-content: space-between; padding: 6px 0; border-top: 1px dashed var(--line); }
+    .ob-files ul { list-style: none; margin: 10px 0 0; padding: 0; }
+    .ob-note { background: var(--surface-2); border: 1px solid var(--border); padding: 12px 14px; margin-top: 12px; border-radius: var(--radius-sm); color: var(--muted); }
+    .ob-actions { position: sticky; bottom: 0; background: var(--bg); border-top: 1px solid var(--line); padding: 10px 0 14px; margin-top: 20px; display: flex; gap: 12px; flex-wrap: wrap; align-items: center; }
+    .ob-actions button { margin-top: 0; }
+    #status { font-weight: 600; }
+    #status.error { color: oklch(45% .18 27); }
+    #status.ok { color: oklch(32% .08 160); }
+    body.ob-closed #form, body.ob-closed .ob-actions { display: none; }
+    .ob-footnote { margin-top: 36px; padding-top: 18px; border-top: 1px solid var(--line); font-size: var(--text-xs); color: var(--muted); line-height: 1.7; }
+  </style>
+</head>
+<body>
+  <header class="ob-topbar">
+    <div class="bar">
+      <div class="ob-mark">
+        <img src="/assets/brand/keel-symbol-64.png" alt="" width="22" height="22" aria-hidden="true" />
+        <div><div class="name">KEELIX</div><div class="sub">AUTOMATION</div></div>
+      </div>
+      <div class="kicker">Company setup</div>
+    </div>
+  </header>
+
+  <div class="ob-wrap">
+    <div class="ob-hero">
+      <span class="ob-eyebrow">Company setup</span>
+      <h1 id="heroTitle">Tell us about your company.</h1>
+      <p id="heroText">Everything we need to file permits and interconnection applications for you, in one place. Your answers save as you go: you can close this page and come back with the same link.</p>
+    </div>
+    <div class="ob-rule"></div>
+
+    <section class="ob-card ob-checklist" id="checklistCard" hidden>
+      <h2>Still missing</h2>
+      <p class="lede">What we still need before we can file for you. It updates as you fill in the page.</p>
+      <ul id="checklist"></ul>
+    </section>
+
+    <div id="form"></div>
+
+    <div class="ob-actions">
+      <button type="button" id="saveBtn" class="secondary">Save for later</button>
+      <button type="button" id="submitBtn">Send to Keelix</button>
+      <span id="status" role="status"></span>
+    </div>
+
+    <p class="ob-footnote">Sent to you by your Keelix contact. A person at Keelix reviews every answer before it is used. This page never asks for a password: portal logins go through the separate secure login link below. If you were not expecting this link, do not enter anything — reply to the person who sent it first.</p>
+  </div>
+
+<script>
+// esc() on EVERY string that reaches innerHTML. The page is built with DOM calls and textContent
+// almost everywhere; esc() is the guard for the few templated lines.
+function esc(v) {
+  return String(v == null ? "" : v).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+const token = new URLSearchParams(location.search).get("token") || "";
+const api = (p) => "/api/public/onboarding/" + encodeURIComponent(token) + p;
+const statusEl = document.getElementById("status");
+const formEl = document.getElementById("form");
+const GROUPS = [
+  ["company", "Your company"], ["address", "Business address"], ["contacts", "Contacts"],
+  ["licences", "Licences"], ["insurance", "Insurance and bond"], ["signer", "Who signs applications"],
+  ["equipment", "Standard equipment"], ["area", "Where you work"],
+];
+const AREA_KINDS = [["state", "Whole state"], ["city", "City"], ["county", "County"], ["utility", "Utility"]];
+const FILE_KIND_LABELS = {
+  insurance_certificate: "Insurance certificate", bond_certificate: "Bond certificate",
+  licence_certificate: "Licence certificate", other_certificate: "Other certificate",
+};
+let view = null;
+const inputs = {};          // scalar field key -> input
+let licRows = [];           // [{state, kind, number, expires}]
+let areaRows = [];          // [{kind, state, name}]
+let filingRows = {};        // authority key -> {address, hasAccount, example}
+let drawFiling = () => {};  // redraws the "how you file" rows after the places change
+let saveTimer = null;
+
+function setStatus(text, kind) { statusEl.textContent = text; statusEl.className = kind || ""; }
+function el(tag, attrs, ...kids) {
+  const n = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs || {})) {
+    if (k === "text") n.textContent = v;
+    else if (k.startsWith("on")) n.addEventListener(k.slice(2), v);
+    else if (v !== undefined && v !== null && v !== false) n.setAttribute(k, v === true ? "" : v);
+  }
+  for (const c of kids) if (c != null) n.append(c);
+  return n;
+}
+function closePage(title, text) {
+  document.getElementById("heroTitle").textContent = title;
+  document.getElementById("heroText").textContent = text;
+  document.body.classList.add("ob-closed");
+}
+
+function renderChecklist(lines) {
+  const card = document.getElementById("checklistCard");
+  const ul = document.getElementById("checklist");
+  ul.replaceChildren();
+  card.hidden = false;
+  if (!lines || !lines.length) {
+    ul.innerHTML = `<li><span></span><span class="ob-done-line">${esc("Nothing missing. Send it when you are ready.")}</span></li>`;
+    return;
+  }
+  for (const l of lines) {
+    ul.append(el("li", { "data-key": l.key }, el("span", { class: "ob-tag " + (l.level === "fail" ? "fail" : "warn"), text: l.level === "fail" ? "Needed" : "Helpful" }), el("span", { text: l.text })));
+  }
+}
+
+const INPUT_TYPE = { email: "email", phone: "tel", date: "date" };
+function scalarInput(f, value) {
+  const i = el("input", { type: INPUT_TYPE[f.type] || "text", id: "f_" + f.key, name: f.key, autocomplete: "off", spellcheck: "false" });
+  i.value = value || "";
+  i.addEventListener("input", queueSave);
+  inputs[f.key] = i;
+  return el("label", { for: "f_" + f.key }, f.label, f.hint ? el("span", { class: "hint", text: f.hint }) : null, i);
+}
+
+function licenceSection(card) {
+  const list = el("div", { id: "licList" });
+  const draw = () => {
+    list.replaceChildren();
+    licRows.forEach((r, idx) => {
+      const st = el("input", { type: "text", "data-lic": "state", maxlength: "2", placeholder: "ST", "aria-label": "State" });
+      st.value = r.state || "";
+      const kind = el("select", { "data-lic": "kind", "aria-label": "Licence type" }, el("option", { value: "", text: "Type of licence…" }));
+      for (const k of view.licenceKinds) kind.append(el("option", { value: k.kind, text: k.label }));
+      kind.value = r.kind || "";
+      const num = el("input", { type: "text", "data-lic": "number", autocomplete: "off", "aria-label": "Licence number" });
+      num.value = r.number || "";
+      const exp = el("input", { type: "date", "data-lic": "expires", "aria-label": "Expires" });
+      exp.value = r.expires || "";
+      for (const [input, key] of [[st, "state"], [kind, "kind"], [num, "number"], [exp, "expires"]]) {
+        input.addEventListener("input", () => { licRows[idx][key] = input.value; queueSave(); });
+        input.addEventListener("change", () => { licRows[idx][key] = input.value; queueSave(); });
+      }
+      list.append(el("div", { class: "row lic", "data-lic-row": String(idx) },
+        el("label", {}, "State", st), el("label", {}, "Type", kind), el("label", {}, "Number", num), el("label", {}, "Expires", exp),
+        el("button", { type: "button", class: "link", text: "Remove", onclick: () => { licRows.splice(idx, 1); draw(); queueSave(); } })));
+    });
+  };
+  draw();
+  card.append(el("p", { class: "lede", text: "One row per licence, in every state you work in: your contractor licence, your electrical contractor licence, and any other the state issues." }),
+    list, el("button", { type: "button", class: "secondary", id: "addLicBtn", text: "Add a licence", onclick: () => { licRows.push({ state: "", kind: "", number: "", expires: "" }); draw(); } }));
+}
+
+function areaSection(card) {
+  const list = el("div", { id: "areaList" });
+  const draw = () => {
+    list.replaceChildren();
+    areaRows.forEach((r, idx) => {
+      const kind = el("select", { "data-area": "kind", "aria-label": "Kind of place" });
+      for (const [v, t] of AREA_KINDS) kind.append(el("option", { value: v, text: t }));
+      kind.value = r.kind || "city";
+      const st = el("input", { type: "text", "data-area": "state", maxlength: "2", placeholder: "ST", "aria-label": "State" });
+      st.value = r.state || "";
+      const name = el("input", { type: "text", "data-area": "name", placeholder: "Name of the city, county or utility", "aria-label": "Name" });
+      name.value = r.name || "";
+      name.disabled = kind.value === "state";
+      for (const [input, key] of [[kind, "kind"], [st, "state"], [name, "name"]]) {
+        const on = () => { areaRows[idx][key] = input.value; if (key === "kind") { name.disabled = input.value === "state"; if (name.disabled) { name.value = ""; areaRows[idx].name = ""; } } queueSave(); };
+        input.addEventListener("input", on); input.addEventListener("change", on);
+      }
+      list.append(el("div", { class: "row area", "data-area-row": String(idx) },
+        el("label", {}, "Kind", kind), el("label", {}, "State", st), el("label", {}, "Name", name),
+        el("button", { type: "button", class: "link", text: "Remove", onclick: () => { areaRows.splice(idx, 1); draw(); queueSave(); } })));
+    });
+  };
+  draw();
+  card.append(el("p", { class: "lede", text: "Each state, city or county you pull permits in, and each utility you file interconnection applications with." }),
+    list, el("button", { type: "button", class: "secondary", id: "addAreaBtn", text: "Add a place", onclick: () => { areaRows.push({ kind: "city", state: "", name: "" }); draw(); } }));
+}
+
+function filesSection() {
+  const card = el("section", { class: "ob-card ob-files", id: "filesCard" }, el("h2", { text: "Certificates (optional)" }),
+    el("p", { class: "lede", text: "Your insurance certificate, bond or licence certificates, as a PDF or a photo (up to 10 MB each). Only Keelix staff open them." }));
+  const kind = el("select", { id: "fileKind", "aria-label": "What the file is" });
+  for (const k of view.fileKinds) kind.append(el("option", { value: k, text: FILE_KIND_LABELS[k] || k }));
+  const pick = el("input", { type: "file", id: "fileInput", accept: "application/pdf,image/png,image/jpeg" });
+  const ul = el("ul", { id: "fileList" });
+  const drawFiles = () => {
+    ul.replaceChildren();
+    for (const f of view.files || []) {
+      ul.append(el("li", {}, el("span", { text: `${FILE_KIND_LABELS[f.kind] || f.kind}: ${f.fileName} (${Math.ceil(f.sizeBytes / 1024)} KB)` }),
+        el("button", { type: "button", class: "link", text: "Remove", onclick: async () => {
+          const res = await fetch(api("/files/" + encodeURIComponent(f.id)), { method: "DELETE" });
+          if (res.ok) { view.files = view.files.filter((x) => x.id !== f.id); drawFiles(); } else setStatus("Could not remove that file.", "error");
+        } })));
+    }
+  };
+  pick.addEventListener("change", async () => {
+    const file = pick.files && pick.files[0];
+    if (!file) return;
+    setStatus("Uploading…");
+    const res = await fetch(api("/files") + "?kind=" + encodeURIComponent(kind.value) + "&name=" + encodeURIComponent(file.name), {
+      method: "POST", headers: { "Content-Type": file.type || "application/octet-stream" }, body: file,
+    }).catch(() => null);
+    const out = res ? await res.json().catch(() => ({})) : {};
+    pick.value = "";
+    if (res && res.ok) { view.files = [...(view.files || []), out]; drawFiles(); setStatus("Uploaded.", "ok"); }
+    else setStatus((out && out.error) || "Could not upload that file.", "error");
+  });
+  drawFiles();
+  card.append(el("div", { class: "grid2" }, el("label", {}, "What it is", kind), el("label", {}, "File", pick)), ul);
+  return card;
+}
+
+// HOW YOU FILE IN EACH PLACE: one row per permit office and utility your places name. An address, a
+// yes/no and an example number only. A login never goes here (the server refuses one).
+const AUTHORITY_KINDS = { ahj: "Permit office", utility: "Utility" };
+function filingSection() {
+  const card = el("section", { class: "ob-card", id: "filingCard" }, el("h2", { text: "How you file in each place (optional)" }),
+    el("p", { class: "lede", text: "If you already file with these offices, tell us where: the portal's web address or the email address applications go to. A person at Keelix checks every address before anything is filed there. Never type a login or password here." }));
+  const list = el("div", { id: "filingList" });
+  let shown = "";
+  drawFiling = (force) => {
+    const authorities = Array.isArray(view.filingAuthorities) ? view.filingAuthorities : [];
+    const keys = authorities.map((a) => a.key).join("\n");
+    if (!force && keys === shown) return; // the same places: leave what is being typed alone
+    shown = keys;
+    list.replaceChildren();
+    if (!authorities.length) {
+      list.append(el("p", { class: "lede", id: "filingEmpty", text: "Add the cities, counties and utilities you work in under “Where you work”. Each one is listed here once it is saved." }));
+      return;
+    }
+    for (const a of authorities) {
+      const r = filingRows[a.key] || (filingRows[a.key] = { address: "", hasAccount: "", example: "" });
+      const address = el("input", { type: "text", "data-filing": "address", value: r.address, maxlength: "400", placeholder: "https://… or an email address", "aria-label": "Portal web address or application email for " + a.name });
+      const account = el("select", { "data-filing": "account", "aria-label": "Do you have an account with " + a.name });
+      for (const [v, label] of [["", "Not sure"], ["yes", "Yes"], ["no", "No"]]) account.append(el("option", { value: v, text: label, selected: r.hasAccount === v }));
+      const example = el("input", { type: "text", "data-filing": "example", value: r.example, maxlength: "40", placeholder: "optional", "aria-label": "A recent permit or application number at " + a.name });
+      address.addEventListener("input", () => { r.address = address.value; queueSave(); });
+      account.addEventListener("change", () => { r.hasAccount = account.value; queueSave(); });
+      example.addEventListener("input", () => { r.example = example.value; queueSave(); });
+      list.append(el("div", { class: "row filing", "data-filing-row": a.key },
+        el("div", { class: "filing-name" }, el("strong", { text: a.name }), el("span", { class: "muted", text: " " + (AUTHORITY_KINDS[a.kind] || "") + (a.state ? ", " + a.state : "") })),
+        el("label", {}, "Where applications go", address), el("label", {}, "You have an account there", account), el("label", {}, "A recent permit or application number", example)));
+    }
+  };
+  drawFiling(true);
+  card.append(list);
+  return card;
+}
+
+function portalSection() {
+  const card = el("section", { class: "ob-card", id: "portalCard" }, el("h2", { text: "Portal logins" }),
+    el("p", { class: "lede", text: "If you already have accounts on city or utility portals we will file on, name them here. You will get a separate one-time secure link to send the logins — never on this page." }));
+  const rows = [];
+  const list = el("div", { id: "portalList" });
+  const add = () => {
+    const name = el("input", { type: "text", "data-portal": "name", placeholder: "e.g. the city's permit portal", "aria-label": "Portal name" });
+    const url = el("input", { type: "url", "data-portal": "url", placeholder: "https://… (the sign-in page)", "aria-label": "Sign-in page address" });
+    const row = el("div", { class: "row portal" }, el("label", {}, "Portal", name), el("label", {}, "Sign-in page address", url),
+      el("button", { type: "button", class: "link", text: "Remove", onclick: () => { row.remove(); rows.splice(rows.indexOf(r), 1); } }));
+    const r = { name, url };
+    rows.push(r);
+    list.append(row);
+  };
+  add();
+  const out = el("div", { id: "portalLinkOut" });
+  const go = el("button", { type: "button", id: "portalLinkBtn", text: "Get my secure login link", onclick: async () => {
+    const portals = rows.map((r) => ({ portalType: r.name.value.trim(), portalUrl: r.url.value.trim() })).filter((p) => p.portalType || p.portalUrl);
+    if (!portals.length) { setStatus("Name a portal and its sign-in page first.", "error"); return; }
+    go.disabled = true;
+    const res = await fetch(api("/portal-logins"), { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ portals }) }).catch(() => null);
+    const data = res ? await res.json().catch(() => ({})) : {};
+    go.disabled = false;
+    if (!res || !res.ok) { setStatus((data && data.error) || "Could not make the secure link.", "error"); return; }
+    const href = new URL(data.path, location.origin).href;
+    out.replaceChildren(el("div", { class: "ob-note" }, "Open your secure login link (it works once, for 72 hours): ",
+      el("a", { href, target: "_blank", rel: "noopener noreferrer", id: "portalLinkHref", text: "send my logins securely" })));
+    setStatus("");
+  } });
+  card.append(list, el("button", { type: "button", class: "secondary", text: "Add another portal", onclick: add }), go, out);
+  return card;
+}
+
+function render() {
+  formEl.replaceChildren();
+  const v = view.values || {};
+  licRows = (Array.isArray(v.stateLicenses) ? v.stateLicenses : []).map((l) => ({ state: l.state || "", kind: l.kind || "", number: l.number || "", expires: l.expires || "" }));
+  areaRows = (Array.isArray(v.serviceArea) ? v.serviceArea : []).map((a) => ({ kind: a.kind || "city", state: a.state || "", name: a.name || "" }));
+  filingRows = {};
+  for (const f of Array.isArray(view.filing) ? view.filing : []) if (f && f.authorityKey) filingRows[f.authorityKey] = { address: f.address || "", hasAccount: f.hasAccount || "", example: f.example || "" };
+  for (const [group, title] of GROUPS) {
+    const card = el("section", { class: "ob-card", "data-group": group }, el("h2", { text: title }));
+    const fields = view.fields.filter((f) => f.group === group);
+    if (group === "licences") licenceSection(card);
+    else if (group === "area") areaSection(card);
+    else {
+      const grid = el("div", { class: fields.length > 1 ? "grid2" : "" });
+      for (const f of fields) grid.append(scalarInput(f, v[f.key]));
+      card.append(grid);
+    }
+    formEl.append(card);
+  }
+  formEl.append(filingSection(), filesSection(), portalSection());
+}
+
+function collect() {
+  const fields = {};
+  for (const [k, i] of Object.entries(inputs)) fields[k] = i.value.trim();
+  fields.stateLicenses = licRows.map((r) => ({ state: r.state.trim(), kind: r.kind, number: r.number.trim(), expires: r.expires }));
+  fields.serviceArea = areaRows.map((r) => ({ kind: r.kind, state: r.state.trim(), name: r.kind === "state" ? "" : r.name.trim() }));
+  // Only the places listed now, and only rows with something in them.
+  const listed = new Set((Array.isArray(view.filingAuthorities) ? view.filingAuthorities : []).map((a) => a.key));
+  fields.filing = Object.entries(filingRows)
+    .filter(([key, r]) => listed.has(key) && (r.address.trim() || r.hasAccount || r.example.trim()))
+    .map(([key, r]) => ({ authorityKey: key, address: r.address.trim(), hasAccount: r.hasAccount, example: r.example.trim() }));
+  return { fields };
+}
+
+function queueSave() {
+  clearTimeout(saveTimer);
+  saveTimer = setTimeout(() => save(false), 1200);
+}
+
+async function save(announce) {
+  clearTimeout(saveTimer);
+  const res = await fetch(api("/draft"), { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(collect()) }).catch(() => null);
+  const out = res ? await res.json().catch(() => ({})) : {};
+  if (!res) { setStatus("Could not reach the server. Your answers are still on this page.", "error"); return false; }
+  if (!res.ok) { setStatus(out.error || "Could not save.", "error"); return false; }
+  renderChecklist(out.checklist);
+  if (Array.isArray(out.filingAuthorities)) { view.filingAuthorities = out.filingAuthorities; drawFiling(false); }
+  if (announce) setStatus(out.problems && out.problems.length ? "Saved. Still to fix: " + out.problems[0] : "Saved. You can come back to this link later.", out.problems && out.problems.length ? "error" : "ok");
+  else setStatus("Saved.", "ok");
+  return true;
+}
+
+document.getElementById("saveBtn").addEventListener("click", () => save(true));
+document.getElementById("submitBtn").addEventListener("click", async () => {
+  const btn = document.getElementById("submitBtn");
+  btn.disabled = true;
+  if (!(await save(false))) { btn.disabled = false; return; }
+  setStatus("Sending…");
+  const res = await fetch(api("/submit"), { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(collect()) }).catch(() => null);
+  const out = res ? await res.json().catch(() => ({})) : {};
+  btn.disabled = false;
+  if (!res || !res.ok) { setStatus((out && out.error) || "Could not send. Your answers are saved; try again.", "error"); return; }
+  closePage("Thank you. A person at Keelix will review it.", "Nothing you sent is used until someone at Keelix checks it. If anything below is still missing, your Keelix contact will ask you for it.");
+  renderChecklist(out.checklist);
+  setStatus("");
+});
+
+async function load() {
+  if (!token) { closePage("This link isn’t complete.", "Part of the link is missing. Ask your Keelix contact to send it again."); return; }
+  const res = await fetch(api("")).catch(() => null);
+  if (!res) { closePage("We couldn’t reach the server.", "Check your internet connection and reload this page."); return; }
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) { closePage("This link can’t be used any more.", "It may have expired or been replaced by a newer one. Ask your Keelix contact for a new link."); return; }
+  view = data;
+  document.getElementById("heroTitle").textContent = view.companyName ? `Set up ${view.companyName} with Keelix.` : "Tell us about your company.";
+  if (view.status === "submitted") {
+    closePage("Thank you. We have your answers.", "A person at Keelix is reviewing them. If anything below is still missing, your Keelix contact will ask you for it.");
+    renderChecklist(view.checklist);
+    return;
+  }
+  render();
+  renderChecklist(view.checklist);
+}
+load();
+</script>
+</body>
+</html>

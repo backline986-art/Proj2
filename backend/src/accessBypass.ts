@@ -45,6 +45,8 @@ export const ACCESS_BYPASS_PATHS: readonly AccessPathEntry[] = [
   { path: "/api/public/credential-request/*", why: "the drop box's data, token-scoped, one use" },
   { path: "/portal", why: "per-client tracker page (link carries a token)" },
   { path: "/api/public/portal/*", why: "the tracker's data, token-scoped, read-only" },
+  { path: "/onboarding", why: "client Company setup page (link carries a token)" },
+  { path: "/api/public/onboarding/*", why: "the setup page's data, token-scoped; answers wait for a staff accept" },
   { path: "/api/public/review/*", why: "shared review report, token-scoped, read-only" },
   { path: "/styles.css", why: "stylesheet the logged-out pages load" },
   { path: "/favicon.ico", why: "tab icon" },
