@@ -409,8 +409,10 @@ export function portalSafetyFactory() {
   };
 
   // A terms / certification acknowledgment. Ticking one is not entering form data, and a page
-  // whose only live control is one is still a read-only page.
-  const ACCEPT_TERMS = /\b(i\s+)?(agree|accept|certify|acknowledge|attest|consent)\b|terms\s+(and|&)\s+conditions|under\s+penalt/i;
+  // whose only live control is one is still a read-only page. The one vocabulary: it holds every
+  // phrasing the learner's gate-checkbox list knows ("I understand…", "I confirm that…" — PowerClerk's
+  // review-screen attestations), so the learner and the backend cannot disagree on a step (#131).
+  const ACCEPT_TERMS = /\b(i\s+)?(agree|accept|certify|acknowledge|attest|consent)\b|\bi\s+(understand|confirm\s+that)\b|terms\s+(and|&)\s+conditions|under\s+penalt/i;
   const isAcceptTermsLabel = (label: string | null | undefined): boolean => !!label && ACCEPT_TERMS.test(String(label));
 
   // A SIGNATURE REQUEST (#308): PowerClerk's "Request Signatures" sends a DocuSign email to the

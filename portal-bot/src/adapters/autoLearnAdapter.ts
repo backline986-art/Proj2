@@ -6407,15 +6407,10 @@ export class AutoLearnAdapter extends BasePortalAdapter {
     // THE ONE "HAS THIS RUN ENTERED FORM DATA?" QUESTION (#341, #131). Asked by the entry-
     // disclaimer guard, the interstitial guard, the terminal page's empty guard and the result's
     // filledSomething — one closure, read at call time, so none of them can drift apart. The
-    // shared predicate (isFormDataStep) leaves out the e-signature steps and terms acknowledgments;
-    // the learner's own wider acknowledgment wording is kept on top of it (a superset exclusion).
-    const isTermsAcknowledgment = (s: RecipeStep): boolean =>
-      s.action === "check" && (
-        ACCEPT_TERMS.test(String(s.selector?.name ?? "")) ||
-        ACCEPT_TERMS.test(String(s.selector?.label ?? "")) ||
-        /termaccept/i.test(String(s.selector?.css ?? "")) ||
-        /accept entry terms/i.test(String(s.note ?? "")));
-    const isFormData = (s: RecipeStep): boolean => isFormDataStep(s) && !isTermsAcknowledgment(s);
+    // shared predicate alone (isFormDataStep: no e-signature steps, no terms acknowledgments —
+    // the learner's gate-checkbox phrasings included), the same one the backend's depth and
+    // trust floor read, so a step counts the same on both sides.
+    const isFormData = isFormDataStep;
     const formDataEnteredThisRun = (): boolean => steps.some(isFormData);
     // Pages on which form data was recorded, tallied as each page closes — the honest numerator
     // of "filled N of M page(s)" (#131: pageCount counts iterations, and a run that typed only
