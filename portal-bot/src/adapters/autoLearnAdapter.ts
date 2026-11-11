@@ -6421,9 +6421,11 @@ export class AutoLearnAdapter extends BasePortalAdapter {
       if (steps.slice(tallyFrom).some(isFormData)) filledPages++;
       tallyFrom = steps.length;
     };
-    // The e-signature pass found boxes the inventory does not hold: ONE re-read per run (#131
-    // risk 3) before the pass is allowed to type by the live marks alone.
-    let signatureStaleRereads = 0;
+    // The e-signature pass found boxes the inventory does not hold: ONE re-read PER PAGE (by
+    // identity, like requiredReplanned; #131 risk 3) before the pass may type by the live marks
+    // alone on that page. Per run, a stale read on the first signature page would have waived the
+    // detector-and-inventory agreement on every later one.
+    const signatureStaleReread = new Set<string>();
     // A REQUIRED BLANK STOPS THE ADVANCE (#410): pages (by identity) already given their one
     // re-plan for required fields still blank, and a per-run cap on those planner calls.
     const requiredReplanned = new Set<string>();
@@ -7433,12 +7435,15 @@ export class AutoLearnAdapter extends BasePortalAdapter {
               stopReason: "signature_no_signer",
             };
           }
-          const done = await this.completeTypedSignature(signer, steps, fields, { allowUninventoried: signatureStaleRereads > 0 });
+          const done = await this.completeTypedSignature(signer, steps, fields, { allowUninventoried: signatureStaleReread.has(scrapedIdentity?.where ?? url) });
           if (!done.ok && done.stale) {
             // THE DETECTOR AND THE INVENTORY DISAGREE: boxes on the live page, none among the
             // fields this iteration read. The page changed since it was read (#131) — re-read it,
-            // once. A box the inventory cannot hold (a shadow root) is typed on the second look.
-            signatureStaleRereads++;
+            // once per page. The LIVE page is the one that was not read, so it is the one keyed:
+            // the next iteration scrapes it, and a box its inventory cannot hold (a shadow root)
+            // is typed on that second look.
+            const live = await pageIdentityOf(this.page).catch(() => null);
+            signatureStaleReread.add(live?.where ?? String(this.page.url?.() ?? url));
             this.debug?.event({ type: "signature_inventory_stale", page: pageCount, why: done.why });
             continue;
           }

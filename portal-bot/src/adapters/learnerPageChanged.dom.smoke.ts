@@ -44,6 +44,13 @@
 //   F. tileNoFills - same portal, the planner fills nothing. MUST: the signer is still typed, but
 //                the run does NOT report a filled page (filledSomething false, no "filled N"),
 //                and its message says the recorded steps entered no form data.
+//   G. lateSig  - (#131 risk 3) the form's signature box appears AFTER the page was read (the
+//                planner stub adds it while "planning", as B moves the page). The live-DOM
+//                signature pass finds a box the inventory does not hold. MUST: it does not type —
+//                the page is re-read (the planner is asked twice for the same path, the second
+//                time with the box present), and the signer is typed on that second look, bound
+//                with no literal. Before (c), the pass typed by the live marks into a box no
+//                inventory had seen — the City of Star failure without the tile.
 //
 // Run: npx tsx portal-bot/src/adapters/learnerPageChanged.dom.smoke.ts
 import "../smokeArtifactDirs";
@@ -140,17 +147,38 @@ const TILE_FORM = `<!doctype html><html><head><title>Solar Permit</title></head>
   <button type="button" id="submit" disabled>Submit</button>
 </body></html>`;
 
+// G: the same form, its signature box revealed by the page itself when the option-less Permit Type
+// select is opened. The walk's dropdown read opens it AFTER the page was read and the pre-pass
+// identity check passed, and BEFORE the signature pass — the one window in which the live page
+// can hold a signature box the inventory does not (a portal whose script reveals the box late).
+const LATE_SIG_FORM = `<!doctype html><html><head><title>Solar Permit</title></head><body>
+  <h1>Solar Permit</h1>
+  <div><label for="desc">Description of Work</label><textarea id="desc" name="desc"></textarea></div>
+  <div><label for="value">Total Project Value</label><input type="number" id="value" name="value"></div>
+  <div><label for="ptype">Permit Type</label><select id="ptype" name="ptype"><option value=""></option></select></div>
+  <div id="sig-slot"></div>
+  <button type="button" id="submit" disabled>Submit</button>
+  <script>
+    const reveal = () => {
+      const slot = document.getElementById("sig-slot");
+      if (!slot.children.length) slot.innerHTML = '<label for="signame">Signature Name</label><input type="text" id="signame" name="signame">';
+    };
+    for (const ev of ["mousedown", "click", "focus"]) document.getElementById("ptype").addEventListener(ev, reveal);
+  </script>
+</body></html>`;
+
 const server = http.createServer((req, res) => {
   const u = new URL(req.url || "/", "http://127.0.0.1");
   res.writeHead(200, { "content-type": "text/html" });
   if (u.pathname.startsWith("/portalhome")) { res.end(TILE_HOME); return; }
   if (u.pathname.startsWith("/new-permit/")) { res.end(TILE_FORM); return; }
+  if (u.pathname.startsWith("/late-sig")) { res.end(LATE_SIG_FORM); return; }
   res.end(u.pathname.startsWith("/app/") ? APP : DASHBOARD);
 });
 await new Promise<void>((r) => server.listen(0, "127.0.0.1", () => r()));
 const base = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
 
-type Mode = "entry" | "moved" | "blank" | "stubborn" | "tile" | "tileNoFills";
+type Mode = "entry" | "moved" | "blank" | "stubborn" | "tile" | "tileNoFills" | "lateSig";
 const VALUES: Record<string, string> = { Name: "Test Solar Co", Address: "100 Example Way, Testville", Phone: "555-0100" };
 const TILE_VALUES = { desc: "Roof-mounted solar PV, 7.2 kW DC", value: "21000" };
 const SIGNER = "Dana Signer";
@@ -160,6 +188,7 @@ const idxOf = (req: LearnPlanRequest, re: RegExp): number =>
 async function walk(mode: Mode): Promise<void> {
   console.log(`\n[${mode}]`);
   const tile = mode === "tile" || mode === "tileNoFills";
+  const late = mode === "lateSig";
   const ctx = await chromium.launch().then((b) => b.newContext().then((c) => ({ b, c })));
   await ctx.c.addInitScript({ content: "globalThis.__name = globalThis.__name || ((f) => f);" });
   ctx.c.setDefaultTimeout(8000);
@@ -169,6 +198,14 @@ async function walk(mode: Mode): Promise<void> {
   const offered: Array<{ url: string; labels: string[]; isDashboard: boolean }> = [];
   let movedOnce = false;
   const planner: LearnPlanner = async (req) => {
+    if (late) {
+      offered.push({ url: String(req.url ?? ""), labels: req.fields.map((f) => String(f.label ?? "")), isDashboard: req.isDashboard === true });
+      const fills = [
+        { selectorIndex: idxOf(req, /^description of work$/i), value: TILE_VALUES.desc },
+        { selectorIndex: idxOf(req, /^total project value$/i), value: TILE_VALUES.value },
+      ].filter((f) => f.selectorIndex >= 0);
+      return { fills, atReview: false };
+    }
     if (tile) {
       offered.push({ url: String(req.url ?? ""), labels: req.fields.map((f) => String(f.label ?? "")), isDashboard: req.isDashboard === true });
       if (mode === "tileNoFills") return { fills: [], atReview: false };
@@ -205,10 +242,10 @@ async function walk(mode: Mode): Promise<void> {
       .filter((f) => f.selectorIndex >= 0);
     return { fills, atReview: false, ...(nextIdx >= 0 ? { advanceSelectorIndex: nextIdx } : {}) };
   };
-  await page.goto(tile ? `${base}/portalhome` : `${base}/`);
+  await page.goto(tile ? `${base}/portalhome` : late ? `${base}/late-sig` : `${base}/`);
   // The tile portal has an e-signature box: the client record's signer (synthetic) is who the
   // bot may sign as; without one the signature pass pauses the run before anything to observe.
-  const adapter = new AutoLearnAdapter("Page Changed Smoke", planner, { maxPages: 8, ...(tile ? { contactIdentity: { signerName: SIGNER, lastName: "Signer" } } : {}) });
+  const adapter = new AutoLearnAdapter("Page Changed Smoke", planner, { maxPages: 8, ...(tile || late ? { contactIdentity: { signerName: SIGNER, lastName: "Signer" } } : {}) });
   (adapter as unknown as { page: unknown }).page = page;
   const T0 = Date.now();
   let r: Awaited<ReturnType<AutoLearnAdapter["learn"]>> | null = null;
@@ -225,6 +262,28 @@ async function walk(mode: Mode): Promise<void> {
   await ctx.b.close().catch(() => null);
   if (!r) return;
   const steps: RecipeStep[] = r.steps ?? [];
+  if (late) {
+    const noteOf = (s: RecipeStep): string => String(s.note ?? "");
+    const trace = `pageTrace=${JSON.stringify(r.pageTrace ?? [])} offered=${JSON.stringify(offered.map((o) => `${o.url.replace(base, "")}: ${o.labels.join("|").slice(0, 160)}`))} ` +
+      `steps=${JSON.stringify(steps.map((s) => `${s.action}:${noteOf(s).slice(0, 40)}`))} form=${JSON.stringify(form)} ok=${String(r.ok)} filledSomething=${String(r.filledSomething)} message=${String(r.message ?? "").slice(0, 300)}`;
+    const sigAt = steps.findIndex((s) => s.action === "fill" && /^e-signature:/.test(noteOf(s)));
+    // The run's own timeline (the debug bundle the smoke's AUTOLEARN_RUN_DIR holds) says whether
+    // the signature pass refused the uninventoried box.
+    const runDir = (adapter as unknown as { debug: { dir: string } | null }).debug?.dir;
+    const events = runDir ? fs.readFileSync(path.join(runDir, "events.jsonl"), "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l) as { type?: string; page?: number }) : [];
+    const stale = events.filter((e) => e.type === "signature_inventory_stale");
+    check("lateSig: MUST the signature pass refuses a box the inventory never held, once, and the page is re-read (pageCount 2)",
+      stale.length === 1 && stale[0].page === 1 && r.pageCount === 2, `${trace} staleEvents=${JSON.stringify(stale)}`);
+    check("lateSig: the planner is handed the form's fields, never the signature box (held by the inventory after the re-read, so stripped)",
+      offered.length >= 1 && offered.every((o) => /\/late-sig/.test(o.url) && o.labels.some((l) => /description of work/i.test(l)) && !o.labels.some((l) => /signature name/i.test(l))), trace);
+    check("lateSig: the signer is typed on the second look, bound to authorizedSignerName with no literal",
+      form.signame === SIGNER && sigAt >= 0 && steps[sigAt].field === "authorizedSignerName" && steps[sigAt].value === undefined && !JSON.stringify(steps).includes(SIGNER), trace);
+    check("lateSig: the re-read is not a failure — the planner's fills hold and the run reports a filled page",
+      form.desc === TILE_VALUES.desc && form.value === TILE_VALUES.value && r.filledSomething === true, trace);
+    check("lateSig: nothing is clicked as a final submit", r.reachedReview !== true && !steps.some((s) => s.isFinalSubmit), trace);
+    console.log(`  (took ${Math.round((Date.now() - T0) / 1000)} s)`);
+    return;
+  }
   if (tile) {
     const pageTrace = r.pageTrace ?? [];
     const noteOf = (s: RecipeStep): string => String(s.note ?? "");
@@ -301,7 +360,7 @@ async function walk(mode: Mode): Promise<void> {
 }
 
 try {
-  for (const m of (process.env.ONLY_MODES ? process.env.ONLY_MODES.split(",") : ["entry", "moved", "blank", "stubborn", "tile", "tileNoFills"]) as Mode[]) await walk(m);
+  for (const m of (process.env.ONLY_MODES ? process.env.ONLY_MODES.split(",") : ["entry", "moved", "blank", "stubborn", "tile", "tileNoFills", "lateSig"]) as Mode[]) await walk(m);
 } finally {
   server.close();
   fs.rmSync(process.env.AUTOLEARN_RUN_DIR!, { recursive: true, force: true });
