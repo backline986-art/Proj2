@@ -307,7 +307,10 @@ const POSTBACK_OTP = `<!doctype html><html><head><title>City Permits - Sign In</
 //   /cv/logon-divtoggle  the heading is a <div role=button> with NO aria at all that hides the
 //                        panel on click, and there is no native submit → the fallback list
 //                        clicks it, nothing posts: step 8 must say so, not "two-step"
-const cityViewLogon = (path: string, opts: { collapsed?: boolean; nativeSubmit?: boolean; banner?: string; eye?: boolean; divToggle?: boolean } = {}): string => {
+//   /cv/logon-flip       the submit handler turns the password box into type=text (a "show
+//                        password" state) and posts 1.5 s later → the post-submit mask must still
+//                        cover that box (rule 2: the PNG never carries the cleartext password)
+const cityViewLogon = (path: string, opts: { collapsed?: boolean; nativeSubmit?: boolean; banner?: string; eye?: boolean; divToggle?: boolean; flip?: boolean } = {}): string => {
   const open = !opts.collapsed;
   const submit = opts.nativeSubmit === false ? "" : `<input data-cy="btnbnext" type="submit" name="bnext" id="bnext" value="" class="buttonSize1">`;
   const eye = opts.eye ? `<button class="eye" id="eye" aria-label="Show password"><svg width="16" height="16"><circle cx="8" cy="8" r="6"/></svg></button>` : "";
@@ -360,9 +363,58 @@ const cityViewLogon = (path: string, opts: { collapsed?: boolean; nativeSubmit?:
     ${opts.divToggle ? "" : `document.getElementById("password").addEventListener("keydown", function (e) {
       if (e.key === "Enter") { e.preventDefault(); document.querySelector("form").submit(); }
     });`}
+    // The flip: the box the password sits in stops being type=password BEFORE the post lands.
+    ${opts.flip ? `document.querySelector("form").addEventListener("submit", function (e) {
+      e.preventDefault();
+      document.getElementById("password").type = "text";
+      setTimeout(function () { document.querySelector("form").submit(); }, 1500);
+    });` : ""}
   </script>
 </body></html>`;
 };
+// (N) THE CLASSIC ASP.NET IMAGE SUBMIT. The login control is <input type="image" alt="Login"> —
+// a native submit per spec, its only words in `alt` — and a stray wordless <input type=submit>
+// (the page's "default button", posting elsewhere) follows the password box. Picking the stray
+// posts the login to the wrong place.
+const IMAGE_LOGIN = `<!doctype html><html><head><title>Portal Login</title></head><body>
+  <form id="aspnetForm" action="/aspnet/image-login" method="post">
+    <table><tr><td>User Name:</td><td><input type="text" id="txtUser" name="username"></td></tr>
+    <tr><td>Password:</td><td><input type="password" id="txtPass" name="password"></td></tr></table>
+    <input type="submit" id="btnDefault" name="btnDefault" value="" formaction="/aspnet/search" style="width:1px;height:1px;border:0;padding:0">
+    <input type="image" id="btnLogin" name="btnLogin" alt="Login" width="80" height="24" src="data:image/gif;base64,R0lGODlhAQABAIAAAP///wAAACH5BAEAAAAALAAAAAABAAEAAAICRAEAOw==">
+  </form>
+  <script>
+    window.__clicks = [];
+    document.addEventListener("click", function (e) {
+      var el = e.target && e.target.closest ? e.target.closest("input, button, a") : null;
+      if (el) window.__clicks.push(el.tagName + (el.id ? "#" + el.id : ""));
+    }, true);
+  </script>
+</body></html>`;
+// (O) THE SPA LOGIN THAT POSTS TO ANOTHER ORIGIN. The modal's submit sends the credential by
+// fetch to an API host (api. subdomain, an embedded IdP widget), hides the modal (the password
+// box stays attached, display:none) and shows a spinner; the URL never moves. The form WAS
+// posted: the diagnosis must never be "the control clicked was a panel toggle".
+const spaLogin = (apiOrigin: string): string => `<!doctype html><html><head><title>Sign in</title></head><body>
+  <h1>Sign in</h1>
+  <div id="modal">
+    <form id="login">
+      <label for="user">Email</label><input type="text" id="user" name="user">
+      <label for="pass">Password</label><input type="password" id="pass" name="pass">
+      <button type="submit" id="go">Sign in</button>
+    </form>
+  </div>
+  <div id="spinner" style="display:none">Signing you in…</div>
+  <script>
+    document.getElementById("login").addEventListener("submit", function (e) {
+      e.preventDefault();
+      var body = JSON.stringify({ u: document.getElementById("user").value, p: document.getElementById("pass").value });
+      fetch("${apiOrigin}/api/session", { method: "POST", mode: "no-cors", headers: { "Content-Type": "text/plain" }, body: body }).catch(function () {});
+      document.getElementById("modal").style.display = "none";
+      document.getElementById("spinner").style.display = "";
+    });
+  </script>
+</body></html>`;
 // (M) THE ASP.NET WHOLE-PAGE FORM (eTRAKiT-shaped). ONE <form> wraps the page; the login control
 // is <input type="button" value="Login"> with a postback handler, and a stray native submit
 // ("Go") follows the password with nothing typeable between. Form ownership alone would pick
@@ -389,13 +441,14 @@ const MEGAFORM_LOGIN = `<!doctype html><html><head><title>Portal Login</title></
 const CV_SIGNED_IN = `<!doctype html><html><head><title>My Items | City Portal</title></head><body>
   <a href="/Portal/Account/LogOff">Log Off</a><h1>My Items</h1><p>You have no applications.</p>
 </body></html>`;
-const CV_ROUTES: Record<string, { collapsed?: boolean; nativeSubmit?: boolean; eye?: boolean; divToggle?: boolean }> = {
+const CV_ROUTES: Record<string, { collapsed?: boolean; nativeSubmit?: boolean; eye?: boolean; divToggle?: boolean; flip?: boolean }> = {
   "/cv/logon": {},
   "/cv/logon-collapsed": { collapsed: true },
   "/cv/logon-refused": {},
   "/cv/logon-nosubmit": { nativeSubmit: false },
   "/cv/logon-eye": { eye: true },
   "/cv/logon-divtoggle": { nativeSubmit: false, divToggle: true },
+  "/cv/logon-flip": { flip: true },
 };
 
 const routes: Record<string, string> = {
@@ -419,7 +472,7 @@ const routes: Record<string, string> = {
 const server = http.createServer((q, r) => {
   const path = (q.url || "").split("?")[0];
   const cv = CV_ROUTES[path];
-  if (cv && q.method === "POST") {
+  if ((cv || path === "/aspnet/image-login") && q.method === "POST") {
     // The portal's answer to the posted form: the signed-in page, or the same form with a
     // refusal banner (the URL never moves — a refusal is not a hand-off).
     let body = "";
@@ -432,13 +485,18 @@ const server = http.createServer((q, r) => {
         return;
       }
       r.writeHead(200, { "Content-Type": "text/html" });
-      r.end(cityViewLogon(path, { ...cv, banner: "Invalid email or password." }));
+      r.end(cv ? cityViewLogon(path, { ...cv, banner: "Invalid email or password." }) : IMAGE_LOGIN);
     });
     return;
   }
+  // The SPA's API: another origin (localhost vs 127.0.0.1) on this same server.
+  if (path === "/api/session") { r.writeHead(204); r.end(); return; }
   r.writeHead(200, { "Content-Type": "text/html" });
   if (cv) { r.end(cityViewLogon(path, cv)); return; }
   if (path === "/cv/home") { r.end(CV_SIGNED_IN); return; }
+  if (path === "/aspnet/image-login") { r.end(IMAGE_LOGIN); return; }
+  if (path === "/aspnet/search") { r.end("<html><head><title>Search</title></head><body><h1>Search results</h1><p>Nothing found.</p></body></html>"); return; }
+  if (path === "/spa/login") { r.end(spaLogin(`http://localhost:${port}`)); return; }
   if (path === "/etrakit/login") { r.end(MEGAFORM_LOGIN); return; }
   if (path === "/etrakit/search") { r.end("<html><head><title>Search</title></head><body><h1>Search results</h1><p>Nothing found.</p></body></html>"); return; }
   r.end(routes[path] ?? "<html><body>?</body></html>");
@@ -722,6 +780,51 @@ await check("ASP.NET whole-page form: the login-worded input[type=button] beats 
     assert.equal(res.detail?.clicked?.id, "ucLogin_btnLogin", `the wrong control was clicked (clicks: ${clicks.join(", ")}; got ${JSON.stringify(res.detail?.clicked)}): ${res.message}`);
     assert.equal(clicks.some((c) => /#go$/.test(c)), false, `the stray submit was clicked: ${clicks.join(", ")}`);
     assert.equal(res.status, "logged_in", `got ${res.status}: ${res.message}`);
+  } finally { await p.close(); }
+});
+
+await check("ASP.NET image submit: <input type=image alt=Login> is the form's own submit, over a stray wordless <input type=submit> posting elsewhere", async () => {
+  const p = await context.newPage();
+  try {
+    await p.goto(`http://127.0.0.1:${port}/aspnet/image-login`);
+    const res = await performLogin(p, cred);
+    const clicks = await cvClicks(p);
+    // Asserted FIRST: the stray posts to /aspnet/search, which the poll would read as a session.
+    assert.equal(res.detail?.clicked?.type, "image", `the wrong control was clicked (clicks: ${clicks.join(", ")}; got ${JSON.stringify(res.detail?.clicked)}): ${res.message}`);
+    assert.equal(res.detail?.clicked?.id, "btnLogin");
+    assert.equal(clicks.some((c) => /#btnDefault$/.test(c)), false, `the stray submit was clicked: ${clicks.join(", ")}`);
+    assert.equal(res.status, "logged_in", `got ${res.status}: ${res.message}`);
+    assert.match(p.url(), /\/cv\/home$/);
+  } finally { await p.close(); }
+});
+
+await check("an SPA login that POSTs the credential to ANOTHER origin and hides its modal was posted — never 'the control clicked was a panel toggle'", async () => {
+  const p = await context.newPage();
+  try {
+    await p.goto(`http://127.0.0.1:${port}/spa/login`);
+    const res = await performLogin(p, cred);
+    assert.equal(res.detail?.posted, true, `a request carried the credential off the page — that IS the form posting (got ${JSON.stringify(res.detail)}: ${res.message})`);
+    assert.notEqual(res.detail?.cause, "toggle_click", `the form was posted; blaming the submit pick sends the engine's owner after a credential problem (got: ${res.message})`);
+    assert.doesNotMatch(res.message, /did not post the form|panel toggle/i, `got: ${res.message}`);
+    assert.equal(res.ok, false, "fixture sanity: the spinner never resolves, so no session");
+  } finally { await p.close(); }
+});
+
+await check("the post-submit mask still covers the password box after the submit flipped it to type=text (rule 2)", async () => {
+  const p = await context.newPage();
+  try {
+    await p.goto(`http://127.0.0.1:${port}/cv/logon-flip`);
+    let covered: string[] | null = null;
+    const res = await performLogin(p, cred, {
+      onSubmitted: async ({ mask }) => {
+        const ids = await Promise.all(mask.map((loc) => loc.evaluateAll((els) => els.map((e) => (e as HTMLElement).id)).catch(() => [] as string[])));
+        covered = ids.flat();
+      },
+    });
+    assert.ok(covered, "onSubmitted must be called right after the click");
+    assert.ok((covered as string[]).includes("password"), `the mask resolved at capture time misses the box that now shows the password in clear (covered: ${(covered as string[]).join(", ") || "nothing"})`);
+    assert.ok((covered as string[]).includes("emailAddress"), `the username box must stay masked too (covered: ${(covered as string[]).join(", ")})`);
+    assert.equal(res.status, "logged_in", `fixture sanity: the flipped form posts 1.5 s later and the portal signs in (got ${res.status}: ${res.message})`);
   } finally { await p.close(); }
 });
 

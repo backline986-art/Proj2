@@ -232,6 +232,10 @@ const SOCIAL_IDP_SOURCE = "\\b(with|using|via)\\s+(google|microsoft|apple|facebo
 const NEVER_ALWAYS_SOURCE = "\\bhelp\\b|\\bunlock\\b|\\bforgot\\b|\\breset (your |my )?password\\b|\\bkeep me (signed|logged) in\\b|\\bremember me\\b|\\bstay signed in\\b|verify with something else|\\bback to (sign|log)[\\s-]?in\\b|\\btrouble (signing|logging)\\b|can'?t (sign|log)[\\s-]?in";
 const NEVER_SIGNUP_SOURCE = "\\bcreate (an |your |a new |new )?account\\b|\\bregist(er|ration)\\b|\\bsign[\\s-]?up\\b|\\bnew account\\b|\\benroll\\b";
 const LOGIN_WORD_SOURCE = "\\blog[\\s-]?(in|on)\\b|\\blogin\\b|\\blogon\\b|\\bsign[\\s-]?in\\b|\\bsignin\\b";
+// The words a portal refuses a password with. ONE source for the banner read (loginRefusalBanner)
+// and for the identity-echo check (submittedIdentityEchoed), which composes its wider "not a
+// session" vocabulary on top of it.
+const LOGIN_REFUSAL_SOURCE = "\\binvalid\\b|\\bincorrect\\b|\\blocked\\b|\\bdisabled\\b|\\bnot recogni[sz]ed\\b|\\btry again\\b";
 // A LOGIN NEVER FOLLOWS A PAYMENT LINK (production 2026-09-27, City of Tigard OR). The reveal's
 // href catch-all (a[href*=login|account|signin]) clicked a link on the EnerGov self-service home
 // that led to Tyler PAYMENTS' sign-in (redirect_uri …/payments/checkout/signin-centralcallback):
@@ -543,20 +547,23 @@ async function submittedIdentityEchoed(page: Page, username: string): Promise<bo
   const needle = String(username || "").trim();
   if (needle.length < 4) return false;
   try {
-    return await (page as unknown as { evaluate: (fn: (n: string) => boolean, arg: string) => Promise<boolean> })
-      .evaluate((n) => {
+    return await (page as unknown as { evaluate: (fn: (a: { n: string; refuse: string }) => boolean, arg: { n: string; refuse: string }) => Promise<boolean> })
+      .evaluate((a) => {
         // Fully inline — no named helper. See the note in authenticatedSignalPresent.
-        const low = n.toLowerCase();
+        const low = a.n.toLowerCase();
+        // A refusal (the shared vocabulary) or any other "not a session" line: not found, a
+        // second factor, a code sent, an error.
+        const notSession = new RegExp(`${a.refuse}|not found|could ?n[o']t (find|locate)|cannot find|does ?n[o']t exist|no account|failed|unrecogni|error|denied|expired|\\bcode\\b|verif|one[\\s-]?time|2fa|two[\\s-]?factor|\\bsent\\b|check your (e-?mail|inbox|phone)`, "i");
         const lines = String((document.body && (document.body as HTMLElement).innerText) || "").split("\n");
         let echoed = false;
         for (const raw of lines) {
           const line = raw.trim();
           if (!line || line.toLowerCase().indexOf(low) < 0) continue;
-          if (/invalid|incorrect|not found|could ?n[o']t (find|locate)|cannot find|does ?n[o']t exist|no account|failed|unrecogni|try again|error|denied|locked|expired|\bcode\b|verif|one[\s-]?time|2fa|two[\s-]?factor|\bsent\b|check your (e-?mail|inbox|phone)/i.test(line)) return false;
+          if (notSession.test(line)) return false;
           echoed = true;
         }
         return echoed;
-      }, needle);
+      }, { n: needle, refuse: LOGIN_REFUSAL_SOURCE });
   } catch {
     return false;
   }
@@ -835,7 +842,9 @@ async function findPasswordField(page: Page): Promise<Locator | null> {
  * #hlLogin, eTRAKiT's input[type=button]): the caller falls back to the ordered candidate list,
  * as before. Never a disclosure toggle, never a never-click control.
  */
-const NATIVE_SUBMIT_SELECTOR = 'input[type="submit"], button[type="submit"], button:not([type])';
+// input[type=image] is a native submit per spec (the classic ASP.NET "Login" picture); its only
+// words are its alt text, which own() reads below.
+const NATIVE_SUBMIT_SELECTOR = 'input[type="submit"], input[type="image"], button[type="submit"], button:not([type])';
 async function ownFormSubmit(passLoc: Locator): Promise<Locator | null> {
   try {
     const form = passLoc.locator("xpath=ancestor::form[1]");
@@ -856,7 +865,7 @@ async function ownFormSubmit(passLoc: Locator): Promise<Locator | null> {
         const after = (el: Element) => (pw.compareDocumentPosition(el) & Node.DOCUMENT_POSITION_FOLLOWING) !== 0;
         const closes = (el: Element) => after(el) && !typeable.some((f) => f !== pw && after(f) && (f.compareDocumentPosition(el) & Node.DOCUMENT_POSITION_FOLLOWING) !== 0);
         // The control's own words — read in-page for the test only; a value never leaves.
-        const own = (el: Element) => String((el as HTMLElement).innerText || (el as HTMLInputElement).value || el.getAttribute("aria-label") || el.getAttribute("title") || "").replace(/\s+/g, " ").trim();
+        const own = (el: Element) => String((el as HTMLElement).innerText || (el as HTMLInputElement).value || el.getAttribute("alt") || el.getAttribute("aria-label") || el.getAttribute("title") || "").replace(/\s+/g, " ").trim();
         const shown = (el: Element) => { const r = (el as HTMLElement).getBoundingClientRect(); return r.width > 0 && r.height > 0 && !(el as HTMLButtonElement).disabled && !el.matches(a.disc); };
         const typedWorded: number[] = [];
         const typedWordless: number[] = [];
@@ -928,6 +937,43 @@ function withoutUsername(text: string, username: string): string {
   return out;
 }
 
+/** Does a request body carry this secret — raw, URL-encoded (form posts, `+` for a space) or
+ *  JSON-escaped? The one reading of "the form posted" that does not depend on WHERE it posted.
+ *  Compared in memory only; the body is never kept or logged (rule 2). A secret too short to be
+ *  distinctive never matches. */
+function bodyCarriesSecret(secret: string): (body: string | null | undefined) => boolean {
+  const s = String(secret ?? "");
+  if (s.length < 4) return () => false;
+  const needles = Array.from(new Set([s, encodeURIComponent(s), encodeURIComponent(s).replace(/%20/g, "+"), JSON.stringify(s).slice(1, -1)]));
+  return (body) => {
+    const text = typeof body === "string" ? body : "";
+    return text.length > 0 && needles.some((n) => text.indexOf(n) >= 0);
+  };
+}
+
+const LOGIN_MASK_ATTR = "data-autopilot-login-mask";
+/** The post-submit screenshot mask, fixed to the boxes the credential was typed into rather than
+ *  to their type: each box is stamped before the click, and the mask reads the stamp in every
+ *  frame, so a box flipped to type=text by the click is still covered. The original locators
+ *  stay in the list for a page the stamp could not reach. */
+async function stampedLoginMask(page: Page, passLoc: Locator, userLoc: Locator | null): Promise<Locator[]> {
+  const boxes = [passLoc, ...(userLoc ? [userLoc] : [])];
+  let stamped = false;
+  for (const loc of boxes) {
+    try {
+      await (loc as unknown as { evaluate: (fn: (el: Element, attr: string) => void, arg: string, o: { timeout: number }) => Promise<void> })
+        .evaluate((el, attr) => { el.setAttribute(attr, "1"); }, LOGIN_MASK_ATTR, { timeout: ELEMENT_READ_TIMEOUT_MS });
+      stamped = true;
+    } catch { /* a box that cannot be stamped keeps its own locator in the mask */ }
+  }
+  if (!stamped || typeof page.frames !== "function") return boxes;
+  try {
+    return boxes.concat(page.frames().map((f) => f.locator(`[${LOGIN_MASK_ATTR}]`)));
+  } catch {
+    return boxes;
+  }
+}
+
 /** aria-expanded now, or null when the control is gone/unreadable (bounded). */
 async function readAriaExpanded(loc: Locator): Promise<string | null> {
   try {
@@ -964,7 +1010,6 @@ async function passwordAttachedButHidden(page: Page): Promise<boolean> {
  * of it, and never a sentence written as instruction (if/when/may/should, a question).
  * Alert-shaped containers (role=alert, validation/error classes) are read first.
  */
-const LOGIN_REFUSAL_SOURCE = "\\binvalid\\b|\\bincorrect\\b|\\blocked\\b|\\bdisabled\\b|\\bnot recogni[sz]ed\\b|\\btry again\\b";
 const INSTRUCTIONAL_PROSE_SOURCE = "^if\\b|\\bif (you|your|the)\\b|\\bwhen (you|your)\\b|\\byou (may|can|should|must|will)\\b|\\bplease (enter|type|use)\\b|\\?\\s*$";
 async function loginRefusalBanner(page: Page): Promise<string> {
   try {
@@ -1797,21 +1842,32 @@ export async function performLogin(
     // DID ANYTHING LEAVE THE BROWSER? A posted form sends a non-GET or navigates; a click that
     // only toggled a panel sends nothing. Read off the page's requests, never off the DOM.
     let posted = false;
-    // Only the portal's own traffic counts: a non-GET to the login page's origin, or a
-    // main-frame navigation. A telemetry beacon POSTing to a third party during the 15 s poll
-    // must not turn a never-posted form back into "an unfinished two-step".
+    // Three readings count, and a telemetry beacon POSTing to a third party during the 15 s poll
+    // satisfies none of them (it must not turn a never-posted form back into "an unfinished
+    // two-step"): a non-GET to the login page's origin, a main-frame navigation, or a request
+    // whose body CARRIES THE PASSWORD — an SPA login posting to an API on another origin (an api.
+    // subdomain, an embedded IdP widget) is the form posting, wherever it posts to. The body is
+    // compared in memory and never logged or kept (rule 2).
     const loginOrigin = (() => { try { return new URL(loginUrl).origin; } catch { return ""; } })();
-    const onRequest = (req: { url?: () => string; method?: () => string; isNavigationRequest?: () => boolean; frame?: () => unknown }) => {
+    const carriesPassword = bodyCarriesSecret(credential.password);
+    const onRequest = (req: { url?: () => string; method?: () => string; isNavigationRequest?: () => boolean; frame?: () => unknown; postData?: () => string | null }) => {
       try {
         const origin = (() => { try { return new URL(typeof req.url === "function" ? req.url() : "").origin; } catch { return ""; } })();
-        const ownPost = typeof req.method === "function" && req.method() !== "GET" && origin !== "" && origin === loginOrigin;
+        const nonGet = typeof req.method === "function" && req.method() !== "GET";
+        const ownPost = nonGet && origin !== "" && origin === loginOrigin;
         const mainNav = typeof req.isNavigationRequest === "function" && req.isNavigationRequest()
           && (typeof req.frame !== "function" || typeof (page as unknown as { mainFrame?: unknown }).mainFrame !== "function" || req.frame() === (page as unknown as { mainFrame: () => unknown }).mainFrame());
-        if (ownPost || mainNav) posted = true;
+        const credentialPost = nonGet && typeof req.postData === "function" && carriesPassword(req.postData());
+        if (ownPost || mainNav || credentialPost) posted = true;
       } catch { /* a request that cannot be read is not evidence either way */ }
     };
     const canListen = typeof (page as unknown as { on?: unknown }).on === "function" && typeof (page as unknown as { off?: unknown }).off === "function";
     if (canListen) (page as unknown as { on: (ev: string, fn: typeof onRequest) => void }).on("request", onRequest);
+    // THE MASK IS FIXED TO THE BOXES, NOT TO THEIR TYPE. Playwright resolves mask locators at
+    // capture time; the password candidate is input[type=password], so a click that flipped the
+    // box to type=text (a show/hide eye, a portal's own "show password" state) would leave the
+    // cleartext password unmasked in the PNG. Stamp the two boxes now and mask by the stamp.
+    const mask = await stampedLoginMask(page, passLoc, userLoc);
     try {
       if (submitLoc) {
         detail.clicked = await describeControl(submitLoc);
@@ -1824,7 +1880,7 @@ export async function performLogin(
       // The moment the artefacts used to miss: the page right after the submit, login fields
       // masked (a never-posted form still holds the password; rule 2).
       if (opts.onSubmitted) {
-        try { await opts.onSubmitted({ page, mask: [passLoc, ...(userLoc ? [userLoc] : [])] }); } catch { /* best-effort */ }
+        try { await opts.onSubmitted({ page, mask }); } catch { /* best-effort */ }
       }
 
       // 7) Poll for the login to resolve. Many portals (PowerClerk) do an AJAX login + a JS
