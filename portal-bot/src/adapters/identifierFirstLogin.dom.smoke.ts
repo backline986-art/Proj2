@@ -269,12 +269,14 @@ const OG_STEP2 = (email: string) => `<!doctype html><html><head><title>OpenGov</
   <input type="password" id="password" name="password"><button type="submit" aria-label="login button">Sign in</button></form></body></html>`;
 
 // FAST-PLATFORM (live Idaho DOPL Online Services, 2026-11-12) identifier-first sign-in with NO
-// <form>: a plain panel holds the Email box (a hidden password box beside it), a type="button"
+// login <form> of its own (the WHOLE page is one ASP.NET-style form, with a type-less Help button
+// that reports any press): a plain panel holds the Email box (a hidden password box beside it), a type="button"
 // "Log in", "Sign in with a passkey" (reports any press: the failure) and a "Sign Up" link, with
 // public-search tiles below. "Log in" with an email typed opens a SEPARATE password page (as the
 // owner's screenshots show): the email echoed with "Change username", Password, "Continue",
 // "Forgot password?" and "Choose another way to sign in" (both report any press). Nothing is a form submit.
-const DOPL = `<!doctype html><html><head><title>Online Services</title></head><body>
+const DOPL = `<!doctype html><html><head><title>Online Services</title></head><body><form id="pageForm" action="/dopl-os/_/" method="post">
+  <button type="button" aria-label="Help" onclick="fetch('/dopl-help-hit')">?</button>
   <h1>Online Services</h1>
   <p>First time? Sign-Up (See <a href="/dopl-help/Registering-an-Account.mp4" target="_blank">How to Create an Online Profile</a> for help)</p>
   <div class="LogonPanel"><div class="row">
@@ -284,7 +286,7 @@ const DOPL = `<!doctype html><html><head><title>Online Services</title></head><b
     <button type="button" id="Dd-c"><span>Log in</span></button></div>
     <div>Or</div><button type="button" id="pk" onclick="fetch('/dopl-passkey-hit')">Sign in with a passkey</button>
     <div>New to Online Services? <a href="/dopl-signup">Sign Up</a></div></div>
-  <section><h2>Public Searches</h2><a href="/dopl-search">Search for Permits</a></section>
+  <section><h2>Public Searches</h2><a href="/dopl-search">Search for Permits</a></section></form>
   <script>
     document.getElementById('Dd-c').onclick = function () {
       var v = document.getElementById('Dd-a').value;

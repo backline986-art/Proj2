@@ -1313,16 +1313,24 @@ async function ownedSubmitOf(field: Locator): Promise<Locator | null> {
       }
       return { seen, fit };
     };
+    // THE NEAREST PANEL FIRST, THE FORM'S SUBMIT SECOND (live Idaho DOPL run 3, 2026-11-12): a
+    // <form> is not always the login's own. FAST / ASP.NET pages wrap the WHOLE page in one, so "the
+    // form's submit" found nothing (DOPL's "Log in" is type="button"). Walk out from the field to
+    // the first ancestor holding a qualifying control (words read as sign-in / continue / next, not
+    // on the never-click list): one fit is the step's control, more than one is ambiguous (nothing).
+    // The walk never goes past the owning form; the form's own submit is the fallback.
     const form = field.locator("xpath=ancestor::form[1]");
-    if (await form.count().catch(() => 0)) {
-      const { fit } = await qualifying(form.locator("button[type=submit], button:not([type]), input[type=submit]"), false);
-      return fit.length === 1 ? fit[0] : null;
-    }
+    const hasForm = (await form.count().catch(() => 0)) > 0;
     for (let up = 1; up <= 8; up++) {
       const panel = field.locator(`xpath=ancestor::*[${up}]`);
-      if (!(await panel.count().catch(() => 0))) return null;
-      const { seen, fit } = await qualifying(panel.locator("button, input[type=submit], input[type=button], [role=button]"), true);
-      if (!seen) continue;
+      if (!(await panel.count().catch(() => 0))) break;
+      const { fit } = await qualifying(panel.locator("button, input[type=submit], input[type=button], [role=button]"), true);
+      if (fit.length === 1) return fit[0];
+      if (fit.length > 1) return null;
+      if (hasForm && await panel.evaluate((el: Element) => el.tagName === "FORM").catch(() => false)) break;
+    }
+    if (hasForm) {
+      const { fit } = await qualifying(form.locator("button[type=submit], button:not([type]), input[type=submit]"), false);
       return fit.length === 1 ? fit[0] : null;
     }
     return null;
