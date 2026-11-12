@@ -12446,7 +12446,7 @@ function editClient(clientId) {
   if ($("clientLinkResultWrap")) $("clientLinkResultWrap").hidden = true;
   if ($("clientLinkStatus")) $("clientLinkStatus").textContent = "";
   $("clientId").value = clientId;
-  CLIENT_TEXT_FIELDS.forEach((field) => { const el = $("c_" + field); if (el) el.value = client[field] || ""; });
+  CLIENT_TEXT_FIELDS.forEach((field) => { const el = $("c_" + field); if (el) el.value = client[field] ?? ""; }); // ?? keeps a $0 price (a free client) from reading back as blank
   state.portalIdentitiesDraft = (client.portalIdentities || []).map((i) => ({
     portalType: i.portalType, installerCompanyLabel: i.installerCompanyLabel, installerContactCode: i.installerContactCode, notes: i.notes,
   }));
