@@ -233,7 +233,7 @@ const SOCIAL_IDP_SOURCE = "\\b(with|using|via)\\s+(google|microsoft|apple|facebo
 // control (live Idaho DOPL, 2026-11-12: the reveal's {button, "Sign in with"} pressed "Sign in with
 // a passkey" and the browser raised a WebAuthn error dialog). Choosing an authenticator is the
 // person's (rule 1), so it is on the never-click list for every login pass.
-const NEVER_ALWAYS_SOURCE = "\\bpass[\\s-]?key\\b|\\bsecurity key\\b|\\bwindows hello\\b|\\b(face|touch) id\\b|\\bhelp\\b|\\bunlock\\b|\\bforgot\\b|\\breset (your |my )?password\\b|\\bkeep me (signed|logged) in\\b|\\bremember me\\b|\\bstay signed in\\b|verify with something else|\b(choose|try|use) (another|a different) way\b|\\bback to (sign|log)[\\s-]?in\\b|\\btrouble (signing|logging)\\b|can'?t (sign|log)[\\s-]?in";
+const NEVER_ALWAYS_SOURCE = "\\bpass[\\s-]?key\\b|\\bsecurity key\\b|\\bwindows hello\\b|\\b(face|touch) id\\b|\\bhelp\\b|\\bunlock\\b|\\bforgot\\b|\\breset (your |my )?password\\b|\\bkeep me (signed|logged) in\\b|\\bremember me\\b|\\bstay signed in\\b|verify with something else|\\b(choose|try|use) (another|a different) way\\b|\\bback to (sign|log)[\\s-]?in\\b|\\btrouble (signing|logging)\\b|can'?t (sign|log)[\\s-]?in";
 const NEVER_SIGNUP_SOURCE = "\\bcreate (an |your |a new |new )?account\\b|\\bregist(er|ration)\\b|\\bsign[\\s-]?up\\b|\\bnew account\\b|\\benroll\\b";
 const LOGIN_WORD_SOURCE = "\\blog[\\s-]?(in|on)\\b|\\blogin\\b|\\blogon\\b|\\bsign[\\s-]?in\\b|\\bsignin\\b";
 // The words a portal refuses a password with. ONE source for the banner read (loginRefusalBanner)
@@ -246,8 +246,8 @@ const LOGIN_REFUSAL_SOURCE = "\\binvalid\\b|\\bincorrect\\b|\\blocked\\b|\\bdisa
 // the same Tyler identity, so the portal's credential would have signed in to the checkout app and
 // the learn would have started there. Rule 1 territory, and never the permit portal's login.
 const NEVER_PAY_HREF_SOURCE = "(^|/)(payments?|checkout|cart|billing|invoices?|pay)(/|$)|^https?://(www\\.)?(pay|payments?|checkout|billing)[.-]";
-const NEVER_HREF_SOURCE = `/sso/idps/|accounts\\.google\\.|facebook\\.com|appleid\\.apple\\.com|login\\.live\\.com|github\\.com/login|linkedin\\.com/oauth|/help(/|$)|/signin/(unlock|forgot|register)|/(register|signup|sign-up)(/|$)|forgot-?password|reset-?password|\.(mp4|mov|webm|avi|pdf|docx?|xlsx?|pptx?)$|${NEVER_PAY_HREF_SOURCE}`;
-const NEVER_CLICK_PATTERNS = {
+const NEVER_HREF_SOURCE = `/sso/idps/|accounts\\.google\\.|facebook\\.com|appleid\\.apple\\.com|login\\.live\\.com|github\\.com/login|linkedin\\.com/oauth|/help(/|$)|/signin/(unlock|forgot|register)|/(register|signup|sign-up)(/|$)|forgot-?password|reset-?password|\\.(mp4|mov|webm|avi|pdf|docx?|xlsx?|pptx?)$|${NEVER_PAY_HREF_SOURCE}`;
+export const NEVER_CLICK_PATTERNS = {
   social: SOCIAL_IDP_SOURCE,
   always: NEVER_ALWAYS_SOURCE,
   signup: NEVER_SIGNUP_SOURCE,
