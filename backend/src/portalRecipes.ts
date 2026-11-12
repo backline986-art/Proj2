@@ -21,6 +21,8 @@ import { certifiedModelFor } from "./cecEquipment";
 import { nowIso } from "./time";
 import { batteryStatus } from "./batteryServiceFeeder";
 import { projectForTrack, sameRecordType } from "./permitProcess";
+import { readArrayAreaSqFt } from "./fireAccess";
+import { packageReadSources } from "./designCriteria";
 import { parseStreetNumber, parseStreetName, parseStreetLine } from "../../portal-bot/src/addressParse";
 import { recordShapeOf } from "../../portal-bot/src/recordNumber";
 import { feeBracketFieldForLabel, feeBracketQuantityFields } from "./feeBracketFields";
@@ -1700,7 +1702,8 @@ export const RECIPE_FIELD_DESCRIPTIONS: Record<string, string> = {
   buildingHeightFeet: "Existing building height, whole feet (grade to ridge)",
   buildingHeightInches: "Existing building height, remaining inches",
   numberOfStories: "Number of storeys of the existing building",
-  newBuildingArea: "New building area created by this work (0 for a rooftop retrofit)",
+  newBuildingArea: "New building area for this work: the PV array's area in square feet (owner ruling 2026-11-12)",
+  totalBuildingArea: "Total building area: existing + new building area, in square feet",
   dwellingUnits: "Dwelling units in the building (1 for a single-family house)",
   numberOfBuildings: "Buildings covered by this permit (1 unless the plans show more)",
   county: "County the project site is in",
@@ -2083,6 +2086,18 @@ export function resolveRecipeFieldValues(
   // So homeowner* stays the property owner, always and on every portal, and the account
   // holder has its own name. A recording binds the customer block to ubAccountHolder* and the
   // owner block to homeowner*, which is what the form is actually asking for.
+  // Building areas (owner ruling 2026-11-12): New = the plan set's stated new area, else the PV
+  // array's plan-view area, else 0; Existing = the plan set's, else 0 (ruling 2026-09-27).
+  const existingAreaText = String(snapshotFlat.existingBuildingArea ?? "").trim() || "0";
+  const newAreaText = ((): string => {
+    const stated = String(snapshotFlat.newBuildingArea ?? "").trim();
+    if (stated) return stated;
+    try {
+      const array = readArrayAreaSqFt(project, packageReadSources(project));
+      if (array && Number.isFinite(array.value) && array.value > 0) return String(Math.round(array.value));
+    } catch { /* no readable package: 0 below */ }
+    return "0";
+  })();
   const projectFields: Record<string, string> = {
     homeownerName: project.homeownerName,
     // The permit's "Project Name" always follows the PROJECT, never the billing name — it is
@@ -2175,14 +2190,17 @@ export function resolveRecipeFieldValues(
     // (operator ruling 2026-09-27, Jules Testperson's Marion building page refused three blanks:
     // "Just put 0's there, that's what we do normally"): a rooftop retrofit's permit geometry is
     // entered as 0 by the operators themselves, and a blank only stops the filing.
-    existingBuildingArea: String(snapshotFlat.existingBuildingArea ?? "").trim() || "0",
+    existingBuildingArea: existingAreaText,
     buildingHeightFeet: String(snapshotFlat.buildingHeightFeet ?? "").trim() || "0",
     buildingHeightInches: String(snapshotFlat.buildingHeightInches ?? "").trim() || "0",
     numberOfStories: String(snapshotFlat.numberOfStories ?? "").trim() || "0",
-    // Defaults that are facts about a ROOFTOP RETROFIT rather than about a project: adding
-    // panels to an existing roof creates no new building area, and the permit covers the one
-    // house the array sits on. The plan set overrides both whenever it says otherwise.
-    newBuildingArea: String(snapshotFlat.newBuildingArea ?? "0").trim(),
+    // NEW BUILDING AREA IS THE ARRAY'S AREA (owner ruling 2026-11-12, "Always array sq ft"). City of
+    // Boise refused 0 for both Existing and New Building Area on a PV permit, and the owner's own
+    // Boise filing entered the array (835 sq ft) as New and Total. So: the plan set's stated new area
+    // when it has one, else the PV array's plan-view area (the one reader fireAccess uses), else 0.
+    newBuildingArea: newAreaText,
+    totalBuildingArea: String(snapshotFlat.totalBuildingArea ?? "").trim() || String((Number(existingAreaText) || 0) + (Number(newAreaText) || 0)),
+    // The permit covers the one house the array sits on unless the plan set says otherwise.
     dwellingUnits: String(snapshotFlat.dwellingUnits ?? "1").trim(),
     numberOfBuildings: String(snapshotFlat.numberOfBuildings ?? "1").trim(),
     // The county the SITE is in — asked by Ameren, and previously frozen as "Sangamon" (the

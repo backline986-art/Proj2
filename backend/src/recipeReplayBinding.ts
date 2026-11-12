@@ -119,6 +119,7 @@ const PROJECT_LITERAL_BINDINGS: Array<{ re: RegExp; field: string }> = [
   { re: /number of stories|^\*?stories:?$/i, field: "numberOfStories" },
   { re: /new building area/i, field: "newBuildingArea" },
   { re: /existing building area/i, field: "existingBuildingArea" },
+  { re: /total building area/i, field: "totalBuildingArea" },
   { re: /dwelling units/i, field: "dwellingUnits" },
   { re: /number of buildings/i, field: "numberOfBuildings" },
 ];
