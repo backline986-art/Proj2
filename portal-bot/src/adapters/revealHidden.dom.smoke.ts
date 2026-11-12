@@ -214,6 +214,17 @@ PAGES.skipLinkOwnId = `<!doctype html><html><body>
   check("a skip link whose href IS the container's id is still refused; the header before it is the opener",
     /preceding/.test(plan.opener) && !/skip/i.test(plan.opener), JSON.stringify(plan));
 }
+// The one other target a controls/target attribute may legitimately name: the container's DIRECT
+// wrapper, when the container has no id and is the wrapper's only element.
+PAGES.wrapperId = `<!doctype html><html><body>
+  <button aria-controls="wrap" aria-expanded="false" style="width:160px;height:24px">Show options</button>
+  <div id="wrap" style="min-height:12px;width:200px"><div style="display:none"><input id="gate" type="radio" data-al-hidden-target="1" /></div></div></body></html>`;
+{
+  const plan = await planOn("wrapperId");
+  console.log(`   wrapperId: ${plan.opener} | ${plan.why}`);
+  check("a toggle that controls the hidden container's direct wrapper (sole child) is accepted",
+    /aria-controls/.test(plan.opener) && /Show options/.test(plan.opener), JSON.stringify(plan));
+}
 
 const proxyOn = async (key: string): Promise<string> => {
   await page.goto(`http://127.0.0.1:${port}/${key}`, { waitUntil: "domcontentloaded" });

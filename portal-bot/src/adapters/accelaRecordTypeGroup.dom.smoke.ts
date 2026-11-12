@@ -319,8 +319,10 @@ let groupedSteps: RecipeStep[] = [];
 }
 
 // ── #176 A1 classfirst: the grouped page, the type on file only SEEDED, Commercial listed first ───
+// The seeded value is the WRONG one on purpose (a lookup that read the Commercial type): if it steered
+// the pick, the Commercial type would be filed. Hard rule 3 says a seeded row is the planner's hint only.
 {
-  const r = await learnOn("grouped", { value: TARGET, verified: false });
+  const r = await learnOn("grouped", { value: OTHER_CLASS, verified: false });
   const decisions = r.events.filter((e) => e.type === "record_type_class_decision");
   console.log(`   A1 classfirst: hits=${JSON.stringify(r.hits)} notes=${JSON.stringify(r.steps.map(note))} decisions=${JSON.stringify(decisions)}`);
   check("A1: the RESIDENTIAL solar type is the one picked and filed, not the Commercial one listed first",
