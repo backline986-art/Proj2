@@ -11922,6 +11922,7 @@ export class AutoLearnAdapter extends BasePortalAdapter {
             companyName: String(identity.companyName ?? "").trim(),
             discipline: this.siteIdentity?.isElectrical === true ? "electrical" : this.siteIdentity?.isElectrical === false ? "structural" : "",
             steps: ctx.steps,
+            shot: ctx.shot ? (l: string) => ctx.shot!(`p${String(ctx.pageCount).padStart(3, "0")}-lookup-${l}`) : undefined,
           });
           searchVerdict = form.verdict;
           searchedWords = form.searched;
@@ -12163,6 +12164,8 @@ export class AutoLearnAdapter extends BasePortalAdapter {
      *  Meridian run 8 searched "Look Up License" with the type at --Select-- and got nothing. */
     discipline?: "electrical" | "structural" | "";
     steps: RecipeStep[];
+    /** The learn's bundle shot, taken once the results have been read (hit or miss). */
+    shot?: (label: string) => Promise<void>;
   }): Promise<{ verdict: "picked" | "empty" | "unusable"; searched: string }> {
     const page = this.page;
     const inFrame: Partial<RecipeSelector> = opts.frame ? { frame: opts.frame } : {};
@@ -12237,38 +12240,77 @@ export class AutoLearnAdapter extends BasePortalAdapter {
       // INC / LLC / & vs AND suffixes do not matter) — only a row that IS this client is picked.
       const isOurs = (text: string): boolean => knowledgeNameMatchScore(opts.companyName, text) >= 60
         || text.toLowerCase().replace(/[^a-z0-9]/g, "").includes(opts.companyName.toLowerCase().replace(/[^a-z0-9]/g, ""));
+      // ONLY ROWS THE SEARCH BROUGHT COUNT (live Meridian run 10: the licence register's own form is a
+      // table of rows holding links and buttons, so "rows, none ours" fired ~2.4 s after the click —
+      // before the results had arrived — and the event read empty:false). Rows present before the
+      // click are the form, never a result.
+      const rowSel = "tr";
+      const rowTexts = async (): Promise<string[]> => scope.locator(rowSel).allInnerTexts().then((a: string[]) => a.map((t) => t.replace(/\s+/g, " ").trim())).catch(() => [] as string[]);
+      // The list's own Select / OK button, pressed after a row's radio is ticked (the address dialog's
+      // shape, here for a licence register that marks rows with radios).
+      const LIST_OK = /^(select|ok|choose)\s*[»›>→]*$/i;
+      const pressListOk = async (): Promise<boolean> => {
+        const ctl = scope.locator("a, button, input[type='button'], input[type='submit']");
+        const labels: string[] = await ctl.evaluateAll((els: Element[]) => els.map((el) => {
+          const r = (el as HTMLElement).getBoundingClientRect();
+          if (!(r.width > 0 && r.height > 0)) return "";
+          return String(el.tagName === "INPUT" ? (el as HTMLInputElement).value : ((el as HTMLElement).innerText || el.textContent || el.getAttribute("title") || "")).replace(/\s+/g, " ").trim();
+        })).catch(() => [] as string[]);
+        const k = labels.findIndex((l) => !!l && LIST_OK.test(l) && !isPayFee(l) && !SUBMIT_INTENT.test(l) && !sharedIsSubmitIntent(l));
+        if (k < 0) return false;
+        const b = ctl.nth(k);
+        await b.scrollIntoViewIfNeeded?.({ timeout: 3000 }).catch(() => null);
+        if (!(await b.click({ timeout: 8000 }).then(() => true).catch(() => false))) return false;
+        opts.steps.push({ action: "click", phase: "fill", selector: { role: "button", name: labels[k], exact: true, fallbacks: [{ role: "link", name: labels[k], exact: true, ...inFrame }], ...inFrame }, note: `lookup(${opts.heading.slice(0, 40)}): ${labels[k]} [result list]` });
+        return true;
+      };
       for (let attempt = 0; attempt < tries; attempt++) {
+        const before = new Set(await rowTexts());
         await searchBtn.scrollIntoViewIfNeeded?.({ timeout: 3000 }).catch(() => null);
         if (!(await searchBtn.click({ timeout: 8000 }).then(() => true).catch(() => false))) { opts.steps.length = mark; return out("unusable"); }
         if (attempt === 0) opts.steps.push({ action: "click", phase: "fill", selector: { role: "button", name: searchLabel, exact: true, fallbacks: [{ role: "link", name: searchLabel, exact: true, ...inFrame }, { css: `a[title="${searchLabel}"], input[value="${searchLabel}"]`, ...inFrame }], ...inFrame }, note: `lookup(${opts.heading.slice(0, 40)}): ${searchLabel}` });
         await page.waitForLoadState?.("networkidle", { timeout: 15000 }).catch(() => null);
         // Poll: rows, or the form's own "nothing found".
         let sawEmpty = false;
-        for (let i = 0; i < 12; i++) {
+        let freshSeen = 0;
+        let freshSample: string[] = [];
+        for (let i = 0; i < 15; i++) {
           await sleep(800);
           const body = String((await scope.locator("body").innerText().catch(async () => String((await scope.innerText?.().catch(() => "")) ?? ""))) ?? "");
-          const rows = scope.locator("tr").filter({ has: scope.locator("a, button, input[type='radio']") });
+          const rows = scope.locator(rowSel).filter({ has: scope.locator("a, button, input[type='radio']") });
           const rn = await rows.count().catch(() => 0);
-          for (let r = 0; r < Math.min(rn, 40); r++) {
+          let fresh = 0;
+          const sample: string[] = [];
+          for (let r = 0; r < Math.min(rn, 60); r++) {
             const row = rows.nth(r);
             const text = String((await row.innerText().catch(() => "")) ?? "").replace(/\s+/g, " ").trim();
-            if (!text || text.length > 400) continue;
+            if (!text || text.length > 400 || before.has(text)) continue;
+            fresh++;
+            if (sample.length < 3) sample.push(text.slice(0, 70));
             // The row's own name cells, not the whole text: a licence number or address never matches.
             const cells: string[] = await row.locator("td").allInnerTexts().catch(() => [] as string[]);
             const names = (cells.length ? cells : [text]).map((c) => c.replace(/\s+/g, " ").trim()).filter(Boolean);
             if (!names.some(isOurs)) continue;
             const sel = row.getByRole("link", { name: /^select$/i }).or(row.getByRole("button", { name: /^select$/i })).or(row.locator("input[type='radio']")).first();
             if (!(await sel.count().catch(() => 0))) continue;
+            const isRadio = await sel.evaluate((el: Element) => (el as HTMLInputElement).type === "radio" || (el as HTMLInputElement).type === "checkbox").catch(() => false);
             const ok = await sel.click({ timeout: 8000 }).then(() => true).catch(() => false);
             if (!ok) continue;
             opts.steps.push({ action: "click", phase: "fill", selector: { css: `tr:has-text("${opts.companyName}") a:has-text("Select"), tr:has-text("${opts.companyName}") input[type='radio']`, ...inFrame }, note: `lookup(${opts.heading.slice(0, 40)}): select this client's record` });
+            // A ticked radio is not a pick until the list's own Select is pressed.
+            if (isRadio) await pressListOk();
             await page.waitForLoadState?.("networkidle", { timeout: 15000 }).catch(() => null);
             await sleep(600);
+            this.debug?.event({ type: "lookup_search_rows", section: opts.heading.slice(0, 40), fresh, picked: true });
             return out("picked");
           }
+          freshSeen = fresh;
+          freshSample = sample;
           if (/no records? (were |was )?found|no results? (were )?(found|returned)|returned no results|not found|0 records?/i.test(body)) { sawEmpty = true; break; }
-          if (rn > 0 && i >= 3) break; // rows, none ours
+          if (fresh > 0 && i >= 3) break; // results arrived, none ours
         }
+        this.debug?.event({ type: "lookup_search_rows", section: opts.heading.slice(0, 40), fresh: freshSeen, sample: freshSample, empty: sawEmpty });
+        await opts.shot?.(`search-results-${attempt + 1}`).catch?.(() => null);
         this.debug?.event({ type: "lookup_search_attempt", section: opts.heading.slice(0, 40), attempt: attempt + 1, licenseType: typeChosen || (typeSelectPresent ? "(placeholder)" : "(no type select)"), empty: sawEmpty });
       }
       opts.steps.length = mark;
