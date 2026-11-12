@@ -246,7 +246,7 @@ const LOGIN_REFUSAL_SOURCE = "\\binvalid\\b|\\bincorrect\\b|\\blocked\\b|\\bdisa
 // the same Tyler identity, so the portal's credential would have signed in to the checkout app and
 // the learn would have started there. Rule 1 territory, and never the permit portal's login.
 const NEVER_PAY_HREF_SOURCE = "(^|/)(payments?|checkout|cart|billing|invoices?|pay)(/|$)|^https?://(www\\.)?(pay|payments?|checkout|billing)[.-]";
-const NEVER_HREF_SOURCE = `/sso/idps/|accounts\\.google\\.|facebook\\.com|appleid\\.apple\\.com|login\\.live\\.com|github\\.com/login|linkedin\\.com/oauth|/help(/|$)|/signin/(unlock|forgot|register)|/(register|signup|sign-up)(/|$)|forgot-?password|reset-?password|${NEVER_PAY_HREF_SOURCE}`;
+const NEVER_HREF_SOURCE = `/sso/idps/|accounts\\.google\\.|facebook\\.com|appleid\\.apple\\.com|login\\.live\\.com|github\\.com/login|linkedin\\.com/oauth|/help(/|$)|/signin/(unlock|forgot|register)|/(register|signup|sign-up)(/|$)|forgot-?password|reset-?password|\.(mp4|mov|webm|avi|pdf|docx?|xlsx?|pptx?)$|${NEVER_PAY_HREF_SOURCE}`;
 const NEVER_CLICK_PATTERNS = {
   social: SOCIAL_IDP_SOURCE,
   always: NEVER_ALWAYS_SOURCE,
@@ -369,7 +369,13 @@ async function loginWordingPresent(page: Page): Promise<boolean> {
   if (looksLikeLoginUrl(typeof page.url === "function" ? page.url() : "")) return true;
   const title = await page.title().catch(() => "");
   if (/log\s?-?\s?in|sign\s?-?\s?in|logon|log on/i.test(title || "")) return true;
-  return await page.getByText(/sign in|log in|password|logon/i).first().isVisible().catch(() => false);
+  // ANY VISIBLE MATCH, NOT THE FIRST (live Idaho DOPL, 2026-11-12): the first "password" text in
+  // DOM order was the hidden password box's "Show/Hide Password" button, so .first() read hidden
+  // and the visible "Log in" beside the email box never counted — the identifier step was refused.
+  const words = page.getByText(/sign in|log in|password|logon/i);
+  const n = Math.min(await words.count().catch(() => 0), 8);
+  for (let i = 0; i < n; i++) if (await words.nth(i).isVisible().catch(() => false)) return true;
+  return false;
 }
 
 /**

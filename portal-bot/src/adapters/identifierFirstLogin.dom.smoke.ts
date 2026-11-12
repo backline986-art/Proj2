@@ -276,9 +276,11 @@ const OG_STEP2 = (email: string) => `<!doctype html><html><head><title>OpenGov</
 // "Forgot password?" and "Choose another way to sign in" (both report any press). Nothing is a form submit.
 const DOPL = `<!doctype html><html><head><title>Online Services</title></head><body>
   <h1>Online Services</h1>
+  <p>First time? Sign-Up (See <a href="/dopl-help/Registering-an-Account.mp4" target="_blank">How to Create an Online Profile</a> for help)</p>
   <div class="LogonPanel"><div class="row">
     <input type="text" autocomplete="username webauthn" id="Dd-a" aria-label="Email Address" placeholder="Email Address">
-    <div style="display:none"><input type="password" autocomplete="current-password webauthn" id="Dd-b" aria-label="Password" placeholder="Password"></div>
+    <div style="display:none"><input type="password" autocomplete="current-password webauthn" id="Dd-b" aria-label="Password" placeholder="Password">
+      <button type="button">Show/Hide Password</button></div>
     <button type="button" id="Dd-c"><span>Log in</span></button></div>
     <div>Or</div><button type="button" id="pk" onclick="fetch('/dopl-passkey-hit')">Sign in with a passkey</button>
     <div>New to Online Services? <a href="/dopl-signup">Sign Up</a></div></div>
@@ -292,7 +294,7 @@ const DOPL = `<!doctype html><html><head><title>Online Services</title></head><b
 </body></html>`;
 const DOPL_PW = (email: string) => `<!doctype html><html><head><title>Online Services</title></head><body>
   <div class="card"><h1>Log in to Online Services</h1>
-    <div>${email.replace(/[<>&"]/g, "")}</div><a href="/dopl-login">Change username</a>
+    <div>${email.replace(/[<>&"]/g, "")}</div><a href="/dopl-os/_/">Change username</a>
     <label for="pw">Password</label><input type="password" id="pw" autocomplete="current-password">
     <button type="button" id="cont">Continue</button>
     <a href="#" onclick="fetch('/dopl-forgot-hit');return false;">Forgot password?</a>
@@ -302,7 +304,7 @@ const DOPL_PW = (email: string) => `<!doctype html><html><head><title>Online Ser
 
 const server = http.createServer((q, r) => {
   const url = q.url || "";
-  if (url.startsWith("/dopl-login")) { r.writeHead(200, { "Content-Type": "text/html" }); return r.end(DOPL); }
+  if (url.startsWith("/dopl-os/_/")) { r.writeHead(200, { "Content-Type": "text/html" }); return r.end(DOPL); }
   if (url.startsWith("/dopl-password")) { r.writeHead(200, { "Content-Type": "text/html" }); return r.end(DOPL_PW(new URL(url, "http://x").searchParams.get("u") || "")); }
   const send = (body: string) => { r.writeHead(200, { "Content-Type": "text/html" }); r.end(body); };
   if (url.startsWith("/LEECO/Login.aspx")) return send(LEE_MAIN());
@@ -500,12 +502,12 @@ await check("MUST-EXCLUDE (race, deterministic): the reveal pass never presses a
 await check("MUST-PASS / MUST-EXCLUDE (FAST / Idaho DOPL shape): no <form>; the panel's 'Log in' opens the password page, Continue signs in; passkey / forgot / another-way never pressed", async () => {
   localHits.length = 0;
   const { context, page } = await freshPage();
-  await page.goto(`http://127.0.0.1:${port}/dopl-login`);
+  await page.goto(`http://127.0.0.1:${port}/dopl-os/_/`);
   const res = await performLogin(page, { username: "dopl-user@example.test", password: "Dopl-Pa55-word" });
   results.push(res.message);
   assert.equal(res.status, "logged_in", `got ${res.status}: ${res.message}`);
   assert.match(page.url(), /\/home/);
-  assert.deepEqual(localHits.filter((h) => /dopl-(passkey|signup|search|forgot|another-way)/.test(h)), [], `a never-click control was followed: ${localHits.join(", ")}`);
+  assert.deepEqual(localHits.filter((h) => /dopl-(passkey|signup|search|forgot|another-way|help)/.test(h)), [], `a never-click control was followed: ${localHits.join(", ")}`);
   await context.close();
 });
 
