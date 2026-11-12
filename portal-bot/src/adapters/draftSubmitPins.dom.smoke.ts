@@ -28,7 +28,8 @@
 //   SHOULD-FIX
 //     SF2  spaPlain (a single-document "Proceed to Part 1" carries view 1's literal) and revisitRe
 //          (a re-assert pick, then a revisit) MUST-STOP; advRerender (an advance-worded reveal that
-//          re-renders Part 1's own value) MUST-PASS
+//          re-renders Part 1's own value) MUST-PASS; advRerender350 / advRerender650 (#120: the same
+//          re-render landing later, while the page is being checked in front of the click) MUST-PASS
 //     SF4  radioBlankStall: a counted radio-group blank is never re-run from another page's select
 //     SF5  readyCheckbox: a required "I am ready to submit" box is a blank — a review stop, no incident
 //     SF6  finishGap, finishRe, millGap, millRe, roofFinishGap: permit MUST-PASS, "finish" is not submit
@@ -143,6 +144,12 @@ const defaultPlan = (mode: string) => (f: Field): Omit<Fill, "selectorIndex"> | 
   return null;
 };
 const labelIs = (f: Field, re: RegExp): boolean => re.test(String(f.label ?? ""));
+
+/** An advance-worded reveal whose page blanks Part 1's own required value `ms` after the click. */
+const advRerender = (ms: number): Mode => ({
+  part1: () => `<button type="button" id="btnNext" onclick="document.getElementById('secB').style.display='block'; setTimeout(function () { document.getElementById('appDate').value = ''; }, ${ms});">Next</button><div id="secB" style="display:none"><label for="sysSize">System Size (kW)</label><input id="sysSize" name="sysSize" type="text"></div>`,
+  steps: () => [step({ action: "click", selector: { css: "#btnNext", text: "Next" }, note: "advance: Next" }), sysSize],
+});
 
 const MODES: Record<string, Mode> = {
   // ---- BLOCKING 1 ------------------------------------------------------------------------
@@ -267,10 +274,14 @@ const MODES: Record<string, Mode> = {
     steps: (base) => nextToPart2(base, "revisitRe"),
     plan: () => null,
   },
-  advRerender: {
-    part1: () => `<button type="button" id="btnNext" onclick="document.getElementById('secB').style.display='block'; setTimeout(function () { document.getElementById('appDate').value = ''; }, 100);">Next</button><div id="secB" style="display:none"><label for="sysSize">System Size (kW)</label><input id="sysSize" name="sysSize" type="text"></div>`,
-    steps: () => [step({ action: "click", selector: { css: "#btnNext", text: "Next" }, note: "advance: Next" }), sysSize],
-  },
+  advRerender: advRerender(100),
+  // #120 — the same re-render, landing LATER: while the ready check in front of the stamped Submit is
+  // running, after its required-field read on the machines this was measured on (a blank at 300–750 ms
+  // ended as posts=[] / not_a_draft before the last read at the click; see draftSubmitReadyAtClick.test).
+  // WHERE a fixed delay lands is the machine's business, so three delays are pinned, and each must end
+  // in the one draft with Part 1's own value posted — never an incident — wherever it lands.
+  advRerender350: advRerender(350),
+  advRerender650: advRerender(650),
   radioBlankStall: {
     early: { html: sel("gridEarly", "Grid tied", ["Yes", "No"]), steps: [earlySel("gridEarly", "Grid tied", "Yes")] },
     part1: () => `<div class="form-group"><div>Grid tied *</div>${radios("gridTied", "required")}</div>`,
@@ -589,7 +600,7 @@ const PART1 = (mode: string): string => {
   return page(mode, "Interconnection Application Part 1", `
   <h1>Interconnection Application Part 1 (Preliminary Validation)</h1>
   <form method="post" action="/m/${mode}/p1/submit">
-    <div><label for="appDate">Application Date</label><input id="appDate" name="appDate" type="text" value="${v.appDate ?? ""}"${["advRerender", "reloadOwn", "postback", "toastOwnT", "dialogCloseOwnT"].includes(mode) ? " required" : ""}></div>
+    <div><label for="appDate">Application Date</label><input id="appDate" name="appDate" type="text" value="${v.appDate ?? ""}"${["advRerender", "advRerender350", "advRerender650", "reloadOwn", "postback", "toastOwnT", "dialogCloseOwnT"].includes(mode) ? " required" : ""}></div>
     ${m.part1 ? m.part1(visit, v) : ""}
     ${m.permit ? "" : `<button type="submit" id="btnSubmit">Submit</button>`}
   </form>${m.script ?? ""}`);
@@ -748,6 +759,9 @@ try {
   await run("spaPlain", (o) => check('spaPlain: a single-document "Proceed to Part 1" — view 1\'s recorded value re-asserted into Part 1 is a pick (0 POSTs, a named stop)', stoppedForPick(o, "Net Metering Program"), brief(o)));
   await run("revisitRe", (o) => check("revisitRe: a carried-over re-assert, then a revisit of Part 1 — still a pick (0 POSTs, a named stop)", stoppedForPick(o, "Preferred Contact Method"), brief(o)));
   await run("advRerender", (o) => check("advRerender: an advance-worded reveal that re-renders Part 1's own value — re-asserted from its own step, one click, the draft", drafted(o) && o.posts[0].body.includes("appDate=10%2F16%2F2026"), brief(o)));
+  for (const late of ["advRerender350", "advRerender650"]) {
+    await run(late, (o) => check(`${late}: the same re-render landing while the page is being checked before the click (#120) — still the one draft with Part 1's own value, never an incident`, drafted(o) && o.posts[0].body.includes("appDate=10%2F16%2F2026") && !o.r.draftSubmitUnexpected, brief(o)));
+  }
   // SF4
   await run("radioBlankStall", (o) => check("radioBlankStall: a counted radio-group blank is never re-run from another page's select — a quick review stop, 0 POSTs", stopped(o) && o.ms < 120_000 && !wrote(o, /^gridTied/), brief(o)));
   // SF5
