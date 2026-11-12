@@ -11714,7 +11714,7 @@ async function loadJobDrops() {
 
 // ----- Clients & contractor licensing -----
 const CLIENT_TEXT_FIELDS = [
-  "companyName", "legalBusinessName", "dba", "contactName", "contactEmail", "phone", "billingStatus", "billingMode", "serviceFeeUsd", "serviceFeePermitUsd", "serviceFeeNemUsd",
+  "companyName", "legalBusinessName", "dba", "contactName", "contactEmail", "phone", "billingStatus", "billingMode", "serviceFeeUsd", "serviceFeePermitUsd", "serviceFeeNemUsd", "pricingTier",
   "requestLinksAutoSend", "handoffAutoSend", "intakeTag", "intakeSenders",
   "ccbLicenseNumber", "ccbExpiration", "electricalLicenseNumber", "metroCityLicenseNumber",
   "electricalSupervisorName", "electricianLicenseNumber", "installerCertifications",
@@ -11989,6 +11989,9 @@ function blankClientForm() {
   state.editingClientId = null;
   $("clientId").value = "";
   CLIENT_TEXT_FIELDS.forEach((field) => { const el = $("c_" + field); if (el) el.value = ""; });
+  // A NEW client pays our fee before each job is filed (owner, 2026-11-12: "Before filing, per job");
+  // staff may switch a trusted client to monthly. An existing client keeps whatever it has.
+  if ($("c_billingMode")) $("c_billingMode").value = "per_submission";
   state.portalIdentitiesDraft = [];
   renderPortalIdentities();
   // A new client: its licence list starts empty and IS the list saved with it.
@@ -12153,15 +12156,22 @@ function renderServicePrices() {
   const box = $("servicePricesBlock");
   const list = state.servicePrices;
   if (!box || !list) return;
-  const p = list.prices || {};
+  const tiers = list.tiers || {};
   const val = (e) => (e && e.priceUsd != null ? esc(String(e.priceUsd)) : "");
   const who = (e) => (e && e.setAt ? ` <span class="muted">set by ${esc(e.setBy || "?")} on ${esc(String(e.setAt).slice(0, 10))}</span>` : ' <span class="badge badge-warning">NOT SET</span>');
-  box.innerHTML = `<p class="muted clients-creds-hint" style="margin:0 0 4px">For every client without its own price. Each filing keeps the price in force when it was filed; a change applies to filings from now on.${list.envDefaultUsd != null ? ` A blank price falls back to the server default, ${billingMoney(list.envDefaultUsd)}.` : " A blank price bills nothing and is listed on the statement."}</p>
+  const tierHtml = (tier, title, hint) => {
+    const t = tiers[tier] || {};
+    return `<p class="clients-creds-hint" style="margin:6px 0 2px"><strong>${esc(title)}</strong> <span class="muted">${esc(hint)}</span></p>
     <div class="form-row">
-      <label>Per permit filing ($)<input id="pricePermitUsd" type="number" min="0" step="0.01" value="${val(p.permit)}" /></label>
-      <label>Per NEM application ($)<input id="priceNemUsd" type="number" min="0" step="0.01" value="${val(p.nem)}" /></label>
+      <label>Per permit filing ($)<input id="price_${tier}_permitUsd" type="number" min="0" step="0.01" value="${val(t.permit)}" /></label>
+      <label>Per NEM application ($)<input id="price_${tier}_nemUsd" type="number" min="0" step="0.01" value="${val(t.nem)}" /></label>
+      <label>Cap per project ($)<input id="price_${tier}_capUsd" type="number" min="0" step="0.01" value="${val(t.project_cap)}" placeholder="blank = no cap" /></label>
     </div>
-    <p class="clients-creds-hint" style="margin:0 0 4px">Permit:${who(p.permit)} · NEM:${who(p.nem)}</p>
+    <p class="clients-creds-hint" style="margin:0 0 4px">Permit:${who(t.permit)} · NEM:${who(t.nem)} · Cap:${who(t.project_cap)}</p>`;
+  };
+  box.innerHTML = `<p class="muted clients-creds-hint" style="margin:0 0 4px">For every client without its own price. A job's filings together never bill more than its tier's cap. Each filing keeps the price in force when it was filed; a change applies to filings from now on.${list.envDefaultUsd != null ? ` A blank price falls back to the server default, ${billingMoney(list.envDefaultUsd)}.` : " A blank price bills nothing and is listed on the statement."}</p>
+    ${tierHtml("founding", "Founding clients", "(clients marked Founding)")}
+    ${tierHtml("standard", "Everyone else", "(standard)")}
     <div class="actions" style="margin:0"><button type="button" class="secondary" id="savePricesBtn"><span style="white-space:nowrap">Save prices</span></button></div>`;
   $("savePricesBtn")?.addEventListener("click", saveServicePrices);
 }
@@ -12170,8 +12180,13 @@ async function saveServicePrices() {
   const decidedBy = namedPersonConsent(await authForDecision(), "Save these prices? Filings from now on are charged at them; filings already made keep their price.", "set the prices", "prices are set by a named person");
   if (decidedBy == null) return;
   try {
+    const tierInput = (tier) => ({
+      permitUsd: $(`price_${tier}_permitUsd`)?.value ?? "",
+      nemUsd: $(`price_${tier}_nemUsd`)?.value ?? "",
+      capUsd: $(`price_${tier}_capUsd`)?.value ?? "",
+    });
     const { prices } = await api("/api/billing/prices", { method: "PUT", body: JSON.stringify({
-      permitUsd: $("pricePermitUsd")?.value ?? "", nemUsd: $("priceNemUsd")?.value ?? "", decidedBy,
+      founding: tierInput("founding"), standard: tierInput("standard"), decidedBy,
     }) });
     state.servicePrices = prices;
     renderServicePrices();

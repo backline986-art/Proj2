@@ -279,6 +279,8 @@ export interface ClientRecord {
   /** This client's own price per filing by track (#187), ahead of serviceFeeUsd and the org price list. */
   serviceFeePermitUsd: number | null;
   serviceFeeNemUsd: number | null;
+  /** "founding" = billed at the founding prices and cap on the price list (#187); "" = standard. */
+  pricingTier: string;
   portalIdentities: ClientPortalIdentity[];
   /** Contractor licences beyond the named columns, one per issuing state/kind (Iowa "EL"
    *  electrical, Florida EC/CVC, Texas TECL, Utah DOPL...). clientMatch matches them like a CCB. */

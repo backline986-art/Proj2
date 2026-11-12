@@ -1,28 +1,39 @@
 // ---------------------------------------------------------------------------
-// OUR OWN PRICE PER FILING (#187): the price list, the price each filing is charged at, and the
-// filing charges a monthly statement bills.
+// OUR OWN PRICE PER FILING (#187): the price list, the per-project cap, the price each filing is
+// charged at, and the filing charges a statement bills.
 //
-// THE PRICE IS DATA, NEVER CODE. A named admin sets one price per billing track (permit, nem) for
-// the org (service_prices); a client may carry its own price per track, or the older single fee for
-// both. Nothing in this file knows a number: an org with no price set bills nothing and says so.
+// THE PRICE IS DATA, NEVER CODE. A named admin sets, for the org (service_prices), one price per permit
+// filing, one per NEM application and one cap per project, for each PRICING TIER: "founding" (the
+// founding clients) and "standard" (everyone else). A client is founding when its pricing tier says so
+// (clients.pricing_tier); every other client is standard. A client may also carry its own price per
+// track, or the older single fee for every filing. Nothing in this file knows a number: an org with no
+// price set bills nothing and says so, and a tier with no cap set has no cap.
 //
 // RESOLUTION, most specific first (resolveServicePrice):
 //   1. the client's own price for this track      clients.service_fee_permit_usd / _nem_usd
 //   2. the client's single fee for every filing    clients.service_fee_usd (before #187)
-//   3. the org's price list                        service_prices
+//   3. the org's price list for the client's tier  service_prices
 //   4. the SUBMISSION_SERVICE_FEE_USD env default, only when it is set
 //   5. none: no price, never a $0 line.
 //
+// THE CAP (owner, 2026-11-12: "$230 cap for founders, $275 for everyone else") is per PROJECT for its
+// whole life: the project's filings together never bill more than the cap of the client's tier. A
+// filing is charged min(its price, the cap less what the project's earlier filings were charged), so
+// building + electrical + NEM at $99 + $99 + $79 bills $99 + $99 + $32 under a $230 cap.
+//
 // THE PRICE IS SAVED ON EACH FILING. The filing doors (markTrackSubmitted, the confirmed auto-submit,
 // captureConfirmation) call recordFilingServiceCharge beside the fee-quote snapshot: one row per
-// project and filing type (building, electrical, combo, mpu, nem), written once with the price in force
-// and the client's billing mode at that moment. A resubmission of the same filing (a correction round)
-// finds the row and adds nothing; a later price change never re-prices it. Building and electrical
-// filed separately are two filings; a combo is one.
+// project and filing type (building, electrical, combo, mpu, nem), written once with the list price, the
+// cap and the charged amount in force, and the client's billing mode at that moment. A resubmission of
+// the same filing (a correction round) finds the row and adds nothing; a later price change never
+// re-prices it. Building and electrical filed separately are two filings ($99 each, owner 2026-11-12);
+// a combo is one.
 //
-// WHO BILLS IT. A filing made while the client was billed per submission was paid at the gate (#699)
-// and is never billed again here. Every other filing (monthly, or no mode set) is billed on the client's
-// statement (clientInvoices.buildClientStatement), once, through the ledger's one-line-one-invoice key.
+// WHO BILLS IT. Under per-submission billing the gate (#699) collects ONE filing per track before
+// staging, so the first filing of each track on a project is the gate's and is never billed again here;
+// a second filing of the same track (the electrical after the building) is billed on the statement.
+// Every filing made under any other mode (monthly, or no mode set) is billed on the client's statement
+// (clientInvoices.buildClientStatement), once, through the ledger's one-line-one-invoice key.
 //
 // NOTHING HERE PAYS, CHARGES OR SENDS ANYTHING (rule 1): these are records a person invoices from.
 // Universal: nothing is keyed to a state, utility, portal or AHJ.
@@ -41,11 +52,19 @@ type Row = Record<string, unknown>;
 export type PriceTrack = "permit" | "nem";
 export const PRICE_TRACKS: readonly PriceTrack[] = ["permit", "nem"];
 
+export type PricingTier = "founding" | "standard";
+export const PRICING_TIERS: readonly PricingTier[] = ["founding", "standard"];
+
+/** What a price-list row prices: a filing of one track, or the per-project cap. */
+export type PriceItem = PriceTrack | "project_cap";
+const PRICE_ITEMS: readonly PriceItem[] = ["permit", "nem", "project_cap"];
+
 /** Where a price came from, most specific first. "unset" means no price anywhere. */
 export type PriceBasis = "client_track" | "client_flat" | "price_list" | "env_default" | "unset";
 
 export interface ResolvedServicePrice {
   track: PriceTrack;
+  tier: PricingTier;
   /** null when no price is set anywhere: bill nothing and say so. */
   priceUsd: number | null;
   basis: PriceBasis;
@@ -54,16 +73,17 @@ export interface ResolvedServicePrice {
 }
 
 export interface ServicePriceEntry {
-  track: PriceTrack;
   priceUsd: number | null;
   setBy: string;
   setAt: string;
 }
 
+export type TierPrices = Record<PriceItem, ServicePriceEntry>;
+
 export interface ServicePriceList {
   orgId: string;
-  prices: Record<PriceTrack, ServicePriceEntry>;
-  /** The env fallback when set, shown so a person can see what an unset track falls back to. */
+  tiers: Record<PricingTier, TierPrices>;
+  /** The env fallback when set, shown so a person can see what an unset price falls back to. */
   envDefaultUsd: number | null;
 }
 
@@ -74,7 +94,12 @@ export interface FilingServiceCharge {
   track: PriceTrack;
   /** The client's billing mode when the filing was recorded. */
   billingMode: string;
-  /** null: no price was set when it was filed. */
+  tier: PricingTier;
+  /** The price before the cap; null when no price was set when it was filed. */
+  listPriceUsd: number | null;
+  /** The project's cap in force when it was filed; null = no cap. */
+  capUsd: number | null;
+  /** What this filing is charged: the list price, cut to what the cap leaves. null with no price. */
   priceUsd: number | null;
   priceBasis: PriceBasis;
   priceLabel: string;
@@ -89,9 +114,14 @@ const round2 = (n: number): number => Math.round(n * 100) / 100;
 const MAX_PRICE_USD = 100_000;
 
 export const TRACK_NAMES: Record<PriceTrack, string> = { permit: "permit filing", nem: "NEM application" };
+export const TIER_NAMES: Record<PricingTier, string> = { founding: "founding", standard: "standard" };
 
 export function priceTrackOf(permitType?: string | null): PriceTrack {
   return String(permitType || "").trim().toLowerCase() === "nem" ? "nem" : "permit";
+}
+
+export function pricingTierOf(raw: unknown): PricingTier {
+  return String(raw ?? "").trim().toLowerCase() === "founding" ? "founding" : "standard";
 }
 
 /** The filing a charge is for: its own type, so building and electrical are two filings. A legacy run
@@ -128,58 +158,78 @@ function orgFor(db: AppDb, clientId: string | null, projectId?: string): string 
   return DEFAULT_ORG_ID;
 }
 
-export function getServicePriceList(db: AppDb, orgId: string): ServicePriceList {
-  const rows = db.query<Row>("SELECT track, price_usd, set_by, set_at FROM service_prices WHERE org_id = ?", [orgId]);
-  const entry = (track: PriceTrack): ServicePriceEntry => {
-    const r = rows.find((x) => text(x.track) === track);
-    return { track, priceUsd: money(r?.price_usd), setBy: text(r?.set_by), setAt: text(r?.set_at) };
-  };
-  return { orgId, prices: { permit: entry("permit"), nem: entry("nem") }, envDefaultUsd: envDefaultServicePriceUsd() };
+function tierOfClient(db: AppDb, clientId: string | null): PricingTier {
+  if (!clientId) return "standard";
+  return pricingTierOf(db.get<Row>("SELECT pricing_tier FROM clients WHERE id = ?", [clientId])?.pricing_tier);
 }
 
+export function getServicePriceList(db: AppDb, orgId: string): ServicePriceList {
+  const rows = db.query<Row>("SELECT tier, item, price_usd, set_by, set_at FROM service_prices WHERE org_id = ?", [orgId]);
+  const tierPrices = (tier: PricingTier): TierPrices => {
+    const entry = (item: PriceItem): ServicePriceEntry => {
+      const r = rows.find((x) => text(x.tier) === tier && text(x.item) === item);
+      return { priceUsd: money(r?.price_usd), setBy: text(r?.set_by), setAt: text(r?.set_at) };
+    };
+    return { permit: entry("permit"), nem: entry("nem"), project_cap: entry("project_cap") };
+  };
+  return { orgId, tiers: { founding: tierPrices("founding"), standard: tierPrices("standard") }, envDefaultUsd: envDefaultServicePriceUsd() };
+}
+
+const INPUT_KEYS: Record<PriceItem, string> = { permit: "permitUsd", nem: "nemUsd", project_cap: "capUsd" };
+const ITEM_NAMES: Record<PriceItem, string> = { permit: "price per permit filing", nem: "price per NEM application", project_cap: "cap per project" };
+
+export interface PriceChange { tier: PricingTier; item: PriceItem; fromUsd: number | null; toUsd: number | null }
+
 /**
- * A NAMED PERSON SETS THE PRICE LIST. Only the tracks present in the input change; null or "" clears
- * one (that track then falls back, and with nothing to fall back to bills nothing). Prices already
- * saved on filings are not touched: a new price applies to filings recorded from now on.
+ * A NAMED PERSON SETS THE PRICE LIST: `{ founding: {permitUsd, nemUsd, capUsd}, standard: {...} }`.
+ * Only the keys present change; null or "" clears one (a cleared price then falls back, and with nothing
+ * to fall back to bills nothing; a cleared cap is no cap). Prices already saved on filings are not
+ * touched: a new price applies to filings recorded from now on.
  */
 export function setServicePrices(
   db: AppDb,
   orgId: string,
-  input: Partial<Record<"permitUsd" | "nemUsd", unknown>>,
+  input: Partial<Record<PricingTier, unknown>>,
   by: string,
-): { list: ServicePriceList; changed: Array<{ track: PriceTrack; fromUsd: number | null; toUsd: number | null }> } {
+): { list: ServicePriceList; changed: PriceChange[] } {
   const who = text(by).trim().slice(0, 120);
   if (!who) throw new HttpError(400, "Name the person setting the prices.");
-  const wanted: Array<{ track: PriceTrack; value: number | null }> = [];
-  for (const track of PRICE_TRACKS) {
-    const key = track === "permit" ? "permitUsd" : "nemUsd";
-    if (!(key in input)) continue;
-    const raw = input[key];
-    if (raw == null || raw === "") { wanted.push({ track, value: null }); continue; }
-    const n = Number(raw);
-    if (!Number.isFinite(n) || n < 0 || n > MAX_PRICE_USD) {
-      throw new HttpError(400, `The ${TRACK_NAMES[track]} price must be a dollar amount from 0 to ${MAX_PRICE_USD}.`, { field: key });
+  const wanted: Array<{ tier: PricingTier; item: PriceItem; value: number | null }> = [];
+  for (const tier of PRICING_TIERS) {
+    const block = input?.[tier];
+    if (block == null) continue;
+    if (typeof block !== "object" || Array.isArray(block)) throw new HttpError(400, `"${tier}" must be an object of permitUsd, nemUsd and capUsd.`);
+    const b = block as Record<string, unknown>;
+    for (const item of PRICE_ITEMS) {
+      const key = INPUT_KEYS[item];
+      if (!(key in b)) continue;
+      const raw = b[key];
+      if (raw == null || raw === "") { wanted.push({ tier, item, value: null }); continue; }
+      const n = Number(raw);
+      if (!Number.isFinite(n) || n < 0 || n > MAX_PRICE_USD) {
+        throw new HttpError(400, `The ${TIER_NAMES[tier]} ${ITEM_NAMES[item]} must be a dollar amount from 0 to ${MAX_PRICE_USD}.`, { field: `${tier}.${key}` });
+      }
+      wanted.push({ tier, item, value: round2(n) });
     }
-    wanted.push({ track, value: round2(n) });
   }
-  if (!wanted.length) throw new HttpError(400, "Give permitUsd and/or nemUsd (a blank clears that price).");
+  if (!wanted.length) throw new HttpError(400, "Give founding and/or standard prices: permitUsd, nemUsd, capUsd (a blank clears one).");
   const before = getServicePriceList(db, orgId);
-  const changed: Array<{ track: PriceTrack; fromUsd: number | null; toUsd: number | null }> = [];
+  const changed: PriceChange[] = [];
   const ts = nowIso();
   db.transaction(() => {
-    for (const { track, value } of wanted) {
-      const fromUsd = before.prices[track].priceUsd;
+    for (const { tier, item, value } of wanted) {
+      const fromUsd = before.tiers[tier][item].priceUsd;
       if (fromUsd === value) continue;
       if (value == null) {
-        db.run("DELETE FROM service_prices WHERE org_id = ? AND track = ?", [orgId, track]);
+        db.run("DELETE FROM service_prices WHERE org_id = ? AND tier = ? AND item = ?", [orgId, tier, item]);
       } else {
         db.run(
-          `INSERT INTO service_prices (org_id, track, price_usd, set_by, set_at) VALUES (?, ?, ?, ?, ?)
-           ON CONFLICT(org_id, track) DO UPDATE SET price_usd = excluded.price_usd, set_by = excluded.set_by, set_at = excluded.set_at`,
-          [orgId, track, value, who, ts],
+          `INSERT INTO service_prices (org_id, tier, item, price_usd, set_by, set_at) VALUES (?, ?, ?, ?, ?, ?)
+           ON CONFLICT(org_id, tier, item) DO UPDATE SET price_usd = excluded.price_usd, set_by = excluded.set_by, set_at = excluded.set_at`,
+          [orgId, tier, item, value, who, ts],
         );
       }
-      changed.push({ track, fromUsd, toUsd: value });
+      changed.push({ tier, item, fromUsd, toUsd: value });
     }
   });
   return { list: getServicePriceList(db, orgId), changed };
@@ -188,19 +238,41 @@ export function setServicePrices(
 /** The price in force NOW for this client (or a project with none) on this track. Reads only. */
 export function resolveServicePrice(db: AppDb, clientId: string | null, trackInput: string | null | undefined, projectId?: string): ResolvedServicePrice {
   const track = priceTrackOf(trackInput);
+  const tier = tierOfClient(db, clientId);
   const name = TRACK_NAMES[track];
   if (clientId) {
     const row = db.get<Row>("SELECT service_fee_permit_usd, service_fee_nem_usd, service_fee_usd FROM clients WHERE id = ?", [clientId]);
     const own = money(track === "nem" ? row?.service_fee_nem_usd : row?.service_fee_permit_usd);
-    if (own != null) return { track, priceUsd: own, basis: "client_track", label: `this client's own price per ${name}` };
+    if (own != null) return { track, tier, priceUsd: own, basis: "client_track", label: `this client's own price per ${name}` };
     const flat = money(row?.service_fee_usd);
-    if (flat != null) return { track, priceUsd: flat, basis: "client_flat", label: "this client's single service fee for every filing" };
+    if (flat != null) return { track, tier, priceUsd: flat, basis: "client_flat", label: "this client's single service fee for every filing" };
   }
   const list = getServicePriceList(db, orgFor(db, clientId, projectId));
-  const listed = list.prices[track].priceUsd;
-  if (listed != null) return { track, priceUsd: listed, basis: "price_list", label: `the price list's price per ${name}` };
-  if (list.envDefaultUsd != null) return { track, priceUsd: list.envDefaultUsd, basis: "env_default", label: "the server's default service fee (SUBMISSION_SERVICE_FEE_USD)" };
-  return { track, priceUsd: null, basis: "unset", label: `no price per ${name} is set (Billing, Prices)` };
+  const listed = list.tiers[tier][track].priceUsd;
+  if (listed != null) return { track, tier, priceUsd: listed, basis: "price_list", label: `the ${TIER_NAMES[tier]} price per ${name}` };
+  if (list.envDefaultUsd != null) return { track, tier, priceUsd: list.envDefaultUsd, basis: "env_default", label: "the server's default service fee (SUBMISSION_SERVICE_FEE_USD)" };
+  return { track, tier, priceUsd: null, basis: "unset", label: `no ${TIER_NAMES[tier]} price per ${name} is set (Billing, Prices)` };
+}
+
+/** The per-project cap in force NOW for this client's tier; null = no cap. Reads only. */
+export function resolveProjectCap(db: AppDb, clientId: string | null, projectId?: string): { capUsd: number | null; tier: PricingTier } {
+  const tier = tierOfClient(db, clientId);
+  return { capUsd: getServicePriceList(db, orgFor(db, clientId, projectId)).tiers[tier].project_cap.priceUsd, tier };
+}
+
+/** What the project's OTHER filings are charged (waived ones excluded): the cap's running total. */
+export function projectChargedUsd(db: AppDb, projectId: string, exceptChargeId = ""): number {
+  const r = db.get<{ total: number | null }>(
+    "SELECT SUM(price_usd) AS total FROM filing_service_charges WHERE project_id = ? AND waived_at = '' AND price_usd IS NOT NULL AND id != ?",
+    [projectId, exceptChargeId],
+  );
+  return round2(Number(r?.total ?? 0));
+}
+
+/** A price cut to what the cap leaves after `chargedUsd`. */
+export function underCap(priceUsd: number, capUsd: number | null, chargedUsd: number): number {
+  if (capUsd == null) return round2(priceUsd);
+  return round2(Math.max(0, Math.min(priceUsd, capUsd - chargedUsd)));
 }
 
 function mapCharge(r: Row): FilingServiceCharge {
@@ -210,6 +282,9 @@ function mapCharge(r: Row): FilingServiceCharge {
     permitType: text(r.permit_type),
     track: priceTrackOf(text(r.billing_track)),
     billingMode: text(r.billing_mode),
+    tier: pricingTierOf(r.pricing_tier),
+    listPriceUsd: money(r.list_price_usd),
+    capUsd: money(r.cap_usd),
     priceUsd: money(r.price_usd),
     priceBasis: (text(r.price_basis) || "unset") as PriceBasis,
     priceLabel: text(r.price_label),
@@ -223,22 +298,25 @@ function mapCharge(r: Row): FilingServiceCharge {
 
 /**
  * THE PRICE SAVED ON A FILING. Called by every filing door after the filing is recorded. Written once
- * per (project, filing type): a correction resubmission of the same filing adds nothing. NEVER THROWS:
- * the filing is the fact that matters, and a missed charge is visible (the job has no charge row).
- * Returns true when it wrote a row.
+ * per (project, filing type): a correction resubmission of the same filing adds nothing. The charged
+ * amount is the price cut to what the project's cap leaves. NEVER THROWS: the filing is the fact that
+ * matters, and a missed charge is visible (the job has no charge row). Returns true when it wrote a row.
  */
 export function recordFilingServiceCharge(db: AppDb, project: ProjectRecord, permitType: string, submissionId = ""): boolean {
   const key = filingKey(permitType);
   try {
     if (db.get("SELECT 1 AS hit FROM filing_service_charges WHERE project_id = ? AND permit_type = ?", [project.id, key])) return false;
     const price = resolveServicePrice(db, project.clientId, key, project.id);
+    const { capUsd } = resolveProjectCap(db, project.clientId, project.id);
+    const charged = price.priceUsd == null ? null : underCap(price.priceUsd, capUsd, projectChargedUsd(db, project.id));
     const client = project.clientId ? db.get<Row>("SELECT billing_mode FROM clients WHERE id = ?", [project.clientId]) : null;
     const ts = nowIso();
     db.run(
       `INSERT OR IGNORE INTO filing_service_charges
-         (id, project_id, permit_type, billing_track, billing_mode, price_usd, price_basis, price_label, submission_id, filed_at, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [newId(), project.id, key, price.track, text(client?.billing_mode).toLowerCase(), price.priceUsd, price.basis, price.label, text(submissionId), ts, ts],
+         (id, project_id, permit_type, billing_track, billing_mode, pricing_tier, list_price_usd, cap_usd, price_usd, price_basis, price_label, submission_id, filed_at, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [newId(), project.id, key, price.track, text(client?.billing_mode).toLowerCase(), price.tier, price.priceUsd, capUsd, charged,
+        price.basis, price.label, text(submissionId), ts, ts],
     );
     return true;
   } catch (err) {
@@ -260,9 +338,22 @@ export function listFilingCharges(db: AppDb, clientId: string): Array<FilingServ
   ).map((r) => ({ ...mapCharge(r), project: { homeownerName: text(r.p_homeowner_name), projectAddress: text(r.p_project_address) } }));
 }
 
-/** A filing charge is billed by the statement (not the gate) unless it was filed under per-submission billing. */
-export function billedOnStatement(charge: FilingServiceCharge): boolean {
-  return charge.billingMode !== "per_submission";
+/**
+ * The charges the GATE already covers: under per-submission billing, the first filing of each track on
+ * a project (by filed time). Every other charge is for the statement to bill.
+ */
+export function gateCoveredChargeIds(charges: FilingServiceCharge[]): Set<string> {
+  const covered = new Set<string>();
+  const seen = new Set<string>();
+  const ordered = [...charges].sort((a, b) => a.filedAt.localeCompare(b.filedAt) || a.id.localeCompare(b.id));
+  for (const c of ordered) {
+    if (c.billingMode !== "per_submission") continue;
+    const k = `${c.projectId}:${c.track}`;
+    if (seen.has(k)) continue;
+    seen.add(k);
+    covered.add(c.id);
+  }
+  return covered;
 }
 
 /**

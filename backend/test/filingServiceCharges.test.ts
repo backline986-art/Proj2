@@ -13,6 +13,10 @@
 //   - a filing saved with no price is listed until a price is set, then billed at the price then;
 //   - a person can waive one filing (named, with a reason), never once it is on a live invoice;
 //   - the per-submission gate collects the track's price.
+//   - THE CAP (owner 2026-11-12: "$230 cap for founders, $275 for everyone else"; "2 is 99 ea"): a
+//     project's filings together never charge more than its tier's cap, the founding tier is the client's
+//     own setting, the gate keeps under the cap too, and under per-submission billing the gate's filing
+//     is not billed again while a second permit filing is.
 //
 //   npx tsx backend/test/filingServiceCharges.test.ts
 import "./_isolate";
@@ -75,20 +79,21 @@ check("1a. nothing set: no price resolves (no number in code, never a silent $0)
 });
 // The founding prices (owner, 2026-11-12) — set here as DATA, the way a person sets them.
 check("1b. a named person sets the price list; an unnamed one is refused; a bad amount is refused", () => {
-  throwsWith(() => P.setServicePrices(db, DEFAULT_ORG_ID, { permitUsd: 99 }, ""), /Name the person/);
-  throwsWith(() => P.setServicePrices(db, DEFAULT_ORG_ID, { permitUsd: -1 }, "Pat Tester"), /dollar amount/);
-  throwsWith(() => P.setServicePrices(db, DEFAULT_ORG_ID, {}, "Pat Tester"), /permitUsd and\/or nemUsd/);
-  const { list, changed } = P.setServicePrices(db, DEFAULT_ORG_ID, { permitUsd: "99", nemUsd: 79 }, "Pat Tester");
-  assert.equal(list.prices.permit.priceUsd, 99);
-  assert.equal(list.prices.nem.priceUsd, 79);
-  assert.equal(list.prices.permit.setBy, "Pat Tester");
+  throwsWith(() => P.setServicePrices(db, DEFAULT_ORG_ID, { standard: { permitUsd: 99 } }, ""), /Name the person/);
+  throwsWith(() => P.setServicePrices(db, DEFAULT_ORG_ID, { standard: { permitUsd: -1 } }, "Pat Tester"), /dollar amount/);
+  throwsWith(() => P.setServicePrices(db, DEFAULT_ORG_ID, {}, "Pat Tester"), /founding and\/or standard/);
+  const { list, changed } = P.setServicePrices(db, DEFAULT_ORG_ID, { standard: { permitUsd: "99", nemUsd: 79 } }, "Pat Tester");
+  assert.equal(list.tiers.standard.permit.priceUsd, 99);
+  assert.equal(list.tiers.standard.nem.priceUsd, 79);
+  assert.equal(list.tiers.standard.permit.setBy, "Pat Tester");
   assert.equal(changed.length, 2);
-  assert.equal(P.setServicePrices(db, DEFAULT_ORG_ID, { permitUsd: 99 }, "Pat Tester").changed.length, 0, "an unchanged price is not a change");
+  assert.equal(P.setServicePrices(db, DEFAULT_ORG_ID, { standard: { permitUsd: 99 } }, "Pat Tester").changed.length, 0, "an unchanged price is not a change");
 });
 check("1c. resolution: price list per track; the client's own price per track, then its single fee, win", () => {
   assert.equal(P.resolveServicePrice(db, monthly.id, "building").priceUsd, 99);
   assert.equal(P.resolveServicePrice(db, monthly.id, "nem").priceUsd, 79);
   assert.equal(P.resolveServicePrice(db, monthly.id, "nem").basis, "price_list");
+  assert.equal(P.resolveServicePrice(db, monthly.id, "nem").tier, "standard");
   const own = createClient(db, { companyName: "Own Price Solar", billingMode: "monthly", serviceFeeUsd: "150", serviceFeeNemUsd: "60" });
   assert.equal(P.resolveServicePrice(db, own.id, "nem").priceUsd, 60);
   assert.equal(P.resolveServicePrice(db, own.id, "nem").basis, "client_track");
@@ -98,7 +103,7 @@ check("1c. resolution: price list per track; the client's own price per track, t
 });
 check("1d. the price list is per org: another org's client does not get it", () => {
   assert.equal(P.resolveServicePrice(db, otherOrg.id, "permit").priceUsd, null);
-  assert.equal(P.getServicePriceList(db, ORG_B).prices.permit.priceUsd, null);
+  assert.equal(P.getServicePriceList(db, ORG_B).tiers.standard.permit.priceUsd, null);
 });
 check("1e. the env default is a fallback only when it is set", () => {
   process.env.SUBMISSION_SERVICE_FEE_USD = "120";
@@ -123,13 +128,13 @@ check("2a. building, electrical and NEM filed = three charges at the price in fo
   ]);
 });
 check("2b. a resubmission of the same filing adds nothing, and a price change never re-prices a saved one", () => {
-  P.setServicePrices(db, DEFAULT_ORG_ID, { permitUsd: 109 }, "Pat Tester");
+  P.setServicePrices(db, DEFAULT_ORG_ID, { standard: { permitUsd: 109 } }, "Pat Tester");
   markTrackSubmitted(db, job, "building", { applicationNumber: "BLD-26-0001-R1" });
   assert.equal(P.recordFilingServiceCharge(db, job, "building"), false);
   const rows = chargesOf(job.id);
   assert.equal(rows.length, 3);
   assert.equal(rows.find((r) => r.permit_type === "building")?.price_usd, 99);
-  P.setServicePrices(db, DEFAULT_ORG_ID, { permitUsd: 99 }, "Pat Tester");
+  P.setServicePrices(db, DEFAULT_ORG_ID, { standard: { permitUsd: 99 } }, "Pat Tester");
 });
 check("2c. captureConfirmation (a staged run's door) saves the price too", () => {
   const p = mk(monthly.id);
@@ -156,9 +161,9 @@ check("3b. invoiced once: the next statement and a second invoice never repeat a
   assert.equal(filingLines(monthly.id).length, 0);
   throwsWith(() => L.createClientInvoice(db, monthly.id, period, "Pat Tester"), /Nothing to invoice/);
   // A price change after invoicing changes nothing already billed.
-  P.setServicePrices(db, DEFAULT_ORG_ID, { permitUsd: 150 }, "Pat Tester");
+  P.setServicePrices(db, DEFAULT_ORG_ID, { standard: { permitUsd: 150 } }, "Pat Tester");
   assert.equal(L.getClientInvoice(db, monthly.id, inv.id).serviceTotalUsd, 99 + 99 + 79 + 99);
-  P.setServicePrices(db, DEFAULT_ORG_ID, { permitUsd: 99 }, "Pat Tester");
+  P.setServicePrices(db, DEFAULT_ORG_ID, { standard: { permitUsd: 99 } }, "Pat Tester");
   // Voiding releases the lines for the next invoice, at the same saved prices.
   L.voidClientInvoice(db, monthly.id, inv.id, "test void");
   assert.equal(filingLines(monthly.id).reduce((t, l) => t + l.amountUsd, 0), 99 + 99 + 79 + 99);
@@ -174,7 +179,7 @@ check("3d. a filing under per-submission billing is never billed on the statemen
   const p = mk(perSub.id);
   assert.equal(buildPaymentQuote(db, p, "nem").gateAmountUsd, 79);
   assert.equal(buildPaymentQuote(db, p, "permit").gateAmountUsd, 99);
-  assert.match(String(buildPaymentQuote(db, p, "permit").serviceFeeSource), /price list/);
+  assert.match(String(buildPaymentQuote(db, p, "permit").serviceFeeSource), /standard price per permit filing/);
   P.recordFilingServiceCharge(db, p, "building");
   assert.equal(chargesOf(p.id)[0]?.billing_mode, "per_submission");
   assert.equal(filingLines(perSub.id).length, 0);
@@ -188,8 +193,8 @@ check("3e. a filing saved with no price is listed (never a $0 line), then billed
   assert.equal(chargesOf(p.id)[0]?.price_usd, null);
   const st = L.buildClientStatement(db, otherOrg.id, period);
   assert.equal(st.lines.filter((l) => l.lineKey.startsWith("filing:")).length, 0);
-  assert.ok(st.excluded.some((x) => /no price per permit filing is set/.test(x.reason)), JSON.stringify(st.excluded));
-  P.setServicePrices(db, ORG_B, { permitUsd: 125 }, "Other Admin");
+  assert.ok(st.excluded.some((x) => /no standard price per permit filing is set/.test(x.reason)), JSON.stringify(st.excluded));
+  P.setServicePrices(db, ORG_B, { standard: { permitUsd: 125 } }, "Other Admin");
   const after = filingLines(otherOrg.id);
   assert.deepEqual(after.map((l) => l.amountUsd), [125]);
   assert.match(after[0].reconciliation, /No price was set when it was filed/);
@@ -220,6 +225,98 @@ check("5a. building a statement writes nothing", () => {
   L.buildClientStatement(db, otherOrg.id, period);
   const after = db.get<{ n: number }>("SELECT (SELECT COUNT(*) FROM filing_service_charges) + (SELECT COUNT(*) FROM client_invoice_lines) + (SELECT COUNT(*) FROM service_prices) AS n")?.n;
   assert.equal(after, before);
+});
+
+// ── 7. the cap per project, by pricing tier ──────────────────────────────────────────────────────
+const ORG_C = "org-prices-caps";
+db.run("INSERT OR IGNORE INTO orgs (id, name, edition, created_at) VALUES (?, 'Cap Co', 'full', ?)", [ORG_C, new Date().toISOString()]);
+const founder = createClient(db, { companyName: "Founding Sample Solar", billingMode: "monthly", pricingTier: "founding" }, ORG_C);
+const regular = createClient(db, { companyName: "Standard Sample Solar", billingMode: "monthly", pricingTier: "anything else" }, ORG_C);
+const founderGate = createClient(db, { companyName: "Founding Gate Solar", billingMode: "per_submission", pricingTier: "Founding" }, ORG_C);
+// The owner's caps, and illustrative standard per-filing prices, set as DATA by a named person.
+P.setServicePrices(db, ORG_C, {
+  founding: { permitUsd: 99, nemUsd: 79, capUsd: 230 },
+  standard: { permitUsd: 119, nemUsd: 99, capUsd: 275 },
+}, "Pat Tester");
+const chargedOf = (projectId: string) => db.query<{ permit_type: string; list_price_usd: number | null; cap_usd: number | null; price_usd: number | null; pricing_tier: string }>(
+  "SELECT permit_type, list_price_usd, cap_usd, price_usd, pricing_tier FROM filing_service_charges WHERE project_id = ? ORDER BY filed_at, id", [projectId]);
+
+check("7a. the client's pricing tier is stored as founding or standard, nothing else", () => {
+  assert.equal(founder.pricingTier, "founding");
+  assert.equal(founderGate.pricingTier, "founding");
+  assert.equal(regular.pricingTier, "");
+  assert.equal(P.resolveServicePrice(db, founder.id, "permit").priceUsd, 99);
+  assert.equal(P.resolveServicePrice(db, regular.id, "permit").priceUsd, 119);
+  assert.equal(P.resolveProjectCap(db, founder.id).capUsd, 230);
+  assert.equal(P.resolveProjectCap(db, regular.id).capUsd, 275);
+});
+check("7b. FOUNDING: building + electrical + NEM = $99 + $99 + $32 = the $230 cap", () => {
+  const p = mk(founder.id, ORG_C);
+  markTrackSubmitted(db, p, "building", { applicationNumber: "BLD-26-0700" });
+  markTrackSubmitted(db, p, "electrical", { applicationNumber: "ELE-26-0700" });
+  markTrackSubmitted(db, p, "nem", { applicationNumber: "INX-26-0700" });
+  const rows = chargedOf(p.id);
+  assert.deepEqual(rows.map((r) => [r.permit_type, r.list_price_usd, r.cap_usd, r.price_usd, r.pricing_tier]), [
+    ["building", 99, 230, 99, "founding"],
+    ["electrical", 99, 230, 99, "founding"],
+    ["nem", 79, 230, 32, "founding"],
+  ]);
+  const lines = filingLines(founder.id).filter((l) => l.projectId === p.id);
+  assert.equal(lines.reduce((t, l) => t + l.amountUsd, 0), 230);
+  assert.ok(lines.some((l) => /cut by the \$230\.00 project cap/.test(l.description)), JSON.stringify(lines.map((l) => l.description)));
+});
+check("7c. FOUNDING: one combo + NEM stays $178, under the cap", () => {
+  const p = mk(founder.id, ORG_C);
+  // This sample AHJ files separate permits, so the combo filing is recorded at the charge door itself.
+  P.recordFilingServiceCharge(db, p, "combo");
+  P.recordFilingServiceCharge(db, p, "nem");
+  assert.deepEqual(chargedOf(p.id).map((r) => r.price_usd), [99, 79]);
+});
+check("7d. EVERYONE ELSE: $119 + $119 + $99 = $337 is held to the $275 cap; a filing past the cap is listed, not a $0 line", () => {
+  const p = mk(regular.id, ORG_C);
+  markTrackSubmitted(db, p, "building", { applicationNumber: "BLD-26-0702" });
+  markTrackSubmitted(db, p, "electrical", { applicationNumber: "ELE-26-0702" });
+  markTrackSubmitted(db, p, "nem", { applicationNumber: "INX-26-0702" });
+  assert.deepEqual(chargedOf(p.id).map((r) => r.price_usd), [119, 119, 37]);
+  P.recordFilingServiceCharge(db, p, "mpu");
+  assert.equal(chargedOf(p.id).find((r) => r.permit_type === "mpu")?.price_usd, 0, "the cap is already reached");
+  const st = L.buildClientStatement(db, regular.id, period);
+  const mine = st.lines.filter((l) => l.projectId === p.id && l.lineKey.startsWith("filing:"));
+  assert.equal(mine.reduce((t, l) => t + l.amountUsd, 0), 275);
+  assert.ok(!mine.some((l) => l.amountUsd === 0), "never a $0 line");
+  assert.ok(st.excluded.some((x) => x.projectId === p.id && /covered by the project cap/.test(x.reason)), JSON.stringify(st.excluded));
+});
+check("7e. a waived filing frees its share of the cap for the job's next filing", () => {
+  const p = mk(regular.id, ORG_C);
+  markTrackSubmitted(db, p, "building", { applicationNumber: "BLD-26-0703" });
+  markTrackSubmitted(db, p, "electrical", { applicationNumber: "ELE-26-0703" });
+  const elec = P.listFilingCharges(db, regular.id).find((c) => c.projectId === p.id && c.permitType === "electrical")!;
+  P.waiveFilingCharge(db, regular.id, elec.id, "filed in error", "Pat Tester");
+  markTrackSubmitted(db, p, "nem", { applicationNumber: "INX-26-0703" });
+  assert.equal(chargedOf(p.id).find((r) => r.permit_type === "nem")?.price_usd, 99);
+});
+check("7f. PER-JOB GATE: the gate collects one permit and one NEM under the cap; the second permit is billed on the statement, the gate's filings are not", () => {
+  const p = mk(founderGate.id, ORG_C);
+  const permitQuote = buildPaymentQuote(db, p, "permit");
+  const nemQuote = buildPaymentQuote(db, p, "nem");
+  assert.equal(permitQuote.gateAmountUsd, 99);
+  assert.equal(nemQuote.gateAmountUsd, 79);
+  markTrackSubmitted(db, p, "building", { applicationNumber: "BLD-26-0704" });
+  markTrackSubmitted(db, p, "electrical", { applicationNumber: "ELE-26-0704" });
+  markTrackSubmitted(db, p, "nem", { applicationNumber: "INX-26-0704" });
+  assert.deepEqual(chargedOf(p.id).map((r) => r.price_usd), [99, 99, 32]);
+  const lines = filingLines(founderGate.id).filter((l) => l.projectId === p.id);
+  assert.equal(lines.length, 1, JSON.stringify(lines.map((l) => l.description)));
+  assert.match(lines[0].description, /electrical permit filing/);
+  assert.equal(lines[0].amountUsd, 99);
+});
+check("7g. the gate keeps under the cap: a client's own high prices are cut at the gate too", () => {
+  const pricey = createClient(db, { companyName: "Pricey Sample Solar", billingMode: "per_submission", pricingTier: "founding", serviceFeePermitUsd: "200", serviceFeeNemUsd: "100" }, ORG_C);
+  const p = mk(pricey.id, ORG_C);
+  assert.equal(buildPaymentQuote(db, p, "permit").gateAmountUsd, 200);
+  const nem = buildPaymentQuote(db, p, "nem");
+  assert.equal(nem.gateAmountUsd, 30);
+  assert.match(String(nem.serviceFeeSource), /cut to \$30\.00 by the \$230\.00 project cap/);
 });
 
 // ── 6. deleting a job takes its charges with it (the FK would refuse the delete otherwise) ──────

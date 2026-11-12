@@ -35,7 +35,7 @@ import type { AppDb } from "./db";
 import type { ClientRecord, ProjectRecord, SubmissionPaymentRecord } from "../../shared/src/types";
 import { invoiceLinesForPayment, type InvoiceExclusion, type InvoiceLine, type InvoiceTrack } from "./invoices";
 import { getSubmissionPayment } from "./submissionFees";
-import { billedOnStatement, listFilingCharges, resolveServicePrice, TRACK_NAMES } from "./servicePrices";
+import { gateCoveredChargeIds, listFilingCharges, projectChargedUsd, resolveProjectCap, resolveServicePrice, TIER_NAMES, TRACK_NAMES, underCap } from "./servicePrices";
 import { getClient } from "./clients";
 import { mapProject } from "./repository";
 import { HttpError } from "./httpError";
@@ -374,12 +374,16 @@ export function buildClientStatement(db: AppDb, clientId: string, period: { peri
   }
 
   // ── OUR PRICE PER FILING (#187) ─────────────────────────────────────────────────────────
-  // Every filing recorded while this client was NOT billed per submission is one service line, at the
-  // price saved on it when it was filed. A per-submission filing was paid at the gate (above) and is
-  // never billed again. A filing saved with no price (none was set then) is priced from the price in
-  // force now, and says so; with still no price it is listed, never billed at $0. A filing a person
-  // waived is not billed. Line key "filing:<charge id>:service": one line, one invoice, as above.
-  const charges = listFilingCharges(db, clientId).filter((c) => billedOnStatement(c));
+  // Every filing is one service line, at the price saved on it when it was filed (already cut to the
+  // project cap), EXCEPT the first filing of each track made under per-submission billing: the gate
+  // collected that one before staging (above), and it is never billed again. A second filing of the
+  // same track (the electrical after the building) is billed here. A filing saved with no price (none
+  // was set then) is priced from the price in force now, cut to what the cap leaves, and says so; with
+  // still no price it is listed, never billed at $0. A filing a person waived is not billed. Line key
+  // "filing:<charge id>:service": one line, one invoice, as above.
+  const allCharges = listFilingCharges(db, clientId);
+  const gateCovered = gateCoveredChargeIds(allCharges);
+  const charges = allCharges.filter((c) => !gateCovered.has(c.id));
   const billedCharges = liveLinesByPayment(db, charges.map((c) => c.id));
   for (const c of charges) {
     const lineKey = `filing:${c.id}:service`;
@@ -401,26 +405,34 @@ export function buildClientStatement(db: AppDb, clientId: string, period: { peri
       continue;
     }
     let amount = c.priceUsd;
+    let listUsd = c.listPriceUsd;
+    let capUsd = c.capUsd;
     let basis = `Price saved when it was filed: ${c.priceLabel || c.priceBasis}.`;
     if (amount == null) {
       const now = resolveServicePrice(db, clientId, c.track, c.projectId);
-      amount = now.priceUsd;
+      capUsd = resolveProjectCap(db, clientId, c.projectId).capUsd;
+      listUsd = now.priceUsd;
+      amount = now.priceUsd == null ? null : underCap(now.priceUsd, capUsd, projectChargedUsd(db, c.projectId, c.id));
       basis = `No price was set when it was filed; priced now from ${now.label}.`;
     }
     if (amount == null) {
       excluded.push({
         track: c.track, projectId: c.projectId, projectLabel: label,
-        reason: `This ${filing} was filed ${at.slice(0, 10)}, and no price per ${kindName} is set for this client or on the price list.`,
+        reason: `This ${filing} was filed ${at.slice(0, 10)}, and no ${TIER_NAMES[c.tier]} price per ${kindName} is set for this client or on the price list.`,
         resolution: "Set the price (Clients, Billing, Prices, or this client's own price) and it is billed on the next statement.",
         amountSeenUsd: null,
       });
       continue;
     }
+    const cappedNote = listUsd != null && capUsd != null && amount < listUsd
+      ? ` (price $${listUsd.toFixed(2)}, cut by the $${capUsd.toFixed(2)} project cap)` : "";
     if (amount === 0) {
       if (!carried(at)) {
         excluded.push({
           track: c.track, projectId: c.projectId, projectLabel: label,
-          reason: `This ${filing} is priced at $0 (${basis.replace(/\.$/, "")}).`,
+          reason: cappedNote
+            ? `This ${filing} is covered by the project cap: the job's other filings already reach $${Number(capUsd).toFixed(2)}.`
+            : `This ${filing} is priced at $0 (${basis.replace(/\.$/, "")}).`,
           resolution: "Nothing to do.",
           amountSeenUsd: 0,
         });
@@ -439,7 +451,7 @@ export function buildClientStatement(db: AppDb, clientId: string, period: { peri
       provisional: false,
       alreadyPaid: false,
       amountUsd: round2(amount),
-      description: `Filing service fee — ${filing} filed ${at.slice(0, 10)}`,
+      description: `Filing service fee — ${filing} filed ${at.slice(0, 10)}${cappedNote}`,
       paymentReference: "",
       eventAt: at,
       carriedForward: carried(at),

@@ -76,7 +76,18 @@ const QB_STATUS = {
 };
 const PRICES = {
   orgId: "org-default", envDefaultUsd: null,
-  prices: { permit: { track: "permit", priceUsd: 99, setBy: "Test <b>Admin</b>", setAt: "2026-11-12T00:00:00Z" }, nem: { track: "nem", priceUsd: null, setBy: "", setAt: "" } },
+  tiers: {
+    founding: {
+      permit: { priceUsd: 99, setBy: "Test <b>Admin</b>", setAt: "2026-11-12T00:00:00Z" },
+      nem: { priceUsd: null, setBy: "", setAt: "" },
+      project_cap: { priceUsd: 230, setBy: "Test Person", setAt: "2026-11-12T00:00:00Z" },
+    },
+    standard: {
+      permit: { priceUsd: null, setBy: "", setAt: "" },
+      nem: { priceUsd: null, setBy: "", setAt: "" },
+      project_cap: { priceUsd: 275, setBy: "Test Person", setAt: "2026-11-12T00:00:00Z" },
+    },
+  },
 };
 const posted: string[] = [];
 const MIME: Record<string, string> = { ".html": "text/html; charset=utf-8", ".css": "text/css; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".woff2": "font/woff2" };
@@ -97,7 +108,7 @@ const startServer = async (): Promise<{ base: string; close: () => Promise<void>
         if (req.method === "PUT") {
           let body = "";
           req.on("data", (c) => { body += c; });
-          req.on("end", () => { posted.push(`PUT prices ${body}`); json({ prices: { ...PRICES, prices: { ...PRICES.prices, nem: { track: "nem", priceUsd: 79, setBy: "Test Person", setAt: "2026-11-12T00:00:00Z" } } } }); });
+          req.on("end", () => { posted.push(`PUT prices ${body}`); json({ prices: { ...PRICES, tiers: { ...PRICES.tiers, founding: { ...PRICES.tiers.founding, nem: { priceUsd: 79, setBy: "Test Person", setAt: "2026-11-12T00:00:00Z" } } } } }); });
           return;
         }
         return json({ prices: PRICES });
@@ -205,15 +216,21 @@ async function main(): Promise<void> {
       // #187: the price list and "Don't bill" on a filing line.
       const pr = await page.evaluate(() => ({
         text: (document.getElementById("servicePricesBlock")?.textContent || "").replace(/\s+/g, " "),
-        permit: (document.getElementById("pricePermitUsd") as HTMLInputElement | null)?.value,
-        nem: (document.getElementById("priceNemUsd") as HTMLInputElement | null)?.value,
+        permit: (document.getElementById("price_founding_permitUsd") as HTMLInputElement | null)?.value,
+        nem: (document.getElementById("price_founding_nemUsd") as HTMLInputElement | null)?.value,
+        foundingCap: (document.getElementById("price_founding_capUsd") as HTMLInputElement | null)?.value,
+        standardCap: (document.getElementById("price_standard_capUsd") as HTMLInputElement | null)?.value,
         markup: Boolean(document.querySelector("#servicePricesBlock b")),
       }));
-      check(pr.permit === "99" && pr.nem === "" && /NEM: NOT SET/.test(pr.text) && /Test <b>Admin<\/b>/.test(pr.text) && !pr.markup,
-        `${tag}: the Prices block shows the permit price, flags the unset NEM price, and renders a name with markup as text`, JSON.stringify(pr));
-      await page.evaluate(() => { (document.getElementById("priceNemUsd") as HTMLInputElement).value = "79"; (document.getElementById("savePricesBtn") as HTMLButtonElement).click(); });
+      check(pr.permit === "99" && pr.nem === "" && pr.foundingCap === "230" && pr.standardCap === "275"
+        && /Founding clients/.test(pr.text) && /Everyone else/.test(pr.text) && /NEM: NOT SET/.test(pr.text) && /Test <b>Admin<\/b>/.test(pr.text) && !pr.markup,
+        `${tag}: the Prices block shows both tiers with their caps, flags an unset price, and renders a name with markup as text`, JSON.stringify(pr));
+      await page.evaluate(() => { (document.getElementById("price_founding_nemUsd") as HTMLInputElement).value = "79"; (document.getElementById("savePricesBtn") as HTMLButtonElement).click(); });
       await page.waitForFunction(() => /Prices saved/.test(document.getElementById("billingStatus")?.textContent || ""), null, { timeout: 15000 });
-      check(posted.some((x) => x === 'PUT prices {"permitUsd":"99","nemUsd":"79","decidedBy":"Test Person"}'), `${tag}: Save prices PUTs both prices with the named person`, posted.join(" | "));
+      check(posted.some((x) => x === 'PUT prices {"founding":{"permitUsd":"99","nemUsd":"79","capUsd":"230"},"standard":{"permitUsd":"","nemUsd":"","capUsd":"275"},"decidedBy":"Test Person"}'),
+        `${tag}: Save prices PUTs both tiers' prices and caps with the named person`, posted.join(" | "));
+      const tierOpts = await page.evaluate(() => [...document.querySelectorAll("#c_pricingTier option")].map((o) => (o as HTMLOptionElement).value));
+      check(tierOpts.join(",") === ",founding", `${tag}: the client form offers Standard and Founding pricing`, JSON.stringify(tierOpts));
       const waiveBtns = await page.evaluate(() => [...document.querySelectorAll("#billingStatement [data-waive-charge]")].map((b) => b.getAttribute("data-waive-charge")));
       check(waiveBtns.join(",") === "chg-1", `${tag}: only the filing line offers "Don't bill"`, JSON.stringify(waiveBtns));
       await page.evaluate(() => (document.querySelector('#billingStatement [data-waive-charge="chg-1"]') as HTMLButtonElement).click());

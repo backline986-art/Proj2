@@ -758,8 +758,8 @@ app.put("/api/billing/prices", asyncHandler(async (req, res) => {
   requireAdmin(req);
   const { setServicePrices } = await import("./servicePrices");
   const by = await billingPerson(req, "set the prices");
-  const input: Record<string, unknown> = {};
-  for (const key of ["permitUsd", "nemUsd"]) if (req.body && key in req.body) input[key] = req.body[key];
+  // { founding: {permitUsd, nemUsd, capUsd}, standard: {...} }: only the tiers sent change.
+  const input = { founding: req.body?.founding, standard: req.body?.standard };
   const orgId = requestScope(db, req).orgId;
   const { list, changed } = setServicePrices(db, orgId, input, by);
   if (changed.length) addAuditLog(db, null, "human", by, "billing.prices_set", { orgId, changed });
