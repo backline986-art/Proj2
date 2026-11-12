@@ -146,3 +146,18 @@ export function toggleSelectorCandidates(info: GroupToggleInfo): RecipeSelector[
 function cssEscape(id: string): string {
   return id.replace(/([^\w-])/g, "\\$1");
 }
+
+/**
+ * THE TYPE A CATALOG BUTTON APPLIES FOR (live City of Tigard, Tyler EnerGov Application Assistant,
+ * 2026-11-12): an application catalog lists each record type as a button worded "Apply <type>" (or
+ * "Start …", "Begin …", "New …", "Apply for a …"). Returns the <type> words, or null when the label is
+ * not such a button. The one reader the verified record-type pick uses for buttons.
+ */
+export function recordTypeOfCatalogButton(label: string): string | null {
+  const m = /^\s*(?:apply|start|begin|new)\s+(?:for\s+)?(?:an?\s+)?(.+?)\s*$/i.exec(String(label || "").replace(/\s+/g, " "));
+  if (!m) return null;
+  const rest = m[1].trim();
+  // "Apply" alone, "Apply Now", "Start Application", "New Application": a door, not a type.
+  if (!rest || /^(now|here|online|application|applications|permit|permits|a permit|an application)$/i.test(rest)) return null;
+  return rest;
+}

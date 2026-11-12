@@ -22,7 +22,7 @@ import type { LoginStatus, LoginDetail } from "./loginFlow";
 import { enterApplicationFlow, isExcludedEntryLabel, normalizeEntryLabel, chooseApplicationType, scanChoiceTiles } from "./applicationEntry";
 import { explainProgramChoice, explainRecordTypeChoice, jobClassOf, namesJobClassAndDiscipline, offeredLabels, programClassFit, programSelector, scanProgramGroups, type ProgramGroup, type ProgramJob, type RecordTypeChoice } from "./applicationProgram";
 import { planHiddenReveal, planLabelProxy } from "./revealHidden";
-import { describeTaggedToggle, GROUP_TOGGLE_CSS, recordTypeGroupNote, tagToggleByText, toggleSelectorCandidates, type GroupToggleInfo } from "./recordTypeGroup";
+import { describeTaggedToggle, GROUP_TOGGLE_CSS, recordTypeGroupNote, recordTypeOfCatalogButton, tagToggleByText, toggleSelectorCandidates, type GroupToggleInfo } from "./recordTypeGroup";
 import { looksLikeConsentWall, planConsentDismissal } from "./consentBanner";
 import { chooseRow, scanRowChoices, markAddressRow, type AddressRowPick } from "./rowChooser";
 import { parseStreetName, parseStreetNumber, parseStreetLine, correctTruncatedAddressFill, isSplitAddressForm } from "../addressParse";
@@ -6773,7 +6773,8 @@ export class AutoLearnAdapter extends BasePortalAdapter {
   /** #166: the recorded step + event for the verified record type just ticked (by label). */
   private noteVerifiedRecordTypeTicked(field: ExtractedField, offeredCount: number, steps: RecipeStep[]): void {
     const label = String(field.label || "").trim();
-    steps.push({ action: "check", phase: "fill", selector: field.selector, note: `record type (verified): ${label.slice(0, 60)}` });
+    // A catalog's "Apply <type>" BUTTON is clicked, not checked (Tyler EnerGov's Application Assistant).
+    steps.push({ action: field.fieldType === "button" ? "click" : "check", phase: "fill", selector: field.selector, note: `record type (verified): ${label.slice(0, 60)}` });
     this.verifiedRecordTypeTicked = true;
     this.debug?.event({ type: "record_type_verified_pick", label: label.slice(0, 70), offeredCount });
   }
@@ -6818,7 +6819,14 @@ export class AutoLearnAdapter extends BasePortalAdapter {
     const wanted = this.verifiedRecordType();
     if (!wanted) return "";
     const checkables = fields.filter((f) => f.fieldType === "checkbox" || f.fieldType === "radio");
-    const hit = checkables.find((f) => sameRecordType(f.label || "", wanted));
+    // AN APPLICATION CATALOG OFFERS TYPES AS "APPLY <TYPE>" BUTTONS (live City of Tigard, Tyler EnerGov
+    // Application Assistant, 2026-11-12: 103 "Apply …" buttons incl. "Apply Residential Renewable Energy
+    // - Prescriptive"; neither record-type rule read buttons, the planner chose nothing on a 312-control
+    // page and the walk stopped). A button whose label is the type behind an apply/start/begin/new verb
+    // is that type's option. Checkboxes and radios are still tried first.
+    const catalogButtons = fields.filter((f) => f.fieldType === "button" && recordTypeOfCatalogButton(f.label || "") !== null);
+    const hit = checkables.find((f) => sameRecordType(f.label || "", wanted))
+      ?? catalogButtons.find((f) => sameRecordType(recordTypeOfCatalogButton(f.label || "") ?? "", wanted));
     if (hit) {
       const on = { label: String(hit.label || "").trim(), fieldType: hit.fieldType, group: hit.group, section: hit.section };
       const listCount = checkables.filter((f) => this.sameRecordTypeList(f, on)).length;
