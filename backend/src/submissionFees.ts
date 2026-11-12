@@ -56,6 +56,7 @@ import { feeReadsNeedingAPerson, feeReadsSentence } from "./feeNeedsPerson";
 import { priorYearOfFeeSource } from "./permitPlatformCatalog";
 import { officialSourceOfFeeResolution } from "./feeOfficial";
 import type { ProjectFeeResolution } from "./feeSchedules";
+import { resolveServicePrice, type PriceBasis } from "./servicePrices";
 
 /** The portal's own total for the filing — typed by a person ("actual") or read off the record
  *  ("portal_record"). Either already contains every line the jurisdiction billed. */
@@ -110,15 +111,21 @@ export function getSubmissionPayment(db: AppDb, projectId: string, track?: strin
 interface ClientBilling {
   billingMode: string;
   serviceFeeUsd: number;
+  /** Where the service fee came from (servicePrices.resolveServicePrice). */
+  serviceFeeBasis: PriceBasis;
+  serviceFeeLabel: string;
 }
 
-function clientBilling(db: AppDb, clientId: string | null): ClientBilling {
-  if (!clientId) return { billingMode: "", serviceFeeUsd: defaultServiceFeeUsd() };
-  const row = db.get<Row>("SELECT billing_mode, service_fee_usd FROM clients WHERE id = ?", [clientId]);
-  const fee = row?.service_fee_usd == null ? null : Number(row.service_fee_usd);
+/** The client's billing mode and OUR price for this track (#187): the client's own price per track,
+ *  its single fee, the org's price list, then the env default. No price anywhere quotes $0, as before. */
+function clientBilling(db: AppDb, project: ProjectRecord, track: "permit" | "nem"): ClientBilling {
+  const row = project.clientId ? db.get<Row>("SELECT billing_mode FROM clients WHERE id = ?", [project.clientId]) : null;
+  const price = resolveServicePrice(db, project.clientId, track, project.id);
   return {
     billingMode: text(row?.billing_mode).toLowerCase(),
-    serviceFeeUsd: fee != null && Number.isFinite(fee) && fee >= 0 ? fee : defaultServiceFeeUsd(),
+    serviceFeeUsd: price.priceUsd ?? 0,
+    serviceFeeBasis: price.basis,
+    serviceFeeLabel: price.label,
   };
 }
 
@@ -817,7 +824,7 @@ function computePaymentQuote(
   persist: boolean,
 ): { quote: SubmissionPaymentQuote; researched: ResearchedPermitQuote } {
   const track = billingTrack(trackInput);
-  const billing = clientBilling(db, project.clientId);
+  const billing = clientBilling(db, project, track);
   const existing = getSubmissionPayment(db, project.id, track);
 
   // Resolved for EVERY quote, whichever tier wins the amount: the payment method
@@ -1187,6 +1194,7 @@ function computePaymentQuote(
     portalFeeRecords,
     paymentMethod,
     serviceFeeUsd,
+    serviceFeeSource: billing.serviceFeeLabel,
     totalUsd,
     // The gate takes our own fee and nothing else (#699), whoever the jurisdiction fee belongs
     // to. A 'card-on-file' or 'customer-pays' fee is never ours to collect; a 'keelix-pays' fee is

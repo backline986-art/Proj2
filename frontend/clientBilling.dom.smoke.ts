@@ -13,6 +13,10 @@
 //               shows its QuickBooks number and status (escaped) and offers neither. "Send to
 //               QuickBooks" POSTs the typed person's name. The QuickBooks block shows the chosen Items
 //               and never a token.
+//   MUST PASS (#187) — the Prices block shows the org's price per permit filing and per NEM application
+//               (an unset one flagged NOT SET); "Save prices" PUTs both with the named person. A filing
+//               line on the statement offers "Don't bill", which POSTs a reason and the named person
+//               for that charge only.
 //
 // Hermetic: a throwaway static server over frontend/, stubbed /api/clients/... with FAKE data,
 // everything else 404. No backend, no database, nothing emailed.
@@ -50,6 +54,7 @@ const STATEMENT = {
     line({}),
     line({ lineKey: "row-1:service", kind: "service", basis: "service", amountUsd: 175, alreadyPaid: true, description: "Submission service fee (paid at the gate)" }),
     line({ lineKey: "row-1:received", kind: "received", role: "received", basis: "received", amountUsd: 175, alreadyPaid: true, description: "Service fee paid at the per-submission gate" }),
+    line({ lineKey: "filing:chg-1:service", paymentId: "chg-1", kind: "service", basis: "price_list", amountUsd: 99, description: "Filing service fee — building permit filing filed 2026-11-04", reconciliation: "Price saved when it was filed: the price list's price per permit filing." }),
     line({ lineKey: "row-2:reimbursement:adj:x", projectLabel: "Second Owner", role: "adjustment", amountUsd: 14.5, description: "true-up", adjusts: { billedUsd: 200, invoiceNumbers: ["INV-2026-0001"] } }),
   ],
   excluded: [{ track: "permit", projectId: "p-3", projectLabel: "Third Owner", reason: "No fee responsibility is on file <b>bold</b>", resolution: "Record it.", amountSeenUsd: 99 }],
@@ -69,6 +74,10 @@ const QB_STATUS = {
   lastStatusSyncAt: "", lastError: "", settingsBy: "Test Person",
   items: { service: { id: "11", name: "Filing service fee" }, passthrough: { id: "12", name: "Permit & portal fee (pass-through)" }, onboarding: { id: "", name: "" } },
 };
+const PRICES = {
+  orgId: "org-default", envDefaultUsd: null,
+  prices: { permit: { track: "permit", priceUsd: 99, setBy: "Test <b>Admin</b>", setAt: "2026-11-12T00:00:00Z" }, nem: { track: "nem", priceUsd: null, setBy: "", setAt: "" } },
+};
 const posted: string[] = [];
 const MIME: Record<string, string> = { ".html": "text/html; charset=utf-8", ".css": "text/css; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".woff2": "font/woff2" };
 
@@ -84,6 +93,21 @@ const startServer = async (): Promise<{ base: string; close: () => Promise<void>
       if (/^\/api\/users/.test(p)) return json({ users: [] });
       if (/^\/api\/clients\/[^/]+\/portal-credentials$/.test(p)) return json({ credentials: [] });
       if (p === "/api/quickbooks/status") return json({ quickbooks: QB_STATUS });
+      if (p === "/api/billing/prices") {
+        if (req.method === "PUT") {
+          let body = "";
+          req.on("data", (c) => { body += c; });
+          req.on("end", () => { posted.push(`PUT prices ${body}`); json({ prices: { ...PRICES, prices: { ...PRICES.prices, nem: { track: "nem", priceUsd: 79, setBy: "Test Person", setAt: "2026-11-12T00:00:00Z" } } } }); });
+          return;
+        }
+        return json({ prices: PRICES });
+      }
+      if (/^\/api\/clients\/[^/]+\/filing-charges\/[^/]+\/waive$/.test(p) && req.method === "POST") {
+        let body = "";
+        req.on("data", (c) => { body += c; });
+        req.on("end", () => { posted.push(`POST waive ${p.split("/")[5]} ${body}`); json({ charge: { id: "chg-1", waivedBy: "Test Person" } }); });
+        return;
+      }
       if (/^\/api\/clients\/[^/]+\/invoices\/[^/]+\/quickbooks$/.test(p) && req.method === "POST") {
         let body = "";
         req.on("data", (c) => { body += c; });
@@ -177,6 +201,24 @@ async function main(): Promise<void> {
       check(/1 portal login has no fee agreement/.test(st.text), `${tag}: an unagreed login is warned about`);
       check(st.createEnabled, `${tag}: Create invoice is enabled once a statement with lines is shown`);
       check(posted.some((x) => /^GET statement \d{4}-\d{2}$/.test(x)), `${tag}: the statement is asked for by month`, posted.join(" | "));
+
+      // #187: the price list and "Don't bill" on a filing line.
+      const pr = await page.evaluate(() => ({
+        text: (document.getElementById("servicePricesBlock")?.textContent || "").replace(/\s+/g, " "),
+        permit: (document.getElementById("pricePermitUsd") as HTMLInputElement | null)?.value,
+        nem: (document.getElementById("priceNemUsd") as HTMLInputElement | null)?.value,
+        markup: Boolean(document.querySelector("#servicePricesBlock b")),
+      }));
+      check(pr.permit === "99" && pr.nem === "" && /NEM: NOT SET/.test(pr.text) && /Test <b>Admin<\/b>/.test(pr.text) && !pr.markup,
+        `${tag}: the Prices block shows the permit price, flags the unset NEM price, and renders a name with markup as text`, JSON.stringify(pr));
+      await page.evaluate(() => { (document.getElementById("priceNemUsd") as HTMLInputElement).value = "79"; (document.getElementById("savePricesBtn") as HTMLButtonElement).click(); });
+      await page.waitForFunction(() => /Prices saved/.test(document.getElementById("billingStatus")?.textContent || ""), null, { timeout: 15000 });
+      check(posted.some((x) => x === 'PUT prices {"permitUsd":"99","nemUsd":"79","decidedBy":"Test Person"}'), `${tag}: Save prices PUTs both prices with the named person`, posted.join(" | "));
+      const waiveBtns = await page.evaluate(() => [...document.querySelectorAll("#billingStatement [data-waive-charge]")].map((b) => b.getAttribute("data-waive-charge")));
+      check(waiveBtns.join(",") === "chg-1", `${tag}: only the filing line offers "Don't bill"`, JSON.stringify(waiveBtns));
+      await page.evaluate(() => (document.querySelector('#billingStatement [data-waive-charge="chg-1"]') as HTMLButtonElement).click());
+      await page.waitForFunction(() => /will not be billed/.test(document.getElementById("billingStatus")?.textContent || ""), null, { timeout: 15000 });
+      check(posted.some((x) => x === 'POST waive chg-1 {"reason":"Test Person","decidedBy":"Test Person"}'), `${tag}: Don't bill POSTs a reason and the named person for that charge`, posted.join(" | "));
 
       await page.evaluate(() => (document.getElementById("billingCreateBtn") as HTMLButtonElement).click());
       await page.waitForFunction(() => /Created INV-2026-0003/.test(document.getElementById("billingStatus")?.textContent || ""), null, { timeout: 15000 });

@@ -113,6 +113,7 @@ import { clientLicenceRow, clientStagingOverlay, contractorLicenceForState, getC
 import { planSetLicenceWarning } from "./clientMatch";
 import { assertSubmissionPaid } from "./submissionFees";
 import { snapshotFilingQuote } from "./feeAccuracy";
+import { recordFilingServiceCharge } from "./servicePrices";
 import { readAndRecordPortalFees } from "./portalFeeReadings";
 import { closeoutDocumentLines, fetchIssuedRecordDocuments, isFinishedOutcome, issuedDocumentsByTarget } from "./portalIssuedDocuments";
 import { clientHasLoginOnHost, getDecryptedCredential, getDecryptedCredentialByUrl, getDecryptedCredentialAny, listPortalCredentials, lockedOutCredential, recordLoginOutcome, storedCredentialFor } from "./portalCredentials";
@@ -11387,6 +11388,8 @@ export async function prepareSubmission(
       void notifyClientOfFiling(db, detail.project, { track: permitTypeTag, permitNumber: capturedPermitNumber, via: "auto_submit" });
       // The quote in force as it was filed (#494), once per billing track; never throws.
       snapshotFilingQuote(db, detail.project, permitTypeTag, submissionId);
+      // Our price in force as it was filed (#187), once per filing type; never throws.
+      recordFilingServiceCharge(db, detail.project, permitTypeTag, submissionId);
     }
 
     // STAFF ALERT (#487) — after the run's row committed, fire-and-forget, never into this path.
@@ -11893,6 +11896,8 @@ export function captureConfirmation(
   // report. Outside the transaction and never throwing, for the same reason as the close above.
   // A legacy run with no track and no stamped row bills as the permit track (billingTrack).
   snapshotFilingQuote(db, projectForTarget, filedTrack, filedSubmissionId);
+  // Our price in force as it was filed (#187), once per filing type; never throws.
+  recordFilingServiceCharge(db, projectForTarget, filedTrack, filedSubmissionId);
 
   const detail = getProjectDetail(db, projectId);
   // A PERSON CONFIRMED THIS FILING (the dashboard's capture form, or the hand-over's confident read

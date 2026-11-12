@@ -35,6 +35,7 @@ import type { AppDb } from "./db";
 import type { ClientRecord, ProjectRecord, SubmissionPaymentRecord } from "../../shared/src/types";
 import { invoiceLinesForPayment, type InvoiceExclusion, type InvoiceLine, type InvoiceTrack } from "./invoices";
 import { getSubmissionPayment } from "./submissionFees";
+import { billedOnStatement, listFilingCharges, resolveServicePrice, TRACK_NAMES } from "./servicePrices";
 import { getClient } from "./clients";
 import { mapProject } from "./repository";
 import { HttpError } from "./httpError";
@@ -372,6 +373,82 @@ export function buildClientStatement(db: AppDb, clientId: string, period: { peri
     }
   }
 
+  // ── OUR PRICE PER FILING (#187) ─────────────────────────────────────────────────────────
+  // Every filing recorded while this client was NOT billed per submission is one service line, at the
+  // price saved on it when it was filed. A per-submission filing was paid at the gate (above) and is
+  // never billed again. A filing saved with no price (none was set then) is priced from the price in
+  // force now, and says so; with still no price it is listed, never billed at $0. A filing a person
+  // waived is not billed. Line key "filing:<charge id>:service": one line, one invoice, as above.
+  const charges = listFilingCharges(db, clientId).filter((c) => billedOnStatement(c));
+  const billedCharges = liveLinesByPayment(db, charges.map((c) => c.id));
+  for (const c of charges) {
+    const lineKey = `filing:${c.id}:service`;
+    if ((billedCharges.get(c.id) ?? []).some((p) => p.lineKey === lineKey)) continue;
+    const at = c.filedAt;
+    if (!inPeriod(at)) continue;
+    const label = [text(c.project.homeownerName), text(c.project.projectAddress)].filter(Boolean).join(", ") || c.projectId;
+    const kindName = TRACK_NAMES[c.track];
+    const filing = c.permitType && c.permitType !== c.track ? `${c.permitType} ${kindName}` : kindName;
+    if (c.waivedAt) {
+      if (!carried(at)) {
+        excluded.push({
+          track: c.track, projectId: c.projectId, projectLabel: label,
+          reason: `Not billed: ${c.waivedBy || "a person"} waived this ${filing} (${c.waiveReason}).`,
+          resolution: "Nothing to do.",
+          amountSeenUsd: c.priceUsd,
+        });
+      }
+      continue;
+    }
+    let amount = c.priceUsd;
+    let basis = `Price saved when it was filed: ${c.priceLabel || c.priceBasis}.`;
+    if (amount == null) {
+      const now = resolveServicePrice(db, clientId, c.track, c.projectId);
+      amount = now.priceUsd;
+      basis = `No price was set when it was filed; priced now from ${now.label}.`;
+    }
+    if (amount == null) {
+      excluded.push({
+        track: c.track, projectId: c.projectId, projectLabel: label,
+        reason: `This ${filing} was filed ${at.slice(0, 10)}, and no price per ${kindName} is set for this client or on the price list.`,
+        resolution: "Set the price (Clients, Billing, Prices, or this client's own price) and it is billed on the next statement.",
+        amountSeenUsd: null,
+      });
+      continue;
+    }
+    if (amount === 0) {
+      if (!carried(at)) {
+        excluded.push({
+          track: c.track, projectId: c.projectId, projectLabel: label,
+          reason: `This ${filing} is priced at $0 (${basis.replace(/\.$/, "")}).`,
+          resolution: "Nothing to do.",
+          amountSeenUsd: 0,
+        });
+      }
+      continue;
+    }
+    lines.push({
+      lineKey,
+      projectId: c.projectId,
+      paymentId: c.id,
+      projectLabel: label,
+      track: c.track,
+      kind: "service",
+      role: "charge",
+      basis: c.priceBasis,
+      provisional: false,
+      alreadyPaid: false,
+      amountUsd: round2(amount),
+      description: `Filing service fee — ${filing} filed ${at.slice(0, 10)}`,
+      paymentReference: "",
+      eventAt: at,
+      carriedForward: carried(at),
+      composition: [],
+      reconciliation: basis,
+      adjusts: null,
+    });
+  }
+
   lines.sort((a, b) => (a.eventAt || "").localeCompare(b.eventAt || "") || a.projectLabel.localeCompare(b.projectLabel) || a.lineKey.localeCompare(b.lineKey));
 
   const logins = db.query<Row>(
@@ -381,7 +458,9 @@ export function buildClientStatement(db: AppDb, clientId: string, period: { peri
 
   const notes: string[] = [];
   if (!perSubmission) {
-    notes.push(`This client is billed ${billingMode || "monthly / none"}, not per submission: our service fee is not a line on this statement. A monthly plan amount is not set in the app yet (price list, later).`);
+    notes.push(billingMode
+      ? `This client is billed ${billingMode}: each filing is a line at the price saved when it was filed (the client's own price, else the price list).`
+      : "No billing mode is set for this client: its filings are billed here at the price saved when each was filed. Set Monthly or Per submission on the client.");
   }
 
   const { billTo, billToSource } = billToFor(client);

@@ -2571,7 +2571,7 @@ function renderPaymentQuoteCard(quote) {
       <table style="font-size:12px;margin:4px 0;border-collapse:collapse">
         <tr><td style="padding:1px 14px 1px 0">Permit fees</td><td style="text-align:right"><strong>${quote.permitFeeIsFloor && quote.permitFeeUsd != null ? "at least " : ""}${money(quote.permitFeeUsd)}</strong></td>
             <td style="padding-left:10px" class="muted">${esc(FEE_SOURCE_LABELS[quote.permitFeeSource] || "")}</td></tr>
-        <tr><td style="padding:1px 14px 1px 0">Our service fee</td><td style="text-align:right"><strong>${money(quote.serviceFeeUsd)}</strong></td><td></td></tr>
+        <tr><td style="padding:1px 14px 1px 0">Our service fee</td><td style="text-align:right"><strong>${money(quote.serviceFeeUsd)}</strong></td><td class="muted" style="padding-left:8px">${quote.serviceFeeSource ? esc(quote.serviceFeeSource) : ""}</td></tr>
         <tr class="muted"><td style="padding:1px 14px 1px 0">Filing cost, all fees</td><td style="text-align:right">${money(quote.totalUsd)}</td><td></td></tr>
         <tr style="border-top:1px solid var(--border)"><td style="padding:3px 14px 1px 0"><strong>Collect from client now</strong></td><td style="text-align:right"><strong>${money(quote.gateAmountUsd)}</strong></td>
             <td style="padding-left:10px" class="muted">service fee only — the permit fee is paid on the portal and invoiced after, only if we paid it</td></tr>
@@ -11714,7 +11714,7 @@ async function loadJobDrops() {
 
 // ----- Clients & contractor licensing -----
 const CLIENT_TEXT_FIELDS = [
-  "companyName", "legalBusinessName", "dba", "contactName", "contactEmail", "phone", "billingStatus", "billingMode", "serviceFeeUsd",
+  "companyName", "legalBusinessName", "dba", "contactName", "contactEmail", "phone", "billingStatus", "billingMode", "serviceFeeUsd", "serviceFeePermitUsd", "serviceFeeNemUsd",
   "requestLinksAutoSend", "handoffAutoSend", "intakeTag", "intakeSenders",
   "ccbLicenseNumber", "ccbExpiration", "electricalLicenseNumber", "metroCityLicenseNumber",
   "electricalSupervisorName", "electricianLicenseNumber", "installerCertifications",
@@ -12067,7 +12067,7 @@ function billingLineFlags(l) {
   return flags.length ? ` <span class="muted">(${esc(flags.join("; "))})</span>` : "";
 }
 
-function billingLinesHtml(lines) {
+function billingLinesHtml(lines, opts = {}) {
   const kinds = ["reimbursement", "service", "onboarding", "received"];
   return kinds.map((kind) => {
     const list = (lines || []).filter((l) => l.kind === kind);
@@ -12078,7 +12078,7 @@ function billingLinesHtml(lines) {
           <td style="padding:1px 8px 1px 0;white-space:nowrap;vertical-align:top">${esc(String(l.eventAt || "").slice(0, 10))}</td>
           <td style="padding:1px 8px 1px 0;vertical-align:top">${esc(l.projectLabel)}<br><span class="muted">${esc(l.description)}</span>${billingLineFlags(l)}
             ${l.reconciliation ? `<br><span class="muted">⚠ ${esc(l.reconciliation)}</span>` : ""}</td>
-          <td style="padding:1px 0;text-align:right;white-space:nowrap;vertical-align:top">${kind === "received" ? "" : l.alreadyPaid ? '<span class="muted">paid</span> ' : ""}${billingMoney(l.amountUsd)}</td>
+          <td style="padding:1px 0;text-align:right;white-space:nowrap;vertical-align:top">${kind === "received" ? "" : l.alreadyPaid ? '<span class="muted">paid</span> ' : ""}${billingMoney(l.amountUsd)}${opts.waive && String(l.lineKey || "").startsWith("filing:") ? `<br><button type="button" class="secondary" style="font-size:11px;padding:1px 6px" data-waive-charge="${esc(l.paymentId)}"><span style="white-space:nowrap">Don't bill</span></button>` : ""}</td>
         </tr>`).join("")}
       </table></div>`;
   }).join("");
@@ -12104,7 +12104,7 @@ function renderBillingStatement(st) {
       <p style="margin:0 0 4px;font-size:12px"><strong>Draft statement, ${esc(st.periodStart)} to ${esc(st.periodEnd)}</strong> (end not included) ·
         bill to ${st.billTo ? esc(st.billTo) : '<span class="badge badge-warning">NO ADDRESS</span>'}
         <span class="muted">(${esc(String(st.billToSource || "").replaceAll("_", " "))}; billed ${esc(st.billingMode)})</span></p>
-      ${(st.lines || []).length ? billingLinesHtml(st.lines) + billingTotalsHtml(st) : '<p class="muted" style="font-size:12px">Nothing new to bill for this period: every billable line is already on an invoice, or nothing is billable yet.</p>'}
+      ${(st.lines || []).length ? billingLinesHtml(st.lines, { waive: true }) + billingTotalsHtml(st) : '<p class="muted" style="font-size:12px">Nothing new to bill for this period: every billable line is already on an invoice, or nothing is billable yet.</p>'}
       ${(st.notes || []).map((n) => `<p class="muted" style="font-size:12px;margin:4px 0">${esc(n)}</p>`).join("")}
       ${logins.length ? `<p style="font-size:12px;margin:4px 0"><strong>⚠ ${esc(String(logins.length))} portal login${logins.length === 1 ? " has" : "s have"} no fee agreement on file</strong> (${esc(logins.join(", "))}). A fee we pay through ${logins.length === 1 ? "it" : "them"} cannot be invoiced until who pays is recorded on the login.</p>` : ""}
       ${excluded.length ? `<details class="provenance"><summary><strong>${esc(String(excluded.length))} not on this statement, and why</strong></summary>
@@ -12112,6 +12112,71 @@ function renderBillingStatement(st) {
           ${excluded.map((x) => `<li><strong>${esc(x.projectLabel)}</strong> (${esc(x.track)}): ${esc(x.reason)}${x.amountSeenUsd != null ? ` <span class="muted">[${billingMoney(x.amountSeenUsd)} seen]</span>` : ""}<br><span class="muted">${esc(x.resolution)}</span></li>`).join("")}
         </ul></div></details>` : ""}
     </div>`;
+  box.querySelectorAll("[data-waive-charge]").forEach((b) => b.addEventListener("click", () => waiveFilingCharge(b.dataset.waiveCharge)));
+}
+
+/* A person decides one filing is not billed (filed in error, a courtesy refile): named, with a reason. */
+async function waiveFilingCharge(chargeId) {
+  const clientId = state.editingClientId;
+  if (!clientId || !chargeId) return;
+  const reason = window.prompt("Why is this filing not billed? (recorded on the filing)", "");
+  if (reason == null) return;
+  if (!String(reason).trim()) { billingStatus("Say why this filing is not billed.", "error"); return; }
+  const decidedBy = namedPersonConsent(await authForDecision(), "Leave this filing off every invoice?", "waived the filing charge", "a filing charge is waived by a named person");
+  if (decidedBy == null) return;
+  try {
+    await api(`/api/clients/${encodeURIComponent(clientId)}/filing-charges/${encodeURIComponent(chargeId)}/waive`, { method: "POST", body: JSON.stringify({ reason, decidedBy }) });
+    await previewBillingStatement();
+    billingStatus("That filing will not be billed.");
+  } catch (err) { billingStatus(err.message || "Could not waive that filing.", "error"); }
+}
+
+/* ===========================================================================
+   OUR PRICES (#187) — one price per permit filing and per NEM application for
+   the organisation. Data set by a named admin, never code; each filing keeps
+   the price in force when it was filed. Every server string goes through esc().
+   =========================================================================== */
+async function loadServicePrices() {
+  const box = $("servicePricesBlock");
+  if (!box) return;
+  try {
+    const { prices } = await api("/api/billing/prices");
+    state.servicePrices = prices;
+  } catch (err) {
+    box.innerHTML = `<p class="muted clients-creds-hint">${esc(err.message || "Could not read the prices.")}</p>`;
+    return;
+  }
+  renderServicePrices();
+}
+
+function renderServicePrices() {
+  const box = $("servicePricesBlock");
+  const list = state.servicePrices;
+  if (!box || !list) return;
+  const p = list.prices || {};
+  const val = (e) => (e && e.priceUsd != null ? esc(String(e.priceUsd)) : "");
+  const who = (e) => (e && e.setAt ? ` <span class="muted">set by ${esc(e.setBy || "?")} on ${esc(String(e.setAt).slice(0, 10))}</span>` : ' <span class="badge badge-warning">NOT SET</span>');
+  box.innerHTML = `<p class="muted clients-creds-hint" style="margin:0 0 4px">For every client without its own price. Each filing keeps the price in force when it was filed; a change applies to filings from now on.${list.envDefaultUsd != null ? ` A blank price falls back to the server default, ${billingMoney(list.envDefaultUsd)}.` : " A blank price bills nothing and is listed on the statement."}</p>
+    <div class="form-row">
+      <label>Per permit filing ($)<input id="pricePermitUsd" type="number" min="0" step="0.01" value="${val(p.permit)}" /></label>
+      <label>Per NEM application ($)<input id="priceNemUsd" type="number" min="0" step="0.01" value="${val(p.nem)}" /></label>
+    </div>
+    <p class="clients-creds-hint" style="margin:0 0 4px">Permit:${who(p.permit)} · NEM:${who(p.nem)}</p>
+    <div class="actions" style="margin:0"><button type="button" class="secondary" id="savePricesBtn"><span style="white-space:nowrap">Save prices</span></button></div>`;
+  $("savePricesBtn")?.addEventListener("click", saveServicePrices);
+}
+
+async function saveServicePrices() {
+  const decidedBy = namedPersonConsent(await authForDecision(), "Save these prices? Filings from now on are charged at them; filings already made keep their price.", "set the prices", "prices are set by a named person");
+  if (decidedBy == null) return;
+  try {
+    const { prices } = await api("/api/billing/prices", { method: "PUT", body: JSON.stringify({
+      permitUsd: $("pricePermitUsd")?.value ?? "", nemUsd: $("priceNemUsd")?.value ?? "", decidedBy,
+    }) });
+    state.servicePrices = prices;
+    renderServicePrices();
+    billingStatus("Prices saved.");
+  } catch (err) { billingStatus(err.message || "Could not save the prices.", "error"); }
 }
 
 const INVOICE_STATUS_BADGE = { draft: "badge-warning", sent: "badge-info", paid: "badge-pass", void: "" };
@@ -12252,6 +12317,7 @@ async function loadClientBilling(clientId) {
   try {
     // The QuickBooks status first: the invoice rows offer "Send to QuickBooks" only when connected.
     await loadQuickBooksStatus();
+    await loadServicePrices();
     const data = await api(`/api/clients/${encodeURIComponent(clientId)}/invoices`);
     if (state.editingClientId === clientId) renderBillingInvoices(data.invoices || []);
   } catch (err) {

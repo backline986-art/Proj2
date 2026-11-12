@@ -746,6 +746,40 @@ app.post("/api/clients/:id/invoices/:invoiceId/quickbooks", asyncHandler(async (
   res.json(await pushInvoiceToQuickBooks(db, String(req.params.id), String(req.params.invoiceId), by));
 }));
 
+// --- Our price per filing (#187): the org's price list, and each filing's saved price ---
+// The price list is per org: every handler reads the org from requestScope(db, req).orgId, never the
+// body. Setting it is admin-gated when sign-in is on, named (billingPerson) and audited. A new price
+// applies to filings recorded from then on; a price saved on a filing never changes.
+app.get("/api/billing/prices", asyncHandler(async (req, res) => {
+  const { getServicePriceList } = await import("./servicePrices");
+  res.json({ prices: getServicePriceList(db, requestScope(db, req).orgId) });
+}));
+app.put("/api/billing/prices", asyncHandler(async (req, res) => {
+  requireAdmin(req);
+  const { setServicePrices } = await import("./servicePrices");
+  const by = await billingPerson(req, "set the prices");
+  const input: Record<string, unknown> = {};
+  for (const key of ["permitUsd", "nemUsd"]) if (req.body && key in req.body) input[key] = req.body[key];
+  const orgId = requestScope(db, req).orgId;
+  const { list, changed } = setServicePrices(db, orgId, input, by);
+  if (changed.length) addAuditLog(db, null, "human", by, "billing.prices_set", { orgId, changed });
+  res.json({ prices: list });
+}));
+// Under /api/clients/:id, so the client scope guard covers both. A charge is read only through its
+// own client's projects (another client's charge is a 404).
+app.get("/api/clients/:id/filing-charges", asyncHandler(async (req, res) => {
+  const { listFilingCharges } = await import("./servicePrices");
+  getClient(db, String(req.params.id));
+  res.json({ charges: listFilingCharges(db, String(req.params.id)) });
+}));
+app.post("/api/clients/:id/filing-charges/:chargeId/waive", asyncHandler(async (req, res) => {
+  const { waiveFilingCharge } = await import("./servicePrices");
+  const by = await billingPerson(req, "waive a filing charge");
+  const charge = waiveFilingCharge(db, String(req.params.id), String(req.params.chargeId), req.body?.reason, by);
+  addAuditLog(db, charge.projectId, "human", by, "billing.filing_charge_waived", { clientId: String(req.params.id), chargeId: charge.id, permitType: charge.permitType, priceUsd: charge.priceUsd, reason: charge.waiveReason });
+  res.json({ charge });
+}));
+
 // --- QuickBooks Online connection (#701): ONE company per org ---
 // Every handler takes the org from requestScope(db, req).orgId, never the body; the OAuth callback
 // binds the org only through the single-use, expiring state a named person of that org minted.

@@ -1366,7 +1366,11 @@
                 <option value="monthly">Monthly invoice (no gate)</option>
               </select>
             </label>
-            <label>Service fee per submission ($)<input id="c_serviceFeeUsd" type="number" min="0" step="0.01" placeholder="blank = env default" /></label>
+            <label>Service fee, every filing ($)<input id="c_serviceFeeUsd" type="number" min="0" step="0.01" placeholder="blank = price list" title="One fee for every filing (the older setting). The two prices below win over it for their kind." /></label>
+          </div>
+          <div class="form-row">
+            <label>This client's price per permit filing ($)<input id="c_serviceFeePermitUsd" type="number" min="0" step="0.01" placeholder="blank = price list" /></label>
+            <label>This client's price per NEM application ($)<input id="c_serviceFeeNemUsd" type="number" min="0" step="0.01" placeholder="blank = price list" /></label>
           </div>
           <label>Intake &amp; portal-login links
             <select id="c_requestLinksAutoSend">
@@ -1508,6 +1512,11 @@
             <div id="billingStatement"></div>
             <h4 style="margin:10px 0 4px">Invoices</h4>
             <div id="billingInvoices"><p class="muted clients-creds-hint">No invoices yet.</p></div>
+            <!-- OUR PRICES (#187): one price per permit filing and per NEM application for the whole
+                 organisation, set by a named admin. Each filing keeps the price in force when it was filed;
+                 a client's own price (above) wins over these. Nothing here charges anyone. -->
+            <h4 style="margin:10px 0 4px">Prices</h4>
+            <div id="servicePricesBlock"><p class="muted clients-creds-hint">Loading…</p></div>
             <!-- QUICKBOOKS ONLINE (#701): one company for the whole organisation, not per client. Connect,
                  choose which Item each kind of line posts to, and check payments. Nothing here takes a
                  payment or makes QuickBooks email anyone. -->

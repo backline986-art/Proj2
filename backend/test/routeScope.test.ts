@@ -174,6 +174,7 @@ const UNSCOPED_BY_DESIGN: Record<string, string> = {
 
   // Stateless: takes a payload, returns a result, stores nothing.
   "/api/parser": "stateless parse/extract; holds no tenant data",
+  "/api/billing": "the org's own price list (#187): every handler reads the org from requestScope(db, req).orgId, never the body; setting a price is admin-gated, named and audited",
   "/api/quickbooks": "one QuickBooks company per org (#701): every handler reads the org from requestScope(db, req).orgId, never the body; the OAuth callback binds the org only through a single-use, expiring state minted by a named person of that org; connect/disconnect/settings are admin-gated",
 };
 

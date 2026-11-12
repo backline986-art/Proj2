@@ -276,6 +276,9 @@ export interface ClientRecord {
   billingMode: string;
   /** Operator's per-submission service fee ("top fee") in USD; null = env default. */
   serviceFeeUsd: number | null;
+  /** This client's own price per filing by track (#187), ahead of serviceFeeUsd and the org price list. */
+  serviceFeePermitUsd: number | null;
+  serviceFeeNemUsd: number | null;
   portalIdentities: ClientPortalIdentity[];
   /** Contractor licences beyond the named columns, one per issuing state/kind (Iowa "EL"
    *  electrical, Florida EC/CVC, Texas TECL, Utah DOPL...). clientMatch matches them like a CCB. */
@@ -662,6 +665,9 @@ export interface SubmissionPaymentQuote {
   portalFeeRecords: PortalFeeRecordSummary | null;
   paymentMethod: FeePaymentMethod;
   serviceFeeUsd: number;
+  /** Where our service fee came from (#187): "the price list's price per permit filing", "this
+   *  client's own price per NEM application", or that no price is set (then serviceFeeUsd is 0). */
+  serviceFeeSource?: string;
   /** What this filing costs in all: the jurisdiction fee plus our service fee. A fact about the
    *  submission, NOT what the client hands us at the gate — see gateAmountUsd. */
   totalUsd: number | null;
