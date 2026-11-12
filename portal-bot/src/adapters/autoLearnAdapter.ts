@@ -11629,21 +11629,26 @@ export class AutoLearnAdapter extends BasePortalAdapter {
     }).catch(() => "");
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const readDoc = async (): Promise<string> => page.evaluate(() => String((window as any).__alLookupDoc || "")).catch(() => "");
-    /** POSTBACK SETTLE: the loading overlay the press raised (ACA's ProcessLoading — an element whose
-     *  id or class reads loading / progress / overlay, visible after the click) must be gone, AND the
-     *  network idle, bounded; then the dynamic-fields settle as everywhere else. */
+    /** POSTBACK SETTLE: the loading indicator the press raised (ACA's ProcessLoading — an element whose
+     *  id or class reads loading / progress, or aria-busy, visible after the click) must be gone, AND
+     *  the network idle, bounded; then the dynamic-fields settle as everywhere else. A visible DIALOG
+     *  ends the wait at once: Accela's page-overlay-blocker mask is PART of an open dialog, not a
+     *  "busy" sign (Meridian 06:01: every modal-opening press waited the full 20 s on it). */
     const settleAfterPress = async (): Promise<void> => {
       const deadline = Date.now() + 20_000;
       await page.waitForLoadState?.("domcontentloaded", { timeout: 15000 }).catch(() => null);
       while (Date.now() < deadline) {
-        const busy = await page.evaluate(() => {
+        const state = await page.evaluate(() => {
           const vis = (e: Element) => { const r = (e as HTMLElement).getBoundingClientRect(); const st = window.getComputedStyle(e); return r.width > 0 && r.height > 0 && st.visibility !== "hidden" && st.display !== "none"; };
-          for (const el of Array.from(document.querySelectorAll("[id*='loading' i], [class*='loading' i], [id*='progress' i], [class*='progress' i], [id*='overlay' i], [class*='overlay' i], [aria-busy='true']"))) {
-            if (vis(el)) return true;
+          for (const el of Array.from(document.querySelectorAll("[role='dialog'], [aria-modal='true'], [class*='dialog' i]:not([class*='mask' i]), [id*='dialog' i]:not([id*='mask' i])"))) {
+            if (vis(el) && el.querySelector("iframe, input, select, table, button, a")) return "dialog";
           }
-          return false;
-        }).catch(() => false);
-        if (!busy) break;
+          for (const el of Array.from(document.querySelectorAll("[id*='loading' i], [class*='loading' i], [id*='progress' i], [class*='progress' i], [aria-busy='true']"))) {
+            if (vis(el)) return "busy";
+          }
+          return "idle";
+        }).catch(() => "idle");
+        if (state !== "busy") break;
         await sleep(400);
       }
       await page.waitForLoadState?.("networkidle", { timeout: Math.max(1000, deadline - Date.now()) }).catch(() => null);
@@ -11671,9 +11676,14 @@ export class AutoLearnAdapter extends BasePortalAdapter {
       for (const el of Array.from(c.querySelectorAll("input[type='hidden']"))) if (String((el as HTMLInputElement).value || "").trim()) n++;
       return n;
     }, key).catch(() => 0);
+    // Visible iframes that can HOLD a dialog: named or id'd, or with a real document — never ACA's
+    // unnamed, pointer-events:none mask iframe (dvACADialogLayerMask), which appears together with the
+    // dialog and, read as "the new frame", shadowed the real ACADialogFrame (Meridian 06:01: the
+    // address list sat in the dialog frame while the pass read "changed nothing").
     const visibleFrames = async (): Promise<string[]> => page.evaluate(() => (Array.from(document.querySelectorAll("iframe")) as HTMLIFrameElement[])
-      .filter((f) => { const r = f.getBoundingClientRect(); return r.width > 0 && r.height > 0; })
-      .map((f) => f.getAttribute("name") || f.id || String(f.getAttribute("src") || "").split("?")[0])).catch(() => [] as string[]);
+      .filter((f) => { const r = f.getBoundingClientRect(); const st = window.getComputedStyle(f); return r.width > 0 && r.height > 0 && st.pointerEvents !== "none" && !/\bmask\b/i.test(f.className); })
+      .map((f) => f.getAttribute("name") || f.id || (/^(about:blank|javascript:|)$/i.test(String(f.getAttribute("src") || "").trim()) ? "" : String(f.getAttribute("src") || "").split("?")[0]))
+      .filter(Boolean)).catch(() => [] as string[]);
     /** IN-DOCUMENT OVERLAYS (Boise 05:29: Accela's "Address Search Result List" is a modal DIV in the
      *  main document — role / aria-modal / a modal-dialog-popup-overlay class or id, or a fixed /
      *  absolute box covering most of the viewport). Each visible one is stamped data-al-overlay=<n>
@@ -11791,7 +11801,8 @@ export class AutoLearnAdapter extends BasePortalAdapter {
       };
       ctx.steps.push(clickStep);
       const framesAfter = await visibleFrames();
-      const newFrame = framesAfter.find((f) => !framesBefore.includes(f)) ?? null;
+      const newFrames = framesAfter.filter((f) => !framesBefore.includes(f));
+      let newFrame: string | null = newFrames[0] ?? null;
       // The in-document overlay the press opened, if any: the newly visible one with the most controls.
       const newOverlay = (await visibleOverlays()).filter((o) => !overlaysBefore.includes(o.key) && o.controls > 0).sort((a, b) => b.controls - a.controls)[0]?.key ?? null;
       const overlaySel = newOverlay ? `[data-al-overlay="${newOverlay}"]` : "";
@@ -11822,7 +11833,11 @@ export class AutoLearnAdapter extends BasePortalAdapter {
         // the form's own radio rows).
         let chosen = overlaySel ? await this.chooseAddressRowInScope(page, "", ctx.steps, overlaySel) : false;
         if (!chosen && !this.addressRowRefusal && !overlaySel) chosen = await this.chooseProjectAddressRow(ctx.steps);
-        if (!chosen && !this.addressRowRefusal && newFrame) chosen = await this.chooseAddressRowInFrame(newFrame, ctx.steps);
+        for (const f of newFrames) {
+          if (chosen || this.addressRowRefusal) break;
+          chosen = await this.chooseAddressRowInFrame(f, ctx.steps);
+          if (chosen) newFrame = f;
+        }
         if (!chosen && !this.addressRowRefusal && popup) chosen = await this.chooseAddressRowInScope(popup, "popup", ctx.steps);
         if (chosen) {
           await settleAfterPress();
@@ -11983,6 +11998,8 @@ export class AutoLearnAdapter extends BasePortalAdapter {
     }, rootSel).catch(() => [] as Array<{ key: string; text: string; tick: boolean }>);
     let rows = await scan();
     for (let waited = 0; rows.length < 2 && waited < 6000; waited += 600) { await sleep(600); rows = await scan(); }
+    // Counts only (no addresses): a list the scan could not read as rows is otherwise a silent miss.
+    this.debug?.event({ type: "address_rows_read", scope: (frameName || rootSel || "page").slice(0, 40), rows: rows.length, radios: rows.filter((r) => r.tick).length });
     if (rows.length < 2) return false;
     const { ranked, rejected, preference } = rankAddressVersions(rows.map((r) => r.text), {
       city: id.city, zip: id.zip, homeownerName: id.homeownerName, isElectrical: id.isElectrical === true, issuingAgency: id.issuingAgency ?? undefined,
@@ -12012,20 +12029,36 @@ export class AutoLearnAdapter extends BasePortalAdapter {
     if (best.tick) {
       // THE DIALOG'S OWN SELECT BUTTON — allowed INSIDE the list's scope only (never a page-level
       // "Select"), by whole label, and still never a filing / paying word.
-      const DIALOG_OK = /^(select|ok|choose|use (this|selected) address|continue|done)\s*[»›>→]*$/i;
+      // Select / OK / Choose / "use this address" only: a dialog's "Continue" or "Done" is too close to
+      // the application's own Continue to be pressed on a word match (lead ruling, #178).
+      const DIALOG_OK = /^(select|ok|choose|use (this|selected) address)\s*[»›>→]*$/i;
       const scope = rootSel ? frame.locator(rootSel) : frame;
       const controls = scope.locator("a, button, input[type='button'], input[type='submit']");
-      const n = await controls.count().catch(() => 0);
-      for (let i = 0; i < Math.min(n, 40); i++) {
-        const c = controls.nth(i);
-        if (typeof c.isVisible === "function" && !(await c.isVisible().catch(() => false))) continue;
-        const label = String((await c.evaluate((el: HTMLElement) => el.tagName === "INPUT" ? (el as HTMLInputElement).value : (el.innerText || el.textContent || el.getAttribute("title") || "")).catch(() => "")) ?? "").replace(/\s+/g, " ").trim();
+      // Every control's label in one read (the list can carry many links: a header sort link, a
+      // pager, a hidden select anchor), then the first that is the dialog's own Select — scrolled
+      // into view (Accela's sits below the fold of a 15-row list) and clicked; a button the page
+      // keeps disabled until a row is ticked is waited for by the click's own actionability check.
+      const found: Array<{ label: string; tag: string; id: string }> = await controls.evaluateAll((els: Element[]) => els.map((el) => {
+        const r = (el as HTMLElement).getBoundingClientRect();
+        const label = !(r.width > 0 && r.height > 0) ? "" : String(el.tagName === "INPUT" ? (el as HTMLInputElement).value : ((el as HTMLElement).innerText || el.textContent || el.getAttribute("title") || "")).replace(/\s+/g, " ").trim();
+        return { label, tag: el.tagName, id: el.getAttribute("id") || "" };
+      })).catch(() => [] as Array<{ label: string; tag: string; id: string }>);
+      for (let i = 0; i < found.length; i++) {
+        const { label, tag, id: cid } = found[i];
         if (!label || !DIALOG_OK.test(label) || isPayFee(label) || SUBMIT_INTENT.test(label) || sharedIsSubmitIntent(label)) continue;
-        if (!(await c.click({ timeout: 8000 }).then(() => true).catch(() => false))) continue;
-        const cid = String((await c.getAttribute("id").catch(() => "")) ?? "");
+        const c = controls.nth(i);
+        await c.scrollIntoViewIfNeeded?.({ timeout: 3000 }).catch(() => null);
+        if (!(await c.click({ timeout: 10000 }).then(() => true).catch(() => false))) continue;
+        // Recorded by the control's own id when it has one (ACA's ctl00_phPopup_btnSelect is stable,
+        // and its <a> has no href — so no link role — until a row is ticked), the label by the role
+        // the tag implies as the fallback: replay resolves the first selector that is there (a
+        // "button" role on an <a> was waited on for its whole timeout, live-shaped smoke).
+        const byLabel = { role: tag === "A" ? "link" as const : "button" as const, name: label, exact: true, ...inFrame };
         steps.push({
           action: "click", phase: "fill",
-          selector: { role: "button", name: label, exact: true, ...inFrame, fallbacks: [{ role: "link", name: label, exact: true, ...inFrame }, ...(cid ? [{ css: `[id="${cid}"]`, ...inFrame }] : [])] },
+          selector: cid
+            ? { css: `[id="${cid}"]`, ...inFrame, fallbacks: [byLabel, { css: `a[title="${label}"], input[value="${label}"]`, ...inFrame }] }
+            : { ...byLabel, fallbacks: [{ css: `a[title="${label}"], input[value="${label}"]`, ...inFrame }] },
           note: `lookup: ${label} [address list]`,
         });
         await this.waitForDynamicFieldsSettle().catch(() => null);

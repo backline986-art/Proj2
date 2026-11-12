@@ -3318,7 +3318,13 @@ export class RecipeAdapter extends BasePortalAdapter {
       // sat over the Terms and Conditions checkbox, and a `check` step never reached the
       // clearing pass. It is a FIRST-RUN artifact, and per-portal browser profiles mean
       // every portal now gets a first run.
-      if (step.action === "click" || step.action === "goto" || step.action === "check" || step.action === "uncheck") {
+      // NOT BEFORE A STEP THAT LIVES INSIDE A DIALOG FRAME (#178): the frame IS the open dialog
+      // the step needs — Accela's "Address Search Result List" (radio rows + Select in
+      // ACADialogFrame) carries a "Close" the dismissor reads as a dismissal, and it closed the
+      // list between the row's tick and the Select (live-shaped smoke: Select then waited on a
+      // frame that was gone). A step the learner recorded in a frame opened that frame on purpose.
+      const inDialogFrame = !!step.selector?.frame || (step.selector?.fallbacks ?? []).some((f) => !!f.frame);
+      if (!inDialogFrame && (step.action === "click" || step.action === "goto" || step.action === "check" || step.action === "uncheck")) {
         await this.dismissModalsGuarded();
         await clearPageOverlays(this.page).catch(() => null);
       }

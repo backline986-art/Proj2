@@ -108,7 +108,9 @@ const pages = (variant: string, path: string, q: URLSearchParams): string | null
       <div class="ACA_Form"><span class="ACA_Required_Indicator">*</span><label for="${P}_AppSpec_txt_0_4">Number of panels:</label> <input id="${P}_AppSpec_txt_0_4" title="Required" aria-required="true"></div>`)}
     <div id="errs"></div>
     ${CONT}
-    <div id="dlgWrap" style="display:none"><a id="ACADialogFrame_Close" title="Close" href="javascript:void(0);">Close</a><iframe name="ACADialogFrame" id="ACADialogFrame" src="about:blank" style="width:600px;height:300px"></iframe></div>
+    <div id="iframeBlocker" class="page-overlay-blocker" style="display:none;position:fixed;top:0;left:0;width:100%;height:100%"></div>
+    <div id="dvACADialogLayerMask" class="ACA_MaskDiv" style="display:none;position:absolute;top:0;left:0;width:100%;height:2900px;pointer-events:none"><iframe class="mask_iframe" title="This is a masked layout for Silverlight control." style="width:100%;height:100%;pointer-events:none"></iframe></div>
+    <div id="dvACADialogLayer" class="ACA_Dialog" style="display:none;position:fixed;top:60px;left:100px;width:800px;background:#fff;border:1px solid #888"><div id="ACA_Dialog_Header"><h1 class="ACA_Dialog_Title"><span id="ACA_Dialog_Title">Address Search Result List</span></h1><a id="ACADialog_closebtn" title="Close" href="javascript:void(0);">Close</a></div><iframe class="ACA_Dialog_Frame" name="ACADialogFrame" id="ACADialogFrame" src="about:blank" style="width:100%;height:300px"></iframe></div>
     <div id="modalMask" class="ACA_MaskDiv" style="display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,.3)"></div>
     <div id="addrModal" class="ACA_Dialog" role="dialog" aria-modal="true" style="display:none;position:fixed;top:80px;left:120px;width:640px;background:#fff;border:1px solid #888;padding:12px">
       <h1>Address Search Result List</h1> <a id="modalClose" title="Close" href="javascript:void(0);">×</a>
@@ -133,9 +135,15 @@ const pages = (variant: string, path: string, q: URLSearchParams): string | null
       }
       setTimeout(function(){
         if (!hit) { document.getElementById("addrMsg").textContent = "Address not found."; return; }
-        if (V === "dialogcandidates") {
-          document.getElementById("ACADialogFrame").src = "/permits/Dialog.aspx?kind=address";
-          document.getElementById("dlgWrap").style.display = "block";
+        if (V === "dialogcandidates" || V === "framecandidates") {
+          // Boise's live shape (05:29): the list page inside iframe#ACADialogFrame within
+          // div#dvACADialogLayer.ACA_Dialog — Select links per row, or a radio per row + one Select.
+          document.getElementById("ACADialogFrame").src = "/permits/Dialog.aspx?kind=address" + (V === "framecandidates" ? "&shape=radio&isPopup=Y" : "");
+          // The dialog brings its masks with it: the page blocker and an UNNAMED mask iframe (first in
+          // DOM order) — the shape that shadowed the real frame live.
+          document.getElementById("iframeBlocker").style.display = "block";
+          document.getElementById("dvACADialogLayerMask").style.display = "block";
+          document.getElementById("dvACADialogLayer").style.display = "block";
         } else if (V === "popupcandidates") {
           window.open("/permits/Dialog.aspx?kind=address&popup=1", "AddrPopup", "width=640,height=420");
         } else if (V === "modalcandidates" || V === "modalnone") {
@@ -161,10 +169,11 @@ const pages = (variant: string, path: string, q: URLSearchParams): string | null
     if (/^(nomatch|postbacknone)$/.test(V)) el("License_409Edit_btnLookUpLP").onclick = function(){
       S.lookups++; save();
       document.getElementById("ACADialogFrame").src = "/permits/Dialog.aspx?kind=licensee";
-      document.getElementById("dlgWrap").style.display = "block";
+      document.getElementById("dvACADialogLayer").style.display = "block";
       return false;
     };
-    document.getElementById("ACADialogFrame_Close").onclick = function(){ document.getElementById("dlgWrap").style.display = "none"; return false; };
+    window.__hideDialog = function(){ document.getElementById("dvACADialogLayer").style.display = "none"; document.getElementById("dvACADialogLayerMask").style.display = "none"; document.getElementById("iframeBlocker").style.display = "none"; };
+    document.getElementById("ACADialog_closebtn").onclick = function(){ window.__hideDialog(); S.frameClosed = (S.frameClosed || 0) + 1; save(); return false; };
     var closeModal = function(){ document.getElementById("modalMask").style.display = "none"; document.getElementById("addrModal").style.display = "none"; S.modalClosed = (S.modalClosed || 0) + 1; save(); return false; };
     document.getElementById("modalClose").onclick = closeModal;
     document.getElementById("modalCancel").onclick = closeModal;
@@ -186,6 +195,44 @@ const pages = (variant: string, path: string, q: URLSearchParams): string | null
       return false;
     };`);
   }
+  if (/Dialog\.aspx$/i.test(path) && q.get("kind") === "address" && q.get("shape") === "radio") {
+    // THE LIVE MERIDIAN SHAPE (06:01, trace resource 503ba5aa…): one ACA_GridView whose first row is
+    // the "Showing 1-15 of 16" caption, then a header row with a sort link, then 15 data rows — a radio
+    // in td 1 (value CB_n, title "To select one record in current page."), the address in td 2 — one
+    // plain row ("… MERIDIAN CITY HALL") and fourteen "STE nnn" rows; a hidden select anchor; the
+    // Select button DISABLED (no href, aria-disabled) until a radio is ticked; Cancel; a hidden Submit.
+    // The frame is 300 px tall, so Select sits well below the fold.
+    const PP = "ctl00_phPopup_ucAddressSearchResult_ucAddressList";
+    const rowText = (i: number): string => i === 0
+      ? "33 BROADWAY AVE, MERIDIAN TOWNSITE AMD, testing testing, MERIDIAN ID 83642, 33 BROADWAY AVE, 33 BROADWAY AVE MERIDIAN CITY HALL"
+      : `33 BROADWAY AVE, STE ${100 + i * 2}, MERIDIAN TOWNSITE AMD, testing testing, MERIDIAN ID 83642, 33 BROADWAY AVE STE ${100 + i * 2}, 33 BROADWAY AVE STE ${100 + i * 2}`;
+    const dataRows = Array.from({ length: 15 }, (_, i) => `<tr class="${i % 2 ? "ACA_TabRow_Even" : "ACA_TabRow_Odd"}"><td class="ACA_AlignLeftOrRightTop"><input type="radio" name="${PP}_gv_RadioButtonFieldGroupName" id="${PP}_gv_CB_${i}" value="CB_${i}" title="To select one record in current page."></td><td class="ACA_AlignLeftOrRightTop" style="width:750px"><div><span id="${PP}_gv_ctl${String(i + 2).padStart(2, "0")}_lblAddress">${rowText(i)}</span></div></td></tr>`).join("");
+    return `<!doctype html><html><head><title>Address Search Result List Dialog</title></head><body>
+    <div class="AddressSearchResult"><div class="Addresses"><div class="ACA_TabRow"><div class="ACA_Title_Bar"><h1><span>Addresses</span></h1></div></div>
+    <div id="${PP}_divAddressResult" class="ACA_TabRow_NoScoll"><a id="${PP}_btnSelectAddress" tabindex="-1" class="ACA_Hide" style="display:none" href="javascript:void(0);"></a>
+    <div class="ACA_Grid_OverFlow"><table class="ACA_GridView ACA_Grid_Caption" cellspacing="0" border="0" id="${PP}_gv"><caption>Address list</caption>
+      <tr><td colspan="5"><div class="aca_gridview_caption"><table role="presentation" border="0"><tr><td style="white-space:nowrap"><span class="ACA_SmLabel">Showing 1-15 of 16</span></td></tr></table></div></td></tr>
+      <tr class="ACA_TabRow_Header"><th scope="col" style="width:20px">&nbsp;</th><th class="ACA_AlignLeftOrRight" scope="col" style="width:750px"><div class="ACA_Header_Row"><a id="${PP}_gv_ctl01_lnkAddressHeader" title="Address" href="javascript:void(0);"><span>Address</span></a></div></th></tr>
+      ${dataRows}
+      <tr><td colspan="5"><a href="javascript:void(0);">1</a> <a class="aca_simple_text" href="javascript:void(0);">2</a> <a class="aca_simple_text" href="javascript:void(0);">Next &gt;</a></td></tr>
+    </table></div></div></div></div>
+    <div class="ACA_Dialog_Buttons"><a id="ctl00_phPopup_btnSelect" disabled="disabled" title="Select" aria-disabled="true"><span>Select</span></a> <a id="ctl00_phPopup_btnCancel" class="ACA_LinkButton" title="Cancel" href="javascript:void(0);"><span>Cancel</span></a></div>
+    <input type="submit" name="Submit" value="Submit" class="HiddenButton" style="display:none">
+    <script>
+      var p = window.parent;
+      var sel = document.getElementById("ctl00_phPopup_btnSelect");
+      Array.prototype.forEach.call(document.querySelectorAll("input[type=radio]"), function(r){ r.onchange = function(){ p.__S.frameTicks = (p.__S.frameTicks || 0) + 1; p.save(); sel.removeAttribute("disabled"); sel.removeAttribute("aria-disabled"); sel.setAttribute("href", "javascript:void(0);"); }; });
+      var closeDlg = function(){ p.__hideDialog(); p.__S.frameClosed = (p.__S.frameClosed || 0) + 1; p.save(); };
+      document.getElementById("ctl00_phPopup_btnCancel").onclick = function(){ closeDlg(); return false; };
+      sel.onclick = function(){
+        if (sel.getAttribute("aria-disabled") === "true") return false;
+        var r = document.querySelector("input[type=radio]:checked");
+        p.__S.frameSelects = (p.__S.frameSelects || 0) + 1; if (r) { p.__S.rowPicks++; p.__S.pickedParcel = r.value === "CB_0" ? "R1234567890" : "R9999999999"; } p.save();
+        if (r) setTimeout(function(){ p.document.getElementById("${P}_ParcelEdit_txtParcelNo").value = r.value === "CB_0" ? "R1234567890" : "R9999999999"; p.document.getElementById("${P}_WorkLocationEdit_txtRefAddressId").value = "A-100"; closeDlg(); }, 200);
+        return false;
+      };
+    </script></body></html>`;
+  }
   if (/Dialog\.aspx$/i.test(path) && q.get("kind") === "address") return `<!doctype html><html><head><title>Address Search Result List</title></head><body>
     <h2>Address Search Result List</h2><p>Showing 1-2 of 2</p>
     <table id="${P}_WorkLocationEdit_gdvAddress">
@@ -199,7 +246,7 @@ const pages = (variant: string, path: string, q: URLSearchParams): string | null
         setTimeout(function(){
           p.document.getElementById("${P}_ParcelEdit_txtParcelNo").value = a.getAttribute("data-p");
           p.document.getElementById("${P}_WorkLocationEdit_txtRefAddressId").value = "A-100";
-          if (POPUP) window.close(); else p.document.getElementById("dlgWrap").style.display = "none";
+          if (POPUP) window.close(); else p.__hideDialog();
         }, 200);
         return false;
       }; });
@@ -272,7 +319,11 @@ let dialogCandidateSteps: RecipeStep[] = [];
 let nomatchSteps: RecipeStep[] = [];
 try {
   const recordedByVariant = new Map<string, RecipeStep[]>();
-  for (const variant of ["nomatch", "candidates", "dialogcandidates", "popupcandidates", "postbackcandidates", "postbacknone", "modalcandidates", "modalnone"]) {
+  // STEP1_VARIANTS=framecandidates,nomatch narrows a local run to the named variants (a full run is
+  // ~15 min); the suite runner never sets it, so CI always runs them all.
+  const ONLY = String(process.env.STEP1_VARIANTS ?? "").split(",").map((s) => s.trim()).filter(Boolean);
+  const wanted = (v: string): boolean => !ONLY.length || ONLY.includes(v);
+  for (const variant of ["nomatch", "candidates", "dialogcandidates", "popupcandidates", "postbackcandidates", "postbacknone", "modalcandidates", "modalnone", "framecandidates"].filter(wanted)) {
     const ctx = await browser.newContext();
     ctx.setDefaultTimeout(8000);
     await ctx.addCookies([{ name: "v", value: variant, url: base }]);
@@ -346,16 +397,20 @@ try {
     } else {
       if (variant === "candidates") candidateSteps = steps; else if (variant === "dialogcandidates") dialogCandidateSteps = steps;
       const rowStep = steps.find((s) => /data-al-row/.test(String(s.selector?.css ?? "")));
-      const wantFrame = variant === "dialogcandidates" ? "ACADialogFrame" : variant === "popupcandidates" ? "popup" : undefined;
-      const modal = variant === "modalcandidates";
+      const wantFrame = variant === "dialogcandidates" || variant === "framecandidates" ? "ACADialogFrame" : variant === "popupcandidates" ? "popup" : undefined;
+      // modalcandidates: radios in the main document; framecandidates: radios INSIDE ACADialogFrame
+      // (Boise's live shape) — both end with the dialog's Select button as its own recorded step.
+      const modal = variant === "modalcandidates" || variant === "framecandidates";
+      const selects = variant === "framecandidates" ? st.frameSelects : st.modalSelects;
+      const closed = variant === "framecandidates" ? st.frameClosed : st.modalClosed;
       // In the modal shape the pick is two steps: the row's radio (the marker) and the dialog's Select
       // button by label; `populates` sits on the last of them.
       const selectStep = modal ? steps.find((s) => /^lookup: Select \[address list\]/.test(String(s.note ?? ""))) : undefined;
       const lastOfGroup = modal ? selectStep : rowStep;
       check(`MUST-PASS ${variant}: two addresses listed${wantFrame ? ` in a ${wantFrame === "popup" ? "popup window" : "dialog"}` : variant === "postbackcandidates" ? " by a full-page postback" : modal ? " in an in-document modal (radio rows + Select)" : ""} → the job's own (Meridian 83642${modal ? ", the PLAIN row, not the unit-qualified one" : ""}) picked by the ranked chooser, recorded as the row marker${wantFrame ? ` with frame "${wantFrame}"` : ""}${modal ? " + the Select button by label" : ""}, populates on the pick`,
         st.rowPicks === 1 && st.pickedParcel === "R1234567890" && !!rowStep && !!lastOfGroup && (lastOfGroup.populates ?? []).some((l) => /parcel number/i.test(l)) && rowStep.selector?.frame === wantFrame
-          && (!modal || (Number(st.modalSelects) === 1 && selectStep?.selector?.name === "Select" && Number(st.modalClosed ?? 0) >= 1)),
-        `rowPicks=${String(st.rowPicks)} pickedParcel=${String(st.pickedParcel)} modalSelects=${String(st.modalSelects)} rowStep=${JSON.stringify(rowStep)} selectStep=${JSON.stringify(selectStep)}`);
+          && (!modal || (Number(selects) === 1 && (selectStep?.selector?.name === "Select" || (selectStep?.selector?.fallbacks ?? []).some((f) => f.name === "Select")) && selectStep?.selector?.frame === wantFrame && Number(closed ?? 0) >= 1)),
+        `rowPicks=${String(st.rowPicks)} pickedParcel=${String(st.pickedParcel)} selects=${String(selects)} closed=${String(closed)} rowStep=${JSON.stringify(rowStep)} selectStep=${JSON.stringify(selectStep)}`);
       check(`MUST-PASS ${variant}: the walk reaches Step 2: Review by Continue Application`,
         r?.reachedReview === true && /CapConfirm/i.test(where) && st.continues === 1, `reachedReview=${String(r?.reachedReview)} at=${where} continues=${String(st.continues)} ${msg}`);
     }
@@ -367,7 +422,8 @@ try {
     portalPlatform: "accela", portalUrl: entry, status: "complete", version: 1, createdBy: "smoke", createdAt: "", updatedAt: "", notes: "",
     steps: [...candidateSteps.filter((s) => !s.isFinalSubmit), { action: "stopForReview" } as RecipeStep],
   } as unknown as PortalRecipe;
-  for (const [variant, recorded] of [["candidates", candidateSteps], ["dialogcandidates", dialogCandidateSteps], ["popupcandidates", recordedByVariant.get("popupcandidates") ?? []], ["postbackcandidates", recordedByVariant.get("postbackcandidates") ?? []], ["modalcandidates", recordedByVariant.get("modalcandidates") ?? []]] as Array<[string, RecipeStep[]]>) {
+  for (const [variant, recorded] of [["candidates", candidateSteps], ["dialogcandidates", dialogCandidateSteps], ["popupcandidates", recordedByVariant.get("popupcandidates") ?? []], ["postbackcandidates", recordedByVariant.get("postbackcandidates") ?? []], ["modalcandidates", recordedByVariant.get("modalcandidates") ?? []], ["framecandidates", recordedByVariant.get("framecandidates") ?? []]] as Array<[string, RecipeStep[]]>) {
+    if (!wanted(variant)) continue;
     const rec = { ...recipe, id: `aca-step1-${variant}`, steps: [...recorded.filter((s) => !s.isFinalSubmit), { action: "stopForReview" } as RecipeStep] } as unknown as PortalRecipe;
     const ctx = await browser.newContext();
     ctx.setDefaultTimeout(8000);
@@ -379,23 +435,33 @@ try {
     // city / ZIP are what the ranked chooser judges the address rows against.
     const adapter = new RecipeAdapter(rec, { streetNumber: "33", streetNameCore: "Broadway", homeownerName: "Test Owner", moduleCount: "16", city: "Meridian", zip: "83642" }, {}, {});
     (adapter as unknown as { page: unknown }).page = page;
-    let res: { ok: boolean; message: string } | null = null;
+    let res: { ok: boolean; message: string; skipped?: string[]; driftWarnings?: string[]; executed?: number } | null = null;
     try { res = await adapter.fillApplication(project); } catch (e) { res = { ok: false, message: `threw ${String(e).slice(0, 200)}` }; }
     await page.waitForTimeout(300);
     const where = page.url();
     const stReplay = await page.evaluate(() => JSON.parse(sessionStorage.getItem("S") || "{}") as Record<string, unknown>).catch(() => ({} as Record<string, unknown>));
+    // What the dialog looked like when the replay ended (a diagnostic for a red check only).
+    const frameState = await page.evaluate(() => {
+      const layer = document.getElementById("dvACADialogLayer");
+      const fr = document.getElementById("ACADialogFrame") as HTMLIFrameElement | null;
+      const doc = fr?.contentDocument ?? null;
+      const sel = doc?.getElementById("ctl00_phPopup_btnSelect");
+      const checked = doc ? Array.from(doc.querySelectorAll("input[type=radio]")).filter((r) => (r as HTMLInputElement).checked).map((r) => (r as HTMLInputElement).value) : [];
+      return { layer: layer ? layer.style.display : "none-in-dom", frameSrc: fr?.getAttribute("src") ?? null, selDisabled: sel?.getAttribute("aria-disabled") ?? null, selHref: sel?.getAttribute("href") ?? null, checked, radios: doc ? doc.querySelectorAll("input[type=radio]").length : -1 };
+    }).catch((e) => ({ error: String(e).slice(0, 120) }));
+    const replayDiag = JSON.stringify({ executed: res?.executed, skipped: (res?.skipped ?? []).slice(0, 6), drift: (res?.driftWarnings ?? []).slice(0, 6), frameState, S: stReplay }).slice(0, 1600);
     await ctx.close().catch(() => null);
     const filings = posts.filter((p) => /CapConfirm.*submit=1/i.test(p)).length;
     check(`replay ${variant}: 0 Enter presses, 0 filing requests`, stReplay.enters === 0 && filings === 0, `enters=${String(stReplay.enters)} filings=${filings}`);
     check(`MUST-PASS replay ${variant}: Find Address by label → the job's row picked${variant === "dialogcandidates" ? " inside the dialog" : ""} → the parcel present when the walk moved on → Autofill → review reached, in order`,
       stReplay.finds === 1 && stReplay.rowPicks === 1 && stReplay.pickedParcel === "R1234567890" && stReplay.autofills === 1 && stReplay.parcelAtContinue === "R1234567890" && /CapConfirm/i.test(where) && res?.ok === true,
-      `finds=${String(stReplay.finds)} rowPicks=${String(stReplay.rowPicks)} picked=${String(stReplay.pickedParcel)} autofills=${String(stReplay.autofills)} parcelAtContinue=${String(stReplay.parcelAtContinue)} at=${where} ok=${String(res?.ok)} msg=${String(res?.message).slice(0, 300)}`);
+      `finds=${String(stReplay.finds)} rowPicks=${String(stReplay.rowPicks)} picked=${String(stReplay.pickedParcel)} autofills=${String(stReplay.autofills)} parcelAtContinue=${String(stReplay.parcelAtContinue)} at=${where} ok=${String(res?.ok)} msg=${String(res?.message).slice(0, 2000)} diag=${replayDiag}`);
   }
 
   // REPLAY WHERE THE LOOKUP FINDS NOTHING: the nomatch recipe (Find Address with populates "Parcel
   // Number:", Autofill) for a street number the page does not know. The press lands, the parcel stays
   // blank, and the step must FAIL NAMED on the field — never a quiet advance to the portal's bounce.
-  {
+  if (nomatchSteps.length) {
     const recipe2 = {
       ...recipe, id: "aca-step1-nomatch",
       steps: [...nomatchSteps.filter((s) => !s.isFinalSubmit), { action: "stopForReview" } as RecipeStep],
