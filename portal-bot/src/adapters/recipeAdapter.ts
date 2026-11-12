@@ -6094,9 +6094,9 @@ export class RecipeAdapter extends BasePortalAdapter {
       return this.pickAddressVersionLive(step);
     }
     if (this.isRecordTypeStep(step)) {
-      // #166: a verified pick's selector is the control's label (or role+name); the note is the
-      // last resort, with its prefix dropped.
-      const wanted = String(step.selector?.label || step.selector?.name || String(step.note ?? "").replace(VERIFIED_RECORD_TYPE_NOTE, "") || "").trim();
+      // #166: a verified pick's selector is the control's label; the note is the last resort, with
+      // its prefix dropped.
+      const wanted = String(step.selector?.label || String(step.note ?? "").replace(VERIFIED_RECORD_TYPE_NOTE, "") || "").trim();
       // SETTLE BEFORE COUNTING. count() does not wait: right after the previous page's full
       // postback navigated here, the list can be unpainted, and "not offered — refusing to file"
       // was then a race (measured on the Accela replica: the record-type page had been served,
