@@ -46,6 +46,7 @@ import { essPermitStep, type EssPermitStep } from "./essRequirements";
 import { separateCounterFor } from "./ahjRowCitations";
 import { randomUUID } from "node:crypto";
 import { snapshotFilingQuote } from "./feeAccuracy";
+import { recordFilingServiceCharge } from "./servicePrices";
 import { nemSignatureState, type NemSignatureView } from "./signatureTrack";
 import { notifyClientOfFiling } from "./clientFilingUpdate";
 import { trackPaymentView, type TrackPaymentView } from "./feePauseView";
@@ -1525,6 +1526,8 @@ export function markTrackSubmitted(
   // THE QUOTE IN FORCE AS IT WAS FILED (#494), kept once per billing track for the fee accuracy
   // report. After the transaction and never throwing: the filing is the fact that matters.
   snapshotFilingQuote(db, project, type, submissionId);
+  // OUR PRICE IN FORCE AS IT WAS FILED (#187), once per filing type; never throws.
+  recordFilingServiceCharge(db, project, type, submissionId);
 }
 
 // ── TWO-STAGE FILINGS (#28): the two person doors, here because they close and record filings ──

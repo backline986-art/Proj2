@@ -56,6 +56,7 @@ import { feeReadsNeedingAPerson, feeReadsSentence } from "./feeNeedsPerson";
 import { priorYearOfFeeSource } from "./permitPlatformCatalog";
 import { officialSourceOfFeeResolution } from "./feeOfficial";
 import type { ProjectFeeResolution } from "./feeSchedules";
+import { resolveProjectCap, resolveServicePrice, underCap, type PriceBasis } from "./servicePrices";
 
 /** The portal's own total for the filing — typed by a person ("actual") or read off the record
  *  ("portal_record"). Either already contains every line the jurisdiction billed. */
@@ -110,15 +111,30 @@ export function getSubmissionPayment(db: AppDb, projectId: string, track?: strin
 interface ClientBilling {
   billingMode: string;
   serviceFeeUsd: number;
+  /** Where the service fee came from (servicePrices.resolveServicePrice). */
+  serviceFeeBasis: PriceBasis;
+  serviceFeeLabel: string;
 }
 
-function clientBilling(db: AppDb, clientId: string | null): ClientBilling {
-  if (!clientId) return { billingMode: "", serviceFeeUsd: defaultServiceFeeUsd() };
-  const row = db.get<Row>("SELECT billing_mode, service_fee_usd FROM clients WHERE id = ?", [clientId]);
-  const fee = row?.service_fee_usd == null ? null : Number(row.service_fee_usd);
+/** The client's billing mode and OUR price for this track (#187): the client's own price per track,
+ *  its single fee, the org's price list, then the env default. No price anywhere quotes $0, as before. */
+function clientBilling(db: AppDb, project: ProjectRecord, track: "permit" | "nem"): ClientBilling {
+  const row = project.clientId ? db.get<Row>("SELECT billing_mode FROM clients WHERE id = ?", [project.clientId]) : null;
+  const price = resolveServicePrice(db, project.clientId, track, project.id);
+  // THE PROJECT CAP (#187) holds at the gate too: this track's fee is cut to what the cap leaves after
+  // the project's other track. At the founding prices one permit + one NEM sits under the cap; a
+  // client's own higher prices may not.
+  const { capUsd } = resolveProjectCap(db, project.clientId, project.id);
+  const other = db.get<Row>("SELECT service_fee_usd FROM submission_payments WHERE project_id = ? AND track = ?", [project.id, track === "nem" ? "permit" : "nem"]);
+  const otherUsd = Number(other?.service_fee_usd ?? 0) || 0;
+  const fee = price.priceUsd == null ? 0 : underCap(price.priceUsd, capUsd, otherUsd);
   return {
     billingMode: text(row?.billing_mode).toLowerCase(),
-    serviceFeeUsd: fee != null && Number.isFinite(fee) && fee >= 0 ? fee : defaultServiceFeeUsd(),
+    serviceFeeUsd: fee,
+    serviceFeeBasis: price.basis,
+    serviceFeeLabel: price.priceUsd != null && fee < price.priceUsd
+      ? `${price.label}, cut to $${fee.toFixed(2)} by the $${Number(capUsd).toFixed(2)} project cap`
+      : price.label,
   };
 }
 
@@ -817,7 +833,7 @@ function computePaymentQuote(
   persist: boolean,
 ): { quote: SubmissionPaymentQuote; researched: ResearchedPermitQuote } {
   const track = billingTrack(trackInput);
-  const billing = clientBilling(db, project.clientId);
+  const billing = clientBilling(db, project, track);
   const existing = getSubmissionPayment(db, project.id, track);
 
   // Resolved for EVERY quote, whichever tier wins the amount: the payment method
@@ -1187,6 +1203,7 @@ function computePaymentQuote(
     portalFeeRecords,
     paymentMethod,
     serviceFeeUsd,
+    serviceFeeSource: billing.serviceFeeLabel,
     totalUsd,
     // The gate takes our own fee and nothing else (#699), whoever the jurisdiction fee belongs
     // to. A 'card-on-file' or 'customer-pays' fee is never ours to collect; a 'keelix-pays' fee is
