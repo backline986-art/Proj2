@@ -1568,7 +1568,11 @@ export function portalSafetyFactory() {
 
   // Request-URL predicates (network recorder, implicit submission). Portal endpoints concatenate
   // words ("SubmitApplication", "CompleteApplication"), so these have no trailing word boundary.
-  const FINAL_SUBMIT_URL = /(submit|finali[sz]e|completeapplication|fileapplication|continueapplication)/i;
+  // "Submittal" is a document set, not a submit (#144, owner ruling 2026-11-11): CityView uploads a
+  // draft's documents to ".../UploadAndCommitSubmittalRequirementFile", EnerGov has "Submittal
+  // Requirements", and the backstop aborted every such upload. A URL that ENDS in "submit" after
+  // "Submittal" ("SubmittalSubmit") still files.
+  const FINAL_SUBMIT_URL = /(submit(?!tal)|finali[sz]e|completeapplication|fileapplication|continueapplication)/i;
   // Rule 1's whole vocabulary (filingBackstop's PAYMENT RULE): payment stays blocked only for URLs
   // this names. After the hand-over a person's input lifts the filing-URL rule and the lockdown for
   // 4 s, so a processor it does not name passes then like any other request. Processors (Helm
