@@ -2887,6 +2887,8 @@ export class AutoLearnAdapter extends BasePortalAdapter {
   private verifiedRecordTypeOnPage: { label: string; fieldType: ExtractedField["fieldType"]; group?: string; section?: string } | null = null;
   /** #166: the verified record type was ticked (and recorded) once this run. */
   private verifiedRecordTypeTicked = false;
+  /** The verified pick was a catalog BUTTON (a navigation): the walk re-reads the page next. */
+  private verifiedPickNavigated = false;
   /** #166: the first record-type page that did NOT offer the verified type: the gap, with what the
    *  planner ticked there (filled in after its fills on that page). Reported on every return. */
   private recordTypeNotOffered: { wanted: string; offered: string[]; ticked: string[]; page: number } | null = null;
@@ -6775,6 +6777,8 @@ export class AutoLearnAdapter extends BasePortalAdapter {
     const label = String(field.label || "").trim();
     // A catalog's "Apply <type>" BUTTON is clicked, not checked (Tyler EnerGov's Application Assistant).
     steps.push({ action: field.fieldType === "button" ? "click" : "check", phase: "fill", selector: field.selector, note: `record type (verified): ${label.slice(0, 60)}` });
+    // A button pick leaves the catalog: the walk re-reads the page before anything else is asked.
+    if (field.fieldType === "button") this.verifiedPickNavigated = true;
     this.verifiedRecordTypeTicked = true;
     this.debug?.event({ type: "record_type_verified_pick", label: label.slice(0, 70), offeredCount });
   }
@@ -8236,6 +8240,16 @@ export class AutoLearnAdapter extends BasePortalAdapter {
       {
         const typeHint = await this.verifiedRecordTypePass(fields, steps, alreadyFilledLabels, pageCount).catch(() => "");
         if (typeHint) recoveryHint = `${recoveryHint ? `${recoveryHint} ` : ""}${typeHint}`;
+        // A CATALOG BUTTON PICK IS A NAVIGATION (live City of Tigard run 2, Tyler EnerGov, 2026-11-12):
+        // the verified "Apply Residential Renewable Energy - Prescriptive" was clicked, the single-page
+        // app swapped the screen with no URL or heading change, the planner was asked on the stale
+        // catalog snapshot and the walk ended "nothing has been filled". Re-read the page instead.
+        if (this.verifiedPickNavigated) {
+          this.verifiedPickNavigated = false;
+          this.debug?.event({ type: "record_type_pick_navigated", page: pageCount });
+          await this.waitForDynamicFieldsSettle().catch(() => null);
+          continue;
+        }
       }
       if (!signatureDone && await pageMovedUnderPlan("before the planner was asked")) continue;
       let plan: LearnPlanResponse;
