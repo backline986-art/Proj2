@@ -22,7 +22,7 @@ import type { LoginStatus, LoginDetail } from "./loginFlow";
 import { enterApplicationFlow, isExcludedEntryLabel, normalizeEntryLabel, chooseApplicationType, scanChoiceTiles } from "./applicationEntry";
 import { explainProgramChoice, explainRecordTypeChoice, jobClassOf, namesJobClassAndDiscipline, offeredLabels, programClassFit, programSelector, scanProgramGroups, type ProgramGroup, type ProgramJob, type RecordTypeChoice } from "./applicationProgram";
 import { planHiddenReveal, planLabelProxy } from "./revealHidden";
-import { describeTaggedToggle, GROUP_TOGGLE_CSS, recordTypeGroupNote, tagToggleByText, toggleSelectorCandidates, type GroupToggleInfo } from "./recordTypeGroup";
+import { describeTaggedToggle, GROUP_TOGGLE_CSS, recordTypeGroupNote, recordTypeOfCatalogButton, tagToggleByText, toggleSelectorCandidates, type GroupToggleInfo } from "./recordTypeGroup";
 import { looksLikeConsentWall, planConsentDismissal } from "./consentBanner";
 import { chooseRow, scanRowChoices, markAddressRow, type AddressRowPick } from "./rowChooser";
 import { parseStreetName, parseStreetNumber, parseStreetLine, correctTruncatedAddressFill, isSplitAddressForm } from "../addressParse";
@@ -2887,6 +2887,8 @@ export class AutoLearnAdapter extends BasePortalAdapter {
   private verifiedRecordTypeOnPage: { label: string; fieldType: ExtractedField["fieldType"]; group?: string; section?: string } | null = null;
   /** #166: the verified record type was ticked (and recorded) once this run. */
   private verifiedRecordTypeTicked = false;
+  /** The verified pick was a catalog BUTTON (a navigation): the walk re-reads the page next. */
+  private verifiedPickNavigated = false;
   /** #166: the first record-type page that did NOT offer the verified type: the gap, with what the
    *  planner ticked there (filled in after its fills on that page). Reported on every return. */
   private recordTypeNotOffered: { wanted: string; offered: string[]; ticked: string[]; page: number } | null = null;
@@ -6771,9 +6773,54 @@ export class AutoLearnAdapter extends BasePortalAdapter {
   }
 
   /** #166: the recorded step + event for the verified record type just ticked (by label). */
+  /** CLICK A CATALOG ENTRY SO THE PAGE ACTUALLY MOVES (live City of Tigard run 3, Tyler EnerGov,
+   *  2026-11-12): each catalog entry is rendered TWICE (one copy per layout, one hidden by ng-show),
+   *  both `<a aria-label="Apply <type>" href="#/permit/apply/94/0/0">`; the extracted selector reached
+   *  the hidden twin, the click "succeeded" and nothing changed. The VISIBLE element with that label is
+   *  clicked; if the page has not moved within a few seconds, the entry's own same-site href (a route,
+   *  never another host) is followed. The network backstop still guards whatever that loads. */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  private async clickCatalogEntry(label: string, fallback: any, pageCount: number): Promise<boolean> {
+    const page = this.page;
+    if (!page) return false;
+    const beforeUrl = typeof page.url === "function" ? String(page.url() ?? "") : "";
+    const beforeFp = await this.pageFingerprint().catch(() => "");
+    const esc = label.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+    const byLabel = page.locator(`a[aria-label="${esc}"], button[aria-label="${esc}"], [role="button"][aria-label="${esc}"], [role="link"][aria-label="${esc}"]`);
+    let target = byLabel.filter({ visible: true }).first();
+    if (!(await target.count().catch(() => 0))) target = fallback;
+    if (!target) return false;
+    await target.scrollIntoViewIfNeeded?.({ timeout: 3000 }).catch(() => null);
+    const clicked = await target.click({ timeout: 8000 }).then(() => true).catch(() => false);
+    if (!clicked) return false;
+    const moved = async (): Promise<boolean> => {
+      const u = typeof page.url === "function" ? String(page.url() ?? "") : "";
+      if (u && u !== beforeUrl) return true;
+      const fp = await this.pageFingerprint().catch(() => "");
+      return !!fp && fp !== beforeFp;
+    };
+    for (let i = 0; i < 8; i++) { await sleep(500); if (await moved()) return true; }
+    const href = String(await target.getAttribute?.("href").catch(() => "") ?? "").trim();
+    let next = "";
+    try {
+      const u = new URL(href, beforeUrl);
+      const b = new URL(beforeUrl);
+      if (href && u.host === b.host && !/^javascript:/i.test(href)) next = u.toString();
+    } catch { /* no usable href */ }
+    this.debug?.event({ type: "record_type_catalog_click_no_move", page: pageCount, label: label.slice(0, 70), followHref: next ? "yes" : "no" });
+    if (!next) return false;
+    const went = await page.goto(next, { waitUntil: "domcontentloaded", timeout: 20000 }).then(() => true).catch(() => false);
+    if (!went) return false;
+    for (let i = 0; i < 8; i++) { await sleep(500); if (await moved()) return true; }
+    return false;
+  }
+
   private noteVerifiedRecordTypeTicked(field: ExtractedField, offeredCount: number, steps: RecipeStep[]): void {
     const label = String(field.label || "").trim();
-    steps.push({ action: "check", phase: "fill", selector: field.selector, note: `record type (verified): ${label.slice(0, 60)}` });
+    // A catalog's "Apply <type>" BUTTON is clicked, not checked (Tyler EnerGov's Application Assistant).
+    steps.push({ action: field.fieldType === "button" ? "click" : "check", phase: "fill", selector: field.selector, note: `record type (verified): ${label.slice(0, 60)}` });
+    // A button pick leaves the catalog: the walk re-reads the page before anything else is asked.
+    if (field.fieldType === "button") this.verifiedPickNavigated = true;
     this.verifiedRecordTypeTicked = true;
     this.debug?.event({ type: "record_type_verified_pick", label: label.slice(0, 70), offeredCount });
   }
@@ -6818,16 +6865,25 @@ export class AutoLearnAdapter extends BasePortalAdapter {
     const wanted = this.verifiedRecordType();
     if (!wanted) return "";
     const checkables = fields.filter((f) => f.fieldType === "checkbox" || f.fieldType === "radio");
-    const hit = checkables.find((f) => sameRecordType(f.label || "", wanted));
+    // AN APPLICATION CATALOG OFFERS TYPES AS "APPLY <TYPE>" BUTTONS (live City of Tigard, Tyler EnerGov
+    // Application Assistant, 2026-11-12: 103 "Apply …" buttons incl. "Apply Residential Renewable Energy
+    // - Prescriptive"; neither record-type rule read buttons, the planner chose nothing on a 312-control
+    // page and the walk stopped). A button whose label is the type behind an apply/start/begin/new verb
+    // is that type's option. Checkboxes and radios are still tried first.
+    const catalogButtons = fields.filter((f) => f.fieldType === "button" && recordTypeOfCatalogButton(f.label || "") !== null);
+    const hit = checkables.find((f) => sameRecordType(f.label || "", wanted))
+      ?? catalogButtons.find((f) => sameRecordType(recordTypeOfCatalogButton(f.label || "") ?? "", wanted));
     if (hit) {
       const on = { label: String(hit.label || "").trim(), fieldType: hit.fieldType, group: hit.group, section: hit.section };
       const listCount = checkables.filter((f) => this.sameRecordTypeList(f, on)).length;
       if (!this.verifiedRecordTypeTicked) {
         const loc = await this.locator(hit.selector).catch(() => null);
-        const ok = loc
-          ? await loc.check({ timeout: 10000 }).then(() => true)
-            .catch(async () => loc.click({ timeout: 8000 }).then(() => true).catch(() => false))
-          : false;
+        const ok = hit.fieldType === "button"
+          ? await this.clickCatalogEntry(String(hit.label || ""), loc, pageCount)
+          : loc
+            ? await loc.check({ timeout: 10000 }).then(() => true)
+              .catch(async () => loc.click({ timeout: 8000 }).then(() => true).catch(() => false))
+            : false;
         if (!ok) {
           // Not ticked, not recorded: the planner keeps the page, and the guard below still refuses
           // another option — a person ticks this one.
@@ -8228,6 +8284,16 @@ export class AutoLearnAdapter extends BasePortalAdapter {
       {
         const typeHint = await this.verifiedRecordTypePass(fields, steps, alreadyFilledLabels, pageCount).catch(() => "");
         if (typeHint) recoveryHint = `${recoveryHint ? `${recoveryHint} ` : ""}${typeHint}`;
+        // A CATALOG BUTTON PICK IS A NAVIGATION (live City of Tigard run 2, Tyler EnerGov, 2026-11-12):
+        // the verified "Apply Residential Renewable Energy - Prescriptive" was clicked, the single-page
+        // app swapped the screen with no URL or heading change, the planner was asked on the stale
+        // catalog snapshot and the walk ended "nothing has been filled". Re-read the page instead.
+        if (this.verifiedPickNavigated) {
+          this.verifiedPickNavigated = false;
+          this.debug?.event({ type: "record_type_pick_navigated", page: pageCount });
+          await this.waitForDynamicFieldsSettle().catch(() => null);
+          continue;
+        }
       }
       if (!signatureDone && await pageMovedUnderPlan("before the planner was asked")) continue;
       let plan: LearnPlanResponse;
