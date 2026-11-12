@@ -30,7 +30,7 @@ for (const k of ["SMTP_HOST", "SMTP_FROM", "ANTHROPIC_API_KEY", "SUBMISSION_SERV
 
 const { openDatabase, DEFAULT_ORG_ID } = await import("../src/db");
 const { createClient, updateClient } = await import("../src/clients");
-const { createProject, captureConfirmation } = await import("../src/repository");
+const { createProject, captureConfirmation, deleteProject } = await import("../src/repository");
 const { markTrackSubmitted } = await import("../src/submittalTracks");
 const { buildPaymentQuote } = await import("../src/submissionFees");
 const P = await import("../src/servicePrices");
@@ -220,6 +220,15 @@ check("5a. building a statement writes nothing", () => {
   L.buildClientStatement(db, otherOrg.id, period);
   const after = db.get<{ n: number }>("SELECT (SELECT COUNT(*) FROM filing_service_charges) + (SELECT COUNT(*) FROM client_invoice_lines) + (SELECT COUNT(*) FROM service_prices) AS n")?.n;
   assert.equal(after, before);
+});
+
+// ── 6. deleting a job takes its charges with it (the FK would refuse the delete otherwise) ──────
+check("6a. deleteProject removes the job's filing charges", () => {
+  const p = mk(monthly.id);
+  markTrackSubmitted(db, p, "building", { applicationNumber: "BLD-26-0900" });
+  assert.equal(chargesOf(p.id).length, 1);
+  deleteProject(db, p.id);
+  assert.equal(chargesOf(p.id).length, 0);
 });
 
 if (failures) {

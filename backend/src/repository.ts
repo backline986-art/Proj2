@@ -1617,6 +1617,9 @@ export function deleteProject(db: AppDb, projectId: string): { deleted: true; pr
     db.run("DELETE FROM track_fee_payments WHERE project_id = ?", [projectId]);
     // A two-stage filing's per-job progress (migration v84, #28) carries the same FK.
     db.run("DELETE FROM track_second_stages WHERE project_id = ?", [projectId]);
+    // The price saved on each filing (migration v85, #187) carries the same FK. A line already on an
+    // invoice keeps its own copy (client_invoice_lines has no FK), so the invoice is unchanged.
+    db.run("DELETE FROM filing_service_charges WHERE project_id = ?", [projectId]);
     // Keep permit_fee_history (learned real fees) but unlink the deleted project.
     db.run("UPDATE permit_fee_history SET project_id = NULL WHERE project_id = ?", [projectId]);
     // Communications may belong to a customer too — unlink rather than destroy correspondence.
