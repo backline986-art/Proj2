@@ -229,7 +229,11 @@ const REVEAL_TRIGGERS: RecipeSelector[] = [
  * the submit pick and the described-control pass cannot disagree about it.
  */
 const SOCIAL_IDP_SOURCE = "\\b(with|using|via)\\s+(google|microsoft|apple|facebook|linkedin|github|twitter|amazon|yahoo|paypal)\\b|^(google|microsoft|apple|facebook|linkedin|github|twitter|amazon|yahoo|paypal)$";
-const NEVER_ALWAYS_SOURCE = "\\bhelp\\b|\\bunlock\\b|\\bforgot\\b|\\breset (your |my )?password\\b|\\bkeep me (signed|logged) in\\b|\\bremember me\\b|\\bstay signed in\\b|verify with something else|\\bback to (sign|log)[\\s-]?in\\b|\\btrouble (signing|logging)\\b|can'?t (sign|log)[\\s-]?in";
+// A PASSKEY / platform authenticator is a second way to authenticate, never the password login's
+// control (live Idaho DOPL, 2026-11-12: the reveal's {button, "Sign in with"} pressed "Sign in with
+// a passkey" and the browser raised a WebAuthn error dialog). Choosing an authenticator is the
+// person's (rule 1), so it is on the never-click list for every login pass.
+const NEVER_ALWAYS_SOURCE = "\\bpass[\\s-]?key\\b|\\bsecurity key\\b|\\bwindows hello\\b|\\b(face|touch) id\\b|\\bhelp\\b|\\bunlock\\b|\\bforgot\\b|\\breset (your |my )?password\\b|\\bkeep me (signed|logged) in\\b|\\bremember me\\b|\\bstay signed in\\b|verify with something else|\b(choose|try|use) (another|a different) way\b|\\bback to (sign|log)[\\s-]?in\\b|\\btrouble (signing|logging)\\b|can'?t (sign|log)[\\s-]?in";
 const NEVER_SIGNUP_SOURCE = "\\bcreate (an |your |a new |new )?account\\b|\\bregist(er|ration)\\b|\\bsign[\\s-]?up\\b|\\bnew account\\b|\\benroll\\b";
 const LOGIN_WORD_SOURCE = "\\blog[\\s-]?(in|on)\\b|\\blogin\\b|\\blogon\\b|\\bsign[\\s-]?in\\b|\\bsignin\\b";
 // The words a portal refuses a password with. ONE source for the banner read (loginRefusalBanner)
@@ -1111,6 +1115,14 @@ export async function revealLoginForm(page: Page): Promise<boolean> {
       else triggers.push(m);
     }
     if (!triggers.length) { trail.push(matched.length ? `only never-click matches ${key}` : `no-match ${key}`); continue; }
+    // A LATE-PAINTED IDENTIFIER STEP ENDS THE REVEAL (live City of Mountain Home ID, OpenGov,
+    // 2026-11-12). performLogin asks "is this an identifier step?" BEFORE the reveal, but a React
+    // login form that paints a moment later is not there yet; the reveal then ran, and its
+    // {button, "Login"} matched the form's own submit (aria-label "login button") and pressed it
+    // with NO email typed — the next page was a password box with no account named. So right
+    // before any reveal click, the question is asked again on the page as it is now; an identifier
+    // step that has appeared is performLogin's to drive, and nothing is clicked here.
+    if (await identifierFirstStep(page, { preReveal: true })) { trail.push(`identifier step appeared before ${key}: reveal stops`); return false; }
     tried.add(key);
     let clickedOne = false;
     for (let ti = 0; ti < triggers.length; ti++) {
@@ -1264,25 +1276,50 @@ export async function revealLoginForm(page: Page): Promise<boolean> {
  * newsletter Email + Subscribe box, the header link is still there — so the old order stands
  * (reveal the real form first) and the username is never typed into the newsletter box.
  */
-/** The visible submit control the field's own <form> owns, when exactly one reads as the step's
- *  advance (never "Sign in with …", help, create, forgot, unlock). null when the field has no form,
- *  no such control, or more than one. */
-const NOT_A_STEP_SUBMIT = /\bwith\s+(google|microsoft|apple|facebook|linkedin|github)\b|\bhelp\b|\bcreate\b|\bregister\b|\bforgot\b|\bunlock\b|\bsign\s*up\b/i;
+/** The identifier step's own advance control, when exactly one qualifies; null otherwise.
+ *
+ *  WITH A <form>: the visible submit controls that form owns, minus the never-click list.
+ *  WITHOUT ONE (live Idaho DOPL, FAST platform, 2026-11-12): the email box and its "Log in" sit in
+ *  a plain panel, the button is type="button", and the password box is in the same panel, hidden
+ *  until "Log in" is pressed. The nearest ancestor of the field that holds any visible button is
+ *  the field's panel; a control there qualifies only when its words read as a sign-in or step
+ *  advance (log in / sign in / continue / next), so a newsletter "Subscribe" never does. The
+ *  never-click vocabulary (social, passkey, help, sign-up…) is the same one every login pass uses. */
+const STEP_ADVANCE_WORDS = new RegExp(`${LOGIN_WORD_SOURCE}|\\bcontinue\\b|\\bnext\\b`, "i");
 async function ownedSubmitOf(field: Locator): Promise<Locator | null> {
   try {
-    const candidates = field.locator("xpath=ancestor::form[1]").locator("button[type=submit], button:not([type]), input[type=submit]");
-    const n = await candidates.count().catch(() => 0);
-    const fit: Locator[] = [];
-    for (let i = 0; i < Math.min(n, 6); i++) {
-      const c = candidates.nth(i);
-      if (!(await c.isVisible().catch(() => false))) continue;
-      const words = String(await c.evaluate((el: Element) => [
-        (el as HTMLElement).innerText || "", (el as HTMLInputElement).value || "", el.getAttribute("aria-label") || "", el.getAttribute("title") || "",
-      ].join(" ")).catch(() => "") ?? "");
-      if (NOT_A_STEP_SUBMIT.test(words)) continue;
-      fit.push(c);
+    const qualifying = async (candidates: Locator, needWords: boolean): Promise<{ seen: number; fit: Locator[] }> => {
+      const n = await candidates.count().catch(() => 0);
+      const fit: Locator[] = [];
+      let seen = 0;
+      for (let i = 0; i < Math.min(n, 8); i++) {
+        const c = candidates.nth(i);
+        if (!(await c.isVisible().catch(() => false))) continue;
+        seen++;
+        if (await neverClickReason(c)) continue;
+        if (needWords) {
+          const words = String(await c.evaluate((el: Element) => [
+            (el as HTMLElement).innerText || "", (el as HTMLInputElement).value || "", el.getAttribute("aria-label") || "", el.getAttribute("title") || "",
+          ].join(" ")).catch(() => "") ?? "");
+          if (!STEP_ADVANCE_WORDS.test(words)) continue;
+        }
+        fit.push(c);
+      }
+      return { seen, fit };
+    };
+    const form = field.locator("xpath=ancestor::form[1]");
+    if (await form.count().catch(() => 0)) {
+      const { fit } = await qualifying(form.locator("button[type=submit], button:not([type]), input[type=submit]"), false);
+      return fit.length === 1 ? fit[0] : null;
     }
-    return fit.length === 1 ? fit[0] : null;
+    for (let up = 1; up <= 8; up++) {
+      const panel = field.locator(`xpath=ancestor::*[${up}]`);
+      if (!(await panel.count().catch(() => 0))) return null;
+      const { seen, fit } = await qualifying(panel.locator("button, input[type=submit], input[type=button], [role=button]"), true);
+      if (!seen) continue;
+      return fit.length === 1 ? fit[0] : null;
+    }
+    return null;
   } catch { return null; }
 }
 

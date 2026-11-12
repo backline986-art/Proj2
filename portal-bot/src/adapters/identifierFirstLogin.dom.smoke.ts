@@ -31,7 +31,7 @@
 import assert from "node:assert/strict";
 import http from "node:http";
 import { chromium, type BrowserContext, type Page } from "playwright";
-import { loginWasRefused, performLogin } from "./loginFlow";
+import { loginWasRefused, performLogin, revealLoginForm } from "./loginFlow";
 
 let failures = 0;
 const check = async (label: string, fn: () => Promise<void>): Promise<void> => {
@@ -268,8 +268,42 @@ const OG_STEP2 = (email: string) => `<!doctype html><html><head><title>OpenGov</
   <input type="hidden" name="username" value="${email.replace(/[<>&"]/g, "")}"><label for="password">Password</label>
   <input type="password" id="password" name="password"><button type="submit" aria-label="login button">Sign in</button></form></body></html>`;
 
+// FAST-PLATFORM (live Idaho DOPL Online Services, 2026-11-12) identifier-first sign-in with NO
+// <form>: a plain panel holds the Email box (a hidden password box beside it), a type="button"
+// "Log in", "Sign in with a passkey" (reports any press: the failure) and a "Sign Up" link, with
+// public-search tiles below. "Log in" with an email typed opens a SEPARATE password page (as the
+// owner's screenshots show): the email echoed with "Change username", Password, "Continue",
+// "Forgot password?" and "Choose another way to sign in" (both report any press). Nothing is a form submit.
+const DOPL = `<!doctype html><html><head><title>Online Services</title></head><body>
+  <h1>Online Services</h1>
+  <div class="LogonPanel"><div class="row">
+    <input type="text" autocomplete="username webauthn" id="Dd-a" aria-label="Email Address" placeholder="Email Address">
+    <div style="display:none"><input type="password" autocomplete="current-password webauthn" id="Dd-b" aria-label="Password" placeholder="Password"></div>
+    <button type="button" id="Dd-c"><span>Log in</span></button></div>
+    <div>Or</div><button type="button" id="pk" onclick="fetch('/dopl-passkey-hit')">Sign in with a passkey</button>
+    <div>New to Online Services? <a href="/dopl-signup">Sign Up</a></div></div>
+  <section><h2>Public Searches</h2><a href="/dopl-search">Search for Permits</a></section>
+  <script>
+    document.getElementById('Dd-c').onclick = function () {
+      var v = document.getElementById('Dd-a').value;
+      if (v) location.href = '/dopl-password?u=' + encodeURIComponent(v);
+    };
+  </script>
+</body></html>`;
+const DOPL_PW = (email: string) => `<!doctype html><html><head><title>Online Services</title></head><body>
+  <div class="card"><h1>Log in to Online Services</h1>
+    <div>${email.replace(/[<>&"]/g, "")}</div><a href="/dopl-login">Change username</a>
+    <label for="pw">Password</label><input type="password" id="pw" autocomplete="current-password">
+    <button type="button" id="cont">Continue</button>
+    <a href="#" onclick="fetch('/dopl-forgot-hit');return false;">Forgot password?</a>
+    <a href="#" onclick="fetch('/dopl-another-way-hit');return false;">Choose another way to sign in</a></div>
+  <script>document.getElementById('cont').onclick = function () { if (document.getElementById('pw').value) location.href = '/home'; };</script>
+</body></html>`;
+
 const server = http.createServer((q, r) => {
   const url = q.url || "";
+  if (url.startsWith("/dopl-login")) { r.writeHead(200, { "Content-Type": "text/html" }); return r.end(DOPL); }
+  if (url.startsWith("/dopl-password")) { r.writeHead(200, { "Content-Type": "text/html" }); return r.end(DOPL_PW(new URL(url, "http://x").searchParams.get("u") || "")); }
   const send = (body: string) => { r.writeHead(200, { "Content-Type": "text/html" }); r.end(body); };
   if (url.startsWith("/LEECO/Login.aspx")) return send(LEE_MAIN());
   if (url.startsWith("/LEECO/login-frame")) return send(LEE_FRAME());
@@ -449,6 +483,32 @@ await check("MUST-PASS / MUST-EXCLUDE (OpenGov shape): a late form's own 'login 
   await context.close();
 });
 
+await check("MUST-EXCLUDE (race, deterministic): the reveal pass never presses an identifier step's own submit — an email step that has painted ends the reveal", async () => {
+  // performLogin's late-paint race made reproducible: the identifier step is already on screen
+  // when the reveal runs. Its {button, "Login"} candidate matches the form's submit (aria-label
+  // "login button"); pressing it would send an EMPTY email to the password page.
+  const { context, page } = await freshPage();
+  await page.goto(`http://127.0.0.1:${port}/og-login?state=race`);
+  await page.locator("#email").waitFor({ state: "visible", timeout: 10000 });
+  const revealed = await revealLoginForm(page);
+  await page.waitForTimeout(800);
+  assert.equal(revealed, false, "the reveal reported a login form");
+  assert.doesNotMatch(page.url(), /\/og-login\/password/, `the reveal pressed the email step's submit: now on ${page.url()}`);
+  await context.close();
+});
+
+await check("MUST-PASS / MUST-EXCLUDE (FAST / Idaho DOPL shape): no <form>; the panel's 'Log in' opens the password page, Continue signs in; passkey / forgot / another-way never pressed", async () => {
+  localHits.length = 0;
+  const { context, page } = await freshPage();
+  await page.goto(`http://127.0.0.1:${port}/dopl-login`);
+  const res = await performLogin(page, { username: "dopl-user@example.test", password: "Dopl-Pa55-word" });
+  results.push(res.message);
+  assert.equal(res.status, "logged_in", `got ${res.status}: ${res.message}`);
+  assert.match(page.url(), /\/home/);
+  assert.deepEqual(localHits.filter((h) => /dopl-(passkey|signup|search|forgot|another-way)/.test(h)), [], `a never-click control was followed: ${localHits.join(", ")}`);
+  await context.close();
+});
+
 await check("MUST-PASS (Lee County shape): the ACA login inside a cross-origin IFRAME is found, filled and signed in", async () => {
   localHits.length = 0;
   const { context, page } = await freshPage();
@@ -477,7 +537,7 @@ await check("MUST-PASS / MUST-EXCLUDE: a landing page reveals its real login; th
 });
 
 await check("MUST-EXCLUDE: neither the username nor any password appears in a log line or a result message", async () => {
-  const secrets = [GOOD_PW, MFA_PW, BAD_PW, "plain-pass-123", "Lee-Pa55-word", "landing-pass-1", "Og-Pa55-word", USER];
+  const secrets = [GOOD_PW, MFA_PW, BAD_PW, "plain-pass-123", "Lee-Pa55-word", "landing-pass-1", "Og-Pa55-word", "Dopl-Pa55-word", USER];
   for (const s of secrets) {
     const inLog = logLines.find((l) => l.includes(s));
     assert.equal(inLog, undefined, `a secret reached a log line: ${String(inLog).slice(0, 120)}`);
