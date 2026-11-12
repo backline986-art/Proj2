@@ -6833,7 +6833,9 @@ export class RecipeAdapter extends BasePortalAdapter {
         else await smartWait(this.page);
         return true;
       case "upload": {
-        const recordedLabel = String(step.note ?? "").split(":").slice(1).join(":").trim();
+        // The slot's heading as recorded (#140: `slot`, the requirement the portal named), else the
+        // label the note carries — one name for the exact-type check and the slot search below.
+        const recordedLabel = String(step.slot ?? "").trim() || String(step.note ?? "").split(":").slice(1).join(":").trim();
         const requiredType = exactUploadDocType(recordedLabel);
         if (requiredType && step.docType !== requiredType) {
           this.driftWarnings.push(`refused ${step.docType || "unbound file"} for "${recordedLabel.slice(0, 60)}"; this slot requires ${requiredType}`);
@@ -6878,7 +6880,9 @@ export class RecipeAdapter extends BasePortalAdapter {
           // tag is re-taken in a bounded poll until the slot the step names is there; if it never
           // appears, the step is skipped NAMED within seconds, and the document goes to no other
           // slot (a differently labelled slot is never a fallback).
-          const wanted = String(step.note ?? "").split(":").slice(1).join(":").trim();
+          // By the recorded slot heading first (#140): CityView's "Electrical Plans" is a row the
+          // control's own text never names, so the note alone ("Browse..") could not find it.
+          const wanted = recordedLabel;
           const norm = (v: string) => String(v ?? "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
           const want = norm(wanted);
           const recordedCss = step.selector.css;

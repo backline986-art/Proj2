@@ -25,6 +25,17 @@
 //       lands in "Bid" or the optional "Other Files", nothing reaches the server.
 //   [D] the slot-label reader alone: a heading is a slot's label only when no other upload control
 //       sits between them; a picker with no heading of its own keeps its old label.
+//   [E] (#140, City of Bend's CityView, watched learn 2026-11-12) an Upload Files page — NOT a review
+//       page, an AHJ learn in combined mode — listing three requirements as table ROWS ("Agreements,
+//       Form, Documents & Checklists" | "Electrical Plans" | "Other/Miscellaneous", each with a
+//       "Pending" status cell, the file input and its description box in the row below under
+//       "Select a new document for this requirement:"), plus an "Upload Additional Documents" area.
+//       The plan set goes into "Electrical Plans" and only there, its description box is filled, the
+//       step records `slot: "Electrical Plans"`, and the two other headed requirements are NAMED
+//       missing. Live, the plan set went into the first slot, the description stayed blank, the step
+//       was positional and `missing:0` stood beside two empty requirements.
+//   [F] replay finds the slot by the recorded `slot` heading when the note names only the picker
+//       face and the positional key points at another requirement's control.
 //
 // Run: npx tsx portal-bot/src/adapters/reviewPageUpload.dom.smoke.ts
 import "../smokeArtifactDirs";
@@ -33,7 +44,9 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { chromium } from "playwright";
+import type { PortalRecipe, RecipeStep } from "../../../shared/src/types";
 import { AutoLearnAdapter, tagUploadControls, type LearnPlanner } from "./autoLearnAdapter";
+import { RecipeAdapter } from "./recipeAdapter";
 
 delete process.env.PORTAL_ALLOW_FINAL_SUBMIT;
 
@@ -98,6 +111,45 @@ const STAR = `<h1>Solar Permit or Panel Application</h1>
   <div id="upload-warning"><i>*The required uploads were not found</i></div>
   <button id="submit-webform" type="button" onclick="fetch('/SubmitApplication', {method:'POST', body:'x=1'}).catch(function(){});">Submit</button>`;
 
+// [E] (#140) A CityView-SHAPED UPLOAD FILES PAGE. Each requirement is a table ROW: its name in the
+// first cell, a "Pending" status cell, and in the row below the file input under "Select a new
+// document for this requirement:" with a bare "Provide a short description…" line above a textarea.
+// No heading element, no label bound to the input, no required attribute, no asterisk, no
+// aria-label/placeholder on the textarea. Synthetic, shaped on the City of Bend watched learn of
+// 2026-11-12 (attached:1 into the first slot, missing:0, step positional, description blank).
+const P1E = P1.replace('action="/final"', 'action="/bend"');
+const reqRow = (n: number, name: string) => `
+      <tr class="requirement"><td class="requirement-name">${name}</td><td class="requirement-status">Pending</td></tr>
+      <tr class="requirement-upload"><td colspan="2">
+        <div class="upload-control">Select a new document for this requirement: <input type="file" id="req_${n}_file" name="req_${n}_file" accept=".pdf"></div>
+        <div class="upload-description-label">Provide a short description of this set of documents:</div>
+        <div><textarea id="req_${n}_desc" name="req_${n}_desc" rows="2"></textarea></div>
+      </td></tr>`;
+const BEND = `<h1>Upload Files</h1>
+  <h2>Current Submittal</h2>
+  <table class="requirements">
+    <thead><tr><th>Requirement</th><th>Status</th></tr></thead>
+    <tbody>${reqRow(0, "Agreements, Form, Documents &amp; Checklists")}${reqRow(1, "Electrical Plans")}${reqRow(2, "Other/Miscellaneous")}
+    </tbody>
+  </table>
+  <h3>Upload Additional Documents</h3>
+  <div>Select a document: <input type="file" id="extra_file" name="extra_file" multiple></div>
+  <div><label for="extra_desc">Description</label> <input type="text" id="extra_desc" name="extra_desc"></div>
+  <button type="button" id="next">Next</button>
+  <script>
+    // The page as the walk LEAVES it, kept for the smoke across the navigation Next makes.
+    document.getElementById("next").addEventListener("click", function () {
+      var n = function (id) { var el = document.getElementById(id); return el && el.files ? el.files.length : -1; };
+      var v = function (id) { var el = document.getElementById(id); return el ? el.value : null; };
+      sessionStorage.setItem("zzHeld", JSON.stringify({ forms: n("req_0_file"), plans: n("req_1_file"), other: n("req_2_file"), extra: n("extra_file"),
+        formsDesc: v("req_0_desc"), plansDesc: v("req_1_desc"), otherDesc: v("req_2_desc"), extraDesc: v("extra_desc") }));
+      location.href = "/review-e";
+    });
+  </script>`;
+const REVIEW_E = `<h1>Review and Submit</h1>
+  <p>Please review your application below before submitting. Once submitted, it cannot be changed.</p>
+  <button type="button" id="submit" onclick="fetch('/SubmitApplication', {method:'POST', body:'x=1'}).catch(function(){});">Submit Application</button>`;
+
 const posts: string[] = [];
 const server = http.createServer((req, res) => {
   const url = new URL(req.url || "/", "http://127.0.0.1");
@@ -108,8 +160,11 @@ const server = http.createServer((req, res) => {
     return;
   }
   res.writeHead(200, { "content-type": "text/html" });
-  const body = url.pathname === "/final" ? FINAL : url.pathname === "/star" ? STAR : url.pathname === "/p1c" ? P1C : P1;
-  res.end(`<!doctype html><html><head><title>${url.pathname === "/star" || url.pathname === "/p1c" ? "iWorQ replica" : "PowerClerk replica"}</title></head><body>${body}</body></html>`);
+  const body = url.pathname === "/final" ? FINAL : url.pathname === "/star" ? STAR : url.pathname === "/p1c" ? P1C
+    : url.pathname === "/p1e" ? P1E : url.pathname === "/bend" ? BEND : url.pathname === "/review-e" ? REVIEW_E : P1;
+  const title = url.pathname === "/star" || url.pathname === "/p1c" ? "iWorQ replica"
+    : url.pathname === "/p1e" || url.pathname === "/bend" || url.pathname === "/review-e" ? "CityView replica" : "PowerClerk replica";
+  res.end(`<!doctype html><html><head><title>${title}</title></head><body>${body}</body></html>`);
 });
 await new Promise<void>((r) => server.listen(0, "127.0.0.1", () => r()));
 const base = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
@@ -258,6 +313,102 @@ try {
     check("[D] a picker face under its own heading reads as the heading", labels[0] === "Plans", JSON.stringify(labels));
     check("[D] a heading two slots share goes to the first; the second keeps its face", labels[1] === "Attachments" && labels[2] === "Choose File", JSON.stringify(labels));
     check("[D] a picker with no heading of its own keeps its old label", labels[3] === "Browse", JSON.stringify(labels));
+    check("[D] a slot's heading is carried; a face-only slot carries none",
+      slots[0].heading === "Plans" && slots[1].heading === "Attachments" && slots[2].heading === undefined && slots[3].heading === undefined, JSON.stringify(slots));
+  }
+
+  // ---- [E] CityView: requirements as table rows (#140) ----
+  console.log("\n[E] CityView-shaped Upload Files page (combined mode, not a review page): three requirement rows, the job holds only the plan set");
+  {
+    const ctx = await browser.newContext();
+    ctx.setDefaultTimeout(8000);
+    await ctx.addInitScript({ content: "globalThis.__name = globalThis.__name || ((f) => f);" });
+    const page = await ctx.newPage();
+    await page.goto(`${base}/p1e`);
+    posts.length = 0;
+    // The Upload Files page is a form page (fill nothing, advance by Next); only the page that
+    // says Submit Application is review.
+    const plannerE: LearnPlanner = async (req) => {
+      if (req.fields.some((f) => /submit application/i.test(String(f.label ?? "")))) return { fills: [], atReview: true };
+      const fills = req.fields.map((f, i) => ({ f, i })).filter((x) => x.f.fieldType === "text" && /contact name/i.test(String(x.f.label ?? ""))).map((x) => ({ selectorIndex: x.i, value: "ZZ Test" }));
+      const next = req.fields.findIndex((f) => f.fieldType === "button" && /^next$/i.test(String(f.label ?? "").trim()));
+      return { fills, atReview: false, ...(next >= 0 ? { advanceSelectorIndex: next } : {}) };
+    };
+    const adapter = new AutoLearnAdapter("CityView Replica", plannerE, { maxPages: 5, docsByType: { plan_set: planSet }, uploadMode: "combined" });
+    const events: Array<Record<string, unknown>> = [];
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (adapter as any).page = page;
+    const holder = adapter as unknown as { debug?: { event: (e: Record<string, unknown>) => void } };
+    if (holder.debug && typeof holder.debug.event === "function") {
+      const orig = holder.debug.event.bind(holder.debug);
+      holder.debug.event = (e) => { events.push(e); orig(e); };
+    } else holder.debug = { event: (e) => { events.push(e); } };
+    let r: Awaited<ReturnType<AutoLearnAdapter["learn"]>> | null = null;
+    let threw = "";
+    try {
+      r = await adapter.learn({ portalUrl: `${base}/p1e` } as never,
+        { projectAddress: "1 Test St, Springfield, IL, 62701", city: "Springfield", state: "IL", zip: "62701", homeownerName: "T" } as never);
+    } catch (e) { threw = String(e).slice(0, 200); }
+    await new Promise((res) => setTimeout(res, 800));
+    // The Upload Files page as the walk left it (its Next button stored it before navigating).
+    const h = await page.evaluate(() => JSON.parse(sessionStorage.getItem("zzHeld") || "null") as Record<string, number | string | null> | null).catch(() => null);
+    await ctx.close().catch(() => null);
+    const msg = String(r?.message ?? threw);
+    const uploads = (r?.steps ?? []).filter((s) => s.action === "upload");
+    const descSteps = (r?.steps ?? []).filter((s) => s.action === "fill" && /^upload description/i.test(String(s.note ?? "")));
+    const missing = r?.missingRequiredDocs ?? [];
+    const uploadEvents = JSON.stringify(events.filter((e) => /^upload/.test(String(e.type))));
+    check("[E] premise: the upload pass ran on the Upload Files page as a form page (not attach-only)",
+      events.some((e) => e.type === "upload_phase_start" && e.page === 2 && e.attachOnly === undefined), uploadEvents);
+    check("[E] the three requirement rows were read as headed slots, plans offered",
+      events.some((e) => e.type === "upload_slots_headed" && /Agreements, Form, Documents & Checklists.*Electrical Plans.*Other\/Miscellaneous/.test(String(e.headings ?? "")) && e.plansOffered === true), uploadEvents);
+    check("[E] the plan set went into \"Electrical Plans\" — and only there (not the forms slot, not the catch-alls)",
+      h?.plans === 1 && h?.forms === 0 && h?.other === 0 && h?.extra === 0, `held=${JSON.stringify(h)}`);
+    check("[E] exactly one upload step, the plan set, recorded with the slot heading and the positional key as its fallback",
+      uploads.length === 1 && uploads[0].docType === "plan_set" && uploads[0].slot === "Electrical Plans" && uploads[0].selector?.css === '[data-al-upl="f1"]', JSON.stringify(uploads));
+    check("[E] the \"Electrical Plans\" row's own description box got the document's kind, recorded for replay; the others stayed blank",
+      h?.plansDesc === "Plan set" && h?.formsDesc === "" && h?.otherDesc === "" && h?.extraDesc === ""
+        && descSteps.length === 1 && descSteps[0].value === "Plan set" && /req_1_desc/.test(String(descSteps[0].selector?.css ?? "")), `held=${JSON.stringify(h)} steps=${JSON.stringify(descSteps)}`);
+    check("[E] the two headed requirements left empty are NAMED by their headings, bare — and \"Electrical Plans\" is not",
+      missing.includes("Agreements, Form, Documents & Checklists") && missing.includes("Other/Miscellaneous") && !missing.some((m) => /electrical plans/i.test(m)) && missing.length === 2,
+      `missing=${JSON.stringify(missing)}`);
+    check("[E] …in the run's message too", /Agreements, Form, Documents & Checklists/.test(msg) && /Other\/Miscellaneous/.test(msg), msg.slice(0, 400));
+    check("[E] …and as events: upload_slot_left_empty (required) for each, upload_phase_done with missing:2",
+      events.filter((e) => e.type === "upload_slot_left_empty" && e.required === true).map((e) => String(e.heading)).sort().join("|") === "Agreements, Form, Documents & Checklists|Other/Miscellaneous"
+        && events.some((e) => e.type === "upload_phase_done" && e.page === 2 && e.attached === 1 && e.missing === 2), uploadEvents);
+    check("[E] the un-headed \"Upload Additional Documents\" area is neither filled nor reported", !missing.some((m) => /additional/i.test(m)), JSON.stringify(missing));
+    check("[E] nothing was submitted; the run stopped at review", !posts.some((p) => p.endsWith("/SubmitApplication")) && r?.reachedReview === true, `posts=[${posts.join(",")}] reachedReview=${r?.reachedReview} ${msg.slice(0, 200)}`);
+  }
+
+  // ---- [F] replay by the recorded slot heading (#140) ----
+  console.log("\n[F] replay: a step whose note names only the picker face and whose key points at the forms slot, with slot: \"Electrical Plans\"");
+  {
+    const ctx = await browser.newContext();
+    ctx.setDefaultTimeout(8000);
+    await ctx.addInitScript({ content: "globalThis.__name = globalThis.__name || ((f) => f);" });
+    const page = await ctx.newPage();
+    await page.goto(`${base}/bend`);
+    const recipe = {
+      id: "zz-bend", scopeType: "ahj", profileKey: "zz|fixture|bend", state: "ZZ", ahj: "Fixture", utility: "",
+      portalPlatform: "fixture", portalUrl: `${base}/bend`, status: "complete", version: 1, steps: [],
+      createdBy: "test", createdAt: "", updatedAt: "", notes: "", discipline: "",
+    } as unknown as PortalRecipe;
+    const replay = new RecipeAdapter(recipe, {}, { plan_set: planSet }, { autoSubmit: false }) as unknown as {
+      page: unknown; agingNotes: string[]; driftWarnings: string[]; executeStep(step: RecipeStep, pastReview: boolean): Promise<boolean>;
+    };
+    replay.page = page;
+    const step = { action: "upload", phase: "fill", selector: { css: '[data-al-upl="f0"]' }, docType: "plan_set", slot: "Electrical Plans", viaFileChooser: false, note: "upload plan_set: Browse.." } as RecipeStep;
+    let ok = false;
+    let err = "";
+    try { ok = await replay.executeStep(step, false); } catch (e) { err = String(e).slice(0, 200); }
+    const held = await page.evaluate(() => {
+      const n = (id: string) => (document.getElementById(id) as HTMLInputElement | null)?.files?.length ?? -1;
+      return { forms: n("req_0_file"), plans: n("req_1_file"), other: n("req_2_file") };
+    }).catch(() => null);
+    await ctx.close().catch(() => null);
+    check("[F] the document landed in the \"Electrical Plans\" row, not in the recorded f0 (the forms slot)",
+      ok && held?.plans === 1 && held?.forms === 0 && held?.other === 0, `ok=${ok} err=${err} held=${JSON.stringify(held)} drift=${JSON.stringify(replay.driftWarnings)}`);
+    check("[F] …and the re-anchoring is noted", replay.agingNotes.some((n) => /Electrical Plans.*re-anchored by label/.test(n)), JSON.stringify(replay.agingNotes));
   }
 } finally {
   await browser.close().catch(() => null);
