@@ -89,6 +89,17 @@ const PRICES = {
     },
   },
 };
+// #199: two late invoices: one 7 days late wanting its late reminder, one 31 days late holding filings.
+const OVERDUE = {
+  reminderLateDays: 7, holdDays: 30,
+  overdue: [
+    { invoiceId: "inv-late", number: "INV-2026-0101", clientId: "client-1", clientName: "Held <img src=x onerror=1> Solar", billTo: "ap@example.test", dueAt: "2026-10-12",
+      dueTotalUsd: 230, daysLate: 31, reminderDue: null, holdsFilings: true, holdLifted: null, qbStatus: "",
+      reminders: [{ id: "r1", invoiceId: "inv-late", kind: "due", sentBy: "Test Person", sentAt: "2026-10-12T00:00:00Z", delivered: true, detail: "" }] },
+    { invoiceId: "inv-week", number: "INV-2026-0102", clientId: "client-1", clientName: "Week Solar", billTo: "ap@example.test", dueAt: "2026-11-05",
+      dueTotalUsd: 99, daysLate: 7, reminderDue: "late", holdsFilings: false, holdLifted: null, qbStatus: "", reminders: [] },
+  ],
+};
 const posted: string[] = [];
 const MIME: Record<string, string> = { ".html": "text/html; charset=utf-8", ".css": "text/css; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".woff2": "font/woff2" };
 
@@ -117,6 +128,16 @@ const startServer = async (): Promise<{ base: string; close: () => Promise<void>
         let body = "";
         req.on("data", (c) => { body += c; });
         req.on("end", () => { posted.push(`POST waive ${p.split("/")[5]} ${body}`); json({ charge: { id: "chg-1", waivedBy: "Test Person" } }); });
+        return;
+      }
+      if (p === "/api/billing/overdue") return json(OVERDUE);
+      if (/^\/api\/clients\/[^/]+\/invoices\/[^/]+\/(remind|lift-hold)$/.test(p) && req.method === "POST") {
+        let body = "";
+        req.on("data", (c) => { body += c; });
+        req.on("end", () => {
+          posted.push(`POST ${p.split("/")[6]} ${p.split("/")[5]} ${body}`);
+          json(p.endsWith("/remind") ? { delivered: true, kind: "late", detail: "" } : { holds: [] });
+        });
         return;
       }
       if (/^\/api\/clients\/[^/]+\/invoices\/[^/]+\/quickbooks$/.test(p) && req.method === "POST") {
@@ -236,6 +257,23 @@ async function main(): Promise<void> {
       await page.evaluate(() => (document.querySelector('#billingStatement [data-waive-charge="chg-1"]') as HTMLButtonElement).click());
       await page.waitForFunction(() => /will not be billed/.test(document.getElementById("billingStatus")?.textContent || ""), null, { timeout: 15000 });
       check(posted.some((x) => x === 'POST waive chg-1 {"reason":"Test Person","decidedBy":"Test Person"}'), `${tag}: Don't bill POSTs a reason and the named person for that charge`, posted.join(" | "));
+
+      // #199: the late-invoice list, a reminder and a lift.
+      const od = await page.evaluate(() => ({
+        text: (document.getElementById("overdueBlock")?.textContent || "").replace(/\s+/g, " "),
+        injected: Boolean(document.querySelector("#overdueBlock img")),
+        buttons: [...document.querySelectorAll("#overdueBlock [data-overdue-action]")].map((b) => `${b.getAttribute("data-overdue-action")}:${b.getAttribute("data-inv-id")}`),
+      }));
+      check(/31 days late/.test(od.text) && /FILINGS HELD/.test(od.text) && /7 days late/.test(od.text) && /due-date reminder 2026-10-12 by Test Person/.test(od.text),
+        `${tag}: the late list shows days late, the held client and the reminders sent`, od.text.slice(0, 300));
+      check(!od.injected && /Held <img src=x onerror=1> Solar/.test(od.text), `${tag}: a client name carrying markup renders as text in the late list`);
+      check(od.buttons.join(",") === "lift:inv-late,remind:inv-week", `${tag}: a held invoice offers Lift hold; a week-late one offers its late reminder`, JSON.stringify(od.buttons));
+      await page.evaluate(() => (document.querySelector('#overdueBlock [data-overdue-action="remind"]') as HTMLButtonElement).click());
+      await page.waitForFunction(() => /Reminder sent/.test(document.getElementById("billingStatus")?.textContent || ""), null, { timeout: 15000 });
+      check(posted.some((x) => x === 'POST remind inv-week {"decidedBy":"Test Person"}'), `${tag}: Send late reminder POSTs the named person, for that invoice only`, posted.join(" | "));
+      await page.evaluate(() => (document.querySelector('#overdueBlock [data-overdue-action="lift"]') as HTMLButtonElement).click());
+      await page.waitForFunction(() => /Hold lifted/.test(document.getElementById("billingStatus")?.textContent || ""), null, { timeout: 15000 });
+      check(posted.some((x) => x === 'POST lift-hold inv-late {"reason":"Test Person","decidedBy":"Test Person"}'), `${tag}: Lift hold POSTs a reason and the named person`, posted.join(" | "));
 
       await page.evaluate(() => (document.getElementById("billingCreateBtn") as HTMLButtonElement).click());
       await page.waitForFunction(() => /Created INV-2026-0003/.test(document.getElementById("billingStatus")?.textContent || ""), null, { timeout: 15000 });

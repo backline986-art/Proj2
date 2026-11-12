@@ -199,6 +199,8 @@ const SCOPED_LIST_ROUTES: Record<string, string> = {
   "/api/filing-destinations": "reqOrgFilter",
   // Go-live check (owner 2026-11-10): admin-gated; process settings as set/not set, the org's own counts.
   "/api/go-live": "reqOrgFilter",
+  // Late invoices (#199): the org's own sent invoices past due; a read.
+  "/api/billing/overdue": "reqOrgFilter",
 };
 
 const topLevel = (p: string): string => {

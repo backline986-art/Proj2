@@ -3847,6 +3847,38 @@ const VERSIONED_MIGRATIONS: VersionedMigration[] = [
       `);
     },
   },
+  {
+    // v86 (#199, chasing late invoices; invoiceCollections.ts): children of client_invoices, reaching an
+    // org through the invoice's client (rule 6), so no org_id.
+    // (a) invoice_reminders: every reminder a named person sent (or tried to: delivered 0 = a draft or a
+    //     failure, which does not count as sent).
+    // (b) invoice_hold_lifts: a named person's lift of one invoice's hold on the client's new filings,
+    //     with the reason. One per invoice. The invoice stays owed.
+    version: 86,
+    name: "invoice_collections",
+    up: (db) => {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS invoice_reminders (
+          id TEXT PRIMARY KEY,
+          invoice_id TEXT NOT NULL,
+          kind TEXT NOT NULL,
+          sent_by TEXT NOT NULL,
+          sent_at TEXT NOT NULL,
+          delivered INTEGER NOT NULL DEFAULT 0,
+          detail TEXT NOT NULL DEFAULT ''
+        );
+        CREATE INDEX IF NOT EXISTS idx_invoice_reminders_invoice ON invoice_reminders(invoice_id);
+        CREATE TABLE IF NOT EXISTS invoice_hold_lifts (
+          id TEXT PRIMARY KEY,
+          invoice_id TEXT NOT NULL UNIQUE,
+          client_id TEXT NOT NULL,
+          lifted_by TEXT NOT NULL,
+          lifted_at TEXT NOT NULL,
+          reason TEXT NOT NULL
+        );
+      `);
+    },
+  },
 ];
 
 /** v47 was edited in place while #218 was open (Helm's review at 0116f98a): a DB that ran an earlier
