@@ -5321,15 +5321,27 @@ export class AutoLearnAdapter extends BasePortalAdapter {
 
   /** The page's review reading with its step navigator cut, and the control labels that exist
    *  only inside the navigator (portalSafety reviewTextInPage / navigatorOnlyControlLabelsInPage).
-   *  null = unreadable (a fake page) — the caller falls back to the whole body. */
-  private async pageReviewReading(): Promise<{ text: string; navOnly: string[] } | null> {
+   *  Also, from the same shared reading, the navigator's CURRENT step(s) (navigatorActiveStepsInPage)
+   *  and the page's live-fillable answer (readOnlyPageInPage), for the planner-review demotion
+   *  (#188). null = unreadable (a fake page) — the caller falls back to the whole body. */
+  private async pageReviewReading(): Promise<{ text: string; navOnly: string[]; activeSteps: string[]; activeTerminal: boolean; readOnly: boolean | null } | null> {
     if (!this.page || typeof this.page.evaluate !== "function") return null;
     await this.page.evaluate(PORTAL_SAFETY_IN_PAGE_SOURCE).catch(() => null);
     const r = await this.page.evaluate((g: string) => {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const ps = (globalThis as any)[g];
       if (!ps || typeof ps.reviewTextInPage !== "function") return null;
-      return { text: String(ps.reviewTextInPage() || "").slice(0, 4000), navOnly: ps.navigatorOnlyControlLabelsInPage() as string[] };
+      // An older in-page copy (installed before this build, on a page that outlived it) has no
+      // active-step reading: no steps and "terminal" — no evidence, the direction that keeps review.
+      const act = typeof ps.navigatorActiveStepsInPage === "function" ? ps.navigatorActiveStepsInPage() : { steps: [], terminal: true };
+      const ro = typeof ps.readOnlyPageInPage === "function" ? ps.readOnlyPageInPage() : undefined;
+      return {
+        text: String(ps.reviewTextInPage() || "").slice(0, 4000),
+        navOnly: ps.navigatorOnlyControlLabelsInPage() as string[],
+        activeSteps: (Array.isArray(act?.steps) ? act.steps : []).map((s: unknown) => String(s)).slice(0, 6),
+        activeTerminal: act?.terminal !== false,
+        readOnly: typeof ro === "boolean" ? ro : null,
+      };
     }, PORTAL_SAFETY_GLOBAL).catch(() => null);
     return r && typeof r.text === "string" ? r : null;
   }
@@ -8580,6 +8592,43 @@ export class AutoLearnAdapter extends BasePortalAdapter {
           ...(fwd >= 0 ? { navigateSelectorIndex: undefined } : {}),
         };
         interstitialAdvanceKey = key;
+      }
+
+      // c2n) A STEP-NAVIGATOR BUBBLE IS NEVER THE FINAL SUBMIT (#188). Live, a 7-step wizard's
+      //      step 1 (EnerGov CSS, AngularJS Material md-steppers): the planner said atReview with
+      //      the "7" bubble — the stepper indicator of "Review and Submit" — as its final submit.
+      //      Nothing demoted it: the walk locked step 1 down as the review page, armed human
+      //      capture, and never added the location. Two rules, both on the shared reading's own
+      //      navigator cut (navOnly: controls that exist ONLY inside the step bar):
+      //   DROP   — a final-submit index naming a navigator-only control is dropped, always. A step
+      //            bubble moves between steps; it never files, and recorded as isFinalSubmit it would
+      //            be an allowlist entry for a click that is not the filing click.
+      //   DEMOTE — when that control is the planner's ONLY review evidence (the page is not review
+      //            by structure, its navigator-cut text names no review, no on-page submit-shaped
+      //            control, no terms box, no review URL), the plan is not a review stop — but ONLY on
+      //            positive evidence of a FORM step, all of: a fillable control on a non-dashboard,
+      //            AND either a live fillable one (readOnlyPageInPage false) or a navigator whose
+      //            CURRENT step is known and not terminal-worded (navigatorActiveStepsInPage). Any
+      //            doubt keeps review — the direction that cannot file. Nothing here touches the
+      //            Enter gate, the terminal-submit reading, the network backstop or the lockdown.
+      {
+        const navKey = (f: ExtractedField | undefined): string => String(f?.label ?? "").replace(/\s+/g, " ").trim().toLowerCase();
+        const fsIdx = plan.finalSubmitSelectorIndex;
+        const fsField = typeof fsIdx === "number" ? fields[fsIdx] : undefined;
+        if (fsField && navKey(fsField) && navOnly.has(navKey(fsField))) {
+          const control = String(fsField.label ?? "").replace(/\s+/g, " ").trim().slice(0, 60);
+          const onlyNavigatorEvidence = plan.atReview === true && !isReviewPage && !reviewSignals && !reviewShaped;
+          const activeSteps = reading?.activeSteps ?? [];
+          const currentStepIsForm = activeSteps.length > 0 && reading?.activeTerminal === false;
+          const formStep = hasFillable && !isDashboard && (reading?.readOnly === false || currentStepIsForm);
+          if (onlyNavigatorEvidence && formStep) {
+            plan = { ...plan, atReview: false, finalSubmitSelectorIndex: undefined };
+            this.debug?.event({ type: "planner_review_demoted_navigator", page: pageCount, control, active: activeSteps.slice(0, 3), readOnly: reading?.readOnly ?? null });
+          } else {
+            plan = { ...plan, finalSubmitSelectorIndex: undefined };
+            this.debug?.event({ type: "planner_final_submit_navigator_dropped", page: pageCount, control, atReview: plan.atReview === true });
+          }
+        }
       }
 
       // c2b) DIAGNOSTIC BREADCRUMB — record what we saw + what the planner decided on this
