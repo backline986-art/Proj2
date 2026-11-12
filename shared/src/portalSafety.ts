@@ -1618,6 +1618,31 @@ export function portalSafetyFactory() {
    * skeptic, enter-probe.log). The default button is tagged data-al-default-submit="1" so the
    * caller can judge it with its full click gate.
    */
+  /** AN AUTOCOMPLETE WIDGET'S OWN STAMP (#139): a class token a widget library writes on the input it
+   *  drives — jQuery UI "ui-autocomplete-input", typeahead.js "tt-input", "autocomplete-input" and
+   *  "<lib>-autocomplete-input", a whole "typeahead" token. Never a token that says the opposite
+   *  ("autocomplete-off", "noautocomplete", "typeahead-disabled"), and never a box's own wording (a
+   *  placeholder "Autocomplete disabled" is not a widget). THE ONE ANSWER: the Enter identity
+   *  (enterIdentityInPage) and the learner's type-ahead classifier (toExtractedField) both read it. */
+  const isAutocompleteWidgetClass = (className: string | null | undefined): boolean => {
+    const tokens = String(className ?? "").toLowerCase().split(/\s+/).filter(Boolean);
+    return tokens.some((t) => !/off|no|disable/.test(t)
+      && (t === "ui-autocomplete-input" || t === "tt-input" || t === "autocomplete-input" || t === "typeahead"
+        || /^[a-z0-9]+(?:-[a-z0-9]+)*-autocomplete-input$/.test(t)));
+  };
+
+  /** WHERE A SUBMITTER POSTS (#139 fix round). `button.formAction` is the PAGE's own URL when the
+   *  button has no formaction attribute (HTML: a missing formaction reflects the document address),
+   *  so `btn.formAction || form.action` never read the form's action: a box in
+   *  <form action="/permit/submitApplication"> with a plain <button>Go</button> was allowed Enter and
+   *  posted the filing (adversarial probe). The button's own formaction only when it has one, else
+   *  the form's action (the document address when the form names none, which is where it posts). */
+  const submitActionOf = (btn: Element, form: HTMLFormElement | null): string => {
+    const own = btn.hasAttribute && btn.hasAttribute("formaction") ? String((btn as HTMLButtonElement).formAction || "") : "";
+    const formOwner = ((btn as HTMLButtonElement).form || form) as HTMLFormElement | null;
+    return own || String(formOwner ? formOwner.action : "") || "";
+  };
+
   const implicitSubmitInPage = (el: Element | null | undefined): { label: string; action: string; tagged: boolean; missingDefault?: string } | null => {
     if (!el) return null;
     const tag = el.tagName;
@@ -1655,7 +1680,7 @@ export function portalSafetyFactory() {
       if (!declared) return { label: "", action: "", tagged: false, missingDefault: id.slice(0, 60) };
       declared.setAttribute("data-al-default-submit", "1");
       const label = String(controlLabelInPage(declared) || (declared as HTMLElement).innerText || (declared as HTMLInputElement).value || "").replace(/\s+/g, " ").trim();
-      return { label, action: String((declared as HTMLButtonElement).formAction || (form ? form.action : "") || ""), tagged: true };
+      return { label, action: submitActionOf(declared, form), tagged: true };
     }
     if (!form) return null;
     const btn = Array.from(form.elements).find((c) => (c.tagName === "BUTTON" && String((c as HTMLButtonElement).type || "submit").toLowerCase() === "submit")
@@ -1663,7 +1688,7 @@ export function portalSafetyFactory() {
     if (btn) {
       btn.setAttribute("data-al-default-submit", "1");
       const label = String(controlLabelInPage(btn) || (btn as HTMLElement).innerText || (btn as HTMLInputElement).value || "").replace(/\s+/g, " ").trim();
-      return { label, action: String(btn.formAction || form.action || ""), tagged: true };
+      return { label, action: submitActionOf(btn, form), tagged: true };
     }
     return { label: "", action: String(form.action || ""), tagged: false };
   };
@@ -1677,6 +1702,16 @@ export function portalSafetyFactory() {
     if (isPayFee(imp.label)) return `Enter here activates "${imp.label.slice(0, 60)}", which pays a fee`;
     if (isSubmitIntent(imp.label, null) || isFinalSubmitControl(imp.label, { reviewPage: true })) return `Enter here activates "${imp.label.slice(0, 60)}", which is submit-worded`;
     if (isSubmitOrPayRequestUrl(imp.action)) return `Enter here submits the form to ${imp.action.slice(0, 80)}, a filing/payment endpoint`;
+    // A FORM WHOSE OWN ACTION FILES OR PAYS refuses Enter whatever button it has (#139 fix round): a
+    // button's formaction may point elsewhere today, and a page script can submit the form itself.
+    const box = el as Element;
+    const form = ((box as HTMLInputElement).form || (box.closest ? box.closest("form") : null)) as HTMLFormElement | null;
+    const formAction = form && form.hasAttribute("action") ? String(form.action || "") : "";
+    if (formAction && isSubmitOrPayRequestUrl(formAction)) return `Enter here is inside a form that posts to ${formAction.slice(0, 80)}, a filing/payment endpoint`;
+    // A SIGNATURE REQUEST is never Enter's to send (#139 fix round): the replay's click gate refused
+    // it on the default button and this shared question did not ("Request Signatures" as the form's
+    // default: allowed, posted).
+    if (isSignatureRequestControl(imp.label)) return `Enter here activates "${imp.label.slice(0, 60)}", which sends a signature request`;
     return "";
   };
 
@@ -1697,7 +1732,8 @@ export function portalSafetyFactory() {
    * passes each found three new shapes a deny rule did not know):
    *   0. The box must be POSITIVELY identified as a search / autocomplete / login control
    *      (enterIdentityInPage: role searchbox/combobox, type=search, aria-autocomplete,
-   *      enterkeyhint/inputmode=search, a search landmark, a password form). Anything else —
+   *      enterkeyhint/inputmode=search, an autocomplete widget's stamp (#139), a search landmark, a
+   *      password form). Anything else —
    *      "Parcel Number", an unnamed text box — is refused by name.
    *   2'. The scope is THE PAGE, whether or not the box sits in a form (a document keydown can
    *      map Enter to any control: checker's enterNoForm, and enterFormScope — a search box in
@@ -1716,6 +1752,11 @@ export function portalSafetyFactory() {
     const ac = attr("aria-autocomplete");
     if (ac && ac !== "none") return "aria-autocomplete";
     if (attr("enterkeyhint") === "search" || attr("inputmode") === "search") return "a search keyboard hint";
+    // AN AUTOCOMPLETE WIDGET'S OWN STAMP ON THE BOX (#139): jQuery UI stamps class
+    // "ui-autocomplete-input" on the input it drives and adds no ARIA (a CityView location search).
+    // Known stamps only (isAutocompleteWidgetClass) — the ONE predicate the learner's type-ahead
+    // classifier reads too. Identity only — every refusal below still applies.
+    if (el.tagName === "INPUT" && /^(text|search)$/.test(type || "text") && isAutocompleteWidgetClass(el.getAttribute("class"))) return "an autocomplete widget's stamp";
     if (el.closest && el.closest("[role=search], search")) return "a search landmark";
     const form = ((el as HTMLInputElement).form || (el.closest ? el.closest("form") : null)) as HTMLFormElement | null;
     if (form && el.tagName === "INPUT" && /^(text|email|password|tel)$/.test(type || "text") && form.querySelector("input[type=password]")) return "a login form";
@@ -1729,7 +1770,7 @@ export function portalSafetyFactory() {
     if (own) return own;
     if (!enterIdentityInPage(el)) {
       const name = clean(controlLabelInPage(el)).slice(0, 40) || "(unlabelled box)";
-      return `Enter is pressed only in a positively identified search, autocomplete or login box (role searchbox/combobox, type=search, aria-autocomplete, a search landmark, a password form) — "${name}" is none of these`;
+      return `Enter is pressed only in a positively identified search, autocomplete or login box (role searchbox/combobox, type=search, aria-autocomplete, an autocomplete widget's stamp, a search landmark, a password form) — "${name}" is none of these`;
     }
     const form = ((el as HTMLInputElement).form || (el.closest ? el.closest("form") : null)) as HTMLFormElement | null;
     const reviewPage = reviewPageInPage();
@@ -1757,6 +1798,7 @@ export function portalSafetyFactory() {
       const where = whereOf(c);
       if (isPayFee(label)) return `the ${where} also holds${what} "${label.slice(0, 50)}", which pays a fee — a page script can map Enter to it`;
       if (isSubmitIntent(label, ctx)) return `the ${where} also holds${what} "${label.slice(0, 50)}", which is submit-worded — a page script can map Enter to it`;
+      if (isSignatureRequestControl(label)) return `the ${where} also holds${what} "${label.slice(0, 50)}", which sends a signature request — a page script can map Enter to it`;
       return "";
     };
     // Native and role controls. A SUBMITTER counts hidden; any other control counts when visible.
@@ -2268,6 +2310,7 @@ export function portalSafetyFactory() {
     implicitSubmitRefusalInPage,
     enterIdentityInPage,
     enterRefusalInPage,
+    isAutocompleteWidgetClass,
     submitsOrNavigatesInPage,
     isSubmitOrPayRequestUrl,
     isPayRequestUrl,
@@ -2318,6 +2361,9 @@ export const paymentDialogVerdict = impl.paymentDialogVerdict;
 export const isPayNowDialogText = impl.isPayNowDialogText;
 export const isFinalSubmitControl = impl.isFinalSubmitControl;
 export const isSignatureRequestControl = impl.isSignatureRequestControl;
+/** #139 — an autocomplete widget's own class stamp on a box (the Enter identity and the learner's
+ *  type-ahead classifier read this one answer). */
+export const isAutocompleteWidgetClass = impl.isAutocompleteWidgetClass;
 export const classifyRecordedClick = impl.classifyRecordedClick;
 export const isSecretField = impl.isSecretField;
 export const isPaymentField = impl.isPaymentField;
