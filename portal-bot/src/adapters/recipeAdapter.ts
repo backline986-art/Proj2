@@ -93,7 +93,7 @@ import { imageToPdfBytes, shouldConvertToPdf } from "../imageToPdf";
 import { removeUploadStaging, uploadPayloadFor, type PreparedUpload } from "./uploadPayload";
 import { attachmentTypeFor, isDocumentTypeList } from "./attachmentTypes";
 import { chooseSubmittedRecord, cleanRecordLink, readApplicationLedgerInPage, recordLinkForNumberInPage, type LedgerEntry } from "./submissionLedger";
-import { exactUploadDocType, fileTypeAllowed, UPLOAD_LABEL_PATTERNS, uploadForbidsSubstitute } from "./autoLearnAdapter";
+import { exactUploadDocType, fileTypeAllowed, formsSlotDocTypes, UPLOAD_LABEL_PATTERNS, uploadForbidsSubstitute, uploadTextNamesNoDocument } from "./autoLearnAdapter";
 import { readFeeStop, secretValuesOf, type FeeStopKind, type FeeStopReading } from "../feeStop";
 import { reviewComparison, scrapeReviewScreen as scrapeReviewScreenShared, utilityIdentifiersEnteredBySteps, type ReviewMismatch } from "../reviewScreenScraper";
 import { controlReadsUnanswered, pinEmptyRequiredControl, PINNED_CONTROL_ATTR, SWEPT_BLANK_ATTR, sweepEmptyRequiredControls, type EmptyRequired } from "../requiredControlSweep";
@@ -6858,9 +6858,16 @@ export class RecipeAdapter extends BasePortalAdapter {
         else await smartWait(this.page);
         return true;
       case "upload": {
-        const recordedLabel = String(step.note ?? "").split(":").slice(1).join(":").trim();
+        // The slot's heading as recorded (#140: `slot`, the requirement the portal named), else the
+        // label the note carries — one name for the exact-type check and the slot search below.
+        const recordedLabel = String(step.slot ?? "").trim() || String(step.note ?? "").split(":").slice(1).join(":").trim();
         const requiredType = exactUploadDocType(recordedLabel);
-        if (requiredType && step.docType !== requiredType) {
+        // A forms slot ("Agreements, Form, Documents & Checklists") takes ANY of the job's forms, so a
+        // step the learn recorded with the building application is as right as one with the checklist
+        // the label's first word names (#140). Anything else must be the exact document.
+        const slotForms = formsSlotDocTypes(recordedLabel);
+        const docTypeFitsSlot = (docType: string | undefined) => !!docType && (docType === requiredType || !!slotForms?.includes(docType));
+        if (requiredType && !docTypeFitsSlot(step.docType)) {
           this.driftWarnings.push(`refused ${step.docType || "unbound file"} for "${recordedLabel.slice(0, 60)}"; this slot requires ${requiredType}`);
           this.noteUnresolved(step);
           return false;
@@ -6903,7 +6910,9 @@ export class RecipeAdapter extends BasePortalAdapter {
           // tag is re-taken in a bounded poll until the slot the step names is there; if it never
           // appears, the step is skipped NAMED within seconds, and the document goes to no other
           // slot (a differently labelled slot is never a fallback).
-          const wanted = String(step.note ?? "").split(":").slice(1).join(":").trim();
+          // By the recorded slot heading first (#140): CityView's "Electrical Plans" is a row the
+          // control's own text never names, so the note alone ("Browse..") could not find it.
+          const wanted = recordedLabel;
           const norm = (v: string) => String(v ?? "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
           const want = norm(wanted);
           const recordedCss = step.selector.css;
@@ -6924,9 +6933,16 @@ export class RecipeAdapter extends BasePortalAdapter {
           if (!hit) {
             // The recorded index is a fallback only for a slot with no label of its own to
             // contradict the step's (an unlabelled Browse box); never for a differently labelled one.
+            // A step recorded against a picker FACE ("upload plan_set: Add" — every Accela recipe,
+            // whose slot now reads its heading, #140) contradicts nothing and keeps its position,
+            // unless the live slot's heading names a different exact document (a step recorded as
+            // "Browse.." into what now reads "Agreements, Form, Documents & Checklists" is refused).
             const recorded = slots.find((sl) => `[data-al-upl="${sl.key}"]` === recordedCss);
             const recordedLabel2 = norm(recorded?.label ?? "");
-            if (!recorded || (want && recordedLabel2 && recordedLabel2 !== "document")) {
+            const wantNamesDocument = !!want && !uploadTextNamesNoDocument(wanted);
+            const liveExact = recorded ? exactUploadDocType(recorded.label || "") : null;
+            const liveContradicts = !!liveExact && liveExact !== step.docType && !formsSlotDocTypes(recorded?.label || "")?.includes(step.docType || "");
+            if (!recorded || liveContradicts || (wantNamesDocument && recordedLabel2 && recordedLabel2 !== "document")) {
               const secs = Math.round((Date.now() - started) / 100) / 10;
               this.driftWarnings.push(`upload "${wanted.slice(0, 48) || recordedCss}" has no matching file slot on this page after ${secs}s (${slots.length} slot(s): ${slots.map((s) => s.label.slice(0, 30)).join(" | ") || "none"}) — not attached, and not attached to any other slot`);
               this.noteUnresolved(step);

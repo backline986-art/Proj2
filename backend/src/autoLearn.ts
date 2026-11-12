@@ -53,7 +53,7 @@ import { expiredInfoPagePassFor, infoPagePriorProgress, isCleanInfoPageHold, liv
 import { formPurposeMismatch } from "./formPurpose";
 import { looksBotBlocked } from "./runAbort";
 import { id } from "./ids";
-import { knowledgeProfileKey, findKnowledgeForLearn, isVerifiedKnowledge, learnSafeNotes } from "./knowledgeBase";
+import { knowledgeProfileKey, findKnowledgeForLearn, isVerifiedKnowledge, learnPortalRequiredUploads, learnSafeNotes } from "./knowledgeBase";
 import { hostFitsTrackAndEntity, trackSafeUrl, type PortalUrlSource } from "./portalChannel";
 import { getCodeProfile } from "./codeProfiles";
 import { certifiedNamesForMake } from "./cecEquipment";
@@ -2218,6 +2218,19 @@ async function autoLearnPortalInner(
   const equipmentNotHeld = learn.equipmentNotHeld ?? [];
   try { learnNoteTopicsFromMisses(db, requiredMisses.filter((m) => !equipmentNotHeld.includes(m))); } catch { /* best-effort */ }
   const docMisses = learn.missingRequiredDocs ?? [];
+  // A REQUIRED SLOT THIS JOB COULD NOT FILL JOINS THE AHJ'S CHECKLIST (#140): the next job here is
+  // stopped at staging naming it, not at the portal. Permit portals only (the AHJ's row); seeded,
+  // never onto a person-verified row. A KB write never changes this learn's outcome.
+  if (scopeType === "ahj" && docMisses.length) {
+    try {
+      const kb = learnPortalRequiredUploads(db, project, docMisses, learnTrack);
+      if ("written" in kb && kb.written.length) {
+        addAuditLog(db, projectId, "system", "auto-learn", "portal.required_upload_learned", { profileKey: kb.profileKey, lines: kb.written });
+      } else if ("skipped" in kb && kb.skipped === "verified") {
+        verification.issues.push(`The portal requires upload(s) this job lacks (${docMisses.slice(0, 6).join(", ")}), and ${project.ahj}'s knowledge-base profile is person-verified, so it was not changed — add them to that profile by hand if they belong there.`);
+      }
+    } catch { /* best-effort: knowledge, never the learn's verdict */ }
+  }
   const validationBlocks = learn.validationBlocks ?? [];
   // #534 — what each page still showed as the walk LEFT it, on any page, and which pages were read.
   const exit = pageExitTrustSignals(learn);

@@ -33,7 +33,8 @@ import { hasMpuScope } from "./serviceScope";
 import { nowIso } from "./time";
 import { logger } from "./logger";
 import { inferPlatform, isRecognizedPlatform, looksLikeBareUrl } from "./portalPlatformRules";
-import { isInformationalPageUrl, isUtilityPlatformUrl, portalHostOf } from "./portalChannel";
+import { isInformationalPageUrl, isUtilityPlatformUrl, portalHostOf, recipeDisciplineForTrack } from "./portalChannel";
+import { portalRequiredUploadLine, requirementSlots } from "./requirementSlots";
 import { HttpError } from "./httpError";
 import { foreignKnownTenant, knownPowerClerkPortalFor, knownPowerClerkUtility, knownTenantOwner, pacifiCorpBrand, provablyDifferentUtility, sameUtilityEntity, utilityIdentityOf, type UtilityIdentity } from "./utilityIdentity";
 import { SECRET_DIGIT_CLASS, SECRET_SEPARATOR_DASHES, SECRET_SEPARATOR_INVISIBLE } from "../../shared/src/portalSafety";
@@ -1302,6 +1303,67 @@ export function learnFromPermitTarget(
       },
     },
   );
+}
+
+/**
+ * The slot label a learn's missingRequiredDocs entry names, when it is worth writing into the shared
+ * AHJ list (#140): the review-page hand-off suffix stripped, a rejected upload or the ACA Save warning
+ * dropped (the slot was satisfiable; the attach failed), and ONLY a label the one requirement
+ * vocabulary maps to a document slot. A picker face ("Choose File"), a bare "Required document", or a
+ * label no slot can hold never lands in a row every tenant reads.
+ */
+export function portalRequiredUploadLabel(raw: string): string | null {
+  const t = clean(raw);
+  if (!t || /portal rejected the upload|Save did not confirm/i.test(t)) return null;
+  const label = t.replace(/\s*\(on the review page[^)]*\)\s*$/i, "").replace(/[\s*:]+$/, "").trim();
+  if (!label || label.length > 80 || /^required document$/i.test(label)) return null;
+  return requirementSlots(label).length ? label : null;
+}
+
+/**
+ * A REQUIRED UPLOAD SLOT A LEARN COULD NOT FILL BECOMES PART OF THE AHJ'S CHECKLIST (#140, owner).
+ *
+ * City of Star's iWorQ form requires a "Bid"; the learn holds none and the portal will not submit
+ * without it. Written into the AHJ's shared required-documents list (the row the document inventory
+ * reads — findKnowledgeForLearn's AHJ match, else a new (state, ahj) row), the next job at Star is
+ * stopped at staging naming the document (requiredDocuments.portalRequiredUploadItems) instead of
+ * reaching the portal and failing there. Pooled on purpose: the slot is the portal's own wording,
+ * no customer data.
+ *
+ * Seeded, and NEVER onto a human-verified row (rule 3): a person's list is theirs to change. A job
+ * excluded from learning teaches nothing. Only labels portalRequiredUploadLabel accepts.
+ */
+export function learnPortalRequiredUploads(
+  db: AppDb,
+  project: Pick<ProjectRecord, "id" | "state" | "ahj">,
+  missingRequiredDocs: string[],
+  track: string | null | undefined,
+): { written: string[]; profileKey: string } | { skipped: "no_ahj" | "nothing" | "excluded" | "verified"; profileKey?: string } {
+  const ahj = clean(project.ahj);
+  if (!ahj) return { skipped: "no_ahj" };
+  const discipline = recipeDisciplineForTrack(track);
+  const lines = [...new Set((missingRequiredDocs || [])
+    .map(portalRequiredUploadLabel)
+    .filter((l): l is string => Boolean(l))
+    .map((l) => portalRequiredUploadLine(l, discipline)))];
+  if (!lines.length) return { skipped: "nothing" };
+  if (isLearningExcluded(db, project.id)) return { skipped: "excluded" };
+  // The row the inventory will read. Written by its own state/ahj/utility so the key is the same row.
+  const match = findKnowledgeForLearn(db, { state: project.state, ahj }).ahj;
+  const target = match && profileKey(match) === match.profileKey
+    ? { state: match.state, ahj: match.ahj, utility: match.utility }
+    : { state: project.state, ahj, utility: "" };
+  const key = profileKey(target);
+  if (isHumanVerifiedProfile(db, key)) return { skipped: "verified", profileKey: key };
+  const existing = db.get<Row>("SELECT required_documents_json FROM permit_utility_knowledge WHERE profile_key = ?", [key]);
+  const before = new Set(existing ? parseJson<string[]>(text(existing.required_documents_json), []) : []);
+  upsertKnowledge(db, {
+    ...target,
+    requiredDocuments: lines,
+    sources: [learnedSource("learned_project", "Required upload slot met on the permit portal during an auto-learn")],
+    confidence: "seeded",
+  }, { projectId: project.id, eventType: "portal.required_upload_learned", details: { lines } });
+  return { written: lines.filter((l) => !before.has(l)), profileKey: key };
 }
 
 /**

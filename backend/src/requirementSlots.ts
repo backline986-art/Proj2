@@ -22,6 +22,9 @@ const REQUIREMENT_SLOT_PATTERNS: Array<{ re: RegExp; docTypes: string[] }> = [
   { re: /module\s*(spec|data|cut|sheet)|panel\s*(spec|data|cut)\s*sheet|spec(ification)?\s*sheets?|data\s*sheets?|cut\s*sheets?|equipment\s+spec/i, docTypes: ["module_spec"] },
   { re: /label|placard/i, docTypes: ["labels"] },
   { re: /utility\s+bill|electric\s+bill|power\s+bill/i, docTypes: ["utility_bill"] },
+  // The installer's bid / proposal for the job (#140: iWorQ's required "Bid" slot). Its own slot —
+  // never the generated bid_sheet worksheet, which is a sheet to transcribe FROM, not the bid.
+  { re: /\bbids?\b/i, docTypes: ["bid"] },
   { re: /meter\s+photo|photo\s+of\s+(the\s+)?meter/i, docTypes: ["meter_photo"] },
   { re: /plan\s*set|construction\s+(documents|drawings|plans)|\bplans\b|drawings|full\s+set|set\s+of\s+plans|structural\s+plans/i, docTypes: ["plan_set", "combined_plan_set", "full_plan_set"] },
 ];
@@ -32,6 +35,29 @@ export function requirementSlots(text: string): string[] {
   if (!t) return [];
   const hit = REQUIREMENT_SLOT_PATTERNS.find((p) => p.re.test(t));
   return hit ? hit.docTypes : [];
+}
+
+// ---------------------------------------------------------------------------
+// A REQUIRED UPLOAD THE PORTAL'S OWN FORM DEMANDED (#140). When a learn meets a required file slot
+// it holds no document for (City of Star's iWorQ "Bid"), the slot is written into the AHJ's shared
+// required-documents list as ONE line in THIS format, so the next job at that AHJ is stopped at
+// staging naming the document instead of reaching the portal and failing there. The writer
+// (knowledgeBase.learnPortalRequiredUploads) and the reader (requiredDocuments.portalRequiredUploadItems)
+// both go through these two functions; nothing else parses the line.
+//   "Required upload on the permit portal [structural]: Bid"
+// The bracket is the permit discipline the learn filed under (recipeDisciplineForTrack; none = any).
+// ---------------------------------------------------------------------------
+const PORTAL_REQUIRED_UPLOAD = /^Required upload on the permit portal(?: \[(structural|electrical|combo)\])?: (.+)$/;
+
+export function portalRequiredUploadLine(label: string, discipline: string): string {
+  const d = ["structural", "electrical", "combo"].includes(discipline) ? ` [${discipline}]` : "";
+  return `Required upload on the permit portal${d}: ${String(label || "").replace(/\s+/g, " ").trim()}`;
+}
+
+/** The slot label and discipline of a portal-required-upload line; null for any other line. */
+export function parsePortalRequiredUpload(line: string): { label: string; discipline: string } | null {
+  const m = PORTAL_REQUIRED_UPLOAD.exec(String(line || "").trim());
+  return m && m[2].trim() ? { label: m[2].trim(), discipline: m[1] || "" } : null;
 }
 
 export type RequirementTrack = "building" | "electrical" | "checklist";

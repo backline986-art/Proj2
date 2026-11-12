@@ -822,8 +822,55 @@ export const UPLOAD_LABEL_PATTERNS: Array<{ re: RegExp; docType: string }> = [
   { re: /meter\s*(photo|picture|image|spec|reading|tag)|(photo|picture|image)\s+of\s+(the\s+)?meter/i, docType: "meter_photo" },
   { re: /label|placard/i, docType: "labels" },
   { re: /utility\s*bill|electric(ity)?\s*bill/i, docType: "utility_bill" },
-  { re: /plan\s*set|full\s*plan|construction\s*(plan|doc)|drawings?/i, docType: "plan_set" },
+  // THE INSTALLER'S BID (#140): iWorQ's "A copy of the bid is required for solar applications" slot,
+  // headed just "Bid". A sales document the plan set can never stand in for (EXACT_UPLOAD_TYPES):
+  // filled by the job's own bid when it holds one, else left empty and reported by name.
+  { re: /\bbids?\b/i, docType: "bid" },
+  // A slot named just "Plans" (#140: an iWorQ slot headed "Plans") is the plan set, as is one
+  // headed by the plans of the permit's own discipline — CityView's "Electrical Plans" (Bend),
+  // "Solar/PV Plans". The bare word or a listed qualifier only: "Stamped plans" / "Landscape
+  // plans" name something else and keep their old reading. Accela's "Plans - Construction" is
+  // deliberately NOT here: replay's unrecorded-upload sweep attaches to any unrecorded slot this
+  // pattern names, and Accela re-renders that box EMPTY after its Save commits the upload — the
+  // sweep would then file the plan set a second time (uploadHeld.dom.smoke pins this). Combined
+  // mode gives that slot the plan set on its own tier, as before.
+  { re: /plan\s*set|full\s*plan|construction\s*(plan|doc)|drawings?|^\W*plans?\W*$|\b(electrical|solar|pv|photovoltaic|building|permit|project)\s*plans?\b/i, docType: "plan_set" },
 ];
+
+/** UPLOAD TEXT THAT NAMES NO DOCUMENT (#140): a picker face ("Add", "Browse..", "Choose File"), a bare
+ *  "Document"/"Files", or an instruction made only of picker words ("Select a new document for this
+ *  requirement:"). Node-side twin of tagUploadControls' namesNoDocument — that function is serialized
+ *  into the page and cannot reach module scope, so the word list lives twice, pinned on one corpus by
+ *  uploadSlotByHeading.test (node) and reviewPageUpload.dom.smoke [D] (page). Replay uses this to let a
+ *  step recorded against a face ("upload plan_set: Add", every Accela recipe) keep its positional key
+ *  now that the live slot reads its heading. */
+const UPLOAD_GENERIC_WORDS = /\b(select|choose|browse|upload|attach|add|drag|drop|click|here|please|a|an|the|this|that|your|new|for|to|of|or|and|file|files|document|documents|requirement|requirements|set|item|items|button|now|max(imum)?|size|mb|kb|type|types|allowed|accepted|only|pdf|jpg|jpeg|png|no|chosen|selected)\b/gi;
+export function uploadTextNamesNoDocument(text: string | undefined): boolean {
+  const t = String(text || "").replace(/\([^)]*\)/g, " ");
+  return !t.replace(UPLOAD_GENERIC_WORDS, " ").replace(/[^a-z]+/gi, "").trim();
+}
+
+/** A slot whose heading names the application FORMS — agreements, forms, applications, checklists
+ *  (CityView's "Agreements, Form, Documents & Checklists", #140): the documents that may fill it,
+ *  in order. Null for any other heading, and for one that also names plans ("Plans & forms"). */
+export function formsSlotDocTypes(label: string): string[] | null {
+  const l = String(label || "");
+  if (!/\b(agreements?|forms?|applications?|checklists?|worksheets?|affidavits?)\b/i.test(l)) return null;
+  if (/plan\s*set|\bplans\b|drawings?/i.test(l)) return null;
+  return ["building_application", "electrical_application", "permit_application", "solar_checklist", "pv_worksheet", "application_transfer_sheet"];
+}
+
+/** A catch-all slot — "Other/Miscellaneous", "Other Files", "Additional Documents" (#140). It is the
+ *  fallback when nothing better is offered: on a page that offers a plans slot it takes nothing. */
+export function catchAllUploadSlot(label: string | undefined): boolean {
+  return /^\W*((upload|attach|add|select|choose)\s+)?(any\s+)?(other|misc(ellaneous)?|additional|supplemental|supporting|optional)\b/i.test(String(label || ""));
+}
+
+/** True when a slot's label names the plan set — the one slot a page offers the plans to. */
+export function uploadSlotTakesPlans(label: string | undefined): boolean {
+  if (!label) return false;
+  return UPLOAD_LABEL_PATTERNS.find(({ re }) => re.test(label))?.docType === "plan_set";
+}
 
 // When an upload control's label doesn't name a specific document (a generic "Upload
 // documents" / "Attach files" control), attach the full plan-set PDF instead — most
@@ -891,7 +938,7 @@ const UPLOAD_NO_SUBSTITUTE = /insurance|invoice|\bw-?9\b|tax\s*form|voided\s*che
 // substitute (and combined mode filed the plan set there even when the photo WAS held). A photo of
 // the customer's meter is the one document that can fill that slot; with none it stays empty and
 // is reported missing, and a recipe that recorded the plan set against it is refused at replay.
-const EXACT_UPLOAD_TYPES = new Set(["building_application", "electrical_application", "permit_application", "solar_checklist", "structural_letter", "pv_worksheet", "meter_photo"]);
+const EXACT_UPLOAD_TYPES = new Set(["building_application", "electrical_application", "permit_application", "solar_checklist", "structural_letter", "pv_worksheet", "meter_photo", "bid"]);
 
 // A SLOT THAT ASKS FOR A PHOTO (#542). No plan sheet, spec or bill is a photograph of the installed
 // gear, so a required "Photo of the main service panel" / "Picture of signage…" slot whose own
@@ -2331,6 +2378,10 @@ export interface UploadSlot {
   key: string;
   /** The human label of the upload field (e.g. "One-Line Electrical Diagram"). */
   label: string;
+  /** The document name the slot is known by (#140): its own label when that names a document,
+   *  else the heading or requirement row it sits under. Absent when the slot's text names
+   *  nothing ("Choose File", "Document") — such a slot is recorded by position only. */
+  heading?: string;
   /** "input" → a real <input type=file> (use setInputFiles); "browse" → a click-to-open
    *  trigger whose real input is created dynamically (use the filechooser event). */
   kind: "input" | "browse";
@@ -2389,9 +2440,146 @@ export function tagUploadControls(): UploadSlot[] {
   // wrong control: an unrecorded slot read as filled and its document was never attached.
   for (const stale of deepQueryAll(document, "[data-al-upl]")) stale.removeAttribute("data-al-upl");
 
+  // A picker's FACE ("Choose File", "Browse", "Upload…") — the same words pass 2 below reads as a
+  // click-to-open trigger. Text that says only this names no document, so it is not a slot label.
+  const TRIGGER = /^(browse|upload|choose(\s+file)?|attach|add\s+file|select\s+file|choose\s+files?|upload\s+file)\.{0,3}$/i;
+
+  // A SLOT NAMED BY ITS HEADING (#140). iWorQ renders each required document as
+  //   <h3>Plans</h3> <div>(File Types: .pdf):</div>
+  //   <div><label for="newfile_…" class="btn">Choose File</label> <input type=file id="newfile_…"> <textarea …></div>
+  // — the label bound to the input is the BUTTON FACE, so every slot read "Choose File", matched
+  // no document, and on the review page (attach-only) the plan set we held went nowhere while the
+  // portal said "The required uploads were not found". The document word lives in the heading
+  // ABOVE the control. Owning heading = the nearest heading-like element before the control, inside
+  // a few ancestors, with NO other upload control between them: a second slot with no heading of
+  // its own never borrows the first slot's, and Accela's repeated unlabeled rows under one section
+  // title stay unlabeled. Null when nothing qualifies — the caller keeps its old label.
+  function owningHeading(el: Element): string | null {
+    const HEADING_SEL = "h1, h2, h3, h4, h5, h6, legend, label, .control-label, .field-label, strong, b, dt";
+    const FOLLOWING = 4; // Node.DOCUMENT_POSITION_FOLLOWING
+    const others = deepQueryAll(document, 'input[type="file"], [data-al-upl]').filter((o) => o !== el && !o.contains(el) && !el.contains(o));
+    let anc: Element | null = el.parentElement;
+    for (let depth = 0; anc && depth < 4; depth++, anc = anc.parentElement) {
+      const before = Array.from(anc.querySelectorAll(HEADING_SEL))
+        .filter((h) => !h.contains(el) && (h.compareDocumentPosition(el) & FOLLOWING) !== 0);
+      for (let i = before.length - 1; i >= 0; i--) {
+        const h = before[i];
+        // A label bound to ANOTHER control is that control's label ("Signature Name:"), not a heading.
+        const forId = h.tagName.toLowerCase() === "label" ? h.getAttribute("for") : null;
+        if (forId && forId !== el.getAttribute("id")) continue;
+        // …and so is text wrapping a control of its own (<label><input> I agree</label>).
+        if (h.querySelector("input, select, textarea, button")) continue;
+        const t = (h.textContent || "").trim().replace(/\s+/g, " ");
+        if (!t || t.length > 80 || namesNoDocument(t)) continue;
+        // Another upload control between this heading and ours means the heading belongs to it.
+        if (others.some((o) => (h.compareDocumentPosition(o) & FOLLOWING) !== 0 && (o.compareDocumentPosition(el) & FOLLOWING) !== 0)) return null;
+        return t;
+      }
+    }
+    return null;
+  }
+
+  // TEXT THAT NAMES NO DOCUMENT (#140). A picker face, a bare "Document"/"Files", or an instruction
+  // made only of picker words — CityView's "Select a new document for this requirement:" — says
+  // which CONTROL this is, not what goes in it. Strip the picker/instruction words; a label with
+  // nothing left names nothing. "Plans", "Bid", "Other Files" and "Upload a photo of meter…" all
+  // keep a word, so they are names — and so does a section titled "Attachments", which the
+  // owning-heading read hands to the first slot under it. Page-side copy of the module's
+  // uploadTextNamesNoDocument (this function is serialized into the page and cannot reach module
+  // scope): change both; the unit test and smoke [D] pin them on one corpus.
+  const GENERIC_WORDS =/\b(select|choose|browse|upload|attach|add|drag|drop|click|here|please|a|an|the|this|that|your|new|for|to|of|or|and|file|files|document|documents|requirement|requirements|set|item|items|button|now|max(imum)?|size|mb|kb|type|types|allowed|accepted|only|pdf|jpg|jpeg|png|no|chosen|selected)\b/gi;
+  function namesNoDocument(text: string): boolean {
+    const t = String(text || "").replace(/\([^)]*\)/g, " ");
+    return !t.replace(GENERIC_WORDS, " ").replace(/[^a-z]+/gi, "").trim();
+  }
+
+  // THE REQUIREMENT ROW A SLOT SITS IN (#140, City of Bend's CityView). The Upload Files page
+  // lists each requirement as a table ROW — the requirement's name in its first cell and a
+  // "Pending" status cell — with the Browse control and its description box in the row BELOW,
+  // under "Select a new document for this requirement:". No heading element, no label bound to
+  // the input: the name is the first text cell of the nearest enclosing requirement row/section,
+  // and owningHeading (which reads heading-like elements only) finds nothing. Live, every slot
+  // read "Browse..", so the plan set went into the FIRST slot ("Agreements, Form, Documents &
+  // Checklists") and "Electrical Plans" stayed empty.
+  //
+  // Reads, from the control outward through a few ancestors: the first LEAF text chunk before
+  // the control inside the ancestor, else the nearest previous sibling's first leaf chunk —
+  // skipping picker/instruction words, status words ("Pending"), file-type notes, header cells,
+  // and anything too long to be a name. Stops with nothing the moment another upload control
+  // sits between the chunk and ours (that chunk is the other slot's), so a repeated unlabeled
+  // row under one section title stays unlabeled, as in the owningHeading contract.
+  // A status word in the same row ("Pending", "Required", "Not submitted") is the portal saying
+  // it tracks this slot as a requirement: `required` on the slot, so an empty one is NAMED.
+  const STATUS_WORD = /^(pending|required|optional|not\s+(yet\s+)?(submitted|received|uploaded|provided|attached)|missing|outstanding|incomplete|complete[d]?|received|accepted|rejected|submitted|awaiting(\s+\w+)?|in\s+review|n\/?a|status|none)$/i;
+  const REQUIRED_STATUS = /^(pending|required|not\s+(yet\s+)?(submitted|received|uploaded|provided|attached)|missing|outstanding|incomplete|awaiting(\s+\w+)?)$/i;
+  const NOT_A_NAME = /^(file\s*types?|accepted\s*(file\s*)?(types?|formats?)|max(imum)?\s*(file\s*)?size|\d+[.)]?|[\W_]*)$|^\(.*\)$/i;
+  function requirementRow(el: Element): { heading: string; required: boolean } | null {
+    const CONTROL = "input, select, textarea, button";
+    const UPLOADS = 'input[type="file"], [data-al-upl]';
+    const isUpload = (n: Element) => n !== el && !n.contains(el) && (n.matches(UPLOADS) || !!n.querySelector(UPLOADS));
+    const FOLLOWING = 4; // Node.DOCUMENT_POSITION_FOLLOWING
+    // The leaf text chunks of a node in document order: each text node's trimmed text, outside
+    // controls, scripts and table header cells.
+    const chunks = (node: Node, beforeEl: boolean): string[] => {
+      const out: string[] = [];
+      const walker = document.createTreeWalker(node, 4 /* SHOW_TEXT */);
+      for (let t = walker.nextNode(); t; t = walker.nextNode()) {
+        const p = (t as Text).parentElement;
+        if (!p || p.closest(`${CONTROL}, script, style, th, thead`)) continue;
+        if (beforeEl && (t.compareDocumentPosition(el) & FOLLOWING) === 0) break;
+        const s = (t.textContent || "").replace(/\s+/g, " ").trim();
+        if (s) out.push(s);
+      }
+      return out;
+    };
+    const nameIn = (list: string[]): { heading: string; required: boolean } | null => {
+      let heading = "";
+      let required = false;
+      for (const s of list) {
+        if (STATUS_WORD.test(s)) { if (REQUIRED_STATUS.test(s)) required = true; continue; }
+        if (heading) continue;
+        if (s.length > 80 || NOT_A_NAME.test(s) || namesNoDocument(s)) continue;
+        heading = s.replace(/[\s*:]+$/, "").trim();
+      }
+      return heading ? { heading, required } : null;
+    };
+    let anc: Element | null = el.parentElement;
+    for (let depth = 0; anc && depth < 6 && !/^(form|body|html)$/i.test(anc.tagName); depth++, anc = anc.parentElement) {
+      // Another upload control before ours inside this ancestor: its text is spoken for.
+      if (Array.from(anc.querySelectorAll(UPLOADS)).some((o) => isUpload(o) && (o.compareDocumentPosition(el) & FOLLOWING) !== 0)) return null;
+      const own = nameIn(chunks(anc, true));
+      if (own) return own;
+      // The rows above ours, nearest first, until one carries a control of its own.
+      for (let sib = anc.previousElementSibling; sib; sib = sib.previousElementSibling) {
+        if (isUpload(sib)) return null;
+        const got = nameIn(chunks(sib, false));
+        if (got) {
+          // A status cell in the row that names the slot, or in our own row, marks it tracked.
+          const ownStatus = chunks(anc, false).some((s) => REQUIRED_STATUS.test(s));
+          return { heading: got.heading, required: got.required || ownStatus };
+        }
+      }
+    }
+    return null;
+  }
+
   // Derive the field label for an upload control: nearest <label>, else the closest
   // form-group/row container's leading label/heading/text, else the trigger's own text.
-  function deriveLabel(el: Element): string {
+  // A result that is only the picker's face (or instruction words naming no document) is
+  // replaced by the slot's owning heading, else by its requirement row's name, if any.
+  // `heading` is the document name the slot is known by — undefined when its text names none —
+  // and `required` adds the row's own status word.
+  function deriveLabel(el: Element): { label: string; heading?: string; required: boolean } {
+    const read = deriveOwnLabel(el);
+    if (!namesNoDocument(read)) return { label: read, heading: read.trim(), required: false };
+    const owned = owningHeading(el);
+    if (owned !== null) return { label: owned, heading: owned, required: false };
+    const row = requirementRow(el);
+    if (row) return { label: row.heading, heading: row.heading, required: row.required };
+    return { label: read, required: false };
+  }
+
+  function deriveOwnLabel(el: Element): string {
     const id = el.getAttribute("id");
     if (id) {
       // Element's own root, so a label inside the same shadow root is found too.
@@ -2429,12 +2617,13 @@ export function tagUploadControls(): UploadSlot[] {
   for (const el of fileInputs) {
     const key = `f${n++}`;
     el.setAttribute("data-al-upl", key);
-    slots.push({ key, label: deriveLabel(el), kind: "input", required: isRequired(el), accept: el.getAttribute("accept") || "" });
+    const named = deriveLabel(el);
+    slots.push({ key, label: named.label, ...(named.heading ? { heading: named.heading } : {}), kind: "input", required: isRequired(el) || named.required, accept: el.getAttribute("accept") || "" });
   }
 
   // 2) Browse/Upload/Choose-File triggers whose real input is created dynamically — these
   //    have NO file input anywhere in their container, so the scrape above missed them.
-  const TRIGGER = /^(browse|upload|choose(\s+file)?|attach|add\s+file|select\s+file|choose\s+files?|upload\s+file)\.{0,3}$/i;
+  //    (TRIGGER is the picker-face test declared above, shared with deriveLabel.)
   const clickables = deepQueryAll(document, 'button, a, [role="button"], input[type="button"], .btn, span[class*="upload"], span[class*="browse"]');
   for (const el of clickables) {
     const txt = ((el as HTMLInputElement).value || el.textContent || "").trim();
@@ -2459,7 +2648,8 @@ export function tagUploadControls(): UploadSlot[] {
     // A browse TRIGGER has no accept of its own; borrow one from a file input in the same
     // container if the portal put it there, else leave it open.
     const nearInput = container ? container.querySelector('input[type="file"]') : null;
-    slots.push({ key, label: deriveLabel(el), kind: "browse", required: isRequired(el), accept: nearInput ? (nearInput.getAttribute("accept") || "") : "" });
+    const named = deriveLabel(el);
+    slots.push({ key, label: named.label, ...(named.heading ? { heading: named.heading } : {}), kind: "browse", required: isRequired(el) || named.required, accept: nearInput ? (nearInput.getAttribute("accept") || "") : "" });
   }
 
   return slots;
@@ -3723,7 +3913,10 @@ export class AutoLearnAdapter extends BasePortalAdapter {
     return size < 0 || size <= cap;
   }
 
-  private resolveUpload(field: ExtractedField, required = true, accept = "", exactOnly = false): { docType: string; file: string } | null {
+  /** `pageOffersPlans` (#140): another slot on this page takes the plan set, so a slot headed by
+   *  the application forms ("Agreements, Form, Documents & Checklists") takes a form or nothing —
+   *  never the plan set, in either mode. Alone on a page, such a slot keeps its old fallbacks. */
+  private resolveUpload(field: ExtractedField, required = true, accept = "", exactOnly = false, pageOffersPlans = false): { docType: string; file: string } | null {
     const label = field.label || "";
     const cap = this.uploadMaxBytes();
     // A candidate must fit the size cap AND be a type this control accepts. Folding the type
@@ -3739,6 +3932,18 @@ export class AutoLearnAdapter extends BasePortalAdapter {
     // by a plan-set fallback, in either upload mode. Record only the exact type
     // so learning cannot teach replay to repeat a substitute indefinitely.
     const namedType = UPLOAD_LABEL_PATTERNS.find(({ re }) => re.test(label))?.docType;
+    // A FORMS SLOT TAKES THE JOB'S FORMS (#140): any filled application / checklist the job holds,
+    // whichever the heading's first word happened to be. With a plans slot offered beside it (or on
+    // the review page) and no form held, it stays empty and is named — the plan set is never
+    // filed as "Agreements, Form, Documents & Checklists" while "Electrical Plans" sits empty.
+    const forms = formsSlotDocTypes(label);
+    if (forms) {
+      for (const docType of forms) if (fits(docType)) return { docType, file: this.docsByType[docType] };
+      if (exactOnly || pageOffersPlans) {
+        this.debug?.event({ type: "upload_no_substitute", label: label.slice(0, 60), reason: "forms_slot" });
+        return null;
+      }
+    }
     // THE REVIEW PAGE TAKES ONLY THE DOCUMENT ITS SLOT NAMES (#383): no substitute, no fallback
     // tier, no combined-mode plan set — a slot we cannot match exactly is left for the person.
     if (exactOnly) return namedType && fits(namedType) ? { docType: namedType, file: this.docsByType[namedType] } : null;
@@ -3840,8 +4045,8 @@ export class AutoLearnAdapter extends BasePortalAdapter {
   }
 
   // Resolve a docType for an upload control by its label only (no ExtractedField wrapper).
-  private resolveUploadByLabel(label: string, required = true, accept = "", exactOnly = false): { docType: string; file: string } | null {
-    return this.resolveUpload({ selector: {}, label, fieldType: "file" }, required, accept, exactOnly);
+  private resolveUploadByLabel(label: string, required = true, accept = "", exactOnly = false, pageOffersPlans = false): { docType: string; file: string } | null {
+    return this.resolveUpload({ selector: {}, label, fieldType: "file" }, required, accept, exactOnly, pageOffersPlans);
   }
 
   // Capture a full-page PNG of the current page as base64 for VISION-ASSISTED PLANNING, so the
@@ -4074,16 +4279,33 @@ export class AutoLearnAdapter extends BasePortalAdapter {
     // still receive the same combined document.
     let pathKey = "";
     try { pathKey = new URL(String(this.page.url?.() ?? "")).pathname.toLowerCase(); } catch { pathKey = ""; }
+    // THE PAGE'S SLOTS DECIDE TOGETHER (#140). When one headed slot takes the plans ("Electrical
+    // Plans"), a forms slot takes a form or nothing and a catch-all ("Other/Miscellaneous") takes
+    // nothing: the plan set goes where the portal asked for plans, once. Alone, each keeps its
+    // old fallbacks. Headed slots are reported as the page listed them.
+    const plansOffered = slots.some((s) => uploadSlotTakesPlans(s.heading ?? s.label));
+    if (slots.some((s) => s.heading)) {
+      this.debug?.event({ type: "upload_slots_headed", headings: slots.filter((s) => s.heading).map((s) => `${s.heading}${s.required ? " (required)" : ""}`).join(" | ").slice(0, 300), plansOffered });
+    }
+    // A headed requirement left with nothing in it is NAMED, by its heading, whatever the reason.
+    const leftEmpty = (slot: UploadSlot, why: string): void => {
+      if (slot.heading) this.debug?.event({ type: "upload_slot_left_empty", heading: slot.heading.slice(0, 80), required: !!slot.required, why });
+      if (slot.required) missingRequired.push(slot.label || "Required document");
+    };
     for (const slot of slots) {
       if (opts.reviewPage && slot.kind !== "input") {
         this.debug?.event({ type: "upload_review_widget_left", label: (slot.label || "").slice(0, 80) });
         if (slot.required) missingRequired.push(`${slot.label || "Required document"} (on the review page — attach it by hand; automation clicks no upload widget there)`);
         continue;
       }
-      const resolved = this.resolveUploadByLabel(slot.label, !!slot.required, slot.accept || "", !!opts.reviewPage);
+      if (plansOffered && catchAllUploadSlot(slot.heading)) {
+        leftEmpty(slot, "catch-all slot; the plan set has its own slot on this page");
+        continue;
+      }
+      const resolved = this.resolveUploadByLabel(slot.label, !!slot.required, slot.accept || "", !!opts.reviewPage, plansOffered);
       if (!resolved) {
         // No document for this control — never fake it. Report it if the portal requires it.
-        if (slot.required) missingRequired.push(slot.label || "Required document");
+        leftEmpty(slot, "no document of this job fits it");
         continue;
       }
       // DUPLICATE-ROW GUARD. A LABELED slot names the document it wants, so combined mode
@@ -4183,6 +4405,8 @@ export class AutoLearnAdapter extends BasePortalAdapter {
           phase: "fill",
           selector,
           docType: resolved.docType,
+          // The slot's heading (#140): replay finds the slot by it, the positional key is the fallback.
+          ...(slot.heading ? { slot: slot.heading } : {}),
           viaFileChooser: slot.kind === "browse",
           note: `upload ${resolved.docType}: ${slot.label || "document"}`,
         });
@@ -4190,6 +4414,7 @@ export class AutoLearnAdapter extends BasePortalAdapter {
           filled.push(slot.label);
           alreadyFilledLabels.push(slot.label);
         }
+        await this.fillUploadDescription(slot.key, resolved.docType, steps, alreadyFilledLabels).catch(() => null);
       } else if (rejected) {
         this.debug?.event({ type: "upload_rejected", label: (slot.label || "").slice(0, 80), docType: resolved.docType, message: rejected.slice(0, 160) });
         // Only a REQUIRED slot's rejection blocks; an optional slot's is informational.
@@ -4200,6 +4425,98 @@ export class AutoLearnAdapter extends BasePortalAdapter {
       }
     }
     return { filled, missingRequired, attached };
+  }
+
+  /** The words a slot's description box gets: the document's KIND, never its file name. A recorded
+   *  fill is a literal in a recipe every tenant replays, and stored file names carry the homeowner's
+   *  name — the kind is true of every job that attaches the same slot. */
+  static uploadDescriptionFor(docType: string): string {
+    const KNOWN: Record<string, string> = {
+      plan_set: "Plan set", combined_plan_set: "Plan set", full_plan_set: "Plan set", sld: "Single-line diagram",
+      site_plan: "Site plan", structural: "Structural sheets", structural_letter: "Structural engineering letter",
+      module_spec: "Module spec sheet", inverter_spec: "Inverter spec sheet", battery_spec: "Battery spec sheet",
+      meter_photo: "Meter photo", utility_bill: "Utility bill", labels: "Labels and placards", bid: "Bid",
+    };
+    const t = String(docType || "").trim();
+    if (KNOWN[t]) return KNOWN[t];
+    const words = t.replace(/_/g, " ").trim();
+    return words ? words.charAt(0).toUpperCase() + words.slice(1) : "Document";
+  }
+
+  // A SLOT'S DESCRIPTION BOX (#140). iWorQ pairs each required file input with a textarea
+  // "Description of the Plans" in the same widget. After a document attaches, the box beside it —
+  // after the control, before the next upload control, within a few ancestors, labelled as a
+  // description — gets the document's kind, and the fill is recorded so replay types it too. A box
+  // that already holds text is left alone. Typing only: nothing is clicked, so the attach-only pass
+  // on a review page stays attach-only. Best-effort: a box that will not fill changes nothing else.
+  private async fillUploadDescription(slotKey: string, docType: string, steps: RecipeStep[], alreadyFilledLabels: string[]): Promise<void> {
+    if (!this.page || typeof this.page.evaluate !== "function") return;
+    // The callback below names a helper; keepNames wraps it in __name, which a raw page lacks.
+    await this.page.evaluate("globalThis.__name = globalThis.__name || function (f) { return f; };").catch(() => null);
+    const found = await this.page.evaluate((key: string) => {
+      for (const stale of Array.from(document.querySelectorAll("[data-al-upl-desc]"))) stale.removeAttribute("data-al-upl-desc");
+      const el = document.querySelector(`[data-al-upl="${key}"]`);
+      if (!el) return null;
+      const FOLLOWING = 4; // Node.DOCUMENT_POSITION_FOLLOWING
+      // The text just before the box, when nothing is bound to it (#140, CityView: a bare
+      // "Provide a short description of this set of documents:" line above the textarea).
+      const precedingText = (b: Element): string => {
+        let node: Element | null = b;
+        for (let depth = 0; node && depth < 3; depth++, node = node.parentElement) {
+          for (let prev = node.previousSibling; prev; prev = prev.previousSibling) {
+            if (prev.nodeType === 1 && (prev as Element).querySelector("input, select, textarea, button")) return "";
+            const t = (prev.textContent || "").replace(/\s+/g, " ").trim();
+            if (t) return t.slice(0, 160);
+          }
+        }
+        return "";
+      };
+      const nameOf = (b: Element): string => {
+        const id = b.getAttribute("id");
+        const forLbl = id ? document.querySelector(`label[for="${(window.CSS && CSS.escape) ? CSS.escape(id) : id}"]`) : null;
+        const bound = [b.getAttribute("aria-label"), b.getAttribute("placeholder"), b.getAttribute("title"), forLbl?.textContent].filter(Boolean).join(" ").replace(/\s+/g, " ").trim();
+        return bound || precedingText(b);
+      };
+      const uploads = Array.from(document.querySelectorAll('input[type="file"], [data-al-upl]')).filter((o) => o !== el);
+      let anc: Element | null = el.parentElement;
+      for (let depth = 0; anc && depth < 3; depth++, anc = anc.parentElement) {
+        for (const b of Array.from(anc.querySelectorAll('textarea, input[type="text"], input:not([type])'))) {
+          if ((el.compareDocumentPosition(b) & FOLLOWING) === 0) continue;
+          if (uploads.some((o) => (el.compareDocumentPosition(o) & FOLLOWING) !== 0 && (o.compareDocumentPosition(b) & FOLLOWING) !== 0)) continue;
+          const name = nameOf(b);
+          if (!/\bdescri(ption|be)\b/i.test(name)) continue;
+          if (((b as HTMLTextAreaElement).value || "").trim()) return null;
+          b.setAttribute("data-al-upl-desc", "1");
+          return {
+            id: b.getAttribute("id") || "", tag: b.tagName.toLowerCase(), name: name.slice(0, 120),
+            placeholder: b.getAttribute("placeholder") || "", ariaLabel: b.getAttribute("aria-label") || "",
+          };
+        }
+      }
+      return null;
+    }, slotKey).catch(() => null) as { id: string; tag: string; name: string; placeholder: string; ariaLabel: string } | null;
+    // Only the shape this callback returns counts as a box (a stub or a navigated page answers otherwise).
+    if (!found || typeof found !== "object" || Array.isArray(found) || typeof found.tag !== "string" || typeof found.name !== "string") return;
+    const value = AutoLearnAdapter.uploadDescriptionFor(docType);
+    const ok = await this.page.locator("[data-al-upl-desc]").first().fill(value, { timeout: 4000 }).then(() => true).catch(() => false);
+    this.debug?.event({ type: "upload_description", ok, docType, label: found.name.slice(0, 80) });
+    if (!ok) return;
+    // Recorded by the box's own stable attributes (the data-al-upl-desc mark is this pass's only).
+    const q = (v: string) => v.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+    const css = found.id ? `${found.tag}[id="${q(found.id)}"]`
+      : found.placeholder ? `${found.tag}[placeholder="${q(found.placeholder)}"]`
+      : found.ariaLabel ? `${found.tag}[aria-label="${q(found.ariaLabel)}"]`
+      : "";
+    if (css) {
+      steps.push({
+        action: "fill",
+        phase: "upload",
+        selector: { css, ...(found.placeholder ? { fallbacks: [{ placeholder: found.placeholder }] } : {}) },
+        value,
+        note: `upload description: ${(found.ariaLabel || found.placeholder || found.name).slice(0, 80)}`,
+      });
+    }
+    alreadyFilledLabels.push(found.ariaLabel || found.placeholder || found.name);
   }
 
   // Snapshot the VISIBLE error-banner texts currently on the page. Two uses per upload:

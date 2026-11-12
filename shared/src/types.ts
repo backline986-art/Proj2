@@ -5018,6 +5018,11 @@ export interface RecipeStep {
   value?: string;
   /** For upload: which document type to attach (e.g. "sld", "site_plan"). */
   docType?: string;
+  /** For upload: the heading of the requirement slot the document went into ("Electrical Plans",
+   *  "Bid"), as the portal named it (#140). Replay finds the slot by this heading first and falls
+   *  back to the recorded positional selector only when no slot on the page carries it. Absent
+   *  when the slot's own text named no document (a bare "Browse"). */
+  slot?: string;
   /** For upload: the control is a custom Browse/Upload widget whose real <input> is
    *  created on click — replay it via the browser file-chooser dialog (click + setFiles)
    *  rather than setInputFiles on a (non-existent) static input. */
