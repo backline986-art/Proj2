@@ -169,8 +169,13 @@ export type PortalRunStatus =
   // delegated final submit — the resubmit confirmation is a human's click, recorded only.
   | "awaiting_human_resubmit"
   | "paused_for_human"
+  // The run stopped on a fee (#576: a pay-to-file submit, a pay-now dialog, a fee page after the
+  // approved click). A person pays on the portal; staging the track is refused while it waits.
+  | "awaiting_payment"
   | "submitted"
-  | "failed";
+  | "failed"
+  // #340: a person stopped the run mid-fill (POST /api/portal-runs/:id/cancel). Nothing was filed.
+  | "cancelled";
 export type PermitCheckSource = "manual" | "portal" | "email" | "mock" | "public_url";
 export type PermitCheckOutcome =
   | "waiting"
@@ -210,6 +215,9 @@ export interface ClientRecord {
    *  part to the installer, and utility portals require a make and model. */
   standardDisconnectMake: string;
   standardDisconnectModel: string;
+  /** The installer's certifications, one per line (#679): checked against a program's or permit
+   *  path's cited installer-certification requirement. */
+  installerCertifications: string;
   ccbExpiration: string;
   electricalLicenseNumber: string;
   /** ICC/state docket number for the installer's DG certification (Illinois Part 468).
@@ -275,7 +283,21 @@ export interface ClientRecord {
   /** A PARTNER contractor this client files through, per portal and/or AHJ (Iowa City: the plan
    *  set is the solar company's, the permit's "Contractor (Electrical)" is a local licensed EC). */
   partnerContacts?: ClientPartnerContact[];
+  /** WHERE THIS COMPANY WORKS: the states, the cities or counties and the utilities it files with
+   *  (backend/src/clientServiceArea.ts). CLIENT DATA: it lives on this client's row (org-scoped, rule 6),
+   *  never in a shared knowledge table and never in a prompt. It names authorities so their filing
+   *  destinations can be confirmed before the first job; it decides nothing about any job. */
+  serviceArea?: ClientServiceAreaEntry[];
   createdAt: string;
+}
+
+/** One place a client works. `state` is the two-letter code; `name` is the city, county or utility as
+ *  staff typed it ("" for a whole-state entry). The authority it names is resolved on read through the
+ *  existing name matching, inside that state only. */
+export interface ClientServiceAreaEntry {
+  kind: "state" | "city" | "county" | "utility";
+  state: string;
+  name: string;
 }
 
 export interface ClientStateLicense {
@@ -360,6 +382,12 @@ export interface SubmissionPaymentRecord {
   feeRecordedAt: string;
   quotedAt: string;
   paidAt: string | null;
+  /** WHAT THE PER-SUBMISSION GATE ACTUALLY COLLECTED from the client when this row was marked
+   *  paid (#699): the service fee only, since the gate stopped asking for the jurisdiction fee.
+   *  null = not collected through that gate (quoted, waived) or paid BEFORE it recorded this —
+   *  when the gate still asked for permit fee + service fee, so what that payment covered is a
+   *  question for a person, never something an invoice may assume. */
+  gateCollectedUsd: number | null;
   updatedAt: string;
 }
 
@@ -588,6 +616,14 @@ export interface SubmissionPaymentQuote {
   /** The jurisdiction's own fee page, when a published schedule supplied or
    *  corroborated the number — so the operator can click through and check. */
   permitFeeSourceUrl: string | null;
+  /** WHEN KEELIX READ THAT SOURCE (ISO), "" when the fee row cannot say (fee round, 2026-11). Beside
+   *  permitFeeConfidence (the tier: seeded or person-verified) and permitFeeEvidenceQuote (the
+   *  printed line), this is what a fee needs before it is charged: who vouches, what was read, when. */
+  permitFeeSourceReadAt?: string;
+  /** FEE PAGES A PERSON READS while this amount is not from a schedule or the portal's own figure:
+   *  refused, dated or unreadable fee pages and cited fees that did not land (feeNeedsPerson).
+   *  Empty when there is nothing to read. Never a number. */
+  feeNeedsPersonRead?: Array<{ url: string; reason: string }>;
   /** The schedule line this project's size landed on ("5.01 kVA through 15 kVA").
    *  Carrying the bracket is the point: a replayed filing that freezes the learn
    *  project's bracket bills a 20 kW job at the 15 kVA rate. */
@@ -620,7 +656,14 @@ export interface SubmissionPaymentQuote {
   portalFeeRecords: PortalFeeRecordSummary | null;
   paymentMethod: FeePaymentMethod;
   serviceFeeUsd: number;
+  /** What this filing costs in all: the jurisdiction fee plus our service fee. A fact about the
+   *  submission, NOT what the client hands us at the gate — see gateAmountUsd. */
   totalUsd: number | null;
+  /** WHAT THE PER-SUBMISSION GATE COLLECTS (#699): our service fee only. The jurisdiction fee is
+   *  never taken up front (pay-then-rebill): it is paid on the portal and, only when we advanced
+   *  it ('keelix-pays'), reaches the client on the invoice once its real figure is recorded.
+   *  0 when this client is not gated (`required` false). */
+  gateAmountUsd: number;
   payment: SubmissionPaymentRecord | null;
   /** The jurisdiction's bill for this track, itemised — see FeeChargeBreakdown.
    *  Resolved for EVERY quote, like `paymentMethod` and `permitFeeSourceUrl`:
@@ -650,6 +693,8 @@ export interface PublishedFeeResult {
   bracketLabel?: string | null;
   /** The jurisdiction's published fee page. */
   sourceUrl?: string | null;
+  /** When Keelix read that page (ISO), "" / absent when the row cannot say. */
+  sourceReadAt?: string | null;
   /** The SCHEDULE's own citation — provenance of the table. Row grain, so on a
    *  bracketed schedule it agrees with at most one of the brackets: read it as a
    *  pointer back to the document (and, as below, as a mailed-check hint), never
@@ -967,11 +1012,85 @@ export interface ProjectRecord {
    *  — and mapped here by mapProject / normalizeProject. Absent when none is set. Read ONLY through
    *  permitProcess.trackIssuer; MPU follows electrical unless its own is set. */
   trackIssuers?: TrackIssuerOverrides;
+  /** THE UTILITY TRACK A PERSON'S RECORD TOOK OFF THIS JOB (draft 10, migration v74). Written only by
+   *  QC from the utility's PERSON-verified storage record (utilityStorageModes.nemStorageExemption),
+   *  read only through submittalTracks.nemTrackDropFor — never set from a request body. Absent when
+   *  nothing is dropped. */
+  nemTrackExemption?: NemTrackExemptionState;
   /** Set ONLY by permitProcess.projectForTrack on the TRACK-SCOPED VIEW it returns (ahj replaced by
    *  the track's issuer) — never persisted, never mapped from a row. It names the project's own AHJ
    *  so the per-job lookup's cited answer about this permit still reaches the view, and makes the
    *  view idempotent (a view of a view is itself). */
-  trackView?: { track: string; projectAhj: string; source: "operator" | "lookup" | "state_rule" };
+  trackView?: { track: string; projectAhj: string; source: "operator" | "lookup" | "reference" | "state_rule" };
+  /** THE JOB'S CLASS (#688, migration v69): "residential" (every existing row, and every job
+   *  nobody has said otherwise about) or "commercial". A PERSON sets it — at intake or on the
+   *  detail view; a model may suggest it, never set it. A commercial job is HELD for a person:
+   *  no recipe replay, no staging, no automatic filing, no learn, no shared-knowledge write
+   *  (shared/src/projectClass.ts). Optional only because normalizeProject builds an in-memory
+   *  record before any row exists; absent reads as "residential". */
+  projectClass?: ProjectClass;
+  /** A NAMED PERSON'S CONFIRMATION of the class against the "probably commercial" signals that
+   *  stood when they confirmed (each signal's key carries its evidence, so a changed size or service
+   *  raises the flag again). null/absent = nobody has confirmed. */
+  projectClassConfirmation?: ProjectClassConfirmation | null;
+  /** The service as the plan set states it (#688), read from the parser keys `servicePhase` /
+   *  `serviceVoltage` (legacy `phase` / `voltage` / `serviceType` as fallbacks). "" = not stated. */
+  servicePhase?: string;
+  serviceVoltage?: string;
+}
+
+/** #688. Every job is one or the other; unknown stays residential with today's checks. */
+export type ProjectClass = "residential" | "commercial";
+
+export interface ProjectClassConfirmation {
+  /** The person's name (namedPersonDecider), never "operator" / a bot. */
+  by: string;
+  at: string;
+  /** The class they confirmed. */
+  projectClass: ProjectClass;
+  /** The keys (ProjectClassSignal.key) of the signals they confirmed it against. */
+  signalKeys: string[];
+}
+
+/** ONE "PROBABLY COMMERCIAL" SIGNAL (#688): deterministic evidence that the job may not be a
+ *  residential job. `severity` is "blocker" only when the limit it crossed is a verbatim-cited
+ *  per-authority cap (Helm's #637 bar); every other signal is a warning. Either way an UNCONFIRMED
+ *  signal holds the job for a person. */
+export interface ProjectClassSignal {
+  /** Stable code: "occupancy.non_dwelling" | "service.three_phase" | "size.dc_over_cap" | "size.ac_over_cap". */
+  code: string;
+  /** code + the evidence it read, so a confirmation covers exactly what the person saw. */
+  key: string;
+  severity: "warning" | "blocker";
+  /** One sentence naming the evidence (no homeowner data: fields, values, kW, sources). */
+  message: string;
+  /** The project/parser field the evidence came from. */
+  fieldName: string;
+}
+
+/** A RESIDENTIAL SIZE CAP read from per-authority data (#679's eligibility record, when wired):
+ *  the program's own limit with its citation. Absent: the strict default applies as a warning. */
+export interface ResidentialCapCitation {
+  basis: "dc" | "ac";
+  valueKw: number;
+  sourceName: string;
+  sourceUrl: string;
+  /** The source's own words, verbatim; must contain the value for the cap to block. */
+  quote: string;
+}
+
+/** WHERE THE JOB STANDS ON CLASS (#688): what the screen found, what a person confirmed, and
+ *  whether automation must leave the job to a person. */
+export interface ProjectClassStatus {
+  projectClass: ProjectClass;
+  confirmation: ProjectClassConfirmation | null;
+  /** Every signal the screen raised now. */
+  signals: ProjectClassSignal[];
+  /** The signals no person has confirmed (empty once a person confirmed against exactly these). */
+  unconfirmed: ProjectClassSignal[];
+  held: boolean;
+  /** Why the job is held, as one sentence; null when it is not. */
+  holdReason: string | null;
 }
 
 /** The permit tracks an issuing agency can be named for. NEM is never one: a utility files it. */
@@ -983,8 +1102,10 @@ export type TrackIssuerOverrides = Partial<Record<IssuerTrackKey, string>>;
  *  CID / MHD where the AHJ has no building department), else the project AHJ. */
 export interface TrackIssuerAnswer {
   name: string;
-  source: "operator" | "lookup" | "state_rule" | "project";
-  /** The lookup's (or state rule's) source page and words (source "lookup" / "state_rule"). */
+  source: "operator" | "lookup" | "reference" | "state_rule" | "project";
+  /** The lookup's (or state rule's, or the AHJ reference row's) source page and words (source
+   *  "lookup" / "state_rule" / "reference": the AHJ's own cited page naming the state as this
+   *  permit's issuer). */
   sourceUrl?: string;
   quote?: string;
   /** The operator's value on file for this track ("" when none) — what the card's input shows. */
@@ -1034,7 +1155,9 @@ export type NextStepUrgency = "overdue" | "today" | "waiting" | "done";
 export type NextStepKey =
   | "operator_blocked"
   | "correction_overdue"
+  | "class_held"
   | "portal_paused"
+  | "payment_needed"
   | "automation_running"
   | "staging_failed"
   | "qc_not_run"
@@ -1046,6 +1169,10 @@ export type NextStepKey =
   | "staged_awaiting_submit"
   | "awaiting_signature"
   | "approved_awaiting_filing"
+  // #28: a two-stage permit filing whose application is made and paid — waiting on the agency's
+  // plan-upload invite, then a person uploads the plans in the second system by hand.
+  | "second_stage_invite"
+  | "second_stage_upload"
   | "fee_due"
   | "correction_open"
   | "payment_due"
@@ -1127,6 +1254,125 @@ export interface NextStepCompact {
   allFiled: boolean;
   gateCanOverrule: boolean;
   hasStagedDraft: boolean;
+}
+
+/**
+ * WHAT A JOB INSTALLS (#673): new PV, new PV plus storage, storage added to an existing PV system, or
+ * storage alone. QC chooses its equipment blockers by it (backend/src/jobScope.ts). Unknown or
+ * conflicting evidence is "pv", so today's PV blockers stay; a storage scope is reached only when
+ * nothing on the job names new modules.
+ */
+export type JobScope = "pv" | "pv+storage" | "storage-added-to-existing-pv" | "storage-only";
+export const JOB_SCOPES: readonly JobScope[] = ["pv", "pv+storage", "storage-added-to-existing-pv", "storage-only"];
+
+/** The battery's operating mode as QC and the utility's storage record read it. */
+export type StorageOperatingMode = "export" | "non-export" | "backup-only";
+export const STORAGE_OPERATING_MODES: readonly StorageOperatingMode[] = ["export", "non-export", "backup-only"];
+
+/**
+ * WHAT A UTILITY'S OWN APPLICATION ASKS FOR (review-audit draft 03; backend/src/utilityRequirements.ts).
+ * One typed item per thing the utility's interconnection application requires; the reviewer gate checks
+ * each against the project's evidence. Universal: the keys are kinds of evidence, never a utility.
+ */
+export type UtilityRequirementKey =
+  | "account_verification"
+  | "meter_photo"
+  | "inverter_settings"
+  | "inverter_listing_ul1741sb"
+  | "one_line"
+  | "site_plan"
+  | "ac_disconnect"
+  | "storage_mode_declaration"
+  | "owner_signature"
+  | "module_spec"
+  | "inverter_spec";
+export const UTILITY_REQUIREMENT_KEYS: readonly UtilityRequirementKey[] = [
+  "account_verification", "meter_photo", "inverter_settings", "inverter_listing_ul1741sb", "one_line",
+  "site_plan", "ac_disconnect", "storage_mode_declaration", "owner_signature", "module_spec", "inverter_spec",
+];
+/** Which gate reads an item: the reviewer gate (reviewerEngine), the QC baseline (baselineRules), or both. */
+export type UtilityRequirementGate = "reviewer" | "qc";
+/** How the QC baseline reports a missing item (baselineRules). Items sharing a ruleId report as ONE
+ *  result listing each missing item's label. {utility} and {missing} are filled in. */
+export interface UtilityRequirementQc {
+  ruleId: string;
+  ruleName: string;
+  message: string;
+  fieldName: string;
+  /** This item's words in a {missing} list ("SLD/3-line"). */
+  label?: string;
+  /** "blocker" only counts when the item may block (utilityRequirements.requirementMayBlock). */
+  severity?: "blocker" | "warning";
+  /** Where the result sits among the utility's QC results (lower first). */
+  order?: number;
+}
+/** seeded (shipped reference / a lookup's proposal) < official (#683: the utility's own official page,
+ *  quote confirmed in the bytes read) < verified (a named person). */
+export type UtilityRequirementTier = "seeded" | "official" | "verified";
+export interface UtilityApplicationRequirement {
+  key: UtilityRequirementKey;
+  /** What a missing item is at most: "blocker" only counts when the item may block (a verbatim quote
+   *  from a named source page that names the item, or the official / verified tier); "warning" never blocks. */
+  whenMissing: "blocker" | "warning";
+  tier: UtilityRequirementTier;
+  sourceName: string;
+  sourceUrl: string;
+  /** The page's own words. Empty = uncited: the item warns, never blocks (Helm's #637 bar). */
+  quote: string;
+  fetchedAt?: string;
+  /** A finding id kept from before this data existed (the two first seeded utilities), so the gate's
+   *  history, dedupe and tests keep reading the same id. Absent = reviewer.utility.<key>. */
+  findingId?: string;
+  /** Which gates read it. Absent = both. */
+  gates?: UtilityRequirementGate[];
+  /** How the QC baseline reports it when missing. Absent = the generic per-kind wording. */
+  qc?: UtilityRequirementQc;
+  verifiedBy?: string;
+  verifiedAt?: string;
+}
+/** The requirement list the reviewer reads for one job's utility (utilityRequirements.resolveUtilityRequirements). */
+export interface UtilityRequirementList {
+  /** The utility as the findings name it ("Rocky Mountain Power", "PGE"). */
+  displayName: string;
+  requirements: UtilityApplicationRequirement[];
+}
+
+/** Why a job's utility (NEM) track was dropped: the person-verified utility record QC read it from. */
+export interface NemTrackDrop {
+  utility: string;
+  mode: StorageOperatingMode;
+  sourceUrl: string;
+  quote: string;
+  verifiedBy: string;
+  verifiedAt: string;
+  /** When QC last confirmed the drop on this job. */
+  decidedAt: string;
+}
+
+/** The per-job state behind the utility track's drop (projects.nem_track_exemption_json). */
+export interface NemTrackExemptionState {
+  drop?: NemTrackDrop | null;
+  /** A named person put the track back on this job: no record drops it again until they undo it. */
+  keptBy?: string;
+  keptAt?: string;
+}
+
+/** The job's scope with its basis, as QC used it (jobScope.resolveJobScope). */
+export interface JobScopeView {
+  scope: JobScope;
+  /** "person": a named person set it on the job; "plan_set": the plan set's own evidence;
+   *  "default": nothing settles it, so the strict default (pv) applies. */
+  basis: "person" | "plan_set" | "default";
+  /** One sentence: why this scope. */
+  reason: string;
+  /** Fields on the job that name NEW modules (a storage scope is refused while any is present). */
+  newModuleEvidence: string[];
+  /** A person's scope that the job's evidence contradicts; "" when none. The evidence wins. */
+  conflict: string;
+  /** The person's own setting, when one is on file (kept even when it is overruled). */
+  personScope?: JobScope;
+  setBy?: string;
+  setAt?: string;
 }
 
 export interface QcResult {
@@ -1251,7 +1497,9 @@ export interface SubmissionRecord {
   /** The filing's discipline (`permit_type`: building, electrical, combo, mpu, nem, …) — names the
    *  filing in the dashboard's corrections picker (#58). */
   permitType?: string;
-  status: "staged" | "awaiting_human_submit" | "paused_for_human" | "submitted" | "failed" | "approved";
+  /** awaiting_second_stage (#28): the application is made (and its fee paid) on a two-stage AHJ whose
+   *  plans go into a second system by hand — NOT filed until a named person marks that upload done. */
+  status: "staged" | "awaiting_human_submit" | "paused_for_human" | "awaiting_payment" | "awaiting_second_stage" | "submitted" | "failed" | "approved";
   applicationNumber: string;
   permitNumber: string;
   confirmationNumber: string;
@@ -1286,6 +1534,10 @@ export interface PermitCheckTarget {
   /** WHY THE MONITOR COULD NOT READ THIS FILING on its last check (#413), one actionable line ("No
    *  portal recipe learned for … yet", "Login wall: …"); absent once a status is read. */
   readGap?: string;
+  /** THE NEWEST CHECK THAT READ NOTHING, and why (#173): the reason the monitor audited
+   *  (`permit_status.unreadable`), scrubbed for staff (rule 2), and when. Only while it is newer than
+   *  this filing's last recorded reading; null once a later check reads a status. Staff-only. */
+  lastUnreadable?: LastUnreadableCheck | null;
   /** THE ISSUED PERMIT / APPROVAL LETTER the monitor downloaded off this filing's record once it
    *  read issued / approved (#492), each with its provenance; absent when none is on file. */
   issuedDocuments?: IssuedRecordDocument[];
@@ -1294,6 +1546,12 @@ export interface PermitCheckTarget {
   issuedDocsGap?: string;
   createdAt: string;
   updatedAt: string;
+}
+
+/** A status check that read nothing (#173): the scrubbed reason and the time it was audited. */
+export interface LastUnreadableCheck {
+  reason: string;
+  at: string;
 }
 
 /** A closeout document the permit monitor downloaded off a filed record (#492). */
@@ -1369,6 +1627,9 @@ export interface ApprovalSheetIssue {
   kind: "mismatch" | "missing" | "note";
   rowKey: string;
   text: string;
+  /** Display only: the filing authority (filing-destinations profileKey) whose destination a person
+   *  can confirm on the track card — the sheet shows a link to it beside this note. */
+  confirmAuthority?: string;
 }
 
 /** #486: GET /api/projects/:id/approval-sheet — what Approve & auto-submit is about to file. A read:
@@ -1381,6 +1642,60 @@ export interface ApprovalSheet {
   rows: ApprovalSheetRow[];
   /** Mismatches first, then missing values, then notes. */
   issues: ApprovalSheetIssue[];
+  /** Review-audit draft 01: every open review item of THIS filing (backend/src/approvalReviewItems.ts),
+   *  those to acknowledge first. Approve stays disabled until each `needsAcknowledgement` item is ticked. */
+  openItems: ApprovalSheetOpenItem[];
+  /** The plan set the package ships, which the acknowledgements are bound to (null = none on file). */
+  planSet: ApprovalPlanSetBinding | null;
+  /** Review-audit draft 07: what the gate's measured rules checked for THIS filing — passed with the
+   *  arithmetic, or not checked for want of an input. Display only: nothing here needs a tick, blocks
+   *  or relaxes anything. */
+  checks: ApprovalSheetCheck[];
+}
+
+/** Review-audit draft 07: one check record of a filing, as the approval sheet lists it. */
+export interface ApprovalSheetCheck {
+  /** The record's finding id ("city.elec.sizing-busbar-120.pass"). */
+  id: string;
+  outcome: "passed" | "not_checked";
+  category: ReviewerFinding["category"];
+  title: string;
+  /** The arithmetic that passed, or "Not checked: <input> is not on the plans." */
+  text: string;
+  /** The rule basis in words (#683's wording), "" when the rule measured against no jurisdiction data. */
+  basis: string;
+}
+
+/** Review-audit draft 01: one open review item of a filing, as the approval sheet lists it. */
+export interface ApprovalSheetOpenItem {
+  /** Unique on the sheet ("finding:<id>", "form:<templateId>", "gate:<checkId>"). */
+  key: string;
+  kind: "reviewer_warning" | "form_mapping" | "gate_warning";
+  /** What an acknowledgement names: the finding id, "form:<templateId>", or the gate check id. */
+  id: string;
+  title: string;
+  /** The AHJ-facing sentence (a finding's cityFeedback) or the check's evidence. */
+  text: string;
+  action: string;
+  /** Arithmetic against the plan's own numbers (reviewerVision.MEASURED_FINDING_IDS). */
+  measured: boolean;
+  /** A measured warning or an unverified form mapping: a named person ticks it before approving. */
+  needsAcknowledgement: boolean;
+  /** What the person read; a changed item is a new one to acknowledge. */
+  contentHash: string;
+}
+
+/** The plan set an acknowledgement covers: its document id and the sha256 of its stored bytes. */
+export interface ApprovalPlanSetBinding {
+  documentId: string;
+  sha256: string;
+}
+
+/** What Approve & auto-submit sends with the approval, and what the approval records (review-audit
+ *  draft 01): the plan set the sheet showed and each acknowledged item's id + content hash. */
+export interface ApprovalAcknowledgements {
+  planSet: ApprovalPlanSetBinding | null;
+  items: Array<{ id: string; contentHash: string }>;
 }
 
 export interface SubmittalTrack {
@@ -1400,6 +1715,9 @@ export interface SubmittalTrack {
   trackingUrl: string;
   submittedAt: string | null;
   lastCheckedAt: string | null;
+  /** The track's filing's newest check that read nothing, while no later reading superseded it
+   *  (#173, the target's own `lastUnreadable`). Staff-only. */
+  lastUnreadable?: LastUnreadableCheck | null;
   /**
    * Which capture fields this track actually uses. NEM is an interconnection
    * application (no AHJ "permit number"); permits issue a permit number. The UI
@@ -1419,8 +1737,10 @@ export interface SubmittalTrack {
   /** The scope type used to look up the recipe — "ahj" or "utility". */
   recipeScopeType?: "ahj" | "utility";
   /** How this track is filed, as a kind (submittalTracks.channelKindOf). in_person / email / mail =
-   *  a person delivers the packet outside this tool — shown as a bold banner, never grey text. */
-  channelKind?: "portal" | "in_person" | "email" | "mail" | "unknown";
+   *  a person delivers the packet outside this tool — shown as a bold banner, never grey text.
+   *  with_permit (#664, NEM only) = a person verified that the utility's application rides INSIDE the
+   *  AHJ permit application: no portal of its own, its status follows the permit's. */
+  channelKind?: "portal" | "in_person" | "email" | "mail" | "with_permit" | "unknown";
   /** No recipe of its own: the recipe this project's LAST run of this track borrowed (another entity's,
    *  same portal — portalRecipes.findBorrowableRecipe), read from that run's result. null = none used. */
   borrowedRecipe?: { recipeId: string; recipeVersion: number | null; learnedFor: string; recordType: string; portalHost: string; lastUsedAt: string } | null;
@@ -1489,6 +1809,19 @@ export interface ApplicationRequirementProfile {
   permitStructure?: "combo" | "separate" | "unknown";
   /** How the completed application is submitted: email | online portal | in-person | combination. */
   submissionMethod?: string;
+  /** A STATEWIDE FALLBACK PROFILE (review-audit draft 14): used for a job in `state` whose AHJ has no
+   *  profile of its own. The flag lives on the profile, so no code compares a profile id or a state
+   *  name to recognise it; the reviewer words its process finding from these fields. */
+  statewide?: {
+    /** Two-letter state code the profile covers. */
+    state: string;
+    /** How the finding names the state ("<name> statewide profile applied"). */
+    name: string;
+    /** The profile as the packet names it ("the <label> (<permits>)"). */
+    label: string;
+    /** The statewide permit structure and its citation. */
+    permits: string;
+  };
 }
 
 export interface GeneratedApplicationDocument {
@@ -1653,8 +1986,28 @@ export interface AhjProcessProfile {
    *  permit_process_lookups as one 'seeded' permit's documents (knowledgeBase.seedSanitizedAhjProfiles),
    *  so lookupRequiredList and the verified-list gate have a cited list to read. */
   documents?: AhjProcessDocuments;
+  /** Per-fact evidence for a researched row: which field (or "ess") each page backs, the page, its own
+   *  words and when it was read. Evidence for the person who verifies the row; it never raises a row's
+   *  tier (rows from the reference file are seeded, rule 3) and never makes a door launchable. */
+  citations?: AhjProcessCitation[];
+  /** A STATE AUTHORITY's row, not a local jurisdiction's: the permit kinds it issues across its state
+   *  ("electrical"). A local row's citations[field=electricalPermitIssuer] "state" names this row as
+   *  that track's issuer (ahjRowCitations.stateAuthorityRowFor). Absent on every local row. */
+  stateAuthorityFor?: string[];
   reviewerNotes: string;
   sourceSheet: string;
+}
+
+export interface AhjProcessCitation {
+  /** The profile field this backs ("submissionMethod", "requiresStructuralStamp", …) or "ess". */
+  field: string;
+  /** The value read, where it is a single value (a portal host and path). */
+  value?: string;
+  sourceUrl: string;
+  /** The page's exact words. */
+  quote: string;
+  /** ISO time the page was read. */
+  fetchedAt: string;
 }
 
 export interface AhjProcessDocuments {
@@ -1831,7 +2184,9 @@ export interface JurisdictionEditionProposal {
   fingerprint: string;
   source: "reference" | "research";
   createdAt: string;
-  changes: Array<{ family: CodeFamily; current: string | null; proposed: string | null; sourceUrl?: string; quote?: string }>;
+  /** `datesOnly`: the row states the same edition, but not the effective / mandatory date or the
+   *  replaced edition the finding states (#561); approving adds them to the row's own entry. */
+  changes: Array<{ family: CodeFamily; current: string | null; proposed: string | null; datesOnly?: boolean; sourceUrl?: string; quote?: string }>;
   /** The full adopted-code list a re-verification would record. */
   proposedCodes: CodeEdition[];
   adoptionModel?: JurisdictionAdoptionModel;
@@ -2028,6 +2383,9 @@ export interface DesignCriteriaResearchResult {
     value: number | string;
     sourceUrl: string;
     quote?: string;
+    /** The number as the page printed it, when it was published in another unit and converted to
+     *  the field's own (#561: "2.5 feet" of frost is stored 30 in; this is 2.5). */
+    publishedValue?: number;
     /** Ground snow only: "pg" (strength) or "pg_asd" (allowable-stress, stored as groundSnowLoadAsdPsf). */
     qualifier?: "pg" | "pg_asd";
     /** Set when the page is NOT a jurisdiction-wide design value (a project-type handout: a storage
@@ -2048,6 +2406,10 @@ export interface DesignCriteriaResearchResult {
    *  values; unparsed = a candidate page whose table did not parse — a criterion still missing is
    *  "candidate page found, not parsed", never "no jurisdiction-wide value". */
   issuerPage?: { url: string; parsed: boolean };
+  /** IN-PROCESS ONLY, never persisted (#683): the pages this process itself read for the lookup —
+   *  the issuer-site probe's page text and when it was read — so the merge can tell a value that is
+   *  in those bytes (official) from a model's answer (seeded). */
+  retrieved?: Array<{ url: string; text: string; fetchedAt: string }>;
   notes: string;
 }
 
@@ -2154,6 +2516,133 @@ export interface PrescriptiveLimits {
   sourceUrl?: string;
 }
 
+/** ONE STATE PERMIT RULE, as cited data (#595 PR2; the shape #586's state fee rules share). A row of
+ *  state_permit_rules: seeded from shipped reference data or research, `verified` only when a person
+ *  checked it against the official source — and then never overwritten (rule 3). */
+export interface StatePermitRule {
+  /** Two-letter state code. */
+  state: string;
+  /** "structural" (#595: prescriptive-solar limits, what forces the engineered path, seal validity);
+   *  "fee" is #586's (state surcharges, caps); "qc" is a QC baseline screen (jurisdictionQcRules.ts,
+   *  review-audit draft 12: rule_key = the screen's ruleId, value = the screen). */
+  family: "structural" | "fee" | "qc";
+  key: string;
+  value: unknown;
+  /** The section, with its words quoted. */
+  citation: string;
+  sourceUrl: string;
+  /** "official" (#683): every quote was found in the bytes read from the state's own official page —
+   *  used at once, never "verified by" anyone, and never overwrites a person's row. */
+  confidence: "seeded" | "official" | "verified";
+  /** When the citation's words were read from `sourceUrl` (ISO); absent when not recorded. */
+  fetchedAt?: string;
+}
+
+/** WHERE ONE ELIGIBILITY LIMIT WAS READ (#679). `quote` is the published words, verbatim; a limit
+ *  raises a BLOCKER only when the quote carries the limit's own value and the source is named with
+ *  its URL (Helm's #637 bar) — anything less is a warning. */
+export interface EligibilityCitation {
+  /** The source by name ("OAR 860-039-0010", "City solar permit packet, rev. 2025"). */
+  sourceName: string;
+  sourceUrl: string;
+  /** The source's own words, verbatim; "" when not quoted. */
+  quote: string;
+  /** When the words were read (ISO date or timestamp); "" when not recorded. */
+  fetchedAt?: string;
+}
+
+/** One cited limit of an authority's program or permit path. */
+export interface EligibilityLimit<T> {
+  value: T;
+  citation: EligibilityCitation;
+  /** A condition on WHO the limit binds that job data cannot confirm ("residential customer-generators
+   *  of a public utility"). While set, exceeding the limit stays a warning that asks to confirm it. */
+  appliesOnlyTo?: string;
+  /** Display overrides, so a row that replaced a coded screen keeps its rule id, name and wording.
+   *  `message` placeholders: {value} {limit} {combinedNote} {program}. */
+  ruleId?: string;
+  ruleName?: string;
+  message?: string;
+}
+
+export interface EligibilityLimits {
+  maxDcKw?: EligibilityLimit<number>;
+  maxAcKw?: EligibilityLimit<number>;
+  maxStringsPerInverter?: EligibilityLimit<number>;
+  productionMeterRequired?: EligibilityLimit<boolean>;
+  /** The installer must hold this certification for applications made on or after effectiveFrom
+   *  (YYYY-MM-DD; "" = already in force). Checked against the client record. */
+  installerCertification?: EligibilityLimit<{ name: string; effectiveFrom: string }>;
+}
+
+/** ONE AUTHORITY'S ELIGIBILITY RECORD (#679): a utility's customer-generation PROGRAM, or an AHJ's
+ *  simplified permit PATH, with each limit cited. A row of authority_eligibility_limits (migration
+ *  v67): seeded from shipped reference data or research, `verified` when a person checked it — and
+ *  then never overwritten (rule 3). Shared knowledge on purpose (no org). */
+export interface AuthorityEligibilityRecord {
+  authorityKind: "utility_program" | "permit_path";
+  /** Two-letter state code. */
+  state: string;
+  /** The utility (utility_program) or the AHJ (permit_path) as named; "" = every one in the state. */
+  authority: string;
+  /** The program or permit path in the authority's own words. */
+  programName: string;
+  limits: EligibilityLimits;
+  /** 'official' is written only by the official-source landing function (#683), never here. */
+  confidence: "seeded" | "official" | "verified";
+  verifiedAt?: string;
+  verifiedBy?: string;
+}
+
+/** WHERE AN ENERGY STORAGE SYSTEM SITS, as the residential code classes it (IRC R328.4 / R328.5 in the
+ *  2021 model; review-audit draft 05). "habitable" covers sleeping rooms, closets or spaces opening
+ *  into them, and habitable rooms: the model code permits no ESS there. */
+export type EssLocationClass = "garage" | "accessory" | "exteriorWall" | "outdoor" | "utilitySpace" | "habitable";
+
+/** A JURISDICTION'S ESS RULES (review-audit draft 05): the AHJ's (or state's) own values where they
+ *  differ from the model-code baseline (essRules.ts ESS_MODEL_DEFAULTS), on its code profile. Each
+ *  value is cited by a `citations` entry whose field is "essRules.<key>" (label = the source by name,
+ *  sourceUrl, quote = its words verbatim). A value is APPLIED only when its row is person-verified or
+ *  the field is official (#683); a seeded value applies only where it is stricter than the baseline,
+ *  and then only warns. A BLOCKER rests only on an applied value whose citation names its source,
+ *  gives the URL and quotes words carrying the value (Helm's #637 bar). Shared knowledge, no org. */
+export interface JurisdictionEssRules {
+  /** Largest rating of one ESS unit, kWh (model: 20). */
+  maxUnitKwh?: number;
+  /** Largest aggregate rating per location class, kWh (model: 40 utility spaces, 80 elsewhere). */
+  maxAggregateKwhUtilitySpace?: number;
+  maxAggregateKwhGarage?: number;
+  maxAggregateKwhAccessory?: number;
+  maxAggregateKwhExteriorWall?: number;
+  maxAggregateKwhOutdoor?: number;
+  /** Least spacing between units, inches (model: 36). */
+  minUnitSpacingIn?: number;
+  /** The AHJ accepts less spacing where large-scale fire testing (UL 9540A) supports it. Strict
+   *  baseline: not on file = not accepted (warns, never blocks). */
+  spacingReductionBy9540A?: boolean;
+  /** Least distance from an outdoor / exterior-wall ESS to doors and windows into the dwelling, inches
+   *  (model: 36). */
+  minOpeningClearanceIn?: number;
+  /** An ESS must be listed and labelled to UL 9540. */
+  listingRequired?: boolean;
+  /** No ESS in sleeping rooms, spaces opening into them, or habitable rooms. */
+  habitableLocationProhibited?: boolean;
+  /** A garage ESS is protected from vehicle impact. */
+  impactProtectionInGarage?: boolean;
+  /** A smoke alarm (or interconnected heat detector) covers an indoor / attached-garage ESS. */
+  alarmRequired?: boolean;
+  /** Finished or noncombustible walls and ceilings (5/8" Type X on unfinished wood framing) at a
+   *  utility-space ESS, and the dwelling separation at an attached-garage ESS. */
+  wallProtectionRequired?: boolean;
+  /** The ESS disconnecting means (or its remote control) is outside the dwelling (NEC 2020+ 706.15(A)
+   *  for one- and two-family dwellings; the 2017 NEC asks only for a readily accessible one). */
+  disconnectOutside?: boolean;
+  /** A UL 9540 unit marked for use in residential dwelling units is exempt from the kWh rating and
+   *  spacing limits (an exception some jurisdictions adopt). Strict baseline: no exemption. The
+   *  habitable-room prohibition, door/window distance, protection and disconnect still apply. */
+  listedResidentialExemption?: boolean;
+}
+
 export interface FireSetbackRule {
   id: string;
   description: string;
@@ -2178,12 +2667,59 @@ export interface StatedRoofPlanDimension {
 export interface RoofPlanRequiredDimension {
   kind: RoofPlanDimensionKind;
   inches: number;
-  /** "ahj": parsed from the jurisdiction's fireSetbacks; "model_code": the adopted IRC edition's default. */
+  /** "ahj": parsed from the jurisdiction's fireSetbacks, or its APPLIED alternative pathway policy (draft 08); "model_code": the adopted IRC edition's default. */
   basis: "ahj" | "model_code";
   /** The fireSetbacks row is human-verified (always false for a model-code default). */
   verified: boolean;
+  /** The number is the AHJ's APPLIED alternative pathway policy's (draft 08), not a fireSetbacks rule. */
+  fromPolicy?: boolean;
   /** Where the number came from, said for the operator. */
   source: string;
+}
+
+/**
+ * A JURISDICTION'S ALTERNATIVE ROOF-ACCESS (FIRE PATHWAY) POLICY (review-audit draft 08): where the AHJ
+ * relaxes the model code's R324.6 pathways for small arrays or low coverage. Typed per-jurisdiction
+ * DATA on its code profile, never code per city. It replaces the model-code numbers only when APPLIED:
+ * the row is person-verified and the policy carries its source page, or a citation with field
+ * "firePathwayPolicy" was read on the authority's official page (#683). A seeded policy is shown as a
+ * callout and the model code applies.
+ */
+export interface JurisdictionFirePathwayPolicy {
+  /** The policy's own name, as the AHJ titles it. */
+  name?: string;
+  /** The policy covers arrays up to this plan-view area, sq ft (absent: any size). */
+  arrayAreaMaxSqFt?: number;
+  /** Ridge setback the policy asks for, inches. */
+  ridgeSetbackIn?: number;
+  /** Pathway width the policy asks for, inches. */
+  pathwayWidthIn?: number;
+  /** At or below this roof coverage (percent of plan-view roof area) the policy needs no pathways. */
+  pathwaysExemptMaxCoveragePct?: number;
+  /** The page the policy was read on, and its own words. */
+  sourceUrl?: string;
+  quote?: string;
+}
+
+/** How much of the roof the array covers, as the package states it (fireAccess.readRoofCoverage). */
+export interface RoofCoverageReading {
+  /** Percent of the plan-view roof area. */
+  pct: number;
+  /** "stated": the plan prints the percentage; "areas": array area / roof area, both stated. */
+  basis: "stated" | "areas";
+  source: string;
+  excerpt: string;
+}
+
+/** The job facts and the jurisdiction policy the fire access requirement reads (draft 08). */
+export interface FireAccessFacts {
+  coverage: RoofCoverageReading | null;
+  /** Total array plan-view area the package states (or modules x module size), sq ft. */
+  arrayAreaSqFt: number | null;
+  /** The plan states the dwelling has an automatic sprinkler system (statement of fact, never a code note). */
+  sprinklered: { source: string; excerpt: string } | null;
+  /** The jurisdiction's alternative pathway policy, and whether it is applied (verified / official). */
+  policy: { policy: JurisdictionFirePathwayPolicy; applied: boolean; provenance: string } | null;
 }
 
 /** A design criterion a submittal package STATES (label-anchored), per source. */
@@ -2344,6 +2880,9 @@ export interface JurisdictionCodeProfile {
   designCriteria: JurisdictionDesignCriteria;
   prescriptive: PrescriptiveLimits;
   fireSetbacks: FireSetbackRule[];
+  /** The jurisdiction's battery / ESS rules where they differ from the model-code baseline (review-audit
+   *  draft 05); each value cited under citations[].field "essRules.<key>". Absent = the baseline. */
+  essRules?: JurisdictionEssRules;
   /** Official sources backing this profile (the human-verification checklist). An applied AHJ
    *  correction has no URL: it is cited by kind "ahj_correction", the field it set, the value and
    *  the date, under a generic label — never the AHJ's sentence, the correction id or the record
@@ -2352,12 +2891,20 @@ export interface JurisdictionCodeProfile {
   citations: Array<{
     label: string;
     sourceUrl: string;
-    kind?: "ahj_correction" | "design_criteria_research";
+    /** "ess_rules_research": an ESS rule a code research read (ESS data follow-up); "reference": an ESS
+     *  rule the shipped reference file carried onto an existing row, field by field. */
+    kind?: "ahj_correction" | "design_criteria_research" | "ess_rules_research" | "reference";
     field?: string;
     quote?: string;
     at?: string;
     /** The page is a project-type handout, not a jurisdiction-wide design value: why (verify it). */
     weakSource?: string;
+    /** OFFICIAL SOURCE (#683, shared/src/officialSource.landingTierFor): this process read the
+     *  value on the authority's own official page at `fetchedAt` and the quote is in those bytes.
+     *  The field is USED at once, worded "from <host>" — never "verified by" (rule 3: a person's
+     *  verification is the row's verifiedAt, nothing else). Absent = seeded. */
+    tier?: "official";
+    fetchedAt?: string;
   }>;
   /** The last design-criteria lookup's checklist: each item found / weak / not found / not researched. */
   designCriteriaLookup?: DesignCriteriaLookupRecord;
@@ -2374,6 +2921,9 @@ export interface JurisdictionCodeProfile {
    *  value it compared against and whether a person verified THAT row. Absent on a single row:
    *  the row's own confidence applies. Never persisted. */
   fieldSources?: Record<string, JurisdictionFieldSource>;
+  /** The jurisdiction's alternative roof-access (fire pathway) policy (review-audit draft 08); absent =
+   *  the model code. Taken whole from one layer (the AHJ's, else the state's): fieldSources.firePathwayPolicy. */
+  firePathwayPolicy?: JurisdictionFirePathwayPolicy;
   /** State rows only: how the state adopts each code family (research or the reference data). */
   adoptionModel?: JurisdictionAdoptionModel;
   /** State rows only: announced editions not yet in effect. */
@@ -2382,15 +2932,40 @@ export interface JurisdictionCodeProfile {
   researchProvenance?: CodeResearchProvenance;
   /** listCodeProfiles only, verified rows only: newer editions found that await a person. */
   editionProposals?: JurisdictionEditionProposal[];
+  /** listCodeProfiles only, verified rows only (#683): values the jurisdiction's own official page
+   *  states differently from the row. The row is never changed by them (rule 3); a person decides. */
+  officialConflicts?: OfficialConflict[];
+}
+
+/** An OFFICIAL read (#683) that disagrees with a human-verified code profile row. Recorded once per
+ *  finding in the audit log; listed while the row is still verified and still says otherwise. */
+export interface OfficialConflict {
+  profileKey: string;
+  /** "designCriteria.frostDepthIn". */
+  field: string;
+  current: number | string | null;
+  found: number | string;
+  sourceUrl: string;
+  quote?: string;
+  fetchedAt: string;
+  createdAt: string;
 }
 
 export interface JurisdictionFieldSource {
   /** "" for the state-level row. */
   ahj: string;
   state: string;
-  confidence: "seeded" | "verified";
+  /** "official" (#683): the row is not person-verified, but THIS field's value was read on the
+   *  authority's own official page (its citation's tier) — used, and worded "from <host>". */
+  confidence: "seeded" | "official" | "verified";
   verifiedBy?: string;
   verifiedAt?: string;
+  /** confidence "official" only: where and when the value was read. */
+  officialSource?: { host: string; sourceUrl: string; fetchedAt: string };
+  /** essRules fields only: who put THIS value on its row — a person (the row is person-verified, or
+   *  a person applied it from an AHJ correction), a code research's read, or the shipped reference
+   *  file. Absent = the row does not say (an import, a legacy row). */
+  origin?: "person" | "research" | "reference";
 }
 
 // Review work types (rule packs). "solar_pv_residential" is the deterministic pack;
@@ -2437,9 +3012,23 @@ export interface JurisdictionCodeResearchInput {
   asOf?: string;
 }
 
+/** One ESS rule a research read (ESS data follow-up): shape-checked by essRuleReadsOf; where it lands
+ *  (official or seeded, never over a person's value) is decided at the write (#683). */
+export interface JurisdictionEssRuleRead {
+  key: keyof JurisdictionEssRules;
+  value: number | boolean;
+  sourceUrl: string;
+  quote: string;
+  /** The number as the page printed it, when it differs from `value`. */
+  publishedValue?: number;
+}
+
 export interface JurisdictionCodeResearchResult {
   provider: "claude" | "stub";
   profile: JurisdictionCodeProfile;
+  /** The jurisdiction's battery / ESS rules the research read, each with its page and quote. Kept
+   *  apart from `profile`: each value lands through the official-source landing, field by field. */
+  essRules?: JurisdictionEssRuleRead[];
   webGrounded: boolean;
   needsHumanVerification: true;
   notes: string;
@@ -2501,6 +3090,21 @@ export interface ReviewerVisionVerdict {
   question?: string;
 }
 
+/** WHERE A RULE'S VALUE CAME FROM (review-audit draft 07; words: shared/src/ruleBasis.ruleBasisLabel). */
+export type RuleBasisTier = "model_code" | "seeded" | "official" | "verified";
+export interface ReviewerRuleBasis {
+  tier: RuleBasisTier;
+  /** What the value was compared against: "NEC 2023 705.12(B)(3)(2)", "Salt Lake City (UT) code profile". */
+  source: string;
+  /** The page the value was read from, "" when none is on file. */
+  sourceUrl: string;
+  /** tier "verified" only: who verified the row (never printed when it is an email address). */
+  verifiedBy?: string;
+  /** The tier in words, as every screen prints it: "from le.utah.gov", "seeded, not verified",
+   *  "person-verified by …", "model code (NEC 2023 690.7)". Official is never worded as verified. */
+  label: string;
+}
+
 export interface ReviewerFinding {
   id: string;
   severity: "blocker" | "warning" | "callout" | "pass";
@@ -2522,6 +3126,15 @@ export interface ReviewerFinding {
   /** On city.fire.pathway-unmeasured only: what the roof plan must show, so the vision pass can
    *  compare a measured sheet against the same requirement the text rule used. */
   roofPlanRequired?: RoofPlanRequiredDimension[];
+  /** A CHECK RECORD, not a correction (review-audit draft 07): "passed" = a measured rule ran and
+   *  passed (severity "pass", its arithmetic in the message); "not_checked" = it could not run because
+   *  an input is not on the plans (severity "callout"). Display only: never blocks, never relaxes,
+   *  never in the correction notice, never needs an acknowledgement. Its id is the rule's id plus
+   *  ".pass" / ".not-checked" (backend/src/checkRecords.ts). Absent on every other finding. */
+  checkOutcome?: "passed" | "not_checked";
+  /** The tier of the jurisdiction data (or the model code) this finding measured against, in words
+   *  matching #683 (shared/src/ruleBasis). Absent where the finding measured against nothing. */
+  ruleBasis?: ReviewerRuleBasis;
 }
 
 export interface FinalSubmitGate {
@@ -2816,6 +3429,44 @@ export interface EmailIntakeRunResult {
   unsorted: number;
   skippedDuplicates: number;
   items: EmailIntakeView[];
+}
+
+// BULK JOB-FOLDER DROP (#538): one zip or server folder, one sub-folder per job, each run through
+// email intake's per-job pipeline (emailIntake.placeIntakeJob) for the client a person chose.
+export type BulkDropFolderStatus = "queued" | "running" | "created" | "attached" | "unsorted";
+
+export interface BulkDropFolderView {
+  /** The job folder's own name (never a server path). */
+  folder: string;
+  status: BulkDropFolderStatus;
+  /** Why it was not placed: no_usable_attachments, address_unreadable, plan_set_names_another_client or failed. */
+  reason: string;
+  reasonText: string;
+  projectId: string | null;
+  files: EmailIntakeFile[];
+  /** What the new project still needs (identity fields, a plan set or bill), in words. */
+  missing: string[];
+}
+
+export interface BulkDropView {
+  batchId: string;
+  clientId: string;
+  clientName: string;
+  startedBy: string;
+  createdAt: string;
+  total: number;
+  counts: Record<BulkDropFolderStatus, number>;
+  folders: BulkDropFolderView[];
+}
+
+/** What a drop holds, shown before anything is read: one model read per job folder, the Parser's. */
+export interface BulkDropPreview {
+  /** An uploaded zip's id (its extracted folder's name under the client's org root), else "". */
+  uploadId: string;
+  clientId: string;
+  jobs: Array<{ folder: string; files: number }>;
+  /** Files at the top level, outside any job folder: they are not read. */
+  looseFiles: string[];
 }
 
 export type OperationStepStatus = "not_started" | "in_progress" | "waiting" | "blocked" | "done";
@@ -3328,6 +3979,8 @@ export interface AuditLog {
 
 export interface ProjectDetail {
   project: ProjectRecord;
+  /** Where the job stands on class (#688): the hold every automation door reads. */
+  classStatus?: ProjectClassStatus;
   qcResults: QcResult[];
   humanReviewItems: HumanReviewItem[];
   corrections: CorrectionRecord[];
@@ -3344,6 +3997,13 @@ export interface ProjectDetail {
   stageLabel: string;
   stageCount: number;
   isBlocked: boolean;
+  /** What the job installs, as QC reads it (#673). */
+  jobScope?: JobScopeView;
+  /** The utility track a person's storage record dropped on this job, with why (draft 10). Null when
+   *  the track is on. Read through nemTrackDropFor — the same predicate requiredTracks asks. */
+  nemTrackDrop?: NemTrackDrop | null;
+  /** A named person put the utility track back on this job (it stays until they let the record drop it). */
+  nemTrackKept?: { by: string; at: string } | null;
 }
 
 /** POST /api/projects/:id/permit-checks (recordPermitStatusCheck). `unreadable` is set when the
@@ -3581,6 +4241,11 @@ export interface ParserLlmExtraction {
   uncertainties?: ParserExtractionUncertainty[];
   /** Deterministic server-side resolutions (no model): e.g. moduleMake from the CEC list. */
   resolutions?: ParserExtractionResolution[];
+  /** Plan-set pages whose text is DRAWN AS OUTLINES (no text layer, no raster, a vector-heavy
+   *  drawing: backend/src/outlinedTextPages.ts, #696). Read by neither the text path nor vision —
+   *  "unread: text drawn as outlines; a person reads this page" — and nothing on them was sent to
+   *  any model. Absent when there are none. */
+  outlinedTextPages?: number[];
   /** Set when the plan set had no text layer and was read by VISION from page images: the
    *  field ids that came from vision, and which pages were read (scannedPlanSet.ts). */
   visionFields?: string[];
@@ -3592,6 +4257,9 @@ export interface ParserLlmExtraction {
   visionPageRoles?: Array<{ page: number; kind: PlanSheetKind; sheet?: string; title?: string; rotate?: number }>;
   /** Pages that were candidates but NOT read, and why (cap, byte budget, render failure). */
   visionSkipped?: Array<{ page: number; reason: string }>;
+  /** Plan-set pages whose TEXT was left out of the text read because the plan text was over the
+   *  prompt's character bound (whole pages dropped from the middle, #697). Absent when all fit. */
+  planTextPagesNotRead?: number[];
 }
 
 /** What a plan-set page is, as the page-index read names it (scannedPlanSet.ts chooses the
@@ -4590,6 +5258,11 @@ export interface PortalRecipe {
    *  dimension. An AHJ holds ONE recipe PER DISCIPLINE: the city/structural and
    *  county/electrical filings drive different portal steps. */
   discipline?: string;
+  /** #448 — this portal's own record-number shapes ("PGENM-#####"), learned from numbers a person
+   *  confirmed after filing on THIS recipe (portal_recipes.record_number_formats_json). Shapes only,
+   *  never a number. The replay's completion read counts a number in one of them like a hand-written
+   *  portal shape (portal-bot recordNumber.ts learnRecordFormat). */
+  recordNumberShapes?: string[];
 }
 
 // ---------------------------------------------------------------------------
@@ -4720,6 +5393,16 @@ export interface PermitFeeAnswer {
   basis: string;
   lines: Array<{ label: string; amountUsd: number }>;
 }
+/** HOW a permit is filed, as the AHJ's own page says it (lookup-permit-filing-channel, 2026-11-10).
+ *  `value`: the portal URL (portal), the address (email), the office ("City Hall", in_person), the
+ *  mailing address or office (mail), or the other permit it rides in (with_other_permit). A channel is
+ *  NEVER a door by itself: an email lands only as a proposal a person confirms
+ *  (filingDestinationProposals), in_person / mail only as words on the track ("file at <office>"). */
+export type PermitFilingChannelKind = "portal" | "email" | "in_person" | "mail" | "with_other_permit";
+export interface PermitFilingChannel {
+  kind: PermitFilingChannelKind;
+  value: string;
+}
 export interface PermitProcessPermitAnswer {
   discipline: PermitProcessDiscipline;
   /** The permit as the AHJ names it ("Residential Structural"). */
@@ -4735,6 +5418,32 @@ export interface PermitProcessPermitAnswer {
   recordTypeCandidates?: Array<{ label: string; condition: string; sourceUrl: string; quote: string }>;
   /** The portal's platform as its own page shows it ("accela" / "energov" / "other"). */
   portalPlatform?: string;
+  /** HOW this permit is filed, cited (an email address in the quote, "in person at City Hall"…).
+   *  Absent on older rows (= unknown, the portal answer stands). A cited channel that is not "portal"
+   *  takes no portal from the vendor-link resolver and launches nothing from the lookup. */
+  channel?: CitedFact<PermitFilingChannel>;
+  /** Other ways the same page says the permit may be filed ("you may also fax, email, mail or bring
+   *  it in"), each cited; never the primary. */
+  alternateChannels?: Array<CitedFact<PermitFilingChannel>>;
+  /** A SECOND STAGE of this permit's filing (#28), cited: after the application (and its fee) the
+   *  agency takes the plans in ANOTHER system, opened by something it sends (an emailed invite).
+   *  A description only: it never changes what a track asks for until a named person confirms it
+   *  (secondStage.ts), and it is never a filing door. Absent on older rows (= none stated). */
+  secondStage?: CitedFact<PermitSecondStageAnswer>;
+}
+/** A two-stage filing's second stage as a page states it: the system the plans are uploaded in, and
+ *  what opens it ("an invitation email after the fee is paid"), both in the page's own words. */
+export interface PermitSecondStageAnswer {
+  system: string;
+  trigger: string;
+}
+export type BatteryPermittingKind = "sameReview" | "separatePermit" | "fireReview" | "fireApprovalLetter";
+export interface BatteryPermittingAnswer {
+  kind: BatteryPermittingKind;
+  /** The agency named for it (a fire district, the building division), as the page names it. */
+  agency?: string;
+  /** Documents the page names for the battery (a storage packet, a fire approval letter). */
+  documents?: string[];
 }
 export interface PermitProcessLookup {
   profileKey: string;
@@ -4764,6 +5473,20 @@ export interface PermitProcessLookup {
   /** Pages the lookup READ ITSELF (agency pages, the portal's public catalog, fee schedules), each
    *  with what came of the read — the audit trail for every value cited to one of them. */
   pagesRead?: Array<{ url: string; ok: boolean; reason: string }>;
+  /** HOW A BATTERY (ESS) JOB IS PERMITTED here (lookup-battery-and-fees, 2026-11-10), each cited:
+   *  in the same PV review, a separate storage permit, a fire review, a fire approval letter (several
+   *  may hold). Read only on a storage job, as a warning (essRequirements.essPermitStep); never a
+   *  blocker by itself. */
+  batteryPermitting?: Array<CitedFact<BatteryPermittingAnswer>>;
+  /** The review time a page states ("Allow 10 business days for review"), cited. Display only. */
+  reviewTime?: CitedFact<string>;
+  /** Pages the lookup was REFUSED (a challenge, 401/403/429, a host backed off after a refusal): a
+   *  person reads them (lookup-door-fixes, 2026-11-10). Never retried in another style. */
+  needsPersonRead?: Array<{ url: string; reason: string }>;
+  /** FEE PAGES A PERSON READS (fee round, 2026-11): a fee schedule Keelix found and does not rely
+   *  on (dated, archived, gone, or with no readable text). Shown on the fee quote while the fee is
+   *  not from a schedule or the portal's own figure. Never a number. */
+  feeReadsForPerson?: Array<{ url: string; reason: string }>;
   lookedUpAt: string;
   model?: string;
   costUsd?: number;

@@ -49,7 +49,10 @@ const MICRO_FIELDS = {
 
 check("a correct SLD produces no sizing findings", () => {
   const fs = run({ ...MICRO_FIELDS, planSetExtractedText: MICRO_SHEET });
-  assert.deepEqual(fs.map((f) => f.id), []);
+  // Review-audit draft 07: only check records beside it — each recompute that ran says it passed.
+  assert.deepEqual(fs.filter((f) => !f.checkOutcome).map((f) => f.id), []);
+  assert.ok(fs.every((f) => f.checkOutcome === "passed" && f.severity === "pass"), JSON.stringify(fs.map((f) => [f.id, f.checkOutcome])));
+  assert.ok(fs.some((f) => f.id === "city.elec.sizing-busbar-120.pass"), JSON.stringify(fs.map((f) => f.id)));
 });
 
 // (a) 120% rule: 200 A bus / 200 A main / 60 A backfeed on a 48 A string inverter.
@@ -235,7 +238,11 @@ check("partially stated inputs -> one inputs-missing callout naming what the SLD
 });
 
 check("nothing electrical stated at all -> silence (absence is other rules' job)", () => {
-  assert.deepEqual(run({}).map((f) => f.id), []);
+  // No finding: the absence is other rules' job. Review-audit draft 07: at most "not checked"
+  // records (display only, never a correction), and never a pass.
+  const fs = run({});
+  assert.deepEqual(fs.filter((f) => !f.checkOutcome).map((f) => f.id), []);
+  assert.ok(fs.every((f) => f.checkOutcome === "not_checked" && f.severity === "callout"), JSON.stringify(fs.map((f) => [f.id, f.checkOutcome])));
 });
 
 check("parseConductor reads size, material and the insulation's column", () => {

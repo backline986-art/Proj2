@@ -1189,7 +1189,7 @@ export class PowerClerkAdapter extends BasePortalAdapter {
       const btnTexts = await nextBtn.allInnerTexts().catch(() => [] as string[]);
       const feeGated = btnTexts.some((t: string) => /pay|fee|payment|checkout/i.test(t));
       if (feeGated) {
-        return { ok: false, message: "submitFromReview: PowerClerk submit button appears to trigger fee payment — pausing for human.", pauseReason: "mfa_captcha" };
+        return { ok: false, message: "submitFromReview: PowerClerk submit button appears to trigger fee payment — pausing for human.", pauseReason: "fee_payment" };
       }
 
       // 5. Click Next (final submit).

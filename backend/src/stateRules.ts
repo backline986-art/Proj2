@@ -1,0 +1,316 @@
+// EACH STATE'S PERMIT RULES, AS CITED DATA (#595 PR2).
+//
+// The owner, 2026-11-04, on a real Oregon job returned as non-prescriptive: "It needs to have already
+// known that code vs having us tell that to it." The job's racking was ballasted, which alone keeps an
+// Oregon job off the prescriptive path, and nothing in the gate knew it.
+//
+// So each state's rules live in state_permit_rules (migration v63), one cited row per rule, in the
+// shape #586 asks for its fee rules: family "structural" here, "fee" there, one table. Rows ship in
+// backend/data/reference-state-permit-rules.json and land SEEDED; a row a person verified is never
+// written again (rule 3). A rule whose every quote was found in the bytes read from the state's own
+// official page lands OFFICIAL (#683) and a seeded write never downgrades it. A state with nothing
+// citable is simply absent: no rule, never a guess.
+//
+// What the reviewer does with them (statePrescriptiveFindings):
+//   - a job whose path is PRESCRIPTIVE while a state rule sends it to the engineered path is REFUSED
+//     (blocker), naming the reason and quoting the rule: ballasted / non-penetrating racking first,
+//     then the limits the prescriptive screen routes on (snow, wind exposure, PV weight, framing
+//     spacing) and a manufactured dwelling;
+//   - an input such a rule needs that the plans do not state, and the rafter span where the state's
+//     span limits are not on file, is "check with an engineer" (warning) — never a pass;
+//   - on an engineered job the same reasons are named (callout), so the path says why.
+// The BCD 5952 rows the prescriptive screen does not route on (attachment spacing, module height) stay
+// the permit-path warning they are today: operator ruling pending (permitPath.ts, step 4).
+
+import fs from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import type { CodeReference, ProjectRecord, ReviewerFinding, StatePermitRule } from "../../shared/src/types";
+import { landingTierFor, sourceHostOf, type LandingTier } from "../../shared/src/officialSource";
+import type { AppDb } from "./db";
+import { logger } from "./logger";
+import { resolvePermitPath, usStateCode } from "./permitPath";
+import { structureTypeForProject } from "./codeReviewRules";
+import { mountKindForProject } from "./mountKind";
+import { ballastedRackingEvidence } from "./ballastRacking";
+import { isValidQcScreenValue } from "./jurisdictionQcRules";
+
+type Row = Record<string, unknown>;
+
+const moduleDir = path.dirname(fileURLToPath(import.meta.url));
+function referencePath(): string {
+  const explicit = (process.env.STATE_RULES_REFERENCE_PATH || "").trim();
+  if (explicit) return path.resolve(explicit);
+  // Read-only reference data shipped beside the code (never a state path: statePaths.ts owns those).
+  return path.resolve(moduleDir, "..", "data", "reference-state-permit-rules.json");
+}
+
+export interface ReferenceRule {
+  state: string;
+  family: StatePermitRule["family"];
+  key: string;
+  value: unknown;
+  citation: string;
+  sourceUrl?: string;
+  /** When the citation's words were read from `sourceUrl` (ISO date or time); '' = not recorded. */
+  fetchedAt?: string;
+}
+
+/** What a writer READ, for the landing function (#683): the text this process retrieved from
+ *  `sourceUrl` and the verbatim quotes, each with the value it names. In-process only: never stored. */
+export interface RuleLandingEvidence {
+  retrievedText: string;
+  quotes: Array<{ quote: string; value: number | string }>;
+}
+
+/** The tier a rule lands at: "official" only when EVERY quote passes the one landing function
+ *  (landingTierFor, shared/src/officialSource.ts) against the bytes this process retrieved, on a
+ *  government host, with a fetched-at time. Anything else, the shipped reference included, is seeded. */
+export function stateRuleLandingTier(r: ReferenceRule, evidence?: RuleLandingEvidence): LandingTier {
+  if (!evidence || !evidence.quotes.length) return "seeded";
+  return evidence.quotes.every((q) => landingTierFor({
+    sourceUrl: String(r.sourceUrl ?? ""), quote: q.quote, value: q.value,
+    fetchedAt: r.fetchedAt, retrievedText: evidence.retrievedText,
+  }).tier === "official") ? "official" : "seeded";
+}
+
+/** THE ONE WRITE PATH into state_permit_rules, for the shipped reference and for research
+ *  (stateFeeResearch.ts) alike; the landing function decides the tier (#683):
+ *  - a row a person verified is never touched (rule 3: the WHERE is in the statement, so no caller
+ *    can skip it);
+ *  - an OFFICIAL row (read on the state's own official page) is never downgraded by a seeded write —
+ *    the boot-time reference re-seed leaves it official — and is refreshed only by another official
+ *    read from the same host;
+ *  - a seeded row is refreshed by either (a corrected citation lands; an official read replaces it).
+ *  A rule with no citation is refused, and a FEE rule — it changes an amount the quote charges — also
+ *  needs the URL its words were read from (Helm's #637 bar). Returns 1 when a row was written, else 0. */
+export function writeSeededStatePermitRule(db: AppDb, r: ReferenceRule, now = new Date().toISOString(), evidence?: RuleLandingEvidence): number {
+  const state = usStateCode(r.state);
+  if (!state || !r.key || !String(r.citation ?? "").trim() || (r.family !== "structural" && r.family !== "fee" && r.family !== "qc")) return 0;
+  // A FEE rule changes an amount the quote charges, and a QC screen (family "qc", draft 14) changes what
+  // the baseline flags: both need the URL their words were read from (Helm's #637 bar). A "qc" row must
+  // also be a screen jurisdictionQcRules can read (kind, ids, words), or it is refused, never half-read.
+  if ((r.family === "fee" || r.family === "qc") && !/^https?:\/\//i.test(String(r.sourceUrl ?? "").trim())) return 0;
+  if (r.family === "qc" && !isValidQcScreenValue(r.key, r.value)) return 0;
+  const tier = stateRuleLandingTier(r, evidence);
+  const existing = db.get<{ source_url: string; confidence: string }>(
+    "SELECT source_url, confidence FROM state_permit_rules WHERE state = ? AND family = ? AND rule_key = ?", [state, r.family, r.key]);
+  const existingHost = sourceHostOf(String(existing?.source_url ?? ""));
+  const sameOfficialHost = tier === "official" && !!existingHost && existingHost === sourceHostOf(String(r.sourceUrl ?? "")) ? 1 : 0;
+  db.run(
+    `INSERT INTO state_permit_rules (state, family, rule_key, value_json, citation, source_url, confidence, fetched_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT(state, family, rule_key) DO UPDATE SET
+       value_json = excluded.value_json, citation = excluded.citation, source_url = excluded.source_url,
+       confidence = excluded.confidence, fetched_at = excluded.fetched_at, updated_at = excluded.updated_at
+     WHERE state_permit_rules.verified_at = ''
+       AND (state_permit_rules.confidence != 'official' OR (excluded.confidence = 'official' AND ? = 1))
+       AND (state_permit_rules.value_json != excluded.value_json OR state_permit_rules.citation != excluded.citation
+            OR state_permit_rules.source_url != excluded.source_url OR state_permit_rules.confidence != excluded.confidence
+            OR state_permit_rules.fetched_at != excluded.fetched_at)`,
+    [state, r.family, r.key, JSON.stringify(r.value ?? null), r.citation, r.sourceUrl ?? "", tier, String(r.fetchedAt ?? "").trim().slice(0, 40), now, sameOfficialHost],
+  );
+  return Number(db.get<{ n: number }>("SELECT changes() AS n")?.n ?? 0);
+}
+
+/** A PERSON RECORDS OR REWORDS A JURISDICTION QC SCREEN (review-audit draft 14): one state_permit_rules
+ *  row of family "qc", PERSON-VERIFIED (verified_at / verified_by), carrying the source's own words and
+ *  the page they were read on. Rule 3 runs the other way here: a person's write replaces any tier (a
+ *  seeded or official row, or an earlier person's wording), and nothing automatic ever replaces it
+ *  (writeSeededStatePermitRule's WHERE refuses a verified row). Returns the row as the overlay reads it,
+ *  or null when the state, the screen, the quote or the URL is not usable (nothing is written). */
+export function writeVerifiedQcScreen(db: AppDb, input: { state: string; ruleId: string; screen: unknown; quote: string; sourceUrl: string }, verifiedBy: string, now = new Date().toISOString()): StatePermitRule | null {
+  const state = usStateCode(input.state);
+  const quote = String(input.quote ?? "").trim();
+  const sourceUrl = String(input.sourceUrl ?? "").trim();
+  const who = String(verifiedBy ?? "").trim();
+  if (!state || !who || quote.length < 8 || !/^https?:\/\//i.test(sourceUrl) || !isValidQcScreenValue(input.ruleId, input.screen)) return null;
+  const { ruleId: _ignored, quote: _q, sourceUrl: _u, tier: _t, ...value } = { ...(input.screen as Record<string, unknown>) };
+  db.run(
+    `INSERT INTO state_permit_rules (state, family, rule_key, value_json, citation, source_url, confidence, fetched_at, verified_at, verified_by, updated_at)
+     VALUES (?, 'qc', ?, ?, ?, ?, 'verified', ?, ?, ?, ?)
+     ON CONFLICT(state, family, rule_key) DO UPDATE SET
+       value_json = excluded.value_json, citation = excluded.citation, source_url = excluded.source_url,
+       confidence = 'verified', fetched_at = excluded.fetched_at, verified_at = excluded.verified_at,
+       verified_by = excluded.verified_by, updated_at = excluded.updated_at`,
+    [state, input.ruleId, JSON.stringify(value), quote, sourceUrl, now.slice(0, 40), now, who.slice(0, 120), now],
+  );
+  return { state, family: "qc", key: input.ruleId, value, citation: quote, sourceUrl, confidence: "verified", fetchedAt: now.slice(0, 40) };
+}
+
+/** Seed the shipped rules. Idempotent: a seeded row is refreshed from the reference (a corrected
+ *  citation lands), a row a person verified is never touched (rule 3), and a row read OFFICIAL on the
+ *  state's own page stays official (#683). The reference carries no retrieved bytes: it lands seeded. */
+export function seedStatePermitRules(db: AppDb, filePath = referencePath()): number {
+  if (!fs.existsSync(filePath)) return 0;
+  const data = JSON.parse(fs.readFileSync(filePath, "utf8")) as { rules?: ReferenceRule[] };
+  const now = new Date().toISOString();
+  let written = 0;
+  for (const r of data.rules ?? []) written += writeSeededStatePermitRule(db, r, now);
+  if (written) logger.info("state-rules", `seeded ${written} state permit rule(s) from reference data`);
+  return written;
+}
+
+/** One state's rules of one family (empty when the state has none on file). */
+export function statePermitRulesFor(db: AppDb, state: string, family: StatePermitRule["family"] = "structural"): StatePermitRule[] {
+  const code = usStateCode(state);
+  if (!code) return [];
+  return db.query<Row>(
+    "SELECT state, family, rule_key, value_json, citation, source_url, confidence, verified_at, fetched_at FROM state_permit_rules WHERE state = ? AND family = ? ORDER BY rule_key",
+    [code, family],
+  ).map((row) => {
+    let value: unknown = null;
+    try { value = JSON.parse(String(row.value_json ?? "null")); } catch { value = null; }
+    return {
+      state: String(row.state), family, key: String(row.rule_key), value,
+      citation: String(row.citation ?? ""), sourceUrl: String(row.source_url ?? ""),
+      confidence: String(row.verified_at ?? "") ? "verified" : String(row.confidence ?? "") === "official" ? "official" : "seeded",
+      ...(String(row.fetched_at ?? "") ? { fetchedAt: String(row.fetched_at) } : {}),
+    };
+  });
+}
+
+/** A rule as the reviewer's citation. */
+export function ruleReference(rule: StatePermitRule): CodeReference {
+  return {
+    code: `${rule.state} state rule`,
+    section: rule.key,
+    title: rule.citation,
+    adoptionScope: `${rule.state} (statewide)`,
+    sourceUrl: rule.sourceUrl,
+    note: rule.confidence === "verified" ? "Verified against the official source."
+      : rule.confidence === "official"
+        ? `Read on ${sourceHostOf(rule.sourceUrl) || "the state's site"}, the state's own official page${rule.fetchedAt ? `, ${rule.fetchedAt.slice(0, 10)}` : ""}.`
+        : "Seeded from the cited source; verify locally.",
+  };
+}
+
+// BALLASTED / NON-PENETRATING RACKING: the one predicate lives in ballastRacking.ts (a leaf), so the
+// reviewer's attachment rule (codeReviewRules, which this module imports) reads the same answer.
+export { ballastedRackingEvidence } from "./ballastRacking";
+
+function numberOf(project: ProjectRecord, key: string): number | null {
+  const raw = String((project.parserSnapshot || {})[key] ?? "").replace(/[^0-9.\-]/g, "");
+  if (!raw) return null;
+  const n = Number(raw);
+  return Number.isFinite(n) ? n : null;
+}
+function textOf(project: ProjectRecord, key: string): string {
+  return String((project.parserSnapshot || {})[key] ?? "").trim();
+}
+
+interface Reason { why: string; rule: StatePermitRule }
+
+/**
+ * The reviewer findings a state's structural rules raise for this job. Pure: the rules come from
+ * statePermitRulesFor (repository.reviewerGateReportFor). Rooftop jobs in a state that publishes a
+ * prescriptive path only; a state with no rules on file raises nothing.
+ */
+export function statePrescriptiveFindings(project: ProjectRecord, rules: StatePermitRule[]): ReviewerFinding[] {
+  const rule = (key: string) => rules.find((r) => r.key === key);
+  const pathRule = rule("prescriptivePath");
+  if (!pathRule || (pathRule.value as { available?: boolean } | null)?.available !== true) return [];
+  const mount = mountKindForProject(project);
+  if (mount === "ground" || mount === "carport") return [];
+  const state = rules[0].state;
+  const resolved = resolvePermitPath(project).path;
+  if (resolved === "unknown") return [];
+
+  // WHAT SENDS THIS JOB TO THE ENGINEERED PATH, by the state's own rules.
+  const forcing: Reason[] = [];
+  const unread: Reason[] = [];
+  const attachment = rule("attachmentMethods");
+  if (attachment) {
+    const ballast = ballastedRackingEvidence(project);
+    if (ballast) forcing.push({ why: `ballasted / non-penetrating racking (${ballast}) is attached by none of the state's prescriptive methods`, rule: attachment });
+    else if (!textOf(project, "rackingSystem") && !textOf(project, "attachmentHardware") && !/^y/i.test(textOf(project, "attachmentToFraming"))) {
+      unread.push({ why: "the plans do not name the racking or how it attaches to the roof", rule: attachment });
+    }
+  }
+  const limit = (key: string, field: string, label: string, unit: string) => {
+    const r = rule(key);
+    const max = typeof r?.value === "number" ? r.value : null;
+    if (!r || max == null) return;
+    const v = numberOf(project, field);
+    if (v == null) unread.push({ why: `the plans do not state the ${label}`, rule: r });
+    else if (v > max) forcing.push({ why: `${label} ${v} ${unit} is over the ${max} ${unit} prescriptive limit`, rule: r });
+  };
+  limit("maxGroundSnowPsf", "snow", "ground snow load", "psf");
+  limit("maxPvSystemWeightPsf", "deadLoad", "PV system weight", "psf");
+  limit("maxFramingSpacingIn", "roofRafterSpacing", "rafter / truss spacing", "in o.c.");
+  const exposures = rule("allowedWindExposures");
+  if (exposures && Array.isArray(exposures.value)) {
+    const wind = textOf(project, "wind").toUpperCase();
+    const letter = /\b([BCD])\b/.exec(wind)?.[1] ?? "";
+    if (!letter) unread.push({ why: "the plans do not state the wind exposure category", rule: exposures });
+    else if (!(exposures.value as string[]).includes(letter)) forcing.push({ why: `wind exposure ${letter} is outside the allowed ${(exposures.value as string[]).join(" / ")}`, rule: exposures });
+  }
+  const prescriptiveRule = pathRule;
+  if (structureTypeForProject(project).kind === "manufactured_home") forcing.push({ why: "the supporting structure is a manufactured dwelling", rule: prescriptiveRule });
+  // THE RAFTER SPAN. Where the state's span limits are on file they would be read here; where they
+  // are not (Oregon's live in ORSC R324.4.1 Exception 1.4-1.6), a rafter roof is a check with an
+  // engineer unless a person answered the exception row Yes.
+  const spanRule = rule("rafterSpanRule");
+  const framing = textOf(project, "framingType").toLowerCase();
+  if (spanRule && /rafter/.test(framing) && !/truss/.test(framing) && !/^y/i.test(textOf(project, "rafterExceptionCompliant"))) {
+    const span = numberOf(project, "roofRafterSpan");
+    const ref = (spanRule.value as { reference?: string } | null)?.reference || "the state's rafter span rule";
+    unread.push({ why: `${span != null ? `rafter span ${span} ft read from the plans` : "the plans do not state the rafter span"}; the span limits (${ref}) are not on file here`, rule: spanRule });
+  }
+
+  const out: ReviewerFinding[] = [];
+  const refs = (rs: Reason[]) => [...new Map(rs.map((r) => [r.rule.key, ruleReference(r.rule)])).values()];
+  const list = (rs: Reason[]) => rs.map((r) => `${r.why} — ${r.rule.citation}`).join(" ");
+  if (forcing.length && resolved === "prescriptive") {
+    out.push({
+      id: "state.struct.prescriptive-refused",
+      severity: "blocker",
+      category: "structural",
+      title: `Prescriptive filing refused: ${forcing.map((r) => r.why.split(" (")[0]).join("; ")} → engineered`,
+      message: `This job is on the prescriptive path, but ${state}'s rules send it to the engineered path: ${list(forcing)}`,
+      cityFeedback: "The design does not qualify for the prescriptive path; submit the engineered (structural) application with stamped structural calculations.",
+      designTeamAction: "Set the permit path to engineered (Manual entry → Permit path) and collect the stamped structural letter / calculations from the engineer of record.",
+      evidenceNeeded: ["Engineered (structural) application", "Stamped structural calculations or engineer's letter"],
+      codeReferences: refs(forcing),
+      installerCallout: true,
+    });
+  } else if (forcing.length) {
+    out.push({
+      id: "state.struct.engineered-reasons",
+      severity: "callout",
+      category: "structural",
+      title: `Engineered path: ${forcing.map((r) => r.why.split(" (")[0]).join("; ")}`,
+      message: `${state}'s rules send this job to the engineered path: ${list(forcing)}`,
+      cityFeedback: "File the engineered (structural) application with stamped structural calculations.",
+      designTeamAction: "Keep the engineered path; the stamped structural package is required.",
+      evidenceNeeded: [],
+      codeReferences: refs(forcing),
+      installerCallout: true,
+    });
+  }
+  if (unread.length && resolved === "prescriptive") {
+    out.push({
+      id: "state.struct.prescriptive-unverified",
+      severity: "warning",
+      category: "structural",
+      title: "Check with an engineer: prescriptive limits not confirmed from the plans",
+      message: `The prescriptive path cannot be confirmed against ${state}'s rules: ${list(unread)}`,
+      cityFeedback: "Show the structural inputs the prescriptive checklist asks for, or provide stamped engineering.",
+      designTeamAction: "Get the missing values onto the plans, or have an engineer confirm the design (or stamp it and file engineered).",
+      evidenceNeeded: unread.map((r) => r.why),
+      codeReferences: refs(unread),
+      installerCallout: true,
+    });
+  }
+  return out;
+}
+
+/** The out-of-state seal finding (codeReviewRules, #595 PR1) cites the job state's own seal rule
+ *  where one is on file, in place of the generic reference. Mutates the findings. */
+export function citeStateSealRule(findings: ReviewerFinding[], rules: StatePermitRule[]): void {
+  const seal = rules.find((r) => r.key === "sealStateOnly");
+  if (!seal) return;
+  for (const f of findings) {
+    if (f.id === "city.struct.seal-out-of-state") f.codeReferences = [ruleReference(seal)];
+  }
+}

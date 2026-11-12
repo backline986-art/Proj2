@@ -46,10 +46,21 @@
 // The email's own body is never sent to a model.
 //
 // THE REPLY. Only to a known sender, only once a project was created or attached, to the From
-// address (never Reply-To). Scrubbed with the project's own secret values (projectSecretValuesById)
+// address (never the incoming message's Reply-To). Scrubbed with the project's own secret values (projectSecretValuesById)
 // and the read's; when those cannot be read the reply is withheld, never sent unscrubbed. SMTP_HOST + SMTP_FROM set and PUBLIC_BASE_URL set → sent; otherwise a
 // DRAFT communication on the project, like every other client email. EMAIL_INTAKE_AUTO_REPLY=off
 // or CLIENT_NOTIFICATIONS=off keeps it a draft.
+//
+// THE WAY BACK TO THE JOB (#540). The reply asks for what is still missing ("reply with these"), so
+// a Reply must come back HERE, not to SMTP_FROM (the status tracker's mailbox, which ignores
+// attachments). The reply carries Reply-To: intake+<the client's own tag>@<intake domain> — only the
+// tag, nothing secret (rule 2) — and a Message-ID of our own that names the project it answers
+// (intakeReplyMessageId). A message that comes back with that id in its In-Reply-To or References
+// attaches to THAT project, even when its files carry no readable address (a bill photo alone):
+// only after the tag, the sender and its authentication chose the client, only a project of that
+// same client in that same org (rule 6), never an archived one, and never when the files read a
+// DIFFERENT street (a new job sent as a reply is still a new job). Otherwise the normal path runs:
+// the same address attaches, a new one creates.
 //
 // UNSORTED NEVER SITS UNSEEN (#541). A message that lands unsorted raises ONE staff alert
 // (staffAlerts.alertStaffOnUnsortedIntake: the sender's domain, the day and the reason in our own
@@ -87,6 +98,7 @@ import { BRAND } from "./clientUpdates";
 import { clientEmailsOffFor, ensureStatusShareToken, formatProjectAddress, sendEmail, smtpConfigured, statusShareUrl } from "./clientNotifier";
 import { mapEmailText, renderEmail, type EmailContent, type EmailSection } from "./emailLayout";
 import { addCommunication } from "./crm";
+import { clientLinkRefusal } from "./clientLinkGuard";
 import { describeKind, isImageKind, looksLikeCad, sniffFileKind } from "./fileTypes";
 import { HttpError } from "./httpError";
 import { intakeAuthRefusal } from "./intakeAuth";
@@ -106,7 +118,9 @@ const ACTOR = "email intake";
 const MAX_FILES = 20;
 
 /** `html`: the layout part (emailLayout.ts), rendered from the same scrubbed content as `body`. */
-export type IntakeSender = (to: string, subject: string, body: string, html?: string) => Promise<void>;
+export type IntakeSender = (to: string, subject: string, body: string, html?: string, headers?: IntakeReplyHeaders) => Promise<void>;
+/** The reply's way back to the job (#540): Reply-To intake+<tag>@… and a Message-ID naming the project. */
+export interface IntakeReplyHeaders { replyTo?: string; messageId?: string }
 export type IntakeExtractor = (input: { planText: string; utilityBillText: string; structuralLetterText: string }, orgId: string) => Promise<ParserExtractionResponse>;
 
 export interface IntakeOptions {
@@ -148,6 +162,41 @@ export function intakeTagFrom(recipients: string[], addr = intakeAddressSetting(
     found = "";
   }
   return found;
+}
+
+/** Where a client's Reply to the intake acknowledgement goes (#540): the intake address with the
+ *  client's OWN tag, so the reply comes back through intake to the same client. Null when intake is
+ *  off or the client has no tag: the bare intake address would land the reply unsorted (no_tag), so
+ *  then no Reply-To is set at all. */
+export function intakeReplyToAddress(db: AppDb, clientId: string, addr = intakeAddressSetting()): string | null {
+  if (!addr) return null;
+  const tag = text(db.get<Row>("SELECT intake_tag FROM clients WHERE id = ?", [clientId])?.intake_tag).trim().toLowerCase();
+  return tag ? `${addr.local}+${tag}@${addr.domain}` : null;
+}
+
+const REPLY_REF_RE = /<intake-reply\.([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.[0-9a-f]+@([^<>\s@]+)>/gi;
+
+/** The acknowledgement's own Message-ID: it names the project it answers, so a reply to it (whose
+ *  In-Reply-To / References carry it back) reaches that project (#540). The project id is not a
+ *  secret (the status link's token is); the random part keeps every acknowledgement's id unique. */
+export function intakeReplyMessageId(projectId: string, addr = intakeAddressSetting()): string | undefined {
+  if (!addr || !/^[0-9a-f-]{36}$/i.test(projectId)) return undefined;
+  return `<intake-reply.${projectId.toLowerCase()}.${crypto.randomBytes(8).toString("hex")}@${addr.domain}>`;
+}
+
+/** The projects a message says it answers: our own acknowledgement ids (intakeReplyMessageId) in
+ *  its In-Reply-To first, then its References newest first. Ids minted for another domain are
+ *  not ours and are ignored. Only candidates: placeIntakeJob holds each to the chosen client. */
+export function answeredProjectIds(parsed: Pick<ParsedMail, "inReplyTo" | "references">, addr = intakeAddressSetting()): string[] {
+  if (!addr) return [];
+  const refs = Array.isArray(parsed.references) ? parsed.references.join(" ") : String(parsed.references ?? "");
+  const ordered = [String(parsed.inReplyTo ?? ""), ...refs.split(/\s+/).reverse()].join(" ");
+  const out: string[] = [];
+  for (const m of ordered.matchAll(REPLY_REF_RE)) {
+    const projectId = m[1].toLowerCase();
+    if (m[2].toLowerCase() === addr.domain && !out.includes(projectId)) out.push(projectId);
+  }
+  return out;
 }
 
 const ADDRESS_RE = /[^\s<>,;:"'()[\]]+@[^\s<>,;:"'()[\]]+/g;
@@ -195,9 +244,19 @@ export function isIntakeMessage(parsed: ParsedMail): boolean {
 // Client and sender.
 // ---------------------------------------------------------------------------
 
-interface ClientRow {
+export interface IntakeClient {
   id: string; org_id: string; company_name: string;
   contact_email: string; business_email: string; updates_inbox: string; billing_contact_email: string; intake_senders: string;
+}
+type ClientRow = IntakeClient;
+
+/** The client with this id IN THIS ORG, else null (rule 6: a person's choice of client never
+ *  reaches across orgs — "File under client" and the bulk job-folder drop both ask this). */
+export function intakeClientInOrg(db: AppDb, clientId: string, orgId: string): IntakeClient | null {
+  return db.get<IntakeClient>(
+    "SELECT id, org_id, company_name, contact_email, business_email, updates_inbox, billing_contact_email, intake_senders FROM clients WHERE id = ? AND org_id = ?",
+    [String(clientId || ""), orgId],
+  ) ?? null;
 }
 
 function clientsForTag(db: AppDb, tag: string, opts: IntakeOptions): ClientRow[] {
@@ -223,11 +282,15 @@ export function senderIsKnown(client: Pick<ClientRow, "contact_email" | "busines
 // Attachments.
 // ---------------------------------------------------------------------------
 
-interface WorkingFile extends EmailIntakeFile {
+export interface WorkingFile extends EmailIntakeFile {
   content: Buffer;
   kind: string;
   pdfText: string;
 }
+
+/** One file handed to the per-job pipeline: an email's attachment, or a file in one job folder of
+ *  a bulk drop (#538). Only its name and bytes: nothing else about where it came from is read. */
+export interface IntakeJobFile { filename?: string; content: Buffer | Uint8Array }
 
 function maxFileBytes(): number {
   const mb = Number(process.env.EMAIL_INTAKE_MAX_FILE_MB || 100);
@@ -254,14 +317,14 @@ async function pdfTextOf(content: Buffer): Promise<string> {
 }
 
 /** Sniff, refuse what no slot can take, read each PDF's text, and give every usable file a slot. */
-async function sortAttachments(attachments: Attachment[]): Promise<WorkingFile[]> {
+async function sortAttachments(attachments: IntakeJobFile[]): Promise<WorkingFile[]> {
   const files: WorkingFile[] = [];
   for (const [i, a] of attachments.entries()) {
     const name = (a.filename || `attachment-${i + 1}`).trim().slice(0, 200);
     const content = Buffer.isBuffer(a.content) ? a.content : Buffer.from(a.content ?? []);
     const kind = sniffFileKind(content);
     const f: WorkingFile = { name, size: content.length, content, kind, pdfText: "" };
-    if (i >= MAX_FILES) f.refused = `More than ${MAX_FILES} attachments; send the rest in another email.`;
+    if (i >= MAX_FILES) f.refused = `More than ${MAX_FILES} files in one job; send the rest separately.`;
     else if (!content.length) f.refused = "The file is empty.";
     else if (content.length > maxFileBytes()) f.refused = `Larger than ${Math.round(maxFileBytes() / 1024 / 1024)} MB.`;
     else if (looksLikeCad(name, kind)) f.refused = "A CAD drawing, not a submittable document: export the plan set to PDF and send that.";
@@ -298,13 +361,14 @@ async function sortAttachments(attachments: Attachment[]): Promise<WorkingFile[]
 export const PARSER_PROJECT_FIELDS: ReadonlySet<string> = new Set([
   "owner", "street", "city", "state", "zip", "ahj", "utility", "account", "meter", "dcKw", "acKw", "interco",
   "moduleMake", "moduleModel", "moduleWattage", "moduleQty", "invMake", "invModel", "invQty", "batteryMake",
-  "batteryModel", "batteryQty", "roofMaterial", "mounting", "rackingSystem", "roofRafterSpan", "invOutputW",
+  "batteryModel", "batteryQty", "batteryCapacityKwh", "batteryOutputKw", "essInverterModel", "essBreaker", "batteryMode",
+  "newModulesOnSchedule", "newModulesOnSld", "roofMaterial", "mounting", "rackingSystem", "roofRafterSpan", "invOutputW",
   "pvMicroMake", "pvMicroModel", "pvMicroQty", "pvMicroOutputW", "inverterSettings", "moduleVoc",
   "moduleIsc", "moduleVocTempCoeff", "pvMicroMaxDcInputV", "modulesPerString", "siteLowTempC",
   "dwellingUnits", "constructionCategory", "invMaxDcInputV", "siteHighTempC", "acConductor",
   "acConductorCount", "acRunLengthFt", "roofMaterialSubtype", "tileAttachmentMethod", "attachmentHardware",
   "busRating", "mainBreaker", "pvBreaker", "acDiscReq", "acDiscMakeModel", "acDiscQty", "acDiscAmps",
-  "acDiscFused", "acDiscVoltage", "snow", "deadLoad", "roofRafterSpacing", "wind", "permitPath", "windSpeed",
+  "acDiscFused", "acDiscVoltage", "snow", "deadLoad", "roofRafterSpacing", "roofRafterSize", "woodGrade", "wind", "permitPath", "windSpeed",
   "riskCategory", "lightFrame", "framingType", "roofLayers", "moduleHeightAboveRoof", "gravityWindDesign",
   "manufacturerInstallation", "rafterExceptionCompliant", "moduleFiguresCompliant", "attachmentToFraming",
   "attachmentSpacingIn", "attachmentEdgeSpacingIn", "attachmentsOutsideEdgeZone",
@@ -357,9 +421,28 @@ export function recentProjectAtAddress(db: AppDb, orgId: string, clientId: strin
      ORDER BY created_at DESC`,
     [orgId, clientId, since],
   );
-  const zip = String(project.zip || "").trim();
-  const hit = rows.find((r) => streetKey(text(r.project_address)) === key && (!zip || !text(r.zip).trim() || text(r.zip).trim() === zip));
+  const hit = rows.find((r) => sameAddress({ projectAddress: text(r.project_address), zip: text(r.zip) }, project));
   return hit ? text(hit.id) : null;
+}
+
+/** The same street, and the same ZIP when both have one: what "the same job" means. */
+function sameAddress(a: Pick<ProjectRecord, "projectAddress" | "zip">, b: Pick<ProjectRecord, "projectAddress" | "zip">): boolean {
+  const key = streetKey(b.projectAddress);
+  const za = String(a.zip || "").trim();
+  const zb = String(b.zip || "").trim();
+  return Boolean(key) && streetKey(a.projectAddress) === key && (!za || !zb || za === zb);
+}
+
+/** The first of the candidate projects that is THIS client's, in THIS org, and not archived (#540). */
+function answeredProject(db: AppDb, orgId: string, clientId: string, candidates: string[]): { id: string; projectAddress: string; zip: string } | null {
+  for (const candidate of candidates) {
+    const row = db.get<Row>(
+      "SELECT id, project_address, zip FROM projects WHERE id = ? AND org_id = ? AND client_id = ? AND COALESCE(archived_at, '') = ''",
+      [candidate, orgId, clientId],
+    );
+    if (row) return { id: text(row.id), projectAddress: text(row.project_address), zip: text(row.zip) };
+  }
+  return null;
 }
 
 // ---------------------------------------------------------------------------
@@ -499,7 +582,7 @@ const FIELD_LABELS: Record<string, string> = {
   batteryMake: "Battery make", batteryModel: "Battery model", batteryQty: "Battery count",
   pvMicroMake: "Microinverter make", pvMicroModel: "Microinverter model", pvMicroQty: "Microinverter count",
   roofMaterial: "Roof material", roofMaterialSubtype: "Roof material type", mounting: "Mounting type", rackingSystem: "Racking system",
-  roofRafterSpan: "Rafter span", roofRafterSpacing: "Rafter spacing", roofLayers: "Roof layers", framingType: "Roof framing type",
+  roofRafterSpan: "Rafter span", roofRafterSpacing: "Rafter spacing", roofRafterSize: "Rafter size", woodGrade: "Lumber grade", roofLayers: "Roof layers", framingType: "Roof framing type",
   interco: "Interconnection method", busRating: "Main panel bus rating (A)", mainBreaker: "Main breaker (A)", pvBreaker: "PV breaker (A)",
   snow: "Snow load", wind: "Wind speed", windSpeed: "Wind speed", existingSystem: "Existing solar system",
 };
@@ -554,16 +637,20 @@ function autoReplyOff(clientId: string | null | undefined): string {
   return "";
 }
 
-const sendWithLayout: IntakeSender = (to, subject, body, html) => sendEmail(to, subject, body, [], { html });
+const sendWithLayout: IntakeSender = (to, subject, body, html, headers) => sendEmail(to, subject, body, [], { html, ...headers });
 
-async function reply(db: AppDb, input: { project: ProjectRecord; orgId: string; to: string; subject: string; body: string; html: string; draftOnly?: string }, opts: IntakeOptions): Promise<string> {
+async function reply(db: AppDb, input: { project: ProjectRecord; orgId: string; to: string; subject: string; body: string; html: string; headers: IntakeReplyHeaders; draftOnly?: string }, opts: IntakeOptions): Promise<string> {
   let status: "sent" | "draft" | "failed" = "draft";
   let detail = input.draftOnly || autoReplyOff(input.project.clientId);
+  // NO DEAD LINK TO A CLIENT (clientLinkGuard.ts): the other dead bases, and a scan of the reply's links.
+  const linkRefusal = clientLinkRefusal({ body: input.body, html: input.html });
   if (detail) { /* stays a draft */ }
   else if (!String(process.env.PUBLIC_BASE_URL ?? "").trim()) detail = "PUBLIC_BASE_URL is not set, so the status link would point at this machine; nothing was sent.";
+  // NO DEAD LINK TO A CLIENT (clientLinkGuard.ts): the other dead bases, and a scan of the reply's links.
+  else if (linkRefusal) detail = linkRefusal;
   else if (!opts.send && !smtpConfigured()) detail = "SMTP is not configured (SMTP_HOST / SMTP_FROM are unset), so no send was attempted.";
   else {
-    try { await (opts.send ?? sendWithLayout)(input.to, input.subject, input.body, input.html); status = "sent"; }
+    try { await (opts.send ?? sendWithLayout)(input.to, input.subject, input.body, input.html, input.headers); status = "sent"; }
     catch (err) { status = "failed"; detail = err instanceof Error ? err.message : String(err); }
   }
   addCommunication(db, {
@@ -595,6 +682,106 @@ const MISSING_DOCS: Array<[string, string]> = [["plan_set", "The plan set (PDF)"
 const IDENTITY_FIELDS: Array<[keyof ProjectRecord, string]> = [
   ["homeownerName", "Homeowner name"], ["utility", "Utility"], ["ahj", "Permitting jurisdiction (AHJ)"], ["systemSizeDcKw", "System size (DC kW)"],
 ];
+
+/** What the per-job pipeline did with one job's files. */
+export type IntakeJobPlacement =
+  | { outcome: "unsorted"; reason: Extract<EmailIntakeReason, "no_usable_attachments" | "address_unreadable" | "plan_set_names_another_client">; files: WorkingFile[] }
+  | {
+    outcome: "created" | "attached"; projectId: string; project: ProjectRecord; files: WorkingFile[];
+    extraction: ParserExtractionResponse | null; unsure: string[]; missing: string[]; refused: EmailIntakeFile[];
+    /** Attached because the message is a reply to this project's acknowledgement (#540). */
+    viaReply: boolean;
+  };
+
+/**
+ * THE PER-JOB PIPELINE: one job's files, for a client already decided, become a project (or are
+ * attached to the same job sent again). Email intake calls it once per message, after the tag, the
+ * sender and its authentication have chosen the client; the bulk job-folder drop (#538) calls it
+ * once per folder with the client a person chose. ONE pipeline, so the two doors slot, read, dedupe
+ * and create alike:
+ *   slot the files (sortAttachments) → read the documents' text only (rule 2) → a plan set licensed
+ *   to another client stays unsorted → no address stays unsorted → the same address for the same
+ *   client within EMAIL_INTAKE_DEDUPE_DAYS attaches, else createProject → save each document →
+ *   enqueueStageSteps (the local chain, which stops at ready_to_stage: nothing here touches a portal).
+ * The org is the client's (rule 6) and nothing the files say changes it. Throws only on a failure
+ * the caller records as `failed`.
+ */
+export async function placeIntakeJob(db: AppDb, input: {
+  client: IntakeClient;
+  files: IntakeJobFile[];
+  extract?: IntakeExtractor;
+  /** Who the documents and audit name: "email intake", or the person who filed or dropped them. */
+  uploadedBy: string;
+  /** project_documents.source: "email_intake" or "bulk_drop". */
+  source: string;
+  /** A person already saw "the plan set's licence names another client" and vouched past it (#541). */
+  otherLicenceVouched?: boolean;
+  /** The projects the message says it answers (answeredProjectIds, #540): candidates only, each
+   *  held here to this client and its org. */
+  answersProjectIds?: string[];
+}): Promise<IntakeJobPlacement> {
+  const { client } = input;
+  const orgId = client.org_id || DEFAULT_ORG_ID;
+  const files = await sortAttachments(input.files);
+  const usable = files.filter((f) => !f.refused);
+  if (!usable.length) return { outcome: "unsorted", reason: "no_usable_attachments", files };
+
+  // THE PARSE: the documents' own text only — never the email body (rule 2).
+  const textOf = (docType: string) => usable.find((f) => f.docType === docType)?.pdfText ?? "";
+  const texts = { planText: textOf("plan_set"), utilityBillText: textOf("utility_bill"), structuralLetterText: textOf("structural_letter") };
+  let extraction: ParserExtractionResponse | null = null;
+  if (texts.planText.trim() || texts.utilityBillText.trim() || texts.structuralLetterText.trim()) {
+    extraction = await (input.extract ?? defaultExtractor(db))(texts, orgId);
+  }
+  const resolution = extraction?.clientResolution;
+  if (resolution?.decision === "auto_assign" && resolution.clientId && resolution.clientId !== client.id
+    && !input.otherLicenceVouched) {
+    return { outcome: "unsorted", reason: "plan_set_names_another_client", files };
+  }
+  const { payload, unsure } = extraction ? payloadFromExtraction(extraction) : { payload: {} as ParserPayload, unsure: [] };
+  const probe = normalizeProject("probe", payload);
+
+  // A REPLY TO THIS JOB'S ACKNOWLEDGEMENT (#540) attaches to it: a project of THIS client in THIS
+  // org (rule 6), not archived, and only when the files read no street or the same street — a
+  // different address sent as a reply is a different job and takes the normal path below.
+  const answered = answeredProject(db, orgId, client.id, input.answersProjectIds ?? []);
+  const replyTarget = answered && (!streetKey(probe.projectAddress) || sameAddress(answered, probe)) ? answered.id : null;
+  const viaReply = replyTarget !== null;
+  if (!viaReply && !probe.projectAddress.trim()) return { outcome: "unsorted", reason: "address_unreadable", files };
+
+  // CREATE, or ATTACH to the same job sent again.
+  const existingId = replyTarget ?? recentProjectAtAddress(db, orgId, client.id, probe);
+  let projectId: string;
+  if (existingId) {
+    projectId = existingId;
+  } else {
+    projectId = createProject(db, { ...payload, clientId: client.id }, orgId).project.id;
+  }
+  const existingDocs = new Set(
+    db.query<Row>("SELECT doc_type, original_filename, size_bytes FROM project_documents WHERE project_id = ?", [projectId])
+      .map((d) => `${text(d.doc_type)}|${text(d.original_filename)}|${Number(d.size_bytes)}`),
+  );
+  for (const f of usable) {
+    if (existingDocs.has(`${f.docType}|${f.name}|${f.size}`)) continue;
+    try {
+      saveProjectDocument(db, projectId, { filename: f.name, docType: f.docType, contentType: f.kind === "pdf" ? "application/pdf" : `image/${f.kind}`, buffer: f.content, source: input.source, uploadedBy: input.uploadedBy });
+    } catch (err) {
+      // The same door as an upload refuses it; it is reported, and the others still go on.
+      f.refused = err instanceof HttpError || err instanceof Error ? err.message : String(err);
+    }
+  }
+  // The chain is queued after the files are on the project, so its first step sees the plan set.
+  try { enqueueStageSteps(db, projectId); } catch { /* the chain is a convenience, not the intake */ }
+
+  const project = getProjectDetail(db, projectId).project;
+  const docTypes = new Set(db.query<Row>("SELECT doc_type FROM project_documents WHERE project_id = ?", [projectId]).map((d) => text(d.doc_type)));
+  const missing = [
+    ...IDENTITY_FIELDS.filter(([k]) => project[k] == null || String(project[k]).trim() === "").map(([, label]) => label),
+    ...MISSING_DOCS.filter(([t]) => !docTypes.has(t)).map(([, label]) => label),
+  ];
+  const refused = files.filter((f) => f.refused).map(({ name, size, refused: why }) => ({ name, size, refused: why }));
+  return { outcome: existingId ? "attached" : "created", projectId, project, files, extraction, unsure, missing, refused, viaReply };
+}
 
 /** A person's re-run of one kept message (#541). */
 interface Rerun {
@@ -663,57 +850,14 @@ async function processOne(db: AppDb, raw: Buffer, opts: IntakeOptions, result: E
     return unsorted("sender_not_authenticated", orgId, client.id, null);
   }
 
-  const files = await sortAttachments(attachments);
-  const usable = files.filter((f) => !f.refused);
-  if (!usable.length) return unsorted("no_usable_attachments", orgId, client.id, files);
-
-  // THE PARSE: the documents' own text only — never the email body (rule 2).
-  const textOf = (docType: string) => usable.find((f) => f.docType === docType)?.pdfText ?? "";
-  const texts = { planText: textOf("plan_set"), utilityBillText: textOf("utility_bill"), structuralLetterText: textOf("structural_letter") };
-  let extraction: ParserExtractionResponse | null = null;
-  if (texts.planText.trim() || texts.utilityBillText.trim() || texts.structuralLetterText.trim()) {
-    extraction = await (opts.extract ?? defaultExtractor(db))(texts, orgId);
-  }
-  const resolution = extraction?.clientResolution;
-  if (resolution?.decision === "auto_assign" && resolution.clientId && resolution.clientId !== client.id
-    && rerun?.overridden !== "plan_set_names_another_client") {
-    return unsorted("plan_set_names_another_client", orgId, client.id, files);
-  }
-  const { payload, unsure } = extraction ? payloadFromExtraction(extraction) : { payload: {} as ParserPayload, unsure: [] };
-  const probe = normalizeProject("probe", payload);
-  if (!probe.projectAddress.trim()) return unsorted("address_unreadable", orgId, client.id, files);
-
-  // CREATE, or ATTACH to the same job sent again.
-  const existingId = recentProjectAtAddress(db, orgId, client.id, probe);
-  let projectId: string;
-  if (existingId) {
-    projectId = existingId;
-  } else {
-    projectId = createProject(db, { ...payload, clientId: client.id }, orgId).project.id;
-  }
-  const existingDocs = new Set(
-    db.query<Row>("SELECT doc_type, original_filename, size_bytes FROM project_documents WHERE project_id = ?", [projectId])
-      .map((d) => `${text(d.doc_type)}|${text(d.original_filename)}|${Number(d.size_bytes)}`),
-  );
-  for (const f of usable) {
-    if (existingDocs.has(`${f.docType}|${f.name}|${f.size}`)) continue;
-    try {
-      saveProjectDocument(db, projectId, { filename: f.name, docType: f.docType, contentType: f.kind === "pdf" ? "application/pdf" : `image/${f.kind}`, buffer: f.content, source: "email_intake", uploadedBy: rerun ? rerun.by : ACTOR });
-    } catch (err) {
-      // The same door as an upload refuses it; it is reported, and the others still go on.
-      f.refused = err instanceof HttpError || err instanceof Error ? err.message : String(err);
-    }
-  }
-  // The chain is queued after the files are on the project, so its first step sees the plan set.
-  try { enqueueStageSteps(db, projectId); } catch { /* the chain is a convenience, not the intake */ }
-
-  const project = getProjectDetail(db, projectId).project;
-  const docTypes = new Set(db.query<Row>("SELECT doc_type FROM project_documents WHERE project_id = ?", [projectId]).map((d) => text(d.doc_type)));
-  const missing = [
-    ...IDENTITY_FIELDS.filter(([k]) => project[k] == null || String(project[k]).trim() === "").map(([, label]) => label),
-    ...MISSING_DOCS.filter(([t]) => !docTypes.has(t)).map(([, label]) => label),
-  ];
-  const refused = files.filter((f) => f.refused).map(({ name, size, refused: why }) => ({ name, size, refused: why }));
+  const placed = await placeIntakeJob(db, {
+    client, files: attachments, extract: opts.extract, uploadedBy: rerun ? rerun.by : ACTOR, source: "email_intake",
+    otherLicenceVouched: rerun?.overridden === "plan_set_names_another_client",
+    answersProjectIds: answeredProjectIds(parsed),
+  });
+  if (placed.outcome === "unsorted") return unsorted(placed.reason, orgId, client.id, placed.files);
+  const { projectId, project, files, extraction, unsure, missing, refused, viaReply } = placed;
+  const existingId = placed.outcome === "attached" ? projectId : null;
   // A sender only a PERSON vouched for (not one of the client's own addresses, or one whose mail
   // failed authentication) never gets an automatic reply: it is a draft a person sends.
   const draftOnly = !knownSender || authOverridden
@@ -734,7 +878,11 @@ async function processOne(db: AppDb, raw: Buffer, opts: IntakeOptions, result: E
       project, attached: Boolean(existingId), link: statusShareUrl(ensureStatusShareToken(db, projectId)),
       missing, unsure: unsure.map((k) => intakeFieldLabel(k)), refused, secrets: [...projectSecrets, ...readSecrets],
     });
-    replyStatus = await reply(db, { project, orgId, to: sender, ...email, draftOnly }, opts);
+    // THE WAY BACK (#540): a Reply goes to intake+<this client's tag>@… and names this project.
+    const replyTo = intakeReplyToAddress(db, client.id);
+    const messageId = intakeReplyMessageId(projectId);
+    const headers: IntakeReplyHeaders = { ...(replyTo ? { replyTo } : {}), ...(messageId ? { messageId } : {}) };
+    replyStatus = await reply(db, { project, orgId, to: sender, ...email, headers, draftOnly }, opts);
   }
 
   const status: EmailIntakeStatus = existingId ? "attached" : "created";
@@ -745,6 +893,7 @@ async function processOne(db: AppDb, raw: Buffer, opts: IntakeOptions, result: E
   if (rerun) fs.rmSync(intakeDir(rowId), { recursive: true, force: true });
   addAuditLog(db, projectId, rerun ? "human" : "system", rerun ? rerun.by : ACTOR, existingId ? "project.files_attached_from_email" : "project.created_from_email", {
     intakeId: rowId, files: item.files.map((f) => ({ docType: f.docType ?? null, refused: Boolean(f.refused) })), unsure, missing: missing.length, reply: replyStatus,
+    ...(viaReply ? { matchedBy: "reply" } : {}),
     ...(rerun ? { placedBy: rerun.by, clientChosenByPerson: Boolean(rerun.client), overridden: rerun.overridden ?? null } : {}),
   });
   if (existingId) result.attached += 1; else result.created += 1;
@@ -891,10 +1040,7 @@ export async function fileEmailIntake(
 ): Promise<EmailIntakeView> {
   const row = rowInScope(db, intakeId, orgFilter);
   const orgId = text(row.org_id) || DEFAULT_ORG_ID;
-  const client = db.get<ClientRow>(
-    "SELECT id, org_id, company_name, contact_email, business_email, updates_inbox, billing_contact_email, intake_senders FROM clients WHERE id = ? AND org_id = ?",
-    [String(clientId || ""), orgId],
-  );
+  const client = intakeClientInOrg(db, clientId, orgId);
   if (!client) throw new HttpError(404, "Client not found.");
   if (text(row.status) !== "unsorted") throw new HttpError(409, "Only an unsorted message can be filed; this one was already placed or dismissed.");
   const reason = text(row.reason);

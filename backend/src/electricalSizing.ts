@@ -26,6 +26,8 @@ import type { CodeReference, ElectricalSizingInput, ElectricalSizingInputKey, Pr
 import { sheetTextSources, type DesignTextSource } from "./designCriteria";
 import { dcDcConverterEvidence, essOutputCurrent, nextStandardOcpd, table6907AFactor } from "./iowaPvWorksheet";
 import { batteryStatus } from "./batteryServiceFeeder";
+import { notCheckedRecord, passRecord } from "./checkRecords";
+import { makeRuleBasis } from "../../shared/src/ruleBasis";
 
 export const SIZING_FINDING_IDS = [
   "city.elec.sizing-busbar-120",
@@ -58,8 +60,9 @@ const voltageDropRef: CodeReference = {
   note: "The informational notes recommend no more than 3 percent drop on a branch circuit or feeder.",
 };
 
-// NEC Table 310.16 (60 / 75 / 90 C columns), copper and aluminum, AWG 14 - 4/0.
-const AMPACITY: Record<"CU" | "AL", Record<string, [number, number, number]>> = {
+// NEC Table 310.16 (60 / 75 / 90 C columns), copper and aluminum, AWG 14 - 4/0. Exported for the
+// per-tag wire table check (wireTableArithmetic.ts, #334): one ampacity table, not two copies.
+export const AMPACITY: Record<"CU" | "AL", Record<string, [number, number, number]>> = {
   CU: {
     "14": [15, 20, 25], "12": [20, 25, 30], "10": [30, 35, 40], "8": [40, 50, 55], "6": [55, 65, 75],
     "4": [70, 85, 95], "3": [85, 100, 115], "2": [95, 115, 130], "1": [110, 130, 145],
@@ -77,14 +80,14 @@ const RESISTANCE: Record<"CU" | "AL", Record<string, number>> = {
   AL: { "12": 3.25, "10": 2.04, "8": 1.28, "6": 0.808, "4": 0.508, "3": 0.403, "2": 0.319, "1": 0.253, "1/0": 0.201, "2/0": 0.159, "3/0": 0.126, "4/0": 0.1 },
 };
 // 240.4(D) small-conductor OCPD ceilings.
-const SMALL_CONDUCTOR_MAX: Record<"CU" | "AL", Record<string, number>> = { CU: { "14": 15, "12": 20, "10": 30 }, AL: { "12": 15, "10": 25 } };
+export const SMALL_CONDUCTOR_MAX: Record<"CU" | "AL", Record<string, number>> = { CU: { "14": 15, "12": 20, "10": 30 }, AL: { "12": 15, "10": 25 } };
 // NEC Table 310.15(B)(1) ambient correction (30 C basis): [upper bound C, 60 C, 75 C, 90 C column].
 const AMBIENT: Array<[number, number, number, number]> = [
   [30, 1, 1, 1], [35, 0.91, 0.94, 0.96], [40, 0.82, 0.88, 0.91], [45, 0.71, 0.82, 0.87], [50, 0.58, 0.75, 0.82],
   [55, 0.41, 0.67, 0.76], [60, 0, 0.58, 0.71], [65, 0, 0.47, 0.65], [70, 0, 0.33, 0.58], [75, 0, 0, 0.5], [80, 0, 0, 0.41], [85, 0, 0, 0.29],
 ];
 // NEC Table 310.15(C)(1): more than three current-carrying conductors in a raceway.
-function fillAdjustment(count: number): number {
+export function fillAdjustment(count: number): number {
   if (count <= 3) return 1;
   if (count <= 6) return 0.8;
   if (count <= 9) return 0.7;
@@ -350,7 +353,15 @@ function essOnBus(project: ProjectRecord, sheetText: string, micro: boolean): Es
 
 export function evaluateElectricalSizingFindings(project: ProjectRecord, opts: ElectricalSizingOptions = {}): ReviewerFinding[] {
   const out: ReviewerFinding[] = [];
+  // CHECK RECORDS (review-audit draft 07): each recompute that ran and passed, and each that could
+  // not run for want of an input, appended after the findings (display only — checkRecords.ts).
+  const records: ReviewerFinding[] = [];
   const cite = opts.cite ?? ((_code: string, fallback: CodeReference) => fallback);
+  // The NEC's own arithmetic: the basis is the model code, at the adopted edition when one is known.
+  const necBasis = (ref: CodeReference) => {
+    const cited = cite("NEC", ref);
+    return makeRuleBasis("model_code", `NEC${opts.adoptedNecEdition ? ` ${opts.adoptedNecEdition}` : ""} ${cited.section}`.trim(), cited.sourceUrl);
+  };
   const sheetText = sheetTextSources(project, opts.documentTexts ?? []).map((s) => s.text).join("\n");
   const missing: string[] = [];
   const input = (key: ElectricalSizingInputKey) => readInput(project, sheetText, key);
@@ -401,9 +412,22 @@ export function evaluateElectricalSizingFindings(project: ProjectRecord, opts: E
       : breaker && breaker.value > 0
         ? { amps: breaker.value, inputs: [breaker], text: `PV breaker ${fmt(breaker.value)} A${tag(breaker)}`, onBreaker: true }
         : null;
+    const busbarCheck = { ruleId: "city.elec.sizing-busbar-120", category: "electrical" as const, title: `Busbar 120 percent screen (${sec})`, codeReferences: [cite("NEC", { ...busbarRef, section: sec })], ruleBasis: necBasis({ ...busbarRef, section: sec }) };
+    if (!(source && bus && main && bus.value > 0) || ess?.kind === "unknown") {
+      records.push(notCheckedRecord({ ...busbarCheck, inputs: [
+        !bus || !(bus.value > 0) ? "the busbar rating" : "",
+        !main ? "the main breaker rating" : "",
+        !source ? "the inverter output current (or the PV breaker rating)" : "",
+        ess?.kind === "unknown" ? "the AC-coupled battery inverter's output current" : "",
+      ] }));
+    }
     if (source && bus && main && bus.value > 0) {
       const lhs = source.amps + main.value;
       const allowance = bus.value * 1.2;
+      if (lhs <= allowance + 1e-9 && ess?.kind !== "unknown") {
+        const used = [...source.inputs, bus, main];
+        records.push(passRecord({ ...busbarCheck, arithmetic: `${sec}: ${source.text} + ${fmt(main.value)} A main${tag(main)} = ${fmt(lhs)} A, within 120 % of the ${fmt(bus.value)} A${tag(bus)} busbar (1.2 x ${fmt(bus.value)} = ${fmt(allowance)} A).${source.onBreaker ? " Measured on the PV breaker rating." : ""}${provenance(used)}` }));
+      }
       if (lhs > allowance + 1e-9) {
         const used = [...source.inputs, bus, main];
         const basis = !source.onBreaker
@@ -437,8 +461,17 @@ export function evaluateElectricalSizingFindings(project: ProjectRecord, opts: E
   // (b) The inverter output circuit: OCPD >= 1.25 x Imax, and OCPD <= the conductor's ampacity.
   const conductorRaw = snap("acConductor");
   const conductor = conductorRaw ? parseConductor(conductorRaw) : null;
+  const pvInverter = micro || stringInverter;
+  const ocpdCheck = { ruleId: "city.elec.sizing-ocpd-under-125", category: "electrical" as const, title: "Inverter output OCPD at least 125 percent of the output current (690.9(B))", codeReferences: [cite("NEC", ocpdRef)], ruleBasis: necBasis(ocpdRef) };
+  if (pvInverter && !(breaker && current)) {
+    records.push(notCheckedRecord({ ...ocpdCheck, inputs: [!breaker ? "the PV breaker / output circuit OCPD rating" : "", !current ? "the inverter's maximum continuous output current and quantity" : ""] }));
+  }
   if (breaker && current) {
     const minOcpd = current.amps * 1.25;
+    if (breaker.value >= minOcpd - 0.01) {
+      const used = [breaker, ...current.inputs];
+      records.push(passRecord({ ...ocpdCheck, arithmetic: `690.9(B): inverter output current ${current.calc}; 1.25 x ${fmt(current.amps)} A = ${fmt(minOcpd)} A minimum OCPD; the PV breaker is ${fmt(breaker.value)} A${tag(breaker)}.${provenance(used)}` }));
+    }
     if (breaker.value < minOcpd - 0.01) {
       const used = [breaker, ...current.inputs];
       out.push(finding({
@@ -452,6 +485,10 @@ export function evaluateElectricalSizingFindings(project: ProjectRecord, opts: E
         codeReferences: [cite("NEC", ocpdRef)],
       }));
     }
+  }
+  const ampacityCheck = { ruleId: "city.elec.sizing-ocpd-over-ampacity", category: "electrical" as const, title: "Inverter output OCPD within the conductor's corrected ampacity (310.15 / 240.4)", codeReferences: [cite("NEC", ocpdRef)], ruleBasis: necBasis(ocpdRef) };
+  if (pvInverter && !(breaker && conductor)) {
+    records.push(notCheckedRecord({ ...ampacityCheck, inputs: [!breaker ? "the PV breaker / output circuit OCPD rating" : "", !conductor ? "the inverter output circuit conductor size, material and insulation" : ""] }));
   }
   if (breaker && conductor) {
     const high = input("siteHighTempC");
@@ -467,6 +504,12 @@ export function evaluateElectricalSizingFindings(project: ProjectRecord, opts: E
     const small = SMALL_CONDUCTOR_MAX[conductor.material][conductor.size];
     const nextUp = nextStandardOcpd(ampacity) ?? Infinity;
     const maxOcpd = Math.min(nextUp, small ?? Infinity);
+    if (breaker.value <= maxOcpd + 1e-9) {
+      const used: ElectricalSizingInput[] = [breaker, { key: "acConductor", value: 0, documentStated: conductorStatedAsOutputCircuit(conductor, sheetText) }];
+      if (high) used.push(high);
+      if (count) used.push(count);
+      records.push(passRecord({ ...ampacityCheck, arithmetic: `310.15 / 240.4: #${conductor.size} ${conductor.material}${conductor.insulation ? ` ${conductor.insulation}` : " (insulation not stated; 90 C column assumed)"}${tag(used[1])}: ${base} A (Table 310.16, ${column} C) x ${fmt(ambient)} ambient${high ? ` at ${fmt(high.value, 1)} C${tag(high)}` : " (30 C assumed)"} x ${fmt(fill)} fill${count ? ` for ${count.value} current-carrying conductors${tag(count)}` : " (3 or fewer assumed)"} = ${fmt(derated)} A${ampacity < derated ? `, ${fmt(ampacity)} A at the terminations` : ""}; largest permitted OCPD ${fmt(maxOcpd)} A; the PV breaker is ${fmt(breaker.value)} A${tag(breaker)}.${provenance(used)}` }));
+    }
     if (breaker.value > maxOcpd + 1e-9) {
       const used: ElectricalSizingInput[] = [breaker, { key: "acConductor", value: 0, documentStated: conductorStatedAsOutputCircuit(conductor, sheetText) }];
       if (high) used.push(high);
@@ -504,6 +547,7 @@ export function evaluateElectricalSizingFindings(project: ProjectRecord, opts: E
   const voc = input("moduleVoc");
   const low = input("siteLowTempC");
   const perString = micro ? null : input("modulesPerString");
+  const vocCheck = { ruleId: "city.elec.sizing-string-voc", category: "electrical" as const, title: micro ? "Module cold-weather Voc within the microinverter's maximum DC input (690.7)" : "String voltage at the design low temperature (690.7)", codeReferences: [cite("NEC", maxVoltageRef)], ruleBasis: necBasis(maxVoltageRef) };
   if (!optimizer && (stringInverter || micro)) {
     const betaInput = input("moduleVocTempCoeff");
     // A coefficient outside 0.05-1 %/C is a broken read (iowaPvWorksheet's bound): use the table.
@@ -518,6 +562,15 @@ export function evaluateElectricalSizingFindings(project: ProjectRecord, opts: E
         if (!micro) limits.push({ v: 600, what: "limit for one- and two-family dwellings (690.7)" });
         if (limitInput && limitInput.value > 0) limits.push({ v: limitInput.value, what: `${micro ? "microinverter" : "inverter"} maximum DC input${tag(limitInput)}`, input: limitInput });
         const exceeded = limits.filter((l) => maxV > l.v + 1e-9).sort((a, b) => a.v - b.v);
+        if (!exceeded.length && limits.length) {
+          const used = [voc, low, ...(beta ? [beta] : []), ...(perString ? [perString] : []), ...(limitInput ? [limitInput] : [])];
+          const factorText = beta
+            ? `(1 + ${fmt(Math.abs(beta.value), 3)} %/C${tag(beta)} x (25 - (${fmt(low.value, 1)})) C) = ${fmt(factor, 4)}`
+            : `Table 690.7(A) factor ${factor} at ${fmt(low.value, 1)} C`;
+          records.push(passRecord({ ...vocCheck, arithmetic: `690.7(A): ${fmt(voc.value)} V Voc${tag(voc)} x ${factorText}${micro ? "" : ` x ${fmt(series, 0)} modules in series${tag(perString as ElectricalSizingInput)}`} = ${fmt(maxV, 1)} V at ${fmt(low.value, 1)} C${tag(low)}, within the ${limits.map((l) => `${fmt(l.v, 0)} V ${l.what}`).join(" and the ")}.${provenance(used)}` }));
+        } else if (!exceeded.length) {
+          records.push(notCheckedRecord({ ...vocCheck, inputs: ["the microinverter's maximum DC input voltage"] }));
+        }
         if (exceeded.length) {
           // Severity follows the inputs of the LOWEST limit exceeded — if only the inverter limit
           // is crossed, the inverter's rating is an input; the 600 V ceiling is code, not an input.
@@ -543,6 +596,13 @@ export function evaluateElectricalSizingFindings(project: ProjectRecord, opts: E
         }
       }
     }
+    if (!(voc && low && (micro || perString))) {
+      records.push(notCheckedRecord({ ...vocCheck, inputs: [
+        !voc ? "the module Voc (datasheet)" : "",
+        !low ? "the site's extreme minimum design temperature" : "",
+        !micro && !perString ? "the modules in series per string" : "",
+      ] }));
+    }
     if ((voc || low || perString) && !(voc && low && (micro || perString))) {
       const need = [
         !voc ? "module Voc (datasheet)" : "",
@@ -561,6 +621,13 @@ export function evaluateElectricalSizingFindings(project: ProjectRecord, opts: E
     const volts = /\b208\b/.test(voltsRaw) ? 208 : 240;
     const drop = (2 * run.value * current.amps * r) / 1000;
     const pct = (drop / volts) * 100;
+    if (pct <= 3) {
+      records.push(passRecord({
+        ruleId: "city.elec.sizing-voltage-drop", category: "electrical", title: "Inverter output circuit voltage drop (advisory, 3 percent)",
+        codeReferences: [cite("NEC", voltageDropRef)], ruleBasis: necBasis(voltageDropRef),
+        arithmetic: `Voltage drop: 2 x ${fmt(run.value, 0)} ft${tag(run)} x ${fmt(current.amps)} A x ${r} ohm/kft (#${conductor.size} ${conductor.material}) / 1000 = ${fmt(drop)} V; ${fmt(drop)} / ${volts} V${voltsRaw ? "" : " (assumed)"} = ${fmt(pct)} %, within 3 %.${provenance([run, ...current.inputs])}`,
+      }));
+    }
     if (pct > 3) {
       const used = [run, ...current.inputs];
       out.push(finding({
@@ -588,5 +655,5 @@ export function evaluateElectricalSizingFindings(project: ProjectRecord, opts: E
       codeReferences: [cite("NEC", ocpdRef), cite("NEC", maxVoltageRef)],
     }));
   }
-  return out;
+  return [...out, ...records];
 }

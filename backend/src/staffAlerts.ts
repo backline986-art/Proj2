@@ -22,6 +22,9 @@
 //                       answered (#445). No run row exists, so the run alert never fired (#551).
 //                       ref = project + track, state = the gap keys, so a retry of the same
 //                       refusal sends nothing and a changed set of gaps sends once more.
+//              client_onboarding  a client submitted its Company setup page (ref = the link id,
+//                       state = "submitted"): staff accept or reject what it sent on the Clients
+//                       screen. No project; the org is the client row's own.
 //            The dedupe is the newest staff_notifications row for (org, kind, ref): the same
 //            state there means this transition was already handled, so a re-entered writer or a
 //            re-poll sends nothing — the same idea as shouldNotifyClient, kept in the table so it
@@ -55,13 +58,14 @@ import { formatProjectAddress, sendEmail } from "./clientNotifier";
 import { renderEmail, type EmailContent, type EmailSection } from "./emailLayout";
 import { projectSecretValuesById } from "./projectSecrets";
 import { redactSecretValues } from "../../shared/src/portalSafety";
+import { usd } from "./feePause";
 import { configuredStaffOrgs, staffAlertChannels, staffDigestHour, type StaffAlertChannels } from "./staffAlertConfig";
 
-export type StaffAlertKind = "run" | "correction" | "status" | "digest" | "unmatched_email" | "unsorted_intake" | "stage_held";
+export type StaffAlertKind = "run" | "correction" | "status" | "digest" | "unmatched_email" | "unsorted_intake" | "stage_held" | "client_onboarding";
 
 /** Stage-run endings that need a person. awaiting_human_submit (staged cleanly, waiting for
  *  review) is deliberately absent: it is the expected end of a run and the digest carries it. */
-export const RUN_STATES_THAT_ALERT = ["paused_for_human", "failed", "interrupted", "submitted_unconfirmed"] as const;
+export const RUN_STATES_THAT_ALERT = ["paused_for_human", "awaiting_payment", "failed", "interrupted", "submitted_unconfirmed"] as const;
 
 /** Tracking outcomes that are NOT news for staff. "waiting" is the agency holding the ball;
  *  correction_flagged has its own alert (the correction), so a status alert would double it. */
@@ -298,6 +302,7 @@ export function staffAlertEmail(input: { address: string; projectId: string; tra
 
 const RUN_WHAT: Record<string, string> = {
   paused_for_human: "run paused for a person",
+  awaiting_payment: "payment needed",
   failed: "run failed, nothing staged",
   interrupted: "run interrupted",
   submitted_unconfirmed: "submit clicked, portal did not confirm",
@@ -305,6 +310,7 @@ const RUN_WHAT: Record<string, string> = {
 /** The subject's / headline's words for each run ending. */
 const RUN_EVENT: Record<string, string> = {
   paused_for_human: "run paused",
+  awaiting_payment: "payment needed",
   failed: "run failed",
   interrupted: "run interrupted",
   submitted_unconfirmed: "submit not confirmed",
@@ -319,11 +325,12 @@ const STATUS_EVENT: Record<string, string> = {
 };
 
 /** A stage run ended on `runStatus`; `why` is already scrubbed (or one of our fixed sentences). */
-export function runAlertEmail(input: { address: string; projectId: string; track: string; runStatus: string; why: string }): StaffEmail {
+export function runAlertEmail(input: { address: string; projectId: string; track: string; runStatus: string; why: string; what?: string }): StaffEmail {
   return staffAlertEmail({
     ...input,
-    event: RUN_EVENT[input.runStatus] ?? "run needs a person",
-    what: RUN_WHAT[input.runStatus] ?? input.runStatus.replace(/_/g, " "),
+    // A fee stop's own words (#576) name the fee and its amount in the subject too.
+    event: input.what || (RUN_EVENT[input.runStatus] ?? "run needs a person"),
+    what: input.what || (RUN_WHAT[input.runStatus] ?? input.runStatus.replace(/_/g, " ")),
   });
 }
 
@@ -363,7 +370,7 @@ const RUN_FIXED_WHY: Record<string, string> = {
  *  scrubbed before it goes anywhere. Returns the send so a test can await it; callers `void` it. */
 export function alertStaffOnRunOutcome(
   db: AppDb,
-  input: { projectId: string; runId: string; track: string; runStatus: string; reason: string },
+  input: { projectId: string; runId: string; track: string; runStatus: string; reason: string; feeUsd?: number | null },
 ): Promise<void> {
   try {
     if (!(RUN_STATES_THAT_ALERT as readonly string[]).includes(input.runStatus)) return Promise.resolve();
@@ -372,7 +379,12 @@ export function alertStaffOnRunOutcome(
     // Fail closed on secrets: an unreadable project row means no free text at all.
     const secrets = projectSecretValuesById(db, input.projectId);
     const why = RUN_FIXED_WHY[input.runStatus] ?? (secrets ? scrubStaffText(input.reason, secrets) : "");
-    const mail = runAlertEmail({ address: facts.address, projectId: input.projectId, track: input.track, runStatus: input.runStatus, why });
+    // A FEE STOP NAMES THE FEE AND ITS AMOUNT (#576) in the "what" — read off the portal's page at
+    // the stop; an amount that was not read is said to be unread, never $0. Our own words.
+    const what = input.runStatus === "awaiting_payment"
+      ? `${RUN_WHAT.awaiting_payment} (${typeof input.feeUsd === "number" && input.feeUsd > 0 ? `fee ${usd(input.feeUsd)}` : "fee amount unread"})`
+      : undefined;
+    const mail = runAlertEmail({ address: facts.address, projectId: input.projectId, track: input.track, runStatus: input.runStatus, why, what });
     return recordAndSend(db, { orgId: facts.orgId, projectId: input.projectId, kind: "run", ref: input.runId, state: input.runStatus, ...mail });
   } catch (err) {
     logger.warn("staff-alert", `run alert skipped: ${err instanceof Error ? err.message : String(err)}`);
@@ -506,6 +518,44 @@ export function alertStaffOnUnsortedIntake(
     return recordAndSend(db, { orgId: input.orgId || DEFAULT_ORG_ID, projectId: null, kind: "unsorted_intake", ref: input.intakeId, state: "unsorted", ...mail });
   } catch (err) {
     logger.warn("staff-alert", `unsorted intake alert skipped: ${err instanceof Error ? err.message : String(err)}`);
+    return Promise.resolve();
+  }
+}
+
+/** The Company setup alert: the company's name (it is our client, not a homeowner) and how many
+ *  answers wait for a person. Never a value the client typed. */
+export function clientOnboardingAlert(input: { companyName: string; proposals: number; files: number; filingAnswers?: number }): StaffEmail {
+  const company = scrubStaffText(input.companyName || "A client", []);
+  const n = Math.max(0, Math.floor(input.proposals));
+  const f = Math.max(0, Math.floor(input.files));
+  return renderStaff(`Action needed: ${company} sent its company setup`, {
+    audience: "staff",
+    preheader: `${company} filled in its Company setup page: ${n} answer${n === 1 ? "" : "s"} wait for a person.`,
+    eyebrow: "Action needed · Clients",
+    headline: "A client sent its company setup",
+    intro: ["Nothing it typed is on the client record yet. Each answer waits on the Clients screen until a person accepts, edits or rejects it."],
+    rows: [
+      ["Client", company],
+      ["Answers to review", String(n)],
+      ["Certificates", String(f)],
+      ...(Number(input.filingAnswers) > 0 ? [["How they file", `${Math.floor(Number(input.filingAnswers))} answer(s), in Destinations to confirm`] as [string, string]] : []),
+      ["Next", "open Clients, pick the company, and review Company setup."],
+    ],
+    action: { label: `Open ${BRAND}`, url: dashboardLink() },
+  });
+}
+
+/** A client submitted its Company setup page (clientOnboarding.ts). Deduped per link: a link submits
+ *  once. RULE 6: the org is the client row's own. Callers `void` it. */
+export function alertStaffOnClientOnboarding(
+  db: AppDb,
+  input: { orgId: string; linkId: string; companyName: string; proposals: number; files: number; filingAnswers?: number },
+): Promise<void> {
+  try {
+    const mail = clientOnboardingAlert(input);
+    return recordAndSend(db, { orgId: input.orgId || DEFAULT_ORG_ID, projectId: null, kind: "client_onboarding", ref: input.linkId, state: "submitted", ...mail });
+  } catch (err) {
+    logger.warn("staff-alert", `client onboarding alert skipped: ${err instanceof Error ? err.message : String(err)}`);
     return Promise.resolve();
   }
 }

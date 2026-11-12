@@ -36,6 +36,8 @@ import type {
   LLMProvider, ParserExtractedField, ParserExtractionConflict, ParserExtractionUncertainty,
   ParserLlmExtraction, PlanPageClass, PlanPageIndex, PlanSheetKind,
 } from "../../shared/src/types";
+import { VisionPageWithheldError } from "./visionPageMask";
+import { OUTLINED_TEXT_WHY, outlinedPagesReport, outlinedTextPagesOfPdf } from "./outlinedTextPages";
 
 /** At most this many DISTINCT pages are read by vision per read (one image per page). */
 export const MAX_VISION_PAGES = 8;
@@ -276,6 +278,9 @@ export interface ScannedPlanRead {
   textChars: number;
   /** HYBRID: the image-only pages found (before the cap). */
   imagePages?: number[];
+  /** Pages whose text is drawn as outlines (#696, outlinedTextPages.ts): read by neither path,
+   *  never rendered or sent, in ANY mode — a text set can carry them too. Absent when none. */
+  outlinedPages?: number[];
   extraction?: ParserLlmExtraction;
 }
 
@@ -302,7 +307,7 @@ async function renderChosen(renderer: Renderer, chosen: PlanPageClass[], labelle
       if (img.bytes.length > MAX_IMAGE_BYTES) img = await renderer.render(p.page, { maxLongEdge: VISION_MAX_LONG_EDGE, maxPixels: VISION_MAX_PIXELS, rotate: p.rotate, quality: 65 });
       if (img.bytes.length > MAX_IMAGE_BYTES) img = await renderer.render(p.page, { maxLongEdge: 2000, maxPixels: 2_000_000, rotate: p.rotate, quality: 65 });
     } catch (err) {
-      skipped.push({ page: p.page, reason: `could not be rendered (${String((err as Error)?.message ?? err).slice(0, 80)})` });
+      skipped.push({ page: p.page, reason: err instanceof VisionPageWithheldError ? err.message : `could not be rendered (${String((err as Error)?.message ?? err).slice(0, 80)})` });
       continue;
     }
     if (img.bytes.length > MAX_IMAGE_BYTES) { skipped.push({ page: p.page, reason: `image over the ${MAX_IMAGE_BYTES}-byte per-image cap` }); continue; }
@@ -324,7 +329,7 @@ async function renderThumbs(renderer: Renderer, pages: number[], byteBudget = Nu
       if (total + img.bytes.length > byteBudget) continue;
       total += img.bytes.length;
       out.push({ page, base64: img.bytes.toString("base64"), mimeType: img.mimeType });
-    } catch { /* an unrenderable page is simply not indexed */ }
+    } catch { /* an unrenderable page — or one withheld for a secret it cannot mask (#612) — is simply not indexed */ }
   }
   return out;
 }
@@ -364,8 +369,8 @@ export function looksLikeBillOrMeterPage(text: string): boolean {
   return BILL_OR_METER_PAGE.test(String(text ?? ""));
 }
 
-/** Datasheet kinds that DECIDE an undecided spec page: module / inverter go into those parts; the
- *  rest (combiner, racking, battery…) are datasheets that belong in neither. */
+/** Datasheet kinds that DECIDE an undecided spec page: module / inverter / battery go into those parts
+ *  (battery since #261); the rest (combiner, racking…) are datasheets that belong in none of them. */
 const DATASHEET_KINDS = new Set<PlanSheetKind>(["module_spec", "inverter_spec", "battery_spec", "racking_spec", "other_spec"]);
 
 export interface UndecidedSpecRead {
@@ -389,10 +394,16 @@ export async function readUndecidedSpecPages(
   pdfBytes: Uint8Array,
   pages: number[],
   pageTexts: string[],
-  opts: { maxBytes?: number } = {},
+  opts: {
+    maxBytes?: number;
+    /** The project's own secrets (projectSecretValuesById): painted over on every thumbnail, or the
+     *  page is not indexed (rule 2, #612). null = they could not be read: nothing is rendered or sent. */
+    secrets?: readonly string[] | null;
+  } = {},
 ): Promise<UndecidedSpecRead> {
   const out: UndecidedSpecRead = { decided: {}, integratedInverter: [], withheld: [] };
   if (!pages.length) return out;
+  if (opts.secrets === null) return { ...out, failure: "the project's account and meter numbers could not be read, so no page image was sent" };
   const send = pages.filter((p) => {
     if (!looksLikeBillOrMeterPage(pageTexts[p - 1] ?? "")) return true;
     out.withheld.push(p);
@@ -402,7 +413,7 @@ export async function readUndecidedSpecPages(
   if (typeof llm.classifyPlanPages !== "function") return { ...out, failure: "no page index was available" };
   const byteBudget = Math.max(1, Math.min(MAX_VISION_BYTES, Math.floor(opts.maxBytes ?? MAX_VISION_BYTES)));
   const { openPdfForVisionRender } = await import("./pageImages");
-  const renderer = await openPdfForVisionRender(pdfBytes);
+  const renderer = await openPdfForVisionRender(pdfBytes, { secrets: opts.secrets ?? [] });
   try {
     const { index, failure } = await readPageIndex(llm, renderer, send, byteBudget);
     if (!index) return { ...out, failure };
@@ -464,7 +475,14 @@ function describeSkipped(skipped: Array<{ page: number; reason: string }>): stri
 export async function readPlanSetForExtraction(
   llm: Pick<LLMProvider, "extractProjectFields" | "classifyPlanPages" | "orientPlanPages">,
   pdfBytes: Uint8Array,
-  opts: { defaultState?: string; maxPages?: number; maxBytes?: number } = {},
+  opts: {
+    defaultState?: string; maxPages?: number; maxBytes?: number;
+    /** The project's own secrets, when the plan set belongs to one (rule 2, #612): painted over on
+     *  every page image, or the page is not read. The parser's plan-scan door posts a bare PDF BEFORE
+     *  any project exists, so it has none to pass — that read is intake (CLAUDE.md rule 2's one
+     *  allowed read), and a scan's pages carry no text layer for a detector to check anyway. */
+    secrets?: readonly string[];
+  } = {},
 ): Promise<ScannedPlanRead> {
   const { PDFDocument } = await import("pdf-lib");
   const doc = await PDFDocument.load(pdfBytes, { ignoreEncryption: true });
@@ -477,32 +495,50 @@ export async function readPlanSetForExtraction(
   // A caller may only TIGHTEN the byte budget.
   const byteBudget = Math.max(1, Math.min(MAX_VISION_BYTES, Math.floor(opts.maxBytes ?? MAX_VISION_BYTES)));
   const scan = planTextIsNearEmpty(text, pageCount);
+  const pageTexts = Array.from({ length: pageCount }, () => "");
+  for (const l of labels) if (l.page >= 0 && l.page < pageCount) pageTexts[l.page] += ` ${l.str}`;
+  // OUTLINED TEXT (#696): pages with no text layer, no raster and a vector-heavy drawing. Neither
+  // path can read them, and the page mask (#612) has no text layer to find a secret in, so they are
+  // taken out of every candidate list here and named — the renderer refuses them too, whoever asks.
+  const outlined = await outlinedTextPagesOfPdf(pdfBytes, { pageTexts });
+  const outlinedSet = new Set(outlined);
+  const outlinedOut = outlined.length ? { outlinedPages: outlined } : {};
+  const outlinedSkips = outlined.map((page) => ({ page, reason: OUTLINED_TEXT_WHY }));
 
   let imagePages: number[] = [];
   if (!scan) {
-    const pageTexts = Array.from({ length: pageCount }, () => "");
-    for (const l of labels) if (l.page >= 0 && l.page < pageCount) pageTexts[l.page] += ` ${l.str}`;
-    imagePages = imageOnlyPages(pageTexts, await rasterPixelsPerPage(pdfBytes));
-    if (!imagePages.length) return { mode: "text", pageCount, textChars };
+    imagePages = imageOnlyPages(pageTexts, await rasterPixelsPerPage(pdfBytes)).filter((p) => !outlinedSet.has(p));
+    if (!imagePages.length) return { mode: "text", pageCount, textChars, ...outlinedOut };
+  }
+  // A scan whose every page is drawn as outlines: nothing can be read, so nothing is rendered and no
+  // model is asked — not even the page index. The read says so, page by page.
+  if (scan && outlined.length >= pageCount) {
+    const notes = `IMAGE-ONLY PLAN SET: the PDF has no usable text layer (${textChars} characters over ${pageCount} page(s)), and every page draws its text as outlines rather than as a picture, so no page could be read by text or by vision. ${outlinedPagesReport(outlined)}`;
+    return {
+      mode: "vision", pageCount, textChars, ...outlinedOut,
+      extraction: { provider: "claude", fields: {}, lowConfidenceFields: [], notes, visionFields: [], visionPages: [], planReadMode: "vision", visionSkipped: outlinedSkips, outlinedTextPages: outlined },
+    };
   }
 
   const { openPdfForVisionRender } = await import("./pageImages");
-  const renderer = await openPdfForVisionRender(pdfBytes);
+  const renderer = await openPdfForVisionRender(pdfBytes, { secrets: opts.secrets });
   try {
     if (scan) {
-      const all = Array.from({ length: pageCount }, (_, i) => i + 1);
+      // Every page but the outlined ones (#696): those are never shown to the index or read.
+      const all = Array.from({ length: pageCount }, (_, i) => i + 1).filter((p) => !outlinedSet.has(p));
       const { index, failure } = await readPageIndex(llm, renderer, all);
       const choice = index ? choosePagesByContent(index, all, cap, "scan") : null;
       const positionCap = Math.min(POSITION_RULE_PAGES, cap);
+      // The position rule picks among the readable pages (exactly as before when none is outlined).
       const picked: PlanPageClass[] = choice
         ? choice.pages
-        : selectKeySheetPages(pageCount, positionCap).map((page) => ({ page, kind: "other" as const, rotate: (index?.pages.find((p) => p.page === page)?.rotate ?? 0) as PlanPageClass["rotate"] }));
+        : selectKeySheetPages(all.length, positionCap).map((i) => all[i - 1]).map((page) => ({ page, kind: "other" as const, rotate: (index?.pages.find((p) => p.page === page)?.rotate ?? 0) as PlanPageClass["rotate"] }));
       // A scan may be sideways or upside down: settle each chosen page upright before the read.
       const chosen = await orientChosen(llm, renderer, picked);
       const { images, skipped: renderSkipped } = await renderChosen(renderer, chosen, Boolean(choice), byteBudget);
       const read = images.map((i) => i.page);
       const pages = [...read].sort((a, b) => a - b);
-      const skipped = [...(choice?.skipped ?? all.filter((p) => !chosen.some((c) => c.page === p)).map((page) => ({ page, reason: `not a position pick — ${failure ?? "the page index named no key sheet"}` }))), ...renderSkipped]
+      const skipped = [...(choice?.skipped ?? all.filter((p) => !chosen.some((c) => c.page === p)).map((page) => ({ page, reason: `not a position pick — ${failure ?? "the page index named no key sheet"}` }))), ...renderSkipped, ...outlinedSkips]
         .sort((a, b) => a.page - b.page);
       const ordered = pages.map((pg) => images.find((i) => i.page === pg)!);
       const result = await llm.extractProjectFields({ planPageImages: ordered, planImageMode: "scan", defaultState: opts.defaultState });
@@ -519,8 +555,8 @@ export async function readPlanSetForExtraction(
         : `cover, site plan, one-line, spec — chosen by POSITION because ${failure ?? "the page index named no key sheet"}, at most ${positionCap}`;
       const lead = `IMAGE-ONLY PLAN SET: the PDF has no usable text layer (${textChars} characters over ${pageCount} page(s)), so pages ${listPages(pages)} (${why}) were read by VISION.${describeSkipped(skipped)} Every value below came from those images${visionFields.length ? ` (${visionFields.join(", ")})` : " — none was read"}; verify each against the sheet.`;
       return {
-        mode: "vision", pageCount, textChars,
-        extraction: { ...result, visionFields, visionPages: pages, planReadMode: "vision", ...(roles ? { visionPageRoles: roles } : {}), visionSkipped: skipped, notes: [lead, result.notes].filter(Boolean).join(" ") },
+        mode: "vision", pageCount, textChars, ...outlinedOut,
+        extraction: { ...result, visionFields, visionPages: pages, planReadMode: "vision", ...(roles ? { visionPageRoles: roles } : {}), visionSkipped: skipped, ...(outlined.length ? { outlinedTextPages: outlined } : {}), notes: [lead, outlinedPagesReport(outlined), result.notes].filter(Boolean).join(" ") },
       };
     }
 
@@ -542,14 +578,14 @@ export async function readPlanSetForExtraction(
     skipped = [...skipped, ...renderSkipped].sort((a, b) => a.page - b.page);
     const pages = images.map((i) => i.page).sort((a, b) => a - b);
     if (!pages.length) {
-      return { mode: "hybrid", pageCount, textChars, imagePages, extraction: { provider: "claude", fields: {}, lowConfidenceFields: [], notes: `IMAGE-ONLY PAGES: pages ${listPages(imagePages)} carry no text layer, but none could be read by vision.${describeSkipped(skipped)}`, visionFields: [], visionPages: [], planReadMode: "hybrid", visionSkipped: skipped } };
+      return { mode: "hybrid", pageCount, textChars, imagePages, ...outlinedOut, extraction: { provider: "claude", fields: {}, lowConfidenceFields: [], notes: [`IMAGE-ONLY PAGES: pages ${listPages(imagePages)} carry no text layer, but none could be read by vision.${describeSkipped(skipped)}`, outlinedPagesReport(outlined)].filter(Boolean).join(" "), visionFields: [], visionPages: [], planReadMode: "hybrid", visionSkipped: skipped, ...(outlined.length ? { outlinedTextPages: outlined } : {}) } };
     }
     const ordered = pages.map((pg) => images.find((i) => i.page === pg)!);
     const result = await llm.extractProjectFields({ planPageImages: ordered, planImageMode: "hybrid", defaultState: opts.defaultState });
     const roles = pages.map((pg) => { const c = chosen.find((x) => x.page === pg)!; return { page: pg, kind: c.kind, ...(c.sheet ? { sheet: c.sheet } : {}), ...(c.title ? { title: c.title } : {}) }; });
     return {
-      mode: "hybrid", pageCount, textChars, imagePages,
-      extraction: { ...result, visionFields: Object.keys(result.fields ?? {}), visionPages: pages, planReadMode: "hybrid", visionPageRoles: roles, visionSkipped: skipped },
+      mode: "hybrid", pageCount, textChars, imagePages, ...outlinedOut,
+      extraction: { ...result, visionFields: Object.keys(result.fields ?? {}), visionPages: pages, planReadMode: "hybrid", visionPageRoles: roles, visionSkipped: skipped, ...(outlined.length ? { outlinedTextPages: outlined } : {}) },
     };
   } finally {
     await renderer.close();
@@ -632,7 +668,11 @@ export function mergeImagePageRead(textRead: ParserLlmExtraction, imageRead: unk
     .filter((r): r is { page: number; kind: PlanSheetKind } => Boolean(r) && typeof r === "object" && Number.isInteger((r as { page?: unknown }).page) && (KINDS as readonly string[]).includes(String((r as { kind?: unknown }).kind)))
     .map((r) => ({ page: r.page, kind: r.kind }))
     .slice(0, 200);
-  if (!visionPages.length && !visionFields.length) return textRead;
+  // #696: the outlined-text pages the image read named (validated: page numbers only) ride along, so
+  // the parser review lists them whether or not vision added a field.
+  const outlinedTextPages = (Array.isArray(ir.outlinedTextPages) ? ir.outlinedTextPages : []).map(Number).filter((n) => Number.isInteger(n) && n > 0).slice(0, 200);
+  const withOutlined = outlinedTextPages.length ? { outlinedTextPages: [...new Set([...(textRead.outlinedTextPages ?? []), ...outlinedTextPages])].sort((a, b) => a - b) } : {};
+  if (!visionPages.length && !visionFields.length) return outlinedTextPages.length ? { ...textRead, ...withOutlined } : textRead;
   const imageNotes = typeof ir.notes === "string" ? ir.notes.trim().slice(0, 1500) : "";
   const lead = `IMAGE-ONLY PAGES: page${visionPages.length === 1 ? "" : "s"} ${listPages(visionPages)} of this plan set carry no text layer (pictures in the PDF), so ${visionPages.length === 1 ? "it was" : "they were"} read by VISION and merged under the text read — the text layer stays authoritative wherever both answer.${describeSkipped(skipped)} ${visionFields.length ? `Fields from vision: ${visionFields.join(", ")}; verify each against the sheet.` : "No field came from vision that the text had not already answered."}${filledOverAbsence.length ? ` The text read stated no value for ${filledOverAbsence.join(", ")} ("not stated"), so the image page's value is used.` : ""}${disagreed.length ? ` Where an image page disagrees with the text (${disagreed.join(", ")}), both readings are listed as conflicts.` : ""}${visionFields.length ? " A note below from the text read that these pages were unreadable describes the TEXT layer only." : ""}`;
   return {
@@ -646,6 +686,7 @@ export function mergeImagePageRead(textRead: ParserLlmExtraction, imageRead: unk
     planReadMode: "hybrid",
     ...(roles.length ? { visionPageRoles: roles } : {}),
     ...(skipped.length ? { visionSkipped: skipped } : {}),
+    ...withOutlined,
     notes: [lead, textRead.notes, imageNotes ? `Image pages: ${imageNotes}` : ""].filter(Boolean).join(" "),
   };
 }

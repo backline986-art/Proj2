@@ -39,6 +39,9 @@ import type {
   JurisdictionReviewRule,
   LLMProvider,
   PermitPrecedentItem,
+  OfficialConflict,
+  JurisdictionEssRules,
+  JurisdictionFieldSource,
   PrescriptiveLimits,
   FireSetbackRule,
   ProjectRecord,
@@ -55,10 +58,14 @@ import {
   isCodeFamily, isFamilyAdoptionModel, locallyAdoptedFamilies, modelBaseOf, upcomingDue,
 } from "./codeFamilies";
 import { isAutoSeedDisabled } from "./portalChannel";
+import { firePathwayPolicyOf } from "../../shared/src/firePathwayPolicy";
 import { id as newId } from "./ids";
 import { logger } from "./logger";
 import { resolvePermitPath } from "./permitPath";
 import { nowIso } from "./time";
+import { isOfficialSourceHost, landingTierFor, officialCitationFor, sourceHostOf } from "../../shared/src/officialSource";
+import { essRuleReadsOf, essRulesOf, type EssRuleKey, type EssRuleRead } from "../../shared/src/essRules";
+import { personVerifiedAuthorityHosts, urlsIn as issuerUrlsIn } from "./officialAuthorityHosts";
 
 interface Row { [key: string]: unknown }
 const text = (v: unknown): string => (v == null ? "" : String(v));
@@ -212,13 +219,27 @@ function mapRow(row: Row): JurisdictionCodeProfile {
     designCriteria: payload.designCriteria ?? {},
     prescriptive: payload.prescriptive ?? {},
     fireSetbacks: Array.isArray(payload.fireSetbacks) ? payload.fireSetbacks : [],
+    ...essRulesField(payload.essRules),
     citations: sanitizeCitations(payload),
     researchedAt: text(row.researched_at) || undefined,
     verifiedAt: text(row.verified_at) || undefined,
     verifiedBy: text(row.verified_by) || undefined,
     updatedAt: text(row.updated_at),
     ...optionalLayerFields(payload),
+    // The alternative roof-access policy (review-audit draft 08), shape-checked; absent when none.
+    ...firePathwayPolicyField((payload as { firePathwayPolicy?: unknown }).firePathwayPolicy),
   };
+}
+
+/** The battery (ESS) rules block (review-audit draft 05), shape-checked; absent when none. */
+function essRulesField(raw: unknown): Pick<JurisdictionCodeProfile, "essRules"> {
+  const essRules = essRulesOf(raw);
+  return essRules ? { essRules } : {};
+}
+
+function firePathwayPolicyField(raw: unknown): Pick<JurisdictionCodeProfile, "firePathwayPolicy"> {
+  const firePathwayPolicy = firePathwayPolicyOf(raw);
+  return firePathwayPolicy ? { firePathwayPolicy } : {};
 }
 
 function optionalLayerFields(payload: unknown): Pick<JurisdictionCodeProfile, "adoptionModel" | "upcoming" | "researchProvenance" | "designCriteriaLookup"> {
@@ -268,8 +289,11 @@ interface ReferenceStateAdoption {
   upcoming?: UpcomingCodeEdition[];
   citations?: JurisdictionCodeProfile["citations"];
 }
+/** A shipped city / county profile. `asOf` (YYYY-MM-DD): the day every value was confirmed on its
+ *  cited official page. A profile that carries it is also landed on an EXISTING row (#561). */
+type ReferenceProfile = JurisdictionCodeProfile & { confidence?: string; asOf?: string };
 interface ReferenceFile {
-  profiles?: Array<JurisdictionCodeProfile & { confidence?: string }>;
+  profiles?: ReferenceProfile[];
   stateAdoptions?: ReferenceStateAdoption[];
 }
 
@@ -567,10 +591,22 @@ export function getCodeProfile(db: AppDb, input: { state?: string; ahj?: string 
     ahj: p.ahj, state: p.state, confidence: p.confidence,
     ...(p.verifiedBy ? { verifiedBy: p.verifiedBy } : {}), ...(p.verifiedAt ? { verifiedAt: p.verifiedAt } : {}),
   });
-  for (const block of ["designCriteria", "prescriptive"] as const) {
+  // A battery (ESS) rule also says WHO put it on its row (ESS data follow-up): a person, a research
+  // read, or the shipped reference.
+  const essOrigin = (p: JurisdictionCodeProfile, field: string): Pick<JurisdictionFieldSource, "origin"> => {
+    const origin = essRuleOrigin(p, field);
+    return origin ? { origin } : {};
+  };
+  for (const block of ["designCriteria", "prescriptive", "essRules"] as const) {
     for (const layer of [base, exact]) {
       for (const [field, value] of Object.entries(layer[block] ?? {})) {
-        if (value !== undefined) fieldSources[`${block}.${field}`] = sourceOf(layer);
+        if (value === undefined) continue;
+        // A field read on the authority's own official page (#683) answers as "official" when its
+        // row is not person-verified: used, and worded "from <host>". The battery rules (draft 05)
+        // take the same tier the same way.
+        const official = block !== "prescriptive" && layer.confidence !== "verified" ? officialCitationFor(layer.citations, `${block}.${field}`) : null;
+        const origin = block === "essRules" ? essOrigin(layer, `${block}.${field}`) : {};
+        fieldSources[`${block}.${field}`] = official ? { ...sourceOf(layer), confidence: "official", officialSource: official, ...origin } : { ...sourceOf(layer), ...origin };
       }
     }
   }
@@ -582,6 +618,13 @@ export function getCodeProfile(db: AppDb, input: { state?: string; ahj?: string 
   fieldSources["adoptedCodes.ahj"] = sourceOf(exact);
   const setbackLayer = exact.fireSetbacks.length ? exact : base.fireSetbacks.length ? base : null;
   if (setbackLayer) fieldSources.fireSetbacks = sourceOf(setbackLayer);
+  // The alternative roof-access policy (draft 08) likewise, whole from one layer: the AHJ's own, else the
+  // state's. Its row answers whether it is verified; an official read of it (#683) answers "official".
+  const policyLayer = exact.firePathwayPolicy ? exact : base.firePathwayPolicy ? base : null;
+  if (policyLayer) {
+    const official = policyLayer.confidence !== "verified" ? officialCitationFor(policyLayer.citations, "firePathwayPolicy") : null;
+    fieldSources.firePathwayPolicy = official ? { ...sourceOf(policyLayer), confidence: "official", officialSource: official } : sourceOf(policyLayer);
+  }
   // Amendments are concatenated state-then-AHJ: each records its own row, so the amendment check
   // (amendmentChecks.ts, #145) blocks only on an amendment a person verified.
   // Keyed by the amendment itself (amendmentSourceKey), not its position: the AHJ's row wins a tie.
@@ -597,9 +640,24 @@ export function getCodeProfile(db: AppDb, input: { state?: string; ahj?: string 
     amendments: [...base.amendments, ...exact.amendments],
     designCriteria: { ...base.designCriteria, ...exact.designCriteria },
     prescriptive: { ...base.prescriptive, ...exact.prescriptive },
+    // Field by field, the AHJ's over the state's (fieldSources["essRules.<key>"] says whose).
+    ...essRulesField({ ...(base.essRules ?? {}), ...(exact.essRules ?? {}) }),
     fireSetbacks: exact.fireSetbacks.length ? exact.fireSetbacks : base.fireSetbacks,
     citations: [...base.citations, ...exact.citations],
+    ...(policyLayer?.firePathwayPolicy ? { firePathwayPolicy: policyLayer.firePathwayPolicy } : {}),
   };
+}
+
+/** Who put a battery (ESS) rule on its row: "person" (the row is person-verified, or a person applied it
+ *  from an AHJ correction), "research" (a code research read), "reference" (the shipped reference file,
+ *  or a row the reference created); undefined when the row does not say. */
+export function essRuleOrigin(row: JurisdictionCodeProfile, field: string): JurisdictionFieldSource["origin"] {
+  if (row.confidence === "verified") return "person";
+  const kind = row.citations.filter((c) => c.field === field).pop()?.kind;
+  if (kind === "ahj_correction") return "person";
+  if (kind === "ess_rules_research") return "research";
+  if (kind === "reference") return "reference";
+  return undefined;
 }
 
 export function listCodeProfiles(db: AppDb): JurisdictionCodeProfile[] {
@@ -607,10 +665,16 @@ export function listCodeProfiles(db: AppDb): JurisdictionCodeProfile[] {
   try {
     for (const p of listEditionProposals(db)) proposals.set(p.profileKey, [...(proposals.get(p.profileKey) ?? []), p]);
   } catch { proposals = new Map(); }
+  let conflicts = new Map<string, OfficialConflict[]>();
+  try {
+    for (const c of listOfficialConflicts(db)) conflicts.set(c.profileKey, [...(conflicts.get(c.profileKey) ?? []), c]);
+  } catch { conflicts = new Map(); }
   return db.query<Row>("SELECT * FROM jurisdiction_code_profiles ORDER BY state, ahj").map((row) => {
     const mapped = mapRow(row);
     const pending = proposals.get(mapped.key);
-    const profile = pending?.length ? { ...mapped, editionProposals: pending } : mapped;
+    const disagree = conflicts.get(mapped.key);
+    const withProposals = pending?.length ? { ...mapped, editionProposals: pending } : mapped;
+    const profile = disagree?.length ? { ...withProposals, officialConflicts: disagree } : withProposals;
     if (!profile.ahj) return profile;
     let summary: JurisdictionCodeProfile["approvedDesignSummary"] = [];
     try { summary = summarizeApprovedDesigns(listApprovedDesignObservations(db, profile.state, profile.ahj)); } catch { summary = []; }
@@ -658,8 +722,18 @@ function upsert(db: AppDb, profile: JurisdictionCodeProfile, opts: { confidence:
   // through the PUT route edits codes/criteria and says nothing about the adoption model).
   const adoptionModel = adoptionModelOf(profile.adoptionModel) ?? adoptionModelOf(priorPayload.adoptionModel);
   const upcoming = upcomingOf(profile.upcoming) ?? upcomingOf(priorPayload.upcoming);
+  // The alternative roof-access policy (review-audit draft 08). A SEEDED re-save that does not carry one
+  // keeps the row's; a VERIFIED save stores exactly what the person sent (rule 3: a policy they were not
+  // shown is never locked as person-verified under their name).
+  const firePathwayPolicy = opts.confidence === "verified"
+    ? firePathwayPolicyOf(profile.firePathwayPolicy)
+    : firePathwayPolicyOf(profile.firePathwayPolicy) ?? firePathwayPolicyOf(priorPayload.firePathwayPolicy);
   // The last lookup's checklist rides every re-save that does not carry its own.
   const designCriteriaLookup = designCriteriaLookupOf(profile.designCriteriaLookup) ?? designCriteriaLookupOf(priorPayload.designCriteriaLookup);
+  // The battery (ESS) rules (review-audit draft 05). A SEEDED re-save that does not carry them (research,
+  // an import of other fields) keeps the row's. A VERIFIED save stores exactly what the person sent:
+  // rules they were not shown are never locked as person-verified under their name (rule 3).
+  const essRules = opts.confidence === "verified" ? essRulesOf(profile.essRules) : essRulesOf(profile.essRules) ?? essRulesOf(priorPayload.essRules);
   const payload = JSON.stringify({
     // Read-time presentation (inheritedFrom, layer, layerLabel) never lands in a row: a verify
     // through the PUT route sends the read back, and "not confirmed" must not be stored as a fact.
@@ -668,10 +742,12 @@ function upsert(db: AppDb, profile: JurisdictionCodeProfile, opts: { confidence:
     designCriteria: profile.designCriteria ?? {},
     prescriptive: profile.prescriptive ?? {},
     fireSetbacks: profile.fireSetbacks ?? [],
+    ...(essRules ? { essRules } : {}),
     citations: profile.citations ?? [],
     ...(adoptionModel ? { adoptionModel } : {}),
     ...(upcoming && upcoming.length ? { upcoming } : {}),
     ...(designCriteriaLookup ? { designCriteriaLookup } : {}),
+    ...(firePathwayPolicy ? { firePathwayPolicy } : {}),
     ...(researchProvenance && opts.confidence === "seeded" ? { researchProvenance } : {}),
   });
   if (existing) {
@@ -888,7 +964,9 @@ export function mergeResearchIntoRow(existing: JurisdictionCodeProfile, incoming
     designCriteria: fillBlanks(existing.designCriteria ?? {}, incoming.designCriteria ?? {}),
     prescriptive: fillBlanks(existing.prescriptive ?? {}, incoming.prescriptive ?? {}),
     fireSetbacks: existing.fireSetbacks.length ? existing.fireSetbacks : incoming.fireSetbacks ?? [],
-    citations: [...existing.citations, ...(incoming.citations ?? []).filter((c) => !haveCite.has(citeKey(c)))],
+    // A battery (ESS) rule's citation travels with its value, field by field (landResearchedEssRules,
+    // mergeReferenceEssRules): appended here without its value it would back a value it never stated.
+    citations: [...existing.citations, ...(incoming.citations ?? []).filter((c) => !haveCite.has(citeKey(c)) && !String(c.field ?? "").startsWith("essRules."))],
     ...(incoming.adoptionModel ? { adoptionModel: incoming.adoptionModel } : {}),
     ...(incoming.upcoming ? { upcoming: incoming.upcoming } : {}),
     ...(incoming.researchProvenance ? { researchProvenance: incoming.researchProvenance } : {}),
@@ -903,7 +981,9 @@ function keepCorrectionCitedValues(existing: JurisdictionCodeProfile, incoming: 
   const cited = existing.citations.filter((c) => c.kind === "ahj_correction" && typeof c.field === "string");
   // A value the narrow design-criteria LOOKUP filled (cited, web-grounded) survives a later full
   // research that says nothing about that field — research fills its blanks, never erases them.
-  // Unlike an AHJ-stated value, a value the new research DOES carry replaces it.
+  // Unlike an AHJ-stated value, a value the new research DOES carry replaces it — unless the lookup
+  // read it on the jurisdiction's own OFFICIAL page (#683): a seeded research never replaces an
+  // official value (only an official read from the same host does, mergeResearchedDesignCriteria).
   const looked = existing.citations.filter((c) => c.kind === "design_criteria_research" && typeof c.field === "string");
   if (looked.length) {
     const dc: Record<string, unknown> = { ...(incoming.designCriteria ?? {}) };
@@ -913,9 +993,15 @@ function keepCorrectionCitedValues(existing: JurisdictionCodeProfile, incoming: 
       if (block !== "designCriteria") continue;
       const had = (existing.designCriteria as Record<string, unknown>)[field];
       const now = dc[field];
-      if (had === undefined || had === null || had === "" || (now !== undefined && now !== null && now !== "")) continue;
+      const official = !!officialCitationFor(existing.citations, String(c.field));
+      if (had === undefined || had === null || had === "" || (!official && now !== undefined && now !== null && now !== "")) continue;
       dc[field] = had;
-      if (!cites.some((x) => x.kind === c.kind && x.field === c.field)) cites.push(c);
+      if (official) {
+        // The official citation is the one that backs the field: the research's own for it goes.
+        if (!officialCitationFor([c], String(c.field))) continue;
+        for (let i = cites.length - 1; i >= 0; i--) if (cites[i].field === c.field) cites.splice(i, 1);
+        cites.push(c);
+      } else if (!cites.some((x) => x.kind === c.kind && x.field === c.field)) cites.push(c);
     }
     incoming = { ...incoming, designCriteria: dc as JurisdictionDesignCriteria, citations: cites };
   }
@@ -1004,14 +1090,17 @@ export function resolvePermitPathForProject(
   project: ProjectRecord,
 ): ReturnType<typeof resolvePermitPath> {
   let limits: PrescriptiveLimits | undefined;
+  let limitsTier: "seeded" | "verified" | undefined;
   try {
     const profile = getCodeProfile(db, { state: project.state, ahj: project.ahj });
     limits = profile?.prescriptive;
+    // A person-verified profile's limits overlay the jurisdiction's permit-path record (draft 14).
+    limitsTier = profile ? profile.confidence : undefined;
     // No profile at all for a jurisdiction we are actually filing in → go find out.
     // ensureCodeProfilesResearched owns its own dedupe and 6-hour backoff.
     if (!profile) ensureCodeProfilesResearched(db, project.state, project.ahj);
   } catch { /* research is best-effort; never break a path resolution */ }
-  return resolvePermitPath(project, { limits });
+  return resolvePermitPath(project, { limits, limitsTier });
 }
 
 /** Pure context builder (also used by tests and the Oregon-constants fallback). */
@@ -1111,14 +1200,28 @@ export function seedReferenceCodeProfiles(db: AppDb): void {
     const data = JSON.parse(fs.readFileSync(filePath, "utf8")) as ReferenceFile;
     referenceCache = { path: filePath, data };
     let seeded = 0;
+    const ahjLayers = { merged: 0, proposed: 0 };
     for (const p of data.profiles ?? []) {
       const key = codeProfileKey(p);
-      const existing = db.get<Row>("SELECT confidence FROM jurisdiction_code_profiles WHERE profile_key = ?", [key]);
-      if (existing) continue; // never clobber operator edits (verified OR re-seeded)
-      upsert(db, p, { confidence: p.confidence === "verified" ? "verified" : "seeded", verifiedBy: p.confidence === "verified" ? "reference-seed" : undefined });
-      seeded++;
+      const existing = db.get<Row>("SELECT * FROM jurisdiction_code_profiles WHERE profile_key = ?", [key]);
+      if (!existing) {
+        // A dated city profile lands research-shaped (provenance + origin "reference"), so the next
+        // boot sees it already carries this reference.
+        upsert(db, p.asOf && String(p.ahj || "").trim() ? referenceAhjProfile(p) : p, { confidence: p.confidence === "verified" ? "verified" : "seeded", verifiedBy: p.confidence === "verified" ? "reference-seed" : undefined });
+        seeded++;
+        continue;
+      }
+      // A ROW ALREADY THERE (#561): a city's reference used to be skipped whenever any row existed
+      // for it, and never reached a person. A state row is the state layer's (stateAdoptions below).
+      if (!String(p.ahj || "").trim()) continue;
+      const landed = seedReferenceAhjProfile(db, mapRow(existing), p);
+      if (landed === "merged") ahjLayers.merged++;
+      if (landed === "proposed") ahjLayers.proposed++;
     }
     if (seeded > 0) logger.info("code-profiles", `seeded ${seeded} jurisdiction code profile(s) from reference data`);
+    if (ahjLayers.merged || ahjLayers.proposed) {
+      logger.info("code-profiles", `reference city/county profiles: ${ahjLayers.merged} merged onto seeded rows, ${ahjLayers.proposed} proposal(s) for human-verified rows`);
+    }
     const layers = seedReferenceStateAdoptions(db, data.stateAdoptions ?? []);
     if (layers.created || layers.merged || layers.proposed) {
       logger.info("code-profiles", `reference state layers: ${layers.created} created, ${layers.merged} merged onto seeded rows, ${layers.proposed} proposal(s) for human-verified rows`);
@@ -1126,6 +1229,58 @@ export function seedReferenceCodeProfiles(db: AppDb): void {
   } catch (err) {
     logger.warn("code-profiles", `reference seed failed: ${err instanceof Error ? err.message : String(err)}`);
   }
+}
+
+/** A shipped city / county profile as a research-shaped one: provenance "reference_truth" as of its
+ *  `asOf`, every edition marked origin "reference" (machine-owned: a later grounded research replaces
+ *  it family by family; an operator's or an import's entry is kept). Seeded — the shipped data has no
+ *  page bytes read by this process, so it never lands official (#683). */
+export function referenceAhjProfile(p: ReferenceProfile): JurisdictionCodeProfile {
+  const asOf = String(p.asOf || "").slice(0, 10);
+  const { asOf: _a, ...rest } = p;
+  return {
+    ...rest, key: "", confidence: "seeded", updatedAt: "",
+    adoptedCodes: (p.adoptedCodes ?? []).map((c) => ({ ...c, origin: "reference" as const })),
+    amendments: p.amendments ?? [], designCriteria: p.designCriteria ?? {}, prescriptive: p.prescriptive ?? {},
+    fireSetbacks: p.fireSetbacks ?? [],
+    // A battery (ESS) rule's citation says the reference put it there (fieldSources origin).
+    citations: (p.citations ?? []).map((c) => (String(c.field ?? "").startsWith("essRules.") && !c.kind ? { ...c, kind: "reference" as const } : c)),
+    researchProvenance: { webGrounded: true, method: "reference_truth", at: asOf, notes: `Shipped reference data: each value confirmed on the cited official page as of ${asOf}.` },
+  };
+}
+
+const editionYear = (e: string): number => { const m = /\b(19|20)\d{2}\b/.exec(String(e)); return m ? Number(m[0]) : NaN; };
+
+/**
+ * A SHIPPED CITY / COUNTY PROFILE ONTO THE ROW ALREADY THERE (#561), as the state layers land:
+ *   a seeded row          -> merged through the research merge (machine-owned editions replaced per
+ *                            family, an operator's or an import's kept, blank criteria filled) —
+ *                            unless it already carries this reference or a grounded research newer
+ *                            than it; the row stays seeded, so it waits on a person's Review / verify;
+ *   a human-verified row  -> NEVER written (rule 3): editions (and effective dates) that differ become
+ *                            a proposal a person approves or dismisses. A family the row states with a
+ *                            NEWER edition than the reference is not proposed backwards.
+ * A profile with no `asOf` says nothing about how current it is: left alone, as before.
+ */
+export function seedReferenceAhjProfile(db: AppDb, existing: JurisdictionCodeProfile, p: ReferenceProfile): "merged" | "proposed" | "skipped" {
+  const asOf = String(p.asOf || "").slice(0, 10);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(asOf)) return "skipped";
+  const ref = referenceAhjProfile(p);
+  if (existing.confidence === "verified") {
+    const newer = (c: CodeEdition): boolean => {
+      const f = codeFamilyOf(c);
+      const y = editionYear(c.edition);
+      return !!f && existing.adoptedCodes.some((h) => codeFamilyOf(h) === f && editionYear(h.edition) > y);
+    };
+    const proposal = proposeEditionUpdate(db, existing, { ...ref, adoptedCodes: ref.adoptedCodes.filter((c) => !newer(c)) }, "reference");
+    return proposal?.isNew ? "proposed" : "skipped";
+  }
+  const prov = existing.researchProvenance;
+  const rowAt = String(prov?.at || "").slice(0, 10);
+  if (prov?.webGrounded && rowAt && rowAt >= asOf) return "skipped";
+  // The battery (ESS) rules ride the same merge, field by field (ESS data follow-up).
+  upsert(db, mergeReferenceEssRules(db, mergeResearchIntoRow(existing, ref), ref), { confidence: "seeded" });
+  return "merged";
 }
 
 /** The state layer a reference entry describes, as a research-shaped profile (provenance
@@ -1220,7 +1375,22 @@ export function editionChanges(current: CodeEdition[], proposed: CodeEdition[], 
       ?? proposed.find((p) => codeFamilyOf(p) === family);
     if (!want) continue;
     const have = current.filter((c) => codeFamilyOf(c) === family);
-    if (have.some((h) => entryAgrees(h, want))) continue;
+    const agreeing = have.find((h) => entryAgrees(h, want));
+    if (agreeing) {
+      // THE SAME EDITION, DATED DIFFERENTLY (#561): an effective / mandatory date or a replaced
+      // edition the finding states and the row does not is a change too — without them the
+      // phase-in (editionsInEffect) can never apply to the row.
+      if (!editionDatesDiffer(agreeing, want)) continue;
+      changes.push({
+        family,
+        current: datedEditionLabel(agreeing),
+        proposed: datedEditionLabel(want),
+        datesOnly: true,
+        ...(want.sourceUrl ? { sourceUrl: want.sourceUrl } : {}),
+        ...(want.quote ? { quote: String(want.quote).slice(0, 300) } : {}),
+      });
+      continue;
+    }
     changes.push({
       family,
       current: have.length ? have.map((h) => `${h.code} ${h.edition}`).join(", ") : null,
@@ -1230,6 +1400,27 @@ export function editionChanges(current: CodeEdition[], proposed: CodeEdition[], 
     });
   }
   return changes;
+}
+
+/** The dates an edition entry carries, compared as days ("2024-01-18T00:00Z" is 2024-01-18). */
+const EDITION_DATE_FIELDS = ["effectiveDate", "mandatoryDate", "previousEdition"] as const;
+const editionDateValue = (e: CodeEdition, f: (typeof EDITION_DATE_FIELDS)[number]): string => {
+  const v = String(e[f] ?? "").trim();
+  return f === "previousEdition" ? v : (/^\d{4}-\d{2}-\d{2}/.test(v) ? v.slice(0, 10) : "");
+};
+/** The finding states a date (or replaced edition) the row's entry does not state, or states
+ *  differently. A date only the ROW states is not a change: a finding that is silent on it says
+ *  nothing against it. */
+export function editionDatesDiffer(have: CodeEdition, want: CodeEdition): boolean {
+  return EDITION_DATE_FIELDS.some((f) => { const w = editionDateValue(want, f); return !!w && w !== editionDateValue(have, f); });
+}
+/** "IRC 2021, effective 2024-01-18, mandatory 2025-01-18, replaces 2018" — the label a dates-only
+ *  change shows a person. */
+export function datedEditionLabel(e: CodeEdition): string {
+  const eff = editionDateValue(e, "effectiveDate");
+  const mand = editionDateValue(e, "mandatoryDate");
+  const prev = editionDateValue(e, "previousEdition");
+  return [editionLabel(e), eff ? `effective ${eff}` : "", mand ? `mandatory ${mand}` : "", prev ? `replaces ${prev}` : ""].filter(Boolean).join(", ");
 }
 
 function fingerprintOf(key: string, changes: JurisdictionEditionProposal["changes"]): string {
@@ -1361,10 +1552,21 @@ export function applyEditionProposal(db: AppDb, fingerprint: string, actor: stri
     return { status: "applied", note: `Adoption model of ${p.profileKey} set by ${actor || "operator"} (${p.changes.map((c) => `${c.family}: ${c.proposed}`).join(", ")}).`, profile: getCodeProfile(db, current) ?? current };
   }
   // Only the families the proposal CHANGES: a family the row already states correctly keeps the
-  // person's own entries (Oregon's verified "IRC 2021" beside "ORSC 2023" is not touched).
-  const families = new Set(p.changes.map((c) => c.family));
+  // person's own entries (Oregon's verified "IRC 2021" beside "ORSC 2023" is not touched). A
+  // DATES-ONLY change (#561) keeps them too: the dates land on the person's own entry of that
+  // edition, and its siblings in the family stay.
+  const families = new Set(p.changes.filter((c) => !c.datesOnly).map((c) => c.family));
+  const datedFamilies = new Set(p.changes.filter((c) => c.datesOnly).map((c) => c.family));
   const adding = p.proposedCodes.filter((c) => { const f = codeFamilyOf(c); return !!f && families.has(f); });
-  const keep = current.adoptedCodes.filter((c) => { const f = codeFamilyOf(c); return !f || !families.has(f); });
+  const keep = current.adoptedCodes.filter((c) => { const f = codeFamilyOf(c); return !f || !families.has(f); }).map((c) => {
+    const f = codeFamilyOf(c);
+    if (!f || !datedFamilies.has(f)) return c;
+    const want = p.proposedCodes.find((x) => codeFamilyOf(x) === f && entryAgrees(c, x) && editionDatesDiffer(c, x));
+    if (!want) return c;
+    const dated: CodeEdition = { ...c };
+    for (const k of EDITION_DATE_FIELDS) { if (editionDateValue(want, k)) dated[k] = editionDateValue(want, k); }
+    return dated;
+  });
   const cites = [...current.citations];
   for (const c of adding) {
     if (c.sourceUrl && !cites.some((x) => x.sourceUrl === c.sourceUrl)) cites.push({ label: `${editionLabel(c)} — adopted edition source`, sourceUrl: c.sourceUrl, ...(c.quote ? { quote: String(c.quote).slice(0, 240) } : {}) });
@@ -1637,7 +1839,12 @@ export function setCodeResearchEnqueuerForTests(fn: ((db: AppDb, payload: CodeRe
  *   a verified target -> saveResearchedCodeProfile records a proposal, never a write;
  *   otherwise -> the research MERGE onto the row.
  */
-export async function runCodeResearch(db: AppDb, payload: Partial<CodeResearchJobPayload> & Record<string, unknown>, provider?: LLMProvider): Promise<Record<string, unknown>> {
+export async function runCodeResearch(
+  db: AppDb, payload: Partial<CodeResearchJobPayload> & Record<string, unknown>, provider?: LLMProvider,
+  /** Reads an official page to confirm an ESS rule's quote (tests pass one over saved pages; null = no
+   *  page reads). Undefined = the installation's default reader, created only when a read needs it. */
+  reader?: PageReader | null,
+): Promise<Record<string, unknown>> {
   const state = String(payload.state || "");
   const ahj = String(payload.ahj || "");
   const families = Array.isArray(payload.families) ? payload.families.filter(isCodeFamily) : undefined;
@@ -1688,10 +1895,27 @@ export async function runCodeResearch(db: AppDb, payload: Partial<CodeResearchJo
     }
     return { saved: false, reason: "not web-grounded — model memory is never stored as an edition", ...evidence, notes: failureNotes.slice(0, 600) };
   }
-  if (targetVerified) return { ...verifyCheckOutcome(db, key, targetRow(), research.profile, families), ...evidence };
+  if (targetVerified) {
+    const outcome = verifyCheckOutcome(db, key, targetRow(), research.profile, families);
+    return { ...outcome, ...evidence, ...(await essRulesOutcome(db, { state, ahj }, research, reader)) };
+  }
   if (!research.profile.adoptedCodes.length && !research.profile.adoptionModel) return { saved: false, reason: "research found no adopted codes", ...evidence };
   const saved = saveResearchedCodeProfile(db, research.profile, { ...(families?.length ? { families } : {}) });
-  return { saved: true, key: saved.key, confidence: saved.confidence, adoptedCodes: saved.adoptedCodes.length, ...evidence };
+  return { saved: true, key: saved.key, confidence: saved.confidence, adoptedCodes: saved.adoptedCodes.length, ...evidence, ...(await essRulesOutcome(db, { state, ahj }, research, reader)) };
+}
+
+/** The research's ESS rule reads, landed (landResearchedEssRules): the job result's (and the manual
+ *  research route's) `essRules`, or nothing at all when the research read none (the result is then
+ *  exactly what it was before). */
+export async function essRulesOutcome(db: AppDb, target: { state: string; ahj: string }, research: { essRules?: EssRuleRead[]; profile: JurisdictionCodeProfile }, reader: PageReader | null | undefined): Promise<{ essRules?: EssRulesLanding }> {
+  if (!research.essRules?.length) return {};
+  try {
+    const pageReader = reader !== undefined ? reader : (await import("./permitProcessLookup")).defaultLookupReader(ESS_OFFICIAL_CONFIRM_MAX_READS);
+    return { essRules: await landResearchedEssRules(db, target, research.essRules, { reader: pageReader, at: provenanceOf(research.profile)?.at }) };
+  } catch (err) {
+    logger.warn("code-profiles", `ESS rules landing failed for ${target.state}/${target.ahj || "(state default)"}`, { err: err instanceof Error ? err.message : String(err) });
+    return { essRules: { saved: false, profileKey: "", filled: [], skipped: [], official: [], reason: `landing failed: ${(err instanceof Error ? err.message : String(err)).slice(0, 200)}` } };
+  }
 }
 
 /**
@@ -2373,13 +2597,21 @@ export function mergeResearchedDesignCriteria(
   db: AppDb,
   target: { state: string; ahj: string; profileKey?: string },
   result: DesignCriteriaResearchResult,
-): { saved: boolean; filled: string[]; skipped: string[]; reason?: string; profileKey: string } {
+): { saved: boolean; filled: string[]; skipped: string[]; reason?: string; profileKey: string; official?: string[]; conflicts?: OfficialConflict[] } {
   // The row is resolved NOW (resolveCriteriaWriteRow), not taken from the job payload: a row may
   // have been verified, or created, since the job was queued.
   const resolved = resolveCriteriaWriteRow(db, target.state, target.ahj);
   if (!resolved) return { saved: false, filled: [], skipped: [], reason: "no state / jurisdiction", profileKey: "" };
   const key = resolved.key;
-  if (resolved.kind === "blocked_verified") return { saved: false, filled: [], skipped: [], reason: `profile is human-verified — ${resolved.message}`, profileKey: key };
+  // Which of the lookup's values were read on the authority's OWN official page (#683): decided
+  // once per value, before anything is written, by the one landing function.
+  const landing = officialLandings(db, target, result);
+  if (resolved.kind === "blocked_verified") {
+    // Rule 3: the human-verified row is not written. An OFFICIAL read that differs from it is kept as
+    // a conflict a person resolves (re-verify the row, or leave it); the row is unchanged.
+    const conflicts = recordOfficialConflicts(db, resolved.profile, result, landing);
+    return { saved: false, filled: [], skipped: [], reason: `profile is human-verified — ${resolved.message}`, profileKey: key, ...(conflicts.length ? { conflicts } : {}) };
+  }
   if (target.profileKey && target.profileKey !== key) {
     logger.info("code-profiles", `design-criteria lookup for ${target.state}/${target.ahj} was queued for ${target.profileKey}; it now resolves to ${key}`);
   }
@@ -2394,37 +2626,382 @@ export function mergeResearchedDesignCriteria(
   const citations = [...base.citations];
   const filled: string[] = [];
   const skipped: string[] = [];
+  const official: string[] = [];
   const at = nowIso();
   for (const v of result.values ?? []) {
     const url = String(v.sourceUrl || "").trim();
     if (!/^https?:\/\//i.test(url)) { skipped.push(`${v.criterion} (no source URL)`); continue; }
-    let value: number | string | null = null;
-    // One category, or a published two-category list ("B or C", #210): llm.exposureValue.
-    if (v.criterion === "windExposure") value = exposureValue(v.value);
-    else if (v.criterion === "seismicDesignCategory") value = /^(?:A|B|C|D[012]?|E|F)$/i.test(String(v.value).trim()) ? String(v.value).trim().toUpperCase() : null;
-    else if (v.criterion === "riskCategory") value = /^(?:I|II|III|IV)$/i.test(String(v.value).trim()) ? String(v.value).trim().toUpperCase() : null;
-    else if (v.criterion === "weathering") value = /^(?:negligible|moderate|severe)$/i.test(String(v.value).trim()) ? String(v.value).trim().toLowerCase() : null;
-    else if (v.criterion === "termite") value = typeof v.value === "string" && v.value.trim() && v.value.trim().length <= 120 ? v.value.trim() : null;
-    // Soil bearing is published in the thousands (1,500 psf): its own bounds, not the load cap below.
-    else if (v.criterion === "soilBearingPsf") value = typeof v.value === "number" && Number.isFinite(v.value) && v.value >= 500 && v.value <= 20000 ? v.value : null;
-    else value = typeof v.value === "number" && Number.isFinite(v.value) && v.value > 0 && v.value < 400 ? v.value : null;
+    const value = criterionValue(v);
     if (value == null) { skipped.push(`${v.criterion} (unusable value)`); continue; }
-    // pg(asd) is ANOTHER quantity (allowable-stress, ~0.7 x Pg): stored in its own field, never in
-    // groundSnowLoadPsf, which every rule compares with a plan's strength-level Pg.
-    const field: keyof JurisdictionDesignCriteria = v.criterion === "groundSnowLoadPsf" && v.qualifier === "pg_asd" ? "groundSnowLoadAsdPsf" : v.criterion;
+    const field = criterionField(v);
+    const land = landing.get(v);
+    const isOfficial = land?.tier === "official";
     const had = (dc as Record<string, unknown>)[field];
-    if (had !== undefined && had !== null && had !== "") { skipped.push(`${field} (already on file)`); continue; }
+    if (had !== undefined && had !== null && had !== "") {
+      // WRITE RULES PER FIELD (#683): an official read replaces a seeded value; an official value is
+      // refreshed only by an official read from the SAME host; a seeded read never replaces either.
+      const onFile = officialCitationFor(base.citations, `designCriteria.${field}`);
+      if (!isOfficial) { skipped.push(`${field} (already on file)`); continue; }
+      // A value a PERSON applied from the AHJ's own correction is that person's statement: an
+      // automatic read never replaces it (rule 3's spirit), official or not.
+      if (base.citations.filter((c) => c.field === `designCriteria.${field}`).pop()?.kind === "ahj_correction") { skipped.push(`${field} (applied by a person from an AHJ correction)`); continue; }
+      if (onFile && onFile.host !== land!.host) { skipped.push(`${field} (official value on file from ${onFile.host})`); continue; }
+    }
     if (verifiedStateLayerNote(db, target.state, "designCriteria", field)) { skipped.push(`${field} (the state's verified profile sets it)`); continue; }
     (dc as Record<string, unknown>)[field] = value;
+    // The field's earlier lookup citations go with the value they backed (one citation per value).
+    for (let i = citations.length - 1; i >= 0; i--) {
+      if (citations[i].field === `designCriteria.${field}` && citations[i].kind === "design_criteria_research") citations.splice(i, 1);
+    }
     // A project-type handout is kept (seeded, like every lookup value) but FLAGGED on its citation.
-    citations.push({ label: `Design criteria lookup: ${field} = ${value}`, sourceUrl: url.slice(0, 500), kind: "design_criteria_research", field: `designCriteria.${field}`, ...(v.quote ? { quote: String(v.quote).slice(0, 240) } : {}), at, ...(v.weakSource ? { weakSource: String(v.weakSource).slice(0, 200) } : {}) });
+    citations.push({
+      label: `Design criteria lookup: ${field} = ${value}`, sourceUrl: url.slice(0, 500), kind: "design_criteria_research", field: `designCriteria.${field}`,
+      ...(v.quote ? { quote: String(v.quote).slice(0, 240) } : {}), at, ...(v.weakSource ? { weakSource: String(v.weakSource).slice(0, 200) } : {}),
+      ...(isOfficial && !v.weakSource ? { tier: "official" as const, fetchedAt: land!.fetchedAt } : {}),
+    });
     filled.push(field);
+    if (isOfficial && !v.weakSource) official.push(field);
   }
   if (!filled.length) return { saved: false, filled, skipped, reason: "nothing new to fill", profileKey: key };
   if (!dc.sourceUrl) dc.sourceUrl = citations.filter((c) => c.kind === "design_criteria_research").pop()?.sourceUrl;
   upsert(db, { ...base, designCriteria: dc, citations }, { confidence: "seeded" });
-  addAuditLog(db, null, "system", "design criteria lookup", "code_profile.design_criteria_researched", { profileKey: key, filled, skipped });
-  return { saved: true, filled, skipped, profileKey: key };
+  addAuditLog(db, null, "system", "design criteria lookup", "code_profile.design_criteria_researched", { profileKey: key, filled, skipped, ...(official.length ? { official } : {}) });
+  return { saved: true, filled, skipped, profileKey: key, ...(official.length ? { official } : {}) };
+}
+
+type LookupValue = DesignCriteriaResearchResult["values"][number];
+
+/** A lookup value as the row stores it, or null when it is not a usable value for its field. */
+function criterionValue(v: LookupValue): number | string | null {
+  // One category, or a published two-category list ("B or C", #210): llm.exposureValue.
+  if (v.criterion === "windExposure") return exposureValue(v.value);
+  if (v.criterion === "seismicDesignCategory") return /^(?:A|B|C|D[012]?|E|F)$/i.test(String(v.value).trim()) ? String(v.value).trim().toUpperCase() : null;
+  if (v.criterion === "riskCategory") return /^(?:I|II|III|IV)$/i.test(String(v.value).trim()) ? String(v.value).trim().toUpperCase() : null;
+  if (v.criterion === "weathering") return /^(?:negligible|moderate|severe)$/i.test(String(v.value).trim()) ? String(v.value).trim().toLowerCase() : null;
+  if (v.criterion === "termite") return typeof v.value === "string" && v.value.trim() && v.value.trim().length <= 120 ? v.value.trim() : null;
+  // Soil bearing is published in the thousands (1,500 psf): its own bounds, not the load cap below.
+  if (v.criterion === "soilBearingPsf") return typeof v.value === "number" && Number.isFinite(v.value) && v.value >= 500 && v.value <= 20000 ? v.value : null;
+  return typeof v.value === "number" && Number.isFinite(v.value) && v.value > 0 && v.value < 400 ? v.value : null;
+}
+
+/** pg(asd) is ANOTHER quantity (allowable-stress, ~0.7 x Pg): stored in its own field, never in
+ *  groundSnowLoadPsf, which every rule compares with a plan's strength-level Pg. */
+function criterionField(v: LookupValue): keyof JurisdictionDesignCriteria {
+  return v.criterion === "groundSnowLoadPsf" && v.qualifier === "pg_asd" ? "groundSnowLoadAsdPsf" : v.criterion;
+}
+
+const pageKey = (u: string): string => { try { const x = new URL(u); return `${x.hostname.toLowerCase()}${x.pathname.replace(/\/$/, "")}${x.search}`; } catch { return ""; } };
+
+/**
+ * EACH LOOKUP VALUE THROUGH THE ONE LANDING FUNCTION (#683): official only when it was read on the
+ * authority's official host (a government host, or a domain a PERSON verified as the AHJ's own),
+ * the quote names the value, and the quote is in the page bytes THIS process retrieved (the
+ * issuer-site probe's read). A model's answer has no retrieved page: seeded.
+ */
+function officialLandings(db: AppDb, target: { state: string; ahj: string }, result: DesignCriteriaResearchResult): Map<LookupValue, { tier: "official" | "seeded"; host: string; fetchedAt: string; reasons: string[] }> {
+  const out = new Map<LookupValue, { tier: "official" | "seeded"; host: string; fetchedAt: string; reasons: string[] }>();
+  const pages = new Map((result.retrieved ?? []).map((r) => [pageKey(r.url), r]));
+  let hosts: string[] | null = null;
+  for (const v of result.values ?? []) {
+    const page = pages.get(pageKey(String(v.sourceUrl || "")));
+    if (!page || v.weakSource) { out.set(v, { tier: "seeded", host: sourceHostOf(String(v.sourceUrl || "")), fetchedAt: "", reasons: [v.weakSource ? "a project-type handout" : "the page was not read by this process"] }); continue; }
+    hosts ??= personVerifiedAuthorityHostsSync(db, target.state, target.ahj);
+    const value = criterionValue(v);
+    const r = landingTierFor({ sourceUrl: String(v.sourceUrl), quote: v.quote, value: value ?? String(v.value), ...(v.publishedValue !== undefined ? { publishedValue: v.publishedValue } : {}), fetchedAt: page.fetchedAt, retrievedText: page.text, verifiedAuthorityHosts: hosts });
+    out.set(v, { ...r, fetchedAt: page.fetchedAt });
+  }
+  return out;
+}
+
+/** The authority's person-verified own hosts (issuerDesignCriteria.personVerifiedAuthorityHosts),
+ *  plus the hosts the AHJ's own row cites when a PERSON verified that row. */
+function personVerifiedAuthorityHostsSync(db: AppDb, state: string, ahj: string): string[] {
+  const own = ownCodeProfileRow(db, state, ahj)?.profile ?? null;
+  const verifiedUrls = own && own.confidence === "verified" && own.verifiedBy && own.verifiedBy !== "reference-seed" ? issuerUrlsIn(own) : [];
+  return personVerifiedAuthorityHosts(db, state, ahj, verifiedUrls);
+}
+
+const OFFICIAL_CONFLICT_ACTION = "code_profile.official_conflict";
+
+/** Record (once per distinct finding) each OFFICIAL read that disagrees with a human-verified row.
+ *  The row is never written (rule 3). (A field the state's human-verified row sets is skipped on the
+ *  AHJ's seeded row as before — verifiedStateLayerNote — and records nothing.) */
+function recordOfficialConflicts(db: AppDb, row: JurisdictionCodeProfile, result: DesignCriteriaResearchResult, landing: ReturnType<typeof officialLandings>): OfficialConflict[] {
+  const out: OfficialConflict[] = [];
+  const key = row.key || codeProfileKey(row);
+  for (const v of result.values ?? []) {
+    const land = landing.get(v);
+    if (land?.tier !== "official") continue;
+    const value = criterionValue(v);
+    if (value == null) continue;
+    const field = criterionField(v);
+    const current = (row.designCriteria as Record<string, unknown>)[field];
+    if (current === value) continue;
+    const c: OfficialConflict = { profileKey: key, field: `designCriteria.${field}`, current: (current as number | string | undefined) ?? null, found: value, sourceUrl: String(v.sourceUrl), ...(v.quote ? { quote: String(v.quote).slice(0, 240) } : {}), fetchedAt: land.fetchedAt, createdAt: nowIso() };
+    const fp = `${key}|${c.field}|${String(c.current)}|${String(value)}`;
+    const seen = db.get<Row>("SELECT id FROM audit_logs WHERE action = ? AND details LIKE ? ESCAPE '\\' LIMIT 1", [OFFICIAL_CONFLICT_ACTION, `%"fingerprint":"${likeLiteral(fp)}"%`]);
+    if (!seen) {
+      addAuditLog(db, null, "system", "design criteria lookup", OFFICIAL_CONFLICT_ACTION, { ...c, fingerprint: fp } as unknown as Record<string, unknown>);
+      logger.warn("code-profiles", `human-verified ${key}: the official page ${c.sourceUrl} states ${c.field} = ${String(value)}, the row says ${String(c.current)} — kept as a conflict for a person; the row is unchanged`);
+    }
+    out.push(c);
+  }
+  return out;
+}
+
+/** Official reads that still disagree with a human-verified row: for a person (GET /api/code-profiles). */
+export function listOfficialConflicts(db: AppDb, profileKey?: string): OfficialConflict[] {
+  const rows = db.query<Row>(
+    `SELECT details FROM audit_logs WHERE action = ? ${profileKey ? "AND details LIKE ? ESCAPE '\\'" : ""} ORDER BY created_at DESC LIMIT 500`,
+    profileKey ? [OFFICIAL_CONFLICT_ACTION, `%"profileKey":"${likeLiteral(profileKey)}"%`] : [OFFICIAL_CONFLICT_ACTION],
+  );
+  const newest = new Map<string, OfficialConflict>();
+  for (const r of rows) {
+    let c: OfficialConflict;
+    try { c = JSON.parse(text(r.details)) as OfficialConflict; } catch { continue; }
+    if (!c?.profileKey || (profileKey && c.profileKey !== profileKey)) continue;
+    const slot = `${c.profileKey}|${c.field}`;
+    if (!newest.has(slot)) newest.set(slot, c);
+  }
+  const out: OfficialConflict[] = [];
+  for (const c of newest.values()) {
+    const row = db.get<Row>("SELECT * FROM jurisdiction_code_profiles WHERE profile_key = ?", [c.profileKey]);
+    if (!row || text(row.confidence) !== "verified") continue;
+    // The field's block: a design criterion, or a battery (ESS) rule (ESS data follow-up).
+    const [block, field] = c.field.split(".");
+    const now = block === "essRules" || block === "designCriteria" ? ((mapRow(row)[block] ?? {}) as Record<string, unknown>)[field] : undefined;
+    if (now === c.found) continue; // a person re-verified it to the official value since
+    const { fingerprint: _f, ...rest } = c as OfficialConflict & { fingerprint?: string };
+    out.push(rest);
+  }
+  return out;
+}
+
+// ── THE BATTERY (ESS) RULES RESEARCH READ, LANDED FIELD BY FIELD (ESS data follow-up) ─────────────
+//
+// Code research proposes the jurisdiction's own ESS rules (essRulesResearch.ts), each with its page and
+// a verbatim quote. Each value lands through #683's ONE landing function (landingTierFor):
+//   official  — the page is on the authority's official host (a government host, or a domain a PERSON
+//               verified as its own), the quote contains the value, and the quote is in the bytes THIS
+//               process read from that page (confirmed by reading it: a model's own quote of a page we
+//               did not read is never enough). A yes/no rule cannot be official: no quote "contains"
+//               true, so it lands seeded and a person verifies it;
+//   seeded    — everything else. The review applies a seeded value only where it is stricter than the
+//               model baseline, and then only as a warning (Helm's #637 bar).
+// Write rules per field, as the design-criteria lookup's (#683):
+//   a person-verified row is NEVER written (rule 3): an official read that differs from it is recorded
+//     as a conflict for a person (listOfficialConflicts), the row unchanged;
+//   a value a person applied from an AHJ correction is never replaced;
+//   an official read replaces a seeded value; an official value is refreshed only from the SAME host;
+//   a seeded read never replaces a value already on file;
+//   an AHJ's seeded value never overrides a rule the state's person-verified row sets.
+
+/** A page this process read, for the landing: its URL, the text read, and when. */
+export interface RetrievedSourcePage { url: string; text: string; fetchedAt: string }
+
+/** Pages read to confirm official ESS reads, per research (each on the reader's politeness and budget). */
+export const ESS_OFFICIAL_CONFIRM_MAX_READS = 4;
+
+export interface EssRulesLanding {
+  saved: boolean;
+  profileKey: string;
+  filled: string[];
+  skipped: string[];
+  /** Fields that landed official ("from <host>"). */
+  official: string[];
+  conflicts?: OfficialConflict[];
+  /** Pages read to confirm a quote, and what came back. */
+  pagesRead?: Array<{ url: string; ok: boolean; reason: string }>;
+  reason?: string;
+}
+
+const ESS_CONFLICT_ACTOR = "ESS rules research";
+
+/** The row an ESS read lands on: the AHJ's (resolveCriteriaWriteRow: exact, same jurisdiction, or a new
+ *  row; a person-verified row it reads is blocked), or for a state-level research the state's row. */
+function essWriteRow(db: AppDb, state: string, ahj: string): CriteriaWriteRow | null {
+  if (String(ahj || "").trim()) return resolveCriteriaWriteRow(db, state, ahj);
+  const st = String(state || "").trim();
+  if (!st) return null;
+  const key = codeProfileKey({ state: st, ahj: "" });
+  const row = db.get<Row>("SELECT * FROM jurisdiction_code_profiles WHERE profile_key = ?", [key]);
+  if (!row) return { kind: "create", key, profile: null };
+  const profile = mapRow(row);
+  return profile.confidence === "verified"
+    ? { kind: "blocked_verified", key, profile, message: `${st}'s state profile is human-verified — it is not changed automatically.` }
+    : { kind: "exact", key, profile };
+}
+
+/** A rule the STATE's person-verified row sets (an AHJ's seeded value would override it on every read). */
+function verifiedStateEssRule(db: AppDb, state: string, key: EssRuleKey): boolean {
+  const row = db.get<Row>("SELECT * FROM jurisdiction_code_profiles WHERE profile_key = ?", [codeProfileKey({ state, ahj: "" })]);
+  if (!row || text(row.confidence) !== "verified") return false;
+  return mapRow(row).essRules?.[key] !== undefined;
+}
+
+/** Read each numeric read's page once when it is on an official host (nothing else could land official),
+ *  so the landing checks the quote against bytes this process retrieved. */
+async function readEssSourcePages(reads: EssRuleRead[], reader: PageReader | null, hosts: string[]): Promise<{ pages: RetrievedSourcePage[]; log: Array<{ url: string; ok: boolean; reason: string }> }> {
+  const pages: RetrievedSourcePage[] = [];
+  const log: Array<{ url: string; ok: boolean; reason: string }> = [];
+  if (!reader) return { pages, log };
+  const urls = [...new Set(reads.filter((r) => typeof r.value === "number" && isOfficialSourceHost(r.sourceUrl, hosts)).map((r) => r.sourceUrl))];
+  for (const url of urls.slice(0, ESS_OFFICIAL_CONFIRM_MAX_READS)) {
+    try {
+      const page = await reader.read(url);
+      const fetchedAt = nowIso();
+      log.push({ url, ok: page.ok, reason: String(page.reason || "").slice(0, 160) });
+      if (page.ok && page.text) pages.push({ url, text: page.text, fetchedAt });
+    } catch (err) {
+      log.push({ url, ok: false, reason: (err instanceof Error ? err.message : String(err)).slice(0, 160) });
+    }
+  }
+  return { pages, log };
+}
+
+/** Each read through the one landing function. A yes/no rule is never official (no quote contains true). */
+function essLandings(reads: EssRuleRead[], pages: RetrievedSourcePage[], hosts: string[]): Map<EssRuleRead, { tier: "official" | "seeded"; host: string; fetchedAt: string; reasons: string[] }> {
+  const byPage = new Map(pages.map((p) => [pageKey(p.url), p]));
+  const out = new Map<EssRuleRead, { tier: "official" | "seeded"; host: string; fetchedAt: string; reasons: string[] }>();
+  for (const r of reads) {
+    const host = sourceHostOf(r.sourceUrl);
+    if (typeof r.value !== "number") { out.set(r, { tier: "seeded", host, fetchedAt: "", reasons: ["a yes/no rule: no quote can contain the value, so a person verifies it"] }); continue; }
+    const page = byPage.get(pageKey(r.sourceUrl));
+    const land = landingTierFor({
+      sourceUrl: r.sourceUrl, quote: r.quote, value: r.value, ...(r.publishedValue !== undefined ? { publishedValue: r.publishedValue } : {}),
+      ...(page ? { fetchedAt: page.fetchedAt, retrievedText: page.text } : {}), verifiedAuthorityHosts: hosts,
+    });
+    out.set(r, { ...land, fetchedAt: page?.fetchedAt ?? "" });
+  }
+  return out;
+}
+
+/** Record (once per distinct finding) each OFFICIAL ESS read that disagrees with a person-verified row. */
+function recordEssOfficialConflicts(db: AppDb, row: JurisdictionCodeProfile, reads: EssRuleRead[], landing: ReturnType<typeof essLandings>): OfficialConflict[] {
+  const out: OfficialConflict[] = [];
+  const key = row.key || codeProfileKey(row);
+  for (const r of reads) {
+    const land = landing.get(r);
+    if (land?.tier !== "official" || typeof r.value !== "number") continue;
+    const current = row.essRules?.[r.key];
+    if (current === r.value) continue;
+    const c: OfficialConflict = {
+      profileKey: key, field: `essRules.${r.key}`, current: typeof current === "number" ? current : current === undefined ? null : String(current),
+      found: r.value, sourceUrl: r.sourceUrl, quote: r.quote.slice(0, 240), fetchedAt: land.fetchedAt, createdAt: nowIso(),
+    };
+    const fp = `${key}|${c.field}|${String(c.current)}|${String(r.value)}`;
+    const seen = db.get<Row>("SELECT id FROM audit_logs WHERE action = ? AND details LIKE ? ESCAPE '\\' LIMIT 1", [OFFICIAL_CONFLICT_ACTION, `%"fingerprint":"${likeLiteral(fp)}"%`]);
+    if (!seen) {
+      addAuditLog(db, null, "system", ESS_CONFLICT_ACTOR, OFFICIAL_CONFLICT_ACTION, { ...c, fingerprint: fp } as unknown as Record<string, unknown>);
+      logger.warn("code-profiles", `human-verified ${key}: the official page ${c.sourceUrl} states ${c.field} = ${String(r.value)}, the row says ${String(c.current)} — kept as a conflict for a person; the row is unchanged`);
+    }
+    out.push(c);
+  }
+  return out;
+}
+
+/**
+ * LAND A RESEARCH'S ESS RULE READS on the jurisdiction's row (see the section comment). `reader` reads
+ * the official pages to confirm their quotes (null = no page reads: everything lands seeded);
+ * `retrieved` = pages the caller already read. Never throws on a page read.
+ */
+export async function landResearchedEssRules(
+  db: AppDb,
+  target: { state: string; ahj: string },
+  reads: EssRuleRead[],
+  opts: { reader?: PageReader | null; retrieved?: RetrievedSourcePage[]; at?: string } = {},
+): Promise<EssRulesLanding> {
+  const resolved = essWriteRow(db, target.state, target.ahj);
+  if (!resolved) return { saved: false, profileKey: "", filled: [], skipped: [], official: [], reason: "no state / jurisdiction" };
+  const key = resolved.key;
+  const clean = essRuleReadsOf(reads).reads;
+  if (!clean.length) return { saved: false, profileKey: key, filled: [], skipped: [], official: [], reason: "no usable ESS rule read" };
+  const hosts = String(target.ahj || "").trim() ? personVerifiedAuthorityHostsSync(db, target.state, target.ahj) : [];
+  const read = await readEssSourcePages(clean, opts.reader ?? null, hosts);
+  const landing = essLandings(clean, [...(opts.retrieved ?? []), ...read.pages], hosts);
+  const pagesRead = read.log.length ? { pagesRead: read.log } : {};
+  if (resolved.kind === "blocked_verified") {
+    const conflicts = recordEssOfficialConflicts(db, resolved.profile, clean, landing);
+    return { saved: false, profileKey: key, filled: [], skipped: clean.map((r) => `${r.key} (the row is human-verified)`), official: [], reason: `profile is human-verified — ${resolved.message}`, ...(conflicts.length ? { conflicts } : {}), ...pagesRead };
+  }
+  const base: JurisdictionCodeProfile = resolved.kind === "create" ? {
+    key: "", state: target.state, ahj: target.ahj, confidence: "seeded",
+    adoptedCodes: [], amendments: [], designCriteria: {}, prescriptive: {}, fireSetbacks: [], citations: [], updatedAt: "",
+  } : resolved.profile;
+  const rules: Record<string, number | boolean> = { ...(base.essRules ?? {}) };
+  const citations = [...base.citations];
+  const filled: string[] = [];
+  const skipped: string[] = [];
+  const official: string[] = [];
+  const at = opts.at && /^\d{4}-\d{2}-\d{2}T/.test(opts.at) ? opts.at : nowIso();
+  for (const r of clean) {
+    const field = `essRules.${r.key}`;
+    const land = landing.get(r)!;
+    const isOfficial = land.tier === "official";
+    const had = rules[r.key];
+    if (had !== undefined) {
+      if (citations.filter((c) => c.field === field).pop()?.kind === "ahj_correction") { skipped.push(`${r.key} (applied by a person from an AHJ correction)`); continue; }
+      const onFile = officialCitationFor(citations, field);
+      if (!isOfficial) { skipped.push(`${r.key} (${onFile ? `official value on file from ${onFile.host}` : "already on file"})`); continue; }
+      if (onFile && onFile.host !== land.host) { skipped.push(`${r.key} (official value on file from ${onFile.host})`); continue; }
+      if (had === r.value && onFile) { skipped.push(`${r.key} (the same official value is on file)`); continue; }
+    }
+    if (String(target.ahj || "").trim() && verifiedStateEssRule(db, base.state || target.state, r.key)) { skipped.push(`${r.key} (the state's verified profile sets it)`); continue; }
+    rules[r.key] = r.value;
+    // One citation per value: the field's earlier research / reference citations go with the value they backed.
+    for (let i = citations.length - 1; i >= 0; i--) {
+      if (citations[i].field === field && (citations[i].kind === "ess_rules_research" || citations[i].kind === "reference")) citations.splice(i, 1);
+    }
+    citations.push({
+      label: `ESS rule research: ${r.key} = ${String(r.value)}`, sourceUrl: r.sourceUrl.slice(0, 500), kind: "ess_rules_research", field,
+      quote: r.quote.slice(0, 300), at,
+      // When the page was read: this process's own read when it made one, else when the research answered.
+      fetchedAt: land.fetchedAt || at,
+      ...(isOfficial ? { tier: "official" as const } : {}),
+    });
+    filled.push(r.key);
+    if (isOfficial) official.push(r.key);
+  }
+  if (!filled.length) return { saved: false, profileKey: key, filled, skipped, official, reason: "nothing new to land", ...pagesRead };
+  upsert(db, { ...base, essRules: rules as JurisdictionEssRules, citations }, { confidence: "seeded" });
+  addAuditLog(db, null, "system", ESS_CONFLICT_ACTOR, "code_profile.ess_rules_researched", { profileKey: key, filled, skipped, ...(official.length ? { official } : {}) });
+  return { saved: true, profileKey: key, filled, skipped, official, ...pagesRead };
+}
+
+/**
+ * A SHIPPED CITY / COUNTY PROFILE'S ESS RULES ONTO THE SEEDED ROW ALREADY THERE (seedReferenceAhjProfile),
+ * field by field: a blank or a machine-seeded value takes the reference's (with the reference's own
+ * citation for that field, kind "reference"); a value read OFFICIAL, a value a person applied from an
+ * AHJ correction, and an AHJ value the state's person-verified row sets are kept. (A person-verified
+ * row never gets here: the caller proposes instead.) The reference lands seeded: it carries no bytes
+ * this process read, so it is never official (#683).
+ */
+function mergeReferenceEssRules(db: AppDb, row: JurisdictionCodeProfile, ref: JurisdictionCodeProfile): JurisdictionCodeProfile {
+  const incoming = essRulesOf(ref.essRules);
+  if (!incoming) return row;
+  const rules: Record<string, number | boolean> = { ...(row.essRules ?? {}) };
+  const citations = [...row.citations];
+  let changed = false;
+  for (const [k, v] of Object.entries(incoming) as Array<[EssRuleKey, number | boolean]>) {
+    const field = `essRules.${k}`;
+    const refCite = ref.citations.filter((c) => c.field === field).pop();
+    if (rules[k] !== undefined) {
+      if (officialCitationFor(citations, field)) continue;
+      if (citations.filter((c) => c.field === field).pop()?.kind === "ahj_correction") continue;
+      if (rules[k] === v && citations.some((c) => c.field === field && c.kind === "reference")) continue;
+    }
+    if (String(row.ahj || "").trim() && verifiedStateEssRule(db, row.state, k)) continue;
+    rules[k] = v;
+    for (let i = citations.length - 1; i >= 0; i--) {
+      if (citations[i].field === field && (citations[i].kind === "ess_rules_research" || citations[i].kind === "reference")) citations.splice(i, 1);
+    }
+    if (refCite) {
+      const { tier: _t, fetchedAt: _f, ...plain } = refCite;
+      citations.push({ ...plain, kind: "reference", ...(ref.researchProvenance?.at ? { at: ref.researchProvenance.at } : {}) });
+    }
+    changed = true;
+  }
+  return changed ? { ...row, essRules: rules as JurisdictionEssRules, citations } : row;
 }
 
 /** Stored placement-rule ids carry this prefix: the reviewer shows ONLY these as "AHJ rule on file"
@@ -2704,9 +3281,12 @@ async function researchWithIssuerPage(
   const answered = fromPage.values.some((v) => v.criterion === "groundSnowLoadPsf" && v.qualifier !== "pg_asd") && fromPage.values.some((v) => v.criterion === "windSpeedMph");
   const read = pages(probe!.pagesRead.length);
   const dropped = /Dropped: [^]*?\.(?= |$)/.exec(fromPage.notes)?.[0] ?? "";
+  // The page THIS process read, for the official-source landing (#683): a value whose quote is in
+  // these bytes, on the authority's official host, lands official; a model's answer never does.
+  const retrieved = probe!.candidateText && probe!.candidateReadAt ? [{ url, text: probe!.candidateText, fetchedAt: probe!.candidateReadAt }] : [];
   if (answered) {
     return { research: {
-      provider: "issuer_page", values: fromPage.values, webGrounded: true, issuerPage: { url, parsed: true },
+      provider: "issuer_page", values: fromPage.values, webGrounded: true, issuerPage: { url, parsed: true }, retrieved,
       notes: `Read from the jurisdiction's own design-criteria page ${url} (${read}); no web search spent.${dropped ? ` ${dropped}` : ""}`,
     } };
   }
@@ -2717,6 +3297,7 @@ async function researchWithIssuerPage(
     values: [...fromPage.values, ...(web.values ?? []).filter((v) => !fromPage.values.some((p) => same(p, v)))],
     webGrounded: web.webGrounded || fromPage.values.length > 0,
     issuerPage: { url, parsed: false },
+    retrieved,
     notes: `Candidate page found on the jurisdiction's own site, not parsed: ${url} (${read}; ${fromPage.values.length} value${fromPage.values.length === 1 ? "" : "s"} read from it). ${web.notes ?? ""}`.trim(),
   } };
 }

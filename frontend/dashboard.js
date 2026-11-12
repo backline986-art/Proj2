@@ -10,6 +10,8 @@ const state = {
   // The server's full next-step answer for the open project (GET /api/projects/:id/next-step,
   // refreshed by every autopilot state), and which project it belongs to.
   nextStep: null,
+  // "Destinations to confirm" (GET /api/filing-destinations): the last queue read, for its buttons.
+  destinationQueue: null,
   nextStepProjectId: null,
   // THE GATE'S ANSWER PER BOARD CARD. The project list carries the list-tier answer, which never
   // runs the submit gate (gateChecked:false); a card must not say "Ready to stage" on it. Each such
@@ -60,6 +62,7 @@ const state = {
   // Which project the status-override panel is currently holding an unsent edit for.
   // Lets a background re-render keep a half-typed reason, and a project switch drop it.
   statusOverrideFor: null,
+  projectClassFor: null,
   knowledgeProfiles: [],
   ahjForms: [],
   signatures: [],
@@ -1040,6 +1043,7 @@ async function loadEmailTracker() {
     $("emailTrackerStatus").textContent = err.message || "Email tracker status unavailable.";
   }
   loadEmailIntake().catch(() => null);
+  loadJobDrops().catch(() => null);
 }
 
 // EMAILED JOBS (#489). Built with DOM calls, never innerHTML: every string here came from an email.
@@ -1360,8 +1364,10 @@ function renderProjectTable() {
 // reading(s)…"), so the chip's count is the server's count, never a second client tally.
 const NEXT_STEP_CHIP = {
   operator_blocked: { pill: "to_fix", tone: "danger", label: "Blocked" },
+  class_held: { pill: "to_fix", tone: "warning", label: "Held: class" },
   correction_overdue: { pill: "corrections", tone: "danger", label: "Correction overdue" },
   portal_paused: { pill: "to_fix", tone: "warning", label: "Portal paused" },
+  payment_needed: { pill: "to_fix", tone: "warning", label: "Payment needed" },
   automation_running: { pill: "waiting", tone: "neutral", label: "Staging running" },
   staging_failed: { pill: "staging_failed", tone: "danger", label: "Staging failed" },
   qc_not_run: { pill: "to_fix", tone: "warning", label: "Run QC" },
@@ -1373,6 +1379,8 @@ const NEXT_STEP_CHIP = {
   staged_awaiting_submit: { pill: "your_submit", tone: "warning", label: "Your submit" },
   awaiting_signature: { pill: "waiting", tone: "neutral", label: "Awaiting signature" },
   approved_awaiting_filing: { pill: "your_submit", tone: "warning", label: "Approved — file it" },
+  second_stage_invite: { pill: "waiting", tone: "neutral", label: "Awaiting upload invite" },
+  second_stage_upload: { pill: "to_fix", tone: "warning", label: "Upload the plans" },
   fee_due: { pill: "to_fix", tone: "warning", label: "Fee due" },
   correction_open: { pill: "corrections", tone: "neutral", label: "Correction open" },
   payment_due: { pill: "ready", tone: "warning", label: "Payment due" },
@@ -2525,6 +2533,8 @@ function renderHandoffBanner() {
 // Quote = real permit fees (portal-calculated actual > learned per-AHJ history >
 // valuation estimate) + the client's service fee. Staging is blocked for
 // per-submission clients until each track's payment is marked paid or waived.
+// The gate COLLECTS the service fee only (#699, quote.gateAmountUsd): the permit fee is
+// paid on the portal and invoiced afterwards, and only when we advanced it.
 async function loadPaymentQuotes() {
   const id = state.selectedProjectId;
   const [permit, nem] = await Promise.all([
@@ -2562,17 +2572,19 @@ function renderPaymentQuoteCard(quote) {
         <tr><td style="padding:1px 14px 1px 0">Permit fees</td><td style="text-align:right"><strong>${quote.permitFeeIsFloor && quote.permitFeeUsd != null ? "at least " : ""}${money(quote.permitFeeUsd)}</strong></td>
             <td style="padding-left:10px" class="muted">${esc(FEE_SOURCE_LABELS[quote.permitFeeSource] || "")}</td></tr>
         <tr><td style="padding:1px 14px 1px 0">Our service fee</td><td style="text-align:right"><strong>${money(quote.serviceFeeUsd)}</strong></td><td></td></tr>
-        <tr style="border-top:1px solid var(--border)"><td style="padding:3px 14px 1px 0"><strong>Client total</strong></td><td style="text-align:right"><strong>${money(quote.totalUsd)}</strong></td><td></td></tr>
+        <tr class="muted"><td style="padding:1px 14px 1px 0">Filing cost, all fees</td><td style="text-align:right">${money(quote.totalUsd)}</td><td></td></tr>
+        <tr style="border-top:1px solid var(--border)"><td style="padding:3px 14px 1px 0"><strong>Collect from client now</strong></td><td style="text-align:right"><strong>${money(quote.gateAmountUsd)}</strong></td>
+            <td style="padding-left:10px" class="muted">service fee only — the permit fee is paid on the portal and invoiced after, only if we paid it</td></tr>
       </table>
       <p class="muted" style="margin:2px 0;font-size:11px">${esc(quote.permitFeeBasis || "")}</p>
       ${printedFormCheckHtml(quote.printedFormCheck)}
-      ${status === "paid" ? `<p style="margin:2px 0;font-size:12px">Paid ${p.paidAt ? new Date(p.paidAt).toLocaleString() : ""}${p.paymentReference ? ` — ref: ${esc(p.paymentReference)}` : ""}</p>` : ""}
+      ${status === "paid" ? `<p style="margin:2px 0;font-size:12px">Client paid us${p.gateCollectedUsd != null ? ` ${esc(money(p.gateCollectedUsd))}` : ""} ${p.paidAt ? esc(new Date(p.paidAt).toLocaleString()) : ""}${p.paymentReference ? ` — ref: ${esc(p.paymentReference)}` : ""}</p>` : ""}
       ${status !== "paid" ? `
         <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:6px">
           <input id="payFee-${quote.track}" type="number" min="0" step="0.01" placeholder="Actual portal fee $" style="width:150px;font-size:12px;padding:4px 8px" title="The real fee the portal calculated on its fee/review screen — replaces the estimate and teaches future quotes for this AHJ.">
           <button class="secondary" style="font-size:12px" data-pay-action="record-fee" data-pay-track="${quote.track}">Record real fee</button>
           <input id="payRef-${quote.track}" placeholder="Payment reference (invoice #, Stripe id…)" style="width:220px;font-size:12px;padding:4px 8px">
-          <button style="font-size:12px" data-pay-action="mark-paid" data-pay-track="${quote.track}">✓ Mark paid</button>
+          <button style="font-size:12px" data-pay-action="mark-paid" data-pay-track="${quote.track}" title="The client paid us the service fee above. Not the portal's fee: record that with We paid the portal on the track.">✓ Client paid us</button>
           <button class="secondary" style="font-size:12px" data-pay-action="waive" data-pay-track="${quote.track}" title="Skip the gate for this submission (comped / billed elsewhere).">Waive</button>
         </div>` : ""}
     </article>`;
@@ -2597,7 +2609,7 @@ function renderPaymentPanel() {
         <span>💳 Payment — per-submission billing</span>
         ${statusBadge(unpaid.length ? "payment required before staging" : "cleared")}
       </div>
-      ${unpaid.length ? `<p style="margin:0 0 8px;font-size:12px">This client pays per submission: collect the total below, then <strong>Mark paid</strong> to unlock <em>3 · Prepare Submittal</em>. Enter the portal's real fee when you see it on the fee/review screen — it replaces the estimate and is remembered for this AHJ. <span class="muted">The portal's own fee checkout is always completed by a human, never automated.</span></p>` : ""}
+      ${unpaid.length ? `<p style="margin:0 0 8px;font-size:12px">This client pays per submission: collect the service fee below, then <strong>Client paid us</strong> to unlock <em>3 · Prepare Submittal</em>. The permit fee is not collected here: it is paid on the portal and, when we pay it, invoiced afterwards at the real figure. Enter the portal's real fee when you see it on the fee/review screen — it replaces the estimate and is remembered for this AHJ. <span class="muted">The portal's own fee checkout is always completed by a human, never automated.</span></p>` : ""}
       ${visible.map(renderPaymentQuoteCard).join("")}
     </section>` : ""}`;
   panel.querySelectorAll("[data-pay-action]").forEach((btn) => {
@@ -2624,7 +2636,7 @@ async function handlePaymentAction(action, track, btn) {
     const res = await api(`/api/projects/${id}/payment/${path}`, { method: "POST", body: JSON.stringify(body) });
     state.paymentQuotes = { ...(state.paymentQuotes || {}), [res.quote.track]: res.quote };
     renderPaymentPanel();
-    if (action === "mark-paid") showMessage(`Payment recorded — ${res.quote.track} staging unlocked.`);
+    if (action === "mark-paid") showMessage(`Client payment recorded — ${res.quote.track} staging unlocked.`);
   } catch (err) {
     showMessage(`Payment update failed: ${err.message}`, "error");
     btn.disabled = false;
@@ -3176,6 +3188,61 @@ function renderFeeSheetPanel() {
   });
 }
 
+// THE PROJECT'S INVOICE (#700): what this project bills the client, from GET /api/projects/:id/invoice
+// (read-only; asking never creates a row), and which client invoice each line already sits on.
+// Collapsed, and fetched only when opened, so opening a project costs nothing more.
+function renderProjectInvoicePanel() {
+  let panel = $("projectInvoicePanel");
+  if (!panel) {
+    const anchor = $("feeSheetPanel") || $("paymentPanel");
+    if (!anchor) return;
+    panel = document.createElement("div");
+    panel.id = "projectInvoicePanel";
+    anchor.insertAdjacentElement("afterend", panel);
+  }
+  const projectId = state.selectedProjectId;
+  panel.innerHTML = `
+    <section class="panel" style="margin-top:10px">
+      <details class="provenance" id="projectInvoiceDetails"${state.projectInvoiceOpenFor === projectId ? " open" : ""}>
+        <summary><strong>Invoice for this project</strong> <span class="muted">what the client owes us, and which invoice it is on</span></summary>
+        <div class="provenance-body" id="projectInvoiceBody"><p class="muted" style="font-size:12px">Loading…</p></div>
+      </details>
+    </section>`;
+  $("projectInvoiceDetails")?.addEventListener("toggle", async (ev) => {
+    // Remembered per project, so a re-render of the detail view does not fold it shut.
+    state.projectInvoiceOpenFor = ev.target.open ? projectId : "";
+    if (!ev.target.open) return;
+    const body = $("projectInvoiceBody");
+    try {
+      const data = await api(`/api/projects/${encodeURIComponent(projectId)}/invoice`);
+      if (state.selectedProjectId !== projectId || !body) return;
+      body.innerHTML = projectInvoiceHtml(data.invoice, data.ledger || []);
+    } catch (err) {
+      if (body) body.innerHTML = `<p class="muted" style="font-size:12px">${esc(err.message || "Could not load the invoice.")}</p>`;
+    }
+  });
+}
+
+function projectInvoiceHtml(inv, ledger) {
+  const where = (track, kind) => {
+    const hits = ledger.filter((e) => e.track === track && e.kind === kind);
+    return hits.length
+      ? ` <span class="badge badge-info">on ${esc([...new Set(hits.map((h) => `${h.invoiceNumber} (${h.invoiceStatus})`))].join(", "))}</span>`
+      : ' <span class="muted">not invoiced yet</span>';
+  };
+  const lines = inv.lines || [];
+  return `
+    <p style="font-size:12px;margin:0 0 4px">Client: <strong>${esc(inv.clientName || "none")}</strong> · billed ${esc(inv.billingMode)} · bill to ${inv.billTo ? esc(inv.billTo) : '<span class="badge badge-warning">NO ADDRESS</span>'}</p>
+    ${lines.length ? `<table style="font-size:12px;width:100%;border-collapse:collapse">${lines.map((l) => `<tr>
+        <td style="padding:1px 8px 1px 0">${esc(l.description)}${l.provisional ? ' <span class="muted">(provisional)</span>' : ""}${l.alreadyPaid ? ' <span class="muted">(already paid)</span>' : ""}${where(l.track, l.kind)}</td>
+        <td style="text-align:right;white-space:nowrap">${billingMoney(l.amountUsd)}</td></tr>`).join("")}</table>` : '<p class="muted" style="font-size:12px">No billable line on this project.</p>'}
+    <p style="font-size:12px;margin:4px 0">Still due: fees at cost ${billingMoney(inv.reimbursementTotalUsd)} · service ${billingMoney(inv.serviceTotalUsd)}</p>
+    ${(inv.paymentsReceived || []).map((p) => `<p class="muted" style="font-size:12px;margin:2px 0">Received: ${p.amountUsd == null ? "amount not on file" : billingMoney(p.amountUsd)}, ${esc(p.description)}${p.paymentReference ? ` (ref ${esc(p.paymentReference)})` : ""}</p>`).join("")}
+    ${(inv.notInvoiceable || []).length ? `<details class="provenance"><summary>${esc(String(inv.notInvoiceable.length))} not billed, and why</summary><div class="provenance-body"><ul style="margin:2px 0;padding-left:18px;font-size:12px">
+      ${inv.notInvoiceable.map((x) => `<li>${esc(x.reason)}<br><span class="muted">${esc(x.resolution)}</span></li>`).join("")}</ul></div></details>` : ""}
+    <p class="muted" style="font-size:12px;margin:4px 0">Invoices are made per client and month under Clients → Billing.</p>`;
+}
+
 // "READ THE FEE FROM THE PORTAL" — offered only where there is a filed permit record whose own
 // page we can read (an Accela record-detail link on an active permit target). The permit monitor
 // does this on its weekly sweep; this is the same read, now.
@@ -3570,6 +3637,7 @@ const NEXT_STEP_BUTTON_LABELS = {
   addPermitTargetBtn: "Add tracking target",
   copyHandoffPacketBtn: "Copy handoff packet",
   sendHandoffPacketBtn: "Send handoff packet",
+  confirmProjectClassBtn: "Confirm class",
 };
 
 // Take the operator TO a control or panel: open every <details> it sits in (stage accordion,
@@ -3741,6 +3809,66 @@ function renderNextStep() {
 // round cannot reappear here, and `blocked` (whose only writer is this control)
 // cannot fall out of it by omission.
 const STATUS_OVERRIDE_EXCLUDED = ["handoff_ready"];
+
+// THE JOB'S CLASS PANEL (#688). Shows where the job stands (detail.classStatus — the same read every
+// automation door makes), the evidence behind a "probably commercial" flag, and the control a named
+// person uses to confirm it. Every value is esc()'d.
+function renderProjectClass() {
+  const panel = $("projectClassPanel");
+  if (!panel) return;
+  const detail = state.detail || {};
+  const project = detail.project;
+  const cs = detail.classStatus;
+  if (!project || !cs) { panel.hidden = true; state.projectClassFor = null; return; }
+  panel.hidden = false;
+  const summary = $("projectClassSummary");
+  const list = $("projectClassSignals");
+  const select = $("projectClassSelect");
+  const by = $("projectClassBy");
+  const confirmed = cs.confirmation
+    ? ` Confirmed ${esc(cs.confirmation.projectClass)} by ${esc(cs.confirmation.by)}${cs.confirmation.at ? ` on ${esc(String(cs.confirmation.at).slice(0, 10))}` : ""}.`
+    : "";
+  if (summary) {
+    summary.innerHTML = cs.projectClass === "commercial"
+      ? `<strong>Commercial job — held for a person.</strong> Automation does not stage, replay, file or learn from it.${confirmed}`
+      : cs.held
+        ? `<strong>Probably commercial — confirm class.</strong> Automation holds this job until a person confirms it.${confirmed}`
+        : `Residential.${confirmed}`;
+  }
+  if (list) {
+    const shown = cs.projectClass === "commercial" ? [] : (cs.unconfirmed || []);
+    list.innerHTML = shown.map((sig) => `<li>${sig.severity === "blocker" ? "<strong>Blocker:</strong> " : ""}${esc(sig.message)}</li>`).join("");
+    list.hidden = shown.length === 0;
+  }
+  // A half-typed name survives a background re-render of the same project (renderStatusOverride's idiom).
+  const sameProject = state.projectClassFor === project.id;
+  if (select && !sameProject) select.value = cs.projectClass === "commercial" ? "commercial" : "residential";
+  if (by && !sameProject) by.value = "";
+  state.projectClassFor = project.id;
+}
+
+async function confirmProjectClass() {
+  const projectId = state.selectedProjectId;
+  if (!projectId) return;
+  const projectClass = ($("projectClassSelect")?.value || "").trim();
+  const decidedBy = ($("projectClassBy")?.value || "").trim();
+  if (!projectClass) { showMessage("Pick the job's class.", "error"); return; }
+  const btn = $("confirmProjectClassBtn");
+  if (btn) btn.disabled = true;
+  try {
+    await api(`/api/projects/${projectId}/class`, { method: "POST", body: JSON.stringify({ projectClass, decidedBy }) });
+    state.projectClassFor = null;
+    await loadProjects();
+    await selectProject(projectId);
+    showMessage(projectClass === "commercial"
+      ? "Class set to commercial — the job is held for a person."
+      : "Class confirmed residential — recorded with your name.", "info");
+  } catch (err) {
+    showMessage(err.message || "Could not set the class.", "error");
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
 
 function renderStatusOverride() {
   const select = $("statusOverrideSelect");
@@ -4319,6 +4447,11 @@ async function buildDocumentSplit() {
       const pages = res.undecidedSpecPages.map((n) => (filedAs[n] ? `${n} (filed as ${filedAs[n]})` : String(n))).join(", ");
       rows.push(`<div class="record-data-row"><span class="muted">Spec pages undecided</span><strong style="color:var(--warning,#b45309)">p. ${esc(pages)}</strong></div>`);
     }
+    // Pages whose text is drawn as outlines (#696): no text layer and no picture, so neither the text
+    // nor a vision read can name them, and nothing on them is sent to a model. A person reads them.
+    if (res.outlinedTextPages && res.outlinedTextPages.length) {
+      rows.push(`<div class="record-data-row"><span class="muted">Pages unread: text drawn as outlines; a person reads them</span><strong style="color:var(--warning,#b45309)">p. ${esc(res.outlinedTextPages.join(", "))}</strong></div>`);
+    }
     if (resultsEl) resultsEl.innerHTML = rows.join("") || `<p class="muted">No documents produced.</p>`;
     if (statusEl) { statusEl.textContent = `Built ${(res.parts || []).length} split doc(s); ${(res.packagedDocTypes || []).length} packaged into the ZIP.`; statusEl.className = ""; }
   } catch (err) {
@@ -4698,6 +4831,7 @@ function renderDetail() {
   safeRender("assignSelect", syncProjectAssignSelect);
   safeRender("nextStep", renderNextStep);
   safeRender("statusOverride", renderStatusOverride);
+  safeRender("projectClass", renderProjectClass);
   safeRender("handoffBanner", renderHandoffBanner);
   safeRender("permitForm", syncPermitForm);
   safeRender("workflow", renderWorkflow);
@@ -4705,6 +4839,7 @@ function renderDetail() {
   safeRender("portalQuestions", renderPortalQuestionChip);
   safeRender("paymentPanel", renderPaymentPanel);
   safeRender("feeSheetPanel", renderFeeSheetPanel);
+  safeRender("projectInvoicePanel", renderProjectInvoicePanel);
   safeRender("submittalTracks", renderSubmittalTracks);
   safeRender("processMap", renderProcessMap);
   safeRender("liveReadiness", renderLiveTestReadiness);
@@ -5049,9 +5184,319 @@ async function loadSubmittalTracks() {
   } catch {
     state.submittalTracks = null;
   }
+  await loadTrackLookups();
   await loadProjectMilestones();
   updatePortalLoginsSummary();
   syncRecordPermitType();
+}
+
+// THE JOB'S PERMIT-PROCESS AND UTILITY-FILING ROWS (#695), read for the verify control on the track
+// groups (lookup-verify.js). The two GET routes are reads (no lookup runs); a failed read shows no
+// block, never a stale one from another project.
+async function loadTrackLookups() {
+  const projectId = state.selectedProjectId;
+  state.trackLookups = { projectId, "permit-process": null, "utility-filing": null, "utility-requirements": null, "filing-destinations": null };
+  if (!projectId) return;
+  const read = (kind) => api(`/api/projects/${projectId}/${kind}`).catch(() => null);
+  // The utility's application requirement list (utility-requirements.js) rides the same read: a GET,
+  // no lookup runs. So do the proposed filing destinations (filing-destination.js): computed on read,
+  // stored nowhere.
+  const [pp, uf, ur, fd] = await Promise.all([read("permit-process"), read("utility-filing"), read("utility-filing/application-requirements"), read("filing-destinations")]);
+  if (state.selectedProjectId !== projectId) return;
+  state.trackLookups = { projectId, "permit-process": pp, "utility-filing": uf, "utility-requirements": ur, "filing-destinations": fd };
+}
+
+// The proposed filing destinations for one track group (filing-destination.js): the utility's above
+// the utility card, the AHJ's above the permit cards. '' when the module is missing or the payload is
+// not this project's (a reload in flight).
+function filingDestinationHtml(lookupKind) {
+  const FD = typeof window !== "undefined" ? window.FilingDestination : null;
+  const tl = state.trackLookups;
+  if (!FD || !tl || tl.projectId !== state.selectedProjectId) return "";
+  return FD.renderGroup(tl["filing-destinations"], lookupKind === "utility-filing" ? "utility" : "ahj");
+}
+
+// CONFIRM / EDIT / REJECT A PROPOSED FILING DESTINATION, as the signed-in person (with sign-in off, the
+// name they type). Where a filing goes is a person's fact (rule 3): nothing is written without the
+// named-person confirm, and nothing is filed or sent by these clicks. Confirm sends exactly the
+// proposal shown (the server re-derives it and refuses a stale one); Edit sends the person's own
+// statement with its page and words; Reject stops the proposal being offered. The tracks re-read after.
+//
+// `where` says which screen the button is on. The track card (none given): the open job and its payload,
+// and the job re-reads after. "Destinations to confirm" (destinationQueueContext): the job and track
+// the proposal itself names (data-fd-project / data-fd-track), the queue's payload, and the queue
+// re-reads after (`after`). Everything between — the named-person confirm, the body, the route — is
+// this one function, so a Confirm from the queue lands exactly as it does from the job's card.
+function trackCardDestinationContext() {
+  const projectId = state.selectedProjectId;
+  const tl = state.trackLookups;
+  return { projectId, payload: tl && tl.projectId === projectId ? tl["filing-destinations"] : null };
+}
+async function decideFilingDestination(btn, action, where) {
+  const FD = window.FilingDestination;
+  const ctx = (where || trackCardDestinationContext)(btn);
+  const projectId = ctx.projectId;
+  const payload = ctx.payload;
+  const notify = ctx.notify || showMessage;
+  if (!FD || !(projectId || ctx.path)) return;
+  const id = btn.dataset.fdId;
+  const track = btn.dataset.fdTrack;
+  const auth = await authForDecision();
+  let method = "PUT";
+  // The track card and a job's queue entry: that job's route. A service-area entry: its client's twin
+  // route (ctx.path), with the entry and authority shown (ctx.extra) added to the SAME body.
+  let path = `/api/projects/${projectId}/filing-destinations`;
+  if (ctx.path) path = ctx.path;
+  let body;
+  let done;
+  if (action === "unreject") {
+    const by = namedPersonConsent(auth, "Offer this proposed destination again? It is still only a proposal until a person confirms it.", "offered it again", "a rejection is withdrawn by a named person");
+    if (by == null) return;
+    method = "DELETE"; path += "/reject"; body = { track, proposalId: id, ...(by ? { decidedBy: by } : {}) };
+    done = "The proposal is offered again. Nothing was filed or sent.";
+  } else {
+    const found = FD.findProposal(payload, id);
+    if (!found) { notify("That proposal is no longer shown — reload the job.", "warning"); return; }
+    const name = found.destination.authority.name;
+    if (action === "confirm") {
+      const by = namedPersonConsent(auth, FD.confirmMessage(name, found.proposal), "confirmed this destination", "a filing destination is confirmed by a named person");
+      if (by == null) return;
+      body = { ...FD.confirmBody(track, found.proposal), ...(by ? { decidedBy: by } : {}) };
+      done = `Confirmed under your name: where ${name} takes this filing. Nothing was filed or sent.`;
+    } else if (action === "save") {
+      const slot = btn.closest("[data-fd-edit-slot]");
+      const values = {};
+      slot?.querySelectorAll("[data-fd-field]").forEach((el) => { values[el.dataset.fdField] = el.value; });
+      const edited = FD.editBody(track, values);
+      const by = namedPersonConsent(auth, FD.confirmMessage(name, edited), "stated this destination", "a filing destination is confirmed by a named person");
+      if (by == null) return;
+      body = { ...edited, ...(by ? { decidedBy: by } : {}) };
+      done = `Recorded under your name: where ${name} takes this filing. Nothing was filed or sent.`;
+    } else if (action === "reject") {
+      const reason = window.prompt(`Reject this proposed destination for ${name}? It stops being offered until the page or its words change.
+
+Why (optional):`, "");
+      if (reason == null) return;
+      const by = namedPersonConsent(auth, `Reject the proposed destination for ${name}?`, "rejected this proposal", "a proposal is rejected by a named person");
+      if (by == null) return;
+      method = "POST"; path += "/reject"; body = { track, proposalId: id, reason, ...(by ? { decidedBy: by } : {}) };
+      done = "Rejected. Nothing was filed or sent.";
+    } else return;
+  }
+  if (ctx.extra) body = { ...body, ...ctx.extra };
+  btn.disabled = true;
+  try {
+    await api(path, { method, body: JSON.stringify(body) });
+  } catch (err) {
+    btn.disabled = false;
+    notify(`Not recorded: ${err.message}`, "error");
+    return;
+  }
+  notify(done, "info");
+  if (ctx.after) { await ctx.after(); return; }
+  try { state.detail = await api(`/api/projects/${projectId}`); } catch { /* the message above says what happened */ }
+  await loadSubmittalTracks();
+  renderDetail();
+}
+
+function bindFilingDestinationButtons(wrap, where) {
+  wrap.querySelectorAll("button[data-fd-confirm]").forEach((btn) => btn.addEventListener("click", () => decideFilingDestination(btn, "confirm", where)));
+  wrap.querySelectorAll("button[data-fd-reject]").forEach((btn) => btn.addEventListener("click", () => decideFilingDestination(btn, "reject", where)));
+  wrap.querySelectorAll("button[data-fd-unreject]").forEach((btn) => btn.addEventListener("click", () => decideFilingDestination(btn, "unreject", where)));
+  wrap.querySelectorAll("button[data-fd-save]").forEach((btn) => btn.addEventListener("click", () => decideFilingDestination(btn, "save", where)));
+  wrap.querySelectorAll("button[data-fd-edit]").forEach((btn) => btn.addEventListener("click", () => {
+    const slot = btn.closest("[data-fd-proposal]")?.querySelector("[data-fd-edit-slot]");
+    if (slot) slot.hidden = !slot.hidden;
+  }));
+}
+
+// DESTINATIONS TO CONFIRM (owner, 2026-11-10): one screen with every authority the org's open jobs
+// file with whose destination no person has verified, grouped by client (GET /api/filing-destinations,
+// a read). The proposals render with the SAME block and buttons as the track card
+// (filing-destination.js); each button names the job and track whose card shows it, and the click goes
+// through decideFilingDestination above with this context — so the same named-person confirm, the same
+// body and the same /api/projects/:id/filing-destinations route. One authority per click; no bulk.
+// SET A CLIENT'S "HOW WE FILE THERE" ANSWER ASIDE, as a named person. It stops being shown as a
+// proposal or a conflict. No filing destination is written, changed or removed by this.
+async function dismissFilingStatement(clientId, statementId, btn) {
+  if (!clientId || !statementId) return false;
+  const auth = await authForDecision();
+  const by = namedPersonConsent(auth, "Set this answer of the client's aside? It stops being shown. No filing destination is changed.", "set it aside", "a client's filing answer is set aside by a named person");
+  if (by == null) return false;
+  if (btn) btn.disabled = true;
+  try {
+    await api(`/api/clients/${encodeURIComponent(clientId)}/onboarding/filing-statements/${encodeURIComponent(statementId)}/dismiss`, { method: "POST", body: JSON.stringify(by ? { decidedBy: by } : {}) });
+  } catch (err) {
+    if (btn) btn.disabled = false;
+    showToast(`Not recorded: ${err.message}`, "error");
+    return false;
+  }
+  showToast("Set aside. No filing destination was changed.", "success");
+  return true;
+}
+function destinationQueueContext(btn) {
+  const FD = window.FilingDestination;
+  return {
+    projectId: btn.dataset.fdProject,
+    ...serviceAreaQueueTarget(btn),
+    payload: FD ? FD.queuePayload(state.destinationQueue) : null,
+    notify: (message, kind) => showToast(message, kind === "error" ? "error" : kind === "warning" ? "warning" : "success"),
+    after: () => loadDestinationQueue(),
+  };
+}
+// A service-area authority (no job yet): its client's twin route, and the entry and authority the queue
+// showed, added to the same body. A job's proposal names its job and gets nothing here.
+function serviceAreaQueueTarget(btn) {
+  if (!btn.dataset.fdClient || btn.dataset.fdProject) return {};
+  return { path: `/api/clients/${encodeURIComponent(btn.dataset.fdClient)}/service-area/filing-destinations`, extra: { areaEntry: btn.dataset.fdAreaEntry || "", authorityKey: btn.dataset.fdAuthorityKey || "" } };
+}
+async function loadDestinationQueue() {
+  const body = $("destQueueBody");
+  const FD = window.FilingDestination;
+  if (!body || !FD) return;
+  try {
+    state.destinationQueue = await api("/api/filing-destinations");
+  } catch (err) {
+    state.destinationQueue = null;
+    body.innerHTML = `<p class="muted">Destinations to confirm did not load: ${esc(err.message)}</p>`;
+    return;
+  }
+  body.innerHTML = FD.renderQueue(state.destinationQueue);
+  bindFilingDestinationButtons(body, destinationQueueContext);
+  // A client's own answer beside a verified destination: a named person sets it aside (the client's
+  // row only; the verified record is not touched).
+  body.querySelectorAll("button[data-fd-dismiss-statement]").forEach((btn) => btn.addEventListener("click", async () => {
+    if (await dismissFilingStatement(btn.dataset.fdClient, btn.dataset.fdDismissStatement, btn)) await loadDestinationQueue();
+  }));
+  // A job link closes the view and opens that job (its track card has the same buttons).
+  body.querySelectorAll('a[href^="#/project/"]').forEach((a) => a.addEventListener("click", () => { $("destQueueModal").hidden = true; }));
+  if (window.lucide) window.lucide.createIcons();
+}
+// GO-LIVE CHECK (owner, 2026-11-10): GET /api/go-live, a read, rendered by go-live.js. A line the
+// Destinations to confirm view resolves opens that view.
+async function loadGoLive() {
+  const body = $("goLiveBody");
+  if (!body || !window.GoLive) return;
+  let report;
+  try {
+    report = await api("/api/go-live");
+  } catch (err) {
+    body.innerHTML = `<p class="muted">The go-live check did not load: ${esc(err.message)}</p>`;
+    return;
+  }
+  body.innerHTML = window.GoLive.render(report);
+  body.querySelectorAll('button[data-golive-open="destinations"]').forEach((btn) => btn.addEventListener("click", () => {
+    $("goLiveModal").hidden = true;
+    openDestinationQueue();
+  }));
+  if (window.lucide) window.lucide.createIcons();
+}
+async function openGoLive() {
+  $("goLiveModal").hidden = false;
+  $("goLiveBody").innerHTML = `<p class="muted">Loading…</p>`;
+  await loadGoLive();
+}
+async function openDestinationQueue() {
+  $("destQueueModal").hidden = false;
+  $("destQueueBody").innerHTML = `<p class="muted">Loading…</p>`;
+  await loadDestinationQueue();
+}
+
+// The utility's application requirement panel (utility-requirements.js), '' when the module is missing
+// or the list is not this project's (a reload in flight).
+function utilityRequirementsHtml() {
+  const UR = typeof window !== "undefined" ? window.UtilityRequirements : null;
+  const tl = state.trackLookups;
+  if (!UR || !tl || tl.projectId !== state.selectedProjectId) return "";
+  return UR.renderRequirementsPanel(tl["utility-requirements"]);
+}
+
+// Verify / Edit fill the panel's form with the item (nothing is saved until Save).
+function fillUtilityRequirementForm(wrap, index) {
+  const UR = window.UtilityRequirements;
+  const tl = state.trackLookups;
+  const item = tl && tl.projectId === state.selectedProjectId && tl["utility-requirements"] ? (tl["utility-requirements"].items || [])[index] : null;
+  const panel = wrap.querySelector("[data-utility-requirements]");
+  if (!UR || !item || !panel) return;
+  const values = UR.prefill(item);
+  for (const [field, value] of Object.entries(values)) {
+    const el = panel.querySelector(`[data-req-field="${field}"]`);
+    if (el) el.value = value;
+  }
+  const form = panel.querySelector("details[data-req-form]");
+  if (form) form.open = true;
+  const quote = panel.querySelector('[data-req-field="quote"]');
+  if (quote) quote.focus();
+}
+
+// RECORD ONE ITEM OF THE UTILITY'S APPLICATION REQUIREMENTS (review-audit draft 03's PUT), as the
+// signed-in person (with sign-in off, the name they type). Rule 3: a named person's record, so nothing
+// is written without the confirm. mode "merge": other people's items stay as recorded. QC re-runs on
+// the server; the project is re-read.
+async function saveUtilityRequirement(wrap, btn) {
+  const UR = window.UtilityRequirements;
+  const projectId = state.selectedProjectId;
+  const panel = wrap.querySelector("[data-utility-requirements]");
+  if (!UR || !projectId || !panel) return;
+  const values = {};
+  panel.querySelectorAll("[data-req-field]").forEach((el) => { values[el.dataset.reqField] = el.value; });
+  const built = UR.formPayload(values);
+  if (!built.ok) { showMessage(built.reason, "warning"); return; }
+  const payload = state.trackLookups && state.trackLookups["utility-requirements"];
+  const utility = (payload && (payload.displayName || payload.utility)) || "this utility";
+  const auth = await authForDecision();
+  const decidedBy = namedPersonConsent(auth, UR.confirmMessage(utility, built.body.requirements[0].key), "recorded this requirement", "a utility's application requirements are recorded by a named person");
+  if (decidedBy == null) return;
+  if (btn) btn.disabled = true;
+  try {
+    await api(`/api/projects/${projectId}/utility-filing/application-requirements`, { method: "PUT", body: JSON.stringify({ ...built.body, ...(decidedBy ? { decidedBy } : {}) }) });
+  } catch (err) {
+    if (btn) btn.disabled = false;
+    showMessage(`Not recorded: ${err.message}`, "error");
+    return;
+  }
+  showMessage(`Recorded under your name: ${utility}'s application asks for ${UR.KINDS[built.body.requirements[0].key] || built.body.requirements[0].key}. QC re-ran; nothing was sent or filed.`, "info");
+  try { state.detail = await api(`/api/projects/${projectId}`); } catch { /* the message above says what happened */ }
+  await loadSubmittalTracks();
+  renderDetail();
+}
+
+// The verify control's block for one row, '' when the module is missing or the row is not this
+// project's (a reload in flight).
+function trackLookupHtml(kind) {
+  const LV = typeof window !== "undefined" ? window.LookupVerify : null;
+  const tl = state.trackLookups;
+  if (!LV || !tl || tl.projectId !== state.selectedProjectId) return "";
+  return LV.renderLookupVerify(kind, tl[kind]);
+}
+
+// VERIFY A JOB'S PERMIT-PROCESS / UTILITY-FILING ROW (#695): the person-only routes, as the signed-in
+// person (with sign-in off, the name they type). Rule 3: a verification is a named person's
+// attestation, so nothing is written without the confirm. The routes verify the row AS IT STANDS (no
+// body but the name); nothing is sent or filed. Afterwards the project is re-read: a verified process
+// row re-judges QC's document rows on the server.
+async function verifyTrackLookup(kind, btn) {
+  const LV = window.LookupVerify;
+  const projectId = state.selectedProjectId;
+  const payload = state.trackLookups && state.trackLookups.projectId === projectId ? state.trackLookups[kind] : null;
+  if (!LV || !LV.KINDS[kind] || !projectId || !payload || !payload.lookup) return;
+  if (LV.verifyBlockers(kind, payload.lookup).length) return;
+  const name = LV.entityName(kind, payload);
+  const auth = await authForDecision();
+  const verifiedBy = namedPersonConsent(auth, LV.confirmMessage(kind, name), "verified this row", `a ${LV.KINDS[kind].noun} is verified by a named person`);
+  if (verifiedBy == null) return;
+  if (btn) btn.disabled = true;
+  try {
+    await api(`/api/projects/${projectId}/${kind}/verify`, { method: "PUT", body: JSON.stringify(verifiedBy ? { verifiedBy } : {}) });
+  } catch (err) {
+    if (btn) btn.disabled = false;
+    showMessage(`Verify failed: ${err.message}`, "error");
+    return;
+  }
+  showMessage(`Verified — the ${LV.KINDS[kind].noun} for ${name} is recorded as checked by a person.`, "info");
+  try { state.detail = await api(`/api/projects/${projectId}`); } catch { /* the message above says what happened */ }
+  await loadSubmittalTracks();
+  renderDetail();
 }
 
 // Header chip: how many of this project's portals have a saved login. Best-effort.
@@ -5064,23 +5509,9 @@ async function updatePortalLoginsSummary() {
   let creds = [];
   try { creds = (await api(`/api/clients/${client.id}/portal-credentials`)).credentials || []; }
   catch { summary.textContent = ""; return; }
-  let total = 0, ready = 0; const seen = new Set();
-  for (const t of tracks) {
-    const url = t.recipePortalUrl || ""; let host = "";
-    try { host = url ? new URL(url).hostname.toLowerCase() : ""; } catch { /* ignore */ }
-    const slug = plPortalSlug(t.channel || t.label || t.type);
-    const key = host || slug;
-    if (seen.has(key)) continue; seen.add(key);
-    total++;
-    const matched = creds.some((c) => {
-      if (host && c.portalUrl) { try { if (new URL(c.portalUrl).hostname.toLowerCase() === host) return true; } catch { /* continue */ } }
-      const ct = (c.portalType || "").toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "");
-      if (ct && ct === slug) return true;
-      if (ct && slug && (ct.includes(slug.slice(0, 10)) || slug.includes(ct.slice(0, 10)))) return true;
-      return false;
-    });
-    if (matched) ready++;
-  }
+  // The same reading as the modal's chips (plProjectPortals), so the two counts never disagree.
+  const portals = plProjectPortals(tracks, creds).portals;
+  const total = portals.length, ready = portals.filter((p) => p.matched).length;
   summary.textContent = total ? `${ready}/${total} portal logins saved` : (creds.length ? `${creds.length} saved` : "");
   if (ready < total) summary.style.color = "var(--warn, #b45309)";
   else summary.style.color = "var(--ok, #16a34a)";
@@ -5166,6 +5597,8 @@ const OFF_TOOL_CHANNEL = {
   in_person: { title: "IN-PERSON SUBMISSION", what: "This jurisdiction does not take this filing online. The bot prepares and fills the packet; a person must deliver it at the counter — outside this tool." },
   email: { title: "EMAIL SUBMISSION", what: "This filing is sent by email, not through a portal. The bot prepares and fills the packet; a person must email it — outside this tool — then record the confirmation here." },
   mail: { title: "SUBMISSION BY MAIL", what: "This filing is mailed. The bot prepares and fills the packet; a person must print and mail it — outside this tool." },
+  // #664 (NEM only): a person verified that the utility takes its application inside the permit application.
+  with_permit: { title: "FILED WITH THE PERMIT", what: "This utility takes its interconnection application inside the AHJ permit application. There is no separate utility filing: its documents go in the permit packet, this track follows the permit, and after approval a person calls the utility to set the meter." },
 };
 function offToolChannelHtml(t) {
   const k = OFF_TOOL_CHANNEL[t.channelKind];
@@ -5179,8 +5612,18 @@ function trackChannelHtml(t) {
   const channel = String(t.channel || "");
   const basis = TRACK_CHANNEL_BASIS[t.channelBasis];
   const lines = [
-    `<p class="muted track-channel" style="margin:0 0 4px">Channel: ${linkifyText(channel)}${basis ? ` <span class="badge ${basis.badge}">${esc(basis.label)}</span>` : ""}${t.lastCheckedAt ? ` · last checked ${esc(fmtDate(t.lastCheckedAt))}` : ""}</p>`,
+    `<p class="muted track-channel" style="margin:0 0 4px">Channel: ${linkifyText(channel)}${basis ? ` <span class="badge ${basis.badge}">${esc(basis.label)}</span>` : ""}${t.lastCheckedAt ? ` · last checked ${esc(fmtDate(t.lastCheckedAt))}` : ""}${
+      // WHY THE LAST CHECK READ NOTHING (#173), beside "last checked" until a later check reads a
+      // status: a filing whose checks keep coming back empty must not look like one that is quiet.
+      t.lastUnreadable?.reason ? ` · <span data-last-unreadable style="color:var(--warning, #b7791f)">last check read nothing (${esc(fmtDate(t.lastUnreadable.at, true))}): ${esc(t.lastUnreadable.reason)}</span>` : ""}</p>`,
   ];
+  // THE PAGE AND WORDS BEHIND A NOT-YET-VERIFIED CHANNEL (server: channelCitation), so a person reads
+  // the source before confirming where the filing goes. Display only; a link only for http(s).
+  const cite = t.channelCitation;
+  if (cite && cite.quote) {
+    const src = httpUrl(cite.sourceUrl);
+    lines.push(`<p class="muted track-channel-citation" style="margin:0 0 4px;font-size:12px">Read on ${src ? `<a href="${esc(src)}" target="_blank" rel="noopener">${esc(portalHostname(src) || src)}</a>` : esc(cite.sourceUrl)}${cite.fetchedAt ? ` (${esc(String(cite.fetchedAt).slice(0, 10))})` : ""}: “${esc(cite.quote)}” — not yet confirmed by a person</p>`);
+  }
   // A portal URL the server resolved but did not write into the sentence.
   const portal = httpUrl(t.portalUrl);
   if (portal && !channel.includes(portal)) {
@@ -5213,7 +5656,7 @@ function trackPrerequisitesHtml(t) {
 // (unverified), or "not on file, verify". Present only on a battery job's permit card. A cited
 // prerequisite already listed above is not listed twice. Untrusted text: esc() everything; URLs
 // only through httpUrl + linkifyText.
-const ESS_STEP_BASIS = { lookup_permit: "per-job lookup, cited", lookup_prerequisite: "per-job lookup, cited", process_note: "seeded process note, unverified" };
+const ESS_STEP_BASIS = { lookup_permit: "per-job lookup, cited", lookup_prerequisite: "per-job lookup, cited", reference_cited: "the AHJ's own page, quoted", process_note: "seeded process note, unverified" };
 function trackEssStepHtml(t) {
   const e = t && t.essStep;
   if (!e || !e.summary) return "";
@@ -5225,7 +5668,8 @@ function trackEssStepHtml(t) {
   const item = (x) => {
     const u = httpUrl(x.sourceUrl);
     const hedge = x.basis !== "process_note" && x.namesStorage === false ? "; whether it covers the battery is not stated — verify" : "";
-    return `<li>${esc(x.step)} <span class="muted">(${esc(ESS_STEP_BASIS[x.basis] || "on file")}${esc(hedge)})</span>${u ? ` — ${linkifyText(u)}` : ""}</li>`;
+    const quoted = x.basis === "reference_cited" && x.quote && x.quote !== x.step ? ` <q>${esc(String(x.quote).slice(0, 300))}</q>` : "";
+    return `<li>${esc(x.step)} <span class="muted">(${esc(ESS_STEP_BASIS[x.basis] || "on file")}${esc(hedge)})</span>${quoted}${u ? ` — ${linkifyText(u)}` : ""}</li>`;
   };
   return `<div class="track-ess" style="margin:0 0 6px;font-size:12px"><span class="badge ${badge}">ESS</span> ${esc(e.summary)}${esc(listedAbove)}${entries.length ? `
     <ul style="margin:2px 0 0 18px;padding:0">${entries.map(item).join("")}</ul>` : ""}</div>`;
@@ -5248,6 +5692,7 @@ const TRACK_ISSUER_SOURCE = {
   operator: { badge: "badge-info", label: "set by an operator" },
   lookup: { badge: "badge-info", label: "per-job lookup, cited" },
   state_rule: { badge: "badge-info", label: "state rule, seeded" },
+  reference: { badge: "badge-info", label: "the AHJ's own page, quoted (not person-verified)" },
   project: { badge: "badge-none", label: "the project's AHJ" },
 };
 // The line sits on the card's FACE (above the channel); its set/clear control is a collapsed
@@ -5257,7 +5702,7 @@ function trackIssuerHtml(t) {
   if (t.category !== "permit" || !t.issuer || !TRACK_ISSUER_KEY[t.type]) return "";
   const i = t.issuer;
   const src = TRACK_ISSUER_SOURCE[i.source];
-  const cited = (i.source === "lookup" || i.source === "state_rule") && httpUrl(i.sourceUrl) ? ` — ${linkifyText(httpUrl(i.sourceUrl))}` : "";
+  const cited = (i.source === "lookup" || i.source === "state_rule" || i.source === "reference") && httpUrl(i.sourceUrl) ? ` — ${linkifyText(httpUrl(i.sourceUrl))}` : "";
   const refused = i.refused ? `<div style="margin-top:2px;color:var(--warning)">${esc(i.refused)}</div>` : "";
   return `<div class="track-issuer" style="margin:0 0 6px;font-size:12px">
     <strong>Issued by:</strong> ${esc(i.name || "—")}${src ? ` <span class="badge ${src.badge}">${esc(src.label)}</span>` : ""}${cited}
@@ -5318,6 +5763,160 @@ const STAGE_GAP_LINK = {
   documents: "Upload it",
   portal_questions: "Answer it",
 };
+// WAITING ON PAYMENT (#576): what to pay, where, with whose card, and the way back to the
+// application. Everything here is server data: esc()'d, and a link is rendered only when it is
+// http(s) (the server already limits it to the track's own portal host — rule 5).
+const FEE_RESPONSIBILITY_TEXT = {
+  "card-on-file": "the card on file on this portal account",
+  "customer-pays": "the customer pays",
+  "mailed-check": "a mailed check",
+  "keelix-pays": "we pay (then invoice it)",
+};
+function trackPaymentHtml(t) {
+  const p = t && t.payment;
+  if (!p) return "";
+  const httpLink = (u) => (/^https?:\/\//i.test(String(u || "")) ? String(u) : "");
+  const money = (n) => `$${Number(n).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+  const amount = typeof p.amountUsd === "number" && p.amountUsd > 0
+    ? `<strong>${esc(money(p.amountUsd))}</strong>`
+    : `<strong>amount not read</strong>${p.unreadReason ? ` <span class="muted">(${esc(p.unreadReason)})</span>` : ""}`;
+  const lines = Array.isArray(p.lines) && p.lines.length
+    ? `<ul style="margin:2px 0 4px 16px;font-size:12px">${p.lines.map((l) => `<li>${esc(l.label)}: ${esc(money(l.amountUsd))}</li>`).join("")}</ul>`
+    : "";
+  const portal = httpLink(p.portalUrl);
+  const app = httpLink(p.applicationLink);
+  const who = p.feeResponsibility ? (FEE_RESPONSIBILITY_TEXT[p.feeResponsibility] || p.feeResponsibility) : "not recorded for this portal (set it on the client's portal login)";
+  return `<div class="submit-gate-check warning" style="margin:4px 0 6px;font-size:12px" data-track-payment="${esc(p.runId)}">
+    <p style="margin:0 0 4px">Payment needed: ${amount}${portal ? ` on <a href="${esc(portal)}" target="_blank" rel="noopener">${esc(portal)}</a>` : ""}. Automation never pays.</p>
+    ${lines}
+    <p style="margin:0 0 2px">Login: ${p.loginUsername ? esc(p.loginUsername) : "no login on file for this portal"} · Who pays: ${esc(who)}</p>
+    ${app ? `<p style="margin:0 0 2px"><a href="${esc(app)}" target="_blank" rel="noopener">Open the saved application</a></p>` : ""}
+    ${p.screenshotUrl ? `<a href="${esc(p.screenshotUrl)}" target="_blank" rel="noopener" title="The fee page as the run saw it (secrets and card fields masked)"><img src="${esc(p.screenshotUrl)}" alt="The portal's fee page" class="review-shot" style="max-width:100%;border:1px solid var(--border);border-radius:var(--radius-sm)" /></a>` : ""}
+    <p class="muted" style="margin:2px 0 0">Pay on the portal, then press We paid the portal below with the record number and the amount paid. Staging this track again is refused while it waits: it would open a second application.</p>
+    ${trackPaidFormHtml(t)}
+  </div>`;
+}
+
+// "PAID" (#576 item 4): one form under a payment wait or a fee due — the record / permit number the
+// portal shows and the amount actually paid. Server data esc()'d; the press posts to the track's own
+// project-scoped route.
+function trackPaidFormHtml(t) {
+  if (!t || !(t.payment || t.feeDue)) return "";
+  const type = esc(t.type);
+  const numberLabel = t.payment ? "Record / application number" : "Permit / record number";
+  return `<div class="track-paid-form" style="display:flex;flex-wrap:wrap;gap:6px;align-items:flex-end;margin:6px 0 2px" data-track-paid-form="${type}">
+    <label class="track-field"><span>${esc(numberLabel)}</span><input data-track-paid-field="recordNumber" data-track="${type}" placeholder="as the portal shows it" /></label>
+    <label class="track-field"><span>Amount paid ($)</span><input data-track-paid-field="amountPaidUsd" data-track="${type}" inputmode="decimal" placeholder="0.00" /></label>
+    <button type="button" class="primary" data-track-paid="${type}" title="Record that a person paid this fee on the portal. Automation never pays."><i data-lucide="badge-dollar-sign"></i><span>We paid the portal</span></button>
+  </div>`;
+}
+
+// A FEE DUE (#576 item 4): approved and the issuance fee is owed, or the agency asked for a fee.
+// Paid clears it; the amount becomes the actual fee. Plus every Paid recorded on the track.
+function trackFeeDueHtml(t) {
+  const money = (n) => `$${Number(n).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+  const due = t && t.feeDue && !t.payment
+    ? `<div class="submit-gate-check warning" style="margin:4px 0 6px;font-size:12px" data-track-fee-due="${esc(t.type)}">
+        <p style="margin:0 0 4px"><strong>Fee due</strong>${t.feeDue.label ? ` <span class="muted">(${esc(t.feeDue.label)})</span>` : ""}: ${esc(t.feeDue.sentence || "")} Automation never pays.</p>
+        ${trackPaidFormHtml(t)}
+      </div>`
+    : "";
+  const paid = Array.isArray(t && t.paid) && t.paid.length
+    ? `<p class="muted" style="margin:0 0 4px;font-size:11px" data-track-paid-list="${esc(t.type)}">Paid: ${t.paid.map((p) => `${esc(money(p.amountUsd))} (${esc(p.kind === "filing" ? "filing fee" : "fee")}, ${esc(p.recordNumber)}, ${esc(String(p.paidAt || "").slice(0, 10))}${p.paidBy ? `, ${esc(p.paidBy)}` : ""})${
+      // #665: the filing's MASKED confirmation screenshot, one click from the fee record. Only the
+      // server's own project route — never a file path or a run's unmasked outcome shot.
+      /^\/api\/projects\/[^/]+\/submissions\/[^/]+\/confirmation-screenshot$/.test(String(p.confirmationUrl || ""))
+        ? ` · <a href="${esc(p.confirmationUrl)}" target="_blank" rel="noopener" data-track-paid-confirmation="${esc(t.type)}" title="The portal's confirmation page for this filing, account and meter numbers masked">confirmation screenshot</a>`
+        : ""}`).join("; ")}</p>`
+    : "";
+  return due + paid;
+}
+
+// A TWO-STAGE FILING (#28): the application and its fee go into one portal; the plans are then uploaded
+// BY HAND in a second system the agency opens with an invite. The server's own block (secondStage.ts):
+// a cited description a person can Confirm (it changes nothing until then), or — confirmed — where this
+// job stands, the invite email once the inbox matched it, the documents to upload and the form that
+// marks the upload done. Nothing here opens the invite or the second system: the link, when the server
+// lets one through (rule 5's predicate), is a plain link a person clicks. Server data esc()'d.
+function trackSecondStageHtml(t) {
+  const ss = t && t.secondStage;
+  if (!ss || typeof ss !== "object") {
+    // Nothing on file for this agency. A person who knows it takes the plans in a second system says
+    // so here (their name is recorded); offered only on an agency track that has not filed.
+    if (!t || t.type === "nem" || (t.status !== "not_started" && t.status !== "staged") || t.payment) return "";
+    const ty = esc(t.type);
+    return `<details style="margin:2px 0 6px;font-size:12px" data-second-stage-add="${ty}"><summary class="muted">Plans uploaded in a second system after the application?</summary>
+      <div style="display:flex;flex-wrap:wrap;gap:6px;align-items:flex-end;margin:4px 0 0">
+        <label class="track-field"><span>System the plans are uploaded in (its name, not an address)</span><input data-second-stage-field="system" data-track="${ty}" /></label>
+        <button type="button" class="secondary" data-second-stage-confirm="${ty}" title="Recorded under your name. From then on this agency's permit track waits for the plan upload before it reads as filed. Nothing is opened or filed."><i data-lucide="check"></i><span>Confirm second stage</span></button>
+      </div>
+    </details>`;
+  }
+  const type = esc(t.type);
+  const http = (u) => (/^https?:\/\//i.test(String(u || "")) ? String(u) : "");
+  const source = http(ss.sourceUrl)
+    ? `<p class="muted" style="margin:2px 0;font-size:11px">Source: <a href="${esc(ss.sourceUrl)}" target="_blank" rel="noopener">${esc(ss.sourceUrl)}</a>${ss.quote ? ` — <q>${esc(ss.quote)}</q>` : ""}</p>`
+    : "";
+  if (ss.basis === "described") {
+    return `<div class="submit-gate-check info" style="margin:4px 0 6px;font-size:12px" data-second-stage="${type}" data-second-stage-state="described">
+      <p style="margin:0 0 2px"><strong>Second stage (described, not confirmed by a person):</strong> ${esc(ss.sentence || "")}</p>
+      ${source}
+      <div style="display:flex;flex-wrap:wrap;gap:6px;align-items:flex-end;margin:4px 0 0">
+        <label class="track-field"><span>System the plans are uploaded in</span><input data-second-stage-field="system" data-track="${type}" value="${esc(ss.system || "")}" /></label>
+        <button type="button" class="secondary" data-second-stage-confirm="${type}" title="Recorded under your name. From then on this agency's permit track waits for the plan upload before it reads as filed. Nothing is opened or filed."><i data-lucide="check"></i><span>Confirm second stage</span></button>
+      </div>
+    </div>`;
+  }
+  const who = ss.verifiedBy ? `<span class="muted"> (confirmed by ${esc(ss.verifiedBy)}${ss.verifiedAt ? `, ${esc(String(ss.verifiedAt).slice(0, 10))}` : ""})</span>` : "";
+  if (ss.state === "uploaded") {
+    const u = ss.uploaded || {};
+    const shot = /^\/api\/projects\/[^/]+\/submittal-tracks\/[^/]+\/second-stage\/screenshot$/.test(String(u.screenshotUrl || ""))
+      ? ` · <a href="${esc(u.screenshotUrl)}" target="_blank" rel="noopener">screenshot</a>` : "";
+    return `<p class="muted" style="margin:0 0 4px;font-size:11px" data-second-stage="${type}" data-second-stage-state="uploaded">Second stage: ${esc(ss.sentence || "")}${u.confirmationNumber ? ` Confirmation ${esc(u.confirmationNumber)}.` : ""}${shot}</p>`;
+  }
+  if (ss.state === "before_application") {
+    return `<div class="submit-gate-check info" style="margin:4px 0 6px;font-size:12px" data-second-stage="${type}" data-second-stage-state="before_application">
+      <p style="margin:0 0 2px"><strong>Two-stage filing${ss.system ? ` (plans go into ${esc(ss.system)})` : ""}</strong>${who}: ${esc(ss.sentence || "")}</p>
+      ${source}
+      <details style="margin:4px 0 0"><summary style="font-size:12px">The application was made by hand</summary>
+        <div style="display:flex;flex-wrap:wrap;gap:6px;align-items:flex-end;margin:4px 0 0">
+          <label class="track-field"><span>Record / application number</span><input data-second-stage-field="recordNumber" data-track="${type}" placeholder="as the portal shows it" /></label>
+          <button type="button" class="secondary" data-second-stage-application="${type}" title="Records that a person made the application (and paid its fee) on the portal. The track then waits for the plan upload; it is not filed yet."><i data-lucide="file-check"></i><span>Record the application</span></button>
+          <button type="button" class="ghost" data-second-stage-remove="${type}" title="This agency no longer takes the plans in a second system. Recorded under your name."><span>Not a two-stage filing</span></button>
+        </div>
+      </details>
+    </div>`;
+  }
+  // waiting_invite / upload: the application is made, the plans are not uploaded. NOT filed.
+  const inv = ss.invite;
+  const invite = inv
+    ? `<p style="margin:2px 0" data-second-stage-invite="${type}"><strong>Invite email</strong> ${esc(String(inv.receivedAt || "").slice(0, 10))}${inv.from ? ` from ${esc(inv.from)}` : ""}: “${esc(inv.subject || "(no subject)")}”${
+        http(inv.link)
+          ? ` · <a href="${esc(inv.link)}" target="_blank" rel="noopener" data-second-stage-invite-link="${type}">its link</a> <span class="muted">(you open it; nothing opens it for you)</span>`
+          : inv.linkHidden && inv.linkHidden.host
+            ? ` <span class="muted" data-second-stage-invite-hidden="${type}">Its link (on ${esc(inv.linkHidden.host)}) is not shown: ${esc(inv.linkHidden.why || "the host is not on file for this agency's permit filing")}. Open it from the email itself.</span>`
+            : ""}</p>`
+    : `<p class="muted" style="margin:2px 0" data-second-stage-no-invite="${type}">No invite matched in the filings inbox yet.</p>`;
+  const docs = Array.isArray(ss.documents) ? ss.documents : [];
+  const docList = docs.length
+    ? `<p style="margin:4px 0 0"><strong>Upload these by hand</strong> (the job's required-documents list for this permit):</p>
+       <ul style="margin:2px 0 4px 16px;font-size:12px" data-second-stage-documents="${type}">${docs.map((d) => `<li>${esc(d.label)} — ${d.present ? `<span class="muted">on file${d.via ? ` (${esc(d.via)})` : ""}</span>` : "<strong>not on file yet</strong>"}</li>`).join("")}</ul>`
+    : "";
+  const shotOnFile = /^\/api\/projects\/[^/]+\/submittal-tracks\/[^/]+\/second-stage\/screenshot$/.test(String(ss.screenshotUrl || ""))
+    ? `<a href="${esc(ss.screenshotUrl)}" target="_blank" rel="noopener" class="muted" style="font-size:11px">screenshot on file</a>` : "";
+  return `<div class="submit-gate-check warning" style="margin:4px 0 6px;font-size:12px" data-second-stage="${type}" data-second-stage-state="${esc(ss.state)}">
+    <p style="margin:0 0 2px"><strong>Second stage${ss.system ? `: ${esc(ss.system)}` : ""}</strong>${who}. Application ${esc((ss.application && ss.application.number) || "")} made ${esc(String((ss.application && ss.application.at) || "").slice(0, 10))}. <strong>Not filed yet.</strong></p>
+    ${invite}
+    ${docList}
+    <div style="display:flex;flex-wrap:wrap;gap:6px;align-items:flex-end;margin:6px 0 2px" data-second-stage-form="${type}">
+      <label class="track-field"><span>Confirmation number</span><input data-second-stage-field="confirmationNumber" data-track="${type}" placeholder="as the second system shows it" /></label>
+      <label class="track-field"><span>or a screenshot (PNG / JPEG)</span><input type="file" accept="image/png,image/jpeg" data-second-stage-field="screenshot" data-track="${type}" /></label>
+      ${shotOnFile}
+      <button type="button" class="primary" data-second-stage-uploaded="${type}" title="Recorded under your name: you uploaded the plans in the second system yourself. This is what files the track. Nothing is opened, uploaded or submitted for you."><i data-lucide="upload"></i><span>Plans uploaded: mark done</span></button>
+    </div>
+  </div>`;
+}
+
 function trackStageGapsHtml(t) {
   const gaps = Array.isArray(t && t.stageGaps) ? t.stageGaps : [];
   if (!gaps.length) return "";
@@ -5368,6 +5967,116 @@ function openStageGap(where, key) {
   reveal($(STAGE_GAP_PROJECT_INPUT[key] || "") || $("manualEntryForm"));
 }
 
+// FILING BY EMAIL (#667 / #672). The track's authority (its utility, or the issuer of this permit) may
+// take applications by email. A NAMED PERSON records and verifies the address with the authority's own
+// page and the words on it that contain the address (PUT /filing-email: the server names the signed-in
+// person; with sign-in off, the name the person types — never one the screen fills in). The staged
+// drafts are listed and a draft downloads as an .eml for the person to send from their own mail client,
+// then "I submitted it" records the filing. THIS SCREEN NEVER SENDS: no route it calls reaches SMTP.
+// Automation sends only inside an approved staging run, behind the one final-submit gate
+// (portalSafety.finalSubmitRefusals, channel "email") with FILING_EMAIL_ALLOW_SEND=1 on the server.
+const FILING_EMAIL_STATUS_TEXT = {
+  draft: "draft — download it and send it yourself",
+  superseded: "superseded by a newer draft",
+  sending: "sending started and did not finish — check the filings mailbox's Sent folder before anything else",
+  sent: "sent by automation after a named approval",
+  failed: "send failed — it was not retried; send the draft yourself if it did not go",
+};
+function filingEmailPanelHtml(type, data, projectId) {
+  const d = data && typeof data === "object" ? data : {};
+  const a = d.authority && typeof d.authority === "object" ? d.authority : null;
+  if (!a) {
+    return `<p class="muted" style="font-size:12px" data-filing-email-none="${esc(type)}">This project names no ${type === "nem" ? "utility" : "issuing agency"} for this track, so no filing email can be recorded.</p>`;
+  }
+  const r = d.record && typeof d.record === "object" ? d.record : null;
+  const problems = Array.isArray(d.problems) ? d.problems : [];
+  const src = r ? httpUrl(r.sourceUrl) : "";
+  const recordHtml = r
+    ? `<p style="margin:0 0 4px" data-filing-email-record="${esc(type)}">${esc(a.name)} takes applications by email at <strong>${esc(r.address)}</strong>
+        — verified by ${esc(r.verifiedBy || "nobody")}${r.verifiedAt ? ` on ${esc(String(r.verifiedAt).slice(0, 10))}` : ""}${src ? `, per <a href="${esc(src)}" target="_blank" rel="noopener">${esc(portalHostname(src) || src)}</a>` : ""}.</p>
+       ${r.quote ? `<p class="muted" style="margin:0 0 4px;font-size:11px">“${esc(r.quote)}”</p>` : ""}
+       ${d.usable
+        ? `<p class="muted" style="margin:0 0 4px;font-size:11px" data-filing-email-usable="${esc(type)}">This track files by email: staging makes a draft for you to send. Automation sends only after Approve &amp; auto-submit, with FILING_EMAIL_ALLOW_SEND=1 on the server.</p>`
+        : `<div class="submit-gate-check warning" style="margin:0 0 4px;font-size:12px" data-filing-email-problems="${esc(type)}"><strong>Not usable:</strong><ul style="margin:2px 0 0 18px;padding:0">${problems.map((p) => `<li>${esc(p)}</li>`).join("")}</ul></div>`}
+       <button type="button" class="ghost" data-filing-email-withdraw="${esc(type)}" title="Withdraw this address: the track files on its portal again"><i data-lucide="x"></i><span>Withdraw</span></button>`
+    : `<p class="muted" style="margin:0 0 4px;font-size:12px" data-filing-email-empty="${esc(type)}">No filing email is on file for ${esc(a.name)}. If ${esc(a.name)} takes applications by email, record the address from its own page.</p>`;
+  const form = `<div class="track-filing-email-form" style="display:flex;flex-wrap:wrap;gap:6px;align-items:flex-end;margin:6px 0" data-filing-email-form="${esc(type)}">
+      <label class="track-field"><span>Application email address</span><input data-filing-email-field="address" data-track="${esc(type)}" placeholder="as the authority's page shows it" /></label>
+      <label class="track-field"><span>The authority's page (https://…)</span><input data-filing-email-field="sourceUrl" data-track="${esc(type)}" placeholder="where you read it" /></label>
+      <label class="track-field" style="flex:1 1 100%"><span>The page's own words, containing the address</span><input data-filing-email-field="quote" data-track="${esc(type)}" placeholder="copy the sentence from the page" /></label>
+      <label class="track-field"><span>Your name (only when sign-in is off)</span><input data-filing-email-field="verifiedBy" data-track="${esc(type)}" placeholder="" /></label>
+      <button type="button" class="secondary" data-filing-email-save="${esc(type)}" title="You checked the authority's page: it takes applications by email at this address. Recorded under your name."><i data-lucide="badge-check"></i><span>I verified this address</span></button>
+    </div>`;
+  const sends = Array.isArray(d.sends) ? d.sends : [];
+  const sendsHtml = sends.length
+    ? `<ul style="margin:4px 0 0 18px;padding:0;font-size:12px" data-filing-email-sends="${esc(type)}">${sends.map((x) => {
+        const status = String(x.status || "");
+        const downloadable = (status === "draft" || status === "failed") && projectId && x.id;
+        const refusals = Array.isArray(x.refusals) ? x.refusals : [];
+        return `<li data-filing-email-row="${esc(x.id)}" data-filing-email-status="${esc(status)}">
+          <strong>${esc(FILING_EMAIL_STATUS_TEXT[status] || status)}</strong> · to ${esc(x.recipient)} · ${esc(String(x.createdAt || "").slice(0, 16).replace("T", " "))}
+          ${Array.isArray(x.attachments) ? ` · ${x.attachments.length} attachment(s)` : ""}
+          ${downloadable ? ` · <a href="/api/projects/${encodeURIComponent(projectId)}/filing-email/drafts/${encodeURIComponent(x.id)}/eml" data-filing-email-download="${esc(x.id)}" title="Opens as a draft in your mail client. Send it yourself, then record the filing with “I submitted it”.">download .eml</a>` : ""}
+          ${x.subject ? `<br><span class="muted">${esc(x.subject)}</span>` : ""}
+          ${refusals.length ? `<br><span class="muted">Not sent automatically: ${esc(refusals.join("; "))}</span>` : ""}
+          ${x.detail ? `<br><span class="muted">${esc(x.detail)}</span>` : ""}
+        </li>`;
+      }).join("")}</ul>`
+    : `<p class="muted" style="margin:4px 0 0;font-size:12px">No filing email staged for this track yet.</p>`;
+  return `<div data-filing-email-panel="${esc(type)}" style="font-size:12px">${recordHtml}${form}<p style="margin:6px 0 0"><strong>Staged emails</strong></p>${sendsHtml}</div>`;
+}
+
+async function loadFilingEmailPanel(type, body) {
+  if (!state.selectedProjectId || !type || !body) return;
+  const projectId = state.selectedProjectId;
+  try {
+    const data = await api(`/api/projects/${projectId}/filing-email?track=${encodeURIComponent(type)}`);
+    body.innerHTML = filingEmailPanelHtml(type, data, projectId);
+  } catch (err) {
+    body.innerHTML = `<p class="muted" style="font-size:12px">Could not load the filing email: ${esc(err.message || "error")}</p>`;
+    return;
+  }
+  if (window.lucide && window.lucide.createIcons) window.lucide.createIcons();
+  const save = body.querySelector("button[data-filing-email-save]");
+  if (save) save.addEventListener("click", () => saveFilingEmail(type, body, save));
+  const withdraw = body.querySelector("button[data-filing-email-withdraw]");
+  if (withdraw) withdraw.addEventListener("click", () => withdrawFilingEmail(type, body, withdraw));
+}
+
+async function saveFilingEmail(type, body, btn) {
+  const field = (name) => String(body.querySelector(`[data-filing-email-field="${name}"]`)?.value || "").trim();
+  const payload = { track: type, address: field("address"), sourceUrl: field("sourceUrl"), quote: field("quote") };
+  // The person's own name, only as typed (the server ignores it when sign-in is on). Never filled in.
+  const typed = field("verifiedBy");
+  if (typed) payload.verifiedBy = typed;
+  if (btn) btn.disabled = true;
+  try {
+    await api(`/api/projects/${state.selectedProjectId}/filing-email`, { method: "PUT", body: JSON.stringify(payload) });
+    showMessage("Filing email verified and recorded under your name. This track now files by email.", "info");
+    await loadFilingEmailPanel(type, body);
+  } catch (err) {
+    if (btn) btn.disabled = false;
+    // The server's refusal as it is (a missing name, or each reason the address is not usable).
+    showMessage(err.message || "Could not record the filing email.", "error");
+  }
+}
+
+async function withdrawFilingEmail(type, body, btn) {
+  if (!confirm("Withdraw this filing email? The track goes back to filing on its portal. Drafts already staged stay listed.")) return;
+  const typed = String(body.querySelector('[data-filing-email-field="verifiedBy"]')?.value || "").trim();
+  if (btn) btn.disabled = true;
+  try {
+    await api(`/api/projects/${state.selectedProjectId}/filing-email?track=${encodeURIComponent(type)}`, {
+      method: "DELETE", body: JSON.stringify(typed ? { verifiedBy: typed } : {}),
+    });
+    showMessage("Filing email withdrawn.", "info");
+    await loadFilingEmailPanel(type, body);
+  } catch (err) {
+    if (btn) btn.disabled = false;
+    showMessage(err.message || "Could not withdraw the filing email.", "error");
+  }
+}
+
 function trackCardHtml(t) {
   const cls = TRACK_STATUS_CLASS[t.status] || "info";
   // Captured numbers — only the fields this track actually uses (NEM has no permit #).
@@ -5379,6 +6088,15 @@ function trackCardHtml(t) {
     ? `<a href="${esc(t.trackingUrl)}" target="_blank" rel="noopener">status page ↗</a>`
     : "";
   const submitted = t.status !== "not_started" && t.status !== "staged";
+  // #569 — THE FILING'S CONFIRMATION SCREENSHOT beside its number: "Submitted: APP-112491 · confirmation
+  // screenshot". The number is the filing record's (read off the portal's page, or entered by a person);
+  // with none, the line says so — never a number nobody read. Only the server's own project route.
+  const conf = t.confirmation && typeof t.confirmation === "object" && /^\/api\/projects\//.test(String(t.confirmation.url || "")) ? t.confirmation : null;
+  const confirmationLine = conf
+    ? `<p style="margin:0 0 4px" data-track-confirmation="${esc(t.type)}">${conf.recordNumber
+      ? `Submitted: <strong>${esc(conf.recordNumber)}</strong>`
+      : "Submitted — no number was read off the portal's page; enter it below"} &nbsp;·&nbsp; <a href="${esc(conf.url)}" target="_blank" rel="noopener" title="The portal's confirmation page, account and meter numbers masked">confirmation screenshot</a></p>`
+    : "";
   const fieldsHtml = (t.captureFields || []).map((f) =>
     `<label class="track-field"><span>${esc(f.label)}</span><input data-track-field="${esc(f.key)}" data-track="${esc(t.type)}" placeholder="${esc(f.placeholder)}" value="${esc(t[f.key] || "")}" /></label>`,
   ).join("");
@@ -5423,7 +6141,16 @@ function trackCardHtml(t) {
   // filed and the approval is spent) or, when the list row does not match the address, starts a
   // SECOND application. So while the track holds a staged draft the button is held with the reason.
   // (The words are APPROVE_HELD_BY_STAGED_DRAFT's, spelled here so the card renders on its own.)
-  const approveHeld = t.type === "nem" && t.status === "staged"
+  // #28: an application waiting on its second stage is filed by the hand upload's mark, never by a run.
+  const secondStagePending = Boolean(t.secondStage && t.secondStage.pending);
+  // A confirmed second stage with no application on record yet: this portal's submit is the
+  // application, which a person submits (the server's gate refuses an approved run the same way).
+  const secondStageOwed = Boolean(t.secondStage && t.secondStage.basis === "verified" && t.secondStage.state === "before_application" && !submitted);
+  const approveHeld = secondStagePending
+    ? "This application is made; its plans are uploaded by hand in the second system, then marked done below. There is nothing for a run to submit."
+    : secondStageOwed
+    ? "This agency takes the plans in a second system by hand, so this portal's submit is not the whole filing. Stage it to review, submit the application yourself and record it; the plan upload's mark files the track."
+    : t.type === "nem" && t.status === "staged"
     ? "This filing has a staged draft; finish it from the review window or by staging again, then a person submits."
     : "";
   // #436 RULING 5 (owner 2026-11-03): A FILING ALREADY SUBMITTED AND TRACKED IS NEVER STAGED AGAIN. The
@@ -5458,13 +6185,19 @@ function trackCardHtml(t) {
     ${trackPrerequisitesHtml(t)}
     ${trackEssStepHtml(t)}
     <p style="margin:0 0 6px;font-size:12px">→ ${linkifyText(trackNextActionText(t))}</p>
+    ${trackPaymentHtml(t)}
+    ${trackFeeDueHtml(t)}
+    ${trackSecondStageHtml(t)}
     ${trackStageGapsHtml(t)}
+    ${confirmationLine}
     ${captured ? `<p style="margin:0 0 4px">${captured} ${trackLink ? "&nbsp;·&nbsp; " + trackLink : ""}</p>` : (trackLink ? `<p style="margin:0 0 4px">${trackLink}</p>` : "")}
     ${t.recipeId && (t.recipeStatus === "complete" || t.recipeStatus === "recording")
       && !screenshotMisses.has(screenshotKey(state.selectedProjectId, t.recipeId, t.recipeStatus))
       ? `<div style="margin:6px 0 4px" data-shot-wrap><a href="/api/projects/${esc(state.selectedProjectId)}/portal-runs/${esc(t.recipeId)}/review-screenshot" target="_blank" rel="noopener" title="Open the full-size capture"><img src="/api/projects/${esc(state.selectedProjectId)}/portal-runs/${esc(t.recipeId)}/review-screenshot" alt="Auto-captured portal page" class="review-shot" style="max-width:100%;border:1px solid var(--border);border-radius:var(--radius-sm)" data-shot-key="${esc(screenshotKey(state.selectedProjectId, t.recipeId, t.recipeStatus))}" onerror="window.__noteMissingReviewShot(this)" /></a><p class="muted" style="font-size:11px;margin:2px 0 0">${t.recipeStatus === "complete" ? "Portal review screen (auto-captured) — click for full size" : "Last captured page — recording not complete. If this is a login page, add this portal's login under “Manage logins” and re-stage."}</p></div>` : ""}
     <div class="track-actions">
-      ${stageBlocked
+      ${t.payment
+        ? `<button type="button" class="secondary" data-track-stage="${esc(t.type)}" disabled aria-disabled="true" title="This filing is waiting on a fee payment on its portal; staging again would open a second application."><i data-lucide="bot"></i><span>Stage in portal</span></button>`
+        : stageBlocked
         ? `<button type="button" class="secondary" data-track-stage="${esc(t.type)}" disabled aria-disabled="true" title="${esc(stageBlocked)}"><i data-lucide="bot"></i><span>Stage in portal</span></button>
       <span class="muted" style="font-size:11px" data-track-stage-blocked>${esc(stageBlocked)}</span>`
         : `<button type="button" class="secondary" data-track-stage="${esc(t.type)}" title="Auto-fill this filing's portal up to the final review screen — you submit manually"><i data-lucide="bot"></i><span>Stage in portal</span></button>`}
@@ -5486,13 +6219,17 @@ function trackCardHtml(t) {
     ${t.signatureRequest && t.signatureRequest.state ? `<p class="muted" style="font-size:12px;margin:4px 0" data-track-signature-state="${esc(t.signatureRequest.state)}">Signature step: ${esc(signatureStateText(t.signatureRequest))}</p>` : ""}
     ${recipeBlock}
     ${trackIssuerEditHtml(t)}
-    <details class="track-submit"${t.status === "staged" ? " open" : ""}>
+    <details class="track-filing-email" data-filing-email="${esc(t.type)}">
+      <summary>Filing by email</summary>
+      <div data-filing-email-body="${esc(t.type)}"><p class="muted" style="font-size:12px">Loading…</p></div>
+    </details>
+    ${secondStagePending || secondStageOwed ? "" : `<details class="track-submit"${t.status === "staged" || t.payment ? " open" : ""}>
       <summary>${submitted ? "Update numbers / status link" : "I submitted it → capture #"}</summary>
       <div class="track-submit-form">
         ${fieldsHtml}
         <button type="button" class="primary" data-track-submit="${esc(t.type)}"><i data-lucide="check"></i><span>Save &amp; track</span></button>
       </div>
-    </details>
+    </details>`}
   </article>`;
 }
 
@@ -5520,6 +6257,50 @@ function utilityGroupTitle(utilityTracks) {
   return `Utility — ${phrase || "interconnection"}`;
 }
 
+// THE UTILITY TRACK A PERSON'S STORAGE RECORD DROPPED (draft 10): said where the card would be, with the
+// person, the page and its words, and a control to put the track back on this job. A person who kept
+// the track sees that too, with the control to let the record drop it again.
+function nemTrackDropHtml(detail) {
+  const drop = detail && detail.nemTrackDrop;
+  const kept = detail && detail.nemTrackKept;
+  if (drop) {
+    return `<div class="track-group"><div class="track-group-head">Utility application: not required</div>
+      <article class="item pass">
+        <p>${esc(drop.utility)} takes no interconnection application for a ${esc(drop.mode)} battery, as ${esc(drop.verifiedBy)} recorded on ${esc(String(drop.verifiedAt || "").slice(0, 10))}:</p>
+        <blockquote>${esc(drop.quote)}</blockquote>
+        <p class="muted">Source: <a href="${esc(drop.sourceUrl)}" target="_blank" rel="noopener noreferrer">${esc(drop.sourceUrl)}</a></p>
+        <button type="button" class="secondary" data-nem-track-keep="1">Put the utility track back on this job</button>
+      </article></div>`;
+  }
+  if (kept) {
+    return `<p class="muted">${esc(kept.by)} kept the utility track on this job${kept.at ? ` on ${esc(String(kept.at).slice(0, 10))}` : ""}.
+      <button type="button" class="secondary" data-nem-track-keep="0">Let the utility's record drop it again</button></p>`;
+  }
+  return "";
+}
+
+async function saveNemTrackKeep(keep, btn) {
+  if (!state.selectedProjectId) return;
+  const auth = await authForDecision();
+  const lede = keep
+    ? "Put the utility track back on this job? It files an interconnection application as usual."
+    : "Let the utility's recorded storage rule drop this job's utility track again? QC re-runs and decides.";
+  const decidedBy = namedPersonConsent(auth, lede, "decide whether this job files its utility application", "whether a job files its utility application is decided by a named person");
+  if (decidedBy == null) return;
+  if (btn) btn.disabled = true;
+  try {
+    const detail = await api(`/api/projects/${state.selectedProjectId}/utility-track/keep`, { method: "PUT", body: JSON.stringify({ keep, ...(decidedBy ? { decidedBy } : {}) }) });
+    if (detail && detail.project) state.detail = detail;
+    await loadSubmittalTracks();
+    renderDetail();
+    showMessage(keep ? "The utility track is back on this job." : "QC re-ran; the utility's record decides the track again.", "info");
+  } catch (err) {
+    showMessage(`Saving failed: ${err.message}`, "error");
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
 function renderSubmittalTracks() {
   const tracks = state.submittalTracks;
   const wrap = $("submittalTracks");
@@ -5537,8 +6318,12 @@ function renderSubmittalTracks() {
   // can be worked in either order (do NEM first, then permits, or vice-versa).
   const utility = tracks.filter((t) => t.category === "utility");
   const permits = tracks.filter((t) => t.category === "permit");
-  const group = (title, list) => list.length
-    ? `<div class="track-group"><div class="track-group-head">${esc(title)}</div>${list.map(trackCardHtml).join("")}</div>`
+  // Each group carries the job's row it files by (#695): the AHJ's permit process above the permit
+  // cards, the utility's filing location above the utility card — one row, one control, however many
+  // cards read it.
+  // The utility group also carries what the utility's application asks for (utility-requirements.js).
+  const group = (title, list, lookupKind) => list.length
+    ? `<div class="track-group"><div class="track-group-head">${esc(title)}</div>${trackLookupHtml(lookupKind)}${filingDestinationHtml(lookupKind)}${lookupKind === "utility-filing" ? utilityRequirementsHtml() : ""}${list.map(trackCardHtml).join("")}</div>`
     : "";
   // THE UTILITY GROUP IS HEADED BY THE TRACK'S OWN PROGRAM (e2e-gap close, 2026-09-26): "Net
   // Metering (NEM)" was hard-coded for every utility — Texas (Oncor) and SRP jobs have no utility
@@ -5546,9 +6331,44 @@ function renderSubmittalTracks() {
   // "Utility net metering (NEM) / interconnection", "… interconnection + export credit (net
   // billing …)", "… interconnection only …", or "… (net-metering program not yet confirmed)");
   // the header repeats that phrase and falls back to the neutral "interconnection".
-  wrap.innerHTML = group(utilityGroupTitle(utility), utility) + group("AHJ — Permit(s)", permits) + closeoutGroupHtml();
+  wrap.innerHTML = nemTrackDropHtml(state.detail) + group(utilityGroupTitle(utility), utility, "utility-filing") + group("AHJ — Permit(s)", permits, "permit-process") + closeoutGroupHtml();
   bindCloseoutMilestones(wrap);
+  wrap.querySelectorAll("button[data-nem-track-keep]").forEach((btn) => {
+    btn.addEventListener("click", () => saveNemTrackKeep(btn.dataset.nemTrackKeep === "1", btn));
+  });
+  wrap.querySelectorAll("button[data-lookup-verify]").forEach((btn) => {
+    btn.addEventListener("click", () => verifyTrackLookup(btn.dataset.lookupVerify, btn));
+  });
+  bindFilingDestinationButtons(wrap);
+  wrap.querySelectorAll("button[data-req-verify], button[data-req-edit]").forEach((btn) => {
+    btn.addEventListener("click", () => fillUtilityRequirementForm(wrap, Number(btn.dataset.reqVerify ?? btn.dataset.reqEdit)));
+  });
+  wrap.querySelectorAll("button[data-req-save]").forEach((btn) => {
+    btn.addEventListener("click", () => saveUtilityRequirement(wrap, btn));
+  });
 
+  wrap.querySelectorAll("button[data-track-paid]").forEach((btn) => {
+    btn.addEventListener("click", () => markTrackPaid(btn.dataset.trackPaid, btn));
+  });
+  // #28: the second stage of a two-stage filing — each press records what a person did or decided.
+  wrap.querySelectorAll("button[data-second-stage-confirm]").forEach((btn) => {
+    btn.addEventListener("click", () => secondStageAction(btn.dataset.secondStageConfirm, "confirm", btn));
+  });
+  wrap.querySelectorAll("button[data-second-stage-remove]").forEach((btn) => {
+    btn.addEventListener("click", () => secondStageAction(btn.dataset.secondStageRemove, "remove", btn));
+  });
+  wrap.querySelectorAll("button[data-second-stage-application]").forEach((btn) => {
+    btn.addEventListener("click", () => secondStageAction(btn.dataset.secondStageApplication, "application-made", btn));
+  });
+  wrap.querySelectorAll("button[data-second-stage-uploaded]").forEach((btn) => {
+    btn.addEventListener("click", () => secondStageAction(btn.dataset.secondStageUploaded, "uploaded", btn));
+  });
+  // Filing by email (#672): loaded when a person opens it — a read; the panel never sends.
+  wrap.querySelectorAll("details[data-filing-email]").forEach((d) => {
+    d.addEventListener("toggle", () => {
+      if (d.open) loadFilingEmailPanel(d.dataset.filingEmail, d.querySelector("[data-filing-email-body]"));
+    });
+  });
   wrap.querySelectorAll("button[data-track-submit]").forEach((btn) => {
     btn.addEventListener("click", () => markSubmittalTrack(btn.dataset.trackSubmit));
   });
@@ -5657,11 +6477,61 @@ const APPROVER_NAME_KEY = "feeConfirmName";
 // true/false exactly where confirm() did, and the name prompt, the request and the server's gate
 // (mayClickFinalSubmit / automaticSubmitRefusals) are unchanged. If the sheet cannot be read (an older
 // server, a network error) the plain confirm is shown and says so: the sheet never blocks an approval.
+// OPEN REVIEW ITEMS (review-audit draft 01): every reviewer warning and gate warning that holds THIS
+// filing is listed above the table. A measured one (arithmetic against the plan's own numbers) and an
+// unverified form mapping each carry a tick box, and Approve stays disabled until every one is ticked;
+// the ticks go with the approval (the server checks them against what it holds now, and the run again).
+function approvalOpenItemsHtml(sheet) {
+  const items = Array.isArray(sheet.openItems) ? sheet.openItems : [];
+  if (!items.length) return "";
+  const toAck = items.filter((i) => i.needsAcknowledgement);
+  const others = items.filter((i) => !i.needsAcknowledgement);
+  const line = (i) => `${esc(i.title)}${i.text ? `<div style="font-size:12px">${esc(i.text)}</div>` : ""}${i.action ? `<div class="muted" style="font-size:12px">${esc(i.action)}</div>` : ""}`;
+  return `<div data-approval-open-items style="border:1px solid var(--edge-warn);background:var(--tint-warn);border-radius:var(--radius-sm);padding:10px 12px">
+      <strong>Open review items for this filing (${items.length})</strong>
+      ${toAck.length ? `<p style="margin:6px 0 4px">${toAck.length === 1 ? "This one is" : "These are"} measured against the plan's own numbers or a form no person has checked. Tick each to say you read it; Approve stays off until every box is ticked.</p>
+      <ul style="list-style:none;margin:0;padding:0">${toAck.map((i) => `<li style="margin:6px 0"><label style="display:flex;gap:8px;align-items:flex-start"><input type="checkbox" data-approval-ack="${esc(i.id)}" data-approval-ack-hash="${esc(i.contentHash)}"><span>${line(i)}</span></label></li>`).join("")}</ul>` : ""}
+      ${others.length ? `<ul data-approval-other-items style="margin:6px 0 0 18px;padding:0">${others.map((i) => `<li style="margin:4px 0">${line(i)}</li>`).join("")}</ul>` : ""}
+    </div>`;
+}
+
+// WHAT THE GATE CHECKED (review-audit draft 07): check records (passed with the arithmetic, or not
+// checked for want of an input), grouped by category, each group collapsed. Display only: none is a
+// correction. `list` items carry { outcome, category, title, text, basis }.
+const CHECK_CATEGORY_LABEL = { electrical: "Electrical", structural: "Structural", plan_set: "Plan set and fire access", ahj_profile: "Local rules", utility_nem: "Utility", project_data: "Project data" };
+function checkRecordsHtml(list, opts = {}) {
+  const items = Array.isArray(list) ? list : [];
+  if (!items.length) return "";
+  const groups = new Map();
+  for (const c of items) {
+    const key = CHECK_CATEGORY_LABEL[c.category] || humanize(c.category || "Other");
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(c);
+  }
+  const line = (c) => `<li data-check-record="${esc(c.id || "")}" data-check-outcome="${esc(c.outcome)}" style="margin:4px 0">
+      <span aria-hidden="true" style="color:${c.outcome === "passed" ? "var(--ink-pass)" : "var(--ink-warn, inherit)"}">${c.outcome === "passed" ? "✓" : "?"}</span>
+      <strong>${c.outcome === "passed" ? "" : "Not checked — "}${esc(c.title)}</strong>
+      <div style="font-size:12px">${esc(c.text)}</div>
+      ${c.basis ? `<div class="muted" style="font-size:12px">Rule basis: ${esc(c.basis)}</div>` : ""}
+    </li>`;
+  return `<div data-check-records${opts.tag ? ` ${opts.tag}` : ""}>
+      ${opts.heading ? `<strong>${esc(opts.heading)}</strong>` : ""}
+      ${[...groups].map(([label, list]) => {
+        const passed = list.filter((c) => c.outcome === "passed").length;
+        const unchecked = list.length - passed;
+        return `<details data-check-group="${esc(label)}" style="margin:4px 0"><summary>${esc(label)}: ${passed} passed${unchecked ? `, ${unchecked} not checked` : ""}</summary><ul style="list-style:none;margin:4px 0 0 0;padding:0">${list.map(line).join("")}</ul></details>`;
+      }).join("")}
+    </div>`;
+}
+
 function approvalSheetHtml(sheet, recordedAs) {
   const issues = Array.isArray(sheet.issues) ? sheet.issues : [];
   const red = issues.filter((i) => i.kind === "mismatch" || i.kind === "missing");
   const notes = issues.filter((i) => i.kind === "note");
-  const issueList = (list, color) => `<ul style="margin:4px 0 0 18px;padding:0;color:${color}">${list.map((i) => `<li>${esc(i.text)}</li>`).join("")}</ul>`;
+  // A note about a destination no person verified carries the way to confirm it (display only: the
+  // link closes the sheet and scrolls to that authority's proposed destination on the track card).
+  const confirmLink = (i) => i.confirmAuthority ? ` <button type="button" class="ghost" data-approval-confirm-dest="${esc(i.confirmAuthority)}">Confirm the destination</button>` : "";
+  const issueList = (list, color) => `<ul style="margin:4px 0 0 18px;padding:0;color:${color}">${list.map((i) => `<li>${esc(i.text)}${confirmLink(i)}</li>`).join("")}</ul>`;
   const rows = (Array.isArray(sheet.rows) ? sheet.rows : []).map((r) => {
     const bad = r.check === "mismatch" || r.check === "missing";
     const value = r.value ? esc(r.value) : `<span style="color:var(--destructive)">Not on file</span>`;
@@ -5676,13 +6546,17 @@ function approvalSheetHtml(sheet, recordedAs) {
   return `${red.length
       ? `<div data-approval-mismatches style="border:1px solid var(--edge-fail);background:var(--tint-fail);color:var(--ink-fail);border-radius:var(--radius-sm);padding:10px 12px"><strong>${red.length === 1 ? "1 thing disagrees or is missing" : `${red.length} things disagree or are missing`} — check before approving</strong>${issueList(red, "var(--ink-fail)")}</div>`
       : `<div data-approval-clean style="border:1px solid var(--edge-pass);background:var(--tint-pass);color:var(--ink-pass);border-radius:var(--radius-sm);padding:10px 12px">No disagreement found between the project, the bill and the plan set.</div>`}
+    ${approvalOpenItemsHtml(sheet)}
     ${notes.length ? `<div data-approval-notes style="border:1px solid var(--edge-warn);background:var(--tint-warn);border-radius:var(--radius-sm);padding:10px 12px"><strong>Worth a look</strong>${issueList(notes, "inherit")}</div>` : ""}
+    ${checkRecordsHtml(sheet.checks, { heading: "What the gate checked for this filing (display only)", tag: "data-approval-checks" })}
     <table style="width:100%;border-collapse:collapse"><thead><tr><th style="text-align:left" class="muted">Field</th><th style="text-align:left" class="muted">What will be filed</th><th style="text-align:left" class="muted">Source</th></tr></thead><tbody>${rows}</tbody></table>
     <p class="muted" style="font-size:12px;white-space:pre-line">${esc(APPROVE_AUTO_SUBMIT_LEDE.replace(/^Approve & auto-submit this filing\?\n\n/, ""))}</p>
     ${recordedAs ? `<p style="margin:0"><strong>Recorded as:</strong> ${esc(recordedAs)}</p>` : ""}`;
 }
 
-async function confirmApprovalSheet(type, recordedAs = "") {
+// `out` (optional) receives `acknowledgements` — the plan set the sheet showed and each ticked item's
+// id + content hash — when the approver ticked any. The answer itself stays true/false.
+async function confirmApprovalSheet(type, recordedAs = "", out = null) {
   let sheet = null;
   try {
     const res = await api(`/api/projects/${state.selectedProjectId}/approval-sheet?track=${encodeURIComponent(type)}`);
@@ -5720,7 +6594,29 @@ async function confirmApprovalSheet(type, recordedAs = "") {
     const onKey = (e) => { if (e.key === "Escape") { e.preventDefault(); done(false); } };
     document.addEventListener("keydown", onKey, true);
     modal.querySelector("[data-approval-cancel]").addEventListener("click", () => done(false));
-    modal.querySelector("[data-approval-approve]").addEventListener("click", () => done(true));
+    modal.querySelectorAll("[data-approval-confirm-dest]").forEach((b) => b.addEventListener("click", () => {
+      const key = b.getAttribute("data-approval-confirm-dest") || "";
+      done(false);
+      const target = Array.from(document.querySelectorAll("[data-fd-authority]")).find((el) => el.getAttribute("data-fd-authority") === key);
+      if (target && target.scrollIntoView) target.scrollIntoView({ behavior: "smooth", block: "center" });
+      else showMessage("No proposed destination is on file for this authority yet: open the track card's lookup, or use Edit on its destination, to confirm where it files.", "warning");
+    }));
+    const approveBtn = modal.querySelector("[data-approval-approve]");
+    const boxes = Array.from(modal.querySelectorAll("[data-approval-ack]"));
+    const allTicked = () => boxes.every((b) => b.checked);
+    const sync = () => { approveBtn.disabled = !allTicked(); };
+    boxes.forEach((b) => b.addEventListener("change", sync));
+    sync();
+    approveBtn.addEventListener("click", () => {
+      if (!allTicked()) return;
+      if (out && boxes.length) {
+        out.acknowledgements = {
+          planSet: sheet.planSet || null,
+          items: boxes.map((b) => ({ id: b.getAttribute("data-approval-ack"), contentHash: b.getAttribute("data-approval-ack-hash") })),
+        };
+      }
+      done(true);
+    });
     modal.addEventListener("click", (e) => { if (e.target === modal) done(false); }, { once: true });
     const title = modal.querySelector("#approvalSheetTitle");
     if (title && title.focus) title.focus();
@@ -5734,11 +6630,15 @@ async function approveAndAutoSubmitTrack(type, btn) {
   const track = (state.submittalTracks || []).find((t) => t.type === type);
   if (track && track.type === "nem" && track.status === "staged") { showMessage(APPROVE_HELD_BY_STAGED_DRAFT, "warning"); return; }
   const auth = await authForDecision();
+  // What the approver ticked on the sheet (review-audit draft 01) rides with the approval; nothing
+  // ticked → the body is exactly as before.
+  const sheetOut = {};
+  const acks = () => (sheetOut.acknowledgements ? { acknowledgements: sheetOut.acknowledgements } : null);
   if (auth && auth.enabled) {
-    if (!(await confirmApprovalSheet(type, (auth.user && (auth.user.name || auth.user.email)) || "you"))) return;
-    return stageSubmittalTrack(type, btn, true);
+    if (!(await confirmApprovalSheet(type, (auth.user && (auth.user.name || auth.user.email)) || "you", sheetOut))) return;
+    return stageSubmittalTrack(type, btn, true, acks());
   }
-  if (!(await confirmApprovalSheet(type))) return;
+  if (!(await confirmApprovalSheet(type, "", sheetOut))) return;
   let last = "";
   try { last = localStorage.getItem(APPROVER_NAME_KEY) || ""; } catch { last = ""; }
   const typed = prompt("Your name, recorded as the approver of this run:", last);
@@ -5748,7 +6648,7 @@ async function approveAndAutoSubmitTrack(type, btn) {
     return stageSubmittalTrack(type, btn, false, null, { noApproval: true });
   }
   try { localStorage.setItem(APPROVER_NAME_KEY, approverName); } catch { /* per-viewer convenience only */ }
-  return stageSubmittalTrack(type, btn, true, { approverName });
+  return stageSubmittalTrack(type, btn, true, { approverName, ...(acks() || {}) });
 }
 
 // THREE OUTCOMES, THREE LINES (#422): filed by automation under a named approval; stopped at review
@@ -5797,6 +6697,13 @@ async function stageSubmittalTrack(type, btn, autoSubmit = false, extra = null, 
     // false "staged to final review" success message.
     if (job.result && job.result.status === "failed") {
       showMessage(`Could not stage ${humanize(type)}: ${job.result.message || "see the run log on the project for details."}`, "error");
+      await loadSubmittalTracks();
+      renderDetail();
+      return;
+    }
+    // A FEE STOP (#576): the payment sentence — amount, portal, pay there. Never MFA wording.
+    if (job.result && job.result.status === "awaiting_payment") {
+      showMessage(job.result.message || `${humanize(type)}: payment needed on the portal. Pay there, then press We paid the portal on the track.`, "warning");
       await loadSubmittalTracks();
       renderDetail();
       return;
@@ -6156,6 +7063,88 @@ async function saveProjectMilestone(key, at, btn, method) {
   } catch (err) {
     if (btn) btn.disabled = false;
     showMessage(err.message || "Could not save the milestone.", "error");
+  }
+}
+
+// "PAID" (#576 item 4): a person paid the track's fee on the portal.
+async function markTrackPaid(type, btn) {
+  if (!state.selectedProjectId || !type) return;
+  const field = (name) => {
+    const el = document.querySelector(`[data-track-paid-field="${name}"][data-track="${type}"]`);
+    return (el?.value || "").trim();
+  };
+  const body = { recordNumber: field("recordNumber"), amountPaidUsd: field("amountPaidUsd") };
+  if (!body.recordNumber || !body.amountPaidUsd) {
+    showMessage("Enter the record number and the amount paid on the portal, then press We paid the portal.", "warning");
+    return;
+  }
+  if (btn) btn.disabled = true;
+  try {
+    const res = await api(`/api/projects/${state.selectedProjectId}/submittal-tracks/${type}/paid`, {
+      method: "POST", body: JSON.stringify(body),
+    });
+    state.submittalTracks = res.tracks || state.submittalTracks;
+    state.detail = await api(`/api/projects/${state.selectedProjectId}`);
+    await loadProcessMap();
+    renderDetail();
+    showMessage(res.message || "Payment recorded.", "info");
+  } catch (err) {
+    if (btn) btn.disabled = false;
+    showMessage(err.message || "Could not record the payment.", "error");
+  }
+}
+
+// #28: ONE handler for the second-stage presses (confirm / remove / application-made / uploaded). Each
+// posts to the track's own project-scoped route; the server names the person from the session when
+// sign-in is on, else from the name asked for here. A screenshot, when chosen, is sent first as the
+// image itself. Nothing here opens the invite or the second system.
+const SECOND_STAGE_ASK = {
+  confirm: "Confirm this second stage?\n\nRecorded under your name. From now on this agency's permit track waits for the plan upload (by hand, in the second system) before it reads as filed. Nothing is opened or filed.",
+  remove: "Remove the second stage for this agency?\n\nRecorded under your name. New applications there will read as filed when recorded.",
+  "application-made": "Record that the application was made by hand?\n\nThe track then waits for the plan-upload invite and the hand upload. It is NOT filed yet.",
+  uploaded: "Did you upload the plans in the second system yourself?\n\nRecorded under your name. This is what files the track: the client is told it is filed and tracking starts.",
+};
+async function secondStageAction(type, action, btn) {
+  if (!state.selectedProjectId || !type || !SECOND_STAGE_ASK[action]) return;
+  const field = (name) => document.querySelector(`[data-second-stage-field="${name}"][data-track="${type}"]`);
+  const body = {};
+  let shot = null;
+  if (action === "confirm") body.system = String(field("system")?.value || "").trim();
+  if (action === "application-made") {
+    body.recordNumber = String(field("recordNumber")?.value || "").trim();
+    if (!body.recordNumber) { showMessage("Enter the record or application number the portal shows.", "warning"); return; }
+  }
+  if (action === "uploaded") {
+    body.confirmationNumber = String(field("confirmationNumber")?.value || "").trim();
+    shot = field("screenshot")?.files?.[0] || null;
+  }
+  if (!confirm(SECOND_STAGE_ASK[action])) return;
+  // WHO: the signed-in person when sign-in is on (the server takes the session, never a typed name);
+  // otherwise the name asked for here, as Approve & auto-submit asks. No name, nothing recorded.
+  const auth = await authForDecision();
+  if (!(auth && auth.enabled)) {
+    let last = "";
+    try { last = localStorage.getItem(APPROVER_NAME_KEY) || ""; } catch { last = ""; }
+    body.by = String(prompt("Your name, recorded with this:", last) || "").trim();
+    if (!body.by) { showMessage("Nothing was recorded: this is recorded under a person's name.", "warning"); return; }
+    try { localStorage.setItem(APPROVER_NAME_KEY, body.by); } catch { /* per-viewer convenience only */ }
+  }
+  if (btn) btn.disabled = true;
+  const base = `/api/projects/${state.selectedProjectId}/submittal-tracks/${encodeURIComponent(type)}/second-stage`;
+  try {
+    if (shot) {
+      const up = await fetch(`${base}/screenshot${body.by ? `?by=${encodeURIComponent(body.by)}` : ""}`, { method: "POST", headers: { "Content-Type": shot.type || "image/png" }, body: shot });
+      if (!up.ok) throw new Error((await up.json().catch(() => ({}))).error || "The screenshot could not be saved.");
+    }
+    const res = await api(`${base}/${action}`, { method: "POST", body: JSON.stringify(body) });
+    state.submittalTracks = res.tracks || state.submittalTracks;
+    state.detail = await api(`/api/projects/${state.selectedProjectId}`);
+    await loadProcessMap();
+    renderDetail();
+    showMessage(action === "uploaded" ? "Recorded: the plans are uploaded and the track is filed." : action === "application-made" ? "Recorded: the application is made. Not filed until the plan upload is marked done." : action === "confirm" ? "Second stage confirmed for this agency." : "Second stage removed for this agency.", "info");
+  } catch (err) {
+    if (btn) btn.disabled = false;
+    showMessage(err.message || "Could not record that.", "error");
   }
 }
 
@@ -6818,6 +7807,56 @@ function renderHistoricalFailures() {
 // preflight column and an is-warn modifier instead of an .item tint. Removed
 // rather than left behind as a helper with no callers.)
 
+// A NAMED PERSON ACCEPTS THAT THE PROJECT AHJ FILES FOR THIS PARCEL (draft 16 A): a reason and a name on
+// the parcel finding; POST /api/projects/:id/parcel-jurisdiction/accept. Never automatic.
+function parcelAcceptFormHtml() {
+  return `
+          <div class="kx-issue-field" data-parcel-accept-form>
+            <span class="kx-issue-field-label">This AHJ files for the parcel anyway?</span>
+            <span class="kx-issue-field-value">
+              <input type="text" data-parcel-accept-reason placeholder="Why (e.g. the county issues for this city by agreement)" maxlength="500">
+              <input type="text" data-parcel-accept-by placeholder="Your name" maxlength="120">
+              <button type="button" class="secondary" data-parcel-accept>Accept with my name</button>
+            </span>
+          </div>`;
+}
+function parcelWithdrawHtml() {
+  return ` <span class="kx-check-note"><input type="text" data-parcel-withdraw-by placeholder="Your name" maxlength="120"> <button type="button" class="secondary" data-parcel-withdraw>Withdraw acceptance</button></span>`;
+}
+function wireParcelAcceptance(root) {
+  if (!root) return;
+  const projectId = state.selectedProjectId;
+  root.querySelectorAll("[data-parcel-accept]").forEach((btn) => btn.addEventListener("click", async () => {
+    const form = btn.closest("[data-parcel-accept-form]");
+    const reason = (form?.querySelector("[data-parcel-accept-reason]")?.value || "").trim();
+    const decidedBy = (form?.querySelector("[data-parcel-accept-by]")?.value || "").trim();
+    if (!reason) { showMessage("Say why this AHJ files for the parcel.", "error"); return; }
+    btn.disabled = true;
+    try {
+      await api(`/api/projects/${projectId}/parcel-jurisdiction/accept`, { method: "POST", body: JSON.stringify({ reason, decidedBy }) });
+      await selectProject(projectId);
+      showMessage("Accepted with your name: the parcel finding now names you.", "info");
+    } catch (err) {
+      showMessage(err.message || "Could not record the acceptance.", "error");
+    } finally {
+      btn.disabled = false;
+    }
+  }));
+  root.querySelectorAll("[data-parcel-withdraw]").forEach((btn) => btn.addEventListener("click", async () => {
+    const decidedBy = (btn.parentElement?.querySelector("[data-parcel-withdraw-by]")?.value || "").trim();
+    btn.disabled = true;
+    try {
+      await api(`/api/projects/${projectId}/parcel-jurisdiction/accept`, { method: "DELETE", body: JSON.stringify({ decidedBy }) });
+      await selectProject(projectId);
+      showMessage("Acceptance withdrawn.", "info");
+    } catch (err) {
+      showMessage(err.message || "Could not withdraw the acceptance.", "error");
+    } finally {
+      btn.disabled = false;
+    }
+  }));
+}
+
 function renderCodeRefs(refs = []) {
   if (!refs.length) return "";
   return `
@@ -6910,7 +7949,10 @@ function renderReviewerGate() {
   const findings = report.findings || [];
   const blockers = findings.filter((item) => item.severity === "blocker");
   const warnings = findings.filter((item) => item.severity === "warning");
-  const clears = findings.filter((item) => item.severity === "pass" || item.severity === "callout");
+  // Check records (review-audit draft 07) are grouped apart from the callouts: passes with their
+  // arithmetic and the checks that could not run, by category, collapsed.
+  const records = findings.filter((item) => item.checkOutcome === "passed" || item.checkOutcome === "not_checked");
+  const clears = findings.filter((item) => (item.severity === "pass" || item.severity === "callout") && !records.includes(item));
   $("reviewerCounts").textContent = `${blockers.length} blocker / ${warnings.length} warn`;
 
   const issues = [...blockers, ...warnings].slice(0, 18);
@@ -6919,11 +7961,12 @@ function renderReviewerGate() {
   const subject = (profile && profile.ahj) || state.detail?.project?.ahj || "This jurisdiction";
   const submitButtonEnough = report.finalSubmitGate?.finalSubmitButtonAloneIsEnough;
 
-  const checksColumn = clears.length
-    ? clears.slice(0, 14).map((item) => `
+  const recordsHtml = checkRecordsHtml(records.map((r) => ({ id: r.id, outcome: r.checkOutcome, category: r.category, title: r.title, text: r.message, basis: r.ruleBasis?.label || "" })), { heading: "Measured checks" });
+  const checksColumn = (clears.length || records.length)
+    ? recordsHtml + clears.slice(0, 14).map((item) => `
         <div class="kx-check ${item.severity === "callout" ? "is-warn" : ""}">
           <span class="kx-check-mark" aria-hidden="true">${item.severity === "callout" ? "!" : "✓"}</span>
-          <span class="kx-check-text">${esc(item.title)}${item.message || item.designTeamAction ? `<span class="kx-check-note">${esc([item.message, item.severity === "callout" ? item.designTeamAction : ""].filter(Boolean).join(" "))}</span>` : ""}</span>
+          <span class="kx-check-text">${esc(item.title)}${item.message || item.designTeamAction ? `<span class="kx-check-note">${esc([item.message, item.severity === "callout" ? item.designTeamAction : ""].filter(Boolean).join(" "))}</span>` : ""}${item.id === "reviewer.jurisdiction.parcel" && /^Jurisdiction accepted by /.test(String(item.title || "")) ? parcelWithdrawHtml() : ""}</span>
         </div>`).join("")
     : `<span class="kx-check-empty">The gate produced no cleared checks for this project yet — everything it looked at is on the right.</span>`;
 
@@ -6944,6 +7987,8 @@ function renderReviewerGate() {
             <span class="kx-action-label">Recommended action</span>
             <span class="kx-action-text">${esc(finding.designTeamAction || "Resolve before submittal.")}</span>
           </div>
+          ${finding.id === "reviewer.jurisdiction.parcel" ? parcelAcceptFormHtml() : ""}
+          ${finding.ruleBasis ? `<div class="kx-issue-field"><span class="kx-issue-field-label">Rule basis</span><span class="kx-issue-field-value">${esc(finding.ruleBasis.label)}${finding.ruleBasis.source ? ` — ${esc(finding.ruleBasis.source)}` : ""}</span></div>` : ""}
           <details class="provenance">
             <summary>${esc(humanize(finding.category))} · evidence and code anchors</summary>
             <div class="provenance-body">
@@ -6987,6 +8032,7 @@ function renderReviewerGate() {
       </article>
     </div>
   `;
+  wireParcelAcceptance($("reviewerGate"));
   // Note: installer callouts are a subset of the findings rendered above (each
   // carries installerCallout=true), so they're intentionally NOT shown again as a
   // separate block — that was duplicating the city-style correction comments.
@@ -7042,16 +8088,59 @@ function qcCounts(results) {
   return { fails: verdicts.filter((v) => v === "fail").length, warnings: verdicts.filter((v) => v === "warning").length };
 }
 
+// WHAT THE JOB INSTALLS (#673). QC checks battery facts instead of module facts only on a storage
+// scope; the plan set settles it, or a named person sets it here. A storage scope on a job whose
+// fields still name new modules does not drop the module checks (the QC row says why).
+const JOB_SCOPE_LABELS = {
+  "pv": "New PV",
+  "pv+storage": "New PV with storage",
+  "storage-added-to-existing-pv": "Storage added to an existing PV system",
+  "storage-only": "Storage only",
+};
+function jobScopeHtml(view) {
+  if (!view) return "";
+  const basis = view.basis === "person" ? `set by ${esc(view.setBy || "a person")}` : view.basis === "plan_set" ? "from the plan set" : "default";
+  const options = [`<option value="">Plan set decides</option>`].concat(Object.entries(JOB_SCOPE_LABELS).map(([value, label]) =>
+    `<option value="${esc(value)}"${view.personScope === value ? " selected" : ""}>${esc(label)}</option>`)).join("");
+  return `<article class="item ${view.conflict ? "warning" : "info"}" id="jobScopeCard">
+      <div class="item-title"><span>Job scope: ${esc(JOB_SCOPE_LABELS[view.scope] || view.scope)} (${basis})</span></div>
+      <p>${esc(view.conflict || view.reason)}</p>
+      <p><label>Set it: <select id="jobScopeSelect">${options}</select></label>
+        <button type="button" class="secondary" id="jobScopeSave">Save scope</button></p>
+    </article>`;
+}
+async function saveJobScope() {
+  const select = $("jobScopeSelect");
+  if (!select || !state.selectedProjectId) return;
+  const scope = select.value || null;
+  const auth = await authForDecision();
+  const lede = scope
+    ? `Set this job's scope to "${JOB_SCOPE_LABELS[scope]}"? QC re-runs and checks the equipment that scope installs.`
+    : "Clear the job scope? The plan set's own evidence decides again.";
+  const decidedBy = namedPersonConsent(auth, lede, "set the job scope", "the job scope is set by a named person");
+  if (decidedBy == null) return;
+  try {
+    const detail = await api(`/api/projects/${state.selectedProjectId}/job-scope`, { method: "PUT", body: JSON.stringify({ scope, ...(decidedBy ? { decidedBy } : {}) }) });
+    if (detail && detail.project) state.detail = detail;
+    renderDetail();
+    showMessage("Job scope saved; QC re-ran.", "info");
+  } catch (err) {
+    showMessage(`Saving the job scope failed: ${err.message}`, "error");
+  }
+}
+
 function renderQc() {
   const results = state.detail.qcResults || [];
   const { fails, warnings } = qcCounts(results);
   $("qcCounts").textContent = `${fails} fail / ${warnings} warn`;
-  $("qcResults").innerHTML = results.length ? results.map((result) => `
+  $("qcResults").innerHTML = jobScopeHtml(state.detail.jobScope) + (results.length ? results.map((result) => `
     <article class="item ${esc(qcVerdict(result))}">
       <div class="item-title"><span>${esc(result.ruleName)}</span>${statusBadge(qcVerdict(result))}</div>
       <p>${esc(result.message)}</p>
     </article>
-  `).join("") : `<p class="muted">No QC results yet.</p>`;
+  `).join("") : `<p class="muted">No QC results yet.</p>`);
+  const save = $("jobScopeSave");
+  if (save) save.addEventListener("click", saveJobScope);
 }
 
 // Human-readable labels + a short "what to enter" hint for the QC review fields,
@@ -7093,6 +8182,17 @@ const REVIEW_FIELD_LABELS = {
   meter: ["Meter number", "the meter number from the plan set / bill / meter photo"],
   ubAccountNumber: ["Utility-bill account number", "the account number printed on the utility bill"],
   ubMeterNumber: ["Utility-bill meter number", "the meter number printed on the utility bill / meter photo"],
+  // Storage-scope rows (#673).
+  batteryMake: ["Battery make", "the battery manufacturer"],
+  batteryModel: ["Battery model", "the battery model number"],
+  batteryQty: ["Battery quantity", "the number of battery units"],
+  batteryCapacityKwh: ["Battery usable energy (kWh)", "the usable kWh of all units together"],
+  batteryOutputKw: ["Battery power (kW)", "the battery inverter / PCS continuous AC output in kW"],
+  essInverterModel: ["Battery inverter / PCS model", "the battery inverter or PCS model number"],
+  batteryMode: ["Battery operating mode", "export, non-export or backup-only"],
+  essBreaker: ["Battery breaker / OCPD (A)", "the backfed breaker the battery inverter lands on, in amps"],
+  existingDcKw: ["Existing PV system size (kW)", "the existing system's DC (or AC) size in kW"],
+  nemTariff: ["Existing system tariff", "the net-metering tariff the existing system is on"],
 };
 function camelToTitle(key) {
   return String(key || "")
@@ -8421,6 +9521,7 @@ function permitTargetCardHtml(target, checks, ui) {
       ${target.portalUrl ? `<p class="muted" style="word-break:break-all">${esc(target.portalUrl)}</p>` : ""}
       ${target.trackingUrl && target.trackingUrl !== target.portalUrl ? `<p class="muted" style="word-break:break-all">Status link: ${esc(target.trackingUrl)}</p>` : ""}
       ${target.readGap && !stopped ? `<p data-read-gap style="border-left:3px solid var(--warn, #b7791f);padding-left:6px"><strong>Can't read on its own:</strong> ${esc(target.readGap)}</p>` : ""}
+      ${target.lastUnreadable?.reason && !stopped ? `<p data-last-unreadable class="muted">Last check read nothing (${esc(new Date(target.lastUnreadable.at).toLocaleString())}): ${esc(target.lastUnreadable.reason)}</p>` : ""}
       ${issuedDocumentsHtml(target)}
       <p class="muted">${stopped ? "Tracking stopped — the monitor no longer reads this filing." : `Checks every ${esc(target.checkFrequencyDays)} day(s) · Next: ${target.nextCheckAt ? esc(new Date(target.nextCheckAt).toLocaleString()) : "not scheduled"}`} · Source strategy: ${esc(target.portalPlatform || "auto")}</p>
       ${ui?.editing || ui?.recording ? "" : `<div style="margin-top:6px">
@@ -9147,10 +10248,10 @@ function renderPortalRuns() {
   // reopen runs included, and offered them the Capture Confirmation form — which stamps a
   // submissions row and would have picked the newest FAILED staging row for a filing that is
   // already on file. The backend now refuses that run type with a 409; this stops offering it.
-  const paused = runs.find((run) => run.status === "paused_for_human" && run.runType !== "correction_reopen");
+  const paused = runs.find((run) => (run.status === "paused_for_human" || run.status === "awaiting_payment") && run.runType !== "correction_reopen");
   const runCard = (run) => {
     const isMfa = run.pauseReason === "mfa_captcha";
-    const cardClass = run.status === "failed" ? "fail" : isMfa ? "warning" : "info";
+    const cardClass = run.status === "failed" ? "fail" : isMfa || run.status === "awaiting_payment" || run.status === "cancelled" ? "warning" : "info";
     const confirmLine = run.confirmationNumber ? `<p class="muted">Confirmation: <strong>${esc(run.confirmationNumber)}</strong></p>` : "";
     const mfaBanner = isMfa
       ? `<p class="submit-gate-check warning" style="margin-top:6px">Portal requires your attention — MFA or CAPTCHA detected. Complete it in the browser window, then click Retry to continue.</p>`
@@ -9168,6 +10269,15 @@ function renderPortalRuns() {
           <span class="muted" style="font-size:11px">Press this only AFTER you have clicked the portal's own resubmit. It records your click — it never submits anything — and closes the corrections this resubmission answers.</span>
         </div>`
       : "";
+    // #340 — STOP A RUNNING STAGE. Only on a stage that is still filling ('running'); a run at the
+    // review screen has no Stop (that window is the person's to submit or close). The server stops the
+    // replay at its next step, closes its browser and records the run cancelled — never submitted.
+    const stopAction = run.status === "running" && run.runType === "prepare_submit"
+      ? `<div style="margin-top:6px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+          <button class="secondary" data-stop-staging="${esc(run.id)}" style="font-size:12px">Stop staging</button>
+          <span class="muted" style="font-size:11px">Stops at the next step: nothing more is filled or clicked, nothing is submitted.</span>
+        </div>`
+      : "";
     return `
     <article class="item ${cardClass}">
       <div class="item-title"><span>${esc(humanize(run.runType))}</span>${statusBadge(run.status)}</div>
@@ -9176,6 +10286,7 @@ function renderPortalRuns() {
       ${confirmLine}
       <p class="muted">${esc(run.errorMessage || run.startedAt)}</p>
       ${resubmitAction}
+      ${stopAction}
     </article>`;
   };
   // PIN WHAT A PERSON MUST ACT ON; FOLD THE HISTORY WITH ITS COUNTS. On 7ec74634 the one
@@ -9184,7 +10295,8 @@ function renderPortalRuns() {
   // resubmit, and every paused run — the same states the capture form and the reopen action
   // are offered for. Everything else goes behind "Earlier runs (N · M failed)", so the failure
   // count is never hidden with the cards.
-  const pinnedStatuses = ["awaiting_human_submit", "awaiting_human_resubmit", "paused_for_human"];
+  // A RUNNING stage is pinned too (#340): its Stop control must not sit folded under old runs.
+  const pinnedStatuses = ["running", "awaiting_human_submit", "awaiting_human_resubmit", "paused_for_human", "awaiting_payment"];
   const pinned = runs.filter((run) => pinnedStatuses.includes(run.status));
   const earlier = runs.filter((run) => !pinnedStatuses.includes(run.status));
   const earlierFailed = earlier.filter((run) => run.status === "failed").length;
@@ -9221,6 +10333,24 @@ function renderPortalRuns() {
         // An unknown must never read as reassurance: a resubmission the monitor cannot poll,
         // or corrections that did not close, is a WARNING even though the record was written.
         showMessage(result.message, result.checkTargetRefreshed && !result.correctionsStillOpen ? "info" : "warning");
+      } catch (err) {
+        showMessage(err.message, "error");
+        button.disabled = false;
+        button.textContent = originalLabel;
+      }
+    });
+  });
+
+  document.querySelectorAll("#portalRunsPinned button[data-stop-staging], #portalRuns button[data-stop-staging]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      if (!confirm("Stop this staging run at its next step? Nothing more is filled or clicked and nothing is submitted; whatever the portal already holds stays there.")) return;
+      button.disabled = true;
+      const originalLabel = button.textContent;
+      button.textContent = "Stopping…";
+      try {
+        const result = await api(`/api/portal-runs/${encodeURIComponent(button.dataset.stopStaging)}/cancel`, { method: "POST", body: "{}" });
+        showMessage(result.message, "info");
+        await selectProject(state.selectedProjectId);
       } catch (err) {
         showMessage(err.message, "error");
         button.disabled = false;
@@ -9698,6 +10828,10 @@ async function prepareSubmission() {
     }
     if (job.result && job.result.status === "failed") {
       showMessage(`Staging failed: ${job.result.message || "see the run log on the project for details."}`, "error");
+      return;
+    }
+    if (job.result && job.result.status === "awaiting_payment") {
+      showMessage(job.result.message || "Payment needed on the portal. Pay there, then press We paid the portal on the track.", "warning");
       return;
     }
     if (job.result && job.result.status === "paused_for_human") {
@@ -10295,6 +11429,7 @@ $("startAutopilotBtn").addEventListener("click", startAutopilot);
 $("approveSubmitBtn").addEventListener("click", approveAndSubmit);
 $("deleteProjectBtn").addEventListener("click", deleteSelectedProject);
 $("applyStatusOverrideBtn")?.addEventListener("click", applyStatusOverride);
+$("confirmProjectClassBtn")?.addEventListener("click", confirmProjectClass);
 $("addCorrectionBtn").addEventListener("click", addCorrection);
 $("addPermitTargetBtn").addEventListener("click", addPermitTarget);
 $("recordPermitStatusBtn").addEventListener("click", () => recordPermitStatus("manual"));
@@ -10417,12 +11552,160 @@ async function handleBatchDrop(file) {
   });
 })();
 
+// NEW JOBS FROM A ZIP (#538). One zip (or, for the operator, a server folder) with one folder per job
+// becomes one project per folder, through email intake's per-job pipeline. Two steps: the upload
+// only lists the folders, so the person sees the count (one Parser-cost read each) before Start.
+// Built with DOM calls, never innerHTML: folder and file names come from the archive.
+const jobDropEl = (tag, props = {}, children = []) => {
+  const node = document.createElement(tag);
+  Object.assign(node, props);
+  node.append(...children);
+  return node;
+};
+let jobDropPoll = null;
+
+async function fillJobDropClients() {
+  const sel = $("jobDropClient");
+  if (!sel) return;
+  if (!(state.clients || []).length) { try { await loadClients(); } catch { /* the select says there are none */ } }
+  const keep = sel.value;
+  sel.replaceChildren(
+    jobDropEl("option", { value: "", textContent: "Client these jobs are for…" }),
+    ...(state.clients || []).map((c) => jobDropEl("option", { value: c.id, textContent: c.companyName || c.legalBusinessName || "Unnamed" })),
+  );
+  if (keep) sel.value = keep;
+}
+
+function uploadJobDropZip(file, clientId) {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open("POST", `/api/batch-import/job-drop/upload?${new URLSearchParams({ clientId }).toString()}`);
+    xhr.setRequestHeader("Content-Type", "application/octet-stream");
+    xhr.upload.onprogress = (event) => {
+      if (!event.lengthComputable) return;
+      $("jobDropStatus").textContent = `Uploading ${file.name}… ${Math.round((event.loaded / event.total) * 100)}%`;
+    };
+    xhr.onload = () => {
+      let data = {};
+      try { data = JSON.parse(xhr.responseText || "{}"); } catch { data = {}; }
+      if (xhr.status < 200 || xhr.status >= 300) { reject(new Error(data.error || `Zip upload failed (status ${xhr.status}).`)); return; }
+      resolve(data);
+    };
+    xhr.onerror = () => reject(new Error("Browser could not upload the zip."));
+    $("jobDropStatus").textContent = `Reading ${file.name} (${formatBytes(file.size)})…`;
+    xhr.send(file);
+  });
+}
+
+/** The count, before anything is read: one model read per folder, the Parser's cost. */
+function renderJobDropPreview(preview, source) {
+  const box = $("jobDropPreview");
+  const n = (preview.jobs || []).length;
+  const clientName = $("jobDropClient").selectedOptions[0]?.textContent || "the client";
+  const start = jobDropEl("button", { type: "button", className: "primary", textContent: `Start ${n} job${n === 1 ? "" : "s"}` });
+  const cancel = jobDropEl("button", { type: "button", className: "secondary", textContent: "Cancel" });
+  cancel.addEventListener("click", () => { box.hidden = true; box.replaceChildren(); $("jobDropStatus").textContent = ""; });
+  start.addEventListener("click", async () => {
+    start.disabled = true;
+    try {
+      const out = await api("/api/batch-import/job-drop/start", { method: "POST", body: JSON.stringify({ clientId: preview.clientId, ...source }) });
+      showMessage(`Queued ${out.queued} job${out.queued === 1 ? "" : "s"}. Each folder is read and checked like an emailed job; the list below fills in as they finish.`);
+      box.hidden = true;
+      box.replaceChildren();
+      $("jobDropStatus").textContent = "";
+      await loadJobDrops();
+    } catch (err) { start.disabled = false; showMessage(err.message || "Could not start the jobs.", "error"); }
+  });
+  box.replaceChildren(jobDropEl("div", { className: "panel" }, [
+    jobDropEl("strong", { textContent: `${n} job folder${n === 1 ? "" : "s"} for ${clientName}` }),
+    jobDropEl("div", { className: "muted", textContent: `Each folder becomes one project and is read once by the model, the same cost as one Parser read: ${n} read${n === 1 ? "" : "s"} in all. Nothing is read until you press Start.` }),
+    jobDropEl("ul", {}, (preview.jobs || []).map((j) => jobDropEl("li", { textContent: `${j.folder} (${j.files} file${j.files === 1 ? "" : "s"})` }))),
+    ...((preview.looseFiles || []).length
+      ? [jobDropEl("div", { className: "muted", textContent: `Not in a job folder, so not read: ${preview.looseFiles.join(", ")}` })]
+      : []),
+    jobDropEl("div", {}, [start, " ", cancel]),
+  ]));
+  box.hidden = false;
+}
+
+const JOB_DROP_STATUS_TEXT = { queued: "Waiting", running: "Reading…", created: "Project created", attached: "Added to the project at that address", unsorted: "Needs a person" };
+
+async function loadJobDrops() {
+  const list = $("jobDropList");
+  if (!list) return;
+  const drops = await api("/api/batch-import/job-drops");
+  const rows = (drops || []).map((d) => {
+    const done = d.counts.created + d.counts.attached + d.counts.unsorted;
+    const folders = (d.folders || []).map((f) => {
+      const parts = [jobDropEl("strong", { textContent: f.folder }), `: ${JOB_DROP_STATUS_TEXT[f.status] || f.status}`];
+      if (f.projectId) {
+        const open = jobDropEl("a", { href: "#", textContent: "open" });
+        open.addEventListener("click", (e) => { e.preventDefault(); selectProject(f.projectId); });
+        parts.push(" (", open, ")");
+      }
+      if (f.reasonText) parts.push(jobDropEl("div", { className: "muted", textContent: f.reasonText }));
+      if ((f.missing || []).length) parts.push(jobDropEl("div", { className: "muted", textContent: `Still needed: ${f.missing.join(", ")}` }));
+      const refused = (f.files || []).filter((x) => x.refused);
+      if (refused.length) parts.push(jobDropEl("div", { className: "muted", textContent: `Not used: ${refused.map((x) => `${x.name} (${x.refused})`).join("; ")}` }));
+      return jobDropEl("li", {}, parts);
+    });
+    return jobDropEl("details", { className: "panel", open: done < d.total }, [
+      jobDropEl("summary", {}, [
+        jobDropEl("strong", { textContent: `${d.clientName || "Client"}: ${d.total} job${d.total === 1 ? "" : "s"}` }),
+        ` (${done}/${d.total} done: ${d.counts.created} created, ${d.counts.attached} added to existing, ${d.counts.unsorted} need a person; started ${new Date(d.createdAt).toLocaleString()}${d.startedBy ? ` by ${d.startedBy}` : ""})`,
+      ]),
+      jobDropEl("progress", { max: d.total, value: done, style: "width:100%" }),
+      jobDropEl("ul", {}, folders),
+    ]);
+  });
+  list.replaceChildren(...rows);
+  // Refresh while any folder is still waiting or being read; stop once every drop is done.
+  const busy = (drops || []).some((d) => d.counts.queued + d.counts.running > 0);
+  if (busy && !jobDropPoll) jobDropPoll = window.setTimeout(() => { jobDropPoll = null; loadJobDrops().catch(() => null); }, 5000);
+}
+
+(function () {
+  const input = $("jobDropInput");
+  if (!input) return;
+  fillJobDropClients().catch(() => null);
+  $("jobDropClient").addEventListener("focus", () => { fillJobDropClients().catch(() => null); });
+  const needClient = () => {
+    const clientId = $("jobDropClient").value;
+    if (!clientId) showMessage("Choose the client these jobs are for first.", "error");
+    return clientId;
+  };
+  input.addEventListener("change", async () => {
+    const file = input.files?.[0];
+    input.value = "";
+    if (!file) return;
+    if (!(file.name || "").toLowerCase().endsWith(".zip")) { showMessage("Choose a .zip with one folder per job.", "error"); return; }
+    const clientId = needClient();
+    if (!clientId) return;
+    try {
+      const preview = await uploadJobDropZip(file, clientId);
+      $("jobDropStatus").textContent = "";
+      renderJobDropPreview(preview, { uploadId: preview.uploadId });
+    } catch (err) { $("jobDropStatus").textContent = ""; showMessage(err.message || "Zip upload failed.", "error"); }
+  });
+  $("jobDropFolderBtn").addEventListener("click", async () => {
+    const folderPath = $("jobDropFolder").value.trim();
+    if (!folderPath) { showMessage("Type the server folder's full path, or choose a .zip.", "error"); return; }
+    const clientId = needClient();
+    if (!clientId) return;
+    try {
+      const preview = await api("/api/batch-import/job-drop/preview", { method: "POST", body: JSON.stringify({ clientId, folderPath }) });
+      renderJobDropPreview(preview, { folderPath });
+    } catch (err) { showMessage(err.message || "Could not read that folder.", "error"); }
+  });
+  loadJobDrops().catch(() => null);
+})();
+
 // ----- Clients & contractor licensing -----
 const CLIENT_TEXT_FIELDS = [
   "companyName", "legalBusinessName", "dba", "contactName", "contactEmail", "phone", "billingStatus", "billingMode", "serviceFeeUsd",
   "requestLinksAutoSend", "handoffAutoSend", "intakeTag", "intakeSenders",
   "ccbLicenseNumber", "ccbExpiration", "electricalLicenseNumber", "metroCityLicenseNumber",
-  "electricalSupervisorName", "electricianLicenseNumber",
+  "electricalSupervisorName", "electricianLicenseNumber", "installerCertifications",
   "ein", "bondCarrier", "insuranceCarrier", "businessAddress", "businessCity", "businessState",
   "businessZip", "businessPhone", "businessEmail", "authorizedSignerName", "authorizedSignerTitle", "notes",
 ];
@@ -10518,6 +11801,78 @@ function renderStateLicences() {
     btn.addEventListener("click", () => {
       state.stateLicencesDraft.splice(Number(btn.dataset.removeSl), 1);
       renderStateLicences();
+    });
+  });
+  if (window.lucide) window.lucide.createIcons();
+}
+
+// ── SERVICE AREA (clientServiceArea.ts): where the company works. A list of { kind, state, name }
+// rows; the save sends the editor's FULL list, and only a list loaded from THIS client (as licences do).
+const SERVICE_AREA_KIND_OPTIONS = [
+  { kind: "city", label: "City / town" },
+  { kind: "county", label: "County" },
+  { kind: "utility", label: "Utility" },
+  { kind: "state", label: "Whole state" },
+];
+
+function serviceAreaFromClient(client) {
+  const list = client && Array.isArray(client.serviceArea) ? client.serviceArea : [];
+  return list.map((e) => ({ kind: String(e.kind || ""), state: String(e.state || ""), name: String(e.name || "") }));
+}
+
+function serviceAreaRowHtml(entry, idx) {
+  const options = SERVICE_AREA_KIND_OPTIONS.map((k) => `<option value="${esc(k.kind)}"${k.kind === entry.kind ? " selected" : ""}>${esc(k.label)}</option>`).join("");
+  const isState = entry.kind === "state";
+  return `<div class="service-area-row" data-sa-row="${idx}">
+      <select data-sa="kind" data-idx="${idx}" aria-label="Kind of place">${entry.kind ? "" : `<option value="" selected>Kind...</option>`}${options}</select>
+      <input data-sa="state" data-idx="${idx}" maxlength="2" placeholder="ST" aria-label="State" value="${esc(entry.state)}" />
+      <input data-sa="name" data-idx="${idx}" placeholder="${isState ? "(the whole state)" : entry.kind === "utility" ? "Utility name" : entry.kind === "county" ? "County name" : "City or town name"}" aria-label="Name" value="${esc(isState ? "" : entry.name)}"${isState ? " disabled" : ""} />
+      <button type="button" class="danger-button" data-remove-sa="${idx}" aria-label="Remove place"><i data-lucide="x"></i><span>Remove</span></button>
+    </div>`;
+}
+
+/** The rows as the API takes them, and what is wrong with a half-filled row (never silently dropped). */
+function serviceAreaPayload(drafts) {
+  const list = [];
+  const errors = [];
+  (drafts || []).forEach((d, i) => {
+    const kind = String(d.kind || "").trim();
+    const st = String(d.state || "").trim().toUpperCase();
+    const name = kind === "state" ? "" : String(d.name || "").trim();
+    if (!kind && !st && !name) return;
+    const isState = st.length === 2 && st.split("").every((c) => c >= "A" && c <= "Z");
+    if (!kind) errors.push(`Service area row ${i + 1}: pick city, county, utility or whole state.`);
+    else if (!isState) errors.push(`Service area row ${i + 1}: the state must be two letters.`);
+    else if (kind !== "state" && !name) errors.push(`Service area row ${i + 1}: name the ${kind}.`);
+    else list.push({ kind, state: st, name });
+  });
+  return { list, errors };
+}
+
+function withServiceArea(payload, drafts, loadedFor, clientId) {
+  if (loadedFor !== clientId) return payload;
+  return { ...payload, serviceArea: serviceAreaPayload(drafts).list };
+}
+
+function renderServiceArea() {
+  const wrap = $("serviceAreaList");
+  if (!wrap) return;
+  const drafts = state.serviceAreaDraft || [];
+  wrap.innerHTML = drafts.length
+    ? drafts.map(serviceAreaRowHtml).join("")
+    : `<p class="muted">No service area yet. Add a row per state, city or county, and utility this company works in.</p>`;
+  wrap.querySelectorAll("[data-sa]").forEach((el) => {
+    el.addEventListener(el.tagName === "SELECT" ? "change" : "input", () => {
+      const row = state.serviceAreaDraft[Number(el.dataset.idx)];
+      if (!row) return;
+      row[el.dataset.sa] = el.value;
+      if (el.dataset.sa === "kind") renderServiceArea();
+    });
+  });
+  wrap.querySelectorAll("[data-remove-sa]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      state.serviceAreaDraft.splice(Number(btn.dataset.removeSa), 1);
+      renderServiceArea();
     });
   });
   if (window.lucide) window.lucide.createIcons();
@@ -10628,6 +11983,9 @@ function blankClientForm() {
   state.stateLicencesDraft = [];
   state.stateLicencesLoadedFor = "";
   renderStateLicences();
+  state.serviceAreaDraft = [];
+  state.serviceAreaLoadedFor = "";
+  renderServiceArea();
   clientFormStatus("");
   if ($("clientCredentials")) $("clientCredentials").hidden = true;
   renderClientsList();
@@ -10660,6 +12018,349 @@ async function loadClientCredentials(clientId) {
   }
 }
 
+/* ===========================================================================
+   CLIENT BILLING (#700) — statement, invoices, the ledger.
+   ---------------------------------------------------------------------------
+   The statement is a PREVIEW (the server writes nothing for it). "Create
+   invoice" saves it as a draft and claims its lines: a line sits on one live
+   invoice only, so the next statement leaves it out. Every value from the
+   server goes through esc(); homeowner names and addresses are tenant data.
+   =========================================================================== */
+function billingMoney(v) {
+  const n = Number(v) || 0;
+  const s = `$${Math.abs(n).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+  return n < 0 ? `−${s}` : s;
+}
+
+function billingStatus(message, kind) {
+  const el = $("billingStatus");
+  if (!el) return;
+  el.textContent = message || "";
+  el.style.color = kind === "error" ? "var(--danger)" : "";
+}
+
+const BILLING_KIND_TITLE = {
+  reimbursement: "Fees we paid on the client's behalf, at cost",
+  service: "Our service fees",
+  onboarding: "Onboarding fees and credits",
+  received: "Payments already received",
+};
+
+function billingLineFlags(l) {
+  const flags = [];
+  if (l.role === "adjustment") flags.push("true-up");
+  if (l.provisional) flags.push("provisional: from the published schedule");
+  if (l.alreadyPaid && l.kind !== "received") flags.push("already paid");
+  if (l.carriedForward) flags.push("from an earlier period");
+  return flags.length ? ` <span class="muted">(${esc(flags.join("; "))})</span>` : "";
+}
+
+function billingLinesHtml(lines) {
+  const kinds = ["reimbursement", "service", "onboarding", "received"];
+  return kinds.map((kind) => {
+    const list = (lines || []).filter((l) => l.kind === kind);
+    if (!list.length) return "";
+    return `<div class="billing-kind"><strong style="font-size:12px">${esc(BILLING_KIND_TITLE[kind])}</strong>
+      <table style="font-size:12px;width:100%;border-collapse:collapse;margin:2px 0 6px">
+        ${list.map((l) => `<tr>
+          <td style="padding:1px 8px 1px 0;white-space:nowrap;vertical-align:top">${esc(String(l.eventAt || "").slice(0, 10))}</td>
+          <td style="padding:1px 8px 1px 0;vertical-align:top">${esc(l.projectLabel)}<br><span class="muted">${esc(l.description)}</span>${billingLineFlags(l)}
+            ${l.reconciliation ? `<br><span class="muted">⚠ ${esc(l.reconciliation)}</span>` : ""}</td>
+          <td style="padding:1px 0;text-align:right;white-space:nowrap;vertical-align:top">${kind === "received" ? "" : l.alreadyPaid ? '<span class="muted">paid</span> ' : ""}${billingMoney(l.amountUsd)}</td>
+        </tr>`).join("")}
+      </table></div>`;
+  }).join("");
+}
+
+function billingTotalsHtml(t) {
+  return `<table style="font-size:12px;border-collapse:collapse;max-width:340px;width:100%;margin:4px 0">
+    <tr><td style="padding:1px 14px 1px 0">Fees at cost (pass-through)</td><td style="text-align:right">${billingMoney(t.reimbursementTotalUsd)}</td></tr>
+    <tr><td style="padding:1px 14px 1px 0">Service fees</td><td style="text-align:right">${billingMoney(t.serviceTotalUsd)}</td></tr>
+    <tr style="border-top:1px solid var(--border)"><td style="padding:3px 14px 1px 0"><strong>Amount due</strong></td><td style="text-align:right"><strong>${billingMoney(t.dueTotalUsd)}</strong></td></tr>
+    ${Number(t.receivedTotalUsd) ? `<tr><td style="padding:1px 14px 1px 0" class="muted">Already received at the gate (not due)</td><td style="text-align:right" class="muted">${billingMoney(t.receivedTotalUsd)}</td></tr>` : ""}
+  </table>`;
+}
+
+function renderBillingStatement(st) {
+  const box = $("billingStatement");
+  if (!box) return;
+  if (!st) { box.innerHTML = ""; return; }
+  const excluded = st.excluded || [];
+  const logins = st.loginsWithoutFeeAgreement || [];
+  box.innerHTML = `
+    <div class="billing-statement" style="border:1px solid var(--border);border-radius:6px;padding:8px;margin:6px 0">
+      <p style="margin:0 0 4px;font-size:12px"><strong>Draft statement, ${esc(st.periodStart)} to ${esc(st.periodEnd)}</strong> (end not included) ·
+        bill to ${st.billTo ? esc(st.billTo) : '<span class="badge badge-warning">NO ADDRESS</span>'}
+        <span class="muted">(${esc(String(st.billToSource || "").replaceAll("_", " "))}; billed ${esc(st.billingMode)})</span></p>
+      ${(st.lines || []).length ? billingLinesHtml(st.lines) + billingTotalsHtml(st) : '<p class="muted" style="font-size:12px">Nothing new to bill for this period: every billable line is already on an invoice, or nothing is billable yet.</p>'}
+      ${(st.notes || []).map((n) => `<p class="muted" style="font-size:12px;margin:4px 0">${esc(n)}</p>`).join("")}
+      ${logins.length ? `<p style="font-size:12px;margin:4px 0"><strong>⚠ ${esc(String(logins.length))} portal login${logins.length === 1 ? " has" : "s have"} no fee agreement on file</strong> (${esc(logins.join(", "))}). A fee we pay through ${logins.length === 1 ? "it" : "them"} cannot be invoiced until who pays is recorded on the login.</p>` : ""}
+      ${excluded.length ? `<details class="provenance"><summary><strong>${esc(String(excluded.length))} not on this statement, and why</strong></summary>
+        <div class="provenance-body"><ul style="margin:2px 0;padding-left:18px;font-size:12px">
+          ${excluded.map((x) => `<li><strong>${esc(x.projectLabel)}</strong> (${esc(x.track)}): ${esc(x.reason)}${x.amountSeenUsd != null ? ` <span class="muted">[${billingMoney(x.amountSeenUsd)} seen]</span>` : ""}<br><span class="muted">${esc(x.resolution)}</span></li>`).join("")}
+        </ul></div></details>` : ""}
+    </div>`;
+}
+
+const INVOICE_STATUS_BADGE = { draft: "badge-warning", sent: "badge-info", paid: "badge-pass", void: "" };
+
+function renderBillingInvoices(invoices) {
+  const box = $("billingInvoices");
+  if (!box) return;
+  if (!invoices || !invoices.length) { box.innerHTML = '<p class="muted clients-creds-hint">No invoices yet.</p>'; return; }
+  box.innerHTML = invoices.map((inv) => {
+    const open = inv.status === "draft" || inv.status === "sent";
+    return `<div class="cred-row" style="flex-wrap:wrap;gap:6px">
+      <div class="cred-row-text"><strong>${esc(inv.number)}</strong>
+        <span class="badge ${esc(INVOICE_STATUS_BADGE[inv.status] || "")}">${esc(inv.status)}</span>
+        <span class="muted">${esc(inv.periodStart)} to ${esc(inv.periodEnd)} · due ${billingMoney(inv.dueTotalUsd)}${inv.dueAt ? ` by ${esc(inv.dueAt)}` : ""}${inv.paidAt ? ` · paid ${esc(inv.paidAt.slice(0, 10))}${inv.paidReference ? ` (${esc(inv.paidReference)})` : ""}` : ""}${inv.voidReason ? ` · void: ${esc(inv.voidReason)}` : ""}</span>
+        ${inv.externalRef ? `<span class="badge badge-info" title="Sent to QuickBooks by ${esc(inv.qbPushedBy)}">QuickBooks #${esc(inv.externalRef)}${inv.qbStatus ? `: ${esc(inv.qbStatus)}` : ""}</span>` : ""}</div>
+      <div class="actions" style="margin:0">
+        <button type="button" class="secondary" data-inv-action="print" data-inv-id="${esc(inv.id)}"><span style="white-space:nowrap">View / print</span></button>
+        ${open ? `<button type="button" class="secondary" data-inv-action="send" data-inv-id="${esc(inv.id)}"><span style="white-space:nowrap">Email</span></button>` : ""}
+        ${inv.status === "draft" ? `<button type="button" class="secondary" data-inv-action="mark-sent" data-inv-id="${esc(inv.id)}"><span style="white-space:nowrap">Mark sent</span></button>` : ""}
+        ${inv.status === "draft" && !inv.externalRef ? `<button type="button" class="secondary" data-inv-action="add-line" data-inv-id="${esc(inv.id)}"><span style="white-space:nowrap">Add onboarding line</span></button>` : ""}
+        ${open && !inv.externalRef && state.quickbooks && state.quickbooks.connected && state.quickbooks.syncOn ? `<button type="button" class="secondary" data-inv-action="quickbooks" data-inv-id="${esc(inv.id)}"><span style="white-space:nowrap">Send to QuickBooks</span></button>` : ""}
+        ${open ? `<button type="button" class="secondary" data-inv-action="mark-paid" data-inv-id="${esc(inv.id)}"><span style="white-space:nowrap">Mark paid</span></button>` : ""}
+        ${open ? `<button type="button" class="danger-button" data-inv-action="void" data-inv-id="${esc(inv.id)}"><span style="white-space:nowrap">Void</span></button>` : ""}
+      </div></div>`;
+  }).join("");
+  box.querySelectorAll("[data-inv-action]").forEach((b) => b.addEventListener("click", () => billingInvoiceAction(b.dataset.invAction, b.dataset.invId)));
+}
+
+/* ===========================================================================
+   QUICKBOOKS ONLINE (#701) — connect, Item choice, payment check.
+   One company per organisation. Every action that writes to QuickBooks or
+   changes the connection is a named person's click (namedPersonConsent).
+   The status never carries a token. Every server string goes through esc().
+   =========================================================================== */
+async function loadQuickBooksStatus() {
+  const box = $("quickbooksBlock");
+  if (!box) return;
+  try {
+    const data = await api("/api/quickbooks/status");
+    state.quickbooks = data.quickbooks;
+  } catch (err) {
+    state.quickbooks = null;
+    box.innerHTML = `<p class="muted clients-creds-hint">${esc(err.message || "Could not read the QuickBooks status.")}</p>`;
+    return;
+  }
+  renderQuickBooksBlock();
+}
+
+function renderQuickBooksBlock() {
+  const box = $("quickbooksBlock");
+  const qb = state.quickbooks;
+  if (!box || !qb) return;
+  if (!qb.syncOn) {
+    box.innerHTML = '<p class="muted clients-creds-hint">QuickBooks sync is off (QUICKBOOKS_SYNC is not 1). Nothing is sent to QuickBooks.</p>';
+    return;
+  }
+  if (!qb.appConfigured) {
+    box.innerHTML = '<p class="muted clients-creds-hint">The QuickBooks app is not configured (QUICKBOOKS_CLIENT_ID and QUICKBOOKS_CLIENT_SECRET).</p>';
+    return;
+  }
+  const item = (i) => (i && i.id ? esc(i.name || `#${i.id}`) : '<span class="badge badge-warning">NOT CHOSEN</span>');
+  box.innerHTML = qb.connected
+    ? `<p class="clients-creds-hint" style="margin:0 0 4px">Connected to company ${esc(qb.realmId)}${qb.connectedBy ? ` by ${esc(qb.connectedBy)}` : ""}${qb.connectedAt ? ` on ${esc(qb.connectedAt.slice(0, 10))}` : ""}.
+        Payments last checked ${qb.lastStatusSyncAt ? esc(qb.lastStatusSyncAt.slice(0, 16).replace("T", " ")) : "never"}.</p>
+      ${qb.lastError ? `<p class="clients-creds-hint" style="color:var(--danger);margin:0 0 4px">${esc(qb.lastError)}</p>` : ""}
+      <p class="clients-creds-hint" style="margin:0 0 4px">Service fees → ${item(qb.items.service)} · Pass-through fees → ${item(qb.items.passthrough)} · Onboarding → ${item(qb.items.onboarding)}</p>
+      <div id="quickbooksItemPicker"></div>
+      <div class="actions" style="margin:0">
+        <button type="button" class="secondary" id="qbChooseItemsBtn"><span style="white-space:nowrap">Choose Items</span></button>
+        <button type="button" class="secondary" id="qbCheckPaymentsBtn"><span style="white-space:nowrap">Check payments now</span></button>
+        <button type="button" class="danger-button" id="qbDisconnectBtn"><span style="white-space:nowrap">Disconnect</span></button>
+      </div>`
+    : `<p class="muted clients-creds-hint" style="margin:0 0 4px">Not connected. Connecting opens QuickBooks in a new tab to approve access to one company.</p>
+      <div class="actions" style="margin:0"><button type="button" class="secondary" id="qbConnectBtn"><span style="white-space:nowrap">Connect QuickBooks</span></button></div>`;
+  $("qbConnectBtn")?.addEventListener("click", () => quickBooksAction("connect"));
+  $("qbDisconnectBtn")?.addEventListener("click", () => quickBooksAction("disconnect"));
+  $("qbCheckPaymentsBtn")?.addEventListener("click", () => quickBooksAction("payments"));
+  $("qbChooseItemsBtn")?.addEventListener("click", () => quickBooksAction("items"));
+}
+
+async function quickBooksAction(action) {
+  try {
+    if (action === "connect") {
+      const decidedBy = namedPersonConsent(await authForDecision(), "Connect this organisation to QuickBooks? QuickBooks opens in a new tab to approve access.", "connected QuickBooks", "QuickBooks is connected by a named person");
+      if (decidedBy == null) return;
+      const { url } = await api("/api/quickbooks/connect", { method: "POST", body: JSON.stringify({ decidedBy }) });
+      if (/^https?:\/\//i.test(String(url || ""))) window.open(url, "_blank", "noopener");
+      billingStatus("Approve access in the QuickBooks tab, then come back and press Choose Items.");
+    } else if (action === "disconnect") {
+      const decidedBy = namedPersonConsent(await authForDecision(), "Disconnect QuickBooks? The stored access is deleted; invoices already sent stay in QuickBooks.", "disconnected QuickBooks", "QuickBooks is disconnected by a named person");
+      if (decidedBy == null) return;
+      await api("/api/quickbooks/disconnect", { method: "POST", body: JSON.stringify({ decidedBy }) });
+    } else if (action === "payments") {
+      const decidedBy = namedPersonConsent(await authForDecision(), "Read payment status from QuickBooks now? This only reads.", "checked payments", "a payment check is run by a named person");
+      if (decidedBy == null) return;
+      const { result } = await api("/api/quickbooks/payment-status", { method: "POST", body: JSON.stringify({ decidedBy }) });
+      billingStatus(`Checked ${result.checked}: ${result.paid} paid, ${result.partial} partly paid, ${result.missing} not found in QuickBooks.`);
+      if (state.editingClientId) await loadClientBilling(state.editingClientId);
+    } else if (action === "items") {
+      const { items } = await api("/api/quickbooks/items");
+      const qb = state.quickbooks || { items: {} };
+      const opts = (sel) => ['<option value="">— choose —</option>'].concat((items || []).map((i) =>
+        `<option value="${esc(i.id)}"${sel && sel.id === i.id ? " selected" : ""}>${esc(i.name)}${i.type ? ` (${esc(i.type)})` : ""}</option>`)).join("");
+      const picker = $("quickbooksItemPicker");
+      if (!picker) return;
+      picker.innerHTML = `<div class="form-row">
+          <label>Service fees<select id="qbItemService">${opts(qb.items.service)}</select></label>
+          <label>Pass-through fees<select id="qbItemPass">${opts(qb.items.passthrough)}</select></label>
+          <label>Onboarding fee<select id="qbItemOnboarding">${opts(qb.items.onboarding)}</select></label>
+        </div>
+        <div class="actions" style="margin:0 0 6px"><button type="button" class="primary" id="qbSaveItemsBtn"><span style="white-space:nowrap">Save Items</span></button></div>`;
+      $("qbSaveItemsBtn")?.addEventListener("click", async () => {
+        const decidedBy = namedPersonConsent(await authForDecision(), "Save which QuickBooks Item each kind of line posts to?", "chose the Items", "the Items are chosen by a named person");
+        if (decidedBy == null) return;
+        try {
+          await api("/api/quickbooks/settings", { method: "PUT", body: JSON.stringify({
+            serviceItemId: $("qbItemService").value, passthroughItemId: $("qbItemPass").value, onboardingItemId: $("qbItemOnboarding").value, decidedBy,
+          }) });
+          await loadQuickBooksStatus();
+          billingStatus("QuickBooks Items saved.");
+        } catch (err) { billingStatus(err.message || "Could not save the Items.", "error"); }
+      });
+      return;
+    }
+    await loadQuickBooksStatus();
+  } catch (err) {
+    billingStatus(err.message || "QuickBooks did not answer.", "error");
+  }
+}
+
+async function loadClientBilling(clientId) {
+  if (!$("clientBillingBlock")) return;
+  state.billingStatement = null;
+  renderBillingStatement(null);
+  billingStatus("");
+  if ($("billingCreateBtn")) $("billingCreateBtn").disabled = true;
+  if ($("billingMonth") && !$("billingMonth").value) $("billingMonth").value = new Date().toISOString().slice(0, 7);
+  try {
+    // The QuickBooks status first: the invoice rows offer "Send to QuickBooks" only when connected.
+    await loadQuickBooksStatus();
+    const data = await api(`/api/clients/${encodeURIComponent(clientId)}/invoices`);
+    if (state.editingClientId === clientId) renderBillingInvoices(data.invoices || []);
+  } catch (err) {
+    billingStatus(err.message || "Could not load invoices.", "error");
+  }
+}
+
+async function previewBillingStatement() {
+  const clientId = state.editingClientId;
+  const month = $("billingMonth")?.value || "";
+  if (!clientId || !month) { billingStatus("Pick a client and a month.", "error"); return; }
+  billingStatus("Building the statement…");
+  try {
+    const data = await api(`/api/clients/${encodeURIComponent(clientId)}/billing/statement?month=${encodeURIComponent(month)}`);
+    if (state.editingClientId !== clientId) return;
+    state.billingStatement = data.statement;
+    renderBillingStatement(data.statement);
+    if ($("billingCreateBtn")) $("billingCreateBtn").disabled = !(data.statement.lines || []).length;
+    billingStatus("");
+  } catch (err) {
+    billingStatus(err.message || "Could not build the statement.", "error");
+  }
+}
+
+async function createBillingInvoice() {
+  const clientId = state.editingClientId;
+  const month = $("billingMonth")?.value || "";
+  if (!clientId || !month) return;
+  if (!window.confirm(`Create a draft invoice for ${month}? Its lines will not appear on another invoice unless you void it.`)) return;
+  try {
+    const data = await api(`/api/clients/${encodeURIComponent(clientId)}/invoices`, { method: "POST", body: JSON.stringify({ month }) });
+    billingStatus(`Created ${data.invoice.number} (draft).`);
+    await loadClientBilling(clientId);
+    billingStatus(`Created ${data.invoice.number} (draft).`);
+  } catch (err) {
+    billingStatus(err.message || "Could not create the invoice.", "error");
+  }
+}
+
+function printInvoiceHtml(inv) {
+  return `<!doctype html><html><head><meta charset="utf-8"><title>${esc(inv.number)}</title>
+    <style>body{font:13px/1.4 system-ui,sans-serif;margin:32px;color:#111}h1{font-size:20px;margin:0 0 4px}
+    table{border-collapse:collapse;width:100%}td{padding:3px 8px 3px 0;vertical-align:top}.r{text-align:right;white-space:nowrap}
+    .m{color:#555}.k{margin-top:14px;font-weight:600}.tot td{border-top:1px solid #999}</style></head><body>
+    <h1>Invoice ${esc(inv.number)}</h1>
+    <p>To: <strong>${esc(inv.clientName)}</strong>${inv.billTo ? ` &lt;${esc(inv.billTo)}&gt;` : ""}<br>
+    Period: ${esc(inv.periodStart)} to ${esc(inv.periodEnd)} (end not included)<br>
+    ${inv.issuedAt ? `Issued: ${esc(inv.issuedAt.slice(0, 10))}<br>` : ""}${inv.dueAt ? `Due: ${esc(inv.dueAt)}<br>` : ""}
+    Status: ${esc(inv.status)}${inv.status === "void" ? ` (${esc(inv.voidReason)})` : ""}</p>
+    ${["reimbursement", "service", "onboarding", "received"].map((kind) => {
+      const list = (inv.lines || []).filter((l) => l.kind === kind);
+      if (!list.length) return "";
+      return `<div class="k">${esc(BILLING_KIND_TITLE[kind])}</div><table>${list.map((l) => `<tr>
+        <td>${esc(String(l.eventAt || "").slice(0, 10))}</td>
+        <td>${esc(l.projectLabel)}<br><span class="m">${esc(l.description)}${l.provisional ? " (provisional)" : ""}${l.alreadyPaid && kind !== "received" ? " (already paid)" : ""}</span></td>
+        <td class="r">${billingMoney(l.amountUsd)}</td></tr>`).join("")}</table>`;
+    }).join("")}
+    <table style="max-width:360px;margin-top:16px">
+      <tr><td>Fees at cost</td><td class="r">${billingMoney(inv.reimbursementTotalUsd)}</td></tr>
+      <tr><td>Service fees</td><td class="r">${billingMoney(inv.serviceTotalUsd)}</td></tr>
+      <tr class="tot"><td><strong>Amount due</strong></td><td class="r"><strong>${billingMoney(inv.dueTotalUsd)}</strong></td></tr>
+    </table></body></html>`;
+}
+
+async function billingInvoiceAction(action, invoiceId) {
+  const clientId = state.editingClientId;
+  if (!clientId || !invoiceId) return;
+  const base = `/api/clients/${encodeURIComponent(clientId)}/invoices/${encodeURIComponent(invoiceId)}`;
+  try {
+    if (action === "print") {
+      const { invoice } = await api(base);
+      const w = window.open("", "_blank");
+      if (!w) { billingStatus("The browser blocked the print window. Allow pop-ups for this page.", "error"); return; }
+      w.document.open();
+      w.document.write(printInvoiceHtml(invoice));
+      w.document.close();
+      return;
+    }
+    if (action === "send") {
+      // A named person sends an invoice email (Helm, #700 review): signed in, the server records the
+      // user; signed out, the person types their name.
+      const decidedBy = namedPersonConsent(await authForDecision(), "Email this invoice to the client's billing contact?", "emailed it", "an invoice is emailed by a named person");
+      if (decidedBy == null) return;
+      const res = await api(`${base}/send`, { method: "POST", body: JSON.stringify({ decidedBy }) });
+      billingStatus(res.delivered ? `Emailed ${res.invoice.number}.` : `Not emailed: ${res.detail} Saved as a draft message; send it by hand, then press Mark sent.`, res.delivered ? "" : "error");
+    } else if (action === "quickbooks") {
+      const decidedBy = namedPersonConsent(await authForDecision(),
+        "Send this invoice to QuickBooks? It is created there once, as an open invoice. QuickBooks does not email the client and no payment is taken: you send it to the client from QuickBooks yourself.",
+        "sent it to QuickBooks", "an invoice is sent to QuickBooks by a named person");
+      if (decidedBy == null) return;
+      const res = await api(`${base}/quickbooks`, { method: "POST", body: JSON.stringify({ decidedBy }) });
+      billingStatus(res.created ? `In QuickBooks as invoice #${res.externalRef}.` : `Already in QuickBooks as invoice #${res.externalRef}; nothing new was created.`);
+    } else if (action === "add-line") {
+      const raw = window.prompt("Onboarding fee amount in dollars. Use a negative amount for a credit back (for example -250).", "");
+      if (raw === null) return;
+      const amountUsd = Number(String(raw).replace(/[$,\s]/g, ""));
+      if (!Number.isFinite(amountUsd) || amountUsd === 0) { billingStatus("Enter an amount, not zero.", "error"); return; }
+      const description = window.prompt("Description on the invoice:", amountUsd < 0 ? "Client onboarding fee — credit" : "Client onboarding fee");
+      if (description === null) return;
+      const decidedBy = namedPersonConsent(await authForDecision(), `Add ${amountUsd < 0 ? "a credit of" : "a fee of"} ${billingMoney(amountUsd)} to this draft invoice?`, "added the line", "a line is added by a named person");
+      if (decidedBy == null) return;
+      await api(`${base}/lines`, { method: "POST", body: JSON.stringify({ kind: "onboarding", amountUsd, description, decidedBy }) });
+    } else if (action === "mark-sent") {
+      await api(`${base}/mark-sent`, { method: "POST", body: "{}" });
+    } else if (action === "mark-paid") {
+      const ref = window.prompt("Payment reference (cheque number, transfer id), optional:", "");
+      if (ref === null) return;
+      await api(`${base}/mark-paid`, { method: "POST", body: JSON.stringify({ paymentReference: ref }) });
+    } else if (action === "void") {
+      const reason = window.prompt("Why is this invoice void? Its lines go back on the next statement.", "");
+      if (!reason || !reason.trim()) return;
+      await api(`${base}/void`, { method: "POST", body: JSON.stringify({ reason }) });
+    }
+    const keep = $("billingStatus")?.textContent || "";
+    await loadClientBilling(clientId);
+    if (action === "send" || action === "quickbooks") billingStatus(keep);
+  } catch (err) {
+    billingStatus(err.message || "That did not work.", "error");
+  }
+}
+
 function editClient(clientId) {
   const client = (state.clients || []).find((c) => c.id === clientId);
   if (!client) return;
@@ -10676,8 +12377,15 @@ function editClient(clientId) {
   state.stateLicencesDraft = stateLicencesFromClient(client);
   state.stateLicencesLoadedFor = clientId;
   renderStateLicences();
+  state.serviceAreaDraft = serviceAreaFromClient(client);
+  state.serviceAreaLoadedFor = clientId;
+  renderServiceArea();
   clientFormStatus("");
   loadClientCredentials(clientId);
+  loadClientBilling(clientId);
+  if ($("onboardingLinkResultWrap")) $("onboardingLinkResultWrap").hidden = true;
+  onboardingStatus("");
+  loadClientOnboarding(clientId);
   renderClientsList();
 }
 
@@ -10718,7 +12426,8 @@ function renderPortalIdentities() {
 function collectClientPayload() {
   const payload = { portalIdentities: state.portalIdentitiesDraft || [] };
   CLIENT_TEXT_FIELDS.forEach((field) => { payload[field] = $("c_" + field)?.value ?? ""; });
-  return withStateLicences(payload, state.stateLicencesDraft, state.stateLicencesLoadedFor, $("clientId").value || "");
+  const withLicences = withStateLicences(payload, state.stateLicencesDraft, state.stateLicencesLoadedFor, $("clientId").value || "");
+  return withServiceArea(withLicences, state.serviceAreaDraft, state.serviceAreaLoadedFor, $("clientId").value || "");
 }
 
 async function saveClient(event) {
@@ -10731,6 +12440,11 @@ async function saveClient(event) {
   const licenceProblems = "stateLicenses" in payload ? stateLicencesPayload(state.stateLicencesDraft).errors : [];
   if (licenceProblems.length) {
     clientFormStatus(licenceProblems[0], "error");
+    return;
+  }
+  const areaProblems = "serviceArea" in payload ? serviceAreaPayload(state.serviceAreaDraft).errors : [];
+  if (areaProblems.length) {
+    clientFormStatus(areaProblems[0], "error");
     return;
   }
   try {
@@ -10911,9 +12625,94 @@ async function openPortalLogins() {
   if (status) status.textContent = "";
   $("pl_portalType").value = ""; $("pl_portalUrl").value = "";
   $("pl_username").value = ""; $("pl_password").value = "";
+  state.plShowAllLogins = false; // each opening starts on this project's logins only
   $("portalLoginsModal").hidden = false;
   if (window.lucide) window.lucide.createIcons();
   await renderPortalLogins();
+}
+
+// WHICH PORTALS, AND WHICH SAVED LOGINS, THE OPEN PROJECT NEEDS (owner, 2026-11-09: "just show
+// the ones needed to submit/missing for the portal we're working on"). The modal used to list every
+// login the client holds under the chips, so the two or three this job files with were buried among
+// every other portal the client ever used. The answer comes from the project's OWN tracks (their
+// recipe/KB portal URL and channel kind), never from a portal, utility or place name, so it holds
+// for any portal. Strictest reading where we cannot tell: tracks not loaded (or none) -> nothing is
+// hidden; a channel kind we don't know -> the portal still asks for a login. Only a track a person
+// files outside any portal (in person, email, mail) gets no chip. Everything else stays one click
+// away (plListHtml's toggle), and Delete works on every row either way.
+const PL_NO_LOGIN_CHANNELS = new Set(["in_person", "email", "mail"]);
+
+// Does this saved login fit this portal? The ONE match the chips, the list and the header summary
+// share (it used to be written out twice). Credential metadata only: never a secret.
+function plLoginFits(cred, portal) {
+  // 1. URL hostname match (most precise).
+  if (portal.host && cred.portalUrl) {
+    try { if (new URL(cred.portalUrl).hostname.toLowerCase() === portal.host) return true; } catch { /* continue */ }
+  }
+  // 2. portalType slug match: the chip pre-fills pl_portalType with the slug, so a
+  //    credential saved via this modal will have portalType === slug.
+  const ct = (cred.portalType || "").toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "");
+  if (ct && ct === portal.slug) return true;
+  // 3. Loose substring: handles minor slug variants (e.g. "accela" inside "accela_oregon").
+  if (ct && portal.slug && (ct.includes(portal.slug.slice(0, 10)) || portal.slug.includes(ct.slice(0, 10)))) return true;
+  return false;
+}
+
+// { known, portals: [{ label, url, slug, host, matched }] (missing logins first), used, others }.
+function plProjectPortals(tracks, creds) {
+  const all = Array.isArray(creds) ? creds : [];
+  const known = Array.isArray(tracks) && tracks.length > 0;
+  const portals = [];
+  const seen = new Set();
+  for (const t of known ? tracks : []) {
+    if (PL_NO_LOGIN_CHANNELS.has(t.channelKind)) continue;
+    const url = t.recipePortalUrl || "";
+    const slug = plPortalSlug(t.channel || t.label || t.type);
+    const key = (url || slug).toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    let host = ""; try { host = url ? new URL(url).hostname.toLowerCase() : ""; } catch { /* ignore */ }
+    const portal = { label: t.label || t.channel || t.type, url, slug, host, matched: false };
+    portal.matched = all.some((c) => plLoginFits(c, portal));
+    portals.push(portal);
+  }
+  // Missing first: that is what the operator opened the modal to fix. (Array sort is stable.)
+  portals.sort((a, b) => Number(a.matched) - Number(b.matched));
+  if (!known) return { known, portals, used: all.slice(), others: [] };
+  const used = all.filter((c) => portals.some((p) => plLoginFits(c, p)));
+  return { known, portals, used, others: all.filter((c) => !used.includes(c)) };
+}
+
+function plCredRowHtml(c) {
+  const name = portalDisplayName(c.portalType, c.portalUrl);
+  const host = portalHostname(c.portalUrl);
+  return `<div class="pl-cred-row">
+        <div>
+          <div class="pl-cred-meta"><strong>${esc(name)}</strong> · ${esc(c.usernameReference)} ${c.hasSecret ? "🔒" : ""}</div>
+          ${host && host !== name ? `<div class="pl-cred-url">${esc(host)}</div>` : ""}
+        </div>
+        <button type="button" class="danger-button danger-button-sm" data-pl-del="${esc(c.id)}">Delete</button>
+      </div>`;
+}
+
+// The list under the chips: this project's logins, then the client's other logins behind a toggle.
+function plListHtml(view, showAll, clientName) {
+  const empty = (text) => `<p class="muted" style="font-size:12px">${esc(text)}</p>`;
+  if (!view.known) {
+    return view.used.length ? view.used.map(plCredRowHtml).join("")
+      : empty("No saved logins yet. Pick a portal above to pre-fill, then enter the username and password.");
+  }
+  const parts = [view.used.length ? view.used.map(plCredRowHtml).join("")
+    : empty(view.portals.length
+      ? "No saved login fits this project's portals yet. Pick a portal above to pre-fill, then enter the username and password."
+      : "This project files outside any portal, so it needs no portal login.")];
+  const n = view.others.length;
+  if (n) {
+    parts.push(`<button type="button" class="ghost" data-pl-toggle="1" aria-expanded="${showAll ? "true" : "false"}" style="font-size:12px">
+      ${showAll ? "Hide" : "Show"} ${n} other saved login${n === 1 ? "" : "s"} for ${esc(clientName)}</button>`);
+    if (showAll) parts.push(view.others.map(plCredRowHtml).join(""));
+  }
+  return parts.join("");
 }
 
 async function renderPortalLogins() {
@@ -10924,52 +12723,23 @@ async function renderPortalLogins() {
   catch (err) { $("plStatus").textContent = err.message || "Could not load logins."; }
 
   // Quick-fill chips: one per portal this project actually files to (from its tracks).
-  const tracks = state.submittalTracks || [];
-  const chips = [];
-  const seen = new Set();
-  for (const t of tracks) {
-    const url = t.recipePortalUrl || "";
-    const label = t.label || t.channel || t.type;
-    const slug = plPortalSlug(t.channel || t.label || t.type);
-    const key = (url || slug).toLowerCase();
-    if (seen.has(key)) continue;
-    seen.add(key);
-    let host = ""; try { host = url ? new URL(url).hostname.toLowerCase() : ""; } catch { /* ignore */ }
-    const matched = creds.some((c) => {
-      // 1. URL hostname match (most precise).
-      if (host && c.portalUrl) {
-        try { if (new URL(c.portalUrl).hostname.toLowerCase() === host) return true; } catch { /* continue */ }
-      }
-      // 2. portalType slug match: the chip pre-fills pl_portalType with the slug, so a
-      //    credential saved via this modal will have portalType === slug.
-      const ct = (c.portalType || "").toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "");
-      if (ct && ct === slug) return true;
-      // 3. Loose substring: handles minor slug variants (e.g. "accela" inside "accela_oregon").
-      if (ct && slug && (ct.includes(slug.slice(0, 10)) || slug.includes(ct.slice(0, 10)))) return true;
-      return false;
-    });
-    chips.push(`<button type="button" class="pl-chip" data-pl-slug="${esc(slug)}" data-pl-url="${esc(url)}" data-has-secret="${matched ? 1 : 0}">
-      <i data-lucide="${matched ? "shield-check" : "key-round"}"></i>
-      <span>${esc(label)}</span>
-      <span class="pl-chip-state">${matched ? "login saved" : "needs login"}</span>
-    </button>`);
-  }
-  $("plPortalChips").innerHTML = chips.join("");
+  const view = plProjectPortals(state.submittalTracks, creds);
+  $("plPortalChips").innerHTML = view.portals.map((p) => `<button type="button" class="pl-chip" data-pl-slug="${esc(p.slug)}" data-pl-url="${esc(p.url)}" data-has-secret="${p.matched ? 1 : 0}">
+      <i data-lucide="${p.matched ? "shield-check" : "key-round"}"></i>
+      <span>${esc(p.label)}</span>
+      <span class="pl-chip-state">${p.matched ? "login saved" : "needs login"}</span>
+    </button>`).join("");
   $("plPortalChips").querySelectorAll("[data-pl-slug]").forEach((chip) => chip.addEventListener("click", () => {
     $("pl_portalType").value = chip.getAttribute("data-pl-slug");
     $("pl_portalUrl").value = chip.getAttribute("data-pl-url") || "";
     $("pl_username").focus();
   }));
 
-  $("plList").innerHTML = creds.length
-    ? creds.map((c) => `<div class="pl-cred-row">
-        <div>
-          <div class="pl-cred-meta"><strong>${esc(portalDisplayName(c.portalType, c.portalUrl))}</strong> · ${esc(c.usernameReference)} ${c.hasSecret ? "🔒" : ""}</div>
-          ${portalHostname(c.portalUrl) && portalHostname(c.portalUrl) !== portalDisplayName(c.portalType, c.portalUrl) ? `<div class="pl-cred-url">${esc(portalHostname(c.portalUrl))}</div>` : ""}
-        </div>
-        <button type="button" class="danger-button danger-button-sm" data-pl-del="${esc(c.id)}">Delete</button>
-      </div>`).join("")
-    : '<p class="muted" style="font-size:12px">No saved logins yet. Pick a portal above to pre-fill, then enter the username and password.</p>';
+  $("plList").innerHTML = plListHtml(view, !!state.plShowAllLogins, client.name);
+  $("plList").querySelectorAll("[data-pl-toggle]").forEach((b) => b.addEventListener("click", async () => {
+    state.plShowAllLogins = !state.plShowAllLogins;
+    await renderPortalLogins();
+  }));
   $("plList").querySelectorAll("[data-pl-del]").forEach((b) => b.addEventListener("click", async () => {
     try {
       if (!window.confirm("Permanently delete this stored portal login?\n\nIt cannot be recovered — you would re-enter the credentials to restore it.")) return;
@@ -10980,8 +12750,8 @@ async function renderPortalLogins() {
   // Header summary: X of Y portals have a saved login.
   const summary = $("portalLoginsSummary");
   if (summary) {
-    const total = chips.length;
-    const ready = $("plPortalChips").querySelectorAll('[data-has-secret="1"]').length;
+    const total = view.portals.length;
+    const ready = view.portals.filter((p) => p.matched).length;
     summary.textContent = total ? `${ready}/${total} portal logins saved` : (creds.length ? `${creds.length} saved` : "");
   }
   if (window.lucide) window.lucide.createIcons();
@@ -11014,6 +12784,11 @@ $("addStateLicenceBtn")?.addEventListener("click", () => {
   state.stateLicencesDraft = state.stateLicencesDraft || [];
   state.stateLicencesDraft.push({ state: "", kind: "", number: "", expires: "", holder: "" });
   renderStateLicences();
+});
+$("addServiceAreaBtn")?.addEventListener("click", () => {
+  state.serviceAreaDraft = state.serviceAreaDraft || [];
+  state.serviceAreaDraft.push({ kind: "city", state: "", name: "" });
+  renderServiceArea();
 });
 $("addPortalIdentityBtn").addEventListener("click", () => {
   state.portalIdentitiesDraft = state.portalIdentitiesDraft || [];
@@ -12098,6 +13873,14 @@ async function openKpiModal() {
 function closeKpiModal() { $("kpiModal").hidden = true; }
 
 $("openKpiBtn").addEventListener("click", openKpiModal);
+$("openDestQueueBtn").addEventListener("click", openDestinationQueue);
+$("closeDestQueueBtn").addEventListener("click", () => { $("destQueueModal").hidden = true; });
+$("refreshDestQueueBtn").addEventListener("click", loadDestinationQueue);
+$("destQueueModal").addEventListener("click", (e) => { if (e.target.id === "destQueueModal") $("destQueueModal").hidden = true; });
+$("openGoLiveBtn").addEventListener("click", openGoLive);
+$("closeGoLiveBtn").addEventListener("click", () => { $("goLiveModal").hidden = true; });
+$("refreshGoLiveBtn").addEventListener("click", loadGoLive);
+$("goLiveModal").addEventListener("click", (e) => { if (e.target.id === "goLiveModal") $("goLiveModal").hidden = true; });
 $("closeKpiBtn").addEventListener("click", closeKpiModal);
 $("refreshKpiBtn").addEventListener("click", loadKpi);
 $("kpiModal").addEventListener("click", (e) => { if (e.target.id === "kpiModal") closeKpiModal(); });
@@ -12274,13 +14057,15 @@ connectSse();
 // shortcuts (Esc and Ctrl/Cmd+K still work) so normal data entry is unaffected.
 // ---------------------------------------------------------------------------
 (function installKeyboardShortcuts() {
-  const MODAL_IDS = ["portalLoginsModal", "knowledgeModal", "customersModal", "clientsModal", "usersModal", "kpiModal"];
+  const MODAL_IDS = ["portalLoginsModal", "knowledgeModal", "customersModal", "clientsModal", "usersModal", "kpiModal", "destQueueModal", "goLiveModal"];
   const MODAL_CLOSERS = {
     knowledgeModal: () => $("closeKnowledgeBtn")?.click(),
     customersModal: () => $("closeCustomersBtn")?.click(),
     clientsModal: () => $("closeClientsBtn")?.click(),
     usersModal: () => $("closeUsersBtn")?.click(),
     kpiModal: () => $("closeKpiBtn")?.click(),
+    destQueueModal: () => $("closeDestQueueBtn")?.click(),
+    goLiveModal: () => $("closeGoLiveBtn")?.click(),
     portalLoginsModal: () => $("closePortalLoginsBtn")?.click(),
   };
 
@@ -12413,8 +14198,127 @@ async function createClientLink(kind) {
     status.textContent = kind === "tracking" ? "Read-only company tracking link. Copy and share it with this client." : "One-time login request, valid for 72 hours. Copy and share it with this client.";
   } catch (err) { status.textContent = err.message || "Could not create link."; }
 }
+// ---------------------------------------------------------------------------
+// COMPANY SETUP (backend/src/clientOnboarding.ts). Staff mint the client's own setup link, then accept,
+// edit or reject each "client-supplied" answer. Only an accept changes the client record, and it is
+// recorded against the named person (signed in, or the name typed when sign-in is off).
+// ---------------------------------------------------------------------------
+function onboardingValueText(p, value) {
+  if (Array.isArray(value)) {
+    if (!value.length) return "(none)";
+    if (p.type === "licences") return value.map((l) => `${l.state} ${String(l.kind || "").replace(/_/g, " ")} ${l.number}${l.expires ? ` (expires ${l.expires})` : ""}`).join("; ");
+    if (p.type === "serviceArea") return value.map((a) => (a.kind === "state" ? `${a.state} (whole state)` : `${a.kind}: ${a.name}, ${a.state}`)).join("; ");
+    return value.join("; ");
+  }
+  return value == null || value === "" ? "(blank)" : String(value);
+}
+function onboardingStatus(text, kind) {
+  const el = $("onboardingStatus");
+  if (!el) return;
+  el.textContent = text || "";
+  el.className = `muted clients-creds-hint${kind === "error" ? " error" : ""}`;
+}
+async function loadClientOnboarding(clientId) {
+  const linksEl = $("onboardingLinks"); const propsEl = $("onboardingProposals"); const filesEl = $("onboardingFiles");
+  if (!linksEl || !propsEl || !filesEl) return;
+  let data;
+  try { data = await api(`/api/clients/${clientId}/onboarding`); }
+  catch (err) { onboardingStatus(err.message || "Could not load company setup.", "error"); return; }
+  if (state.editingClientId !== clientId) return;
+  state.onboarding = data;
+  const links = data.links || [];
+  linksEl.innerHTML = links.length
+    ? `<ul class="cred-list">${links.slice(0, 5).map((l) => `<li class="cred-row"><span>Link ${esc(l.state)} · created ${esc(String(l.createdAt || "").slice(0, 10))} by ${esc(l.createdBy || "")}${l.state === "open" ? ` · expires ${esc(String(l.expiresAt || "").slice(0, 10))}${l.draftSavedAt ? " · client has saved a draft" : ""}` : ""}${l.submittedAt ? ` · sent ${esc(String(l.submittedAt).slice(0, 10))}` : ""}</span>${l.state === "open" ? `<button type="button" class="secondary" data-onboarding-revoke="${esc(l.id)}">Revoke</button>` : ""}</li>`).join("")}</ul>`
+    : `<p class="muted clients-creds-hint">No setup link yet.</p>`;
+  const props = data.proposals || [];
+  propsEl.innerHTML = props.length
+    ? `<h4 style="margin:10px 0 4px">Answers waiting (${props.length}, client-supplied)</h4>
+       <table class="onboarding-proposals"><thead><tr><th>Field</th><th>On file</th><th>Client sent</th><th></th></tr></thead><tbody>
+       ${props.map((p) => `<tr data-proposal-id="${esc(p.id)}"><td>${esc(p.label)}</td><td>${esc(onboardingValueText(p, p.current))}</td><td>${esc(onboardingValueText(p, p.proposed))}${p.type === "licences" || p.type === "serviceArea" ? ` <span class="muted">(added to what is on file)</span>` : ""}</td>
+         <td><button type="button" class="secondary" data-onboarding-accept="${esc(p.id)}">Accept</button>${p.type === "licences" || p.type === "serviceArea" ? "" : `<button type="button" class="secondary" data-onboarding-edit="${esc(p.id)}">Edit…</button>`}<button type="button" class="danger-button" data-onboarding-reject="${esc(p.id)}">Reject</button></td></tr>`).join("")}
+       </tbody></table>
+       <div class="actions"><button type="button" class="primary" id="onboardingAcceptAllBtn">Accept all</button></div>`
+    : "";
+  const files = data.files || [];
+  filesEl.innerHTML = files.length
+    ? `<h4 style="margin:10px 0 4px">Certificates the client uploaded</h4><ul class="cred-list">${files.map((f) => `<li class="cred-row"><a href="/api/clients/${encodeURIComponent(clientId)}/onboarding/files/${encodeURIComponent(f.id)}">${esc(f.fileName)}</a> <span class="muted">${esc(String(f.kind).replace(/_/g, " "))} · ${esc(String(Math.ceil(Number(f.sizeBytes) / 1024)))} KB</span></li>`).join("")}</ul>`
+    : "";
+  // HOW THE CLIENT SAYS IT FILES with each authority (its own word; never a destination). A person
+  // checks and confirms each in Destinations to confirm; here they can only set an answer aside.
+  const filing = data.filingStatements || [];
+  if (filing.length) {
+    filesEl.innerHTML += `<h4 style="margin:10px 0 4px">How the client says it files (${filing.length}, client-supplied)</h4>
+      <p class="muted clients-creds-hint">The client's word only. Check and confirm each one in Destinations to confirm; nothing files to an address until a person confirms it there.</p>
+      <ul class="cred-list">${filing.map((f) => `<li class="cred-row" data-filing-statement="${esc(f.id)}"><span><strong>${esc(f.authority.name)}</strong>${f.authority.state ? `, ${esc(f.authority.state)}` : ""} · ${f.kind === "email" ? "email" : "portal"}: <code>${esc(f.address)}</code>${f.hasAccount ? ` · account: ${esc(f.hasAccount)}` : ""}${f.example ? ` · example: ${esc(f.example)}` : ""} <span class="muted">${esc(String(f.statedAt || "").slice(0, 10))}</span></span> <button type="button" class="secondary" data-filing-dismiss="${esc(f.id)}">Set aside</button></li>`).join("")}</ul>`;
+    filesEl.querySelectorAll("[data-filing-dismiss]").forEach((b) => b.addEventListener("click", async () => {
+      if (await dismissFilingStatement(clientId, b.dataset.filingDismiss, b)) loadClientOnboarding(clientId);
+    }));
+  }
+  linksEl.querySelectorAll("[data-onboarding-revoke]").forEach((b) => b.addEventListener("click", () => revokeOnboardingLink(b.dataset.onboardingRevoke)));
+  propsEl.querySelectorAll("[data-onboarding-accept]").forEach((b) => b.addEventListener("click", () => decideOnboarding({ accept: [b.dataset.onboardingAccept] })));
+  propsEl.querySelectorAll("[data-onboarding-reject]").forEach((b) => b.addEventListener("click", () => decideOnboarding({ reject: [b.dataset.onboardingReject] })));
+  propsEl.querySelectorAll("[data-onboarding-edit]").forEach((b) => b.addEventListener("click", () => {
+    const p = props.find((x) => x.id === b.dataset.onboardingEdit);
+    if (!p) return;
+    const typed = window.prompt(`${p.label}: the value to save (the client sent "${onboardingValueText(p, p.proposed)}")`, onboardingValueText(p, p.proposed));
+    if (typed == null) return;
+    decideOnboarding({ edits: { [p.id]: typed } });
+  }));
+  $("onboardingAcceptAllBtn")?.addEventListener("click", () => decideOnboarding({ acceptAll: true }));
+}
+async function onboardingPerson(lede) {
+  const auth = await authForDecision();
+  return namedPersonConsent(auth, lede, "decided", "a client's company setup is reviewed by a named person");
+}
+async function decideOnboarding(body) {
+  const clientId = state.editingClientId;
+  if (!clientId) return;
+  const lede = body.acceptAll ? "Accept every answer this client sent? They are written to the client record." : body.reject ? "Reject this answer? The client record stays as it is." : "Accept this answer? It is written to the client record.";
+  const by = await onboardingPerson(lede);
+  if (by == null) return;
+  try {
+    const out = await api(`/api/clients/${clientId}/onboarding/decide`, { method: "POST", body: JSON.stringify({ ...body, ...(by ? { decidedBy: by } : {}) }) });
+    onboardingStatus(`${out.accepted} accepted, ${out.rejected} rejected.`);
+    await loadClients();
+    editClient(clientId);
+  } catch (err) { onboardingStatus(err.message || "That did not work.", "error"); }
+}
+async function revokeOnboardingLink(linkId) {
+  const clientId = state.editingClientId;
+  if (!clientId) return;
+  const by = await onboardingPerson("Revoke this company setup link? The client can no longer open it.");
+  if (by == null) return;
+  try {
+    await api(`/api/clients/${clientId}/onboarding-links/${encodeURIComponent(linkId)}/revoke`, { method: "POST", body: JSON.stringify(by ? { decidedBy: by } : {}) });
+    onboardingStatus("Link revoked.");
+    await loadClientOnboarding(clientId);
+  } catch (err) { onboardingStatus(err.message || "Could not revoke.", "error"); }
+}
+async function createOnboardingLink() {
+  const clientId = state.editingClientId;
+  if (!clientId) return;
+  const by = await onboardingPerson("Create a company setup link for this client? Any open setup link is replaced (its draft carries over).");
+  if (by == null) return;
+  $("onboardingLinkResultWrap").hidden = true;
+  try {
+    const out = await api(`/api/clients/${clientId}/onboarding-links`, { method: "POST", body: JSON.stringify(by ? { decidedBy: by } : {}) });
+    if (state.editingClientId !== clientId) return;
+    $("onboardingLinkResult").value = new URL(out.url, location.origin).href;
+    $("onboardingLinkResultWrap").hidden = false;
+    $("onboardingLinkResult").select();
+    // The go-live link guard: a link built on a base the client cannot open is said so, before it is shared.
+    onboardingStatus(out.linkProblem
+      ? `Do not send this yet: ${out.linkProblem}. Fix PUBLIC_BASE_URL, then create the link again.`
+      : `Valid until ${String(out.expiresAt || "").slice(0, 10)}. Copy and share it with this client; it is not shown again.`, out.linkProblem ? "error" : "");
+    await loadClientOnboarding(clientId);
+  } catch (err) { onboardingStatus(err.message || "Could not create the link.", "error"); }
+}
+$("onboardingLinkBtn")?.addEventListener("click", () => createOnboardingLink());
 $("clientTrackingLinkBtn")?.addEventListener("click", () => createClientLink("tracking"));
 $("clientCredentialLinkBtn")?.addEventListener("click", () => createClientLink("credentials"));
+$("billingPreviewBtn")?.addEventListener("click", () => previewBillingStatement());
+$("billingCreateBtn")?.addEventListener("click", () => createBillingInvoice());
+$("billingMonth")?.addEventListener("change", () => { renderBillingStatement(null); if ($("billingCreateBtn")) $("billingCreateBtn").disabled = true; });
 
 // ---------------------------------------------------------------------------
 // MODAL FOCUS AND BACKGROUND. Opening a modal left focus on <body>, and Tab walked into the

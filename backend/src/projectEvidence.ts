@@ -1,5 +1,6 @@
 import type { HistoricalChecklistItem, ProjectRecord } from "../../shared/src/types";
 import { text } from "./json";
+import { AC_DISCONNECT_TEXT_PATTERNS, capturedDisconnectPart } from "./acDisconnectIntake";
 import { hasStampedStructuralEvidence } from "./permitPath";
 import { projectSecretValues } from "./projectSecrets";
 import { redactSecretValues } from "../../shared/src/portalSafety";
@@ -18,6 +19,7 @@ export type EvidenceTopic =
   | "rapidShutdown"
   | "labels"
   | "inverterSettings"
+  | "acDisconnect"
   | "batteryMode"
   | "utilityApproval"
   | "ownerAuthorization";
@@ -55,6 +57,7 @@ const topicRequirements: Record<EvidenceTopic, string[]> = {
   rapidShutdown: ["Rapid shutdown equipment", "RSD initiation/control location", "RSD label/placard callout"],
   labels: ["PV label schedule", "Placard locations", "Power source directory"],
   inverterSettings: ["UL 1741 SB listing", "Utility-required inverter settings", "Inverter spec sheet"],
+  acDisconnect: ["AC / utility disconnect on the one-line", "Disconnect location (lockable, visible break if the utility asks)", "Disconnect label"],
   batteryMode: ["Battery model/quantity", "Backup/non-backup mode", "Export setting", "Backup panel scope"],
   utilityApproval: ["Utility approval or interconnection approval", "Utility application confirmation", "Approval letter if AHJ requires it"],
   ownerAuthorization: ["Signed application", "Owner authorization", "Customer/owner signature"],
@@ -70,11 +73,14 @@ function maskIdentifier(value: string): string {
   return `${"*".repeat(Math.max(0, cleaned.length - 4))}${cleaned.slice(-4)}`;
 }
 
+// An identifier after "account" / "meter" is masked only when it holds a digit: a WORD there
+// ("account number captured: ******7890") is not a number, and masking it printed
+// "account number ****ured: ******7890" on the submit gate (review-audit draft 04).
 function cleanExcerpt(value: string): string {
   return value
     .replace(/\s+/g, " ")
-    .replace(/\b(account(?:\s*(?:number|#|no\.?))?\s*[:#]?\s*)([A-Z0-9-]{5,})/gi, (_match, label: string, account: string) => `${label}${maskIdentifier(account)}`)
-    .replace(/\b(meter(?:\s*(?:number|#|no\.?))?\s*[:#]?\s*)([A-Z0-9-]{5,})/gi, (_match, label: string, meter: string) => `${label}${maskIdentifier(meter)}`)
+    .replace(/\b(account(?:\s*(?:number|#|no\.?))?\s*[:#]?\s*)((?=[A-Z-]*\d)[A-Z0-9-]{5,})/gi, (_match, label: string, account: string) => `${label}${maskIdentifier(account)}`)
+    .replace(/\b(meter(?:\s*(?:number|#|no\.?))?\s*[:#]?\s*)((?=[A-Z-]*\d)[A-Z0-9-]{5,})/gi, (_match, label: string, meter: string) => `${label}${maskIdentifier(meter)}`)
     .trim()
     .slice(0, 220);
 }
@@ -484,6 +490,30 @@ export function evidenceForTopic(project: ProjectRecord, topic: EvidenceTopic): 
         hasAny(project, [/inverter spec/i, /microinverter spec/i, /cut ?sheet/i, /\bUL\s*1741\b/i, /datasheet/i])
       );
       return evidence(project, topic, present || specOnly, present ? "high" : specOnly ? "medium" : "low", patterns);
+    }
+    case "acDisconnect": {
+      // The utility's AC disconnect (a utility asks for it on its application: an external, lockable,
+      // visible-break switch near the meter). Shown = the set names an AC / utility disconnect; proven =
+      // the set also says where it is or what kind it is.
+      // The wordings are acDisconnectIntake's one list, which QC's ac_disconnect read uses too (#134).
+      const patterns = [...AC_DISCONNECT_TEXT_PATTERNS];
+      //
+      // THE JOB'S PART THAT ITS OWN PLAN SET NAMES COUNTS AS SHOWN (soft run on main f280d056): the
+      // intake reads the part off the plan set's AC-disconnect label in forms the patterns above do not
+      // ("A.C. DISCONNECT", "AC SAFETY DISCONNECT", "VISIBLE, LOCKABLE, LABELED DISCONNECT"), so a job
+      // holding the part its plan set names could still read "missing" and be blocked by a utility
+      // whose cited list asks for the disconnect. capturedDisconnectPart is the ONE reader QC's
+      // ac_disconnect read uses too. The key alone is never evidence (a person can type it): the part
+      // counts only when this job's plan-set text names it at the AC-disconnect label — never acDiscReq
+      // alone, never the client's standard part. Otherwise exactly the text read above, and the blocker
+      // stays. A part alone is SHOWN, not proven (a part number does not say where the switch is): the
+      // finding stays as a warning for a person; only the patterns above prove it, as before.
+      const snapshot = (project.parserSnapshot || {}) as Record<string, unknown>;
+      const part = capturedDisconnectPart(snapshot, snapshot.planSetExtractedText);
+      const named = hasAny(project, patterns);
+      const present = named || Boolean(part);
+      const high = named && /lockable|visible|within sight|adjacent to (?:the )?meter|location|sheet|page/i.test(all);
+      return evidence(project, topic, present, high ? "high" : present ? "medium" : "low", patterns, part ? [`AC disconnect part named on the plan set: ${part}`] : []);
     }
     case "batteryMode": {
       const batteryScope = /battery|\bESS\b|powerwall|encharge|backup/i.test(all);

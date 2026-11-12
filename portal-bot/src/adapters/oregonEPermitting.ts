@@ -790,7 +790,7 @@ export class OregonEPermittingAdapter extends BasePortalAdapter {
       const allAreFeeGated = allSubmitText.length > 0 &&
         allSubmitText.every((t: string) => /pay|fee|payment|checkout/i.test(t));
       if (allAreFeeGated) {
-        return { ok: false, message: "submitFromReview: Accela review page shows a fee-payment gate before submit — pausing for human to complete payment.", pauseReason: "mfa_captcha" };
+        return { ok: false, message: "submitFromReview: Accela review page shows a fee-payment gate before submit — pausing for human to complete payment.", pauseReason: "fee_payment" };
       }
 
       // 3. Click the allowlisted final-submit button. Accela may render it as a link or

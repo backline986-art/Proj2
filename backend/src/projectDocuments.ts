@@ -12,6 +12,7 @@ import { stampStructuralLetterVoid } from "./structuralLetterVoid";
 import { parseFeeSummary, recordFeeSummary } from "./feeSummary";
 import { parsePaidFeeReceipt, recordPaidFeeReceipt } from "./feeReceipts";
 import { logger } from "./logger";
+import { outlinedTextPagesOfPdf } from "./outlinedTextPages";
 import { sniffFileKind, looksLikeCad, isImageKind, describeKind, PDF_ACCEPT, PHOTO_OR_PDF_ACCEPT, type SniffedKind } from "./fileTypes";
 
 type Row = Record<string, unknown>;
@@ -50,8 +51,62 @@ async function extractDocumentText(db: AppDb, docId: string, storedPath: string)
     extractionsInFlight.delete(docId);
   }
   db.run("UPDATE project_documents SET extracted_text = ?, page_texts_json = ? WHERE id = ?", [extracted || "[no text layer]", pageTexts, docId]);
+  // A plan set's pages whose text is drawn as outlines (#696), while the file is in hand.
+  if (isPlanSetDocType(s(db.get<Row>("SELECT doc_type FROM project_documents WHERE id = ?", [docId])?.doc_type))) await recordOutlinedPages(db, docId, storedPath);
   if (extracted) recordFeeSummaryIfPresent(db, docId, extracted);
   if (extracted && /PHOTOVOLTAIC WORKSHEET/i.test(extracted) && /PV SYSTEM OVERVIEW/i.test(extracted)) await recordFiledWorksheetReading(db, docId, storedPath);
+}
+
+/** The plan-set doc types (plan_set and the aliases operators file it under). */
+function isPlanSetDocType(docType: string): boolean {
+  return docType === "plan_set" || DOC_TYPE_ALIASES.plan_set.includes(docType);
+}
+
+// PLAN PAGES WHOSE TEXT IS DRAWN AS OUTLINES (#696, outlinedTextPages.ts). Checked once per plan-set
+// document and stored (outlined_pages_json, v75), so QC and the submit gate — synchronous readers —
+// can name the pages nobody read. One check in flight per document, like the text extraction.
+const outlinedChecksInFlight = new Set<string>();
+
+/** Find and store a plan-set document's outlined-text pages. A failed check stores nothing (''), so
+ *  it is tried again; it never throws. */
+async function recordOutlinedPages(db: AppDb, docId: string, storedPath: string): Promise<void> {
+  if (outlinedChecksInFlight.has(docId)) return;
+  outlinedChecksInFlight.add(docId);
+  try {
+    const bytes = new Uint8Array(fs.readFileSync(storedPath));
+    const pageTexts = await extractPdfPages(storedPath, 80);
+    const pages = await outlinedTextPagesOfPdf(bytes, { pageTexts, maxPages: 80 });
+    recordOutlinedPagesValue(db, docId, pages);
+  } catch { /* unknown stays '' */ } finally {
+    outlinedChecksInFlight.delete(docId);
+  }
+}
+
+/** Store a plan-set document's outlined-text pages (the splitter writes what it found too). */
+export function recordOutlinedPagesValue(db: AppDb, docId: string, pages: readonly number[]): void {
+  db.run("UPDATE project_documents SET outlined_pages_json = ? WHERE id = ?", [JSON.stringify([...pages].sort((a, b) => a - b)), docId]);
+}
+
+/**
+ * The shipped plan set's pages whose text is drawn as outlines (#696): "unread: text drawn as
+ * outlines; a person reads this page". [] when there are none, when there is no plan set, or when
+ * the check has not run yet — in that last case it is started in the background (a plan set uploaded
+ * before v75), and the next read has the answer. Synchronous: QC and the submit gate call it.
+ */
+export function shippedPlanSetOutlinedPages(db: AppDb, projectId: string): number[] {
+  const docId = shippedPlanSetDocumentId(db, projectId);
+  if (!docId) return [];
+  const row = db.get<Row>("SELECT stored_path, outlined_pages_json, content_type, original_filename FROM project_documents WHERE id = ?", [docId]);
+  if (!row) return [];
+  const raw = s(row.outlined_pages_json);
+  if (!raw) {
+    if (isPdfDoc(row) && fs.existsSync(s(row.stored_path))) void recordOutlinedPages(db, docId, s(row.stored_path));
+    return [];
+  }
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    return Array.isArray(parsed) ? parsed.map(Number).filter((n) => Number.isInteger(n) && n > 0) : [];
+  } catch { return []; }
 }
 
 /** A filed Iowa SFM PV worksheet, read by position, for the gate (pvWorksheetGate). Only the
@@ -348,8 +403,14 @@ const SPLIT_PART_WITHDRAWN_ACTION = "project.split_part_withdrawn";
  * "Required document … not attached … Staging will refuse without it" rows, the bill-on-file
  * wait) is stale once this is newer than the verdict, and is re-judged (autoStageSteps STEP 1).
  */
+/** #569 — the slot a filing's confirmation screenshot is filed under (submissionConfirmation.ts). It is
+ *  evidence OF a filing, never a document FOR one: no portal upload set carries it, and it is not a
+ *  document change QC re-judges on. Declared here so this module needs no import of that one. */
+export const SUBMISSION_CONFIRMATION_DOC_TYPE = "submission_confirmation";
+
 export function documentsChangedAt(db: AppDb, projectId: string): string | null {
-  const uploaded = s(db.get<Row>("SELECT MAX(uploaded_at) AS t FROM project_documents WHERE project_id = ?", [projectId])?.t);
+  // A confirmation screenshot (#569) lands AFTER a filing and no verdict reads it: not a change.
+  const uploaded = s(db.get<Row>("SELECT MAX(uploaded_at) AS t FROM project_documents WHERE project_id = ? AND doc_type != ?", [projectId, SUBMISSION_CONFIRMATION_DOC_TYPE])?.t);
   const removed = s(db.get<Row>(
     "SELECT MAX(created_at) AS t FROM audit_logs WHERE project_id = ? AND action IN (?, ?)",
     [projectId, DOCUMENT_DELETED_ACTION, SPLIT_PART_WITHDRAWN_ACTION])?.t);

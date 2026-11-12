@@ -367,19 +367,27 @@ export function clientUpdateFor(
         action: "Nothing needed from you.",
       };
 
-    case "correction_flagged":
+    case "correction_flagged": {
+      // WHO sent it back is the track's agency (#617): the client was told the CITY returned an
+      // interconnection application the city never saw. Asked the same way as the filed event —
+      // trackKind, the one "what track is this target" answer — so a legacy 'permit'-typed NEM
+      // filing reads as the utility's too. A permit correction's wording is unchanged.
+      const nem = trackKind(String(ctx.targetType || ""), text(ctx.permitType)) === "nem";
       return {
         subject: "Correction requested",
         // WHICH filing came back. A project files a structural AND an electrical application; a
         // client told only that "the application" was returned cannot tell which of the two is
         // stalled, and the reference number alone makes them go and look it up.
-        headline: `${ahj} has sent ${whichApplication} back with a correction${refPhrase}.`,
+        headline: nem
+          ? `${utility} has sent the interconnection application back with a correction${refPhrase}.`
+          : `${ahj} has sent ${whichApplication} back with a correction${refPhrase}.`,
         // Deliberately does NOT quote the correction. See the header.
         meaning: "The reviewer wants changes before it can go further. This is routine and it is not a rejection.",
         // The single most useful sentence we send. A correction notice with no instruction reads
         // as an emergency; most of the time there is nothing for them to do at all.
         action: "Nothing for you to do yet. We are reading exactly what they asked for and will come back to you with it — and tell you if we need anything from your designer.",
       };
+    }
 
     default:
       return null;

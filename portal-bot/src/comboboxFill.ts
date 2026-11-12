@@ -654,7 +654,14 @@ export async function fillCustomCombobox(page: any, loc: any, value: string, pic
       }
     }
   } catch { /* no search box — some widgets filter inline */ }
-  await waitForOptions(page, 2500, (ownPopup && await ownPopup.isVisible().catch(() => false)) ? ownPopup : undefined);
+  // WAIT ON THE WIDGET'S OWN LIST WHEN IT NAMES ONE, EVEN WHILE THAT LIST IS EMPTY (#584). A
+  // cascading model list is open but still loading (0 rows, 0 height, so not "visible") for the
+  // ~600ms after its manufacturer changed. Gating ownPopup on visibility made this wait read the
+  // heuristic scope instead, find some OTHER popup's rows, return at once, and the matchers below
+  // ran against an empty list. That stayed hidden while the uncapped 30s search-box read in 3a'
+  // happened to give the cascade time to land; once that read was capped, PGE-shaped model picks
+  // failed (powerClerkSpecsCombobox). The list's own rows are what this waits for, bounded as before.
+  await waitForOptions(page, 2500, ownPopup ?? undefined);
 
   // 3a. BEST normalized match across the live option rows — exact (whitespace/case-
   //     insensitive) preferred over substring so we never pick a near-neighbour like
@@ -674,7 +681,14 @@ export async function fillCustomCombobox(page: any, loc: any, value: string, pic
   try {
     const sScope = await scopeOf();
     const searchBox = sScope === page ? page.locator(SEARCH_BOX_SELECTORS).first() : sScope.locator("input:visible").first();
-    const typedNow = String(await searchBox.inputValue().catch(() => "")).trim();
+    // COUNT FIRST, AND CAP THE READ (#584). A popup with no filter box of its own (a Telerik list,
+    // most plain dropdowns) has no `input:visible`, and inputValue() on a locator that matches
+    // nothing WAITS for one to appear — Playwright's default 30s, with no default set anywhere in
+    // this engine. Every pick that fell through to here (an answer with no exact option) burned
+    // 30s per attempt, twice per step; widgetFaceReadback's 48 cases ran past the 600s budget.
+    const typedNow = (await searchBox.count().catch(() => 0))
+      ? String(await searchBox.inputValue({ timeout: 2000 }).catch(() => "")).trim()
+      : "";
     if (typedNow && await searchBox.isEditable().catch(() => false)) {
       await searchBox.fill("", { timeout: 2000 }).catch(() => {});
       await waitForOptions(page, 2500, (ownPopup && await ownPopup.isVisible().catch(() => false)) ? ownPopup : undefined);
@@ -747,7 +761,9 @@ export async function fillCustomCombobox(page: any, loc: any, value: string, pic
   // #acGlobalSearch — which the portal may pre-fill, and which nothing here should be
   // touching — and press Enter, navigating the walk out of a half-filled form. Enter is only
   // ever for a box this widget owns.
-  const typed = widgetSearch ? await widgetSearch.inputValue().catch(() => "") : "";
+  // Capped like the read above (#584): the popup holding the box may have closed by now, and an
+  // uncapped read of a box that is gone waits Playwright's default 30s.
+  const typed = widgetSearch && (await widgetSearch.count().catch(() => 0)) ? await widgetSearch.inputValue({ timeout: 2000 }).catch(() => "") : "";
   // ENTER IN A BOX INSIDE A FORM IS THAT FORM'S DEFAULT BUTTON (hard rule 1). A widget whose
   // search box sits in a form whose default button files or pays must not press Enter in it —
   // the same shared in-page question replay's gate asks. Unreadable -> no Enter.

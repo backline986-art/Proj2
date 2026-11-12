@@ -7,7 +7,8 @@ import { portalUploadCapBytes } from "../../portal-bot/src/uploadCap";
 import type { AppDb } from "./db";
 import type { LLMProvider, PlanSheetKind } from "../../shared/src/types";
 import { HttpError } from "./httpError";
-import { saveProjectDocument, listProjectDocuments, projectDocsByType, shippedPlanSet, shippedPlanSetDocumentId, documentTypesDeletedSince, withdrawSplitPart } from "./projectDocuments";
+import { outlinedTextPagesOfPdf } from "./outlinedTextPages";
+import { recordOutlinedPagesValue, saveProjectDocument, listProjectDocuments, projectDocsByType, shippedPlanSet, shippedPlanSetDocumentId, documentTypesDeletedSince, withdrawSplitPart } from "./projectDocuments";
 
 // Sheet/content patterns → upload doc category. Ported from the parser's detectSplitPages;
 // pages are scored against each category and assigned to the best match. The categories are
@@ -50,7 +51,14 @@ export const CATEGORY_PATTERNS: Array<{ docType: string; label: string; patterns
   // diagram went unsplit and the submit gate reported the SLD missing from a plan set that
   // plainly contains one. Anchored on LINE DIAGRAM with an electrical qualifier; a bare
   // /LINE DIAGRAM/ is deliberately NOT used ("property line", "setback line" prose risk).
-  { docType: "sld", label: "SLD / one-line", patterns: [/\b3-?LINE DIAGRAM\b/i, /\bONE-?LINE\b/i, /\bSINGLE-?LINE\b/i, /\bELECTRICAL\s+LINE\s+DIAGRAM\b/i], sheetNumbers: [/\bE\s*1\.1\b/i] },
+  //
+  // A SPACE IS A HYPHEN IN A SHEET TITLE (#691). "-?" let "SINGLE-LINE" and "3-LINE DIAGRAM" through
+  // but not "SINGLE LINE DIAGRAM" or "3 LINE DIAGRAM", and "THREE LINE DIAGRAM" / "ELECTRICAL
+  // SCHEMATIC" had no pattern, so a NEM package reported the SLD missing from a set that has one.
+  // Hyphen OR whitespace now, by title wording, never by jurisdiction. Two words stay anchored so prose
+  // cannot pass for a title: the 3 / THREE form needs DIAGRAM ("THREE LINE ITEMS", "PROPERTY LINE"),
+  // and a SPACED "ONE LINE" needs a diagram noun after it ("ONE LINE PER CIRCUIT" is a note).
+  { docType: "sld", label: "SLD / one-line", patterns: [/\b(?:3|THREE)[\s-]?LINE\s+DIAGRAM\b/i, /\bONE(?:-?LINE\b|\s+LINE\s+(?:DIAGRAM|DWG|DRAWING|SCHEMATIC)\b)/i, /\bSINGLE[\s-]?LINE\b/i, /\bELECTRICAL\s+LINE\s+DIAGRAM\b/i, /\bELECTRICAL\s+SCHEMATIC\b/i], sheetNumbers: [/\bE\s*1\.1\b/i] },
   // Fire access pathways / setbacks are drawn and labeled on the site plan (the fire-access
   // sheet the gate asks for), so they identify it alongside the sheet name.
   { docType: "site_plan", label: "Site / plot plan", patterns: [/\bSITE PLAN\b/i, /\bPLOT PLAN\b/i, /\bFIRE\s+(?:PATHWAYS?|SETBACKS?|ACCESS)\b/i], sheetNumbers: [/\bPV\s*1\.[01]\b/i] },
@@ -79,6 +87,13 @@ export const CATEGORY_PATTERNS: Array<{ docType: string; label: string; patterns
   // inverter_spec split and bloated it past PowerClerk's 5 MB upload limit. Match the dedicated
   // SPEC SHEET by its title-block name only, per this file's stated discipline.
   { docType: "inverter_spec", label: "Inverter spec", patterns: [/MODULE\s*[\/&]?\s*INV(?:ERTER)?\.?\s*SPEC/i, /MICRO-?INVERTER\s+SPEC(?:IFICATION)?S?\b/i, /\bINVERTER\s+SPEC(?:IFICATION)?S?\b/i] },
+  // The battery / ESS datasheet (#261), by its sheet NAME here and by its CONTENT in batteryPage()
+  // below — never by a sheet code one design firm uses (the parser page only read DS-coded sheets).
+  // Scored only when batteryPage() says "spec": a calcs sheet, or a page that reads as an inverter
+  // (MPPT / PV input / a combined INVERTER-BATTERY name), never takes it. After the inverter spec, so
+  // an "INVERTER SPECIFICATIONS" + "BATTERY SPECIFICATIONS" tie goes to the inverter; before labels,
+  // which stays last.
+  { docType: "battery_spec", label: "Battery / ESS spec", patterns: [/\b(?:BATT(?:ERY|ERIES)?|ESS|ENERGY\s+STORAGE(?:\s+SYSTEMS?)?)\s*(?:SPEC(?:IFICATION)?S?|DATA\s*-?\s*SHEETS?|DATASHEETS?|CUT\s*-?\s*SHEETS?)\b/i] },
   // PLACARD is the sheet name of the service / PV directory plaque sheet (NEC 690.56, 705.10). It
   // scored 0 everywhere and was left out of the labels part (#67). It is a `words` hit, not a sheet
   // name: a NOTES sheet says "PROVIDE PLACARD …" too, and there it does not count (the #33 rule on
@@ -93,7 +108,53 @@ export const CATEGORY_PATTERNS: Array<{ docType: string; label: string; patterns
 // module and inverter specs, so it is never a spec part — the spec categories and the combined
 // MODULE / INV fan-out do not apply to it (#66). Other categories still score as before.
 const CALCS_SHEET = /\b(?:WIR(?:E|ING)|ELECTRICAL)\s+CALC(?:ULATION)?S?\b/i;
-const SPEC_DOC_TYPES = new Set(["module_spec", "inverter_spec"]);
+const SPEC_DOC_TYPES = new Set(["module_spec", "inverter_spec", "battery_spec"]);
+
+// BATTERY / ESS DATASHEETS BY CONTENT (#261). A storage job owes the battery's cut sheet (UL 9540,
+// essRequirements.ts), and its make, model and kWh feed the NEM portal and the AHJ's ESS review. The
+// sheet is found by what it SAYS, whatever the plan set numbers it:
+//   - a battery body: a labelled energy capacity in kWh (USABLE / NOMINAL / TOTAL ENERGY 13.5 kWh,
+//     ENERGY (kWh) 10.1), storage words (BATTERY, ENERGY STORAGE, ESS, LITHIUM, LFP, UL 1973), and at
+//     least BATTERY_DATASHEET_MARKS_MIN of the performance-table rows a datasheet prints and a drawing
+//     sheet does not (round-trip efficiency, depth of discharge, cycle life, warranty, operating
+//     temperature, scalability, chemistry, continuous / peak power). An SLD or ESS detail that calls
+//     out "13.5 kWh LITHIUM ION UL 9540" has the first two and not the table;
+//   - or the sheet's own name (CATEGORY_PATTERNS battery_spec: BATTERY SPEC SHEET, ESS DATA SHEET…).
+// MUST-EXCLUDE (Helm's triage on #261): an inverter datasheet, an ESS / hybrid-inverter datasheet and a
+// calculation sheet are never the battery spec. A page that reads as an inverter (MPPT, PV input, CEC
+// efficiency, a HYBRID / BATTERY / STORAGE INVERTER, a combined INVERTER / BATTERY name) is not filed
+// as the battery even when it also states a kWh capacity (a hybrid inverter's compatible battery range;
+// an all-in-one with PV inputs): it is reported UNDECIDED, so the existing page-index read (#79) or a
+// person decides — never guessed. A calcs, index or cover page never qualifies. On an E x.x sheet the
+// body test does not run (the #33 rule: there the words are words the sheet uses).
+// Text only: no model call here. A page with no text layer is the scanned / hybrid path's (scannedPlanSet).
+const BATTERY_CAPACITY = /\b(?:USABLE|NOMINAL|TOTAL|RATED|AVAILABLE|STORAGE|ENERGY|BATTERY)\s+(?:ENERGY|CAPACITY)\d?\b[^.;]{0,40}?\b\d{1,3}(?:\.\d{1,2})?\s*kWh\b|\b(?:ENERGY|CAPACITY)\s*\(\s*kWh\s*\)\s*:?\s*\d{1,3}(?:\.\d{1,2})?\b/i;
+const STORAGE_WORDS = /\bBATTER(?:Y|IES)\b|\bENERGY\s+STORAGE\b|\bESS\b|\bLITHIUM\b|\bLFP\b|\bLiFePO4\b|\bUL\s*-?\s*1973\b/i;
+const BATTERY_DATASHEET_MARKS: RegExp[] = [
+  /\bROUND[\s-]*TRIP\s+EFFICIENCY\b/i,
+  /\bDEPTH\s+OF\s+DISCHARGE\b|\bDoD\b/,
+  /\bCYCLE\s+LIFE\b|\b\d[\d,]*\s*CYCLES\b/i,
+  /\bWARRANTY\b/i,
+  /\bOPERATING\s+TEMP(?:ERATURE)?\b/i,
+  /\bSCALAB(?:LE|ILITY)\b|\bSTACKABLE\b|\bEXPANDABLE\b/i,
+  /\bCHEMISTRY\b|\bLiFePO4\b|\bLFP\b|\bLITHIUM[\s-]+(?:ION|IRON)\b|\bNMC\b/i,
+  /\b(?:CONTINUOUS|PEAK)\s+(?:POWER|OUTPUT|DISCHARGE|CHARGE)\b/i,
+];
+const BATTERY_DATASHEET_MARKS_MIN = 3;
+const INVERTER_BODY = /\bMPPTs?\b|\bPV\s+INPUTS?\b|\bMAX(?:IMUM)?\.?\s+PV\b|\bCEC\s+(?:WEIGHTED\s+)?EFFICIENCY\b|\bMAX(?:IMUM)?\.?\s+(?:DC\s+)?INPUT\s+(?:VOLTAGE|CURRENT)\b|\bSTRINGS?\s+PER\b|\b(?:HYBRID|BATTERY|STORAGE|ESS)\s+INVERTERS?\b|\bINVERTERS?\s*(?:[\/&+]|AND)\s*BATT|\bBATT(?:ERY|ERIES)?\s*(?:[\/&+]|AND)\s*INVERTER/i;
+const BATTERY_SHEET_NAME = CATEGORY_PATTERNS.find((c) => c.docType === "battery_spec")!.patterns[0];
+
+/** Does the page's own text read as a battery datasheet? "spec": file it as the battery spec;
+ *  "undecided": it names or describes a battery but also reads as an inverter — a person or the
+ *  page-index read decides; null: not a battery datasheet. */
+export function batteryPage(text: string): "spec" | "undecided" | null {
+  if (isIndexOrNotesPage(text) || CALCS_SHEET.test(text)) return null;
+  const named = BATTERY_SHEET_NAME.test(text);
+  const body = !ELECTRICAL_SHEET.test(text) && BATTERY_CAPACITY.test(text) && STORAGE_WORDS.test(text)
+    && BATTERY_DATASHEET_MARKS.filter((re) => re.test(text)).length >= BATTERY_DATASHEET_MARKS_MIN;
+  if (!named && !body) return null;
+  return INVERTER_BODY.test(text) ? "undecided" : "spec";
+}
 
 // A notes sheet: NOTES anywhere on the page (GENERAL NOTES, ELECTRICAL NOTES, a bare NOTES sheet
 // name) except the placard sheet's own "LABELING NOTES" / "PLACARD NOTES" heading. Read only for a
@@ -235,14 +296,24 @@ export function scorePage(text: string): { docTypes: string[]; byPattern: boolea
   const electricalSheet = ELECTRICAL_SHEET.test(text);
   const calcsSheet = CALCS_SHEET.test(text);
   const notesSheet = NOTES_SHEET.test(text);
+  const battery = batteryPage(text);
   let best: { docType: string; score: number; patternHits: number } | null = null;
   for (const cat of CATEGORY_PATTERNS) {
     if (calcsSheet && SPEC_DOC_TYPES.has(cat.docType)) continue;
+    // Only a page batteryPage() files as the battery spec scores for it (#261): an inverter-reading
+    // page named "BATTERY SPEC" is undecided, not filed.
+    if (cat.docType === "battery_spec" && battery !== "spec") continue;
     const hits = (res: RegExp[] | undefined) => (res ?? []).reduce((n, re) => (re.test(text) ? n + 1 : n), 0);
     const patternHits = hits(cat.patterns);
     const score = patternHits + hits(cat.sheetNumbers)
       + (electricalSheet ? 0 : (cat.wordsSkipNotes && notesSheet ? 0 : hits(cat.words)) + (cat.vocabulary?.some((re) => re.test(text)) ? 1 : 0));
     if (score > 0 && (!best || score > best.score)) best = { docType: cat.docType, score, patternHits };
+  }
+  // A battery datasheet found by its BODY (no battery sheet name) is the battery spec unless another
+  // category won on its own title-block sheet NAME (an SLD or site plan that calls out the battery).
+  // A stray `words` / vocabulary / sheet-number win (STRUCTURAL in a wall-mount note) does not keep it.
+  if (battery === "spec" && best?.docType !== "battery_spec" && !(best && best.patternHits > 0)) {
+    best = { docType: "battery_spec", score: 1, patternHits: BATTERY_SHEET_NAME.test(text) ? 1 : 0 };
   }
   if (!best) return { docTypes: [], byPattern: false };
   const out = [best.docType];
@@ -267,11 +338,11 @@ export function scorePage(text: string): { docTypes: string[]; byPattern: boolea
 const PACKAGE_SETS: Record<string, string[]> = {
   // Utility NEM/interconnection upload set (PGE PowerClerk, Pacific Power, etc.).
   // Meter photo is uploaded separately and never in the plan set.
-  nem: ["meter_photo", "sld", "site_plan", "inverter_spec"],
+  nem: ["meter_photo", "sld", "site_plan", "inverter_spec", "battery_spec"],
   // ProjectDox AHJ permit upload set — each sheet in its own slot.
-  permit: ["sld", "site_plan", "structural", "structural_letter", "module_spec", "inverter_spec", "labels"],
+  permit: ["sld", "site_plan", "structural", "structural_letter", "module_spec", "inverter_spec", "battery_spec", "labels"],
   // Everything we could split/attach — for debug or portals with no defined set yet.
-  all: ["sld", "site_plan", "structural", "structural_letter", "module_spec", "inverter_spec", "labels", "meter_photo", "utility_bill"],
+  all: ["sld", "site_plan", "structural", "structural_letter", "module_spec", "inverter_spec", "battery_spec", "labels", "meter_photo", "utility_bill"],
 };
 
 // Doc types packaged WHEN PRESENT but never reported as missing. The sealed structural
@@ -281,7 +352,11 @@ const PACKAGE_SETS: Record<string, string[]> = {
 // job as incomplete. What this set fixes is the other half: before, "structural_letter"
 // was absent from PACKAGE_SETS entirely, so a stamped letter the operator had uploaded
 // was silently left out of the AHJ package.
-const CONDITIONAL_PACKAGE_DOC_TYPES = new Set(["structural_letter", "utility_bill"]);
+//
+// The battery / ESS spec (#261) is the same: owed only on a storage job (essRequirements.ts, the one
+// battery predicate), so it is cut and packaged when the plan set carries one — the NEM portals ask
+// for it too (recipe uploads of docType battery_spec) — and never reported missing here.
+const CONDITIONAL_PACKAGE_DOC_TYPES = new Set(["structural_letter", "utility_bill", "battery_spec"]);
 
 export interface UtilityPackageResult {
   target: string;
@@ -304,12 +379,16 @@ export interface UtilityPackageResult {
    *  the doc type it was filed into. Absent for a page no category claimed. */
   undecidedSpecFiledAs: Record<string, string>;
   /** Undecided spec pages the page-index read labelled (#79): 1-based page → its datasheet kind.
-   *  A module_spec / inverter_spec page went into that part; any other kind (combiner, racking…)
+   *  A module_spec / inverter_spec / battery_spec page went into that part (#261); any other kind (combiner, racking…)
    *  into neither. Such a page is no longer in `undecidedSpecPages`. Absent when no read ran. */
   specPagesByVision?: Record<string, PlanSheetKind>;
   /** Undecided spec pages never sent to the read because their text reads as a bill or meter
    *  record (rule 2). They stay undecided. */
   specPagesWithheld?: number[];
+  /** 1-based pages whose text is DRAWN AS OUTLINES (#696, outlinedTextPages.ts): "unread: text drawn
+   *  as outlines; a person reads this page". Always in `unclassifiedPages` too — never filed under a
+   *  type on whatever stray text they carry, and never sent to the page-index read. */
+  outlinedTextPages: number[];
 }
 
 // A split part that holds a page the page-index read decided (#79) says so in its filename. The
@@ -351,7 +430,8 @@ function findPlanSet(db: AppDb, projectId: string): { id: string; path: string; 
 // the text could not place are labelled by the existing page-index read (scannedPlanSet
 // readUndecidedSpecPages): a module datasheet goes into module_spec, an inverter datasheet into
 // inverter_spec, an AC module carrying its integrated micro's ratings and UL 1741 listing into
-// both, and a combiner / racking / other datasheet into neither. No undecided page → no call.
+// both, a battery datasheet into battery_spec (#261), and a combiner / racking / other datasheet into
+// none of them. No undecided page → no call.
 // Only those pages' images are sent, never a page that reads as a bill or meter (rule 2).
 export async function buildUtilityPackage(
   db: AppDb, projectId: string, target = "all", opts: { llm?: Pick<LLMProvider, "classifyPlanPages"> } = {},
@@ -365,7 +445,9 @@ export async function buildUtilityPackage(
   const source = await PDFDocument.load(planBytes);
   const total = source.getPageCount();
   const classified = await classifyPlanSetPages(planSet.path, total);
-  const { byCategory, unclassified, pageTexts } = classified;
+  const { byCategory, unclassified, pageTexts, outlined } = classified;
+  // The shipped plan set's unread pages, for QC and the submit gate (#696): the split read them anyway.
+  try { recordOutlinedPagesValue(db, planSet.id, outlined); } catch { /* the gate reads '' as not checked */ }
   let { undecidedSpec, undecidedSpecFiledAs } = classified;
   const visionTypes = new Set<string>();
   let specPagesByVision: Record<string, PlanSheetKind> | undefined;
@@ -374,7 +456,9 @@ export async function buildUtilityPackage(
     const { readUndecidedSpecPages } = await import("./scannedPlanSet");
     // A read that cannot run (the renderer failed) leaves every page undecided, as before #79 —
     // never a failed split.
-    const read = await readUndecidedSpecPages(opts.llm, planBytes, undecidedSpec, pageTexts)
+    const { projectSecretValuesById } = await import("./projectSecrets");
+    // Rule 2 (#612): every thumbnail is masked with the project's own secrets; unreadable → no read.
+    const read = await readUndecidedSpecPages(opts.llm, planBytes, undecidedSpec, pageTexts, { secrets: projectSecretValuesById(db, projectId) })
       .catch(() => ({ decided: {} as Record<string, PlanSheetKind>, integratedInverter: [] as number[], withheld: [] as number[] }));
     specPagesByVision = read.decided;
     if (read.withheld.length) specPagesWithheld = read.withheld;
@@ -382,7 +466,9 @@ export async function buildUtilityPackage(
       const page = Number(pageKey);
       const into = kind === "module_spec"
         ? (read.integratedInverter.includes(page) ? ["module_spec", "inverter_spec"] : ["module_spec"])
-        : kind === "inverter_spec" ? ["inverter_spec"] : [];
+        : kind === "inverter_spec" ? ["inverter_spec"]
+        // A battery datasheet the read named (#261): the battery spec part, never module / inverter.
+        : kind === "battery_spec" ? ["battery_spec"] : [];
       for (const docType of into) {
         const arr = byCategory.get(docType) ?? [];
         if (!arr.includes(page - 1)) arr.push(page - 1);
@@ -479,8 +565,8 @@ export async function buildUtilityPackage(
 
   const missingSheetTypes = CATEGORY_PATTERNS
     .map((c) => c.docType)
-    .filter((t) => wanted.includes(t) && !parts.some((p) => p.docType === t));
-  return { target, planSetDocId: planSet.id, pages: total, parts, packagedDocTypes: packaged, missingDocTypes: missing, zipDocumentId: zipDoc.id, unclassifiedPages: unclassified, missingSheetTypes, undecidedSpecPages: undecidedSpec, undecidedSpecFiledAs,
+    .filter((t) => wanted.includes(t) && !CONDITIONAL_PACKAGE_DOC_TYPES.has(t) && !parts.some((p) => p.docType === t));
+  return { target, planSetDocId: planSet.id, pages: total, parts, packagedDocTypes: packaged, missingDocTypes: missing, zipDocumentId: zipDoc.id, unclassifiedPages: unclassified, missingSheetTypes, undecidedSpecPages: undecidedSpec, undecidedSpecFiledAs, outlinedTextPages: outlined,
     ...(specPagesByVision ? { specPagesByVision } : {}), ...(specPagesWithheld ? { specPagesWithheld } : {}) };
 }
 
@@ -488,14 +574,27 @@ export async function buildUtilityPackage(
 // the pages that name a spec sheet but landed in no spec part are listed as undecided spec pages,
 // with the category that took each one, if any (#91) — unless that category won on a title-block
 // sheet-name hit (#119).
-async function classifyPlanSetPages(planSetPath: string, total: number): Promise<{ byCategory: Map<string, number[]>; unclassified: number[]; undecidedSpec: number[]; undecidedSpecFiledAs: Record<string, string>; pageTexts: string[] }> {
+//
+// OUTLINED TEXT (#696). A page whose text is drawn as outlines (outlinedTextPages.ts: no or near-no
+// text layer, no raster, a vector-heavy drawing) is UNCLASSIFIED, whatever its few stray text items
+// score: the text cannot say what the sheet is, so filing it would be a guess. It is named in
+// `outlined` so every report says why it was not read. Only pages whose text is already short are
+// opened to check; a normal text page is classified exactly as before.
+async function classifyPlanSetPages(planSetPath: string, total: number): Promise<{ byCategory: Map<string, number[]>; unclassified: number[]; undecidedSpec: number[]; undecidedSpecFiledAs: Record<string, string>; pageTexts: string[]; outlined: number[] }> {
   const pageTexts = await extractPdfPages(planSetPath, 80);
+  let outlined: number[] = [];
+  try {
+    outlined = (await outlinedTextPagesOfPdf(new Uint8Array(fs.readFileSync(planSetPath)), { pageTexts: pageTexts.slice(0, total), maxPages: Math.min(total, 80) }))
+      .filter((p) => p <= total);
+  } catch { outlined = []; /* unreadable drawing: classified by its text, as before */ }
+  const outlinedSet = new Set(outlined);
   const byCategory = new Map<string, number[]>();
   const unclassified: number[] = [];
   const undecidedSpec: number[] = [];
   const undecidedSpecFiledAs: Record<string, string> = {};
   const index = indexSpecSheets(pageTexts.slice(0, total));
   for (let i = 0; i < total; i++) {
+    if (outlinedSet.has(i + 1)) { unclassified.push(i + 1); continue; }
     const text = pageTexts[i] ?? "";
     const { docTypes, byPattern } = scorePage(text);
     for (const docType of docTypes) {
@@ -513,7 +612,7 @@ async function classifyPlanSetPages(planSetPath: string, total: number): Promise
       if (docTypes.length) undecidedSpecFiledAs[String(i + 1)] = docTypes[0];
     }
   }
-  return { byCategory, unclassified, undecidedSpec, undecidedSpecFiledAs, pageTexts };
+  return { byCategory, unclassified, undecidedSpec, undecidedSpecFiledAs, pageTexts, outlined };
 }
 
 // A page that names a spec sheet, is not a calculations or index page, landed in no spec part, and
@@ -523,7 +622,9 @@ async function classifyPlanSetPages(planSetPath: string, total: number): Promise
 export function isUndecidedSpecPage(
   text: string, scored: { docTypes: string[]; byPattern: boolean }, index?: { spec: Set<string>; listed: Set<string> },
 ): boolean {
-  const named = SPEC_SHEET_NAME.test(text) || Boolean(index?.spec.size && index.spec.has(pageSheetNumber(text, index.listed) ?? ""));
+  // A battery page that also reads as an inverter (#261) is spec-named too: never filed, never dropped.
+  const named = SPEC_SHEET_NAME.test(text) || batteryPage(text) === "undecided"
+    || Boolean(index?.spec.size && index.spec.has(pageSheetNumber(text, index.listed) ?? ""));
   return named && !CALCS_SHEET.test(text) && !isIndexOrNotesPage(text)
     && !scored.docTypes.some((t) => SPEC_DOC_TYPES.has(t)) && !scored.byPattern;
 }
@@ -563,7 +664,7 @@ export async function reconcileSplitParts(db: AppDb, projectId: string): Promise
   // The plan set the package ships (#198): one "newest" rule, so reconcile judges the same plan set.
   const shipped = shippedPlanSet(db, projectId);
   const latest = shipped ? { stored_path: shipped.storedPath, uploaded_at: shipped.uploadedAt } : undefined;
-  const none: ReconcileResult = { withdrawn: [], gaps: [], undecidedSpecPages: [], undecidedSpecFiledAs: {} };
+  const none: ReconcileResult = { withdrawn: [], gaps: [], undecidedSpecPages: [], undecidedSpecFiledAs: {}, outlinedTextPages: [] };
   if (!latest?.stored_path || !fs.existsSync(latest.stored_path)) return none;
   const sheetTypes = CATEGORY_PATTERNS.map((c) => c.docType);
   const splitParts = db.query<{ id: string; doc_type: string; stored_path: string; uploaded_at: string; original_filename: string }>(
@@ -574,8 +675,8 @@ export async function reconcileSplitParts(db: AppDb, projectId: string): Promise
   if (splitParts.length === 0) return none;
   const deletedByPerson = documentTypesDeletedSince(db, projectId, latest.uploaded_at);
   const total = (await PDFDocument.load(fs.readFileSync(latest.stored_path))).getPageCount();
-  const { byCategory, pageTexts, undecidedSpec, undecidedSpecFiledAs } = await classifyPlanSetPages(latest.stored_path, total);
-  const undecided = { undecidedSpecPages: undecidedSpec, undecidedSpecFiledAs };
+  const { byCategory, pageTexts, undecidedSpec, undecidedSpecFiledAs, outlined } = await classifyPlanSetPages(latest.stored_path, total);
+  const undecided = { undecidedSpecPages: undecidedSpec, undecidedSpecFiledAs, outlinedTextPages: outlined };
 
   const withdrawn = new Set<string>();
   if (pageTexts.some((t) => pageKey(t))) {
@@ -615,6 +716,8 @@ export interface ReconcileResult {
   /** As UtilityPackageResult's: the newest plan set's spec-named pages no spec part holds (#91). */
   undecidedSpecPages: number[];
   undecidedSpecFiledAs: Record<string, string>;
+  /** As UtilityPackageResult's: the newest plan set's pages whose text is drawn as outlines (#696). */
+  outlinedTextPages: number[];
 }
 
 /**

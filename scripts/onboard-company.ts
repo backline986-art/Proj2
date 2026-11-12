@@ -118,47 +118,96 @@ const EXAMPLE_INTAKE = {
     "so a new tenant org can never get its own admin. Only the 'autopilot' product unlocks",
     "staging and it refuses API keys, so a review-gate-only org cannot stage at all. If you have",
     "read that and still want it, the shape is an explicit opt-in — nothing else creates an org:",
-    "  \"org\": { \"createTenant\": true, \"name\": \"Sunrise Solar Co\", \"edition\": \"full\" },",
+    "  \"org\": { \"createTenant\": true, \"name\": \"Brightfield Solar Co\", \"edition\": \"full\" },",
     "  \"entitlements\": [\"autopilot\"],",
-    "  \"users\": [{ \"name\": \"Dana Ruiz\", \"email\": \"dana@example.com\", \"password\": \"typed-here-once\" }]",
+    "  \"users\": [{ \"name\": \"Robin Vale\", \"email\": \"robin@brightfield-solar.invalid\", \"password\": \"typed-here-once\" }]",
     "and `users` is REQUIRED there, because a tenant with no login is a row nobody can reach.",
     "",
     "An existing tenant is addressed by \"org\": { \"id\": \"org-1234abcd\" } — an id that does not",
     "already exist is refused, never created, unless createTenant is also true.",
+    "",
+    "EVERY \"XX\" IS A TWO-LETTER STATE CODE TO FILL IN, and every REPLACE-ME a real number: this example",
+    "names no state on purpose, and the script refuses to run while either is still there.",
+    "",
+    "LICENCES GO IN client.stateLicenses, one entry per licence per state the company files in:",
+    "  { \"state\": \"XX\", \"kind\": \"contractor\", \"number\": \"...\", \"expires\": \"YYYY-MM-DD\" }",
+    "kind is one of contractor, electrical_contractor, construction_supervisor,",
+    "home_improvement_contractor, solar_contractor, master_electrician, business_registration; a",
+    "person's licence (master_electrician, construction_supervisor) also takes \"holder\": the person's",
+    "name. The named ccbLicenseNumber / electricalLicenseNumber / electricianLicenseNumber columns are",
+    "OREGON's licences and fill only Oregon jobs; an Oregon job also refuses to stage without the CCB",
+    "column. A re-run only ADDS licences: one already on file is never removed by this script.",
+    "",
+    "SERVICE AREA: client.serviceArea lists where the company works, one entry per place:",
+    "  { \"kind\": \"city\" | \"county\" | \"utility\", \"state\": \"XX\", \"name\": \"...\" } or { \"kind\": \"state\", \"state\": \"XX\" }.",
+    "\"Destinations to confirm\" and the coverage report then list every authority it names that no job",
+    "does yet, so its filing destination can be confirmed before the first job. A re-run only ADDS places.",
+    "",
+    "EMAIL INTAKE: client.intakeTag routes jobs mailed to intake+<tag>@ the filings mailbox to this",
+    "client; client.intakeSenders lists the other addresses allowed to send them (\"@domain\" allows a",
+    "whole domain). The client's own contact, business, updates and billing addresses always count.",
   ],
   client: {
-    companyName: "Sunrise Solar Co",
-    legalBusinessName: "Sunrise Solar Company LLC",
+    companyName: "Brightfield Solar Co",
+    legalBusinessName: "Brightfield Solar Company LLC",
     dba: "",
-    contactName: "Dana Ruiz",
-    contactEmail: "dana@example.com",
-    phone: "503-555-0100",
-    ccbLicenseNumber: "223690",
-    ccbExpiration: "2027-04-30",
+    contactName: "Robin Vale",
+    contactEmail: "office@brightfield-solar.invalid",
+    phone: "555-010-0100",
+    // OREGON ONLY. The named CCB / electrical / electrician columns are Oregon's licences and fill
+    // ONLY Oregon jobs (clients.licenceFor). Every state's licences — Oregon's too, if you like —
+    // go in stateLicenses below. Leave these blank for a company that does not file in Oregon.
+    ccbLicenseNumber: "",
+    ccbExpiration: "",
     electricalLicenseNumber: "",
     electricianLicenseNumber: "",
     electricalSupervisorName: "",
     metroCityLicenseNumber: "",
     docketNumber: "",
-    businessAddress: "1400 SW Alder St",
-    businessCity: "Portland",
-    businessState: "OR",
-    businessZip: "97205",
-    businessPhone: "503-555-0100",
-    businessEmail: "permits@example.com",
+    businessAddress: "100 Example Way",
+    businessCity: "Exampleville",
+    businessState: "XX",
+    businessZip: "00000",
+    businessPhone: "555-010-0100",
+    businessEmail: "permits@brightfield-solar.invalid",
+    licenseState: "XX",
     ein: "",
     bondCarrier: "",
     insuranceCarrier: "",
-    authorizedSignerName: "Dana Ruiz",
+    authorizedSignerName: "Robin Vale",
     authorizedSignerTitle: "Owner",
-    standardDisconnectMake: "Eaton",
-    standardDisconnectModel: "DG221URB",
+    standardDisconnectMake: "",
+    standardDisconnectModel: "",
     billingMode: "",
     serviceFeeUsd: null,
     billingStatus: "active",
     notes: "",
+    // ONE ENTRY PER LICENCE, PER STATE THE COMPANY FILES IN. state = the two-letter code; kind = one of
+    // contractor, electrical_contractor, construction_supervisor, home_improvement_contractor,
+    // solar_contractor, master_electrician, business_registration. A person's licence
+    // (master_electrician, construction_supervisor) carries the holder's name. Additive: a re-run never
+    // removes a licence already on file (remove one under Clients -> State licences).
+    stateLicenses: [
+      { state: "XX", kind: "contractor", number: "REPLACE-ME", expires: "2027-04-30" },
+      { state: "XX", kind: "electrical_contractor", number: "REPLACE-ME", expires: "2027-04-30" },
+      { state: "XX", kind: "master_electrician", number: "REPLACE-ME", holder: "Robin Vale" },
+    ],
+    // EMAIL INTAKE. Jobs mailed to intake+<intakeTag>@ our filings mailbox land on this client; a
+    // sender is accepted when it is one of the client's own addresses or listed here ("@domain" allows
+    // a whole domain). Letters, digits, dot, dash and underscore; one client per tag.
+    intakeTag: "brightfield",
+    intakeSenders: ["@brightfield-solar.invalid"],
+    // WHERE THE COMPANY WORKS: each state, city or county, and utility it files with (kind state / city /
+    // county / utility; a state entry takes no name). Additive: a re-run never removes a place on file
+    // (remove one under Clients -> Service area).
+    serviceArea: [
+      { kind: "state", state: "XX" },
+      { kind: "city", state: "XX", name: "REPLACE-ME" },
+      { kind: "county", state: "XX", name: "REPLACE-ME" },
+      { kind: "utility", state: "XX", name: "REPLACE-ME" },
+    ],
     portalIdentities: [
-      { portalType: "OR · Accela Citizen Access", installerCompanyLabel: "SUNRISE SOLAR CO", installerContactCode: "", notes: "" },
+      { portalType: "XX · <Platform>", installerCompanyLabel: "BRIGHTFIELD SOLAR CO", installerContactCode: "", notes: "" },
     ],
   },
   // EMPTY ON PURPOSE. In the service-bureau lane a `users` entry does not create a login for
@@ -167,11 +216,11 @@ const EXAMPLE_INTAKE = {
   users: [],
   portalCredentials: [
     {
-      portalType: "OR · Accela Citizen Access",
-      portalUrl: "https://aca-oregon.accela.com/oregon/",
-      username: "sunrise.permits",
+      portalType: "XX · <Platform>",
+      portalUrl: "https://permits.example-city.invalid/portal/",
+      username: "brightfield.permits",
       password: "typed-here-once-then-delete-this-file",
-      securityAnswers: "mother's maiden name: Reyes",
+      securityAnswers: "first pet: Example",
       // The two kickoff answers every portal account needs (INTAKE_CHECKLIST §5). Neither is a
       // secret. Leaving a key OUT on a re-run keeps whatever is stored; "" means "asked, not
       // yet agreed", which the coverage report prints as "fees NOT AGREED".
@@ -213,7 +262,11 @@ if (dbFlag) process.env.AUTOPILOT_DB_PATH = dbFlag;
 process.env.AUTOPILOT_DB_PATH = process.env.AUTOPILOT_DB_PATH || "backend/data/autopilot.sqlite";
 
 const { openDatabase, DEFAULT_ORG_ID } = await import("../backend/src/db");
-const { createClient, updateClient, getClient } = await import("../backend/src/clients");
+const { createClient, updateClient, getClient, normalizeIntakeTag, parseStateLicenses, licenceFor, licenceJobState } = await import("../backend/src/clients");
+const { mergeServiceArea, parseServiceArea, serviceAreaProblems } = await import("../backend/src/serviceAreaEntries");
+const { canonicalLicenceKind, licenceKindWords, LICENCE_KINDS } = await import("../shared/src/licenceKinds");
+const { looksLikePlaceholderIdentifier } = await import("../shared/src/companyFacts");
+const { usStateCode } = await import("../backend/src/permitPath");
 const { createUser, updateUser } = await import("../backend/src/users");
 // The ONE writer of users.password_hash outside the seed path. Imported rather than
 // re-implemented: the format is scrypt(pw, 16-byte salt, 64) as "salthex:hashhex" and
@@ -252,6 +305,10 @@ const CLIENT_FIELDS = [
   // client field", so an operator filling the template correctly got a warning and a dropped
   // value. updatesInbox is the address every automated status update is sent to.
   "updatesInbox", "billingContactEmail", "licenseState", "insuranceExpiry", "bondExpiry",
+  // EMAIL INTAKE (#682): the tag that routes intake+<tag>@ mail to this client, and the extra
+  // senders allowed to use it. Both are FIELD_COLUMNS pairs; until they were listed here an
+  // intake that set them was warned "not a writable client field" and the value dropped.
+  "intakeTag", "intakeSenders",
 ] as const;
 
 /** Every key a portalCredentials[] entry may carry. The last three are the per-portal kickoff
@@ -393,20 +450,105 @@ if (publicBaseDead) {
 
 const clientName = str(clientIn.companyName) || str(clientIn.legalBusinessName);
 if (!clientName) problems.push("client.companyName (or client.legalBusinessName) is required — createClient refuses a nameless client.");
-if (!str(clientIn.ccbLicenseNumber)) {
-  problems.push(
-    "client.ccbLicenseNumber is blank. This is the hard staging gate, not a nice-to-have: prepareSubmission " +
-    "throws 409 {needsCcb} and the project soft-locks with no way forward from the dashboard.",
-  );
+// LICENCES ARE CHECKED PER STATE, IN THE PLAN (#682). "client.ccbLicenseNumber is blank" used to be
+// a hard problem for EVERY intake, but the CCB is Oregon's contractor board: the named columns fill
+// only Oregon jobs (clients.licenceFor) and prepareSubmission's needsCcb gate fires only on an
+// Oregon job. A Utah or Idaho company was refused for lacking an Oregon licence, and the licences it
+// does hold had nowhere to go. Which licence each state needs is answered by licenceFor against the
+// stored row merged with this intake, so it can only be checked once the DB is open (planLicences).
+// Here: the SHAPE of every stateLicenses entry, and the intake tag / senders.
+const LICENCE_KIND_NAMES = LICENCE_KINDS.map((k) => k.kind);
+/** "REPLACE-ME", "TEST-1", "XXX", "0000": a value nobody filled in. Never stored as a licence. */
+const placeholderValue = (v: string): boolean => looksLikePlaceholderIdentifier(v) || /replace[-_ ]?me|^<.*>$/i.test(v);
+const stateLicencesIn: Json[] = [];
+if ("stateLicenses" in clientIn && !Array.isArray(clientIn.stateLicenses)) {
+  problems.push("client.stateLicenses must be a list of { state, kind, number } entries.");
+}
+const seenLicence = new Set<string>();
+arr(clientIn.stateLicenses).forEach((raw, i) => {
+  const l = obj(raw);
+  const where = `client.stateLicenses[${i}]`;
+  const state = usStateCode(str(l.state));
+  const kind = canonicalLicenceKind(str(l.kind));
+  const number = str(l.number);
+  if (!state) problems.push(`${where}.state "${str(l.state)}" is not a US state. Use its two-letter code (the job's state is matched against it).`);
+  if (!kind) {
+    problems.push(
+      `${where}.kind "${str(l.kind)}" names no licence kind. Use one of ${LICENCE_KIND_NAMES.join(", ")} — a licence ` +
+      "without its kind is never put in any slot, so it would be stored and then never used.",
+    );
+  }
+  if (!number) problems.push(`${where}.number is blank. A licence entry needs its number (a person's name alone goes in holder, beside a number).`);
+  else if (placeholderValue(number)) problems.push(`${where}.number "${number}" is a placeholder, not a licence number. Fill in the real number or remove the entry.`);
+  if (str(l.expires) && !/^\d{4}-\d{2}-\d{2}$|^\d{1,2}\/\d{1,2}\/\d{4}$/.test(str(l.expires))) {
+    problems.push(`${where}.expires "${str(l.expires)}" is not a date (YYYY-MM-DD). An unreadable expiry is kept as text and never reaches a form.`);
+  }
+  for (const key of Object.keys(l)) {
+    if (!["state", "kind", "number", "expires", "holder"].includes(key) && !key.startsWith("_")) {
+      warnings.push(`${where}.${key} is not a licence field — dropped. Known: state, kind, number, expires, holder.`);
+    }
+  }
+  const dupKey = `${state}|${number.toUpperCase().replace(/[^A-Z0-9]/g, "")}`;
+  if (state && number && seenLicence.has(dupKey)) problems.push(`${where} repeats ${state} licence ${number} — list each licence once.`);
+  seenLicence.add(dupKey);
+  if (state && kind && number) {
+    const entry: Json = { state, kind, number };
+    if (str(l.expires)) entry.expires = str(l.expires);
+    if (str(l.holder)) entry.holder = str(l.holder);
+    stateLicencesIn.push(entry);
+  }
+});
+// SERVICE AREA: the shape of every entry, checked like the licences (a US state; a place that names
+// something). Universal: any state, any city, county or utility — the names are data.
+const serviceAreaIn: Json[] = [];
+if ("serviceArea" in clientIn) {
+  if (!Array.isArray(clientIn.serviceArea)) problems.push("client.serviceArea must be a list of { kind, state, name } entries.");
+  else {
+    const usable: Json[] = [];
+    arr(clientIn.serviceArea).forEach((raw, i) => {
+      const e = obj(raw);
+      const where = `client.serviceArea[${i}]`;
+      const state = usStateCode(str(e.state));
+      if (!state) { problems.push(`${where}.state "${str(e.state)}" is not a US state. Use its two-letter code.`); return; }
+      if (str(e.kind).toLowerCase() !== "state" && placeholderValue(str(e.name))) { problems.push(`${where}.name "${str(e.name)}" is a placeholder. Name the place or remove the entry.`); return; }
+      for (const key of Object.keys(e)) {
+        if (!["kind", "state", "name"].includes(key) && !key.startsWith("_")) warnings.push(`${where}.${key} is not a service-area field — dropped. Known: kind, state, name.`);
+      }
+      usable.push({ kind: str(e.kind).toLowerCase(), state, name: str(e.name) });
+    });
+    for (const p of serviceAreaProblems(usable)) problems.push(`client.${p}`);
+    if (!problems.some((p) => p.startsWith("client.serviceArea"))) serviceAreaIn.push(...parseServiceArea(usable) as unknown as Json[]);
+  }
+}
+if ("intakeTag" in clientIn) {
+  try {
+    normalizeIntakeTag(clientIn.intakeTag);
+  } catch (err) {
+    problems.push(`client.intakeTag: ${(err as Error).message}`);
+  }
+}
+/** intakeSenders as stored: one comma-separated column. A list is accepted in the intake. */
+const intakeSendersIn = Array.isArray(clientIn.intakeSenders)
+  ? clientIn.intakeSenders.map(str).filter(Boolean).join(", ")
+  : str(clientIn.intakeSenders);
+for (const sender of intakeSendersIn.split(/[\s,;]+/).filter(Boolean)) {
+  if (!(sender.startsWith("@") ? /^@[^\s@]+\.[^\s@]{2,}$/.test(sender) : EMAIL_RE.test(sender))) {
+    problems.push(`client.intakeSenders entry "${sender}" is neither an email address nor "@domain". A sender that cannot match is a job filed as unsorted.`);
+  }
 }
 for (const key of Object.keys(clientIn)) {
-  if (key === "id" || key === "portalIdentities" || key.startsWith("_")) continue;
+  if (key === "id" || key === "portalIdentities" || key === "stateLicenses" || key === "serviceArea" || key.startsWith("_")) continue;
   if (key === "logoBase64" || key === "logoMime") {
     warnings.push(`client.${key} cannot be set by any code path today (not in FIELD_COLUMNS; the logo routes UPDATE a clients.updated_at column that does not exist). Ignored.`);
     continue;
   }
   if (!(CLIENT_FIELDS as readonly string[]).includes(key)) {
     warnings.push(`client.${key} is not a writable client field — createClient ignores it. Check the spelling against CLIENT_FIELDS in this script.`);
+  }
+}
+for (const key of ["licenseState", "businessState"] as const) {
+  if (str(clientIn[key]) && !usStateCode(str(clientIn[key]))) {
+    problems.push(`client.${key} "${str(clientIn[key])}" is not a US state. Use its two-letter code.`);
   }
 }
 for (const key of OVERLAY_FIELDS) {
@@ -754,8 +896,10 @@ try {
   const clientPayload: Json = {};
   for (const key of CLIENT_FIELDS) {
     if (!(key in clientIn)) continue;
-    clientPayload[key] = key === "serviceFeeUsd" ? clientIn[key] : str(clientIn[key]);
+    clientPayload[key] = key === "serviceFeeUsd" ? clientIn[key] : key === "intakeSenders" ? intakeSendersIn : str(clientIn[key]);
   }
+  // The intake tag as it will be stored (lower-cased), so a re-run with "Brightfield" is unchanged.
+  if ("intakeTag" in clientPayload) clientPayload.intakeTag = normalizeIntakeTag(clientPayload.intakeTag);
   if (!("companyName" in clientPayload) && clientName) clientPayload.companyName = clientName;
   if ("portalIdentities" in clientIn) clientPayload.portalIdentities = clientIn.portalIdentities;
 
@@ -786,6 +930,107 @@ try {
       if (shape(arr(existing.portalIdentities)) !== shape(arr(clientPayload.portalIdentities))) clientChanged.push("portalIdentities");
     }
     if (clientChanged.length) clientVerdict = "update";
+  }
+
+  // --- STATE LICENCES (#682) --------------------------------------------------
+  // ADDITIVE, like everything else here: the intake's licences are added to what is on file, and an
+  // entry already on file (same state + number) takes the intake's kind / expiry / holder. Nothing is
+  // removed — a licence typed under Clients -> State licences must survive a re-run of an intake that
+  // never listed it. The writer (updateClient -> mergeStateLicenceSave) also keeps any stored row the
+  // parser cannot read.
+  const licenceId = (l: { state?: unknown; number?: unknown }): string =>
+    `${str(l.state).toUpperCase()}|${str(l.number).toUpperCase().replace(/[^A-Z0-9]/g, "")}`;
+  const storedLicences = clientId ? parseStateLicenses((getClient(db, clientId) as unknown as Json).stateLicenses) : [];
+  const mergedLicences: Json[] = storedLicences.map((l) => ({ ...l }) as Json);
+  for (const l of stateLicencesIn) {
+    const at = mergedLicences.findIndex((m) => licenceId(m) === licenceId(l));
+    if (at >= 0) mergedLicences[at] = l;
+    else mergedLicences.push(l);
+  }
+  const licenceShape = (list: unknown): string =>
+    JSON.stringify(parseStateLicenses(list).map((l) => [l.state, l.kind, l.number, l.expires ?? "", l.holder ?? ""]).sort());
+  if (stateLicencesIn.length && licenceShape(mergedLicences) !== licenceShape(storedLicences)) {
+    clientPayload.stateLicenses = mergedLicences;
+    if (clientId) {
+      clientChanged.push("stateLicenses");
+      clientVerdict = "update";
+    }
+  }
+
+  // --- SERVICE AREA ---------------------------------------------------------
+  // ADDITIVE, like the licences: the intake's places are added to what is on file; nothing is removed.
+  const storedArea = clientId ? parseServiceArea((getClient(db, clientId) as unknown as Json).serviceArea) : [];
+  const mergedArea = mergeServiceArea(storedArea, serviceAreaIn);
+  if (serviceAreaIn.length && mergedArea.length !== storedArea.length) {
+    clientPayload.serviceArea = mergedArea;
+    if (clientId) {
+      clientChanged.push("serviceArea");
+      clientVerdict = "update";
+    }
+  }
+
+  // INTAKE TAG: one client per tag inside an org (clients.assertIntakeTagFree). Checked here so a
+  // clash is an intake problem (exit 1, nothing written), not a 400 thrown mid-transaction.
+  const tagWanted = str(clientPayload.intakeTag);
+  if (tagWanted) {
+    const other = db.get<{ id: string; company_name: string }>(
+      "SELECT id, company_name FROM clients WHERE org_id = ? AND intake_tag = ? AND id != ?", [orgId, tagWanted, clientId ?? ""],
+    );
+    if (other) planProblems.push(`client.intakeTag "${tagWanted}" is already used by ${str(other.company_name) || other.id}. One client per tag, or every job mailed to it is ambiguous.`);
+  }
+
+  // WHICH LICENCE EACH STATE'S JOBS GET — asked of licenceFor, the one answer every licence door uses
+  // (the submit gate, the portal overlay, the form fill), on the stored row merged with this intake.
+  // The states: the one the intake says issued its licence (licenseState), and every state it holds
+  // a licence in. Strictest real requirement first: a state with no contractor licence on file stages
+  // a filing whose licence slot is blank, and an Oregon job refuses to stage at all without the CCB
+  // column (prepareSubmission's needsCcb gate) — so both are problems, not warnings.
+  const storedRow = clientId ? (getClient(db, clientId) as unknown as Json) : {};
+  const mergedClient: Json = { ...storedRow, ...clientPayload, stateLicenses: mergedLicences.length ? mergedLicences : storedRow.stateLicenses ?? [] };
+  const licenceStates = new Set<string>();
+  const licenseStateCode = usStateCode(str(mergedClient.licenseState));
+  if (licenseStateCode) licenceStates.add(licenseStateCode);
+  for (const l of parseStateLicenses(mergedClient.stateLicenses)) licenceStates.add(l.state);
+  if (str(mergedClient.ccbLicenseNumber)) licenceStates.add("OR");
+  interface LicencePlan { state: string; contractor: string; others: string[] }
+  const licencePlans: LicencePlan[] = [];
+  if (!licenceStates.size) {
+    planProblems.push(
+      "no licence is on file for this company in any state. Every permit and interconnection application asks for " +
+      "the installer's licence, and the slot is filled from client.stateLicenses (one { state, kind, number } entry per " +
+      "licence per state it files in). Add them, and set licenseState to the state that issued the contractor licence.",
+    );
+  }
+  for (const st of [...licenceStates].sort()) {
+    const generic = licenceFor(mergedClient, licenceJobState(st), { track: null });
+    const others = parseStateLicenses(mergedClient.stateLicenses).filter((l) => l.state === st).map((l) => licenceKindWords(canonicalLicenceKind(l.kind)));
+    // Labels and kinds only, never the numbers (this script prints licences as set/missing).
+    licencePlans.push({
+      state: st,
+      contractor: generic.number ? `${generic.label || "set"} — set` : generic.candidates.length ? "several on file — a slot must name its kind" : "",
+      others,
+    });
+    if (st === "OR" && !str(mergedClient.ccbLicenseNumber)) {
+      planProblems.push(
+        "client.ccbLicenseNumber is blank and this company holds Oregon licences or names Oregon as its licence state. " +
+        "On an Oregon job that is the hard staging gate: prepareSubmission throws 409 {needsCcb} and the project " +
+        "soft-locks with no way forward from the dashboard.",
+      );
+    } else if (!generic.number && generic.candidates.length) {
+      warnings.push(
+        `${st}: ${generic.candidates.length} contractor-kind licences are on file (${others.join(", ")}). A licence slot that does not ` +
+        "name its kind, on a job whose track does not say, cannot pick one and is left blank; a slot that names its kind still fills.",
+      );
+    } else if (!generic.number) {
+      planProblems.push(
+        `${st}: no ${st} contractor licence is on file (State licences there: ${others.length ? others.join(", ") : "none"}). A ${st} job would stage with its contractor-licence slot blank, which the authority ` +
+        `rejects. Add the ${st} contractor (or electrical / solar contractor) licence to client.stateLicenses.`,
+      );
+    }
+  }
+  const homeState = usStateCode(str(mergedClient.businessState));
+  if (homeState && licenceStates.size && !licenceStates.has(homeState)) {
+    warnings.push(`the company's business state is ${homeState} but it holds no ${homeState} licence. Fine if it files only elsewhere; a ${homeState} job would stage with no licence.`);
   }
 
   // --- USERS ----------------------------------------------------------------
@@ -1007,7 +1252,12 @@ try {
 
   rule("CLIENT (the solar company the work is FOR)");
   line(`  ${verdictLabel(clientVerdict).padEnd(26)} ${clientName}${clientId ? `   ${clientId}` : ""}`);
-  line(`  ccb licence                ${secretState(str(clientIn.ccbLicenseNumber))}`);
+  for (const p of licencePlans) {
+    line(`  licence ${p.state.padEnd(19)}${p.contractor ? `contractor slot: ${p.contractor}` : "contractor slot: NONE"}${p.others.length ? `   on file: ${p.others.join(", ")}` : ""}`);
+  }
+  if ("stateLicenses" in clientPayload) line(`  state licences             ${stateLicencesIn.length} in intake, ${parseStateLicenses(clientPayload.stateLicenses).length} after merge (never removes one on file)`);
+  if (serviceAreaIn.length) line(`  service area               ${serviceAreaIn.length} place(s) in intake, ${mergedArea.length} after merge (never removes one on file)`);
+  if (tagWanted) line(`  intake tag                 ${tagWanted}   senders ${intakeSendersIn ? intakeSendersIn.split(/[\s,;]+/).filter(Boolean).length : 0} listed`);
   line(`  ein                        ${secretState(str(clientIn.ein))}`);
   if (clientChanged.length) line(`  fields to update           ${clientChanged.join(", ")}`);
   if (clientVerdict === "create") line(`  fields to write            ${Object.keys(clientPayload).filter((k) => k !== "portalIdentities").length} of ${CLIENT_FIELDS.length} writable`);
@@ -1054,7 +1304,7 @@ try {
     line();
   } else {
     // ONE TRANSACTION for everything. A half-onboarded company is the worst outcome: a client
-    // with no credentials stages against a mock portal and reports success, and an org with no
+    // with no credentials stalls at every portal login, and an org with no
     // entitlements 403s on every route. Either the whole company exists or none of it does.
     db.transaction(() => {
       if (orgVerdict === "create") {
@@ -1143,8 +1393,11 @@ try {
     line("     (createProject auto-enqueues an autopilot job unless AUTOPILOT_AUTO_START=0 — a scripted project starts a real staging attempt on its own.)");
     line("  3. GET /health must report sessionKeySet true, or every stored credential above is unreadable.");
     line("  4. Each portal login must already exist on the portal's own site. This script stores logins; it never registers them,");
-    line("     and a portal the shared knowledge base has never seen will \"stage successfully\" against a MOCK adapter that never");
-    line("     opened a browser. Point the recorder at the real portal URL before trusting a stage for a new jurisdiction.");
+    line("     and a portal the shared knowledge base has never seen cannot be staged at all: Stage stops with nothing to drive");
+    line("     (the mock adapter stands in only on a MOCK_PORTAL=1 rehearsal). Point the recorder at the real portal URL, or have");
+    line("     a person verify the authority's filing-email address, before promising a new jurisdiction.");
+    line("  4b. Run scripts/coverage-report.ts and scripts/onboarding-readiness.ts for this client: they read the licences per state");
+    line("     and track, the email filing channel and utilities filed inside the permit application.");
     line("  5. Final submit, fees and CAPTCHA/MFA stay a human's job. Nothing here changes that.");
     if (orgVerdict === "create") {
       line(`  6. YOU CREATED A TENANT (${orgId}). It has no admin and no route to get one: POST /api/orgs/:id/users`);

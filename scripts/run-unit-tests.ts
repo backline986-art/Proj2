@@ -208,7 +208,9 @@ const runOne = (rel: string): Promise<Result> =>
       cwd: REPO_ROOT,
       detached: process.platform !== "win32",
       stdio: ["ignore", "pipe", "pipe"],
-      env: { ...process.env, ...artifactEnvFor(path.join(ARTIFACT_ROOT, slug)) },
+      // MODEL_PAYLOAD_SCAN_STRICT: under tests a rule-2 leak to a (stub) model THROWS and fails the
+      // suite instead of being quietly redacted (backend/src/modelPayloadScan.ts).
+      env: { ...process.env, MODEL_PAYLOAD_SCAN_STRICT: "1", ...artifactEnvFor(path.join(ARTIFACT_ROOT, slug)) },
     });
 
     let out = "";

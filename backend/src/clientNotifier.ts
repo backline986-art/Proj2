@@ -34,6 +34,7 @@ import { addCommunication, undeliveredCommunications } from "./crm";
 import { clientEmailSubject, clientUpdateFor, clientUpdateEmail, isClientFacingOutcome, recordClientUpdateNote, type ClientUpdate } from "./clientUpdates";
 import { mailFrom, wrapPlainText } from "./emailLayout";
 import { addAuditLog } from "./audit";
+import { clientLinkRefusal } from "./clientLinkGuard";
 import { text } from "./json";
 import { logger } from "./logger";
 import { outcomeTrack, type ReadingProvenance } from "./permitMonitor";
@@ -100,6 +101,12 @@ export interface SendEmailOptions {
   /** The HTML part, rendered by the layout (emailLayout.renderEmail) from the same content as the
    *  text. Unset: the text is wrapped in the layout (wrapPlainText), so every email gets the look. */
   html?: string;
+  /** Where the recipient's Reply should go, when that is not SMTP_FROM: the intake reply (#540)
+   *  sends the client back to intake+<their tag>@…, so the files they reply with reach the job. */
+  replyTo?: string;
+  /** The message's own Message-ID ("<…@…>"), when the sender needs to recognise a reply to it by
+   *  its In-Reply-To / References (#540). Unset: nodemailer mints one. */
+  messageId?: string;
 }
 
 /**
@@ -115,6 +122,8 @@ export function buildMailOptions(to: string, subject: string, textBody: string, 
     subject,
     text: textBody,
     html: opts.html || wrapPlainText(textBody, { subject }),
+    ...(opts.replyTo ? { replyTo: opts.replyTo } : {}),
+    ...(opts.messageId ? { messageId: opts.messageId } : {}),
     ...(attachments.length ? { attachments: attachments.map((a) => ({ filename: a.filename, path: a.path, ...(a.contentType ? { contentType: a.contentType } : {}) })) } : {}),
   };
 }
@@ -189,6 +198,15 @@ export async function resendCommunication(
     return { delivered: false, to: "(none)", detail };
   }
   const body = refreshStatusLink(db, comm.projectId, comm.body);
+  // NO DEAD LINK TO A CLIENT (clientLinkGuard.ts): a project's message carries its status link, so it
+  // needs a base a client can open; every body is scanned for a local link. Refused = left a draft
+  // with the reason, never marked failed (nothing was tried) and never sent.
+  const linkRefusal = clientLinkRefusal({ body, carriesLink: Boolean(comm.projectId) });
+  if (linkRefusal) {
+    db.run("UPDATE communications SET delivery_status = 'draft', delivery_detail = ?, recipient = ?, body = ? WHERE id = ?", [linkRefusal, to, body, comm.id]);
+    logger.warn("notify", `held back a stranded client message to ${to}: ${linkRefusal}`);
+    return { delivered: false, to, detail: linkRefusal };
+  }
   // AN INSTALLER HANDOFF DRAFTED WHILE SMTP WAS UNSET (#491) lists its documents as attached, so
   // the backlog sends it WITH them — resolved now through the same allowlist the first attempt
   // used, never a list stored on the row.
@@ -357,7 +375,12 @@ export async function notifyClientOfStatusChange(
     // string, and the deployment step went undone for twelve days behind it.
     let deliveryStatus = "draft";
     let deliveryDetail = "SMTP is not configured (SMTP_HOST / SMTP_FROM are unset), so no send was attempted.";
-    if (smtpConfigured()) {
+    // NO DEAD LINK TO A CLIENT (clientLinkGuard.ts): the status link must open off this machine.
+    // Asked only when a send would happen, so the "never tried" draft above keeps its own reason.
+    const linkRefusal = smtpConfigured() ? clientLinkRefusal({ body, html }) : null;
+    if (linkRefusal) {
+      deliveryDetail = linkRefusal;
+    } else if (smtpConfigured()) {
       try {
         await sendEmail(to, subject, body, [], { html });
         deliveryStatus = "sent";

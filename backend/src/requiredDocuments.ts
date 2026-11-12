@@ -35,7 +35,8 @@
 // ---------------------------------------------------------------------------
 
 import type { AppDb } from "./db";
-import type { CodeEdition, ProjectRecord } from "../../shared/src/types";
+import type { CodeEdition, JobScope, ProjectRecord } from "../../shared/src/types";
+import { deriveJobScope, resolveJobScope, scopeHasNewPv } from "./jobScope";
 import { projectDocsByType } from "./projectDocuments";
 import { activeStructuralLetterConfirmation, confirmedByLine } from "./structuralLetter";
 import { duplicateUploads, uploadedSubmissionDocuments } from "./submissionDocuments";
@@ -62,6 +63,8 @@ import { FIRE_PATHWAY_PATTERNS } from "./projectEvidence";
 import { groundMountFromField } from "./mountKind";
 import { adoptedNecEdition } from "./necEditions";
 import { essDocumentRows, projectHasBattery } from "./essRequirements";
+import { outlinedPagesMissingSheetNote } from "./outlinedTextPages";
+import { nemFiledWithPermit, type NemFiledWithPermit } from "./utilityFilingLookup";
 
 export interface RequiredDocItem {
   /** project_documents.doc_type this maps to (or a synthetic key for path docs). */
@@ -472,6 +475,9 @@ export function requiredDocuments(
      *  APPLICATION is demanded at all, which is what keeps this function safe to
      *  call with a bare project that has no ahj/state. */
     application?: ApplicationDocContext;
+    /** What the job installs (#673). Absent: the plan set's own evidence (deriveJobScope) — pv unless
+     *  the job names no new module and both sheets say so. */
+    jobScope?: JobScope;
   } = {},
 ): RequiredDocItem[] {
   const hasUtility = Boolean((project.utility || "").trim());
@@ -485,11 +491,26 @@ export function requiredDocuments(
     { docType: "labels", label: "Label / placard schedule", why: "Placard/label schedule (705.10 directory, RSD, disconnects) — usually a plan-set sheet.", lane: "permit", blocking: false },
   ];
 
+  // A STORAGE SCOPE INSTALLS NO ARRAY (#673; draft 06). No roof framing / attachment detail and no
+  // module cut sheet; the site plan is asked for the ESS location, the one-line for the ESS, and the
+  // inverter sheet is the battery inverter / PCS sheet. The ESS rows (battery_spec, ess_detail) join
+  // below as on any battery job. Every PV scope — and an unknown one, which is pv — keeps the set as is.
+  const scope: JobScope = opts.jobScope ?? deriveJobScope(project.parserSnapshot).scope;
+  if (!scopeHasNewPv(scope)) {
+    for (let i = items.length - 1; i >= 0; i--) if (items[i].docType === "structural" || items[i].docType === "module_spec") items.splice(i, 1);
+    for (const it of items) {
+      if (it.docType === "site_plan") { it.label = "Site plan with the ESS location + service equipment"; it.why = "The AHJ reviews where the battery and its disconnect are installed (NEC 706 / IRC R328) relative to the service equipment."; }
+      if (it.docType === "sld") { it.label = "Electrical one-line / SLD (ESS + NEC 705.12)"; it.why = "Shows the battery inverter / PCS, its disconnect and backfed breaker, and the point of interconnection — for the electrical permit and the utility application."; }
+      if (it.docType === "inverter_spec") { it.label = "Battery inverter / PCS spec sheet (UL 1741)"; }
+      if (it.docType === "labels") { it.why = "Placard/label schedule (705.10 directory, ESS and disconnect labels) — usually a plan-set sheet."; }
+    }
+  }
+
   // A GROUND / POLE ARRAY HAS NO ROOF (#247). The mounting FIELD decides (mountKind.groundMountFromField
   // — plan prose never does): a pure ground array's rows replace roof framing in place; a roof + ground
   // combination keeps roof framing and adds them after it. Rooftop, carport and unknown-mount jobs never
   // take this branch — their set is unchanged.
-  const groundMount = groundMountFromField(project);
+  const groundMount = scopeHasNewPv(scope) ? groundMountFromField(project) : null;
   if (groundMount) {
     const at = items.findIndex((i) => i.docType === "structural");
     if (at < 0) items.push(...groundMountDocItems(project));
@@ -535,6 +556,33 @@ export function requiredDocuments(
   // one of the two never acquired, never filled and never attached.
   items.push(...requiredApplicationDocs(project, opts.application ?? {}));
   return items;
+}
+
+/** The utility-lane docType the with-permit application files under (docDiscipline: lane "nem"; a
+ *  permit track carries it only when the utility files with the permit — submissionDocuments). */
+export const WITH_PERMIT_DOC_TYPE = "utility_application";
+
+/**
+ * THE NEM APPLICATION THAT RIDES IN THE PERMIT APPLICATION (#664), as a PERMIT-lane row: every permit
+ * track's packet owes it (discipline "" — the utility names no trade). It BLOCKS only when the verified
+ * record lists the utility's documents (cited, verified — Helm's bar); a record that lists none leaves
+ * an advisory row that says to check the utility's page, never a guess and never silence. The owner's
+ * signature on the utility's agreement is a person's to obtain; nothing here signs it.
+ */
+export function withPermitDocItem(project: Pick<ProjectRecord, "utility">, w: NemFiledWithPermit): RequiredDocItem {
+  const who = (project.utility || "").trim() || w.utility || "The utility";
+  const basis = `${who} takes its interconnection / net-metering application inside the AHJ permit application (verified by ${w.verifiedBy || "a person"}: ${w.sourceUrl}).`;
+  const human = "The property owner signs the utility's agreement and a person attaches it — nothing here signs for the owner.";
+  return {
+    docType: WITH_PERMIT_DOC_TYPE,
+    label: `${who}'s net-metering / interconnection application (filed with the permit)`,
+    why: w.documents.length
+      ? `${basis} Its page lists: ${w.documents.join("; ")}. Attach them under this row. ${human}`
+      : `${basis} The verified record lists none of its documents — check ${who}'s page for its agreement, one-line form or questionnaire and attach what it asks for. ${human}`,
+    lane: "permit",
+    discipline: "",
+    blocking: w.documents.length > 0,
+  };
 }
 
 /**
@@ -1025,7 +1073,9 @@ export function documentInventory(db: AppDb, project: ProjectRecord): DocumentIn
       { ahjKnowledgeUnavailable: true },
     );
   }
-  const docOpts = { stampThresholdKwDc, stampThresholdConfirmed, stampThresholdBasis, jurisdictionLabel, processProfileRequiresStamp, application };
+  // What the job installs (#673; draft 06), a person's scope included.
+  const jobScope = resolveJobScope(db, String(project.id ?? ""), project.parserSnapshot).scope;
+  const docOpts = { stampThresholdKwDc, stampThresholdConfirmed, stampThresholdBasis, jurisdictionLabel, processProfileRequiresStamp, application, jobScope };
   const baselineItems = requiredDocuments(project, docOpts);
   // A HELD BUT UNFILLABLE AGENCY APPLICATION IS STILL REQUIRED — AS A FILE TO ATTACH. The row
   // keeps blocking exactly as before; its words stop promising a fill that cannot happen.
@@ -1057,6 +1107,12 @@ export function documentInventory(db: AppDb, project: ProjectRecord): DocumentIn
     }
   } catch { /* KB optional */ }
   const required = [...baselineItems, ...kbItems];
+  // THE UTILITY'S APPLICATION RIDES IN THE PERMIT PACKET (#664) — only when a person VERIFIED that this
+  // utility files inside the AHJ permit application (nemFiledWithPermit; a seeded row adds nothing).
+  try {
+    const withPermit = nemFiledWithPermit(db, project);
+    if (withPermit && !required.some((r) => r.docType === WITH_PERMIT_DOC_TYPE)) required.push(withPermitDocItem(project, withPermit));
+  } catch { /* the lookup is optional — the rows stay as they were */ }
   // A PERSON-VERIFIED REQUIRED LIST BLOCKS; A SEEDED ONE ADVISES (hard rule 3's shape). Each line of
   // the verified lookup's cited list that maps to a slot becomes a blocking row — an existing row for
   // that slot is made blocking and cites the list; a slot nothing here tracks gets its own row. A
@@ -1409,7 +1465,7 @@ export function requiredListCheck(db: AppDb, project: ProjectRecord, inventory: 
   const knownProfile = (): { label: string; lines: string[] } | null => {
     let profile: ReturnType<typeof findApplicationProfile> | null = null;
     try { profile = findApplicationProfile(project); } catch { profile = null; }
-    if (!profile || !(profile.id.startsWith("process-") || (applicationProfiles.includes(profile) && profile.id !== "oregon-generic-epermitting"))) return null;
+    if (!profile || !(profile.id.startsWith("process-") || (applicationProfiles.includes(profile) && !profile.statewide))) return null;
     return {
       label: profile.id.startsWith("process-") ? `the seeded ${project.ahj || "AHJ"} process profile (not confirmed on an agency page)` : `the ${profile.name} profile`,
       lines: profile.requiredDocuments.filter((t) => String(t || "").trim()),
@@ -1610,12 +1666,16 @@ export function isApplicationFormRow(d: Pick<DocPresence, "docType" | "altDocTyp
  * county's application). Anything else (a plan sheet, a PE letter, a spec, a bill) is attached or
  * split out of the plan set.
  */
-export function owedDocumentAction(d: Pick<DocPresence, "docType" | "altDocTypes" | "lane">, deadLinks: string[] = []): string {
+export function owedDocumentAction(d: Pick<DocPresence, "docType" | "altDocTypes" | "lane">, deadLinks: string[] = [], unreadPlanPages: readonly number[] = []): string {
   // FOUND, DEAD LINK (issue #205): the search found the blank and its link answered 404 — said so, with
   // the URL, so the operator looks for where the AHJ moved the file rather than for a form "none exists".
-  return d.lane === "permit" && isApplicationFormRow(d)
-    ? `${deadLinks.length ? `${deadLinkSentence(deadLinks)}; ` : ""}find the official form (App Docs → Find missing official forms) or upload the blank`
-    : "attach it or split it out of the plan set";
+  if (d.lane === "permit" && isApplicationFormRow(d)) {
+    return `${deadLinks.length ? `${deadLinkSentence(deadLinks)}; ` : ""}find the official form (App Docs → Find missing official forms) or upload the blank`;
+  }
+  // A plan sheet "missing" from a set with pages whose text is drawn as outlines (#696) may be on one
+  // of them: nobody read those pages, so the reason names them (shippedPlanSetOutlinedPages).
+  const unread = outlinedPagesMissingSheetNote(d.docType, unreadPlanPages);
+  return `attach it or split it out of the plan set${unread ? `; ${unread}` : ""}`;
 }
 
 // ---------------------------------------------------------------------------

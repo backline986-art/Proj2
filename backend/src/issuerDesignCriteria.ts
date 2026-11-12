@@ -36,6 +36,7 @@ import { logger } from "./logger";
 import { getPermitProcessLookup } from "./permitProcess";
 import { isAgencyOwnDomain } from "./permitPlatformCatalog";
 import { isPermitPlatformUrl, portalHostOf, registrableDomain } from "./portalChannel";
+import { urlsIn } from "./officialAuthorityHosts";
 
 /** Reads one probe may spend on the issuer's site (the home page, a site search, a hub, candidates). */
 export const ISSUER_PROBE_MAX_READS = 8;
@@ -46,14 +47,9 @@ export const ISSUER_PROBE_HUB_READS = 3;
 
 // ── 1. The issuer's host ─────────────────────────────────────────────────────────────────
 
-/** Every http(s) URL anywhere in a value (a stored lookup's citations), depth-bounded. */
-export function urlsIn(v: unknown, out: string[] = [], depth = 0): string[] {
-  if (depth > 6 || v == null) return out;
-  if (typeof v === "string") { if (/^https?:\/\//i.test(v.trim())) out.push(v.trim()); return out; }
-  if (Array.isArray(v)) { for (const x of v) urlsIn(x, out, depth + 1); return out; }
-  if (typeof v === "object") for (const x of Object.values(v as Record<string, unknown>)) urlsIn(x, out, depth + 1);
-  return out;
-}
+// urlsIn lives in officialAuthorityHosts.ts (no llm import there, so codeProfiles can read it
+// statically); re-exported here for the probe's callers.
+export { urlsIn } from "./officialAuthorityHosts";
 
 /** Is this host the jurisdiction's OWN site: an official host (llm.isOfficialCodeSource) whose name
  *  is the jurisdiction's (isAgencyOwnDomain) — never a state agency's, a code publisher's, or a
@@ -167,6 +163,8 @@ export interface IssuerProbeResult {
   candidateUrl?: string;
   /** The candidate's text as read (capped) — the grounding a model is handed when the table did not parse. */
   candidateText?: string;
+  /** When the candidate page was read (ISO) — the fetched-at an official landing needs (#683). */
+  candidateReadAt?: string;
   /** The lookup-shaped JSON the table yielded (extractCriteriaTable), for llm.parseDesignCriteriaLookup. */
   raw?: Record<string, unknown>;
   pagesRead: Array<{ url: string; ok: boolean; reason: string }>;
@@ -209,7 +207,7 @@ export async function probeIssuerDesignCriteria(reader: PageReader, input: { hos
       else if (isHubLink(l) && !hubs.some((c) => key(c) === key(l.href))) hubs.push(l.href);
     }
   };
-  let best: { url: string; text: string; raw: Record<string, unknown> } | null = null;
+  let best: { url: string; text: string; raw: Record<string, unknown>; at: string } | null = null;
   const consider = (pg: ReadPage): boolean => {
     if (!looksLikeCriteriaPage(pg)) return false;
     const raw = extractCriteriaTable(pg.text, pg.finalUrl || pg.url);
@@ -218,7 +216,7 @@ export async function probeIssuerDesignCriteria(reader: PageReader, input: { hos
     const score = (r: Record<string, unknown>) => [probeAnswered(r) ? 1 : 0, coreCount(r), Object.keys(r).length];
     const [a, b] = [score(raw), best ? score(best.raw) : null];
     if (!b || a[0] > b[0] || (a[0] === b[0] && (a[1] > b[1] || (a[1] === b[1] && a[2] > b[2])))) {
-      best = { url: pg.finalUrl || pg.url, text: pg.text, raw };
+      best = { url: pg.finalUrl || pg.url, text: pg.text, raw, at: new Date().toISOString() };
     }
     return probeAnswered(raw);
   };
@@ -268,10 +266,11 @@ export async function probeIssuerDesignCriteria(reader: PageReader, input: { hos
     }
   }
   await visitAll(rankedCandidates(candidates, candidateWords));
-  const found = best as { url: string; text: string; raw: Record<string, unknown> } | null;
+  const found = best as { url: string; text: string; raw: Record<string, unknown>; at: string } | null;
   if (found) {
     out.candidateUrl = found.url;
     out.candidateText = found.text.slice(0, CANDIDATE_TEXT_CAP);
+    out.candidateReadAt = found.at;
     if (Object.keys(found.raw).length) out.raw = found.raw;
   }
   return out;

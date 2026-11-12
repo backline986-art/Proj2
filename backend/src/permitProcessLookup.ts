@@ -29,21 +29,24 @@
 // never overwritten), and its fees land through feeSchedules.saveFeeSchedule — including the
 // DELEGATION (City of Jefferson's fees are collected by Marion County) the fee researcher had read
 // and then discarded.
-import type { CitedFact, LLMProvider, PermitFeeAnswer, PermitProcessDiscipline, PermitProcessLookup, PermitProcessPermitAnswer, WebLookupResult } from "../../shared/src/types";
+import type { BatteryPermittingAnswer, BatteryPermittingKind, CitedFact, LLMProvider, PermitFeeAnswer, PermitFilingChannel, PermitFilingChannelKind, PermitProcessDiscipline, PermitProcessLookup, PermitProcessPermitAnswer, PermitSecondStageAnswer, WebLookupResult } from "../../shared/src/types";
 import type { AppDb } from "./db";
-import { hostFitsTrackAndEntity, isInformationalPageUrl, isPathTenantedHost, isPermitPlatformUrl, isVendorDomain, isVendorRootOrMarketing, portalHostOf, portalTenantKey, portalTenantOf, salesforceTenantKind, trackSafeUrl, type PortalEntity } from "./portalChannel";
-import { ahjNameCore, getPermitProcessLookup, normalizeAhjName, savePermitProcessLookup, servingIssuerNamed, stateRulesFor, trackIssuer, ZONING_SIGNOFF } from "./permitProcess";
+import { quoteNamesSystem } from "./secondStage";
+import { hostFitsTrackAndEntity, isInformationalPageUrl, isPathTenantedHost, portalUrlsInText, isPermitPlatformUrl, isVendorDomain, isVendorRootOrMarketing, portalHostOf, portalTenantKey, portalTenantOf, salesforceTenantKind, trackSafeUrl, type PortalEntity } from "./portalChannel";
+import { ahjNameCore, channelPhrase, getPermitProcessLookup, normalizeAhjName, savePermitProcessLookup, servingIssuerNamed, stateRulesFor, trackIssuer, unknownStateAuthorityName, ZONING_SIGNOFF } from "./permitProcess";
 import { CONNECTOR_WORDS, DEPARTMENT_WORDS, GENERIC_ORG_WORDS, agencyNameKey, sameAgencyName, stripDepartmentPhrase } from "./agencyName";
 // Re-exported: the agency-name identity helpers moved to agencyName.ts (pure, no lookup stack) so
 // permitProcess can ask the same question without importing this module back (a cycle).
 export { agencyNameKey, sameAgencyName };
 import { logger } from "./logger";
-import { feeScheduleProfileKey, saveFeeSchedule } from "./feeSchedules";
+import { bracketDescribesPercentOfCost, feeScheduleProfileKey, saveFeeSchedule } from "./feeSchedules";
+import { stateSurchargeRuleFor } from "./stateFeeRules";
 import { parseBracketRow } from "./pdfTables";
-import { candidateNamedBy, chooseRecordType, classifyDocument, DOCUMENT_URL, staleOrOtherFeeSource, detectPlatform, documentLinks, excerptFor, extractCodeEditions, extractPrerequisites, isAgencyOwnUrl, isOfficialAgencyHost, linksAnotherModule, platformOfUrl, readPortalCatalog, registrableDomain, resolvePortalFromPages, solarRecordTypeCandidates, tenantContradictsAgency, wordsNameAnotherJurisdiction, type PortalCatalog, type PortalResolution, type RecordTypeCandidate } from "./permitPlatformCatalog";
-import { createPageReader, feeLinePrintedTogether, quoteOnPage, type PageReader, type ReadPage } from "./agencyPageReader";
+import { candidateNamedBy, chooseRecordType, classifyDocument, datedFeeScheduleLinks, DOCUMENT_URL, staleOrOtherFeeSource, detectPlatform, documentLinks, excerptFor, extractCodeEditions, extractPrerequisites, isAgencyOwnDomain, isAgencyOwnUrl, isOfficialAgencyHost, linksAnotherModule, platformOfUrl, readPortalCatalog, registrableDomain, resolvePortalFromPages, solarRecordTypeCandidates, tenantContradictsAgency, wordsNameAnotherJurisdiction, type PortalCatalog, type PortalResolution, type RecordTypeCandidate } from "./permitPlatformCatalog";
+import { createPageReader, feeLinePrintedTogether, isRefusal, quoteOnPage, type PageReader, type ReadPage } from "./agencyPageReader";
 import { documentFetchDisabled } from "./documentFetch";
 import { classifyPrerequisites } from "./permitProcessPrerequisites";
+import { quoteStatesReviewTime } from "./citedReviewTime";
 export { registrableDomain };
 
 export const PROCESS_LOOKUP_SYSTEM = `You look up how RESIDENTIAL ROOFTOP SOLAR PV permits are issued for ONE jurisdiction in the United States.
@@ -56,23 +59,32 @@ Find, with web search (search several times with different queries: the city, it
    - portalUrl: the ONLINE PORTAL where that permit is APPLIED FOR (a citizen-access / permitting-system entry page). NEVER an information, help, FAQ or guide page, and NEVER a PDF.
    - recordType: the RECORD TYPE selected when applying ONLINE on that portal (e.g. Accela's "Residential Structural"), as the portal or a public record on it shows it. A paper application FORM's title is NOT a record type — if you only find form titles, set recordType to null.
    - issuingAgency: the agency that issues THIS permit, when it differs by permit.
+   - channel: HOW this permit is filed, as the page says it: "portal" (applied for online), "email" (value: the address the page gives), "in_person" (value: the office or counter, e.g. "City Hall"), "mail" (value: the address or office, if given), or "with_other_permit" (value: the permit it is filed with, e.g. "Building"). A page that says the permit is bought or brought in at an office is "in_person" even when the city also has a portal for OTHER permits.
+   - alternateChannels: other ways the SAME page says this permit may be filed ("you may also fax, email, mail or bring it in"), each cited the same way; [] when none.
 
 Where answers may come from: the jurisdiction's own site; its county's building-inspection site; the state building agency; the permitting portal's public pages and public permit records.
 
 4. prerequisites — a step at ANOTHER office that must happen BEFORE the application is filed or the permit is issued ("submit to City Hall first, then to the County", a zoning sign-off). A prerequisite office is NOT the issuing agency: the issuing agency is the one that issues the permit. What happens AFTER the permit is approved or issued (copies of approved plans, inspections, final, occupancy) is NEVER a prerequisite. Take prerequisites only from pages about THIS permit (residential solar / electrical / building) — never from another permit type's page (basement, deck, fence, pool…). List each step once, however many pages repeat it.
    groundMountZoning — how this jurisdiction permits a residential GROUND-MOUNTED array (not on a roof): "required" when a page says it needs a zoning / land-use approval (a zoning permit, setback or accessory-structure review, planning sign-off) beside the building permit; "not_required" when a page says it does not. null when no page says so — never inferred from the rooftop answer.
 
+5. batteryPermitting — how this jurisdiction permits a residential BATTERY / energy storage system (ESS) added to a PV system, as its pages say it: each of "sameReview" (reviewed in the same PV permit / plan review), "separatePermit" (its own storage / battery permit or packet), "fireReview" (a fire department / district review or permit), "fireApprovalLetter" (a fire approval letter submitted with the application) that a page states, with the agency and the documents it names. [] when no page says.
+   reviewTime — the review / processing time a page states for this permit ("Allow 10 business days for review"), in its words. null when none does.
+
 EVERY value carries "sourceUrl" (a page your search returned or you opened) and "quote" (the exact words on that page that state it, under 250 characters, containing the answer itself). If you cannot find a page that states it, set "value": null and say what you searched in "notFound". Never answer from memory. Never guess.
 
 Return ONLY JSON (no prose):
 {"issuingAgency": {"value": "<agency>"|null, "sourceUrl": "", "quote": "", "notFound": ""},
+ "batteryPermitting": [{"value": {"kind": "sameReview"|"separatePermit"|"fireReview"|"fireApprovalLetter", "agency": "", "documents": []}, "sourceUrl": "", "quote": ""}],
+ "reviewTime": {"value": "<as the page says it>"|null, "sourceUrl": "", "quote": "", "notFound": ""},
  "permitStructure": {"value": "separate"|"combo"|null, "sourceUrl": "", "quote": "", "notFound": ""},
  "prerequisites": [{"value": "<the step, naming the office>", "sourceUrl": "", "quote": ""}],
  "groundMountZoning": {"value": "required"|"not_required"|null, "sourceUrl": "", "quote": "", "notFound": ""},
  "permits": [{"discipline": "structural"|"electrical"|"combo", "label": "<permit name>",
    "issuingAgency": {"value": ..., "sourceUrl": "", "quote": ""},
    "portalUrl": {"value": "<url>"|null, "sourceUrl": "", "quote": "", "notFound": ""},
-   "recordType": {"value": "<type>"|null, "sourceUrl": "", "quote": "", "notFound": ""}}]}`;
+   "recordType": {"value": "<type>"|null, "sourceUrl": "", "quote": "", "notFound": ""},
+   "channel": {"value": {"kind": "portal"|"email"|"in_person"|"mail"|"with_other_permit", "value": "<url | address | office | permit>"}|null, "sourceUrl": "", "quote": "", "notFound": ""},
+   "alternateChannels": [{"value": {"kind": "...", "value": "..."}, "sourceUrl": "", "quote": ""}]}]}`;
 
 /** PROCESS_LOOKUP_SYSTEM, plus — where a state rule names a state issuer (New Mexico CID, issue #44)
  *  — whether THIS jurisdiction runs its own building program or is served by that agency, and where
@@ -129,6 +141,9 @@ Start from the agency's own building/permit pages (they usually say "apply onlin
 For each permit named in the request:
 - portalUrl: the ONLINE PORTAL's entry page where that permit is APPLIED FOR (a citizen-access / self-service / permitting-system page). NEVER an information, help, FAQ or guide page, NEVER a PDF, and NEVER a utility's interconnection / net-metering portal.
 - recordType: the record / permit type selected when applying ONLINE on that portal, in the portal's or the agency's own words (e.g. "Residential Electrical - Solar"). A paper application FORM's title is NOT a record type — if you only find form titles, set it to null.
+- channel: HOW the agency's page says this permit is filed — "portal", "email" (value: the address), "in_person" (value: the office), "mail", or "with_other_permit" (value: the permit it rides in). When the page says it is emailed or bought / brought in at an office, say so here and set portalUrl to null: a link on that page to an inspection scheduler, a payment page or another permit's portal is NOT this permit's portal.
+- alternateChannels: other ways the same page lists ("may also be faxed, emailed, mailed or brought in"), each cited; [] when none.
+- secondStage: ONLY when the agency's page says the application is made (and its fee paid) FIRST and the plans / documents are then uploaded in ANOTHER, separately named system that the agency opens for the applicant (for example by an emailed invitation): value {"system": the system's name as the page names it, "trigger": what opens it, in the page's words, e.g. "an invitation email after the fee is paid"}; the quote must name that system. Plans uploaded in the same portal as the application are NOT a second stage: null.
 
 EVERY value carries "sourceUrl" (a page your search returned or you opened) and "quote" (the exact words on that page that state it, under 250 characters: for a portal, the words naming or linking it; for a record type, the words naming it). If no page states it, "value": null with "notFound". Never answer from memory. Never guess.
 
@@ -137,7 +152,10 @@ prerequisites: only a step at another office that must happen BEFORE filing or i
 Return ONLY JSON:
 {"permits": [{"discipline": "structural"|"electrical"|"combo",
   "portalUrl": {"value": "<url>"|null, "sourceUrl": "", "quote": "", "notFound": ""},
-  "recordType": {"value": "<type>"|null, "sourceUrl": "", "quote": "", "notFound": ""}}],
+  "recordType": {"value": "<type>"|null, "sourceUrl": "", "quote": "", "notFound": ""},
+  "channel": {"value": {"kind": "portal"|"email"|"in_person"|"mail"|"with_other_permit", "value": "<url | address | office | permit>"}|null, "sourceUrl": "", "quote": "", "notFound": ""},
+  "alternateChannels": [{"value": {"kind": "...", "value": "..."}, "sourceUrl": "", "quote": ""}],
+  "secondStage": {"value": {"system": "<name>", "trigger": "<what opens it>"}|null, "sourceUrl": "", "quote": "", "notFound": ""}}],
  "prerequisites": [{"value": "<a step at another office>", "sourceUrl": "", "quote": ""}]}`;
 
 type RawFact = { value?: unknown; sourceUrl?: unknown; quote?: unknown; notFound?: unknown } | null | undefined;
@@ -177,6 +195,11 @@ export function acceptCited<T>(
   return { value, sourceUrl, quote, origin: "lookup" };
 }
 
+// A CALL TO APPLY on the page that links the (already attested) portal: "Apply for a Permit", "Building
+// Permits Apply Now", "Here you will be able to submit permits" (bot-vs-research 2026-11-10: three city
+// portals were refused for these words). The host must still be attested and rule 5 still holds; this
+// only answers "do the words say this link is where you apply".
+const APPLY_CALL = /\bapply (?:now|here|for (?:a |an |your )?(?:[a-z]+ )?permits?)\b|\bsubmit (?:your |a |an )?(?:[a-z]+ )?(?:permits?|permit applications?|plans)\b/i;
 // The DISTINCTIVE words of a name must be in the quote ("Marion" of "Marion County Public Works –
 // Building Inspection Division"); the generic organisational words need not be.
 const supportsName = (value: string, quote: string) => {
@@ -190,7 +213,7 @@ const supportsName = (value: string, quote: string) => {
 // a prerequisite clause — named BEFORE a "first"/"before going to" marker, or as a zoning/land-use
 // sign-off — does not state that the value ISSUES the permit. A name AFTER the marker (the county it
 // then goes to) is the destination and still counts.
-const PREREQ_MARKER = /\bfirst\b[^.;]{0,40}?\b(?:before|then|prior to)\b|\bbefore (?:going|submitting|applying|being (?:sent|submitted)|it goes|they go) to\b|\bprior to (?:submitting|applying|going)\b/i;
+const PREREQ_MARKER = /\bfirst\b[^.;]{0,40}?\b(?:before|then|prior to)\b|\bbefore (?:going|submitting|applying|being (?:sent|submitted)|it goes|they go) to\b|\bprior to (?:submitting|applying|going|(?:the )?submittal|(?:the )?submission|filing)\b|\bmust be (?:paid|submitted|approved|obtained|completed) (?:prior to|before)\b/i;
 export function namesOnlyAsPrerequisite(value: string, quote: string): boolean {
   const need = words(value).filter((x) => !GENERIC_ORG_WORDS.has(x));
   const w = need.length ? need : words(value);
@@ -206,6 +229,24 @@ export function namesOnlyAsPrerequisite(value: string, quote: string): boolean {
   });
 }
 const supportsAgency = (value: string, quote: string) => supportsName(value, quote) && !namesOnlyAsPrerequisite(value, quote);
+// THE AGENCY'S OWN PAGE STATES IT (bot-vs-research 2026-11-10): a city's page that says "Trade permits,
+// such as electrical, are obtained separately" or "The Building Safety Division utilizes an online permit
+// portal" does not repeat the city's name; the page's own host carries it. Kept only when the source
+// host is the value's OWN domain (isAgencyOwnDomain, every TLD, never merely .gov), the words are about
+// obtaining / applying for / submitting a permit there, they name no other jurisdiction and no state
+// body (unless the value is one), and every distinctive word the host does not carry is in the words.
+const ISSUED_HERE = /\bpermits?\b[^.;]{0,80}?\b(?:obtain\w*|issu\w*|appl(?:y|ied|ies|ication)|submi\w*|purchas\w*|portal)\b|\b(?:obtain\w*|issu\w*|apply|submi\w*|purchas\w*)\b[^.;]{0,80}?\bpermits?\b/i;
+export function agencyStatedOnOwnPage(value: string, quote: string, sourceUrl: string, state?: string): boolean {
+  if (supportsAgency(value, quote)) return true;
+  const host = portalHostOf(sourceUrl);
+  if (!host || !isAgencyOwnDomain(host, [value], state)) return false;
+  const q = str(quote);
+  if (!ISSUED_HERE.test(q) || namesOnlyAsPrerequisite(value, q)) return false;
+  if (/\bstate\b/i.test(q) && !/\bstate\b/i.test(value)) return false;
+  if (wordsNameAnotherJurisdiction(q, [value])) return false;
+  const label = host.replace(/^www\./, "").replace(/[^a-z0-9]/g, "");
+  return words(value).filter((x) => !GENERIC_ORG_WORDS.has(x) && !label.includes(x)).every((x) => q.toLowerCase().includes(x));
+}
 const supportsPrerequisite = (value: string, quote: string) =>
   (PREREQ_MARKER.test(quote) || ZONING_SIGNOFF.test(quote) || /\b(?:approv|sign[- ]?off|clearance)/i.test(quote)) && words(value).some((w) => quote.toLowerCase().includes(w));
 
@@ -251,7 +292,9 @@ export interface PortalDoorContext {
   /** URLs we read whose own markers name a permit platform (the R3 self-citation door). */
   platformPages?: string[];
   /** Links on pages WE read (page -> href): a page we read linking exactly the URL attests it. */
-  agencyLinks?: Array<{ page: string; href: string }>;
+  /** Links on the pages we read; `printed`: an address PRINTED in the words of a page or document we
+   *  read on the agency's own official domain (a checklist PDF that prints the portal's address). */
+  agencyLinks?: Array<{ page: string; href: string; printed?: boolean }>;
   /** Every name in play (the AHJ, the top agency, this permit's agency) — their distinctive keys. */
   names?: string[];
   /** The names whose jurisdiction TYPE the portal must not contradict (see (c)); no type check when empty. */
@@ -333,10 +376,10 @@ export function acceptPortalForPermit(raw: RawFact, source: PortalCandidateSourc
     const seenSelf = ctx.seenUrls.some((u) => portalHostOf(u) === host && (!shared || portalTenantKey(u) === portalTenantKey(url)));
     const ownDomainLink = !shared && !isVendorDomain(host) && registrableDomain(host) === registrableDomain(sourceHost)
       && quote.toLowerCase().includes(host) && ctx.seenUrls.some((u) => portalHostOf(u) === sourceHost);
-    const linkedFrom = (ctx.agencyLinks ?? []).find((l) => pageKey(l.href) === pageKey(url));
+    const linkedFrom = (ctx.agencyLinks ?? []).find((l) => (l.printed ? printedKey(l.href) === printedKey(url) : pageKey(l.href) === pageKey(url)));
     attestedBy = seenSelf ? (shared ? "its tenant on the shared host was a search result / a page opened or read" : "its host was a search result / a page opened or read")
       : ownDomainLink ? `the agency's own seen page (${sourceHost}) quotes this link on its own domain`
-        : linkedFrom ? `a page we read links it (${linkedFrom.page})` : null;
+        : linkedFrom ? (linkedFrom.printed ? `a page or document we read on the agency's own domain prints it (${linkedFrom.page})` : `a page we read links it (${linkedFrom.page})`) : null;
     if (!attestedBy) {
       return refused("unattested", `the portal ${url} was never returned by the search, opened by the lookup, or linked by a page we read${shared ? " (that tenant on the shared host)" : ""} — not kept`);
     }
@@ -349,7 +392,7 @@ export function acceptPortalForPermit(raw: RawFact, source: PortalCandidateSourc
       if (!h) return false;
       const selfCited = portalHostOf(str(raw?.sourceUrl)) === h
         && platformPages.some((u) => portalHostOf(u) === h && (!isPathTenantedHost(h) || portalTenantKey(u) === portalTenantKey(v)));
-      return selfCited || q.toLowerCase().includes(h) || /portal|apply online|e-?permitting|citizen access|self[- ]?service|online permit|accela/i.test(q);
+      return selfCited || q.toLowerCase().includes(h) || /portal|apply online|e-?permitting|citizen access|self[- ]?service|online permit|accela/i.test(q) || APPLY_CALL.test(q);
     },
   });
   if (!portal.value) {
@@ -426,6 +469,162 @@ export function acceptRecordType(raw: RawFact, seenUrls: string[]): CitedFact<st
   if (rt.value && FORM_TITLE.test(rt.value)) return { ...rt, value: null, notFound: `"${rt.value}" is a form's title, not an online record type — not kept` };
   return rt;
 }
+// ── BATTERY (ESS) PERMITTING AND REVIEW TIME (lookup-battery-and-fees, 2026-11-10) ─────────────
+// Four of nine cities in the comparison published how a battery job is permitted, and the lookup
+// never asked. Each answer is cited and kept only when the quote itself names the storage and states
+// the kind; it is read on a storage job only, as a warning (essRequirements.essPermitStep).
+const STORAGE_WORDS = /\bbatter(?:y|ies)\b|\benergy[\s-]+storage\b|\bstorage[\s-]+(?:battery|system)s?\b|\bess\b/i;
+const BATTERY_KIND_WORDS: Record<BatteryPermittingKind, RegExp> = {
+  sameReview: /\b(?:same|together|included|along with|as part of|combined|with the)\b[^.;]{0,60}?\b(?:pv|solar|photovoltaic|plan review|review|permit)\b|\b(?:pv|solar)\b[^.;]{0,40}?\b(?:review|permit)\b[^.;]{0,40}?\b(?:includ\w*|covers?)\b/i,
+  separatePermit: /\b(?:separate|own|additional|its own)\b[^.;]{0,40}?\b(?:permit|packet|application)s?\b|\b(?:battery|storage)[\w\s-]{0,30}?\b(?:permit|packet)s?\b/i,
+  fireReview: /\bfire\b[^.;]{0,60}?\b(?:review\w*|permits?|inspect\w*|approv\w*|plan check)\b|\b(?:review\w*|permits?|approv\w*)\b[^.;]{0,60}?\bfire\b/i,
+  fireApprovalLetter: /\bfire\b[^.;]{0,60}?\b(?:letter|sign[\s-]?off|approval)\b|\b(?:letter|sign[\s-]?off|approval)\b[^.;]{0,60}?\bfire\b/i,
+};
+const BATTERY_KINDS = Object.keys(BATTERY_KIND_WORDS) as BatteryPermittingKind[];
+function coerceBattery(v: unknown): BatteryPermittingAnswer | null {
+  const o = (v && typeof v === "object" ? v : { kind: v }) as Record<string, unknown>;
+  const k = str(o.kind);
+  const kind = BATTERY_KINDS.find((x) => x.toLowerCase() === k.toLowerCase().replace(/[\s_-]+/g, ""));
+  if (!kind) return null;
+  const agency = str(o.agency).slice(0, 120);
+  const documents = (Array.isArray(o.documents) ? o.documents : []).map(str).filter(Boolean).slice(0, 8);
+  return { kind, ...(agency ? { agency } : {}), ...(documents.length ? { documents } : {}) };
+}
+/** The quote must name the storage, unless the cited page's own address is about storage (a battery
+ *  packet's line "FIRE AGENCY: Approval Letter" is about the battery job it is printed in). */
+export function quoteStatesBatteryPermitting(v: BatteryPermittingAnswer, quote: string, sourceUrl = ""): boolean {
+  const q = str(quote);
+  let onStoragePage = false;
+  try { onStoragePage = STORAGE_WORDS.test(decodeURIComponent(new URL(sourceUrl).pathname).replace(/[-_/+.]+/g, " ")); } catch { /* no URL */ }
+  if (!(STORAGE_WORDS.test(q) || onStoragePage) || !BATTERY_KIND_WORDS[v.kind].test(q)) return false;
+  return !v.agency || supportsName(v.agency, q);
+}
+export function acceptBatteryPermitting(raw: unknown, seenUrls: string[]): Array<CitedFact<BatteryPermittingAnswer>> {
+  const out: Array<CitedFact<BatteryPermittingAnswer>> = [];
+  for (const r of (Array.isArray(raw) ? raw : []).slice(0, 6)) {
+    const src = str((r as RawFact)?.sourceUrl);
+    const c = acceptCited<BatteryPermittingAnswer>(r as RawFact, { seenUrls, what: "battery permitting answer", coerce: coerceBattery, supports: (v, q) => quoteStatesBatteryPermitting(v, q, src) });
+    if (c.value && !out.some((x) => x.value?.kind === c.value!.kind)) out.push(c);
+  }
+  return out;
+}
+export function acceptReviewTime(raw: unknown): (seenUrls: string[]) => CitedFact<string> {
+  return (seenUrls) => acceptCited<string>(raw as RawFact, { seenUrls, what: "review time", coerce: (v) => str(v).slice(0, 120) || null, supports: quoteStatesReviewTime });
+}
+
+// ── HOW A PERMIT IS FILED (lookup-permit-filing-channel, 2026-11-10) ─────────────────────────────
+// The lookup used to have one slot for where a permit is filed: a portal URL. A city that takes
+// permits by EMAIL or at the COUNTER had nowhere to land, and the vendor-link resolver filled the hole
+// with whatever vendor link its page carried (an inspection scheduler; the city portal for a permit
+// the same page says is bought at City Hall). The channel is a cited answer like every other: kept
+// only when the quote itself states it. It is never a door: an email address becomes a pre-filled
+// proposal a person confirms (filingDestinationProposals), in person / by mail only words on the card.
+const EMAIL_ADDRESS = /[A-Z0-9._%+-]+@[A-Z0-9-]+(?:\.[A-Z0-9-]+)*\.[A-Z]{2,}/i;
+/** The quote says the permit is filed in person: "in person", "at the counter", "walk-in", or a
+ *  verb of handing over / buying followed by WHERE ("purchased separately at City Hall", "bring the
+ *  application into the Building Department"). "Available at <office>" alone is not one. */
+const IN_PERSON_WORDS = /\bin[- ]person\b|\bover[- ]the[- ]counter\b|\b(?:at|to) the (?:\w+ )?(?:counter|front desk|permit desk)\b|\bwalk[- ]ins?\b|\b(?:bring\w*|brought|drop(?:ped|ping)? off|hand[- ]deliver\w*|purchas\w*|bought|buy|pick(?:ed)? up)\b[^.;]{0,60}?\b(?:at|to|into|in to)\b/i;
+/** By (postal) mail. Read with every e-mail word taken out first ("emailed" is not "mailed"). */
+const MAIL_WORDS = /\b(?:by|via|through the) (?:u\.?s\.? |postal )?mail\b|\bmail(?:ed|ing)?\b/i;
+const EMAIL_WORDS = /\be-?mail\w*/gi;
+/** Online: the page speaks of a portal / applying online / uploading. */
+const PORTAL_CHANNEL_WORDS = /\bon-?line\b|\bportal\b|\belectronic\w*|\be-?permit\w*|\bupload\w*/i;
+/** Rides in another permit: "with / included in / part of / covered by the building permit". */
+const WITH_OTHER_PERMIT_WORDS = /\b(?:with|included? (?:with|in)|part of|under|covered by)\b[^.;]{0,40}?\bpermit\b/i;
+
+function channelKind(v: unknown): PermitFilingChannelKind | null {
+  const k = str(v).toLowerCase().replace(/[\s-]+/g, "_");
+  if (k === "portal" || k === "online") return "portal";
+  if (k === "email" || k === "e_mail") return "email";
+  if (k === "in_person" || k === "counter" || k === "walk_in") return "in_person";
+  if (k === "mail" || k === "postal_mail" || k === "by_mail") return "mail";
+  if (k === "with_other_permit" || k === "with_another_permit") return "with_other_permit";
+  return null;
+}
+function coerceChannel(v: unknown): PermitFilingChannel | null {
+  const o = (v && typeof v === "object" ? v : { kind: v }) as Record<string, unknown>;
+  const kind = channelKind(o.kind);
+  if (!kind) return null;
+  const value = str(o.value ?? o.address ?? o.office ?? o.url).slice(0, 200);
+  if (kind === "email") {
+    // An email channel's value is ONE address or nothing ("may also be emailed": no address stated).
+    if (!value) return { kind, value: "" };
+    const m = value.match(EMAIL_ADDRESS);
+    return m && m[0].length === value.replace(/^mailto:/i, "").length ? { kind, value: m[0] } : null;
+  }
+  if (kind === "portal") return { kind, value: /^https?:\/\//i.test(value) ? value : "" };
+  // In person / by mail / with another permit: WHERE (or which permit), or nothing.
+  return { kind, value };
+}
+/** THE ONE TEST of "the quote states this channel". Exported for the tests. */
+export function quoteStatesChannel(c: PermitFilingChannel, quote: string): boolean {
+  const q = str(quote);
+  switch (c.kind) {
+    case "email":
+      return c.value ? q.toLowerCase().includes(c.value.toLowerCase()) : /\be-?mail(?:ed|ing|s)?\b/i.test(q);
+    case "in_person":
+      return IN_PERSON_WORDS.test(q) && (!c.value || supportsName(c.value, q));
+    case "mail":
+      return MAIL_WORDS.test(q.replace(EMAIL_WORDS, " ")) && (!c.value || supportsName(c.value, q));
+    case "portal":
+      return PORTAL_CHANNEL_WORDS.test(q);
+    case "with_other_permit":
+      return Boolean(c.value) && WITH_OTHER_PERMIT_WORDS.test(q) && supportsName(c.value, q);
+  }
+}
+export function acceptChannel(raw: RawFact, seenUrls: string[]): CitedFact<PermitFilingChannel> {
+  return acceptCited<PermitFilingChannel>(raw, { seenUrls, what: "filing channel", coerce: coerceChannel, supports: quoteStatesChannel });
+}
+/** Other ways the page lists ("faxing, emailing, mailing or bringing it in"): each cited, one per
+ *  kind, never the primary's kind. */
+export function acceptAlternateChannels(raw: unknown, seenUrls: string[], primary: CitedFact<PermitFilingChannel> | null): CitedFact<PermitFilingChannel>[] {
+  const out: CitedFact<PermitFilingChannel>[] = [];
+  for (const r of (Array.isArray(raw) ? raw : []).slice(0, 5)) {
+    const c = acceptChannel(r as RawFact, seenUrls);
+    if (!c.value || c.value.kind === primary?.value?.kind || out.some((x) => x.value?.kind === c.value!.kind)) continue;
+    out.push(c);
+  }
+  return out;
+}
+/** A permit whose CITED channel is something other than a portal (email, in person, mail, with
+ *  another permit): the vendor-link resolver gives it no portal and the lookup launches nothing. */
+export function citedNonPortalChannel(p: Pick<PermitProcessPermitAnswer, "channel"> | null | undefined): PermitFilingChannel | null {
+  const c = p?.channel?.value;
+  return c && c.kind !== "portal" ? c : null;
+}
+/** The channel fields of a raw permit answer, for the permit entry (absent when the answer gave none,
+ *  so an older-shaped answer keeps its older-shaped row). */
+function channelFields(p: Record<string, unknown>, seenUrls: string[]): Pick<PermitProcessPermitAnswer, "channel" | "alternateChannels"> {
+  if (p.channel == null && p.alternateChannels == null) return {};
+  const channel = acceptChannel(p.channel as RawFact, seenUrls);
+  const alternateChannels = acceptAlternateChannels(p.alternateChannels, seenUrls, channel);
+  return { channel, ...(alternateChannels.length ? { alternateChannels } : {}) };
+}
+
+/** A SECOND STAGE OF THE FILING (#28), cited: the plans go into another system the agency opens
+ *  after the application (and its fee). Kept only when the quote NAMES that system
+ *  (secondStage.quoteNamesSystem) on a page the lookup saw; a name that is an address is not a system.
+ *  A description for a person to confirm: it changes no track and is never a filing door. */
+export function acceptSecondStage(raw: RawFact, seenUrls: string[]): CitedFact<PermitSecondStageAnswer> {
+  return acceptCited<PermitSecondStageAnswer>(raw, {
+    seenUrls, what: "second stage",
+    coerce: (v) => {
+      const o = v && typeof v === "object" ? v as Record<string, unknown> : null;
+      const system = str(o?.system).replace(/\s+/g, " ").slice(0, 120);
+      if (!system || /https?:\/\/|www\.|@/i.test(system)) return null;
+      return { system, trigger: str(o?.trigger).replace(/\s+/g, " ").slice(0, 200) };
+    },
+    supports: (v, quote) => quoteNamesSystem(v.system, quote),
+  });
+}
+/** The second-stage field of a raw permit answer (absent when the answer gave none or none was kept,
+ *  so an older-shaped answer keeps its older-shaped row). */
+function secondStageField(p: Record<string, unknown>, seenUrls: string[]): Pick<PermitProcessPermitAnswer, "secondStage"> {
+  if (p.secondStage == null) return {};
+  const fact = acceptSecondStage(p.secondStage as RawFact, seenUrls);
+  return fact.value ? { secondStage: fact } : {};
+}
+
 function parsePrerequisites(raw: unknown, seenUrls: string[]): CitedFact<string>[] {
   return (Array.isArray(raw) ? raw : []).slice(0, 5)
     .map((r) => acceptCited<string>(r as RawFact, { seenUrls, what: "prerequisite", coerce: (v) => str(v).slice(0, 200) || null, supports: supportsPrerequisite }))
@@ -516,6 +715,7 @@ const supportsBuildingProgram = (value: "own" | "state", quote: string, names: N
 export function parseProcessPart(text: string, seenUrls: string[], stopReason: string | null, platformPages: string[] = [], entity: PortalEntity | null = null, where: { state: string; ahj: string } | null = null): {
   issuingAgency: CitedFact<string>; permitStructure: CitedFact<"separate" | "combo">; permits: PermitProcessPermitAnswer[]; prerequisites: CitedFact<string>[]; problem: string;
   buildingProgram?: CitedFact<"own" | "state">; unincorporatedZoning?: CitedFact<string>; groundMountZoning?: CitedFact<"required" | "not_required">;
+  batteryPermitting?: Array<CitedFact<BatteryPermittingAnswer>>; reviewTime?: CitedFact<string>;
 } {
   const truncated = stopReason === "max_tokens" || stopReason === "pause_turn";
   const json = parseJsonLoose(text);
@@ -524,7 +724,8 @@ export function parseProcessPart(text: string, seenUrls: string[], stopReason: s
     const why = truncated ? "the lookup's answer was cut off before it finished — not kept" : "the lookup returned no readable answer";
     return { issuingAgency: nf(why), permitStructure: nf(why), permits: [], prerequisites: [], problem: why };
   }
-  const issuingAgency = acceptCited<string>(json.issuingAgency as RawFact, { seenUrls, what: "issuing agency", coerce: agencyName, supports: supportsAgency });
+  const agencySupports = (raw: unknown) => (v: string, q: string) => agencyStatedOnOwnPage(v, q, str((raw as RawFact)?.sourceUrl), where?.state);
+  const issuingAgency = acceptCited<string>(json.issuingAgency as RawFact, { seenUrls, what: "issuing agency", coerce: agencyName, supports: agencySupports(json.issuingAgency) });
   const permitStructure = acceptCited<"separate" | "combo">(json.permitStructure as RawFact, {
     seenUrls, what: "permit structure", coerce: (v) => (/separ/i.test(str(v)) ? "separate" : /combo|combin/i.test(str(v)) ? "combo" : null), supports: supportsStructure,
   });
@@ -535,9 +736,10 @@ export function parseProcessPart(text: string, seenUrls: string[], stopReason: s
     permits.push({
       discipline,
       label: str(p.label) || discipline,
-      issuingAgency: acceptCited<string>(p.issuingAgency as RawFact, { seenUrls, what: "issuing agency", coerce: agencyName, supports: supportsAgency }),
+      issuingAgency: acceptCited<string>(p.issuingAgency as RawFact, { seenUrls, what: "issuing agency", coerce: agencyName, supports: agencySupports(p.issuingAgency) }),
       portalUrl: acceptPortal(p.portalUrl as RawFact, seenUrls, platformPages, entity),
       recordType: acceptRecordType(p.recordType as RawFact, seenUrls),
+      ...channelFields(p, seenUrls),
       documents: { value: null, sourceUrl: "", quote: "", origin: "lookup", notFound: "not looked up yet" },
       fee: { value: null, sourceUrl: "", quote: "", origin: "lookup", notFound: "not looked up yet" },
     });
@@ -559,21 +761,24 @@ export function parseProcessPart(text: string, seenUrls: string[], stopReason: s
     seenUrls, what: "ground-mount zoning answer", coerce: (v) => (/^not[_\s-]?required\b/i.test(str(v)) ? "not_required" : /^required\b/i.test(str(v)) ? "required" : null),
     supports: (v, q) => GROUND_ZONING_WORDS.test(q) && groundZoningPolarity(q) === v,
   });
-  return { issuingAgency, permitStructure, permits, buildingProgram, unincorporatedZoning, groundMountZoning, prerequisites: parsePrerequisites(json.prerequisites, seenUrls), problem: truncated ? "answer was cut off (kept only fully parsed, cited values)" : "" };
+  const batteryPermitting = acceptBatteryPermitting(json.batteryPermitting, seenUrls);
+  const reviewTime = json.reviewTime != null ? acceptReviewTime(json.reviewTime)(seenUrls) : undefined;
+  return { issuingAgency, permitStructure, permits, buildingProgram, unincorporatedZoning, groundMountZoning, batteryPermitting, ...(reviewTime ? { reviewTime } : {}), prerequisites: parsePrerequisites(json.prerequisites, seenUrls), problem: truncated ? "answer was cut off (kept only fully parsed, cited values)" : "" };
 }
 
+type PortalStepAnswer = { portalUrl: CitedFact<string>; recordType: CitedFact<string> } & Pick<PermitProcessPermitAnswer, "channel" | "alternateChannels" | "secondStage">;
 /** The portal step's answer: per discipline, the cited portal and record type (the same doors as
- *  the process part), plus any cited prerequisite the agency's pages state. */
+ *  the process part), its cited filing channel, plus any cited prerequisite the agency's pages state. */
 export function parsePortalPart(text: string, seenUrls: string[], stopReason: string | null, platformPages: string[] = [], entity: PortalEntity | null = null): {
-  byDiscipline: Map<PermitProcessDiscipline, { portalUrl: CitedFact<string>; recordType: CitedFact<string> }>; prerequisites: CitedFact<string>[]; problem: string;
+  byDiscipline: Map<PermitProcessDiscipline, PortalStepAnswer>; prerequisites: CitedFact<string>[]; problem: string;
 } {
-  const out = new Map<PermitProcessDiscipline, { portalUrl: CitedFact<string>; recordType: CitedFact<string> }>();
+  const out = new Map<PermitProcessDiscipline, PortalStepAnswer>();
   const json = parseJsonLoose(text);
   if (!json) return { byDiscipline: out, prerequisites: [], problem: stopReason === "max_tokens" || stopReason === "pause_turn" ? "portal answer was cut off — not kept" : "portal lookup returned no readable answer" };
   for (const p of (Array.isArray(json.permits) ? json.permits : []) as Array<Record<string, unknown>>) {
     const discipline = asDiscipline(p?.discipline);
     if (!discipline) continue;
-    out.set(discipline, { portalUrl: acceptPortal(p.portalUrl as RawFact, seenUrls, platformPages, entity), recordType: acceptRecordType(p.recordType as RawFact, seenUrls) });
+    out.set(discipline, { portalUrl: acceptPortal(p.portalUrl as RawFact, seenUrls, platformPages, entity), recordType: acceptRecordType(p.recordType as RawFact, seenUrls), ...channelFields(p, seenUrls), ...secondStageField(p, seenUrls) });
   }
   return { byDiscipline: out, prerequisites: parsePrerequisites(json.prerequisites, seenUrls), problem: "" };
 }
@@ -622,6 +827,10 @@ function onOurPage<T>(fact: CitedFact<T>, pageTexts: Map<string, string>, what: 
   return { ...fact, value: null, notFound: `the quoted words are not on the ${what}'s source page as we read it ("${fact.quote.slice(0, 80)}") — not kept` };
 }
 /** One key per page: no fragment, no trailing slash, host lower-cased. */
+/** A printed address carries no scheme and may drop "www.": compared host (no www) + path + query. */
+function printedKey(url: string): string {
+  return pageKey(url).toLowerCase().replace(/^https?:\/\/(?:www\.)?/, "");
+}
 export function pageKey(url: string): string {
   try { const u = new URL(str(url)); u.hash = ""; return `${u.protocol}//${u.host.toLowerCase()}${u.pathname.replace(/\/+$/, "")}${u.search}`; } catch { return str(url); }
 }
@@ -634,6 +843,24 @@ function currentFeeSource(fee: CitedFact<PermitFeeAnswer>, gone: string[]): Cite
   if (gone.includes(pageKey(fee.sourceUrl))) return { ...fee, value: null, notFound: `the cited schedule is no longer there (HTTP 404 when read) — a replaced schedule, not kept (${fee.sourceUrl})` };
   const why = staleOrOtherFeeSource("", fee.sourceUrl);
   return why ? { ...fee, value: null, notFound: `the cited source is ${why} — not this job's fee (${fee.sourceUrl})` } : fee;
+}
+
+/** A FORMULA IS NOT AN AMOUNT (Proj2 #150). Measured on a state's saved rule: its electrical permit
+ *  fee is "sixty dollars ($60) plus two percent (2%) of total wiring cost", and an answer giving that
+ *  sentence with a total of $60 was kept and landed as a flat $60 schedule, several times too low for
+ *  any real job. ONE predicate says what a share-of-cost formula is: the fee evaluator's own
+ *  (feeSchedules.bracketDescribesPercentOfCost, #692), so the lookup and the schedule cannot disagree
+ *  about the same sentence. Such a fee is not kept as a number at all: the citation stays on the
+ *  answer's notFound for a person to price (feeReadsForAPerson lists it), and nothing lands.
+ *  NOT YET (the second half of #150): landing it as a formula bracket. The evaluator can price a
+ *  percentage-of-cost bracket from its printed label, but a lookup answer quotes ONE clause, and one
+ *  band of a banded table landed alone would price every job on that band. A surcharge taken of the
+ *  PERMIT FEE is not a formula on cost; tiers by system size are not formulas. */
+export function formulaFeeNotANumber(fee: CitedFact<PermitFeeAnswer>): CitedFact<PermitFeeAnswer> {
+  if (!fee.value) return fee;
+  const words = `${fee.value.basis ?? ""} ${fee.quote ?? ""} ${fee.value.lines.map((l) => l.label ?? "").join(" ")}`;
+  if (!bracketDescribesPercentOfCost(words)) return fee;
+  return { ...fee, value: null, notFound: `the cited fee is a formula (a base plus a share of the job's cost), not an amount — not kept as a number; a person prices it from the job's cost: "${str(fee.quote).slice(0, 200)}" (${fee.sourceUrl})` };
 }
 
 /** A CITATION THE SERVER SAYS IS GONE IS NOT EVIDENCE (#560). Saratoga Springs, UT's documents list
@@ -688,11 +915,64 @@ export function parseDocsFeesPart(text: string, seenUrls: string[], stopReason: 
         if (tiers.length) answer.tiers = tiers;
         return answer.amountUsd == null && !lines.length && !tiers.length ? null : answer;
       },
-      supports: supportsAmount,
+      // A PRINTED FEE TABLE (several lines + TOTAL) is quoted by its TOTAL row: the lines are on the
+      // page, not in a 250-character quote (bot-vs-research 2026-11-10: "TOTAL $1,033.00" over five
+      // lines). Supported when the quote states it (every line + the total, whitespace normalised), or
+      // when the quote is ON the page we read and that page prints every line and the total — the fee
+      // tie below then holds each amount to its own label on that page.
+      supports: (v, q) => supportsAmount(v, q.replace(/\s+/g, " ")) || feeTableOnOurPage(v, q, pageTexts.get(pageKey(str((p.fee as RawFact)?.sourceUrl)))),
     });
-    out.set(discipline, { documents: onOurPage(refuseGoneCitation(documents, gone, "required documents"), pageTexts, "required documents"), fee: tiedFee(onOurPage(currentFeeSource(fee, gone), pageTexts, "fee"), pageTexts) });
+    out.set(discipline, { documents: onOurPage(refuseGoneCitation(documents, gone, "required documents"), pageTexts, "required documents"), fee: tiedFee(onOurPage(formulaFeeNotANumber(currentFeeSource(fee, gone)), pageTexts, "fee"), pageTexts) });
   }
   return { byDiscipline: out, problem: "" };
+}
+/** The reads a PERSON must make: refused (401 / 403 / 429, a challenge or wall) or skipped because
+ *  the host refused an earlier read. A missing page (404 / 410), a spent budget, a sign-in page or
+ *  downloads switched off are not refusals. One entry per page. */
+export function readsNeedingAPerson(log: ReadonlyArray<{ url: string; ok: boolean; reason: string }>): Array<{ url: string; reason: string }> {
+  const out: Array<{ url: string; reason: string }> = [];
+  for (const l of log) {
+    if (l.ok) continue;
+    const reason = str(l.reason);
+    const status = Number(/HTTP (\d{3})\b/.exec(reason)?.[1] ?? 0);
+    if (!isRefusal(status, reason) && !/backed off/i.test(reason)) continue;
+    if (out.some((o) => pageKey(o.url) === pageKey(l.url))) continue;
+    out.push({ url: l.url, reason: reason.slice(0, 120) });
+  }
+  return out.slice(0, 10);
+}
+/** THE FEE PAGES A PERSON READS (fee round, 2026-11), beside the refused reads: a fee the answer
+ *  cited that the source door did not keep because its schedule is dated, archived or gone
+ *  (currentFeeSource words those), and the fee documents the agency's pages link that are dated or
+ *  came back unreadable (AgencyEvidence.feeLeads). A document whose fee WAS kept is never listed.
+ *  Never a number: the fee stays unknown until a person reads it or a current schedule is found. */
+export function feeReadsForAPerson(
+  permits: ReadonlyArray<{ discipline: string; fee: CitedFact<PermitFeeAnswer> }>,
+  leads: ReadonlyArray<{ url: string; reason: string }>,
+): Array<{ url: string; reason: string }> {
+  const kept = new Set(permits.filter((p) => p.fee?.value != null).map((p) => pageKey(p.fee.sourceUrl)));
+  const out: Array<{ url: string; reason: string }> = [];
+  const add = (url: string, reason: string) => {
+    if (!/^https?:\/\//i.test(url) || kept.has(pageKey(url)) || out.some((o) => pageKey(o.url) === pageKey(url))) return;
+    out.push({ url, reason: reason.slice(0, 200) });
+  };
+  for (const p of permits) {
+    const f = p.fee;
+    if (!f || f.value != null) continue;
+    const why = /the cited source is (.+?) — not this job's fee/.exec(str(f.notFound))?.[1]
+      ?? (/the cited schedule is no longer there/.test(str(f.notFound)) ? "no longer at its address" : "");
+    if (why && !/another permit kind/.test(why)) add(str(f.sourceUrl), `the ${p.discipline} fee was cited to this schedule, which is ${why}: Keelix does not rely on it`);
+    // A formula fee (formulaFeeNotANumber): the page is readable, the price is a person's to work out.
+    if (/^the cited fee is a formula/.test(str(f.notFound))) add(str(f.sourceUrl), `the ${p.discipline} fee is a formula on the job's cost, not an amount: a person prices it. Printed: "${str(f.quote).slice(0, 110)}"`);
+  }
+  for (const l of leads) add(l.url, l.reason);
+  return out.slice(0, 6);
+}
+/** The quote is on the page we read, and that page prints every line amount and the total. */
+export function feeTableOnOurPage(fee: PermitFeeAnswer, quote: string, pageText: string | undefined): boolean {
+  if (!pageText || !fee.lines.length) return false;
+  if (!quoteOnPage(quote, pageText)) return false;
+  return supportsAmount(fee, pageText);
 }
 /** THE FEE TIE (lookup-close-4, D3): every (label, amount) pair the answer carries — each line, each
  *  tier — is printed together (agencyPageReader.feeLinePrintedTogether) on the page we read when we
@@ -789,7 +1069,12 @@ export interface AgencyEvidence {
   gone: string[];
   /** Every link on a page we read (page -> href), the resolved portal's included: a page we read
    *  linking exactly a URL attests it (the one portal door, kind (b)). */
-  agencyLinks: Array<{ page: string; href: string }>;
+  agencyLinks: Array<{ page: string; href: string; printed?: boolean }>;
+  /** FEE DOCUMENTS FOUND AND NOT USABLE AS READ (fee round, 2026-11): a schedule the agency's page
+   *  links that is dated or archived, and a fee document that came back with nothing readable (a
+   *  spreadsheet, a scan, a failed read that was not a refusal). A person reads them; never a guess.
+   *  A REFUSED read is not here (readsNeedingAPerson lists those), nor a page that is gone. */
+  feeLeads?: Array<{ url: string; reason: string }>;
 }
 // A document URL (a PDF, a DocumentCenter / WebLink / eDoc view) is permitPlatformCatalog.DOCUMENT_URL —
 // ONE pattern (lookup-close-5: this file kept a narrower copy, DOC_URL).
@@ -847,15 +1132,19 @@ export async function readAgencyEvidence(reader: PageReader, input: {
   // cites most, preferring one that carries the AHJ's own name (a state agency's page is read only
   // when it IS the agency's domain — a state portal link must not stand in for a city's).
   let agencyDomain = input.agencyCitation && official(input.agencyCitation) ? domOf(input.agencyCitation) : "";
+  const own = names.flatMap((n) => n.toLowerCase().split(/[^a-z]+/)).filter((w) => w.length >= 4 && !["city", "county", "town", "village", "unincorporated"].includes(w));
   if (!agencyDomain) {
     const counts = new Map<string, number>();
-    const own = names.flatMap((n) => n.toLowerCase().split(/[^a-z]+/)).filter((w) => w.length >= 4 && !["city", "county", "town", "village", "unincorporated"].includes(w));
     for (const u of input.citedUrls.filter(official)) {
       const d = domOf(u);
       counts.set(d, (counts.get(d) ?? 0) + 1 + (own.some((w) => d.includes(w)) ? 10 : 0));
     }
     agencyDomain = [...counts.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] ?? "";
   }
+  // NOTHING CITED (bot-vs-research round 2, a city whose whole site refuses automated reads): the
+  // search's own results on the agency's official domain that carries its name are read, so a refusal
+  // is recorded for a person's browser (needsPersonRead) instead of the lookup silently finding nothing.
+  if (!agencyDomain) agencyDomain = input.resultUrls.filter(official).map(domOf).find((d) => own.some((w) => d.includes(w))) ?? "";
   const onAgency = (u: string) => Boolean(agencyDomain) && domOf(u) === agencyDomain && official(u);
   const pageUrls: string[] = [];
   const addPage = (u: string) => { if (pageUrls.length < MAX_AGENCY_PAGES && !pageUrls.some((x) => pageKey(x) === pageKey(u))) pageUrls.push(u); };
@@ -904,6 +1193,15 @@ export async function readAgencyEvidence(reader: PageReader, input: {
     return { page, kind: d.kind };
   }));
   const docs = docPages.filter((d) => d.page.ok && d.page.text).map((d) => ({ ...d, excerpt: excerptFor(d.page, d.kind) })).filter((d) => d.excerpt);
+  const feeLeads: Array<{ url: string; reason: string }> = datedFeeScheduleLinks(okPages, names, input.state);
+  for (const d of docPages) {
+    if (d.kind !== "fees") continue;
+    const pg = d.page;
+    const reason = !pg.ok
+      ? (pg.status === 404 || pg.status === 410 || isRefusal(pg.status, pg.reason) || /backed off/i.test(pg.reason) ? "" : `the fee schedule could not be read (${str(pg.reason).slice(0, 80)})`)
+      : !str(pg.text) || pg.kind === "other" ? "the fee schedule came back with no readable text (a scan or a spreadsheet)" : "";
+    if (reason && !feeLeads.some((l) => pageKey(l.url) === pageKey(pg.url))) feeLeads.push({ url: pg.url, reason });
+  }
 
   const prerequisites: CitedFact<string>[] = [];
   // A fee schedule prices steps; its "plan review" / "registration" rows are not steps to take — the
@@ -934,10 +1232,25 @@ export async function readAgencyEvidence(reader: PageReader, input: {
     pageTexts.set(pageKey(pg.finalUrl), pg.text);
   }
   for (const u of platformPages) seen.push(u);
-  const agencyLinks = okPages.flatMap((pg) => pg.links.map((l) => ({ page: pg.finalUrl, href: l.href })));
+  const agencyLinks: AgencyEvidence["agencyLinks"] = okPages.flatMap((pg) => pg.links.map((l) => ({ page: pg.finalUrl, href: l.href })));
+  // A PORTAL ADDRESS PRINTED on a page or document WE READ on the agency's own official domain
+  // attests that address as a link on it would (bot-vs-research 2026-11-10: a city's solar checklist
+  // PDF prints its portal's address; a PDF has no anchors) — a permit platform's address or one on the
+  // agency's own domain, never a vanity host (read for its redirect instead). The door still judges it whole:
+  // rule 5, the information-page refusal, the issuer's jurisdiction type, another module.
+  for (const pg of [...okPages, ...docPages.map((d) => d.page)]) {
+    if (!pg.ok || !pg.text || !onAgency(pg.finalUrl || pg.url)) continue;
+    for (const u of portalUrlsInText(pg.text).slice(0, 40)) {
+      // Only a permit platform's address or one on the agency's own domain: a vanity host printed in
+      // words ("Apply online at www.<city>permits.com") may redirect anywhere, so it stays unattested
+      // and the door READS it (portal-truth D3) before anything is kept.
+      if (!isPermitPlatformUrl(u) && domOf(u) !== agencyDomain) continue;
+      if (!agencyLinks.some((l) => printedKey(l.href) === printedKey(u))) agencyLinks.push({ page: pg.finalUrl || pg.url, href: u, printed: true });
+    }
+  }
   // The resolver read the page that links the portal it resolved (a hop page is not in okPages).
   if (portal) agencyLinks.push({ page: portal.sourceUrl, href: portal.url });
-  return { agencyDomain, pages, portal, platformPages: [...new Set(platformPages)], platformReads, docs, prerequisites: prerequisites.slice(0, 6), codes, seen: [...new Set(seen)], pageTexts, gone, agencyLinks };
+  return { agencyDomain, pages, portal, platformPages: [...new Set(platformPages)], platformReads, docs, prerequisites: prerequisites.slice(0, 6), codes, seen: [...new Set(seen)], pageTexts, gone, agencyLinks, ...(feeLeads.length ? { feeLeads } : {}) };
 }
 
 /** THIS AHJ'S OWN KB EVIDENCE for the portal door: the portals its permit_utility_knowledge rows
@@ -1120,7 +1433,7 @@ export async function runPermitProcessLookup(
   const platformPages = ev?.platformPages ?? [];
   const part1 = first
     ? (ev ? parseProcessPart(p1.text, [...seenOf(p1), ...ev.seen], p1.stopReason, platformPages, entity, input) : first)
-    : { issuingAgency: ungrounded(p1.error ? `lookup failed: ${p1.error.slice(0, 120)}` : "no web search returned results — nothing kept from memory"), permitStructure: ungrounded("no grounded search"), permits: [] as PermitProcessPermitAnswer[], prerequisites: [] as CitedFact<string>[], problem: p1.error ?? "ungrounded", buildingProgram: undefined, unincorporatedZoning: undefined, groundMountZoning: undefined };
+    : { issuingAgency: ungrounded(p1.error ? `lookup failed: ${p1.error.slice(0, 120)}` : "no web search returned results — nothing kept from memory"), permitStructure: ungrounded("no grounded search"), permits: [] as PermitProcessPermitAnswer[], prerequisites: [] as CitedFact<string>[], problem: p1.error ?? "ungrounded", buildingProgram: undefined, unincorporatedZoning: undefined, groundMountZoning: undefined, batteryPermitting: undefined, reviewTime: undefined };
 
   // ASK THE AGENCY THAT ISSUES EACH PERMIT. Lift an agency every permit agrees on; then group.
   const issuer = issuerOf(part1.permits, part1.issuingAgency);
@@ -1149,6 +1462,9 @@ export async function runPermitProcessLookup(
   // PUBLISHER ISSUES (issuerOf above).
   const detPortal: CitedFact<string> | null = ev?.portal ? { value: ev.portal.url, sourceUrl: ev.portal.sourceUrl, quote: ev.portal.quote, origin: "lookup" } : null;
   const issuedByPublisher = issuer.publisher;
+  const resolverWithheld = new Map<PermitProcessDiscipline, PermitFilingChannel>();
+  // The portal step's answers (filled below), declared here because the channel is read from it.
+  const portalFor = new Map<PermitProcessDiscipline, PortalStepAnswer>();
   const platformReads = ev?.platformReads ?? new Map<string, ReadPage>();
   const ourSeen = ev?.seen ?? [];
   // THE ONE DOOR, TWICE: every candidate — ours from the agency's page, part one's cited, (later) the
@@ -1172,9 +1488,21 @@ export async function runPermitProcessLookup(
     const chosen = accepted ?? decisions.find((x) => x.claimed) ?? decisions.find((x) => x.source === "portal step") ?? decisions.find((x) => x.source === "process part") ?? decisions[0] ?? notDecided;
     return { decisions, accepted, chosen };
   };
+  // THE CITED FILING CHANNEL of each permit: part one's, else the portal step's (asked of the issuer).
+  const channelOf = (d: PermitProcessDiscipline): Pick<PermitProcessPermitAnswer, "channel" | "alternateChannels"> => {
+    const one = byDiscipline.get(d);
+    const step = portalFor.get(d);
+    const pick = one?.channel?.value ? one : step?.channel?.value ? step : one?.channel ? one : step;
+    return pick?.channel ? { channel: pick.channel, ...(pick.alternateChannels?.length ? { alternateChannels: pick.alternateChannels } : {}) } : {};
+  };
   const baseCandidates = (d: PermitProcessDiscipline, partOne: CitedFact<string> | undefined): Array<{ raw: RawFact; source: PortalCandidateSource }> => {
     const out: Array<{ raw: RawFact; source: PortalCandidateSource }> = [];
-    if (detPortal && issuedByPublisher(d)) out.push({ raw: { value: detPortal.value, sourceUrl: detPortal.sourceUrl, quote: detPortal.quote }, source: "agency page (our read)" });
+    // A PERMIT FILED BY EMAIL / IN PERSON / BY MAIL / WITH ANOTHER PERMIT, as a cited page says, takes
+    // no portal from the vendor-link resolver (the vendor link on that page is something else: an
+    // inspection scheduler, the portal for the OTHER permit). A model-cited portal is still judged.
+    const nonPortal = citedNonPortalChannel(channelOf(d));
+    if (detPortal && issuedByPublisher(d) && nonPortal) resolverWithheld.set(d, nonPortal);
+    if (detPortal && issuedByPublisher(d) && !nonPortal) out.push({ raw: { value: detPortal.value, sourceUrl: detPortal.sourceUrl, quote: detPortal.quote }, source: "agency page (our read)" });
     // A claim the PARSE-TIME door refused for want of evidence stays a candidate (its `claimed`), so
     // the final door can judge it with everything read since (portal-truth D3: a redirect we read).
     if (partOne) out.push({ raw: { value: partOne.value ?? (partOne.claimed || null), sourceUrl: partOne.sourceUrl, quote: partOne.quote, notFound: partOne.notFound }, source: "process part" });
@@ -1253,7 +1581,6 @@ export async function runPermitProcessLookup(
   const answers = await Promise.all(tasks);
 
   // Keyed by (agency, discipline): each group's answer fills only the permits asked of that agency.
-  const portalFor = new Map<PermitProcessDiscipline, { portalUrl: CitedFact<string>; recordType: CitedFact<string> }>();
   const docsFor = new Map<PermitProcessDiscipline, { documents: CitedFact<string[]>; fee: CitedFact<PermitFeeAnswer> }>();
   const problems: string[] = [part1.problem];
   const prerequisites = [...part1.prerequisites];
@@ -1454,6 +1781,9 @@ export async function runPermitProcessLookup(
       ...(portalUrl.value ? { portalPlatform: (ev?.portal && decided.get(p.discipline)?.source === "agency page (our read)" ? ev.portal.platform : platformOfUrl(portalUrl.value)) ?? undefined } : {}),
       documents: df?.documents ?? ungrounded("not found"),
       fee: df?.fee ?? ungrounded("not found"),
+      ...channelOf(p.discipline),
+      // #28: the portal step's cited second stage (a description for a person to confirm).
+      ...(portalFor.get(p.discipline)?.secondStage ? { secondStage: portalFor.get(p.discipline)!.secondStage } : {}),
     };
   });
   prerequisites.push(...(ev?.prerequisites ?? []));
@@ -1465,6 +1795,7 @@ export async function runPermitProcessLookup(
     ...(issuingAgency !== part1.issuingAgency ? [`Issuing agency lifted from the permits' agreeing cited agencies (${issuingAgency.value}).`] : []),
     ...(ev?.portal ? [`Portal resolved from the agency's own page (${ev.portal.via}): ${ev.portal.quote} — ${ev.portal.sourceUrl}`] : []),
     ...portalNotes,
+    ...[...resolverWithheld.entries()].map(([d, c]) => `Portal (${d}): the agency page's vendor link was not taken — the cited page says this permit is filed ${channelPhrase(c)}.`),
     ...questions.map((q) => `Operator question: ${q}`),
     ...uniquePrereqs.map((x) => `Prerequisite: ${x.value} — ${x.sourceUrl}`),
   ];
@@ -1506,9 +1837,15 @@ export async function runPermitProcessLookup(
   // establish (an aborted part, a search that came up empty) keeps the earlier cited answer — unless
   // its cited page is gone now (withoutGoneCitations, the last door before the write).
   // The earlier row's portal goes through the ONE door with THIS run's issuer (mergeWithEarlier).
+  // A REFUSED READ IS NOT SILENT (lookup-door-fixes): every page the reader was refused is listed for
+  // a person to read, on the row and in its notes. The reader's one try and host back-off are unchanged.
+  const needsPersonRead = reader ? readsNeedingAPerson(reader.log) : [];
+  for (const r of needsPersonRead) notes.push(`Needs a person to read: ${r.url} (${r.reason})`);
   const merged = withoutGoneCitations(mergeWithEarlier(existing, { issuingAgency, permitStructure: part1.permitStructure, permits },
     (d, earlierPortal) => acceptPortalForPermit({ value: earlierPortal.value, sourceUrl: earlierPortal.sourceUrl, quote: earlierPortal.quote }, "process part", doorContextFor(d, { seen: [], platformPages: [] })),
     (d, earlierRecordType, portalUrl) => recordTypeBelongsToPortal(earlierRecordType, portalUrl, rtCtx(d))), gone);
+  const feeReadsForPerson = feeReadsForAPerson(merged.permits, ev?.feeLeads ?? []);
+  for (const r of feeReadsForPerson) notes.push(`Fee needs a person to read: ${r.url} (${r.reason})`);
   const res = savePermitProcessLookup(db, {
     state: input.state, ahj: input.ahj, lookedUpAt: new Date().toISOString(),
     issuingAgency: merged.issuingAgency, permitStructure: merged.permitStructure, permits: merged.permits, notes,
@@ -1524,7 +1861,13 @@ export async function runPermitProcessLookup(
     // Asked everywhere (#247), kept the same way: a re-run that could not establish it keeps the earlier answer.
     groundMountZoning: part1.groundMountZoning?.value ? part1.groundMountZoning : existing?.groundMountZoning?.value ? existing.groundMountZoning : part1.groundMountZoning,
     ...(ev?.codes ? { codes: ev.codes } : existing?.codes ? { codes: existing.codes } : {}),
+    // Battery permitting and review time (lookup-battery-and-fees): this run's cited answers, else the
+    // earlier row's (a re-run that found none forgets nothing).
+    ...(part1.batteryPermitting?.length ? { batteryPermitting: part1.batteryPermitting } : existing?.batteryPermitting?.length ? { batteryPermitting: existing.batteryPermitting } : {}),
+    ...(part1.reviewTime?.value ? { reviewTime: part1.reviewTime } : existing?.reviewTime?.value ? { reviewTime: existing.reviewTime } : {}),
     ...(reader ? { pagesRead: reader.log.map((l) => ({ url: l.url, ok: l.ok, reason: l.reason.slice(0, 160) })) } : {}),
+    ...(needsPersonRead.length ? { needsPersonRead } : {}),
+    ...(feeReadsForPerson.length ? { feeReadsForPerson } : {}),
   });
   if (res.saved && res.lookup) {
     try { applyLookupFees(db, res.lookup); } catch (err) { logger.warn("permit-process", `fee landing failed: ${err instanceof Error ? err.message : String(err)}`); }
@@ -1573,7 +1916,10 @@ export function mergeWithEarlier(
     const b = earlier.permits.find((e) => e.discipline === p.discipline);
     if (!b) return p;
     if (p.issuingAgency.value && b.issuingAgency.value && !sameAgencyName(p.issuingAgency.value, b.issuingAgency.value)) return p;
-    let portalUrl = keep(p.portalUrl, b.portalUrl);
+    // A permit THIS run reads as filed some other way (a cited non-portal channel) does not get the
+    // earlier row's portal back (it was the resolver's vendor link, typically).
+    const channelNow = p.channel?.value ? p : b.channel?.value ? b : p;
+    let portalUrl = citedNonPortalChannel(p) ? p.portalUrl : keep(p.portalUrl, b.portalUrl);
     if (portalUrl === b.portalUrl && b.portalUrl.value) {
       const dec = judgePortal(p.discipline, b.portalUrl);
       if (OUTRIGHT_REFUSALS.has(dec.code)) portalUrl = { ...p.portalUrl, notFound: `the earlier row's ${dec.fact.notFound ?? "portal is refused"}` };
@@ -1581,7 +1927,11 @@ export function mergeWithEarlier(
     const carryType = !p.recordType.value && Boolean(b.recordType.value) && belongs(p.discipline, b.recordType, portalUrl.value);
     return {
       ...p, issuingAgency: keep(p.issuingAgency, b.issuingAgency), portalUrl,
-      recordType: carryType ? b.recordType : p.recordType, documents: keep(p.documents, b.documents), fee: keep(p.fee, b.fee),
+      recordType: carryType ? b.recordType : p.recordType, documents: keep(p.documents, b.documents), fee: keep(p.fee, formulaFeeNotANumber(b.fee)),
+      ...(channelNow.channel ? { channel: channelNow.channel } : {}),
+      ...(channelNow.alternateChannels?.length ? { alternateChannels: channelNow.alternateChannels } : {}),
+      // A second stage this run did not establish is kept from the earlier row (same issuer).
+      ...((p.secondStage?.value ? p.secondStage : b.secondStage) ? { secondStage: p.secondStage?.value ? p.secondStage : b.secondStage } : {}),
     };
   });
   // A permit only the earlier row lists is carried too — through the same doors (its portal and the
@@ -1619,16 +1969,17 @@ const SURCHARGE_WORDS = /\bsurcharge/i;
 /**
  * A STATE SURCHARGE THE AGENCY'S OWN SOURCE STATES (close M3: Marion County's E-01 prints "State
  * surcharge (12% of permit fee)"; the answer held $94 + $11.28, the schedule dropped it, and the
- * cited STATE_PERMIT_RULES surcharge was read nowhere). Applied only when ALL hold:
- *   - the state has a cited surcharge rule, and the percentage is within its maximum;
+ * cited state surcharge was read nowhere). Applied only when ALL hold:
+ *   - the state has a cited surcharge rule (state_permit_rules "fee" family, stateFeeRules — #663),
+ *     and the percentage is within its maximum;
  *   - the fee's QUOTE (the words that passed acceptCited) itself prints a state surcharge AND its
  *     percentage — the basis prose and the line labels alone never apply one;
  *   - a surcharge line the answer itemised, if any, is that percentage of the base (±$0.02).
  * Anything short of that is left to the quote's "state surcharge not included" note.
  */
-export function citedStateSurcharge(state: string, fee: CitedFact<PermitFeeAnswer>): { percent: number; quote: string; sourceUrl: string } | null {
-  const rule = stateRulesFor(state).surcharge;
-  const max = typeof rule?.value === "number" ? rule.value * 100 : null;
+export function citedStateSurcharge(db: AppDb, state: string, fee: CitedFact<PermitFeeAnswer>): { percent: number; quote: string; sourceUrl: string } | null {
+  const rule = stateSurchargeRuleFor(db, state);
+  const max = rule.status === "rule" ? rule.percent : null;
   if (max == null || !fee.value) return null;
   const quote = str(fee.quote);
   const m = /state\s+surcharge[^.;$]{0,40}?(\d+(?:\.\d+)?)\s*%|(\d+(?:\.\d+)?)\s*%[^.;$]{0,20}?state\s+surcharge/i.exec(quote);
@@ -1689,7 +2040,7 @@ export function applyLookupFees(db: AppDb, lookup: PermitProcessLookup): Array<{
     // as 5 made this project's bracket keys (feeBracketQuantity:5-15) differ from the SAME row as a
     // recorded recipe names it (5.01-15), so a borrowed recipe's recorded quantity replayed
     // unbound. The previous row's upper bound is only the fallback for a label that prints none.
-    const surcharge = citedStateSurcharge(lookup.state, fee);
+    const surcharge = citedStateSurcharge(db, lookup.state, fee);
     // With a surcharge applied by the evaluator, a flat fee's bracket is the BASE line (the
     // surcharge's own line and a total that already includes it would count it twice).
     const baseLines = fee.value.lines.filter((l) => !SURCHARGE_WORDS.test(l.label ?? "") && typeof l.amountUsd === "number");
@@ -1699,7 +2050,7 @@ export function applyLookupFees(db: AppDb, lookup: PermitProcessLookup): Array<{
     // With a cited surcharge the evaluator adds it, so the bracket is the ONE printed base line; a
     // total (which may already include the surcharge) would count it twice.
     const flatUsd = surcharge ? (baseLine?.amountUsd ?? null) : fee.value.amountUsd;
-    if (!tiers.length && (flatUsd == null || RATED_FEE.test(`${fee.value.basis} ${fee.quote}`))) {
+    if (!tiers.length && (flatUsd == null || RATED_FEE.test(`${fee.value.basis} ${fee.quote}`) || bracketDescribesPercentOfCost(`${fee.value.basis} ${fee.quote}`))) {
       out.push({ discipline: permit.discipline, saved: false, reason: flatUsd == null ? "no stated total for this permit — not landed as a flat fee" : "priced by valuation or a rate — not a flat fee" });
       continue;
     }
@@ -1712,7 +2063,8 @@ export function applyLookupFees(db: AppDb, lookup: PermitProcessLookup): Array<{
     const r = saveFeeSchedule(db, { state: lookup.state, ahj: owner, track: "permit", discipline: permit.discipline }, {
       found: true, reason: "", basis: tiers.length ? "system_kw" : "flat", brackets, sourceUrl: fee.sourceUrl, sourceQuote: fee.quote, sourceKind: "official",
       notes: `Per-job lookup (seeded): ${fee.value.basis}`.slice(0, 400),
-    }, surcharge ? { citedStateSurcharge: surcharge } : {});
+      // The read date the fee quote shows beside the source: the lookup's own run time.
+    }, { ...(surcharge ? { citedStateSurcharge: surcharge } : {}), fetchedAt: lookup.lookedUpAt });
     out.push({ discipline: permit.discipline, saved: r.saved, reason: r.reason ?? "" });
   }
   return out;
@@ -1814,7 +2166,9 @@ function stateIssuersToLookUp(project: { state: string; ahj: string; parserSnaps
     for (const track of ["building", "electrical"]) {
       const issuer = trackIssuer(project as never, track);
       const name = str(issuer.name);
-      if (issuer.source !== "state_rule" || !name || sameAgencyName(name, project.ahj)) continue;
+      if ((issuer.source !== "state_rule" && issuer.source !== "reference") || !name || sameAgencyName(name, project.ahj)) continue;
+      // A placeholder for a state authority not on file is not an agency to research.
+      if (name === unknownStateAuthorityName(project.state)) continue;
       if (!out.some((n) => normalizeAhjName(n) === normalizeAhjName(name))) out.push(name);
     }
   } catch { /* an unreadable issuer is simply not looked up */ }

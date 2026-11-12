@@ -4,13 +4,16 @@ import type { LLMProvider, ReviewerFinding, ReviewerReport, ReviewerVisionVerdic
 import type { AppDb } from "./db";
 import { topicForFinding } from "./reviewerEngine";
 import { StubLLMProvider } from "./llm";
-import { findPlanSetPdf, renderPdfPageToPng, selectTopPagesForTopic } from "./pageImages";
+import { findPlanSetPdf, renderPdfPageForVision, selectTopPagesForTopic } from "./pageImages";
 import { extractPdfPages } from "./batchImport";
 import type { EvidenceTopic } from "./projectEvidence";
 import { applyRoofPlanMeasurement, FIRE_PATHWAY_BELOW_ID, FIRE_PATHWAY_UNMEASURED_ID } from "./designCriteria";
+import { FIRE_EERO_OBSTRUCTED_ID } from "./fireAccess";
 import { AMENDMENT_NOT_MET_ID } from "./amendmentChecks";
 import { PRIOR_CORRECTION_ID } from "./ahjReviewRules";
 import { PRECEDENT_DEPARTURE_ID } from "./permitPrecedents";
+import { WIRE_TABLE_FINDING_IDS } from "./wireTableArithmetic";
+import { ESS_MEASURED_FINDING_IDS } from "./essReview";
 import { nowIso } from "./time";
 import { redactSecretValues } from "../../shared/src/portalSafety";
 import { projectSecretValuesById } from "./projectSecrets";
@@ -106,6 +109,7 @@ function writeCache(db: AppDb, projectId: string, findingId: string, sig: string
 // hardcoded set like this otherwise rots silently the first time a rule is renamed.
 export const MEASURED_FINDING_IDS: ReadonlySet<string> = new Set([
   "city.elec.dc-size-mismatch",     // module count x wattage vs declared DC size
+  "city.elec.ac-size-mismatch",     // inverter count x output vs declared AC size
   "city.elec.interconnection-ambiguous",    // the design names two sides; a photo cannot pick
   "city.elec.interconnection-unclassified", // seeing an SLD does not classify the method
   // Design criteria compared for VALUE (designCriteria.ts): two documents disagree, a stated
@@ -136,9 +140,16 @@ export const MEASURED_FINDING_IDS: ReadonlySet<string> = new Set([
   "city.elec.sizing-string-voc",
   "city.elec.sizing-voltage-drop",
   "city.elec.sizing-inputs-missing",
+  // The wire table's own arithmetic, tag by tag (wireTableArithmetic.ts, #334): EGC vs 250.122,
+  // the supply-side bonding jumper, ampacity vs OCPD, raceway fill, load center spaces. A picture of
+  // the table shows it is there, never that its numbers add up.
+  ...WIRE_TABLE_FINDING_IDS,
   // A stated (or vision-measured) pathway width / ridge setback against the required one is
   // arithmetic (issue #142). A sheet showing a pathway does not make it wide enough.
   FIRE_PATHWAY_BELOW_ID,
+  // Modules the plan places below an emergency escape and rescue opening (draft 08, fireAccess.ts):
+  // a sheet showing the opening does not move the array off the roof below it.
+  FIRE_EERO_OBSTRUCTED_ID,
   // A classified local amendment compared with the plan's stated value or wording (#145): a sheet
   // showing a snow note or a placard does not make the value meet the amendment.
   AMENDMENT_NOT_MET_ID,
@@ -150,6 +161,11 @@ export const MEASURED_FINDING_IDS: ReadonlySet<string> = new Set([
   // recorded values; a sheet showing an attachment detail cannot say it is the accepted one (and
   // "attachment" in its title would map it to rackingAttachment).
   PRECEDENT_DEPARTURE_ID,
+  // A stated battery fact against an ESS rule (essReview.ts, review-audit draft 05): kWh per unit and
+  // by location, a habitable-room location, spacing, distance to doors and windows. A sheet showing
+  // the battery does not make it small enough or far enough away. (Its "detail not shown" twin is
+  // absence, so vision may relax that one.)
+  ...ESS_MEASURED_FINDING_IDS,
 ]);
 
 /** False when the finding reports a measured result rather than missing evidence. */
@@ -212,6 +228,14 @@ function answersQuestion(verdict: ReviewerVisionVerdict, finding: ReviewerFindin
   return Boolean(verdict.question) && verdict.question === visionQuestionFor(finding);
 }
 
+// A sheet withheld from vision because its own text carries a project secret that could not be
+// painted over (#293). Never cached (checked: false), so a later pass looks at the sheet again.
+const NOT_SENT_PREFIX = "Not sent to vision";
+const notSentNote = (page: number, reason: string) => `${NOT_SENT_PREFIX} (page ${page}): ${reason}.`;
+function isNotSent(verdict: ReviewerVisionVerdict): boolean {
+  return !verdict.checked && verdict.note.startsWith(NOT_SENT_PREFIX);
+}
+
 async function verifyOne(
   llm: LLMProvider,
   pdfPath: string,
@@ -235,11 +259,18 @@ async function verifyOne(
   // sheet ("no structural information appears on this sheet" — true, and no
   // one should have been looking at it).
   let firstVerdict: ReviewerVisionVerdict | null = null;
+  // RULE 2 FOR THE IMAGE (#293): a candidate sheet whose own text carries a project secret goes
+  // with that text painted over; one where it cannot be placed is not sent at all, and why is kept.
+  const skipped: string[] = [];
   for (const page of candidates) {
     let base64: string;
     try {
-      const png = await renderPdfPageToPng(pdfPath, page);
-      base64 = png.toString("base64");
+      const image = await renderPdfPageForVision(pdfPath, page, secrets);
+      if (!image.ok) {
+        skipped.push(notSentNote(page, image.reason));
+        continue;
+      }
+      base64 = image.png.toString("base64");
     } catch {
       continue;
     }
@@ -260,7 +291,8 @@ async function verifyOne(
     if (present) return verdict; // found it — stop retrying
     if (!firstVerdict) firstVerdict = verdict;
   }
-  return firstVerdict ?? { checked: false, present: false, confidence: "low", page: candidates[0], observed: "", note: "Could not render any plan-set page for vision." };
+  if (firstVerdict && skipped.length) return { ...firstVerdict, note: `${firstVerdict.note}\n${skipped.join(" ")}` };
+  return firstVerdict ?? { checked: false, present: false, confidence: "low", page: candidates[0], observed: "", note: skipped.length ? skipped.join(" ") : "Could not render any plan-set page for vision." };
 }
 
 // THE ONE MEASUREMENT (issue #142). Every other vision call asks "is it on the sheet?"; this one
@@ -293,11 +325,13 @@ function inchesOf(raw: unknown): number | null {
   return Number.isFinite(n) && n > 0 && n <= 240 ? n : null;
 }
 
-async function measureOne(llm: LLMProvider, pdfPath: string, pages: string[], finding: ReviewerFinding): Promise<ReviewerVisionVerdict> {
+async function measureOne(llm: LLMProvider, pdfPath: string, pages: string[], finding: ReviewerFinding, secrets: string[] = []): Promise<ReviewerVisionVerdict> {
   const page = selectTopPagesForTopic(pages, "firePathway", "", "", 1)[0] ?? 1;
   let base64: string;
   try {
-    base64 = (await renderPdfPageToPng(pdfPath, page)).toString("base64");
+    const image = await renderPdfPageForVision(pdfPath, page, secrets);
+    if (!image.ok) return { checked: false, present: false, confidence: "low", page, observed: "", note: notSentNote(page, image.reason) };
+    base64 = image.png.toString("base64");
   } catch {
     return { checked: false, present: false, confidence: "low", page, observed: "", note: "Could not render the roof plan page for a vision measurement." };
   }
@@ -426,8 +460,13 @@ export async function applyVisionToReviewerReport(
       let measured = readCache(db, report.projectId, finding.id, sig);
       if (!measured && budget > 0) {
         budget -= 1;
-        measured = await measureOne(llm, pdfPath, pages, finding);
+        measured = await measureOne(llm, pdfPath, pages, finding, secrets);
         if (measured.checked) writeCache(db, report.projectId, finding.id, sig, measured);
+        // Not cached, so the next pass asks again; this pass's finding says why nothing was read.
+        else if (isNotSent(measured)) {
+          findings.push({ ...finding, visionVerification: measured });
+          continue;
+        }
       }
       findings.push(measured && measured.checked ? applyRoofPlanMeasurement(finding, measured) : finding);
       continue;

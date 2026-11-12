@@ -64,8 +64,11 @@ console.log(`  scraped ${rows.length} row(s)`);
 check("only rows with a Select ACTION are rows — the header and a stray 'Select a report' are not",
   rows.length === 4, `got ${rows.length}`);
 
+// Every fixture row's address carries the synthetic street token MOCKUP exactly once (#98 scrub;
+// it used to be a real street name, which is why this counted a word no row carries any more,
+// #326). A row whose scrape swallowed the whole table would carry it four times.
 check("each row carries only its OWN text, not the whole table",
-  rows.every((r) => (r.text.match(/KENTUCKY/g) || []).length === 1),
+  rows.every((r) => (r.text.match(/MOCKUP/g) || []).length === 1),
   JSON.stringify(rows.map((r) => r.text.slice(0, 40))));
 
 const IVY = { city: "Coos Bay", zip: "97420", homeownerName: "Drew Example" };

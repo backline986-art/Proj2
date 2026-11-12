@@ -136,6 +136,13 @@ add("access", "PORTAL_ALLOW_FINAL_SUBMIT", !finalSubmit ? "PASS" : authOn ? "WAR
   !finalSubmit ? "unset: automation never clicks a portal's final submit"
     : authOn ? "=1: Approve & Submit may click a portal's final submit after a named per-run approval (operator ruling; acceptable only with that gate verified on the running build)"
       : "=1 with no login: anyone on the network can approve a filing into a real submission");
+// The email filing door (#667) has its OWN switch, judged the same way: with no login, anyone who can
+// reach the port could approve a filing email into a real application sent to an authority.
+const emailFiling = String(env.FILING_EMAIL_ALLOW_SEND ?? "").trim() === "1";
+add("access", "FILING_EMAIL_ALLOW_SEND", !emailFiling ? "PASS" : authOn ? "WARN" : "FAIL",
+  !emailFiling ? "unset: automation never sends a filing email (each is staged as a draft for a person to send)"
+    : authOn ? "=1: Approve & auto-submit may send a filing email to an authority's person-verified address after a named per-run approval"
+      : "=1 with no login: anyone on the network can approve a filing email into a real application");
 
 // --- CUSTOMER LINKS -----------------------------------------------------------------------------
 const base = String(env.PUBLIC_BASE_URL ?? "").trim();

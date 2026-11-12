@@ -33,7 +33,7 @@ import type {
 } from "../../shared/src/types";
 import { formatProjectAddress } from "./clientNotifier";
 import { getProjectDetail } from "./repository";
-import { publishedReadingFreshness, trackKind, UNCONFIRMED_READING_LABEL, type TrackKind } from "./permitMonitor";
+import { POWERCLERK_STAGE_LABELS, publishedReadingFreshness, trackKind, UNCONFIRMED_READING_LABEL, type TrackKind } from "./permitMonitor";
 import { logger } from "./logger";
 import { clientFacingPermitType, clientPermitStructure } from "./clientUpdates";
 import { buildClientTimeline } from "./clientTimeline";
@@ -239,6 +239,21 @@ const PUBLIC_CHECK_LABELS = new Map<string, PublicCheckWording>([
     permit: "Waiting on us — reading the jurisdiction's latest update",
     nem: "Waiting on us — reading the utility's latest update",
   }],
+  // POWERCLERK STAGES (#170, permitMonitor.powerClerkVocabulary). The utility is past its review
+  // and waiting on the job itself: the jurisdiction's final inspection and/or the signatures it
+  // asked for. Named, so the client knows what the filing is waiting on — never "in review".
+  // Only a NEM reading writes these; the words name the utility either way.
+  [`waiting::${POWERCLERK_STAGE_LABELS.inspectionAndSignatures.toLowerCase()}`,
+    "Waiting on the final inspection and signatures — the utility needs both before it moves on"],
+  [`waiting::${POWERCLERK_STAGE_LABELS.inspection.toLowerCase()}`,
+    "Waiting on the final inspection — the utility needs it before it moves on"],
+  [`waiting::${POWERCLERK_STAGE_LABELS.signatures.toLowerCase()}`,
+    "Waiting on signatures — the utility needs them before it moves on"],
+  // A correction (#617): waiting on US — we read the utility's notes and file its correction form.
+  [`correction_flagged::${POWERCLERK_STAGE_LABELS.changesNeeded.toLowerCase()}`,
+    "Waiting on us — the utility asked for changes before it goes further"],
+  [`needs_human_review::${POWERCLERK_STAGE_LABELS.closed.toLowerCase()}`,
+    "Waiting on us — the utility shows this application closed, and we are checking it"],
   // A reading the writer refused to trust (permitMonitor.readingMayFinishTrack: an email's
   // approval, a no-target reading, the other track's family on this filing) — stored as
   // needs_human_review with the fixed UNCONFIRMED_READING_LABEL. The client is told an update was

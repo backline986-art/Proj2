@@ -68,7 +68,7 @@
     "ruleName": "PGE interconnection package",
     "qcStatus": "warning",
     "severity": "warning",
-    "message": "PGE package may be missing: SLD/3-line, module spec, inverter spec, utility account.",
+    "message": "PGE package may be missing: module spec, inverter spec, utility account.",
     "fieldName": "utilityDownloadChecklistText"
   }
 ]

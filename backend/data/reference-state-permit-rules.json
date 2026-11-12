@@ -1,0 +1,85 @@
+{
+  "about": "Each state's permit rules as cited data (#595 PR2; family \"fee\" holds #586/#663's fee rules: a state surcharge on permit fees, a solar permit-fee cap). Seeded: stateRules.seedStatePermitRules writes these into state_permit_rules and never over a row a person verified (rule 3). Every rule quotes its source. A state is left out of a rule it publishes nothing citable for: Utah, Idaho, Nevada and Arizona publish no statewide prescriptive rooftop-PV path that could be found (as of 2026-11-09), so they carry only the seal rule, and rooftop PV there goes through the standard structural review (permitPath.ts).",
+  "asOf": "2026-11-09",
+  "rules": [
+    {
+      "state": "OR", "family": "structural", "key": "prescriptivePath",
+      "value": { "available": true, "form": "BCD 440-5952" },
+      "citation": "Oregon BCD 440-5952 (5/24) Prescriptive Rooftop-Mounted Solar Photovoltaic Installation Checklist, Part III: \"If 'No' is selected for any item below, or if the supporting structure is a manufactured dwelling, the project may not be submitted using the prescriptive path.\"",
+      "sourceUrl": "https://www.washingtoncountyor.gov/lut/building-services/documents/solar-checklist/download?inline="
+    },
+    {
+      "state": "OR", "family": "structural", "key": "attachmentMethods",
+      "value": ["direct attachment to the roof framing or blocking", "direct attachment to standing seam metal roofing panels"],
+      "citation": "Oregon BCD 440-5952 (5/24), Part III: \"PV modules or racking will be attached to the roof using one of the following methods\": Attachment Method 1, \"Direct attachment to the roof framing or blocking\"; Attachment Method 2, \"Direct attachment to standing seam metal roofing panels\". Ballasted or non-penetrating racking is attached by neither method.",
+      "sourceUrl": "https://www.washingtoncountyor.gov/lut/building-services/documents/solar-checklist/download?inline="
+    },
+    {
+      "state": "OR", "family": "structural", "key": "maxGroundSnowPsf",
+      "value": 70,
+      "citation": "Oregon BCD 440-5952 (5/24), Part III: \"Ground snow load at the site does not exceed 70 pounds per square foot (psf)\".",
+      "sourceUrl": "https://www.washingtoncountyor.gov/lut/building-services/documents/solar-checklist/download?inline="
+    },
+    {
+      "state": "OR", "family": "structural", "key": "allowedWindExposures",
+      "value": ["B", "C"],
+      "citation": "Oregon BCD 440-5952 (5/24), Part III: \"Wind exposure for structure is limited to Wind Exposure Category B or C\".",
+      "sourceUrl": "https://www.washingtoncountyor.gov/lut/building-services/documents/solar-checklist/download?inline="
+    },
+    {
+      "state": "OR", "family": "structural", "key": "maxPvSystemWeightPsf",
+      "value": 4.5,
+      "citation": "Oregon BCD 440-5952 (5/24), Part III: \"Total weight of the PV panel system, including modules and racking, will not exceed 4.5 psf\".",
+      "sourceUrl": "https://www.washingtoncountyor.gov/lut/building-services/documents/solar-checklist/download?inline="
+    },
+    {
+      "state": "OR", "family": "structural", "key": "maxFramingSpacingIn",
+      "value": 24,
+      "citation": "Oregon BCD 440-5952 (5/24), Part III: \"Pre-engineered trusses are spaced less than or equal to 24 inches on center (o.c.); or Rafters are spaced less than or equal to 24 inches o.c. and framing complies with R324.4.1 Exception 1.4 through 1.6\".",
+      "sourceUrl": "https://www.washingtoncountyor.gov/lut/building-services/documents/solar-checklist/download?inline="
+    },
+    {
+      "state": "OR", "family": "structural", "key": "rafterSpanRule",
+      "value": { "reference": "ORSC R324.4.1 Exception 1.4 through 1.6", "maxSpanOnFile": false },
+      "citation": "Oregon BCD 440-5952 (5/24), Part III: rafters qualify only where \"framing complies with R324.4.1 Exception 1.4 through 1.6\" (Oregon Residential Specialty Code). The span limits of those exceptions are not on file here, so a rafter roof's span is a check with an engineer, never a pass.",
+      "sourceUrl": "https://www.washingtoncountyor.gov/lut/building-services/documents/solar-checklist/download?inline="
+    },
+    {
+      "state": "OR", "family": "structural", "key": "sealStateOnly",
+      "value": { "board": "OSBEELS" },
+      "citation": "ORS 672.020(1): \"no person shall practice or offer to practice engineering in this state ... unless the person is registered and has a valid certificate to practice engineering issued under ORS 672.002 to 672.325\"; ORS 672.020(2): every final document \"shall be stamped with the seal and signed by the registrant.\"",
+      "sourceUrl": "https://www.oregonlegislature.gov/bills_laws/ors/ors672.html"
+    },
+    {
+      "state": "OR", "family": "fee", "key": "surcharge",
+      "value": {"percent": 12, "appliesTo": "permit_fees", "maximum": true, "section": "ORS 455.210(4) + 455.220(1)"},
+      "citation": "ORS 455.210(4): \"(a) For the purpose of partially defraying state administrative costs, there is imposed a surcharge in the amount of four percent of the total permit fees or, if the applicant chooses to pay an hourly rate instead of purchasing a permit, four percent of the total hourly charges collected. (b) For the purpose of partially defraying state inspection costs, there is imposed a surcharge in the amount of two percent of the total permit fees or, if the applicant chooses to pay an hourly rate instead of purchasing a permit, two percent of the total hourly charges collected. (c) For the purpose of defraying the cost of administering and enforcing the state building code, there is imposed a surcharge on permit fees and on hourly charges collected instead of permit fees. The surcharge may not exceed one percent of the total permit fees or, if the applicant chooses to pay an hourly rate instead of purchasing a permit, one percent of the total hourly charges collected. (d) For the purpose of defraying the cost of developing and administering the electronic building codes information system described in ORS 455.095 and 455.097, there is imposed a surcharge in the amount of four percent on permit fees, or if the applicant chooses to pay an hourly rate instead of purchasing a permit, four percent of the total hourly charges collected.\" ORS 455.220(1): \"There is hereby imposed a surcharge in the amount of one percent of the total building permit fees or, if the applicant chooses to pay an hourly rate instead of purchasing a permit, one percent of the total hourly charges collected in connection with the construction of, or addition or alteration to, buildings and equipment or appurtenances.\" Together 4 + 2 + (at most) 1 + 4 + 1 = at most 12 percent of the total permit fees; ORS 455.210(5): \"Municipalities shall collect and remit surcharges imposed under subsection (4) of this section to the director as provided in ORS 455.220.\"",
+      "sourceUrl": "https://www.oregonlegislature.gov/bills_laws/ors/ors455.html",
+      "fetchedAt": "2026-11-09"
+    },
+    {
+      "state": "UT", "family": "structural", "key": "sealStateOnly",
+      "value": { "board": "Utah DOPL" },
+      "citation": "Utah Code 58-22-602 (Plans ... to be sealed): final plans, specifications and reports of a building or structure erected in Utah \"shall bear the seal of a professional engineer or professional structural engineer licensed under this chapter\"; 58-22-301 requires the license to practise.",
+      "sourceUrl": "https://codes.findlaw.com/ut/title-58-occupations-and-professions/ut-code-sect-58-22-602/"
+    },
+    {
+      "state": "ID", "family": "structural", "key": "sealStateOnly",
+      "value": { "board": "Idaho Board of Licensure of Professional Engineers and Professional Land Surveyors" },
+      "citation": "Idaho Code 54-1215 (License — Seals): \"The seal, signature and date shall be placed on all final specifications, land surveys, reports, plats, drawings, plans, design information and calculations whenever presented to a client or any public or governmental agency.\"",
+      "sourceUrl": "https://legislature.idaho.gov/statutesrules/idstat/title54/t54ch12/sect54-1215/"
+    },
+    {
+      "state": "NV", "family": "structural", "key": "sealStateOnly",
+      "value": { "board": "Nevada State Board of Professional Engineers and Land Surveyors" },
+      "citation": "NRS 625.383 (Stamp): \"Each professional engineer and professional land surveyor shall obtain a stamp of the design authorized by the Board\"; NRS 625.381: the Board issues the license to practise professional engineering in Nevada.",
+      "sourceUrl": "https://www.leg.state.nv.us/nrs/nrs-625.html"
+    },
+    {
+      "state": "AZ", "family": "structural", "key": "sealStateOnly",
+      "value": { "board": "Arizona State Board of Technical Registration" },
+      "citation": "A.R.S. 32-125(B) (Seals for registrants): plans, specifications, plats or reports prepared by a registrant \"shall be issued under the registrant's seal if the board requires the registrant to use a seal.\"",
+      "sourceUrl": "https://www.azleg.gov/ars/32/00125.htm"
+    }
+  ]
+}

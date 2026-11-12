@@ -28,6 +28,14 @@ export type JobType =
   // that exists but has none on file (codeProfiles.ensureDesignCriteriaResearched).
   | "design_criteria_research"
   | "fee_research"
+  // A STATE'S PERMIT-FEE RULES (#663): its surcharge on permit fees / a solar fee cap, cited verbatim
+  // and landed seeded, the first time a permit job lands in a state with none on file
+  // (stateFeeResearch.ensureStateFeeRulesResearched).
+  | "state_fee_research"
+  // WHICH JURISDICTION THE JOB'S PARCEL IS IN (review-audit draft 09, parcelJurisdiction.ts): one plain
+  // GET to the county's public parcel service — a government host only — cached by address hash.
+  // Queued by QC for a permit-track job; never by a page read.
+  | "parcel_jurisdiction_check"
   // THE PER-JOB PERMIT-PROCESS LOOKUP (permitProcessLookup.ts): agency, combo vs separate, portal +
   // record type, documents and fees per permit — cited, seeded — for an AHJ with no process of its own.
   | "permit_process_lookup"
@@ -39,7 +47,10 @@ export type JobType =
   | "stage_step"
   // EMAILED JOBS, FILED OFF THE MONITOR TICK (#539): the intake mail one inbox poll found (IMAP
   // UIDs or Gmail ids, never the raw message), fetched again and run through emailIntake.ts.
-  | "email_intake";
+  | "email_intake"
+  // ONE JOB FOLDER OF A BULK DROP (#538): its files through email intake's per-job pipeline for the
+  // client a person chose (bulkJobDrop.ts). One job per folder, so one bad folder never sinks the drop.
+  | "bulk_job_folder";
 
 export type JobStatus = "pending" | "running" | "done" | "failed";
 
@@ -684,6 +695,19 @@ function permitLookupRunningFor(db: AppDb, state: string, ahj: string): boolean 
  *  AHJ's cited required-documents list) re-judges QC's document rows instead (#112).
  *  Best effort: a failure here never changes the job's own outcome. */
 async function rejudgeAfterJurisdictionLookup(db: AppDb, job: JobRecord): Promise<void> {
+  if (job.jobType === "parcel_jurisdiction_check") {
+    // The parcel's answer landed for ONE project: re-judge that project's gate (pre-stage only, and
+    // only once its gate has run), so the page shows the parcel finding without a reload.
+    const landed = db.get<{ status: string }>("SELECT status FROM job_queue WHERE id = ?", [job.id]);
+    if (String(landed?.status) !== "done" || !job.projectId) return;
+    try {
+      const { rejudgeReviewerGateForProject } = await import("./repository");
+      await rejudgeReviewerGateForProject(db, job.projectId, `${job.jobType}_landed`);
+    } catch (err) {
+      logger.warn("job-worker", `re-judge after ${job.jobType} failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+    return;
+  }
   if (job.jobType === "permit_process_lookup") {
     // The AHJ's cited required-documents list landed (savePermitProcessLookup wrote it before the job
     // left 'running'): QC's docs.* / docs.complete rows were judged without it, so re-judge them for
@@ -749,6 +773,10 @@ async function runClaimedJob(db: AppDb, job: JobRecord): Promise<boolean> {
         const { runImapIntakeJob } = await import("./emailPoller");
         result = await runImapIntakeJob(db, job.payload);
       }
+    } else if (job.jobType === "bulk_job_folder") {
+      // Dynamic: bulkJobDrop imports this module to enqueue its folder jobs.
+      const { runBulkJobFolder } = await import("./bulkJobDrop");
+      result = await runBulkJobFolder(db, job);
     } else if (job.jobType === "folder_scan") {
       result = await runFolderScanJob(db, job);
     } else if (job.jobType === "stage_step") {
@@ -773,7 +801,12 @@ async function runClaimedJob(db: AppDb, job: JobRecord): Promise<boolean> {
       // (route kick, worker drain, auto-start, auto-resume). Best-effort.
       void import("./events").then(({ sseBroadcast }) => {
         const projectId = job.projectId ?? undefined;
-        if (seg.blocked && seg.blockers.some((b) => b.code === "paused_for_human")) {
+        const payment = seg.blockers.find((b) => b.code === "payment_needed");
+        if (payment || seg.state.pauseReason === "fee_payment") {
+          // A FEE STOP (#576) is a hand-over to the person who pays, worded as one: the amount and
+          // the portal — never "the portal needs human attention", never MFA.
+          sseBroadcast({ type: "run_paused", projectId, message: payment?.detail || seg.state.message, data: { pauseReason: "fee_payment" } });
+        } else if (seg.blocked && seg.blockers.some((b) => b.code === "paused_for_human")) {
           // An MFA/CAPTCHA pause is a designed human handoff, not an error — keep the
           // warning-severity pause toast even though Segment A reports it as blocked.
           sseBroadcast({ type: "run_paused", projectId, message: "Autopilot paused — the portal needs human attention." });
@@ -896,6 +929,16 @@ async function runClaimedJob(db: AppDb, job: JobRecord): Promise<boolean> {
       // with their citations only; never a verified row (codeProfiles.runDesignCriteriaResearch).
       const { runDesignCriteriaResearch } = await import("./codeProfiles");
       result = await runDesignCriteriaResearch(db, job.payload as Record<string, unknown>);
+    } else if (job.jobType === "state_fee_research") {
+      // One web-grounded lookup for the state's statute; only verbatim, page-checked rules land, as
+      // seeded, through the one write path that never touches a verified row (rule 3).
+      const { runStateFeeResearch } = await import("./stateFeeResearch");
+      result = await runStateFeeResearch(db, job.payload as Record<string, unknown>);
+    } else if (job.jobType === "parcel_jurisdiction_check") {
+      // One read of the county's parcel service per covering record, government hosts only, no model;
+      // the answer lands in parcel_jurisdiction_checks by address hash (the gate reads it after).
+      const { runParcelJurisdictionCheck } = await import("./parcelJurisdiction");
+      result = await runParcelJurisdictionCheck(db, job.payload as Record<string, unknown>);
     } else if (job.jobType === "fee_research") {
       // Autonomous fee-schedule onboarding: web-research the jurisdiction's (or
       // utility's) published fee schedule and land it through the REAL save path —
@@ -957,6 +1000,8 @@ async function runClaimedJob(db: AppDb, job: JobRecord): Promise<boolean> {
           profileKey: outcome.profileKey, track: outcome.track, discipline,
           refusedVerified: outcome.refusedVerified, refusedConflicted: outcome.refusedConflicted,
           reason: outcome.reason || undefined,
+          // The documents a pass that saved nothing could not get: a person reads them (feeNeedsPerson).
+          ...(outcome.unread?.length ? { unread: outcome.unread } : {}),
         };
         // The attempt is a visible fact either way (the cold-start portal-URL
         // research does the same): a save says where the fee sheet's new number came

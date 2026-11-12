@@ -49,6 +49,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { effectiveSmokeTimeoutMs } from "../portal-bot/src/smokeDeadline";
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -247,10 +248,14 @@ const runOne = (rel: string, attribute: boolean): Promise<Result> =>
 
     let out = "";
     let timedOut = false;
+    // A smoke slow BY DESIGN declares its own budget in its header (`// dom-smoke-timeout: N`,
+    // portal-bot/src/smokeDeadline.ts); a declaration can only raise the default (#584).
+    const budgetMs = effectiveSmokeTimeoutMs(TIMEOUT_MS, fs.readFileSync(path.join(REPO_ROOT, rel), "utf8"));
     const timer = setTimeout(() => {
       timedOut = true;
+      out += `\n[run-dom-smokes] killed at its ${budgetMs / 1000}s budget\n`;
       if (child.pid) killTree(child.pid);
-    }, TIMEOUT_MS);
+    }, budgetMs);
 
     child.stdout.on("data", (d) => { out += String(d); });
     child.stderr.on("data", (d) => { out += String(d); });
@@ -320,7 +325,7 @@ const ATTRIBUTE_DATA_WRITES = CONCURRENCY === 1;
 const dataBeforeRun = snapshotFiles(DATA_DIR);
 
 console.log(`discovered ${discovered.length} *.smoke.ts | ${runnable.length} DOM | running ${selected.length}` +
-  ` at concurrency ${CONCURRENCY}, ${TIMEOUT_MS / 1000}s each`);
+  ` at concurrency ${CONCURRENCY}, ${TIMEOUT_MS / 1000}s each (more where a smoke declares it)`);
 if (unclassified.length) console.log(`WARNING: ${unclassified.length} unclassified — see summary`);
 console.log("");
 
@@ -385,7 +390,7 @@ const report = (title: string, rows: Result[], note: string): void => {
 };
 
 report("FAILED", failed, "red checks — the smoke ran and disagreed with the code");
-report("TIMED OUT", timeouts, `killed at ${TIMEOUT_MS / 1000}s — a hang, not a red check. Different repair: find what never resolved`);
+report("TIMED OUT", timeouts, `killed at its budget (${TIMEOUT_MS / 1000}s unless the smoke declares more) — a hang, not a red check. Different repair: find what never resolved`);
 report("EXIT CODE LIED", lied, "printed failures and STILL exited 0 — the smoke's own exit path is broken, fix that first");
 
 if (selfSkipped.length) {

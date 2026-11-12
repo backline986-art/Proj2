@@ -296,6 +296,13 @@ interface StageOptions {
     /** The click only CREATED A DRAFT (#302): nothing was filed, recordNumber is "", and the
      *  caller records the draft for the next stage to continue — never a submission. */
     draftCreated?: DraftCreatedObserved;
+    /** #569 — the page after the person's submit read as the completion (the adapter's judgement,
+     *  never the number's confidence): what lets the caller keep the confirmation screenshot below
+     *  when no number was read. */
+    completionConfirmed?: boolean;
+    /** #569 — that page's MASKED full-page screenshot (maskedFullPageScreenshot proved the mask), or
+     *  absent when none was kept. */
+    confirmationShotPath?: string;
   }) => void;
   // Track-scoped portal login URL (resolved server-side from portal_credentials/recipe/KB).
   // Lets platform adapters that host many tenants (PowerClerk: PGE, PacifiCorp…) land on
@@ -317,6 +324,12 @@ interface StageOptions {
    *  stagedReview; reviewDigest.ts). The backend passes it on a plain NEM recipe stage only. The
    *  capture comes back as the result's top-level `stagedReview`, in memory, for the one writer. */
   stagedReview?: { secrets: string[]; gapMs?: number } | null;
+  /** #340 — a person's cancel of THIS run (the backend aborts it; reason { by, at }). A recipe replay
+   *  stops at its next step boundary and closes its browser; the result carries `runCancelled`. */
+  abortSignal?: AbortSignal | null;
+  /** #340 — a replay with no new step for this long ends as a named failure (`replayStalled`).
+   *  Default PORTAL_REPLAY_STALL_MINUTES, 8 minutes. */
+  stallTimeoutMs?: number;
 }
 
 // Headed, guided-manual staging leaves the browser OPEN at the review screen so the human
@@ -372,6 +385,11 @@ export async function armSubmitCapture(
           // chooseSubmittedRecord): its confidence, its best link, and the unsure candidates. Every
           // other adapter keeps the reading below.
           const chosen = data.recordRead as SubmitRecordRead | undefined;
+          // #569: the masked confirmation screenshot of a page the adapter judged the completion.
+          const shot = {
+            ...(data.completionConfirmed === true ? { completionConfirmed: true } : {}),
+            ...(typeof data.confirmationShotPath === "string" && data.confirmationShotPath ? { confirmationShotPath: data.confirmationShotPath } : {}),
+          };
           if (chosen && typeof chosen === "object" && typeof chosen.confidence === "string") {
             options.onSubmitCaptured?.({
               recordNumber: chosen.confidence === "high" ? String(chosen.recordNumber ?? "") : "",
@@ -380,6 +398,7 @@ export async function armSubmitCapture(
               reason: String(chosen.reason || capture.message),
               recordLink: String(chosen.recordLink ?? ""),
               ...(chosen.confidence !== "high" && chosen.candidates?.length ? { candidates: chosen.candidates } : {}),
+              ...shot,
             });
             return;
           }
@@ -604,6 +623,10 @@ async function runAdapter(
     // point at the folder, and at the one shot that shows how the filing ended.
     const evidenceDir = steps.map((s) => String(s?.data?.pageShotDir ?? "")).filter(Boolean).pop() ?? "";
     const outcomeShotPath = steps.map((s) => String(s?.data?.outcomeShotPath ?? "")).filter(Boolean).pop() ?? "";
+    // #569 — THE MASKED CONFIRMATION SCREENSHOT of the page the portal confirmed the approved filing
+    // on (only when the mask was proven), or why none was kept. The backend saves it to the project.
+    const confirmationShotPath = finalSubmitClicked ? steps.map((s) => String(s?.data?.confirmationShotPath ?? "")).filter(Boolean).pop() ?? "" : "";
+    const confirmationShotRefused = finalSubmitClicked ? steps.map((s) => String(s?.data?.confirmationShotRefused ?? "")).filter(Boolean).pop() ?? "" : "";
     // This address already had an unsubmitted draft on the portal (#302): carried up for the caller.
     const existingDraft = steps.map((s) => s?.data?.existingDraft).find((d) => d && typeof d === "object") ?? null;
     // THE REPLAY CLICKED A KNOWN DRAFT-CREATING SUBMIT ITSELF (#330): the draft it made, for the
@@ -614,6 +637,10 @@ async function runAdapter(
     // #436 PR1 — THE STAGED DRAFT'S REVIEW DIGEST, off the adapter itself (never a step's data): the
     // backend's one writer records it from this in-memory result and keeps it out of result_json.
     const stagedReview = (adapter as { stagedReviewCapture?: unknown }).stagedReviewCapture;
+    // #340 — A RUN STOPPED FROM OUTSIDE (a person's cancel, or the stall clock), lifted for the backend:
+    // it records `cancelled` / a named stall, never a filing.
+    const runCancelled = steps.map((s) => s?.data?.runCancelled).find((d) => d && typeof d === "object") ?? null;
+    const replayStalled = steps.map((s) => s?.data?.replayStalled).find((d) => d && typeof d === "object") ?? null;
 
     // Leave the browser OPEN for the human ONLY when: this is a guided-manual run (no
     // autosubmit), it's headed (the human is watching), it staged cleanly to review, and we
@@ -647,12 +674,23 @@ async function runAdapter(
     // name it (PowerClerk's ProjectId). Never by navigating: this window is the one a person submits
     // in. An Accela wizard URL carries no record key, and the reference then says so (id "").
     let draftReference: { link: string; id: string } | null = null;
+    // THE FEE AT THE STOP (#576): what a fee_payment stop read off the page (amount, lines, the
+    // masked screenshot, the page's own link). Carried up for the backend's run row and card.
+    const feeStop = stepPause === "fee_payment"
+      ? steps.map((s) => s?.data?.feeStop).find((d) => d && typeof d === "object") ?? null
+      : null;
     if (reviewResult.ok && !finalSubmitClicked) {
       try {
         const pg = (adapter as unknown as { page?: { url?: () => string } | null }).page;
         const here = pg && typeof pg.url === "function" ? String(pg.url() ?? "") : "";
         if (here) draftReference = draftReferenceFromUrl(here);
       } catch { /* a page we cannot read names no draft */ }
+    }
+    // A FEE STOP NAMES ITS APPLICATION TOO (#576): the stop happened on the application's own page
+    // (the review page with "Submit & Pay", or the fee page after the click), and the person who
+    // pays needs the way back to it. Read off the page the stop read, never by navigating.
+    if (!draftReference && feeStop && typeof (feeStop as { pageLink?: unknown }).pageLink === "string" && (feeStop as { pageLink: string }).pageLink) {
+      draftReference = { link: (feeStop as { pageLink: string }).pageLink, id: String((feeStop as { pageRef?: unknown }).pageRef ?? "") };
     }
 
     return {
@@ -673,8 +711,13 @@ async function runAdapter(
       ...(draftCreatedByReplay ? { draftCreatedByReplay } : {}),
       ...(draftSubmitUnexpected ? { draftSubmitUnexpected } : {}),
       ...(stagedReview && typeof stagedReview === "object" ? { stagedReview } : {}),
+      ...(runCancelled ? { runCancelled } : {}),
+      ...(replayStalled ? { replayStalled } : {}),
       evidenceDir,
       outcomeShotPath,
+      ...(confirmationShotPath ? { confirmationShotPath } : {}),
+      ...(confirmationShotRefused ? { confirmationShotRefused } : {}),
+      ...(feeStop ? { feeStop } : {}),
       pauseReason: stepPause,
       internalFinalReviewPacketRequired: true,
       reviewerBlockerCount: options.reviewerReport?.findings.filter((f) => f.severity === "blocker").length ?? 0,
@@ -742,6 +785,8 @@ export async function stageWithRecipe(
     // The review page is handed to a person only when this caller watches for their submit (#333).
     handOverReview: typeof options.onSubmitCaptured === "function",
     stagedReview: options.stagedReview ?? null,
+    abortSignal: options.abortSignal ?? null,
+    stallTimeoutMs: options.stallTimeoutMs,
   }), project, files, options));
 }
 

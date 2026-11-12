@@ -128,6 +128,10 @@ export async function openDatabase(): Promise<AppDb> {
   db.pragma("busy_timeout = 5000");
 
   const appDb = new AppDb(db);
+  // CODE OLDER THAN THE DATABASE (#203). Checked BEFORE migrate(), which writes (CREATE TABLE IF NOT
+  // EXISTS, addColumnIfMissing) to any schema it opens: an old pinned build started on a database a
+  // newer build already migrated must not run against it at all.
+  refuseOlderBuild(appDb, dbPath);
   migrate(appDb);
   // LLM-6: every model call this process makes is written to THIS database's llm_calls
   // (best-effort; llmAccounting has no imports that could close a cycle).
@@ -139,6 +143,19 @@ export async function openDatabase(): Promise<AppDb> {
   // fire-and-forget seed raced the first request/test on cold module loads.
   try {
     (await import("./codeProfiles")).seedReferenceCodeProfiles(appDb);
+  } catch { /* reference data is best-effort */ }
+  // Each state's cited permit rules (#595): the same idempotent seed, never over a verified row.
+  try {
+    (await import("./stateRules")).seedStatePermitRules(appDb);
+  } catch { /* reference data is best-effort */ }
+  // Each authority's cited eligibility limits (#679): the same idempotent seed, never over a verified row.
+  try {
+    (await import("./eligibilityLimits")).seedEligibilityRecords(appDb);
+  } catch { /* reference data is best-effort */ }
+  // Each utility's cited filing door (reference-utility-application-requirements.json `filingDoor`):
+  // a SEEDED utility KB row, never over a verified one (rule 3); read through hostFitsTrackAndEntity.
+  try {
+    (await import("./utilityRequirements")).seedShippedUtilityFilingDoors(appDb);
   } catch { /* reference data is best-effort */ }
   // Per-job permit process answers: loaded into the in-process registry that the pure
   // (db-less) track/document/fee resolvers read — the same pattern as the process-profile cache.
@@ -946,6 +963,11 @@ function migrate(db: AppDb): void {
   // has explicitly enabled one-click approve-submit for this portal, and the recipe was
   // recorded through the final application submit. Fee payment is never automated.
   addColumnIfMissing(db, "portal_recipes", "auto_submit_enabled", "INTEGER NOT NULL DEFAULT 0");
+
+  // #448 — this portal's own record-number shapes ("PGENM-#####"), learned from numbers a person
+  // confirmed after filing on this recipe: [{ shape, status: "seeded" | "verified", learnedAt }].
+  // Shapes only, never a number. Appended as seeded; an existing entry is never rewritten (rule 3).
+  addColumnIfMissing(db, "portal_recipes", "record_number_formats_json", "TEXT NOT NULL DEFAULT '[]'");
 
   // IMAP email source support — extend email_tracking_sources so a DB row can
   // represent a live IMAP inbox (central TML or per-client) in addition to the
@@ -3093,6 +3115,686 @@ const VERSIONED_MIGRATIONS: VersionedMigration[] = [
       `);
     },
   },
+  {
+    version: 62,
+    name: "track_fee_payments",
+    up: (db) => {
+      // "PAID" (#576 item 4): a person paid a fee ON THE PORTAL for a track — the filing fee a staging
+      // run stopped on (awaiting_payment), or the issuance fee after approval (fee_due). One row per
+      // press of Paid, written ONLY by trackPaid.markTrackPaid. Automation never pays (rule 1): every
+      // row is a person's record of their own payment, with who and when.
+      //   kind: 'filing' (closed an awaiting_payment run) | 'issuance' (cleared fee_due).
+      //   track: the submittal track (combo, electrical, nem...), never the billing track.
+      //   amount_usd: what was actually paid; the track family's sum is the actual fee
+      //     (submission_payments.permit_fee_actual_usd), which fee accuracy (#494) reads.
+      //   record_number: the record / permit number the portal showed.
+      //   run_id: the awaiting_payment run it closed ('' for an issuance fee).
+      //   confirmation_shot_path: the #569 confirmation screenshot when one exists ('' until then).
+      // Created here, never lazily: nextStep and the track card read it, and reads write nothing.
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS track_fee_payments (
+          id TEXT PRIMARY KEY,
+          project_id TEXT NOT NULL,
+          track TEXT NOT NULL,
+          kind TEXT NOT NULL,
+          amount_usd REAL NOT NULL,
+          record_number TEXT NOT NULL DEFAULT '',
+          run_id TEXT NOT NULL DEFAULT '',
+          confirmation_shot_path TEXT NOT NULL DEFAULT '',
+          paid_by TEXT NOT NULL DEFAULT '',
+          paid_at TEXT NOT NULL,
+          FOREIGN KEY (project_id) REFERENCES projects(id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_track_fee_payments_project ON track_fee_payments(project_id, track, paid_at);
+      `);
+    },
+  },
+  {
+    version: 63,
+    name: "state_permit_rules",
+    up: (db) => {
+      // EACH STATE'S PERMIT RULES AS CITED DATA, NOT CODE (#595 PR2; the shape #586 asks for its fee
+      // rules). One row per (state, family, rule): `structural` holds the prescriptive-solar limits,
+      // what forces the engineered path and where a seal is valid (#595); #586's `fee` rules (state
+      // surcharges, caps) join the same table under their own family. Shared knowledge on purpose, like
+      // jurisdiction_code_profiles: no org_id.
+      //   value_json: the rule's value (a number, a list, an object) — stateRules.ts reads each key.
+      //   citation / source_url: the section and its words, and where they were read. Every row has one.
+      //   confidence: 'seeded' (shipped reference data or research) | 'verified' (a person checked it
+      //     against the official source). RULE 3: the seeder never writes a row whose verified_at is set.
+      // Created here, never lazily: the reviewer reads it, and reads write nothing.
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS state_permit_rules (
+          state TEXT NOT NULL,
+          family TEXT NOT NULL,
+          rule_key TEXT NOT NULL,
+          value_json TEXT NOT NULL,
+          citation TEXT NOT NULL,
+          source_url TEXT NOT NULL DEFAULT '',
+          confidence TEXT NOT NULL DEFAULT 'seeded',
+          verified_at TEXT NOT NULL DEFAULT '',
+          verified_by TEXT NOT NULL DEFAULT '',
+          updated_at TEXT NOT NULL,
+          PRIMARY KEY (state, family, rule_key)
+        );
+      `);
+    },
+  },
+  {
+    version: 64,
+    name: "submission_confirmation_document",
+    up: (db) => {
+      // THE CONFIRMATION SCREENSHOT OF A FILING (#569): the project document (doc_type
+      // submission_confirmation — the portal's own "submitted / your application number is …" page,
+      // secrets masked) that proves this submission went. '' = none kept. The track card and the
+      // filing record link it; GET /api/projects/:id/submissions/:submissionId/confirmation-screenshot
+      // serves only the document this column names, of the same project.
+      addColumnIfMissing(db, "submissions", "confirmation_document_id", "TEXT NOT NULL DEFAULT ''");
+    },
+  },
+  {
+    version: 65,
+    name: "filing_email",
+    up: (db) => {
+      // THE EMAIL FILING CHANNEL (#667). filing_email_json: a PERSON's record that this authority
+      // takes applications by email at an address — { address, sourceUrl, quote, verifiedBy,
+      // verifiedAt } (backend/src/filingEmail.ts). Its own column, so a lookup's write (which
+      // replaces payload_json) never touches it (rule 3). Never written by a lookup or a model.
+      // filing_email_sends: one row per run that composed a filing email (draft, sending, sent,
+      // failed). The audit copy is the template body and the attachment NAMES — never a file's
+      // contents, a path, or a secret. run_id UNIQUE: one send per run, and the send path refuses a
+      // track that has any sending/sent/failed row (a retry never re-sends).
+      addColumnIfMissing(db, "utility_filing_lookups", "filing_email_json", "TEXT NOT NULL DEFAULT ''");
+      addColumnIfMissing(db, "permit_process_lookups", "filing_email_json", "TEXT NOT NULL DEFAULT ''");
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS filing_email_sends (
+          id TEXT PRIMARY KEY,
+          project_id TEXT NOT NULL,
+          track TEXT NOT NULL,
+          run_id TEXT NOT NULL UNIQUE,
+          status TEXT NOT NULL,
+          authority_kind TEXT NOT NULL DEFAULT '',
+          authority_name TEXT NOT NULL DEFAULT '',
+          recipient TEXT NOT NULL DEFAULT '',
+          subject TEXT NOT NULL DEFAULT '',
+          body TEXT NOT NULL DEFAULT '',
+          ref_tag TEXT NOT NULL DEFAULT '',
+          message_id TEXT NOT NULL DEFAULT '',
+          attachments_json TEXT NOT NULL DEFAULT '[]',
+          approved_by TEXT NOT NULL DEFAULT '',
+          refusals_json TEXT NOT NULL DEFAULT '[]',
+          detail TEXT NOT NULL DEFAULT '',
+          created_at TEXT NOT NULL,
+          sent_at TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_filing_email_sends_project ON filing_email_sends(project_id, track, status);
+        CREATE INDEX IF NOT EXISTS idx_filing_email_sends_message ON filing_email_sends(message_id);
+        CREATE INDEX IF NOT EXISTS idx_filing_email_sends_ref ON filing_email_sends(ref_tag);
+      `);
+    },
+  },
+  {
+    version: 66,
+    name: "state_permit_rules_fetched_at",
+    up: (db) => {
+      // WHEN A STATE RULE'S WORDS WERE READ (#663; the provenance every cited row carries, owner rule
+      // 2026-11-09 / #683). The reference seed stamps the date its citation was checked against the
+      // source; state fee research stamps the time it fetched the page the quote was found on.
+      // '' = not recorded (rows written before this column). `confidence` is free text on purpose:
+      // #683 adds an 'official' tier beside 'seeded' / 'verified' without a schema change.
+      addColumnIfMissing(db, "state_permit_rules", "fetched_at", "TEXT NOT NULL DEFAULT ''");
+    },
+  },
+  {
+    version: 67,
+    name: "authority_eligibility_limits",
+    up: (db) => {
+      // WHO QUALIFIES, AS CITED DATA (#679): one row per authority — a utility's customer-generation
+      // PROGRAM (authority_kind 'utility_program') or an AHJ's simplified permit PATH ('permit_path') —
+      // holding its limits (max DC/AC kW, strings per inverter, production meter, installer
+      // certification), each with its source name, URL and verbatim words (eligibilityLimits.ts).
+      // authority '' = every utility / AHJ in the state. Shared knowledge on purpose: no org_id.
+      // RULE 3: a seed or research write never touches a row whose verified_at is set.
+      // Created here, never lazily: QC reads it, and reads write nothing.
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS authority_eligibility_limits (
+          record_key TEXT PRIMARY KEY,
+          authority_kind TEXT NOT NULL,
+          state TEXT NOT NULL,
+          authority TEXT NOT NULL DEFAULT '',
+          program_name TEXT NOT NULL DEFAULT '',
+          limits_json TEXT NOT NULL DEFAULT '{}',
+          confidence TEXT NOT NULL DEFAULT 'seeded',
+          verified_at TEXT NOT NULL DEFAULT '',
+          verified_by TEXT NOT NULL DEFAULT '',
+          updated_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_authority_eligibility_state ON authority_eligibility_limits(state, authority_kind);
+      `);
+    },
+  },
+  {
+    version: 68,
+    name: "job_scope_and_storage_modes",
+    up: (db) => {
+      // WHAT THE JOB INSTALLS, AS A PERSON SET IT (#673, backend/src/jobScope.ts): one row per
+      // project — pv / pv+storage / storage-added-to-existing-pv / storage-only — written only by
+      // PUT /api/projects/:id/job-scope with a named person. Never by the parser or a model: a
+      // storage scope drops the PV module blockers, so the parser's guess cannot set it.
+      // Reaches an org through its project (no org_id).
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS project_job_scopes (
+          project_id TEXT PRIMARY KEY,
+          scope TEXT NOT NULL,
+          set_by TEXT NOT NULL,
+          set_at TEXT NOT NULL
+        );
+      `);
+      // WHICH STORAGE MODES THE UTILITY TAKES AN APPLICATION FOR (#673 item 3): a PERSON's cited
+      // record on the utility's filing row — { modesWithoutApplication, sourceUrl, quote, verifiedBy,
+      // verifiedAt } (utilityStorageModes.nemStorageExemption). Its own column, so a lookup's write
+      // (which replaces payload_json) never touches it (rule 3). Never written by a lookup or a model.
+      addColumnIfMissing(db, "utility_filing_lookups", "storage_modes_json", "TEXT NOT NULL DEFAULT ''");
+    },
+  },
+  {
+    // NOTE FOR THE MERGE (#688): v68 is expected to be worker-673's (#673); this takes v69. Whichever
+    // lands out of order renumbers — nothing else here depends on the number.
+    version: 69,
+    name: "project_class",
+    up: (db) => {
+      // THE JOB'S CLASS (#688; shared/src/projectClass.ts). Every existing row is residential —
+      // the class every job has been worked as until now — and nothing about an existing row's
+      // automation changes unless its own evidence raises a "probably commercial" signal.
+      // project_class_confirmation: a named person's confirmation as JSON ({by, at, projectClass,
+      // signalKeys}); '' = nobody confirmed. Lifecycle-like columns written only by
+      // setProjectClass: not in the edit_version trigger's OF list (v51), so a class decision never
+      // refuses a teammate's open edit.
+      addColumnIfMissing(db, "projects", "project_class", "TEXT NOT NULL DEFAULT 'residential'");
+      addColumnIfMissing(db, "projects", "project_class_confirmation", "TEXT NOT NULL DEFAULT ''");
+    },
+  },
+  {
+    // v70: after #673's v68 and #688's v69 (Helm's final numbering, 2026-11-10).
+    version: 70,
+    name: "submission_payments_gate_collected",
+    up: (db) => {
+      // WHAT THE PER-SUBMISSION GATE ACTUALLY TOOK (#699). The gate used to ask for the
+      // jurisdiction fee + our service fee before staging; it now asks for the service fee only,
+      // and the jurisdiction fee reaches the client on the invoice once its real figure is
+      // recorded (pay-then-rebill). The invoice must show a gate payment as money RECEIVED, not
+      // bill it again, so it has to know what that payment covered.
+      //
+      // Stamped by markSubmissionPaid: the service fee collected. NULL on every row paid before
+      // this column existed, deliberately not back-filled: those payments went through the old
+      // gate, which may also have taken a permit-fee ESTIMATE, and nothing on the row says which.
+      // The invoice treats NULL on a paid row as "ask a person before re-billing the fee".
+      addColumnIfMissing(db, "submission_payments", "gate_collected_usd", "REAL");
+    },
+  },
+  {
+    // v71, NOT v67: v67-v70 are held by unmerged work (#679, #673, #688, #699). Until those land,
+    // migrationVersions.test reads this as a gap — red by design (its own header), the merge-order
+    // guard. Renumber to the next free version at merge if the queue changes.
+    version: 71,
+    name: "run_approval_acknowledgements",
+    up: (db) => {
+      // WHAT THE APPROVER ACKNOWLEDGED (review-audit draft 01). Approve & auto-submit records, with the
+      // approval, each measured reviewer warning and unverified form mapping the person ticked on the
+      // approval sheet (its id and content hash) and the shipped plan set's document id + sha256
+      // (approvalReviewItems.ts). The run reads it back at the claim and stops at review when it no
+      // longer covers what needs one. '' = nothing acknowledged (every approval minted before this).
+      addColumnIfMissing(db, "portal_run_approvals", "acknowledgements_json", "TEXT NOT NULL DEFAULT ''");
+    },
+  },
+  {
+    // v72: the next free number on the offline staging base (ae6eaca3, up to v71: #699's v70, approval
+    // draft 01's v71). Renumber at merge if the queue changes — nothing depends on the number.
+    version: 72,
+    name: "utility_application_requirements",
+    up: (db) => {
+      // WHAT THE UTILITY'S OWN APPLICATION ASKS FOR (review-audit draft 03, backend/src/utilityRequirements.ts):
+      // { requirements: [{ key, whenMissing, tier, sourceName, sourceUrl, quote, fetchedAt, verifiedBy?, verifiedAt? }] }
+      // on the utility's filing row — official reads and a NAMED PERSON's items (the shipped seed lives in
+      // backend/data/reference-utility-application-requirements.json). Its own column, so a lookup's write
+      // (which replaces payload_json) never touches it (rule 3), and beside #673's storage_modes_json,
+      // which it never reads or writes.
+      addColumnIfMissing(db, "utility_filing_lookups", "application_requirements_json", "TEXT NOT NULL DEFAULT ''");
+    },
+  },
+  {
+    // v73 (#700): after approval draft 01's v71 and the utility checks' v72 on offline staging
+    // 7d706055 (Helm's numbering, 2026-11-10). Renumber at merge if the queue changes; nothing here
+    // depends on the number.
+    version: 73,
+    name: "client_invoices_ledger",
+    up: (db) => {
+      // THE BILLING LEDGER (#700): what was actually invoiced, so a line is billed once.
+      //
+      // client_invoices — one invoice to one client for one period. status draft|sent|paid|void.
+      //   Totals are kept by KIND and never blended into one figure: reimbursement (fees we advanced,
+      //   pass-through, adjustments included), service (our own fee, revenue), received (paid at the
+      //   gate before the invoice, shown, never charged), due = reimbursement + service still owed.
+      //   external_ref is the accounting system's id once an invoice is pushed there (#701, later).
+      //
+      // client_invoice_lines — each billed line, with the payment row it came from.
+      //   line_key names WHAT is billed: "<payment row id>:<kind>" for a charge, and
+      //   "<payment row id>:reimbursement:adj:<fee_recorded_at>" for a true-up adjustment. THE
+      //   INVARIANT IS IN THE SCHEMA, not only in the builder: the partial unique index lets one
+      //   key sit on at most one live line, so two people pressing "Create invoice" at once cannot
+      //   bill the same fee twice. Voiding an invoice stamps released_at on its lines, which takes
+      //   them out of the index and lets a later invoice carry them.
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS client_invoices (
+          id TEXT PRIMARY KEY,
+          number TEXT NOT NULL UNIQUE,
+          client_id TEXT NOT NULL,
+          period_start TEXT NOT NULL,
+          period_end TEXT NOT NULL,
+          status TEXT NOT NULL DEFAULT 'draft',
+          bill_to TEXT NOT NULL DEFAULT '',
+          billing_mode TEXT NOT NULL DEFAULT '',
+          issued_at TEXT NOT NULL DEFAULT '',
+          due_at TEXT NOT NULL DEFAULT '',
+          paid_at TEXT NOT NULL DEFAULT '',
+          paid_reference TEXT NOT NULL DEFAULT '',
+          voided_at TEXT NOT NULL DEFAULT '',
+          void_reason TEXT NOT NULL DEFAULT '',
+          external_ref TEXT NOT NULL DEFAULT '',
+          reimbursement_total_usd REAL NOT NULL DEFAULT 0,
+          service_total_usd REAL NOT NULL DEFAULT 0,
+          received_total_usd REAL NOT NULL DEFAULT 0,
+          due_total_usd REAL NOT NULL DEFAULT 0,
+          created_by TEXT NOT NULL DEFAULT '',
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          FOREIGN KEY (client_id) REFERENCES clients(id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_client_invoices_client ON client_invoices(client_id, created_at);
+        CREATE TABLE IF NOT EXISTS client_invoice_lines (
+          id TEXT PRIMARY KEY,
+          invoice_id TEXT NOT NULL,
+          line_key TEXT NOT NULL,
+          project_id TEXT NOT NULL,
+          payment_id TEXT NOT NULL,
+          track TEXT NOT NULL,
+          kind TEXT NOT NULL,
+          role TEXT NOT NULL DEFAULT 'charge',
+          basis TEXT NOT NULL DEFAULT '',
+          provisional INTEGER NOT NULL DEFAULT 0,
+          already_paid INTEGER NOT NULL DEFAULT 0,
+          amount_usd REAL NOT NULL,
+          description TEXT NOT NULL DEFAULT '',
+          project_label TEXT NOT NULL DEFAULT '',
+          payment_reference TEXT NOT NULL DEFAULT '',
+          event_at TEXT NOT NULL DEFAULT '',
+          detail_json TEXT NOT NULL DEFAULT '{}',
+          released_at TEXT,
+          created_at TEXT NOT NULL,
+          FOREIGN KEY (invoice_id) REFERENCES client_invoices(id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_client_invoice_lines_invoice ON client_invoice_lines(invoice_id);
+        CREATE INDEX IF NOT EXISTS idx_client_invoice_lines_project ON client_invoice_lines(project_id);
+        CREATE UNIQUE INDEX IF NOT EXISTS ux_client_invoice_lines_live_key
+          ON client_invoice_lines(line_key) WHERE released_at IS NULL;
+      `);
+    },
+  },
+  {
+    // v74: the next free version on the offline staging base (bdde3b57: v72 = utility application
+    // requirements, v73 = #700's invoices). Renumber at merge if the queue changes (Helm rules it).
+    version: 74,
+    name: "nem_track_storage_exemption",
+    up: (db) => {
+      // THE UTILITY TRACK A PERSON'S RECORD TOOK OFF THIS JOB (draft 10, utilityStorageModes.ts). QC writes
+      // it: { drop: { utility, mode, sourceUrl, quote, verifiedBy, verifiedAt, decidedAt } } when the
+      // utility's PERSON-verified storage record says this job's battery mode needs no application, and
+      // { keptBy, keptAt } when a named person put the track back on this job. requiredTracks() reads it
+      // through mapProject, so every door (done-ness, nextStep, Stage, autopilot, the tracks screen)
+      // asks the same question. '' = nothing dropped, the strict default.
+      addColumnIfMissing(db, "projects", "nem_track_exemption_json", "TEXT NOT NULL DEFAULT ''");
+    },
+  },
+  {
+    // v75: after the utility checks' v72, #700's v73 and #673 draft 10's v74 (offline staging
+    // 5d8973d0). Helm renumbers at merge if the queue changes — nothing here depends on the number.
+    version: 75,
+    name: "project_documents_outlined_pages",
+    up: (db) => {
+      // PLAN PAGES WHOSE TEXT IS DRAWN AS OUTLINES (#696, outlinedTextPages.ts): the 1-based pages of
+      // a plan-set document that neither the text path nor vision reads, as a JSON array, written
+      // with the document's extracted text and by the splitter. '' = not checked yet (the reader
+      // starts the check and says nothing until it lands); '[]' = checked, none. QC and the submit
+      // gate read it synchronously to name the unread pages.
+      addColumnIfMissing(db, "project_documents", "outlined_pages_json", "TEXT NOT NULL DEFAULT ''");
+    },
+  },
+  {
+    // v76 (#701, Helm's numbering 2026-11-10): after #700's v73, draft 10's v74 and #696's v75.
+    // Renumber at merge if the queue changes; nothing depends on the number.
+    version: 76,
+    name: "quickbooks_connection",
+    up: (db) => {
+      // QUICKBOOKS ONLINE (#701): ONE company per org (org_id is the key), connected by a named person.
+      //
+      // quickbooks_connections.encrypted_tokens is the ONLY place the OAuth access and refresh tokens
+      // live: an encryptStorageState envelope (SESSION_ENCRYPTION_KEY, the portal-secret pattern).
+      // Never a plaintext column, never logged, never read outside backend/src/quickbooks.ts (a test
+      // fences that). The three Item ids are a person's choice in settings, never code.
+      //
+      // quickbooks_oauth_states: the single-use, expiring `state` a named person mints with Connect;
+      // the callback binds the org through it and nothing else.
+      //
+      // client_invoices.external_ref (v73) carries the QuickBooks invoice Id; the partial UNIQUE index
+      // means one of our invoices maps to one QuickBooks invoice and no QuickBooks invoice is claimed
+      // twice. qb_push_started_at is the in-flight claim that keeps two clicks (or a click and a
+      // restart) from creating two.
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS quickbooks_connections (
+          org_id TEXT PRIMARY KEY,
+          realm_id TEXT NOT NULL DEFAULT '',
+          encrypted_tokens TEXT NOT NULL DEFAULT '',
+          access_expires_at TEXT NOT NULL DEFAULT '',
+          refresh_expires_at TEXT NOT NULL DEFAULT '',
+          service_item_id TEXT NOT NULL DEFAULT '',
+          service_item_name TEXT NOT NULL DEFAULT '',
+          passthrough_item_id TEXT NOT NULL DEFAULT '',
+          passthrough_item_name TEXT NOT NULL DEFAULT '',
+          onboarding_item_id TEXT NOT NULL DEFAULT '',
+          onboarding_item_name TEXT NOT NULL DEFAULT '',
+          connected_by TEXT NOT NULL DEFAULT '',
+          connected_at TEXT NOT NULL DEFAULT '',
+          settings_by TEXT NOT NULL DEFAULT '',
+          last_status_sync_at TEXT NOT NULL DEFAULT '',
+          last_error TEXT NOT NULL DEFAULT '',
+          updated_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS quickbooks_oauth_states (
+          state TEXT PRIMARY KEY,
+          org_id TEXT NOT NULL,
+          created_by TEXT NOT NULL DEFAULT '',
+          created_at TEXT NOT NULL,
+          expires_at TEXT NOT NULL,
+          used_at TEXT NOT NULL DEFAULT ''
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS ux_client_invoices_external_ref
+          ON client_invoices(external_ref) WHERE external_ref != '';
+      `);
+      addColumnIfMissing(db, "clients", "quickbooks_customer_id", "TEXT NOT NULL DEFAULT ''");
+      addColumnIfMissing(db, "client_invoices", "qb_push_started_at", "TEXT NOT NULL DEFAULT ''");
+      addColumnIfMissing(db, "client_invoices", "qb_pushed_by", "TEXT NOT NULL DEFAULT ''");
+      addColumnIfMissing(db, "client_invoices", "qb_pushed_at", "TEXT NOT NULL DEFAULT ''");
+      addColumnIfMissing(db, "client_invoices", "qb_balance_usd", "REAL");
+      addColumnIfMissing(db, "client_invoices", "qb_status", "TEXT NOT NULL DEFAULT ''");
+      addColumnIfMissing(db, "client_invoices", "qb_checked_at", "TEXT NOT NULL DEFAULT ''");
+    },
+  },
+  {
+    // v77 (review-audit draft 09): the next free number on offline staging 93b73064 (#701 holds v76).
+    // Helm renumbers at merge if the queue changes — nothing here depends on the number.
+    version: 77,
+    name: "parcel_jurisdiction_checks",
+    up: (db) => {
+      // WHICH JURISDICTION A PARCEL IS IN, AS THE COUNTY'S OWN SERVICE ANSWERED (parcelJurisdiction.ts).
+      // Written ONLY by the parcel_jurisdiction_check job; the gate reads it and writes nothing.
+      // address_key is a sha256 of state + normalized street + ZIP (or mailing city): the address
+      // itself is never stored. Shared on purpose like the other jurisdiction tables: a row says only
+      // which public jurisdiction a hashed address lies in, so it carries no tenant data.
+      // status: found | no_match | unavailable. source_fingerprint = the data records the answer was
+      // read against (a changed record makes the answer stale).
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS parcel_jurisdiction_checks (
+          address_key TEXT PRIMARY KEY,
+          state TEXT NOT NULL DEFAULT '',
+          source_key TEXT NOT NULL DEFAULT '',
+          source_fingerprint TEXT NOT NULL DEFAULT '',
+          status TEXT NOT NULL,
+          jurisdiction_raw TEXT NOT NULL DEFAULT '',
+          parcel_agency TEXT NOT NULL DEFAULT '',
+          incorporated INTEGER NOT NULL DEFAULT 0,
+          service_host TEXT NOT NULL DEFAULT '',
+          detail TEXT NOT NULL DEFAULT '',
+          checked_at TEXT NOT NULL
+        )
+      `);
+    },
+  },
+  {
+    // v78 (draft 16 A): the next free number on offline staging 30f8509d (#701 v76, draft 09 v77).
+    // Helm renumbers at merge if the queue changes — nothing here depends on the number.
+    version: 78,
+    name: "parcel_jurisdiction_acceptance",
+    up: (db) => {
+      // A NAMED PERSON'S "THIS AHJ FILES FOR THIS PARCEL" (draft 16 A, parcelJurisdiction.ts):
+      // { ahj, parcelAgency, addressKey, reason, by, at } — bound to the disagreement it answers, so a
+      // changed address, AHJ or parcel answer brings the blocker back. Written only by a named person
+      // (POST /api/projects/:id/parcel-jurisdiction/accept); '' = none.
+      addColumnIfMissing(db, "projects", "parcel_jurisdiction_acceptance_json", "TEXT NOT NULL DEFAULT ''");
+    },
+  },
+  {
+    // v79 (filing-destination proposals): the next free number on offline staging 73115a27
+    // (parcel 16 A holds v78). Helm renumbers at merge if the queue changes — nothing depends on it.
+    version: 79,
+    name: "filing_destination_rejections",
+    up: (db) => {
+      // A NAMED PERSON'S "NO" TO A PROPOSED FILING DESTINATION (filingDestinationProposals.ts). The
+      // proposals themselves are computed on read and stored nowhere; this table holds only which
+      // ones a person turned down, so they stop being offered. A changed page or changed words make a
+      // new proposal_id (a fingerprint of the authority, kind, address, page and words). Shared on
+      // purpose like the authority rows it answers (no tenant data: an authority's public address).
+      // Nothing that decides a channel, stages, launches or sends reads this table.
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS filing_destination_rejections (
+          proposal_id TEXT PRIMARY KEY,
+          authority_kind TEXT NOT NULL,
+          profile_key TEXT NOT NULL,
+          state TEXT NOT NULL DEFAULT '',
+          authority TEXT NOT NULL DEFAULT '',
+          kind TEXT NOT NULL,
+          address TEXT NOT NULL DEFAULT '',
+          source_url TEXT NOT NULL DEFAULT '',
+          reason TEXT NOT NULL DEFAULT '',
+          rejected_by TEXT NOT NULL,
+          rejected_at TEXT NOT NULL
+        )
+      `);
+      db.exec("CREATE INDEX IF NOT EXISTS idx_filing_destination_rejections_authority ON filing_destination_rejections (authority_kind, profile_key)");
+    },
+  },
+  {
+    // v80 (client service area): the next free number on offline staging 1472b867 (v79 = filing-
+    // destination rejections). Helm renumbers at merge if the queue changes — nothing depends on it.
+    version: 80,
+    name: "client_service_area",
+    up: (db) => {
+      // WHERE A CLIENT WORKS (clientServiceArea.ts): a JSON list of { kind, state, name } entries, kind
+      // state / city / county / utility. CLIENT DATA on the client's own row (org-scoped through
+      // clients.org_id, rule 6) — never a shared knowledge table, never a prompt. '[]' = none on file.
+      addColumnIfMissing(db, "clients", "service_area_json", "TEXT NOT NULL DEFAULT '[]'");
+    },
+  },
+  {
+    // v81 (client self-onboarding): the Company setup link, the client's proposals and its
+    // certificate uploads. Client data, scoped by client_id (rule 6); nothing here is shared knowledge.
+    version: 81,
+    name: "client_onboarding",
+    up: (db) => {
+      // A CLIENT FILLS IN ITS OWN COMPANY SETUP (clientOnboarding.ts). Three tables, all CLIENT DATA
+      // keyed on client_id (org-scoped through the client row, rule 6), none of them shared knowledge
+      // and none of them read by a prompt.
+      //   client_onboarding_links: the staff-minted, revocable, expiring link. Only the SHA-256 of the
+      //     token is stored (the URL is shown once, at mint). draft_json is the client's work in
+      //     progress, saved across sessions until it submits; status open / submitted / revoked.
+      //   client_onboarding_proposals: what the client submitted, one row per field that differs from
+      //     the client record. NOTHING here writes the client row: a named staff person accepts (as
+      //     sent or edited) or rejects each one, and only the accept calls updateClient.
+      //   client_onboarding_files: the optional certificate uploads (type and size capped). Bytes in
+      //     the row, so a purge of the client takes them; never parsed, never sent to a model.
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS client_onboarding_links (
+          id TEXT PRIMARY KEY,
+          client_id TEXT NOT NULL,
+          token_hash TEXT NOT NULL UNIQUE,
+          status TEXT NOT NULL DEFAULT 'open',
+          draft_json TEXT NOT NULL DEFAULT '{}',
+          draft_saved_at TEXT,
+          created_by TEXT NOT NULL DEFAULT '',
+          created_at TEXT NOT NULL,
+          expires_at TEXT NOT NULL,
+          submitted_at TEXT,
+          revoked_at TEXT,
+          revoked_by TEXT NOT NULL DEFAULT '',
+          portal_requests INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE INDEX IF NOT EXISTS idx_client_onboarding_links_client ON client_onboarding_links(client_id, created_at);
+        CREATE TABLE IF NOT EXISTS client_onboarding_proposals (
+          id TEXT PRIMARY KEY,
+          client_id TEXT NOT NULL,
+          link_id TEXT NOT NULL,
+          field TEXT NOT NULL,
+          proposed_json TEXT NOT NULL,
+          current_json TEXT NOT NULL DEFAULT 'null',
+          source TEXT NOT NULL DEFAULT 'client-supplied',
+          status TEXT NOT NULL DEFAULT 'pending',
+          created_at TEXT NOT NULL,
+          decided_by TEXT NOT NULL DEFAULT '',
+          decided_at TEXT,
+          applied_json TEXT NOT NULL DEFAULT ''
+        );
+        CREATE INDEX IF NOT EXISTS idx_client_onboarding_proposals_client ON client_onboarding_proposals(client_id, status);
+        CREATE TABLE IF NOT EXISTS client_onboarding_files (
+          id TEXT PRIMARY KEY,
+          client_id TEXT NOT NULL,
+          link_id TEXT NOT NULL,
+          kind TEXT NOT NULL,
+          file_name TEXT NOT NULL DEFAULT '',
+          mime TEXT NOT NULL,
+          size_bytes INTEGER NOT NULL,
+          sha256 TEXT NOT NULL,
+          bytes BLOB NOT NULL,
+          created_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_client_onboarding_files_client ON client_onboarding_files(client_id, created_at);
+      `);
+    },
+  },
+  {
+    // v82 (client filing details): what a CLIENT says about how it files with each authority in its
+    // service area (clientFilingStatements.ts) — a portal address or an intake email, whether it holds
+    // an account there (yes/no, never a login) and an example record number. CLIENT DATA, scoped by
+    // client_id (rule 6), and only ever a SOURCE for a destination proposal a person decides
+    // (filingDestinationProposals.ts): no channel, stage, launch or send reads this table. Created
+    // here, never lazily: reading a proposal writes nothing.
+    version: 82,
+    name: "client_filing_statements",
+    up: (db) => {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS client_filing_statements (
+          id TEXT PRIMARY KEY,
+          client_id TEXT NOT NULL,
+          link_id TEXT NOT NULL DEFAULT '',
+          authority_kind TEXT NOT NULL,
+          authority_state TEXT NOT NULL DEFAULT '',
+          authority_name TEXT NOT NULL,
+          profile_key TEXT NOT NULL,
+          kind TEXT NOT NULL,
+          address TEXT NOT NULL,
+          has_account TEXT NOT NULL DEFAULT '',
+          example_number TEXT NOT NULL DEFAULT '',
+          source TEXT NOT NULL DEFAULT 'client-supplied',
+          status TEXT NOT NULL DEFAULT 'current',
+          created_at TEXT NOT NULL,
+          dismissed_by TEXT NOT NULL DEFAULT '',
+          dismissed_at TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_client_filing_statements_authority ON client_filing_statements(client_id, authority_kind, profile_key, status);
+      `);
+    },
+  },  {
+    // WHAT THE SERVER'S OWN IMAGE READ OF A PLAN SET SAID ABOUT ITS AC DISCONNECT (#135,
+    // planSetImageReads.ts). Written only by the plan-scan route, at the one place the intake reads a
+    // scanned plan set by vision, keyed by the PDF's bytes (sha-256) because no job exists yet, and by
+    // the org that posted it (rule 6: its own org_id, from the session). Only the AC disconnect's own
+    // fields, value and sheet; never the read's other fields. Created here, never lazily: the gate and
+    // QC read it, and a read writes nothing.
+    version: 83,
+    name: "plan_set_image_reads",
+    up: (db) => {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS plan_set_image_reads (
+          org_id TEXT NOT NULL,
+          pdf_sha256 TEXT NOT NULL,
+          field TEXT NOT NULL,
+          value TEXT NOT NULL,
+          sheet TEXT NOT NULL DEFAULT '',
+          read_mode TEXT NOT NULL DEFAULT 'vision',
+          read_at TEXT NOT NULL,
+          PRIMARY KEY (org_id, pdf_sha256, field)
+        );
+      `);
+    },
+  },
+  {
+    // v84 (two-stage permit filings, #28 part 1): the number the coordinator assigned
+    // (v81 to v83 are on main). Nothing depends on the number.
+    version: 84,
+    name: "permit_second_stages",
+    up: (db) => {
+      // (a) THE SECOND STAGE A PERSON CONFIRMED FOR AN ISSUING AGENCY (secondStage.ts): after the
+      //     application and its fee, the plans go into another system the agency opens with an invite.
+      //     SHARED per-agency process knowledge, like permit_process_lookups (an agency's process
+      //     learned once serves every tenant; it holds no job, client or homeowner data). Written ONLY
+      //     by a named person's Confirm (rule 3: a seeded or cited description never lands here by
+      //     itself). One row per (state, agency). It names a system, never an address: no door.
+      // (b) ONE JOB'S PROGRESS THROUGH IT: a child row of the project (org reached through the
+      //     project, rule 6). first_stage_*: the application a person recorded (Paid at the fee stop,
+      //     or made by hand). invite_*: the agency's invite email once the filings inbox matches it;
+      //     invite_link is kept only when its host passed rule 5's predicate at match time, and is
+      //     judged again at every read. uploaded_*: the named person's mark that the plans went in;
+      //     screenshot_path: that person's own picture of the confirmation (staff-only route).
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS permit_second_stages (
+          id TEXT PRIMARY KEY,
+          state TEXT NOT NULL,
+          agency_key TEXT NOT NULL,
+          agency TEXT NOT NULL DEFAULT '',
+          system_name TEXT NOT NULL,
+          trigger_text TEXT NOT NULL DEFAULT '',
+          source_url TEXT NOT NULL DEFAULT '',
+          quote TEXT NOT NULL DEFAULT '',
+          verified_by TEXT NOT NULL,
+          verified_at TEXT NOT NULL,
+          UNIQUE (state, agency_key)
+        );
+        CREATE TABLE IF NOT EXISTS track_second_stages (
+          id TEXT PRIMARY KEY,
+          project_id TEXT NOT NULL,
+          track TEXT NOT NULL,
+          submission_id TEXT NOT NULL DEFAULT '',
+          system_name TEXT NOT NULL DEFAULT '',
+          first_stage_at TEXT NOT NULL,
+          first_stage_number TEXT NOT NULL DEFAULT '',
+          first_stage_by TEXT NOT NULL DEFAULT '',
+          first_stage_via TEXT NOT NULL DEFAULT '',
+          invite_signature TEXT NOT NULL DEFAULT '',
+          invite_subject TEXT NOT NULL DEFAULT '',
+          invite_from TEXT NOT NULL DEFAULT '',
+          invite_received_at TEXT NOT NULL DEFAULT '',
+          invite_link TEXT NOT NULL DEFAULT '',
+          invite_link_hidden_host TEXT NOT NULL DEFAULT '',
+          invite_link_hidden_why TEXT NOT NULL DEFAULT '',
+          uploaded_at TEXT NOT NULL DEFAULT '',
+          uploaded_by TEXT NOT NULL DEFAULT '',
+          confirmation_number TEXT NOT NULL DEFAULT '',
+          screenshot_path TEXT NOT NULL DEFAULT '',
+          created_at TEXT NOT NULL,
+          UNIQUE (project_id, track),
+          FOREIGN KEY (project_id) REFERENCES projects(id)
+        );
+      `);
+    },
+  },
 ];
 
 /** v47 was edited in place while #218 was open (Helm's review at 0116f98a): a DB that ran an earlier
@@ -3162,6 +3864,30 @@ export function currentSchemaVersion(db: AppDb): number {
   } catch {
     return 0;
   }
+}
+
+/** Why this build must not open a database, or null when it may (#203). A database whose
+ *  schema_meta reaches past the newest migration this code carries was migrated by a NEWER build:
+ *  this one does not know those tables or columns, and its own boot-time writes and reads can damage
+ *  them. A database at or below this build's version (including a fresh one, version 0) is fine. */
+export function olderBuildProblem(databaseVersion: number, codeVersion: number, dbPath = "the database"): string | null {
+  if (databaseVersion <= codeVersion) return null;
+  return `This build knows the database schema up to v${codeVersion}, but ${dbPath} is at v${databaseVersion}: `
+    + "a newer build already migrated it. Starting an older build against it can damage data (#203). "
+    + "Start the newer build (check /health build.sha), or set AUTOPILOT_ALLOW_OLDER_BUILD=1 to run this one anyway.";
+}
+
+/** The boot guard: refuses (closing the handle first) unless AUTOPILOT_ALLOW_OLDER_BUILD=1, which
+ *  only downgrades the refusal to a loud warning. Reads schema_meta only; writes nothing. */
+function refuseOlderBuild(db: AppDb, dbPath: string): void {
+  const problem = olderBuildProblem(currentSchemaVersion(db), latestSchemaVersion(), dbPath);
+  if (!problem) return;
+  if (process.env.AUTOPILOT_ALLOW_OLDER_BUILD === "1") {
+    console.warn(`[db] WARNING: ${problem} Continuing because AUTOPILOT_ALLOW_OLDER_BUILD=1.`);
+    return;
+  }
+  db.close();
+  throw new Error(`[db] REFUSED: ${problem}`);
 }
 
 function runVersionedMigrations(db: AppDb): void {
@@ -3244,6 +3970,9 @@ const CLIENT_LICENSING_COLUMNS: [string, string][] = [
   // plan set does name a part.
   ["standard_disconnect_make", "TEXT NOT NULL DEFAULT ''"],
   ["standard_disconnect_model", "TEXT NOT NULL DEFAULT ''"],
+  // The installer's certifications (#679), one per line: checked against a program's or permit path's
+  // cited installer-certification requirement. Blank = none on record (a warning, never a pass).
+  ["installer_certifications", "TEXT NOT NULL DEFAULT ''"],
   ["legal_business_name", "TEXT NOT NULL DEFAULT ''"],
   ["dba", "TEXT NOT NULL DEFAULT ''"],
   ["ccb_license_number", "TEXT NOT NULL DEFAULT ''"],

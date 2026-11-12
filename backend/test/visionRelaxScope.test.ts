@@ -90,6 +90,21 @@ ${letter}` });
   // A local amendment's 30 psf ground snow minimum against the plan's 20 psf (#145).
   const amendments = [{ code: "IRC", summary: "Ground snow minimum 30 psf", sourceUrl: "https://codes.example.gov/a", check: { kind: "min_value" as const, field: "groundSnowPsf" as const, value: 30, unit: "psf" } }];
   for (const f of buildReviewerReport(mk({ planSetExtractedText: "GROUND SNOW LOAD = 20 PSF" }), { codeContext: buildCodeContext("OR", "City of Coos Bay", { ...base, amendments, designCriteria: {}, prescriptive: {} }), documentTexts: [{ label: "Plan set", text: "GROUND SNOW LOAD = 20 PSF" }] }).findings) allProducibleIds.add(f.id);
+  // The wire table's own arithmetic on a line-side tap (wireTableArithmetic.ts, #334): a #10 EGC
+  // behind 90 A, the tap's #10 bonding jumper on #2, eleven #10 in a 3/4" EMT, six #10 on 40 A,
+  // and five 2-pole breakers in an 8-space load center.
+  {
+    const table = [
+      "TAG 2: (10) #10 THWN-2, (1) #10 THWN-2 EGC, 3/4\" EMT, OCPD 20A",
+      "TAG 3: (3) #2 THWN-2, (1) #10 THWN-2 EGC, (2) 90A FUSES",
+      "TAG 4: LINE SIDE TAP (3) #2 THWN-2, (1) #10 THWN-2 GND, (2) 90A FUSES",
+      "TAG 5: (6) #10 THWN-2, (1) #10 THWN-2 EGC, OCPD 40A",
+      "8-SPACE LOAD CENTER WITH (5) 20A 2P BREAKERS",
+    ].join("\n");
+    const p = mk({ interco: "Line-side tap", planSetExtractedText: table });
+    (p as unknown as { interconnectionMethod: string }).interconnectionMethod = "Line-side tap";
+    for (const f of buildReviewerReport(p).findings) allProducibleIds.add(f.id);
+  }
   // An approved review rule from this AHJ's earlier correction: an 18" pathway against its 36" (#146).
   const reviewRules = [{ id: "rule-1", profileKey: "or|city of coos bay|unknown", state: "OR", ahj: "City of Coos Bay", check: { kind: "min_value" as const, field: "pathwayWidthIn" as const, value: 36, unit: "in" }, bucket: "B_designer_fix", rootCause: "", requiredAction: "", status: "approved" as const, createdAt: "" }];
   for (const f of buildReviewerReport(mk({ planSetExtractedText: '18" FIRE ACCESS PATHWAY' }), { codeContext: { ...buildCodeContext("OR", "City of Coos Bay", null), reviewRules }, documentTexts: [{ label: "Plan set", text: '18" FIRE ACCESS PATHWAY' }] }).findings) allProducibleIds.add(f.id);
@@ -99,6 +114,17 @@ ${letter}` });
     ahjCorrections: [{ signature: "s", bucket: "B_designer_fix" as const, rootCause: "Attachment detail not per listing", requiredAction: "", count: 1, lastSeenAt: "2026-06-01" }],
   };
   for (const f of buildReviewerReport(mk({ attachmentHardware: "Otherco Mount Z" }), { codeContext: precedentCtx }).findings) allProducibleIds.add(f.id);
+  // The battery (ESS) comparisons (essReview.ts, review-audit draft 05), on invented equipment: a unit
+  // over 20 kWh, 3 x 24 kWh in a utility closet and a bedroom, 6 in between units, an exterior-wall
+  // unit 12 in from a window.
+  for (const sheet of [
+    "(3) EXAMPLECELL BATTERY 24 KWH. BATTERY LOCATION: UTILITY CLOSET. BATTERIES 6 IN APART.",
+    "(1) EXAMPLECELL BATTERY 13.5 KWH. BATTERY LOCATION: BEDROOM.",
+    "(1) EXAMPLECELL BATTERY 13.5 KWH. BATTERY LOCATION: EXTERIOR WALL. BATTERY 12 IN FROM NEAREST WINDOW.",
+  ]) for (const f of buildReviewerReport(mk({ hasBattery: "Yes", batteryModel: "EXC-13", planSetExtractedText: sheet })).findings) allProducibleIds.add(f.id);
+  // Modules below an emergency escape and rescue opening with no 36 in path (review-audit draft 08).
+  const eero = '36" FIRE ACCESS PATHWAY. 36" SETBACK FROM RIDGE. MODULES BELOW EERO ON ROOF PLANE 2.';
+  for (const f of buildReviewerReport(mk({ planSetExtractedText: eero }), { codeContext: buildCodeContext("OR", "City of Coos Bay", null), documentTexts: [{ label: "Plan set", text: eero }] }).findings) allProducibleIds.add(f.id);
 }
 for (const id of [...MEASURED_FINDING_IDS]) {
   check(`MUST PASS: ${id} is still a real finding this engine emits`, () => {

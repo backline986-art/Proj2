@@ -16,7 +16,7 @@ import { applyFormatHint } from "../formatHint";
 import { scrapeReviewScreen as scrapeReviewScreenShared } from "../reviewScreenScraper";
 import { performLogin, lastRevealTrail, loginFormPresent, holdForPerson } from "./loginFlow";
 import { enterApplicationFlow, isExcludedEntryLabel, normalizeEntryLabel, chooseApplicationType, scanChoiceTiles } from "./applicationEntry";
-import { chooseProgram, offeredLabels, programSelector, scanProgramGroups, type ProgramGroup } from "./applicationProgram";
+import { explainProgramChoice, jobClassOf, offeredLabels, programSelector, scanProgramGroups, type ProgramGroup, type ProgramJob } from "./applicationProgram";
 import { planHiddenReveal, planLabelProxy } from "./revealHidden";
 import { looksLikeConsentWall, planConsentDismissal } from "./consentBanner";
 import { chooseRow, scanRowChoices, markAddressRow, type AddressRowPick } from "./rowChooser";
@@ -24,6 +24,7 @@ import { parseStreetName, parseStreetNumber, parseStreetLine, correctTruncatedAd
 import { portalUploadCapBytes } from "../uploadCap";
 import { LearnRunDebug } from "../learnDebug";
 import { armHumanCaptureOnPage } from "../humanCapture";
+import { isStartNewApplicationControl, readExistingApplicationNotice } from "../existingApplicationNotice";
 import { chooseDraftForm, findSiteDraft, isDraftFormRefusal, modificationOnOriginalNotice, readsAsUnsubmittedDraft } from "../draftCreated";
 import { scanProjectForms, type ProjectFormRow } from "./correctionForm";
 import { readApplicationLedgerInPage, type LedgerEntry } from "./submissionLedger";
@@ -2591,6 +2592,9 @@ export class AutoLearnAdapter extends BasePortalAdapter {
   /** The permit discipline this run is filing ("electrical", "structural", …). Empty when
    *  the caller didn't say — the record-type guard then only checks label-vs-control. */
   private permitDiscipline = "";
+  /** #693: the job's class and size, so the program chooser prefers THIS job's program
+   *  over the first one in DOM order (a commercial program listed above the residential one). */
+  private programJob: ProgramJob = {};
   /** Set when the review page's own save was still pending when the learn handed over (B3). */
   private reviewUnsavedWarning = "";
   /** THE PROJECT'S OWN SECRETS, READ BY NAME AT FILL TIME (hard rule 2). Live on PGE (2026-09-28):
@@ -4652,6 +4656,12 @@ export class AutoLearnAdapter extends BasePortalAdapter {
       // What discipline this run is filing. Held on the instance so the fill guard can refuse
       // a record type that contradicts it — the planner sees one page at a time and does not.
       this.permitDiscipline = String(project.permitType ?? "");
+      this.programJob = {
+        jobClass: jobClassOf(project),
+        // Program thresholds are printed against the size the utility rates the system at;
+        // AC where the plan gives it, else DC.
+        sizeKw: project.systemSizeAcKw ?? project.systemSizeDcKw ?? null,
+      };
       // #575: the job's own address, which a typeahead's address suggestion must be unmistakably.
       this.typeaheadSite = {
         street: String(project.projectAddress ?? "").split(",")[0].trim(),
@@ -6187,12 +6197,21 @@ export class AutoLearnAdapter extends BasePortalAdapter {
     const list = Array.isArray(groups) ? groups : [];
     if (list.length === 0) return false; // no revealed panel offering a choice
 
-    const picked = chooseProgram(list, this.permitDiscipline);
+    const choice = explainProgramChoice(list, this.permitDiscipline, this.programJob);
+    const picked = choice.pick;
     if (!picked) {
+      // Left for the supervising person: whatever they click is what the recipe records, by
+      // label. An ambiguous or other-class choice is never settled by DOM order (#693).
+      const why = choice.reason === "ambiguous"
+        ? `more than one program fits and the labels do not say which is this ${this.programJob.jobClass ?? "residential"} job's: ${choice.candidates.join(" | ")}`
+        : choice.reason === "other_class"
+          ? `only the other class's program is offered for this ${this.programJob.jobClass ?? "residential"} job: ${choice.candidates.join(" | ")}`
+          : "no option reads as an interconnection/generation application";
       this.debug?.event({
         type: "application_program_unmatched",
+        reason: choice.reason,
         offered: offeredLabels(list).slice(0, 8).join(" | ").slice(0, 200),
-        why: "no option reads as an interconnection/generation application",
+        why: why.slice(0, 240),
       });
       return false;
     }
@@ -6359,6 +6378,9 @@ export class AutoLearnAdapter extends BasePortalAdapter {
     // detector only speaks after a fingerprint repeats twice, which is 2-3 planner calls of
     // a 6-page budget; a refusal already knows what went wrong, so it says so immediately.
     let pendingHint = "";
+    /** #351: the planner was told once that a page names somebody's application (and offers a start-new
+     *  control); a second miss stops the walk. */
+    let existingNoticeReplans = 0;
     const MAX_RECOVERY = 3;
     // THE PLAN ACTS ON THE PAGE IT WAS MADE FOR (#410). Re-reads of a page that changed between
     // its scrape and its plan being applied — bounded per run, so a page that keeps repainting
@@ -7452,6 +7474,53 @@ export class AutoLearnAdapter extends BasePortalAdapter {
       const formDataEnteredThisRun = (): boolean => steps.some(
         (s) => (s.action === "fill" || s.action === "check" || s.action === "select") && !isTermsAcknowledgment(s));
       const anyFormMutationRecorded = formDataEnteredThisRun();
+      // c2-) A PAGE THAT NAMES AN APPLICATION ALREADY IN PROGRESS IS NEVER RESUMED ON A PLANNER'S SAY-SO
+      //      (#351). After the permit-type tile a portal can show a no-field notice — "You have an
+      //      application in progress. Draft 2026-0141, 77 Other Ave." — whose Continue opens that
+      //      draft. Before this run has entered anything, the draft is not this run's: the planner's
+      //      "advance Continue" opened it, typed this project's address over the draft's own and
+      //      posted its save (a GET forward, so the backstop never judged it, #346). The one door
+      //      that resumes a draft is the continue-draft path (b8z, #302), which opens only the draft
+      //      that matches this project and sets continuedDraft. Here the walk takes ONE control: one
+      //      that starts its own application ("Start a New Application"). Anything else — Continue,
+      //      Resume, the draft's link, the interstitial pass's forward, no plan at all — stops the
+      //      walk and names the notice; offered a start-new control the planner did not take, it is
+      //      asked once more first. Before c2i (the interstitial's forward) and every other door.
+      if (!hasFillable && !anyFormMutationRecorded && !this.continuedDraft && !this.signatureCheck && !signatureDone) {
+        // Read from the page's visible LINES (a menu line never runs into the notice), secrets this run
+        // knows scrubbed; the line the person reads is then redacted like any status text.
+        const read = readExistingApplicationNotice(this.scrubSecrets(await visibleBodyText(this.page))) ?? readExistingApplicationNotice(bodyText);
+        const notice = read ? (redactStatusText(read) ?? "") : "";
+        if (notice) {
+          const startNew = fields.findIndex((f) => f.fieldType === "button" && !f.disabled && !f.tile && isStartNewApplicationControl(String(f.label ?? ""))
+            && !this.isOffLimitsButton(f));
+          const nav = typeof plan.navigateSelectorIndex === "number" ? plan.navigateSelectorIndex : -1;
+          const adv = typeof plan.advanceSelectorIndex === "number" ? plan.advanceSelectorIndex : -1;
+          const takes = (i: number): boolean => i >= 0 && !!fields[i] && isStartNewApplicationControl(String(fields[i].label ?? ""));
+          const startLabel = startNew >= 0 ? String(fields[startNew].label ?? "").replace(/\s+/g, " ").trim().slice(0, 60) : "";
+          this.debug?.event({ type: "existing_application_notice", page: pageCount, notice: notice.slice(0, 160), startNew: startLabel || null,
+            takes: takes(nav) ? "navigate" : takes(adv) ? "advance" : null });
+          if (takes(nav)) {
+            plan = { fills: [], atReview: false, navigateSelectorIndex: nav };
+          } else if (takes(adv)) {
+            plan = { fills: [], atReview: false, advanceSelectorIndex: adv };
+          } else if (startNew >= 0 && existingNoticeReplans < 1) {
+            existingNoticeReplans++;
+            pendingHint = `This page names an application already in progress ("${notice}"). It is not this run's application: never continue, resume or open it. `
+              + `Take "${startLabel}" to start this project's own application, or return no advance.`;
+            continue;
+          } else {
+            return {
+              ...fail(steps, this.portalName, `Stopped before resuming an application this run did not start: the portal says "${notice}" `
+                + `The learner never continues somebody else's draft on a planner's say-so, so nothing on that draft was opened or typed. `
+                + (startLabel ? `The page offers "${startLabel}", which the planner did not take. ` : "")
+                + `If this is this project's own draft, record it on the project so the continue-draft path opens it; otherwise start a new application by hand, then stage again.`,
+              null, pageCount, portalNotices),
+              stopReason: "existing_application_notice",
+            };
+          }
+        }
+      }
       const entryDisclaimer = disclaimerish && !anyFormMutationRecorded;
       // c2i) AN INFORMATION INTERSTITIAL IS NOT THE REVIEW SCREEN (#341). Portland DevHub, live
       //      2026-10-14: the page behind the "Solar Permit Request" tile is prose ("This is a

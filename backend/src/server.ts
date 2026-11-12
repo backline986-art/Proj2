@@ -1,5 +1,5 @@
 import "dotenv/config";
-import { validate, portalCredentialCreateSchema, portalCredentialUpdateSchema, autoLearnSchema, codeProfileResearchSchema, codeProfileVerifySchema, permitProcessVerifySchema, reviewSubjectSchema } from "./validation";
+import { validate, portalCredentialCreateSchema, portalCredentialUpdateSchema, autoLearnSchema, codeProfileResearchSchema, codeProfileVerifySchema, jurisdictionQcScreenSchema, permitProcessVerifySchema, reviewSubjectSchema, utilityFilingVerifySchema, jobScopeSchema, utilityStorageModesSchema, utilityApplicationRequirementsSchema, nemTrackKeepSchema } from "./validation";
 import crypto from "node:crypto";
 import { spawn } from "node:child_process";
 import express, { type NextFunction, type Request, type Response } from "express";
@@ -11,7 +11,7 @@ import { openDatabase } from "./db";
 import { HttpError } from "./httpError";
 import { llmUsageForProject, runWithLlmContext } from "./llmAccounting";
 import { parseJson } from "./json";
-import { collectDiagnostics, logErrorBlock, logger, requestLogger, startupBanner } from "./logger";
+import { collectDiagnostics, logErrorBlock, logger, maskPublicTokenPath, requestLogger, startupBanner } from "./logger";
 import { buildInfo, publicBuildInfo, versionString } from "./buildInfo";
 import { COPYRIGHT_NOTICE, PROVENANCE_ID } from "../../shared/src/provenance";
 import { checkConcurrencyConfig, readConcurrencyConfig } from "./concurrencyConfig";
@@ -49,7 +49,7 @@ import { sniffFileKind } from "./fileTypes";
 import { buildSubmittalEmailDraft } from "./applicationDocs";
 import type { EvidenceTopic } from "./projectEvidence";
 import { createClient, deleteClient, getClient, listClients, updateClient } from "./clients";
-import { enqueueJob, getJob, inFlightJobCount, listJobs, processNextJob, startJobWorker } from "./jobQueue";
+import { enqueueJob, getJob, inFlightJobCount, jobWorkerRunning, listJobs, processNextJob, startJobWorker } from "./jobQueue";
 import { isPublicJobType } from "./publicJobTypes";
 import { createUser, getUserWorkload, listUsers, updateUser, assignProjectToUser } from "./users";
 import { listBackups, runBackup, startBackupScheduler } from "./backup";
@@ -69,7 +69,7 @@ import type { RequestScope } from "./scope";
 import { DEFAULT_ORG_ID } from "./db";
 import { ensureStatusShareToken, statusShareUrl } from "./clientNotifier";
 import { sendInstallerHandoff } from "./installerHandoff";
-import { listCodeProfiles, listRowlessDesignLookups, getCodeProfile, saveResearchedCodeProfile, saveVerifiedCodeProfile, codeProfileKey, applyEditionProposal, dismissEditionProposal } from "./codeProfiles";
+import { listCodeProfiles, listRowlessDesignLookups, getCodeProfile, saveResearchedCodeProfile, essRulesOutcome, saveVerifiedCodeProfile, codeProfileKey, applyEditionProposal, dismissEditionProposal } from "./codeProfiles";
 import { applyCorrectionApproval } from "./correctionAgent";
 import { runStandaloneReview, getReviewSubmission, listReviewSubmissions, reviewSubjectToProject } from "./reviewSubject";
 import { renderReviewerReportHtml } from "./reviewerEngine";
@@ -104,10 +104,17 @@ import {
 import { acquireFromBytes, ensureAhjFormTemplate, formFindAuditDetails, templateProvenance } from "./ahjFormAuto";
 import { createSignature, deleteSignature, getSignatureImage, listSignatures, setDefaultSignature } from "./signatures";
 import { addAuditLog } from "./audit";
+import { cancelPortalRun } from "./stageCancel";
 import { buildAuthUrl, exchangeCodeForTokens, gmailStatus, pollGmail } from "./gmail";
 import { imapStatus, pollImap, upsertImapSource } from "./emailPoller";
 import { answerPortalQuestions, createIntakeRequest, getIntakeRequestPublic, submitIntakeRequest, portalQuestionStatus } from "./intakeRequests";
 import { createCredentialRequest, getCredentialRequestPublic, listCredentialRequests, submitCredentialRequest } from "./credentialRequests";
+import {
+  addOnboardingFile, decideOnboardingProposals, getOnboardingFile, getOnboardingPublic, listOnboardingProposals, mintOnboardingLink,
+  ONBOARDING_FILE_MAX_BYTES, pendingOnboardingProposalIds, removeOnboardingFile, requestOnboardingPortalLogins, revokeOnboardingLink,
+  saveOnboardingDraft, submitOnboarding,
+} from "./clientOnboarding";
+import { publicRateLimit } from "./publicRateLimit";
 import { ensureHeartbeat, sseBroadcast, sseSubscribe, setSseOrgResolver } from "./events";
 import {
   addManualCorrection,
@@ -126,6 +133,7 @@ import {
   createProject,
   updateProject,
   setProjectStatusByOperator,
+  setProjectClass,
   researchAndSaveAhj,
   researchAndSaveUtility,
   deleteProject,
@@ -165,12 +173,22 @@ import {
   runProjectWorkflow,
   runPermitChecksNow,
   createRunApproval,
+  approvalAcknowledgementRefusals,
   finalSubmitJobPayload,
 } from "./repository";
 import { createSignatureRequestApproval } from "./signatureRequestApproval";
 import { confirmSignatureRequestSent } from "./signatureTrack";
-import { getSubmittalTracks, markTrackSubmitted, requiredTracks, trackSubmittedAndTracked, trackSubmittedSentence } from "./submittalTracks";
+import { getSubmittalTracks, markSecondStageUploaded, markTrackFirstStage, markTrackSubmitted, requiredTracks, trackSubmittedAndTracked, trackSubmittedSentence, withPermitStageSentence } from "./submittalTracks";
+import { confirmSecondStage, removeSecondStage, saveSecondStageScreenshot, secondStageScreenshotFile } from "./secondStage";
+import { getUtilityFilingLookup, nemFiledWithPermit, verifyUtilityFilingLookup } from "./utilityFilingLookup";
+import { runQcForProject } from "./qc";
+import { personJobScope, setPersonJobScope } from "./jobScope";
+import { clearUtilityStorageModes, recordUtilityStorageModes } from "./utilityStorageModes";
+import { projectsDroppedFor, setNemTrackKept } from "./nemTrackDrop";
+import { clearUtilityApplicationRequirements, recordUtilityApplicationRequirements, utilityRequirementsView } from "./utilityRequirements";
 import { stagedReviewScreenshotFile } from "./stagedReviews";
+import { submissionConfirmationFile } from "./submissionConfirmation";
+import { reviewScreenshotFile } from "./reviewScreenshot";
 import { buildApprovalSheet } from "./approvalSheet";
 import { getPermitProcessLookup, projectForTrack, verifyPermitProcessLookup } from "./permitProcess";
 import { ahjProcessKnowledgeStatus, AHJ_PROCESS_REFERENCE_ENV } from "./processProfiles";
@@ -179,6 +197,7 @@ import type { ClientResolution, EditionProposalDecisionResult, ParserExtractionR
 import { FINAL_SUBMIT_GATE_SENTENCE } from "../../shared/src/portalSafety";
 import { resolveListenHost } from "./listenHost";
 import { disableConsoleQuickEdit } from "./consoleQuickEdit";
+import { projectClassHoldReason } from "./projectClassHold";
 
 // First thing, before the first log line: a click in this window must never freeze the
 // server (#360). Runs only when stdout is a real Windows console; see consoleQuickEdit.ts.
@@ -346,6 +365,8 @@ app.get("/credentials", (_req, res) => res.sendFile(path.join(frontendDir, "cred
 app.get("/status", (_req, res) => res.sendFile(path.join(frontendDir, "status.html")));
 // The per-CLIENT tracker: one stable link listing every job we are filing for that company.
 app.get("/portal", (_req, res) => res.sendFile(path.join(frontendDir, "portal.html")));
+// The client's own Company setup page (clientOnboarding.ts): tokenized, no login, draft-saving.
+app.get("/onboarding", (_req, res) => res.sendFile(path.join(frontendDir, "onboarding.html")));
 app.use(requireAuth(db));
 // Licensing: an org reaches only the routes of the products it holds. Deny-by-default,
 // driven by the product registry in entitlements.ts.
@@ -491,6 +512,21 @@ app.get("/api/diagnostics", (req, res) => {
   res.json(collectDiagnostics(db, { build: BUILD, port, dbPath }));
 });
 
+// GO-LIVE CHECK (owner, 2026-11-10): every switch and setting this server reads, set / not set, and
+// what each means, with the database version, the destinations waiting on a person and the job
+// worker. A READ: env, SELECTs and file stats only; it never shows a value (goLiveCheck.ts). Staff
+// only (requireAdmin), and the database counts are the caller's org (reqOrgFilter, routeScope.test).
+app.get("/api/go-live", asyncHandler(async (req, res) => {
+  requireAdmin(req);
+  const { goLiveReport } = await import("./goLiveCheck");
+  const { filingDestinationQueue } = await import("./filingDestinationProposals");
+  res.json(await goLiveReport(process.env, db, reqOrgFilter(db, req), {
+    source: "server",
+    workerRunning: jobWorkerRunning(),
+    destinationCounts: (orgId) => filingDestinationQueue(db, orgId, (project) => getSubmittalTracks(db, project)).counts,
+  }));
+}));
+
 app.post("/api/projects", (req, res) => {
   const payload = req.body?.parserPayload ?? req.body?.payload ?? req.body;
   if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
@@ -520,6 +556,8 @@ app.post("/api/projects", (req, res) => {
   if (!client) {
     throw new HttpError(400, `No client "${clientId}" exists here. Pick the client this project is filed for from the Client / Contractor list, or create it first under Clients.`, { needsClient: true });
   }
+  // The intake form's "Job class" (#688) rides in the payload; createProject takes it as the
+  // class column, never a parser key.
   const created = createProject(db, payload, scope.orgId);
   // THE LOCAL PIPELINE RUNS ITSELF from here (operator ruling 2026-09-21): a freshly parsed
   // project queues QC -> doc package -> reviewer gate automatically, stopping cold at
@@ -619,6 +657,144 @@ app.post("/api/projects/:id/client", (req, res) => {
   maybeResumeAutopilot(db, String(req.params.id), "a client was assigned to the project"); // clears needsClient/CCB blockers
   res.json(assigned);
 });
+
+// --- Client billing (#700): statement, invoices and the ledger ---
+// Under /api/clients/:id, so the client scope guard covers every one of them. An invoice id is read
+// only through its own client (getClientInvoice), so another client's invoice is a 404.
+// Nothing here pays or charges anything (rule 1): "Mark paid" records money a person saw arrive.
+function billingActor(req: Request): string {
+  const user = currentUser(db, req);
+  return String(user?.name || user?.email || req.body?.by || "operator").trim().slice(0, 120) || "operator";
+}
+/** The named person behind an outward billing action (an invoice email, a QuickBooks write or connect):
+ *  the signed-in user, or with sign-in off the name the dashboard sends (`decidedBy`). A placeholder
+ *  such as "operator" is not a person. */
+async function billingPerson(req: Request, what: string): Promise<string> {
+  const { isConfirmingPerson } = await import("./feeConfirm");
+  return namedPersonDecider(req, "decidedBy", `Sign in to ${what}.`,
+    `Name the person who will ${what}: it is recorded against them, and "operator" is not a person.`, isConfirmingPerson);
+}
+app.get("/api/clients/:id/billing/statement", asyncHandler(async (req, res) => {
+  const { buildClientStatement, resolvePeriod } = await import("./clientInvoices");
+  const period = resolvePeriod({ month: req.query.month, periodStart: req.query.periodStart, periodEnd: req.query.periodEnd });
+  res.json({ statement: buildClientStatement(db, String(req.params.id), period) });
+}));
+app.get("/api/clients/:id/invoices", asyncHandler(async (req, res) => {
+  const { listClientInvoices } = await import("./clientInvoices");
+  res.json({ invoices: listClientInvoices(db, String(req.params.id)) });
+}));
+app.post("/api/clients/:id/invoices", asyncHandler(async (req, res) => {
+  const { createClientInvoice, resolvePeriod } = await import("./clientInvoices");
+  const period = resolvePeriod({ month: req.body?.month, periodStart: req.body?.periodStart, periodEnd: req.body?.periodEnd });
+  const by = billingActor(req);
+  const invoice = createClientInvoice(db, String(req.params.id), period, by);
+  addAuditLog(db, null, "human", by, "invoice.created", { clientId: invoice.clientId, invoiceId: invoice.id, number: invoice.number, dueTotalUsd: invoice.dueTotalUsd, lines: invoice.lines.length });
+  res.status(201).json({ invoice });
+}));
+app.get("/api/clients/:id/invoices/:invoiceId", asyncHandler(async (req, res) => {
+  const { getClientInvoice } = await import("./clientInvoices");
+  res.json({ invoice: getClientInvoice(db, String(req.params.id), String(req.params.invoiceId)) });
+}));
+app.post("/api/clients/:id/invoices/:invoiceId/mark-sent", asyncHandler(async (req, res) => {
+  const { markClientInvoiceSent } = await import("./clientInvoices");
+  const invoice = markClientInvoiceSent(db, String(req.params.id), String(req.params.invoiceId));
+  addAuditLog(db, null, "human", billingActor(req), "invoice.marked_sent", { clientId: invoice.clientId, invoiceId: invoice.id, number: invoice.number });
+  res.json({ invoice });
+}));
+app.post("/api/clients/:id/invoices/:invoiceId/mark-paid", asyncHandler(async (req, res) => {
+  const { markClientInvoicePaid } = await import("./clientInvoices");
+  const reference = typeof req.body?.paymentReference === "string" ? req.body.paymentReference : "";
+  const invoice = markClientInvoicePaid(db, String(req.params.id), String(req.params.invoiceId), reference);
+  addAuditLog(db, null, "human", billingActor(req), "invoice.marked_paid", { clientId: invoice.clientId, invoiceId: invoice.id, number: invoice.number, reference: invoice.paidReference });
+  res.json({ invoice });
+}));
+app.post("/api/clients/:id/invoices/:invoiceId/void", asyncHandler(async (req, res) => {
+  const { voidClientInvoice } = await import("./clientInvoices");
+  const invoice = voidClientInvoice(db, String(req.params.id), String(req.params.invoiceId), String(req.body?.reason || ""));
+  addAuditLog(db, null, "human", billingActor(req), "invoice.voided", { clientId: invoice.clientId, invoiceId: invoice.id, number: invoice.number, reason: invoice.voidReason });
+  res.json({ invoice });
+}));
+// Emails the invoice through the one client-email switch (clientEmailsOffFor); silenced or without
+// SMTP it is saved as a draft communication and the invoice is left as it was.
+app.post("/api/clients/:id/invoices/:invoiceId/send", asyncHandler(async (req, res) => {
+  const { sendClientInvoice } = await import("./clientInvoices");
+  // AN OUTWARD EMAIL IS A NAMED PERSON'S CLICK (Helm, #700 review): never billingActor's "operator"
+  // fallback. Named before anything is sent: an unnamed caller is a 400 (401 signed out) that sends nothing.
+  const by = await billingPerson(req, "email an invoice");
+  const result = await sendClientInvoice(db, String(req.params.id), String(req.params.invoiceId), by);
+  addAuditLog(db, null, "human", by, result.delivered ? "invoice.emailed" : "invoice.email_not_sent", { clientId: result.invoice.clientId, invoiceId: result.invoice.id, number: result.invoice.number, detail: result.detail });
+  res.json(result);
+}));
+
+// A line a PERSON adds to a draft invoice (#701): the client onboarding fee, or its credit back
+// (negative). The amount is typed by the person; nothing in code knows a price.
+app.post("/api/clients/:id/invoices/:invoiceId/lines", asyncHandler(async (req, res) => {
+  const { addManualInvoiceLine } = await import("./clientInvoices");
+  const by = await billingPerson(req, "add a line to an invoice");
+  const invoice = addManualInvoiceLine(db, String(req.params.id), String(req.params.invoiceId), {
+    kind: req.body?.kind, amountUsd: req.body?.amountUsd, description: req.body?.description, serviceDate: req.body?.serviceDate,
+  }, by);
+  addAuditLog(db, null, "human", by, "invoice.line_added", { clientId: invoice.clientId, invoiceId: invoice.id, number: invoice.number, dueTotalUsd: invoice.dueTotalUsd });
+  res.json({ invoice });
+}));
+// SEND TO QUICKBOOKS (#701, safety-critical): a named person's click, never automatic or scheduled.
+// Creates the QuickBooks invoice once (external_ref UNIQUE; a retry returns the one already made).
+// Never emails the customer and never takes a payment. QUICKBOOKS_SYNC off = refused, zero network.
+app.post("/api/clients/:id/invoices/:invoiceId/quickbooks", asyncHandler(async (req, res) => {
+  const { pushInvoiceToQuickBooks } = await import("./quickbooks");
+  const by = await billingPerson(req, "send an invoice to QuickBooks");
+  res.json(await pushInvoiceToQuickBooks(db, String(req.params.id), String(req.params.invoiceId), by));
+}));
+
+// --- QuickBooks Online connection (#701): ONE company per org ---
+// Every handler takes the org from requestScope(db, req).orgId, never the body; the OAuth callback
+// binds the org only through the single-use, expiring state a named person of that org minted.
+// Connect, disconnect and the Item choice are admin-gated when sign-in is on, and named.
+app.get("/api/quickbooks/status", asyncHandler(async (req, res) => {
+  const { quickBooksStatus } = await import("./quickbooks");
+  res.json({ quickbooks: quickBooksStatus(db, requestScope(db, req).orgId) });
+}));
+app.post("/api/quickbooks/connect", asyncHandler(async (req, res) => {
+  requireAdmin(req);
+  const { beginQuickBooksConnect } = await import("./quickbooks");
+  const by = await billingPerson(req, "connect QuickBooks");
+  res.json(beginQuickBooksConnect(db, requestScope(db, req).orgId, by));
+}));
+app.get("/api/quickbooks/oauth/callback", asyncHandler(async (req, res) => {
+  const { completeQuickBooksConnect } = await import("./quickbooks");
+  const { escapeHtml } = await import("./emailLayout");
+  try {
+    await completeQuickBooksConnect(db, { code: req.query.code, state: req.query.state, realmId: req.query.realmId });
+    res.type("html").send("<h2>QuickBooks connected</h2><p>You can close this tab and return to the dashboard (Clients, Billing) to choose the Items.</p>");
+  } catch (err) {
+    const status = err instanceof HttpError ? err.status : 500;
+    res.status(status).type("html").send(`<h2>QuickBooks was not connected</h2><p>${escapeHtml(err instanceof Error ? err.message : "Unknown error.")}</p>`);
+  }
+}));
+app.post("/api/quickbooks/disconnect", asyncHandler(async (req, res) => {
+  requireAdmin(req);
+  const { disconnectQuickBooks } = await import("./quickbooks");
+  const by = await billingPerson(req, "disconnect QuickBooks");
+  res.json({ quickbooks: disconnectQuickBooks(db, requestScope(db, req).orgId, by) });
+}));
+app.get("/api/quickbooks/items", asyncHandler(async (req, res) => {
+  const { listQuickBooksItems } = await import("./quickbooks");
+  res.json({ items: await listQuickBooksItems(db, requestScope(db, req).orgId) });
+}));
+app.put("/api/quickbooks/settings", asyncHandler(async (req, res) => {
+  requireAdmin(req);
+  const { saveQuickBooksItemSettings } = await import("./quickbooks");
+  const by = await billingPerson(req, "choose the QuickBooks Items");
+  res.json({ quickbooks: await saveQuickBooksItemSettings(db, requestScope(db, req).orgId, {
+    serviceItemId: req.body?.serviceItemId, passthroughItemId: req.body?.passthroughItemId, onboardingItemId: req.body?.onboardingItemId,
+  }, by) });
+}));
+// "Check payments now": the same read-only payment status read the daily tick runs.
+app.post("/api/quickbooks/payment-status", asyncHandler(async (req, res) => {
+  const { syncQuickBooksPaymentStatus } = await import("./quickbooks");
+  await billingPerson(req, "check QuickBooks payments");
+  res.json({ result: await syncQuickBooksPaymentStatus(db, requestScope(db, req).orgId) });
+}));
 
 // --- Per-client portal credentials (encrypted; plaintext never returned) ---
 app.get("/api/clients/:id/portal-credentials", (req, res) => {
@@ -969,6 +1145,95 @@ app.post("/api/public/credential-request/:token", (req, res) => {
   res.json(submitCredentialRequest(db, String(req.params.token), (body.portals ?? []) as never));
 });
 
+// ---------------------------------------------------------------------------
+// COMPANY SETUP: the client fills in its own onboarding (backend/src/clientOnboarding.ts).
+// Staff mint / revoke the link and decide each answer under /api/clients/:id (scope-guarded). The
+// public routes are scoped to ONE client by the token (rule 6), rate-limited, and answer 404 for a
+// bad, expired or revoked token. Nothing a client sends writes the client record: each answer waits
+// as a "client-supplied" proposal until a named person accepts it. Portal logins go through the
+// existing one-time credential link, never through these routes (rule 2).
+// ---------------------------------------------------------------------------
+// Per caller, per 10 minutes: 300 requests (a person filling in the form never gets near it) and 20
+// refused tokens, after which that caller waits out the window.
+const onboardingLimiter = publicRateLimit({ windowMs: 10 * 60_000, max: 300, maxMisses: 20 });
+const onboardingDecider = async (req: Request, what: string): Promise<string> => {
+  const { isConfirmingPerson } = await import("./feeConfirm");
+  return namedPersonDecider(req, "decidedBy", `Sign in to ${what}.`,
+    `Name the person who will ${what}: it is recorded against them, and "operator" is not a person.`, isConfirmingPerson);
+};
+app.post("/api/clients/:id/onboarding-links", asyncHandler(async (req, res) => {
+  const by = await onboardingDecider(req, "create a company setup link");
+  res.json(mintOnboardingLink(db, String(req.params.id), { createdBy: by, ttlDays: Number((req.body ?? {}).ttlDays) || undefined }));
+}));
+app.post("/api/clients/:id/onboarding-links/:linkId/revoke", asyncHandler(async (req, res) => {
+  const by = await onboardingDecider(req, "revoke a company setup link");
+  res.json(revokeOnboardingLink(db, String(req.params.id), String(req.params.linkId), by));
+}));
+app.get("/api/clients/:id/onboarding", (req, res) => {
+  res.json(listOnboardingProposals(db, String(req.params.id), { all: req.query.all === "1" }));
+});
+app.post("/api/clients/:id/onboarding/decide", asyncHandler(async (req, res) => {
+  const body = (req.body ?? {}) as { accept?: unknown; reject?: unknown; edits?: unknown; acceptAll?: boolean };
+  // Named BEFORE anything is written: a blank name (sign-in off) is a 400 that changes nothing.
+  const by = await onboardingDecider(req, "decide a client's company setup answers");
+  const clientId = String(req.params.id);
+  const accept = body.acceptAll === true ? pendingOnboardingProposalIds(db, clientId) : body.accept;
+  res.json(decideOnboardingProposals(db, clientId, { accept, reject: body.reject, edits: body.edits }, by));
+}));
+// A named person sets a client's "how we file there" answer aside (wrong, or the verified door
+// stands). The client's own row only: no door, no proposal source of the authority's is touched.
+app.post("/api/clients/:id/onboarding/filing-statements/:statementId/dismiss", asyncHandler(async (req, res) => {
+  const by = await onboardingDecider(req, "set a client's filing answer aside");
+  const { dismissFilingStatement } = await import("./clientFilingStatements");
+  res.json(dismissFilingStatement(db, String(req.params.id), String(req.params.statementId), by));
+}));
+app.get("/api/clients/:id/onboarding/files/:fileId", (req, res) => {
+  const f = getOnboardingFile(db, String(req.params.id), String(req.params.fileId));
+  res.setHeader("Content-Type", f.mime);
+  res.setHeader("Content-Disposition", `attachment; filename="${f.fileName.replace(/"/g, "")}"`);
+  res.setHeader("Cache-Control", "no-store");
+  res.send(f.bytes);
+});
+// Public (no auth): the page's data and its writes.
+// Rate limit + no caching on every public onboarding route (a page holding a company's details is
+// never cached by a browser or a proxy). Attached per route, so each stays a plain registration.
+const onboardingPublic = [onboardingLimiter, (_req: Request, res: Response, next: NextFunction) => {
+  res.setHeader("Cache-Control", "no-store");
+  res.setHeader("Referrer-Policy", "no-referrer");
+  next();
+}];
+// HOW THE CLIENT FILES IN EACH PLACE (clientFilingStatements.ts): the page asks about the authorities
+// the client's service area names, resolved as the Destinations queue resolves them. Names only go to
+// the page; an answer is stored as the client's word and shown to staff as a "client-supplied"
+// proposal in that queue. It is never a door: a named person confirms through the queue as before.
+const onboardingContext = async (): Promise<import("./clientOnboarding").OnboardingContext> => {
+  const { clientFilingAuthorities } = await import("./filingDestinationProposals");
+  return { filingAuthorities: (clientId, draftArea) => clientFilingAuthorities(db, clientId, draftArea) };
+};
+app.get("/api/public/onboarding/:token", ...onboardingPublic, asyncHandler(async (req, res) => {
+  res.json(getOnboardingPublic(db, String(req.params.token), await onboardingContext()));
+}));
+app.post("/api/public/onboarding/:token/draft", ...onboardingPublic, asyncHandler(async (req, res) => {
+  res.json(saveOnboardingDraft(db, String(req.params.token), req.body, await onboardingContext()));
+}));
+app.post("/api/public/onboarding/:token/submit", ...onboardingPublic, asyncHandler(async (req, res) => {
+  res.json(submitOnboarding(db, String(req.params.token), req.body, await onboardingContext()));
+}));
+app.post("/api/public/onboarding/:token/portal-logins", ...onboardingPublic, (req, res) => {
+  res.json(requestOnboardingPortalLogins(db, String(req.params.token), req.body));
+});
+app.post(
+  "/api/public/onboarding/:token/files",
+  ...onboardingPublic,
+  express.raw({ type: ["application/pdf", "image/png", "image/jpeg", "application/octet-stream"], limit: ONBOARDING_FILE_MAX_BYTES + 1024 }),
+  (req, res) => {
+    res.json(addOnboardingFile(db, String(req.params.token), { kind: req.query.kind, fileName: req.query.name, bytes: req.body }));
+  },
+);
+app.delete("/api/public/onboarding/:token/files/:fileId", ...onboardingPublic, (req, res) => {
+  res.json(removeOnboardingFile(db, String(req.params.token), String(req.params.fileId)));
+});
+
 // Public (no auth): read an intake request by token.
 app.get("/api/intake/:token", asyncHandler(async (req, res) => {
   res.json(getIntakeRequestPublic(db, String(req.params.token)));
@@ -1002,7 +1267,10 @@ app.post("/api/code-profiles/research", asyncHandler(async (req, res) => {
   addAuditLog(db, null, "llm", "code-profile research", "code_profile.researched", {
     key: codeProfileKey(b), state: b.state, ahj: b.ahj, webGrounded: research.webGrounded,
   });
-  res.json({ profile: saved, webGrounded: research.webGrounded, notes: research.notes, needsHumanVerification: true });
+  // The jurisdiction's own battery (ESS) rules the research read land field by field (official only on
+  // a page this process read; never over a person's value). Absent when it read none.
+  const ess = await essRulesOutcome(db, { state: b.state, ahj: b.ahj }, research, undefined);
+  res.json({ profile: ess.essRules?.saved ? getCodeProfile(db, saved) ?? saved : saved, ...ess, webGrounded: research.webGrounded, notes: research.notes, needsHumanVerification: true });
 }));
 
 // EDITION PROPOSALS (#172): a due verify check on a HUMAN-VERIFIED row stores a proposal, never a
@@ -1046,13 +1314,43 @@ app.put("/api/code-profiles/verify", (req, res) => {
     "Name the person verifying: a code profile is verified by a named person.");
   const saved = saveVerifiedCodeProfile(db, {
     key: "", confidence: "verified", updatedAt: "",
-    state: b.state, ahj: b.ahj,
+    state: b.state, ahj: b.ahj, ...(b.firePathwayPolicy ? { firePathwayPolicy: b.firePathwayPolicy } : {}),
     adoptedCodes: b.adoptedCodes, amendments: b.amendments,
     designCriteria: b.designCriteria, prescriptive: b.prescriptive,
     fireSetbacks: b.fireSetbacks.map((f) => ({ ...f })), citations: b.citations,
+    ...(b.essRules ? { essRules: b.essRules } : {}),
   }, verifiedBy);
   res.json({ profile: saved });
 });
+// JURISDICTION QC SCREENS, WRITTEN BY A PERSON (review-audit draft 14). Draft 12 moved each state's and
+// city's QC baseline screens to data (reference-jurisdiction-qc-rules.json, overlaid by state_permit_rules
+// rows of family "qc") but left nothing that writes those rows. GET shows the screens a state's jobs are
+// checked against, each with its tier; PUT records or rewords one: a NAMED person (namedPersonDecider, the
+// placeholder names refused), the source's own words verbatim (quote) and the page they were read on. It
+// lands person-verified (rule 3: nothing automatic replaces it), and it may block only under the #637 bar
+// (jurisdictionQcRules.jurisdictionScreenMayBlock). Under the existing /api/code-profiles path (rule 6:
+// shared jurisdiction knowledge, scoped in routeScope.test.ts).
+app.get("/api/code-profiles/qc-screens", asyncHandler(async (req, res) => {
+  const { usStateCode } = await import("./usState");
+  const { resolveJurisdictionQcRecords } = await import("./jurisdictionQcRules");
+  const state = usStateCode(req.query.state);
+  if (!state) throw new HttpError(400, "state is required (a two-letter US state code or name).");
+  const records = resolveJurisdictionQcRecords(db, state, String(req.query.ahj ?? "")).filter((r) => r.state === state);
+  res.json({ state, records });
+}));
+app.put("/api/code-profiles/qc-screens", asyncHandler(async (req, res) => {
+  const b = validate(jurisdictionQcScreenSchema, req.body);
+  const { isConfirmingPerson } = await import("./feeConfirm");
+  // Named BEFORE anything is written: a blank or placeholder name (auth off) is a 400 that writes nothing.
+  const verifiedBy = namedPersonDecider(req, "verifiedBy",
+    "Sign in to record a jurisdiction QC screen.",
+    "Name the person recording this screen: a jurisdiction screen is recorded by a named person (\"operator\" or a bot's name is not a person).",
+    isConfirmingPerson);
+  const { writeVerifiedQcScreen } = await import("./stateRules");
+  const row = writeVerifiedQcScreen(db, { state: b.state, ruleId: b.ruleId, screen: b.screen, quote: b.quote, sourceUrl: b.sourceUrl }, verifiedBy);
+  if (!row) throw new HttpError(400, "That screen cannot be recorded: check the state, the screen's kind and fields (a submittal-documents screen lists its items), the quote and the source URL.");
+  res.json({ rule: row, verifiedBy });
+}));
 const editionProposalFingerprint = (req: Request): string => {
   const fp = String(req.body?.fingerprint || "").trim();
   if (!fp || fp.length > 400) throw new HttpError(400, "fingerprint is required.");
@@ -1745,6 +2043,46 @@ app.post("/api/projects/:id/status", (req, res) => {
   res.json(detail);
 });
 
+// A PERSON SETS OR CONFIRMS THE JOB'S CLASS (#688; repository.setProjectClass). Named like every
+// decision that releases a hold: the signed-in person, or with sign-in off the `decidedBy` the
+// caller sends — a blank, placeholder or automation name is a 400 that writes nothing. Under
+// /api/projects/:id, so the project scope guard covers it.
+app.post("/api/projects/:id/class", asyncHandler(async (req, res) => {
+  const { isConfirmingPerson } = await import("./feeConfirm");
+  const by = namedPersonDecider(req, "decidedBy",
+    "Sign in to confirm the job's class.",
+    'Name the person confirming the job\'s class (type your name; "human", "operator" or a bot\'s name is not a person).',
+    isConfirmingPerson);
+  res.json(setProjectClass(db, String(req.params.id), { projectClass: String(req.body?.projectClass ?? ""), by }));
+}));
+
+// A NAMED PERSON ACCEPTS THAT THE PROJECT AHJ FILES FOR THIS PARCEL (draft 16 A; parcelJurisdiction.ts).
+// Only against a current parcel disagreement, with a reason; the gate's parcel blocker becomes a pass
+// naming the person until the address, AHJ or parcel answer changes. Named like every decision that
+// releases a hold (the signed-in person, or the `decidedBy` the caller sends; a blank, placeholder or
+// automation name is a 400 that writes nothing). Under /api/projects/:id, so the scope guard covers it.
+app.post("/api/projects/:id/parcel-jurisdiction/accept", asyncHandler(async (req, res) => {
+  const { isConfirmingPerson } = await import("./feeConfirm");
+  const by = namedPersonDecider(req, "decidedBy",
+    "Sign in to accept the parcel's jurisdiction.",
+    'Name the person accepting that this AHJ files for the parcel (type your name; "human", "operator" or a bot\'s name is not a person).',
+    isConfirmingPerson);
+  const { acceptParcelJurisdiction } = await import("./parcelJurisdiction");
+  const project = getProjectDetail(db, String(req.params.id)).project;
+  res.json({ parcelJurisdiction: await acceptParcelJurisdiction(db, project, { reason: String(req.body?.reason ?? ""), by }) });
+}));
+app.delete("/api/projects/:id/parcel-jurisdiction/accept", asyncHandler(async (req, res) => {
+  const { isConfirmingPerson } = await import("./feeConfirm");
+  const by = namedPersonDecider(req, "decidedBy",
+    "Sign in to withdraw the parcel acceptance.",
+    'Name the person withdrawing the acceptance ("human", "operator" or a bot\'s name is not a person).',
+    isConfirmingPerson);
+  const { withdrawParcelJurisdictionAcceptance, readParcelJurisdiction } = await import("./parcelJurisdiction");
+  const projectId = String(req.params.id);
+  const withdrawn = await withdrawParcelJurisdictionAcceptance(db, projectId, by);
+  res.json({ withdrawn, parcelJurisdiction: readParcelJurisdiction(db, getProjectDetail(db, projectId).project) });
+}));
+
 app.get("/api/projects/:id/application-docs", (req, res) => {
   const pkg = getApplicationDocumentPackage(db, req.params.id);
   if (req.query.format === "html") {
@@ -2288,6 +2626,11 @@ app.post("/api/projects/:id/auto-learn", (req, res) => {
   if (!db.get<{ id?: string }>("SELECT id FROM projects WHERE id = ?", [projectId])) {
     throw new HttpError(404, "Project not found.");
   }
+  // …and on a job held by its class (#688): autoLearnPortal refuses it at its own door too.
+  const learnClassHold = projectClassHoldReason(db, projectId);
+  if (learnClassHold) {
+    throw new HttpError(409, `${learnClassHold} A held job is never used to learn a portal: its recording would replace the portal's residential recipe.`, { classHeld: true, reason: learnClassHold });
+  }
   // RULE 5 BOTH WAYS + THE ENTITY, AT ENQUEUE — a 409 now beats a job that fails later (and
   // autoLearnPortal asks the same question again at its own door). The project's own recipe for
   // this key is not evidence for the URL being judged.
@@ -2421,6 +2764,352 @@ app.post("/api/projects/:id/permit-process/refresh", asyncHandler(async (req, re
   if (!r.queued) throw new HttpError(r.status, r.reason);
   addAuditLog(db, projectId, "human", requestedBy || "dashboard", "permit_process.refresh_requested", { ahj: project.ahj, state: project.state, jobId: r.jobId ?? null });
   res.status(202).json({ queued: true, jobId: r.jobId, reason: r.reason, lookupKey: r.lookupKey });
+}));
+
+// THIS PROJECT'S UTILITY FILING ROW: READ AND VERIFY (#664). Nothing could verify a utility filing
+// lookup, so the one fact that switches a NEM track to "filed inside the permit application" had no
+// door a person could use. Under /api/projects/:id, so each inherits the tenancy guard (rule 6) and
+// getProjectDetail 404s an unknown or out-of-scope project first; the row itself is SHARED knowledge
+// on purpose (one utility's filing location serves every tenant), keyed by the project's own state +
+// utility — a body never names another utility.
+//   GET  the row on file (null when none).
+//   PUT  .../verify — a NAMED PERSON (namedPersonDecider) verifies the row as it stands, or states the
+//        with-permit method with the page and words they read it on. Lands 'verified'; a lookup never
+//        overwrites it (rule 3). No URL can be stated here: nothing new reaches the NEM track (rule 5).
+app.get("/api/projects/:id/utility-filing", (req, res) => {
+  const { project } = getProjectDetail(db, String(req.params.id));
+  res.json({ state: project.state, utility: project.utility, lookup: String(project.utility || "").trim() ? getUtilityFilingLookup(db, project.state, project.utility) : null });
+});
+app.put("/api/projects/:id/utility-filing/verify", (req, res) => {
+  const projectId = String(req.params.id);
+  const { project } = getProjectDetail(db, projectId);
+  const b = validate(utilityFilingVerifySchema, req.body);
+  const verifiedBy = namedPersonDecider(req, "verifiedBy",
+    "Sign in to verify a utility filing location.",
+    "Name the person verifying: a utility filing location is verified by a named person.");
+  const r = verifyUtilityFilingLookup(db, { state: project.state, utility: project.utility }, { verifiedBy, ...(b.filedWithPermit ? { filedWithPermit: b.filedWithPermit } : {}) });
+  if (!r.saved) throw new HttpError(r.lookup ? 409 : 400, r.reason);
+  addAuditLog(db, projectId, "human", verifiedBy, b.filedWithPermit ? "utility_filing.stated_with_permit" : "utility_filing.verified", {
+    utility: project.utility, state: project.state, method: r.lookup?.filing?.value?.method ?? null, sourceUrl: r.lookup?.filing?.sourceUrl ?? "",
+  });
+  res.json({ lookup: r.lookup });
+});
+
+// THIS JOB'S FILING DESTINATIONS: PROPOSED FROM THE AUTHORITY'S OFFICIAL PAGE, CONFIRMED BY A PERSON
+// (owner, 2026-11-10; filingDestinationProposals.ts). Where a filing goes stays a person's fact (rule
+// 3's last sentence): the GET computes proposals on read and stores nothing; Confirm / Edit write the
+// EXISTING person-verified record (a verified KB portal, the filing-email record, the with-permit
+// statement) under a named person and audit it; Reject stops a proposal being offered. Under
+// /api/projects/:id, so each inherits the tenancy guard (rule 6) and getProjectDetail 404s an unknown
+// or out-of-scope project first; the authority is always the project's own (a body never names one).
+const destinationPerson = async (req: Request, what: string): Promise<string> => {
+  const { isConfirmingPerson } = await import("./feeConfirm");
+  return namedPersonDecider(req, "decidedBy", `Sign in to ${what}.`,
+    `Name the person who will ${what}: it is recorded against them, and "operator" is not a person.`, isConfirmingPerson);
+};
+const destinationTrack = (v: unknown): SubmittalTrackType => {
+  const t = String(v ?? "").trim() as SubmittalTrackType;
+  if (!SUBMITTAL_TRACK_TYPES.includes(t)) throw new HttpError(400, "track is one of nem, building, electrical, combo, permit, mpu.");
+  return t;
+};
+const destinationRefusal = (err: unknown): never => {
+  if (err && typeof err === "object" && "status" in err && err instanceof Error && (err as { status?: unknown }).status) {
+    throw new HttpError(Number((err as { status: number }).status), err.message);
+  }
+  throw err;
+};
+// DESTINATIONS TO CONFIRM (owner, 2026-11-10): every authority an open job of the caller's org files
+// with and whose door no person has verified, grouped by client — one screen instead of one track
+// card at a time. A READ: it writes nothing and adds no write path. Each proposal names the job and
+// track whose card shows it, and the dashboard's Confirm / Edit / Reject send THAT job's routes above
+// and below, unchanged. A new top-level path, so it is tenant-scoped here (reqOrgFilter) and declared
+// in routeScope.test.
+app.get("/api/filing-destinations", asyncHandler(async (req, res) => {
+  const { filingDestinationQueue } = await import("./filingDestinationProposals");
+  res.json(filingDestinationQueue(db, reqOrgFilter(db, req), (project) => getSubmittalTracks(db, project)));
+}));
+app.get("/api/projects/:id/filing-destinations", asyncHandler(async (req, res) => {
+  const { project } = getProjectDetail(db, String(req.params.id));
+  const { filingDestinationsFor } = await import("./filingDestinationProposals");
+  res.json({ destinations: filingDestinationsFor(db, project, getSubmittalTracks(db, project)) });
+}));
+app.put("/api/projects/:id/filing-destinations", asyncHandler(async (req, res) => {
+  const projectId = String(req.params.id);
+  const { project } = getProjectDetail(db, projectId);
+  const b = req.body || {};
+  const track = destinationTrack(b.track);
+  // Named BEFORE anything is written.
+  const by = await destinationPerson(req, "confirm where this filing goes");
+  const { decideFilingDestination, filingDestinationsFor } = await import("./filingDestinationProposals");
+  let r;
+  try {
+    r = decideFilingDestination(db, project, getSubmittalTracks(db, project), {
+      track, ...(b.proposalId ? { proposalId: String(b.proposalId) } : {}),
+      kind: String(b.kind ?? "") as never, address: String(b.address ?? ""), ...(b.name ? { name: String(b.name) } : {}),
+      sourceUrl: String(b.sourceUrl ?? ""), quote: String(b.quote ?? ""),
+    }, by);
+  } catch (err) { destinationRefusal(err); }
+  const fresh = getProjectDetail(db, projectId).project;
+  res.json({ ...r, destinations: filingDestinationsFor(db, fresh, getSubmittalTracks(db, fresh)) });
+}));
+app.post("/api/projects/:id/filing-destinations/reject", asyncHandler(async (req, res) => {
+  const projectId = String(req.params.id);
+  const { project } = getProjectDetail(db, projectId);
+  const b = req.body || {};
+  const track = destinationTrack(b.track);
+  const by = await destinationPerson(req, "reject this proposed destination");
+  const { rejectFilingDestination, filingDestinationsFor } = await import("./filingDestinationProposals");
+  let r;
+  try {
+    r = rejectFilingDestination(db, project, getSubmittalTracks(db, project), { track, proposalId: String(b.proposalId ?? ""), reason: b.reason ? String(b.reason) : "" }, by);
+  } catch (err) { destinationRefusal(err); }
+  res.json({ ...r, destinations: filingDestinationsFor(db, project, getSubmittalTracks(db, project)) });
+}));
+app.delete("/api/projects/:id/filing-destinations/reject", asyncHandler(async (req, res) => {
+  const projectId = String(req.params.id);
+  const { project } = getProjectDetail(db, projectId);
+  const b = req.body || {};
+  const track = destinationTrack(b.track);
+  const by = await destinationPerson(req, "offer this proposed destination again");
+  const { withdrawDestinationRejection, filingDestinationsFor } = await import("./filingDestinationProposals");
+  let r;
+  try {
+    r = withdrawDestinationRejection(db, project, { track, proposalId: String(b.proposalId ?? "") }, by);
+  } catch (err) { destinationRefusal(err); }
+  res.json({ ...r, destinations: filingDestinationsFor(db, project, getSubmittalTracks(db, project)) });
+}));
+
+// THE SAME DECISIONS FROM A CLIENT'S SERVICE AREA (the area entries on its row): the client-scoped twins of
+// the three routes above, for an authority the client's area names before any job does. Under
+// /api/clients/:id, so each inherits the client scope guard (rule 6: another org's client is a 404);
+// getClient 404s an unknown one. The body names the area entry and the authority the queue SHOWED;
+// serviceAreaDecisionJob builds the entry's in-memory job (never stored) and refuses (409) unless the
+// track resolves to exactly that authority. The person is named BEFORE anything is written, and the
+// decision runs through the SAME decideFilingDestination / rejectFilingDestination /
+// withdrawDestinationRejection: no new decision logic, no bulk, one authority per click, the same
+// records written, audited with the person and time (the client and entry in the details).
+const areaDecisionInput = (req: Request) => {
+  const client = getClient(db, String(req.params.id));
+  const b = req.body || {};
+  return { client, b, track: destinationTrack(b.track), entryKey: String(b.areaEntry ?? ""), authorityKey: String(b.authorityKey ?? "") };
+};
+app.put("/api/clients/:id/service-area/filing-destinations", asyncHandler(async (req, res) => {
+  const { client, b, track, entryKey, authorityKey } = areaDecisionInput(req);
+  const by = await destinationPerson(req, "confirm where this filing goes");
+  const { decideFilingDestination, serviceAreaDecisionJob } = await import("./filingDestinationProposals");
+  let r;
+  try {
+    const job = serviceAreaDecisionJob(db, client, { entryKey, authorityKey, track });
+    r = decideFilingDestination(db, job, getSubmittalTracks(db, job), {
+      track, ...(b.proposalId ? { proposalId: String(b.proposalId) } : {}),
+      kind: String(b.kind ?? "") as never, address: String(b.address ?? ""), ...(b.name ? { name: String(b.name) } : {}),
+      sourceUrl: String(b.sourceUrl ?? ""), quote: String(b.quote ?? ""),
+    }, by);
+  } catch (err) { destinationRefusal(err); }
+  res.json(r);
+}));
+app.post("/api/clients/:id/service-area/filing-destinations/reject", asyncHandler(async (req, res) => {
+  const { client, b, track, entryKey, authorityKey } = areaDecisionInput(req);
+  const by = await destinationPerson(req, "reject this proposed destination");
+  const { rejectFilingDestination, serviceAreaDecisionJob } = await import("./filingDestinationProposals");
+  let r;
+  try {
+    const job = serviceAreaDecisionJob(db, client, { entryKey, authorityKey, track });
+    r = rejectFilingDestination(db, job, getSubmittalTracks(db, job), { track, proposalId: String(b.proposalId ?? ""), reason: b.reason ? String(b.reason) : "" }, by);
+  } catch (err) { destinationRefusal(err); }
+  res.json(r);
+}));
+app.delete("/api/clients/:id/service-area/filing-destinations/reject", asyncHandler(async (req, res) => {
+  const { client, b, track, entryKey, authorityKey } = areaDecisionInput(req);
+  const by = await destinationPerson(req, "offer this proposed destination again");
+  const { withdrawDestinationRejection, serviceAreaDecisionJob } = await import("./filingDestinationProposals");
+  let r;
+  try {
+    const job = serviceAreaDecisionJob(db, client, { entryKey, authorityKey, track });
+    r = withdrawDestinationRejection(db, job, { track, proposalId: String(b.proposalId ?? "") }, by);
+  } catch (err) { destinationRefusal(err); }
+  res.json(r);
+}));
+
+// WHICH STORAGE MODES THIS PROJECT'S UTILITY TAKES NO APPLICATION FOR (#673 item 3;
+// utilityStorageModes.ts). Same tenancy and keying as the utility-filing routes above: the record is
+// shared knowledge on the utility's filing row, keyed by the project's own state + utility. A NAMED
+// PERSON records it with the page and its words (rule 3: never a lookup, never a model, not the
+// official tier); DELETE withdraws it. QC re-runs so the job says what now stands.
+app.put("/api/projects/:id/utility-filing/storage-modes", (req, res) => {
+  const projectId = String(req.params.id);
+  const { project } = getProjectDetail(db, projectId);
+  const b = validate(utilityStorageModesSchema, req.body);
+  const verifiedBy = namedPersonDecider(req, "decidedBy",
+    "Sign in to record a utility's storage-mode rule.",
+    "Name the person recording it: a utility's storage-mode rule is recorded by a named person.");
+  const r = recordUtilityStorageModes(db, { state: project.state, utility: project.utility }, { modesWithoutApplication: b.modesWithoutApplication, sourceUrl: b.sourceUrl, quote: b.quote, verifiedBy });
+  if (!r.saved) throw new HttpError(r.reason.startsWith("No filing record") ? 409 : 400, r.reason);
+  addAuditLog(db, projectId, "human", verifiedBy, "utility_filing.storage_modes_recorded", { utility: project.utility, state: project.state, modes: b.modesWithoutApplication, sourceUrl: b.sourceUrl });
+  runQcForProject(db, projectId);
+  res.json({ record: r.record });
+});
+app.delete("/api/projects/:id/utility-filing/storage-modes", (req, res) => {
+  const projectId = String(req.params.id);
+  const { project } = getProjectDetail(db, projectId);
+  const verifiedBy = namedPersonDecider(req, "decidedBy",
+    "Sign in to withdraw a utility's storage-mode rule.",
+    "Name the person withdrawing it.");
+  // Every job the record dropped a track on, read BEFORE the record goes (its stamp names the utility).
+  const dropped = projectsDroppedFor(db, project.state, project.utility);
+  clearUtilityStorageModes(db, { state: project.state, utility: project.utility });
+  addAuditLog(db, projectId, "human", verifiedBy, "utility_filing.storage_modes_withdrawn", { utility: project.utility, state: project.state });
+  // The utility track comes back on each of them now (draft 10), not at some later QC run. System
+  // work, like the scheduler's: the record is shared knowledge, so its jobs may sit in any org, and
+  // nothing about them — not even how many — reaches this response or this job's audit (rule 6).
+  for (const id of new Set([projectId, ...dropped])) {
+    try { runQcForProject(db, id); } catch { /* one job's QC failing never stops the others */ }
+  }
+  res.json({ record: null });
+});
+
+// PUT THE UTILITY TRACK BACK ON THIS JOB (draft 10; nemTrackDrop.ts). A person's storage record dropped
+// the track; a NAMED PERSON can keep it on this one job (keep: true) — the customer wants the
+// application anyway, the job differs from the page — or let the record drop it again (keep: false).
+// Under /api/projects/:id, so it inherits the tenancy guard (rule 6). QC re-runs and writes the stamp;
+// the response is the job as it now stands.
+app.put("/api/projects/:id/utility-track/keep", (req, res) => {
+  const projectId = String(req.params.id);
+  getProjectDetail(db, projectId);
+  const b = validate(nemTrackKeepSchema, req.body);
+  const decidedBy = namedPersonDecider(req, "decidedBy",
+    "Sign in to change whether this job files a utility application.",
+    "Name the person deciding: whether a job files its utility application is decided by a named person.");
+  setNemTrackKept(db, projectId, b.keep, decidedBy);
+  addAuditLog(db, projectId, "human", decidedBy, b.keep ? "utility_track.kept" : "utility_track.released", {});
+  runQcForProject(db, projectId);
+  res.json(getProjectDetail(db, projectId));
+});
+
+// WHAT THIS PROJECT'S UTILITY'S OWN APPLICATION ASKS FOR (review-audit draft 03; utilityRequirements.ts).
+// Same tenancy and keying as the storage-mode routes above: shared knowledge on the utility's filing row,
+// keyed by the project's own state + utility. A NAMED PERSON records each item with the page and its words
+// (rule 3: lands 'verified'; a verified item may block when the job lacks it); DELETE withdraws the
+// person's items (the shipped seed and any official reads stand). QC re-runs so the gate reads it.
+// The panel's read (dashboard utility-requirements.js): every item the shipped seed and the utility's
+// filing row carry, with its tier, source and words, and which one the gates read per kind. A read: no
+// lookup runs, nothing is written.
+app.get("/api/projects/:id/utility-filing/application-requirements", (req, res) => {
+  const { project } = getProjectDetail(db, String(req.params.id));
+  const utility = String(project.utility || "").trim();
+  const view = utility ? utilityRequirementsView(db, project.state, utility) : { displayName: "", rowExists: false, items: [] };
+  res.json({ state: project.state, utility: project.utility, ...view });
+});
+app.put("/api/projects/:id/utility-filing/application-requirements", (req, res) => {
+  const projectId = String(req.params.id);
+  const { project } = getProjectDetail(db, projectId);
+  const b = validate(utilityApplicationRequirementsSchema, req.body);
+  const verifiedBy = namedPersonDecider(req, "decidedBy",
+    "Sign in to record a utility's application requirements.",
+    "Name the person recording them: a utility's application requirements are recorded by a named person.");
+  const r = recordUtilityApplicationRequirements(db, { state: project.state, utility: project.utility }, { requirements: b.requirements, verifiedBy, ...(b.mode ? { mode: b.mode } : {}) });
+  if (!r.saved) throw new HttpError(r.reason.startsWith("No filing record") ? 409 : 400, r.reason);
+  addAuditLog(db, projectId, "human", verifiedBy, "utility_filing.application_requirements_recorded", {
+    utility: project.utility, state: project.state, keys: b.requirements.map((x) => x.key), sources: b.requirements.map((x) => x.sourceUrl), mode: b.mode ?? "replace",
+  });
+  runQcForProject(db, projectId);
+  res.json({ requirements: r.requirements });
+});
+app.delete("/api/projects/:id/utility-filing/application-requirements", (req, res) => {
+  const projectId = String(req.params.id);
+  const { project } = getProjectDetail(db, projectId);
+  const verifiedBy = namedPersonDecider(req, "decidedBy",
+    "Sign in to withdraw a utility's application requirements.",
+    "Name the person withdrawing them.");
+  clearUtilityApplicationRequirements(db, { state: project.state, utility: project.utility });
+  addAuditLog(db, projectId, "human", verifiedBy, "utility_filing.application_requirements_withdrawn", { utility: project.utility, state: project.state });
+  runQcForProject(db, projectId);
+  res.json({ requirements: null });
+});
+
+// WHAT THE JOB INSTALLS, SET BY A PERSON (#673; jobScope.ts). Under /api/projects/:id, so it
+// inherits the tenancy guard (rule 6) and getProjectDetail 404s an unknown or out-of-scope project
+// first. A NAMED PERSON (namedPersonDecider) sets pv / pv+storage / storage-added-to-existing-pv /
+// storage-only, or clears it (null) so the plan set's evidence decides again. A storage scope never
+// drops a PV row on a job whose fields name new modules (jobScope.deriveJobScope: the evidence
+// wins, QC says so). QC re-runs at once so the rows match the scope.
+app.put("/api/projects/:id/job-scope", (req, res) => {
+  const projectId = String(req.params.id);
+  getProjectDetail(db, projectId);
+  const b = validate(jobScopeSchema, req.body);
+  const setBy = namedPersonDecider(req, "decidedBy",
+    "Sign in to set what this job installs.",
+    "Name the person setting the job scope: it decides which equipment QC checks.");
+  const before = personJobScope(db, projectId);
+  setPersonJobScope(db, projectId, b.scope, setBy);
+  addAuditLog(db, projectId, "human", setBy, b.scope ? "job_scope.set" : "job_scope.cleared", { from: before?.scope ?? null, to: b.scope });
+  runQcForProject(db, projectId);
+  res.json(getProjectDetail(db, projectId));
+});
+
+// THE EMAIL FILING CHANNEL (#667; filingEmail.ts). Under /api/projects/:id, so each inherits the
+// tenancy guard (rule 6) and getProjectDetail 404s an unknown or out-of-scope project first. The
+// record itself is SHARED knowledge (one authority's address serves every tenant), keyed by the
+// project's own utility / track issuer — a body never names another authority.
+//   GET     ?track=  the authority, its record, whether it is usable (and why not), the drafts/sends.
+//   PUT     a NAMED PERSON records (verifies) the address, the authority's page and its words. Refused
+//           unless usable (address verbatim in the words; government or the page's own domain).
+//   DELETE  ?track=  a named person withdraws it: the track files on its portal again.
+//   GET     .../drafts/:sendId/eml  the staged draft as an .eml for a person to send (rule 1: the
+//           person sends it; automation sends only through the gate, in the staging run).
+const filingEmailTrack = (raw: unknown): SubmittalTrackType => {
+  const t = String(raw ?? "").trim();
+  if (!SUBMITTAL_TRACK_TYPES.includes(t as SubmittalTrackType)) throw new HttpError(400, "Name the track (nem, building, electrical, combo, permit or mpu).");
+  return t as SubmittalTrackType;
+};
+app.get("/api/projects/:id/filing-email", asyncHandler(async (req, res) => {
+  const fe = await import("./filingEmail");
+  const { project } = getProjectDetail(db, String(req.params.id));
+  const track = filingEmailTrack(req.query.track);
+  const authority = fe.authorityForTrack(project, track);
+  const record = authority ? fe.readFilingEmail(db, authority).record : null;
+  const problems = record ? fe.filingEmailRecordProblems(record) : [];
+  res.json({ track, authority, record, usable: Boolean(record) && problems.length === 0, problems, sends: fe.listFilingEmailSends(db, project.id, track) });
+}));
+app.put("/api/projects/:id/filing-email", asyncHandler(async (req, res) => {
+  const fe = await import("./filingEmail");
+  const { isConfirmingPerson } = await import("./feeConfirm");
+  const projectId = String(req.params.id);
+  const { project } = getProjectDetail(db, projectId);
+  const track = filingEmailTrack(req.body?.track);
+  // Named BEFORE anything is written: no name (auth off) is a 400 that records nothing.
+  const verifiedBy = namedPersonDecider(req, "verifiedBy",
+    "Sign in to verify an authority's filing email.",
+    "Name the person verifying: an authority's filing email is verified by a named person.", isConfirmingPerson);
+  const authority = fe.authorityForTrack(project, track);
+  if (!authority) throw new HttpError(400, track === "nem" ? "The project names no utility." : "The project names no AHJ for this track.");
+  const r = fe.setFilingEmail(db, authority, { address: String(req.body?.address ?? ""), sourceUrl: String(req.body?.sourceUrl ?? ""), quote: String(req.body?.quote ?? "") }, verifiedBy);
+  if (!r.saved) throw new HttpError(r.problems.length ? 400 : 409, r.reason, { problems: r.problems });
+  addAuditLog(db, projectId, "human", verifiedBy, "filing_email.verified", { track, authority: authority.name, kind: authority.kind, address: r.record?.address, sourceUrl: r.record?.sourceUrl });
+  res.json({ track, authority, record: r.record, usable: true, problems: [] });
+}));
+app.delete("/api/projects/:id/filing-email", asyncHandler(async (req, res) => {
+  const fe = await import("./filingEmail");
+  const { isConfirmingPerson } = await import("./feeConfirm");
+  const projectId = String(req.params.id);
+  const { project } = getProjectDetail(db, projectId);
+  const track = filingEmailTrack(req.query.track ?? req.body?.track);
+  const by = namedPersonDecider(req, "verifiedBy",
+    "Sign in to withdraw an authority's filing email.",
+    "Name the person withdrawing an authority's filing email.", isConfirmingPerson);
+  const authority = fe.authorityForTrack(project, track);
+  if (!authority || !fe.clearFilingEmail(db, authority)) throw new HttpError(404, "No filing email is on file for this track's authority.");
+  addAuditLog(db, projectId, "human", by, "filing_email.withdrawn", { track, authority: authority.name, kind: authority.kind });
+  res.json({ track, authority, record: null, usable: false });
+}));
+app.get("/api/projects/:id/filing-email/drafts/:sendId/eml", asyncHandler(async (req, res) => {
+  const fe = await import("./filingEmail");
+  const { project } = getProjectDetail(db, String(req.params.id));
+  const eml = await fe.filingEmailDraftEml(db, project, String(req.params.sendId));
+  addAuditLog(db, project.id, "human", String(currentUser(db, req)?.email || "dashboard"), "filing_email.draft_downloaded", { sendId: String(req.params.sendId) });
+  res.setHeader("Content-Type", "message/rfc822");
+  res.setHeader("Content-Disposition", `attachment; filename="${eml.filename.replace(/[^a-z0-9._-]/gi, "_")}"`);
+  res.send(eml.content);
 }));
 
 // THE MANUAL WRITER. The body is passed through as recordPermitStatusCheck's input, so
@@ -3127,6 +3816,35 @@ app.post(
   },
 );
 
+// BULK JOB-FOLDER DROP (#538): one zip (or, for the operator, a server folder) with one sub-folder
+// per job becomes one project per folder, each through email intake's per-job pipeline
+// (bulkJobDrop.ts). Two steps: upload/preview lists the job folders and queues nothing, so the person
+// sees the count (one Parser-cost model read per folder) before starting. The org is the CHOSEN
+// client's, never the archive's (rule 6): a client outside the caller's org is a 404, the zip lands
+// under that org's root, and every folder job is stamped with it. No server path is returned.
+app.post(
+  "/api/batch-import/job-drop/upload",
+  express.raw({ type: "*/*", limit: process.env.BATCH_ZIP_LIMIT || "2gb" }),
+  asyncHandler(async (req, res) => {
+    const body = req.body;
+    if (!Buffer.isBuffer(body) || body.length === 0) throw new HttpError(400, "Uploaded zip was empty or unreadable.");
+    const { previewUploadedDrop } = await import("./bulkJobDrop");
+    res.status(201).json(previewUploadedDrop(db, requestScope(db, req), String(req.query.clientId || ""), body));
+  }),
+);
+app.post("/api/batch-import/job-drop/preview", asyncHandler(async (req, res) => {
+  const { previewFolderDrop } = await import("./bulkJobDrop");
+  res.json(previewFolderDrop(db, requestScope(db, req), (req.body || {}).clientId, (req.body || {}).folderPath));
+}));
+app.post("/api/batch-import/job-drop/start", asyncHandler(async (req, res) => {
+  const { startDrop } = await import("./bulkJobDrop");
+  res.status(201).json(startDrop(db, requestScope(db, req), req.body || {}, currentUser(db, req)?.email || "operator"));
+}));
+app.get("/api/batch-import/job-drops", asyncHandler(async (req, res) => {
+  const { listBulkDrops } = await import("./bulkJobDrop");
+  res.json(listBulkDrops(db, reqOrgFilter(db, req)));
+}));
+
 // Check folder scan job status + get full result. SCOPED to the caller's org: a folder_scan
 // job's payload carries a server folderPath and its results name every scanned PDF's path, and
 // /scan + /upload-zip stamp the caller's org on it. Without the orgId, listJobs fell back to the
@@ -3182,7 +3900,17 @@ app.post(
     const { readPlanSetForExtraction } = await import("./scannedPlanSet");
     try {
       const read = await readPlanSetForExtraction(createLLMProvider(), bytes, { defaultState });
-      if (read.mode === "text" || !read.extraction) throw new HttpError(409, `This plan set has a text layer (${read.textChars} characters over ${read.pageCount} page(s)) and no image-only page; the text parser reads it.`);
+      // Pages whose text is drawn as outlines (#696) are named even here: the text parser reads the
+      // rest, those pages are read by nobody, and the parser review says so.
+      if (read.mode === "text" || !read.extraction) throw new HttpError(409, `This plan set has a text layer (${read.textChars} characters over ${read.pageCount} page(s)) and no image-only page; the text parser reads it.`, read.outlinedPages?.length ? { outlinedTextPages: read.outlinedPages } : {});
+      // The server's own note of what this image read said about the AC disconnect, keyed by these
+      // bytes and the caller's org (#135, planSetImageReads): the read's result goes back to the parser
+      // page and returns on save as plain fields, which are never evidence by themselves. A failed
+      // note never takes down the read; the job is then held exactly as before.
+      try {
+        const { recordPlanSetImageRead } = await import("./planSetImageReads");
+        recordPlanSetImageRead(db, requestScope(db, req).orgId, bytes, read.extraction);
+      } catch (err) { logger.warn("parser", "could not note the plan set's image read", { err: err instanceof Error ? err.message : String(err) }); }
       // Hybrid: the image pages' read goes back to the parser page, which merges it under the text
       // read (the text read resolves the client).
       if (read.mode === "hybrid") { res.json(read.extraction satisfies ParserExtractionResponse); return; }
@@ -3522,8 +4250,10 @@ app.post("/api/projects/:id/fee-sheet/read-portal", asyncHandler(async (req, res
 // only — unlike the payment-quote route below it, asking for an invoice never creates a row.
 app.get("/api/projects/:id/invoice", asyncHandler(async (req, res) => {
   const { buildProjectInvoice } = await import("./invoices");
+  const { projectLedgerEntries } = await import("./clientInvoices");
   const detail = getProjectDetail(db, String(req.params.id));
-  res.json({ invoice: buildProjectInvoice(db, detail.project) });
+  // ledger (#700): which of this project's lines are already on a client invoice, and which one.
+  res.json({ invoice: buildProjectInvoice(db, detail.project), ledger: projectLedgerEntries(db, detail.project.id) });
 }));
 
 app.post("/api/projects/:id/prepare-submission", (req, res) => {
@@ -3546,8 +4276,13 @@ app.post("/api/projects/:id/prepare-submission", (req, res) => {
   // this (PowerClerk numbers a draft), and neither is a staged draft awaiting approval: both run.
   // The trackless legacy stage keeps its own refusals in the job.
   if (track) {
-    const filed = trackSubmittedAndTracked(db, projectId, track, requiredTracks(getProjectDetail(db, projectId).project));
+    const { project } = getProjectDetail(db, projectId);
+    const filed = trackSubmittedAndTracked(db, projectId, track, requiredTracks(project));
     if (filed) throw new HttpError(409, trackSubmittedSentence(filed), { track, submittedAndTracked: filed.via, number: filed.number, tracked: filed.tracked });
+    // #664: a utility a person verified as filing INSIDE the permit application has no NEM filing of
+    // its own to stage — refused here, before an approval is minted (the job asks again).
+    const withPermit = track === "nem" ? nemFiledWithPermit(db, project) : null;
+    if (withPermit) throw new HttpError(409, withPermitStageSentence(withPermit, project.utility), { track, nemFiledWithPermit: true });
   }
   // APPROVE & SUBMIT: A NAMED PERSON APPROVES THIS RUN. The approval row is the only thing that
   // lets the run click the portal's final submit (repository.maySubmitAutomatically also needs
@@ -3564,7 +4299,19 @@ app.post("/api/projects/:id/prepare-submission", (req, res) => {
     if (AUTH_ENABLED && !user) throw new HttpError(401, "Sign in to approve a final submit.");
     const approverName = AUTH_ENABLED ? String(user?.name || user?.email || "").trim() : String(req.body?.approverName || "").trim();
     if (approverName) {
-      approval = createRunApproval(db, { projectId, track: track ?? "permit", approver: approverName, approverUserId: user?.id ?? null });
+      // THE OPEN REVIEW ITEMS ARE ACKNOWLEDGED FIRST (review-audit draft 01). Each measured reviewer
+      // warning and unverified form mapping this filing carries must have been ticked on the approval
+      // sheet — with the content the server holds now, against the plan set on file — or no approval
+      // is minted and nothing is enqueued. Adds a stop only: what is acknowledged is recorded with the
+      // approval, and the run checks it again (automaticSubmitRefusals).
+      const ack = approvalAcknowledgementRefusals(db, getProjectDetail(db, projectId).project, track ?? null, req.body?.acknowledgements);
+      if (ack.problems.length) {
+        addAuditLog(db, projectId, "human", approverName, "portal.final_submit_acknowledgement_missing", { track: track ?? "permit", problems: ack.problems });
+        throw new HttpError(409,
+          `Approve & auto-submit needs each open review item acknowledged on the approval sheet first: ${ack.problems.join("; ")}. Nothing was approved or started — reopen the approval sheet, read the items and tick each one.`,
+          { acknowledgementsNeeded: true, problems: ack.problems });
+      }
+      approval = createRunApproval(db, { projectId, track: track ?? "permit", approver: approverName, approverUserId: user?.id ?? null, acknowledgements: ack.acknowledgements });
     } else {
       addAuditLog(db, projectId, "human", "dashboard", "portal.final_submit_not_approved", {
         track: track ?? "permit", reason: "no named approver — the run will stop at review",
@@ -3621,7 +4368,10 @@ app.post("/api/projects/:id/prepare-submission", (req, res) => {
       const detail = getProjectDetail(db, projectId);
       const run = detail.portalRuns?.[0];
       if (!run) return;
-      if (run.pauseReason === "mfa_captcha") {
+      if (run.status === "awaiting_payment") {
+        // A FEE STOP (#576): the payment sentence (amount, portal, pay there) — never MFA wording.
+        sseBroadcast({ type: "run_paused", projectId, message: run.errorMessage || "Payment needed on the portal. Pay there, then press We paid the portal on the track.", data: { pauseReason: "fee_payment" } });
+      } else if (run.pauseReason === "mfa_captcha") {
         sseBroadcast({ type: "run_paused", projectId, message: "Portal requires attention — MFA or CAPTCHA detected. Complete it in the browser, then resume.", data: { pauseReason: run.pauseReason } });
       } else if (run.status === "failed") {
         const why = run.errorMessage || "see the run log on the project for details";
@@ -3774,6 +4524,15 @@ app.post("/api/projects/:id/autofill-specs", asyncHandler(async (req, res) => {
   res.json({ spec, suggestions, applied, detail: getProjectDetail(db, String(req.params.id)) });
 }));
 
+// #340 — STOP A RUNNING STAGE. A person asks a recipe replay this server is driving to stop: it ends
+// at its next step boundary (no further fill or click), closes its browser, and is recorded
+// 'cancelled' with who and when (stageCancel.ts). Never submits and never clicks to clean up (rule 1);
+// a run already at the review screen is refused (that window is the person's).
+// Scope: /api/portal-runs/:id, so the child scope guard 404s another tenant's run (rule 6).
+app.post("/api/portal-runs/:id/cancel", (req, res) => {
+  res.json(cancelPortalRun(db, String(req.params.id), currentUser(db, req)?.email || "operator"));
+});
+
 app.post("/api/portal-runs/:id/capture-confirmation", (req, res) => {
   res.json(captureConfirmation(db, req.params.id, req.body || {}));
 });
@@ -3809,18 +4568,33 @@ app.get("/api/projects/:id/staged-reviews/:runId/screenshot", (req, res) => {
   res.sendFile(file);
 });
 
+// #569 — A FILING'S CONFIRMATION SCREENSHOT (the portal's "submitted / your application number is …"
+// page, every known secret masked). Serves ONLY the submission_confirmation document the submission row
+// names, of THIS project (submissionConfirmation.submissionConfirmationFile) — never the run's unmasked
+// outcome shot. Under /api/projects/:id, so the scope guard covers it (rule 6); another project's
+// submission, or none, is a 404.
+app.get("/api/projects/:id/submissions/:submissionId/confirmation-screenshot", (req, res) => {
+  const file = submissionConfirmationFile(db, String(req.params.id), String(req.params.submissionId));
+  if (!file) throw new HttpError(404, "No confirmation screenshot for this project's filing.");
+  res.setHeader("Content-Type", "image/png");
+  res.setHeader("X-Content-Type-Options", "nosniff");
+  res.setHeader("Cache-Control", "no-store");
+  res.sendFile(file);
+});
+
 // Serve the auto-captured review-page screenshot for a portal run (or auto-learn recipe).
 app.get("/api/projects/:id/portal-runs/:runId/review-screenshot", (req, res) => {
   const projectId = String(req.params.id);
   const runId = String(req.params.runId);
-  // Check portal_runs first (for recipe-replay runs that generate portal_run records).
-  const run = db.get<{ screenshots_path: string; project_id: string }>(
-    "SELECT screenshots_path, project_id FROM portal_runs WHERE id = ?",
-    [runId],
-  );
-  if (run && run.project_id === projectId && run.screenshots_path && fs.existsSync(run.screenshots_path)) {
+  // #316 — this project's runs first (reviewScreenshot.ts): the run's picture, its folder's masked
+  // review shot when the row names none, or — for the track card's recipe id — this project's newest
+  // run of that recipe by its masked review shot.
+  const own = reviewScreenshotFile(db, projectId, runId);
+  if (own) {
     res.setHeader("Content-Type", "image/png");
-    res.sendFile(run.screenshots_path);
+    res.setHeader("X-Content-Type-Options", "nosniff");
+    res.setHeader("Cache-Control", "no-store");
+    res.sendFile(own);
     return;
   }
   // Fall back to portal_recipes (auto-learn stores recipe id; screenshot path in notes).
@@ -3938,6 +4712,30 @@ app.post("/api/projects/:id/submittal-tracks/:type/signature-request-sent", asyn
   const signature = confirmSignatureRequestSent(db, detail.project.id, { confirmedBy, userId: user?.id ?? null });
   res.json({ ok: true, signature, tracks: getSubmittalTracks(db, detail.project) });
 }));
+// "PAID" (#576 item 4): a person paid this track's fee ON THE PORTAL — the fee a staging run stopped
+// on (awaiting_payment: the filing is recorded with the portal's record number) or a fee due after
+// approval / an emailed fee request (fee_due is cleared). The amount actually paid becomes the actual
+// fee fee accuracy reads. Automation never pays (rule 1); this records a person's payment. Under
+// /api/projects/:id, so the org scope guard answers another org's project with a 404 (rule 6). The
+// name is the signed-in user's when auth is on, never the body's.
+app.post("/api/projects/:id/submittal-tracks/:type/paid", asyncHandler(async (req, res) => {
+  const type = String(req.params.type) as SubmittalTrackType;
+  if (!SUBMITTAL_TRACK_TYPES.includes(type)) throw new HttpError(400, "Unknown submittal track type.");
+  const detail = getProjectDetail(db, String(req.params.id));
+  const user = currentUser(db, req);
+  if (AUTH_ENABLED && !user) throw new HttpError(401, "Sign in to record a payment.");
+  const paidBy = AUTH_ENABLED ? String(user?.name || user?.email || "").trim() : String(req.body?.paidBy || "").trim();
+  const { markTrackPaid } = await import("./trackPaid");
+  const result = markTrackPaid(db, detail.project, type, {
+    recordNumber: req.body?.recordNumber,
+    amountPaidUsd: req.body?.amountPaidUsd,
+    paidBy,
+  });
+  addAuditLog(db, detail.project.id, "human", paidBy || "operator", "track.fee_paid", {
+    track: type, kind: result.paid.kind, amountUsd: result.paid.amountUsd, actualFeeUsd: result.actualFeeUsd,
+  });
+  res.json({ ok: true, message: result.message, paid: result.paid, tracks: getSubmittalTracks(db, detail.project) });
+}));
 app.post("/api/projects/:id/submittal-tracks/:type/mark-submitted", asyncHandler(async (req, res) => {
   const type = String(req.params.type) as SubmittalTrackType;
   if (!SUBMITTAL_TRACK_TYPES.includes(type)) throw new HttpError(400, "Unknown submittal track type.");
@@ -3962,7 +4760,9 @@ app.post("/api/projects/:id/submittal-tracks/:type/mark-submitted", asyncHandler
     const scoped = type === "nem"
       ? { scopeType: "utility" as const, state: detail.project.state, utility: detail.project.utility }
       : { scopeType: "ahj" as const, state: detail.project.state, ahj: detail.project.ahj, utility: detail.project.utility };
-    const draft = findAnyRecipeForProject(db, scoped);
+    // A job held by its class (#688) is not evidence that a residential draft works: its manual
+    // filing promotes nothing.
+    const draft = projectClassHoldReason(db, detail.project.id) ? null : findAnyRecipeForProject(db, scoped);
     if (draft) {
       // Eligibility-guarded (reached-review) promotion — a paused/partial or stale
       // abandoned recording must NOT be silently promoted by an unrelated manual submit.
@@ -3980,6 +4780,80 @@ app.post("/api/projects/:id/submittal-tracks/:type/mark-submitted", asyncHandler
   } catch { /* promotion/close are best-effort — marking submitted must never fail on them */ }
   res.status(201).json({ ok: true, tracks: getSubmittalTracks(db, getProjectDetail(db, String(req.params.id)).project) });
 }));
+
+// ── TWO-STAGE PERMIT FILINGS (#28 part 1): the second stage as a tracked HUMAN step ──────────────
+// Every route here records what a person did or decided; none opens, fills, uploads to or submits in
+// any system, and none stores a filing destination. All sit under /api/projects/:id, so the org scope
+// guard answers another org's project with a 404 before a handler runs (rule 6). The person's name is
+// the signed-in user's when auth is on, never the body's.
+function secondStageTrack(req: express.Request): SubmittalTrackType {
+  const type = String(req.params.type) as SubmittalTrackType;
+  if (!SUBMITTAL_TRACK_TYPES.includes(type)) throw new HttpError(400, "Unknown submittal track type.");
+  return type;
+}
+function secondStagePerson(req: express.Request, what: string): string {
+  const user = currentUser(db, req);
+  if (AUTH_ENABLED && !user) throw new HttpError(401, `Sign in to ${what}.`);
+  return AUTH_ENABLED ? String(user?.name || user?.email || "").trim() : String(req.body?.by || req.query?.by || "").trim();
+}
+// A named person CONFIRMS the agency's second stage (pre-filled from the cited description). Until
+// this, a described second stage changes nothing about the track (rule 3).
+app.post("/api/projects/:id/submittal-tracks/:type/second-stage/confirm", (req, res) => {
+  const type = secondStageTrack(req);
+  const detail = getProjectDetail(db, String(req.params.id));
+  const by = secondStagePerson(req, "confirm a second stage");
+  const stage = confirmSecondStage(db, detail.project, type, { system: req.body?.system, trigger: req.body?.trigger }, by);
+  res.json({ ok: true, stage, tracks: getSubmittalTracks(db, detail.project) });
+});
+// A named person says the agency has no second stage (any more).
+app.post("/api/projects/:id/submittal-tracks/:type/second-stage/remove", (req, res) => {
+  const type = secondStageTrack(req);
+  const detail = getProjectDetail(db, String(req.params.id));
+  const removed = removeSecondStage(db, detail.project, type, secondStagePerson(req, "remove a second stage"));
+  res.json({ ok: true, removed, tracks: getSubmittalTracks(db, detail.project) });
+});
+// The application was made BY HAND on a two-stage agency (no fee-stop run to press Paid on): recorded
+// as waiting on its second stage — not filed.
+app.post("/api/projects/:id/submittal-tracks/:type/second-stage/application-made", (req, res) => {
+  const type = secondStageTrack(req);
+  const detail = getProjectDetail(db, String(req.params.id));
+  const by = secondStagePerson(req, "record an application");
+  markTrackFirstStage(db, detail.project, type, { recordNumber: String(req.body?.recordNumber ?? ""), by, via: "by_hand" });
+  res.status(201).json({ ok: true, tracks: getSubmittalTracks(db, getProjectDetail(db, String(req.params.id)).project) });
+});
+// The person's own screenshot of the second system's confirmation (PNG / JPEG by its bytes): evidence
+// for the mark below. Staff-only; never a project document, never attached to a filing.
+app.post(
+  "/api/projects/:id/submittal-tracks/:type/second-stage/screenshot",
+  express.raw({ type: ["image/png", "image/jpeg"], limit: "10mb" }),
+  (req, res) => {
+    const type = secondStageTrack(req);
+    const detail = getProjectDetail(db, String(req.params.id));
+    const by = secondStagePerson(req, "attach a screenshot");
+    if (!Buffer.isBuffer(req.body) || req.body.length === 0) throw new HttpError(400, "PNG/JPEG image body required.");
+    saveSecondStageScreenshot(db, detail.project, type, req.body, by);
+    res.status(201).json({ ok: true, tracks: getSubmittalTracks(db, detail.project) });
+  },
+);
+app.get("/api/projects/:id/submittal-tracks/:type/second-stage/screenshot", (req, res) => {
+  const type = secondStageTrack(req);
+  getProjectDetail(db, String(req.params.id));
+  const file = secondStageScreenshotFile(db, String(req.params.id), type);
+  if (!file) throw new HttpError(404, "No screenshot is on file for this track's second stage.");
+  res.setHeader("Content-Type", file.contentType);
+  res.setHeader("Cache-Control", "private, no-store");
+  res.setHeader("X-Content-Type-Options", "nosniff");
+  res.sendFile(file.path);
+});
+// A NAMED PERSON MARKS THE PLAN UPLOAD DONE, with the confirmation number or a saved screenshot. This
+// is what files a track that waits on its second stage (submittalTracks.markSecondStageUploaded).
+app.post("/api/projects/:id/submittal-tracks/:type/second-stage/uploaded", (req, res) => {
+  const type = secondStageTrack(req);
+  const detail = getProjectDetail(db, String(req.params.id));
+  const uploadedBy = secondStagePerson(req, "mark an upload done");
+  markSecondStageUploaded(db, detail.project, type, { confirmationNumber: req.body?.confirmationNumber, uploadedBy });
+  res.status(201).json({ ok: true, tracks: getSubmittalTracks(db, getProjectDetail(db, String(req.params.id)).project) });
+});
 
 app.get("/parser", (_req, res) => {
   res.sendFile(path.join(frontendDir, "parser.html"));
@@ -4017,8 +4891,12 @@ app.use((err: unknown, req: Request, res: Response, _next: NextFunction) => {
         ? new HttpError(413, `Upload is too large. For a big .zip of project PDFs, raise BATCH_ZIP_LIMIT in your .env (default 2gb) or unzip it locally and use the "Scan Folder" path instead. For a big .mbox file, paste its full local path and click Import Path.`)
         : new HttpError(bodyParserStatus && bodyParserStatus >= 400 && bodyParserStatus < 600 ? bodyParserStatus : 500, err instanceof Error ? err.message : "Unknown error.");
   // 5xx are real bugs — print a copy-pasteable block. 4xx are client errors — one line.
-  if (httpError.status >= 500) logErrorBlock("http", err, { route: `${req.method} ${req.path}`, status: httpError.status });
-  else logger.warn("http", `${httpError.status} ${req.method} ${req.path}`, { reason: httpError.message });
+  // A tokenized public path logs with its token masked; a client's onboarding answer (a refusal can
+  // quote what was typed) is never logged at all (rule 2, clientOnboarding.ts).
+  const logPath = maskPublicTokenPath(req.path);
+  const withheld = /^\/api\/public\/onboarding\//i.test(req.path);
+  if (httpError.status >= 500) logErrorBlock("http", withheld ? new Error("onboarding route failed (detail withheld: client answers)") : err, { route: `${req.method} ${logPath}`, status: httpError.status });
+  else logger.warn("http", `${httpError.status} ${req.method} ${logPath}`, { reason: withheld ? "(withheld: a client's onboarding answer)" : httpError.message });
   // A 5xx whose message was WRITTEN FOR THE OPERATOR (normalizeLlmError: "add credits", "rate-
   // limited", "rejected the API key") reaches the dashboard as written; the generic line stands in
   // only when no safe message exists (an uncaught Error's message may carry a path or a stack).
@@ -4090,6 +4968,8 @@ const server = app.listen(port, listen.host, () => {
   startBackupScheduler(db);
   startArtifactRetention();
   startMonitorScheduler(db);
+  // #701: the daily READ of QuickBooks payment status. Does nothing unless QUICKBOOKS_SYNC=1; never sends.
+  void import("./quickbooks").then((m) => m.startQuickBooksStatusScheduler(db)).catch(() => undefined);
   startStaffDigestScheduler(db);
   startAhjFormRefreshScheduler(db);
   startKbLinkCheckScheduler(db);

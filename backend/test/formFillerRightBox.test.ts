@@ -20,6 +20,7 @@ import { PDFDocument } from "pdf-lib";
 import { autoFillByFieldName } from "../src/formFiller";
 import { autoPlaceFromData, extractLabels, splitBlankRuns, type AutoPlacement, type LabelItem } from "../src/formTextLayer";
 import { matchSynonym, isCombinedCityStateZip, headerParty, keyAllowsParty, isApplicantBanner } from "../src/formFillSlots";
+import { fileURLToPath } from "node:url";
 
 let failures = 0;
 let passed = 0;
@@ -28,7 +29,7 @@ const check = async (label: string, fn: () => void | Promise<void>): Promise<voi
   catch (err) { failures++; console.error(`  FAIL - ${label}\n         ${err instanceof Error ? err.message : String(err)}`); }
 };
 
-const FIXTURES = path.join(path.dirname(new URL(import.meta.url).pathname), "fixtures");
+const FIXTURES = path.join(path.dirname(fileURLToPath(import.meta.url)), "fixtures");
 const blank = (f: string): Uint8Array => new Uint8Array(fs.readFileSync(path.join(FIXTURES, f)));
 
 // The tool's data panel, as the operator fills it: the row (homeowner/site) and the company

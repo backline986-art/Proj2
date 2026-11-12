@@ -3,13 +3,14 @@ import type { AppDb } from "./db";
 import { filledFormsByDocType, formContradictsPath } from "./ahjForms";
 import { generatedDocFilesByType } from "./generatedDocFiles";
 import { resolvePermitPath } from "./permitPath";
-import { projectDocsByType } from "./projectDocuments";
+import { projectDocsByType, SUBMISSION_CONFIRMATION_DOC_TYPE } from "./projectDocuments";
 import { docDisciplineFor, docFitsTrack } from "./docDiscipline";
 // A deliberate import cycle: requiredDocuments imports this module's uploadedSubmissionDocuments /
 // duplicateUploads, and this module asks requiredDocuments's requiredListCheck which utility
 // documents an AHJ names (OD-4). Both use each other only inside function bodies, so ESM
 // instantiation resolves it (function declarations are bound before either module evaluates).
-import { requiredListCheck } from "./requiredDocuments";
+import { requiredListCheck, WITH_PERMIT_DOC_TYPE } from "./requiredDocuments";
+import { nemFiledWithPermit } from "./utilityFilingLookup";
 import { createHash } from "node:crypto";
 import fs from "node:fs";
 
@@ -59,6 +60,11 @@ export function submissionDocumentsByType(db: AppDb, project: ProjectRecord, tra
  */
 function utilityDocsNamedByAhj(db: AppDb, project: ProjectRecord): Set<string> {
   const named = new Set<string>();
+  // #664: a utility a person VERIFIED as filing inside the permit application — its application (and
+  // only that: never the bill or the meter photo) travels in the permit packet.
+  try {
+    if (nemFiledWithPermit(db, project)) named.add(WITH_PERMIT_DOC_TYPE);
+  } catch { /* fail closed: nothing added */ }
   try {
     const list = requiredListCheck(db, project, { required: [], presence: [], missingBlocking: [], missingAdvisory: [] });
     if (list.source === "unknown") return named;
@@ -94,6 +100,8 @@ export function duplicateUploads(docs: Record<string, string>): Array<{ docType:
 
 export function uploadedSubmissionDocuments(db: AppDb, project: ProjectRecord): Record<string, string> {
   const docs = projectDocsByType(db, project.id);
+  // A filing's confirmation screenshot (#569) is evidence that it went, never a document to upload.
+  delete docs[SUBMISSION_CONFIRMATION_DOC_TYPE];
   for (const dup of duplicateUploads(docs)) delete docs[dup.docType];
   const permitPath = resolvePermitPath(project).path;
   const rows = db.query<{ doc_type: string; stored_path: string; original_filename: string }>(

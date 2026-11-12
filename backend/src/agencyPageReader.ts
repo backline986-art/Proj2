@@ -228,7 +228,14 @@ async function parseFetched(url: string, finalUrl: string, status: number, conte
 export async function pdfText(bytes: Uint8Array): Promise<string> {
   const { extractPdfRows } = await import("./pdfTables");
   const rows = await extractPdfRows(bytes, { maxPages: 150 });
-  return rows.map((r) => r.cells.join("  ")).join("\n");
+  return rows.map((r) => r.cells.map(joinSplitAmounts).join("  ")).join("\n");
+}
+/** A DOLLAR AMOUNT SPLIT BY A GLYPH GAP inside one PDF cell ("$5 78.00", "$1,033 .00": the PDF places
+ *  the digits as separate runs) is one amount: rejoined only when the pieces end in cents, inside one
+ *  cell (cells are joined by two spaces, so two columns never merge). Found by the bot-vs-research
+ *  comparison 2026-11-10: a city's fee table read "$5 78.00" and its TOTAL "$1,033 .00". */
+export function joinSplitAmounts(cell: string): string {
+  return String(cell ?? "").replace(/(\$\s?\d[\d,]*) (?=[\d,]*\.\d{2}\b)/g, "$1");
 }
 
 /** Outlook safelinks wrap the real target in ?url= — the page's author meant that target. */
@@ -283,8 +290,33 @@ export function parseHtml(html: string, pageUrl: string): { title: string; text:
     if (cells.length) $(el).text(`\n${cells.join(" | ")}\n`);
   });
   $("p, li, div, h1, h2, h3, h4, h5, h6, dt, dd, table, section, article, blockquote").each((_i, el) => { $(el).append("\n"); });
-  const text = $("body").text().replace(/[ \t\f\v\r]+/g, " ").replace(/\s*\n\s*/g, "\n").split("\n").filter((l) => l.length <= 600).join("\n").trim().slice(0, TEXT_CAP);
+  const text = $("body").text().replace(/[ \t\f\v\r]+/g, " ").replace(/\s*\n\s*/g, "\n").split("\n").flatMap(readableLines).join("\n").trim().slice(0, TEXT_CAP);
   return { title, text, links, html: html.slice(0, HTML_CAP) };
+}
+
+/** The longest run of words read as ONE line. Past it, a line with no sentence in it is a menu or
+ *  a script's leftovers run together, and is dropped. */
+const LINE_MAX = 600;
+
+/** A LONG PARAGRAPH IS STILL THE PAGE'S OWN WORDS. Measured on saved pages (fee round, 2026-11):
+ *  a utility prints its application fee inside one long list item and again in one long FAQ answer,
+ *  each past 600 characters, and the old rule (drop every line over 600) removed both, so a correct
+ *  quote of the fee was "not on the page" as Keelix read it. A long line made of sentences is kept,
+ *  cut at its sentence ends so each piece is a line of its own; a piece that is still over the limit
+ *  has no sentence in it and is dropped, as before. */
+function readableLines(line: string): string[] {
+  if (line.length <= LINE_MAX) return [line];
+  const sentences = line.split(/(?<=[.!?;:])\s+(?=[A-Z0-9"“(\[$])/);
+  if (sentences.length < 2) return [];
+  const out: string[] = [];
+  let run = "";
+  for (const s of sentences) {
+    if (s.length > LINE_MAX) { if (run) out.push(run); run = ""; continue; }
+    // Sentences stay together while they fit, so a quote that spans two of them is still one line.
+    if (run && run.length + 1 + s.length > LINE_MAX) { out.push(run); run = s; } else run = run ? `${run} ${s}` : s;
+  }
+  if (run) out.push(run);
+  return out;
 }
 
 const FRACTIONS: Record<string, string> = { "½": "1/2", "¼": "1/4", "¾": "3/4", "⅓": "1/3", "⅔": "2/3", "⅛": "1/8", "⅜": "3/8", "⅝": "5/8", "⅞": "7/8" };

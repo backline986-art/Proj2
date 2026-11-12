@@ -3,6 +3,14 @@
 //   npx tsx scripts/research-fee-schedules.ts --db <path> [--out findings.json]
 //   npx tsx scripts/research-fee-schedules.ts --db <path> --only "coos county"
 //   npx tsx scripts/research-fee-schedules.ts --db <path> --list
+//   npx tsx scripts/research-fee-schedules.ts --db <path> --state <ST> --ahj "<AHJ name>" [--discipline electrical] --out findings.json
+//
+// ANY AHJ, NOT JUST THE LIST (#661). --state + --ahj research one jurisdiction this build has
+// never filed in — the first job in a new city needs a quote before anybody has read its fee
+// page. Nothing about the jurisdiction is in code: the name and state are the whole input, and
+// the report says, line by line, what the published schedule priced, what it printed without a
+// price we could read, and what the strict default expected and nothing we read named. A city
+// whose schedule cannot be found is reported NOT FOUND with the hosts tried; nothing is stored.
 //
 // --db IS REQUIRED AND HAS NO DEFAULT. Every other script in this directory falls back to
 // backend/data/autopilot.sqlite, which is right for a seed the operator asked for and wrong
@@ -31,6 +39,7 @@
 // would apply different findings than the ones a person read and approved.
 import fs from "node:fs";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import type { FeeScheduleFinding, FeeScheduleRecord, FeeTrack, FeeDocumentLedger } from "../backend/src/feeSchedules";
 
 export interface HarvestTarget {
@@ -38,6 +47,8 @@ export interface HarvestTarget {
   ahj?: string;
   utility?: string;
   track: FeeTrack;
+  /** Which permit ("structural" | "electrical" | "combo"); blank = whatever the AHJ publishes. */
+  discipline?: string;
   /** Why this jurisdiction is on the list — printed, so the run explains itself. */
   why: string;
 }
@@ -70,6 +81,23 @@ export const DEFAULT_TARGETS: HarvestTarget[] = [
     why: "A real project's utility; its recipe needs re-recording but the fee is a fee either way.",
   },
 ];
+
+/** The one ad-hoc target --state/--ahj (or --utility for a NEM fee) names, or null when neither
+ *  was given. Exported for the test: a typo here would research the wrong jurisdiction. */
+export function adHocTarget(flag: (name: string) => string): HarvestTarget | null {
+  const state = flag("state").toUpperCase();
+  const ahj = flag("ahj");
+  const utility = flag("utility");
+  if (!state && !ahj && !utility) return null;
+  if (!/^[A-Z]{2}$/.test(state)) throw new Error("--state must be a two-letter state code when --ahj or --utility is given.");
+  if (!ahj && !utility) throw new Error("--state needs --ahj (a permit fee) or --utility (an interconnection fee).");
+  const track: FeeTrack = ahj ? "permit" : "nem";
+  return {
+    state, ahj: ahj || undefined, utility: utility || undefined, track,
+    discipline: flag("discipline") || undefined,
+    why: "Named on the command line — a jurisdiction with no stored schedule to research from its own published documents.",
+  };
+}
 
 /** A schedule row flattened for the report and for replay. */
 function summarise(row: FeeScheduleRecord | null): Record<string, unknown> | null {
@@ -139,6 +167,8 @@ async function main(): Promise<void> {
   }
   const only = flag("only").toLowerCase();
   const outPath = flag("out");
+  let adHoc: HarvestTarget | null;
+  try { adHoc = adHocTarget(flag); } catch (err) { console.error(err instanceof Error ? err.message : String(err)); process.exit(1); }
 
   await import("dotenv/config");
   process.env.AUTOPILOT_DB_PATH = dbPath;
@@ -149,11 +179,11 @@ async function main(): Promise<void> {
 
   const { openDatabase } = await import("../backend/src/db");
   const {
-    researchFeeSchedule, getFeeSchedule, feeScheduleProfileKey, newFeeDocumentLedger,
+    researchFeeSchedule, getFeeSchedule, feeScheduleProfileKey, newFeeDocumentLedger, feeDiscipline,
   } = await import("../backend/src/feeSchedules");
   const db = await openDatabase();
 
-  const targets = DEFAULT_TARGETS.filter(
+  const targets = adHoc ? [adHoc] : DEFAULT_TARGETS.filter(
     (t) => !only || `${t.state} ${t.ahj || ""} ${t.utility || ""}`.toLowerCase().includes(only),
   );
   if (!targets.length) { console.error(`Nothing matches --only "${only}".`); process.exit(1); }
@@ -166,17 +196,18 @@ async function main(): Promise<void> {
   for (const target of targets) {
     const who = target.track === "nem" ? target.utility : target.ahj;
     const key = feeScheduleProfileKey(target, target.track);
-    const before = getFeeSchedule(db, key, target.track);
+    const discipline = feeDiscipline(target.discipline);
+    const before = getFeeSchedule(db, key, target.track, discipline);
     console.log(bar(`${target.track.toUpperCase()}  ${target.state}  ${who}`));
     console.log(`  why: ${target.why}`);
     console.log(`  before: ${before ? `${before.confidence}, basis ${before.basis}, ${before.brackets.length} bracket(s), ${before.sourceUrl || "no url"}` : "(no row)"}`);
 
     const ledger: FeeDocumentLedger = newFeeDocumentLedger();
     const startedAt = Date.now();
-    const outcome = await researchFeeSchedule(db, target, { ledger });
+    const outcome = await researchFeeSchedule(db, { ...target, discipline }, { ledger });
     const seconds = Math.round((Date.now() - startedAt) / 1000);
     const finding: FeeScheduleFinding | null = outcome.finding;
-    const after = getFeeSchedule(db, key, target.track);
+    const after = getFeeSchedule(db, key, target.track, discipline);
 
     console.log(`  ran ${seconds}s — found=${outcome.found} saved=${outcome.saved}${outcome.refusedVerified ? " REFUSED (row is human-verified)" : ""}`);
     if (outcome.reason) console.log(`  reason: ${outcome.reason}`);
@@ -199,12 +230,24 @@ async function main(): Promise<void> {
             : `          not corroborated — this row was not found printed with its fee in anything we retrieved`,
         );
       }
-      console.log(`  QUOTE: "${finding.sourceQuote}"`);
+      // EVERY LINE, PRICED OR NAMED (#661): the rest of the bill, read off the stored brackets so
+      // the report and the row are one fact.
+      const held = finding.brackets[0]?.ancillaryCharges ?? [];
+      for (const c of held) {
+        const money = c.amountUsd != null ? `$${c.amountUsd.toFixed(2)}` : `${c.percent}% ${c.percentOf}`;
+        console.log(`      PRICED    ${c.kind.padEnd(16)} ${money}   "${c.matchedLine}"  ${c.sourceUrl}`);
+      }
+      for (const u of finding.brackets[0]?.unpricedLines ?? []) {
+        console.log(`      UNPRICED  ${u.kind.padEnd(16)} ${u.why === "not_found" ? "(not named in any document read)" : `"${u.printedLine || u.label}"`}  ${u.sourceUrl}`);
+      }
+      if ((finding.brackets[0]?.unpricedLines ?? []).length) console.log("      → a quote from this row reads \"at least\" and names each UNPRICED line.");
       console.log(`  quote found in retrieved bytes: ${finding.quoteVerified ? "YES" : "NO — treat this number as unchecked"}`);
     }
 
     findings.push({
       state: target.state, ahj: target.ahj || "", utility: target.utility || "", track: target.track,
+      // apply-fee-findings refuses a row with no discipline against a split-permit jurisdiction.
+      ...(discipline ? { discipline } : {}),
       why: target.why, seconds,
       outcome: { found: outcome.found, saved: outcome.saved, refusedVerified: outcome.refusedVerified, reason: outcome.reason },
       finding: finding && {
@@ -232,4 +275,12 @@ async function main(): Promise<void> {
   db.close();
 }
 
-main().catch((err) => { console.error(err); process.exit(1); });
+// CLI — runs only when invoked directly, so a test can import adHocTarget without a research run.
+const invokedDirectly = ((): boolean => {
+  try {
+    return !!process.argv[1] && path.resolve(process.argv[1]).toLowerCase() === fileURLToPath(import.meta.url).toLowerCase();
+  } catch {
+    return false;
+  }
+})();
+if (invokedDirectly) main().catch((err) => { console.error(err); process.exit(1); });

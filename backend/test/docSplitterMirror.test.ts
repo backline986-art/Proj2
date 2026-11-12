@@ -17,7 +17,7 @@ import fs from "node:fs";
 import path from "node:path";
 import vm from "node:vm";
 import { REPO } from "./_isolate";
-import { CATEGORY_PATTERNS, indexSpecSheets, isUndecidedSpecPage, scorePage } from "../src/docSplitter";
+import { CATEGORY_PATTERNS, batteryPage, indexSpecSheets, isUndecidedSpecPage, scorePage } from "../src/docSplitter";
 
 const sandbox: { window: Record<string, unknown> } = { window: {} };
 vm.runInNewContext(fs.readFileSync(path.join(REPO, "frontend", "parser-review.js"), "utf8"), sandbox, { filename: "parser-review.js" });
@@ -34,13 +34,14 @@ const json = (v: unknown) => JSON.stringify(v);
 
 // One or more phrasings of every category word: sheet names, sheet numbers, words, vocabulary.
 const CATEGORY_WORDS = [
-  "3-LINE DIAGRAM", "3LINE DIAGRAM", "ONE-LINE DIAGRAM", "ONELINE", "SINGLE-LINE DIAGRAM", "SINGLELINE", "ELECTRICAL LINE DIAGRAM", "E 1.1", "E1.1",
+  "3-LINE DIAGRAM", "3LINE DIAGRAM", "3 LINE DIAGRAM", "THREE LINE DIAGRAM", "ONE-LINE DIAGRAM", "ONELINE", "ONE LINE DIAGRAM", "SINGLE-LINE DIAGRAM", "SINGLELINE", "SINGLE LINE DIAGRAM", "ELECTRICAL LINE DIAGRAM", "ELECTRICAL SCHEMATIC", "E 1.1", "E1.1",
   "SITE PLAN", "PLOT PLAN", "FIRE PATHWAYS", "FIRE PATHWAY", "FIRE SETBACKS", "FIRE SETBACK", "FIRE ACCESS", "PV 1.0", "PV1.1",
   "MOUNT DETAIL", "ATTACHMENT DETAIL", "S 1.2", "S1.0", "STRUCTURAL", "ROOF SECTION", "RAFTER", "TRUSS",
   "PV MODULE / INV SPECIFICATION SHEET", "MODULE & INVERTER SPEC", "MODULE/INV. SPEC", "MODULE INV SPEC",
   "MODULE SPECIFICATION SHEET", "PV MODULE SPECIFICATION SHEET", "PV MODULE SPEC",
   "MICROINVERTER SPECIFICATION SHEET", "MICRO-INVERTER SPECS", "MICROINVERTER SPECIFICATIONS", "INVERTER SPECIFICATION SHEET", "INVERTER SPEC", "INVERTERS SPECIFICATIONS",
   "WARNING LABELS", "LABEL LOCATION", "E 1.3", "E1.3", "PLACARD", "PLACARDS",
+  "BATTERY SPEC SHEET", "BATTERIES SPECIFICATIONS", "BATT DATA SHEET", "ESS DATASHEET", "ENERGY STORAGE SYSTEM CUT SHEET", // #261
 ];
 // Words that change how a sheet scores rather than which category it names.
 const MODIFIERS = [
@@ -50,6 +51,10 @@ const MODIFIERS = [
   "SHEET INDEX", "GENERAL NOTES AND PROJECT DATA", // the index / cover page
   "EQUIPMENT SPECIFICATION", "MODULES SPECIFICATIONS", "INVERTER SPECS", // spec-named pages (undecided)
   "Q.TRON Q.MI DS3 MICROINVERTER", "UL 1741", "SEE E 1.1 FOR WIRING", "DIRECTORY PLAQUE", // callout noise
+  // A battery datasheet BODY (#261: kWh capacity + storage words + datasheet rows), a thinner callout
+  // that is not one, and the inverter readings that make a battery page undecided.
+  "USABLE ENERGY 13.5 kWh LITHIUM ION ROUND TRIP EFFICIENCY 90% WARRANTY 10 YEARS", "ESS 13.5 kWh USABLE ENERGY LITHIUM ION UL 9540",
+  "2 MPPT PV INPUT", "HYBRID INVERTER", "INVERTER/BATT",
 ];
 const WORDS = [...CATEGORY_WORDS, ...MODIFIERS];
 const page = (...parts: string[]) => `PV 9.9 Sheet Name ${parts.join(" ")} Sheet Number PV 9.9`;
@@ -86,6 +91,7 @@ console.log("\n2. THE SAME ANSWER ON EVERY PAGE OF THE CORPUS");
   const inv = mismatch("inverter");
   const und = mismatch("undecided");
   const lab = mismatch("labels");
+  const bat = mismatch("battery");
   for (const t of corpus) {
     const be = scorePage(t);
     const fe = PR.scoreSplitPage(t);
@@ -95,12 +101,14 @@ console.log("\n2. THE SAME ANSWER ON EVERY PAGE OF THE CORPUS");
     inv.note(t, be.docTypes.includes("inverter_spec") ? [1] : [], one.inverterSpecs);
     und.note(t, isUndecidedSpecPage(t, be) ? [1] : [], one.undecidedSpecs);
     lab.note(t, be.docTypes.includes("labels"), [...fe.docTypes].includes("labels"));
+    bat.note(t, [be.docTypes.includes("battery_spec") ? [1] : [], batteryPage(t)], [one.batterySpecs, PR.batteryPage(t)]);
   }
   run(`scoreSplitPage = scorePage (docTypes, byPattern) on all ${corpus.length} pages`, !winners.bad.length, `${count.winners} differ, e.g. ${winners.bad.join(" | ")}`);
   run("specSheetPages module spec = the splitter's module_spec part", !mod.bad.length, `${count.module} differ, e.g. ${mod.bad.join(" | ")}`);
   run("specSheetPages inverter spec = the splitter's inverter_spec part", !inv.bad.length, `${count.inverter} differ, e.g. ${inv.bad.join(" | ")}`);
   run("specSheetPages undecided = the splitter's undecidedSpecPages", !und.bad.length, `${count.undecided} differ, e.g. ${und.bad.join(" | ")}`);
   run("labels (PLACARD words, wordsSkipNotes on a NOTES sheet) agree", !lab.bad.length, `${count.labels} differ, e.g. ${lab.bad.join(" | ")}`);
+  run("specSheetPages battery spec + batteryPage = the splitter's battery_spec part (#261)", !bat.bad.length, `${count.battery} differ, e.g. ${bat.bad.join(" | ")}`);
 }
 
 console.log("\n3. A WHOLE SET: EACH SPEC SIDE IS ONLY ITS OWN PAGES");
@@ -209,10 +217,11 @@ console.log("\n4. THE DOCTYPE ORDER (A TIE GOES TO THE EARLIER CATEGORY)");
   // One sheet-NAME word per category, each scoring exactly 1 on a non-electrical, non-notes page.
   const ONE: Record<string, string> = {
     sld: "ONE-LINE DIAGRAM", site_plan: "SITE PLAN", structural: "MOUNT DETAIL",
-    module_spec: "MODULE SPECIFICATION SHEET", inverter_spec: "MICROINVERTER SPECIFICATION SHEET", labels: "WARNING LABELS",
+    module_spec: "MODULE SPECIFICATION SHEET", inverter_spec: "MICROINVERTER SPECIFICATION SHEET",
+    battery_spec: "BATTERY SPEC SHEET", labels: "WARNING LABELS",
   };
-  const ORDER = ["sld", "site_plan", "structural", "module_spec", "inverter_spec", "labels"];
-  run("backend CATEGORY_PATTERNS order is sld, site_plan, structural, module_spec, inverter_spec, labels",
+  const ORDER = ["sld", "site_plan", "structural", "module_spec", "inverter_spec", "battery_spec", "labels"];
+  run("backend CATEGORY_PATTERNS order is sld, site_plan, structural, module_spec, inverter_spec, battery_spec, labels",
     json(CATEGORY_PATTERNS.map((c) => c.docType)) === json(ORDER), json(CATEGORY_PATTERNS.map((c) => c.docType)));
   run("parser-review.js SPLIT_CATEGORIES has the same order",
     json((PR.SPLIT_CATEGORIES ?? []).map((c: { docType: string }) => c.docType)) === json(ORDER));

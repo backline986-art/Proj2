@@ -48,10 +48,11 @@ import { text } from "./json";
 import { nowIso } from "./time";
 import { logger } from "./logger";
 import { isServiceLineBaseKind, serviceLineCounts, SERVICE_FEEDER_200A_LABEL, SERVICE_FEEDER_400A_LABEL } from "./batteryServiceFeeder";
-import { stateRulesFor } from "./permitProcess";
+import { stateSurchargeRuleFor } from "./stateFeeRules";
 import { localPermitReview, permitFeeProject } from "./feeIssuer";
 import { portalFeeSummary } from "./portalFeeReadings";
 import { printedFormCheck, printedFormQuote } from "./printedFormFees";
+import { feeReadsNeedingAPerson, feeReadsSentence } from "./feeNeedsPerson";
 
 /** The portal's own total for the filing — typed by a person ("actual") or read off the record
  *  ("portal_record"). Either already contains every line the jurisdiction billed. */
@@ -90,6 +91,7 @@ function mapPayment(row: Row): SubmissionPaymentRecord {
     feeRecordedAt: text(row.fee_recorded_at),
     quotedAt: text(row.quoted_at),
     paidAt: row.paid_at ? text(row.paid_at) : null,
+    gateCollectedUsd: num(row.gate_collected_usd),
     updatedAt: text(row.updated_at),
   };
 }
@@ -264,6 +266,8 @@ interface ScheduleFee {
   feeUsd: number | null;
   bracketLabel: string | null;
   sourceUrl: string | null;
+  /** When Keelix read the source (ISO), "" when the producer could not say. */
+  sourceReadAt: string;
   /** The ROW's citation. Read below by MAILED_CHECK_RE — a signal about how the
    *  money moves — and NEVER printed beside the amount: a bracketed schedule has
    *  one of these and N brackets, so it agrees with at most one of them. */
@@ -426,6 +430,7 @@ function normalizeScheduleResult(raw: unknown): ScheduleFee | null {
     feeUsd: usable ? round2(fee) : null,
     bracketLabel: text(r.bracketLabel).trim().slice(0, 200) || null,
     sourceUrl: /^https?:\/\//i.test(url) ? url.slice(0, 500) : null,
+    sourceReadAt: /^\d{4}-\d{2}-\d{2}T/.test(text(r.sourceReadAt).trim()) ? text(r.sourceReadAt).trim().slice(0, 30) : "",
     sourceQuote: quote,
     bracketQuote: text(r.bracketQuote).trim().slice(0, 400),
     corroborated: r.corroborated === true,
@@ -572,16 +577,28 @@ function surchargeGapsOf(r: Record<string, unknown>): string[] {
   return out.slice(0, 6);
 }
 
-/** THE STATE SURCHARGE THE QUOTE DOES NOT INCLUDE (close M3). A state that levies a surcharge on
- *  permit fees (a cited STATE_PERMIT_RULES entry — Oregon's ORS 455.210, at most 12%) and a quoted
- *  permit line that carries none: the amount is short by up to that percentage, and it must say so
- *  instead of reading as a complete price. "" when nothing is missing. */
-export function stateSurchargeNotice(state: string, gaps: string[]): string {
+/** THE STATE SURCHARGE THE QUOTE DOES NOT INCLUDE (close M3), read from the state's fee record
+ *  (state_permit_rules "fee" family, stateFeeRules.stateSurchargeRuleFor — #663):
+ *    · a cited rule (Oregon's ORS 455.210(4) + 455.220(1), at most 12%) and a quoted permit line that
+ *      carries none: the amount is short by up to that percentage, and it must say so instead of
+ *      reading as a complete price;
+ *    · NO RECORD for the state: "state surcharge: not researched" — the strictest baseline. Unknown
+ *      is a question, not a pass: the quote never reads a state nobody researched as levying none;
+ *    · a record this quote cannot apply: named, with its citation, as not applied.
+ *  "" when nothing is missing (no uncovered permit line, or a cited "no state surcharge"). */
+export function stateSurchargeNotice(db: AppDb, state: string, gaps: string[]): string {
   if (!gaps.length) return "";
-  const rule = stateRulesFor(state).surcharge;
-  if (!rule || typeof rule.value !== "number") return "";
-  const pct = Math.round(rule.value * 1000) / 10;
-  return ` PLUS the state surcharge on the ${gaps.join(" and ")} permit${gaps.length > 1 ? "s" : ""} (up to ${pct}% of the permit fee — ${rule.quote.split(":")[0]}) — NOT included in this amount; confirm the surcharge with the agency.`;
+  const rule = stateSurchargeRuleFor(db, state);
+  const permits = `the ${gaps.join(" and ")} permit${gaps.length > 1 ? "s" : ""}`;
+  if (rule.status === "not_researched") {
+    return ` State surcharge: not researched${rule.state ? ` for ${rule.state}` : ""} — no cited state fee rule is on file, so none is assumed on ${permits}; confirm any state surcharge with the agency.`;
+  }
+  if (rule.status === "none") return "";
+  const section = rule.quote.split(":")[0];
+  if (rule.status === "unmodeled") {
+    return ` PLUS the state surcharge on file (${section}), which this quote does not apply because ${rule.why} — NOT included in this amount; confirm the surcharge with the agency.`;
+  }
+  return ` PLUS the state surcharge on ${permits} (up to ${rule.percent}% of the permit fee — ${section}) — NOT included in this amount; confirm the surcharge with the agency.`;
 }
 
 /** The published schedule's answer for THIS project, or null if no schedule is
@@ -737,6 +754,13 @@ export interface ResearchedPermitQuote {
   jurisdiction: string;
 }
 
+/** The same quote buildPaymentQuote answers (the portal's own figure on top of the researched
+ *  ladder), WITHOUT writing the submission_payments row: for a read path that must write nothing
+ *  (the approval sheet, review-audit draft 02). */
+export function readPaymentQuote(db: AppDb, project: ProjectRecord, trackInput?: string | null): SubmissionPaymentQuote {
+  return computePaymentQuote(db, project, trackInput, false).quote;
+}
+
 export function researchedPermitQuote(db: AppDb, project: ProjectRecord, trackInput?: string | null): ResearchedPermitQuote {
   return computePaymentQuote(db, project, trackInput, false).researched;
 }
@@ -888,8 +912,11 @@ function computePaymentQuote(
         + `${vouching}.`
         + evidenceClause
         + `${schedule.sourceUrl ? ` ${schedule.sourceUrl}` : ""}`
+        // The read date beside the source (fee round, 2026-11): a fee that may be charged says when
+        // its page was read. Only where the row states one; never the row's last-touched time.
+        + `${schedule.sourceReadAt ? ` Source read ${schedule.sourceReadAt.slice(0, 10)}.` : ""}`
         + modeledSurchargeClause(schedule)
-        + (track === "permit" ? stateSurchargeNotice(project.state, schedule.surchargeGaps) : "");
+        + (track === "permit" ? stateSurchargeNotice(db, project.state, schedule.surchargeGaps) : "");
     } else if (schedule && floorUsd != null && floorWins()) {
       // A SCHEDULE THAT PRICED PART OF THE FILING IS A FLOOR, NEVER A REASON TO GUESS LOWER (#421).
       //
@@ -919,7 +946,7 @@ function computePaymentQuote(
         + `PLUS ${missing}, not yet priced: the real fee is higher by ${schedule.unpricedItems.length > 1 ? "those" : "that"}. `
         + `A published schedule for ${who} was found but did not resolve: ${schedule.reason}${schedule.sourceUrl ? ` (${schedule.sourceUrl})` : ""}`
         + modeledSurchargeClause(schedule)
-        + (track === "permit" ? stateSurchargeNotice(project.state, schedule.surchargeGaps) : "");
+        + (track === "permit" ? stateSurchargeNotice(db, project.state, schedule.surchargeGaps) : "");
     } else {
       const est = estimate();
       // THE PRINTED FORM IS THE LAST RUNG (#454), below the valuation estimate: it answers only
@@ -1062,6 +1089,12 @@ function computePaymentQuote(
     );
   }
 
+  // THE FEE PAGES A PERSON READS, while the amount is not a schedule's or the portal's own figure
+  // (feeNeedsPerson). A display value like the archive notice below: computed per quote, so it
+  // stops being shown the moment a schedule lands or a person records the real fee.
+  const needsPerson = permitFeeSource === "published_schedule" || permitFeeSource === "actual" || permitFeeSource === "portal_record"
+    ? [] : [...feeReadsNeedingAPerson(db, feeProject, track), ...(feeProject !== project ? feeReadsNeedingAPerson(db, project, track) : [])]
+      .filter((r, i, all) => all.findIndex((x) => x.url === r.url) === i).slice(0, 6);
   const quote: SubmissionPaymentQuote = {
     track,
     required: billing.billingMode === "per_submission",
@@ -1074,9 +1107,11 @@ function computePaymentQuote(
     // and would have to be scrubbed on un-archive; computed per quote it simply
     // stops being true. The stored sentence stays the reason for the AMOUNT,
     // which is what a re-read of that column is for.
-    permitFeeBasis: archivedNotice(project) + permitFeeBasis,
+    permitFeeBasis: archivedNotice(project) + permitFeeBasis + feeReadsSentence(needsPerson),
     ...(permitFeeIsFloor ? { permitFeeIsFloor: true } : {}),
     permitFeeSourceUrl,
+    ...(permitFeeSource === "published_schedule" && schedule?.sourceReadAt ? { permitFeeSourceReadAt: schedule.sourceReadAt } : {}),
+    ...(needsPerson.length ? { feeNeedsPersonRead: needsPerson } : {}),
     permitFeeBracketLabel,
     // Named only when the payee is not the AHJ. "cited" is about the SCHEDULE: said only when the
     // amount came off a published (sourced) state schedule; otherwise the line says none is on file.
@@ -1095,6 +1130,11 @@ function computePaymentQuote(
     paymentMethod,
     serviceFeeUsd,
     totalUsd,
+    // The gate takes our own fee and nothing else (#699), whoever the jurisdiction fee belongs
+    // to. A 'card-on-file' or 'customer-pays' fee is never ours to collect; a 'keelix-pays' fee is
+    // not owed until we have paid it, and then it is invoiced at its real figure. totalUsd above
+    // stays the filing's whole cost, which is what the fee sheet and the quote are about.
+    gateAmountUsd: billing.billingMode === "per_submission" ? serviceFeeUsd : 0,
     payment: getSubmissionPayment(db, project.id, track),
     // RESOLVED FOR EVERY QUOTE, WHICHEVER TIER WON THE AMOUNT — deliberately not
     // gated on `permitFeeSource === "published_schedule"`.
@@ -1238,9 +1278,12 @@ export function markSubmissionPaid(
   const track = billingTrack(trackInput);
   const existing = getSubmissionPayment(db, project.id, track)!;
   const ts = nowIso();
+  // "CLIENT PAID US": the gate's own payment, which is the service fee and only that (#699).
+  // Stamped so the invoice can show it as received rather than bill it again. Marking paid twice
+  // re-stamps the same row, never a second payment: the row is one per (project, track).
   db.run(
-    `UPDATE submission_payments SET status = 'paid', payment_reference = ?, paid_at = ?, updated_at = ? WHERE id = ?`,
-    [text(input.paymentReference).slice(0, 200), ts, ts, existing.id],
+    `UPDATE submission_payments SET status = 'paid', payment_reference = ?, paid_at = ?, gate_collected_usd = ?, updated_at = ? WHERE id = ?`,
+    [text(input.paymentReference).slice(0, 200), ts, round2(existing.serviceFeeUsd), ts, existing.id],
   );
   return buildPaymentQuote(db, project, track);
 }
@@ -1540,7 +1583,9 @@ export function assertSubmissionPaid(db: AppDb, project: ProjectRecord, trackInp
   if (!quote.required) return;
   const status = quote.payment?.status;
   if (status === "paid" || status === "waived") return;
-  throw new HttpError(402, `Payment required before staging: this client bills per submission. Collect ${quote.totalUsd != null ? `$${quote.totalUsd.toFixed(2)}` : "the submission total"} (permit fees${quote.permitFeeUsd != null ? ` $${quote.permitFeeUsd.toFixed(2)}` : ""} + service fee $${quote.serviceFeeUsd.toFixed(2)}) on the Payment screen, then mark it paid.`, {
+  // The service fee only (#699). The jurisdiction fee is not collected here: it is paid on the
+  // portal, and re-billed on the invoice only when we advanced it.
+  throw new HttpError(402, `Payment required before staging: this client bills per submission. Collect the service fee $${quote.gateAmountUsd.toFixed(2)} on the Payment screen, then press "Client paid us". The permit fee is not collected here: it is invoiced after it is paid, and only if we paid it.`, {
     paymentRequired: true,
     quote,
   });

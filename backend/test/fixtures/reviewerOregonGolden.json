@@ -137,7 +137,7 @@
       "severity": "blocker",
       "category": "structural",
       "title": "Prescriptive rafter span evidence incomplete",
-      "message": "Oregon-style prescriptive review needs rafter/truss spacing and span evidence or an engineered alternate path.",
+      "message": "Oregon-style prescriptive review needs rafter/truss spacing and span evidence or an engineered alternate path. Not stated on the plans: rafter span. Read from the plans: 32 in o.c.",
       "cityFeedback": "Provide the prescriptive rooftop PV checklist/worksheet information, including framing member size, spacing, span, species/grade, roof slope, dead load, snow load, and wind exposure. If this cannot be documented, provide stamped engineering.",
       "designTeamAction": "Complete the structural worksheet inputs or route the design to engineered review.",
       "evidenceNeeded": [
@@ -329,6 +329,58 @@
       "evidenceStatus": "weak"
     },
     {
+      "id": "city.elec.wire-table.not-checked",
+      "severity": "callout",
+      "category": "electrical",
+      "title": "Wire table arithmetic (EGC, ampacity vs OCPD, raceway fill)",
+      "message": "Not checked: a wire table (conductor, OCPD, ground and raceway per tag) is not on the plans.",
+      "cityFeedback": "",
+      "designTeamAction": "State a wire table (conductor, OCPD, ground and raceway per tag) on the plan set so this check can run.",
+      "evidenceNeeded": [
+        "a wire table (conductor, OCPD, ground and raceway per tag)"
+      ],
+      "codeReferences": [
+        {
+          "code": "NEC",
+          "section": "250.122",
+          "title": "Size of equipment grounding conductors",
+          "adoptionScope": "Equipment grounding conductors of every circuit.",
+          "sourceUrl": "https://www.nfpa.org/codes-and-standards/nfpa-70-standard-development/70",
+          "note": "Not smaller than Table 250.122 for the rating of the overcurrent device ahead of the circuit; 250.122(A): need not be larger than the circuit conductors."
+        },
+        {
+          "code": "NEC",
+          "section": "240.4 / 310.15 / 110.14(C)",
+          "title": "Conductor protection against overcurrent",
+          "adoptionScope": "Every conductor and its overcurrent device.",
+          "sourceUrl": "https://www.nfpa.org/codes-and-standards/nfpa-70-standard-development/70",
+          "note": "The OCPD may not exceed the conductor's ampacity after the 310.15(C)(1) fill adjustment and the 110.14(C) termination limit (next standard size up per 240.4(B); 240.4(D) small-conductor limits)."
+        }
+      ],
+      "installerCallout": false,
+      "checkOutcome": "not_checked",
+      "ruleBasis": {
+        "tier": "model_code",
+        "source": "NEC 250.122",
+        "sourceUrl": "https://www.nfpa.org/codes-and-standards/nfpa-70-standard-development/70",
+        "label": "model code (NEC 250.122)"
+      },
+      "evidenceStatus": "missing",
+      "evidenceFound": [
+        {
+          "kind": "absence_check",
+          "label": "Input not on the plans",
+          "source": "Rule engine",
+          "excerpt": "Not checked: a wire table (conductor, OCPD, ground and raceway per tag) is not on the plans.",
+          "confidence": "low",
+          "pageHint": "",
+          "screenshotPath": "",
+          "verifier": "rule_engine",
+          "note": "A check record: the rule could not run. It never blocks or relaxes anything."
+        }
+      ]
+    },
+    {
       "id": "city.elec.equipment-specs-incomplete",
       "severity": "blocker",
       "category": "electrical",
@@ -388,17 +440,52 @@
       "evidenceStatus": "weak"
     },
     {
-      "id": "city.elec.dc-size-mismatch",
-      "severity": "blocker",
+      "id": "city.elec.dc-size-mismatch.pass",
+      "severity": "pass",
       "category": "electrical",
-      "title": "DC size mismatch",
-      "message": "Captured module count/wattage calculates 60.20 kW DC but project DC size is 60.00 kW.",
-      "cityFeedback": "Revise the equipment schedule/application so module quantity, module wattage, and DC system size match across all sheets and portal fields.",
-      "designTeamAction": "Correct either module quantity, module wattage, or DC kW and regenerate affected application fields.",
+      "title": "DC size against the modules",
+      "message": "140 x 430 W = 60.20 kW DC, matching the project's 60.00 kW DC.",
+      "cityFeedback": "",
+      "designTeamAction": "",
+      "evidenceNeeded": [],
+      "codeReferences": [
+        {
+          "code": "2023 OESC / 2023 NEC",
+          "section": "Articles 690 and 705",
+          "title": "Solar PV and interconnected power production sources",
+          "adoptionScope": "Oregon electrical submittals; verify local adopted NEC cycle outside Oregon.",
+          "sourceUrl": "https://www.oregon.gov/bcd/codes-stand/pages/electrical.aspx",
+          "note": "Oregon BCD lists the 2023 Oregon Electrical Specialty Code as effective Oct. 1, 2023 and based on the 2023 NEC."
+        }
+      ],
+      "installerCallout": false,
+      "checkOutcome": "passed",
+      "evidenceStatus": "verified",
+      "evidenceFound": [
+        {
+          "kind": "field_value",
+          "label": "Recomputed from the plan's own values",
+          "source": "Rule engine",
+          "excerpt": "140 x 430 W = 60.20 kW DC, matching the project's 60.00 kW DC.",
+          "confidence": "high",
+          "pageHint": "",
+          "screenshotPath": "",
+          "verifier": "rule_engine",
+          "note": "A check record: the rule ran and passed. It never blocks or relaxes anything."
+        }
+      ]
+    },
+    {
+      "id": "city.elec.ac-size-mismatch.not-checked",
+      "severity": "callout",
+      "category": "electrical",
+      "title": "AC size against the inverters",
+      "message": "Not checked: the inverter's rated output per unit; the inverter quantity are not on the plans.",
+      "cityFeedback": "",
+      "designTeamAction": "State the inverter's rated output per unit; the inverter quantity on the plan set so this check can run.",
       "evidenceNeeded": [
-        "Corrected equipment schedule",
-        "Corrected application DC size",
-        "Matching SLD/module sheet"
+        "the inverter's rated output per unit",
+        "the inverter quantity"
       ],
       "codeReferences": [
         {
@@ -410,32 +497,22 @@
           "note": "Oregon BCD lists the 2023 Oregon Electrical Specialty Code as effective Oct. 1, 2023 and based on the 2023 NEC."
         }
       ],
-      "installerCallout": true,
+      "installerCallout": false,
+      "checkOutcome": "not_checked",
+      "evidenceStatus": "missing",
       "evidenceFound": [
         {
-          "kind": "source_excerpt",
-          "label": "SLD found — corrected equipment schedule not verified",
-          "source": "Split page mapping",
-          "excerpt": "one-line diagram rapid shutdown site plan roof plan",
-          "confidence": "high",
-          "pageHint": "Split page mapping",
+          "kind": "absence_check",
+          "label": "Input not on the plans",
+          "source": "Rule engine",
+          "excerpt": "Not checked: the inverter's rated output per unit; the inverter quantity are not on the plans.",
+          "confidence": "low",
+          "pageHint": "",
           "screenshotPath": "",
-          "verifier": "parser",
-          "note": "This shows the SLD is on the set. It does not show corrected equipment schedule; check the source sheet for that."
-        },
-        {
-          "kind": "screenshot_placeholder",
-          "label": "Screenshot crop slot",
-          "source": "Split page mapping",
-          "excerpt": "",
-          "confidence": "high",
-          "pageHint": "Split page mapping",
-          "screenshotPath": "/api/projects/golden-or-1/evidence-image?topic=sld&hint=Split%20page%20mapping&excerpt=one-line%20diagram%20rapid%20shutdown%20site%20plan%20roof%20plan",
-          "verifier": "parser",
-          "note": "Source page will render here. If no plan-set PDF is stored, upload it to Project Documents — then this slot shows the sheet. Use the source/page hint above meanwhile."
+          "verifier": "rule_engine",
+          "note": "A check record: the rule could not run. It never blocks or relaxes anything."
         }
-      ],
-      "evidenceStatus": "weak"
+      ]
     },
     {
       "id": "reviewer.plan.rapid-shutdown",
@@ -484,14 +561,14 @@
       "severity": "warning",
       "category": "utility_nem",
       "title": "Verify PGE account evidence",
-      "message": "PGE/NEM submission has an account value, but parsed utility bill/account match evidence is not strong enough. Found medium-confidence evidence: Project account number ****ured: ******7890",
+      "message": "PGE/NEM submission has an account value, but parsed utility bill/account match evidence is not strong enough. Found medium-confidence evidence: Project account number captured: ******7890",
       "cityFeedback": "Utility account evidence is incomplete: account number alone is not enough for a clean intake pass.",
       "designTeamAction": "Verify utility bill/account holder/service address match before staging the NEM application.",
       "evidenceNeeded": [
         "Utility bill/account holder match",
         "Utility account number",
         "Service address match",
-        "Parsed evidence: Project account number ****ured: ******7890"
+        "Parsed evidence: Project account number captured: ******7890"
       ],
       "codeReferences": [],
       "installerCallout": true,
@@ -501,7 +578,7 @@
           "kind": "source_excerpt",
           "label": "Utility account text found — utility bill/account holder match not verified",
           "source": "Normalized project field",
-          "excerpt": "Project account number ****ured: ******7890",
+          "excerpt": "Project account number captured: ******7890",
           "confidence": "medium",
           "pageHint": "Project field",
           "screenshotPath": "",
@@ -515,7 +592,7 @@
           "excerpt": "",
           "confidence": "medium",
           "pageHint": "Project field",
-          "screenshotPath": "/api/projects/golden-or-1/evidence-image?topic=accountVerification&hint=Project%20field&excerpt=Project%20account%20number%20****ured%3A%20******7890",
+          "screenshotPath": "/api/projects/golden-or-1/evidence-image?topic=accountVerification&hint=Project%20field&excerpt=Project%20account%20number%20captured%3A%20******7890",
           "verifier": "parser",
           "note": "Source page will render here. If no plan-set PDF is stored, upload it to Project Documents — then this slot shows the sheet. Use the source/page hint above meanwhile."
         }
@@ -717,7 +794,7 @@
       "severity": "blocker",
       "category": "structural",
       "title": "Prescriptive rafter span evidence incomplete",
-      "message": "Oregon-style prescriptive review needs rafter/truss spacing and span evidence or an engineered alternate path.",
+      "message": "Oregon-style prescriptive review needs rafter/truss spacing and span evidence or an engineered alternate path. Not stated on the plans: rafter span. Read from the plans: 32 in o.c.",
       "cityFeedback": "Provide the prescriptive rooftop PV checklist/worksheet information, including framing member size, spacing, span, species/grade, roof slope, dead load, snow load, and wind exposure. If this cannot be documented, provide stamped engineering.",
       "designTeamAction": "Complete the structural worksheet inputs or route the design to engineered review.",
       "evidenceNeeded": [
@@ -968,56 +1045,6 @@
       "evidenceStatus": "weak"
     },
     {
-      "id": "city.elec.dc-size-mismatch",
-      "severity": "blocker",
-      "category": "electrical",
-      "title": "DC size mismatch",
-      "message": "Captured module count/wattage calculates 60.20 kW DC but project DC size is 60.00 kW.",
-      "cityFeedback": "Revise the equipment schedule/application so module quantity, module wattage, and DC system size match across all sheets and portal fields.",
-      "designTeamAction": "Correct either module quantity, module wattage, or DC kW and regenerate affected application fields.",
-      "evidenceNeeded": [
-        "Corrected equipment schedule",
-        "Corrected application DC size",
-        "Matching SLD/module sheet"
-      ],
-      "codeReferences": [
-        {
-          "code": "2023 OESC / 2023 NEC",
-          "section": "Articles 690 and 705",
-          "title": "Solar PV and interconnected power production sources",
-          "adoptionScope": "Oregon electrical submittals; verify local adopted NEC cycle outside Oregon.",
-          "sourceUrl": "https://www.oregon.gov/bcd/codes-stand/pages/electrical.aspx",
-          "note": "Oregon BCD lists the 2023 Oregon Electrical Specialty Code as effective Oct. 1, 2023 and based on the 2023 NEC."
-        }
-      ],
-      "installerCallout": true,
-      "evidenceFound": [
-        {
-          "kind": "source_excerpt",
-          "label": "SLD found — corrected equipment schedule not verified",
-          "source": "Split page mapping",
-          "excerpt": "one-line diagram rapid shutdown site plan roof plan",
-          "confidence": "high",
-          "pageHint": "Split page mapping",
-          "screenshotPath": "",
-          "verifier": "parser",
-          "note": "This shows the SLD is on the set. It does not show corrected equipment schedule; check the source sheet for that."
-        },
-        {
-          "kind": "screenshot_placeholder",
-          "label": "Screenshot crop slot",
-          "source": "Split page mapping",
-          "excerpt": "",
-          "confidence": "high",
-          "pageHint": "Split page mapping",
-          "screenshotPath": "/api/projects/golden-or-1/evidence-image?topic=sld&hint=Split%20page%20mapping&excerpt=one-line%20diagram%20rapid%20shutdown%20site%20plan%20roof%20plan",
-          "verifier": "parser",
-          "note": "Source page will render here. If no plan-set PDF is stored, upload it to Project Documents — then this slot shows the sheet. Use the source/page hint above meanwhile."
-        }
-      ],
-      "evidenceStatus": "weak"
-    },
-    {
       "id": "reviewer.plan.rapid-shutdown",
       "severity": "warning",
       "category": "plan_set",
@@ -1064,14 +1091,14 @@
       "severity": "warning",
       "category": "utility_nem",
       "title": "Verify PGE account evidence",
-      "message": "PGE/NEM submission has an account value, but parsed utility bill/account match evidence is not strong enough. Found medium-confidence evidence: Project account number ****ured: ******7890",
+      "message": "PGE/NEM submission has an account value, but parsed utility bill/account match evidence is not strong enough. Found medium-confidence evidence: Project account number captured: ******7890",
       "cityFeedback": "Utility account evidence is incomplete: account number alone is not enough for a clean intake pass.",
       "designTeamAction": "Verify utility bill/account holder/service address match before staging the NEM application.",
       "evidenceNeeded": [
         "Utility bill/account holder match",
         "Utility account number",
         "Service address match",
-        "Parsed evidence: Project account number ****ured: ******7890"
+        "Parsed evidence: Project account number captured: ******7890"
       ],
       "codeReferences": [],
       "installerCallout": true,
@@ -1081,7 +1108,7 @@
           "kind": "source_excerpt",
           "label": "Utility account text found — utility bill/account holder match not verified",
           "source": "Normalized project field",
-          "excerpt": "Project account number ****ured: ******7890",
+          "excerpt": "Project account number captured: ******7890",
           "confidence": "medium",
           "pageHint": "Project field",
           "screenshotPath": "",
@@ -1095,7 +1122,7 @@
           "excerpt": "",
           "confidence": "medium",
           "pageHint": "Project field",
-          "screenshotPath": "/api/projects/golden-or-1/evidence-image?topic=accountVerification&hint=Project%20field&excerpt=Project%20account%20number%20****ured%3A%20******7890",
+          "screenshotPath": "/api/projects/golden-or-1/evidence-image?topic=accountVerification&hint=Project%20field&excerpt=Project%20account%20number%20captured%3A%20******7890",
           "verifier": "parser",
           "note": "Source page will render here. If no plan-set PDF is stored, upload it to Project Documents — then this slot shows the sheet. Use the source/page hint above meanwhile."
         }

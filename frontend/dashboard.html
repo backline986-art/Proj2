@@ -125,6 +125,8 @@
           <button id="openClientsBtn" class="secondary"><i data-lucide="building-2"></i><span>Clients</span></button>
           <button id="openUsersBtn" class="secondary"><i data-lucide="users"></i><span>Team</span></button>
           <button id="openKpiBtn" class="secondary"><i data-lucide="bar-chart-2"></i><span>KPIs</span></button>
+          <button id="openDestQueueBtn" class="secondary"><i data-lucide="map-pin-check"></i><span>Destinations to confirm</span></button>
+          <button id="openGoLiveBtn" class="secondary"><i data-lucide="rocket"></i><span>Go-live check</span></button>
           <button id="openKnowledgeBtn" class="secondary"><i data-lucide="brain"></i><span>Knowledge</span></button>
           <!-- A standalone tool: still shipping, just no longer competing with
                the pipeline for top-level space. -->
@@ -438,6 +440,30 @@
              rail with no JS change. Every id is unchanged. -->
         <aside class="detail-rail" aria-label="Project status and next step">
           <div id="nextStepBanner" class="next-step-banner" hidden></div>
+          <!-- THE JOB'S CLASS (#688). Residential unless a person says commercial. A commercial job,
+               or one whose own evidence says "probably commercial" (not a dwelling, a three-phase /
+               208-480 V service, or over the residential size cap) is HELD for a person: automation
+               does not stage, replay, file or learn from it. A named person confirms the class here;
+               the confirmation covers exactly the evidence shown, so a changed size or service asks
+               again. Rendered by dashboard.js renderProjectClass from detail.classStatus. -->
+          <section id="projectClassPanel" class="project-class-panel" hidden>
+            <div id="projectClassSummary" class="muted" style="font-size:12px;margin:4px 0"></div>
+            <ul id="projectClassSignals" style="font-size:12px;margin:4px 0 6px 18px;padding:0"></ul>
+            <div class="form-row">
+              <label style="flex:1">Job class
+                <select id="projectClassSelect">
+                  <option value="residential">Residential</option>
+                  <option value="commercial">Commercial</option>
+                </select>
+              </label>
+              <label style="flex:1">Your name
+                <input id="projectClassBy" type="text" maxlength="120" placeholder="Who is confirming" autocomplete="name" />
+              </label>
+            </div>
+            <div class="actions">
+              <button id="confirmProjectClassBtn" class="secondary"><i data-lucide="badge-check"></i><span>Confirm class</span></button>
+            </div>
+          </section>
           <div class="actions autopilot-actions">
             <span class="actions-label">Autopilot:</span>
             <button id="startAutopilotBtn" class="primary"><i data-lucide="rocket"></i><span>Stage portals · Autopilot</span></button>
@@ -543,6 +569,7 @@
                     <option value="trench_detail">Trench / burial-depth detail</option>
                     <option value="zoning_approval">Zoning / land-use approval</option>
                     <option value="issued_permit">Issued permit / permit card</option>
+                    <option value="utility_application">Utility net-metering application / signed agreement</option>
                     <option value="utility_approval">Utility approval / PTO letter</option>
                     <option value="module_spec">Module spec</option>
                     <option value="inverter_spec">Inverter spec</option>
@@ -1044,6 +1071,23 @@
           <div id="emailIntakeList" class="stack"></div>
         </div>
 
+        <!-- #538: a backlog as one zip, one folder per job: one project per folder, read like an emailed job. -->
+        <div id="jobDropPanel">
+          <div class="section-head subhead" style="margin-top:8px"><h2>New Jobs from a Zip</h2></div>
+          <div class="muted" style="font-size:12px">Put each job's files (plan set, utility bill, meter photo) in its own folder, zip the folders together, and drop the zip here. Each folder becomes one project for the client you choose, read and checked like an emailed job. You see the folder count before anything is read.</div>
+          <div class="batch-import-form">
+            <select id="jobDropClient" style="min-width:180px"></select>
+            <label class="drop-browse" for="jobDropInput" style="align-self:center">Choose a .zip…</label>
+            <input id="jobDropInput" type="file" accept=".zip" hidden />
+            <!-- #439: a folder path reads the SERVER's disk — hidden when the server is shared. -->
+            <input id="jobDropFolder" class="local-disk-only" placeholder="…or a folder on the server (operator)" style="flex:1;min-width:200px" />
+            <button id="jobDropFolderBtn" class="local-disk-only" type="button"><i data-lucide="folder-search"></i><span>List Folders</span></button>
+          </div>
+          <div id="jobDropStatus" class="muted" style="font-size:13px;padding:6px 0"></div>
+          <div id="jobDropPreview" hidden></div>
+          <div id="jobDropList" class="stack"></div>
+        </div>
+
         <!-- Batch PDF import -->
         <div class="section-head subhead" style="margin-top:8px">
           <h2>Learn from Past Projects</h2>
@@ -1354,6 +1398,7 @@
             <label>Supervising electrician<input id="c_electricalSupervisorName" /></label>
             <label>Electrician license # (personal)<input id="c_electricianLicenseNumber" placeholder="e.g. 5787S" /></label>
           </div>
+          <label>Installer certifications<input id="c_installerCertifications" placeholder="Comma-separated, e.g. NABCEP PV Installation Professional" title="Checked against a utility program's or permit path's cited installer-certification requirement" /></label>
           <div class="form-row">
             <label>EIN<input id="c_ein" /></label>
             <label>Bond carrier<input id="c_bondCarrier" /></label>
@@ -1364,6 +1409,11 @@
           <p class="muted">One row per licence this company holds, by state and type. The bot puts each number only in the slot that asks for that type, in that state &mdash; never another state's or another company's. Oregon's CCB / electrical / supervising-electrician numbers stay in the fields above.</p>
           <div id="stateLicencesList" class="stack compact"></div>
           <button type="button" id="addStateLicenceBtn" class="secondary"><i data-lucide="plus"></i><span>Add state licence</span></button>
+
+          <h3>Service area</h3>
+          <p class="muted">Where this company works: each state, city or county, and utility it files with. "Destinations to confirm" then lists every authority here that no open job names yet, so its filing destination can be confirmed before the first job. This decides nothing about any job; it stays with this client and is never sent to a model.</p>
+          <div id="serviceAreaList" class="stack compact"></div>
+          <button type="button" id="addServiceAreaBtn" class="secondary"><i data-lucide="plus"></i><span>Add place</span></button>
 
           <h3>Business address</h3>
           <label>Address<input id="c_businessAddress" /></label>
@@ -1406,6 +1456,20 @@
             <label id="clientLinkResultWrap" hidden>Link to share<input id="clientLinkResult" readonly /></label>
             <p id="clientLinkStatus" role="status" class="muted clients-creds-hint"></p>
           </section>
+          <!-- COMPANY SETUP (clientOnboarding.ts): the client fills in its own details on a link. Nothing
+               it sends changes the client record until a named person accepts it here. -->
+          <section class="clients-creds-block" id="clientOnboardingBlock">
+            <h3>Company setup</h3>
+            <p class="muted clients-creds-hint">A link where this client fills in its own company details, licences and service area. Every answer waits here until you accept, edit or reject it. Portal logins go through the secure login link, never this page.</p>
+            <div class="actions">
+              <button type="button" id="onboardingLinkBtn" class="secondary"><i data-lucide="clipboard-list"></i><span>Create company setup link</span></button>
+            </div>
+            <label id="onboardingLinkResultWrap" hidden>Link to share (shown once)<input id="onboardingLinkResult" readonly /></label>
+            <p id="onboardingStatus" role="status" class="muted clients-creds-hint"></p>
+            <div id="onboardingLinks"></div>
+            <div id="onboardingProposals"></div>
+            <div id="onboardingFiles"></div>
+          </section>
           <section class="clients-creds-block">
             <h3>Portal logins (encrypted)</h3>
             <p class="muted clients-creds-hint">Passwords are stored encrypted (AES-256-GCM) and never shown again. Used by the bot to log in for this client only.</p>
@@ -1425,6 +1489,29 @@
                 <span id="credStatus" class="muted clients-creds-hint"></span>
               </div>
             </div>
+          </section>
+          <!-- BILLING (#700): this client's statement for a month, its invoices and their status.
+               Nothing here charges a card or pays a fee: "Mark paid" records money a person saw
+               arrive, and "Email" goes through the same client-email switch as every client email. -->
+          <section class="clients-creds-block" id="clientBillingBlock">
+            <h3>Billing</h3>
+            <p class="muted clients-creds-hint">Draft a statement for a month, turn it into an invoice, and track it. A line goes on one invoice only; voiding an invoice frees its lines for the next one.</p>
+            <div class="form-row">
+              <label>Month<input id="billingMonth" type="month" /></label>
+            </div>
+            <div class="actions">
+              <button type="button" id="billingPreviewBtn" class="secondary"><i data-lucide="file-search"></i><span>Show draft statement</span></button>
+              <button type="button" id="billingCreateBtn" class="primary" disabled><i data-lucide="file-plus"></i><span>Create invoice</span></button>
+            </div>
+            <p id="billingStatus" role="status" class="muted clients-creds-hint"></p>
+            <div id="billingStatement"></div>
+            <h4 style="margin:10px 0 4px">Invoices</h4>
+            <div id="billingInvoices"><p class="muted clients-creds-hint">No invoices yet.</p></div>
+            <!-- QUICKBOOKS ONLINE (#701): one company for the whole organisation, not per client. Connect,
+                 choose which Item each kind of line posts to, and check payments. Nothing here takes a
+                 payment or makes QuickBooks email anyone. -->
+            <h4 style="margin:10px 0 4px">QuickBooks</h4>
+            <div id="quickbooksBlock"><p class="muted clients-creds-hint">Loading…</p></div>
           </section>
         </div>
         </div>
@@ -1580,6 +1667,41 @@
     </div>
   </div>
 
+  <!-- DESTINATIONS TO CONFIRM: every authority the open jobs file with whose destination no person has
+       verified, grouped by client (GET /api/filing-destinations; filing-destination.js renderQueue).
+       Its Confirm / Edit / Reject are the track card's, on the job each proposal names. -->
+  <div id="destQueueModal" class="modal" hidden role="dialog" aria-modal="true" aria-labelledby="destQueueTitle">
+    <div class="modal-card modal-wide">
+      <div class="modal-head">
+        <h2 id="destQueueTitle">Destinations to confirm</h2>
+        <div class="actions">
+          <button id="refreshDestQueueBtn" class="secondary"><i data-lucide="refresh-cw"></i><span>Refresh</span></button>
+          <button id="closeDestQueueBtn" class="secondary"><i data-lucide="x"></i><span>Close</span></button>
+        </div>
+      </div>
+      <div id="destQueueBody" class="dest-queue-body">
+        <p class="muted">Loading…</p>
+      </div>
+    </div>
+  </div>
+
+  <!-- GO-LIVE CHECK: every switch and setting this server reads, set / not set, and what each means
+       (GET /api/go-live, admin-only; go-live.js render). A read: it changes nothing and never shows a value. -->
+  <div id="goLiveModal" class="modal" hidden role="dialog" aria-modal="true" aria-labelledby="goLiveTitle">
+    <div class="modal-card modal-wide">
+      <div class="modal-head">
+        <h2 id="goLiveTitle">Go-live check</h2>
+        <div class="actions">
+          <button id="refreshGoLiveBtn" class="secondary"><i data-lucide="refresh-cw"></i><span>Refresh</span></button>
+          <button id="closeGoLiveBtn" class="secondary"><i data-lucide="x"></i><span>Close</span></button>
+        </div>
+      </div>
+      <div id="goLiveBody" class="golive-body">
+        <p class="muted">Loading…</p>
+      </div>
+    </div>
+  </div>
+
   <!-- Keyboard shortcuts help — toggled with ? ; closed with Esc. -->
   <div id="shortcutsOverlay" class="shortcuts-overlay" hidden role="dialog" aria-modal="true" aria-labelledby="shortcutsTitle">
     <div class="shortcuts-card">
@@ -1603,7 +1725,14 @@
   <!-- The pending edition proposals on a code-profile KB card (window.EditionProposals, #172). -->
   <script src="/edition-proposals.js"></script>
   <script src="/code-profile-verify.js"></script>
-  <script src="/parser-review.js?v=12"></script>
+  <!-- The verify control for a job's permit-process and utility-filing rows (window.LookupVerify, #695). -->
+  <script src="/lookup-verify.js"></script>
+  <!-- What the job's utility's application asks for: the list and a named person's record (window.UtilityRequirements). -->
+  <script src="/utility-requirements.js"></script>
+  <!-- Proposed filing destinations from the authority's official page, confirmed by a named person (window.FilingDestination). -->
+  <script src="/filing-destination.js"></script>
+  <script src="/go-live.js"></script>
+  <script src="/parser-review.js?v=13"></script>
   <script type="module" src="/dashboard.js"></script>
 </body>
 </html>

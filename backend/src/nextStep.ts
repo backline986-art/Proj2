@@ -18,6 +18,8 @@
 //
 // FIRST MATCH WINS, in this order (derived from "who is stopped, and how badly"):
 //   1  operator_blocked        a person said stop — nothing else matters until lifted
+//   1b class_held              the job is commercial / probably commercial (#688) and still has a
+//                              filing to make: a person works it or confirms the class
 //   2  correction_overdue      an agency stopped a filing AND our clock ran out
 //   3  portal_paused           a live browser is waiting on a human at MFA/CAPTCHA
 //   4  automation_running      a staging/autopilot job is in flight — wait for it
@@ -28,7 +30,11 @@
 //   9  resubmit_awaiting_me    a reopened correction form waits for the human resubmit
 //  10  staged_awaiting_submit  a staged draft waits for review + approval (per track)
 //  11  approved_awaiting_filing  approval recorded, the human filing not captured yet
-//  12  fee_due                 the AHJ approved a permit; a person pays the issuance fee
+//  11b second_stage_invite / second_stage_upload   a two-stage filing (#28): the application is made
+//                              and paid; the agency's plan-upload invite is awaited, then a person
+//                              uploads the plans in the second system by hand and marks it done
+//  12  fee_due                 the AHJ approved a permit (or emailed a fee request); a person pays,
+//                              then presses Paid (feeDue.ts)
 //  13  correction_open         an open (not overdue) correction — owner by triage bucket
 //  14  payment_due             a per-submission client's payment gates staging (the 402)
 //      ready_to_stage          required tracks with nothing on the portal yet
@@ -65,6 +71,7 @@ import type {
 } from "../../shared/src/types";
 import { stageForStatus } from "./projectStage";
 import { isTrackDone, requiredTracks, trackPermitTypes } from "./submittalTracks";
+import { utilityFilingKey, verifiedWithPermitKeys } from "./utilityFilingLookup";
 import { trackKind } from "./permitMonitor";
 import { parseJson } from "./json";
 import { billingTrack } from "./submissionFees";
@@ -76,6 +83,9 @@ import { installerHandoffRecords, type InstallerHandoffRecord } from "./installe
 import { SIGNATURE_REQUEST_CONFIRMED_ACTION, reduceNemSignatureState } from "./signatureTrack";
 import { visionRelaxedBlockers } from "./reviewerVision";
 import { startedAtLabel } from "./formAcquisitionPlan";
+import { paymentNeededForRun } from "./feePause";
+import { feeDueReadings, feePaidMarks, trackFeeDueFrom } from "./feeDue";
+import { projectClassStatusFor } from "./projectClassHold";
 import {
   getProjectDetail,
   getSubmitGateReport,
@@ -231,6 +241,8 @@ export interface TrackFacts {
   gapFillMissing: string[];
   /** A tracking target of this track's kind reads ready_for_issue (approved, fee due). */
   feeDue: boolean;
+  /** The fee due follows an approval (ready for issue); false = an agency asked for a fee (#576). */
+  feeDueApproved?: boolean;
   /** The CLIENT's payment for this track is outstanding: a per-submission client with no paid /
    *  waived submission_payments row — exactly what assertSubmissionPaid's 402 refuses on. */
   paymentDue: boolean;
@@ -243,10 +255,18 @@ export interface TrackFacts {
    *  electrical permit is named as the county's. Optional: absent, the answer falls back to the
    *  AHJ / utility on the facts record (agencyOf). */
   agency?: string;
+  /** #664, NEM only: a person verified that the utility takes its application INSIDE the AHJ permit
+   *  application (utilityFilingLookup.nemFiledWithPermit) and the track has no evidence of its own —
+   *  it is filed when the permit tracks are, and it is never "to stage". */
+  followsPermit?: boolean;
   /** UNSURE RECORD NUMBERS read after a person's submit in this track's left-open window (#400,
    *  portal_runs.submit_capture_candidates of the staged run) — offered for one-click
    *  confirmation, never treated as a filing. Absent when there are none. */
   recordCandidates?: Array<{ recordNumber: string; recordLink: string; source: "completion_page" | "account_list" }>;
+  /** #28: the track's application is made on a two-stage agency and its plans are NOT uploaded in the
+   *  second system yet (track_second_stages, no upload mark). The track is not filed and is never
+   *  "to stage". inviteAt: when the filings inbox matched the agency's plan-upload invite, else null. */
+  secondStage?: { system: string; number: string; since: string; inviteAt: string | null };
 }
 
 export interface NextStepFacts {
@@ -257,6 +277,9 @@ export interface NextStepFacts {
   ahj: string;
   utility: string;
   operatorHold: { reason: string; since: string | null } | null;
+  /** The job is held for a person by its class (#688; shared/src/projectClass.ts): a commercial job,
+   *  or "probably commercial" with nobody's confirmation. Optional so hand-built facts stay valid. */
+  classHold?: { reason: string; commercial: boolean } | null;
   openCorrections: CorrectionRecord[];
   /** step: what the job says it is doing right now (job_queue.progress_note — the automatic chain
    *  names each step), so the banner can show "Checking the AHJ's required official forms… (started
@@ -283,7 +306,8 @@ export interface NextStepFacts {
   installerHandoff?: InstallerHandoffRecord | null;
 }
 
-const ON_PORTAL = new Set(["awaiting_human_submit", "submitted", "paused_for_human"]);
+// awaiting_payment (#576): the application sits on the portal waiting on its fee — never "to stage".
+const ON_PORTAL = new Set(["awaiting_human_submit", "submitted", "paused_for_human", "awaiting_payment"]);
 
 /** How long a queued/started automatic chain (stage_step) reads as "automation running". A real
  *  chain takes about three minutes (2026-09-28: 2m45s on a Newberg job); past this it is stuck, and
@@ -415,10 +439,24 @@ export function loadNextStepFacts(db: AppDb, projects: ProjectRecord[]): Map<str
   // The installer handoff email (#491), read only for handed-off projects.
   const handedOffIds = projects.filter((p) => p.status === "handoff_ready").map((p) => p.id);
   const handoffs = installerHandoffRecords(db, handedOffIds);
-  const feeDueKinds = groupBy(
-    db.query<Row>(`SELECT project_id, target_type, permit_type FROM permit_check_targets WHERE project_id IN (${ph}) AND active = 1 AND latest_outcome = 'ready_for_issue'`, ids),
-    (r) => s(r.project_id),
-  );
+  // A fee asked for (ready for issue, or an emailed fee request) that no Paid has answered (#576).
+  const feeReadings = feeDueReadings(db, ids);
+  const feePaid = feePaidMarks(db, ids);
+
+  // #664: the utilities a person verified as filing inside the permit application — one query.
+  const withPermitKeys = verifiedWithPermitKeys(db);
+
+  // #28: applications made on a two-stage agency whose plans are not marked as uploaded — one query.
+  // (An older schema has no such table: nothing waits.)
+  let secondStageRows: Row[] = [];
+  try {
+    secondStageRows = db.query<Row>(
+      `SELECT project_id, track, system_name, first_stage_number, first_stage_at, invite_received_at, invite_subject
+         FROM track_second_stages WHERE project_id IN (${ph}) AND uploaded_at = ''`,
+      ids,
+    );
+  } catch { secondStageRows = []; }
+  const secondStages = groupBy(secondStageRows, (r) => s(r.project_id));
 
   const stagedRunIds: string[] = [];
   for (const project of projects) {
@@ -439,25 +477,44 @@ export function loadNextStepFacts(db: AppDb, projects: ProjectRecord[]): Map<str
       const ownsTarget = (r: Row): boolean => family.includes(s(r.permit_type))
         || (trackKind(s(r.target_type), s(r.permit_type)) === kind && !claimed.has(s(r.permit_type)));
       const targetEvidence = (numberedTargets.get(pid) ?? []).some(ownsTarget);
+      const feeAsk = trackFeeDueFrom(feeReadings.get(pid) ?? [], feePaid.get(pid) ?? [], track, family, kind, claimed);
+      const second = (secondStages.get(pid) ?? []).find((r) => s(r.track) === track);
       return {
         track,
         filed: Boolean(filedRow) || targetEvidence,
         filedAt: filedRow ? s(filedRow.submitted_at) || null : null,
         done: withTargets.has(pid) ? isTrackDone(db, pid, track, tracksRequired) : false,
         latestRun: familyRuns[0] ?? null,
-        onPortal: familyRuns.some((r) => ON_PORTAL.has(r.status)),
+        // An application made by hand on a two-stage agency (#28) is on the portal with no run of ours.
+        onPortal: familyRuns.some((r) => ON_PORTAL.has(r.status)) || Boolean(second),
         stagedRun: staged,
         gapFillMissing: [],
         // THIS track's filing reads ready-for-issue — not "some permit filing does". Matched by kind
         // alone, one permit's fee made every permit track "approved", and the banner told the
         // operator the electrical permit was approved while it sat in plan review.
-        feeDue: (feeDueKinds.get(pid) ?? []).some(ownsTarget),
+        // A person's Paid since the reading clears it (feeDue.ts, the card's answer too).
+        feeDue: Boolean(feeAsk),
+        feeDueApproved: Boolean(feeAsk?.approved),
         paymentDue: perSubmissionClients.has(s(project.clientId))
           && !(payments.get(pid) ?? []).some((r) => s(r.track) === billingTrack(track) && (s(r.status) === "paid" || s(r.status) === "waived")),
         // A registry read (permitProcess), never the db — the "reads write nothing" invariant holds.
         agency: track === "nem" ? s(project.utility).trim() : issuingAuthorityForTrack(project, track),
+        ...(second ? { secondStage: {
+          system: s(second.system_name), number: s(second.first_stage_number), since: s(second.first_stage_at),
+          inviteAt: s(second.invite_received_at) || (s(second.invite_subject) ? s(second.first_stage_at) : null),
+        } } : {}),
       };
     });
+    // #664: the NEM track of a with-permit utility follows the permit tracks while it has no
+    // evidence of its own (no run, no filing, no finished target).
+    const nemFacts = tracks.find((t) => t.track === "nem");
+    if (nemFacts && !nemFacts.filed && !nemFacts.done && !nemFacts.latestRun
+      && withPermitKeys.has(utilityFilingKey(s(project.state), s(project.utility)))) {
+      const permits = tracks.filter((t) => t.track !== "nem");
+      nemFacts.followsPermit = true;
+      nemFacts.filed = permits.length > 0 && permits.every((t) => t.filed);
+      nemFacts.filedAt = nemFacts.filed ? permits.map((t) => t.filedAt ?? "").filter(Boolean).sort()[0] ?? null : null;
+    }
     const pending = (pendingReview.get(pid) ?? []).map((r) => ({ status: "pending", fieldName: s(r.field_name), issueType: s(r.issue_type) }));
     const status = project.status;
     let operatorHold: NextStepFacts["operatorHold"] = null;
@@ -476,6 +533,11 @@ export function loadNextStepFacts(db: AppDb, projects: ProjectRecord[]): Map<str
       ahj: s(project.ahj).trim(),
       utility: s(project.utility).trim(),
       operatorHold,
+      classHold: (() => {
+        // The same read every door makes (projectClassHold — the stored row), never a second derivation.
+        const cs = projectClassStatusFor(db, pid);
+        return cs?.held && cs.holdReason ? { reason: cs.holdReason, commercial: cs.projectClass === "commercial" } : null;
+      })(),
       openCorrections: openCorr.get(pid) ?? [],
       jobInFlight: jobs.get(pid) ?? null,
       tracks,
@@ -548,6 +610,7 @@ export const NEXT_STEP_BUTTON_IDS = [
   "addPermitTargetBtn",
   "copyHandoffPacketBtn",
   "sendHandoffPacketBtn",
+  "confirmProjectClassBtn",
 ] as const;
 /** Every fixTarget id the rule table can emit — same test. */
 export const NEXT_STEP_FIX_TARGETS = [
@@ -563,6 +626,7 @@ export const NEXT_STEP_FIX_TARGETS = [
   "submittalTracks",
   "permitTargets",
   "paymentPanel",
+  "projectClassPanel",
 ] as const;
 type ButtonId = typeof NEXT_STEP_BUTTON_IDS[number];
 type FixTarget = typeof NEXT_STEP_FIX_TARGETS[number];
@@ -647,7 +711,9 @@ function correctionWhy(c: CorrectionRecord): NextStepWhy {
 export function decideNextStep(facts: NextStepFacts): NextStep {
   const stageIndex = stageForStatus(facts.status).index;
   const gateChecked = Boolean(facts.gate);
-  const unfinished = facts.tracks.filter((t) => !t.filed && !t.done);
+  // A track that rides in the permit application (#664) is unfinished only THROUGH the permit: it is
+  // never staged, held or failed on its own.
+  const unfinished = facts.tracks.filter((t) => !t.filed && !t.done && !t.followsPermit);
   // THE THREE FLAGS THE CLIENT USED TO RE-DERIVE FROM `key` — each computed here, once, from the
   // facts (allFiled, hasStagedDraft) or from where the rule table actually stopped
   // (gateCanOverrule), so a reordered rule cannot leave a client-side key list behind.
@@ -684,6 +750,19 @@ export function decideNextStep(facts: NextStepFacts): NextStep {
       btn("applyStatusOverrideBtn", "Change status"), facts.operatorHold.since);
   }
 
+  // 1b. The job is held for a person by its class (#688) while something is still to file: nothing
+  // below (QC, the gate, staging) is automation's to do. A commercial job a person filed by hand
+  // falls through to the tracking steps like any other.
+  if (facts.classHold && unfinished.length) {
+    return facts.classHold.commercial
+      ? make("class_held", "me", "today",
+        "Commercial job — held for a person. Automation does not stage, replay or file it; file it by hand.",
+        [why(facts.classHold.reason, "projectClassPanel")], null)
+      : make("class_held", "me", "today",
+        "Probably commercial — confirm the job's class. Automation holds it until a person does.",
+        [why(facts.classHold.reason, "projectClassPanel")], btn("confirmProjectClassBtn", "Confirm class"));
+  }
+
   // 2. An agency stopped a filing and our clock ran out.
   const overdue = facts.openCorrections.filter((c) => c.isOverdue).sort((a, b) => String(a.dueAt).localeCompare(String(b.dueAt)));
   if (overdue.length) {
@@ -692,6 +771,18 @@ export function decideNextStep(facts: NextStepFacts): NextStep {
     return make("correction_overdue", owner.who, "overdue",
       `A correction is overdue (was due ${first.dueAt}) — ${owner.ask}.`,
       overdue.map(correctionWhy), null, first.dueAt);
+  }
+
+  // 3a. A filing waits on a fee (#576): the person who pays is told what, where, and how to get
+  //     back — never MFA wording, never "stage again" (staging is refused while it waits).
+  const awaitingPayment = unfinished.filter((t) => t.latestRun?.status === "awaiting_payment");
+  if (awaitingPayment.length && !facts.reopenPause) {
+    const first = awaitingPayment[0];
+    const sentence = first.latestRun?.errorMessage || paymentNeededForRun(null);
+    return make("payment_needed", "me", "today",
+      awaitingPayment.length === 1 ? `${TRACK_NAME[first.track]}: ${sentence}` : `${trackList(awaitingPayment)}: ${sentence}`,
+      awaitingPayment.map((t) => why(`${TRACK_NAME[t.track]}: stopped on the fee ${t.latestRun?.startedAt.slice(0, 16).replace("T", " ")} — automation never pays.`, "submittalTracks")),
+      null, first.latestRun?.startedAt);
   }
 
   // 3. A live browser is waiting on a human.
@@ -881,11 +972,37 @@ export function decideNextStep(facts: NextStepFacts): NextStep {
       approved[0].stagedRun!.startedAt);
   }
 
+  // 11b. A TWO-STAGE FILING (#28): the application is made (and paid) and the plans are not uploaded
+  //      in the agency's second system. Not filed. First the agency's invite is awaited; once the
+  //      inbox matched it (or whenever the person has it), a person uploads by hand and marks it done.
+  const secondStage = unfinished.filter((t) => t.secondStage);
+  if (secondStage.length) {
+    const invited = secondStage.filter((t) => t.secondStage!.inviteAt);
+    if (invited.length) {
+      const first = invited[0];
+      return make("second_stage_upload", "me", "today",
+        `${joinNames(invited.map((t) => `${agencyOf(facts, t)}'s plan-upload invite for the ${TRACK_NAME[t.track]} arrived`))} — upload the plans in ${first.secondStage!.system || "the second system"} by hand, then mark the upload done on the track card with the confirmation number or a screenshot. Not filed until then.`,
+        [
+          ...invited.map((t) => why(`${TRACK_NAME[t.track]}: application ${t.secondStage!.number} made ${t.secondStage!.since.slice(0, 10)}; invite received ${String(t.secondStage!.inviteAt).slice(0, 10)}. The track card lists the documents to upload.`, "submittalTracks")),
+          why("Automation does not open the invite, upload or submit in the second system.", "submittalTracks"),
+        ], null, first.secondStage!.inviteAt);
+    }
+    const first = secondStage[0];
+    return make("second_stage_invite", "ahj", "waiting",
+      `Application made — waiting for ${joinNames(secondStage.map((t) => `${agencyOf(facts, t)}'s plan-upload invite for the ${TRACK_NAME[t.track]}`))}. Not filed until the plans are uploaded in ${first.secondStage!.system || "the second system"} by hand and marked done on the track card.`,
+      [
+        ...secondStage.map((t) => why(`${TRACK_NAME[t.track]}: application ${t.secondStage!.number} made ${t.secondStage!.since.slice(0, 10)}; no invite matched in the filings inbox yet.`, "submittalTracks")),
+        why("If the invite reached another inbox, upload the plans and mark the upload done all the same.", "submittalTracks"),
+      ], null, first.secondStage!.since);
+  }
+
   // 12. Approved by the AHJ, issuance fee due (a person pays — automation never does).
   const feeDue = facts.tracks.filter((t) => t.feeDue && !t.done);
   if (feeDue.length) {
     return make("fee_due", "me", "today",
-      `${joinNames(feeDue.map((t) => `${agencyOf(facts, t)} approved the ${TRACK_NAME[t.track]}`))} — pay the issuance fee in the portal (automation never pays fees).`,
+      feeDue.every((t) => t.feeDueApproved !== false)
+        ? `${joinNames(feeDue.map((t) => `${agencyOf(facts, t)} approved the ${TRACK_NAME[t.track]}`))} — pay the issuance fee in the portal, then press We paid the portal on the track with the permit number and the amount (automation never pays fees).`
+        : `Fee due: ${joinNames(feeDue.map((t) => `${agencyOf(facts, t)} asked for the ${TRACK_NAME[t.track]} fee`))} — pay it in the portal, then press We paid the portal on the track with the record number and the amount (automation never pays fees).`,
       [], null);
   }
 
@@ -942,6 +1059,14 @@ export function decideNextStep(facts: NextStepFacts): NextStep {
       notDone.map((t) => why(`${TRACK_NAME[t.track]}: waiting on ${agencyOf(facts, t)}`, "permitTargets")), null);
   }
 
+  // 17a. #664: every permit is approved and the one track left rides in it — the net metering is
+  //      approved pending the meter set, which is a person's call to the utility, never automation's.
+  if (notDone.length && notDone.every((t) => t.followsPermit) && facts.tracks.some((t) => t.track !== "nem")) {
+    const who = facts.utility || "the utility";
+    return make("waiting_on_agency", "me", "today",
+      `The permit is approved, so ${who}'s net metering (filed with it) is approved pending the meter set — call ${who} to set the meter after the inspection, then record the approval on the utility track.`,
+      [why(`${who} takes its interconnection application inside the AHJ permit application (verified by a person); the meter set is a person's call.`, "permitTargets")], null);
+  }
   // 17. Filed; the agency has the ball.
   if (notDone.length) {
     const permitWaiting = notDone.some((t) => t.track !== "nem");

@@ -92,3 +92,35 @@ export function shouldSpareForReview(commandLine: string, now = Date.now()): boo
   if (!dir) return false;
   return hasLiveReviewSession(dir, now);
 }
+
+/**
+ * The first profile under `root` (the root itself, or a directory up to `maxDepth` levels below
+ * it) that carries a live review marker, or "" when none does (#516).
+ *
+ * A client's profiles live under one root (`<profiles>/<clientId>`): staging takes
+ * `<clientId>/<portalType>`, a correction reopen `<clientId>/<portalType>/<host>`, a learn
+ * `<clientId>/<learnProfileName>` — so two levels reach every profile a person is handed. Not
+ * deeper: below that is Chromium's own profile tree, where no marker is ever written.
+ * `skip` leaves out top-level entries (the clientless root skips every client's own directory).
+ */
+export function liveReviewSessionUnder(
+  root: string,
+  opts: { now?: number; maxDepth?: number; skip?: (name: string) => boolean } = {},
+): string {
+  const now = opts.now ?? Date.now();
+  const maxDepth = opts.maxDepth ?? 2;
+  const walk = (dir: string, depth: number): string => {
+    if (hasLiveReviewSession(dir, now)) return dir;
+    if (depth >= maxDepth) return "";
+    let entries: fs.Dirent[];
+    try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return ""; }
+    for (const e of entries) {
+      if (!e.isDirectory()) continue;
+      if (depth === 0 && opts.skip?.(e.name)) continue;
+      const found = walk(path.join(dir, e.name), depth + 1);
+      if (found) return found;
+    }
+    return "";
+  };
+  return walk(root, 0);
+}

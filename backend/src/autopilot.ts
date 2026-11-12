@@ -34,9 +34,12 @@ import { auditVisionRelaxedAtStage, getProjectDetail, rerunQc, captureConfirmati
 import { parseJson } from "./json";
 import type { NextStep, ProjectRecord, StageDetail, SubmittalTrackType } from "../../shared/src/types";
 import { requiredTracks, SUBMITTAL_TRACK_TYPES, trackPermitTypes } from "./submittalTracks";
+import { nemFiledWithPermit } from "./utilityFilingLookup";
 import { stageForStatus } from "./projectStage";
+import { paymentNeededForRun } from "./feePause";
 import { decideNextStep, gateBlockerHoldsTrack, loadFullNextStepFacts, reviewInfoFromResultJson, reviewerBlockerList, reviewerBlockersFor, reviewerGateRead, stagingFailedFor, withoutCodeResearch, type NextStepFacts, type ReviewMismatch } from "./nextStep";
 import { portalAutomationDisabled } from "../../portal-bot/src/browser";
+import { projectClassHoldReason } from "./projectClassHold";
 // STATIC, and the synchrony is load-bearing (see maybeResumeAutopilot). No load-time cycle:
 // jobQueue reaches this module only through the worker's dynamic import() in processNextJob,
 // exactly as it reaches autoStageSteps.ts, which imports enqueueJob the same way.
@@ -146,7 +149,7 @@ export function trackAlreadyStaged(db: AppDb, projectId: string, track: Submitta
   const row = db.get<Row>(
     `SELECT id FROM portal_runs
       WHERE project_id = ? AND permit_type IN (${family.map(() => "?").join(", ")})
-        AND status IN ('awaiting_human_submit', 'submitted', 'paused_for_human')
+        AND status IN ('awaiting_human_submit', 'submitted', 'paused_for_human', 'awaiting_payment')
       LIMIT 1`,
     [projectId, ...family],
   );
@@ -166,13 +169,28 @@ export function operatorBlockedOutcome(db: AppDb, projectId: string): AutopilotB
   };
 }
 
+// A JOB HELD BY ITS CLASS (#688) as a Segment A outcome, or null: a commercial job, or one whose own
+// evidence says "probably commercial" and no person confirmed. Like the operator's block, the code
+// `class_held` is one maybeResumeAutopilot never relaunches on its own — a person's decision ends it.
+export function classHeldOutcome(db: AppDb, projectId: string): AutopilotBlocker | null {
+  const reason = projectClassHoldReason(db, projectId);
+  if (!reason) return null;
+  return {
+    code: "class_held",
+    detail: `${reason} Autopilot does not run QC, build or stage a held job.`,
+  };
+}
+
 // Which tracks THIS autopilot invocation should stage. An explicit track stages just
 // that one; with no track we stage every track the project actually requires (NEM +
 // the AHJ's permit structure). Before this, a track-less run made ONE untracked stage:
 // the second permit discipline never filed at all, and the run was recorded against
 // permit_type 'permit' so it showed on no track.
+// #664: a utility a person VERIFIED as filing inside the AHJ permit application has no NEM filing of
+// its own — a track-less run stages the permit track(s) only (an explicit NEM request is refused by
+// prepareSubmission, in words).
 export function tracksToStage(db: AppDb, project: ProjectRecord, requested?: SubmittalTrackType): SubmittalTrackType[] {
-  const wanted = requested ? [requested] : requiredTracks(project);
+  const wanted = requested ? [requested] : requiredTracks(project).filter((t) => t !== "nem" || !nemFiledWithPermit(db, project));
   return wanted.filter((t) => !trackAlreadyStaged(db, project.id, t));
 }
 
@@ -254,6 +272,17 @@ export function segmentAOutcomeFromRun(
     const detail = String(run?.error_message ?? "").trim()
       || "The portal stage failed before reaching the review screen — see the run's debug bundle.";
     return { code: "stage_failed", detail };
+  }
+  // #340 — A CANCELLED RUN STAGED NOTHING. Without this it fell through to null, which this function
+  // reads as "genuinely staged" — autopilot would have gone on as if the draft sat at review.
+  if (status === "cancelled") {
+    const detail = String(run?.error_message ?? "").trim() || "A person cancelled the portal stage before it reached the review screen.";
+    return { code: "stage_cancelled", detail };
+  }
+  // A FEE IS NOT A CHALLENGE (#576): the run's own payment sentence (its error_message), never
+  // "complete the challenge" and never a relaunch — it is a portal-run outcome, not a gate.
+  if (status === "awaiting_payment") {
+    return { code: "payment_needed", detail: String(run?.error_message ?? "").trim() || paymentNeededForRun(null) };
   }
   if (status === "paused_for_human") {
     const why = String(run?.pause_reason ?? "").trim() || "human input required";
@@ -341,6 +370,8 @@ export function getAutopilotState(db: AppDb, projectId: string): AutopilotState 
     ? "The project is archived — nothing is staged or filed from it. Restore it from the archive first."
     : facts.operatorHold
     ? `Blocked by an operator (${facts.operatorHold.reason}) — lift the block before staging.`
+    : facts.classHold
+    ? facts.classHold.reason
     : jobInFlight || facts.jobInFlight
       ? "A staging / autopilot run is already in flight — wait for it to finish."
       : stageForStatus(project.status).index >= stageForStatus("submitted").index
@@ -356,6 +387,20 @@ export function getAutopilotState(db: AppDb, projectId: string): AutopilotState 
   // A run that paused mid-fill for MFA/CAPTCHA needs a human at the browser. Per TRACK (the
   // same fact nextStep's portal_paused reads): the newest run of a track that is not filed,
   // or a correction reopen that paused.
+  // A TRACK WAITING ON PAYMENT (#576) says so in the payment's own words: the amount and the
+  // portal, pay there — never MFA wording, never "stage again" (a new run would open a second
+  // application). The run's error_message is the payment sentence (feePause.paymentNeededForRun).
+  const paymentRun = unfinished.find((t) => t.latestRun?.status === "awaiting_payment")?.latestRun ?? null;
+  if (paymentRun && !facts.reopenPause) {
+    const sentence = paymentRun.errorMessage || paymentNeededForRun(null);
+    return {
+      projectId, phase: "paused_for_human", stage: "Payment needed",
+      message: sentence,
+      blockers: [{ code: "payment_needed", detail: sentence }], canApprove: false, approveDisabledReason: "A filing is waiting on a fee payment on its portal.",
+      pauseReason: "fee_payment", portalRunId: paymentRun.id, updatedAt: ts,
+      ...noReview, ...stageInfo,
+    };
+  }
   const pausedRun = facts.reopenPause ?? unfinished.find((t) => t.latestRun?.status === "paused_for_human")?.latestRun ?? null;
   if (pausedRun) {
     return {
@@ -482,7 +527,7 @@ export function getAutopilotState(db: AppDb, projectId: string): AutopilotState 
   // meanwhile") is kept, marked as the last run's, until a newer portal run supersedes it.
   const LIVE_CODES = new Set([
     "qc_fail", "pending_review", "reviewer_blocker", "historical_missing", "missing_document", "permit_path", "needs_client", "needs_ccb",
-    "payment_required", "operator_blocked", "stage_failed", "paused_for_human", "not_pre_stage",
+    "payment_required", "operator_blocked", "stage_failed", "paused_for_human", "payment_needed", "not_pre_stage", "class_held",
   ]);
   const jobFinishedAt = job?.finished_at == null ? "" : String(job.finished_at);
   const runSinceJob = Boolean(run && jobFinishedAt && String(run.started_at ?? "") > jobFinishedAt);
@@ -590,7 +635,7 @@ export function maybeResumeAutopilot(db: AppDb, projectId: string, trigger = "a 
       // failed job: the operator resumes explicitly. `operator_blocked` likewise: the
       // operator stopped this project on purpose, and lifting the block is not a request
       // to have an unrelated upload relaunch a live portal run.
-      if ((result.blockers ?? []).some((b) => b?.code === "stage_failed" || b?.code === "paused_for_human" || b?.code === "operator_blocked")) return;
+      if ((result.blockers ?? []).some((b) => b?.code === "stage_failed" || b?.code === "paused_for_human" || b?.code === "payment_needed" || b?.code === "operator_blocked" || b?.code === "class_held")) return;
       // Carry the original run's track — a resume of an NEM-track run must not
       // restage the default track — and its ORIGIN, so the root's origin rides the chain.
       const payload = parseJson<{ track?: string; origin?: unknown } | null>(job.payload == null ? null : String(job.payload), null);
@@ -635,6 +680,12 @@ export async function runAutopilotSegmentA(
   if (operatorBlock) {
     logger.info("autopilot", "Segment A refused — the project is blocked by an operator", { project: projectId });
     return { blocked: true, blockers: [operatorBlock], message: operatorBlock.detail, state: getAutopilotState(db, projectId) };
+  }
+  // The class hold (#688), refused the same way: before anything is written.
+  const classHeld = classHeldOutcome(db, projectId);
+  if (classHeld) {
+    logger.info("autopilot", "Segment A refused — the job is held for a person by its class", { project: projectId });
+    return { blocked: true, blockers: [classHeld], message: classHeld.detail, state: getAutopilotState(db, projectId) };
   }
   // EXECUTION-TIME GUARD, PER TRACK. A queued autopilot job may be stale by the time it
   // runs, and staging is NOT idempotent portal-side — a re-run creates a duplicate live

@@ -6,7 +6,7 @@ import { maskedFullPageScreenshot } from "../secretMask";
 import { stagedReviewShotsDir } from "../../../backend/src/statePaths";
 import { BasePortalAdapter, HUMAN_REVIEW_MESSAGE, ok, fail, type PortalContext, type PortalStepResult } from "../adapter";
 import { applyFormatHint } from "../formatHint";
-import { extractRecordNumber, pageConfirmsSubmission, recordNumberCandidates, RECORD_NUMBER_TIERS } from "../recordNumber";
+import { extractRecordNumber, learnRecordFormat, pageConfirmsSubmission, recordNumberCandidates, RECORD_NUMBER_TIERS, type LearnedRecordFormat } from "../recordNumber";
 import { findSiteDraft, readDraftCreated } from "../draftCreated";
 import { completeStamp, draftCreatingClickRefusals, draftLabelKey, draftStepLabel, draftTenantKey, readDraftAfterClick, type DraftCreatingStamp } from "../draftSubmitGate";
 import { armHumanCaptureOnPage, HUMAN_SUBMIT_OBSERVED_NOTE } from "../humanCapture";
@@ -94,6 +94,7 @@ import { removeUploadStaging, uploadPayloadFor, type PreparedUpload } from "./up
 import { attachmentTypeFor, isDocumentTypeList } from "./attachmentTypes";
 import { chooseSubmittedRecord, cleanRecordLink, readApplicationLedgerInPage, recordLinkForNumberInPage, type LedgerEntry } from "./submissionLedger";
 import { exactUploadDocType, fileTypeAllowed, UPLOAD_LABEL_PATTERNS, uploadForbidsSubstitute } from "./autoLearnAdapter";
+import { readFeeStop, secretValuesOf, type FeeStopKind, type FeeStopReading } from "../feeStop";
 import { reviewComparison, scrapeReviewScreen as scrapeReviewScreenShared, utilityIdentifiersEnteredBySteps, type ReviewMismatch } from "../reviewScreenScraper";
 import { controlReadsUnanswered, pinEmptyRequiredControl, PINNED_CONTROL_ATTR, SWEPT_BLANK_ATTR, sweepEmptyRequiredControls, type EmptyRequired } from "../requiredControlSweep";
 import { openPortal } from "../browser";
@@ -109,6 +110,7 @@ import {
 import { commitField, installSettleProbe, waitForSettled } from "../settle";
 import { siteOfUrl } from "../siteOf";
 import { dialogOpenedSince, readUnlessDialog } from "../personDialogs";
+import { cancelledMessage, cancelRequestOf, ReplayStallWatch, replayStallMsFromEnv, type RunCancelRequest } from "./replayStopControl";
 import { installFilingBackstop, withBackstopWindow, withOwnWriteWindow, withAutomationInput, describeBackstopAbort, backstopSentLine, drainOwnWrites, unsavedAtReviewWarning, portalOwnCallsBlockedAtReview, reviewBlockedCallsLine, isStoppingAbort, type BackstopAbort, type FilingBackstop, type BackstopHumanRequest } from "../filingBackstop";
 
 /** #333: the run did not hand the review page over — its input watch could not be armed, or (Helm
@@ -123,6 +125,10 @@ export const REVIEW_READ_SKIPPED_SUMMARY = " The review screen was not read back
 /** #381: what the capture says when a native dialog waits for the person on the window. */
 export const DIALOG_WAITING_CAPTURE = "A dialog the portal opened is waiting in the window for your answer (automation never answers one): the page was not read and nothing was recorded.";
 /** #381: said beside a click the portal answered with a native dialog — never "click again" there. */
+/** #316 — the masked picture of the page a run stopped on for a person (captureReviewShot), in the run's
+ *  page-shot folder. backend/src/reviewScreenshot.ts serves a folder's picture only by this exact name:
+ *  the folder's other shots are unmasked. */
+export const REVIEW_SHOT_FILE = "zzz-review.png";
 const CONFIRMATION_ASKED = " The portal asked for a confirmation after that click: only you answer it, in the window (automation never answers one).";
 /** #333: why the run's own input is refused once it has started handing the page over. */
 const INPUT_CLOSED = "the run has stopped at review and is handing the page to a person — it makes no input of its own on the page from here";
@@ -292,6 +298,7 @@ import { chooseCorrectionForm, correctionFormSelector, isRefusal, scanProjectFor
 import { type ExtractedField, type RawField, EXTRACT_SEL, extractFieldsInPage, toExtractedField, dismissPageModals, clearPageOverlays, equipmentMakeCandidates, pageFingerprintOf, collectValidationErrorsFrom, acaApplyEntryFrom, advanceSignatureOf } from "./autoLearnAdapter";
 import { tagUploadControls, visibleBodyText, policyScopeFor } from "./autoLearnAdapter";
 import { answerForUnrecordedControl, missingRequiredStopMessage, UNPINNED_CONTROL_WHY, type MissingRequired } from "../unrecordedControls";
+import { answerForRecordedPolicyStep, parsePolicyDefaultNote } from "../recordedPolicyAnswer";
 import { isComputeTotalsStep, prepareComputeSettle, waitForComputeSettled } from "../computeSettle";
 import { portalSaysNotServed } from "../../../shared/src/portalNotServed";
 
@@ -732,6 +739,26 @@ const ROW_CONTROL_WORDS = /^(qty|quantity|(pv\s*)?array\s*quantity|module\s*quan
 const ROW_FIELD = /^(array\d+[A-Z]\w*|moduleMake|moduleModel|moduleModelCertified)$/;
 const ROW_HOOK_ROLES = new Set(Object.values(ROW_FIELD_HOOKS).map((h) => h.role));
 
+/** Is this select step's target a dropdown's CONCEALED BACKING INPUT — an <input> already on the
+ *  page that is type=hidden or display:none ITSELF (not merely inside a hidden section)? Such an
+ *  input never becomes visible, so a visibility wait on it only spends its timeout (#584). Every
+ *  read is capped; anything unreadable (not rendered yet, a browser-free test fake) answers false,
+ *  which keeps the wait. */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export async function isConcealedBackingInput(loc: any): Promise<boolean> {
+  if (!loc || typeof loc.count !== "function" || typeof loc.first !== "function") return false;
+  try {
+    if (!(await loc.count().catch(() => 0))) return false;
+    const first = loc.first();
+    if (typeof first?.evaluate !== "function") return false;
+    return (await first.evaluate((el: Element) => el.tagName === "INPUT"
+      && ((el as HTMLInputElement).type === "hidden" || getComputedStyle(el).display === "none"), undefined, { timeout: 1000 })
+      .catch(() => false)) === true;
+  } catch {
+    return false;
+  }
+}
+
 /** Which PV-array row a recorded step names, 0 when it names none: its field's array number, its
  *  section ("PV Array 3"), or a row hook css with an nth (nth 1 = row 2). */
 function recordedArrayRow(step: RecipeStep): number {
@@ -1152,6 +1179,21 @@ export class RecipeAdapter extends BasePortalAdapter {
   /** The one shot that says how the filing ended — the completion page with its record
    *  number, or the portal's refusal. Reported so the submission record can point at it. */
   private outcomeShotPath = "";
+  /** THE CONFIRMATION SCREENSHOT OF A FILING (#569): a full-page picture of the page the portal showed
+   *  after the filing went — the approved final submit the portal confirmed, or a person's own submit
+   *  in the hand-over window that read as the completion — with every known secret masked through
+   *  #588's maskedFullPageScreenshot (the one masking path). `path` is set ONLY when that call proved
+   *  the mask covered every secret (rule 2); otherwise `why` says why no picture was kept, and the
+   *  outcome shot stays the run's only picture. Taken, never clicked for (rule 1). */
+  private confirmationShot: { path: string; why: string } | null = null;
+  /** #316 — WHY A RUN THAT STOPPED FOR A PERSON KEPT NO REVIEW PICTURE: captureReviewShot takes the
+   *  page the run stopped on through maskedFullPageScreenshot (the one masking path) and makes it the
+   *  run's outcome shot only when the mask was proven; otherwise this says why (reported on the step
+   *  as reviewShotRefused) and the run has no picture of that page. "" when a picture was kept. */
+  private reviewShotRefused = "";
+  /** THE FEE AT A fee_payment STOP (#576): amount, lines, masked shot and the page's link, read
+   *  once, at the first fee stop. Carried on the step result (data.feeStop). Read only. */
+  private feeStop: FeeStopReading | null = null;
   private pageShotCount = 0;
   private arrayPass = 1;
   /** Bounds of the recorded array block — the span of steps bound to array1*. -1 when the
@@ -1256,8 +1298,26 @@ export class RecipeAdapter extends BasePortalAdapter {
   /** The account's application list as the sign-in landed on it (openSubmission) — the "before"
    *  of the person's filing (#400). null when the page could not be read. */
   private ledgerBefore: LedgerEntry[] | null = null;
+  /** #448 — THIS PORTAL'S OWN RECORD-NUMBER FORMAT: shapes learned from the ids its account list
+   *  showed at sign-in (ledgerBefore) and the shapes a person confirmed on this recipe before
+   *  (recipe.recordNumberShapes). Never another recipe's: the format is this tenant's alone. */
+  private learnedRecordFormat(): LearnedRecordFormat {
+    return learnRecordFormat((this.ledgerBefore ?? []).map((e) => e.id), this.recipe.recordNumberShapes ?? []);
+  }
   /** The recipe step index the loop is on — the final-submit gate's "is this the terminal step". */
   private currentStepIdx = -1;
+  /** #340 — WHY THE REPLAY WAS STOPPED FROM OUTSIDE (a person's cancel, or no progress for too long).
+   *  Set once; every later door (the step loop, fillApplication, stopAtReview) reads it and ends the
+   *  run named, without touching the page again. */
+  private replayStop: { kind: "cancelled"; message: string; stepIndex: number | null; request: RunCancelRequest }
+    | { kind: "stalled"; message: string; stepIndex: number | null; stalledMs: number } | null = null;
+  /** #340 — the stall clock for this replay (created when the step loop starts). */
+  private stallWatch: ReplayStallWatch | null = null;
+  /** #340 — may a stop interrupt the step in flight (close the page under it)? False from the moment
+   *  the loop reaches a click that can file or create a draft — the approved final submit, the
+   *  stamped draft submit, anything past the review marker — so a hung filing click is never cut
+   *  off half-way into an unknown. There, the stop waits for the step boundary. */
+  private stopMayInterrupt = true;
   /** #436 PR1 — the staged draft's review digest, read at the review stop (options.stagedReview).
    *  IN MEMORY ONLY: runAdapter hands it to the backend's one writer; it is never part of a step's
    *  data (result_json is not where it lives). null = not asked for, or the run did not stop at review. */
@@ -1312,6 +1372,13 @@ export class RecipeAdapter extends BasePortalAdapter {
        *  every label blank. Nothing is clicked on it; any failure is an unapprovable capture, never a
        *  failed Stage. */
       stagedReview?: { secrets: string[]; gapMs?: number } | null;
+      /** #340 — A PERSON CANCELLED THIS RUN: the backend aborts it (POST /api/portal-runs/:id/cancel),
+       *  its reason { by, at }. The replay stops at its next step boundary — no further fill or click
+       *  — and never clicks anything to clean up. */
+      abortSignal?: AbortSignal | null;
+      /** #340 — no new step for this long ends the run as a named failure. Default
+       *  PORTAL_REPLAY_STALL_MINUTES (8 minutes); never unbounded. */
+      stallTimeoutMs?: number;
     } = {},
   ) {
     super();
@@ -1485,16 +1552,26 @@ export class RecipeAdapter extends BasePortalAdapter {
     if (this.backstop?.redirectGuardNote) this.driftWarnings.push(this.backstop.redirectGuardNote);
     try {
       // A FilerIdentityStop that escaped the step loop (a click between steps) is the run's answer too.
+      const stopTimer = this.startStopWatchdog();
       const ranRaw = await this.runAll(project).catch((err: unknown) => {
+        // #340 — the watchdog closed the page under a hung step: the stop is the answer, not the
+        // "page closed" error it caused.
+        if (this.replayStop) return fail(this.replayStop.message, this.replayStopData());
         if (err instanceof FilerIdentityStop) return fail(err.message, { driftWarnings: this.driftWarnings, agingNotes: this.agingNotes, guardRefusals: this.guardRefusals });
         if (err instanceof TypeaheadStop) return fail(err.message, { driftWarnings: this.driftWarnings, agingNotes: this.agingNotes, guardRefusals: this.guardRefusals, fieldsVerified: this.fieldsVerified, fieldsUnverified: this.fieldsUnverified });
         throw err;
-      });
+      }).finally(() => clearInterval(stopTimer));
+      // #340 — a cancel or a stall is the run's answer however the step in flight ended (its own
+      // "page closed" failure, or a skip that let the loop run on to the boundary). Never over a
+      // click that happened: that is a fact the record must carry.
+      const ranOrStop = this.replayStop && !this.finalSubmitClicked
+        ? fail(this.replayStop.message, { ...(ranRaw.data ?? {}), ...this.replayStopData() })
+        : ranRaw;
       // ...and a stop recorded on a path that swallowed it never ends as "reached review".
       const stopped = this.filerIdentityStop || this.typeaheadStop;
-      const ran = stopped && ranRaw.ok
-        ? fail(stopped, { ...(ranRaw.data ?? {}), driftWarnings: this.driftWarnings, guardRefusals: this.guardRefusals })
-        : ranRaw;
+      const ran = stopped && ranOrStop.ok
+        ? fail(stopped, { ...(ranOrStop.data ?? {}), driftWarnings: this.driftWarnings, guardRefusals: this.guardRefusals })
+        : ranOrStop;
       // A dismissed dialog cancelled the approved click: the result says so in data too.
       const r = this.finalSubmitNothingSent ? { ...ran, data: { ...(ran.data ?? {}), finalSubmitClicked: false, finalSubmitRequestSent: false } } : ran;
       // Hand-off: the route comes off FIRST, then every abort up to that moment is counted (an
@@ -1929,6 +2006,8 @@ export class RecipeAdapter extends BasePortalAdapter {
         { finalSubmitClicked: false, draftSubmitClickedByAutomation: true },
       );
     }
+    // #340 — A STOPPED RUN HANDS NOTHING OVER: no review read, no staged-review walk, no page touched.
+    if (this.replayStop) return fail(this.replayStop.message, this.replayStopData());
     // A request the person sent may land after the run's tail read it, and before the run let the page
     // go: the handed-over backstop's record is read again now (round 3).
     if ((this.handedOverBackstop?.humanRequests.length ?? 0) > 0) this.personRequestWent = true;
@@ -2265,7 +2344,7 @@ export class RecipeAdapter extends BasePortalAdapter {
     const read = await this.readPageForCapture().catch(() => null);
     if (!read) return { numbers: new Set(), filingControl: "", completionPhrase: null };
     return {
-      numbers: new Set(recordNumberCandidates(read.text).map((c) => c.value)),
+      numbers: new Set(recordNumberCandidates(read.text, this.learnedRecordFormat()).map((c) => c.value)),
       filingControl: read.filingControl,
       reviewPage: read.reviewPage,
       completionPhrase: completionEvidence(read.cellFree).phrase,
@@ -2290,7 +2369,7 @@ export class RecipeAdapter extends BasePortalAdapter {
     const documentPostSince = (this.handedOverBackstop?.humanRequests ?? []).some((h) => h.document && h.page === this.page && typeof h.at === "number" && h.at >= clickAt - HUMAN_CLICK_EARLY_MS && String(h.method ?? "").toUpperCase() !== "GET")
       || this.lateHumanRequests.some((h) => h.document && h.at >= clickAt - HUMAN_CLICK_EARLY_MS);
     const navigationOnly = !!doc && doc.method === "GET" && doc.at > clickAt && !documentPostSince;
-    const candidates = recordNumberCandidates(read.text);
+    const candidates = recordNumberCandidates(read.text, this.learnedRecordFormat());
     const tier = RECORD_NUMBER_TIERS.find((t) => candidates.some((c) => c.source === t));
     const inTier = tier ? candidates.filter((c) => c.source === tier).map((c) => c.value) : [];
     const fresh = inTier.filter((v) => !rr.numbers.has(v));
@@ -2408,11 +2487,17 @@ export class RecipeAdapter extends BasePortalAdapter {
         const errorPage = /^chrome-error:/i.test(rawUrl);
         const read = errorPage ? null : await this.readPageForCapture();
         const judged = read ? this.judgeCompletion(read, this.lastCommittedClick?.at ?? 0) : { number: "", confirmed: false, stillReview: false };
+        // #569: A PAGE JUDGED THE COMPLETION OF THE PERSON'S OWN SUBMIT gets the masked confirmation
+        // screenshot — read only, after the read above (nothing is clicked). Never on the review page,
+        // an error page or a page that does not read as the completion.
+        const confirmed = judged.confirmed && !errorPage;
+        if (confirmed) await this.captureConfirmationShot("PERSON-SUBMITTED");
+        const shot = confirmed ? { ...this.confirmationShotData(), completionConfirmed: true } : {};
         if (judged.number) {
           const recordRead = await chooseRecord({ value: judged.number, confidence: "high", reason: `Captured submission confirmation: ${judged.number}.` });
           return ok(`Captured submission confirmation: ${judged.number}.`, {
             permitNumber: judged.number, confirmationNumber: judged.number,
-            discipline: judged.number.match(/-([A-Z]{2,4})$/)?.[1] ?? null, recordLink: recordRead.recordLink, recordRead,
+            discipline: judged.number.match(/-([A-Z]{2,4})$/)?.[1] ?? null, recordLink: recordRead.recordLink, recordRead, ...shot,
           });
         }
         if (judged.stillReview || errorPage) {
@@ -2436,10 +2521,12 @@ export class RecipeAdapter extends BasePortalAdapter {
           : listed.confidence === "low" && !listed.candidates.length ? { ...listed, reason: unread } : listed;
         return ok(
           recordRead.confidence === "high" ? `Submitted; ${recordRead.recordNumber} is the one new application in the account's list.` : unread,
-          { permitNumber: "", recordLink: recordRead.recordLink || cleanRecordLink(rawUrl), stillReview: false, errorPage: false, recordRead },
+          { permitNumber: "", recordLink: recordRead.recordLink || cleanRecordLink(rawUrl), stillReview: false, errorPage: false, recordRead, ...shot },
         );
       }
-      const read = extractRecordNumber(bodyText);
+      // #448: this portal's own format (its account list's ids, the shapes confirmed on this recipe)
+      // counts like a hand-written portal shape; the page must still say the submission completed.
+      const read = extractRecordNumber(bodyText, this.learnedRecordFormat());
       const permitNumber = read.value;
       // Accela record suffix encodes the discipline: -STR (structural), -ELE (electrical), etc.
       const discipline = permitNumber.match(/-([A-Z]{2,4})$/)?.[1] ?? null;
@@ -2750,6 +2837,50 @@ export class RecipeAdapter extends BasePortalAdapter {
     return { fields, body, confirmed: cmp.confirmed, mismatches: cmp.mismatches };
   }
 
+  /** #340 — has a person cancelled this run, or has it stopped making progress? Records the first
+   *  answer in replayStop (it never changes after) and says whether the run must end. */
+  private checkReplayStop(stepIndex: number | null, inFlight = false): boolean {
+    if (this.replayStop) return true;
+    const req = cancelRequestOf(this.options.abortSignal);
+    if (req) {
+      this.replayStop = { kind: "cancelled", message: cancelledMessage(req, stepIndex, inFlight), stepIndex, request: req };
+      return true;
+    }
+    const stalledMs = this.stallWatch?.stalledMs() ?? null;
+    if (stalledMs != null && this.stallWatch) {
+      this.replayStop = { kind: "stalled", message: this.stallWatch.message(), stepIndex: this.stallWatch.current?.stepIndex ?? stepIndex, stalledMs };
+      return true;
+    }
+    return false;
+  }
+
+  /** #340 — what a stopped run reports in its data (index.ts lifts it to the run's result). */
+  private replayStopData(): Record<string, unknown> {
+    const st = this.replayStop;
+    if (!st) return {};
+    return st.kind === "cancelled"
+      ? { runCancelled: { by: st.request.by, at: st.request.at, stepIndex: st.stepIndex } }
+      : { replayStalled: { stepIndex: st.stepIndex, stalledMs: st.stalledMs } };
+  }
+
+  /** #340 — THE WATCHDOG for a step that never returns. Polls the cancel and the stall clock; when
+   *  either says stop and the step in flight may be interrupted, it closes the page, so the hung
+   *  Playwright call throws and the loop ends with the stop named. Inside a filing/draft click it
+   *  only records the stop; the loop ends at the next boundary. */
+  private startStopWatchdog(): ReturnType<typeof setInterval> {
+    const stallMs = this.options.stallTimeoutMs && this.options.stallTimeoutMs > 0 ? this.options.stallTimeoutMs : replayStallMsFromEnv();
+    this.stallWatch = new ReplayStallWatch(stallMs);
+    const every = Math.max(25, Math.min(5_000, Math.floor(stallMs / 8)));
+    const timer = setInterval(() => {
+      if (this.replayStop || !this.checkReplayStop(this.currentStepIdx >= 0 ? this.currentStepIdx : null, true)) return;
+      if (!this.stopMayInterrupt || this.finalSubmitClicked) return;
+      const pg = this.page as { close?: () => Promise<unknown> } | null;
+      if (pg && typeof pg.close === "function") void pg.close().catch(() => null);
+    }, every);
+    if (typeof timer.unref === "function") timer.unref();
+    return timer;
+  }
+
   private async runAll(project?: ProjectRecord): Promise<PortalStepResult> {
     if (!this.page) return fail("Recipe replay has no open page.");
     let executed = 0;
@@ -2853,6 +2984,13 @@ export class RecipeAdapter extends BasePortalAdapter {
       }
       const recordedStep = this.recipe.steps[stepIdx];
       this.currentStepIdx = stepIdx;
+      // #340 — THE STEP BOUNDARY: a person's cancel, or no new step for too long, ends the run HERE,
+      // before this step fills or clicks anything. Nothing is clicked to clean up.
+      this.stallWatch?.note(stepIdx, this.arrayPass, String(recordedStep?.note ?? recordedStep?.field ?? recordedStep?.action ?? ""));
+      if (this.checkReplayStop(stepIdx)) {
+        closePrevStepTiming();
+        return fail(this.replayStop!.message, { ...this.replayStopData(), executed, skipped, healedSteps: this.healedSteps, driftWarnings: this.driftWarnings, agingNotes: this.agingNotes, guardRefusals: this.guardRefusals, failedStepIndex: stepIdx, trace, slowSteps });
+      }
       // #382 — A RECORDED "ADD ARRAY" CLICK IS NEVER REPLAYED. It adds a fixed number of rows (the
       // learn project's), whatever this project has; the rows this project needs are added after
       // the array block, one per array (afterArrayBlock), and only there.
@@ -2931,6 +3069,8 @@ export class RecipeAdapter extends BasePortalAdapter {
       closePrevStepTiming();
       prevStart = Date.now();
       prevStep = { i: stepIdx, action: String(step?.action ?? ""), note: String(step?.note ?? "").slice(0, 52) };
+      // #340 — from a click that can file or create a draft on, a stop never cuts a step off mid-way.
+      if (pastReview || isFinalSubmitStep(step) || this.draftCreatingStepAt(stepIdx) >= 0) this.stopMayInterrupt = false;
       // Guided-manual: stop at review. autoSubmit (trusted, approved): proceed past
       // the review marker to replay ONLY allowlisted final-submit steps.
       // Sweep before leaving a page (an advancing click) and before review: those are the
@@ -3307,7 +3447,7 @@ export class RecipeAdapter extends BasePortalAdapter {
           if (err instanceof FinalSubmitStop) {
             closePrevStepTiming();
             const base = fail(err.pauseReason ? err.message : `Recipe step failed (${step.action}${step.note ? ` — ${step.note}` : ""}): ${err.message}`,
-              { executed, skipped, healedSteps: this.healedSteps, driftWarnings: this.driftWarnings, agingNotes: this.agingNotes, guardRefusals: this.guardRefusals, failedStepIndex: stepIdx, trace, slowSteps, finalSubmitClicked: this.finalSubmitClicked, ...(err.pauseReason ? { needsHuman: true } : {}), pageShotDir: this.pageShotDir, outcomeShotPath: this.outcomeShotPath });
+              { executed, skipped, healedSteps: this.healedSteps, driftWarnings: this.driftWarnings, agingNotes: this.agingNotes, guardRefusals: this.guardRefusals, failedStepIndex: stepIdx, trace, slowSteps, finalSubmitClicked: this.finalSubmitClicked, ...(err.pauseReason ? { needsHuman: true } : {}), pageShotDir: this.pageShotDir, outcomeShotPath: this.outcomeShotPath, ...(err.pauseReason === "fee_payment" && this.feeStop ? { feeStop: this.feeStop } : {}) });
             return err.pauseReason ? { ...base, pauseReason: err.pauseReason } : base;
           }
           // WHO IS FILING (#524): never retried, healed or skipped as optional — a retry or a heal
@@ -3665,6 +3805,7 @@ export class RecipeAdapter extends BasePortalAdapter {
         permitNumber: capture.data?.permitNumber || "",
         confirmationNumber: capture.data?.confirmationNumber || "",
         recordLink: capture.data?.recordLink || "",
+        ...this.confirmationShotData(),
         // What the LLM gap-fill added (and what it left blank for lack of real data) — same key
         // the hand-coded adapters surface, so the operator/UI sees a uniform report.
         gapFill: this.gapFillReport, healedSteps: this.healedSteps, driftWarnings: this.driftWarnings, agingNotes: this.agingNotes, slowSteps, requiredStillEmpty: this.requiredStillEmpty, unresolvedFields: this.unresolvedFields, fieldsVerified: this.fieldsVerified, fieldsUnverified: this.fieldsUnverified, requiredFieldsSeen: this.requiredFieldsSeen, stoppedAtPayment: this.stoppedAtPayment, pageShotDir: this.pageShotDir, outcomeShotPath: this.outcomeShotPath,
@@ -3761,6 +3902,14 @@ export class RecipeAdapter extends BasePortalAdapter {
       this.stagedReviewCapture = await this.captureStagedReview(cfg).catch((e) =>
         unapprovableStagedReview(`the staged review could not be read (${String((e as { message?: string })?.message ?? e).replace(/\s+/g, " ").slice(0, 80)})`, this.pageUrlNoHash()));
     }
+    // #316 — THE PICTURE OF THE PAGE A PERSON IS HANDED (a replay that stopped at review, or before
+    // it): taken BEFORE the hand-over (after it the window is the person's, and the mask tags its
+    // DOM), and only when no stop has already pictured the run's ending. Masked or nothing (rule 2);
+    // read only (rule 1). It becomes the run's outcome shot, so portal_runs.screenshots_path names it
+    // and the review-screenshot route serves it.
+    if (!pastReview && !this.finalSubmitClicked && !this.stoppedAtPayment && !this.outcomeShotPath) {
+      await this.captureReviewShot();
+    }
     // THE REVIEW-PAGE LOCKDOWN (filingBackstop.ts): the run's last write to the page (the final
     // re-assert and gap-fill above, which a portal autosaves on blur) is done. From here until
     // fillApplication hands the page to a person (dispose), every state-changing request is
@@ -3834,6 +3983,7 @@ export class RecipeAdapter extends BasePortalAdapter {
       healedSteps: this.healedSteps, driftWarnings: this.driftWarnings, agingNotes: this.agingNotes, slowSteps,
       requiredStillEmpty: this.requiredStillEmpty, unresolvedFields: this.unresolvedFields, fieldsVerified: this.fieldsVerified, fieldsUnverified: this.fieldsUnverified, requiredFieldsSeen: this.requiredFieldsSeen, stoppedAtPayment: this.stoppedAtPayment, pageShotDir: this.pageShotDir,
       outcomeShotPath: this.outcomeShotPath,
+      ...(this.reviewShotRefused ? { reviewShotRefused: this.reviewShotRefused } : {}),
       reviewFieldsSeen: review.fieldsSeen, reviewFieldsConfirmed: review.confirmed, reviewMismatches: review.mismatches,
       ...(review.skipped ? { reviewReadSkipped: "a dialog waits for the person in the window" } : {}),
       attachmentLedger: this.attachmentLedger, unrecordedAnswered: this.unrecordedAnswered,
@@ -5229,7 +5379,7 @@ export class RecipeAdapter extends BasePortalAdapter {
    * worse ones — the exact mistake that broke a working replay earlier today.
    */
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  private async reanchorIfWrongControl(step: RecipeStep, scoped: any): Promise<any | "abort" | null> {
+  private async reanchorIfWrongControl(step: RecipeStep, scoped: any, rescued = false): Promise<any | "abort" | null> {
     const recorded = String(step.selector?.label || step.note || "").trim();
     if (!recorded || !scoped || typeof scoped.count !== "function") return null;
     // Nothing resolved at all is a different problem (a genuine miss); leave it alone.
@@ -5359,7 +5509,19 @@ export class RecipeAdapter extends BasePortalAdapter {
             return { label, section };
           }).catch(() => null) as { label: string; section: string } | null;
           const sectionAgrees = !!fp.section && !!meant?.section && meant.section.toLowerCase() === String(fp.section).replace(/\s+/g, " ").trim().toLowerCase();
-          if (meant && (sectionAgrees || (meant.label && agree(recorded, meant.label)))) {
+          // THE RESCUE ALREADY REJECTED THAT CONTROL (#408). When the section or hook rescue
+          // replaced an out-of-reach resolution, and the recorded element is an EMPTY concealed
+          // shadow standing beside the one control of its block that carries exactly its label,
+          // the two mechanisms are answering the same question and the rescue is right: writing
+          // "there" put PGE's inverter Model into an opacity:0 select holding only "Select...",
+          // the visible Model stayed empty, and the step was reported as a miss.
+          // shadowKeepsRescue is narrow on purpose; anything it cannot prove goes to MF5 as before.
+          const keepRescue = rescued && meant && await this.shadowKeepsRescue(step, target.first(), el0);
+          if (keepRescue) {
+            this.agingNotes.push(
+              `step "${recorded.slice(0, 44)}": the recorded control #${String(fp.id || fp.name).slice(0, 50)} is an empty concealed shadow beside #${(got!.id || got!.name).slice(0, 50)} in its own block — kept the rescue, re-record the step`,
+            );
+          } else if (meant && (sectionAgrees || (meant.label && agree(recorded, meant.label)))) {
             this.driftWarnings.push(
               `step "${recorded.slice(0, 44)}" resolved onto #${(got!.id || got!.name).slice(0, 50)}, but the recorded control #${String(fp.id || fp.name).slice(0, 50)}${fp.section ? ` (${String(fp.section).slice(0, 30)})` : ""} is on the page — written there, not into the other box`,
             );
@@ -6033,6 +6195,8 @@ export class RecipeAdapter extends BasePortalAdapter {
     // learned. Consulted last, because a working selector needs no rescue.
     // A PINNED RE-ASSERT (#362) writes the one element it checked, or nothing: no rescue.
     const pinned = isPinnedReassert(step);
+    // Whether a rescue below replaced the resolution: the fingerprint re-anchor asks it (#408).
+    let rescued = false;
     if (!pinned && !isToggle && await this.looksOutOfReach(scoped)) {
       // THE PORTAL'S OWN NAME FOR THE CONTROL FIRST. A test hook is stable across renders and
       // says which side it belongs to; a recorded id is neither.
@@ -6051,10 +6215,10 @@ export class RecipeAdapter extends BasePortalAdapter {
       const usable = async (loc: unknown): Promise<boolean> =>
         !!loc && await this.isTrulyVisible(loc as never).catch(() => false);
       const byHook = await this.resolveByTestHook(step);
-      if (await usable(byHook) && await this.insideArrayRow(byHook)) scoped = byHook as never;
+      if (await usable(byHook) && await this.insideArrayRow(byHook)) { scoped = byHook as never; rescued = true; }
       else if (step.fingerprint?.section) {
         const bySection = await this.resolveBySection(step);
-        if (await usable(bySection) && await this.insideArrayRow(bySection)) scoped = bySection as never;
+        if (await usable(bySection) && await this.insideArrayRow(bySection)) { scoped = bySection as never; rescued = true; }
         else if (bySection || byHook) {
           this.resolveTrail.push(`  ...rescue: ${byHook ? "the test hook" : "the section"} resolved a control that is STILL concealed — the portal puts its hook on the hidden native input; kept the original`);
         }
@@ -6099,7 +6263,7 @@ export class RecipeAdapter extends BasePortalAdapter {
     // nothing reported. So confirm the control's own label still agrees with what was
     // recorded before touching it, and re-anchor by label when it does not.
     if (IDENTITY_CHECKED.has(step.action) && !pinned) {
-      const anchored = await this.reanchorIfWrongControl(step, scoped);
+      const anchored = await this.reanchorIfWrongControl(step, scoped, rescued);
       if (anchored === "abort") return false;
       if (anchored) scoped = anchored;
     }
@@ -6264,6 +6428,24 @@ export class RecipeAdapter extends BasePortalAdapter {
           this.agingNotes.push(`"${this.stepLabel(step) || "Installer Company"}": the recorded company "${String(step.value).slice(0, 40)}" is the learn's — this client's own name is used instead`);
         }
         if (companyList) step = { ...step, field: "installerCompanyName", ...(literalCompany ? { value: undefined } : {}) };
+        // A RECORDED POLICY ANSWER YIELDS TO THE JOB'S OWN (#355) — the select-shaped twin of
+        // recordedPolicyRadio: a recorded "policy default: … → No" select commits THIS job's answer.
+        if (!step.field) {
+          const pol = answerForRecordedPolicyStep(step, this.fieldValues);
+          const shown = this.recordedPolicyShown(step);
+          if (pol?.kind === "unanswerable") {
+            this.noteUnresolved(step);
+            this.notePolicyOnce(this.driftWarnings, `"${shown}" left unanswered for a person: ${pol.why}`);
+            return false;
+          }
+          if (pol?.kind === "standing") this.notePolicyOnce(this.agingNotes, `"${shown}" answered "${pol.value}": ${pol.why}`);
+          if (pol?.kind === "job") {
+            this.notePolicyOnce(this.agingNotes, pol.value === pol.recorded
+              ? `"${shown}" answered "${pol.value}" from ${pol.key} (this job's own answer)`
+              : `"${shown}" answered "${pol.value}" from ${pol.key} (this job's own answer), not the recorded standing "${pol.recorded}"`);
+            step = { ...step, value: pol.value };
+          }
+        }
         const v = this.resolveValue(step);
         const filerIdentity = isFilerIdentityField(step.field);
         if (!v && filerIdentity) {
@@ -6314,7 +6496,13 @@ export class RecipeAdapter extends BasePortalAdapter {
             }
           }
         }
-        await waitForElement(scoped);
+        // A CONCEALED BACKING INPUT NEVER TURNS VISIBLE (#584). A Telerik/Kendo-style dropdown keeps
+        // its key in an <input> of its own with display:none (or type=hidden) and is driven through
+        // its face; waiting for THAT input to become visible burned the whole 10s budget on every
+        // such select step, every run. It is already on the page, so there is nothing to wait for:
+        // the select path below opens it through its face. A control not yet rendered (count 0), or
+        // hidden only by a section around it, still gets the visibility wait as before.
+        if (!(await isConcealedBackingInput(scoped))) await waitForElement(scoped);
         // WHO IS FILING (#524): never the contains match, the model rules, a certified alias or a
         // label re-resolve — this client's option exactly once, read back after the commit, or stop.
         if (filerIdentity) return this.selectFilerIdentityStep(step, scoped, v);
@@ -6588,15 +6776,21 @@ export class RecipeAdapter extends BasePortalAdapter {
           }
           return false;
         }
-        const target = recovered ?? scoped;
+        let target = recovered ?? scoped;
         await waitForElement(target);
         // force: a radio inside a styled widget is driven by its label, so the input itself
         // can be visually hidden while still being the thing that must end up checked.
         // A RECOVERED radio is usually exactly that hidden half (recovery only runs when
         // the recorded id was unusable) — force must follow !usable alone, or the check
         // waits out its full actionability timeout on an element that can never be visible.
+        let force = !usable;
+        // A RECORDED POLICY ANSWER YIELDS TO THE JOB'S OWN (#355): the export-capacity radio the
+        // learner recorded as the standing "No" is THIS job's exportLimiting when the job carries it.
+        const policyPick = await this.recordedPolicyRadio(step, target);
+        if (policyPick === "unanswered") return false;
+        if (policyPick) { target = policyPick.loc; force = !policyPick.visible; }
         try {
-          await withAutomationInput(this.page, () => target!.check({ force: !usable }));
+          await withAutomationInput(this.page, () => target!.check({ force }));
         } catch (err) {
           // "CLICKING THE CHECKBOX DID NOT CHANGE ITS STATE" IS NOT A MISSING CONTROL.
           //
@@ -7713,9 +7907,9 @@ export class RecipeAdapter extends BasePortalAdapter {
           bsPay.closeApprovedSlot();
           this.finalSubmitClicked = false;
           this.finalSubmitNothingSent = true;
-          throw new FinalSubmitStop(`The approved final submit's confirmation asks for a payment — fees are never automated, the dialog was not answered, and NOTHING was filed (no request reached the portal). A person pays and submits on the portal. (${modal.blocked.slice(0, 120)})`, "fee_payment");
+          throw await this.feeStopError(`The approved final submit's confirmation asks for a payment — fees are never automated, the dialog was not answered, and NOTHING was filed (no request reached the portal). A person pays and submits on the portal. (${modal.blocked.slice(0, 120)})`, "pay_dialog");
         }
-        throw new FinalSubmitStop(`The submit raised a payment dialog — fees are never automated; a person pays and confirms the filing on the portal. (${modal.blocked.slice(0, 120)})`, "fee_payment");
+        throw await this.feeStopError(`The submit raised a payment dialog — fees are never automated; a person pays and confirms the filing on the portal. (${modal.blocked.slice(0, 120)})`, "pay_dialog");
       }
       // A MODAL IS ANSWERED ONLY WHILE THE FILING HAS NOT GONE (portal-run-close-2 C3). Its OK
       // opens a fresh approved slot — which is right for the submit's own confirmation ("Are you
@@ -7745,11 +7939,28 @@ export class RecipeAdapter extends BasePortalAdapter {
       const pay = await this.paymentOnPage();
       if (pay) {
         this.finalSubmitOutcome = { verdict: "unknown", evidence: `fee page: ${pay}` };
-        await this.capturePageShot("FEE-PAGE", true).catch(() => null);
-        throw new FinalSubmitStop(`The approved final submit landed on a fee-payment page (${pay}) — automation never pays. A person pays on the portal and confirms the filing (and its record number) there.`, "fee_payment");
+        throw await this.feeStopError(`The approved final submit landed on a fee-payment page (${pay}) — automation never pays. A person pays on the portal and confirms the filing (and its record number) there.`, "fee_page");
       }
     }
     return last;
+  }
+
+  /** THE ONE WAY A fee_payment STOP IS RAISED (#576): the fee the page asks is read (shared reader,
+   *  read only — nothing is clicked or typed), a full-page screenshot is taken with every secret and
+   *  card field masked (it becomes the run's outcome shot), and the stop carries both on the result.
+   *  Read at the first fee stop only. Never throws on a page it cannot read: the amount is then
+   *  UNREAD, never $0. */
+  private async feeStopError(message: string, where: FeeStopKind): Promise<FinalSubmitStop> {
+    if (!this.feeStop) {
+      const dir = await this.ensurePageShotDir().catch(() => "");
+      this.feeStop = await readFeeStop(this.page, {
+        where,
+        shotFile: dir ? path.join(dir, "zzz-outcome-FEE-STOP.png") : null,
+        secrets: secretValuesOf(this.fieldValues),
+      }).catch(() => null);
+      if (this.feeStop?.shotPath) this.outcomeShotPath = this.feeStop.shotPath;
+    }
+    return new FinalSubmitStop(message, "fee_payment");
   }
 
   /** A visible pay control (its label read by the shared isPayFee) or a payment-card field on the
@@ -7797,7 +8008,7 @@ export class RecipeAdapter extends BasePortalAdapter {
     //    in silence and the approved run read as an ordinary review stop.
     if (PAY_FEE_REPLAY_GATE.test(name)) {
       if (flaggedFinal && this.finalSubmitRefusalsNow().length === 0) {
-        throw new FinalSubmitStop(`The approved final submit "${name.slice(0, 60)}" pays a fee — automation never pays. Nothing was clicked; the application is staged at review for a person to pay and submit.`, "fee_payment");
+        throw await this.feeStopError(`The approved final submit "${name.slice(0, 60)}" pays a fee — automation never pays. Nothing was clicked; the application is staged at review for a person to pay and submit.`, "pay_to_file");
       }
       return false;
     }
@@ -7866,10 +8077,10 @@ export class RecipeAdapter extends BasePortalAdapter {
         this.finalSubmitNothingSent = true;
         const payment = /payment/.test(dismissed.why);
         this.finalSubmitOutcome = { verdict: "unknown", evidence: `${dismissed.type} dialog dismissed: ${dismissed.message.slice(0, 80)}` };
-        throw new FinalSubmitStop(payment
-          ? `The approved final submit's confirmation asks for a payment ("${dismissed.message.slice(0, 100)}") — dismissed, automation never pays. NOTHING was filed (no request reached the portal); a person pays and submits on the portal.`
-          : `The approved final submit opened a ${dismissed.type} ("${dismissed.message.slice(0, 100)}") that was dismissed (${dismissed.why}). NOTHING was filed (no request reached the portal); a person completes the submit on the portal.`,
-        payment ? "fee_payment" : null);
+        if (payment) {
+          throw await this.feeStopError(`The approved final submit's confirmation asks for a payment ("${dismissed.message.slice(0, 100)}") — dismissed, automation never pays. NOTHING was filed (no request reached the portal); a person pays and submits on the portal.`, "pay_dialog");
+        }
+        throw new FinalSubmitStop(`The approved final submit opened a ${dismissed.type} ("${dismissed.message.slice(0, 100)}") that was dismissed (${dismissed.why}). NOTHING was filed (no request reached the portal); a person completes the submit on the portal.`, null);
       }
       const postChallenge = await detectChallengeFrame(this.page);
       if (postChallenge) {
@@ -7890,6 +8101,9 @@ export class RecipeAdapter extends BasePortalAdapter {
       this.finalSubmitOutcome = outcome;
       if (outcome.verdict === "accepted") {
         await this.capturePageShot("SUBMITTED", true);
+        // #569: the portal confirmed it — the masked confirmation screenshot of that page. Only on
+        // "accepted": a refused or quiet page keeps the outcome shot alone and is never a confirmation.
+        await this.captureConfirmationShot("SUBMITTED");
         return true;
       }
       if (outcome.verdict === "rejected") {
@@ -8195,12 +8409,7 @@ export class RecipeAdapter extends BasePortalAdapter {
     if (!this.page || typeof this.page.evaluate !== "function") return null;
     const field = String(step.field ?? "");
     if (!field) return null;
-    // inverterModel -> inverter model ; array1ModuleQuantity -> array module quantity
-    const tokens = field
-      .replace(/([a-z0-9])([A-Z])/g, "$1 $2").toLowerCase()
-      .replace(/[^a-z ]+/g, " ").split(/\s+/)
-      .map((t) => (t === "module" ? "array" : t === "pv" ? "array" : t))
-      .filter((t) => t.length > 2 && !["the", "certified", "make"].includes(t));
+    const tokens = this.testHookTokens(field);
     if (tokens.length < 2) return null;
     const want = String(step.fingerprint?.section ?? "").trim();
     const found = await this.page.evaluate((arg: { toks: string[]; want: string }) => {
@@ -8268,6 +8477,146 @@ export class RecipeAdapter extends BasePortalAdapter {
       `"${String(step.note ?? field).slice(0, 34)}" resolved by the portal's own test hook ${JSON.stringify(found.slice(0, 40))} — stabler than the recorded id`,
     );
     return this.page.locator("[data-rc-hook-hit='1']").first();
+  }
+
+  /** The tokens a test hook must carry to name this field: inverterModel -> inverter model ;
+   *  array1ModuleQuantity -> array module quantity. One spelling for the hook rescue and for
+   *  shadowKeepsRescue's contest check, so the two can never read a hook differently. */
+  private testHookTokens(field: string): string[] {
+    return field
+      .replace(/([a-z0-9])([A-Z])/g, "$1 $2").toLowerCase()
+      .replace(/[^a-z ]+/g, " ").split(/\s+/)
+      .map((t) => (t === "module" ? "array" : t === "pv" ? "array" : t))
+      .filter((t) => t.length > 2 && !["the", "certified", "make"].includes(t));
+  }
+
+  /**
+   * MAY A RESCUE STAND AGAINST THE FINGERPRINT RE-ANCHOR? (#408, #327)
+   *
+   * Two mechanisms answer "which element does this step write". The section/hook rescue runs
+   * when the resolved control is out of reach and picks a usable one; MF5's fingerprint re-anchor
+   * (replayWrongElement) then sees a resolved id that is not the recorded one while the recorded
+   * one is on the page, and sends the write back there. On PGE's spec block (sectionDisambiguation)
+   * the recorded #pcInputBase34 is an opacity:0 "Model" select holding only "Select...", beside
+   * the visible inverter Model the rescue chose — so MF5 undid the rescue, the value went nowhere
+   * a person could see, and the step was reported as a miss. Red on main from b05a9a5e.
+   *
+   * A concealed recorded control is NOT always a stale shadow (sectionRedirectKept): a select2's
+   * real <select>, a styled select still carrying its list, a list still cascading in, a
+   * code-valued State twin. In each of those the rescue is the one that took a neighbour and
+   * MF5 is right. So the rescue stands ONLY when every one of these holds, and anything else
+   * goes to MF5 exactly as on main:
+   *   1. the recorded element is a <select>, concealed, with no option but placeholders: it
+   *      cannot take ANY answer, so writing there can only leave the step blank;
+   *   2. it has no widget of its own: no widget class or data attribute, no combobox/popup face
+   *      or widget wrapper beside it or around it (a select2 / bootstrap-select / Kendo / Chosen
+   *      native whose list arrives late is empty too, and its face is how you tell);
+   *   3. its BLOCK (the smallest ancestor holding another form control) holds exactly one
+   *      other control whose label contains the recorded label, that control is the rescued
+   *      one, its label is EXACTLY the recorded label, and it is usable. An "Existing Model"
+   *      beside it, a clone block, or a twin elsewhere in the block is a contest, not a shadow;
+   *   4. the shadow, its own label, and the rescued control all read exactly the recorded label
+   *      and section (the learner's section algorithm);
+   *   5. no test hook on the page names this field for a control other than the rescued one:
+   *      the portal's own name for the field pointing elsewhere is a contest too.
+   */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  private async shadowKeepsRescue(step: RecipeStep, target: any, rescued: any): Promise<boolean> {
+    if (!target || typeof target.evaluate !== "function" || !rescued || typeof rescued.elementHandle !== "function") return false;
+    const want = String(step.fingerprint?.section ?? "").trim();
+    const label = String(step.fingerprint?.ariaLabel ?? step.selector?.label ?? step.note ?? "").trim();
+    if (!want || !label) return false;
+    const toks = this.testHookTokens(String(step.field ?? ""));
+    const handle = await rescued.elementHandle().catch(() => null);
+    if (!handle) return false;
+    try {
+      return await target.evaluate((shadow: Element, arg: { r: Element; want: string; label: string; toks: string[] }) => {
+        const r = arg.r;
+        if (!r || r === shadow || shadow.tagName !== "SELECT") return false;
+        const clean = (t: string | null | undefined): string => (t || "").replace(/\s+/g, " ").trim().slice(0, 80);
+        const norm = (t: string): string => clean(t).toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+        const shown = (el: Element): boolean => {
+          const b = el.getBoundingClientRect();
+          const cs = getComputedStyle(el as HTMLElement);
+          return b.width > 2 && b.height > 2 && cs.visibility !== "hidden" && cs.display !== "none" && Number(cs.opacity) !== 0;
+        };
+        // 1. concealed, and empty but for placeholders.
+        if (shown(shadow)) return false;
+        const placeholder = /^(select|choose|please select|nothing selected|none|-+)\b|^$/i;
+        const opts = Array.from((shadow as HTMLSelectElement).options);
+        if (opts.some((o) => o.value !== "" && !placeholder.test(clean(o.text)))) return false;
+        // 2. no widget of its own.
+        const widget = /select2|selectpicker|bootstrap-select|chosen|selectize|choices|k-widget|k-combobox|k-dropdown|customselect|custom-select|ui-selectmenu|multiselect|dropdown/i;
+        const cls = (el: Element | null): string => (el && typeof el.className === "string" ? el.className : "");
+        if (widget.test(cls(shadow)) || ["data-role", "data-select2-id", "data-live-search", "data-placeholder"].some((a) => shadow.hasAttribute(a))) return false;
+        const faceLike = (el: Element | null): boolean => !!el && (widget.test(cls(el))
+          || el.matches('[role="combobox"], [aria-haspopup]')
+          || !!el.querySelector('[role="combobox"], [aria-haspopup], [class*="select2"], [class*="chosen"], [class*="bootstrap-select"], [class*="k-widget"]'));
+        if (faceLike(shadow.previousElementSibling) || faceLike(shadow.nextElementSibling) || widget.test(cls(shadow.parentElement))) return false;
+        // 3. the block, and the one control in it that carries the label.
+        const isControl = (el: Element): boolean => el !== shadow
+          && (el.tagName === "SELECT" || el.tagName === "TEXTAREA" || (el.tagName === "INPUT" && (el.getAttribute("type") || "").toLowerCase() !== "hidden"));
+        let blk: Element | null = shadow.parentElement;
+        while (blk && !Array.from(blk.querySelectorAll("input, select, textarea")).some(isControl)) blk = blk.parentElement;
+        if (!blk || !blk.contains(r)) return false;
+        const labelOf = (el: Element): string => {
+          const id = el.getAttribute("id");
+          const forLbl = id ? document.querySelector(`label[for="${CSS.escape(id)}"]`) : null;
+          return clean(
+            el.getAttribute("aria-label")
+            || (forLbl ? forLbl.textContent : "")
+            || (el.closest("label") ? (el.closest("label") as HTMLElement).textContent : "")
+            || el.getAttribute("placeholder")
+            || "",
+          );
+        };
+        const wantL = norm(arg.label);
+        if (!wantL) return false;
+        const carries = Array.from(blk.querySelectorAll("input, select, textarea"))
+          .filter((el) => isControl(el) && ` ${norm(labelOf(el))} `.includes(` ${wantL} `));
+        if (carries.length !== 1 || carries[0] !== r) return false;
+        if (norm(labelOf(r)) !== wantL || norm(labelOf(shadow)) !== wantL) return false;
+        if (!shown(r) || (r as HTMLInputElement).disabled) return false;
+        // 4. resolveBySection's sectionOf, verbatim: the learner's section algorithm.
+        const sectionOf = (el: Element): string => {
+          const fs = el.closest("fieldset");
+          const legend = fs ? fs.querySelector("legend") : null;
+          if (legend && clean(legend.textContent)) return clean(legend.textContent);
+          const container = el.closest('section, [class*="panel"], [class*="card"], [class*="section"], [class*="form-section"], [class*="block"], [role="group"], [role="region"]');
+          if (container) {
+            const h = container.querySelector('legend, h1, h2, h3, h4, h5, h6, .panel-title, .card-title, .card-header, .section-title, .panel-heading');
+            if (h && clean(h.textContent)) return clean(h.textContent);
+          }
+          let node: Element | null = el;
+          for (let hops = 0; node && hops < 6; hops++) {
+            let sib: Element | null = node.previousElementSibling;
+            while (sib) {
+              if (/^(H[1-6]|LEGEND)$/.test(sib.tagName) && clean(sib.textContent)) return clean(sib.textContent);
+              const inner = sib.querySelector ? sib.querySelector("h1, h2, h3, h4, h5, h6, legend") : null;
+              if (inner && clean(inner.textContent)) return clean(inner.textContent);
+              sib = sib.previousElementSibling;
+            }
+            node = node.parentElement;
+          }
+          return "";
+        };
+        const wantS = norm(arg.want);
+        if (!wantS || norm(sectionOf(shadow)) !== wantS || norm(sectionOf(r)) !== wantS) return false;
+        // 5. no test hook naming this field for another control.
+        if (arg.toks.length >= 2) {
+          for (const el of Array.from(document.querySelectorAll("[data-test-role], [data-testid], [data-test-id]"))) {
+            const hook = (el.getAttribute("data-test-role") || el.getAttribute("data-testid") || el.getAttribute("data-test-id") || "")
+              .toLowerCase().replace(/([a-z0-9])([A-Z])/g, "$1 $2").replace(/[^a-z]+/g, " ");
+            if (!hook || !arg.toks.every((t) => hook.includes(t))) continue;
+            const ctl = el.matches("input, select, textarea") ? el : el.querySelector("input, select, textarea");
+            if (ctl && ctl !== r) return false;
+          }
+        }
+        return true;
+      }, { r: handle, want, label, toks }).catch(() => false) as boolean;
+    } finally {
+      await handle.dispose().catch(() => null);
+    }
   }
 
   /**
@@ -8768,6 +9117,78 @@ export class RecipeAdapter extends BasePortalAdapter {
    * One screenshot per completed wizard page, so a run can be reviewed by eye afterwards
    * instead of only when it fails. Capped, so a recipe that loops cannot fill the disk.
    */
+  /** This run's page-shot folder, made on first use. */
+  private async ensurePageShotDir(): Promise<string> {
+    if (!this.pageShotDir) {
+      const stamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
+      const who = String(this.recipe?.utility || this.recipe?.ahj || "portal")
+        .toLowerCase().replace(/[^a-z0-9]+/g, "-").slice(0, 28);
+      this.pageShotDir = path.join(
+        process.env.REPLAY_RUN_DIR || path.join(process.cwd(), "data", "replay-runs"),
+        stamp + "-" + who,
+      );
+      await fs.promises.mkdir(this.pageShotDir, { recursive: true });
+    }
+    return this.pageShotDir;
+  }
+
+  /** #569 — THE CONFIRMATION SCREENSHOT: wait for the page to settle, then one masked full-page
+   *  picture through maskedFullPageScreenshot (#588's path, never a second one), with the run's known
+   *  secrets — the same set the fee stop and the staged review mask. Kept only on { ok: true }: a page
+   *  the mask cannot provably cover leaves no picture (the file is deleted there) and says why. Read
+   *  only: nothing is clicked, typed or navigated. Never throws. */
+  private async captureConfirmationShot(label: string): Promise<void> {
+    const page = this.page;
+    if (!page || typeof page.screenshot !== "function" || typeof page.evaluate !== "function") {
+      this.confirmationShot = { path: "", why: "no browser page to picture" };
+      return;
+    }
+    try {
+      await smartWait(page).catch(() => null);
+      const dir = await this.ensurePageShotDir();
+      const safe = String(label || "page").replace(/[^a-zA-Z0-9]+/g, "_").slice(0, 40) || "page";
+      const file = path.join(dir, `zzz-confirmation-${safe}.png`);
+      const m = await maskedFullPageScreenshot(page, this.shotMaskSecrets(), file);
+      this.confirmationShot = m.ok ? { path: file, why: "" } : { path: "", why: m.why || "the secret mask could not be proven on this page" };
+    } catch (err) {
+      this.confirmationShot = { path: "", why: `the picture could not be taken (${err instanceof Error ? err.message.slice(0, 120) : String(err)})` };
+    }
+  }
+
+  /** The run's known secrets for a masked picture — the one set the confirmation shot and the review
+   *  shot both mask (the fee stop and the staged review read the same field map). */
+  private shotMaskSecrets(): string[] {
+    return Array.from(new Set([...secretValuesOf(this.fieldValues), String(this.fieldValues.accountNumber ?? ""), String(this.fieldValues.meterNumber ?? "")]
+      .map((v) => String(v ?? "").trim()).filter((v) => v.length >= 4)));
+  }
+
+  /** #316 — THE REVIEW SCREENSHOT OF A RUN THAT STOPS FOR A PERSON: one full-page picture of the page
+   *  the run stopped on, through maskedFullPageScreenshot (#588's path, never a second one) with the
+   *  same secrets the confirmation shot masks. Kept — as the run's outcome shot, `zzz-review.png`
+   *  in the run's folder — only on { ok: true }; otherwise reviewShotRefused says why and no file is
+   *  left. Read only: nothing is clicked, typed or navigated. Never throws. */
+  private async captureReviewShot(): Promise<void> {
+    const page = this.page;
+    if (!page || typeof page.screenshot !== "function" || typeof page.evaluate !== "function") return;
+    try {
+      // A fixed name, never the page's own words (a title could carry a value the mask covers in the
+      // picture but not in a file name). The backend serves a folder's picture only by this name.
+      const file = path.join(await this.ensurePageShotDir(), REVIEW_SHOT_FILE);
+      const m = await maskedFullPageScreenshot(page, this.shotMaskSecrets(), file);
+      if (m.ok) { this.outcomeShotPath = file; this.reviewShotRefused = ""; }
+      else this.reviewShotRefused = m.why || "the secret mask could not be proven on this page";
+    } catch (err) {
+      this.reviewShotRefused = `the picture could not be taken (${err instanceof Error ? err.message.slice(0, 120) : String(err)})`;
+    }
+  }
+
+  /** #569 — the confirmation screenshot's fields for a step's data: the masked file, or why none. */
+  private confirmationShotData(): { confirmationShotPath?: string; confirmationShotRefused?: string } {
+    const c = this.confirmationShot;
+    if (!c) return {};
+    return c.path ? { confirmationShotPath: c.path } : { confirmationShotRefused: c.why };
+  }
+
   private async capturePageShot(label: string, force = false): Promise<void> {
     if (!this.page || typeof this.page.screenshot !== "function") return;
     // The OUTCOME shot is never dropped for the cap. It is the one picture that says what
@@ -8775,16 +9196,7 @@ export class RecipeAdapter extends BasePortalAdapter {
     // refusal — and it is taken at the end of a long run, exactly where the cap bites.
     if (!force && this.pageShotCount >= 40) return;
     try {
-      if (!this.pageShotDir) {
-        const stamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
-        const who = String(this.recipe?.utility || this.recipe?.ahj || "portal")
-          .toLowerCase().replace(/[^a-z0-9]+/g, "-").slice(0, 28);
-        this.pageShotDir = path.join(
-          process.env.REPLAY_RUN_DIR || path.join(process.cwd(), "data", "replay-runs"),
-          stamp + "-" + who,
-        );
-        await fs.promises.mkdir(this.pageShotDir, { recursive: true });
-      }
+      await this.ensurePageShotDir();
       this.pageShotCount++;
       const safe = String(label || "page").replace(/[^a-zA-Z0-9]+/g, "_").slice(0, 40) || "page";
       // The outcome sorts last in the folder and is the file the submission record points at.
@@ -10747,6 +11159,101 @@ export class RecipeAdapter extends BasePortalAdapter {
       if (!labels) return " (group unreadable)";
       return labels.length ? ` (${labels.length} candidate(s): ${labels.join(", ")})` : " (0 candidates — not rendered)";
     } catch { return " (group inspect failed)"; }
+  }
+
+  /** A step retried (or re-asked at the page's end) says whose answer it is once. */
+  private notePolicyOnce(list: string[], line: string): void {
+    if (!list.includes(line)) list.push(line);
+  }
+
+  /** The question a recorded policy-default step answers, for the run's notes. */
+  private recordedPolicyShown(step: RecipeStep): string {
+    const q = parsePolicyDefaultNote(step.note)?.question || this.stepLabel(step) || String(step.note ?? "");
+    return q.replace(/\s+/g, " ").trim().slice(0, 60);
+  }
+
+  /** A RECORDED POLICY RADIO WHOSE QUESTION THE JOB ANSWERS (#355). The learner's policy pass records
+   *  a `check` on the radio of its standing answer ("policy default: Do you propose to limit the
+   *  export capacity…? → No"); THIS job's exportLimiting decides it when the job carries one
+   *  (answerForRecordedPolicyStep). Reads the recorded radio's live group — its question, for a note
+   *  that names only an option, and its peers (same name, else the same container the learner read).
+   *    null         — check the recorded radio, as recorded (not such a step, the standing answer, or
+   *                   the job's answer IS the recorded one); the run's notes say whose answer it is;
+   *    a locator    — the peer whose label is the job's answer: check THAT one;
+   *    "unanswered" — the job's answer is not offered, or the question reads negated: nothing is
+   *                   checked (never the recorded standing answer in its place); named for a person,
+   *                   and the required sweep sees the group blank. */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  private async recordedPolicyRadio(step: RecipeStep, target: any): Promise<null | "unanswered" | { loc: any; visible: boolean }> {
+    if (!parsePolicyDefaultNote(step.note)) return null;
+    const first = typeof target?.first === "function" ? target.first() : target;
+    const GROUP = "fieldset, .form-group, [class*='form-group'], [class*='field'], .row, [class*='row']";
+    const readGroup = (el: Element, args: { group: string; want: string; attr: string; token: string }) => {
+      const norm = (s: string | null | undefined) => (s || "").trim().replace(/\s+/g, " ");
+      // The learner's own option label (autoLearnAdapter applyPolicyDefaults labelOf).
+      const labelOf = (r: Element): string => {
+        const id = r.getAttribute("id");
+        if (id) { const l = document.querySelector(`label[for="${CSS.escape(id)}"]`); if (l?.textContent?.trim()) return norm(l.textContent); }
+        const w = r.closest("label"); if (w?.textContent?.trim()) return norm(w.textContent);
+        return norm(r.getAttribute("aria-label") || r.getAttribute("value") || "");
+      };
+      const grp = el.closest(args.group);
+      const name = el.getAttribute("name") || "";
+      const isRadio = (r: Element) => (r as HTMLInputElement).type === "radio";
+      const peers = (name ? Array.from(document.getElementsByName(name)) : grp ? Array.from(grp.querySelectorAll('input[type="radio"]')) : [el]).filter(isRadio);
+      let picked = "";
+      if (args.want) {
+        const hit = peers.find((p) => labelOf(p).toLowerCase() === args.want.toLowerCase());
+        if (hit) {
+          const id = hit.getAttribute("id") || "";
+          if (id && document.querySelectorAll(`[id="${CSS.escape(id)}"]`).length === 1) picked = `[id=${JSON.stringify(id)}]`;
+          else { hit.setAttribute(args.attr, args.token); picked = `[${args.attr}="${args.token}"]`; }
+        }
+      }
+      // The QUESTION is the container's text without its options' own labels: options written
+      // before the question ("Yes No Do you propose…") would otherwise sit in its sentence.
+      let question = "";
+      if (grp) {
+        const own = new Set<Element>();
+        for (const p of peers) {
+          const id = p.getAttribute("id");
+          const forLabel = id ? document.querySelector(`label[for="${CSS.escape(id)}"]`) : null;
+          if (forLabel) own.add(forLabel);
+          const wrap = p.closest("label");
+          if (wrap) own.add(wrap);
+        }
+        const parts: string[] = [];
+        const walk = document.createTreeWalker(grp, NodeFilter.SHOW_TEXT);
+        for (let t = walk.nextNode(); t; t = walk.nextNode()) {
+          let inOption = false;
+          for (let n = t.parentElement; n && n !== grp.parentElement; n = n.parentElement) if (own.has(n)) { inOption = true; break; }
+          if (!inOption) parts.push(t.textContent || "");
+        }
+        question = norm(parts.join(" "));
+      }
+      return { question, picked };
+    };
+    const group = await first?.evaluate?.(readGroup, { group: GROUP, want: "", attr: "", token: "" }).catch(() => null) as { question: string } | null | undefined;
+    const ans = answerForRecordedPolicyStep(step, this.fieldValues, group?.question ?? null);
+    if (!ans) return null;
+    const shown = this.recordedPolicyShown(step);
+    if (ans.kind === "standing") { this.notePolicyOnce(this.agingNotes, `"${shown}" answered "${ans.value}": ${ans.why}`); return null; }
+    const unanswered = (why: string): "unanswered" => {
+      this.noteUnresolved(step);
+      this.notePolicyOnce(this.driftWarnings, `"${shown}" left unanswered for a person: ${why}`);
+      return "unanswered";
+    };
+    if (ans.kind === "unanswerable") return unanswered(ans.why);
+    if (ans.value === ans.recorded) { this.notePolicyOnce(this.agingNotes, `"${shown}" answered "${ans.value}" from ${ans.key} (this job's own answer)`); return null; }
+    const token = `p${++this.unrecordedPinSeq}`;
+    const read = await first?.evaluate?.(readGroup, { group: GROUP, want: ans.value, attr: "data-al-policy-answer", token }).catch(() => null) as { picked: string } | null | undefined;
+    if (!read?.picked) {
+      return unanswered(`this job's ${ans.key} is "${ans.value}", which the question does not offer as an option here, so the recorded standing "${ans.recorded}" was not used in its place`);
+    }
+    const loc = this.locator({ ...(step.selector?.frame ? { frame: step.selector.frame } : {}), css: read.picked })?.first();
+    if (!loc) return unanswered(`the "${ans.value}" option could not be located again`);
+    this.notePolicyOnce(this.agingNotes, `"${shown}" answered "${ans.value}" from ${ans.key} (this job's own answer), not the recorded standing "${ans.recorded}"`);
+    return { loc, visible: await this.isTrulyVisible(loc) };
   }
 
   private async recoverVolatileIdOption(step: RecipeStep) {

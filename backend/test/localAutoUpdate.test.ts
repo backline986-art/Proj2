@@ -6,7 +6,9 @@
 // (git, npm, server stop/start, snapshot): nothing touches a real checkout or a real server.
 //
 //   MUST-PASS    idle + behind -> snapshot, stop, fast-forward, restart, health; lockfile changed
-//                -> npm ci; the idle predicate reads the real schema read-only.
+//                -> npm ci, then the Playwright browser build that version drives (npm ci never
+//                fetches it: a Playwright bump left portal runs with no browser); the idle predicate
+//                reads the real schema read-only.
 //   MUST-EXCLUDE busy (job running/due, portal run staged or paused for a human, filing
 //                awaiting_human_submit, lookup in flight) -> no stop, no pull; dirty tree / not on
 //                main / diverged -> nothing; lockfile unchanged -> no npm ci; failed pull -> the
@@ -46,6 +48,8 @@ const NEW = "b".repeat(40);
 type World = {
   branch?: string; dirty?: boolean; head?: string; remote?: string; diverged?: boolean;
   lockfileChanged?: boolean; mergeFails?: boolean; npmCiFails?: boolean; busy?: string[];
+  /** The first `npm run portal:install` (the new version's browser) fails. */
+  browserFails?: boolean;
   /** null: the server processes could not be read (#188). */
   supervisor?: boolean | null; serverRunning?: boolean; healthy?: boolean; paused?: boolean; snapshotFails?: boolean;
   stopFails?: boolean; failedTo?: string | null;
@@ -60,6 +64,7 @@ function harness(w: World) {
   const lines: string[] = [];
   let head = w.head ?? OLD;
   let npmCiRuns = 0;
+  let browserRuns = 0;
   // The failure marker, held in memory the way data/auto-update.failed holds it on disk.
   const marker: { to: string | null } = { to: w.failedTo ?? null };
   const git = (args: string[]) => {
@@ -86,6 +91,7 @@ function harness(w: World) {
     clearFailed: () => { marker.to = null; },
     git,
     npmCi: () => { calls.push("npm ci"); npmCiRuns++; return { code: w.npmCiFails && npmCiRuns === 1 ? 1 : 0, out: "" }; },
+    browserInstall: () => { calls.push("browser install"); browserRuns++; return { code: w.browserFails && browserRuns === 1 ? 1 : 0, out: "" }; },
     serverUp: async () => w.serverUp !== false,
     busy: async () => w.busy ?? [],
     supervisorRunning: () => (w.supervisor === null ? null : !!w.supervisor),
@@ -151,10 +157,11 @@ await check("paused -> nothing at all", async () => {
   assert.deepEqual(h.calls, []);
 });
 
-await check("lockfile unchanged -> no npm ci", async () => {
+await check("lockfile unchanged -> no npm ci and no browser install", async () => {
   const h = harness({ lockfileChanged: false });
   await runCycle(h.deps, {});
   assert.ok(!h.calls.includes("npm ci"));
+  assert.ok(!h.calls.includes("browser install"));
 });
 
 await check("lockfile changed -> npm ci after the pull and before the start", async () => {
@@ -162,6 +169,34 @@ await check("lockfile changed -> npm ci after the pull and before the start", as
   assert.equal((await runCycle(h.deps, {})).outcome, "updated");
   const i = (c: string) => h.calls.findIndex((x) => x.startsWith(c));
   assert.ok(i("stop") < i("git merge") && i("git merge") < i("npm ci") && i("npm ci") < i("start"), h.calls.join(", "));
+});
+
+await check("lockfile changed -> the Playwright browser is installed after npm ci and before the start", async () => {
+  const h = harness({ lockfileChanged: true });
+  assert.equal((await runCycle(h.deps, {})).outcome, "updated");
+  const i = (c: string) => h.calls.indexOf(c);
+  assert.ok(i("browser install") > -1, `no browser install after a lockfile change: ${h.calls.join(", ")}`);
+  assert.ok(i("npm ci") < i("browser install") && i("browser install") < i("start"), h.calls.join(", "));
+});
+
+await check("browser install failed -> reset --keep, npm ci and the old version's browser BEFORE any start", async () => {
+  const h = harness({ lockfileChanged: true, browserFails: true });
+  assert.equal((await runCycle(h.deps, {})).outcome, "browser-install-failed");
+  assert.equal(h.head(), OLD);
+  const firstStart = h.calls.indexOf("start");
+  assert.ok(firstStart > h.calls.indexOf(`git reset --keep ${OLD}`), h.calls.join(", "));
+  assert.equal(h.calls.filter((c) => c === "npm ci").length, 2);
+  assert.equal(h.calls.filter((c) => c === "browser install").length, 2, "the old code gets its browser back too");
+  assert.ok(h.calls.lastIndexOf("browser install") < firstStart, h.calls.join(", "));
+  assert.ok(h.lines.some((l) => l.includes("PLAYWRIGHT BROWSER INSTALL FAILED")), h.lines.join(" | "));
+});
+
+await check("npm ci failed -> no browser install for the new version", async () => {
+  const h = harness({ lockfileChanged: true, npmCiFails: true });
+  await runCycle(h.deps, {});
+  // One install, after the rollback's npm ci: the old version's browser, never the new one's.
+  assert.equal(h.calls.filter((c) => c === "browser install").length, 1, h.calls.join(", "));
+  assert.ok(h.calls.indexOf("browser install") > h.calls.lastIndexOf("npm ci"), h.calls.join(", "));
 });
 
 await check("pull failed -> install left at the old commit and the old server restarted, no npm ci", async () => {
@@ -248,6 +283,7 @@ console.log("local auto-update: no retry loop on a failed origin/main");
 for (const [label, w, outcome] of [
   ["pull failed", { mergeFails: true }, "pull-failed"],
   ["npm ci failed", { lockfileChanged: true, npmCiFails: true }, "npm-ci-failed"],
+  ["browser install failed", { lockfileChanged: true, browserFails: true }, "browser-install-failed"],
   ["stop failed", { stopFails: true }, "stop-failed"],
 ] as const) {
   await check(`${label} -> marker records origin/main; the next tick on the same sha does nothing`, async () => {
@@ -297,14 +333,16 @@ await check("pre-update snapshots: keep the newest 3 by stamp, ignore everything
 
 console.log("local auto-update: lock and health");
 
-await check("the lock is touched before every long step (snapshot, stop, pull, each npm ci, start)", async () => {
+await check("the lock is touched before every long step (snapshot, stop, pull, each npm ci and browser install, start)", async () => {
   const h = harness({ lockfileChanged: true, npmCiFails: true });
   assert.equal((await runCycle(h.deps, {})).outcome, "npm-ci-failed");
   const g = harness({ lockfileChanged: true });
   assert.equal((await runCycle(g.deps, {})).outcome, "updated");
-  for (const calls of [h.calls, g.calls]) {
+  const b = harness({ lockfileChanged: true, browserFails: true });
+  assert.equal((await runCycle(b.deps, {})).outcome, "browser-install-failed");
+  for (const calls of [h.calls, g.calls, b.calls]) {
     calls.forEach((c, i) => {
-      if (c === "snapshot" || c === "stop" || c === "npm ci" || c === "start" || c.startsWith("git merge")) {
+      if (c === "snapshot" || c === "stop" || c === "npm ci" || c === "browser install" || c === "start" || c.startsWith("git merge")) {
         assert.equal(calls[i - 1], "beat", `no heartbeat right before "${c}": ${calls.join(", ")}`);
       }
     });

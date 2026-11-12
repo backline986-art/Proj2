@@ -698,6 +698,7 @@ console.log("\n3. AFTER THE WATCH IS ARMED THE RUN ONLY READS (Helm Should-fix 8
     isSubmitOrPayRequestUrl: "shared/src/portalSafety.ts: a URL predicate",
     completionEvidence: "shared/src/portalSafety.ts: reads completion wording out of text",
     recordNumberCandidates: "recordNumber.ts: reads record numbers out of text",
+    learnRecordFormat: "recordNumber.ts: derives a portal's record-number shapes from ids already read (#448, pure)",
     readDraftCreated: "draftCreated.ts: reads whether the page shows a created draft (page.evaluate only)",
     smartWait: "safeAction.ts: waits for a load state",
     extractRecordNumber: "recordNumber.ts: reads a record number out of text",
@@ -711,6 +712,9 @@ console.log("\n3. AFTER THE WATCH IS ARMED THE RUN ONLY READS (Helm Should-fix 8
     // Handed to page.evaluate (taken as values, run in the page): their module is scanned whole below.
     readApplicationLedgerInPage: "adapters/submissionLedger.ts: reads the application ledger in the page (#401)",
     recordLinkForNumberInPage: "adapters/submissionLedger.ts: reads a record's link in the page (#401)",
+    // #569: the confirmation screenshot of the page the person's submit led to (captureConfirmationShot).
+    maskedFullPageScreenshot: "secretMask.ts: tags secret-bearing elements with an attribute, takes a masked screenshot, clears the tags (#588); no click, key or navigation",
+    secretValuesOf: "feeStop.ts: picks the secret values off the run's field map",
   };
   // The names recipeAdapter.ts imports as VALUES (`import type` and `type X` items left out), by their
   // local name. ANY reference to one in the closure — a call of any shape (`f(`, `f?.(`, `(f)(`,

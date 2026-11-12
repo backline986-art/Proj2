@@ -51,10 +51,18 @@ const NAMES = [
   // The permit card's issuer line and its set/clear control (split issuer) — trackCardHtml calls both.
   "TRACK_ISSUER_KEY", "TRACK_ISSUER_SOURCE", "trackIssuerHtml", "trackIssuerEditHtml", "saveTrackIssuer",
   // What the recipe will fill that the job has no value for (#445) — trackCardHtml calls it.
-  "STAGE_GAP_LINK", "trackStageGapsHtml",
+  "FEE_RESPONSIBILITY_TEXT", "trackPaymentHtml", "trackPaidFormHtml", "trackFeeDueHtml", "trackSecondStageHtml", "STAGE_GAP_LINK", "trackStageGapsHtml",
   "trackCardHtml", "utilityGroupTitle",
+  // The job's permit-process / utility-filing row above each group (#695); with no window.LookupVerify it draws nothing.
+  "trackLookupHtml",
+  // What the utility's application asks for, under the utility group's lookup row (utility requirements panel); with no window.UtilityRequirements it draws nothing.
+  "utilityRequirementsHtml",
+  // The proposed filing destinations above each group (filing-destination.js); with no window.FilingDestination it draws nothing.
+  "filingDestinationHtml", "decideFilingDestination", "bindFilingDestinationButtons",
   // The closeout milestones group (#497) — renderSubmittalTracks draws and binds it.
   "closeoutGroupHtml", "bindCloseoutMilestones", "saveProjectMilestone",
+  // The utility track a person's storage record dropped (draft 10) — renderSubmittalTracks draws it first.
+  "nemTrackDropHtml", "saveNemTrackKeep",
   "renderSubmittalTracks",
 ];
 const preamble = "const screenshotMisses = new Set(); const screenshotKey = (a, b, c) => `${a}:${b}:${c}`;";
@@ -185,6 +193,19 @@ const baseTrack = {
   fn();
   check("MUST-PASS: the utility group is headed 'Utility — interconnection'", /Utility — interconnection/.test(els.submittalTracks.innerHTML));
   check("MUST-EXCLUDE: …never 'Net Metering (NEM)' for every utility", !/Net Metering \(NEM\)/.test(els.submittalTracks.innerHTML));
+}
+// #569 — THE FILING'S CONFIRMATION SCREENSHOT ON THE CARD, beside its number.
+{
+  const url = "/api/projects/p1/submissions/s1/confirmation-screenshot";
+  const html = lib.trackCardHtml({ ...baseTrack, type: "nem", status: "submitted", confirmation: { submissionId: "s1", documentId: "d1", url, recordNumber: "APP-112491", submitted: true, at: "" } });
+  check("MUST-PASS (#569): the card says 'Submitted: APP-112491 · confirmation screenshot', linked to the project route",
+    /Submitted: APP-112491 (?:&nbsp;|\s)*·(?:&nbsp;|\s)* confirmation screenshot/.test(words(face(html))) && html.includes(`<a href="${url}" target="_blank" rel="noopener"`), words(face(html)).slice(0, 300));
+  const none = lib.trackCardHtml({ ...baseTrack, type: "nem", status: "staged", confirmation: { submissionId: "s1", documentId: "d1", url, recordNumber: "", submitted: false, at: "" } });
+  check("MUST-EXCLUDE (#569): with no number read, the card claims none ('no number was read')", /no number was read off the portal's page/.test(words(none)) && !/Submitted: <strong>/.test(none));
+  const foreign = lib.trackCardHtml({ ...baseTrack, confirmation: { url: "https://evil.example/x.png", recordNumber: "APP-1" } });
+  check("MUST-EXCLUDE (#569): a confirmation link that is not the project route is never drawn", !/confirmation screenshot/.test(foreign) && !/evil\.example/.test(foreign));
+  const escaped = lib.trackCardHtml({ ...baseTrack, confirmation: { url, recordNumber: "<img src=x onerror=alert(1)>" } });
+  check("MUST-EXCLUDE (#569): the number is escaped", !/<img/.test(escaped) && /&lt;img/.test(escaped));
 }
 
 if (failures) { console.error(`\nfeeTracksDisplay: ${failures} FAILED`); process.exit(1); }

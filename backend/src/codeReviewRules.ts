@@ -1,9 +1,14 @@
 import type { AhjProcessProfile, CodeReference, NecEditionRequirements, ProjectRecord, ReviewerFinding, ReviewerFindingEvidence, StructureTypeFact } from "../../shared/src/types";
-import { isPlaceholderBatteryModel } from "../../shared/src/batteryControls";
+import { batteryStatus, isPlaceholderBatteryModel } from "../../shared/src/batteryControls";
+import { acSizesDisagree, inverterAcFromPlan, inverterAcMissingInputs, threePhaseService } from "./sizesAgree";
+import { notCheckedRecord, passRecord } from "./checkRecords";
 import type { EffectiveCodeContext } from "./codeProfiles";
 import { FIRE_PATHWAY_PATTERNS, packageShowsSld } from "./projectEvidence";
 import { evaluateElectricalSizingFindings } from "./electricalSizing";
+import { evaluateEeroFindings, evaluatePolicyFindings, readFireAccessFacts } from "./fireAccess";
+import { evaluateWireTableFindings } from "./wireTableArithmetic";
 import { evaluateAmendmentFindings } from "./amendmentChecks";
+import { evaluateEssFindings } from "./essReview";
 import { evaluatePriorCorrectionFindings } from "./ahjReviewRules";
 import { pathWordingScope, resolvePermitPath, usStateCode } from "./permitPath";
 import { classifyRoofCovering, statedRoofDeadLoads, tileAttachmentFromText, tileAttachmentMethodOf, TILE_MIN_ROOF_DEAD_LOAD_PSF } from "./roofCovering";
@@ -11,6 +16,7 @@ import {
   evaluateDesignCriteriaFindings,
   evaluateFirePathwayFindings,
   extractAttachmentSpacings,
+  fieldRuleBasis,
   packageTextSources,
   PARSED_FIELDS_SOURCE,
   residentialCodeRef,
@@ -20,8 +26,15 @@ import {
 import { adoptedNecEdition, necEditionRequirements, NEC_EDITION_REQUIREMENTS } from "./necEditions";
 import { moduleLevelElectronicsEquipment, type ModuleLevelElectronicsEvidence } from "./moduleLevelElectronics";
 import { designText, mountKind, type MountKind } from "./mountKind";
+import { ballastedRackingEvidence } from "./ballastRacking";
 import { microEvidenceSupersededIn } from "./normalize";
-export { designText, engineeredGroundMount, groundMountFromField, isGroundMount, mountKind, mountKindForProject, type MountKind } from "./mountKind";
+import { engineerSealStates, stateName } from "./engineerSeal";
+import { readPlanFraming } from "./planFraming";
+import { describeQuotes, describeSnowLabelIssue, planSheets, readDeckMount, readSnowLabels, type PlanSheet, type SheetQuote } from "./planAttachmentRead";
+import { readNecEditionCitations, readOtherMethodItems, readRapidShutdownStatements, readServiceLocationConflicts, readSupplySideDisconnectRating } from "./planConsistency";
+import type { JobScope } from "../../shared/src/types";
+import { scopeHasNewPv } from "./jobScope";
+export { designText, engineeredGroundMount, groundMountFromField, isGroundMount, mountAdjective, mountKind, mountKindForProject, type MountKind } from "./mountKind";
 
 const oregonElectrical2023: CodeReference = {
   code: "2023 OESC / 2023 NEC",
@@ -104,6 +117,19 @@ const oregonPrescriptive: CodeReference = {
   note: "Common screens include PV dead load, ground snow load, wind exposure, roof slope, and framing spacing/span evidence.",
 };
 
+// AN ENGINEER'S SEAL IS VALID ONLY IN THE STATE THAT REGISTERED THE ENGINEER (#595). Every state
+// licenses engineers to practise within its own borders (Oregon: OSBEELS under ORS chapter 672), so
+// the seal on a job's engineering must be that job's state's. The per-state cited record of this rule
+// is #595's second PR (seeded state data); until then this reference states the rule itself.
+const engineerSealJurisdiction: CodeReference = {
+  code: "State engineering registration law",
+  section: "Seal of the state of registration",
+  title: "An engineer's seal is valid only in the state that registered the engineer",
+  adoptionScope: "Every US state (Oregon: OSBEELS, ORS chapter 672).",
+  sourceUrl: "",
+  note: "The per-state citation lands with #595's state record (seeded, cited data).",
+};
+
 const portlandRafterSpan: CodeReference = {
   code: "OSSC",
   section: "Table 2308.7.2(1)",
@@ -174,6 +200,53 @@ function num(project: ProjectRecord, keys: string[]): number | null {
   return null;
 }
 
+// WHAT A BALLAST PLAN CONTAINS (#689 3d): the layout or schedule of the ballast, its weights, the
+// manufacturer's ballast calculation, or the anchorage/seismic restraint. The bare word "ballast" is the
+// TRIGGER, never the evidence: a set that only says "ballasted racking" has said nothing about it.
+const BALLAST_PLAN_PATTERNS: RegExp[] = [
+  /ballast\w*\s*(?:layout|plan|schedule|map|calc\w*|design|weight|block\s*(?:count|weight|layout)|tray|bay)/i,
+  /\bblock\s*(?:count|weight|layout|schedule)/i,
+  /ballast\w*[^.\n]{0,60}?\b\d+(?:\.\d+)?\s*(?:lbs?|pounds|psf)\b/i,
+  /\b\d+(?:\.\d+)?\s*(?:lbs?|pounds)\s+(?:of\s+)?ballast/i,
+  /\banchorage\b/i,
+  /\bseismic\s*(?:anchor\w*|restraint|attachment|tie.?down)/i,
+];
+
+// THE DECLARED DC SIZE IS A ROUNDED FIGURE (#689 3c). A flat 0.15 kW tolerance blocked a set whose
+// 455 x 550 W modules make 250.25 kW against a declared "250 kW" (0.1%): the designer wrote the size to
+// the kilowatt, and 250.25 kW written to the kilowatt IS 250. The tolerance is now what the declared
+// figure can round away, at the precision it is written in — half a unit of its last digit ("250" ->
+// 0.5 kW, "8.36" -> 0.005 kW) — or the 0.15 kW it has always allowed, whichever is looser. It stays
+// strict for a COUNT error: a gap of a whole module or more is never rounding, so a figure written
+// coarser than one module ("8" for 20 x 400 W) cannot absorb a miscounted module (21 x 400 W = 8.4 kW
+// still blocks). Nothing here is keyed to a place: it is arithmetic on the set's own numbers.
+const DC_SIZE_FLOOR_KW = 0.15;
+
+/** The declared DC size as it is WRITTEN, so its precision can be read: the snapshot's own dcKw text
+ *  when it states the same figure, else the number itself (a parser number loses trailing zeros:
+ *  "8.00" arrives as 8 — read as written to the kilowatt, and the one-module bound still holds). */
+function declaredDcText(project: ProjectRecord, dcKw: number): string {
+  const raw = str(project, "dcKw");
+  return raw && parseRating(raw) === dcKw ? raw : String(dcKw);
+}
+
+/** Decimal places the figure is written to: "250" -> 0, "8.36 kW" -> 2, "8.000" -> 3. */
+function writtenDecimals(text: string): number {
+  const m = text.replace(/,/g, "").match(/\d+(?:\.(\d+))?/);
+  return m?.[1]?.length ?? 0;
+}
+
+/** Does the modules' DC agree with the declared figure? Within the 0.15 kW floor, or within the
+ *  declared figure's own rounding AND short of one whole module. */
+export function dcSizeAgrees(calculatedKw: number, declaredKw: number, declaredText: string, moduleKw: number): boolean {
+  const gap = Math.abs(calculatedKw - declaredKw);
+  const EPS = 1e-9; // binary fractions: 455 * 550 / 1000 is not exactly 250.25
+  if (gap <= DC_SIZE_FLOOR_KW + EPS) return true;
+  const halfUnit = 0.5 * 10 ** -writtenDecimals(declaredText);
+  // A tie rounds away from the declared figure (250.5 written to the kilowatt is 251), so strictly less.
+  return gap < halfUnit - EPS && gap < moduleKw - EPS;
+}
+
 function hasAny(text: string, patterns: RegExp[]): boolean {
   return patterns.some((pattern) => pattern.test(text));
 }
@@ -185,15 +258,11 @@ function isOregon(project: ProjectRecord, _profile: AhjProcessProfile | null): b
   return usStateCode(project.state) === "OR";
 }
 
-// IS THIS ON A ROOF? — the one mount predicate (mountKind / mountKindForProject) lives in
-// mountKind.ts, so permitPath and requiredDocuments ask the same question without importing this
-// module (which imports permitPath). Re-exported here for the callers that always read it from here.
+// IS THIS ON A ROOF? — the one mount predicate (mountKind / mountKindForProject) and the adjective it
+// is written with (mountAdjective) live in mountKind.ts, so permitPath, requiredDocuments and
+// applicationDocs ask the same question without importing this module (which imports permitPath).
+// Re-exported here for the callers that always read it from here.
 
-/** The mount, as the scope-of-work sentence names it — "" when the mount is not known: an unknown
- *  mount is never written as "roof-mounted" on an application (leak sweep 2026-09-28). */
-export function mountAdjective(kind: MountKind): string {
-  return kind === "roof" ? "Roof-mounted" : kind === "ground" ? "Ground-mounted" : kind === "carport" ? "Carport-mounted" : "";
-}
 
 /** True when the array sits on a roof and the roof rule family applies. */
 export function isRoofMounted(project: ProjectRecord, allText: string): boolean {
@@ -619,10 +688,34 @@ export function packageListings(project: ProjectRecord, extraTexts: DesignTextSo
 // them is how the advisory and the reviewer finding end up disagreeing about the same plan set.
 /** city.elec.rapid-shutdown-missing: a rapid shutdown callout or equipment evidence. */
 export const RAPID_SHUTDOWN_PATTERNS: RegExp[] = [/rapid shutdown/i, /\bRSD\b/i, /690\.12/i];
-/** The NEC 705.10 power-source directory, by itself. */
-export const POWER_SOURCE_DIRECTORY_PATTERNS: RegExp[] = [/directory/i, /705\.10/i];
-/** city.elec.labels-missing: a PV label / placard schedule. */
-export const LABEL_SCHEDULE_PATTERNS: RegExp[] = [/label/i, /placard/i, ...POWER_SOURCE_DIRECTORY_PATTERNS, /690\.12/i];
+// THE DIRECTORY BY WHAT IT SAYS (#335). The placard rarely says "directory" or cites 705.10: the
+// installers' and label vendors' wording is "POWER TO THIS BUILDING IS ALSO SUPPLIED FROM THE
+// FOLLOWING SOURCES WITH DISCONNECT(S) LOCATED AS SHOWN". A label sheet carrying exactly that read
+// as "Power-source directory (705.10)" missing and blocked a permit until vision looked. The
+// wording counts only as a PAIR, in one sentence: power from other/multiple sources AND where the
+// disconnects are. Either half alone is another label: "DUAL POWER SOURCE" is the 705.12 backfed
+// breaker warning, "FED BY MULTIPLE SOURCES" the busbar-sum label, "AC DISCONNECT LOCATED …" a
+// disconnect marking — none of them is the directory. Nor is "ALL POWER SOURCES" (a de-energize
+// instruction).
+const DIRECTORY_SOURCES = String.raw`(?:also\s+(?:supplied|served|fed|powered)\s+(?:by|from)|multiple\s+(?:sources\s+of\s+power|power\s+sources)|(?:other|additional|following)\s+(?:power\s+|energy\s+)?sources|(?<!\ball\s)(?:power|energy)\s+sources)`;
+const DIRECTORY_DISCONNECTS = String.raw`disconnect(?:s|\s*\(\s*s\s*\)|ing\s+means(?:es)?)?\s+(?:(?:are|is)\s+)?located`;
+/** The NEC 705.10 power-source directory, by itself — the word, the section, or the placard's own
+ *  wording. One predicate: the reviewer rule (necLabelRequirements) and requiredDocuments' labels
+ *  sheet-content layer both read it. */
+export const POWER_SOURCE_DIRECTORY_PATTERNS: RegExp[] = [
+  /directory/i,
+  /705\.10/i,
+  new RegExp(String.raw`\b${DIRECTORY_SOURCES}\b[^.;]{0,160}?\b${DIRECTORY_DISCONNECTS}\b`, "i"),
+  new RegExp(String.raw`\b${DIRECTORY_DISCONNECTS}\b[^.;]{0,160}?\b${DIRECTORY_SOURCES}\b`, "i"),
+];
+/** city.elec.labels-missing: a PV label / placard schedule. The directory's word and section only,
+ *  as before #335 — the placard wording above answers the directory, not "is there a schedule". */
+export const LABEL_SCHEDULE_PATTERNS: RegExp[] = [/label/i, /placard/i, /directory/i, /705\.10/i, /690\.12/i];
+/** A dedicated label sheet, by its sheet name — the names the splitter files a labels part by
+ *  (docSplitter.ts, labels category). A "LABEL SCHEDULE" note on an E-1 is not one. */
+const LABEL_SHEET_NAMES: RegExp[] = [/\bWARNING\s+LABELS\b/i, /\bLABEL\s+LOCATIONS?\b/i];
+/** The uploaded labels document's source label (repository DESIGN_DOC_LABELS). */
+const LABELS_DOCUMENT_SOURCE = "Labels sheet";
 /** city.elec.load-side-calc-missing: the 705.12 busbar screen. */
 export const LOAD_SIDE_CALC_PATTERNS: RegExp[] = [/705\.12/i, /120%|120 percent/i, /busbar/i, /bus bar/i];
 /** city.elec.supply-side-detail-missing: what a tap detail actually contains. */
@@ -802,8 +895,11 @@ function finding(input: {
   evidenceNeeded: string[];
   codeReferences: CodeReference[];
   installerCallout?: boolean;
+  /** The tier of the jurisdiction data the finding measured against (review-audit draft 07). */
+  ruleBasis?: ReviewerFinding["ruleBasis"];
 }): ReviewerFinding {
   return {
+    ...(input.ruleBasis ? { ruleBasis: input.ruleBasis } : {}),
     id: input.id,
     severity: input.severity,
     category: input.category,
@@ -838,13 +934,20 @@ export function evaluateDesignCodeFindings(
    *  ruling 2026-10-08): the letter is in the package and only its seal — an image the text layer
    *  cannot read — is left to verify. Never set from text. */
   structuralCertification: { confirmedBy: string; confirmedAt: string } | null = null,
+  /** What the job installs (#673; draft 06). Default pv: today's findings, exactly. A storage scope
+   *  installs no array, so the roof / fire-pathway / framing / attachment / rapid-shutdown / module
+   *  rules below do not run; the storage facts are required by the reviewer engine instead. */
+  scope: JobScope = "pv",
 ): ReviewerFinding[] {
   const out: ReviewerFinding[] = [];
   const all = designText(project);
+  const newArray = scopeHasNewPv(scope);
   // A STAMP IS A DOCUMENT, NOT A SENTENCE ABOUT ONE.
   const hasStampedEngineering = uploadedDocTypes.some((t) => STAMPED_ENGINEERING_DOC_TYPES.includes(String(t)));
-  const roofMounted = isRoofMounted(project, all);
-  const rsdApplies = rapidShutdownApplies(project, all);
+  // No new array, no roof array and no PV rapid shutdown (NEC 690.12 governs PV): every rule gated on
+  // these two is an array rule.
+  const roofMounted = newArray && isRoofMounted(project, all);
+  const rsdApplies = newArray && rapidShutdownApplies(project, all);
   const oregon = isOregon(project, profile);
   // "NON-PRESCRIPTIVE" CONTAINS "PRESCRIPTIVE". A bare substring test therefore read an
   // explicitly engineered project as a prescriptive one and inverted the structural gate:
@@ -947,8 +1050,19 @@ export function evaluateDesignCodeFindings(
   // MEASURED FIRST (issue #142): the plan's stated pathway widths and ridge setback against the
   // jurisdiction's fireSetbacks, else the adopted edition's model-code default. The word list
   // below is now only the fallback, for a plan with no pathway text AND no readable dimension.
-  const fire = ctx ? evaluateFirePathwayFindings(project, ctx, { roofMounted, extraTexts: documentTexts }) : { findings: [], measured: false };
+  //
+  // WHAT THE REQUIREMENT READS (review-audit draft 08, fireAccess.ts): the roof coverage (33% / 66%
+  // sprinklered → 18 or 36 in from the ridge; not stated → 36 in, said), a stated sprinkler system,
+  // and the jurisdiction's alternative pathway policy where it is applied (verified with its page, or
+  // official). Then the emergency escape and rescue openings (R324.6), and a policy on file that is
+  // not applied, shown for a person to verify.
+  const fireFacts = ctx && roofMounted ? readFireAccessFacts(project, ctx, documentTexts) : null;
+  const fire = ctx ? evaluateFirePathwayFindings(project, ctx, { roofMounted, extraTexts: documentTexts, facts: fireFacts }) : { findings: [], measured: false };
   out.push(...fire.findings);
+  if (ctx && roofMounted && fireFacts) {
+    out.push(...evaluateEeroFindings(project, ctx, documentTexts));
+    out.push(...evaluatePolicyFindings(ctx, fireFacts));
+  }
   if (roofMounted && !fire.measured && !hasAny(all, FIRE_PATHWAY_PATTERNS)) {
     out.push(finding({
       id: "city.fire.pathways-missing",
@@ -1035,8 +1149,8 @@ export function evaluateDesignCodeFindings(
       title: "Engineer's structural letter on file (confirmed) — verify the seal on the structural pages",
       message: `The engineer's structural letter is on file as the structural document, confirmed by ${by}. The text layer cannot see a PE seal, so whether it is sealed is for a person to verify, not missing.`,
       cityFeedback: "The structural calculations or engineer's letter must carry the engineer's wet or digital seal.",
-      designTeamAction: "Open the structural pages and confirm the engineer's seal and signature are on the letter before submittal.",
-      evidenceNeeded: ["PE seal and signature on the engineer's structural letter"],
+      designTeamAction: `Open the structural pages and confirm the engineer's seal and signature are on the letter${usStateCode(project.state) ? `, and that the seal is ${stateName(usStateCode(project.state))}'s (a seal is valid only in the state that registered the engineer)` : ""}, before submittal.`,
+      evidenceNeeded: [`PE seal and signature on the engineer's structural letter${usStateCode(project.state) ? ` (a ${stateName(usStateCode(project.state))} seal)` : ""}`],
       codeReferences: [...oregonWorksheetRefs, roofLoadsRef],
     }));
   } else if (roofMounted && claimsEngineered && !hasStampedEngineering) {
@@ -1055,6 +1169,34 @@ export function evaluateDesignCodeFindings(
       designTeamAction: "Obtain the sealed calculation package from the engineer of record before submittal — a review-block reference on the plan set is not the stamp, and strict jurisdictions (Portland among them) will issue a correction for it.",
       evidenceNeeded: ["Stamped/sealed structural calculation or engineer's letter", "Rafter size, spacing and clear span used in the calculation", "PV dead load and attachment point loads"],
       codeReferences: [...oregonWorksheetRefs, roofLoadsRef],
+    }));
+  }
+
+  // THE SEAL MUST BE THIS STATE'S (#595). A sealed letter in the package silences "stamped
+  // engineering missing" above, and a real Oregon job was returned because its letter carried another
+  // state's seal. Read the state each seal / licence line names from the sheets' own words (the plan
+  // set's text and each uploaded document; never the parser's narrative or its review flags), and
+  // block when the seals name states and none of them is the job's. A seal that is only an image names
+  // no state, so it raises nothing here: that is the person's check below. Tightens only.
+  const jobState = usStateCode(project.state) || usStateCode(str(project, "state"));
+  const sealSources = [
+    { label: "Plan set", text: str(project, "planSetExtractedText") },
+    ...documentTexts,
+  ];
+  const seals = jobState ? engineerSealStates(sealSources) : [];
+  if (seals.length && !seals.some((s) => s.state === jobState)) {
+    const named = [...new Set(seals.map((s) => s.state))].map(stateName);
+    const where = [...new Set(seals.map((s) => s.source))].join(", ");
+    out.push(finding({
+      id: "city.struct.seal-out-of-state",
+      severity: "blocker",
+      category: "structural",
+      title: `Engineer's seal is from ${named.join(" / ")}, not ${stateName(jobState)}`,
+      message: `The engineering in this package is sealed for ${named.join(" / ")} (read from: ${where}), but the job is in ${stateName(jobState)}. An engineer's seal is valid only in the state that registered the engineer, so ${stateName(jobState)} will not accept it.`,
+      cityFeedback: `Structural calculations and letters must be sealed by an engineer registered in ${stateName(jobState)}.`,
+      designTeamAction: `Get the structural letter / calculations sealed by an engineer registered in ${stateName(jobState)} before submittal.`,
+      evidenceNeeded: [`Structural letter / calculations sealed by a ${stateName(jobState)}-registered engineer`],
+      codeReferences: [engineerSealJurisdiction],
     }));
   }
 
@@ -1080,14 +1222,29 @@ export function evaluateDesignCodeFindings(
 
   // Suppression now requires the DOCUMENT, not a mention of one — see above.
   if (roofMounted && prescriptiveScreening && !hasStampedEngineering && spanEvidenceIncomplete) {
+    // SAY WHAT THE PLANS LACK (#595). The parser reads the framing off the plans (planFraming.ts),
+    // so a fact still missing here is one the plans did not state: name it, and name what WAS read,
+    // so the caution reads as the plans' gap rather than a guess.
+    const notStated = [
+      rafterSpacing == null ? (trussFraming ? "truss spacing" : "rafter spacing") : "",
+      !trussFraming && rafterSpan == null ? "rafter span" : "",
+    ].filter(Boolean);
+    const size = str(project, "roofRafterSize");
+    const grade = str(project, "woodGrade");
+    const read = [
+      size ? `${size}${grade ? ` ${grade}` : ""}${framingTypeText ? ` ${framingTypeText}` : ""}` : "",
+      rafterSpacing != null ? `${rafterSpacing} in o.c.` : "",
+      rafterSpan != null ? `span ${rafterSpan} ft` : "",
+    ].filter(Boolean);
+    const gap = ` Not stated on the plans: ${notStated.join(", ")}.${read.length ? ` Read from the plans: ${read.join(", ").replace(/\.?$/, ".")}` : ""}`;
     out.push(finding({
       id: "city.struct.span-table-incomplete",
       severity: screeningSeverity,
       category: "structural",
       title: "Prescriptive rafter span evidence incomplete",
-      message: ctx && !oregon
+      message: (ctx && !oregon
         ? `${ctx.ahj || ctx.state} prescriptive review needs rafter/truss spacing and span evidence or an engineered alternate path.`
-        : "Oregon-style prescriptive review needs rafter/truss spacing and span evidence or an engineered alternate path.",
+        : "Oregon-style prescriptive review needs rafter/truss spacing and span evidence or an engineered alternate path.") + gap,
       cityFeedback: "Provide the prescriptive rooftop PV checklist/worksheet information, including framing member size, spacing, span, species/grade, roof slope, dead load, snow load, and wind exposure. If this cannot be documented, provide stamped engineering.",
       designTeamAction: "Complete the structural worksheet inputs or route the design to engineered review.",
       evidenceNeeded: ["Framing spacing", "Framing clear span", "Species/grade or engineered truss evidence", "Dead load, snow load, wind exposure"],
@@ -1100,7 +1257,28 @@ export function evaluateDesignCodeFindings(
   // `mounting` FIELD reads "Roof mount". /rail/i was satisfied by a guardrail and /lag/i by
   // any word containing those three letters. Ask instead for what an attachment detail
   // actually contains.
-  if (roofMounted && !hasAny(all, [
+  //
+  // A BALLASTED ROOF HAS NO PENETRATIONS TO DETAIL (#689 3d). The screen asked every rooftop for lag
+  // screws and flashing, so a ballasted, non-penetrating array (the one predicate,
+  // ballastedRackingEvidence) was blocked for a detail it cannot have. On that positive evidence only,
+  // the question becomes what holds a ballasted array down: the ballast layout and weights, the roof's
+  // capacity for them, and the wind/seismic basis or anchorage. Asked as a warning when the package
+  // does not show it (Helm ruling on #689); without ballast evidence today's blocker stands unchanged.
+  const ballast = roofMounted ? ballastedRackingEvidence(project) : "";
+  if (roofMounted && ballast && !hasAny(all, BALLAST_PLAN_PATTERNS)) {
+    out.push(finding({
+      id: "city.struct.ballast-plan-missing",
+      severity: "warning",
+      category: "structural",
+      title: "Ballast / anchorage plan not shown",
+      message: `The racking is ballasted / non-penetrating (${ballast}), so a roof attachment detail does not apply, but the package does not show the ballast layout or what holds the array in place.`,
+      cityFeedback: "Provide the ballast layout and schedule (ballast count and weight per bay), the racking manufacturer's ballast calculation for wind uplift and sliding, the roof structure's capacity for the added ballast dead load, and the seismic basis for an unattached array or the anchorage that restrains it.",
+      designTeamAction: "Add the racking manufacturer's ballast layout/calculation and the roof capacity check, or the anchorage detail where the array is attached.",
+      evidenceNeeded: ["Ballast layout and schedule (count and weight per bay)", "Manufacturer ballast calculation (wind uplift, sliding)", "Roof capacity for the ballast dead load", "Seismic basis or anchorage detail"],
+      codeReferences: [roofLoadsRef],
+    }));
+  }
+  if (roofMounted && !ballast && !hasAny(all, [
     /attachment\s*(?:detail|schedule|spacing|point)/i,
     /standoff/i, /flashing/i, /flashfoot/i, /l.?foot/i,
     /lag\s*(?:screw|bolt)/i, /fastener/i, /embedment/i, /pull.?out/i,
@@ -1118,6 +1296,67 @@ export function evaluateDesignCodeFindings(
       evidenceNeeded: ["Racking/attachment detail", "Attachment spacing table", "Fastener/embedment callout", "Flashing/waterproofing note"],
       codeReferences: [roofLoadsRef],
     }));
+  }
+
+  // A DETAIL THAT EXISTS IS NOT A DETAIL THAT WAS READ (#336). The prescriptive screen passed a real
+  // set on "attachment/racking details included" while its only attachment detail fastened into the
+  // DECKING, its roof-plane schedules said TRUSS where the parse said rafter, and one sheet called the
+  // design snow load ROOF snow where another called it GROUND snow. Each reading below is the sheets'
+  // own words (planAttachmentRead.ts, planFraming.ts), on the jurisdiction's prescriptive screen only,
+  // and each is a WARNING: it tightens a pass into a question, and an unread detail is "check with an
+  // engineer", never a pass. No state, city or utility is named here; the screen is the profile's.
+  if (roofMounted && prescriptiveScreening) {
+    const sheets = planSheets(project, documentTexts);
+    // (1) FASTENERS INTO THE DECKING with no stated deck-mount basis.
+    const deck = readDeckMount(sheets);
+    if (!hasStampedEngineering && deck.basisMissing) {
+      const contradiction = deck.toFraming.length
+        ? ` It also contradicts the set's own statement that the attachments go to the framing members (${describeQuotes(deck.toFraming)}).`
+        : "";
+      const half = deck.sheathing.length ? "the listed deck-mount capacity" : deck.capacity.length ? "the sheathing type and thickness" : "the sheathing type and thickness, or the listed deck-mount capacity";
+      out.push(finding({
+        id: "city.struct.deck-mount-basis-missing",
+        severity: "warning",
+        category: "structural",
+        title: "Attachment detail fastens into the roof decking, with no deck-mount basis",
+        message: `The attachment detail fastens into the decking / sheathing, not the framing (${describeQuotes(deck.deckMount)}), and the set does not state ${half}.${contradiction} The prescriptive attachment method assumes attachment to the roof framing; a deck mount needs its own basis, or check it with an engineer.`,
+        cityFeedback: "Provide the basis for the deck-mounted attachment: the roof sheathing type and thickness, and the listed capacity of the deck mount in that sheathing (manufacturer listing or evaluation report). Otherwise attach to the roof framing members.",
+        designTeamAction: "Either revise the attachment detail to fasten into the framing members (and match the framing note), or add the sheathing type/thickness and the deck mount's listed capacity to the attachment sheet; if neither can be stated, route the structure to an engineer.",
+        evidenceNeeded: ["Attachment detail showing the fastener target (framing member or decking)", "Roof sheathing type and thickness", "Deck-mount listed capacity (manufacturer listing / evaluation report)"],
+        codeReferences: [...oregonWorksheetRefs, roofLoadsRef],
+      }));
+    }
+    // (2) FRAMING TYPE: the parse against every schedule / callout on the sheets.
+    const planFrame = readPlanFraming(sheets.map((s) => s.text).join("\n")).framingType;
+    const parsedFrame = trussFraming ? "truss" : /\brafter/i.test(framingTypeText) && !/\btruss/i.test(framingTypeText) ? "rafter" : "";
+    if (planFrame && parsedFrame && planFrame.value !== parsedFrame) {
+      out.push(finding({
+        id: "city.struct.framing-type-conflict",
+        severity: "warning",
+        category: "structural",
+        title: `Framing type: the plans say ${planFrame.value}, the parse says ${parsedFrame}`,
+        message: `Every framing schedule / callout the plans state reads ${planFrame.value === "truss" ? "TRUSS" : "RAFTER"} ("${planFrame.excerpt}"), but the project records "${framingTypeText}". The prescriptive checklist asks truss vs rafter, and the two arms ask different things (a truss: spacing; a rafter: spacing, span table and the rafter exception), so the framing row cannot be answered until the framing type is confirmed.`,
+        cityFeedback: "Confirm the roof framing type (rafters or trusses) and make the framing schedule, the structural notes and the prescriptive checklist agree.",
+        designTeamAction: `Confirm the framing type on site or with the designer and correct the project's framing type (Manual entry) to match the plans${planFrame.value === "truss" ? "" : "; a rafter roof also needs the span and the rafter exception answered"}.`,
+        evidenceNeeded: ["Framing type (rafter or truss) per roof plane", "Framing schedule matching the structural notes"],
+        codeReferences: [...oregonWorksheetRefs, roofLoadsRef],
+      }));
+    }
+    // (3) ROOF vs GROUND SNOW labels across sheets — the screen keys on GROUND snow.
+    const snowIssue = readSnowLabels(sheets, num(project, ["snow", "groundSnowLoad"]));
+    if (snowIssue) {
+      out.push(finding({
+        id: "city.struct.snow-load-label-conflict",
+        severity: "warning",
+        category: "structural",
+        title: snowIssue.kind === "conflict" ? "Snow load labelled ground snow on one sheet and roof snow on another" : "Ground snow load not stated; the plans give only a roof snow load",
+        message: `${describeSnowLabelIssue(snowIssue).replace(/^./, (c) => c.toUpperCase())}. The prescriptive screen compares the GROUND snow load (Pg) with its limit; a roof snow load is a different, smaller quantity, so the screen's snow input is not read until the labels agree. Check it with an engineer.`,
+        cityFeedback: "State the ground snow load (Pg) and, if shown, the roof snow load (pf) with their own labels, consistently on every sheet.",
+        designTeamAction: "Correct the design-criteria labels so the ground snow load and the roof snow load are each stated once and agree across the cover sheet and the structural sheets.",
+        evidenceNeeded: ["Ground snow load (Pg), labelled", "Roof snow load (pf), labelled, if stated", "Same values on every sheet"],
+        codeReferences: [...oregonWorksheetRefs, roofLoadsRef],
+      }));
+    }
   }
 
   // TILE ROOFS (roofCovering.ts is the one predicate). A tile roof is attached differently
@@ -1316,7 +1555,7 @@ export function evaluateDesignCodeFindings(
   // exactly as a roof array does; the gate used to be `ctx && roofMounted`, so a job read as ground
   // or carport never had the listings checked at all. Only the racking's words follow the mount —
   // the roof wording is unchanged, and so is the severity (listingEvidenceRequired).
-  if (ctx) {
+  if (ctx && newArray) {
     const listingMount = roofMounted ? "roof" : mountKind(project, all);
     const racking = listingMount === "ground" ? "ground-mount racking" : listingMount === "carport" ? "carport racking/mounting" : "racking/mounting";
     const mountNote = listingMount === "ground"
@@ -1425,8 +1664,11 @@ export function evaluateDesignCodeFindings(
     }
     const profileNote = ctx.verified ? "human-verified code profile" : "seeded code profile (not yet human-verified)";
     const ref = residentialCodeRef(ctx, roofLoads.section, roofLoads.title, roofLoads.note);
+    // The tier of the limit this rule measures against, in words (review-audit draft 07).
+    const spacingBasis = fieldRuleBasis(ctx, "prescriptive.maxAttachmentSpacingIn");
     if (!stated.length) {
       out.push(finding({
+        ruleBasis: spacingBasis,
         id: "city.struct.anchor-spacing-unchecked",
         severity: "callout",
         category: "structural",
@@ -1440,10 +1682,18 @@ export function evaluateDesignCodeFindings(
       }));
     } else {
       const fieldSpacing = Math.max(...stated.map((s) => s.inches));
+      if (fieldSpacing <= ahjMaxSpacing) {
+        out.push(passRecord({
+          ruleId: "city.struct.anchor-spacing-exceeds-ahj", category: "structural", title: "Roof anchor spacing against the jurisdiction's limit",
+          codeReferences: [ref], ruleBasis: spacingBasis,
+          arithmetic: `The plan's widest attachment spacing is ${fieldSpacing}" o.c. (${[...new Set(stated.filter((x) => x.inches === fieldSpacing).map((x) => x.source))].join(", ")}) <= ${who}'s ${ahjMaxSpacing}" o.c. limit.`,
+        }));
+      }
       if (fieldSpacing > ahjMaxSpacing) {
         const over = stated.filter((s) => s.inches > ahjMaxSpacing);
         out.push({
           ...finding({
+            ruleBasis: spacingBasis,
             id: "city.struct.anchor-spacing-exceeds-ahj",
             severity: screeningSeverity,
             category: "structural",
@@ -1588,10 +1838,17 @@ export function evaluateDesignCodeFindings(
     // rapid-shutdown evidence above. Each missing label is cited by the edition's own section.
     const missingLabels = necLabelRequirements(nec, { rsdApplies, standAlone: STAND_ALONE.test(all), dcCircuits: !isMicroinverterDesign(project, all) })
       .filter((l) => !affirmedIn(labelTexts, l.patterns));
+    // AN UNCERTAIN READING MUST NOT BLOCK (#335). With a dedicated label sheet in the package, a
+    // label the text did not find is far more often wording the patterns do not know (the directory
+    // above) or a placard drawn as an image than a label that is not there. From text alone that is
+    // at most a warning: the vision pass still looks at the sheet (needsVision takes warnings) and
+    // can relax it, and a human sees it either way. Without a label sheet the rule-3 severity stands.
+    const labelSheet = sheetTextSources(project, documentTexts)
+      .some((s) => s.label === LABELS_DOCUMENT_SOURCE || hasAny(s.text, LABEL_SHEET_NAMES));
     if (missingLabels.length) {
       out.push(finding({
         id: "city.elec.labels-edition-missing",
-        severity: ruleThreeSeverity,
+        severity: labelSheet ? "warning" : ruleThreeSeverity,
         category: "electrical",
         title: `PV label schedule is missing labels NEC ${nec.edition} requires`,
         message: `The package shows a label schedule, but not: ${missingLabels.map((l) => `${l.label} (${l.section})`).join("; ")}.`
@@ -1626,7 +1883,8 @@ export function evaluateDesignCodeFindings(
   const intercoText = `${project.interconnectionMethod}\n${str(project, "interco")}`;
   const bus = num(project, ["busRating"]);
   const mainBreaker = num(project, ["mainBreaker"]);
-  const pvBreaker = num(project, ["pvBreaker"]);
+  // On a storage scope the backfed breaker is the battery inverter's (#673: essBreaker, else pvBreaker).
+  const pvBreaker = num(project, newArray ? ["pvBreaker"] : ["essBreaker", "pvBreaker"]);
 
   // WHICH SIDE OF THE SERVICE IS THIS? The 120% busbar screen is NEC 705.12(B)(3)(2) — a
   // LOAD-SIDE rule. A SUPPLY-SIDE (line-side) tap is 705.11 and is not governed by it at all:
@@ -1661,6 +1919,14 @@ export function evaluateDesignCodeFindings(
     loadSide: loadSideBranch,
     adoptedNecEdition: necAdopted,
     busbarSection: busbarArt,
+    cite,
+  });
+  // THE WIRE TABLE, TAG BY TAG (#334): EGC vs Table 250.122, the tap's supply-side bonding jumper
+  // (250.102(C)(1), only on a supply-side-only classification), ampacity vs OCPD, 40 % fill, and
+  // load center spaces vs breaker poles — read from the sheets, an unclear row read as nothing.
+  const wireTableFindings = evaluateWireTableFindings(project, {
+    documentTexts,
+    supplySide: saysSupplySide && !saysLoadSide,
     cite,
   });
 
@@ -1769,6 +2035,27 @@ export function evaluateDesignCodeFindings(
   // RECOMPUTE THE SIZING (#144), evaluated above so the load-side branch can see the busbar
   // result; pushed here so the report's finding order is unchanged.
   out.push(...sizingFindings);
+  out.push(...wireTableFindings);
+
+  // DOES THE SET AGREE WITH ITSELF? (#338) A reviewer reads the sheets against each other: the other
+  // interconnection method's boilerplate, the POI called interior on one sheet and exterior on another,
+  // labels citing an older NEC than the adopted one, rapid shutdown claimed and denied, a supply-side
+  // disconnect never called suitable for service equipment. Every one is a CALLOUT naming each sheet:
+  // it tells the designer what to make agree, and a fact a reader did not find yields nothing. The
+  // interconnection method is the classifier's above (saysSupplySide / loadSideBranch), never a second
+  // reading of it. Cut sheets are not read: a datasheet is not the designer's sheet.
+  out.push(...planConsistencyFindings({
+    sheets: planSheets(project, documentTexts.filter((d) => !SPEC_SHEET_SOURCE.test(d.label))),
+    method: saysSupplySide && !saysLoadSide ? "supply" : loadSideBranch ? "load" : null,
+    necAdopted,
+    rsdApplies,
+    editionRowKnown: nec != null,
+    supplySideRef,
+    loadSideRef,
+    rapidShutdownRef,
+    electricalRef,
+    cite,
+  }));
 
   const moduleFields = [str(project, "moduleMake"), str(project, "moduleModel"), str(project, "moduleWattage"), str(project, "moduleQty")].filter(Boolean);
   const inverterFields = [str(project, "invModel"), str(project, "pvMicroModel"), str(project, "inverterModel"), str(project, "invQty"), str(project, "pvMicroQty")].filter(Boolean);
@@ -1780,7 +2067,9 @@ export function evaluateDesignCodeFindings(
   // confirms — not a warning that the equipment is "missing". The warning/blocker
   // is reserved for genuinely missing core fields.
   const coreEquipmentPresent = moduleFields.length >= 4 && inverterFields.length >= 2;
-  if (moduleFields.length < 4 || inverterFields.length < 2 || !hasModuleSpec || !hasInverterSpec) {
+  // The module / inverter schedule is an array question; a storage scope's equipment facts are asked by
+  // reviewer.storage.facts-missing, and the ESS spec sheet by the required documents (battery_spec).
+  if (newArray && (moduleFields.length < 4 || inverterFields.length < 2 || !hasModuleSpec || !hasInverterSpec)) {
     const severity = !coreEquipmentPresent ? "blocker" : "callout";
     out.push(finding({
       id: "city.elec.equipment-specs-incomplete",
@@ -1802,9 +2091,17 @@ export function evaluateDesignCodeFindings(
   const dcKw = project.systemSizeDcKw ?? num(project, ["dcKw"]);
   const moduleQty = num(project, ["moduleQty"]);
   const moduleWattage = num(project, ["moduleWattage"]);
+  // CHECK RECORDS (review-audit draft 07, checkRecords.ts): the DC and AC cross-checks say when they
+  // ran and agreed, or what they lacked. Display only. A storage-only scope installs no array.
+  const dcCheck = { ruleId: "city.elec.dc-size-mismatch", category: "electrical" as const, title: "DC size against the modules", codeReferences: [electricalRef] };
+  if (newArray && (dcKw == null || moduleQty == null || moduleWattage == null)) {
+    out.push(notCheckedRecord({ ...dcCheck, inputs: [dcKw == null ? "the DC system size" : "", moduleQty == null ? "the module count" : "", moduleWattage == null ? "the module wattage" : ""] }));
+  }
   if (dcKw != null && moduleQty != null && moduleWattage != null) {
     const calculatedDc = (moduleQty * moduleWattage) / 1000;
-    if (Math.abs(calculatedDc - dcKw) > 0.15) {
+    if (dcSizeAgrees(calculatedDc, dcKw, declaredDcText(project, dcKw), moduleWattage / 1000)) {
+      out.push(passRecord({ ...dcCheck, arithmetic: `${moduleQty} x ${moduleWattage} W = ${calculatedDc.toFixed(2)} kW DC, matching the project's ${dcKw.toFixed(2)} kW DC.` }));
+    } else {
       out.push(finding({
         id: "city.elec.dc-size-mismatch",
         severity: "blocker",
@@ -1814,6 +2111,48 @@ export function evaluateDesignCodeFindings(
         cityFeedback: "Revise the equipment schedule/application so module quantity, module wattage, and DC system size match across all sheets and portal fields.",
         designTeamAction: "Correct either module quantity, module wattage, or DC kW and regenerate affected application fields.",
         evidenceNeeded: ["Corrected equipment schedule", "Corrected application DC size", "Matching SLD/module sheet"],
+        codeReferences: [electricalRef],
+      }));
+    }
+  }
+
+  // THE AC SIZE AGAINST THE INVERTERS (review-audit draft 04): the AC nameplate is what the utility
+  // application carries and what its reviewer checks, and the gate only cross-checked DC. The inverters'
+  // AC comes from sizesAgree.inverterAcFromPlan, the ONE reader the approval sheet's AC row uses too
+  // (draft 11): per-unit output in amps x the service's single-phase voltage (or watts above 100),
+  // skipped on a battery, an existing system or a three-phase service. Same tolerance as the sheet.
+  // A WARNING, not a blocker: the voltage is the plan's or a single-phase assumption, so the derived
+  // figure is an estimate, unlike the DC product of module count and wattage.
+  const acKw = project.systemSizeAcKw ?? num(project, ["acKw"]);
+  const acReading = acKw != null && acKw > 0
+    ? inverterAcFromPlan(
+      { num: (key) => num(project, [key]), text: (key) => str(project, key) },
+      { battery: batteryStatus(project.parserSnapshot as Record<string, unknown> | undefined) === "yes", existingSystem: Boolean(project.existingSystem?.hasExistingSystem) },
+    )
+    : null;
+  const acCheck = { ruleId: "city.elec.ac-size-mismatch", category: "electrical" as const, title: "AC size against the inverters", codeReferences: [electricalRef] };
+  const acRead = { num: (key: string) => num(project, [key]), text: (key: string) => str(project, key) };
+  if (newArray && !acReading && batteryStatus(project.parserSnapshot as Record<string, unknown> | undefined) !== "yes"
+      && !project.existingSystem?.hasExistingSystem && !threePhaseService(acRead)) {
+    const missingAc = [acKw == null || !(acKw > 0) ? "the AC system size" : "", ...inverterAcMissingInputs(acRead)].filter(Boolean);
+    if (missingAc.length) out.push(notCheckedRecord({ ...acCheck, inputs: missingAc }));
+  }
+  if (acKw != null && acReading && !acSizesDisagree(acKw, acReading)) {
+    out.push(passRecord({ ...acCheck, arithmetic: `The inverters add up to about ${acReading.kw.toFixed(2)} kW AC (${acReading.how}), matching the project's ${acKw.toFixed(2)} kW AC.` }));
+  }
+  if (acKw != null && acReading) {
+    const derivedAc = acReading.kw;
+    if (acSizesDisagree(acKw, acReading)) {
+      const how = acReading.how;
+      out.push(finding({
+        id: "city.elec.ac-size-mismatch",
+        severity: "warning",
+        category: "electrical",
+        title: "AC size mismatch",
+        message: `The inverters add up to about ${derivedAc.toFixed(2)} kW AC (${how}) but the project AC size is ${acKw.toFixed(2)} kW.`,
+        cityFeedback: "Revise the equipment schedule/application so inverter quantity, inverter output and the AC system size match across all sheets and the utility application.",
+        designTeamAction: "Correct the inverter quantity, the inverter output or the AC kW and regenerate the affected application fields.",
+        evidenceNeeded: ["Corrected equipment schedule", "Corrected application AC size", "Matching SLD/inverter sheet"],
         codeReferences: [electricalRef],
       }));
     }
@@ -1829,35 +2168,226 @@ export function evaluateDesignCodeFindings(
     { label: "batteryQty", text: str(project, "batteryQty") },
     { label: "design text", text: designText(project, ["splitPagesText", "utilityDownloadChecklistText", "packetReadinessText"]) },
   ];
-  const batteryText = batterySources.map((s) => s.text).join("\n");
-  // The suppression list held a bare /fire/i — and since the fire-pathway work every plan set
-  // reliably carries "FIRE ACCESS PATHWAY", so that fix would itself have switched off every
-  // battery review. It also held an unbounded /ESS/i, which matches "addrESS" and "procESS".
-  // Word-boundary the acronym, and take fire SEPARATION/rating rather than the bare word.
-  // The acronym itself is a TRIGGER only (#245): it also sat in the suppression list, so an
-  // equipment-schedule line reading "ESS" both raised this review and cleared it. Suppression
-  // takes real detail evidence — a 706/R328/1207/NFPA 855 citation, clearances, fire separation.
+  // History: the keyword check this replaced was cleared by a bare /fire/i (every set carries "FIRE
+  // ACCESS PATHWAY"), by an unbounded /ESS/i ("addrESS"), and by the acronym that raised it (#245).
+  // The acronym stays a TRIGGER only; nothing clears the review but the facts themselves.
   // A NEGATED mention is not storage scope (#257): "ESS: N/A", "NO ESS PROPOSED",
   // "BATTERY / ESS: NONE" — affirmedIn's negation read, plus a run of storage words before the
   // denial ("BATTERY / ESS: NONE", "NO BATTERY / ESS").
-  if (affirmedIn(batterySources, ESS_TRIGGER_PATTERNS, essMentionDenied)
-    && !hasAny(batteryText, [
-      /clearance/i, /working\s*space/i,
-      /\b706\b/i, /R\s*328/i, /\b1207\b/i, /NFPA\s*855/i,
-      /fire\s*(?:separation|barrier|rating)|fire.?rated/i,
-    ])) {
-    out.push(finding({
-      id: "city.ess.details-missing",
-      severity: "warning",
-      category: "electrical",
-      title: "Battery/ESS detail not reviewable",
-      message: "Battery/ESS scope appears present but location, clearance, disconnect, and fire-code details are not obvious.",
-      cityFeedback: "Provide ESS equipment schedule, location plan, working clearance, ventilation/listing basis, disconnect/emergency shutdown details, labels, and local fire-code notes.",
-      designTeamAction: "Add ESS detail sheets and verify local fire/AHJ requirements.",
-      evidenceNeeded: ["ESS model/quantity", "ESS location plan", "Clearance and working space notes", "Disconnect/shutdown/label callouts"],
-      codeReferences: [essRef],
-    }));
+  //
+  // A JOB WITH STORAGE GETS THE ESS REVIEW (review-audit draft 05, essReview.ts): the facts an AHJ
+  // checks — listing, kWh per unit and by location, location, spacing, distance to openings,
+  // protection, alarm, the disconnecting means — read and compared with the jurisdiction's rules
+  // over the model-code baseline. Storage = the one battery predicate (batteryStatus, #673's too) or
+  // an affirmed storage mention on the sheets. Citation words alone no longer clear the review: a
+  // "706" or "R328" note is not the facts it asks for. A job with neither (PV-only) gets nothing
+  // here, exactly as before (essReviewPvOnlyGolden pins it).
+  const storagePresent = batteryStatus(project.parserSnapshot as Record<string, unknown> | undefined) === "yes"
+    || !!affirmedIn(batterySources, ESS_TRIGGER_PATTERNS, essMentionDenied);
+  if (storagePresent) {
+    // A storage scope's quantity and usable kWh are already required by reviewer.storage.facts-missing
+    // (draft 06, a blocker); the ESS review does not ask for them a second time.
+    out.push(...evaluateEssFindings(project, ctx, documentTexts, { quantityAskedByScope: !newArray }).map((f) => (f.id === "city.ess.details-missing"
+      // The generic ESS reference the keyword check cited stays, under the adopted edition.
+      ? { ...f, codeReferences: [...f.codeReferences, essRef] }
+      : f)));
   }
 
   return out;
 }
+
+// ---------------------------------------------------------------------------------------------
+// THE PLAN-SET CONSISTENCY PASS (#338). The readers are planConsistency.ts (sheets' own words, one
+// quote per sheet and phrase); this is only the wording and the citations. All callouts: each names the
+// sheets so the designer can fix the set in one pass, and none can hold a filing.
+// ---------------------------------------------------------------------------------------------
+
+const NEC_SOURCE_URL = "https://www.nfpa.org/codes-and-standards/nfpa-70-standard-development/70";
+const serviceDisconnectLocation: CodeReference = {
+  code: "NEC",
+  section: "230.70(A)(1)",
+  title: "Service disconnecting means location",
+  adoptionScope: "Every service; verify the locally adopted NEC edition.",
+  sourceUrl: NEC_SOURCE_URL,
+  note: "The service disconnecting means is outside the building or inside nearest the point of entrance of the service conductors, so the plans must say which.",
+};
+const supplySideServiceEquipment: CodeReference = {
+  code: "NEC",
+  section: "230.82(6)",
+  title: "Equipment connected to the supply side of the service disconnect",
+  adoptionScope: "PV connected on the supply side of the service disconnecting means.",
+  sourceUrl: NEC_SOURCE_URL,
+  note: "PV ahead of the service disconnect is permitted with a disconnecting means suitable for use as service equipment and overcurrent protection per Article 230.",
+};
+const rapidShutdownInitiation: CodeReference = {
+  code: "NEC",
+  section: "690.12(C)",
+  title: "Rapid shutdown initiation device",
+  adoptionScope: "NEC 2017 and later; the strictest edition's requirement where the adopted edition is not on file.",
+  sourceUrl: NEC_SOURCE_URL,
+  note: "For one- and two-family dwellings the initiation device is at a readily accessible location outside the building.",
+};
+
+function sheetEvidence(q: SheetQuote, label: string, note: string): ReviewerFindingEvidence {
+  return { kind: "source_excerpt", label, source: q.sheet, excerpt: q.excerpt, confidence: "high", pageHint: q.sheet, screenshotPath: "", verifier: "rule_engine", note };
+}
+const sheetsOf = (qs: SheetQuote[]): string => [...new Set(qs.map((q) => q.sheet))].join(", ");
+const quoted = (qs: SheetQuote[], max = 4): string =>
+  `${qs.slice(0, max).map((q) => `${q.sheet}: "${q.excerpt}"`).join("; ")}${qs.length > max ? ` (+${qs.length - max} more)` : ""}`;
+
+function planConsistencyFindings(input: {
+  sheets: PlanSheet[];
+  /** The gate's own classification: supply side only, its load-side branch, or neither (no reading). */
+  method: "supply" | "load" | null;
+  necAdopted: number | null;
+  rsdApplies: boolean;
+  /** The adopted edition has a row in the edition table, so the edition-evidence rule owns 690.12(C). */
+  editionRowKnown: boolean;
+  supplySideRef: CodeReference;
+  loadSideRef: CodeReference;
+  rapidShutdownRef: CodeReference;
+  electricalRef: CodeReference;
+  cite: (code: string, fallback: CodeReference) => CodeReference;
+}): ReviewerFinding[] {
+  const { sheets, method, cite } = input;
+  if (!sheets.length) return [];
+  const out: ReviewerFinding[] = [];
+
+  // (1) THE OTHER METHOD'S BOILERPLATE.
+  if (method) {
+    const items = readOtherMethodItems(sheets, method);
+    if (items.length) {
+      const supply = method === "supply";
+      const listed = items.slice(0, 8).map((i) => `${i.item} (${i.quote.sheet}: "${i.quote.excerpt}")`).join("; ") + (items.length > 8 ? ` (+${items.length - 8} more)` : "");
+      out.push({
+        ...finding({
+          id: "city.elec.interconnection-boilerplate-mismatch",
+          severity: "callout",
+          category: "electrical",
+          title: supply ? "Load-side notes and labels on a supply-side (line-side) connection" : "Supply-side notes on a load-side connection",
+          message: `The interconnection is ${supply ? "a supply-side (line-side) connection" : "a load-side connection"}, but the sheets also carry ${supply ? "load-side" : "supply-side"} items: ${listed}. A reviewer reads these as the set describing the other method.`,
+          cityFeedback: supply
+            ? "Remove the load-side (busbar / back-fed breaker) notes and labels from the supply-side design, or state the interconnection method once and show the calculation and labels that match it."
+            : "Remove the supply-side (line-side tap) notes from the load-side design, or state the interconnection method once and show the calculation and labels that match it.",
+          designTeamAction: `Delete or correct each listed note and label (${sheetsOf(items.map((i) => i.quote))}) so every sheet describes the same interconnection method.`,
+          evidenceNeeded: items.slice(0, 8).map((i) => `${i.quote.sheet}: ${i.item}`),
+          codeReferences: supply ? [input.supplySideRef, input.loadSideRef] : [input.loadSideRef, input.supplySideRef],
+        }),
+        evidenceStatus: "verified",
+        evidenceFound: items.slice(0, 8).map((i) => sheetEvidence(i.quote, `Other-method item: ${i.item}`, `Read on ${i.quote.sheet}; the job is classified ${method} side.`)),
+      });
+    }
+  }
+
+  // (2) INTERIOR vs EXTERIOR, per fact.
+  const locations = readServiceLocationConflicts(sheets);
+  if (locations.length) {
+    out.push({
+      ...finding({
+        id: "city.elec.service-location-conflict",
+        severity: "callout",
+        category: "electrical",
+        title: `The sheets disagree on whether the ${locations.map((c) => c.fact).join(" / ")} is interior or exterior`,
+        message: locations.map((c) => `The ${c.fact} is INTERIOR on ${sheetsOf(c.interior)} (${quoted(c.interior, 2)}) and EXTERIOR on ${sheetsOf(c.exterior)} (${quoted(c.exterior, 2)})`).join(". ")
+          + ". The location decides where the service disconnect and the PV overcurrent device sit, so the reviewer cannot check either until the sheets agree.",
+        cityFeedback: "Show the point of interconnection and the service equipment at one location (interior or exterior), the same on every sheet.",
+        designTeamAction: `Confirm the actual location on site and correct the sheets that disagree (${sheetsOf(locations.flatMap((c) => [...c.interior, ...c.exterior]))}).`,
+        evidenceNeeded: locations.map((c) => `${c.fact}: one location on every sheet`),
+        codeReferences: [cite("NEC", serviceDisconnectLocation), method === "supply" ? input.supplySideRef : method === "load" ? input.loadSideRef : input.electricalRef],
+      }),
+      evidenceStatus: "verified",
+      evidenceFound: locations.flatMap((c) => [
+        ...c.interior.slice(0, 2).map((q) => sheetEvidence(q, `${c.fact}: interior`, `Read on ${q.sheet}.`)),
+        ...c.exterior.slice(0, 2).map((q) => sheetEvidence(q, `${c.fact}: exterior`, `Read on ${q.sheet}.`)),
+      ]),
+    });
+  }
+
+  // (3) NEC EDITION CITED ON THE SHEETS. Against the adopted edition when one is on file; otherwise
+  // only the set against itself (two editions cited), since an unknown adoption is not a finding here.
+  const cited = readNecEditionCitations(sheets);
+  const adopted = input.necAdopted;
+  const flagged = adopted != null ? cited.filter((c) => c.edition < adopted) : cited.length > 1 ? cited : [];
+  if (flagged.length) {
+    const describe = (c: EditionCitationsLike): string => `NEC ${c.edition} on ${sheetsOf(c.quotes)} (${c.count} citation${c.count === 1 ? "" : "s"}, e.g. "${c.quotes[0].excerpt}")`;
+    out.push({
+      ...finding({
+        id: "city.elec.nec-edition-cited-outdated",
+        severity: "callout",
+        category: "electrical",
+        title: adopted != null ? `Labels and notes cite an older NEC than the adopted NEC ${adopted}` : "The sheets cite more than one NEC edition",
+        message: adopted != null
+          ? `The sheets cite ${flagged.map(describe).join("; ")}, but the jurisdiction has adopted NEC ${adopted}. A reviewer reads an older edition on the labels and notes as the design having been checked against the wrong code.`
+          : `The sheets cite ${flagged.map(describe).join("; ")}. Only one can be the design basis; the labels and notes should all cite the edition the jurisdiction has adopted.`,
+        cityFeedback: adopted != null
+          ? `Update the code references on the labels and notes to NEC ${adopted} (the adopted edition), and confirm the label wording matches that edition.`
+          : "Cite one NEC edition, the locally adopted one, on every label and note.",
+        designTeamAction: `Correct the edition on every label and note (${sheetsOf(flagged.flatMap((c) => c.quotes))}) in one pass, and check each label's wording against that edition.`,
+        evidenceNeeded: ["Code edition on labels and notes matching the adopted NEC"],
+        codeReferences: [input.electricalRef],
+      }),
+      evidenceStatus: "verified",
+      evidenceFound: flagged.flatMap((c) => c.quotes.slice(0, 2).map((q) => sheetEvidence(q, `NEC ${c.edition} cited`, `${c.count} citation(s) of NEC ${c.edition} on the sheets.`))),
+    });
+  }
+
+  // (4) RAPID SHUTDOWN CLAIMED AND DENIED, or claimed with no initiation device named. The initiation
+  // gap is read here only where the adopted edition is not in the table: a known edition's 690.12(C)
+  // belongs to city.elec.rapid-shutdown-edition-evidence, which must not be asked twice.
+  if (input.rsdApplies) {
+    const rsd = readRapidShutdownStatements(sheets, RSD_INITIATION_PATTERNS);
+    const denied = rsd.claimed.length > 0 && rsd.denied.length > 0;
+    const noInitiation = rsd.claimed.length > 0 && rsd.initiation.length === 0 && !input.editionRowKnown;
+    if (denied || noInitiation) {
+      const parts = [
+        denied ? `Rapid shutdown is claimed on ${sheetsOf(rsd.claimed)} (${quoted(rsd.claimed, 2)}) and denied on ${sheetsOf(rsd.denied)} (${quoted(rsd.denied, 3)})` : "",
+        noInitiation ? `The sheets claim rapid shutdown (${quoted(rsd.claimed, 2)}) but no sheet names the initiation device or where it is (690.12(C), NEC 2017 and later)` : "",
+      ].filter(Boolean);
+      out.push({
+        ...finding({
+          id: "city.elec.rapid-shutdown-contradiction",
+          severity: "callout",
+          category: "electrical",
+          title: denied ? "Rapid shutdown is claimed on one sheet and denied on another" : "Rapid shutdown claimed with no initiation device named",
+          message: `${parts.join(". ")}.`,
+          cityFeedback: "State the rapid shutdown method once and consistently on every sheet, and show the initiation device and its location on the one-line and the site plan.",
+          designTeamAction: denied
+            ? `Correct the notes that deny rapid shutdown (${sheetsOf(rsd.denied)}) or the RSD note and placard, so the set says one thing; name the initiation device on the one-line.`
+            : "Name the rapid shutdown initiation device (switch / service disconnect) and its readily accessible outdoor location on the one-line and site plan.",
+          evidenceNeeded: [...(denied ? ["One rapid shutdown statement on every sheet"] : []), "Rapid shutdown initiation device and location"],
+          codeReferences: [input.rapidShutdownRef, ...(noInitiation ? [cite("NEC", rapidShutdownInitiation)] : [])],
+        }),
+        evidenceStatus: "verified",
+        evidenceFound: [
+          ...rsd.claimed.slice(0, 2).map((q) => sheetEvidence(q, "Rapid shutdown claimed", `Read on ${q.sheet}.`)),
+          ...(denied ? rsd.denied.slice(0, 3).map((q) => sheetEvidence(q, "Rapid shutdown denied", `Read on ${q.sheet}.`)) : []),
+        ],
+      });
+    }
+  }
+
+  // (5) A SUPPLY-SIDE DISCONNECT NOT CALLED SUITABLE FOR USE AS SERVICE EQUIPMENT.
+  if (method === "supply") {
+    const rating = readSupplySideDisconnectRating(sheets);
+    if (rating.disconnect.length && !rating.serviceRated.length) {
+      out.push({
+        ...finding({
+          id: "city.elec.supply-side-disconnect-service-rating",
+          severity: "callout",
+          category: "electrical",
+          title: "Supply-side disconnect not called out as suitable for use as service equipment",
+          message: `The supply-side disconnect is named (${quoted(rating.disconnect, 3)}), but no sheet describes it as suitable for use as service equipment (service rated). A disconnect ahead of the service disconnect is permitted only when it is.`,
+          cityFeedback: "Identify the PV disconnect on the supply side of the service as suitable for use as service equipment (service-entrance rated), on the one-line and the equipment schedule.",
+          designTeamAction: "Add \"SUITABLE FOR USE AS SERVICE EQUIPMENT\" (or the listed service-entrance rating) to the disconnect callout on the one-line and the equipment schedule; confirm the specified disconnect carries that listing.",
+          evidenceNeeded: ["Supply-side disconnect described as suitable for use as service equipment"],
+          codeReferences: [cite("NEC", supplySideServiceEquipment), input.supplySideRef],
+        }),
+        evidenceStatus: "verified",
+        evidenceFound: rating.disconnect.slice(0, 3).map((q) => sheetEvidence(q, "Supply-side disconnect named", `Read on ${q.sheet}; no service-equipment rating stated on any sheet.`)),
+      });
+    }
+  }
+
+  return out;
+}
+type EditionCitationsLike = ReturnType<typeof readNecEditionCitations>[number];

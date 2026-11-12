@@ -1,0 +1,10 @@
+{
+  "_comment": "USPS standard abbreviations (Publication 28) used to send a job's street line to a county parcel service the way assessor data usually stores it (backend/src/parcelJurisdiction.ts normalizeStreet, addressStyle 'usps'). Suffixes are abbreviated after the street name's first word; directionals as the first word after the house number or the last word. Data, so the table can grow without code.",
+  "suffixes": {
+    "STREET": "ST", "AVENUE": "AVE", "ROAD": "RD", "DRIVE": "DR", "LANE": "LN", "COURT": "CT", "BOULEVARD": "BLVD", "PLACE": "PL",
+    "CIRCLE": "CIR", "TERRACE": "TER", "PARKWAY": "PKWY", "HIGHWAY": "HWY", "TRAIL": "TRL", "SQUARE": "SQ", "LOOP": "LOOP", "WAY": "WAY"
+  },
+  "directionals": {
+    "NORTH": "N", "SOUTH": "S", "EAST": "E", "WEST": "W", "NORTHEAST": "NE", "NORTHWEST": "NW", "SOUTHEAST": "SE", "SOUTHWEST": "SW"
+  }
+}

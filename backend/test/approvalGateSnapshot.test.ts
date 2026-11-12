@@ -28,6 +28,9 @@ import { setupStageFixture, check, finish } from "./_stageFixture";
 
 const fx = await setupStageFixture("approval-gate-snapshot");
 const { db, repo } = fx;
+// The fixture AHJ's filing door, verified by a named person: the gate refuses a run on an unverified door
+// (automaticSubmitRefusals filingDoor; filingDoorGate.test pins that), and these runs are about other checks.
+fx.verifyDoor();
 const { PDFDocument, StandardFonts } = await import("pdf-lib");
 const docs = await import("../src/projectDocuments");
 const { findPlanSetPdf } = await import("../src/pageImages");
@@ -113,7 +116,7 @@ async function stage(projectId: string, opts: { approvalId?: string | null; fina
   assert.ok(seen, "the run never reached the bot");
   return seen as unknown as Seen;
 }
-const approve = (projectId: string) => repo.createRunApproval(db, { projectId, track: "permit", approver: "A. Person", approverUserId: null });
+const approve = (projectId: string) => repo.createRunApproval(db, { projectId, track: "permit", approver: "A. Person", approverUserId: null, acknowledgements: fx.acknowledgeAll(projectId, null) });
 const auditsFor = (action: string, projectId: string) =>
   fx.audits(action).filter((a) => a.project_id === projectId).map((a) => JSON.parse(String(a.details)) as Record<string, unknown>);
 
@@ -190,7 +193,7 @@ await check("5. AUDIT staging with nothing relaxed writes no row", async () => {
 
 await check("6. the one door: automaticSubmitRefusals refuses relaxedSinceApproval on its own", () => {
   const recipe = fx.completeRecipe();
-  const ok = { recipeId: recipe.id, runApproval: { approver: "A. Person", runId: "r1" }, runId: "r1", env: { PORTAL_ALLOW_FINAL_SUBMIT: "1" } };
+  const ok = { recipeId: recipe.id, runApproval: { approver: "A. Person", runId: "r1" }, runId: "r1", env: { PORTAL_ALLOW_FINAL_SUBMIT: "1" }, filingDoor: { url: fx.FIXTURE_DOOR } };
   assert.deepEqual(repo.automaticSubmitRefusals(db, { ...ok, relaxedSinceApproval: [] }), [], "setup: the clean inputs must pass");
   assert.equal(repo.automaticSubmitRefusals(db, { ...ok, relaxedSinceApproval: [RSD] }).length, 1);
   assert.equal(repo.maySubmitAutomatically(db, { ...ok, relaxedSinceApproval: [RSD] }), false);

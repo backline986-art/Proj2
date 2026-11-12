@@ -1333,20 +1333,52 @@
   const ELECTRICAL_SHEET = /\bE\s*-?\s*\d+\.\d+\b/i;
   const COMBINED_SPEC = /MODULE\s*[\/&]?\s*INV(?:ERTER)?\.?\s*SPEC/i;
   const SPLIT_CATEGORIES = [
-    { docType: 'sld', patterns: [/\b3-?LINE DIAGRAM\b/i, /\bONE-?LINE\b/i, /\bSINGLE-?LINE\b/i, /\bELECTRICAL\s+LINE\s+DIAGRAM\b/i], sheetNumbers: [/\bE\s*1\.1\b/i] },
+    // Hyphen OR whitespace between the title words (#691) — the backend list, kept identical.
+    { docType: 'sld', patterns: [/\b(?:3|THREE)[\s-]?LINE\s+DIAGRAM\b/i, /\bONE(?:-?LINE\b|\s+LINE\s+(?:DIAGRAM|DWG|DRAWING|SCHEMATIC)\b)/i, /\bSINGLE[\s-]?LINE\b/i, /\bELECTRICAL\s+LINE\s+DIAGRAM\b/i, /\bELECTRICAL\s+SCHEMATIC\b/i], sheetNumbers: [/\bE\s*1\.1\b/i] },
     { docType: 'site_plan', patterns: [/\bSITE PLAN\b/i, /\bPLOT PLAN\b/i, /\bFIRE\s+(?:PATHWAYS?|SETBACKS?|ACCESS)\b/i], sheetNumbers: [/\bPV\s*1\.[01]\b/i] },
     { docType: 'structural', patterns: [/\bMOUNT DETAIL\b/i, /\bATTACHMENT DETAIL\b/i], sheetNumbers: [/\bS\s*1\.\d\b/i], words: [/STRUCTURAL/i], vocabulary: [/\bROOF SECTION\b/i, /\bRAFTER\b/i, /\bTRUSS\b/i] },
     { docType: 'module_spec', patterns: [COMBINED_SPEC, /MODULE\s+SPECIFICATION\s+SHEET/i, /PV MODULE SPEC/i] },
     { docType: 'inverter_spec', patterns: [COMBINED_SPEC, /MICRO-?INVERTER\s+SPEC(?:IFICATION)?S?\b/i, /\bINVERTER\s+SPEC(?:IFICATION)?S?\b/i] },
+    // The battery / ESS datasheet by its sheet name, scored only when batteryPage() says "spec" (#261).
+    { docType: 'battery_spec', patterns: [/\b(?:BATT(?:ERY|ERIES)?|ESS|ENERGY\s+STORAGE(?:\s+SYSTEMS?)?)\s*(?:SPEC(?:IFICATION)?S?|DATA\s*-?\s*SHEETS?|DATASHEETS?|CUT\s*-?\s*SHEETS?)\b/i] },
     // PLACARD (the directory plaque sheet) as a `words` hit that a NOTES sheet does not get, as in the backend (#67).
     { docType: 'labels', patterns: [/\bWARNING LABELS\b/i, /\bLABEL LOCATION\b/i], sheetNumbers: [/\bE\s*1\.3\b/i], words: [/\bPLACARDS?\b/i], wordsSkipNotes: true },
   ];
   // The backend's SPEC_DOC_TYPES: the categories a calculations sheet never scores for (#66). An
   // explicit set, as there, not a /_spec$/ name test (#193).
-  const SPEC_DOC_TYPES = new Set(['module_spec', 'inverter_spec']);
+  const SPEC_DOC_TYPES = new Set(['module_spec', 'inverter_spec', 'battery_spec']);
   // The backend's NOTES_SHEET: NOTES on the page, except the placard sheet's own LABELING / PLACARD NOTES.
   const NOTES_SHEET = /(?<!\b(?:LABEL(?:ING|S)?|PLACARDS?)\s+)\bNOTES\b/i;
   const isIndexOrNotesPage = (t) => /SHEET INDEX/i.test(t) || /GENERAL NOTES AND PROJECT DATA/i.test(t);
+  // The backend's batteryPage() (docSplitter.ts, #261): a battery / ESS datasheet by its CONTENT (a
+  // labelled kWh capacity, storage words, and at least 3 datasheet performance rows) or its sheet name,
+  // whatever the sheet is numbered — the DS-code-only read missed every other firm's datasheet. A page
+  // that also reads as an inverter (MPPT, PV input, a hybrid / combined INVERTER-BATTERY name) is
+  // "undecided", never the battery spec; a calcs, index or cover page never qualifies.
+  // docSplitterMirror.test.ts pins the two to the same answers.
+  const BATTERY_CAPACITY = /\b(?:USABLE|NOMINAL|TOTAL|RATED|AVAILABLE|STORAGE|ENERGY|BATTERY)\s+(?:ENERGY|CAPACITY)\d?\b[^.;]{0,40}?\b\d{1,3}(?:\.\d{1,2})?\s*kWh\b|\b(?:ENERGY|CAPACITY)\s*\(\s*kWh\s*\)\s*:?\s*\d{1,3}(?:\.\d{1,2})?\b/i;
+  const STORAGE_WORDS = /\bBATTER(?:Y|IES)\b|\bENERGY\s+STORAGE\b|\bESS\b|\bLITHIUM\b|\bLFP\b|\bLiFePO4\b|\bUL\s*-?\s*1973\b/i;
+  const BATTERY_DATASHEET_MARKS = [
+    /\bROUND[\s-]*TRIP\s+EFFICIENCY\b/i,
+    /\bDEPTH\s+OF\s+DISCHARGE\b|\bDoD\b/,
+    /\bCYCLE\s+LIFE\b|\b\d[\d,]*\s*CYCLES\b/i,
+    /\bWARRANTY\b/i,
+    /\bOPERATING\s+TEMP(?:ERATURE)?\b/i,
+    /\bSCALAB(?:LE|ILITY)\b|\bSTACKABLE\b|\bEXPANDABLE\b/i,
+    /\bCHEMISTRY\b|\bLiFePO4\b|\bLFP\b|\bLITHIUM[\s-]+(?:ION|IRON)\b|\bNMC\b/i,
+    /\b(?:CONTINUOUS|PEAK)\s+(?:POWER|OUTPUT|DISCHARGE|CHARGE)\b/i,
+  ];
+  const BATTERY_DATASHEET_MARKS_MIN = 3;
+  const INVERTER_BODY = /\bMPPTs?\b|\bPV\s+INPUTS?\b|\bMAX(?:IMUM)?\.?\s+PV\b|\bCEC\s+(?:WEIGHTED\s+)?EFFICIENCY\b|\bMAX(?:IMUM)?\.?\s+(?:DC\s+)?INPUT\s+(?:VOLTAGE|CURRENT)\b|\bSTRINGS?\s+PER\b|\b(?:HYBRID|BATTERY|STORAGE|ESS)\s+INVERTERS?\b|\bINVERTERS?\s*(?:[\/&+]|AND)\s*BATT|\bBATT(?:ERY|ERIES)?\s*(?:[\/&+]|AND)\s*INVERTER/i;
+  const BATTERY_SHEET_NAME = SPLIT_CATEGORIES.find((c) => c.docType === 'battery_spec').patterns[0];
+  function batteryPage(t) {
+    if (isIndexOrNotesPage(t) || isCalcsSheet(t)) return null;
+    const named = BATTERY_SHEET_NAME.test(t);
+    const body = !ELECTRICAL_SHEET.test(t) && BATTERY_CAPACITY.test(t) && STORAGE_WORDS.test(t)
+      && BATTERY_DATASHEET_MARKS.filter((re) => re.test(t)).length >= BATTERY_DATASHEET_MARKS_MIN;
+    if (!named && !body) return null;
+    return INVERTER_BODY.test(t) ? 'undecided' : 'spec';
+  }
   // The backend's index reader (docSplitter.ts indexSpecSheets / pageSheetNumber, #199): the sheet
   // numbers the cover's sheet index names as a spec sheet ("S-1 SPEC SHEET"), so an image-only page
   // that carries only its title block and "S-1" is a spec-named page. Same regexes, same row /
@@ -1416,14 +1448,20 @@
     const electrical = ELECTRICAL_SHEET.test(t);
     const calcs = isCalcsSheet(t);
     const notes = NOTES_SHEET.test(t);
+    const battery = batteryPage(t);
     const hits = (res) => (res || []).reduce((n, re) => (re.test(t) ? n + 1 : n), 0);
     let best = null;
     for (const cat of SPLIT_CATEGORIES) {
       if (calcs && SPEC_DOC_TYPES.has(cat.docType)) continue;
+      if (cat.docType === 'battery_spec' && battery !== 'spec') continue;
       const patternHits = hits(cat.patterns);
       const score = patternHits + hits(cat.sheetNumbers)
         + (electrical ? 0 : (cat.wordsSkipNotes && notes ? 0 : hits(cat.words)) + ((cat.vocabulary || []).some((re) => re.test(t)) ? 1 : 0));
       if (score > 0 && (!best || score > best.score)) best = { docType: cat.docType, score, patternHits };
+    }
+    // A battery datasheet by its body wins over anything but another category's own sheet NAME (#261).
+    if (battery === 'spec' && (!best || best.docType !== 'battery_spec') && !(best && best.patternHits > 0)) {
+      best = { docType: 'battery_spec', score: 1, patternHits: BATTERY_SHEET_NAME.test(t) ? 1 : 0 };
     }
     if (!best) return { docTypes: [], byPattern: false };
     const docTypes = [best.docType];
@@ -1435,7 +1473,7 @@
 
   /** docSplitter.ts isUndecidedSpecPage, with the index from indexSpecSheets (#199). */
   function isUndecidedSpecPage(t, scored, index) {
-    const named = SPEC_SHEET_NAME.test(t) || Boolean(index && index.spec.size && index.spec.has(pageSheetNumber(t, index.listed) || ''));
+    const named = SPEC_SHEET_NAME.test(t) || batteryPage(t) === 'undecided' || Boolean(index && index.spec.size && index.spec.has(pageSheetNumber(t, index.listed) || ''));
     return named && !isCalcsSheet(t) && !isIndexOrNotesPage(t)
       && !scored.docTypes.some((d) => SPEC_DOC_TYPES.has(d)) && !scored.byPattern;
   }
@@ -1449,6 +1487,7 @@
     const moduleSpecs = [];
     const inverterSpecs = [];
     const undecidedSpecs = [];
+    const batterySpecs = [];
     const index = indexSpecSheets((allPages || pages || []).map((p) => String(p.text || '')));
     for (const p of pages || []) {
       const t = String(p.text || '');
@@ -1458,14 +1497,18 @@
     }
     // A page another category won on its own sheet name (a dense SLD citing "INVERTER
     // SPECIFICATIONS") is filed right; reporting it undecided would be noise (#119).
+    // The battery / ESS spec over the WHOLE set (#261), by the splitter's rule: a battery datasheet is
+    // found by its content or name, not by a DS sheet code.
     for (const p of allPages || pages || []) {
       const t = String(p.text || '');
-      if (isUndecidedSpecPage(t, scoreSplitPage(t), index)) undecidedSpecs.push(p.page);
+      const scored = scoreSplitPage(t);
+      if (scored.docTypes.includes('battery_spec')) batterySpecs.push(p.page);
+      if (isUndecidedSpecPage(t, scored, index)) undecidedSpecs.push(p.page);
     }
     // No one-side-empty copy (#193): a set with only a MICROINVERTER SPECIFICATION SHEET has no
     // module spec, as the splitter reports. A combined MODULE / INV sheet is already on both sides
     // (scoreSplitPage's fan-out), the only case where one page is both specs.
-    return { moduleSpecs, inverterSpecs, undecidedSpecs };
+    return { moduleSpecs, inverterSpecs, undecidedSpecs, batterySpecs };
   }
 
   /** A split-map row's value: the pages, else "undecided (…)" when spec-named pages exist that
@@ -1474,6 +1517,91 @@
     if (specPages && specPages.length) return specPages.join(', ');
     if (undecidedPages && undecidedPages.length) return `undecided (pages ${undecidedPages.join(', ')} name an equipment spec; check which)`;
     return 'missing';
+  }
+
+  // -------------------------------------------------------------------------
+  // PLAN TEXT — each PDF page's text as the page reads it, and each page ONCE when posted (#697).
+  // pdfPageText is the page's own reader (moved here from parser.html so a test runs it on real
+  // pdf.js items): a layout-ordered copy (items grouped by line, left to right) then the raw item
+  // order of the same words. The page's local readers keep both. The smart read is POSTED one copy
+  // per page (textOncePerPage, the mirror of shared/src/planText.ts, pinned to it by
+  // backend/test/planTextOnce.test.ts): the doubled copy halved what fit in the backend's 80k
+  // bound and dropped the middle sheets.
+  // -------------------------------------------------------------------------
+  function normalizeText(raw) {
+    return String(raw || '')
+      .replace(/\u2013|\u2014|\u2212/g, '-')
+      .replace(/\u00a0/g, ' ')
+      .replace(/[|]/g, '1')
+      .replace(/[\u201c\u201d]/g, '"')
+      .replace(/[\u2018\u2019]/g, "'")
+      .replace(/[ \t]+/g, ' ')
+      .replace(/\n{3,}/g, '\n\n');
+  }
+
+  function layoutTextFromItems(items) {
+    const mapped = (items || [])
+      .map(item => {
+        const tx = item.transform || [1, 0, 0, 1, 0, 0];
+        return { str: String(item.str || '').trim(), x: Number(tx[4] || 0), y: Number(tx[5] || 0) };
+      })
+      .filter(item => item.str);
+    if (!mapped.length) return '';
+    // PDF text item order is not always visual order. Group by Y position and sort X left to right.
+    mapped.sort((a, b) => {
+      if (Math.abs(b.y - a.y) > 3) return b.y - a.y;
+      return a.x - b.x;
+    });
+    const lines = [];
+    for (const item of mapped) {
+      const last = lines[lines.length - 1];
+      if (!last || Math.abs(last.y - item.y) > 3) lines.push({ y: item.y, items: [item] });
+      else last.items.push(item);
+    }
+    return lines.map(line => line.items.sort((a, b) => a.x - b.x).map(i => i.str).join(' ')).join('\n');
+  }
+
+  /** One page's text as the page's local readers see it: layout copy, blank line, raw item order. */
+  function pdfPageText(items) {
+    const linear = (items || []).map(item => item.str || '').join(' ');
+    return normalizeText(`${layoutTextFromItems(items)}\n\n${linear}`);
+  }
+
+  const PLAN_PAGE_MARKER = /---\s*(?:OCR\s+)?PAGE\s+(\d+)\s*---/gi;
+  const planWords = (s) => s.split(/\s+/).filter(Boolean);
+  function sameWords(a, b) {
+    if (a.length !== b.length) return false;
+    const x = [...a].sort();
+    const y = [...b].sort();
+    return x.every((w, i) => w === y[i]);
+  }
+  function collapseDoubledPage(body) {
+    const all = planWords(body);
+    if (all.length < 2 || all.length % 2) return body;
+    const half = all.length / 2;
+    const blank = /\n[ \t]*\n/g;
+    for (let m = blank.exec(body); m; m = blank.exec(body)) {
+      const first = body.slice(0, m.index);
+      const firstWords = planWords(first);
+      if (firstWords.length > half) break;
+      if (firstWords.length < half) continue;
+      const rest = body.slice(m.index + m[0].length);
+      if (sameWords(firstWords, planWords(rest))) return first + ((/\s*$/.exec(rest) || [''])[0]);
+    }
+    return body;
+  }
+  /** The text with every doubled page collapsed to its first (layout) copy. */
+  function textOncePerPage(text) {
+    const src = String(text == null ? '' : text);
+    const hits = [...src.matchAll(PLAN_PAGE_MARKER)];
+    if (!hits.length) return collapseDoubledPage(src);
+    let out = src.slice(0, hits[0].index);
+    hits.forEach((m, i) => {
+      const start = m.index + m[0].length;
+      const end = i + 1 < hits.length ? hits[i + 1].index : src.length;
+      out += m[0] + collapseDoubledPage(src.slice(start, end));
+    });
+    return out;
   }
 
   // -------------------------------------------------------------------------
@@ -1516,6 +1644,7 @@
     filterTapEvidence, isNoteMention,
     formatReviewList,
     isCalcsSheet, specSheetPages, specMapValue, SPEC_MAP_RULE, scoreSplitPage, SPLIT_CATEGORIES,
-    indexSpecSheets, isUndecidedSpecPage,
+    indexSpecSheets, isUndecidedSpecPage, batteryPage,
+    normalizeText, layoutTextFromItems, pdfPageText, collapseDoubledPage, textOncePerPage,
   };
 });

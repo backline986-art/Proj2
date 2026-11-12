@@ -50,6 +50,17 @@ function first(payload: ParserPayload, keys: string[]): string {
   return "";
 }
 
+// THE SERVICE'S PHASE AND VOLTAGE, BY THE PARSER'S OWN KEYS (#689 3a). The parser emits
+// `servicePhase` / `serviceVoltage` (llm.ts's field list); the worksheets read `phase` / `voltage`, the
+// names older fixtures and hand-entered snapshots carry, so "Service phase/voltage" printed [verify]
+// on every parsed job. The parser's key first, the legacy key as the fallback; "" when neither is set.
+// The raw text, unconverted: a reader that needs a number normalises it (iowaPvWorksheet.serviceVoltageOf).
+export function serviceFieldText(payload: ParserPayload, field: "phase" | "voltage"): string {
+  return field === "phase"
+    ? str(payload, "servicePhase") || str(payload, "phase")
+    : str(payload, "serviceVoltage") || str(payload, "voltage");
+}
+
 function addressFrom(payload: ParserPayload): string {
   const street = str(payload, "street");
   const city = str(payload, "city");

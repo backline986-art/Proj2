@@ -141,7 +141,7 @@ export interface HeldShape {
   start?: string;
   route: (p: string, rest: string, method: string) => Reply | null;
   /** The planner by page (rest). null = nothing. */
-  plan: (rest: string, idx: (label: string) => number) => LearnPlanResponse | null;
+  plan: (rest: string, idx: (label: string) => number, req?: LearnPlanRequest) => LearnPlanResponse | null;
   plannerDelayMs?: number;
   options?: Record<string, unknown>;
   project?: Record<string, unknown>;
@@ -153,6 +153,8 @@ export interface HeldShape {
   /** Main ITSELF lets this shape's leak through (#346 GET forwards; a sentence rendered after load):
    *  asserted EQUAL to (i), never newly opened. */
   mainLeaks?: boolean;
+  /** What the run's message must say (walk i): the stop names what it stopped on. */
+  message?: RegExp;
 }
 const adv = (map: Record<string, string>) => (rest: string, idx: (l: string) => number): LearnPlanResponse | null =>
   map[rest] ? { fills: [], atReview: false, advanceSelectorIndex: idx(map[rest]) } : null;
@@ -169,6 +171,31 @@ const draftRoutes = (p: string, rest: string, m: string, notice: string): Reply 
     : rest === "/sg" && m === "POST" ? { redirect: `${p}/draft-0141` } : rest === "/draft-0141" ? { html: otherDraftPage(p) }
       : rest.startsWith("/act/") ? { html: `<!doctype html><html><body><h1>Saved</h1><p>${esc(rest)}</p></body></html>` } : null;
 const D1M = `<p>You have an application in progress.</p><p>Draft 2026-0141, 77 Other Ave. Once submitted, staff will review your application.</p>`;
+// #351 — the Helm's d3: the notice's one Continue is a GET into somebody's draft form (the backstop
+// never judges a GET forward, #346), the draft's own Next POSTs the save. The other shapes move the
+// door (a link the planner NAVIGATES, a "Resume Application" label, the planner silent) or add the
+// one control the learner may take there: "Start a New Application", its own application.
+const D3_NOTICE = `<p>You have an application in progress.</p><p>Draft 2026-0141, 77 Other Ave.</p>`;
+const d3Notice = (p: string, o: { control?: string; link?: boolean; startNew?: string } = {}): string => shell(p, {
+  title: "Permitting Information", method: "GET", action: `${p}/draft-0141`, content: D3_NOTICE,
+  nav: (o.startNew ? `<a href="${p}/new-form" class="btn">${o.startNew}</a>` : "")
+    + (o.link ? `<a href="${p}/draft-0141" class="btn btn-primary ms-auto">${o.control ?? "Continue"}</a>`
+      : `<button type="submit" name="t_c1" class="btn btn-primary ms-auto">${o.control ?? "Continue"}</button>`),
+});
+const d3Routes = (o: { control?: string; link?: boolean; startNew?: string } = {}) => (p: string, rest: string): Reply | null =>
+  rest === "/info" ? { html: d3Notice(p, o) }
+    : rest === "/draft-0141" ? { html: otherDraftPage(p) }
+      : rest === "/new-form" ? { html: prefilledFormPage(p) }
+        : rest.startsWith("/act/") ? { html: `<!doctype html><html><body><h1>Saved</h1><p>${esc(rest)}</p></body></html>` } : null;
+/** The planner of the issue's repro: "advance Continue" on the notice, then fill Site Address and
+ *  advance Next on the draft. `door` names the notice control and how the planner takes it. */
+const d3Plan = (door: { label: string; navigate?: boolean }) => (rest: string, idx: (l: string) => number): LearnPlanResponse | null =>
+  rest === "/info" ? { fills: [], atReview: false, ...(door.navigate ? { navigateSelectorIndex: idx(door.label) } : { advanceSelectorIndex: idx(door.label) }) }
+    : rest === "/draft-0141" ? { fills: [{ selectorIndex: idx("Site Address"), value: "1 Test St" }], atReview: false, advanceSelectorIndex: idx("Next") }
+      : null;
+// The stop names the draft: its notice, its number (masked to its last four like any status text)
+// and its street.
+const D3_STOP = /in progress\. Draft \*+0141, 77 Other Ave\./;
 
 export const HELD_SHAPES: Record<string, HeldShape> = {
   // ---- Helm (#349 review): form → summary; the learner stops at review on main.
@@ -202,6 +229,23 @@ export const HELD_SHAPES: Record<string, HeldShape> = {
   d2: { desc: "Helm d2: 'Saved applications: Draft 2026-0141 …', one Continue", firstTarget: "/info",
     route: (p, rest, m) => draftRoutes(p, rest, m, `<p>Saved applications: Draft 2026-0141, 77 Other Ave.</p>`), plan: silent, leak: /^POST \/(sg|act\/)/ },
   // ---- skeptic A.
+  // ---- #351: the in-progress notice names somebody's draft; the learner never resumes it.
+  d3: { desc: "#351 d3: in-progress notice, GET Continue into Draft 2026-0141, the planner advances Continue then fills and saves the draft", firstTarget: "/info",
+    route: d3Routes(), plan: d3Plan({ label: "Continue" }), leak: /^(POST \/act\/|GET \/draft-0141)/, message: D3_STOP },
+  d3n: { desc: "#351 d3, the Continue is a LINK the planner navigates", firstTarget: "/info",
+    route: d3Routes({ link: true }), plan: d3Plan({ label: "Continue", navigate: true }), leak: /^(POST \/act\/|GET \/draft-0141)/, message: D3_STOP },
+  d3r: { desc: "#351 d3, the control reads \"Resume Application\"", firstTarget: "/info",
+    route: d3Routes({ control: "Resume Application" }), plan: d3Plan({ label: "Resume Application" }), leak: /^(POST \/act\/|GET \/draft-0141)/, message: D3_STOP },
+  d3s: { desc: "#351 d3, the planner silent (the interstitial pass's own forward control)", firstTarget: "/info",
+    route: d3Routes(), plan: (rest, idx) => rest === "/draft-0141" ? d3Plan({ label: "Continue" })(rest, idx) : null, leak: /^(POST \/act\/|GET \/draft-0141)/, message: D3_STOP },
+  d3x: { desc: "#351 d3 with \"Create New\" beside it; the planner advances Continue, and again when told", firstTarget: "/info",
+    route: d3Routes({ startNew: "Create New" }), plan: d3Plan({ label: "Continue" }), leak: /^(POST \/act\/|GET \/draft-0141)/, message: D3_STOP },
+  d3c: { desc: "#351 d3 with \"Create New\" beside it; the planner advances Continue, is told, then takes Create New: its own application", firstTarget: "/info", premise: "/new-form",
+    route: d3Routes({ startNew: "Create New" }),
+    plan: (rest, idx, req) => rest === "/info" && /Create New/.test(String(req?.recoveryHint ?? "")) ? d3Plan({ label: "Create New", navigate: true })(rest, idx) : d3Plan({ label: "Continue" })(rest, idx),
+    leak: /^(POST \/act\/|GET \/draft-0141)/ },
+  d3new: { desc: "#351 d3 with \"Start a New Application\" beside it (the entry pass's own wording): its own application, walked on", firstTarget: "/info", premise: "/new-form",
+    route: d3Routes({ startNew: "Start a New Application" }), plan: d3Plan({ label: "Start a New Application", navigate: true }), leak: /^(POST \/act\/|GET \/draft-0141)/ },
   a1: { desc: "send page, POST Continue -> /sg, planner advance", firstTarget: "/target", route: (p, rest) => rest === "/target" ? { html: sendPage(p, SEND_PROSE, "Continue", "POST", "/sg") } : null, plan: adv({ "/target": "Continue" }), leak: /^POST \/sg/ },
   a2: { desc: "send page, POST Continue -> /sg, planner atReview", firstTarget: "/target", route: (p, rest) => rest === "/target" ? { html: sendPage(p, SEND_PROSE, "Continue", "POST", "/sg") } : null, plan: (r) => r === "/target" ? { fills: [], atReview: true } : null, leak: /^POST \/sg/ },
   a3: { desc: "send page, POST Continue -> /sg, planner nothing", firstTarget: "/target", route: (p, rest) => rest === "/target" ? { html: sendPage(p, SEND_PROSE, "Continue", "POST", "/sg") } : null, plan: silent, leak: /^POST \/sg/ },
@@ -421,7 +465,7 @@ export async function runHeldShapes(name: string, ids: string[], o: { concurrenc
       if (s.plannerDelayMs) await new Promise((r) => setTimeout(r, s.plannerDelayMs));
       const rest = pathOf(req.url).slice(P.length);
       const idx = (label: string): number => req.fields.findIndex((f) => String(f.label ?? "").trim() === label);
-      return s.plan(rest, idx) ?? { fills: [], atReview: false };
+      return s.plan(rest, idx, req) ?? { fills: [], atReview: false };
     };
     // Round 5: an always-OK reservation, so each shape is held for its OWN reason, never for want of one.
     const a = new AutoLearnAdapter("Held Walk", plan, { maxPages: 8, budgetMs: 240_000, infoPagePasses: entries, infoPagePriorProgress: false, infoPagePassUnavailable: false, reserveInfoPagePass: () => [], ...(s.options ?? {}) });
@@ -485,8 +529,8 @@ export async function runHeldShapes(name: string, ids: string[], o: { concurrenc
       const entry = await nearEntry(id, one.candidate);
       const two = await walk(id, entry ? [entry] : []);
       const held = (w: Walked): boolean => w.arrived && (s.mainLeaks ? true : w.leaks.length === 0) && w.passed === 0;
-      local(`${id} (i) no verified page: ${s.desc} — ${s.mainLeaks ? "exactly main's outcome (main lets it through)" : "HELD, nothing state-changing reached the server"}`,
-        held(one) && (s.mainLeaks ? true : one.reached.length === 0), JSON.stringify({ arrived: one.arrived, reached: one.reached, leaks: one.leaks, passed: one.passed, msg: one.message }));
+      local(`${id} (i) no verified page: ${s.desc} — ${s.mainLeaks ? "exactly main's outcome (main lets it through)" : "HELD, nothing state-changing reached the server"}${s.message ? `, and the stop says ${s.message}` : ""}`,
+        held(one) && (s.mainLeaks ? true : one.reached.length === 0) && (!s.message || s.message.test(one.message)), JSON.stringify({ arrived: one.arrived, reached: one.reached, leaks: one.leaks, passed: one.passed, msg: one.message }));
       local(`${id} (ii) a near-miss verified page (one identity hash off): the same outcome, no pass`,
         !!entry && held(two) && JSON.stringify(two.reached) === JSON.stringify(one.reached), JSON.stringify({ entry: !!entry, arrived: two.arrived, reached: two.reached, first: one.reached, passed: two.passed, msg: two.message }));
       out.push(JSON.stringify([`  note - ${id}: ${one.secs}s + ${two.secs}s; the pass was asked ${one.asked}x / ${two.asked}x; ${one.candidate ? `a person COULD verify this page (candidate ${one.candidate.identitySha256.slice(0, 12)}, held=${!!one.candidate.observed})` : "no candidate (refused by shape, run state, or the page is not held)"}`, null, ""]));

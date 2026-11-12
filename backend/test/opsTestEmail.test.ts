@@ -32,6 +32,9 @@ const smtp = net.createServer((sock) => {
   sessions.push(s);
   let buf = "";
   let inData = false;
+  // A client hanging up abruptly (Windows sends a RST, e.g. after the refused RCPT) emits ECONNRESET
+  // here; unhandled, it crashed the whole test before any check printed (#555). It is not a finding.
+  sock.on("error", () => {});
   sock.write("220 fake.smtp.invalid ESMTP\r\n");
   sock.on("data", (chunk) => {
     buf += chunk.toString("utf8");

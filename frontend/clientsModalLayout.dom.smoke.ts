@@ -47,6 +47,12 @@ const CLIENT = {
     { state: "MA", kind: "home_improvement_contractor", number: "000000" },
     { state: "WA", kind: "electrical_contractor", number: "FAKEEC000000XX", expires: "2027-06-30" },
   ],
+  // The Service area editor's rows must fit the pane too (invented places).
+  serviceArea: [
+    { kind: "state", state: "ZZ", name: "" },
+    { kind: "city", state: "ZZ", name: "Fakeville Springs With A Long Invented Name" },
+    { kind: "utility", state: "ZZ", name: "Fake Valley Electric Cooperative" },
+  ],
 };
 const CREDS = [
   { id: "cred-1", portalType: "accela_oregon", usernameReference: "fake.user.one@example.invalid", hasSecret: true },

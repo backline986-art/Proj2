@@ -28,6 +28,7 @@
 import type {
   CitedFact,
   IssuerTrackKey,
+  PermitFilingChannel,
   PermitProcessLookup,
   PermitProcessPermitAnswer,
   ProjectRecord,
@@ -41,6 +42,8 @@ import { hostAliasesOf } from "./portalCredentials";
 import { isApplicationPortalShapedUrl } from "./portalChannel";
 import { structureType } from "./codeReviewRules";
 import { classifyPrerequisites } from "./permitProcessPrerequisites";
+import { findAhjProcessProfile } from "./processProfiles";
+import { citedElectricalIssuer, isStateAuthorityRow, stateAuthorityRowFor } from "./ahjRowCitations";
 
 // ── Keys ────────────────────────────────────────────────────────────────────────────────
 /** "City of Jefferson, OR" / "city of  jefferson" → "city of jefferson". A trailing state code
@@ -326,8 +329,8 @@ export interface StatePermitRules {
   prescriptiveFeeBasis?: CitedFact<string>;
   /** The electrical renewable-energy fee tiers (kVA). */
   electricalRenewableTiers?: CitedFact<Array<{ maxKva: number; amountUsd: number; label: string }>>;
-  /** State surcharge on permit fees (fraction), when the state sets a maximum. */
-  surcharge?: CitedFact<number>;
+  // The state surcharge on permit fees is NOT here: it is data in state_permit_rules' "fee" family
+  // (stateFeeRules.stateSurchargeRuleFor, #663), seeded from reference-state-permit-rules.json.
   /** Portal application-info vocabulary guidance (Category of Construction / Type of Work). */
   applicationInfoGuidance?: CitedFact<{ categoryOfConstruction: "structure_type"; typeOfWorkExisting: string; solarIsNotOther: boolean }>;
   /** A state PV worksheet the electrical inspection asks for (Iowa: the SFM Electrical Bureau
@@ -402,12 +405,6 @@ export const STATE_PERMIT_RULES: Record<string, StatePermitRules> = {
       ],
       sourceUrl: OAR_918_309_0070,
       quote: "(11)(a) (A) 5 KVA or less: $79; (B) 5.01 KVA to 15 KVA: $94; (C) 15.01 KVA to 25 KVA: $156",
-      origin: "state_rule",
-    },
-    surcharge: {
-      value: 0.12,
-      sourceUrl: "https://oregon.public.law/statutes/ors_455.210",
-      quote: "ORS 455.210(4) + 455.220(1): state surcharge on permit fees, at most 12%",
       origin: "state_rule",
     },
     applicationInfoGuidance: {
@@ -739,6 +736,35 @@ export function permitAnswerForTrackFrom(project: Pick<ProjectRecord, "state" | 
   return own ? { answer: own, from: "issuer" } : null;
 }
 
+/** "by email to x@y", "in person at City Hall", "by mail", "with the Building permit", "online"
+ *  (lookup-permit-filing-channel): the words a card and a note use for a cited filing channel. */
+export function channelPhrase(c: PermitFilingChannel): string {
+  switch (c.kind) {
+    case "email": return c.value ? `by email to ${c.value}` : "by email (no address stated)";
+    case "in_person": return c.value ? `in person at ${c.value}` : "in person";
+    case "mail": return c.value ? `by mail to ${c.value}` : "by mail";
+    case "with_other_permit": return `with the ${c.value || "other"} permit`;
+    case "portal": return c.value ? `online at ${c.value}` : "online";
+  }
+}
+/** THIS TRACK'S PERMIT IS FILED SOME WAY OTHER THAN A PORTAL, as the per-job lookup's cited page says
+ *  (email, in person, by mail, with another permit) — or null (a portal, or no channel on file). The
+ *  lookup's portal is then never launched for the track (repository's stage), and the stop says where
+ *  it is filed instead (filingChannelStopSentence). A person-verified portal still outranks it. */
+export function citedNonPortalChannelFor(project: Pick<ProjectRecord, "state" | "ahj"> & Partial<Pick<ProjectRecord, "trackView">>, track: string | null | undefined): CitedFact<PermitFilingChannel> | null {
+  const c = permitAnswerForTrack(project, track)?.channel;
+  return c?.value && c.value.kind !== "portal" ? c : null;
+}
+/** The stop's words for such a track: "file at <office>" with the page's own words — no launch. */
+export function filingChannelStopSentence(project: Pick<ProjectRecord, "state" | "ahj"> & Partial<Pick<ProjectRecord, "trackView">>, track: string | null | undefined): string {
+  const c = citedNonPortalChannelFor(project, track);
+  if (!c?.value) return "";
+  const where = String(project.ahj ?? "").trim() || "This AHJ";
+  const alts = (permitAnswerForTrack(project, track)?.alternateChannels ?? []).map((a) => a.value).filter((v): v is PermitFilingChannel => Boolean(v));
+  const how = c.value.kind === "in_person" ? `File it ${channelPhrase(c.value)}` : c.value.kind === "email" ? `File it ${channelPhrase(c.value)} (the address becomes a filing destination to confirm; nothing is sent automatically)` : `File it ${channelPhrase(c.value)}`;
+  return `${where}'s ${track ?? "permit"} permit is not filed in a portal: the lookup's cited page says "${String(c.quote).slice(0, 160)}" (${c.sourceUrl}). ${how}. Nothing was opened.${alts.length ? ` The page also allows: ${alts.map(channelPhrase).join("; ")}.` : ""}`;
+}
+
 /** The agency that issues this track's permit: the OPERATOR's per-track issuer (trackIssuer's first
  *  layer — the same value, the same refusals), else the permit's own looked-up answer, else the
  *  AHJ-wide one. Forms (applicationDocsAgency.formAuthorityFor) and the replay's agency binding read
@@ -888,6 +914,8 @@ function baseOfView<T extends IssuerProject>(project: T): T {
  *      permit's own answer, else the AHJ-wide one) when it clears the cited bar AND names another
  *      agency than the project AHJ (sameAgencyName — "City of Salem Permit Center" is Salem, a
  *      department suffix never re-keys a project) AND is not a known utility's name;
+ *   b2. the AHJ's own reference row, cited, saying the STATE issues the electrical permit (electrical /
+ *      MPU only): the state's authority row (referenceStateIssuerFor) — its own door, never the AHJ's;
  *   c. a cited STATE rule naming a state issuer for this AHJ (stateTradeIssuerFor: New Mexico CID,
  *      or MHD for a manufactured home, where the AHJ has no building department);
  *   d. the project AHJ.
@@ -921,6 +949,11 @@ export function trackIssuer(project: IssuerProject, track: string | null | undef
       override, ...(refused ? { refused } : {}),
     };
   }
+  // b2. THE AHJ'S OWN REFERENCE ROW, CITED, NAMES THE STATE as this track's issuer (electrical / MPU):
+  //     the state authority's own row (data), whose door is its own and starts unknown — the AHJ's
+  //     door is never copied onto it (referenceStateIssuerFor).
+  const ref = ahj ? referenceStateIssuerFor(base, key) : null;
+  if (ref) return { name: ref.name, source: "reference", sourceUrl: ref.sourceUrl, quote: ref.quote, override, ...(refused ? { refused } : {}) };
   const st = ahj ? stateTradeIssuerFor(base) : null;
   // Source "state_rule" whether the seed or the lookup's cited buildingProgram put this AHJ on the
   // state issuer: the ISSUER is the state rule's agency either way, and the fee path
@@ -928,6 +961,33 @@ export function trackIssuer(project: IssuerProject, track: string | null | undef
   // review). The citation travels in sourceUrl/quote — the lookup's page when the lookup decided.
   if (st) return { name: st.value, source: "state_rule", sourceUrl: st.sourceUrl, quote: st.quote, override, ...(refused ? { refused } : {}) };
   return { name: ahj, source: "project", override, ...(refused ? { refused } : {}) };
+}
+
+/** The name a track's issuer takes when the AHJ's page says the STATE issues it and no state
+ *  authority row is on file for that state: a name, never an address, so its door stays unknown. */
+export function unknownStateAuthorityName(state: string | null | undefined): string {
+  return `State electrical permit authority (${String(state ?? "").trim().toUpperCase() || "state"}) — not on file`;
+}
+
+/** LAYER b2 OF trackIssuer (worker-trackissuer): the AHJ's own reference row cites, on its page, that
+ *  the STATE issues the electrical permit (citations[field=electricalPermitIssuer], first word
+ *  "state"). The issuer is then the state's authority row for electrical permits (stateAuthorityFor,
+ *  data) — or, with none on file, unknownStateAuthorityName. Electrical and MPU tracks only (MPU
+ *  follows electrical); a state authority's own row never names itself. The citation is the AHJ's page. */
+export function referenceStateIssuerFor(project: IssuerProject, track: string | null | undefined): { name: string; sourceUrl: string; quote: string } | null {
+  const key = issuerTrackKey(track);
+  if (key !== "electrical" && key !== "mpu") return null;
+  const base = baseOfView(project);
+  if (!String(base.ahj ?? "").trim()) return null;
+  let row;
+  try { row = findAhjProcessProfile(base as unknown as ProjectRecord); } catch { row = null; }
+  if (!row || isStateAuthorityRow(row)) return null;
+  const cited = citedElectricalIssuer(row);
+  if (cited?.kind !== "state") return null;
+  const authority = stateAuthorityRowFor(base.state, "electrical");
+  const name = authority ? String(authority.ahj).trim() : unknownStateAuthorityName(base.state);
+  if (!name || sameAgencyName(name, String(base.ahj ?? ""))) return null;
+  return { name, sourceUrl: cited.citation.sourceUrl, quote: cited.citation.quote };
 }
 
 /**
@@ -954,7 +1014,7 @@ export function projectForTrack<T extends IssuerProject>(project: T, track: stri
     ...base,
     ahj: issuer.name,
     ...(snap !== undefined ? { parserSnapshot: snap } : {}),
-    trackView: { track: key, projectAhj: ahj, source: issuer.source as "operator" | "lookup" | "state_rule" },
+    trackView: { track: key, projectAhj: ahj, source: issuer.source as "operator" | "lookup" | "reference" | "state_rule" },
   } as T;
 }
 

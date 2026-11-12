@@ -4,6 +4,7 @@
 
 import { z } from "zod";
 import { HttpError } from "./httpError";
+import { UTILITY_REQUIREMENT_KEYS, type UtilityRequirementKey } from "../../shared/src/types";
 
 export { z };
 
@@ -67,12 +68,23 @@ export const codeProfileResearchSchema = z.object({
   ahj: z.string().max(160).optional().default(""),
 });
 
+// A calendar day ("2025-01-18"), checked as a real date: an edition's phase-in reads these.
+const isoDay = z.string().trim().regex(/^\d{4}-\d{2}-\d{2}$/, "must be a date, YYYY-MM-DD")
+  .refine((d) => { const t = Date.parse(`${d}T00:00:00Z`); return !Number.isNaN(t) && new Date(t).toISOString().slice(0, 10) === d; }, "must be a real calendar date");
+// EFFECTIVE DATES (#561): the verify route kept only code/edition/title/source/notes, so a person
+// could not record when an edition took effect, when it became mandatory, or which edition it
+// replaced — and the edition phase-in (codeFamilies.editionsInEffect) could never apply.
 const codeEditionSchema = z.object({
   code: z.string().min(1).max(24),
   edition: z.string().min(1).max(12),
   title: z.string().max(240).optional(),
   sourceUrl: z.string().max(500).optional(),
   notes: z.string().max(500).optional(),
+  effectiveDate: isoDay.optional(),
+  mandatoryDate: isoDay.optional(),
+  previousEdition: z.string().trim().min(1).max(12).optional(),
+}).refine((c) => !c.effectiveDate || !c.mandatoryDate || c.mandatoryDate >= c.effectiveDate, {
+  message: "mandatoryDate cannot be before effectiveDate", path: ["mandatoryDate"],
 });
 
 // A PERSON VERIFIES OR REPLACES AN AHJ'S PERMIT-PROCESS LOOKUP (#560). No `permits`: verify the row
@@ -89,6 +101,86 @@ export const permitProcessVerifySchema = z.object({
     documents: z.object({ value: z.array(z.string().trim().min(1).max(300)).min(1).max(40), sourceUrl: personFactUrl, quote: z.string().max(300).optional() }).optional(),
   })).min(1).max(6).optional(),
 });
+
+// #664: a named person verifies the project's utility filing row — as it stands, or stating that the
+// utility takes its application inside the AHJ permit application (a method, never a URL: rule 5).
+export const utilityFilingVerifySchema = z.object({
+  verifiedBy: z.string().max(120).optional(),
+  filedWithPermit: z.object({
+    name: z.string().trim().max(160).optional(),
+    sourceUrl: personFactUrl,
+    quote: z.string().trim().min(8).max(300),
+    documents: z.array(z.string().trim().min(1).max(200)).max(12).optional(),
+  }).strict().optional(),
+});
+
+/** PUT /api/projects/:id/job-scope (#673): a named person sets what the job installs, or clears it
+ *  (scope null) so the plan set's evidence decides again. */
+export const jobScopeSchema = z.object({
+  scope: z.enum(["pv", "pv+storage", "storage-added-to-existing-pv", "storage-only"]).nullable(),
+  decidedBy: z.string().max(120).optional(),
+}).strict();
+
+/** PUT /api/projects/:id/utility-track/keep (draft 10): a named person puts the utility track back on
+ *  this job (keep: true) though a person's storage record drops it, or lets the record drop it again. */
+export const nemTrackKeepSchema = z.object({
+  keep: z.boolean(),
+  decidedBy: z.string().max(120).optional(),
+}).strict();
+
+/** PUT /api/projects/:id/utility-filing/storage-modes (#673 item 3): a named person records which
+ *  storage modes this project's utility takes NO application for, with the page and its words. */
+export const utilityStorageModesSchema = z.object({
+  modesWithoutApplication: z.array(z.enum(["export", "non-export", "backup-only"])).min(1).max(3),
+  sourceUrl: personFactUrl,
+  quote: z.string().trim().min(8).max(300),
+  decidedBy: z.string().max(120).optional(),
+}).strict();
+
+/** PUT /api/projects/:id/utility-filing/application-requirements (review-audit draft 03): a named person
+ *  records what this project's utility's own application asks for, each item with the page and its words. */
+export const utilityApplicationRequirementsSchema = z.object({
+  requirements: z.array(z.object({
+    // Every kind the requirement data knows (shared UTILITY_REQUIREMENT_KEYS), so a person can cite any item
+    // the seed or a lookup carries (module_spec / inverter_spec included).
+    key: z.enum(UTILITY_REQUIREMENT_KEYS as unknown as [UtilityRequirementKey, ...UtilityRequirementKey[]]),
+    whenMissing: z.enum(["blocker", "warning"]),
+    sourceName: z.string().trim().max(200).optional(),
+    sourceUrl: personFactUrl,
+    quote: z.string().trim().min(8).max(600),
+  }).strict()).min(1).max(12),
+  /** "merge": add, edit or verify these items and keep the person's other items (the dashboard panel);
+   *  absent / "replace": these items become the person-recorded list. */
+  mode: z.enum(["replace", "merge"]).optional(),
+  decidedBy: z.string().max(120).optional(),
+}).strict();
+
+/** A PERSON records or rewords one jurisdiction QC screen (review-audit draft 14): PUT
+ *  /api/code-profiles/qc-screens. Lands as a state_permit_rules row of family "qc", person-verified,
+ *  with the source's own words (quote) and the page they were read on (sourceUrl). */
+export const jurisdictionQcScreenSchema = z.object({
+  state: z.string().trim().min(2).max(40),
+  ruleId: z.string().trim().regex(/^[a-z0-9][a-z0-9_-]{2,60}$/, "lower-case letters, digits, - and _ (3-61 characters)"),
+  screen: z.object({
+    kind: z.enum(["manual_disconnect", "submittal_documents"]),
+    ruleName: z.string().trim().min(1).max(200),
+    message: z.string().trim().min(1).max(600),
+    fieldName: z.string().trim().regex(/^[A-Za-z][A-Za-z0-9]{0,60}$/),
+    items: z.array(z.object({
+      key: z.enum(["site_plan", "fire_access_path", "roof_framing", "roof_cross_section", "racking_attachment"]),
+      label: z.string().trim().min(1).max(120),
+    }).strict()).min(1).max(12).optional(),
+    severity: z.enum(["warning", "blocker"]).optional(),
+    source: z.string().trim().max(200).optional(),
+    /** A NEW city / county screen: the AHJ it narrows to and how that AHJ is named (lower-case substrings). */
+    ahj: z.string().trim().max(160).optional(),
+    ahjNames: z.array(z.string().trim().min(2).max(80)).max(12).optional(),
+    displayName: z.string().trim().max(120).optional(),
+  }).strict(),
+  quote: z.string().trim().min(8).max(1200),
+  sourceUrl: personFactUrl,
+  verifiedBy: z.string().max(120).optional(),
+}).strict();
 
 export const codeProfileVerifySchema = z.object({
   state: z.string().min(2).max(40),
@@ -129,13 +221,48 @@ export const codeProfileVerifySchema = z.object({
     maxExportKwWithoutStudy: z.number().finite().optional(),
     engineerStampOverKwDc: z.number().finite().optional(),
   }).default({}),
+  // The AHJ's alternative roof-access policy a person checked against its page (review-audit draft 08).
+  // Optional: a verify that sends none stores none (codeProfiles.upsert); shape-checked again there.
+  firePathwayPolicy: z.object({
+    name: z.string().max(200).optional(),
+    arrayAreaMaxSqFt: z.number().finite().positive().max(100000).optional(),
+    ridgeSetbackIn: z.number().finite().positive().max(240).optional(),
+    pathwayWidthIn: z.number().finite().positive().max(240).optional(),
+    pathwaysExemptMaxCoveragePct: z.number().finite().positive().max(100).optional(),
+    sourceUrl: z.string().url().max(500).optional(),
+    quote: z.string().max(600).optional(),
+  }).optional(),
   fireSetbacks: z.array(z.object({
     id: z.string().min(1).max(60),
     description: z.string().min(1).max(500),
   })).max(20).default([]),
+  // The battery (ESS) rules a person checked against their cited sources (review-audit draft 05).
+  // Optional: a verify that sends none stores none (codeProfiles.upsert).
+  essRules: z.object({
+    maxUnitKwh: z.number().finite().positive().max(10000).optional(),
+    maxAggregateKwhUtilitySpace: z.number().finite().positive().max(10000).optional(),
+    maxAggregateKwhGarage: z.number().finite().positive().max(10000).optional(),
+    maxAggregateKwhAccessory: z.number().finite().positive().max(10000).optional(),
+    maxAggregateKwhExteriorWall: z.number().finite().positive().max(10000).optional(),
+    maxAggregateKwhOutdoor: z.number().finite().positive().max(10000).optional(),
+    minUnitSpacingIn: z.number().finite().positive().max(10000).optional(),
+    spacingReductionBy9540A: z.boolean().optional(),
+    minOpeningClearanceIn: z.number().finite().positive().max(10000).optional(),
+    listingRequired: z.boolean().optional(),
+    habitableLocationProhibited: z.boolean().optional(),
+    impactProtectionInGarage: z.boolean().optional(),
+    alarmRequired: z.boolean().optional(),
+    wallProtectionRequired: z.boolean().optional(),
+    disconnectOutside: z.boolean().optional(),
+    listedResidentialExemption: z.boolean().optional(),
+  }).optional(),
   citations: z.array(z.object({
     label: z.string().max(200),
     sourceUrl: z.string().min(1).max(500),
+    // Which value a citation backs ("essRules.maxUnitKwh") and the source's own words: a battery rule
+    // blocks only when its citation quotes the value (Helm's #637 bar), so a verify keeps both.
+    field: z.string().max(80).optional(),
+    quote: z.string().max(600).optional(),
   })).max(30).default([]),
 });
 
