@@ -5957,7 +5957,12 @@ export class RecipeAdapter extends BasePortalAdapter {
       throw new Error(why);
     }
     const best = rows[ranked[0].index];
-    const okClick = await this.guardedClick(this.page.locator(`[data-al-row="${best.key}"]`).first(), "select the ranked address version", { timeout: 12000 })
+    // CLICK IN THE FRAME THE ROWS WERE READ IN (#178). The scan above was made frame-aware for
+    // Accela's work-location panel, but the click still looked for the stamped row in the MAIN
+    // document — so a candidate list inside a dialog frame (Accela's "Address Search Result List"
+    // after Find Address) was ranked, then "could not click it", and the step was skipped.
+    const rowScope = step.selector?.frame ? this.page.frameLocator(frameSelectorFor(step.selector.frame)) : this.page;
+    const okClick = await this.guardedClick(rowScope.locator(`[data-al-row="${best.key}"]`).first(), "select the ranked address version", { timeout: 12000 })
       .then(() => true).catch((err: unknown) => {
         // SAY WHY. This returned false in silence, so the step landed in `skipped` with no
         // reason and the NEXT step — waiting for a Continue button that only appears once a
