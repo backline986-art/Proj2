@@ -53,6 +53,8 @@ import { localPermitReview, permitFeeProject } from "./feeIssuer";
 import { portalFeeSummary } from "./portalFeeReadings";
 import { printedFormCheck, printedFormQuote } from "./printedFormFees";
 import { feeReadsNeedingAPerson, feeReadsSentence } from "./feeNeedsPerson";
+import { officialSourceOfFeeResolution } from "./feeOfficial";
+import type { ProjectFeeResolution } from "./feeSchedules";
 
 /** The portal's own total for the filing — typed by a person ("actual") or read off the record
  *  ("portal_record"). Either already contains every line the jurisdiction billed. */
@@ -285,6 +287,10 @@ interface ScheduleFee {
    *  offered as this fee's published line. Anything unrecognised reads "none". */
   evidenceVerdict: "names_permit" | "other_permit" | "unnamed" | "none";
   confidence: "verified" | "seeded";
+  /** READ ON THE AUTHORITY'S OWN OFFICIAL PAGE (feeOfficial, rule 3's official tier): where and
+   *  when, null unless every seeded line of this amount is official. Beside `confidence`, which
+   *  stays "seeded": the quote grades the amount "official" and words it "from <host>". */
+  official: { host: string; sourceUrl: string; fetchedAt: string } | null;
   /** Who verified it and when — "" unless confidence is "verified". The NAME is a tenant's fact:
    *  shown only when every org in verifiedOrgIds is the project's own (verifierNameFor). */
   verifiedBy: string;
@@ -335,7 +341,7 @@ const CHARGE_CAP = 16;
 /** Trust order for FeeConfidence, weakest last — buildProjectFeeSheet grades a
  *  TOTAL by the weakest line summed into it. Same vocabulary as the lines. */
 const FEE_CONFIDENCE_RANK: Record<FeeConfidence, number> = {
-  actual: 4, verified: 3, seeded: 2, estimated: 1, unknown: 0,
+  actual: 5, verified: 4, official: 3, seeded: 2, estimated: 1, unknown: 0,
 };
 
 // A schedule that spells out payment by post is stating a process automation
@@ -437,6 +443,9 @@ function normalizeScheduleResult(raw: unknown): ScheduleFee | null {
     evidenceVerdict: (["names_permit", "other_permit", "unnamed"] as const).find((v) => v === text(r.evidenceVerdict)) ?? "none",
     // Research lands as seeded (safety rule 3); only a human promotes it.
     confidence: verified ? "verified" : "seeded",
+    // Set by scheduleFeeAt, which holds the database the official grade needs; never read off
+    // the producer's own object (a module owned elsewhere cannot claim it).
+    official: null,
     // A name beside a seeded row would read as a vouch nobody made — read only beside verified.
     verifiedBy: verified ? text(r.verifiedBy).trim().slice(0, 120) : "",
     verifiedAt: verified ? text(r.verifiedAt).trim().slice(0, 40) : "",
@@ -611,12 +620,45 @@ function publishedScheduleFee(db: AppDb, project: ProjectRecord, track: "permit"
   return scheduleFeeAt(db, track === "permit" ? permitFeeProject(project) : project, track);
 }
 
+/** THE AMOUNT'S OFFICIAL SOURCE (feeOfficial.officialSourceOfFeeResolution), through the same
+ *  whitelist discipline as every field crossing this seam: a host, an http(s) page and a read time,
+ *  or nothing. Never throws: a fee that cannot show its official read is seeded. */
+function officialSourceOf(db: AppDb, project: ProjectRecord, track: "permit" | "nem", raw: unknown): ScheduleFee["official"] {
+  try {
+    if (!raw || typeof raw !== "object" || !Array.isArray((raw as { lines?: unknown }).lines)) return null;
+    const o = officialSourceOfFeeResolution(db, text(project.state), track, raw as ProjectFeeResolution);
+    if (!o) return null;
+    const host = text(o.host).trim().toLowerCase().slice(0, 120);
+    const sourceUrl = text(o.sourceUrl).trim().slice(0, 500);
+    const fetchedAt = text(o.fetchedAt).trim().slice(0, 30);
+    return host && /^https?:\/\//i.test(sourceUrl) && /^\d{4}-\d{2}-\d{2}T/.test(fetchedAt) ? { host, sourceUrl, fetchedAt } : null;
+  } catch { return null; }
+}
+
+/** Does every state surcharge the quote ADDS to this amount rest on a state rule that is official
+ *  or person-verified? True when the quote adds none. Never throws: unknown reads as "no". */
+function modeledSurchargeRuleStands(db: AppDb, project: ProjectRecord, fee: ScheduleFee): boolean {
+  if (!fee.modeledSurcharges.length) return true;
+  try {
+    const rule = stateSurchargeRuleFor(db, project.state);
+    return rule.status === "rule" && (rule.confidence === "official" || rule.confidence === "verified");
+  } catch { return false; }
+}
+
 /** The published-schedule lookup for exactly this project's agency, no issuer re-keying. */
 function scheduleFeeAt(db: AppDb, project: ProjectRecord, track: "permit" | "nem"): ScheduleFee | null {
   const lookup = feeScheduleLookup();
   if (!lookup) return null;
   try {
-    return normalizeScheduleResult(lookup(db, project, track));
+    const raw = lookup(db, project, track);
+    const fee = normalizeScheduleResult(raw);
+    // THE WEAKEST PART DECIDES. A state surcharge the QUOTE adds (#421) is part of the amount shown
+    // and the schedule does not print it, so the amount is "official" only when that state rule is
+    // itself official or person-verified. A seeded state rule leaves the whole amount seeded.
+    if (fee && fee.feeUsd != null && fee.confidence === "seeded" && !fee.valuationEstimated && modeledSurchargeRuleStands(db, project, fee)) {
+      fee.official = officialSourceOf(db, project, track, raw);
+    }
+    return fee;
   } catch (err) {
     if (!loadWarned) {
       loadWarned = true;
@@ -728,11 +770,13 @@ export function feeConfirmRows(db: AppDb, project: ProjectRecord, track: "permit
 
 /** MAY A PERSON CONFIRM THIS AMOUNT? The one answer, asked by the fee sheet (to draw the
  *  Confirm control) and by feeConfirm.confirmPublishedFee (to refuse anything else): a
- *  researched, unchecked ("seeded") amount read off a published schedule. An estimate rests on
+ *  researched, unchecked ("seeded") amount read off a published schedule, or one read on the
+ *  authority's own official page ("official": used already, and a person may still put their name
+ *  to it). An estimate rests on
  *  a guessed valuation, not on the table a person would be vouching for; an actual, a learned
  *  median and an already-verified row have nothing on the schedule left to confirm. */
 export function feeLineConfirmable(source: PermitFeeSource, confidence: FeeConfidence): boolean {
-  return source === "published_schedule" && confidence === "seeded";
+  return source === "published_schedule" && (confidence === "seeded" || confidence === "official");
 }
 
 /** Build (and persist, unless already paid/waived) the payment quote for a track. */
@@ -795,6 +839,8 @@ function computePaymentQuote(
   let permitFeeEvidenceQuote = "";
   let permitFeeVerifiedBy = "";
   let permitFeeVerifiedAt = "";
+  // Set on the published_schedule tier only: where the amount's official read came from.
+  let permitFeeOfficial: ScheduleFee["official"] = null;
   let permitFeeBracketLabel: string | null = schedule?.bracketLabel ?? null;
   const permitFeeSourceUrl: string | null = schedule?.sourceUrl ?? null;
 
@@ -854,7 +900,11 @@ function computePaymentQuote(
       // to tell the operator to true it up from the portal's own fee screen. That is exactly
       // the right instruction here, and it is the difference between a number a customer can
       // be quoted and one that only looks like it.
-      permitFeeConfidence = schedule.valuationEstimated ? "estimated" : schedule.confidence;
+      // OFFICIAL (rule 3, owner 2026-11-11): every seeded line of this amount is a printed row Keelix
+      // itself read on the authority's own official page. Used as published, worded "from <host>",
+      // never under a person's name; a person's verified amount outranks it.
+      permitFeeOfficial = schedule.confidence === "seeded" && !schedule.valuationEstimated ? schedule.official : null;
+      permitFeeConfidence = schedule.valuationEstimated ? "estimated" : permitFeeOfficial ? "official" : schedule.confidence;
       const who = schedule.matchedName || (track === "nem" ? project.utility : feeProject.ahj) || "this jurisdiction";
       // THE SENTENCE BESIDE THE NUMBER MUST BE ABOUT THAT NUMBER.
       //
@@ -903,6 +953,8 @@ function computePaymentQuote(
       permitFeeVerifiedAt = schedule.verifiedAt;
       const vouching = schedule.confidence === "verified"
         ? ` (human-verified${permitFeeVerifiedBy ? ` by ${permitFeeVerifiedBy}` : ""}${schedule.verifiedAt ? ` on ${schedule.verifiedAt.slice(0, 10)}` : ""})`
+        : permitFeeOfficial
+          ? ` (from ${permitFeeOfficial.host}, read ${permitFeeOfficial.fetchedAt.slice(0, 10)}: the authority's own published schedule, used as published; not checked by a person)`
         : permitFeeCorroborated
           ? " (matches the published schedule — CORROBORATED: a machine re-read the cited document and found this line printed in it; no person has confirmed it yet)"
           : matchBadgeOn && schedule.corroborated
@@ -1003,6 +1055,7 @@ function computePaymentQuote(
     permitFeeIsFloor = false;
     permitFeeCorroborated = false;
     permitFeeEvidenceQuote = "";
+    permitFeeOfficial = null;
     permitFeeVerifiedBy = "";
     permitFeeVerifiedAt = "";
     // Kept as the fee-quantity fact it has always been beside an actual (a fact about the job's
@@ -1124,6 +1177,7 @@ function computePaymentQuote(
     permitFeeEvidenceQuote,
     permitFeeVerifiedBy,
     permitFeeVerifiedAt,
+    ...(permitFeeOfficial && permitFeeConfidence === "official" ? { permitFeeOfficialSource: permitFeeOfficial } : {}),
     permitFeeComparison,
     printedFormCheck: printedCheck,
     portalFeeRecords,
@@ -1332,6 +1386,7 @@ export function buildProjectFeeSheet(db: AppDb, project: ProjectRecord): Project
     confirmRows: feeLineConfirmable(quote.permitFeeSource, quote.permitFeeConfidence) ? feeConfirmRows(db, project, track) : [],
     verifiedBy: quote.permitFeeVerifiedBy,
     verifiedAt: quote.permitFeeVerifiedAt,
+    ...(quote.permitFeeOfficialSource ? { officialSource: quote.permitFeeOfficialSource } : {}),
     comparison: quote.permitFeeComparison,
     printedFormCheck: quote.printedFormCheck,
     portalRecords: quote.portalFeeRecords,
@@ -1543,7 +1598,8 @@ function localReviewLine(db: AppDb, project: ProjectRecord, review: { ahj: strin
   let s: ScheduleFee | null = null;
   try { s = normalizeScheduleResult(localReviewLookup()?.(db, at, "permit")); } catch { s = null; }
   const priced = s != null && s.feeUsd != null;
-  const confidence: FeeConfidence = priced ? (s!.valuationEstimated ? "estimated" : s!.confidence) : "unknown";
+  const official = priced && s!.confidence === "seeded" && !s!.valuationEstimated ? s!.official : null;
+  const confidence: FeeConfidence = priced ? (s!.valuationEstimated ? "estimated" : official ? "official" : s!.confidence) : "unknown";
   return {
     track: "permit",
     role: "local_review",
@@ -1553,7 +1609,7 @@ function localReviewLine(db: AppDb, project: ProjectRecord, review: { ahj: strin
     source: priced ? "published_schedule" : "unknown",
     basis: priced
       ? `${review.ahj}'s own zoning / site-development review fee, read off its published schedule${s!.bracketLabel ? ` ("${s!.bracketLabel}")` : ""}`
-        + `${s!.confidence === "verified" ? "." : " — researched, not yet checked by a person."} ${review.issuer} issues the building and electrical permits; this is ${review.ahj}'s separate charge.`
+        + `${s!.confidence === "verified" ? "." : official ? ` (from ${official.host}, read ${official.fetchedAt.slice(0, 10)}; not checked by a person).` : " — researched, not yet checked by a person."} ${review.issuer} issues the building and electrical permits; this is ${review.ahj}'s separate charge.`
       : `No published zoning / site-development review fee on file for ${review.ahj} yet${s?.reason ? ` (${s.reason})` : ""}. `
         + `${review.ahj} issues no building or electrical permit here — ${review.issuer} does — but it reviews the site plan first and may charge for it. `
         + `Ask ${review.ahj}'s planning office for the fee.`,
