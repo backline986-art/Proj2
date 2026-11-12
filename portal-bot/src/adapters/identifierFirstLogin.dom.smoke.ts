@@ -302,7 +302,19 @@ const DOPL = `<!doctype html><html><head><title>Online Services</title></head><b
       view.querySelectorAll('[data-hit]').forEach(function (l) { l.onclick = function () { fetch(l.getAttribute('data-hit')); return false; }; });
       view.querySelector('.who').textContent = v;
       var pf = document.getElementById('pageForm'); pf.insertBefore(view, pf.querySelector('h1'));
-      document.getElementById('cont').onclick = function () { if (document.getElementById('pw').value) location.href = '/home'; };
+      document.getElementById('cont').onclick = function () {
+        if (!document.getElementById('pw').value) return;
+        if (location.search.indexOf('mfa=1') < 0) { location.href = '/home'; return; }
+        // ?mfa=1: DOPL's emailed-code step, drawn in place under a new hash. The code box is named
+        // ONLY by <label for>; "Log In" and "Resend security code" report any press.
+        location.hash = '#3';
+        view.innerHTML = '<h1>Two-Step Verification</h1><p>An email with your Online Services security code was sent to d***@e***.test.</p>' +
+          '<label for="Dc-91">Security Code</label><input type="text" id="Dc-91" name="Dc-91" autocomplete="off">' +
+          '<input type="checkbox" id="Dc-c1"><label for="Dc-c1">Trust this device</label>' +
+          '<button type="button" id="mfaGo">Log In</button><p>Didn\\'t receive your code?</p><a href="#" id="resend">Resend security code</a>';
+        document.getElementById('mfaGo').onclick = function () { fetch('/dopl-mfa-login-hit'); };
+        document.getElementById('resend').onclick = function () { fetch('/dopl-resend-hit'); return false; };
+      };
       setTimeout(function () { var old = document.querySelector('.LogonPanel'); if (old) old.remove(); }, 2500);
     };
   </script>
@@ -523,6 +535,18 @@ await check("MUST-PASS / MUST-EXCLUDE (FAST / Idaho DOPL shape): no <form>; the 
   assert.equal(res.status, "logged_in", `got ${res.status}: ${res.message}`);
   assert.match(page.url(), /\/home/);
   assert.deepEqual(localHits.filter((h) => /dopl-(passkey|signup|search|forgot|another-way|help)/.test(h)), [], `a never-click control was followed: ${localHits.join(", ")}`);
+  await context.close();
+});
+
+await check("MUST-EXCLUDE (DOPL emailed code): 'Two-Step Verification' with a label-only Security Code box is a second factor — mfa_captcha, never logged_in; the code box, Log In and Resend are never touched", async () => {
+  localHits.length = 0;
+  const { context, page } = await freshPage();
+  await page.goto(`http://127.0.0.1:${port}/dopl-os/_/?mfa=1`);
+  const res = await performLogin(page, { username: "dopl-user@example.test", password: "Dopl-Pa55-word" });
+  results.push(res.message);
+  assert.equal(res.status, "mfa_captcha", `got ${res.status}: ${res.message}`);
+  assert.equal(await page.locator("#Dc-91").inputValue().catch(() => "gone"), "", "something was typed into the security-code box");
+  assert.deepEqual(localHits.filter((h) => /dopl-(mfa-login|resend)-hit/.test(h)), [], `a factor control was pressed: ${localHits.join(", ")}`);
   await context.close();
 });
 

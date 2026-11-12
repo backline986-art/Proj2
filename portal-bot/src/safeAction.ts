@@ -620,7 +620,10 @@ export const SECOND_FACTOR_TEXT_SOURCE = [
   "we sent (you )?(an e-?mail|a code|a verification)", "enter (a|the|your) (verification |security |one[- ]time )?code",
   "verification code", "one[- ]time (code|passcode|password)", "get a push notification",
   "push notification (has been )?sent", "okta verify", "google authenticator", "authenticator app",
-  "security key or biometric", "answer (your|the) security question", "two[- ]factor", "2-step verification",
+  "security key or biometric", "answer (your|the) security question", "two[- ]factor", "(2|two)[- ]step verification",
+  // Live Idaho DOPL (FAST platform), 2026-11-12: "Two-Step Verification" / "An email with your Online
+  // Services security code was sent to …" / "Resend security code" matched none of the above.
+  "(security|verification|one[- ]time|login|sign[- ]in) code (was|has been) sent", "resend (the |a |your )?(security |verification )?code",
   "multi[- ]factor", "approve the sign[- ]in", "check your (e-?mail|phone) for a code",
 ].join("|");
 
@@ -641,7 +644,10 @@ export async function detectSecondFactor(page: Page | null | undefined): Promise
           if (!(rect.width > 2 && rect.height > 2 && st.visibility !== "hidden" && st.display !== "none")) continue;
           const type = (el.getAttribute("type") || "text").toLowerCase();
           if (type === "password") { if (!el.disabled && !el.readOnly) password = true; continue; }
-          const hay = [el.name, el.id, el.getAttribute("autocomplete"), el.getAttribute("aria-label"), el.getAttribute("placeholder")]
+          // The box's own <label> text counts too (live Idaho DOPL: the code box is id="Dc-91",
+          // named only by <label for> "Security Code").
+          const labelled = Array.from(el.labels || []).map((l) => (l as HTMLElement).innerText || "").join(" ");
+          const hay = [el.name, el.id, el.getAttribute("autocomplete"), el.getAttribute("aria-label"), el.getAttribute("placeholder"), labelled]
             .filter(Boolean).join(" ");
           if (/one-time-code|passcode|\botp\b|verification.?code|security.?code|mfa.?code|credentials\.passcode/i.test(hay)) code = true;
         }
