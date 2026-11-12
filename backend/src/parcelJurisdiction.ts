@@ -23,10 +23,16 @@
 //
 // ONE EXCEPTION TO "GOVERNMENT HOSTS ONLY" (draft 16 B; owner 2026-11-10, "Yes that is okay"; Helm's
 // conditions): many counties publish their parcel map on a hosted map platform (ArcGIS Online, run by
-// Esri), never a government host. Such a record is usable ONLY when a NAMED PERSON verified it: the
-// county's own GOVERNMENT page links that service, its URL and a verbatim quote naming the linked
-// host are recorded, and the record names the exact service root (host + path) it was checked
-// against. It is never seeded or official tier, the shared #683 predicate never learns the platform,
+// Esri), never a government host. Such a record is usable ONLY when the county's own GOVERNMENT page is
+// shown to link that service, and the record names the exact service root (host + path):
+//   - by a NAMED PERSON (tier verified): the page URL and a verbatim quote naming the linked host are
+//     recorded with who checked; or
+//   - by KEELIX ITSELF (tier official; owner 2026-11-12, "would like it to be automated"): before any
+//     address is sent, the job reads the county's page and finds the link in the bytes it retrieved
+//     (parcelServiceLink.ts), recording the page, the link as written, the page's own words around it
+//     and when it read it. Until that read confirms it — and again after 30 days, or once the page stops
+//     linking it — the service is not asked.
+// The shared #683 predicate never learns the platform (the county's link vouches, never the platform),
 // and any other third-party host is still refused. What goes there is the address the template asks
 // for (street, city / ZIP), nothing else: no name, no account, no credential.
 //
@@ -49,6 +55,7 @@ import { agencyNameKey, sameAgencyName } from "./agencyName";
 import { usStateCode } from "./permitPath";
 import { STATE_NAMES } from "./permitPlatformCatalog";
 import { getPermitProcessLookup } from "./permitProcess";
+import { confirmParcelServiceLink, confirmationHolds, linkCheckFresh, readServiceLinkCheck, type ServiceLinkCheck } from "./parcelServiceLink";
 import { logger } from "./logger";
 import { nowIso } from "./time";
 
@@ -85,11 +92,18 @@ export interface JurisdictionLookupSource {
   fetchedAt: string;
   verifiedBy: string;
   /** Where the service lives: "government" (the #683 predicate), or "map_platform" — a hosted map
-   *  platform, admitted only on a person-verified record (draft 16 B). */
+   *  platform, admitted only when the county's own government page is shown to link it (draft 16 B). */
   hostedOn: "government" | "map_platform";
-  /** map_platform only: the exact service root (https://host/path...) the person verified; every query
-   *  must sit under it. "" for a government host. */
+  /** map_platform only: the exact service root (https://host/path...) the county's link was checked
+   *  against; every query must sit under it. "" for a government host. */
   verifiedService: string;
+  /** map_platform only: who shows the county links it — "person" (tier verified, verifiedBy) or
+   *  "keelix" (tier official: Keelix reads the county's page itself, parcelServiceLink.ts). "" for a
+   *  government host. */
+  linkCheck: "person" | "keelix" | "";
+  /** keelix only, attached from the database (withLinkChecks): Keelix's latest read of the county's
+   *  page. The service is asked only while it holds (parcelServiceLink.confirmationHolds). */
+  linkConfirmation?: ServiceLinkCheck | null;
   /** A hash of everything that decides the answer: a cached answer from an older record is stale. */
   fingerprint: string;
 }
@@ -129,7 +143,8 @@ export function sourceMayBlock(s: Pick<JurisdictionLookupSource, "tier" | "sourc
   return Boolean(str(s.sourceName)) && /^https?:\/\//i.test(str(s.sourceUrl)) && quoteNamesHost(s.quote, sourceHostOf(s.queryUrl));
 }
 
-/** HOSTED MAP PLATFORMS a person-verified county record may name (draft 16 B; owner 2026-11-10, for
+/** HOSTED MAP PLATFORMS a county record may name, once a person verified, or Keelix confirmed, that the
+ *  county's own government page links the service (draft 16 B; owner 2026-11-10 and 2026-11-12, for
  *  Esri-hosted county maps). A vendor, not a place: widening this list needs the owner's word, so it
  *  is code, reviewed, never data. officialSource's predicate never learns these. */
 const PERSON_VERIFIED_MAP_PLATFORMS: readonly string[] = ["arcgis.com"];
@@ -168,9 +183,29 @@ function mapPlatformRefusal(o: Record<string, unknown>, queryUrl: string, servic
   return "";
 }
 
+/** Why a record on a hosted map platform cannot wait for KEELIX to confirm the county's link ("" = it
+ *  can; owner 2026-11-12). The record names the exact service root (serviceRoot, or verifiedService),
+ *  with a path, on the query's own host, the query sits under it, and its sourceUrl is an https page on
+ *  a GOVERNMENT host (the county's own page, which Keelix will read). No quote is taken from the data:
+ *  the evidence is what Keelix finds in the page's bytes. */
+function keelixLinkRefusal(o: Record<string, unknown>, queryUrl: string, serviceHost: string): string {
+  const root = (str(o.serviceRoot) || str(o.verifiedService)).replace(/\/+$/, "");
+  if (!root) return "no serviceRoot (the exact service root the county's page must link)";
+  if (!/^https:\/\//i.test(root) || sourceHostOf(root) !== serviceHost) return `serviceRoot is not on ${serviceHost}`;
+  let rootPath = "";
+  try { rootPath = new URL(root).pathname.replace(/\/+$/, ""); } catch { rootPath = ""; }
+  if (!rootPath) return "serviceRoot names a host but no service path";
+  if (!underServiceRoot(queryUrl.replace(/\{[a-zA-Z]+\}/g, "x"), root)) return "queryUrl is not under serviceRoot";
+  const sourceUrl = str(o.sourceUrl);
+  const pageHost = sourceHostOf(sourceUrl);
+  if (!/^https:\/\//i.test(sourceUrl) || !pageHost || !isGovernmentHost(pageHost)) return `sourceUrl${pageHost ? ` (${pageHost})` : ""} is not an https page on the county's own government host`;
+  return "";
+}
+
 /** One record, cleaned; null (with the reason) when it cannot be used. A query URL off a government
- *  host is refused here — the one exception being a person-verified record on a hosted map platform
- *  (draft 16 B, mapPlatformRefusal) — so no code path can ever be handed any other host. */
+ *  host is refused here — the one exception being a record on a hosted map platform whose county link
+ *  a person verified (mapPlatformRefusal) or Keelix will confirm (keelixLinkRefusal; asked only once
+ *  confirmed) — so no code path can ever be handed any other host. */
 export function sanitizeLookupSource(raw: unknown): { source: JurisdictionLookupSource | null; problem: string } {
   const o = (raw && typeof raw === "object" ? raw : {}) as Record<string, unknown>;
   const state = usStateCode(o.state);
@@ -183,11 +218,16 @@ export function sanitizeLookupSource(raw: unknown): { source: JurisdictionLookup
   // 16 B, a person-verified record on a hosted map platform.
   const probeHost = sourceHostOf(queryUrl.replace(/\{[a-zA-Z]+\}/g, "x"));
   let hostedOn: "government" | "map_platform" = "government";
+  let linkCheck: "person" | "keelix" | "" = "";
   if (!isOfficialSourceHost(queryUrl.replace(/\{[a-zA-Z]+\}/g, "x"))) {
     const notGov = `${label}: ${probeHost || "queryUrl"} is not a government host`;
     if (!isPersonVerifiedMapPlatformHost(probeHost)) return { source: null, problem: notGov };
-    const why = mapPlatformRefusal(o, queryUrl, probeHost);
-    if (why) return { source: null, problem: `${notGov} (${why})` };
+    const personWhy = mapPlatformRefusal(o, queryUrl, probeHost);
+    if (personWhy) {
+      const keelixWhy = keelixLinkRefusal(o, queryUrl, probeHost);
+      if (keelixWhy) return { source: null, problem: `${notGov} (${personWhy}; nor can Keelix confirm the county links it: ${keelixWhy})` };
+      linkCheck = "keelix";
+    } else linkCheck = "person";
     hostedOn = "map_platform";
   }
   const jurisdictionField = str(o.jurisdictionField);
@@ -204,7 +244,9 @@ export function sanitizeLookupSource(raw: unknown): { source: JurisdictionLookup
   const fetchedAt = str(o.fetchedAt).slice(0, 40);
   const verifiedBy = str(o.verifiedBy).slice(0, 120);
   const serviceHost = sourceHostOf(queryUrl.replace(/\{[a-zA-Z]+\}/g, "x"));
-  const tier = honouredTier(str(o.tier), { sourceUrl, quote, fetchedAt, verifiedBy, serviceHost });
+  // A record Keelix will confirm is official (#683: Keelix's own read of the county's page), never a
+  // person's: it carries no verifiedBy.
+  const tier: LookupSourceTier = linkCheck === "keelix" ? "official" : honouredTier(str(o.tier), { sourceUrl, quote, fetchedAt, verifiedBy, serviceHost });
   const base = {
     key: `${state}|${county.toLowerCase()}`,
     state, county, coversCities, coversZips, queryUrl,
@@ -215,13 +257,18 @@ export function sanitizeLookupSource(raw: unknown): { source: JurisdictionLookup
     addressStyle: (str(o.addressStyle) === "full" ? "full" : "usps") as "usps" | "full",
     tier,
     sourceName: str(o.sourceName).slice(0, 200),
-    sourceUrl, quote, fetchedAt, verifiedBy,
+    sourceUrl, quote, fetchedAt,
+    verifiedBy: linkCheck === "keelix" ? "" : verifiedBy,
     hostedOn,
-    verifiedService: hostedOn === "map_platform" ? str(o.verifiedService).replace(/\/+$/, "") : "",
+    verifiedService: linkCheck === "person" ? str(o.verifiedService).replace(/\/+$/, "")
+      : linkCheck === "keelix" ? (str(o.serviceRoot) || str(o.verifiedService)).replace(/\/+$/, "") : "",
+    linkCheck,
   };
-  // Belt and braces: a map-platform record is verified tier or nothing.
-  if (hostedOn === "map_platform" && tier !== "verified") return { source: null, problem: `${label}: ${probeHost} is not a government host (not person-verified)` };
-  const fingerprint = sha(JSON.stringify([base.key, base.queryUrl, base.verifiedService, base.recordsPath, base.jurisdictionField, base.unincorporatedValues, base.cityNames, base.addressStyle])).slice(0, 16);
+  // Belt and braces: a map-platform record is a person's (verified) or Keelix's to confirm (official), or nothing.
+  if (hostedOn === "map_platform" && !((linkCheck === "person" && tier === "verified" && base.verifiedBy) || (linkCheck === "keelix" && tier === "official")))
+    return { source: null, problem: `${label}: ${probeHost} is not a government host (no county link to verify)` };
+  // A record Keelix confirms also hangs on its source page: a new page is a new check, and a new answer.
+  const fingerprint = sha(JSON.stringify([base.key, base.queryUrl, base.verifiedService, base.recordsPath, base.jurisdictionField, base.unincorporatedValues, base.cityNames, base.addressStyle, ...(linkCheck === "keelix" ? [base.sourceUrl] : [])])).slice(0, 16);
   return { source: { ...base, mayBlock: sourceMayBlock(base), fingerprint }, problem: "" };
 }
 
@@ -413,14 +460,24 @@ export function setParcelFetchForTests(fn: ParcelFetch | null): void {
   fetchForTests = fn;
 }
 
-/** May this built URL be asked for this record? A government host; or, for a person-verified
- *  map-platform record (draft 16 B), the record's own verified service root and nothing else. */
-export function mayAskServiceUrl(source: Pick<JurisdictionLookupSource, "hostedOn" | "tier" | "verifiedService" | "verifiedBy">, url: string): boolean {
+/** May this built URL be asked for this record? A government host; or, for a map-platform record
+ *  (draft 16 B), the record's own service root and nothing else — when a person verified the county
+ *  links it, or Keelix's own read of the county's page confirms it NOW (confirmationHolds). */
+export function mayAskServiceUrl(
+  source: Pick<JurisdictionLookupSource, "hostedOn" | "tier" | "verifiedService" | "verifiedBy" | "sourceUrl"> & Partial<Pick<JurisdictionLookupSource, "linkCheck" | "linkConfirmation">>,
+  url: string,
+  now = Date.now(),
+): boolean {
   if (isOfficialSourceHost(url)) return true;
   const host = sourceHostOf(url);
-  return source.hostedOn === "map_platform" && source.tier === "verified" && !!source.verifiedBy
-    && isPersonVerifiedMapPlatformHost(host) && host === sourceHostOf(source.verifiedService)
-    && underServiceRoot(url, source.verifiedService);
+  if (source.hostedOn !== "map_platform" || !isPersonVerifiedMapPlatformHost(host) || host !== sourceHostOf(source.verifiedService) || !underServiceRoot(url, source.verifiedService)) return false;
+  if (source.linkCheck === "keelix") return source.tier === "official" && confirmationHolds(source.linkConfirmation, source, now);
+  return source.tier === "verified" && !!source.verifiedBy;
+}
+
+/** The records with Keelix's latest read of each county page attached (a keelix record only). Reads only. */
+export function withLinkChecks(db: AppDb, sources: JurisdictionLookupSource[]): JurisdictionLookupSource[] {
+  return sources.map((s) => (s.linkCheck === "keelix" ? { ...s, linkConfirmation: readServiceLinkCheck(db, s.key, s.sourceUrl, s.verifiedService) } : s));
 }
 
 /** Ask one record's service about one address. Refuses (unavailable) any URL off a government host,
@@ -428,9 +485,9 @@ export function mayAskServiceUrl(source: Pick<JurisdictionLookupSource, "hostedO
 export async function askParcelService(source: JurisdictionLookupSource, project: Pick<ProjectRecord, "projectAddress" | "city" | "state" | "zip">): Promise<ParcelAnswer & { host: string }> {
   const url = buildQueryUrl(source, project);
   const host = sourceHostOf(url);
-  // At the door as well as at load: nothing but a government host (or the person-verified service
-  // root, draft 16 B) is ever asked.
-  if (!mayAskServiceUrl(source, url)) return { status: "unavailable", detail: `${host || "the query URL"} is not a government host or the person-verified service`, host };
+  // At the door as well as at load: nothing but a government host (or the service root a person
+  // verified, or Keelix confirmed, the county links — draft 16 B) is ever asked.
+  if (!mayAskServiceUrl(source, url)) return { status: "unavailable", detail: `${host || "the query URL"} is not a government host or the person-verified service, nor a service the county's own page is confirmed to link`, host };
   try {
     const res = await (fetchForTests ?? defaultFetch)(url);
     if (res.status < 200 || res.status >= 300) return { status: "unavailable", detail: `the service answered HTTP ${res.status}`, host };
@@ -511,6 +568,9 @@ export interface ParcelJurisdictionReading {
   mayBlock?: boolean;
   /** The answer came from a hosted map platform (draft 16 B): who verified that the county links it. */
   serviceVerifiedBy?: string;
+  /** The answer came from a hosted map platform whose county link KEELIX confirmed (owner 2026-11-12):
+   *  the county's page it read, and when. Official, never a person's verification. */
+  serviceConfirmedFrom?: { pageUrl: string; pageHost: string; readAt: string };
   /** A NAMED PERSON accepted that the project AHJ files for this parcel although the parcel lies in
    *  another jurisdiction (draft 16 A). Present only on an "agrees" reading that this record turned. */
   acceptedBy?: { by: string; at: string; reason: string };
@@ -659,14 +719,24 @@ export function readParcelJurisdiction(db: AppDb, project: Pick<ProjectRecord, "
   if (!cached || cached.fingerprint !== fingerprint || (cached.status !== "unavailable" && !cacheFresh(cached, fingerprint))) {
     return notChecked(checkQueued(db, project.id) ? "the parcel lookup is queued" : "the parcel has not been looked up yet", true);
   }
-  const source = sources.find((s) => s.key === cached!.sourceKey);
+  const found = sources.find((s) => s.key === cached!.sourceKey);
+  const source = found ? withLinkChecks(db, [found])[0] : undefined;
+  const link = source?.linkCheck === "keelix" ? source.linkConfirmation ?? null : null;
   const at = {
     county: source?.county ?? sources[0].county, host: cached.host, checkedAt: cached.checkedAt,
-    ...(source?.hostedOn === "map_platform" && source.verifiedBy ? { serviceVerifiedBy: source.verifiedBy } : {}),
+    ...(source?.hostedOn === "map_platform" && source.linkCheck === "person" && source.verifiedBy ? { serviceVerifiedBy: source.verifiedBy } : {}),
+    ...(link?.status === "confirmed" ? { serviceConfirmedFrom: { pageUrl: link.pageUrl, pageHost: sourceHostOf(link.pageUrl), readAt: link.checkedAt } } : {}),
   };
   if (cached.status === "unavailable") return { ...notChecked(`the county's parcel service did not answer: ${cached.detail}`, true), ...at };
   if (cached.status === "no_match") return { ...notChecked(`the county's parcel service could not place the address: ${cached.detail}`, true), ...at };
   if (!source) return notChecked("the parcel has not been looked up yet", true);
+  // KEELIX'S CONFIRMATION (owner 2026-11-12): an answer from a hosted map stands while Keelix's read of
+  // the county's page is on file and has not since found the link gone.
+  if (source.linkCheck === "keelix") {
+    if (!link) return notChecked("Keelix has not yet confirmed that the county's own page links its hosted parcel map", true);
+    if (link.status === "refused" && Date.parse(link.checkedAt) >= Date.parse(cached.checkedAt))
+      return { ...notChecked(`the county's own page no longer confirms its hosted parcel map (read ${link.checkedAt.slice(0, 10)}: ${link.detail})`, true), county: source.county, host: cached.host };
+  }
   const ahj = str(project.ahj);
   if (!ahj) return { ...notChecked("the job has no AHJ to compare", true), ...at, parcelAgency: cached.agency };
   if (isStateLevelAgency(ahj, project.state)) return { ...notChecked(`the project AHJ (${ahj}) is a state agency; the parcel is in ${cached.agency}`, true), ...at, parcelAgency: cached.agency };
@@ -742,7 +812,18 @@ export async function runParcelJurisdictionCheck(db: AppDb, payload: Record<stri
   let outcome: Omit<CachedCheck, "fingerprint" | "checkedAt"> | null = null;
   const misses: string[] = [];
   let anyUnavailable = false;
-  for (const source of sources) {
+  for (const listed of sources) {
+    let source = withLinkChecks(db, [listed])[0];
+    // A hosted map Keelix confirms: read the county's own page FIRST (nothing of this job goes there),
+    // unless a fresh read is on file; the service is asked only when the read confirms the link.
+    if (source.linkCheck === "keelix" && !linkCheckFresh(source.linkConfirmation ?? null)) {
+      source = { ...source, linkConfirmation: await confirmParcelServiceLink(db, source) };
+    }
+    if (source.linkCheck === "keelix" && !confirmationHolds(source.linkConfirmation, source)) {
+      anyUnavailable = true;
+      misses.push(`${source.county}: the county's own page does not confirm its hosted parcel map (${source.linkConfirmation?.detail || "not read"})`);
+      continue;
+    }
     const answer = await askParcelService(source, project);
     if (answer.status === "found") {
       outcome = { status: "found", sourceKey: source.key, raw: answer.raw, agency: answer.agency, incorporated: answer.incorporated, host: answer.host, detail: "" };
