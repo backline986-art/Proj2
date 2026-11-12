@@ -411,6 +411,58 @@ if (recorded) {
   await page.close();
 }
 
+// ---- I) #198 ENTER REFUSED: THE BOX'S OWN SEARCH CONTROL, ONCE (live City of Tigard, EnerGov) -----
+// An Esri-style "Address & Parcel Search" box: typing offers no suggestions; the page also holds an
+// invoices menu in its header (and a "Pay Invoices" nav link), so the shared Enter question refuses
+// Enter; no <form> around the widget (as live); a wordless
+// magnifier (role=button, a search icon) beside the box lists results when pressed. `results=none`:
+// the magnifier finds nothing. Every press of a pay / invoice control is counted (a press = failure).
+const esri = (results: "one" | "none"): string => `<!doctype html><html><head><title>Apply for Permit</title></head><body>
+<div class="header"><button type="button" aria-label="User dropdown menu to update profile, view invoice" onclick="window.__pay++">Me</button></div>
+<nav><a href="#" id="payInv" onclick="window.__pay++;return false;">Pay Invoices</a></nav>
+<div id="app">
+<div class="esri-search"><div class="esri-search__form">
+  <input id="addr" type="text" role="combobox" aria-autocomplete="list" aria-controls="sugg" placeholder="Address &amp; Parcel Search" aria-label="Address &amp; Parcel Search">
+  <div role="button" tabindex="0" aria-label="" class="esri-search__submit-button" id="mag" style="display:inline-block;width:32px;height:32px;border:1px solid #888"><span class="esri-icon-search"></span></div>
+</div><ul id="sugg" role="listbox"></ul></div>
+<div id="picked"></div>
+<button type="button" id="next" onclick="window.__posted++">Next</button>
+</div>
+<script>
+window.__pay = 0; window.__posted = 0; window.__searched = 0;
+var R = ${JSON.stringify(results)};
+document.getElementById('mag').onclick = function () {
+  window.__searched++;
+  var ul = document.getElementById('sugg'); ul.innerHTML = '';
+  if (R !== 'one') return;
+  ['4821 W QUILLFEATHER DR, MARROWVALE, UT 84999', '4823 W QUILLFEATHER DR, MARROWVALE, UT 84999'].forEach(function (t) {
+    var li = document.createElement('li'); li.setAttribute('role', 'option'); li.textContent = t;
+    li.onclick = function () { document.getElementById('addr').value = t; document.getElementById('picked').textContent = 'PICKED ' + t; ul.innerHTML = ''; };
+    ul.appendChild(li);
+  });
+};
+</script></body></html>`;
+for (const results of ["one", "none"] as const) {
+  const page = await ctx.newPage();
+  await page.setContent(esri(results));
+  const out = await fillTypeahead(page, page.locator("#addr"), {
+    value: JOB.street, mode: "site", site: { street: JOB.street, city: JOB.city, zip: JOB.zip, state: JOB.state },
+  });
+  const st = await page.evaluate(() => ({ pay: (window as unknown as { __pay: number }).__pay, posted: (window as unknown as { __posted: number }).__posted, searched: (window as unknown as { __searched: number }).__searched }));
+  const pickedText = ((await page.locator("#picked").textContent().catch(() => "")) ?? "").trim();
+  console.log(`   esri ${results}: outcome=${out.outcome} via=${"via" in out ? out.via : ""} why=${"why" in out ? out.why : ""} state=${JSON.stringify(st)} picked=${JSON.stringify(pickedText)}`);
+  check(`#198 (${results}): no pay / invoice control pressed, nothing posted`, st.pay === 0 && st.posted === 0, JSON.stringify(st));
+  check(`#198 (${results}): the box's own magnifier was pressed (Enter was refused)`, st.searched >= 1, JSON.stringify(st));
+  if (results === "one") {
+    check("#198: the job's address is picked from the list the magnifier opened (not its neighbour)",
+      out.outcome === "picked" && pickedText === "PICKED 4821 W QUILLFEATHER DR, MARROWVALE, UT 84999", JSON.stringify(out));
+  } else {
+    check("#198: a magnifier that finds nothing stays a NAMED no-suggestions outcome that says it searched",
+      out.outcome === "no_suggestions" && /own "search"/.test("why" in out ? out.why : ""), JSON.stringify(out));
+  }
+  await page.close();
+}
+
 await browser.close();
 server.close();
 console.log(failures === 0 ? "typeaheadFill.dom.smoke: PASS" : `typeaheadFill.dom.smoke: ${failures} FAILURE(S)`);
