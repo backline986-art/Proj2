@@ -6059,7 +6059,8 @@ export class RecipeAdapter extends BasePortalAdapter {
       this.driftWarnings.push(`record type group "${group}" was already open — its header was not clicked`);
       return true;
     }
-    await target.click({ timeout: 10000 });
+    // Through the replay chokepoint (R1), like every other click: a disclosure, never a filing.
+    await this.guardedClick(target, `record type group "${group}"`, { timeout: 10000 });
     await clearTag();
     await this.settle(4000);
     this.driftWarnings.push(`record type group "${group}" opened by label via ${how} (positional fallback refused)`);
