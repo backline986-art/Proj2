@@ -53,6 +53,7 @@ import { localPermitReview, permitFeeProject } from "./feeIssuer";
 import { portalFeeSummary } from "./portalFeeReadings";
 import { printedFormCheck, printedFormQuote } from "./printedFormFees";
 import { feeReadsNeedingAPerson, feeReadsSentence } from "./feeNeedsPerson";
+import { priorYearOfFeeSource } from "./permitPlatformCatalog";
 import { officialSourceOfFeeResolution } from "./feeOfficial";
 import type { ProjectFeeResolution } from "./feeSchedules";
 
@@ -967,6 +968,9 @@ function computePaymentQuote(
         // The read date beside the source (fee round, 2026-11): a fee that may be charged says when
         // its page was read. Only where the row states one; never the row's last-touched time.
         + `${schedule.sourceReadAt ? ` Source read ${schedule.sourceReadAt.slice(0, 10)}.` : ""}`
+        // A schedule whose own address dates it to a prior year says so beside the amount (owner,
+        // 2026-11-11: the newest schedule an agency still links counts, and the quote names its year).
+        + `${priorYearOfFeeSource(schedule.sourceUrl ?? "") ? ` The schedule is dated ${priorYearOfFeeSource(schedule.sourceUrl ?? "")}.` : ""}`
         + modeledSurchargeClause(schedule)
         + (track === "permit" ? stateSurchargeNotice(db, project.state, schedule.surchargeGaps) : "");
     } else if (schedule && floorUsd != null && floorWins()) {
