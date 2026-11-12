@@ -411,6 +411,22 @@ function challengeUrlHit(rawUrl: string): { cls: ChallengeClass; hit: string } |
   return null;
 }
 
+/**
+ * IS THIS reCAPTCHA FRAME ONLY THE BADGE? Invisible reCAPTCHA (v3, v2-invisible) loads an anchor
+ * frame whose URL carries size=invisible — the corner badge — and a bframe kept hidden until the
+ * site asks for a challenge. Neither asks anything of a person on an ordinary form. true = not a
+ * challenge: the invisible anchor, or any reCAPTCHA frame whose iframe element is NOT showing.
+ * A reCAPTCHA frame with no iframe element to answer for it (a frame url the DOM read missed)
+ * is NOT a badge: fail closed. Other captcha vendors are untouched here.
+ */
+export function recaptchaBadgeOnly(url: string, iframeShown: ReadonlyMap<string, boolean>): boolean {
+  const raw = String(url || "");
+  if (!/recaptcha/i.test(raw)) return false;
+  if (/[?&]size=invisible(&|$)/i.test(raw)) return true;
+  const shown = iframeShown.get(raw);
+  return shown === false;
+}
+
 // Page titles that signal a challenge screen, by class.
 const CAPTCHA_TITLE = /captcha|security check|are you human/i;
 const MFA_TITLE = /verify|two.factor|2fa|authenticat|identity check/i;
@@ -498,14 +514,31 @@ export async function detectChallengeFrame(
       try { url = typeof frame.url === "function" ? String(frame.url() ?? "") : ""; } catch { url = ""; }
       if (url) urls.push({ url, kind: "frame" });
     }
+    // Each iframe element with whether it is SHOWING (own box, and no ancestor hiding it:
+    // visibility inherits, display:none zeroes the box). Read once, used to tell a reCAPTCHA
+    // badge from a reCAPTCHA challenge below.
+    let iframeShown = new Map<string, boolean>();
     try {
-      const srcs: string[] = await (page as { locator: (s: string) => { evaluateAll: (fn: (e: Element[]) => string[]) => Promise<string[]> } })
+      const els: Array<{ src: string; shown: boolean }> = await (page as { locator: (s: string) => { evaluateAll: (fn: (e: Element[]) => Array<{ src: string; shown: boolean }>) => Promise<Array<{ src: string; shown: boolean }>> } })
         .locator("iframe")
-        .evaluateAll((els: Element[]) => els.map((el) => (el as HTMLIFrameElement).getAttribute("src") || ""))
-        .catch(() => [] as string[]);
-      for (const src of srcs) if (src) urls.push({ url: String(src), kind: "iframe src" });
+        .evaluateAll((els: Element[]) => els.map((el) => {
+          const rect = el.getBoundingClientRect();
+          const st = getComputedStyle(el);
+          return { src: (el as HTMLIFrameElement).getAttribute("src") || "", shown: rect.width > 2 && rect.height > 2 && st.visibility !== "hidden" && st.display !== "none" && Number(st.opacity || "1") > 0 };
+        }))
+        .catch(() => [] as Array<{ src: string; shown: boolean }>);
+      iframeShown = new Map(els.filter((e) => e.src).map((e) => [e.src, e.shown]));
+      for (const e of els) if (e.src) urls.push({ url: e.src, kind: "iframe src" });
     } catch { /* ignore */ }
-    const hits = urls.map((u) => ({ ...u, h: challengeUrlHit(u.url) })).filter((u) => u.h);
+    const hits = urls.map((u) => ({ ...u, h: challengeUrlHit(u.url) }))
+      .filter((u) => u.h)
+      // A reCAPTCHA BADGE IS NOT A CHALLENGE. Invisible reCAPTCHA (v3, and v2 "invisible") puts an
+      // anchor frame with size=invisible in a page corner and a hidden bframe beside it on EVERY load
+      // of an ordinary application form; nothing is asked of anyone until a submit. Parking there
+      // stopped every such form before a field was filled (City of Star, iWorQ). A challenge is a
+      // reCAPTCHA frame that is SHOWING and is not the invisible anchor: the v2 checkbox anchor, or a
+      // bframe the site has opened. A frame no element answers for stays a challenge (fail closed).
+      .filter((u) => !recaptchaBadgeOnly(u.url, iframeShown));
     const say = (u: { kind: string; h: { hit: string } | null }) => `challenge ${u.kind} detected (${u.h!.hit})`;
 
     // 2) CAPTCHA — always a challenge.
