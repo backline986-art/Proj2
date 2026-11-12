@@ -182,6 +182,11 @@ export interface ExtractedField {
    *  the box's suggestions and picks the one typeaheadMatch says is this job's; the recorded step
    *  carries the same strategy (RecipeStep.fillStrategy) so the replay does the same. */
   fillStrategy?: "typeahead";
+  /** #188: the element this field was read from, stamped data-al-fx="<id>" in the page, and its
+   *  identity then (tag | text | aria-label | a button input's value). Learn-time only — never in a
+   *  RecipeSelector (a stamp means nothing to a replay) and never sent to a planner. The walk's
+   *  navigate/advance clicks resolve the stamp first when the element is still that control. */
+  fx?: { id: string; text: string };
 }
 
 export interface LearnPlanRequest {
@@ -1605,6 +1610,9 @@ export interface RawField {
   /** #139: an editable text input's class attribute, read for an autocomplete widget's stamp
    *  (portalSafety isAutocompleteWidgetClass) in toExtractedField. */
   stampClass?: string;
+  /** #188: the element's own stamp (data-al-fx) and its identity at harvest. See ExtractedField.fx. */
+  fx?: string;
+  fxText?: string;
 }
 
 // Serializable extractor — derives a label and selector hints for each interactive
@@ -2213,7 +2221,24 @@ export function extractFieldsInPage(els: Element[]): RawField[] {
     }
     const questions = fieldType === "button" || fieldType === "file" ? [] : questionsOf(el, fieldType, label);
 
+    // THE ELEMENT THAT WAS READ (#188). A navigate/advance the planner picks from this list is
+    // clicked through THIS element first (AutoLearnAdapter.fieldClickLocator), and only then by its
+    // label/role selector: a clickable card (div[role=button]) whose text runs on into a hidden
+    // "An address is required." has no selector that resolves it. Stamped ONCE per element (a
+    // later harvest reuses the stamp), with the element's identity at harvest — tag, text,
+    // aria-label, a button input's value — so a node a framework re-used for another control
+    // (Next patched to Submit in place) is never clicked through a stale stamp.
+    let fx = el.getAttribute("data-al-fx") || "";
+    if (!fx) {
+      const w = globalThis as unknown as { __alFx?: number };
+      w.__alFx = (w.__alFx || 0) + 1;
+      fx = `f${w.__alFx}`;
+      el.setAttribute("data-al-fx", fx);
+    }
+    const fxText = `${tag}|${String(el.textContent || "").replace(/\s+/g, " ").trim().slice(0, 200)}|${String(el.getAttribute("aria-label") || "").trim()}|${tag === "input" ? String((el as HTMLInputElement).value || "") : ""}`;
+
     out.push({
+      fx, fxText,
       label, fieldType, options, role, name, placeholder, id, text, href,
       tile: tileLabel ? true : undefined,
       typeahead: typeahead && fieldType === "text" ? true : undefined,
@@ -2350,6 +2375,7 @@ export function toExtractedField(raw: RawField): ExtractedField {
   if (raw.fieldType === "radio" && raw.name) field.group = raw.name;
   if (raw.groupPrompt) field.groupPrompt = raw.groupPrompt;
   if (raw.questions?.length) field.questions = [...raw.questions];
+  if (raw.fx && /^f\d+$/.test(raw.fx)) field.fx = { id: raw.fx, text: String(raw.fxText ?? "") };
   return field;
 }
 
@@ -8961,7 +8987,8 @@ export class AutoLearnAdapter extends BasePortalAdapter {
           // the browser. Past the budget the click is retired and the run stops, named.
           const navStarted = Date.now();
           const res = await this.boundedClick("navigate", clickStepBudgetMs(), async () => {
-            const loc = await this.locator(navField.selector);
+            // The element the planner was shown first, its selector second (#188, fieldClickLocator).
+            const loc = await this.fieldClickLocator(navField);
             if (!loc) throw new Error("navigate selector unresolved");
             const href = navField.href;
             const realHref = !!href && href !== "#" && !/^javascript:/i.test(href);
@@ -10171,7 +10198,10 @@ export class AutoLearnAdapter extends BasePortalAdapter {
         let res: { ok: boolean; field?: string; message?: string; timedOut?: boolean; absent?: boolean };
         try {
           res = await this.boundedClick("advance", clickStepBudgetMs(), async () => {
-            const loc = await this.locator(advanceField.selector);
+            // The element that was read first (#188, fieldClickLocator). An interstitial's forward
+            // click (#344) keeps its selector lookup exactly as before: the information-page pass
+            // below judges the control that lookup resolves, and that door is not changed here.
+            const loc = interstitialAdvanceKey ? await this.locator(advanceField.selector) : await this.fieldClickLocator(advanceField);
             if (!loc) throw new Error("advance selector unresolved");
             if (infoPassTried) {
               if (infoDoor && typeof infoDoor.closeInfoPagePass === "function") infoDoor.closeInfoPagePass();
@@ -13054,7 +13084,7 @@ export class AutoLearnAdapter extends BasePortalAdapter {
       note: `advance: ${candidate.label || "next"}`,
     });
     const res = await safeAction("fallback-advance", async () => {
-      const loc = await this.locator(candidate.selector);
+      const loc = await this.fieldClickLocator(candidate as ExtractedField);
       if (!loc) throw new Error("fallback advance selector unresolved");
       await this.clickResilient(loc);
       await this.waitAfterClick(beforeUrl, beforeFp, tabsBefore);
@@ -13839,6 +13869,36 @@ export class AutoLearnAdapter extends BasePortalAdapter {
   // Best-effort; never throws. Returns [] when nothing is found.
   private async collectValidationErrors(): Promise<string[]> {
     return collectValidationErrorsFrom(this.page);
+  }
+
+  /** A NAVIGATE / ADVANCE IS CLICKED THROUGH THE ELEMENT THE PLANNER WAS SHOWN (#188). The field's
+   *  stamped element (ExtractedField.fx) first — exactly one match, visible, and still the same
+   *  control (its identity unchanged since the harvest) — and only otherwise its selector (label /
+   *  role+name / #id, locator()). Live: the "Add Location" card, a div[role=button] whose text ran on
+   *  into a hidden "An address is required.", was looked up by that label, matched nothing
+   *  (navigate_control_absent), and the walk never added the location. A stamp that is gone, doubled
+   *  or now names another control falls back to the selector — never a click on a node a framework
+   *  re-used (a Next patched in place into Submit fails the identity check). */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  private async fieldClickLocator(field: ExtractedField): Promise<any | null> {
+    if (!this.page) return null;
+    if (field.fx && /^f\d+$/.test(field.fx.id)) {
+      try {
+        const loc = this._buildLocator(this.page, { css: `[data-al-fx="${field.fx.id}"]`, ...(field.selector?.frame ? { frame: field.selector.frame } : {}) }, { raw: true });
+        if ((await loc.count().catch(() => 0)) === 1) {
+          const el = loc.first();
+          const now = await el.evaluate((n: Element) => {
+            const tag = n.tagName.toLowerCase();
+            return `${tag}|${String(n.textContent || "").replace(/\s+/g, " ").trim().slice(0, 200)}|${String(n.getAttribute("aria-label") || "").trim()}|${tag === "input" ? String((n as HTMLInputElement).value || "") : ""}`;
+          }).catch(() => null);
+          if (now === field.fx.text && await el.isVisible().catch(() => false)) {
+            this.debug?.event({ type: "click_by_element", label: String(field.label ?? "").replace(/\s+/g, " ").trim().slice(0, 60) });
+            return el;
+          }
+        }
+      } catch { /* an unusable stamp — the selector below */ }
+    }
+    return this.locator(field.selector);
   }
 
   // Resolve a selector descriptor to the first locator that has ≥1 matching element on
