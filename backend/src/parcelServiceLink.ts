@@ -28,7 +28,7 @@
 //
 // A confirmation is good for CONFIRM_TTL_MS (re-read after); a page that no longer links the service
 // is recorded as refused, and the service stops being asked. Stored in parcel_service_link_checks
-// (migration v86): shared on purpose like the other jurisdiction tables (a public page, a public link).
+// (migration v87): shared on purpose like the other jurisdiction tables (a public page, a public link).
 import { createHash } from "node:crypto";
 import { isGovernmentHost, sourceHostOf } from "../../shared/src/officialSource";
 import type { AppDb } from "./db";
@@ -263,7 +263,7 @@ async function organisationIdOfSite(host: string): Promise<{ id: string; url: st
   } catch { return { id: "", url }; }
 }
 
-// ── The record of a check (parcel_service_link_checks, migration v86) ───────────────────────────
+// ── The record of a check (parcel_service_link_checks, migration v87) ───────────────────────────
 export interface ServiceLinkCheck {
   sourceKey: string;
   sourceUrl: string;
