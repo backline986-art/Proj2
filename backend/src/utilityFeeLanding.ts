@@ -31,7 +31,7 @@ import type { CitedFact } from "../../shared/src/types";
 import { isGovernmentHost, siteOfHost, sourceHostOf } from "../../shared/src/officialSource";
 import { quoteOnPage, type PageReader } from "./agencyPageReader";
 import { dollarAmounts } from "./citedReviewTime";
-import { feeScheduleProfileKey, getFeeSchedule, saveFeeSchedule, scheduleHasPersonVerification, type FeeScheduleRecord } from "./feeSchedules";
+import { feeLedgerFromPages, feeScheduleProfileKey, getFeeSchedule, saveFeeSchedule, scheduleHasPersonVerification, type FeeScheduleRecord } from "./feeSchedules";
 import { logger } from "./logger";
 import type { UtilityFee, UtilityFilingLookup } from "./utilityFilingLookup";
 
@@ -174,6 +174,7 @@ export async function landUtilityLookupFees(
     return { ...out, reason: "differs from the researched fee on file — not landed" };
   }
   const readAt = opts.now ?? new Date().toISOString();
+  const ledger = feeLedgerFromPages([{ url, text }]);
   let saved: ReturnType<typeof saveFeeSchedule>;
   try {
     saved = saveFeeSchedule(db, where, {
@@ -181,7 +182,10 @@ export async function landUtilityLookupFees(
       brackets: [{ feeUsd: value.amountUsd, label: value.label }],
       sourceUrl: url, sourceQuote: fee.quote, sourceKind: UTILITY_LOOKUP_FEE_KIND,
       notes: `Utility lookup (seeded): ${value.label} ${money(value.amountUsd)}, read on the utility's page`.slice(0, 300),
-    }, { fetchedAt: readAt });
+      // The page as re-read just above travels with the save: the bracket's printed line is then
+      // checked against bytes Keelix retrieved (corroborateBrackets), which is the only evidence
+      // the official grade accepts (feeOfficial). Never a claim made here.
+    }, { fetchedAt: readAt, verifiedAuthorityHosts: opts.verifiedHosts ?? [], ...(ledger ? { corroborateAgainst: ledger } : {}) });
   } catch (err) {
     logger.warn("utility-filing", `fee landing failed for ${lookup.utility}: ${err instanceof Error ? err.message : String(err)}`);
     return { ...out, reason: "fee landing failed" };

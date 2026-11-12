@@ -400,10 +400,13 @@ export type FeePaymentMethod = "portal" | "mailed_check" | "none" | "unknown";
 
 /** How much to trust the amount. "actual" is the portal's own number. "verified"
  *  means a human stands behind it — a human-checked schedule row, or a median of
- *  fees people read off real portal screens. "seeded" is unreviewed research, so
+ *  fees people read off real portal screens. "official" (owner, 2026-11-11; rule 3's official tier)
+ *  is a published-schedule amount whose printed line Keelix itself read on the authority's own
+ *  official page: used as published and shown "from <host>, read <date>", never under a person's
+ *  name, and never over a person's verified amount. "seeded" is unreviewed research, so
  *  it never auto-overwrites anything (safety rule 3). "estimated" is the
  *  valuation heuristic, which knows nothing about the jurisdiction. */
-export type FeeConfidence = "actual" | "verified" | "seeded" | "estimated" | "unknown";
+export type FeeConfidence = "actual" | "verified" | "official" | "seeded" | "estimated" | "unknown";
 
 /** "actual" is the portal's fee TYPED BY THE OPERATOR off its fee/review screen; "portal_record"
  *  is the portal's fee READ AUTOMATICALLY off the filed record by the permit monitor. Both rank
@@ -646,6 +649,9 @@ export interface SubmissionPaymentQuote {
    *  published_schedule and its confidence "verified". */
   permitFeeVerifiedBy: string;
   permitFeeVerifiedAt: string;
+  /** WHERE AN "official" AMOUNT WAS READ (the authority's own page, and when). Present only when
+   *  permitFeeConfidence is "official". */
+  permitFeeOfficialSource?: { host: string; sourceUrl: string; fetchedAt: string };
   /** The portal's figure beside the researched one, whenever a portal figure exists (read off
    *  the record, or typed by the operator) — both numbers and the difference. */
   permitFeeComparison: FeeComparison | null;
@@ -843,6 +849,9 @@ export interface ProjectFeeSheetLine {
    *  on the published_schedule tier. */
   verifiedBy: string;
   verifiedAt: string;
+  /** Where an "official" amount was read (SubmissionPaymentQuote.permitFeeOfficialSource): shown
+   *  "from <host>, read <date>". Present only when confidence is "official". */
+  officialSource?: { host: string; sourceUrl: string; fetchedAt: string };
   /** See SubmissionPaymentQuote.permitFeeComparison / portalFeeRecords. */
   comparison: FeeComparison | null;
   /** See SubmissionPaymentQuote.printedFormCheck. Absent on the local-review line. */

@@ -7724,42 +7724,67 @@ export class RecipeAdapter extends BasePortalAdapter {
     });
     if (refusals.length) return { kind: "refused", refusals };
     const stamp = completeStamp(this.options.draftSubmitStamp)!;
-    // READY, AS A PERSON WOULD CHECK BEFORE CLICKING: the page re-asserted and gap-filled, nothing
-    // required left empty, no challenge on it, and the run's own pending save drained.
-    await this.reassertBlanksOnce(false).catch(() => [] as string[]);
-    await this.runGapFill(this.page).catch(() => null);
-    this.gapFilledPage = await this.pageIdentity().catch(() => "");
-    // NOT THE PAGE THE STAMP SAW (#362, owner rulings 2026-10-17 "Stop for me" and 2026-10-18 "Data
-    // is enough"). The stamp vouches that the recorded steps replayed unchanged. An extra answer
-    // straight from this project's data goes ahead; an answer automation PICKED with no project data
-    // behind it (a gap-fill choice with no bound field, another page's recorded value re-asserted
-    // here — see unrecordedWrites) still in front of the click stops the run here like a review
-    // stop: the answers stay on the page for a person to check, the stamp is kept, and nothing is
-    // clicked. Never an incident.
-    const inFront = await this.unrecordedPicksInFront();
-    if (inFront.length) {
-      const shown = inFront.slice(0, 6).join(", ");
-      const more = inFront.length > 6 ? ` and ${inFront.length - 6} more` : "";
-      // THE PERSON IS TOLD, not only the run log: the stop message LEADS with it (the run card reads
-      // its first line, cut short), and reviewHandoffNotes carries the full list.
-      this.draftPickTell = draftPickStopTell(stamp.label, inFront);
-      const tell = `AUTOMATION PICKED ANSWERS WITH NO PROJECT DATA BEHIND THEM before "${stamp.label.slice(0, 40)}" (${shown}${more}): it did NOT click it — check those answers, then click it yourself.`;
-      if (!this.reviewHandoffNotes.includes(tell)) this.reviewHandoffNotes.push(tell);
-      return { kind: "refused", refusals: [`automation picked ${inFront.length} answer(s) with no project data behind them, which the recorded steps never fill (${shown}${more}) — a person checks them and clicks Submit`] };
+    // The whole ready check, as one unit that can be run again (#120). [] = ready to click `scoped`.
+    let scoped!: Awaited<ReturnType<RecipeAdapter["resolveLocator"]>>;
+    const readyCheck = async (): Promise<string[]> => {
+      // READY, AS A PERSON WOULD CHECK BEFORE CLICKING: the page re-asserted and gap-filled, nothing
+      // required left empty, no challenge on it, and the run's own pending save drained.
+      await this.reassertBlanksOnce(false).catch(() => [] as string[]);
+      await this.runGapFill(this.page).catch(() => null);
+      this.gapFilledPage = await this.pageIdentity().catch(() => "");
+      // NOT THE PAGE THE STAMP SAW (#362, owner rulings 2026-10-17 "Stop for me" and 2026-10-18 "Data
+      // is enough"). The stamp vouches that the recorded steps replayed unchanged. An extra answer
+      // straight from this project's data goes ahead; an answer automation PICKED with no project data
+      // behind it (a gap-fill choice with no bound field, another page's recorded value re-asserted
+      // here — see unrecordedWrites) still in front of the click stops the run here like a review
+      // stop: the answers stay on the page for a person to check, the stamp is kept, and nothing is
+      // clicked. Never an incident.
+      const inFront = await this.unrecordedPicksInFront();
+      if (inFront.length) {
+        const shown = inFront.slice(0, 6).join(", ");
+        const more = inFront.length > 6 ? ` and ${inFront.length - 6} more` : "";
+        // THE PERSON IS TOLD, not only the run log: the stop message LEADS with it (the run card reads
+        // its first line, cut short), and reviewHandoffNotes carries the full list.
+        this.draftPickTell = draftPickStopTell(stamp.label, inFront);
+        const tell = `AUTOMATION PICKED ANSWERS WITH NO PROJECT DATA BEHIND THEM before "${stamp.label.slice(0, 40)}" (${shown}${more}): it did NOT click it — check those answers, then click it yourself.`;
+        if (!this.reviewHandoffNotes.includes(tell)) this.reviewHandoffNotes.push(tell);
+        return [`automation picked ${inFront.length} answer(s) with no project data behind them, which the recorded steps never fill (${shown}${more}) — a person checks them and clicks Submit`];
+      }
+      const empty = await this.emptyRequiredControls().catch(() => [] as string[]);
+      if (empty.length) return [`required field(s) still empty on the page: ${empty.slice(0, 4).join(", ")}`];
+      const before = await detectChallengeFrame(this.page).catch(() => null);
+      if (before) return [`a challenge is on the page (${before}) — never answered by automation`];
+      // THE CONTROL ON THE PAGE MUST STILL BE THE ONE STAMPED, by its own label.
+      this.resolvingStep = step;
+      scoped = await this.resolveLocator(step.selector, String(step.note ?? "")).finally(() => { this.resolvingStep = null; });
+      scoped = await this.narrowToOne(scoped, step);
+      const live = await this.controlLabelOf(scoped).catch(() => "");
+      if (!live || draftLabelKey(live) !== draftLabelKey(stamp.label)) {
+        return [`the control on the page reads "${live.slice(0, 60) || "nothing readable"}", not "${stamp.label.slice(0, 60)}"`];
+      }
+      await this.drainBeforeReviewLock();
+      return [];
+    };
+    const notReady = await readyCheck();
+    if (notReady.length) return { kind: "refused", refusals: notReady };
+    // STILL READY AT THE CLICK (#120). The check above takes real time (a gap-fill read, the control's
+    // own label, the drain), and a portal that re-renders a section late can blank a value AFTER the
+    // required-field read passed. The click then landed on a form the browser itself refuses to send:
+    // nothing was posted, the page after it was not a draft, and the run ended as an incident ("the
+    // portal MAY HAVE FILED", the stamp deleted) for a click that sent nothing. So the last thing
+    // before the click is the same required-field read once more. Something blank now: the WHOLE
+    // ready check runs again, once — the same checks in the same order (the re-assert of this run's
+    // own recorded value, the picks-in-front stop, the required read, the challenge, the control's
+    // label), never fewer — and a field still blank after that is a refusal: a review stop, nothing
+    // clicked. This only ever adds a read and a stop in front of the click; draftCreatingClickRefusals
+    // (the gate) is asked exactly as before, and what may be clicked is unchanged.
+    const blankedSince = await this.emptyRequiredControls().catch(() => [] as string[]);
+    if (blankedSince.length) {
+      const again = await readyCheck();
+      if (again.length) return { kind: "refused", refusals: again };
+      const still = await this.emptyRequiredControls().catch(() => [] as string[]);
+      if (still.length) return { kind: "refused", refusals: [`required field(s) went blank again while the page was being checked: ${still.slice(0, 4).join(", ")} — the portal keeps re-rendering them`] };
     }
-    const empty = await this.emptyRequiredControls().catch(() => [] as string[]);
-    if (empty.length) return { kind: "refused", refusals: [`required field(s) still empty on the page: ${empty.slice(0, 4).join(", ")}`] };
-    const before = await detectChallengeFrame(this.page).catch(() => null);
-    if (before) return { kind: "refused", refusals: [`a challenge is on the page (${before}) — never answered by automation`] };
-    // THE CONTROL ON THE PAGE MUST STILL BE THE ONE STAMPED, by its own label.
-    this.resolvingStep = step;
-    let scoped = await this.resolveLocator(step.selector, String(step.note ?? "")).finally(() => { this.resolvingStep = null; });
-    scoped = await this.narrowToOne(scoped, step);
-    const live = await this.controlLabelOf(scoped).catch(() => "");
-    if (!live || draftLabelKey(live) !== draftLabelKey(stamp.label)) {
-      return { kind: "refused", refusals: [`the control on the page reads "${live.slice(0, 60) || "nothing readable"}", not "${stamp.label.slice(0, 60)}"`] };
-    }
-    await this.drainBeforeReviewLock();
     const label = draftStepLabel(step) || stamp.label;
     // AT MOST ONCE PER RUN, marked before the click: a click that throws may still have reached the portal.
     this.draftSubmitAttempted = true;

@@ -58,7 +58,8 @@ await run("EffectiveCodeContext: verified vs seeded vs defaults phrasing", () =>
   const or = resolveEffectiveCodeContext(db, "OR", "Salem");
   assert.equal(or.source, "verified");
   const cite = or.citationFor("NEC", "690.12", "Rapid shutdown");
-  assert.ok(cite.code.includes("2023"), `adopted edition in citation (${cite.code})`);
+  // The shipped Oregon row's NEC is the 2026 edition the 2026 OESC adopts (#596).
+  assert.ok(cite.code.includes("2026"), `adopted edition in citation (${cite.code})`);
   assert.ok(/adopted/i.test(cite.adoptionScope));
 
   const elmore = resolveEffectiveCodeContext(db, "ID", "Elmore County");
