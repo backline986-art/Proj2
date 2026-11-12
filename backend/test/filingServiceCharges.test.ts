@@ -239,7 +239,7 @@ P.setServicePrices(db, ORG_C, {
   standard: { permitUsd: 119, nemUsd: 99, capUsd: 275 },
 }, "Pat Tester");
 const chargedOf = (projectId: string) => db.query<{ permit_type: string; list_price_usd: number | null; cap_usd: number | null; price_usd: number | null; pricing_tier: string }>(
-  "SELECT permit_type, list_price_usd, cap_usd, price_usd, pricing_tier FROM filing_service_charges WHERE project_id = ? ORDER BY filed_at, id", [projectId]);
+  "SELECT permit_type, list_price_usd, cap_usd, price_usd, pricing_tier FROM filing_service_charges WHERE project_id = ? ORDER BY filed_at, rowid", [projectId]); // rowid = insertion order: two filings can share a millisecond
 
 check("7a. the client's pricing tier is stored as founding or standard, nothing else", () => {
   assert.equal(founder.pricingTier, "founding");
