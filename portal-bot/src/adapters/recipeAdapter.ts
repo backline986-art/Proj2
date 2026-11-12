@@ -358,7 +358,7 @@ export const PAY_FEE_REPLAY_GATE = /\b(pay\s*(and|&)\s*submit|pay fees?|pay now|
 // Submit-ish keywords. A step matching these is HARD-BLOCKED in autoSubmit UNLESS it
 // also carries the explicit isFinalSubmit flag — we never decide "this is the submit
 // button" purely from a regex over recorded names.
-const SUBMIT_KEYWORDS = /\b(submit|file application|finalize|finish|complete application|send application|confirm submission)\b/i;
+export const SUBMIT_KEYWORDS = /\b(submit|file application|finalize|finish|complete application|send application|confirm submission)\b/i;
 
 // A recorded step may carry an operator/recorder-set `isFinalSubmit` flag. This field
 // is not (yet) in the shared RecipeStep type, so read it structurally + type-safely.

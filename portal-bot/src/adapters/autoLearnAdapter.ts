@@ -489,7 +489,7 @@ const STALL_WATCHDOG_DEFAULT_MS = 300_000;
  *  AUTOLEARN_PLANNER_STALL_MS tunes it; never below the walk's own budget. */
 const PLANNER_STALL_DEFAULT_MS = 600_000;
 
-const SUBMIT_INTENT = /\b(continue application|submit application|file application|submit|finish|finalize|confirm submission|place order|complete submission)\b/i;
+export const SUBMIT_INTENT = /\b(continue application|submit application|file application|submit|finish|finalize|confirm submission|place order|complete submission)\b/i;
 /** A login-worded control ("Sign In", "Log in", "Login", "Log On"). Never a walk advance while its
  *  credential boxes are empty — see the login_advance_refused stop. */
 const LOGIN_ADVANCE = /^\s*(sign\s*-?\s*in|log\s*-?\s*in|login|log\s*on|sign\s*on)\b/i;

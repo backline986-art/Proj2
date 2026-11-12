@@ -430,6 +430,29 @@ export function portalSafetyFactory() {
     return SIGNATURE_REQUEST.test(t) && !SUBMIT_AND_SIGN.test(t);
   };
 
+  // A LOOKUP / POPULATE BUTTON (#178): a control on a form page that fills a SECTION from the
+  // portal's own data instead of the person typing it — Accela Step 1's "Find Address" (the address
+  // search, which also populates the Parcel section), "Autofill" (the account's contact into
+  // Applicant / Contact), "Look Up" (a licensed-professional search), "FIND PARCEL", a "Validate
+  // Address". The learner presses one ONCE after the section's typed inputs are in and re-reads the
+  // section. The words are DISJOINT from every filing / paying word above by construction: a label
+  // that is also submit-, pay-, final-submit- or signature-request-worded ("Search and Submit",
+  // "Find & Pay") is NEVER a lookup button — the same filing predicates say no first. A unit test
+  // pins the disjointness (portal-bot/src/lookupButtonWords.test.ts). Whole-label bounded: a label
+  // that merely CONTAINS "find" inside a sentence ("Find out how to apply") is a help link, not
+  // a button that populates anything — so at most six words, the lookup word among them.
+  const LOOKUP_BUTTON_WORDS: readonly string[] = Object.freeze([
+    "find", "look up", "lookup", "search", "autofill", "auto-fill", "populate", "select from account", "validate", "verify address",
+  ]);
+  const LOOKUP_WORDS = /\b(find|look\s?-?up|search|auto-?fill|populate|select from account|validate|verify address)\b/i;
+  const isLookupButtonLabel = (label: string | null | undefined): boolean => {
+    const t = String(label ?? "").replace(/\s+/g, " ").replace(/[»›>→]+\s*$/, "").trim();
+    if (!t) return false;
+    if (t.split(" ").length > 6) return false;
+    if (!LOOKUP_WORDS.test(t)) return false;
+    return !isSubmitIntent(t) && !isPayFee(t) && !isFinalSubmitControl(t) && !isSignatureRequestControl(t);
+  };
+
   /** How a capture surface (human recorder, human patch) must treat a click on this control. */
   const classifyRecordedClick = (label: string | null | undefined, ctx?: ControlContext | null): RecordedClickClass => {
     if (isFinalSubmitControl(label, ctx)) return "finalSubmit";
@@ -2278,6 +2301,8 @@ export function portalSafetyFactory() {
     isPayNowDialogText,
     isFinalSubmitControl,
     isSignatureRequestControl,
+    LOOKUP_BUTTON_WORDS,
+    isLookupButtonLabel,
     classifyRecordedClick,
     isSecretField,
     isPaymentField,
@@ -2318,6 +2343,10 @@ export const paymentDialogVerdict = impl.paymentDialogVerdict;
 export const isPayNowDialogText = impl.isPayNowDialogText;
 export const isFinalSubmitControl = impl.isFinalSubmitControl;
 export const isSignatureRequestControl = impl.isSignatureRequestControl;
+/** #178: the words a form page's lookup / populate button reads with ("Find Address", "Autofill",
+ *  "Look Up") — disjoint from every filing / paying word; `isLookupButtonLabel` is the one answer. */
+export const LOOKUP_BUTTON_WORDS = impl.LOOKUP_BUTTON_WORDS;
+export const isLookupButtonLabel = impl.isLookupButtonLabel;
 export const classifyRecordedClick = impl.classifyRecordedClick;
 export const isSecretField = impl.isSecretField;
 export const isPaymentField = impl.isPaymentField;
