@@ -2036,7 +2036,17 @@ export async function performLogin(
       const deadline = Date.now() + LOGIN_RESULT_TIMEOUT_MS;
       await smartWait(page, 2000); // let the first navigation/AJAX settle
       while (Date.now() < deadline) {
-        const proof = await sessionProof(page, loginUrl, credential.username);
+        let proof = await sessionProof(page, loginUrl, credential.username);
+        // A WEAK PROOF MUST HOLD ON A SECOND LOOK (live Idaho DOPL run 6): FAST blanks the view
+        // between the password step and its "Two-Step Verification" step. In that instant the URL
+        // hash has moved, no password box and no code box exist, and "moved off the login page"
+        // read as a session; the code page drawn a moment later was never seen. Only a sign-out
+        // control is proof at once; any other proof is re-read after a fixed pause (an in-place
+        // redraw sends no request, so a network-quiet wait would not wait) and must still stand.
+        if (proof && !/sign-out control/.test(proof)) {
+          await page.waitForTimeout(1500).catch(() => null);
+          proof = await sessionProof(page, loginUrl, credential.username);
+        }
         if (proof) return { ok: true, status: "logged_in", message: `Logged in successfully (${proof}).`, detail: { ...detail, posted } };
         const challenge = (await detectSecondFactor(page)) || (await challengeBeyondPasswordStep(page));
         if (challenge) return await parkForSecondFactor(page, challenge, credential.username, opts);

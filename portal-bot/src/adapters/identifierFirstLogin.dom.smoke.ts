@@ -307,7 +307,12 @@ const DOPL = `<!doctype html><html><head><title>Online Services</title></head><b
         if (location.search.indexOf('mfa=1') < 0) { location.href = '/home'; return; }
         // ?mfa=1: DOPL's emailed-code step, drawn in place under a new hash. The code box is named
         // ONLY by <label for>; "Log In" and "Resend security code" report any press.
+        // Like live DOPL: the hash moves and the view is BLANK for a moment before the code step draws.
         location.hash = '#3';
+        view.innerHTML = '';
+        setTimeout(function () { drawCode(); }, 1200);
+      };
+      var drawCode = function () {
         view.innerHTML = '<h1>Two-Step Verification</h1><p>An email with your Online Services security code was sent to d***@e***.test.</p>' +
           '<label for="Dc-91">Security Code</label><input type="text" id="Dc-91" name="Dc-91" autocomplete="off">' +
           '<input type="checkbox" id="Dc-c1"><label for="Dc-c1">Trust this device</label>' +
