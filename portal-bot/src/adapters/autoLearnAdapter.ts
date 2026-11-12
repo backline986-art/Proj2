@@ -13884,8 +13884,18 @@ export class AutoLearnAdapter extends BasePortalAdapter {
    *  role+name / #id, locator()). Live: the "Add Location" card, a div[role=button] whose text ran on
    *  into a hidden "An address is required.", was looked up by that label, matched nothing
    *  (navigate_control_absent), and the walk never added the location. A stamp that is gone, doubled
-   *  or now names another control falls back to the selector — never a click on a node a framework
-   *  re-used (a Next patched in place into Submit fails the identity check). */
+   *  or already names another control here falls back to the selector.
+   *
+   *  THE IDENTITY IS RE-READ BEFORE EVERY GESTURE, NOT ONCE (adversarial review N2). The locator
+   *  handed back is lazy: clickResilient re-finds [data-al-fx=…] on each of its attempts, then
+   *  force-clicks, then dispatches a click — across up to a minute of waits. A node a framework
+   *  patched in place in that time (Next → Submit) would still carry the stamp. So the returned
+   *  locator is wrapped: each click / dispatchEvent / tap / press (and the like) first re-reads the
+   *  element's identity, and on any difference — or an element that cannot be read — throws
+   *  ControlAbsentError without touching it ("the control that was read is not on the page"; the
+   *  navigate door re-plans, the advance door treats it as an advance that did nothing). What is
+   *  NOT guaranteed: a change landing in the milliseconds between that re-read and Playwright's own
+   *  gesture — the same window a role/name lookup has between resolving and clicking. */
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   private async fieldClickLocator(field: ExtractedField): Promise<any | null> {
     if (!this.page) return null;
@@ -13894,13 +13904,36 @@ export class AutoLearnAdapter extends BasePortalAdapter {
         const loc = this._buildLocator(this.page, { css: `[data-al-fx="${field.fx.id}"]`, ...(field.selector?.frame ? { frame: field.selector.frame } : {}) }, { raw: true });
         if ((await loc.count().catch(() => 0)) === 1) {
           const el = loc.first();
-          const now = await el.evaluate((n: Element) => {
+          const want = field.fx.text;
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const identity = (): Promise<string | null> => el.evaluate((n: Element) => {
             const tag = n.tagName.toLowerCase();
             return `${tag}|${String(n.textContent || "").replace(/\s+/g, " ").trim().slice(0, 200)}|${String(n.getAttribute("aria-label") || "").trim()}|${tag === "input" ? String((n as HTMLInputElement).value || "") : ""}`;
-          }).catch(() => null);
-          if (now === field.fx.text && await el.isVisible().catch(() => false)) {
+          }, undefined, { timeout: 2000 }).catch(() => null);
+          if ((await identity()) === want && await el.isVisible().catch(() => false)) {
             this.debug?.event({ type: "click_by_element", label: String(field.label ?? "").replace(/\s+/g, " ").trim().slice(0, 60) });
-            return el;
+            const label = String(field.label ?? "").replace(/\s+/g, " ").trim().slice(0, 60);
+            const GESTURES = new Set(["click", "dblclick", "tap", "press", "pressSequentially", "type", "fill", "check", "uncheck", "setChecked", "selectOption", "dispatchEvent"]);
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            const guarded: any = new Proxy(el, {
+              get: (t, k) => {
+                // first()/last() of a one-element locator are the same element: keep the guard on.
+                if (k === "first" || k === "last") return () => guarded;
+                const v = Reflect.get(t, k);
+                if (typeof v !== "function") return v;
+                if (typeof k === "string" && GESTURES.has(k)) {
+                  return async (...args: unknown[]) => {
+                    if ((await identity()) !== want) {
+                      this.debug?.event({ type: "click_by_element_changed", label, gesture: k });
+                      throw new ControlAbsentError();
+                    }
+                    return v.apply(t, args);
+                  };
+                }
+                return v.bind(t);
+              },
+            });
+            return guarded;
           }
         }
       } catch { /* an unusable stamp — the selector below */ }

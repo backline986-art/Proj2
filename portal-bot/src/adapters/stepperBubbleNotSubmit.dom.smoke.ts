@@ -32,7 +32,7 @@
 import "../smokeArtifactDirs";
 import http from "node:http";
 import { chromium, type Page } from "playwright";
-import { AutoLearnAdapter, type LearnPlanner } from "./autoLearnAdapter";
+import { AutoLearnAdapter, EXTRACT_SEL, extractFieldsInPage, toExtractedField, type LearnPlanner } from "./autoLearnAdapter";
 
 delete process.env.PORTAL_ALLOW_FINAL_SUBMIT;
 
@@ -181,11 +181,13 @@ type St = { step?: number; location?: boolean; cardClicks?: number; bubbleClicks
 const readState = (pg: Page): Promise<St> => pg.evaluate(() => ({ ...(window as unknown as { __S: Record<string, unknown> }).__S }))
   .catch((e) => ({ err: String(e) })) as Promise<St>;
 
-const ALL: Variant[] = ["tigardStep1", "step7Bubble", "step7Submit", "noFillable", "textReview", "summaryContinue"];
+// "patchedNode" is not a learn: it drives fieldClickLocator + clickResilient directly (N2, below).
+const ALL: string[] = ["tigardStep1", "step7Bubble", "step7Submit", "noFillable", "textReview", "summaryContinue", "patchedNode"];
 const which = (process.argv[2] ? process.argv[2].split(",") : ALL) as Variant[];
 const browser = await chromium.launch();
 try {
   for (const name of which) {
+    if ((name as string) === "patchedNode") continue;
     const ctx = await browser.newContext();
     ctx.setDefaultTimeout(8000);
     await ctx.addInitScript({ content: "globalThis.__name = globalThis.__name || ((f) => f);" });
@@ -259,6 +261,46 @@ try {
           finals.length === 1 && /final submit: Submit \(recorded, NOT clicked\)/.test(norm(finals[0].note)), detail);
       }
     }
+  }
+
+  // N2 (adversarial review): A STAMPED NODE PATCHED IN PLACE IS NEVER CLICKED. fieldClickLocator hands
+  // back a lazy locator that clickResilient re-finds on every attempt; a framework that patches the
+  // "Next" node into "Submit" after it was handed back must not get that node clicked — not by an
+  // attempt, the force-click or the dispatched click. Unpatched, the same path clicks it once.
+  if ((which as string[]).includes("patchedNode")) {
+    const ctx = await browser.newContext();
+    ctx.setDefaultTimeout(8000);
+    await ctx.addInitScript({ content: "globalThis.__name = globalThis.__name || ((f) => f);" });
+    const pg = await ctx.newPage();
+    await pg.goto(`${base}/apps/selfservice?v=noFillable#/permit/apply/7`);
+    await pg.evaluate(() => {
+      document.body.insertAdjacentHTML("beforeend", '<div id="patch-zone"><button type="button" id="go">Continue to step 3</button></div>');
+      const w = window as unknown as { __go: { next: number; submit: number } };
+      w.__go = { next: 0, submit: 0 };
+      document.getElementById("go")!.addEventListener("click", function (this: HTMLElement) { if (/submit/i.test(this.textContent || "")) w.__go.submit++; else w.__go.next++; });
+    });
+    const adapter = new AutoLearnAdapter("Stepper Bubble", mkPlanner("noFillable"), { maxPages: 2 });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const a = adapter as any;
+    a.page = pg;
+    const events: Array<Record<string, unknown>> = [];
+    a.debug = { event: (e: Record<string, unknown>) => { events.push(e); } };
+    const field = (await pg.$$eval(EXTRACT_SEL, extractFieldsInPage)).map(toExtractedField).find((f) => norm(f.label) === "Continue to step 3");
+    const counts = (): Promise<{ next: number; submit: number }> => pg.evaluate(() => (window as unknown as { __go: { next: number; submit: number } }).__go);
+    let loc = field ? await a.fieldClickLocator(field) : null;
+    let threw = "";
+    try { await a.clickResilient(loc); } catch (e) { threw = String(e).slice(0, 120); }
+    const c1 = await counts();
+    check(`patchedNode: an unchanged stamped node is clicked through its element, once`,
+      !!field?.fx && c1.next === 1 && c1.submit === 0 && !threw && events.some((e) => e.type === "click_by_element"), `fx=${JSON.stringify(field?.fx)} counts=${JSON.stringify(c1)} threw=${threw}`);
+    loc = field ? await a.fieldClickLocator(field) : null;
+    await pg.evaluate(() => { document.getElementById("go")!.textContent = "Submit application"; });
+    threw = "";
+    try { await a.clickResilient(loc); } catch (e) { threw = String(e).slice(0, 160); }
+    const c2 = await counts();
+    check(`patchedNode: the same stamped node patched to "Submit application" after it was handed back is NOT clicked (no attempt, force-click or dispatch); the click ends as an absent control`,
+      c2.submit === 0 && c2.next === 1 && /not on the page/i.test(threw) && events.some((e) => e.type === "click_by_element_changed"), `counts=${JSON.stringify(c2)} threw=${threw}`);
+    await ctx.close().catch(() => null);
   }
 } finally {
   await browser.close().catch(() => null);
