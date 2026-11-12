@@ -126,6 +126,13 @@ export function permitProcessFor(project: Pick<ProjectRecord, "state" | "ahj">):
   return registry.get(permitProcessKey(project.state, project.ahj)) ?? null;
 }
 
+/** A PERSON VERIFIED THIS LOOKUP ROW (verifyPermitProcessLookup — confidence "verified" / verified_at).
+ *  The one predicate for a process row's standing (hard rule 3): this table has no "official"
+ *  origin, so row-verified is the whole notion. A seeded row is a lookup's reading, never authority. */
+export function isVerifiedPermitProcess(lookup: Pick<PermitProcessLookup, "confidence" | "verifiedAt"> | null | undefined): boolean {
+  return Boolean(lookup) && (lookup!.confidence === "verified" || Boolean(lookup!.verifiedAt));
+}
+
 /** A document name that says it is a downloadable blank (a PDF, a form to download / fill). */
 const NAMES_PDF_BLANK = /\bpdf\b|\.pdf\b|\bform\b|\bfillable\b|\bdownload/i;
 
@@ -147,7 +154,7 @@ export function lookupPortalOnlyFor(project: Pick<ProjectRecord, "state" | "ahj"
   if (!withPortal) return null;
   if (permits.some((p) => (p.documents?.value ?? []).some((d) => NAMES_PDF_BLANK.test(String(d || ""))))) return null;
   const portalUrl = String(withPortal.portalUrl.value).trim();
-  const verified = lookup.confidence === "verified" || Boolean(lookup.verifiedAt);
+  const verified = isVerifiedPermitProcess(lookup);
   return { portalUrl, waives: verified || isApplicationPortalShapedUrl(portalUrl) };
 }
 /** The card's / the gate's words for it. */
@@ -1022,6 +1029,34 @@ export function projectForTrack<T extends IssuerProject>(project: T, track: stri
 export function lookedUpRecordType(project: Pick<ProjectRecord, "state" | "ahj">, track: string | null | undefined): CitedFact<string> | null {
   const p = permitAnswerForTrack(project, track);
   return p && answered(p.recordType) ? p.recordType : null;
+}
+
+/**
+ * THE RECORD TYPE A LEARN IS TOLD TO TICK (#166): lookedUpRecordType with the standing of THE ROW
+ * THAT ANSWERED. On a track view the project's own row can answer for the issuer (the Marion case,
+ * permitAnswerForTrackFrom "project"), so `verified` is read off that row — never off
+ * permitProcessFor(project), which on a view is the issuer's row and may not exist.
+ *
+ * A watched City of Bend learn (2026-11-12) ticked "Renewable energy up to 25KVA" while the job's
+ * person-verified process row named "Prescriptive photovoltaic systems": the verified name never
+ * reached the learner. It does now, and the learner's pass (autoLearnAdapter) ticks the offered
+ * option whose label sameRecordType()s it — a VERIFIED one deterministically, a seeded one is only
+ * ever the planner's hint (hard rule 3).
+ */
+export function lookedUpRecordTypeFor(
+  project: Pick<ProjectRecord, "state" | "ahj"> & Partial<Pick<ProjectRecord, "trackView">>,
+  track: string | null | undefined,
+): { value: string; verified: boolean; sourceUrl: string } | null {
+  const hit = permitAnswerForTrackFrom(project, track);
+  if (!hit || !answered(hit.answer.recordType)) return null;
+  const row = hit.from === "project"
+    ? permitProcessFor({ state: project.state, ahj: String(project.trackView?.projectAhj ?? "") })
+    : permitProcessFor(project);
+  return {
+    value: String(hit.answer.recordType.value).trim(),
+    verified: isVerifiedPermitProcess(row),
+    sourceUrl: String(hit.answer.recordType.sourceUrl ?? ""),
+  };
 }
 
 /** "Residential - Structural" ≈ "Residential Structural" ≈ "residential structural permit". */

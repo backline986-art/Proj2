@@ -14,6 +14,9 @@ import { feeBracketCoverage, feeBracketCoverageMessage, decideFeeTier, FEE_TIER_
 
 /** The pause's reason when a recorded kVA tier step finds no tier box on its page (close MF2). */
 const FEE_TIER_NO_BOX_REASON = "the recorded kVA tier box was not found on this page and no kVA-labelled box could be read";
+/** #166: the learner's note on a person-verified record-type / work-item pick (autoLearnAdapter
+ *  noteVerifiedRecordTypeTicked) — the replay finds that step by label, never by position. */
+const VERIFIED_RECORD_TYPE_NOTE = /^\s*record type \(verified\):\s*/i;
 import { collectPortalErrorBanner } from "../safeAction";
 import { SERVICE_FEEDER_200A_FIELD, SERVICE_FEEDER_400A_FIELD, isServiceFeeder200Label, isServiceFeeder400Label } from "../../../shared/src/serviceLineLabels";
 import { contactFieldKind, contactKeyFor, contactRoleOfStep, isContactOpener, type ContactFieldKind, type ContactRole, type ContactTrack } from "../../../shared/src/contactRoles";
@@ -5986,7 +5989,11 @@ export class RecipeAdapter extends BasePortalAdapter {
     const s = `${step.selector?.label ?? ""} ${step.note ?? ""}`;
     return step.action === "check"
       && (/cbListServices/i.test(step.selector?.fallbacks?.map((f) => f.css ?? "").join(" ") ?? "")
-        || /^(residential|commercial)\s*-\s*/i.test(s.trim()));
+        || /^(residential|commercial)\s*-\s*/i.test(s.trim())
+        // #166: the learner's deterministic pick of a PERSON-VERIFIED record type / work item, on any
+        // portal ("record type (verified): Prescriptive photovoltaic systems") — by label here too,
+        // never healed onto a neighbour by position.
+        || VERIFIED_RECORD_TYPE_NOTE.test(String(step.note ?? "")));
   }
 
   // The list this jurisdiction actually offers — for the error, so a human reads "the city has
@@ -6087,7 +6094,9 @@ export class RecipeAdapter extends BasePortalAdapter {
       return this.pickAddressVersionLive(step);
     }
     if (this.isRecordTypeStep(step)) {
-      const wanted = String(step.selector?.label || step.note || "").trim();
+      // #166: a verified pick's selector is the control's label (or role+name); the note is the
+      // last resort, with its prefix dropped.
+      const wanted = String(step.selector?.label || step.selector?.name || String(step.note ?? "").replace(VERIFIED_RECORD_TYPE_NOTE, "") || "").trim();
       // SETTLE BEFORE COUNTING. count() does not wait: right after the previous page's full
       // postback navigated here, the list can be unpainted, and "not offered — refusing to file"
       // was then a race (measured on the Accela replica: the record-type page had been served,
@@ -6095,11 +6104,17 @@ export class RecipeAdapter extends BasePortalAdapter {
       // then count — and when nothing matches, settle and look exactly once more.
       await this.settle(8000);
       await waitForInteractiveControls(this.page, 8000);
+      // #166: a verified record type is a RADIO on some portals (Accela's CapType); the role is the
+      // one the page offers the name under. Checkbox as always, else radio.
+      const role: "checkbox" | "radio" =
+        (await this.page.getByRole("checkbox", { name: wanted, exact: false }).count().catch(() => 0)) === 0
+          && (await this.page.getByRole("radio", { name: wanted, exact: false }).count().catch(() => 0)) > 0
+          ? "radio" : "checkbox";
       // Exact first. "Residential - Structural" must not resolve through a substring onto
       // "Residential - Structural - Demolition": one unambiguous name, or nothing.
-      const exact = this.page.getByRole("checkbox", { name: wanted, exact: true });
+      const exact = this.page.getByRole(role, { name: wanted, exact: true });
       let exactCount = await exact.count().catch(() => 0);
-      if (exactCount === 0 && (await this.page.getByRole("checkbox", { name: wanted, exact: false }).count().catch(() => 0)) === 0) {
+      if (exactCount === 0 && (await this.page.getByRole(role, { name: wanted, exact: false }).count().catch(() => 0)) === 0) {
         await this.settle(4000);
         exactCount = await exact.count().catch(() => 0);
       }
@@ -6108,7 +6123,7 @@ export class RecipeAdapter extends BasePortalAdapter {
         this.driftWarnings.push(`record type "${wanted}" selected by label (positional fallback refused)`);
         return true;
       }
-      const loose = this.page.getByRole("checkbox", { name: wanted, exact: false });
+      const loose = this.page.getByRole(role, { name: wanted, exact: false });
       const looseCount = exactCount > 1 ? exactCount : await loose.count().catch(() => 0);
       if (looseCount === 1) {
         await withAutomationInput(this.page, () => loose.first().check({ timeout: 10000 }));
