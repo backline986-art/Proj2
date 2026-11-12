@@ -39,6 +39,8 @@
 //   [G] the step as the live run recorded it (no `slot`, note "Browse..", key f0 = the forms slot) is
 //       refused by name at replay: a face-recorded step keeps its position only while the live slot's
 //       heading does not name a different exact document.
+//   [H] a forms-slot step recorded with the building application replays into that slot — the label's
+//       first word ("Checklists") is not the only document the slot takes.
 //
 // Run: npx tsx portal-bot/src/adapters/reviewPageUpload.dom.smoke.ts
 import "../smokeArtifactDirs";
@@ -444,6 +446,39 @@ try {
       !ok && held?.forms === 0 && held?.plans === 0 && held?.other === 0, `ok=${ok} err=${err} held=${JSON.stringify(held)}`);
     check("[G] …and the refusal names the slot the key now points at",
       replay.driftWarnings.some((w) => /no matching file slot/.test(w) && /Agreements, Form/.test(w)), JSON.stringify(replay.driftWarnings));
+  }
+
+  // ---- [H] a forms-slot step recorded with the BUILDING application replays (the label's first word says checklist) ----
+  console.log("\n[H] replay: a step recorded as building_application into \"Agreements, Form, Documents & Checklists\" is accepted, not refused for the checklist");
+  {
+    const buildingApp = path.join(dir, "ZZTEST-building-application.pdf");
+    fs.writeFileSync(buildingApp, "%PDF-1.4\n% placeholder\n");
+    const ctx = await browser.newContext();
+    ctx.setDefaultTimeout(8000);
+    await ctx.addInitScript({ content: "globalThis.__name = globalThis.__name || ((f) => f);" });
+    const page = await ctx.newPage();
+    await page.goto(`${base}/bend`);
+    const recipe = {
+      id: "zz-bend-forms", scopeType: "ahj", profileKey: "zz|fixture|bend", state: "ZZ", ahj: "Fixture", utility: "",
+      portalPlatform: "fixture", portalUrl: `${base}/bend`, status: "complete", version: 1, steps: [],
+      createdBy: "test", createdAt: "", updatedAt: "", notes: "", discipline: "",
+    } as unknown as PortalRecipe;
+    const replay = new RecipeAdapter(recipe, {}, { plan_set: planSet, building_application: buildingApp }, { autoSubmit: false }) as unknown as {
+      page: unknown; driftWarnings: string[]; executeStep(step: RecipeStep, pastReview: boolean): Promise<boolean>;
+    };
+    replay.page = page;
+    const step = { action: "upload", phase: "fill", selector: { css: '[data-al-upl="f0"]' }, docType: "building_application", slot: "Agreements, Form, Documents & Checklists", viaFileChooser: false, note: "upload building_application: Agreements, Form, Documents & Checklists" } as RecipeStep;
+    let ok = false;
+    let err = "";
+    try { ok = await replay.executeStep(step, false); } catch (e) { err = String(e).slice(0, 200); }
+    const held = await page.evaluate(() => {
+      const n = (id: string) => (document.getElementById(id) as HTMLInputElement | null)?.files?.length ?? -1;
+      return { forms: n("req_0_file"), plans: n("req_1_file"), other: n("req_2_file") };
+    }).catch(() => null);
+    await ctx.close().catch(() => null);
+    check("[H] the building application landed in the forms requirement's row",
+      ok && held?.forms === 1 && held?.plans === 0 && held?.other === 0, `ok=${ok} err=${err} held=${JSON.stringify(held)} drift=${JSON.stringify(replay.driftWarnings)}`);
+    check("[H] …with no 'refused … this slot requires solar_checklist' warning", !replay.driftWarnings.some((w) => /refused/.test(w)), JSON.stringify(replay.driftWarnings));
   }
 } finally {
   await browser.close().catch(() => null);

@@ -141,6 +141,13 @@ await check("(5) the label filter: a rejected upload, a placeholder, an unmapped
   assert.deepEqual(r, { skipped: "nothing" });
   assert.equal(kb.portalRequiredUploadLabel("Bid (on the review page — attach it by hand; automation clicks no upload widget there)"), "Bid");
   assert.equal(kb.portalRequiredUploadLabel("Plans *"), "Plans");
+  // CityView's headed requirement rows (City of Bend), as the learner names them bare: the forms row
+  // maps (checklist slot) and becomes a line; the catch-all maps to no slot and writes nothing.
+  assert.equal(kb.portalRequiredUploadLabel("Agreements, Form, Documents & Checklists"), "Agreements, Form, Documents & Checklists");
+  assert.equal(kb.portalRequiredUploadLabel("Other/Miscellaneous"), null);
+  const bend = kb.learnPortalRequiredUploads(db, repo.getProjectDetail(db, fx.newProject(atAhj("City of Zzbend"))).project,
+    ["Agreements, Form, Documents & Checklists", "Other/Miscellaneous"], "building");
+  assert.deepEqual("written" in bend ? bend.written : bend, ["Required upload on the permit portal [structural]: Agreements, Form, Documents & Checklists"]);
 });
 
 finish("portal required upload");

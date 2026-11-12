@@ -93,7 +93,7 @@ import { imageToPdfBytes, shouldConvertToPdf } from "../imageToPdf";
 import { removeUploadStaging, uploadPayloadFor, type PreparedUpload } from "./uploadPayload";
 import { attachmentTypeFor, isDocumentTypeList } from "./attachmentTypes";
 import { chooseSubmittedRecord, cleanRecordLink, readApplicationLedgerInPage, recordLinkForNumberInPage, type LedgerEntry } from "./submissionLedger";
-import { exactUploadDocType, fileTypeAllowed, UPLOAD_LABEL_PATTERNS, uploadForbidsSubstitute, uploadTextNamesNoDocument } from "./autoLearnAdapter";
+import { exactUploadDocType, fileTypeAllowed, formsSlotDocTypes, UPLOAD_LABEL_PATTERNS, uploadForbidsSubstitute, uploadTextNamesNoDocument } from "./autoLearnAdapter";
 import { readFeeStop, secretValuesOf, type FeeStopKind, type FeeStopReading } from "../feeStop";
 import { reviewComparison, scrapeReviewScreen as scrapeReviewScreenShared, utilityIdentifiersEnteredBySteps, type ReviewMismatch } from "../reviewScreenScraper";
 import { controlReadsUnanswered, pinEmptyRequiredControl, PINNED_CONTROL_ATTR, SWEPT_BLANK_ATTR, sweepEmptyRequiredControls, type EmptyRequired } from "../requiredControlSweep";
@@ -6837,7 +6837,12 @@ export class RecipeAdapter extends BasePortalAdapter {
         // label the note carries — one name for the exact-type check and the slot search below.
         const recordedLabel = String(step.slot ?? "").trim() || String(step.note ?? "").split(":").slice(1).join(":").trim();
         const requiredType = exactUploadDocType(recordedLabel);
-        if (requiredType && step.docType !== requiredType) {
+        // A forms slot ("Agreements, Form, Documents & Checklists") takes ANY of the job's forms, so a
+        // step the learn recorded with the building application is as right as one with the checklist
+        // the label's first word names (#140). Anything else must be the exact document.
+        const slotForms = formsSlotDocTypes(recordedLabel);
+        const docTypeFitsSlot = (docType: string | undefined) => !!docType && (docType === requiredType || !!slotForms?.includes(docType));
+        if (requiredType && !docTypeFitsSlot(step.docType)) {
           this.driftWarnings.push(`refused ${step.docType || "unbound file"} for "${recordedLabel.slice(0, 60)}"; this slot requires ${requiredType}`);
           this.noteUnresolved(step);
           return false;
@@ -6911,7 +6916,7 @@ export class RecipeAdapter extends BasePortalAdapter {
             const recordedLabel2 = norm(recorded?.label ?? "");
             const wantNamesDocument = !!want && !uploadTextNamesNoDocument(wanted);
             const liveExact = recorded ? exactUploadDocType(recorded.label || "") : null;
-            const liveContradicts = !!liveExact && liveExact !== step.docType;
+            const liveContradicts = !!liveExact && liveExact !== step.docType && !formsSlotDocTypes(recorded?.label || "")?.includes(step.docType || "");
             if (!recorded || liveContradicts || (wantNamesDocument && recordedLabel2 && recordedLabel2 !== "document")) {
               const secs = Math.round((Date.now() - started) / 100) / 10;
               this.driftWarnings.push(`upload "${wanted.slice(0, 48) || recordedCss}" has no matching file slot on this page after ${secs}s (${slots.length} slot(s): ${slots.map((s) => s.label.slice(0, 30)).join(" | ") || "none"}) — not attached, and not attached to any other slot`);
