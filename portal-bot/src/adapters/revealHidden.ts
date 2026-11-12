@@ -50,10 +50,36 @@ export function planHiddenReveal(): HiddenRevealPlan {
     if ((el as HTMLElement).hasAttribute("hidden")) return true;
     if (el.getAttribute("aria-hidden") === "true") return true;
     const r = (el as HTMLElement).getBoundingClientRect();
-    return r.width < 2 || r.height < 2;
+    if (r.width >= 2 && r.height >= 2) return false;
+    // A BOX WITH NO SIZE OF ITS OWN WHOSE CONTENT STILL RENDERS CONCEALS NOTHING (#176). Meridian's
+    // <main id="mainContent"> measured 0px tall — its children float — around a fully visible page,
+    // and reading it as "hidden" made it the container and the page's skip link its opener. Only a
+    // box that clips (overflow not visible) or whose descendants render nothing is shut; a
+    // display:none container still reads as shut because every descendant measures 0. Bounded.
+    if (String(st.overflow || "visible").split(/\s+/).every((v) => v === "visible")) {
+      const queue: Element[] = Array.from(el.children);
+      for (let seen = 0; queue.length && seen < 400; seen++) {
+        const child = queue.shift() as Element;
+        const cr = (child as HTMLElement).getBoundingClientRect();
+        if (cr.width >= 2 && cr.height >= 2) return false;
+        for (const g of Array.from(child.children)) queue.push(g);
+      }
+    }
+    return true;
   };
 
-  // THE OUTERMOST HIDDEN ANCESTOR, NOT THE NEAREST.
+  // A SKIP / JUMP LINK IS NEVER AN OPENER (#176): it moves focus to a landmark and opens nothing,
+  // and on Meridian "Skip to main content" (href="#mainContent") was returned as the record-type
+  // group's toggle. Read from the link's own words, aria-label and title.
+  const isSkipLink = (el: Element): boolean => {
+    const words = `${(el as HTMLElement).innerText || ""} ${el.getAttribute("aria-label") || ""} ${el.getAttribute("title") || ""}`;
+    return /\b(skip|jump)\s+(to|over|past)\b/i.test(words) || /\bskip\b[^.]{0,30}\b(navigation|nav|content|main)\b/i.test(words);
+  };
+  // A page landmark is a region, not a closed container: nothing legitimately "opens" <main>.
+  const isLandmark = (el: Element): boolean =>
+    el.matches("main, [role=main], nav, [role=navigation], header, [role=banner], footer, [role=contentinfo], body, html");
+
+  // THE OUTERMOST HIDDEN ANCESTOR, NOT THE NEAREST — AND NOT PAST THE BOUNDARY EITHER (#176).
   //
   // The first version stopped at the nearest concealed ancestor, which on any real portal is
   // an inner wrapper that nothing opens. Momentum's annotated capture shows why — reading
@@ -70,6 +96,12 @@ export function planHiddenReveal(): HiddenRevealPlan {
   // A control that opens something is associated with the boundary between hidden and
   // visible, never with a div three levels inside it. Climbing to the last hidden ancestor
   // before the first visible parent is what "the container that is closed" actually means.
+  //
+  // "Before the first visible parent" is load-bearing. The first version kept climbing past it
+  // and took ANY concealed node within twelve levels: on Meridian five visible ancestors were
+  // walked through to a 0px-tall <main>, which became "the container" and whose skip link
+  // became "the opener". Once a concealed ancestor is in hand, the first visible one ends the
+  // climb — that is the boundary.
   let container: Element | null = null;
   let why = "";
   let node: Element | null = target.parentElement;
@@ -83,6 +115,8 @@ export function planHiddenReveal(): HiddenRevealPlan {
     if (concealed(node)) {
       container = node;
       why = `inside a hidden <${node.tagName.toLowerCase()}${node.className ? `.${String(node.className).split(/\s+/)[0]}` : ""}>`;
+    } else if (container) {
+      break;
     }
     node = node.parentElement;
   }
@@ -102,15 +136,20 @@ export function planHiddenReveal(): HiddenRevealPlan {
     if (summary) return tag(summary, "summary of a closed details");
   }
 
-  const id = container.id;
+  // The container's own id, or its DIRECT wrapper's when the container has none and is the
+  // wrapper's only element — the two shapes a target attribute may legitimately point at.
+  const wrapper = container.parentElement;
+  const id = container.id || (wrapper && !isLandmark(wrapper) && wrapper.children.length === 1 ? wrapper.id : "");
   // 2. Something that explicitly says it controls this container. The strongest signal
-  //    there is, and the one an accessible portal provides on purpose.
-  if (id) {
-    const byControls = document.querySelector(`[aria-controls="${CSS.escape(id)}"]`);
+  //    there is, and the one an accessible portal provides on purpose. Never a skip/jump link,
+  //    never a hidden control, and never for a landmark (#176): a[href="#main"] is navigation.
+  if (id && !isLandmark(container)) {
+    const byControls = Array.from(document.querySelectorAll(`[aria-controls="${CSS.escape(id)}"]`))
+      .find((el) => !concealed(el) && !isSkipLink(el));
     if (byControls) return tag(byControls, "aria-controls");
-    const byTarget = document.querySelector(
+    const byTarget = Array.from(document.querySelectorAll(
       `[data-bs-target="#${CSS.escape(id)}"], [data-target="#${CSS.escape(id)}"], a[href="#${CSS.escape(id)}"]`,
-    );
+    )).find((el) => !concealed(el) && !isSkipLink(el));
     if (byTarget) return tag(byTarget, "data-target/href");
   }
 

@@ -19,7 +19,7 @@ import { applyFormatHint } from "../formatHint";
 import { scrapeReviewScreen as scrapeReviewScreenShared } from "../reviewScreenScraper";
 import { performLogin, lastRevealTrail, loginFormPresent, holdForPerson } from "./loginFlow";
 import { enterApplicationFlow, isExcludedEntryLabel, normalizeEntryLabel, chooseApplicationType, scanChoiceTiles } from "./applicationEntry";
-import { explainProgramChoice, jobClassOf, offeredLabels, programSelector, scanProgramGroups, type ProgramGroup, type ProgramJob } from "./applicationProgram";
+import { explainProgramChoice, explainRecordTypeChoice, jobClassOf, namesJobClassAndDiscipline, offeredLabels, programClassFit, programSelector, scanProgramGroups, type ProgramGroup, type ProgramJob, type RecordTypeChoice } from "./applicationProgram";
 import { planHiddenReveal, planLabelProxy } from "./revealHidden";
 import { describeTaggedToggle, GROUP_TOGGLE_CSS, recordTypeGroupNote, tagToggleByText, toggleSelectorCandidates, type GroupToggleInfo } from "./recordTypeGroup";
 import { looksLikeConsentWall, planConsentDismissal } from "./consentBanner";
@@ -2890,6 +2890,13 @@ export class AutoLearnAdapter extends BasePortalAdapter {
    *  revealed it. The walk then stops, named (stopReason record_type_closed_group): an advance pressed
    *  with nothing selected only re-asks for a record type, and did so four times on Meridian. */
   private recordTypeClosedGroup: { type: string; group: string } | null = null;
+  /** #176: NO OFFERED RECORD TYPE CAN BE TAKEN FOR THIS JOB'S CLASS — set by accelaRecordTypePass when,
+   *  with no person-verified type, the labels a preference tier matched all name the OTHER class
+   *  ("Commercial Electrical Solar Array" on a residential job) or do not settle which is ours, and
+   *  no further group could be opened. The walk then stops, named (stopReason record_type_unsettled):
+   *  DOM order is never the tie-break, and handing the page to the planner meant Continue pressed with
+   *  nothing selected. */
+  private recordTypeRefused: { reason: Exclude<RecordTypeChoice["reason"], "matched" | "unmatched">; jobClass: string; candidates: string[] } | null = null;
   /** Set when the review page's own save was still pending when the learn handed over (B3). */
   private reviewUnsavedWarning = "";
   /** THE PROJECT'S OWN SECRETS, READ BY NAME AT FILL TIME (hard rule 2). Live on PGE (2026-09-28):
@@ -6579,7 +6586,12 @@ export class AutoLearnAdapter extends BasePortalAdapter {
         return out;
       }, GROUP_TOGGLE_CSS);
     } catch { return false; }
-    const untried = (l: string): boolean => !/^non[\s-]?residential$/i.test(l) && !this.acaTypeCategoriesTried.has(l);
+    // #176: a group whose header names only the OTHER class is never opened for this job ("Commercial
+    // Solar" on a residential job would otherwise satisfy the solar preference) — programClassFit,
+    // the one class reader (#693). "Non Residential" was the hand-written case of the same rule.
+    const untried = (l: string): boolean => !/^non[\s-]?residential$/i.test(l)
+      && programClassFit(l, this.programJob) !== "contradicts"
+      && !this.acaTypeCategoriesTried.has(l);
     const ordered: string[] = [];
     // #174 — THE GROUP NAMED BY THE VERIFIED RECORD TYPE'S OWN LEADING WORDS COMES FIRST. "Residential
     // Electrical" for "Residential Electrical Solar Array": a PERSON named the type (#166), and the
@@ -6594,6 +6606,14 @@ export class AutoLearnAdapter extends BasePortalAdapter {
         .sort((a, b) => b.length - a.length)
         .forEach((l) => ordered.push(l));
     }
+    // #176 — THEN THE GROUP NAMED BY THIS JOB'S CLASS AND DISCIPLINE, derived from the job alone (no KB
+    // needed): "Residential Electrical" for a residential electrical job. Before any bare word
+    // preference — `^residential$` opened Meridian's Residential BUILDING group for an electrical job.
+    // Same discipline words as accelaRecordTypePass's tiers (recordTypeDisciplineWords).
+    const discipline = this.recordTypeDisciplineWords();
+    labels
+      .filter((l) => namesJobClassAndDiscipline(l, this.programJob, discipline) && untried(l) && !ordered.includes(l))
+      .forEach((l) => ordered.push(l));
     for (const pref of prefs) {
       const label = labels.find((l) => pref.test(l) && untried(l) && !ordered.includes(l));
       if (label) ordered.push(label);
@@ -6891,13 +6911,25 @@ export class AutoLearnAdapter extends BasePortalAdapter {
    * by the caller) opened a group — the caller re-reads the page and runs this pass again. "bail": the
    * planner takes the page — or, when recordTypeClosedGroup is set, the walk stops named.
    */
+  /** The words this run's discipline is written with on a record-type label or group header: the one
+   *  place the permitType → label-word mapping lives (electrical, else the structural track the
+   *  hand-coded adapter live-verified: county rows file electrical, city structural). */
+  private recordTypeDisciplineWord(discipline: string = this.permitDiscipline): "electrical" | "structural" {
+    return /elec/i.test(discipline) ? "electrical" : "structural";
+  }
+
+  private recordTypeDisciplineWords(discipline: string = this.permitDiscipline): RegExp {
+    return new RegExp(`\\b${this.recordTypeDisciplineWord(discipline)}\\b`, "i");
+  }
+
   private async accelaRecordTypePass(project: ProjectRecord, fields: ExtractedField[], steps: RecipeStep[], expand?: () => Promise<boolean>): Promise<"advanced" | "expanded" | "bail"> {
     const page = this.page;
     if (!page) return "bail";
-    const isElectrical = /elec/i.test(project.permitType ?? "");
+    const permitType = String(project.permitType ?? "");
+    const discipline = this.recordTypeDisciplineWords(permitType);
     const prefs: RegExp[] = [
       /solar|photovoltaic|\bpv\b/i,
-      isElectrical ? /residential\s*[-–—]?\s*electrical/i : /residential\s*[-–—]?\s*structural/i,
+      new RegExp(`residential\\s*[-–—]?\\s*${this.recordTypeDisciplineWord(permitType)}`, "i"),
     ];
     const candidates = fields.filter((f) => f.fieldType === "checkbox" || f.fieldType === "radio");
     let chosen: ExtractedField | undefined;
@@ -6906,9 +6938,34 @@ export class AutoLearnAdapter extends BasePortalAdapter {
     const verifiedTarget = this.verifiedRecordType();
     const verifiedHit = verifiedTarget ? candidates.find((f) => sameRecordType(f.label || "", verifiedTarget)) : undefined;
     if (verifiedHit) chosen = verifiedHit;
-    for (const re of prefs) {
-      if (chosen) break;
-      chosen = candidates.find((f) => re.test(f.label || ""));
+    if (!chosen) {
+      // #176 — THE JOB'S CLASS DECIDES AMONG THE PREFERENCE'S MATCHES, NEVER DOM ORDER. Accela tenants
+      // list Commercial groups first, and the first solar label on Meridian's page was "Commercial
+      // Electrical Solar Array" — for a residential job. explainRecordTypeChoice (applicationProgram.ts,
+      // the program chooser's own class rule, #693): a label naming only the other class is never
+      // eligible; among the rest the one naming this class wins, then the discipline's words; what the
+      // labels do not settle is refused — the group pass may still open the right list (lazy pages),
+      // else the walk stops named below. The event names the decision whichever way it went.
+      const jobClass = this.programJob.jobClass ?? "residential";
+      const choice = explainRecordTypeChoice(candidates.map((f) => String(f.label || "")), prefs, this.programJob, discipline);
+      this.debug?.event({
+        type: "record_type_class_decision",
+        jobClass,
+        decision: choice.reason,
+        label: choice.index !== undefined ? String(candidates[choice.index]?.label || "").slice(0, 60) : "",
+        candidates: choice.candidates.slice(0, 8).map((c) => c.slice(0, 60)),
+      });
+      if (choice.reason === "matched" && choice.index !== undefined) {
+        chosen = candidates[choice.index];
+      } else if (choice.reason === "other_class" || choice.reason === "ambiguous") {
+        if (expand && await expand()) {
+          this.debug?.event({ type: "record_type_group_expanded_for_retry", label: "", why: choice.reason });
+          return "expanded";
+        }
+        this.recordTypeRefused = { reason: choice.reason, jobClass, candidates: choice.candidates.slice(0, 12) };
+        this.debug?.event({ type: "record_type_refused_for_class", reason: choice.reason, jobClass, candidates: choice.candidates.slice(0, 8).map((c) => c.slice(0, 60)) });
+        return "bail";
+      }
     }
     if (!chosen) { this.debug?.event({ type: "record_type_bail", why: "no candidate matched the solar/discipline preference" }); return "bail"; }
     let loc = await this.locator(chosen.selector);
@@ -7752,6 +7809,22 @@ export class AutoLearnAdapter extends BasePortalAdapter {
             return {
               ...fail(steps, this.portalName, `Stopped on page ${pageCount}: the record type "${type}" is in a closed group this page would not open: ${group}. Nothing was selected and the page was not advanced (pressing Continue with no record type selected only re-asks for one). Open the group by hand or correct the record type on file, then run again; the steps before this page were recorded.`, null, pageCount, portalNotices),
               stopReason: "record_type_closed_group",
+            };
+          }
+          // #176 — NO OFFERED RECORD TYPE IS THIS JOB'S: the labels the preference matched all name the
+          // other class, or do not say which is ours, and nothing further would open. Stop named rather
+          // than take DOM order (the Coos Bay mistake in another costume) or hand the planner a page
+          // whose only move is Continue with nothing selected.
+          if (this.recordTypeRefused) {
+            const { reason, jobClass, candidates } = this.recordTypeRefused;
+            const offered = candidates.join(" | ");
+            const why = reason === "other_class"
+              ? `only the other class's record type is offered for this ${jobClass} job: ${offered}`
+              : `more than one record type fits and the labels do not say which is this ${jobClass} job's: ${offered}`;
+            this.debug?.event({ type: "record_type_unsettled_stop", page: pageCount, reason, jobClass, candidates: candidates.slice(0, 8).map((c) => c.slice(0, 60)) });
+            return {
+              ...fail(steps, this.portalName, `Stopped on page ${pageCount}: ${why}. Nothing was selected and the page was not advanced. Tick the right record type by hand, or have a person verify the record type on file for this permit, then run again; the steps before this page were recorded.`, null, pageCount, portalNotices),
+              stopReason: "record_type_unsettled",
             };
           }
         }
