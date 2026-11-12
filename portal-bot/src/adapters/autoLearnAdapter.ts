@@ -6773,6 +6773,48 @@ export class AutoLearnAdapter extends BasePortalAdapter {
   }
 
   /** #166: the recorded step + event for the verified record type just ticked (by label). */
+  /** CLICK A CATALOG ENTRY SO THE PAGE ACTUALLY MOVES (live City of Tigard run 3, Tyler EnerGov,
+   *  2026-11-12): each catalog entry is rendered TWICE (one copy per layout, one hidden by ng-show),
+   *  both `<a aria-label="Apply <type>" href="#/permit/apply/94/0/0">`; the extracted selector reached
+   *  the hidden twin, the click "succeeded" and nothing changed. The VISIBLE element with that label is
+   *  clicked; if the page has not moved within a few seconds, the entry's own same-site href (a route,
+   *  never another host) is followed. The network backstop still guards whatever that loads. */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  private async clickCatalogEntry(label: string, fallback: any, pageCount: number): Promise<boolean> {
+    const page = this.page;
+    if (!page) return false;
+    const beforeUrl = typeof page.url === "function" ? String(page.url() ?? "") : "";
+    const beforeFp = await this.pageFingerprint().catch(() => "");
+    const esc = label.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+    const byLabel = page.locator(`a[aria-label="${esc}"], button[aria-label="${esc}"], [role="button"][aria-label="${esc}"], [role="link"][aria-label="${esc}"]`);
+    let target = byLabel.filter({ visible: true }).first();
+    if (!(await target.count().catch(() => 0))) target = fallback;
+    if (!target) return false;
+    await target.scrollIntoViewIfNeeded?.({ timeout: 3000 }).catch(() => null);
+    const clicked = await target.click({ timeout: 8000 }).then(() => true).catch(() => false);
+    if (!clicked) return false;
+    const moved = async (): Promise<boolean> => {
+      const u = typeof page.url === "function" ? String(page.url() ?? "") : "";
+      if (u && u !== beforeUrl) return true;
+      const fp = await this.pageFingerprint().catch(() => "");
+      return !!fp && fp !== beforeFp;
+    };
+    for (let i = 0; i < 8; i++) { await sleep(500); if (await moved()) return true; }
+    const href = String(await target.getAttribute?.("href").catch(() => "") ?? "").trim();
+    let next = "";
+    try {
+      const u = new URL(href, beforeUrl);
+      const b = new URL(beforeUrl);
+      if (href && u.host === b.host && !/^javascript:/i.test(href)) next = u.toString();
+    } catch { /* no usable href */ }
+    this.debug?.event({ type: "record_type_catalog_click_no_move", page: pageCount, label: label.slice(0, 70), followHref: next ? "yes" : "no" });
+    if (!next) return false;
+    const went = await page.goto(next, { waitUntil: "domcontentloaded", timeout: 20000 }).then(() => true).catch(() => false);
+    if (!went) return false;
+    for (let i = 0; i < 8; i++) { await sleep(500); if (await moved()) return true; }
+    return false;
+  }
+
   private noteVerifiedRecordTypeTicked(field: ExtractedField, offeredCount: number, steps: RecipeStep[]): void {
     const label = String(field.label || "").trim();
     // A catalog's "Apply <type>" BUTTON is clicked, not checked (Tyler EnerGov's Application Assistant).
@@ -6836,10 +6878,12 @@ export class AutoLearnAdapter extends BasePortalAdapter {
       const listCount = checkables.filter((f) => this.sameRecordTypeList(f, on)).length;
       if (!this.verifiedRecordTypeTicked) {
         const loc = await this.locator(hit.selector).catch(() => null);
-        const ok = loc
-          ? await loc.check({ timeout: 10000 }).then(() => true)
-            .catch(async () => loc.click({ timeout: 8000 }).then(() => true).catch(() => false))
-          : false;
+        const ok = hit.fieldType === "button"
+          ? await this.clickCatalogEntry(String(hit.label || ""), loc, pageCount)
+          : loc
+            ? await loc.check({ timeout: 10000 }).then(() => true)
+              .catch(async () => loc.click({ timeout: 8000 }).then(() => true).catch(() => false))
+            : false;
         if (!ok) {
           // Not ticked, not recorded: the planner keeps the page, and the guard below still refuses
           // another option — a person ticks this one.
