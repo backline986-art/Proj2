@@ -43,8 +43,11 @@ const check = (label: string, ok: boolean, detail = ""): void => {
   else { failures++; console.error(`  FAIL - ${label}\n         ${detail}`); }
 };
 
-type Variant = "tigardStep1" | "step7Bubble" | "step7Submit" | "noFillable" | "textReview" | "summaryContinue";
+type Variant = "tigardStep1" | "step7Bubble" | "step7Submit" | "noFillable" | "textReview" | "summaryContinue" | "attestContinue";
 const TITLES = ["Locations", "Type", "Contacts", "More Info", "Attachments", "Signature", "Review and Submit"];
+// attestContinue (second #188 review): the filing step is "7 Attestation", current (md-active), after
+// "6 Review and Submit"; a typed declaration box and a "Continue" that POSTs the apply URL.
+const TITLES_ATTEST = ["Locations", "Type", "Contacts", "More Info", "Attachments", "Review and Submit", "Attestation"];
 const SUBMIT = "/api/selfservice/permit/submit";
 const DRAFT = "/api/selfservice/draft/save";
 // summaryContinue's filing POST: no filing word in the URL, so only the walk itself keeps it from firing.
@@ -72,9 +75,9 @@ const page = (variant: Variant): string => `<!doctype html><html><head><title>Ap
 ${variant === "summaryContinue" ? `<footer><label for="lang">Language</label> <select id="lang"><option>English</option><option>Espanol</option></select></footer>` : ""}
 <script>
 var V = ${JSON.stringify(variant)};
-var S = { step: (V === "step7Bubble" || V === "step7Submit") ? 7 : V === "summaryContinue" ? 2 : 1, applyPosts: 0, location: false, cardClicks: 0, bubbleClicks: 0, submitClicked: false, desc: "" };
+var S = { step: (V === "step7Bubble" || V === "step7Submit" || V === "attestContinue") ? 7 : V === "summaryContinue" ? 2 : 1, applyPosts: 0, location: false, cardClicks: 0, bubbleClicks: 0, submitClicked: false, desc: "" };
 window.__S = S;
-var TITLES = ${JSON.stringify(TITLES)};
+var TITLES = V === "attestContinue" ? ${JSON.stringify(TITLES_ATTEST)} : ${JSON.stringify(TITLES)};
 function stepper(){
   var h = '<div class="md-steppers-header-region"><md-steppers-header class="md-steppers-header md-steppers-horizontal" role="list">';
   for (var i = 0; i < TITLES.length; i++) {
@@ -87,6 +90,9 @@ function stepper(){
   return h + '</md-steppers-header></div>';
 }
 function body(){
+  if (S.step === 7 && V === "attestContinue") {
+    return '<h3 class="apply-steps-title">ATTESTATION</h3><p>The applicant attests the information is true.</p><div><label for="ref">Reference number (optional)</label> <input id="ref" type="text"></div>';
+  }
   if (S.step === 7 && V === "summaryContinue") {
     return '<h3 class="apply-steps-title">APPLICATION SUMMARY</h3>'
       + '<dl><dt>Location</dt><dd>1 Test St</dd><dt>Description</dt><dd>' + (S.desc || "Roof-mounted solar PV") + '</dd></dl>';
@@ -119,7 +125,7 @@ function render(){
   document.getElementById("stepper").innerHTML = stepper();
   document.getElementById("body").innerHTML = body();
   var next = document.getElementById("next");
-  next.textContent = S.step === 7 ? (V === "summaryContinue" ? "Continue" : "Submit") : "Next";
+  next.textContent = S.step === 7 ? ((V === "summaryContinue" || V === "attestContinue") ? "Continue" : "Submit") : "Next";
   document.getElementById("err").textContent = "";
   var add = document.getElementById("addLoc");
   // The card keeps no id a selector could use: strip it once it is wired (the live card had none).
@@ -129,7 +135,7 @@ function render(){
   });
 }
 document.getElementById("next").addEventListener("click", function(){
-  if (S.step === 7 && V === "summaryContinue") { S.submitClicked = true; S.applyPosts++; fetch(${JSON.stringify(APPLY)}, { method: "POST", body: "x=1" }).catch(function(){}); return; }
+  if (S.step === 7 && (V === "summaryContinue" || V === "attestContinue")) { S.submitClicked = true; S.applyPosts++; fetch(${JSON.stringify(APPLY)}, { method: "POST", body: "x=1" }).catch(function(){}); return; }
   if (S.step === 7) { S.submitClicked = true; fetch(${JSON.stringify(SUBMIT)}, { method: "POST", body: "x=1" }).catch(function(){}); return; }
   if (S.step === 1 && V === "tigardStep1" && !S.location) { document.getElementById("err").textContent = "An address is required."; return; }
   if (S.step === 2) { var d = document.getElementById("desc"); S.desc = d ? d.value : ""; if (!S.desc.trim()) { document.getElementById("err").textContent = "Description is required."; return; } }
@@ -151,14 +157,14 @@ await new Promise<void>((r) => server.listen(0, "127.0.0.1", () => r()));
 const base = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
 
 const norm = (s: unknown): string => String(s ?? "").replace(/\s+/g, " ").trim();
-const isBubble = (l: string): boolean => /^[1-7]\s+(locations|type|contacts|more info|attachments|signature|review and submit)$/i.test(norm(l));
+const isBubble = (l: string): boolean => /^[1-7]\s+(locations|type|contacts|more info|attachments|signature|review and submit|attestation)$/i.test(norm(l));
 // What the planner was asked about, per call: does the page carry the card / a Submit?
 const asked: Array<{ step: string; labels: string[] }> = [];
 const mkPlanner = (variant: Variant): LearnPlanner => async (req) => {
   const labels = req.fields.map((f) => norm(f.label));
   asked.push({ step: /REVIEW AND SUBMIT/.test(req.bodyText) ? "7" : /\bTYPE\b/.test(req.bodyText) ? "2" : "1", labels });
   const idx = (re: RegExp, type?: string): number => req.fields.findIndex((f, i) => re.test(labels[i]) && (!type || f.fieldType === type));
-  const bubble7 = req.fields.findIndex((f, i) => f.fieldType === "button" && /^7\s+review and submit$/i.test(labels[i]));
+  const bubble7 = req.fields.findIndex((f, i) => f.fieldType === "button" && /^[67]\s+review and submit$/i.test(labels[i]));
   const submit = idx(/^submit$/i, "button");
   const next = idx(/^next$/i, "button");
   const card = req.fields.findIndex((f, i) => f.fieldType !== "button" && /^add location\b/i.test(labels[i]));
@@ -183,7 +189,7 @@ const readState = (pg: Page): Promise<St> => pg.evaluate(() => ({ ...(window as 
   .catch((e) => ({ err: String(e) })) as Promise<St>;
 
 // "patchedNode" is not a learn: it drives fieldClickLocator + clickResilient directly (N2, below).
-const ALL: string[] = ["tigardStep1", "step7Bubble", "step7Submit", "noFillable", "textReview", "summaryContinue", "patchedNode", "terminalStepReading"];
+const ALL: string[] = ["tigardStep1", "step7Bubble", "step7Submit", "noFillable", "textReview", "summaryContinue", "attestContinue", "patchedNode", "terminalStepReading"];
 const which = (process.argv[2] ? process.argv[2].split(",") : ALL) as Variant[];
 const browser = await chromium.launch();
 try {
@@ -249,6 +255,10 @@ try {
         st.step === 7 && r?.reachedReview === true && steps.some((s) => /^advance: Next/i.test(norm(s.note))), detail);
       check(`MUST-PASS ${tag}: the review stop records the real Submit as the one final submit`,
         finals.length === 1 && /final submit: Submit\b/.test(norm(finals[0].note)), detail);
+    } else if (name === "attestContinue") {
+      check(`MUST-STAY-REVIEW ${tag}: a current "7 Attestation" step is a closing step — no demotion, its filing "Continue" never clicked, the ${APPLY} POST never arrives`,
+        r?.reachedReview === true && demoted.length === 0 && st.step === 7 && st.applyPosts === 0 && !posts.includes(APPLY)
+          && !steps.some((s) => /^advance: Continue/i.test(norm(s.note))), `applyHits=${posts.filter((p) => p === APPLY).length} ${detail}`);
     } else if (name === "summaryContinue") {
       check(`MUST-STAY-REVIEW ${tag}: the summary page (no current-step marker, a live footer select) is the review stop — no demotion, its filing "Continue" never clicked, the ${APPLY} POST never arrives`,
         r?.reachedReview === true && demoted.length === 0 && st.step === 7 && st.applyPosts === 0 && !posts.includes(APPLY)

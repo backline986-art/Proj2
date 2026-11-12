@@ -8652,7 +8652,13 @@ export class AutoLearnAdapter extends BasePortalAdapter {
           const control = String(fsField.label ?? "").replace(/\s+/g, " ").trim().slice(0, 60);
           const onlyNavigatorEvidence = plan.atReview === true && !isReviewPage && !reviewSignals && !reviewShaped;
           const activeSteps = reading?.activeSteps ?? [];
-          const currentStepIsForm = activeSteps.length > 0 && reading?.activeTerminal === false;
+          // A CLOSING STEP IS NEVER A FORM STEP HERE (second #188 review): the shared terminal words
+          // (review / summary / confirm / certify / sign / submit / pay) miss a filing step named
+          // "Attestation", "Declaration", "Acknowledgement", "Finish", "Complete", "Fees" or
+          // "Checkout". Demotion is the only direction that can walk past a filing page, so this
+          // door reads those words too. The shared reading itself is unchanged.
+          const closingStep = /\b(attest|declar|acknowledg|finish|complet|fees?\b|checkout|payment|agree)/i;
+          const currentStepIsForm = activeSteps.length > 0 && reading?.activeTerminal === false && !activeSteps.some((s) => closingStep.test(s));
           const formStep = hasFillable && !isDashboard && currentStepIsForm;
           if (onlyNavigatorEvidence && formStep) {
             plan = { ...plan, atReview: false, finalSubmitSelectorIndex: undefined };
