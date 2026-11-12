@@ -1264,6 +1264,28 @@ export async function revealLoginForm(page: Page): Promise<boolean> {
  * newsletter Email + Subscribe box, the header link is still there — so the old order stands
  * (reveal the real form first) and the username is never typed into the newsletter box.
  */
+/** The visible submit control the field's own <form> owns, when exactly one reads as the step's
+ *  advance (never "Sign in with …", help, create, forgot, unlock). null when the field has no form,
+ *  no such control, or more than one. */
+const NOT_A_STEP_SUBMIT = /\bwith\s+(google|microsoft|apple|facebook|linkedin|github)\b|\bhelp\b|\bcreate\b|\bregister\b|\bforgot\b|\bunlock\b|\bsign\s*up\b/i;
+async function ownedSubmitOf(field: Locator): Promise<Locator | null> {
+  try {
+    const candidates = field.locator("xpath=ancestor::form[1]").locator("button[type=submit], button:not([type]), input[type=submit]");
+    const n = await candidates.count().catch(() => 0);
+    const fit: Locator[] = [];
+    for (let i = 0; i < Math.min(n, 6); i++) {
+      const c = candidates.nth(i);
+      if (!(await c.isVisible().catch(() => false))) continue;
+      const words = String(await c.evaluate((el: Element) => [
+        (el as HTMLElement).innerText || "", (el as HTMLInputElement).value || "", el.getAttribute("aria-label") || "", el.getAttribute("title") || "",
+      ].join(" ")).catch(() => "") ?? "");
+      if (NOT_A_STEP_SUBMIT.test(words)) continue;
+      fit.push(c);
+    }
+    return fit.length === 1 ? fit[0] : null;
+  } catch { return null; }
+}
+
 async function identifierFirstStep(
   page: Page,
   opts: { preReveal?: boolean } = {},
@@ -1271,7 +1293,14 @@ async function identifierFirstStep(
   if (await loginFormPresent(page)) return null;
   const idField = await firstVisible(page, USERNAME_CANDIDATES, { fillable: true });
   if (!idField) return null;
-  const nextCtl = await firstVisible(page, NEXT_STEP_CANDIDATES, { clickable: true, submit: true });
+  // THE IDENTIFIER'S OWN FORM SUBMIT FIRST (live City of Mountain Home ID, OpenGov, 2026-11-12):
+  // OpenGov's step-1 button reads "Continue" but its accessible name is aria-label "login button",
+  // and the page's image carousel carries "Next Image" / "Previous Image" buttons — a page-wide
+  // name search for "Next"/"Continue" can land on the carousel, leaving the email typed and the
+  // step never advanced. The submit control the identifier field's own <form> owns is the step's
+  // next control (#137 applies the same form-ownership rule to the password step); a social /
+  // help / create / forgot control is never it. Page-wide candidates remain the fallback.
+  const nextCtl = (await ownedSubmitOf(idField)) ?? await firstVisible(page, NEXT_STEP_CANDIDATES, { clickable: true, submit: true });
   if (!nextCtl) return null;
   if (!(await loginWordingPresent(page))) return null;
   if (opts.preReveal && await wordedRevealTriggerVisible(page, nextCtl)) return null;

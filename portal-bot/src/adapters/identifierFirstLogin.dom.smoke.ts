@@ -248,6 +248,26 @@ const LANDING = `<!doctype html><html><head><title>City Permit Center</title></h
   </script>
 </body></html>`;
 
+// OPENGOV-SHAPED identifier-first sign-in (live City of Mountain Home ID, 2026-11-12): the form
+// paints late (a React mount), an image carousel sits beside it whose buttons are "Previous Image" /
+// "Next Image" / "Pause automatic rotation", and step 1's submit reads "Continue" but is NAMED
+// aria-label "login button". The carousel buttons report each press to the server (a hit is the
+// failure). Step 2 is a password page in the same shape.
+const OG_CAROUSEL = '<section aria-label="Image carousel"><button aria-label="Previous Image" title="Previous Image" type="button" onclick="fetch(\'/og-carousel-hit\')">&lt;</button>' +
+  '<button aria-label="Next Image" title="Next Image" type="button" onclick="fetch(\'/og-carousel-hit\')">&gt;</button>' +
+  '<button aria-label="Pause automatic rotation" type="button" onclick="fetch(\'/og-carousel-hit\')">||</button></section>';
+const OG_STEP1_FORM = '<form novalidate aria-label="Sign in" action="/og-login/password" method="get"><h1>Sign in to your account</h1><label for="email">Email</label>' +
+  '<input type="email" id="email" placeholder="Email address" name="email"><button type="submit" aria-label="login button">Continue</button></form>';
+const OG_STEP1 = `<!doctype html><html><head><title>OpenGov</title></head><body><div id="root"></div><script>
+  setTimeout(function () { document.getElementById('root').innerHTML = ${JSON.stringify(OG_CAROUSEL + OG_STEP1_FORM)}; }, 1500);
+</script></body></html>`;
+// Step 2 echoes the identifier as the account being signed in (with an "Edit" link), as the live one does.
+const OG_STEP2 = (email: string) => `<!doctype html><html><head><title>OpenGov</title></head><body>${OG_CAROUSEL}
+  <form aria-label="Sign in" action="/og-login/done" method="get"><h1>Enter your password</h1>
+  <div><span class="identifier">${email.replace(/[<>&"]/g, "")}</span> <a href="/og-login">Edit</a></div>
+  <input type="hidden" name="username" value="${email.replace(/[<>&"]/g, "")}"><label for="password">Password</label>
+  <input type="password" id="password" name="password"><button type="submit" aria-label="login button">Sign in</button></form></body></html>`;
+
 const server = http.createServer((q, r) => {
   const url = q.url || "";
   const send = (body: string) => { r.writeHead(200, { "Content-Type": "text/html" }); r.end(body); };
@@ -257,6 +277,9 @@ const server = http.createServer((q, r) => {
   if (url.startsWith("/plain-login")) return send(PLAIN);
   if (url.startsWith("/permit-center")) return send(LANDING);
   if (url.startsWith("/home")) return send(PLAIN_HOME);
+  if (url.startsWith("/og-login/password")) return send(OG_STEP2(new URL(url, "http://x").searchParams.get("email") || ""));
+  if (url.startsWith("/og-login/done")) { r.writeHead(302, { Location: "/home" }); return r.end(); }
+  if (url.startsWith("/og-login")) return send(OG_STEP1);
   localHits.push(url);
   return send("<html><body>not here</body></html>");
 });
@@ -414,6 +437,18 @@ await check("MUST-PASS: a plain one-page login", async () => {
   await context.close();
 });
 
+await check("MUST-PASS / MUST-EXCLUDE (OpenGov shape): a late form's own 'login button' submit advances step 1; the carousel's Next Image is never pressed", async () => {
+  localHits.length = 0;
+  const { context, page } = await freshPage();
+  await page.goto(`http://127.0.0.1:${port}/og-login?state=abc`);
+  const res = await performLogin(page, { username: "og-user@example.test", password: "Og-Pa55-word" });
+  results.push(res.message);
+  assert.equal(res.status, "logged_in", `got ${res.status}: ${res.message}`);
+  assert.match(page.url(), /\/home/);
+  assert.deepEqual(localHits.filter((h) => h.startsWith("/og-carousel-hit")), [], "a carousel control was pressed");
+  await context.close();
+});
+
 await check("MUST-PASS (Lee County shape): the ACA login inside a cross-origin IFRAME is found, filled and signed in", async () => {
   localHits.length = 0;
   const { context, page } = await freshPage();
@@ -442,7 +477,7 @@ await check("MUST-PASS / MUST-EXCLUDE: a landing page reveals its real login; th
 });
 
 await check("MUST-EXCLUDE: neither the username nor any password appears in a log line or a result message", async () => {
-  const secrets = [GOOD_PW, MFA_PW, BAD_PW, "plain-pass-123", "Lee-Pa55-word", "landing-pass-1", USER];
+  const secrets = [GOOD_PW, MFA_PW, BAD_PW, "plain-pass-123", "Lee-Pa55-word", "landing-pass-1", "Og-Pa55-word", USER];
   for (const s of secrets) {
     const inLog = logLines.find((l) => l.includes(s));
     assert.equal(inLog, undefined, `a secret reached a log line: ${String(inLog).slice(0, 120)}`);
