@@ -1497,6 +1497,14 @@
                 <label>Username<input id="cred_username" autocomplete="off" /></label>
                 <label>Password<input id="cred_password" type="password" autocomplete="new-password" /></label>
               </div>
+              <div class="form-row">
+                <label>Who pays this portal's fees?<select id="cred_feeResponsibility">
+                  <option value="card-on-file" selected>Client's card saved in the portal</option>
+                  <option value="customer-pays">Client pays it themselves</option>
+                  <option value="mailed-check">Mailed check</option>
+                  <option value="keelix-pays">Keelix pays, then bills it at cost</option>
+                </select></label>
+              </div>
               <div class="actions">
                 <button type="button" id="addCredentialBtn" class="secondary"><i data-lucide="key-round"></i><span>Save login</span></button>
                 <span id="credStatus" class="muted clients-creds-hint"></span>
@@ -1565,6 +1573,14 @@
           <div class="form-row">
             <label>Username<input id="pl_username" autocomplete="off" /></label>
             <label>Password<input id="pl_password" type="password" autocomplete="new-password" /></label>
+          </div>
+          <div class="form-row">
+            <label>Who pays this portal's fees?<select id="pl_feeResponsibility">
+              <option value="card-on-file" selected>Client's card saved in the portal</option>
+              <option value="customer-pays">Client pays it themselves</option>
+              <option value="mailed-check">Mailed check</option>
+              <option value="keelix-pays">Keelix pays, then bills it at cost</option>
+            </select></label>
           </div>
           <div class="actions">
             <button type="button" id="plSaveBtn" class="primary"><i data-lucide="key-round"></i><span>Save login (encrypted)</span></button>
