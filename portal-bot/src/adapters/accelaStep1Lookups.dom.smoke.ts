@@ -29,7 +29,18 @@
 // Fails without the fix (the lookup pass commented out): the nomatch walk never presses Find Address
 // and stops on "Parcel Number:" as required-never-filled with no lookup step recorded.
 //
+// MUST-PASS popupcandidates: Find Address opens a POPUP WINDOW listing two addresses → the job's row
+//           is picked in the popup (recorded with frame "popup"), the parcel lands on the opener,
+//           review reached; the recipe replays (the popup adopted by replay's row pick).
+// MUST-PASS postbackcandidates: Find Address is a FULL-PAGE POSTBACK that re-renders the page with the
+//           list below the section → the sections are re-stamped, the row picked, review reached;
+//           replays.
+// MUST-PASS postbacknone: the postback re-renders with "No addresses found." → no effect with the
+//           reloaded wording, and the stop names BOTH the Parcel section (Find Address reloaded, FIND
+//           PARCEL not pressed — nothing typed) and the Contractor section.
+//
 // Run: npx tsx portal-bot/src/adapters/accelaStep1Lookups.dom.smoke.ts
+// dom-smoke-timeout: 1500
 import "../smokeArtifactDirs";
 import http from "node:http";
 import { chromium, type Page } from "playwright";
@@ -66,19 +77,25 @@ ${script}
 
 const pages = (variant: string, path: string, q: URLSearchParams): string | null => {
   if (/CapEdit\.aspx$/i.test(path) && q.get("stepNumber") === "1") {
-    const contractor = variant === "nomatch" ? section("Contractor",
+    // A full-page postback re-renders the page with what was typed and the search's answer.
+    const esc = (s: string): string => s.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c] as string));
+    const found = q.get("found") || "";
+    const typedNo = esc(q.get("no") || "");
+    const typedNm = esc(q.get("nm") || "");
+    const LIST = `<table id="${P}_WorkLocationEdit_gdvAddress"><tr><td><a href="javascript:void(0);" class="pick" data-p="R1234567890">Select</a></td><td>33 BROADWAY AVE MERIDIAN ID 83642 CITY APPLICATIONS</td></tr><tr><td><a href="javascript:void(0);" class="pick" data-p="R9999999999">Select</a></td><td>33 BROADWAY CT NAMPA ID 83651 CITY APPLICATIONS</td></tr></table>`;
+    const contractor = /^(nomatch|postbacknone|modalnone)$/.test(variant) ? section("Contractor",
       "For Residential permits, if no contractor and pulling permit as Property Owner, please indicate by clicking look up and search property owner under business name.",
       `${validator("License_409Edit")}<div id="contractorRecord"></div>
        <a id="${P}_License_409Edit_btnAddNewLP" title="Add New" href="javascript:void(0);"><span>Add New</span></a>
        <a id="${P}_License_409Edit_btnLookUpLP" title="Look Up" href="javascript:void(0);"><span>Look Up</span></a>`) : "";
     return shell("Accela Citizen Access", `<h1 class="ACA_Title_Color">Residential Electrical Solar Array</h1><p>Step 1: Application Information &gt; Application Details</p><p>* indicates a required field.</p>
     ${section("Site Address", 'TO USE: Enter a Street Number and Street Name. Click on "FIND ADDRESS" and all other fields will populate automatically.', `
-      <div class="ACA_Form"><span class="ACA_Required_Indicator">*</span><label for="${P}_WorkLocationEdit_txtStreetNo">Street No.:</label> <input id="${P}_WorkLocationEdit_txtStreetNo" name="${P}$WorkLocationEdit$txtStreetNo" title="Required" aria-required="true"></div>
-      <div class="ACA_Form"><span class="ACA_Required_Indicator">*</span><label for="${P}_WorkLocationEdit_txtStreetName">Street Name:</label> <input id="${P}_WorkLocationEdit_txtStreetName" name="${P}$WorkLocationEdit$txtStreetName" title="Required" aria-required="true"></div>
+      <div class="ACA_Form"><span class="ACA_Required_Indicator">*</span><label for="${P}_WorkLocationEdit_txtStreetNo">Street No.:</label> <input id="${P}_WorkLocationEdit_txtStreetNo" name="${P}$WorkLocationEdit$txtStreetNo" title="Required" aria-required="true" value="${typedNo}"></div>
+      <div class="ACA_Form"><span class="ACA_Required_Indicator">*</span><label for="${P}_WorkLocationEdit_txtStreetName">Street Name:</label> <input id="${P}_WorkLocationEdit_txtStreetName" name="${P}$WorkLocationEdit$txtStreetName" title="Required" aria-required="true" value="${typedNm}"></div>
       <input type="hidden" id="${P}_WorkLocationEdit_txtRefAddressId" value="">
       <ul class="addressedit_button_section"><li><a id="${P}_WorkLocationEdit_btnSearch" title="Find Address" href="javascript:void(0);"><span>Find Address</span></a></li>
       <li><a id="${P}_WorkLocationEdit_btnClearAddress" title="Clear" href="javascript:void(0);"><span>Clear</span></a></li></ul>
-      <div id="addrResults"></div><div id="addrMsg"></div>`)}
+      <div id="addrResults">${found === "1" ? LIST : ""}</div><div id="addrMsg">${found === "none" ? "No addresses found." : ""}</div>`)}
     ${section("Parcel", 'TO USE: Enter Parcel Number, i.e., R1000000000. Click on "FIND PARCEL"', `
       <div class="ACA_Form"><span class="ACA_Required_Indicator">*</span><label for="${P}_ParcelEdit_txtParcelNo">Parcel Number:</label> <input id="${P}_ParcelEdit_txtParcelNo" name="${P}$ParcelEdit$txtParcelNo" title="Required" aria-required="true"></div>
       <a id="${P}_ParcelEdit_btnSearch" title="FIND PARCEL" href="javascript:void(0);"><span>FIND PARCEL</span></a> <a id="${P}_ParcelEdit_btnClear" title="Clear" href="javascript:void(0);"><span>Clear</span></a>`)}
@@ -91,22 +108,46 @@ const pages = (variant: string, path: string, q: URLSearchParams): string | null
       <div class="ACA_Form"><span class="ACA_Required_Indicator">*</span><label for="${P}_AppSpec_txt_0_4">Number of panels:</label> <input id="${P}_AppSpec_txt_0_4" title="Required" aria-required="true"></div>`)}
     <div id="errs"></div>
     ${CONT}
-    <div id="dlgWrap" style="display:none"><a id="ACADialogFrame_Close" title="Close" href="javascript:void(0);">Close</a><iframe name="ACADialogFrame" id="ACADialogFrame" src="about:blank" style="width:600px;height:300px"></iframe></div>`,
+    <div id="dlgWrap" style="display:none"><a id="ACADialogFrame_Close" title="Close" href="javascript:void(0);">Close</a><iframe name="ACADialogFrame" id="ACADialogFrame" src="about:blank" style="width:600px;height:300px"></iframe></div>
+    <div id="modalMask" class="ACA_MaskDiv" style="display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,.3)"></div>
+    <div id="addrModal" class="ACA_Dialog" role="dialog" aria-modal="true" style="display:none;position:fixed;top:80px;left:120px;width:640px;background:#fff;border:1px solid #888;padding:12px">
+      <h1>Address Search Result List</h1> <a id="modalClose" title="Close" href="javascript:void(0);">×</a>
+      <h2>Addresses</h2><p id="modalCount"></p>
+      <table id="addrModalTable"><thead><tr><th></th><th>Address</th><th>City</th><th>State</th><th>Zip</th></tr></thead><tbody id="modalRows"></tbody></table>
+      <a id="modalSelect" href="javascript:void(0);" title="Select"><span>Select</span></a> <a id="modalCancel" href="javascript:void(0);" title="Cancel"><span>Cancel</span></a>
+    </div>`,
     `var V = ${JSON.stringify(variant)};
     var el = function(s){ return document.getElementById("${P}_" + s); };
     var fillParcel = function(){ el("ParcelEdit_txtParcelNo").value = "R1234567890"; el("WorkLocationEdit_txtRefAddressId").value = "A-100"; };
+    var bindPicks = function(){ Array.prototype.forEach.call(document.querySelectorAll("a.pick"), function(a){ a.onclick = function(){ S.rowPicks++; S.pickedParcel = a.getAttribute("data-p"); save(); setTimeout(function(){ el("ParcelEdit_txtParcelNo").value = a.getAttribute("data-p"); el("WorkLocationEdit_txtRefAddressId").value = "A-100"; document.getElementById("addrResults").innerHTML = ""; }, 200); return false; }; }); };
+    bindPicks();
     el("WorkLocationEdit_btnSearch").onclick = function(){
       S.finds++; save();
       var no = el("WorkLocationEdit_txtStreetNo").value.trim(), nm = el("WorkLocationEdit_txtStreetName").value.trim().toLowerCase();
       var hit = no === "33" && nm && "broadway".indexOf(nm) === 0;
+      if (V === "postbackcandidates" || V === "postbacknone") {
+        // ACA's __doPostBack: a loading overlay, then the whole page comes back re-rendered.
+        var ov = document.createElement("div"); ov.id = "divLoadingTemplate"; ov.className = "ACA_Loading_Message"; ov.textContent = "Loading..."; ov.style.cssText = "position:fixed;top:0;left:0;width:100%;height:40px;background:#eee"; document.body.appendChild(ov);
+        setTimeout(function(){ location.href = "/permits/Cap/CapEdit.aspx?stepNumber=1&${MOD}&found=" + ((hit && V === "postbackcandidates") ? "1" : "none") + "&no=" + encodeURIComponent(no) + "&nm=" + encodeURIComponent(el("WorkLocationEdit_txtStreetName").value.trim()); }, 400);
+        return false;
+      }
       setTimeout(function(){
         if (!hit) { document.getElementById("addrMsg").textContent = "Address not found."; return; }
         if (V === "dialogcandidates") {
           document.getElementById("ACADialogFrame").src = "/permits/Dialog.aspx?kind=address";
           document.getElementById("dlgWrap").style.display = "block";
+        } else if (V === "popupcandidates") {
+          window.open("/permits/Dialog.aspx?kind=address&popup=1", "AddrPopup", "width=640,height=420");
+        } else if (V === "modalcandidates" || V === "modalnone") {
+          // Boise's shape: an in-document modal, a RADIO per row, one Select button, Cancel and a close.
+          var rows = V === "modalnone" ? "" : '<tr><td><input type="radio" name="addrPick" value="R9999999999"></td><td>33 BROADWAY AVE, B C O T, City Hall Annex</td><td>MERIDIAN</td><td>ID</td><td>83642</td></tr><tr><td><input type="radio" name="addrPick" value="R1234567890"></td><td>33 BROADWAY AVE</td><td>MERIDIAN</td><td>ID</td><td>83642</td></tr>';
+          document.getElementById("modalMask").style.display = "block";
+          document.getElementById("addrModal").style.display = "block";
+          document.getElementById("modalRows").innerHTML = rows;
+          document.getElementById("modalCount").textContent = V === "modalnone" ? "Showing 0-0 of 0" : "Showing 1-2 of 2";
         } else if (V === "candidates") {
-          document.getElementById("addrResults").innerHTML = '<table id="${P}_WorkLocationEdit_gdvAddress"><tr><td><a href="javascript:void(0);" class="pick" data-p="R1234567890">Select</a></td><td>33 BROADWAY AVE MERIDIAN ID 83642 CITY APPLICATIONS</td></tr><tr><td><a href="javascript:void(0);" class="pick" data-p="R9999999999">Select</a></td><td>33 BROADWAY CT NAMPA ID 83651 CITY APPLICATIONS</td></tr></table>';
-          Array.prototype.forEach.call(document.querySelectorAll("a.pick"), function(a){ a.onclick = function(){ S.rowPicks++; S.pickedParcel = a.getAttribute("data-p"); save(); setTimeout(function(){ el("ParcelEdit_txtParcelNo").value = a.getAttribute("data-p"); el("WorkLocationEdit_txtRefAddressId").value = "A-100"; document.getElementById("addrResults").innerHTML = ""; }, 200); return false; }; });
+          document.getElementById("addrResults").innerHTML = ${JSON.stringify(LIST)};
+          bindPicks();
         } else { fillParcel(); }
       }, 300);
       return false;
@@ -117,18 +158,27 @@ const pages = (variant: string, path: string, q: URLSearchParams): string | null
       setTimeout(function(){ document.getElementById("applicantRecord").innerHTML = '<div>Permit Tech<br>Keelix Test Co<br>permits@example.test</div><a id="${P}_Applicant_410Edit_btnEdit" title="Edit" href="javascript:void(0);"><span>Edit</span></a>'; el("Applicant_410Edit_btnAddFromSaved").style.display = "none"; }, 250);
       return false;
     };
-    if (V === "nomatch") el("License_409Edit_btnLookUpLP").onclick = function(){
+    if (/^(nomatch|postbacknone)$/.test(V)) el("License_409Edit_btnLookUpLP").onclick = function(){
       S.lookups++; save();
       document.getElementById("ACADialogFrame").src = "/permits/Dialog.aspx?kind=licensee";
       document.getElementById("dlgWrap").style.display = "block";
       return false;
     };
     document.getElementById("ACADialogFrame_Close").onclick = function(){ document.getElementById("dlgWrap").style.display = "none"; return false; };
+    var closeModal = function(){ document.getElementById("modalMask").style.display = "none"; document.getElementById("addrModal").style.display = "none"; S.modalClosed = (S.modalClosed || 0) + 1; save(); return false; };
+    document.getElementById("modalClose").onclick = closeModal;
+    document.getElementById("modalCancel").onclick = closeModal;
+    document.getElementById("modalSelect").onclick = function(){
+      var r = document.querySelector("#modalRows input[type=radio]:checked");
+      S.modalSelects = (S.modalSelects || 0) + 1; if (r) { S.rowPicks++; S.pickedParcel = r.value; } save();
+      if (r) setTimeout(function(){ el("ParcelEdit_txtParcelNo").value = r.value; el("WorkLocationEdit_txtRefAddressId").value = "A-100"; closeModal(); }, 200);
+      return false;
+    };
     el("actionBarBottom_btnContinue").onclick = function(){
       S.continues++; S.parcelAtContinue = el("ParcelEdit_txtParcelNo").value; S.applicantAtContinue = document.getElementById("applicantRecord").textContent.trim(); save();
       var errs = [];
       if (!el("ParcelEdit_txtParcelNo").value.trim()) errs.push("Parcel Number: Required");
-      if (V === "nomatch" && !document.getElementById("contractorRecord").textContent.trim()) errs.push("Contractor - This section is required. Please add one record.");
+      if (/^(nomatch|postbacknone)$/.test(V) && !document.getElementById("contractorRecord").textContent.trim()) errs.push("Contractor - This section is required. Please add one record.");
       if (!document.getElementById("applicantRecord").textContent.trim()) errs.push("Applicant - This section is required. Please add one record.");
       if (!el("DetailInfoEdit_txtApplicationName").value.trim()) errs.push("Application Name: Required");
       if (errs.length) { document.getElementById("errs").innerHTML = errs.length + " error(s) occurred on current page. " + errs.join(" "); return false; }
@@ -143,12 +193,13 @@ const pages = (variant: string, path: string, q: URLSearchParams): string | null
       <tr><td><a href="javascript:void(0);" class="pick" data-p="R9999999999">Select</a></td><td>33 BROADWAY CT NAMPA ID 83651 CITY APPLICATIONS</td></tr>
     </table>
     <script>
+      var POPUP = ${q.get("popup") === "1" ? "true" : "false"};
       Array.prototype.forEach.call(document.querySelectorAll("a.pick"), function(a){ a.onclick = function(){
-        var p = window.parent; p.__S.rowPicks++; p.__S.pickedParcel = a.getAttribute("data-p"); p.save();
+        var p = POPUP ? window.opener : window.parent; p.__S.rowPicks++; p.__S.pickedParcel = a.getAttribute("data-p"); p.save();
         setTimeout(function(){
           p.document.getElementById("${P}_ParcelEdit_txtParcelNo").value = a.getAttribute("data-p");
           p.document.getElementById("${P}_WorkLocationEdit_txtRefAddressId").value = "A-100";
-          p.document.getElementById("dlgWrap").style.display = "none";
+          if (POPUP) window.close(); else p.document.getElementById("dlgWrap").style.display = "none";
         }, 200);
         return false;
       }; });
@@ -220,7 +271,8 @@ let candidateSteps: RecipeStep[] = [];
 let dialogCandidateSteps: RecipeStep[] = [];
 let nomatchSteps: RecipeStep[] = [];
 try {
-  for (const variant of ["nomatch", "candidates", "dialogcandidates"]) {
+  const recordedByVariant = new Map<string, RecipeStep[]>();
+  for (const variant of ["nomatch", "candidates", "dialogcandidates", "popupcandidates", "postbackcandidates", "postbacknone", "modalcandidates", "modalnone"]) {
     const ctx = await browser.newContext();
     ctx.setDefaultTimeout(8000);
     await ctx.addCookies([{ name: "v", value: variant, url: base }]);
@@ -251,14 +303,25 @@ try {
     const applicantNow = st.applicant ?? st.applicantAtContinue;
     const findStep = steps.find((s) => s.action === "click" && /^lookup: Find Address/.test(String(s.note ?? "")));
     const autofillStep = steps.find((s) => s.action === "click" && /^lookup: Autofill/.test(String(s.note ?? "")));
+    recordedByVariant.set(variant, steps);
     check(`${variant}: 0 Enter presses, 0 filing requests, FIND PARCEL never pressed`, st.enters === 0 && filings === 0 && st.parcelFinds === 0, `enters=${String(st.enters)} filings=${filings} parcelFinds=${String(st.parcelFinds)} POSTs=[${posts.join(",")}]`);
-    check(`MUST-PASS ${variant}: Find Address pressed once, the parcel populated by the page, and NO typed parcel anywhere in the steps`,
-      st.finds === 1 && parcelNow === "R1234567890" && !stepsJson.includes("R1234567890") && !steps.some((s) => s.action === "fill" && /parcel/i.test(String(s.note ?? "") + String(s.field ?? ""))),
-      `finds=${String(st.finds)} parcel=${String(parcelNow)} notes=${JSON.stringify(notes)}`);
-    check(`MUST-PASS ${variant}: the recorded step is the BUTTON click by its label, with a css fallback, before any Autofill step`,
-      !!findStep && findStep.selector?.name === "Find Address" && findStep.selector?.exact === true && (findStep.selector?.fallbacks ?? []).some((f) => /btnSearch/.test(String(f.css ?? "")))
-        && (!autofillStep || steps.indexOf(findStep) < steps.indexOf(autofillStep)),
-      `findStep=${JSON.stringify(findStep)}`);
+    if (variant === "modalnone") {
+      check("MUST-PASS modalnone: Find Address pressed once (a modal with zero rows), the modal CLOSED by the pass, the parcel stays blank, NO Find Address step kept",
+        st.finds === 1 && Number(st.modalClosed ?? 0) >= 1 && !parcelNow && !findStep && !stepsJson.includes("R1234567890"),
+        `finds=${String(st.finds)} modalClosed=${String(st.modalClosed)} parcel=${String(parcelNow)} notes=${JSON.stringify(notes)}`);
+    } else if (variant === "postbacknone") {
+      check("MUST-PASS postbacknone: Find Address pressed once (the page reloaded with nothing found), the parcel stays blank, NO Find Address step kept, no typed parcel",
+        st.finds === 1 && !parcelNow && !findStep && !stepsJson.includes("R1234567890") && !steps.some((s) => s.action === "fill" && /parcel/i.test(String(s.note ?? "") + String(s.field ?? ""))),
+        `finds=${String(st.finds)} parcel=${String(parcelNow)} notes=${JSON.stringify(notes)}`);
+    } else {
+      check(`MUST-PASS ${variant}: Find Address pressed once, the parcel populated by the page, and NO typed parcel anywhere in the steps`,
+        st.finds === 1 && parcelNow === "R1234567890" && !stepsJson.includes("R1234567890") && !steps.some((s) => s.action === "fill" && /parcel/i.test(String(s.note ?? "") + String(s.field ?? ""))),
+        `finds=${String(st.finds)} parcel=${String(parcelNow)} notes=${JSON.stringify(notes)}`);
+      check(`MUST-PASS ${variant}: the recorded step is the BUTTON click by its label, with a css fallback, before any Autofill step`,
+        !!findStep && findStep.selector?.name === "Find Address" && findStep.selector?.exact === true && (findStep.selector?.fallbacks ?? []).some((f) => /btnSearch/.test(String(f.css ?? "")))
+          && (!autofillStep || steps.indexOf(findStep) < steps.indexOf(autofillStep)),
+        `findStep=${JSON.stringify(findStep)}`);
+    }
     check(`MUST-PASS ${variant}: Autofill pressed once and the Applicant section holds a record; recorded by label with populates naming the section`,
       st.autofills === 1 && /Keelix Test Co/.test(String(applicantNow)) && !!autofillStep && autofillStep.selector?.name === "Autofill" && (autofillStep.populates ?? []).includes("Applicant"),
       `autofills=${String(st.autofills)} applicant=${String(applicantNow)} autofillStep=${JSON.stringify(autofillStep)}`);
@@ -272,13 +335,27 @@ try {
       check("MUST-PASS nomatch: the walk stops NAMED on the Contractor section only (not Parcel, not Applicant), stopReason required_blank, Continue never pressed",
         r?.ok === false && r?.stopReason === "required_blank" && /"Contractor" section/.test(msg) && /Look Up/.test(msg) && !/Applicant|Parcel Number/.test(msg.replace(/the steps before this page were recorded\./, "")) && st.continues === 0 && /CapEdit/.test(where),
         `ok=${String(r?.ok)} stopReason=${String(r?.stopReason)} continues=${String(st.continues)} at=${where} msg=${msg}`);
+    } else if (variant === "modalnone") {
+      check("MUST-PASS modalnone: the stop names the Parcel section (Find Address changed nothing, FIND PARCEL not pressed — nothing typed) AND the Contractor section; no modal left open; Continue never pressed",
+        r?.ok === false && r?.stopReason === "required_blank" && /"Parcel" section/.test(msg) && /"Contractor" section/.test(msg) && /nothing typed to search by/.test(msg) && st.continues === 0 && /CapEdit/.test(where),
+        `ok=${String(r?.ok)} stopReason=${String(r?.stopReason)} continues=${String(st.continues)} at=${where} msg=${msg}`);
+    } else if (variant === "postbacknone") {
+      check("MUST-PASS postbacknone: the stop names BOTH the Parcel section (Find Address reloaded the page, FIND PARCEL not pressed — nothing typed) AND the Contractor section, stopReason required_blank, Continue never pressed",
+        r?.ok === false && r?.stopReason === "required_blank" && /"Parcel" section/.test(msg) && /"Contractor" section/.test(msg) && /reloaded the page/.test(msg) && /nothing typed to search by/.test(msg) && !/"Applicant" section/.test(msg) && st.continues === 0 && /CapEdit/.test(where),
+        `ok=${String(r?.ok)} stopReason=${String(r?.stopReason)} continues=${String(st.continues)} at=${where} msg=${msg}`);
     } else {
-      if (variant === "candidates") candidateSteps = steps; else dialogCandidateSteps = steps;
+      if (variant === "candidates") candidateSteps = steps; else if (variant === "dialogcandidates") dialogCandidateSteps = steps;
       const rowStep = steps.find((s) => /data-al-row/.test(String(s.selector?.css ?? "")));
-      const inDialog = variant === "dialogcandidates";
-      check(`MUST-PASS ${variant}: two addresses listed${inDialog ? " in a dialog" : ""} → the job's own (Meridian 83642) picked by the ranked chooser, recorded as the row marker${inDialog ? " in that frame" : ""}, populates on the pick`,
-        st.rowPicks === 1 && st.pickedParcel === "R1234567890" && !!rowStep && (rowStep.populates ?? []).some((l) => /parcel number/i.test(l)) && (inDialog ? rowStep.selector?.frame === "ACADialogFrame" : !rowStep.selector?.frame),
-        `rowPicks=${String(st.rowPicks)} pickedParcel=${String(st.pickedParcel)} rowStep=${JSON.stringify(rowStep)}`);
+      const wantFrame = variant === "dialogcandidates" ? "ACADialogFrame" : variant === "popupcandidates" ? "popup" : undefined;
+      const modal = variant === "modalcandidates";
+      // In the modal shape the pick is two steps: the row's radio (the marker) and the dialog's Select
+      // button by label; `populates` sits on the last of them.
+      const selectStep = modal ? steps.find((s) => /^lookup: Select \[address list\]/.test(String(s.note ?? ""))) : undefined;
+      const lastOfGroup = modal ? selectStep : rowStep;
+      check(`MUST-PASS ${variant}: two addresses listed${wantFrame ? ` in a ${wantFrame === "popup" ? "popup window" : "dialog"}` : variant === "postbackcandidates" ? " by a full-page postback" : modal ? " in an in-document modal (radio rows + Select)" : ""} → the job's own (Meridian 83642${modal ? ", the PLAIN row, not the unit-qualified one" : ""}) picked by the ranked chooser, recorded as the row marker${wantFrame ? ` with frame "${wantFrame}"` : ""}${modal ? " + the Select button by label" : ""}, populates on the pick`,
+        st.rowPicks === 1 && st.pickedParcel === "R1234567890" && !!rowStep && !!lastOfGroup && (lastOfGroup.populates ?? []).some((l) => /parcel number/i.test(l)) && rowStep.selector?.frame === wantFrame
+          && (!modal || (Number(st.modalSelects) === 1 && selectStep?.selector?.name === "Select" && Number(st.modalClosed ?? 0) >= 1)),
+        `rowPicks=${String(st.rowPicks)} pickedParcel=${String(st.pickedParcel)} modalSelects=${String(st.modalSelects)} rowStep=${JSON.stringify(rowStep)} selectStep=${JSON.stringify(selectStep)}`);
       check(`MUST-PASS ${variant}: the walk reaches Step 2: Review by Continue Application`,
         r?.reachedReview === true && /CapConfirm/i.test(where) && st.continues === 1, `reachedReview=${String(r?.reachedReview)} at=${where} continues=${String(st.continues)} ${msg}`);
     }
@@ -290,7 +367,7 @@ try {
     portalPlatform: "accela", portalUrl: entry, status: "complete", version: 1, createdBy: "smoke", createdAt: "", updatedAt: "", notes: "",
     steps: [...candidateSteps.filter((s) => !s.isFinalSubmit), { action: "stopForReview" } as RecipeStep],
   } as unknown as PortalRecipe;
-  for (const [variant, recorded] of [["candidates", candidateSteps], ["dialogcandidates", dialogCandidateSteps]] as Array<[string, RecipeStep[]]>) {
+  for (const [variant, recorded] of [["candidates", candidateSteps], ["dialogcandidates", dialogCandidateSteps], ["popupcandidates", recordedByVariant.get("popupcandidates") ?? []], ["postbackcandidates", recordedByVariant.get("postbackcandidates") ?? []], ["modalcandidates", recordedByVariant.get("modalcandidates") ?? []]] as Array<[string, RecipeStep[]]>) {
     const rec = { ...recipe, id: `aca-step1-${variant}`, steps: [...recorded.filter((s) => !s.isFinalSubmit), { action: "stopForReview" } as RecipeStep] } as unknown as PortalRecipe;
     const ctx = await browser.newContext();
     ctx.setDefaultTimeout(8000);

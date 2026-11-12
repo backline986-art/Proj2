@@ -5371,7 +5371,7 @@ export class AutoLearnAdapter extends BasePortalAdapter {
     };
     if (!(await stillUp())) return true;
     // The modal's own close control first, then Escape.
-    for (const sel of ["#ACADialogFrame_Close", ".ui-dialog-titlebar-close", 'a[title="Close" i]', 'button[aria-label="Close" i]', 'img[alt="Close" i]']) {
+    for (const sel of ["#ACADialogFrame_Close", "#ACADialog_closebtn", ".ui-dialog-titlebar-close", 'a[title="Close" i]', 'button[aria-label="Close" i]', 'img[alt="Close" i]']) {
       const c = page.locator(sel).first();
       const closeVisible = (await c.count().catch(() => 0)) > 0
         && (typeof c.isVisible === "function" ? await c.isVisible().catch(() => false) : false);
@@ -9236,7 +9236,7 @@ export class AutoLearnAdapter extends BasePortalAdapter {
         const lookups = await this.withPhaseTimeout(
           "lookup_buttons",
           120_000,
-          () => this.lookupButtonPass({ steps, url, pageCount, alreadyFilledLabels, portalNotices, pageTrace }),
+          () => this.lookupButtonPass({ steps, url, pageCount, alreadyFilledLabels, portalNotices, pageTrace, shot: saveDebugShot }),
           { pressed: 0, stop: null as LearnResult | null },
         );
         if (lookups.stop) return lookups.stop;
@@ -11611,10 +11611,48 @@ export class AutoLearnAdapter extends BasePortalAdapter {
     alreadyFilledLabels: string[];
     portalNotices: string[];
     pageTrace: string[];
+    /** The learn's bundle shot (saveDebugShot): one per press, after it settles, so a live miss is
+     *  diagnosable from the bundle (the Meridian 05:20 run had none). */
+    shot?: (label: string) => Promise<void>;
   }): Promise<{ pressed: number; stop: LearnResult | null }> {
     const page = this.page;
     const none = { pressed: 0, stop: null };
     if (!page || typeof page.evaluate !== "function" || typeof page.locator !== "function") return none;
+    /** A document token, so a FULL postback (the DOM replaced — ACA's __doPostBack on Find Address /
+     *  Look Up) is told from an in-page change: stamps from before the press are gone either way and
+     *  the sections are re-read, but "the page reloaded; no section changed" is a different finding. */
+    const stampDoc = async (): Promise<string> => page.evaluate(() => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const w = window as any;
+      if (!w.__alLookupDoc) w.__alLookupDoc = `d${Date.now()}${Math.floor(Math.random() * 1e6)}`;
+      return String(w.__alLookupDoc);
+    }).catch(() => "");
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const readDoc = async (): Promise<string> => page.evaluate(() => String((window as any).__alLookupDoc || "")).catch(() => "");
+    /** POSTBACK SETTLE: the loading overlay the press raised (ACA's ProcessLoading — an element whose
+     *  id or class reads loading / progress / overlay, visible after the click) must be gone, AND the
+     *  network idle, bounded; then the dynamic-fields settle as everywhere else. */
+    const settleAfterPress = async (): Promise<void> => {
+      const deadline = Date.now() + 20_000;
+      await page.waitForLoadState?.("domcontentloaded", { timeout: 15000 }).catch(() => null);
+      while (Date.now() < deadline) {
+        const busy = await page.evaluate(() => {
+          const vis = (e: Element) => { const r = (e as HTMLElement).getBoundingClientRect(); const st = window.getComputedStyle(e); return r.width > 0 && r.height > 0 && st.visibility !== "hidden" && st.display !== "none"; };
+          for (const el of Array.from(document.querySelectorAll("[id*='loading' i], [class*='loading' i], [id*='progress' i], [class*='progress' i], [id*='overlay' i], [class*='overlay' i], [aria-busy='true']"))) {
+            if (vis(el)) return true;
+          }
+          return false;
+        }).catch(() => false);
+        if (!busy) break;
+        await sleep(400);
+      }
+      await page.waitForLoadState?.("networkidle", { timeout: Math.max(1000, deadline - Date.now()) }).catch(() => null);
+      await this.waitForDynamicFieldsSettle().catch(() => null);
+      await sleep(600);
+    };
+    /** The browser context, for a popup WINDOW the press opens (Accela asks to allow pop-ups). */
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const browserContext = (): any => { try { return typeof page.context === "function" ? page.context() : this.opened?.context; } catch { return this.opened?.context; } };
     type Sec = NonNullable<Awaited<ReturnType<AutoLearnAdapter["acaContactSectionsOnPage"]>>>[number];
     let path = "";
     try { const u = new URL(ctx.url); path = u.host + u.pathname; } catch { path = String(ctx.url || "").split(/[?#]/)[0]; }
@@ -11636,6 +11674,35 @@ export class AutoLearnAdapter extends BasePortalAdapter {
     const visibleFrames = async (): Promise<string[]> => page.evaluate(() => (Array.from(document.querySelectorAll("iframe")) as HTMLIFrameElement[])
       .filter((f) => { const r = f.getBoundingClientRect(); return r.width > 0 && r.height > 0; })
       .map((f) => f.getAttribute("name") || f.id || String(f.getAttribute("src") || "").split("?")[0])).catch(() => [] as string[]);
+    /** IN-DOCUMENT OVERLAYS (Boise 05:29: Accela's "Address Search Result List" is a modal DIV in the
+     *  main document — role / aria-modal / a modal-dialog-popup-overlay class or id, or a fixed /
+     *  absolute box covering most of the viewport). Each visible one is stamped data-al-overlay=<n>
+     *  (once), so the one that APPEARED after a press is the press's result and the search scope —
+     *  never "no effect". A bare mask (no rows, inputs or controls inside) is not the scope. */
+    const visibleOverlays = async (): Promise<Array<{ key: string; controls: number }>> => page.evaluate(() => {
+      const out: Array<{ key: string; controls: number }> = [];
+      const vw = window.innerWidth || 1;
+      const vh = window.innerHeight || 1;
+      const vis = (e: Element) => { const r = (e as HTMLElement).getBoundingClientRect(); const st = window.getComputedStyle(e); return r.width > 0 && r.height > 0 && st.visibility !== "hidden" && st.display !== "none"; };
+      const named = Array.from(document.querySelectorAll("[role='dialog'], [aria-modal='true'], [class*='modal' i], [id*='modal' i], [class*='dialog' i], [id*='dialog' i], [class*='popup' i], [id*='popup' i], [class*='overlay' i], [id*='overlay' i]"));
+      const big = Array.from(document.querySelectorAll("div, section, aside, form")).filter((e) => {
+        const st = window.getComputedStyle(e);
+        if (st.position !== "fixed" && st.position !== "absolute") return false;
+        const r = (e as HTMLElement).getBoundingClientRect();
+        return r.width * r.height >= 0.5 * vw * vh;
+      });
+      let seq = Number(document.body.getAttribute("data-al-overlay-seq") || "0");
+      for (const e of [...named, ...big]) {
+        if (!vis(e)) continue;
+        if (e === document.body || e === document.documentElement) continue;
+        let key = e.getAttribute("data-al-overlay");
+        if (!key) { key = `ov${seq++}`; e.setAttribute("data-al-overlay", key); }
+        if (out.some((o) => o.key === key)) continue;
+        out.push({ key, controls: e.querySelectorAll("tr, input, select, button, a").length });
+      }
+      document.body.setAttribute("data-al-overlay-seq", String(seq));
+      return out;
+    }).catch(() => [] as Array<{ key: string; controls: number }>);
     const readSections = async (): Promise<Sec[] | null> => {
       await this.waitForDynamicFieldsSettle().catch(() => null);
       return this.acaContactSectionsOnPage({ lookups: true });
@@ -11647,7 +11714,8 @@ export class AutoLearnAdapter extends BasePortalAdapter {
       sections: sections.filter((s) => s.lookups.length).map((s) => ({ heading: s.heading.slice(0, 40), buttons: s.lookups.map((l) => l.label.slice(0, 30)), blanks: s.requiredBlank.slice(0, 6), typed: `${s.typedTotal - s.typedBlank}/${s.typedTotal}`, address: s.addressTyped, record: s.hasEdit })),
     });
     let pressed = 0;
-    const unresolved: Array<{ heading: string; label: string; why: string }> = [];
+    let presses = 0; // every press, including the ones with no effect
+    const tried: Array<{ heading: string; label: string; why: string; addressSearch: boolean }> = [];
     const identity = this.identityForRole("company");
     for (let round = 0; round < 8 && sections; round++) {
       // The next candidate, by the rules above. The address section first; then document order.
@@ -11680,14 +11748,37 @@ export class AutoLearnAdapter extends BasePortalAdapter {
       const recordsBefore = new Set(sections.filter((s) => s.hasEdit).map((s) => s.key));
       const hiddenBefore = await hiddenFilled(sec.key);
       const framesBefore = await visibleFrames();
+      const overlaysBefore = (await visibleOverlays()).map((o) => o.key);
+      const docBefore = await stampDoc();
       const addressSearch = sec.addressTyped && !isPopulateWord(btn.label);
       if (addressSearch) { this.addressRowChosen = false; this.addressRowRefusal = null; } // a fresh search is a fresh grid
       this.debug?.event({ type: "lookup_button_press", page: ctx.pageCount, section: sec.heading.slice(0, 40), label: btn.label.slice(0, 40), blanks: sec.requiredBlank.slice(0, 6) });
+      // A POPUP WINDOW the press opens is the dialog (Accela: "Please Allow Pop-ups from This Site"):
+      // listened for BEFORE the click on the page and on the context, adopted as the search scope
+      // below, closed afterwards — never adopted as the walk's page.
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      let popup: any = null;
+      const bctx = browserContext();
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const onPage = (p: any) => { if (!popup && p !== page) popup = p; };
+      try { bctx?.on?.("page", onPage); } catch { /* no context events */ }
+      const popupWait = typeof page.waitForEvent === "function" ? page.waitForEvent("popup", { timeout: 6000 }).catch(() => null) : Promise.resolve(null);
       const clicked = await this.clickResilient(loc).then(() => true).catch(() => false);
-      if (!clicked) { this.debug?.event({ type: "lookup_button_click_failed", section: sec.heading.slice(0, 40), label: btn.label.slice(0, 40) }); continue; }
-      await page.waitForLoadState?.("networkidle", { timeout: 15000 }).catch(() => null);
-      await this.waitForDynamicFieldsSettle().catch(() => null);
-      await sleep(600);
+      if (!clicked) {
+        try { bctx?.off?.("page", onPage); } catch { /* ignore */ }
+        this.debug?.event({ type: "lookup_button_click_failed", section: sec.heading.slice(0, 40), label: btn.label.slice(0, 40) });
+        continue;
+      }
+      await settleAfterPress();
+      popup = (await popupWait) ?? popup;
+      try { bctx?.off?.("page", onPage); } catch { /* ignore */ }
+      if (popup) {
+        await popup.waitForLoadState?.("domcontentloaded", { timeout: 10000 }).catch(() => null);
+        await popup.waitForLoadState?.("networkidle", { timeout: 8000 }).catch(() => null);
+      }
+      const reloaded = docBefore !== "" && (await readDoc()) !== docBefore;
+      await ctx.shot?.(`p${String(ctx.pageCount).padStart(3, "0")}-lookup-${btn.label.replace(/[^A-Za-z0-9]+/g, "_").slice(0, 24)}`).catch(() => null);
+      this.debug?.event({ type: "lookup_button_settled", page: ctx.pageCount, label: btn.label.slice(0, 40), reloaded, popup: !!popup });
       // The click, recorded by LABEL with css fallbacks — appended only if the press did something.
       const clickStep: RecipeStep = {
         action: "click", phase: "fill",
@@ -11701,43 +11792,73 @@ export class AutoLearnAdapter extends BasePortalAdapter {
       ctx.steps.push(clickStep);
       const framesAfter = await visibleFrames();
       const newFrame = framesAfter.find((f) => !framesBefore.includes(f)) ?? null;
+      // The in-document overlay the press opened, if any: the newly visible one with the most controls.
+      const newOverlay = (await visibleOverlays()).filter((o) => !overlaysBefore.includes(o.key) && o.controls > 0).sort((a, b) => b.controls - a.controls)[0]?.key ?? null;
+      const overlaySel = newOverlay ? `[data-al-overlay="${newOverlay}"]` : "";
       let searchVerdict: "picked" | "empty" | "unusable" | null = null;
+      /** Close an in-document overlay the pass is leaving: its own Cancel / Close / × first, then Escape. */
+      const closeOverlay = async (): Promise<void> => {
+        if (!overlaySel) return;
+        const ov = page.locator(overlaySel);
+        if (!(await ov.count().catch(() => 0))) return;
+        for (const sel of ["a[title='Close' i]", "button[aria-label='Close' i]", "[class*='close' i]", "img[alt='Close' i]"]) {
+          const c = ov.locator(sel).first();
+          if ((await c.count().catch(() => 0)) && (typeof c.isVisible !== "function" || await c.isVisible().catch(() => false))) { await c.click({ timeout: 4000 }).catch(() => null); break; }
+        }
+        const cancel = ov.getByRole("button", { name: /^cancel$/i }).or(ov.getByRole("link", { name: /^cancel$/i })).first();
+        if ((await cancel.count().catch(() => 0)) && (typeof cancel.isVisible !== "function" || await cancel.isVisible().catch(() => false))) await cancel.click({ timeout: 4000 }).catch(() => null);
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const kb = (page as any)?.keyboard;
+        if (kb && typeof kb.press === "function") await kb.press("Escape").catch(() => null);
+        await sleep(400);
+      };
       // A CANDIDATE LIST (two or more address rows) — in the page, or in a dialog the search opened:
       // the ranked chooser picks the job's own address, or refuses, which ends the page named: a
       // learn opens a real application, never on a property that is not this job's.
+      const closePopup = async (): Promise<void> => { try { if (popup && !(typeof popup.isClosed === "function" && popup.isClosed())) await popup.close(); } catch { /* already gone */ } };
       if (addressSearch) {
-        let chosen = await this.chooseProjectAddressRow(ctx.steps);
+        // The list is wherever the press put it: the page, an in-document modal, a dialog frame, a
+        // popup window — the modal first (Boise 05:29: the scan over the whole page would also see
+        // the form's own radio rows).
+        let chosen = overlaySel ? await this.chooseAddressRowInScope(page, "", ctx.steps, overlaySel) : false;
+        if (!chosen && !this.addressRowRefusal && !overlaySel) chosen = await this.chooseProjectAddressRow(ctx.steps);
         if (!chosen && !this.addressRowRefusal && newFrame) chosen = await this.chooseAddressRowInFrame(newFrame, ctx.steps);
+        if (!chosen && !this.addressRowRefusal && popup) chosen = await this.chooseAddressRowInScope(popup, "popup", ctx.steps);
         if (chosen) {
-          await page.waitForLoadState?.("networkidle", { timeout: 15000 }).catch(() => null);
-          await this.waitForDynamicFieldsSettle().catch(() => null);
-          await sleep(600);
+          await settleAfterPress();
+          await closePopup();
         } else if (this.addressRowRefusal) {
           ctx.steps.length = stepMark;
           if (newFrame) await this.closeLookupDialog(newFrame);
+          await closeOverlay();
+          await closePopup();
           return { pressed, stop: { ...fail(ctx.steps, this.portalName, `Stopped for a person on page ${ctx.pageCount}: "${btn.label}" listed several addresses and none could be taken as this job's — ${this.addressRowRefusal.slice(0, 300)}. Pick the address by hand and run again; the steps before this page were recorded.`, null, ctx.pageCount, ctx.portalNotices), stopReason: "address_candidates", pageTrace: ctx.pageTrace.slice(0, 40) } };
-        } else if (newFrame) {
-          // A dialog with nothing to pick ("Address not found", a list shape the chooser does not
-          // read): closed, so it cannot swallow the next click; the section then reads as unchanged.
-          await this.closeLookupDialog(newFrame);
+        } else {
+          // A dialog / modal / popup with nothing to pick ("Address not found", a list shape the
+          // chooser does not read): closed, so it cannot swallow the next click; the section then
+          // reads as unchanged. Never left open when the pass ends.
+          if (newFrame) await this.closeLookupDialog(newFrame);
+          await closeOverlay();
+          await closePopup();
         }
       }
-      // A SEARCH FORM THAT OPENED (Look Up's dialog, or an inline panel): searched once by this
-      // client's business name; only a result that IS this client is picked.
+      // A SEARCH FORM THAT OPENED (Look Up's dialog, a popup window, or an inline panel): searched
+      // once by this client's business name; only a result that IS this client is picked.
       if (!addressSearch) {
         const midSections = await readSections();
         const mid = midSections?.find((s) => s.key === sec.key || s.heading === sec.heading) ?? null;
         const inlineFormOpened = !!mid && mid.typedTotal > sec.typedTotal && !!mid.lookups.some((l) => l.lookupKey !== btn.lookupKey || l.label !== btn.label);
-        if (newFrame || inlineFormOpened) {
+        if (popup || newFrame || overlaySel || inlineFormOpened) {
           searchVerdict = await this.lookupSearchForm({
-            scope: newFrame ? page.frameLocator(`iframe[name="${newFrame}"], iframe[id="${newFrame}"]`) : page.locator(`[data-al-csec="${sec.key}"]`),
-            frame: newFrame ?? undefined,
+            scope: popup ? popup : newFrame ? page.frameLocator(`iframe[name="${newFrame}"], iframe[id="${newFrame}"]`) : overlaySel ? page.locator(overlaySel) : page.locator(`[data-al-csec="${sec.key}"]`),
+            frame: popup ? "popup" : newFrame ?? undefined,
             heading: sec.heading,
             companyName: String(identity.companyName ?? "").trim(),
             steps: ctx.steps,
           });
-          this.debug?.event({ type: "lookup_search_form", section: sec.heading.slice(0, 40), label: btn.label.slice(0, 40), verdict: searchVerdict, dialog: newFrame ? newFrame.slice(0, 40) : "inline" });
-          if (searchVerdict !== "picked") await this.closeLookupDialog(newFrame);
+          this.debug?.event({ type: "lookup_search_form", section: sec.heading.slice(0, 40), label: btn.label.slice(0, 40), verdict: searchVerdict, dialog: popup ? "popup window" : newFrame ? newFrame.slice(0, 40) : overlaySel ? "modal" : "inline" });
+          if (searchVerdict !== "picked" && !popup) { await this.closeLookupDialog(newFrame); await closeOverlay(); }
+          if (popup) { await settleAfterPress(); await closePopup(); }
         }
       }
       // RE-READ: what did the press populate — anywhere on the page?
@@ -11761,33 +11882,48 @@ export class AutoLearnAdapter extends BasePortalAdapter {
         this.debug?.event({ type: "lookup_button_populated", page: ctx.pageCount, section: sec.heading.slice(0, 40), label: btn.label.slice(0, 40), populated: populated.slice(0, 8).map((l) => l.slice(0, 60)) });
       } else {
         ctx.steps.length = stepMark; // a press that changed nothing is not a step to replay
-        const stillRequired = after.find((s) => s.key === sec.key || s.heading === sec.heading);
         const why = searchVerdict === "empty" ? `its "${btn.label}" search found no record for this client`
           : searchVerdict === "unusable" ? `its "${btn.label}" search asks for something this client record does not carry`
+          : reloaded ? `its "${btn.label}" reloaded the page; no section changed`
           : `its "${btn.label}" changed nothing on the page`;
         this.debug?.event({ type: "lookup_button_no_effect", page: ctx.pageCount, section: sec.heading.slice(0, 40), label: btn.label.slice(0, 40), why });
-        if (stillRequired && stillRequired.requiredBlank.length && !stillRequired.hasEdit && !stillRequired.addressTyped) {
-          unresolved.push({ heading: sec.heading, label: btn.label, why });
-        }
+        tried.push({ heading: sec.heading, label: btn.label, why, addressSearch });
+        presses++;
       }
       sections = after;
     }
-    if (unresolved.length) {
-      // Only sections whose OTHER buttons were all tried too (an Autofill after a failed Look Up
-      // may have filled it) — a section that holds a record now is not unresolved.
+    // THE STOP NAMES EVERY SECTION STILL REQUIRED-BLANK AFTER THE PASS (Meridian 05:20 run: the stop
+    // said "Contractor" while Parcel's required "Parcel Number" was also blank — Find Address had no
+    // effect and FIND PARCEL was rightly skipped with nothing typed; the person must fix both in one
+    // visit). Each with its button and why: the button pressed here with no effect, or the button
+    // not pressed and why ("nothing typed to search by"), plus the address search that should have
+    // fed it. Only after a press on this page FAILED — a page where every press worked, or where
+    // nothing was pressed, is the required sweep's as before (never a stop the portal may not make).
+    if (tried.length) {
       const final = (await readSections()) ?? sections ?? [];
-      const still = unresolved.filter((u) => { const s = final.find((x) => x.heading === u.heading); return !s || (s.requiredBlank.length > 0 && !s.hasEdit); });
+      const addressMiss = tried.find((t) => t.addressSearch);
+      const still = final.filter((s) => s.lookups.length && s.requiredBlank.length && !s.hasEdit && !s.addressTyped && !sectionOwnedByContactPass(s));
       if (still.length) {
-        const named = still.map((u) => `the "${u.heading.slice(0, 40)}" section (${u.why})`).join("; ");
-        this.debug?.event({ type: "lookup_section_stop", page: ctx.pageCount, sections: still.map((u) => u.heading.slice(0, 40)) });
+        const named = still.map((s) => {
+          const own = tried.filter((t) => t.heading === s.heading && !t.addressSearch);
+          const parts: string[] = [];
+          if (own.length) parts.push(...own.map((t) => t.why));
+          else {
+            const btnLabel = s.lookups.map((l) => l.label).find((l) => isLookupButtonLabel(l)) ?? s.lookups[0]?.label ?? "lookup";
+            parts.push(`its "${btnLabel}" was not pressed — nothing typed to search by`);
+          }
+          if (addressMiss) parts.push(`and the address search ("${addressMiss.label}" in ${addressMiss.heading.slice(0, 40)}) ${addressMiss.why.replace(/^its "[^"]*" /, "")}`);
+          return `the "${s.heading.slice(0, 40)}" section (${s.requiredBlank.slice(0, 4).join(", ")}: ${parts.join("; ")})`;
+        }).join("; ");
+        this.debug?.event({ type: "lookup_section_stop", page: ctx.pageCount, sections: still.map((s) => s.heading.slice(0, 40)) });
         return {
           pressed,
           stop: {
             ...fail(ctx.steps, this.portalName,
-              `Stopped for a person on page ${ctx.pageCount}: ${named}. The portal requires this section and its own lookup could not fill it — add the record by hand (the page offers "Add New") or add the missing data to the client record, then run again; the steps before this page were recorded.`,
+              `Stopped for a person on page ${ctx.pageCount}: ${named}. The portal requires these and the page's own lookups could not fill them — fill or add them by hand (the page offers "Add New" / its own search) or add the missing data to the project or client record, then run again; the steps before this page were recorded.`,
               null, ctx.pageCount, ctx.portalNotices),
             stopReason: "required_blank",
-            requiredFieldMisses: still.map((u) => u.heading),
+            requiredFieldMisses: still.flatMap((s) => s.requiredBlank.slice(0, 4)),
             pageTrace: ctx.pageTrace.slice(0, 40),
           },
         };
@@ -11803,37 +11939,57 @@ export class AutoLearnAdapter extends BasePortalAdapter {
    *  one Select button) pick nothing — the section then reads as unchanged and is named as today. */
   private async chooseAddressRowInFrame(frameName: string, steps: RecipeStep[]): Promise<boolean> {
     const page = this.page;
-    if (this.addressRowChosen || this.addressRowRefusal || !this.siteIdentity || !page) return false;
-    const id = this.siteIdentity;
-    if (!id.city && !id.zip) return false;
+    if (!page) return false;
     const frames: Frame[] = typeof page.frames === "function" ? page.frames() : [];
     const frame = frames.find((f) => { try { return f.name() === frameName; } catch { return false; } })
       ?? (typeof page.frame === "function" ? page.frame({ name: frameName }) : null);
-    if (!frame || typeof frame.evaluate !== "function") return false;
-    const scan = async (): Promise<Array<{ key: string; text: string }>> => frame.evaluate(() => {
+    if (!frame) return false;
+    return this.chooseAddressRowInScope(frame, frameName, steps);
+  }
+
+  /** The candidate-list pick in ANY scope that can evaluate and locate — a child frame (recorded with
+   *  its frame key) or a popup WINDOW the search opened (recorded with the reserved key "popup", which
+   *  replay's pickAddressVersionLive reads as "the newest other page of the context"). */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  private async chooseAddressRowInScope(frame: any, frameKey: string, steps: RecipeStep[], rootSel = ""): Promise<boolean> {
+    if (this.addressRowChosen || this.addressRowRefusal || !this.siteIdentity || !this.page) return false;
+    const id = this.siteIdentity;
+    if (!id.city && !id.zip) return false;
+    if (!frame || typeof frame.evaluate !== "function" || typeof frame.locator !== "function") return false;
+    const frameName = frameKey;
+    const inFrame: Partial<RecipeSelector> = frameName ? { frame: frameName } : {};
+    // Rows: one "Select" link each (Oregon's grid), OR a radio / checkbox each with the dialog's one
+    // Select button (Accela's Address Search Result List — Boise 05:29). A radio row must read like an
+    // address (a digit in it): a form's own Yes / No radio rows are not candidates. Scoped to rootSel
+    // (an in-document modal) when given, else the whole document of the scope.
+    const scan = async (): Promise<Array<{ key: string; text: string; tick: boolean }>> => frame.evaluate((sel: string) => {
+      const root: ParentNode = (sel && document.querySelector(sel)) || document;
       const vis = (e: Element) => { const r = (e as HTMLElement).getBoundingClientRect(); return r.width > 0 && r.height > 0; };
-      const out: Array<{ key: string; text: string }> = [];
+      const out: Array<{ key: string; text: string; tick: boolean }> = [];
       let n = 0;
-      for (const tr of Array.from(document.querySelectorAll("tr"))) {
+      for (const tr of Array.from(root.querySelectorAll("tr"))) {
         if (!vis(tr)) continue;
-        const actions = Array.from(tr.querySelectorAll("a, button, [role='button']")).filter((a) => /^\s*select\s*$/i.test((a as HTMLElement).innerText || ""));
-        if (actions.length !== 1) continue;
+        const links = Array.from(tr.querySelectorAll("a, button, [role='button']")).filter((a) => /^\s*select\s*$/i.test((a as HTMLElement).innerText || ""));
+        const ticks = Array.from(tr.querySelectorAll("input[type='radio'], input[type='checkbox']"));
         const text = ((tr as HTMLElement).innerText || "").replace(/\s+/g, " ").trim();
         if (!text || text.length > 400) continue;
+        const action = links.length === 1 ? links[0] : (!links.length && ticks.length === 1 && /\d/.test(text) ? ticks[0] : null);
+        if (!action) continue;
         const key = `af${n++}`;
-        (actions[0] as HTMLElement).setAttribute("data-al-row", key);
-        out.push({ key, text });
+        (action as HTMLElement).setAttribute("data-al-row", key);
+        out.push({ key, text, tick: action === ticks[0] });
       }
       return out;
-    }).catch(() => [] as Array<{ key: string; text: string }>);
+    }, rootSel).catch(() => [] as Array<{ key: string; text: string; tick: boolean }>);
     let rows = await scan();
     for (let waited = 0; rows.length < 2 && waited < 6000; waited += 600) { await sleep(600); rows = await scan(); }
     if (rows.length < 2) return false;
     const { ranked, rejected, preference } = rankAddressVersions(rows.map((r) => r.text), {
       city: id.city, zip: id.zip, homeownerName: id.homeownerName, isElectrical: id.isElectrical === true, issuingAgency: id.issuingAgency ?? undefined,
+      street: this.typeaheadSite.street || undefined,
     });
     if (ranked.length === 0) {
-      this.addressRowRefusal = `none of the ${rows.length} addresses listed is in ${id.city ?? ""} ${id.zip ?? ""}`.replace(/\s+/g, " ").trim();
+      this.addressRowRefusal = `none of the ${rows.length} addresses listed is this job's (${[this.typeaheadSite.street, id.city, id.zip].filter(Boolean).join(", ")})`.replace(/\s+/g, " ").trim();
       this.debug?.event({ type: "address_row_refused", why: "no result in the dialog is this project's property", rejected: rejected.slice(0, 3).join(" | ").slice(0, 200) });
       return false;
     }
@@ -11847,12 +12003,36 @@ export class AutoLearnAdapter extends BasePortalAdapter {
     if (!(await frame.locator(css).first().click({ timeout: 12000 }).then(() => true).catch(() => false))) return false;
     this.addressRowChosen = true;
     await this.waitForDynamicFieldsSettle().catch(() => null);
-    this.debug?.event({ type: "address_row_chosen", jurisdiction: (ranked[0].text.match(/(CITY|COUNTY|DEQ)\s+APPLICATIONS/i) || [])[0] || "unlabelled", basis: preference.basis, ownerMatched: ranked[0].ownerHit, considered: ranked.length, rejected: rejected.length, dialog: frameName.slice(0, 40) });
+    this.debug?.event({ type: "address_row_chosen", jurisdiction: (ranked[0].text.match(/(CITY|COUNTY|DEQ)\s+APPLICATIONS/i) || [])[0] || "unlabelled", basis: preference.basis, ownerMatched: ranked[0].ownerHit, considered: ranked.length, rejected: rejected.length, dialog: (frameName || rootSel || "page").slice(0, 40), shape: best.tick ? "radio + Select button" : "Select link" });
     steps.push({
       action: "click", phase: "fill",
-      selector: { css, frame: frameName, fallbacks: [{ role: "link", name: "Select", frame: frameName }] },
+      selector: { css, ...inFrame, fallbacks: [{ role: "link", name: "Select", ...inFrame }] },
       note: `address version: ${(ranked[0].text.match(/(CITY|COUNTY|DEQ)\s+APPLICATIONS/i) || ["this property"])[0]}`,
     });
+    if (best.tick) {
+      // THE DIALOG'S OWN SELECT BUTTON — allowed INSIDE the list's scope only (never a page-level
+      // "Select"), by whole label, and still never a filing / paying word.
+      const DIALOG_OK = /^(select|ok|choose|use (this|selected) address|continue|done)\s*[»›>→]*$/i;
+      const scope = rootSel ? frame.locator(rootSel) : frame;
+      const controls = scope.locator("a, button, input[type='button'], input[type='submit']");
+      const n = await controls.count().catch(() => 0);
+      for (let i = 0; i < Math.min(n, 40); i++) {
+        const c = controls.nth(i);
+        if (typeof c.isVisible === "function" && !(await c.isVisible().catch(() => false))) continue;
+        const label = String((await c.evaluate((el: HTMLElement) => el.tagName === "INPUT" ? (el as HTMLInputElement).value : (el.innerText || el.textContent || el.getAttribute("title") || "")).catch(() => "")) ?? "").replace(/\s+/g, " ").trim();
+        if (!label || !DIALOG_OK.test(label) || isPayFee(label) || SUBMIT_INTENT.test(label) || sharedIsSubmitIntent(label)) continue;
+        if (!(await c.click({ timeout: 8000 }).then(() => true).catch(() => false))) continue;
+        const cid = String((await c.getAttribute("id").catch(() => "")) ?? "");
+        steps.push({
+          action: "click", phase: "fill",
+          selector: { role: "button", name: label, exact: true, ...inFrame, fallbacks: [{ role: "link", name: label, exact: true, ...inFrame }, ...(cid ? [{ css: `[id="${cid}"]`, ...inFrame }] : [])] },
+          note: `lookup: ${label} [address list]`,
+        });
+        await this.waitForDynamicFieldsSettle().catch(() => null);
+        return true;
+      }
+      this.debug?.event({ type: "address_row_select_button_missing", dialog: (frameName || rootSel || "page").slice(0, 40) });
+    }
     return true;
   }
 

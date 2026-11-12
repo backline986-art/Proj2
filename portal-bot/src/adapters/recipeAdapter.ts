@@ -5872,10 +5872,20 @@ export class RecipeAdapter extends BasePortalAdapter {
     // the MAIN document and found no rows at all. It then returned false in silence, so the
     // step landed in `skipped` with no reason and the next step, waiting for a Continue
     // button that only appears once a row is chosen, took the blame for it.
+    // A LIST IN A POPUP WINDOW (#178): the learner records the pick with the reserved frame key
+    // "popup" — the search opened a new page of the context (Accela asks to allow pop-ups). The
+    // newest other open page is that window; waited for briefly, since it opens on the click before.
+    const popupScope = step.selector?.frame === "popup" ? await this.newestOtherPage() : null;
+    if (step.selector?.frame === "popup" && !popupScope) {
+      this.driftWarnings.push("address grid: the recorded pick was made in a popup window, and no popup opened this time — the address step was skipped");
+      return false;
+    }
     const evalScope: { evaluate: (fn: unknown) => Promise<Array<{ key: string; text: string }>> } =
-      step.selector?.frame
-        ? (this.page.frameLocator(frameSelectorFor(step.selector.frame)).locator("body") as never)
-        : (this.page as never);
+      popupScope
+        ? (popupScope as never)
+        : step.selector?.frame
+          ? (this.page.frameLocator(frameSelectorFor(step.selector.frame)).locator("body") as never)
+          : (this.page as never);
     // AN UNPAINTED GRID IS NOT AN EMPTY GRID — the same rule this file already applies to
     // form fields ("a portal that renders asynchronously looked identical to being on the
     // wrong page"). Accela draws the address results on a postback, and this scan got one
@@ -5887,10 +5897,15 @@ export class RecipeAdapter extends BasePortalAdapter {
       let n = 0;
       for (const tr of Array.from(document.querySelectorAll("tr"))) {
         if (!vis(tr)) continue;
-        const action = Array.from(tr.querySelectorAll("a, button, [role='button']"))
+        // A row's action: its own "Select" link — or (#178, Accela's Address Search Result List) the
+        // RADIO / checkbox that marks it, the dialog's one Select button being the next recorded step.
+        // A radio row must read like an address (a digit in it); the form's own Yes / No rows do not.
+        const link = Array.from(tr.querySelectorAll("a, button, [role='button']"))
           .find((a) => /^\s*select\s*$/i.test((a as HTMLElement).innerText || ""));
-        if (!action) continue;
+        const ticks = Array.from(tr.querySelectorAll("input[type='radio'], input[type='checkbox']"));
         const text = ((tr as HTMLElement).innerText || "").replace(/\s+/g, " ").trim();
+        const action = link ?? (ticks.length === 1 && /\d/.test(text) ? ticks[0] : null);
+        if (!action) continue;
         if (!text || text.length > 400) continue;
         const key = `rr${n++}`;
         (action as HTMLElement).setAttribute("data-al-row", key);
@@ -5937,6 +5952,9 @@ export class RecipeAdapter extends BasePortalAdapter {
       homeownerName: this.fieldValues.homeownerName,
       isElectrical: wantsElectrical,
       issuingAgency: issuingAgency || undefined,
+      // #178: this project's street number, so a list that mixes in a neighbour, or the same address
+      // with and without a unit qualifier, resolves to the job's own row.
+      street: String(this.fieldValues.streetNumber ?? this.fieldValues.street ?? "").trim() || undefined,
     });
     // How many the grid offered, always — "which row did it pick" is unanswerable otherwise.
     this.agingNotes.push(`address grid: ${rows.length} result(s) offered for ${String(this.fieldValues.city ?? "(no city)")} ${String(this.fieldValues.zip ?? "")}`.slice(0, 140));
@@ -5961,7 +5979,7 @@ export class RecipeAdapter extends BasePortalAdapter {
     // Accela's work-location panel, but the click still looked for the stamped row in the MAIN
     // document — so a candidate list inside a dialog frame (Accela's "Address Search Result List"
     // after Find Address) was ranked, then "could not click it", and the step was skipped.
-    const rowScope = step.selector?.frame ? this.page.frameLocator(frameSelectorFor(step.selector.frame)) : this.page;
+    const rowScope = popupScope ? popupScope : step.selector?.frame ? this.page.frameLocator(frameSelectorFor(step.selector.frame)) : this.page;
     const okClick = await this.guardedClick(rowScope.locator(`[data-al-row="${best.key}"]`).first(), "select the ranked address version", { timeout: 12000 })
       .then(() => true).catch((err: unknown) => {
         // SAY WHY. This returned false in silence, so the step landed in `skipped` with no
@@ -5977,6 +5995,26 @@ export class RecipeAdapter extends BasePortalAdapter {
     await smartWait(this.page, 2500);
     this.agingNotes.push(`address version re-ranked live: ${(ranked[0].text.match(/(CITY|COUNTY|DEQ)\s+APPLICATIONS/i) || ["this property"])[0]}${preference.basis === "agency" ? ` (issuing agency ${issuingAgency})` : ""}${rejected.length ? `, ${rejected.length} other propert${rejected.length === 1 ? "y" : "ies"} rejected` : ""}`);
     return true;
+  }
+
+  /** The newest OTHER open page of this page's browser context (a popup a click opened), waited for
+   *  up to ~8 s, loaded; null when none. Read-only on the context: the walk's own page never moves. */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  private async newestOtherPage(): Promise<any | null> {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const ctx: any = (() => { try { return typeof this.page?.context === "function" ? this.page.context() : null; } catch { return null; } })();
+    if (!ctx || typeof ctx.pages !== "function") return null;
+    for (let waited = 0; waited <= 8000; waited += 500) {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const others = (ctx.pages() as any[]).filter((p) => p !== this.page && !(typeof p.isClosed === "function" && p.isClosed()));
+      if (others.length) {
+        const p = others[others.length - 1];
+        await p.waitForLoadState?.("domcontentloaded", { timeout: 5000 }).catch(() => null);
+        return p;
+      }
+      await sleep(500);
+    }
+    return null;
   }
 
   // WHICH PERMIT WE ARE APPLYING FOR IS NEVER CHOSEN BY ARRAY INDEX.
