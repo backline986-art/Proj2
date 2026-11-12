@@ -5784,6 +5784,33 @@ const FEE_RESPONSIBILITY_TEXT = {
   "mailed-check": "a mailed check",
   "keelix-pays": "we pay (then invoice it)",
 };
+// WHO PAYS EACH PORTAL'S FEES (#201): asked on every login a person saves, changeable in place.
+// The owner's rule (2026-11-12): the client's own card where the portal takes one; elsewhere we pay
+// and bill it at cost. A RECORD OF AN AGREEMENT, never an authorisation: automation never pays.
+const FEE_PAYER_CHOICES = [
+  ["card-on-file", "Client's card saved in the portal"],
+  ["customer-pays", "Client pays it themselves"],
+  ["mailed-check", "Mailed check"],
+  ["keelix-pays", "Keelix pays, then bills it at cost"],
+];
+/** The in-place "who pays" control on a saved login. A blank one says NOT SET and is flagged. */
+function feePayerControlHtml(c, attr) {
+  const v = String(c.feeResponsibility || "");
+  const opts = (v ? [] : [["", "Who pays: NOT SET"]]).concat(FEE_PAYER_CHOICES)
+    .map(([val, label]) => `<option value="${esc(val)}"${val === v ? " selected" : ""}>${esc(label)}</option>`).join("");
+  return `<label class="fee-payer${v ? "" : " fee-payer-missing"}" style="font-size:12px;display:inline-flex;gap:4px;align-items:center">
+      ${v ? "Who pays" : '<span class="badge badge-warning">who pays not set</span>'}
+      <select ${attr}="${esc(c.id)}" aria-label="Who pays this portal's fees">${opts}</select></label>`;
+}
+/** Saves a changed "who pays" on one login (the existing PUT; only that key is sent). */
+async function saveFeePayer(clientId, credId, value, statusEl, reload) {
+  try {
+    await api(`/api/clients/${encodeURIComponent(clientId)}/portal-credentials/${encodeURIComponent(credId)}`, { method: "PUT", body: JSON.stringify({ feeResponsibility: value }) });
+    if (statusEl) statusEl.textContent = "Who pays saved.";
+    await reload();
+  } catch (err) { if (statusEl) statusEl.textContent = err.message || "Could not save who pays."; }
+}
+
 function trackPaymentHtml(t) {
   const p = t && t.payment;
   if (!p) return "";
@@ -12016,10 +12043,14 @@ async function loadClientCredentials(clientId) {
     const creds = data.credentials || [];
     list.innerHTML = creds.length
       ? creds.map((c) => `<div class="cred-row">
-          <div class="cred-row-text"><strong>${esc(portalDisplayName(c.portalType, c.portalUrl))}</strong><span class="cred-row-user">${esc(c.usernameReference)}${c.hasSecret ? ' <span class="cred-row-lock" title="Password stored encrypted">🔒</span>' : ""}</span></div>
+          <div class="cred-row-text"><strong>${esc(portalDisplayName(c.portalType, c.portalUrl))}</strong><span class="cred-row-user">${esc(c.usernameReference)}${c.hasSecret ? ' <span class="cred-row-lock" title="Password stored encrypted">🔒</span>' : ""}</span>
+            ${feePayerControlHtml(c, "data-cred-fee")}</div>
           <button type="button" class="danger-button cred-row-del" data-cred-del="${esc(c.id)}"><i data-lucide="trash-2"></i><span>Delete</span></button></div>`).join("")
       : '<p class="muted clients-creds-hint">No saved logins yet.</p>';
     if (window.lucide) window.lucide.createIcons();
+    list.querySelectorAll("[data-cred-fee]").forEach((sel) => sel.addEventListener("change", () => {
+      if (sel.value) saveFeePayer(clientId, sel.getAttribute("data-cred-fee"), sel.value, $("credStatus"), () => loadClientCredentials(clientId));
+    }));
     list.querySelectorAll("[data-cred-del]").forEach((b) => b.addEventListener("click", async () => {
       try {
         // A stored portal login is unrecoverable once deleted (encrypted at rest,
@@ -12731,11 +12762,14 @@ if ($("addCredentialBtn")) {
       portalUrl: $("cred_portalUrl").value.trim(),
       username: $("cred_username").value.trim(),
       password: $("cred_password").value,
+      feeResponsibility: $("cred_feeResponsibility") ? $("cred_feeResponsibility").value : "",
     };
     if (!body.username || !body.password) { $("credStatus").textContent = "Username and password are required."; return; }
+    if (!body.feeResponsibility) { $("credStatus").textContent = "Say who pays this portal's fees."; return; }
     try {
       await api(`/api/clients/${clientId}/portal-credentials`, { method: "POST", body: JSON.stringify(body) });
       $("cred_username").value = ""; $("cred_password").value = ""; $("cred_portalType").value = ""; $("cred_portalUrl").value = "";
+      if ($("cred_feeResponsibility")) $("cred_feeResponsibility").value = "card-on-file";
       $("credStatus").textContent = "Saved (encrypted).";
       await loadClientCredentials(clientId);
     } catch (err) { $("credStatus").textContent = err.message || "Save failed."; }
@@ -12834,6 +12868,8 @@ function plProjectPortals(tracks, creds) {
     let host = ""; try { host = url ? new URL(url).hostname.toLowerCase() : ""; } catch { /* ignore */ }
     const portal = { label: t.label || t.channel || t.type, url, slug, host, matched: false };
     portal.matched = all.some((c) => plLoginFits(c, portal));
+    // #201: a saved login nobody has said who pays for stalls the job at the portal's fee screen.
+    portal.payerMissing = portal.matched && !all.some((c) => plLoginFits(c, portal) && c.feeResponsibility);
     portals.push(portal);
   }
   // Missing first: that is what the operator opened the modal to fix. (Array sort is stable.)
@@ -12850,6 +12886,7 @@ function plCredRowHtml(c) {
         <div>
           <div class="pl-cred-meta"><strong>${esc(name)}</strong> · ${esc(c.usernameReference)} ${c.hasSecret ? "🔒" : ""}</div>
           ${host && host !== name ? `<div class="pl-cred-url">${esc(host)}</div>` : ""}
+          ${feePayerControlHtml(c, "data-pl-fee")}
         </div>
         <button type="button" class="danger-button danger-button-sm" data-pl-del="${esc(c.id)}">Delete</button>
       </div>`;
@@ -12887,7 +12924,7 @@ async function renderPortalLogins() {
   $("plPortalChips").innerHTML = view.portals.map((p) => `<button type="button" class="pl-chip" data-pl-slug="${esc(p.slug)}" data-pl-url="${esc(p.url)}" data-has-secret="${p.matched ? 1 : 0}">
       <i data-lucide="${p.matched ? "shield-check" : "key-round"}"></i>
       <span>${esc(p.label)}</span>
-      <span class="pl-chip-state">${p.matched ? "login saved" : "needs login"}</span>
+      <span class="pl-chip-state">${p.matched ? (p.payerMissing ? "who pays not set" : "login saved") : "needs login"}</span>
     </button>`).join("");
   $("plPortalChips").querySelectorAll("[data-pl-slug]").forEach((chip) => chip.addEventListener("click", () => {
     $("pl_portalType").value = chip.getAttribute("data-pl-slug");
@@ -12899,6 +12936,9 @@ async function renderPortalLogins() {
   $("plList").querySelectorAll("[data-pl-toggle]").forEach((b) => b.addEventListener("click", async () => {
     state.plShowAllLogins = !state.plShowAllLogins;
     await renderPortalLogins();
+  }));
+  $("plList").querySelectorAll("[data-pl-fee]").forEach((sel) => sel.addEventListener("change", () => {
+    if (sel.value) saveFeePayer(client.id, sel.getAttribute("data-pl-fee"), sel.value, $("plStatus"), renderPortalLogins);
   }));
   $("plList").querySelectorAll("[data-pl-del]").forEach((b) => b.addEventListener("click", async () => {
     try {
@@ -12912,7 +12952,9 @@ async function renderPortalLogins() {
   if (summary) {
     const total = view.portals.length;
     const ready = view.portals.filter((p) => p.matched).length;
-    summary.textContent = total ? `${ready}/${total} portal logins saved` : (creds.length ? `${creds.length} saved` : "");
+    const unpaid = view.portals.filter((p) => p.payerMissing).length;
+    summary.textContent = (total ? `${ready}/${total} portal logins saved` : (creds.length ? `${creds.length} saved` : ""))
+      + (unpaid ? ` · ${unpaid} without who pays` : "");
   }
   if (window.lucide) window.lucide.createIcons();
 }
@@ -12929,12 +12971,15 @@ if ($("plSaveBtn")) $("plSaveBtn").addEventListener("click", async () => {
     portalUrl: $("pl_portalUrl").value.trim(),
     username: $("pl_username").value.trim(),
     password: $("pl_password").value,
+    feeResponsibility: $("pl_feeResponsibility") ? $("pl_feeResponsibility").value : "",
   };
   if (!body.username || !body.password) { $("plStatus").textContent = "Username and password are required."; return; }
+  if (!body.feeResponsibility) { $("plStatus").textContent = "Say who pays this portal's fees."; return; }
   if (!body.portalUrl) { $("plStatus").textContent = "Portal URL is required so the bot matches this login to the right portal."; return; }
   try {
     await api(`/api/clients/${client.id}/portal-credentials`, { method: "POST", body: JSON.stringify(body) });
     $("pl_username").value = ""; $("pl_password").value = "";
+    if ($("pl_feeResponsibility")) $("pl_feeResponsibility").value = "card-on-file";
     $("plStatus").textContent = "Saved (encrypted).";
     await renderPortalLogins();
   } catch (err) { $("plStatus").textContent = err.message || "Save failed."; }
