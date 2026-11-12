@@ -6097,7 +6097,14 @@ export class RecipeAdapter extends BasePortalAdapter {
         this.recordedStepView.set(idx, { doc: await this.docToken(), view, path: this.lastView?.path ?? "", ctl: recordedControlCss(step) });
       }
     }
-    if (!RecipeAdapter.WRITE_ACTIONS.has(step.action)) return this.executeStepInner(step, pastReview);
+    if (!RecipeAdapter.WRITE_ACTIONS.has(step.action)) {
+      const ok = await this.executeStepInner(step, pastReview);
+      // #178: a recorded lookup click (Find Address, Autofill) names the fields it populated; after the
+      // press they must hold a value — the parcel is never typed from a recipe, so a lookup that found
+      // nothing for THIS project is said here, by field, not discovered at the portal's bounce.
+      if (ok && step.action === "click" && step.populates?.length) await this.verifyLookupPopulated(step);
+      return ok;
+    }
     this.writtenTarget = null;
     const done = !this.backstop ? await this.executeStepInner(step, pastReview)
       : await withOwnWriteWindow(this.page, `recorded ${step.action}${step.note ? ` (${String(step.note).slice(0, 50)})` : ""}`, () => this.executeStepInner(step, pastReview));
@@ -6105,6 +6112,32 @@ export class RecipeAdapter extends BasePortalAdapter {
     this.writtenTarget = null;
     if (done && !this.inPolicyRetry) await this.recordingOverwrotePick(written);
     return done;
+  }
+
+  /** #178 — THE FIELDS A LOOKUP CLICK POPULATED AT LEARN TIME MUST HOLD A VALUE AT REPLAY. Each label
+   *  in step.populates that names a control on the page (getByLabel) is read back, with a bounded
+   *  wait for the portal's postback; a label that names no control (a section heading — "Applicant",
+   *  whose Autofill added a RECORD, not a value) is left to the click's own effect check
+   *  (assertAdvanced's pageEffect diff). A blank is a named failure, never a quiet advance. */
+  private async verifyLookupPopulated(step: RecipeStep): Promise<void> {
+    if (!this.page || typeof this.page.getByLabel !== "function") return;
+    const what = String(step.note ?? step.selector?.name ?? "lookup").slice(0, 60);
+    for (const raw of step.populates ?? []) {
+      const label = String(raw ?? "").replace(/[*:]\s*$/, "").trim();
+      if (!label) continue;
+      const loc = this.page.getByLabel(label, { exact: false }).first();
+      if (!(await loc.count().catch(() => 0))) continue; // a heading, not a control
+      let value = "";
+      for (let i = 0; i < 16; i++) {
+        value = String((await loc.inputValue({ timeout: 1500 }).catch(() => "")) ?? "").trim();
+        if (value) break;
+        await sleep(500);
+      }
+      if (!value) {
+        throw new Error(`The lookup "${what}" did not populate "${label}" — the portal's own lookup found nothing for this project's address (or its result did not land). A person must fill or verify "${label}" before the application goes on; it is never typed from a recipe.`);
+      }
+      this.agingNotes.push(`lookup "${what}" populated "${label}"`);
+    }
   }
 
   /** A PICK THE RECORDING THEN ANSWERS IS NO LONGER A PICK (#362). The mid-page gap-fill can answer

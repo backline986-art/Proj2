@@ -57,7 +57,7 @@ export interface ContinueDraft {
    *  Submit; not signed, or unreadable, it stops on the record page and names why. */
   awaitingSignature?: boolean;
 }
-import { PORTAL_SAFETY_GLOBAL, PORTAL_SAFETY_IN_PAGE_SOURCE, isFinalSubmitControl, isInterstitialForwardLabel as sharedIsInterstitialForwardLabel, isSignatureNameLabel, isSignatureRequestControl, isTypeSignatureToggleLabel, looksLikeReviewUrl, redactSecretValues, reviewSignals as sharedReviewSignals, splitSignerName } from "../../../shared/src/portalSafety";
+import { PORTAL_SAFETY_GLOBAL, PORTAL_SAFETY_IN_PAGE_SOURCE, isFinalSubmitControl, isLookupButtonLabel, isSubmitIntent as sharedIsSubmitIntent, isInterstitialForwardLabel as sharedIsInterstitialForwardLabel, isSignatureNameLabel, isSignatureRequestControl, isTypeSignatureToggleLabel, looksLikeReviewUrl, redactSecretValues, reviewSignals as sharedReviewSignals, splitSignerName } from "../../../shared/src/portalSafety";
 import { BATTERY_DECLARATION_QUESTION, batteryAttestationAnswer, batteryControlKind, batteryDeclarationAnswer } from "../../../shared/src/batteryControls";
 import { installFilingBackstop, withBackstopWindow, withOwnWriteWindow, describeBackstopAbort, backstopSentLine, backstopFor, isStoppingAbort, drainOwnWrites, unsavedAtReviewWarning, portalOwnCallsBlockedAtReview, reviewBlockedCallsLine } from "../filingBackstop";
 // Types only (erased): the information-page door is reached duck-typed on the installed backstop.
@@ -2666,6 +2666,9 @@ export class AutoLearnAdapter extends BasePortalAdapter {
   /** The completion/receipt page as text + URL, captured while standing on it. */
   finalSubmitPageText = "";
   finalSubmitUrl = "";
+  /** #178 — lookup / populate buttons already pressed, by page path + section + label + the section's
+   *  state (its blanks, whether it holds a record): never pressed twice in the same page state. */
+  private readonly lookupPressed = new Set<string>();
   // A grid is chosen once per run; re-choosing on a re-scrape would re-click the row.
   private addressRowChosen = false;
   /** Set when the ranked chooser REFUSED the grid: the looked-up issuing agency names no row and
@@ -5444,23 +5447,37 @@ export class AutoLearnAdapter extends BasePortalAdapter {
    *  text, the section's own text, and its control ids. Each section container, Add New and Edit
    *  is stamped (data-al-csec / data-al-caddnew / data-al-cedit) so the pass can act on exactly
    *  that section. null when the page cannot be read (a stub page) — the positional fallback. */
-  private async acaContactSectionsOnPage(): Promise<Array<{
+  private async acaContactSectionsOnPage(opts: { lookups?: boolean } = {}): Promise<Array<{
     key: number; heading: string; instruction: string; text: string;
     addNewId: string; selectId: string; editId: string; hasAddNew: boolean; hasEdit: boolean;
+    /** #178 (only with opts.lookups): the section's lookup / populate buttons (portalSafety
+     *  isLookupButtonLabel, judged IN the page), stamped data-al-clookup=<lookupKey>, in document
+     *  order; the required inputs still blank (visible, or a hidden aria-required validator — ACA
+     *  marks a required RECORD section with one); the typed inputs it holds and how many are blank;
+     *  whether it holds the split-address boxes (Street No. / Street Name) and they are typed. */
+    lookups: Array<{ lookupKey: number; id: string; label: string; role: "link" | "button" }>;
+    requiredBlank: string[]; typedTotal: number; typedBlank: number; addressTyped: boolean;
   }> | null> {
     const page = this.page;
     if (!page || typeof page.evaluate !== "function") return null;
-    const raw = await page.evaluate(() => {
+    // The lookup words are the SHARED predicate's, asked in the page (never a second list here).
+    if (opts.lookups) await page.evaluate(PORTAL_SAFETY_IN_PAGE_SOURCE).catch(() => null);
+    const raw = await page.evaluate((src: { lookups: boolean; global: string }) => {
       // NO named functions in here: keepNames wraps them in __name, which the page may lack.
-      const out: Array<{ key: number; heading: string; instruction: string; text: string; addNewId: string; selectId: string; editId: string; hasAddNew: boolean; hasEdit: boolean }> = [];
+      type Sec = { key: number; heading: string; instruction: string; text: string; addNewId: string; selectId: string; editId: string; hasAddNew: boolean; hasEdit: boolean; lookups: Array<{ lookupKey: number; id: string; label: string; role: "link" | "button" }>; requiredBlank: string[]; typedTotal: number; typedBlank: number; addressTyped: boolean };
+      const out: Sec[] = [];
       const containers: Element[] = [];
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const ps = (globalThis as any)[src.global];
+      const isLookup = (label: string): boolean => src.lookups && !!ps && typeof ps.isLookupButtonLabel === "function" && ps.isLookupButtonLabel(label) === true;
+      let lookupSeq = 0;
       const controls = Array.from(document.querySelectorAll("a, button, input[type='button'], input[type='submit']")) as HTMLElement[];
       for (const el of controls) {
         const own = el.tagName === "INPUT" ? String((el as HTMLInputElement).value || "") : String(el.innerText || el.textContent || el.getAttribute("title") || "");
         const label = own.replace(/\s+/g, " ").trim();
         // "Look Up" marks a LOOK-UP section (Corvallis's Licensed Professional: a CCB search, no
         // Add New) — read so the pass knows the page is not all its own to settle.
-        const kind = /^add new$/i.test(label) ? "add" : /^select from account$/i.test(label) ? "select" : /^edit$/i.test(label) ? "edit" : /^look ?up$/i.test(label) ? "lookup" : "";
+        const kind = /^add new$/i.test(label) ? "add" : /^select from account$/i.test(label) ? "select" : /^edit$/i.test(label) ? "edit" : /^look ?up$/i.test(label) ? "lookup" : isLookup(label) ? "lookup" : "";
         if (!kind) continue;
         const r = el.getBoundingClientRect();
         const st = window.getComputedStyle(el);
@@ -5490,16 +5507,71 @@ export class AutoLearnAdapter extends BasePortalAdapter {
           containers.push(container);
           idx = containers.length - 1;
           container.setAttribute("data-al-csec", String(idx));
-          out.push({ key: idx, heading, instruction, text: "", addNewId: "", selectId: "", editId: "", hasAddNew: false, hasEdit: false });
+          out.push({ key: idx, heading, instruction, text: "", addNewId: "", selectId: "", editId: "", hasAddNew: false, hasEdit: false, lookups: [], requiredBlank: [], typedTotal: 0, typedBlank: 0, addressTyped: false });
         }
         const rec = out[idx];
         if (kind === "add" && !rec.hasAddNew) { rec.hasAddNew = true; rec.addNewId = el.id || ""; el.setAttribute("data-al-caddnew", String(idx)); }
         if (kind === "select" && !rec.selectId) rec.selectId = el.id || "";
         if (kind === "edit" && !rec.hasEdit) { rec.hasEdit = true; rec.editId = el.id || ""; el.setAttribute("data-al-cedit", String(idx)); }
+        // #178: every lookup / populate button of the section, by the SHARED predicate (a "Select
+        // from Account" is a populate word too, so the contact pass's picker is read here as well
+        // — the lookup pass never presses one on a section the contact pass owns).
+        if (src.lookups && isLookup(label)) {
+          const lookupKey = lookupSeq++;
+          el.setAttribute("data-al-clookup", String(lookupKey));
+          rec.lookups.push({ lookupKey, id: el.id || "", label, role: el.tagName === "A" ? "link" : "button" });
+        }
       }
-      for (let i = 0; i < out.length; i++) out[i].text = String((containers[i] as HTMLElement).innerText || "").replace(/\s+/g, " ").trim().slice(0, 800);
+      for (let i = 0; i < out.length; i++) {
+        const c = containers[i] as HTMLElement;
+        out[i].text = String(c.innerText || "").replace(/\s+/g, " ").trim().slice(0, 800);
+        if (!src.lookups) continue;
+        // THE SECTION'S OWN INPUTS. A required box is blank when it is visible, required (the
+        // attribute, aria-required, a "Required" title, an asterisk on its label or beside it) and
+        // empty — or when it is a HIDDEN required validator (ACA's txtValidateSectionRequired, in a
+        // display:none table with aria-required="true"): that is how the portal marks a record
+        // section as required before anything is added, and the required sweep cannot see it.
+        const vis = (e: Element) => { const rr = (e as HTMLElement).getBoundingClientRect(); return rr.width > 0 && rr.height > 0; };
+        const norm = (s: string | null | undefined) => String(s || "").replace(/\s+/g, " ").trim();
+        const labelOf = (el: Element): string => {
+          const id = el.getAttribute("id");
+          if (id) { const l = document.querySelector(`label[for="${CSS.escape(id)}"]`); if (l && norm(l.textContent)) return norm(l.textContent); }
+          const w = el.closest("label"); if (w && norm(w.textContent)) return norm(w.textContent);
+          return norm(el.getAttribute("aria-label") || el.getAttribute("placeholder") || "");
+        };
+        const requiredMark = (el: Element): boolean => {
+          if ((el as HTMLInputElement).required || el.getAttribute("aria-required") === "true") return true;
+          if (/\brequired\b/i.test(String(el.getAttribute("title") || ""))) return true;
+          const id = el.getAttribute("id");
+          if (id) { const l = document.querySelector(`label[for="${CSS.escape(id)}"]`); if (l && /\*/.test(l.textContent || "")) return true; }
+          const grp = el.closest("[class*='element_group'], .form-group, [class*='form-group'], fieldset, [class*='Field'], [class*='field']");
+          return !!grp && !!grp.querySelector("[class*='equired']");
+        };
+        let streetBoxes = 0;
+        let streetBlank = 0;
+        for (const el of Array.from(c.querySelectorAll("input, select, textarea"))) {
+          const type = String(el.getAttribute("type") || "").toLowerCase();
+          if (["hidden", "button", "submit", "checkbox", "radio", "file", "image", "reset"].includes(type)) continue;
+          const tag = el.tagName.toLowerCase();
+          const val = tag === "select"
+            ? (/^(please\s+)?select\.{0,3}$|^--/i.test(norm((el as HTMLSelectElement).selectedOptions?.[0]?.textContent)) ? "" : norm((el as HTMLSelectElement).value))
+            : norm((el as HTMLInputElement).value);
+          const shown = vis(el);
+          const lbl = labelOf(el);
+          if (shown) {
+            out[i].typedTotal++;
+            if (!val) out[i].typedBlank++;
+            if (/\b(street|house)\s*(no\.?|number|#|num)\b|\bstreet\s*name\b/i.test(lbl)) { streetBoxes++; if (!val) streetBlank++; }
+            if (!val && requiredMark(el)) out[i].requiredBlank.push(lbl || out[i].heading);
+          } else if (!val && ((el as HTMLInputElement).required || el.getAttribute("aria-required") === "true")) {
+            // The hidden validator: required by attribute, nothing else. Named by the heading.
+            if (!out[i].requiredBlank.includes(out[i].heading)) out[i].requiredBlank.push(out[i].heading);
+          }
+        }
+        out[i].addressTyped = streetBoxes >= 2 && streetBlank === 0;
+      }
       return out;
-    }).catch(() => null);
+    }, { lookups: !!opts.lookups, global: PORTAL_SAFETY_GLOBAL }).catch(() => null);
     return Array.isArray(raw) ? raw : null;
   }
 
@@ -9147,6 +9219,34 @@ export class AutoLearnAdapter extends BasePortalAdapter {
         await saveDebugShot(`p${pageCount.toString().padStart(3, "0")}-after-${(pageTitle || "page").replace(/\s+/g, "_").slice(0, 40)}`);
       }
 
+      // d3f) THE PAGE'S OWN LOOKUP / POPULATE BUTTONS, PRESSED ONCE PER SECTION (#178). Live City
+      //      of Meridian (Accela Step 1, 2026-11-12): the walk typed Street No. / Street Name, every
+      //      solar question and the signature, then Continue bounced — "Parcel Number: Required" and
+      //      "This section is required. Please add one record." for Contractor, Applicant and
+      //      Contact. All four are filled by a BUTTON the walk never pressed: "Find Address" runs the
+      //      address search and populates the Parcel section, "Autofill" copies the account's contact
+      //      into Applicant / Contact, "Look Up" searches the licensed-professional register. Generic:
+      //      the labels are read from the page (portalSafety isLookupButtonLabel — disjoint from every
+      //      filing word), a section is the heading-scoped container acaContactSectionsOnPage already
+      //      reads, the address section's button goes first (its result feeds the parcel), then every
+      //      section with a required blank, top to bottom; what a press populated is recorded as the
+      //      button click (never a typed parcel); a candidate list is the ranked address chooser's; a
+      //      REQUIRED section its button could not fill ends the page named. Never on a review page.
+      if (!plan.atReview && !isDashboard && hasFillable && this.page) {
+        const lookups = await this.withPhaseTimeout(
+          "lookup_buttons",
+          120_000,
+          () => this.lookupButtonPass({ steps, url, pageCount, alreadyFilledLabels, portalNotices, pageTrace }),
+          { pressed: 0, stop: null as LearnResult | null },
+        );
+        if (lookups.stop) return lookups.stop;
+        if (lookups.pressed > 0) {
+          pageFillCount += lookups.pressed;
+          await this.waitForAutosaveIndicator(3000);
+          await sleep(400);
+        }
+      }
+
       // d4) VERIFY THE FILLS LANDED before advancing. A portal can silently drop a fill — a
       //     Vue/React model rejects it, an overlay eats the keystrokes, inline validation clears
       //     it, or an autosave round-trip blanks it. If we advance blindly the field is gone and
@@ -11469,6 +11569,318 @@ export class AutoLearnAdapter extends BasePortalAdapter {
       step.value = value;
     }
     return step;
+  }
+
+  /** #178 — PRESS THE PAGE'S LOOKUP / POPULATE BUTTONS, ONCE PER SECTION STATE, AND RE-READ.
+   *
+   *  The shape is clickComputeButton's (press a button so the page fills itself in, record the
+   *  click), generalised to sections: every heading-scoped container acaContactSectionsOnPage reads
+   *  (one heading-walk, not a second one), with its lookup-worded buttons (the SHARED predicate
+   *  isLookupButtonLabel, judged in the page), its required blanks and its typed inputs.
+   *
+   *  Candidates, in order:
+   *    1. the section holding the typed Street No. / Street Name boxes (address_split_form), when
+   *       they are filled — its "Find Address" validates the address and populates OTHER sections
+   *       (Accela's Parcel), so its own blanks do not decide it;
+   *    2. then, top to bottom, every section with a required blank (a visible required box, or the
+   *       hidden required validator ACA marks a record section with) — preferring a populate word
+   *       (Autofill) over a search word (Look Up) when a section offers both; a SEARCH button whose
+   *       section's own typed boxes are all blank is skipped (Accela's "FIND PARCEL" with no parcel
+   *       typed searches for nothing — and once Find Address has populated it, it is not blank).
+   *  Never: a label the filing predicates also claim (structurally impossible, pinned by
+   *  lookupButtonWords.test), "Select from Account" (the contact pass refuses the account picker on
+   *  purpose — a shared operator account would attach another company's contact), a section the
+   *  contact pass settled, the same section in the same state twice, or a review page (the caller).
+   *
+   *  After a press: a candidate list (two or more address rows) goes to the ranked address chooser
+   *  (chooseProjectAddressRow — the job's own address or a refusal, never the first row); a search
+   *  form that opened (Look Up's dialog) is searched ONCE by this client's business name, and only a
+   *  result that IS this client is picked; then the sections are re-read. What the press populated
+   *  (blanks that vanished anywhere on the page, a record that appeared, a section's hidden state
+   *  that filled) is recorded as the button click — by its label, css fallbacks, `populates` naming
+   *  the fields — never as a typed value, and the labels join alreadyFilledLabels so the re-plan
+   *  never types a parcel. A press that changed nothing records nothing.
+   *
+   *  A REQUIRED section still empty after its button (the Keelix test client has no Idaho licence,
+   *  so Contractor's Look Up finds nothing — the honest outcome) ends the page named: advancing is
+   *  the retry the portal already refused, and the page's own fallback ("Add New") is a person's. */
+  private async lookupButtonPass(ctx: {
+    steps: RecipeStep[];
+    url: string;
+    pageCount: number;
+    alreadyFilledLabels: string[];
+    portalNotices: string[];
+    pageTrace: string[];
+  }): Promise<{ pressed: number; stop: LearnResult | null }> {
+    const page = this.page;
+    const none = { pressed: 0, stop: null };
+    if (!page || typeof page.evaluate !== "function" || typeof page.locator !== "function") return none;
+    type Sec = NonNullable<Awaited<ReturnType<AutoLearnAdapter["acaContactSectionsOnPage"]>>>[number];
+    let path = "";
+    try { const u = new URL(ctx.url); path = u.host + u.pathname; } catch { path = String(ctx.url || "").split(/[?#]/)[0]; }
+    const norm = (s: string) => String(s ?? "").replace(/[*:]/g, " ").replace(/\s+/g, " ").trim().toLowerCase();
+    const stateKey = (s: Sec, label: string) => `${path}|${norm(s.heading)}|${norm(label)}|${s.requiredBlank.map(norm).join(",")}|${s.hasEdit ? "record" : "empty"}`;
+    const isPopulateWord = (label: string) => /auto-?fill|populate/i.test(label);
+    const sectionOwnedByContactPass = (s: Sec): boolean =>
+      this.acaFilledSectionHeadings.has(s.heading.toLowerCase())
+      || [s.addNewId, s.editId, s.selectId].some((id) => id && (this.acaFilledSectionControls.has(id) || this.acaEmptySectionControls.has(id)));
+    /** Visible, hidden-but-filled state of a section container — a Find Address that validated the
+     *  address writes the portal's address id into hidden boxes even when nothing visible moves. */
+    const hiddenFilled = async (key: number): Promise<number> => page.evaluate((k: number) => {
+      const c = document.querySelector(`[data-al-csec="${k}"]`);
+      if (!c) return 0;
+      let n = 0;
+      for (const el of Array.from(c.querySelectorAll("input[type='hidden']"))) if (String((el as HTMLInputElement).value || "").trim()) n++;
+      return n;
+    }, key).catch(() => 0);
+    const visibleFrames = async (): Promise<string[]> => page.evaluate(() => (Array.from(document.querySelectorAll("iframe")) as HTMLIFrameElement[])
+      .filter((f) => { const r = f.getBoundingClientRect(); return r.width > 0 && r.height > 0; })
+      .map((f) => f.getAttribute("name") || f.id || String(f.getAttribute("src") || "").split("?")[0])).catch(() => [] as string[]);
+    const readSections = async (): Promise<Sec[] | null> => {
+      await this.waitForDynamicFieldsSettle().catch(() => null);
+      return this.acaContactSectionsOnPage({ lookups: true });
+    };
+    let sections = await readSections();
+    if (!sections || !sections.some((s) => s.lookups.length)) return none;
+    this.debug?.event({
+      type: "lookup_sections", page: ctx.pageCount,
+      sections: sections.filter((s) => s.lookups.length).map((s) => ({ heading: s.heading.slice(0, 40), buttons: s.lookups.map((l) => l.label.slice(0, 30)), blanks: s.requiredBlank.slice(0, 6), typed: `${s.typedTotal - s.typedBlank}/${s.typedTotal}`, address: s.addressTyped, record: s.hasEdit })),
+    });
+    let pressed = 0;
+    const unresolved: Array<{ heading: string; label: string; why: string }> = [];
+    const identity = this.identityForRole("company");
+    for (let round = 0; round < 8 && sections; round++) {
+      // The next candidate, by the rules above. The address section first; then document order.
+      const pick = (s: Sec): { lookupKey: number; id: string; label: string; role: "link" | "button" } | null => {
+        if (sectionOwnedByContactPass(s)) return null;
+        const usable = s.lookups.filter((l) => isLookupButtonLabel(l.label) && !/select from account/i.test(l.label) && !isPayFee(l.label) && !SUBMIT_INTENT.test(l.label) && !sharedIsSubmitIntent(l.label));
+        if (!usable.length) return null;
+        const ordered = [...usable.filter((l) => isPopulateWord(l.label)), ...usable.filter((l) => !isPopulateWord(l.label))];
+        for (const l of ordered) {
+          if (this.lookupPressed.has(stateKey(s, l.label))) continue;
+          if (s.addressTyped && !isPopulateWord(l.label)) return l; // rule 1: the address search
+          if (!s.requiredBlank.length) continue;
+          if (!isPopulateWord(l.label) && s.typedTotal > 0 && s.typedBlank === s.typedTotal) continue; // a search with nothing typed
+          return l;
+        }
+        return null;
+      };
+      let target: { sec: Sec; btn: NonNullable<ReturnType<typeof pick>> } | null = null;
+      for (const s of [...sections.filter((s) => s.addressTyped), ...sections.filter((s) => !s.addressTyped)]) {
+        const btn = pick(s);
+        if (btn) { target = { sec: s, btn }; break; }
+      }
+      if (!target) break;
+      const { sec, btn } = target;
+      this.lookupPressed.add(stateKey(sec, btn.label));
+      const loc = page.locator(`[data-al-clookup="${btn.lookupKey}"]`).first();
+      if (!(await loc.count().catch(() => 0))) continue;
+      const stepMark = ctx.steps.length;
+      const blanksBefore = new Map(sections.map((s) => [s.key, s.requiredBlank] as const));
+      const recordsBefore = new Set(sections.filter((s) => s.hasEdit).map((s) => s.key));
+      const hiddenBefore = await hiddenFilled(sec.key);
+      const framesBefore = await visibleFrames();
+      const addressSearch = sec.addressTyped && !isPopulateWord(btn.label);
+      if (addressSearch) { this.addressRowChosen = false; this.addressRowRefusal = null; } // a fresh search is a fresh grid
+      this.debug?.event({ type: "lookup_button_press", page: ctx.pageCount, section: sec.heading.slice(0, 40), label: btn.label.slice(0, 40), blanks: sec.requiredBlank.slice(0, 6) });
+      const clicked = await this.clickResilient(loc).then(() => true).catch(() => false);
+      if (!clicked) { this.debug?.event({ type: "lookup_button_click_failed", section: sec.heading.slice(0, 40), label: btn.label.slice(0, 40) }); continue; }
+      await page.waitForLoadState?.("networkidle", { timeout: 15000 }).catch(() => null);
+      await this.waitForDynamicFieldsSettle().catch(() => null);
+      await sleep(600);
+      // The click, recorded by LABEL with css fallbacks — appended only if the press did something.
+      const clickStep: RecipeStep = {
+        action: "click", phase: "fill",
+        selector: {
+          role: btn.role, name: btn.label, exact: true,
+          fallbacks: [...(btn.id ? [{ css: `[id="${btn.id}"]` }] : []), { css: `a[title="${btn.label}"], input[value="${btn.label}"], button:has-text("${btn.label}")` }],
+        },
+        note: `lookup: ${btn.label} [${sec.heading.slice(0, 40)}]`,
+        fingerprint: { ...(btn.id ? { id: btn.id } : {}), section: sec.heading.slice(0, 80) },
+      };
+      ctx.steps.push(clickStep);
+      // A CANDIDATE LIST (two or more address rows): the ranked chooser picks the job's own address
+      // — or refuses, which ends the page named: a learn opens a real application, never on a
+      // property that is not this job's.
+      if (addressSearch) {
+        const chosen = await this.chooseProjectAddressRow(ctx.steps);
+        if (chosen) {
+          await page.waitForLoadState?.("networkidle", { timeout: 15000 }).catch(() => null);
+          await this.waitForDynamicFieldsSettle().catch(() => null);
+          await sleep(600);
+        } else if (this.addressRowRefusal) {
+          ctx.steps.length = stepMark;
+          return { pressed, stop: { ...fail(ctx.steps, this.portalName, `Stopped for a person on page ${ctx.pageCount}: "${btn.label}" listed several addresses and none could be taken as this job's — ${this.addressRowRefusal.slice(0, 300)}. Pick the address by hand and run again; the steps before this page were recorded.`, null, ctx.pageCount, ctx.portalNotices), stopReason: "address_candidates", pageTrace: ctx.pageTrace.slice(0, 40) } };
+        }
+      }
+      // A SEARCH FORM THAT OPENED (Look Up's dialog, or an inline panel): searched once by this
+      // client's business name; only a result that IS this client is picked.
+      const framesAfter = await visibleFrames();
+      const newFrame = framesAfter.find((f) => !framesBefore.includes(f)) ?? null;
+      let searchVerdict: "picked" | "empty" | "unusable" | null = null;
+      if (newFrame || !addressSearch) {
+        const midSections = await readSections();
+        const mid = midSections?.find((s) => s.key === sec.key || s.heading === sec.heading) ?? null;
+        const inlineFormOpened = !!mid && mid.typedTotal > sec.typedTotal && !!mid.lookups.some((l) => l.lookupKey !== btn.lookupKey || l.label !== btn.label);
+        if (newFrame || inlineFormOpened) {
+          searchVerdict = await this.lookupSearchForm({
+            scope: newFrame ? page.frameLocator(`iframe[name="${newFrame}"], iframe[id="${newFrame}"]`) : page.locator(`[data-al-csec="${sec.key}"]`),
+            frame: newFrame ?? undefined,
+            heading: sec.heading,
+            companyName: String(identity.companyName ?? "").trim(),
+            steps: ctx.steps,
+          });
+          this.debug?.event({ type: "lookup_search_form", section: sec.heading.slice(0, 40), label: btn.label.slice(0, 40), verdict: searchVerdict, dialog: newFrame ? newFrame.slice(0, 40) : "inline" });
+          if (searchVerdict !== "picked") await this.closeLookupDialog(newFrame);
+        }
+      }
+      // RE-READ: what did the press populate — anywhere on the page?
+      const after = await readSections();
+      if (!after) break;
+      const populated: string[] = [];
+      for (const s of after) {
+        const before = blanksBefore.get(s.key) ?? [];
+        for (const l of before) if (!s.requiredBlank.includes(l) && !populated.includes(l)) populated.push(l);
+        if (s.hasEdit && !recordsBefore.has(s.key) && !populated.includes(s.heading)) populated.push(s.heading);
+      }
+      const hiddenAfter = await hiddenFilled(sec.key);
+      if (!populated.length && hiddenAfter > hiddenBefore) populated.push(sec.heading);
+      if (populated.length && searchVerdict !== "empty") {
+        pressed++;
+        // On the LAST step of the group: a candidate list fills the parcel only once its row is
+        // picked, so replay verifies the fields after the pick, not after the search click.
+        (ctx.steps[ctx.steps.length - 1] ?? clickStep).populates = populated.slice(0, 12);
+        for (const l of populated) if (!ctx.alreadyFilledLabels.includes(l)) ctx.alreadyFilledLabels.push(l);
+        this.acaFilledSectionHeadings.add(sec.heading.toLowerCase());
+        this.debug?.event({ type: "lookup_button_populated", page: ctx.pageCount, section: sec.heading.slice(0, 40), label: btn.label.slice(0, 40), populated: populated.slice(0, 8).map((l) => l.slice(0, 60)) });
+      } else {
+        ctx.steps.length = stepMark; // a press that changed nothing is not a step to replay
+        const stillRequired = after.find((s) => s.key === sec.key || s.heading === sec.heading);
+        const why = searchVerdict === "empty" ? `its "${btn.label}" search found no record for this client`
+          : searchVerdict === "unusable" ? `its "${btn.label}" search asks for something this client record does not carry`
+          : `its "${btn.label}" changed nothing on the page`;
+        this.debug?.event({ type: "lookup_button_no_effect", page: ctx.pageCount, section: sec.heading.slice(0, 40), label: btn.label.slice(0, 40), why });
+        if (stillRequired && stillRequired.requiredBlank.length && !stillRequired.hasEdit && !stillRequired.addressTyped) {
+          unresolved.push({ heading: sec.heading, label: btn.label, why });
+        }
+      }
+      sections = after;
+    }
+    if (unresolved.length) {
+      // Only sections whose OTHER buttons were all tried too (an Autofill after a failed Look Up
+      // may have filled it) — a section that holds a record now is not unresolved.
+      const final = (await readSections()) ?? sections ?? [];
+      const still = unresolved.filter((u) => { const s = final.find((x) => x.heading === u.heading); return !s || (s.requiredBlank.length > 0 && !s.hasEdit); });
+      if (still.length) {
+        const named = still.map((u) => `the "${u.heading.slice(0, 40)}" section (${u.why})`).join("; ");
+        this.debug?.event({ type: "lookup_section_stop", page: ctx.pageCount, sections: still.map((u) => u.heading.slice(0, 40)) });
+        return {
+          pressed,
+          stop: {
+            ...fail(ctx.steps, this.portalName,
+              `Stopped for a person on page ${ctx.pageCount}: ${named}. The portal requires this section and its own lookup could not fill it — add the record by hand (the page offers "Add New") or add the missing data to the client record, then run again; the steps before this page were recorded.`,
+              null, ctx.pageCount, ctx.portalNotices),
+            stopReason: "required_blank",
+            requiredFieldMisses: still.map((u) => u.heading),
+            pageTrace: ctx.pageTrace.slice(0, 40),
+          },
+        };
+      }
+    }
+    return { pressed, stop: null };
+  }
+
+  /** #178 — a lookup button opened a SEARCH FORM (Accela's Look Up dialog: licence number / business
+   *  name + Search; or an inline panel). Searched ONCE by this client's business name; a result row
+   *  that holds the business name is picked (its Select link or radio); "no records found" or rows
+   *  that are not this client pick nothing. Steps (the fill, the search click, the pick) are recorded
+   *  only on a pick, bound to the company-name key, in the dialog's frame. */
+  private async lookupSearchForm(opts: {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    scope: any;
+    frame?: string;
+    heading: string;
+    companyName: string;
+    steps: RecipeStep[];
+  }): Promise<"picked" | "empty" | "unusable"> {
+    const page = this.page;
+    if (!page) return "unusable";
+    const { scope } = opts;
+    const inFrame: Partial<RecipeSelector> = opts.frame ? { frame: opts.frame } : {};
+    const mark = opts.steps.length;
+    try {
+      await sleep(600);
+      if (!opts.companyName) return "unusable";
+      const nameBox = scope.getByLabel(/business|company|organi[sz]ation|contractor|licensee|name/i).first();
+      if (!(await nameBox.count().catch(() => 0))) return "unusable";
+      if (!(await nameBox.fill(opts.companyName, { timeout: 8000 }).then(() => true).catch(() => false))) return "unusable";
+      opts.steps.push({ action: "fill", phase: "fill", selector: { label: "Business Name", fallbacks: [{ css: "input[id*='Business' i], input[id*='Company' i], input[id*='Name' i]" }], ...inFrame }, field: contactKeyFor("company", "business") ?? "installerCompanyName", value: opts.companyName, note: `lookup(${opts.heading.slice(0, 40)}): business name` });
+      // The form's own search button — the same shared predicate, the same refusals.
+      const controls = scope.locator("a, button, input[type='button'], input[type='submit']");
+      const n = await controls.count().catch(() => 0);
+      let searchBtn: unknown = null;
+      let searchLabel = "";
+      for (let i = 0; i < Math.min(n, 40); i++) {
+        const c = controls.nth(i);
+        if (typeof c.isVisible === "function" && !(await c.isVisible().catch(() => false))) continue;
+        const label = String((await c.evaluate((el: HTMLElement) => el.tagName === "INPUT" ? (el as HTMLInputElement).value : (el.innerText || el.textContent || el.getAttribute("title") || "")).catch(() => "")) ?? "").replace(/\s+/g, " ").trim();
+        if (!label || !/search|look\s?-?up|find/i.test(label) || !isLookupButtonLabel(label) || isPayFee(label) || SUBMIT_INTENT.test(label)) continue;
+        searchBtn = c; searchLabel = label; break;
+      }
+      if (!searchBtn) { opts.steps.length = mark; return "unusable"; }
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      if (!(await (searchBtn as any).click({ timeout: 8000 }).then(() => true).catch(() => false))) { opts.steps.length = mark; return "unusable"; }
+      opts.steps.push({ action: "click", phase: "fill", selector: { role: "button", name: searchLabel, exact: true, fallbacks: [{ role: "link", name: searchLabel, exact: true }, { css: `a[title="${searchLabel}"], input[value="${searchLabel}"]` }], ...inFrame }, note: `lookup(${opts.heading.slice(0, 40)}): ${searchLabel}` });
+      await page.waitForLoadState?.("networkidle", { timeout: 15000 }).catch(() => null);
+      // Poll: rows, or the form's own "nothing found".
+      const want = opts.companyName.toLowerCase().replace(/[^a-z0-9]/g, "");
+      for (let i = 0; i < 12; i++) {
+        await sleep(800);
+        const body = String((await scope.locator("body").innerText().catch(async () => String((await scope.innerText?.().catch(() => "")) ?? ""))) ?? "");
+        const rows = scope.locator("tr").filter({ has: scope.locator("a, button, input[type='radio']") });
+        const rn = await rows.count().catch(() => 0);
+        for (let r = 0; r < Math.min(rn, 40); r++) {
+          const row = rows.nth(r);
+          const text = String((await row.innerText().catch(() => "")) ?? "").replace(/\s+/g, " ").trim();
+          if (!text || text.length > 400) continue;
+          if (!text.toLowerCase().replace(/[^a-z0-9]/g, "").includes(want)) continue;
+          const sel = row.getByRole("link", { name: /^select$/i }).or(row.getByRole("button", { name: /^select$/i })).or(row.locator("input[type='radio']")).first();
+          if (!(await sel.count().catch(() => 0))) continue;
+          const ok = await sel.click({ timeout: 8000 }).then(() => true).catch(() => false);
+          if (!ok) continue;
+          opts.steps.push({ action: "click", phase: "fill", selector: { css: `tr:has-text("${opts.companyName}") a:has-text("Select"), tr:has-text("${opts.companyName}") input[type='radio']`, ...inFrame }, note: `lookup(${opts.heading.slice(0, 40)}): select this client's record` });
+          await page.waitForLoadState?.("networkidle", { timeout: 15000 }).catch(() => null);
+          await sleep(600);
+          return "picked";
+        }
+        if (/no records? (were |was )?found|no results? (were )?(found|returned)|returned no results|not found|0 records?/i.test(body)) { opts.steps.length = mark; return "empty"; }
+        if (rn > 0 && i >= 3) break; // rows, none ours
+      }
+      opts.steps.length = mark;
+      return "empty";
+    } catch {
+      opts.steps.length = mark;
+      return "unusable";
+    }
+  }
+
+  /** Close a dialog a lookup opened and did not resolve: ACA's own (closeAcaDialog), any other
+   *  frame's close control, then Escape. */
+  private async closeLookupDialog(frame: string | null): Promise<void> {
+    const page = this.page;
+    if (!page) return;
+    await this.closeAcaDialog().catch(() => null);
+    if (frame) {
+      for (const sel of ["a[title='Close' i]", "button[aria-label='Close' i]", "img[alt='Close' i]", ".ui-dialog-titlebar-close", `[id="${frame}_Close"]`]) {
+        const c = page.locator(sel).first();
+        const vis = (await c.count().catch(() => 0)) > 0 && (typeof c.isVisible === "function" ? await c.isVisible().catch(() => false) : false);
+        if (vis) { await c.click({ timeout: 4000 }).catch(() => null); break; }
+      }
+    }
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const kb = (page as any)?.keyboard;
+    if (kb && typeof kb.press === "function") await kb.press("Escape").catch(() => null);
+    await sleep(400);
   }
 
   // Click a "Calculate" / "Update Totals" style button that computes derived values from the
