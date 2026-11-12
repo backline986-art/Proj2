@@ -20,6 +20,7 @@ import { performLogin, lastRevealTrail, loginFormPresent, holdForPerson } from "
 import { enterApplicationFlow, isExcludedEntryLabel, normalizeEntryLabel, chooseApplicationType, scanChoiceTiles } from "./applicationEntry";
 import { explainProgramChoice, jobClassOf, offeredLabels, programSelector, scanProgramGroups, type ProgramGroup, type ProgramJob } from "./applicationProgram";
 import { planHiddenReveal, planLabelProxy } from "./revealHidden";
+import { describeTaggedToggle, GROUP_TOGGLE_CSS, recordTypeGroupNote, tagToggleByText, toggleSelectorCandidates, type GroupToggleInfo } from "./recordTypeGroup";
 import { looksLikeConsentWall, planConsentDismissal } from "./consentBanner";
 import { chooseRow, scanRowChoices, markAddressRow, type AddressRowPick } from "./rowChooser";
 import { parseStreetName, parseStreetNumber, parseStreetLine, correctTruncatedAddressFill, isSplitAddressForm } from "../addressParse";
@@ -265,7 +266,9 @@ export interface LearnResult {
   message: string;
   /** A NAMED stop (machine-readable), when the walk ended itself for a reason it can name:
    *  login_needed_no_credential, login_repeated_on_host, login_midrun_failed,
-   *  login_advance_with_empty_credentials, aca_wrong_module_cap, no_fill_progress. */
+   *  login_advance_with_empty_credentials, aca_wrong_module_cap, no_fill_progress,
+   *  record_type_closed_group (#174: the chosen record type sits in a group the page would not open;
+   *  nothing was selected and the advance was not pressed). */
   stopReason?: string;
   /** Base64 PNG screenshot taken when the review/confirm page is reached. */
   reviewScreenshotBase64?: string;
@@ -2621,6 +2624,11 @@ export class AutoLearnAdapter extends BasePortalAdapter {
   /** #166: the first record-type page that did NOT offer the verified type: the gap, with what the
    *  planner ticked there (filled in after its fills on that page). Reported on every return. */
   private recordTypeNotOffered: { wanted: string; offered: string[]; ticked: string[]; page: number } | null = null;
+  /** #174: THE CHOSEN RECORD TYPE IS IN A GROUP THIS PAGE WOULD NOT OPEN — set by accelaRecordTypePass
+   *  when the radio it chose was hidden and neither its group header nor a visible category checkbox
+   *  revealed it. The walk then stops, named (stopReason record_type_closed_group): an advance pressed
+   *  with nothing selected only re-asks for a record type, and did so four times on Meridian. */
+  private recordTypeClosedGroup: { type: string; group: string } | null = null;
   /** Set when the review page's own save was still pending when the learn handed over (B3). */
   private reviewUnsavedWarning = "";
   /** THE PROJECT'S OWN SECRETS, READ BY NAME AT FILL TIME (hard rule 2). Live on PGE (2026-09-28):
@@ -6147,35 +6155,61 @@ export class AutoLearnAdapter extends BasePortalAdapter {
    *  radios appear (record-type pass takes over) or the next call tries the next category. */
   private async accelaExpandRecordTypeCategory(steps: RecipeStep[]): Promise<boolean> {
     const page = this.page;
-    if (!page) return false;
+    if (!page || typeof page.evaluate !== "function") return false;
     const prefs: RegExp[] = [/solar|photovoltaic|\bpv\b/i, /^residential$/i, /^trades$/i, /^building$/i];
     let labels: string[] = [];
     try {
-      labels = await page.evaluate(() => {
-        const vis = (el: Element) => { const r = (el as HTMLElement).getBoundingClientRect(); return r.width > 0 && r.height > 0; };
-        return (Array.from(document.querySelectorAll("a")) as HTMLElement[])
-          .filter(vis)
-          .map((el) => (el.textContent || "").replace(/\s+/g, " ").trim())
-          .filter((t) => t && t.length < 40);
-      });
+      // Any clickable, not only <a> (#174): a header may be a <button>, a bare [onclick] div or an
+      // [aria-expanded] span. Its own words only — a container with [onclick] that wraps the whole
+      // list would otherwise read as a very long "label", and the length cap drops it.
+      labels = await page.evaluate((css: string) => {
+        const out: string[] = [];
+        for (const el of Array.from(document.querySelectorAll(css)) as HTMLElement[]) {
+          const r = el.getBoundingClientRect();
+          if (!(r.width > 0 && r.height > 0)) continue;
+          const t = (el.innerText || el.textContent || "").replace(/\s+/g, " ").trim();
+          if (t && t.length < 40 && !out.includes(t)) out.push(t);
+        }
+        return out;
+      }, GROUP_TOGGLE_CSS);
     } catch { return false; }
+    const untried = (l: string): boolean => !/^non[\s-]?residential$/i.test(l) && !this.acaTypeCategoriesTried.has(l);
+    const ordered: string[] = [];
+    // #174 — THE GROUP NAMED BY THE VERIFIED RECORD TYPE'S OWN LEADING WORDS COMES FIRST. "Residential
+    // Electrical" for "Residential Electrical Solar Array": a PERSON named the type (#166), and the
+    // group that is a prefix of it is where it lives — before any word preference, which knows
+    // nothing about this tenant's grouping. The longest prefix first (a page may offer both
+    // "Residential" and "Residential Electrical"). Only a verified type steers this: a seeded one is
+    // the planner's hint and never reaches a deterministic pass (hard rule 3, #166).
+    const verified = this.verifiedRecordType().toLowerCase();
+    if (verified) {
+      labels
+        .filter((l) => { const g = l.toLowerCase(); return g.length >= 4 && verified.startsWith(g) && verified.length > g.length && untried(l); })
+        .sort((a, b) => b.length - a.length)
+        .forEach((l) => ordered.push(l));
+    }
     for (const pref of prefs) {
-      const label = labels.find((l) => pref.test(l) && !/^non[\s-]?residential$/i.test(l) && !this.acaTypeCategoriesTried.has(l));
-      if (!label) continue;
+      const label = labels.find((l) => pref.test(l) && untried(l) && !ordered.includes(l));
+      if (label) ordered.push(label);
+    }
+    for (const label of ordered) {
       this.acaTypeCategoriesTried.add(label);
-      // Exact-text link; ACA renders these as <a> inside the category tree. A category that
-      // refuses the click is not fatal — the next call tries the next preference.
-      const loc = page.getByRole("link", { name: label, exact: true }).first();
-      const ok = await loc.click({ timeout: 8000 }).then(() => true).catch(() => false);
-      if (!ok) continue;
+      // Clicked by its words, tagged in-page: a role locator on the header's visible text misses
+      // when the header carries an icon with alt text (Meridian's <img alt="Expand">). A category
+      // that refuses the click is not fatal — the next call tries the next preference.
+      const hit = await this.clickGroupToggleByText(label);
+      if (!hit.clicked || !hit.selector) continue;
       await page.waitForLoadState?.("networkidle", { timeout: 12000 }).catch(() => null);
       await page.waitForTimeout?.(1200).catch(() => null);
+      // Recorded under the record-type group note (#174): the replay resolves it by label and never
+      // heals it onto a neighbouring group by position (recipeAdapter.isRecordTypeStep).
       steps.push({
         action: "click",
         phase: "fill",
-        selector: { role: "link", name: label, exact: true },
-        note: `accela: expand record-type category "${label}"`,
+        selector: hit.selector,
+        note: recordTypeGroupNote(label),
       });
+      this.debug?.event({ type: "record_type_group_opened", group: label.slice(0, 40), forType: verified ? this.verifiedRecordType().slice(0, 40) : "", via: "header" });
       return true;
     }
     return false;
@@ -6371,9 +6405,89 @@ export class AutoLearnAdapter extends BasePortalAdapter {
     return `The record type / work item a person verified for this permit is "${wanted}", and this page does not offer that exact name. Tick the ONE offered item that is that permit (the closest reading of it) and say which in notes.`;
   }
 
-  private async accelaRecordTypePass(project: ProjectRecord, fields: ExtractedField[], steps: RecipeStep[]): Promise<boolean> {
+  /** #174: the selector to RECORD for a group toggle — the first candidate (visible text, accessible
+   *  name, id, text) that resolves to exactly one element on the live page is the primary; the rest
+   *  are its fallbacks. Checked on the page because Meridian's header <a><img alt="Expand"><span>
+   *  Residential Electrical</span></a> is "Expand Residential Electrical" to a role locator: a
+   *  selector written from the visible words alone would resolve to nothing at replay. */
+  private async recordedToggleSelector(info: GroupToggleInfo): Promise<RecipeSelector | null> {
+    const candidates = toggleSelectorCandidates(info);
+    if (!candidates.length || !this.page) return null;
+    let primary: RecipeSelector | null = null;
+    for (const cand of candidates) {
+      try {
+        const n = await this._buildLocator(this.page, cand, { raw: true }).count();
+        if (n === 1) { primary = cand; break; }
+      } catch { /* a malformed candidate — try the next */ }
+    }
+    if (!primary) primary = candidates[0];
+    const fallbacks = candidates.filter((c) => c !== primary);
+    return fallbacks.length ? { ...primary, fallbacks } : primary;
+  }
+
+  /**
+   * #174 — OPEN THE GROUP THAT HOLDS A HIDDEN RECORD-TYPE RADIO, BY ITS OWN HEADER.
+   *
+   * The radio is tagged and planHiddenReveal (revealHidden.ts — the one reader of "what is holding
+   * this control shut") names the opener: the toggle preceding the hidden container, an
+   * aria-controls / data-target owner, a <summary>. The opener's words are read before the click
+   * (the header's img alt flips Expand → Collapse afterwards), it is clicked, and the radio is
+   * re-read. Returns the group's visible text and the selector to record, whether or not the
+   * click revealed the radio — the caller names the group in its stop when it did not.
+   */
+  private async openRecordTypeGroupByHeader(loc: any, forType: string): Promise<{ opened: boolean; group: string; selector: RecipeSelector | null; why: string }> {
+    const none = { opened: false, group: "", selector: null, why: "" };
+    if (!this.page || typeof this.page.evaluate !== "function" || typeof loc?.evaluate !== "function") return none;
+    const untag = async (): Promise<void> => {
+      await loc.evaluate((el: Element) => el.removeAttribute("data-al-hidden-target")).catch(() => {});
+      await this.page!.evaluate(() => document.querySelectorAll("[data-al-reveal]").forEach((n) => n.removeAttribute("data-al-reveal"))).catch(() => null);
+    };
+    try {
+      await loc.evaluate((el: Element) => el.setAttribute("data-al-hidden-target", "1"));
+      const plan = await this.page.evaluate(planHiddenReveal);
+      if (!plan?.opener) {
+        await untag();
+        return { ...none, why: plan?.why || "not concealed by any ancestor we recognise" };
+      }
+      const info = await this.page.evaluate(describeTaggedToggle, "data-al-reveal").catch(() => null);
+      const group = String(info?.text || "").trim();
+      const selector = info ? await this.recordedToggleSelector(info) : null;
+      const clicked = await this.page.locator("[data-al-reveal]").first().click({ timeout: 4000 }).then(() => true).catch(() => false);
+      await this.page.waitForTimeout?.(600).catch(() => null);
+      await this.waitForDynamicFieldsSettle().catch(() => null);
+      const now = clicked && typeof loc.isVisible === "function" ? await loc.isVisible().catch(() => false) : false;
+      await untag();
+      this.debug?.event({ type: now ? "record_type_group_header_clicked" : "record_type_group_header_no_effect", group: group.slice(0, 60), forType: forType.slice(0, 60), opener: String(plan.opener).slice(0, 120), clicked });
+      return { opened: now, group, selector, why: plan.why };
+    } catch {
+      await untag();
+      return none;
+    }
+  }
+
+  /** #174: click the ONE visible clickable whose words are `label` (tagged in-page, never by a role
+   *  locator — see recordedToggleSelector) and return the selector to record. */
+  private async clickGroupToggleByText(label: string): Promise<{ clicked: boolean; selector: RecipeSelector | null; matches: number }> {
+    if (!this.page || typeof this.page.evaluate !== "function") return { clicked: false, selector: null, matches: 0 };
+    const attr = "data-al-group-toggle";
+    const matches = await this.page.evaluate(tagToggleByText, { text: label, attr, css: GROUP_TOGGLE_CSS }).catch(() => 0);
+    if (matches !== 1) return { clicked: false, selector: null, matches };
+    const info = await this.page.evaluate(describeTaggedToggle, attr).catch(() => null);
+    const selector = info ? await this.recordedToggleSelector(info) : null;
+    const clicked = await this.page.locator(`[${attr}]`).first().click({ timeout: 8000 }).then(() => true).catch(() => false);
+    await this.page.evaluate((a: string) => document.querySelectorAll(`[${a}]`).forEach((n) => n.removeAttribute(a)), attr).catch(() => null);
+    return { clicked, selector, matches };
+  }
+
+  /**
+   * "advanced": the type was ticked and Continue pressed. "expanded" (#174): the chosen control was
+   * hidden, nothing this pass knows opened it, and `expand` (accelaExpandRecordTypeCategory, budgeted
+   * by the caller) opened a group — the caller re-reads the page and runs this pass again. "bail": the
+   * planner takes the page — or, when recordTypeClosedGroup is set, the walk stops named.
+   */
+  private async accelaRecordTypePass(project: ProjectRecord, fields: ExtractedField[], steps: RecipeStep[], expand?: () => Promise<boolean>): Promise<"advanced" | "expanded" | "bail"> {
     const page = this.page;
-    if (!page) return false;
+    if (!page) return "bail";
     const isElectrical = /elec/i.test(project.permitType ?? "");
     const prefs: RegExp[] = [
       /solar|photovoltaic|\bpv\b/i,
@@ -6390,9 +6504,9 @@ export class AutoLearnAdapter extends BasePortalAdapter {
       if (chosen) break;
       chosen = candidates.find((f) => re.test(f.label || ""));
     }
-    if (!chosen) { this.debug?.event({ type: "record_type_bail", why: "no candidate matched the solar/discipline preference" }); return false; }
-    const loc = await this.locator(chosen.selector);
-    if (!loc) return false;
+    if (!chosen) { this.debug?.event({ type: "record_type_bail", why: "no candidate matched the solar/discipline preference" }); return "bail"; }
+    let loc = await this.locator(chosen.selector);
+    if (!loc) return "bail";
 
     // THE RECORD TYPE IS INSIDE A CATEGORY THAT HAS TO BE OPENED FIRST.
     //
@@ -6415,26 +6529,57 @@ export class AutoLearnAdapter extends BasePortalAdapter {
     const chosenVisible = typeof loc.isVisible === "function"
       ? await loc.isVisible().catch(() => false)
       : true;
+    // What the group the radio sits in is called, for the stop below when nothing opened it — and,
+    // when no opener was found at all, what concealed the radio (planHiddenReveal's reading).
+    let closedGroup = "";
+    let concealedBy = "";
     if (!chosenVisible) {
-      const wanted = String(chosen.label || "").trim().toLowerCase();
-      const category = fields.find((f) => {
-        if (f.fieldType !== "checkbox" || f === chosen) return false;
-        const cat = String(f.label || "").trim().toLowerCase();
-        return cat.length >= 4 && wanted.startsWith(cat) && wanted.length > cat.length;
-      });
-      if (category) {
-        const catLoc = await this.locator(category.selector);
-        const opened = catLoc
-          ? await catLoc.check({ timeout: 8000 }).then(() => true)
-            .catch(async () => catLoc.click({ timeout: 6000 }).then(() => true).catch(() => false))
-          : false;
-        if (opened) {
-          steps.push({ action: "check", phase: "fill", selector: category.selector, note: `record type category: ${(category.label || "").slice(0, 50)}` });
-          await this.page?.waitForTimeout?.(1200).catch(() => null);
-          this.debug?.event({ type: "record_type_category_opened", category: String(category.label || "").slice(0, 40), forType: String(chosen.label || "").slice(0, 40) });
-        }
+      const chosenLabel = String(chosen.label || "").trim();
+      // #174 — FIRST, THE RADIO'S OWN GROUP HEADER (Meridian's shape: a collapsed tree whose groups
+      // open by an <a onclick> header; the category checkboxes exist but sit in a hidden filter
+      // panel). The group is whatever the page calls it — read from the header, recorded by it.
+      const byHeader = await this.openRecordTypeGroupByHeader(loc, chosenLabel);
+      concealedBy = byHeader.why;
+      if (byHeader.opened && byHeader.group && byHeader.selector) {
+        steps.push({ action: "click", phase: "fill", selector: byHeader.selector, note: recordTypeGroupNote(byHeader.group) });
+        this.debug?.event({ type: "record_type_group_opened", group: byHeader.group.slice(0, 40), forType: chosenLabel.slice(0, 40), via: "header" });
+        // Re-located: the list the header opened may have been re-rendered around the radio.
+        loc = (await this.locator(chosen.selector)) ?? loc;
       } else {
-        this.debug?.event({ type: "record_type_hidden_no_category", label: String(chosen.label || "").slice(0, 40) });
+        closedGroup = byHeader.group;
+        // SECOND, THE CATEGORY CHECKBOX — CHINO's shape, where the categories sit ABOVE the types and
+        // a type stays collapsed until its category is ticked. The category is named by the record
+        // type's own leading words ("Residential" for "Residential Solar"); only a genuine prefix
+        // qualifies, so this never ticks an unrelated category. And only a checkbox a person can SEE:
+        // check() on a hidden box (Meridian's filter panel) fails after its whole timeout and opens
+        // nothing — that wait, and the bail after it, is what this pass used to spend its budget on.
+        const wanted = chosenLabel.toLowerCase();
+        const category = fields.find((f) => {
+          if (f.fieldType !== "checkbox" || f === chosen) return false;
+          const cat = String(f.label || "").trim().toLowerCase();
+          return cat.length >= 4 && wanted.startsWith(cat) && wanted.length > cat.length;
+        });
+        if (category) {
+          const catLoc = await this.locator(category.selector);
+          const catVisible = catLoc
+            ? (typeof catLoc.isVisible === "function" ? await catLoc.isVisible().catch(() => false) : true)
+            : false;
+          const opened = catLoc && catVisible
+            ? await catLoc.check({ timeout: 8000 }).then(() => true)
+              .catch(async () => catLoc.click({ timeout: 6000 }).then(() => true).catch(() => false))
+            : false;
+          if (opened) {
+            steps.push({ action: "check", phase: "fill", selector: category.selector, note: `record type category: ${(category.label || "").slice(0, 50)}` });
+            await this.page?.waitForTimeout?.(1200).catch(() => null);
+            this.debug?.event({ type: "record_type_group_opened", group: String(category.label || "").slice(0, 40), forType: chosenLabel.slice(0, 40), via: "checkbox" });
+            loc = (await this.locator(chosen.selector)) ?? loc;
+          } else {
+            closedGroup = closedGroup || `${String(category.label || "").trim()} (category checkbox, ${catVisible ? "would not tick" : "hidden"})`;
+            this.debug?.event({ type: "record_type_category_unusable", category: String(category.label || "").slice(0, 40), visible: catVisible, label: chosenLabel.slice(0, 40) });
+          }
+        } else {
+          this.debug?.event({ type: "record_type_hidden_no_category", label: chosenLabel.slice(0, 40) });
+        }
       }
     }
 
@@ -6442,7 +6587,30 @@ export class AutoLearnAdapter extends BasePortalAdapter {
     // the planner retakes the page, and the duplicate corrupts every future replay).
     const checkOk = await loc.check({ timeout: 10000 }).then(() => true)
       .catch(async () => loc.click({ timeout: 8000 }).then(() => true).catch(() => false));
-    if (!checkOk) { this.debug?.event({ type: "record_type_bail", why: "record-type check/click failed" }); return false; }
+    if (!checkOk) {
+      this.debug?.event({ type: "record_type_bail", why: "record-type check/click failed" });
+      const stillHidden = typeof loc.isVisible === "function" ? !(await loc.isVisible().catch(() => false)) : false;
+      if (!chosenVisible && stillHidden) {
+        // THIRD, A GROUP HEADER THE PAGE SHOWS (#174): the group named by the verified type's leading
+        // words, else the word preferences. On a page whose groups are EMPTY until opened (Anne
+        // Arundel's shape) with a hidden filter panel, the only "record type" read is a filter-panel
+        // CHECKBOX that happens to carry a discipline name — nothing opens that, and the real radios
+        // are behind a header. Opening a group selects nothing; the caller re-reads and runs this pass
+        // again, within the expansion budget.
+        if (expand && await expand()) {
+          this.debug?.event({ type: "record_type_group_expanded_for_retry", label: String(chosen.label || "").slice(0, 60) });
+          return "expanded";
+        }
+        // #174 — THE WALK STOPS HERE, NAMED. The radio is on the page and nothing this pass knows
+        // opened its group; handing the page to the planner meant Continue pressed with nothing
+        // selected, "You have not selected a record type.", and recovery attempts that re-ask the
+        // same question. learnImpl reads this right after the pass and ends the run.
+        const group = closedGroup || `(no group header or category control found; the radio is ${concealedBy || "hidden"})`;
+        this.recordTypeClosedGroup = { type: String(chosen.label || "").trim(), group };
+        this.debug?.event({ type: "record_type_closed_group", label: String(chosen.label || "").slice(0, 60), group: group.slice(0, 80) });
+      }
+      return "bail";
+    }
     if (chosen === verifiedHit) {
       this.noteVerifiedRecordTypeTicked(chosen, candidates.length, steps);
     } else {
@@ -6453,13 +6621,13 @@ export class AutoLearnAdapter extends BasePortalAdapter {
       if (!(await cont.click({ timeout: 10000 }).then(() => true).catch(() => false))) {
         // Checked but couldn't advance — leave the advance to the planner next iteration
         // (the recorded check stands; the box holds its state on the live page).
-        return false;
+        return "bail";
       }
       steps.push({ action: "click", phase: "fill", selector: { css: ACA_CONTINUE_CSS, fallbacks: [{ role: "button", name: "Continue Application »" }] }, note: "record type: continue" });
       await page.waitForLoadState?.("networkidle", { timeout: 20000 }).catch(() => null);
       await page.waitForTimeout?.(2000).catch(() => null);
     }
-    return true;
+    return "advanced";
   }
 
   private async learnImpl(context: PortalContext, _project: ProjectRecord): Promise<LearnResult> {
@@ -7154,9 +7322,29 @@ export class AutoLearnAdapter extends BasePortalAdapter {
         // Record-type selection (the page right after the address row is chosen).
         if (!acaRecordTypeHandled && this.acaRecordTypePageDetected(fields)) {
           acaRecordTypeHandled = true;
-          const advanced = await this.accelaRecordTypePass(_project, fields, steps);
-          this.debug?.event({ type: "aca_record_type_pass", page: pageCount, advanced });
-          if (advanced) continue;
+          // The pass may open a group (#174) under the same budget as the expansion above.
+          const expand = async (): Promise<boolean> => {
+            if (acaTypeExpansions >= ACA_TYPE_EXPANSION_MAX) return false;
+            acaTypeExpansions++;
+            return this.accelaExpandRecordTypeCategory(steps);
+          };
+          const outcome = await this.accelaRecordTypePass(_project, fields, steps, expand);
+          this.debug?.event({ type: "aca_record_type_pass", page: pageCount, advanced: outcome === "advanced", outcome });
+          if (outcome === "advanced") continue;
+          if (outcome === "expanded") { acaRecordTypeHandled = false; continue; }
+          // #174 — THE RECORD TYPE IS IN A GROUP THIS PAGE WOULD NOT OPEN: stop, named, before the
+          // planner can press Continue with nothing selected. On Meridian that press drew "You have
+          // not selected a record type." four times through two recovery attempts and created no
+          // record; the only thing a re-plan of this page can do is press it again. No pauseReason:
+          // nothing here is a challenge, and the browser is not held for anyone.
+          if (this.recordTypeClosedGroup) {
+            const { type, group } = this.recordTypeClosedGroup;
+            this.debug?.event({ type: "record_type_closed_group_stop", page: pageCount, label: type.slice(0, 60), group: group.slice(0, 80) });
+            return {
+              ...fail(steps, this.portalName, `Stopped on page ${pageCount}: the record type "${type}" is in a closed group this page would not open: ${group}. Nothing was selected and the page was not advanced (pressing Continue with no record type selected only re-asks for one). Open the group by hand or correct the record type on file, then run again; the steps before this page were recorded.`, null, pageCount, portalNotices),
+              stopReason: "record_type_closed_group",
+            };
+          }
         }
       }
 

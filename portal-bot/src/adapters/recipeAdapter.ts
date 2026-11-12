@@ -18,6 +18,7 @@ const FEE_TIER_NO_BOX_REASON = "the recorded kVA tier box was not found on this 
  *  noteVerifiedRecordTypeTicked) — the replay finds that step by label, never by position. */
 const VERIFIED_RECORD_TYPE_NOTE = /^\s*record type \(verified\):\s*/i;
 import { collectPortalErrorBanner } from "../safeAction";
+import { GROUP_TOGGLE_CSS, recordTypeGroupOf, tagToggleByText, toggledListOpen } from "./recordTypeGroup";
 import { SERVICE_FEEDER_200A_FIELD, SERVICE_FEEDER_400A_FIELD, isServiceFeeder200Label, isServiceFeeder400Label } from "../../../shared/src/serviceLineLabels";
 import { contactFieldKind, contactKeyFor, contactRoleOfStep, isContactOpener, type ContactFieldKind, type ContactRole, type ContactTrack } from "../../../shared/src/contactRoles";
 import { structureTypeMeaning } from "../../../backend/src/permitProcess";
@@ -5986,6 +5987,10 @@ export class RecipeAdapter extends BasePortalAdapter {
   // and it must stop, not approximate. The hand-coded Accela adapter learned this same lesson
   // earlier; the replay path kept the fallback.
   private isRecordTypeStep(step: RecipeStep): boolean {
+    // #174: the click that OPENS the record type's group ("record type group: Residential Electrical")
+    // is part of the same choice — a group healed onto a neighbour by position exposes another
+    // list, and the type ticked after it is the permit that gets filed. Routed by openRecordTypeGroup.
+    if (recordTypeGroupOf(step)) return true;
     const s = `${step.selector?.label ?? ""} ${step.note ?? ""}`;
     return step.action === "check"
       && (/cbListServices/i.test(step.selector?.fallbacks?.map((f) => f.css ?? "").join(" ") ?? "")
@@ -5994,6 +5999,71 @@ export class RecipeAdapter extends BasePortalAdapter {
         // portal ("record type (verified): Prescriptive photovoltaic systems") — by label here too,
         // never healed onto a neighbour by position.
         || VERIFIED_RECORD_TYPE_NOTE.test(String(step.note ?? "")));
+  }
+
+  /**
+   * #174 — OPEN A RECORD-TYPE GROUP BY ITS NAME, NEVER BY POSITION.
+   *
+   * The learner recorded the header it clicked by the group's words ("record type group: Residential
+   * Electrical"); here that name is the only thing trusted. The recorded selector levels are tried
+   * first and taken only when exactly one VISIBLE element answers; otherwise the one visible
+   * clickable whose own words are the group's (tagged in-page — a role locator misses a header whose
+   * icon carries alt text) is clicked. Zero or several matches is a named refusal, not a guess: the
+   * type ticked after this click is the permit that gets filed. A group already open is left alone
+   * (its header would close it).
+   */
+  private async openRecordTypeGroup(step: RecipeStep): Promise<boolean> {
+    const group = recordTypeGroupOf(step);
+    await this.settle(8000);
+    await waitForInteractiveControls(this.page, 8000);
+    const attr = "data-al-group-toggle";
+    const clearTag = (): Promise<unknown> => typeof this.page.evaluate === "function"
+      ? this.page.evaluate((a: string) => document.querySelectorAll(`[${a}]`).forEach((n) => n.removeAttribute(a)), attr).catch(() => null)
+      : Promise.resolve();
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    let target: any = null;
+    let how = "";
+    const levels: RecipeSelector[] = step.selector ? [step.selector, ...(step.selector.fallbacks ?? [])] : [];
+    for (const sel of levels) {
+      const loc = this.locator({ ...sel, fallbacks: undefined });
+      if (!loc) continue;
+      let n = 0;
+      try { n = await loc.count(); } catch { continue; }
+      if (n !== 1 || !(await this.isTrulyVisible(loc.first()))) continue;
+      // The recorded control must still READ as this group: a per-render id that now names another
+      // header is the positional pick in another costume.
+      const words = await loc.first().evaluate((el: Element) => ((el as HTMLElement).innerText || el.textContent || "").replace(/\s+/g, " ").trim()).catch(() => "") as string;
+      if (words.toLowerCase() !== group.toLowerCase()) continue;
+      target = loc.first();
+      how = "the recorded selector";
+      break;
+    }
+    if (!target) {
+      const matches = typeof this.page.evaluate === "function"
+        ? await this.page.evaluate(tagToggleByText, { text: group, attr, css: GROUP_TOGGLE_CSS }).catch(() => 0) as number
+        : 0;
+      if (matches !== 1) {
+        await clearTag();
+        throw new Error(matches === 0
+          ? `Record type group "${group}" is not on this page — refusing to open another group (the type picked inside it is the permit that gets filed).`
+          : `Record type group "${group}" matches ${matches} controls on this page — refusing to guess which to open.`);
+      }
+      target = this.page.locator(`[${attr}]`).first();
+      how = "its words on the page";
+    } else if (typeof target.evaluate === "function") {
+      await target.evaluate((el: Element, a: string) => el.setAttribute(a, "1"), attr).catch(() => null);
+    }
+    const open = typeof this.page.evaluate === "function" ? await this.page.evaluate(toggledListOpen, attr).catch(() => null) : null;
+    if (open === true) {
+      await clearTag();
+      this.driftWarnings.push(`record type group "${group}" was already open — its header was not clicked`);
+      return true;
+    }
+    await target.click({ timeout: 10000 });
+    await clearTag();
+    await this.settle(4000);
+    this.driftWarnings.push(`record type group "${group}" opened by label via ${how} (positional fallback refused)`);
+    return true;
   }
 
   // The list this jurisdiction actually offers — for the error, so a human reads "the city has
@@ -6093,6 +6163,8 @@ export class RecipeAdapter extends BasePortalAdapter {
     if (/data-al-row\s*=/.test(step.selector?.css ?? "")) {
       return this.pickAddressVersionLive(step);
     }
+    // #174: the group a record type sits in is opened by its name (and never healed by position).
+    if (recordTypeGroupOf(step)) return this.openRecordTypeGroup(step);
     if (this.isRecordTypeStep(step)) {
       // #166: a verified pick's selector is the control's label; the note is the last resort, with
       // its prefix dropped.

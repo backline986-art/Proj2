@@ -115,12 +115,16 @@ export function planHiddenReveal(): HiddenRevealPlan {
   }
 
   // 3. A collapsed toggle immediately before the container — the shape a hand-rolled
-  //    accordion takes when nobody wired up aria.
+  //    accordion takes when nobody wired up aria. Any clickable counts (#174): Accela's
+  //    record-type group header is <a href="javascript:void(0)" onclick="ToggleRecordTypeList(this)">,
+  //    and other builds draw the same header as a bare [onclick] div or an [aria-expanded] span.
+  //    The set is recordTypeGroup.GROUP_TOGGLE_CSS, spelled out here because this function is
+  //    serialized into the page and cannot import it.
   const prev = container.previousElementSibling;
   if (prev) {
-    const toggle = prev.matches("button, summary, [role=button], a")
+    const toggle = prev.matches("button, summary, [role=button], a, [onclick], [aria-expanded]")
       ? prev
-      : prev.querySelector("button, summary, [role=button], a");
+      : prev.querySelector("button, summary, [role=button], a, [onclick], [aria-expanded]");
     if (toggle && !concealed(toggle)) return tag(toggle, "toggle preceding the hidden container");
   }
 
