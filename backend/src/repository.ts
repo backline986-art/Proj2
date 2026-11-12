@@ -114,6 +114,7 @@ import { planSetLicenceWarning } from "./clientMatch";
 import { assertSubmissionPaid } from "./submissionFees";
 import { snapshotFilingQuote } from "./feeAccuracy";
 import { recordFilingServiceCharge } from "./servicePrices";
+import { assertNoBillingHold } from "./invoiceCollections";
 import { readAndRecordPortalFees } from "./portalFeeReadings";
 import { closeoutDocumentLines, fetchIssuedRecordDocuments, isFinishedOutcome, issuedDocumentsByTarget } from "./portalIssuedDocuments";
 import { clientHasLoginOnHost, getDecryptedCredential, getDecryptedCredentialByUrl, getDecryptedCredentialAny, listPortalCredentials, lockedOutCredential, recordLoginOutcome, storedCredentialFor } from "./portalCredentials";
@@ -9604,6 +9605,10 @@ export async function prepareSubmission(
   // operator's service fee) paid or waived before anything is staged. This bills
   // the CLIENT; the portal's own fee checkout stays human-only regardless.
   assertSubmissionPaid(db, detail.project, track);
+  // THE LATE-INVOICE HOLD (#199, owner 2026-11-12): a client with an invoice 30+ days past due files
+  // nothing new until it is paid, voided, or a named person lifts the hold. A stop only; 402 like the
+  // gate above, so the autopilot reports it as a payment blocker and resumes when it clears.
+  assertNoBillingHold(db, detail.project);
 
   // A TRACK THAT IS ALREADY FILED MUST NOT BE FILED AGAIN.
   //

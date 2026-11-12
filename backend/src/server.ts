@@ -706,13 +706,47 @@ app.post("/api/clients/:id/invoices/:invoiceId/mark-paid", asyncHandler(async (r
   const reference = typeof req.body?.paymentReference === "string" ? req.body.paymentReference : "";
   const invoice = markClientInvoicePaid(db, String(req.params.id), String(req.params.invoiceId), reference);
   addAuditLog(db, null, "human", billingActor(req), "invoice.marked_paid", { clientId: invoice.clientId, invoiceId: invoice.id, number: invoice.number, reference: invoice.paidReference });
+  await resumeAfterBillingHold(invoice.clientId, "a late invoice was marked paid");
   res.json({ invoice });
 }));
 app.post("/api/clients/:id/invoices/:invoiceId/void", asyncHandler(async (req, res) => {
   const { voidClientInvoice } = await import("./clientInvoices");
   const invoice = voidClientInvoice(db, String(req.params.id), String(req.params.invoiceId), String(req.body?.reason || ""));
   addAuditLog(db, null, "human", billingActor(req), "invoice.voided", { clientId: invoice.clientId, invoiceId: invoice.id, number: invoice.number, reason: invoice.voidReason });
+  await resumeAfterBillingHold(invoice.clientId, "a late invoice was voided");
   res.json({ invoice });
+}));
+
+// --- Chasing late invoices (#199): the overdue list, reminders on a click, the filing hold ---
+// The owner's rule (2026-11-12): remind at the due date and 7 days after, each a staff click; hold the
+// client's new filings once an invoice is 30 days late; a named person may lift a hold. The list reads
+// through reqOrgFilter (rule 6); the two actions sit under /api/clients/:id (the client scope guard)
+// and read an invoice only through its own client.
+/** When nothing holds the client any more, resume the autopilot runs that stopped on the hold. */
+async function resumeAfterBillingHold(clientId: string, trigger: string): Promise<void> {
+  const { clientBillingHold, clientProjectIds } = await import("./invoiceCollections");
+  if (clientBillingHold(db, clientId).length) return;
+  for (const projectId of clientProjectIds(db, clientId)) maybeResumeAutopilot(db, projectId, trigger);
+}
+app.get("/api/billing/overdue", asyncHandler(async (req, res) => {
+  const { listOverdueInvoices, holdDays, reminderLateDays } = await import("./invoiceCollections");
+  res.json({ overdue: listOverdueInvoices(db, reqOrgFilter(db, req)), holdDays: holdDays(), reminderLateDays: reminderLateDays() });
+}));
+app.post("/api/clients/:id/invoices/:invoiceId/remind", asyncHandler(async (req, res) => {
+  const { sendInvoiceReminder } = await import("./invoiceCollections");
+  // AN OUTWARD EMAIL IS A NAMED PERSON'S CLICK: never the "operator" fallback.
+  const by = await billingPerson(req, "send a payment reminder");
+  const result = await sendInvoiceReminder(db, String(req.params.id), String(req.params.invoiceId), by);
+  addAuditLog(db, null, "human", by, result.delivered ? "invoice.reminder_sent" : "invoice.reminder_not_sent", { clientId: String(req.params.id), invoiceId: result.invoice.id, number: result.invoice.number, kind: result.kind, detail: result.detail });
+  res.json({ delivered: result.delivered, detail: result.detail, kind: result.kind });
+}));
+app.post("/api/clients/:id/invoices/:invoiceId/lift-hold", asyncHandler(async (req, res) => {
+  const { liftBillingHold } = await import("./invoiceCollections");
+  const by = await billingPerson(req, "lift a filing hold");
+  const holds = liftBillingHold(db, String(req.params.id), String(req.params.invoiceId), req.body?.reason, by);
+  addAuditLog(db, null, "human", by, "invoice.hold_lifted", { clientId: String(req.params.id), invoiceId: String(req.params.invoiceId), reason: String(req.body?.reason || "").slice(0, 300), stillHeldBy: holds.map((h) => h.number) });
+  await resumeAfterBillingHold(String(req.params.id), "a filing hold was lifted");
+  res.json({ holds });
 }));
 // Emails the invoice through the one client-email switch (clientEmailsOffFor); silenced or without
 // SMTP it is saved as a draft communication and the invoice is left as it was.
