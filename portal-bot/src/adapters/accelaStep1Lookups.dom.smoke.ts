@@ -101,7 +101,10 @@ const pages = (variant: string, path: string, q: URLSearchParams): string | null
       var hit = no === "33" && nm && "broadway".indexOf(nm) === 0;
       setTimeout(function(){
         if (!hit) { document.getElementById("addrMsg").textContent = "Address not found."; return; }
-        if (V === "candidates") {
+        if (V === "dialogcandidates") {
+          document.getElementById("ACADialogFrame").src = "/permits/Dialog.aspx?kind=address";
+          document.getElementById("dlgWrap").style.display = "block";
+        } else if (V === "candidates") {
           document.getElementById("addrResults").innerHTML = '<table id="${P}_WorkLocationEdit_gdvAddress"><tr><td><a href="javascript:void(0);" class="pick" data-p="R1234567890">Select</a></td><td>33 BROADWAY AVE MERIDIAN ID 83642 CITY APPLICATIONS</td></tr><tr><td><a href="javascript:void(0);" class="pick" data-p="R9999999999">Select</a></td><td>33 BROADWAY CT NAMPA ID 83651 CITY APPLICATIONS</td></tr></table>';
           Array.prototype.forEach.call(document.querySelectorAll("a.pick"), function(a){ a.onclick = function(){ S.rowPicks++; S.pickedParcel = a.getAttribute("data-p"); save(); setTimeout(function(){ el("ParcelEdit_txtParcelNo").value = a.getAttribute("data-p"); el("WorkLocationEdit_txtRefAddressId").value = "A-100"; document.getElementById("addrResults").innerHTML = ""; }, 200); return false; }; });
         } else { fillParcel(); }
@@ -133,6 +136,23 @@ const pages = (variant: string, path: string, q: URLSearchParams): string | null
       return false;
     };`);
   }
+  if (/Dialog\.aspx$/i.test(path) && q.get("kind") === "address") return `<!doctype html><html><head><title>Address Search Result List</title></head><body>
+    <h2>Address Search Result List</h2><p>Showing 1-2 of 2</p>
+    <table id="${P}_WorkLocationEdit_gdvAddress">
+      <tr><td><a href="javascript:void(0);" class="pick" data-p="R1234567890">Select</a></td><td>33 BROADWAY AVE MERIDIAN ID 83642 CITY APPLICATIONS</td></tr>
+      <tr><td><a href="javascript:void(0);" class="pick" data-p="R9999999999">Select</a></td><td>33 BROADWAY CT NAMPA ID 83651 CITY APPLICATIONS</td></tr>
+    </table>
+    <script>
+      Array.prototype.forEach.call(document.querySelectorAll("a.pick"), function(a){ a.onclick = function(){
+        var p = window.parent; p.__S.rowPicks++; p.__S.pickedParcel = a.getAttribute("data-p"); p.save();
+        setTimeout(function(){
+          p.document.getElementById("${P}_ParcelEdit_txtParcelNo").value = a.getAttribute("data-p");
+          p.document.getElementById("${P}_WorkLocationEdit_txtRefAddressId").value = "A-100";
+          p.document.getElementById("dlgWrap").style.display = "none";
+        }, 200);
+        return false;
+      }; });
+    </script></body></html>`;
   if (/Dialog\.aspx$/i.test(path)) return `<!doctype html><html><head><title>Look Up</title></head><body>
     <h2>Licensed Professional Search</h2>
     <div><label for="txtLicenseNumber">License Number:</label> <input id="txtLicenseNumber"></div>
@@ -197,9 +217,10 @@ const COMPANY = { companyName: "Keelix Test Co", firstName: "Permit", lastName: 
 
 const browser = await chromium.launch();
 let candidateSteps: RecipeStep[] = [];
+let dialogCandidateSteps: RecipeStep[] = [];
 let nomatchSteps: RecipeStep[] = [];
 try {
-  for (const variant of ["nomatch", "candidates"]) {
+  for (const variant of ["nomatch", "candidates", "dialogcandidates"]) {
     const ctx = await browser.newContext();
     ctx.setDefaultTimeout(8000);
     await ctx.addCookies([{ name: "v", value: variant, url: base }]);
@@ -252,43 +273,47 @@ try {
         r?.ok === false && r?.stopReason === "required_blank" && /"Contractor" section/.test(msg) && /Look Up/.test(msg) && !/Applicant|Parcel Number/.test(msg.replace(/the steps before this page were recorded\./, "")) && st.continues === 0 && /CapEdit/.test(where),
         `ok=${String(r?.ok)} stopReason=${String(r?.stopReason)} continues=${String(st.continues)} at=${where} msg=${msg}`);
     } else {
-      candidateSteps = steps;
+      if (variant === "candidates") candidateSteps = steps; else dialogCandidateSteps = steps;
       const rowStep = steps.find((s) => /data-al-row/.test(String(s.selector?.css ?? "")));
-      check("MUST-PASS candidates: two addresses listed → the job's own (Meridian 83642) picked by the ranked chooser, recorded as the row marker, populates on the pick",
-        st.rowPicks === 1 && st.pickedParcel === "R1234567890" && !!rowStep && (rowStep.populates ?? []).some((l) => /parcel number/i.test(l)),
+      const inDialog = variant === "dialogcandidates";
+      check(`MUST-PASS ${variant}: two addresses listed${inDialog ? " in a dialog" : ""} → the job's own (Meridian 83642) picked by the ranked chooser, recorded as the row marker${inDialog ? " in that frame" : ""}, populates on the pick`,
+        st.rowPicks === 1 && st.pickedParcel === "R1234567890" && !!rowStep && (rowStep.populates ?? []).some((l) => /parcel number/i.test(l)) && (inDialog ? rowStep.selector?.frame === "ACADialogFrame" : !rowStep.selector?.frame),
         `rowPicks=${String(st.rowPicks)} pickedParcel=${String(st.pickedParcel)} rowStep=${JSON.stringify(rowStep)}`);
-      check("MUST-PASS candidates: the walk reaches Step 2: Review by Continue Application",
+      check(`MUST-PASS ${variant}: the walk reaches Step 2: Review by Continue Application`,
         r?.reachedReview === true && /CapConfirm/i.test(where) && st.continues === 1, `reachedReview=${String(r?.reachedReview)} at=${where} continues=${String(st.continues)} ${msg}`);
     }
   }
 
-  // REPLAY the candidates recipe through the real RecipeAdapter.
+  // REPLAY each candidates recipe through the real RecipeAdapter.
   const recipe = {
     id: "aca-step1", scopeType: "ahj", profileKey: "id|city of meridian|", state: "ID", ahj: "City of Meridian", utility: "",
     portalPlatform: "accela", portalUrl: entry, status: "complete", version: 1, createdBy: "smoke", createdAt: "", updatedAt: "", notes: "",
     steps: [...candidateSteps.filter((s) => !s.isFinalSubmit), { action: "stopForReview" } as RecipeStep],
   } as unknown as PortalRecipe;
-  const ctx = await browser.newContext();
-  ctx.setDefaultTimeout(8000);
-  await ctx.addCookies([{ name: "v", value: "candidates", url: base }]);
-  await ctx.addInitScript({ content: "globalThis.__name = globalThis.__name || ((f) => f);" });
-  const page = await ctx.newPage();
-  posts.length = 0;
-  // The field values the backend binds for a replay (bindRecipeForReplay): the project's own
-  // city / ZIP are what the ranked chooser judges the address rows against.
-  const adapter = new RecipeAdapter(recipe, { streetNumber: "33", streetNameCore: "Broadway", homeownerName: "Test Owner", moduleCount: "16", city: "Meridian", zip: "83642" }, {}, {});
-  (adapter as unknown as { page: unknown }).page = page;
-  let res: { ok: boolean; message: string; agingNotes?: string[] } | null = null;
-  try { res = await adapter.fillApplication(project); } catch (e) { res = { ok: false, message: `threw ${String(e).slice(0, 200)}` }; }
-  await page.waitForTimeout(300);
-  const where = page.url();
-  const stReplay = await page.evaluate(() => JSON.parse(sessionStorage.getItem("S") || "{}") as Record<string, unknown>).catch(() => ({} as Record<string, unknown>));
-  await ctx.close().catch(() => null);
-  const filings = posts.filter((p) => /CapConfirm.*submit=1/i.test(p)).length;
-  check("replay: 0 Enter presses, 0 filing requests", stReplay.enters === 0 && filings === 0, `enters=${String(stReplay.enters)} filings=${filings}`);
-  check("MUST-PASS replay: Find Address by label → the job's row picked → the parcel present when the walk moved on → Autofill → review reached, in order",
-    stReplay.finds === 1 && stReplay.rowPicks === 1 && stReplay.pickedParcel === "R1234567890" && stReplay.autofills === 1 && stReplay.parcelAtContinue === "R1234567890" && /CapConfirm/i.test(where) && res?.ok === true,
-    `finds=${String(stReplay.finds)} rowPicks=${String(stReplay.rowPicks)} picked=${String(stReplay.pickedParcel)} autofills=${String(stReplay.autofills)} parcelAtContinue=${String(stReplay.parcelAtContinue)} at=${where} ok=${String(res?.ok)} msg=${String(res?.message).slice(0, 300)}`);
+  for (const [variant, recorded] of [["candidates", candidateSteps], ["dialogcandidates", dialogCandidateSteps]] as Array<[string, RecipeStep[]]>) {
+    const rec = { ...recipe, id: `aca-step1-${variant}`, steps: [...recorded.filter((s) => !s.isFinalSubmit), { action: "stopForReview" } as RecipeStep] } as unknown as PortalRecipe;
+    const ctx = await browser.newContext();
+    ctx.setDefaultTimeout(8000);
+    await ctx.addCookies([{ name: "v", value: variant, url: base }]);
+    await ctx.addInitScript({ content: "globalThis.__name = globalThis.__name || ((f) => f);" });
+    const page = await ctx.newPage();
+    posts.length = 0;
+    // The field values the backend binds for a replay (bindRecipeForReplay): the project's own
+    // city / ZIP are what the ranked chooser judges the address rows against.
+    const adapter = new RecipeAdapter(rec, { streetNumber: "33", streetNameCore: "Broadway", homeownerName: "Test Owner", moduleCount: "16", city: "Meridian", zip: "83642" }, {}, {});
+    (adapter as unknown as { page: unknown }).page = page;
+    let res: { ok: boolean; message: string } | null = null;
+    try { res = await adapter.fillApplication(project); } catch (e) { res = { ok: false, message: `threw ${String(e).slice(0, 200)}` }; }
+    await page.waitForTimeout(300);
+    const where = page.url();
+    const stReplay = await page.evaluate(() => JSON.parse(sessionStorage.getItem("S") || "{}") as Record<string, unknown>).catch(() => ({} as Record<string, unknown>));
+    await ctx.close().catch(() => null);
+    const filings = posts.filter((p) => /CapConfirm.*submit=1/i.test(p)).length;
+    check(`replay ${variant}: 0 Enter presses, 0 filing requests`, stReplay.enters === 0 && filings === 0, `enters=${String(stReplay.enters)} filings=${filings}`);
+    check(`MUST-PASS replay ${variant}: Find Address by label → the job's row picked${variant === "dialogcandidates" ? " inside the dialog" : ""} → the parcel present when the walk moved on → Autofill → review reached, in order`,
+      stReplay.finds === 1 && stReplay.rowPicks === 1 && stReplay.pickedParcel === "R1234567890" && stReplay.autofills === 1 && stReplay.parcelAtContinue === "R1234567890" && /CapConfirm/i.test(where) && res?.ok === true,
+      `finds=${String(stReplay.finds)} rowPicks=${String(stReplay.rowPicks)} picked=${String(stReplay.pickedParcel)} autofills=${String(stReplay.autofills)} parcelAtContinue=${String(stReplay.parcelAtContinue)} at=${where} ok=${String(res?.ok)} msg=${String(res?.message).slice(0, 300)}`);
+  }
 
   // REPLAY WHERE THE LOOKUP FINDS NOTHING: the nomatch recipe (Find Address with populates "Parcel
   // Number:", Autofill) for a street number the page does not know. The press lands, the parcel stays

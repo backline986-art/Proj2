@@ -11699,26 +11699,32 @@ export class AutoLearnAdapter extends BasePortalAdapter {
         fingerprint: { ...(btn.id ? { id: btn.id } : {}), section: sec.heading.slice(0, 80) },
       };
       ctx.steps.push(clickStep);
-      // A CANDIDATE LIST (two or more address rows): the ranked chooser picks the job's own address
-      // — or refuses, which ends the page named: a learn opens a real application, never on a
-      // property that is not this job's.
+      const framesAfter = await visibleFrames();
+      const newFrame = framesAfter.find((f) => !framesBefore.includes(f)) ?? null;
+      let searchVerdict: "picked" | "empty" | "unusable" | null = null;
+      // A CANDIDATE LIST (two or more address rows) — in the page, or in a dialog the search opened:
+      // the ranked chooser picks the job's own address, or refuses, which ends the page named: a
+      // learn opens a real application, never on a property that is not this job's.
       if (addressSearch) {
-        const chosen = await this.chooseProjectAddressRow(ctx.steps);
+        let chosen = await this.chooseProjectAddressRow(ctx.steps);
+        if (!chosen && !this.addressRowRefusal && newFrame) chosen = await this.chooseAddressRowInFrame(newFrame, ctx.steps);
         if (chosen) {
           await page.waitForLoadState?.("networkidle", { timeout: 15000 }).catch(() => null);
           await this.waitForDynamicFieldsSettle().catch(() => null);
           await sleep(600);
         } else if (this.addressRowRefusal) {
           ctx.steps.length = stepMark;
+          if (newFrame) await this.closeLookupDialog(newFrame);
           return { pressed, stop: { ...fail(ctx.steps, this.portalName, `Stopped for a person on page ${ctx.pageCount}: "${btn.label}" listed several addresses and none could be taken as this job's — ${this.addressRowRefusal.slice(0, 300)}. Pick the address by hand and run again; the steps before this page were recorded.`, null, ctx.pageCount, ctx.portalNotices), stopReason: "address_candidates", pageTrace: ctx.pageTrace.slice(0, 40) } };
+        } else if (newFrame) {
+          // A dialog with nothing to pick ("Address not found", a list shape the chooser does not
+          // read): closed, so it cannot swallow the next click; the section then reads as unchanged.
+          await this.closeLookupDialog(newFrame);
         }
       }
       // A SEARCH FORM THAT OPENED (Look Up's dialog, or an inline panel): searched once by this
       // client's business name; only a result that IS this client is picked.
-      const framesAfter = await visibleFrames();
-      const newFrame = framesAfter.find((f) => !framesBefore.includes(f)) ?? null;
-      let searchVerdict: "picked" | "empty" | "unusable" | null = null;
-      if (newFrame || !addressSearch) {
+      if (!addressSearch) {
         const midSections = await readSections();
         const mid = midSections?.find((s) => s.key === sec.key || s.heading === sec.heading) ?? null;
         const inlineFormOpened = !!mid && mid.typedTotal > sec.typedTotal && !!mid.lookups.some((l) => l.lookupKey !== btn.lookupKey || l.label !== btn.label);
@@ -11788,6 +11794,66 @@ export class AutoLearnAdapter extends BasePortalAdapter {
       }
     }
     return { pressed, stop: null };
+  }
+
+  /** #178 — THE CANDIDATE LIST INSIDE A DIALOG the address search opened: the same ranking as
+   *  chooseProjectAddressRow (rankAddressVersions on the job's city / ZIP / owner), the rows read in
+   *  THAT frame (one Select action per result row), the pick recorded with the frame so replay's
+   *  pickAddressVersionLive scans the same frame. Rows the chooser cannot read (a radio per row and
+   *  one Select button) pick nothing — the section then reads as unchanged and is named as today. */
+  private async chooseAddressRowInFrame(frameName: string, steps: RecipeStep[]): Promise<boolean> {
+    const page = this.page;
+    if (this.addressRowChosen || this.addressRowRefusal || !this.siteIdentity || !page) return false;
+    const id = this.siteIdentity;
+    if (!id.city && !id.zip) return false;
+    const frames: Frame[] = typeof page.frames === "function" ? page.frames() : [];
+    const frame = frames.find((f) => { try { return f.name() === frameName; } catch { return false; } })
+      ?? (typeof page.frame === "function" ? page.frame({ name: frameName }) : null);
+    if (!frame || typeof frame.evaluate !== "function") return false;
+    const scan = async (): Promise<Array<{ key: string; text: string }>> => frame.evaluate(() => {
+      const vis = (e: Element) => { const r = (e as HTMLElement).getBoundingClientRect(); return r.width > 0 && r.height > 0; };
+      const out: Array<{ key: string; text: string }> = [];
+      let n = 0;
+      for (const tr of Array.from(document.querySelectorAll("tr"))) {
+        if (!vis(tr)) continue;
+        const actions = Array.from(tr.querySelectorAll("a, button, [role='button']")).filter((a) => /^\s*select\s*$/i.test((a as HTMLElement).innerText || ""));
+        if (actions.length !== 1) continue;
+        const text = ((tr as HTMLElement).innerText || "").replace(/\s+/g, " ").trim();
+        if (!text || text.length > 400) continue;
+        const key = `af${n++}`;
+        (actions[0] as HTMLElement).setAttribute("data-al-row", key);
+        out.push({ key, text });
+      }
+      return out;
+    }).catch(() => [] as Array<{ key: string; text: string }>);
+    let rows = await scan();
+    for (let waited = 0; rows.length < 2 && waited < 6000; waited += 600) { await sleep(600); rows = await scan(); }
+    if (rows.length < 2) return false;
+    const { ranked, rejected, preference } = rankAddressVersions(rows.map((r) => r.text), {
+      city: id.city, zip: id.zip, homeownerName: id.homeownerName, isElectrical: id.isElectrical === true, issuingAgency: id.issuingAgency ?? undefined,
+    });
+    if (ranked.length === 0) {
+      this.addressRowRefusal = `none of the ${rows.length} addresses listed is in ${id.city ?? ""} ${id.zip ?? ""}`.replace(/\s+/g, " ").trim();
+      this.debug?.event({ type: "address_row_refused", why: "no result in the dialog is this project's property", rejected: rejected.slice(0, 3).join(" | ").slice(0, 200) });
+      return false;
+    }
+    if (preference.contradicts) {
+      this.addressRowRefusal = preference.note;
+      this.debug?.event({ type: "address_row_refused", why: preference.note.slice(0, 300) });
+      return false;
+    }
+    const best = rows[ranked[0].index];
+    const css = `[data-al-row="${best.key}"]`;
+    if (!(await frame.locator(css).first().click({ timeout: 12000 }).then(() => true).catch(() => false))) return false;
+    this.addressRowChosen = true;
+    await this.waitForDynamicFieldsSettle().catch(() => null);
+    this.debug?.event({ type: "address_row_chosen", jurisdiction: (ranked[0].text.match(/(CITY|COUNTY|DEQ)\s+APPLICATIONS/i) || [])[0] || "unlabelled", basis: preference.basis, ownerMatched: ranked[0].ownerHit, considered: ranked.length, rejected: rejected.length, dialog: frameName.slice(0, 40) });
+    steps.push({
+      action: "click", phase: "fill",
+      selector: { css, frame: frameName, fallbacks: [{ role: "link", name: "Select", frame: frameName }] },
+      note: `address version: ${(ranked[0].text.match(/(CITY|COUNTY|DEQ)\s+APPLICATIONS/i) || ["this property"])[0]}`,
+    });
+    return true;
   }
 
   /** #178 — a lookup button opened a SEARCH FORM (Accela's Look Up dialog: licence number / business
