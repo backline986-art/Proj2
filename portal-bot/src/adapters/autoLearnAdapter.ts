@@ -2631,6 +2631,12 @@ export class AutoLearnAdapter extends BasePortalAdapter {
    *  revealed it. The walk then stops, named (stopReason record_type_closed_group): an advance pressed
    *  with nothing selected only re-asks for a record type, and did so four times on Meridian. */
   private recordTypeClosedGroup: { type: string; group: string } | null = null;
+  /** #178: the lookup buttons the pass pressed ON THIS PAGE that populated something, by label (lower
+   *  case). Reset at each pass. A control in here is never the page's advance — live City of Boise
+   *  run 3: the planner had chosen the address "Search" as the page's advance (reasonable before the
+   *  pass existed); the pass searched, picked the row, filled the parcel and closed the dialog, and
+   *  the advance then pressed Search again and re-opened the dialog. */
+  private lookupPopulatedLabels = new Set<string>();
   /** Set when the review page's own save was still pending when the learn handed over (B3). */
   private reviewUnsavedWarning = "";
   /** THE PROJECT'S OWN SECRETS, READ BY NAME AT FILL TIME (hard rule 2). Live on PGE (2026-09-28):
@@ -9418,6 +9424,20 @@ export class AutoLearnAdapter extends BasePortalAdapter {
       if (typeof plan.advanceSelectorIndex === "number") {
         const advanceField = fields[plan.advanceSelectorIndex];
         if (!advanceField) break; // bad index — stop cleanly.
+        // A LOOKUP THE PASS ALREADY PRESSED IS NOT THE PAGE'S WAY FORWARD (#178, City of Boise run 3):
+        // the planner chose the address "Search" as this page's advance; the lookup pass had already
+        // searched, picked the row and filled the parcel, so pressing it again only re-opens the list.
+        // The curated forward finder takes over (never a submit, never pay) — else the planner re-plans.
+        {
+          const advLabel = String(advanceField.label ?? "").replace(/\s+/g, " ").trim().toLowerCase();
+          if (advLabel && this.lookupPopulatedLabels.has(advLabel)) {
+            this.debug?.event({ type: "advance_is_pressed_lookup", page: pageCount, label: advLabel.slice(0, 40) });
+            this.lookupPopulatedLabels.delete(advLabel);
+            if (await this.clickFallbackAdvance(steps, fields)) continue;
+            this.debug?.event({ type: "dead_advance_replan", page: pageCount, label: advLabel.slice(0, 40) });
+            continue;
+          }
+        }
         // Already proven not to move this page — fall through to the fallback finder, which
         // will pick a different control rather than repeating a click that does nothing.
         {
@@ -11619,6 +11639,7 @@ export class AutoLearnAdapter extends BasePortalAdapter {
   }): Promise<{ pressed: number; stop: LearnResult | null }> {
     const page = this.page;
     const none = { pressed: 0, stop: null };
+    this.lookupPopulatedLabels = new Set<string>();
     if (!page || typeof page.evaluate !== "function" || typeof page.locator !== "function") return none;
     /** A document token, so a FULL postback (the DOM replaced — ACA's __doPostBack on Find Address /
      *  Look Up) is told from an in-page change: stamps from before the press are gone either way and
@@ -11928,6 +11949,7 @@ export class AutoLearnAdapter extends BasePortalAdapter {
         (ctx.steps[ctx.steps.length - 1] ?? clickStep).populates = populated.slice(0, 12);
         for (const l of populated) if (!ctx.alreadyFilledLabels.includes(l)) ctx.alreadyFilledLabels.push(l);
         this.acaFilledSectionHeadings.add(sec.heading.toLowerCase());
+        this.lookupPopulatedLabels.add(btn.label.replace(/\s+/g, " ").trim().toLowerCase());
         this.debug?.event({ type: "lookup_button_populated", page: ctx.pageCount, section: sec.heading.slice(0, 40), label: btn.label.slice(0, 40), populated: populated.slice(0, 8).map((l) => l.slice(0, 60)) });
       } else {
         ctx.steps.length = stepMark; // a press that changed nothing is not a step to replay
