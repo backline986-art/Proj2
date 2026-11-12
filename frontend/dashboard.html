@@ -1523,6 +1523,11 @@
             <!-- OUR PRICES (#187): one price per permit filing and per NEM application for the whole
                  organisation, set by a named admin. Each filing keeps the price in force when it was filed;
                  a client's own price (above) wins over these. Nothing here charges anyone. -->
+            <!-- LATE INVOICES (#199): every client's sent invoices past due. A reminder is a staff click
+                 (at the due date, then 7 days after); 30 days late holds that client's new filings until
+                 paid, voided, or a named person lifts the hold. -->
+            <h4 style="margin:10px 0 4px">Late invoices (all clients)</h4>
+            <div id="overdueBlock"><p class="muted clients-creds-hint">Loading…</p></div>
             <h4 style="margin:10px 0 4px">Prices</h4>
             <div id="servicePricesBlock"><p class="muted clients-creds-hint">Loading…</p></div>
             <!-- QUICKBOOKS ONLINE (#701): one company for the whole organisation, not per client. Connect,

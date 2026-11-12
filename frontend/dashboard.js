@@ -12135,6 +12135,72 @@ async function waiveFilingCharge(chargeId) {
 }
 
 /* ===========================================================================
+   LATE INVOICES (#199) — every client's sent invoices past due. A reminder is
+   a named person's click; 30 days late holds the client's new filings until it
+   is paid, voided, or a named person lifts the hold. Every server string esc().
+   =========================================================================== */
+async function loadOverdueInvoices() {
+  const box = $("overdueBlock");
+  if (!box) return;
+  try {
+    state.overdue = await api("/api/billing/overdue");
+  } catch (err) {
+    box.innerHTML = `<p class="muted clients-creds-hint">${esc(err.message || "Could not read the late invoices.")}</p>`;
+    return;
+  }
+  renderOverdueInvoices();
+}
+
+const REMINDER_LABEL = { due: "Send due-date reminder", late: "Send late reminder" };
+
+function renderOverdueInvoices() {
+  const box = $("overdueBlock");
+  const data = state.overdue;
+  if (!box || !data) return;
+  const list = data.overdue || [];
+  if (!list.length) { box.innerHTML = '<p class="muted clients-creds-hint">No invoice is past due.</p>'; return; }
+  box.innerHTML = `<p class="muted clients-creds-hint" style="margin:0 0 4px">Reminders go out only when someone presses the button: at the due date, then ${esc(String(data.reminderLateDays))} days after. At ${esc(String(data.holdDays))} days late, that client's new filings wait.</p>`
+    + list.map((x) => {
+      const sent = (x.reminders || []).filter((r) => r.delivered).map((r) => `${r.kind === "late" ? "late" : "due-date"} reminder ${String(r.sentAt).slice(0, 10)} by ${r.sentBy}`);
+      const drafts = (x.reminders || []).filter((r) => !r.delivered).length;
+      return `<div class="cred-row" style="flex-wrap:wrap;gap:6px">
+        <div class="cred-row-text"><strong>${esc(x.clientName)}</strong> · ${esc(x.number)} · ${billingMoney(x.dueTotalUsd)}
+          <span class="muted">due ${esc(x.dueAt)}, ${x.daysLate === 0 ? "today" : `${esc(String(x.daysLate))} day${x.daysLate === 1 ? "" : "s"} late`}</span>
+          ${x.holdsFilings ? '<span class="badge badge-fail">FILINGS HELD</span>' : ""}
+          ${x.holdLifted ? `<span class="badge badge-info" title="${esc(x.holdLifted.reason)}">hold lifted by ${esc(x.holdLifted.by)}</span>` : ""}
+          ${sent.length ? `<br><span class="muted">${esc(sent.join("; "))}</span>` : ""}
+          ${drafts ? `<br><span class="muted">${esc(String(drafts))} reminder${drafts === 1 ? "" : "s"} saved as a draft, not sent</span>` : ""}</div>
+        <div class="actions" style="margin:0">
+          ${x.reminderDue ? `<button type="button" class="secondary" data-overdue-action="remind" data-client-id="${esc(x.clientId)}" data-inv-id="${esc(x.invoiceId)}"><span style="white-space:nowrap">${esc(REMINDER_LABEL[x.reminderDue] || "Send reminder")}</span></button>` : ""}
+          ${x.holdsFilings ? `<button type="button" class="secondary" data-overdue-action="lift" data-client-id="${esc(x.clientId)}" data-inv-id="${esc(x.invoiceId)}"><span style="white-space:nowrap">Lift hold</span></button>` : ""}
+        </div></div>`;
+    }).join("");
+  box.querySelectorAll("[data-overdue-action]").forEach((b) => b.addEventListener("click", () => overdueAction(b.dataset.overdueAction, b.dataset.clientId, b.dataset.invId)));
+}
+
+async function overdueAction(action, clientId, invoiceId) {
+  if (!clientId || !invoiceId) return;
+  const base = `/api/clients/${encodeURIComponent(clientId)}/invoices/${encodeURIComponent(invoiceId)}`;
+  try {
+    if (action === "remind") {
+      const decidedBy = namedPersonConsent(await authForDecision(), "Email this client a payment reminder now?", "sent the reminder", "a reminder is sent by a named person");
+      if (decidedBy == null) return;
+      const r = await api(`${base}/remind`, { method: "POST", body: JSON.stringify({ decidedBy }) });
+      billingStatus(r.delivered ? "Reminder sent." : `Reminder not sent: ${r.detail}`, r.delivered ? "info" : "error");
+    } else if (action === "lift") {
+      const reason = window.prompt("Why lift the hold? (a payment plan, a dispute being settled…)", "");
+      if (reason == null) return;
+      if (!String(reason).trim()) { billingStatus("Say why the hold is lifted.", "error"); return; }
+      const decidedBy = namedPersonConsent(await authForDecision(), "Let this client's new filings go ahead while the invoice is still owed?", "lifted the hold", "a hold is lifted by a named person");
+      if (decidedBy == null) return;
+      await api(`${base}/lift-hold`, { method: "POST", body: JSON.stringify({ reason, decidedBy }) });
+      billingStatus("Hold lifted: the invoice is still owed.");
+    }
+    await loadOverdueInvoices();
+  } catch (err) { billingStatus(err.message || "That did not work.", "error"); }
+}
+
+/* ===========================================================================
    OUR PRICES (#187) — one price per permit filing and per NEM application for
    the organisation. Data set by a named admin, never code; each filing keeps
    the price in force when it was filed. Every server string goes through esc().
@@ -12333,6 +12399,7 @@ async function loadClientBilling(clientId) {
     // The QuickBooks status first: the invoice rows offer "Send to QuickBooks" only when connected.
     await loadQuickBooksStatus();
     await loadServicePrices();
+    await loadOverdueInvoices();
     const data = await api(`/api/clients/${encodeURIComponent(clientId)}/invoices`);
     if (state.editingClientId === clientId) renderBillingInvoices(data.invoices || []);
   } catch (err) {
