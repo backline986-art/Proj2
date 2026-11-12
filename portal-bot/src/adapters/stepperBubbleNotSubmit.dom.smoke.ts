@@ -33,6 +33,7 @@ import "../smokeArtifactDirs";
 import http from "node:http";
 import { chromium, type Page } from "playwright";
 import { AutoLearnAdapter, EXTRACT_SEL, extractFieldsInPage, toExtractedField, type LearnPlanner } from "./autoLearnAdapter";
+import { PORTAL_SAFETY_GLOBAL, PORTAL_SAFETY_IN_PAGE_SOURCE } from "../../../shared/src/portalSafety";
 
 delete process.env.PORTAL_ALLOW_FINAL_SUBMIT;
 
@@ -182,12 +183,12 @@ const readState = (pg: Page): Promise<St> => pg.evaluate(() => ({ ...(window as 
   .catch((e) => ({ err: String(e) })) as Promise<St>;
 
 // "patchedNode" is not a learn: it drives fieldClickLocator + clickResilient directly (N2, below).
-const ALL: string[] = ["tigardStep1", "step7Bubble", "step7Submit", "noFillable", "textReview", "summaryContinue", "patchedNode"];
+const ALL: string[] = ["tigardStep1", "step7Bubble", "step7Submit", "noFillable", "textReview", "summaryContinue", "patchedNode", "terminalStepReading"];
 const which = (process.argv[2] ? process.argv[2].split(",") : ALL) as Variant[];
 const browser = await chromium.launch();
 try {
   for (const name of which) {
-    if ((name as string) === "patchedNode") continue;
+    if ((name as string) === "patchedNode" || (name as string) === "terminalStepReading") continue;
     const ctx = await browser.newContext();
     ctx.setDefaultTimeout(8000);
     await ctx.addInitScript({ content: "globalThis.__name = globalThis.__name || ((f) => f);" });
@@ -300,6 +301,47 @@ try {
     const c2 = await counts();
     check(`patchedNode: the same stamped node patched to "Submit application" after it was handed back is NOT clicked (no attempt, force-click or dispatch); the click ends as an absent control`,
       c2.submit === 0 && c2.next === 1 && /not on the page/i.test(threw) && events.some((e) => e.type === "click_by_element_changed"), `counts=${JSON.stringify(c2)} threw=${threw}`);
+    await ctx.close().catch(() => null);
+  }
+
+  // N1 (adversarial review), MUST-STAY-REVIEW in the SHARED reading: md-active now names the current
+  // step, so an md-steppers final step whose own label is NOT review-worded ("7 Submit", "7 Sign &
+  // Submit") — with "Review" elsewhere in the bar — must not become "the active step is not review,
+  // so this is a form step". The final step, current, with its Submit and nothing to fill, still
+  // reads review:true and terminal:true. (Without the stepOneLabelTerminal gate on the shared
+  // reading's form evidence, the two "Review and Submit" / "Review & Submit" bars read review:false.)
+  if ((which as string[]).includes("terminalStepReading")) {
+    const ctx = await browser.newContext();
+    await ctx.addInitScript({ content: "globalThis.__name = globalThis.__name || ((f) => f);" });
+    const pg = await ctx.newPage();
+    for (const [last, review] of [["Submit", "Review and Submit"], ["Sign & Submit", "Review & Submit"], ["Submit", "Review"], ["Sign & Submit", "Review"]] as const) {
+      const titles = ["Locations", "Type", "Contacts", "More Info", "Attachments", review, last];
+      const bar = titles.map((t, i) => `<button type="button" class="md-stepper-indicator${i === 6 ? " md-active" : ""}" role="listitem">\n<div class="md-stepper-indicator-wrapper">\n<div class="md-stepper-number"><span>${i + 1}</span></div>\n<div class="md-stepper-title"><span>${t}</span></div>\n</div>\n</button>`).join("");
+      await pg.goto(`${base}/apps/selfservice?v=noFillable#/permit/apply/7`);
+      await pg.setContent(`<!doctype html><html><head><title>Apply for Permit</title><style>.md-steppers-header{display:flex;gap:8px}</style></head><body>
+<form role="form"><h3>Apply for Permit - Residential Solar - Prescriptive</h3>
+<div class="md-steppers-header-region"><md-steppers-header class="md-steppers-header md-steppers-horizontal" role="list">${bar}</md-steppers-header></div>
+<h3 class="apply-steps-title">${last.toUpperCase()}</h3><dl><dt>Location</dt><dd>1 Test St</dd><dt>Description</dt><dd>Roof-mounted solar PV</dd></dl>
+<div class="md-step-actions"><div class="stepper-pull-left"><button type="button">Save Draft</button></div><div class="stepper-pull-right"><button type="button">Submit</button></div></div>
+</form></body></html>`);
+      await pg.evaluate(PORTAL_SAFETY_IN_PAGE_SOURCE);
+      const r = await pg.evaluate((g) => {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const ps = (globalThis as any)[g];
+        return { review: ps.reviewPageInPage(), terminal: ps.terminalPageInPage(), active: ps.navigatorActiveStepsInPage() };
+      }, PORTAL_SAFETY_GLOBAL);
+      if (review === "Review") {
+        // A bare "Review" is not a review phrase to the shared reading (isReviewPageText), so this bar
+        // never "lists the review step": review:false here is the base's reading too (checked without
+        // md-active). The page is still TERMINAL (read-only + its Submit) — the reading the lockdown,
+        // the backstop and replay's click gate use.
+        check(`MUST-STAY-TERMINAL terminalStepReading "7 ${last}" current (step 6 "${review}"): terminal:true (review:${String(r.review)}, as on the base)`,
+          r.terminal?.terminal === true, JSON.stringify(r));
+      } else {
+        check(`MUST-STAY-REVIEW terminalStepReading "7 ${last}" current (step 6 "${review}"): the shared reading says review:true and terminal:true`,
+          r.review === true && r.terminal?.terminal === true, JSON.stringify(r));
+      }
+    }
     await ctx.close().catch(() => null);
   }
 } finally {

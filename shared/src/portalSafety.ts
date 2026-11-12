@@ -611,7 +611,8 @@ export function portalSafetyFactory() {
   // Both agree: that is the answer. Only NARROW names review — the words sit inside a
   // class-matched container, and it takes positive evidence of a FORM step to call it one: a
   // live fillable control on the page (readOnlyPageInPage false), or a bar that marks its active
-  // step and none of the active steps is review. With neither, it is the review page — the
+  // step and none of the active steps is terminal-worded (review / submit / sign / confirm / pay —
+  // stepOneLabelTerminal, #188). With neither, it is the review page — the
   // direction that cannot file. And whatever either reading says, the page IS review when a
   // bar's ACTIVE step (aria-current / aria-selected / a whole "active"/"current" class token —
   // not mat-stepper's "mat-step-label-active", which a non-linear stepper puts on every step) or
@@ -791,7 +792,14 @@ export function portalSafetyFactory() {
     if (named.length) return { review: true, text: `${textNarrow} \n ${named.join(" \n ")}`, navs: narrow, active };
     if (reviewSignals(textWide, url)) return { review: true, text: textWide, navs: wide, active };
     if (!reviewSignals(textNarrow, url)) return { review: false, text: textWide, navs: wide, active };
-    const formEvidence = active.length > 0 || readOnlyPageInPage() === false;
+    // A CURRENT STEP IS FORM EVIDENCE ONLY WHEN IT IS NOT A TERMINAL STEP (#188, adversarial
+    // review N1). With md-active read, an md-steppers wizard whose last step is "7 Submit" or
+    // "7 Sign & Submit" (the bar's "6 Review and Submit" listing review) marked that last step
+    // current, and "an active step that is not review-worded" turned its own submit page into a
+    // form step — on the base it read review (no active step, read-only). The step-one rule's
+    // words decide (stepOneLabelTerminal: review / summary / confirm / certify / sign / submit /
+    // pay), the same ones navigatorActiveStepsInPage reports. Only ever fewer form steps.
+    const formEvidence = (active.length > 0 && !active.some((t) => stepOneLabelTerminal(t))) || readOnlyPageInPage() === false;
     return formEvidence ? { review: false, text: textWide, navs: wide, active } : { review: true, text: textNarrow, navs: narrow, active };
   };
   const pageTextWithoutNavigatorInPage = (d: Document): string => reviewReadingInPage(d).text;
