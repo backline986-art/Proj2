@@ -6,6 +6,8 @@ import type { Page, Frame, Locator } from "playwright";
 import type { LearnTargetRecordType, PortalRecipe, ProjectRecord, RecipeSelector, RecipeStep, StepFingerprint } from "../../../shared/src/types";
 // #166: the ONE record-type label matcher (the replay's borrow reads the same one — findBorrowableRecipe).
 import { sameRecordType } from "../../../backend/src/permitProcess";
+// #178: the ONE name matcher (case, punctuation, INC / LLC / &-vs-AND suffixes) for "is this row this client".
+import { knowledgeNameMatchScore } from "../../../backend/src/knowledgeBase";
 import { BasePortalAdapter, HUMAN_REVIEW_MESSAGE, type PortalContext, type PortalStepResult } from "../adapter";
 import { openPortal } from "../browser";
 import { selectWithFallback, readClosedComboboxOptions } from "../comboboxFill";
@@ -11807,6 +11809,7 @@ export class AutoLearnAdapter extends BasePortalAdapter {
       const newOverlay = (await visibleOverlays()).filter((o) => !overlaysBefore.includes(o.key) && o.controls > 0).sort((a, b) => b.controls - a.controls)[0]?.key ?? null;
       const overlaySel = newOverlay ? `[data-al-overlay="${newOverlay}"]` : "";
       let searchVerdict: "picked" | "empty" | "unusable" | null = null;
+      let searchedWords = ""; // what the search form was asked, for the named stop
       /** Close an in-document overlay the pass is leaving: its own Cancel / Close / × first, then Escape. */
       const closeOverlay = async (): Promise<void> => {
         if (!overlaySel) return;
@@ -11827,6 +11830,33 @@ export class AutoLearnAdapter extends BasePortalAdapter {
       // the ranked chooser picks the job's own address, or refuses, which ends the page named: a
       // learn opens a real application, never on a property that is not this job's.
       const closePopup = async (): Promise<void> => { try { if (popup && !(typeof popup.isClosed === "function" && popup.isClosed())) await popup.close(); } catch { /* already gone */ } };
+      /** Which of the press's dialogs is still showing: the in-document modal, the dialog frame, the
+       *  popup window — or "" when none. */
+      const dialogStillOpen = async (): Promise<string> => {
+        if (overlaySel && await page.locator(overlaySel).first().isVisible().catch(() => false)) return "modal";
+        if (newFrame && await page.locator(`iframe[name="${newFrame}"], iframe[id="${newFrame}"]`).first().isVisible().catch(() => false)) return "dialog frame";
+        if (popup && !(typeof popup.isClosed === "function" && popup.isClosed())) return "popup window";
+        return "";
+      };
+      /** AFTER A SUCCESSFUL PICK THE DIALOG MUST BE GONE BEFORE THE RE-READ (Boise building run 2:
+       *  the list stayed open after Select on that tenant, the next two page reads were of the dialog,
+       *  and the planner reached for its hidden Submit). Wait ~8 s for it to close on its own; else
+       *  close it the pass's way (×, Cancel, Escape — never its Submit); a dialog that re-opens is
+       *  closed once more and then named in events. The pass owns the dialog until it is closed. */
+      const ensureDialogClosed = async (): Promise<void> => {
+        let kind = await dialogStillOpen();
+        for (let w = 0; kind && w < 16; w++) { await sleep(500); kind = await dialogStillOpen(); }
+        if (!kind) { this.debug?.event({ type: "lookup_dialog_closed", page: ctx.pageCount, label: btn.label.slice(0, 40), how: "itself" }); return; }
+        const closeOnce = async (): Promise<void> => { if (newFrame) await this.closeLookupDialog(newFrame); await closeOverlay(); await closePopup(); await sleep(600); };
+        await closeOnce();
+        const again = await dialogStillOpen();
+        this.debug?.event({ type: "lookup_dialog_closed", page: ctx.pageCount, label: btn.label.slice(0, 40), how: again ? `closed by the pass, re-opened (${again})` : `closed by the pass (${kind})` });
+        if (again) {
+          await closeOnce();
+          const still = await dialogStillOpen();
+          if (still) this.debug?.event({ type: "lookup_dialog_stays_open", page: ctx.pageCount, label: btn.label.slice(0, 40), kind: still });
+        }
+      };
       if (addressSearch) {
         // The list is wherever the press put it: the page, an in-document modal, a dialog frame, a
         // popup window — the modal first (Boise 05:29: the scan over the whole page would also see
@@ -11841,7 +11871,7 @@ export class AutoLearnAdapter extends BasePortalAdapter {
         if (!chosen && !this.addressRowRefusal && popup) chosen = await this.chooseAddressRowInScope(popup, "popup", ctx.steps);
         if (chosen) {
           await settleAfterPress();
-          await closePopup();
+          await ensureDialogClosed();
         } else if (this.addressRowRefusal) {
           ctx.steps.length = stepMark;
           if (newFrame) await this.closeLookupDialog(newFrame);
@@ -11864,16 +11894,20 @@ export class AutoLearnAdapter extends BasePortalAdapter {
         const mid = midSections?.find((s) => s.key === sec.key || s.heading === sec.heading) ?? null;
         const inlineFormOpened = !!mid && mid.typedTotal > sec.typedTotal && !!mid.lookups.some((l) => l.lookupKey !== btn.lookupKey || l.label !== btn.label);
         if (popup || newFrame || overlaySel || inlineFormOpened) {
-          searchVerdict = await this.lookupSearchForm({
+          const form = await this.lookupSearchForm({
             scope: popup ? popup : newFrame ? page.frameLocator(`iframe[name="${newFrame}"], iframe[id="${newFrame}"]`) : overlaySel ? page.locator(overlaySel) : page.locator(`[data-al-csec="${sec.key}"]`),
             frame: popup ? "popup" : newFrame ?? undefined,
             heading: sec.heading,
             companyName: String(identity.companyName ?? "").trim(),
+            discipline: this.siteIdentity?.isElectrical === true ? "electrical" : this.siteIdentity?.isElectrical === false ? "structural" : "",
             steps: ctx.steps,
           });
+          searchVerdict = form.verdict;
+          searchedWords = form.searched;
           this.debug?.event({ type: "lookup_search_form", section: sec.heading.slice(0, 40), label: btn.label.slice(0, 40), verdict: searchVerdict, dialog: popup ? "popup window" : newFrame ? newFrame.slice(0, 40) : overlaySel ? "modal" : "inline" });
           if (searchVerdict !== "picked" && !popup) { await this.closeLookupDialog(newFrame); await closeOverlay(); }
           if (popup) { await settleAfterPress(); await closePopup(); }
+          if (searchVerdict === "picked") { await settleAfterPress(); await ensureDialogClosed(); }
         }
       }
       // RE-READ: what did the press populate — anywhere on the page?
@@ -11897,7 +11931,7 @@ export class AutoLearnAdapter extends BasePortalAdapter {
         this.debug?.event({ type: "lookup_button_populated", page: ctx.pageCount, section: sec.heading.slice(0, 40), label: btn.label.slice(0, 40), populated: populated.slice(0, 8).map((l) => l.slice(0, 60)) });
       } else {
         ctx.steps.length = stepMark; // a press that changed nothing is not a step to replay
-        const why = searchVerdict === "empty" ? `its "${btn.label}" search found no record for this client`
+        const why = searchVerdict === "empty" ? `its "${btn.label}" search found no record for this client${searchedWords ? ` (${searchedWords})` : ""}`
           : searchVerdict === "unusable" ? `its "${btn.label}" search asks for something this client record does not carry`
           : reloaded ? `its "${btn.label}" reloaded the page; no section changed`
           : `its "${btn.label}" changed nothing on the page`;
@@ -11914,6 +11948,28 @@ export class AutoLearnAdapter extends BasePortalAdapter {
     // not pressed and why ("nothing typed to search by"), plus the address search that should have
     // fed it. Only after a press on this page FAILED — a page where every press worked, or where
     // nothing was pressed, is the required sweep's as before (never a stop the portal may not make).
+    // NO DIALOG OUTLIVES THE PASS: a page read made through an open dialog is not the page, and the
+    // planner must never be asked on it. ACA's own dialog first, then any stamped overlay with controls
+    // (its Close / × / Cancel) — never a Submit.
+    {
+      await this.closeAcaDialog().catch(() => null);
+      const left = (await visibleOverlays()).filter((o) => o.controls > 0);
+      for (const o of left) {
+        const ov = page.locator(`[data-al-overlay="${o.key}"]`);
+        let how = "";
+        for (const sel of ["a[title='Close' i]", "button[aria-label='Close' i]", "[class*='close' i]", "img[alt='Close' i]"]) {
+          const c = ov.locator(sel).first();
+          if ((await c.count().catch(() => 0)) && (typeof c.isVisible !== "function" || await c.isVisible().catch(() => false))) { await c.click({ timeout: 4000 }).catch(() => null); how = sel; break; }
+        }
+        if (!how) {
+          const cancel = ov.getByRole("button", { name: /^cancel$/i }).or(ov.getByRole("link", { name: /^cancel$/i })).first();
+          if ((await cancel.count().catch(() => 0)) && (typeof cancel.isVisible !== "function" || await cancel.isVisible().catch(() => false))) { await cancel.click({ timeout: 4000 }).catch(() => null); how = "Cancel"; }
+        }
+        await sleep(400);
+        const gone = !(await ov.first().isVisible().catch(() => false));
+        this.debug?.event({ type: gone ? "lookup_dialog_closed" : "lookup_dialog_stays_open", page: ctx.pageCount, how: `pass-end sweep${how ? ` (${how})` : ""}`, kind: "modal" });
+      }
+    }
     if (tried.length) {
       const final = (await readSections()) ?? sections ?? [];
       const addressMiss = tried.find((t) => t.addressSearch);
@@ -12080,66 +12136,124 @@ export class AutoLearnAdapter extends BasePortalAdapter {
     frame?: string;
     heading: string;
     companyName: string;
+    /** This learn's discipline (siteIdentity.isElectrical): the TYPE select of a licence register
+     *  (Accela's "License Type") is set to the option naming it before the name search — live
+     *  Meridian run 8 searched "Look Up License" with the type at --Select-- and got nothing. */
+    discipline?: "electrical" | "structural" | "";
     steps: RecipeStep[];
-  }): Promise<"picked" | "empty" | "unusable"> {
+  }): Promise<{ verdict: "picked" | "empty" | "unusable"; searched: string }> {
     const page = this.page;
-    if (!page) return "unusable";
-    const { scope } = opts;
     const inFrame: Partial<RecipeSelector> = opts.frame ? { frame: opts.frame } : {};
     const mark = opts.steps.length;
+    const { scope } = opts;
+    let searched = "";
+    const out = (verdict: "picked" | "empty" | "unusable") => ({ verdict, searched });
+    if (!page) return out("unusable");
     try {
       await sleep(600);
-      if (!opts.companyName) return "unusable";
-      const nameBox = scope.getByLabel(/business|company|organi[sz]ation|contractor|licensee|name/i).first();
-      if (!(await nameBox.count().catch(() => 0))) return "unusable";
-      if (!(await nameBox.fill(opts.companyName, { timeout: 8000 }).then(() => true).catch(() => false))) return "unusable";
-      opts.steps.push({ action: "fill", phase: "fill", selector: { label: "Business Name", fallbacks: [{ css: "input[id*='Business' i], input[id*='Company' i], input[id*='Name' i]" }], ...inFrame }, field: contactKeyFor("company", "business") ?? "installerCompanyName", value: opts.companyName, note: `lookup(${opts.heading.slice(0, 40)}): business name` });
-      // The form's own search button — the same shared predicate, the same refusals.
-      const controls = scope.locator("a, button, input[type='button'], input[type='submit']");
-      const n = await controls.count().catch(() => 0);
-      let searchBtn: unknown = null;
-      let searchLabel = "";
-      for (let i = 0; i < Math.min(n, 40); i++) {
-        const c = controls.nth(i);
-        if (typeof c.isVisible === "function" && !(await c.isVisible().catch(() => false))) continue;
-        const label = String((await c.evaluate((el: HTMLElement) => el.tagName === "INPUT" ? (el as HTMLInputElement).value : (el.innerText || el.textContent || el.getAttribute("title") || "")).catch(() => "")) ?? "").replace(/\s+/g, " ").trim();
-        if (!label || !/search|look\s?-?up|find/i.test(label) || !isLookupButtonLabel(label) || isPayFee(label) || SUBMIT_INTENT.test(label)) continue;
-        searchBtn = c; searchLabel = label; break;
-      }
-      if (!searchBtn) { opts.steps.length = mark; return "unusable"; }
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      if (!(await (searchBtn as any).click({ timeout: 8000 }).then(() => true).catch(() => false))) { opts.steps.length = mark; return "unusable"; }
-      opts.steps.push({ action: "click", phase: "fill", selector: { role: "button", name: searchLabel, exact: true, fallbacks: [{ role: "link", name: searchLabel, exact: true }, { css: `a[title="${searchLabel}"], input[value="${searchLabel}"]` }], ...inFrame }, note: `lookup(${opts.heading.slice(0, 40)}): ${searchLabel}` });
-      await page.waitForLoadState?.("networkidle", { timeout: 15000 }).catch(() => null);
-      // Poll: rows, or the form's own "nothing found".
-      const want = opts.companyName.toLowerCase().replace(/[^a-z0-9]/g, "");
-      for (let i = 0; i < 12; i++) {
-        await sleep(800);
-        const body = String((await scope.locator("body").innerText().catch(async () => String((await scope.innerText?.().catch(() => "")) ?? ""))) ?? "");
-        const rows = scope.locator("tr").filter({ has: scope.locator("a, button, input[type='radio']") });
-        const rn = await rows.count().catch(() => 0);
-        for (let r = 0; r < Math.min(rn, 40); r++) {
-          const row = rows.nth(r);
-          const text = String((await row.innerText().catch(() => "")) ?? "").replace(/\s+/g, " ").trim();
-          if (!text || text.length > 400) continue;
-          if (!text.toLowerCase().replace(/[^a-z0-9]/g, "").includes(want)) continue;
-          const sel = row.getByRole("link", { name: /^select$/i }).or(row.getByRole("button", { name: /^select$/i })).or(row.locator("input[type='radio']")).first();
-          if (!(await sel.count().catch(() => 0))) continue;
-          const ok = await sel.click({ timeout: 8000 }).then(() => true).catch(() => false);
-          if (!ok) continue;
-          opts.steps.push({ action: "click", phase: "fill", selector: { css: `tr:has-text("${opts.companyName}") a:has-text("Select"), tr:has-text("${opts.companyName}") input[type='radio']`, ...inFrame }, note: `lookup(${opts.heading.slice(0, 40)}): select this client's record` });
-          await page.waitForLoadState?.("networkidle", { timeout: 15000 }).catch(() => null);
-          await sleep(600);
-          return "picked";
+      if (!opts.companyName) return out("unusable");
+      // 1) A TYPE / CATEGORY SELECT, set first: the option naming this learn's discipline (electrical
+      //    → /electric/; structural or building → /building|general|contractor/), else the single
+      //    non-placeholder option when there is exactly one; nothing fits → left at its placeholder
+      //    and the search still runs (today's behaviour). Recorded by its label.
+      const typeWanted = opts.discipline === "electrical" ? /electric/i : opts.discipline === "structural" ? /building|general|contractor/i : null;
+      const selects: Array<{ label: string; id: string; options: Array<{ value: string; text: string }> }> = await scope.locator("select").evaluateAll((els: Element[]) => els.map((el) => {
+        const r = (el as HTMLElement).getBoundingClientRect();
+        if (!(r.width > 0 && r.height > 0)) return { label: "", id: "", options: [] };
+        const id = el.getAttribute("id") || "";
+        const lab = (id && document.querySelector(`label[for="${CSS.escape(id)}"]`)) || el.closest("label");
+        const label = String((lab && (lab as HTMLElement).innerText) || el.getAttribute("aria-label") || el.getAttribute("title") || "").replace(/\s+/g, " ").replace(/[*:]\s*$/, "").trim();
+        return { label, id, options: Array.from((el as HTMLSelectElement).options).map((o) => ({ value: o.value, text: String(o.textContent || "").replace(/\s+/g, " ").trim() })) };
+      })).catch(() => []);
+      const typeSel = selects.find((s) => s.label && /\b(licen[cs]e\s+type|contractor\s+type|type|category|trade|discipline|kind)\b/i.test(s.label));
+      let typeChosen = "";
+      let typeSelectPresent = false;
+      if (typeSel) {
+        typeSelectPresent = true;
+        const real = typeSel.options.filter((o) => o.value && !/^(please\s+)?select\b|^--|^choose\b|^\(?none\)?$/i.test(o.text));
+        const hit = (typeWanted ? real.find((o) => typeWanted.test(o.text)) : undefined) ?? (real.length === 1 ? real[0] : undefined);
+        if (hit) {
+          const sel = typeSel.id ? scope.locator(`[id="${typeSel.id}"]`).first() : scope.getByLabel(typeSel.label, { exact: false }).first();
+          if (await sel.selectOption({ label: hit.text }).then(() => true).catch(async () => sel.selectOption(hit.value).then(() => true).catch(() => false))) {
+            typeChosen = hit.text;
+            opts.steps.push({ action: "select", phase: "fill", selector: { label: typeSel.label, fallbacks: [...(typeSel.id ? [{ css: `[id="${typeSel.id}"]`, ...inFrame }] : [])], ...inFrame }, value: hit.text, note: `lookup(${opts.heading.slice(0, 40)}): ${typeSel.label}` });
+            await sleep(400);
+          }
         }
-        if (/no records? (were |was )?found|no results? (were )?(found|returned)|returned no results|not found|0 records?/i.test(body)) { opts.steps.length = mark; return "empty"; }
-        if (rn > 0 && i >= 3) break; // rows, none ours
+      }
+      // 2) The BUSINESS name box, never a person's: Accela's licence register lists First / Middle /
+      //    Last before "Name of Business", so a bare /name/ took "First". Business words first; a bare
+      //    "Name" only when no business-worded box exists and it is not a person's part.
+      let nameBox = scope.getByLabel(/business|company|organi[sz]ation|contractor|licensee/i).first();
+      if (!(await nameBox.count().catch(() => 0))) {
+        nameBox = scope.getByLabel(/\bname\b/i).first();
+        if (await nameBox.count().catch(() => 0)) {
+          const lbl = String(await nameBox.evaluate((el: Element) => { const id = el.getAttribute("id"); const l = id && document.querySelector(`label[for="${CSS.escape(id)}"]`); return String((l && (l as HTMLElement).innerText) || el.getAttribute("aria-label") || ""); }).catch(() => "") ?? "");
+          if (/\b(first|middle|last|given|family|contact|your)\b/i.test(lbl)) { opts.steps.length = mark; return out("unusable"); }
+        }
+      }
+      if (!(await nameBox.count().catch(() => 0))) { opts.steps.length = mark; return out("unusable"); }
+      if (!(await nameBox.fill(opts.companyName, { timeout: 8000 }).then(() => true).catch(() => false))) { opts.steps.length = mark; return out("unusable"); }
+      opts.steps.push({ action: "fill", phase: "fill", selector: { label: "Business Name", fallbacks: [{ css: "input[id*='Business' i], input[id*='Company' i], input[id*='Name' i]", ...inFrame }], ...inFrame }, field: contactKeyFor("company", "business") ?? "installerCompanyName", value: opts.companyName, note: `lookup(${opts.heading.slice(0, 40)}): business name` });
+      searched = `searched by business name "${opts.companyName}"${typeChosen ? ` with ${typeSel!.label} "${typeChosen}"` : typeSelectPresent ? ` with ${typeSel!.label} left at its placeholder (no option names ${opts.discipline || "this discipline"})` : ""}`;
+      // 3) The form's own search button — the same shared predicate, the same refusals; labels read in
+      //    one pass (the button sits below the fold of a long form), scrolled into view before the click.
+      const controls = scope.locator("a, button, input[type='button'], input[type='submit']");
+      const labels: string[] = await controls.evaluateAll((els: Element[]) => els.map((el) => {
+        const r = (el as HTMLElement).getBoundingClientRect();
+        if (!(r.width > 0 && r.height > 0)) return "";
+        return String(el.tagName === "INPUT" ? (el as HTMLInputElement).value : ((el as HTMLElement).innerText || el.textContent || el.getAttribute("title") || "")).replace(/\s+/g, " ").trim();
+      })).catch(() => [] as string[]);
+      const si = labels.findIndex((label) => !!label && /search|look\s?-?up|find/i.test(label) && isLookupButtonLabel(label) && !isPayFee(label) && !SUBMIT_INTENT.test(label));
+      if (si < 0) { opts.steps.length = mark; return out("unusable"); }
+      const searchBtn = controls.nth(si);
+      const searchLabel = labels[si];
+      // At most TWO searches per press: a second only when no type option fit (the register may
+      // answer a bare name on a retry); with the type set, one empty answer is the answer.
+      const tries = typeSelectPresent && !typeChosen ? 2 : 1;
+      // The "is this client" test: the shared knowledge-name matcher (case, punctuation and the
+      // INC / LLC / & vs AND suffixes do not matter) — only a row that IS this client is picked.
+      const isOurs = (text: string): boolean => knowledgeNameMatchScore(opts.companyName, text) >= 60
+        || text.toLowerCase().replace(/[^a-z0-9]/g, "").includes(opts.companyName.toLowerCase().replace(/[^a-z0-9]/g, ""));
+      for (let attempt = 0; attempt < tries; attempt++) {
+        await searchBtn.scrollIntoViewIfNeeded?.({ timeout: 3000 }).catch(() => null);
+        if (!(await searchBtn.click({ timeout: 8000 }).then(() => true).catch(() => false))) { opts.steps.length = mark; return out("unusable"); }
+        if (attempt === 0) opts.steps.push({ action: "click", phase: "fill", selector: { role: "button", name: searchLabel, exact: true, fallbacks: [{ role: "link", name: searchLabel, exact: true, ...inFrame }, { css: `a[title="${searchLabel}"], input[value="${searchLabel}"]`, ...inFrame }], ...inFrame }, note: `lookup(${opts.heading.slice(0, 40)}): ${searchLabel}` });
+        await page.waitForLoadState?.("networkidle", { timeout: 15000 }).catch(() => null);
+        // Poll: rows, or the form's own "nothing found".
+        let sawEmpty = false;
+        for (let i = 0; i < 12; i++) {
+          await sleep(800);
+          const body = String((await scope.locator("body").innerText().catch(async () => String((await scope.innerText?.().catch(() => "")) ?? ""))) ?? "");
+          const rows = scope.locator("tr").filter({ has: scope.locator("a, button, input[type='radio']") });
+          const rn = await rows.count().catch(() => 0);
+          for (let r = 0; r < Math.min(rn, 40); r++) {
+            const row = rows.nth(r);
+            const text = String((await row.innerText().catch(() => "")) ?? "").replace(/\s+/g, " ").trim();
+            if (!text || text.length > 400) continue;
+            // The row's own name cells, not the whole text: a licence number or address never matches.
+            const cells: string[] = await row.locator("td").allInnerTexts().catch(() => [] as string[]);
+            const names = (cells.length ? cells : [text]).map((c) => c.replace(/\s+/g, " ").trim()).filter(Boolean);
+            if (!names.some(isOurs)) continue;
+            const sel = row.getByRole("link", { name: /^select$/i }).or(row.getByRole("button", { name: /^select$/i })).or(row.locator("input[type='radio']")).first();
+            if (!(await sel.count().catch(() => 0))) continue;
+            const ok = await sel.click({ timeout: 8000 }).then(() => true).catch(() => false);
+            if (!ok) continue;
+            opts.steps.push({ action: "click", phase: "fill", selector: { css: `tr:has-text("${opts.companyName}") a:has-text("Select"), tr:has-text("${opts.companyName}") input[type='radio']`, ...inFrame }, note: `lookup(${opts.heading.slice(0, 40)}): select this client's record` });
+            await page.waitForLoadState?.("networkidle", { timeout: 15000 }).catch(() => null);
+            await sleep(600);
+            return out("picked");
+          }
+          if (/no records? (were |was )?found|no results? (were )?(found|returned)|returned no results|not found|0 records?/i.test(body)) { sawEmpty = true; break; }
+          if (rn > 0 && i >= 3) break; // rows, none ours
+        }
+        this.debug?.event({ type: "lookup_search_attempt", section: opts.heading.slice(0, 40), attempt: attempt + 1, licenseType: typeChosen || (typeSelectPresent ? "(placeholder)" : "(no type select)"), empty: sawEmpty });
       }
       opts.steps.length = mark;
-      return "empty";
+      return out("empty");
     } catch {
       opts.steps.length = mark;
-      return "unusable";
+      return out("unusable");
     }
   }
 

@@ -83,7 +83,7 @@ const pages = (variant: string, path: string, q: URLSearchParams): string | null
     const typedNo = esc(q.get("no") || "");
     const typedNm = esc(q.get("nm") || "");
     const LIST = `<table id="${P}_WorkLocationEdit_gdvAddress"><tr><td><a href="javascript:void(0);" class="pick" data-p="R1234567890">Select</a></td><td>33 BROADWAY AVE MERIDIAN ID 83642 CITY APPLICATIONS</td></tr><tr><td><a href="javascript:void(0);" class="pick" data-p="R9999999999">Select</a></td><td>33 BROADWAY CT NAMPA ID 83651 CITY APPLICATIONS</td></tr></table>`;
-    const contractor = /^(nomatch|postbacknone|modalnone)$/.test(variant) ? section("Contractor",
+    const contractor = /^(nomatch|postbacknone|modalnone|licensematch)$/.test(variant) ? section("Contractor",
       "For Residential permits, if no contractor and pulling permit as Property Owner, please indicate by clicking look up and search property owner under business name.",
       `${validator("License_409Edit")}<div id="contractorRecord"></div>
        <a id="${P}_License_409Edit_btnAddNewLP" title="Add New" href="javascript:void(0);"><span>Add New</span></a>
@@ -108,10 +108,10 @@ const pages = (variant: string, path: string, q: URLSearchParams): string | null
       <div class="ACA_Form"><span class="ACA_Required_Indicator">*</span><label for="${P}_AppSpec_txt_0_4">Number of panels:</label> <input id="${P}_AppSpec_txt_0_4" title="Required" aria-required="true"></div>`)}
     <div id="errs"></div>
     ${CONT}
-    <div id="iframeBlocker" class="page-overlay-blocker" style="display:none;position:fixed;top:0;left:0;width:100%;height:100%"></div>
+    <div id="iframeBlocker" class="page-overlay-blocker" style="display:none;position:fixed;top:0;left:0;width:100%;height:100%;pointer-events:none"></div>
     <div id="dvACADialogLayerMask" class="ACA_MaskDiv" style="display:none;position:absolute;top:0;left:0;width:100%;height:2900px;pointer-events:none"><iframe class="mask_iframe" title="This is a masked layout for Silverlight control." style="width:100%;height:100%;pointer-events:none"></iframe></div>
     <div id="dvACADialogLayer" class="ACA_Dialog" style="display:none;position:fixed;top:60px;left:100px;width:800px;background:#fff;border:1px solid #888"><div id="ACA_Dialog_Header"><h1 class="ACA_Dialog_Title"><span id="ACA_Dialog_Title">Address Search Result List</span></h1><a id="ACADialog_closebtn" title="Close" href="javascript:void(0);">Close</a></div><iframe class="ACA_Dialog_Frame" name="ACADialogFrame" id="ACADialogFrame" src="about:blank" style="width:100%;height:300px"></iframe></div>
-    <div id="modalMask" class="ACA_MaskDiv" style="display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,.3)"></div>
+    <div id="modalMask" class="ACA_MaskDiv" style="display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,.3);pointer-events:none"></div>
     <div id="addrModal" class="ACA_Dialog" role="dialog" aria-modal="true" style="display:none;position:fixed;top:80px;left:120px;width:640px;background:#fff;border:1px solid #888;padding:12px">
       <h1>Address Search Result List</h1> <a id="modalClose" title="Close" href="javascript:void(0);">×</a>
       <h2>Addresses</h2><p id="modalCount"></p>
@@ -120,6 +120,10 @@ const pages = (variant: string, path: string, q: URLSearchParams): string | null
     </div>`,
     `var V = ${JSON.stringify(variant)};
     var el = function(s){ return document.getElementById("${P}_" + s); };
+    // Diagnostics for a red replay check: every full page load, and every change of the parcel box
+    // (a programmatic write fires no event, so it is polled) with the modal's state at that moment.
+    S.loads = (S.loads || 0) + 1; S.parcelLog = S.parcelLog || []; save();
+    setInterval(function(){ var v = el("ParcelEdit_txtParcelNo").value; if (v !== (S.lastParcel || "")) { S.lastParcel = v; S.parcelLog.push((Date.now() % 100000) + ":" + JSON.stringify(v) + ":modal=" + document.getElementById("addrModal").style.display + ":dlg=" + document.getElementById("dvACADialogLayer").style.display); save(); } }, 100);
     var fillParcel = function(){ el("ParcelEdit_txtParcelNo").value = "R1234567890"; el("WorkLocationEdit_txtRefAddressId").value = "A-100"; };
     var bindPicks = function(){ Array.prototype.forEach.call(document.querySelectorAll("a.pick"), function(a){ a.onclick = function(){ S.rowPicks++; S.pickedParcel = a.getAttribute("data-p"); save(); setTimeout(function(){ el("ParcelEdit_txtParcelNo").value = a.getAttribute("data-p"); el("WorkLocationEdit_txtRefAddressId").value = "A-100"; document.getElementById("addrResults").innerHTML = ""; }, 200); return false; }; }); };
     bindPicks();
@@ -166,7 +170,7 @@ const pages = (variant: string, path: string, q: URLSearchParams): string | null
       setTimeout(function(){ document.getElementById("applicantRecord").innerHTML = '<div>Permit Tech<br>Keelix Test Co<br>permits@example.test</div><a id="${P}_Applicant_410Edit_btnEdit" title="Edit" href="javascript:void(0);"><span>Edit</span></a>'; el("Applicant_410Edit_btnAddFromSaved").style.display = "none"; }, 250);
       return false;
     };
-    if (/^(nomatch|postbacknone)$/.test(V)) el("License_409Edit_btnLookUpLP").onclick = function(){
+    if (/^(nomatch|postbacknone|modalnone|licensematch)$/.test(V)) el("License_409Edit_btnLookUpLP").onclick = function(){
       S.lookups++; save();
       document.getElementById("ACADialogFrame").src = "/permits/Dialog.aspx?kind=licensee";
       document.getElementById("dvACADialogLayer").style.display = "block";
@@ -180,14 +184,16 @@ const pages = (variant: string, path: string, q: URLSearchParams): string | null
     document.getElementById("modalSelect").onclick = function(){
       var r = document.querySelector("#modalRows input[type=radio]:checked");
       S.modalSelects = (S.modalSelects || 0) + 1; if (r) { S.rowPicks++; S.pickedParcel = r.value; } save();
-      if (r) setTimeout(function(){ el("ParcelEdit_txtParcelNo").value = r.value; el("WorkLocationEdit_txtRefAddressId").value = "A-100"; closeModal(); }, 200);
+      // Boise building run 2: the list STAYS OPEN after Select (no row selected, Select / Cancel / ×
+      // still showing) — only × or Cancel closes it. The pass must close it before the re-read.
+      if (r) setTimeout(function(){ el("ParcelEdit_txtParcelNo").value = r.value; el("WorkLocationEdit_txtRefAddressId").value = "A-100"; Array.prototype.forEach.call(document.querySelectorAll("#modalRows input[type=radio]"), function(x){ x.checked = false; }); }, 200);
       return false;
     };
     el("actionBarBottom_btnContinue").onclick = function(){
       S.continues++; S.parcelAtContinue = el("ParcelEdit_txtParcelNo").value; S.applicantAtContinue = document.getElementById("applicantRecord").textContent.trim(); save();
       var errs = [];
       if (!el("ParcelEdit_txtParcelNo").value.trim()) errs.push("Parcel Number: Required");
-      if (/^(nomatch|postbacknone)$/.test(V) && !document.getElementById("contractorRecord").textContent.trim()) errs.push("Contractor - This section is required. Please add one record.");
+      if (/^(nomatch|postbacknone|modalnone|licensematch)$/.test(V) && !document.getElementById("contractorRecord").textContent.trim()) errs.push("Contractor - This section is required. Please add one record.");
       if (!document.getElementById("applicantRecord").textContent.trim()) errs.push("Applicant - This section is required. Please add one record.");
       if (!el("DetailInfoEdit_txtApplicationName").value.trim()) errs.push("Application Name: Required");
       if (errs.length) { document.getElementById("errs").innerHTML = errs.length + " error(s) occurred on current page. " + errs.join(" "); return false; }
@@ -228,7 +234,8 @@ const pages = (variant: string, path: string, q: URLSearchParams): string | null
         if (sel.getAttribute("aria-disabled") === "true") return false;
         var r = document.querySelector("input[type=radio]:checked");
         p.__S.frameSelects = (p.__S.frameSelects || 0) + 1; if (r) { p.__S.rowPicks++; p.__S.pickedParcel = r.value === "CB_0" ? "R1234567890" : "R9999999999"; } p.save();
-        if (r) setTimeout(function(){ p.document.getElementById("${P}_ParcelEdit_txtParcelNo").value = r.value === "CB_0" ? "R1234567890" : "R9999999999"; p.document.getElementById("${P}_WorkLocationEdit_txtRefAddressId").value = "A-100"; closeDlg(); }, 200);
+        // Boise building run 2: the list STAYS OPEN after Select — the pass must close it (×).
+        if (r) setTimeout(function(){ p.document.getElementById("${P}_ParcelEdit_txtParcelNo").value = r.value === "CB_0" ? "R1234567890" : "R9999999999"; p.document.getElementById("${P}_WorkLocationEdit_txtRefAddressId").value = "A-100"; r.checked = false; sel.setAttribute("aria-disabled", "true"); sel.removeAttribute("href"); }, 200);
         return false;
       };
     </script></body></html>`;
@@ -251,21 +258,51 @@ const pages = (variant: string, path: string, q: URLSearchParams): string | null
         return false;
       }; });
     </script></body></html>`;
-  if (/Dialog\.aspx$/i.test(path)) return `<!doctype html><html><head><title>Look Up</title></head><body>
-    <h2>Licensed Professional Search</h2>
-    <div><label for="txtLicenseNumber">License Number:</label> <input id="txtLicenseNumber"></div>
-    <div><label for="txtBusinessName">Business Name:</label> <input id="txtBusinessName"></div>
-    <a id="btnSearchLP" title="Search" href="javascript:void(0);"><span>Search</span></a>
+  if (/Dialog\.aspx$/i.test(path)) {
+    // THE LIVE "LOOK UP LICENSE" DIALOG (Meridian run 8, p005-lookup-Look_Up.png): License Type select
+    // (--Select--), State License Number, First / Middle / Last, Name of Business, Business License #,
+    // Country select, Address Line 1, City, State, Zip, Work Phone, Mobile Phone, E-mail, then Search
+    // below the fold. The register answers NOTHING until License Type is chosen; the client's row
+    // (legal name with suffix and punctuation) is listed only for Electrical + a matching name, and
+    // only in the licensematch variant — the nomatch client has no Idaho licence on file.
+    const LP = "ctl00_phPopup_ucLicenseInput";
+    const field = (id: string, label: string): string => `<div class="ACA_Form"><label for="${LP}_${id}">${label}</label> <input id="${LP}_${id}" name="${LP}$${id}"></div>`;
+    return `<!doctype html><html><head><title>Look Up License Dialog</title></head><body>
+    <h1>Look Up License</h1>
+    <div class="ACA_Form"><label for="${LP}_ddlLicenseType">License Type:</label> <select id="${LP}_ddlLicenseType" name="${LP}$ddlLicenseType"><option value="">--Select--</option><option value="ELE">Electrical</option><option value="PLB">Plumbing</option><option value="GC">General Contractor</option></select></div>
+    ${field("txtLicenseNumber", "State License Number:")}
+    ${field("txtFirstName", "First:")}${field("txtMiddleName", "Middle:")}${field("txtLastName", "Last:")}
+    ${field("txtBusinessName", "Name of Business:")}
+    ${field("txtBusinessLicense", "Business License #:")}
+    <div class="ACA_Form"><label for="${LP}_ddlCountry">Country:</label> <select id="${LP}_ddlCountry"><option value="US" selected>United States</option><option value="CA">Canada</option></select></div>
+    ${field("txtAddress1", "Address Line 1:")}${field("txtCity", "City:")}${field("txtState", "State:")}${field("txtZip", "Zip:")}
+    ${field("txtWorkPhone", "Work Phone:")}${field("txtMobilePhone", "Mobile Phone:")}${field("txtEmail", "E-mail:")}
+    <div class="ACA_Dialog_Buttons"><a id="ctl00_phPopup_btnSearch" title="Search" href="javascript:void(0);"><span>Search</span></a> <a id="ctl00_phPopup_btnCancel" title="Cancel" href="javascript:void(0);"><span>Cancel</span></a></div>
     <div id="res"></div>
     <script>
+      var p = window.parent;
       document.addEventListener("keydown", function(e){ if (e.key === "Enter" && e.target && e.target.tagName === "INPUT") { var S = JSON.parse(sessionStorage.getItem("S") || "{}"); S.enters = (S.enters || 0) + 1; sessionStorage.setItem("S", JSON.stringify(S)); } });
-      document.getElementById("btnSearchLP").onclick = function(){
+      var closeDlg = function(){ p.__hideDialog(); p.__S.frameClosed = (p.__S.frameClosed || 0) + 1; p.save(); };
+      document.getElementById("ctl00_phPopup_btnCancel").onclick = function(){ closeDlg(); return false; };
+      document.getElementById("ctl00_phPopup_btnSearch").onclick = function(){
         var D = JSON.parse(sessionStorage.getItem("D") || '{"searches":0}');
-        D.searches++; D.lastName = document.getElementById("txtBusinessName").value; sessionStorage.setItem("D", JSON.stringify(D));
-        setTimeout(function(){ document.getElementById("res").textContent = "No records found."; }, 250);
+        var type = document.getElementById("${LP}_ddlLicenseType"); var typeText = type.options[type.selectedIndex].text;
+        var name = document.getElementById("${LP}_txtBusinessName").value;
+        D.searches++; D.lastName = name; D.type = typeText; D.firstName = document.getElementById("${LP}_txtFirstName").value; sessionStorage.setItem("D", JSON.stringify(D));
+        var hit = ${JSON.stringify(variant)} === "licensematch" && typeText === "Electrical" && /keelix\\s*test/i.test(name);
+        setTimeout(function(){
+          if (!hit) { document.getElementById("res").textContent = "No records found."; return; }
+          document.getElementById("res").innerHTML = '<table class="ACA_GridView"><tr class="ACA_TabRow_Header"><th></th><th>Name</th><th>License Number</th><th>Business Name</th></tr><tr><td><a href="javascript:void(0);" id="lpSelect">Select</a></td><td>Permit Tech</td><td>ELE-C-12345</td><td>KEELIX TEST CO., INC.</td></tr></table>';
+          document.getElementById("lpSelect").onclick = function(){
+            p.__S.contractorPicked = (p.__S.contractorPicked || 0) + 1; p.save();
+            setTimeout(function(){ p.document.getElementById("contractorRecord").innerHTML = '<div>KEELIX TEST CO., INC.<br>ELE-C-12345<br>Permit Tech</div><a id="${P}_License_409Edit_btnEdit" title="Edit" href="javascript:void(0);"><span>Edit</span></a>'; closeDlg(); }, 200);
+            return false;
+          };
+        }, 250);
         return false;
       };
     </script></body></html>`;
+  }
   if (/CapConfirm\.aspx$/i.test(path)) return shell("Accela Citizen Access", `<h1>Step 2: Review</h1><p>Please review all information below. Your application will not be submitted until you click Continue Application.</p>
     <p>Work location: 33 BROADWAY AVE</p>${CONT}`,
   `document.getElementById("${P}_actionBarBottom_btnContinue").onclick = function(){ fetch("/permits/Cap/CapConfirm.aspx?submit=1", { method: "POST", body: "__EVENTTARGET=btnContinue" }).catch(function(){}); return false; };`);
@@ -323,7 +360,7 @@ try {
   // ~15 min); the suite runner never sets it, so CI always runs them all.
   const ONLY = String(process.env.STEP1_VARIANTS ?? "").split(",").map((s) => s.trim()).filter(Boolean);
   const wanted = (v: string): boolean => !ONLY.length || ONLY.includes(v);
-  for (const variant of ["nomatch", "candidates", "dialogcandidates", "popupcandidates", "postbackcandidates", "postbacknone", "modalcandidates", "modalnone", "framecandidates"].filter(wanted)) {
+  for (const variant of ["nomatch", "candidates", "dialogcandidates", "popupcandidates", "postbackcandidates", "postbacknone", "modalcandidates", "modalnone", "framecandidates", "licensematch"].filter(wanted)) {
     const ctx = await browser.newContext();
     ctx.setDefaultTimeout(8000);
     await ctx.addCookies([{ name: "v", value: variant, url: base }]);
@@ -380,12 +417,29 @@ try {
       nomatchSteps = steps;
       const lastGroup = steps[steps.indexOf(findStep as RecipeStep)];
       check("MUST-PASS nomatch: `populates` on the Find Address click names Parcel Number", (lastGroup?.populates ?? []).some((l) => /parcel number/i.test(l)), `populates=${JSON.stringify(lastGroup?.populates)}`);
-      check("MUST-PASS nomatch: Look Up tried — its dialog searched ONCE by the business name, found nothing, no dialog steps kept",
-        st.lookups === 1 && Number(st.dialog?.searches) === 1 && st.dialog?.lastName === "Keelix Test Co" && !notes.some((n) => /^lookup\(Contractor\)/.test(n)),
+      check("MUST-PASS nomatch: Look Up tried — License Type set to Electrical, the dialog searched ONCE by the BUSINESS name (never a person's box), found nothing, no dialog steps kept",
+        st.lookups === 1 && Number(st.dialog?.searches) === 1 && st.dialog?.lastName === "Keelix Test Co" && st.dialog?.type === "Electrical" && !st.dialog?.firstName && !notes.some((n) => /^lookup\(Contractor\)/.test(n)),
         `lookups=${String(st.lookups)} dialog=${JSON.stringify(st.dialog)} notes=${JSON.stringify(notes)}`);
-      check("MUST-PASS nomatch: the walk stops NAMED on the Contractor section only (not Parcel, not Applicant), stopReason required_blank, Continue never pressed",
-        r?.ok === false && r?.stopReason === "required_blank" && /"Contractor" section/.test(msg) && /Look Up/.test(msg) && !/Applicant|Parcel Number/.test(msg.replace(/the steps before this page were recorded\./, "")) && st.continues === 0 && /CapEdit/.test(where),
+      check("MUST-PASS nomatch: the walk stops NAMED on the Contractor section only (not Parcel, not Applicant), stopReason required_blank, the message says what was searched, Continue never pressed",
+        r?.ok === false && r?.stopReason === "required_blank" && /"Contractor" section/.test(msg) && /Look Up/.test(msg) && /searched by business name "Keelix Test Co" with License Type "Electrical"/.test(msg) && !/Applicant|Parcel Number/.test(msg.replace(/the steps before this page were recorded\./, "")) && st.continues === 0 && /CapEdit/.test(where),
         `ok=${String(r?.ok)} stopReason=${String(r?.stopReason)} continues=${String(st.continues)} at=${where} msg=${msg}`);
+    } else if (variant === "licensematch") {
+      const lookupStep = steps.find((s) => s.action === "click" && /^lookup: Look Up/.test(String(s.note ?? "")));
+      const typeStep = steps.find((s) => s.action === "select" && /^lookup\(Contractor\): License Type/.test(String(s.note ?? "")));
+      const nameStep = steps.find((s) => s.action === "fill" && /^lookup\(Contractor\): business name/.test(String(s.note ?? "")));
+      const searchStep = steps.find((s) => s.action === "click" && /^lookup\(Contractor\): Search/.test(String(s.note ?? "")));
+      const pickStep = steps.find((s) => s.action === "click" && /^lookup\(Contractor\): select this client's record/.test(String(s.note ?? "")));
+      check("MUST-PASS licensematch: Look Up → License Type set to Electrical (by label, in the frame), the business name typed, ONE search, the client's row (\"KEELIX TEST CO., INC.\") picked, the Contractor section populated, the dialog closed",
+        st.lookups === 1 && Number(st.dialog?.searches) === 1 && st.dialog?.type === "Electrical" && st.dialog?.lastName === "Keelix Test Co" && Number(st.contractorPicked) === 1 && Number(st.frameClosed ?? 0) >= 1
+          && !!lookupStep && !!pickStep && (pickStep.populates ?? []).includes("Contractor"),
+        `lookups=${String(st.lookups)} dialog=${JSON.stringify(st.dialog)} contractorPicked=${String(st.contractorPicked)} lookupStep=${JSON.stringify(lookupStep)}`);
+      check("MUST-PASS licensematch: the steps recorded in order — Look Up click, select License Type by label (value Electrical, frame), fill business name (bound to the company key), Search click, row pick — all in ACADialogFrame",
+        !!typeStep && typeStep.selector?.label === "License Type" && typeStep.value === "Electrical" && typeStep.selector?.frame === "ACADialogFrame"
+          && !!nameStep && nameStep.selector?.frame === "ACADialogFrame" && !!nameStep.field && !!searchStep && searchStep.selector?.frame === "ACADialogFrame" && !!pickStep && pickStep.selector?.frame === "ACADialogFrame"
+          && [lookupStep, typeStep, nameStep, searchStep, pickStep].map((s) => steps.indexOf(s as RecipeStep)).every((ix, k, arr) => ix >= 0 && (k === 0 || ix > arr[k - 1])),
+        `typeStep=${JSON.stringify(typeStep)} nameStep=${JSON.stringify(nameStep)} searchStep=${JSON.stringify(searchStep)} pickStep=${JSON.stringify(pickStep)} notes=${JSON.stringify(notes)}`);
+      check("MUST-PASS licensematch: the walk reaches Step 2: Review by Continue Application",
+        r?.reachedReview === true && /CapConfirm/i.test(where) && st.continues === 1, `reachedReview=${String(r?.reachedReview)} at=${where} continues=${String(st.continues)} ${msg}`);
     } else if (variant === "modalnone") {
       check("MUST-PASS modalnone: the stop names the Parcel section (Find Address changed nothing, FIND PARCEL not pressed — nothing typed) AND the Contractor section; no modal left open; Continue never pressed",
         r?.ok === false && r?.stopReason === "required_blank" && /"Parcel" section/.test(msg) && /"Contractor" section/.test(msg) && /nothing typed to search by/.test(msg) && st.continues === 0 && /CapEdit/.test(where),
@@ -435,7 +489,7 @@ try {
     // city / ZIP are what the ranked chooser judges the address rows against.
     const adapter = new RecipeAdapter(rec, { streetNumber: "33", streetNameCore: "Broadway", homeownerName: "Test Owner", moduleCount: "16", city: "Meridian", zip: "83642" }, {}, {});
     (adapter as unknown as { page: unknown }).page = page;
-    let res: { ok: boolean; message: string; skipped?: string[]; driftWarnings?: string[]; executed?: number } | null = null;
+    let res: { ok: boolean; message: string; skipped?: string[]; driftWarnings?: string[]; executed?: number; trace?: string[] } | null = null;
     try { res = await adapter.fillApplication(project); } catch (e) { res = { ok: false, message: `threw ${String(e).slice(0, 200)}` }; }
     await page.waitForTimeout(300);
     const where = page.url();
@@ -449,7 +503,7 @@ try {
       const checked = doc ? Array.from(doc.querySelectorAll("input[type=radio]")).filter((r) => (r as HTMLInputElement).checked).map((r) => (r as HTMLInputElement).value) : [];
       return { layer: layer ? layer.style.display : "none-in-dom", frameSrc: fr?.getAttribute("src") ?? null, selDisabled: sel?.getAttribute("aria-disabled") ?? null, selHref: sel?.getAttribute("href") ?? null, checked, radios: doc ? doc.querySelectorAll("input[type=radio]").length : -1 };
     }).catch((e) => ({ error: String(e).slice(0, 120) }));
-    const replayDiag = JSON.stringify({ executed: res?.executed, skipped: (res?.skipped ?? []).slice(0, 6), drift: (res?.driftWarnings ?? []).slice(0, 6), frameState, S: stReplay }).slice(0, 1600);
+    const replayDiag = JSON.stringify({ executed: res?.executed, skipped: (res?.skipped ?? []).slice(0, 6), drift: (res?.driftWarnings ?? []).slice(0, 6), trace: (res?.trace ?? []).slice(-14), frameState, S: stReplay }).slice(0, 2600);
     await ctx.close().catch(() => null);
     const filings = posts.filter((p) => /CapConfirm.*submit=1/i.test(p)).length;
     check(`replay ${variant}: 0 Enter presses, 0 filing requests`, stReplay.enters === 0 && filings === 0, `enters=${String(stReplay.enters)} filings=${filings}`);
