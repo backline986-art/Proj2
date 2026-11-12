@@ -649,8 +649,15 @@ export function portalSafetyFactory() {
     return r.width > 2 && r.height > 2 && cs.display !== "none" && cs.visibility !== "hidden";
   };
   const ACTIVE_STEP_ATTR = "[aria-current]:not([aria-current=false]), [aria-selected=true]";
+  // WHOLE class tokens only. AngularJS Material's md-steppers marks the ONE current step
+  // "md-active" (ng-class "stepNumber === stepper.currentStep"; EnerGov CSS's 7-step wizard, #188:
+  // read without it, step 1 had no active step, its "7 Review and Submit" bubble kept the page
+  // review, and the walk stopped on step 1). Angular Material's "mat-step-label-active" is NOT
+  // here and never may be: a non-linear mat-stepper puts it on every step, so it marks no step
+  // as THE current one — it would name the review step active on every form page, and the form
+  // steps active on the review page.
   const activeByClass = (el: Element): boolean => String(typeof el.className === "string" ? el.className : "").split(/\s+/)
-    .some((k) => /^(active|current|is-active|is-current|selected|is-selected)$/i.test(k));
+    .some((k) => /^(active|current|is-active|is-current|selected|is-selected|md-active)$/i.test(k));
   // The texts of the steps a bar marks active (each short; a bar's own container is never one).
   const activeStepTexts = (bars: Element[]): string[] => {
     const out: string[] = [];
@@ -766,7 +773,7 @@ export function portalSafetyFactory() {
     .filter((el) => { const r = (el as HTMLElement).getBoundingClientRect(); return r.width > 2 && r.height > 2; })
     .map((el) => String(controlLabelInPage(el) || (el as HTMLElement).innerText || (el as HTMLInputElement).value || ""))
     .some((t) => isFinalSubmitControl(t, { reviewPage: true }) || isSubmitIntent(t, { reviewPage: true, readOnlyPage: true }) || isPayFee(t) || isSignatureRequestControl(t) || SIGN_CONTROL.test(t));
-  const reviewReadingInPage = (d: Document): { review: boolean; text: string; navs: Element[] } => {
+  const reviewReadingInPage = (d: Document): { review: boolean; text: string; navs: Element[]; active: string[] } => {
     const url = (globalThis as { location?: { href?: string } }).location?.href;
     const wide = wideBarsInPage(d);
     const narrow = narrowBarsInPage(d);
@@ -779,11 +786,13 @@ export function portalSafetyFactory() {
     const named = active.concat(panelNamesInPage(d)).filter((t) => isReviewPageText(t));
     // The positive read's words ride on the text, so a caller that applies its own wording
     // (the learner's reviewTextInPage) reaches the same answer.
-    if (named.length) return { review: true, text: `${textNarrow} \n ${named.join(" \n ")}`, navs: narrow };
-    if (reviewSignals(textWide, url)) return { review: true, text: textWide, navs: wide };
-    if (!reviewSignals(textNarrow, url)) return { review: false, text: textWide, navs: wide };
+    // `active` rides along unchanged (read-only): the learner's planner-review demotion (#188)
+    // asks the same reading whether the CURRENT step is a review step — never a second reading.
+    if (named.length) return { review: true, text: `${textNarrow} \n ${named.join(" \n ")}`, navs: narrow, active };
+    if (reviewSignals(textWide, url)) return { review: true, text: textWide, navs: wide, active };
+    if (!reviewSignals(textNarrow, url)) return { review: false, text: textWide, navs: wide, active };
     const formEvidence = active.length > 0 || readOnlyPageInPage() === false;
-    return formEvidence ? { review: false, text: textWide, navs: wide } : { review: true, text: textNarrow, navs: narrow };
+    return formEvidence ? { review: false, text: textWide, navs: wide, active } : { review: true, text: textNarrow, navs: narrow, active };
   };
   const pageTextWithoutNavigatorInPage = (d: Document): string => reviewReadingInPage(d).text;
 
@@ -1168,6 +1177,19 @@ export function portalSafetyFactory() {
       for (const n of names) target.add(n);
     }
     return Array.from(inNav).filter((l) => !outside.has(l));
+  };
+
+  /** Runs IN THE PAGE: the step(s) a step navigator marks CURRENT — the reading's own `active`
+   *  (aria-current / aria-selected / a whole active-class token, only in a bar that lists the
+   *  review step) — and whether any of them is a terminal step, by the step-one rule's own words
+   *  (stepOneLabelTerminal: review / summary / confirm / certify / sign / submit / pay). Read-only;
+   *  nothing in the shared reading changes. Asked by the learner's planner-review demotion (#188):
+   *  no current step, or a terminal-worded one, is no evidence of a form step. */
+  const navigatorActiveStepsInPage = (): { steps: string[]; terminal: boolean } => {
+    const d = (globalThis as { document?: Document }).document;
+    if (!d || !d.body) return { steps: [], terminal: false };
+    const steps = reviewReadingInPage(d).active;
+    return { steps, terminal: steps.some((t) => stepOneLabelTerminal(t)) };
   };
 
   /**
@@ -2332,6 +2354,7 @@ export function portalSafetyFactory() {
     reviewPageInPage,
     reviewTextInPage,
     navigatorOnlyControlLabelsInPage,
+    navigatorActiveStepsInPage,
     isSignatureNameLabel,
     isSignatureNameBox,
     signatureNamePartOf,
