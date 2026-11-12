@@ -15,7 +15,7 @@
 // All addresses are synthetic: invented streets, numbers and cities.
 // Run: tsx portal-bot/src/typeaheadMatch.test.ts
 import assert from "node:assert/strict";
-import { addressQueries, chooseAddressSuggestion, chooseExactSuggestion, suggestionText, typeaheadMatchMode } from "./typeaheadMatch";
+import { addressQueries, chooseAddressSuggestion, chooseExactSuggestion, noMatchSaid, oneLineAddress, suggestionText, typeaheadMatchMode } from "./typeaheadMatch";
 import { siteKey } from "./draftCreated";
 
 let failures = 0;
@@ -159,6 +159,28 @@ check("an address is typed as house number + core name, then the house number al
 });
 check("an address with no house number is typed as its street line", () => {
   assert.deepEqual(addressQueries("Rural Route Quillfeather"), ["Rural Route Quillfeather"]);
+});
+
+// ---- #139: THE WHOLE ONE-LINE ADDRESS, AND THE PORTAL SAYING "NO MATCH" -------------------------
+check("the job's address as one line: street, city, ST zip (what a person types into a location search)", () => {
+  assert.equal(oneLineAddress({ street: "4821 W Quillfeather Dr, Marrowvale, UT, 84999", city: "Marrowvale", state: "UT", zip: "84999" }), "4821 W Quillfeather Dr, Marrowvale, UT 84999");
+  assert.equal(oneLineAddress({ street: "4821 W Quillfeather Dr", city: "Marrowvale", zip: "84999" }), "4821 W Quillfeather Dr, Marrowvale, 84999");
+  assert.equal(oneLineAddress({ street: "4821 W Quillfeather Dr" }), "4821 W Quillfeather Dr");
+  assert.equal(oneLineAddress({ street: "" , city: "Marrowvale" }), "");
+});
+check("the portal's own no-match words are read (CityView after Enter, iWorQ's list, the usual empty states)", () => {
+  for (const t of ["The search value did not match an address", "No results match your search", "No results found", "Property Address not found.", "0 results"]) {
+    assert.equal(noMatchSaid(t), t, t);
+  }
+});
+check("MUST EXCLUDE: an address, a label or a long paragraph is not the portal saying no match", () => {
+  for (const t of ["4821 W QUILLFEATHER DR, MARROWVALE, UT 84999", "Search for location:", "Next Step", `If you cannot find your property ${"in the list below, ".repeat(12)}contact the city.`]) {
+    assert.equal(noMatchSaid(t), "", t);
+  }
+});
+check("a no-match status row in a suggestion list is not a suggestion; an address row still is", () => {
+  assert.equal(suggestionText("No results match your search"), "");
+  assert.equal(suggestionText("4821 W QUILLFEATHER DR, MARROWVALE, UT 84999"), "4821 W QUILLFEATHER DR, MARROWVALE, UT 84999");
 });
 
 // ---- HOW A FILL IS JUDGED -------------------------------------------------------------------

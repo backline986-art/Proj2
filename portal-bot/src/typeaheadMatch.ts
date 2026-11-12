@@ -37,15 +37,43 @@ export type TypeaheadChoice =
 
 /** The job's address, as the typeahead is judged against it. `city` / `zip` only when the value
  *  being typed IS the project's address (never a contractor's mailing address). */
-export interface TypeaheadSite { street: string; city?: string; zip?: string }
+export interface TypeaheadSite { street: string; city?: string; zip?: string; state?: string }
 
 /** A list row that is the widget saying it has nothing, not a suggestion. */
 const NOT_A_SUGGESTION = /^(?:no\s+(?:results?|matches|matching\b.*|suggestions?|records?|addresses|items?|data|options?)(?:\s+(?:were\s+)?found)?|nothing\s+found|not\s+found|searching|loading|please\s+wait|type\s+(?:to|at\s+least)\b.*|enter\s+at\s+least\b.*)\W*$/i;
 
-/** One suggestion's words, trimmed; "" for a widget's own status row ("No results found"). */
+/** THE PORTAL SAYING ITS SEARCH FOUND NOTHING (#139): "The search value did not match an address"
+ *  (a CityView location search, after Enter), "No results match your search" (an iWorQ property
+ *  and contractor search), "No results found", "Property Address not found." The ONE reading of
+ *  those words: a list row that says it is not a suggestion, and the message a no-match stop quotes.
+ *  Short text only — a paragraph that happens to contain "not found" is not the search answering. */
+const NO_MATCH_SAID = /\b(?:no\s+(?:results?|matches|match(?:ing)?|suggestions?|records?|addresses|propert(?:y|ies)|locations?|parcels?|contractors?)\b(?:\s+(?:were\s+|was\s+)?found)?|did\s+not\s+match|does\s+not\s+match|didn'?t\s+match|(?:could|can)\s*not\s+(?:be\s+)?(?:find|found|locate|located)|not\s+found|nothing\s+found|0\s+results?)\b/i;
+
+/** The portal's own no-match words, trimmed ("" when `raw` does not say that). */
+export function noMatchSaid(raw: unknown): string {
+  const t = String(raw ?? "").replace(/\s+/g, " ").trim();
+  return t && t.length <= 200 && NO_MATCH_SAID.test(t) ? t : "";
+}
+
+/** One suggestion's words, trimmed; "" for a widget's own status row ("No results found",
+ *  "No results match your search"). */
 export function suggestionText(raw: unknown): string {
   const t = String(raw ?? "").replace(/\s+/g, " ").trim();
-  return !t || NOT_A_SUGGESTION.test(t) ? "" : t.slice(0, 200);
+  if (!t || NOT_A_SUGGESTION.test(t)) return "";
+  // A status row that is a no-match sentence and names no house number is not an address.
+  if (noMatchSaid(t) && !/\d/.test(t)) return "";
+  return t.slice(0, 200);
+}
+
+/** THE JOB'S ADDRESS AS ONE LINE (#139): "street, city, ST zip" from the parts the project holds —
+ *  what a person types into a location search, and what a CityView search took (the owner, by hand,
+ *  2026-11-11: "718 NE 8th St, Bend, OR 97701" + Enter selected the location; the street-name core
+ *  "718 NE 8th" was "did not match"). "" without a street line. */
+export function oneLineAddress(site: TypeaheadSite): string {
+  const street = streetLineOf(site.street);
+  if (!street) return "";
+  const tail = [String(site.state ?? "").trim(), String(site.zip ?? "").trim()].filter(Boolean).join(" ");
+  return [street, String(site.city ?? "").trim(), tail].filter(Boolean).join(", ");
 }
 
 const loose = (s: string): string => String(s ?? "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();

@@ -8,6 +8,7 @@ import { BasePortalAdapter, HUMAN_REVIEW_MESSAGE, type PortalContext, type Porta
 import { openPortal } from "../browser";
 import { selectWithFallback, readClosedComboboxOptions } from "../comboboxFill";
 import { fillTypeahead, typeaheadFailureLine } from "../typeaheadFill";
+import { usStateCode } from "../../../backend/src/usState";
 import { typeaheadMatchMode, type TypeaheadSite } from "../typeaheadMatch";
 import { assertFilerIdentityHeld, FilerIdentityStop, filerIdentityFieldForSelect, filerIdentityStopMessage, selectFilerIdentity } from "../filerIdentitySelect";
 import { detectChallengeFrame, frameSelectorFor, maskId, readbackMatches, redactCaptureText, redactStatusText, safeAction, sleep, smartWait, waitForElement, waitForInteractiveControls } from "../safeAction";
@@ -54,9 +55,9 @@ export interface ContinueDraft {
    *  Submit; not signed, or unreadable, it stops on the record page and names why. */
   awaitingSignature?: boolean;
 }
-import { PORTAL_SAFETY_GLOBAL, PORTAL_SAFETY_IN_PAGE_SOURCE, isFinalSubmitControl, isInterstitialForwardLabel as sharedIsInterstitialForwardLabel, isSignatureNameLabel, isSignatureRequestControl, isTypeSignatureToggleLabel, looksLikeReviewUrl, redactSecretValues, reviewSignals as sharedReviewSignals, splitSignerName } from "../../../shared/src/portalSafety";
+import { PORTAL_SAFETY_GLOBAL, PORTAL_SAFETY_IN_PAGE_SOURCE, isAutocompleteWidgetClass, isFinalSubmitControl, isInterstitialForwardLabel as sharedIsInterstitialForwardLabel, isSignatureNameLabel, isSignatureRequestControl, isTypeSignatureToggleLabel, looksLikeReviewUrl, redactSecretValues, reviewSignals as sharedReviewSignals, splitSignerName } from "../../../shared/src/portalSafety";
 import { BATTERY_DECLARATION_QUESTION, batteryAttestationAnswer, batteryControlKind, batteryDeclarationAnswer } from "../../../shared/src/batteryControls";
-import { installFilingBackstop, withBackstopWindow, withOwnWriteWindow, describeBackstopAbort, backstopSentLine, backstopFor, isStoppingAbort, drainOwnWrites, unsavedAtReviewWarning, portalOwnCallsBlockedAtReview, reviewBlockedCallsLine } from "../filingBackstop";
+import { installFilingBackstop, withAutomationInput, withBackstopWindow, withOwnWriteWindow, describeBackstopAbort, backstopSentLine, backstopFor, isStoppingAbort, drainOwnWrites, unsavedAtReviewWarning, portalOwnCallsBlockedAtReview, reviewBlockedCallsLine } from "../filingBackstop";
 // Types only (erased): the information-page door is reached duck-typed on the installed backstop.
 import type { FilingBackstop, InfoPageCandidateTake, InfoPagePassOpen } from "../filingBackstop";
 import { INFO_PAGE_PRIOR_PROGRESS_REFUSAL, infoPageEvidence, infoPageProofOfProgressRefusals, infoPageProofStepRefusals, type InfoPageProofStep, type InfoPageRunState, type InfoPageRunStep } from "../../../shared/src/infoPagePass";
@@ -1532,6 +1533,9 @@ export interface RawField {
   /** A search-as-you-type box (#575): an editable <input role=combobox aria-autocomplete=list|both>.
    *  Its fieldType stays "text"; see ExtractedField.fillStrategy. */
   typeahead?: boolean;
+  /** #139: an editable text input's class attribute, read for an autocomplete widget's stamp
+   *  (portalSafety isAutocompleteWidgetClass) in toExtractedField. */
+  stampClass?: string;
 }
 
 // Serializable extractor — derives a label and selector hints for each interactive
@@ -1901,6 +1905,8 @@ export function extractFieldsInPage(els: Element[]): RawField[] {
     // TEXT field (the planner binds it like any address box) and carries its strategy apart from
     // its label, which remains the matching key; applyFill and the replay type, wait and pick.
     let typeahead = false;
+    // #139: an editable text input's class, for the widget-stamp reading in toExtractedField.
+    let stampClass = "";
     {
       const comboRole = (el.getAttribute("role") || "").toLowerCase();
       const comboPopup = (el.getAttribute("aria-haspopup") || "").toLowerCase();
@@ -1912,6 +1918,18 @@ export function extractFieldsInPage(els: Element[]): RawField[] {
           && el.getAttribute("aria-disabled") !== "true";
         if (comboRole === "combobox" && (completes === "list" || completes === "both") && editable) typeahead = true;
         else fieldType = "select";
+      }
+      // ...OR A BOX AN AUTOCOMPLETE WIDGET STAMPS AS ITS OWN, WITH NO ARIA AT ALL (#139). jQuery UI
+      // writes class "ui-autocomplete-input" on the input it drives and adds no role (CityView's
+      // "Search for location", live 2026-11-11: typed into as a plain box, nothing was selected, and the
+      // walk retried the page until the session expired). The class is read HERE (an editable text
+      // input only) and judged in Node by the ONE predicate the shared Enter question uses
+      // (portalSafety isAutocompleteWidgetClass, in toExtractedField) — never a second regex.
+      if (!typeahead && tag === "input" && fieldType === "text") {
+        const box = el as HTMLInputElement;
+        const editable = !box.readOnly && !box.disabled && el.getAttribute("aria-readonly") !== "true"
+          && el.getAttribute("aria-disabled") !== "true";
+        if (editable) stampClass = String(el.getAttribute("class") || "").slice(0, 300);
       }
     }
 
@@ -2130,6 +2148,7 @@ export function extractFieldsInPage(els: Element[]): RawField[] {
       label, fieldType, options, role, name, placeholder, id, text, href,
       tile: tileLabel ? true : undefined,
       typeahead: typeahead && fieldType === "text" ? true : undefined,
+      stampClass: !typeahead && fieldType === "text" && stampClass ? stampClass : undefined,
       required: required || undefined,
       section: sectionFor(el) || undefined,
       testCss,
@@ -2247,7 +2266,7 @@ export function toExtractedField(raw: RawField): ExtractedField {
   // `disabled` that stops at the RawField boundary would make every gated Next invisible to it.
   if (raw.disabled) field.disabled = true;
   if (raw.tile) field.tile = true;
-  if (raw.typeahead && raw.fieldType === "text") field.fillStrategy = "typeahead";
+  if ((raw.typeahead || isAutocompleteWidgetClass(raw.stampClass)) && raw.fieldType === "text") field.fillStrategy = "typeahead";
   // Fingerprint: raw element attributes for replay-heal tie-breaking. Attribute
   // NAMES/labels only — never values, so nothing sensitive can land in a recipe.
   if (raw.id || raw.name || raw.placeholder || raw.ariaLabel || raw.section) {
@@ -2446,6 +2465,58 @@ export function tagUploadControls(): UploadSlot[] {
   return slots;
 }
 
+/** #139 — A LOCATION SEARCH'S OWN "ENTER IT BY HAND" DOOR, by its words: "Can't find address?"
+ *  (CityView, live Bend 2026-11-11: it opens Street Address / City / State / Zip, "staff confirm"),
+ *  "Enter address manually", "Address not listed", "Not found?". Matched on the WHOLE short label of
+ *  a control near the box (manualEntryDoorInPage), never on page prose. */
+export const MANUAL_ENTRY_DOOR = /^(?:[^a-z0-9]*)(?:(?:i\s+)?(?:can'?t|cannot|can\s+not|could\s*n'?o?t|unable\s+to)\s+(?:find|locate|see)\b.{0,30}|(?:enter|add|type|input)\b.{0,25}\bmanual(?:ly)?\b.{0,10}|manual(?:ly)?\s+(?:entry|address|location)\b.{0,15}|(?:my\s+|the\s+)?(?:address|location|property|parcel)\s+(?:is\s+)?not\s+(?:listed|found|shown|here|in\s+the\s+list)\b.{0,10}|not\s+(?:found|listed)\s*)\??\s*$/i;
+
+/**
+ * Runs IN THE PAGE, on the search box (#139). The manual-entry door NEAR it: the nearest control —
+ * searching the box's ancestors outward, at most four levels and never the whole <body> — whose
+ * whole label reads as MANUAL_ENTRY_DOOR. Never a submitter (a submit / image input, a button that
+ * submits its form) and never a submit- or pay-worded control by the shared predicates. The label,
+ * or "". No nested functions (esbuild keepNames → __name).
+ */
+export function manualEntryDoorInPage(box: Element, args: { re: string; g: string }): string {
+  const RE = new RegExp(args.re, "i");
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const ps = (globalThis as any)[args.g];
+  let node: Element | null = box.parentElement;
+  for (let level = 0; level < 4 && node && node !== document.body && node !== document.documentElement; level++, node = node.parentElement) {
+    const found = node.querySelectorAll("button, input[type=button], input[type=submit], input[type=image], a, [role=button], [role=link]");
+    for (let i = 0; i < found.length; i++) {
+      const c = found[i] as HTMLElement;
+      const r = c.getBoundingClientRect();
+      const cs = getComputedStyle(c);
+      if (r.width <= 0 || r.height <= 0 || cs.visibility === "hidden" || cs.display === "none") continue;
+      const text = String(c.innerText || (c as HTMLInputElement).value || c.getAttribute("aria-label") || c.getAttribute("title") || "")
+        .replace(/[’‘]/g, "'").replace(/\s+/g, " ").trim();
+      if (!text || text.length > 60 || !RE.test(text)) continue;
+      const type = String(c.getAttribute("type") || "").toLowerCase();
+      const inForm = !!(c as HTMLButtonElement).form;
+      if ((c.tagName === "INPUT" && (type === "submit" || type === "image")) || (c.tagName === "BUTTON" && inForm && (type === "" || type === "submit"))) continue;
+      if (ps && ((typeof ps.isSubmitIntent === "function" && ps.isSubmitIntent(text, null)) || (typeof ps.isPayFee === "function" && ps.isPayFee(text)))) continue;
+      return text;
+    }
+  }
+  return "";
+}
+
+/** #139 — which part of the job's address a box revealed by a manual-entry door takes, by its label:
+ *  "Street Address" → street, "City" → city, "State" → state, "Zip" / "Postal Code" → zip. Never an
+ *  extra address line, a unit, a mailing or e-mail address; null for anything else. */
+export function manualAddressPart(label: string | null | undefined): "street" | "city" | "state" | "zip" | null {
+  const l = String(label ?? "").replace(/[*:]/g, " ").replace(/\s+/g, " ").trim().toLowerCase();
+  if (!l || l.length > 40) return null;
+  if (/\b(e-?mail|mailing|billing|line\s*2|extra|apt|apartment|unit|suite|county|country)\b/.test(l)) return null;
+  if (/\b(zip|postal)\b/.test(l)) return "zip";
+  if (/\b(city|town)\b/.test(l)) return "city";
+  if (/^(state|province)\b|\bstate\s*\/\s*province\b/.test(l)) return "state";
+  if (/^street\b/.test(l) || /\b(street(\s+address)?|address(\s+line)?(\s*1)?)$/.test(l)) return "street";
+  return null;
+}
+
 /** @param pagesWalked HOW FAR THE WALK ACTUALLY GOT. This was hardcoded to 0, so every failed
  *  learn reported zero pages however far it had walked — and scoreLearnOutcome picks the rung
  *  FROM pageCount, so a run that reached a form and then failed was scored "authenticated, no
@@ -2627,6 +2698,22 @@ export class AutoLearnAdapter extends BasePortalAdapter {
   private readonly typeaheadTried = new Map<string, string>();
   /** #575 — the job's site address, which an address suggestion is judged against (set by learn()). */
   private typeaheadSite: TypeaheadSite = { street: "" };
+  /** #139 — a type-ahead that found no match and had no manual-entry door (or the door failed):
+   *  the NAMED stop the page ends with (label, what was typed, the portal's words). Read once the
+   *  page's fills are applied, like typeaheadQuestion. `label` joins the run's required misses. */
+  private typeaheadNoMatchStop: { line: string; label: string } | null = null;
+  /** #139 — boxes the PORTAL selected on Enter (selector+label → the selection it shows). The
+   *  search box comes back empty: a read-back, a required sweep or a re-plan must not take that for
+   *  a miss and search again (a second identical search, a second location row). */
+  private readonly typeaheadEnterPicks = new Map<string, { label: string; held: string }>();
+  /** #139 — manual-entry doors already tried (box selector+label): one click per box per walk. */
+  private readonly typeaheadDoorTried = new Set<string>();
+  /** #139 — steps a type-ahead's manual-entry door recorded (its click, then each address box it
+   *  revealed and filled), drained into the walk's steps right after the fill that produced them. */
+  private readonly typeaheadDoorSteps: RecipeStep[] = [];
+  /** #139 — required labels left blank when the walk LEFT a page: label → { path, page }. The same
+   *  label blank again on the very next page at the same path is the portal sending it back. */
+  private readonly requiredBlankLeft = new Map<string, { path: string; page: number; form: string[] }>();
   /** True once the delegated final submit actually went through. Read by the caller. */
   finalSubmitClicked = false;
   /** The completion/receipt page as text + URL, captured while standing on it. */
@@ -4667,6 +4754,8 @@ export class AutoLearnAdapter extends BasePortalAdapter {
         street: String(project.projectAddress ?? "").split(",")[0].trim(),
         city: String(project.city ?? this.siteIdentity?.city ?? "").trim() || undefined,
         zip: String(project.zip ?? this.siteIdentity?.zip ?? "").trim() || undefined,
+        // #139: the one-line address a location search is typed with ("street, city, ST zip").
+        state: String(project.state ?? "").trim() || undefined,
       };
       // The secrets a recorded step binds by name, read from the SAME project fields the replay's
       // value map uses (portalRecipes.resolveRecipeFieldValues: accountNumber / meterNumber).
@@ -6736,6 +6825,8 @@ export class AutoLearnAdapter extends BasePortalAdapter {
       // directive (capped at MAX_RECOVERY) so the model can choose a different action and heal.
       let recoveryHint = pendingHint;
       pendingHint = "";
+      // #139: the planner was told THIS iteration which validation errors blocked the last advance.
+      let validationHinted = false;
       const loopFp = await this.loopFingerprint();
       const consecutiveStuck = !!loopFp && loopFp === lastLoopFp;
       const cycling = !!loopFp && !consecutiveStuck && recentFingerprints.includes(loopFp);
@@ -6759,6 +6850,7 @@ export class AutoLearnAdapter extends BasePortalAdapter {
         const validationLine = lastValidationErrors.length > 0
           ? ` The portal BLOCKED the advance with these validation errors — fix these specific fields before advancing again: ${lastValidationErrors.slice(0, 10).join(" | ")}.`
           : "";
+        if (validationLine) validationHinted = true;
         recoveryHint =
           `${recoveryHint ? `${recoveryHint} ` : ""}${problem} Recent steps: ${pageTrace.slice(-4).join("  ->  ") || "(none)"}.${validationLine} ` +
           `Do NOT repeat the action that caused this. In particular, do NOT click a navigation link that RESTARTS the flow ` +
@@ -8370,6 +8462,8 @@ export class AutoLearnAdapter extends BasePortalAdapter {
         }
         const sensitive = isSensitiveLabel(field.label);
         const step = await this.applyFill(field, fillReq, sensitive);
+        // #139: a type-ahead's manual-entry door — its click and the address boxes it filled.
+        pageFillCount += this.drainTypeaheadDoorSteps(steps, alreadyFilledLabels);
         if (step) {
           steps.push(step);
           pageFillCount++;
@@ -8402,6 +8496,14 @@ export class AutoLearnAdapter extends BasePortalAdapter {
           stopReason: "typeahead_question",
           typeaheadMisses: [...this.typeaheadMisses],
         };
+      }
+      // d1'') A TYPE-AHEAD THAT FOUND NO MATCH, WITH NO DOOR, ENDS THE PAGE NAMED (#139). Live Bend:
+      //       the location search answered "did not match an address", the required selection stayed
+      //       empty, Next bounced to "Submission Error", and the walk searched the same page until
+      //       the portal's session expired. The box, what was typed and the portal's words.
+      {
+        const stopped = this.typeaheadNoMatchResult(steps, pageCount, portalNotices, fillVerifyMisses, pageTrace);
+        if (stopped) return stopped;
       }
 
       // d2) SENSITIVE-FIELD DETERMINISTIC PASS — any sensitive text field (account/meter number)
@@ -8858,6 +8960,62 @@ export class AutoLearnAdapter extends BasePortalAdapter {
           if (!missesNeverFilled.includes(m) && !missesDidNotHold.includes(m)) missesNeverFilled.push(m);
         }
         if (unfilled.length) this.debug?.event({ type: "required_never_filled", page: pageCount, labels: unfilled.slice(0, 8) });
+        // #139: the re-plan can reach a type-ahead too — its no-match stop ends the page the same way.
+        {
+          const stopped = this.typeaheadNoMatchResult(steps, pageCount, portalNotices, fillVerifyMisses, pageTrace);
+          if (stopped) return stopped;
+        }
+        // d4b') A REQUIRED BLANK THE PORTAL SENT BACK ENDS THE WALK, NAMED (#139). The walk advances
+        //       past a required box it could not fill after the re-plan (the portal may not enforce
+        //       the asterisk — the flex-over-false-stops ruling), but when the very next page is
+        //       the same page (same path) with the same box still blank, the advance bounced on it:
+        //       advancing again is the same retry the portal already refused (live Bend: "The location
+        //       you have selected" blank on p7, again on p8 "Submission Error", then a session
+        //       expiry; a CityView "Email Address" blank three pages running until the repeat guard).
+        //       "The same page" is the same path AND the same form: four in five of its fillable labels
+        //       in common — a single-path wizard (CityView's every step is /Permit/Application) asks
+        //       "Email Address" again on the NEXT step, which is not a bounce.
+        {
+          let path = "";
+          try { const u = new URL(url); path = u.host + u.pathname; } catch { path = String(url || "").split(/[?#]/)[0]; }
+          const formLabels = [...new Set(fields.filter((f) => f.fieldType !== "button").map((f) => String(f.label ?? "").trim()).filter(Boolean))];
+          const sameForm = (prev: string[]): boolean => {
+            if (!prev.length || !formLabels.length) return false;
+            const shared = formLabels.filter((l) => prev.includes(l)).length;
+            return shared / Math.max(prev.length, formLabels.length) >= 0.8;
+          };
+          // AN ADVANCE THE PORTAL REFUSED WITH VALIDATION ERRORS THE WALK READ is the validation
+          // guard's first: the planner is re-planned once with those errors (the stuck recovery).
+          // Only after that turn — or when the portal said nothing the walk could read — is the
+          // blank that came back the run's answer.
+          const guardOwesReplan = lastValidationErrors.length > 0 && !validationHinted;
+          const bounced = guardOwesReplan ? undefined : unfilled.find((m) => {
+            const left = this.requiredBlankLeft.get(m);
+            return !!left && left.path === path && left.page === pageCount - 1 && sameForm(left.form);
+          });
+          if (bounced) {
+            const left = this.requiredBlankLeft.get(bounced)!;
+            const others = unfilled.filter((m) => m !== bounced).slice(0, 4);
+            this.debug?.event({ type: "required_blank_stop", page: pageCount, label: bounced.slice(0, 60), from: left.page });
+            return {
+              ...fail(
+                steps,
+                this.portalName,
+                `Stopped for a person on page ${pageCount}: the required box "${bounced.slice(0, 80)}" could not be filled — the walk left page ${left.page} with it blank and the portal brought it straight back${others.length ? ` (also blank: ${others.map((o) => `"${o.slice(0, 60)}"`).join(", ")})` : ""}. Fill it by hand (or add the value to the project) and run again; the steps before this page were recorded.`
+                  + (validationBlocks.length ? ` ⛔ The portal blocked an advance with ${validationBlocks.length} validation error(s): ${validationBlocks.slice(0, 8).join("; ")}.` : ""),
+                null,
+                pageCount,
+                portalNotices,
+              ),
+              stopReason: "required_blank",
+              requiredFieldMisses: [...fillVerifyMisses],
+              ...(validationBlocks.length ? { validationBlocks: [...validationBlocks] } : {}),
+              ...(this.typeaheadMisses.length ? { typeaheadMisses: [...this.typeaheadMisses] } : {}),
+              pageTrace: pageTrace.slice(0, 40),
+            };
+          }
+          for (const m of unfilled) this.requiredBlankLeft.set(m, { path, page: pageCount, form: formLabels });
+        }
         // RETRACT a provisional miss the page has since answered. The premature-atReview
         // guard sweeps before this page's fills and before applyPolicyDefaults, so a
         // question the policy pass then answers ("Do you propose to limit the export
@@ -10680,22 +10838,68 @@ export class AutoLearnAdapter extends BasePortalAdapter {
       this.debug?.event({ type: "typeahead_not_retried", label: label.slice(0, 60), outcome: prior });
       return null;
     }
+    // #139: a box the PORTAL already selected for on Enter is answered, though it reads empty now.
+    const boxKey = `${JSON.stringify(field.selector ?? {})}\u0000${label}`;
+    if (this.typeaheadEnterPicks.has(boxKey)) {
+      this.debug?.event({ type: "typeahead_already_selected", label: label.slice(0, 60) });
+      return null;
+    }
     const mode = typeaheadMatchMode({ field: fillReq.field, label, value: v, projectStreet: this.typeaheadSite.street });
     const site: TypeaheadSite = mode === "site"
-      ? { street: this.typeaheadSite.street || v, city: this.typeaheadSite.city, zip: this.typeaheadSite.zip }
+      ? { street: this.typeaheadSite.street || v, city: this.typeaheadSite.city, zip: this.typeaheadSite.zip, state: this.typeaheadSite.state }
       : { street: v };
     const loc = await this.locator(field.selector).catch(() => null);
+    // THE LEARNER'S ENTER DOOR (#139 fix round), the one its own Enter fallback goes through
+    // (pressEnterInLastFilledField): the shared enterRefusalInPage — which judges the form's default
+    // button by the click gate's label rules (fee, submit / filing, signature request, a filing
+    // action, a page naming itself the review step) and every control Enter can reach — asked in the
+    // box's own frame, the refusal recorded as that door records it (and in the box's miss line).
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const enterGate = async (box: any): Promise<string> => {
+      if (typeof box?.evaluate !== "function") return "the box could not be read";
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      let frame: any = this.page;
+      try {
+        const h = typeof box.elementHandle === "function" ? await box.elementHandle({ timeout: 1500 }) : null;
+        const f = h && typeof h.ownerFrame === "function" ? await h.ownerFrame() : null;
+        await h?.dispose?.().catch(() => null);
+        if (f && typeof f.evaluate === "function") frame = f;
+      } catch { /* the page, as before */ }
+      await frame?.evaluate?.(PORTAL_SAFETY_IN_PAGE_SOURCE).catch(() => null);
+      const refusal = String(await box.evaluate((el: Element, g: string) => {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const ps = (globalThis as any)[g];
+        return ps && typeof ps.enterRefusalInPage === "function" ? ps.enterRefusalInPage(el) : "the page's safety predicates are not installed";
+      }, PORTAL_SAFETY_GLOBAL).catch(() => "the box could not be read") ?? "the box could not be read");
+      if (refusal) this.debug?.event({ type: "enter_submit_refused", via: "typeahead", label: label.slice(0, 60), reason: refusal.slice(0, 160) });
+      return refusal;
+    };
     const out = loc
-      ? await fillTypeahead(this.page, loc, { value: v, mode, site })
+      ? await fillTypeahead(this.page, loc, { value: v, mode, site, enterGate })
       : { outcome: "unusable" as const, why: "the box could not be located" };
     // Outcome and counts only — never the address or the suggestions themselves.
-    this.debug?.event({ type: "typeahead_fill", label: label.slice(0, 60), mode, outcome: out.outcome, ...("offered" in out ? { offered: out.offered.length } : {}) });
+    this.debug?.event({ type: "typeahead_fill", label: label.slice(0, 60), mode, outcome: out.outcome, ...("offered" in out ? { offered: out.offered.length } : {}), ...(out.outcome === "picked" && out.via ? { via: out.via } : {}) });
     if (out.outcome !== "picked") {
       this.typeaheadTried.set(memo, out.outcome);
       const line = typeaheadFailureLine(label, out);
       if (out.outcome === "ask" && !this.typeaheadQuestion) this.typeaheadQuestion = line;
+      // #139 — NO MATCH, AFTER THE WHOLE ADDRESS AND ITS CORE. The job's own address (or any box the
+      // page requires) is never left to the advance: the portal's own manual-entry door, once, or a
+      // NAMED stop on this page — never the same search again, never the page_repeat_stop guard.
+      if (out.outcome === "no_suggestions" || out.outcome === "no_match") {
+        const required = !!field.required || /\*/.test(String(field.label ?? ""));
+        if (mode === "site" || required) {
+          const door = mode === "site" && loc ? await this.tryManualEntryDoor(field, label, loc) : null;
+          if (door?.ok) {
+            return miss(`${line.replace(/ — nothing was picked and the box was left empty\.$/, "")} — entered by hand through the portal's "${door.door}" instead; a person confirms that address before submitting.`);
+          }
+          const why = door && !door.ok && door.door ? ` The portal's "${door.door}" did not reveal address boxes to fill (${door.why}).` : "";
+          if (!this.typeaheadNoMatchStop) this.typeaheadNoMatchStop = { line: `${line}${why}`, label };
+        }
+      }
       return miss(line);
     }
+    if (out.via === "enter") this.typeaheadEnterPicks.set(boxKey, { label, held: out.held });
     const step: RecipeStep = {
       action: "fill",
       phase: "fill",
@@ -10715,6 +10919,106 @@ export class AutoLearnAdapter extends BasePortalAdapter {
       step.value = v;
     }
     return step;
+  }
+
+  /** #139 — move the steps a manual-entry door recorded into the walk's steps; the number of fills. */
+  private drainTypeaheadDoorSteps(steps: RecipeStep[], alreadyFilledLabels: string[]): number {
+    const extra = this.typeaheadDoorSteps.splice(0);
+    let fills = 0;
+    for (const s of extra) {
+      steps.push(s);
+      if (s.action !== "fill") continue;
+      fills++;
+      if (s.note) alreadyFilledLabels.push(s.note);
+    }
+    return fills;
+  }
+
+  /** #139 — the NAMED stop a type-ahead with no match (and no working door) ends its page with; null
+   *  when there is none. Its box joins the run's required misses (a review item, by label). */
+  private typeaheadNoMatchResult(steps: RecipeStep[], pageCount: number, portalNotices: string[], fillVerifyMisses: string[], pageTrace: string[]): LearnResult | null {
+    const stop = this.typeaheadNoMatchStop;
+    if (!stop) return null;
+    this.debug?.event({ type: "typeahead_no_match_stop", page: pageCount, label: stop.label.slice(0, 60) });
+    const misses = fillVerifyMisses.includes(stop.label) ? [...fillVerifyMisses] : [...fillVerifyMisses, stop.label];
+    return {
+      ...fail(steps, this.portalName, `Stopped for a person on page ${pageCount}: 📍 Not picked — ${stop.line} Enter the location by hand (or correct the project's address) and run again; the steps before this page were recorded.`, null, pageCount, portalNotices),
+      stopReason: "typeahead_no_match",
+      typeaheadMisses: [...this.typeaheadMisses],
+      requiredFieldMisses: misses,
+      pageTrace: pageTrace.slice(0, 40),
+    };
+  }
+
+  /** #139 — THE PORTAL'S OWN MANUAL-ENTRY DOOR next to a location search that found nothing ("Can't
+   *  find address?", "Enter address manually", "Address not listed"): clicked ONCE per box per walk,
+   *  and the plain address boxes it reveals are filled with the job's street / city / state / zip,
+   *  each bound by name. The click and the fills are recorded as steps (typeaheadDoorSteps, drained
+   *  into the walk's steps by the caller). Never a submit or pay control, never a door that is not
+   *  near the box; nothing revealed → not ok (the caller stops the page, named). */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  private async tryManualEntryDoor(field: ExtractedField, label: string, loc: any): Promise<{ ok: boolean; door: string; why: string }> {
+    const key = `${JSON.stringify(field.selector ?? {})}\u0000${label}`;
+    if (!this.page || this.typeaheadDoorTried.has(key)) return { ok: false, door: "", why: "already tried" };
+    this.typeaheadDoorTried.add(key);
+    if (typeof loc?.evaluate !== "function") return { ok: false, door: "", why: "the box could not be read" };
+    await this.page.evaluate(PORTAL_SAFETY_IN_PAGE_SOURCE).catch(() => null);
+    const found = String(await loc.evaluate(manualEntryDoorInPage, { re: MANUAL_ENTRY_DOOR.source, g: PORTAL_SAFETY_GLOBAL }).catch(() => "") ?? "").trim();
+    this.debug?.event({ type: "typeahead_door", label: label.slice(0, 60), found: found.slice(0, 60) || null });
+    if (!found) return { ok: false, door: "", why: "no manual-entry door near the box" };
+    const norm = (s: string): string => String(s ?? "").replace(/[’‘]/g, "'").replace(/\s+/g, " ").trim().toLowerCase();
+    const before = (await this.extractAllFrames(EXTRACT_SEL)).map(toExtractedField);
+    const doorField = before.find((f) => f.fieldType === "button" && norm(f.label) === norm(found));
+    if (!doorField) return { ok: false, door: found, why: "the door could not be located again" };
+    const partOf = (f: ExtractedField): "street" | "city" | "state" | "zip" | null =>
+      (f.fieldType === "text" || f.fieldType === "select") ? manualAddressPart(f.label) : null;
+    const keyOf = (f: ExtractedField): string => `${JSON.stringify(f.selector ?? {})}\u0000${f.label}`;
+    const shownBefore = new Set<string>();
+    for (const f of before) {
+      if (!partOf(f)) continue;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const l = (await this.locator(f.selector).catch(() => null)) as any;
+      if (l && await l.isVisible().catch(() => false)) shownBefore.add(keyOf(f));
+    }
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const doorLoc = (await this.locator(doorField.selector).catch(() => null)) as any;
+    const clicked = doorLoc ? await withAutomationInput(this.page, () => doorLoc.click({ timeout: 5000 })).then(() => true).catch(() => false) : false;
+    if (!clicked) return { ok: false, door: found, why: "the door could not be clicked" };
+    const doorStep: RecipeStep = { action: "click", phase: "fill", selector: doorField.selector, note: doorField.label || found, ...(doorField.fingerprint ? { fingerprint: doorField.fingerprint } : {}) };
+    await this.waitForDynamicFieldsSettle().catch(() => null);
+    const after = (await this.extractAllFrames(EXTRACT_SEL)).map(toExtractedField);
+    const values: Record<"street" | "city" | "state" | "zip", string> = {
+      street: this.typeaheadSite.street, city: this.typeaheadSite.city ?? "", state: this.typeaheadSite.state ?? "", zip: this.typeaheadSite.zip ?? "",
+    };
+    const filled: RecipeStep[] = [];
+    const done = new Set<string>();
+    for (const f of after) {
+      const part = partOf(f);
+      if (!part || done.has(part) || shownBefore.has(keyOf(f)) || !values[part]) continue;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const l = (await this.locator(f.selector).catch(() => null)) as any;
+      if (!l || !(await l.isVisible().catch(() => false))) continue;
+      // A State LIST takes the one option that IS this state ("OREGON" for "OR"), never a partial
+      // match a select fallback could make ("OR" inside "FLORIDA"); none or several → left alone.
+      let value = values[part];
+      if (part === "state" && f.fieldType === "select") {
+        const want = usStateCode(value);
+        const same = (f.options ?? []).filter((o) => !!want && usStateCode(o) === want);
+        if (same.length !== 1) continue;
+        value = same[0];
+      }
+      // Bound by name, so each replay enters ITS job's address — except a State option spelled
+      // otherwise than the project's code, kept as the option (the portal's jurisdiction is in one state).
+      const step = await this.applyFill(f, { value, field: value === values[part] ? part : undefined }, false);
+      if (!step) continue;
+      done.add(part);
+      filled.push(step);
+    }
+    this.debug?.event({ type: "typeahead_door_filled", label: label.slice(0, 60), parts: [...done] });
+    // The click is recorded either way (it happened, and the page shows what it revealed).
+    this.typeaheadDoorSteps.push(doorStep, ...filled);
+    if (!done.has("street")) return { ok: false, door: found, why: done.size ? `only ${[...done].join(" / ")} could be filled` : "no street / city / zip box appeared" };
+    return { ok: true, door: found, why: "" };
   }
 
   private async applyFillInner(
@@ -11220,6 +11524,7 @@ export class AutoLearnAdapter extends BasePortalAdapter {
         if (held.trim()) continue;
       }
       const step = await this.applyFill(field, fillReq, false);
+      applied += this.drainTypeaheadDoorSteps(ctx.steps, ctx.alreadyFilledLabels);
       if (!step) continue;
       ctx.steps.push(step);
       applied++;
@@ -11236,6 +11541,37 @@ export class AutoLearnAdapter extends BasePortalAdapter {
       });
     }
     return applied;
+  }
+
+  /** #139 — whether the page still SHOWS the selection the portal made on Enter for this search box
+   *  (selector + label), read from the page's visible text. False when no such selection was made. */
+  private async enterSelectionShown(boxKey: string): Promise<boolean> {
+    const pick = this.typeaheadEnterPicks.get(boxKey);
+    if (!pick || !this.page) return false;
+    const loose = (s: string): string => String(s ?? "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+    const want = loose(pick.held);
+    if (!want) return false;
+    // Every frame's text (the main frame is one of them): an application in an iframe shows it there.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const docs: any[] = typeof (this.page as any).frames === "function" ? (this.page as any).frames() : [this.page];
+    const shown = await Promise.all(docs.map((d) => (typeof d?.locator === "function"
+      ? d.locator("body").innerText({ timeout: 2000 }).catch(() => "")
+      : Promise.resolve(""))));
+    return shown.some((t) => loose(String(t ?? "")).includes(want));
+  }
+
+  /** #139 — `labels` (required boxes read blank) without the search boxes whose Enter selection the
+   *  page still shows. */
+  private async withoutEnterSelections(labels: string[]): Promise<string[]> {
+    if (!this.typeaheadEnterPicks.size || !labels.length) return labels;
+    const norm = (s: string): string => String(s ?? "").replace(/[*:]/g, " ").replace(/\s+/g, " ").trim().toLowerCase();
+    const answered = new Set<string>();
+    for (const [key, pick] of this.typeaheadEnterPicks) {
+      if (await this.enterSelectionShown(key)) answered.add(norm(pick.label));
+    }
+    const kept = labels.filter((l) => !answered.has(norm(l)));
+    if (kept.length !== labels.length) this.debug?.event({ type: "required_answered_by_enter_selection", labels: labels.filter((l) => !kept.includes(l)).slice(0, 4) });
+    return kept;
   }
 
   private async collectUnfilledRequired(): Promise<string[]> {
@@ -11314,7 +11650,9 @@ export class AutoLearnAdapter extends BasePortalAdapter {
       }
       return Array.from(out).slice(0, 20);
     }, { sensitive: REQUIRED_SWEEP_SENSITIVE.source, ack: REQUIRED_SWEEP_ACK.source }).catch(() => [] as string[]);
-    const all = Array.isArray(labels) ? labels : [];
+    // #139: a search box the portal selected for on Enter comes back empty — answered, not blank,
+    // while the page still shows its selection.
+    const all = await this.withoutEnterSelections(Array.isArray(labels) ? labels : []);
     // A BATTERY SPEC ON A NO-BATTERY JOB IS BLANK BY DESIGN, like a sensitive field: the fill
     // guard refuses to invent it, so counting it as a required miss would block the trust gate on
     // every no-battery job forever, over boxes a portal only enforces once storage is declared.
@@ -11535,6 +11873,15 @@ export class AutoLearnAdapter extends BasePortalAdapter {
       // read-back is the portal dropping a real fill, exactly like any other field, and it is
       // re-typed by the same name (the value is re-read, never held on the fill record).
       if (a.sensitive && !a.secretBinding) continue;
+      // #139: a search the PORTAL answered on Enter holds its answer outside the box (the box comes
+      // back empty). Held while the page shows the selection; never searched again either way.
+      if (a.fillStrategy === "typeahead") {
+        const boxKey = `${JSON.stringify(a.selector ?? {})}\u0000${String(a.label ?? "").replace(/\s+/g, " ").trim().slice(0, 80)}`;
+        if (this.typeaheadEnterPicks.has(boxKey)) {
+          if (!(await this.enterSelectionShown(boxKey)) && a.required) misses.push(a.label);
+          continue;
+        }
+      }
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const loc = (await this.locator(a.selector)) as any;
       if (!loc) continue;

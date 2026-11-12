@@ -58,6 +58,9 @@ const BOOKS: Record<string, string[]> = {
   ],
 };
 
+/** #139: the job's whole one-line address, typed first into its own site's search. */
+const LOC_FULL = `${JOB.street}, ${JOB.city}, ${JOB.state} ${JOB.zip}`;
+
 // ---- the replica ---------------------------------------------------------------------------------
 const formPage = (mode: string): string => `<!doctype html><html><head><title>PublicAccess</title>
 <style>
@@ -343,15 +346,17 @@ if (recorded) {
   await page.goto(`${base}/?mode=none`);
   const t0 = Date.now();
   const out = await fillTypeahead(page, page.locator("#cw-ui-input-2000000000000002"), {
-    value: JOB.street, mode: "site", site: { street: JOB.street, city: JOB.city, zip: JOB.zip },
+    value: JOB.street, mode: "site", site: { street: JOB.street, city: JOB.city, zip: JOB.zip, state: JOB.state },
   });
   const ms = Date.now() - t0;
   const searches = await page.evaluate(() => (window as unknown as { __searches: string[] }).__searches);
   const after = await read(page);
   console.log(`   no suggestions: ${ms} ms outcome=${out.outcome} why=${"why" in out ? out.why : ""} searched=${JSON.stringify(searches)}`);
   check("no suggestions is a NAMED outcome, not a pick", out.outcome === "no_suggestions" && /offered no suggestions/.test("why" in out ? out.why : ""), JSON.stringify(out));
-  check("...after widening from house + street to the house number alone",
-    JSON.stringify(searches) === JSON.stringify(["4821 Quillfeather", "4821"]), JSON.stringify(searches));
+  // #139: the job's whole one-line address goes in first (Enter there, behind the shared gate), and
+  // the house + street core and the house number alone only after it.
+  check("...after widening from the whole address to house + street, then the house number alone",
+    JSON.stringify(searches) === JSON.stringify([LOC_FULL, "4821 Quillfeather", "4821"]), JSON.stringify(searches));
   check("...within the fill's 30 s budget", ms < 30_000, `${ms} ms`);
   check("...and the box is left empty", after.value === "" && after.picked === "", JSON.stringify(after));
   await page.close();
