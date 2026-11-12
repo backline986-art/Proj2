@@ -96,6 +96,60 @@ await check("(t5) MUST-EXCLUDE: the name match is exact — 'City of Jefferson' 
   assert.equal(pp.permitProcessFor(project("Jefferson County, OR"))?.issuingAgency.value, "Jefferson County");
 });
 
+// ── #177: one combo permit answers the building and electrical tracks ───────────────────────
+// Live at City of Meridian (2026-11-12): the owner verified the record type on the row's ONE combo
+// permit; an electrical learn asked for an electrical permit, found none, and walked as if nothing
+// were verified. KILL: drop the combo fallback in permitAnswerForTrackFrom → (c1) fails.
+const comboPermit = (recordType: string) => ({
+  discipline: "combo" as const, label: "Residential Electrical Solar Array (one record)",
+  issuingAgency: { value: "City of Onepermit", sourceUrl: "https://one.example.gov", quote: "q", origin: "operator" as const },
+  portalUrl: { value: "https://aca-one.accela.com/ONE/", sourceUrl: "https://one.example.gov", quote: "q", origin: "operator" as const },
+  recordType: { value: recordType, sourceUrl: "https://one.example.gov", quote: "q", origin: "operator" as const },
+  documents: { value: ["Plan set"], sourceUrl: "https://one.example.gov", quote: "q", origin: "operator" as const },
+  fee: { value: null, sourceUrl: "", quote: "", origin: "lookup" as const, notFound: "not searched" },
+});
+const electricalPermit = (recordType: string) => ({ ...comboPermit(recordType), discipline: "electrical" as const, label: "Electrical permit" });
+await check("(c1) MUST-PASS: a row with ONE combo permit answers the building and the electrical track with it (viaCombo), record type included", () => {
+  pp.savePermitProcessLookup(db, {
+    state: "ID", ahj: "City of Onepermit", lookedUpAt: new Date().toISOString(),
+    issuingAgency: { value: "City of Onepermit", sourceUrl: "https://one.example.gov", quote: "q", origin: "operator" },
+    permitStructure: { value: "combo", sourceUrl: "https://one.example.gov", quote: "one record covers the PV job", origin: "operator" },
+    permits: [comboPermit("Residential Electrical Solar Array")],
+  });
+  const p = project("City of Onepermit", "ID");
+  for (const track of ["electrical", "building", "combo"] as const) {
+    const got = pp.permitAnswerForTrackFrom(p, track);
+    assert.ok(got, `${track}: an answer`);
+    assert.equal(got.answer.discipline, "combo", `${track}: the combo permit answers`);
+    assert.equal(got.viaCombo, track !== "combo", `${track}: viaCombo says whether the track borrowed the combo permit`);
+    assert.equal(pp.lookedUpRecordType(p, track)?.value, "Residential Electrical Solar Array", `${track}: the record type reaches the track`);
+    assert.equal(pp.issuingAgencyFor(p, track)?.value, "City of Onepermit", `${track}: the issuing agency reaches the track`);
+  }
+});
+await check("(c2) MUST-EXCLUDE: a discipline-specific permit beats the combo one for its own track", () => {
+  pp.savePermitProcessLookup(db, {
+    state: "ID", ahj: "City of Bothkinds", lookedUpAt: new Date().toISOString(),
+    issuingAgency: { value: "City of Bothkinds", sourceUrl: "https://both.example.gov", quote: "q", origin: "operator" },
+    permitStructure: { value: "separate", sourceUrl: "https://both.example.gov", quote: "q", origin: "operator" },
+    permits: [comboPermit("Combo Solar"), electricalPermit("Electrical Solar")],
+  });
+  const p = project("City of Bothkinds", "ID");
+  assert.equal(pp.permitAnswerForTrackFrom(p, "electrical")?.answer.recordType.value, "Electrical Solar");
+  assert.equal(pp.permitAnswerForTrackFrom(p, "electrical")?.viaCombo, false);
+  assert.equal(pp.permitAnswerForTrackFrom(p, "building")?.answer.recordType.value, "Combo Solar", "no structural permit: the combo one answers the building track");
+  assert.equal(pp.permitAnswerForTrackFrom(p, "building")?.viaCombo, true);
+});
+await check("(c3) MUST-EXCLUDE: a combo track never takes a discipline permit (it names half the job)", () => {
+  pp.savePermitProcessLookup(db, {
+    state: "ID", ahj: "City of Twoonly", lookedUpAt: new Date().toISOString(),
+    issuingAgency: { value: "City of Twoonly", sourceUrl: "https://two.example.gov", quote: "q", origin: "operator" },
+    permitStructure: { value: "separate", sourceUrl: "https://two.example.gov", quote: "q", origin: "operator" },
+    permits: [electricalPermit("Electrical Solar")],
+  });
+  assert.equal(pp.permitAnswerForTrackFrom(project("City of Twoonly", "ID"), "combo"), null);
+  assert.equal(pp.permitAnswerForTrackFrom(project("City of Twoonly", "ID"), "building"), null, "no structural and no combo permit: nothing answers the building track");
+});
+
 // ── B2: an information page is never a portal ─────────────────────────────────────────────
 await check("(p1) the portal predicate: help pages, PDFs and SharePoint content pages are not portals; portals are", () => {
   for (const u of [BCD_HELP, "https://www.co.marion.or.us/PW/BuildingInspection/Pages/ApplicationsandBrochures.aspx",

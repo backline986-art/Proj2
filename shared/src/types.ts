@@ -5018,6 +5018,11 @@ export interface RecipeStep {
   value?: string;
   /** For upload: which document type to attach (e.g. "sld", "site_plan"). */
   docType?: string;
+  /** For upload: the heading of the requirement slot the document went into ("Electrical Plans",
+   *  "Bid"), as the portal named it (#140). Replay finds the slot by this heading first and falls
+   *  back to the recorded positional selector only when no slot on the page carries it. Absent
+   *  when the slot's own text named no document (a bare "Browse"). */
+  slot?: string;
   /** For upload: the control is a custom Browse/Upload widget whose real <input> is
    *  created on click — replay it via the browser file-chooser dialog (click + setFiles)
    *  rather than setInputFiles on a (non-existent) static input. */
@@ -5453,6 +5458,16 @@ export interface BatteryPermittingAnswer {
   agency?: string;
   /** Documents the page names for the battery (a storage packet, a fire approval letter). */
   documents?: string[];
+}
+/** THE RECORD TYPE / WORK ITEM a learn is told to tick (#166): the per-job lookup's record type for
+ *  the permit this learn files, with the standing of the row it came from. `verified` is true only
+ *  when that lookup row is person-verified (permitProcess.isVerifiedPermitProcess) — rule 3's line:
+ *  a verified name is the deterministic pick wherever a page offers it (matched by label with
+ *  permitProcess.sameRecordType, never by position); a seeded one is a planner hint and nothing
+ *  more. null = no record type on file, or a utility (interconnection) learn. */
+export interface LearnTargetRecordType {
+  value: string;
+  verified: boolean;
 }
 export interface PermitProcessLookup {
   profileKey: string;

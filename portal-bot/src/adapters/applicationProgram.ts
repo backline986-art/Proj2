@@ -27,6 +27,7 @@
 // code the live run does. The previous version duplicated the logic into the test, and the
 // hand-written fixture drifted from the portal: the test passed while the live run failed.
 // ---------------------------------------------------------------------------
+import { sameRecordType } from "../../../backend/src/permitProcess";
 
 /** One selectable programme inside a candidate container. */
 export interface ProgramOption {
@@ -289,6 +290,10 @@ export interface ProgramJob {
   jobClass?: JobClass;
   /** The system size the program thresholds are compared against (AC where known, else DC). */
   sizeKw?: number | null;
+  /** #166: the PERSON-VERIFIED record type / work item on file for this permit (never a seeded
+   *  one — that is a planner hint, hard rule 3). An offered option whose label sameRecordType()s it
+   *  is the pick before any word tier is consulted. */
+  recordType?: string | null;
 }
 
 /**
@@ -328,13 +333,14 @@ export function programClassFit(label: string, job: ProgramJob = {}): "fits" | "
 export interface ProgramChoice {
   pick?: ProgramOption;
   /**
+   * "target"       an option's label IS the person-verified record type on file (#166);
    * "matched"      one option fits the deciding tier for this job;
    * "ambiguous"    two or more fit the deciding tier and their labels do not settle which;
    * "other_class"  the only matching options name the other class (a commercial-only
    *                program offered to a residential job, or the reverse);
    * "unmatched"    nothing reads as something we came here to apply for.
    */
-  reason: "matched" | "ambiguous" | "other_class" | "unmatched";
+  reason: "target" | "matched" | "ambiguous" | "other_class" | "unmatched";
   /** The labels the decision was between — for a refusal the person can act on. */
   candidates: string[];
 }
@@ -359,6 +365,17 @@ export function explainProgramChoice(groups: ProgramGroup[], discipline?: string
     ? [...PROGRAM_PREFER_PERMIT, ...PROGRAM_PREFER]
     : [...PROGRAM_PREFER, ...PROGRAM_PREFER_PERMIT];
   const ranked = (Array.isArray(groups) ? groups.slice() : []).sort((a, b) => a.area - b.area);
+  // #166: A PERSON NAMED THE RECORD TYPE — it wins before any word tier, and before the exclusion
+  // list (a person's name for the thing is not re-judged by a regex). Tightest group first, and
+  // only an EXACT label match (sameRecordType: case / punctuation / "permit" folded), never a
+  // substring — "Residential Solar" is not "Residential Solar - Demolition".
+  const target = String(job.recordType ?? "").trim();
+  if (target) {
+    for (const group of ranked) {
+      const hit = (group.options || []).find((o) => o && typeof o.label === "string" && sameRecordType(o.label, target));
+      if (hit) return { pick: hit, reason: "target", candidates: [hit.label] };
+    }
+  }
   let otherClass: string[] = [];
   for (const group of ranked) {
     const eligible = (group.options || []).filter((o) => o && typeof o.label === "string" && !PROGRAM_EXCLUDE.test(o.label));
@@ -392,6 +409,84 @@ export function explainProgramChoice(groups: ProgramGroup[], discipline?: string
  */
 export function chooseProgram(groups: ProgramGroup[], discipline?: string, job: ProgramJob = {}): ProgramOption | undefined {
   return explainProgramChoice(groups, discipline, job).pick;
+}
+
+// ---------------------------------------------------------------------------
+// THE SAME CLASS RULE FOR A RECORD-TYPE LIST (#176).
+//
+// An AHJ's record-type page is the program chooser in another costume, and it made the same
+// mistake: Accela tenants list their Commercial groups before Residential, so a word preference
+// that takes the first solar label in DOM order handed a residential job "Commercial Electrical
+// Solar Array" (owner-watched City of Meridian run, 2026-11-12). The rule is the one above —
+// a label naming only the other class is never eligible; among what is left at the deciding
+// tier the one naming THIS job's class wins; when the labels do not settle it the pick is
+// refused, never taken by DOM order — read through programClassFit, the one class reader.
+// ---------------------------------------------------------------------------
+
+/** How the record-type pick went, by index into the labels it was given. */
+export interface RecordTypeChoice {
+  /** Index into `labels` of the pick, when there is one. */
+  index?: number;
+  /**
+   * "matched"      one label is the pick at the deciding tier;
+   * "ambiguous"    two or more labels fit the deciding tier and neither class nor discipline
+   *                words say which is this job's;
+   * "other_class"  every label a tier matched names the other class (a commercial-only type
+   *                offered to a residential job, or the reverse);
+   * "unmatched"    no tier matched any label.
+   */
+  reason: "matched" | "ambiguous" | "other_class" | "unmatched";
+  /** The labels the decision was between — for a refusal a person can act on. */
+  candidates: string[];
+}
+
+/**
+ * Picks a record type from the offered labels, tier by tier (`tiers` are the caller's word
+ * preferences, most specific first). The FIRST tier with an eligible match decides: a label whose
+ * programClassFit is "contradicts" is never eligible; one eligible label is taken; several are
+ * narrowed to those that name this job's class, then to those that name its `discipline` (the
+ * caller's discipline words — the same regex its tiers are built from, never a second reader);
+ * anything still unsettled is refused. A tier where every match is the other class's is passed
+ * over (the next tier may still hold ours) and remembered for the refusal.
+ */
+export function explainRecordTypeChoice(labels: string[], tiers: RegExp[], job: ProgramJob = {}, discipline?: RegExp): RecordTypeChoice {
+  const all = (Array.isArray(labels) ? labels : []).map((l) => String(l ?? ""));
+  const otherClass: string[] = [];
+  for (const re of tiers) {
+    const matches = all.map((label, index) => ({ label, index })).filter((x) => x.label && re.test(x.label));
+    if (matches.length === 0) continue;
+    const fit = matches.map((x) => ({ ...x, fit: programClassFit(x.label, job) }));
+    const usable = fit.filter((x) => x.fit !== "contradicts");
+    if (usable.length === 0) {
+      for (const x of fit) if (!otherClass.includes(x.label)) otherClass.push(x.label);
+      continue;
+    }
+    if (usable.length === 1) return { index: usable[0].index, reason: "matched", candidates: [usable[0].label] };
+    const ours = usable.filter((x) => x.fit === "fits");
+    if (ours.length === 1) return { index: ours[0].index, reason: "matched", candidates: usable.map((x) => x.label) };
+    // Several name our class (or none says anything about class): the discipline's own words
+    // settle it when exactly one carries them — "Residential Electrical Solar Array" over
+    // "Residential Building Solar Array" on an electrical job.
+    const pool = ours.length ? ours : usable;
+    const named = discipline ? pool.filter((x) => discipline.test(x.label)) : [];
+    if (named.length === 1) return { index: named[0].index, reason: "matched", candidates: pool.map((x) => x.label) };
+    return { reason: "ambiguous", candidates: (named.length > 1 ? named : pool).map((x) => x.label) };
+  }
+  if (otherClass.length) return { reason: "other_class", candidates: otherClass };
+  return { reason: "unmatched", candidates: [] };
+}
+
+/**
+ * Does a group header / record-type label name THIS job's class AND its discipline — the group a
+ * residential electrical job's record type lives in ("Residential Electrical"), derived from the
+ * job alone, so a page can be opened at the right group before any verified type or bare word
+ * preference is consulted (#176). The class is read by programClassFit; the discipline words are
+ * the caller's.
+ */
+export function namesJobClassAndDiscipline(label: string, job: ProgramJob = {}, discipline?: RegExp): boolean {
+  if (!discipline) return false;
+  const l = String(label ?? "");
+  return programClassFit(l, job) === "fits" && discipline.test(l);
 }
 
 /**

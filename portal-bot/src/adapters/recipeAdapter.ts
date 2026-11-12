@@ -14,7 +14,11 @@ import { feeBracketCoverage, feeBracketCoverageMessage, decideFeeTier, FEE_TIER_
 
 /** The pause's reason when a recorded kVA tier step finds no tier box on its page (close MF2). */
 const FEE_TIER_NO_BOX_REASON = "the recorded kVA tier box was not found on this page and no kVA-labelled box could be read";
+/** #166: the learner's note on a person-verified record-type / work-item pick (autoLearnAdapter
+ *  noteVerifiedRecordTypeTicked) — the replay finds that step by label, never by position. */
+const VERIFIED_RECORD_TYPE_NOTE = /^\s*record type \(verified\):\s*/i;
 import { collectPortalErrorBanner } from "../safeAction";
+import { GROUP_TOGGLE_CSS, recordTypeGroupOf, tagToggleByText, toggledListOpen } from "./recordTypeGroup";
 import { SERVICE_FEEDER_200A_FIELD, SERVICE_FEEDER_400A_FIELD, isServiceFeeder200Label, isServiceFeeder400Label } from "../../../shared/src/serviceLineLabels";
 import { contactFieldKind, contactKeyFor, contactRoleOfStep, isContactOpener, type ContactFieldKind, type ContactRole, type ContactTrack } from "../../../shared/src/contactRoles";
 import { structureTypeMeaning } from "../../../backend/src/permitProcess";
@@ -93,7 +97,7 @@ import { imageToPdfBytes, shouldConvertToPdf } from "../imageToPdf";
 import { removeUploadStaging, uploadPayloadFor, type PreparedUpload } from "./uploadPayload";
 import { attachmentTypeFor, isDocumentTypeList } from "./attachmentTypes";
 import { chooseSubmittedRecord, cleanRecordLink, readApplicationLedgerInPage, recordLinkForNumberInPage, type LedgerEntry } from "./submissionLedger";
-import { exactUploadDocType, fileTypeAllowed, UPLOAD_LABEL_PATTERNS, uploadForbidsSubstitute } from "./autoLearnAdapter";
+import { exactUploadDocType, fileTypeAllowed, formsSlotDocTypes, UPLOAD_LABEL_PATTERNS, uploadForbidsSubstitute, uploadTextNamesNoDocument } from "./autoLearnAdapter";
 import { readFeeStop, secretValuesOf, type FeeStopKind, type FeeStopReading } from "../feeStop";
 import { reviewComparison, scrapeReviewScreen as scrapeReviewScreenShared, utilityIdentifiersEnteredBySteps, type ReviewMismatch } from "../reviewScreenScraper";
 import { controlReadsUnanswered, pinEmptyRequiredControl, PINNED_CONTROL_ATTR, SWEPT_BLANK_ATTR, sweepEmptyRequiredControls, type EmptyRequired } from "../requiredControlSweep";
@@ -6008,10 +6012,84 @@ export class RecipeAdapter extends BasePortalAdapter {
   // and it must stop, not approximate. The hand-coded Accela adapter learned this same lesson
   // earlier; the replay path kept the fallback.
   private isRecordTypeStep(step: RecipeStep): boolean {
+    // #174: the click that OPENS the record type's group ("record type group: Residential Electrical")
+    // is part of the same choice — a group healed onto a neighbour by position exposes another
+    // list, and the type ticked after it is the permit that gets filed. Routed by openRecordTypeGroup.
+    if (recordTypeGroupOf(step)) return true;
     const s = `${step.selector?.label ?? ""} ${step.note ?? ""}`;
     return step.action === "check"
       && (/cbListServices/i.test(step.selector?.fallbacks?.map((f) => f.css ?? "").join(" ") ?? "")
-        || /^(residential|commercial)\s*-\s*/i.test(s.trim()));
+        || /^(residential|commercial)\s*-\s*/i.test(s.trim())
+        // #166: the learner's deterministic pick of a PERSON-VERIFIED record type / work item, on any
+        // portal ("record type (verified): Prescriptive photovoltaic systems") — by label here too,
+        // never healed onto a neighbour by position.
+        || VERIFIED_RECORD_TYPE_NOTE.test(String(step.note ?? "")));
+  }
+
+  /**
+   * #174 — OPEN A RECORD-TYPE GROUP BY ITS NAME, NEVER BY POSITION.
+   *
+   * The learner recorded the header it clicked by the group's words ("record type group: Residential
+   * Electrical"); here that name is the only thing trusted. The recorded selector levels are tried
+   * first and taken only when exactly one VISIBLE element answers; otherwise the one visible
+   * clickable whose own words are the group's (tagged in-page — a role locator misses a header whose
+   * icon carries alt text) is clicked. Zero or several matches is a named refusal, not a guess: the
+   * type ticked after this click is the permit that gets filed. A group already open is left alone
+   * (its header would close it).
+   */
+  private async openRecordTypeGroup(step: RecipeStep): Promise<boolean> {
+    const group = recordTypeGroupOf(step);
+    await this.settle(8000);
+    await waitForInteractiveControls(this.page, 8000);
+    const attr = "data-al-group-toggle";
+    const clearTag = (): Promise<unknown> => typeof this.page.evaluate === "function"
+      ? this.page.evaluate((a: string) => document.querySelectorAll(`[${a}]`).forEach((n) => n.removeAttribute(a)), attr).catch(() => null)
+      : Promise.resolve();
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    let target: any = null;
+    let how = "";
+    const levels: RecipeSelector[] = step.selector ? [step.selector, ...(step.selector.fallbacks ?? [])] : [];
+    for (const sel of levels) {
+      const loc = this.locator({ ...sel, fallbacks: undefined });
+      if (!loc) continue;
+      let n = 0;
+      try { n = await loc.count(); } catch { continue; }
+      if (n !== 1 || !(await this.isTrulyVisible(loc.first()))) continue;
+      // The recorded control must still READ as this group: a per-render id that now names another
+      // header is the positional pick in another costume.
+      const words = await loc.first().evaluate((el: Element) => ((el as HTMLElement).innerText || el.textContent || "").replace(/\s+/g, " ").trim()).catch(() => "") as string;
+      if (words.toLowerCase() !== group.toLowerCase()) continue;
+      target = loc.first();
+      how = "the recorded selector";
+      break;
+    }
+    if (!target) {
+      const matches = typeof this.page.evaluate === "function"
+        ? await this.page.evaluate(tagToggleByText, { text: group, attr, css: GROUP_TOGGLE_CSS }).catch(() => 0) as number
+        : 0;
+      if (matches !== 1) {
+        await clearTag();
+        throw new Error(matches === 0
+          ? `Record type group "${group}" is not on this page — refusing to open another group (the type picked inside it is the permit that gets filed).`
+          : `Record type group "${group}" matches ${matches} controls on this page — refusing to guess which to open.`);
+      }
+      target = this.page.locator(`[${attr}]`).first();
+      how = "its words on the page";
+    } else if (typeof target.evaluate === "function") {
+      await target.evaluate((el: Element, a: string) => el.setAttribute(a, "1"), attr).catch(() => null);
+    }
+    const open = typeof this.page.evaluate === "function" ? await this.page.evaluate(toggledListOpen, attr).catch(() => null) : null;
+    if (open === true) {
+      await clearTag();
+      this.driftWarnings.push(`record type group "${group}" was already open — its header was not clicked`);
+      return true;
+    }
+    // Through the replay chokepoint (R1), like every other click: a disclosure, never a filing.
+    await this.guardedClick(target, `record type group "${group}"`, { timeout: 10000 });
+    await clearTag();
+    await this.settle(4000);
+    this.driftWarnings.push(`record type group "${group}" opened by label via ${how} (positional fallback refused)`);
+    return true;
   }
 
   // The list this jurisdiction actually offers — for the error, so a human reads "the city has
@@ -6111,8 +6189,12 @@ export class RecipeAdapter extends BasePortalAdapter {
     if (/data-al-row\s*=/.test(step.selector?.css ?? "")) {
       return this.pickAddressVersionLive(step);
     }
+    // #174: the group a record type sits in is opened by its name (and never healed by position).
+    if (recordTypeGroupOf(step)) return this.openRecordTypeGroup(step);
     if (this.isRecordTypeStep(step)) {
-      const wanted = String(step.selector?.label || step.note || "").trim();
+      // #166: a verified pick's selector is the control's label; the note is the last resort, with
+      // its prefix dropped.
+      const wanted = String(step.selector?.label || String(step.note ?? "").replace(VERIFIED_RECORD_TYPE_NOTE, "") || "").trim();
       // SETTLE BEFORE COUNTING. count() does not wait: right after the previous page's full
       // postback navigated here, the list can be unpainted, and "not offered — refusing to file"
       // was then a race (measured on the Accela replica: the record-type page had been served,
@@ -6120,11 +6202,17 @@ export class RecipeAdapter extends BasePortalAdapter {
       // then count — and when nothing matches, settle and look exactly once more.
       await this.settle(8000);
       await waitForInteractiveControls(this.page, 8000);
+      // #166: a verified record type is a RADIO on some portals (Accela's CapType); the role is the
+      // one the page offers the name under. Checkbox as always, else radio.
+      const role: "checkbox" | "radio" =
+        (await this.page.getByRole("checkbox", { name: wanted, exact: false }).count().catch(() => 0)) === 0
+          && (await this.page.getByRole("radio", { name: wanted, exact: false }).count().catch(() => 0)) > 0
+          ? "radio" : "checkbox";
       // Exact first. "Residential - Structural" must not resolve through a substring onto
       // "Residential - Structural - Demolition": one unambiguous name, or nothing.
-      const exact = this.page.getByRole("checkbox", { name: wanted, exact: true });
+      const exact = this.page.getByRole(role, { name: wanted, exact: true });
       let exactCount = await exact.count().catch(() => 0);
-      if (exactCount === 0 && (await this.page.getByRole("checkbox", { name: wanted, exact: false }).count().catch(() => 0)) === 0) {
+      if (exactCount === 0 && (await this.page.getByRole(role, { name: wanted, exact: false }).count().catch(() => 0)) === 0) {
         await this.settle(4000);
         exactCount = await exact.count().catch(() => 0);
       }
@@ -6133,7 +6221,7 @@ export class RecipeAdapter extends BasePortalAdapter {
         this.driftWarnings.push(`record type "${wanted}" selected by label (positional fallback refused)`);
         return true;
       }
-      const loose = this.page.getByRole("checkbox", { name: wanted, exact: false });
+      const loose = this.page.getByRole(role, { name: wanted, exact: false });
       const looseCount = exactCount > 1 ? exactCount : await loose.count().catch(() => 0);
       if (looseCount === 1) {
         await withAutomationInput(this.page, () => loose.first().check({ timeout: 10000 }));
@@ -6858,9 +6946,16 @@ export class RecipeAdapter extends BasePortalAdapter {
         else await smartWait(this.page);
         return true;
       case "upload": {
-        const recordedLabel = String(step.note ?? "").split(":").slice(1).join(":").trim();
+        // The slot's heading as recorded (#140: `slot`, the requirement the portal named), else the
+        // label the note carries — one name for the exact-type check and the slot search below.
+        const recordedLabel = String(step.slot ?? "").trim() || String(step.note ?? "").split(":").slice(1).join(":").trim();
         const requiredType = exactUploadDocType(recordedLabel);
-        if (requiredType && step.docType !== requiredType) {
+        // A forms slot ("Agreements, Form, Documents & Checklists") takes ANY of the job's forms, so a
+        // step the learn recorded with the building application is as right as one with the checklist
+        // the label's first word names (#140). Anything else must be the exact document.
+        const slotForms = formsSlotDocTypes(recordedLabel);
+        const docTypeFitsSlot = (docType: string | undefined) => !!docType && (docType === requiredType || !!slotForms?.includes(docType));
+        if (requiredType && !docTypeFitsSlot(step.docType)) {
           this.driftWarnings.push(`refused ${step.docType || "unbound file"} for "${recordedLabel.slice(0, 60)}"; this slot requires ${requiredType}`);
           this.noteUnresolved(step);
           return false;
@@ -6903,7 +6998,9 @@ export class RecipeAdapter extends BasePortalAdapter {
           // tag is re-taken in a bounded poll until the slot the step names is there; if it never
           // appears, the step is skipped NAMED within seconds, and the document goes to no other
           // slot (a differently labelled slot is never a fallback).
-          const wanted = String(step.note ?? "").split(":").slice(1).join(":").trim();
+          // By the recorded slot heading first (#140): CityView's "Electrical Plans" is a row the
+          // control's own text never names, so the note alone ("Browse..") could not find it.
+          const wanted = recordedLabel;
           const norm = (v: string) => String(v ?? "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
           const want = norm(wanted);
           const recordedCss = step.selector.css;
@@ -6924,9 +7021,16 @@ export class RecipeAdapter extends BasePortalAdapter {
           if (!hit) {
             // The recorded index is a fallback only for a slot with no label of its own to
             // contradict the step's (an unlabelled Browse box); never for a differently labelled one.
+            // A step recorded against a picker FACE ("upload plan_set: Add" — every Accela recipe,
+            // whose slot now reads its heading, #140) contradicts nothing and keeps its position,
+            // unless the live slot's heading names a different exact document (a step recorded as
+            // "Browse.." into what now reads "Agreements, Form, Documents & Checklists" is refused).
             const recorded = slots.find((sl) => `[data-al-upl="${sl.key}"]` === recordedCss);
             const recordedLabel2 = norm(recorded?.label ?? "");
-            if (!recorded || (want && recordedLabel2 && recordedLabel2 !== "document")) {
+            const wantNamesDocument = !!want && !uploadTextNamesNoDocument(wanted);
+            const liveExact = recorded ? exactUploadDocType(recorded.label || "") : null;
+            const liveContradicts = !!liveExact && liveExact !== step.docType && !formsSlotDocTypes(recorded?.label || "")?.includes(step.docType || "");
+            if (!recorded || liveContradicts || (wantNamesDocument && recordedLabel2 && recordedLabel2 !== "document")) {
               const secs = Math.round((Date.now() - started) / 100) / 10;
               this.driftWarnings.push(`upload "${wanted.slice(0, 48) || recordedCss}" has no matching file slot on this page after ${secs}s (${slots.length} slot(s): ${slots.map((s) => s.label.slice(0, 30)).join(" | ") || "none"}) — not attached, and not attached to any other slot`);
               this.noteUnresolved(step);

@@ -3,7 +3,9 @@ import { preferredRowLabel, rankAddressVersions, type SiteIdentity } from "../ad
 import { imageToPdfBytes, pdfNameFor, shouldConvertToPdf } from "../imageToPdf";
 import path from "path";
 import type { Page, Frame, Locator } from "playwright";
-import type { PortalRecipe, ProjectRecord, RecipeSelector, RecipeStep, StepFingerprint } from "../../../shared/src/types";
+import type { LearnTargetRecordType, PortalRecipe, ProjectRecord, RecipeSelector, RecipeStep, StepFingerprint } from "../../../shared/src/types";
+// #166: the ONE record-type label matcher (the replay's borrow reads the same one — findBorrowableRecipe).
+import { sameRecordType } from "../../../backend/src/permitProcess";
 import { BasePortalAdapter, HUMAN_REVIEW_MESSAGE, type PortalContext, type PortalStepResult } from "../adapter";
 import { openPortal } from "../browser";
 import { selectWithFallback, readClosedComboboxOptions } from "../comboboxFill";
@@ -17,8 +19,9 @@ import { applyFormatHint } from "../formatHint";
 import { scrapeReviewScreen as scrapeReviewScreenShared } from "../reviewScreenScraper";
 import { performLogin, lastRevealTrail, loginFormPresent, holdForPerson } from "./loginFlow";
 import { enterApplicationFlow, isExcludedEntryLabel, normalizeEntryLabel, chooseApplicationType, scanChoiceTiles } from "./applicationEntry";
-import { explainProgramChoice, jobClassOf, offeredLabels, programSelector, scanProgramGroups, type ProgramGroup, type ProgramJob } from "./applicationProgram";
+import { explainProgramChoice, explainRecordTypeChoice, jobClassOf, namesJobClassAndDiscipline, offeredLabels, programClassFit, programSelector, scanProgramGroups, type ProgramGroup, type ProgramJob, type RecordTypeChoice } from "./applicationProgram";
 import { planHiddenReveal, planLabelProxy } from "./revealHidden";
+import { describeTaggedToggle, GROUP_TOGGLE_CSS, recordTypeGroupNote, tagToggleByText, toggleSelectorCandidates, type GroupToggleInfo } from "./recordTypeGroup";
 import { looksLikeConsentWall, planConsentDismissal } from "./consentBanner";
 import { chooseRow, scanRowChoices, markAddressRow, type AddressRowPick } from "./rowChooser";
 import { parseStreetName, parseStreetNumber, parseStreetLine, correctTruncatedAddressFill, isSplitAddressForm } from "../addressParse";
@@ -264,7 +267,9 @@ export interface LearnResult {
   message: string;
   /** A NAMED stop (machine-readable), when the walk ended itself for a reason it can name:
    *  login_needed_no_credential, login_repeated_on_host, login_midrun_failed,
-   *  login_advance_with_empty_credentials, aca_wrong_module_cap, no_fill_progress. */
+   *  login_advance_with_empty_credentials, aca_wrong_module_cap, no_fill_progress,
+   *  record_type_closed_group (#174: the chosen record type sits in a group the page would not open;
+   *  nothing was selected and the advance was not pressed). */
   stopReason?: string;
   /** Base64 PNG screenshot taken when the review/confirm page is reached. */
   reviewScreenshotBase64?: string;
@@ -328,6 +333,12 @@ export interface LearnResult {
    *  a portal list can hold several drafts for the same customer, and auditing "the first" or
    *  "the newest" matching row picked the wrong one both times it was tried. */
   applicationUrl?: string;
+  /** #166 — THE PERSON-VERIFIED RECORD TYPE WAS NOT OFFERED on the record-type / work-item page
+   *  this walk met: what was wanted, what the page offered (≤12 labels) and what the planner ticked
+   *  there (its own choice — the backend names the gap in the run's issues). Undefined when no
+   *  verified type is on file or the page offered it (then it was ticked, event
+   *  record_type_verified_pick). */
+  recordTypeNotOffered?: { wanted: string; offered: string[]; ticked: string[] };
   /** Absolute path of this run's debug bundle (data/learn-runs/<runId>) — the folder the
    *  operator zips up for troubleshooting. Undefined when AUTOLEARN_RUN_DEBUG=0. */
   debugDir?: string;
@@ -581,6 +592,12 @@ const NOT_LISTED_CHECKBOX =
 // discipline on the request, so the planner never gets to choose it; see the guard in
 // applyFill and accelaRecordTypePass, which picks it deterministically.
 const RECORD_TYPE_LABEL = /^\s*(residential|commercial)\s*[-–—]\s*\S/i;
+// #166: a checkable whose label reads as a RECORD TYPE / WORK ITEM option on any portal (CityView's
+// work-item list, Accela's CapType radios, a permit-type picker): the discipline / permit words,
+// or the solar and generation words a PV item carries. Two or more on a page = a choice of what to
+// file; used only to tell a record-type page from a login or address page (the not-offered report),
+// never to pick anything.
+const RECORD_TYPE_OPTION_WORDS = /\bsolar\b|photovoltaic|\bpv\b|renewable|generation|interconnect|net.?meter|\bpermit(s)?\b|electrical|structural|mechanical|plumbing|\bbuilding\b|\bresidential\b|\bcommercial\b/i;
 
 // PGE/PowerClerk Yes/No POLICY questions whose answer is fixed for standard residential NEM.
 // Mirrors the knowledge-base seed. A deterministic pass applies the policy answer so the portal
@@ -822,8 +839,55 @@ export const UPLOAD_LABEL_PATTERNS: Array<{ re: RegExp; docType: string }> = [
   { re: /meter\s*(photo|picture|image|spec|reading|tag)|(photo|picture|image)\s+of\s+(the\s+)?meter/i, docType: "meter_photo" },
   { re: /label|placard/i, docType: "labels" },
   { re: /utility\s*bill|electric(ity)?\s*bill/i, docType: "utility_bill" },
-  { re: /plan\s*set|full\s*plan|construction\s*(plan|doc)|drawings?/i, docType: "plan_set" },
+  // THE INSTALLER'S BID (#140): iWorQ's "A copy of the bid is required for solar applications" slot,
+  // headed just "Bid". A sales document the plan set can never stand in for (EXACT_UPLOAD_TYPES):
+  // filled by the job's own bid when it holds one, else left empty and reported by name.
+  { re: /\bbids?\b/i, docType: "bid" },
+  // A slot named just "Plans" (#140: an iWorQ slot headed "Plans") is the plan set, as is one
+  // headed by the plans of the permit's own discipline — CityView's "Electrical Plans" (Bend),
+  // "Solar/PV Plans". The bare word or a listed qualifier only: "Stamped plans" / "Landscape
+  // plans" name something else and keep their old reading. Accela's "Plans - Construction" is
+  // deliberately NOT here: replay's unrecorded-upload sweep attaches to any unrecorded slot this
+  // pattern names, and Accela re-renders that box EMPTY after its Save commits the upload — the
+  // sweep would then file the plan set a second time (uploadHeld.dom.smoke pins this). Combined
+  // mode gives that slot the plan set on its own tier, as before.
+  { re: /plan\s*set|full\s*plan|construction\s*(plan|doc)|drawings?|^\W*plans?\W*$|\b(electrical|solar|pv|photovoltaic|building|permit|project)\s*plans?\b/i, docType: "plan_set" },
 ];
+
+/** UPLOAD TEXT THAT NAMES NO DOCUMENT (#140): a picker face ("Add", "Browse..", "Choose File"), a bare
+ *  "Document"/"Files", or an instruction made only of picker words ("Select a new document for this
+ *  requirement:"). Node-side twin of tagUploadControls' namesNoDocument — that function is serialized
+ *  into the page and cannot reach module scope, so the word list lives twice, pinned on one corpus by
+ *  uploadSlotByHeading.test (node) and reviewPageUpload.dom.smoke [D] (page). Replay uses this to let a
+ *  step recorded against a face ("upload plan_set: Add", every Accela recipe) keep its positional key
+ *  now that the live slot reads its heading. */
+const UPLOAD_GENERIC_WORDS = /\b(select|choose|browse|upload|attach|add|drag|drop|click|here|please|a|an|the|this|that|your|new|for|to|of|or|and|file|files|document|documents|requirement|requirements|set|item|items|button|now|max(imum)?|size|mb|kb|type|types|allowed|accepted|only|pdf|jpg|jpeg|png|no|chosen|selected)\b/gi;
+export function uploadTextNamesNoDocument(text: string | undefined): boolean {
+  const t = String(text || "").replace(/\([^)]*\)/g, " ");
+  return !t.replace(UPLOAD_GENERIC_WORDS, " ").replace(/[^a-z]+/gi, "").trim();
+}
+
+/** A slot whose heading names the application FORMS — agreements, forms, applications, checklists
+ *  (CityView's "Agreements, Form, Documents & Checklists", #140): the documents that may fill it,
+ *  in order. Null for any other heading, and for one that also names plans ("Plans & forms"). */
+export function formsSlotDocTypes(label: string): string[] | null {
+  const l = String(label || "");
+  if (!/\b(agreements?|forms?|applications?|checklists?|worksheets?|affidavits?)\b/i.test(l)) return null;
+  if (/plan\s*set|\bplans\b|drawings?/i.test(l)) return null;
+  return ["building_application", "electrical_application", "permit_application", "solar_checklist", "pv_worksheet", "application_transfer_sheet"];
+}
+
+/** A catch-all slot — "Other/Miscellaneous", "Other Files", "Additional Documents" (#140). It is the
+ *  fallback when nothing better is offered: on a page that offers a plans slot it takes nothing. */
+export function catchAllUploadSlot(label: string | undefined): boolean {
+  return /^\W*((upload|attach|add|select|choose)\s+)?(any\s+)?(other|misc(ellaneous)?|additional|supplemental|supporting|optional)\b/i.test(String(label || ""));
+}
+
+/** True when a slot's label names the plan set — the one slot a page offers the plans to. */
+export function uploadSlotTakesPlans(label: string | undefined): boolean {
+  if (!label) return false;
+  return UPLOAD_LABEL_PATTERNS.find(({ re }) => re.test(label))?.docType === "plan_set";
+}
 
 // When an upload control's label doesn't name a specific document (a generic "Upload
 // documents" / "Attach files" control), attach the full plan-set PDF instead — most
@@ -891,7 +955,7 @@ const UPLOAD_NO_SUBSTITUTE = /insurance|invoice|\bw-?9\b|tax\s*form|voided\s*che
 // substitute (and combined mode filed the plan set there even when the photo WAS held). A photo of
 // the customer's meter is the one document that can fill that slot; with none it stays empty and
 // is reported missing, and a recipe that recorded the plan set against it is refused at replay.
-const EXACT_UPLOAD_TYPES = new Set(["building_application", "electrical_application", "permit_application", "solar_checklist", "structural_letter", "pv_worksheet", "meter_photo"]);
+const EXACT_UPLOAD_TYPES = new Set(["building_application", "electrical_application", "permit_application", "solar_checklist", "structural_letter", "pv_worksheet", "meter_photo", "bid"]);
 
 // A SLOT THAT ASKS FOR A PHOTO (#542). No plan sheet, spec or bill is a photograph of the installed
 // gear, so a required "Photo of the main service panel" / "Picture of signage…" slot whose own
@@ -2331,6 +2395,10 @@ export interface UploadSlot {
   key: string;
   /** The human label of the upload field (e.g. "One-Line Electrical Diagram"). */
   label: string;
+  /** The document name the slot is known by (#140): its own label when that names a document,
+   *  else the heading or requirement row it sits under. Absent when the slot's text names
+   *  nothing ("Choose File", "Document") — such a slot is recorded by position only. */
+  heading?: string;
   /** "input" → a real <input type=file> (use setInputFiles); "browse" → a click-to-open
    *  trigger whose real input is created dynamically (use the filechooser event). */
   kind: "input" | "browse";
@@ -2389,9 +2457,146 @@ export function tagUploadControls(): UploadSlot[] {
   // wrong control: an unrecorded slot read as filled and its document was never attached.
   for (const stale of deepQueryAll(document, "[data-al-upl]")) stale.removeAttribute("data-al-upl");
 
+  // A picker's FACE ("Choose File", "Browse", "Upload…") — the same words pass 2 below reads as a
+  // click-to-open trigger. Text that says only this names no document, so it is not a slot label.
+  const TRIGGER = /^(browse|upload|choose(\s+file)?|attach|add\s+file|select\s+file|choose\s+files?|upload\s+file)\.{0,3}$/i;
+
+  // A SLOT NAMED BY ITS HEADING (#140). iWorQ renders each required document as
+  //   <h3>Plans</h3> <div>(File Types: .pdf):</div>
+  //   <div><label for="newfile_…" class="btn">Choose File</label> <input type=file id="newfile_…"> <textarea …></div>
+  // — the label bound to the input is the BUTTON FACE, so every slot read "Choose File", matched
+  // no document, and on the review page (attach-only) the plan set we held went nowhere while the
+  // portal said "The required uploads were not found". The document word lives in the heading
+  // ABOVE the control. Owning heading = the nearest heading-like element before the control, inside
+  // a few ancestors, with NO other upload control between them: a second slot with no heading of
+  // its own never borrows the first slot's, and Accela's repeated unlabeled rows under one section
+  // title stay unlabeled. Null when nothing qualifies — the caller keeps its old label.
+  function owningHeading(el: Element): string | null {
+    const HEADING_SEL = "h1, h2, h3, h4, h5, h6, legend, label, .control-label, .field-label, strong, b, dt";
+    const FOLLOWING = 4; // Node.DOCUMENT_POSITION_FOLLOWING
+    const others = deepQueryAll(document, 'input[type="file"], [data-al-upl]').filter((o) => o !== el && !o.contains(el) && !el.contains(o));
+    let anc: Element | null = el.parentElement;
+    for (let depth = 0; anc && depth < 4; depth++, anc = anc.parentElement) {
+      const before = Array.from(anc.querySelectorAll(HEADING_SEL))
+        .filter((h) => !h.contains(el) && (h.compareDocumentPosition(el) & FOLLOWING) !== 0);
+      for (let i = before.length - 1; i >= 0; i--) {
+        const h = before[i];
+        // A label bound to ANOTHER control is that control's label ("Signature Name:"), not a heading.
+        const forId = h.tagName.toLowerCase() === "label" ? h.getAttribute("for") : null;
+        if (forId && forId !== el.getAttribute("id")) continue;
+        // …and so is text wrapping a control of its own (<label><input> I agree</label>).
+        if (h.querySelector("input, select, textarea, button")) continue;
+        const t = (h.textContent || "").trim().replace(/\s+/g, " ");
+        if (!t || t.length > 80 || namesNoDocument(t)) continue;
+        // Another upload control between this heading and ours means the heading belongs to it.
+        if (others.some((o) => (h.compareDocumentPosition(o) & FOLLOWING) !== 0 && (o.compareDocumentPosition(el) & FOLLOWING) !== 0)) return null;
+        return t;
+      }
+    }
+    return null;
+  }
+
+  // TEXT THAT NAMES NO DOCUMENT (#140). A picker face, a bare "Document"/"Files", or an instruction
+  // made only of picker words — CityView's "Select a new document for this requirement:" — says
+  // which CONTROL this is, not what goes in it. Strip the picker/instruction words; a label with
+  // nothing left names nothing. "Plans", "Bid", "Other Files" and "Upload a photo of meter…" all
+  // keep a word, so they are names — and so does a section titled "Attachments", which the
+  // owning-heading read hands to the first slot under it. Page-side copy of the module's
+  // uploadTextNamesNoDocument (this function is serialized into the page and cannot reach module
+  // scope): change both; the unit test and smoke [D] pin them on one corpus.
+  const GENERIC_WORDS =/\b(select|choose|browse|upload|attach|add|drag|drop|click|here|please|a|an|the|this|that|your|new|for|to|of|or|and|file|files|document|documents|requirement|requirements|set|item|items|button|now|max(imum)?|size|mb|kb|type|types|allowed|accepted|only|pdf|jpg|jpeg|png|no|chosen|selected)\b/gi;
+  function namesNoDocument(text: string): boolean {
+    const t = String(text || "").replace(/\([^)]*\)/g, " ");
+    return !t.replace(GENERIC_WORDS, " ").replace(/[^a-z]+/gi, "").trim();
+  }
+
+  // THE REQUIREMENT ROW A SLOT SITS IN (#140, City of Bend's CityView). The Upload Files page
+  // lists each requirement as a table ROW — the requirement's name in its first cell and a
+  // "Pending" status cell — with the Browse control and its description box in the row BELOW,
+  // under "Select a new document for this requirement:". No heading element, no label bound to
+  // the input: the name is the first text cell of the nearest enclosing requirement row/section,
+  // and owningHeading (which reads heading-like elements only) finds nothing. Live, every slot
+  // read "Browse..", so the plan set went into the FIRST slot ("Agreements, Form, Documents &
+  // Checklists") and "Electrical Plans" stayed empty.
+  //
+  // Reads, from the control outward through a few ancestors: the first LEAF text chunk before
+  // the control inside the ancestor, else the nearest previous sibling's first leaf chunk —
+  // skipping picker/instruction words, status words ("Pending"), file-type notes, header cells,
+  // and anything too long to be a name. Stops with nothing the moment another upload control
+  // sits between the chunk and ours (that chunk is the other slot's), so a repeated unlabeled
+  // row under one section title stays unlabeled, as in the owningHeading contract.
+  // A status word in the same row ("Pending", "Required", "Not submitted") is the portal saying
+  // it tracks this slot as a requirement: `required` on the slot, so an empty one is NAMED.
+  const STATUS_WORD = /^(pending|required|optional|not\s+(yet\s+)?(submitted|received|uploaded|provided|attached)|missing|outstanding|incomplete|complete[d]?|received|accepted|rejected|submitted|awaiting(\s+\w+)?|in\s+review|n\/?a|status|none)$/i;
+  const REQUIRED_STATUS = /^(pending|required|not\s+(yet\s+)?(submitted|received|uploaded|provided|attached)|missing|outstanding|incomplete|awaiting(\s+\w+)?)$/i;
+  const NOT_A_NAME = /^(file\s*types?|accepted\s*(file\s*)?(types?|formats?)|max(imum)?\s*(file\s*)?size|\d+[.)]?|[\W_]*)$|^\(.*\)$/i;
+  function requirementRow(el: Element): { heading: string; required: boolean } | null {
+    const CONTROL = "input, select, textarea, button";
+    const UPLOADS = 'input[type="file"], [data-al-upl]';
+    const isUpload = (n: Element) => n !== el && !n.contains(el) && (n.matches(UPLOADS) || !!n.querySelector(UPLOADS));
+    const FOLLOWING = 4; // Node.DOCUMENT_POSITION_FOLLOWING
+    // The leaf text chunks of a node in document order: each text node's trimmed text, outside
+    // controls, scripts and table header cells.
+    const chunks = (node: Node, beforeEl: boolean): string[] => {
+      const out: string[] = [];
+      const walker = document.createTreeWalker(node, 4 /* SHOW_TEXT */);
+      for (let t = walker.nextNode(); t; t = walker.nextNode()) {
+        const p = (t as Text).parentElement;
+        if (!p || p.closest(`${CONTROL}, script, style, th, thead`)) continue;
+        if (beforeEl && (t.compareDocumentPosition(el) & FOLLOWING) === 0) break;
+        const s = (t.textContent || "").replace(/\s+/g, " ").trim();
+        if (s) out.push(s);
+      }
+      return out;
+    };
+    const nameIn = (list: string[]): { heading: string; required: boolean } | null => {
+      let heading = "";
+      let required = false;
+      for (const s of list) {
+        if (STATUS_WORD.test(s)) { if (REQUIRED_STATUS.test(s)) required = true; continue; }
+        if (heading) continue;
+        if (s.length > 80 || NOT_A_NAME.test(s) || namesNoDocument(s)) continue;
+        heading = s.replace(/[\s*:]+$/, "").trim();
+      }
+      return heading ? { heading, required } : null;
+    };
+    let anc: Element | null = el.parentElement;
+    for (let depth = 0; anc && depth < 6 && !/^(form|body|html)$/i.test(anc.tagName); depth++, anc = anc.parentElement) {
+      // Another upload control before ours inside this ancestor: its text is spoken for.
+      if (Array.from(anc.querySelectorAll(UPLOADS)).some((o) => isUpload(o) && (o.compareDocumentPosition(el) & FOLLOWING) !== 0)) return null;
+      const own = nameIn(chunks(anc, true));
+      if (own) return own;
+      // The rows above ours, nearest first, until one carries a control of its own.
+      for (let sib = anc.previousElementSibling; sib; sib = sib.previousElementSibling) {
+        if (isUpload(sib)) return null;
+        const got = nameIn(chunks(sib, false));
+        if (got) {
+          // A status cell in the row that names the slot, or in our own row, marks it tracked.
+          const ownStatus = chunks(anc, false).some((s) => REQUIRED_STATUS.test(s));
+          return { heading: got.heading, required: got.required || ownStatus };
+        }
+      }
+    }
+    return null;
+  }
+
   // Derive the field label for an upload control: nearest <label>, else the closest
   // form-group/row container's leading label/heading/text, else the trigger's own text.
-  function deriveLabel(el: Element): string {
+  // A result that is only the picker's face (or instruction words naming no document) is
+  // replaced by the slot's owning heading, else by its requirement row's name, if any.
+  // `heading` is the document name the slot is known by — undefined when its text names none —
+  // and `required` adds the row's own status word.
+  function deriveLabel(el: Element): { label: string; heading?: string; required: boolean } {
+    const read = deriveOwnLabel(el);
+    if (!namesNoDocument(read)) return { label: read, heading: read.trim(), required: false };
+    const owned = owningHeading(el);
+    if (owned !== null) return { label: owned, heading: owned, required: false };
+    const row = requirementRow(el);
+    if (row) return { label: row.heading, heading: row.heading, required: row.required };
+    return { label: read, required: false };
+  }
+
+  function deriveOwnLabel(el: Element): string {
     const id = el.getAttribute("id");
     if (id) {
       // Element's own root, so a label inside the same shadow root is found too.
@@ -2429,12 +2634,13 @@ export function tagUploadControls(): UploadSlot[] {
   for (const el of fileInputs) {
     const key = `f${n++}`;
     el.setAttribute("data-al-upl", key);
-    slots.push({ key, label: deriveLabel(el), kind: "input", required: isRequired(el), accept: el.getAttribute("accept") || "" });
+    const named = deriveLabel(el);
+    slots.push({ key, label: named.label, ...(named.heading ? { heading: named.heading } : {}), kind: "input", required: isRequired(el) || named.required, accept: el.getAttribute("accept") || "" });
   }
 
   // 2) Browse/Upload/Choose-File triggers whose real input is created dynamically — these
   //    have NO file input anywhere in their container, so the scrape above missed them.
-  const TRIGGER = /^(browse|upload|choose(\s+file)?|attach|add\s+file|select\s+file|choose\s+files?|upload\s+file)\.{0,3}$/i;
+  //    (TRIGGER is the picker-face test declared above, shared with deriveLabel.)
   const clickables = deepQueryAll(document, 'button, a, [role="button"], input[type="button"], .btn, span[class*="upload"], span[class*="browse"]');
   for (const el of clickables) {
     const txt = ((el as HTMLInputElement).value || el.textContent || "").trim();
@@ -2459,7 +2665,8 @@ export function tagUploadControls(): UploadSlot[] {
     // A browse TRIGGER has no accept of its own; borrow one from a file input in the same
     // container if the portal put it there, else leave it open.
     const nearInput = container ? container.querySelector('input[type="file"]') : null;
-    slots.push({ key, label: deriveLabel(el), kind: "browse", required: isRequired(el), accept: nearInput ? (nearInput.getAttribute("accept") || "") : "" });
+    const named = deriveLabel(el);
+    slots.push({ key, label: named.label, ...(named.heading ? { heading: named.heading } : {}), kind: "browse", required: isRequired(el) || named.required, accept: nearInput ? (nearInput.getAttribute("accept") || "") : "" });
   }
 
   return slots;
@@ -2666,6 +2873,30 @@ export class AutoLearnAdapter extends BasePortalAdapter {
   /** #693: the job's class and size, so the program chooser prefers THIS job's program
    *  over the first one in DOM order (a commercial program listed above the residential one). */
   private programJob: ProgramJob = {};
+  /** #166: the record type / work item on file for this permit (see the constructor option). */
+  private targetRecordType: LearnTargetRecordType | null = null;
+  /** #166: THE VERIFIED RECORD TYPE IS OFFERED ON THE PAGE BEING PLANNED — the option that matched
+   *  it, as the fill guard reads it: a planner pick of ANOTHER checkable in the same list (same
+   *  kind, radio group and section) is refused. Re-read on every iteration the page is planned, so
+   *  a re-plan of the same page keeps the guard; null when the page does not offer it. */
+  private verifiedRecordTypeOnPage: { label: string; fieldType: ExtractedField["fieldType"]; group?: string; section?: string } | null = null;
+  /** #166: the verified record type was ticked (and recorded) once this run. */
+  private verifiedRecordTypeTicked = false;
+  /** #166: the first record-type page that did NOT offer the verified type: the gap, with what the
+   *  planner ticked there (filled in after its fills on that page). Reported on every return. */
+  private recordTypeNotOffered: { wanted: string; offered: string[]; ticked: string[]; page: number } | null = null;
+  /** #174: THE CHOSEN RECORD TYPE IS IN A GROUP THIS PAGE WOULD NOT OPEN — set by accelaRecordTypePass
+   *  when the radio it chose was hidden and neither its group header nor a visible category checkbox
+   *  revealed it. The walk then stops, named (stopReason record_type_closed_group): an advance pressed
+   *  with nothing selected only re-asks for a record type, and did so four times on Meridian. */
+  private recordTypeClosedGroup: { type: string; group: string } | null = null;
+  /** #176: NO OFFERED RECORD TYPE CAN BE TAKEN FOR THIS JOB'S CLASS — set by accelaRecordTypePass when,
+   *  with no person-verified type, the labels a preference tier matched all name the OTHER class
+   *  ("Commercial Electrical Solar Array" on a residential job) or do not settle which is ours, and
+   *  no further group could be opened. The walk then stops, named (stopReason record_type_unsettled):
+   *  DOM order is never the tie-break, and handing the page to the planner meant Continue pressed with
+   *  nothing selected. */
+  private recordTypeRefused: { reason: Exclude<RecordTypeChoice["reason"], "matched" | "unmatched">; jobClass: string; candidates: string[] } | null = null;
   /** Set when the review page's own save was still pending when the learn handed over (B3). */
   private reviewUnsavedWarning = "";
   /** THE PROJECT'S OWN SECRETS, READ BY NAME AT FILL TIME (hard rule 2). Live on PGE (2026-09-28):
@@ -2863,6 +3094,11 @@ export class AutoLearnAdapter extends BasePortalAdapter {
       bindableFields?: string[];
       /** City/ZIP/owner of the project, so a row for someone else's property is refused. */
       siteIdentity?: SiteIdentity;
+      /** #166: the record type / work item on file for this permit, with its standing. VERIFIED → the
+       *  walk ticks the offered option whose label matches (sameRecordType) before the planner is
+       *  asked, and refuses a planner pick of another option on that page; seeded → nothing here (the
+       *  backend gives the planner the hint). null / omitted: the planner chooses, as before. */
+      targetRecordType?: LearnTargetRecordType | null;
       /** Operator delegation: click the recorded final submit instead of leaving it. */
       allowFinalSubmit?: boolean;
       /** Whether the PROJECT says a battery exists. false = guard against declaring one. */
@@ -2949,6 +3185,7 @@ export class AutoLearnAdapter extends BasePortalAdapter {
     this.policyProfile = options.policyProfile ?? "residential_nem";
     this.bindableFields = new Set(options.bindableFields ?? []);
     this.siteIdentity = options.siteIdentity;
+    this.targetRecordType = options.targetRecordType ?? null;
     this.continueDraft = options.continueDraft;
     this.signatureRequestApproval = options.signatureRequestApproval ?? null;
     this.infoPagePasses = Object.freeze((options.infoPagePasses ?? []).map((e) => Object.freeze(JSON.parse(JSON.stringify(e)) as VerifiedInfoPage)));
@@ -3723,7 +3960,10 @@ export class AutoLearnAdapter extends BasePortalAdapter {
     return size < 0 || size <= cap;
   }
 
-  private resolveUpload(field: ExtractedField, required = true, accept = "", exactOnly = false): { docType: string; file: string } | null {
+  /** `pageOffersPlans` (#140): another slot on this page takes the plan set, so a slot headed by
+   *  the application forms ("Agreements, Form, Documents & Checklists") takes a form or nothing —
+   *  never the plan set, in either mode. Alone on a page, such a slot keeps its old fallbacks. */
+  private resolveUpload(field: ExtractedField, required = true, accept = "", exactOnly = false, pageOffersPlans = false): { docType: string; file: string } | null {
     const label = field.label || "";
     const cap = this.uploadMaxBytes();
     // A candidate must fit the size cap AND be a type this control accepts. Folding the type
@@ -3739,6 +3979,18 @@ export class AutoLearnAdapter extends BasePortalAdapter {
     // by a plan-set fallback, in either upload mode. Record only the exact type
     // so learning cannot teach replay to repeat a substitute indefinitely.
     const namedType = UPLOAD_LABEL_PATTERNS.find(({ re }) => re.test(label))?.docType;
+    // A FORMS SLOT TAKES THE JOB'S FORMS (#140): any filled application / checklist the job holds,
+    // whichever the heading's first word happened to be. With a plans slot offered beside it (or on
+    // the review page) and no form held, it stays empty and is named — the plan set is never
+    // filed as "Agreements, Form, Documents & Checklists" while "Electrical Plans" sits empty.
+    const forms = formsSlotDocTypes(label);
+    if (forms) {
+      for (const docType of forms) if (fits(docType)) return { docType, file: this.docsByType[docType] };
+      if (exactOnly || pageOffersPlans) {
+        this.debug?.event({ type: "upload_no_substitute", label: label.slice(0, 60), reason: "forms_slot" });
+        return null;
+      }
+    }
     // THE REVIEW PAGE TAKES ONLY THE DOCUMENT ITS SLOT NAMES (#383): no substitute, no fallback
     // tier, no combined-mode plan set — a slot we cannot match exactly is left for the person.
     if (exactOnly) return namedType && fits(namedType) ? { docType: namedType, file: this.docsByType[namedType] } : null;
@@ -3840,8 +4092,8 @@ export class AutoLearnAdapter extends BasePortalAdapter {
   }
 
   // Resolve a docType for an upload control by its label only (no ExtractedField wrapper).
-  private resolveUploadByLabel(label: string, required = true, accept = "", exactOnly = false): { docType: string; file: string } | null {
-    return this.resolveUpload({ selector: {}, label, fieldType: "file" }, required, accept, exactOnly);
+  private resolveUploadByLabel(label: string, required = true, accept = "", exactOnly = false, pageOffersPlans = false): { docType: string; file: string } | null {
+    return this.resolveUpload({ selector: {}, label, fieldType: "file" }, required, accept, exactOnly, pageOffersPlans);
   }
 
   // Capture a full-page PNG of the current page as base64 for VISION-ASSISTED PLANNING, so the
@@ -4074,16 +4326,33 @@ export class AutoLearnAdapter extends BasePortalAdapter {
     // still receive the same combined document.
     let pathKey = "";
     try { pathKey = new URL(String(this.page.url?.() ?? "")).pathname.toLowerCase(); } catch { pathKey = ""; }
+    // THE PAGE'S SLOTS DECIDE TOGETHER (#140). When one headed slot takes the plans ("Electrical
+    // Plans"), a forms slot takes a form or nothing and a catch-all ("Other/Miscellaneous") takes
+    // nothing: the plan set goes where the portal asked for plans, once. Alone, each keeps its
+    // old fallbacks. Headed slots are reported as the page listed them.
+    const plansOffered = slots.some((s) => uploadSlotTakesPlans(s.heading ?? s.label));
+    if (slots.some((s) => s.heading)) {
+      this.debug?.event({ type: "upload_slots_headed", headings: slots.filter((s) => s.heading).map((s) => `${s.heading}${s.required ? " (required)" : ""}`).join(" | ").slice(0, 300), plansOffered });
+    }
+    // A headed requirement left with nothing in it is NAMED, by its heading, whatever the reason.
+    const leftEmpty = (slot: UploadSlot, why: string): void => {
+      if (slot.heading) this.debug?.event({ type: "upload_slot_left_empty", heading: slot.heading.slice(0, 80), required: !!slot.required, why });
+      if (slot.required) missingRequired.push(slot.label || "Required document");
+    };
     for (const slot of slots) {
       if (opts.reviewPage && slot.kind !== "input") {
         this.debug?.event({ type: "upload_review_widget_left", label: (slot.label || "").slice(0, 80) });
         if (slot.required) missingRequired.push(`${slot.label || "Required document"} (on the review page — attach it by hand; automation clicks no upload widget there)`);
         continue;
       }
-      const resolved = this.resolveUploadByLabel(slot.label, !!slot.required, slot.accept || "", !!opts.reviewPage);
+      if (plansOffered && catchAllUploadSlot(slot.heading)) {
+        leftEmpty(slot, "catch-all slot; the plan set has its own slot on this page");
+        continue;
+      }
+      const resolved = this.resolveUploadByLabel(slot.label, !!slot.required, slot.accept || "", !!opts.reviewPage, plansOffered);
       if (!resolved) {
         // No document for this control — never fake it. Report it if the portal requires it.
-        if (slot.required) missingRequired.push(slot.label || "Required document");
+        leftEmpty(slot, "no document of this job fits it");
         continue;
       }
       // DUPLICATE-ROW GUARD. A LABELED slot names the document it wants, so combined mode
@@ -4183,6 +4452,8 @@ export class AutoLearnAdapter extends BasePortalAdapter {
           phase: "fill",
           selector,
           docType: resolved.docType,
+          // The slot's heading (#140): replay finds the slot by it, the positional key is the fallback.
+          ...(slot.heading ? { slot: slot.heading } : {}),
           viaFileChooser: slot.kind === "browse",
           note: `upload ${resolved.docType}: ${slot.label || "document"}`,
         });
@@ -4190,6 +4461,7 @@ export class AutoLearnAdapter extends BasePortalAdapter {
           filled.push(slot.label);
           alreadyFilledLabels.push(slot.label);
         }
+        await this.fillUploadDescription(slot.key, resolved.docType, steps, alreadyFilledLabels).catch(() => null);
       } else if (rejected) {
         this.debug?.event({ type: "upload_rejected", label: (slot.label || "").slice(0, 80), docType: resolved.docType, message: rejected.slice(0, 160) });
         // Only a REQUIRED slot's rejection blocks; an optional slot's is informational.
@@ -4200,6 +4472,98 @@ export class AutoLearnAdapter extends BasePortalAdapter {
       }
     }
     return { filled, missingRequired, attached };
+  }
+
+  /** The words a slot's description box gets: the document's KIND, never its file name. A recorded
+   *  fill is a literal in a recipe every tenant replays, and stored file names carry the homeowner's
+   *  name — the kind is true of every job that attaches the same slot. */
+  static uploadDescriptionFor(docType: string): string {
+    const KNOWN: Record<string, string> = {
+      plan_set: "Plan set", combined_plan_set: "Plan set", full_plan_set: "Plan set", sld: "Single-line diagram",
+      site_plan: "Site plan", structural: "Structural sheets", structural_letter: "Structural engineering letter",
+      module_spec: "Module spec sheet", inverter_spec: "Inverter spec sheet", battery_spec: "Battery spec sheet",
+      meter_photo: "Meter photo", utility_bill: "Utility bill", labels: "Labels and placards", bid: "Bid",
+    };
+    const t = String(docType || "").trim();
+    if (KNOWN[t]) return KNOWN[t];
+    const words = t.replace(/_/g, " ").trim();
+    return words ? words.charAt(0).toUpperCase() + words.slice(1) : "Document";
+  }
+
+  // A SLOT'S DESCRIPTION BOX (#140). iWorQ pairs each required file input with a textarea
+  // "Description of the Plans" in the same widget. After a document attaches, the box beside it —
+  // after the control, before the next upload control, within a few ancestors, labelled as a
+  // description — gets the document's kind, and the fill is recorded so replay types it too. A box
+  // that already holds text is left alone. Typing only: nothing is clicked, so the attach-only pass
+  // on a review page stays attach-only. Best-effort: a box that will not fill changes nothing else.
+  private async fillUploadDescription(slotKey: string, docType: string, steps: RecipeStep[], alreadyFilledLabels: string[]): Promise<void> {
+    if (!this.page || typeof this.page.evaluate !== "function") return;
+    // The callback below names a helper; keepNames wraps it in __name, which a raw page lacks.
+    await this.page.evaluate("globalThis.__name = globalThis.__name || function (f) { return f; };").catch(() => null);
+    const found = await this.page.evaluate((key: string) => {
+      for (const stale of Array.from(document.querySelectorAll("[data-al-upl-desc]"))) stale.removeAttribute("data-al-upl-desc");
+      const el = document.querySelector(`[data-al-upl="${key}"]`);
+      if (!el) return null;
+      const FOLLOWING = 4; // Node.DOCUMENT_POSITION_FOLLOWING
+      // The text just before the box, when nothing is bound to it (#140, CityView: a bare
+      // "Provide a short description of this set of documents:" line above the textarea).
+      const precedingText = (b: Element): string => {
+        let node: Element | null = b;
+        for (let depth = 0; node && depth < 3; depth++, node = node.parentElement) {
+          for (let prev = node.previousSibling; prev; prev = prev.previousSibling) {
+            if (prev.nodeType === 1 && (prev as Element).querySelector("input, select, textarea, button")) return "";
+            const t = (prev.textContent || "").replace(/\s+/g, " ").trim();
+            if (t) return t.slice(0, 160);
+          }
+        }
+        return "";
+      };
+      const nameOf = (b: Element): string => {
+        const id = b.getAttribute("id");
+        const forLbl = id ? document.querySelector(`label[for="${(window.CSS && CSS.escape) ? CSS.escape(id) : id}"]`) : null;
+        const bound = [b.getAttribute("aria-label"), b.getAttribute("placeholder"), b.getAttribute("title"), forLbl?.textContent].filter(Boolean).join(" ").replace(/\s+/g, " ").trim();
+        return bound || precedingText(b);
+      };
+      const uploads = Array.from(document.querySelectorAll('input[type="file"], [data-al-upl]')).filter((o) => o !== el);
+      let anc: Element | null = el.parentElement;
+      for (let depth = 0; anc && depth < 3; depth++, anc = anc.parentElement) {
+        for (const b of Array.from(anc.querySelectorAll('textarea, input[type="text"], input:not([type])'))) {
+          if ((el.compareDocumentPosition(b) & FOLLOWING) === 0) continue;
+          if (uploads.some((o) => (el.compareDocumentPosition(o) & FOLLOWING) !== 0 && (o.compareDocumentPosition(b) & FOLLOWING) !== 0)) continue;
+          const name = nameOf(b);
+          if (!/\bdescri(ption|be)\b/i.test(name)) continue;
+          if (((b as HTMLTextAreaElement).value || "").trim()) return null;
+          b.setAttribute("data-al-upl-desc", "1");
+          return {
+            id: b.getAttribute("id") || "", tag: b.tagName.toLowerCase(), name: name.slice(0, 120),
+            placeholder: b.getAttribute("placeholder") || "", ariaLabel: b.getAttribute("aria-label") || "",
+          };
+        }
+      }
+      return null;
+    }, slotKey).catch(() => null) as { id: string; tag: string; name: string; placeholder: string; ariaLabel: string } | null;
+    // Only the shape this callback returns counts as a box (a stub or a navigated page answers otherwise).
+    if (!found || typeof found !== "object" || Array.isArray(found) || typeof found.tag !== "string" || typeof found.name !== "string") return;
+    const value = AutoLearnAdapter.uploadDescriptionFor(docType);
+    const ok = await this.page.locator("[data-al-upl-desc]").first().fill(value, { timeout: 4000 }).then(() => true).catch(() => false);
+    this.debug?.event({ type: "upload_description", ok, docType, label: found.name.slice(0, 80) });
+    if (!ok) return;
+    // Recorded by the box's own stable attributes (the data-al-upl-desc mark is this pass's only).
+    const q = (v: string) => v.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+    const css = found.id ? `${found.tag}[id="${q(found.id)}"]`
+      : found.placeholder ? `${found.tag}[placeholder="${q(found.placeholder)}"]`
+      : found.ariaLabel ? `${found.tag}[aria-label="${q(found.ariaLabel)}"]`
+      : "";
+    if (css) {
+      steps.push({
+        action: "fill",
+        phase: "upload",
+        selector: { css, ...(found.placeholder ? { fallbacks: [{ placeholder: found.placeholder }] } : {}) },
+        value,
+        note: `upload description: ${(found.ariaLabel || found.placeholder || found.name).slice(0, 80)}`,
+      });
+    }
+    alreadyFilledLabels.push(found.ariaLabel || found.placeholder || found.name);
   }
 
   // Snapshot the VISIBLE error-banner texts currently on the page. Two uses per upload:
@@ -4748,6 +5112,8 @@ export class AutoLearnAdapter extends BasePortalAdapter {
         // Program thresholds are printed against the size the utility rates the system at;
         // AC where the plan gives it, else DC.
         sizeKw: project.systemSizeAcKw ?? project.systemSizeDcKw ?? null,
+        // #166: only a PERSON-VERIFIED record type is the chooser's target (a seeded one is a hint).
+        recordType: this.verifiedRecordType(),
       };
       // #575: the job's own address, which a typeahead's address suggestion must be unmistakably.
       this.typeaheadSite = {
@@ -4791,6 +5157,12 @@ export class AutoLearnAdapter extends BasePortalAdapter {
       result = { ...result, pageExitReads: { read: [...this.pageExitReads.read], unread: [...this.pageExitReads.unread] } };
       if (this.equipmentStrays.length) {
         result = { ...result, message: `${result.message} EQUIPMENT FILL REACHED ANOTHER CONTROL — check before submitting: ${this.equipmentStrays.slice(0, 6).map((l) => this.scrubSecrets(l)).join("; ")}.` };
+      }
+      // #166: the verified record type the record-type page did not offer — on every return, so the
+      // backend can name the gap for a person however the walk ended.
+      if (this.recordTypeNotOffered) {
+        const { wanted, offered, ticked } = this.recordTypeNotOffered;
+        result = { ...result, recordTypeNotOffered: { wanted, offered: [...offered], ticked: [...ticked] } };
       }
       // #575: a search box that picked nothing is said, whichever way the walk ended (a stop on its
       // question already leads with it).
@@ -6196,35 +6568,74 @@ export class AutoLearnAdapter extends BasePortalAdapter {
    *  radios appear (record-type pass takes over) or the next call tries the next category. */
   private async accelaExpandRecordTypeCategory(steps: RecipeStep[]): Promise<boolean> {
     const page = this.page;
-    if (!page) return false;
+    if (!page || typeof page.evaluate !== "function") return false;
     const prefs: RegExp[] = [/solar|photovoltaic|\bpv\b/i, /^residential$/i, /^trades$/i, /^building$/i];
     let labels: string[] = [];
     try {
-      labels = await page.evaluate(() => {
-        const vis = (el: Element) => { const r = (el as HTMLElement).getBoundingClientRect(); return r.width > 0 && r.height > 0; };
-        return (Array.from(document.querySelectorAll("a")) as HTMLElement[])
-          .filter(vis)
-          .map((el) => (el.textContent || "").replace(/\s+/g, " ").trim())
-          .filter((t) => t && t.length < 40);
-      });
+      // Any clickable, not only <a> (#174): a header may be a <button>, a bare [onclick] div or an
+      // [aria-expanded] span. Its own words only — a container with [onclick] that wraps the whole
+      // list would otherwise read as a very long "label", and the length cap drops it.
+      labels = await page.evaluate((css: string) => {
+        const out: string[] = [];
+        for (const el of Array.from(document.querySelectorAll(css)) as HTMLElement[]) {
+          const r = el.getBoundingClientRect();
+          if (!(r.width > 0 && r.height > 0)) continue;
+          const t = (el.innerText || el.textContent || "").replace(/\s+/g, " ").trim();
+          if (t && t.length < 40 && !out.includes(t)) out.push(t);
+        }
+        return out;
+      }, GROUP_TOGGLE_CSS);
     } catch { return false; }
+    // #176: a group whose header names only the OTHER class is never opened for this job ("Commercial
+    // Solar" on a residential job would otherwise satisfy the solar preference) — programClassFit,
+    // the one class reader (#693). "Non Residential" was the hand-written case of the same rule.
+    const untried = (l: string): boolean => !/^non[\s-]?residential$/i.test(l)
+      && programClassFit(l, this.programJob) !== "contradicts"
+      && !this.acaTypeCategoriesTried.has(l);
+    const ordered: string[] = [];
+    // #174 — THE GROUP NAMED BY THE VERIFIED RECORD TYPE'S OWN LEADING WORDS COMES FIRST. "Residential
+    // Electrical" for "Residential Electrical Solar Array": a PERSON named the type (#166), and the
+    // group that is a prefix of it is where it lives — before any word preference, which knows
+    // nothing about this tenant's grouping. The longest prefix first (a page may offer both
+    // "Residential" and "Residential Electrical"). Only a verified type steers this: a seeded one is
+    // the planner's hint and never reaches a deterministic pass (hard rule 3, #166).
+    const verified = this.verifiedRecordType().toLowerCase();
+    if (verified) {
+      labels
+        .filter((l) => { const g = l.toLowerCase(); return g.length >= 4 && verified.startsWith(g) && verified.length > g.length && untried(l); })
+        .sort((a, b) => b.length - a.length)
+        .forEach((l) => ordered.push(l));
+    }
+    // #176 — THEN THE GROUP NAMED BY THIS JOB'S CLASS AND DISCIPLINE, derived from the job alone (no KB
+    // needed): "Residential Electrical" for a residential electrical job. Before any bare word
+    // preference — `^residential$` opened Meridian's Residential BUILDING group for an electrical job.
+    // Same discipline words as accelaRecordTypePass's tiers (recordTypeDisciplineWords).
+    const discipline = this.recordTypeDisciplineWords();
+    labels
+      .filter((l) => namesJobClassAndDiscipline(l, this.programJob, discipline) && untried(l) && !ordered.includes(l))
+      .forEach((l) => ordered.push(l));
     for (const pref of prefs) {
-      const label = labels.find((l) => pref.test(l) && !/^non[\s-]?residential$/i.test(l) && !this.acaTypeCategoriesTried.has(l));
-      if (!label) continue;
+      const label = labels.find((l) => pref.test(l) && untried(l) && !ordered.includes(l));
+      if (label) ordered.push(label);
+    }
+    for (const label of ordered) {
       this.acaTypeCategoriesTried.add(label);
-      // Exact-text link; ACA renders these as <a> inside the category tree. A category that
-      // refuses the click is not fatal — the next call tries the next preference.
-      const loc = page.getByRole("link", { name: label, exact: true }).first();
-      const ok = await loc.click({ timeout: 8000 }).then(() => true).catch(() => false);
-      if (!ok) continue;
+      // Clicked by its words, tagged in-page: a role locator on the header's visible text misses
+      // when the header carries an icon with alt text (Meridian's <img alt="Expand">). A category
+      // that refuses the click is not fatal — the next call tries the next preference.
+      const hit = await this.clickGroupToggleByText(label);
+      if (!hit.clicked || !hit.selector) continue;
       await page.waitForLoadState?.("networkidle", { timeout: 12000 }).catch(() => null);
       await page.waitForTimeout?.(1200).catch(() => null);
+      // Recorded under the record-type group note (#174): the replay resolves it by label and never
+      // heals it onto a neighbouring group by position (recipeAdapter.isRecordTypeStep).
       steps.push({
         action: "click",
         phase: "fill",
-        selector: { role: "link", name: label, exact: true },
-        note: `accela: expand record-type category "${label}"`,
+        selector: hit.selector,
+        note: recordTypeGroupNote(label),
       });
+      this.debug?.event({ type: "record_type_group_opened", group: label.slice(0, 40), forType: verified ? this.verifiedRecordType().slice(0, 40) : "", via: "header" });
       return true;
     }
     return false;
@@ -6310,6 +6721,12 @@ export class AutoLearnAdapter extends BasePortalAdapter {
     if (!ok) return false;
     this.programChosen = true;
     await this.waitForDynamicFieldsSettle().catch(() => null);
+    // #166: the person-verified record type won the choice — said in the same words as the
+    // checkable pass, so one event names every deterministic verified pick.
+    if (choice.reason === "target") {
+      this.verifiedRecordTypeTicked = true;
+      this.debug?.event({ type: "record_type_verified_pick", label: picked.label.slice(0, 70), offeredCount: offeredLabels(list).length });
+    }
     this.debug?.event({
       type: "application_program_chosen",
       label: picked.label.slice(0, 60),
@@ -6327,23 +6744,232 @@ export class AutoLearnAdapter extends BasePortalAdapter {
     return true;
   }
 
-  private async accelaRecordTypePass(project: ProjectRecord, fields: ExtractedField[], steps: RecipeStep[]): Promise<boolean> {
+  /** #166: the record type a PERSON verified for this permit, or "" (a seeded one is never this). */
+  private verifiedRecordType(): string {
+    const t = this.targetRecordType;
+    return t && t.verified ? String(t.value ?? "").trim() : "";
+  }
+
+  /** #166: the recorded step + event for the verified record type just ticked (by label). */
+  private noteVerifiedRecordTypeTicked(field: ExtractedField, offeredCount: number, steps: RecipeStep[]): void {
+    const label = String(field.label || "").trim();
+    steps.push({ action: "check", phase: "fill", selector: field.selector, note: `record type (verified): ${label.slice(0, 60)}` });
+    this.verifiedRecordTypeTicked = true;
+    this.debug?.event({ type: "record_type_verified_pick", label: label.slice(0, 70), offeredCount });
+  }
+
+  /** Does this checkable belong to the SAME LIST as the verified option on the page: the same kind of
+   *  control, the same radio group and the same section. (Both sections unread reads as the same
+   *  list — on a page that offers the verified type, its checkables are the work-item list.) */
+  private sameRecordTypeList(field: ExtractedField, on: NonNullable<AutoLearnAdapter["verifiedRecordTypeOnPage"]>): boolean {
+    return field.fieldType === on.fieldType
+      && String(field.group ?? "") === String(on.group ?? "")
+      && String(field.section ?? "") === String(on.section ?? "");
+  }
+
+  /**
+   * #166 — THE PERSON-VERIFIED RECORD TYPE IS THE PICK, BEFORE THE PLANNER IS ASKED.
+   *
+   * Watched City of Bend learn (2026-11-12): CityView's "Work Items" page offered both "Prescriptive
+   * photovoltaic systems" (the job's person-verified process row names exactly this) and "Renewable
+   * energy up to 25KVA". The planner ticked the Renewable one, and the run went on to file the wrong
+   * work item. The discipline guard (RECORD_TYPE_LABEL) could not help: both are electrical, both
+   * solar. The verified name had simply never reached the learner.
+   *
+   * On every page, before the planner: an offered checkable whose label sameRecordType()s the
+   * verified name is ticked ONCE this run (recorded by label, note "record type (verified): …"),
+   * put in alreadyFilledLabels so the planner sees it as settled, and remembered for the fill guard
+   * (applyFillInner) so a planner pick of ANOTHER option in that list is refused. Generic by
+   * construction: the label comes from the knowledge base, the matcher is sameRecordType, no
+   * portal is named.
+   *
+   * A record-type page that does NOT offer the verified name (two or more work-item-like
+   * checkables, none matching) is reported once: event record_type_verified_not_offered, the
+   * planner is told the name for this page (it chooses the nearest), and the run's result carries
+   * the gap for a person (LearnResult.recordTypeNotOffered — the backend names it in the issues).
+   *
+   * A seeded (unverified) record type never reaches this pass: hard rule 3 — only a person's
+   * word is authority; the lookup's reading is the planner's hint (backend jurisdictionContext).
+   *
+   * Returns the planner's hint for this page, or "" when nothing is to be said.
+   */
+  private async verifiedRecordTypePass(fields: ExtractedField[], steps: RecipeStep[], alreadyFilledLabels: string[], pageCount: number): Promise<string> {
+    this.verifiedRecordTypeOnPage = null;
+    const wanted = this.verifiedRecordType();
+    if (!wanted) return "";
+    const checkables = fields.filter((f) => f.fieldType === "checkbox" || f.fieldType === "radio");
+    const hit = checkables.find((f) => sameRecordType(f.label || "", wanted));
+    if (hit) {
+      const on = { label: String(hit.label || "").trim(), fieldType: hit.fieldType, group: hit.group, section: hit.section };
+      const listCount = checkables.filter((f) => this.sameRecordTypeList(f, on)).length;
+      if (!this.verifiedRecordTypeTicked) {
+        const loc = await this.locator(hit.selector).catch(() => null);
+        const ok = loc
+          ? await loc.check({ timeout: 10000 }).then(() => true)
+            .catch(async () => loc.click({ timeout: 8000 }).then(() => true).catch(() => false))
+          : false;
+        if (!ok) {
+          // Not ticked, not recorded: the planner keeps the page, and the guard below still refuses
+          // another option — a person ticks this one.
+          this.debug?.event({ type: "record_type_verified_tick_failed", label: on.label.slice(0, 70), page: pageCount });
+        } else {
+          this.noteVerifiedRecordTypeTicked(hit, listCount, steps);
+          await this.waitForDynamicFieldsSettle().catch(() => null);
+        }
+      }
+      this.verifiedRecordTypeOnPage = on;
+      if (this.verifiedRecordTypeTicked && hit.label && !alreadyFilledLabels.includes(hit.label)) alreadyFilledLabels.push(hit.label);
+      return "";
+    }
+    // Not offered. Only a page that offers a CHOICE of work items / record types is a gap worth a
+    // person's attention — never a login or address page with one stray checkbox.
+    const typeLike = checkables.filter((f) => RECORD_TYPE_OPTION_WORDS.test(f.label || ""));
+    if (typeLike.length < 2 || this.recordTypeNotOffered) return "";
+    const offered = Array.from(new Set(typeLike.map((f) => String(f.label || "").trim()).filter(Boolean))).slice(0, 12);
+    this.recordTypeNotOffered = { wanted, offered, ticked: [], page: pageCount };
+    this.debug?.event({ type: "record_type_verified_not_offered", wanted: wanted.slice(0, 70), offered, page: pageCount });
+    return `The record type / work item a person verified for this permit is "${wanted}", and this page does not offer that exact name. Tick the ONE offered item that is that permit (the closest reading of it) and say which in notes.`;
+  }
+
+  /** #174: the selector to RECORD for a group toggle — the first candidate (visible text, accessible
+   *  name, id, text) that resolves to exactly one element on the live page is the primary; the rest
+   *  are its fallbacks. Checked on the page because Meridian's header <a><img alt="Expand"><span>
+   *  Residential Electrical</span></a> is "Expand Residential Electrical" to a role locator: a
+   *  selector written from the visible words alone would resolve to nothing at replay. */
+  private async recordedToggleSelector(info: GroupToggleInfo): Promise<RecipeSelector | null> {
+    const candidates = toggleSelectorCandidates(info);
+    if (!candidates.length || !this.page) return null;
+    let primary: RecipeSelector | null = null;
+    for (const cand of candidates) {
+      try {
+        const n = await this._buildLocator(this.page, cand, { raw: true }).count();
+        if (n === 1) { primary = cand; break; }
+      } catch { /* a malformed candidate — try the next */ }
+    }
+    if (!primary) primary = candidates[0];
+    const fallbacks = candidates.filter((c) => c !== primary);
+    return fallbacks.length ? { ...primary, fallbacks } : primary;
+  }
+
+  /**
+   * #174 — OPEN THE GROUP THAT HOLDS A HIDDEN RECORD-TYPE RADIO, BY ITS OWN HEADER.
+   *
+   * The radio is tagged and planHiddenReveal (revealHidden.ts — the one reader of "what is holding
+   * this control shut") names the opener: the toggle preceding the hidden container, an
+   * aria-controls / data-target owner, a <summary>. The opener's words are read before the click
+   * (the header's img alt flips Expand → Collapse afterwards), it is clicked, and the radio is
+   * re-read. Returns the group's visible text and the selector to record, whether or not the
+   * click revealed the radio — the caller names the group in its stop when it did not.
+   */
+  private async openRecordTypeGroupByHeader(loc: any, forType: string): Promise<{ opened: boolean; group: string; selector: RecipeSelector | null; why: string }> {
+    const none = { opened: false, group: "", selector: null, why: "" };
+    if (!this.page || typeof this.page.evaluate !== "function" || typeof loc?.evaluate !== "function") return none;
+    const untag = async (): Promise<void> => {
+      await loc.evaluate((el: Element) => el.removeAttribute("data-al-hidden-target")).catch(() => {});
+      await this.page!.evaluate(() => document.querySelectorAll("[data-al-reveal]").forEach((n) => n.removeAttribute("data-al-reveal"))).catch(() => null);
+    };
+    try {
+      await loc.evaluate((el: Element) => el.setAttribute("data-al-hidden-target", "1"));
+      const plan = await this.page.evaluate(planHiddenReveal);
+      if (!plan?.opener) {
+        await untag();
+        return { ...none, why: plan?.why || "not concealed by any ancestor we recognise" };
+      }
+      const info = await this.page.evaluate(describeTaggedToggle, "data-al-reveal").catch(() => null);
+      const group = String(info?.text || "").trim();
+      const selector = info ? await this.recordedToggleSelector(info) : null;
+      const clicked = await this.page.locator("[data-al-reveal]").first().click({ timeout: 4000 }).then(() => true).catch(() => false);
+      await this.page.waitForTimeout?.(600).catch(() => null);
+      await this.waitForDynamicFieldsSettle().catch(() => null);
+      const now = clicked && typeof loc.isVisible === "function" ? await loc.isVisible().catch(() => false) : false;
+      await untag();
+      this.debug?.event({ type: now ? "record_type_group_header_clicked" : "record_type_group_header_no_effect", group: group.slice(0, 60), forType: forType.slice(0, 60), opener: String(plan.opener).slice(0, 120), clicked });
+      return { opened: now, group, selector, why: plan.why };
+    } catch {
+      await untag();
+      return none;
+    }
+  }
+
+  /** #174: click the ONE visible clickable whose words are `label` (tagged in-page, never by a role
+   *  locator — see recordedToggleSelector) and return the selector to record. */
+  private async clickGroupToggleByText(label: string): Promise<{ clicked: boolean; selector: RecipeSelector | null; matches: number }> {
+    if (!this.page || typeof this.page.evaluate !== "function") return { clicked: false, selector: null, matches: 0 };
+    const attr = "data-al-group-toggle";
+    const matches = await this.page.evaluate(tagToggleByText, { text: label, attr, css: GROUP_TOGGLE_CSS }).catch(() => 0);
+    if (matches !== 1) return { clicked: false, selector: null, matches };
+    const info = await this.page.evaluate(describeTaggedToggle, attr).catch(() => null);
+    const selector = info ? await this.recordedToggleSelector(info) : null;
+    const clicked = await this.page.locator(`[${attr}]`).first().click({ timeout: 8000 }).then(() => true).catch(() => false);
+    await this.page.evaluate((a: string) => document.querySelectorAll(`[${a}]`).forEach((n) => n.removeAttribute(a)), attr).catch(() => null);
+    return { clicked, selector, matches };
+  }
+
+  /**
+   * "advanced": the type was ticked and Continue pressed. "expanded" (#174): the chosen control was
+   * hidden, nothing this pass knows opened it, and `expand` (accelaExpandRecordTypeCategory, budgeted
+   * by the caller) opened a group — the caller re-reads the page and runs this pass again. "bail": the
+   * planner takes the page — or, when recordTypeClosedGroup is set, the walk stops named.
+   */
+  /** The words this run's discipline is written with on a record-type label or group header: the one
+   *  place the permitType → label-word mapping lives (electrical, else the structural track the
+   *  hand-coded adapter live-verified: county rows file electrical, city structural). */
+  private recordTypeDisciplineWord(discipline: string = this.permitDiscipline): "electrical" | "structural" {
+    return /elec/i.test(discipline) ? "electrical" : "structural";
+  }
+
+  private recordTypeDisciplineWords(discipline: string = this.permitDiscipline): RegExp {
+    return new RegExp(`\\b${this.recordTypeDisciplineWord(discipline)}\\b`, "i");
+  }
+
+  private async accelaRecordTypePass(project: ProjectRecord, fields: ExtractedField[], steps: RecipeStep[], expand?: () => Promise<boolean>): Promise<"advanced" | "expanded" | "bail"> {
     const page = this.page;
-    if (!page) return false;
-    const isElectrical = /elec/i.test(project.permitType ?? "");
+    if (!page) return "bail";
+    const permitType = String(project.permitType ?? "");
+    const discipline = this.recordTypeDisciplineWords(permitType);
     const prefs: RegExp[] = [
       /solar|photovoltaic|\bpv\b/i,
-      isElectrical ? /residential\s*[-–—]?\s*electrical/i : /residential\s*[-–—]?\s*structural/i,
+      new RegExp(`residential\\s*[-–—]?\\s*${this.recordTypeDisciplineWord(permitType)}`, "i"),
     ];
     const candidates = fields.filter((f) => f.fieldType === "checkbox" || f.fieldType === "radio");
     let chosen: ExtractedField | undefined;
-    for (const re of prefs) {
-      chosen = candidates.find((f) => re.test(f.label || ""));
-      if (chosen) break;
+    // #166: A PERSON NAMED THE RECORD TYPE — it wins over the solar / discipline preference. Matched by
+    // label (sameRecordType), never by position; the category-opening below serves it the same way.
+    const verifiedTarget = this.verifiedRecordType();
+    const verifiedHit = verifiedTarget ? candidates.find((f) => sameRecordType(f.label || "", verifiedTarget)) : undefined;
+    if (verifiedHit) chosen = verifiedHit;
+    if (!chosen) {
+      // #176 — THE JOB'S CLASS DECIDES AMONG THE PREFERENCE'S MATCHES, NEVER DOM ORDER. Accela tenants
+      // list Commercial groups first, and the first solar label on Meridian's page was "Commercial
+      // Electrical Solar Array" — for a residential job. explainRecordTypeChoice (applicationProgram.ts,
+      // the program chooser's own class rule, #693): a label naming only the other class is never
+      // eligible; among the rest the one naming this class wins, then the discipline's words; what the
+      // labels do not settle is refused — the group pass may still open the right list (lazy pages),
+      // else the walk stops named below. The event names the decision whichever way it went.
+      const jobClass = this.programJob.jobClass ?? "residential";
+      const choice = explainRecordTypeChoice(candidates.map((f) => String(f.label || "")), prefs, this.programJob, discipline);
+      this.debug?.event({
+        type: "record_type_class_decision",
+        jobClass,
+        decision: choice.reason,
+        label: choice.index !== undefined ? String(candidates[choice.index]?.label || "").slice(0, 60) : "",
+        candidates: choice.candidates.slice(0, 8).map((c) => c.slice(0, 60)),
+      });
+      if (choice.reason === "matched" && choice.index !== undefined) {
+        chosen = candidates[choice.index];
+      } else if (choice.reason === "other_class" || choice.reason === "ambiguous") {
+        if (expand && await expand()) {
+          this.debug?.event({ type: "record_type_group_expanded_for_retry", label: "", why: choice.reason });
+          return "expanded";
+        }
+        this.recordTypeRefused = { reason: choice.reason, jobClass, candidates: choice.candidates.slice(0, 12) };
+        this.debug?.event({ type: "record_type_refused_for_class", reason: choice.reason, jobClass, candidates: choice.candidates.slice(0, 8).map((c) => c.slice(0, 60)) });
+        return "bail";
+      }
     }
-    if (!chosen) { this.debug?.event({ type: "record_type_bail", why: "no candidate matched the solar/discipline preference" }); return false; }
-    const loc = await this.locator(chosen.selector);
-    if (!loc) return false;
+    if (!chosen) { this.debug?.event({ type: "record_type_bail", why: "no candidate matched the solar/discipline preference" }); return "bail"; }
+    let loc = await this.locator(chosen.selector);
+    if (!loc) return "bail";
 
     // THE RECORD TYPE IS INSIDE A CATEGORY THAT HAS TO BE OPENED FIRST.
     //
@@ -6366,26 +6992,57 @@ export class AutoLearnAdapter extends BasePortalAdapter {
     const chosenVisible = typeof loc.isVisible === "function"
       ? await loc.isVisible().catch(() => false)
       : true;
+    // What the group the radio sits in is called, for the stop below when nothing opened it — and,
+    // when no opener was found at all, what concealed the radio (planHiddenReveal's reading).
+    let closedGroup = "";
+    let concealedBy = "";
     if (!chosenVisible) {
-      const wanted = String(chosen.label || "").trim().toLowerCase();
-      const category = fields.find((f) => {
-        if (f.fieldType !== "checkbox" || f === chosen) return false;
-        const cat = String(f.label || "").trim().toLowerCase();
-        return cat.length >= 4 && wanted.startsWith(cat) && wanted.length > cat.length;
-      });
-      if (category) {
-        const catLoc = await this.locator(category.selector);
-        const opened = catLoc
-          ? await catLoc.check({ timeout: 8000 }).then(() => true)
-            .catch(async () => catLoc.click({ timeout: 6000 }).then(() => true).catch(() => false))
-          : false;
-        if (opened) {
-          steps.push({ action: "check", phase: "fill", selector: category.selector, note: `record type category: ${(category.label || "").slice(0, 50)}` });
-          await this.page?.waitForTimeout?.(1200).catch(() => null);
-          this.debug?.event({ type: "record_type_category_opened", category: String(category.label || "").slice(0, 40), forType: String(chosen.label || "").slice(0, 40) });
-        }
+      const chosenLabel = String(chosen.label || "").trim();
+      // #174 — FIRST, THE RADIO'S OWN GROUP HEADER (Meridian's shape: a collapsed tree whose groups
+      // open by an <a onclick> header; the category checkboxes exist but sit in a hidden filter
+      // panel). The group is whatever the page calls it — read from the header, recorded by it.
+      const byHeader = await this.openRecordTypeGroupByHeader(loc, chosenLabel);
+      concealedBy = byHeader.why;
+      if (byHeader.opened && byHeader.group && byHeader.selector) {
+        steps.push({ action: "click", phase: "fill", selector: byHeader.selector, note: recordTypeGroupNote(byHeader.group) });
+        this.debug?.event({ type: "record_type_group_opened", group: byHeader.group.slice(0, 40), forType: chosenLabel.slice(0, 40), via: "header" });
+        // Re-located: the list the header opened may have been re-rendered around the radio.
+        loc = (await this.locator(chosen.selector)) ?? loc;
       } else {
-        this.debug?.event({ type: "record_type_hidden_no_category", label: String(chosen.label || "").slice(0, 40) });
+        closedGroup = byHeader.group;
+        // SECOND, THE CATEGORY CHECKBOX — CHINO's shape, where the categories sit ABOVE the types and
+        // a type stays collapsed until its category is ticked. The category is named by the record
+        // type's own leading words ("Residential" for "Residential Solar"); only a genuine prefix
+        // qualifies, so this never ticks an unrelated category. And only a checkbox a person can SEE:
+        // check() on a hidden box (Meridian's filter panel) fails after its whole timeout and opens
+        // nothing — that wait, and the bail after it, is what this pass used to spend its budget on.
+        const wanted = chosenLabel.toLowerCase();
+        const category = fields.find((f) => {
+          if (f.fieldType !== "checkbox" || f === chosen) return false;
+          const cat = String(f.label || "").trim().toLowerCase();
+          return cat.length >= 4 && wanted.startsWith(cat) && wanted.length > cat.length;
+        });
+        if (category) {
+          const catLoc = await this.locator(category.selector);
+          const catVisible = catLoc
+            ? (typeof catLoc.isVisible === "function" ? await catLoc.isVisible().catch(() => false) : true)
+            : false;
+          const opened = catLoc && catVisible
+            ? await catLoc.check({ timeout: 8000 }).then(() => true)
+              .catch(async () => catLoc.click({ timeout: 6000 }).then(() => true).catch(() => false))
+            : false;
+          if (opened) {
+            steps.push({ action: "check", phase: "fill", selector: category.selector, note: `record type category: ${(category.label || "").slice(0, 50)}` });
+            await this.page?.waitForTimeout?.(1200).catch(() => null);
+            this.debug?.event({ type: "record_type_group_opened", group: String(category.label || "").slice(0, 40), forType: chosenLabel.slice(0, 40), via: "checkbox" });
+            loc = (await this.locator(chosen.selector)) ?? loc;
+          } else {
+            closedGroup = closedGroup || `${String(category.label || "").trim()} (category checkbox, ${catVisible ? "would not tick" : "hidden"})`;
+            this.debug?.event({ type: "record_type_category_unusable", category: String(category.label || "").slice(0, 40), visible: catVisible, label: chosenLabel.slice(0, 40) });
+          }
+        } else {
+          this.debug?.event({ type: "record_type_hidden_no_category", label: chosenLabel.slice(0, 40) });
+        }
       }
     }
 
@@ -6393,20 +7050,47 @@ export class AutoLearnAdapter extends BasePortalAdapter {
     // the planner retakes the page, and the duplicate corrupts every future replay).
     const checkOk = await loc.check({ timeout: 10000 }).then(() => true)
       .catch(async () => loc.click({ timeout: 8000 }).then(() => true).catch(() => false));
-    if (!checkOk) { this.debug?.event({ type: "record_type_bail", why: "record-type check/click failed" }); return false; }
-    steps.push({ action: "check", phase: "fill", selector: chosen.selector, note: `record type: ${(chosen.label || "").slice(0, 60)}` });
+    if (!checkOk) {
+      this.debug?.event({ type: "record_type_bail", why: "record-type check/click failed" });
+      const stillHidden = typeof loc.isVisible === "function" ? !(await loc.isVisible().catch(() => false)) : false;
+      if (!chosenVisible && stillHidden) {
+        // THIRD, A GROUP HEADER THE PAGE SHOWS (#174): the group named by the verified type's leading
+        // words, else the word preferences. On a page whose groups are EMPTY until opened (Anne
+        // Arundel's shape) with a hidden filter panel, the only "record type" read is a filter-panel
+        // CHECKBOX that happens to carry a discipline name — nothing opens that, and the real radios
+        // are behind a header. Opening a group selects nothing; the caller re-reads and runs this pass
+        // again, within the expansion budget.
+        if (expand && await expand()) {
+          this.debug?.event({ type: "record_type_group_expanded_for_retry", label: String(chosen.label || "").slice(0, 60) });
+          return "expanded";
+        }
+        // #174 — THE WALK STOPS HERE, NAMED. The radio is on the page and nothing this pass knows
+        // opened its group; handing the page to the planner meant Continue pressed with nothing
+        // selected, "You have not selected a record type.", and recovery attempts that re-ask the
+        // same question. learnImpl reads this right after the pass and ends the run.
+        const group = closedGroup || `(no group header or category control found; the radio is ${concealedBy || "hidden"})`;
+        this.recordTypeClosedGroup = { type: String(chosen.label || "").trim(), group };
+        this.debug?.event({ type: "record_type_closed_group", label: String(chosen.label || "").slice(0, 60), group: group.slice(0, 80) });
+      }
+      return "bail";
+    }
+    if (chosen === verifiedHit) {
+      this.noteVerifiedRecordTypeTicked(chosen, candidates.length, steps);
+    } else {
+      steps.push({ action: "check", phase: "fill", selector: chosen.selector, note: `record type: ${(chosen.label || "").slice(0, 60)}` });
+    }
     const cont = this.acaContinueLocator();
     if (await cont.count().catch(() => 0)) {
       if (!(await cont.click({ timeout: 10000 }).then(() => true).catch(() => false))) {
         // Checked but couldn't advance — leave the advance to the planner next iteration
         // (the recorded check stands; the box holds its state on the live page).
-        return false;
+        return "bail";
       }
       steps.push({ action: "click", phase: "fill", selector: { css: ACA_CONTINUE_CSS, fallbacks: [{ role: "button", name: "Continue Application »" }] }, note: "record type: continue" });
       await page.waitForLoadState?.("networkidle", { timeout: 20000 }).catch(() => null);
       await page.waitForTimeout?.(2000).catch(() => null);
     }
-    return true;
+    return "advanced";
   }
 
   private async learnImpl(context: PortalContext, _project: ProjectRecord): Promise<LearnResult> {
@@ -7104,9 +7788,45 @@ export class AutoLearnAdapter extends BasePortalAdapter {
         // Record-type selection (the page right after the address row is chosen).
         if (!acaRecordTypeHandled && this.acaRecordTypePageDetected(fields)) {
           acaRecordTypeHandled = true;
-          const advanced = await this.accelaRecordTypePass(_project, fields, steps);
-          this.debug?.event({ type: "aca_record_type_pass", page: pageCount, advanced });
-          if (advanced) continue;
+          // The pass may open a group (#174) under the same budget as the expansion above.
+          const expand = async (): Promise<boolean> => {
+            if (acaTypeExpansions >= ACA_TYPE_EXPANSION_MAX) return false;
+            acaTypeExpansions++;
+            return this.accelaExpandRecordTypeCategory(steps);
+          };
+          const outcome = await this.accelaRecordTypePass(_project, fields, steps, expand);
+          this.debug?.event({ type: "aca_record_type_pass", page: pageCount, advanced: outcome === "advanced", outcome });
+          if (outcome === "advanced") continue;
+          if (outcome === "expanded") { acaRecordTypeHandled = false; continue; }
+          // #174 — THE RECORD TYPE IS IN A GROUP THIS PAGE WOULD NOT OPEN: stop, named, before the
+          // planner can press Continue with nothing selected. On Meridian that press drew "You have
+          // not selected a record type." four times through two recovery attempts and created no
+          // record; the only thing a re-plan of this page can do is press it again. No pauseReason:
+          // nothing here is a challenge, and the browser is not held for anyone.
+          if (this.recordTypeClosedGroup) {
+            const { type, group } = this.recordTypeClosedGroup;
+            this.debug?.event({ type: "record_type_closed_group_stop", page: pageCount, label: type.slice(0, 60), group: group.slice(0, 80) });
+            return {
+              ...fail(steps, this.portalName, `Stopped on page ${pageCount}: the record type "${type}" is in a closed group this page would not open: ${group}. Nothing was selected and the page was not advanced (pressing Continue with no record type selected only re-asks for one). Open the group by hand or correct the record type on file, then run again; the steps before this page were recorded.`, null, pageCount, portalNotices),
+              stopReason: "record_type_closed_group",
+            };
+          }
+          // #176 — NO OFFERED RECORD TYPE IS THIS JOB'S: the labels the preference matched all name the
+          // other class, or do not say which is ours, and nothing further would open. Stop named rather
+          // than take DOM order (the Coos Bay mistake in another costume) or hand the planner a page
+          // whose only move is Continue with nothing selected.
+          if (this.recordTypeRefused) {
+            const { reason, jobClass, candidates } = this.recordTypeRefused;
+            const offered = candidates.join(" | ");
+            const why = reason === "other_class"
+              ? `only the other class's record type is offered for this ${jobClass} job: ${offered}`
+              : `more than one record type fits and the labels do not say which is this ${jobClass} job's: ${offered}`;
+            this.debug?.event({ type: "record_type_unsettled_stop", page: pageCount, reason, jobClass, candidates: candidates.slice(0, 8).map((c) => c.slice(0, 60)) });
+            return {
+              ...fail(steps, this.portalName, `Stopped on page ${pageCount}: ${why}. Nothing was selected and the page was not advanced. Tick the right record type by hand, or have a person verify the record type on file for this permit, then run again; the steps before this page were recorded.`, null, pageCount, portalNotices),
+              stopReason: "record_type_unsettled",
+            };
+          }
         }
       }
 
@@ -7484,6 +8204,11 @@ export class AutoLearnAdapter extends BasePortalAdapter {
       // chooser) can leave another page on screen without asking the loop to re-read; planning
       // `fields` then plans a page that is gone. Re-read instead — before paying for the call.
       // Not after the typed signature: the bot's own signing changes the page it signs.
+      // #166: the person-verified record type is ticked here, before the planner sees the page.
+      {
+        const typeHint = await this.verifiedRecordTypePass(fields, steps, alreadyFilledLabels, pageCount).catch(() => "");
+        if (typeHint) recoveryHint = `${recoveryHint ? `${recoveryHint} ` : ""}${typeHint}`;
+      }
       if (!signatureDone && await pageMovedUnderPlan("before the planner was asked")) continue;
       let plan: LearnPlanResponse;
       const planShot = await this.capturePlanScreenshot();
@@ -8468,6 +9193,12 @@ export class AutoLearnAdapter extends BasePortalAdapter {
           steps.push(step);
           pageFillCount++;
           if (field.label) alreadyFilledLabels.push(field.label);
+          // #166: on the page that did not offer the verified record type, what the planner ticked
+          // instead is the gap a person reads ("the walk ticked Y").
+          if (step.action === "check" && this.recordTypeNotOffered?.page === pageCount && field.label
+            && RECORD_TYPE_OPTION_WORDS.test(field.label) && !this.recordTypeNotOffered.ticked.includes(field.label)) {
+            this.recordTypeNotOffered.ticked.push(field.label);
+          }
           appliedThisPage.push({
             selector: field.selector,
             label: field.label || "",
@@ -11075,6 +11806,30 @@ export class AutoLearnAdapter extends BasePortalAdapter {
     // contradicts the discipline is refused — nothing checked, nothing recorded, so no recipe
     // can inherit it. A solar/PV-specific type is always allowed: that IS the right answer
     // wherever an AHJ offers one.
+    // #166: A PERSON-VERIFIED RECORD TYPE IS OFFERED ON THIS PAGE (verifiedRecordTypePass found and
+    // ticked it): the planner's pick of ANOTHER option in that list is refused — nothing checked,
+    // nothing recorded. Its pick of the verified option itself is already done (a second check
+    // would record a duplicate step, which corrupts every replay) — dropped quietly.
+    if (isCheckable && this.verifiedRecordTypeOnPage) {
+      const on = this.verifiedRecordTypeOnPage;
+      const label = field.label || "";
+      if (sameRecordType(label, on.label)) {
+        if (this.verifiedRecordTypeTicked) {
+          this.debug?.event({ type: "record_type_verified_settled", label: label.slice(0, 70) });
+          return null;
+        }
+      } else if (this.sameRecordTypeList(field, on)) {
+        this.debug?.event({
+          type: "record_type_refused",
+          label: label.slice(0, 70),
+          discipline: this.permitDiscipline,
+          why: "a person-verified record type is offered on this page",
+          verified: on.label.slice(0, 70),
+        });
+        return null;
+      }
+    }
+
     if (isCheckable && RECORD_TYPE_LABEL.test(field.label || "") && this.permitDiscipline) {
       const label = field.label || "";
       const wantElectrical = /elec/i.test(this.permitDiscipline);

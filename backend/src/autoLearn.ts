@@ -25,7 +25,7 @@ import path from "node:path";
 import { portalProfilesDir, screenshotsDir } from "./statePaths";
 import fs from "node:fs";
 import type { AppDb } from "./db";
-import type { InfoPageIncident, PortalRecipe, ProjectRecord, RecipeStep } from "../../shared/src/types";
+import type { InfoPageIncident, LearnTargetRecordType, PortalRecipe, ProjectRecord, RecipeStep } from "../../shared/src/types";
 import { FINAL_SUBMIT_GATE_SENTENCE, redactSecretValues } from "../../shared/src/portalSafety";
 import { INFO_PAGE_PASS_EXPIRED, infoPageJobValues } from "../../shared/src/infoPagePass";
 import { isPlannerSecretKey, projectSecretValues } from "./projectSecrets";
@@ -53,14 +53,14 @@ import { expiredInfoPagePassFor, infoPagePriorProgress, isCleanInfoPageHold, liv
 import { formPurposeMismatch } from "./formPurpose";
 import { looksBotBlocked } from "./runAbort";
 import { id } from "./ids";
-import { knowledgeProfileKey, findKnowledgeForLearn, isVerifiedKnowledge, learnSafeNotes } from "./knowledgeBase";
+import { knowledgeProfileKey, findKnowledgeForLearn, isVerifiedKnowledge, learnPortalRequiredUploads, learnSafeNotes } from "./knowledgeBase";
 import { hostFitsTrackAndEntity, trackSafeUrl, type PortalUrlSource } from "./portalChannel";
 import { getCodeProfile } from "./codeProfiles";
 import { certifiedNamesForMake } from "./cecEquipment";
 import { annotateDraft, buildDraftTouch, recordDraftTouch, type DraftTouch } from "./draftLedger";
 import { healDraftCreatingFinalSubmit, recordPortalDraft, type ObservedDraft } from "./portalDraft";
 import { draftReferenceFromUrl } from "../../portal-bot/src/adapters/submissionLedger";
-import { issuingAgencyFor, projectForTrack } from "./permitProcess";
+import { issuingAgencyFor, lookedUpRecordTypeFor, projectForTrack } from "./permitProcess";
 import { DECLARED_VALUATION_FIELD, rebindsToValuation } from "./valuation";
 import { feeBracketFieldForLabel } from "./feeBracketFields";
 import { SERVICE_FEEDER_200A_FIELD, SERVICE_FEEDER_400A_FIELD } from "./batteryServiceFeeder";
@@ -643,6 +643,29 @@ export function learnClientNames(db: AppDb, project: Pick<ProjectRecord, "client
   }
 }
 
+/** THE PLANNER'S ONE LINE about the record type on file (#166). Exported for its test. */
+export function recordTypePlannerLine(target: LearnTargetRecordType | null | undefined): string {
+  const value = String(target?.value ?? "").trim();
+  if (!value) return "";
+  return target!.verified
+    ? `recordType (person-verified for this permit — tick exactly this record type / work item where a page offers it; if a page does not offer it, choose the nearest and say so in notes): ${value}`
+    : `recordTypeHint (the per-job lookup read the record type as this; unverified — a hint, not an instruction): ${value}`;
+}
+
+/** THE TARGET RECORD TYPE FOR A LEARN (#166): lookedUpRecordTypeFor on the same track view the
+ *  learn's issuing agency reads (siteIdentity.issuingAgency). Utility scope → null. */
+export function learnTargetRecordType(
+  project: ProjectRecord,
+  scopeType: "ahj" | "utility",
+  learnTrack: string | null,
+  issuerTrack: string | null,
+): LearnTargetRecordType | null {
+  if (scopeType === "utility") return null;
+  const track = issuerTrack === null && learnTrack && projectForTrack(project, learnTrack) === project ? learnTrack : issuerTrack;
+  const hit = lookedUpRecordTypeFor(project, track);
+  return hit ? { value: hit.value, verified: hit.verified } : null;
+}
+
 export function buildPortalPlanner(
   db: AppDb,
   project: ProjectRecord,
@@ -652,6 +675,9 @@ export function buildPortalPlanner(
      *  other than the licence track's (a learn keyed on its stage's own view — learnIssuerTrack).
      *  Omitted: `track`. */
     issuerTrack?: string | null;
+    /** #166: the per-job lookup's record type for this permit, with its standing (learnTargetRecordType).
+     *  Reaches the planner as a jurisdictionContext line — verified: the name to tick; seeded: a hint. */
+    targetRecordType?: LearnTargetRecordType | null;
   },
 ): { planner: (req: LearnPlanRequest) => Promise<LearnPlanResponse>; projectFields: Record<string, string> } {
   // The filing this planner fills — the licence keys answer "the licence THIS permit takes".
@@ -746,6 +772,11 @@ export function buildPortalPlanner(
       project.ahj ? `targetJurisdiction (AHJ): ${project.ahj}` : "",
       project.city ? `projectCity: ${project.city}` : "",
       project.state ? `state: ${project.state}` : "",
+      // #166: the record type / work item on file for THIS permit. A person-verified name is ticked
+      // by the learner itself wherever a page offers it (the planner then sees it in
+      // alreadyFilledLabels); the line is for the page that does NOT offer it, so the planner names
+      // the nearest. A seeded one is a lookup's reading and only ever a hint (hard rule 3).
+      recordTypePlannerLine(opts.targetRecordType),
     ].filter(Boolean).join("\n");
   }
 
@@ -1169,12 +1200,16 @@ async function autoLearnPortalInner(
   const issuerTrack = scopeType === "utility" ? "nem" : learnIssuerTrack(input);
   // Secrets are stripped inside buildPortalPlanner — they never reach the LLM; the adapter
   // binds account/meter deterministically from the encrypted credential store.
+  // #166: the record type / work item on file for this permit, read once for the planner's hint and
+  // the learner's deterministic pick (the same value both ways).
+  const targetRecordType = learnTargetRecordType(project, scopeType, learnTrack, issuerTrack);
   const { planner, projectFields } = buildPortalPlanner(db, project, {
     portalType,
     scopeType,
     permitType: input.permitType,
     track: learnTrack,
     issuerTrack,
+    targetRecordType,
   });
 
   // Credential lookup (B11): the portal's URL decides FIRST (host + first path segment), then
@@ -1624,6 +1659,10 @@ async function autoLearnPortalInner(
         issuingAgency: scopeType === "utility" ? null : (issuingAgencyFor(project,
           issuerTrack === null && learnTrack && projectForTrack(project, learnTrack) === project ? learnTrack : issuerTrack)?.value ?? null),
       },
+      // #166: THE RECORD TYPE / WORK ITEM ON FILE for this permit (same track view as issuingAgency).
+      // Verified → the learner ticks the offered option whose label matches, before the planner is
+      // asked; seeded → the planner's hint only. null on a utility learn.
+      targetRecordType,
       onProgress: input.onProgress,
       onHumanStep,
       onDraftCreated,
@@ -2218,6 +2257,19 @@ async function autoLearnPortalInner(
   const equipmentNotHeld = learn.equipmentNotHeld ?? [];
   try { learnNoteTopicsFromMisses(db, requiredMisses.filter((m) => !equipmentNotHeld.includes(m))); } catch { /* best-effort */ }
   const docMisses = learn.missingRequiredDocs ?? [];
+  // A REQUIRED SLOT THIS JOB COULD NOT FILL JOINS THE AHJ'S CHECKLIST (#140): the next job here is
+  // stopped at staging naming it, not at the portal. Permit portals only (the AHJ's row); seeded,
+  // never onto a person-verified row. A KB write never changes this learn's outcome.
+  if (scopeType === "ahj" && docMisses.length) {
+    try {
+      const kb = learnPortalRequiredUploads(db, project, docMisses, learnTrack);
+      if ("written" in kb && kb.written.length) {
+        addAuditLog(db, projectId, "system", "auto-learn", "portal.required_upload_learned", { profileKey: kb.profileKey, lines: kb.written });
+      } else if ("skipped" in kb && kb.skipped === "verified") {
+        verification.issues.push(`The portal requires upload(s) this job lacks (${docMisses.slice(0, 6).join(", ")}), and ${project.ahj}'s knowledge-base profile is person-verified, so it was not changed — add them to that profile by hand if they belong there.`);
+      }
+    } catch { /* best-effort: knowledge, never the learn's verdict */ }
+  }
   const validationBlocks = learn.validationBlocks ?? [];
   // #534 — what each page still showed as the walk LEFT it, on any page, and which pages were read.
   const exit = pageExitTrustSignals(learn);
@@ -2311,6 +2363,17 @@ async function autoLearnPortalInner(
     [portalUrl, ...gotoUrls],
   );
   if (purpose.mismatch) verification.issues.push(purpose.reason);
+  // #166: the person-verified record type was NOT on the record-type page, so the walk's work item
+  // is the planner's choice — named here in words a person can act on (confirm the item, or correct
+  // the process row), whatever the gate decides below.
+  if (learn.recordTypeNotOffered) {
+    const gap = learn.recordTypeNotOffered;
+    const ticked = gap.ticked.length ? gap.ticked.map((l) => `"${l}"`).join(", ") : "nothing";
+    verification.issues.push(
+      `The verified record type "${gap.wanted}" is not on this portal's record-type page; the walk ticked ${ticked}` +
+      ` (offered: ${gap.offered.slice(0, 12).join("; ") || "(none read)"}). Confirm the work item before trusting this recipe, or correct the process row.`,
+    );
+  }
 
   // THE TRUST GATE. Every condition above feeds evaluateTrustGate, which is where the bar is
   // written down in full — read that comment before changing anything here. Nothing may grant
