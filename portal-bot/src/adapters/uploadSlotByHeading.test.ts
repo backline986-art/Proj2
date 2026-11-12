@@ -15,7 +15,7 @@
 // Constructing the learner starts a debug bundle (LearnRunDebug.start) — keep it out of data/learn-runs.
 import "../smokeArtifactDirs";
 import assert from "node:assert/strict";
-import { AutoLearnAdapter, catchAllUploadSlot, exactUploadDocType, formsSlotDocTypes, uploadForbidsSubstitute, uploadSlotTakesPlans, type LearnPlanner } from "./autoLearnAdapter";
+import { AutoLearnAdapter, catchAllUploadSlot, exactUploadDocType, formsSlotDocTypes, uploadForbidsSubstitute, uploadSlotTakesPlans, uploadTextNamesNoDocument, type LearnPlanner } from "./autoLearnAdapter";
 
 let failures = 0;
 const check = (label: string, fn: () => void): void => {
@@ -72,7 +72,11 @@ check("MUST-PASS \"Electrical Plans\" is the plan set — on the review page (ex
   assert.equal(pick(PLAN, "Electrical Plans"), "plan_set");
   assert.equal(pick(PLAN, "Electrical Plans", { mode: "combined" }), "plan_set");
   assert.equal(pick(PLAN, "Solar PV Plans", { review: true }), "plan_set");
-  assert.equal(pick(PLAN, "Plans - Construction", { review: true }), "plan_set");
+  // Accela's "Plans - Construction" keeps its old reading (combined-mode tier, not the pattern):
+  // the pattern also drives replay's unrecorded-upload sweep, which would re-attach into the box
+  // Accela empties after Save (uploadHeld.dom.smoke).
+  assert.equal(pick(PLAN, "Plans - Construction", { mode: "combined" }), "plan_set");
+  assert.equal(pick(PLAN, "Plans - Construction", { review: true }), null);
   assert.equal(uploadSlotTakesPlans("Electrical Plans"), true);
   assert.equal(uploadSlotTakesPlans(FORMS), false);
   assert.equal(uploadSlotTakesPlans("Other/Miscellaneous"), false);
@@ -103,6 +107,17 @@ check("MUST-PASS a catch-all heading is known as one; a plans or forms heading i
   assert.equal(catchAllUploadSlot("Electrical Plans"), false);
   assert.equal(catchAllUploadSlot(FORMS), false);
   assert.equal(catchAllUploadSlot(undefined), false);
+});
+
+// The same corpus runs through the page-side copy of this predicate in reviewPageUpload.dom.smoke [D].
+check("MUST-PASS text that names no document: picker faces and bare instructions; names keep a word", () => {
+  for (const generic of ["Add", "Browse..", "Choose File", "Choose Files", "Document", "Files", "Select a new document for this requirement:", "Upload a file (max 10 MB)", "Select a document:"]) {
+    assert.equal(uploadTextNamesNoDocument(generic), true, generic);
+  }
+  for (const named of ["Plans", "Bid", "Other Files", "Attachment", "Attachments", "Electrical Plans", "Upload a photo of meter where system will be interconnected", "Plans - Construction", "Plan set (PDF) *"]) {
+    assert.equal(uploadTextNamesNoDocument(named), false, named);
+  }
+  assert.equal(uploadTextNamesNoDocument(undefined), true);
 });
 
 check("MUST-PASS a description box gets the document's KIND, never a file name", () => {

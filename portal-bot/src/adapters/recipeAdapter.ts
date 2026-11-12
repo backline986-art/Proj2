@@ -93,7 +93,7 @@ import { imageToPdfBytes, shouldConvertToPdf } from "../imageToPdf";
 import { removeUploadStaging, uploadPayloadFor, type PreparedUpload } from "./uploadPayload";
 import { attachmentTypeFor, isDocumentTypeList } from "./attachmentTypes";
 import { chooseSubmittedRecord, cleanRecordLink, readApplicationLedgerInPage, recordLinkForNumberInPage, type LedgerEntry } from "./submissionLedger";
-import { exactUploadDocType, fileTypeAllowed, UPLOAD_LABEL_PATTERNS, uploadForbidsSubstitute } from "./autoLearnAdapter";
+import { exactUploadDocType, fileTypeAllowed, UPLOAD_LABEL_PATTERNS, uploadForbidsSubstitute, uploadTextNamesNoDocument } from "./autoLearnAdapter";
 import { readFeeStop, secretValuesOf, type FeeStopKind, type FeeStopReading } from "../feeStop";
 import { reviewComparison, scrapeReviewScreen as scrapeReviewScreenShared, utilityIdentifiersEnteredBySteps, type ReviewMismatch } from "../reviewScreenScraper";
 import { controlReadsUnanswered, pinEmptyRequiredControl, PINNED_CONTROL_ATTR, SWEPT_BLANK_ATTR, sweepEmptyRequiredControls, type EmptyRequired } from "../requiredControlSweep";
@@ -6903,9 +6903,16 @@ export class RecipeAdapter extends BasePortalAdapter {
           if (!hit) {
             // The recorded index is a fallback only for a slot with no label of its own to
             // contradict the step's (an unlabelled Browse box); never for a differently labelled one.
+            // A step recorded against a picker FACE ("upload plan_set: Add" — every Accela recipe,
+            // whose slot now reads its heading, #140) contradicts nothing and keeps its position,
+            // unless the live slot's heading names a different exact document (a step recorded as
+            // "Browse.." into what now reads "Agreements, Form, Documents & Checklists" is refused).
             const recorded = slots.find((sl) => `[data-al-upl="${sl.key}"]` === recordedCss);
             const recordedLabel2 = norm(recorded?.label ?? "");
-            if (!recorded || (want && recordedLabel2 && recordedLabel2 !== "document")) {
+            const wantNamesDocument = !!want && !uploadTextNamesNoDocument(wanted);
+            const liveExact = recorded ? exactUploadDocType(recorded.label || "") : null;
+            const liveContradicts = !!liveExact && liveExact !== step.docType;
+            if (!recorded || liveContradicts || (wantNamesDocument && recordedLabel2 && recordedLabel2 !== "document")) {
               const secs = Math.round((Date.now() - started) / 100) / 10;
               this.driftWarnings.push(`upload "${wanted.slice(0, 48) || recordedCss}" has no matching file slot on this page after ${secs}s (${slots.length} slot(s): ${slots.map((s) => s.label.slice(0, 30)).join(" | ") || "none"}) — not attached, and not attached to any other slot`);
               this.noteUnresolved(step);

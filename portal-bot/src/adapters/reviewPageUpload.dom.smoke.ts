@@ -36,6 +36,9 @@
 //       was positional and `missing:0` stood beside two empty requirements.
 //   [F] replay finds the slot by the recorded `slot` heading when the note names only the picker
 //       face and the positional key points at another requirement's control.
+//   [G] the step as the live run recorded it (no `slot`, note "Browse..", key f0 = the forms slot) is
+//       refused by name at replay: a face-recorded step keeps its position only while the live slot's
+//       heading does not name a different exact document.
 //
 // Run: npx tsx portal-bot/src/adapters/reviewPageUpload.dom.smoke.ts
 import "../smokeArtifactDirs";
@@ -409,6 +412,38 @@ try {
     check("[F] the document landed in the \"Electrical Plans\" row, not in the recorded f0 (the forms slot)",
       ok && held?.plans === 1 && held?.forms === 0 && held?.other === 0, `ok=${ok} err=${err} held=${JSON.stringify(held)} drift=${JSON.stringify(replay.driftWarnings)}`);
     check("[F] …and the re-anchoring is noted", replay.agingNotes.some((n) => /Electrical Plans.*re-anchored by label/.test(n)), JSON.stringify(replay.agingNotes));
+  }
+
+  // ---- [G] the OLD Bend step — no slot, note "Browse..", key f0 = the forms slot — is refused, not replayed into the wrong slot ----
+  console.log("\n[G] replay: the step as the live run recorded it (no slot, note names the face, key f0 = forms slot) is refused by name");
+  {
+    const ctx = await browser.newContext();
+    ctx.setDefaultTimeout(8000);
+    await ctx.addInitScript({ content: "globalThis.__name = globalThis.__name || ((f) => f);" });
+    const page = await ctx.newPage();
+    await page.goto(`${base}/bend`);
+    const recipe = {
+      id: "zz-bend-old", scopeType: "ahj", profileKey: "zz|fixture|bend", state: "ZZ", ahj: "Fixture", utility: "",
+      portalPlatform: "fixture", portalUrl: `${base}/bend`, status: "complete", version: 1, steps: [],
+      createdBy: "test", createdAt: "", updatedAt: "", notes: "", discipline: "",
+    } as unknown as PortalRecipe;
+    const replay = new RecipeAdapter(recipe, {}, { plan_set: planSet }, { autoSubmit: false }) as unknown as {
+      page: unknown; driftWarnings: string[]; executeStep(step: RecipeStep, pastReview: boolean): Promise<boolean>;
+    };
+    replay.page = page;
+    const step = { action: "upload", phase: "fill", selector: { css: '[data-al-upl="f0"]' }, docType: "plan_set", viaFileChooser: false, note: "upload plan_set: Browse.." } as RecipeStep;
+    let ok = true;
+    let err = "";
+    try { ok = await replay.executeStep(step, false); } catch (e) { err = String(e).slice(0, 200); ok = false; }
+    const held = await page.evaluate(() => {
+      const n = (id: string) => (document.getElementById(id) as HTMLInputElement | null)?.files?.length ?? -1;
+      return { forms: n("req_0_file"), plans: n("req_1_file"), other: n("req_2_file") };
+    }).catch(() => null);
+    await ctx.close().catch(() => null);
+    check("[G] nothing was attached anywhere — the plan set is not filed as the forms requirement by position",
+      !ok && held?.forms === 0 && held?.plans === 0 && held?.other === 0, `ok=${ok} err=${err} held=${JSON.stringify(held)}`);
+    check("[G] …and the refusal names the slot the key now points at",
+      replay.driftWarnings.some((w) => /no matching file slot/.test(w) && /Agreements, Form/.test(w)), JSON.stringify(replay.driftWarnings));
   }
 } finally {
   await browser.close().catch(() => null);

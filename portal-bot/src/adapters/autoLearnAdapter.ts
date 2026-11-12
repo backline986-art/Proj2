@@ -827,10 +827,27 @@ export const UPLOAD_LABEL_PATTERNS: Array<{ re: RegExp; docType: string }> = [
   { re: /\bbids?\b/i, docType: "bid" },
   // A slot named just "Plans" (#140: an iWorQ slot headed "Plans") is the plan set, as is one
   // headed by the plans of the permit's own discipline — CityView's "Electrical Plans" (Bend),
-  // "Solar/PV Plans", Accela's "Plans - Construction". The bare word or a listed qualifier only:
-  // "Stamped plans" / "Landscape plans" name something else and keep their old reading.
-  { re: /plan\s*set|full\s*plan|construction\s*(plan|doc)|drawings?|^\W*plans?\W*$|\b(electrical|solar|pv|photovoltaic|building|permit|project)\s*plans?\b|\bplans?\s*[-–—:]\s*construction/i, docType: "plan_set" },
+  // "Solar/PV Plans". The bare word or a listed qualifier only: "Stamped plans" / "Landscape
+  // plans" name something else and keep their old reading. Accela's "Plans - Construction" is
+  // deliberately NOT here: replay's unrecorded-upload sweep attaches to any unrecorded slot this
+  // pattern names, and Accela re-renders that box EMPTY after its Save commits the upload — the
+  // sweep would then file the plan set a second time (uploadHeld.dom.smoke pins this). Combined
+  // mode gives that slot the plan set on its own tier, as before.
+  { re: /plan\s*set|full\s*plan|construction\s*(plan|doc)|drawings?|^\W*plans?\W*$|\b(electrical|solar|pv|photovoltaic|building|permit|project)\s*plans?\b/i, docType: "plan_set" },
 ];
+
+/** UPLOAD TEXT THAT NAMES NO DOCUMENT (#140): a picker face ("Add", "Browse..", "Choose File"), a bare
+ *  "Document"/"Files", or an instruction made only of picker words ("Select a new document for this
+ *  requirement:"). Node-side twin of tagUploadControls' namesNoDocument — that function is serialized
+ *  into the page and cannot reach module scope, so the word list lives twice, pinned on one corpus by
+ *  uploadSlotByHeading.test (node) and reviewPageUpload.dom.smoke [D] (page). Replay uses this to let a
+ *  step recorded against a face ("upload plan_set: Add", every Accela recipe) keep its positional key
+ *  now that the live slot reads its heading. */
+const UPLOAD_GENERIC_WORDS = /\b(select|choose|browse|upload|attach|add|drag|drop|click|here|please|a|an|the|this|that|your|new|for|to|of|or|and|file|files|document|documents|requirement|requirements|set|item|items|button|now|max(imum)?|size|mb|kb|type|types|allowed|accepted|only|pdf|jpg|jpeg|png|no|chosen|selected)\b/gi;
+export function uploadTextNamesNoDocument(text: string | undefined): boolean {
+  const t = String(text || "").replace(/\([^)]*\)/g, " ");
+  return !t.replace(UPLOAD_GENERIC_WORDS, " ").replace(/[^a-z]+/gi, "").trim();
+}
 
 /** A slot whose heading names the application FORMS — agreements, forms, applications, checklists
  *  (CityView's "Agreements, Form, Documents & Checklists", #140): the documents that may fill it,
@@ -2448,8 +2465,10 @@ export function tagUploadControls(): UploadSlot[] {
   // which CONTROL this is, not what goes in it. Strip the picker/instruction words; a label with
   // nothing left names nothing. "Plans", "Bid", "Other Files" and "Upload a photo of meter…" all
   // keep a word, so they are names — and so does a section titled "Attachments", which the
-  // owning-heading read hands to the first slot under it. Page-side only (serialized into the page).
-  const GENERIC_WORDS = /\b(select|choose|browse|upload|attach|add|drag|drop|click|here|please|a|an|the|this|that|your|new|for|to|of|or|and|file|files|document|documents|requirement|requirements|set|item|items|button|now|max(imum)?|size|mb|kb|type|types|allowed|accepted|only|pdf|jpg|jpeg|png|no|chosen|selected)\b/gi;
+  // owning-heading read hands to the first slot under it. Page-side copy of the module's
+  // uploadTextNamesNoDocument (this function is serialized into the page and cannot reach module
+  // scope): change both; the unit test and smoke [D] pin them on one corpus.
+  const GENERIC_WORDS =/\b(select|choose|browse|upload|attach|add|drag|drop|click|here|please|a|an|the|this|that|your|new|for|to|of|or|and|file|files|document|documents|requirement|requirements|set|item|items|button|now|max(imum)?|size|mb|kb|type|types|allowed|accepted|only|pdf|jpg|jpeg|png|no|chosen|selected)\b/gi;
   function namesNoDocument(text: string): boolean {
     const t = String(text || "").replace(/\([^)]*\)/g, " ");
     return !t.replace(GENERIC_WORDS, " ").replace(/[^a-z]+/gi, "").trim();
