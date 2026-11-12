@@ -5459,6 +5459,16 @@ export interface BatteryPermittingAnswer {
   /** Documents the page names for the battery (a storage packet, a fire approval letter). */
   documents?: string[];
 }
+/** THE RECORD TYPE / WORK ITEM a learn is told to tick (#166): the per-job lookup's record type for
+ *  the permit this learn files, with the standing of the row it came from. `verified` is true only
+ *  when that lookup row is person-verified (permitProcess.isVerifiedPermitProcess) — rule 3's line:
+ *  a verified name is the deterministic pick wherever a page offers it (matched by label with
+ *  permitProcess.sameRecordType, never by position); a seeded one is a planner hint and nothing
+ *  more. null = no record type on file, or a utility (interconnection) learn. */
+export interface LearnTargetRecordType {
+  value: string;
+  verified: boolean;
+}
 export interface PermitProcessLookup {
   profileKey: string;
   state: string;

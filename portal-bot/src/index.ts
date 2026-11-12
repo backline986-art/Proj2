@@ -955,6 +955,10 @@ export async function learnPortal(input: {
   /** City/ZIP/owner + discipline, so an address-disambiguation grid can refuse a row that
    *  belongs to another property rather than guessing between them. */
   siteIdentity?: import("./addressVersion").SiteIdentity;
+  /** #166: the per-job lookup's record type / work item for this permit, with its standing. A
+   *  VERIFIED one is ticked by the learner wherever a page offers it (by label); a seeded one is
+   *  the planner's hint only. null / omitted on a utility learn or with nothing on file. */
+  targetRecordType?: import("../../shared/src/types").LearnTargetRecordType | null;
   /** Operator delegation: click the recorded final submit rather than leaving it for a human.
    *  Honoured only alongside PORTAL_ALLOW_FINAL_SUBMIT=1, checked at the click itself. */
   allowFinalSubmit?: boolean;
@@ -986,7 +990,7 @@ export async function learnPortal(input: {
       input.onProgress?.({ phase: "page", pageCount: 0, maxPages: input.maxPages ?? 18, message: `Paused for a person: ${String(info.reason ?? "").slice(0, 200)}` });
     } catch { /* a notifier must never change the outcome */ }
   };
-  const adapter = new AutoLearnAdapter(input.portalName, input.planner, { parkMs: input.parkMs, credentialForUrl: input.credentialForUrl, noProgressBudgetMs: input.noProgressBudgetMs, maxPages: input.maxPages, budgetMs: input.budgetMs, docsByType: input.docsByType, beforeUpload: input.beforeUpload, uploadMode: input.uploadMode, policyProfile: input.policyProfile, bindableFields: input.bindableFields, onProgress: input.onProgress, onPark, equipment: input.equipment, certifiedAliases: input.certifiedAliases, contactIdentity: input.contactIdentity, siteContactIdentity: input.siteContactIdentity, siteIdentity: input.siteIdentity, allowFinalSubmit: input.allowFinalSubmit, hasBattery: input.hasBattery, allowConsentAccept: input.allowConsentAccept, continueDraft: input.continueDraft, signatureRequestApproval: input.signatureRequestApproval ?? null, runId: input.runId, infoPagePasses: input.infoPagePasses, infoPagePriorProgress: input.infoPagePriorProgress, infoPagePassUnavailable: input.infoPagePassUnavailable, reserveInfoPagePass: input.reserveInfoPagePass, onInfoPagePassed: input.onInfoPagePassed, infoPageProofValues: input.infoPageProofValues });
+  const adapter = new AutoLearnAdapter(input.portalName, input.planner, { parkMs: input.parkMs, credentialForUrl: input.credentialForUrl, noProgressBudgetMs: input.noProgressBudgetMs, maxPages: input.maxPages, budgetMs: input.budgetMs, docsByType: input.docsByType, beforeUpload: input.beforeUpload, uploadMode: input.uploadMode, policyProfile: input.policyProfile, bindableFields: input.bindableFields, onProgress: input.onProgress, onPark, equipment: input.equipment, certifiedAliases: input.certifiedAliases, contactIdentity: input.contactIdentity, siteContactIdentity: input.siteContactIdentity, siteIdentity: input.siteIdentity, targetRecordType: input.targetRecordType ?? null, allowFinalSubmit: input.allowFinalSubmit, hasBattery: input.hasBattery, allowConsentAccept: input.allowConsentAccept, continueDraft: input.continueDraft, signatureRequestApproval: input.signatureRequestApproval ?? null, runId: input.runId, infoPagePasses: input.infoPagePasses, infoPagePriorProgress: input.infoPagePriorProgress, infoPagePassUnavailable: input.infoPagePassUnavailable, reserveInfoPagePass: input.reserveInfoPagePass, onInfoPagePassed: input.onInfoPagePassed, infoPageProofValues: input.infoPageProofValues });
   let tmpStatePath: string | undefined;
   let leaveOpen = false;
   // A browser left open by a prior guided-manual stage holds this profile's lock — close it

@@ -27,6 +27,7 @@
 // code the live run does. The previous version duplicated the logic into the test, and the
 // hand-written fixture drifted from the portal: the test passed while the live run failed.
 // ---------------------------------------------------------------------------
+import { sameRecordType } from "../../../backend/src/permitProcess";
 
 /** One selectable programme inside a candidate container. */
 export interface ProgramOption {
@@ -289,6 +290,10 @@ export interface ProgramJob {
   jobClass?: JobClass;
   /** The system size the program thresholds are compared against (AC where known, else DC). */
   sizeKw?: number | null;
+  /** #166: the PERSON-VERIFIED record type / work item on file for this permit (never a seeded
+   *  one — that is a planner hint, hard rule 3). An offered option whose label sameRecordType()s it
+   *  is the pick before any word tier is consulted. */
+  recordType?: string | null;
 }
 
 /**
@@ -328,13 +333,14 @@ export function programClassFit(label: string, job: ProgramJob = {}): "fits" | "
 export interface ProgramChoice {
   pick?: ProgramOption;
   /**
+   * "target"       an option's label IS the person-verified record type on file (#166);
    * "matched"      one option fits the deciding tier for this job;
    * "ambiguous"    two or more fit the deciding tier and their labels do not settle which;
    * "other_class"  the only matching options name the other class (a commercial-only
    *                program offered to a residential job, or the reverse);
    * "unmatched"    nothing reads as something we came here to apply for.
    */
-  reason: "matched" | "ambiguous" | "other_class" | "unmatched";
+  reason: "target" | "matched" | "ambiguous" | "other_class" | "unmatched";
   /** The labels the decision was between — for a refusal the person can act on. */
   candidates: string[];
 }
@@ -359,6 +365,17 @@ export function explainProgramChoice(groups: ProgramGroup[], discipline?: string
     ? [...PROGRAM_PREFER_PERMIT, ...PROGRAM_PREFER]
     : [...PROGRAM_PREFER, ...PROGRAM_PREFER_PERMIT];
   const ranked = (Array.isArray(groups) ? groups.slice() : []).sort((a, b) => a.area - b.area);
+  // #166: A PERSON NAMED THE RECORD TYPE — it wins before any word tier, and before the exclusion
+  // list (a person's name for the thing is not re-judged by a regex). Tightest group first, and
+  // only an EXACT label match (sameRecordType: case / punctuation / "permit" folded), never a
+  // substring — "Residential Solar" is not "Residential Solar - Demolition".
+  const target = String(job.recordType ?? "").trim();
+  if (target) {
+    for (const group of ranked) {
+      const hit = (group.options || []).find((o) => o && typeof o.label === "string" && sameRecordType(o.label, target));
+      if (hit) return { pick: hit, reason: "target", candidates: [hit.label] };
+    }
+  }
   let otherClass: string[] = [];
   for (const group of ranked) {
     const eligible = (group.options || []).filter((o) => o && typeof o.label === "string" && !PROGRAM_EXCLUDE.test(o.label));

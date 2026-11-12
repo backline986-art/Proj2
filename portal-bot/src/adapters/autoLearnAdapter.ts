@@ -3,7 +3,9 @@ import { preferredRowLabel, rankAddressVersions, type SiteIdentity } from "../ad
 import { imageToPdfBytes, pdfNameFor, shouldConvertToPdf } from "../imageToPdf";
 import path from "path";
 import type { Page, Frame, Locator } from "playwright";
-import type { PortalRecipe, ProjectRecord, RecipeSelector, RecipeStep, StepFingerprint } from "../../../shared/src/types";
+import type { LearnTargetRecordType, PortalRecipe, ProjectRecord, RecipeSelector, RecipeStep, StepFingerprint } from "../../../shared/src/types";
+// #166: the ONE record-type label matcher (the replay's borrow reads the same one — findBorrowableRecipe).
+import { sameRecordType } from "../../../backend/src/permitProcess";
 import { BasePortalAdapter, HUMAN_REVIEW_MESSAGE, type PortalContext, type PortalStepResult } from "../adapter";
 import { openPortal } from "../browser";
 import { selectWithFallback, readClosedComboboxOptions } from "../comboboxFill";
@@ -328,6 +330,12 @@ export interface LearnResult {
    *  a portal list can hold several drafts for the same customer, and auditing "the first" or
    *  "the newest" matching row picked the wrong one both times it was tried. */
   applicationUrl?: string;
+  /** #166 — THE PERSON-VERIFIED RECORD TYPE WAS NOT OFFERED on the record-type / work-item page
+   *  this walk met: what was wanted, what the page offered (≤12 labels) and what the planner ticked
+   *  there (its own choice — the backend names the gap in the run's issues). Undefined when no
+   *  verified type is on file or the page offered it (then it was ticked, event
+   *  record_type_verified_pick). */
+  recordTypeNotOffered?: { wanted: string; offered: string[]; ticked: string[] };
   /** Absolute path of this run's debug bundle (data/learn-runs/<runId>) — the folder the
    *  operator zips up for troubleshooting. Undefined when AUTOLEARN_RUN_DEBUG=0. */
   debugDir?: string;
@@ -581,6 +589,12 @@ const NOT_LISTED_CHECKBOX =
 // discipline on the request, so the planner never gets to choose it; see the guard in
 // applyFill and accelaRecordTypePass, which picks it deterministically.
 const RECORD_TYPE_LABEL = /^\s*(residential|commercial)\s*[-–—]\s*\S/i;
+// #166: a checkable whose label reads as a RECORD TYPE / WORK ITEM option on any portal (CityView's
+// work-item list, Accela's CapType radios, a permit-type picker): the discipline / permit words,
+// or the solar and generation words a PV item carries. Two or more on a page = a choice of what to
+// file; used only to tell a record-type page from a login or address page (the not-offered report),
+// never to pick anything.
+const RECORD_TYPE_OPTION_WORDS = /\bsolar\b|photovoltaic|\bpv\b|renewable|generation|interconnect|net.?meter|\bpermit(s)?\b|electrical|structural|mechanical|plumbing|\bbuilding\b|\bresidential\b|\bcommercial\b/i;
 
 // PGE/PowerClerk Yes/No POLICY questions whose answer is fixed for standard residential NEM.
 // Mirrors the knowledge-base seed. A deterministic pass applies the policy answer so the portal
@@ -2856,6 +2870,18 @@ export class AutoLearnAdapter extends BasePortalAdapter {
   /** #693: the job's class and size, so the program chooser prefers THIS job's program
    *  over the first one in DOM order (a commercial program listed above the residential one). */
   private programJob: ProgramJob = {};
+  /** #166: the record type / work item on file for this permit (see the constructor option). */
+  private targetRecordType: LearnTargetRecordType | null = null;
+  /** #166: THE VERIFIED RECORD TYPE IS OFFERED ON THE PAGE BEING PLANNED — the option that matched
+   *  it, as the fill guard reads it: a planner pick of ANOTHER checkable in the same list (same
+   *  kind, radio group and section) is refused. Re-read on every iteration the page is planned, so
+   *  a re-plan of the same page keeps the guard; null when the page does not offer it. */
+  private verifiedRecordTypeOnPage: { label: string; fieldType: ExtractedField["fieldType"]; group?: string; section?: string } | null = null;
+  /** #166: the verified record type was ticked (and recorded) once this run. */
+  private verifiedRecordTypeTicked = false;
+  /** #166: the first record-type page that did NOT offer the verified type: the gap, with what the
+   *  planner ticked there (filled in after its fills on that page). Reported on every return. */
+  private recordTypeNotOffered: { wanted: string; offered: string[]; ticked: string[]; page: number } | null = null;
   /** Set when the review page's own save was still pending when the learn handed over (B3). */
   private reviewUnsavedWarning = "";
   /** THE PROJECT'S OWN SECRETS, READ BY NAME AT FILL TIME (hard rule 2). Live on PGE (2026-09-28):
@@ -3053,6 +3079,11 @@ export class AutoLearnAdapter extends BasePortalAdapter {
       bindableFields?: string[];
       /** City/ZIP/owner of the project, so a row for someone else's property is refused. */
       siteIdentity?: SiteIdentity;
+      /** #166: the record type / work item on file for this permit, with its standing. VERIFIED → the
+       *  walk ticks the offered option whose label matches (sameRecordType) before the planner is
+       *  asked, and refuses a planner pick of another option on that page; seeded → nothing here (the
+       *  backend gives the planner the hint). null / omitted: the planner chooses, as before. */
+      targetRecordType?: LearnTargetRecordType | null;
       /** Operator delegation: click the recorded final submit instead of leaving it. */
       allowFinalSubmit?: boolean;
       /** Whether the PROJECT says a battery exists. false = guard against declaring one. */
@@ -3139,6 +3170,7 @@ export class AutoLearnAdapter extends BasePortalAdapter {
     this.policyProfile = options.policyProfile ?? "residential_nem";
     this.bindableFields = new Set(options.bindableFields ?? []);
     this.siteIdentity = options.siteIdentity;
+    this.targetRecordType = options.targetRecordType ?? null;
     this.continueDraft = options.continueDraft;
     this.signatureRequestApproval = options.signatureRequestApproval ?? null;
     this.infoPagePasses = Object.freeze((options.infoPagePasses ?? []).map((e) => Object.freeze(JSON.parse(JSON.stringify(e)) as VerifiedInfoPage)));
@@ -5065,6 +5097,8 @@ export class AutoLearnAdapter extends BasePortalAdapter {
         // Program thresholds are printed against the size the utility rates the system at;
         // AC where the plan gives it, else DC.
         sizeKw: project.systemSizeAcKw ?? project.systemSizeDcKw ?? null,
+        // #166: only a PERSON-VERIFIED record type is the chooser's target (a seeded one is a hint).
+        recordType: this.verifiedRecordType(),
       };
       // #575: the job's own address, which a typeahead's address suggestion must be unmistakably.
       this.typeaheadSite = {
@@ -5108,6 +5142,12 @@ export class AutoLearnAdapter extends BasePortalAdapter {
       result = { ...result, pageExitReads: { read: [...this.pageExitReads.read], unread: [...this.pageExitReads.unread] } };
       if (this.equipmentStrays.length) {
         result = { ...result, message: `${result.message} EQUIPMENT FILL REACHED ANOTHER CONTROL — check before submitting: ${this.equipmentStrays.slice(0, 6).map((l) => this.scrubSecrets(l)).join("; ")}.` };
+      }
+      // #166: the verified record type the record-type page did not offer — on every return, so the
+      // backend can name the gap for a person however the walk ended.
+      if (this.recordTypeNotOffered) {
+        const { wanted, offered, ticked } = this.recordTypeNotOffered;
+        result = { ...result, recordTypeNotOffered: { wanted, offered: [...offered], ticked: [...ticked] } };
       }
       // #575: a search box that picked nothing is said, whichever way the walk ended (a stop on its
       // question already leads with it).
@@ -6627,6 +6667,12 @@ export class AutoLearnAdapter extends BasePortalAdapter {
     if (!ok) return false;
     this.programChosen = true;
     await this.waitForDynamicFieldsSettle().catch(() => null);
+    // #166: the person-verified record type won the choice — said in the same words as the
+    // checkable pass, so one event names every deterministic verified pick.
+    if (choice.reason === "target") {
+      this.verifiedRecordTypeTicked = true;
+      this.debug?.event({ type: "record_type_verified_pick", label: picked.label.slice(0, 70), offeredCount: offeredLabels(list).length });
+    }
     this.debug?.event({
       type: "application_program_chosen",
       label: picked.label.slice(0, 60),
@@ -6644,6 +6690,93 @@ export class AutoLearnAdapter extends BasePortalAdapter {
     return true;
   }
 
+  /** #166: the record type a PERSON verified for this permit, or "" (a seeded one is never this). */
+  private verifiedRecordType(): string {
+    const t = this.targetRecordType;
+    return t && t.verified ? String(t.value ?? "").trim() : "";
+  }
+
+  /** #166: the recorded step + event for the verified record type just ticked (by label). */
+  private noteVerifiedRecordTypeTicked(field: ExtractedField, offeredCount: number, steps: RecipeStep[]): void {
+    const label = String(field.label || "").trim();
+    steps.push({ action: "check", phase: "fill", selector: field.selector, note: `record type (verified): ${label.slice(0, 60)}` });
+    this.verifiedRecordTypeTicked = true;
+    this.debug?.event({ type: "record_type_verified_pick", label: label.slice(0, 70), offeredCount });
+  }
+
+  /** Does this checkable belong to the SAME LIST as the verified option on the page: the same kind of
+   *  control, the same radio group and the same section. (Both sections unread reads as the same
+   *  list — on a page that offers the verified type, its checkables are the work-item list.) */
+  private sameRecordTypeList(field: ExtractedField, on: NonNullable<AutoLearnAdapter["verifiedRecordTypeOnPage"]>): boolean {
+    return field.fieldType === on.fieldType
+      && String(field.group ?? "") === String(on.group ?? "")
+      && String(field.section ?? "") === String(on.section ?? "");
+  }
+
+  /**
+   * #166 — THE PERSON-VERIFIED RECORD TYPE IS THE PICK, BEFORE THE PLANNER IS ASKED.
+   *
+   * Watched City of Bend learn (2026-11-12): CityView's "Work Items" page offered both "Prescriptive
+   * photovoltaic systems" (the job's person-verified process row names exactly this) and "Renewable
+   * energy up to 25KVA". The planner ticked the Renewable one, and the run went on to file the wrong
+   * work item. The discipline guard (RECORD_TYPE_LABEL) could not help: both are electrical, both
+   * solar. The verified name had simply never reached the learner.
+   *
+   * On every page, before the planner: an offered checkable whose label sameRecordType()s the
+   * verified name is ticked ONCE this run (recorded by label, note "record type (verified): …"),
+   * put in alreadyFilledLabels so the planner sees it as settled, and remembered for the fill guard
+   * (applyFillInner) so a planner pick of ANOTHER option in that list is refused. Generic by
+   * construction: the label comes from the knowledge base, the matcher is sameRecordType, no
+   * portal is named.
+   *
+   * A record-type page that does NOT offer the verified name (two or more work-item-like
+   * checkables, none matching) is reported once: event record_type_verified_not_offered, the
+   * planner is told the name for this page (it chooses the nearest), and the run's result carries
+   * the gap for a person (LearnResult.recordTypeNotOffered — the backend names it in the issues).
+   *
+   * A seeded (unverified) record type never reaches this pass: hard rule 3 — only a person's
+   * word is authority; the lookup's reading is the planner's hint (backend jurisdictionContext).
+   *
+   * Returns the planner's hint for this page, or "" when nothing is to be said.
+   */
+  private async verifiedRecordTypePass(fields: ExtractedField[], steps: RecipeStep[], alreadyFilledLabels: string[], pageCount: number): Promise<string> {
+    this.verifiedRecordTypeOnPage = null;
+    const wanted = this.verifiedRecordType();
+    if (!wanted) return "";
+    const checkables = fields.filter((f) => f.fieldType === "checkbox" || f.fieldType === "radio");
+    const hit = checkables.find((f) => sameRecordType(f.label || "", wanted));
+    if (hit) {
+      const on = { label: String(hit.label || "").trim(), fieldType: hit.fieldType, group: hit.group, section: hit.section };
+      const listCount = checkables.filter((f) => this.sameRecordTypeList(f, on)).length;
+      if (!this.verifiedRecordTypeTicked) {
+        const loc = await this.locator(hit.selector).catch(() => null);
+        const ok = loc
+          ? await loc.check({ timeout: 10000 }).then(() => true)
+            .catch(async () => loc.click({ timeout: 8000 }).then(() => true).catch(() => false))
+          : false;
+        if (!ok) {
+          // Not ticked, not recorded: the planner keeps the page, and the guard below still refuses
+          // another option — a person ticks this one.
+          this.debug?.event({ type: "record_type_verified_tick_failed", label: on.label.slice(0, 70), page: pageCount });
+        } else {
+          this.noteVerifiedRecordTypeTicked(hit, listCount, steps);
+          await this.waitForDynamicFieldsSettle().catch(() => null);
+        }
+      }
+      this.verifiedRecordTypeOnPage = on;
+      if (this.verifiedRecordTypeTicked && hit.label && !alreadyFilledLabels.includes(hit.label)) alreadyFilledLabels.push(hit.label);
+      return "";
+    }
+    // Not offered. Only a page that offers a CHOICE of work items / record types is a gap worth a
+    // person's attention — never a login or address page with one stray checkbox.
+    const typeLike = checkables.filter((f) => RECORD_TYPE_OPTION_WORDS.test(f.label || ""));
+    if (typeLike.length < 2 || this.recordTypeNotOffered) return "";
+    const offered = Array.from(new Set(typeLike.map((f) => String(f.label || "").trim()).filter(Boolean))).slice(0, 12);
+    this.recordTypeNotOffered = { wanted, offered, ticked: [], page: pageCount };
+    this.debug?.event({ type: "record_type_verified_not_offered", wanted: wanted.slice(0, 70), offered, page: pageCount });
+    return `The record type / work item a person verified for this permit is "${wanted}", and this page does not offer that exact name. Tick the ONE offered item that is that permit (the closest reading of it) and say which in notes.`;
+  }
+
   private async accelaRecordTypePass(project: ProjectRecord, fields: ExtractedField[], steps: RecipeStep[]): Promise<boolean> {
     const page = this.page;
     if (!page) return false;
@@ -6654,9 +6787,14 @@ export class AutoLearnAdapter extends BasePortalAdapter {
     ];
     const candidates = fields.filter((f) => f.fieldType === "checkbox" || f.fieldType === "radio");
     let chosen: ExtractedField | undefined;
+    // #166: A PERSON NAMED THE RECORD TYPE — it wins over the solar / discipline preference. Matched by
+    // label (sameRecordType), never by position; the category-opening below serves it the same way.
+    const verifiedTarget = this.verifiedRecordType();
+    const verifiedHit = verifiedTarget ? candidates.find((f) => sameRecordType(f.label || "", verifiedTarget)) : undefined;
+    if (verifiedHit) chosen = verifiedHit;
     for (const re of prefs) {
-      chosen = candidates.find((f) => re.test(f.label || ""));
       if (chosen) break;
+      chosen = candidates.find((f) => re.test(f.label || ""));
     }
     if (!chosen) { this.debug?.event({ type: "record_type_bail", why: "no candidate matched the solar/discipline preference" }); return false; }
     const loc = await this.locator(chosen.selector);
@@ -6711,7 +6849,11 @@ export class AutoLearnAdapter extends BasePortalAdapter {
     const checkOk = await loc.check({ timeout: 10000 }).then(() => true)
       .catch(async () => loc.click({ timeout: 8000 }).then(() => true).catch(() => false));
     if (!checkOk) { this.debug?.event({ type: "record_type_bail", why: "record-type check/click failed" }); return false; }
-    steps.push({ action: "check", phase: "fill", selector: chosen.selector, note: `record type: ${(chosen.label || "").slice(0, 60)}` });
+    if (chosen === verifiedHit) {
+      this.noteVerifiedRecordTypeTicked(chosen, candidates.length, steps);
+    } else {
+      steps.push({ action: "check", phase: "fill", selector: chosen.selector, note: `record type: ${(chosen.label || "").slice(0, 60)}` });
+    }
     const cont = this.acaContinueLocator();
     if (await cont.count().catch(() => 0)) {
       if (!(await cont.click({ timeout: 10000 }).then(() => true).catch(() => false))) {
@@ -7801,6 +7943,11 @@ export class AutoLearnAdapter extends BasePortalAdapter {
       // chooser) can leave another page on screen without asking the loop to re-read; planning
       // `fields` then plans a page that is gone. Re-read instead — before paying for the call.
       // Not after the typed signature: the bot's own signing changes the page it signs.
+      // #166: the person-verified record type is ticked here, before the planner sees the page.
+      {
+        const typeHint = await this.verifiedRecordTypePass(fields, steps, alreadyFilledLabels, pageCount).catch(() => "");
+        if (typeHint) recoveryHint = `${recoveryHint ? `${recoveryHint} ` : ""}${typeHint}`;
+      }
       if (!signatureDone && await pageMovedUnderPlan("before the planner was asked")) continue;
       let plan: LearnPlanResponse;
       const planShot = await this.capturePlanScreenshot();
@@ -8785,6 +8932,12 @@ export class AutoLearnAdapter extends BasePortalAdapter {
           steps.push(step);
           pageFillCount++;
           if (field.label) alreadyFilledLabels.push(field.label);
+          // #166: on the page that did not offer the verified record type, what the planner ticked
+          // instead is the gap a person reads ("the walk ticked Y").
+          if (step.action === "check" && this.recordTypeNotOffered?.page === pageCount && field.label
+            && RECORD_TYPE_OPTION_WORDS.test(field.label) && !this.recordTypeNotOffered.ticked.includes(field.label)) {
+            this.recordTypeNotOffered.ticked.push(field.label);
+          }
           appliedThisPage.push({
             selector: field.selector,
             label: field.label || "",
@@ -11392,6 +11545,30 @@ export class AutoLearnAdapter extends BasePortalAdapter {
     // contradicts the discipline is refused — nothing checked, nothing recorded, so no recipe
     // can inherit it. A solar/PV-specific type is always allowed: that IS the right answer
     // wherever an AHJ offers one.
+    // #166: A PERSON-VERIFIED RECORD TYPE IS OFFERED ON THIS PAGE (verifiedRecordTypePass found and
+    // ticked it): the planner's pick of ANOTHER option in that list is refused — nothing checked,
+    // nothing recorded. Its pick of the verified option itself is already done (a second check
+    // would record a duplicate step, which corrupts every replay) — dropped quietly.
+    if (isCheckable && this.verifiedRecordTypeOnPage) {
+      const on = this.verifiedRecordTypeOnPage;
+      const label = field.label || "";
+      if (sameRecordType(label, on.label)) {
+        if (this.verifiedRecordTypeTicked) {
+          this.debug?.event({ type: "record_type_verified_settled", label: label.slice(0, 70) });
+          return null;
+        }
+      } else if (this.sameRecordTypeList(field, on)) {
+        this.debug?.event({
+          type: "record_type_refused",
+          label: label.slice(0, 70),
+          discipline: this.permitDiscipline,
+          why: "a person-verified record type is offered on this page",
+          verified: on.label.slice(0, 70),
+        });
+        return null;
+      }
+    }
+
     if (isCheckable && RECORD_TYPE_LABEL.test(field.label || "") && this.permitDiscipline) {
       const label = field.label || "";
       const wantElectrical = /elec/i.test(this.permitDiscipline);
