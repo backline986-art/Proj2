@@ -14,6 +14,7 @@
 // checked FIRST and win over any positive match.
 
 import type { Page, Frame, Locator } from "playwright";
+import { DISCLOSURE_TOGGLE_SELECTOR } from "./disclosureToggle";
 
 export interface ApplicationEntryMatch {
   /** The visible label of the control we would click. */
@@ -213,7 +214,7 @@ function entryRank(label: string): number {
 // ---------------------------------------------------------------------------
 
 /** Stamp the page's chrome — account, toggle, frame — for every door to read. Returns counts. */
-export function markSiteChromeInPage(): { account: number; toggle: number; frame: number } {
+export function markSiteChromeInPage(disclosureSel: string = "[aria-expanded]"): { account: number; toggle: number; frame: number } {
   for (const prev of Array.from(document.querySelectorAll("[data-al-chrome]"))) prev.removeAttribute("data-al-chrome");
   const FRAME = "nav, header, footer, [role='navigation'], [role='banner'], [role='contentinfo'], [role='tablist'], "
     + "[role='menu'], [role='menubar'], [aria-label*='step' i], [class*='stepper'], [class*='steps'], [class*='stepNav'], "
@@ -234,7 +235,7 @@ export function markSiteChromeInPage(): { account: number; toggle: number; frame
 
   const anchors: Element[] = [];
   // Toggles first: decide "account" or "toggle" by what the menu they open holds.
-  for (const t of Array.from(document.querySelectorAll("[data-bs-toggle='dropdown'], [data-toggle='dropdown'], .dropdown-toggle, [aria-haspopup], [aria-expanded]"))) {
+  for (const t of Array.from(document.querySelectorAll(`[data-bs-toggle='dropdown'], [data-toggle='dropdown'], .dropdown-toggle, [aria-haspopup], ${disclosureSel}`))) {
     if (t === root || t === body) continue;
     let menu: Element | null = null;
     const ctl = (t.getAttribute("aria-controls") || "").split(/\s+/).filter(Boolean)[0];
@@ -247,7 +248,10 @@ export function markSiteChromeInPage(): { account: number; toggle: number; frame
     const pop = (t.getAttribute("aria-haspopup") || "").toLowerCase();
     const declared = t.matches("[data-bs-toggle='dropdown'], [data-toggle='dropdown'], .dropdown-toggle")
       || pop === "true" || pop === "menu" || pop === "listbox";
-    if (!declared && !menu) continue; // aria-expanded alone — an accordion, a disclosure — is not a toggle
+    // A disclosure alone (DISCLOSURE_TOGGLE_SELECTOR — an accordion, a collapsible legend) that
+    // opens no menu is not a dropdown toggle. The same predicate keeps the login's submit pick
+    // off such a control (loginFlow).
+    if (!declared && !menu) continue;
     const ownLabel = `${t.getAttribute("aria-label") || ""} ${t.getAttribute("title") || ""}`;
     const accountish = (menu !== null && ACCOUNT_ACTION.test(menu.textContent || ""))
       || ACCOUNT_LABEL.test(ownLabel);
@@ -304,7 +308,7 @@ export function markSiteChromeInPage(): { account: number; toggle: number; frame
  *  leaves every door exactly as it was before this existed. */
 export async function markSiteChrome(scope: Page | Frame): Promise<void> {
   if (!scope || typeof (scope as Frame).evaluate !== "function") return;
-  try { await (scope as Frame).evaluate(markSiteChromeInPage); } catch { /* fail open */ }
+  try { await (scope as Frame).evaluate(markSiteChromeInPage, DISCLOSURE_TOGGLE_SELECTOR); } catch { /* fail open */ }
 }
 
 // ---------------------------------------------------------------------------
