@@ -12,6 +12,7 @@
 // run must stop rather than approximate.
 //   npx tsx portal-bot/src/adapters/recordType.test.ts
 import assert from "node:assert/strict";
+import { recordTypeGroupNote, recordTypeGroupOf } from "./recordTypeGroup";
 
 let failures = 0;
 const check = (label: string, fn: () => void): void => {
@@ -122,6 +123,37 @@ check("a category is only a prefix, never an equal or a substring elsewhere", ()
 });
 check("a too-short category label cannot match by accident", () => {
   assert.equal(categoryFor("Residential Solar", ["Res"]), undefined);
+});
+
+// ---------------------------------------------------------------------------
+// A RECORD TYPE INSIDE A COLLAPSED GROUP IS OPENED BY ITS OWN HEADER (#174).
+//
+// Meridian's CapType page groups the radios under header toggles; the category checkboxes are in
+// a hidden filter panel. The learner records the header click as "record type group: <text>", and
+// the replay routes that step by label (recipeAdapter.isRecordTypeStep → openRecordTypeGroup) — the
+// REAL predicate, imported, not a copy: a group healed onto a neighbour by position exposes another
+// list, and the type ticked after it is the permit that gets filed.
+// ---------------------------------------------------------------------------
+check("THE REGRESSION: the group-header click is a record-type step, by its note", () => {
+  const step = { action: "click", selector: { role: "link", name: "Expand Residential Electrical", exact: true }, note: recordTypeGroupNote("Residential Electrical") };
+  assert.equal(step.note, "record type group: Residential Electrical");
+  assert.equal(recordTypeGroupOf(step as never), "Residential Electrical");
+});
+check("the group's words are read back whatever the spacing or case of the prefix", () => {
+  assert.equal(recordTypeGroupOf({ action: "click", note: "  Record Type Group:   Trades " }), "Trades");
+});
+check("a check step is never a group step (the type itself is the check that follows)", () => {
+  assert.equal(recordTypeGroupOf({ action: "check", note: "record type group: Residential Electrical" }), "");
+  assert.equal(recordTypeGroupOf({ action: "check", note: "record type (verified): Residential Electrical Solar Array" }), "");
+});
+check("an ordinary click is not a group step", () => {
+  for (const n of ["record type: continue", "accela: expand record-type category \"Residential\"", "advance: Continue Application »", ""]) {
+    assert.equal(recordTypeGroupOf({ action: "click", note: n }), "", n);
+  }
+});
+check("the note is capped and whitespace-folded (a header's wrapped text records as one line)", () => {
+  assert.equal(recordTypeGroupNote("Residential\n   Electrical"), "record type group: Residential Electrical");
+  assert.equal(recordTypeGroupNote("x".repeat(80)).length, "record type group: ".length + 60);
 });
 
 if (failures) { console.error(`\n${failures} record-type check(s) FAILED.`); process.exit(1); }
