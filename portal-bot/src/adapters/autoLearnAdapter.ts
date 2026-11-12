@@ -5348,8 +5348,8 @@ export class AutoLearnAdapter extends BasePortalAdapter {
   /** The page's review reading with its step navigator cut, and the control labels that exist
    *  only inside the navigator (portalSafety reviewTextInPage / navigatorOnlyControlLabelsInPage).
    *  Also, from the same shared reading, the navigator's CURRENT step(s) (navigatorActiveStepsInPage)
-   *  and the page's live-fillable answer (readOnlyPageInPage), for the planner-review demotion
-   *  (#188). null = unreadable (a fake page) — the caller falls back to the whole body. */
+   *  for the planner-review demotion (#188), and the page's live-fillable answer
+   *  (readOnlyPageInPage) — logged with it, never evidence on its own. null = unreadable (a fake page) — the caller falls back to the whole body. */
   private async pageReviewReading(): Promise<{ text: string; navOnly: string[]; activeSteps: string[]; activeTerminal: boolean; readOnly: boolean | null } | null> {
     if (!this.page || typeof this.page.evaluate !== "function") return null;
     await this.page.evaluate(PORTAL_SAFETY_IN_PAGE_SOURCE).catch(() => null);
@@ -8632,11 +8632,18 @@ export class AutoLearnAdapter extends BasePortalAdapter {
       //   DEMOTE — when that control is the planner's ONLY review evidence (the page is not review
       //            by structure, its navigator-cut text names no review, no on-page submit-shaped
       //            control, no terms box, no review URL), the plan is not a review stop — but ONLY on
-      //            positive evidence of a FORM step, all of: a fillable control on a non-dashboard,
-      //            AND either a live fillable one (readOnlyPageInPage false) or a navigator whose
-      //            CURRENT step is known and not terminal-worded (navigatorActiveStepsInPage). Any
-      //            doubt keeps review — the direction that cannot file. Nothing here touches the
-      //            Enter gate, the terminal-submit reading, the network backstop or the lockdown.
+      //            positive evidence of a FORM step, both of: a fillable control on a non-dashboard,
+      //            AND a navigator whose CURRENT step is known and not terminal-worded
+      //            (navigatorActiveStepsInPage). Any doubt keeps review — the direction that cannot
+      //            file. Nothing here touches the Enter gate, the terminal-submit reading, the
+      //            network backstop or the lockdown.
+      //   NOT "a live fillable control" ALONE (adversarial review, B1). readOnlyPageInPage is false
+      //            on any visible enabled box outside header/nav/search — a footer language picker,
+      //            an optional "Notes to reviewer" — and a review page can carry one. A real summary
+      //            page with no review words outside its step bar, no readable current step and a
+      //            "Continue" that FILES (#346's shape) was demoted on it; the no-advance path's
+      //            fallback then clicked Continue with the lockdown never armed. Only the
+      //            navigator's own current step speaks for "this is a form step".
       {
         const navKey = (f: ExtractedField | undefined): string => String(f?.label ?? "").replace(/\s+/g, " ").trim().toLowerCase();
         const fsIdx = plan.finalSubmitSelectorIndex;
@@ -8646,7 +8653,7 @@ export class AutoLearnAdapter extends BasePortalAdapter {
           const onlyNavigatorEvidence = plan.atReview === true && !isReviewPage && !reviewSignals && !reviewShaped;
           const activeSteps = reading?.activeSteps ?? [];
           const currentStepIsForm = activeSteps.length > 0 && reading?.activeTerminal === false;
-          const formStep = hasFillable && !isDashboard && (reading?.readOnly === false || currentStepIsForm);
+          const formStep = hasFillable && !isDashboard && currentStepIsForm;
           if (onlyNavigatorEvidence && formStep) {
             plan = { ...plan, atReview: false, finalSubmitSelectorIndex: undefined };
             this.debug?.event({ type: "planner_review_demoted_navigator", page: pageCount, control, active: activeSteps.slice(0, 3), readOnly: reading?.readOnly ?? null });

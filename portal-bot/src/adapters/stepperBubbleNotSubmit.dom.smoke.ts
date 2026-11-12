@@ -21,6 +21,12 @@
 //   step7Submit   — the same page, the planner names the real Submit (recorded, never clicked).
 //   noFillable    — step 1 active, nothing to fill on the page, the planner names the bubble.
 //   textReview    — step 1 active, a live box, but the page's own title says "Step 7: Review".
+//   summaryContinue (adversarial review B1) — a real summary page ("APPLICATION SUMMARY", no review
+//                   words outside the step bar), NO current-step marker anywhere, a live footer
+//                   language <select> (readOnlyPageInPage false), and a "Continue" that FILES to a
+//                   URL with no filing word. The planner names the bubble. A live box alone once
+//                   demoted this page and the fallback advance clicked Continue: the POST must
+//                   never arrive.
 //
 // Run: npx tsx portal-bot/src/adapters/stepperBubbleNotSubmit.dom.smoke.ts [variant,...]
 import "../smokeArtifactDirs";
@@ -36,10 +42,12 @@ const check = (label: string, ok: boolean, detail = ""): void => {
   else { failures++; console.error(`  FAIL - ${label}\n         ${detail}`); }
 };
 
-type Variant = "tigardStep1" | "step7Bubble" | "step7Submit" | "noFillable" | "textReview";
+type Variant = "tigardStep1" | "step7Bubble" | "step7Submit" | "noFillable" | "textReview" | "summaryContinue";
 const TITLES = ["Locations", "Type", "Contacts", "More Info", "Attachments", "Signature", "Review and Submit"];
 const SUBMIT = "/api/selfservice/permit/submit";
 const DRAFT = "/api/selfservice/draft/save";
+// summaryContinue's filing POST: no filing word in the URL, so only the walk itself keeps it from firing.
+const APPLY = "/api/selfservice/permit/apply/12";
 
 const page = (variant: Variant): string => `<!doctype html><html><head><title>Apply for Permit</title>
 <style>
@@ -60,15 +68,16 @@ const page = (variant: Variant): string => `<!doctype html><html><head><title>Ap
   <div id="err"></div>
 </form>
 </div>
+${variant === "summaryContinue" ? `<footer><label for="lang">Language</label> <select id="lang"><option>English</option><option>Espanol</option></select></footer>` : ""}
 <script>
 var V = ${JSON.stringify(variant)};
-var S = { step: (V === "step7Bubble" || V === "step7Submit") ? 7 : 1, location: false, cardClicks: 0, bubbleClicks: 0, submitClicked: false, desc: "" };
+var S = { step: (V === "step7Bubble" || V === "step7Submit") ? 7 : V === "summaryContinue" ? 2 : 1, applyPosts: 0, location: false, cardClicks: 0, bubbleClicks: 0, submitClicked: false, desc: "" };
 window.__S = S;
 var TITLES = ${JSON.stringify(TITLES)};
 function stepper(){
   var h = '<div class="md-steppers-header-region"><md-steppers-header class="md-steppers-header md-steppers-horizontal" role="list">';
   for (var i = 0; i < TITLES.length; i++) {
-    h += '<button type="button" class="md-stepper-indicator' + (i + 1 === S.step ? ' md-active' : '') + '" role="listitem" data-step="' + (i + 1) + '">\\n'
+    h += '<button type="button" class="md-stepper-indicator' + (i + 1 === S.step && V !== "summaryContinue" ? ' md-active' : '') + '" role="listitem" data-step="' + (i + 1) + '">\\n'
       + '  <div class="md-stepper-indicator-wrapper">\\n'
       + '    <div class="md-stepper-number"><span>' + (i + 1) + '</span></div>\\n'
       + '    <div class="md-stepper-title"><span>' + TITLES[i] + '</span>\\n      <small class="md-stepper-error-message" hidden></small></div>\\n'
@@ -77,6 +86,10 @@ function stepper(){
   return h + '</md-steppers-header></div>';
 }
 function body(){
+  if (S.step === 7 && V === "summaryContinue") {
+    return '<h3 class="apply-steps-title">APPLICATION SUMMARY</h3>'
+      + '<dl><dt>Location</dt><dd>1 Test St</dd><dt>Description</dt><dd>' + (S.desc || "Roof-mounted solar PV") + '</dd></dl>';
+  }
   if (S.step === 7) {
     return '<h3 class="apply-steps-title">REVIEW AND SUBMIT</h3><p>Please review your application before submitting.</p>'
       + '<dl><dt>Location</dt><dd>1 Test St</dd><dt>Description</dt><dd>' + (S.desc || "Roof-mounted solar PV") + '</dd></dl>';
@@ -105,7 +118,7 @@ function render(){
   document.getElementById("stepper").innerHTML = stepper();
   document.getElementById("body").innerHTML = body();
   var next = document.getElementById("next");
-  next.textContent = S.step === 7 ? "Submit" : "Next";
+  next.textContent = S.step === 7 ? (V === "summaryContinue" ? "Continue" : "Submit") : "Next";
   document.getElementById("err").textContent = "";
   var add = document.getElementById("addLoc");
   // The card keeps no id a selector could use: strip it once it is wired (the live card had none).
@@ -115,6 +128,7 @@ function render(){
   });
 }
 document.getElementById("next").addEventListener("click", function(){
+  if (S.step === 7 && V === "summaryContinue") { S.submitClicked = true; S.applyPosts++; fetch(${JSON.stringify(APPLY)}, { method: "POST", body: "x=1" }).catch(function(){}); return; }
   if (S.step === 7) { S.submitClicked = true; fetch(${JSON.stringify(SUBMIT)}, { method: "POST", body: "x=1" }).catch(function(){}); return; }
   if (S.step === 1 && V === "tigardStep1" && !S.location) { document.getElementById("err").textContent = "An address is required."; return; }
   if (S.step === 2) { var d = document.getElementById("desc"); S.desc = d ? d.value : ""; if (!S.desc.trim()) { document.getElementById("err").textContent = "Description is required."; return; } }
@@ -163,11 +177,11 @@ const mkPlanner = (variant: Variant): LearnPlanner => async (req) => {
   };
 };
 
-type St = { step?: number; location?: boolean; cardClicks?: number; bubbleClicks?: number; submitClicked?: boolean; err?: string };
+type St = { step?: number; location?: boolean; cardClicks?: number; bubbleClicks?: number; submitClicked?: boolean; applyPosts?: number; err?: string };
 const readState = (pg: Page): Promise<St> => pg.evaluate(() => ({ ...(window as unknown as { __S: Record<string, unknown> }).__S }))
   .catch((e) => ({ err: String(e) })) as Promise<St>;
 
-const ALL: Variant[] = ["tigardStep1", "step7Bubble", "step7Submit", "noFillable", "textReview"];
+const ALL: Variant[] = ["tigardStep1", "step7Bubble", "step7Submit", "noFillable", "textReview", "summaryContinue"];
 const which = (process.argv[2] ? process.argv[2].split(",") : ALL) as Variant[];
 const browser = await chromium.launch();
 try {
@@ -232,6 +246,10 @@ try {
         st.step === 7 && r?.reachedReview === true && steps.some((s) => /^advance: Next/i.test(norm(s.note))), detail);
       check(`MUST-PASS ${tag}: the review stop records the real Submit as the one final submit`,
         finals.length === 1 && /final submit: Submit\b/.test(norm(finals[0].note)), detail);
+    } else if (name === "summaryContinue") {
+      check(`MUST-STAY-REVIEW ${tag}: the summary page (no current-step marker, a live footer select) is the review stop — no demotion, its filing "Continue" never clicked, the ${APPLY} POST never arrives`,
+        r?.reachedReview === true && demoted.length === 0 && st.step === 7 && st.applyPosts === 0 && !posts.includes(APPLY)
+          && !steps.some((s) => /^advance: Continue/i.test(norm(s.note))), `applyHits=${posts.filter((p) => p === APPLY).length} ${detail}`);
     } else {
       check(`MUST-STAY-REVIEW ${tag}: stops at review on the page it opened on, no demotion, nothing clicked past it`,
         r?.reachedReview === true && demoted.length === 0 && st.step === (name.startsWith("step7") ? 7 : 1)
