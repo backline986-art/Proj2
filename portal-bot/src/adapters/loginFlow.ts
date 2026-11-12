@@ -229,7 +229,11 @@ const REVEAL_TRIGGERS: RecipeSelector[] = [
  * the submit pick and the described-control pass cannot disagree about it.
  */
 const SOCIAL_IDP_SOURCE = "\\b(with|using|via)\\s+(google|microsoft|apple|facebook|linkedin|github|twitter|amazon|yahoo|paypal)\\b|^(google|microsoft|apple|facebook|linkedin|github|twitter|amazon|yahoo|paypal)$";
-const NEVER_ALWAYS_SOURCE = "\\bhelp\\b|\\bunlock\\b|\\bforgot\\b|\\breset (your |my )?password\\b|\\bkeep me (signed|logged) in\\b|\\bremember me\\b|\\bstay signed in\\b|verify with something else|\\bback to (sign|log)[\\s-]?in\\b|\\btrouble (signing|logging)\\b|can'?t (sign|log)[\\s-]?in";
+// A PASSKEY / platform authenticator is a second way to authenticate, never the password login's
+// control (live Idaho DOPL, 2026-11-12: the reveal's {button, "Sign in with"} pressed "Sign in with
+// a passkey" and the browser raised a WebAuthn error dialog). Choosing an authenticator is the
+// person's (rule 1), so it is on the never-click list for every login pass.
+const NEVER_ALWAYS_SOURCE = "\\bpass[\\s-]?key\\b|\\bsecurity key\\b|\\bwindows hello\\b|\\b(face|touch) id\\b|\\bhelp\\b|\\bunlock\\b|\\bforgot\\b|\\breset (your |my )?password\\b|\\bkeep me (signed|logged) in\\b|\\bremember me\\b|\\bstay signed in\\b|verify with something else|\\b(choose|try|use) (another|a different) way\\b|\\bback to (sign|log)[\\s-]?in\\b|\\btrouble (signing|logging)\\b|can'?t (sign|log)[\\s-]?in";
 const NEVER_SIGNUP_SOURCE = "\\bcreate (an |your |a new |new )?account\\b|\\bregist(er|ration)\\b|\\bsign[\\s-]?up\\b|\\bnew account\\b|\\benroll\\b";
 const LOGIN_WORD_SOURCE = "\\blog[\\s-]?(in|on)\\b|\\blogin\\b|\\blogon\\b|\\bsign[\\s-]?in\\b|\\bsignin\\b";
 // The words a portal refuses a password with. ONE source for the banner read (loginRefusalBanner)
@@ -242,8 +246,8 @@ const LOGIN_REFUSAL_SOURCE = "\\binvalid\\b|\\bincorrect\\b|\\blocked\\b|\\bdisa
 // the same Tyler identity, so the portal's credential would have signed in to the checkout app and
 // the learn would have started there. Rule 1 territory, and never the permit portal's login.
 const NEVER_PAY_HREF_SOURCE = "(^|/)(payments?|checkout|cart|billing|invoices?|pay)(/|$)|^https?://(www\\.)?(pay|payments?|checkout|billing)[.-]";
-const NEVER_HREF_SOURCE = `/sso/idps/|accounts\\.google\\.|facebook\\.com|appleid\\.apple\\.com|login\\.live\\.com|github\\.com/login|linkedin\\.com/oauth|/help(/|$)|/signin/(unlock|forgot|register)|/(register|signup|sign-up)(/|$)|forgot-?password|reset-?password|${NEVER_PAY_HREF_SOURCE}`;
-const NEVER_CLICK_PATTERNS = {
+const NEVER_HREF_SOURCE = `/sso/idps/|accounts\\.google\\.|facebook\\.com|appleid\\.apple\\.com|login\\.live\\.com|github\\.com/login|linkedin\\.com/oauth|/help(/|$)|/signin/(unlock|forgot|register)|/(register|signup|sign-up)(/|$)|forgot-?password|reset-?password|\\.(mp4|mov|webm|avi|pdf|docx?|xlsx?|pptx?)$|${NEVER_PAY_HREF_SOURCE}`;
+export const NEVER_CLICK_PATTERNS = {
   social: SOCIAL_IDP_SOURCE,
   always: NEVER_ALWAYS_SOURCE,
   signup: NEVER_SIGNUP_SOURCE,
@@ -365,7 +369,13 @@ async function loginWordingPresent(page: Page): Promise<boolean> {
   if (looksLikeLoginUrl(typeof page.url === "function" ? page.url() : "")) return true;
   const title = await page.title().catch(() => "");
   if (/log\s?-?\s?in|sign\s?-?\s?in|logon|log on/i.test(title || "")) return true;
-  return await page.getByText(/sign in|log in|password|logon/i).first().isVisible().catch(() => false);
+  // ANY VISIBLE MATCH, NOT THE FIRST (live Idaho DOPL, 2026-11-12): the first "password" text in
+  // DOM order was the hidden password box's "Show/Hide Password" button, so .first() read hidden
+  // and the visible "Log in" beside the email box never counted — the identifier step was refused.
+  const words = page.getByText(/sign in|log in|password|logon/i);
+  const n = Math.min(await words.count().catch(() => 0), 8);
+  for (let i = 0; i < n; i++) if (await words.nth(i).isVisible().catch(() => false)) return true;
+  return false;
 }
 
 /**
@@ -1111,6 +1121,14 @@ export async function revealLoginForm(page: Page): Promise<boolean> {
       else triggers.push(m);
     }
     if (!triggers.length) { trail.push(matched.length ? `only never-click matches ${key}` : `no-match ${key}`); continue; }
+    // A LATE-PAINTED IDENTIFIER STEP ENDS THE REVEAL (live City of Mountain Home ID, OpenGov,
+    // 2026-11-12). performLogin asks "is this an identifier step?" BEFORE the reveal, but a React
+    // login form that paints a moment later is not there yet; the reveal then ran, and its
+    // {button, "Login"} matched the form's own submit (aria-label "login button") and pressed it
+    // with NO email typed — the next page was a password box with no account named. So right
+    // before any reveal click, the question is asked again on the page as it is now; an identifier
+    // step that has appeared is performLogin's to drive, and nothing is clicked here.
+    if (await identifierFirstStep(page, { preReveal: true })) { trail.push(`identifier step appeared before ${key}: reveal stops`); return false; }
     tried.add(key);
     let clickedOne = false;
     for (let ti = 0; ti < triggers.length; ti++) {
@@ -1264,6 +1282,61 @@ export async function revealLoginForm(page: Page): Promise<boolean> {
  * newsletter Email + Subscribe box, the header link is still there — so the old order stands
  * (reveal the real form first) and the username is never typed into the newsletter box.
  */
+/** The identifier step's own advance control, when exactly one qualifies; null otherwise.
+ *
+ *  WITH A <form>: the visible submit controls that form owns, minus the never-click list.
+ *  WITHOUT ONE (live Idaho DOPL, FAST platform, 2026-11-12): the email box and its "Log in" sit in
+ *  a plain panel, the button is type="button", and the password box is in the same panel, hidden
+ *  until "Log in" is pressed. The nearest ancestor of the field that holds any visible button is
+ *  the field's panel; a control there qualifies only when its words read as a sign-in or step
+ *  advance (log in / sign in / continue / next), so a newsletter "Subscribe" never does. The
+ *  never-click vocabulary (social, passkey, help, sign-up…) is the same one every login pass uses. */
+const STEP_ADVANCE_WORDS = new RegExp(`${LOGIN_WORD_SOURCE}|\\bcontinue\\b|\\bnext\\b`, "i");
+async function ownedSubmitOf(field: Locator): Promise<Locator | null> {
+  try {
+    const qualifying = async (candidates: Locator, needWords: boolean): Promise<{ seen: number; fit: Locator[] }> => {
+      const n = await candidates.count().catch(() => 0);
+      const fit: Locator[] = [];
+      let seen = 0;
+      for (let i = 0; i < Math.min(n, 8); i++) {
+        const c = candidates.nth(i);
+        if (!(await c.isVisible().catch(() => false))) continue;
+        seen++;
+        if (await neverClickReason(c)) continue;
+        if (needWords) {
+          const words = String(await c.evaluate((el: Element) => [
+            (el as HTMLElement).innerText || "", (el as HTMLInputElement).value || "", el.getAttribute("aria-label") || "", el.getAttribute("title") || "",
+          ].join(" ")).catch(() => "") ?? "");
+          if (!STEP_ADVANCE_WORDS.test(words)) continue;
+        }
+        fit.push(c);
+      }
+      return { seen, fit };
+    };
+    // THE NEAREST PANEL FIRST, THE FORM'S SUBMIT SECOND (live Idaho DOPL run 3, 2026-11-12): a
+    // <form> is not always the login's own. FAST / ASP.NET pages wrap the WHOLE page in one, so "the
+    // form's submit" found nothing (DOPL's "Log in" is type="button"). Walk out from the field to
+    // the first ancestor holding a qualifying control (words read as sign-in / continue / next, not
+    // on the never-click list): one fit is the step's control, more than one is ambiguous (nothing).
+    // The walk never goes past the owning form; the form's own submit is the fallback.
+    const form = field.locator("xpath=ancestor::form[1]");
+    const hasForm = (await form.count().catch(() => 0)) > 0;
+    for (let up = 1; up <= 8; up++) {
+      const panel = field.locator(`xpath=ancestor::*[${up}]`);
+      if (!(await panel.count().catch(() => 0))) break;
+      const { fit } = await qualifying(panel.locator("button, input[type=submit], input[type=button], [role=button]"), true);
+      if (fit.length === 1) return fit[0];
+      if (fit.length > 1) return null;
+      if (hasForm && await panel.evaluate((el: Element) => el.tagName === "FORM").catch(() => false)) break;
+    }
+    if (hasForm) {
+      const { fit } = await qualifying(form.locator("button[type=submit], button:not([type]), input[type=submit]"), false);
+      return fit.length === 1 ? fit[0] : null;
+    }
+    return null;
+  } catch { return null; }
+}
+
 async function identifierFirstStep(
   page: Page,
   opts: { preReveal?: boolean } = {},
@@ -1271,7 +1344,14 @@ async function identifierFirstStep(
   if (await loginFormPresent(page)) return null;
   const idField = await firstVisible(page, USERNAME_CANDIDATES, { fillable: true });
   if (!idField) return null;
-  const nextCtl = await firstVisible(page, NEXT_STEP_CANDIDATES, { clickable: true, submit: true });
+  // THE IDENTIFIER'S OWN FORM SUBMIT FIRST (live City of Mountain Home ID, OpenGov, 2026-11-12):
+  // OpenGov's step-1 button reads "Continue" but its accessible name is aria-label "login button",
+  // and the page's image carousel carries "Next Image" / "Previous Image" buttons — a page-wide
+  // name search for "Next"/"Continue" can land on the carousel, leaving the email typed and the
+  // step never advanced. The submit control the identifier field's own <form> owns is the step's
+  // next control (#137 applies the same form-ownership rule to the password step); a social /
+  // help / create / forgot control is never it. Page-wide candidates remain the fallback.
+  const nextCtl = (await ownedSubmitOf(idField)) ?? await firstVisible(page, NEXT_STEP_CANDIDATES, { clickable: true, submit: true });
   if (!nextCtl) return null;
   if (!(await loginWordingPresent(page))) return null;
   if (opts.preReveal && await wordedRevealTriggerVisible(page, nextCtl)) return null;
@@ -1607,7 +1687,12 @@ export async function performLogin(
         if (foreign) return refusedThirdParty(foreign);
         await waitForElement(step.idField);
         await step.idField.fill(credential.username);
-        await step.nextCtl.click().catch(() => null);
+        // STAMP STEP 1'S CONTROL (live Idaho DOPL run 4): a FAST page keeps the old view in the DOM
+        // while it transitions to the password view, so the password step's submit search found
+        // step 1's "Log in" still "visible", picked it, and the click waited 30 s on a node being
+        // detached. The stamp lets that search pass over step 1's control while the page settles.
+        await step.nextCtl.evaluate((el: Element) => el.setAttribute("data-al-idstep", "1")).catch(() => null);
+        await step.nextCtl.click({ timeout: 10000 }).catch(() => null);
         // Wait for the password step to paint — or for a SECOND FACTOR, which some identity
         // providers ask for straight after the identifier (Okta with password-optional
         // policies: "Verify with your email"). That is a person's to complete: park (B3).
@@ -1833,7 +1918,19 @@ export async function performLogin(
     //    <legend>…) is never a submit there (opts.submit): City of Bend's panel heading was
     //    clicked as "Sign In", collapsed the fields and posted nothing.
     const loginUrl: string = typeof page.url === "function" ? page.url() : "";
-    const submitLoc = (await ownFormSubmit(passLoc)) ?? (await firstVisible(page, SUBMIT_CANDIDATES, { clickable: true, submit: true }));
+    const pickSubmit = async (): Promise<Locator | null> => (await ownFormSubmit(passLoc)) ?? (await firstVisible(page, SUBMIT_CANDIDATES, { clickable: true, submit: true }));
+    const isStepOneControl = async (loc: Locator | null): Promise<boolean> =>
+      !!loc && await loc.evaluate((el: Element) => el.getAttribute("data-al-idstep") === "1").catch(() => false);
+    let submitLoc = await pickSubmit();
+    // NOT STEP 1'S CONTROL WHILE THE PAGE IS STILL CHANGING (see the stamp in the identifier
+    // step): give a transitioning page up to ~6 s to drop the old view, re-picking each time. A
+    // portal whose ONE button really does both steps keeps it after that, as before.
+    // A fixed pause, not smartWait: an in-place transition sends no request, so a network-quiet
+    // wait returns at once and all four re-picks would read the same half-drawn page.
+    for (let i = 0; i < 4 && await isStepOneControl(submitLoc); i++) {
+      await page.waitForTimeout(1500).catch(() => null);
+      submitLoc = await pickSubmit();
+    }
     const detail: LoginDetail = { submittedVia: "button" };
     // The portal's ANSWER is text that was not there before the submit: a standing notice
     // ("accounts are locked after 5 failed attempts") must not read as a refusal on a path that
@@ -1872,7 +1969,17 @@ export async function performLogin(
       if (submitLoc) {
         detail.clicked = await describeControl(submitLoc);
         await waitForElement(submitLoc);
-        await submitLoc.click();
+        // TIME-BOXED, AND ONE RE-PICK: a node detached mid-transition used to hold this click
+        // for Playwright's 30 s default and end the login as an error. If the click does not land
+        // in 10 s, the page is re-read once and the submit chosen again; failing that, Enter.
+        const landed = await submitLoc.click({ timeout: 10000 }).then(() => true, () => false);
+        if (!landed) {
+          await smartWait(page, 1500);
+          const again = await pickSubmit();
+          const retried = again ? await again.click({ timeout: 10000 }).then(() => true, () => false) : false;
+          if (again) detail.clicked = await describeControl(again);
+          if (!retried) { detail.submittedVia = "enter"; await passLoc.press("Enter").catch(() => null); }
+        }
       } else {
         detail.submittedVia = "enter";
         await passLoc.press("Enter").catch(() => null);
@@ -1929,7 +2036,17 @@ export async function performLogin(
       const deadline = Date.now() + LOGIN_RESULT_TIMEOUT_MS;
       await smartWait(page, 2000); // let the first navigation/AJAX settle
       while (Date.now() < deadline) {
-        const proof = await sessionProof(page, loginUrl, credential.username);
+        let proof = await sessionProof(page, loginUrl, credential.username);
+        // A WEAK PROOF MUST HOLD ON A SECOND LOOK (live Idaho DOPL run 6): FAST blanks the view
+        // between the password step and its "Two-Step Verification" step. In that instant the URL
+        // hash has moved, no password box and no code box exist, and "moved off the login page"
+        // read as a session; the code page drawn a moment later was never seen. Only a sign-out
+        // control is proof at once; any other proof is re-read after a fixed pause (an in-place
+        // redraw sends no request, so a network-quiet wait would not wait) and must still stand.
+        if (proof && !/sign-out control/.test(proof)) {
+          await page.waitForTimeout(1500).catch(() => null);
+          proof = await sessionProof(page, loginUrl, credential.username);
+        }
         if (proof) return { ok: true, status: "logged_in", message: `Logged in successfully (${proof}).`, detail: { ...detail, posted } };
         const challenge = (await detectSecondFactor(page)) || (await challengeBeyondPasswordStep(page));
         if (challenge) return await parkForSecondFactor(page, challenge, credential.username, opts);

@@ -413,7 +413,7 @@ export function invoiceLinesForPayment(
     excluded.push({
       track,
       reason: `A service fee of $${serviceFee.toFixed(2)} is quoted, but this client is billed ${billingMode || "monthly/none"} rather than per submission.`,
-      resolution: "Nothing to do — it belongs on the monthly arrangement, not on this project.",
+      resolution: "Nothing to do here — each filing is billed on the client's statement at the price saved when it was filed (#187).",
       amountSeenUsd: serviceFee,
     });
   }

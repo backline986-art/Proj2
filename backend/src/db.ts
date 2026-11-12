@@ -3795,6 +3795,58 @@ const VERSIONED_MIGRATIONS: VersionedMigration[] = [
       `);
     },
   },
+  {
+    // v85 (#187, the founding prices): OUR OWN PRICE PER FILING, as data (servicePrices.ts).
+    // (a) service_prices: the org's price list, per pricing tier (founding | standard) and item (permit,
+    //     nem, project_cap), set by a named admin. Per org (the tenant that sells), never a shared table.
+    //     No row = no price (or no cap).
+    // (b) filing_service_charges: the price saved on each filing, written ONCE per (project, filing
+    //     type) by the filing doors beside fee_quote_snapshots, with the client's billing mode at that
+    //     moment: the tier, the list price, the project cap and the charged amount (the price cut to what
+    //     the cap leaves). A child of projects: it reaches an org through its project and carries no org_id.
+    //     A statement bills it (clientInvoices.ts), except the first filing of each track under
+    //     per-submission billing, which the gate collected.
+    //     waived_*: a named person's "do not bill this filing", with the reason.
+    // The client's own price per track (service_fee_permit_usd / service_fee_nem_usd) and pricing tier
+    // (pricing_tier) are in the client column list, added on every boot like the client's other columns.
+    version: 85,
+    name: "service_price_list",
+    up: (db) => {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS service_prices (
+          org_id TEXT NOT NULL,
+          tier TEXT NOT NULL,
+          item TEXT NOT NULL,
+          price_usd REAL NOT NULL,
+          set_by TEXT NOT NULL DEFAULT '',
+          set_at TEXT NOT NULL,
+          PRIMARY KEY (org_id, tier, item)
+        );
+        CREATE TABLE IF NOT EXISTS filing_service_charges (
+          id TEXT PRIMARY KEY,
+          project_id TEXT NOT NULL,
+          permit_type TEXT NOT NULL,
+          billing_track TEXT NOT NULL,
+          billing_mode TEXT NOT NULL DEFAULT '',
+          pricing_tier TEXT NOT NULL DEFAULT 'standard',
+          list_price_usd REAL,
+          cap_usd REAL,
+          price_usd REAL,
+          price_basis TEXT NOT NULL DEFAULT 'unset',
+          price_label TEXT NOT NULL DEFAULT '',
+          submission_id TEXT NOT NULL DEFAULT '',
+          filed_at TEXT NOT NULL,
+          waived_at TEXT NOT NULL DEFAULT '',
+          waived_by TEXT NOT NULL DEFAULT '',
+          waive_reason TEXT NOT NULL DEFAULT '',
+          created_at TEXT NOT NULL,
+          UNIQUE (project_id, permit_type),
+          FOREIGN KEY (project_id) REFERENCES projects(id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_filing_service_charges_project ON filing_service_charges(project_id);
+      `);
+    },
+  },
 ];
 
 /** v47 was edited in place while #218 was open (Helm's review at 0116f98a): a DB that ran an earlier
@@ -4002,6 +4054,12 @@ const CLIENT_LICENSING_COLUMNS: [string, string][] = [
   // The operator's per-submission service fee ("top fee") for this client, in USD.
   // Null falls back to the SUBMISSION_SERVICE_FEE_USD env default.
   ["service_fee_usd", "REAL"],
+  // This client's own price per filing, by billing track (#187): ahead of service_fee_usd and the
+  // org's price list (servicePrices.resolveServicePrice). Null = not set for this client.
+  ["service_fee_permit_usd", "REAL"],
+  ["service_fee_nem_usd", "REAL"],
+  // "founding" = the founding prices and cap on the price list; anything else is the standard tier (#187).
+  ["pricing_tier", "TEXT NOT NULL DEFAULT ''"],
 ];
 
 const CORRECTION_SLA_COLUMNS: [string, string][] = [

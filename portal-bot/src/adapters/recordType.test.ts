@@ -12,7 +12,8 @@
 // run must stop rather than approximate.
 //   npx tsx portal-bot/src/adapters/recordType.test.ts
 import assert from "node:assert/strict";
-import { recordTypeGroupNote, recordTypeGroupOf } from "./recordTypeGroup";
+import { recordTypeGroupNote, recordTypeGroupOf, recordTypeOfCatalogButton } from "./recordTypeGroup";
+import { sameRecordType } from "../../../backend/src/permitProcess";
 
 let failures = 0;
 const check = (label: string, fn: () => void): void => {
@@ -154,6 +155,22 @@ check("an ordinary click is not a group step", () => {
 check("the note is capped and whitespace-folded (a header's wrapped text records as one line)", () => {
   assert.equal(recordTypeGroupNote("Residential\n   Electrical"), "record type group: Residential Electrical");
   assert.equal(recordTypeGroupNote("x".repeat(80)).length, "record type group: ".length + 60);
+});
+
+// A CATALOG'S "APPLY <TYPE>" BUTTON IS THAT TYPE'S OPTION (live City of Tigard, Tyler EnerGov, 2026-11-12):
+// the type behind the verb matches the verified name; a bare door ("Apply Now") is never a type.
+check("a catalog button names its type behind the verb, and matches the verified record type", () => {
+  assert.equal(recordTypeOfCatalogButton("Apply Residential Renewable Energy - Prescriptive"), "Residential Renewable Energy - Prescriptive");
+  assert.ok(sameRecordType(recordTypeOfCatalogButton("Apply Residential Renewable Energy - Prescriptive") ?? "", "Residential Renewable Energy - Prescriptive"));
+  assert.ok(!sameRecordType(recordTypeOfCatalogButton("Apply Residential Renewable Energy - Non Prescriptive") ?? "", "Residential Renewable Energy - Prescriptive"), "Non Prescriptive is a different type");
+  assert.ok(!sameRecordType(recordTypeOfCatalogButton("Apply Commercial Renewable Energy") ?? "", "Residential Renewable Energy - Prescriptive"));
+  assert.equal(recordTypeOfCatalogButton("Start a Residential Electrical Permit"), "Residential Electrical Permit");
+  assert.equal(recordTypeOfCatalogButton("Apply for a Solar Permit"), "Solar Permit");
+});
+check("MUST NOT: a bare door or an ordinary button is not a catalog type", () => {
+  for (const l of ["Apply", "Apply Now", "Apply Online", "Start Application", "New Application", "Apply for a Permit", "Continue", "Submit Application", "Search"]) {
+    assert.equal(recordTypeOfCatalogButton(l), null, `${l} read as a type`);
+  }
 });
 
 if (failures) { console.error(`\n${failures} record-type check(s) FAILED.`); process.exit(1); }

@@ -81,6 +81,9 @@ function mapClient(row: Row, identities: ClientPortalIdentity[]): ClientRecord {
     logoMime: s(row.logo_mime) || "image/png",
     billingMode: s(row.billing_mode),
     serviceFeeUsd: row.service_fee_usd == null || row.service_fee_usd === "" ? null : Number(row.service_fee_usd),
+    serviceFeePermitUsd: row.service_fee_permit_usd == null || row.service_fee_permit_usd === "" ? null : Number(row.service_fee_permit_usd),
+    serviceFeeNemUsd: row.service_fee_nem_usd == null || row.service_fee_nem_usd === "" ? null : Number(row.service_fee_nem_usd),
+    pricingTier: s(row.pricing_tier) === "founding" ? "founding" : "",
     portalIdentities: identities,
     stateLicenses: parseStateLicenses(row.state_licenses_json),
     partnerContacts: parsePartnerContacts(row.partner_contacts_json),
@@ -508,12 +511,19 @@ const FIELD_COLUMNS: [keyof ClientRecord, string][] = [
   ["authorizedSignerTitle", "authorized_signer_title"],
   ["billingMode", "billing_mode"],
   ["serviceFeeUsd", "service_fee_usd"],
+  ["serviceFeePermitUsd", "service_fee_permit_usd"],
+  ["serviceFeeNemUsd", "service_fee_nem_usd"],
+  ["pricingTier", "pricing_tier"],
 ];
 
-// serviceFeeUsd is REAL; the intake tag is normalised (#489); everything else is coerced to string.
+const MONEY_FIELDS = new Set<keyof ClientRecord>(["serviceFeeUsd", "serviceFeePermitUsd", "serviceFeeNemUsd"]);
+
+// The service fees are REAL; the intake tag is normalised (#489); everything else is coerced to string.
 function fieldValue(key: keyof ClientRecord, raw: unknown): string | number | null {
   if (key === "intakeTag") return normalizeIntakeTag(raw);
-  return key === "serviceFeeUsd" ? moneyOrNull(raw) : s(raw);
+  // Only "founding" means anything (the founding prices and cap); anything else is the standard tier.
+  if (key === "pricingTier") return s(raw).trim().toLowerCase() === "founding" ? "founding" : "";
+  return MONEY_FIELDS.has(key) ? moneyOrNull(raw) : s(raw);
 }
 
 /** The intake tag as stored: lower-case, and only what can sit after the + of an email address
