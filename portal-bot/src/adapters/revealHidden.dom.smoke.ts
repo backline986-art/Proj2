@@ -166,6 +166,55 @@ check("...and names that container, so the log points at the right element",
   /section/.test(nested.why), nested.why);
 console.log(`   ${nested.opener} | ${nested.why}`);
 
+// ---------------------------------------------------------------------------
+// A SKIP LINK IS NEVER AN OPENER, AND THE CLIMB STOPS AT THE BOUNDARY (#176).
+//
+// Owner-watched City of Meridian run (2026-11-12): the record-type list sat under a header toggle,
+// but <main id="mainContent"> measured 0px tall (its children float) around a fully visible page.
+// The climb read it as "hidden", walked through five visible ancestors to make it the container,
+// and a[href="#mainContent"] — the page's "Skip to main content" link — was returned as the
+// group's opener: record_type_group_header_no_effect, and the header rule never ran.
+//
+//   skipLinkMain   the live shape: the collapsed list behind a header, inside a 0px <main>, with a
+//                  skip link to #main → the header toggle, never the skip link.
+//   skipLinkOwnId  the belt alone: a skip link whose href is the hidden container's OWN id, a
+//                  header before the container → still the header (a skip link opens nothing).
+// ---------------------------------------------------------------------------
+PAGES.skipLinkMain = `<!doctype html><html><body>
+  <a class="skip-link" href="#main" aria-label="Skip to main content" style="display:inline-block;width:160px;height:20px">Skip to main content</a>
+  <main id="main">
+    <div style="float:left;width:300px">
+      <h1>Select a Record Type</h1>
+      <div class="group"><a href="javascript:void(0)" onclick="return false" style="display:inline-block;width:160px;height:20px">Residential Electrical</a></div>
+      <div class="list" style="display:none"><input id="gate" type="radio" data-al-hidden-target="1" /></div>
+    </div>
+  </main>
+  <div style="clear:both"></div></body></html>`;
+PAGES.skipLinkOwnId = `<!doctype html><html><body>
+  <a class="skip-link" href="#sect" style="display:inline-block;width:160px;height:20px">Skip to content</a>
+  <div class="group"><button style="width:160px;height:24px">Residential Electrical</button></div>
+  <div id="sect" style="display:none"><input id="gate" type="radio" data-al-hidden-target="1" /></div></body></html>`;
+
+{
+  await page.goto(`http://127.0.0.1:${port}/skipLinkMain`, { waitUntil: "domcontentloaded" });
+  await page.waitForTimeout(80);
+  // The fixture must reproduce the live measurement, or it proves nothing about the climb.
+  const mainHeight = await page.evaluate(() => document.getElementById("main")!.getBoundingClientRect().height);
+  check("fixture: <main> around floated content measures 0px, as Meridian's did", mainHeight < 2, `height=${mainHeight}`);
+  const plan = await page.evaluate(planHiddenReveal);
+  console.log(`   skipLinkMain: ${plan.opener} | ${plan.why}`);
+  check("THE REGRESSION (#176): the opener is the header toggle preceding the list, never the skip link",
+    /preceding/.test(plan.opener) && /Residential Electrical/.test(plan.opener) && !/skip/i.test(plan.opener), JSON.stringify(plan));
+  check("...and the container named is the list, not <main> (the climb stopped at the boundary)",
+    /div\.list/.test(plan.why), plan.why);
+}
+{
+  const plan = await planOn("skipLinkOwnId");
+  console.log(`   skipLinkOwnId: ${plan.opener} | ${plan.why}`);
+  check("a skip link whose href IS the container's id is still refused; the header before it is the opener",
+    /preceding/.test(plan.opener) && !/skip/i.test(plan.opener), JSON.stringify(plan));
+}
+
 const proxyOn = async (key: string): Promise<string> => {
   await page.goto(`http://127.0.0.1:${port}/${key}`, { waitUntil: "domcontentloaded" });
   await page.waitForTimeout(80);

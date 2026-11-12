@@ -25,8 +25,24 @@
 //   replay    the grouped recipe replayed on a page whose groups are REORDERED (the recorded ids
 //             name another group) → the group is opened by label and the right radio ticked.
 //
+// And WITHOUT a verified type (#176 — the owner-watched rerun, where Meridian's row was only seeded):
+//   A1 classfirst  the grouped page, "Commercial Electrical Solar Array" listed BEFORE "Residential
+//                  Electrical Solar Array", a residential job, the type on file seeded → the
+//                  Residential one is chosen (record_type_class_decision names it), recorded as a
+//                  plain "record type:" step — the seeded value never steered (hard rule 3).
+//   A2 otherclass  only the Commercial solar type offered (plus a Residential Building group) → the
+//                  walk stops NAMED (stopReason record_type_unsettled), nothing ticked, Continue not
+//                  pressed, the planner never asked.
+//   A3 lazy        the empty groups with NO type on file → the expansion opens "Residential
+//                  Electrical" (this job's class AND discipline), never the bare "Residential".
+//   B1 skiplink    the grouped page inside a 0px-tall <main id="mainContent"> with a "Skip to main
+//                  content" link to it → the opener is the header toggle, never the skip link; no
+//                  record_type_group_header_no_effect, no expansion retry.
+//
 //   MUST PASS    - grouped, nogroup, lazy and replay go red with the #174 changes removed (the
-//                  learner's header path, the named stop, the prefix preference, the replay route).
+//                  learner's header path, the named stop, the prefix preference, the replay route);
+//                  A1/A2/A3 go red with the #176 class rule removed from the pass / expansion, B1 with
+//                  the #176 revealHidden changes removed.
 //   MUST EXCLUDE - checkbox keeps passing: the category-checkbox path is untouched when its box is
 //                  visible.
 //
@@ -49,10 +65,12 @@ const GROUP = "Residential Electrical";
 const PX = "ctl00_PlaceHolderMain_capTypeListControl_rptPermitTypeGroup";
 const GIF = "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7";
 
-type Shape = "grouped" | "nogroup" | "lazy" | "checkbox";
+type Shape = "grouped" | "nogroup" | "lazy" | "checkbox" | "otherclass" | "skiplink";
 interface Group { name: string; types: string[] }
+// The Commercial group FIRST, as Accela tenants list them — its solar type is the one DOM order took.
+const OTHER_CLASS = "Commercial Electrical Solar Array";
 const GROUPS: Group[] = [
-  { name: "Commercial", types: ["Commercial Addition", "Commercial Solar Array"] },
+  { name: "Commercial", types: ["Commercial Addition", OTHER_CLASS] },
   { name: GROUP, types: ["Residential Electrical Floor Heat", TARGET, "Residential electrical service reactivation/upgrade"] },
   { name: "Residential Building", types: ["Residential Building Addition", "Residential Building Deck"] },
 ];
@@ -90,21 +108,30 @@ function filterPanel(groups: Group[], visible: boolean): string {
 /** The CapType page for one shape. `order` rotates the groups (the replay leg) so a recorded id names
  *  another group; `err` renders the portal's own refusal line. */
 function capTypePage(shape: Shape, order: "normal" | "rotated", err: boolean): string {
-  let groups = shape === "lazy" ? [...GROUPS, RESIDENTIAL_WORD_GROUP] : [...GROUPS];
+  // otherclass (#176 A2): the Residential ELECTRICAL group is gone — only the Commercial solar type and
+  // a Residential Building group (so the page still reads as a record-type page) are offered.
+  let groups = shape === "lazy" ? [...GROUPS, RESIDENTIAL_WORD_GROUP] : shape === "otherclass" ? [GROUPS[0], GROUPS[2]] : [...GROUPS];
   if (order === "rotated") groups = [groups[2], groups[0], groups[1]];
   const body = groups.map((g, gi) => group(gi, g, {
-    header: shape === "grouped" || shape === "lazy" || (shape === "nogroup" && g.name !== GROUP) ? "toggle" : "caption",
+    header: shape === "checkbox" || (shape === "nogroup" && g.name === GROUP) ? "caption" : "toggle",
     lazy: shape === "lazy",
   })).join("\n");
-  return `<!doctype html><html><head><title>Accela Citizen Access</title></head><body style="font:14px sans-serif;padding:16px">
-  <h1>Select a Record Type</h1>
+  const content = `<h1>Select a Record Type</h1>
   <p>Choose one of the following available record types. For assistance or to apply for a record type not listed below please contact us.</p>
   ${err ? `<div id="ctl00_PlaceHolderMain_lblMessage" class="ACA_ErrorMsg" style="color:#b00">You have not selected a record type.</div>` : ""}
   ${filterPanel(groups, shape === "checkbox")}
   <div id="capTypeList" class="ACA_RightItem"><div class="servicelist"><div id="ctl00_PlaceHolderMain_capTypeListControl_updatePanel">
   ${body}
   </div></div></div>
-  <div id="ctl00_PlaceHolderMain_btnContinue_container"><div class="ACA_Continue ACA_LgButton_FontSize ACA_Button_Text"><a id="ctl00_PlaceHolderMain_btnContinue" accesskey="3" class="ACA_FLeft" title="Continue Application »" href="javascript:void(0)" onclick="return doContinue();"><span>Continue Application »</span></a></div></div>
+  <div id="ctl00_PlaceHolderMain_btnContinue_container"><div class="ACA_Continue ACA_LgButton_FontSize ACA_Button_Text"><a id="ctl00_PlaceHolderMain_btnContinue" accesskey="3" class="ACA_FLeft" title="Continue Application »" href="javascript:void(0)" onclick="return doContinue();"><span>Continue Application »</span></a></div></div>`;
+  // skiplink (#176 B1): Meridian's page chrome — a visually-hidden "Skip to main content" link to
+  // <main id="mainContent">, whose children FLOAT so the landmark itself measures 0px tall.
+  const framed = shape === "skiplink"
+    ? `<a class="skip-link" href="#mainContent" aria-label="Skip to main content" style="position:absolute;left:-9999px">Skip to main content</a>
+  <main id="mainContent"><div style="float:left;width:720px">${content}</div></main><div style="clear:both"></div>`
+    : content;
+  return `<!doctype html><html><head><title>Accela Citizen Access</title></head><body style="font:14px sans-serif;padding:16px">
+  ${framed}
   <script>
     function SelectNode(r) {}
     function fillList(list) {
@@ -289,6 +316,82 @@ let groupedSteps: RecipeStep[] = [];
       && r.steps.some((s) => s.action === "check" && note(s) === `record type (verified): ${TARGET}`)
       && picked(r)[0] === TARGET && refusals(r) === 0,
     JSON.stringify({ notes: r.steps.map(note), hits: r.hits }));
+}
+
+// ── #176 A1 classfirst: the grouped page, the type on file only SEEDED, Commercial listed first ───
+{
+  const r = await learnOn("grouped", { value: TARGET, verified: false });
+  const decisions = r.events.filter((e) => e.type === "record_type_class_decision");
+  console.log(`   A1 classfirst: hits=${JSON.stringify(r.hits)} notes=${JSON.stringify(r.steps.map(note))} decisions=${JSON.stringify(decisions)}`);
+  check("A1: the RESIDENTIAL solar type is the one picked and filed, not the Commercial one listed first",
+    picked(r).length === 1 && picked(r)[0] === TARGET && refusals(r) === 0, JSON.stringify(r.hits));
+  check("A1: event record_type_class_decision {jobClass:\"residential\", decision:\"matched\", label} names the class decision",
+    decisions.length === 1 && decisions[0].jobClass === "residential" && decisions[0].decision === "matched" && decisions[0].label === TARGET
+      && (decisions[0].candidates as string[]).includes(TARGET),
+    JSON.stringify(decisions));
+  check("A1: the Commercial group was never opened (one record_type_group_opened, for Residential Electrical)",
+    groupEvents(r).length === 1 && groupEvents(r)[0].group === GROUP && groupEvents(r)[0].forType === TARGET, JSON.stringify(groupEvents(r)));
+  check("A1 (hard rule 3): recorded as a plain \"record type:\" step — the seeded value did not steer, no record_type_verified_pick",
+    r.steps.some((s) => s.action === "check" && note(s) === `record type: ${TARGET}`)
+      && !r.steps.some((s) => /\(verified\)/.test(note(s)))
+      && !r.events.some((e) => e.type === "record_type_verified_pick"),
+    JSON.stringify(r.steps.map(note)));
+  check("A1: no refusal, no stop (ok, planner reached the detail page only)",
+    !r.events.some((e) => e.type === "record_type_refused_for_class" || e.type === "record_type_unsettled_stop") && r.result.stopReason !== "record_type_unsettled",
+    JSON.stringify({ stop: r.result.stopReason, events: r.events.filter((e) => /^record_type_/.test(String(e.type))) }));
+}
+
+// ── #176 A2 otherclass: only the other class's solar type is offered ─────────────────────────────
+{
+  const r = await learnOn("otherclass", { value: TARGET, verified: false });
+  const decisions = r.events.filter((e) => e.type === "record_type_class_decision");
+  console.log(`   A2 otherclass: hits=${JSON.stringify(r.hits)} ok=${String(r.result.ok)} stop=${String(r.result.stopReason)} msg=${String(r.result.message).slice(0, 300)} decisions=${JSON.stringify(decisions)}`);
+  check("A2: the walk stops NAMED (stopReason record_type_unsettled, ok:false)",
+    r.result.ok === false && r.result.stopReason === "record_type_unsettled", JSON.stringify({ ok: r.result.ok, stop: r.result.stopReason }));
+  check("A2: the message says only the other class's type is offered for this residential job, and names it",
+    String(r.result.message).includes(`only the other class's record type is offered for this residential job: ${OTHER_CLASS}`), String(r.result.message).slice(0, 300));
+  check("A2: nothing ticked, Continue NOT pressed (no detail page, no portal refusal, no check step)",
+    picked(r).length === 0 && refusals(r) === 0 && !r.steps.some((s) => s.action === "check" || note(s) === "record type: continue"), JSON.stringify({ hits: r.hits, notes: r.steps.map(note) }));
+  check("A2: the planner was never asked", r.requests.length === 0, JSON.stringify(r.requests.map((q) => q.url)));
+  check("A2: event record_type_class_decision {decision:\"other_class\"} names the Commercial type as what was passed over",
+    decisions.some((e) => e.decision === "other_class" && (e.candidates as string[]).includes(OTHER_CLASS)), JSON.stringify(decisions));
+  check("A2: the Residential BUILDING group was not opened for an electrical job (no record_type_group_opened)",
+    groupEvents(r).length === 0, JSON.stringify(groupEvents(r)));
+}
+
+// ── #176 A3 lazy, NO type on file: the expansion opens the class+discipline group ───────────────
+{
+  const r = await learnOn("lazy", null);
+  const groupNotes = r.steps.filter((s) => /^record type group:/.test(note(s))).map(note);
+  console.log(`   A3 lazy/none: hits=${JSON.stringify(r.hits)} notes=${JSON.stringify(r.steps.map(note))} events=${JSON.stringify(groupEvents(r))}`);
+  check("A3: the FIRST group opened is \"Residential Electrical\" (this job's class AND discipline), never the bare \"Residential\"",
+    groupNotes[0] === `record type group: ${GROUP}` && !groupNotes.includes("record type group: Residential"), JSON.stringify(groupNotes));
+  check("A3: the solar type in it was then ticked (plain \"record type:\" step) and filed",
+    r.steps.some((s) => s.action === "check" && note(s) === `record type: ${TARGET}`) && picked(r)[0] === TARGET && refusals(r) === 0, JSON.stringify(r.hits));
+}
+
+// ── #176 B1 skiplink: a 0px <main> with a "Skip to main content" link around the grouped page ────
+{
+  {
+    const ctx = await browser.newContext();
+    const pg = await ctx.newPage();
+    await pg.goto(capTypeUrl("skiplink"));
+    const h = await pg.evaluate(() => document.getElementById("mainContent")!.getBoundingClientRect().height);
+    await ctx.close();
+    check("B1 fixture: <main id=\"mainContent\"> measures 0px around the visible page, as Meridian's did", h < 2, `height=${h}`);
+  }
+  const r = await learnOn("skiplink", { value: TARGET, verified: true });
+  const headerEvents = r.events.filter((e) => /^record_type_group_header_/.test(String(e.type)));
+  console.log(`   B1 skiplink: hits=${JSON.stringify(r.hits)} notes=${JSON.stringify(r.steps.map(note))} header=${JSON.stringify(headerEvents)}`);
+  check("B1: the opener is the group's header toggle (record_type_group_header_clicked), never the skip link",
+    headerEvents.length === 1 && headerEvents[0].type === "record_type_group_header_clicked" && headerEvents[0].group === GROUP
+      && !/skip/i.test(String(headerEvents[0].opener)) && /preceding/.test(String(headerEvents[0].opener)),
+    JSON.stringify(headerEvents));
+  check("B1: no record_type_group_header_no_effect, no expansion retry",
+    !r.events.some((e) => e.type === "record_type_group_header_no_effect" || e.type === "record_type_group_expanded_for_retry"),
+    JSON.stringify(r.events.filter((e) => /^record_type_/.test(String(e.type)))));
+  check("B1: the verified type was ticked after the group and filed; Continue only after the tick",
+    picked(r).length === 1 && picked(r)[0] === TARGET && refusals(r) === 0, JSON.stringify(r.hits));
 }
 
 // ── replay: the grouped recipe on a page whose groups are REORDERED ──────────────────────────────
