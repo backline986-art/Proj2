@@ -1687,7 +1687,12 @@ export async function performLogin(
         if (foreign) return refusedThirdParty(foreign);
         await waitForElement(step.idField);
         await step.idField.fill(credential.username);
-        await step.nextCtl.click().catch(() => null);
+        // STAMP STEP 1'S CONTROL (live Idaho DOPL run 4): a FAST page keeps the old view in the DOM
+        // while it transitions to the password view, so the password step's submit search found
+        // step 1's "Log in" still "visible", picked it, and the click waited 30 s on a node being
+        // detached. The stamp lets that search pass over step 1's control while the page settles.
+        await step.nextCtl.evaluate((el: Element) => el.setAttribute("data-al-idstep", "1")).catch(() => null);
+        await step.nextCtl.click({ timeout: 10000 }).catch(() => null);
         // Wait for the password step to paint — or for a SECOND FACTOR, which some identity
         // providers ask for straight after the identifier (Okta with password-optional
         // policies: "Verify with your email"). That is a person's to complete: park (B3).
@@ -1913,7 +1918,19 @@ export async function performLogin(
     //    <legend>…) is never a submit there (opts.submit): City of Bend's panel heading was
     //    clicked as "Sign In", collapsed the fields and posted nothing.
     const loginUrl: string = typeof page.url === "function" ? page.url() : "";
-    const submitLoc = (await ownFormSubmit(passLoc)) ?? (await firstVisible(page, SUBMIT_CANDIDATES, { clickable: true, submit: true }));
+    const pickSubmit = async (): Promise<Locator | null> => (await ownFormSubmit(passLoc)) ?? (await firstVisible(page, SUBMIT_CANDIDATES, { clickable: true, submit: true }));
+    const isStepOneControl = async (loc: Locator | null): Promise<boolean> =>
+      !!loc && await loc.evaluate((el: Element) => el.getAttribute("data-al-idstep") === "1").catch(() => false);
+    let submitLoc = await pickSubmit();
+    // NOT STEP 1'S CONTROL WHILE THE PAGE IS STILL CHANGING (see the stamp in the identifier
+    // step): give a transitioning page up to ~6 s to drop the old view, re-picking each time. A
+    // portal whose ONE button really does both steps keeps it after that, as before.
+    // A fixed pause, not smartWait: an in-place transition sends no request, so a network-quiet
+    // wait returns at once and all four re-picks would read the same half-drawn page.
+    for (let i = 0; i < 4 && await isStepOneControl(submitLoc); i++) {
+      await page.waitForTimeout(1500).catch(() => null);
+      submitLoc = await pickSubmit();
+    }
     const detail: LoginDetail = { submittedVia: "button" };
     // The portal's ANSWER is text that was not there before the submit: a standing notice
     // ("accounts are locked after 5 failed attempts") must not read as a refusal on a path that
@@ -1952,7 +1969,17 @@ export async function performLogin(
       if (submitLoc) {
         detail.clicked = await describeControl(submitLoc);
         await waitForElement(submitLoc);
-        await submitLoc.click();
+        // TIME-BOXED, AND ONE RE-PICK: a node detached mid-transition used to hold this click
+        // for Playwright's 30 s default and end the login as an error. If the click does not land
+        // in 10 s, the page is re-read once and the submit chosen again; failing that, Enter.
+        const landed = await submitLoc.click({ timeout: 10000 }).then(() => true, () => false);
+        if (!landed) {
+          await smartWait(page, 1500);
+          const again = await pickSubmit();
+          const retried = again ? await again.click({ timeout: 10000 }).then(() => true, () => false) : false;
+          if (again) detail.clicked = await describeControl(again);
+          if (!retried) { detail.submittedVia = "enter"; await passLoc.press("Enter").catch(() => null); }
+        }
       } else {
         detail.submittedVia = "enter";
         await passLoc.press("Enter").catch(() => null);

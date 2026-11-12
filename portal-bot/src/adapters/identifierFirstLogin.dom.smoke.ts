@@ -288,9 +288,22 @@ const DOPL = `<!doctype html><html><head><title>Online Services</title></head><b
     <div>New to Online Services? <a href="/dopl-signup">Sign Up</a></div></div>
   <section><h2>Public Searches</h2><a href="/dopl-search">Search for Permits</a></section></form>
   <script>
+    // FAST transitions IN PLACE: the password view is drawn at once, the old view (with its still
+    // visible "Log in") is detached 2.5 s later — the window in which run 4 picked the old button.
     document.getElementById('Dd-c').onclick = function () {
       var v = document.getElementById('Dd-a').value;
-      if (v) location.href = '/dopl-password?u=' + encodeURIComponent(v);
+      if (!v || document.getElementById('pw')) return;
+      var view = document.createElement('div'); view.className = 'card';
+      view.innerHTML = '<h1>Log in to Online Services</h1><div class="who"></div><a href="/dopl-os/_/">Change username</a>' +
+        '<label for="pw">Password</label><input type="password" id="pw" autocomplete="current-password">' +
+        '<button type="button" id="cont">Continue</button>' +
+        '<a href="#" data-hit="/dopl-forgot-hit">Forgot password?</a> ' +
+        '<a href="#" data-hit="/dopl-another-way-hit">Choose another way to sign in</a>';
+      view.querySelectorAll('[data-hit]').forEach(function (l) { l.onclick = function () { fetch(l.getAttribute('data-hit')); return false; }; });
+      view.querySelector('.who').textContent = v;
+      var pf = document.getElementById('pageForm'); pf.insertBefore(view, pf.querySelector('h1'));
+      document.getElementById('cont').onclick = function () { if (document.getElementById('pw').value) location.href = '/home'; };
+      setTimeout(function () { var old = document.querySelector('.LogonPanel'); if (old) old.remove(); }, 2500);
     };
   </script>
 </body></html>`;
