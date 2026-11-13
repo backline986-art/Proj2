@@ -116,7 +116,7 @@ async function main(): Promise<void> {
     !/inverter settings/i.test(pkg?.message ?? ""), pkg?.message ?? "(no package row)");
   const info = cRows.find((r) => r.rule_id === "cec.inverter_ul1741sb");
   check("QC: says where it was verified (CEC list, host, the listings, the certifier)",
-    info?.qc_status === "pass" && info.severity === "info" && /Verified from the CEC equipment list \(solarequipment\.energy\.ca\.gov/.test(info.message) && /IQ8M-72-2-US/.test(info.message) && /\(UL\)/.test(info.message)
+    info?.qc_status === "pass" && info.severity === "info" && /^Verified from solarequipment\.energy\.ca\.gov(, \d{4}-\d{2}-\d{2})? \(the CEC equipment list\)/.test(info.message) && /IQ8M-72-2-US/.test(info.message) && /\(UL\)/.test(info.message)
       && /standing answer/.test(info.message),
     JSON.stringify(info));
   const cGate = gateIds(certified);
