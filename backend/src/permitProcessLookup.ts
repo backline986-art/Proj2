@@ -41,6 +41,7 @@ export { agencyNameKey, sameAgencyName };
 import { logger } from "./logger";
 import { isOfficialSourceHost } from "../../shared/src/officialSource";
 import { personVerifiedAuthorityHosts } from "./officialAuthorityHosts";
+import { stampOfficialLookupFacts } from "./lookupFactTiers";
 import { bracketDescribesPercentOfCost, feeLedgerFromPages, feeScheduleProfileKey, saveFeeSchedule } from "./feeSchedules";
 import { stateSurchargeRuleFor } from "./stateFeeRules";
 import { parseBracketRow } from "./pdfTables";
@@ -1886,7 +1887,12 @@ export async function runPermitProcessLookup(
     (d, earlierRecordType, portalUrl) => recordTypeBelongsToPortal(earlierRecordType, portalUrl, rtCtx(d))), gone);
   const feeReadsForPerson = feeReadsForAPerson(merged.permits, ev?.feeLeads ?? []);
   for (const r of feeReadsForPerson) notes.push(`Fee needs a person to read: ${r.url} (${r.reason})`);
-  const res = savePermitProcessLookup(db, {
+  // OFFICIAL FACTS (lookupFactTiers.ts): a non-door fact whose quote, naming its value, is in the bytes
+  // this run retrieved from the authority's own official page lands tier "official"; every other fact,
+  // and every door, fee and category, lands without a tier (seeded).
+  const factHosts = (() => { try { return personVerifiedAuthorityHosts(db, input.state, input.ahj); } catch { return []; } })();
+  const stampCtx = { pageText: (u: string) => pageTexts.get(pageKey(u)), hosts: factHosts, now: new Date().toISOString(), earlier: existing };
+  const res = savePermitProcessLookup(db, stampOfficialLookupFacts({
     state: input.state, ahj: input.ahj, lookedUpAt: new Date().toISOString(),
     issuingAgency: merged.issuingAgency, permitStructure: merged.permitStructure, permits: merged.permits, notes,
     prerequisites: uniquePrereqs.length ? uniquePrereqs : existing?.prerequisites,
@@ -1908,7 +1914,7 @@ export async function runPermitProcessLookup(
     ...(reader ? { pagesRead: reader.log.map((l) => ({ url: l.url, ok: l.ok, reason: l.reason.slice(0, 160) })) } : {}),
     ...(needsPersonRead.length ? { needsPersonRead } : {}),
     ...(feeReadsForPerson.length ? { feeReadsForPerson } : {}),
-  });
+  }, stampCtx));
   if (res.saved && res.lookup) {
     // The pages this run read itself travel with the landing, so a landed fee's printed line is
     // checked against bytes Keelix retrieved (and can earn the official grade, feeOfficial).
