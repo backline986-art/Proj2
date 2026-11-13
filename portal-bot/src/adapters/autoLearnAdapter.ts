@@ -12401,7 +12401,8 @@ export class AutoLearnAdapter extends BasePortalAdapter {
           const sample: string[] = [];
           // #221 — every row that IS this client, then ONE chosen: the row's own control is its
           // Select / Add link or button or its radio (live Tigard rows carry their own "Add").
-          const ROW_PICK = /^(select|add|choose|use)$/i;
+          // The visible word or the accessible name (live Tigard: <button aria-label="Add Contact">Add</button>).
+          const ROW_PICK = /^(select|add|choose|use)(\s+(this\s+)?(contact|record|contractor|licen[cs]e|company|applicant|professional))?$/i;
           type Cand = { row: any; text: string; sel: any }; // eslint-disable-line @typescript-eslint/no-explicit-any
           const cands: Cand[] = [];
           const staleOurs: Cand[] = [];

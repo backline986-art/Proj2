@@ -65,7 +65,7 @@ document.getElementById("button-ContactSearchBar").onclick = function(){
   if (q.indexOf("quillmark") < 0) return;
   [["808 SE EXAMPLE DR STE 3-337 VANCOUVER WA 98683"], ["305 SE EXAMPLE DR SUITE 111 VANCOUVER WA 98683"]].forEach(function(r){
     var tr = document.createElement("tr");
-    tr.innerHTML = "<td>QUILLMARK SOLAR CO</td><td>" + r[0] + "</td><td><button type='button' class='add'>Add</button></td>";
+    tr.innerHTML = "<td>QUILLMARK SOLAR CO</td><td>" + r[0] + "</td><td><button type='button' class='add' aria-label='Add Contact'>Add</button></td>";
     tr.querySelector(".add").onclick = function(){ S.adds.push(r[0]); save(); location.href = "/review"; };
     tb.appendChild(tr);
   });
