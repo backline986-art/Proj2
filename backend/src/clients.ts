@@ -84,6 +84,7 @@ function mapClient(row: Row, identities: ClientPortalIdentity[]): ClientRecord {
     serviceFeePermitUsd: row.service_fee_permit_usd == null || row.service_fee_permit_usd === "" ? null : Number(row.service_fee_permit_usd),
     serviceFeeNemUsd: row.service_fee_nem_usd == null || row.service_fee_nem_usd === "" ? null : Number(row.service_fee_nem_usd),
     pricingTier: s(row.pricing_tier) === "founding" ? "founding" : "",
+    feeLimitUsd: row.fee_limit_usd == null || row.fee_limit_usd === "" ? null : Number(row.fee_limit_usd),
     portalIdentities: identities,
     stateLicenses: parseStateLicenses(row.state_licenses_json),
     partnerContacts: parsePartnerContacts(row.partner_contacts_json),
@@ -514,9 +515,10 @@ const FIELD_COLUMNS: [keyof ClientRecord, string][] = [
   ["serviceFeePermitUsd", "service_fee_permit_usd"],
   ["serviceFeeNemUsd", "service_fee_nem_usd"],
   ["pricingTier", "pricing_tier"],
+  ["feeLimitUsd", "fee_limit_usd"],
 ];
 
-const MONEY_FIELDS = new Set<keyof ClientRecord>(["serviceFeeUsd", "serviceFeePermitUsd", "serviceFeeNemUsd"]);
+const MONEY_FIELDS = new Set<keyof ClientRecord>(["serviceFeeUsd", "serviceFeePermitUsd", "serviceFeeNemUsd", "feeLimitUsd"]);
 
 // The service fees are REAL; the intake tag is normalised (#489); everything else is coerced to string.
 function fieldValue(key: keyof ClientRecord, raw: unknown): string | number | null {

@@ -281,6 +281,9 @@ export interface ClientRecord {
   serviceFeeNemUsd: number | null;
   /** "founding" = billed at the founding prices and cap on the price list (#187); "" = standard. */
   pricingTier: string;
+  /** The most we carry in fees we paid for this client and are not yet paid back for; null = the
+   *  default (FEE_FLOAT_LIMIT_USD, else $2,500). Over it, a filing whose fee we would pay waits. */
+  feeLimitUsd: number | null;
   portalIdentities: ClientPortalIdentity[];
   /** Contractor licences beyond the named columns, one per issuing state/kind (Iowa "EL"
    *  electrical, Florida EC/CVC, Texas TECL, Utah DOPL...). clientMatch matches them like a CCB. */

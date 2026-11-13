@@ -122,6 +122,8 @@ export interface ClientInvoice extends StatementTotals {
   number: string;
   clientId: string;
   clientName: string;
+  /** A job fee invoice (one job's fees we paid, due on receipt): that job; "" = a statement for a period. */
+  projectId: string;
   periodStart: string;
   periodEnd: string;
   status: ClientInvoiceStatus;
@@ -575,6 +577,7 @@ function mapInvoice(db: AppDb, r: Row, withLines = true): ClientInvoice {
     number: text(r.number),
     clientId: text(r.client_id),
     clientName: text(clientRow?.company_name) || text(clientRow?.legal_business_name),
+    projectId: text(r.project_id),
     periodStart: text(r.period_start),
     periodEnd: text(r.period_end),
     status: text(r.status) as ClientInvoiceStatus,
@@ -653,7 +656,16 @@ export function createClientInvoice(db: AppDb, clientId: string, period: { perio
         statement.reimbursementTotalUsd, statement.serviceTotalUsd, statement.receivedTotalUsd, statement.dueTotalUsd,
         text(by).slice(0, 120), ts, ts],
     );
-    for (const l of statement.lines) {
+    insertLines(db, invoiceId, statement.lines, ts);
+    return invoiceId;
+  });
+  return getClientInvoice(db, clientId, created);
+}
+
+/** Every statement line goes on the invoice once: a line already live on another invoice is a 409. */
+function insertLines(db: AppDb, invoiceId: string, lines: LedgerLine[], ts: string): void {
+  {
+    for (const l of lines) {
       try {
         db.run(
           `INSERT INTO client_invoice_lines (id, invoice_id, line_key, project_id, payment_id, track, kind, role, basis,
@@ -670,9 +682,43 @@ export function createClientInvoice(db: AppDb, clientId: string, period: { perio
         throw err;
       }
     }
+  }
+}
+
+/**
+ * ONE JOB'S FEES WE PAID, ON THEIR OWN INVOICE, DUE ON RECEIPT (owner, 2026-11-13: "Both" — bill each
+ * job's paid fees right away, and limit what we carry). Called when a person records a fee paid on a
+ * job: the job's re-billable fee lines (agreement "Keelix pays") not yet on a live invoice go on that
+ * job's open DRAFT fee invoice, or a new one. A draft only: sending it is still a person's click. A
+ * job with nothing to re-bill gets nothing. Never throws for "nothing to bill" (returns null).
+ */
+export function draftJobFeeInvoice(db: AppDb, clientId: string, projectId: string, by: string): ClientInvoice | null {
+  const made = db.transaction(() => {
+    const tomorrow = new Date(Date.now() + 86_400_000).toISOString().slice(0, 10);
+    const statement = buildClientStatement(db, clientId, { periodStart: "2000-01-01", periodEnd: tomorrow });
+    const lines = statement.lines.filter((l) => l.projectId === projectId && l.kind === "reimbursement");
+    if (!lines.length) return null;
+    const ts = nowIso();
+    const open = db.get<Row>(
+      "SELECT id FROM client_invoices WHERE client_id = ? AND project_id = ? AND status = 'draft' AND external_ref = '' ORDER BY created_at DESC LIMIT 1",
+      [clientId, projectId],
+    );
+    let invoiceId = text(open?.id);
+    if (!invoiceId) {
+      invoiceId = newId();
+      db.run(
+        `INSERT INTO client_invoices (id, number, client_id, project_id, period_start, period_end, status, bill_to, billing_mode,
+           reimbursement_total_usd, service_total_usd, received_total_usd, due_total_usd, created_by, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, 'draft', ?, ?, 0, 0, 0, 0, ?, ?, ?)`,
+        [invoiceId, nextInvoiceNumber(db, ts), clientId, projectId, ts.slice(0, 10), tomorrow, statement.billTo, "job fees",
+          text(by).slice(0, 120), ts, ts],
+      );
+    }
+    insertLines(db, invoiceId, lines, ts);
+    refreshInvoiceTotals(db, invoiceId);
     return invoiceId;
   });
-  return getClientInvoice(db, clientId, created);
+  return made ? getClientInvoice(db, clientId, made) : null;
 }
 
 function requireStatus(inv: ClientInvoice, allowed: ClientInvoiceStatus[], action: string): void {
@@ -736,7 +782,9 @@ export function markClientInvoiceSent(db: AppDb, clientId: string, invoiceId: st
   requireStatus(inv, ["draft", "sent"], "marked sent");
   if (inv.status === "sent") return inv;
   const ts = nowIso();
-  const due = new Date(Date.parse(ts) + invoiceTermsDays() * 86_400_000).toISOString().slice(0, 10);
+  // A job's fee invoice is due on receipt (we already paid the fee); a period statement takes the terms.
+  const termsDays = inv.projectId ? 0 : invoiceTermsDays();
+  const due = new Date(Date.parse(ts) + termsDays * 86_400_000).toISOString().slice(0, 10);
   db.run("UPDATE client_invoices SET status = 'sent', issued_at = ?, due_at = ?, updated_at = ? WHERE id = ?", [ts, due, ts, invoiceId]);
   return getClientInvoice(db, clientId, invoiceId);
 }
