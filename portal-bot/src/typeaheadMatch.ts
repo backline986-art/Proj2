@@ -86,8 +86,15 @@ const escapeRe = (s: string): string => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
  *  number. The whole text when the house number is not in it. */
 function addressPart(text: string, house: string): string {
   const m = new RegExp(`(^|[^0-9a-z])(${escapeRe(house)})([^0-9a-z]|$)`, "i").exec(text);
-  return m ? text.slice(m.index + m[1].length) : text;
+  return (m ? text.slice(m.index + m[1].length) : text).replace(PARCEL_TAIL, "");
 }
+
+/** A PARCEL / ACCOUNT ID AFTER THE ADDRESS is a label, not a place (live City of Tigard, Esri
+ *  search, 2026-11-12: "13125 SW HALL BLVD Parcel: 2S102DA00401" read "parcel" as the city and was
+ *  asked about instead of picked). The label word, then an id that carries a digit, at the end. A
+ *  street that merely starts with such a word ("Pin Oak Dr", "Parcel Rd") has no digit id after it
+ *  and is kept. */
+const PARCEL_TAIL = /[\s,;|(-]+(?:parcel|apn|pin|tax\s*lot|tax\s*id|tlid|property\s*id|acct|account)\b\.?\s*(?:#|no\.?|number|id)?\s*[:#]?\s*(?=[A-Z0-9.-]*\d)[A-Z0-9.-]+\)?\s*$/i;
 
 // A STATE CODE THAT IS ALSO A STREET WORD. siteKey stops a street at a state code before it asks
 // whether the token is a suffix or a directional, so "Quillfeather CT" reads as Connecticut (no

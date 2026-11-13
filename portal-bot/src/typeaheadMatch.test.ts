@@ -50,6 +50,18 @@ check("...with a parcel id in front of the address", () => {
   const c = chooseAddressSuggestion(["12-345-0067 | 4821 W QUILLFEATHER DR MARROWVALE"], SITE);
   assert.equal(c.kind, "pick", JSON.stringify(c));
 });
+check("...with a parcel id AFTER the address (live Tigard Esri: 'Parcel: 2S102DA00401')", () => {
+  for (const row of ["4821 W QUILLFEATHER DR Parcel: 2S1-02DA00401", "4821 W QUILLFEATHER DR (APN 123-456-78)", "4821 W QUILLFEATHER DR, Tax Lot 2S102DA00401"]) {
+    const c = chooseAddressSuggestion([row], SITE);
+    assert.equal(c.kind, "pick", `${row}: ${JSON.stringify(c)}`);
+  }
+});
+check("MUST NOT: a street that starts with a label word keeps its words (no digit id after it)", () => {
+  const c = chooseAddressSuggestion(["4821 W PIN OAK DR"], SITE);
+  assert.notEqual(c.kind, "pick", JSON.stringify(c));
+  const own = chooseAddressSuggestion(["77 PIN OAK DR"], { street: "77 Pin Oak Dr", city: "Marrowvale", zip: "84999" });
+  assert.equal(own.kind, "pick", JSON.stringify(own));
+});
 check("...with the direction spelled out on one side", () => {
   const c = chooseAddressSuggestion(["4821 West Quillfeather Dr"], SITE);
   assert.equal(c.kind, "pick", JSON.stringify(c));
