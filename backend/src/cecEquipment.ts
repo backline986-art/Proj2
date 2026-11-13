@@ -17,6 +17,8 @@ import { id } from "./ids";
 import { logger } from "./logger";
 import { startPersistentSchedule } from "./schedulerState";
 import { nowIso } from "./time";
+import { isOfficialSourceHost } from "../../shared/src/officialSource";
+import { operatorPolicyAnswer } from "../../shared/src/perJobQuestions";
 
 export type CecKind = "module" | "inverter";
 
@@ -26,6 +28,11 @@ export interface CecRow {
   powerW: number | null;
   outputCurrentA: number | null;
   listedAt: string;
+  /** INVERTERS ONLY: the list's own "UL 1741 Supplement SB Certification" column, "Y" or "N" ("" when
+   *  the workbook has no such column). Kept in the row's raw_json (no migration). */
+  ul1741sb?: "Y" | "N" | "";
+  /** Who certified it: the list's "UL 1741 (3rd Ed.) Supplement SB Certification" (certifying entity). */
+  ul1741sbBy?: string;
 }
 
 export interface CecSyncSummary {
@@ -135,12 +142,20 @@ export function parseCecSheet(kind: CecKind, buf: Buffer): CecRow[] {
           if (volts !== null && volts >= 100) outputCurrentA = Math.round((powerW / volts) * 100) / 100;
         }
       }
+      // THE LIST'S OWN UL 1741 SB ANSWER (inverters). The workbook prints a Y/N column
+      // ("UL 1741 Supplement SB Certification") and, further right, the certifying entity under a
+      // different heading ("UL 1741 (3rd Ed.) Supplement SB Certification"); pick() matches a heading by
+      // its start, so the two never read as each other.
+      const sbRaw = kind === "inverter" ? pick(row, "UL 1741 Supplement SB Certification").toUpperCase() : "";
+      const ul1741sb: "Y" | "N" | "" = sbRaw.startsWith("Y") ? "Y" : sbRaw.startsWith("N") ? "N" : "";
+      const sbBy = ul1741sb === "Y" ? pick(row, "UL 1741 (3rd Ed.) Supplement SB Certification") : "";
       out.push({
         manufacturer,
         model,
         powerW,
         outputCurrentA,
         listedAt: pick(row, "CEC Listing Date", "Grid Support Listing Date", "Listing Date", "Last Update"),
+        ...(ul1741sb ? { ul1741sb, ul1741sbBy: /no information/i.test(sbBy) ? "" : sbBy } : {}),
       });
     }
     // No break: the inverter workbook carries Solar_Inverters AND
@@ -157,8 +172,9 @@ export function importCecRows(db: AppDb, kind: CecKind, rows: CecRow[]): number 
     for (const row of rows) {
       db.run(
         `INSERT OR IGNORE INTO cec_equipment (id, kind, manufacturer, model, power_w, output_current_a, listed_at, raw_json, synced_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, '{}', ?)`,
-        [id(), kind, row.manufacturer, row.model, row.powerW, row.outputCurrentA, row.listedAt || "", ts],
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [id(), kind, row.manufacturer, row.model, row.powerW, row.outputCurrentA, row.listedAt || "",
+          row.ul1741sb ? JSON.stringify({ ul1741sb: row.ul1741sb, ul1741sbBy: row.ul1741sbBy || "" }) : "{}", ts],
       );
     }
   });
@@ -429,6 +445,120 @@ export function cecListing(
   const certifiedName = certifiedModelFor(db, kind, make, model, watts);
   if (certifiedName) return { listed: true, certifiedName };
   return { listed: listedByContainment(db, kind, model), certifiedName: "" };
+}
+
+/**
+ * THE JOB'S INVERTER, AS THE CEC CHECKS READ IT: the string inverter's model, else the microinverter's,
+ * with the make that goes with it. One reading for QC's listing row, its UL 1741 SB row and the gate.
+ */
+export function jobInverterForCec(snapshot: Record<string, unknown> | null | undefined): { model: string; make: string } {
+  const s = (k: string): string => String(snapshot?.[k] ?? "").trim();
+  const micro = !s("invModel") && Boolean(s("pvMicroModel"));
+  return {
+    model: s("invModel") || s("pvMicroModel"),
+    make: micro ? s("pvMicroMake") : s("invMake") || s("inverterManufacturer"),
+  };
+}
+
+export interface CecUl1741SbAnswer {
+  /** True only when EVERY CEC listing the model can be prints "Y"; false only when every one prints "N". */
+  certified: boolean;
+  /** The listings the answer was read from (several when the plan set names a model without its suffix). */
+  listedModels: string[];
+  /** The certifying entity, when every listing names the same one; else "". */
+  certifiedBy: string;
+  /** When the list was last synced into this database (the newest row's synced_at). */
+  syncedAt: string;
+  /** Where the list comes from: the CEC's own download (a government host). */
+  sourceUrl: string;
+}
+
+/**
+ * VERIFY FIRST (owner, 2026-11-13: "verify first, then verify prior to warning"): does the CEC's own
+ * inverter list say this model is UL 1741 SB certified? The CEC (energy.ca.gov) publishes a Y/N per
+ * listing; utilities that ask for "UL 1741 SB listing" are asking exactly this, and the weekly sync
+ * already downloads it. An official, government-published answer, read from the list's bytes, never
+ * from a model.
+ *
+ * WHICH LISTINGS: the same rules as certifiedModelFor, without its guesses. Exact (punctuation-
+ * insensitive) wins alone; otherwise every listing that STARTS with the model at a token boundary
+ * ("IQ8M" -> "IQ8M-72-2-US {240V}" and "IQ8M-72-M-US {208V}", never "IQ8MC-…"), scoped to the make when
+ * the make names CEC manufacturers. The answer counts only when every one of them agrees, so a model
+ * string that could be two SKUs with different answers answers nothing. A row synced before this column
+ * was read carries no flag: no answer (null), and the job is checked exactly as before.
+ */
+export function cecUl1741SbListing(db: AppDb, model: string, make = ""): CecUl1741SbAnswer | null {
+  const want = String(model ?? "").trim();
+  if (!want) return null;
+  const wantNorm = want.toLowerCase().replace(/\s+/g, " ").trim();
+  const wantBare = wantNorm.replace(/[^a-z0-9]/g, "");
+  if (wantBare.length < 3) return null;
+  // Official only from the list's own (government) host, by the one shared predicate: a mirror set in
+  // CEC_INVERTERS_URL is not the CEC, and its answer verifies nothing.
+  const sourceUrl = cecUrl("inverter");
+  if (!isOfficialSourceHost(sourceUrl)) return null;
+  try {
+    const makers = make ? certifiedNamesForMake(db, "inverter", make) : [];
+    type Row = { model: string; raw_json: string; synced_at: string };
+    const rows = makers.length
+      ? db.query<Row>(
+        `SELECT model, raw_json, synced_at FROM cec_equipment WHERE kind = 'inverter' AND manufacturer IN (${makers.map(() => "?").join(",")})`,
+        makers,
+      )
+      : db.query<Row>("SELECT model, raw_json, synced_at FROM cec_equipment WHERE kind = 'inverter'");
+    const exact: Row[] = [];
+    const boundary: Row[] = [];
+    for (const row of rows) {
+      const t = String(row.model ?? "").toLowerCase().replace(/\s+/g, " ").trim();
+      if (!t) continue;
+      if (t === wantNorm || t.replace(/[^a-z0-9]/g, "") === wantBare) { exact.push(row); continue; }
+      if (t.startsWith(wantNorm)) {
+        const next = t.charAt(wantNorm.length);
+        if (!next || !/[a-z0-9]/.test(next)) boundary.push(row);
+      }
+    }
+    const pool = exact.length ? exact : boundary;
+    if (!pool.length) return null;
+    const flags = pool.map((r) => {
+      try {
+        const raw = JSON.parse(String(r.raw_json || "{}")) as { ul1741sb?: string; ul1741sbBy?: string };
+        return { sb: raw.ul1741sb === "Y" || raw.ul1741sb === "N" ? raw.ul1741sb : "", by: String(raw.ul1741sbBy ?? "").trim() };
+      } catch {
+        return { sb: "", by: "" };
+      }
+    });
+    if (flags.some((f) => !f.sb)) return null;
+    const allY = flags.every((f) => f.sb === "Y");
+    const allN = flags.every((f) => f.sb === "N");
+    if (!allY && !allN) return null;
+    const bys = [...new Set(flags.map((f) => f.by).filter(Boolean))];
+    return {
+      certified: allY,
+      listedModels: pool.map((r) => r.model),
+      certifiedBy: allY && bys.length === 1 ? bys[0] : "",
+      syncedAt: pool.map((r) => String(r.synced_at ?? "")).sort().pop() || "",
+      sourceUrl,
+    };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * THE UTILITY'S "USE THE REQUIRED SETTINGS" ITEM, ANSWERED (owner, 2026-11-13: "assume yes for inverter
+ * settings, or even better the spec sheet … or look it up"): the CEC's own list says the inverter is
+ * UL 1741 SB certified (it can take a utility's required profile) AND the operator's standing answer
+ * says installs are commissioned with the utility's settings. Both, or nothing: an inverter the list
+ * does not certify still asks a person.
+ */
+export function inverterSettingsByStandingAnswer(answer: CecUl1741SbAnswer | null): boolean {
+  return answer?.certified === true && operatorPolicyAnswer("utilitySettingsCommissioned") === "Yes";
+}
+
+/** The job's inverter against the CEC list's UL 1741 SB column (jobInverterForCec + cecUl1741SbListing). */
+export function jobInverterUl1741Sb(db: AppDb, snapshot: Record<string, unknown> | null | undefined): CecUl1741SbAnswer | null {
+  const { model, make } = jobInverterForCec(snapshot);
+  return model ? cecUl1741SbListing(db, model, make) : null;
 }
 
 /** Is a model on the CEC list? (cecListing — the one answer; make and wattage sharpen it.) */

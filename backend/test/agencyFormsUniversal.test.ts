@@ -285,6 +285,13 @@ try {
   check("MF3 (setup) the county's two applications and the 5952 acquired", ens.results.every((r) => r.status === "acquired" || r.status === "exists"), JSON.stringify(ens.results.map((r) => [r.formType, r.status])));
   const held = doorList();
   check("MF3 held and fillable, not yet filled: 'on file (fill pending)'", /— on file \(fill pending\)$/.test(statusOf(held, /B-01S/)) && /— on file \(fill pending\)$/.test(statusOf(held, /E-01/)) && /— on file \(fill pending\)$/.test(statusOf(held, /440-5952/)), JSON.stringify(held));
+  // VERIFY FIRST (#213): a form staging fills from its stored template is not counted "missing" on
+  // the job's required list. QC says it is made at staging, and never names it in the missing count.
+  const { runQcForProject } = await import("../src/qc");
+  runQcForProject(db, created.id);
+  const completeRow = db.query<{ qc_status: string; message: string }>("SELECT qc_status, message FROM qc_results WHERE project_id = ? AND rule_id = 'docs.complete' ORDER BY created_at DESC LIMIT 1", [created.id])[0];
+  const missingPart = (completeRow?.message ?? "").split(" Made at staging")[0];
+  check("#213 docs.complete: a form filled at staging is not counted missing", !!completeRow && /\(1 of 4 missing/.test(missingPart) && !/Marion County \(issues/.test(missingPart) && /Made at staging, so not counted missing: Marion County \(issues the structural/.test(completeRow.message), completeRow?.message ?? "(no docs.complete row)");
   const pkgFill = await forms.buildFilledFormsForProject(db, created);
   check("MF3 (setup) the fill ran", pkgFill.forms.filter((f) => f.status === "filled").length >= 3, JSON.stringify(pkgFill.forms.map((f) => [f.formName, f.status])));
   const filled = doorList();
