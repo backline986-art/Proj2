@@ -29,6 +29,7 @@ import { resolvePermitPath, evaluatePrescriptiveCriteria, usStateCode, type Pres
 import { registryTermMatches } from "./processProfiles";
 import { resolveEffectiveCodeContext } from "./codeProfiles";
 import { isDocumentDateStale } from "./documentDate";
+import { officialFormDocument, officialFormWords, type OfficialFormDocument } from "./officialFormDocument";
 import { mountAdjective, mountKindForProject } from "./codeReviewRules";
 import { batteryStatus } from "./batteryServiceFeeder";
 import { findFeeScheduleForProject, feeForProject, knownElectricalReviewRequired, type FeeScheduleLine } from "./feeSchedules";
@@ -1594,6 +1595,12 @@ export interface FilledFormResult {
   documentStale?: boolean;
   /** Where the blank was downloaded from, so the operator can re-check it. */
   sourceUrl?: string;
+  /** Stored forms only: the BLANK is the authority's own document (officialFormDocument: an official
+   *  host, the stored bytes are the bytes Keelix retrieved, a retrieval date). Says nothing about the
+   *  mapping — `verified` alone is a person's word on that, and every gate still reads `verified`. */
+  officialDocument?: OfficialFormDocument | null;
+  /** "Blank form: Verified from <host>, <date>[; mapping not checked by a person]" — "" when not official. */
+  officialDocumentWords?: string;
   /** Blanks the product did NOT fill, by printed label, with why — for the operator to complete by
    *  hand: facts no source holds (zoning, setbacks, flood zone…), a mapped value that is empty on
    *  this job, a value refused as the wrong shape for its box, an attestation never made
@@ -2440,10 +2447,17 @@ export async function buildFilledFormsForProject(db: AppDb, project: ProjectReco
     // the filled PDF is the last person who can catch that, so the document's
     // own date travels with the fill result rather than living only in the
     // template manager.
+    // WHOSE DOCUMENT THE BLANK IS (official-source slice 5): graded against the row's OWN authority's
+    // hosts, never the project's. The mapping is a separate fact — `verified` stays the person's.
+    const officialDocument = officialFormDocument(db, { state: stored.def.state || project.state, ahj: stored.authority }, {
+      sourceUrl: stored.sourceUrl, retrievedAt: stored.retrievedAt, sourceHash: stored.sourceHash, bytes: stored.bytes,
+    });
     const dated = {
       documentDate: stored.documentDate,
       documentStale: stored.documentStale,
       sourceUrl: stored.sourceUrl,
+      officialDocument,
+      officialDocumentWords: officialFormWords(officialDocument, stored.verified ? "person" : stored.builtInMap ? "built_in" : "unchecked"),
     };
     const staleNote = stored.documentStale
       ? `This blank dates ITSELF "${stored.documentDate}" — over two years old. Re-check the AHJ's current forms page before filing, and if it prints a fee table, re-check that against the adopted schedule.`
@@ -2523,6 +2537,8 @@ export interface StoredTemplate {
   sourceUrl: string;
   /** The stored blank's sha256 (field_map.sourceHash, stamped at store) — "" on rows stored before it. */
   sourceHash: string;
+  /** When Keelix pulled these bytes (the row's retrieved_at) — "" for an upload or an old row. */
+  retrievedAt: string;
   applicationKind: "prescriptive" | "structural" | null;
   /** The row's form_type ("" on rows stored before the column mattered). */
   formType: string;
@@ -2533,7 +2549,7 @@ export interface StoredTemplate {
   issuedBy: string;
 }
 
-type TemplateRow = { id: string; ahj_name: string; state: string; form_type?: string; original_filename: string; pdf_blob: Buffer | null; field_map: string; document_date: string; source_url: string };
+type TemplateRow = { id: string; ahj_name: string; state: string; form_type?: string; original_filename: string; pdf_blob: Buffer | null; field_map: string; document_date: string; source_url: string; retrieved_at?: string };
 
 /** A stored form's permit track, from its form type (applicationDocsAgency.trackForFormType — the one
  *  answer): the generic permit application is "permit" (the project's combo filing, else building). */
@@ -2656,6 +2672,7 @@ function storedTemplateFromRow(row: TemplateRow, issuedBy = ""): StoredTemplate 
     documentStale: isDocumentDateStale(String(row.document_date || "")),
     sourceUrl: String(row.source_url || map.sourceUrl || ""),
     sourceHash: String(map.sourceHash || ""),
+    retrievedAt: String(row.retrieved_at || ""),
     applicationKind: storedApplicationKind(row),
     formType: String(row.form_type || ""),
     authority: String(row.ahj_name || ""),
@@ -2691,7 +2708,7 @@ export function loadStoredTemplates(db: AppDb, ahj: string, state: string, opts:
   const needle = (ahj || "").trim().toLowerCase();
   if (!needle) return [];
   const rows = db.query<TemplateRow>(
-    "SELECT id, ahj_name, state, form_type, original_filename, pdf_blob, field_map, document_date, source_url FROM ahj_form_templates WHERE pdf_blob IS NOT NULL ORDER BY updated_at DESC",
+    "SELECT id, ahj_name, state, form_type, original_filename, pdf_blob, field_map, document_date, source_url, retrieved_at FROM ahj_form_templates WHERE pdf_blob IS NOT NULL ORDER BY updated_at DESC",
   );
   let out: StoredTemplate[] = [];
   const ownRows = new Map<string, TemplateRow>();
@@ -2742,7 +2759,7 @@ export function heldUnfillableAgencyBlanks(db: AppDb, project: Pick<ProjectRecor
   const others = tracksIssuedByOther(project);
   if (!others.length) return out;
   const rows = db.query<TemplateRow>(
-    "SELECT id, ahj_name, state, form_type, original_filename, pdf_blob, field_map, document_date, source_url FROM ahj_form_templates WHERE pdf_blob IS NOT NULL",
+    "SELECT id, ahj_name, state, form_type, original_filename, pdf_blob, field_map, document_date, source_url, retrieved_at FROM ahj_form_templates WHERE pdf_blob IS NOT NULL",
   );
   for (const other of others) {
     // C1 (agency-contain): only the agency's rows THIS job may use (agencyRowAppliesToJob).

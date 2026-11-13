@@ -867,6 +867,9 @@ function renderAhjForms() {
       provBits.push('<span class="muted" style="font-size:11px">no source link (uploaded)</span>');
     }
     if (prov.retrievedAt) provBits.push(`<span class="muted" style="font-size:11px">pulled ${esc(String(prov.retrievedAt).slice(0, 10))}</span>`);
+    // The BLANK is the authority's own document (server: officialFormDocument). The words say whose
+    // the mapping is too, so an official blank is never read as a person-checked map.
+    if (r.officialDocumentWords) provBits.push(`<span class="muted" style="font-size:11px" data-official-form="${esc(r.id)}">${esc(r.officialDocumentWords)}</span>`);
     return `
     <div class="card" style="padding:8px 10px;margin-bottom:6px">
       <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap">
@@ -8786,6 +8789,7 @@ function renderFilledForms(projectId) {
       ${ok && !isStored && !f.signaturesLocked ? `<p class="muted"><button type="button" class="secondary" data-detect-sign="${esc(f.formId)}" style="font-size:12px">Detect signature lines (AI)</button> — stamp your stored signature on this form.</p>` : ""}
       ${ok ? `<p class="muted"><button type="button" class="secondary" data-verify-vision="${esc(f.formId)}" style="font-size:12px">Verify fill with vision</button> — reads the filled PDF back and lists each value under the printed label it sits beside. Reports only; it never changes the form.</p><div data-vision-result="${esc(f.formId)}"></div>` : ""}
       ${ok && !isStored && f.signaturesLocked ? `<p class="muted">✓ Built-in form — signature + date auto-placed on the authorized-signature line. No verification needed.</p>` : ""}
+      ${isStored && f.officialDocumentWords ? `<p class="muted" data-official-form="${esc(f.templateId)}">${esc(f.officialDocumentWords)}</p>` : ""}
       ${f.documentStale ? `<p class="muted"><strong>This blank dates itself “${esc(f.documentDate)}”</strong> — over two years old. Re-check the AHJ's current forms page before filing${f.sourceUrl ? ` (<a href="${esc(f.sourceUrl)}" target="_blank" rel="noopener noreferrer">source</a>)` : ""}. Check any printed fee rates against the current schedule.</p>` : ""}
       ${extra ? `<p class="muted">${esc(extra)}</p>` : ""}
       ${ok && operatorItems.length ? `<p><strong>Fill by hand before filing (${operatorItems.length}):</strong></p><ul class="muted" style="margin:2px 0 6px 18px">${operatorItems.map((it) => `<li>${esc(it)}</li>`).join("")}</ul>` : ""}
