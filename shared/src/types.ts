@@ -5411,6 +5411,12 @@ export interface CitedFact<T> {
   /** Other pages that state the SAME fact in other words (a prerequisite collapsed from
    *  near-duplicates, permitProcessPrerequisites.classifyPrerequisites) — every source is kept. */
   alsoSourceUrls?: string[];
+  /** OFFICIAL (owner, 2026-11-11; backend/src/lookupFactTiers.ts): Keelix read this fact's quote, naming
+   *  its value, in the bytes it retrieved from the authority's own official page at `fetchedAt`. Shown
+   *  "Verified from <host>, <date>"; never a person's verification, never on a filing door or a fee.
+   *  Absent = seeded. Re-checked whenever the row is served (withHonouredFactTiers). */
+  tier?: "official";
+  fetchedAt?: string;
 }
 export type PermitProcessDiscipline = "structural" | "electrical" | "combo" | "other";
 export interface PermitFeeAnswer {
