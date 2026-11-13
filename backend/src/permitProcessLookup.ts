@@ -40,7 +40,8 @@ import { CONNECTOR_WORDS, DEPARTMENT_WORDS, GENERIC_ORG_WORDS, agencyNameKey, sa
 export { agencyNameKey, sameAgencyName };
 import { logger } from "./logger";
 import { isOfficialSourceHost } from "../../shared/src/officialSource";
-import { personVerifiedAuthorityHosts } from "./officialAuthorityHosts";
+import { officialAuthorityHosts, vouchNamesFor } from "./officialAuthorityHosts";
+import { findSiteVouches, mergeVouches, type SiteVouch } from "./governmentVouches";
 import { bracketDescribesPercentOfCost, feeLedgerFromPages, feeScheduleProfileKey, saveFeeSchedule } from "./feeSchedules";
 import { stateSurchargeRuleFor } from "./stateFeeRules";
 import { parseBracketRow } from "./pdfTables";
@@ -1431,6 +1432,7 @@ export async function runPermitProcessLookup(
   // OUR OWN READ of the agency's pages, the portal they link and its public catalog (grounded
   // answers only: an ungrounded part one names no page worth reading).
   let ev: AgencyEvidence | null = null;
+  let siteVouchRun: { vouches: SiteVouch[]; read: string[] } = { vouches: [], read: [] };
   if (reader && first) {
     const p1json = parseJsonLoose(p1.text);
     const cited = citedSourceUrls(p1json);
@@ -1448,9 +1450,21 @@ export async function runPermitProcessLookup(
       const dec = acceptPortalForPermit(rawPortal, "process part", { seenUrls: seenOf(p1), names: pre.namesFor(discipline), typeNames: pre.typeNamesFor(discipline), entity });
       worthReading.set(u, (worthReading.get(u) ?? false) || !OUTRIGHT_REFUSALS.has(dec.code));
     }
-    // The one shared official-source predicate for THIS authority: a government domain, or a domain a
-    // person verified as its own. Only a schedule there may count as current while dated.
-    const verifiedHosts = (() => { try { return personVerifiedAuthorityHosts(db, input.state, input.ahj); } catch { return []; } })();
+    // A GOVERNMENT PAGE VOUCHES (owner, 2026-11-13; governmentVouches.ts): when the answer's own pages
+    // sit on a non-government site that could be this AHJ's and is not yet recorded as its own, the
+    // government pages among its citations and search results (≤ 2) are read for a link to that site
+    // in the AHJ's name. Before the agency read, so this run's official checks already see it.
+    const recordedHosts = (() => { try { return officialAuthorityHosts(db, input.state, input.ahj); } catch { return []; } })();
+    try {
+      siteVouchRun = await findSiteVouches(reader, { kind: "ahj", state: input.state, names: vouchNamesFor(input.ahj, first) },
+        { candidateUrls: [...cited.all, ...p1.resultUrls], officialHosts: recordedHosts });
+    } catch (err) {
+      logger.warn("permit-process", `site vouch read failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+    // The one shared official-source predicate for THIS authority: a government domain, or a domain
+    // recorded as its own (a person's, or a government page's vouch). Only a schedule there may count
+    // as current while dated.
+    const verifiedHosts = [...new Set([...recordedHosts, ...siteVouchRun.vouches.map((v) => v.host)])];
     const officialFeeHost = (u: string) => isOfficialSourceHost(u, verifiedHosts);
     try {
       ev = await readAgencyEvidence(reader, { ahj: input.ahj, state: input.state, agencyNames, citedUrls: cited.all, agencyCitation, resultUrls: p1.resultUrls, resultTitles: p1.resultTitles, proposedPortals: [...worthReading.entries()].filter(([, ok]) => ok).map(([u]) => u), typeNames: [...new Set([input.ahj, pre.lifted.value ?? ""])].filter(Boolean), officialFeeHost });
@@ -1908,6 +1922,9 @@ export async function runPermitProcessLookup(
     ...(reader ? { pagesRead: reader.log.map((l) => ({ url: l.url, ok: l.ok, reason: l.reason.slice(0, 160) })) } : {}),
     ...(needsPersonRead.length ? { needsPersonRead } : {}),
     ...(feeReadsForPerson.length ? { feeReadsForPerson } : {}),
+    // This run's government vouches beside the earlier row's (an earlier one is dropped only when its
+    // government page was read again and no longer links the site).
+    ...(() => { const v = mergeVouches(existing?.siteVouches, siteVouchRun.vouches, siteVouchRun.read); return v.length ? { siteVouches: v } : {}; })(),
   });
   if (res.saved && res.lookup) {
     // The pages this run read itself travel with the landing, so a landed fee's printed line is

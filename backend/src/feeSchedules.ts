@@ -89,7 +89,7 @@ import { routeFor } from "./modelRouting";
 import { getPermitProcessLookup } from "./permitProcess";
 import { stateSurchargeRuleFor, type StateSurchargeAnswer } from "./stateFeeRules";
 import { citationShortfalls, isOfficialSourceHost, quoteNamesValue, sourceHostOf } from "../../shared/src/officialSource";
-import { personVerifiedAuthorityHosts } from "./officialAuthorityHosts";
+import { officialAuthorityHosts } from "./officialAuthorityHosts";
 import { CURATED_AHJ_FORMS } from "./curatedAhjForms";
 import { localPermitReview, permitFeeProject, trackForFeeDiscipline } from "./feeIssuer";
 import { logger } from "./logger";
@@ -1398,9 +1398,10 @@ export function foreignMunicipalitySource(
     + `It may be another municipality's schedule (Halifax Township's was cited for Corry). Find ${clean(input.ahj)}'s own schedule, or record the agency that collects its fees as a delegation.`;
 }
 
-/** The hosts a person verified as this AHJ's own; a broken lookup row reads as none. */
+/** The hosts recorded as this AHJ's own (a person's, or a government page's vouch); a broken lookup
+ *  row reads as none. */
 function safeVerifiedHosts(db: AppDb, state: string, ahj: string): string[] {
-  try { return state && ahj ? personVerifiedAuthorityHosts(db, state, ahj) : []; } catch { return []; }
+  try { return state && ahj ? officialAuthorityHosts(db, state, ahj) : []; } catch { return []; }
 }
 
 /** THE OFFICIAL HOSTS A ROW'S PRINTED LINES WERE READ ON: every bracket whose corroboration (written
