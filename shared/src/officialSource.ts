@@ -102,6 +102,20 @@ export interface CitationEvidence {
   /** Hosts cited by this authority's HUMAN-verified rows (see isOfficialSourceHost). */
   verifiedAuthorityHosts?: readonly string[];
 }
+/**
+ * THE WORDS FOR AN OFFICIAL FACT (owner, 2026-11-13, decision card "Choose how facts read from an
+ * official page are labelled": "Verified from site, with date"): "Verified from <host>, <YYYY-MM-DD>".
+ * It counts as verified, and it always names the SITE and the read date, never a person: a person's
+ * mark stays "Verified by <name>, <date>", so the two can never be mistaken for each other. Every
+ * screen, quote and invoice line that shows the official tier uses these words (the frontend's
+ * vanilla-JS copies are pinned to the same shape by officialSourceWords.test).
+ */
+export function officialSourceWords(host: string, fetchedAt?: string | null): string {
+  const h = String(host ?? "").trim();
+  const day = /^\d{4}-\d{2}-\d{2}/.test(String(fetchedAt ?? "")) ? String(fetchedAt).slice(0, 10) : "";
+  return `Verified from ${h || "the authority's own page"}${day ? `, ${day}` : ""}`;
+}
+
 export function citationShortfalls(input: CitationEvidence): { host: string; quote: string; reasons: string[] } {
   const reasons: string[] = [];
   const host = sourceHostOf(input.sourceUrl);

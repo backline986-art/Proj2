@@ -54,7 +54,7 @@ import { portalFeeSummary } from "./portalFeeReadings";
 import { printedFormCheck, printedFormQuote } from "./printedFormFees";
 import { feeReadsNeedingAPerson, feeReadsSentence } from "./feeNeedsPerson";
 import { priorYearOfFeeSource } from "./permitPlatformCatalog";
-import { officialSourceOfFeeResolution } from "./feeOfficial";
+import { officialFeeWords, officialSourceOfFeeResolution } from "./feeOfficial";
 import type { ProjectFeeResolution } from "./feeSchedules";
 import { resolveProjectCap, resolveServicePrice, underCap, type PriceBasis } from "./servicePrices";
 
@@ -971,7 +971,7 @@ function computePaymentQuote(
       const vouching = schedule.confidence === "verified"
         ? ` (human-verified${permitFeeVerifiedBy ? ` by ${permitFeeVerifiedBy}` : ""}${schedule.verifiedAt ? ` on ${schedule.verifiedAt.slice(0, 10)}` : ""})`
         : permitFeeOfficial
-          ? ` (from ${permitFeeOfficial.host}, read ${permitFeeOfficial.fetchedAt.slice(0, 10)}: the authority's own published schedule, used as published; not checked by a person)`
+          ? ` (${officialFeeWords(permitFeeOfficial)}: Keelix read it on the authority's own published schedule and uses it as published)`
         : permitFeeCorroborated
           ? " (matches the published schedule — CORROBORATED: a machine re-read the cited document and found this line printed in it; no person has confirmed it yet)"
           : matchBadgeOn && schedule.corroborated
@@ -1630,7 +1630,7 @@ function localReviewLine(db: AppDb, project: ProjectRecord, review: { ahj: strin
     source: priced ? "published_schedule" : "unknown",
     basis: priced
       ? `${review.ahj}'s own zoning / site-development review fee, read off its published schedule${s!.bracketLabel ? ` ("${s!.bracketLabel}")` : ""}`
-        + `${s!.confidence === "verified" ? "." : official ? ` (from ${official.host}, read ${official.fetchedAt.slice(0, 10)}; not checked by a person).` : " — researched, not yet checked by a person."} ${review.issuer} issues the building and electrical permits; this is ${review.ahj}'s separate charge.`
+        + `${s!.confidence === "verified" ? "." : official ? ` (${officialFeeWords(official)}: Keelix read it on the authority's own published schedule).` : " — researched, not yet checked by a person."} ${review.issuer} issues the building and electrical permits; this is ${review.ahj}'s separate charge.`
       : `No published zoning / site-development review fee on file for ${review.ahj} yet${s?.reason ? ` (${s.reason})` : ""}. `
         + `${review.ahj} issues no building or electrical permit here — ${review.issuer} does — but it reviews the site plan first and may charge for it. `
         + `Ask ${review.ahj}'s planning office for the fee.`,

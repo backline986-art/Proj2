@@ -407,8 +407,8 @@ export type FeePaymentMethod = "portal" | "mailed_check" | "none" | "unknown";
  *  means a human stands behind it — a human-checked schedule row, or a median of
  *  fees people read off real portal screens. "official" (owner, 2026-11-11; rule 3's official tier)
  *  is a published-schedule amount whose printed line Keelix itself read on the authority's own
- *  official page: used as published and shown "from <host>, read <date>", never under a person's
- *  name, and never over a person's verified amount. "seeded" is unreviewed research, so
+ *  official page: used as published and shown "Verified from <host>, <date>" (owner, 2026-11-13;
+ *  officialSourceWords), never under a person's name, and never over a person's verified amount. "seeded" is unreviewed research, so
  *  it never auto-overwrites anything (safety rule 3). "estimated" is the
  *  valuation heuristic, which knows nothing about the jurisdiction. */
 export type FeeConfidence = "actual" | "verified" | "official" | "seeded" | "estimated" | "unknown";
