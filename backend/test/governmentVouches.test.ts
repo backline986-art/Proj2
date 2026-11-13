@@ -16,7 +16,7 @@
 // Kill tests (each mutation → the checks that fail), run by hand on this branch:
 //   K1  vouchesOnPage: drop the government-host check on the vouching page        → A2.
 //   K2  vouchesOnPage: drop linkNamesAuthority                                      → A3, D2, D5.
-//   K3  hostCouldBeAuthorityOwn: drop the hosting / platform refusal               → none: today the
+//   K3  hostCouldBeAuthorityOwn: drop the hosting / permit-platform refusal        → none: today the
 //       name-in-domain test already refuses every such host (a vendor's domain never carries a
 //       city's name); kept as a second wall should that test ever widen.
 //   K4  hostCouldBeAuthorityOwn (ahj): any host                                     → A4, B1.
@@ -27,6 +27,8 @@
 //   K9  utilityOfficialHosts: person-verified only (no vouches)                     → D4, C2.
 //   K10 filingDestinationProposals reads the official union                         → C3.
 //   K11 findSiteVouches: read even when the site is already recorded                → D3.
+//   K12 hostCouldBeAuthorityOwn (utility): refuse the rule 5 utility list again     → A7.
+//   K13 hostCouldBeAuthorityOwn (ahj): drop the utility-list refusal                → A7.
 
 import "./_isolate"; // FIRST
 import assert from "node:assert/strict";
@@ -126,6 +128,17 @@ await check("(A6) a utility: a state commission page linking the utility in its 
   const PUC = "https://puc.zz.gov/utilities/electric";
   const v = gv.vouchesOnPage(page(PUC, [{ href: "https://www.larchmontpowerzz.com/", text: "Larchmont Power" }, { href: "https://www.otherutilityzz.com/", text: "Other Utility" }]), LARCH, AT);
   assert.deepEqual(v.map((x) => x.host), ["www.larchmontpowerzz.com"]);
+});
+
+await check("(A7) a utility's own domain that the rule 5 utility list holds is still its own; a vendor's domain or a city's vouch onto it is not", async () => {
+  const pc = await import("../src/portalChannel");
+  const OWN = "www.xcelenergy.com"; // a utility's own domain on portalChannel's utility list (for rule 5)
+  assert.equal(pc.isUtilityPlatformUrl(`https://${OWN}/`), true, "fixture: the host is on the utility list");
+  const UTIL = { kind: "utility" as const, state: "ZZ", names: ["Xcel Energy"] };
+  const PUC = "https://puc.zz.gov/utilities/electric";
+  assert.deepEqual(gv.vouchesOnPage(page(PUC, [{ href: `https://${OWN}/`, text: "Xcel Energy" }]), UTIL, AT).map((v) => v.host), [OWN]);
+  assert.deepEqual(gv.vouchesOnPage(page(PUC, [{ href: "https://xcelenergy.powerclerk.com/", text: "Xcel Energy" }]), UTIL, AT), [], "an interconnection vendor's tenant");
+  assert.equal(gv.hostCouldBeAuthorityOwn(OWN, { kind: "ahj", state: "ZZ", names: ["Xcel Energy"] }), false, "a jurisdiction is never vouched onto a utility's domain");
 });
 
 // ── B. A stored vouch is re-checked ─────────────────────────────────────────────────────────────

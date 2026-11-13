@@ -16,7 +16,8 @@
 //      "Ashbury", "Ashbury Power"); a few words like "official website" around the name are allowed.
 //   4. The linked host is not a government host (no vouch needed), not a permit or interconnection
 //      platform, not a hosting / social / mapping domain, and its own domain carries the authority's
-//      name (isAgencyOwnDomain for a jurisdiction; the utility's name or initials for a utility).
+//      name (isAgencyOwnDomain for a jurisdiction; the utility's name or initials for a utility). A
+//      utility's own domain on portalChannel's utility list (kept there for rule 5) is still its own.
 //   5. One page, one answer: a page whose links name the same authority on two different sites
 //      vouches for neither.
 //
@@ -77,8 +78,14 @@ export function hostCouldBeAuthorityOwn(host: string, authority: VouchAuthority)
   if (!h || isGovernmentHost(h)) return false;
   const site = registrableDomain(h);
   if (!site.includes(".") || HOSTING_DOMAINS.has(site)) return false;
-  if (isPermitPlatformUrl(`https://${h}/`) || isUtilityPlatformUrl(`https://${h}/`)) return false;
-  if (authority.kind === "ahj") return isAgencyOwnDomain(h, authority.names, authority.state);
+  if (isPermitPlatformUrl(`https://${h}/`)) return false;
+  // A city is never vouched onto a utility's domain or an interconnection platform.
+  if (authority.kind === "ahj") return !isUtilityPlatformUrl(`https://${h}/`) && isAgencyOwnDomain(h, authority.names, authority.state);
+  // A UTILITY: the utility-platform list (portalChannel) also holds the big utilities' OWN domains
+  // (idahopower.com, pge.com…), there so a permit track never lands on them (rule 5). For the utility
+  // itself that list is no refusal: the name test below decides. An interconnection vendor's domain
+  // (powerclerk.com, a tenant under it, a hosted site) never carries the utility's name in its own
+  // registrable label, so it still fails.
   const label = site.split(".")[0].replace(/-/g, "");
   return authority.names.some((n) => {
     const c = compactUtility(n);
