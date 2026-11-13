@@ -11754,7 +11754,7 @@ async function loadJobDrops() {
 
 // ----- Clients & contractor licensing -----
 const CLIENT_TEXT_FIELDS = [
-  "companyName", "legalBusinessName", "dba", "contactName", "contactEmail", "phone", "billingStatus", "billingMode", "serviceFeeUsd", "serviceFeePermitUsd", "serviceFeeNemUsd", "pricingTier",
+  "companyName", "legalBusinessName", "dba", "contactName", "contactEmail", "phone", "billingStatus", "billingMode", "serviceFeeUsd", "serviceFeePermitUsd", "serviceFeeNemUsd", "pricingTier", "feeLimitUsd",
   "requestLinksAutoSend", "handoffAutoSend", "intakeTag", "intakeSenders",
   "ccbLicenseNumber", "ccbExpiration", "electricalLicenseNumber", "metroCityLicenseNumber",
   "electricalSupervisorName", "electricianLicenseNumber", "installerCertifications",
@@ -12276,10 +12276,11 @@ function renderServicePrices() {
       <label>Per permit filing ($)<input id="price_${tier}_permitUsd" type="number" min="0" step="0.01" value="${val(t.permit)}" /></label>
       <label>Per NEM application ($)<input id="price_${tier}_nemUsd" type="number" min="0" step="0.01" value="${val(t.nem)}" /></label>
       <label>Cap per project ($)<input id="price_${tier}_capUsd" type="number" min="0" step="0.01" value="${val(t.project_cap)}" placeholder="blank = no cap" /></label>
+      <label>Onboarding fee ($)<input id="price_${tier}_onboardingUsd" type="number" min="0" step="0.01" value="${val(t.onboarding)}" placeholder="blank = none" /></label>
     </div>
-    <p class="clients-creds-hint" style="margin:0 0 4px">Permit:${who(t.permit)} · NEM:${who(t.nem)} · Cap:${who(t.project_cap)}</p>`;
+    <p class="clients-creds-hint" style="margin:0 0 4px">Permit:${who(t.permit)} · NEM:${who(t.nem)} · Cap:${who(t.project_cap)} · Onboarding:${who(t.onboarding)}</p>`;
   };
-  box.innerHTML = `<p class="muted clients-creds-hint" style="margin:0 0 4px">For every client without its own price. A job's filings together never bill more than its tier's cap. Each filing keeps the price in force when it was filed; a change applies to filings from now on.${list.envDefaultUsd != null ? ` A blank price falls back to the server default, ${billingMoney(list.envDefaultUsd)}.` : " A blank price bills nothing and is listed on the statement."}</p>
+  box.innerHTML = `<p class="muted clients-creds-hint" style="margin:0 0 4px">For every client without its own price. A job's filings together never bill more than its tier's cap. A new client's first statement carries the onboarding fee; once it is paid, it comes off their filing fees (the up-front fee first) until used. Each filing keeps the price in force when it was filed; a change applies to filings from now on.${list.envDefaultUsd != null ? ` A blank price falls back to the server default, ${billingMoney(list.envDefaultUsd)}.` : " A blank price bills nothing and is listed on the statement."}</p>
     ${tierHtml("founding", "Founding clients", "(clients marked Founding)")}
     ${tierHtml("standard", "Everyone else", "(standard)")}
     <div class="actions" style="margin:0"><button type="button" class="secondary" id="savePricesBtn"><span style="white-space:nowrap">Save prices</span></button></div>`;
@@ -12294,6 +12295,7 @@ async function saveServicePrices() {
       permitUsd: $(`price_${tier}_permitUsd`)?.value ?? "",
       nemUsd: $(`price_${tier}_nemUsd`)?.value ?? "",
       capUsd: $(`price_${tier}_capUsd`)?.value ?? "",
+      onboardingUsd: $(`price_${tier}_onboardingUsd`)?.value ?? "",
     });
     const { prices } = await api("/api/billing/prices", { method: "PUT", body: JSON.stringify({
       founding: tierInput("founding"), standard: tierInput("standard"), decidedBy,
@@ -12315,7 +12317,8 @@ function renderBillingInvoices(invoices) {
     return `<div class="cred-row" style="flex-wrap:wrap;gap:6px">
       <div class="cred-row-text"><strong>${esc(inv.number)}</strong>
         <span class="badge ${esc(INVOICE_STATUS_BADGE[inv.status] || "")}">${esc(inv.status)}</span>
-        <span class="muted">${esc(inv.periodStart)} to ${esc(inv.periodEnd)} · due ${billingMoney(inv.dueTotalUsd)}${inv.dueAt ? ` by ${esc(inv.dueAt)}` : ""}${inv.paidAt ? ` · paid ${esc(inv.paidAt.slice(0, 10))}${inv.paidReference ? ` (${esc(inv.paidReference)})` : ""}` : ""}${inv.voidReason ? ` · void: ${esc(inv.voidReason)}` : ""}</span>
+        ${inv.projectId ? `<span class="badge badge-info" title="One job's fees we paid, due on receipt">Job fees${inv.lines && inv.lines[0] ? `: ${esc(inv.lines[0].projectLabel)}` : ""}</span>` : ""}
+        <span class="muted">${inv.projectId ? "due on receipt" : `${esc(inv.periodStart)} to ${esc(inv.periodEnd)}`} · due ${billingMoney(inv.dueTotalUsd)}${inv.dueAt ? ` by ${esc(inv.dueAt)}` : ""}${inv.paidAt ? ` · paid ${esc(inv.paidAt.slice(0, 10))}${inv.paidReference ? ` (${esc(inv.paidReference)})` : ""}` : ""}${inv.voidReason ? ` · void: ${esc(inv.voidReason)}` : ""}</span>
         ${inv.externalRef ? `<span class="badge badge-info" title="Sent to QuickBooks by ${esc(inv.qbPushedBy)}">QuickBooks #${esc(inv.externalRef)}${inv.qbStatus ? `: ${esc(inv.qbStatus)}` : ""}</span>` : ""}</div>
       <div class="actions" style="margin:0">
         <button type="button" class="secondary" data-inv-action="print" data-inv-id="${esc(inv.id)}"><span style="white-space:nowrap">View / print</span></button>

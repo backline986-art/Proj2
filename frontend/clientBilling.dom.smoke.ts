@@ -81,11 +81,13 @@ const PRICES = {
       permit: { priceUsd: 99, setBy: "Test <b>Admin</b>", setAt: "2026-11-12T00:00:00Z" },
       nem: { priceUsd: null, setBy: "", setAt: "" },
       project_cap: { priceUsd: 230, setBy: "Test Person", setAt: "2026-11-12T00:00:00Z" },
+      onboarding: { priceUsd: 500, setBy: "Test Person", setAt: "2026-11-13T00:00:00Z" },
     },
     standard: {
       permit: { priceUsd: null, setBy: "", setAt: "" },
       nem: { priceUsd: null, setBy: "", setAt: "" },
       project_cap: { priceUsd: 275, setBy: "Test Person", setAt: "2026-11-12T00:00:00Z" },
+      onboarding: { priceUsd: null, setBy: "", setAt: "" },
     },
   },
 };
@@ -248,8 +250,8 @@ async function main(): Promise<void> {
         `${tag}: the Prices block shows both tiers with their caps, flags an unset price, and renders a name with markup as text`, JSON.stringify(pr));
       await page.evaluate(() => { (document.getElementById("price_founding_nemUsd") as HTMLInputElement).value = "79"; (document.getElementById("savePricesBtn") as HTMLButtonElement).click(); });
       await page.waitForFunction(() => /Prices saved/.test(document.getElementById("billingStatus")?.textContent || ""), null, { timeout: 15000 });
-      check(posted.some((x) => x === 'PUT prices {"founding":{"permitUsd":"99","nemUsd":"79","capUsd":"230"},"standard":{"permitUsd":"","nemUsd":"","capUsd":"275"},"decidedBy":"Test Person"}'),
-        `${tag}: Save prices PUTs both tiers' prices and caps with the named person`, posted.join(" | "));
+      check(posted.some((x) => x === 'PUT prices {"founding":{"permitUsd":"99","nemUsd":"79","capUsd":"230","onboardingUsd":"500"},"standard":{"permitUsd":"","nemUsd":"","capUsd":"275","onboardingUsd":""},"decidedBy":"Test Person"}'),
+        `${tag}: Save prices PUTs both tiers' prices, caps and onboarding fees with the named person`, posted.join(" | "));
       const tierOpts = await page.evaluate(() => [...document.querySelectorAll("#c_pricingTier option")].map((o) => (o as HTMLOptionElement).value));
       check(tierOpts.join(",") === ",founding", `${tag}: the client form offers Standard and Founding pricing`, JSON.stringify(tierOpts));
       const waiveBtns = await page.evaluate(() => [...document.querySelectorAll("#billingStatement [data-waive-charge]")].map((b) => b.getAttribute("data-waive-charge")));

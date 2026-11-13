@@ -281,6 +281,9 @@ export interface ClientRecord {
   serviceFeeNemUsd: number | null;
   /** "founding" = billed at the founding prices and cap on the price list (#187); "" = standard. */
   pricingTier: string;
+  /** The most we carry in fees we paid for this client and are not yet paid back for; null = the
+   *  default (FEE_FLOAT_LIMIT_USD, else $2,500). Over it, a filing whose fee we would pay waits. */
+  feeLimitUsd: number | null;
   portalIdentities: ClientPortalIdentity[];
   /** Contractor licences beyond the named columns, one per issuing state/kind (Iowa "EL"
    *  electrical, Florida EC/CVC, Texas TECL, Utah DOPL...). clientMatch matches them like a CCB. */
@@ -393,6 +396,9 @@ export interface SubmissionPaymentRecord {
    *  when the gate still asked for permit fee + service fee, so what that payment covered is a
    *  question for a person, never something an invoice may assume. */
   gateCollectedUsd: number | null;
+  /** How much of the client's paid onboarding fee this gate row took off its service fee (#208).
+   *  serviceFeeUsd is what is left to collect; counted as used only once the row is paid. */
+  creditAppliedUsd: number;
   updatedAt: string;
 }
 
@@ -670,6 +676,8 @@ export interface SubmissionPaymentQuote {
   /** Where our service fee came from (#187): "the price list's price per permit filing", "this
    *  client's own price per NEM application", or that no price is set (then serviceFeeUsd is 0). */
   serviceFeeSource?: string;
+  /** The onboarding credit taken off serviceFeeUsd on this quote (#208); 0 when none. */
+  onboardingCreditUsd?: number;
   /** What this filing costs in all: the jurisdiction fee plus our service fee. A fact about the
    *  submission, NOT what the client hands us at the gate — see gateAmountUsd. */
   totalUsd: number | null;
@@ -5406,6 +5414,12 @@ export interface CitedFact<T> {
   /** Other pages that state the SAME fact in other words (a prerequisite collapsed from
    *  near-duplicates, permitProcessPrerequisites.classifyPrerequisites) — every source is kept. */
   alsoSourceUrls?: string[];
+  /** OFFICIAL (owner, 2026-11-11; backend/src/lookupFactTiers.ts): Keelix read this fact's quote, naming
+   *  its value, in the bytes it retrieved from the authority's own official page at `fetchedAt`. Shown
+   *  "Verified from <host>, <date>"; never a person's verification, never on a filing door or a fee.
+   *  Absent = seeded. Re-checked whenever the row is served (withHonouredFactTiers). */
+  tier?: "official";
+  fetchedAt?: string;
 }
 export type PermitProcessDiscipline = "structural" | "electrical" | "combo" | "other";
 export interface PermitFeeAnswer {

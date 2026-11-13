@@ -9614,6 +9614,10 @@ export async function prepareSubmission(
   // nothing new until it is paid, voided, or a named person lifts the hold. A stop only; 402 like the
   // gate above, so the autopilot reports it as a payment blocker and resumes when it clears.
   assertNoBillingHold(db, detail.project);
+  // THE FEE LIMIT (owner 2026-11-13): a filing whose portal fee WE would pay waits while the client
+  // already owes us its limit in fees we paid. A stop only, 402 like the two above. Dynamic: feeFloat
+  // reaches clientInvoices, which imports this module.
+  (await import("./feeFloat")).assertUnderFeeLimit(db, detail.project, track);
 
   // A TRACK THAT IS ALREADY FILED MUST NOT BE FILED AGAIN.
   //
