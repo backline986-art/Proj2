@@ -34,7 +34,7 @@ import { logger } from "./logger";
 import { portalHostOf } from "./portalChannel";
 import { nowIso } from "./time";
 import { utilityFilingKey } from "./utilityFilingLookup";
-import { filingRowRequirements, QUOTE_NAMES_REQUIREMENT, shippedRecordFor, utilityPersonVerifiedHosts } from "./utilityRequirements";
+import { filingRowRequirements, QUOTE_NAMES_REQUIREMENT, shippedRecordFor, utilityOfficialHosts } from "./utilityRequirements";
 
 const str = (v: unknown): string => (typeof v === "string" ? v.trim() : v == null ? "" : String(v).trim());
 
@@ -113,7 +113,7 @@ export async function landResearchedUtilityRequirements(
   // The row as stored (a writer never writes a read-time downgrade back).
   const { rowExists, requirements: onRow } = filingRowRequirements(db, where.state, where.utility, { honour: false });
   if (!rowExists) return { ...out, reason: "no filing record for this utility" };
-  const hosts = utilityPersonVerifiedHosts(db, where.state, where.utility, onRow);
+  const hosts = utilityOfficialHosts(db, where.state, where.utility, onRow);
 
   // Read each official-host page once, so the landing checks the quote against bytes this process read.
   const pages = new Map<string, RetrievedPage>();

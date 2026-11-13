@@ -65,7 +65,7 @@ import { resolvePermitPath } from "./permitPath";
 import { nowIso } from "./time";
 import { isOfficialSourceHost, landingTierFor, officialCitationFor, sourceHostOf } from "../../shared/src/officialSource";
 import { essRuleReadsOf, essRulesOf, type EssRuleKey, type EssRuleRead } from "../../shared/src/essRules";
-import { personVerifiedAuthorityHosts, urlsIn as issuerUrlsIn } from "./officialAuthorityHosts";
+import { officialAuthorityHosts, urlsIn as issuerUrlsIn } from "./officialAuthorityHosts";
 
 interface Row { [key: string]: unknown }
 const text = (v: unknown): string => (v == null ? "" : String(v));
@@ -2718,7 +2718,8 @@ function officialLandings(db: AppDb, target: { state: string; ahj: string }, res
 function personVerifiedAuthorityHostsSync(db: AppDb, state: string, ahj: string): string[] {
   const own = ownCodeProfileRow(db, state, ahj)?.profile ?? null;
   const verifiedUrls = own && own.confidence === "verified" && own.verifiedBy && own.verifiedBy !== "reference-seed" ? issuerUrlsIn(own) : [];
-  return personVerifiedAuthorityHosts(db, state, ahj, verifiedUrls);
+  // A government page's vouch counts as well as a person's (owner, 2026-11-13; governmentVouches.ts).
+  return officialAuthorityHosts(db, state, ahj, verifiedUrls);
 }
 
 const OFFICIAL_CONFLICT_ACTION = "code_profile.official_conflict";

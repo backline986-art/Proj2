@@ -57,7 +57,7 @@ await check("RENDER: each item with its tier, source and words; Verify on seeded
   const html = UR.renderRequirementsPanel(payload());
   assert.match(html, /What Exampleton Municipal Light's application asks for/);
   assert.match(html, /3 items \(1 verified, 1 official, 1 seeded\)/);
-  assert.match(html, /data-req-provenance>from www\.exampleton-nv\.gov</);
+  assert.match(html, /data-req-provenance>Verified from www\.exampleton-nv\.gov, 2026-11-10</);
   assert.match(html, /data-req-provenance>Verified by Pat Synthetic, 2026-11-09</);
   assert.match(html, /data-req-provenance>Seeded \(shipped reference\)</);
   assert.match(html, /<a href="https:\/\/www\.exampleton-nv\.gov\/utilities\/solar"[^>]*data-req-source>Solar page<\/a>/);
