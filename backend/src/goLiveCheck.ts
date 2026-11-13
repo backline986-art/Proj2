@@ -298,6 +298,9 @@ const LOOKUPS: Array<{ id: string; name: string; label: string; on: string; off:
   { id: "form-research", name: "AHJ_FORM_RESEARCH", label: "Form research", needsKey: true,
     on: "On: an AHJ's blank application forms are found and downloaded.",
     off: (env) => String(env.AHJ_FORM_RESEARCH ?? "") === "off", extra: ["AHJ_FORM_DOWNLOADS", "AHJ_FORM_REFRESH_DAYS", "AHJ_FORM_LOOKUP_TIMEOUT_MS", "AHJ_FORM_RECOVER_MAX"] }, // formAcquisitionPlan.ts
+  { id: "maker-spec-sheets", name: "MAKER_SPEC_SHEETS", label: "Maker spec sheets", needsKey: true,
+    on: "On: a microinverter's datasheet is fetched from its maker's own site and attached when it says the product is listed rapid-shutdown equipment.",
+    off: (env) => String(env.MAKER_SPEC_SHEETS ?? "") === "off" }, // makerSpecSheets.ts
   { id: "portal-url-research", name: "PORTAL_URL_RESEARCH", label: "Portal address research", needsKey: true,
     on: "On: a missing portal address is researched (a person still confirms where a filing goes).",
     off: (env) => String(env.PORTAL_URL_RESEARCH ?? "") === "off" }, // repository.ts
