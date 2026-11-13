@@ -182,6 +182,11 @@ export interface ExtractedField {
    *  the box's suggestions and picks the one typeaheadMatch says is this job's; the recorded step
    *  carries the same strategy (RecipeStep.fillStrategy) so the replay does the same. */
   fillStrategy?: "typeahead";
+  /** #188: the element this field was read from, stamped data-al-fx="<id>" in the page, and its
+   *  identity then (tag | text | aria-label | a button input's value). Learn-time only — never in a
+   *  RecipeSelector (a stamp means nothing to a replay) and never sent to a planner. The walk's
+   *  navigate/advance clicks resolve the stamp first when the element is still that control. */
+  fx?: { id: string; text: string };
 }
 
 export interface LearnPlanRequest {
@@ -1605,6 +1610,9 @@ export interface RawField {
   /** #139: an editable text input's class attribute, read for an autocomplete widget's stamp
    *  (portalSafety isAutocompleteWidgetClass) in toExtractedField. */
   stampClass?: string;
+  /** #188: the element's own stamp (data-al-fx) and its identity at harvest. See ExtractedField.fx. */
+  fx?: string;
+  fxText?: string;
 }
 
 // Serializable extractor — derives a label and selector hints for each interactive
@@ -2213,7 +2221,24 @@ export function extractFieldsInPage(els: Element[]): RawField[] {
     }
     const questions = fieldType === "button" || fieldType === "file" ? [] : questionsOf(el, fieldType, label);
 
+    // THE ELEMENT THAT WAS READ (#188). A navigate/advance the planner picks from this list is
+    // clicked through THIS element first (AutoLearnAdapter.fieldClickLocator), and only then by its
+    // label/role selector: a clickable card (div[role=button]) whose text runs on into a hidden
+    // "An address is required." has no selector that resolves it. Stamped ONCE per element (a
+    // later harvest reuses the stamp), with the element's identity at harvest — tag, text,
+    // aria-label, a button input's value — so a node a framework re-used for another control
+    // (Next patched to Submit in place) is never clicked through a stale stamp.
+    let fx = el.getAttribute("data-al-fx") || "";
+    if (!fx) {
+      const w = globalThis as unknown as { __alFx?: number };
+      w.__alFx = (w.__alFx || 0) + 1;
+      fx = `f${w.__alFx}`;
+      el.setAttribute("data-al-fx", fx);
+    }
+    const fxText = `${tag}|${String(el.textContent || "").replace(/\s+/g, " ").trim().slice(0, 200)}|${String(el.getAttribute("aria-label") || "").trim()}|${tag === "input" ? String((el as HTMLInputElement).value || "") : ""}`;
+
     out.push({
+      fx, fxText,
       label, fieldType, options, role, name, placeholder, id, text, href,
       tile: tileLabel ? true : undefined,
       typeahead: typeahead && fieldType === "text" ? true : undefined,
@@ -2350,6 +2375,7 @@ export function toExtractedField(raw: RawField): ExtractedField {
   if (raw.fieldType === "radio" && raw.name) field.group = raw.name;
   if (raw.groupPrompt) field.groupPrompt = raw.groupPrompt;
   if (raw.questions?.length) field.questions = [...raw.questions];
+  if (raw.fx && /^f\d+$/.test(raw.fx)) field.fx = { id: raw.fx, text: String(raw.fxText ?? "") };
   return field;
 }
 
@@ -5321,15 +5347,27 @@ export class AutoLearnAdapter extends BasePortalAdapter {
 
   /** The page's review reading with its step navigator cut, and the control labels that exist
    *  only inside the navigator (portalSafety reviewTextInPage / navigatorOnlyControlLabelsInPage).
-   *  null = unreadable (a fake page) — the caller falls back to the whole body. */
-  private async pageReviewReading(): Promise<{ text: string; navOnly: string[] } | null> {
+   *  Also, from the same shared reading, the navigator's CURRENT step(s) (navigatorActiveStepsInPage)
+   *  for the planner-review demotion (#188), and the page's live-fillable answer
+   *  (readOnlyPageInPage) — logged with it, never evidence on its own. null = unreadable (a fake page) — the caller falls back to the whole body. */
+  private async pageReviewReading(): Promise<{ text: string; navOnly: string[]; activeSteps: string[]; activeTerminal: boolean; readOnly: boolean | null } | null> {
     if (!this.page || typeof this.page.evaluate !== "function") return null;
     await this.page.evaluate(PORTAL_SAFETY_IN_PAGE_SOURCE).catch(() => null);
     const r = await this.page.evaluate((g: string) => {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const ps = (globalThis as any)[g];
       if (!ps || typeof ps.reviewTextInPage !== "function") return null;
-      return { text: String(ps.reviewTextInPage() || "").slice(0, 4000), navOnly: ps.navigatorOnlyControlLabelsInPage() as string[] };
+      // An older in-page copy (installed before this build, on a page that outlived it) has no
+      // active-step reading: no steps and "terminal" — no evidence, the direction that keeps review.
+      const act = typeof ps.navigatorActiveStepsInPage === "function" ? ps.navigatorActiveStepsInPage() : { steps: [], terminal: true };
+      const ro = typeof ps.readOnlyPageInPage === "function" ? ps.readOnlyPageInPage() : undefined;
+      return {
+        text: String(ps.reviewTextInPage() || "").slice(0, 4000),
+        navOnly: ps.navigatorOnlyControlLabelsInPage() as string[],
+        activeSteps: (Array.isArray(act?.steps) ? act.steps : []).map((s: unknown) => String(s)).slice(0, 6),
+        activeTerminal: act?.terminal !== false,
+        readOnly: typeof ro === "boolean" ? ro : null,
+      };
     }, PORTAL_SAFETY_GLOBAL).catch(() => null);
     return r && typeof r.text === "string" ? r : null;
   }
@@ -8582,6 +8620,56 @@ export class AutoLearnAdapter extends BasePortalAdapter {
         interstitialAdvanceKey = key;
       }
 
+      // c2n) A STEP-NAVIGATOR BUBBLE IS NEVER THE FINAL SUBMIT (#188). Live, a 7-step wizard's
+      //      step 1 (EnerGov CSS, AngularJS Material md-steppers): the planner said atReview with
+      //      the "7" bubble — the stepper indicator of "Review and Submit" — as its final submit.
+      //      Nothing demoted it: the walk locked step 1 down as the review page, armed human
+      //      capture, and never added the location. Two rules, both on the shared reading's own
+      //      navigator cut (navOnly: controls that exist ONLY inside the step bar):
+      //   DROP   — a final-submit index naming a navigator-only control is dropped, always. A step
+      //            bubble moves between steps; it never files, and recorded as isFinalSubmit it would
+      //            be an allowlist entry for a click that is not the filing click.
+      //   DEMOTE — when that control is the planner's ONLY review evidence (the page is not review
+      //            by structure, its navigator-cut text names no review, no on-page submit-shaped
+      //            control, no terms box, no review URL), the plan is not a review stop — but ONLY on
+      //            positive evidence of a FORM step, both of: a fillable control on a non-dashboard,
+      //            AND a navigator whose CURRENT step is known and not terminal-worded
+      //            (navigatorActiveStepsInPage). Any doubt keeps review — the direction that cannot
+      //            file. Nothing here touches the Enter gate, the terminal-submit reading, the
+      //            network backstop or the lockdown.
+      //   NOT "a live fillable control" ALONE (adversarial review, B1). readOnlyPageInPage is false
+      //            on any visible enabled box outside header/nav/search — a footer language picker,
+      //            an optional "Notes to reviewer" — and a review page can carry one. A real summary
+      //            page with no review words outside its step bar, no readable current step and a
+      //            "Continue" that FILES (#346's shape) was demoted on it; the no-advance path's
+      //            fallback then clicked Continue with the lockdown never armed. Only the
+      //            navigator's own current step speaks for "this is a form step".
+      {
+        const navKey = (f: ExtractedField | undefined): string => String(f?.label ?? "").replace(/\s+/g, " ").trim().toLowerCase();
+        const fsIdx = plan.finalSubmitSelectorIndex;
+        const fsField = typeof fsIdx === "number" ? fields[fsIdx] : undefined;
+        if (fsField && navKey(fsField) && navOnly.has(navKey(fsField))) {
+          const control = String(fsField.label ?? "").replace(/\s+/g, " ").trim().slice(0, 60);
+          const onlyNavigatorEvidence = plan.atReview === true && !isReviewPage && !reviewSignals && !reviewShaped;
+          const activeSteps = reading?.activeSteps ?? [];
+          // A CLOSING STEP IS NEVER A FORM STEP HERE (second #188 review): the shared terminal words
+          // (review / summary / confirm / certify / sign / submit / pay) miss a filing step named
+          // "Attestation", "Declaration", "Acknowledgement", "Finish", "Complete", "Fees" or
+          // "Checkout". Demotion is the only direction that can walk past a filing page, so this
+          // door reads those words too. The shared reading itself is unchanged.
+          const closingStep = /\b(attest|declar|acknowledg|finish|complet|fees?\b|checkout|payment|agree)/i;
+          const currentStepIsForm = activeSteps.length > 0 && reading?.activeTerminal === false && !activeSteps.some((s) => closingStep.test(s));
+          const formStep = hasFillable && !isDashboard && currentStepIsForm;
+          if (onlyNavigatorEvidence && formStep) {
+            plan = { ...plan, atReview: false, finalSubmitSelectorIndex: undefined };
+            this.debug?.event({ type: "planner_review_demoted_navigator", page: pageCount, control, active: activeSteps.slice(0, 3), readOnly: reading?.readOnly ?? null });
+          } else {
+            plan = { ...plan, finalSubmitSelectorIndex: undefined };
+            this.debug?.event({ type: "planner_final_submit_navigator_dropped", page: pageCount, control, atReview: plan.atReview === true });
+          }
+        }
+      }
+
       // c2b) DIAGNOSTIC BREADCRUMB — record what we saw + what the planner decided on this
       //      page. host+pathname only (NO query string — avoids leaking any ids), title
       //      capped, no field values. This is the trace surfaced when a run finds nothing.
@@ -8912,7 +9000,8 @@ export class AutoLearnAdapter extends BasePortalAdapter {
           // the browser. Past the budget the click is retired and the run stops, named.
           const navStarted = Date.now();
           const res = await this.boundedClick("navigate", clickStepBudgetMs(), async () => {
-            const loc = await this.locator(navField.selector);
+            // The element the planner was shown first, its selector second (#188, fieldClickLocator).
+            const loc = await this.fieldClickLocator(navField);
             if (!loc) throw new Error("navigate selector unresolved");
             const href = navField.href;
             const realHref = !!href && href !== "#" && !/^javascript:/i.test(href);
@@ -10122,7 +10211,10 @@ export class AutoLearnAdapter extends BasePortalAdapter {
         let res: { ok: boolean; field?: string; message?: string; timedOut?: boolean; absent?: boolean };
         try {
           res = await this.boundedClick("advance", clickStepBudgetMs(), async () => {
-            const loc = await this.locator(advanceField.selector);
+            // The element that was read first (#188, fieldClickLocator). An interstitial's forward
+            // click (#344) keeps its selector lookup exactly as before: the information-page pass
+            // below judges the control that lookup resolves, and that door is not changed here.
+            const loc = interstitialAdvanceKey ? await this.locator(advanceField.selector) : await this.fieldClickLocator(advanceField);
             if (!loc) throw new Error("advance selector unresolved");
             if (infoPassTried) {
               if (infoDoor && typeof infoDoor.closeInfoPagePass === "function") infoDoor.closeInfoPagePass();
@@ -13005,7 +13097,7 @@ export class AutoLearnAdapter extends BasePortalAdapter {
       note: `advance: ${candidate.label || "next"}`,
     });
     const res = await safeAction("fallback-advance", async () => {
-      const loc = await this.locator(candidate.selector);
+      const loc = await this.fieldClickLocator(candidate as ExtractedField);
       if (!loc) throw new Error("fallback advance selector unresolved");
       await this.clickResilient(loc);
       await this.waitAfterClick(beforeUrl, beforeFp, tabsBefore);
@@ -13790,6 +13882,69 @@ export class AutoLearnAdapter extends BasePortalAdapter {
   // Best-effort; never throws. Returns [] when nothing is found.
   private async collectValidationErrors(): Promise<string[]> {
     return collectValidationErrorsFrom(this.page);
+  }
+
+  /** A NAVIGATE / ADVANCE IS CLICKED THROUGH THE ELEMENT THE PLANNER WAS SHOWN (#188). The field's
+   *  stamped element (ExtractedField.fx) first — exactly one match, visible, and still the same
+   *  control (its identity unchanged since the harvest) — and only otherwise its selector (label /
+   *  role+name / #id, locator()). Live: the "Add Location" card, a div[role=button] whose text ran on
+   *  into a hidden "An address is required.", was looked up by that label, matched nothing
+   *  (navigate_control_absent), and the walk never added the location. A stamp that is gone, doubled
+   *  or already names another control here falls back to the selector.
+   *
+   *  THE IDENTITY IS RE-READ BEFORE EVERY GESTURE, NOT ONCE (adversarial review N2). The locator
+   *  handed back is lazy: clickResilient re-finds [data-al-fx=…] on each of its attempts, then
+   *  force-clicks, then dispatches a click — across up to a minute of waits. A node a framework
+   *  patched in place in that time (Next → Submit) would still carry the stamp. So the returned
+   *  locator is wrapped: each click / dispatchEvent / tap / press (and the like) first re-reads the
+   *  element's identity, and on any difference — or an element that cannot be read — throws
+   *  ControlAbsentError without touching it ("the control that was read is not on the page"; the
+   *  navigate door re-plans, the advance door treats it as an advance that did nothing). What is
+   *  NOT guaranteed: a change landing in the milliseconds between that re-read and Playwright's own
+   *  gesture — the same window a role/name lookup has between resolving and clicking. */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  private async fieldClickLocator(field: ExtractedField): Promise<any | null> {
+    if (!this.page) return null;
+    if (field.fx && /^f\d+$/.test(field.fx.id)) {
+      try {
+        const loc = this._buildLocator(this.page, { css: `[data-al-fx="${field.fx.id}"]`, ...(field.selector?.frame ? { frame: field.selector.frame } : {}) }, { raw: true });
+        if ((await loc.count().catch(() => 0)) === 1) {
+          const el = loc.first();
+          const want = field.fx.text;
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const identity = (): Promise<string | null> => el.evaluate((n: Element) => {
+            const tag = n.tagName.toLowerCase();
+            return `${tag}|${String(n.textContent || "").replace(/\s+/g, " ").trim().slice(0, 200)}|${String(n.getAttribute("aria-label") || "").trim()}|${tag === "input" ? String((n as HTMLInputElement).value || "") : ""}`;
+          }, undefined, { timeout: 2000 }).catch(() => null);
+          if ((await identity()) === want && await el.isVisible().catch(() => false)) {
+            this.debug?.event({ type: "click_by_element", label: String(field.label ?? "").replace(/\s+/g, " ").trim().slice(0, 60) });
+            const label = String(field.label ?? "").replace(/\s+/g, " ").trim().slice(0, 60);
+            const GESTURES = new Set(["click", "dblclick", "tap", "press", "pressSequentially", "type", "fill", "check", "uncheck", "setChecked", "selectOption", "dispatchEvent"]);
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            const guarded: any = new Proxy(el, {
+              get: (t, k) => {
+                // first()/last() of a one-element locator are the same element: keep the guard on.
+                if (k === "first" || k === "last") return () => guarded;
+                const v = Reflect.get(t, k);
+                if (typeof v !== "function") return v;
+                if (typeof k === "string" && GESTURES.has(k)) {
+                  return async (...args: unknown[]) => {
+                    if ((await identity()) !== want) {
+                      this.debug?.event({ type: "click_by_element_changed", label, gesture: k });
+                      throw new ControlAbsentError();
+                    }
+                    return v.apply(t, args);
+                  };
+                }
+                return v.bind(t);
+              },
+            });
+            return guarded;
+          }
+        }
+      } catch { /* an unusable stamp — the selector below */ }
+    }
+    return this.locator(field.selector);
   }
 
   // Resolve a selector descriptor to the first locator that has ≥1 matching element on
