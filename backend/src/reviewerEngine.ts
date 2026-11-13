@@ -20,6 +20,7 @@ import { evaluatePermitPrecedentFindings } from "./permitPrecedents";
 import { citeStateSealRule, statePrescriptiveFindings } from "./stateRules";
 import type { EffectiveCodeContext } from "./codeProfiles";
 import type { ParcelJurisdictionReading } from "./parcelJurisdiction";
+import { inverterSettingsByStandingAnswer, type CecUl1741SbAnswer } from "./cecEquipment";
 import type { JobScope } from "../../shared/src/types";
 import { deriveJobScope, jobScopeLabel, scopeHasNewPv, storageFactGaps } from "./jobScope";
 
@@ -136,6 +137,11 @@ export function buildReviewerReport(
      *  utility's AC-disconnect item reads the package text alone, as before. Never taken from the
      *  job's snapshot. */
     planSetImageDisconnectRead?: PlanSetImageDisconnectRead | null;
+    /** What the CEC's own inverter list says about the job's inverter and UL 1741 SB
+     *  (cecEquipment.jobInverterUl1741Sb, the one reader QC uses too). Certified there = the utility's
+     *  "UL 1741 SB inverter listing" item is met. undefined / null = no answer: the item reads the
+     *  package text alone, as before. Never taken from the job's snapshot. */
+    inverterUl1741Sb?: CecUl1741SbAnswer | null;
     /** Which jurisdiction the job's parcel is in, as the county's own service answered (review-audit
      *  draft 09, parcelJurisdiction.readParcelJurisdiction — the cache, read only). undefined = not
      *  read here: the profile's callout stands, worded "not checked". */
@@ -175,7 +181,7 @@ export function buildReviewerReport(
   if (newArray) addPlacementRuleFindings(project, opts.codeContext, findings, opts.documentTexts ?? []);
   const utilityAliases = addUtilityFindings(project, findings,
     opts.utilityRequirements === undefined ? resolveUtilityRequirements(null, project.state, project.utility) : opts.utilityRequirements,
-    opts.planSetImageDisconnectRead ?? null);
+    opts.planSetImageDisconnectRead ?? null, opts.inverterUl1741Sb ?? null);
   addProfileFindings(project, profile, findings, opts.uploadedDocTypes ?? []);
   addParcelJurisdictionFindings(project, profile, opts.parcelJurisdiction, findings);
   addPermitPathFindings(project, findings);
@@ -1198,7 +1204,7 @@ export function requirementFindingId(item: Pick<UtilityApplicationRequirement, "
  * bar). No list on file = one callout that the utility side was not reviewed, never silence. A storage
  * item is asked only on a job with a battery. Returns each finding's dedupe family (id -> alias).
  */
-function addUtilityFindings(project: ProjectRecord, findings: ReviewerFinding[], list: UtilityRequirementList | null, imageDisconnectRead: PlanSetImageDisconnectRead | null = null): Map<string, string> {
+function addUtilityFindings(project: ProjectRecord, findings: ReviewerFinding[], list: UtilityRequirementList | null, imageDisconnectRead: PlanSetImageDisconnectRead | null = null, inverterUl1741Sb: CecUl1741SbAnswer | null = null): Map<string, string> {
   const aliases = new Map<string, string>();
   const utilityName = String(project.utility ?? "").trim();
   if (list && list.requirements.length) {
@@ -1208,6 +1214,12 @@ function addUtilityFindings(project: ProjectRecord, findings: ReviewerFinding[],
       if (item.key === "storage_mode_declaration" && !battery) continue;
       const topic = REQUIREMENT_TOPIC[item.key];
       if (!topic || !requirementForGate(item, "reviewer")) continue;
+      // VERIFIED FIRST (owner, 2026-11-13): the CEC's own inverter list printing UL 1741 SB for the job's
+      // inverter meets the listing item; QC records where it came from.
+      if (item.key === "inverter_listing_ul1741sb" && inverterUl1741Sb?.certified) continue;
+      // The settings item: the operator's standing answer that installs are commissioned with the
+      // utility's settings, on an inverter the list certifies (owner, 2026-11-13). Both, or it asks.
+      if (item.key === "inverter_settings" && inverterSettingsByStandingAnswer(inverterUl1741Sb)) continue;
       const textCheck = evidenceForTopic(project, topic);
       if (textCheck.confidence === "high") continue;
       // AN IMAGE-ONLY PLAN SET (#135): the package text names no AC disconnect because the plan set

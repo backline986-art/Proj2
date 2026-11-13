@@ -184,6 +184,7 @@ import { evidenceForTopic, evidenceLines, type EvidenceTopic } from "./projectEv
 import { resolveUtilityRequirements } from "./utilityRequirements";
 import { readParcelJurisdiction, type ParcelJurisdictionReading } from "./parcelJurisdiction";
 import { planSetImageDisconnectRead as planSetImageDisconnectReadOf } from "./planSetImageReads";
+import { jobInverterUl1741Sb } from "./cecEquipment";
 import { customerBillOnFile, runQcForProject, WAITING_ON_BILL_ISSUE_TYPE, type QcRunOptions } from "./qc";
 import { resolveJobScope } from "./jobScope";
 import { loadStoredTemplates, formAllowedForPath } from "./ahjForms";
@@ -289,7 +290,11 @@ export function buildReviewerReportFor(db: AppDb, project: ProjectRecord): Revie
   // failed read is "no such read", which holds the job exactly as before.
   let planSetImageDisconnectRead: ReturnType<typeof planSetImageDisconnectReadOf> = null;
   try { planSetImageDisconnectRead = planSetImageDisconnectReadOf(db, project.id); } catch { planSetImageDisconnectRead = null; }
-  return buildReviewerReport(project, { planSetImageDisconnectRead, codeContext, codeProfileRow, uploadedDocTypes, documentTexts: designDocumentTexts(db, project.id), pvWorksheet: filedPvWorksheetInput(db, project), structuralCertification, stateRules, jobScope, utilityRequirements, parcelJurisdiction });
+  // What the CEC's own inverter list says about the job's inverter and UL 1741 SB (the one reader QC
+  // uses too). A failed read is no answer, which checks the package text exactly as before.
+  let inverterUl1741Sb: ReturnType<typeof jobInverterUl1741Sb> = null;
+  try { inverterUl1741Sb = jobInverterUl1741Sb(db, project.parserSnapshot as Record<string, unknown>); } catch { inverterUl1741Sb = null; }
+  return buildReviewerReport(project, { planSetImageDisconnectRead, inverterUl1741Sb, codeContext, codeProfileRow, uploadedDocTypes, documentTexts: designDocumentTexts(db, project.id), pvWorksheet: filedPvWorksheetInput(db, project), structuralCertification, stateRules, jobScope, utilityRequirements, parcelJurisdiction });
 }
 
 // WHAT HOLDS THIS FILING: ONE ANSWER (#214). The text report with the cached vision verdicts folded
