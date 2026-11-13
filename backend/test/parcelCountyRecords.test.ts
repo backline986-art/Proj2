@@ -6,8 +6,10 @@
 // missing field) or quietly downgraded (claims "official" or "verified" without meeting the bar) would
 // make the parcel check say "not checked" or warn where its author meant it to block — with nobody told.
 // This pins: every shipped record loads, at exactly the tier it claims, on a government host — or, on
-// an ArcGIS Online host, only as a person-verified record bound to its service root (draft 16 B; the
-// owner's yes 2026-11-10; Helm's conditions, parcelMapPlatform.test.ts).
+// an ArcGIS Online host, only as a record bound to its service root whose county link a person verified
+// (draft 16 B; the owner's yes 2026-11-10; parcelMapPlatform.test.ts) or Keelix confirms by reading the
+// county's own government page before asking (owner 2026-11-12; parcelServiceLink.test.ts) — such a
+// record loads as official whatever tier it claims, and is not asked until Keelix's read confirms it.
 //
 // Reads the shipped file only; no database, no network.
 //   npx tsx backend/test/parcelCountyRecords.test.ts
@@ -40,12 +42,15 @@ function recordProblems(records: unknown[]): string[] {
     const { source, problem } = sanitizeLookupSource(raw);
     if (!source) { out.push(`${label}: dropped at load — ${problem}`); return; }
     const claimed = String(o.tier ?? "seeded").trim() || "seeded";
-    if (source.tier !== claimed) out.push(`${label}: claims tier "${claimed}" but loads as "${source.tier}"`);
+    const keelix = source.linkCheck === "keelix";
+    if (!keelix && source.tier !== claimed) out.push(`${label}: claims tier "${claimed}" but loads as "${source.tier}"`);
     const host = sourceHostOf(source.queryUrl.replace(/\{[a-zA-Z]+\}/g, "x"));
     const platform = source.hostedOn === "map_platform";
     if (!isGovernmentHost(host) && !platform) out.push(`${label}: service host ${host} is not a government host`);
-    if (/(^|\.)arcgis\.com$/.test(host) && !(platform && source.tier === "verified" && source.verifiedBy && source.verifiedService))
-      out.push(`${label}: ArcGIS Online host ${host} without a person-verified service root`);
+    const personVerified = platform && source.linkCheck === "person" && source.tier === "verified" && source.verifiedBy && source.verifiedService;
+    const keelixConfirms = platform && keelix && source.tier === "official" && source.verifiedService && isGovernmentHost(sourceHostOf(source.sourceUrl));
+    if (/(^|\.)arcgis\.com$/.test(host) && !(personVerified || keelixConfirms))
+      out.push(`${label}: ArcGIS Online host ${host} without a service root whose county link a person verified or Keelix confirms`);
     if (!/^\d{4}-\d{2}-\d{2}/.test(source.fetchedAt)) out.push(`${label}: no fetchedAt`);
     if (!source.sourceUrl || !source.quote) out.push(`${label}: no source page or quote`);
     if (keys.has(source.key)) out.push(`${label}: a second record for ${source.key}`);
@@ -91,6 +96,16 @@ await check("a person-verified ArcGIS Online record bound to its service root pa
     queryUrl: `${root}/0/query?where=SITE_ADDR%3D%27{street}%27&outFields=JURIS&f=json`,
     pageLinksHost: "examplecounty.maps.arcgis.com", quote: "Parcel maps: examplecounty.maps.arcgis.com",
   }]), []);
+});
+await check("an ArcGIS Online record Keelix confirms from the county's own government page passes, whatever tier it claims", () => {
+  const root = "https://services9.arcgis.com/SyntheticOrg0001/arcgis/rest/services/Parcels/FeatureServer";
+  for (const tier of ["seeded", "official"]) {
+    assert.deepEqual(recordProblems([{
+      ...GOOD, tier, serviceRoot: root,
+      queryUrl: `${root}/0/query?where=SITE_ADDR%3D%27{street}%27&outFields=JURIS&f=json`,
+      quote: "Tax Parcels (REST): services9.arcgis.com/SyntheticOrg0001",
+    }]), [], tier);
+  }
 });
 await check("two records for one county, or one with no source, are caught", () => {
   assert.match(recordProblems([GOOD, GOOD]).join(" | "), /a second record for ID\|example county/);

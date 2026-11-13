@@ -33,8 +33,10 @@ export type JobType =
   // (stateFeeResearch.ensureStateFeeRulesResearched).
   | "state_fee_research"
   // WHICH JURISDICTION THE JOB'S PARCEL IS IN (review-audit draft 09, parcelJurisdiction.ts): one plain
-  // GET to the county's public parcel service — a government host only — cached by address hash.
-  // Queued by QC for a permit-track job; never by a page read.
+  // GET to the county's public parcel service — a government host only, or a hosted map (ArcGIS Online)
+  // the county's own government page links (a person verified it, or Keelix read that page first and
+  // confirmed it: parcelServiceLink.ts) — cached by address hash. Queued by QC for a permit-track job;
+  // never by a page read.
   | "parcel_jurisdiction_check"
   // THE PER-JOB PERMIT-PROCESS LOOKUP (permitProcessLookup.ts): agency, combo vs separate, portal +
   // record type, documents and fees per permit — cited, seeded — for an AHJ with no process of its own.
@@ -935,8 +937,9 @@ async function runClaimedJob(db: AppDb, job: JobRecord): Promise<boolean> {
       const { runStateFeeResearch } = await import("./stateFeeResearch");
       result = await runStateFeeResearch(db, job.payload as Record<string, unknown>);
     } else if (job.jobType === "parcel_jurisdiction_check") {
-      // One read of the county's parcel service per covering record, government hosts only, no model;
-      // the answer lands in parcel_jurisdiction_checks by address hash (the gate reads it after).
+      // One read of the county's parcel service per covering record, government hosts only (or a hosted
+      // map the county's own page is confirmed to link, that page read first), no model; the answer
+      // lands in parcel_jurisdiction_checks by address hash (the gate reads it after).
       const { runParcelJurisdictionCheck } = await import("./parcelJurisdiction");
       result = await runParcelJurisdictionCheck(db, job.payload as Record<string, unknown>);
     } else if (job.jobType === "fee_research") {
