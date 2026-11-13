@@ -22,6 +22,8 @@
 // The track is labelled by what the program IS — net metering only when a cited page says so.
 // ---------------------------------------------------------------------------
 
+import type { SiteVouch } from "../../shared/src/types";
+import { findSiteVouches, mergeVouches } from "./governmentVouches";
 import type { AppDb } from "./db";
 import type { CitedFact, EligibilityLimits, LLMProvider, ProjectRecord, WebLookupResult } from "../../shared/src/types";
 import { hostFitsTrackAndEntity, isInformationalPageUrl, namedInterconnectionPlatforms, portalHostOf } from "./portalChannel";
@@ -100,6 +102,8 @@ export interface UtilityFilingLookup {
    *  application fees, a fee by size or level, a page Keelix could not re-read, a difference from the
    *  fee on file). Shown on the fee quote; never a number Keelix charges. */
   feesHeld?: Array<{ label: string; amountUsd: number; sourceUrl: string; reason: string }>;
+  /** Government pages that link this utility's own non-government site (governmentVouches.ts). */
+  siteVouches?: SiteVouch[];
   lookedUpAt: string;
   verifiedAt?: string | null;
   verifiedBy?: string | null;
@@ -696,8 +700,25 @@ export async function runUtilityFilingLookup(
   const keepFiling = !parsed.filing.value && existing?.filing?.value;
   const keepProgram = !parsed.program.value && existing?.program?.value;
   const programName = keepProgram ? existing?.programName ?? "" : parsed.programName;
+  // A GOVERNMENT PAGE VOUCHES (owner, 2026-11-13; governmentVouches.ts): when the answer's pages sit on
+  // a non-government site that could be this utility's and is not yet recorded as its own, the
+  // government pages among the search's results (a state commission's list of utilities, ≤ 2) are read
+  // for a link to that site in the utility's name.
+  let siteVouchRun: { vouches: SiteVouch[]; read: string[] } = { vouches: [], read: [] };
+  if (!ungrounded) {
+    try {
+      const { utilityOfficialHosts } = await import("./utilityRequirements");
+      const candidateUrls = [str(parsed.filing.sourceUrl), str(parsed.program.sourceUrl), ...seen].filter(Boolean);
+      siteVouchRun = await findSiteVouches(await getReader(), { kind: "utility", state: input.state, names: [input.utility] },
+        { candidateUrls, officialHosts: utilityOfficialHosts(db, input.state, input.utility) });
+    } catch (err) {
+      logger.warn("utility-filing", `site vouch read failed for ${input.utility}: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+  const siteVouches = mergeVouches(existing?.siteVouches, siteVouchRun.vouches, siteVouchRun.read);
   const save = saveUtilityFilingLookup(db, {
     state: input.state, utility: input.utility,
+    ...(siteVouches.length ? { siteVouches } : {}),
     filing: (keepFiling ? existing!.filing : parsed.filing) as UtilityFilingFact,
     program: (keepProgram ? existing!.program : parsed.program) as CitedFact<UtilityProgramKind>,
     ...(programName ? { programName } : {}),
@@ -729,8 +750,8 @@ export async function runUtilityFilingLookup(
   if (save.saved && save.lookup && !ungrounded && parsed.fees?.length) {
     try {
       const { landUtilityLookupFees } = await import("./utilityFeeLanding");
-      const { utilityPersonVerifiedHosts } = await import("./utilityRequirements");
-      feeLanding = await landUtilityLookupFees(db, save.lookup, { reader: await getReader(), verifiedHosts: utilityPersonVerifiedHosts(db, input.state, input.utility) });
+      const { utilityOfficialHosts } = await import("./utilityRequirements");
+      feeLanding = await landUtilityLookupFees(db, save.lookup, { reader: await getReader(), verifiedHosts: utilityOfficialHosts(db, input.state, input.utility) });
       parsed.dropped.push(`utility fee: ${feeLanding.reason}`);
     } catch (err) {
       logger.warn("utility-filing", `could not land the utility fee for ${input.utility}: ${err instanceof Error ? err.message : String(err)}`);

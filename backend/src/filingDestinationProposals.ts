@@ -441,6 +441,8 @@ export function filingDestinationsFor(
       candidates = [...utilityCandidates(getUtilityFilingLookup(db, authority.state, authority.name)), ...shippedDoorCandidates(authority.state, authority.name)];
       // The seeded KB door LAST: a cited candidate naming the same address is the one shown (below).
       candidates.push(...seededUtilityDoorCandidates(db, authority.state, authority.name));
+      // A FILING DOOR: person-verified hosts ONLY. A government page's vouch (governmentVouches.ts) makes
+      // facts official, never where a filing goes (owner, 2026-11-10 and 2026-11-13).
       try { hosts = utilityPersonVerifiedHosts(db, authority.state, authority.name); } catch { hosts = []; }
     } else {
       const issuer = projectForTrack(project, tracks[0]);
