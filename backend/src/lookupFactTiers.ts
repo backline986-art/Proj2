@@ -5,7 +5,8 @@
 //
 // A fact is stamped `tier: "official"` with its `fetchedAt` only when ALL of these hold, through the
 // one shared predicate (shared/src/officialSource.landingTierFor):
-//   - its page is on a government host, or a domain recorded as the authority's own;
+//   - its page is on a government host, or a domain recorded as the authority's own (by a person, or by
+//     a government page Keelix read, governmentVouches.ts);
 //   - its quote names its value (a string value; for a list, every item);
 //   - the quote is in the bytes Keelix itself retrieved from that page in this run (never a model's
 //     answer about a page Keelix did not read).
@@ -51,7 +52,7 @@ const factKey = (f: Stamped): string => `${str(f.sourceUrl)}\u0000${str(f.quote)
 export interface StampContext {
   /** The text Keelix retrieved this run, by page (the lookup's own pageKey). */
   pageText: (url: string) => string | undefined;
-  /** Hosts recorded as this authority's own (a person's). Government hosts need none. */
+  /** Hosts recorded as this authority's own (a person's, or a government page's vouch). Government hosts need none. */
   hosts: readonly string[];
   /** The read time stamped on a fact landed this run. */
   now: string;

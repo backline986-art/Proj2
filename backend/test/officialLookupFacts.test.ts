@@ -65,7 +65,7 @@ const cite = (value: unknown, sourceUrl: string, quote: string) => ({ value, sou
 const NONE = { value: null, sourceUrl: "", quote: "", notFound: "no page states it" };
 
 /** A permit lookup for `ahj` whose agency page is `site`'s /building/permits. */
-async function run(ahj: string, site: string, opts: { refuse?: string[]; pageWords?: string } = {}) {
+async function run(ahj: string, site: string, opts: { refuse?: string[]; pageWords?: string; extraPages?: Record<string, string> } = {}) {
   const BUILD = `https://${site}/building/permits`;
   const AGENCY = `Electrical permits are issued by the ${ahj} Building Division for work inside the city.`;
   const permit = { discipline: "electrical", label: "Electrical permit", issuingAgency: cite(`${ahj} Building Division`, BUILD, AGENCY), portalUrl: NONE, recordType: NONE };
@@ -75,9 +75,9 @@ async function run(ahj: string, site: string, opts: { refuse?: string[]; pageWor
     docsFees: { permits: [{ discipline: "electrical", documents: NONE, fee: NONE }] },
   };
   reader._resetPoliteness();
-  const r = reader.createPageReader({ fetch: transport({ [BUILD]: html(`<p>${opts.pageWords ?? AGENCY}</p><p>Separate building and electrical permits are required.</p>`) }, opts.refuse ?? []), minGapMs: 0, maxReads: 12 });
+  const r = reader.createPageReader({ fetch: transport({ [BUILD]: html(`<p>${opts.pageWords ?? AGENCY}</p><p>Separate building and electrical permits are required.</p>`), ...(opts.extraPages ?? {}) }, opts.refuse ?? []), minGapMs: 0, maxReads: 12 });
   const out = await ppl.runPermitProcessLookup(db, {
-    webLookup: async (q: { label: string }) => g(/\.process$/.test(q.label) ? a.process : /\.portal$/.test(q.label) ? a.portal : /documentsFees$/.test(q.label) ? a.docsFees : {}, [BUILD]),
+    webLookup: async (q: { label: string }) => g(/\.process$/.test(q.label) ? a.process : /\.portal$/.test(q.label) ? a.portal : /documentsFees$/.test(q.label) ? a.docsFees : {}, [BUILD, ...Object.keys(opts.extraPages ?? {})]),
   } as never, { state: "ZZ", ahj, force: true, reader: r });
   return { out, row: pp.getPermitProcessLookup(db, "ZZ", ahj) };
 }
@@ -105,6 +105,13 @@ await check("(A3) the same answer on a .org nobody recorded as the city's own la
   const { row } = await run("Cobbleford", "www.cobblefordcityzz.org");
   assert.equal(row?.issuingAgency?.value, "Cobbleford", JSON.stringify(row?.issuingAgency));
   assert.equal((row?.issuingAgency as { tier?: string }).tier, undefined);
+});
+
+await check("(A4) the same .org once a county page Keelix read links it in the city's name (a government page's vouch): official", async () => {
+  const COUNTY = "https://www.hollowcountyzz.gov/cities";
+  const { row } = await run("Elmcrest", "www.cityofelmcrestzz.org", { extraPages: { [COUNTY]: html(`<ul><li><a href="https://www.cityofelmcrestzz.org/">City of Elmcrest</a></li></ul>`) } });
+  assert.deepEqual(row?.siteVouches?.map((v) => v.host), ["www.cityofelmcrestzz.org"]);
+  assert.equal((row?.issuingAgency as { tier?: string }).tier, "official", JSON.stringify(row?.issuingAgency));
 });
 
 // ── B. Never stamped ────────────────────────────────────────────────────────────────────────────

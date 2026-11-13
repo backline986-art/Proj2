@@ -5483,6 +5483,19 @@ export interface LearnTargetRecordType {
   value: string;
   verified: boolean;
 }
+/** A GOVERNMENT PAGE VOUCHED FOR THIS AUTHORITY'S OWN SITE (owner, 2026-11-13): a .gov page Keelix read
+ *  itself links `host` with words naming the authority, so facts read on `host` can be official
+ *  (backend/src/governmentVouches.ts holds the conditions and re-checks them on every read). Never a
+ *  filing door: where a filing goes and whether one is sent stay person-verified. */
+export interface SiteVouch {
+  host: string;
+  /** The government page that links it, as read. */
+  vouchedByUrl: string;
+  /** The link's own words on that page. */
+  linkText: string;
+  /** When Keelix read the vouching page (ISO). */
+  fetchedAt: string;
+}
 export interface PermitProcessLookup {
   profileKey: string;
   state: string;
@@ -5511,6 +5524,8 @@ export interface PermitProcessLookup {
   /** Pages the lookup READ ITSELF (agency pages, the portal's public catalog, fee schedules), each
    *  with what came of the read — the audit trail for every value cited to one of them. */
   pagesRead?: Array<{ url: string; ok: boolean; reason: string }>;
+  /** Government pages that link this AHJ's own non-government site (SiteVouch). */
+  siteVouches?: SiteVouch[];
   /** HOW A BATTERY (ESS) JOB IS PERMITTED here (lookup-battery-and-fees, 2026-11-10), each cited:
    *  in the same PV review, a separate storage permit, a fire review, a fire approval letter (several
    *  may hold). Read only on a storage job, as a warning (essRequirements.essPermitStep); never a

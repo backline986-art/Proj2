@@ -191,7 +191,7 @@ import { submissionConfirmationFile } from "./submissionConfirmation";
 import { reviewScreenshotFile } from "./reviewScreenshot";
 import { buildApprovalSheet } from "./approvalSheet";
 import { getPermitProcessLookup, projectForTrack, verifyPermitProcessLookup } from "./permitProcess";
-import { personVerifiedAuthorityHosts } from "./officialAuthorityHosts";
+import { officialAuthorityHosts } from "./officialAuthorityHosts";
 import { withHonouredFactTiers } from "./lookupFactTiers";
 import { ahjProcessKnowledgeStatus, AHJ_PROCESS_REFERENCE_ENV } from "./processProfiles";
 import { enqueueStageSteps } from "./autoStageSteps";
@@ -2808,7 +2808,7 @@ app.get("/api/projects/:id/permit-process", (req, res) => {
   const { project } = getProjectDetail(db, String(req.params.id));
   // Each official fact's stamp re-checked against the authority's hosts as they stand (lookupFactTiers).
   const lookup = String(project.ahj || "").trim() ? getPermitProcessLookup(db, project.state, project.ahj) : null;
-  const hosts = lookup ? (() => { try { return personVerifiedAuthorityHosts(db, project.state, project.ahj); } catch { return []; } })() : [];
+  const hosts = lookup ? (() => { try { return officialAuthorityHosts(db, project.state, project.ahj); } catch { return []; } })() : [];
   res.json({ state: project.state, ahj: project.ahj, lookup: withHonouredFactTiers(lookup, hosts) });
 });
 app.put("/api/projects/:id/permit-process/verify", (req, res) => {
