@@ -1,5 +1,6 @@
 import type { AppDb } from "./db";
-import { cecListing, cecTableCount } from "./cecEquipment";
+import { sourceHostOf } from "../../shared/src/officialSource";
+import { cecListing, cecTableCount, jobInverterForCec, jobInverterUl1741Sb, type CecUl1741SbAnswer } from "./cecEquipment";
 import { evaluateBaselineRules } from "./baselineRules";
 import { certificationList, eligibilityRecordsForState } from "./eligibilityLimits";
 import { resolveUtilityRequirements } from "./utilityRequirements";
@@ -731,7 +732,24 @@ export function runQcForProject(db: AppDb, projectId: string, options: QcRunOpti
       // stored plan set answers instead (planSetImageReads, the one reader the gate uses too, #135).
       planSetNamesAcDisconnect = planTextNamesAcDisconnect(planSetText) || Boolean(planSetImageDisconnectRead(db, projectId));
     } catch { disconnectPartOnPlanSet = ""; planSetNamesAcDisconnect = false; }
-    for (const baseline of evaluateBaselineRules(baselinePayload, codeCtx, eligibility, { requirements: utilityRequirements, reportUnresearched: true, scope: scope.scope, disconnectPartOnPlanSet, planSetNamesAcDisconnect }, { records: jurisdictionRecords })) {
+    // VERIFY FIRST (owner, 2026-11-13): the CEC's own inverter list answers "is it UL 1741 SB
+    // certified" for the job's inverter (cecEquipment.jobInverterUl1741Sb, the one reader the reviewer
+    // gate uses too). Certified on the list = the utility's listing item is met, and QC says where that
+    // came from instead of warning. A failed read is no answer: the item reads the package as before.
+    let ul1741Sb: CecUl1741SbAnswer | null = null;
+    try { ul1741Sb = jobInverterUl1741Sb(db, payload as Record<string, unknown>); } catch { ul1741Sb = null; }
+    if (ul1741Sb?.certified) {
+      const { model } = jobInverterForCec(payload as Record<string, unknown>);
+      const listed = ul1741Sb.listedModels.length === 1 ? `"${ul1741Sb.listedModels[0]}"` : `${ul1741Sb.listedModels.length} listings (${ul1741Sb.listedModels.slice(0, 3).map((m) => `"${m}"`).join(", ")}${ul1741Sb.listedModels.length > 3 ? ", …" : ""}), every one`;
+      db.run(
+        `INSERT INTO qc_results (id, project_id, qc_status, rule_id, rule_name, message, severity, created_at)
+         VALUES (?, ?, 'pass', 'cec.inverter_ul1741sb', 'Inverter UL 1741 SB listing', ?, 'info', ?)`,
+        [id(), projectId,
+         `Verified from the CEC equipment list (${sourceHostOf(ul1741Sb.sourceUrl)}${ul1741Sb.syncedAt ? `, synced ${ul1741Sb.syncedAt.slice(0, 10)}` : ""}): inverter "${model}" is listed as ${listed} UL 1741 SB certified${ul1741Sb.certifiedBy ? ` (${ul1741Sb.certifiedBy})` : ""}.`,
+         createdAt],
+      );
+    }
+    for (const baseline of evaluateBaselineRules(baselinePayload, codeCtx, eligibility, { requirements: utilityRequirements, reportUnresearched: true, scope: scope.scope, disconnectPartOnPlanSet, planSetNamesAcDisconnect, inverterUl1741SbOnCecList: ul1741Sb?.certified === true }, { records: jurisdictionRecords })) {
       if (baseline.qcStatus === "fail") failCount += 1;
       if (baseline.qcStatus === "fail" && !priorFails.has(baseline.ruleId)) newFailsOutsideBill += 1;
       if (baseline.qcStatus === "warning") warningCount += 1;
@@ -804,10 +822,10 @@ export function runQcForProject(db: AppDb, projectId: string, options: QcRunOpti
         const firstArray = (Array.isArray(payload.pvArrays) ? payload.pvArrays[0] : null) as Record<string, unknown> | null;
         const moduleMake = clean(payload.moduleMake) || clean(payload.moduleManufacturer) || clean(firstArray?.moduleManufacturer ?? firstArray?.moduleMake ?? firstArray?.manufacturer);
         const moduleWatts = clean(payload.moduleWattage) || clean(firstArray?.moduleWattage ?? firstArray?.wattage ?? firstArray?.watts);
-        const micro = !clean(payload.invModel) && Boolean(clean(payload.pvMicroModel));
+        const inverter = jobInverterForCec(payload as Record<string, unknown>);
         const checks: Array<["module" | "inverter", string, string, string, string]> = [
           ["module", "cec.module_listed", clean(payload.moduleModel), moduleMake, moduleWatts],
-          ["inverter", "cec.inverter_listed", clean(payload.invModel) || clean(payload.pvMicroModel), micro ? clean(payload.pvMicroMake) : clean(payload.invMake) || clean(payload.inverterManufacturer), ""],
+          ["inverter", "cec.inverter_listed", inverter.model, inverter.make, ""],
         ];
         for (const [kind, ruleId, model, make, watts] of checks) {
           if (!model) continue;
