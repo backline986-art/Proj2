@@ -5785,8 +5785,8 @@ const FEE_RESPONSIBILITY_TEXT = {
   "keelix-pays": "we pay (then invoice it)",
 };
 // WHO PAYS EACH PORTAL'S FEES (#201): asked on every login a person saves, changeable in place.
-// The owner's rule (2026-11-12): the client's own card where the portal takes one; elsewhere we pay
-// and bill it at cost. A RECORD OF AN AGREEMENT, never an authorisation: automation never pays.
+// The owner's rule (2026-11-13): new logins start on Keelix paying with the company card and billing it
+// at cost after (keeps filing speed predictable); a person can switch any login. A RECORD OF AN AGREEMENT, never an authorisation: automation never pays.
 const FEE_PAYER_CHOICES = [
   ["card-on-file", "Client's card saved in the portal"],
   ["customer-pays", "Client pays it themselves"],
@@ -12769,7 +12769,7 @@ if ($("addCredentialBtn")) {
     try {
       await api(`/api/clients/${clientId}/portal-credentials`, { method: "POST", body: JSON.stringify(body) });
       $("cred_username").value = ""; $("cred_password").value = ""; $("cred_portalType").value = ""; $("cred_portalUrl").value = "";
-      if ($("cred_feeResponsibility")) $("cred_feeResponsibility").value = "card-on-file";
+      if ($("cred_feeResponsibility")) $("cred_feeResponsibility").value = "keelix-pays";
       $("credStatus").textContent = "Saved (encrypted).";
       await loadClientCredentials(clientId);
     } catch (err) { $("credStatus").textContent = err.message || "Save failed."; }
@@ -12979,7 +12979,7 @@ if ($("plSaveBtn")) $("plSaveBtn").addEventListener("click", async () => {
   try {
     await api(`/api/clients/${client.id}/portal-credentials`, { method: "POST", body: JSON.stringify(body) });
     $("pl_username").value = ""; $("pl_password").value = "";
-    if ($("pl_feeResponsibility")) $("pl_feeResponsibility").value = "card-on-file";
+    if ($("pl_feeResponsibility")) $("pl_feeResponsibility").value = "keelix-pays";
     $("plStatus").textContent = "Saved (encrypted).";
     await renderPortalLogins();
   } catch (err) { $("plStatus").textContent = err.message || "Save failed."; }

@@ -17,7 +17,7 @@
 //   MUST PASS — dark theme at 1440: the same geometry holds.
 //   MUST PASS — who pays (#201), at 1440: every saved login shows who pays its portal's fees and a
 //               blank one is flagged; changing it PUTs only that answer for that login; the new-login
-//               form starts on "Client's card saved in the portal" and its save POSTs the answer.
+//               form starts on "Keelix pays, then bills it at cost" (owner, 2026-11-13) and its save POSTs the answer.
 //
 // Hermetic: a throwaway static server over frontend/ (or CLIENTS_SMOKE_FRONTEND, to prove the
 // smoke fails on an older checkout), stubbed /api/clients + one client's four FAKE logins,
@@ -185,9 +185,9 @@ async function main(): Promise<void> {
         }));
         check(fee.rows.join(",") === "cred-1=,cred-2=card-on-file,cred-3=,cred-4=" && fee.flagged === 3,
           `${tag}: each saved login shows who pays, and the three without an answer are flagged`, JSON.stringify(fee));
-        check(fee.formValue === "card-on-file" && fee.formOptions.join(",") === "card-on-file,customer-pays,mailed-check,keelix-pays"
+        check(fee.formValue === "keelix-pays" && fee.formOptions.join(",") === "card-on-file,customer-pays,mailed-check,keelix-pays"
           && fee.plOptions.join(",") === fee.formOptions.join(","),
-          `${tag}: both new-login forms ask who pays, starting on the client's card`, JSON.stringify(fee));
+          `${tag}: both new-login forms ask who pays, starting on Keelix pays (owner, 2026-11-13)`, JSON.stringify(fee));
         await page.evaluate(() => {
           const sel = document.querySelector('#credList [data-cred-fee="cred-1"]') as HTMLSelectElement;
           sel.value = "keelix-pays"; sel.dispatchEvent(new Event("change", { bubbles: true }));
@@ -202,7 +202,7 @@ async function main(): Promise<void> {
           (document.getElementById("addCredentialBtn") as HTMLButtonElement).click();
         });
         await page.waitForFunction(() => /Saved \(encrypted\)/.test(document.getElementById("credStatus")?.textContent || ""), null, { timeout: 15000 });
-        check(sent.some((x) => x.startsWith("POST portal-credentials ") && x.includes('"feeResponsibility":"card-on-file"')), `${tag}: saving a new login sends who pays`, sent.join(" | "));
+        check(sent.some((x) => x.startsWith("POST portal-credentials ") && x.includes('"feeResponsibility":"keelix-pays"')), `${tag}: saving a new login sends who pays`, sent.join(" | "));
       }
       await ctx.close();
     }
