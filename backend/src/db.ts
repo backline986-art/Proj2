@@ -3914,10 +3914,10 @@ const VERSIONED_MIGRATIONS: VersionedMigration[] = [
     },
   },
   {
-    // v88 (#220, rapid shutdown from the maker's spec sheet; owner card 2026-11-13 "Keelix attaches the
-    // maker's spec sheet"): the next free number on main e927b3f (v87 = parcel_service_link_checks).
+    // v90 (#220, rapid shutdown from the maker's spec sheet; owner card 2026-11-13 "Keelix attaches the
+    // maker's spec sheet"): Helm's number. v88 (#215) and v89 (#219) are queued ahead of it.
     // Helm renumbers at merge if the queue changes — nothing here depends on the number.
-    version: 88,
+    version: 90,
     name: "maker_spec_sheets",
     up: (db) => {
       // A MAKER'S OWN DATASHEET FOR ONE PRODUCT (makerSpecSheets.ts), fetched once per make + model and
