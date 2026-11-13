@@ -55,9 +55,11 @@ export const PRICE_TRACKS: readonly PriceTrack[] = ["permit", "nem"];
 export type PricingTier = "founding" | "standard";
 export const PRICING_TIERS: readonly PricingTier[] = ["founding", "standard"];
 
-/** What a price-list row prices: a filing of one track, or the per-project cap. */
-export type PriceItem = PriceTrack | "project_cap";
-const PRICE_ITEMS: readonly PriceItem[] = ["permit", "nem", "project_cap"];
+/** What a price-list row prices: a filing of one track, the per-project cap, or the client onboarding
+ *  fee (#208: put on a new client's first statement; once paid, credited back against Keelix's own
+ *  filing fees). */
+export type PriceItem = PriceTrack | "project_cap" | "onboarding";
+const PRICE_ITEMS: readonly PriceItem[] = ["permit", "nem", "project_cap", "onboarding"];
 
 /** Where a price came from, most specific first. "unset" means no price anywhere. */
 export type PriceBasis = "client_track" | "client_flat" | "price_list" | "env_default" | "unset";
@@ -170,13 +172,13 @@ export function getServicePriceList(db: AppDb, orgId: string): ServicePriceList 
       const r = rows.find((x) => text(x.tier) === tier && text(x.item) === item);
       return { priceUsd: money(r?.price_usd), setBy: text(r?.set_by), setAt: text(r?.set_at) };
     };
-    return { permit: entry("permit"), nem: entry("nem"), project_cap: entry("project_cap") };
+    return { permit: entry("permit"), nem: entry("nem"), project_cap: entry("project_cap"), onboarding: entry("onboarding") };
   };
   return { orgId, tiers: { founding: tierPrices("founding"), standard: tierPrices("standard") }, envDefaultUsd: envDefaultServicePriceUsd() };
 }
 
-const INPUT_KEYS: Record<PriceItem, string> = { permit: "permitUsd", nem: "nemUsd", project_cap: "capUsd" };
-const ITEM_NAMES: Record<PriceItem, string> = { permit: "price per permit filing", nem: "price per NEM application", project_cap: "cap per project" };
+const INPUT_KEYS: Record<PriceItem, string> = { permit: "permitUsd", nem: "nemUsd", project_cap: "capUsd", onboarding: "onboardingUsd" };
+const ITEM_NAMES: Record<PriceItem, string> = { permit: "price per permit filing", nem: "price per NEM application", project_cap: "cap per project", onboarding: "onboarding fee" };
 
 export interface PriceChange { tier: PricingTier; item: PriceItem; fromUsd: number | null; toUsd: number | null }
 
@@ -198,7 +200,7 @@ export function setServicePrices(
   for (const tier of PRICING_TIERS) {
     const block = input?.[tier];
     if (block == null) continue;
-    if (typeof block !== "object" || Array.isArray(block)) throw new HttpError(400, `"${tier}" must be an object of permitUsd, nemUsd and capUsd.`);
+    if (typeof block !== "object" || Array.isArray(block)) throw new HttpError(400, `"${tier}" must be an object of permitUsd, nemUsd, capUsd and onboardingUsd.`);
     const b = block as Record<string, unknown>;
     for (const item of PRICE_ITEMS) {
       const key = INPUT_KEYS[item];
@@ -212,7 +214,7 @@ export function setServicePrices(
       wanted.push({ tier, item, value: round2(n) });
     }
   }
-  if (!wanted.length) throw new HttpError(400, "Give founding and/or standard prices: permitUsd, nemUsd, capUsd (a blank clears one).");
+  if (!wanted.length) throw new HttpError(400, "Give founding and/or standard prices: permitUsd, nemUsd, capUsd, onboardingUsd (a blank clears one).");
   const before = getServicePriceList(db, orgId);
   const changed: PriceChange[] = [];
   const ts = nowIso();
@@ -258,6 +260,13 @@ export function resolveServicePrice(db: AppDb, clientId: string | null, trackInp
 export function resolveProjectCap(db: AppDb, clientId: string | null, projectId?: string): { capUsd: number | null; tier: PricingTier } {
   const tier = tierOfClient(db, clientId);
   return { capUsd: getServicePriceList(db, orgFor(db, clientId, projectId)).tiers[tier].project_cap.priceUsd, tier };
+}
+
+/** The onboarding fee in force NOW for this client's tier (#208); null = none set. Reads only. */
+export function resolveOnboardingFee(db: AppDb, clientId: string | null): { feeUsd: number | null; setAt: string; tier: PricingTier } {
+  const tier = tierOfClient(db, clientId);
+  const entry = getServicePriceList(db, orgFor(db, clientId)).tiers[tier].onboarding;
+  return { feeUsd: entry.priceUsd, setAt: entry.setAt, tier };
 }
 
 /** What the project's OTHER filings are charged (waived ones excluded): the cap's running total. */
