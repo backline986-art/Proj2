@@ -3926,10 +3926,10 @@ const VERSIONED_MIGRATIONS: VersionedMigration[] = [
     },
   },
   {
-    // v88 (fee float; feeFloat.ts): an invoice for ONE job's fees we paid, due on receipt. project_id ''
+    // v89 (#209, fee float; feeFloat.ts): an invoice for ONE job's fees we paid, due on receipt. project_id ''
     // is a statement for a period (as before). The client's fee limit is a client column (fee_limit_usd,
     // in the client column list).
-    version: 88,
+    version: 89,
     name: "job_fee_invoices",
     up: (db) => {
       addColumnIfMissing(db, "client_invoices", "project_id", "TEXT NOT NULL DEFAULT ''");
