@@ -9,9 +9,11 @@
 // One predicate and one landing function, shared by every writer that stores a cited fact:
 //   - isGovernmentHost(host): .gov / .mil, a US locality's or state's .us, a country's gov. second level;
 //   - isOfficialSourceHost(url, verifiedAuthorityHosts): a government host, or the authority's own
-//     domain where that domain is itself recorded HUMAN-verified for that authority (many cities and
-//     utilities run on .org / .com; a seeded or inferred domain never qualifies). A vendor, an
-//     aggregator or a file on someone else's CDN never qualifies;
+//     domain where that domain is RECORDED as that authority's own (many cities and utilities run on
+//     .org / .com): by a person, or (owner, 2026-11-13) by a government page Keelix read that links
+//     it in the authority's name (backend/src/governmentVouches.ts). A seeded or inferred domain never
+//     qualifies; a vendor, an aggregator or a file on someone else's CDN never qualifies. A filing
+//     door's caller passes person-verified hosts only;
 //   - landingTierFor(...): "official" only when the host passes, the quote names the value, and the
 //     quote is found in the bytes this process RETRIEVED from that page at `fetchedAt` (never a
 //     model's memory, never a model's own quote of a page we did not read); else "seeded".
@@ -44,9 +46,10 @@ export function siteOfHost(host: string): string {
 }
 
 /**
- * IS THIS PAGE THE AUTHORITY'S OWN OFFICIAL PAGE? A government host, or a host on a domain that a
- * PERSON verified as this authority's own (`verifiedAuthorityHosts`: hosts cited by the authority's
- * human-verified rows — never a seeded row, never a guess from the name).
+ * IS THIS PAGE THE AUTHORITY'S OWN OFFICIAL PAGE? A government host, or a host on a domain recorded as
+ * this authority's own (`verifiedAuthorityHosts`: hosts cited by the authority's human-verified rows,
+ * and hosts a government page vouched for — governmentVouches.ts; never a seeded row, never a guess
+ * from the name). Callers deciding a filing door pass person-verified hosts only.
  */
 export function isOfficialSourceHost(url: string, verifiedAuthorityHosts: readonly string[] = []): boolean {
   const host = sourceHostOf(url);
