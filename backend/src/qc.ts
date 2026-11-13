@@ -625,16 +625,37 @@ export function runQcForProject(db: AppDb, projectId: string, options: QcRunOpti
             `The list of documents this filing needs${where} is not yet confirmed — no cited per-job process lookup and no shipped profile names it. ${!gateDocs.owed.length && !inv.missingAdvisory.length ? "The universal set (plan set, site plan, SLD, specs) is attached; " : ""}confirm the AHJ's own submittal list before staging.${filledNote}`,
             createdAt],
         );
-      } else if (list.missing.length) {
+      }
+      // VERIFY FIRST (owner, 2026-11-13: "verify first, then verify prior to warning"). An item on the
+      // list that staging itself makes (a form filled from its stored template, or one Stage downloads
+      // and fills) is not missing: QC already says so in its own pass row, so it is not counted again
+      // here. Everything else stays as it was: an item no document slot can hold is still a warning
+      // (a workers' comp affidavit is a real requirement Keelix cannot see, not a verified one).
+      const madeAtStaging = new Set([...gateDocs.filledAtStaging, ...gateDocs.acquiredAtStaging].map((d) => d.docType));
+      const listMissing = list.source === "unknown" ? [] : list.missing;
+      const stagingMakes = listMissing.filter((m) => m.docTypes.some((t) => madeAtStaging.has(t)));
+      const stillMissing = listMissing.filter((m) => !stagingMakes.includes(m));
+      const stagingNote = stagingMakes.length ? ` Made at staging, so not counted missing: ${stagingMakes.map((m) => m.text).join("; ")}.` : "";
+      if (list.source === "unknown") {
+        // said above
+      } else if (stillMissing.length) {
         warningCount += 1;
         db.run(
           `INSERT INTO qc_results (id, project_id, qc_status, rule_id, rule_name, message, severity, created_at)
            VALUES (?, ?, 'warning', 'docs.complete', 'Required documents', ?, 'warning', ?)`,
           [id(), projectId,
-            `Not every document on the required list${where} is attached (${list.missing.length} of ${list.items.length} missing, list from ${list.sourceLabel}): ${list.missing.map((m) => m.docTypes.length ? m.text : `${m.text} (could not match to a document type; attach as additional — no document slot holds this, so its absence cannot be proven and it never blocks)`).join("; ")}.${filledNote}`,
+            `Not every document on the required list${where} is attached (${stillMissing.length} of ${list.items.length} missing, list from ${list.sourceLabel}): ${stillMissing.map((m) => m.docTypes.length ? m.text : `${m.text} (could not match to a document type; attach as additional — no document slot holds this, so its absence cannot be proven and it never blocks)`).join("; ")}.${stagingNote}${filledNote}`,
             createdAt],
         );
-      } else if (!gateDocs.owed.length && !inv.missingAdvisory.length) {
+      } else if (listMissing.length) {
+        db.run(
+          `INSERT INTO qc_results (id, project_id, qc_status, rule_id, rule_name, message, severity, created_at)
+           VALUES (?, ?, 'pass', 'docs.complete', 'Required documents', ?, 'info', ?)`,
+          [id(), projectId,
+            `Every document on the required list${where} is attached or made at staging (list from ${list.sourceLabel}).${stagingNote}${filledNote}`,
+            createdAt],
+        );
+      } else if (!listMissing.length && !gateDocs.owed.length && !inv.missingAdvisory.length) {
         const applied = list.items.filter((i) => !i.skipped).length;
         db.run(
           `INSERT INTO qc_results (id, project_id, qc_status, rule_id, rule_name, message, severity, created_at)
