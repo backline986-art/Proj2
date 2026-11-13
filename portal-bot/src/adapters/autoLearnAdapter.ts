@@ -12213,10 +12213,10 @@ export class AutoLearnAdapter extends BasePortalAdapter {
     const { scope } = opts;
     let searched = "";
     const out = (verdict: "picked" | "empty" | "unusable" | "ambiguous") => ({ verdict, searched });
-    if (!page) return out("unusable");
+    if (!page) return (this.debug?.event({ type: "lookup_search_unusable", section: opts.heading.slice(0, 40), why: "no page" }), out("unusable"));
     try {
       await sleep(600);
-      if (!opts.companyName) return out("unusable");
+      if (!opts.companyName) return (this.debug?.event({ type: "lookup_search_unusable", section: opts.heading.slice(0, 40), why: "the client record has no company name" }), out("unusable"));
       // 1) A TYPE / CATEGORY SELECT, set first: the option naming this learn's discipline (electrical
       //    → /electric/; structural or building → /building|general|contractor/), else the single
       //    non-placeholder option when there is exactly one; nothing fits → left at its placeholder
@@ -12251,12 +12251,15 @@ export class AutoLearnAdapter extends BasePortalAdapter {
       //    "Name" only when no business-worded box exists and it is not a person's part.
       // VISIBLE boxes only (#221, live Tigard: a hidden "Company Name" in the inactive "Enter Manually"
       // tab was found first and could not be filled).
-      let nameBox = scope.getByLabel(/business|company|organi[sz]ation|contractor|licensee/i).filter({ visible: true }).first();
+      // TYPEABLE boxes only, too (live Tigard run 13: the section heading <h4 aria-label="Add Contact As
+      // Contractor"> matched "contractor" by its aria-label and the fill failed — "unusable").
+      const typeable = (page ?? scope).locator("input:not([type=hidden]):not([type=checkbox]):not([type=radio]):not([type=button]):not([type=submit]), textarea");
+      let nameBox = scope.getByLabel(/business|company|organi[sz]ation|contractor|licensee/i).and(typeable).filter({ visible: true }).first();
       if (!(await nameBox.count().catch(() => 0))) {
-        nameBox = scope.getByLabel(/\bname\b/i).filter({ visible: true }).first();
+        nameBox = scope.getByLabel(/\bname\b/i).and(typeable).filter({ visible: true }).first();
         if (await nameBox.count().catch(() => 0)) {
           const lbl = String(await nameBox.evaluate((el: Element) => { const id = el.getAttribute("id"); const l = id && document.querySelector(`label[for="${CSS.escape(id)}"]`); return String((l && (l as HTMLElement).innerText) || el.getAttribute("aria-label") || ""); }).catch(() => "") ?? "");
-          if (/\b(first|middle|last|given|family|contact|your)\b/i.test(lbl)) { opts.steps.length = mark; return out("unusable"); }
+          if (/\b(first|middle|last|given|family|contact|your)\b/i.test(lbl)) { opts.steps.length = mark; return (this.debug?.event({ type: "lookup_search_unusable", section: opts.heading.slice(0, 40), why: "the only name box is a person's name" }), out("unusable")); }
         }
       }
       // #221 — A PLAIN "SEARCH" BOX (Tyler EnerGov "Add Contact": the only text box is labelled
@@ -12270,8 +12273,8 @@ export class AutoLearnAdapter extends BasePortalAdapter {
           if (/\bsearch\b/i.test(lbl) && !/\b(first|middle|last|given|family|address|street|parcel|e-?mail|phone)\b/i.test(lbl)) nameBox = lone.first();
         }
       }
-      if (!(await nameBox.count().catch(() => 0))) { opts.steps.length = mark; return out("unusable"); }
-      if (!(await nameBox.fill(opts.companyName, { timeout: 8000 }).then(() => true).catch(() => false))) { opts.steps.length = mark; return out("unusable"); }
+      if (!(await nameBox.count().catch(() => 0))) { opts.steps.length = mark; return (this.debug?.event({ type: "lookup_search_unusable", section: opts.heading.slice(0, 40), why: "no business, name or Search box in the form" }), out("unusable")); }
+      if (!(await nameBox.fill(opts.companyName, { timeout: 8000 }).then(() => true).catch(() => false))) { opts.steps.length = mark; return (this.debug?.event({ type: "lookup_search_unusable", section: opts.heading.slice(0, 40), why: "the name box could not be filled" }), out("unusable")); }
       opts.steps.push({ action: "fill", phase: "fill", selector: { label: "Business Name", fallbacks: [{ css: "input[id*='Business' i], input[id*='Company' i], input[id*='Name' i]", ...inFrame }], ...inFrame }, field: contactKeyFor("company", "business") ?? "installerCompanyName", value: opts.companyName, note: `lookup(${opts.heading.slice(0, 40)}): business name` });
       searched = `searched by business name "${opts.companyName}"${typeChosen ? ` with ${typeSel!.label} "${typeChosen}"` : typeSelectPresent ? ` with ${typeSel!.label} left at its placeholder (no option names ${opts.discipline || "this discipline"})` : ""}`;
       // 3) The form's own search button — the same shared predicate, the same refusals; labels read in
@@ -12318,7 +12321,7 @@ export class AutoLearnAdapter extends BasePortalAdapter {
       }).catch(() => "") ?? "");
       const tabFlags: boolean[] = await controls.evaluateAll((els: Element[]) => els.map((el) => el.getAttribute("role") === "tab" || el.getAttribute("aria-selected") === "true" || !!el.getAttribute("aria-current") || /(^|\s)(active|selected|is-active)(\s|$)/i.test(String((el as HTMLElement).className || "")))).catch(() => [] as boolean[]);
       const si = owned ? -1 : labels.findIndex((label, i) => !!label && !tabFlags[i] && /search|look\s?-?up|find/i.test(label) && isLookupButtonLabel(label) && !isPayFee(label) && !SUBMIT_INTENT.test(label));
-      if (!owned && si < 0) { opts.steps.length = mark; return out("unusable"); }
+      if (!owned && si < 0) { opts.steps.length = mark; return (this.debug?.event({ type: "lookup_search_unusable", section: opts.heading.slice(0, 40), why: "no search control beside the name box or by its words" }), out("unusable")); }
       const searchBtn = owned ? scope.locator('[data-al-lsb="1"]').first() : controls.nth(si);
       const searchLabel = owned || labels[si];
       // At most TWO searches per press: a second only when no type option fit (the register may
@@ -12360,7 +12363,7 @@ export class AutoLearnAdapter extends BasePortalAdapter {
         // ...and every row in the name box's own document, for the wider result scope below.
         await nameBox.evaluate((box: Element) => { (box.ownerDocument || document).querySelectorAll("tr").forEach((e) => e.setAttribute("data-al-oldrow", "1")); }).catch(() => null);
         await searchBtn.scrollIntoViewIfNeeded?.({ timeout: 3000 }).catch(() => null);
-        if (!(await searchBtn.click({ timeout: 8000 }).then(() => true).catch(() => false))) { opts.steps.length = mark; return out("unusable"); }
+        if (!(await searchBtn.click({ timeout: 8000 }).then(() => true).catch(() => false))) { opts.steps.length = mark; return (this.debug?.event({ type: "lookup_search_unusable", section: opts.heading.slice(0, 40), why: "the search control could not be clicked" }), out("unusable")); }
         if (attempt === 0) opts.steps.push({ action: "click", phase: "fill", selector: { role: "button", name: searchLabel, exact: true, fallbacks: [{ role: "link", name: searchLabel, exact: true, ...inFrame }, { css: `a[title="${searchLabel}"], input[value="${searchLabel}"]`, ...inFrame }], ...inFrame }, note: `lookup(${opts.heading.slice(0, 40)}): ${searchLabel}` });
         await page.waitForLoadState?.("networkidle", { timeout: 15000 }).catch(() => null);
         // Poll: rows, or the form's own "nothing found".

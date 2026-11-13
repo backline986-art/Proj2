@@ -32,7 +32,7 @@ const contactPage = `<!doctype html><html><head><title>Apply for Permit</title><
 <h2>Add Contact</h2>
 <div class="contact-page">
 <div class="contact-section">
-  <h3>Add Contact As : Contractor</h3>
+  <h4 aria-label="Add Contact As Contractor"><span>Add Contact As</span> <span>: Contractor</span></h4>
   <div class="tabs">
     <button type="button" class="btn active" aria-selected="true" id="tabSearch">Search</button>
     <button type="button" class="btn" id="tabManual">Enter Manually</button>
@@ -44,8 +44,10 @@ const contactPage = `<!doctype html><html><head><title>Apply for Permit</title><
   <!-- As live: the search row and the results table are SIBLINGS of the section block, not inside it. -->
   <div class="search-row">
     <span>Search</span>
+    <form name="contactSearchForm" onsubmit="return false"><div><label>Search</label>
     <input id="input-ContactSearchBar" type="text" aria-label="Search" placeholder="Name, E-mail, or Company" required>
-    <button id="button-ContactSearchBar" type="button" class="btn fa fa-search" aria-label="Search"></button>
+    <button id="button-ContactSearchBar" class="btn css-btn-primary fa fa-search search-contact-button" aria-label="Search" disabled></button>
+    </div></form>
   </div>
   <table id="res"><thead><tr><th>Company</th><th>Address</th><th>Action</th></tr></thead><tbody></tbody></table>
 </div>
@@ -54,6 +56,8 @@ var S = JSON.parse(sessionStorage.getItem("S") || '{"tab":0,"mag":0,"adds":[],"m
 function save(){ sessionStorage.setItem("S", JSON.stringify(S)); }
 document.getElementById("tabSearch").onclick = function(){ S.tab++; save(); };
 document.getElementById("mCompany").oninput = function(){ S.manualTyped++; save(); };
+// As live: the magnifier is disabled until the box holds text.
+document.getElementById("input-ContactSearchBar").oninput = function(){ document.getElementById("button-ContactSearchBar").disabled = !this.value; };
 document.getElementById("button-ContactSearchBar").onclick = function(){
   S.mag++; save();
   var q = document.getElementById("input-ContactSearchBar").value.toLowerCase();
