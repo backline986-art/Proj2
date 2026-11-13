@@ -3911,7 +3911,6 @@ const VERSIONED_MIGRATIONS: VersionedMigration[] = [
           PRIMARY KEY (source_key, source_url, service_root)
         )
       `);
-      },
     },
   },
   {
