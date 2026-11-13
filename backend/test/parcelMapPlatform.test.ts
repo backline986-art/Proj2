@@ -6,11 +6,13 @@
 // service. Helm's conditions, each pinned here:
 //   (1) the shared #683 predicate (isOfficialSourceHost / isGovernmentHost) never learns arcgis.com;
 //   (2) an ArcGIS-hosted record is used only at tier verified: a named person, the county's own
-//       GOVERNMENT page URL and a verbatim quote naming the exact host; never seeded or official;
+//       GOVERNMENT page URL and a verbatim quote naming the exact host — or (owner 2026-11-12, automated)
+//       at tier official, once KEELIX's own read of that government page confirms the link
+//       (parcelServiceLink.test.ts pins that path); never on a record's word alone;
 //   (3) the query goes to that exact host (and service root) only; a redirect is not followed;
 //   (4) the address only (street, city / ZIP), never a name, account or anything else;
-//   (5) a seeded or official ArcGIS record is dropped at load AND refused at the door with no fetch;
-//       any other third-party host stays refused.
+//   (5) a record that neither path can vouch for is dropped at load; one waiting for Keelix's read is
+//       refused at the door with no fetch; any other third-party host stays refused.
 //
 // Synthetic data only (every county, city, street, organisation id and page is invented); scratch DB;
 // NO NETWORK: the "platform" is a fake answering through the fetch seam, and the test fails if any other
@@ -121,7 +123,6 @@ await check("a quote naming the service host itself (no pageLinksHost) also load
 });
 await check("each missing condition drops the record at load, with the reason", () => {
   const cases: Array<[Record<string, unknown>, RegExp]> = [
-    [{ verifiedBy: "" }, /person-verified record/],
     [{ verifiedService: "" }, /no verifiedService/],
     [{ verifiedService: `https://services8.arcgis.com/${ORG}/arcgis/rest/services/Example_Parcels/FeatureServer` }, /verifiedService is not on services9\.arcgis\.com/],
     [{ verifiedService: `https://${PLATFORM_HOST}` }, /no service path/],
@@ -130,25 +131,43 @@ await check("each missing condition drops the record at load, with the reason", 
     [{ sourceUrl: "https://www.examplecounty.org/assessor/gis" }, /not the county's own government page/],
     [{ sourceUrl: `https://${PORTAL_HOST}/home` }, /not the county's own government page/],
     [{ sourceUrl: "" }, /not the county's own government page/],
-    [{ quote: "Parcel maps are available online" }, /the quote does not name examplecounty\.maps\.arcgis\.com/],
-    [{ pageLinksHost: "maps.example-vendor.com", quote: "maps.example-vendor.com" }, /pageLinksHost is not on the hosted map platform/],
-    [{ fetchedAt: "" }, /no fetchedAt/],
+    [{ sourceUrl: "http://www.examplecounty.gov/assessor/gis", verifiedBy: "" }, /not an https page on the county's own government host/],
   ];
   for (const [over, why] of cases) {
     const { source, problem } = load(over);
     assert.equal(source, null, JSON.stringify(over));
     assert.match(problem, /services9\.arcgis\.com is not a government host/, problem);
     assert.match(problem, why, problem);
+    assert.match(problem, /nor can Keelix confirm the county links it/, problem);
+  }
+});
+await check("a record short of a person's verification falls back to KEELIX's check: official, no person, not asked until confirmed", () => {
+  const cases: Array<Record<string, unknown>> = [
+    { verifiedBy: "" },
+    { quote: "Parcel maps are available online" },
+    { pageLinksHost: "maps.example-vendor.com", quote: "maps.example-vendor.com" },
+    { fetchedAt: "" },
+  ];
+  for (const over of cases) {
+    const { source, problem } = load(over);
+    assert.equal(problem, "", JSON.stringify(over));
+    assert.equal(source?.linkCheck, "keelix", JSON.stringify(over));
+    assert.equal(source?.tier, "official");
+    assert.equal(source?.verifiedBy, "", "never shown as a person's check");
+    assert.equal(source?.verifiedService, SERVICE_ROOT);
+    assert.equal(PJ.mayAskServiceUrl(source!, PJ.buildQueryUrl(source!, ADDRESS)), false, "not asked with no confirmation");
   }
 });
 
 // ── (5) Seeded / official dropped; any other third party refused ──────────────────────────────
-console.log("\n(5) seeded or official platform records, and every other third-party host, are refused");
-await check("a seeded or official platform record is dropped at load, however complete", () => {
+console.log("\n(5) seeded or official platform records wait for Keelix's read; every other third-party host is refused");
+await check("a seeded or official platform record loads only as waiting for Keelix's read of the county page", () => {
   for (const tier of ["seeded", "official", ""]) {
     const { source, problem } = load({ tier });
-    assert.equal(source, null, tier);
-    assert.match(problem, /is not a government host \(a hosted map service is used only on a person-verified record/, problem);
+    assert.equal(problem, "", tier);
+    assert.equal(source?.linkCheck, "keelix", tier);
+    assert.equal(source?.tier, "official", tier);
+    assert.equal(source?.linkConfirmation, undefined, "no confirmation comes from the data");
   }
 });
 await check("any other third-party host stays refused, even fully person-verified", () => {
@@ -169,6 +188,10 @@ await check("the door refuses a seeded or official platform record handed in dir
   }
   const unbound = await PJ.askParcelService({ ...good, hostedOn: "government", verifiedService: "" }, ADDRESS);
   assert.equal(unbound.status, "unavailable", "a platform URL on a record not loaded as a platform record");
+  const waiting = load({ tier: "seeded" }).source!;
+  assert.equal((await PJ.askParcelService(waiting, ADDRESS)).status, "unavailable", "a record waiting for Keelix's read");
+  const verifiedButKeelix = await PJ.askParcelService({ ...good, linkCheck: "keelix", tier: "official", linkConfirmation: null }, ADDRESS);
+  assert.equal(verifiedButKeelix.status, "unavailable", "a keelix record with no confirmation, however the rest reads");
   assert.equal(asked.length, before, "nothing was fetched");
 });
 await check("(3) the door refuses another organisation on the same platform host, or another host, with no fetch", async () => {

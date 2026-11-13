@@ -3879,6 +3879,40 @@ const VERSIONED_MIGRATIONS: VersionedMigration[] = [
       `);
     },
   },
+  {
+    // v87 (draft 16 B, automated; owner 2026-11-12): the next free number on main 16a7fb4 (#199 holds v86).
+    // Helm renumbers at merge if the queue changes — nothing here depends on the number.
+    version: 87,
+    name: "parcel_service_link_checks",
+    up: (db) => {
+      // KEELIX'S READ OF A COUNTY'S OWN GOVERNMENT PAGE: DOES IT LINK THE HOSTED PARCEL SERVICE?
+      // (parcelServiceLink.ts.) Written ONLY by the parcel_jurisdiction_check job, before any address
+      // is sent; the gate and the door read it. One row per (record, its source page, its service
+      // root): the latest check. status confirmed | refused; kind service | organisation |
+      // organisation_site; link_url + quote = the link and the page's own bytes around it, verbatim;
+      // organisation_id / organisation_source = what the organisation's own site said it is (for
+      // organisation_site). Shared on purpose like the other jurisdiction tables: a public page and a
+      // public link, no tenant data, no address.
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS parcel_service_link_checks (
+          source_key TEXT NOT NULL,
+          source_url TEXT NOT NULL,
+          service_root TEXT NOT NULL,
+          status TEXT NOT NULL,
+          kind TEXT NOT NULL DEFAULT '',
+          page_url TEXT NOT NULL DEFAULT '',
+          link_url TEXT NOT NULL DEFAULT '',
+          quote TEXT NOT NULL DEFAULT '',
+          organisation_id TEXT NOT NULL DEFAULT '',
+          organisation_source TEXT NOT NULL DEFAULT '',
+          page_sha256 TEXT NOT NULL DEFAULT '',
+          detail TEXT NOT NULL DEFAULT '',
+          checked_at TEXT NOT NULL,
+          PRIMARY KEY (source_key, source_url, service_root)
+        )
+      `);
+    },
+  },
 ];
 
 /** v47 was edited in place while #218 was open (Helm's review at 0116f98a): a DB that ran an earlier
