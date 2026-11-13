@@ -192,6 +192,8 @@ import { submissionConfirmationFile } from "./submissionConfirmation";
 import { reviewScreenshotFile } from "./reviewScreenshot";
 import { buildApprovalSheet } from "./approvalSheet";
 import { getPermitProcessLookup, projectForTrack, verifyPermitProcessLookup } from "./permitProcess";
+import { officialAuthorityHosts } from "./officialAuthorityHosts";
+import { withHonouredFactTiers } from "./lookupFactTiers";
 import { ahjProcessKnowledgeStatus, AHJ_PROCESS_REFERENCE_ENV } from "./processProfiles";
 import { enqueueStageSteps } from "./autoStageSteps";
 import type { ClientResolution, EditionProposalDecisionResult, ParserExtractionResponse, SubmittalTrackType } from "../../shared/src/types";
@@ -678,7 +680,12 @@ async function billingPerson(req: Request, what: string): Promise<string> {
 app.get("/api/clients/:id/billing/statement", asyncHandler(async (req, res) => {
   const { buildClientStatement, resolvePeriod } = await import("./clientInvoices");
   const period = resolvePeriod({ month: req.query.month, periodStart: req.query.periodStart, periodEnd: req.query.periodEnd });
-  res.json({ statement: buildClientStatement(db, String(req.params.id), period) });
+  const statement = buildClientStatement(db, String(req.params.id), period);
+  // What we carry for this client in fees we paid, against its limit (feeFloat.ts), as a statement note.
+  const { feeFloat, feeFloatSentence } = await import("./feeFloat");
+  const float = feeFloat(db, String(req.params.id));
+  if (float.owedUsd > 0) statement.notes.push(feeFloatSentence(float) + (float.over ? " At the limit: filings whose fee we pay wait until they pay." : ""));
+  res.json({ statement });
 }));
 app.get("/api/clients/:id/invoices", asyncHandler(async (req, res) => {
   const { listClientInvoices } = await import("./clientInvoices");
@@ -2805,7 +2812,10 @@ app.post("/api/projects/:id/research-ahj", asyncHandler(async (req, res) => {
 //           409: verify or replace it instead). 202 with the job.
 app.get("/api/projects/:id/permit-process", (req, res) => {
   const { project } = getProjectDetail(db, String(req.params.id));
-  res.json({ state: project.state, ahj: project.ahj, lookup: String(project.ahj || "").trim() ? getPermitProcessLookup(db, project.state, project.ahj) : null });
+  // Each official fact's stamp re-checked against the authority's hosts as they stand (lookupFactTiers).
+  const lookup = String(project.ahj || "").trim() ? getPermitProcessLookup(db, project.state, project.ahj) : null;
+  const hosts = lookup ? (() => { try { return officialAuthorityHosts(db, project.state, project.ahj); } catch { return []; } })() : [];
+  res.json({ state: project.state, ahj: project.ahj, lookup: withHonouredFactTiers(lookup, hosts) });
 });
 app.put("/api/projects/:id/permit-process/verify", (req, res) => {
   const projectId = String(req.params.id);
@@ -4058,6 +4068,9 @@ app.post("/api/projects/:id/payment/mark-paid", asyncHandler(async (req, res) =>
   addAuditLog(db, detail.project.id, "human", "operator", "payment.marked_paid", {
     track: quote.track, totalUsd: quote.totalUsd, reference: quote.payment?.paymentReference || "",
   });
+  if (req.body?.actualPermitFeeUsd != null && req.body?.actualPermitFeeUsd !== "") {
+    (await import("./feeFloat")).afterFeeRecorded(db, detail.project, "operator");
+  }
   maybeResumeAutopilot(db, detail.project.id, "a fee payment was recorded"); // clears the 402 gate
   res.json({ quote });
 }));
@@ -4081,7 +4094,9 @@ app.post("/api/projects/:id/payment/record-fee", asyncHandler(async (req, res) =
   addAuditLog(db, detail.project.id, "human", "operator", "payment.fee_recorded", {
     track: quote.track, permitFeeUsd: quote.permitFeeUsd,
   });
-  res.json({ quote });
+  // A fee we paid goes on the job's own invoice now, due on receipt (owner 2026-11-13), as a draft.
+  const jobInvoice = (await import("./feeFloat")).afterFeeRecorded(db, detail.project, "operator");
+  res.json({ quote, jobInvoice: jobInvoice ? { id: jobInvoice.id, number: jobInvoice.number, dueTotalUsd: jobInvoice.dueTotalUsd } : null });
 }));
 
 // FEE ACCURACY (#494) — what we quoted at filing beside what was paid, per AHJ/utility and track,
@@ -4815,7 +4830,10 @@ app.post("/api/projects/:id/submittal-tracks/:type/paid", asyncHandler(async (re
   addAuditLog(db, detail.project.id, "human", paidBy || "operator", "track.fee_paid", {
     track: type, kind: result.paid.kind, amountUsd: result.paid.amountUsd, actualFeeUsd: result.actualFeeUsd,
   });
-  res.json({ ok: true, message: result.message, paid: result.paid, tracks: getSubmittalTracks(db, detail.project) });
+  // A fee we paid goes on the job's own invoice now, due on receipt (owner 2026-11-13), as a draft.
+  const jobInvoice = (await import("./feeFloat")).afterFeeRecorded(db, detail.project, paidBy || "operator");
+  const billed = jobInvoice ? ` Billed to the client on draft invoice ${jobInvoice.number} (due on receipt once sent).` : "";
+  res.json({ ok: true, message: result.message + billed, paid: result.paid, tracks: getSubmittalTracks(db, detail.project) });
 }));
 app.post("/api/projects/:id/submittal-tracks/:type/mark-submitted", asyncHandler(async (req, res) => {
   const type = String(req.params.type) as SubmittalTrackType;

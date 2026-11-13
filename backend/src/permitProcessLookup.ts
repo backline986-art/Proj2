@@ -42,6 +42,7 @@ import { logger } from "./logger";
 import { isOfficialSourceHost } from "../../shared/src/officialSource";
 import { officialAuthorityHosts, vouchNamesFor } from "./officialAuthorityHosts";
 import { findSiteVouches, mergeVouches, type SiteVouch } from "./governmentVouches";
+import { stampOfficialLookupFacts } from "./lookupFactTiers";
 import { bracketDescribesPercentOfCost, feeLedgerFromPages, feeScheduleProfileKey, saveFeeSchedule } from "./feeSchedules";
 import { stateSurchargeRuleFor } from "./stateFeeRules";
 import { parseBracketRow } from "./pdfTables";
@@ -1900,7 +1901,13 @@ export async function runPermitProcessLookup(
     (d, earlierRecordType, portalUrl) => recordTypeBelongsToPortal(earlierRecordType, portalUrl, rtCtx(d))), gone);
   const feeReadsForPerson = feeReadsForAPerson(merged.permits, ev?.feeLeads ?? []);
   for (const r of feeReadsForPerson) notes.push(`Fee needs a person to read: ${r.url} (${r.reason})`);
-  const res = savePermitProcessLookup(db, {
+  // OFFICIAL FACTS (lookupFactTiers.ts): a non-door fact whose quote, naming its value, is in the bytes
+  // this run retrieved from the authority's own official page lands tier "official"; every other fact,
+  // and every door, fee and category, lands without a tier (seeded).
+  // The authority's recorded hosts (a person's, or a government page's vouch, this run's included).
+  const factHosts = [...new Set([...(() => { try { return officialAuthorityHosts(db, input.state, input.ahj); } catch { return []; } })(), ...siteVouchRun.vouches.map((v) => v.host)])];
+  const stampCtx = { pageText: (u: string) => pageTexts.get(pageKey(u)), hosts: factHosts, now: new Date().toISOString(), earlier: existing };
+  const res = savePermitProcessLookup(db, stampOfficialLookupFacts({
     state: input.state, ahj: input.ahj, lookedUpAt: new Date().toISOString(),
     issuingAgency: merged.issuingAgency, permitStructure: merged.permitStructure, permits: merged.permits, notes,
     prerequisites: uniquePrereqs.length ? uniquePrereqs : existing?.prerequisites,
@@ -1925,7 +1932,7 @@ export async function runPermitProcessLookup(
     // This run's government vouches beside the earlier row's (an earlier one is dropped only when its
     // government page was read again and no longer links the site).
     ...(() => { const v = mergeVouches(existing?.siteVouches, siteVouchRun.vouches, siteVouchRun.read); return v.length ? { siteVouches: v } : {}; })(),
-  });
+  }, stampCtx));
   if (res.saved && res.lookup) {
     // The pages this run read itself travel with the landing, so a landed fee's printed line is
     // checked against bytes Keelix retrieved (and can earn the official grade, feeOfficial).
