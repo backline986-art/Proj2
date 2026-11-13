@@ -18,6 +18,7 @@ import { logger } from "./logger";
 import { startPersistentSchedule } from "./schedulerState";
 import { nowIso } from "./time";
 import { isOfficialSourceHost } from "../../shared/src/officialSource";
+import { operatorPolicyAnswer } from "../../shared/src/perJobQuestions";
 
 export type CecKind = "module" | "inverter";
 
@@ -541,6 +542,17 @@ export function cecUl1741SbListing(db: AppDb, model: string, make = ""): CecUl17
   } catch {
     return null;
   }
+}
+
+/**
+ * THE UTILITY'S "USE THE REQUIRED SETTINGS" ITEM, ANSWERED (owner, 2026-11-13: "assume yes for inverter
+ * settings, or even better the spec sheet … or look it up"): the CEC's own list says the inverter is
+ * UL 1741 SB certified (it can take a utility's required profile) AND the operator's standing answer
+ * says installs are commissioned with the utility's settings. Both, or nothing: an inverter the list
+ * does not certify still asks a person.
+ */
+export function inverterSettingsByStandingAnswer(answer: CecUl1741SbAnswer | null): boolean {
+  return answer?.certified === true && operatorPolicyAnswer("utilitySettingsCommissioned") === "Yes";
 }
 
 /** The job's inverter against the CEC list's UL 1741 SB column (jobInverterForCec + cecUl1741SbListing). */

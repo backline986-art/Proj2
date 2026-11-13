@@ -2,8 +2,8 @@
 // A utility that asks for the "UL 1741 SB inverter listing" is asking exactly that, so QC and the
 // reviewer gate read the list before warning. Pins: the parse keeps the column, the lookup answers only
 // when every listing the model can be agrees, rows synced before the column answer nothing, a mirror
-// host answers nothing, QC says where the answer came from, and the settings item (what the inverter is
-// SET to) still asks a person.
+// host answers nothing, QC says where the answer came from, and the settings item is answered only by
+// the operator's standing answer (owner, 2026-11-13) on an inverter the list certifies.
 // Run: tsx backend/test/cecUl1741Sb.test.ts
 import fs from "node:fs";
 import os from "node:os";
@@ -112,15 +112,16 @@ async function main(): Promise<void> {
   const pkg = cRows.find((r) => r.rule_id === "utility-application-package");
   check("QC: a CEC-certified inverter is not listed as missing its UL 1741 SB listing",
     !/UL 1741 SB inverter listing/.test(pkg?.message ?? ""), pkg?.message ?? "(no package row)");
-  check("QC MUST-EXCLUDE: the settings item still asks (the list says nothing about settings)",
-    /inverter settings/i.test(pkg?.message ?? ""), pkg?.message ?? "(no package row)");
+  check("QC: the settings item is answered by the operator's standing answer on a certified inverter (owner, 2026-11-13)",
+    !/inverter settings/i.test(pkg?.message ?? ""), pkg?.message ?? "(no package row)");
   const info = cRows.find((r) => r.rule_id === "cec.inverter_ul1741sb");
   check("QC: says where it was verified (CEC list, host, the listings, the certifier)",
-    info?.qc_status === "pass" && info.severity === "info" && /Verified from the CEC equipment list \(solarequipment\.energy\.ca\.gov/.test(info.message) && /IQ8M-72-2-US/.test(info.message) && /\(UL\)/.test(info.message),
+    info?.qc_status === "pass" && info.severity === "info" && /Verified from the CEC equipment list \(solarequipment\.energy\.ca\.gov/.test(info.message) && /IQ8M-72-2-US/.test(info.message) && /\(UL\)/.test(info.message)
+      && /standing answer/.test(info.message),
     JSON.stringify(info));
   const cGate = gateIds(certified);
   check("gate: no UL 1741 SB listing warning for a CEC-certified inverter", !cGate.includes("reviewer.utility.inverter-listing-ul1741sb"), cGate.join(", "));
-  check("gate MUST-EXCLUDE: the settings warning stays", cGate.includes("reviewer.utility.inverter-settings"), cGate.join(", "));
+  check("gate: no settings warning for a certified inverter under the standing answer", !cGate.includes("reviewer.utility.inverter-settings"), cGate.join(", "));
 
   const notCertified = job("IQ8MC-72-M-US {240V}", "Enphase");
   runQcForProject(db, notCertified);
@@ -129,10 +130,30 @@ async function main(): Promise<void> {
     /UL 1741 SB inverter listing/.test(nPkg?.message ?? ""), nPkg?.message ?? "(no package row)");
   check("QC MUST-EXCLUDE: no 'verified' row for an N listing", !qcRows(notCertified).some((r) => r.rule_id === "cec.inverter_ul1741sb"));
   check("gate MUST-EXCLUDE: an N listing keeps the UL 1741 SB listing warning", gateIds(notCertified).includes("reviewer.utility.inverter-listing-ul1741sb"));
+  check("QC MUST-EXCLUDE: an N listing keeps the settings item (the standing answer needs a certified inverter)",
+    /inverter settings/i.test(nPkg?.message ?? ""), nPkg?.message ?? "(no package row)");
+  check("gate MUST-EXCLUDE: an N listing keeps the settings warning", gateIds(notCertified).includes("reviewer.utility.inverter-settings"));
 
   const ambiguous = job("MX5000", "Mixedco");
   runQcForProject(db, ambiguous);
   check("gate MUST-EXCLUDE: an ambiguous model keeps the warning", gateIds(ambiguous).includes("reviewer.utility.inverter-listing-ul1741sb"));
+  check("gate MUST-EXCLUDE: an ambiguous model keeps the settings warning", gateIds(ambiguous).includes("reviewer.utility.inverter-settings"));
+
+  // PACIFICORP'S SETTINGS ITEM (its own QC rule id, pacpower-ul1741sb, on the inverter_settings key):
+  // the same standing answer answers it on a certified inverter, and only there.
+  const pacJob = (invModel: string) => createProject(db, {
+    owner: "SB Test", street: "2 Test St", city: "Coos Bay", state: "OR", zip: "97420", ahj: "City of Coos Bay", utility: "Pacific Power",
+    pvMicroMake: "Enphase", pvMicroModel: invModel, moduleMake: "Qcells", moduleModel: "Q.TRON BLK M-G2.C1+/AC", moduleQty: "20", moduleWattage: "430",
+    dcKw: "8.6", acKw: "6.5", interco: "Load-side breaker", busRating: "200", mainBreaker: "200", pvBreaker: "40",
+  } as never).project.id;
+  const pacOk = pacJob("IQ8M");
+  runQcForProject(db, pacOk);
+  check("QC: Pacific Power's settings row does not fire on a certified inverter", !qcRows(pacOk).some((r) => r.rule_id === "pacpower-ul1741sb"), JSON.stringify(qcRows(pacOk).filter((r) => r.rule_id.startsWith("pacpower"))));
+  check("gate: Pacific Power's settings warning does not fire on a certified inverter", !gateIds(pacOk).includes("reviewer.utility.pacpower-settings"), gateIds(pacOk).join(", "));
+  const pacN = pacJob("IQ8MC-72-M-US {240V}");
+  runQcForProject(db, pacN);
+  check("QC MUST-EXCLUDE: Pacific Power's settings row stays on an N listing", qcRows(pacN).some((r) => r.rule_id === "pacpower-ul1741sb"));
+  check("gate MUST-EXCLUDE: Pacific Power's settings warning stays on an N listing", gateIds(pacN).includes("reviewer.utility.pacpower-settings"));
 
   db.close();
   fs.rmSync(dir, { recursive: true, force: true });

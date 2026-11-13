@@ -123,6 +123,15 @@ const OPERATOR_POLICY_ANSWERS: Readonly<Record<string, { answer: string; why: st
     answer: "Yes",
     why: "standard residential detail places the lockable AC disconnect within the required distance on every install — the operator's standing answer, and the same one autoLearnAdapter's POLICY_RADIO_DEFAULTS files at learn time",
   },
+  // "Assume yes for inverter settings" (owner, 2026-11-13, project thread "Walk 30 jobs through
+  // Keelix today"): installs are commissioned with the settings the utility requires. A utility's
+  // "use the provided settings" item is something the installer DOES, not something a plan set shows.
+  // Read only together with the CEC list's UL 1741 SB "Y" for the job's inverter (an inverter that
+  // can take the required profile): utilityRequirements' inverter_settings item, QC and the gate.
+  utilitySettingsCommissioned: {
+    answer: "Yes",
+    why: "owner's standing answer 2026-11-13: every install is commissioned with the utility's required inverter settings",
+  },
 });
 
 /** The operator's standing answer for a binding, or "" when there is none. Own keys only — a key

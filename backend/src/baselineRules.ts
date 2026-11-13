@@ -227,6 +227,10 @@ export interface BaselineUtilityContext {
    *  model can be (cecEquipment.jobInverterUl1741Sb, read by qc.ts; the reviewer gate reads the same
    *  answer). Absent / false = the inverter_listing_ul1741sb item reads the package text alone, as before. */
   inverterUl1741SbOnCecList?: boolean;
+  /** True when the CEC list certifies the inverter AND the operator's standing answer says installs use
+   *  the utility's required settings (cecEquipment.inverterSettingsByStandingAnswer, read by qc.ts).
+   *  Absent / false = the inverter_settings item reads the package text alone, as before. */
+  inverterSettingsByStandingAnswer?: boolean;
 }
 
 /** The jurisdiction records the QC baseline reads (jurisdictionQcRules.ts). */
@@ -623,11 +627,13 @@ export function evaluateBaselineRules(payload: ParserPayload, ctx?: EffectiveCod
 // ── THE UTILITY'S APPLICATION REQUIREMENTS, CHECKED ON THE PACKAGE (QC) ─────────────────────────
 // What QC reads for each KIND of item: the package text the plan-set split and the upload notes carry,
 // and the parser's account / meter fields. Kinds, never utilities.
-type QcReadInput = { payload: ParserPayload; split: string; notes: string; newPv: boolean; disconnectPart: string; disconnectNamed: boolean; sbOnCecList: boolean };
+type QcReadInput = { payload: ParserPayload; split: string; notes: string; newPv: boolean; disconnectPart: string; disconnectNamed: boolean; sbOnCecList: boolean; settingsByStandingAnswer: boolean };
 const QC_SHOWN: Record<UtilityRequirementKey, (t: QcReadInput) => boolean> = {
   account_verification: ({ payload }) => Boolean(str(payload, "account") || str(payload, "ubAccountNumber")),
   meter_photo: ({ payload }) => Boolean(str(payload, "meter") || str(payload, "ubMeterNumber")),
-  inverter_settings: ({ split, notes }) => hasAny(`${split}\n${notes}`, [/UL\s*1741\s*SB/i, /inverter settings/i, /smart inverter/i]),
+  // The operator's standing answer (installs are commissioned with the utility's settings) on an
+  // inverter the CEC list certifies to UL 1741 SB answers it (owner, 2026-11-13).
+  inverter_settings: ({ split, notes, settingsByStandingAnswer }) => settingsByStandingAnswer || hasAny(`${split}\n${notes}`, [/UL\s*1741\s*SB/i, /inverter settings/i, /smart inverter/i]),
   // VERIFIED FIRST (owner, 2026-11-13): the CEC's own list printing UL 1741 SB "Y" for the job's inverter
   // answers the listing, so the package text need not say it again. Settings (inverter_settings) are a
   // different question the list does not answer.
@@ -700,7 +706,7 @@ function utilityRequirementResults(payload: ParserPayload, state: string, utilit
   // WHAT THE JOB INSTALLS (#673): a job that adds no modules is never asked for a module spec, and its
   // inverter is the battery inverter / PCS.
   const newPv = scopeHasNewPv(ctx.scope ?? deriveJobScope(payload).scope);
-  const read: QcReadInput = { payload, split, notes, newPv, disconnectPart: String(ctx.disconnectPartOnPlanSet ?? "").trim(), disconnectNamed: ctx.planSetNamesAcDisconnect === true, sbOnCecList: ctx.inverterUl1741SbOnCecList === true };
+  const read: QcReadInput = { payload, split, notes, newPv, disconnectPart: String(ctx.disconnectPartOnPlanSet ?? "").trim(), disconnectNamed: ctx.planSetNamesAcDisconnect === true, sbOnCecList: ctx.inverterUl1741SbOnCecList === true, settingsByStandingAnswer: ctx.inverterSettingsByStandingAnswer === true };
   const groups = new Map<string, { qc: { ruleId: string; ruleName: string; message: string; fieldName: string }; order: number; first: number; missing: string[]; block: boolean }>();
   items.forEach((item, index) => {
     if (!requirementForGate(item, "qc")) return;

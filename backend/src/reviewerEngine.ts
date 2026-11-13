@@ -20,7 +20,7 @@ import { evaluatePermitPrecedentFindings } from "./permitPrecedents";
 import { citeStateSealRule, statePrescriptiveFindings } from "./stateRules";
 import type { EffectiveCodeContext } from "./codeProfiles";
 import type { ParcelJurisdictionReading } from "./parcelJurisdiction";
-import type { CecUl1741SbAnswer } from "./cecEquipment";
+import { inverterSettingsByStandingAnswer, type CecUl1741SbAnswer } from "./cecEquipment";
 import type { JobScope } from "../../shared/src/types";
 import { deriveJobScope, jobScopeLabel, scopeHasNewPv, storageFactGaps } from "./jobScope";
 
@@ -1215,9 +1215,11 @@ function addUtilityFindings(project: ProjectRecord, findings: ReviewerFinding[],
       const topic = REQUIREMENT_TOPIC[item.key];
       if (!topic || !requirementForGate(item, "reviewer")) continue;
       // VERIFIED FIRST (owner, 2026-11-13): the CEC's own inverter list printing UL 1741 SB for the job's
-      // inverter meets the listing item; QC records where it came from. Only the listing: the utility's
-      // settings item (inverter_settings) asks what the inverter is SET to, which the list does not say.
+      // inverter meets the listing item; QC records where it came from.
       if (item.key === "inverter_listing_ul1741sb" && inverterUl1741Sb?.certified) continue;
+      // The settings item: the operator's standing answer that installs are commissioned with the
+      // utility's settings, on an inverter the list certifies (owner, 2026-11-13). Both, or it asks.
+      if (item.key === "inverter_settings" && inverterSettingsByStandingAnswer(inverterUl1741Sb)) continue;
       const textCheck = evidenceForTopic(project, topic);
       if (textCheck.confidence === "high") continue;
       // AN IMAGE-ONLY PLAN SET (#135): the package text names no AC disconnect because the plan set

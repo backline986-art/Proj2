@@ -1,6 +1,6 @@
 import type { AppDb } from "./db";
 import { sourceHostOf } from "../../shared/src/officialSource";
-import { cecListing, cecTableCount, jobInverterForCec, jobInverterUl1741Sb, type CecUl1741SbAnswer } from "./cecEquipment";
+import { cecListing, cecTableCount, inverterSettingsByStandingAnswer, jobInverterForCec, jobInverterUl1741Sb, type CecUl1741SbAnswer } from "./cecEquipment";
 import { evaluateBaselineRules } from "./baselineRules";
 import { certificationList, eligibilityRecordsForState } from "./eligibilityLimits";
 import { resolveUtilityRequirements } from "./utilityRequirements";
@@ -745,11 +745,11 @@ export function runQcForProject(db: AppDb, projectId: string, options: QcRunOpti
         `INSERT INTO qc_results (id, project_id, qc_status, rule_id, rule_name, message, severity, created_at)
          VALUES (?, ?, 'pass', 'cec.inverter_ul1741sb', 'Inverter UL 1741 SB listing', ?, 'info', ?)`,
         [id(), projectId,
-         `Verified from the CEC equipment list (${sourceHostOf(ul1741Sb.sourceUrl)}${ul1741Sb.syncedAt ? `, synced ${ul1741Sb.syncedAt.slice(0, 10)}` : ""}): inverter "${model}" is listed as ${listed} UL 1741 SB certified${ul1741Sb.certifiedBy ? ` (${ul1741Sb.certifiedBy})` : ""}.`,
+         `Verified from the CEC equipment list (${sourceHostOf(ul1741Sb.sourceUrl)}${ul1741Sb.syncedAt ? `, synced ${ul1741Sb.syncedAt.slice(0, 10)}` : ""}): inverter "${model}" is listed as ${listed} UL 1741 SB certified${ul1741Sb.certifiedBy ? ` (${ul1741Sb.certifiedBy})` : ""}.${inverterSettingsByStandingAnswer(ul1741Sb) ? " The utility's required inverter settings are taken as applied at commissioning (the operator's standing answer)." : ""}`,
          createdAt],
       );
     }
-    for (const baseline of evaluateBaselineRules(baselinePayload, codeCtx, eligibility, { requirements: utilityRequirements, reportUnresearched: true, scope: scope.scope, disconnectPartOnPlanSet, planSetNamesAcDisconnect, inverterUl1741SbOnCecList: ul1741Sb?.certified === true }, { records: jurisdictionRecords })) {
+    for (const baseline of evaluateBaselineRules(baselinePayload, codeCtx, eligibility, { requirements: utilityRequirements, reportUnresearched: true, scope: scope.scope, disconnectPartOnPlanSet, planSetNamesAcDisconnect, inverterUl1741SbOnCecList: ul1741Sb?.certified === true, inverterSettingsByStandingAnswer: inverterSettingsByStandingAnswer(ul1741Sb) }, { records: jurisdictionRecords })) {
       if (baseline.qcStatus === "fail") failCount += 1;
       if (baseline.qcStatus === "fail" && !priorFails.has(baseline.ruleId)) newFailsOutsideBill += 1;
       if (baseline.qcStatus === "warning") warningCount += 1;
