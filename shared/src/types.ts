@@ -393,6 +393,9 @@ export interface SubmissionPaymentRecord {
    *  when the gate still asked for permit fee + service fee, so what that payment covered is a
    *  question for a person, never something an invoice may assume. */
   gateCollectedUsd: number | null;
+  /** How much of the client's paid onboarding fee this gate row took off its service fee (#208).
+   *  serviceFeeUsd is what is left to collect; counted as used only once the row is paid. */
+  creditAppliedUsd: number;
   updatedAt: string;
 }
 
@@ -670,6 +673,8 @@ export interface SubmissionPaymentQuote {
   /** Where our service fee came from (#187): "the price list's price per permit filing", "this
    *  client's own price per NEM application", or that no price is set (then serviceFeeUsd is 0). */
   serviceFeeSource?: string;
+  /** The onboarding credit taken off serviceFeeUsd on this quote (#208); 0 when none. */
+  onboardingCreditUsd?: number;
   /** What this filing costs in all: the jurisdiction fee plus our service fee. A fact about the
    *  submission, NOT what the client hands us at the gate — see gateAmountUsd. */
   totalUsd: number | null;

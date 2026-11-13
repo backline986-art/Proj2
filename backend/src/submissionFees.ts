@@ -57,6 +57,8 @@ import { priorYearOfFeeSource } from "./permitPlatformCatalog";
 import { officialFeeWords, officialSourceOfFeeResolution } from "./feeOfficial";
 import type { ProjectFeeResolution } from "./feeSchedules";
 import { resolveProjectCap, resolveServicePrice, underCap, type PriceBasis } from "./servicePrices";
+import { onboardingCredit } from "./onboardingCredit";
+import { addAuditLog } from "./audit";
 
 /** The portal's own total for the filing — typed by a person ("actual") or read off the record
  *  ("portal_record"). Either already contains every line the jurisdiction billed. */
@@ -96,6 +98,7 @@ function mapPayment(row: Row): SubmissionPaymentRecord {
     quotedAt: text(row.quoted_at),
     paidAt: row.paid_at ? text(row.paid_at) : null,
     gateCollectedUsd: num(row.gate_collected_usd),
+    creditAppliedUsd: num(row.credit_applied_usd) ?? 0,
     updatedAt: text(row.updated_at),
   };
 }
@@ -114,6 +117,8 @@ interface ClientBilling {
   /** Where the service fee came from (servicePrices.resolveServicePrice). */
   serviceFeeBasis: PriceBasis;
   serviceFeeLabel: string;
+  /** The onboarding credit taken off the fee (#208); serviceFeeUsd is already net of it. */
+  creditUsd: number;
 }
 
 /** The client's billing mode and OUR price for this track (#187): the client's own price per track,
@@ -125,16 +130,28 @@ function clientBilling(db: AppDb, project: ProjectRecord, track: "permit" | "nem
   // the project's other track. At the founding prices one permit + one NEM sits under the cap; a
   // client's own higher prices may not.
   const { capUsd } = resolveProjectCap(db, project.clientId, project.id);
-  const other = db.get<Row>("SELECT service_fee_usd FROM submission_payments WHERE project_id = ? AND track = ?", [project.id, track === "nem" ? "permit" : "nem"]);
-  const otherUsd = Number(other?.service_fee_usd ?? 0) || 0;
+  // The other track's PRICE counts toward the cap, credit or not: a credit pays a fee, it does not
+  // lower it.
+  const other = db.get<Row>("SELECT service_fee_usd, credit_applied_usd FROM submission_payments WHERE project_id = ? AND track = ?", [project.id, track === "nem" ? "permit" : "nem"]);
+  const otherUsd = (Number(other?.service_fee_usd ?? 0) || 0) + (Number(other?.credit_applied_usd ?? 0) || 0);
   const fee = price.priceUsd == null ? 0 : underCap(price.priceUsd, capUsd, otherUsd);
+  const capLabel = price.priceUsd != null && fee < price.priceUsd
+    ? `${price.label}, cut to $${fee.toFixed(2)} by the $${Number(capUsd).toFixed(2)} project cap`
+    : price.label;
+  // THE ONBOARDING CREDIT (#208, owner 2026-11-13 "Covers the first filings' fees"): once the client
+  // has paid its onboarding fee, what is left of it comes off this fee. This row's own earlier claim is
+  // left out of "used" (it is being re-quoted); a quoted row never holds credit another row could use.
+  const mine = db.get<Row>("SELECT id FROM submission_payments WHERE project_id = ? AND track = ?", [project.id, track]);
+  const credit = fee > 0 ? Math.min(fee, onboardingCredit(db, project.clientId, text(mine?.id)).remainingUsd) : 0;
+  const creditUsd = Math.round(credit * 100) / 100;
   return {
     billingMode: text(row?.billing_mode).toLowerCase(),
-    serviceFeeUsd: fee,
+    serviceFeeUsd: Math.round((fee - creditUsd) * 100) / 100,
     serviceFeeBasis: price.basis,
-    serviceFeeLabel: price.priceUsd != null && fee < price.priceUsd
-      ? `${price.label}, cut to $${fee.toFixed(2)} by the $${Number(capUsd).toFixed(2)} project cap`
-      : price.label,
+    serviceFeeLabel: creditUsd > 0
+      ? `${capLabel}; $${creditUsd.toFixed(2)} taken from the onboarding credit${fee - creditUsd <= 0 ? ", so nothing is due" : ""}`
+      : capLabel,
+    creditUsd,
   };
 }
 
@@ -1146,19 +1163,19 @@ function computePaymentQuote(
   if (persist && !existing) {
     db.run(
       `INSERT INTO submission_payments
-         (id, project_id, track, status, permit_fee_estimate_usd, permit_fee_actual_usd, service_fee_usd, total_usd, fee_basis, quoted_at, updated_at)
-       VALUES (?, ?, ?, 'quoted', ?, NULL, ?, ?, ?, ?, ?)`,
+         (id, project_id, track, status, permit_fee_estimate_usd, permit_fee_actual_usd, service_fee_usd, credit_applied_usd, total_usd, fee_basis, quoted_at, updated_at)
+       VALUES (?, ?, ?, 'quoted', ?, NULL, ?, ?, ?, ?, ?, ?)`,
       // The ESTIMATE column holds what research says; a portal read is not an estimate, so beside
       // one it keeps the researched figure (and permit_fee_actual_usd — a person's column — is
       // never written from a machine read).
-      [id(), project.id, track, permitFeeSource === "actual" ? null : permitFeeSource === "portal_record" ? researched.usd : permitFeeUsd, serviceFeeUsd, totalUsd ?? 0, permitFeeBasis, ts, ts],
+      [id(), project.id, track, permitFeeSource === "actual" ? null : permitFeeSource === "portal_record" ? researched.usd : permitFeeUsd, serviceFeeUsd, billing.creditUsd, totalUsd ?? 0, permitFeeBasis, ts, ts],
     );
   } else if (persist && existing?.status === "quoted") {
     db.run(
       `UPDATE submission_payments
-         SET permit_fee_estimate_usd = ?, service_fee_usd = ?, total_usd = ?, fee_basis = ?, updated_at = ?
+         SET permit_fee_estimate_usd = ?, service_fee_usd = ?, credit_applied_usd = ?, total_usd = ?, fee_basis = ?, updated_at = ?
        WHERE id = ?`,
-      [permitFeeSource === "actual" ? existing.permitFeeEstimateUsd : permitFeeSource === "portal_record" ? researched.usd : permitFeeUsd, serviceFeeUsd, totalUsd ?? 0, permitFeeBasis, ts, existing.id],
+      [permitFeeSource === "actual" ? existing.permitFeeEstimateUsd : permitFeeSource === "portal_record" ? researched.usd : permitFeeUsd, serviceFeeUsd, billing.creditUsd, totalUsd ?? 0, permitFeeBasis, ts, existing.id],
     );
   }
 
@@ -1204,6 +1221,7 @@ function computePaymentQuote(
     paymentMethod,
     serviceFeeUsd,
     serviceFeeSource: billing.serviceFeeLabel,
+    ...(billing.creditUsd > 0 ? { onboardingCreditUsd: billing.creditUsd } : {}),
     totalUsd,
     // The gate takes our own fee and nothing else (#699), whoever the jurisdiction fee belongs
     // to. A 'card-on-file' or 'customer-pays' fee is never ours to collect; a 'keelix-pays' fee is
@@ -1660,6 +1678,14 @@ export function assertSubmissionPaid(db: AppDb, project: ProjectRecord, trackInp
   if (!quote.required) return;
   const status = quote.payment?.status;
   if (status === "paid" || status === "waived") return;
+  // FULLY COVERED BY THE ONBOARDING CREDIT (#208): nothing is left to collect, so the credit IS the
+  // payment. Recorded as paid (which is what spends the credit: a quoted row never does), with the
+  // reference saying so, and audited. A $0 fee with no credit behind it still waits for a person.
+  if (status === "quoted" && quote.gateAmountUsd <= 0 && (quote.onboardingCreditUsd ?? 0) > 0) {
+    markSubmissionPaid(db, project, trackInput, { paymentReference: "Onboarding credit" });
+    addAuditLog(db, project.id, "system", "onboarding credit", "billing.gate_paid_by_credit", { track: quote.track, creditUsd: quote.onboardingCreditUsd });
+    return;
+  }
   // The service fee only (#699). The jurisdiction fee is not collected here: it is paid on the
   // portal, and re-billed on the invoice only when we advanced it.
   throw new HttpError(402, `Payment required before staging: this client bills per submission. Collect the service fee $${quote.gateAmountUsd.toFixed(2)} on the Payment screen, then press "Client paid us". The permit fee is not collected here: it is invoiced after it is paid, and only if we paid it.`, {
