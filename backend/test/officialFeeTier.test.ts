@@ -125,7 +125,7 @@ const save = (ahj: string, url: string, feeUsd = 94, withLedger = true) => fees.
   withLedger ? { corroborateAgainst: ledger(url, `Fee schedule\n${LABEL} | $${feeUsd}.00\nPlumbing permit | $60.00`) } : {});
 const sheetLine = (p: ProjectRecord) => subFees.buildProjectFeeSheet(db, p).lines.find((l) => l.track === "permit" && !l.role)!;
 
-await check("(B1) the fee quote grades it official and words it 'from <host>, read <date>', never as verified", () => {
+await check("(B1) the fee quote grades it official and words it 'Verified from <host>, <date>' (owner, 2026-11-13), never under a person's name", () => {
   assert.equal(save("Thistlewood", GOV).saved, true);
   const p = project({ ahj: "Thistlewood" });
   const q = subFees.readPaymentQuote(db, p, "permit");
@@ -133,7 +133,7 @@ await check("(B1) the fee quote grades it official and words it 'from <host>, re
   assert.equal(q.permitFeeSource, "published_schedule");
   assert.equal(q.permitFeeConfidence, "official");
   assert.equal(q.permitFeeOfficialSource?.host, "www.thistlewoodzz.gov");
-  assert.match(q.permitFeeBasis, /\(from www\.thistlewoodzz\.gov, read \d{4}-\d\d-\d\d: the authority's own published schedule, used as published; not checked by a person\)/);
+  assert.match(q.permitFeeBasis, /\(Verified from www\.thistlewoodzz\.gov, \d{4}-\d\d-\d\d: Keelix read it on the authority's own published schedule and uses it as published\)/);
   assert.doesNotMatch(q.permitFeeBasis, /human-verified|verified by|not yet human-verified/i, "official is never worded as a person's check, and no longer as unchecked research");
   assert.equal(q.permitFeeVerifiedBy, "");
   assert.equal(q.permitFeeVerifiedAt, "");
@@ -142,7 +142,7 @@ await check("(B1) the fee quote grades it official and words it 'from <host>, re
   assert.equal(row.confidence, "seeded");
   assert.equal(row.verifiedBy, "");
 });
-await check("(B2) the fee card and the invoice line say the same: official, the host, the date, no person", () => {
+await check("(B2) the fee card and the invoice line say the same: 'Verified from' the host, the date, no person", () => {
   const p = R.createProject(db, { owner: "Sample Owner", state: "ZZ", dcKw: "8.0", acKw: "7.6", street: "1 Test Way", city: "Thistlewood", zip: "00000", ahj: "Thistlewood", utility: "Sample Power" } as never).project;
   const l = sheetLine(p);
   assert.equal(l.confidence, "official");
@@ -150,14 +150,15 @@ await check("(B2) the fee card and the invoice line say the same: official, the 
   assert.equal(l.verifiedBy, "");
   assert.equal(l.confirmable, true, "a person may still put their name to it");
   const comp = (tier: "seeded" | "official" | "verified", host = "") => ({ authority: "Thistlewood", discipline: "electrical", amountUsd: 94, sourceUrl: GOV, collectedVia: "", tier, ...(host ? { officialHost: host } : {}), sourceQuote: ROW, sourceReadAt: READ });
-  assert.equal(invoices.publishedFeeProvenance([comp("official", "www.thistlewoodzz.gov")]), "from www.thistlewoodzz.gov, read 2026-11-11; not checked by a person");
-  assert.equal(invoices.publishedFeeProvenance([comp("official", "www.thistlewoodzz.gov"), comp("verified")]), "from www.thistlewoodzz.gov, read 2026-11-11; not checked by a person");
+  assert.equal(invoices.publishedFeeProvenance([comp("official", "www.thistlewoodzz.gov")]), "Verified from www.thistlewoodzz.gov, 2026-11-11");
+  assert.equal(invoices.publishedFeeProvenance([comp("official", "www.thistlewoodzz.gov"), comp("verified")]), "Verified from www.thistlewoodzz.gov, 2026-11-11");
   assert.equal(invoices.publishedFeeProvenance([comp("official", "www.thistlewoodzz.gov"), comp("seeded")]), "seeded schedule, not person-verified; source read 2026-11-11", "one seeded share decides");
   assert.doesNotMatch(invoices.publishedFeeProvenance([comp("official", "www.thistlewoodzz.gov")]), /verified by|person-verified schedule/);
   const dash = fs.readFileSync(new URL("../../frontend/dashboard.js", import.meta.url), "utf8");
   const entry = /\n {2}official: \{[\s\S]*?\n {2}\},/.exec(dash)?.[0] ?? "";
   assert.ok(entry, "the dashboard has a fee confidence entry for official");
-  assert.doesNotMatch(entry.replace(/\/\/.*$/gm, ""), /label: "[^"]*verified/i, "its badge never says verified");
+  assert.match(entry.replace(/\/\/.*$/gm, ""), /label: "verified from /, "its badge says verified FROM the site");
+  assert.doesNotMatch(entry.replace(/\/\/.*$/gm, ""), /verified by|checked it|human/i, "and never under a person");
 });
 await check("(B3) the same schedule with no retrieved document, or on a host nobody verified, stays seeded and says so", () => {
   save("Umberfield", "https://www.umberfieldzz.gov/fees", 94, false);

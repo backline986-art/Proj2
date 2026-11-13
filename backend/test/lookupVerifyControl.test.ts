@@ -159,15 +159,15 @@ check("no row on file (or an unknown kind) renders nothing", () => {
   assert.equal(LV.renderLookupVerify("code-profile", pp(permitRow())), "");
 });
 
-check("an OFFICIAL row (#683) is 'from <host>', not person-verified, and still offers Verify (filing targets stay person-verified)", () => {
+check("an OFFICIAL row (#683) is 'Verified from <host>, <date>' (owner, 2026-11-13), never 'Verified by', and still offers Verify (filing targets stay person-verified)", () => {
   const official = { ...filingRow(), confidence: "official", officialSource: { host: "www.brightwater-zz.gov", sourceUrl: "https://www.brightwater-zz.gov/net-metering", fetchedAt: "2026-11-09T00:00:00.000Z" } };
   const html: string = LV.renderLookupVerify("utility-filing", uf(official));
-  assert.match(html, /from www\.brightwater-zz\.gov/);
-  assert.ok(!/Verified/.test(html), "an official row reads as person-verified");
+  assert.match(html, /Verified from www\.brightwater-zz\.gov, 2026-11-09/);
+  assert.ok(!/Verified by/.test(html), "an official row reads as person-verified");
   assert.ok(enabledButton(html, "utility-filing"), "an official row hides the person's Verify");
   assert.match(html, /Where a filing goes stays a person's check/);
   const fact = { ...permitRow(), issuingAgency: { ...lk(AHJ, CITY_PAGE, `issued by the ${AHJ} Building Division`), tier: "official" } };
-  assert.match(LV.renderLookupVerify("permit-process", pp(fact)), /City of Fernhollow <span class="muted">\(from www\.fernhollow-zz\.gov\)<\/span>/);
+  assert.match(LV.renderLookupVerify("permit-process", pp(fact)), /City of Fernhollow <span class="muted">\(Verified from www\.fernhollow-zz\.gov(?:, \d{4}-\d\d-\d\d)?\)<\/span>/);
 });
 
 check("every interpolated value is escaped; a source link only for http(s)", () => {

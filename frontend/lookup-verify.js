@@ -110,7 +110,8 @@
   const hasValue = (f) => f && f.value != null && !(Array.isArray(f.value) && f.value.length === 0) && f.value !== '';
 
   // Is the row (or this fact) from an OFFICIAL source (#683)? Official = the row says so, or the fact
-  // carries tier 'official'. Shown "from <host>", never as a person's verification.
+  // carries tier 'official'. Shown "Verified from <host>, <date>" (owner, 2026-11-13), never as a
+  // person's verification ("Verified by <name>, <date>").
   const isOfficialRow = (lookup) => Boolean(lookup) && lookup.confidence === 'official';
   const isOfficialFact = (f) => Boolean(f) && (f.tier === 'official' || f.confidence === 'official');
 
@@ -141,6 +142,14 @@
     return `${entity || '(unnamed)'}${st ? `, ${st.toUpperCase()}` : ''}`;
   }
 
+  // "Verified from <host>, <date>": the official tier's words (plain text; the caller escapes). The same
+  // shape as shared/src/officialSource.officialSourceWords (pinned by officialSourceWords.test).
+  function officialSourceWords(host, fetchedAt) {
+    const h = str(host);
+    const day = /^\d{4}-\d{2}-\d{2}/.test(str(fetchedAt)) ? str(fetchedAt).slice(0, 10) : '';
+    return `Verified from ${h || "the authority's own page"}${day ? `, ${day}` : ''}`;
+  }
+
   // "Verified by <name>, <date>" (plain text; the caller escapes). '' for a row that is not verified.
   function verifiedStamp(lookup) {
     if (!lookup || lookup.confidence !== 'verified') return '';
@@ -154,7 +163,7 @@
     if (lookup.confidence === 'verified') return `<span class="badge badge-pass" data-lookup-verified>${esc(verifiedStamp(lookup))}</span>`;
     if (isOfficialRow(lookup)) {
       const host = hostOf(lookup.officialSource && lookup.officialSource.sourceUrl) || str(lookup.officialSource && lookup.officialSource.host);
-      return `<span class="badge badge-info" data-lookup-official>${esc(host ? `from ${host}` : 'from an official source')}</span> <span class="muted">not checked by a person</span>`;
+      return `<span class="badge badge-info" data-lookup-official>${esc(officialSourceWords(host, lookup.officialSource && lookup.officialSource.fetchedAt))}</span> <span class="muted">read by Keelix on the authority's own page</span>`;
     }
     return '<span class="badge badge-none" data-lookup-seeded>Seeded by research</span> <span class="muted">not checked by a person</span>';
   }
@@ -163,7 +172,7 @@
     const f = x.fact;
     const value = hasValue(f) ? (x.display ? x.display(f.value) : valueText(f.value)) : '';
     const url = httpUrl(f.sourceUrl);
-    const origin = isOfficialFact(f) && hostOf(url) ? `from ${hostOf(url)}` : (ORIGIN[f.origin] || str(f.origin) || 'on file');
+    const origin = isOfficialFact(f) && hostOf(url) ? officialSourceWords(hostOf(url), f.fetchedAt) : (ORIGIN[f.origin] || str(f.origin) || 'on file');
     const head = value
       ? `<strong>${esc(x.label)}:</strong> ${esc(value)} <span class="muted">(${esc(origin)})</span>`
       : `<strong>${esc(x.label)}:</strong> <span class="muted">not found${str(f.notFound) ? ` — ${esc(f.notFound)}` : ''}</span>`;
