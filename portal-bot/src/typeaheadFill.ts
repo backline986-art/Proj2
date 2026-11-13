@@ -236,6 +236,123 @@ async function enterRefusal(doc: any, loc: any): Promise<string> {
 }
 
 /**
+ * Runs IN THE PAGE (#198, Tigard's results panel). The TICKABLE RESULT ROWS a search brought: visible
+ * checkboxes that were not on the page before the search (data-al-oldcb), each read by the nearest
+ * ancestor (≤4 levels) whose text is a short line holding a digit. "Select All" is never a row. Stamps
+ * each row's checkbox data-al-tsr=<index>; returns the texts in order. No nested functions.
+ */
+export function searchResultRowsInPage(): string[] {
+  document.querySelectorAll("[data-al-tsr]").forEach((n) => n.removeAttribute("data-al-tsr"));
+  const out: string[] = [];
+  const boxes = document.querySelectorAll('input[type=checkbox]:not([data-al-oldcb]), [role=checkbox]:not([data-al-oldcb])');
+  for (let i = 0; i < boxes.length && out.length < 25; i++) {
+    const cb = boxes[i] as HTMLElement;
+    let node: HTMLElement | null = cb.parentElement;
+    let text = "";
+    let row: HTMLElement | null = null;
+    for (let up = 0; up < 4 && node && node !== document.body; up++, node = node.parentElement) {
+      const t = String(node.innerText || "").replace(/\s+/g, " ").trim();
+      if (t.length >= 5 && t.length <= 300 && /\d/.test(t)) { text = t; row = node; break; }
+      if (t.length > 300) break;
+    }
+    if (!text || !row || /^select\s+all\b/i.test(text)) continue;
+    const r = row.getBoundingClientRect();
+    const cs = getComputedStyle(row);
+    if (r.width <= 0 || r.height <= 0 || cs.visibility === "hidden" || cs.display === "none") continue;
+    cb.setAttribute("data-al-tsr", String(out.length));
+    out.push(text);
+  }
+  return out;
+}
+
+/**
+ * Runs IN THE PAGE, on a ticked result row's checkbox (#198). THE PANEL'S OWN "ADD": searching the
+ * row's ancestors outward (≤6 levels, never <body>), the first level holding any visible control whose
+ * whole label reads add / add selected / add location / select / use selected — exactly one there, or
+ * nothing. Never submit- or pay-worded by the shared predicates. Stamps data-al-tsadd="1".
+ */
+export function resultPanelAddInPage(cb: Element, g: string): string {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const ps = (globalThis as any)[g];
+  document.querySelectorAll("[data-al-tsadd]").forEach((n) => n.removeAttribute("data-al-tsadd"));
+  const WORDS = /^\+?\s*(?:add(?:\s+(?:selected|location|address|parcel|to\s+application))?|select(?:ed)?|use\s+selected)$/i;
+  let node: Element | null = cb.parentElement;
+  for (let level = 0; level < 6 && node && node !== document.body && node !== document.documentElement; level++, node = node.parentElement) {
+    const found = node.querySelectorAll("button, input[type=button], [role=button], a");
+    const fit: HTMLElement[] = [];
+    const labels: string[] = [];
+    for (let i = 0; i < found.length; i++) {
+      const c = found[i] as HTMLElement;
+      const r = c.getBoundingClientRect();
+      const cs = getComputedStyle(c);
+      if (r.width <= 0 || r.height <= 0 || cs.visibility === "hidden" || cs.display === "none") continue;
+      const text = String(c.innerText || (c as HTMLInputElement).value || c.getAttribute("aria-label") || c.getAttribute("title") || "").replace(/\s+/g, " ").trim();
+      if (!text || !WORDS.test(text)) continue;
+      if (ps && ((typeof ps.isSubmitIntent === "function" && ps.isSubmitIntent(text, null)) || (typeof ps.isPayFee === "function" && ps.isPayFee(text)))) continue;
+      fit.push(c);
+      labels.push(text);
+    }
+    if (fit.length > 1) return "";
+    if (fit.length === 1) { fit[0].setAttribute("data-al-tsadd", "1"); return labels[0]; }
+  }
+  return "";
+}
+
+/** #198 — after the box's own search: tick the ONE result row that is the job's address and press the
+ *  results panel's own "Add", then confirm the page now shows the address outside the search box.
+ *  "none" when the search brought no tickable rows (the caller reads the page the other ways). */
+async function searchResultTickAndAdd(
+  page: any, doc: any, loc: any, site: TypeaheadSite, req: TypeaheadRequest, deadline: number,
+): Promise<{ kind: "none" } | { kind: "picked"; text: string; why: string; add: string } | { kind: "ask"; question: string; offered: string[]; why: string } | { kind: "failed"; text: string; why: string }> {
+  let texts: string[] = [];
+  for (let i = 0; i < 6 && Date.now() < deadline; i++) {
+    await doc.evaluate(NAME_SHIM).catch(() => null);
+    const read = await doc.evaluate(searchResultRowsInPage).catch(() => [] as string[]);
+    texts = Array.isArray(read) ? read.map((t: unknown) => String(t ?? "")) : [];
+    if (texts.length) break;
+    await page.waitForTimeout?.(400).catch(() => null);
+  }
+  if (!texts.length) return { kind: "none" };
+  const choice = chooseAddressSuggestion(texts, site);
+  if (choice.kind === "ask") return { kind: "ask", question: choice.question, offered: texts, why: choice.why };
+  if (choice.kind !== "pick") return { kind: "none" };
+  const cb = doc.locator(`[data-al-tsr="${choice.index}"]`).first();
+  const ticked = await withAutomationInput(page, () => cb.click({ timeout: 3000 })).then(() => true)
+    .catch(() => withAutomationInput(page, () => cb.click({ timeout: 3000, force: true })).then(() => true).catch(() => false));
+  if (!ticked) return { kind: "failed", text: choice.text, why: `"${choice.text}" was found in the search results but its checkbox could not be ticked` };
+  // The panel's "Add" appears once a row is ticked: look for it near the row, briefly.
+  let addLabel = "";
+  for (let i = 0; i < 6 && !addLabel && Date.now() < deadline; i++) {
+    await page.waitForTimeout?.(400).catch(() => null);
+    await doc.evaluate(PORTAL_SAFETY_IN_PAGE_SOURCE).catch(() => null);
+    addLabel = String(await cb.evaluate(resultPanelAddInPage, PORTAL_SAFETY_GLOBAL).catch(() => "") ?? "");
+  }
+  if (!addLabel) return { kind: "failed", text: choice.text, why: `ticked "${choice.text}" in the search results and the panel offered no single "Add" to put it on the application` };
+  const add = doc.locator('[data-al-tsadd="1"]').first();
+  const addRefused = req.clickGate
+    ? String(await req.clickGate(add).catch((e: unknown) => `the click gate could not answer (${String((e as Error)?.message ?? e).slice(0, 80)})`) ?? "")
+    : "";
+  if (addRefused) return { kind: "failed", text: choice.text, why: `ticked "${choice.text}" but the panel's "${addLabel}" was refused: ${addRefused.slice(0, 120)}` };
+  const urlBefore = typeof page.url === "function" ? page.url() : "";
+  const added = await withAutomationInput(page, () => add.click({ timeout: 4000 })).then(() => true).catch(() => false);
+  if (!added) return { kind: "failed", text: choice.text, why: `ticked "${choice.text}" and the panel's "${addLabel}" could not be pressed` };
+  // CONFIRMED BY THE PAGE: the results panel's Add is gone (or the page moved) and the job's address
+  // is now shown on the page outside any input — the application's location card.
+  const house = (String(site.street ?? "").match(/^\s*(\d+[A-Za-z]?)\b/) ?? [])[1] ?? "";
+  for (let i = 0; i < 15 && Date.now() < deadline + 5000; i++) {
+    await page.waitForTimeout?.(400).catch(() => null);
+    const gone = !(await add.isVisible().catch(() => false)) || (typeof page.url === "function" && page.url() !== urlBefore);
+    if (!gone) continue;
+    const shows = house ? await doc.evaluate((h: string) => {
+      const body = String((document.body && (document.body as HTMLElement).innerText) || "");
+      return new RegExp(`(^|[^0-9])${h}([^0-9]|$)`).test(body);
+    }, house).catch(() => false) : true;
+    if (shows) return { kind: "picked", text: choice.text, why: choice.why, add: addLabel };
+  }
+  return { kind: "failed", text: choice.text, why: `ticked "${choice.text}" and pressed the panel's "${addLabel}", and the page did not then show the address` };
+}
+
+/**
  * Runs IN THE PAGE, on the box (#198). THE BOX'S OWN SEARCH CONTROL: searching the box's ancestors
  * outward, at most three levels and never <body>, the first level holding any qualifying control —
  * and exactly ONE there, or nothing. A control qualifies when its whole short label reads as a search
@@ -486,11 +603,22 @@ export async function fillTypeahead(page: any, loc: any, req: TypeaheadRequest):
             typed.push(q);
             if (!(await typeInto(page, loc, q))) continue;
           }
+          await doc.evaluate(() => { document.querySelectorAll('input[type=checkbox], [role=checkbox]').forEach((n) => n.setAttribute("data-al-oldcb", "1")); }).catch(() => null);
           const viaSearch = await enterAndReadSelection(page, doc, loc, site, beforeQ, deadline, () => control.click({ timeout: 3000 }));
           if (viaSearch.said) portalSaid = viaSearch.said;
           if (!viaSearch.pressed) continue;
           pressedAny = true;
           searchNote = ` + the box's own "${searchLabel}"`;
+          // A RESULTS PANEL OF TICKABLE ROWS (live City of Tigard, owner's walk-through 2026-11-13): the
+          // search lists each parcel as a row with its own checkbox (plus a "Select All"); ticking the
+          // row shows the panel's "Add", which puts the location on the application. Text that merely
+          // APPEARED is not a selection there — so this is read first, and only rows the search brought.
+          const tick = await searchResultTickAndAdd(page, doc, loc, site, req, deadline);
+          if (tick.kind === "picked") {
+            return { outcome: "picked", picked: tick.text, held: tick.text, typed: q, why: `${tick.why}; ticked in the results of the box's own "${searchLabel}" and added with the panel's "${tick.add}"`, via: "search" };
+          }
+          if (tick.kind === "ask") return { outcome: "ask", question: tick.question, offered: tick.offered, typed: q, why: tick.why };
+          if (tick.kind === "failed") return { outcome: "not_held", why: tick.why, picked: tick.text };
           if (viaSearch.choice?.kind === "pick") {
             return { outcome: "picked", picked: viaSearch.choice.text, held: viaSearch.choice.text, typed: q, why: `${viaSearch.choice.why}; selected by the portal after its own "${searchLabel}"`, via: "search" };
           }
