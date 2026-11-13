@@ -40,6 +40,7 @@ import type { ClientRecord, ProjectRecord, SubmissionPaymentRecord } from "../..
 import { getSubmissionPayment, defaultServiceFeeUsd } from "./submissionFees";
 import { feeForProject } from "./feeSchedules";
 import { officialSourceOfFeeLine } from "./feeOfficial";
+import { officialSourceWords } from "../../shared/src/officialSource";
 import { getClient } from "./clients";
 import { text } from "./json";
 import { nowIso } from "./time";
@@ -82,7 +83,7 @@ export function publishedFeeProvenance(composition: InvoiceComposition[]): strin
   if (composition.every((c) => c.tier === "verified" || c.tier === "official")) {
     const hosts = [...new Set(composition.filter((c) => c.tier === "official").map((c) => c.officialHost || "").filter(Boolean))];
     const read = composition.filter((c) => c.tier === "official").map((c) => c.sourceReadAt.slice(0, 10)).filter(Boolean).sort()[0];
-    return `from ${hosts.length ? hosts.join(" and ") : "the authority's own page"}${read ? `, read ${read}` : ""}; not checked by a person`;
+    return officialSourceWords(hosts.join(" and "), read);
   }
   const dates = composition.map((c) => c.sourceReadAt.slice(0, 10)).filter(Boolean).sort();
   return `seeded schedule, not person-verified${dates.length === composition.length ? `; source read ${dates[0]}` : ""}`;

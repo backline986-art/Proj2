@@ -13,9 +13,10 @@
 // lookup (utilityRequirements.utilityOfficialHosts). A government host needs neither.
 //
 // WHAT OFFICIAL NEVER DOES: it never replaces a person's verified amount, never decides where a
-// filing goes or whether one is sent, and never pays (rules 1, 3, 5). It is shown as "from <host>,
-// read <date>", never under a person's name.
+// filing goes or whether one is sent, and never pays (rules 1, 3, 5). It is shown as "Verified from
+// <host>, <date>" (owner, 2026-11-13; officialSourceWords), never under a person's name.
 
+import { officialSourceWords } from "../../shared/src/officialSource";
 import type { AppDb } from "./db";
 import {
   officialFeeLineSource, officialFeeResolutionSource,
@@ -51,7 +52,7 @@ export function officialSourceOfFeeResolution(db: AppDb, state: string, track: F
   });
 }
 
-/** "from <host>, read <date>": the words every screen prints for an official fee. */
+/** "Verified from <host>, <date>": the words every screen prints for an official fee. */
 export function officialFeeWords(o: OfficialFeeSource): string {
-  return `from ${o.host}${o.fetchedAt ? `, read ${o.fetchedAt.slice(0, 10)}` : ""}`;
+  return officialSourceWords(o.host, o.fetchedAt);
 }

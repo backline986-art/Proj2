@@ -2727,12 +2727,13 @@ const FEE_SOURCE_TEXT = {
 const FEE_CONFIDENCE = {
   actual: { badge: "badge-pass", label: "actual", note: "" },
   verified: { badge: "badge-pass", label: "verified", note: "" },
-  // READ ON THE AUTHORITY'S OWN OFFICIAL PAGE (rule 3's official tier): used as published. Never
-  // the word "verified": that is a person. The card names the host and the read date beside it.
+  // READ ON THE AUTHORITY'S OWN OFFICIAL PAGE (rule 3's official tier): used as published, and
+  // shown "Verified from <host>, <date>" (owner, 2026-11-13): verified by the SITE, never under a
+  // person's name ("Verified by <name>" is a person's). The card names the host and the date.
   official: {
     badge: "badge-info",
-    label: "from the authority's own page",
-    note: "Keelix read this line on the authority's own published schedule and uses it as published. No person has checked it; Confirm fee puts your name to it.",
+    label: "verified from the authority's page",
+    note: "Keelix read this line on the authority's own published schedule and uses it as published. Confirm fee adds your own name to it.",
   },
   seeded: {
     badge: "badge-warning",
@@ -2761,6 +2762,14 @@ const FEE_CONFIDENCE = {
     note: "The permit monitor read this off the portal's own record. A machine read it; no person has checked it.",
   },
 };
+
+// "Verified from <host>, <date>": the words for the official tier (owner, 2026-11-13). The same
+// shape as shared/src/officialSource.officialSourceWords (pinned by officialSourceWords.test).
+function officialSourceWords(host, fetchedAt) {
+  const h = String(host == null ? "" : host).trim();
+  const day = /^\d{4}-\d{2}-\d{2}/.test(String(fetchedAt == null ? "" : fetchedAt)) ? String(fetchedAt).slice(0, 10) : "";
+  return `Verified from ${h || "the authority's own page"}${day ? `, ${day}` : ""}`;
+}
 
 // WHICH FEE_CONFIDENCE ENTRY A LINE WEARS — the one predicate the card and the folded
 // summary both ask, so "matches the published schedule" cannot appear in one and not the other.
@@ -2979,7 +2988,7 @@ function renderFeeSheetLine(line) {
   // schedule amount). The click asks who is confirming before anything is written.
   // WHERE AN OFFICIAL AMOUNT WAS READ: the host and the date, never a person's name.
   const officialNote = line.confidence === "official" && line.officialSource && line.officialSource.host
-    ? `<p class="fee-face-official" data-fee-official style="margin:2px 0;font-size:12px">From ${esc(line.officialSource.host)}${line.officialSource.fetchedAt ? `, read ${esc(String(line.officialSource.fetchedAt).slice(0, 10))}` : ""}. Not checked by a person.</p>`
+    ? `<p class="fee-face-official" data-fee-official style="margin:2px 0;font-size:12px">${esc(officialSourceWords(line.officialSource.host, line.officialSource.fetchedAt))}. Keelix read it on the authority's own page.</p>`
     : "";
   const confirmControl = line.confirmable === true
     ? `<p class="fee-confirm" style="margin:4px 0"><button class="secondary" style="font-size:12px" data-fee-confirm="${esc(line.track)}" title="Mark the brackets and amounts on this card as verified by you — only those. Automation never changes a schedule a person has verified.">Confirm fee — I checked it against the published schedule</button></p>`
@@ -3103,7 +3112,7 @@ function renderFeeSheetPanel() {
   // and the human-checkout rule — an unknown must never read as a final number because the
   // detail is one click away. Plain text built from sheet fields, escaped.
   const foldMoney = (v) => (v == null ? "UNKNOWN" : `$${Number(v).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`);
-  const FOLD_QUALIFIER = { actual: "actual", verified: "verified", official: "from the authority's own page", seeded: "provisional", estimated: "estimate", unknown: "unknown", schedule_match: "matches published schedule", portal_read: "actual, read from portal" };
+  const FOLD_QUALIFIER = { actual: "actual", verified: "verified", official: "verified from the authority's page", seeded: "provisional", estimated: "estimate", unknown: "unknown", schedule_match: "matches published schedule", portal_read: "actual, read from portal" };
   const trackParts = sheet.lines.map((line) => {
     const name = line.track === "nem" ? "Utility" : line.role === "local_review" ? "Zoning review" : "Permit";
     const q = FOLD_QUALIFIER[feeConfidenceKey(line)] || "unknown";
