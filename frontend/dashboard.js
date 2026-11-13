@@ -11754,7 +11754,7 @@ async function loadJobDrops() {
 
 // ----- Clients & contractor licensing -----
 const CLIENT_TEXT_FIELDS = [
-  "companyName", "legalBusinessName", "dba", "contactName", "contactEmail", "phone", "billingStatus", "billingMode", "serviceFeeUsd", "serviceFeePermitUsd", "serviceFeeNemUsd", "pricingTier",
+  "companyName", "legalBusinessName", "dba", "contactName", "contactEmail", "phone", "billingStatus", "billingMode", "serviceFeeUsd", "serviceFeePermitUsd", "serviceFeeNemUsd", "pricingTier", "feeLimitUsd",
   "requestLinksAutoSend", "handoffAutoSend", "intakeTag", "intakeSenders",
   "ccbLicenseNumber", "ccbExpiration", "electricalLicenseNumber", "metroCityLicenseNumber",
   "electricalSupervisorName", "electricianLicenseNumber", "installerCertifications",
@@ -12317,7 +12317,8 @@ function renderBillingInvoices(invoices) {
     return `<div class="cred-row" style="flex-wrap:wrap;gap:6px">
       <div class="cred-row-text"><strong>${esc(inv.number)}</strong>
         <span class="badge ${esc(INVOICE_STATUS_BADGE[inv.status] || "")}">${esc(inv.status)}</span>
-        <span class="muted">${esc(inv.periodStart)} to ${esc(inv.periodEnd)} · due ${billingMoney(inv.dueTotalUsd)}${inv.dueAt ? ` by ${esc(inv.dueAt)}` : ""}${inv.paidAt ? ` · paid ${esc(inv.paidAt.slice(0, 10))}${inv.paidReference ? ` (${esc(inv.paidReference)})` : ""}` : ""}${inv.voidReason ? ` · void: ${esc(inv.voidReason)}` : ""}</span>
+        ${inv.projectId ? `<span class="badge badge-info" title="One job's fees we paid, due on receipt">Job fees${inv.lines && inv.lines[0] ? `: ${esc(inv.lines[0].projectLabel)}` : ""}</span>` : ""}
+        <span class="muted">${inv.projectId ? "due on receipt" : `${esc(inv.periodStart)} to ${esc(inv.periodEnd)}`} · due ${billingMoney(inv.dueTotalUsd)}${inv.dueAt ? ` by ${esc(inv.dueAt)}` : ""}${inv.paidAt ? ` · paid ${esc(inv.paidAt.slice(0, 10))}${inv.paidReference ? ` (${esc(inv.paidReference)})` : ""}` : ""}${inv.voidReason ? ` · void: ${esc(inv.voidReason)}` : ""}</span>
         ${inv.externalRef ? `<span class="badge badge-info" title="Sent to QuickBooks by ${esc(inv.qbPushedBy)}">QuickBooks #${esc(inv.externalRef)}${inv.qbStatus ? `: ${esc(inv.qbStatus)}` : ""}</span>` : ""}</div>
       <div class="actions" style="margin:0">
         <button type="button" class="secondary" data-inv-action="print" data-inv-id="${esc(inv.id)}"><span style="white-space:nowrap">View / print</span></button>

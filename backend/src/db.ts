@@ -3925,6 +3925,16 @@ const VERSIONED_MIGRATIONS: VersionedMigration[] = [
       addColumnIfMissing(db, "submission_payments", "credit_applied_usd", "REAL NOT NULL DEFAULT 0");
     },
   },
+  {
+    // v89 (#209, fee float; feeFloat.ts): an invoice for ONE job's fees we paid, due on receipt. project_id ''
+    // is a statement for a period (as before). The client's fee limit is a client column (fee_limit_usd,
+    // in the client column list).
+    version: 89,
+    name: "job_fee_invoices",
+    up: (db) => {
+      addColumnIfMissing(db, "client_invoices", "project_id", "TEXT NOT NULL DEFAULT ''");
+    },
+  },
 ];
 
 /** v47 was edited in place while #218 was open (Helm's review at 0116f98a): a DB that ran an earlier
@@ -4138,6 +4148,9 @@ const CLIENT_LICENSING_COLUMNS: [string, string][] = [
   ["service_fee_nem_usd", "REAL"],
   // "founding" = the founding prices and cap on the price list; anything else is the standard tier (#187).
   ["pricing_tier", "TEXT NOT NULL DEFAULT ''"],
+  // The most we carry for this client in fees we paid on its behalf and have not been paid back for
+  // (feeFloat.ts). Null = the default (FEE_FLOAT_LIMIT_USD, else $2,500).
+  ["fee_limit_usd", "REAL"],
 ];
 
 const CORRECTION_SLA_COLUMNS: [string, string][] = [
