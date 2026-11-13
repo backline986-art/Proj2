@@ -11918,11 +11918,40 @@ export class AutoLearnAdapter extends BasePortalAdapter {
         // "Search" pressed was the already-active tab; the section itself holds the search box, its
         // magnifier and the results table). Nothing changed and the section still has a required blank
         // and a typed box: the section is searched as the form.
-        const unchangedInline = !popup && !newFrame && !overlaySel && !inlineFormOpened && !!mid
-          && mid.requiredBlank.length >= sec.requiredBlank.length && mid.typedTotal > 0;
+        const pressChangedNothing = !popup && !newFrame && !overlaySel && !inlineFormOpened && !!mid
+          && mid.requiredBlank.length >= sec.requiredBlank.length;
+        // ...and that form may sit BESIDE the section block, not in it (live Tigard run 12: the section
+        // container held the heading and the tabs; the search box and the results table were siblings).
+        // Widened from the section up (≤4 levels) to the nearest container holding a VISIBLE box
+        // labelled "Search"; the section itself otherwise.
+        let inlineScopeSel = `[data-al-csec="${sec.key}"]`;
+        let searchHolder = false;
+        if (pressChangedNothing) {
+          const widened = await page.evaluate((key: string) => {
+            document.querySelectorAll("[data-al-csearch]").forEach((n) => n.removeAttribute("data-al-csearch"));
+            let node: Element | null = document.querySelector(`[data-al-csec="${key}"]`);
+            for (let up = 0; up < 5 && node && node.tagName !== "BODY"; up++, node = node.parentElement) {
+              const boxes = node.querySelectorAll("input[type=text], input[type=search], input:not([type])");
+              for (let k = 0; k < boxes.length; k++) {
+                const b = boxes[k] as HTMLElement;
+                const r = b.getBoundingClientRect();
+                const cs = getComputedStyle(b);
+                if (!(r.width > 0 && r.height > 0) || cs.visibility === "hidden" || cs.display === "none") continue;
+                const id = b.getAttribute("id");
+                const l = id ? document.querySelector(`label[for="${CSS.escape(id)}"]`) : null;
+                const lbl = [String((l && (l as HTMLElement).innerText) || ""), b.getAttribute("aria-label") || "", b.getAttribute("title") || ""].join(" ");
+                if (/\bsearch\b/i.test(lbl)) { node.setAttribute("data-al-csearch", "1"); return true; }
+              }
+            }
+            return false;
+          }, String(sec.key)).catch(() => false);
+          if (widened) { inlineScopeSel = '[data-al-csearch="1"]'; searchHolder = true; }
+        }
+        // The section is searched as the form only when a visible "Search" box was found in it or beside it.
+        const unchangedInline = pressChangedNothing && searchHolder;
         if (popup || newFrame || overlaySel || inlineFormOpened || unchangedInline) {
           const form = await this.lookupSearchForm({
-            scope: popup ? popup : newFrame ? page.frameLocator(`iframe[name="${newFrame}"], iframe[id="${newFrame}"]`) : overlaySel ? page.locator(overlaySel) : page.locator(`[data-al-csec="${sec.key}"]`),
+            scope: popup ? popup : newFrame ? page.frameLocator(`iframe[name="${newFrame}"], iframe[id="${newFrame}"]`) : overlaySel ? page.locator(overlaySel) : page.locator(inlineScopeSel).first(),
             frame: popup ? "popup" : newFrame ?? undefined,
             heading: sec.heading,
             companyName: String(identity.companyName ?? "").trim(),

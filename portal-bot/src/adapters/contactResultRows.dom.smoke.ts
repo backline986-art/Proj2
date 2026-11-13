@@ -30,6 +30,7 @@ const CO = "Quillmark Solar Co";
 const contactPage = `<!doctype html><html><head><title>Apply for Permit</title></head><body>
 <a href="#">Back to Application</a>
 <h2>Add Contact</h2>
+<div class="contact-page">
 <div class="contact-section">
   <h3>Add Contact As : Contractor</h3>
   <div class="tabs">
@@ -39,6 +40,8 @@ const contactPage = `<!doctype html><html><head><title>Apply for Permit</title><
   </div>
   <div id="manual" style="display:none"><label for="mCompany">Company Name</label><input id="mCompany" type="text"></div>
   <div style="display:none"><input id="contractorRequired" type="text" required aria-required="true"></div>
+</div>
+  <!-- As live: the search row and the results table are SIBLINGS of the section block, not inside it. -->
   <div class="search-row">
     <span>Search</span>
     <input id="input-ContactSearchBar" type="text" aria-label="Search" placeholder="Name, E-mail, or Company" required>
