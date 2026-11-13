@@ -469,20 +469,44 @@ export async function fillTypeahead(page: any, loc: any, req: TypeaheadRequest):
           ? String(await req.clickGate(control).catch((e: unknown) => `the click gate could not answer (${String((e as Error)?.message ?? e).slice(0, 80)})`) ?? "")
           : "";
         if (clickRefused) { enterNote = ` (Enter was not pressed: ${refusal.slice(0, 160)}; the box's own "${searchLabel}" was refused: ${clickRefused.slice(0, 120)})`; continue; }
-        const viaSearch = await enterAndReadSelection(page, doc, loc, site, before, deadline, () => control.click({ timeout: 3000 }));
-        if (viaSearch.said) portalSaid = viaSearch.said;
-        if (!viaSearch.pressed) { enterNote = ` (Enter was not pressed: ${refusal.slice(0, 160)}; the box's own "${searchLabel}" could not be pressed)`; continue; }
-        searchNote = ` + the box's own "${searchLabel}"`;
-        if (viaSearch.choice?.kind === "pick") {
-          return { outcome: "picked", picked: viaSearch.choice.text, held: viaSearch.choice.text, typed: t.q, why: `${viaSearch.choice.why}; selected by the portal after its own "${searchLabel}"`, via: "search" };
+        // The whole line first; if that finds nothing, THE STREET LINE ALONE (live Tigard run 6: the
+        // Esri box answered "There are no matches available." for "13125 SW Hall Blvd, Tigard, OR
+        // 97223" — its address source matches the street line, and the city/ZIP tail defeats it).
+        const searchQueries = [t.q];
+        if (loose(street) && loose(street) !== loose(t.q)) searchQueries.push(street);
+        let found = false;
+        let pressedAny = false;
+        for (let qi = 0; qi < searchQueries.length && Date.now() < deadline; qi++) {
+          const q = searchQueries[qi];
+          let beforeQ = before;
+          if (qi > 0) {
+            await clearBox(doc, loc, controlsId);
+            await markExistingPopups(doc);
+            beforeQ = await readShows(doc);
+            typed.push(q);
+            if (!(await typeInto(page, loc, q))) continue;
+          }
+          const viaSearch = await enterAndReadSelection(page, doc, loc, site, beforeQ, deadline, () => control.click({ timeout: 3000 }));
+          if (viaSearch.said) portalSaid = viaSearch.said;
+          if (!viaSearch.pressed) continue;
+          pressedAny = true;
+          searchNote = ` + the box's own "${searchLabel}"`;
+          if (viaSearch.choice?.kind === "pick") {
+            return { outcome: "picked", picked: viaSearch.choice.text, held: viaSearch.choice.text, typed: q, why: `${viaSearch.choice.why}; selected by the portal after its own "${searchLabel}"`, via: "search" };
+          }
+          if (viaSearch.choice?.kind === "ask") {
+            return { outcome: "ask", question: `${viaSearch.choice.question} (The portal selected it after its own "${searchLabel}"; check its selection before going on.)`, offered: viaSearch.choice.candidates, typed: q, why: viaSearch.choice.why };
+          }
+          // A RESULTS LIST: rows the search opened, read and picked like a suggestion list. The
+          // selection read above already waited for the page; this is one short settle, not a second
+          // full wait (the whole fill's budget is shared).
+          const listed = await settledSuggestions(doc, controlsId, Math.min(waitMs, 1500), deadline);
+          if (listed.length) { rows = listed; usedQuery = q; found = true; break; }
         }
-        if (viaSearch.choice?.kind === "ask") {
-          return { outcome: "ask", question: `${viaSearch.choice.question} (The portal selected it after its own "${searchLabel}"; check its selection before going on.)`, offered: viaSearch.choice.candidates, typed: t.q, why: viaSearch.choice.why };
-        }
-        // A RESULTS LIST: rows the search opened, read and picked like a suggestion list.
-        const listed = await settledSuggestions(doc, controlsId, waitMs, deadline);
-        if (listed.length) { rows = listed; usedQuery = t.q; break; }
-        enterNote = ` (Enter was not pressed: ${refusal.slice(0, 160)}; the box's own "${searchLabel}" brought nothing)`;
+        if (found) break;
+        enterNote = pressedAny
+          ? ` (Enter was not pressed: ${refusal.slice(0, 160)}; the box's own "${searchLabel}" brought nothing)`
+          : ` (Enter was not pressed: ${refusal.slice(0, 160)}; the box's own "${searchLabel}" could not be pressed)`;
         continue;
       }
       const sel = await enterAndReadSelection(page, doc, loc, site, before, deadline);

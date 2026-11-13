@@ -434,7 +434,8 @@ var R = ${JSON.stringify(results)};
 document.getElementById('mag').onclick = function () {
   window.__searched++;
   var ul = document.getElementById('sugg'); ul.innerHTML = '';
-  if (R !== 'one') return;
+  // Like live Tigard's address source: the whole "street, city, ST zip" line finds nothing; the street line does.
+  if (R !== 'one' || document.getElementById('addr').value.indexOf(',') >= 0) return;
   ['4821 W QUILLFEATHER DR, MARROWVALE, UT 84999', '4823 W QUILLFEATHER DR, MARROWVALE, UT 84999'].forEach(function (t) {
     var li = document.createElement('li'); li.setAttribute('role', 'option'); li.textContent = t;
     li.onclick = function () { document.getElementById('addr').value = t; document.getElementById('picked').textContent = 'PICKED ' + t; ul.innerHTML = ''; };
