@@ -11829,7 +11829,7 @@ export class AutoLearnAdapter extends BasePortalAdapter {
       // The in-document overlay the press opened, if any: the newly visible one with the most controls.
       const newOverlay = (await visibleOverlays()).filter((o) => !overlaysBefore.includes(o.key) && o.controls > 0).sort((a, b) => b.controls - a.controls)[0]?.key ?? null;
       const overlaySel = newOverlay ? `[data-al-overlay="${newOverlay}"]` : "";
-      let searchVerdict: "picked" | "empty" | "unusable" | null = null;
+      let searchVerdict: "picked" | "empty" | "unusable" | "ambiguous" | null = null;
       let searchedWords = ""; // what the search form was asked, for the named stop
       /** Close an in-document overlay the pass is leaving: its own Cancel / Close / × first, then Escape. */
       const closeOverlay = async (): Promise<void> => {
@@ -11914,12 +11914,19 @@ export class AutoLearnAdapter extends BasePortalAdapter {
         const midSections = await readSections();
         const mid = midSections?.find((s) => s.key === sec.key || s.heading === sec.heading) ?? null;
         const inlineFormOpened = !!mid && mid.typedTotal > sec.typedTotal && !!mid.lookups.some((l) => l.lookupKey !== btn.lookupKey || l.label !== btn.label);
-        if (popup || newFrame || overlaySel || inlineFormOpened) {
+        // #221 — THE SEARCH FORM WAS ALREADY THE SECTION (live Tigard "Add Contact As: Contractor": the
+        // "Search" pressed was the already-active tab; the section itself holds the search box, its
+        // magnifier and the results table). Nothing changed and the section still has a required blank
+        // and a typed box: the section is searched as the form.
+        const unchangedInline = !popup && !newFrame && !overlaySel && !inlineFormOpened && !!mid
+          && mid.requiredBlank.length >= sec.requiredBlank.length && mid.typedTotal > 0;
+        if (popup || newFrame || overlaySel || inlineFormOpened || unchangedInline) {
           const form = await this.lookupSearchForm({
             scope: popup ? popup : newFrame ? page.frameLocator(`iframe[name="${newFrame}"], iframe[id="${newFrame}"]`) : overlaySel ? page.locator(overlaySel) : page.locator(`[data-al-csec="${sec.key}"]`),
             frame: popup ? "popup" : newFrame ?? undefined,
             heading: sec.heading,
             companyName: String(identity.companyName ?? "").trim(),
+            companyStreet: String(identity.street ?? "").trim(),
             discipline: this.siteIdentity?.isElectrical === true ? "electrical" : this.siteIdentity?.isElectrical === false ? "structural" : "",
             steps: ctx.steps,
             shot: ctx.shot ? (l: string) => ctx.shot!(`p${String(ctx.pageCount).padStart(3, "0")}-lookup-${l}`) : undefined,
@@ -11954,7 +11961,8 @@ export class AutoLearnAdapter extends BasePortalAdapter {
         this.debug?.event({ type: "lookup_button_populated", page: ctx.pageCount, section: sec.heading.slice(0, 40), label: btn.label.slice(0, 40), populated: populated.slice(0, 8).map((l) => l.slice(0, 60)) });
       } else {
         ctx.steps.length = stepMark; // a press that changed nothing is not a step to replay
-        const why = searchVerdict === "empty" ? `its "${btn.label}" search found no record for this client${searchedWords ? ` (${searchedWords})` : ""}`
+        const why = searchVerdict === "ambiguous" ? `its "${btn.label}" search listed this client more than once and the client record's business address did not single one out${searchedWords ? ` (${searchedWords})` : ""} — pick the right record by hand, or correct the client's business address`
+          : searchVerdict === "empty" ? `its "${btn.label}" search found no record for this client${searchedWords ? ` (${searchedWords})` : ""}`
           : searchVerdict === "unusable" ? `its "${btn.label}" search asks for something this client record does not carry`
           : reloaded ? `its "${btn.label}" reloaded the page; no section changed`
           : `its "${btn.label}" changed nothing on the page`;
@@ -12159,6 +12167,9 @@ export class AutoLearnAdapter extends BasePortalAdapter {
     frame?: string;
     heading: string;
     companyName: string;
+    /** #221 — the client's business STREET (company identity): when several result rows are this
+     *  client (Tigard lists two TML INTERNATIONAL LLC records), the row whose address is this street. */
+    companyStreet?: string;
     /** This learn's discipline (siteIdentity.isElectrical): the TYPE select of a licence register
      *  (Accela's "License Type") is set to the option naming it before the name search — live
      *  Meridian run 8 searched "Look Up License" with the type at --Select-- and got nothing. */
@@ -12166,13 +12177,13 @@ export class AutoLearnAdapter extends BasePortalAdapter {
     steps: RecipeStep[];
     /** The learn's bundle shot, taken once the results have been read (hit or miss). */
     shot?: (label: string) => Promise<void>;
-  }): Promise<{ verdict: "picked" | "empty" | "unusable"; searched: string }> {
+  }): Promise<{ verdict: "picked" | "empty" | "unusable" | "ambiguous"; searched: string }> {
     const page = this.page;
     const inFrame: Partial<RecipeSelector> = opts.frame ? { frame: opts.frame } : {};
     const mark = opts.steps.length;
     const { scope } = opts;
     let searched = "";
-    const out = (verdict: "picked" | "empty" | "unusable") => ({ verdict, searched });
+    const out = (verdict: "picked" | "empty" | "unusable" | "ambiguous") => ({ verdict, searched });
     if (!page) return out("unusable");
     try {
       await sleep(600);
@@ -12209,12 +12220,25 @@ export class AutoLearnAdapter extends BasePortalAdapter {
       // 2) The BUSINESS name box, never a person's: Accela's licence register lists First / Middle /
       //    Last before "Name of Business", so a bare /name/ took "First". Business words first; a bare
       //    "Name" only when no business-worded box exists and it is not a person's part.
-      let nameBox = scope.getByLabel(/business|company|organi[sz]ation|contractor|licensee/i).first();
+      // VISIBLE boxes only (#221, live Tigard: a hidden "Company Name" in the inactive "Enter Manually"
+      // tab was found first and could not be filled).
+      let nameBox = scope.getByLabel(/business|company|organi[sz]ation|contractor|licensee/i).filter({ visible: true }).first();
       if (!(await nameBox.count().catch(() => 0))) {
-        nameBox = scope.getByLabel(/\bname\b/i).first();
+        nameBox = scope.getByLabel(/\bname\b/i).filter({ visible: true }).first();
         if (await nameBox.count().catch(() => 0)) {
           const lbl = String(await nameBox.evaluate((el: Element) => { const id = el.getAttribute("id"); const l = id && document.querySelector(`label[for="${CSS.escape(id)}"]`); return String((l && (l as HTMLElement).innerText) || el.getAttribute("aria-label") || ""); }).catch(() => "") ?? "");
           if (/\b(first|middle|last|given|family|contact|your)\b/i.test(lbl)) { opts.steps.length = mark; return out("unusable"); }
+        }
+      }
+      // #221 — A PLAIN "SEARCH" BOX (Tyler EnerGov "Add Contact": the only text box is labelled
+      // "Search") when no business- or name-worded box exists, and it is the scope's ONE text box.
+      if (!(await nameBox.count().catch(() => 0))) {
+        const lone = scope.locator("input[type='text']:visible, input[type='search']:visible, input:not([type]):visible");
+        if ((await lone.count().catch(() => 0)) === 1) {
+          // The box's own LABEL names it a search; its placeholder may list what it searches (Tigard's
+          // reads "Name, E-mail, or Company"), so only the label is held to the exclusions.
+          const lbl = String(await lone.first().evaluate((el: Element) => { const id = el.getAttribute("id"); const l = id && document.querySelector(`label[for="${CSS.escape(id)}"]`); return [String((l && (l as HTMLElement).innerText) || ""), el.getAttribute("aria-label") || "", el.getAttribute("title") || ""].join(" "); }).catch(() => "") ?? "");
+          if (/\bsearch\b/i.test(lbl) && !/\b(first|middle|last|given|family|address|street|parcel|e-?mail|phone)\b/i.test(lbl)) nameBox = lone.first();
         }
       }
       if (!(await nameBox.count().catch(() => 0))) { opts.steps.length = mark; return out("unusable"); }
@@ -12229,10 +12253,45 @@ export class AutoLearnAdapter extends BasePortalAdapter {
         if (!(r.width > 0 && r.height > 0)) return "";
         return String(el.tagName === "INPUT" ? (el as HTMLInputElement).value : ((el as HTMLElement).innerText || el.textContent || el.getAttribute("title") || "")).replace(/\s+/g, " ").trim();
       })).catch(() => [] as string[]);
-      const si = labels.findIndex((label) => !!label && /search|look\s?-?up|find/i.test(label) && isLookupButtonLabel(label) && !isPayFee(label) && !SUBMIT_INTENT.test(label));
-      if (si < 0) { opts.steps.length = mark; return out("unusable"); }
-      const searchBtn = controls.nth(si);
-      const searchLabel = labels[si];
+      // #221 — THE NAME BOX'S OWN SEARCH CONTROL FIRST (live Tigard "Add Contact As: Contractor": a
+      // "Search" TAB — already the active one — sits above the box; the box's own magnifier, wordless,
+      // sits beside it). Nearest ancestor level (≤3) holding exactly one search-worded or magnifier
+      // control; a tab (role=tab, aria-selected / aria-current, an active / selected class) never is.
+      const owned = String(await nameBox.evaluate((box: Element) => {
+        document.querySelectorAll("[data-al-lsb]").forEach((n) => n.removeAttribute("data-al-lsb"));
+        let node: Element | null = box.parentElement;
+        for (let level = 0; level < 3 && node && node !== document.body; level++, node = node.parentElement) {
+          const found = node.querySelectorAll("button, input[type=button], input[type=submit], [role=button], a");
+          const fit: HTMLElement[] = [];
+          const names: string[] = [];
+          for (let i = 0; i < found.length; i++) {
+            const c = found[i] as HTMLElement;
+            const r = c.getBoundingClientRect();
+            if (!(r.width > 0 && r.height > 0)) continue;
+            const cls = String(c.className || "");
+            if (c.getAttribute("role") === "tab" || c.getAttribute("aria-selected") === "true" || c.getAttribute("aria-current") || /(^|\s)(active|selected|is-active)(\s|$)/i.test(cls)) continue;
+            const text = String(c.innerText || (c as HTMLInputElement).value || c.getAttribute("aria-label") || c.getAttribute("title") || "").replace(/\s+/g, " ").trim();
+            let ok = !!text && text.length <= 30 && /^(search|find|go|look\s?-?up)$/i.test(text);
+            if (!text) {
+              const drawn = [cls, c.getAttribute("data-icon") || ""];
+              const kids = c.querySelectorAll("i, span, svg, img");
+              for (let k = 0; k < kids.length && k < 6; k++) drawn.push(String((kids[k] as Element).getAttribute("class") || ""), (kids[k] as Element).getAttribute("alt") || "");
+              ok = /search|magnif/i.test(drawn.join(" "));
+            }
+            if (!ok) continue;
+            fit.push(c);
+            names.push(text || "search");
+          }
+          if (fit.length > 1) return "";
+          if (fit.length === 1) { fit[0].setAttribute("data-al-lsb", "1"); return names[0]; }
+        }
+        return "";
+      }).catch(() => "") ?? "");
+      const tabFlags: boolean[] = await controls.evaluateAll((els: Element[]) => els.map((el) => el.getAttribute("role") === "tab" || el.getAttribute("aria-selected") === "true" || !!el.getAttribute("aria-current") || /(^|\s)(active|selected|is-active)(\s|$)/i.test(String((el as HTMLElement).className || "")))).catch(() => [] as boolean[]);
+      const si = owned ? -1 : labels.findIndex((label, i) => !!label && !tabFlags[i] && /search|look\s?-?up|find/i.test(label) && isLookupButtonLabel(label) && !isPayFee(label) && !SUBMIT_INTENT.test(label));
+      if (!owned && si < 0) { opts.steps.length = mark; return out("unusable"); }
+      const searchBtn = owned ? scope.locator('[data-al-lsb="1"]').first() : controls.nth(si);
+      const searchLabel = owned || labels[si];
       // At most TWO searches per press: a second only when no type option fit (the register may
       // answer a bare name on a retry); with the type set, one empty answer is the answer.
       const tries = typeSelectPresent && !typeChosen ? 2 : 1;
@@ -12266,6 +12325,11 @@ export class AutoLearnAdapter extends BasePortalAdapter {
       };
       for (let attempt = 0; attempt < tries; attempt++) {
         const before = new Set(await rowTexts());
+        // Rows on screen before the press are marked: a row the press RE-RENDERED is a result even
+        // when its text is unchanged (the same query run twice), a row it left alone is not.
+        await scope.locator(rowSel).evaluateAll((els: Element[]) => els.forEach((e) => e.setAttribute("data-al-oldrow", "1"))).catch(() => null);
+        // ...and every row in the name box's own document, for the wider result scope below.
+        await nameBox.evaluate((box: Element) => { (box.ownerDocument || document).querySelectorAll("tr").forEach((e) => e.setAttribute("data-al-oldrow", "1")); }).catch(() => null);
         await searchBtn.scrollIntoViewIfNeeded?.({ timeout: 3000 }).catch(() => null);
         if (!(await searchBtn.click({ timeout: 8000 }).then(() => true).catch(() => false))) { opts.steps.length = mark; return out("unusable"); }
         if (attempt === 0) opts.steps.push({ action: "click", phase: "fill", selector: { role: "button", name: searchLabel, exact: true, fallbacks: [{ role: "link", name: searchLabel, exact: true, ...inFrame }, { css: `a[title="${searchLabel}"], input[value="${searchLabel}"]`, ...inFrame }], ...inFrame }, note: `lookup(${opts.heading.slice(0, 40)}): ${searchLabel}` });
@@ -12276,27 +12340,83 @@ export class AutoLearnAdapter extends BasePortalAdapter {
         let freshSample: string[] = [];
         for (let i = 0; i < 15; i++) {
           await sleep(800);
-          const body = String((await scope.locator("body").innerText().catch(async () => String((await scope.innerText?.().catch(() => "")) ?? ""))) ?? "");
-          const rows = scope.locator(rowSel).filter({ has: scope.locator("a, button, input[type='radio']") });
+          // Bounded: a SECTION scope (#221, the search form inline in a section) has no <body> inside it,
+          // and an unbounded read waited the context's whole default timeout on every poll.
+          const body = (await scope.locator("body").count().catch(() => 0))
+            ? String((await scope.locator("body").innerText({ timeout: 2000 }).catch(() => "")) ?? "")
+            : String((await scope.innerText?.({ timeout: 2000 }).catch(() => "")) ?? "");
+          // #221 — THE RESULTS MAY SIT OUTSIDE THE SCOPE handed in (live Tigard: the section container
+          // holds the search box, the results table is further out). With no result rows in the scope,
+          // the nearest ancestor of the name box (≤6 levels) that holds rows with controls.
+          let rowScope = scope;
+          if (!(await scope.locator(rowSel).filter({ has: (page ?? scope).locator("a, button, input[type='radio']") }).count().catch(() => 0)) && !opts.frame) {
+            const held = await nameBox.evaluate((box: Element) => {
+              (box.ownerDocument || document).querySelectorAll("[data-al-lrows]").forEach((n) => n.removeAttribute("data-al-lrows"));
+              let node: Element | null = box.parentElement;
+              for (let up = 0; up < 6 && node && node.tagName !== "BODY"; up++, node = node.parentElement) {
+                const trs = node.querySelectorAll("tr");
+                for (let k = 0; k < trs.length; k++) if (trs[k].querySelector("a, button, input[type=radio]")) { node.setAttribute("data-al-lrows", "1"); return true; }
+              }
+              return false;
+            }).catch(() => false);
+            if (held && page) rowScope = page.locator('[data-al-lrows="1"]').first();
+          }
+          // The row's "has a control" test is a PAGE-rooted selector: an inner locator built from a section
+          // scope carries the section's own selector and can never match inside a row.
+          const rows = rowScope.locator(rowSel).filter({ has: (page ?? rowScope).locator("a, button, input[type='radio']") });
           const rn = await rows.count().catch(() => 0);
           let fresh = 0;
           const sample: string[] = [];
+          // #221 — every row that IS this client, then ONE chosen: the row's own control is its
+          // Select / Add link or button or its radio (live Tigard rows carry their own "Add").
+          const ROW_PICK = /^(select|add|choose|use)$/i;
+          type Cand = { row: any; text: string; sel: any }; // eslint-disable-line @typescript-eslint/no-explicit-any
+          const cands: Cand[] = [];
+          const staleOurs: Cand[] = [];
           for (let r = 0; r < Math.min(rn, 60); r++) {
             const row = rows.nth(r);
             const text = String((await row.innerText().catch(() => "")) ?? "").replace(/\s+/g, " ").trim();
-            if (!text || text.length > 400 || before.has(text)) continue;
-            fresh++;
-            if (sample.length < 3) sample.push(text.slice(0, 70));
+            if (!text || text.length > 400) continue;
+            const rerendered = !(await row.getAttribute("data-al-oldrow").catch(() => null));
+            const isFresh = rerendered || !before.has(text);
+            if (isFresh) { fresh++; if (sample.length < 3) sample.push(text.slice(0, 70)); }
             // The row's own name cells, not the whole text: a licence number or address never matches.
             const cells: string[] = await row.locator("td").allInnerTexts().catch(() => [] as string[]);
             const names = (cells.length ? cells : [text]).map((c) => c.replace(/\s+/g, " ").trim()).filter(Boolean);
             if (!names.some(isOurs)) continue;
-            const sel = row.getByRole("link", { name: /^select$/i }).or(row.getByRole("button", { name: /^select$/i })).or(row.locator("input[type='radio']")).first();
+            const sel = row.getByRole("link", { name: ROW_PICK }).or(row.getByRole("button", { name: ROW_PICK })).or(row.locator("input[type='radio']")).first();
             if (!(await sel.count().catch(() => 0))) continue;
+            (isFresh ? cands : staleOurs).push({ row, text, sel });
+          }
+          // The same query run again may leave its rows untouched: they ARE this search's answer when
+          // the name box holds exactly this client's name (after the poll has waited for a re-render).
+          if (!cands.length && !fresh && staleOurs.length && i >= 3) {
+            const held = String(await nameBox.inputValue().catch(() => "") ?? "").trim().toLowerCase();
+            if (held === opts.companyName.trim().toLowerCase()) cands.push(...staleOurs);
+          }
+          let pickedCand: Cand | null = null;
+          let byStreet = "";
+          if (cands.length === 1) pickedCand = cands[0];
+          else if (cands.length > 1) {
+            // SEVERAL ROWS ARE THIS CLIENT: the one at the client record's business street (house number
+            // and the street's first word), else a named stop — never the first row.
+            const m = String(opts.companyStreet ?? "").trim().match(/^(\d+[A-Za-z]?)\s+(?:(?:N|S|E|W|NE|NW|SE|SW|North|South|East|West)\.?\s+)?([A-Za-z0-9]+)/i);
+            const atStreet = m ? cands.filter((c) => new RegExp(`(^|\\D)${m[1]}\\b`, "i").test(c.text) && new RegExp(`\\b${m[2]}\\b`, "i").test(c.text)) : [];
+            if (atStreet.length === 1) { pickedCand = atStreet[0]; byStreet = `${m![1]} ${m![2]}`; }
+            else {
+              this.debug?.event({ type: "lookup_search_rows", section: opts.heading.slice(0, 40), fresh, ours: cands.length, picked: false, ambiguous: true, streetKnown: !!m });
+              await opts.shot?.(`search-results-ambiguous`).catch?.(() => null);
+              opts.steps.length = mark;
+              return out("ambiguous");
+            }
+          }
+          if (pickedCand) {
+            const { sel } = pickedCand;
             const isRadio = await sel.evaluate((el: Element) => (el as HTMLInputElement).type === "radio" || (el as HTMLInputElement).type === "checkbox").catch(() => false);
             const ok = await sel.click({ timeout: 8000 }).then(() => true).catch(() => false);
             if (!ok) continue;
-            opts.steps.push({ action: "click", phase: "fill", selector: { css: `tr:has-text("${opts.companyName}") a:has-text("Select"), tr:has-text("${opts.companyName}") input[type='radio']`, ...inFrame }, note: `lookup(${opts.heading.slice(0, 40)}): select this client's record` });
+            const rowSelCss = byStreet ? `tr:has-text("${opts.companyName}"):has-text("${byStreet.split(" ")[0]}")` : `tr:has-text("${opts.companyName}")`;
+            opts.steps.push({ action: "click", phase: "fill", selector: { css: `${rowSelCss} a:has-text("Select"), ${rowSelCss} button:has-text("Add"), ${rowSelCss} a:has-text("Add"), ${rowSelCss} input[type='radio']`, ...inFrame }, note: `lookup(${opts.heading.slice(0, 40)}): select this client's record${byStreet ? ` (the row at ${byStreet})` : ""}` });
             // A ticked radio is not a pick until the list's own Select is pressed.
             if (isRadio) await pressListOk();
             await page.waitForLoadState?.("networkidle", { timeout: 15000 }).catch(() => null);
