@@ -102,6 +102,7 @@ import {
   matchingForms,
 } from "./ahjForms";
 import { acquireFromBytes, ensureAhjFormTemplate, formFindAuditDetails, templateProvenance } from "./ahjFormAuto";
+import { officialFormDocument, officialFormWords } from "./officialFormDocument";
 import { createSignature, deleteSignature, getSignatureImage, listSignatures, setDefaultSignature } from "./signatures";
 import { addAuditLog } from "./audit";
 import { cancelPortalRun } from "./stageCancel";
@@ -3746,11 +3747,23 @@ app.get("/api/ahj-templates", (req, res) => {
     // The map the fill USES (ahjForms.effectiveStoredFieldMap): a built-in map for an exact blank
     // shows as such, never the stale copy stamped into the row.
     const effective = effectiveStoredFieldMap(r as { ahj_name: string; state: string; field_map: string; source_url?: string });
+    // WHOSE DOCUMENT THE BLANK IS (official-source slice 5): read-time grade, the blob hashed against the
+    // stamp taken at download. The mapping's own standing (fieldMap.verified) is untouched by it.
+    const row = r as { id: string; ahj_name: string; state: string; field_map: string; source_url?: string; retrieved_at?: string };
+    const stamped = parseJson<{ sourceHash?: string }>(String(row.field_map || "{}"), {});
+    const blob = row.source_url ? db.get<{ pdf_blob: Buffer | null }>("SELECT pdf_blob FROM ahj_form_templates WHERE id = ?", [row.id])?.pdf_blob : null;
+    const officialDocument = officialFormDocument(db, { state: row.state, ahj: row.ahj_name }, {
+      sourceUrl: String(row.source_url || ""), retrievedAt: String(row.retrieved_at || ""), sourceHash: String(stamped.sourceHash || ""),
+      bytes: blob ? new Uint8Array(blob) : null,
+    });
+    const mapping = effective.map.verified === true ? "person" : effective.builtInMap ? "built_in" : "unchecked";
     return {
       ...r,
       fieldMap: effective.map,
       builtInMap: effective.builtInMap,
       provenance: templateProvenance(r as Record<string, unknown>),
+      officialDocument,
+      officialDocumentWords: officialFormWords(officialDocument, mapping),
     };
   }));
 });
