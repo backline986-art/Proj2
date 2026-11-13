@@ -378,7 +378,7 @@ const DESIGN_DOC_LABELS: Record<string, string> = {
   sld: "Single-line diagram", site_plan: "Site plan", labels: "Labels sheet",
   module_spec: "Module spec sheet", inverter_spec: "Inverter spec sheet",
 };
-function designDocumentTexts(db: AppDb, projectId: string): DesignTextSource[] {
+export function designDocumentTexts(db: AppDb, projectId: string): DesignTextSource[] {
   const out: DesignTextSource[] = [];
   const seen = new Set<string>();
   for (const row of db.query<Row>(

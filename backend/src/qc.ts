@@ -979,6 +979,11 @@ export function runQcForProject(db: AppDb, projectId: string, options: QcRunOpti
         // only, cached by address hash). QC is a write path; the gate only reads the cache.
         const { ensureParcelJurisdictionChecked } = await import("./parcelJurisdiction");
         await ensureParcelJurisdictionChecked(db, projectId);
+        // RAPID SHUTDOWN FROM THE MAKER'S OWN SHEET (#220): a microinverter job whose package does not
+        // say its equipment is listed gets the maker's datasheet attached (kept once per model), or
+        // one lookup queued for it.
+        const { ensureMakerSpecSheetForProject } = await import("./makerSpecSheets");
+        await ensureMakerSpecSheetForProject(db, projectId);
       }
     })().catch(() => null));
   } catch (err) {
