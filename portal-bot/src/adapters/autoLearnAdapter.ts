@@ -4425,11 +4425,22 @@ export class AutoLearnAdapter extends BasePortalAdapter {
       if (converted) {
         this.debug?.event({ type: "image_to_pdf", docType: resolved.docType, accept: (slot.accept || "").slice(0, 60) });
       }
+      // ONE FILE, TWO NAMED SLOTS ON ONE PAGE (#224, live City of Tigard): combined mode sends the plan
+      // set to "Electrical Line Diagram Plans" AND to the required "Plan Set", and the portal refused
+      // the second as "File already exists". The same bytes go to the later slot under a name that
+      // carries the slot's own label, so no portal reads it as a duplicate.
+      const sameFileEarlier = [...this.attachedKeys].some((k) => k.startsWith(`${pathKey}::`) && k.endsWith(`::${resolved.file}`) && k !== attachKey);
+      const slotTag = String(slot.heading || slot.label || "").replace(/\s+/g, " ").split(/\b(?:add\s+attachment|attachment|is\s+required|required|supported)\b/i)[0].replace(/[^A-Za-z0-9 ._-]+/g, "").trim().slice(0, 40);
+      const distinctName = (name: string): string => {
+        if (!sameFileEarlier || !slotTag) return name;
+        const ext = path.extname(name);
+        return `${name.slice(0, name.length - ext.length)} - ${slotTag}${ext}`;
+      };
       const uploadPayload = (() => {
         const base = path.basename(resolved.file);
         const clean = base.replace(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}-/i, "");
         if (converted) {
-          return { name: pdfNameFor(clean || base), mimeType: "application/pdf", buffer: converted.buf };
+          return { name: distinctName(pdfNameFor(clean || base)), mimeType: "application/pdf", buffer: converted.buf };
         }
         try {
           const buffer = fs.readFileSync(resolved.file);
@@ -4439,7 +4450,7 @@ export class AutoLearnAdapter extends BasePortalAdapter {
             : ext === ".jpg" || ext === ".jpeg" ? "image/jpeg"
             : ext === ".zip" ? "application/zip"
             : "application/octet-stream";
-          return { name: clean || base, mimeType, buffer };
+          return { name: distinctName(clean || base), mimeType, buffer };
         } catch {
           return null; // unreadable — fall back to the path (Playwright reads it itself)
         }
