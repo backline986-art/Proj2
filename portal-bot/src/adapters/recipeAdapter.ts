@@ -546,6 +546,16 @@ export class ReplayGuardRefusal extends Error {
   }
 }
 
+/** #228 — A CLICK WHOSE ONLY MATCH IS ANOTHER STEP'S RECORDED CONTROL, while its own never rendered.
+ *  Not clicked; the step fails named. Never healed: the heal re-anchors by the step's words and would
+ *  land on the very namesake this refused, then patch the recipe with it. */
+export class NamesakeClickStop extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "NamesakeClickStop";
+  }
+}
+
 /** THE APPROVED FINAL SUBMIT ENDED THE RUN — a pause for a person (a CAPTCHA/MFA challenge, a fee
  *  the portal wants paid) or a verdict (the portal refused it, or said nothing a person can trust).
  *  Typed so the step loop returns AT ONCE: never retried (the approved click is at most once, and a
@@ -841,6 +851,123 @@ function recordedControlCss(step: RecipeStep): string {
   const id = String(step.fingerprint?.id ?? "").trim();
   return id ? `[id="${id.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"]` : "";
 }
+
+/** The element id an id css names (`#x` or `[id="x"]`, the two shapes the learner writes), else "". */
+function idOfCss(css: unknown): string {
+  const c = String(css ?? "").trim();
+  const hash = /^#([A-Za-z_][\w:.-]*)$/.exec(c);
+  if (hash) return hash[1];
+  const attr = /^\[id="((?:[^"\\]|\\.)+)"\]$/.exec(c);
+  return attr ? attr[1].replace(/\\(.)/g, "$1") : "";
+}
+
+/** Every element id a step RECORDED for its control (#228): its selector's and each fallback's id
+ *  css, and its fingerprint id. Several are allowed — a heal keeps the original selector as a
+ *  fallback — and all of them are this step's own. */
+function recordedIdsOf(sel: RecipeSelector | undefined, step?: RecipeStep | null): string[] {
+  const ids = new Set<string>();
+  for (const s of sel ? [sel, ...(sel.fallbacks ?? [])] : []) {
+    const id = idOfCss(s?.css);
+    if (id) ids.add(id);
+  }
+  const fp = String(step?.fingerprint?.id ?? "").trim();
+  if (fp) ids.add(fp);
+  return [...ids];
+}
+
+/** The WORDS a step recorded its control by (#228): the first role-name / text / label /
+ *  placeholder across its selector levels, and whether that level matched them exactly. */
+function recordedWordsOf(sel: RecipeSelector): { text: string; exact: boolean } {
+  for (const s of [sel, ...(sel.fallbacks ?? [])]) {
+    const text = String(s?.name || s?.text || s?.label || s?.placeholder || "").replace(/\s+/g, " ").trim();
+    if (text) return { text, exact: s.exact === true };
+  }
+  return { text: "", exact: false };
+}
+
+/** The attribute the recorded-identity check puts on the control it chose over a namesake (#228). */
+const RECORDED_ID_HIT_ATTR = "data-rc-recorded-id";
+/** How long a click whose only match is another step's recorded control waits for its OWN recorded
+ *  control to render (#228). Tigard's record-type button renders ~116 ms after Search. */
+const NAMESAKE_WAIT_MS = 3000;
+
+/**
+ * #228 — DOES THE CONTROL A STEP RECORDED BY ID ANSWER TO IT BETTER THAN WHAT ITS SELECTOR MATCHED?
+ *
+ * Runs ON the element a selector level picked (so in that element's own document / frame), and reads,
+ * in one round trip: whether the pick IS one of the step's recorded ids; else the first VISIBLE,
+ * ENABLED element carrying a recorded id that also answers to the step's recorded WORDS (tagged, so
+ * the caller can hand it back to Playwright); and, for a click, whether the pick is the control an
+ * EARLIER step recorded (its id, or that step's css primary) — the namesake signal.
+ *
+ * "Answers to the words": the recorded role-name / text / label equals (exact level) or is contained
+ * in (otherwise) one of the element's own names — aria-label, aria-labelledby, its <label>, title,
+ * placeholder, a button-input's value, or the visible text of a non-form element (a <select>'s text
+ * is its option list, which says nothing about what the control is). Whitespace- and case-folded.
+ * Visibility is isTrulyVisible's own test, so the gate and the report answer the same question.
+ *
+ * Module-level and free of nested function declarations: esbuild's keepNames would wrap them as
+ * __name(…), which a page without the shim throws on — and a swallowed throw reads as "no match".
+ */
+const recordedIdentityInPage = (el: Element, a: {
+  own: string[]; words: string; exact: boolean; tag: string; row: number;
+  earlierIds: Array<{ id: string; step: number }>; earlierCss: Array<{ css: string; step: number }>;
+}) => {
+  for (const t of Array.from(document.querySelectorAll(`[${a.tag}]`))) t.removeAttribute(a.tag);
+  const pickId = el.getAttribute("id") || "";
+  if (pickId && a.own.indexOf(pickId) >= 0) {
+    return { pickId, own: true, hit: "", hitName: "", ownSeen: 0, ownShown: 0, ownOther: 0, namesake: null as null | { step: number; how: string } };
+  }
+  const want = a.words.replace(/\s+/g, " ").trim().toLowerCase();
+  let hit = "";
+  let hitName = "";
+  let ownSeen = 0;
+  let ownShown = 0;
+  let ownOther = 0;
+  for (const id of a.own) {
+    if (hit) break;
+    for (const c of Array.from(document.querySelectorAll(`[id="${CSS.escape(id)}"]`))) {
+      if (c === el) continue;
+      if (a.row > 0 && !c.closest(`[data-al-arrayrow="${a.row}"]`)) continue;
+      ownSeen++;
+      const r = c.getBoundingClientRect();
+      const cs = getComputedStyle(c as HTMLElement);
+      if (!(r.width > 2 && r.height > 2 && cs.visibility !== "hidden" && cs.display !== "none" && Number(cs.opacity) !== 0)) continue;
+      ownShown++;
+      const tag = (c.tagName || "").toLowerCase();
+      const formControl = tag === "input" || tag === "select" || tag === "textarea";
+      const names: string[] = [c.getAttribute("aria-label") || "", c.getAttribute("title") || "", c.getAttribute("placeholder") || ""];
+      for (const ref of (c.getAttribute("aria-labelledby") || "").split(/\s+/).filter(Boolean)) names.push(document.getElementById(ref)?.textContent || "");
+      for (const l of Array.from((c as HTMLInputElement).labels ?? [])) names.push((l as HTMLElement).innerText || l.textContent || "");
+      if (tag === "input" && /^(button|submit|reset)$/i.test((c as HTMLInputElement).type || "")) names.push((c as HTMLInputElement).value || "");
+      if (!formControl) names.push((c as HTMLElement).innerText || c.textContent || "");
+      let answers = false;
+      for (const n of names) {
+        const norm = n.replace(/\s+/g, " ").trim().toLowerCase();
+        if (want && norm && (a.exact ? norm === want : norm.includes(want))) { answers = true; hitName = n.replace(/\s+/g, " ").trim(); break; }
+      }
+      if (!answers) { ownOther++; continue; }
+      let disabled = false;
+      try { disabled = c.matches(":disabled"); } catch { /* not a form-associated element */ }
+      if (disabled || c.closest("[aria-disabled='true']")) continue;
+      c.setAttribute(a.tag, "1");
+      hit = id;
+      break;
+    }
+  }
+  let namesake: null | { step: number; how: string } = null;
+  if (!hit) {
+    for (const e of a.earlierIds) if (pickId && e.id === pickId) { namesake = { step: e.step, how: `#${e.id}` }; break; }
+    if (!namesake) {
+      for (const e of a.earlierCss) {
+        let m = false;
+        try { m = el.matches(e.css); } catch { /* a Playwright-only selector — cannot be asked here */ }
+        if (m) { namesake = { step: e.step, how: "css" }; break; }
+      }
+    }
+  }
+  return { pickId, own: false, hit, hitName: hit ? hitName : "", ownSeen, ownShown, ownOther, namesake };
+};
 
 /** THE FIRST WORDS OF A STOP FOR PICKS (#362, Helm review of 4081f12, SF1). The run card and the
  *  project's stage line read the first line of the stop message (backend pausedRunSentence, behind
@@ -1328,6 +1455,13 @@ export class RecipeAdapter extends BasePortalAdapter {
   stagedReviewCapture: StagedReviewCapture | null = null;
   /** The step whose selector resolveLocator is resolving right now (for disambiguation). */
   private resolvingStep: RecipeStep | null = null;
+  /** #228 — the step the ACTING resolution is for (executeStepInner only; never the diagnostic or
+   *  draft-submit re-reads, never a final submit): resolveLocator asks its recorded identity, and
+   *  `namesake` says whether a namesake may make it wait and stop (a click that will be performed). */
+  private identityGuard: { step: RecipeStep; namesake: boolean } | null = null;
+  /** #228 — set by resolveLocator when a click's only match is an earlier step's recorded control;
+   *  executeStepInner turns it into a NamesakeClickStop. */
+  private namesakeStop: string | null = null;
   /** Every click/press/goto the chokepoint refused this run, in order. */
   guardRefusals: string[] = [];
   /** How long an upload step waits for its named file slot to MOUNT (client-rendered steps show a
@@ -3616,7 +3750,9 @@ export class RecipeAdapter extends BasePortalAdapter {
       // NEVER HEAL A kVA TIER BOX either (close MF2): heal re-anchors by label score, and "5.01kva
       // through 15kva" scores high against "15.01kva through 25kva" — a tier row must never hop to
       // its neighbour by similarity. The tier is decided from the page's labels or not at all.
-      if (!succeeded && !step.isFinalSubmit && !this.isRecordTypeStep(step) && !this.isFeeTierStep(step) && this.arrayPass === 1 && process.env.RECIPE_SELF_HEAL !== "off") {
+      // NEVER HEAL A NAMESAKE REFUSAL (#228): the heal re-anchors by the step's words, and the only
+      // control answering them is the earlier step's — it would click it and PATCH THE RECIPE with it.
+      if (!succeeded && !step.isFinalSubmit && !this.isRecordTypeStep(step) && !this.isFeeTierStep(step) && !(lastErr instanceof NamesakeClickStop) && this.arrayPass === 1 && process.env.RECIPE_SELF_HEAL !== "off") {
         // arrayPass === 1: heal re-anchors BY LABEL against the whole page with no row
         // concept, and a repeat-pass step's labels are bare copies ("Manufacturer") of
         // controls in OTHER sections — a heal here would write array N's value into the
@@ -6285,8 +6421,19 @@ export class RecipeAdapter extends BasePortalAdapter {
     // when narrowToOne did it, and again when this hint was added without the same guard.
     const nameHint = (step.action === "check" || step.action === "uncheck")
       ? "" : String(step.note ?? step.field ?? "");
+    // #228: this resolution is the one acted on — it asks the step's recorded identity (a final submit
+    // resolves exactly as before; a namesake may hold only a click that will really be performed).
+    const guard = isFinalSubmitStep(step) || this.draftCreatingStepAt(this.currentStepIdx) >= 0 ? null
+      : { step, namesake: step.action === "click" && !pastReview };
+    this.namesakeStop = null;
     this.resolvingStep = step;
-    let scoped = await this.resolveLocator(step.selector, nameHint).finally(() => { this.resolvingStep = null; });
+    this.identityGuard = guard;
+    let scoped = await this.resolveLocator(step.selector, nameHint).finally(() => { this.resolvingStep = null; this.identityGuard = null; });
+    if (this.namesakeStop) {
+      const why = this.namesakeStop;
+      this.namesakeStop = null;
+      throw new NamesakeClickStop(why);
+    }
     // A HIDDEN INPUT IS THE NORMAL STATE FOR A STYLED CHECKBOX, NOT A PROBLEM TO SOLVE.
     //
     // The third door onto the same regression. `isTrulyVisible` correctly calls an opacity:0
@@ -6297,7 +6444,15 @@ export class RecipeAdapter extends BasePortalAdapter {
     // the name hint, then this. check/uncheck keep whatever they resolved.
     const isToggle = step.action === "check" || step.action === "uncheck";
     if (!isToggle && (await this.looksOutOfReach(scoped) || await this.overlayShadowsTarget(scoped))) {
-      if (await this.dismissStaleOverlays()) scoped = await this.resolveLocator(step.selector);
+      if (await this.dismissStaleOverlays()) {
+        this.identityGuard = guard;
+        scoped = await this.resolveLocator(step.selector).finally(() => { this.identityGuard = null; });
+        if (this.namesakeStop) {
+          const why = this.namesakeStop;
+          this.namesakeStop = null;
+          throw new NamesakeClickStop(why);
+        }
+      }
     }
     // THE SECTION THE LEARNER RECORDED, FINALLY USED.
     //
@@ -11100,6 +11255,97 @@ export class RecipeAdapter extends BasePortalAdapter {
     return /manufacturer|\bmake\b/i.test(`${step.selector?.label ?? ""} ${step.note ?? ""}`);
   }
 
+  // A MATCH THAT CARRIES THE STEP'S WORDS BUT NOT ITS RECORDED ID IS A NAMESAKE WHILE THE RECORDED
+  // CONTROL IS ON THE PAGE (#228).
+  //
+  // resolveLocator accepts the first level whose pick is visible and enabled, and the recorded id was
+  // only ever asked to choose AMONG a level's several matches. Live on City of Tigard (EnerGov), the
+  // record-type step was recorded `{role:"link", name:"Apply", exact:true, fallbacks:[{css:
+  // "#apply-btn-ResidentialRenewableEnergy-Prescriptive"}]}`; that link's accessible name is its
+  // aria-label ("Apply Residential Renewable Energy - Prescriptive"), so the role+name matches exactly
+  // ONE element — the top menu's "Apply" tab, step 1's own target. Level 0 took it, the id fallback was
+  // never asked, the click reported ok, the application never opened, and the next step waited out the
+  // stall watchdog.
+  //
+  // So the candidate answering to MORE of the step's recorded identity wins: when the pick is not the
+  // recorded id, the element the recorded id names displaces it — but only when it is visible, enabled
+  // AND answers to the step's recorded words too. A per-render id (PowerClerk's #pcInputBase34, which
+  // later names "Energy Source") fails the words and changes nothing: an id alone never overrides.
+  //
+  // A NAMESAKE IS WORTH A SHORT WAIT, AND NOTHING ELSE IS. When a click's pick is the control an EARLIER
+  // step recorded (its id, or that step's css primary) and the step's own recorded control is not up
+  // yet, poll for it briefly — Tigard's renders ~116 ms after Search. A step whose recorded id is simply
+  // gone and whose pick is nobody else's pays nothing: a 75-step replay must not wait on id churn. If
+  // the own control never renders and the pick is an earlier step's recorded id, the click is refused,
+  // named (a legitimate second click of one control recorded the SAME id, and that id is its own); a
+  // css-only resemblance is reported and clicked. Writes are not held: their identity check downstream
+  // (reanchorIfWrongControl) owns that question, and PowerClerk's per-render input ids collide across
+  // pages all the time.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  private async recordedIdentityOverNamesake(sel: RecipeSelector, picked: any): Promise<any | null> {
+    const guard = this.identityGuard;
+    if (!guard || typeof picked?.evaluate !== "function") return null;
+    const own = recordedIdsOf(sel, guard.step);
+    if (!own.length) return null;
+    const words = recordedWordsOf(sel);
+    const earlierIds: Array<{ id: string; step: number }> = [];
+    const earlierCss: Array<{ css: string; step: number }> = [];
+    if (guard.namesake) {
+      const ownCss = String(sel.css ?? "").trim();
+      const upTo = Math.min(this.currentStepIdx, this.recipe.steps.length);
+      for (let i = 0; i < upTo; i++) {
+        const s = this.recipe.steps[i];
+        if (!s?.selector || !!s.selector.frame !== !!sel.frame) continue;
+        for (const id of recordedIdsOf(s.selector, s)) if (!own.includes(id)) earlierIds.push({ id, step: i });
+        const css = String(s.selector.css ?? "").trim();
+        if (css && !idOfCss(css) && css !== ownCss) earlierCss.push({ css, step: i });
+      }
+    }
+    const args = { own, words: words.text, exact: words.exact, tag: RECORDED_ID_HIT_ATTR, row: this.arrayRowScope, earlierIds, earlierCss };
+    type Read = ReturnType<typeof recordedIdentityInPage>;
+    const read = async (): Promise<Read | null> =>
+      await picked.evaluate(recordedIdentityInPage, args, { timeout: 1500 }).catch(() => null) as Read | null;
+    let r = await read();
+    if (!r || r.own) return null;
+    const label = String(guard.step.note || words.text || guard.step.action).replace(/\s+/g, " ").slice(0, 80);
+    const pickShown = r.pickId ? `#${r.pickId.slice(0, 80)}` : "an element with no id";
+    let waited = 0;
+    if (!r.hit && r.namesake && guard.namesake && r.ownShown === 0) {
+      const t0 = Date.now();
+      while (Date.now() - t0 < NAMESAKE_WAIT_MS) {
+        await sleep(150);
+        const again = await read();
+        if (!again || again.own) break;
+        r = again;
+        if (r.hit || r.ownShown > 0) break;
+      }
+      waited = Date.now() - t0;
+    }
+    if (r.hit) {
+      const took = this.locator({ css: `[${RECORDED_ID_HIT_ATTR}="1"]`, frame: sel.frame });
+      if (took) {
+        const line = `"${label}" — its selector matched ${pickShown}, which carries its words but not the control it recorded; the recorded #${r.hit.slice(0, 80)} is on the page and reads "${r.hitName.slice(0, 40)}", so that was used${waited ? ` (it rendered ${(waited / 1000).toFixed(1)} s after the namesake)` : ""} — re-record this step so its selector names it (#228)`;
+        this.resolveTrail.push(`  ...recorded identity: ${line}`);
+        this.driftWarnings.push(line);
+        return took.first();
+      }
+    }
+    if (r.namesake && guard.namesake) {
+      const other = `step ${r.namesake.step + 1}'s recorded control (${r.namesake.how === "css" ? `matches its selector ${JSON.stringify(String(this.recipe.steps[r.namesake.step]?.selector?.css ?? "").slice(0, 40))}` : r.namesake.how})`;
+      const ownState = r.ownShown > 0 ? `its own recorded #${own[0].slice(0, 80)} is on the page but names a control that does not read "${words.text.slice(0, 30)}"`
+        : `its own recorded #${own[0].slice(0, 80)} never rendered${waited ? ` (waited ${(waited / 1000).toFixed(1)} s)` : ""}`;
+      const line = `"${label}" — the only control answering its selector is ${other}; ${ownState}`;
+      this.resolveTrail.push(`  ...recorded identity: ${line}`);
+      if (r.namesake.how !== "css" && r.ownShown === 0) {
+        this.namesakeStop = `${line}. NOT clicked: that click would land on another step's control and report ok (#228, Tigard's menu "Apply" in place of the record type). Re-record this step.`;
+        this.driftWarnings.push(`${line} — not clicked (#228)`);
+      } else {
+        this.driftWarnings.push(`${line} — clicked it, verify (#228)`);
+      }
+    }
+    return null;
+  }
+
   // A SELECTOR LEVEL WHOSE EVERY MATCH IS INVISIBLE HAS NOT FOUND THE CONTROL.
   //
   // The recorded primary is routinely a per-render id, and on a fresh project that id can
@@ -11225,6 +11471,11 @@ export class RecipeAdapter extends BasePortalAdapter {
         // Worth a warning only when an EARLIER matching level was passed over as hidden.
         if (level !== firstNonEmpty) {
           this.driftWarnings.push(`"${this.stepLabel({ selector: sel } as RecipeStep)}" — recorded selector matched only hidden or disabled control(s); resolved via a fallback to a usable one`);
+        }
+        // #228: a usable match is not yet the control the step RECORDED — ask its recorded id.
+        if (canProbe && this.identityGuard) {
+          const recorded = await this.recordedIdentityOverNamesake(sel, picked);
+          if (recorded) return recorded;
         }
         return picked;
       }
