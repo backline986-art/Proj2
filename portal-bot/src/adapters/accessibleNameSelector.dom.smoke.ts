@@ -256,6 +256,15 @@ const recordedVia = async (f: ExtractedField): Promise<RecipeSelector> => {
     check(`${what}: a selector that finds its own element is recorded unchanged`,
       !!f && !!r && !r.repinned && !r.missed && JSON.stringify(r.selector) === JSON.stringify(f.selector), JSON.stringify(r));
   }
+  // A HIDDEN control is in no role query, whatever its name: the hidden sidebar's "Apply" twin (a
+  // menu-nested link the walk reaches by its href) keeps the name the replay's closed-menu reveal
+  // searches by — never re-pinned to an #id that also finds the visible tab.
+  let hiddenTwin: RawField | undefined;
+  for (const r of raws.filter((x) => x.id === "link-Menu-Apply")) if (!(await visibleFx(r.fx))) hiddenTwin = r;
+  const ht = hiddenTwin ? toExtractedField(hiddenTwin) : null;
+  const hr = ht ? await pin(page, ht) : null;
+  check("a HIDDEN control (the sidebar's menu twin) keeps its harvested selector, name and all",
+    !!ht && !!hr && !hr.repinned && JSON.stringify(hr.selector) === JSON.stringify(ht.selector), JSON.stringify(hr));
 }
 
 await browser.close();

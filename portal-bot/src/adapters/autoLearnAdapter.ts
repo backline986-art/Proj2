@@ -2444,7 +2444,8 @@ export function toExtractedField(raw: RawField): ExtractedField {
  * getByRole). When that happens the role+name the step records may find ANOTHER control — Tigard's
  * record type, recorded as "Apply", found only the top menu's "Apply" tab, and the replay clicked it as
  * the record type — or none at all. So before a click step is recorded, the same getByRole the replay
- * runs is asked which elements it finds, by the scan's stamp (data-al-fx). If the stamped element is
+ * runs is asked which elements it finds, by the scan's stamp (data-al-fx) — only for a stamped element
+ * that is shown, since a hidden one is in no role query whatever its name. If the stamped element is
  * among them, the selector stands (a choice between namesakes is the replay's to make). If not, and the
  * element's #id finds it, the step leads with the #id: a role+name that found a NAMESAKE is dropped,
  * because kept as a fallback it would click that namesake whenever the id misses; one that found
@@ -2471,6 +2472,11 @@ export async function clickSelectorForElement(
         ]);
       } catch { return null; } finally { if (timer) clearTimeout(timer); }
     };
+    // Only a control getByRole CAN find is judged: one stamped element, shown. A hidden one (a menu-
+    // nested link the walk reaches by its href) is never in a role query, whatever its name, and its
+    // recorded name is what the replay's closed-menu reveal searches by — so it stands untouched.
+    const stamped = scope.locator(`[data-al-fx="${fx}"]`);
+    if ((await stampsOf(stamped))?.length !== 1 || !(await stamped.isVisible().catch(() => false))) return { selector: sel };
     const byName = await stampsOf(scope.getByRole(sel.role, { name: sel.name, exact: sel.exact ?? false }));
     if (!byName || byName.includes(fx)) return { selector: sel };
     const idCss = (sel.fallbacks ?? []).map((fb) => fb.css).find((c): c is string => typeof c === "string" && /^#\S+$/.test(c));
