@@ -822,7 +822,10 @@ export const UPLOAD_LABEL_PATTERNS: Array<{ re: RegExp; docType: string }> = [
   { re: /\b(pv|photovoltaic|solar)\s*worksheet|(standard|string)\s*or\s*micro[-\s]?inverter\s*array|micro[-\s]?inverter\s*array\s*(worksheet|form)?\s*$/i, docType: "pv_worksheet" },
   { re: /checklist|worksheet|eligibilit/i, docType: "solar_checklist" },
   { re: /(completed|signed|permit|solar)\s*application|application\s*(form|packet)/i, docType: "permit_application" },
-  { re: /one[-\s]?line|single[-\s]?line|\bsld\b|electrical\s*(diagram|schematic|one)/i, docType: "sld" },
+  // "Electrical LINE Diagram Plans" (live City of Tigard, EnerGov Attachments, 2026-11-14) matched none
+  // of these, fell through to the plan set, and the REQUIRED "Plan Set" slot was then refused as a
+  // duplicate file name. Any "<qualifier> line / wiring / riser diagram" is the one-line.
+  { re: /one[-\s]?line|single[-\s]?line|\bsld\b|electrical\s*(diagram|schematic|one)|\b(electrical\s+)?(line|wiring|riser)\s+diagram|\b(three|3)[-\s]?line\b/i, docType: "sld" },
   { re: /site\s*plan|plot\s*plan/i, docType: "site_plan" },
   // The SEALED LETTER before the generic structural pattern. These are different
   // documents: "structural" is the roof-framing/attachment-detail sheet split out of
