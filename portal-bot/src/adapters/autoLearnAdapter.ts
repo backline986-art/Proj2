@@ -2436,6 +2436,62 @@ export function toExtractedField(raw: RawField): ExtractedField {
   return field;
 }
 
+/**
+ * A RECORDED CLICK'S ROLE+NAME MUST FIND THE ELEMENT THAT WAS READ — ASKED OF PLAYWRIGHT, AT RECORD
+ * TIME (#228). The scan computes the accessible name itself (accName), and a page can still name a
+ * control in ways it does not read: CSS ::before/::after content, spacing between block children, an
+ * <img alt> inside the text, a <label for> on a button (each measured in real Chromium against
+ * getByRole). When that happens the role+name the step records may find ANOTHER control — Tigard's
+ * record type, recorded as "Apply", found only the top menu's "Apply" tab, and the replay clicked it as
+ * the record type — or none at all. So before a click step is recorded, the same getByRole the replay
+ * runs is asked which elements it finds, by the scan's stamp (data-al-fx). If the stamped element is
+ * among them, the selector stands (a choice between namesakes is the replay's to make). If not, and the
+ * element's #id finds it, the step leads with the #id: a role+name that found a NAMESAKE is dropped,
+ * because kept as a fallback it would click that namesake whenever the id misses; one that found
+ * nothing is kept behind the id. With no id to lead with, the selector stands and `missed` says so.
+ * Never throws and never waits long: any failure keeps the selector exactly as harvested.
+ */
+export async function clickSelectorForElement(
+  page: Page | null | undefined,
+  field: Pick<ExtractedField, "selector" | "fx">,
+): Promise<{ selector: RecipeSelector; repinned?: "namesake" | "nothing"; missed?: boolean }> {
+  const sel = field.selector;
+  const fx = field.fx?.id ?? "";
+  if (!page || !sel?.role || !sel.name || !/^f\d+$/.test(fx)) return { selector: sel };
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const scope: any = sel.frame ? page.frameLocator(frameSelectorFor(sel.frame)) : page;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const stampsOf = async (loc: any): Promise<string[] | null> => {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        return await Promise.race([
+          loc.evaluateAll((els: Element[]) => els.map((e) => e.getAttribute("data-al-fx") || "")) as Promise<string[]>,
+          new Promise<null>((r) => { timer = setTimeout(() => r(null), 3000); }),
+        ]);
+      } catch { return null; } finally { if (timer) clearTimeout(timer); }
+    };
+    const byName = await stampsOf(scope.getByRole(sel.role, { name: sel.name, exact: sel.exact ?? false }));
+    if (!byName || byName.includes(fx)) return { selector: sel };
+    const idCss = (sel.fallbacks ?? []).map((fb) => fb.css).find((c): c is string => typeof c === "string" && /^#\S+$/.test(c));
+    const byId = idCss ? await stampsOf(scope.locator(idCss)) : null;
+    if (!idCss || !byId || !byId.includes(fx)) return { selector: sel, missed: true };
+    const named: RecipeSelector = { role: sel.role, name: sel.name, ...(sel.exact != null ? { exact: sel.exact } : {}), ...(sel.frame ? { frame: sel.frame } : {}) };
+    const fallbacks = [...(byName.length === 0 ? [named] : []), ...(sel.fallbacks ?? []).filter((fb) => fb.css !== idCss)];
+    return {
+      selector: {
+        css: idCss,
+        ...(sel.frame ? { frame: sel.frame } : {}),
+        ...(sel.shownText ? { shownText: sel.shownText } : {}),
+        ...(fallbacks.length ? { fallbacks } : {}),
+      },
+      repinned: byName.length ? "namesake" : "nothing",
+    };
+  } catch {
+    return { selector: sel };
+  }
+}
+
 // The derived label equals the name attribute only — a label-based locator would then
 // be unreliable, so prefer a more structural selector.
 function isLikelyOnlyName(raw: RawField): boolean {
@@ -6910,10 +6966,11 @@ export class AutoLearnAdapter extends BasePortalAdapter {
     return false;
   }
 
-  private noteVerifiedRecordTypeTicked(field: ExtractedField, offeredCount: number, steps: RecipeStep[]): void {
+  private noteVerifiedRecordTypeTicked(field: ExtractedField, offeredCount: number, steps: RecipeStep[], selector?: RecipeSelector): void {
     const label = String(field.label || "").trim();
     // A catalog's "Apply <type>" BUTTON is clicked, not checked (Tyler EnerGov's Application Assistant).
-    steps.push({ action: field.fieldType === "button" ? "click" : "check", phase: "fill", selector: field.selector, note: `record type (verified): ${label.slice(0, 60)}` });
+    // `selector`: the one checked against the element before the click (#228, recordedClickSelector).
+    steps.push({ action: field.fieldType === "button" ? "click" : "check", phase: "fill", selector: selector ?? field.selector, note: `record type (verified): ${label.slice(0, 60)}` });
     // A button pick leaves the catalog: the walk re-reads the page before anything else is asked.
     if (field.fieldType === "button") this.verifiedPickNavigated = true;
     this.verifiedRecordTypeTicked = true;
@@ -6973,6 +7030,8 @@ export class AutoLearnAdapter extends BasePortalAdapter {
       const listCount = checkables.filter((f) => this.sameRecordTypeList(f, on)).length;
       if (!this.verifiedRecordTypeTicked) {
         const loc = await this.locator(hit.selector).catch(() => null);
+        // A catalog button's step selector is checked against it now, while it is on the page (#228).
+        const recorded = hit.fieldType === "button" ? await this.recordedClickSelector(hit) : undefined;
         const ok = hit.fieldType === "button"
           ? await this.clickCatalogEntry(String(hit.label || ""), loc, pageCount)
           : loc
@@ -6984,7 +7043,7 @@ export class AutoLearnAdapter extends BasePortalAdapter {
           // another option — a person ticks this one.
           this.debug?.event({ type: "record_type_verified_tick_failed", label: on.label.slice(0, 70), page: pageCount });
         } else {
-          this.noteVerifiedRecordTypeTicked(hit, listCount, steps);
+          this.noteVerifiedRecordTypeTicked(hit, listCount, steps, recorded);
           await this.waitForDynamicFieldsSettle().catch(() => null);
         }
       }
@@ -9036,7 +9095,8 @@ export class AutoLearnAdapter extends BasePortalAdapter {
           const navStep: RecipeStep = {
             action: "click",
             phase: "open",
-            selector: navField.selector,
+            // Checked against the element before the click (#228): a name that finds a namesake leads with the #id.
+            selector: await this.recordedClickSelector(navField),
             note: `navigate to application: ${navField.label || "link"}`,
           };
           steps.push(navStep);
@@ -10235,11 +10295,13 @@ export class AutoLearnAdapter extends BasePortalAdapter {
         // An interstitial's forward control is clicked once per page (c2i'): remembered now, as
         // the click is made, so a return to the same page stops instead of clicking it again.
         if (interstitialAdvanceKey) this.navClicksByPath.add(interstitialAdvanceKey);
-        // Record the advance click, then perform it.
+        // Record the advance click, then perform it. Its selector is checked against the element first
+        // (#228) — except an interstitial's forward click, whose information-page pass (#344) judges the
+        // control its recorded selector resolves and is left exactly as it was.
         steps.push({
           action: "click",
           phase: "fill",
-          selector: advanceField.selector,
+          selector: interstitialAdvanceKey ? advanceField.selector : await this.recordedClickSelector(advanceField),
           note: `advance: ${advanceField.label || "next"}`,
         });
         // #344 — A HUMAN-VERIFIED INFORMATION PAGE: on the interstitial's forward click only (c2i'),
@@ -11948,9 +12010,11 @@ export class AutoLearnAdapter extends BasePortalAdapter {
     }
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const doorLoc = (await this.locator(doorField.selector).catch(() => null)) as any;
+    // The step's selector, checked against the door while it is still on the page (#228).
+    const doorRecorded = await this.recordedClickSelector(doorField);
     const clicked = doorLoc ? await withAutomationInput(this.page, () => doorLoc.click({ timeout: 5000 })).then(() => true).catch(() => false) : false;
     if (!clicked) return { ok: false, door: found, why: "the door could not be clicked" };
-    const doorStep: RecipeStep = { action: "click", phase: "fill", selector: doorField.selector, note: doorField.label || found, ...(doorField.fingerprint ? { fingerprint: doorField.fingerprint } : {}) };
+    const doorStep: RecipeStep = { action: "click", phase: "fill", selector: doorRecorded, note: doorField.label || found, ...(doorField.fingerprint ? { fingerprint: doorField.fingerprint } : {}) };
     await this.waitForDynamicFieldsSettle().catch(() => null);
     const after = (await this.extractAllFrames(EXTRACT_SEL)).map(toExtractedField);
     const values: Record<"street" | "city" | "state" | "zip", string> = {
@@ -13150,7 +13214,7 @@ export class AutoLearnAdapter extends BasePortalAdapter {
     steps.push({
       action: "click",
       phase: "fill",
-      selector: candidate.selector,
+      selector: await this.recordedClickSelector(candidate as ExtractedField), // checked before the click (#228)
       note: `advance: ${candidate.label || "next"}`,
     });
     const res = await safeAction("fallback-advance", async () => {
@@ -13962,6 +14026,23 @@ export class AutoLearnAdapter extends BasePortalAdapter {
    *  navigate door re-plans, the advance door treats it as an advance that did nothing). What is
    *  NOT guaranteed: a change landing in the milliseconds between that re-read and Playwright's own
    *  gesture — the same window a role/name lookup has between resolving and clicking. */
+  /** #228 — THE SELECTOR A CLICK STEP RECORDS FOR `field`, checked against the element it was read
+   *  from (clickSelectorForElement). Asked while that element is still on the page — before the
+   *  click — and only at the doors that record a scanned button: navigate, advance, the fallback
+   *  advance, the verified record type, the manual-entry door. A re-pin or a miss is named in the
+   *  debug bundle; the walk itself is never stopped by it. */
+  private async recordedClickSelector(field: ExtractedField): Promise<RecipeSelector> {
+    const r = await clickSelectorForElement(this.page, field);
+    if (r.repinned || r.missed) {
+      this.debug?.event({
+        type: r.repinned ? "click_selector_repinned" : "click_selector_misses_element",
+        label: String(field.label ?? "").replace(/\s+/g, " ").trim().slice(0, 60),
+        ...(r.repinned ? { why: r.repinned === "namesake" ? "its name finds another control" : "its name finds nothing" } : {}),
+      });
+    }
+    return r.selector;
+  }
+
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   private async fieldClickLocator(field: ExtractedField): Promise<any | null> {
     if (!this.page) return null;

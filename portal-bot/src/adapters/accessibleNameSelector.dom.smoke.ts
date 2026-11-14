@@ -17,11 +17,17 @@
 // that each recorded selector resolves to the element that was read. MUST-KEEP: a plain button, a
 // Material-icon button (ligature + aria-label), #556's aria-hidden icon wrapper, a submit input, a
 // labelledby name, and the off-limits test still seeing a pay word on a control's face.
+//
+// THE RECORD-TIME CHECK (clickSelectorForElement): names the scan cannot read — CSS ::after content,
+// spacing between block children — are caught by asking getByRole itself, before the click is
+// recorded, whether the role+name finds the stamped element. A name that finds a namesake is replaced
+// by the #id; one that finds nothing goes behind it; with no id the miss is reported, never guessed.
 //   npx tsx portal-bot/src/adapters/accessibleNameSelector.dom.smoke.ts
 import "../smokeArtifactDirs"; // hand-run safe: artifact dirs default to a temp folder, never data/
 import http from "node:http";
 import { chromium, type Page } from "playwright";
 import type { PortalRecipe, RecipeSelector, RecipeStep } from "../../../shared/src/types";
+import * as AL from "./autoLearnAdapter";
 import { AutoLearnAdapter, EXTRACT_SEL, extractFieldsInPage, toExtractedField, type ExtractedField, type RawField } from "./autoLearnAdapter";
 import { RecipeAdapter } from "./recipeAdapter";
 
@@ -38,6 +44,7 @@ const RECORD_TYPE = (id: string, name: string, href: string, hidden: boolean): s
 const PAGE = `<!doctype html><html><head><style>
   .ng-hide { display: none !important; }
   .material-icons { font-family: sans-serif; }
+  .sfx::after { content: " Solar Permit"; }
 </style></head><body>
   <!-- Tigard's top menu: the "Apply" tab, plus its twin in a hidden sidebar (same id). -->
   <div id="sidebarMenu" style="display:none"><a id="link-Menu-Apply" class="mainMenuNav-a" href="/apps/selfservice/home#/applicationAssistant">Apply</a></div>
@@ -65,6 +72,13 @@ const PAGE = `<!doctype html><html><head><style>
   <span id="lbl-noid">Start Electrical Application</span>
   <button name="btnGoElectrical" aria-labelledby="lbl-noid">Go</button>
   <button id="btn-pay" aria-label="Continue to the next step">Pay Fees</button>
+
+  <!-- RECORD-TIME CHECK: names the scan cannot read, so only asking getByRole itself catches them.
+       CSS content is in the accessible name ("Apply Solar Permit"); the scan reads "Apply" — the menu
+       tab's name. Block children are spaced in it ("Start Roof Mount"); the scan reads "StartRoof Mount". -->
+  <a id="apply-sfx" class="sfx" href="#/permit/apply/96/0/0">Apply</a>
+  <a id="start-blocks" href="#/permit/apply/97/0/0"><div>Start</div><div>Roof Mount</div></a>
+  <a class="sfx nid" href="#/permit/apply/98/0/0">Apply</a>
 </body></html>`;
 
 const server = http.createServer((_q, r) => { r.writeHead(200, { "Content-Type": "text/html" }); r.end(PAGE); });
@@ -174,6 +188,74 @@ await keep("a button named by aria-labelledby", (r) => r.id === "btn-begin", "Be
   const offLimits = f ? (AutoLearnAdapter.prototype as unknown as { isOffLimitsButton: (x: ExtractedField) => boolean }).isOffLimitsButton.call({}, f) : false;
   check("a control whose FACE reads \"Pay Fees\" is still off limits under an aria-label that does not",
     offLimits, f ? show(f) : "not harvested");
+}
+
+// ---- RECORD-TIME CHECK (clickSelectorForElement) ---------------------------------------------
+// What the learner records for a click, through the adapter's own wrapper (the one its navigate,
+// advance, fallback-advance, verified-record-type and manual-entry doors call). A learner without the
+// check records the harvested selector as it is — which is what a missing export stands for here.
+type Pin = (p: Page, f: ExtractedField) => Promise<{ selector: RecipeSelector; repinned?: string; missed?: boolean }>;
+const pin: Pin = (AL as unknown as { clickSelectorForElement?: Pin }).clickSelectorForElement
+  ?? (async (_p, f) => ({ selector: f.selector }));
+const events: Array<Record<string, unknown>> = [];
+const recordedVia = async (f: ExtractedField): Promise<RecipeSelector> => {
+  const wrap = (AutoLearnAdapter.prototype as unknown as { recordedClickSelector?: (x: ExtractedField) => Promise<RecipeSelector> }).recordedClickSelector;
+  return wrap ? wrap.call({ page, debug: { event: (e: Record<string, unknown>) => events.push(e) } }, f) : f.selector;
+};
+{
+  const raw = await rawFor((r) => r.id === "apply-sfx");
+  const f = raw ? toExtractedField(raw) : null;
+  if (!raw || !f) check("the scan reads the ::after link", false, "not harvested");
+  else {
+    const harvestedHits = await primaryMatches(f.selector);
+    console.log(`   ::after link harvested as ${show(f)} — its name finds ${JSON.stringify(harvestedHits)}`);
+    const rec = await recordedVia(f);
+    const got = await replayResolves(rec);
+    check("A NAME THE SCAN CANNOT READ: the recorded click leads with the #id when its role+name finds a NAMESAKE (the menu tab)",
+      rec.css === "#apply-sfx" && !rec.name && got === `${raw.fx}#apply-sfx`,
+      `recorded ${JSON.stringify(rec)} -> replay landed on ${got}`);
+    check("...and the namesake-finding role+name is dropped, not kept as a fallback the replay would reach",
+      !(rec.fallbacks ?? []).some((fb) => fb.role && fb.name === f.selector.name), JSON.stringify(rec));
+    check("...and the re-pin is named in the debug bundle",
+      events.some((e) => e.type === "click_selector_repinned" && /another control/.test(String(e.why))), JSON.stringify(events));
+  }
+}
+{
+  const raw = await rawFor((r) => r.id === "start-blocks");
+  const f = raw ? toExtractedField(raw) : null;
+  if (!raw || !f) check("the scan reads the block-children link", false, "not harvested");
+  else {
+    const rec = (await pin(page, f)).selector;
+    check("a role+name that finds NOTHING: the #id leads and the name is kept behind it",
+      rec.css === "#start-blocks" && (rec.fallbacks ?? [])[0]?.name === f.selector.name && (await replayResolves(rec)) === `${raw.fx}#start-blocks`,
+      `harvested ${show(f)} -> recorded ${JSON.stringify(rec)}`);
+  }
+}
+{
+  const raw = await rawFor((r) => r.fieldType === "button" && !r.id && r.href === "#/permit/apply/98/0/0");
+  const f = raw ? toExtractedField(raw) : null;
+  if (!raw || !f) check("the scan reads the id-less ::after link", false, "not harvested");
+  else {
+    const r = await pin(page, f);
+    check("with NO id to lead with, the selector stands and the miss is reported (never a guess)",
+      r.missed === true && JSON.stringify(r.selector) === JSON.stringify(f.selector), JSON.stringify(r));
+  }
+}
+{
+  // MUST-KEEP: a selector that already finds its element is recorded exactly as harvested.
+  const sound: Array<[string, (r: RawField) => boolean]> = [
+    ["the Tigard record type", (r) => r.id === "apply-btn-ResidentialRenewableEnergy-Prescriptive"],
+    ["the menu tab", (r) => r.id === "link-Menu-Apply"],
+    ["a plain Next", (r) => r.id === "btn-next"],
+    ["#556's Building Permits", (r) => r.id === "btn-cat"],
+  ];
+  for (const [what, pick] of sound) {
+    const raw = await rawFor(pick);
+    const f = raw ? toExtractedField(raw) : null;
+    const r = f ? await pin(page, f) : null;
+    check(`${what}: a selector that finds its own element is recorded unchanged`,
+      !!f && !!r && !r.repinned && !r.missed && JSON.stringify(r.selector) === JSON.stringify(f.selector), JSON.stringify(r));
+  }
 }
 
 await browser.close();
