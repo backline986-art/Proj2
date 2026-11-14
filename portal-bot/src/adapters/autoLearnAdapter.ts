@@ -36,6 +36,7 @@ import { readApplicationLedgerInPage, type LedgerEntry } from "./submissionLedge
 import { LIST_LINK } from "../statusFinder";
 import { readSignatureRequestStep, stageSignatureRequestStep, type SignatureStepOutcome } from "./signatureRequestStep";
 import type { SignatureRequestApproval } from "../../../shared/src/signatureRequestGate";
+import { nameAttributeCss, nameAttributeOf } from "../../../shared/src/recipeSelector";
 import { readSignatureStatuses, type SignatureCheck } from "./signatureStatusRead";
 import { signatureCompletion } from "../../../shared/src/signatureCompletion";
 
@@ -2303,9 +2304,8 @@ export function toExtractedField(raw: RawField): ExtractedField {
     } else if (raw.id) {
       selector.css = `#${raw.id}`;
     } else if (raw.name) {
-      selector.name = raw.name;
-      selector.role = ariaRole;
-      selector.exact = true;
+      // The name ATTRIBUTE, not the accessible name a `role` beside `name` would claim (#229).
+      selector.css = nameAttributeCss(raw.name);
     }
   } else {
     // Inputs/selects: prefer label, then placeholder, then name, then css id.
@@ -2315,13 +2315,20 @@ export function toExtractedField(raw: RawField): ExtractedField {
       selector.label = raw.label;
     } else if (raw.placeholder) {
       selector.placeholder = raw.placeholder;
-    } else if (raw.name) {
-      selector.name = raw.name;
+    } else if (raw.name && raw.fieldType !== "radio" && raw.fieldType !== "checkbox") {
+      // THE NAME ATTRIBUTE IS WRITTEN AS CSS, NEVER AS A BARE `name` (#229).
+      //
+      // A bare `name` reads as an accessible name everywhere a role stands beside it, and replay
+      // had no reading for it alone: City of Star's valuation box, recorded `{ name: "fee244341" }`
+      // because its label is not tied to it, failed "no usable selector" on every replay. Written
+      // through the one builder (shared/src/recipeSelector), which replay also uses for the bare
+      // names already saved. A radio's or checkbox's name is its GROUP's, so those take their #id.
+      selector.css = nameAttributeCss(raw.name);
     } else if (raw.id) {
       selector.css = `#${raw.id}`;
     }
     // Always keep a css #id fallback when we have one and didn't already use it.
-    if (raw.id && !selector.css) {
+    if (raw.id && selector.css !== `#${raw.id}`) {
       selector.fallbacks = [{ css: `#${raw.id}` }];
     }
   }
@@ -13812,6 +13819,8 @@ export class AutoLearnAdapter extends BasePortalAdapter {
     else if (sel.testId) loc = scope.getByTestId(sel.testId);
     else if (sel.text) loc = scope.getByText(sel.text, { exact: sel.exact });
     else if (sel.css) loc = scope.locator(sel.css);
+    // A bare `name` is the name attribute: the same reading replay makes (#229, shared/src/recipeSelector).
+    else if (nameAttributeOf(sel)) loc = scope.locator(nameAttributeCss(nameAttributeOf(sel)));
     else if (sel.role) loc = scope.getByRole(sel.role);
     else throw new Error("AutoLearn selector has no usable strategy.");
     if (typeof sel.nth === "number") return loc.nth(sel.nth);
