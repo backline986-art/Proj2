@@ -1587,6 +1587,9 @@ export class RecipeAdapter extends BasePortalAdapter {
     // (armSubmitWatch), and a route left behind would abort the person's own filing.
     this.backstop = await installFilingBackstop(this.page, "replay run").catch(() => null);
     if (this.backstop?.redirectGuardNote) this.driftWarnings.push(this.backstop.redirectGuardNote);
+    // #232: this run's ending is its own (endReplay sets it on the way out).
+    this.reachedReviewMarker = false;
+    this.replayEnd = null;
     try {
       // A FilerIdentityStop that escaped the step loop (a click between steps) is the run's answer too.
       const stopTimer = this.startStopWatchdog();
@@ -1651,14 +1654,14 @@ export class RecipeAdapter extends BasePortalAdapter {
   /** #232 — WHERE A REPLAY THAT DID NOT END CLEAN ACTUALLY STOPPED, in the closing step's words: the
    *  step (1-based, as the stall message counts), its note, and the run's own reason — and "before
    *  reaching the review screen" unless the loop got to the review marker. Never "staged". */
-  private replayStoppedClose(end: { started: boolean; pauseReason: string | null; stepIndex: number; message: string }): string {
+  private replayStoppedClose(end: { started: boolean; pauseReason: string | null; stepIndex: number; message: string }, handoff = ""): string {
     const flat = end.message.replace(/\s+/g, " ").trim();
     // The reason, without the "Recipe step failed (action — note):" lead (the step is named here),
     // the Playwright call log, and the bracketed page context (the fill step's own message has both).
     const reason = flat.replace(/^Recipe step failed \((?:[^()]|\([^()]*\))*\):\s*/, "")
       .replace(/\s*Call log:.*$/, "").replace(/\s*\[url=.*$/, "").slice(0, 300) || "no reason was reported";
     if (!end.started) {
-      return `${this.portalName}: the recipe was NOT replayed — ${reason} Nothing was staged at the review screen and nothing was submitted. AUTOMATION HAS STOPPED.`;
+      return `${this.portalName}: the recipe was NOT replayed — ${reason} Nothing was staged at the review screen and nothing was submitted.${handoff} AUTOMATION HAS STOPPED.`;
     }
     const total = this.recipe.steps.length;
     const i = end.stepIndex;
@@ -1672,7 +1675,7 @@ export class RecipeAdapter extends BasePortalAdapter {
     const filed = (this.finalSubmitAttempted && !this.finalSubmitNothingSent) || this.draftSubmitAttempted
       ? " A submit was clicked in this run — check on the portal what it did before anything is staged or clicked again."
       : " Nothing was submitted.";
-    return `${this.portalName}: the replay ${verb} ${where}${review}: ${reason}${/[.!?]$/.test(reason) ? "" : "."}${filed} AUTOMATION HAS STOPPED.`;
+    return `${this.portalName}: the replay ${verb} ${where}${review}: ${reason}${/[.!?]$/.test(reason) ? "" : "."}${filed}${handoff} AUTOMATION HAS STOPPED.`;
   }
 
   /** The approved final submit was clicked: report every backstop abort (warnings + refusals) and
@@ -2094,9 +2097,12 @@ export class RecipeAdapter extends BasePortalAdapter {
     // failure from the fill step), and nothing below reads the page.
     if (this.replayEnd && !this.replayEnd.ok) {
       const end = this.replayEnd;
-      return ok(this.replayStoppedClose(end), {
+      // What the person must know about the page still stands (an answer not yet saved, a call held back).
+      const notes = this.reviewHandoffNotes;
+      return ok(this.replayStoppedClose(end, notes.length ? ` ${notes.join(" ")}` : ""), {
         finalSubmitClicked: false, reachedReview: this.reachedReviewMarker,
         replayStoppedAt: end.started ? { stepIndex: end.stepIndex, steps: this.recipe.steps.length, pauseReason: end.pauseReason } : { notStarted: true },
+        ...(notes.length ? { reviewHandoffNotes: [...notes], reviewPageBlockedCalls: [...this.reviewPageBlockedCalls] } : {}),
       });
     }
     // A request the person sent may land after the run's tail read it, and before the run let the page
