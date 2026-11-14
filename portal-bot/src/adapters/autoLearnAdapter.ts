@@ -1569,7 +1569,12 @@ export interface RawField {
   placeholder?: string;
   id?: string;
   css?: string;
+  /** The words on a button/link's face (aria-hidden parts removed; the aria-label only for an
+   *  icon) — read by the off-limits tests. NOT the name a role selector matches: see accName. */
   text?: string;
+  /** #228: a button/link's ACCESSIBLE NAME (aria-labelledby, aria-label, rendered content, a button
+   *  input's value) — the name getByRole matches, so the one its role selector is built from. */
+  accName?: string;
   href?: string;
   required?: boolean;
   /** aria-label attribute, captured for the step fingerprint (heal tie-break). */
@@ -2160,6 +2165,50 @@ export function extractFieldsInPage(els: Element[]): RawField[] {
     // A tile's text is its TITLE, never the whole card (the body's prose would become the
     // name a replay has to match).
     const text = tileLabel ? tileLabel : fieldType === "button" ? buttonText || undefined : undefined;
+    // THE NAME A ROLE SELECTOR IS BUILT FROM IS THE ACCESSIBLE NAME, READ IN THE SPEC'S ORDER (#228):
+    // aria-labelledby (the referenced elements' own aria-label or text), else a non-empty aria-label,
+    // else the content without its aria-hidden or unrendered (display:none / visibility:hidden)
+    // parts, else a button input's value — whitespace collapsed, as getByRole compares it. `text`
+    // above takes the aria-label only for an icon, so whenever an aria-label (or a labelledby) is set
+    // and says something else, a selector named by the text names ANOTHER control or none. Live, City
+    // of Tigard (EnerGov), 2026-11-14: each record type's button is <a role="link" aria-label="Apply
+    // Residential Renewable Energy - Prescriptive">Apply</a>; recorded as getByRole('link', { name:
+    // 'Apply', exact: true }) it never matched itself and matched exactly one control on the page, the
+    // top menu's "Apply" tab, which the replay clicked as the record type. Only the selector's name
+    // changes: the LABEL (what the planner reads, what loop guards and replay healing key on) and
+    // `text` (the words on the control's face, which the off-limits tests read) are untouched.
+    const accName = ((): string => {
+      if (fieldType !== "button" || tileLabel) return "";
+      const ownRoot = el.getRootNode() as Document | ShadowRoot;
+      const refs = (el.getAttribute("aria-labelledby") || "").split(/\s+/).filter(Boolean);
+      if (refs.length) {
+        const by = refs.map((ref) => {
+          const n = (typeof ownRoot.getElementById === "function" ? ownRoot.getElementById(ref) : null) || document.getElementById(ref);
+          return n ? ((n.getAttribute("aria-label") || "").trim() || n.textContent || "") : "";
+        }).join(" ").replace(/\s+/g, " ").trim();
+        if (by) return by;
+      }
+      if (ariaName) return ariaName.replace(/\s+/g, " ").trim();
+      // The content, walked (no helper function: this runs in the page), skipping what getByRole
+      // leaves out of a name — an aria-hidden subtree (#556's icon wrapper) and an unrendered one.
+      let content = "";
+      const stack: Node[] = Array.from(el.childNodes).reverse();
+      while (stack.length) {
+        const n = stack.pop() as Node;
+        if (n.nodeType === 3) { content += n.textContent || ""; continue; }
+        if (n.nodeType !== 1) continue;
+        const ce = n as Element;
+        if (ce.getAttribute("aria-hidden") === "true") continue;
+        const cs = window.getComputedStyle(ce);
+        if (cs.display === "none" || cs.visibility === "hidden") continue;
+        const kids = Array.from(ce.childNodes);
+        for (let k = kids.length - 1; k >= 0; k--) stack.push(kids[k]);
+      }
+      content = content.replace(/\s+/g, " ").trim();
+      if (content) return content;
+      if (tag === "input") return String((el as HTMLInputElement).value || el.getAttribute("value") || "").replace(/\s+/g, " ").trim();
+      return "";
+    })();
     // Capture href for anchors so a hidden/menu-nested nav link can be reached by direct
     // navigation when it can't be clicked.
     const href = tag === "a" ? (el.getAttribute("href") || undefined) : undefined;
@@ -2240,6 +2289,7 @@ export function extractFieldsInPage(els: Element[]): RawField[] {
     out.push({
       fx, fxText,
       label, fieldType, options, role, name, placeholder, id, text, href,
+      accName: accName || undefined,
       tile: tileLabel ? true : undefined,
       typeahead: typeahead && fieldType === "text" ? true : undefined,
       stampClass: !typeahead && fieldType === "text" && stampClass ? stampClass : undefined,
@@ -2292,7 +2342,14 @@ export function toExtractedField(raw: RawField): ExtractedField {
     const ariaRole = raw.role || "button";
     if (raw.text) {
       selector.role = ariaRole;
-      selector.name = raw.text;
+      // THE ACCESSIBLE NAME, NOT THE FACE TEXT (#228): getByRole matches nothing else, and Tigard's
+      // record-type link — face "Apply", aria-label "Apply Residential Renewable Energy -
+      // Prescriptive" — recorded by its face matched only the top menu's "Apply". The face words,
+      // when they differ, ride along as shownText for the safety haystacks that read them before.
+      const accName = String(raw.accName ?? "").trim();
+      selector.name = accName || raw.text;
+      const shown = raw.text.replace(/\s+/g, " ").trim();
+      if (accName && shown && shown !== accName) selector.shownText = shown;
       // EXACT name match: a substring match makes "Next" also match "Next page" (a decoy
       // pager button), and .first() then resolves to whichever is first in the DOM — the
       // wrong control. Exact matching pins it to the button whose accessible name IS the
@@ -13227,11 +13284,14 @@ export class AutoLearnAdapter extends BasePortalAdapter {
 
   private isOffLimitsButton(field: ExtractedField): boolean {
     const sel = field.selector;
-    return isPayFee(field.label) || isPayFee(sel?.name) || isPayFee(sel?.text)
-      || isSignatureRequestControl(field.label) || isSignatureRequestControl(sel?.text)
+    // The FACE words too (#228): since the selector is named by the accessible name, a control
+    // reading "Pay Fees" under an aria-label that does not would otherwise leave this test.
+    return isPayFee(field.label) || isPayFee(sel?.name) || isPayFee(sel?.text) || isPayFee(sel?.shownText)
+      || isSignatureRequestControl(field.label) || isSignatureRequestControl(sel?.text) || isSignatureRequestControl(sel?.shownText)
       || EXISTING_RECORD_ACTION.test(field.label || "")
       || EXISTING_RECORD_ACTION.test(sel?.name || "")
-      || EXISTING_RECORD_ACTION.test(sel?.text || "");
+      || EXISTING_RECORD_ACTION.test(sel?.text || "")
+      || EXISTING_RECORD_ACTION.test(sel?.shownText || "");
   }
 
   /** Off-limits for a DASHBOARD navigate specifically. On a logged-in home the only valid
@@ -13246,7 +13306,7 @@ export class AutoLearnAdapter extends BasePortalAdapter {
     // Only test text we actually have: isExcludedEntryLabel treats an EMPTY label as
     // excluded (nothing to start an application with), which would refuse every control
     // whose selector happens to carry no name/text.
-    const texts = [field.label, sel?.name, sel?.text].map((t) => String(t ?? "").trim()).filter(Boolean);
+    const texts = [field.label, sel?.name, sel?.text, sel?.shownText].map((t) => String(t ?? "").trim()).filter(Boolean);
     return texts.some((t) => isExcludedEntryLabel(t));
   }
 

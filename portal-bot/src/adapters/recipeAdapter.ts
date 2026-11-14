@@ -8146,7 +8146,13 @@ export class RecipeAdapter extends BasePortalAdapter {
     // Include the step NOTE in the safety haystack: a human-patch click step may carry a
     // css-only selector (no name/text) while its note names the button ("human-patch:
     // Submit") — the regex gates below must see that label too.
+    // THE WORDS ON THE CONTROL'S FACE ARE IN THE HAYSTACK TOO (#228). The learner names a role
+    // selector by the accessible name now (Tigard's "Apply" link carries the aria-label "Apply
+    // Residential Renewable Energy - Prescriptive"), and keeps the face text, when it differs, as
+    // selector.shownText — read here so a pay or submit word a person sees is refused exactly as
+    // it was when the face text was the recorded name. Only adds words: never lets a click through.
     const name = `${step.selector?.name || step.selector?.text || ""} ${step.note || ""}`.trim();
+    const gateWords = `${name} ${step.selector?.shownText ?? ""}`.trim();
     const flaggedFinal = isFinalSubmitStep(step);
 
     // A RECORD NUMBER FROM THE LEARN SESSION NAMES A FILING THAT IS NOT THIS ONE. Checked
@@ -8160,7 +8166,7 @@ export class RecipeAdapter extends BasePortalAdapter {
     //    final submit that pays ("Pay and Submit") under an approval that otherwise holds is a
     //    PAUSE, named: the filing is staged at review and a person pays — it used to be skipped
     //    in silence and the approved run read as an ordinary review stop.
-    if (PAY_FEE_REPLAY_GATE.test(name)) {
+    if (PAY_FEE_REPLAY_GATE.test(gateWords)) {
       if (flaggedFinal && this.finalSubmitRefusalsNow().length === 0) {
         throw await this.feeStopError(`The approved final submit "${name.slice(0, 60)}" pays a fee — automation never pays. Nothing was clicked; the application is staged at review for a person to pay and submit.`, "pay_to_file");
       }
@@ -8174,7 +8180,7 @@ export class RecipeAdapter extends BasePortalAdapter {
 
     // 3) Any step whose name/text matches submit keywords is hard-blocked UNLESS it is
     //    the explicitly flagged final submit. We never infer "submit button" from regex.
-    if (SUBMIT_KEYWORDS.test(name) && !flaggedFinal) return false;
+    if (SUBMIT_KEYWORDS.test(gateWords) && !flaggedFinal) return false;
 
     // 4) The explicitly allowlisted final submit — clicked ONLY through the shared gate, asked
     //    at the click itself: PORTAL_ALLOW_FINAL_SUBMIT=1 re-read now, a named person's

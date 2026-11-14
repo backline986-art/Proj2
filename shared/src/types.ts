@@ -5001,6 +5001,12 @@ export interface RecipeSelector {
   /** 0-based index when multiple match; omitted means .first(). */
   nth?: number;
   exact?: boolean;
+  /** #228: the words on the control's FACE when they differ from `name` (its accessible name, e.g.
+   *  a link reading "Apply" whose aria-label is "Apply Residential Renewable Energy"). NEVER a
+   *  locating strategy — no locator builder reads it. Read only by the click-safety haystacks
+   *  (the learner's off-limits tests, the replay's pay/submit gates), so a pay or submit word a
+   *  person sees on the control is refused exactly as it was when the face text was the name. */
+  shownText?: string;
   /** Alternate locator strategies tried in order when the primary selector finds
    *  nothing — survives portal UI updates that change one attribute but not all.
    *  Recorder contributors should capture 1-2 fallbacks (e.g. a stable css id as a
