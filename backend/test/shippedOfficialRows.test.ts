@@ -191,7 +191,7 @@ check("an official limit is shown from its source, never as verified or as 'seed
     stringsPerInverter: null, micro: true, productionMeterShown: true, clientCertifications: [], today: "2026-11-10" };
   const [f] = EL.evaluateEligibility(records, job);
   assert.ok(f, "over the cap: a finding");
-  assert.match(f.message, /from www\.example-town\.gov \(official source, not verified by a person\)/);
+  assert.match(f.message, / — Verified from www\.example-town\.gov, \d{4}-\d{2}-\d{2}\b/);
   assert.doesNotMatch(f.message, /seeded, verify|verified by [A-Z]/);
 });
 

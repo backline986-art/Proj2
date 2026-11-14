@@ -29,8 +29,10 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { AuthorityEligibilityRecord, EligibilityCitation, EligibilityLimit, EligibilityLimits, QcStatus, Severity } from "../../shared/src/types";
-import { shippedRowTier, sourceHostOf } from "../../shared/src/officialSource";
+import { landingTierFor, officialSourceWords, shippedRowTier, sourceHostOf } from "../../shared/src/officialSource";
 import type { AppDb } from "./db";
+import { addAuditLog } from "./audit";
+import { logger } from "./logger";
 import { usStateCode } from "./permitPath";
 
 type Kind = AuthorityEligibilityRecord["authorityKind"];
@@ -149,13 +151,49 @@ function sanitizeRecord(raw: unknown, confidence: AuthorityEligibilityRecord["co
 /** A shipped record's honoured tier: "official" only when it claims it and EVERY limit's citation
  *  passes shippedRowTier with its own words carrying the limit (quoteCarries, the one test the
  *  research path and the #637 bar already use). A program cap is a fact, never a filing door. */
-export function shippedRecordTier(claimed: unknown, rec: Pick<AuthorityEligibilityRecord, "limits">): "official" | "seeded" {
+export function shippedRecordTier(claimed: unknown, rec: Pick<AuthorityEligibilityRecord, "limits">, authorityHosts: readonly string[] = []): "official" | "seeded" {
   const limits = Object.entries(rec.limits) as Array<[keyof EligibilityLimits, EligibilityLimit<unknown>]>;
   if (!limits.length) return "seeded";
   return limits.every(([key, limit]) => shippedRowTier(claimed, {
     sourceUrl: limit.citation.sourceUrl, quote: limit.citation.quote, fetchedAt: limit.citation.fetchedAt,
+    verifiedAuthorityHosts: authorityHosts,
     quoteStatesValue: (q) => quoteCarries(key, limit.value, q),
   }).tier === "official") ? "official" : "seeded";
+}
+
+/** A page Keelix itself retrieved, by URL: its text and when it was read. */
+export interface RetrievedLimitPage { text: string; fetchedAt: string }
+
+/**
+ * A LOOKUP-FOUND RECORD'S TIER (official-source slice 4; CLAUDE.md rule 3). "official" only when EVERY
+ * limit's citation passes the one landing test, landingTierFor: its host passes the shared predicate
+ * (the authority's own hosts include a government page's vouch), its quote is in the bytes this process
+ * retrieved from that URL, with the fetched-at of that read; and the quote carries the limit's value
+ * (quoteCarries, the same test acceptProposedLimits and the #637 bar use). Anything short is "seeded".
+ * The official record's citations carry the fetched-at of the read that confirmed them.
+ */
+export function lookupRecordTier(
+  rec: Pick<AuthorityEligibilityRecord, "limits">,
+  pages: ReadonlyMap<string, RetrievedLimitPage>,
+  authorityHosts: readonly string[],
+): { tier: "official" | "seeded"; limits: EligibilityLimits; reasons: string[] } {
+  const entries = Object.entries(rec.limits) as Array<[keyof EligibilityLimits, EligibilityLimit<unknown>]>;
+  const reasons: string[] = [];
+  const stamped: EligibilityLimits = {};
+  for (const [key, limit] of entries) {
+    const page = pages.get(limit.citation.sourceUrl);
+    // The quote is its own "value" for landingTierFor (the in-bytes and host checks); quoteCarries is
+    // the limit-shaped value test (a number, a production meter, a certification's name).
+    const land = landingTierFor({
+      sourceUrl: limit.citation.sourceUrl, quote: limit.citation.quote, value: limit.citation.quote,
+      ...(page ? { fetchedAt: page.fetchedAt, retrievedText: page.text } : {}), verifiedAuthorityHosts: authorityHosts,
+    });
+    if (land.tier !== "official") reasons.push(...land.reasons.map((r) => `${key}: ${r}`));
+    else if (!quoteCarries(key, limit.value, limit.citation.quote)) reasons.push(`${key}: the quote does not carry the limit`);
+    (stamped as Record<string, unknown>)[key] = page ? { ...limit, citation: { ...limit.citation, fetchedAt: page.fetchedAt } } : limit;
+  }
+  if (!entries.length) reasons.push("no limits");
+  return reasons.length ? { tier: "seeded", limits: rec.limits, reasons } : { tier: "official", limits: stamped, reasons };
 }
 
 /** The hosts a record's limits cite (an official row is refreshed only from the same hosts). */
@@ -210,6 +248,71 @@ export function saveEligibilityRecord(
   return { saved: true, reason: verifiedBy ? "verified" : "seeded" };
 }
 
+/** The one official write: replaces a seeded or official row (callers check the person's row and
+ *  the same-host refresh rule first). */
+function writeOfficialRecord(db: AppDb, key: string, rec: Omit<AuthorityEligibilityRecord, "confidence" | "verifiedAt" | "verifiedBy">): void {
+  db.run(
+    `INSERT INTO authority_eligibility_limits (record_key, authority_kind, state, authority, program_name, limits_json, confidence, verified_at, verified_by, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, 'official', '', '', ?)
+     ON CONFLICT(record_key) DO UPDATE SET authority = excluded.authority, program_name = excluded.program_name,
+       limits_json = excluded.limits_json, confidence = excluded.confidence, verified_at = excluded.verified_at,
+       verified_by = excluded.verified_by, updated_at = excluded.updated_at`,
+    [key, rec.authorityKind, rec.state, rec.authority, rec.programName, JSON.stringify(rec.limits), new Date().toISOString()],
+  );
+}
+
+const LOOKUP_CONFLICT_ACTION = "eligibility_limits.official_conflict";
+
+/**
+ * LAND A LOOKUP'S LIMITS (official-source slice 4). Graded by lookupRecordTier against the pages this
+ * process read. A seeded grade goes through saveEligibilityRecord (never over a person's or an official
+ * row). An official grade replaces a seeded row; refreshes an official row only from the same hosts;
+ * and never touches a person's row: an official read that DIFFERS from it is recorded once as a
+ * conflict for a person (audit log), the row unchanged. A program limit is a fact, never a filing door.
+ */
+export function landLookupEligibilityRecord(
+  db: AppDb,
+  input: Omit<AuthorityEligibilityRecord, "confidence" | "verifiedAt" | "verifiedBy">,
+  evidence: { pages: ReadonlyMap<string, RetrievedLimitPage>; authorityHosts: readonly string[] },
+): { saved: boolean; tier: "official" | "seeded"; reason: string; conflict?: boolean } {
+  const rec = sanitizeRecord(input, "seeded");
+  if (!rec) return { saved: false, tier: "seeded", reason: "not a record: needs a kind, a US state and at least one cited limit" };
+  const graded = lookupRecordTier(rec, evidence.pages, evidence.authorityHosts);
+  if (graded.tier !== "official") {
+    const r = saveEligibilityRecord(db, rec);
+    return { saved: r.saved, tier: "seeded", reason: r.saved ? `seeded (${graded.reasons.slice(0, 3).join("; ")})` : r.reason };
+  }
+  const official = { ...rec, limits: graded.limits };
+  const key = eligibilityKey(rec.authorityKind, rec.state, rec.authority);
+  const row = db.get<Row>("SELECT limits_json, verified_at, confidence FROM authority_eligibility_limits WHERE record_key = ?", [key]);
+  let stored: EligibilityLimits = {};
+  try { stored = sanitizeLimits(JSON.parse(str(row?.limits_json) || "{}")); } catch { stored = {}; }
+  if (row && str(row.verified_at)) {
+    const differs = limitValues(stored) !== limitValues(official.limits);
+    if (differs) {
+      const fp = `${key}|${limitValues(stored)}|${limitValues(official.limits)}|${citedHosts(official.limits)}`;
+      const seen = db.get<{ id: string }>("SELECT id FROM audit_logs WHERE action = ? AND details LIKE ? LIMIT 1", [LOOKUP_CONFLICT_ACTION, `%"fingerprint":${JSON.stringify(fp)}%`]);
+      if (!seen) {
+        addAuditLog(db, null, "system", "eligibility-lookup", LOOKUP_CONFLICT_ACTION, {
+          state: rec.state, authority: rec.authority, kind: rec.authorityKind, current: JSON.parse(limitValues(stored)), found: JSON.parse(limitValues(official.limits)),
+          sources: Object.values(official.limits).map((l) => (l as EligibilityLimit<unknown>).citation.sourceUrl), fingerprint: fp,
+        });
+        logger.warn("eligibility", `${rec.authority} (${rec.state}): an official page reads its program limits differently from the record a person verified; kept as a conflict for a person, the record is unchanged`);
+      }
+    }
+    return { saved: false, tier: "official", reason: "a person verified this record; an official read never overwrites it", conflict: differs };
+  }
+  if (row && str(row.confidence) === "official" && citedHosts(stored) !== citedHosts(official.limits)) {
+    return { saved: false, tier: "official", reason: `an official record is on file from ${citedHosts(stored)}; it is refreshed only from the same source` };
+  }
+  writeOfficialRecord(db, key, official);
+  return { saved: true, tier: "official", reason: "official" };
+}
+
+/** The limits' values only (no citations), for telling a real difference from a re-citation. */
+const limitValues = (limits: EligibilityLimits): string =>
+  JSON.stringify(Object.fromEntries(Object.entries(limits).sort(([a], [b]) => (a < b ? -1 : 1)).map(([k, l]) => [k, (l as EligibilityLimit<unknown>).value])));
+
 /** Seed the shipped rows. Idempotent; never over a verified row (rule 3). A shipped row honoured as
  *  official (shippedEligibilityRecords) lands official: it replaces a seeded row, refreshes an official
  *  row only from the same hosts, and never touches a person's row. */
@@ -231,21 +334,15 @@ export function seedEligibilityRecords(db: AppDb, filePath = referencePath()): n
       try { stored = sanitizeLimits(JSON.parse(str(row.limits_json) || "{}")); } catch { stored = {}; }
       if (citedHosts(stored) !== citedHosts(rec.limits)) continue;
     }
-    db.run(
-      `INSERT INTO authority_eligibility_limits (record_key, authority_kind, state, authority, program_name, limits_json, confidence, verified_at, verified_by, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, 'official', '', '', ?)
-       ON CONFLICT(record_key) DO UPDATE SET authority = excluded.authority, program_name = excluded.program_name,
-         limits_json = excluded.limits_json, confidence = excluded.confidence, verified_at = excluded.verified_at,
-         verified_by = excluded.verified_by, updated_at = excluded.updated_at`,
-      [key, rec.authorityKind, rec.state, rec.authority, rec.programName, JSON.stringify(rec.limits), new Date().toISOString()],
-    );
+    writeOfficialRecord(db, key, rec);
     written += 1;
   }
   return written;
 }
 
 /** The stored records for one state (both kinds), the shipped rows filling any key the store lacks
- *  (a boot whose seed failed still screens). A failed read is the shipped rows alone. */
+ *  (a boot whose seed failed still screens). A failed read is the shipped rows alone. Tiers AS STORED:
+ *  screens read eligibilityOfficial.eligibilityRecordsOnFile, which re-checks an official record. */
 export function eligibilityRecordsForState(db: AppDb | null, state: string): AuthorityEligibilityRecord[] {
   const code = usStateCode(state);
   if (!code) return [];
@@ -343,7 +440,7 @@ function matches(rec: AuthorityEligibilityRecord, job: EligibilityJob): boolean 
 const kindSlug = (k: Kind) => (k === "utility_program" ? "utility-program" : "permit-path");
 const recordLabel = (rec: AuthorityEligibilityRecord) => rec.programName || (rec.authorityKind === "utility_program" ? "the utility's program" : "the simplified permit path");
 const citeText = (c: EligibilityCitation, conf: AuthorityEligibilityRecord["confidence"]) =>
-  `${c.sourceName || c.sourceUrl}${c.quote ? `: "${c.quote}"` : ""}${c.sourceUrl && c.sourceName ? ` (${c.sourceUrl})` : ""}${conf === "seeded" ? " — seeded, verify" : conf === "official" ? ` — from ${sourceHostOf(c.sourceUrl) || "the official source"} (official source, not verified by a person)` : ""}`;
+  `${c.sourceName || c.sourceUrl}${c.quote ? `: "${c.quote}"` : ""}${c.sourceUrl && c.sourceName ? ` (${c.sourceUrl})` : ""}${conf === "seeded" ? " — seeded, verify" : conf === "official" ? ` — ${officialSourceWords(sourceHostOf(c.sourceUrl), c.fetchedAt)}` : ""}`;
 const fill = (template: string, vars: Record<string, string>) => template.replace(/\{(\w+)\}/g, (m, k: string) => (k in vars ? vars[k] : m));
 
 interface Screen { finding: EligibilityFinding; excludes: boolean }

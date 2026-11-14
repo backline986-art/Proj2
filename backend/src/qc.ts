@@ -2,7 +2,8 @@ import type { AppDb } from "./db";
 import { officialSourceWords, sourceHostOf } from "../../shared/src/officialSource";
 import { cecListing, cecTableCount, inverterSettingsByStandingAnswer, jobInverterForCec, jobInverterUl1741Sb, type CecUl1741SbAnswer } from "./cecEquipment";
 import { evaluateBaselineRules } from "./baselineRules";
-import { certificationList, eligibilityRecordsForState } from "./eligibilityLimits";
+import { certificationList } from "./eligibilityLimits";
+import { eligibilityRecordsOnFile } from "./eligibilityOfficial";
 import { resolveUtilityRequirements } from "./utilityRequirements";
 import { resolveJurisdictionQcRecords, type JurisdictionQcRecord } from "./jurisdictionQcRules";
 import type { UtilityRequirementList } from "../../shared/src/types";
@@ -726,7 +727,7 @@ export function runQcForProject(db: AppDb, projectId: string, options: QcRunOpti
     // PROGRAM / PERMIT-PATH ELIGIBILITY (#679): the cited records on file for the job's state, and the
     // project's OWN client's certifications (null when the project has no client row to read).
     const eligibility = {
-      records: eligibilityRecordsForState(db, clean(baselinePayload.state)),
+      records: eligibilityRecordsOnFile(db, clean(baselinePayload.state)),
       clientCertifications: std ? certificationList(std.installer_certifications) : null,
       reportUnknownProgram: true,
     };
@@ -979,6 +980,11 @@ export function runQcForProject(db: AppDb, projectId: string, options: QcRunOpti
         // only, cached by address hash). QC is a write path; the gate only reads the cache.
         const { ensureParcelJurisdictionChecked } = await import("./parcelJurisdiction");
         await ensureParcelJurisdictionChecked(db, projectId);
+        // RAPID SHUTDOWN FROM THE MAKER'S OWN SHEET (#220): a microinverter job whose package does not
+        // say its equipment is listed gets the maker's datasheet attached (kept once per model), or
+        // one lookup queued for it.
+        const { ensureMakerSpecSheetForProject } = await import("./makerSpecSheets");
+        await ensureMakerSpecSheetForProject(db, projectId);
       }
     })().catch(() => null));
   } catch (err) {

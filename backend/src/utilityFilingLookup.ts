@@ -23,6 +23,7 @@
 // ---------------------------------------------------------------------------
 
 import type { SiteVouch } from "../../shared/src/types";
+import { isOfficialSourceHost } from "../../shared/src/officialSource";
 import { findSiteVouches, mergeVouches } from "./governmentVouches";
 import type { AppDb } from "./db";
 import type { CitedFact, EligibilityLimits, LLMProvider, ProjectRecord, WebLookupResult } from "../../shared/src/types";
@@ -31,7 +32,7 @@ import { logger } from "./logger";
 import { knownPowerClerkUtility } from "./utilityIdentity";
 import { isVerifiedKnowledge, knowledgeProfileKey } from "./knowledgeBase";
 import { portalEntityEvidence } from "./portalRecipes";
-import { acceptProposedLimits, saveEligibilityRecord } from "./eligibilityLimits";
+import { acceptProposedLimits, landLookupEligibilityRecord, type RetrievedLimitPage } from "./eligibilityLimits";
 // Text constants only (the prompt); the landing is imported where it runs, so this module and
 // utilityRequirements.ts (which reads this one's keys) never load each other at start-up.
 import { UTILITY_REQUIREMENTS_RESEARCH_RULE, UTILITY_REQUIREMENTS_RESEARCH_SCHEMA } from "./utilityRequirementsResearchPrompt";
@@ -606,6 +607,9 @@ function rawFilingOf(text: string): RawFact {
   try { return ((JSON.parse(t.slice(a, b + 1)) as Record<string, unknown>).filing ?? null) as RawFact; } catch { return null; }
 }
 
+/** Pages read to confirm a lookup's program limits (each limit usually cites one tariff or program page). */
+const LIMIT_CONFIRM_MAX_READS = 3;
+
 const isTimeout = (r: Pick<WebLookupResult, "timedOut" | "error">) => Boolean(r.timedOut) || /\b(?:abort(?:ed)?|timed? ?out)\b/i.test(str(r.error));
 
 export async function runUtilityFilingLookup(
@@ -730,11 +734,29 @@ export async function runUtilityFilingLookup(
     ...(parsed.serviceArea?.value ? { serviceArea: parsed.serviceArea } : existing?.serviceArea?.value ? { serviceArea: existing.serviceArea } : {}),
     lookedUpAt: new Date().toISOString(),
   });
-  // The cited program limits land as the utility's own eligibility record, SEEDED (never over a
-  // verified or official row — saveEligibilityRecord refuses those, rule 3).
+  // The cited program limits land as the utility's own eligibility record (official-source slice 4):
+  // OFFICIAL when every limit's quote is in a page Keelix read here, on the utility's own official host
+  // (vouches included, the row just saved carries this run's); SEEDED otherwise. Never over a person's
+  // record (a differing official read is a conflict for a person), never over an official one except
+  // from its own hosts (landLookupEligibilityRecord, rule 3).
   if (Object.keys(parsed.limits).length) {
     try {
-      saveEligibilityRecord(db, { authorityKind: "utility_program", state: input.state, authority: input.utility, programName: programName || `${input.utility} customer-generation program`, limits: parsed.limits });
+      const { utilityOfficialHosts } = await import("./utilityRequirements");
+      const hosts = utilityOfficialHosts(db, input.state, input.utility);
+      const pages = new Map<string, RetrievedLimitPage>();
+      const urls = [...new Set(Object.values(parsed.limits).map((l) => str((l as { citation?: { sourceUrl?: string } })?.citation?.sourceUrl)))]
+        .filter((u) => isOfficialSourceHost(u, hosts));
+      const rd = urls.length ? await getReader() : null;
+      for (const url of rd ? urls.slice(0, LIMIT_CONFIRM_MAX_READS) : []) {
+        try {
+          const page = await rd!.read(url);
+          if (page.ok && page.text) pages.set(url, { text: page.text, fetchedAt: new Date().toISOString() });
+        } catch (err) {
+          logger.warn("utility-filing", `could not read ${url} to confirm program limits: ${err instanceof Error ? err.message : String(err)}`);
+        }
+      }
+      const landed = landLookupEligibilityRecord(db, { authorityKind: "utility_program", state: input.state, authority: input.utility, programName: programName || `${input.utility} customer-generation program`, limits: parsed.limits }, { pages, authorityHosts: hosts });
+      parsed.dropped.push(`program limits: ${landed.reason}`);
     } catch (err) {
       logger.warn("utility-filing", `could not store program limits for ${input.utility}: ${err instanceof Error ? err.message : String(err)}`);
     }
