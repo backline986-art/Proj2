@@ -11979,6 +11979,11 @@ export class AutoLearnAdapter extends BasePortalAdapter {
       }
       const hiddenAfter = await hiddenFilled(sec.key);
       if (!populated.length && hiddenAfter > hiddenBefore) populated.push(sec.heading);
+      // #221 — A CONFIRMED PICK THAT TOOK THE PAGE BACK (live Tigard run 15: "Add Contact" on the
+      // contact search page returns to the application, so the section that was read is gone and
+      // nothing on the new page reads as "populated"). The search form's verdict "picked" — this
+      // client's row, its own control pressed — with the section no longer on the page is the fill.
+      if (!populated.length && searchVerdict === "picked" && !after.some((s) => s.heading === sec.heading)) populated.push(sec.heading);
       if (populated.length && searchVerdict !== "empty") {
         pressed++;
         // On the LAST step of the group: a candidate list fills the parcel only once its row is
