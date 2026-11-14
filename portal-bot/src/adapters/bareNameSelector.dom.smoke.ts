@@ -7,7 +7,8 @@
 // role, threw "Recipe step has no usable selector." for the bare one, and — the primary being
 // built outside the level loop — failed step 8 without trying the #id.
 //
-// MUST-PASS a saved bare-name step fills the number box (with its #id fallback, and alone).
+// MUST-PASS a saved bare-name step fills the number box (with its #id fallback, and alone), as
+//   recorded — not by a self-heal, which patches the recipe and drops auto-submit trust.
 // MUST-PASS the learner's shape for that box, read off the page by the REAL extractor and
 //   toExtractedField, is never a bare name, and its primary alone fills the box.
 // MUST-PASS a step whose primary cannot be built (no strategy at all) fills via its fallback; a
@@ -15,7 +16,8 @@
 //   primary could not be built.
 // MUST-KEEP { role: "button", name: "Next", exact: true } clicks the button NAMED Next, never the
 //   decoy whose name ATTRIBUTE is "Next"; a { label } step fills as before; a saved bare name that
-//   is a RADIO GROUP's name lands on the recorded #id option, never the group's first radio.
+//   is a RADIO GROUP's name lands on the recorded #id option, never the group's first radio, and
+//   with no option id it ticks nothing at all.
 //
 // Run: npx tsx portal-bot/src/adapters/bareNameSelector.dom.smoke.ts
 import "../smokeArtifactDirs";
@@ -72,7 +74,7 @@ const fee = (selector: RecipeSelector): RecipeStep =>
   ({ action: "fill", phase: "fill", selector, field: "declaredValuation", note: "fee244341" }) as RecipeStep;
 
 const browser = await chromium.launch();
-type Run = { fee: string; work: string; clicked: string; occ1: boolean; occ2: boolean; ok: boolean; message: string; trail: string; resolution: string };
+type Run = { fee: string; work: string; clicked: string; occ1: boolean; occ2: boolean; ok: boolean; message: string; trail: string; resolution: string; healed: number };
 const run = async (steps: RecipeStep[]): Promise<Run> => {
   const ctx = await browser.newContext();
   await ctx.addInitScript({ content: "globalThis.__name = globalThis.__name || ((f) => f);" });
@@ -90,22 +92,27 @@ const run = async (steps: RecipeStep[]): Promise<Run> => {
   const trail = (adapter as unknown as { driftWarnings: string[] }).driftWarnings.join(" | ");
   // The last resolution's own trail (resolveTrail): kept for every step, reported on a select miss.
   const resolution = (adapter as unknown as { resolveTrail: string[] }).resolveTrail.join(" | ");
+  // A self-heal patches the recipe and drops auto-submit trust: a step that resolves as recorded needs none.
+  const healed = (adapter as unknown as { healedSteps: unknown[] }).healedSteps.length;
   await ctx.close();
-  return { ...read, ok: !!(r as { ok?: boolean }).ok, message: String((r as { message?: string }).message ?? ""), trail, resolution };
+  return { ...read, ok: !!(r as { ok?: boolean }).ok, message: String((r as { message?: string }).message ?? ""), trail, resolution, healed };
 };
-const show = (r: Run): string => JSON.stringify({ fee: r.fee, ok: r.ok, message: r.message.slice(0, 160), trail: r.trail.slice(0, 300), resolution: r.resolution.slice(0, 300) });
+const show = (r: Run): string => JSON.stringify({ fee: r.fee, ok: r.ok, healed: r.healed, message: r.message.slice(0, 160), trail: r.trail.slice(0, 300), resolution: r.resolution.slice(0, 300) });
 
 try {
   // ── MUST-PASS: the saved recipe, exactly as Star's step 8 was recorded ───────────────────────
   const saved = await run([fee({ name: "fee244341", fallbacks: [{ css: "#fee244341" }] })]);
   check("MUST-PASS saved { name, fallbacks:[#id] } (Star step 8): the valuation lands in the number box",
-    saved.fee === VALUATION, show(saved));
+    saved.fee === VALUATION && saved.healed === 0, show(saved));
   check("...and the step did not fail with \"no usable selector\"", !/no usable selector/i.test(`${saved.message} ${saved.trail}`), show(saved));
 
-  // Without the #id fallback the bare name has to be READ — skipping to a fallback cannot save it.
+  // Without the #id fallback the bare name has to be READ. Skipping to a fallback cannot save it;
+  // a self-heal by the note's label can (it re-anchors by label), but a heal patches the recipe
+  // and drops auto-submit trust, so the step must land as recorded, with no heal.
   const bare = await run([fee({ name: "fee244341" })]);
   check("MUST-PASS saved bare { name } with NO fallback: read as the name attribute, the box is filled",
     bare.fee === VALUATION, show(bare));
+  check("...as recorded, not by a self-heal around an unreadable selector", bare.healed === 0, show(bare));
 
   // ── MUST-PASS: the learner's new shape, read off this page by the real extractor ─────────────
   const lctx = await browser.newContext();
@@ -123,14 +130,15 @@ try {
   check("MUST-PASS ...it writes the name attribute through the one builder, and keeps the #id fallback",
     learned?.css === nameAttributeCss("fee244341") && !!learned?.fallbacks?.some((f) => f.css === "#fee244341"), JSON.stringify(learned));
   const learnedPrimary = await run([fee({ ...(learned ?? {}), fallbacks: undefined })]);
-  check("MUST-PASS the learner's primary ALONE (fallbacks stripped) fills the box on replay", learnedPrimary.fee === VALUATION, show(learnedPrimary));
+  check("MUST-PASS the learner's primary ALONE (fallbacks stripped) fills the box on replay, no heal",
+    learnedPrimary.fee === VALUATION && learnedPrimary.healed === 0, show(learnedPrimary));
   const learnedFull = await run([fee(learned ?? {})]);
   check("MUST-PASS the learner's whole selector fills the box on replay", learnedFull.fee === VALUATION, show(learnedFull));
 
   // ── MUST-PASS: a primary that cannot be built falls to its fallbacks ─────────────────────────
   const unbuilt = await run([fee({ fallbacks: [{ css: "#fee244341" }] })]);
   check("MUST-PASS a primary with no usable strategy (locator() throws) still fills via its #id fallback",
-    unbuilt.fee === VALUATION, show(unbuilt));
+    unbuilt.fee === VALUATION && unbuilt.healed === 0, show(unbuilt));
   const malformed = await run([fee({ css: "#fee244341[[", fallbacks: [{ css: "#fee244341" }] })]);
   check("MUST-PASS a malformed-css primary still fills via its fallback", malformed.fee === VALUATION, show(malformed));
   // Its note names nothing on the page either, so self-heal (which anchors on the note) cannot
@@ -152,6 +160,11 @@ try {
   check("MUST-KEEP a saved bare name that is a RADIO GROUP's lands on the recorded #id option (Tenant)",
     radio.occ2 === true, JSON.stringify({ occ1: radio.occ1, occ2: radio.occ2, ok: radio.ok, message: radio.message.slice(0, 160) }));
   check("...never the group's first radio (a group's name is not the option's identity)", radio.occ1 === false, JSON.stringify({ occ1: radio.occ1, occ2: radio.occ2 }));
+  // With no option id to disambiguate, reading the group's name as an address would tick the
+  // first radio — an answer nobody recorded. It must resolve nothing, as it did before (#229).
+  const groupOnly = await run([{ action: "check", phase: "fill", selector: { name: "occ" }, note: "occ" } as RecipeStep]);
+  check("MUST-KEEP a saved bare RADIO-GROUP name with no option id ticks no option (never a guessed first radio)",
+    groupOnly.occ1 === false && groupOnly.occ2 === false, JSON.stringify({ occ1: groupOnly.occ1, occ2: groupOnly.occ2, ok: groupOnly.ok, message: groupOnly.message.slice(0, 160) }));
 
   // ── The builder's quoting: a name carrying a quote and a backslash still addresses its control ─
   const qctx = await browser.newContext();

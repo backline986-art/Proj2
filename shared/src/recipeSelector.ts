@@ -30,11 +30,12 @@ export function nameAttributeOf(sel: NamedSelector | null | undefined): string {
 /** A CSS selector for the control whose name ATTRIBUTE is `name`.
  *
  *  A RADIO'S OR CHECKBOX'S NAME IS ITS GROUP'S, NOT ITS OWN. Every option of a radio group
- *  carries the same name, so `[name="grp"]` matches them all and the first visible one would be
- *  taken — the wrong answer, checked with nothing raised. A saved step that recorded a group's
- *  name as a bare `name` has its option's #id as a fallback, so the name level must match
- *  nothing there and let the #id decide. The value is quoted with `\` and `"` escaped (Node has
- *  no CSS.escape); ASP.NET names (`ctl00$Main$txtValue`) need nothing more inside quotes. */
+ *  carries the same name, so `[name="grp"]` matches them all and, with no recorded option id to
+ *  tell them apart, replay ticks the first one — an answer nobody recorded, reported as success
+ *  (bareNameSelector smoke, red without this). So the name level matches no radio or checkbox:
+ *  the option's own #id fallback decides, or the step finds nothing, as it did before #229. The
+ *  value is quoted with `\` and `"` escaped (Node has no CSS.escape); ASP.NET names
+ *  (`ctl00$Main$txtValue`) need nothing more inside quotes. */
 export function nameAttributeCss(name: string): string {
   const v = String(name)
     .replace(/\\/g, "\\\\")
