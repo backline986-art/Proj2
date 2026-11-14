@@ -763,6 +763,12 @@ const RSD_OPTION_TITLE = /(690\.12\s*\(\s*B\s*\)\s*\(\s*2\s*\)\s*\(\s*3\s*\))\s*
 function withoutRsdOptionTitle(sources: DesignTextSource[]): DesignTextSource[] {
   return sources.map((s) => ({ ...s, text: String(s.text || "").replace(RSD_OPTION_TITLE, "$1") }));
 }
+/** DOES THE PACKAGE SAY ITS RAPID-SHUTDOWN EQUIPMENT IS LISTED (690.12(B)(2))? The one answer: the
+ *  edition rule below asks it, and the maker's spec-sheet fetch (makerSpecSheets.ts) asks it of a
+ *  maker's sheet before attaching one, so a sheet is attached only when it would answer the rule. */
+export function rsdListedEquipmentAffirmed(sources: DesignTextSource[]): Affirmed | null {
+  return affirmedIn(withoutRsdOptionTitle(sources), RSD_LISTED_EQUIPMENT_PATTERNS);
+}
 /** city.ess.details-missing's trigger: a mention of storage scope. */
 const ESS_TRIGGER_PATTERNS: RegExp[] = [/battery/i, /\bESS\b/i, /powerwall/i, /encharge/i, /backup/i];
 const STORAGE_WORD = String.raw`(?:batter(?:y|ies)|ESS|backup|powerwall|encharge|energy\s+storage(?:\s+system)?|storage)`;

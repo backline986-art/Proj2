@@ -3935,6 +3935,38 @@ const VERSIONED_MIGRATIONS: VersionedMigration[] = [
       addColumnIfMissing(db, "client_invoices", "project_id", "TEXT NOT NULL DEFAULT ''");
     },
   },
+  {
+    // v90 (#220, rapid shutdown from the maker's spec sheet; owner card 2026-11-13 "Keelix attaches the
+    // maker's spec sheet"): Helm's number. v88 and v89 are in main ahead of it.
+    // Helm renumbers at merge if the queue changes — nothing here depends on the number.
+    version: 90,
+    name: "maker_spec_sheets",
+    up: (db) => {
+      // A MAKER'S OWN DATASHEET FOR ONE PRODUCT (makerSpecSheets.ts), fetched once per make + model and
+      // shared on purpose like cec_equipment: a public PDF from the maker's own site, no tenant data.
+      // status found = the sheet names the model and says it is listed rapid-shutdown equipment
+      // (rsd_quote, the sheet's own words); no_listing = the sheet was read and does not say so;
+      // not_found = no sheet on the maker's own site could be read (detail says why). Written ONLY by
+      // the maker_spec_sheet job; a project gets a COPY as its own inverter_spec document.
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS maker_spec_sheets (
+          make_key TEXT NOT NULL,
+          model_key TEXT NOT NULL,
+          make TEXT NOT NULL DEFAULT '',
+          model TEXT NOT NULL DEFAULT '',
+          status TEXT NOT NULL,
+          source_url TEXT NOT NULL DEFAULT '',
+          host TEXT NOT NULL DEFAULT '',
+          sha256 TEXT NOT NULL DEFAULT '',
+          stored_path TEXT NOT NULL DEFAULT '',
+          rsd_quote TEXT NOT NULL DEFAULT '',
+          detail TEXT NOT NULL DEFAULT '',
+          fetched_at TEXT NOT NULL,
+          PRIMARY KEY (make_key, model_key)
+        )
+      `);
+    },
+  },
 ];
 
 /** v47 was edited in place while #218 was open (Helm's review at 0116f98a): a DB that ran an earlier
