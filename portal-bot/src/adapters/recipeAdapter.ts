@@ -1432,12 +1432,21 @@ export class RecipeAdapter extends BasePortalAdapter {
       const mark = (phase: string, started: number, note?: string) => { this.phaseTimings.push({ phase, ms: Date.now() - started, ...(note ? { note } : {}) }); };
       mark("open browser", tStart);
       this.progress("open", "Browser open — going to the portal", Date.now() - tStart);
+      this.landedPortalSite = "";
       if (this.recipe.portalUrl) {
         const tGoto = Date.now();
         await this.withProgress("goto", "Opening the portal", () => this.guardedGoto(this.recipe.portalUrl!, "open the recipe's portal", { waitUntil: "domcontentloaded", timeout: 30000 }));
         const stuck = await this.recoverFromPortalErrorPage(this.recipe.portalUrl, "open the recipe's portal");
         await smartWait(this.page);
         mark("portal goto", tGoto, stuck ? "error page not left" : undefined);
+        // WHERE THE PORTAL URL LANDED, read here — after its own redirects, before the sign-in can
+        // move the page (#231, adoptLandedPortalSite). A landing on the other track's portal stops
+        // the run now: no credential is typed into it.
+        const landedRefusal = this.adoptLandedPortalSite("open the recipe's portal");
+        if (landedRefusal) {
+          return fail(`${this.portalName}: replay safety gate refused: ${landedRefusal} — stopped before signing in`,
+            { phaseTimings: this.phaseTimings, driftWarnings: this.driftWarnings, guardRefusals: this.guardRefusals });
+        }
       }
 
       // Log in via the shared, portal-agnostic login flow. It detects/reveals the login
@@ -7550,6 +7559,69 @@ export class RecipeAdapter extends BasePortalAdapter {
     "microsoftonline.com", "b2clogin.com", "okta.com", "auth0.com", "onelogin.com", "pingidentity.com", "login.gov", "id.me",
   ]);
 
+  /** The site of the recipe's own portal: its portalUrl, else its first goto. The one answer the
+   *  goto gate and adoptLandedPortalSite both read. "" when the recipe names neither. */
+  private recipeHomeSite(): string {
+    const anchor = this.recipe.portalUrl || String(this.recipe.steps.find((s) => s.action === "goto")?.value ?? "");
+    return anchor ? RecipeAdapter.siteOf(anchor) : "";
+  }
+
+  /** HARD RULE 5, THE TRACK HALF OF THE GOTO GATE: a permit recipe never opens a utility
+   *  (PowerClerk) portal, a utility recipe never opens a permit portal, unless the recipe's own
+   *  portal (`home`) is one. The refusal reason, or "". ONE predicate for a goto's target and for
+   *  the site the recipe's portal landed on (#231), so the two can never disagree. */
+  private gotoTrackRefusal(target: string, home: string): string {
+    if (this.recipe.scopeType === "ahj" && /powerclerk/i.test(target) && !/powerclerk/i.test(home)) {
+      return `a permit recipe may not open a utility (PowerClerk) portal: ${target}`;
+    }
+    if (this.recipe.scopeType === "utility" && /accela|tylerhost|epermit/i.test(target) && !/accela|tylerhost|epermit/i.test(home)) {
+      return `a utility recipe may not open a permit portal: ${target}`;
+    }
+    return "";
+  }
+
+  /** The site loading the recipe's own portalUrl landed on, when it differs from portalUrl's own
+   *  (adoptLandedPortalSite). "" = none: the goto gate is exactly the recipe's portal. */
+  private landedPortalSite = "";
+
+  /**
+   * A PORTAL URL THAT REDIRECTS ELSEWHERE MAKES THE SITE IT LANDED ON THE RECIPE'S PORTAL FOR THIS
+   * RUN. City of Meridian (replay sweep 2026-11-14, #231): portalUrl citizenportal.meridiancity.org/
+   * CitizenAccess/ redirects to aca-prod.accela.com/meridian/Default.aspx; the run landed and signed
+   * in there, then refused its own step 0 (goto aca-prod.accela.com/MERIDIAN/Dashboard.aspx) as
+   * "leaving the recipe's portal (meridiancity.org)" — the gate knew portalUrl's site only.
+   *
+   * The site is OBSERVED in this run (page.url() once the portal goto has settled), never read from
+   * the recipe: nothing a recipe step names vouches for a site. Called by login() BEFORE the sign-in,
+   * so a site a login link reaches is never adopted; an identity provider (SSO_SITES, already
+   * allowed) and a page that is not http(s) are not adopted either. The track half of the gate
+   * (gotoTrackRefusal) is asked FIRST: a permit portalUrl that lands on a utility portal, or the
+   * reverse, is recorded as a refusal and never adopted, and the caller stops before any credential
+   * is typed there. It is asked with NO home exemption — rule 5's one carve-out (a utility filing
+   * inside the city's permit portal its verified record names) covers that portal, never another
+   * permit-platform site a redirect reaches. Returns that refusal, else "".
+   */
+  private adoptLandedPortalSite(why: string): string {
+    this.landedPortalSite = "";
+    if (!this.recipe.portalUrl) return "";
+    const here = String(this.page && typeof this.page.url === "function" ? this.page.url() ?? "" : "");
+    if (!/^https?:\/\//i.test(here)) return "";
+    const home = this.recipeHomeSite();
+    const site = RecipeAdapter.siteOf(here);
+    if (!home || !site || site === home || RecipeAdapter.SSO_SITES.has(site)) return "";
+    const track = this.gotoTrackRefusal(site, "");
+    if (track) {
+      const reason = `the recipe's portal (${home}) landed on ${site} — ${track}`;
+      const line = `REFUSED goto (${why}): ${reason}`;
+      this.guardRefusals.push(line);
+      this.driftWarnings.push(line);
+      return reason;
+    }
+    this.landedPortalSite = site;
+    this.agingNotes.push(`the recipe's portal (${home}) landed on ${site} — that site is the recipe's portal for this run's gotos`);
+    return "";
+  }
+
   /** The page, as the shared predicates read it: does it NAME itself the review step, is it
    *  read-only, and does it show a filing-shaped control. Unknown (a page that cannot be read)
    *  answers every question with undefined. */
@@ -7635,16 +7707,18 @@ export class RecipeAdapter extends BasePortalAdapter {
       const url = String(intent.url || "");
       if (!/^https?:\/\//i.test(url)) return url ? refuse(`"${url.slice(0, 80)}" is not an http(s) URL`) : refuse("no URL");
       const target = RecipeAdapter.siteOf(url);
-      const anchor = this.recipe.portalUrl || String(this.recipe.steps.find((s) => s.action === "goto")?.value ?? "");
-      const home = anchor ? RecipeAdapter.siteOf(anchor) : "";
-      if (this.recipe.scopeType === "ahj" && /powerclerk/i.test(target) && !/powerclerk/i.test(home)) {
-        return refuse(`a permit recipe may not open a utility (PowerClerk) portal: ${target}`);
-      }
-      if (this.recipe.scopeType === "utility" && /accela|tylerhost|epermit/i.test(target) && !/accela|tylerhost|epermit/i.test(home)) {
-        return refuse(`a utility recipe may not open a permit portal: ${target}`);
-      }
-      if (home && target !== home && !RecipeAdapter.SSO_SITES.has(target)) {
-        return refuse(`goto leaves the recipe's portal (${home}) for ${target} — stopped rather than followed`);
+      const home = this.recipeHomeSite();
+      // The track half FIRST, against the recipe's own portal only — the landed site below never
+      // relaxes it.
+      const track = this.gotoTrackRefusal(target, home);
+      if (track) return refuse(track);
+      // THE SITE THE RECIPE'S OWN PORTAL URL LANDED ON IS THE RECIPE'S PORTAL TOO (#231; see
+      // adoptLandedPortalSite). Only that one observed site; "" adds nothing, and an unparseable
+      // target ("") never matches it.
+      const landed = this.landedPortalSite;
+      const ownSite = target === home || (!!landed && target === landed);
+      if (home && !ownSite && !RecipeAdapter.SSO_SITES.has(target)) {
+        return refuse(`goto leaves the recipe's portal (${home}${landed ? `, landed on ${landed}` : ""}) for ${target} — stopped rather than followed`);
       }
       return "";
     }

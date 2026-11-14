@@ -1434,12 +1434,91 @@ async function testGotoLeavingThePortalStopsTheRun() {
   }
 }
 
+// #231 — THE SITE THE RECIPE'S OWN PORTAL URL LANDED ON IS ITS PORTAL TOO, AND NOTHING ELSE IS.
+// City of Meridian, 2026-11-14: portalUrl citizenportal.meridiancity.org/CitizenAccess/ redirects to
+// aca-prod.accela.com/meridian/Default.aspx, and the recipe's own step 0 (goto aca-prod.accela.com/
+// MERIDIAN/Dashboard.aspx) was refused as leaving the portal. adoptLandedPortalSite is what login()
+// calls once the portal goto settles; the fake page's url() stands for where that goto landed.
+async function testLandedPortalSiteIsTheRecipesPortal() {
+  type Probe = { adoptLandedPortalSite?: (why: string) => string; landedPortalSite?: string };
+  const run = async (c: { scope: "ahj" | "utility"; portalUrl: string; landed: string; to: string[] }) => {
+    const log: ActionLog = { clicks: [], fills: [], gotos: [], checks: 0 };
+    const steps = [...c.to.map((u) => ({ action: "goto", value: u, note: "entry url" }) as RecipeStep), { action: "stopForReview" } as RecipeStep];
+    const adapter = new RecipeAdapter({ ...baseRecipe(steps), scopeType: c.scope, portalUrl: c.portalUrl }, {}, {});
+    const page = makeFakePage({ log });
+    page.url = () => c.landed;
+    withFakePage(adapter, page);
+    const probe = adapter as unknown as Probe;
+    const refusal = typeof probe.adoptLandedPortalSite === "function" ? probe.adoptLandedPortalSite("open the recipe's portal") : "";
+    const adopted = probe.landedPortalSite ?? "";
+    const result = await adapter.fillApplication(fakeProject);
+    const data = (result.data ?? {}) as { agingNotes?: string[]; guardRefusals?: string[] };
+    return { refusal, adopted, result, gotos: log.gotos, notes: data.agingNotes ?? [], refusals: adapter.guardRefusals };
+  };
+  const meridian = "https://citizenportal.meridiancity.org/CitizenAccess/";
+  const landed = "https://aca-prod.accela.com/meridian/Default.aspx";
+  const dashboard = "https://aca-prod.accela.com/MERIDIAN/Dashboard.aspx";
+  const third = "https://www.example-other.org/apply";
+
+  const a = await run({ scope: "ahj", portalUrl: meridian, landed, to: [dashboard] });
+  assert.equal(a.refusal, "", `MUST-PASS (Meridian): no refusal on landing (${a.refusal})`);
+  assert.equal(a.adopted, "accela.com", "MUST-PASS (Meridian): the landed site is the recipe's portal for this run");
+  assert.deepEqual(a.gotos, [dashboard], `MUST-PASS (Meridian): step 0's goto to the landed site ran (${a.result.message})`);
+  assert.equal(a.result.ok, true, `MUST-PASS (Meridian): ${a.result.message}`);
+  assert.ok(a.notes.some((n) => /landed on accela\.com/.test(n)), `MUST-PASS (Meridian): the landing is named in the run's notes (${JSON.stringify(a.notes)})`);
+
+  const b = await run({ scope: "ahj", portalUrl: meridian, landed, to: [dashboard, third] });
+  assert.deepEqual(b.gotos, [dashboard], "MUST-EXCLUDE (third site): never navigated past the landed site");
+  assert.equal(b.result.ok, false, "MUST-EXCLUDE (third site): the run stops");
+  assert.match(String(b.result.message), /replay safety gate refused: goto leaves the recipe's portal \(meridiancity\.org, landed on accela\.com\) for example-other\.org/, `MUST-EXCLUDE (third site): named (${b.result.message})`);
+
+  const c = await run({ scope: "ahj", portalUrl: "https://permits.cityofexample.gov/apply", landed: "https://pgenm.powerclerk.com/MvcAccount/Login", to: ["https://pgenm.powerclerk.com/MvcProjects/Home"] });
+  assert.match(c.refusal, /landed on powerclerk\.com — a permit recipe may not open a utility \(PowerClerk\) portal/, `MUST-EXCLUDE (permit → PowerClerk): the landing itself is refused (${c.refusal})`);
+  assert.equal(c.adopted, "", "MUST-EXCLUDE (permit → PowerClerk): the utility portal is never adopted");
+  assert.ok(c.refusals.some((r) => /^REFUSED goto \(open the recipe's portal\): .*powerclerk/.test(r)), `MUST-EXCLUDE (permit → PowerClerk): recorded as a refusal (${JSON.stringify(c.refusals)})`);
+  assert.deepEqual(c.gotos, [], "MUST-EXCLUDE (permit → PowerClerk): the recipe's goto there is still refused");
+  assert.match(String(c.result.message), /replay safety gate refused: a permit recipe may not open a utility \(PowerClerk\) portal/, `MUST-EXCLUDE (permit → PowerClerk): by the track rule (${c.result.message})`);
+
+  const d = await run({ scope: "utility", portalUrl: "https://interconnect.utilityexample.com/", landed: "https://aca-prod.accela.com/CITY/Default.aspx", to: ["https://aca-prod.accela.com/CITY/Cap/CapHome.aspx"] });
+  assert.match(d.refusal, /a utility recipe may not open a permit portal: accela\.com/, `MUST-EXCLUDE (utility → Accela): the landing is refused (${d.refusal})`);
+  assert.equal(d.adopted, "", "MUST-EXCLUDE (utility → Accela): never adopted");
+  assert.deepEqual(d.gotos, [], "MUST-EXCLUDE (utility → Accela): the recipe's goto there is still refused");
+
+  // Rule 5's carve-out (a utility filing inside a verified city permit portal) covers THAT portal: a
+  // redirect from it to another permit-platform site is refused, not adopted.
+  const d2 = await run({ scope: "utility", portalUrl: "https://aca-prod.accela.com/SLC/Default.aspx", landed: "https://slc-ut.tylerhost.net/prod/selfservice", to: ["https://slc-ut.tylerhost.net/prod/selfservice#/apply"] });
+  assert.match(d2.refusal, /landed on tylerhost\.net — a utility recipe may not open a permit portal/, `MUST-EXCLUDE (carve-out → another permit site): refused (${d2.refusal})`);
+  assert.equal(d2.adopted, "", "MUST-EXCLUDE (carve-out → another permit site): never adopted");
+  assert.deepEqual(d2.gotos, [], "MUST-EXCLUDE (carve-out → another permit site): the goto there stays refused");
+
+  const e = await run({ scope: "ahj", portalUrl: "https://portal.cityexample.gov/", landed: "https://login.microsoftonline.com/common/oauth2/authorize", to: ["https://portal.cityexample.gov/apply", third] });
+  assert.equal(e.refusal, "", "an SSO landing is not refused");
+  assert.equal(e.adopted, "", "MUST-EXCLUDE (SSO): an identity provider is never adopted as the portal");
+  assert.deepEqual(e.gotos, ["https://portal.cityexample.gov/apply"], "MUST-EXCLUDE (SSO): a third site is still refused");
+
+  const f = await run({ scope: "ahj", portalUrl: meridian, landed: "chrome-error://chromewebdata/", to: [dashboard] });
+  assert.equal(f.adopted, "", "MUST-EXCLUDE (error page): a page that is not http(s) is never adopted");
+  assert.deepEqual(f.gotos, [], "MUST-EXCLUDE (error page): the goto off portalUrl's site stays refused");
+
+  const g = await run({ scope: "ahj", portalUrl: "", landed, to: ["https://www.cityexample.gov/apply", third] });
+  assert.equal(g.adopted, "", "MUST-EXCLUDE (no portalUrl): nothing was loaded from a portalUrl, so nothing is adopted");
+  assert.deepEqual(g.gotos, ["https://www.cityexample.gov/apply"], "MUST-EXCLUDE (no portalUrl): the first goto stays the anchor");
+
+  // MUST-KEEP: no redirect — the gate and its words are exactly main's.
+  const h = await run({ scope: "ahj", portalUrl: landed, landed, to: [dashboard, third] });
+  assert.equal(h.adopted, "", "MUST-KEEP (no redirect): nothing adopted");
+  assert.deepEqual(h.gotos, [dashboard], "MUST-KEEP (no redirect): the own-site goto runs, the third site does not");
+  assert.ok(String(h.result.message).includes("goto leaves the recipe's portal (accela.com) for example-other.org — stopped rather than followed"), `MUST-KEEP (no redirect): main's words (${h.result.message})`);
+  assert.ok(!h.notes.some((n) => /landed on/.test(n)), "MUST-KEEP (no redirect): no landing note");
+}
+
 const tests: Array<[string, () => Promise<void>]> = [
   ["R4: a failure capture never waits for the control that failed to appear", testFailureCaptureDoesNotWaitForAnAbsentTarget],
   ["R1: no click/press/goto outside the replay chokepoint (static)", testNoRawActionOutsideTheChokepoint],
   ["R1: the overlay dismissor replay imports stays behind the chokepoint (static)", testImportedHelpersStayBehindTheChokepoint],
   ["DRIFT: a scan that died mid-navigation is rescanned, never read as 'no drift'", testDriftPrecheckRescansAfterANavigationError],
   ["R1: a goto that leaves the recipe's portal stops the run, named (rule 5)", testGotoLeavingThePortalStopsTheRun],
+  ["R1 #231: the site the recipe's own portal URL landed on is its portal too; a third site, the other track and an SSO host are not", testLandedPortalSiteIsTheRecipesPortal],
   ["R2: each missing input of the final-submit gate keeps it unclicked", testFinalSubmitGateRefusesEachMissingInput],
   ["R2: a quiet page after the approved click is unknown, reported, never retried", testFinalSubmitQuietPageIsUnknownAndNotRetried],
   ["MF-C: runs started together with ONE approval file at most once (claim before any await)", testConcurrentSameApprovalFilesAtMostOnce],
