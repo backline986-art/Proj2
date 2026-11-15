@@ -1567,6 +1567,10 @@ export interface RawField {
   // Selector hints captured from the element.
   role?: string;
   name?: string;
+  /** True when another input / select / textarea / button in the same document (or shadow root)
+   *  carries the same name attribute — radios, checkboxes and hidden inputs not counted. A shared
+   *  name is not this control's identity, so toExtractedField never records it as the address (#229). */
+  nameShared?: boolean;
   placeholder?: string;
   id?: string;
   css?: string;
@@ -1925,6 +1929,8 @@ export function extractFieldsInPage(els: Element[]): RawField[] {
   // position instead. The literal selector is repeated here because this function is
   // serialized into the page and cannot close over ACTIVE_SCOPE_CSS.
   const scopeEl = document.querySelector('[data-al-activescope="1"]');
+  // How many form controls carry each name attribute, per document / shadow root (nameShared).
+  const nameCounts = new Map<Node, Map<string, number>>();
 
   const out: RawField[] = [];
   for (const el of els) {
@@ -2123,6 +2129,29 @@ export function extractFieldsInPage(els: Element[]): RawField[] {
     const genericLabel = /^(please\s+)?select\.{0,3}$|^select$|^qty$|^\s*$/i.test(rawLabel);
     const label = widgetLabel || ((genericLabel && testHint) ? testHint : (rawLabel || testHint || ""));
     const name = el.getAttribute("name") || undefined;
+    // A NAME ATTRIBUTE SEVERAL CONTROLS CARRY IS NOT ONE CONTROL'S ADDRESS (#229 review). Two
+    // contact blocks that both name their box "firstName", or icon buttons sharing name="cmd",
+    // recorded one identical `[name=…]` selector, and replay then filled the FIRST block or clicked
+    // the first button with ok:true. Counted over the control's own root, inline (this function is
+    // serialized into the page), radios / checkboxes / hidden inputs left out: a radio's name is its
+    // group's, and a hidden twin is never the one a fill or click lands on.
+    let nameShared = false;
+    if (name) {
+      const root = el.getRootNode();
+      let counts = nameCounts.get(root);
+      if (!counts) {
+        counts = new Map<string, number>();
+        const scopeRoot = root as Document | ShadowRoot;
+        for (const c of Array.from(typeof scopeRoot.querySelectorAll === "function" ? scopeRoot.querySelectorAll("input, select, textarea, button") : [])) {
+          const cn = c.getAttribute("name");
+          const ct = (c.getAttribute("type") || "").toLowerCase();
+          if (!cn || ct === "radio" || ct === "checkbox" || ct === "hidden") continue;
+          counts.set(cn, (counts.get(cn) ?? 0) + 1);
+        }
+        nameCounts.set(root, counts);
+      }
+      nameShared = (counts.get(name) ?? 0) > 1;
+    }
     const placeholder = el.getAttribute("placeholder") || undefined;
     const id = el.getAttribute("id") || undefined;
     // <a> elements have ARIA role "link", not "button", even though we treat them as
@@ -2241,6 +2270,7 @@ export function extractFieldsInPage(els: Element[]): RawField[] {
     out.push({
       fx, fxText,
       label, fieldType, options, role, name, placeholder, id, text, href,
+      nameShared: nameShared || undefined,
       tile: tileLabel ? true : undefined,
       typeahead: typeahead && fieldType === "text" ? true : undefined,
       stampClass: !typeahead && fieldType === "text" && stampClass ? stampClass : undefined,
@@ -2303,8 +2333,9 @@ export function toExtractedField(raw: RawField): ExtractedField {
       if (raw.id) selector.fallbacks = [{ css: `#${raw.id}` }];
     } else if (raw.id) {
       selector.css = `#${raw.id}`;
-    } else if (raw.name) {
-      // The name ATTRIBUTE, not the accessible name a `role` beside `name` would claim (#229).
+    } else if (raw.name && !raw.nameShared) {
+      // The name ATTRIBUTE, not the accessible name a `role` beside `name` would claim (#229) —
+      // and only when no other control carries it: a shared one is nobody's address (nameShared).
       selector.css = nameAttributeCss(raw.name);
     }
   } else {
@@ -2315,14 +2346,15 @@ export function toExtractedField(raw: RawField): ExtractedField {
       selector.label = raw.label;
     } else if (raw.placeholder) {
       selector.placeholder = raw.placeholder;
-    } else if (raw.name && raw.fieldType !== "radio" && raw.fieldType !== "checkbox") {
+    } else if (raw.name && !raw.nameShared && raw.fieldType !== "radio" && raw.fieldType !== "checkbox") {
       // THE NAME ATTRIBUTE IS WRITTEN AS CSS, NEVER AS A BARE `name` (#229).
       //
       // A bare `name` reads as an accessible name everywhere a role stands beside it, and replay
       // had no reading for it alone: City of Star's valuation box, recorded `{ name: "fee244341" }`
       // because its label is not tied to it, failed "no usable selector" on every replay. Written
       // through the one builder (shared/src/recipeSelector), which replay also uses for the bare
-      // names already saved. A radio's or checkbox's name is its GROUP's, so those take their #id.
+      // names already saved. A radio's or checkbox's name is its GROUP's, and a name another
+      // control also carries is nobody's (nameShared), so those take their #id.
       selector.css = nameAttributeCss(raw.name);
     } else if (raw.id) {
       selector.css = `#${raw.id}`;
@@ -2333,9 +2365,16 @@ export function toExtractedField(raw: RawField): ExtractedField {
     }
   }
   // Absolute last resort so the selector is always usable.
+  //
+  // A LABEL THAT IS ONLY THE NAME ATTRIBUTE IS NEVER PAGE TEXT (#229 review). The label falls back
+  // to the name attribute, so an id-less, label-less checkbox `<input type=checkbox name="agree">`
+  // reached here as `{ text: "agree" }`, and replay's getByText found "Email me marketing updates
+  // (I agree)" and ticked THAT label's checkbox with ok:true — where main failed the step loudly.
+  // Such a control keeps no address at all (`{}`): the learner's locator() bails on it at once, as
+  // it did on main's bare `{ name }`, and nothing guessed is recorded.
   if (!selector.label && !selector.role && !selector.name && !selector.placeholder && !selector.css) {
     if (raw.id) selector.css = `#${raw.id}`;
-    else if (raw.label) selector.text = raw.label;
+    else if (raw.label && !isLikelyOnlyName(raw)) selector.text = raw.label;
   }
   // A data-test* attribute is the most stable hook for a custom widget — use it as the primary
   // selector when nothing better was derived, else keep it as a fallback so replay can still find
