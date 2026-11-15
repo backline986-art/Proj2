@@ -307,6 +307,9 @@ const list = (d: Record<string, unknown>, k: string): string[] => (Array.isArray
       `properties:${JOB.street}, ${JOB.city}, ${JOB.state} ${JOB.zip}`, "properties:4821 Quillfeather", "properties:4821", `contractors:${COMPANY}`,
     ]),
     `${r.searches.length} searches: ${JSON.stringify(r.searches)}`);
+  check("...and the re-assert does not also call either box a control \"no longer on this page\"",
+    !warnings.some((w) => /^"(properties|contractors) autocomplete" is blank and its recorded step could not re-fill/.test(w)),
+    JSON.stringify(warnings.filter((w) => /could not re-fill/.test(w))));
   check("...quoting the portal's own sentence, not the form row around it",
     warnings.some((w) => /^FAILED "properties autocomplete"/.test(w) && /the portal said: "No results match your search"/.test(w)),
     JSON.stringify(warnings.filter((w) => /^FAILED/.test(w))));
