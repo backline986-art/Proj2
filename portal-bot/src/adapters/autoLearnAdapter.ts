@@ -826,7 +826,10 @@ export const UPLOAD_LABEL_PATTERNS: Array<{ re: RegExp; docType: string }> = [
   { re: /\b(pv|photovoltaic|solar)\s*worksheet|(standard|string)\s*or\s*micro[-\s]?inverter\s*array|micro[-\s]?inverter\s*array\s*(worksheet|form)?\s*$/i, docType: "pv_worksheet" },
   { re: /checklist|worksheet|eligibilit/i, docType: "solar_checklist" },
   { re: /(completed|signed|permit|solar)\s*application|application\s*(form|packet)/i, docType: "permit_application" },
-  { re: /one[-\s]?line|single[-\s]?line|\bsld\b|electrical\s*(diagram|schematic|one)/i, docType: "sld" },
+  // "Electrical LINE Diagram Plans" (live City of Tigard, EnerGov Attachments, 2026-11-14) matched none
+  // of these, fell through to the plan set, and the REQUIRED "Plan Set" slot was then refused as a
+  // duplicate file name. Any "<qualifier> line / wiring / riser diagram" is the one-line.
+  { re: /one[-\s]?line|single[-\s]?line|\bsld\b|electrical\s*(diagram|schematic|one)|\b(electrical\s+)?(line|wiring|riser)\s+diagram|\b(three|3)[-\s]?line\b/i, docType: "sld" },
   { re: /site\s*plan|plot\s*plan/i, docType: "site_plan" },
   // The SEALED LETTER before the generic structural pattern. These are different
   // documents: "structural" is the roof-framing/attachment-detail sheet split out of
@@ -4624,11 +4627,22 @@ export class AutoLearnAdapter extends BasePortalAdapter {
       if (converted) {
         this.debug?.event({ type: "image_to_pdf", docType: resolved.docType, accept: (slot.accept || "").slice(0, 60) });
       }
+      // ONE FILE, TWO NAMED SLOTS ON ONE PAGE (#224, live City of Tigard): combined mode sends the plan
+      // set to "Electrical Line Diagram Plans" AND to the required "Plan Set", and the portal refused
+      // the second as "File already exists". The same bytes go to the later slot under a name that
+      // carries the slot's own label, so no portal reads it as a duplicate.
+      const sameFileEarlier = [...this.attachedKeys].some((k) => k.startsWith(`${pathKey}::`) && k.endsWith(`::${resolved.file}`) && k !== attachKey);
+      const slotTag = String(slot.heading || slot.label || "").replace(/\s+/g, " ").split(/\b(?:add\s+attachment|attachment|is\s+required|required|supported)\b/i)[0].replace(/[^A-Za-z0-9 ._-]+/g, "").trim().slice(0, 40);
+      const distinctName = (name: string): string => {
+        if (!sameFileEarlier || !slotTag) return name;
+        const ext = path.extname(name);
+        return `${name.slice(0, name.length - ext.length)} - ${slotTag}${ext}`;
+      };
       const uploadPayload = (() => {
         const base = path.basename(resolved.file);
         const clean = base.replace(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}-/i, "");
         if (converted) {
-          return { name: pdfNameFor(clean || base), mimeType: "application/pdf", buffer: converted.buf };
+          return { name: distinctName(pdfNameFor(clean || base)), mimeType: "application/pdf", buffer: converted.buf };
         }
         try {
           const buffer = fs.readFileSync(resolved.file);
@@ -4638,7 +4652,7 @@ export class AutoLearnAdapter extends BasePortalAdapter {
             : ext === ".jpg" || ext === ".jpeg" ? "image/jpeg"
             : ext === ".zip" ? "application/zip"
             : "application/octet-stream";
-          return { name: clean || base, mimeType, buffer };
+          return { name: distinctName(clean || base), mimeType, buffer };
         } catch {
           return null; // unreadable — fall back to the path (Playwright reads it itself)
         }

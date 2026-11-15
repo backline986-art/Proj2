@@ -32,6 +32,14 @@ const pick = (docs: Record<string, string>, label: string, opts: { mode?: "combi
   return a.resolveUploadByLabel(label, opts.required ?? true, " .pdf ", opts.review ?? false, opts.plansOffered ?? false)?.docType ?? null;
 };
 
+check("LIVE TIGARD: \"Electrical Line Diagram Plans\" takes the single-line, never the plan set", () => {
+  const BOTH = { ...PLAN, sld: "C:/nope/ZZTEST-sld.pdf" };
+  assert.equal(pick(BOTH, "Electrical Line Diagram Plans"), "sld");
+  assert.equal(pick(BOTH, "Wiring Diagram"), "sld");
+  assert.equal(pick(BOTH, "Three-Line Diagram"), "sld");
+  assert.equal(pick(BOTH, "Plan Set"), "plan_set", "the plan-set slot still takes the plan set");
+});
+
 check("MUST-PASS a slot headed \"Plans\" takes the plan set on the review page (exact match only)", () => {
   assert.equal(pick(PLAN, "Plans", { review: true }), "plan_set");
   assert.equal(pick(PLAN, "Plans *", { review: true }), "plan_set");
