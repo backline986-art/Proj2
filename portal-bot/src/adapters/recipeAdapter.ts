@@ -17,6 +17,10 @@ const FEE_TIER_NO_BOX_REASON = "the recorded kVA tier box was not found on this 
 /** #166: the learner's note on a person-verified record-type / work-item pick (autoLearnAdapter
  *  noteVerifiedRecordTypeTicked) — the replay finds that step by label, never by position. */
 const VERIFIED_RECORD_TYPE_NOTE = /^\s*record type \(verified\):\s*/i;
+/** #236: the review hand-off line naming the unbound answers a replay typed as recorded. */
+export const LEARN_ANSWER_NOTE_PREFIX = "replayed the learn's answer:";
+/** #236 review: the review hand-off line naming the steps the binder left blank for a person. */
+export const LEFT_FOR_PERSON_NOTE_PREFIX = "not answered by the replay:";
 import { collectPortalErrorBanner } from "../safeAction";
 import { GROUP_TOGGLE_CSS, recordTypeGroupOf, tagToggleByText, toggledListOpen } from "./recordTypeGroup";
 import { SERVICE_FEEDER_200A_FIELD, SERVICE_FEEDER_400A_FIELD, isServiceFeeder200Label, isServiceFeeder400Label } from "../../../shared/src/serviceLineLabels";
@@ -72,6 +76,12 @@ export function looksLikeProjectData(label: string, value: string): boolean {
   const l = `${String(label ?? "")} ${labelWords(String(label ?? ""))}`;
   const v = String(value ?? "").trim();
   if (!v) return false;
+  // THE VALUE'S SHAPE IS READ FIRST, BEFORE ANY LABEL RULE (#236). A box whose label names no project
+  // word still holds one job's data when its value is an orientation, a rating with its unit, a module
+  // count, a street address or a narrative — the 2026-11-14 audit found Tigard's array description
+  // replaying the learn roof's "180° azimuth, 22° tilt". One reading (jobValueShape), asked by the
+  // backend binder's R2 too. Before the taxonomy words: a "Description" holding "8.2 kW …" is the job's.
+  if (jobValueShape(v)) return true;
   // The portal's own vocabulary wins: a "Job Category" answer is the portal's word even
   // though "category" sits near words we treat as project data elsewhere.
   // A COMPANY'S OWN FACTS are somebody's data too (leak sweep 2026-09-28): insurer, policy, bond,
@@ -84,15 +94,21 @@ export function looksLikeProjectData(label: string, value: string): boolean {
   const companyFact = isCompanyIdentityLabel(l);
   if (TAXONOMY_LABEL.test(l) && !PROJECT_DATA_LABEL.test(l) && !companyFact) return false;
   if (PROJECT_DATA_LABEL.test(l) || companyFact) return true;
+  // A BATTERY'S SPECIFICATION IS THAT BATTERY'S (#236): PacifiCorp's "Battery Round-trip Efficiency (%)"
+  // replayed the learn battery's "89" onto every battery job — no project word in the label, no unit in
+  // the value. The one battery predicate (shared batteryControls) calls it a spec; a select's make is
+  // still the portal's list and never reaches this guard.
+  if (batteryControlKind(l, { control: "text" }) === "spec") return true;
   // A bare "Name" is a person's until the label says it is a thing's — see the comment above.
   if (BARE_NAME_LABEL.test(l) && !NAMES_A_THING_NOT_A_PERSON.test(l)) return true;
   return UNAMBIGUOUS_PII_VALUE.test(v) || PHONE_VALUE.test(v);
 }
 import { rankAddressVersions } from "../addressVersion";
+import { jobValueShape } from "../jobValueShape";
 import { isCompanyIdentityLabel } from "../../../shared/src/companyFacts";
 import { licenceKeyForLabel } from "../../../shared/src/licenceKinds";
 import { completionEvidence, labelWords } from "../../../shared/src/portalSafety";
-import { batteryControlKind, batteryControlOfStep, batteryDeclarationAnswer, parseHasBattery } from "../../../shared/src/batteryControls";
+import { bareAnswerPolarity, batteryControlKind, batteryControlOfStep, batteryDeclarationAnswer, batteryQuestionTextOfStep, parseHasBattery } from "../../../shared/src/batteryControls";
 import { imageToPdfBytes, shouldConvertToPdf } from "../imageToPdf";
 import { removeUploadStaging, uploadPayloadFor, type PreparedUpload } from "./uploadPayload";
 import { attachmentTypeFor, isDocumentTypeList } from "./attachmentTypes";
@@ -2311,9 +2327,17 @@ export class RecipeAdapter extends BasePortalAdapter {
     // screen was staged: the next stage of this track opens that draft and continues it.
     if (this.draftSubmitOutcome) {
       const d = this.draftSubmitOutcome;
+      // THE DRAFT CARRIES WHAT THE REPLAY TYPED, SO THE PERSON IS TOLD WHAT IT TYPED BLIND (#236 review).
+      // PSE's draft-creating Submit follows step 4's "Change to an existing…" — the learn job's answer —
+      // and the next stage continues the draft without replaying that step, so this stop is the only
+      // place the hand-off can name it. Message and data only: nothing here clicks or decides a click.
+      const notes = this.reviewHandoffNotes;
       return ok(
-        `${this.portalName}: automation clicked "${d.clickedLabel.slice(0, 60)}" — the submit this portal answers with a draft, never the filing — and the portal created draft ${d.applicationNumber || "(no number shown)"}. NOTHING WAS FILED.${d.nextForm ? ` The filing is in "${d.nextForm}".` : ""} Stage this track again: the next run opens this draft and continues it (never a new application), and its own submit still stops for review. AUTOMATION HAS STOPPED.`,
-        { finalSubmitClicked: false, draftSubmitClickedByAutomation: true },
+        `${this.portalName}: automation clicked "${d.clickedLabel.slice(0, 60)}" — the submit this portal answers with a draft, never the filing — and the portal created draft ${d.applicationNumber || "(no number shown)"}. NOTHING WAS FILED.${d.nextForm ? ` The filing is in "${d.nextForm}".` : ""} Stage this track again: the next run opens this draft and continues it (never a new application), and its own submit still stops for review.${notes.length ? ` ${notes.join(" ")}` : ""} AUTOMATION HAS STOPPED.`,
+        {
+          finalSubmitClicked: false, draftSubmitClickedByAutomation: true,
+          ...(notes.length ? { reviewHandoffNotes: [...notes], reviewPageBlockedCalls: [...this.reviewPageBlockedCalls] } : {}),
+        },
       );
     }
     // #340 — A STOPPED RUN HANDS NOTHING OVER: no review read, no staged-review walk, no page touched.
@@ -3766,6 +3790,10 @@ export class RecipeAdapter extends BasePortalAdapter {
           }
           if (done) executed++;
           else skipped.push(String(step.note || step.action).slice(0, 70));
+          // #236: an unbound answer replayed as recorded is named on the hand-off, and so is a step the
+          // binder left blank for a person (typed or not — the blank is the point).
+          if (done) this.noteReplayedLearnAnswer(step);
+          this.noteLeftForPerson(step);
           performed = done;
           // close MF2: a tier step that found no kVA box on its page stands under a provisional
           // stop; it is withdrawn only here, when that very step typed its real quantity.
@@ -6067,8 +6095,113 @@ export class RecipeAdapter extends BasePortalAdapter {
    *  never fired and a datasheet went up on a no-battery filing) — the predicate calls a file a
    *  spec. */
   private batteryKindOf(step: RecipeStep): ReturnType<typeof batteryControlKind> {
-    const label = `${step.selector?.label ?? ""} ${step.note ?? ""} ${step.field ?? ""}`;
-    return batteryControlKind(label, { control: batteryControlOfStep(step), options: (step as { options?: unknown[] }).options });
+    // The step's question text, read the one way (shared batteryQuestionTextOfStep): a radio option
+    // labelled just "No" is asked its SECTION's question (#236, Ameren's ESS radio).
+    return batteryControlKind(batteryQuestionTextOfStep(step), { control: batteryControlOfStep(step), options: (step as { options?: unknown[] }).options });
+  }
+
+  /** A RADIO OPTION ANSWERING THE STORAGE QUESTION IS TICKED ONLY WHEN IT IS THIS JOB'S ANSWER (#236).
+   *
+   *  Ameren Illinois records its ESS question as a check on the radio labelled "No", the question only
+   *  in the step's section. That tick is the learn job's answer: right on a job without a battery,
+   *  false on a job with one. A recorded option that AGREES with the project's hasBattery is ticked; one
+   *  that DISAGREES is left for a person, named, and never swapped for the group's other option by
+   *  position — the recipe never recorded that control. A project silent about its battery replays the
+   *  recorded tick (and the hand-off lists it as the learn's answer). Returns the reason to leave it,
+   *  or null to tick it. */
+  private batteryRadioConflict(step: RecipeStep): string | null {
+    if (step.action !== "check") return null;
+    const answer = bareAnswerPolarity(step.selector?.label || step.note);
+    if (!answer || this.batteryKindOf(step) !== "declaration") return null;
+    const hasBattery = this.projectHasBattery();
+    if (hasBattery === undefined || (answer === "yes") === hasBattery) return null;
+    const question = String(step.fingerprint?.section ?? step.note ?? "the storage question").replace(/\s+/g, " ").trim().slice(0, 70);
+    return `left "${question}" for a person — the recorded answer "${String(step.selector?.label || step.note).trim()}" was the learn job's, and this project ${hasBattery ? "has a" : "has no"} battery`;
+  }
+
+  /** AN ANSWER NOTHING BOUND IS THE LEARN JOB'S ANSWER, AND THE HAND-OFF SAYS SO (#236).
+   *
+   *  A select or radio the recipe recorded as a literal replays it on every job: the portal's own
+   *  constants ("Customer Type = Residential") and per-job answers frozen at learn (PSE's "Application
+   *  Type = Change to an existing…", Bend's "Building Use", Ameren's line/load side, the backup-power
+   *  radio) alike — the 2026-11-14 audit found 14 recipes doing it. The replay cannot tell the two
+   *  apart, so it names every one on the review hand-off instead of letting a filled control read as
+   *  checked: an unknown must not read as reassurance. Answers the run took from THIS job are not
+   *  listed (a bound key, a battery declaration answered from hasBattery, a policy default, the
+   *  verified record type, the submitting company).
+   *
+   *  ONE running line in reviewHandoffNotes (the channel the stop message and the project's review
+   *  banner read), found by its prefix and rewritten as the run goes: the banner keeps six notes, so a
+   *  list must never crowd out a held payment or an unsaved answer. Not agingNotes: those mean "the
+   *  engine took another route; worth re-recording" to the benchmark and the KPI. */
+  private readonly learnAnswersListed: string[] = [];
+  private static readonly LEARN_ANSWER_SHOWN = 10;
+  /** The last control label the run executed that names something (not a bare "Yes"/"No") — where a
+   *  radio with no question of its own is found on the page. */
+  private lastNamedLabel = "";
+  private noteReplayedLearnAnswer(step: RecipeStep): void {
+    const before = this.lastNamedLabel;
+    const own = String(this.stepLabel(step) || "").replace(/\s+/g, " ").trim();
+    if (step.action === "goto") this.lastNamedLabel = "";
+    else if ((step.action === "fill" || step.action === "select" || step.action === "check") && own && !bareAnswerPolarity(own)) this.lastNamedLabel = own;
+    if (step.field || step.sensitive || (step.action !== "select" && step.action !== "check")) return;
+    const note = String(step.note ?? "");
+    if (/^\s*policy default\s*:/i.test(note) || VERIFIED_RECORD_TYPE_NOTE.test(note)) return;
+    // Answered from this job (or skipped for it) by the storage rules above.
+    if (this.skipForNoBattery(step) || (this.batteryKindOf(step) === "declaration" && this.projectHasBattery() !== undefined)) return;
+    let question: string;
+    let answer: string;
+    if (step.action === "select") {
+      answer = String(step.value ?? "").trim();
+      if (!answer) return;
+      // The submitting company's list types THIS client's name (#524), never the recorded one.
+      if (filerIdentityFieldForSelect(this.stepLabel(step) || step.note, "") === "installerCompanyName") return;
+      question = this.stepLabel(step) || note;
+    } else {
+      // A check answers a question only as a radio option: a bare Yes/No/None/N/A label, or a
+      // choice under a section that asks something. A terms box or a record-type tick is not one.
+      answer = String(step.selector?.label || "").trim() || note;
+      const section = String(step.fingerprint?.section ?? "").trim();
+      const asks = /\?|^\s*(?:is|are|do|does|did|will|would|was|were|have|has|can|could|should|shall|who|what|which|where|when|how|please\s+(?:select|choose|indicate|specify))\b/i.test(section);
+      if (!answer || (!bareAnswerPolarity(answer) && !asks)) return;
+      question = section || note;
+    }
+    // A QUESTION THE RECIPE NEVER RECORDED IS NAMED BY WHERE IT IS, NEVER AS ITS OWN ANSWER (#236 review:
+    // Meridian, ComEd, Coos Bay and Boise listed '"No" = "No"', which tells the person nothing to check).
+    // The radio's place is the last named control the run executed before it.
+    const squash = (s: string): string => s.replace(/\s+/g, " ").trim();
+    const same = (a: string, b: string): boolean => squash(a).toLowerCase().replace(/[.*:?]+$/, "") === squash(b).toLowerCase().replace(/[.*:?]+$/, "");
+    const asked = !squash(question) || same(question, answer)
+      ? (before ? `the unlabelled question recorded after "${squash(before).slice(0, 50)}"` : "an unlabelled question")
+      : `"${squash(question).slice(0, 60)}"`;
+    const item = `${asked} = "${squash(answer).slice(0, 40)}"`;
+    if (this.learnAnswersListed.includes(item)) return;
+    this.learnAnswersListed.push(item);
+    const n = this.learnAnswersListed.length;
+    const shown = this.learnAnswersListed.slice(0, RecipeAdapter.LEARN_ANSWER_SHOWN).join("; ");
+    const more = n > RecipeAdapter.LEARN_ANSWER_SHOWN ? ` (+${n - RecipeAdapter.LEARN_ANSWER_SHOWN} more)` : "";
+    const line = `${LEARN_ANSWER_NOTE_PREFIX} ${shown}${more} — bound to nothing, so ${n === 1 ? "it is" : `each of these ${n} is`} the recorded job's answer; confirm ${n === 1 ? "it is" : "each is"} this job's.`;
+    const at = this.reviewHandoffNotes.findIndex((note) => note.startsWith(LEARN_ANSWER_NOTE_PREFIX));
+    if (at >= 0) this.reviewHandoffNotes[at] = line;
+    else this.reviewHandoffNotes.push(line);
+  }
+
+  /** A STEP LEFT BLANK FOR A PERSON IS NAMED WHERE THE PERSON READS (#236 review). The binder blanks a
+   *  step it will not answer for this job — a fee count no key answers (R14), an address component the
+   *  reader could not read (R13), a licence kind with no number on file, another company's attestation
+   *  — and says why in step.operatorItem; nothing in the replay read it, so "named for a person" reached
+   *  only the audit log (Tigard's three required fee-page blanks among them). One running line in
+   *  reviewHandoffNotes, rewritten in place like the learn-answer line, at most four reasons shown. */
+  private readonly leftForPersonListed: string[] = [];
+  private noteLeftForPerson(step: RecipeStep): void {
+    const why = String(step.operatorItem ?? "").replace(/\s+/g, " ").trim();
+    if (!why || this.leftForPersonListed.includes(why)) return;
+    this.leftForPersonListed.push(why);
+    const n = this.leftForPersonListed.length;
+    const line = `${LEFT_FOR_PERSON_NOTE_PREFIX} ${this.leftForPersonListed.slice(0, 4).join("; ")}${n > 4 ? ` (+${n - 4} more)` : ""}.`;
+    const at = this.reviewHandoffNotes.findIndex((note) => note.startsWith(LEFT_FOR_PERSON_NOTE_PREFIX));
+    if (at >= 0) this.reviewHandoffNotes[at] = line;
+    else this.reviewHandoffNotes.push(line);
   }
 
   /** The project's hasBattery, read the one way (shared parseHasBattery): false = no battery,
@@ -6095,7 +6228,11 @@ export class RecipeAdapter extends BasePortalAdapter {
     // is the Ivy incident (the tick that revealed the Powerwall fields) reintroduced by replay —
     // which it was, between the declaration commit and this one: isBatteryDeclaration said
     // "declaration" for every check step and skipForNoBattery then executed it.
-    if (kind === "declaration") return step.action === "check";
+    //
+    // A RADIO OPTION is not a declaring checkbox (#236): a check on "No" under "Do you seek to install
+    // an Energy Storage System?" IS the No answer, and skipping it leaves a required radio blank.
+    // batteryRadioConflict decides those — ticked when they agree with this job, left when they do not.
+    if (kind === "declaration") return step.action === "check" && !bareAnswerPolarity(step.selector?.label || step.note);
     // A spec of a battery that does not exist — and an ATTESTATION about one (#536: "The battery
     // system will not backfeed into the grid" is never ticked for a battery that is not there; on
     // such a job the portal does not render it, so a recorded tick skips rather than fails).
@@ -6660,6 +6797,14 @@ export class RecipeAdapter extends BasePortalAdapter {
         ? `left "${what}" unchecked — this project has no battery, and unchecked is that answer`
         : `skipped "${what}" — this project has no battery`);
       return true; // not a failure: the section does not apply to this filing
+    }
+    // #236: a storage radio whose recorded option is not this job's answer is left for a person.
+    const radioConflict = this.batteryRadioConflict(step);
+    if (radioConflict) {
+      this.driftWarnings.push(radioConflict);
+      // The person taking the review page answers it, so the hand-off says so too.
+      if (!this.reviewHandoffNotes.includes(radioConflict)) this.reviewHandoffNotes.push(radioConflict);
+      return true; // not a step failure: the question is the reviewer's, and the warning says so
     }
     // F1 — A kVA TIER BOX IS DECIDED FROM THE PAGE'S OWN LABELS, not from the recorded selector:
     // the recorded label is the DONOR agency's spelling and the recorded box is the DONOR job's
