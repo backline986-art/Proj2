@@ -114,13 +114,13 @@ import { imageToPdfBytes, shouldConvertToPdf } from "../imageToPdf";
 import { removeUploadStaging, uploadPayloadFor, type PreparedUpload } from "./uploadPayload";
 import { attachmentTypeFor, isDocumentTypeList } from "./attachmentTypes";
 import { chooseSubmittedRecord, cleanRecordLink, readApplicationLedgerInPage, recordLinkForNumberInPage, type LedgerEntry } from "./submissionLedger";
-import { DISMISS_LABEL, exactUploadDocType, fileTypeAllowed, formsSlotDocTypes, UPLOAD_LABEL_PATTERNS, uploadForbidsSubstitute, uploadTextNamesNoDocument } from "./autoLearnAdapter";
+import { DISMISS_LABEL, exactUploadDocType, fileTypeAllowed, formsSlotDocTypes, isSensitiveLabel, UPLOAD_LABEL_PATTERNS, uploadForbidsSubstitute, uploadTextNamesNoDocument } from "./autoLearnAdapter";
 import { readFeeStop, secretValuesOf, type FeeStopKind, type FeeStopReading } from "../feeStop";
 import { reviewComparison, scrapeReviewScreen as scrapeReviewScreenShared, utilityIdentifiersEnteredBySteps, type ReviewMismatch } from "../reviewScreenScraper";
 import { controlReadsUnanswered, pinEmptyRequiredControl, PINNED_CONTROL_ATTR, SWEPT_BLANK_ATTR, sweepEmptyRequiredControls, type EmptyRequired } from "../requiredControlSweep";
 import { openPortal } from "../browser";
 import { selectWithFallback, comboboxFaceInPage, type ComboboxPick } from "../comboboxFill";
-import { fillTypeahead, typeaheadFailureLine, TypeaheadStop } from "../typeaheadFill";
+import { fillTypeahead, typeaheadBoxReason, typeaheadFailureLine, typeaheadPortalAnswered, TypeaheadStop } from "../typeaheadFill";
 import { typeaheadMatchMode, type TypeaheadSite } from "../typeaheadMatch";
 import { isPrintedDateLabel, resultRowRoleOf, type ResultRowRole } from "../learnDataInSelectors";
 import { assertFilerIdentityHeld, FilerIdentityStop, filerIdentityFieldForSelect, filerIdentityStopMessage, isFilerIdentityField, isUnansweredOption, readNativeSelect, selectFilerIdentity } from "../filerIdentitySelect";
@@ -2387,6 +2387,30 @@ export class RecipeAdapter extends BasePortalAdapter {
    *  comes back empty while the selection shows elsewhere, so the required sweep's re-assert must not
    *  take it for a blank and search again (a second identical search, a second location row). */
   private readonly typeaheadEnterSelected = new Set<string>();
+  /** #244 — THE BOX ITSELF CARRIES "ALREADY ANSWERED": a search box the PORTAL answered with nothing
+   *  for this job's value (typeaheadPortalAnswered) is stamped TYPEAHEAD_ANSWERED_ATTR=<token>, and
+   *  the token maps here to that value and the label it was searched as. A re-run of the step, or
+   *  the required sweep's re-assert, on THAT element with THAT value is not searched again (a
+   *  required iWorQ box re-searched three times: 82 s of the same "No results match your search" on
+   *  the synthetic replica). Keyed by the live element, never by the step's words: two boxes with the same note,
+   *  binding and value (PowerClerk 32f3d2b2 has "Address"/street at steps 16 and 27) are two
+   *  searches, and a new document is a new search (review of 5eb51ad3, shape S3). The entry also
+   *  carries the ADVANCE GENERATION it was made in (review of d1c7acd1): a framework that re-uses
+   *  the same <input> node for the next wizard step (Vue's in-place patch, React's same-position
+   *  element) keeps the mark while the box, its list and its page have all changed — the recipe's
+   *  own executed click/goto/press is what tells the two apart, not the DOM, the URL or the view. */
+  private readonly typeaheadAnswered = new Map<string, { value: string; label: string; gen: number }>();
+  private readonly typeaheadRunTag = Math.random().toString(36).slice(2, 8);
+  /** #244 — bumped by every executed click, goto or key step (executeStep): the "already answered"
+   *  marks made before it belong to an earlier page of the walk and are not read after it. The
+   *  required sweep's re-assert runs before the Next click, so it stays in the search's own
+   *  generation and that box is still searched once. */
+  private typeaheadAdvanceGen = 0;
+  /** Set by fillTypeaheadStep whenever it returns false with its own FAILED line standing (searched
+   *  and found nothing, a pick the portal did not take, or not searched again because the box had
+   *  already answered) — the re-assert reads it so that box is not also called a control "no longer
+   *  on this page". */
+  private typeaheadFailureNamed = false;
   /** #333: after the hand-over, a person's own main-frame form request went (their submit, or a
    *  postback they made) — the run's end page is theirs now, not where the run "stopped". */
   private personMovedOn = false;
@@ -5872,6 +5896,19 @@ export class RecipeAdapter extends BasePortalAdapter {
   private async fillTypeaheadStep(step: RecipeStep, scoped: any, v: string): Promise<boolean> {
     const label = String(this.stepLabel(step) || step.note || "search box").slice(0, 60);
     const fieldName = String(step.note ?? step.field ?? step.action).slice(0, 60);
+    // #244: THIS BOX (its own mark, read off the live element) already answered this job's value with
+    // nothing this run — its FAILED line stands and the same search is not typed again. Another
+    // step's words landing on that box are named once, so no step is skipped unnamed.
+    const answered = await this.typeaheadAnsweredBy(scoped, v);
+    if (answered) {
+      this.typeaheadFailureNamed = true;
+      if (!this.fieldsUnverified.includes(fieldName)) this.fieldsUnverified.push(fieldName);
+      // Said once per distinct line, never hidden behind another step's FAILED line of the same label
+      // (review of d1c7acd1: a prefix match let step 1's own failure swallow step 2's skip, silently).
+      const skipLine = `FAILED "${label}": not searched again — this box already answered this job's value with nothing this run (searched as "${answered.label}") — nothing was picked and the box was left empty.`;
+      if (!this.driftWarnings.includes(skipLine)) this.driftWarnings.push(skipLine);
+      return false;
+    }
     const projectStreet = String(this.fieldValues.street || this.fieldValues.projectAddress || "");
     const mode = typeaheadMatchMode({ field: step.field, label, value: v, projectStreet });
     const site: TypeaheadSite = mode === "site"
@@ -5907,6 +5944,7 @@ export class RecipeAdapter extends BasePortalAdapter {
       if (!shown) {
         this.driftWarnings.push(`FAILED "${label}": picked "${out.picked}" and the box was empty once the page saved — the portal did not keep the pick`);
         if (!this.fieldsUnverified.includes(fieldName)) this.fieldsUnverified.push(fieldName);
+        this.typeaheadFailureNamed = true;
         return false;
       }
       if (!this.fieldsVerified.includes(fieldName)) this.fieldsVerified.push(fieldName);
@@ -5921,8 +5959,49 @@ export class RecipeAdapter extends BasePortalAdapter {
       if (!this.driftWarnings.includes(`STOPPED: ${line}`)) this.driftWarnings.push(`STOPPED: ${line}`);
       throw new TypeaheadStop(msg);
     }
-    this.driftWarnings.push(`FAILED ${line}`);
+    // Remembered on the box only when the PORTAL answered (its own no-match words, or a settled list
+    // with none of the job's): a search that ran out of time, a list that re-rendered under the read
+    // or a pick the box did not keep may go differently next time, so it is searched again.
+    if (typeaheadPortalAnswered(out)) await this.markTypeaheadAnswered(scoped, v, label);
+    // The box was there and its failure is named (a box that could not be used may be gone — the
+    // re-assert's own line says so). The same line from a re-run is not said twice.
+    if (out.outcome !== "unusable") this.typeaheadFailureNamed = true;
+    if (!this.driftWarnings.includes(`FAILED ${line}`)) this.driftWarnings.push(`FAILED ${line}`);
     return false;
+  }
+
+  /** #244 — the attribute that marks a search box the portal already answered with nothing. */
+  private static readonly TYPEAHEAD_ANSWERED_ATTR = "data-al-ta-answered";
+  private static typeaheadValueKey(v: string): string {
+    return String(v ?? "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+  }
+
+  /** #244 — THIS element's "already answered" mark, when this run made it for this value; else null.
+   *  Never throws (a stub locator's evaluate may not even return a promise). */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  private async typeaheadAnsweredBy(scoped: any, v: string): Promise<{ value: string; label: string } | null> {
+    if (!this.typeaheadAnswered.size || typeof scoped?.evaluate !== "function") return null;
+    try {
+      const token = String((await Promise.resolve(scoped.evaluate((el: Element, attr: string) => el.getAttribute(attr) || "", RecipeAdapter.TYPEAHEAD_ANSWERED_ATTR, { timeout: 1500 })).catch(() => "")) ?? "");
+      const hit = token ? this.typeaheadAnswered.get(token) : undefined;
+      // Same element, same value AND the same generation of the walk: after an executed advance the
+      // mark is an earlier page's, even on a re-used node.
+      return hit && hit.value === RecipeAdapter.typeaheadValueKey(v) && hit.gen === this.typeaheadAdvanceGen ? hit : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /** #244 — stamp the box the portal answered with nothing for `v` (a run-local token; the value
+   *  itself never goes into the page). Unmarked on any failure: the next run of the step searches. */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  private async markTypeaheadAnswered(scoped: any, v: string, label: string): Promise<void> {
+    if (typeof scoped?.evaluate !== "function") return;
+    const token = `${this.typeaheadRunTag}-${this.typeaheadAnswered.size + 1}`;
+    try {
+      const ok = await Promise.resolve(scoped.evaluate((el: Element, a: { attr: string; token: string }) => { el.setAttribute(a.attr, a.token); return true; }, { attr: RecipeAdapter.TYPEAHEAD_ANSWERED_ATTR, token }, { timeout: 1500 })).catch(() => false);
+      if (ok === true) this.typeaheadAnswered.set(token, { value: RecipeAdapter.typeaheadValueKey(v), label, gen: this.typeaheadAdvanceGen });
+    } catch { /* unmarked */ }
   }
 
   /** #524 — record WHO IS FILING's stop (sticky for the run) and throw it. */
@@ -7211,12 +7290,15 @@ export class RecipeAdapter extends BasePortalAdapter {
       }
     }
     if (!RecipeAdapter.WRITE_ACTIONS.has(step.action)) {
-      const ok = await this.executeStepInner(step, pastReview);
+      const moved = await this.executeStepInner(step, pastReview);
       // #178: a recorded lookup click (Find Address, Autofill) names the fields it populated; after the
       // press they must hold a value — the parcel is never typed from a recipe, so a lookup that found
       // nothing for THIS project is said here, by field, not discovered at the portal's bounce.
-      if (ok && step.action === "click" && step.populates?.length) await this.verifyLookupPopulated(step);
-      return ok;
+      if (moved && step.action === "click" && step.populates?.length) await this.verifyLookupPopulated(step);
+      // #244: an executed click, goto or key is a new generation for the search boxes' "already
+      // answered" marks — the next page's box may be the same DOM node (typeaheadAdvanceGen says why).
+      if (moved && (step.action === "click" || step.action === "goto" || step.action === "press")) this.typeaheadAdvanceGen++;
+      return moved;
     }
     this.writtenTarget = null;
     const done = !this.backstop ? await this.executeStepInner(step, pastReview)
@@ -7894,6 +7976,22 @@ export class RecipeAdapter extends BasePortalAdapter {
         // by its own rule — the box holds the SUGGESTION, so fillHeld's "shows what we typed"
         // would call a good pick a miss, and a plain fill() leaves a value nobody picked.
         if (step.fillStrategy === "typeahead") return this.fillTypeaheadStep(step, scoped, v);
+        // THE BOX'S OWN MARKUP DECIDES, NOT THE RECORDING (#244). A step saved as a plain fill before
+        // its box was recognised (City of Star's iWorQ "properties autocomplete" / "contractors
+        // autocomplete", live 2026-11-15) typed the address, picked nothing, and read back "verified"
+        // while the property id stayed empty. The one predicate (typeaheadBoxSays) is asked of the
+        // live box; a sensitive value is never typed into a search whose suggestions are read.
+        {
+          const shown = String(this.stepLabel(step) || step.note || "").slice(0, 60);
+          if (!isSensitiveLabel(shown)) {
+            const byMarkup = await typeaheadBoxReason(scoped);
+            if (byMarkup) {
+              const note = `"${shown || "search box"}" was recorded as a plain fill; the box's own markup says it is a search-as-you-type box (${byMarkup}) — typed and picked from its list instead`;
+              if (!this.agingNotes.includes(note)) this.agingNotes.push(note);
+              return this.fillTypeaheadStep(step, scoped, v);
+            }
+          }
+        }
         // MASKED CONTROLS (Accela phone / zip): they keep their validation state from KEY
         // events, so .fill() - which assigns .value and fires input+change - leaves the box
         // showing the right text while the portal still reports "Required Invalid". The
@@ -12724,8 +12822,14 @@ export class RecipeAdapter extends BasePortalAdapter {
               await this.noteUnrecordedWrite("pick", `re-assert into "${(target.label || blank).slice(0, 60)}" (the recorded "${String(rs.note ?? rs.field ?? "").slice(0, 40)}")`, { ...(target.control ?? {}), question: target.label || blank, questions: target.questions });
             }
             const step = target.pinned ? { ...rs, selector: target.pinned, fingerprint: undefined } as RecipeStep : rs;
+            this.typeaheadFailureNamed = false;
             const done = await this.executeStep(step, pastReview).catch(() => false);
             if (target.pinned) await this.unpinReassert(target.pinned);
+            // A SEARCH BOX'S FAILURE IS ITS OWN LINE (#244): one the portal already answered with nothing
+            // for this job's value was not searched again, and any other type-ahead miss named the box
+            // and the reason (the portal's words, the pick it did not take) — it is not also a control
+            // "no longer on this page".
+            if (!done && this.typeaheadFailureNamed) continue;
             // BOTH OUTCOMES, or this becomes the sixth silent path in this file. A
             // re-assert that fails says something different from one that was never
             // attempted, and today proved repeatedly that the difference is the whole
