@@ -8519,6 +8519,17 @@ export class RecipeAdapter extends BasePortalAdapter {
           }
           return false;
         }
+        // A QUESTION THE PORTAL DID NOT SHOW THIS PROJECT (live City of Bend, CityView, replay v4 of
+        // 2026-11-15): the learn job's page carried two "Do you agree?" disclaimers and the recipe a
+        // check for each; this project's page keeps the second one's whole block hidden. Its input
+        // resolved by its own recorded id (not drift), and it is not a styled checkbox either — a styled
+        // widget hides only the <input> and shows its label, here the label is hidden with it. A box
+        // inside a block the portal keeps closed is nothing a person could tick, so the step is not
+        // applicable: skipped, named, never a 30 s failure that ends the walk one step from review.
+        if (!usable && !recovered && present && await this.inHiddenBlock(scoped.first())) {
+          this.agingNotes.push(`"${String(step.note ?? "checkbox").slice(0, 40)}" skipped: not applicable — its control is on the page but inside a block the portal keeps hidden for this project (its label is hidden with it)`);
+          return false;
+        }
         let target = recovered ?? scoped;
         await waitForElement(target);
         // force: a radio inside a styled widget is driven by its label, so the input itself
@@ -10355,6 +10366,28 @@ export class RecipeAdapter extends BasePortalAdapter {
    *  This is the cheap second look: control count, option count, and the values themselves.
    *  A real in-page action moves at least one of them; a click that was swallowed moves
    *  none. */
+  /** Is this control's QUESTION hidden — its own label (label[for], or the label around it) not shown, or,
+   *  with no label, an ancestor within six levels display:none? A styled checkbox hides only its <input>
+   *  and shows its label, so it reads false here; a block the portal keeps closed reads true. No nested
+   *  functions in the evaluate. */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  private async inHiddenBlock(loc: any): Promise<boolean> {
+    if (!loc || typeof loc.evaluate !== "function") return false;
+    const hidden = await loc.evaluate((el: Element) => {
+      const id = el.getAttribute("id") || "";
+      const lbl = (id ? document.querySelector(`label[for="${CSS.escape(id)}"]`) : null) || el.closest("label");
+      if (lbl) {
+        const r = (lbl as HTMLElement).getBoundingClientRect();
+        const cs = getComputedStyle(lbl as HTMLElement);
+        return !(r.width > 0 && r.height > 0 && cs.visibility !== "hidden" && cs.display !== "none");
+      }
+      let a: Element | null = el.parentElement;
+      for (let k = 0; k < 6 && a; k++, a = a.parentElement) if (getComputedStyle(a).display === "none") return true;
+      return false;
+    }).catch(() => false);
+    return hidden === true;
+  }
+
   /** The words of an opened dialog (pageEffect's `modal:<id|aria-label|tag>`) when they say the page's
    *  own fields are required or invalid — the portal refusing an advance, not a page the advance
    *  reached; "" for any other dialog, a frame dialog, or one that cannot be read. */
