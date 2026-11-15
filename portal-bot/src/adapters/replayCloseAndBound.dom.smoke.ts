@@ -21,6 +21,9 @@
 //                   at its own step, and the closing step says so.
 //      MUST-PASS    a select whose target never exists (Tigard's shape) fails within the bound, named.
 //      MUST-PASS    a fill (with a value) whose target never exists fails within the bound, named.
+//      MUST-PASS    a late control that only resolveLocator's rescue reaches (an icon ligature,
+//                   "check_circleApply" for a recorded "Apply") is clicked within the bound, never
+//                   reported as missing (#232 review).
 //      MUST-PASS    a recorded POLICY DEFAULT select whose question is not asked is SKIPPED (not failed)
 //                   within the bound, named "not asked", and the run goes on.
 //   K  what the bound must not take away. Each late control mounts AFTER its step has begun (past
@@ -91,6 +94,11 @@ const PAGES: Record<string, string> = {
   // loads with its own request). Same reference box, same reason.
   "/policy-late": shell("Disconnect Requirements", `<h1>Disconnect Requirements</h1><label for="ref">Reference</label> <input id="ref" name="ref"><div id="sec"></div>
 <script>setTimeout(function(){ document.getElementById('sec').innerHTML = '<label for="E44U32NXYNWGInput">Are the AC disconnect(s) for this installation within the states required distance?</label> <select id="E44U32NXYNWGInput" name="acDisc"><option value="">Please select...</option><option value="Yes">Yes</option><option value="No">No</option></select>'; }, 7000);</script>`),
+  // Oregon ePermitting's Apply, mounting ~5 s after the page lands: the icon font's ligature is glued
+  // to its name ("check_circleApply"), so the recorded role+name "Apply" never matches it — only
+  // resolveLocator's rescue by name does.
+  "/late-icon": shell("Permits", `<h1>Permits and Licensing</h1><div id="menu"></div>
+<script>setTimeout(function(){ document.getElementById('menu').innerHTML = '<a href="/form"><span class="material-icons">check_circle</span>Apply</a>'; }, 5000);</script>`),
   // The page the recipe's entry URL serves once the session is where it should be (Coos Bay's Apply).
   "/entry": shell("Applications", `<h1>Applications</h1><p>Start a new application.</p><a href="/form">Apply</a>`),
   // Where a login redirect lands instead: the signed-in home, with no Apply on it.
@@ -202,6 +210,15 @@ console.log(`\nB. a step whose control is not on the page fails named within ${B
   check("MUST-PASS ...named, at its own step",
     /^Recipe step failed \(fill — Description of work\): no control on this page matches "Description of work" \(recorded as label:"Description of work" \| css:#desc\)/.test(o.fillMsg)
       && o.data.failedStepIndex === 1 && o.traceOf(1) === "FAILED", `trace1=${o.traceOf(1)} ${o.fillMsg.slice(0, 300)}`);
+}
+{
+  // Not missing, only out of the recorded levels' reach: the end of the wait looks once more the full
+  // way (resolveLocator and its rescues) before it calls the control missing.
+  const o = await staged("late control only the rescue reaches", [gotoStep("/late-icon"), CLICK_APPLY, REVIEW], `${base}/late-icon`);
+  const ms = o.stepMs(1);
+  check(`MUST-PASS a late control that only resolveLocator's rescue reaches ("check_circleApply" for a recorded "Apply") is clicked within the bound (step ${ms} ms, < ${BOUND_MS + SLACK_MS}), never "no control matches"`,
+    ms < BOUND_MS + SLACK_MS && o.data.executed === 2 && /STOPPED on "Building application"/.test(o.fillMsg) && !/Recipe step failed|no control on this page matches|Replay stalled/.test(o.fillMsg),
+    `step ms=${ms} executed=${String(o.data.executed)} ${o.fillMsg.slice(0, 220)}`);
 }
 {
   // A policy question the portal does not ask this project is not missing information: skipped, named.
