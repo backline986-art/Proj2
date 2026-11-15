@@ -862,7 +862,9 @@ export function draftPickStopTell(stampLabel: string, picks: string[]): string {
 export function isAdvancingClickStep(step: RecipeStep): boolean {
   const note = String(step.note ?? "");
   if (/^advance\b/i.test(note)) return true;
-  const name = `${step.selector?.name ?? ""} ${step.selector?.text ?? ""} ${note}`;
+  // THE FACE WORDS TOO (#228): a control the learner names by its aria-label keeps what its face
+  // reads as shownText, which was the recorded name before — the same words, read the same way.
+  const name = `${step.selector?.name ?? ""} ${step.selector?.text ?? ""} ${step.selector?.shownText ?? ""} ${note}`;
   return /\bcontinue\b|\bnext\b|save (and|&) continue/i.test(name) && !/add new|add contact|search|lookup|calculate/i.test(name);
 }
 
@@ -3678,7 +3680,8 @@ export class RecipeAdapter extends BasePortalAdapter {
       // A COMMIT CLICK AFTER THIS PAGE'S UPLOADS (the attachment Save): the page must LIST the file
       // before the run moves on (runs-finish item 4). An advance leaves the page's uploads behind.
       if (performed && step.action === "click" && this.uploadsPerformed.length > this.uploadsSettledUpTo) {
-        const said = `${String(step.note ?? "")} ${String(step.selector?.name ?? step.selector?.text ?? "")}`;
+        // The face words too (#228): an aria-labelled "Save" keeps them as shownText.
+        const said = `${String(step.note ?? "")} ${String(step.selector?.name ?? step.selector?.text ?? "")} ${String(step.selector?.shownText ?? "")}`;
         if (/^advance\b/i.test(String(step.note ?? ""))) this.uploadsSettledUpTo = this.uploadsPerformed.length;
         else if (/\b(save|upload|attach|commit)/i.test(said)) {
           // Only a LEARNER-STAMPED attachment Save is a place the committed list is known to show the
@@ -8478,7 +8481,8 @@ export class RecipeAdapter extends BasePortalAdapter {
     // "the portal did not advance". A step that targets a dialog frame, or that opens a contact
     // section's dialog, is an in-page action; the main page's own advance ("Continue Application")
     // is still held to moving.
-    const words = `${step.selector?.name ?? ""} ${step.selector?.text ?? ""} ${step.selector?.label ?? ""} ${step.note ?? ""}`;
+    // The face words too (#228), as trackContactBlock and the backend's R11 read them: one opener test.
+    const words = `${step.selector?.name ?? ""} ${step.selector?.text ?? ""} ${step.selector?.shownText ?? ""} ${step.selector?.label ?? ""} ${step.note ?? ""}`;
     const dialogStep = !!step.selector?.frame || isContactOpener(words);
     const isAdvance = /^advance\b/i.test(String(step.note ?? "").trim()) && !dialogStep;
     if (!blockers.length && !isAdvance) {
@@ -8937,9 +8941,9 @@ export class RecipeAdapter extends BasePortalAdapter {
     const ids = new Set([step.fingerprint?.id, ...[sel, ...(sel.fallbacks ?? [])].map((s) => /^#([A-Za-z_][\w:.-]*)$/.exec(String(s?.css ?? ""))?.[1])]
       .filter((x): x is string => !!x));
     const side = SIDES.find((s) => s.field.test(String(step.field ?? "")));
-    const probe: Array<{ i: number; id: string; section: string; visible: boolean }> = [];
+    const probe: Array<{ i: number; id: string; section: string; face: string; visible: boolean }> = [];
     for (let i = 0; i < Math.min(n, 12); i++) {
-      const c = loc.nth(i) as { evaluate?: (fn: unknown) => Promise<{ id: string; section: string }>; isVisible?: () => Promise<boolean> };
+      const c = loc.nth(i) as { evaluate?: (fn: unknown) => Promise<{ id: string; section: string; face: string }>; isVisible?: () => Promise<boolean> };
       if (typeof c.evaluate !== "function" || typeof c.isVisible !== "function") break;
       const info = await c.evaluate((el: Element) => {
         let section = "";
@@ -8947,15 +8951,37 @@ export class RecipeAdapter extends BasePortalAdapter {
           const h = a.querySelector("h1, h2, h3, h4, h5, legend, [role=heading]");
           if (h && !h.contains(el)) section = (h.textContent || "").replace(/\s+/g, " ").trim().slice(0, 80);
         }
-        return { id: el.id || "", section };
+        // Its face as the learner read it for shownText: the text without its aria-hidden parts.
+        let face = el.textContent || "";
+        if (el.querySelector('[aria-hidden="true"]')) {
+          const copy = el.cloneNode(true) as Element;
+          copy.querySelectorAll('[aria-hidden="true"]').forEach((x) => x.remove());
+          face = copy.textContent || "";
+        }
+        return { id: el.id || "", section, face: face.replace(/\s+/g, " ").trim().toLowerCase() };
       }).catch(() => null);
       if (!info) continue;
-      probe.push({ i, id: info.id, section: info.section, visible: await c.isVisible().catch(() => false) });
+      probe.push({ i, id: info.id, section: info.section, face: info.face ?? "", visible: await c.isVisible().catch(() => false) });
     }
     const byId = probe.filter((p) => p.id && ids.has(p.id));
     if (byId.length === 1) {
       this.agingNotes.push(`"${String(step.note ?? step.action).slice(0, 40)}" matched ${n} controls — its recorded id picked one of them`);
       return loc.nth(byId[0].i);
+    }
+    // THE FACE THE STEP RECORDED CHOOSES BETWEEN CONTROLS THAT SHARE ITS NAME (#228). The learner
+    // names a click by its accessible name and keeps the words on its face, when they differ, as
+    // shownText. Two id-less links that share one aria-label ("link") and read "Cancel" and "Next"
+    // match the same role+name, and the first visible one was taken: Cancel, for a step recorded on
+    // Next (review of #228). Only a UNIQUE visible match among the selector's own matches is taken,
+    // so this never finds a control the selector did not find, and the face never locates one on its
+    // own: Tigard's record type reads "Apply", the face of the top menu's tab too.
+    const face = String(sel.shownText ?? "").replace(/\s+/g, " ").trim().toLowerCase();
+    if (face) {
+      const byFace = probe.filter((p) => p.visible && p.face === face);
+      if (byFace.length === 1) {
+        this.agingNotes.push(`"${String(step.note ?? step.action).slice(0, 40)}" matched ${n} controls — the words on its face ("${face.slice(0, 30)}") picked one of them`);
+        return loc.nth(byFace[0].i);
+      }
     }
     if (side) {
       const graded = probe.filter((p) => p.visible).map((p) => ({ ...p, v: sideVerdict(side.side, p.section) }));
@@ -9647,7 +9673,8 @@ export class RecipeAdapter extends BasePortalAdapter {
    *  whose section says nothing is left exactly as recorded. */
   private async trackContactBlock(step: RecipeStep): Promise<void> {
     const frame = step.selector?.frame;
-    const words = `${step.selector?.name ?? ""} ${step.selector?.text ?? ""} ${step.selector?.label ?? ""} ${step.note ?? ""}`;
+    // The face words too (#228): an opener the learner names by its aria-label keeps them as shownText.
+    const words = `${step.selector?.name ?? ""} ${step.selector?.text ?? ""} ${step.selector?.shownText ?? ""} ${step.selector?.label ?? ""} ${step.note ?? ""}`;
     const track: ContactTrack = this.recipe.scopeType === "utility" ? "nem" : "permit";
     if (!frame) {
       if (step.action === "click" && isContactOpener(words)) {
@@ -10233,7 +10260,10 @@ export class RecipeAdapter extends BasePortalAdapter {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   private async reanchorRecordNumberLink(step: RecipeStep): Promise<any | null> {
     if (!this.page || step.action !== "click") return null;
-    const recorded = String(step.selector?.name ?? step.selector?.text ?? step.note ?? "")
+    // THE FACE FIRST (#228): the record number a person sees is the link's face, which the learner
+    // keeps as shownText when an aria-label names the link ("Open record BLD-26-001665"). That face
+    // was the recorded name before, so this is the same string this check has always compared.
+    const recorded = String(step.selector?.shownText ?? step.selector?.name ?? step.selector?.text ?? step.note ?? "")
       .replace(/^human-patch:\s*/i, "").trim();
     if (!recorded || !RECORD_NUMBER.test(recorded)) return null;
     const links = this.page.getByRole("link");

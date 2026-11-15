@@ -230,7 +230,9 @@ export function bindRecipeForReplay(input: {
 
     // R1 — never open a specific filed record.
     if ((step.action === "click" || step.action === "check") && !step.isFinalSubmit) {
-      const hay = [step.selector?.name, step.selector?.text, step.selector?.label, note].map((v) => String(v ?? "")).join(" ");
+      // The face words too (#228): a link the learner names by its aria-label ("Open record") keeps
+      // the record number its face shows as shownText — which was the recorded name before.
+      const hay = [step.selector?.name, step.selector?.text, step.selector?.shownText, step.selector?.label, note].map((v) => String(v ?? "")).join(" ");
       const m = RECORD_NUMBER.exec(hay);
       if (m) {
         record("stripped", `clicks the specific filed record ${m[0]} — replaying it would open a previous customer's record`);
@@ -412,7 +414,8 @@ export function bindRecipeForReplay(input: {
     // section says nothing is left exactly as recorded — never guessed.
     {
       const inFrame = Boolean(original.selector?.frame);
-      const words = `${original.selector?.name ?? ""} ${original.selector?.text ?? ""} ${original.selector?.label ?? ""} ${note}`;
+      // The face words too (#228), as the replay's own opener tests read them.
+      const words = `${original.selector?.name ?? ""} ${original.selector?.text ?? ""} ${original.selector?.shownText ?? ""} ${original.selector?.label ?? ""} ${note}`;
       const opener = original.action === "click" && !inFrame && isContactOpener(words);
       if (opener) {
         contactBlock = { role: contactRoleOfStep(original, { track: contactTrack }), label: label.slice(0, 40) };
