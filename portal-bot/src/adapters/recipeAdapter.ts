@@ -550,6 +550,18 @@ export class ReplayGuardRefusal extends Error {
   }
 }
 
+/** #232 — A STEP WHOSE CONTROL NEVER RESOLVED: no level of its recorded selector matched anything on
+ *  the page within RecipeAdapter.TARGET_APPEAR_MS. Its message names the step and what it looked
+ *  for; it never says "timeout", so the retry loop does not reload and retry it (a reload cannot
+ *  conjure a control the page does not have) — only a run carried off its entry URL at the start
+ *  gets one more look, from that URL. */
+export class ReplayTargetMissing extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "ReplayTargetMissing";
+  }
+}
+
 /** THE APPROVED FINAL SUBMIT ENDED THE RUN — a pause for a person (a CAPTCHA/MFA challenge, a fee
  *  the portal wants paid) or a verdict (the portal refused it, or said nothing a person can trust).
  *  Typed so the step loop returns AT ONCE: never retried (the approved click is at most once, and a
@@ -1316,6 +1328,14 @@ export class RecipeAdapter extends BasePortalAdapter {
   }
   /** The recipe step index the loop is on — the final-submit gate's "is this the terminal step". */
   private currentStepIdx = -1;
+  /** #232 — the step loop arrived at the review marker (stopForReview, the recorded final submit, or a
+   *  stamped draft-creating submit). A run that ends after this stopped AT review; before it, it never
+   *  got there. */
+  private reachedReviewMarker = false;
+  /** #232 — HOW THE REPLAY ITSELF ENDED, for the closing step (stopAtReview): fillApplication's own
+   *  result, or openSubmission's refusal to start it. null = neither has reported (a caller that asks
+   *  stopAtReview alone keeps today's message). */
+  private replayEnd: { started: boolean; ok: boolean; pauseReason: string | null; stepIndex: number; message: string } | null = null;
   /** #340 — WHY THE REPLAY WAS STOPPED FROM OUTSIDE (a person's cancel, or no progress for too long).
    *  Set once; every later door (the step loop, fillApplication, stopAtReview) reads it and ends the
    *  run named, without touching the page again. */
@@ -1339,6 +1359,17 @@ export class RecipeAdapter extends BasePortalAdapter {
   /** How long an upload step waits for its named file slot to MOUNT (client-rendered steps show a
    *  spinner first) before it is skipped, named. Bounded: never a 30 s wait per retry. */
   static UPLOAD_SLOT_WAIT_MS = 10_000;
+  /** #232 — HOW LONG A CLICK, FILL OR SELECT WAITS FOR A CONTROL THAT IS NOT ON THE PAGE AT ALL to
+   *  appear, before the step fails named. A control nothing on the page matches used to be handed to
+   *  every wait the step's branch had — each evaluate, selectOption and click on an empty locator
+   *  waits out Playwright's 30 s, and the retry loop then reloaded and did it all again: live
+   *  2026-11-14, Tigard's "Address Type" select spent 127 s of a 2-minute stall budget (8 minutes
+   *  of the default) and Boise's "Building" click 170 s of 3 minutes, and each run ended as a stall
+   *  rather than as the step that could not find its control. 15 s sits above the 10 s every
+   *  branch already waited for its target to become visible, the 10 s an upload slot gets to mount
+   *  and the 12 s an SPA section gets to mount its controls, and at half the click timeout.
+   *  Static so a smoke can read it. */
+  static TARGET_APPEAR_MS = 15_000;
 
   constructor(
     private recipe: PortalRecipe,
@@ -1489,6 +1520,8 @@ export class RecipeAdapter extends BasePortalAdapter {
       const find = findSiteDraft(entries, { ...this.options.siteDraft, street });
       if (find.found || find.ambiguous) {
         const appNo = find.found ? find.entry.id : "";
+        // #232: the closing step says the recipe never ran, never "staged to the review screen".
+        this.replayEnd = { started: false, ok: false, pauseReason: null, stepIndex: -1, message: find.found ? `this address already has an unsubmitted draft on the portal (${appNo}).` : `${find.why}.` };
         return fail(
           find.found
             ? `${this.portalName}: this address already has an unsubmitted draft on the portal (${appNo}) — the recipe was not replayed, so no second application was started. Stage again: the next run opens that draft and continues it.`
@@ -1560,6 +1593,9 @@ export class RecipeAdapter extends BasePortalAdapter {
     // (armSubmitWatch), and a route left behind would abort the person's own filing.
     this.backstop = await installFilingBackstop(this.page, "replay run").catch(() => null);
     if (this.backstop?.redirectGuardNote) this.driftWarnings.push(this.backstop.redirectGuardNote);
+    // #232: this run's ending is its own (endReplay sets it on the way out).
+    this.reachedReviewMarker = false;
+    this.replayEnd = null;
     try {
       // A FilerIdentityStop that escaped the step loop (a click between steps) is the run's answer too.
       const stopTimer = this.startStopWatchdog();
@@ -1591,23 +1627,61 @@ export class RecipeAdapter extends BasePortalAdapter {
       this.noteReviewBlockedCalls();
       // AFTER THE APPROVED CLICK "Nothing was sent" is false: the filing went (or the click's own
       // request was the one aborted). Every abort is still reported, and the result says which.
-      if (this.finalSubmitClicked) return this.withApprovedClickBackstopNotes(r);
+      if (this.finalSubmitClicked) return this.endReplay(this.withApprovedClickBackstopNotes(r));
       const stop = this.backstopStop();
       // A DIALOG WE DISMISSED CANCELLED THE APPROVED CLICK, AND THE PAGE POSTED ANYWAY (autosubmit-2
       // MF-S3: an alert() cannot cancel its form) — the backstop aborted that POST. The run's own
       // pause (fee_payment) and its "NOTHING was filed" stand, first; the abort is reported after.
       if (stop && this.finalSubmitNothingSent && r.pauseReason) {
-        return { ...fail(`${String(r.message ?? "")} ${stop}`.trim(), { ...(r.data ?? {}), driftWarnings: this.driftWarnings, guardRefusals: this.guardRefusals }), pauseReason: r.pauseReason };
+        return this.endReplay({ ...fail(`${String(r.message ?? "")} ${stop}`.trim(), { ...(r.data ?? {}), driftWarnings: this.driftWarnings, guardRefusals: this.guardRefusals }), pauseReason: r.pauseReason });
       }
       // Every abort is reported (driftWarnings + guardRefusals, pushed by backstopStop); a
       // filing/payment/lockdown abort turns ANY ending — "reached review", or a step that then
       // "did not advance" because its request was aborted — into the backstop's named failure.
-      if (stop) return fail(r.ok ? stop : `${stop} (The run then reported: ${String(r.message ?? "").slice(0, 300)})`, { ...(r.data ?? {}), driftWarnings: this.driftWarnings, guardRefusals: this.guardRefusals });
-      return r;
+      if (stop) return this.endReplay(fail(r.ok ? stop : `${stop} (The run then reported: ${String(r.message ?? "").slice(0, 300)})`, { ...(r.data ?? {}), driftWarnings: this.driftWarnings, guardRefusals: this.guardRefusals }));
+      return this.endReplay(r);
     } finally {
       await this.backstop?.dispose().catch(() => null);
       this.backstop = null;
     }
+  }
+
+  /** #232 — the replay's own ending, kept for the closing step: whether it ended clean, and if not,
+   *  at which step (failedStepIndex, else the step the loop was on) and why. Returns `res` as is. */
+  private endReplay(res: PortalStepResult): PortalStepResult {
+    const at = (res.data as { failedStepIndex?: unknown } | undefined)?.failedStepIndex;
+    this.replayEnd = {
+      started: true, ok: res.ok, pauseReason: typeof res.pauseReason === "string" && res.pauseReason ? res.pauseReason : null,
+      stepIndex: typeof at === "number" && Number.isFinite(at) ? at : this.currentStepIdx, message: String(res.message ?? ""),
+    };
+    return res;
+  }
+
+  /** #232 — WHERE A REPLAY THAT DID NOT END CLEAN ACTUALLY STOPPED, in the closing step's words: the
+   *  step (1-based, as the stall message counts), its note, and the run's own reason — and "before
+   *  reaching the review screen" unless the loop got to the review marker. Never "staged". */
+  private replayStoppedClose(end: { started: boolean; pauseReason: string | null; stepIndex: number; message: string }, handoff = ""): string {
+    const flat = end.message.replace(/\s+/g, " ").trim();
+    // The reason, without the "Recipe step failed (action — note):" lead (the step is named here),
+    // the Playwright call log, and the bracketed page context (the fill step's own message has both).
+    const reason = flat.replace(/^Recipe step failed \((?:[^()]|\([^()]*\))*\):\s*/, "")
+      .replace(/\s*Call log:.*$/, "").replace(/\s*\[url=.*$/, "").slice(0, 300) || "no reason was reported";
+    if (!end.started) {
+      return `${this.portalName}: the recipe was NOT replayed — ${reason} Nothing was staged at the review screen and nothing was submitted.${handoff} AUTOMATION HAS STOPPED.`;
+    }
+    const total = this.recipe.steps.length;
+    const i = end.stepIndex;
+    const step = i >= 0 ? this.recipe.steps[i] : undefined;
+    const note = String(step?.note || step?.field || step?.action || "").replace(/\s+/g, " ").trim().slice(0, 60);
+    const where = i >= 0 && i < total ? `at step ${i + 1} of ${total}${note ? ` ("${note}")` : ""}` : "before its first step";
+    const verb = end.pauseReason ? "PAUSED for a person" : "STOPPED";
+    const review = this.reachedReviewMarker ? "" : " before reaching the review screen";
+    // "Nothing was submitted" only while it is known: a filing or draft-creating click that was
+    // attempted may have reached the portal whatever the step then reported.
+    const filed = (this.finalSubmitAttempted && !this.finalSubmitNothingSent) || this.draftSubmitAttempted
+      ? " A submit was clicked in this run — check on the portal what it did before anything is staged or clicked again."
+      : " Nothing was submitted.";
+    return `${this.portalName}: the replay ${verb} ${where}${review}: ${reason}${/[.!?]$/.test(reason) ? "" : "."}${filed}${handoff} AUTOMATION HAS STOPPED.`;
   }
 
   /** The approved final submit was clicked: report every backstop abort (warnings + refusals) and
@@ -2022,6 +2096,22 @@ export class RecipeAdapter extends BasePortalAdapter {
     }
     // #340 — A STOPPED RUN HANDS NOTHING OVER: no review read, no staged-review walk, no page touched.
     if (this.replayStop) return fail(this.replayStop.message, this.replayStopData());
+    // #232 — A REPLAY THAT FAILED OR PAUSED SAYS WHERE IT STOPPED, NEVER "STAGED TO THE REVIEW SCREEN".
+    // This step used to close every run with the staged sentence whatever the replay had done: live
+    // 2026-11-14 all six failed scratch replays ended with it, Meridian's after ZERO steps (its entry
+    // goto was refused). The run's own ending decides it — ok stays as it was (the runner reads the
+    // failure from the fill step), and nothing below reads the page. A page the run HANDED OVER at
+    // review (#333) is the person's from then on: what became of it is told below, whatever failed after.
+    if (this.replayEnd && !this.replayEnd.ok && !this.handedOverBackstop) {
+      const end = this.replayEnd;
+      // What the person must know about the page still stands (an answer not yet saved, a call held back).
+      const notes = this.reviewHandoffNotes;
+      return ok(this.replayStoppedClose(end, notes.length ? ` ${notes.join(" ")}` : ""), {
+        finalSubmitClicked: false, reachedReview: this.reachedReviewMarker,
+        replayStoppedAt: end.started ? { stepIndex: end.stepIndex, steps: this.recipe.steps.length, pauseReason: end.pauseReason } : { notStarted: true },
+        ...(notes.length ? { reviewHandoffNotes: [...notes], reviewPageBlockedCalls: [...this.reviewPageBlockedCalls] } : {}),
+      });
+    }
     // A request the person sent may land after the run's tail read it, and before the run let the page
     // go: the handed-over backstop's record is read again now (round 3).
     if ((this.handedOverBackstop?.humanRequests.length ?? 0) > 0) this.personRequestWent = true;
@@ -3102,6 +3192,8 @@ export class RecipeAdapter extends BasePortalAdapter {
       // so that click step itself is where the page is answered — before clickDraftCreatingSubmit
       // reads it. A known control with no value stops here by name, before any click.
       if (!pastReview && (step.action === "stopForReview" || isFinalSubmitStep(step) || this.draftCreatingStepAt(stepIdx) >= 0)) {
+        // #232: the run got to its review marker — what ends it from here ends it AT review.
+        this.reachedReviewMarker = true;
         const unrecorded = await this.timed("unrecorded-required", () => this.answerUnrecordedRequired());
         if (unrecorded.filled.length) { prevWasInput = true; wroteToThisPage = true; }
         if (unrecorded.missing.length) {
@@ -3484,7 +3576,12 @@ export class RecipeAdapter extends BasePortalAdapter {
           // Retrying re-resolves against a settled page, where narrowing sees all four and
           // picks one; breaking out instead turned a timing artefact into a dead recipe.
           const isAmbiguous = err instanceof Error && /strict mode violation/i.test(err.message);
-          if ((!isTimeout && !isAmbiguous) || attempt >= RETRY_BACKOFF_MS.length) break;
+          // #232 — A CONTROL THAT NEVER RESOLVED IS NOT RELOADED AND WAITED FOR AGAIN: it has already
+          // had its bounded wait, and three more cycles of it are what ate Boise's stall budget. The
+          // one exception is the login redirect below — a run carried off its entry URL at the start
+          // gets ONE more look, from that URL.
+          const missingOffEntry = err instanceof ReplayTargetMissing && attempt === 0 && this.carriedOffEntryUrl(executed);
+          if ((!isTimeout && !isAmbiguous && !missingOffEntry) || attempt >= RETRY_BACKOFF_MS.length) break;
           // NEVER RETRY — AND NEVER RELOAD — ON THE REVIEW PAGE. A control that is missing there
           // belongs to a page this portal does not have (the recipe is longer than the portal),
           // so waiting cannot produce it, and a reload of a review page is the last thing a
@@ -3541,7 +3638,7 @@ export class RecipeAdapter extends BasePortalAdapter {
           if (isAmbiguous) { await this.settle(8000); continue; }
           const entryUrl = String(this.recipe.steps.find((s) => s.action === "goto")?.value || "");
           const here = String(this.page.url?.() ?? "");
-          if (entryUrl && executed <= 1 && here && !here.startsWith(entryUrl)) {
+          if (this.carriedOffEntryUrl(executed)) {
             this.driftWarnings.push(
               `the session landed on ${here.slice(0, 60)} rather than the recipe's entry URL — returned there before retrying (commonly a login redirect)`,
             );
@@ -6433,6 +6530,12 @@ export class RecipeAdapter extends BasePortalAdapter {
         return this.executeClick(step, scoped, pastReview);
       case "fill": {
         let v = this.resolveValue(step);
+        // #232: a value to write into a control that is not on the page fails named within
+        // TARGET_APPEAR_MS (no value is still a skip, whether or not the control is there).
+        if (v) {
+          scoped = await this.targetOrMissing(step, scoped, nameHint);
+          if (scoped === null) return false;
+        }
         // THE ONE SIGNER RULE, READ LIVE (portal-run-close 1). isSignatureStep sees only what
         // the recipe recorded; a box that is a signature only by the statement above it ("Type
         // your full name" under "I certify under penalty of perjury…") has an ordinary label, and
@@ -6581,6 +6684,31 @@ export class RecipeAdapter extends BasePortalAdapter {
             : `no contact code on file for this client, and the list shows "${shown?.selected?.label ?? ""}"`);
         }
         if (!v) { this.noteUnresolved(step); return false; }
+        // #232: a select whose control is not on the page fails named within TARGET_APPEAR_MS — except
+        // a recorded POLICY DEFAULT, a fixed answer to a question the portal may not ask this project:
+        // not asked is skipped and looked at once more before the page's advance, as the check branch
+        // does for a policy radio. (It was "skipped" before too, after minutes of waits.)
+        // A POLICY QUESTION STILL GETS THE SAME WAIT AS ANY OTHER SELECT BEFORE IT IS "NOT ASKED". It
+        // can mount after its step begins — a section the page loads with its own request after an
+        // advance, a transition — and skipping it on a first look that found nothing left it
+        // unanswered, or answered out of order by the retry before the advance, after the answer it
+        // reveals had already been missed (#232 review, PacifiCorp's AC-disconnect select). The retry
+        // itself is ONE look: the page is as settled as it will ever be, and a question that is
+        // genuinely not asked must not cost a second wait right before every advance.
+        const policyDefault = /^policy default:/i.test(String(step.note ?? ""));
+        if (policyDefault && this.inPolicyRetry && typeof scoped?.first?.().isVisible === "function"
+          && (await scoped.count().catch(() => 0)) === 0) return false;
+        try {
+          scoped = await this.targetOrMissing(step, scoped, nameHint);
+        } catch (err) {
+          if (!policyDefault || !(err instanceof ReplayTargetMissing)) throw err;
+          if (!this.inPolicyRetry) {
+            this.driftWarnings.push(`policy question not asked for this project — skipped: ${String(step.note ?? "").slice(0, 60)}`);
+            this.pendingPolicyRetries.push(step);
+          }
+          return false;
+        }
+        if (scoped === null) return false;
         // TWO "Manufacturer" SELECTS, ONE LABEL — THE FIELD NAME CARRIES THE SIDE.
         //
         // PowerClerk's spec block renders the INVERTER's Manufacturer/Model and, nested
@@ -7076,6 +7204,71 @@ export class RecipeAdapter extends BasePortalAdapter {
       default:
         return false;
     }
+  }
+
+  /** #232 — IS THIS STEP'S CONTROL ON THE PAGE AT ALL? Asked by a click, fill or select at the point
+   *  it would start waiting on its target. Something matched: `scoped`, untouched. Nothing matched:
+   *  every level of the recorded selector (the primary and each fallback, counted, never accepted —
+   *  acceptance stays resolveLocator's) is polled for up to TARGET_APPEAR_MS, and then the step is
+   *  resolved again the full way (resolution with its rescues, identity check, narrowing; null =
+   *  the identity check aborted the step). Something resolved: that. Nothing: ReplayTargetMissing,
+   *  named. Not on a repeat array pass or inside an array row (a row control that is not there is
+   *  skipped by design), not for a pinned re-assert (#362), and not on a locator that cannot be
+   *  probed (the unit-test fakes have no isVisible). */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  private async targetOrMissing(step: RecipeStep, scoped: any, nameHint: string): Promise<any> {
+    const first = scoped && typeof scoped.first === "function" ? scoped.first() : null;
+    if (!scoped || typeof scoped.count !== "function" || typeof first?.isVisible !== "function") return scoped;
+    if (this.arrayPass > 1 || this.arrayRowScope > 0 || isPinnedReassert(step)) return scoped;
+    if ((await scoped.count().catch(() => 0)) > 0) return scoped;
+    const sel = step.selector;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const levels: any[] = [];
+    for (const s of [sel, ...(sel?.fallbacks ?? []).map((fb) => ({ ...fb, fallbacks: undefined }) as RecipeSelector)]) {
+      try { const l = this.locator(s); if (l) levels.push(l); } catch { /* a level with nothing usable matches nothing */ }
+    }
+    const started = Date.now();
+    // A CONTROL THAT MOUNTS A MOMENT AFTER ITS STEP BEGINS IS A PAGE STILL RENDERING, NOT AN AGING
+    // RECIPE: the wait is a phase of the step (slowSteps shows it), never an aging note — those drive
+    // "worth re-recording" and the portal's drift count, and the recorded selector worked (#232
+    // review: a description input mounting 0.8 s after an advance read as drift).
+    await this.timed("target-appear", async () => {
+      const deadline = started + RecipeAdapter.TARGET_APPEAR_MS;
+      while (!this.replayStop && Date.now() < deadline) {
+        for (const l of levels) {
+          if ((await l.count().catch(() => 0)) > 0) return;
+        }
+        await sleep(Math.min(500, Math.max(0, deadline - Date.now())));
+      }
+    });
+    const label = String(step.note || this.stepLabel(step) || step.action).replace(/\s+/g, " ").trim().slice(0, 60);
+    // ONE FULL RESOLUTION AT THE END, WHETHER OR NOT A RECORDED LEVEL TURNED UP. The poll counts the
+    // recorded levels only; resolveLocator's rescues (the nth-free twin, the enabled control by its
+    // name, a closed menu opened) reach controls no recorded level matches. Without this look a
+    // Material-icon "check_circleApply" button that mounted at 5 s failed at 15 s as "no control on
+    // this page matches", with that very button listed among the page's visible controls (#232
+    // review). The same resolution executeStep ran when the step began — nothing new is tried.
+    if (!this.replayStop) {
+      this.resolvingStep = step;
+      let again = await this.resolveLocator(sel, nameHint).finally(() => { this.resolvingStep = null; });
+      if (IDENTITY_CHECKED.has(step.action)) {
+        const anchored = await this.reanchorIfWrongControl(step, again);
+        if (anchored === "abort") return null;
+        if (anchored) again = anchored;
+      }
+      again = await this.narrowToOne(again, step);
+      if ((await again?.count?.().catch(() => 0)) > 0) return again;
+    }
+    const recorded = [sel, ...(sel?.fallbacks ?? [])].map((s) => this.describeSelector(s as RecipeSelector)).join(" | ");
+    throw new ReplayTargetMissing(`no control on this page matches "${label}" (recorded as ${recorded.slice(0, 160)}) — waited ${Math.round((Date.now() - started) / 1000)} s for it to appear; this is not the page the step was recorded on, or the portal no longer offers that control`);
+  }
+
+  /** The recipe's entry URL (its first goto) is not where the session is, at the START of the run —
+   *  a login redirect carried it off. The one case a failed step goes back to that URL and retries. */
+  private carriedOffEntryUrl(executed: number): boolean {
+    const entryUrl = String(this.recipe.steps.find((s) => s.action === "goto")?.value || "");
+    const here = String(this.page?.url?.() ?? "");
+    return !!entryUrl && executed <= 1 && !!here && !here.startsWith(entryUrl);
   }
 
   // ---------------------------------------------------------------------------------------------
@@ -8289,6 +8482,10 @@ export class RecipeAdapter extends BasePortalAdapter {
     // Fingerprint FIRST: this is the only way to tell "the portal advanced" from "the
     // portal refused". waitForInteractiveControls below cannot — it is page-global and
     // identity-free, so a page that never moved satisfies it instantly.
+    // #232: first, a click whose control is not on the page fails named within TARGET_APPEAR_MS —
+    // before the fingerprint, so a control that renders while it is awaited is not read as the
+    // click's own effect.
+    scoped = await this.targetOrMissing(step, scoped, String(step.note ?? step.field ?? ""));
     const beforeUrl = typeof this.page.url === "function" ? String(this.page.url() ?? "") : "";
     const beforeFp = await this.pageIdentity();
     // Values too, not just identity — so a click that computed a total can prove it did.
