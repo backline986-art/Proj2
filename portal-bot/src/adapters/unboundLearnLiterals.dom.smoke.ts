@@ -91,7 +91,7 @@ const searchSteps = (dir: string, type: string): RecipeStep[] => [
 ] as RecipeStep[];
 
 async function replay(recipe: PortalRecipe, project: ProjectRecord, read: string[]): Promise<{ values: Record<string, string>; drift: string[]; aging: string[]; changes: string[] }> {
-  const fieldValues = resolveRecipeFieldValues(db, project, "accela");
+  const fieldValues = resolveRecipeFieldValues(db, project, "accela", "permit");
   const binding = bindRecipeForReplay({
     steps: recipe.steps, portalUrl: recipe.portalUrl, project: { ...project, city: project.city } as never,
     fieldValues, track: "permit", borrowed: null, agency: null,
