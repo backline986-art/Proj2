@@ -923,6 +923,14 @@ export function isDialogDismissalClick(step: RecipeStep): boolean {
   return [sel.css, ...(sel.fallbacks ?? []).map((f) => f.css)].some((c) => DIALOG_CLOSE_CSS.test(String(c ?? "")));
 }
 
+/** The learn session's own record number a recorded click names (its name, text or note, with
+ *  "human-patch:" dropped), or "" — THE one reading: replay re-anchors such a click to the record
+ *  THIS run created (reanchorRecordNumberLink), and #237 never skips it as absent. */
+function recordedRecordNumber(step: RecipeStep): string {
+  const recorded = String(step.selector?.name ?? step.selector?.text ?? step.note ?? "").replace(/^human-patch:\s*/i, "").trim();
+  return recorded && RECORD_NUMBER.test(recorded) ? recorded : "";
+}
+
 /** A recorder note naming a click that MOVES the run somewhere (into an application, a record type,
  *  a program, an address): never a learn-state click, and a closed menu may hold its link — the
  *  name rescue opens that menu (revealMenuAndPick), so a hidden match is no evidence here. */
@@ -944,7 +952,9 @@ function isNavigationClick(step: RecipeStep): boolean {
  * attestation or signature (isAcceptTermsLabel, companyFactOf, isSignatureStep); an upload, and a
  * save / upload / attach / commit click (isCommitWordedClick — the attachment commit); an opener
  * (isContactOpener, isArrayAdderClick) or a compute (isComputeTotalsStep), because the steps after
- * them fill what they make; and who is filing (isFilerIdentityField). An ADVANCE is not in this list
+ * them fill what they make; who is filing (isFilerIdentityField); and a learn session's record
+ * number (recordedRecordNumber: absent by construction, re-anchored to this run's record — skipping
+ * it as a learn-state click broke recordNumberReanchor.dom.smoke). An ADVANCE is not in this list
  * because it is decided by kind (learnStateSkippable): it is never a "non-advancing" click, and only
  * the review-page rule takes one. A draft-creating submit is decided at run time (its stamp).
  */
@@ -956,6 +966,8 @@ export function learnStateNeverSkipped(step: RecipeStep): string {
   if (isAcceptTermsLabel(words) || !!step.companyFactOf || isSignatureStep(step)) return "a consent, attestation or signature";
   if (isFilerIdentityField(step.field)) return "who is filing";
   if (step.action === "click") {
+    // Absent BY CONSTRUCTION (the learn's filing, not this one): re-anchored, never skipped.
+    if (recordedRecordNumber(step)) return "a learn-session record number (re-anchored to this run's record)";
     if (isCommitWordedClick(step)) return "a save / upload commit";
     if (isContactOpener(words) || isArrayAdderClick(step)) return "an opener (the steps after it fill what it opens)";
     if (isComputeTotalsStep(step)) return "a compute (the steps after it read what it computes)";
@@ -1023,8 +1035,10 @@ export function learnStateSkipKind(
   return null;
 }
 
-/** Is step `idx` in the recipe's REVIEW TAIL — every step after it up to the review stop, the
- *  final submit or the recipe's end is a click (never a write, an upload, a key press or a goto)? */
+/** Is step `idx` in the recipe's REVIEW TAIL — a recorded review stop or final submit follows, and
+ *  every step between is a click (never a write, an upload, a key press or a goto)? A recipe that
+ *  simply ENDS is not a review: the stop is what says the learn stood on the review page there
+ *  (recordNumberReanchor.dom.smoke: a one-click recipe is no review tail). */
 export function inRecipeReviewTail(steps: readonly RecipeStep[], idx: number): boolean {
   if (idx < 0 || idx >= steps.length) return false;
   for (let k = idx + 1; k < steps.length; k++) {
@@ -1032,7 +1046,7 @@ export function inRecipeReviewTail(steps: readonly RecipeStep[], idx: number): b
     if (s.action === "stopForReview" || isFinalSubmitStep(s)) return true;
     if (s.action !== "click") return false;
   }
-  return true;
+  return false;
 }
 
 /** A #237 probe call that never throws, sync or async — a browser-free fake may return a plain
@@ -10613,9 +10627,8 @@ export class RecipeAdapter extends BasePortalAdapter {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   private async reanchorRecordNumberLink(step: RecipeStep): Promise<any | null> {
     if (!this.page || step.action !== "click") return null;
-    const recorded = String(step.selector?.name ?? step.selector?.text ?? step.note ?? "")
-      .replace(/^human-patch:\s*/i, "").trim();
-    if (!recorded || !RECORD_NUMBER.test(recorded)) return null;
+    const recorded = recordedRecordNumber(step);
+    if (!recorded) return null;
     const links = this.page.getByRole("link");
     const n = await links.count().catch(() => 0);
     if (!n) return null;

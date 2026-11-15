@@ -91,6 +91,12 @@ check("a consent / attestation / signature is never skipped, not even when condi
   assert.equal(kind({ action: "check", note: "Company is licensed", conditional: true, companyFactOf: "abc", selector: { label: "Licensed" } } as RecipeStep, "absent"), null);
   assert.equal(kind({ action: "fill", note: "Signature", field: "authorizedSignerName", conditional: true, selector: { label: "Signature" } } as RecipeStep, "absent"), null);
 });
+check("a learn session's record number is never skipped (it is re-anchored to this run's record)", () => {
+  const rn = click("human-patch: 187-26-000309-STR", { role: "link", name: "187-26-000309-STR" });
+  assert.ok(learnStateNeverSkipped(rn));
+  assert.equal(kind(rn, "absent", TAIL), null);
+  assert.equal(kind(rn, "absent", REVIEW), null);
+});
 check("who is filing is never skipped, not even when conditional", () => {
   assert.equal(kind({ action: "select", note: "Installer Company", field: "installerCompanyName", conditional: true, selector: { label: "Installer Company" } } as RecipeStep, "absent"), null);
 });
@@ -103,14 +109,15 @@ check("a dismissal is the WHOLE label: Book an Inspection, Lookup and Accept are
 });
 
 // ---- the review tail ---------------------------------------------------------------------------
-check("the review tail: only clicks between the step and the review stop / final submit / end", () => {
+check("the review tail: only clicks between the step and a recorded review stop / final submit", () => {
   const s = (action: string, extra: Partial<RecipeStep> = {}): RecipeStep => ({ action, ...extra } as RecipeStep);
   const steps = [s("fill"), s("click"), s("click"), s("stopForReview"), s("click", { isFinalSubmit: true })];
   assert.equal(inRecipeReviewTail(steps, 1), true);
   assert.equal(inRecipeReviewTail(steps, 2), true);
   assert.equal(inRecipeReviewTail([s("click"), s("fill"), s("stopForReview")], 0), false, "a write follows");
   assert.equal(inRecipeReviewTail([s("click"), s("goto"), s("stopForReview")], 0), false, "a goto follows");
-  assert.equal(inRecipeReviewTail([s("click"), s("click")], 0), true, "the recipe's end");
+  assert.equal(inRecipeReviewTail([s("click"), s("click")], 0), false, "a recipe that simply ends is not a review");
+  assert.equal(inRecipeReviewTail([s("click")], 0), false, "a one-click recipe is not a review");
   assert.equal(inRecipeReviewTail([s("click"), s("click", { isFinalSubmit: true })], 0), true, "the final submit");
 });
 
