@@ -3,35 +3,47 @@
 // The live-confirmed defect is Bend's electrical recipe step 22, "advance: OK" on
 // #uploadErrorPopupOk: the learn's upload hit an error popup and the learner dismissed it as a
 // step. On a run whose upload goes through the popup is a closed <dialog> with a display:none OK.
-// Live 2026-11-14 the step clicked that hidden OK into a 30 s timeout and three reloads and failed
-// the run; on the auditors' probe page the name rescue matched "OK" as a SUBSTRING of "Book an
-// Inspection" (label.includes(want), shortest label wins) and navigated off the application.
+// Live 2026-11-14 the step clicked that hidden OK into a 30 s timeout, retried it after three
+// reloads and failed the run; on the auditors' probe page the name rescue matched "OK" as a
+// SUBSTRING of "Book an Inspection" (label.includes(want), shortest label wins) and navigated off
+// the application.
 //
-// Pinned here, each on a synthetic page shaped like the evidence:
-//   [1] Bend 22  — MUST PASS: no popup shown, the OK step is skipped NAMED (the popup's closed, or
-//                  not in the DOM at all), "Book an Inspection" is never clicked, and the run goes on
-//                  to tick "Do you agree?*".
-//   [2] popups   — MUST KEEP: a popup that IS showing (at once, at 1.2 s, at 4 s) has its OK clicked
-//                  as recorded; a dialog showing under other markup goes main's way at once (its
-//                  "Ok" found by name, no wait); a dismissal whose words a gate refuses keeps main's
-//                  path to that gate (no wait).
+// A dismissal step runs EXACTLY main's path (resolution with the whole-words rescue, main's gates,
+// main's waits). Only where main's click times out on a popup that is not showing is the step
+// skipped, named, instead of failing the run — at that first timeout, before main's reload.
+//
+// Pinned here, each on a synthetic page shaped like the evidence (production timeouts: no
+// setDefaultTimeout, so Playwright's 30 s click wait and waitForElement's 10 s are the real ones):
+//   [1] Bend 22  — MUST PASS: no popup shown (closed, or not in the DOM at all): after main's own
+//                  click wait the OK step is skipped NAMED, "Book an Inspection" is never clicked,
+//                  nothing is reloaded, and the run goes on to tick "Do you agree?*".
+//   [2] popups   — MUST KEEP: a popup that IS showing (at once, at 1.2 s, at 4 s, at 20 s — past
+//                  waitForElement, inside the click's own wait) has its OK clicked as recorded; a
+//                  dialog under other markup, and a PLAIN-DIV popup whose control the recorded levels
+//                  miss (another case, another role), are reached by the name rescue and clicked; a
+//                  dismissal whose words a gate refuses keeps main's path to that gate.
 //   [3] words    — MUST EXCLUDE: the rescue never resolves "Search" to "Research" or "OK" to "Book
 //                  an Inspection" / "Lookup" / "Bookmarks", and the closed-menu reveal never hovers a
 //                  "Research" menu for "Search". MUST PASS: "Search Records"; a ligature glued after
 //                  the label ("Nextarrow_forward") still reads "Next"; "Log<span>in</span>" reads
-//                  "Login".
+//                  "Login". MUST KEEP (plurals main reached): "Add Attachment" reaches "Add
+//                  Attachments", "Permit" reaches "Permits".
 //   [4] Oregon   — MUST KEEP: "Apply" still reaches "check_circleApply" (the ligature strip) past a
 //                  disabled decorative pill, and "Apply Now".
 //   [5] hidden   — MUST KEEP: an ordinary control hidden then shown is clicked as on main, and so is
 //                  a bare "Close" with no recorded popup handle (not a dismissal step).
+//   [6] the skip's own question, asked directly — MUST PASS on a hidden or absent target after the
+//                  click's TimeoutError; MUST EXCLUDE a showing target (a popup that is up, its click
+//                  intercepted), a showing recorded level, any other failure kind, a timeout that is
+//                  not the click's, past review, a non-dismissal, the flagged final submit.
 //
 //   npx tsx portal-bot/src/adapters/rescueAndDismissal.dom.smoke.ts
 import "../smokeArtifactDirs";
 import assert from "node:assert/strict";
 import http from "node:http";
-import { chromium } from "playwright";
+import { chromium, errors } from "playwright";
 import type { PortalRecipe, RecipeStep } from "../../../shared/src/types";
-import { RecipeAdapter } from "./recipeAdapter";
+import { RecipeAdapter, ReplayGuardRefusal } from "./recipeAdapter";
 
 let failures = 0;
 const check = (label: string, fn: () => void): void => {
@@ -54,7 +66,8 @@ const HITS = "window.__hits = []; document.addEventListener('click', function (e
 // [1] Bend p6, from the live step-22 capture's shape: the control bar's links (here with the
 // auditors' "Book an Inspection", which leaves the application), "Permit Application - Upload Files"
 // with its Next Step (recipe step 21, whose redirect brings the disclaimer), and a CLOSED upload-error
-// <dialog class="cvpopup"> whose OK is display:none.
+// <dialog class="cvpopup"> whose OK is display:none. The disclaimer is client-rendered: a reload
+// would bring back the upload step, so a ticked "Do you agree?*" also proves nothing was reloaded.
 const bend = (withPopup: boolean): string => shell(`
   <nav id="navBar" class="controlBar" aria-label="Portal navigation links">
     <a id="lnkMyItems" href="#/items">My Items</a>
@@ -75,7 +88,7 @@ const bend = (withPopup: boolean): string => shell(`
     setTimeout(function () { document.getElementById('uploadStep').style.display = 'none'; document.getElementById('disclaimerStep').style.display = ''; }, 600);
   });`);
 
-// [2] The popup SHOWING (at once, at 1.2 s, at 4 s): its OK closes it and the disclaimer appears.
+// [2] The popup SHOWING (at once, at 1.2 s, at 4 s, at 20 s): its OK closes it and the disclaimer appears.
 const popup = (at: number): string => shell(`
   <form onsubmit="return false;"><h2>Permit Application - Upload Files</h2>
     <dialog id="uploadErrorPopup" class="cvpopup"><div>An error has occurred.</div>
@@ -87,6 +100,21 @@ const popup = (at: number): string => shell(`
   });
   var open = function () { document.getElementById('uploadErrorPopup').showModal(); }; ${at < 0 ? "open();" : `setTimeout(open, ${at});`}`);
 
+// [2] A PLAIN-DIV popup (no dialog element, no role, no aria-modal) over a backdrop, shown at once,
+// whose control the recorded levels miss: `control` is its markup.
+const divPopup = (control: string, id: string): string => shell(`
+  <form onsubmit="return false;"><h2>Permit Application - Upload Files</h2>
+    <div id="backdrop" class="cvpopup-backdrop" style="position:fixed;inset:0;background:rgba(0,0,0,.4);z-index:10"></div>
+    <div id="notice" class="cvpopup-div" style="position:fixed;top:30%;left:30%;background:#fff;padding:16px;z-index:11">
+      <div>Your upload is still processing.</div>${control}</div>
+    <section id="disclaimerStep" style="display:none"><input type="checkbox" id="agree"><label for="agree">Do you agree?*</label></section>
+  </form>`, `${HITS}
+  document.getElementById('${id}').addEventListener('click', function (e) {
+    e.preventDefault();
+    document.getElementById('backdrop').style.display = 'none'; document.getElementById('notice').style.display = 'none';
+    document.getElementById('disclaimerStep').style.display = '';
+  });`);
+
 const PAGES: Record<string, string> = {
   "/bend": bend(true),
   "/bendgone": bend(false),
@@ -94,6 +122,7 @@ const PAGES: Record<string, string> = {
   "/popupshown": popup(-1),
   "/popuplate": popup(1200),
   "/popupslow": popup(4000),
+  "/popup20s": popup(20000),
   // [2] A dialog showing under markup the recording did not name: no #uploadErrorPopupOk, and an
   // "Ok" button the recorded exact role+name does not match.
   "/popupother": shell(`
@@ -106,6 +135,9 @@ const PAGES: Record<string, string> = {
       document.getElementById('sessionNotice').close(); document.getElementById('disclaimerStep').style.display = '';
     });
     document.getElementById('sessionNotice').showModal();`),
+  // [2] Plain-div popups: "Ok" (the exact recorded name "OK" misses it), and an <a>OK</a> (the role misses).
+  "/divstale": divPopup(`<button id="altOk" type="button">Ok</button>`, "altOk"),
+  "/divstalelink": divPopup(`<a id="altOkLink" class="btn" href="#ok">OK</a>`, "altOkLink"),
   // [2] A dismissal-shaped step a gate refuses (its note says "submit"): the popup closed.
   "/submitgate": shell(`
     <form onsubmit="return false;"><h2>Review</h2>
@@ -142,6 +174,19 @@ const PAGES: Record<string, string> = {
       <div class="dropdown"><button id="researchBtn" disabled>Research</button>
         <div class="dropdown-menu"><a id="researchEntry" href="#/library">Research Library</a></div></div>
     </main>`, HITS),
+  // [3] Plurals main reached: a hidden recorded "Add Attachment" and the visible "Add Attachments";
+  // a hidden "Permit" and a visible "Permits".
+  "/plural": shell(`
+    <main><h2 id="heading">Attachments</h2>
+      <button id="hiddenAdd" style="display:none">Add Attachment</button>
+      <a id="addAtts" class="btn" href="#att">Add Attachments</a>
+    </main>`,
+  `${HITS} document.getElementById('addAtts').addEventListener('click', function (e) { e.preventDefault(); document.getElementById('heading').textContent = 'Add an attachment'; });`),
+  "/permits": shell(`
+    <main><h2>Dashboard</h2>
+      <button id="hiddenPermit" style="display:none">Permit</button>
+      <a id="permitsBtn" class="btn" href="#/permits">Permits</a>
+    </main>`, HITS),
   // [4] Oregon ePermitting, reduced: a disabled decorative pill carrying the bare word, and the real
   // link whose name is the icon ligature glued to the label ("check_circleApply").
   "/ligature": shell(`
@@ -176,7 +221,10 @@ const browser = await chromium.launch();
 const context = await browser.newContext();
 await context.addInitScript("globalThis.__name = globalThis.__name || function (fn) { return fn; };");
 
-interface Run { ok: boolean; message: string; hits: string[]; path: string; drift: string[]; aging: string[]; skipped: string[]; described: Array<{ note: string; said: string }>; ms: number; checked?: boolean }
+interface Run {
+  ok: boolean; message: string; hits: string[]; path: string; drift: string[]; aging: string[]; skipped: string[];
+  described: Array<{ note: string; said: string }>; asked: Array<{ name: string; message: string; verdict: boolean }>; loads: number; ms: number; checked?: boolean;
+}
 const recipeOf = (path: string, steps: RecipeStep[]): PortalRecipe => ({
   id: `rd-${path.slice(1)}`, scopeType: "ahj", profileKey: `or|synthetic${path.slice(1)}|x`, state: "OR", ahj: "City of Example", utility: "",
   portalPlatform: "synthetic", portalUrl: `${base}${path}`, status: "complete", version: 1,
@@ -185,18 +233,31 @@ const recipeOf = (path: string, steps: RecipeStep[]): PortalRecipe => ({
 
 async function run(path: string, steps: RecipeStep[]): Promise<Run> {
   const page = await context.newPage();
+  let loads = 0;
+  page.on("load", () => { loads++; });
   await page.goto(`${base}${path}`);
   const adapter = new RecipeAdapter(recipeOf(path, steps), {}, {}, { autoSubmit: false });
   (adapter as unknown as { page: unknown }).page = page;
-  // What the skip trace said about each skipped step (describeResolved), read as it is said.
+  // Every skipped step the trace re-resolved for its diagnostic (describeResolved).
   const described: Run["described"] = [];
-  const spy = adapter as unknown as { describeResolved: (step: RecipeStep, actual?: unknown) => Promise<string> };
-  const real = spy.describeResolved.bind(adapter);
-  spy.describeResolved = async (step, actual) => {
-    const said = await real(step, actual);
+  const dspy = adapter as unknown as { describeResolved: (step: RecipeStep, actual?: unknown) => Promise<string> };
+  const dreal = dspy.describeResolved.bind(adapter);
+  dspy.describeResolved = async (step, actual) => {
+    const said = await dreal(step, actual);
     described.push({ note: String(step.note ?? ""), said });
     return said;
   };
+  // Every time the retry loop asks the skip's question: the error it was asked about, and the answer.
+  const asked: Run["asked"] = [];
+  const spy = adapter as unknown as { dismissalClickTimedOutUnshown?: (step: RecipeStep, err: unknown, pastReview: boolean) => Promise<boolean> };
+  if (typeof spy.dismissalClickTimedOutUnshown === "function") {
+    const real = spy.dismissalClickTimedOutUnshown.bind(adapter);
+    spy.dismissalClickTimedOutUnshown = async (step, err, pastReview) => {
+      const verdict = await real(step, err, pastReview);
+      asked.push({ name: err instanceof Error ? err.name : "", message: err instanceof Error ? err.message.split("\n")[0] : String(err), verdict });
+      return verdict;
+    };
+  }
   const t0 = Date.now();
   const res = await adapter.fillApplication({} as never);
   const ms = Date.now() - t0;
@@ -207,10 +268,11 @@ async function run(path: string, steps: RecipeStep[]): Promise<Run> {
   await page.close();
   const out: Run = {
     ok: res.ok, message: String(res.message ?? ""), hits, path: `${where.pathname}${where.hash}`, ms, checked,
-    drift: data.driftWarnings ?? [], aging: data.agingNotes ?? [], skipped: data.skipped ?? [], described,
+    drift: data.driftWarnings ?? [], aging: data.agingNotes ?? [], skipped: data.skipped ?? [], described, asked, loads,
   };
-  console.log(`   ${path}: ok=${out.ok} ${Math.round(ms / 100) / 10}s hits=${JSON.stringify(hits)} at=${out.path}`);
+  console.log(`   ${path}: ok=${out.ok} ${Math.round(ms / 100) / 10}s loads=${loads} hits=${JSON.stringify(hits)} at=${out.path}`);
   console.log(`      message: ${out.message.replace(/\s+/g, " ").slice(0, 220)}`);
+  if (asked.length) console.log(`      asked: ${JSON.stringify(asked)}`);
   return out;
 }
 
@@ -240,40 +302,50 @@ const OK_STEP = { action: "click", phase: "fill", selector: { role: "button", na
 const AGREE_STEP = { action: "check", phase: "fill", selector: { label: "Do you agree?*", fallbacks: [{ css: "#agree" }] }, note: "Do you agree?*" };
 
 // -------------------------------------------------------------------------------------------
-console.log("\n[1] Bend 22: a dismissal whose popup is not shown is skipped named; the run goes on");
+console.log("\n[1] Bend 22: after main's own click wait, a dismissal whose popup is not shown is skipped named; the run goes on");
 for (const p of ["/bend", "/bendgone"]) {
   const r = await run(p, [NEXT_STEP, OK_STEP, AGREE_STEP] as RecipeStep[]);
   check(`${p}: THE REGRESSION — "Book an Inspection" is never clicked, the run never leaves the application, and nothing is clicked for the OK`, () => {
     assert.deepEqual(r.hits, ["dummyUploadCompleteThenRedirect"], JSON.stringify(r.hits));
     assert.equal(r.path, p, r.path);
   });
+  check(`${p}: ...main's path ran first: the click's own Playwright TimeoutError, asked once`, () => {
+    assert.equal(r.asked.length, 1, JSON.stringify(r.asked));
+    assert.equal(r.asked[0].name, "TimeoutError");
+    assert.match(r.asked[0].message, /^locator\.click: Timeout 30000ms exceeded/);
+    assert.equal(r.asked[0].verdict, true);
+  });
   check(`${p}: ...the OK step is skipped as not applicable, said so by name`, () => {
     assert.ok(r.skipped.some((s) => /advance: OK/.test(s)), JSON.stringify(r.skipped));
-    assert.ok(r.aging.some((a) => /advance: OK.*not showing on this run — skipped as not applicable/.test(a)), JSON.stringify(r.aging));
+    assert.ok(r.aging.some((a) => /advance: OK.*not showing on this run — its click timed out on a hidden or absent control/.test(a)), JSON.stringify(r.aging));
   });
-  check(`${p}: ...never handed to the name rescue, not even by the trace's diagnostic`, () => {
+  check(`${p}: ...and its trace line is not a re-resolution (that would run the rescue and the menu reveal's hover after the fact)`, () => {
+    assert.ok(!r.described.some((t) => /advance: OK/.test(t.note)), JSON.stringify(r.described));
+  });
+  check(`${p}: ...the name rescue found nothing (whole words: "OK" is not in "Book an Inspection")`, () => {
     assert.ok(!r.aging.some((a) => /found an enabled one by name/.test(a)), JSON.stringify(r.aging));
-    assert.ok(!r.drift.some((d) => /name containing "OK"/.test(d)), JSON.stringify(r.drift));
-    const line = r.described.find((t) => /advance: OK/.test(t.note));
-    assert.ok(line && /popup is not showing/.test(line.said), JSON.stringify(r.described));
   });
-  check(`${p}: ...and the run goes on: the next recorded step ticks "Do you agree?*" and the run is not failed`, () => {
+  check(`${p}: ...and the run goes on: never reloaded, the next recorded step ticks "Do you agree?*", the run is not failed`, () => {
+    assert.equal(r.loads, 1, `loads=${r.loads}`);
     assert.equal(r.checked, true, `checked=${r.checked}`);
     assert.equal(r.ok, true, r.message.slice(0, 200));
     assert.doesNotMatch(r.message, /Timeout \d+ms/);
   });
-  check(`${p}: ...after the popup's wait, never a 30 s click timeout and reloads`, () => {
-    assert.ok(r.ms >= 6000 && r.ms < 25000, `${r.ms} ms`);
+  check(`${p}: ...after main's own click wait (30 s), on the first attempt — none of main's backoffs and reloads`, () => {
+    // Measured 42 s (/bend) and 72 s (/bendgone: main's own extra wait on a locator that matches
+    // nothing) — each main's FIRST attempt; main went on to ~180 s and ~300 s with three reloads.
+    assert.ok(r.ms >= 30000 && r.ms < 150000, `${r.ms} ms`);
   });
 }
 
 // -------------------------------------------------------------------------------------------
-console.log("\n[2] MUST KEEP: a showing popup's OK is clicked as recorded");
-for (const p of ["/popupshown", "/popuplate", "/popupslow"]) {
+console.log("\n[2] MUST KEEP: a showing popup's OK is clicked as on main");
+for (const p of ["/popupshown", "/popuplate", "/popupslow", "/popup20s"]) {
   const r = await run(p, [OK_STEP, AGREE_STEP] as RecipeStep[]);
   check(`${p}: the showing popup's OK is clicked, not skipped, and the run goes on`, () => {
     assert.deepEqual(r.hits, ["uploadErrorPopupOk"], JSON.stringify(r.hits));
     assert.ok(!r.skipped.some((s) => /advance: OK/.test(s)), JSON.stringify(r.skipped));
+    assert.ok(!r.aging.some((a) => /not showing on this run/.test(a)), JSON.stringify(r.aging));
     assert.equal(r.checked, true, `checked=${r.checked}`);
     assert.equal(r.ok, true, r.message.slice(0, 200));
   });
@@ -289,6 +361,16 @@ for (const p of ["/popupshown", "/popuplate", "/popupslow"]) {
     assert.ok(r.ms < 5000, `${r.ms} ms`);
   });
 }
+for (const [p, id] of [["/divstale", "altOk"], ["/divstalelink", "altOkLink"]] as const) {
+  const r = await run(p, [OK_STEP, AGREE_STEP] as RecipeStep[]);
+  check(`${p}: a PLAIN-DIV popup whose control the recorded levels miss is reached by the name rescue and clicked, as on main`, () => {
+    assert.ok(r.hits.includes(id), JSON.stringify(r.hits));
+    assert.ok(!r.skipped.some((s) => /advance: OK/.test(s)), JSON.stringify(r.skipped));
+    assert.ok(!r.aging.some((a) => /not showing on this run/.test(a)), JSON.stringify(r.aging));
+    assert.equal(r.checked, true, `checked=${r.checked}`);
+    assert.equal(r.ok, true, r.message.slice(0, 200));
+  });
+}
 {
   const r = await run("/submitgate", [
     { action: "click", phase: "fill", selector: { role: "button", name: "OK", exact: true, fallbacks: [{ css: "#submitPopupOk" }] }, note: "submit: OK" },
@@ -297,12 +379,13 @@ for (const p of ["/popupshown", "/popuplate", "/popupslow"]) {
     assert.deepEqual(r.hits, [], JSON.stringify(r.hits));
     assert.ok(r.skipped.some((s) => /submit: OK/.test(s)), JSON.stringify(r.skipped));
     assert.ok(!r.aging.some((a) => /not showing on this run/.test(a)), JSON.stringify(r.aging));
+    assert.equal(r.asked.length, 0, JSON.stringify(r.asked));
     assert.ok(r.ms < 5000, `${r.ms} ms`);
   });
 }
 
 // -------------------------------------------------------------------------------------------
-console.log("\n[3] the name rescue and the closed-menu reveal match whole words");
+console.log("\n[3] the name rescue and the closed-menu reveal match whole words (the last one may be plural)");
 {
   const r = await resolveOnly("/wholeword", { action: "click", phase: "fill", selector: { role: "button", name: "Search", exact: true }, note: "lookup: Search" } as RecipeStep);
   check("/wholeword: MUST EXCLUDE — 'Research' (the shorter label, a fragment) is not the rescue's pick", () => {
@@ -336,6 +419,19 @@ console.log("\n[3] the name rescue and the closed-menu reveal match whole words"
   });
   check("/trail: MUST KEEP — a ligature glued AFTER the label: 'Nextarrow_forward' still reads 'Next' and is the stand-in", () => {
     assert.ok(r.hits.includes("realNext"), JSON.stringify(r.hits));
+  });
+}
+{
+  const r = await run("/plural", [
+    { action: "click", phase: "fill", selector: { role: "button", name: "Add Attachment", exact: true }, note: "attachment: Add Attachment" },
+  ] as RecipeStep[]);
+  check("/plural: MUST KEEP — a recorded 'Add Attachment' still reaches 'Add Attachments' (a plural main reached) and the run completes", () => {
+    assert.deepEqual(r.hits, ["addAtts"], JSON.stringify(r.hits));
+    assert.equal(r.ok, true, r.message.slice(0, 200));
+  });
+  const p = await resolveOnly("/permits", { action: "click", phase: "fill", selector: { role: "button", name: "Permit", exact: true }, note: "navigate: Permit" } as RecipeStep);
+  check("/permits: MUST KEEP — a recorded 'Permit' still resolves to 'Permits'", () => {
+    assert.equal(p.id, "permitsBtn");
   });
 }
 
@@ -379,6 +475,43 @@ console.log("\n[5] MUST KEEP: a control hidden then shown is clicked as on main"
   check("/lateshown: ...and nothing says it was a dismissal", () => {
     assert.ok(!r.aging.some((a) => /not showing on this run/.test(a)), JSON.stringify(r.aging));
   });
+}
+
+// -------------------------------------------------------------------------------------------
+console.log("\n[6] the skip's own question (dismissalClickTimedOutUnshown), asked directly on real pages");
+{
+  const clickTimeout = (): Error => new errors.TimeoutError("locator.click: Timeout 30000ms exceeded.");
+  const ask = async (path: string, opts: { step?: unknown; err?: unknown; pastReview?: boolean; target?: string | null }): Promise<boolean | string> => {
+    const page = await context.newPage();
+    await page.goto(`${base}${path}`);
+    const step = (opts.step ?? OK_STEP) as RecipeStep;
+    const adapter = new RecipeAdapter(recipeOf(path, [step]), {}, {}, { autoSubmit: false });
+    const a = adapter as unknown as { page: unknown; dismissalTarget: unknown; dismissalClickTimedOutUnshown?: (s: RecipeStep, e: unknown, p: boolean) => Promise<boolean> };
+    a.page = page;
+    a.dismissalTarget = opts.target === null ? null : page.locator(opts.target ?? "#uploadErrorPopupOk");
+    try {
+      if (typeof a.dismissalClickTimedOutUnshown !== "function") return "dismissalClickTimedOutUnshown is not defined";
+      return await a.dismissalClickTimedOutUnshown(step, "err" in opts ? opts.err : clickTimeout(), opts.pastReview ?? false);
+    } finally { await page.close(); }
+  };
+  const cases: Array<[string, () => Promise<boolean | string>, boolean]> = [
+    ["MUST PASS: the click's TimeoutError on Bend's closed popup (OK display:none)", () => ask("/bend", {}), true],
+    ["MUST PASS: the click's TimeoutError with the popup not in the DOM at all", () => ask("/bendgone", {}), true],
+    ["MUST EXCLUDE: a SHOWING target (a popup that is up, its click intercepted) keeps main's retry", () => ask("/popupshown", {}), false],
+    ["MUST EXCLUDE: a hidden target while a recorded level shows keeps main's retry", () => ask("/popupshown", { target: "#noSuchControl" }), false],
+    ["MUST EXCLUDE: any other failure kind (not a timeout)", () => ask("/bend", { err: new Error("locator.click: Element is not attached to the DOM") }), false],
+    ["MUST EXCLUDE: a message that only mentions a timeout (assertAdvanced quoting page text)", () => ask("/bend", { err: new Error("the portal did not advance (it refused \"advance: OK\"). Session timeout in 5 minutes") }), false],
+    ["MUST EXCLUDE: a TimeoutError that is not the click's", () => ask("/bend", { err: new errors.TimeoutError("locator.waitFor: Timeout 10000ms exceeded.") }), false],
+    ["MUST EXCLUDE: a gate refusal", () => ask("/bend", { err: new ReplayGuardRefusal("click timed out? no — refused") }), false],
+    ["MUST EXCLUDE: past the review marker", () => ask("/bend", { pastReview: true }), false],
+    ["MUST EXCLUDE: an attempt that never reached the click (no target)", () => ask("/bend", { target: null }), false],
+    ["MUST EXCLUDE: a step that is not a dismissal (no recorded popup handle)", () => ask("/bend", { step: { action: "click", phase: "fill", selector: { role: "button", name: "OK", exact: true }, note: "advance: OK" } }), false],
+    ["MUST EXCLUDE: the flagged final submit", () => ask("/bend", { step: { ...OK_STEP, isFinalSubmit: true } }), false],
+  ];
+  for (const [label, verdict, want] of cases) {
+    const got = await verdict();
+    check(`[6] ${label}`, () => assert.equal(got, want, String(got)));
+  }
 }
 
 await browser.close();

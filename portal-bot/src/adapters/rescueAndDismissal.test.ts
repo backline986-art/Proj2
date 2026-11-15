@@ -4,7 +4,9 @@
 //   labelHasWholeWords / wholeWordsPattern — the name rescue's match (findEnabledControlByName,
 //     and revealMenuAndPick's trigger search). It was `label.includes(wants)`, so with Bend's
 //     upload-error popup absent "OK" matched "Book an Inspection" and the run navigated off the
-//     application. A fragment never matches; the whole label, or words on token boundaries, do.
+//     application. A fragment never matches; the whole label, or words on token boundaries, do,
+//     and the LAST wanted word may take a plural "s" / "es" (main reached "Add Attachments" for
+//     "Add Attachment", "Permits" for "Permit") — never a prefix, never another suffix.
 //   isDialogDismissalStep — a recorded click that only closed a popup: its WHOLE label is a
 //     dismissal word (the dismisser's DISMISS_LABEL — one vocabulary) AND a recorded handle names a
 //     popup. Bend step 22 is one; Accela's dialog "Continue" / "Select" / "Look Up" (ids carrying
@@ -68,9 +70,38 @@ check("MUST PASS: the whole label, and words on token boundaries, match", () => 
   assert.equal(whole("folder building permits", "folder building permits"), true);
   // A later occurrence on a boundary still counts when the first is a fragment.
   assert.equal(whole("lookup ok", "ok"), true);
-  // Non-ASCII letters are letters: no boundary inside "café".
-  assert.equal(whole("cafés", "café"), false);
+  // Non-ASCII letters are letters: no boundary inside "cafétéria" or "écafé".
+  assert.equal(whole("cafétéria", "café"), false);
+  assert.equal(whole("écafé", "café"), false);
   assert.equal(whole("le café", "café"), true);
+});
+
+check("MUST PASS (plurals main reached): the LAST wanted word may take 's' or 'es'", () => {
+  assert.equal(whole("add attachments", "add attachment"), true);
+  assert.equal(whole("permits", "permit"), true);
+  assert.equal(whole("building permits", "permit"), true);
+  assert.equal(whole("upload documents", "upload document"), true);
+  assert.equal(whole("next steps", "next step"), true);
+  assert.equal(whole("searches", "search"), true);
+  assert.equal(whole("boxes", "box"), true);
+});
+
+check("MUST EXCLUDE (plurals): never a prefix, never another suffix, never inside an earlier word", () => {
+  // The fragments the whole-word rule exists for stay out with the ending allowed.
+  for (const label of ["book an inspection", "lookup", "bookmarks", "books"]) assert.equal(whole(label, "ok"), false, label);
+  assert.equal(whole("research", "search"), false);
+  assert.equal(whole("researches", "search"), false);
+  assert.equal(whole("applying", "apply"), false);
+  assert.equal(whole("applied", "apply"), false);
+  assert.equal(whole("permitted", "permit"), false);
+  assert.equal(whole("permitss", "permit"), false);
+  assert.equal(whole("permitsx", "permit"), false);
+  // Only the LAST word takes it: "adds attachment" is not "add attachment".
+  assert.equal(whole("adds attachment", "add attachment"), false);
+  // A wanted name that does not end in a letter takes no ending.
+  assert.equal(whole("next »s", "next »"), false);
+  assert.equal(whole("cart (0)s", "cart (0)"), false);
+  assert.equal(whole("step 1s", "step 1"), false);
 });
 
 check("a wanted name with regex syntax characters is literal, and compiles under the 'u' flag", () => {
@@ -128,12 +159,6 @@ check("ONE VOCABULARY: with a popup handle, a recorded click is a dismissal exac
   for (const label of ["OK", "ok", "Close", "Dismiss", "Got it", "Accept", "Accept All", "×", "x", "Okay", "Continue", "Book an Inspection", "OK, submit"]) {
     assert.equal(dismissal({ action: "click", selector: { role: "button", name: label, fallbacks: [{ css: "#messagePopupBtn" }] }, note: `human-patch: ${label}` }), DISMISS_LABEL!.test(label), label);
   }
-});
-
-check("THE WAIT FOR A LATE POPUP: long enough for a 4 s showModal, and shorter than main's 30 s click wait", () => {
-  const ms = (ra.RecipeAdapter as unknown as { DISMISSAL_DIALOG_WAIT_MS?: number }).DISMISSAL_DIALOG_WAIT_MS;
-  assert.equal(typeof ms, "number", "RecipeAdapter.DISMISSAL_DIALOG_WAIT_MS is not defined");
-  assert.ok(ms! >= 4000 && ms! < 30000, `${ms} ms`);
 });
 
 if (failures) { console.error(`\n${failures} rescue/dismissal check(s) FAILED.`); process.exit(1); }

@@ -418,10 +418,19 @@ function isFinalSubmitStep(step: RecipeStep): boolean {
  *  lower-cased by the caller. One predicate, three readers: findEnabledControlByName and
  *  revealMenuAndPick's trigger search compile this source in the page (a closed-over function is a
  *  ReferenceError there), and labelHasWholeWords answers it in Node. Only syntax characters are
- *  escaped: under "u" any other identity escape is a SyntaxError. */
+ *  escaped: under "u" any other identity escape is a SyntaxError.
+ *
+ *  THE LAST WANTED WORD MAY TAKE A PLURAL ENDING, "s" OR "es", AND NOTHING ELSE (#233). main's
+ *  substring test reached "Add Attachments" for a recorded "Add Attachment" and "Permits" for
+ *  "Permit"; whole words alone dropped those, a stop on a shape main ran clean. Only when `wants`
+ *  ends in a letter ("next »" and "cart (0)" take no ending), only at the end, never before it:
+ *  "ok" is still not in "Book", "Lookup" or "Bookmarks", "search" not in "Research", "apply" not in
+ *  "Applying". */
 export function wholeWordsPattern(wants: string): string {
-  const esc = String(wants ?? "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  return `(?<![\\p{L}\\p{N}])${esc}(?![\\p{L}\\p{N}])`;
+  const raw = String(wants ?? "");
+  const esc = raw.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const plural = /\p{L}$/u.test(raw) ? "(?:e?s)?" : "";
+  return `(?<![\\p{L}\\p{N}])${esc}${plural}(?![\\p{L}\\p{N}])`;
 }
 
 /** Does `label` carry `wants` as whole words? (wholeWordsPattern, answered in Node.) */
@@ -433,14 +442,6 @@ export function labelHasWholeWords(label: string, wants: string): boolean {
 /** A recorded handle that names a popup: an id, class, frame or section carrying one of these
  *  words (Bend's `#uploadErrorPopupOk`, a `.modal-footer` button, Accela's `ACADialogFrame`). */
 const POPUP_HANDLE = /popup|popover|modal|dialog|lightbox/i;
-/** The popup a hidden dismissal control sits in, asked with closest(): the open-panel shapes,
- *  their CLOSED forms (Bend's popup is a closed `<dialog class="cvpopup">`, which `dialog[open]`
- *  can never match), and the class words POPUP_HANDLE reads in a recorded handle. */
-const POPUP_CONTAINER_SEL = "dialog, [role='dialog'], [role='alertdialog'], [aria-modal='true'], mat-dialog-container, "
-  + ".cdk-overlay-pane, [class*='modal' i], [class*='popup' i], [class*='popover' i], [class*='lightbox' i], [class*='x-window']";
-/** A dialog SHOWING anywhere on the page, by semantics only — never a class word, which a visible
- *  help link or trigger can carry ("popup-link") and would disarm the skip on a page with no popup. */
-const DIALOG_SHOWN_SEL = "dialog[open], [role='dialog'], [role='alertdialog'], [aria-modal='true']";
 
 /**
  * A DIALOG-DISMISSAL CLICK (#233): a recorded click that only closed or acknowledged a popup the
@@ -454,7 +455,8 @@ const DIALOG_SHOWN_SEL = "dialog[open], [role='dialog'], [role='alertdialog'], [
  *     `role=button "Close"` with nothing else is not enough, and keeps main's path.
  * Never the flagged final submit. Bend's electrical step 22, "advance: OK" with the fallback
  * `#uploadErrorPopupOk`, is one: the learn's upload hit an error popup and the learner dismissed it
- * as a step.
+ * as a step. Such a step runs exactly main's path; only where main's click times out on a popup
+ * that is not showing is it skipped instead of failing the run (dismissalClickTimedOutUnshown).
  */
 export function isDialogDismissalStep(step: RecipeStep): boolean {
   if (!step || step.action !== "click" || isFinalSubmitStep(step)) return false;
@@ -1388,11 +1390,10 @@ export class RecipeAdapter extends BasePortalAdapter {
   stagedReviewCapture: StagedReviewCapture | null = null;
   /** The step whose selector resolveLocator is resolving right now (for disambiguation). */
   private resolvingStep: RecipeStep | null = null;
-  /** The dialog-dismissal click executeStepInner just skipped because its popup is not showing
-   *  (#233). Its trace line says so instead of re-resolving it: a re-resolution runs the name
-   *  rescue and the closed-menu reveal (which hovers), and the skipped "OK" is never handed to
-   *  either. Reset at the top of every step. */
-  private dismissalNotShown: RecipeStep | null = null;
+  /** The control a dialog-dismissal click's attempt resolved to and handed to executeClick (#233),
+   *  read only by dismissalClickTimedOutUnshown when that click times out: a target that is showing
+   *  (its popup up, the click intercepted) keeps main's retry. Reset at the top of every step. */
+  private dismissalTarget: unknown = null;
   /** Every click/press/goto the chokepoint refused this run, in order. */
   guardRefusals: string[] = [];
   /** How long an upload step waits for its named file slot to MOUNT (client-rendered steps show a
@@ -3533,6 +3534,42 @@ export class RecipeAdapter extends BasePortalAdapter {
             return fail(err.message, { executed, skipped, healedSteps: this.healedSteps, driftWarnings: this.driftWarnings, agingNotes: this.agingNotes, guardRefusals: this.guardRefusals, failedStepIndex: stepIdx, trace, slowSteps, fieldsVerified: this.fieldsVerified, fieldsUnverified: this.fieldsUnverified, pageShotDir: this.pageShotDir, outcomeShotPath: this.outcomeShotPath });
           }
           if (!failureContext) failureContext = await this.timed("failure-context", () => this.captureFailureContext(step, stepIdx).catch(() => ""));
+          // A DIALOG-DISMISSAL CLICK THAT TIMED OUT ON A POPUP THAT IS NOT SHOWING IS SKIPPED, NAMED
+          // (#233) — where main would go on to fail the run, and only there.
+          //
+          // Bend's electrical step 22 is "advance: OK" on #uploadErrorPopupOk: the learn's upload hit
+          // an error popup and the learner dismissed it as a step. On a run whose upload goes through
+          // the popup never opens. Live 2026-11-14 main clicked the hidden OK into a 30 s timeout,
+          // retried it after three reloads (160 s) and failed the run. A click that only closes a
+          // popup has nothing to do when the popup is not there.
+          //
+          // The step has already run main's whole path: resolution with the whole-words rescue,
+          // executeClick's gates, main's waits. So a popup that paints at any time main's click
+          // would take it is clicked as on main, and so is one the rescue finds by name under any
+          // markup. Only the click's own TimeoutError, on a target and recorded levels that show
+          // nothing (dismissalClickTimedOutUnshown), skips — here, before the backoff and the reload:
+          // a reload is a new document, so main's retries cannot bring back a popup the previous
+          // step's round trip produced, and on a client-rendered wizard they throw away the page the
+          // next recorded step needs. Never another failure kind, never past review, never the
+          // flagged final submit, never a gate refusal. Nothing is clicked here.
+          if (await this.dismissalClickTimedOutUnshown(step, err, pastReview)) {
+            const said = String(step.note || step.selector?.name || "OK").slice(0, 44);
+            this.agingNotes.push(
+              `"${said}" dismisses a popup that is not showing on this run — its click timed out on a hidden or absent control, so the step was skipped as not applicable rather than failing the run (the learn met that popup; this run did not) (#233)`,
+            );
+            skipped.push(String(step.note || step.action).slice(0, 70));
+            performed = false;
+            // The trace names the skip without re-resolving the step: describeResolved would hand
+            // it to the name rescue and the closed-menu reveal (which hovers) after the fact.
+            trace.push({
+              i: stepIdx, action: step.action, note: String(step.note ?? "").slice(0, 52),
+              outcome: "SKIPPED", page: await currentPageLabel(),
+              resolved: "its popup is not showing — the click timed out on a hidden or absent control (skipped as not applicable)",
+              ...(skipped.length <= 3 && failureContext ? { shot: failureContext } : {}),
+            });
+            succeeded = true;
+            break;
+          }
           const isTimeout = err instanceof Error && /timeout|TimeoutError/i.test(err.message);
           // A STRICT-MODE VIOLATION IS ALWAYS WORTH ONE MORE PASS, and it is not a timeout.
           //
@@ -6235,7 +6272,7 @@ export class RecipeAdapter extends BasePortalAdapter {
   private static readonly WRITE_ACTIONS: ReadonlySet<string> = new Set(["fill", "select", "check", "uncheck", "upload"]);
 
   private async executeStepInner(step: RecipeStep, pastReview: boolean): Promise<boolean> {
-    this.dismissalNotShown = null;
+    this.dismissalTarget = null;
     // ONE CONTACT, ONE IDENTITY at replay (see trackContactBlock) — before the step runs, so a
     // dialog Continue is preceded by the dialog made the section identity.
     await this.trackContactBlock(step).catch(() => null);
@@ -6317,31 +6354,6 @@ export class RecipeAdapter extends BasePortalAdapter {
     if (step.action === "fill" && this.isFeeTierStep(step)) {
       const verdict = await this.fillFeeTierFromPage(step);
       if (verdict !== "normal") return verdict;
-    }
-    // A DIALOG-DISMISSAL CLICK WHOSE DIALOG IS NOT SHOWN IS SKIPPED, NAMED (#233) — before
-    // resolution, so it is never handed to the name rescue, and never run-fatal.
-    //
-    // Bend's electrical step 22 is "advance: OK" on #uploadErrorPopupOk: the learn's upload hit an
-    // error popup and the learner dismissed it as a step. On a run whose upload goes through the
-    // popup never opens. Live 2026-11-14 the step clicked the hidden OK into a 30 s timeout and three
-    // reloads and failed the run; on the auditors' probe page the rescue found "OK" inside "Book an
-    // Inspection" and navigated off the application. A click that only closes a popup has nothing to
-    // do when the popup is not there.
-    //
-    // Only a recorded dismissal (isDialogDismissalStep), only before review, and never a click
-    // executeClick's gates refuse at once (their predicates READ here on the haystack they read,
-    // never changed) — those keep main's path to the gate. Only when its control and its popup stay
-    // unshown for the whole budget (dismissalDialogNotShown): a showing popup — at once, late, or
-    // under markup the recording did not name — is clicked as on main. Nothing is clicked here.
-    if (!pastReview && isDialogDismissalStep(step)) {
-      const gateWords = `${step.selector?.name || step.selector?.text || ""} ${step.note || ""}`.trim();
-      if (!SUBMIT_KEYWORDS.test(gateWords) && !PAY_FEE_REPLAY_GATE.test(gateWords) && await this.dismissalDialogNotShown(step)) {
-        this.dismissalNotShown = step;
-        this.agingNotes.push(
-          `"${String(step.note || step.selector?.name || "OK").slice(0, 44)}" dismisses a popup that is not showing on this run — skipped as not applicable (the learn met that popup; this run did not) (#233)`,
-        );
-        return false;
-      }
     }
     // A POPUP LEFT OPEN BY THE LAST STEP MUST NOT SHADOW THIS ONE.
     //
@@ -6511,6 +6523,9 @@ export class RecipeAdapter extends BasePortalAdapter {
         return true;
       }
       case "click":
+        // What a dismissal click's attempt is about to wait on, for the retry loop's not-shown
+        // reading if that wait times out (#233). A read, never a change to the click.
+        if (isDialogDismissalStep(step)) this.dismissalTarget = scoped;
         return this.executeClick(step, scoped, pastReview);
       case "fill": {
         let v = this.resolveValue(step);
@@ -8512,11 +8527,6 @@ export class RecipeAdapter extends BasePortalAdapter {
   }
   /** How long an advance check waits for vanished controls to come back (or the page to move). */
   static VANISHED_CONTROLS_WAIT_MS = 6000;
-  /** How long a dialog-dismissal click waits for its popup to show before it is skipped as not
-   *  applicable (#233). A popup opened by the previous click's round trip can take seconds to
-   *  paint (a showModal at 4 s is pinned by the smoke), and a showing popup ends the wait at once.
-   *  Paid only on the shape where main spent its 30 s click wait and three reloads, and failed. */
-  static DISMISSAL_DIALOG_WAIT_MS = 6000;
 
   private async assertAdvanced(step: RecipeStep, beforeUrl: string, beforeFp: string, beforeEffect = ""): Promise<void> {
     // No identity means a mock/no-DOM page (the unit-test doubles) — assert nothing.
@@ -9006,58 +9016,51 @@ export class RecipeAdapter extends BasePortalAdapter {
   }
 
   /**
-   * IS A DIALOG-DISMISSAL CLICK'S DIALOG NOT SHOWN? (#233; see isDialogDismissalStep.)
+   * DID A DIALOG-DISMISSAL CLICK FAIL ONLY BECAUSE ITS POPUP IS NOT SHOWING? (#233; see
+   * isDialogDismissalStep.) Asked by the retry loop about an attempt that has already thrown, so
+   * the step has run main's whole path first: its resolution (the whole-words name rescue
+   * included), executeClick's gates, waitForElement's 10 s and the click's own 30 s.
    *
-   * True only when, for the whole DISMISSAL_DIALOG_WAIT_MS, no level of the step's selector matches
-   * anything visible, no hidden match sits in a popup container that is itself showing, and no
-   * dialog is showing anywhere on the page (DIALOG_SHOWN_SEL: a popup up under markup the recording
-   * did not name is main's to handle — its rescue may find the dismissal by name). Bend's popup is
-   * a closed `<dialog>` whose OK is display:none, or not in the DOM at all.
-   *
-   * Every doubt answers false at once, which leaves the step to run exactly as on main: a page or
-   * match that cannot be read (a test fake, a navigation mid-read), a showing control, a showing
-   * box, a showing dialog. Only the not-shown answer waits out the budget.
+   * True only when all of these hold — every doubt answers false, and false is main's retry:
+   *   - a recorded dismissal (isDialogDismissalStep: never the flagged final submit), before review;
+   *   - the error is THE CLICK'S Playwright TimeoutError. Not main's looser /timeout/ reading of
+   *     any message (assertAdvanced's "did not advance" can quote page text), never a gate refusal
+   *     (a ReplayGuardRefusal), a stop, or any other failure kind;
+   *   - the attempt reached the click with a target (dismissalTarget), and that target matches
+   *     nothing showing — no element at all, or only hidden ones (Bend's OK is display:none inside
+   *     a closed <dialog>, or not in the DOM). A SHOWING target whose click was intercepted is a
+   *     popup that is up, and keeps main's retry;
+   *   - no level of the recorded selector matches anything showing either.
+   * Read-only: count and computed style, never the name rescue (it tags an element) or the
+   * closed-menu reveal (it hovers). Nothing is clicked.
    */
-  private async dismissalDialogNotShown(step: RecipeStep): Promise<boolean> {
-    if (!this.page || typeof this.page.evaluate !== "function" || !step.selector) return false;
-    const sel = step.selector;
-    const levels: RecipeSelector[] = [
-      { ...sel, fallbacks: undefined },
-      ...(sel.fallbacks ?? []).map((fb) => ({ ...fb, fallbacks: undefined }) as RecipeSelector),
-    ];
-    const deadline = Date.now() + RecipeAdapter.DISMISSAL_DIALOG_WAIT_MS;
-    for (;;) {
-      for (const lv of levels) {
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        let loc: any = null;
-        try { loc = this.locator(lv); } catch { loc = null; }
-        if (!loc || typeof loc.count !== "function") return false;
-        const n = Math.min(5, await loc.count().catch(() => 0));
-        for (let i = 0; i < n; i++) {
-          const one = typeof loc.nth === "function" ? loc.nth(i) : loc;
-          if (typeof one?.evaluate !== "function") return false;
-          if (await this.isTrulyVisible(one)) return false; // its control is showing: clicked as recorded
-          const boxShown = await one.evaluate((el: Element, popSel: string) => {
-            const box = el.closest(popSel);
-            if (!box) return false;
-            const r = box.getBoundingClientRect();
-            const cs = getComputedStyle(box as HTMLElement);
-            return r.width > 4 && r.height > 4 && cs.visibility !== "hidden" && cs.display !== "none" && Number(cs.opacity) !== 0;
-          }, POPUP_CONTAINER_SEL).catch(() => true);
-          if (boxShown !== false) return false; // its popup is up (its OK not yet shown): main's path
-        }
+  private async dismissalClickTimedOutUnshown(step: RecipeStep, err: unknown, pastReview: boolean): Promise<boolean> {
+    if (pastReview || !isDialogDismissalStep(step)) return false;
+    if (!(err instanceof Error) || err instanceof ReplayGuardRefusal) return false;
+    if (err.name !== "TimeoutError" || !/\bclick\b/.test(err.message)) return false;
+    if (!this.page || typeof this.page.evaluate !== "function" || !step.selector || !this.dismissalTarget) return false;
+    // Is anything this locator matches showing? null = cannot tell (main's path).
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const showing = async (loc: any): Promise<boolean | null> => {
+      if (!loc || typeof loc.count !== "function") return null;
+      let n: number;
+      try { n = await loc.count(); } catch { return null; }
+      for (let i = 0; i < Math.min(5, n); i++) {
+        const one = typeof loc.nth === "function" ? loc.nth(i) : loc;
+        if (typeof one?.evaluate !== "function") return null;
+        if (await this.isTrulyVisible(one)) return true;
       }
-      // A dialog up anywhere, under markup the recording did not name: main's path at once, with
-      // no wait main did not pay — its rescue may find the dismissal there by name.
-      const dialogShown = await this.page.evaluate((dlgSel: string) => Array.from(document.querySelectorAll(dlgSel)).some((d) => {
-        const r = d.getBoundingClientRect();
-        const cs = getComputedStyle(d as HTMLElement);
-        return r.width > 4 && r.height > 4 && cs.visibility !== "hidden" && cs.display !== "none" && Number(cs.opacity) !== 0;
-      }), DIALOG_SHOWN_SEL).catch(() => true);
-      if (dialogShown !== false) return false;
-      if (Date.now() >= deadline) return true;
-      await sleep(250);
+      return false;
+    };
+    if ((await showing(this.dismissalTarget)) !== false) return false;
+    const sel = step.selector;
+    for (const lv of [{ ...sel, fallbacks: undefined }, ...(sel.fallbacks ?? []).map((fb) => ({ ...fb, fallbacks: undefined }))] as RecipeSelector[]) {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      let loc: any = null;
+      try { loc = this.locator(lv); } catch { return false; }
+      if ((await showing(loc)) !== false) return false;
     }
+    return true;
   }
 
   /**
@@ -11471,9 +11474,6 @@ export class RecipeAdapter extends BasePortalAdapter {
    * than the one acted on is worse than none, because it is believed.
    */
   private async describeResolved(step: RecipeStep, actual?: unknown): Promise<string> {
-    // The dismissal skipped because its popup is not showing (#233): never re-resolved — that would
-    // hand it to the name rescue and the closed-menu reveal after all.
-    if (!actual && step === this.dismissalNotShown) return "its popup is not showing — not resolved (skipped as not applicable)";
     try {
       const loc = (actual as { count?: unknown } | undefined)?.count
         ? actual as never
