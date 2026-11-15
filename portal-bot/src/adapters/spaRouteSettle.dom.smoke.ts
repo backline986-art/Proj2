@@ -37,8 +37,16 @@ import "../smokeArtifactDirs"; // hand-run safe: artifact dirs default to a temp
 import http from "node:http";
 import { chromium } from "playwright";
 import type { PortalRecipe, ProjectRecord, RecipeStep } from "../../../shared/src/types";
-import { installSettleProbe, ROUTE_SETTLE_MS, settleAfterRoute } from "../settle";
+import * as settleModule from "../settle";
 import { RecipeAdapter } from "./recipeAdapter";
+
+// Read off the namespace, not imported by name, so a kill run on main's settle.ts (which has no
+// settleAfterRoute) still runs every leg and fails each for its own reason instead of at import.
+const { installSettleProbe } = settleModule;
+const ROUTE_SETTLE_MS = Number((settleModule as Record<string, unknown>).ROUTE_SETTLE_MS ?? 4000);
+const settleAfterRoute = (settleModule as Record<string, unknown>).settleAfterRoute as
+  | ((page: import("playwright").Page, beforeUrl: string) => Promise<{ result: { settled: boolean } } | null>)
+  | undefined;
 
 let failures = 0;
 const check = (label: string, ok: boolean, detail = ""): void => {
@@ -264,10 +272,10 @@ const trace = (r: Run): Array<{ i: number; outcome: string; note: string }> => (
   const before = page.url();
   await page.click("#go");
   const t0 = Date.now();
-  const r = await settleAfterRoute(page, before);
+  const r = settleAfterRoute ? await settleAfterRoute(page, before) : null;
   const ms = Date.now() - t0;
   await ctx.close();
-  console.log(`   ticker: ${ms} ms ${JSON.stringify(r?.result ?? null)}`);
+  console.log(`   ticker: ${settleAfterRoute ? `${ms} ms ${JSON.stringify(r?.result ?? null)}` : "settle.ts has no settleAfterRoute (the fix is absent)"}`);
   check(`MUST KEEP ticker: a route change on a page with a 100 ms clock settles in the quiet window (< 1 s), not the ${ROUTE_SETTLE_MS} ms bound`,
     !!r && r.result.settled && ms < 1000, `${ms} ms ${JSON.stringify(r?.result ?? null)}`);
 }
