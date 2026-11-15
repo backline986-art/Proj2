@@ -28,7 +28,12 @@
 //      page-wide row search, which reads the site navigation as suggestions;
 //   3. let the one predicate (typeaheadMatch) choose: exactly one match is clicked; a near miss or
 //      several equal candidates pick NOTHING and come back as a question for a person;
-//   4. read the box back: empty after the pick is a NAMED failure, never a silent drop.
+//   4. read the box back: empty after the pick is a NAMED failure, never a silent drop — and so is a
+//      pick the widget's own selected value never took (#244: the hidden input beside the box that
+//      held nothing before the pick still holds nothing after it).
+// WHICH boxes take this path is the box's own markup (typeaheadBoxSays, #244), asked by the learner
+// and the replay at their fill doors; the list is the box's own, a fresh popup, or a list that
+// appeared inside the box's own widget (an iWorQ Vue autocomplete renders it there, unnamed).
 // Never Enter but in step 0, behind the shared gate (the form's default button may file); never a
 // containment guess; the box is cleared whenever nothing was picked, so no half-typed address is
 // left for the portal to take. A box that found nothing says what the PORTAL said (noMatchSaid).
@@ -40,7 +45,8 @@
 import { PORTAL_SAFETY_GLOBAL, PORTAL_SAFETY_IN_PAGE_SOURCE } from "../../shared/src/portalSafety";
 import { FRESH_POPUP_SELECTORS, clearPopupMarks, markExistingPopups } from "./comboboxFill";
 import { withAutomationInput } from "./filingBackstop";
-import { addressQueries, chooseAddressSuggestion, chooseExactSuggestion, noMatchSaid, oneLineAddress, suggestionText, type TypeaheadSite } from "./typeaheadMatch";
+import { normalizeCompanyLabel } from "./filerIdentitySelect";
+import { addressQueries, chooseAddressSuggestion, chooseCompanySuggestion, chooseExactSuggestion, noMatchSaid, oneLineAddress, suggestionText, typeaheadBoxSays, type TypeaheadBoxFacts, type TypeaheadSite } from "./typeaheadMatch";
 
 /** What a typeahead fill did. Only "picked" wrote a value the portal kept. `via: "enter"` — the
  *  portal selected it on Enter and shows it OUTSIDE the box (`held` is that shown text); the search
@@ -61,8 +67,9 @@ export interface TypeaheadRequest {
   /** The value to enter (the planner's / the recipe's resolved value). */
   value: string;
   /** typeaheadMatch.typeaheadMatchMode: "site" (the job's own address: city/ZIP checked where a
-   *  suggestion shows them), "address" (another street address), "exact" (any other lookup). */
-  mode: "site" | "address" | "exact";
+   *  suggestion shows them), "address" (another street address), "company" (the submitting company,
+   *  chooseCompanySuggestion), "exact" (any other lookup). */
+  mode: "site" | "address" | "exact" | "company";
   /** The job's address for "site" (street, city, ZIP); for "address" only `street` is read. */
   site?: TypeaheadSite;
   /** #139 fix round — THE ENTER DOOR the caller's recorded Enter goes through: "" = Enter may be
@@ -84,10 +91,113 @@ const NAME_SHIM = "globalThis.__name = globalThis.__name || function (f) { retur
 const loose = (s: string): string => String(s ?? "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
 
 /**
+ * Runs IN THE PAGE (#244). What the box's own markup says about it, for typeaheadBoxSays: its role,
+ * aria-autocomplete, id, aria-label and class, and the classes of ITS OWN WIDGET — its ancestors up
+ * to the highest one that holds no other text-entry control (at most four levels, never past a
+ * <form>): the iWorQ box sits in div.input-group > div.autocomplete-template > its section, and the
+ * row above that holds the contractor box. With `mark`, the box (data-al-ta-box) and that widget
+ * (data-al-ta-widget) are marked for the fill's list and selected-value reads. No nested functions
+ * (esbuild keepNames → __name).
+ */
+export function typeaheadBoxFactsInPage(el: Element, mark: boolean): TypeaheadBoxFacts {
+  if (mark) {
+    const old = document.querySelectorAll("[data-al-ta-widget], [data-al-ta-box], [data-al-ta-pre]");
+    for (let i = 0; i < old.length; i++) {
+      old[i].removeAttribute("data-al-ta-widget");
+      old[i].removeAttribute("data-al-ta-box");
+      old[i].removeAttribute("data-al-ta-pre");
+    }
+  }
+  const box = el as HTMLInputElement;
+  const type = String(el.getAttribute("type") || "text").toLowerCase();
+  const textBox = el.tagName === "INPUT" && (type === "text" || type === "search");
+  const editable = !box.readOnly && !box.disabled && el.getAttribute("aria-readonly") !== "true" && el.getAttribute("aria-disabled") !== "true";
+  const ENTRY = 'input:not([type=hidden]):not([type=submit]):not([type=button]):not([type=reset]):not([type=image]):not([type=checkbox]):not([type=radio]):not([type=file]), select, textarea, [contenteditable="true"], [contenteditable=""]';
+  const widgetClasses: string[] = [];
+  let widget: Element | null = null;
+  let p: Element | null = el.parentElement;
+  for (let depth = 0; depth < 4 && p && p !== document.body && p !== document.documentElement && p.tagName !== "FORM"; depth++) {
+    const entries = p.querySelectorAll(ENTRY);
+    let other = false;
+    for (let i = 0; i < entries.length; i++) {
+      if (entries[i] !== el) { other = true; break; }
+    }
+    if (other) break;
+    widget = p;
+    widgetClasses.push(String(p.getAttribute("class") || "").slice(0, 300));
+    p = p.parentElement;
+  }
+  if (mark) {
+    el.setAttribute("data-al-ta-box", "1");
+    if (widget) widget.setAttribute("data-al-ta-widget", "1");
+  }
+  return {
+    textBox,
+    editable,
+    role: String(el.getAttribute("role") || ""),
+    ariaAutocomplete: String(el.getAttribute("aria-autocomplete") || ""),
+    className: String(el.getAttribute("class") || "").slice(0, 300),
+    id: String(el.getAttribute("id") || "").slice(0, 120),
+    ariaLabel: String(el.getAttribute("aria-label") || "").slice(0, 200),
+    widgetClasses,
+  };
+}
+
+/**
+ * Runs IN THE PAGE (#244). Stamp what is on screen inside the box's widget (data-al-ta-pre) before a
+ * query is typed, so a list that appears there afterwards is told from what was already showing — a
+ * Vue list kept in the DOM while hidden (v-show) counts as new when it shows. No nested functions.
+ */
+export function stampTypeaheadWidgetInPage(): void {
+  const old = document.querySelectorAll("[data-al-ta-pre]");
+  for (let i = 0; i < old.length; i++) old[i].removeAttribute("data-al-ta-pre");
+  const widget = document.querySelector("[data-al-ta-widget]");
+  if (!widget) return;
+  const all = widget.querySelectorAll("*");
+  for (let i = 0; i < all.length; i++) {
+    const n = all[i] as HTMLElement;
+    const r = n.getBoundingClientRect();
+    if (r.width <= 0 || r.height <= 0) continue;
+    const s = getComputedStyle(n);
+    if (s.visibility === "hidden" || s.display === "none") continue;
+    n.setAttribute("data-al-ta-pre", "1");
+  }
+}
+
+/**
+ * Runs IN THE PAGE (#244). The hidden inputs inside the box's widget, in order — where a widget keeps
+ * the SELECTED record's id (the box only shows its words). A pick that leaves every one of them as
+ * empty as it was did not select anything. No nested functions.
+ */
+export function typeaheadWidgetHiddenInPage(): Array<{ name: string; value: string }> {
+  const out: Array<{ name: string; value: string }> = [];
+  const widget = document.querySelector("[data-al-ta-widget]");
+  if (!widget) return out;
+  const hidden = widget.querySelectorAll('input[type="hidden"]');
+  for (let i = 0; i < hidden.length; i++) {
+    const h = hidden[i] as HTMLInputElement;
+    out.push({ name: String(h.getAttribute("name") || h.getAttribute("id") || "").slice(0, 60), value: String(h.value ?? "") });
+  }
+  return out;
+}
+
+/** THE BOX'S OWN MARKUP, JUDGED (#244): the reason it is a search-as-you-type box, "" when it is not
+ *  or cannot be read. One read, bounded; the learner's and the replay's fill doors both ask it. */
+export async function typeaheadBoxReason(loc: any): Promise<string> {
+  if (!loc || typeof loc.evaluate !== "function") return "";
+  const facts = await loc.evaluate(typeaheadBoxFactsInPage, false, { timeout: 1500 }).catch(() => null);
+  return typeaheadBoxSays(facts as TypeaheadBoxFacts | null);
+}
+
+/**
  * Runs IN THE PAGE. The visible suggestion rows of the box's list, in order, each marked
  * data-al-sugg="<its index>" so the row that was read is the row that is clicked. The list is the
  * one the box names (aria-controls / aria-owns), else the last list that was not on screen before
- * typing (comboboxFill's fresh-popup stamp). No nested functions (esbuild keepNames → __name).
+ * typing (comboboxFill's fresh-popup stamp), else (#244) a list that appeared INSIDE the box's own
+ * widget since the query was typed (data-al-ta-widget / data-al-ta-pre) — an iWorQ Vue autocomplete
+ * renders its results there with no role and no menu/option class, so neither reading above saw
+ * them (City of Star, live 2026-11-15: the panel spans the widget's column, not the box). No nested
+ * functions (esbuild keepNames → __name).
  */
 export function readSuggestionsInPage(args: { controlsId: string; fresh: string }): string[] {
   const out: string[] = [];
@@ -104,13 +214,41 @@ export function readSuggestionsInPage(args: { controlsId: string; fresh: string 
     const fresh = Array.from(document.querySelectorAll(args.fresh));
     for (let i = fresh.length - 1; i >= 0; i--) lists.push(fresh[i]);
   }
+  // #244 — read only when nothing above had rows: the outermost lists inside the box's widget that
+  // were not on screen before typing (and do not hold the box), then, as a last reading, the widget
+  // itself, whose rows are only the option / li elements that appeared since typing.
+  const widget = document.querySelector("[data-al-ta-widget]");
+  const boxEl = document.querySelector("[data-al-ta-box]");
+  if (widget) {
+    const found = widget.querySelectorAll('[role="listbox"], [role="list"], ul, ol');
+    const own: Element[] = [];
+    for (let i = 0; i < found.length; i++) {
+      const l = found[i];
+      if (l.hasAttribute("data-al-ta-pre") || (boxEl && l.contains(boxEl))) continue;
+      let inner = false;
+      for (let j = 0; j < own.length; j++) {
+        if (own[j].contains(l)) { inner = true; break; }
+      }
+      if (!inner) own.push(l);
+    }
+    for (let i = 0; i < own.length; i++) lists.push(own[i]);
+    lists.push(widget);
+  }
   for (const list of lists) {
     const lr = (list as HTMLElement).getBoundingClientRect();
     const ls = getComputedStyle(list as HTMLElement);
     if (lr.width <= 0 || lr.height <= 0 || ls.visibility === "hidden" || ls.display === "none") continue;
-    let rows: Element[] = Array.from(list.querySelectorAll('[role="option"]'));
-    if (!rows.length) rows = Array.from(list.querySelectorAll("li"));
-    if (!rows.length) rows = Array.from(list.children);
+    let rows: Element[] = [];
+    if (list === widget) {
+      const cand = widget.querySelectorAll('[role="option"], li');
+      for (let i = 0; i < cand.length; i++) {
+        if (!cand[i].hasAttribute("data-al-ta-pre") && !(boxEl && cand[i].contains(boxEl))) rows.push(cand[i]);
+      }
+    } else {
+      rows = Array.from(list.querySelectorAll('[role="option"]'));
+      if (!rows.length) rows = Array.from(list.querySelectorAll("li"));
+      if (!rows.length) rows = Array.from(list.children);
+    }
     for (const row of rows) {
       const r = (row as HTMLElement).getBoundingClientRect();
       const s = getComputedStyle(row as HTMLElement);
@@ -212,12 +350,15 @@ async function readShows(doc: any): Promise<{ shown: string[]; notes: string[] }
   return r && Array.isArray(r.shown) && Array.isArray(r.notes) ? r : null;
 }
 
-/** The first no-match sentence in `after` that was not on screen in `before`, else the first one
- *  at all ("" when none). */
+/** The no-match sentence in `after` that was not on screen in `before`, else one at all ("" when
+ *  none) — THE SHORTEST, so it is the portal's own words and not a container that holds them (#244:
+ *  the quote read "* Property Information No results match your search * Contractor(s) Contractors
+ *  with expired licenses…", the whole row of an iWorQ form, which also named the other box). */
 function freshNoMatch(before: string[] | null | undefined, after: string[] | null | undefined): string {
   const old = new Set(before ?? []);
   const said = (after ?? []).map(noMatchSaid).filter(Boolean);
-  return said.find((t) => !old.has(t)) ?? said[0] ?? "";
+  const shortest = (list: string[]): string => list.reduce((a, b) => (b.length < a.length ? b : a), list[0] ?? "");
+  return shortest(said.filter((t) => !old.has(t))) || shortest(said);
 }
 
 /** THE SHARED ENTER QUESTION (hard rule 1), asked of this box in its own document: "" = Enter may be
@@ -351,12 +492,18 @@ export async function fillTypeahead(page: any, loc: any, req: TypeaheadRequest):
     : { street };
   // What is typed, in order. The job's own address: its whole one-line form first (Enter allowed
   // there only), then the house number + street-name core, then the house number alone.
-  const tries: Array<{ q: string; enter: boolean }> = (req.mode === "exact" ? [value] : addressQueries(street)).map((q) => ({ q, enter: false }));
+  // A value lookup (a company, any other lookup) is typed as itself; an address is widened.
+  const valueMode = req.mode === "exact" || req.mode === "company";
+  const tries: Array<{ q: string; enter: boolean }> = (valueMode ? [value] : addressQueries(street)).map((q) => ({ q, enter: false }));
   const whole = req.mode === "site" ? oneLineAddress(site) : "";
   if (whole && !tries.some((t) => loose(t.q) === loose(whole))) tries.unshift({ q: whole, enter: true });
   if (!tries.length) return { outcome: "unusable", why: "there is no address to type" };
   const doc = await ownerScope(page, loc);
   await doc.evaluate(NAME_SHIM).catch(() => null);
+  // #244: mark the box and its own widget, and what that widget shows before anything is typed, for
+  // the widget-local list and the selected-value read-back.
+  if (typeof loc.evaluate === "function") await loc.evaluate(typeaheadBoxFactsInPage, true, { timeout: 1500 }).catch(() => null);
+  await doc.evaluate(stampTypeaheadWidgetInPage).catch(() => null);
 
   const typed: string[] = [];
   let rows: string[] = [];
@@ -372,6 +519,7 @@ export async function fillTypeahead(page: any, loc: any, req: TypeaheadRequest):
       await clearBox(doc, loc, controlsId);
       // Whatever list is on screen now is not this box's answer to what we are about to type.
       await markExistingPopups(doc);
+      await doc.evaluate(stampTypeaheadWidgetInPage).catch(() => null);
       const before = await readShows(doc);
       typed.push(t.q);
       if (!(await typeInto(page, loc, t.q))) continue;
@@ -421,7 +569,9 @@ export async function fillTypeahead(page: any, loc: any, req: TypeaheadRequest):
       };
     }
     const offered = rows.map(suggestionText).filter(Boolean);
-    const choice = req.mode === "exact" ? chooseExactSuggestion(rows, value) : chooseAddressSuggestion(rows, site);
+    const choice = req.mode === "company" ? chooseCompanySuggestion(rows, value)
+      : req.mode === "exact" ? chooseExactSuggestion(rows, value)
+        : chooseAddressSuggestion(rows, site);
     if (choice.kind === "ask") {
       await clearBox(doc, loc, controlsId);
       return { outcome: "ask", question: choice.question, offered, typed: usedQuery, why: choice.why };
@@ -438,6 +588,13 @@ export async function fillTypeahead(page: any, loc: any, req: TypeaheadRequest):
       await clearBox(doc, loc, controlsId);
       return { outcome: "no_match", why: `the suggestion list changed while it was being read ("${choice.text}" is no longer the row chosen)`, offered, typed: usedQuery };
     }
+    // THE WIDGET'S OWN SELECTED VALUE (#244). A widget that keeps the selected record's id in a hidden
+    // input beside the box (the box only shows its words) selected nothing unless that id was
+    // written: the box reading the address is not the portal holding the property. Read just before
+    // the click: an empty hidden input there must be filled by it. None empty → no opinion.
+    const hiddenBefore = await doc.evaluate(typeaheadWidgetHiddenInPage).catch(() => [] as Array<{ name: string; value: string }>);
+    const filledCount = (vals: unknown): number => (Array.isArray(vals) ? vals.filter((h) => String((h as { value?: unknown })?.value ?? "") !== "").length : 0);
+    const watched = Array.isArray(hiddenBefore) ? hiddenBefore.filter((h) => String(h?.value ?? "") === "") : [];
     const clicked = await withAutomationInput(page, () => row.click({ timeout: 4000 })).then(() => true).catch(() => false);
     if (!clicked) {
       await clearBox(doc, loc, controlsId);
@@ -447,13 +604,16 @@ export async function fillTypeahead(page: any, loc: any, req: TypeaheadRequest):
     // widget may write the box only after its own round trip (a geocode, a map zoom), so it is read
     // back for up to 2 s before it is judged: a slow but good pick is not called a miss.
     const holds = (h: string): boolean => !!h && (loose(h) === loose(choice.text)
-      || (req.mode === "exact" ? loose(h) === loose(value) : chooseAddressSuggestion([h], site).kind === "pick"));
+      || (req.mode === "company" ? normalizeCompanyLabel(h) === normalizeCompanyLabel(value)
+        : req.mode === "exact" ? loose(h) === loose(value) : chooseAddressSuggestion([h], site).kind === "pick"));
     let held = "";
+    let selectedTook = watched.length === 0;
     const readUntil = Date.now() + 2000;
     for (;;) {
       await page.waitForTimeout?.(200).catch(() => null);
       held = String((await loc.inputValue({ timeout: 1000 }).catch(() => "")) ?? "").replace(/\s+/g, " ").trim();
-      if (holds(held) || Date.now() >= readUntil) break;
+      if (!selectedTook) selectedTook = filledCount(await doc.evaluate(typeaheadWidgetHiddenInPage).catch(() => [])) > filledCount(hiddenBefore);
+      if ((holds(held) && selectedTook) || Date.now() >= readUntil) break;
     }
     if (!held) return { outcome: "not_held", why: `picked "${choice.text}" and the box is empty afterwards`, picked: choice.text };
     const same = holds(held);
@@ -461,12 +621,24 @@ export async function fillTypeahead(page: any, loc: any, req: TypeaheadRequest):
       await clearBox(doc, loc, controlsId);
       return { outcome: "not_held", why: `picked "${choice.text}" and the box then showed "${held.slice(0, 120)}" — cleared`, picked: choice.text };
     }
+    if (!selectedTook) {
+      await clearBox(doc, loc, controlsId);
+      const names = watched.map((h) => h.name).filter(Boolean).slice(0, 3).map((n) => `"${n}"`).join(", ");
+      return { outcome: "not_held", why: `picked "${choice.text}" and the box shows it, but the widget's selected value (its hidden input${names ? ` ${names}` : ""}) stayed empty — the portal did not take the pick; cleared`, picked: choice.text };
+    }
     // Commit the way every fill commits (a per-field save on blur).
     if (typeof loc.blur === "function") await loc.blur().catch(() => null);
     return { outcome: "picked", picked: choice.text, held, typed: usedQuery, why: choice.why, via: "list" };
   } finally {
     await clearPopupMarks(doc);
     await doc.evaluate(() => { document.querySelectorAll("[data-al-sugg]").forEach((n) => n.removeAttribute("data-al-sugg")); }).catch(() => null);
+    await doc.evaluate(() => {
+      document.querySelectorAll("[data-al-ta-widget], [data-al-ta-box], [data-al-ta-pre]").forEach((n) => {
+        n.removeAttribute("data-al-ta-widget");
+        n.removeAttribute("data-al-ta-box");
+        n.removeAttribute("data-al-ta-pre");
+      });
+    }).catch(() => null);
   }
 }
 

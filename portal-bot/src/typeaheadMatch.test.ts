@@ -15,7 +15,7 @@
 // All addresses are synthetic: invented streets, numbers and cities.
 // Run: tsx portal-bot/src/typeaheadMatch.test.ts
 import assert from "node:assert/strict";
-import { addressQueries, chooseAddressSuggestion, chooseExactSuggestion, noMatchSaid, oneLineAddress, suggestionText, typeaheadMatchMode } from "./typeaheadMatch";
+import { addressQueries, chooseAddressSuggestion, chooseCompanySuggestion, chooseExactSuggestion, noMatchSaid, oneLineAddress, suggestionText, typeaheadBoxSays, typeaheadMatchMode } from "./typeaheadMatch";
 import { siteKey } from "./draftCreated";
 
 let failures = 0;
@@ -211,6 +211,62 @@ check("siteKey reads the directionals and leaves words / suffix / unit as before
   assert.equal(post!.suffix, "ave");
   const none = siteKey({ street: "77 Brindlecove Ln" });
   assert.deepEqual(none!.dirs, []);
+});
+
+// ---- #244: THE SUBMITTING COMPANY, BY THE COMPANY SELECT'S OWN RULE ---------------------------
+check("a box bound to installerCompanyName is judged as the company", () => {
+  assert.equal(typeaheadMatchMode({ field: "installerCompanyName", label: "contractors autocomplete", value: "Bramblecrest Solar Co" }), "company");
+});
+check("the company folds & to and, case and punctuation (the select's rule), and only the name", () => {
+  const c = chooseCompanySuggestion([
+    "BRAMBLECREST SOLAR AND ELECTRIC LLC OF IDAHO",
+    "BRAMBLECREST SOLAR AND ELECTRIC, LLC",
+    "No results match your search",
+  ], "Bramblecrest Solar & Electric LLC");
+  assert.equal(c.kind, "pick");
+  if (c.kind === "pick") assert.equal(c.index, 1);
+});
+check("MUST REFUSE: a longer name that contains the company is never it", () => {
+  const c = chooseCompanySuggestion(["BRAMBLECREST SOLAR AND ELECTRIC LLC OF IDAHO"], "Bramblecrest Solar & Electric LLC");
+  assert.equal(c.kind, "none");
+});
+check("MUST ASK: two entries that both read as the company", () => {
+  const c = chooseCompanySuggestion(["Bramblecrest Solar Co.", "BRAMBLECREST SOLAR CO"], "Bramblecrest Solar Co");
+  assert.equal(c.kind, "ask");
+  if (c.kind === "ask") assert.equal(c.candidates.length, 2);
+});
+
+// ---- #244: IS THIS BOX A SEARCH-AS-YOU-TYPE BOX? — from its own markup ------------------------
+// The iWorQ shape is the live City of Star markup (2026-11-15) with nothing else: no role, no
+// aria-autocomplete, no widget stamp, no name.
+const IWORQ = {
+  textBox: true, editable: true, role: "", ariaAutocomplete: "", className: "form-control",
+  id: "autocomplete_1", ariaLabel: "properties autocomplete",
+  widgetClasses: ["input-group", "autocomplete-template", "col-12 col-sm-6 mb-4 mb-sm-0"],
+};
+check("MUST CATCH: the iWorQ autocomplete (by its id, its aria-label, or its widget alone)", () => {
+  assert.match(typeaheadBoxSays(IWORQ), /autocomplete/);
+  assert.match(typeaheadBoxSays({ ...IWORQ, id: "", ariaLabel: "" }), /widget \("autocomplete-template"\)/);
+  assert.match(typeaheadBoxSays({ ...IWORQ, id: "", widgetClasses: [] }), /aria-label "properties autocomplete"/);
+  assert.match(typeaheadBoxSays({ ...IWORQ, ariaLabel: "", widgetClasses: [] }), /id "autocomplete_1"/);
+});
+check("MUST CATCH: ARIA (role=combobox + aria-autocomplete list|both) and a widget's stamp, as before", () => {
+  assert.match(typeaheadBoxSays({ textBox: true, editable: true, role: "combobox", ariaAutocomplete: "list" }), /aria-autocomplete=list/);
+  assert.match(typeaheadBoxSays({ textBox: true, editable: true, className: "ui-autocomplete-input" }), /stamp/);
+  assert.match(typeaheadBoxSays({ textBox: true, editable: true, widgetClasses: ["react-autosuggest__container"] }), /autosuggest/);
+});
+check("MUST EXCLUDE: a keyword box whose only hint is \"Search…\", and a plain text box", () => {
+  assert.equal(typeaheadBoxSays({ textBox: true, editable: true, id: "keyword", ariaLabel: "Search permits", className: "form-control", widgetClasses: ["input-group search-bar"] }), "");
+  assert.equal(typeaheadBoxSays({ textBox: true, editable: true, id: "field267055", className: "form-control", widgetClasses: ["col"] }), "");
+});
+check("MUST EXCLUDE: tokens that say the opposite, a read-only box, a non-text control", () => {
+  assert.equal(typeaheadBoxSays({ textBox: true, editable: true, className: "autocomplete-off" }), "");
+  assert.equal(typeaheadBoxSays({ textBox: true, editable: true, widgetClasses: ["typeahead-disabled"] }), "");
+  assert.equal(typeaheadBoxSays({ textBox: true, editable: true, ariaLabel: "Address (autocomplete off)" }), "");
+  assert.equal(typeaheadBoxSays({ ...IWORQ, editable: false }), "");
+  assert.equal(typeaheadBoxSays({ ...IWORQ, textBox: false }), "");
+  assert.equal(typeaheadBoxSays({ textBox: true, editable: true, role: "combobox", ariaAutocomplete: "none" }), "");
+  assert.equal(typeaheadBoxSays(null), "");
 });
 
 if (failures) { console.error(`\n${failures} typeaheadMatch check(s) failed`); process.exit(1); }

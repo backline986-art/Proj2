@@ -97,13 +97,13 @@ import { imageToPdfBytes, shouldConvertToPdf } from "../imageToPdf";
 import { removeUploadStaging, uploadPayloadFor, type PreparedUpload } from "./uploadPayload";
 import { attachmentTypeFor, isDocumentTypeList } from "./attachmentTypes";
 import { chooseSubmittedRecord, cleanRecordLink, readApplicationLedgerInPage, recordLinkForNumberInPage, type LedgerEntry } from "./submissionLedger";
-import { exactUploadDocType, fileTypeAllowed, formsSlotDocTypes, UPLOAD_LABEL_PATTERNS, uploadForbidsSubstitute, uploadTextNamesNoDocument } from "./autoLearnAdapter";
+import { exactUploadDocType, fileTypeAllowed, formsSlotDocTypes, isSensitiveLabel, UPLOAD_LABEL_PATTERNS, uploadForbidsSubstitute, uploadTextNamesNoDocument } from "./autoLearnAdapter";
 import { readFeeStop, secretValuesOf, type FeeStopKind, type FeeStopReading } from "../feeStop";
 import { reviewComparison, scrapeReviewScreen as scrapeReviewScreenShared, utilityIdentifiersEnteredBySteps, type ReviewMismatch } from "../reviewScreenScraper";
 import { controlReadsUnanswered, pinEmptyRequiredControl, PINNED_CONTROL_ATTR, SWEPT_BLANK_ATTR, sweepEmptyRequiredControls, type EmptyRequired } from "../requiredControlSweep";
 import { openPortal } from "../browser";
 import { selectWithFallback, comboboxFaceInPage, type ComboboxPick } from "../comboboxFill";
-import { fillTypeahead, typeaheadFailureLine, TypeaheadStop } from "../typeaheadFill";
+import { fillTypeahead, typeaheadBoxReason, typeaheadFailureLine, TypeaheadStop } from "../typeaheadFill";
 import { typeaheadMatchMode, type TypeaheadSite } from "../typeaheadMatch";
 import { assertFilerIdentityHeld, FilerIdentityStop, filerIdentityFieldForSelect, filerIdentityStopMessage, isFilerIdentityField, isUnansweredOption, readNativeSelect, selectFilerIdentity } from "../filerIdentitySelect";
 import {
@@ -1682,6 +1682,12 @@ export class RecipeAdapter extends BasePortalAdapter {
    *  comes back empty while the selection shows elsewhere, so the required sweep's re-assert must not
    *  take it for a blank and search again (a second identical search, a second location row). */
   private readonly typeaheadEnterSelected = new Set<string>();
+  /** #244 — search boxes (note, binding, value; loose) whose type-ahead already came back with
+   *  nothing this run: no suggestions, none that is the job's, or a pick the portal did not take.
+   *  The portal's answer to the same value has not changed, so neither a re-run of the step nor the
+   *  required sweep's re-assert searches again (a required iWorQ box re-searched three times: 82 s
+   *  of the same "No results match your search" on the synthetic replica). */
+  private readonly typeaheadSearchedOut = new Set<string>();
   /** #333: after the hand-over, a person's own main-frame form request went (their submit, or a
    *  postback they made) — the run's end page is theirs now, not where the run "stopped". */
   private personMovedOn = false;
@@ -5031,6 +5037,12 @@ export class RecipeAdapter extends BasePortalAdapter {
   private async fillTypeaheadStep(step: RecipeStep, scoped: any, v: string): Promise<boolean> {
     const label = String(this.stepLabel(step) || step.note || "search box").slice(0, 60);
     const fieldName = String(step.note ?? step.field ?? step.action).slice(0, 60);
+    // #244: the same box and value already came back with nothing this run — its FAILED line stands.
+    const memo = this.typeaheadMemoKey(step, v);
+    if (this.typeaheadSearchedOut.has(memo)) {
+      if (!this.fieldsUnverified.includes(fieldName)) this.fieldsUnverified.push(fieldName);
+      return false;
+    }
     const projectStreet = String(this.fieldValues.street || this.fieldValues.projectAddress || "");
     const mode = typeaheadMatchMode({ field: step.field, label, value: v, projectStreet });
     const site: TypeaheadSite = mode === "site"
@@ -5078,8 +5090,16 @@ export class RecipeAdapter extends BasePortalAdapter {
       if (!this.driftWarnings.includes(`STOPPED: ${line}`)) this.driftWarnings.push(`STOPPED: ${line}`);
       throw new TypeaheadStop(msg);
     }
+    if (out.outcome !== "unusable") this.typeaheadSearchedOut.add(memo);
     this.driftWarnings.push(`FAILED ${line}`);
     return false;
+  }
+
+  /** #244 — one type-ahead search: the step's note (stable under a re-assert's pinned selector), its
+   *  binding and this job's value, loose. */
+  private typeaheadMemoKey(step: RecipeStep, v: string): string {
+    const loose = (s: unknown): string => String(s ?? "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+    return `${loose(step.note || this.stepLabel(step))}\u0000${loose(step.field)}\u0000${loose(v)}`;
   }
 
   /** #524 — record WHO IS FILING's stop (sticky for the run) and throw it. */
@@ -6446,6 +6466,21 @@ export class RecipeAdapter extends BasePortalAdapter {
         // by its own rule — the box holds the SUGGESTION, so fillHeld's "shows what we typed"
         // would call a good pick a miss, and a plain fill() leaves a value nobody picked.
         if (step.fillStrategy === "typeahead") return this.fillTypeaheadStep(step, scoped, v);
+        // THE BOX'S OWN MARKUP DECIDES, NOT THE RECORDING (#244). A step saved as a plain fill before
+        // its box was recognised (City of Star's iWorQ "properties autocomplete" / "contractors
+        // autocomplete", live 2026-11-15) typed the address, picked nothing, and read back "verified"
+        // while the property id stayed empty. The one predicate (typeaheadBoxSays) is asked of the
+        // live box; a sensitive value is never typed into a search whose suggestions are read.
+        {
+          const shown = String(this.stepLabel(step) || step.note || "").slice(0, 60);
+          if (!isSensitiveLabel(shown)) {
+            const byMarkup = await typeaheadBoxReason(scoped);
+            if (byMarkup) {
+              this.agingNotes.push(`"${shown || "search box"}" was recorded as a plain fill; the box's own markup says it is a search-as-you-type box (${byMarkup}) — typed and picked from its list instead`);
+              return this.fillTypeaheadStep(step, scoped, v);
+            }
+          }
+        }
         // MASKED CONTROLS (Accela phone / zip): they keep their validation state from KEY
         // events, so .fill() - which assigns .value and fires input+change - leaves the box
         // showing the right text while the portal still reports "Required Invalid". The
@@ -10687,6 +10722,9 @@ export class RecipeAdapter extends BasePortalAdapter {
             // filed; Part 1's own "Net Metering" did the same by substring. Left blank, a person
             // answers it.
             if (isSubmitIntentField(blank)) continue;
+            // A SEARCH THAT ALREADY FOUND NOTHING FOR THIS JOB'S VALUE IS NOT RE-RUN (#244): its FAILED
+            // line names the box and the portal's words, and a re-run only types the same query again.
+            if (rs.action === "fill" && this.typeaheadSearchedOut.size && this.typeaheadSearchedOut.has(this.typeaheadMemoKey(rs, this.resolveValue(rs)))) continue;
             // THE CONTROL THE STEP WILL WRITE, RESOLVED FIRST AND WRITTEN ONLY THROUGH ITSELF: it must
             // be the control the sweep called that blank, it must be on the page now (a step whose
             // control is gone waits out its whole timeout), and no question of it may read as

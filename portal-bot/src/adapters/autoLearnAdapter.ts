@@ -9,7 +9,7 @@ import { sameRecordType } from "../../../backend/src/permitProcess";
 import { BasePortalAdapter, HUMAN_REVIEW_MESSAGE, type PortalContext, type PortalStepResult } from "../adapter";
 import { openPortal } from "../browser";
 import { selectWithFallback, readClosedComboboxOptions } from "../comboboxFill";
-import { fillTypeahead, typeaheadFailureLine } from "../typeaheadFill";
+import { fillTypeahead, typeaheadBoxReason, typeaheadFailureLine } from "../typeaheadFill";
 import { usStateCode } from "../../../backend/src/usState";
 import { typeaheadMatchMode, type TypeaheadSite } from "../typeaheadMatch";
 import { assertFilerIdentityHeld, FilerIdentityStop, filerIdentityFieldForSelect, filerIdentityStopMessage, selectFilerIdentity } from "../filerIdentitySelect";
@@ -12155,6 +12155,20 @@ export class AutoLearnAdapter extends BasePortalAdapter {
 
     // A SEARCH-AS-YOU-TYPE BOX IS TYPED INTO AND PICKED FROM (#575): fill() would leave the value
     // un-picked in the box (which then reads as "held"), and the select path opens an empty list.
+    // ...AND THE BOX'S OWN MARKUP IS ASKED HERE (#244), by the one predicate the replay asks at its
+    // fill door (typeaheadBoxSays): an iWorQ autocomplete has no ARIA and no widget stamp for the
+    // scan to read (City of Star, live 2026-11-15: <input id="autocomplete_1" aria-label="properties
+    // autocomplete"> in div.autocomplete-template), so it was recorded as a plain fill and nothing
+    // was ever picked. The strategy goes ON THE FIELD, because the page's applied list and the
+    // re-assert pass read it there — without it the re-assert would fill() over the pick.
+    if (action === "fill" && field.fieldType === "text" && field.fillStrategy !== "typeahead" && !sensitive) {
+      const box = await this.locator(field.selector).catch(() => null);
+      const byMarkup = box ? await typeaheadBoxReason(box) : "";
+      if (byMarkup) {
+        field.fillStrategy = "typeahead";
+        this.debug?.event({ type: "typeahead_by_markup", label: String(field.label ?? "").slice(0, 60), why: byMarkup.slice(0, 120) });
+      }
+    }
     if (action === "fill" && field.fillStrategy === "typeahead") return this.applyTypeaheadFill(field, fillReq, value, sensitive);
 
     const res = await safeAction(
