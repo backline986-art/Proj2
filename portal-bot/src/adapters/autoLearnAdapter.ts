@@ -14004,6 +14004,13 @@ export class AutoLearnAdapter extends BasePortalAdapter {
   }
 }
 
+/** A POPUP'S DISMISSAL WORDS: a control whose WHOLE label is one of these only closes or
+ *  acknowledges a popup. One vocabulary for two questions (#233): the dismisser's fast path asks
+ *  it in the page (passed as `.source` with the same "i" flag, since a closed-over constant is a
+ *  ReferenceError there — the regex text is unchanged), and replay asks it of a recorded click
+ *  (isDialogDismissalStep), so the two cannot disagree about what "OK" is. */
+export const DISMISS_LABEL = /^(got it|dismiss|close|accept all|accept|ok|×|x)$/i;
+
 // SHARED WITH REPLAY. Extracted verbatim from AutoLearnAdapter.dismissModals so the RecipeAdapter
 // can run the same pass: replay had NO modal handling at all, and the first live replay died
 // on step 2 of 99 because PowerClerk's "What's new?" popover — which this code already knows
@@ -14026,15 +14033,15 @@ export async function dismissPageModals(
   // any button whose text is a dismissal? Deliberately broader than the selectors below, so
   // it can only skip work that would have found nothing.
   if (typeof page.evaluate === "function") {
-    const worthDoing = await page.evaluate(() => {
+    const worthDoing = await page.evaluate((dismissSource: string) => {
       const CSS_HINTS = '.modal, .popover, .modal-backdrop, [class*="backdrop"], [id*="cpr-banner"],'
         + ' [class*="cookie"], [class*="consent"], .btn-close, [aria-label="Close"], [aria-label="close"],'
         + ' .x-tool-close, [class*="x-window"], [class*="modal"], [class*="popover"]';
       if (document.querySelector(CSS_HINTS)) return true;
-      const DISMISS_TEXT = /^(got it|dismiss|close|accept all|accept|ok|×|x)$/i;
+      const DISMISS_TEXT = new RegExp(dismissSource, "i");
       const els = Array.from(document.querySelectorAll("button, a, .btn, [role=button]"));
       return els.some((el) => DISMISS_TEXT.test(((el as HTMLElement).innerText || "").trim()));
-    }).catch(() => true); // unreadable page → do the full walk, as before
+    }, DISMISS_LABEL.source).catch(() => true); // unreadable page → do the full walk, as before
     if (!worthDoing) return out;
   }
   // Match dismiss controls whether they're <button>, <a>, or .btn (PowerClerk uses
