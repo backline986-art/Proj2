@@ -11558,6 +11558,27 @@ export class RecipeAdapter extends BasePortalAdapter {
         levels.push({ loc: this.locator({ ...fb, nth: undefined, fallbacks: undefined }), from: { ...fb, nth: undefined } as RecipeSelector });
       }
     }
+    // A LABEL RECORDED ON A CLICK IS ALSO THE CONTROL'S ACCESSIBLE NAME (#193, #228). The learner
+    // recorded EnerGov's "Add Location" card — a role="button" div, clicked through its stamped
+    // element — as { label: "Add\n Location\n … REQUIRED\n An address is required." } and nothing
+    // else; getByLabel never matches a button's content, so the step resolved nothing (live City of
+    // Tigard, 2026-11-15). The words a label-only level carries are tried as a button's, then a
+    // link's, accessible name — exact, whitespace folded as Playwright folds it — AFTER the levels
+    // the step recorded, so a real <label> association still wins. Clicks only: a write's label is
+    // a field's.
+    const clickStep = this.identityGuard ?? (this.resolvingStep?.action === "click" ? this.resolvingStep : null);
+    if (clickStep) {
+      for (const level of [...levels]) {
+        const l = level.from;
+        if (!l?.label || l.role || l.name || l.text || l.css || l.placeholder || l.testId) continue;
+        const name = String(l.label).replace(/\s+/g, " ").trim();
+        if (!name) continue;
+        for (const role of ["button", "link"] as const) {
+          const twin = { role, name, exact: true, ...(l.frame ? { frame: l.frame } : {}) } as RecipeSelector;
+          levels.push({ loc: this.locator(twin), from: twin });
+        }
+      }
+    }
     let levelIdx = -1;
     for (const level of levels) {
       levelIdx++;
