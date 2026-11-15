@@ -1689,9 +1689,18 @@ export class RecipeAdapter extends BasePortalAdapter {
    *  required iWorQ box re-searched three times: 82 s of the same "No results match your search" on
    *  the synthetic replica). Keyed by the live element, never by the step's words: two boxes with the same note,
    *  binding and value (PowerClerk 32f3d2b2 has "Address"/street at steps 16 and 27) are two
-   *  searches, and a new document is a new search (review of 5eb51ad3, shape S3). */
-  private readonly typeaheadAnswered = new Map<string, { value: string; label: string }>();
+   *  searches, and a new document is a new search (review of 5eb51ad3, shape S3). The entry also
+   *  carries the ADVANCE GENERATION it was made in (review of d1c7acd1): a framework that re-uses
+   *  the same <input> node for the next wizard step (Vue's in-place patch, React's same-position
+   *  element) keeps the mark while the box, its list and its page have all changed — the recipe's
+   *  own executed click/goto/press is what tells the two apart, not the DOM, the URL or the view. */
+  private readonly typeaheadAnswered = new Map<string, { value: string; label: string; gen: number }>();
   private readonly typeaheadRunTag = Math.random().toString(36).slice(2, 8);
+  /** #244 — bumped by every executed click, goto or key step (executeStep): the "already answered"
+   *  marks made before it belong to an earlier page of the walk and are not read after it. The
+   *  required sweep's re-assert runs before the Next click, so it stays in the search's own
+   *  generation and that box is still searched once. */
+  private typeaheadAdvanceGen = 0;
   /** Set by fillTypeaheadStep whenever it returns false with its own FAILED line standing (searched
    *  and found nothing, a pick the portal did not take, or not searched again because the box had
    *  already answered) — the re-assert reads it so that box is not also called a control "no longer
@@ -5053,9 +5062,10 @@ export class RecipeAdapter extends BasePortalAdapter {
     if (answered) {
       this.typeaheadFailureNamed = true;
       if (!this.fieldsUnverified.includes(fieldName)) this.fieldsUnverified.push(fieldName);
-      if (!this.driftWarnings.some((w) => w.startsWith(`FAILED "${label}"`))) {
-        this.driftWarnings.push(`FAILED "${label}": not searched again — this box already answered this job's value with nothing this run (searched as "${answered.label}") — nothing was picked and the box was left empty.`);
-      }
+      // Said once per distinct line, never hidden behind another step's FAILED line of the same label
+      // (review of d1c7acd1: a prefix match let step 1's own failure swallow step 2's skip, silently).
+      const skipLine = `FAILED "${label}": not searched again — this box already answered this job's value with nothing this run (searched as "${answered.label}") — nothing was picked and the box was left empty.`;
+      if (!this.driftWarnings.includes(skipLine)) this.driftWarnings.push(skipLine);
       return false;
     }
     const projectStreet = String(this.fieldValues.street || this.fieldValues.projectAddress || "");
@@ -5131,7 +5141,9 @@ export class RecipeAdapter extends BasePortalAdapter {
     try {
       const token = String((await Promise.resolve(scoped.evaluate((el: Element, attr: string) => el.getAttribute(attr) || "", RecipeAdapter.TYPEAHEAD_ANSWERED_ATTR, { timeout: 1500 })).catch(() => "")) ?? "");
       const hit = token ? this.typeaheadAnswered.get(token) : undefined;
-      return hit && hit.value === RecipeAdapter.typeaheadValueKey(v) ? hit : null;
+      // Same element, same value AND the same generation of the walk: after an executed advance the
+      // mark is an earlier page's, even on a re-used node.
+      return hit && hit.value === RecipeAdapter.typeaheadValueKey(v) && hit.gen === this.typeaheadAdvanceGen ? hit : null;
     } catch {
       return null;
     }
@@ -5145,7 +5157,7 @@ export class RecipeAdapter extends BasePortalAdapter {
     const token = `${this.typeaheadRunTag}-${this.typeaheadAnswered.size + 1}`;
     try {
       const ok = await Promise.resolve(scoped.evaluate((el: Element, a: { attr: string; token: string }) => { el.setAttribute(a.attr, a.token); return true; }, { attr: RecipeAdapter.TYPEAHEAD_ANSWERED_ATTR, token }, { timeout: 1500 })).catch(() => false);
-      if (ok === true) this.typeaheadAnswered.set(token, { value: RecipeAdapter.typeaheadValueKey(v), label });
+      if (ok === true) this.typeaheadAnswered.set(token, { value: RecipeAdapter.typeaheadValueKey(v), label, gen: this.typeaheadAdvanceGen });
     } catch { /* unmarked */ }
   }
 
@@ -6189,7 +6201,13 @@ export class RecipeAdapter extends BasePortalAdapter {
         this.recordedStepView.set(idx, { doc: await this.docToken(), view, path: this.lastView?.path ?? "", ctl: recordedControlCss(step) });
       }
     }
-    if (!RecipeAdapter.WRITE_ACTIONS.has(step.action)) return this.executeStepInner(step, pastReview);
+    if (!RecipeAdapter.WRITE_ACTIONS.has(step.action)) {
+      const moved = await this.executeStepInner(step, pastReview);
+      // #244: an executed click, goto or key is a new generation for the search boxes' "already
+      // answered" marks — the next page's box may be the same DOM node (typeaheadAdvanceGen says why).
+      if (moved && (step.action === "click" || step.action === "goto" || step.action === "press")) this.typeaheadAdvanceGen++;
+      return moved;
+    }
     this.writtenTarget = null;
     const done = !this.backstop ? await this.executeStepInner(step, pastReview)
       : await withOwnWriteWindow(this.page, `recorded ${step.action}${step.note ? ` (${String(step.note).slice(0, 50)})` : ""}`, () => this.executeStepInner(step, pastReview));

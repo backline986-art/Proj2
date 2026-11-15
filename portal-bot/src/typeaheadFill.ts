@@ -57,7 +57,11 @@ export type TypeaheadOutcome =
   /** A near miss or several equal candidates: nothing picked, the box cleared; ask `question`. */
   | { outcome: "ask"; question: string; offered: string[]; typed: string; why: string }
   /** `portalSaid`: the portal's own no-match words, when it printed any. */
-  | { outcome: "no_suggestions"; why: string; typed: string[]; portalSaid?: string }
+  | { outcome: "no_suggestions"; why: string; typed: string[]; portalSaid?: string;
+      /** `portalSaid` appeared AFTER the typing (it was not on screen before): the portal's answer to
+       *  this search, not static copy or another box's leftover panel. Only such an answer is
+       *  remembered as "already answered" (typeaheadPortalAnswered). */
+      portalSaidFresh?: true }
   /** `listChanged`: the list re-rendered between the read and the click — not the portal's answer. */
   | { outcome: "no_match"; why: string; offered: string[]; typed: string; portalSaid?: string; listChanged?: true }
   /** A suggestion was clicked and the box does not hold it. */
@@ -415,11 +419,15 @@ async function readShows(doc: any): Promise<{ shown: string[]; notes: string[] }
  *  none) — THE SHORTEST, so it is the portal's own words and not a container that holds them (#244:
  *  the quote read "* Property Information No results match your search * Contractor(s) Contractors
  *  with expired licenses…", the whole row of an iWorQ form, which also named the other box). */
-function freshNoMatch(before: string[] | null | undefined, after: string[] | null | undefined): string {
+function freshNoMatch(before: string[] | null | undefined, after: string[] | null | undefined, freshOnly = false): string {
   const old = new Set(before ?? []);
   const said = (after ?? []).map(noMatchSaid).filter(Boolean);
   const shortest = (list: string[]): string => list.reduce((a, b) => (b.length < a.length ? b : a), list[0] ?? "");
-  return shortest(said.filter((t) => !old.has(t))) || shortest(said);
+  // `freshOnly`: only a sentence that was NOT on screen before the typing. The fallback (a sentence
+  // that was already there — static help copy "Address not found? Call the permit desk.", another
+  // box's leftover panel) is still worth quoting, but it is not the portal's answer to THIS search
+  // (review of d1c7acd1): a caller that remembers "already answered" must not remember it.
+  return shortest(said.filter((t) => !old.has(t))) || (freshOnly ? "" : shortest(said));
 }
 
 /** THE SHARED ENTER QUESTION (hard rule 1), asked of this box in its own document: "" = Enter may be
@@ -442,7 +450,7 @@ async function enterRefusal(doc: any, loc: any): Promise<string> {
  */
 async function enterAndReadSelection(
   page: any, doc: any, loc: any, site: TypeaheadSite, before: { shown: string[]; notes: string[] } | null, deadline: number,
-): Promise<{ choice: ReturnType<typeof chooseAddressSuggestion> | null; said: string; pressed: boolean }> {
+): Promise<{ choice: ReturnType<typeof chooseAddressSuggestion> | null; said: string; saidFresh: boolean; pressed: boolean }> {
   // A box inside a form posts the form back on Enter: wait for THAT navigation (a real postback can
   // take seconds to start), never read the old document's stillness as "nothing selected".
   const inForm = await loc.evaluate((el: Element) => !!(el as HTMLInputElement).form).catch(() => false);
@@ -450,11 +458,12 @@ async function enterAndReadSelection(
     ? doc.waitForNavigation({ waitUntil: "domcontentloaded", timeout: Math.max(0, Math.min(8_000, deadline - Date.now())) }).then(() => true).catch(() => false)
     : Promise.resolve(false);
   const pressed = await withAutomationInput(page, () => loc.press("Enter", { timeout: 3000 })).then(() => true).catch(() => false);
-  if (!pressed) return { choice: null, said: "", pressed: false };
+  if (!pressed) return { choice: null, said: "", saidFresh: false, pressed: false };
   await navigated;
   const old = new Set(before?.shown ?? []);
   const until = Math.min(Date.now() + 6_000, deadline);
   let said = "";
+  let saidFresh = false;
   let quiet = 0;
   let lastSig = "";
   while (Date.now() < until) {
@@ -463,10 +472,12 @@ async function enterAndReadSelection(
     const now = await readShows(doc);
     if (!now) continue; // mid-navigation
     const fresh = now.shown.filter((t) => !old.has(t));
-    said = freshNoMatch(before?.notes, now.notes) || said;
+    const freshSaid = freshNoMatch(before?.notes, now.notes, true);
+    if (freshSaid) saidFresh = true;
+    said = freshSaid || freshNoMatch(before?.notes, now.notes) || said;
     if (fresh.length) {
       const choice = chooseAddressSuggestion(fresh, site);
-      if (choice.kind === "pick" || choice.kind === "ask") return { choice, said, pressed: true };
+      if (choice.kind === "pick" || choice.kind === "ask") return { choice, said, saidFresh, pressed: true };
     }
     // Nothing selected (yet): settle once the page has held still for a moment, or said "no match".
     const sig = JSON.stringify(now.shown);
@@ -475,7 +486,7 @@ async function enterAndReadSelection(
     if (said && quiet >= 1) break;
     if (quiet >= 4) break;
   }
-  return { choice: null, said, pressed: true };
+  return { choice: null, said, saidFresh, pressed: true };
 }
 
 /** Poll until the suggestions hold still (two equal reads in a row) or the wait ends. Returns the
@@ -573,6 +584,7 @@ export async function fillTypeahead(page: any, loc: any, req: TypeaheadRequest):
   let rows: string[] = [];
   let usedQuery = "";
   let portalSaid = "";
+  let portalSaidFresh = false; // set only by a sentence that appeared after the typing (freshNoMatch freshOnly)
   let enterNote = "";
   let wholeListed = 0;
   const entered = new Set<number>();
@@ -600,7 +612,9 @@ export async function fillTypeahead(page: any, loc: any, req: TypeaheadRequest):
         break;
       }
       const afterTyping = await readShows(doc);
-      portalSaid = freshNoMatch(before?.notes, afterTyping?.notes) || portalSaid;
+      const freshSaid = freshNoMatch(before?.notes, afterTyping?.notes, true);
+      if (freshSaid) portalSaidFresh = true;
+      portalSaid = freshSaid || freshNoMatch(before?.notes, afterTyping?.notes) || portalSaid;
       if (!t.enter || Date.now() >= deadline) continue;
       // No list for the whole address: a search that runs on Enter (#139), through the caller's Enter
       // door (the replay's guardAction), else the shared Enter question.
@@ -609,7 +623,7 @@ export async function fillTypeahead(page: any, loc: any, req: TypeaheadRequest):
         : await enterRefusal(doc, loc);
       if (refusal) { enterNote = ` (Enter was not pressed: ${refusal.slice(0, 160)})`; continue; }
       const sel = await enterAndReadSelection(page, doc, loc, site, before, deadline);
-      if (sel.said) portalSaid = sel.said;
+      if (sel.said) { portalSaid = sel.said; if (sel.saidFresh) portalSaidFresh = true; }
       if (!sel.pressed) continue;
       entered.add(typed.length - 1);
       if (sel.choice?.kind === "pick") {
@@ -630,6 +644,7 @@ export async function fillTypeahead(page: any, loc: any, req: TypeaheadRequest):
         why: `typed ${typedLine()} and the box offered no suggestions${wholeListed ? ` (only ${wholeListed} other address(es) for the whole line)` : ""}${entered.size ? " and the portal selected nothing" : ""}${enterNote}${over}`,
         typed,
         ...(portalSaid ? { portalSaid } : {}),
+        ...(portalSaid && portalSaidFresh ? { portalSaidFresh: true as const } : {}),
       };
     }
     const offered = rows.map(suggestionText).filter(Boolean);
@@ -733,7 +748,9 @@ export class TypeaheadStop extends Error {
  *  re-rendered under the read, or a pick the box did not keep is not an answer — it may differ on
  *  the next try, so a caller that remembers "already searched" (the replay) must not remember it. */
 export function typeaheadPortalAnswered(o: TypeaheadOutcome): boolean {
-  if (o.outcome === "no_suggestions") return !!o.portalSaid;
+  // Its own words, printed FOR this search — a no-match sentence that was already on screen (static
+  // help copy, another box's panel) is quoted but is not an answer (review of d1c7acd1).
+  if (o.outcome === "no_suggestions") return !!o.portalSaid && o.portalSaidFresh === true;
   if (o.outcome === "no_match") return !o.listChanged;
   return false;
 }

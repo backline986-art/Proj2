@@ -74,8 +74,13 @@ check("nothing watched: taken", () => {
 });
 
 // ---- typeaheadPortalAnswered ---------------------------------------------------------------------
-check("the portal's own no-match words are its answer", () => {
-  assert.equal(typeaheadPortalAnswered({ outcome: "no_suggestions", why: "", typed: ["x"], portalSaid: "No results match your search" }), true);
+check("the portal's own no-match words, printed for this search, are its answer", () => {
+  assert.equal(typeaheadPortalAnswered({ outcome: "no_suggestions", why: "", typed: ["x"], portalSaid: "No results match your search", portalSaidFresh: true }), true);
+});
+check("MUST EXCLUDE: a no-match sentence that was already on screen before the typing is quoted, not an answer", () => {
+  // Static help copy ("Address not found? Call the permit desk.") or another box's leftover panel:
+  // a cold first search on such a page must be searched again by the required sweep, as on main.
+  assert.equal(typeaheadPortalAnswered({ outcome: "no_suggestions", why: "", typed: ["x"], portalSaid: "Address not found? Call the permit desk." }), false);
 });
 check("a settled list with none of the job's is its answer", () => {
   assert.equal(typeaheadPortalAnswered({ outcome: "no_match", why: "", offered: ["4812 W QUILLFEATHER DR"], typed: "x" }), true);
