@@ -184,8 +184,14 @@ const atPayment = (label: string, r: Ran & { boxes: Record<string, string> }): v
   const r = await replay(recipeOf("card-hosted-frame", [
     { action: "goto", phase: "open", value: `${base}/permits/fees/hosted`, note: "entry url" },
     { ...codeStep("#csc"), value: "123", sensitive: false, fingerprint: undefined },
-  ]), async (pg) => ({ csc: await valueOf(pg, "#csc"), cn: await valueOf(pg, "#cn", "#cardFrame") }));
+  ]), async (pg) => {
+    // The fixture itself: the card frame must have loaded cross-origin, or this variant proves nothing.
+    const frameUrl = pg.frames().map((f) => f.url()).find((u) => u.includes("/hosted-card-frame")) ?? "";
+    return { csc: await valueOf(pg, "#csc"), cn: await valueOf(pg, "#cn", "#cardFrame"), frameHost: frameUrl ? new URL(frameUrl).hostname : "<no frame>" };
+  });
   console.log(`   card number in a cross-origin frame: ${brief(r)}`);
+  check("fixture: the card number's frame loaded from another origin (localhost, the page is 127.0.0.1)", r.boxes.frameHost === "localhost", brief(r));
+  delete r.boxes.frameHost;
   atPayment("card number in a cross-origin child frame", r);
 }
 {
