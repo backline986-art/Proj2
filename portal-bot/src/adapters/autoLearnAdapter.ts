@@ -5330,6 +5330,8 @@ export class AutoLearnAdapter extends BasePortalAdapter {
       companyNames: [s(company.companyName), ...(company.ownNames ?? []).map(s)].filter(Boolean),
       companyStreet: s(company.street),
       companyContacts: [s(company.phone), s(company.email)].filter(Boolean),
+      // The walk is ending now: only today's date (within the slack) printed in a label is volatile.
+      learnedAt: Date.now(),
     };
   }
 

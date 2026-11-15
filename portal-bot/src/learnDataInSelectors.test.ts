@@ -16,7 +16,7 @@
 import assert from "node:assert/strict";
 import type { RecipeStep } from "../../shared/src/types";
 import {
-  carriesDate, DATE_LITERAL, identityWordsOf, isVolatileLabel, readsAsStreetAddress, resultRowRoleOf,
+  carriesDate, DATE_LITERAL, identityWordsOf, isPrintedDateLabel, isVolatileLabel, readsAsStreetAddress, resultRowRoleOf,
   RESULT_ROW_MARKER_CSS, withoutLearnDataInSelectors, type LearnIdentity,
 } from "./learnDataInSelectors";
 
@@ -34,13 +34,18 @@ const LEARN: LearnIdentity = {
   companyNames: ["Brightfold Energy LLC"],
   companyStreet: "929 Harrowgate Rd",
   companyContacts: ["555-201-7788", "office@brightfold.example"],
+  // The walk ran on 10/02/2026 (the CERT_TICK's printed date).
+  learnedAt: Date.UTC(2026, 9, 2, 17),
 };
 const POPUP = "ACADialogFrame";
+// THE LIVE PREFIX: the parcel and owner lists nest inside the ADDRESS search's panel
+// (…ucAddressSearchResult_ucParcelList_gv_CB_0) — only "the last role word wins" reads them right.
+const PANEL = "ctl00_phPopup_ucAddressSearchResult";
 const listStep = (list: string, row: number, label: string, section: string): RecipeStep => ({
   action: "check", phase: "fill",
-  selector: { label, frame: POPUP, fallbacks: [{ css: `#ctl00_phPopup_ucSearchResult_uc${list}List_gv_CB_${row}`, frame: POPUP }] },
+  selector: { label, frame: POPUP, fallbacks: [{ css: `#${PANEL}_uc${list}List_gv_CB_${row}`, frame: POPUP }] },
   note: label,
-  fingerprint: { id: `ctl00_phPopup_ucSearchResult_uc${list}List_gv_CB_${row}`, name: `ctl00_phPopup_ucSearchResult_uc${list}List_gv_RadioButtonFieldGroupName`, section },
+  fingerprint: { id: `${PANEL}_uc${list}List_gv_CB_${row}`, name: `${PANEL}_uc${list}List_gv_RadioButtonFieldGroupName`, section },
 });
 // The audit's shapes, re-made with invented values.
 const ADDRESS_ROW = listStep("Address", 1, "4417 W QUILLMERE BLVD, Fernhollow ID 83999", "Address City State Zip");
@@ -111,6 +116,14 @@ check("the audit's row shapes read as their roles with no identity at all (recip
   assert.equal(resultRowRoleOf(OWNER_ROW), "owner");
   assert.equal(resultRowRoleOf(LICENCE_ROW), "licence");
   assert.equal(resultRowRoleOf(CONTACT_ROW), "contact");
+});
+check("a list nested in a panel named for another role reads as ITS OWN list (the last role word wins)", () => {
+  // …ucAddressSearchResult_ucParcelList_… is the PARCEL list; …ucAddressSearchResult_ucOwnerList_… the
+  // OWNER list. Reading the first role word routes the parcel to the address matcher and loses the owner.
+  assert.equal(PARCEL_ROW.fingerprint?.id, "ctl00_phPopup_ucAddressSearchResult_ucParcelList_gv_CB_0");
+  assert.equal(resultRowRoleOf(PARCEL_ROW), "parcel");
+  assert.equal(resultRowRoleOf(OWNER_ROW), "owner");
+  assert.equal(resultRowRoleOf(listStep("Parcel", 0, "R7730012645", "")), "parcel", "from the ids alone, no section");
 });
 check("an explicit rowRole is the answer", () => {
   assert.equal(resultRowRoleOf({ action: "check", selector: { css: RESULT_ROW_MARKER_CSS }, rowRole: "parcel" }), "parcel");
@@ -206,6 +219,50 @@ check("a level naming the learn company is dropped when another level remains", 
   const { steps } = withoutLearnDataInSelectors([st], LEARN);
   assert.equal(steps[0].selector?.name, undefined);
   assert.equal(steps[0].selector?.css, "#acctMenu");
+});
+check("...but a QUESTION that merely contains a learn value keeps its label (it is not the value)", () => {
+  // A learn on a city-owned property: the owner's name is in an ordinary question.
+  const cityOwned: LearnIdentity = { ...LEARN, ownerNames: ["City of Fernhollow"] };
+  const letter: RecipeStep = { action: "check", phase: "fill", selector: { label: "Have you been issued an acceptance letter by the City of Fernhollow?*", fallbacks: [{ css: "#PRPermit31_attFlagIsAffordableHousing" }] }, note: "acceptance letter" };
+  // A company whose name's words are also a question's words.
+  const wordy: LearnIdentity = { ...LEARN, companyNames: ["Electric Service Co"] };
+  const service: RecipeStep = { action: "select", phase: "fill", field: "serviceType", selector: { label: "Type of Electric Service at Generation Site", fallbacks: [{ css: "#pcInputBase61" }] }, note: "Type of Electric Service at Generation Site" };
+  const a = withoutLearnDataInSelectors([letter], cityOwned);
+  const b = withoutLearnDataInSelectors([service], wordy);
+  assert.equal(a.steps[0], letter, "the acceptance-letter question is untouched");
+  assert.equal(b.steps[0], service, "the service-type question is untouched");
+  assert.equal(a.changed.length + b.changed.length, 0);
+});
+check("only THE LEARN DAY's date is volatile to the learner: a tariff's effective date is the portal's wording", () => {
+  const tariff: RecipeStep = { action: "check", phase: "fill", selector: { label: "I accept the Net Metering tariff effective 07/01/2017", fallbacks: [{ css: "#pcInputBase55" }] }, note: "I accept the Net Metering tariff effective 07/01/2017" };
+  const rate: RecipeStep = { action: "select", phase: "fill", field: "rateSchedule", selector: { label: "Rate schedule (2024-01-01 revision)", fallbacks: [{ css: "#pcInputBase61" }] }, note: "Rate schedule (2024-01-01 revision)" };
+  const { steps, changed } = withoutLearnDataInSelectors([tariff, rate], LEARN);
+  assert.equal(steps[0], tariff, "the tariff's label stays (its id is a render counter)");
+  assert.equal(steps[1], rate);
+  assert.equal(changed.length, 0);
+  // The learn day itself, give or take a day (the page prints its own zone's date), is volatile.
+  for (const d of ["10/01/2026", "10/02/2026", "2026-10-03"]) {
+    const st: RecipeStep = { ...CERT_TICK, selector: { label: `Date: ${d}`, fallbacks: [{ css: "#ctl00_PlaceHolderMain_capReviewCertification1_termReviewAccept" }] }, note: `Date: ${d}` };
+    assert.equal(withoutLearnDataInSelectors([st], LEARN).steps[0].note, "Date: [date]", d);
+  }
+  const stale: RecipeStep = { ...CERT_TICK, selector: { label: "Date: 09/20/2026", fallbacks: [{ css: "#ctl00_PlaceHolderMain_capReviewCertification1_termReviewAccept" }] }, note: "Date: 09/20/2026" };
+  assert.equal(withoutLearnDataInSelectors([stale], LEARN).steps[0], stale, "twelve days off is not the learn day");
+});
+check("with no learn time, the learn day is TODAY (the pass runs as the walk ends)", () => {
+  const now = new Date();
+  const today = `${String(now.getMonth() + 1).padStart(2, "0")}/${String(now.getDate()).padStart(2, "0")}/${now.getFullYear()}`;
+  const st: RecipeStep = { ...CERT_TICK, selector: { label: `Date: ${today}`, fallbacks: [{ css: "#ctl00_PlaceHolderMain_capReviewCertification1_termReviewAccept" }] }, note: `Date: ${today}` };
+  const { learnedAt: _drop, ...noTime } = LEARN;
+  void _drop;
+  assert.equal(withoutLearnDataInSelectors([st], noTime).steps[0].note, "Date: [date]");
+  assert.equal(withoutLearnDataInSelectors([CERT_TICK], noTime).steps[0], CERT_TICK, "10/02/2026 is not today");
+});
+check("isPrintedDateLabel: the replay waives a printed date, never a long number", () => {
+  assert.equal(isPrintedDateLabel("Date: 09/28/2026"), true);
+  assert.equal(isPrintedDateLabel("Date: [date]"), true);
+  assert.equal(isPrintedDateLabel("fld20456"), false, "a numeric control name still contradicts another question");
+  assert.equal(isPrintedDateLabel("085531"), false);
+  assert.equal(isPrintedDateLabel("I accept the Net Metering tariff effective 07/01/2017"), false, "the question's own words remain");
 });
 
 if (failures) { console.error(`\n${failures} learnDataInSelectors check(s) failed`); process.exit(1); }

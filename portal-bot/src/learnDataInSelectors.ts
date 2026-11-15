@@ -59,9 +59,38 @@ export function carriesDate(text: string): boolean {
   return hit;
 }
 
-/** The text with every date replaced by the stand-in ("Date: 11/12/2026" → "Date: [date]"). */
-export function withDateStandIn(text: string): string {
-  return String(text ?? "").replace(DATE_IN_TEXT, DATE_STAND_IN);
+// THE LEARN DAY'S DATE IS VOLATILE; THE PORTAL'S OWN DATES ARE ITS WORDING (#235 review). A label
+// printing the day the walk ran ("Date: 11/14/2026") changes every day; "the Net Metering tariff
+// effective 07/01/2017" or "Rate schedule (2024-01-01 revision)" is the question itself, and replacing
+// that label by the control's id would leave a PowerClerk render counter (pcInputBase55) as the only
+// selector — another question on a new project. Within two days of the walk either way: the page
+// prints its own time zone's date, and a walk can cross midnight.
+const LEARN_DAY_SLACK_MS = 2 * 24 * 60 * 60 * 1000;
+function dateValueOf(literal: string): number | null {
+  const iso = /^(\d{4})-(\d{2})-(\d{2})$/.exec(literal);
+  const us = /^(\d{1,2})\/(\d{1,2})\/(\d{4})$/.exec(literal);
+  const [y, m, d] = iso ? [+iso[1], +iso[2], +iso[3]] : us ? [+us[3], +us[1], +us[2]] : [0, 0, 0];
+  if (!y || m < 1 || m > 12 || d < 1 || d > 31) return null;
+  return Date.UTC(y, m - 1, d, 12);
+}
+const isLearnDayLiteral = (literal: string, learnedAt: number): boolean => {
+  if (literal.toLowerCase() === DATE_STAND_IN) return true;
+  const at = dateValueOf(literal);
+  return at !== null && Math.abs(at - learnedAt) <= LEARN_DAY_SLACK_MS;
+};
+
+/** Does the text carry the LEARN DAY's date (or the stand-in)? `learnedAt` is the walk's time (epoch
+ *  ms); without one, now — the learner's last pass runs as the walk ends. */
+export function carriesLearnDayDate(text: string, learnedAt?: number): boolean {
+  const at = learnedAt ?? Date.now();
+  return (String(text ?? "").match(DATE_IN_TEXT) ?? []).some((lit) => isLearnDayLiteral(lit, at));
+}
+
+/** The text with the learn day's date replaced by the stand-in ("Date: 11/12/2026" → "Date: [date]");
+ *  any other date is the portal's wording and stays. */
+export function withDateStandIn(text: string, learnedAt?: number): string {
+  const at = learnedAt ?? Date.now();
+  return String(text ?? "").replace(DATE_IN_TEXT, (lit) => (isLearnDayLiteral(lit, at) ? DATE_STAND_IN : lit));
 }
 
 /** THE LEARN JOB'S OWN VALUES — the property's and the filing company's. Matched by shape (an address
@@ -82,11 +111,13 @@ export interface LearnIdentity {
   companyContacts?: string[];
   /** The filing company's licence numbers. */
   licences?: string[];
+  /** When the walk ran (epoch ms): only THAT day's date in a label is volatile. Default now. */
+  learnedAt?: number;
 }
 
 // A DIGIT RUN LONG ENOUGH TO BE SOMEBODY'S NUMBER (a parcel, a licence, a phone, an account) is
 // volatile: five digits or more once dashes, dots and spaces between digit groups are closed up
-// ("123-45-678", "R1013000280", "014096"). A SLASH is never closed: "120/240" is a voltage — the
+// ("123-45-678", "R7730012645", "085531"). A SLASH is never closed: "120/240" is a voltage — the
 // portal's own vocabulary — and must keep contradicting a control labelled anything else.
 const LONG_NUMBER_MIN_DIGITS = 5;
 const isLongNumberToken = (token: string): boolean => (token.match(/\d/g) ?? []).length >= LONG_NUMBER_MIN_DIGITS;
@@ -189,6 +220,15 @@ export function identityWordsOf(label: string, identity?: LearnIdentity): string
 export function isVolatileLabel(label: string, identity?: LearnIdentity): boolean {
   if (!tokensOf(label).length && !carriesDate(label)) return false;
   return identityWordsOf(label, identity).length === 0;
+}
+
+/** THE ONE ANSWER TO "IS THIS RECORDED LABEL A DATE THE PAGE PRINTED, NOT THE CONTROL'S NAME?" — a
+ *  volatile label that carries a date ("Date: 09/28/2026", the learner's "Date: [date]"). The replay's
+ *  label re-anchor waives only this: a long number recorded as a label (a numeric control name such as
+ *  "fld20456", a code) still contradicts a control the page labels as another question — the #235
+ *  review's C4 wrote a valuation into "Owner Phone" when numbers were waived too. */
+export function isPrintedDateLabel(label: string): boolean {
+  return carriesDate(label) && isVolatileLabel(label);
 }
 
 /** Does the text read as a street address ("150 N Example Blvd, Town ST 83702")? A house number, a
@@ -343,12 +383,18 @@ const levelText = (lvl: RecipeSelector | undefined): string =>
     .filter(Boolean).join(" | ");
 
 /**
- * THE LEARNER'S LAST PASS: no step leaves a walk with the learn job's data or a date in its selector.
+ * THE LEARNER'S LAST PASS: no step leaves a walk with the learn job's data or the learn day's date in
+ * its selector.
  *   - A results-row pick becomes a ROW ROLE: the marker selector, the role, a note with no learn value,
  *     and the fingerprint (its id is kept only so replay can find the GRID — never the row).
- *   - A level whose label / name / text carries a date is replaced by the control's own id (the label
- *     was the date printed beside the box, not its name); the note keeps the caption, date stood in.
- *   - Any other level carrying a learn value is dropped when another level remains.
+ *   - A level whose label / name / text carries THE LEARN DAY's date is replaced by the control's own
+ *     id (the label was the date printed beside the box, not its name); the note keeps the caption,
+ *     date stood in. Any other date is the portal's own wording and stays (carriesLearnDayDate).
+ *   - A level that IS a learn value — nothing left once the learn job's values are taken out
+ *     (isVolatileLabel with the identity) — is dropped when another level remains. A question that
+ *     merely contains one ("Have you been issued an acceptance letter by the City of Bend?" on a learn
+ *     whose owner is the City of Bend, "Type of Electric Service at Generation Site" for a company
+ *     named Electric Service Co) keeps its label: the #235 review found both losing it.
  * Returns the steps and, per change, why (for the run's debug bundle).
  */
 export function withoutLearnDataInSelectors(steps: RecipeStep[], identity: LearnIdentity): { steps: RecipeStep[]; changed: string[] } {
@@ -387,8 +433,8 @@ export function withoutLearnDataInSelectors(steps: RecipeStep[], identity: Learn
     }
     const sel = step.selector;
     const levels: RecipeSelector[] = [{ ...sel, fallbacks: undefined }, ...(sel.fallbacks ?? []).map((f) => ({ ...f, fallbacks: undefined }))];
-    const dated = levels.map((l) => carriesDate([l.label, l.name, l.text].filter(Boolean).join(" ")));
-    const learned = levels.map((l) => identityRoleIn(levelText(l), identity) !== null);
+    const dated = levels.map((l) => carriesLearnDayDate([l.label, l.name, l.text].filter(Boolean).join(" "), identity.learnedAt));
+    const learned = levels.map((l) => { const t = levelText(l); return identityRoleIn(t, identity) !== null && isVolatileLabel(t, identity); });
     if (!dated.some(Boolean) && !learned.some(Boolean)) return step;
     const frame = frameOf(step);
     const clean = levels.filter((_l, k) => !dated[k] && !learned[k]);
@@ -408,8 +454,8 @@ export function withoutLearnDataInSelectors(steps: RecipeStep[], identity: Learn
     const nextSel: RecipeSelector = { ...primary, ...(frame ? { frame } : {}) };
     if (rest.length) nextSel.fallbacks = rest.map((l) => ({ ...l, ...(frame ? { frame } : {}) }));
     const next: RecipeStep = { ...step, selector: nextSel };
-    if (step.note && carriesDate(step.note)) next.note = withDateStandIn(step.note);
-    changed.push(`step ${i}: ${dated.some(Boolean) ? "a date in the label replaced by the control's own id" : "a level carrying the learn job's data dropped"}`);
+    if (step.note && carriesLearnDayDate(step.note, identity.learnedAt)) next.note = withDateStandIn(step.note, identity.learnedAt);
+    changed.push(`step ${i}: ${dated.some(Boolean) ? "the learn day's date in the label replaced by the control's own id" : "a level that is the learn job's data dropped"}`);
     return next;
   });
   return { steps: out, changed };
