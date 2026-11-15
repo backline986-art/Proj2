@@ -131,6 +131,8 @@ run("every other condition in the bar blocks on its own", () => {
     ["too few fills", { substantiveFills: 4 }],
     ["wrong form", { formPurposeMismatch: true }],
     ["a recorded sequence that cannot replay as recorded (#241)", { sequenceProblems: ['the advance at step 15 ("Next Step") did not leave its page'] }],
+    // An unchecked sequence is not a clean one: a caller that forgot the signal is blocked (#241).
+    ["a learn whose saved steps were never read as a sequence (#241)", { sequenceProblems: null as unknown as string[] }],
   ];
   for (const [label, patch] of cases) {
     assert.equal(evaluateTrustGate({ ...CLEAN_RUN, ...patch }).trusted, false, `${label} must block promotion`);

@@ -2405,15 +2405,19 @@ async function autoLearnPortalInner(
   // the steps that will be saved and replayed (after the binding pass, so a literal the pass bound is
   // judged as the binding replay will use). A finding that refuses promotion is a gate blocker and an
   // issue in the notes; a note (no upload step while this filing carries documents) is an issue too,
-  // and rides on a trusted recipe's notes after its matching-key lead sentence.
+  // pushed AFTER the hard-blocker issues so it never takes one of the operator message's few slots
+  // ahead of a blocker, and rides on a trusted recipe's notes after its matching-key lead sentence.
+  // The walk's own review signal goes in: a learn that reached review but could not keep its submit
+  // (pay- or signature-worded) saves no terminal step, and that is not "never reached review" (#241
+  // review). An empty docsByType stays "not known" (null), never "owes none": documents not built
+  // yet are not documents not owed.
   const owedDocTypes = Object.keys(docsByType).filter((k) => docsByType[k]);
-  const sequence = recipeSequenceProblems(boundSteps, { owedDocuments: owedDocTypes.length ? owedDocTypes : null });
+  const sequence = recipeSequenceProblems(boundSteps, { owedDocuments: owedDocTypes.length ? owedDocTypes : null, reachedReview });
   const sequenceRefusals = sequence.filter((p) => p.refusesPromotion).map((p) => p.detail);
   const sequenceNotes = sequence.filter((p) => !p.refusesPromotion);
   if (sequenceRefusals.length) {
     verification.issues.push(`The recorded sequence cannot replay as recorded — ${sequenceRefusals.slice(0, 6).join("; ")}${sequenceRefusals.length > 6 ? `; +${sequenceRefusals.length - 6} more` : ""}. Re-learn this portal, or fix those steps, before trusting.`);
   }
-  for (const n of sequenceNotes) verification.issues.push(`Sequence note: ${n.detail}.`);
 
   // THE TRUST GATE. Every condition above feeds evaluateTrustGate, which is where the bar is
   // written down in full — read that comment before changing anything here. Nothing may grant
@@ -2449,6 +2453,7 @@ async function autoLearnPortalInner(
     else if (exitUnread.length) verification.issues.push(`Page(s) ${exitUnread.slice(0, 12).join(", ")} could not be read as the walk left them — review each before trusting.`);
     else if (!exit.exitPagesRead?.read.length) verification.issues.push("No page was read as the walk left it — review every page before trusting.");
   }
+  for (const n of sequenceNotes) verification.issues.push(`Sequence note: ${n.detail}.`);
 
   // While a verified-complete recipe is being protected, the stub (which RESETS that row) is
   // created only after the FINAL trust decision — the replay self-test below can still downgrade

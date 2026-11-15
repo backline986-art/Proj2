@@ -39,7 +39,7 @@ import { provablyDifferentUtility, sameUtilityEntity } from "./utilityIdentity";
 import { sameAgencyName } from "./permitProcessLookup";
 import { labelWords } from "../../shared/src/portalSafety";
 // A cycle (portalDraft imports this module); safe because it is only called inside a function.
-import { disarmDraftCreatingSubmit } from "./portalDraft";
+import { disarmDraftCreatingSubmit, stepsEndOnHealedDraftSubmit } from "./portalDraft";
 import { firstEmail, looksLikeEmail } from "../../shared/src/emailAddress";
 import { contactKeyRole } from "../../shared/src/contactRoles";
 import { mountAdjective, mountKindForProject } from "./codeReviewRules";
@@ -216,7 +216,12 @@ const prevSnapshotMarker = (status: string, version: number): string =>
 export function snapshotIsProven(notes: unknown): boolean {
   return /\[prev-recipe:\s*proven/i.test(String(notes ?? ""));
 }
-const stripPrevMarker = (notes: unknown): string => String(notes ?? "").replace(PREV_SNAPSHOT_MARKER_RE, "").trim();
+// THE SEPARATOR GOES WITH THE MARKER. The marker is space-joined onto the notes, so on a row whose
+// notes were empty it is the whole first segment, and removing it alone left the " | " after it
+// dangling: "| [sequence check …]" is a segment that no longer starts with its own tag, so an upsert
+// by tag kept the stale copy beside the new one, and a removal by tag missed it (#241 review).
+const stripPrevMarker = (notes: unknown): string =>
+  String(notes ?? "").replace(PREV_SNAPSHOT_MARKER_RE, "").trim().replace(/^\|\s*/, "").replace(/\s*\|$/, "").trim();
 const carriedPrevMarker = (notes: unknown): string => (String(notes ?? "").match(PREV_SNAPSHOT_MARKER_RE) ?? [])[0]?.trim() ?? "";
 
 /** Fills, selects and checks — the steps that actually put data into a form, and the only
@@ -1129,10 +1134,16 @@ export type FinishedPortalRecipe = PortalRecipeWithFlag & { sequenceProblems: Re
 // with no steps can't be promoted; already-complete is a no-op (its findings are still returned).
 export function finishPortalRecipe(db: AppDb, recipeId: string, finishedBy?: string): FinishedPortalRecipe {
   const recipe = getPortalRecipe(db, recipeId);
-  if (recipe.status === "complete") return { ...recipe, sequenceProblems: recipeSequenceProblems(recipe.steps) };
+  // THE ONE EVIDENCE THIS DOOR HOLDS THAT THE RECORDING REACHED ITS END, beyond a terminal step: the
+  // heal record names the last step as a submit a person's click was seen to turn into a draft. The
+  // heal removes isFinalSubmit by design, and a draft-only Part 1 (PSE) is never promoted any other
+  // way, so without this every such save was flagged "never reached review" (#241 review). Read-only;
+  // it decides what this check reports, never what a replay may click.
+  const sequenceOpts = { reachedReview: stepsEndOnHealedDraftSubmit(db, recipeId, recipe.steps) };
+  if (recipe.status === "complete") return { ...recipe, sequenceProblems: recipeSequenceProblems(recipe.steps, sequenceOpts) };
   if (!recipe.steps.length) throw new HttpError(409, "This recording has no captured steps yet — nothing to save as a replayable recipe.");
   const who = finishedBy || "operator";
-  const problems = recipeSequenceProblems(recipe.steps);
+  const problems = recipeSequenceProblems(recipe.steps, sequenceOpts);
   const refusing = problems.filter((p) => p.refusesPromotion);
   const now = nowIso();
   const sequenceNote = !problems.length ? ""

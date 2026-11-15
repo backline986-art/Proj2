@@ -16,7 +16,8 @@
 //     the page moved on (Boise, Corvallis, Meridian address / licence / contact look-ups);
 //   - an attachment row's own steps written after the row was committed (Corvallis: Type and
 //     Description after the row's Save, then Save again);
-//   - a recipe that ends before the review screen (ComEd ends on its first page).
+//   - a recipe that ends before the review screen (ComEd ends on its first page) — unless the door
+//     holds its own evidence that the recording reached review (options.reachedReview).
 //
 // ONE PURE FUNCTION over the steps, so every door that can make a recipe 'complete' asks the same
 // question: the learn's trust gate (backend autoLearn), the automatic promotion
@@ -26,7 +27,8 @@
 // Control identity is the recorded DOM id only (fingerprint.id, or a css that is a bare id) — never
 // a label or a positional css: two "Do you agree?" boxes and two attachment rows' "textarea" are
 // different controls with the same words, and Oregon ePermitting's contact dialog (no ids, the
-// live-proven Coos Bay recipes) re-uses one css for each contact it adds.
+// live-proven Coos Bay recipes) re-uses one css for each contact it adds. The id is necessary, not
+// sufficient: two writes to one id whose recorded names disagree are two controls (namesDisagree).
 // ---------------------------------------------------------------------------
 
 import type { RecipeStep } from "./types";
@@ -57,6 +59,13 @@ export interface RecipeSequenceOptions {
    *  the filing owes documents. []: known to owe none. null / absent: not known where the check runs
    *  (a promotion with no project in hand) — a zero-upload recipe is then noted, never refused. */
   owedDocuments?: readonly string[] | null;
+  /** THE DOOR'S OWN EVIDENCE THAT THE RECORDING REACHED ITS END, when it holds any: the learn's walk
+   *  said it reached review (gate item 1), or the heal record names the last step as a submit a
+   *  person's click was seen to turn into a draft (portalDraft). true: a recipe with no review stop
+   *  and no recorded final submit is NOT "never reached review" — a submit the recorder could not
+   *  keep (pay- or signature-worded, isOffLimitsButton) or a healed draft-only Part 1 (#302) still
+   *  replays to its last step and hands over. Absent / false: the steps alone decide (#241 review). */
+  reachedReview?: boolean;
 }
 
 const WRITE_ACTIONS = new Set(["fill", "select", "check", "uncheck"]);
@@ -111,6 +120,34 @@ function isChooserOpener(st: RecipeStep): boolean {
   return LOOKUP_WORDS.test(words) || isContactOpener(words) || /\bselect (?:a|an)\b/i.test(words);
 }
 
+/** A MAIN-PAGE CLICK THAT MAY HAVE REPLACED THE FORM UNDER THE NEXT WRITE: not in a frame, not an
+ *  advance replay holds to moving, not a terminal step, not a look-up (a look-up opens a result list
+ *  over the same page). A person's "Previous page" or "Edit" at review, a tab, a breadcrumb, an
+ *  in-page dialog's Save: a write after it to a control written before it is not evidence that
+ *  anything was refused, nor that one form got two answers. The patch-by-demonstration flow is the
+ *  case (#241 review): the learn's advance, then the person's "human-patch: Previous page", a
+ *  corrected box, "human-patch: Next page" — that replays exactly as recorded. ONE predicate: the
+ *  refused-advance walk and the conflicting-write baseline both read it. */
+function mayReplaceForm(st: RecipeStep): boolean {
+  return st.action === "click" && !frameOf(st) && !isTerminal(st) && !isHeldPageAdvance(st) && !isLookupClick(st);
+}
+
+/** The control's recorded NAME (label / accessible name / aria-label), squashed to letters and digits. */
+function controlName(st: RecipeStep): string {
+  return String(st.selector?.label || st.selector?.name || st.fingerprint?.ariaLabel || "").toLowerCase().replace(/[^a-z0-9]+/g, "");
+}
+
+/** TWO WRITES TO ONE ID WHOSE RECORDED NAMES DISAGREE ARE TWO CONTROLS. Identity is the DOM id, but a
+ *  portal that renders ids as per-render tokens re-uses one id for another control after a re-render
+ *  (PowerClerk's pcInputBase ids: autoLearnAdapter's and recipeAdapter's own notes say a re-render
+ *  renumbers them on the same page). Both names present and different is evidence against identity;
+ *  a missing name never is. (#241 review: pcInputBase34 written as a battery model, then as export kW.) */
+function namesDisagree(a: RecipeStep, b: RecipeStep): boolean {
+  const x = controlName(a);
+  const y = controlName(b);
+  return !!x && !!y && x !== y;
+}
+
 /** The recorded DOM id of the control a write targets (scoped to its frame), or null when the step
  *  carries no id — never a label or a positional css (see the header). */
 function controlKey(st: RecipeStep): string | null {
@@ -163,18 +200,23 @@ export function recipeSequenceProblems(steps: readonly RecipeStep[], opts: Recip
   // a control already written on that page means the page never moved: the advance was refused, and
   // the two pages are one (so a later write that contradicts the earlier one is caught too). A
   // dialog's own commit (a frame click that is not a search) closes it, and a re-opened dialog is a
-  // fresh form — its ids may take another contact's values.
+  // fresh form — its ids may take another contact's values. A main-page click that may have replaced
+  // the form (mayReplaceForm) before any re-fill drops the parked page — the person may have gone
+  // back to it — and starts a fresh baseline for disagreeing writes. Once re-fills have shown the
+  // advance was refused, a later click changes nothing about that.
   type Write = { i: number; write: string };
   let page = new Map<string, Write>();
   let left: Map<string, Write> | null = null;
   let advanceAt = -1;
   let merged = false;
+  let formBreak = -1;
   let sinceAdvance = new Set<string>();
   const refills = new Map<number, Array<{ at: number; earlier: number }>>();
   const conflicts: Array<{ earlier: Write; later: Write }> = [];
   all.forEach((st, i) => {
     if (isHeldPageAdvance(st)) { left = page; page = new Map(); advanceAt = i; merged = false; sinceAdvance = new Set(); return; }
     if (st.action === "goto") { left = null; page = new Map(); advanceAt = -1; merged = false; sinceAdvance = new Set(); return; }
+    if (mayReplaceForm(st)) { if (!merged) left = null; formBreak = i; return; }
     if (st.action === "click" && frameOf(st) && !isLookupClick(st)) {
       const prefix = `${frameOf(st)}|`;
       for (const k of [...page.keys()]) if (k.startsWith(prefix)) page.delete(k);
@@ -185,15 +227,16 @@ export function recipeSequenceProblems(steps: readonly RecipeStep[], opts: Recip
     if (!key) return;
     const w: Write = { i, write: writeOf(st) };
     const parked = left as Map<string, Write> | null;
-    if (parked && advanceAt >= 0 && !sinceAdvance.has(key) && parked.has(key)) {
+    const parkedWrite = parked?.get(key);
+    if (parkedWrite && advanceAt >= 0 && !sinceAdvance.has(key) && !namesDisagree(all[parkedWrite.i], st)) {
       const at = refills.get(advanceAt) ?? [];
-      at.push({ at: i, earlier: parked.get(key)!.i });
+      at.push({ at: i, earlier: parkedWrite.i });
       refills.set(advanceAt, at);
-      if (!merged) { page = new Map([...parked, ...page]); merged = true; }
+      if (!merged) { page = new Map([...parked!, ...page]); merged = true; }
     }
     sinceAdvance.add(key);
     const prior = page.get(key);
-    if (prior && prior.write !== w.write) conflicts.push({ earlier: prior, later: w });
+    if (prior && prior.i > formBreak && prior.write !== w.write && !namesDisagree(all[prior.i], st)) conflicts.push({ earlier: prior, later: w });
     page.set(key, w);
   });
   for (const [adv, rows] of refills) {
@@ -292,13 +335,18 @@ export function recipeSequenceProblems(steps: readonly RecipeStep[], opts: Recip
     });
   });
 
-  // 6. NEVER REACHED REVIEW. No review stop and no recorded final submit: the recipe ends mid-form.
-  if (!all.some(isTerminal)) {
+  // 6. NOTHING SHOWS THE RECORDING REACHED ITS END. No review stop, no recorded final submit, and the
+  // door holds no evidence of its own that review was reached (opts.reachedReview): the recipe ends
+  // mid-form (ComEd on its first page, Meridian before its first advance). The words state what the
+  // steps show, never that the review screen was not reached: a learn whose walk reached review but
+  // could not keep its submit, and a healed draft-only Part 1, carry no terminal step either, and the
+  // door that knows says so (#241 review).
+  if (!all.some(isTerminal) && opts.reachedReview !== true) {
     const advances = all.filter(isHeldPageAdvance).length;
     out.push({
       kind: "never_reached_review",
       steps: [all.length - 1],
-      detail: `the recipe ends at step ${all.length} without reaching the review screen (no review stop, no recorded final submit)${advances ? ` after ${advances} page advance(s)` : "; it never advances past its first page"}`,
+      detail: `the recipe ends at step ${all.length} with no review stop and no recorded final submit, and nothing shows the recording reached review${advances ? ` (after ${advances} page advance(s))` : "; it never advances past its first page"}`,
       refusesPromotion: true,
     });
   }
