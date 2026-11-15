@@ -19,6 +19,8 @@ const FEE_TIER_NO_BOX_REASON = "the recorded kVA tier box was not found on this 
 const VERIFIED_RECORD_TYPE_NOTE = /^\s*record type \(verified\):\s*/i;
 /** #236: the review hand-off line naming the unbound answers a replay typed as recorded. */
 export const LEARN_ANSWER_NOTE_PREFIX = "replayed the learn's answer:";
+/** #236 review: the review hand-off line naming the steps the binder left blank for a person. */
+export const LEFT_FOR_PERSON_NOTE_PREFIX = "not answered by the replay:";
 import { collectPortalErrorBanner } from "../safeAction";
 import { GROUP_TOGGLE_CSS, recordTypeGroupOf, tagToggleByText, toggledListOpen } from "./recordTypeGroup";
 import { SERVICE_FEEDER_200A_FIELD, SERVICE_FEEDER_400A_FIELD, isServiceFeeder200Label, isServiceFeeder400Label } from "../../../shared/src/serviceLineLabels";
@@ -2023,9 +2025,17 @@ export class RecipeAdapter extends BasePortalAdapter {
     // screen was staged: the next stage of this track opens that draft and continues it.
     if (this.draftSubmitOutcome) {
       const d = this.draftSubmitOutcome;
+      // THE DRAFT CARRIES WHAT THE REPLAY TYPED, SO THE PERSON IS TOLD WHAT IT TYPED BLIND (#236 review).
+      // PSE's draft-creating Submit follows step 4's "Change to an existing…" — the learn job's answer —
+      // and the next stage continues the draft without replaying that step, so this stop is the only
+      // place the hand-off can name it. Message and data only: nothing here clicks or decides a click.
+      const notes = this.reviewHandoffNotes;
       return ok(
-        `${this.portalName}: automation clicked "${d.clickedLabel.slice(0, 60)}" — the submit this portal answers with a draft, never the filing — and the portal created draft ${d.applicationNumber || "(no number shown)"}. NOTHING WAS FILED.${d.nextForm ? ` The filing is in "${d.nextForm}".` : ""} Stage this track again: the next run opens this draft and continues it (never a new application), and its own submit still stops for review. AUTOMATION HAS STOPPED.`,
-        { finalSubmitClicked: false, draftSubmitClickedByAutomation: true },
+        `${this.portalName}: automation clicked "${d.clickedLabel.slice(0, 60)}" — the submit this portal answers with a draft, never the filing — and the portal created draft ${d.applicationNumber || "(no number shown)"}. NOTHING WAS FILED.${d.nextForm ? ` The filing is in "${d.nextForm}".` : ""} Stage this track again: the next run opens this draft and continues it (never a new application), and its own submit still stops for review.${notes.length ? ` ${notes.join(" ")}` : ""} AUTOMATION HAS STOPPED.`,
+        {
+          finalSubmitClicked: false, draftSubmitClickedByAutomation: true,
+          ...(notes.length ? { reviewHandoffNotes: [...notes], reviewPageBlockedCalls: [...this.reviewPageBlockedCalls] } : {}),
+        },
       );
     }
     // #340 — A STOPPED RUN HANDS NOTHING OVER: no review read, no staged-review walk, no page touched.
@@ -3434,8 +3444,10 @@ export class RecipeAdapter extends BasePortalAdapter {
           }
           if (done) executed++;
           else skipped.push(String(step.note || step.action).slice(0, 70));
-          // #236: an unbound answer replayed as recorded is named on the hand-off.
+          // #236: an unbound answer replayed as recorded is named on the hand-off, and so is a step the
+          // binder left blank for a person (typed or not — the blank is the point).
           if (done) this.noteReplayedLearnAnswer(step);
+          this.noteLeftForPerson(step);
           performed = done;
           // close MF2: a tier step that found no kVA box on its page stands under a provisional
           // stop; it is withdrawn only here, when that very step typed its real quantity.
@@ -5724,7 +5736,14 @@ export class RecipeAdapter extends BasePortalAdapter {
    *  engine took another route; worth re-recording" to the benchmark and the KPI. */
   private readonly learnAnswersListed: string[] = [];
   private static readonly LEARN_ANSWER_SHOWN = 10;
+  /** The last control label the run executed that names something (not a bare "Yes"/"No") — where a
+   *  radio with no question of its own is found on the page. */
+  private lastNamedLabel = "";
   private noteReplayedLearnAnswer(step: RecipeStep): void {
+    const before = this.lastNamedLabel;
+    const own = String(this.stepLabel(step) || "").replace(/\s+/g, " ").trim();
+    if (step.action === "goto") this.lastNamedLabel = "";
+    else if ((step.action === "fill" || step.action === "select" || step.action === "check") && own && !bareAnswerPolarity(own)) this.lastNamedLabel = own;
     if (step.field || step.sensitive || (step.action !== "select" && step.action !== "check")) return;
     const note = String(step.note ?? "");
     if (/^\s*policy default\s*:/i.test(note) || VERIFIED_RECORD_TYPE_NOTE.test(note)) return;
@@ -5747,7 +5766,15 @@ export class RecipeAdapter extends BasePortalAdapter {
       if (!answer || (!bareAnswerPolarity(answer) && !asks)) return;
       question = section || note;
     }
-    const item = `"${question.replace(/\s+/g, " ").trim().slice(0, 60)}" = "${answer.replace(/\s+/g, " ").trim().slice(0, 40)}"`;
+    // A QUESTION THE RECIPE NEVER RECORDED IS NAMED BY WHERE IT IS, NEVER AS ITS OWN ANSWER (#236 review:
+    // Meridian, ComEd, Coos Bay and Boise listed '"No" = "No"', which tells the person nothing to check).
+    // The radio's place is the last named control the run executed before it.
+    const squash = (s: string): string => s.replace(/\s+/g, " ").trim();
+    const same = (a: string, b: string): boolean => squash(a).toLowerCase().replace(/[.*:?]+$/, "") === squash(b).toLowerCase().replace(/[.*:?]+$/, "");
+    const asked = !squash(question) || same(question, answer)
+      ? (before ? `the unlabelled question recorded after "${squash(before).slice(0, 50)}"` : "an unlabelled question")
+      : `"${squash(question).slice(0, 60)}"`;
+    const item = `${asked} = "${squash(answer).slice(0, 40)}"`;
     if (this.learnAnswersListed.includes(item)) return;
     this.learnAnswersListed.push(item);
     const n = this.learnAnswersListed.length;
@@ -5755,6 +5782,24 @@ export class RecipeAdapter extends BasePortalAdapter {
     const more = n > RecipeAdapter.LEARN_ANSWER_SHOWN ? ` (+${n - RecipeAdapter.LEARN_ANSWER_SHOWN} more)` : "";
     const line = `${LEARN_ANSWER_NOTE_PREFIX} ${shown}${more} — bound to nothing, so ${n === 1 ? "it is" : `each of these ${n} is`} the recorded job's answer; confirm ${n === 1 ? "it is" : "each is"} this job's.`;
     const at = this.reviewHandoffNotes.findIndex((note) => note.startsWith(LEARN_ANSWER_NOTE_PREFIX));
+    if (at >= 0) this.reviewHandoffNotes[at] = line;
+    else this.reviewHandoffNotes.push(line);
+  }
+
+  /** A STEP LEFT BLANK FOR A PERSON IS NAMED WHERE THE PERSON READS (#236 review). The binder blanks a
+   *  step it will not answer for this job — a fee count no key answers (R14), an address component the
+   *  reader could not read (R13), a licence kind with no number on file, another company's attestation
+   *  — and says why in step.operatorItem; nothing in the replay read it, so "named for a person" reached
+   *  only the audit log (Tigard's three required fee-page blanks among them). One running line in
+   *  reviewHandoffNotes, rewritten in place like the learn-answer line, at most four reasons shown. */
+  private readonly leftForPersonListed: string[] = [];
+  private noteLeftForPerson(step: RecipeStep): void {
+    const why = String(step.operatorItem ?? "").replace(/\s+/g, " ").trim();
+    if (!why || this.leftForPersonListed.includes(why)) return;
+    this.leftForPersonListed.push(why);
+    const n = this.leftForPersonListed.length;
+    const line = `${LEFT_FOR_PERSON_NOTE_PREFIX} ${this.leftForPersonListed.slice(0, 4).join("; ")}${n > 4 ? ` (+${n - 4} more)` : ""}.`;
+    const at = this.reviewHandoffNotes.findIndex((note) => note.startsWith(LEFT_FOR_PERSON_NOTE_PREFIX));
     if (at >= 0) this.reviewHandoffNotes[at] = line;
     else this.reviewHandoffNotes.push(line);
   }
