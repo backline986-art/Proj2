@@ -124,7 +124,14 @@ const pageFor = (mode: string): string => {
     // MF5 where the only heading is a title carrying a record number that changed since the learn.
     case "mf5-dynamic-title": return page(`
       <div><label for="ApplicantEdit_txtEmail">E-mail:</label><input id="ApplicantEdit_txtEmail" value="installer@example.test"></div>
-      <div><label for="OwnerEdit_txtEmail">Email Address:</label><input id="OwnerEdit_txtEmail"></div>`, "<h1>Application BLD26-00712 - Contacts</h1>");
+      <div><label for="OwnerEdit_txtEmail">Email Address:</label><input id="OwnerEdit_txtEmail"></div>`, "<h1>Application ZZ00-00712 - Contacts</h1>");
+    // Review of the minimal round: both boxes under ONE recorded legend, stable ids; the recorded
+    // owner box was relabelled "Contact Address" and the label resolves onto its prefilled sibling.
+    case "same-legend-stable": return page(`
+    <fieldset><legend>Property Owner</legend>
+      <label for="Owner_txtAltEmail">E-mail:</label><input id="Owner_txtAltEmail" value="installer@example.test">
+      <label for="OwnerEdit_txtEmail">Contact Address</label><input id="OwnerEdit_txtEmail">
+    </fieldset>`);
     // MF5 with the owner's boxes named only by a placeholder mask and a title tooltip.
     case "hints": return page(`
     <fieldset><legend>Applicant</legend>
@@ -291,7 +298,8 @@ try {
     { mode: "counter-legend-renamed", owner: "pcInputBase31", app: "pcInputBase12", section: "Property Owner", why: "owner legend renamed, counter ids (label agrees)" },
     { mode: "long-legend", owner: "OwnerEdit_txtEmail", app: "ApplicantEdit_txtEmail", section: LONG_RECORDED, why: "owner legend over 80 characters" },
     { mode: "mf5-subheading", owner: "OwnerEdit_txtEmail", app: "ApplicantEdit_txtEmail", section: "Property Owner", why: "panel headings, owner under a sub-heading (label agrees)" },
-    { mode: "mf5-dynamic-title", owner: "OwnerEdit_txtEmail", app: "ApplicantEdit_txtEmail", section: "Application BLD26-00685 - Contacts", why: "title-only page whose record number changed (label agrees)" },
+    { mode: "mf5-dynamic-title", owner: "OwnerEdit_txtEmail", app: "ApplicantEdit_txtEmail", section: "Application ZZ00-00685 - Contacts", why: "title-only page whose record number changed (label agrees)" },
+    { mode: "same-legend-stable", owner: "OwnerEdit_txtEmail", app: "Owner_txtAltEmail", section: "Property Owner", why: "review of the minimal round: one legend, stable ids, owner relabelled 'Contact Address'" },
   ];
   for (const c of mf5Cases) {
     const o = await run(c.mode, one({ label: "E-mail:" }, "E-mail:", "homeownerEmail", { id: c.owner, section: c.section }));

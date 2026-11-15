@@ -5567,18 +5567,21 @@ export class RecipeAdapter extends BasePortalAdapter {
           // with the numbering restarted, a counter whose own label agreed moved it into the
           // co-applicant's Last. So when the box the step resolved onto sits in the recorded section
           // and its own label does not contradict the recorded one, the recording already confirms it,
-          // and the fingerprinted box is not written instead when its own label disagrees (whatever
-          // its id), or when its id is a counter that does not ALSO agree on its own label and the
-          // section (isVolatileControlId, the one classifier). Everywhere else this is main's rule
-          // unchanged: MF5's resolution lands in ANOTHER section, so the recorded box still takes the
-          // write there; and two boxes alike in label and section are still told apart by the counter.
+          // and a fingerprint whose id is a render counter or row ordinal (isVolatileControlId, the
+          // one classifier) that does not ALSO agree on its own label and the section is not written
+          // instead. A STABLE id keeps main's rule exactly (review of the minimal round: refusing a
+          // stable id whose label was reworded brought MF5 back inside one legend). Everywhere else
+          // this is main's rule unchanged: MF5's resolution lands in ANOTHER section, so the recorded
+          // box still takes the write there; and two boxes alike in label and section are still told
+          // apart by the counter.
           const keptBoxStands = async (): Promise<boolean> => {
             if (!meant) return false;
             const key = String(fp.id || fp.name);
+            if (!isVolatileControlId(key)) return false;
             const labelAgrees = !!meant.label && agree(recorded, meant.label);
             const stranger = !!meant.label && !labelAgrees;
-            const counter = isVolatileControlId(key) && !(labelAgrees && sectionAgrees);
-            if (!stranger && !counter) return false;
+            const counter = !(labelAgrees && sectionAgrees);
+            if (!counter) return false;
             const kept = await el0.evaluate(ownLabelAndLegendInPage).catch(() => null) as { label: string; section: string } | null;
             if (!inRecordedSection(kept, fp.section) || !agree(recorded, actual)) return false;
             this.agingNotes.push(
