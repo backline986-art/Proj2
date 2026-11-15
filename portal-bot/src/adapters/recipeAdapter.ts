@@ -5091,6 +5091,7 @@ export class RecipeAdapter extends BasePortalAdapter {
       if (!shown) {
         this.driftWarnings.push(`FAILED "${label}": picked "${out.picked}" and the box was empty once the page saved — the portal did not keep the pick`);
         if (!this.fieldsUnverified.includes(fieldName)) this.fieldsUnverified.push(fieldName);
+        this.typeaheadFailureNamed = true;
         return false;
       }
       if (!this.fieldsVerified.includes(fieldName)) this.fieldsVerified.push(fieldName);
