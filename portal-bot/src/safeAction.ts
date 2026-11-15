@@ -630,14 +630,23 @@ export const SECOND_FACTOR_TEXT_SOURCE = [
 /** A ONE-TIME-CODE BOX, BY THE NAMES IT CARRIES (name, id, autocomplete, aria-label, placeholder,
  *  its own <label>). THE ONE REGEX for that question: detectSecondFactor reads a live box with it, and
  *  the replay reads a recorded step's label with it (recipeAdapter, #238). A card's "Security Code"
- *  matches too, so this is never the whole answer on a page that might take a card: the replay asks
- *  for card context first (the shared isPaymentElementInPage / isPayRequestUrl) and only a code box
- *  with none is a second factor. Live Idaho DOPL recipe 7e90272b: its only recorded step, the emailed
- *  "Security Code", was read as a CVV and the run reported a clean review stop. */
+ *  matches too, so this is never the whole answer on a page that might take a card: the replay
+ *  pauses for a second factor only on the page's own second-factor WORDING with no card anywhere
+ *  (recipeAdapter secondFactorAtSignIn). Live Idaho DOPL recipe 7e90272b: its only recorded step, the
+ *  emailed "Security Code", was read as a CVV and the run reported a clean review stop. */
 export const ONE_TIME_CODE_FIELD = /one-time-code|passcode|\botp\b|verification.?code|security.?code|mfa.?code|credentials\.passcode/i;
 
-export async function detectSecondFactor(page: Page | null | undefined): Promise<string> {
-  if (!page || typeof (page as { frames?: unknown }).frames !== "function") return "";
+/** What every frame of the page says about a second factor, as DATA: a visible password box (the
+ *  password step, never a second factor), the first SECOND_FACTOR_TEXT_SOURCE wording found, and
+ *  whether a visible box is named like a one-time code (ONE_TIME_CODE_FIELD). THE ONE READER:
+ *  detectSecondFactor formats it for the login flow, and the replay asks it for the WORDING alone
+ *  (#238), because there a CVV named "Security Code" makes the code-box half true on a card page
+ *  too. A page it cannot read reads as nothing. Reads only; types nothing and clicks nothing. */
+export type SecondFactorReading = { password: boolean; wording: string; codeField: boolean };
+
+export async function readSecondFactor(page: Page | null | undefined): Promise<SecondFactorReading> {
+  const none: SecondFactorReading = { password: false, wording: "", codeField: false };
+  if (!page || typeof (page as { frames?: unknown }).frames !== "function") return none;
   try {
     let wording = "";
     let codeField = false;
@@ -665,16 +674,26 @@ export async function detectSecondFactor(page: Page | null | undefined): Promise
         return { password, code, wording: m ? m[0] : "" };
       }, { src: SECOND_FACTOR_TEXT_SOURCE, codeSrc: ONE_TIME_CODE_FIELD.source }).catch(() => null);
       if (!r) continue;
-      if (r.password) return ""; // still the password step, in some frame — never a second factor
+      if (r.password) return { password: true, wording: "", codeField: false }; // still the password step, in some frame — never a second factor
       if (r.code) codeField = true;
       if (r.wording && !wording) wording = r.wording;
     }
-    if (wording) return `a second-factor screen ("${wording.slice(0, 50)}")${codeField ? " with a code field" : ""}`;
-    if (codeField) return "a second-factor screen (a one-time-code field and no password field)";
-    return "";
+    return { password: false, wording, codeField };
   } catch {
-    return "";
+    return none;
   }
+}
+
+/** The short reason a reading gives for a second factor, or "" when it gives none. */
+export function secondFactorReason(r: SecondFactorReading): string {
+  if (r.password) return "";
+  if (r.wording) return `a second-factor screen ("${r.wording.slice(0, 50)}")${r.codeField ? " with a code field" : ""}`;
+  if (r.codeField) return "a second-factor screen (a one-time-code field and no password field)";
+  return "";
+}
+
+export async function detectSecondFactor(page: Page | null | undefined): Promise<string> {
+  return secondFactorReason(await readSecondFactor(page));
 }
 
 // ---------------------------------------------------------------------------
