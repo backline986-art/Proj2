@@ -1251,7 +1251,7 @@ export class RecipeAdapter extends BasePortalAdapter {
   private stoppedBeforeReview = "";
   /** …and the reading it was built from: stopAtReview re-words it with what it knows by then (a
    *  request of the person's that landed after the tail read it is said, never "Nothing was filed"). */
-  private stoppedBeforeReviewAt: { where: string; refused: string[] } | null = null;
+  private stoppedBeforeReviewAt: { where: string; refused: string[]; ranOut?: boolean } | null = null;
   /** Policy-default steps whose control was absent when their turn came — re-tried once
    *  just before the page's advance, when a conditional section has had every chance to
    *  render. Cleared on each advance. */
@@ -1310,6 +1310,10 @@ export class RecipeAdapter extends BasePortalAdapter {
   }
   /** The recipe step index the loop is on — the final-submit gate's "is this the terminal step". */
   private currentStepIdx = -1;
+  /** #232 — the step loop arrived at the review marker (stopForReview, the recorded final submit, or a
+   *  stamped draft-creating submit). A run that ends after this stopped AT review; before it, it never
+   *  got there. */
+  private reachedReviewMarker = false;
   /** #340 — WHY THE REPLAY WAS STOPPED FROM OUTSIDE (a person's cancel, or no progress for too long).
    *  Set once; every later door (the step loop, fillApplication, stopAtReview) reads it and ends the
    *  run named, without touching the page again. */
@@ -1554,6 +1558,8 @@ export class RecipeAdapter extends BasePortalAdapter {
     // (armSubmitWatch), and a route left behind would abort the person's own filing.
     this.backstop = await installFilingBackstop(this.page, "replay run").catch(() => null);
     if (this.backstop?.redirectGuardNote) this.driftWarnings.push(this.backstop.redirectGuardNote);
+    // #232: this run's ending is its own (the step loop sets the marker when it gets there).
+    this.reachedReviewMarker = false;
     try {
       // A FilerIdentityStop that escaped the step loop (a click between steps) is the run's answer too.
       const stopTimer = this.startStopWatchdog();
@@ -2027,7 +2033,7 @@ export class RecipeAdapter extends BasePortalAdapter {
       const handoff = notes.length ? ` ${notes.join(" ")}` : "";
       const handoffData = notes.length ? { reviewHandoffNotes: [...notes], reviewPageBlockedCalls: [...this.reviewPageBlockedCalls] } : {};
       const at = this.stoppedBeforeReviewAt;
-      const stopped = at ? this.stoppedBeforeReviewMessage(at.where, at.refused, this.personRequestWent) : this.stoppedBeforeReview;
+      const stopped = at ? this.stoppedBeforeReviewMessage(at.where, at.refused, this.personRequestWent, at.ranOut === true) : this.stoppedBeforeReview;
       return ok(
         `${HUMAN_REVIEW_MESSAGE} The recipe did NOT stage ${this.portalName} at its review screen — it ${stopped}${handoff} AUTOMATION HAS STOPPED.`,
         { finalSubmitClicked: false, stoppedBeforeReview: true, personMovedOn: this.personMovedOn, ...handoffData },
@@ -3096,6 +3102,8 @@ export class RecipeAdapter extends BasePortalAdapter {
       // so that click step itself is where the page is answered — before clickDraftCreatingSubmit
       // reads it. A known control with no value stops here by name, before any click.
       if (!pastReview && (step.action === "stopForReview" || isFinalSubmitStep(step) || this.draftCreatingStepAt(stepIdx) >= 0)) {
+        // #232: the run got to its review marker — what ends it from here ends it AT review.
+        this.reachedReviewMarker = true;
         const unrecorded = await this.timed("unrecorded-required", () => this.answerUnrecordedRequired());
         if (unrecorded.filled.length) { prevWasInput = true; wroteToThisPage = true; }
         if (unrecorded.missing.length) {
@@ -3935,7 +3943,7 @@ export class RecipeAdapter extends BasePortalAdapter {
     // WHERE THE RUN STOPPED, READ BEFORE THE PAGE IS HANDED OVER (Helm Should-fix 4): once the person
     // acts, the page is theirs and no longer where the run stopped. Read-only, with the same evidence
     // as the review read-back (the project's values on the page).
-    let earlyStop: { where: string; refused: string[]; message: string } | null = null;
+    let earlyStop: { where: string; refused: string[]; message: string; ranOut: boolean } | null = null;
     if (handingOver) {
       earlyStop = !pastReview && !this.stoppedAtPayment
         ? await this.whereTheRunStopped(project ? (await this.reviewValuesOnPage(project).catch(() => ({ confirmed: 0 }))).confirmed : 0)
@@ -3969,7 +3977,7 @@ export class RecipeAdapter extends BasePortalAdapter {
       // A run that stopped before review says so here too — never "Staged to review" (Should-fix 4).
       if (handedOver) {
         this.progress("wait", earlyStop
-          ? `Stopped on "${earlyStop.where}" — NOT the review page; the page is yours to finish, continue to review, verify and submit`
+          ? `${earlyStop.ranOut ? "The recipe ended" : "Stopped"} on "${earlyStop.where}" — NOT the review page; the page is yours to finish, continue to review, verify and submit`
           : "Staged to review — the page is yours to verify and submit", 0);
       }
       else {
@@ -4026,15 +4034,22 @@ export class RecipeAdapter extends BasePortalAdapter {
     // hand-over. A final submit the click detector saw is not decided here (the review step's wording).
     const stop = !pastReview && !this.stoppedAtPayment && !onHeldErrorPage
       ? (personMovedOn && !this.humanSubmit
-        ? (earlyStop && { where: earlyStop.where, refused: earlyStop.refused, message: this.stoppedBeforeReviewMessage(earlyStop.where, earlyStop.refused, this.personRequestWent) })
+        ? (earlyStop && { where: earlyStop.where, refused: earlyStop.refused, ranOut: earlyStop.ranOut, message: this.stoppedBeforeReviewMessage(earlyStop.where, earlyStop.refused, this.personRequestWent, earlyStop.ranOut) })
         : (personMovedOn || review.skipped ? null : await readUnlessDialog(this.page, () => this.whereTheRunStopped(review.confirmed, this.personRequestWent), null)))
       : null;
     if (stop) {
       this.stoppedBeforeReview = stop.message;
-      this.stoppedBeforeReviewAt = { where: stop.where, refused: stop.refused };
+      this.stoppedBeforeReviewAt = { where: stop.where, refused: stop.refused, ranOut: stop.ranOut };
+      // #243 — A PAGE THAT IS NOT THE REVIEW SCREEN WAS NOT CHECKED AS ONE. The read-back's pass
+      // sentence ("Review screen checked against the project: … no mismatch") said the opposite of
+      // the stop it rode on: Meridian's page-1 form read "16 field(s) read, 2 project value(s)
+      // confirmed present, no mismatch" under a run that never reached review. A mismatch is still
+      // said (it warns, it never reassures).
+      const summary = review.mismatches.length || !review.summary ? review.summary
+        : ` The page it ended on is not the review screen, so it was not checked as one (${review.fieldsSeen} field(s) read there).`;
       // THE PICKS FIRST (#362): the run card and the stage line read this message's first line (the
       // backend's pausedRunSentence), so what automation picked leads it, before the where-it-stopped.
-      return { ...ok(`${this.draftPickTell ? `${this.draftPickTell} ` : ""}Replayed ${executed} recorded step(s); ${stop.message}${review.summary}`, { ...data, stoppedBeforeReview: stop.where }), pauseReason: "stopped_before_review" };
+      return { ...ok(`${this.draftPickTell ? `${this.draftPickTell} ` : ""}Replayed ${executed} recorded step(s); ${stop.message}${summary}`, { ...data, stoppedBeforeReview: stop.where, ...(stop.ranOut ? { reviewMarkerReached: false } : {}) }), pauseReason: "stopped_before_review" };
     }
     return ok(`${this.draftPickTell ? `${this.draftPickTell} ` : ""}Replayed ${executed} recorded step(s); stopped at review.${review.summary}`, data);
   }
@@ -4044,11 +4059,23 @@ export class RecipeAdapter extends BasePortalAdapter {
    *  on the page, or the shared reading (terminalPageInPage, the backstop's own question) does not
    *  say "not review" — a page that cannot be read (a unit-test double) keeps today's report.
    *  Otherwise: the page is readable, is not the review page, and shows none of the project's
-   *  values — the run stopped before review, and says where in the page's own words. */
-  private async whereTheRunStopped(confirmed: number, personRequestWent = false): Promise<{ where: string; refused: string[]; message: string } | null> {
-    if (confirmed > 0) return null;
+   *  values — the run stopped before review, and says where in the page's own words.
+   *  #243 — a run that never got to its recorded review marker (ranOut) is judged by the page alone. */
+  private async whereTheRunStopped(confirmed: number, personRequestWent = false): Promise<{ where: string; refused: string[]; message: string; ranOut: boolean } | null> {
+    // #243 — A RECIPE THAT RAN OUT OF STEPS BEFORE ITS REVIEW MARKER IS AT REVIEW ONLY WHEN THE PAGE
+    // SAYS SO. The project's values on the page are not that evidence: they are the values the run
+    // itself just typed into a form. Live 2026-11-15, City of Meridian (Accela): a learn that never
+    // advanced past page 1 (no Continue, no final submit, no stopForReview) replayed its 26 steps,
+    // ended on "Step 1 > Page 1" with the address search never run and the signature empty, and was
+    // reported "stopped at review … 2 project value(s) confirmed present, no mismatch" and staged —
+    // the two "confirmations" were the street and the owner's name it had typed on that page. With no
+    // marker, the ONE review-page reading (terminalPageInPage, the backstop's lockdown question)
+    // decides alone, and an unknown is not review: the recipe gave no marker and the page gave no name.
+    // A run that DID reach its marker keeps the rule below unchanged.
+    const ranOut = !this.reachedReviewMarker;
+    if (!ranOut && confirmed > 0) return null;
     const at = await this.pageSafetyContext();
-    if (at.reviewPage !== false) return null;
+    if (ranOut ? at.reviewPage === true : at.reviewPage !== false) return null;
     // The page's own title for itself (Accela's "Step 2 : Services > Attachments"), else its heading —
     // before pageLabelNow, whose "active" match can be the site banner ("Oregon ePermitting").
     const titled = typeof this.page?.evaluate === "function" ? String(await this.page.evaluate(() => {
@@ -4064,21 +4091,27 @@ export class RecipeAdapter extends BasePortalAdapter {
     }).catch(() => "")) : "";
     const where = titled || (await this.pageLabelNow().catch(() => "")) || "the last page the recipe reached";
     const refused = (await this.readPortalRefusal().catch(() => [] as string[])).slice(0, 3).map((t) => t.replace(/[.\s]+$/, ""));
-    return { where, refused, message: this.stoppedBeforeReviewMessage(where, refused, personRequestWent) };
+    return { where, refused, ranOut, message: this.stoppedBeforeReviewMessage(where, refused, personRequestWent, ranOut) };
   }
 
   /** THE STOPPED-BEFORE-REVIEW SENTENCE, whole (pure). Built from a reading taken before the hand-over
    *  too (Helm Should-fix 4): a person who moved on from the page the run stopped on is told where the
-   *  run stopped, never that it staged the review screen. */
-  private stoppedBeforeReviewMessage(where: string, refused: string[], personRequestWent: boolean): string {
-    return `STOPPED on "${where}" — NOT the review page (the page does not read as the portal's review step, and none of the project's values are on it), so the application is NOT staged at review.`
+   *  run stopped, never that it staged the review screen. `ranOut` (#243): the recipe's steps ended
+   *  before its review marker — said as such, never "none of the project's values are on it" (they
+   *  may well be: the run typed them there). */
+  private stoppedBeforeReviewMessage(where: string, refused: string[], personRequestWent: boolean, ranOut = false): string {
+    return (ranOut
+      ? `ENDED on "${where}" before the review step — the review step was not reached (the recipe records no review stop or final submit, and this page does not name itself the portal's review step), so the application is NOT staged at review.`
+      : `STOPPED on "${where}" — NOT the review page (the page does not read as the portal's review step, and none of the project's values are on it), so the application is NOT staged at review.`)
       + `${refused.length ? ` The portal says: ${refused.join(" | ")}.` : ""}`
       // A request went through after the person touched the page past the hand-over (round 3): it may
       // have been the filing — never "Nothing was filed"; this sentence is the one that says so. Hedged
       // (#417): it may also have been the portal's own save.
       + (personRequestWent
         ? ` A request from the page went through after you touched it while the stage was finishing (it may also have been the portal saving the stage's answers) — check the portal before anything else.`
-        : ` Next: in the portal, finish that page (check every attachment is listed and nothing is flagged required), continue to the review page, verify every field there, then submit. Nothing was filed.`);
+        : ranOut
+          ? ` Next: in the portal, finish the application from that page by hand (the recipe has no steps past it — re-record it through the review step), continue to the review page, verify every field there, then submit. Nothing was filed.`
+          : ` Next: in the portal, finish that page (check every attachment is listed and nothing is flagged required), continue to the review page, verify every field there, then submit. Nothing was filed.`);
   }
 
   /** #436 PR1 — READ THE STAGED DRAFT FOR ITS REVIEW DIGEST (reviewDigest.ts is the one reader). A walk

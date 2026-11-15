@@ -264,6 +264,39 @@ function run() {
     console.log("  ✅ B8 MUST-PASS: a NEM review page that lost the meter it typed is still flagged");
   }
 
+  // ---------------------------------------------------------------------------
+  // #243: THE SIGNER'S NAME BOX IS NOT THE HOMEOWNER'S NAME. City of Star (iWorQ) 2026-11-15: a form
+  // with no homeowner field reported "homeownerName: shows <the client's signer>" off its "Signature
+  // Name" box, because "name" scoped the check to it. KILL: drop isSignatureNameLabel from the
+  // homeownerName check -> case 1 shows the signer, case 2 confirms the homeowner off the signer's
+  // first name. (The DOM smoke replayEndOfRecipe drives the same through a real replay.)
+  // ---------------------------------------------------------------------------
+  {
+    const owner = { homeownerName: "Quillon Testcase", projectAddress: "4127 Larkspur Ln, Fernhollow, ID 83600" } as unknown as ProjectRecord;
+    const sigOnly: ReviewField[] = [
+      { label: "* Property Address:", value: "4127 Larkspur Ln", editable: true },
+      { label: "* Description of Work:", value: "Roof-mounted solar PV", editable: true },
+      { label: "* Signature Name:", value: "Marisol Signwell", editable: true },
+    ];
+    const one = reviewComparison(sigOnly, owner, { accountNumber: false, meterNumber: false }, "");
+    const hm = one.mismatches.find((m) => m.field === "homeownerName");
+    assert.ok(!one.mismatches.some((m) => /Signwell/.test(m.found)), `the signer's name was read as the homeowner's: ${JSON.stringify(one.mismatches)}`);
+    assert.ok(!hm || /could not confirm; not a disagreement/.test(hm.found), `homeownerName should be 'could not confirm', got ${JSON.stringify(hm)}`);
+    console.log("  ✅ #243 MUST-PASS: a 'Signature Name' box is never the homeowner's name");
+
+    // A signer who shares the homeowner's first name must not "confirm" the homeowner either.
+    const sameFirst = reviewComparison([{ label: "Applicant Signature", value: "Quillon Signwell" }, { label: "Work Location", value: "4127 Larkspur Ln" }], owner, { accountNumber: false, meterNumber: false }, "");
+    assert.equal(sameFirst.confirmed, 1, `only the address may be confirmed, got ${sameFirst.confirmed}: ${JSON.stringify(sameFirst.mismatches)}`);
+    console.log("  ✅ #243 MUST-PASS: a signer with the homeowner's first name confirms nothing about the homeowner");
+
+    // MIRROR: an owner box beside the signature is still read — a wrong name caught, a right one confirmed.
+    const wrong = reviewComparison([...sigOnly, { label: "* Owner Name:", value: "Bramble Wrongname", editable: true }], owner, { accountNumber: false, meterNumber: false }, "");
+    assert.ok(wrong.mismatches.some((m) => m.field === "homeownerName" && /Bramble Wrongname/.test(m.found) && !/Signwell/.test(m.found)), JSON.stringify(wrong.mismatches));
+    const right = reviewComparison([...sigOnly, { label: "* Owner Name:", value: "Quillon Testcase", editable: true }], owner, { accountNumber: false, meterNumber: false }, "");
+    assert.ok(!right.mismatches.some((m) => m.field === "homeownerName") && right.confirmed === 2, JSON.stringify(right));
+    console.log("  ✅ #243 MUST-EXCLUDE: an owner box beside the signature is still checked (wrong caught, right confirmed)");
+  }
+
   console.log("\n✅ ALL PASS: review-screen comparison tests");
 }
 
