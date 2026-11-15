@@ -32,10 +32,12 @@ const PAGE = `<!doctype html><html><body>
   <label for="desc">Description</label><input id="desc" type="text">
   <div id="card" role="button" tabindex="0" onclick="location.hash='#/location'; document.getElementById('hit').textContent='card';">
     <div class="card-body"><div>Add</div><div>Location</div><div class="row permit-plus-icon"><i class="fa fa-plus"></i></div></div>
-    <div class="card-footer"><span>REQUIRED</span><div>An address is required.</div></div>
+    <div class="card-footer"><div class="row" aria-required="true">REQUIRED</div><div hidden="hidden">An address is required.</div></div>
   </div>
   <a id="lnk" href="#/contacts" onclick="document.getElementById('hit').textContent='link';">Add Contact</a>
   <button id="decoy" type="button" onclick="document.getElementById('hit').textContent='decoy';">Continue</button>
+  <button id="twinA" type="button" onclick="document.getElementById('hit').textContent='twinA';">Add Parcel</button>
+  <button id="twinB" type="button" onclick="document.getElementById('hit').textContent='twinB';">Add Parcel Notes</button>
   <div id="hit"></div>
 </body></html>`;
 const server = http.createServer((_q, r) => { r.writeHead(200, { "Content-Type": "text/html" }); r.end(PAGE); });
@@ -79,10 +81,15 @@ try {
   const c = await run([{ action: "fill", phase: "fill", selector: { label: "Description" }, field: "workDescription", note: "Description" }, { action: "stopForReview" } as RecipeStep], { workDescription: "Roof PV" });
   check("MUST-KEEP a label-only FILL still fills its <label for> input", () => { assert.equal(c.desc, "Roof PV"); assert.equal(c.hit, ""); });
   // MUST EXCLUDE — words that name no button or link.
-  const d = await run([{ action: "click", phase: "fill", selector: { label: "Add\n  Parcel" }, note: "advance: Add Parcel" }, { action: "stopForReview" } as RecipeStep]);
+  const d = await run([{ action: "click", phase: "fill", selector: { label: "Add\n  Owner" }, note: "advance: Add Owner" }, { action: "stopForReview" } as RecipeStep]);
   check("MUST-EXCLUDE a label-only click naming no button or link clicks nothing else (not the decoy Continue)", () => {
     assert.equal(d.hit, "", `hit=${JSON.stringify(d.hit)}`);
     assert.equal(d.res.ok, false);
+  });
+  // MUST EXCLUDE — a leading-words prefix shared by two controls names neither.
+  const e = await run([{ action: "click", phase: "fill", selector: { label: "Add\n  Parcel\n  REQUIRED\n  A parcel is required." }, note: "advance: Add Parcel" }, { action: "stopForReview" } as RecipeStep]);
+  check("MUST-EXCLUDE a prefix two controls share (\"Add Parcel\" / \"Add Parcel Notes\") clicks neither", () => {
+    assert.equal(e.hit, "", `hit=${JSON.stringify(e.hit)}`);
   });
 } finally {
   await browser.close();
