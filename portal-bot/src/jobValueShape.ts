@@ -29,10 +29,11 @@ const MULTI_LETTER_UNIT = /(?<![\w.])\d+(?:\.\d+)?\s?(?:kwh|kw|kva|mw|watts?|amp
 const ONE_LETTER_UNIT = /(?<![\w.])\d{2,}(?:\.\d+)?\s?[awv](?![a-z0-9])/i;
 const MODULE_COUNT = /\(\d+\)\s*[A-Za-z]/;
 
-/** Two or more sentences of three or more words. An abbreviation's full stop ("St. Louis",
- *  "N. Main") makes a short segment, which does not count. */
+/** Two or more sentences of three or more words. A sentence ends after a WORD (three lower-case
+ *  letters before the stop), so an abbreviation's full stop ("N. Main", "St. Louis", "Dr.") never
+ *  splits one sentence into two. */
 function isProse(v: string): boolean {
-  const sentences = v.split(/(?<=[.!?])\s+(?=[A-Z])/)
+  const sentences = v.split(/(?<=[a-z]{3}[.!?])\s+(?=[A-Z])/)
     .filter((s) => s.split(/\s+/).filter((w) => /[a-z]/i.test(w)).length >= 3);
   return sentences.length >= 2;
 }
