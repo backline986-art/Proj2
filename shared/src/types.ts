@@ -5015,9 +5015,9 @@ export interface RecipeSelector {
  *  bare "Manufacturer" fields), the section rescue resolves by `section`, a
  *  write's identity check moves to the element `id`/`name` names when that
  *  element's label or section agrees, and a click's recorded identity (#228)
- *  lets the element `id` names displace a match that only has the step's
- *  words. Attribute names/labels only — never values, never secrets. Old
- *  recipes lack the bag. */
+ *  lets the element `id` names, when its words equal the step's, displace a
+ *  match suspected of being an earlier click's control. Attribute
+ *  names/labels only — never values, never secrets. Old recipes lack the bag. */
 export interface StepFingerprint {
   id?: string;
   name?: string;
