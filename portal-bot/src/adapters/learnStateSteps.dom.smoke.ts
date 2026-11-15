@@ -134,11 +134,13 @@ const HIDDEN_TOGGLE = shell(`
 
 // H — PowerClerk's shape of D: EVERY input carries the platform's generic test hook
 // data-test-role="textbox-element", and the learner records that hook as a fallback on each data step
-// (PacifiCorp 32f3d2b2 111/112: label, then #...Input, then the bare hook). The battery inverter block
-// is display:none (H) or not rendered (H2) on a job whose answers did not reveal it; H3 shows it.
+// (PacifiCorp 32f3d2b2 111/112: label, then #...Input, then the bare hook). PowerClerk's ids are
+// random, and one in four starts with a digit — 112's "#865S27BYAFHZInput" is not a valid CSS selector
+// at all, so its id level can never match (the model below copies that shape). The battery inverter
+// block is display:none (H) or not rendered (H2) on a job whose answers did not reveal it; H3 shows it.
 const pcBlock = (style: string): string => style === "absent" ? "" : `<div id="battInv" style="${style}">
     <label for="BI7MAKE0001Input">Battery Inverter Manufacturer</label><input id="BI7MAKE0001Input" data-test-role="textbox-element">
-    <label for="BI7MODL0002Input">Battery Inverter Model</label><input id="BI7MODL0002Input" data-test-role="textbox-element"></div>`;
+    <label for="8Q7MODL0002Input">Battery Inverter Model</label><input id="8Q7MODL0002Input" data-test-role="textbox-element"></div>`;
 const PC_COND = (style: string): string => shell(`
   <h2>Inverter Clone System</h2>
   <label for="NB7BATT0003Input">Number of Batteries</label><input id="NB7BATT0003Input" data-test-role="textbox-element" value="1">
@@ -406,7 +408,7 @@ try {
   const HOOK = { css: "[data-test-role=\"textbox-element\"]" };
   const pcSteps = (): RecipeStep[] => [
     { action: "fill", field: "batteryMake", note: "Battery Inverter Manufacturer", conditional: true, selector: { label: "Battery Inverter Manufacturer", fallbacks: [{ css: "#BI7MAKE0001Input" }, HOOK] } } as RecipeStep,
-    { action: "fill", field: "batteryModel", note: "Battery Inverter Model", conditional: true, selector: { label: "Battery Inverter Model", fallbacks: [{ css: "#BI7MODL0002Input" }, HOOK] } } as RecipeStep,
+    { action: "fill", field: "batteryModel", note: "Battery Inverter Model", conditional: true, selector: { label: "Battery Inverter Model", fallbacks: [{ css: "#8Q7MODL0002Input" }, HOOK] } } as RecipeStep,
     { action: "fill", field: "invQty", note: "Inverter Quantity", selector: { label: "Inverter Quantity", fallbacks: [{ css: "#IQ7QNTY0005Input" }, HOOK] } } as RecipeStep,
     { action: "stopForReview", note: "review" } as RecipeStep,
   ];
@@ -426,7 +428,7 @@ try {
   const h3 = await run(browser, recipeOf("learnstate-h3", "/pcshown", pcSteps()), pcValues);
   console.log(`   H3 ${tail(h3)}`);
   check("H3 MUST-EXCLUDE when this job's answers DID reveal the block, both conditional controls are written",
-    h3.ok && h3.values.BI7MAKE0001Input === "ExampleCo" && h3.values.BI7MODL0002Input === "EX-1" && named(h3) === 0, tail(h3) + JSON.stringify(h3.values));
+    h3.ok && h3.values.BI7MAKE0001Input === "ExampleCo" && h3.values["8Q7MODL0002Input"] === "EX-1" && named(h3) === 0, tail(h3) + JSON.stringify(h3.values));
   }
 
   // ---- I: a control disabled while the portal works is busy, not answered ------------------------

@@ -1055,6 +1055,10 @@ async function probeCall<T>(fn: () => unknown, dflt: T): Promise<T> {
   try { return (await fn()) as T; } catch { return dflt; }
 }
 
+/** What the browser says when it rejects a css level as a selector ("'#865S27BYAFHZInput' is not a
+ *  valid selector" — an id that starts with a digit). Such a level can never match (targetSeen). */
+const MALFORMED_SELECTOR = /\bis not a valid selector\b|\bSyntaxError\b/;
+
 /** The learner's test-hook attributes, as its testCss writes them (`[attr="value"]`). */
 const BARE_TEST_HOOK = /^\[(data-testid|data-test-role|data-test|data-cy|data-qa)=["']?([^"'\]]+)["']?\]$/;
 
@@ -6422,7 +6426,14 @@ export class RecipeAdapter extends BasePortalAdapter {
    *  matches exist and none is shown, "absent" when nothing matches. `absentIsFinal`: nothing
    *  matching ends the wait at once (the caller has no use for an absent control). AN UNKNOWN IS
    *  NEVER A REASON TO SKIP: nothing that can be probed (a browser-free fake), or a count that
-   *  throws with nothing else matching, answers "shown" — the step runs as recorded. */
+   *  throws with nothing else matching, answers "shown" — the step runs as recorded.
+   *
+   *  A LEVEL THE BROWSER REJECTS AS A SELECTOR IS NOT AN UNKNOWN: it can never match anything, so it
+   *  counts as no match, as resolveLocator passes it over ("count() can throw on a malformed
+   *  selector — try the next level"). PowerClerk's ids are random and about one in four starts with
+   *  a digit, which CSS cannot name unescaped: PacifiCorp 32f3d2b2 112's "#865S27BYAFHZInput" threw,
+   *  read as an unknown, and the conditional step was never skipped — it resolved onto "Number of
+   *  Batteries" through the bare hook instead (review probe P3, rerun on the #237 fix round). */
   private async targetSeen(locators: unknown[], graceMs: number, absentIsFinal = false): Promise<{ state: RecordedTargetSeen; described: string }> {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const probeable = (locators as any[]).filter((loc) => !!loc && typeof loc.count === "function" && typeof loc.nth === "function");
@@ -6432,7 +6443,10 @@ export class RecipeAdapter extends BasePortalAdapter {
       let matched = 0;
       let unreadable = false;
       for (const loc of probeable) {
-        const counted = await probeCall(() => loc.count(), -1);
+        const counted = await probeCall(() => Promise.resolve(loc.count()).catch((err: unknown) => {
+          if (MALFORMED_SELECTOR.test(String((err as Error)?.message ?? err))) return 0;
+          throw err;
+        }), -1);
         const n = typeof counted === "number" && counted >= 0 ? counted : 0;
         if (n === 0 && counted !== 0) unreadable = true;
         matched += n;
