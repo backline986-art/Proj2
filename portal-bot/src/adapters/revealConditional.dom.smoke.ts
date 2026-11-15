@@ -164,12 +164,9 @@ try {
     return { ok: r.ok === true, message: String(r.message ?? ""), aging: ((r.data ?? {}).agingNotes as string[]) ?? [], values, reachedReview };
   };
 
-  const none = await replay(`${pre}/noreveal`);
-  console.log(`   replay ${pre}/noreveal: ok=${none.ok} review=${none.reachedReview} msg=${none.message.slice(0, 160)} values=${JSON.stringify(none.values)} aging=${JSON.stringify(none.aging).slice(0, 300)}`);
-  check(`MUST-PASS on a portal whose answer reveals nothing, the conditional step is skipped, named${tag}`,
-    none.aging.some((n) => n.includes(REV) && /reveal/i.test(n) && /#237/.test(n)), JSON.stringify(none.aging));
-  check(`MUST-PASS ...and the run still fills what follows and reaches the review stop${tag}`, none.ok && none.reachedReview && none.values.amps === "200", `ok=${none.ok} review=${none.reachedReview} ${none.message.slice(0, 200)} ${JSON.stringify(none.values)}`);
-
+  // The /noreveal replay (the conditional step skipped, named) is retired with the conditional door
+  // (review of #237): on a portal whose answer reveals nothing the step now runs as on main. The
+  // learner's marking above and the revealing portal's write below are what this smoke keeps.
   const shown = await replay(`${pre}/app`);
   console.log(`   replay ${pre}/app: ok=${shown.ok} review=${shown.reachedReview} values=${JSON.stringify(shown.values)}`);
   const written = pre === "/testid" ? shown.values["xfmr-shared"] === "true" : shown.values.xfmr === "TX-9902";

@@ -43,10 +43,13 @@ check("Bend 22: the learn's popup OK, absent or hidden, is skipped as a dialog d
   for (const w of ["Close", "Dismiss", "Got it", "Cancel", "×", "Okay"]) assert.equal(isDialogDismissalClick(click(`human-patch: ${w}`)), true, w);
   assert.equal(isDialogDismissalClick(click("human-patch", { css: "div.modal button.btn-close" })), true, "icon-only close by class");
 });
-check("PacifiCorp 102 / Ameren 25: a conditional write, absent or hidden, is skipped", () => {
+check("the CONDITIONAL door is closed (review of #237): a conditional write, absent or hidden, runs as on main", () => {
+  // The absence probe does not walk every door resolution does (the section and hook rescues), so a
+  // control this job DID reveal could be skipped where main writes it. Until it asks exactly what
+  // resolution asks, nothing is skipped for being conditional; the learner's mark is read by no one.
   const c = { action: "select", note: "Battery Inverter Manufacturer", conditional: true, selector: { label: "Manufacturer" } } as RecipeStep;
-  assert.equal(kind(c, "absent"), "conditional");
-  assert.equal(kind(c, "hidden"), "conditional");
+  assert.equal(kind(c, "absent"), null);
+  assert.equal(kind(c, "hidden"), null);
 });
 check("a non-advancing click whose only matches are hidden is skipped (non_advancing)", () => {
   assert.equal(kind(click("human-patch: Show Details", { css: "#more" }), "hidden"), "non_advancing");

@@ -386,19 +386,8 @@ try {
 
   // ---- D: a control the learn saw only after a reveal --------------------------------------------
   if (want("D")) {
-  const d = await run(browser, recipeOf("learnstate-d", "/noreveal", [
-    { action: "select", note: "Battery Inverter Manufacturer", value: "Example Power", conditional: true, selector: { css: "#battMake", fallbacks: [{ label: "Battery Inverter Manufacturer" }] } } as RecipeStep,
-    { action: "fill", note: "Total System Export (kW)", field: "exportKw", selector: { css: "#kw", fallbacks: [{ label: "Total System Export (kW)" }] } } as RecipeStep,
-    { action: "stopForReview", note: "review" } as RecipeStep,
-  ]), { exportKw: "7.6" });
-  console.log(`   D ${tail(d)}`);
-  check("D MUST-PASS the absent conditional control is skipped, named as not revealed on this job",
-    d.aging.some((n) => /Battery Inverter Manufacturer/.test(n) && /reveal/i.test(n) && /#237/.test(n)), JSON.stringify(d.aging));
-  check("D MUST-PASS ...the run carries on to the next fill and the review stop", d.ok && d.values.kw === "7.6", tail(d));
-  // skipForNoBattery's convention: the section does not apply to this filing — not a step that
-  // failed to land, so never in `skipped` (which scores the run as failed, re-record or not).
-  check("D MUST-PASS ...counted as not applicable, never as a step that did not land",
-    !d.skipped.some((s) => /Battery Inverter/.test(s)) && /Replayed 3 recorded step/.test(d.message), JSON.stringify(d.skipped) + d.message.slice(0, 80));
+  // D (an absent conditional control skipped, named as not revealed) is retired with the
+  // conditional door (review of #237): the step now runs as on main.
   }
 
   // ---- E: hidden for a moment, then shown: clicked, never skipped --------------------------------
@@ -445,17 +434,8 @@ try {
   ];
   const pcValues = { batteryMake: "ExampleCo", batteryModel: "EX-1", invQty: "2" };
   const named = (r: Run): number => r.aging.filter((n) => /Battery Inverter (Manufacturer|Model)/.test(n) && /reveal/i.test(n) && /#237/.test(n)).length;
-  for (const [key, path] of [["H", "/pchidden"], ["H2", "/pcabsent"]] as const) {
-    const h = await run(browser, recipeOf(`learnstate-${key.toLowerCase()}`, path, pcSteps()), pcValues);
-    console.log(`   ${key} ${tail(h)}`);
-    check(`${key} MUST-PASS a conditional control the generic hook also matches (block ${path === "/pchidden" ? "hidden" : "not rendered"}) is skipped, named — the hook names every textbox, not this one`,
-      named(h) === 2, JSON.stringify(h.aging));
-    check(`${key} MUST-PASS ...its value is never written into another hooked textbox (Battery Disconnect keeps the portal's value)`,
-      h.values.BD7DISC0004Input === "DisconnectCo" && !Object.values(h.values).some((v) => v === "ExampleCo" || v === "EX-1"), JSON.stringify(h.values));
-    check(`${key} MUST-PASS ...the run carries on: the next fill lands and the review stop is reached without a fill timeout`,
-      h.ok && h.values.IQ7QNTY0005Input === "2" && h.ms < 30_000, tail(h));
-    check(`${key} MUST-PASS ...counted as not applicable, never in skipped`, !h.skipped.some((s) => /Battery Inverter/.test(s)), JSON.stringify(h.skipped));
-  }
+  // H / H2 (the conditional skip on a hidden or absent block) are retired with the conditional door
+  // (review of #237): such a step now runs as on main. H3 keeps the revealed block written.
   const h3 = await run(browser, recipeOf("learnstate-h3", "/pcshown", pcSteps()), pcValues);
   console.log(`   H3 ${tail(h3)}`);
   check("H3 MUST-EXCLUDE when this job's answers DID reveal the block, both conditional controls are written",
@@ -534,16 +514,8 @@ try {
   check("K2 MUST-PASS a revealed conditional checkbox only a neighbouring div labels (getByLabel never resolves it) is CHECKED through its data-testid, never skipped",
     k2.ok && k2.values["battery-dc-coupled"] === "true" && no237(k2) && !k2.skipped.length, tail(k2) + JSON.stringify(k2.values));
 
-  // K3: the same recipes on a job whose answers revealed nothing. Every level, the test hook
-  // included, finds nothing: the conditional skip still holds.
-  const k3 = await run(browser, recipeOf("learnstate-k3", "/k1none", [makeStep("data-testid"), exportKw, stop]), kValues);
-  console.log(`   K3 ${tail(k3)} values=${JSON.stringify(k3.values)}`);
-  check("K3 MUST-KEEP the K1 step, truly absent (no level finds anything), is skipped, named as not revealed, and the run carries on",
-    k3.ok && k3.aging.some((n) => /Battery Inverter Make/.test(n) && /reveal/i.test(n) && /#237/.test(n)) && k3.values.kw === "7.6" && k3.ms < 30_000, tail(k3) + JSON.stringify(k3.values));
-  const k3b = await run(browser, recipeOf("learnstate-k3b", "/k2none", [dcStep, exportKw, stop]), kValues);
-  console.log(`   K3b ${tail(k3b)} values=${JSON.stringify(k3b.values)}`);
-  check("K3b MUST-KEEP the K2 checkbox, truly absent, is skipped, named, and the run carries on",
-    k3b.ok && k3b.aging.some((n) => /Battery is DC coupled/.test(n) && /reveal/i.test(n) && /#237/.test(n)) && k3b.values.kw === "7.6" && k3b.ms < 30_000, tail(k3b) + JSON.stringify(k3b.values));
+  // K3 / K3b (a truly absent conditional step skipped, named) are retired with the conditional door
+  // (review of #237): such a step now runs as on main.
   }
 } finally {
   await browser.close().catch(() => null);

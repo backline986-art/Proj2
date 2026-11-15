@@ -993,7 +993,12 @@ export function learnStateSkippable(step: RecipeStep): LearnStateSkippable | nul
   if (learnStateNeverSkipped(step)) return null;
   const click = step.action === "click";
   const can: LearnStateSkippable = {
-    conditional: step.conditional === true && DATA_ACTIONS.has(step.action),
+    // THE CONDITIONAL DOOR IS CLOSED (review of #237, 2026-11-15): the absence probe does not walk
+    // every door main reaches a control through (the section rescue, the hook rescue), so on a job
+    // that DID reveal the control it could still be skipped where main writes it. Until the probe
+    // asks exactly what resolution asks, a conditional step runs as on main: a missing one fails
+    // bounded (#232), never silently. The learner's `conditional` mark stays, read by nothing else.
+    conditional: false,
     dialog: click && isDialogDismissalClick(step),
     nonAdvancing: click && !isAdvancingClickStep(step) && !isNavigationClick(step),
     reviewPatch: click && isHumanPatch(step),
