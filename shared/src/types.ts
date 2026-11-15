@@ -5001,6 +5001,15 @@ export interface RecipeSelector {
   /** 0-based index when multiple match; omitted means .first(). */
   nth?: number;
   exact?: boolean;
+  /** #228: the words on the control's FACE when they differ from `name` (its accessible name, e.g.
+   *  a link reading "Apply" whose aria-label is "Apply Residential Renewable Energy"). NEVER a
+   *  locating strategy — no locator builder and no name rescue reads it (Tigard's menu tab reads
+   *  "Apply" too). Read by the click-safety haystacks (the learner's off-limits tests, the replay's
+   *  pay/submit gates) and the word tests that read the name (advance, contact opener, record
+   *  number), so a word a person sees on the control counts exactly as it did when the face text
+   *  was the name; and by the replay only to CHOOSE among controls the selector itself already
+   *  found (disambiguateByRecordedIdentity: a unique visible match by face), never to find one. */
+  shownText?: string;
   /** Alternate locator strategies tried in order when the primary selector finds
    *  nothing — survives portal UI updates that change one attribute but not all.
    *  Recorder contributors should capture 1-2 fallbacks (e.g. a stable css id as a

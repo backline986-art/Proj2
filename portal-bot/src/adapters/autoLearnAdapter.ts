@@ -1569,7 +1569,12 @@ export interface RawField {
   placeholder?: string;
   id?: string;
   css?: string;
+  /** The words on a button/link's face (aria-hidden parts removed; the aria-label only for an
+   *  icon) — read by the off-limits tests. NOT the name a role selector matches: see accName. */
   text?: string;
+  /** #228: a button/link's ACCESSIBLE NAME (aria-labelledby, aria-label, rendered content, a button
+   *  input's value) — the name getByRole matches, so the one its role selector is built from. */
+  accName?: string;
   href?: string;
   required?: boolean;
   /** aria-label attribute, captured for the step fingerprint (heal tie-break). */
@@ -2160,6 +2165,50 @@ export function extractFieldsInPage(els: Element[]): RawField[] {
     // A tile's text is its TITLE, never the whole card (the body's prose would become the
     // name a replay has to match).
     const text = tileLabel ? tileLabel : fieldType === "button" ? buttonText || undefined : undefined;
+    // THE NAME A ROLE SELECTOR IS BUILT FROM IS THE ACCESSIBLE NAME, READ IN THE SPEC'S ORDER (#228):
+    // aria-labelledby (the referenced elements' own aria-label or text), else a non-empty aria-label,
+    // else the content without its aria-hidden or unrendered (display:none / visibility:hidden)
+    // parts, else a button input's value — whitespace collapsed, as getByRole compares it. `text`
+    // above takes the aria-label only for an icon, so whenever an aria-label (or a labelledby) is set
+    // and says something else, a selector named by the text names ANOTHER control or none. Live, City
+    // of Tigard (EnerGov), 2026-11-14: each record type's button is <a role="link" aria-label="Apply
+    // Residential Renewable Energy - Prescriptive">Apply</a>; recorded as getByRole('link', { name:
+    // 'Apply', exact: true }) it never matched itself and matched exactly one control on the page, the
+    // top menu's "Apply" tab, which the replay clicked as the record type. Only the selector's name
+    // changes: the LABEL (what the planner reads, what loop guards and replay healing key on) and
+    // `text` (the words on the control's face, which the off-limits tests read) are untouched.
+    const accName = ((): string => {
+      if (fieldType !== "button" || tileLabel) return "";
+      const ownRoot = el.getRootNode() as Document | ShadowRoot;
+      const refs = (el.getAttribute("aria-labelledby") || "").split(/\s+/).filter(Boolean);
+      if (refs.length) {
+        const by = refs.map((ref) => {
+          const n = (typeof ownRoot.getElementById === "function" ? ownRoot.getElementById(ref) : null) || document.getElementById(ref);
+          return n ? ((n.getAttribute("aria-label") || "").trim() || n.textContent || "") : "";
+        }).join(" ").replace(/\s+/g, " ").trim();
+        if (by) return by;
+      }
+      if (ariaName) return ariaName.replace(/\s+/g, " ").trim();
+      // The content, walked (no helper function: this runs in the page), skipping what getByRole
+      // leaves out of a name — an aria-hidden subtree (#556's icon wrapper) and an unrendered one.
+      let content = "";
+      const stack: Node[] = Array.from(el.childNodes).reverse();
+      while (stack.length) {
+        const n = stack.pop() as Node;
+        if (n.nodeType === 3) { content += n.textContent || ""; continue; }
+        if (n.nodeType !== 1) continue;
+        const ce = n as Element;
+        if (ce.getAttribute("aria-hidden") === "true") continue;
+        const cs = window.getComputedStyle(ce);
+        if (cs.display === "none" || cs.visibility === "hidden") continue;
+        const kids = Array.from(ce.childNodes);
+        for (let k = kids.length - 1; k >= 0; k--) stack.push(kids[k]);
+      }
+      content = content.replace(/\s+/g, " ").trim();
+      if (content) return content;
+      if (tag === "input") return String((el as HTMLInputElement).value || el.getAttribute("value") || "").replace(/\s+/g, " ").trim();
+      return "";
+    })();
     // Capture href for anchors so a hidden/menu-nested nav link can be reached by direct
     // navigation when it can't be clicked.
     const href = tag === "a" ? (el.getAttribute("href") || undefined) : undefined;
@@ -2240,6 +2289,7 @@ export function extractFieldsInPage(els: Element[]): RawField[] {
     out.push({
       fx, fxText,
       label, fieldType, options, role, name, placeholder, id, text, href,
+      accName: accName || undefined,
       tile: tileLabel ? true : undefined,
       typeahead: typeahead && fieldType === "text" ? true : undefined,
       stampClass: !typeahead && fieldType === "text" && stampClass ? stampClass : undefined,
@@ -2292,7 +2342,14 @@ export function toExtractedField(raw: RawField): ExtractedField {
     const ariaRole = raw.role || "button";
     if (raw.text) {
       selector.role = ariaRole;
-      selector.name = raw.text;
+      // THE ACCESSIBLE NAME, NOT THE FACE TEXT (#228): getByRole matches nothing else, and Tigard's
+      // record-type link — face "Apply", aria-label "Apply Residential Renewable Energy -
+      // Prescriptive" — recorded by its face matched only the top menu's "Apply". The face words,
+      // when they differ, ride along as shownText for the safety haystacks that read them before.
+      const accName = String(raw.accName ?? "").trim();
+      selector.name = accName || raw.text;
+      const shown = raw.text.replace(/\s+/g, " ").trim();
+      if (accName && shown && shown !== accName) selector.shownText = shown;
       // EXACT name match: a substring match makes "Next" also match "Next page" (a decoy
       // pager button), and .first() then resolves to whichever is first in the DOM — the
       // wrong control. Exact matching pins it to the button whose accessible name IS the
@@ -2377,6 +2434,76 @@ export function toExtractedField(raw: RawField): ExtractedField {
   if (raw.questions?.length) field.questions = [...raw.questions];
   if (raw.fx && /^f\d+$/.test(raw.fx)) field.fx = { id: raw.fx, text: String(raw.fxText ?? "") };
   return field;
+}
+
+/**
+ * A RECORDED CLICK'S ROLE+NAME MUST FIND THE ELEMENT THAT WAS READ — ASKED OF PLAYWRIGHT, AT RECORD
+ * TIME (#228). The scan computes the accessible name itself (accName), and a page can still name a
+ * control in ways it does not read: CSS ::before/::after content, spacing between block children, an
+ * <img alt> inside the text, a <label for> on a button (each measured in real Chromium against
+ * getByRole). When that happens the role+name the step records may find ANOTHER control — Tigard's
+ * record type, recorded as "Apply", found only the top menu's "Apply" tab, and the replay clicked it as
+ * the record type — or none at all. So before a click step is recorded, the same getByRole the replay
+ * runs is asked which elements it finds, by the scan's stamp (data-al-fx) — only for a stamped element
+ * that is shown, since a hidden one is in no role query whatever its name. If the stamped element is
+ * among them, the selector stands (a choice between namesakes is the replay's to make). If it found a
+ * NAMESAKE and the element's #id finds it, the step leads with the #id and the role+name is dropped,
+ * because kept as a fallback it would click that namesake whenever the id misses. A role+name that found
+ * NOTHING stands as harvested and is only reported (`missed: "nothing"`), and so does a namesake with no
+ * id to lead with (`missed: "namesake"`). Never throws and never waits long: any failure keeps the
+ * selector exactly as harvested.
+ */
+export async function clickSelectorForElement(
+  page: Page | null | undefined,
+  field: Pick<ExtractedField, "selector" | "fx">,
+): Promise<{ selector: RecipeSelector; repinned?: "namesake"; missed?: "nothing" | "namesake" }> {
+  const sel = field.selector;
+  const fx = field.fx?.id ?? "";
+  if (!page || !sel?.role || !sel.name || !/^f\d+$/.test(fx)) return { selector: sel };
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const scope: any = sel.frame ? page.frameLocator(frameSelectorFor(sel.frame)) : page;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const stampsOf = async (loc: any): Promise<string[] | null> => {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        return await Promise.race([
+          loc.evaluateAll((els: Element[]) => els.map((e) => e.getAttribute("data-al-fx") || "")) as Promise<string[]>,
+          new Promise<null>((r) => { timer = setTimeout(() => r(null), 3000); }),
+        ]);
+      } catch { return null; } finally { if (timer) clearTimeout(timer); }
+    };
+    // Only a control getByRole CAN find is judged: one stamped element, shown. A hidden one (a menu-
+    // nested link the walk reaches by its href) is never in a role query, whatever its name, and its
+    // recorded name is what the replay's closed-menu reveal searches by — so it stands untouched.
+    const stamped = scope.locator(`[data-al-fx="${fx}"]`);
+    if ((await stampsOf(stamped))?.length !== 1 || !(await stamped.isVisible().catch(() => false))) return { selector: sel };
+    const byName = await stampsOf(scope.getByRole(sel.role, { name: sel.name, exact: sel.exact ?? false }));
+    if (!byName || byName.includes(fx)) return { selector: sel };
+    // A NAME THAT FINDS NOTHING STANDS AS HARVESTED, REPORTED, NEVER MOVED BEHIND THE #ID. It cannot
+    // misclick, since it finds no control, and the replay already reaches the #id one level down. The
+    // replay's last-resort name rescue reads only the TOP-LEVEL name, so moved into a fallback it would
+    // leave a control whose id the portal regenerates with no way back. Review of #228, on Cityworks'
+    // user-menu trigger: id CW-UI-MENU-1000000000000001-trigger is a counter, and role="menubutton" is
+    // no ARIA role, so getByRole never finds it. Re-pinned, a replay with the counter moved waited ~70 s
+    // and failed; left as harvested, the name rescue clicked it by its aria-label "User".
+    if (byName.length === 0) return { selector: sel, missed: "nothing" };
+    const idCss = (sel.fallbacks ?? []).map((fb) => fb.css).find((c): c is string => typeof c === "string" && /^#\S+$/.test(c));
+    const byId = idCss ? await stampsOf(scope.locator(idCss)) : null;
+    if (!idCss || !byId || !byId.includes(fx)) return { selector: sel, missed: "namesake" };
+    const fallbacks = (sel.fallbacks ?? []).filter((fb) => fb.css !== idCss);
+    return {
+      selector: {
+        css: idCss,
+        ...(sel.frame ? { frame: sel.frame } : {}),
+        ...(sel.shownText ? { shownText: sel.shownText } : {}),
+        ...(fallbacks.length ? { fallbacks } : {}),
+      },
+      repinned: "namesake",
+    };
+  } catch {
+    return { selector: sel };
+  }
 }
 
 // The derived label equals the name attribute only — a label-based locator would then
@@ -6853,10 +6980,11 @@ export class AutoLearnAdapter extends BasePortalAdapter {
     return false;
   }
 
-  private noteVerifiedRecordTypeTicked(field: ExtractedField, offeredCount: number, steps: RecipeStep[]): void {
+  private noteVerifiedRecordTypeTicked(field: ExtractedField, offeredCount: number, steps: RecipeStep[], selector?: RecipeSelector): void {
     const label = String(field.label || "").trim();
     // A catalog's "Apply <type>" BUTTON is clicked, not checked (Tyler EnerGov's Application Assistant).
-    steps.push({ action: field.fieldType === "button" ? "click" : "check", phase: "fill", selector: field.selector, note: `record type (verified): ${label.slice(0, 60)}` });
+    // `selector`: the one checked against the element before the click (#228, recordedClickSelector).
+    steps.push({ action: field.fieldType === "button" ? "click" : "check", phase: "fill", selector: selector ?? field.selector, note: `record type (verified): ${label.slice(0, 60)}` });
     // A button pick leaves the catalog: the walk re-reads the page before anything else is asked.
     if (field.fieldType === "button") this.verifiedPickNavigated = true;
     this.verifiedRecordTypeTicked = true;
@@ -6916,6 +7044,8 @@ export class AutoLearnAdapter extends BasePortalAdapter {
       const listCount = checkables.filter((f) => this.sameRecordTypeList(f, on)).length;
       if (!this.verifiedRecordTypeTicked) {
         const loc = await this.locator(hit.selector).catch(() => null);
+        // A catalog button's step selector is checked against it now, while it is on the page (#228).
+        const recorded = hit.fieldType === "button" ? await this.recordedClickSelector(hit) : undefined;
         const ok = hit.fieldType === "button"
           ? await this.clickCatalogEntry(String(hit.label || ""), loc, pageCount)
           : loc
@@ -6927,7 +7057,7 @@ export class AutoLearnAdapter extends BasePortalAdapter {
           // another option — a person ticks this one.
           this.debug?.event({ type: "record_type_verified_tick_failed", label: on.label.slice(0, 70), page: pageCount });
         } else {
-          this.noteVerifiedRecordTypeTicked(hit, listCount, steps);
+          this.noteVerifiedRecordTypeTicked(hit, listCount, steps, recorded);
           await this.waitForDynamicFieldsSettle().catch(() => null);
         }
       }
@@ -8979,7 +9109,8 @@ export class AutoLearnAdapter extends BasePortalAdapter {
           const navStep: RecipeStep = {
             action: "click",
             phase: "open",
-            selector: navField.selector,
+            // Checked against the element before the click (#228): a name that finds a namesake leads with the #id.
+            selector: await this.recordedClickSelector(navField),
             note: `navigate to application: ${navField.label || "link"}`,
           };
           steps.push(navStep);
@@ -10178,11 +10309,13 @@ export class AutoLearnAdapter extends BasePortalAdapter {
         // An interstitial's forward control is clicked once per page (c2i'): remembered now, as
         // the click is made, so a return to the same page stops instead of clicking it again.
         if (interstitialAdvanceKey) this.navClicksByPath.add(interstitialAdvanceKey);
-        // Record the advance click, then perform it.
+        // Record the advance click, then perform it. Its selector is checked against the element first
+        // (#228) — except an interstitial's forward click, whose information-page pass (#344) judges the
+        // control its recorded selector resolves and is left exactly as it was.
         steps.push({
           action: "click",
           phase: "fill",
-          selector: advanceField.selector,
+          selector: interstitialAdvanceKey ? advanceField.selector : await this.recordedClickSelector(advanceField),
           note: `advance: ${advanceField.label || "next"}`,
         });
         // #344 — A HUMAN-VERIFIED INFORMATION PAGE: on the interstitial's forward click only (c2i'),
@@ -11891,9 +12024,11 @@ export class AutoLearnAdapter extends BasePortalAdapter {
     }
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const doorLoc = (await this.locator(doorField.selector).catch(() => null)) as any;
+    // The step's selector, checked against the door while it is still on the page (#228).
+    const doorRecorded = await this.recordedClickSelector(doorField);
     const clicked = doorLoc ? await withAutomationInput(this.page, () => doorLoc.click({ timeout: 5000 })).then(() => true).catch(() => false) : false;
     if (!clicked) return { ok: false, door: found, why: "the door could not be clicked" };
-    const doorStep: RecipeStep = { action: "click", phase: "fill", selector: doorField.selector, note: doorField.label || found, ...(doorField.fingerprint ? { fingerprint: doorField.fingerprint } : {}) };
+    const doorStep: RecipeStep = { action: "click", phase: "fill", selector: doorRecorded, note: doorField.label || found, ...(doorField.fingerprint ? { fingerprint: doorField.fingerprint } : {}) };
     await this.waitForDynamicFieldsSettle().catch(() => null);
     const after = (await this.extractAllFrames(EXTRACT_SEL)).map(toExtractedField);
     const values: Record<"street" | "city" | "state" | "zip", string> = {
@@ -13093,7 +13228,7 @@ export class AutoLearnAdapter extends BasePortalAdapter {
     steps.push({
       action: "click",
       phase: "fill",
-      selector: candidate.selector,
+      selector: await this.recordedClickSelector(candidate as ExtractedField), // checked before the click (#228)
       note: `advance: ${candidate.label || "next"}`,
     });
     const res = await safeAction("fallback-advance", async () => {
@@ -13227,11 +13362,14 @@ export class AutoLearnAdapter extends BasePortalAdapter {
 
   private isOffLimitsButton(field: ExtractedField): boolean {
     const sel = field.selector;
-    return isPayFee(field.label) || isPayFee(sel?.name) || isPayFee(sel?.text)
-      || isSignatureRequestControl(field.label) || isSignatureRequestControl(sel?.text)
+    // The FACE words too (#228): since the selector is named by the accessible name, a control
+    // reading "Pay Fees" under an aria-label that does not would otherwise leave this test.
+    return isPayFee(field.label) || isPayFee(sel?.name) || isPayFee(sel?.text) || isPayFee(sel?.shownText)
+      || isSignatureRequestControl(field.label) || isSignatureRequestControl(sel?.text) || isSignatureRequestControl(sel?.shownText)
       || EXISTING_RECORD_ACTION.test(field.label || "")
       || EXISTING_RECORD_ACTION.test(sel?.name || "")
-      || EXISTING_RECORD_ACTION.test(sel?.text || "");
+      || EXISTING_RECORD_ACTION.test(sel?.text || "")
+      || EXISTING_RECORD_ACTION.test(sel?.shownText || "");
   }
 
   /** Off-limits for a DASHBOARD navigate specifically. On a logged-in home the only valid
@@ -13246,7 +13384,7 @@ export class AutoLearnAdapter extends BasePortalAdapter {
     // Only test text we actually have: isExcludedEntryLabel treats an EMPTY label as
     // excluded (nothing to start an application with), which would refuse every control
     // whose selector happens to carry no name/text.
-    const texts = [field.label, sel?.name, sel?.text].map((t) => String(t ?? "").trim()).filter(Boolean);
+    const texts = [field.label, sel?.name, sel?.text, sel?.shownText].map((t) => String(t ?? "").trim()).filter(Boolean);
     return texts.some((t) => isExcludedEntryLabel(t));
   }
 
@@ -13902,6 +14040,25 @@ export class AutoLearnAdapter extends BasePortalAdapter {
    *  navigate door re-plans, the advance door treats it as an advance that did nothing). What is
    *  NOT guaranteed: a change landing in the milliseconds between that re-read and Playwright's own
    *  gesture — the same window a role/name lookup has between resolving and clicking. */
+  /** #228 — THE SELECTOR A CLICK STEP RECORDS FOR `field`, checked against the element it was read
+   *  from (clickSelectorForElement). Asked while that element is still on the page — before the
+   *  click — and only at the doors that record a scanned button: navigate, advance, the fallback
+   *  advance, the verified record type, the manual-entry door. A re-pin or a miss is named in the
+   *  debug bundle; the walk itself is never stopped by it. */
+  private async recordedClickSelector(field: ExtractedField): Promise<RecipeSelector> {
+    const r = await clickSelectorForElement(this.page, field);
+    if (r.repinned || r.missed) {
+      this.debug?.event({
+        type: r.repinned ? "click_selector_repinned" : "click_selector_misses_element",
+        label: String(field.label ?? "").replace(/\s+/g, " ").trim().slice(0, 60),
+        why: r.repinned ? "its name finds another control; the step leads with its #id"
+          : r.missed === "nothing" ? "its name finds nothing; kept as harvested (the replay reaches it by a fallback or by name)"
+          : "its name finds another control and no #id finds it; kept as harvested",
+      });
+    }
+    return r.selector;
+  }
+
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   private async fieldClickLocator(field: ExtractedField): Promise<any | null> {
     if (!this.page) return null;
