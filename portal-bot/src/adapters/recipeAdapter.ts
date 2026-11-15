@@ -898,11 +898,12 @@ const ACTED_ON_ATTR = "data-rc-acted";
  *
  * Tigard's record-type button renders ~116 ms after Search. A slow government search can take
  * seconds; the re-review's probe used 4.5 s. Ten seconds covers that with margin. It is paid only when
- * all of these hold: the step is a click, its own recorded id is not shown at all, and its pick is
- * suspected of being an earlier click's control. A false suspicion costs this much once and never
- * stops the run, because the click then goes where it would have gone without this check. Paid at
- * most once per step and array pass: a retried step of the same pass re-reads the page without
- * waiting again.
+ * all of these hold: the step is a click; its pick is suspected of being an earlier click's control;
+ * and no visible element carrying its own recorded id names another control. That last test passes
+ * when the id is absent or hidden, or when its element is still disabled. A false suspicion costs
+ * this much once and never stops the run, because the click then goes where it would have gone
+ * without this check. Paid at most once per step and array pass: a retried step of the same pass
+ * re-reads the page without waiting again.
  */
 const NAMESAKE_WAIT_MS = 10_000;
 
@@ -938,20 +939,16 @@ const recordedIdentityInPage = (el: Element, a: { own: string[]; words: string; 
   const k = cut > 0 && stamp.slice(0, cut) === a.acted.token ? Number(stamp.slice(cut + 1)) : -1;
   const stampedBy = Number.isInteger(k) && k >= 0 ? k : -1;
   const cands: Array<{ n: number; id: string; name: string }> = [];
-  if (pickId && a.own.indexOf(pickId) >= 0) return { pickId, own: true, stampedBy, cands, ownSeen: 0, ownShown: 0, ownOther: 0 };
+  if (pickId && a.own.indexOf(pickId) >= 0) return { pickId, own: true, stampedBy, cands, ownOther: 0 };
   const want = a.words.replace(/\s+/g, " ").trim().toLowerCase();
-  let ownSeen = 0;
-  let ownShown = 0;
   let ownOther = 0;
   for (const id of a.own) {
     for (const c of Array.from(document.querySelectorAll(`[id="${CSS.escape(id)}"]`))) {
       if (c === el) continue;
       if (a.row > 0 && !c.closest(`[data-al-arrayrow="${a.row}"]`)) continue;
-      ownSeen++;
       const r = c.getBoundingClientRect();
       const cs = getComputedStyle(c as HTMLElement);
       if (!(r.width > 2 && r.height > 2 && cs.visibility !== "hidden" && cs.display !== "none" && Number(cs.opacity) !== 0)) continue;
-      ownShown++;
       const tag = (c.tagName || "").toLowerCase();
       const formControl = tag === "input" || tag === "select" || tag === "textarea";
       const names: string[] = [c.getAttribute("aria-label") || "", c.getAttribute("title") || "", c.getAttribute("placeholder") || ""];
@@ -970,7 +967,7 @@ const recordedIdentityInPage = (el: Element, a: { own: string[]; words: string; 
       cands.push({ n: cands.length + 1, id, name });
     }
   }
-  return { pickId, own: false, stampedBy, cands, ownSeen, ownShown, ownOther };
+  return { pickId, own: false, stampedBy, cands, ownOther };
 };
 
 /** THE FIRST WORDS OF A STOP FOR PICKS (#362, Helm review of 4081f12, SF1). The run card and the
@@ -11359,8 +11356,8 @@ export class RecipeAdapter extends BasePortalAdapter {
   // the role. An id alone never overrides.
   //
   // A SUSPECTED NAMESAKE BUYS A BOUNDED WAIT, NEVER A STOP. A pick that namesakeSuspicion ties to an
-  // earlier click, with the step's own recorded id not shown at all, waits up to NAMESAKE_WAIT_MS for
-  // that id to render. Tigard's renders ~116 ms after Search. If it renders and passes, it is clicked.
+  // earlier click waits up to NAMESAKE_WAIT_MS for the step's own recorded control to render, or to
+  // enable. Tigard's renders ~116 ms after Search. If it renders and passes, it is clicked.
   // If it does not, the pick is clicked: the click this check never changes. A driftWarnings line then
   // names the suspicion for the person reading the run. Round 2 refused the click there. That stopped
   // correct clicks on one persistent node that two steps recorded under different ids (a footer Next

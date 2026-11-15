@@ -360,7 +360,8 @@ for (const c of [
   console.log(`   ok=${res.ok} in ${(ms / 1000).toFixed(1)}s, failedStepIndex=${data.failedStepIndex}, menu clicks=${menus.length}, second menu click ${gap} ms after Search`);
   console.log(`   drift: ${JSON.stringify(blocking228(data).map((w) => w.slice(0, 300)))}`);
   console.log(`   message: ${String(res.message ?? "").slice(0, 300)}`);
-  check("C: MUST PASS — the record-type step is not stopped: it clicks as it would without the check (the menu tab, a second time)",
+  // Not a MUST PASS: without the check the step clicks the menu tab too. Round 2 stopped here.
+  check("C: never a stop — the record-type step clicks as it would without the check (the menu tab, a second time)",
     menus.length === 2 && data.failedStepIndex !== 2, `menu clicks=${menus.length} failedStepIndex=${data.failedStepIndex}`);
   check(`C: MUST PASS — that click came only after the bounded wait for its own control (${gap} ms after Search)`,
     gap >= WAIT_MS - 500 && gap < WAIT_MS + 6000, `second menu click ${gap} ms after Search`);
