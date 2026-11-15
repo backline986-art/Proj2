@@ -930,10 +930,12 @@ function recordedIdsOf(sel: RecipeSelector | undefined, step?: RecipeStep | null
 /** The WORDS a step recorded its control by (#228): the first role-name / text / label /
  *  placeholder across its selector levels, and the ROLE recorded on that same level. The role is ""
  *  when that level recorded none, as with a choice tile's title text: its role-named fallbacks are
- *  alternatives for a portal that later turns the card into a link, and do not say what it is. */
+ *  alternatives for a portal that later turns the card into a link, and do not say what it is.
+ *  A bare `name` (no role) is the input's name ATTRIBUTE (#229, accessibleNameOf), never words a
+ *  person sees, so it never stands as a step's words here. */
 function recordedWordsOf(sel: RecipeSelector): { text: string; role: string } {
   for (const s of [sel, ...(sel.fallbacks ?? [])]) {
-    const text = String(s?.name || s?.text || s?.label || s?.placeholder || "").replace(/\s+/g, " ").trim();
+    const text = String(accessibleNameOf(s) || s?.text || s?.label || s?.placeholder || "").replace(/\s+/g, " ").trim();
     if (text) return { text, role: String(s?.role ?? "").trim().toLowerCase() };
   }
   return { text: "", role: "" };
