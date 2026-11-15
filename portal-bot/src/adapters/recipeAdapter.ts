@@ -5702,7 +5702,7 @@ export class RecipeAdapter extends BasePortalAdapter {
     const hasBattery = this.projectHasBattery();
     if (hasBattery === undefined || (answer === "yes") === hasBattery) return null;
     const question = String(step.fingerprint?.section ?? step.note ?? "the storage question").replace(/\s+/g, " ").trim().slice(0, 70);
-    return `left "${question}" for a person — the recorded answer "${String(step.selector?.label || step.note).trim()}" was the learn job's, and this project ${hasBattery ? "has" : "has no"} battery`;
+    return `left "${question}" for a person — the recorded answer "${String(step.selector?.label || step.note).trim()}" was the learn job's, and this project ${hasBattery ? "has a" : "has no"} battery`;
   }
 
   /** AN ANSWER NOTHING BOUND IS THE LEARN JOB'S ANSWER, AND THE HAND-OFF SAYS SO (#236).
