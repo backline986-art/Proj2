@@ -327,6 +327,8 @@ export async function settleAfterRoute(page: Page, beforeUrl: string, opts: { ti
   const urlNow = (): string => { try { return String(page.url() ?? ""); } catch { return ""; } };
   const clickedUrl = urlNow();
   if (!beforeUrl || !clickedUrl || clickedUrl === beforeUrl) return null;
+  // A closed page cannot settle; waiting would only spend the bound reading nothing.
+  if (typeof page.isClosed === "function" && page.isClosed()) return null;
   const result = await waitForSettled(page, { timeoutMs: opts.timeoutMs ?? ROUTE_SETTLE_MS, dom: false })
     .catch((e: unknown): SettleResult => ({ settled: false, waitedMs: 0, reason: `could not read the page: ${String((e as Error)?.message ?? e).slice(0, 120)}` }));
   return { clickedUrl, settledUrl: urlNow(), result };
