@@ -8648,6 +8648,32 @@ export class RecipeAdapter extends BasePortalAdapter {
             await this.settle(1500);
             await sleep(400);
           }
+          if (!hit && slots.length === 0) {
+            // A PAGE WITH NO FILE SLOT MAY BE ONE THE LEARN PASSED THROUGH (live City of Bend, CityView,
+            // replay v3 of 2026-11-15): the learn's one "Next Step" from Location landed on Upload Files;
+            // on replay it landed on Contacts (already complete, nothing to fill) and the upload ran
+            // there — 0 slots, skipped — so every later step ran a page behind and the walk ended on
+            // "Do you agree?" not found. The drift seek that clicks through such a page for a resolvable
+            // step never sees an upload (its selector is the learner's stamp). The same rule, here: when
+            // the page has nothing to fill and the recipe's own next step is its advance, that advance is
+            // clicked through ONCE (as a pass-through) and the slots are looked for again on the page it
+            // reaches. The slot wait has already run out, so a slow-mounting slot is not what this is.
+            const idx = this.recipe.steps.indexOf(step);
+            const next = idx >= 0 ? this.recipe.steps[idx + 1] : undefined;
+            if (next && next.action === "click" && /^advance\b/i.test(String(next.note ?? "")) && await this.pageIsPassThrough()) {
+              const adv = await this.resolveLocator(next.selector).catch(() => null);
+              if (adv && typeof adv.count === "function" && (await adv.count().catch(() => 0)) > 0) {
+                const moved = await this.guardedClick(adv.first(), "drift-seek click-through of a page with no file slot and nothing to fill", { timeout: 8000 }, { passThrough: true }).then(() => true).catch(() => false);
+                if (moved) {
+                  await waitForInteractiveControls(this.page);
+                  await this.settle(1500);
+                  slots = (await this.page.evaluate(tagUploadControls).catch(() => null) as Array<{ key: string; label: string }> | null) ?? [];
+                  hit = pick(slots);
+                  if (slots.length) this.driftWarnings.push(`clicked through 1 page this jurisdiction has that the recipe does not (nothing to fill on it, and no file slot) before "${wanted.slice(0, 48) || recordedCss}"`);
+                }
+              }
+            }
+          }
           if (!hit) {
             // The recorded index is a fallback only for a slot with no label of its own to
             // contradict the step's (an unlabelled Browse box); never for a differently labelled one.
