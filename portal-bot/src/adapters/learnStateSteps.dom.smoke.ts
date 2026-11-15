@@ -25,7 +25,8 @@
 // MUST-EXCLUDE: a hidden control that SHOWS within the grace is clicked, not skipped (E); an
 //   ENABLED select is written as before, never judged "answered by the portal" (B2); a conditional
 //   switch whose real box is concealed inside a visible label is written, not skipped (F); a revealed
-//   PowerClerk block is written (H3).
+//   PowerClerk block is written (H3); a select or box the portal disables for 3 s WHILE IT WORKS,
+//   keeping its old value meanwhile, is busy — written with the job's value as on main (I, I2).
 //
 // Run: npx tsx portal-bot/src/adapters/learnStateSteps.dom.smoke.ts
 import "../smokeArtifactDirs";
@@ -142,7 +143,26 @@ const PC_COND = (style: string): string => shell(`
   <label for="BD7DISC0004Input">Battery Disconnect Manufacturer</label><input id="BD7DISC0004Input" data-test-role="textbox-element" value="DisconnectCo">
   <label for="IQ7QNTY0005Input">Inverter Quantity</label><input id="IQ7QNTY0005Input" data-test-role="textbox-element">`);
 
-const PAGES: Record<string, string> = { "/switch": SWITCH, "/hiddentoggle": HIDDEN_TOGGLE, "/review": REVIEW, "/summary": SUMMARY, "/answered": ANSWERED, "/answeredbox": ANSWERED_BOX, "/nopopup": NO_POPUP, "/hiddenpopup": HIDDEN_POPUP, "/noreveal": NO_REVEAL, "/lateshow": LATE_SHOW,
+// I — a control the portal disables WHILE IT WORKS, keeping its old value meanwhile (an Angular
+// control.disable(), a default such as "New Construction" or "0"): answering the previous control
+// locks it for 3 s, then it enables. It is busy, not answered — the job's value must be written.
+const busy = (lockId: string, body: string, triggerId: string): string => shell(`<h2>Work</h2>${body}`, `
+  document.getElementById('${triggerId}').addEventListener('change', function () {
+    var c = document.getElementById('${lockId}');
+    c.disabled = true;
+    setTimeout(function () { c.disabled = false; }, 3000);
+  });`);
+const BUSY_SELECT = busy("ctype", `
+  <label for="wclass">Work Class</label>
+  <select id="wclass"><option value="">-- Select --</option><option value="PV">Solar PV</option><option value="RR">Re-roof</option></select>
+  <label for="ctype">Construction Type</label>
+  <select id="ctype"><option value="">-- Select --</option><option value="N" selected>New Construction</option><option value="A">Alteration</option></select>`, "wclass");
+const BUSY_BOX = busy("val", `
+  <label for="pkind">Permit Kind</label>
+  <select id="pkind"><option value="">-- Select --</option><option value="RES">Residential</option><option value="COM">Commercial</option></select>
+  <label for="val">Valuation</label><input id="val" value="0">`, "pkind");
+
+const PAGES: Record<string, string> = { "/busyselect": BUSY_SELECT, "/busybox": BUSY_BOX, "/switch": SWITCH, "/hiddentoggle": HIDDEN_TOGGLE, "/review": REVIEW, "/summary": SUMMARY, "/answered": ANSWERED, "/answeredbox": ANSWERED_BOX, "/nopopup": NO_POPUP, "/hiddenpopup": HIDDEN_POPUP, "/noreveal": NO_REVEAL, "/lateshow": LATE_SHOW,
   "/pchidden": PC_COND("display:none"), "/pcabsent": PC_COND("absent"), "/pcshown": PC_COND("") };
 const server = http.createServer((req, res) => {
   const url = new URL(req.url || "/", "http://127.0.0.1");
@@ -340,6 +360,27 @@ try {
   console.log(`   H3 ${tail(h3)}`);
   check("H3 MUST-EXCLUDE when this job's answers DID reveal the block, both conditional controls are written",
     h3.ok && h3.values.BI7MAKE0001Input === "ExampleCo" && h3.values.BI7MODL0002Input === "EX-1" && named(h3) === 0, tail(h3) + JSON.stringify(h3.values));
+  }
+
+  // ---- I: a control disabled while the portal works is busy, not answered ------------------------
+  if (want("I")) {
+  const sel = (note: string, id: string, value: string): RecipeStep => ({ action: "select", phase: "fill", note, value, selector: { label: note, fallbacks: [{ css: `#${id}` }] } } as RecipeStep);
+  const i1 = await run(browser, recipeOf("learnstate-i", "/busyselect", [
+    sel("Work Class", "wclass", "Solar PV"),
+    sel("Construction Type", "ctype", "Alteration"),
+    { action: "stopForReview", note: "review" } as RecipeStep,
+  ]));
+  console.log(`   I ${tail(i1)} values=${JSON.stringify(i1.values)}`);
+  check("I MUST-EXCLUDE a select disabled for 3 s while the portal works (holding its default) is WRITTEN with the job's value, never left as the portal's answer",
+    i1.values.ctype === "A" && !i1.skipped.some((s) => /Construction Type/.test(s)) && !i1.drift.some((w) => /answered by the portal/.test(w)), tail(i1) + JSON.stringify(i1.values));
+  const i2 = await run(browser, recipeOf("learnstate-i2", "/busybox", [
+    sel("Permit Kind", "pkind", "Residential"),
+    { action: "fill", phase: "fill", note: "Valuation", field: "declaredValuation", selector: { label: "Valuation", fallbacks: [{ css: "#val" }] } } as RecipeStep,
+    { action: "stopForReview", note: "review" } as RecipeStep,
+  ]), { declaredValuation: "25000" });
+  console.log(`   I2 ${tail(i2)} values=${JSON.stringify(i2.values)}`);
+  check("I2 MUST-EXCLUDE a box disabled for 3 s while the portal works (holding \"0\") is WRITTEN with the job's value",
+    i2.values.val === "25000" && !i2.skipped.some((s) => /Valuation/.test(s)) && !i2.drift.some((w) => /answered by the portal/.test(w)), tail(i2) + JSON.stringify(i2.values));
   }
 } finally {
   await browser.close().catch(() => null);

@@ -1089,10 +1089,15 @@ export function identifyingLevels(sel: RecipeSelector): RecipeSelector[] {
 /** How long a #237 probe waits for a control to show before calling it hidden or absent: a control
  *  still rendering (a reveal's round-trip, a fade-in) shows well inside it. */
 const LEARN_STATE_GRACE_MS = 2500;
-/** How long a disabled control already holding a value is watched before it counts as the portal's
- *  answer when it DIFFERS from the job's (an agreeing one is taken at once): a control the portal
- *  is still working on enables inside it, and the ordinary write then runs. */
-const PORTAL_ANSWER_SETTLE_MS = 1000;
+/** HOW LONG A DISABLED CONTROL MAY BE BUSY — THE ENGINE'S ONE ANSWER. A control the portal disables
+ *  while it works enables within a second or two; a decorative or portal-answered one never does.
+ *  resolveLocator waits this long on a visible-but-disabled recorded control before looking
+ *  elsewhere, and #237 (2) waits this long before a disabled control that DIFFERS from the job's
+ *  value counts as the portal's answer (an agreeing one is taken at once). A second, shorter window
+ *  there left a control disabled for 1-4 s while busy — an Angular control.disable() keeping its
+ *  default "New Construction" or "0" — at the portal's value with its step SKIPPED, where main wrote
+ *  the job's value (review of #237: 1 s vs 4 s, D = 3000 ms). */
+const BUSY_CONTROL_WAIT_MS = 4000;
 
 export class RecipeAdapter extends BasePortalAdapter {
   portalName: string;
@@ -6537,8 +6542,9 @@ export class RecipeAdapter extends BasePortalAdapter {
    * #237 (2) — THE PORTAL'S ANSWER, COMPARED WITH THE JOB'S. On a control portalAnsweredControl found
    * disabled and holding a value: agreeing (the select read-back's selectionHeld, the fill
    * read-back's fillHeld) is VERIFIED at once, nothing written; differing is watched for
-   * PORTAL_ANSWER_SETTLE_MS and is then a NAMED drift (left as the portal set it — a disabled
-   * control takes no write — and listed unverified for the person at review). Enabled meanwhile,
+   * BUSY_CONTROL_WAIT_MS (as long as resolveLocator waits on a busy control) and is then a NAMED
+   * drift (left as the portal set it — a disabled control takes no write — and listed unverified for
+   * the person at review). Enabled meanwhile,
    * or nothing held any more: null, and the ordinary write runs. A secret is never written into the
    * drift line.
    */
@@ -6566,7 +6572,7 @@ export class RecipeAdapter extends BasePortalAdapter {
         this.agingNotes.push(`"${name}" answered by the portal: its control is disabled and already shows this job's value — verified, nothing written (#237)`);
         return true;
       }
-      if (Date.now() - t0 >= PORTAL_ANSWER_SETTLE_MS) break;
+      if (Date.now() - t0 >= BUSY_CONTROL_WAIT_MS) break;
       await sleep(250);
     }
     const shownBy = await this.shownBy(scoped);
@@ -6668,7 +6674,7 @@ export class RecipeAdapter extends BasePortalAdapter {
     this.learnStateSkipped = null;
     if (await this.learnStateSkip(step, "before")) return false;
     // #237 (2) — A WRITE ON A CONTROL THE PORTAL ALREADY ANSWERED AND DISABLED is taken as that
-    // control (no busy-control wait: it is compared within PORTAL_ANSWER_SETTLE_MS in its case below).
+    // control (its case below waits the same busy window, BUSY_CONTROL_WAIT_MS, before naming a drift).
     const portalHeld = (step.action === "select" || step.action === "fill") && !isPinnedReassert(step)
       ? await this.portalAnsweredControl(step) : null;
     // A POPUP LEFT OPEN BY THE LAST STEP MUST NOT SHADOW THIS ONE.
@@ -11625,7 +11631,7 @@ export class RecipeAdapter extends BasePortalAdapter {
       // a second or two, a decorative one never does. Paid only when the RECORDED selector
       // resolves to something visible-but-disabled, so the happy path never waits.
       if (vis === true && enab === false && level === levels[0] && typeof picked.isEnabled === "function") {
-        for (let waited = 0; waited < 4000 && enab === false; waited += 500) {
+        for (let waited = 0; waited < BUSY_CONTROL_WAIT_MS && enab === false; waited += 500) {
           await this.page?.waitForTimeout?.(500).catch(() => null);
           enab = await picked.isEnabled().catch(() => false);
         }
