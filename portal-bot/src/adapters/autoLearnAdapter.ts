@@ -2269,6 +2269,23 @@ export function extractFieldsInPage(els: Element[]): RawField[] {
   return out;
 }
 
+/**
+ * THE ROLE A RECORDED STEP NAMES THIS CONTROL BY: one rule, the learner's (#228). A clickable
+ * control (a button-type field) gets its explicit role. Failing that, it gets the role
+ * extractFieldsInPage read for it, which is "link" for every <a>, href or not. Failing both, it is
+ * "button". Any other field is named only by its explicit role.
+ *
+ * toExtractedField writes this into a click step's selector. Replay's recorded-identity check
+ * (recipeAdapter) asks the same question of the element a step's recorded id names now, by running
+ * extractFieldsInPage on that element and then this function. Recording and checking therefore
+ * share one rule. The check once kept a second role table that gave an href-less <a> no role. An
+ * AngularJS anchor that routes by ng-click, the record-type control the step had recorded as a
+ * link, was then refused, and its namesake was clicked instead.
+ */
+export function recordedRoleOf(raw: Pick<RawField, "fieldType" | "role">): string {
+  return raw.fieldType === "button" ? (raw.role || "button") : (raw.role || "");
+}
+
 // Turn a RawField captured in the page into the contract's ExtractedField, building a
 // stable RecipeSelector preferring label / role+name / name, falling back to css #id.
 export function toExtractedField(raw: RawField): ExtractedField {
@@ -2289,7 +2306,7 @@ export function toExtractedField(raw: RawField): ExtractedField {
   } else if (raw.fieldType === "button") {
     // Use the element's actual ARIA role ("link" for <a> tags, "button" otherwise).
     // getByRole("button", {name}) never matches a plain <a> — it must be "link".
-    const ariaRole = raw.role || "button";
+    const ariaRole = recordedRoleOf(raw);
     if (raw.text) {
       selector.role = ariaRole;
       selector.name = raw.text;

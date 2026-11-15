@@ -299,7 +299,7 @@ import { findFilingStatus } from "../statusFinder";
 import { UNRECORDED_WRITE_ATTR, gapFillMayAnswer, isSubmitIntentField, questionsOfRaw } from "../llmGapFill";
 import { performLogin, portalErrorPage } from "./loginFlow";
 import { chooseCorrectionForm, correctionFormSelector, isRefusal, scanProjectForms, type ProjectFormRow } from "./correctionForm";
-import { type ExtractedField, type RawField, EXTRACT_SEL, extractFieldsInPage, toExtractedField, dismissPageModals, clearPageOverlays, equipmentMakeCandidates, pageFingerprintOf, collectValidationErrorsFrom, acaApplyEntryFrom, advanceSignatureOf } from "./autoLearnAdapter";
+import { type ExtractedField, type RawField, EXTRACT_SEL, extractFieldsInPage, toExtractedField, recordedRoleOf, dismissPageModals, clearPageOverlays, equipmentMakeCandidates, pageFingerprintOf, collectValidationErrorsFrom, acaApplyEntryFrom, advanceSignatureOf } from "./autoLearnAdapter";
 import { tagUploadControls, visibleBodyText, policyScopeFor } from "./autoLearnAdapter";
 import { answerForUnrecordedControl, missingRequiredStopMessage, UNPINNED_CONTROL_WHY, type MissingRequired } from "../unrecordedControls";
 import { answerForRecordedPolicyStep, parsePolicyDefaultNote } from "../recordedPolicyAnswer";
@@ -543,17 +543,6 @@ export class ReplayGuardRefusal extends Error {
   constructor(public readonly reason: string) {
     super(`replay safety gate refused: ${reason}`);
     this.name = "ReplayGuardRefusal";
-  }
-}
-
-/** #228 — A CLICK WHOSE ONLY MATCH IS THE CONTROL AN EARLIER STEP CLICKED IN THIS RUN, while its own
- *  recorded control never rendered. Not clicked; the step fails named. Never healed: the heal
- *  re-anchors by the step's words and would land on the very namesake this refused, then patch the
- *  recipe with it. */
-export class NamesakeClickStop extends Error {
-  constructor(message: string) {
-    super(message);
-    this.name = "NamesakeClickStop";
   }
 }
 
@@ -877,68 +866,84 @@ function recordedIdsOf(sel: RecipeSelector | undefined, step?: RecipeStep | null
 }
 
 /** The WORDS a step recorded its control by (#228): the first role-name / text / label /
- *  placeholder across its selector levels, whether that level matched them exactly, and the first
- *  ROLE any level recorded ("" when none did). */
-function recordedWordsOf(sel: RecipeSelector): { text: string; exact: boolean; role: string } {
-  const role = String([sel, ...(sel.fallbacks ?? [])].find((s) => s?.role)?.role ?? "").trim().toLowerCase();
+ *  placeholder across its selector levels, and the ROLE recorded on that same level. The role is ""
+ *  when that level recorded none, as with a choice tile's title text: its role-named fallbacks are
+ *  alternatives for a portal that later turns the card into a link, and do not say what it is. */
+function recordedWordsOf(sel: RecipeSelector): { text: string; role: string } {
   for (const s of [sel, ...(sel.fallbacks ?? [])]) {
     const text = String(s?.name || s?.text || s?.label || s?.placeholder || "").replace(/\s+/g, " ").trim();
-    if (text) return { text, exact: s.exact === true, role };
+    if (text) return { text, role: String(s?.role ?? "").trim().toLowerCase() };
   }
-  return { text: "", exact: false, role };
+  return { text: "", role: "" };
 }
 
-/** The attribute the recorded-identity check puts on the control it chose over a namesake (#228). */
+/** A selector level's own shape, without its fallbacks: two levels with the same key resolve the
+ *  same elements (#228, "the level that picked it is an earlier click step's own selector"). */
+function selectorLevelKey(s: RecipeSelector | undefined): string {
+  if (!s) return "";
+  const norm = (v: unknown): string => String(v ?? "").replace(/\s+/g, " ").trim();
+  return JSON.stringify([norm(s.role).toLowerCase(), norm(s.name), norm(s.text), norm(s.label), norm(s.placeholder), norm(s.css), s.exact === true, s.nth ?? null, norm(s.frame)]);
+}
+
+/** The attribute the recorded-identity check puts on each element carrying a step's recorded id that
+ *  is visible and answers to the step's words (`"1"`, `"2"`… in document order), so the caller can
+ *  hand each one back to Playwright for the learner's own reading (#228). Cleared at every read. */
 const RECORDED_ID_HIT_ATTR = "data-rc-recorded-id";
 /** The attribute a performed recipe click leaves on the element it clicked (#228): `<run token>:<step
  *  index>`. Read only by the namesake check, which asks "did an earlier step of THIS run click this
  *  very node?" — the token keeps a page reused across runs from answering with a stale stamp. */
 const ACTED_ON_ATTR = "data-rc-acted";
-/** How long a click whose only match is the control an earlier step clicked waits for its OWN
- *  recorded control to render (#228). Tigard's record-type button renders ~116 ms after Search. */
-const NAMESAKE_WAIT_MS = 3000;
+/**
+ * HOW LONG A SUSPECTED NAMESAKE WAITS FOR THE STEP'S OWN RECORDED CONTROL (#228): one bound, 10 s.
+ *
+ * Tigard's record-type button renders ~116 ms after Search. A slow government search can take
+ * seconds; the re-review's probe used 4.5 s. Ten seconds covers that with margin. It is paid only when
+ * all of these hold: the step is a click, its own recorded id is not shown at all, and its pick is
+ * suspected of being an earlier click's control. A false suspicion costs this much once and never
+ * stops the run, because the click then goes where it would have gone without this check. Paid at
+ * most once per step and array pass: a retried step of the same pass re-reads the page without
+ * waiting again.
+ */
+const NAMESAKE_WAIT_MS = 10_000;
 
 /**
- * #228 — DOES THE CONTROL A STEP RECORDED BY ID ANSWER TO IT BETTER THAN WHAT ITS SELECTOR MATCHED?
+ * #228 — WHAT THE PAGE SAYS ABOUT A CLICK'S PICK AND ITS RECORDED IDENTITY, IN ONE ROUND TRIP.
  *
- * Runs ON the element a selector level picked (so in that element's own document / frame), and reads,
- * in one round trip: whether the pick IS one of the step's recorded ids; else the first VISIBLE,
- * ENABLED element carrying a recorded id that has the step's recorded ROLE and answers to its
- * recorded WORDS (tagged, so the caller can hand it back to Playwright); and whether the pick is the
- * very node an EARLIER step of this run clicked (its ACTED_ON_ATTR stamp) — the namesake signal —
- * unless that step recorded one of this step's own ids (then it is one control clicked twice, under a
- * drifted id). Whether the pick's id is merely an id an earlier step recorded is reported, not acted
- * on: counter ids (`cw-2` on one view is `cw-4`'s twin on the next) make that common and innocent.
+ * Runs ON the element a selector level picked, so it reads that element's own document or frame.
+ * It reads four things. First, whether the pick IS one of the step's recorded ids. Second, the pick's
+ * id. Third, the step of THIS run whose click stamped this very node (ACTED_ON_ATTR, else -1).
+ * Fourth, every VISIBLE element that carries a recorded id and answers to the step's recorded words.
+ * Those are tagged 1, 2… in document order, at most four. The caller then runs the learner's own
+ * extractor on each one to ask whether it is enabled and has the recorded role. That is the one role
+ * table (autoLearnAdapter recordedRoleOf); this function keeps no second one.
  *
- * "Answers to the words": the recorded role-name / text / label equals (exact level) or is contained
- * in (otherwise) one of the element's own names — aria-label, aria-labelledby, its <label>, title,
- * placeholder, a button-input's value, or the visible text of a non-form element (a <select>'s text
- * is its option list, which says nothing about what the control is). Whitespace- and case-folded.
- * "Has the role": its explicit role, else the implicit one of its tag; a step that recorded no role
- * asks nothing. Visibility is isTrulyVisible's own test, so the gate and the report answer the same
- * question.
+ * "Answers to the words" means the recorded role-name, text or label is CONTAINED in one of the
+ * element's own names, after folding whitespace and case. Its names are: aria-label,
+ * aria-labelledby, its <label>, title, placeholder, a button-input's value, or the visible text of a
+ * non-form element. A <select>'s text is its option list, which says nothing about what the control
+ * is, so it does not count. The test is containment, not equality, because Tigard's record type is
+ * named "Apply Residential Renewable Energy - Prescriptive" and reads "Apply". A per-render id that
+ * now names a control with other words fails it. One example is PowerClerk's #pcButton7 on "Remove
+ * Inverter" for a step that recorded "Add Inverter"; such an element is counted in `ownOther`.
+ * Visibility is isTrulyVisible's own test.
  *
  * Module-level and free of nested function declarations: esbuild's keepNames would wrap them as
  * __name(…), which a page without the shim throws on — and a swallowed throw reads as "no match".
  */
-const recordedIdentityInPage = (el: Element, a: {
-  own: string[]; words: string; exact: boolean; role: string; tag: string; row: number;
-  acted: { attr: string; token: string; before: number; sameControl: number[] };
-  earlierIds: Array<{ id: string; step: number }>;
-}) => {
+const recordedIdentityInPage = (el: Element, a: { own: string[]; words: string; tag: string; row: number; acted: { attr: string; token: string } }) => {
   for (const t of Array.from(document.querySelectorAll(`[${a.tag}]`))) t.removeAttribute(a.tag);
   const pickId = el.getAttribute("id") || "";
-  if (pickId && a.own.indexOf(pickId) >= 0) {
-    return { pickId, own: true, hit: "", hitName: "", ownSeen: 0, ownShown: 0, ownOther: 0, namesake: null as null | { step: number }, idTwin: null as null | { step: number } };
-  }
+  const stamp = el.getAttribute(a.acted.attr) || "";
+  const cut = stamp.lastIndexOf(":");
+  const k = cut > 0 && stamp.slice(0, cut) === a.acted.token ? Number(stamp.slice(cut + 1)) : -1;
+  const stampedBy = Number.isInteger(k) && k >= 0 ? k : -1;
+  const cands: Array<{ n: number; id: string; name: string }> = [];
+  if (pickId && a.own.indexOf(pickId) >= 0) return { pickId, own: true, stampedBy, cands, ownSeen: 0, ownShown: 0, ownOther: 0 };
   const want = a.words.replace(/\s+/g, " ").trim().toLowerCase();
-  let hit = "";
-  let hitName = "";
   let ownSeen = 0;
   let ownShown = 0;
   let ownOther = 0;
   for (const id of a.own) {
-    if (hit) break;
     for (const c of Array.from(document.querySelectorAll(`[id="${CSS.escape(id)}"]`))) {
       if (c === el) continue;
       if (a.row > 0 && !c.closest(`[data-al-arrayrow="${a.row}"]`)) continue;
@@ -948,50 +953,24 @@ const recordedIdentityInPage = (el: Element, a: {
       if (!(r.width > 2 && r.height > 2 && cs.visibility !== "hidden" && cs.display !== "none" && Number(cs.opacity) !== 0)) continue;
       ownShown++;
       const tag = (c.tagName || "").toLowerCase();
-      // The step's recorded role, or it is another control (R2: a wizard's "Next" button must not give
-      // way to a results pager's "Next" link that took its id).
-      if (a.role) {
-        const type = tag === "input" ? String((c as HTMLInputElement).type || "text").toLowerCase() : "";
-        const implicit = (tag === "a" || tag === "area") && c.hasAttribute("href") ? "link"
-          : tag === "button" || tag === "summary" || /^(button|submit|reset|image)$/.test(type) ? "button"
-            : type === "checkbox" ? "checkbox"
-              : type === "radio" ? "radio"
-                : tag === "select" ? ((c as HTMLSelectElement).multiple || (c as HTMLSelectElement).size > 1 ? "listbox" : "combobox")
-                  : tag === "textarea" || /^(text|email|tel|url)$/.test(type) ? "textbox"
-                    : tag === "option" ? "option" : "";
-        const has = (c.getAttribute("role") || "").trim().toLowerCase().split(/\s+/)[0] || implicit;
-        if (has !== a.role) { ownOther++; continue; }
-      }
       const formControl = tag === "input" || tag === "select" || tag === "textarea";
       const names: string[] = [c.getAttribute("aria-label") || "", c.getAttribute("title") || "", c.getAttribute("placeholder") || ""];
       for (const ref of (c.getAttribute("aria-labelledby") || "").split(/\s+/).filter(Boolean)) names.push(document.getElementById(ref)?.textContent || "");
       for (const l of Array.from((c as HTMLInputElement).labels ?? [])) names.push((l as HTMLElement).innerText || l.textContent || "");
       if (tag === "input" && /^(button|submit|reset)$/i.test((c as HTMLInputElement).type || "")) names.push((c as HTMLInputElement).value || "");
       if (!formControl) names.push((c as HTMLElement).innerText || c.textContent || "");
-      let answers = false;
+      let name = "";
       for (const n of names) {
         const norm = n.replace(/\s+/g, " ").trim().toLowerCase();
-        if (want && norm && (a.exact ? norm === want : norm.includes(want))) { answers = true; hitName = n.replace(/\s+/g, " ").trim(); break; }
+        if (want && norm && norm.includes(want)) { name = n.replace(/\s+/g, " ").trim(); break; }
       }
-      if (!answers) { ownOther++; continue; }
-      let disabled = false;
-      try { disabled = c.matches(":disabled"); } catch { /* not a form-associated element */ }
-      if (disabled || c.closest("[aria-disabled='true']")) continue;
-      c.setAttribute(a.tag, "1");
-      hit = id;
-      break;
+      if (!name) { ownOther++; continue; }
+      if (cands.length >= 4) continue;
+      c.setAttribute(a.tag, String(cands.length + 1));
+      cands.push({ n: cands.length + 1, id, name });
     }
   }
-  let namesake: null | { step: number } = null;
-  let idTwin: null | { step: number } = null;
-  if (!hit) {
-    const stamp = el.getAttribute(a.acted.attr) || "";
-    const cut = stamp.lastIndexOf(":");
-    const k = cut > 0 && stamp.slice(0, cut) === a.acted.token ? Number(stamp.slice(cut + 1)) : -1;
-    if (Number.isInteger(k) && k >= 0 && k < a.acted.before && a.acted.sameControl.indexOf(k) < 0) namesake = { step: k };
-    if (!namesake) for (const e of a.earlierIds) if (pickId && e.id === pickId) { idTwin = { step: e.step }; break; }
-  }
-  return { pickId, own: false, hit, hitName: hit ? hitName : "", ownSeen, ownShown, ownOther, namesake, idTwin };
+  return { pickId, own: false, stampedBy, cands, ownSeen, ownShown, ownOther };
 };
 
 /** THE FIRST WORDS OF A STOP FOR PICKS (#362, Helm review of 4081f12, SF1). The run card and the
@@ -1480,16 +1459,21 @@ export class RecipeAdapter extends BasePortalAdapter {
   stagedReviewCapture: StagedReviewCapture | null = null;
   /** The step whose selector resolveLocator is resolving right now (for disambiguation). */
   private resolvingStep: RecipeStep | null = null;
-  /** #228 — the CLICK the acting resolution is for (executeStepInner only, and only a pre-review click
-   *  that will be performed: never a write, the diagnostic or draft-submit re-reads, or a final
-   *  submit): resolveLocator asks its recorded identity. */
+  /** #228 — the CLICK the acting resolution is for. Set only by the resolutions that perform it:
+   *  executeStepInner's, and assertAdvanced's retry of an advance. Only a pre-review click qualifies;
+   *  never a write, the diagnostic or draft-submit re-reads, or a final submit (see
+   *  clickIdentityGuardFor). While it is set, resolveLocator asks the click's recorded identity. */
   private identityGuard: RecipeStep | null = null;
-  /** #228 — set by resolveLocator when a click's only match is the control an earlier step clicked;
-   *  executeStepInner turns it into a NamesakeClickStop. */
-  private namesakeStop: string | null = null;
   /** #228 — this run's half of every ACTED_ON_ATTR stamp, so a page reused across runs (or adapters)
    *  never answers the namesake check with another run's click. */
   private readonly actedToken = `r${Math.random().toString(36).slice(2, 10)}`;
+  /** #228 — every recipe click this run performed, by step index: the id its node carried when the
+   *  click returned ("" = it had none), or null when that could not be read (the handle was not
+   *  acquired, or the click replaced the document). The namesake check's evidence of WHICH control
+   *  an earlier click went to. */
+  private clickRecords = new Map<number, { liveId: string | null }>();
+  /** #228 — the steps (`<array pass>:<index>`) that have already paid the namesake wait this run. */
+  private namesakeWaited = new Set<string>();
   /** Every click/press/goto the chokepoint refused this run, in order. */
   guardRefusals: string[] = [];
   /** How long an upload step waits for its named file slot to MOUNT (client-rendered steps show a
@@ -3778,9 +3762,7 @@ export class RecipeAdapter extends BasePortalAdapter {
       // NEVER HEAL A kVA TIER BOX either (close MF2): heal re-anchors by label score, and "5.01kva
       // through 15kva" scores high against "15.01kva through 25kva" — a tier row must never hop to
       // its neighbour by similarity. The tier is decided from the page's labels or not at all.
-      // NEVER HEAL A NAMESAKE REFUSAL (#228): the heal re-anchors by the step's words, and the only
-      // control answering them is the earlier step's — it would click it and PATCH THE RECIPE with it.
-      if (!succeeded && !step.isFinalSubmit && !this.isRecordTypeStep(step) && !this.isFeeTierStep(step) && !(lastErr instanceof NamesakeClickStop) && this.arrayPass === 1 && process.env.RECIPE_SELF_HEAL !== "off") {
+      if (!succeeded && !step.isFinalSubmit && !this.isRecordTypeStep(step) && !this.isFeeTierStep(step) && this.arrayPass === 1 && process.env.RECIPE_SELF_HEAL !== "off") {
         // arrayPass === 1: heal re-anchors BY LABEL against the whole page with no row
         // concept, and a repeat-pass step's labels are bare copies ("Manufacturer") of
         // controls in OTHER sections — a heal here would write array N's value into the
@@ -6449,22 +6431,11 @@ export class RecipeAdapter extends BasePortalAdapter {
     // when narrowToOne did it, and again when this hint was added without the same guard.
     const nameHint = (step.action === "check" || step.action === "uncheck")
       ? "" : String(step.note ?? step.field ?? "");
-    // #228: A CLICK THAT WILL BE PERFORMED ASKS ITS RECORDED IDENTITY; NOTHING ELSE DOES. A write keeps
-    // its own identity check (reanchorIfWrongControl), which moves a value only when the label or
-    // section agrees — this one also accepts a placeholder or title, and on a per-render-id portal it
-    // put a City value into a "City (mailing)" box (review R4). A final submit, the draft-submit
-    // re-check and a past-review click resolve exactly as before.
-    const guard = step.action === "click" && !pastReview && !isFinalSubmitStep(step)
-      && this.draftCreatingStepAt(this.currentStepIdx) < 0 ? step : null;
-    this.namesakeStop = null;
+    // #228: A CLICK THAT WILL BE PERFORMED ASKS ITS RECORDED IDENTITY (clickIdentityGuardFor).
+    const guard = this.clickIdentityGuardFor(step, pastReview);
     this.resolvingStep = step;
     this.identityGuard = guard;
     let scoped = await this.resolveLocator(step.selector, nameHint).finally(() => { this.resolvingStep = null; this.identityGuard = null; });
-    if (this.namesakeStop) {
-      const why = this.namesakeStop;
-      this.namesakeStop = null;
-      throw new NamesakeClickStop(why);
-    }
     // A HIDDEN INPUT IS THE NORMAL STATE FOR A STYLED CHECKBOX, NOT A PROBLEM TO SOLVE.
     //
     // The third door onto the same regression. `isTrulyVisible` correctly calls an opacity:0
@@ -6478,11 +6449,6 @@ export class RecipeAdapter extends BasePortalAdapter {
       if (await this.dismissStaleOverlays()) {
         this.identityGuard = guard;
         scoped = await this.resolveLocator(step.selector).finally(() => { this.identityGuard = null; });
-        if (this.namesakeStop) {
-          const why = this.namesakeStop;
-          this.namesakeStop = null;
-          throw new NamesakeClickStop(why);
-        }
       }
     }
     // THE SECTION THE LEARNER RECORDED, FINALLY USED.
@@ -8479,17 +8445,28 @@ export class RecipeAdapter extends BasePortalAdapter {
     // identity, not a shared id: on a counter-id wizard the next view's fresh Next legitimately
     // carries the id an earlier Next recorded (review R1). Stamped AFTER the click returns, so a
     // refused or failed click leaves none; a click that navigates the document takes its stamp with it.
+    //
+    // THE SAME READ RECORDS THE ID THAT NODE CARRIED (clickRecords). A re-rendered control loses its
+    // stamp but usually keeps its id, so a namesake is still known by the id of the node the earlier
+    // click went to. Tigard's menu tab is the example: if the menu is rebuilt on a route change, the
+    // new tab is still #link-Menu-Apply. The id is the one READ from the clicked node, never the one
+    // that step recorded. On a counter-id wizard (review R1), the next view's fresh Next carries an id
+    // an earlier Next RECORDED, but the earlier click's node carried a different one. Every performed
+    // click is recorded, even when its id could not be read.
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const clicked: any = typeof scoped?.elementHandle === "function" ? await scoped.elementHandle({ timeout: 1000 }).catch(() => null) : null;
     try {
       await this.guardedClick(scoped, `recipe click${step.note ? ` (${String(step.note).slice(0, 50)})` : ""}`);
+      let liveId: string | null = null;
       if (clicked && typeof clicked.evaluate === "function") {
-        await Promise.race([
-          clicked.evaluate((el: Element, s: { attr: string; v: string }) => { el.setAttribute(s.attr, s.v); },
+        const read = await Promise.race([
+          clicked.evaluate((el: Element, s: { attr: string; v: string }) => { el.setAttribute(s.attr, s.v); return el.getAttribute("id") || ""; },
             { attr: ACTED_ON_ATTR, v: `${this.actedToken}:${this.currentStepIdx}` }).catch(() => null),
-          sleep(1500),
+          sleep(1500).then(() => null),
         ]);
+        liveId = typeof read === "string" ? read : null;
       }
+      this.clickRecords.set(this.currentStepIdx, { liveId });
     } finally {
       if (clicked && typeof clicked.dispose === "function") void clicked.dispose().catch(() => null);
     }
@@ -8504,7 +8481,7 @@ export class RecipeAdapter extends BasePortalAdapter {
         this.driftWarnings.push(`"${String(step.note ?? "Calculate").slice(0, 44)}": the page still showed it was computing after ${Math.round(computed.waitedMs / 1000)}s (${computed.reason.slice(0, 120)}) — went on; check the totals and any section they reveal before submit`);
       }
     }
-    await this.assertAdvanced(step, beforeUrl, beforeFp, beforeEffect);
+    await this.assertAdvanced(step, beforeUrl, beforeFp, beforeEffect, pastReview);
     return true;
   }
 
@@ -8629,7 +8606,7 @@ export class RecipeAdapter extends BasePortalAdapter {
   /** How long an advance check waits for vanished controls to come back (or the page to move). */
   static VANISHED_CONTROLS_WAIT_MS = 6000;
 
-  private async assertAdvanced(step: RecipeStep, beforeUrl: string, beforeFp: string, beforeEffect = ""): Promise<void> {
+  private async assertAdvanced(step: RecipeStep, beforeUrl: string, beforeFp: string, beforeEffect = "", pastReview = false): Promise<void> {
     // No identity means a mock/no-DOM page (the unit-test doubles) — assert nothing.
     if (!beforeFp) return;
     const urlNow = (): string => (typeof this.page.url === "function" ? String(this.page.url() ?? "") : "");
@@ -8712,7 +8689,10 @@ export class RecipeAdapter extends BasePortalAdapter {
     await this.timed("advance-settle", async () => { for (let i = 0; i < ADVANCE_SETTLE_TRIES && !(await moved()); i++) await sleep(ADVANCE_SETTLE_MS); });
     if (await moved()) return;
     await this.timed("advance-overlays", async () => { await this.dismissModalsGuarded(); await clearPageOverlays(this.page).catch(() => null); });
-    const again = await this.resolveLocator(step.selector).catch(() => null);
+    // THE RETRY CLICKS TOO, SO IT ASKS THE SAME RECORDED IDENTITY (#228). Without the guard it
+    // re-resolved by the step's words alone and would click the namesake its first try was steered off.
+    this.identityGuard = this.clickIdentityGuardFor(step, pastReview);
+    const again = await this.resolveLocator(step.selector).catch(() => null).finally(() => { this.identityGuard = null; });
     if (again && typeof again.click === "function") await this.timed("advance-retry-click", () => this.guardedClick(again, "retry an advance that did not move", { timeout: 8000 }).catch(() => null));
     await this.timed("advance-settle", async () => { for (let i = 0; i < ADVANCE_SETTLE_TRIES && !(await moved()); i++) await sleep(ADVANCE_SETTLE_MS); });
     if (await moved()) {
@@ -11307,34 +11287,86 @@ export class RecipeAdapter extends BasePortalAdapter {
     return /manufacturer|\bmake\b/i.test(`${step.selector?.label ?? ""} ${step.note ?? ""}`);
   }
 
-  // A MATCH THAT CARRIES THE STEP'S WORDS BUT NOT ITS RECORDED ID IS A NAMESAKE WHILE THE RECORDED
-  // CONTROL IS ON THE PAGE (#228).
+  // A CLICK THAT WILL BE PERFORMED ASKS ITS RECORDED IDENTITY; NOTHING ELSE DOES (#228). Both doors
+  // that perform a recipe click ask this one predicate: executeStepInner's resolution, and
+  // assertAdvanced's retry of an advance. A write keeps its own identity check
+  // (reanchorIfWrongControl). That check moves a value only when the label or section agrees.
+  // recordedIdentityOverNamesake also accepts a placeholder or title, and on a per-render-id portal
+  // it put a City value into a "City (mailing)" box (review R4). A final submit, the draft-submit
+  // re-check and a past-review click resolve exactly as before; their own gates are untouched.
+  private clickIdentityGuardFor(step: RecipeStep, pastReview: boolean): RecipeStep | null {
+    return step.action === "click" && !pastReview && !isFinalSubmitStep(step)
+      && this.draftCreatingStepAt(this.currentStepIdx) < 0 ? step : null;
+  }
+
+  // IS A CLICK'S PICK SUSPECTED OF BEING AN EARLIER CLICK'S CONTROL? (#228) Returns why ("" = no).
   //
-  // resolveLocator accepts the first level whose pick is visible and enabled, and the recorded id was
+  // Only an earlier click step of THIS run counts, by its click record. Steps that recorded one of
+  // this step's own ids are skipped: they are this control's own steps. One example is a persistent
+  // footer Next, clicked twice under the same drifted id. Each remaining click is asked for the
+  // strongest evidence it left, strongest first:
+  //   1. its stamp: the pick IS the node it clicked;
+  //   2. the id the node it clicked carried, read live at the click, or that step's recorded ids when
+  //      the read failed. A re-rendered control loses the stamp but usually keeps its id.
+  //   3. only when that click's control carried NO id: the level that picked this one is that step's
+  //      own primary selector.
+  // Evidence 2 uses the LIVE id. Each fresh Next on a counter-id wizard carries an id that an earlier
+  // Next RECORDED (review R1), but the node that earlier click went to carried a different one.
+  // Evidence 3 is used only where the click's control had no id. Every repeated "Next" shares its
+  // primary selector, and asking that on every click would tax each advance of an id-drifting wizard
+  // with the wait.
+  private namesakeSuspicion(own: string[], pickId: string, stampedBy: number, from: RecipeSelector | undefined): string {
+    const upTo = Math.min(this.currentStepIdx, this.recipe.steps.length);
+    const fromKey = selectorLevelKey(from);
+    let byId = "";
+    let bySelector = "";
+    for (let k = upTo - 1; k >= 0; k--) {
+      const s = this.recipe.steps[k];
+      const rec = this.clickRecords.get(k);
+      if (!s?.selector || s.action !== "click" || !rec) continue;
+      const recorded = recordedIdsOf(s.selector, s);
+      if (recorded.some((id) => own.includes(id))) continue;
+      if (stampedBy === k) return `it is the very control step ${k + 1} clicked`;
+      const ids = rec.liveId != null ? (rec.liveId ? [rec.liveId] : []) : recorded;
+      if (!byId && pickId && ids.includes(pickId)) byId = `it carries #${pickId.slice(0, 80)}, the id of the control step ${k + 1} clicked`;
+      if (!bySelector && !ids.length && fromKey && fromKey === selectorLevelKey({ ...s.selector, fallbacks: undefined })) {
+        bySelector = `the selector that found it is step ${k + 1}'s own, and the control that step clicked carried no id`;
+      }
+    }
+    return byId || bySelector;
+  }
+
+  // A MATCH THAT CARRIES THE STEP'S WORDS BUT NOT ITS RECORDED ID MAY BE A NAMESAKE (#228).
+  //
+  // resolveLocator accepts the first level whose pick is visible and enabled. The recorded id was
   // only ever asked to choose AMONG a level's several matches. Live on City of Tigard (EnerGov), the
   // record-type step was recorded `{role:"link", name:"Apply", exact:true, fallbacks:[{css:
-  // "#apply-btn-ResidentialRenewableEnergy-Prescriptive"}]}`; that link's accessible name is its
+  // "#apply-btn-ResidentialRenewableEnergy-Prescriptive"}]}`. That link's accessible name is its
   // aria-label ("Apply Residential Renewable Energy - Prescriptive"), so the role+name matches exactly
-  // ONE element — the top menu's "Apply" tab, step 1's own target. Level 0 took it, the id fallback was
-  // never asked, the click reported ok, the application never opened, and the next step waited out the
-  // stall watchdog.
+  // ONE element: the top menu's "Apply" tab, which is step 1's own target. Level 0 took it and the id
+  // fallback was never asked. The click reported ok, the application never opened, and the next step
+  // waited out the stall watchdog.
   //
-  // So the candidate answering to MORE of the step's recorded identity wins: when the pick is not the
-  // recorded id, the element the recorded id names displaces it — but only when it is visible, enabled,
-  // has the step's recorded ROLE and answers to its recorded WORDS too. A per-render id (PowerClerk's
-  // #pcInputBase34, which later names "Energy Source") fails the words, and a results pager's "Next"
-  // link that took a wizard button's id fails the role: an id alone never overrides. Clicks only (the
-  // caller's guard): a write's own identity check is gated on label or section, never on this.
+  // THE CONTROL THE STEP RECORDED WINS WHEN IT IS THERE. When the pick is not one of the step's
+  // recorded ids, the element a recorded id names displaces the pick at once, but only when it passes
+  // all of these:
+  //   - it is visible;
+  //   - it answers to the step's recorded words;
+  //   - the learner's own reading of it (extractFieldsInPage, recordedRoleOf) calls it enabled and
+  //     gives it the step's recorded role.
+  // A per-render id fails the words. PowerClerk's #pcButton7 is one: it now names "Remove Inverter"
+  // for an "Add Inverter" step. A results pager's "Next" link that took a wizard button's id fails
+  // the role. An id alone never overrides.
   //
-  // A NAMESAKE IS THE NODE AN EARLIER STEP CLICKED, AND ONLY IT IS WORTH A WAIT OR A STOP. When the
-  // pick carries an earlier step's click stamp (executeClick) and the step's own recorded control is
-  // not up yet, poll for it briefly — Tigard's renders ~116 ms after Search. If it never renders, the
-  // click is refused, named: clicking would only repeat what that earlier step did, and report ok. An
-  // earlier step that recorded one of THIS step's ids is the same control clicked twice under a
-  // drifted id (a persistent footer Next), never a namesake. A pick that merely carries an id some
-  // earlier step recorded — every Next on a counter-id wizard (review R1) — is clicked with no wait;
-  // the resolve trail says so. A step whose recorded id is simply gone pays nothing: a 75-step replay
-  // must not wait on id churn.
+  // A SUSPECTED NAMESAKE BUYS A BOUNDED WAIT, NEVER A STOP. A pick that namesakeSuspicion ties to an
+  // earlier click, with the step's own recorded id not shown at all, waits up to NAMESAKE_WAIT_MS for
+  // that id to render. Tigard's renders ~116 ms after Search. If it renders and passes, it is clicked.
+  // If it does not, the pick is clicked: the click this check never changes. A driftWarnings line then
+  // names the suspicion for the person reading the run. Round 2 refused the click there. That stopped
+  // correct clicks on one persistent node that two steps recorded under different ids (a footer Next
+  // the learn saw as #btnNext1 and #btnNext2). Compared with no check, the worst case is the wait,
+  // never a stop. A recorded id that is shown but names another control means a per-render id, and
+  // waiting for it is pointless: no wait.
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   private async recordedIdentityOverNamesake(sel: RecipeSelector, from: RecipeSelector | undefined, picked: any): Promise<any | null> {
     const step = this.identityGuard;
@@ -11342,66 +11374,65 @@ export class RecipeAdapter extends BasePortalAdapter {
     const own = recordedIdsOf(sel, step);
     if (!own.length) return null;
     const words = recordedWordsOf(sel);
-    const sameControl: number[] = [];
-    const earlierIds: Array<{ id: string; step: number }> = [];
-    const upTo = Math.min(this.currentStepIdx, this.recipe.steps.length);
-    for (let i = 0; i < upTo; i++) {
-      const s = this.recipe.steps[i];
-      if (!s?.selector) continue;
-      const ids = recordedIdsOf(s.selector, s);
-      if (ids.some((id) => own.includes(id))) { sameControl.push(i); continue; }
-      for (const id of ids) earlierIds.push({ id, step: i });
-    }
-    const args = {
-      own, words: words.text, exact: words.exact, role: words.role, tag: RECORDED_ID_HIT_ATTR, row: this.arrayRowScope,
-      acted: { attr: ACTED_ON_ATTR, token: this.actedToken, before: this.currentStepIdx, sameControl }, earlierIds,
-    };
+    const args = { own, words: words.text, tag: RECORDED_ID_HIT_ATTR, row: this.arrayRowScope, acted: { attr: ACTED_ON_ATTR, token: this.actedToken } };
     type Read = ReturnType<typeof recordedIdentityInPage>;
-    const read = async (): Promise<Read | null> =>
-      await picked.evaluate(recordedIdentityInPage, args, { timeout: 1500 }).catch(() => null) as Read | null;
-    let r = await read();
-    if (!r || r.own) return null;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    type Look = { r: Read | null; hit: { loc: any; id: string; name: string } | null; other: number };
+    // One look: the page's reading of the pick and its recorded ids, then the LEARNER'S reading of each
+    // tagged candidate. `other` counts shown recorded-id elements that name another control (other
+    // words, or another role). A candidate the extractor cannot read is neither a hit nor another
+    // control. The tags live in the picked element's own document: the level that picked it names the frame.
+    const look = async (): Promise<Look> => {
+      const r = await picked.evaluate(recordedIdentityInPage, args, { timeout: 1500 }).catch(() => null) as Read | null;
+      if (!r || r.own) return { r, hit: null, other: 0 };
+      let other = r.ownOther;
+      for (const c of r.cands) {
+        const loc = this.locator({ css: `[${RECORDED_ID_HIT_ATTR}="${c.n}"]`, frame: from?.frame });
+        const raws = loc && typeof loc.evaluateAll === "function"
+          ? await loc.evaluateAll(extractFieldsInPage).catch(() => null) as RawField[] | null : null;
+        const raw = Array.isArray(raws) && raws.length === 1 ? raws[0] : null;
+        if (!raw) continue;
+        if (words.role && recordedRoleOf(raw).trim().toLowerCase() !== words.role) { other++; continue; }
+        if (raw.disabled) continue;
+        return { r, hit: { loc, id: c.id, name: c.name }, other };
+      }
+      return { r, hit: null, other };
+    };
+    let seen = await look();
+    if (!seen.r || seen.r.own) return null;
     const label = String(step.note || words.text || step.action).replace(/\s+/g, " ").slice(0, 80);
-    const pickShown = r.pickId ? `#${r.pickId.slice(0, 80)}` : "an element with no id";
+    const pickId = seen.r.pickId;
+    const pickShown = pickId ? `#${pickId.slice(0, 80)}` : "an element with no id";
+    const suspicion = seen.hit ? "" : this.namesakeSuspicion(own, pickId, seen.r.stampedBy, from);
     let waited = 0;
-    const namesakeOf = r.namesake?.step ?? -1;
-    if (!r.hit && r.namesake && r.ownShown === 0) {
+    const waitKey = `${this.arrayPass}:${this.currentStepIdx}`;
+    if (suspicion && seen.other === 0 && !this.namesakeWaited.has(waitKey)) {
+      this.namesakeWaited.add(waitKey);
       const t0 = Date.now();
       while (Date.now() - t0 < NAMESAKE_WAIT_MS) {
         await sleep(150);
-        const again = await read();
-        if (!again || again.own) break;
-        r = again;
-        if (r.hit || r.ownShown > 0) break;
+        const again = await look();
+        if (again.r?.own) return null; // the pick now carries a recorded id: it is the control
+        if (!again.r) continue; // mid re-render: look again
+        seen = again;
+        if (seen.hit || seen.other > 0) break;
       }
       waited = Date.now() - t0;
     }
-    if (r.hit) {
-      // The tag was set in the picked element's own document: the level that picked it names the frame.
-      const took = this.locator({ css: `[${RECORDED_ID_HIT_ATTR}="1"]`, frame: from?.frame });
-      if (took) {
-        const line = `"${label}" — its selector matched ${pickShown}, which carries its words but not the control it recorded; the recorded #${r.hit.slice(0, 80)} is on the page and reads "${r.hitName.slice(0, 40)}", so that was used${waited ? ` (it rendered ${(waited / 1000).toFixed(1)} s after the namesake, the control step ${namesakeOf + 1} clicked)` : ""} — re-record this step so its selector names it (#228)`;
-        this.resolveTrail.push(`  ...recorded identity: ${line}`);
-        // The step landed on the control it recorded: a self-heal and a re-record signal, not a defect
-        // in this filing (the agingNotes channel; driftWarnings would fail a clean score).
-        this.agingNotes.push(line);
-        return took.first();
-      }
-    }
-    if (r.namesake) {
-      const other = `the control step ${r.namesake.step + 1} clicked (${pickShown})`;
-      const ownState = r.ownShown > 0 ? `its own recorded #${own[0].slice(0, 80)} is on the page but names a control that is not a ${words.role || "control"} reading "${words.text.slice(0, 30)}"`
-        : `its own recorded #${own[0].slice(0, 80)} never rendered${waited ? ` (waited ${(waited / 1000).toFixed(1)} s)` : ""}`;
-      const line = `"${label}" — the only control answering its selector is ${other}; ${ownState}`;
+    if (seen.hit) {
+      const line = `"${label}" — its selector matched ${pickShown}, which carries its words but not the control it recorded; the recorded #${seen.hit.id.slice(0, 80)} is on the page and reads "${seen.hit.name.slice(0, 40)}", so that was used${waited ? ` (it rendered ${(waited / 1000).toFixed(1)} s after the suspected namesake: ${suspicion})` : ""} — re-record this step so its selector names it (#228)`;
       this.resolveTrail.push(`  ...recorded identity: ${line}`);
-      if (r.ownShown === 0) {
-        this.namesakeStop = `${line}. NOT clicked: that click would only repeat step ${r.namesake.step + 1}'s and report ok (#228, Tigard's menu "Apply" in place of the record type). Re-record this step.`;
-        this.driftWarnings.push(`${line} — not clicked (#228)`);
-      } else {
-        this.driftWarnings.push(`${line} — clicked it, verify (#228)`);
-      }
-    } else if (r.idTwin) {
-      this.resolveTrail.push(`  ...recorded identity: "${label}" — its pick ${pickShown} carries the id step ${r.idTwin.step + 1} recorded, but is not the node that step clicked; its own recorded #${own[0].slice(0, 80)} ${r.ownShown > 0 ? "is on the page but is not this control" : "is not on the page"} — clicked (#228)`);
+      // The step landed on the control it recorded: a self-heal and a re-record signal, not a defect
+      // in this filing (the agingNotes channel; driftWarnings would fail a clean score).
+      this.agingNotes.push(line);
+      return seen.hit.loc.first();
+    }
+    if (suspicion) {
+      const ownState = seen.other > 0 ? `is on the page but names another control, so it was not waited for`
+        : waited ? `never rendered (waited ${(waited / 1000).toFixed(1)} s)` : "has not rendered (this step already waited once)";
+      const line = `"${label}" — its selector matched ${pickShown}, a suspected namesake: ${suspicion}; its own recorded #${own[0].slice(0, 80)} ${ownState} — clicked it, as without this check; verify it was this step's control (#228)`;
+      this.resolveTrail.push(`  ...recorded identity: ${line}`);
+      this.driftWarnings.push(line);
     }
     return null;
   }

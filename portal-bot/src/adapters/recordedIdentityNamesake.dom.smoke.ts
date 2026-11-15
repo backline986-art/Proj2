@@ -1,42 +1,60 @@
-// A MATCH THAT CARRIES THE STEP'S WORDS BUT NOT ITS RECORDED ID IS A NAMESAKE (#228).
+// A MATCH THAT CARRIES THE STEP'S WORDS BUT NOT ITS RECORDED ID MAY BE A NAMESAKE (#228).
 //
 // Live on City of Tigard (Tyler EnerGov), 2026-11-14: the learner recorded the record-type click as
 //
 //   { role: "link", name: "Apply", exact: true, fallbacks: [{ css: "#apply-btn-ResidentialRenewableEnergy-Prescriptive" }] }
 //
 // The real control's accessible name is its aria-label ("Apply Residential Renewable Energy -
-// Prescriptive"), so that role+name never matches it. It matches exactly ONE element — the top menu's
-// "Apply" tab, which is step 1's own recorded target. resolveLocator accepted that single visible
-// match at level 0 and never asked the recorded id; the click reported ok, the application never
+// Prescriptive"), so that role+name never matches it. It matches exactly ONE element: the top
+// menu's "Apply" tab, step 1's own recorded target. resolveLocator accepted that single visible
+// match at level 0 and never asked the recorded id. The click reported ok, the application never
 // opened, and the next step ("Address Type") waited out the stall watchdog. The record-type button
-// renders ~116 ms after the assistant's Search, and the page carries a hidden ng-hide twin of it
-// (and a hidden twin of the menu tab in #sidebarMenu).
+// renders ~116 ms after the assistant's Search. The page also carries a hidden ng-hide twin of it,
+// and a hidden twin of the menu tab in #sidebarMenu.
 //
-// The namesake is the very node step 1 clicked: EnerGov's menu is persistent chrome outside its
-// ng-view (fixtures/tyler-login-link.html), and so is this fixture's.
+// The rule under test is that a suspected namesake buys a bounded wait (NAMESAKE_WAIT_MS, 10 s) for
+// the step's own recorded control and NEVER a stop. If the control renders it is clicked; if not,
+// the click goes where it would have gone without the check, and a drift warning names the
+// suspicion. Whether an element has the recorded role is answered by the learner's own reading of
+// it (extractFieldsInPage + recordedRoleOf), not by a second table.
 //
-//   MUST PASS  — (A) the live shape (rows ~150 ms after Search) opens the RIGHT record type and fills
-//                Address Type; (B) rows 1.5 s after Search, which forces the namesake WAIT, the same;
-//                (C) rows that never render: the click is REFUSED, named, the menu tab is not clicked
-//                a second time; (C') the same with a step note of "Apply" and no hidden menu twin, so
-//                only the refusal's heal exclusion keeps the heal off the menu tab (and the recipe).
-//   MUST KEEP  — (a) PowerClerk's per-render id: `{css:"#pcInputBase34", fallbacks:[{label:"Model",
-//                nth:0}]}` where #pcInputBase34 now names a visible "Energy Source" still fills Model;
-//                the label-primary shape the same; and a click recorded by "Add Inverter" whose id now
-//                names a visible "Remove Inverter" still clicks Add Inverter (the id alone never wins);
-//                (b) two "Next" steps sharing #button-Next on consecutive pages both click;
-//                (c) a step whose recorded id is gone and whose role+name is nobody else's target
-//                clicks with NO added wait;
-//                (d) review R1 — a counter-id wizard (each view's Next takes the next `cw-N`, one fewer
-//                than at learn), so each Next carries an id an EARLIER step recorded: every step runs;
-//                (e) review (id drift) — page 2's fresh Next carries step 1's recorded #button-Next
-//                while step 2 recorded #button-Next-2: it clicks;
-//                (f) a persistent footer Next whose id drifted (#button-1037) where both steps recorded
-//                #button-1034: one control clicked twice, never a namesake — it clicks twice, no wait;
-//                (g) review R4 — a WRITE is never moved by this rule: `{label:"City", fallbacks:[{css:
-//                "#c9"}]}` with #c9 a "City (mailing)" placeholder box fills the labelled City;
-//                (h) review R2 — a wizard's "Next" button whose recorded id now names a results pager's
-//                "Next" LINK: the role differs, so the button is clicked and the pager is not.
+//   MUST PASS  (each fails with recipeAdapter.ts at origin/main):
+//     A0  rows already up when the step resolves: the recorded id displaces the namesake, no wait.
+//     A   the live shape, rows ~150 ms after Search: the namesake wait finds the record type.
+//     B   rows 1.5 s after Search: the same.
+//     M2  the record type is an href-less, role-less <a> that routes by onclick (AngularJS ng-click).
+//         The learner reads every <a> as a link, and so must the check.
+//     m1  the menu is rebuilt by innerHTML on every hashchange, so step 1's click stamp is lost. The
+//         new tab still carries the id step 1's click read live (#link-Menu-Apply).
+//     m1n the same with no ids on the menu at all (step 1 recorded by role+name alone): the selector
+//         that found the pick is step 1's own, and step 1's control carried no id.
+//     m2  rows 4.5 s after Search (a slow government search): inside the 10 s wait.
+//     C   rows never render: the record-type step is NOT stopped. After the bounded wait it clicks
+//         what it would have clicked without the check (the menu tab, a second time), and a drift
+//         warning names the suspicion.
+//   MUST KEEP  (each passes with recipeAdapter.ts at origin/main):
+//     a   PowerClerk's per-render id: `{css:"#pcInputBase34", fallbacks:[{label:"Model", nth:0}]}`,
+//         where #pcInputBase34 now names a visible "Energy Source", still fills Model. The
+//         label-primary shape does the same. A click recorded by "Add Inverter" whose id now names
+//         a visible "Remove Inverter" still clicks Add Inverter: the id alone never wins.
+//     b   two consecutive {role:button, name:Next, fallbacks:[{css:"#button-Next"}]} steps both click.
+//     c   a click whose recorded id is gone, and whose role+name matches one element that no other
+//         step is for, clicks with NO added wait (< 1 s).
+//     d   review R1, a counter-id wizard: each view's Next takes the next `cw-N`, one fewer than at
+//         learn, so each fresh Next carries an id an EARLIER step recorded. Every step runs, with no
+//         wait and no #228 note.
+//     e   page 2's fresh Next carries step 1's #button-Next while step 2 recorded #button-Next-2. It
+//         reaches page 3, paying the wait at most once.
+//     f   a persistent footer Next whose id drifted (#button-1037), with both steps recorded
+//         #button-1034. One control clicked twice: it clicks twice, no wait.
+//     g   review R4: a WRITE is never moved by this rule.
+//     h   review R2: a wizard's "Next" button whose recorded id now names a results pager's "Next"
+//         LINK. The role differs, so the button is clicked and the pager is not.
+//     P1  the re-review's persistent footer: the learn saw a fresh Next per view (#btnNext1,
+//         #btnNext2), and the portal now renders one persistent footer Next (#next). It reaches page
+//         3 with ok=true. Round 2 refused this click.
+//     P2  the same footer, where the earlier step recorded only a css hook
+//         ([data-test-role="next-btn"]) and no id: page 3, ok=true.
 //
 //   npx tsx portal-bot/src/adapters/recordedIdentityNamesake.dom.smoke.ts
 import "../smokeArtifactDirs"; // hand-run safe: artifact dirs default to a temp folder, never data/
@@ -46,43 +64,56 @@ import type { PortalRecipe, RecipeStep } from "../../../shared/src/types";
 import { RecipeAdapter } from "./recipeAdapter";
 
 let failures = 0;
+const failedLabels: string[] = [];
 const check = (label: string, ok: boolean, detail = ""): void => {
   if (ok) console.log(`  ok   - ${label}`);
-  else { failures++; console.error(`  FAIL - ${label}\n         ${detail}`); }
+  else { failures++; failedLabels.push(label); console.error(`  FAIL - ${label}\n         ${detail}`); }
 };
+/** The recipe adapter's namesake wait (NAMESAKE_WAIT_MS), mirrored for the timing checks. */
+const WAIT_MS = 10_000;
 
 // ---- the EnerGov self-service shape -----------------------------------------------------------
-// A hash-routed SPA: the menu stays put, the view re-renders. Each result row carries its Apply link
-// TWICE (ng-show / ng-hide), hidden copy first, both with the same id. A decoy type comes first so a
-// positional or text-only pick lands on the wrong permit.
+// A hash-routed SPA: the menu stays put (unless ?rerender=1), the view re-renders. Each result row
+// carries its Apply link TWICE (ng-show / ng-hide), hidden copy first, both with the same id. A
+// decoy type comes first so a positional or text-only pick lands on the wrong permit.
+//   ?delay=N     rows N ms after Search (-1: the search finds nothing)
+//   ?nosidebar=1 no hidden twin of the menu tab
+//   ?rerender=1  the menu is rebuilt by innerHTML on every hashchange (a stamp on it is lost)
+//   ?noid=1      the menu tabs carry no id
+//   ?nohref=1    the record-type anchors carry no href and no role, and route by onclick
 const ENERGOV = `<!doctype html><html><head><style>
   body { font: 14px sans-serif; padding: 16px; }
   .ng-hide { display: none !important; }
   #sidebarMenu { display: none; }
   .mainMenuNav-a { display: inline-block; padding: 8px 14px; background: #246; color: #fff; text-decoration: none; }
-  .btn { display: inline-block; padding: 6px 12px; background: #06c; color: #fff; text-decoration: none; }
+  .btn { display: inline-block; padding: 6px 12px; background: #06c; color: #fff; text-decoration: none; cursor: pointer; }
   .row { margin: 8px 0; }
 </style></head><body>
-  <nav id="topMenu">
-    <a id="link-Menu-Home" class="mainMenuNav-a" href="#/home">Home</a>
-    <a id="link-Menu-Apply" class="mainMenuNav-a" href="#/applicationAssistant">Apply</a>
-  </nav>
-  <div id="sidebarMenu"><a id="link-Menu-Apply" class="mainMenuNav-a" href="#/applicationAssistant">Apply</a></div>
+  <nav id="topMenu"></nav>
+  <div id="sidebarMenu"></div>
   <main id="view"></main>
 <script>
-  var DELAY = Number(new URLSearchParams(location.search).get('delay') || '150');
-  // (C') no hidden twin of the menu tab, so a heal by the word "Apply" would find exactly one.
-  if (new URLSearchParams(location.search).get('nosidebar')) document.getElementById('sidebarMenu').remove();
+  var q = new URLSearchParams(location.search);
+  var DELAY = Number(q.get('delay') || '150');
+  var NOID = !!q.get('noid'), NOHREF = !!q.get('nohref'), RERENDER = !!q.get('rerender');
+  if (q.get('nosidebar')) document.getElementById('sidebarMenu').remove();
   // Reported to the test process, so neither a retry's reload nor the stall watchdog closing the page
   // can lose the evidence.
   var report = function (k, v) { try { if (window.__smokeEvent) window.__smokeEvent(k, v); } catch (e) { /* not wired */ } };
-  var bump = function () { report('menu', ''); };
-  document.querySelectorAll('[id="link-Menu-Apply"]').forEach(function (a) {
-    a.addEventListener('click', bump);
-  });
+  function menu() {
+    var id = function (x) { return NOID ? '' : ' id="' + x + '"'; };
+    var html = '<a' + id('link-Menu-Home') + ' class="mainMenuNav-a" href="#/home">Home</a> '
+      + '<a' + id('link-Menu-Apply') + ' class="mainMenuNav-a menu-apply" href="#/applicationAssistant">Apply</a>';
+    document.getElementById('topMenu').innerHTML = html;
+    var side = document.getElementById('sidebarMenu');
+    if (side) side.innerHTML = '<a' + id('link-Menu-Apply') + ' class="mainMenuNav-a menu-apply" href="#/applicationAssistant">Apply</a>';
+    document.querySelectorAll('.menu-apply').forEach(function (a) { a.addEventListener('click', function () { report('menu', ''); }); });
+  }
   function applyLink(type, label, href, hidden) {
-    return '<div ng-show="' + (hidden ? '!' : '') + 'vm.isCollapsed" class="apply-btn-align' + (hidden ? ' ng-hide' : '') + '" aria-hidden="' + (hidden ? 'true' : 'false') + '">'
-      + '<a id="apply-btn-' + type + '" class="btn btn-primary" tabindex="0" role="link" aria-label="Apply ' + label + '" href="' + href + '">\\n Apply\\n </a></div>';
+    var a = NOHREF
+      ? '<a id="apply-btn-' + type + '" class="btn btn-primary" tabindex="0" aria-label="Apply ' + label + '" onclick="location.hash=\\'' + href + '\\'">\\n Apply\\n </a>'
+      : '<a id="apply-btn-' + type + '" class="btn btn-primary" tabindex="0" role="link" aria-label="Apply ' + label + '" href="' + href + '">\\n Apply\\n </a>';
+    return '<div ng-show="' + (hidden ? '!' : '') + 'vm.isCollapsed" class="apply-btn-align' + (hidden ? ' ng-hide' : '') + '" aria-hidden="' + (hidden ? 'true' : 'false') + '">' + a + '</div>';
   }
   function rows() {
     return [['ResidentialMechanical', 'Residential Mechanical', '#/permit/apply/12/0/0'],
@@ -97,6 +128,7 @@ const ENERGOV = `<!doctype html><html><head><style>
       v.innerHTML = '<h2>Application Assistant</h2><input id="assistantSearch" aria-label="Search applications" value="solar">'
         + ' <button id="button-Search" type="button">Search</button><div id="results"></div>';
       document.getElementById('button-Search').addEventListener('click', function () {
+        report('search', '');
         if (DELAY < 0) return; // the search found nothing for this address
         setTimeout(function () { document.getElementById('results').innerHTML = rows(); }, DELAY);
       });
@@ -108,7 +140,8 @@ const ENERGOV = `<!doctype html><html><head><style>
       v.innerHTML = '<h2>Home</h2>';
     }
   }
-  window.addEventListener('hashchange', render);
+  menu();
+  window.addEventListener('hashchange', function () { if (RERENDER) menu(); render(); });
   render();
 </script>
 </body></html>`;
@@ -168,15 +201,18 @@ const COUNTER = `<!doctype html><html><head><style>body { font: 14px sans-serif;
 </script>
 </body></html>`;
 
-// ---- (f) a persistent footer Next whose id drifted since the learn ------------------------------
-// The view re-renders; the footer (and its Next) never does. The learn saw it as #button-1034.
+// ---- (f) / (P1, P2) a persistent footer Next ------------------------------------------------------
+// The view re-renders; the footer (and its Next) never does. ?id= names the footer button's id;
+// ?hook=1 gives it the data-test-role hook P2's first step recorded.
 const FOOTER = `<!doctype html><html><head><style>body { font: 14px sans-serif; padding: 16px; }</style></head><body>
   <main id="view"></main>
-  <footer><button id="button-1037" type="button">Next</button></footer>
+  <footer id="foot"></footer>
 <script>
+  var q = new URLSearchParams(location.search);
   window.__page = 1;
+  document.getElementById('foot').innerHTML = '<button id="' + (q.get('id') || 'button-1037') + '"' + (q.get('hook') ? ' data-test-role="next-btn"' : '') + ' type="button">Next</button>';
   function render() { document.getElementById('view').innerHTML = '<h2>Page ' + window.__page + '</h2>'; }
-  document.getElementById('button-1037').addEventListener('click', function () { window.__page++; render(); });
+  document.querySelector('#foot button').addEventListener('click', function () { window.__page++; render(); });
   render();
 </script>
 </body></html>`;
@@ -228,28 +264,34 @@ const TIGARD_STEPS: RecipeStep[] = [
   { action: "click", phase: "fill", selector: { role: "link", name: "Apply", exact: true, fallbacks: [{ css: "#apply-btn-ResidentialRenewableEnergy-Prescriptive" }] }, note: "record type (verified): Residential Renewable Energy - Prescriptive" },
   { action: "select", phase: "fill", selector: { label: "Address Type", fallbacks: [{ css: "#addressType" }] }, value: "Location", note: "Address Type" },
 ] as RecipeStep[];
+// m1n: a menu with no ids, so the learn recorded step 1 by role+name alone.
+const TIGARD_NOID_STEPS: RecipeStep[] = TIGARD_STEPS.map((s, i) => (i === 0 ? { ...s, selector: { role: "link", name: "Apply", exact: true } } : s)) as RecipeStep[];
 
 type Data = { driftWarnings?: string[]; agingNotes?: string[]; skipped?: string[]; failedStepIndex?: number; healedSteps?: Array<{ stepIndex: number; selector?: unknown }> };
 const browser = await chromium.launch();
 
-// What the fixture reported (menu-tab clicks, the application route opened), per page.
-const events = new WeakMap<Page, Array<{ kind: string; value: string }>>();
+// What the fixture reported (menu-tab clicks, the Search click, the application route opened), per
+// page, each with the time it arrived.
+type Ev = { kind: string; value: string; t: number };
+const events = new WeakMap<Page, Ev[]>();
 async function freshPage(path: string): Promise<Page> {
   const ctx = await browser.newContext();
   await ctx.addInitScript("globalThis.__name = globalThis.__name || function (fn) { return fn; };");
   const page = await ctx.newPage();
-  const seen: Array<{ kind: string; value: string }> = [];
+  const seen: Ev[] = [];
   events.set(page, seen);
-  await page.exposeFunction("__smokeEvent", (kind: string, value: string) => { seen.push({ kind, value }); });
+  await page.exposeFunction("__smokeEvent", (kind: string, value: string) => { seen.push({ kind, value, t: Date.now() }); });
   await page.goto(`${base}${path}`);
   return page;
 }
-const menuClicks = (page: Page): number => (events.get(page) ?? []).filter((e) => e.kind === "menu").length;
-const openedRoute = (page: Page): string => [...new Set((events.get(page) ?? []).filter((e) => e.kind === "opened").map((e) => e.value))].join(" ");
-async function replay(page: Page, steps: RecipeStep[], fieldValues: Record<string, string> = {}) {
+const evs = (page: Page, kind: string): Ev[] => (events.get(page) ?? []).filter((e) => e.kind === kind);
+const menuClicks = (page: Page): number => evs(page, "menu").length;
+const openedRoute = (page: Page): string => [...new Set(evs(page, "opened").map((e) => e.value))].join(" ");
+async function replay(page: Page, steps: RecipeStep[], fieldValues: Record<string, string> = {}, stallTimeoutMs = 45_000) {
   // A 45 s stall watchdog instead of the production 8 minutes: without the fix, the step after the
   // namesake click waits it out exactly as it did live, and the smoke should not take half an hour.
-  const adapter = new RecipeAdapter(recipeOf(steps, page.url()), fieldValues, {}, { autoSubmit: false, stallTimeoutMs: 45_000 });
+  // Always well above the 10 s namesake wait, so the watchdog never fires DURING it.
+  const adapter = new RecipeAdapter(recipeOf(steps, page.url()), fieldValues, {}, { autoSubmit: false, stallTimeoutMs });
   (adapter as unknown as { page: unknown }).page = page;
   const t0 = Date.now();
   const res = await adapter.fillApplication({} as never);
@@ -257,89 +299,79 @@ async function replay(page: Page, steps: RecipeStep[], fieldValues: Record<strin
   return { adapter, res, data, ms: Date.now() - t0 };
 }
 const said = (d: Data): string[] => [...(d.driftWarnings ?? []), ...(d.agingNotes ?? [])];
+const blocking228 = (d: Data): string[] => (d.driftWarnings ?? []).filter((w) => /#228/.test(w));
 
-// (A) and (B): the record type opens and the application's first field fills.
-// (A0) rows already up when the step resolves: the recorded id displaces the namesake with no wait.
-for (const [tag, delay] of [
-  ["A0 rows rendered at once (displacement, no wait)", 0],
-  ["A live shape, rows 150 ms after Search", 150],
-  ["B rows 1.5 s after Search (the namesake wait)", 1500],
-] as const) {
-  console.log(`\n${tag}`);
-  const page = await freshPage(`/?delay=${delay}`);
-  const { res, data, ms } = await replay(page, TIGARD_STEPS);
+// ---- MUST PASS: the record type opens and the application's first field fills ------------------
+for (const c of [
+  { tag: "A0", what: "rows rendered at once (displacement, no wait)", path: "/?delay=0", steps: TIGARD_STEPS },
+  { tag: "A", what: "live shape, rows 150 ms after Search", path: "/?delay=150", steps: TIGARD_STEPS },
+  { tag: "B", what: "rows 1.5 s after Search (the namesake wait)", path: "/?delay=1500", steps: TIGARD_STEPS },
+  { tag: "M2", what: "an href-less, role-less record-type <a> routed by onclick", path: "/?delay=150&nohref=1", steps: TIGARD_STEPS },
+  { tag: "m1", what: "the menu rebuilt on every hashchange (stamp lost)", path: "/?delay=150&rerender=1", steps: TIGARD_STEPS },
+  { tag: "m1n", what: "the menu rebuilt, and no ids on it at all", path: "/?delay=150&rerender=1&noid=1", steps: TIGARD_NOID_STEPS },
+  { tag: "m2", what: "rows 4.5 s after Search (a slow search)", path: "/?delay=4500", steps: TIGARD_STEPS },
+]) {
+  console.log(`\n${c.tag} ${c.what}`);
+  const page = await freshPage(c.path);
+  const { res, data, ms } = await replay(page, c.steps);
   const opened = openedRoute(page);
   const menu = menuClicks(page);
   const addressType = await page.locator("#addressType").inputValue().catch(() => "(not on the page)");
   console.log(`   ok=${res.ok} in ${(ms / 1000).toFixed(1)}s, opened=${JSON.stringify(opened)}, menu clicks=${menu}, Address Type=${JSON.stringify(addressType)}`);
-  console.log(`   notes: ${JSON.stringify(said(data).filter((w) => /#228/.test(w)).map((w) => w.slice(0, 220)))}`);
-  check(`${tag.split(" ")[0]}: MUST PASS — the replay opens the recorded record type, not the menu's "Apply"`,
+  console.log(`   notes: ${JSON.stringify(said(data).filter((w) => /#228/.test(w)).map((w) => w.slice(0, 260)))}`);
+  check(`${c.tag}: MUST PASS — the replay opens the recorded record type, not the menu's "Apply"`,
     opened === "#/permit/apply/94/0/0",
     `opened=${JSON.stringify(opened)} — the namesake menu tab was clicked (or the decoy type), and the application never opened`);
-  check(`${tag.split(" ")[0]}: MUST PASS — the menu tab is clicked once (by step 1), never again by the record-type step`,
+  check(`${c.tag}: MUST PASS — the menu tab is clicked once (by step 1), never again by the record-type step`,
     menu === 1, `menu clicks=${menu}`);
-  check(`${tag.split(" ")[0]}: MUST PASS — Address Type fills on the opened application`,
+  check(`${c.tag}: MUST PASS — Address Type fills on the opened application`,
     addressType === "Location", `Address Type=${JSON.stringify(addressType)}`);
-  check(`${tag.split(" ")[0]}: the run completes`, res.ok === true, String(res.message ?? "").slice(0, 300));
+  check(`${c.tag}: MUST PASS — the run completes`, res.ok === true, String(res.message ?? "").slice(0, 300));
   const rescue = said(data).find((w) => /#228/.test(w) && /apply-btn-ResidentialRenewableEnergy-Prescriptive/.test(w)) ?? "";
-  check(`${tag.split(" ")[0]}: the rescue is reported, so the recipe is re-recorded`, !!rescue, JSON.stringify(said(data)));
+  check(`${c.tag}: the rescue is reported, so the recipe is re-recorded`, !!rescue, JSON.stringify(said(data)));
   // The step landed on the control it recorded: a self-heal (agingNotes), never a defect that fails
   // a clean score (driftWarnings).
-  check(`${tag.split(" ")[0]}: the rescue is an aging note, not a blocking drift warning`,
-    (data.agingNotes ?? []).includes(rescue) && !(data.driftWarnings ?? []).some((w) => /#228/.test(w)),
+  check(`${c.tag}: the rescue is an aging note, not a blocking drift warning`,
+    (data.agingNotes ?? []).includes(rescue) && blocking228(data).length === 0,
     `drift=${JSON.stringify(data.driftWarnings ?? [])}`);
-  if (delay === 0) {
-    check("A0: the rows were up before the step resolved — displaced with no wait", !!rescue && !/rendered .* after the namesake/.test(rescue), rescue);
+  if (c.tag === "A0") {
+    check("A0: the rows were up before the step resolved — displaced with no wait", !!rescue && !/rendered .* after the suspected namesake/.test(rescue), rescue);
   }
-  if (delay === 1500) {
-    check("B: the namesake WAIT is what found it", /rendered 1\.\d s after the namesake/.test(rescue), rescue);
-  }
+  if (c.tag === "B") check("B: the namesake WAIT is what found it", /rendered 1\.\d s after the suspected namesake/.test(rescue), rescue);
+  if (c.tag === "m2") check("m2: the namesake wait found it after the slow search", /rendered [4-6]\.\d s after the suspected namesake/.test(rescue), rescue);
+  if (c.tag === "m1") check("m1: suspected by the id step 1's click read, not by a stamp", /carries #link-Menu-Apply, the id of the control step 1 clicked/.test(rescue), rescue);
+  if (c.tag === "m1n") check("m1n: suspected by step 1's own selector (its control carried no id)", /the selector that found it is step 1's own/.test(rescue), rescue);
+  if (c.tag === "A" || c.tag === "M2") check(`${c.tag}: suspected by step 1's click stamp`, /it is the very control step 1 clicked/.test(rescue), rescue);
   await page.context().close().catch(() => null);
 }
 
-// (C): the search found nothing — the record type never renders.
+// ---- MUST PASS (C): the search found nothing — the record type never renders --------------------
+// Never a stop at the record-type step: after the bounded wait it clicks what it would have clicked
+// without the check (the menu tab), and says so. Without the check the second menu click comes at
+// once; with it, a full wait after the Search.
 {
   const tag = "C rows never render";
   console.log(`\n${tag}`);
   const page = await freshPage("/?delay=-1");
-  const { res, data, ms } = await replay(page, TIGARD_STEPS);
-  const opened = openedRoute(page);
-  const menu = menuClicks(page);
-  console.log(`   ok=${res.ok} in ${(ms / 1000).toFixed(1)}s, failedStepIndex=${data.failedStepIndex}, menu clicks=${menu}`);
-  console.log(`   message: ${String(res.message ?? "").slice(0, 400)}`);
-  check("C: MUST PASS — the record-type click is NOT satisfied by the earlier step's menu tab (menu clicked once)",
-    menu === 1, `menu clicks=${menu} — the namesake was clicked and the step reported ok`);
-  check("C: MUST PASS — the run stops AT the record-type step, named",
-    res.ok === false && data.failedStepIndex === 2 && /NOT clicked/.test(String(res.message ?? "")) && /the control step 1 clicked/.test(String(res.message ?? "")),
-    `ok=${res.ok} failedStepIndex=${data.failedStepIndex} message=${String(res.message ?? "").slice(0, 300)}`);
-  check("C: nothing opened", opened === "", `opened=${JSON.stringify(opened)}`);
-  check(`C: the refusal is prompt — one bounded wait, no retries or reloads (took ${(ms / 1000).toFixed(1)}s)`,
-    ms < 25000, `took ${ms}ms`);
+  const { res, data, ms } = await replay(page, TIGARD_STEPS, {}, 30_000);
+  const menus = evs(page, "menu");
+  const search = evs(page, "search")[0];
+  const gap = menus.length >= 2 && search ? menus[1].t - search.t : -1;
+  console.log(`   ok=${res.ok} in ${(ms / 1000).toFixed(1)}s, failedStepIndex=${data.failedStepIndex}, menu clicks=${menus.length}, second menu click ${gap} ms after Search`);
+  console.log(`   drift: ${JSON.stringify(blocking228(data).map((w) => w.slice(0, 300)))}`);
+  console.log(`   message: ${String(res.message ?? "").slice(0, 300)}`);
+  check("C: MUST PASS — the record-type step is not stopped: it clicks as it would without the check (the menu tab, a second time)",
+    menus.length === 2 && data.failedStepIndex !== 2, `menu clicks=${menus.length} failedStepIndex=${data.failedStepIndex}`);
+  check(`C: MUST PASS — that click came only after the bounded wait for its own control (${gap} ms after Search)`,
+    gap >= WAIT_MS - 500 && gap < WAIT_MS + 6000, `second menu click ${gap} ms after Search`);
+  const line = blocking228(data).find((w) => /suspected namesake/.test(w) && /it is the very control step 1 clicked/.test(w) && /apply-btn-ResidentialRenewableEnergy-Prescriptive never rendered \(waited 1\d\.\d s\)/.test(w)) ?? "";
+  check("C: MUST PASS — a drift warning names the suspicion, so a person reading the run sees it", !!line, JSON.stringify(data.driftWarnings ?? []));
+  check("C: nothing opened", openedRoute(page) === "", `opened=${JSON.stringify(openedRoute(page))}`);
+  check("C: the recipe is not patched by a heal of the record-type step", !(data.healedSteps ?? []).some((h) => h.stepIndex === 2), JSON.stringify(data.healedSteps ?? []));
   await page.context().close().catch(() => null);
 }
 
-// (C'): the same refusal where nothing ELSE keeps the heal off the menu tab. C's step note ("record
-// type (verified): …") is no anchor for the menu tab, and C's hidden #sidebarMenu twin makes a heal
-// by "Apply" refuse as ambiguous. Here the note IS "Apply" and the twin is gone: only the refusal's
-// heal exclusion stops the heal from clicking the menu tab and patching the recipe with it.
-{
-  const tag = "C' rows never render, note \"Apply\", no hidden menu twin";
-  console.log(`\n${tag}`);
-  const page = await freshPage("/?delay=-1&nosidebar=1");
-  const steps = TIGARD_STEPS.map((s, i) => (i === 2 ? { ...s, note: "Apply" } : s)) as RecipeStep[];
-  const { res, data, ms } = await replay(page, steps);
-  const menu = menuClicks(page);
-  console.log(`   ok=${res.ok} in ${(ms / 1000).toFixed(1)}s, failedStepIndex=${data.failedStepIndex}, menu clicks=${menu}, healedSteps=${JSON.stringify(data.healedSteps ?? [])}`);
-  console.log(`   message: ${String(res.message ?? "").slice(0, 300)}`);
-  check("C': MUST PASS — the heal does not click the menu tab either (menu clicked once)",
-    menu === 1, `menu clicks=${menu} — the heal re-anchored "Apply" onto the namesake and clicked it`);
-  check("C': MUST PASS — the recipe is not patched with the namesake (no healed step)",
-    (data.healedSteps ?? []).length === 0, `healedSteps=${JSON.stringify(data.healedSteps ?? [])}`);
-  check("C': the run stops AT that step, named",
-    res.ok === false && data.failedStepIndex === 2 && /NOT clicked/.test(String(res.message ?? "")),
-    `ok=${res.ok} failedStepIndex=${data.failedStepIndex} message=${String(res.message ?? "").slice(0, 300)}`);
-  await page.context().close().catch(() => null);
-}
+// ---- MUST KEEP --------------------------------------------------------------------------------
 
 // (a) PowerClerk's per-render ids must not win.
 {
@@ -376,14 +408,18 @@ for (const [tag, delay] of [
   await page2.context().close().catch(() => null);
 }
 
-// (b) Two "Next" steps that recorded the same id: the second is not a namesake of the first.
+// (b) Two "Next" steps that recorded the same id: the second is not a namesake of the first. Its run
+// time is the baseline a two-Next replay costs with no #228 handling at all (the replay's own settles
+// and end-of-run reads), which the at-most-one-wait checks below are measured against.
+let twoNextBaselineMs = 0;
 {
   console.log("\nb two Next steps sharing #button-Next");
   const page = await freshPage("/wizard");
   const next: RecipeStep = { action: "click", phase: "fill", selector: { role: "button", name: "Next", exact: true, fallbacks: [{ css: "#button-Next" }] }, note: "advance: Next" } as RecipeStep;
-  const { res, data } = await replay(page, [next, { ...next }]);
+  const { res, data, ms } = await replay(page, [next, { ...next }]);
+  twoNextBaselineMs = ms;
   const reached = await page.evaluate(() => (window as unknown as { __page: number }).__page).catch(() => -1);
-  console.log(`   ok=${res.ok}, reached page ${reached}`);
+  console.log(`   ok=${res.ok} in ${(ms / 1000).toFixed(1)}s, reached page ${reached}`);
   check("b: MUST KEEP — both Next steps click (page 3 reached)", reached === 3 && res.ok === true,
     `reached page ${reached}, ok=${res.ok}: ${String(res.message ?? "").slice(0, 200)}`);
   check("b: no namesake handling fired", !said(data).some((w) => /#228/.test(w)), JSON.stringify(said(data)));
@@ -403,8 +439,9 @@ for (const [tag, delay] of [
   check("c: MUST KEEP — the step still clicks the one control its role+name names", continued === 1 && res.ok === true,
     `continued=${continued} ok=${res.ok}: ${String(res.message ?? "").slice(0, 200)}`);
   check("c: no namesake handling fired", !said(data).some((w) => /#228/.test(w)), JSON.stringify(said(data)));
-  // The resolution itself, timed: exactly the acting path's guard, for the Continue step.
-  const a = adapter as unknown as { currentStepIdx: number; identityGuard: unknown; namesakeStop: unknown; resolveLocator: (s: unknown, h?: string) => Promise<unknown> };
+  // The resolution itself, timed: exactly the acting path's guard, for the Continue step, with the
+  // run's own click records in place.
+  const a = adapter as unknown as { currentStepIdx: number; identityGuard: unknown; resolveLocator: (s: unknown, h?: string) => Promise<unknown> };
   a.currentStepIdx = 1;
   a.identityGuard = steps[1];
   const t0 = Date.now();
@@ -414,16 +451,14 @@ for (const [tag, delay] of [
   a.identityGuard = null;
   check("c: the timed resolution ran", threw === "", threw);
   console.log(`   resolution of the Continue step took ${dt} ms`);
-  check(`c: MUST KEEP — no added wait (resolution ${dt} ms, well under 1 s)`, dt < 1000 && a.namesakeStop == null,
-    `took ${dt}ms, namesakeStop=${JSON.stringify(a.namesakeStop)}`);
+  check(`c: MUST KEEP — no added wait (resolution ${dt} ms, well under 1 s)`, dt < 1000, `took ${dt}ms`);
   await page.context().close().catch(() => null);
 }
 
-const blocking228 = (d: Data): string[] => (d.driftWarnings ?? []).filter((w) => /#228/.test(w));
-
 // (d) review R1: a counter-id wizard. Each Next is a fresh node carrying an id an earlier step
 // recorded (view 1's Next is cw-1, Description's recorded id; view 2's is cw-2, view 1's recorded
-// Next). Neither is the node an earlier step clicked: both click, with no wait.
+// Next). Neither is the node an earlier click went to, nor carries that node's id: both click, with
+// no wait and no note.
 {
   console.log("\nd counter-id wizard (review R1)");
   const page = await freshPage("/counter");
@@ -442,7 +477,7 @@ const blocking228 = (d: Data): string[] => (d.driftWarnings ?? []).filter((w) =>
   console.log(`   ok=${res.ok} in ${(ms / 1000).toFixed(1)}s, view=${view}, Phone=${JSON.stringify(phone)}, failedStepIndex=${data.failedStepIndex}`);
   console.log(`   skipped=${JSON.stringify(data.skipped ?? [])} said=${JSON.stringify(said(data)).slice(0, 600)}`);
   if (!res.ok) console.log(`   message: ${String(res.message ?? "").slice(0, 300)}`);
-  check("d: MUST KEEP — both counter-id Nexts click and the last view fills (no namesake stop)",
+  check("d: MUST KEEP — both counter-id Nexts click and the last view fills",
     res.ok === true && view === 3 && phone === "555-0100",
     `ok=${res.ok} view=${view} Phone=${JSON.stringify(phone)} failedStepIndex=${data.failedStepIndex}: ${String(res.message ?? "").slice(0, 300)}`);
   check("d: no blocking #228 warning", blocking228(data).length === 0, JSON.stringify(blocking228(data)));
@@ -450,20 +485,29 @@ const blocking228 = (d: Data): string[] => (d.driftWarnings ?? []).filter((w) =>
   await page.context().close().catch(() => null);
 }
 
-// (e) review (id drift): page 2's Next is a FRESH node carrying step 1's recorded #button-Next,
-// while step 2 recorded #button-Next-2. It is not the node step 1 clicked: it clicks.
-{
-  console.log("\ne drifted wizard ids (fresh Next carries step 1's id)");
-  const page = await freshPage("/wizard");
-  const next = (id: string): RecipeStep => ({ action: "click", phase: "fill", selector: { role: "button", name: "Next", exact: true, fallbacks: [{ css: `#${id}` }] }, note: "advance: Next" } as RecipeStep);
-  const { res, data, ms } = await replay(page, [next("button-Next"), next("button-Next-2")]);
+// A two-Next replay that must reach page 3 with ok=true, paying the namesake wait at most once.
+async function twoNexts(tag: string, path: string, steps: RecipeStep[]): Promise<void> {
+  const page = await freshPage(path);
+  const { res, data, ms } = await replay(page, steps);
   const reached = await page.evaluate(() => (window as unknown as { __page: number }).__page).catch(() => -1);
   console.log(`   ok=${res.ok} in ${(ms / 1000).toFixed(1)}s, reached page ${reached}, failedStepIndex=${data.failedStepIndex}`);
+  console.log(`   #228: ${JSON.stringify(said(data).filter((w) => /#228/.test(w)).map((w) => w.slice(0, 260)))}`);
   if (!res.ok) console.log(`   message: ${String(res.message ?? "").slice(0, 300)}`);
-  check("e: MUST KEEP — both Next steps click (page 3 reached), no namesake stop", reached === 3 && res.ok === true,
+  check(`${tag}: MUST KEEP — both Next steps click (page 3 reached, ok=true), never a namesake stop`, reached === 3 && res.ok === true,
     `reached page ${reached}, ok=${res.ok}: ${String(res.message ?? "").slice(0, 300)}`);
-  check("e: no blocking #228 warning", blocking228(data).length === 0, JSON.stringify(blocking228(data)));
+  // One wait over the plain two-Next replay (case b), never two.
+  const bound = twoNextBaselineMs + WAIT_MS + 5000;
+  check(`${tag}: the namesake wait is paid at most once (run took ${(ms / 1000).toFixed(1)}s, a plain two-Next replay ${(twoNextBaselineMs / 1000).toFixed(1)}s)`,
+    twoNextBaselineMs > 0 && ms < bound, `took ${ms}ms, bound ${bound}ms`);
   await page.context().close().catch(() => null);
+}
+
+// (e) page 2's Next is a FRESH node carrying step 1's recorded (and live) #button-Next, while step 2
+// recorded #button-Next-2: structurally Tigard's re-rendered menu tab, told apart only by the wait.
+console.log("\ne drifted wizard ids (fresh Next carries step 1's id)");
+{
+  const next = (id: string): RecipeStep => ({ action: "click", phase: "fill", selector: { role: "button", name: "Next", exact: true, fallbacks: [{ css: `#${id}` }] }, note: "advance: Next" } as RecipeStep);
+  await twoNexts("e", "/wizard", [next("button-Next"), next("button-Next-2")]);
 }
 
 // (f) A persistent footer Next whose id drifted since the learn (#button-1034 → #button-1037): step 2's
@@ -476,11 +520,26 @@ const blocking228 = (d: Data): string[] => (d.driftWarnings ?? []).filter((w) =>
   const reached = await page.evaluate(() => (window as unknown as { __page: number }).__page).catch(() => -1);
   console.log(`   ok=${res.ok} in ${(ms / 1000).toFixed(1)}s, reached page ${reached}, failedStepIndex=${data.failedStepIndex}`);
   if (!res.ok) console.log(`   message: ${String(res.message ?? "").slice(0, 300)}`);
-  check("f: MUST KEEP — the footer Next is clicked twice (page 3 reached), not refused as a namesake", reached === 3 && res.ok === true,
+  check("f: MUST KEEP — the footer Next is clicked twice (page 3 reached), not treated as a namesake", reached === 3 && res.ok === true,
     `reached page ${reached}, ok=${res.ok}: ${String(res.message ?? "").slice(0, 300)}`);
   check("f: no #228 handling fired (no wait, no warning)", !said(data).some((w) => /#228/.test(w)), JSON.stringify(said(data)));
   await page.context().close().catch(() => null);
 }
+
+// (P1) the re-review's persistent footer: the learn saw #btnNext1 / #btnNext2, the portal now renders
+// one persistent #next. Step 2's pick is the node step 1 clicked; its own #btnNext2 never renders.
+console.log("\nP1 one persistent footer #next, the learn saw #btnNext1 / #btnNext2");
+{
+  const next = (id: string): RecipeStep => ({ action: "click", phase: "fill", selector: { role: "button", name: "Next", exact: true, fallbacks: [{ css: `#${id}` }] }, fingerprint: { id }, note: "advance: Next" } as RecipeStep);
+  await twoNexts("P1", "/footer?id=next&hook=1", [next("btnNext1"), next("btnNext2")]);
+}
+
+// (P2) the same footer; the earlier step recorded only a css hook, so no id ties the two steps.
+console.log("\nP2 the earlier step recorded only a css hook");
+await twoNexts("P2", "/footer?id=next&hook=1", [
+  { action: "click", phase: "fill", selector: { role: "button", name: "Next", exact: true, fallbacks: [{ css: '[data-test-role="next-btn"]' }] }, note: "advance: Next" },
+  { action: "click", phase: "fill", selector: { role: "button", name: "Next", exact: true, fallbacks: [{ css: "#nextLearned" }] }, fingerprint: { id: "nextLearned" }, note: "advance: Next" },
+] as RecipeStep[]);
 
 // (g) review R4: a WRITE is never moved by this rule. Its recorded id #c9 now names a visible box whose
 // placeholder carries the word "City"; the labelled City box is the one written.
@@ -501,7 +560,8 @@ const blocking228 = (d: Data): string[] => (d.driftWarnings ?? []).filter((w) =>
 }
 
 // (h) review R2: the wizard's "Next" BUTTON was recorded with #tok7, which now names a results pager's
-// "Next" LINK. Same words, other role: the button is clicked, the pager never is.
+// "Next" LINK. Same words, other role (the learner's own reading of the link): the button is clicked,
+// the pager never is.
 {
   console.log("\nh recorded id now names a same-word control of another role (review R2)");
   const page = await freshPage("/pager");
@@ -519,5 +579,6 @@ const blocking228 = (d: Data): string[] => (d.driftWarnings ?? []).filter((w) =>
 
 await browser.close();
 server.close();
+if (failedLabels.length) console.log(`\nfailed checks:\n${failedLabels.map((l) => `  - ${l}`).join("\n")}`);
 console.log(failures === 0 ? "\nrecordedIdentityNamesake.dom.smoke: PASS" : `\nrecordedIdentityNamesake.dom.smoke: ${failures} FAILURE(S)`);
 process.exit(failures === 0 ? 0 : 1);
