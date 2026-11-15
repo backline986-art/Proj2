@@ -35,7 +35,7 @@ import http from "node:http";
 import { chromium, type Page } from "playwright";
 import type { PortalRecipe, RecipeSelector, RecipeStep } from "../../../shared/src/types";
 import * as AL from "./autoLearnAdapter";
-import { AutoLearnAdapter, EXTRACT_SEL, extractFieldsInPage, toExtractedField, type ExtractedField, type RawField } from "./autoLearnAdapter";
+import { AutoLearnAdapter, EXTRACT_SEL, extractFieldsInPage, toExtractedField, type ExtractedField, type LearnPlanner, type RawField } from "./autoLearnAdapter";
 import { RecipeAdapter } from "./recipeAdapter";
 
 let failures = 0;
@@ -120,9 +120,24 @@ const DELAYED = `<!doctype html><html><head><style>.ng-hide { display: none !imp
   </script>
 </body></html>`;
 
+// A LEARN WALK through the advance door: the real advance's accessible name carries CSS content
+// ("Continue to Step 2") the scan does not read, and a disabled "Continue" (still in every role query)
+// is its namesake. The recorded advance step must lead with #btn-adv.
+const WALK1 = `<!doctype html><html><head><style>.sfx2::after { content: " to Step 2"; }</style></head>
+<body style="font:14px sans-serif;padding:16px">
+  <h2>Applicant</h2>
+  <label for="owner">Owner Name</label><input id="owner" type="text">
+  <button type="button" id="btn-adv" class="sfx2" onclick="location.href='/walk2'">Continue</button>
+  <button type="button" disabled>Continue</button>
+</body></html>`;
+const WALK2 = `<!doctype html><html><body style="font:14px sans-serif;padding:16px">
+  <h2>Review</h2><p>Review your application before you submit it.</p>
+</body></html>`;
+
 const server = http.createServer((q, r) => {
   r.writeHead(200, { "Content-Type": "text/html" });
-  r.end(/delayed/.test(String(q.url ?? "")) ? DELAYED : PAGE);
+  const u = String(q.url ?? "");
+  r.end(/delayed/.test(u) ? DELAYED : /walk2/.test(u) ? WALK2 : /walk/.test(u) ? WALK1 : PAGE);
 });
 await new Promise<void>((r) => server.listen(0, "127.0.0.1", () => r()));
 const port = (server.address() as { port: number }).port;
@@ -382,6 +397,40 @@ if (rtRaw) {
   const hr = ht ? await pin(page, ht) : null;
   check("a HIDDEN control (the sidebar's menu twin) keeps its harvested selector, name and all",
     !!ht && !!hr && !hr.repinned && JSON.stringify(hr.selector) === JSON.stringify(ht.selector), JSON.stringify(hr));
+}
+
+// ---- THE WIRING: a real learn walk records its advance through the check -------------------------
+{
+  const wctx = await browser.newContext();
+  await wctx.addInitScript("globalThis.__name = globalThis.__name || function (fn) { return fn; };");
+  const wpage = await wctx.newPage();
+  await wpage.goto(`${url}walk`);
+  let asked = 0;
+  const planner: LearnPlanner = async (req) => {
+    asked++;
+    if (asked > 1) return { fills: [], atReview: true };
+    const owner = req.fields.findIndex((f) => String(f.label ?? "") === "Owner Name");
+    return { fills: owner >= 0 ? [{ selectorIndex: owner, value: "T" }] : [], atReview: false };
+  };
+  const adapter = new AutoLearnAdapter("Accessible Name Walk", planner, { maxPages: 2 });
+  (adapter as unknown as { page: Page }).page = wpage;
+  let steps: RecipeStep[] = [];
+  let err = "";
+  try {
+    const res = await adapter.learn(
+      { portalUrl: `${url}walk` } as never,
+      { projectAddress: "1 Test St, Tigard, OR, 97223", city: "Tigard", state: "OR", zip: "97223", homeownerName: "T" } as never,
+    ) as unknown as { steps?: RecipeStep[] };
+    steps = res.steps ?? [];
+  } catch (e) { err = e instanceof Error ? e.message.slice(0, 160) : String(e); }
+  const reached = wpage.url();
+  await wctx.close();
+  const adv = steps.filter((s) => s.action === "click" && /^advance\b/i.test(String(s.note ?? "")));
+  check("THE ADVANCE DOOR: a walk records the advance whose name finds a disabled namesake by its #id, with the namesake's name dropped",
+    adv.length === 1 && adv[0].selector?.css === "#btn-adv" && !adv[0].selector?.name
+      && !(adv[0].selector?.fallbacks ?? []).some((fb) => fb.role && fb.name === "Continue")
+      && /walk2/.test(reached),
+    `advance steps ${JSON.stringify(adv)}; walk reached ${reached}${err ? `; learn threw: ${err}` : ""}`);
 }
 
 await browser.close();
