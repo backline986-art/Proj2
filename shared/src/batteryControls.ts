@@ -198,6 +198,34 @@ export function batteryControlOfStep(step: { action?: string | null }): BatteryC
   }
 }
 
+/** A LABEL THAT IS ITSELF AN ANSWER — a radio option ("Yes", "No", "None", "N/A") — and which way it
+ *  answers. null for any other label: "No Export Limits Applied" names a choice, not a polarity. */
+const BARE_ANSWER = /^\s*(?:yes|no|none|n\/?a|not\s+applicable|true|false)\s*[.*:]?\s*$/i;
+export function bareAnswerPolarity(label: unknown): "yes" | "no" | null {
+  const t = String(label ?? "").trim();
+  if (!BARE_ANSWER.test(t)) return null;
+  return readsAsYesAnswer(t) ? "yes" : readsAsNoAnswer(t) ? "no" : null;
+}
+
+/** THE TEXT A RECORDED STEP'S STORAGE QUESTION READS AS — the one assembly every door that asks the
+ *  predicate of a recorded step uses (replay's skip / answer logic, the stage gate).
+ *
+ *  A RADIO OPTION'S QUESTION LIVES ONLY IN ITS SECTION (#236). Ameren Illinois records "Do you seek to
+ *  install an Energy Storage System (ESS), or batteries as part of t…" as the fingerprint section of
+ *  a check on a radio labelled just "No", so a reading of label + note + field found no storage word
+ *  and the learn job's answer replayed on battery jobs too. When the label is a bare answer, the
+ *  section is the question, and it LEADS (the presence questions are anchored at the start: "Will
+ *  energy storage be installed?"). Any other label is read as before, never with its section: a
+ *  section titled "Inverter and Battery Information" must not make the inverter's Manufacturer a
+ *  battery spec (BATTERY_DECLARATION_QUESTION reads the control's own label for the same reason). */
+export function batteryQuestionTextOfStep(step: {
+  selector?: { label?: string } | null; note?: string | null; field?: string | null; fingerprint?: { section?: string } | null;
+}): string {
+  const own = `${step.selector?.label ?? ""} ${step.note ?? ""} ${step.field ?? ""}`;
+  const section = String(step.fingerprint?.section ?? "").trim();
+  return section && bareAnswerPolarity(step.selector?.label || step.note) ? `${section} ${own}` : own;
+}
+
 /**
  * THE ONE PREDICATE. null when the label is not about storage at all (an inverter's
  * manufacturer, a PV system size — the guard must never touch an ordinary job's fields).

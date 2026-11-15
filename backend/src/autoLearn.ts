@@ -66,6 +66,7 @@ import { feeBracketFieldForLabel } from "./feeBracketFields";
 import { SERVICE_FEEDER_200A_FIELD, SERVICE_FEEDER_400A_FIELD } from "./batteryServiceFeeder";
 import { DESIGN_NOTE_SOURCES, EXPORT_LIMITING_NO_EVIDENCE_KEY } from "../../shared/src/exportLimiting";
 import { FILING_CONTACT_EMAIL_KEY, contactTrackOf, isOwnerEmailSlot, planFilingContactEmails } from "../../shared/src/filingContactEmail";
+import { ADDRESS_COMPONENT_FIELD_KEYS } from "../../portal-bot/src/addressParse";
 
 /** The submittal track an AHJ learn files, from the recipe discipline it will be keyed under
  *  (authoritative — the value the recipe lookup asks for), else the requested permit type.
@@ -248,7 +249,10 @@ export function plannerFieldView(projectFields: Record<string, string>): Record<
   // gets exportLimiting itself, as before, and no new text.
   // The filing contact's email (#520) is placed by the one slot predicate after the plan
   // (applyFilingContactEmail), never by the model: it is not the model's to choose where it goes.
-  const omit = new Set<string>([...DESIGN_NOTE_SOURCES, ...PLANNER_REVIEW_PROSE_KEYS, EXPORT_LIMITING_NO_EVIDENCE_KEY, FILING_CONTACT_EMAIL_KEY]);
+  // The address components (#236) are bound by their control's label at save
+  // (convertLiteralsToBoundFields), never chosen by the model — and the planner already reads the
+  // street line they are cut from, so offering them again would only spend prompt.
+  const omit = new Set<string>([...DESIGN_NOTE_SOURCES, ...PLANNER_REVIEW_PROSE_KEYS, EXPORT_LIMITING_NO_EVIDENCE_KEY, FILING_CONTACT_EMAIL_KEY, ...ADDRESS_COMPONENT_FIELD_KEYS]);
   const same = (a: string | undefined, b: string | undefined) =>
     String(a ?? "").trim().toLowerCase() === String(b ?? "").trim().toLowerCase();
   const out: Record<string, string> = {};

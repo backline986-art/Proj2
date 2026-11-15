@@ -23,7 +23,7 @@ import { batteryStatus } from "./batteryServiceFeeder";
 import { projectForTrack, sameRecordType } from "./permitProcess";
 import { readArrayAreaSqFt } from "./fireAccess";
 import { packageReadSources } from "./designCriteria";
-import { parseStreetNumber, parseStreetName, parseStreetLine } from "../../portal-bot/src/addressParse";
+import { addressComponentFields, addressComponentKeysForSteps, parseStreetNumber, parseStreetName, parseStreetLine } from "../../portal-bot/src/addressParse";
 import { recordShapeOf } from "../../portal-bot/src/recordNumber";
 import { feeBracketFieldForLabel, feeBracketQuantityFields } from "./feeBracketFields";
 import { FEE_BRACKET_FIELD_PREFIX } from "../../portal-bot/src/feeBracketQuantity";
@@ -2134,6 +2134,11 @@ export function resolveRecipeFieldValues(
     // Bound instead of streetNameCore when the LEARN run's full-name search returned
     // zero results and its 3-char retry succeeded (the portal's own search hint).
     streetNameSearchPortion: parseStreetName(project.projectAddress || "").slice(0, 3),
+    // AND THE PIECES THE SAME SEARCH ASKS FOR IN SELECTS (#236): street direction, street type, unit
+    // type, in both vocabularies ("SE"/"Southeast", "AVE"/"Avenue"). An address-component step binds
+    // here (addressParse.addressComponentKeysForSteps) — the audit found Corvallis replaying the
+    // learn job's "NW" and "ST" into an "SE … Ave" project's search. "" when the address has none.
+    ...addressComponentFields(project.projectAddress || ""),
     // SEGMENTED PHONE parts. Accela renders a US phone as three boxes (area/prefix/line);
     // recording the digits as literals would replay the LEARN project's phone number for
     // every future project, so each segment binds to its own derived key.
@@ -2722,12 +2727,26 @@ export function convertLiteralsToBoundFields(
   const bound: LiteralBindingResult["bound"] = [];
   const ambiguous: LiteralBindingResult["ambiguous"] = [];
   const portalConstants: Array<{ value: string; note?: string }> = [];
-  const out = steps.map((step) => {
+  // The address-component key each step's LABEL names (#236) — over the whole recipe, because a bare
+  // "Direction" is a street direction only on the page that searches an address.
+  const componentKeys = addressComponentKeysForSteps(steps);
+  const out = steps.map((step, index) => {
     const bindable = (step.action === "fill" || step.action === "select") && !!step.value && !step.field && !step.sensitive;
     if (!bindable) return step;
     // A STANDING POLICY ANSWER IS A LITERAL ON PURPOSE ("policy default: Are the AC disconnect(s)…
     // -> Yes"): the operator's answer for every job, never a value to rebind to project data.
     if (POLICY_DEFAULT_NOTE.test(String(step.note ?? ""))) return step;
+    // AN ADDRESS COMPONENT IS BOUND BY ITS LABEL, BEFORE ANY VALUE MATCH (#236). Street Direction "NW"
+    // and Street Type "ST" are the learn job's address; value equality cannot reach them ("N" is one
+    // character, under the two the value map keeps) and they then froze as portal constants that every
+    // later job's address search replayed. Bound to this project's component in the recorded vocabulary.
+    const componentKey = componentKeys[index];
+    if (componentKey) {
+      bound.push({ value: step.value as string, field: componentKey, note: step.note });
+      const next: RecipeStep = { ...step, field: componentKey };
+      delete next.value;
+      return next;
+    }
     // A DATE never matches by value (todayDate is skipped above as volatile), so it would
     // otherwise stay frozen and replay a stale — eventually PAST — date onto a live
     // application. Rebind it by the control's label to a field recomputed every replay.

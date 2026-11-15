@@ -182,7 +182,8 @@ export const SUFFIXES: Readonly<Record<string, string>> = {
   terrace: "ter", trl: "trl", trail: "trl", pkwy: "pkwy", parkway: "pkwy", hwy: "hwy", highway: "hwy", loop: "loop", sq: "sq",
   square: "sq", aly: "aly", alley: "aly", cv: "cv", cove: "cv", pt: "pt", point: "pt", run: "run", row: "row", walk: "walk", path: "path",
 };
-const UNIT_WORD = /^(?:unit|apt|apartment|ste|suite|bldg|building|lot|space|spc|trlr|rm|room|fl|floor|no|num|number)$/;
+// Exported (#236) so addressParse reads a unit designator with the same vocabulary.
+export const UNIT_WORD = /^(?:unit|apt|apartment|ste|suite|bldg|building|lot|space|spc|trlr|rm|room|fl|floor|no|num|number)$/;
 const STATE = /^(?:al|ak|az|ar|ca|co|ct|de|fl|ga|hi|id|il|in|ia|ks|ky|la|me|md|ma|mi|mn|ms|mo|mt|ne|nv|nh|nj|nm|ny|nc|nd|oh|ok|or|pa|ri|sc|sd|tn|tx|ut|vt|va|wa|wv|wi|wy|dc)$/;
 const ZIP = /^\d{5}$/;
 const zip5 = (s: string): string => { const m = String(s || "").match(/\b(\d{5})(?:-\d{4})?\b/); return m ? m[1] : ""; };
@@ -206,7 +207,7 @@ export interface SiteKey {
    *  the project's ("123 S Example Dr" for "123 W Example Dr"). */
   dirs: string[];
 }
-const DIRECTION_CANON: Record<string, string> = { north: "n", south: "s", east: "e", west: "w", northeast: "ne", northwest: "nw", southeast: "se", southwest: "sw" };
+export const DIRECTION_CANON: Readonly<Record<string, string>> = { north: "n", south: "s", east: "e", west: "w", northeast: "ne", northwest: "nw", southeast: "se", southwest: "sw" };
 export function siteKey(site: { street?: string; city?: string; zip?: string }, strict = false): SiteKey | null {
   const raw = String(site.street ?? "");
   const city = formKey(String(site.city ?? "")).split(" ")[0] || "";

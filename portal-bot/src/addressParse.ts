@@ -3,6 +3,9 @@
 // the search form live, and the backend's resolveRecipeFieldValues that binds the same
 // values at replay (a recorded recipe must never replay the LEARN project's address).
 // Live-verified against Oregon ePermitting (originally in oregonEPermitting.ts).
+import type { RecipeStep } from "../../shared/src/types";
+import { contactRoleOfStep } from "../../shared/src/contactRoles";
+import { DIRECTION_CANON, DIRECTIONAL, SUFFIXES, UNIT_WORD, siteKey } from "./draftCreated";
 
 // The street LINE only — the part before the first comma. projectAddress is stored as
 // "925 N Grant St, Lafayette, OR, 97127"; everything after the first comma is city/state/zip
@@ -88,8 +91,168 @@ export function isSplitAddressForm(labels: Array<string | undefined>): boolean {
   return labels.some((raw) => {
     const label = (raw || "").replace(/\s+/g, " ").trim();
     if (!label) return false;
-    if (/^suffix$/i.test(label)) return true;
-    return /(street|house)\s*(no\.?\b|num\b|number\b)|street\s*(type|suffix|direction)\b/i.test(label);
+    // The street type / suffix / direction / unit-type control: the ONE component grammar
+    // (addressComponentOfLabel, #236) the binder asks too. A bare "Direction" is not enough here —
+    // it may be an array's — but a bare "Suffix" always was.
+    const component = addressComponentOfLabel(label);
+    if (component && (component.explicit || component.component === "suffix")) return true;
+    return /(street|house)\s*(no\.?\b|num\b|number\b)/i.test(label);
+  });
+}
+
+// ── ADDRESS-COMPONENT CONTROLS ARE THIS PROJECT'S ADDRESS, NEVER THE LEARN JOB'S (#236) ─────────
+//
+// A split address search asks for the house number, the street DIRECTION, the street name and the
+// street TYPE (suffix) in separate controls. The number and the name were bound from the start
+// (streetNumber / streetNameCore); the direction and the type are closed-vocabulary selects, so the
+// literal binder kept them as "portal constants" and replay chose them unconditionally. Measured in
+// the 2026-11-14 recipe audit: both City of Corvallis recipes replay Direction "NW" and Street Type
+// "ST" — the learn job's address — and a replay for an "SE … Ave" project searched NW … ST.
+//
+// So a control whose label names an address component binds to that component of THIS project's
+// address (addressComponentFields, in resolveRecipeFieldValues), at learn time
+// (convertLiteralsToBoundFields) and on every replay (recipeReplayBinding R13). Read with the one
+// street vocabulary (draftCreated DIRECTIONAL / SUFFIXES / UNIT_WORD, which siteKey parses with) —
+// never a third list.
+//
+// The VALUE keeps the portal's own vocabulary: a recorded "ST" means the select lists USPS
+// abbreviations, a recorded "Street" means it lists words. Both forms are emitted ("AVE" and
+// "Avenue"), and the binding picks the one the recorded literal spoke. Picking the wrong form is
+// not harmless: selectWithFallback's contains pass would put "ST" on "Crest".
+
+export type AddressComponent = "direction" | "postDirection" | "suffix" | "unitType";
+
+/** The keys an address-component control binds to, abbreviation form first. */
+export const ADDRESS_COMPONENT_KEYS: Readonly<Record<AddressComponent, { abbr: string; word: string }>> = Object.freeze({
+  direction: Object.freeze({ abbr: "streetDirection", word: "streetDirectionWord" }),
+  postDirection: Object.freeze({ abbr: "streetPostDirection", word: "streetPostDirectionWord" }),
+  suffix: Object.freeze({ abbr: "streetSuffix", word: "streetSuffixWord" }),
+  unitType: Object.freeze({ abbr: "unitType", word: "unitTypeWord" }),
+});
+/** Every key above — the planner view leaves them out (the binder places them, never the model). */
+export const ADDRESS_COMPONENT_FIELD_KEYS: ReadonlySet<string> = new Set(
+  Object.values(ADDRESS_COMPONENT_KEYS).flatMap((k) => [k.abbr, k.word]),
+);
+/** The keys an address SEARCH binds its number and name to — a bare "Direction" / "Suffix" label is an
+ *  address component only on a page that searches an address this way. */
+export const ADDRESS_SEARCH_FIELD_KEYS: ReadonlySet<string> = new Set(["streetNumber", "streetNameCore", "streetNameSearchPortion"]);
+
+/** USPS unit designators, read from the words UNIT_WORD knows (a "#" names no type). */
+const UNIT_TYPE_CANON: Readonly<Record<string, string>> = {
+  apt: "APT", apartment: "APT", unit: "UNIT", ste: "STE", suite: "STE", bldg: "BLDG", building: "BLDG",
+  lot: "LOT", space: "SPC", spc: "SPC", trlr: "TRLR", rm: "RM", room: "RM", fl: "FL", floor: "FL",
+};
+const UNIT_TYPE_WORD: Readonly<Record<string, string>> = {
+  APT: "Apartment", UNIT: "Unit", STE: "Suite", BLDG: "Building", LOT: "Lot", SPC: "Space", TRLR: "Trailer", RM: "Room", FL: "Floor",
+};
+const titleCase = (w: string): string => (w ? w[0].toUpperCase() + w.slice(1) : "");
+const tokensOf = (s: string): string[] => String(s || "").toLowerCase().replace(/[^a-z0-9#]+/g, " ").split(" ").filter(Boolean);
+/** "n" → "North", "se" → "Southeast" (DIRECTION_CANON read backwards). */
+function directionWord(canon: string): string {
+  const word = Object.keys(DIRECTION_CANON).find((w) => DIRECTION_CANON[w] === canon);
+  return word ? titleCase(word) : "";
+}
+/** "st" → "Street", "ave" → "Avenue" — the longest SUFFIXES spelling of that canonical suffix. */
+function suffixWord(canon: string): string {
+  const words = Object.keys(SUFFIXES).filter((w) => SUFFIXES[w] === canon).sort((a, b) => b.length - a.length);
+  return words.length ? titleCase(words[0]) : "";
+}
+
+/** The four components of the project's street line, canonical lowercase ("se", "ave", "apt"). */
+function addressComponentsOf(address: string): Record<AddressComponent, string> {
+  const line = streetLine(address);
+  const none = { direction: "", postDirection: "", suffix: "", unitType: "" };
+  const key = siteKey({ street: line }, true);
+  if (!key) return none;
+  const toks = tokensOf(line);
+  const house = toks.findIndex((w) => /^\d+[a-z]?$/.test(w));
+  const next = toks[house + 1] ?? "";
+  // A leading directional is one only when a street name follows it ("123 N Main St"), which siteKey
+  // has already established by finding words.
+  const direction = DIRECTIONAL.test(next) ? (DIRECTION_CANON[next] ?? next) : "";
+  const postDirection = (direction ? key.dirs.slice(1) : key.dirs)[0] ?? "";
+  const unitWord = toks.slice(house + 1).find((w) => UNIT_WORD.test(w) && UNIT_TYPE_CANON[w]) ?? "";
+  return { direction, postDirection: postDirection === direction && direction ? "" : postDirection, suffix: key.suffix, unitType: unitWord ? UNIT_TYPE_CANON[unitWord] : "" };
+}
+
+/** THIS PROJECT'S ADDRESS COMPONENTS, both vocabularies: { streetDirection: "SE", streetDirectionWord:
+ *  "Southeast", streetSuffix: "AVE", streetSuffixWord: "Avenue", … }. "" for a component the
+ *  address does not have — a directionless street has no direction, and that is an answer. */
+export function addressComponentFields(address: string): Record<string, string> {
+  const c = addressComponentsOf(address);
+  const k = ADDRESS_COMPONENT_KEYS;
+  return {
+    [k.direction.abbr]: c.direction.toUpperCase(),
+    [k.direction.word]: directionWord(c.direction),
+    [k.postDirection.abbr]: c.postDirection.toUpperCase(),
+    [k.postDirection.word]: directionWord(c.postDirection),
+    [k.suffix.abbr]: c.suffix.toUpperCase(),
+    [k.suffix.word]: suffixWord(c.suffix),
+    [k.unitType.abbr]: c.unitType,
+    [k.unitType.word]: UNIT_TYPE_WORD[c.unitType] ?? "",
+  };
+}
+
+/** WHICH ADDRESS COMPONENT DOES THIS CONTROL ASK FOR? `explicit` when the label says so on its own
+ *  ("Street Type", "Street Direction", "Pre-Direction", "Unit Type"); a bare "Direction" or "Suffix"
+ *  is a component only beside an address search (an array's "Direction" takes compass values too). */
+export function addressComponentOfLabel(raw: unknown): { component: AddressComponent; explicit: boolean } | null {
+  const label = String(raw ?? "").replace(/[*:?]+/g, " ").replace(/\s+/g, " ").trim().toLowerCase();
+  if (!label) return null;
+  if (/\b(?:post|suffix|trailing)[\s-]*dir(?:ection)?\b/.test(label)) return { component: "postDirection", explicit: true };
+  if (/\bstreet\s*dir(?:ection)?\b|\bst\.?\s*dir(?:ection)?\b|\bpre(?:fix)?[\s-]*dir(?:ection)?\b/.test(label)) return { component: "direction", explicit: true };
+  if (/^dir(?:ection)?\.?$/.test(label)) return { component: "direction", explicit: false };
+  if (/\bstreet\s*(?:type|suffix)\b|\bst\.?\s*(?:type|suffix)\b/.test(label)) return { component: "suffix", explicit: true };
+  if (/^suffix$/.test(label)) return { component: "suffix", explicit: false };
+  if (/\bunit\s*(?:type|designator)\b|\b(?:apt|apartment|suite)\s*type\b/.test(label)) return { component: "unitType", explicit: true };
+  return null;
+}
+
+/** THE KEY A RECORDED ADDRESS-COMPONENT STEP BINDS TO, or null. The recorded literal must speak the
+ *  component's vocabulary (a direction, a street type, a unit designator — or be empty); its form
+ *  picks the abbreviation or the word key. `addressSearchOnPage`: a step on the same page is bound
+ *  to the address search's number or name (a bare label needs it). */
+export function addressComponentKeyFor(label: unknown, recorded: unknown, ctx: { addressSearchOnPage: boolean }): string | null {
+  const found = addressComponentOfLabel(label);
+  if (!found) return null;
+  if (!found.explicit && !ctx.addressSearchOnPage) return null;
+  const keys = ADDRESS_COMPONENT_KEYS[found.component];
+  const v = String(recorded ?? "").trim().toLowerCase().replace(/\./g, "");
+  if (!v) return keys.abbr;
+  let word: boolean;
+  if (found.component === "direction" || found.component === "postDirection") {
+    if (!DIRECTIONAL.test(v)) return null;
+    word = v.length > 2;
+  } else if (found.component === "suffix") {
+    const canon = SUFFIXES[v];
+    if (!canon) return null;
+    word = v !== canon && v === suffixWord(canon).toLowerCase();
+  } else {
+    const canon = UNIT_TYPE_CANON[v];
+    if (!canon) return null;
+    word = v !== canon.toLowerCase() && v === String(UNIT_TYPE_WORD[canon] ?? "").toLowerCase();
+  }
+  return word ? keys.word : keys.abbr;
+}
+
+/** For each recorded step, the address-component key it binds to (or null): an unbound, unframed
+ *  fill/select whose label names a component, outside the filing company's own contact block (the
+ *  contractor's mailing address is not the site's). A page is the run of steps between clicks and
+ *  navigations, so a bare "Direction" counts only beside the search it belongs to. */
+export function addressComponentKeysForSteps(steps: ReadonlyArray<RecipeStep>): Array<string | null> {
+  const pageOf: number[] = [];
+  let page = 0;
+  steps.forEach((s, i) => {
+    if (s.action === "click" || s.action === "goto" || s.action === "stopForReview") page++;
+    pageOf[i] = page;
+  });
+  const searchPages = new Set<number>();
+  steps.forEach((s, i) => { if (ADDRESS_SEARCH_FIELD_KEYS.has(String(s.field ?? ""))) searchPages.add(pageOf[i]); });
+  return steps.map((s, i) => {
+    if ((s.action !== "select" && s.action !== "fill") || s.field || s.sensitive || s.selector?.frame) return null;
+    if (contactRoleOfStep(s) === "company") return null;
+    const label = String(s.selector?.label || s.selector?.name || s.note || "");
+    return addressComponentKeyFor(label, s.value, { addressSearchOnPage: searchPages.has(pageOf[i]) });
   });
 }
 
