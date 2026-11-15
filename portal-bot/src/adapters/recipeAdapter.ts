@@ -11133,19 +11133,21 @@ export class RecipeAdapter extends BasePortalAdapter {
 
   /**
    * #235 — MARK THE GRID A RECORDED RESULTS-ROW PICK BELONGS TO (data-al-grid="1"), so a row is read
-   * only from it. ONLY THE RECORDED CONTROL ITSELF SAYS WHICH TABLE — its id, a sibling row's id of the
-   * same shape (…_gv_CB_1 recorded, only …_gv_CB_0 on this job's one-row result), or its radio group's
-   * name: the one place a recorded position is still worth reading, because it is never used to pick
-   * the ROW. Nothing recorded on the page → nothing is marked and every row is read (main's reading).
-   * NOT A HEADER THAT SAYS "ADDRESS": the first version took the one table whose header named the role,
-   * and a search form ("Property Search by Address", with its Search button) or a mailing-address box
-   * says that too — the generic results-row pass, which records no id, then read only that table, never
-   * the grid of rows bound in script beside it, and refused the job's own row (#235 review, A1/A1b).
-   * Returns true when a grid was marked.
+   * only from it. ONLY THE RECORDED CONTROL ITSELF SAYS WHICH TABLE — its id or its radio group's name,
+   * else a sibling row's id of the same shape (…_gv_CB_1 recorded, only …_gv_CB_0 on this job's one-row
+   * result): the one place a recorded position is still worth reading, because it is never used to
+   * pick the ROW. Nothing recorded on the page → nothing is marked and every row is read (main's
+   * reading). NOT A HEADER THAT SAYS "ADDRESS": the first version took the one table whose header named
+   * the role, and a search form ("Property Search by Address", with its Search button) or a mailing-
+   * address box says that too — the generic results-row pass, which records no id, then read only that
+   * table, never the grid of rows bound in script beside it, and refused the job's own row (#235
+   * review, A1/A1b). Returns how the grid was told: "exact" (the recorded id or name is on the page),
+   * "shape" (only a same-shaped id is — and ids differing only by digits can be two DIFFERENT grids,
+   * gvList1 / gvList2, so there a row must still show this job's value), or "" (nothing marked).
    */
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  private async markResultGrid(step: RecipeStep, doc: any): Promise<boolean> {
-    if (!doc || typeof doc.evaluate !== "function") return false;
+  private async markResultGrid(step: RecipeStep, doc: any): Promise<"exact" | "shape" | ""> {
+    if (!doc || typeof doc.evaluate !== "function") return "";
     const ids: string[] = [];
     const names: string[] = [];
     if (step.fingerprint?.id) ids.push(step.fingerprint.id);
@@ -11156,14 +11158,19 @@ export class RecipeAdapter extends BasePortalAdapter {
     }
     if (!ids.length && !names.length) {
       await doc.evaluate(() => document.querySelectorAll("[data-al-grid]").forEach((n) => n.removeAttribute("data-al-grid"))).catch(() => null);
-      return false;
+      return "";
     }
     return await doc.evaluate((args: { ids: string[]; names: string[] }) => {
       document.querySelectorAll("[data-al-grid]").forEach((n) => n.removeAttribute("data-al-grid"));
       let table: HTMLTableElement | null = null;
+      let how: "exact" | "shape" | "" = "";
       for (const id of args.ids) {
         const t = document.getElementById(id)?.closest("tr")?.closest("table") as HTMLTableElement | null | undefined;
-        if (t) { table = t; break; }
+        if (t) { table = t; how = "exact"; break; }
+      }
+      for (let k = 0; !table && k < args.names.length; k++) {
+        const t = document.getElementsByName(args.names[k])[0]?.closest("tr")?.closest("table") as HTMLTableElement | null | undefined;
+        if (t) { table = t; how = "exact"; }
       }
       // THE SAME CONTROL ON ANOTHER ROW: ids that differ only by their row numbers (the reanchor's
       // ordinal-sibling shape) belong to one grid, whichever rows this job's search returned.
@@ -11173,17 +11180,13 @@ export class RecipeAdapter extends BasePortalAdapter {
         for (const el of Array.from(document.querySelectorAll("[id]"))) {
           if (el.id.replace(/\d+/g, "#") !== shape) continue;
           const t = el.closest("tr")?.closest("table") as HTMLTableElement | null | undefined;
-          if (t) { table = t; break; }
+          if (t) { table = t; how = "shape"; break; }
         }
       }
-      for (let k = 0; !table && k < args.names.length; k++) {
-        const t = document.getElementsByName(args.names[k])[0]?.closest("tr")?.closest("table") as HTMLTableElement | null | undefined;
-        if (t) table = t;
-      }
-      if (!table) return false;
+      if (!table) return "";
       table.setAttribute("data-al-grid", "1");
-      return true;
-    }, { ids, names }).catch(() => false) as boolean;
+      return how;
+    }, { ids, names }).catch(() => "") as "exact" | "shape" | "";
   }
 
   /**
@@ -11198,9 +11201,12 @@ export class RecipeAdapter extends BasePortalAdapter {
    *
    * THE NO-VALUE RULE: a grid with exactly ONE selectable row is that row when this job holds no value
    * to compare (a parcel search returns the searched address's own parcel) — that is the only row,
-   * not a position. A value the job DOES hold that the only row contradicts still refuses, and a
-   * contact record is never taken without the company's name. Zero or several matches leave the row
-   * for a person, named, and the step is skipped (never healed onto a neighbour by label).
+   * not a position. Only in the grid the recorded control's OWN id or name tells (markResultGrid
+   * "exact"): a grid told by a same-shaped id may be another grid (gvList1 for a recorded gvList2), and
+   * its one row is then another list's row (#235 review). A value the job DOES hold that the only row
+   * contradicts still refuses, and a contact record is never taken without the company's name. Zero
+   * or several matches leave the row for a person, named, and the step is skipped (never healed onto
+   * a neighbour by label).
    */
   private async pickResultRowForProject(step: RecipeStep, role: ResultRowRole): Promise<boolean> {
     if (role === "address") return this.pickAddressRowForProject(step);
@@ -11232,9 +11238,10 @@ export class RecipeAdapter extends BasePortalAdapter {
       return false;
     }
     type Pick = { picked: string; how: string; rows: number; hits: number; kind: string };
+    let gridTold: "exact" | "shape" | "" = "";
     const scan = async (): Promise<Pick> => {
-      await this.markResultGrid(step, doc);
-      return await doc.evaluate((args: { role: string; wanted: string[]; tiebreak: string[] }) => {
+      gridTold = await this.markResultGrid(step, doc);
+      return await doc.evaluate((args: { role: string; wanted: string[]; tiebreak: string[]; ownGrid: boolean }) => {
         document.querySelectorAll("[data-al-projrow]").forEach((n) => n.removeAttribute("data-al-projrow"));
         const grid = document.querySelector('[data-al-grid="1"]') as HTMLTableElement | null;
         const all = grid ? Array.from(grid.rows) : Array.from(document.querySelectorAll("tr"));
@@ -11283,14 +11290,14 @@ export class RecipeAdapter extends BasePortalAdapter {
         let chosen: { text: string; ctl: Element } | null = null;
         let how = "";
         if (hits.length === 1) { chosen = hits[0]; how = "value"; }
-        else if (!args.wanted.length && rows.length === 1 && args.role !== "contact") { chosen = rows[0]; how = "only"; }
+        else if (!args.wanted.length && args.ownGrid && rows.length === 1 && args.role !== "contact") { chosen = rows[0]; how = "only"; }
         if (chosen) chosen.ctl.setAttribute("data-al-projrow", "1");
         const ty = chosen ? ((chosen.ctl as HTMLInputElement).type || "").toLowerCase() : "";
         return {
           picked: chosen ? chosen.text.slice(0, 90) : "", how, rows: rows.length, hits: hits.length,
           kind: chosen ? (chosen.ctl.tagName.toLowerCase() === "input" && (ty === "radio" || ty === "checkbox") ? "tick" : "click") : "",
         };
-      }, { role, wanted, tiebreak }).catch(() => ({ picked: "", how: "", rows: 0, hits: 0, kind: "" })) as Pick;
+      }, { role, wanted, tiebreak, ownGrid: gridTold === "exact" }).catch(() => ({ picked: "", how: "", rows: 0, hits: 0, kind: "" })) as Pick;
     };
     // AN UNPAINTED GRID IS NOT AN EMPTY GRID (the address-version scan's rule): results land on a
     // postback, so look again briefly before concluding there is nothing to pick.
@@ -11309,7 +11316,9 @@ export class RecipeAdapter extends BasePortalAdapter {
             ? `${role} row: ${r.hits} of the ${r.rows} results show this job's ${what} — refusing to guess; choose the row by hand`
             : wanted.length
               ? `${role} row: none of the ${r.rows} result(s) shows this job's ${what} — refusing to pick another's row; choose it by hand`
-              : `${role} row: this job has no ${what} on file and the grid offers ${r.rows} rows — refusing to pick one by position; choose it by hand`,
+              : r.rows === 1
+                ? `${role} row: this job has no ${what} on file, and the one result's grid is not told by the recorded control itself — refusing to take it as the only row; choose it by hand`
+                : `${role} row: this job has no ${what} on file and the grid offers ${r.rows} rows — refusing to pick one by position; choose it by hand`,
       );
       return false;
     }

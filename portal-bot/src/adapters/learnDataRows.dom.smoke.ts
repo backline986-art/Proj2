@@ -29,6 +29,10 @@
 //         on main and here (regression guards).
 //   E3c / E3d — must-exclude: a grid tick recorded by another row's number (E3c) or by the date
 //         printed beside the rows (E3d) is never ticked by its recorded position.
+//   E3e / E3f — the grid a row step reads is told by the recorded control: by a same-shaped sibling
+//         id when the recorded row is not on this job's page (E3e: the one address row, not the
+//         owner's mailing address beside it) — but such an id is no authority for "the only row"
+//         (E3f: another list whose ids differ by a digit is never taken for the recorded one).
 //   C4 / C5 / C5b — the label re-anchor keeps main's answers (#235 review): a numeric control name
 //         as the label still refuses a box labelled as another question (C4); a label that agrees
 //         with the box's own (C5) or a box with no label (C5b) is kept, even among ordinal siblings.
@@ -86,11 +90,14 @@ const LOT_PP = "ctl00_phPopup_ucSearchResult";
 
 const popup = (variant: string): string => `<!doctype html><html><body>
 <h2>Address Search Result List</h2>
-${grid("Address", ["Address", "City", "State", "Zip"], [
-    ["4420 W QUILLMERE BLVD", "Fernhollow", "ID", "83999"],
-    ["4415 W QUILLMERE BLVD", "Fernhollow", "ID", "83999"],
-    ["2208 E LANTERNWOOD ST", "Fernhollow", "ID", "83999"],
-  ], false)}
+${grid("Address", ["Address", "City", "State", "Zip"], variant === "E3e"
+    // E3e: this job's search returned ONE address row — the recorded row (_CB_1) is not on the page.
+    ? [["2208 E LANTERNWOOD ST", "Fernhollow", "ID", "83999"]]
+    : [
+      ["4420 W QUILLMERE BLVD", "Fernhollow", "ID", "83999"],
+      ["4415 W QUILLMERE BLVD", "Fernhollow", "ID", "83999"],
+      ["2208 E LANTERNWOOD ST", "Fernhollow", "ID", "83999"],
+    ], false)}
 ${grid("Parcel", ["Parcel Number", "Lot", "Block", "Subdivision"], [["R5521007731", "4", "2", "LANTERNWOOD ADD"]], true)}
 ${grid("Owner", ["Name", "Address"], variant === "E3b"
     ? [["HOLLOWAY TRUST", "PO BOX 88 FERNHOLLOW ID"]]
@@ -207,6 +214,10 @@ const anchorPage = (variant: string): string => {
       : variant === "C5b"
         // An unlabelled box (its numeric name the only recorded text) in a layout table beside another.
         ? `<table class="layout"><tr><td>Solar PV</td><td><input type="checkbox" id="field267070" name="field267070"></td></tr><tr><td>Battery</td><td><input type="checkbox" id="field267071" name="field267071"></td></tr></table>`
+        : variant === "E3f"
+          // E3f: the recorded parcel list (gvList2) returned nothing; ANOTHER list whose ids differ only
+          // by a digit (gvList1, the address results) holds one row.
+          ? `<h3>Address</h3><table id="ctl00_phPopup_gvList1"><tr><th></th><th>Address</th></tr><tr><td><input type="radio" id="ctl00_phPopup_gvList1_CB_0" name="ctl00$phPopup$gvList1$rb"></td><td>4420 W QUILLMERE BLVD</td></tr></table><h3>Parcel</h3><p>No parcels found.</p>`
         // E3d: a grid of ordinal, LABELLED radios; the step recorded the date printed beside them.
         : `<table id="ctl00_gvSlots">${["Slot A - Morning", "Slot B - Midday", "Slot C - Afternoon"].map((s, i) => `<tr><td><input type="radio" id="ctl00_gvSlots_ctl0${i + 2}_rb" name="ctl00$gvSlots$rb" value="${i}"><label for="ctl00_gvSlots_ctl0${i + 2}_rb">${s}</label></td><td>Date: ${today}</td></tr>`).join("")}</table>`;
   return `<!doctype html><html><head><title>Application Details</title></head><body><h1>Application Details</h1>${body}</body></html>`;
@@ -337,6 +348,42 @@ const ticked = async (page: Page): Promise<Record<string, boolean>> => {
   check("E3b: an owner row that is not this job's owner is NOT ticked", t.OwnerList_gv_CB_0 !== true, JSON.stringify(t));
   check("E3b: ...and the refusal is named for a person", /owner row: none of the 1 result/.test(drift), drift);
   check("E3b: the address row is still this job's", t.AddressList_gv_CB_2 === true && t.AddressList_gv_CB_1 !== true, JSON.stringify(t));
+  await page.context().close();
+}
+// ---- E3e (the grid told by a same-shaped sibling id) --------------------------------------------
+// This job's search returned ONE address row, so the recorded row's id (_CB_1) is not on the page,
+// and the step names no radio group (an older recording: id only). The owner list beside it shows the
+// owner's mailing address — the property's own. The address grid is still told by the recorded
+// control (its sibling _CB_0 has the same shape): read every row instead and the owner's row is a
+// second "address" match, and this job's own row is refused as ambiguous. main fails the step outright.
+{
+  const page = await freshPage();
+  const idOnly = { ...DIALOG_STEPS[0], fingerprint: { id: `${PP}_ucAddressList_gv_CB_1` } };
+  const r = await replay(page, recipeOf("/dialog?v=E3e", [idOnly]), THIS_JOB);
+  const t = await ticked(page);
+  console.log(`   E3e: ok=${r.ok} ${r.seconds.toFixed(1)}s ticked=${JSON.stringify(t)}\n       ${notes(r)}`);
+  check("E3e: the one address row (this job's) is ticked, read from the address grid only", t.AddressList_gv_CB_0 === true && t.OwnerList_gv_CB_0 !== true, JSON.stringify(t));
+  await page.context().close();
+}
+// ---- E3f (a same-shaped id is no "only row" authority) --------------------------------------------
+// The recorded parcel list (…gvList2_CB_1) returned nothing; another list whose ids differ only by a
+// digit (…gvList1, the address results) holds one row, and this job has no parcel number to compare.
+// That row is another list's: never ticked as "the only row". main fails the step (nothing ticked).
+{
+  const page = await freshPage();
+  const { parcelNumber: _none, ...noParcel } = THIS_JOB;
+  void _none;
+  const r = await replay(page, recipeOf("/anchor?v=E3f", [{
+    action: "check", phase: "fill",
+    selector: { label: "R7730012645", fallbacks: [{ css: "#ctl00_phPopup_gvList2_CB_1" }] },
+    note: "R7730012645",
+    fingerprint: { id: "ctl00_phPopup_gvList2_CB_1", section: "Parcel Number Lot Block Subdivision" },
+  }]), noParcel);
+  const radios = await page.evaluate(() => Array.from(document.querySelectorAll("input[type=radio]")).map((el) => (el as HTMLInputElement).checked)).catch(() => [true]);
+  const drift = ((r.data.driftWarnings ?? []) as string[]).join(" | ");
+  console.log(`   E3f: ok=${r.ok} ${r.seconds.toFixed(1)}s ticked=${JSON.stringify(radios)}\n       ${notes(r)}`);
+  check("E3f: another list's one row is NOT ticked as the parcel list's only row", radios.every((x) => !x), JSON.stringify(radios));
+  check("E3f: ...and the refusal is named", /parcel row: this job has no parcel number on file, and the one result's grid is not told by the recorded control itself/.test(drift), drift);
   await page.context().close();
 }
 // ---- E5 / E5b / E5c, and the reachable shapes E5d (title) / E5e (unlabelled) -----------------
