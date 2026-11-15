@@ -6525,8 +6525,14 @@ export class RecipeAdapter extends BasePortalAdapter {
       let n = 0;
       for (const tr of Array.from(document.querySelectorAll("tr"))) {
         if (!vis(tr)) continue;
+        // A ROW'S OWN RADIO OR CHECKBOX IS ITS SELECTOR TOO (live City of Boise, Accela ACA,
+        // 2026-11-15, #235): the Address Search Result List puts a radio in each row and ONE
+        // "Select" button under the grid, so a grid with two rows read as "no selectable rows"
+        // and the address step was skipped. A per-row "Select" link (Oregon ePermitting) still
+        // comes first; a header row carries neither.
         const action = Array.from(tr.querySelectorAll("a, button, [role='button']"))
-          .find((a) => /^\s*select\s*$/i.test((a as HTMLElement).innerText || ""));
+          .find((a) => /^\s*select\s*$/i.test((a as HTMLElement).innerText || ""))
+          ?? Array.from(tr.querySelectorAll("input[type='radio'], input[type='checkbox']")).find((i) => vis(i) && !(i as HTMLInputElement).disabled);
         if (!action) continue;
         const text = ((tr as HTMLElement).innerText || "").replace(/\s+/g, " ").trim();
         if (!text || text.length > 400) continue;
