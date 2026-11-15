@@ -113,6 +113,7 @@ import {
 } from "../../../shared/src/portalSafety";
 import { commitField, installSettleProbe, waitForSettled } from "../settle";
 import { siteOfUrl } from "../siteOf";
+import { isPathTenantedHost, portalHostOf, portalTenantKey, portalTenantOf, trackSafeUrl } from "../../../backend/src/portalChannel";
 import { dialogOpenedSince, readUnlessDialog } from "../personDialogs";
 import { cancelledMessage, cancelRequestOf, ReplayStallWatch, replayStallMsFromEnv, type RunCancelRequest } from "./replayStopControl";
 import { installFilingBackstop, withBackstopWindow, withOwnWriteWindow, withAutomationInput, describeBackstopAbort, backstopSentLine, drainOwnWrites, unsavedAtReviewWarning, portalOwnCallsBlockedAtReview, reviewBlockedCallsLine, isStoppingAbort, type BackstopAbort, type FilingBackstop, type BackstopHumanRequest } from "../filingBackstop";
@@ -1514,12 +1515,20 @@ export class RecipeAdapter extends BasePortalAdapter {
       const mark = (phase: string, started: number, note?: string) => { this.phaseTimings.push({ phase, ms: Date.now() - started, ...(note ? { note } : {}) }); };
       mark("open browser", tStart);
       this.progress("open", "Browser open — going to the portal", Date.now() - tStart);
+      this.landedPortal = null;
       if (this.recipe.portalUrl) {
         const tGoto = Date.now();
         await this.withProgress("goto", "Opening the portal", () => this.guardedGoto(this.recipe.portalUrl!, "open the recipe's portal", { waitUntil: "domcontentloaded", timeout: 30000 }));
         const stuck = await this.recoverFromPortalErrorPage(this.recipe.portalUrl, "open the recipe's portal");
         await smartWait(this.page);
-        mark("portal goto", tGoto, stuck ? "error page not left" : undefined);
+        // WHERE THE PORTAL URL LANDED, read here — after its own redirects, before the sign-in can
+        // move the page (#231, adoptLandedPortal). A landing that is not adopted changes nothing:
+        // no stop, no refusal, the run goes on exactly as before. An adopted one is named on this
+        // phase, never as an aging note: re-recording cannot change where portalUrl redirects.
+        this.adoptLandedPortal();
+        const landed = this.landedPortal ? RecipeAdapter.landedPortalLabel(this.landedPortal) : "";
+        const gotoNote = [stuck ? "error page not left" : "", landed ? `landed on ${landed}, the recipe's portal for this run's gotos` : ""].filter(Boolean).join("; ");
+        mark("portal goto", tGoto, gotoNote || undefined);
       }
 
       // Log in via the shared, portal-agnostic login flow. It detects/reveals the login
@@ -7824,6 +7833,133 @@ export class RecipeAdapter extends BasePortalAdapter {
     "microsoftonline.com", "b2clogin.com", "okta.com", "auth0.com", "onelogin.com", "pingidentity.com", "login.gov", "id.me",
   ]);
 
+  /** The site of the recipe's own portal: its portalUrl, else its first goto. The one answer the
+   *  goto gate and adoptLandedPortal both read. "" when the recipe names neither. */
+  private recipeHomeSite(): string {
+    const anchor = this.recipe.portalUrl || String(this.recipe.steps.find((s) => s.action === "goto")?.value ?? "");
+    return anchor ? RecipeAdapter.siteOf(anchor) : "";
+  }
+
+  /** HARD RULE 5, THE TRACK HALF OF THE GOTO GATE: a permit recipe never opens a utility
+   *  (PowerClerk) portal, a utility recipe never opens a permit portal, unless the recipe's own
+   *  portal (`home`) is one. The refusal reason, or "". Asked of every goto's target, and of the
+   *  site the recipe's portal landed on with no home exemption (#231, adoptLandedPortal). */
+  private gotoTrackRefusal(target: string, home: string): string {
+    if (this.recipe.scopeType === "ahj" && /powerclerk/i.test(target) && !/powerclerk/i.test(home)) {
+      return `a permit recipe may not open a utility (PowerClerk) portal: ${target}`;
+    }
+    if (this.recipe.scopeType === "utility" && /accela|tylerhost|epermit/i.test(target) && !/accela|tylerhost|epermit/i.test(home)) {
+      return `a utility recipe may not open a permit portal: ${target}`;
+    }
+    return "";
+  }
+
+  /** HARD RULE 5'S OWN TRACK PREDICATE, ON THE FULL URL: portalChannel.trackSafeUrl, the backend's
+   *  track half (vendor clouds, utility platforms, non-allowlisted Salesforce tenants, and a permit
+   *  install self-hosted on any host — read from the PATH, /CitizenAccess, /EnerGov_Prod…). The
+   *  refusal reason naming the URL's host, or "". Asked of the landing before it is adopted and of
+   *  every goto the landed portal alone would admit (#231): the gate's regex knows three words. */
+  private trackSafeRefusal(url: string): string {
+    const utility = this.recipe.scopeType === "utility";
+    if (trackSafeUrl(utility ? "nem" : "permit", url)) return "";
+    const host = portalHostOf(url) || RecipeAdapter.siteOf(url);
+    return utility ? `a utility recipe may not open a permit portal: ${host}` : `a permit recipe may not open a utility portal: ${host}`;
+  }
+
+  /**
+   * THE PORTAL A LANDING NAMES IS ITS ORIGIN, AND ON A SHARED VENDOR HOST ITS PATH TENANT TOO (#231).
+   * The origin is scheme + host + port: an http page of an https landing is not the page the run
+   * landed on, and a landing on localhost:3000 never vouches for localhost:8787 (the backend's API).
+   * A host that serves many agencies from one name (portalChannel.isPathTenantedHost — the one list,
+   * which the final-submit door check sameFilingDoor and draftTenantKey also read: aca-*.accela.com,
+   * permiteyes.us, portal.iworq.net…) is a different portal per tenant: aca-prod.accela.com/MERIDIAN
+   * and aca-prod.accela.com/CHINO are two cities with two sign-ins. There the landing is adopted
+   * only when it names its tenant BY ITS FIRST PATH SEGMENT: its portalTenantKey is that segment's
+   * (the instance's own reading of a tenant), and not the bare root's. The vendor's root
+   * (aca-prod.accela.com/) names no one, and a tenant named only by a query parameter
+   * (bsaonline.com/?uid=413) would have to be carried by every later URL; neither is adopted, and the
+   * run's gates stay as before.
+   * The tenant comes from the landing, never from the recipe's goto paths: nothing a recipe step
+   * names vouches for a portal. null = not adoptable.
+   */
+  private static landedPortalOf(url: string): { origin: string; tenant: string } | null {
+    const host = portalHostOf(url);
+    if (!host) return null;
+    let origin = "";
+    try { origin = new URL(url).origin; } catch { return null; }
+    if (!isPathTenantedHost(host)) return { origin, tenant: "" };
+    const tenant = portalTenantOf(url);
+    const key = portalTenantKey(url);
+    if (!tenant || key === portalTenantKey(`https://${host}/`) || key !== portalTenantKey(`https://${host}/${tenant}/`)) return null;
+    return { origin, tenant };
+  }
+
+  /** The landed portal as the run report names it: its origin, and its tenant when it has one. */
+  private static landedPortalLabel(p: { origin: string; tenant: string }): string {
+    return p.tenant ? `${p.origin}/${p.tenant}` : p.origin;
+  }
+
+  /** The portal loading the recipe's own portalUrl landed on, when its site differs from portalUrl's
+   *  own (adoptLandedPortal). null = none: the goto gate is exactly the recipe's portal. */
+  private landedPortal: { origin: string; tenant: string } | null = null;
+
+  /** IS THIS URL ON THE PORTAL THE RUN LANDED ON? The same origin, and on a shared vendor host the
+   *  landing's tenant as its first path segment (case-insensitive: /MERIDIAN is /meridian, /CHINO is
+   *  not). The URL's own tenant query parameters are not read: Accela's record pages carry
+   *  agencyCode= beside the path, which names the agency whose sign-in the run holds. */
+  private landedPortalAdmits(url: string): boolean {
+    const landed = this.landedPortal;
+    if (!landed) return false;
+    let origin = "";
+    try { origin = new URL(url).origin; } catch { return false; }
+    return origin === landed.origin && (!landed.tenant || portalTenantOf(url) === landed.tenant);
+  }
+
+  /**
+   * A PORTAL URL THAT REDIRECTS ELSEWHERE MAKES THE PORTAL IT LANDED ON THE RECIPE'S PORTAL FOR THIS
+   * RUN. City of Meridian (replay sweep 2026-11-14, #231): portalUrl citizenportal.meridiancity.org/
+   * CitizenAccess/ redirects to aca-prod.accela.com/meridian/Default.aspx; the run landed and signed
+   * in there, then refused its own step 0 (goto aca-prod.accela.com/MERIDIAN/Dashboard.aspx) as
+   * "leaving the recipe's portal (meridiancity.org)" — the gate knew portalUrl's site only.
+   *
+   * The portal is OBSERVED in this run (page.url() once the portal goto has settled), never read from
+   * the recipe: nothing a recipe step names vouches for a portal. Called by login() BEFORE the
+   * sign-in, so a host the sign-in's own redirects reach is never adopted. A redirect a script fires
+   * after the page has settled is not seen: the run then stops at its first goto there, as before.
+   * What is adopted is landedPortalOf: the origin, and on a shared vendor host the tenant — never a
+   * registrable domain (accela.com would admit every other city's tenant host on it).
+   *
+   * NOT ADOPTED, AND NOTHING ELSE CHANGES (review of #231): a page that is not http(s), a landing on
+   * portalUrl's own site (already the recipe's portal), the eight SSO_SITES identity providers (already
+   * allowed), a landing on the other track's portal by either rule-5 predicate with no home exemption
+   * (the gate's own gotoTrackRefusal, and trackSafeRefusal on the full URL), and a shared vendor
+   * host's landing that names no path tenant. No stop, no refusal line, no message: the run goes on
+   * exactly as before and a later goto there is refused at that step, in the gate's usual words. A stop
+   * at login here stopped runs main completes — a utility recipe on tylerhost whose sign-in bounces
+   * through identity.tylerportico.com, a permit-vendor host to rule 5 — and its message read as a
+   * recipe failure, which demotes the recipe. Rule 5's one carve-out (a utility filing inside the
+   * city permit portal its verified record names) covers THAT portal — portalUrl's own site, which
+   * returns above — never another host a redirect reaches.
+   */
+  private adoptLandedPortal(): void {
+    this.landedPortal = null;
+    if (!this.recipe.portalUrl) return;
+    const here = String(this.page && typeof this.page.url === "function" ? this.page.url() ?? "" : "");
+    if (!/^https?:\/\//i.test(here)) return;
+    // A FULLY-QUALIFIED HOST (TRAILING DOT) IS NEVER ADOPTED. "pgenm.powerclerk.com." is the same
+    // server as "pgenm.powerclerk.com", but siteOf reads its site as "com." and the track regexes
+    // miss it, so adopting it would let a permit recipe's gotos reach a utility portal that main
+    // refuses (#231 rule-5 review). Not adopting changes nothing: the run is main's.
+    let hostname = "";
+    try { hostname = new URL(here).hostname; } catch { return; }
+    if (!hostname || hostname.endsWith(".")) return;
+    const home = this.recipeHomeSite();
+    const site = RecipeAdapter.siteOf(here);
+    if (!home || !site || site === home || RecipeAdapter.SSO_SITES.has(site)) return;
+    if (this.gotoTrackRefusal(site, "") || this.trackSafeRefusal(here)) return;
+    this.landedPortal = RecipeAdapter.landedPortalOf(here);
+  }
+
   /** The page, as the shared predicates read it: does it NAME itself the review step, is it
    *  read-only, and does it show a filing-shaped control. Unknown (a page that cannot be read)
    *  answers every question with undefined. */
@@ -7909,18 +8045,27 @@ export class RecipeAdapter extends BasePortalAdapter {
       const url = String(intent.url || "");
       if (!/^https?:\/\//i.test(url)) return url ? refuse(`"${url.slice(0, 80)}" is not an http(s) URL`) : refuse("no URL");
       const target = RecipeAdapter.siteOf(url);
-      const anchor = this.recipe.portalUrl || String(this.recipe.steps.find((s) => s.action === "goto")?.value ?? "");
-      const home = anchor ? RecipeAdapter.siteOf(anchor) : "";
-      if (this.recipe.scopeType === "ahj" && /powerclerk/i.test(target) && !/powerclerk/i.test(home)) {
-        return refuse(`a permit recipe may not open a utility (PowerClerk) portal: ${target}`);
+      const home = this.recipeHomeSite();
+      // The track half FIRST, against the recipe's own portal only — the landed portal below never
+      // relaxes it.
+      const track = this.gotoTrackRefusal(target, home);
+      if (track) return refuse(track);
+      if (!home || target === home || RecipeAdapter.SSO_SITES.has(target)) return "";
+      // THE PORTAL THE RECIPE'S OWN PORTAL URL LANDED ON IS THE RECIPE'S PORTAL TOO (#231; see
+      // adoptLandedPortal), AND RULE 5 IS ASKED AGAIN OF THE FULL TARGET. The landing passed rule 5,
+      // but a page of the same origin need not: a utility recipe that landed on a city host's root
+      // (no /CitizenAccess in its path) must not then goto /CitizenAccess/ there (review of #231).
+      // With no landing, the decisions and the words are exactly as before.
+      const landed = this.landedPortal;
+      if (landed && this.landedPortalAdmits(url)) {
+        const rule5 = this.trackSafeRefusal(url);
+        return rule5 ? refuse(rule5) : "";
       }
-      if (this.recipe.scopeType === "utility" && /accela|tylerhost|epermit/i.test(target) && !/accela|tylerhost|epermit/i.test(home)) {
-        return refuse(`a utility recipe may not open a permit portal: ${target}`);
-      }
-      if (home && target !== home && !RecipeAdapter.SSO_SITES.has(target)) {
-        return refuse(`goto leaves the recipe's portal (${home}) for ${target} — stopped rather than followed`);
-      }
-      return "";
+      if (!landed) return refuse(`goto leaves the recipe's portal (${home}) for ${target} — stopped rather than followed`);
+      const tenantOf = landed.tenant ? portalTenantOf(url) : "";
+      let named = target;
+      try { named = `${new URL(url).origin}${tenantOf ? `/${tenantOf}` : ""}`; } catch { /* the site names it */ }
+      return refuse(`goto leaves the recipe's portal (${home}, landed on ${RecipeAdapter.landedPortalLabel(landed)}) for ${named} — stopped rather than followed`);
     }
     // A key press that is not Enter/Space cannot activate a control (Escape, Tab, arrows).
     if (intent.kind === "press" && !/^(enter|numpadenter|space| )$/i.test(String(intent.key ?? "Enter"))) return "";
