@@ -12,6 +12,7 @@ import { selectWithFallback, readClosedComboboxOptions } from "../comboboxFill";
 import { fillTypeahead, typeaheadFailureLine } from "../typeaheadFill";
 import { usStateCode } from "../../../backend/src/usState";
 import { typeaheadMatchMode, type TypeaheadSite } from "../typeaheadMatch";
+import { withoutLearnDataInSelectors, type LearnIdentity } from "../learnDataInSelectors";
 import { assertFilerIdentityHeld, FilerIdentityStop, filerIdentityFieldForSelect, filerIdentityStopMessage, selectFilerIdentity } from "../filerIdentitySelect";
 import { detectChallengeFrame, frameSelectorFor, maskId, readbackMatches, redactCaptureText, redactStatusText, safeAction, sleep, smartWait, waitForElement, waitForInteractiveControls } from "../safeAction";
 import { clearSecretTags, secretMaskPatterns, tagSecretsForMask } from "../secretMask";
@@ -5381,6 +5382,19 @@ export class AutoLearnAdapter extends BasePortalAdapter {
       // left, ended, stopped or found nothing fillable on without entering this job's own data there
       // — the incident, settled here (every exit of the walk), before the backstop is disposed.
       result = this.settleInfoPageProof(result, backstop);
+      // THE LEARNER NEVER WRITES THE LEARN JOB'S DATA OR A DATE INTO A SELECTOR (#235). The walk
+      // records what the page showed: a results row by its content (Boise's address, parcel, owner
+      // and licence rows, labelled with the learn property's own values), a certification tick by the
+      // date printed beside it. A recipe is replayed for every job on the portal, so on every exit of
+      // the walk a results-row pick becomes a ROW ROLE (replayed by THAT job's value) and a dated
+      // label becomes the control's own id — one predicate with the replay (learnDataInSelectors).
+      {
+        const scrubbed = withoutLearnDataInSelectors(result.steps ?? [], this.learnIdentityOf(project));
+        if (scrubbed.changed.length) {
+          result = { ...result, steps: scrubbed.steps };
+          this.debug?.event({ type: "learn_data_scrubbed", changed: scrubbed.changed.slice(0, 20) });
+        }
+      }
       // #394: the walk starts on the page login left loaded — if the redirect guard could not
       // cover it, the result says so (never silent).
       if (guardNote) result = { ...result, message: `${result.message} ${guardNote}`.trim() };
@@ -5487,6 +5501,28 @@ export class AutoLearnAdapter extends BasePortalAdapter {
       // so this reaches the caller) — it's how the backend + UI surface "where to look".
       if (result && this.debug) result.debugDir = this.debug.dir;
     }
+  }
+
+  /** #235 — the learn job's own values, as withoutLearnDataInSelectors matches them: the property's
+   *  street, owner and parcel (the project and the site contact), and the filing company's names,
+   *  street, phone and email (the applicant contact). The learner has no licence numbers: a licence
+   *  row is told by its shape (a long number in a licence list). */
+  private learnIdentityOf(project: ProjectRecord): LearnIdentity {
+    const site = this.siteContactIdentity ?? {};
+    const company = this.contactIdentity ?? {};
+    const snapshot = ((project as { parserSnapshot?: Record<string, unknown> }).parserSnapshot ?? {}) as Record<string, unknown>;
+    const s = (v: unknown): string => String(v ?? "").trim();
+    const fullName = (c: ContactIdentity): string => s(c.fullName) || [s(c.firstName), s(c.lastName)].filter(Boolean).join(" ");
+    return {
+      siteStreet: s(project.projectAddress).split(",")[0].trim(),
+      ownerNames: [s(project.homeownerName), fullName(site)].filter(Boolean),
+      parcels: [s(site.parcel), s(snapshot.apn), s(snapshot.parcelNumber)].filter(Boolean),
+      companyNames: [s(company.companyName), ...(company.ownNames ?? []).map(s)].filter(Boolean),
+      companyStreet: s(company.street),
+      companyContacts: [s(company.phone), s(company.email)].filter(Boolean),
+      // The walk is ending now: only today's date (within the slack) printed in a label is volatile.
+      learnedAt: Date.now(),
+    };
   }
 
   // ---------------------------------------------------------------------------

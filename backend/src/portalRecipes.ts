@@ -28,6 +28,7 @@ import { parseStreetNumber, parseStreetName, parseStreetLine } from "../../porta
 import { recordShapeOf } from "../../portal-bot/src/recordNumber";
 import { feeBracketFieldForLabel, feeBracketQuantityFields } from "./feeBracketFields";
 import { FEE_BRACKET_FIELD_PREFIX } from "../../portal-bot/src/feeBracketQuantity";
+import { DATE_LITERAL } from "../../portal-bot/src/learnDataInSelectors";
 import { filingValuationText } from "./valuation";
 import { planSetDisconnectPart, standardDisconnectConflicts } from "./baselineRules";
 import { clientCompanyFactFields } from "./clients";
@@ -1867,8 +1868,8 @@ function dateFields(): Record<string, string> {
 
 // Which date field a recorded date literal should become. Value-equality binding cannot
 // reach these (that is exactly why they froze), so this matches on the CONTROL's label
-// and picks the format the portal already demonstrated it accepts.
-const DATE_LITERAL = /^(\d{4}-\d{2}-\d{2}|\d{1,2}\/\d{1,2}\/\d{4})$/;
+// and picks the format the portal already demonstrated it accepts. DATE_LITERAL is the one date
+// grammar (portal-bot learnDataInSelectors): the learner reads a date printed in a label by it too.
 const FUTURE_DATE_LABEL = /commission|in[- ]?service|energiz|operation|installation|completion|start|planned|expected|estimated|anticipat|schedul/i;
 // AN EXPIRY IS NEITHER A SIGNATURE DATE NOR A COMMISSIONING ESTIMATE.
 //

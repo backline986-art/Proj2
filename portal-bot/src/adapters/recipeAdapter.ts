@@ -105,6 +105,7 @@ import { openPortal } from "../browser";
 import { selectWithFallback, comboboxFaceInPage, type ComboboxPick } from "../comboboxFill";
 import { fillTypeahead, typeaheadFailureLine, TypeaheadStop } from "../typeaheadFill";
 import { typeaheadMatchMode, type TypeaheadSite } from "../typeaheadMatch";
+import { isPrintedDateLabel, resultRowRoleOf, type ResultRowRole } from "../learnDataInSelectors";
 import { assertFilerIdentityHeld, FilerIdentityStop, filerIdentityFieldForSelect, filerIdentityStopMessage, isFilerIdentityField, isUnansweredOption, readNativeSelect, selectFilerIdentity } from "../filerIdentitySelect";
 import {
   classifySubmissionText, finalSubmitEnvAllows, finalSubmitRefusals, isFinalSubmitControl, isPayFee, isPayNowDialogText, mayClickFinalSubmit,
@@ -5913,6 +5914,54 @@ export class RecipeAdapter extends BasePortalAdapter {
 
     if (!actual) return null; // unlabelled control — nothing to contradict
     if (agree(recorded, actual)) return null;
+
+    // A RECORDED LABEL THAT IS ONLY A PRINTED DATE IS NOT IDENTITY EVIDENCE (#235). "Date: 09/28/2026"
+    // beside a certification tick names nothing a later day's page will print, so when it disagrees
+    // with the box's own label it contradicts nothing: the control is judged by its OWN reading. The
+    // case is the corpus's: Corvallis 333de771 #63 (and two Boise ticks) were recorded with the learn
+    // day's date as the label by an earlier learner; the live label markup was never seen, and the
+    // audit's E5 replay ASSUMED the certification sentence as the box's label — on that page main
+    // found no word shared with the date and SKIPPED the certification. Runs AFTER the unlabelled and
+    // agreement checks (#235 review): a label that agrees, or a box with no label, was never in doubt.
+    // ONLY A DATE: a long number recorded as a label (a numeric control name, a code) still contradicts
+    // a box the page labels as another question (isPrintedDateLabel, one predicate with the learner's
+    // date grammar). One exception: a tick inside a results grid is a ROW, and a date cannot say which
+    // one — never ticked by the position the recording happened to hold.
+    if (isPrintedDateLabel(recorded)) {
+      // A RESULTS GRID IS ORDINAL SIBLINGS, NOT TWO BOXES IN ONE TABLE: Accela lays whole pages out in
+      // tables, so a certification sharing a layout table with an opt-in box is no grid. A grid's
+      // rows carry the same control again — radios sharing one name, or ids that differ only by
+      // their row numbers (…_gv_CB_0 / _CB_1, …_ctl02_CB_0 / _ctl03_CB_0).
+      const inResultsGrid = await el0.evaluate((el: Element) => {
+        const ty = ((el as HTMLInputElement).type || "").toLowerCase();
+        if (el.tagName.toLowerCase() !== "input" || (ty !== "radio" && ty !== "checkbox")) return false;
+        const ownRow = el.closest("tr");
+        const table = ownRow?.closest("table") as HTMLTableElement | null;
+        if (!ownRow || !table) return false;
+        const name = el.getAttribute("name") || "";
+        const id = el.getAttribute("id") || "";
+        const shape = id && /\d/.test(id) ? id.replace(/\d+/g, "#") : "";
+        for (const tr of Array.from(table.rows)) {
+          if (tr === ownRow) continue;
+          for (const other of Array.from(tr.querySelectorAll(`input[type="${ty}"]`))) {
+            if (ty === "radio" && name && other.getAttribute("name") === name) return true;
+            const oid = other.getAttribute("id") || "";
+            if (shape && oid && oid !== id && oid.replace(/\d+/g, "#") === shape) return true;
+          }
+        }
+        return false;
+      }).catch(() => false) as boolean;
+      if (inResultsGrid) {
+        this.driftWarnings.push(
+          `step "${recorded.slice(0, 44)}" resolved onto one row of a results grid, and its recorded label is a date the learn job's page printed — SKIPPED rather than ticking a row by its recorded position`,
+        );
+        return "abort";
+      }
+      this.agingNotes.push(
+        `step "${recorded.slice(0, 44)}": the recorded label is a date the page printed, not the control's name — kept the control by its own reading ("${actual.replace(/\s+/g, " ").slice(0, 50)}")`,
+      );
+      return null;
+    }
     const a = words(recorded);
 
     // They share nothing. Find the control the recipe actually meant — by scanning the
@@ -6591,6 +6640,19 @@ export class RecipeAdapter extends BasePortalAdapter {
           : `Record type "${wanted}" matches ${looseCount} of the types offered here — refusing to guess which permit to file. `
             + `This jurisdiction offers: ${offered.join("; ") || "(none read)"}.`,
       );
+    }
+    // A RESULTS-ROW PICK IS MADE BY THIS JOB'S OWN VALUE, NEVER BY THE RECORDED ROW (#235). Boise's
+    // address, parcel, owner and licence rows were recorded with the learn job's address, parcel
+    // number, owner and licence as their labels, and Tigard's contact row with the learn company's
+    // name in its css: on any other job the label misses and the recorded row-position id decides —
+    // the audit's E3 ticked the NEIGHBOUR's address row and skipped the parcel, and p2A stalled on a
+    // css that named another company. resultRowRoleOf (one predicate with the learner) says which
+    // row a step picks; the row picker finds THIS job's row, or leaves it for a person, named.
+    // Before the selector is tried: a recorded level here is either the learn job's data or a
+    // position, and resolving it is exactly the mistake.
+    if (!step.isFinalSubmit && !this.isFeeTierStep(step)) {
+      const rowRole = resultRowRoleOf(step);
+      if (rowRole) return this.pickResultRowForProject(step, rowRole);
     }
     if (this.skipForNoBattery(step)) {
       const what = String(step.note ?? step.field ?? "battery step").slice(0, 48);
@@ -11617,16 +11679,22 @@ export class RecipeAdapter extends BasePortalAdapter {
 
   /** Did the address search return ANY selectable result rows? Distinguishes "the portal
    *  does not serve this jurisdiction" from "it does, but the row could not be matched". */
-  private async addressSearchHadResults(): Promise<boolean> {
-    if (!this.page || typeof this.page.evaluate !== "function") return true;
-    return await this.page.evaluate(() => {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  private async addressSearchHadResults(docArg?: any): Promise<boolean> {
+    // The document the address step reads (#235: a dialog frame), else the page. Only a results
+    // dialog's rows count a radio as a result: on the page itself a form's own Yes/No rows would.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const doc: any = docArg ?? this.page;
+    if (!doc || typeof doc.evaluate !== "function") return true;
+    return await doc.evaluate((ticksCount: boolean) => {
       const rows = Array.from(document.querySelectorAll("tr"));
       for (const tr of rows) {
         const a = tr.querySelector("a");
         if (a && /select/i.test(a.textContent || "")) return true;
+        if (ticksCount && tr.querySelector("td") && tr.querySelector("input[type='radio']")) return true;
       }
       return false;
-    }).catch(() => true) as boolean;
+    }, doc !== this.page).catch(() => true) as boolean;
   }
 
   /**
@@ -11643,8 +11711,10 @@ export class RecipeAdapter extends BasePortalAdapter {
    *  trying) and the post-failure fallback (Accela, whose recorded "Select" link can still
    *  work and is tried first). */
   private async pickAddressRowForProject(step: RecipeStep): Promise<boolean> {
-    const num = String(this.fieldValues.streetNumber ?? "").trim();
     const street = String(this.fieldValues.street ?? "").trim();
+    // The house number from its own key, else from the street line that carries it ("410 E
+    // Washington St") — a value map holding only the street still names the job's address.
+    const num = String(this.fieldValues.streetNumber ?? "").trim() || (/^(\d+[a-z]?)\s/i.exec(street)?.[1] ?? "");
     if (!num || !street) return false;
     // ACA returns ONE ROW PER JURISDICTION for the same address — city and county both serve
     // it. Which one is right is the discipline: a structural permit files with the CITY, an
@@ -11652,7 +11722,18 @@ export class RecipeAdapter extends BasePortalAdapter {
     // city/structural address row"). Without that tiebreak the match is ambiguous on
     // essentially every search.
     const wantCounty = /county|electrical/i.test(String(step.note ?? "")) && !/city/i.test(String(step.note ?? ""));
-    const picked = await this.pickAddressRow(num, street, wantCounty ? "county" : "city");
+    // IN THE DOCUMENT THE STEP LIVES IN, AND IN ITS OWN GRID (#235). Boise's address results sit in
+    // Accela's dialog frame beside the parcel and owner lists — whose rows can carry the same street
+    // — and are ticked by a radio, not clicked by a Select link: scanning the main document found no
+    // row at all, and scanning every row of the dialog would count an owner's mailing address as a
+    // second address row. The recorded control tells only WHICH GRID; the row is this job's.
+    const doc = await this.resultRowDocument(step);
+    if (!doc) {
+      this.driftWarnings.push(`address row: the dialog frame ${String(step.selector?.frame ?? "").slice(0, 40)} is not open — the address row was left for a person`);
+      return false;
+    }
+    await this.markResultGrid(step, doc);
+    const picked = await this.pickAddressRow(num, street, wantCounty ? "county" : "city", doc, step.action === "check");
     // AN EMPTY SEARCH IS A CONCLUSION, NOT A RETRY. Oregon ePermitting participation is
     // VOLUNTARY: a jurisdiction that has not joined never appears in this search at all. So
     // an address the statewide portal cannot find almost always means the AHJ runs its OWN
@@ -11665,7 +11746,7 @@ export class RecipeAdapter extends BasePortalAdapter {
     // shape that earned it.
     const isEPermitting = /work location/i.test(String(step.note ?? ""))
       || /accela|epermitting/i.test(String(this.recipe.portalPlatform ?? ""));
-    if (!picked && isEPermitting && !(await this.addressSearchHadResults())) {
+    if (!picked && isEPermitting && !(await this.addressSearchHadResults(doc))) {
       throw new Error(
         `ADDRESS NOT IN OREGON EPERMITTING: the statewide portal returned no results for ${num} ${street}. `
         + `Participation is voluntary, so this almost certainly means ${this.recipe.ahj || "this jurisdiction"} runs its own permit portal. `
@@ -11680,9 +11761,12 @@ export class RecipeAdapter extends BasePortalAdapter {
     return true;
   }
 
-  private async pickAddressRow(streetNumber: string, street: string, prefer: "city" | "county" = "city"): Promise<string> {
-    if (!this.page || typeof this.page.evaluate !== "function") return "";
-    const id = await this.page.evaluate((args: { num: string; street: string; prefer: string }) => {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  private async pickAddressRow(streetNumber: string, street: string, prefer: "city" | "county" = "city", docArg?: any, tick = false): Promise<string> {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const doc: any = docArg ?? this.page;
+    if (!doc || typeof doc.evaluate !== "function") return "";
+    const id = await doc.evaluate((args: { num: string; street: string; prefer: string }) => {
       // No nested function declarations — esbuild's keepNames would wrap them as __name(…)
       // and this evaluate would throw into a swallowed catch.
       const DIRECTIONS: Record<string, string> = {
@@ -11694,7 +11778,11 @@ export class RecipeAdapter extends BasePortalAdapter {
         ct: "court", blvd: "boulevard", pl: "place", ter: "terrace", cir: "circle",
         hwy: "highway", pkwy: "parkway", way: "way", loop: "loop", trl: "trail",
       };
-      const rows = Array.from(document.querySelectorAll("tr"));
+      // A marker left by an earlier pick in this document must not answer for this one.
+      document.querySelectorAll("[data-replay-addr]").forEach((n) => n.removeAttribute("data-replay-addr"));
+      // The recorded control's own grid when markResultGrid found it (#235), else every row.
+      const grid = document.querySelector('[data-al-grid="1"]') as HTMLTableElement | null;
+      const rows = grid ? Array.from(grid.rows) : Array.from(document.querySelectorAll("tr"));
       const hits: Array<{ idx: number; text: string }> = [];
       // Expand the wanted address once.
       const wantWords: string[] = [];
@@ -11740,7 +11828,16 @@ export class RecipeAdapter extends BasePortalAdapter {
     if (!id) return "";
     // What in the row takes the click, widest-first: Accela's "Select" link, then any link
     // or button in the row, then the row itself for a grid that binds its handler in script.
-    const row = this.page.locator('tr[data-replay-addr="1"]');
+    const row = doc.locator('tr[data-replay-addr="1"]');
+    // A ROW TICKED BY A RADIO OR CHECKBOX (#235 — Accela's address results in its dialog frame) is
+    // chosen by ticking it, and judged by the tick holding: ticking moves no page.
+    const ticks = row.locator("input[type='radio'], input[type='checkbox']").first();
+    if (tick && await ticks.count().catch(() => 0)) {
+      const visible = await this.isTrulyVisible(ticks).catch(() => false);
+      await withAutomationInput(this.page, () => ticks.check({ force: !visible, timeout: 8000 })).catch(() => null);
+      await this.settle(5000);
+      return (await ticks.isChecked().catch(() => false)) ? id : "";
+    }
     // A CLICK THAT LANDS IS NOT A CLICK THAT WORKED. Playwright happily clicks a plain <td>,
     // so the widened candidate list would report success on any grid whose row is inert.
     // Every candidate is judged on whether the page moved, not on whether the click threw.
@@ -11748,7 +11845,7 @@ export class RecipeAdapter extends BasePortalAdapter {
     // evaluate, so on a page without the __name shim it throws, the catch turns it into ""
     // and every candidate then reads as "did not move" — the fixture caught exactly that.
     // One arrow function, no nested declarations, nothing to shim.
-    const snap = async (): Promise<string> => await this.page.evaluate(() =>
+    const snap = async (): Promise<string> => await doc.evaluate(() =>
       `${location.href}|${(document.querySelector("h1, h2, h3")?.textContent || "").trim().slice(0, 60)}`
       + `|${document.querySelectorAll("tr, li, option").length}|${(document.body?.innerText || "").length}`,
     ).catch(() => "") as string;
@@ -11769,6 +11866,229 @@ export class RecipeAdapter extends BasePortalAdapter {
       if ((afterUrl && afterUrl !== beforeUrl) || (beforeSig && afterSig && afterSig !== beforeSig)) return id;
     }
     return "";
+  }
+
+  /** The document a results-row step lives in: the page, or the frame its selector names (Accela's
+   *  dialog frame). null when that frame is not on the page. */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  private async resultRowDocument(step: RecipeStep): Promise<any | null> {
+    const key = step.selector?.frame || step.selector?.fallbacks?.find((f) => f.frame)?.frame;
+    if (!key) return this.page;
+    if (!this.page || typeof this.page.locator !== "function") return null;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const handle: any = await this.page.locator(frameSelectorFor(key)).first().elementHandle({ timeout: 8000 }).catch(() => null);
+    return handle ? await handle.contentFrame().catch(() => null) : null;
+  }
+
+  /**
+   * #235 — MARK THE GRID A RECORDED RESULTS-ROW PICK BELONGS TO (data-al-grid="1"), so a row is read
+   * only from it. ONLY THE RECORDED CONTROL ITSELF SAYS WHICH TABLE — its id or its radio group's name,
+   * else a sibling row's id of the same shape (…_gv_CB_1 recorded, only …_gv_CB_0 on this job's one-row
+   * result): the one place a recorded position is still worth reading, because it is never used to
+   * pick the ROW. Nothing recorded on the page → nothing is marked and every row is read (main's
+   * reading). NOT A HEADER THAT SAYS "ADDRESS": the first version took the one table whose header named
+   * the role, and a search form ("Property Search by Address", with its Search button) or a mailing-
+   * address box says that too — the generic results-row pass, which records no id, then read only that
+   * table, never the grid of rows bound in script beside it, and refused the job's own row (#235
+   * review, A1/A1b). Returns how the grid was told: "exact" (the recorded id or name is on the page),
+   * "shape" (only a same-shaped id is — and ids differing only by digits can be two DIFFERENT grids,
+   * gvList1 / gvList2, so there a row must still show this job's value), or "" (nothing marked).
+   */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  private async markResultGrid(step: RecipeStep, doc: any): Promise<"exact" | "shape" | ""> {
+    if (!doc || typeof doc.evaluate !== "function") return "";
+    const ids: string[] = [];
+    const names: string[] = [];
+    if (step.fingerprint?.id) ids.push(step.fingerprint.id);
+    if (step.fingerprint?.name) names.push(step.fingerprint.name);
+    for (const lvl of [step.selector, ...(step.selector?.fallbacks ?? [])]) {
+      const m = /^(?:#([\w$:.-]+)|\[id="([^"]+)"\])$/.exec(String(lvl?.css ?? "").trim());
+      if (m) ids.push(m[1] || m[2]);
+    }
+    if (!ids.length && !names.length) {
+      await doc.evaluate(() => document.querySelectorAll("[data-al-grid]").forEach((n) => n.removeAttribute("data-al-grid"))).catch(() => null);
+      return "";
+    }
+    return await doc.evaluate((args: { ids: string[]; names: string[] }) => {
+      document.querySelectorAll("[data-al-grid]").forEach((n) => n.removeAttribute("data-al-grid"));
+      let table: HTMLTableElement | null = null;
+      let how: "exact" | "shape" | "" = "";
+      for (const id of args.ids) {
+        const t = document.getElementById(id)?.closest("tr")?.closest("table") as HTMLTableElement | null | undefined;
+        if (t) { table = t; how = "exact"; break; }
+      }
+      for (let k = 0; !table && k < args.names.length; k++) {
+        const t = document.getElementsByName(args.names[k])[0]?.closest("tr")?.closest("table") as HTMLTableElement | null | undefined;
+        if (t) { table = t; how = "exact"; }
+      }
+      // THE SAME CONTROL ON ANOTHER ROW: ids that differ only by their row numbers (the reanchor's
+      // ordinal-sibling shape) belong to one grid, whichever rows this job's search returned.
+      for (let k = 0; !table && k < args.ids.length; k++) {
+        const shape = /\d/.test(args.ids[k]) ? args.ids[k].replace(/\d+/g, "#") : "";
+        if (!shape) continue;
+        for (const el of Array.from(document.querySelectorAll("[id]"))) {
+          if (el.id.replace(/\d+/g, "#") !== shape) continue;
+          const t = el.closest("tr")?.closest("table") as HTMLTableElement | null | undefined;
+          if (t) { table = t; how = "shape"; break; }
+        }
+      }
+      if (!table) return "";
+      table.setAttribute("data-al-grid", "1");
+      return how;
+    }, { ids, names }).catch(() => "") as "exact" | "shape" | "";
+  }
+
+  /**
+   * #235 — PICK ONE ROW OF A RESULTS GRID BY THIS JOB'S OWN VALUE, NEVER BY THE RECORDED ROW.
+   *
+   * The address row goes through the address matcher (pickAddressRowForProject). The others match the
+   * job's own value: the parcel number, the property owner's name (every word, in any order), the
+   * filing company's licence numbers, or — for its contact record — the company's name, its street
+   * number breaking a tie between two of the company's records. CONTACT ROWS ARE THE SEAM FOR #221:
+   * its contact-table picker (the client's row by company and street, a named question listing the
+   * rows) belongs here, under role "contact".
+   *
+   * THE NO-VALUE RULE: a grid with exactly ONE selectable row is that row when this job holds no value
+   * to compare (a parcel search returns the searched address's own parcel) — that is the only row,
+   * not a position. Only in the grid the recorded control's OWN id or name tells (markResultGrid
+   * "exact"): a grid told by a same-shaped id may be another grid (gvList1 for a recorded gvList2), and
+   * its one row is then another list's row (#235 review). A value the job DOES hold that the only row
+   * contradicts still refuses, and a contact record is never taken without the company's name. Zero
+   * or several matches leave the row for a person, named, and the step is skipped (never healed onto
+   * a neighbour by label).
+   */
+  private async pickResultRowForProject(step: RecipeStep, role: ResultRowRole): Promise<boolean> {
+    if (role === "address") return this.pickAddressRowForProject(step);
+    const fv = this.fieldValues as Record<string, unknown>;
+    const val = (k: string): string => String(fv[k] ?? "").replace(/\s+/g, " ").trim();
+    const what = role === "parcel" ? "parcel number" : role === "owner" ? "property owner" : role === "licence" ? "licence number" : "company record";
+    let wanted: string[] = [];
+    let tiebreak: string[] = [];
+    if (role === "parcel") wanted = [val("parcelNumber")];
+    else if (role === "owner") wanted = [val("homeownerName")];
+    else if (role === "licence") {
+      wanted = Object.keys(fv).filter((k) => /LicenseNumber$/i.test(k)).map(val);
+      // Two of the company's licences in one list: the one for this permit's trade.
+      const trade = /elec/i.test(String(this.recipe.discipline ?? "")) ? "electrical" : "";
+      if (trade) tiebreak = [trade];
+    } else {
+      wanted = [val("installerCompanyName")];
+      const house = val("installerStreetNumber") || (val("installerStreet").match(/^\d+[a-z]?\b/i)?.[0] ?? "");
+      if (house) tiebreak = [house];
+    }
+    wanted = [...new Set(wanted.filter(Boolean))];
+    if (role === "contact" && !wanted.length) {
+      this.driftWarnings.push("contact row: the filing company's name is not on file for this job — the company's record was left for a person to pick");
+      return false;
+    }
+    const doc = await this.resultRowDocument(step);
+    if (!doc) {
+      this.driftWarnings.push(`${role} row: the dialog frame ${String(step.selector?.frame ?? "").slice(0, 40)} is not open — the ${what} row was left for a person`);
+      return false;
+    }
+    type Pick = { picked: string; how: string; rows: number; hits: number; kind: string };
+    let gridTold: "exact" | "shape" | "" = "";
+    const scan = async (): Promise<Pick> => {
+      gridTold = await this.markResultGrid(step, doc);
+      return await doc.evaluate((args: { role: string; wanted: string[]; tiebreak: string[]; ownGrid: boolean }) => {
+        document.querySelectorAll("[data-al-projrow]").forEach((n) => n.removeAttribute("data-al-projrow"));
+        const grid = document.querySelector('[data-al-grid="1"]') as HTMLTableElement | null;
+        const all = grid ? Array.from(grid.rows) : Array.from(document.querySelectorAll("tr"));
+        const norm = (s: string): string => ` ${s.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim()} `;
+        const squash = (s: string): string => s.toLowerCase().replace(/[^a-z0-9]/g, "");
+        const NOT_A_NAME_WORD = /^(llc|inc|co|corp|corporation|company|ltd|the|of|and|dba)$/;
+        const numeric = args.role === "parcel" || args.role === "licence";
+        const fits = (text: string, value: string): boolean => {
+          if (numeric) {
+            const full = squash(value);
+            const bare = full.replace(/^[a-z]+/, "");
+            const hay = squash(text);
+            return (full.length >= 4 && hay.indexOf(full) >= 0) || (bare.length >= 5 && bare !== full && hay.indexOf(bare) >= 0);
+          }
+          const want = norm(value).trim().split(" ").filter((w) => w.length >= 2 && !NOT_A_NAME_WORD.test(w));
+          const have = norm(text);
+          return want.length > 0 && want.every((w) => have.indexOf(` ${w} `) >= 0);
+        };
+        // THE ACTION WORD IS A WORD OF THE CONTROL'S TEXT, NOT ITS WHOLE TEXT (#235 review): the recorded
+        // css this replaces matched by substring (a:has-text("Select"), button:has-text("Add")), so an
+        // Add button carrying its icon's text ("person_add Add") or a "Select Contact" link is the row's
+        // action — an exact-text test left the learn company's own record for a person. "Unselect" and
+        // "Selected" are not the word.
+        const ACTION = /\b(select|add|choose|pick|use)\b/i;
+        const rows: Array<{ text: string; ctl: Element }> = [];
+        for (const tr of all) {
+          if (tr.closest("thead") || !tr.querySelector("td") || tr.querySelector("table")) continue;
+          const tick = tr.querySelector("input[type='radio'], input[type='checkbox']");
+          const ctls = Array.from(tr.querySelectorAll("a, button, input[type='button'], input[type='submit'], [role='button']"));
+          const act = ctls.find((a) => ACTION.test((a as HTMLElement).innerText || (a as HTMLInputElement).value || a.getAttribute("aria-label") || ""));
+          // A NUMBER THAT IS ITSELF THE LINK: a licence or parcel grid whose row is chosen by clicking its
+          // number carries no action word and no tick — the link showing this job's value is the action.
+          const valueLink = !tick && !act && numeric
+            ? ctls.find((a) => args.wanted.some((v) => fits((a as HTMLElement).innerText || a.textContent || "", v)))
+            : undefined;
+          const ctl = tick || act || valueLink;
+          if (!ctl) continue;
+          const text = Array.from(tr.querySelectorAll("td, th")).map((c) => (c.textContent || "").replace(/\s+/g, " ").trim()).filter(Boolean).join(" ");
+          rows.push({ text, ctl });
+        }
+        let hits = args.wanted.length ? rows.filter((r) => args.wanted.some((v) => fits(r.text, v))) : [];
+        if (hits.length > 1 && args.tiebreak.length) {
+          const narrowed = hits.filter((r) => args.tiebreak.every((t) => norm(r.text).indexOf(norm(t)) >= 0));
+          if (narrowed.length) hits = narrowed;
+        }
+        let chosen: { text: string; ctl: Element } | null = null;
+        let how = "";
+        if (hits.length === 1) { chosen = hits[0]; how = "value"; }
+        else if (!args.wanted.length && args.ownGrid && rows.length === 1 && args.role !== "contact") { chosen = rows[0]; how = "only"; }
+        if (chosen) chosen.ctl.setAttribute("data-al-projrow", "1");
+        const ty = chosen ? ((chosen.ctl as HTMLInputElement).type || "").toLowerCase() : "";
+        return {
+          picked: chosen ? chosen.text.slice(0, 90) : "", how, rows: rows.length, hits: hits.length,
+          kind: chosen ? (chosen.ctl.tagName.toLowerCase() === "input" && (ty === "radio" || ty === "checkbox") ? "tick" : "click") : "",
+        };
+      }, { role, wanted, tiebreak, ownGrid: gridTold === "exact" }).catch(() => ({ picked: "", how: "", rows: 0, hits: 0, kind: "" })) as Pick;
+    };
+    // AN UNPAINTED GRID IS NOT AN EMPTY GRID (the address-version scan's rule): results land on a
+    // postback, so look again briefly before concluding there is nothing to pick.
+    let r = await scan();
+    for (let waited = 0; r.rows === 0 && waited < 8000; waited += 800) {
+      await this.page.waitForTimeout?.(800).catch(() => null);
+      r = await scan();
+    }
+    if (!r.picked) {
+      // Worded WITHOUT the "Recipe step failed" prefix: the portal is fine and so is the recipe — the
+      // job's row is a person's choice (the staleness handler must not queue a re-learn for it).
+      this.driftWarnings.push(
+        r.rows === 0
+          ? `${role} row: no results grid with selectable rows was found — the ${what} row was left for a person`
+          : r.hits > 1
+            ? `${role} row: ${r.hits} of the ${r.rows} results show this job's ${what} — refusing to guess; choose the row by hand`
+            : wanted.length
+              ? `${role} row: none of the ${r.rows} result(s) shows this job's ${what} — refusing to pick another's row; choose it by hand`
+              : r.rows === 1
+                ? `${role} row: this job has no ${what} on file, and the one result's grid is not told by the recorded control itself — refusing to take it as the only row; choose it by hand`
+                : `${role} row: this job has no ${what} on file and the grid offers ${r.rows} rows — refusing to pick one by position; choose it by hand`,
+      );
+      return false;
+    }
+    const target = doc.locator('[data-al-projrow="1"]').first();
+    let ok = false;
+    if (r.kind === "tick") {
+      const visible = await this.isTrulyVisible(target).catch(() => false);
+      await withAutomationInput(this.page, () => target.check({ force: !visible, timeout: 8000 })).catch(() => null);
+      ok = await target.isChecked().catch(() => false);
+    } else {
+      ok = await this.guardedClick(target, `select this job's ${what} row`, { timeout: 8000 }).then(() => true).catch(() => false);
+    }
+    await this.settle(5000);
+    if (!ok) {
+      this.driftWarnings.push(`${role} row: found this job's row ("${r.picked.slice(0, 52)}") and could not ${r.kind === "tick" ? "tick" : "click"} it — left for a person`);
+      return false;
+    }
+    this.agingNotes.push(
+      `${role} row chosen by ${r.how === "only" ? `being the only result (this job has no ${what} on file to compare)` : `this job's own ${what}`}: "${r.picked.slice(0, 52)}"${step.rowRole ? "" : " — the recorded row belonged to the job this recipe was learned on"}`,
+    );
+    return true;
   }
 
   /** Is this locator a native <select>, whose options can actually be read? */
