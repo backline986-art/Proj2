@@ -6478,11 +6478,21 @@ function renderSubmittalTracks() {
     btn.addEventListener("click", async () => {
       btn.disabled = true;
       try {
-        await api(`/api/portal-recipes/${btn.dataset.trackFinishRecipe}/finish`, {
+        const finished = await api(`/api/portal-recipes/${btn.dataset.trackFinishRecipe}/finish`, {
           method: "POST",
           body: JSON.stringify({ clientId: state.detail?.project?.clientId || "" }),
         });
-        showMessage("Recipe saved — the bot will replay this portal automatically for future projects. Review browser closed.", "info");
+        // #241: the person's save is never blocked, but they are shown what the sequence check found
+        // in the steps they just promoted — the same findings that refuse an automatic promotion.
+        const found = Array.isArray(finished?.sequenceProblems) ? finished.sequenceProblems : [];
+        const refusing = found.filter((p) => p && p.refusesPromotion);
+        const notes = found.filter((p) => p && !p.refusesPromotion);
+        const words = (list) => list.slice(0, 4).map((p) => String(p.detail || "")).join("; ") + (list.length > 4 ? `; +${list.length - 4} more` : "");
+        if (refusing.length) {
+          showMessage(`Recipe saved as you asked, but its recorded steps cannot replay as recorded: ${words(refusing)}. It is flagged on the Recipes list — re-learn the portal, or fix those steps, then clear the flag.`, "warning");
+        } else {
+          showMessage(`Recipe saved — the bot will replay this portal automatically for future projects. Review browser closed.${notes.length ? ` Note: ${words(notes)}.` : ""}`, "info");
+        }
         await loadSubmittalTracks();
         renderDetail();
       } catch (err) {

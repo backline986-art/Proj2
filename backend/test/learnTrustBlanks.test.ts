@@ -182,6 +182,7 @@ await check("(8) pageExitTrustSignals + evaluateTrustGate: every kind blocks, th
     reachedReview: true, filledSomething: true, reviewReadable: true, verificationAccurate: true, textContradicts: false,
     requiredFieldMisses: [] as string[], missingRequiredDocs: [] as string[], validationBlocks: [] as string[],
     ambiguousLiteralCount: 0, deadBindings: [] as string[], pageCount: 10, substantiveFills: 92, formPurposeMismatch: false,
+    sequenceProblems: [] as string[],
   };
   type Learn = { trustEvidence?: Evidence[]; pageExitReads?: { read: number[]; unread: number[] } };
   const gate = (learn: Learn) => autoLearn.evaluateTrustGate({ ...clean, ...autoLearn.pageExitTrustSignals(learn) });
