@@ -7672,6 +7672,13 @@ export class RecipeAdapter extends BasePortalAdapter {
     if (!this.recipe.portalUrl) return;
     const here = String(this.page && typeof this.page.url === "function" ? this.page.url() ?? "" : "");
     if (!/^https?:\/\//i.test(here)) return;
+    // A FULLY-QUALIFIED HOST (TRAILING DOT) IS NEVER ADOPTED. "pgenm.powerclerk.com." is the same
+    // server as "pgenm.powerclerk.com", but siteOf reads its site as "com." and the track regexes
+    // miss it, so adopting it would let a permit recipe's gotos reach a utility portal that main
+    // refuses (#231 rule-5 review). Not adopting changes nothing: the run is main's.
+    let hostname = "";
+    try { hostname = new URL(here).hostname; } catch { return; }
+    if (!hostname || hostname.endsWith(".")) return;
     const home = this.recipeHomeSite();
     const site = RecipeAdapter.siteOf(here);
     if (!home || !site || site === home || RecipeAdapter.SSO_SITES.has(site)) return;

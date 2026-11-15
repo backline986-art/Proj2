@@ -1566,6 +1566,14 @@ async function testUnadoptableLandingChangesNothingRuleFive() {
   assert.match(String(pc.result.message), /replay safety gate refused: a permit recipe may not open a utility \(PowerClerk\) portal: powerclerk\.com/, `MUST-EXCLUDE (permit → PowerClerk): by the track rule, at that step (${pc.result.message})`);
   none(pc, "permit → PowerClerk");
 
+  // The same utility portal written as a fully-qualified host (trailing dot): siteOf reads "com.",
+  // which the track regexes miss, so it must never be adopted (#231 rule-5 review).
+  const fq = await landedRun({ scope: "ahj", portalUrl: "https://permits.cityofexample.gov/apply", landed: "https://pgenm.powerclerk.com./MvcAccount/Login", to: ["https://pgenm.powerclerk.com./MvcProjects/Home"] });
+  assert.deepEqual(fq.gotos, [], `MUST-EXCLUDE (permit → PowerClerk, trailing-dot host): never navigated there (${fq.result.message})`);
+  assert.equal(fq.result.ok, false, "MUST-EXCLUDE (permit → PowerClerk, trailing-dot host): the run stops at that goto, as on main");
+  none(fq, "permit → PowerClerk, trailing-dot host");
+  assert.equal(fq.adopted, "", "cross-check (trailing-dot host): never adopted");
+
   const comed = await landedRun({ scope: "ahj", portalUrl: "https://permits.cityofexample.gov/apply", landed: "https://interconnect.comed.com/Home", to: ["https://interconnect.comed.com/Apply"] });
   assert.deepEqual(comed.gotos, [], `MUST-EXCLUDE (permit → a utility platform the regex does not name): never navigated there (${comed.result.message})`);
   assert.ok(String(comed.result.message).includes("goto leaves the recipe's portal (cityofexample.gov) for comed.com — stopped rather than followed"), `MUST-EXCLUDE (permit → a utility platform): main's words (${comed.result.message})`);
