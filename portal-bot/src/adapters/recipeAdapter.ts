@@ -4258,7 +4258,7 @@ export class RecipeAdapter extends BasePortalAdapter {
           // next recorded step needs. Never another failure kind, never past review, never the
           // flagged final submit, never a gate refusal. Nothing is clicked here.
           if (await this.dismissalClickTimedOutUnshown(step, err, pastReview)) {
-            const said = String(step.note || step.selector?.name || "OK").slice(0, 44);
+            const said = String(step.note || step.selector?.name || "the popup's button").slice(0, 44);
             this.agingNotes.push(
               `"${said}" dismisses a popup that is not showing on this run — its click timed out on a hidden or absent control, so the step was skipped as not applicable rather than failing the run (the learn met that popup; this run did not) (#233)`,
             );
@@ -11111,8 +11111,12 @@ export class RecipeAdapter extends BasePortalAdapter {
    * pre-filter, so every match here is one main also made — only fragments are dropped — and the
    * shortest label still wins among them, measured as before.
    */
-  private async findEnabledControlByName(want: string): Promise<unknown | null> {
+  private async findEnabledControlByName(wantRaw: string): Promise<unknown | null> {
     if (!this.page || typeof this.page.evaluate !== "function") return null;
+    // The wanted name is read as the page's labels are: whitespace collapsed (a raw multi-line
+    // recording's "Contractor\n   Add\n   Contact" is "Contractor Add Contact" here, Tigard 2026-11-15).
+    const want = String(wantRaw ?? "").replace(/\s+/g, " ").trim();
+    if (!want) return null;
     const found = await this.page.evaluate(({ needle, whole }: { needle: string; whole: string }) => {
       const norm = (t: string): string => t.replace(/\s+/g, " ").trim();
       // Icon ligatures sit immediately before the real label with no separator and are
@@ -14008,7 +14012,9 @@ export class RecipeAdapter extends BasePortalAdapter {
         : this.page;
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     let loc: any;
-    if (sel.role && sel.name) loc = scope.getByRole(sel.role, { name: sel.name, exact: sel.exact });
+    // The recorded name is read through accessibleNameOf (whitespace-collapsed): a pre-#228
+    // recording's raw multi-line card name never matched the page's one-line accessible name.
+    if (sel.role && sel.name) loc = scope.getByRole(sel.role, { name: accessibleNameOf(sel), exact: sel.exact });
     else if (sel.label) loc = scope.getByLabel(sel.label, { exact: sel.exact });
     else if (sel.placeholder) loc = scope.getByPlaceholder(sel.placeholder, { exact: sel.exact });
     else if (sel.testId) loc = scope.getByTestId(sel.testId);

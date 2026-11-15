@@ -20,9 +20,13 @@
 
 type NamedSelector = { role?: string | null; name?: string | null; css?: string | null };
 
-/** The accessible name a selector records — its `name` only when a `role` stands beside it. */
+/** The accessible name a selector records — its `name` only when a `role` stands beside it.
+ *  WHITESPACE-COLLAPSED, as an accessible name is: a recording made before the learner collapsed
+ *  it (City of Tigard 2026-11-15, a two-line card recorded as "Contractor\n   …\n   Add\n   Contact")
+ *  never matched the page's "Contractor Add Contact" by role, nor by whole words. One reading for
+ *  every door that asks a selector's name. */
 export function accessibleNameOf(sel: NamedSelector | null | undefined): string {
-  return sel?.role && sel.name ? String(sel.name) : "";
+  return sel?.role && sel.name ? String(sel.name).replace(/\s+/g, " ").trim() : "";
 }
 
 /** The HTML name attribute a selector records — a `name` with NO role beside it. */

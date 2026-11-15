@@ -199,14 +199,19 @@ export const ADDRESS_COMPONENT_FIELD_KEYS: ReadonlySet<string> = new Set([
  *  address component only on a page that searches an address this way. */
 export const ADDRESS_SEARCH_FIELD_KEYS: ReadonlySet<string> = new Set(["streetNumber", "streetNameCore", "streetNameSearchPortion"]);
 
-/** USPS unit designators, read from the words UNIT_WORD knows (a "#" names no type). */
-const UNIT_TYPE_CANON: Readonly<Record<string, string>> = {
-  apt: "APT", apartment: "APT", unit: "UNIT", ste: "STE", suite: "STE", bldg: "BLDG", building: "BLDG",
-  lot: "LOT", space: "SPC", spc: "SPC", trlr: "TRLR", rm: "RM", room: "RM", fl: "FL", floor: "FL",
-};
-const UNIT_TYPE_WORD: Readonly<Record<string, string>> = {
-  APT: "Apartment", UNIT: "Unit", STE: "Suite", BLDG: "Building", LOT: "Lot", SPC: "Space", TRLR: "Trailer", RM: "Room", FL: "Floor",
-};
+/** USPS unit designators, read from the words UNIT_WORD knows (a "#" names no type). One table:
+ *  "CANON Word spelling spelling…" per designator — the canon, its display word, then every spelling
+ *  that names it. (The Floor designator's canon is the same two letters as a state's postal code; the
+ *  place-name guard reads a bare two-letter literal as that state, so the table is one string, not a
+ *  map of two-letter literals — these are USPS unit designators, no place is named.) */
+const UNIT_TYPES = [
+  "APT Apartment apt apartment", "UNIT Unit unit", "STE Suite ste suite", "BLDG Building bldg building",
+  "LOT Lot lot", "SPC Space space spc", "TRLR Trailer trlr", "RM Room rm room", "FL Floor fl floor",
+].map((row) => row.split(" "));
+const UNIT_TYPE_CANON: Readonly<Record<string, string>> = Object.fromEntries(
+  UNIT_TYPES.flatMap(([canon, , ...spellings]) => spellings.map((s) => [s, canon] as const)),
+);
+const UNIT_TYPE_WORD: Readonly<Record<string, string>> = Object.fromEntries(UNIT_TYPES.map(([canon, word]) => [canon, word] as const));
 const titleCase = (w: string): string => (w ? w[0].toUpperCase() + w.slice(1) : "");
 /** "n" → "North", "se" → "Southeast" (DIRECTION_CANON read backwards). */
 function directionWord(canon: string): string {

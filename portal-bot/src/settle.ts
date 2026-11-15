@@ -120,8 +120,8 @@ export const SETTLE_PROBE_SOURCE = String.raw`(function () {
   observe();
 
   // --- the page's own URL (#245): a hash route, pushState / replaceState, back / forward ---
-  // An app that rewrites its route has not finished arriving: Tigard's (Tyler EnerGov) application
-  // assistant rewrote #/applicationAssistant?sectionName=All to ?showTemplates=false when its own
+  // An app that rewrites its route has not finished arriving: a Tyler EnerGov SelfService application
+  // assistant (live trace, 2026-11-15) rewrote #/applicationAssistant?sectionName=All to ?showTemplates=false when its own
   // initialisation ended, and wiped the search a replay had clicked in the meantime. A change is
   // activity; the href is also compared at every poll and snapshot, so nothing that moves the URL
   // without an event (a router that captured history methods before this ran) is missed.
@@ -289,13 +289,13 @@ export async function waitForSettled(page: Page, opts: SettleOptions = {}): Prom
 
 /**
  * THE BOUND ON A ROUTE SETTLE (#245). It must outlast the rewrite that does the damage, not the whole
- * request chain behind it. Tigard's (Tyler EnerGov, AngularJS) application assistant, opened from the
+ * request chain behind it. A Tyler EnerGov (AngularJS) SelfService application assistant, opened from the
  * menu, runs a chain with 4-15 ms between its stages (view template, settings, api/user/my ~500 ms,
  * a 4-request batch, then a POST to ApplicationAssistant/trending of 1.3-2.5 s); from its first
  * request to the end of trending that is 1.9-3.7 s in six learn traces. The route rewrite that wiped
  * the live replay's search results lands at the end of the batch, before trending: 1.12 s after the
  * click live (11:01:11.018 → 11:01:12.142), 1.1-1.9 s in the traces. So the settle normally waits
- * the whole chain (2.7-4.0 s on Tigard) and returns settled; on the slowest trace it reaches this bound
+ * the whole chain (2.7-4.0 s on that site) and returns settled; on the slowest trace it reaches this bound
  * with trending still in flight, unsettled, having waited ~2 s past the rewrite. A larger bound buys
  * nothing against the rewrite and is spent in full by a page whose requests or URL never go quiet for
  * the window (a short-interval poll; a long-poll younger than the probe's 5 s request age). A settle
@@ -314,10 +314,10 @@ export interface RouteSettle {
 /**
  * A CLICK THAT CHANGED THE PAGE'S URL IS NOT DONE UNTIL THE PAGE HAS SETTLED (#245): no request in
  * flight and no further change of its URL for the quiet window (the probe's 300 ms default, longer
- * than a setTimeout-0 deferral and than the 15 ms between Tigard's last init response and its
+ * than a setTimeout-0 deferral and than the 15 ms between that assistant's last init response and its
  * rewrite), bounded by ROUTE_SETTLE_MS. A single-page app's view goes on initialising after the
  * route change that opened it, and may end by rewriting its own route; the live replay clicked
- * Tigard's "Search" 0.8 s after "Apply" while the assistant was still initialising, and the
+ * that assistant's "Search" 0.8 s after "Apply" while the assistant was still initialising, and the
  * assistant's rewrite then wiped the results the next step needed (the learn, with ~15 s between
  * those steps, never raced). DOM mutations are left out (`dom: false`): the question is whether the
  * view has finished arriving, which its requests and its route answer; a ticking node would make
@@ -368,13 +368,13 @@ function routeParts(url: string): { route: string; params: Map<string, string> }
 /**
  * DID THE PAGE TAKE BACK WHAT A CLICK DID TO ITS URL? (#245) `before` is the URL before the click,
  * `clicked` the URL the click left, `settled` the URL now. A URL that merely differs from `before` is
- * not proof of an advance: Tigard's "Search" went from #/applicationAssistant to
+ * not proof of an advance: the EnerGov assistant's "Search" went from #/applicationAssistant to
  * ?sectionName=All&showTemplates=false, and the assistant's own rewrite left ?showTemplates=false —
  * not `before`, yet the search was gone. Undone means exactly one of:
  *   - the click left the route, and the page is back on it with the same parameters it had there:
  *     back where it was (#/a → #/b → #/a; /apply → /apply/search?t=all → /apply);
  *   - the click changed only parameters, the page is still on that route, and a parameter the click
- *     SET (to a value) no longer holds it (Tigard: sectionName=All gone).
+ *     SET (to a value) no longer holds it (there: sectionName=All gone).
  * ONLY WHAT THE CLICK DID COUNTS, never what the page added or restored around it, because a router
  * normalising its own URL looks exactly like that and the click's effect held (review of #245):
  *   - a page back on the route it left but in a NEW state is moving on, not going back: a wizard
@@ -388,7 +388,7 @@ function routeParts(url: string): { route: string; params: Map<string, string> }
  *     all the way back to `before` this way still reads as not moved: the caller compares it with
  *     `before` first.
  * A page that went on to another route ("#/loading" → "#/dashboard"), or that kept everything the
- * click set and added to it (Tigard's "Apply": #/applicationAssistant → ?showTemplates=false), is not
+ * click set and added to it (that assistant's "Apply": #/applicationAssistant → ?showTemplates=false), is not
  * undone. Unparseable URLs, or a click that did not change the URL, are never undone (the caller keeps
  * today's reading).
  */
