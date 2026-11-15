@@ -182,6 +182,20 @@ check("a step carrying nothing of the learn job passes through untouched (same o
   assert.equal(steps[0], plain);
   assert.equal(changed.length, 0);
 });
+check("the generic results-row pass's note no longer names the learn property's address", () => {
+  const st: RecipeStep = { action: "click", phase: "fill", selector: { css: RESULT_ROW_MARKER_CSS }, note: 'address row: pick the search result matching this project\'s address (learned on "4417 W QUILLMERE BLVD")' };
+  const { steps } = withoutLearnDataInSelectors([st], {});
+  assert.equal(steps[0].rowRole, "address");
+  assert.match(String(steps[0].note), /^address row:/);
+  assert.doesNotMatch(String(steps[0].note), /QUILLMERE|4417/);
+});
+check("a row pick keeps every field that is not the learn job's row (a lookup's populates, optional)", () => {
+  const st = { ...CONTACT_ROW, optional: true, populates: ["Add Contact As : Contractor"] } as RecipeStep & { populates: string[] };
+  const { steps } = withoutLearnDataInSelectors([st], LEARN);
+  assert.deepEqual((steps[0] as RecipeStep & { populates?: string[] }).populates, ["Add Contact As : Contractor"]);
+  assert.equal(steps[0].optional, true);
+  assert.equal(steps[0].rowRole, "contact");
+});
 check("a level naming the learn company is dropped when another level remains", () => {
   const st: RecipeStep = { action: "click", selector: { role: "button", name: "Brightfold Energy LLC", fallbacks: [{ css: "#acctMenu" }] }, note: "advance: account" };
   const { steps } = withoutLearnDataInSelectors([st], LEARN);

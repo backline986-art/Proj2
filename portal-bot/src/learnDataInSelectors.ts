@@ -358,17 +358,26 @@ export function withoutLearnDataInSelectors(steps: RecipeStep[], identity: Learn
       if (fp?.name) fingerprint.name = fp.name;
       if (fp?.section && !carriesLearnData(fp.section, identity)) fingerprint.section = fp.section;
       if (!fingerprint.id) { const id = recordedIdOf(step); if (id) fingerprint.id = id; }
+      // Every other field rides along (a lookup's `populates`, `optional`, the phase): only what
+      // named the learn job's row is replaced.
       const next: RecipeStep = {
-        action: step.action,
-        ...(step.phase ? { phase: step.phase } : {}),
+        ...step,
         selector: { css: RESULT_ROW_MARKER_CSS, ...(frame ? { frame } : {}) },
         rowRole: role,
         note: ROW_ROLE_NOTE[role],
-        ...(step.optional ? { optional: true } : {}),
-        ...(Object.keys(fingerprint).length ? { fingerprint } : {}),
       };
+      if (Object.keys(fingerprint).length) next.fingerprint = fingerprint;
+      else delete next.fingerprint;
       changed.push(`step ${i}: recorded as a results row, role ${role} (the learn job's row content and position dropped)`);
       return next;
+    }
+    // THE GENERIC RESULTS-ROW PASS'S OWN NOTE named the row it clicked ('learned on "<the learn
+    // property's address>"') — the learn job's address in a recipe every company replays. Its
+    // selector is already the marker; the note becomes the role's.
+    const note = String(step.note ?? "");
+    if (/^address row:/i.test(note) && !step.rowRole && (/\blearned on\b/i.test(note) || carriesLearnData(note, identity))) {
+      changed.push(`step ${i}: the address-row note no longer names the learn property`);
+      return { ...step, rowRole: "address" as const, note: ROW_ROLE_NOTE.address };
     }
     const sel = step.selector;
     const levels: RecipeSelector[] = [{ ...sel, fallbacks: undefined }, ...(sel.fallbacks ?? []).map((f) => ({ ...f, fallbacks: undefined }))];
