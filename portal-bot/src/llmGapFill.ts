@@ -11,6 +11,7 @@ import {
   type LearnPlanRequest,
 } from "./adapters/autoLearnAdapter";
 import { buildLocator } from "./adapters/loginFlow";
+import { recordedNameAttribute } from "../../shared/src/recipeSelector";
 import { selectWithFallback } from "./comboboxFill";
 import { assertFilerIdentityHeld, FilerIdentityStop, filerIdentityFieldForSelect, filerIdentityStopMessage, selectFilerIdentity } from "./filerIdentitySelect";
 import { redactStatusText } from "./safeAction";
@@ -429,6 +430,22 @@ function labelIsOnlyIdent(field: ExtractedField): boolean {
   const l = String(field.label ?? "").trim();
   return !l || l === field.fingerprint?.id || l === field.fingerprint?.name || l === field.group;
 }
+/** A CONTROL WHOSE ONLY IDENTITY IS ITS NAME ATTRIBUTE IS NOT THE GAP-FILL'S (#229 review, Helm
+ *  review of 381204a C6). Main recorded such a control — a name attribute, no label, no
+ *  placeholder: nothing a person reads — as a bare `{ name }` that loginFlow's buildLocator could
+ *  not build, so it was never offered, never written and never reported missing. #229 made the
+ *  name attribute addressable (the learner writes it as css, a saved bare name reads as it) and
+ *  gave a label-less radio or checkbox its #id instead. Asked of the selector, that set leaked in
+ *  the fix's first round: draftSubmitPins b_titleSelect's READY select, whose question sits only
+ *  in its title, was answered "Yes" and the fixture's draft-creating Part 1 submit posted it; on
+ *  a captured Accela ACA page (offline), the txtValidateSectionRequired validation boxes reached
+ *  the operator's "add this to the project" list. So it is asked of the CONTROL: it has a name
+ *  attribute and the selector carries no label or placeholder — exactly the controls main's name
+ *  branch recorded (bareNameSelector smoke, red without this). */
+function identifiedOnlyByName(field: ExtractedField): boolean {
+  const sel = field.selector ?? {};
+  return !!(field.fingerprint?.name || recordedNameAttribute(sel)) && !sel.label && !sel.placeholder;
+}
 
 /** THE CONTROL THE EXTRACTOR SAW, AND ONLY IT (#362, Helm review of 4081f12, Blocking 3). A label
  *  locator is a substring match ("Yes" lands on the first Yes of the page, "Net Metering" on "Are
@@ -440,8 +457,9 @@ function labelIsOnlyIdent(field: ExtractedField): boolean {
 async function locateExtracted(page: any, field: ExtractedField): Promise<any | null> {
   // A control named only by its id / name (nothing a person reads) keeps main's locator: an
   // `[id=…]` built for it answered a READY select whose question was not read (Helm review of
-  // 381204a, C6), where main never wrote it.
-  if (labelIsOnlyIdent(field)) return buildLocator(page, field.selector);
+  // 381204a, C6), where main never wrote it. One addressed only by its name attribute is not
+  // located at all, as on main (identifiedOnlyByName).
+  if (labelIsOnlyIdent(field)) return identifiedOnlyByName(field) ? null : buildLocator(page, field.selector);
   const frame = field.selector?.frame;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const scope: any = frame ? (typeof page.frameLocator === "function" ? page.frameLocator(`iframe[name="${cssStr(frame)}"]`) : null) : page;

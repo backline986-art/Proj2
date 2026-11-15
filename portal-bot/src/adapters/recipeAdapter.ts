@@ -305,6 +305,7 @@ import { answerForUnrecordedControl, missingRequiredStopMessage, UNPINNED_CONTRO
 import { answerForRecordedPolicyStep, parsePolicyDefaultNote } from "../recordedPolicyAnswer";
 import { isComputeTotalsStep, prepareComputeSettle, waitForComputeSettled } from "../computeSettle";
 import { portalSaysNotServed } from "../../../shared/src/portalNotServed";
+import { accessibleNameOf, nameAttributeCss, nameAttributeOf, nameAttributeOfCss, recordedNameAttribute } from "../../../shared/src/recipeSelector";
 
 // RecipeAdapter — replays a recorded portal recipe (see portal_recipes / the recorder).
 // Works for ANY AHJ or utility portal an admin has taught by recording. It substitutes
@@ -398,8 +399,11 @@ function isSignatureStep(step: RecipeStep): boolean {
   // signature box a planner had bound to installerContactName passed this test by its (empty)
   // top-level label and replay typed the CONTACT's name (portal-run-close kill C, red before
   // this). A css/name id reads as words ("signatureTypedNameId" -> "signature Typed Name Id").
+  // A css the name-attribute builder wrote reads as that NAME, as the bare `name` it replaced did
+  // (#229 review): its own scaffolding put the word "name" before "OwnerSigns" and made an
+  // unlabeled box read as the signature box.
   const sel = (step.selector ?? {}) as RecipeSelector & { fallbacks?: RecipeSelector[] };
-  const words = (s: unknown): string => String(s ?? "").replace(/([a-z0-9])([A-Z])/g, "$1 $2").replace(/[#_\-.[\]="']+/g, " ");
+  const words = (s: unknown): string => nameAttributeOfCss(String(s ?? "")) || String(s ?? "").replace(/([a-z0-9])([A-Z])/g, "$1 $2").replace(/[#_\-.[\]="']+/g, " ");
   const names = [sel.label, sel.placeholder, sel.name, words(sel.css), ...(sel.fallbacks ?? []).map((f) => f.label ?? f.placeholder ?? words(f.css))]
     .map((s) => String(s ?? "").trim()).filter(Boolean);
   return names.some((n) => isSignatureNameLabel(n));
@@ -6053,7 +6057,10 @@ export class RecipeAdapter extends BasePortalAdapter {
     let how = "";
     const levels: RecipeSelector[] = step.selector ? [step.selector, ...(step.selector.fallbacks ?? [])] : [];
     for (const sel of levels) {
-      const loc = this.locator({ ...sel, fallbacks: undefined });
+      // A level that cannot be built is skipped like an empty one, never the end of the walk (#229).
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      let loc: any = null;
+      try { loc = this.locator({ ...sel, fallbacks: undefined }); } catch { continue; }
       if (!loc) continue;
       let n = 0;
       try { n = await loc.count(); } catch { continue; }
@@ -8878,11 +8885,15 @@ export class RecipeAdapter extends BasePortalAdapter {
   /** A selector in one short phrase, for the resolution trail. */
   private describeSelector(sel?: RecipeSelector): string {
     if (!sel) return "(none)";
+    // A css the name-attribute builder wrote shows as the name it addresses: its `:is(…)[name="`
+    // head alone is 40 characters, the whole cut, and would hide which name it was (#229).
+    const nameAttr = recordedNameAttribute(sel);
     const bits = [
-      sel.css ? `css:${String(sel.css).slice(0, 40)}` : "",
+      sel.css && !nameAttributeOfCss(sel.css) ? `css:${String(sel.css).slice(0, 40)}` : "",
       sel.label ? `label:${JSON.stringify(String(sel.label).slice(0, 30))}` : "",
       sel.role ? `role:${sel.role}` : "",
-      sel.name ? `name:${JSON.stringify(String(sel.name).slice(0, 30))}` : "",
+      accessibleNameOf(sel) ? `name:${JSON.stringify(accessibleNameOf(sel).slice(0, 30))}` : "",
+      nameAttr ? `name-attr:${JSON.stringify(nameAttr.slice(0, 30))}` : "",
       sel.text ? `text:${JSON.stringify(String(sel.text).slice(0, 30))}` : "",
       sel.nth != null ? `nth:${sel.nth}` : "",
     ].filter(Boolean);
@@ -11151,7 +11162,21 @@ export class RecipeAdapter extends BasePortalAdapter {
     // A row scope is only as good as its stamp: re-stamp before each resolution, because the
     // portal re-renders the section (fresh ids, fresh elements) as rows save.
     if (this.arrayRowScope > 0) await this.markArrayRows();
-    const primary = this.locator(sel);
+    // A LEVEL THAT CANNOT BE BUILT HAS FOUND NOTHING, AND THE NEXT LEVEL IS STILL TRIED (#229).
+    //
+    // locator() throws for a selector it has no strategy for, and the primary used to be built
+    // right here, outside every level: the throw failed the whole step before one fallback was
+    // consulted. Live, City of Star (iWorQ) 2026-11-14: step 8's primary was a bare name replay
+    // could not read, and its `#fee244341` fallback, the very control, was never tried. A level
+    // that cannot be built is skipped like an empty one and says why in the trail. Only when NO
+    // level can be built does the build error stand ("no usable selector" is what the backend's
+    // drift reading keys on).
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const build = (s: RecipeSelector): { loc: any; unbuilt?: string } => {
+      try { return { loc: this.locator(s) }; } catch (err) { return { loc: null, unbuilt: err instanceof Error ? err.message : String(err) }; }
+    };
+    const built = sel ? build(sel) : { loc: null };
+    const primary = built.loc;
     // A SELECTOR WITH NO FALLBACKS STILL DESERVES THE USABILITY CHECKS.
     //
     // This returned the primary's best match immediately, skipping the visible-AND-enabled
@@ -11162,7 +11187,7 @@ export class RecipeAdapter extends BasePortalAdapter {
     // were on screen. Having no fallbacks is a reason to try HARDER to rescue the step, not
     // a reason to skip the rescue. Falling through with an empty fallback list costs one
     // extra visibility probe on the happy path and nothing else.
-    if (!sel || !primary) return this.preferVisible(primary, sel, hint);
+    if (!sel) return this.preferVisible(primary, sel, hint);
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     let firstNonEmpty: { loc: any; from?: RecipeSelector } | null = null;
     // A RECORDED ORDINAL IS A GUESS ABOUT PAGE STRUCTURE, AND STRUCTURE MOVES.
@@ -11181,17 +11206,20 @@ export class RecipeAdapter extends BasePortalAdapter {
     // against a page that has since re-rendered.
     this.resolveTrail = [];
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const levels: Array<{ loc: any; from?: RecipeSelector }> = [{ loc: primary, from: sel }];
+    const levels: Array<{ loc: any; from?: RecipeSelector; unbuilt?: string }> = [{ loc: primary, from: sel, unbuilt: built.unbuilt }];
     for (const fb of sel.fallbacks ?? []) {
-      levels.push({ loc: this.locator({ ...fb, fallbacks: undefined }), from: fb as RecipeSelector });
+      levels.push({ ...build({ ...fb, fallbacks: undefined }), from: fb as RecipeSelector });
       if (fb.nth != null) {
-        levels.push({ loc: this.locator({ ...fb, nth: undefined, fallbacks: undefined }), from: { ...fb, nth: undefined } as RecipeSelector });
+        levels.push({ ...build({ ...fb, nth: undefined, fallbacks: undefined }), from: { ...fb, nth: undefined } as RecipeSelector });
       }
     }
     let levelIdx = -1;
     for (const level of levels) {
       levelIdx++;
-      if (!level.loc) continue;
+      if (!level.loc) {
+        if (level.unbuilt) this.resolveTrail.push(`level ${levelIdx} ${this.describeSelector(level.from)} -> cannot be built (${level.unbuilt}), skipped`);
+        continue;
+      }
       try {
         if (await level.loc.count() === 0) continue;
       } catch { continue; } // count() can throw on a malformed selector — try the next level.
@@ -11273,7 +11301,9 @@ export class RecipeAdapter extends BasePortalAdapter {
     // role+name, so every fallback missed and replay was left holding a disabled decorative
     // pill that happened to carry the same word. Material Icons are used across government
     // portals, so this is a fleet-wide shape rather than one portal's quirk.
-    const want = String(sel.name || sel.text || "").trim();
+    // The ACCESSIBLE name only (#229): a bare name is an attribute no person reads, and asking
+    // for "fee244341" by name would open the page's menus looking for it.
+    const want = String(accessibleNameOf(sel) || sel.text || "").trim();
     if (want) {
       const rescued = await this.findEnabledControlByName(want)
         // Nothing enabled and visible carries this name — it may be behind a closed menu.
@@ -11287,7 +11317,12 @@ export class RecipeAdapter extends BasePortalAdapter {
     }
     // Nothing visible at any level: the first level that matched at all keeps the familiar
     // failure shape (identity check / skip reporting sees the same control it always did).
-    return firstNonEmpty ? this.preferVisible(firstNonEmpty.loc, firstNonEmpty.from, hint) : primary;
+    if (firstNonEmpty) return this.preferVisible(firstNonEmpty.loc, firstNonEmpty.from, hint);
+    // Nothing matched: the first level that could be BUILT carries the ordinary not-found failure
+    // (and self-heal); when none could be, the build error stands (#229).
+    const firstBuilt = levels.find((l) => l.loc);
+    if (firstBuilt) return firstBuilt.loc;
+    throw new Error(built.unbuilt || "Recipe step has no usable selector.");
   }
 
   /**
@@ -11504,6 +11539,10 @@ export class RecipeAdapter extends BasePortalAdapter {
     else if (sel.testId) loc = scope.getByTestId(sel.testId);
     else if (sel.text) loc = scope.getByText(sel.text, { exact: sel.exact });
     else if (sel.css) loc = scope.locator(sel.css);
+    // A BARE `name` IS THE CONTROL'S NAME ATTRIBUTE, never an accessible name (#229, the one
+    // reading in shared/src/recipeSelector). Recipes saved before the learner wrote it as css
+    // carry it, and it fell through to the throw below: City of Star's valuation box.
+    else if (nameAttributeOf(sel)) loc = scope.locator(nameAttributeCss(nameAttributeOf(sel)));
     else if (sel.role) loc = scope.getByRole(sel.role);
     else throw new Error("Recipe step has no usable selector.");
     // An explicit nth is honoured exactly. Otherwise return the UNCOLLAPSED locator so
@@ -11934,8 +11973,10 @@ export function healTargetOf(step: RecipeStep, value = ""): HealTarget {
   const cssId = allSel.map((s) => /^#([A-Za-z_][\w:.-]*)$/.exec(String(s.css ?? ""))?.[1]).find(Boolean);
   const side = SIDES.find((s) => s.field.test(String(step.field ?? "")))?.side;
   return {
+    // The label ANCHOR is matched against the extractor's own label, which falls back to the
+    // name attribute exactly as a bare name does — so a bare name stays an anchor here.
     label: String(step.note || sel.label || sel.name || "").trim().toLowerCase(),
-    name: fp.name || (sel.role ? undefined : sel.name) || undefined,
+    name: fp.name || recordedNameAttribute(sel) || undefined,
     id: fp.id || cssId || undefined,
     placeholder: fp.placeholder || sel.placeholder || undefined,
     ariaLabel: fp.ariaLabel || undefined,
