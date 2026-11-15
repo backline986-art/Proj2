@@ -4116,7 +4116,13 @@ export class RecipeAdapter extends BasePortalAdapter {
       //
       // The learner already re-enters the wizard by URL when it drifts out of it; do the
       // same rather than hunting for a link that is on a different page.
-      if (!succeeded && /^navigate to application/i.test(String(step.note ?? ""))) {
+      // NEVER FROM INSIDE AN APPLICATION (#235, live City of Boise 2026-11-15): the learner had
+      // labelled a contact opener mid-form "navigate to application: Select a Contact"; when it was
+      // not found, this re-entry went back to the Apply start and abandoned the half-filled
+      // application. An application is in progress once any write step of this run has landed;
+      // from there a missing "navigate" fails like any other step.
+      const applicationInProgress = trace.some((t) => t.outcome === "ok" && RecipeAdapter.WRITE_ACTIONS.has(String(t.action)));
+      if (!succeeded && !applicationInProgress && /^navigate to application/i.test(String(step.note ?? ""))) {
         const here = typeof this.page.url === "function" ? String(this.page.url() ?? "") : "";
         // The recipe's own entry URL carries the module (Lee: Permitting) and marks the portal
         // as ACA even on a custom domain (Columbus: portal.columbus.gov/permits) — B5/B8.
@@ -12249,10 +12255,15 @@ export class RecipeAdapter extends BasePortalAdapter {
    *  trying) and the post-failure fallback (Accela, whose recorded "Select" link can still
    *  work and is tried first). */
   private async pickAddressRowForProject(step: RecipeStep): Promise<boolean> {
-    const street = String(this.fieldValues.street ?? "").trim();
+    const streetRaw = String(this.fieldValues.street ?? "").trim();
     // The house number from its own key, else from the street line that carries it ("410 E
     // Washington St") — a value map holding only the street still names the job's address.
-    const num = String(this.fieldValues.streetNumber ?? "").trim() || (/^(\d+[a-z]?)\s/i.exec(street)?.[1] ?? "");
+    const numRaw = String(this.fieldValues.streetNumber ?? "").trim() || (/^(\d+[a-z]?)\s/i.exec(streetRaw)?.[1] ?? "");
+    // THE STREET LINE MAY ALREADY CARRY THE NUMBER (#235). Live City of Boise 2026-11-15: `street`
+    // was "150 N Capitol Blvd" and `streetNumber` "150", so the needle read "150 150 N Capitol
+    // Blvd" and no row matched the property's own address. The number is held once.
+    const num = numRaw;
+    const street = num && new RegExp(`^${num.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\s+`, "i").test(streetRaw) ? streetRaw.replace(/^\S+\s+/, "").trim() : streetRaw;
     if (!num || !street) return false;
     // ACA returns ONE ROW PER JURISDICTION for the same address — city and county both serve
     // it. Which one is right is the discipline: a structural permit files with the CITY, an
@@ -12271,6 +12282,21 @@ export class RecipeAdapter extends BasePortalAdapter {
       return false;
     }
     await this.markResultGrid(step, doc);
+    // AN UNPAINTED GRID IS NOT AN EMPTY GRID (#235) — the rule pickAddressVersionLive already
+    // applies. Live City of Boise 2026-11-15: the row step ran the moment the results dialog
+    // re-opened, read the grid before its rows had arrived, and reported "no result matched" for
+    // the property's own address. Poll briefly for a row that carries a selector (a radio, a
+    // checkbox, a link), re-marking the grid each look; a grid still empty after the budget is
+    // then judged as today.
+    const dataRows = async (): Promise<number> => await doc.evaluate(() => {
+      const g = document.querySelector("[data-al-grid]");
+      const rows = Array.from((g ?? document).querySelectorAll("tr"));
+      return rows.filter((tr) => tr.querySelector("input[type='radio'], input[type='checkbox'], a, button")).length;
+    }).catch(() => -1) as number;
+    for (let waited = 0; waited < 8000 && (await dataRows()) === 0; waited += 800) {
+      await sleep(800);
+      await this.markResultGrid(step, doc);
+    }
     const picked = await this.pickAddressRow(num, street, wantCounty ? "county" : "city", doc, step.action === "check");
     // AN EMPTY SEARCH IS A CONCLUSION, NOT A RETRY. Oregon ePermitting participation is
     // VOLUNTARY: a jurisdiction that has not joined never appears in this search at all. So
