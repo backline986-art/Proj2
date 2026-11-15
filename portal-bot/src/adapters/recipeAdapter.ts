@@ -105,6 +105,7 @@ export function looksLikeProjectData(label: string, value: string): boolean {
 }
 import { rankAddressVersions } from "../addressVersion";
 import { jobValueShape } from "../jobValueShape";
+import { isVolatileControlId, volatileControlIdKind } from "../../../shared/src/volatileControlId";
 import { isCompanyIdentityLabel } from "../../../shared/src/companyFacts";
 import { licenceKeyForLabel } from "../../../shared/src/licenceKinds";
 import { completionEvidence, labelWords } from "../../../shared/src/portalSafety";
@@ -1098,6 +1099,35 @@ export function isAdvancingClickStep(step: RecipeStep): boolean {
  *  multi-page draft pass, so this reads the broad predicate, not only the "advance:" note. */
 export function stagedReviewExpectedPages(steps: readonly RecipeStep[]): number {
   return steps.filter((s) => s.action === "click" && !isFinalSubmitStep(s) && isAdvancingClickStep(s)).length + 1;
+}
+
+// ---------------------------------------------------------------------------
+// ONE READING OF "THIS CONTROL'S OWN LABEL AND THE LEGEND IT SITS UNDER" FOR THE FINGERPRINT DOORS
+// (#234). This is the reader the fingerprint re-anchor has always used for the recorded control,
+// moved here unchanged so the box the step resolved onto and the counter tie-break read the SAME
+// way: the issue was a stale render counter naming a neighbour in the same fieldset, and the only
+// way to tell the two boxes apart is to read both with one reader and compare. No new section
+// reader: a fieldset legend only, as before.
+//
+// Runs INSIDE the page: self-contained, no module references, no named inner functions.
+// ---------------------------------------------------------------------------
+function ownLabelAndLegendInPage(el: Element): { label: string; section: string } {
+  const id = el.getAttribute("id");
+  const forLbl = id ? document.querySelector(`label[for="${CSS.escape(id)}"]`) : null;
+  const wrap = el.closest("label");
+  const label = ((forLbl as HTMLElement | null)?.textContent || (wrap as HTMLElement | null)?.textContent || el.getAttribute("aria-label") || "").replace(/\s+/g, " ").trim();
+  const fs = el.closest("fieldset");
+  const legend = fs ? fs.querySelector("legend") : null;
+  const section = (legend && legend.textContent ? legend.textContent : "").replace(/\s+/g, " ").trim();
+  return { label, section };
+}
+
+/** THE ONE ANSWER TO "DOES THIS READING SIT IN THE RECORDED SECTION?" (#234): the comparison the
+ *  fingerprint re-anchor has always made (case-insensitive, whitespace collapsed), shared so the
+ *  re-anchor and the counter tie-break cannot disagree about it. No recorded section, or no legend
+ *  read, is never agreement. */
+function inRecordedSection(read: { section: string } | null | undefined, recorded: string | undefined): boolean {
+  return !!recorded && !!read?.section && read.section.toLowerCase() === String(recorded).replace(/\s+/g, " ").trim().toLowerCase();
 }
 
 export class RecipeAdapter extends BasePortalAdapter {
@@ -5907,17 +5937,38 @@ export class RecipeAdapter extends BasePortalAdapter {
           : this.page.locator(`[name="${String(fp.name).replace(/["\\]/g, "\\$&")}"]`);
         const n = await target.count().catch(() => 0);
         if (n === 1 && await this.insideArrayRow(target.first())) {
-          const meant = await target.first().evaluate((el: Element) => {
-            const id = el.getAttribute("id");
-            const forLbl = id ? document.querySelector(`label[for="${CSS.escape(id)}"]`) : null;
-            const wrap = el.closest("label");
-            const label = ((forLbl as HTMLElement | null)?.textContent || (wrap as HTMLElement | null)?.textContent || el.getAttribute("aria-label") || "").replace(/\s+/g, " ").trim();
-            const fs = el.closest("fieldset");
-            const legend = fs ? fs.querySelector("legend") : null;
-            const section = (legend && legend.textContent ? legend.textContent : "").replace(/\s+/g, " ").trim();
-            return { label, section };
-          }).catch(() => null) as { label: string; section: string } | null;
-          const sectionAgrees = !!fp.section && !!meant?.section && meant.section.toLowerCase() === String(fp.section).replace(/\s+/g, " ").trim().toLowerCase();
+          const meant = await target.first().evaluate(ownLabelAndLegendInPage).catch(() => null) as { label: string; section: string } | null;
+          const sectionAgrees = inRecordedSection(meant, fp.section);
+          // A BOX THE RECORDING ALREADY CONFIRMS IS NOT OUTRANKED BY SECTION AGREEMENT ALONE, NOR BY A
+          // RENDER COUNTER (#234). PowerClerk's pcInputBaseN is assigned in render order: when one
+          // control renders before it, the recorded #pcInputBase11 names the NEXT box in the same
+          // fieldset. The audit replayed PGE's applicant steps on that shift and this re-anchor, taking
+          // the shared legend as licence, wrote the surname into Company and read it back verified;
+          // with the numbering restarted, a counter whose own label agreed moved it into the
+          // co-applicant's Last. So when the box the step resolved onto sits in the recorded section
+          // and its own label does not contradict the recorded one, the recording already confirms it,
+          // and a fingerprint whose id is a render counter or row ordinal (isVolatileControlId, the
+          // one classifier) that does not ALSO agree on its own label and the section is not written
+          // instead. A STABLE id keeps main's rule exactly (review of the minimal round: refusing a
+          // stable id whose label was reworded brought MF5 back inside one legend). Everywhere else
+          // this is main's rule unchanged: MF5's resolution lands in ANOTHER section, so the recorded
+          // box still takes the write there; and two boxes alike in label and section are still told
+          // apart by the counter.
+          const keptBoxStands = async (): Promise<boolean> => {
+            if (!meant) return false;
+            const key = String(fp.id || fp.name);
+            if (!isVolatileControlId(key)) return false;
+            const labelAgrees = !!meant.label && agree(recorded, meant.label);
+            const stranger = !!meant.label && !labelAgrees;
+            const counter = !(labelAgrees && sectionAgrees);
+            if (!counter) return false;
+            const kept = await el0.evaluate(ownLabelAndLegendInPage).catch(() => null) as { label: string; section: string } | null;
+            if (!inRecordedSection(kept, fp.section) || !agree(recorded, actual)) return false;
+            this.agingNotes.push(
+              `step "${recorded.slice(0, 44)}": the recorded control #${key.slice(0, 50)} ${stranger ? `now calls itself "${meant.label.slice(0, 30)}"` : `is a ${volatileControlIdKind(key)} and now names another control`} — kept #${(got!.id || got!.name).slice(0, 50)}, which the recorded label and section confirm; re-record the step`,
+            );
+            return true;
+          };
           // THE RESCUE ALREADY REJECTED THAT CONTROL (#408). When the section or hook rescue
           // replaced an out-of-reach resolution, and the recorded element is an EMPTY concealed
           // shadow standing beside the one control of its block that carries exactly its label,
@@ -5930,7 +5981,7 @@ export class RecipeAdapter extends BasePortalAdapter {
             this.agingNotes.push(
               `step "${recorded.slice(0, 44)}": the recorded control #${String(fp.id || fp.name).slice(0, 50)} is an empty concealed shadow beside #${(got!.id || got!.name).slice(0, 50)} in its own block — kept the rescue, re-record the step`,
             );
-          } else if (meant && (sectionAgrees || (meant.label && agree(recorded, meant.label)))) {
+          } else if (meant && (sectionAgrees || (meant.label && agree(recorded, meant.label))) && !(await keptBoxStands())) {
             this.driftWarnings.push(
               `step "${recorded.slice(0, 44)}" resolved onto #${(got!.id || got!.name).slice(0, 50)}, but the recorded control #${String(fp.id || fp.name).slice(0, 50)}${fp.section ? ` (${String(fp.section).slice(0, 30)})` : ""} is on the page — written there, not into the other box`,
             );
@@ -9884,6 +9935,30 @@ export class RecipeAdapter extends BasePortalAdapter {
       probe.push({ i, id: info.id, section: info.section, face: info.face ?? "", visible: await c.isVisible().catch(() => false) });
     }
     const byId = probe.filter((p) => p.id && ids.has(p.id));
+    // A RENDER COUNTER DOES NOT CHOOSE AGAINST THE RECORDED SECTION (#234). When PGE's contact
+    // numbering restarted, the recorded #pcInputBase11 named the CO-APPLICANT's "Last", this pick
+    // took it, and all six applicant values went silently into the co-applicant's block (the audit's
+    // restart replay; nothing downstream sees it, because the box then matches its fingerprint). So
+    // when the id that picked is a counter (isVolatileControlId), its box sits under another legend
+    // than the recorded section, and exactly one other visible match sits under the recorded one,
+    // that one is the step's box. Anything less certain (no section recorded, no legend read, a
+    // stable id, zero or several in the recorded section) is main's pick unchanged. The legend is
+    // read the re-anchor's way (ownLabelAndLegendInPage, inRecordedSection), so this door and the
+    // re-anchor cannot disagree about which box the recorded section names.
+    const recordedSection = step.fingerprint?.section;
+    if (byId.length === 1 && recordedSection && isVolatileControlId(byId[0].id)) {
+      const legendOf = async (i: number): Promise<{ label: string; section: string } | null> =>
+        await (loc.nth(i) as { evaluate: (fn: unknown) => Promise<{ label: string; section: string }> }).evaluate(ownLabelAndLegendInPage).catch(() => null);
+      const picked = await legendOf(byId[0].i);
+      if (picked?.section && !inRecordedSection(picked, recordedSection)) {
+        const inSection: typeof probe = [];
+        for (const p of probe) if (p.visible && p.i !== byId[0].i && inRecordedSection(await legendOf(p.i), recordedSection)) inSection.push(p);
+        if (inSection.length === 1) {
+          this.agingNotes.push(`"${String(step.note ?? step.action).slice(0, 40)}" matched ${n} controls — its recorded id #${byId[0].id.slice(0, 30)} is a ${volatileControlIdKind(byId[0].id)} and now sits under "${picked.section.slice(0, 30)}"; the one match in its recorded section (${String(recordedSection).slice(0, 30)}) was used`);
+          return loc.nth(inSection[0].i);
+        }
+      }
+    }
     if (byId.length === 1) {
       this.agingNotes.push(`"${String(step.note ?? step.action).slice(0, 40)}" matched ${n} controls — its recorded id picked one of them`);
       return loc.nth(byId[0].i);
