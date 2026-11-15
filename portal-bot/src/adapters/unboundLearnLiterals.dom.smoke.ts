@@ -9,8 +9,12 @@
 //       must ask SE ... AVE; for a directionless "... Way" project the Direction stays unanswered and
 //       the type is WAY. On main both projects searched NW ... ST.
 //   E4b The same search on a portal that lists WORDS ("Street", "Avenue"): the recorded "Street"
-//       binds to the word form, so the "SE ... Ave" project gets "Avenue" — never "Crest", which a
-//       contains match on "ST" would pick.
+//       binds to the word form, so the "SE ... Ave" project gets "Avenue", and a "... St" project
+//       gets "Street" — never "Crest", which a contains match on "ST" would pick.
+//   E4c The street line read once (#236 review): an NE ... Ct project searches NE ... CT (the first
+//       reader stopped at "ne"/"ct" as state codes and stripped both as "none"); "1234 North Ave"
+//       searches name North, type AVE; a type the reader does not know ("Plz") is left blank and
+//       named for a person, never the learn job's ST and never "the address has no street type".
 //   R1  A storage radio whose question lives only in the step's section (Ameren's shape: a check on
 //       the radio labelled "No"): ticked on a job without a battery, left for a person, named, on a
 //       job with one. On main the learn job's "No" was ticked on the battery job.
@@ -59,7 +63,7 @@ const RADIO = `<!doctype html><html><body>
   </fieldset>
 </body></html>`;
 const PAGES: Record<string, string> = {
-  "/abbr": SEARCH(["AVE", "CREST", "DR", "ST", "WAY"], ["N", "NE", "NW", "S", "SE", "SW", "E", "W"]),
+  "/abbr": SEARCH(["AVE", "CREST", "CT", "DR", "PLZ", "ST", "WAY"], ["N", "NE", "NW", "S", "SE", "SW", "E", "W"]),
   "/words": SEARCH(["Alley", "Avenue", "Crest", "Drive", "Street", "Way"], ["North", "Northeast", "Northwest", "South", "Southeast", "Southwest", "East", "West"]),
   "/radio": RADIO,
 };
@@ -142,8 +146,37 @@ check("E4: the binder names why the Direction step was not replayed",
 // ── E4b: a portal listing words keeps its own vocabulary ────────────────────────────────────────
 const words = await replay(recipeOf(searchSteps("Northwest", "Street"), `${base}/words`), projectAt("1234 SE Example Ave, Testville, OR 97000"), ["#dir", "#type"]);
 console.log(`   word-vocabulary portal -> ${JSON.stringify(words.values)}`);
-check("E4b: a recorded word answers in words — Southeast / Avenue, never \"Crest\" by a contains match",
+check("E4b: a recorded word answers in words — Southeast / Avenue",
   words.values["#dir"] === "Southeast" && words.values["#type"] === "Avenue", JSON.stringify(words.values));
+// The hazard the word form exists for: a "… St" project on a list where "Crest" comes before "Street".
+// The abbreviation "ST" matches no option exactly, and the contains pass takes the first option holding
+// "st" — Crest.
+const street = await replay(recipeOf(searchSteps("Northwest", "Avenue"), `${base}/words`), projectAt("1234 SE Example St, Testville, OR 97000"), ["#type"]);
+console.log(`   word-vocabulary portal, a "… St" project -> ${JSON.stringify(street.values)}`);
+check("E4b: a \"… St\" project on a word list answers \"Street\" — never \"Crest\" by a contains match on \"ST\"",
+  street.values["#type"] === "Street", `Street Type=${JSON.stringify(street.values["#type"])}`);
+
+// ── E4c: the reading of the street line itself (#236 review) ───────────────────────────────────
+// "ne" and "ct" spell state codes; the first component reader stopped at them, so an NE … Ct project
+// had its Direction and Street Type stripped as "the address has none". And the name box was read by
+// a second grammar: "1234 North Ave" searched name "Ave".
+const neCt = await replay(recipeOf(searchSteps("NW", "ST"), `${base}/abbr`), projectAt("1234 NE Example Ct, Testville, OR 97000"), ["#dir", "#name", "#type"]);
+console.log(`   NE ... Ct project -> ${JSON.stringify(neCt.values)}`);
+check("E4c: an NE … Ct project searches NE … CT (state-code spellings are street words)",
+  neCt.values["#dir"] === "NE" && neCt.values["#type"] === "CT" && neCt.values["#name"] === "Example", JSON.stringify(neCt.values));
+check("E4c: ...and the binder never claims that address has no direction or no street type",
+  !neCt.changes.some((c) => /has no street (direction|type)/.test(c)), JSON.stringify(neCt.changes));
+const north = await replay(recipeOf(searchSteps("NW", "ST"), `${base}/abbr`), projectAt("1234 North Ave, Testville, OR 97000"), ["#dir", "#name", "#type"]);
+console.log(`   North Ave project -> ${JSON.stringify(north.values)}`);
+check("E4c: \"1234 North Ave\" searches name North, type AVE, no direction — the boxes of one search agree",
+  north.values["#name"] === "North" && north.values["#type"] === "AVE" && north.values["#dir"] === "", JSON.stringify(north.values));
+const plz = await replay(recipeOf(searchSteps("NW", "ST"), `${base}/abbr`), projectAt("1234 Example Plz, Testville, OR 97000"), ["#dir", "#type"]);
+console.log(`   ... Plz project (a type outside the shared list) -> ${JSON.stringify(plz.values)} handoff=${JSON.stringify(plz.handoff)}`);
+check("E4c: a street type the reader could not read is left blank — never the learn job's ST",
+  plz.values["#type"] === "", `Street Type=${JSON.stringify(plz.values["#type"])}`);
+check("E4c: ...and named for the person on the review hand-off, never claimed as \"no street type\"",
+  plz.handoff.some((n) => /^not answered by the replay: "Street Type:" — this project's street type could not be read from its address, so it is left blank for a person/.test(n))
+    && !plz.changes.some((c) => /has no street type/.test(c)), JSON.stringify({ handoff: plz.handoff, changes: plz.changes }));
 
 // ── H1: the hand-off names the unbound answer it replayed ───────────────────────────────────────
 console.log(`   hand-off notes -> ${JSON.stringify(se.handoff)}`);

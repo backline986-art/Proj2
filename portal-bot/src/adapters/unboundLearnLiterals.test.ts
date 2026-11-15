@@ -39,6 +39,7 @@ check("p3 MUST-EXCLUDE: the portal's own words still replay (and a bare count is
 type Replay = {
   skipForNoBattery(s: RecipeStep): boolean; isBatteryDeclaration(s: RecipeStep): boolean;
   batteryRadioConflict(s: RecipeStep): string | null; noteReplayedLearnAnswer(s: RecipeStep): void;
+  noteLeftForPerson(s: RecipeStep): void; stopAtReview(): Promise<{ ok: boolean; message: string; data?: Record<string, unknown> }>;
   reviewHandoffNotes: string[]; agingNotes: string[];
 };
 const replayWith = (hasBattery: string): Replay => {
@@ -48,6 +49,7 @@ const replayWith = (hasBattery: string): Replay => {
   a.agingNotes = [];
   a.reviewHandoffNotes = [];
   a.learnAnswersListed = [];
+  a.leftForPersonListed = [];
   return a as unknown as Replay;
 };
 const radio = (label: string, section: string): RecipeStep =>
@@ -120,6 +122,48 @@ check("MUST-EXCLUDE: answers taken from THIS job, and checks that answer no ques
   r.noteReplayedLearnAnswer(ESS_NO); // answered from hasBattery No — this job's answer
   assert.deepEqual(r.reviewHandoffNotes, []);
 });
+
+// ── #236 REVIEW: WHAT THE HAND-OFF NAMES, AND WHERE IT REACHES ─────────────────────────────────
+check("a radio with no recorded question is named by WHERE it is — never '\"No\" = \"No\"'", () => {
+  const r = replayWith("");
+  r.noteReplayedLearnAnswer({ action: "select", phase: "fill", note: "Customer Type", selector: { label: "Customer Type" }, value: "Residential" } as RecipeStep);
+  r.noteReplayedLearnAnswer(radio("No", ""));
+  const line = r.reviewHandoffNotes[0] ?? "";
+  assert.doesNotMatch(line, /"No" = "No"/, line);
+  assert.match(line, /; the unlabelled question recorded after "Customer Type" = "No" — bound to nothing/, line);
+  const first = replayWith("");
+  first.noteReplayedLearnAnswer(radio("Yes", ""));
+  assert.match(first.reviewHandoffNotes[0] ?? "", /^replayed the learn's answer: an unlabelled question = "Yes"/);
+});
+check("a step the binder left blank for a person is named on the hand-off (its operatorItem), once", () => {
+  const r = replayWith("");
+  const blank = { action: "fill", phase: "fill", note: "*Without Service or Feeder", selector: { label: "*Without Service or Feeder" }, field: "__replayBlank", value: "",
+    operatorItem: "\"*Without Service or Feeder\" sits among this page's fee quantities but names no fee line this project's count can answer — left blank for a person, never the learn job's \"1\"" } as RecipeStep;
+  r.noteLeftForPerson(blank);
+  r.noteLeftForPerson(blank);
+  r.noteLeftForPerson({ action: "fill", phase: "fill", note: "Street No.", selector: { label: "Street No." }, field: "streetNumber" } as RecipeStep);
+  assert.equal(r.reviewHandoffNotes.length, 1);
+  assert.match(r.reviewHandoffNotes[0], /^not answered by the replay: "\*Without Service or Feeder" sits among this page's fee quantities.*never the learn job's "1"\.$/);
+});
+// The #330 draft-created stop: PSE's draft-creating Submit follows step 4's learn answer, and the next
+// stage continues the draft without replaying it — this stop is the only place to name it.
+try {
+  const r = replayWith("") as Replay & Record<string, unknown>;
+  r.portalName = "Test Utility";
+  r.reviewPageBlockedCalls = [];
+  r.draftSubmitOutcome = { clickedLabel: "Submit", applicationNumber: "APP-000001", nextForm: "" };
+  r.noteReplayedLearnAnswer({ action: "select", phase: "fill", note: "Application Type", selector: { label: "Application Type" }, value: "Change to an existing system" } as RecipeStep);
+  const stop = await r.stopAtReview();
+  const notes = (stop.data?.reviewHandoffNotes ?? []) as string[];
+  assert.equal(stop.data?.draftSubmitClickedByAutomation, true);
+  assert.equal(stop.data?.finalSubmitClicked, false);
+  assert.ok(notes.some((n) => n.startsWith("replayed the learn's answer: \"Application Type\" = \"Change to an existing system\"")), JSON.stringify(stop.data));
+  assert.match(stop.message, /NOTHING WAS FILED\..*replayed the learn's answer: "Application Type" = "Change to an existing system".* AUTOMATION HAS STOPPED\.$/);
+  console.log("  ok   - the draft-created stop (#330) carries the hand-off: data.reviewHandoffNotes and its message");
+} catch (e) {
+  failures++;
+  console.error(`  FAIL - the draft-created stop (#330) carries the hand-off: data.reviewHandoffNotes and its message\n         ${(e as Error).message}`);
+}
 
 if (failures) { console.error(`\n${failures} unbound-learn-literal check(s) FAILED.`); process.exit(1); }
 console.log("\nunbound learn literals (replay): every check passed.");

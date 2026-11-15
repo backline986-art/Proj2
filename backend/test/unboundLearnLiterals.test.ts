@@ -25,7 +25,8 @@ const { openDatabase } = await import("../src/db");
 const { resolveRecipeFieldValues, convertLiteralsToBoundFields } = await import("../src/portalRecipes");
 const { bindRecipeForReplay, REPLAY_BLANK_FIELD } = await import("../src/recipeReplayBinding");
 const { plannerFieldView } = await import("../src/autoLearn");
-const { ADDRESS_COMPONENT_FIELD_KEYS, addressComponentFields, addressComponentKeyFor } = await import("../../portal-bot/src/addressParse");
+const { ADDRESS_COMPONENT_FIELD_KEYS, ADDRESS_COMPONENTS_UNREAD_KEY, addressComponentFields, addressComponentKeyFor, parseStreetName } = await import("../../portal-bot/src/addressParse");
+const { recipeStageGaps } = await import("../src/recipeStageGaps");
 const { jobValueShape } = await import("../../portal-bot/src/jobValueShape");
 const { SERVICE_FEEDER_200A_FIELD } = await import("../../shared/src/serviceLineLabels");
 
@@ -69,10 +70,100 @@ check("RESOLVER (the real write path): this project's address components, both v
   assert.equal(SE_AVE.streetSuffixWord, "Avenue");
   assert.equal(WAY.streetDirection, "", "a directionless address has no direction — and that is an answer");
   assert.equal(WAY.streetSuffix, "WAY");
+  // A directional written AFTER the street: the leading Direction is not claimed empty (a single
+  // "Direction" control may want that NW) — it is named unread.
   assert.deepEqual(addressComponentFields("77 Main St NW Apt 4, Town, OR"), {
-    streetDirection: "", streetDirectionWord: "", streetPostDirection: "NW", streetPostDirectionWord: "Northwest",
+    streetPostDirection: "NW", streetPostDirectionWord: "Northwest",
     streetSuffix: "ST", streetSuffixWord: "Street", unitType: "APT", unitTypeWord: "Apartment",
+    [ADDRESS_COMPONENTS_UNREAD_KEY]: "streetDirection,streetDirectionWord",
   });
+});
+
+// ── (1b) THE STREET LINE IS READ ONCE, AND AN UNKNOWN IS NEVER "NONE" (#236 review) ──────────────
+// The first reader stopped at any token spelling a state code ("ne" = Nebraska, "ct" = Connecticut,
+// "la", "de"): an NE-quadrant or Court address read as having no direction / no type, and R13 then
+// stripped those controls saying so. And the name box was cut by a second grammar, so one search's
+// boxes disagreed ("1234 North Ave" searched name "Ave").
+const at = (a: string) => resolveRecipeFieldValues(db, projectAt(a), "accela");
+check("RESOLVER: state-code street words read as street words — NE … Ct, La Paloma, De Anza", () => {
+  const ne = at("1234 NE Example Ct, Testville, OR 97000");
+  assert.equal(ne.streetDirection, "NE");
+  assert.equal(ne.streetSuffix, "CT");
+  assert.equal(ne.streetNameCore, "Example");
+  const ct = at("2468 Example Ct, Testville, OR 97000");
+  assert.equal(ct.streetSuffix, "CT", "a Court is a street type, not Connecticut");
+  assert.equal(ct.streetDirection, "");
+  for (const [a, name, sfx] of [["1234 La Paloma Dr, Testville, CA 90000", "La Paloma", "DR"], ["1234 De Anza Blvd, Testville, CA 90000", "De Anza", "BLVD"]]) {
+    const v = at(a);
+    assert.equal(v.streetNameCore, name, a);
+    assert.equal(v.streetSuffix, sfx, a);
+  }
+});
+check("RESOLVER: the number, direction, name and type boxes of one search agree (one reading)", () => {
+  for (const [a, dir, name, sfx] of [
+    ["1234 North Ave, Testville, OR 97000", "", "North", "AVE"],
+    ["500 Northeast Larkspur Way, Testville, OR 97000", "NE", "Larkspur", "WAY"],
+    ["45 Example Point Rd, Testville, OR 97000", "", "Example Point", "RD"],
+    ["1234 Example Cove, Testville, OR 97000", "", "Example", "CV"],
+    ["925 N Grant St, Lafayette, OR, 97127", "N", "Grant", "ST"],
+  ] as const) {
+    const v = at(a);
+    assert.deepEqual([v.streetDirection, v.streetNameCore, v.streetSuffix], [dir, name, sfx], a);
+    assert.equal(parseStreetName(a), name, `${a}: the name parser is the same reading`);
+  }
+});
+check("RESOLVER: what the reader could not read is NAMED unread, never emitted as \"\"", () => {
+  const plz = at("1234 Example Plz, Testville, OR 97000"); // a suffix outside the shared list
+  assert.equal("streetSuffix" in plz, false, "no street type is claimed for a Plz");
+  assert.equal(plz[ADDRESS_COMPONENTS_UNREAD_KEY], "streetSuffix,streetSuffixWord");
+  assert.equal(plz.streetDirection, "", "the direction is still certain: none");
+  const runOn = at("925 N Grant St Lafayette OR 97127"); // no comma: its city, state and ZIP are in the line
+  assert.equal("streetDirection" in runOn || "streetSuffix" in runOn, false);
+  assert.match(String(runOn[ADDRESS_COMPONENTS_UNREAD_KEY]), /streetDirection,.*streetSuffix/);
+});
+
+check("MUST-PASS (replay, R13): an NE … Ct project searches NE … CT — never stripped as \"no direction\"", () => {
+  const ne = at("1234 NE Example Ct, Testville, OR 97000");
+  const b = bind(SEARCH, ne);
+  assert.equal(b.steps.find((s) => s.selector?.label === "Direction:")?.field, "streetDirection");
+  assert.equal(b.steps.find((s) => s.selector?.label === "Street Type:")?.field, "streetSuffix");
+  assert.equal(b.changes.some((c) => c.kind === "stripped"), false, JSON.stringify(b.changes));
+  const learned = bind(convertLiteralsToBoundFields(SEARCH, SE_AVE).steps, ne);
+  assert.equal(learned.steps.find((s) => s.selector?.label === "Street Type:")?.field, "streetSuffix", "a step bound at learn too");
+});
+check("MUST-PASS (replay, R13): an UNREAD component is left blank for a person, named — not stripped, not the learn job's", () => {
+  const plz = at("1234 Example Plz, Testville, OR 97000");
+  for (const steps of [SEARCH, convertLiteralsToBoundFields(SEARCH, SE_AVE).steps]) {
+    const b = bind(steps, plz);
+    const type = b.steps.find((s) => s.selector?.label === "Street Type:");
+    assert.ok(type, "the Street Type step is kept — never stripped as \"the address has no street type\"");
+    assert.equal(type!.field, REPLAY_BLANK_FIELD);
+    assert.equal(type!.value, "");
+    assert.match(String(type!.operatorItem), /street type could not be read from its address, so it is left blank for a person/);
+    assert.equal(b.changes.some((c) => /has no street type/.test(c.reason)), false, JSON.stringify(b.changes));
+    assert.equal(b.steps.some((s) => s.selector?.label === "Direction:"), false, "its direction IS certain (none): stripped");
+  }
+  const runOn = bind(SEARCH, at("925 N Grant St Lafayette OR 97127"));
+  assert.equal(runOn.steps.find((s) => s.selector?.label === "Direction:")?.field, REPLAY_BLANK_FIELD, "an unreadable line: blank for a person");
+  assert.ok(runOn.changes.some((c) => c.kind === "blanked" && /never the recorded "NW"/.test(c.reason)), JSON.stringify(runOn.changes));
+});
+check("MUST-EXCLUDE (replay, R13): a value dictionary with no component reading leaves the step as before", () => {
+  const b = bind(SEARCH, { streetNumber: "1234", streetNameCore: "Example" });
+  assert.equal(b.steps.find((s) => s.selector?.label === "Street Type:")?.value, "ST");
+  assert.equal(b.steps.find((s) => s.selector?.label === "Street Type:")?.field, undefined);
+});
+check("MUST-EXCLUDE (learn): an address component is never bound by VALUE (\"Roof Facing\" = \"Southwest\" at an SW address)", () => {
+  const sw = at("123 SW Example St, Testville, OR 97000");
+  assert.equal(sw.streetDirectionWord, "Southwest");
+  const { steps } = convertLiteralsToBoundFields([
+    ADVANCE,
+    st("select", "Roof Facing", { value: "Southwest" }),
+    st("select", "Array Azimuth Direction", { value: "SW" }),
+    ADVANCE,
+  ], sw);
+  assert.equal(steps[1].field, undefined, "the roof's facing is not the street's direction");
+  assert.equal(steps[1].value, "Southwest");
+  assert.equal(steps[2].field, undefined);
 });
 
 check("PLANNER: the components are the binder's to place — the model's field view leaves them out", () => {
