@@ -4049,7 +4049,7 @@ export class RecipeAdapter extends BasePortalAdapter {
         : ` The page it ended on is not the review screen, so it was not checked as one (${review.fieldsSeen} field(s) read there).`;
       // THE PICKS FIRST (#362): the run card and the stage line read this message's first line (the
       // backend's pausedRunSentence), so what automation picked leads it, before the where-it-stopped.
-      return { ...ok(`${this.draftPickTell ? `${this.draftPickTell} ` : ""}Replayed ${executed} recorded step(s); ${stop.message}${summary}`, { ...data, stoppedBeforeReview: stop.where, ...(stop.ranOut ? { reviewMarkerReached: false } : {}) }), pauseReason: "stopped_before_review" };
+      return { ...ok(`${this.draftPickTell ? `${this.draftPickTell} ` : ""}Replayed ${executed} recorded step(s); ${stop.message}${summary}`, { ...data, stoppedBeforeReview: stop.where, ...(stop.ranOut ? { reachedReview: false } : {}) }), pauseReason: "stopped_before_review" };
     }
     return ok(`${this.draftPickTell ? `${this.draftPickTell} ` : ""}Replayed ${executed} recorded step(s); stopped at review.${review.summary}`, data);
   }
