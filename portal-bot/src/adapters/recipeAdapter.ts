@@ -111,7 +111,7 @@ import {
   isPayRequestUrl, isRecipeShapeValid, isSignatureNameLabel, isSignatureRequestControl, isSubmitIntent, isSubmitOrPayRequestUrl, PORTAL_SAFETY_GLOBAL, PORTAL_SAFETY_IN_PAGE_SOURCE, splitSignerName,
   type HealedStep, type RunApproval, type SubmissionOutcome,
 } from "../../../shared/src/portalSafety";
-import { commitField, installSettleProbe, routeEffectUndone, routeText, settleAfterRoute, waitForSettled } from "../settle";
+import { commitField, installSettleProbe, routeEffectUndone, routeText, settleAfterRoute, waitForSettled, type RouteSettle } from "../settle";
 import { siteOfUrl } from "../siteOf";
 import { dialogOpenedSince, readUnlessDialog } from "../personDialogs";
 import { cancelledMessage, cancelRequestOf, ReplayStallWatch, replayStallMsFromEnv, type RunCancelRequest } from "./replayStopControl";
@@ -1173,6 +1173,22 @@ export class RecipeAdapter extends BasePortalAdapter {
       const ms = Date.now() - t;
       if (ms >= 300) this.stepPhases[name] = (this.stepPhases[name] ?? 0) + ms;
     }
+  }
+  /** The route settle after a click (settle.ts settleAfterRoute, #245), timed as a phase of the step.
+   *  A ROUTE SETTLE THAT DID NOT SETTLE SAYS SO, AND WHY, WHERE THE STEP'S SECONDS ARE REPORTED: its
+   *  phase is named for what was still going ("route-settle unsettled: timeout after 4000ms: 1
+   *  request(s) in flight"), and a step that spent the 4 s bound is always a slow step, so slowSteps
+   *  carries it. Review of #245: on a slow Tigard day (a trending request still in flight at the bound)
+   *  the protection could lapse with no trace an operator would see. Not a drift warning: a page that
+   *  polls reaches the bound on every routed click and would never replay clean, and what was waited
+   *  on is the view arriving, not a value of the filing (compute-settle warns because its totals are). */
+  private async routeSettle(from: string): Promise<RouteSettle | null> {
+    const t = Date.now();
+    const r = await settleAfterRoute(this.page, from);
+    const ms = Date.now() - t;
+    const name = r && !r.result.settled ? `route-settle unsettled: ${r.result.reason.slice(0, 100)}` : "route-settle";
+    if (ms >= 300) this.stepPhases[name] = (this.stepPhases[name] ?? 0) + ms;
+    return r;
   }
   /** Where this run's page screenshots go, and how many were written. Replay only ever
    *  photographed FAILURES, so every page that filled "successfully" was invisible — and
@@ -8436,13 +8452,15 @@ export class RecipeAdapter extends BasePortalAdapter {
     // initialising, and the assistant's own route rewrite then wiped the results. Paid only when the
     // URL changed — a click that changed nothing reads one URL and waits on nothing, so fast path 1
     // below stays free for it.
-    let routed = await this.timed("route-settle", () => settleAfterRoute(this.page, beforeUrl));
+    let routed = await this.routeSettle(beforeUrl);
+    // Where the click that `routed` settled started from: beforeUrl, or the retry's own start below.
+    let routeFrom = beforeUrl;
     // A ROUTE THE PAGE TOOK BACK IS NOT AN ADVANCE (#245): Tigard's settled URL (?showTemplates=false)
     // still differed from the one before "Search", yet the search the click opened was gone. While the
     // click's route is undone the URL proves nothing and the page identity decides.
     const urlMoved = (): boolean => {
       const u = urlNow();
-      return !!u && u !== beforeUrl && !(routed && routeEffectUndone(beforeUrl, routed.clickedUrl, u));
+      return !!u && u !== beforeUrl && !(routed && routeEffectUndone(routeFrom, routed.clickedUrl, u));
     };
     const moved = async (): Promise<boolean> => {
       if (urlMoved()) return true;
@@ -8529,7 +8547,10 @@ export class RecipeAdapter extends BasePortalAdapter {
     await this.timed("advance-overlays", async () => { await this.dismissModalsGuarded(); await clearPageOverlays(this.page).catch(() => null); });
     const again = await this.resolveLocator(step.selector).catch(() => null);
     if (again && typeof again.click === "function") await this.timed("advance-retry-click", () => this.guardedClick(again, "retry an advance that did not move", { timeout: 8000 }).catch(() => null));
-    routed = (await this.timed("route-settle", () => settleAfterRoute(this.page, retryFrom))) ?? routed;
+    // A retry that routed the page is judged on its own route from where it started, not the first
+    // click's (review of #245: judged against beforeUrl, a retry's held route could read as undone).
+    const retried = await this.routeSettle(retryFrom);
+    if (retried) { routed = retried; routeFrom = retryFrom; }
     await this.timed("advance-settle", async () => { for (let i = 0; i < ADVANCE_SETTLE_TRIES && !(await moved()); i++) await sleep(ADVANCE_SETTLE_MS); });
     if (await moved()) {
       this.driftWarnings.push(tookBack
@@ -8544,7 +8565,11 @@ export class RecipeAdapter extends BasePortalAdapter {
     const said = blockers.length
       ? ` The portal says: ${blockers.slice(0, 6).join(" | ")}`
       : tookBack
-        ? ` The page took back the route the click opened (${tookBack}) — it was still settling from the step before, or it undoes this step.`
+        // THE ROUTES GO IN A "[url=" BRACKET, the page context the backend leaves out of the verdict
+        // (portalRecipes replayFailureTextWithoutPageContext cuts from the first one): a portal's own
+        // URL words ("/account/mfa-setup", "sessionToken=…dns…", "Error.aspx?code=500&kind=server") must
+        // never turn this stop into an MFA, DNS or server-error attribution (review of #245).
+        ? ` The page took back the route the click opened — it was still settling from the step before, or it undoes this step. [url=${tookBack}]`
         : " The portal gave no visible reason — check that page for a required field the recipe left blank.";
     throw new Error(`the portal did not advance (it refused "${String(step.note ?? "the advance").slice(0, 44)}").${said}`);
   }
