@@ -6678,15 +6678,26 @@ export class RecipeAdapter extends BasePortalAdapter {
         // a recorded POLICY DEFAULT, a fixed answer to a question the portal may not ask this project:
         // not asked is skipped and looked at once more before the page's advance, as the check branch
         // does for a policy radio. (It was "skipped" before too, after minutes of waits.)
-        if (/^policy default:/i.test(String(step.note ?? "")) && typeof scoped?.first?.().isVisible === "function"
-          && this.arrayPass === 1 && (await scoped.count().catch(() => 0)) === 0) {
+        // A POLICY QUESTION STILL GETS THE SAME WAIT AS ANY OTHER SELECT BEFORE IT IS "NOT ASKED". It
+        // can mount after its step begins — a section the page loads with its own request after an
+        // advance, a transition — and skipping it on a first look that found nothing left it
+        // unanswered, or answered out of order by the retry before the advance, after the answer it
+        // reveals had already been missed (#232 review, PacifiCorp's AC-disconnect select). The retry
+        // itself is ONE look: the page is as settled as it will ever be, and a question that is
+        // genuinely not asked must not cost a second wait right before every advance.
+        const policyDefault = /^policy default:/i.test(String(step.note ?? ""));
+        if (policyDefault && this.inPolicyRetry && typeof scoped?.first?.().isVisible === "function"
+          && (await scoped.count().catch(() => 0)) === 0) return false;
+        try {
+          scoped = await this.targetOrMissing(step, scoped, nameHint);
+        } catch (err) {
+          if (!policyDefault || !(err instanceof ReplayTargetMissing)) throw err;
           if (!this.inPolicyRetry) {
             this.driftWarnings.push(`policy question not asked for this project — skipped: ${String(step.note ?? "").slice(0, 60)}`);
             this.pendingPolicyRetries.push(step);
           }
           return false;
         }
-        scoped = await this.targetOrMissing(step, scoped, nameHint);
         if (scoped === null) return false;
         // TWO "Manufacturer" SELECTS, ONE LABEL — THE FIELD NAME CARRIES THE SIDE.
         //
@@ -7188,12 +7199,12 @@ export class RecipeAdapter extends BasePortalAdapter {
   /** #232 — IS THIS STEP'S CONTROL ON THE PAGE AT ALL? Asked by a click, fill or select at the point
    *  it would start waiting on its target. Something matched: `scoped`, untouched. Nothing matched:
    *  every level of the recorded selector (the primary and each fallback, counted, never accepted —
-   *  acceptance stays resolveLocator's) is polled for up to TARGET_APPEAR_MS. A control that
-   *  appears is resolved again the full way (resolution, identity check, narrowing; null = the
-   *  identity check aborted the step); one that never does throws ReplayTargetMissing, named.
-   *  Not on a repeat array pass or inside an array row (a row control that is not there is skipped
-   *  by design), not for a pinned re-assert (#362), and not on a locator that cannot be probed
-   *  (the unit-test fakes have no isVisible). */
+   *  acceptance stays resolveLocator's) is polled for up to TARGET_APPEAR_MS, and then the step is
+   *  resolved again the full way (resolution with its rescues, identity check, narrowing; null =
+   *  the identity check aborted the step). Something resolved: that. Nothing: ReplayTargetMissing,
+   *  named. Not on a repeat array pass or inside an array row (a row control that is not there is
+   *  skipped by design), not for a pinned re-assert (#362), and not on a locator that cannot be
+   *  probed (the unit-test fakes have no isVisible). */
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   private async targetOrMissing(step: RecipeStep, scoped: any, nameHint: string): Promise<any> {
     const first = scoped && typeof scoped.first === "function" ? scoped.first() : null;
@@ -7207,16 +7218,27 @@ export class RecipeAdapter extends BasePortalAdapter {
       try { const l = this.locator(s); if (l) levels.push(l); } catch { /* a level with nothing usable matches nothing */ }
     }
     const started = Date.now();
-    const deadline = started + RecipeAdapter.TARGET_APPEAR_MS;
-    let appeared = false;
-    while (!appeared && !this.replayStop && Date.now() < deadline) {
-      for (const l of levels) {
-        if ((await l.count().catch(() => 0)) > 0) { appeared = true; break; }
+    // A CONTROL THAT MOUNTS A MOMENT AFTER ITS STEP BEGINS IS A PAGE STILL RENDERING, NOT AN AGING
+    // RECIPE: the wait is a phase of the step (slowSteps shows it), never an aging note — those drive
+    // "worth re-recording" and the portal's drift count, and the recorded selector worked (#232
+    // review: a description input mounting 0.8 s after an advance read as drift).
+    await this.timed("target-appear", async () => {
+      const deadline = started + RecipeAdapter.TARGET_APPEAR_MS;
+      while (!this.replayStop && Date.now() < deadline) {
+        for (const l of levels) {
+          if ((await l.count().catch(() => 0)) > 0) return;
+        }
+        await sleep(Math.min(500, Math.max(0, deadline - Date.now())));
       }
-      if (!appeared) await sleep(Math.min(500, Math.max(0, deadline - Date.now())));
-    }
+    });
     const label = String(step.note || this.stepLabel(step) || step.action).replace(/\s+/g, " ").trim().slice(0, 60);
-    if (appeared) {
+    // ONE FULL RESOLUTION AT THE END, WHETHER OR NOT A RECORDED LEVEL TURNED UP. The poll counts the
+    // recorded levels only; resolveLocator's rescues (the nth-free twin, the enabled control by its
+    // name, a closed menu opened) reach controls no recorded level matches. Without this look a
+    // Material-icon "check_circleApply" button that mounted at 5 s failed at 15 s as "no control on
+    // this page matches", with that very button listed among the page's visible controls (#232
+    // review). The same resolution executeStep ran when the step began — nothing new is tried.
+    if (!this.replayStop) {
       this.resolvingStep = step;
       let again = await this.resolveLocator(sel, nameHint).finally(() => { this.resolvingStep = null; });
       if (IDENTITY_CHECKED.has(step.action)) {
@@ -7225,10 +7247,7 @@ export class RecipeAdapter extends BasePortalAdapter {
         if (anchored) again = anchored;
       }
       again = await this.narrowToOne(again, step);
-      if ((await again?.count?.().catch(() => 0)) > 0) {
-        this.agingNotes.push(`"${label}" was not on the page when its step began and appeared ${((Date.now() - started) / 1000).toFixed(1)} s later — waited for it`);
-        return again;
-      }
+      if ((await again?.count?.().catch(() => 0)) > 0) return again;
     }
     const recorded = [sel, ...(sel?.fallbacks ?? [])].map((s) => this.describeSelector(s as RecipeSelector)).join(" | ");
     throw new ReplayTargetMissing(`no control on this page matches "${label}" (recorded as ${recorded.slice(0, 160)}) — waited ${Math.round((Date.now() - started) / 1000)} s for it to appear; this is not the page the step was recorded on, or the portal no longer offers that control`);
