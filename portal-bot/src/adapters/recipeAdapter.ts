@@ -13018,6 +13018,24 @@ export class RecipeAdapter extends BasePortalAdapter {
           const twin = { role, name, exact: true, ...(l.frame ? { frame: l.frame } : {}) } as RecipeSelector;
           levels.push({ loc: this.locator(twin), from: twin });
         }
+        // THE HINT THAT TRAILS THE WORDS MAY BE HIDDEN NOW. Tigard's card reads "Add Location
+        // REQUIRED An address is required." to the learner, but "An address is required." sits in a
+        // hidden div, so the control's accessible name is "Add Location REQUIRED": the label's LEADING
+        // words. A prefix of its first three, then two, words is tried, and only when it names exactly
+        // ONE control of that role — a shared prefix ("Add Location" / "Add Location Notes") names none.
+        const words = name.split(" ");
+        const esc = (s: string): string => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const scope: any = l.frame ? this.page.frameLocator(frameSelectorFor(l.frame)) : this.page;
+        for (const k of [3, 2]) {
+          if (words.length <= k) continue; // the exact twin already asks these words
+          const lead = words.slice(0, k).join(" ");
+          for (const role of ["button", "link"] as const) {
+            const loc = typeof scope?.getByRole === "function" ? scope.getByRole(role, { name: new RegExp(`^${esc(lead)}\\b`, "i") }) : null;
+            const n = loc && typeof loc.count === "function" ? await loc.count().catch(() => 0) : 0;
+            if (n === 1) levels.push({ loc, from: { role, name: lead, ...(l.frame ? { frame: l.frame } : {}) } as RecipeSelector });
+          }
+        }
       }
     }
     let levelIdx = -1;
