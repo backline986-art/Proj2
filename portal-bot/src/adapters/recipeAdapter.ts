@@ -305,7 +305,7 @@ import { answerForUnrecordedControl, missingRequiredStopMessage, UNPINNED_CONTRO
 import { answerForRecordedPolicyStep, parsePolicyDefaultNote } from "../recordedPolicyAnswer";
 import { isComputeTotalsStep, prepareComputeSettle, waitForComputeSettled } from "../computeSettle";
 import { portalSaysNotServed } from "../../../shared/src/portalNotServed";
-import { accessibleNameOf, nameAttributeCss, nameAttributeOf } from "../../../shared/src/recipeSelector";
+import { accessibleNameOf, nameAttributeCss, nameAttributeOf, nameAttributeOfCss, recordedNameAttribute } from "../../../shared/src/recipeSelector";
 
 // RecipeAdapter — replays a recorded portal recipe (see portal_recipes / the recorder).
 // Works for ANY AHJ or utility portal an admin has taught by recording. It substitutes
@@ -399,8 +399,11 @@ function isSignatureStep(step: RecipeStep): boolean {
   // signature box a planner had bound to installerContactName passed this test by its (empty)
   // top-level label and replay typed the CONTACT's name (portal-run-close kill C, red before
   // this). A css/name id reads as words ("signatureTypedNameId" -> "signature Typed Name Id").
+  // A css the name-attribute builder wrote reads as that NAME, as the bare `name` it replaced did
+  // (#229 review): its own scaffolding put the word "name" before "OwnerSigns" and made an
+  // unlabeled box read as the signature box.
   const sel = (step.selector ?? {}) as RecipeSelector & { fallbacks?: RecipeSelector[] };
-  const words = (s: unknown): string => String(s ?? "").replace(/([a-z0-9])([A-Z])/g, "$1 $2").replace(/[#_\-.[\]="']+/g, " ");
+  const words = (s: unknown): string => nameAttributeOfCss(String(s ?? "")) || String(s ?? "").replace(/([a-z0-9])([A-Z])/g, "$1 $2").replace(/[#_\-.[\]="']+/g, " ");
   const names = [sel.label, sel.placeholder, sel.name, words(sel.css), ...(sel.fallbacks ?? []).map((f) => f.label ?? f.placeholder ?? words(f.css))]
     .map((s) => String(s ?? "").trim()).filter(Boolean);
   return names.some((n) => isSignatureNameLabel(n));
@@ -3513,7 +3516,7 @@ export class RecipeAdapter extends BasePortalAdapter {
           // only happen when SEVERAL of the thing matched. Coos Bay's street number was
           // declared absent immediately after four of it were found.
           if (DATA_ACTIONS.has(step.action) && !isAmbiguous) {
-            const want = String(step.note || step.selector?.label || accessibleNameOf(step.selector) || "").trim();
+            const want = String(step.note || step.selector?.label || step.selector?.name || "").trim();
             if (want.length >= 3 && (await this.labelPresentOnPage(want)) === false) {
               this.driftWarnings.push(`"${want.slice(0, 44)}" is not on this page — stopped retrying rather than reloading (a reload sends PowerClerk back to page 1)`);
               break;
@@ -8872,12 +8875,15 @@ export class RecipeAdapter extends BasePortalAdapter {
   /** A selector in one short phrase, for the resolution trail. */
   private describeSelector(sel?: RecipeSelector): string {
     if (!sel) return "(none)";
+    // A css the name-attribute builder wrote shows as the name it addresses: its `:is(…)[name="`
+    // head alone is 40 characters, the whole cut, and would hide which name it was (#229).
+    const nameAttr = recordedNameAttribute(sel);
     const bits = [
-      sel.css ? `css:${String(sel.css).slice(0, 40)}` : "",
+      sel.css && !nameAttributeOfCss(sel.css) ? `css:${String(sel.css).slice(0, 40)}` : "",
       sel.label ? `label:${JSON.stringify(String(sel.label).slice(0, 30))}` : "",
       sel.role ? `role:${sel.role}` : "",
       accessibleNameOf(sel) ? `name:${JSON.stringify(accessibleNameOf(sel).slice(0, 30))}` : "",
-      nameAttributeOf(sel) ? `name-attr:${JSON.stringify(nameAttributeOf(sel).slice(0, 30))}` : "",
+      nameAttr ? `name-attr:${JSON.stringify(nameAttr.slice(0, 30))}` : "",
       sel.text ? `text:${JSON.stringify(String(sel.text).slice(0, 30))}` : "",
       sel.nth != null ? `nth:${sel.nth}` : "",
     ].filter(Boolean);
@@ -11530,8 +11536,7 @@ export class RecipeAdapter extends BasePortalAdapter {
       // correct filing read as 4/14 and emitted "the portal may have changed; verify", which
       // was the last blocking warning standing on PGE.
       if (this.skipForNoBattery(st)) continue;
-      // A bare name is an attribute, not words on the page (#229): only the accessible name counts.
-      const label = (st.note || st.selector?.label || accessibleNameOf(st.selector) || st.selector?.placeholder || "")
+      const label = (st.note || st.selector?.label || st.selector?.name || st.selector?.placeholder || "")
         .replace(/^human-patch:\s*/i, "")
         .replace(/\s*—\s*SENSITIVE.*$/i, "")
         .trim();
@@ -11935,7 +11940,7 @@ export function healTargetOf(step: RecipeStep, value = ""): HealTarget {
     // The label ANCHOR is matched against the extractor's own label, which falls back to the
     // name attribute exactly as a bare name does — so a bare name stays an anchor here.
     label: String(step.note || sel.label || sel.name || "").trim().toLowerCase(),
-    name: fp.name || nameAttributeOf(sel) || undefined,
+    name: fp.name || recordedNameAttribute(sel) || undefined,
     id: fp.id || cssId || undefined,
     placeholder: fp.placeholder || sel.placeholder || undefined,
     ariaLabel: fp.ariaLabel || undefined,

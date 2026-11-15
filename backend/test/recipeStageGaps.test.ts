@@ -32,6 +32,7 @@
 import "./_isolate"; // FIRST
 import assert from "node:assert/strict";
 import type { RecipeStep } from "../../shared/src/types";
+import { nameAttributeCss } from "../../shared/src/recipeSelector";
 import { setupStageFixture, check, finish } from "./_stageFixture";
 
 const fx = await setupStageFixture("recipe-stage-gaps");
@@ -139,6 +140,22 @@ for (const [name, steps, values, docs, blankKey, blankLabel, docKey, literalLabe
     assert.deepEqual(recipeStageGaps([{ ...step, value: "" }], {}, {}), [], "even a blank literal is the recipe's own answer");
   });
 }
+
+await check("(N) a box addressed by its name attribute reads as that NAME: the css scaffolding never makes it the signature box (#229 review)", () => {
+  // An unlabeled box whose name attribute is "OwnerSigns", bound to the contact. The learner used to
+  // record it { name } and now records the name attribute as css; both must key to the contact.
+  const asCss = { action: "fill", selector: { css: nameAttributeCss("OwnerSigns"), fallbacks: [{ css: "#sigq" }] }, field: "installerContactName", note: "OwnerSigns" } as RecipeStep;
+  const asBare = { action: "fill", selector: { name: "OwnerSigns", fallbacks: [{ css: "#sigq" }] }, field: "installerContactName", note: "OwnerSigns" } as RecipeStep;
+  const values = { installerContactName: "", authorizedSignerName: "Pat Signer" };
+  assert.deepEqual(keys(recipeStageGaps([asCss], values, {})), ["installerContactName"], "the css-addressed box is the contact's, not the signer's");
+  assert.deepEqual(keys(recipeStageGaps([asBare], values, {})), ["installerContactName"], "the saved bare-name box is the contact's, as before");
+  // A real signature box addressed the same way still reads as one, as its bare name did.
+  const noSigner = { ...values, authorizedSignerName: "" };
+  const sigCss = { ...asCss, selector: { css: nameAttributeCss("Signature Name"), fallbacks: [{ css: "#sig" }] } } as RecipeStep;
+  const sigBare = { ...asCss, selector: { name: "Signature Name", fallbacks: [{ css: "#sig" }] } } as RecipeStep;
+  assert.deepEqual(keys(recipeStageGaps([sigBare], noSigner, {})), ["authorizedSignerName"], "a bare-name signature box reads the signer");
+  assert.deepEqual(keys(recipeStageGaps([sigCss], noSigner, {})), ["authorizedSignerName"], "the same box addressed by css reads the signer too");
+});
 
 await check("(R) steps the replay answers itself never count; the signature reads the signer; a certified model is present", () => {
   const steps: RecipeStep[] = [
