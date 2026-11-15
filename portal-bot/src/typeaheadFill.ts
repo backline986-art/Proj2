@@ -182,11 +182,16 @@ export function typeaheadWidgetHiddenInPage(): Array<{ name: string; value: stri
 }
 
 /** THE BOX'S OWN MARKUP, JUDGED (#244): the reason it is a search-as-you-type box, "" when it is not
- *  or cannot be read. One read, bounded; the learner's and the replay's fill doors both ask it. */
+ *  or cannot be read. One read, bounded; the learner's, the replay's and the gap-fill's fill doors
+ *  all ask it. Never throws (a stub locator's evaluate may not even return a promise). */
 export async function typeaheadBoxReason(loc: any): Promise<string> {
   if (!loc || typeof loc.evaluate !== "function") return "";
-  const facts = await loc.evaluate(typeaheadBoxFactsInPage, false, { timeout: 1500 }).catch(() => null);
-  return typeaheadBoxSays(facts as TypeaheadBoxFacts | null);
+  try {
+    const facts = await loc.evaluate(typeaheadBoxFactsInPage, false, { timeout: 1500 });
+    return typeaheadBoxSays(facts as TypeaheadBoxFacts | null);
+  } catch {
+    return "";
+  }
 }
 
 /**

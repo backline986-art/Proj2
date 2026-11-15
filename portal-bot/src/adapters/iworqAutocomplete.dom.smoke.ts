@@ -228,7 +228,7 @@ const SAVED: RecipeStep[] = [
   { action: "fill", phase: "fill", selector: { label: "Mailing Address", fallbacks: [{ css: "#mail" }] }, note: "Mailing Address", field: "installerAddress" } as RecipeStep,
 ];
 
-async function replay(mode: string, steps: RecipeStep[]): Promise<{ data: Record<string, unknown>; ok: boolean; message: string; page: Page; shown: Shown; ms: number; searches: string[] }> {
+async function replay(mode: string, steps: RecipeStep[], gap?: LearnPlanner): Promise<{ data: Record<string, unknown>; ok: boolean; message: string; page: Page; shown: Shown; ms: number; searches: string[] }> {
   const page = await ctx.newPage();
   const url = `${base}/?mode=${mode}`;
   const recipe = {
@@ -237,11 +237,13 @@ async function replay(mode: string, steps: RecipeStep[]): Promise<{ data: Record
     steps: [{ action: "goto", phase: "open", value: url, note: "entry url" }, ...steps],
     createdBy: "test", createdAt: "", updatedAt: "", notes: "", discipline: "electrical",
   } as unknown as PortalRecipe;
-  const adapter = new RecipeAdapter(recipe, {
+  const values = {
     street: JOB.street, city: JOB.city, state: JOB.state, zip: JOB.zip,
     projectAddress: `${JOB.street}, ${JOB.city}, ${JOB.state}, ${JOB.zip}`,
     installerCompanyName: COMPANY, installerAddress: "9 Copperfen Way",
-  }, {}, { autoSubmit: false });
+  };
+  const adapter = new RecipeAdapter(recipe, values, {}, { autoSubmit: false });
+  if (gap) adapter.enableLlmGapFill(gap, values);
   (adapter as unknown as { page: unknown }).page = page;
   const t0 = Date.now();
   const r = await adapter.fillApplication({} as never);
@@ -302,6 +304,31 @@ const list = (d: Record<string, unknown>, k: string): string[] => (Array.isArray
   check("...quoting the portal's own sentence, not the form row around it",
     warnings.some((w) => /^FAILED "properties autocomplete"/.test(w) && /the portal said: "No results match your search"/.test(w)),
     JSON.stringify(warnings.filter((w) => /^FAILED/.test(w))));
+  await r.page.close();
+}
+
+// ---- B2) THE GAP-FILL DOOR: a box the search left empty is never given the planner's plain text ----
+// The replay's gap-fill asks a planner about required blanks; one that answers the property box with
+// the street (grounded: it IS the project's street) would type it back in, picked by nobody.
+{
+  const offered: string[] = [];
+  const gap: LearnPlanner = async (req) => {
+    for (const f of req.fields) if (!offered.includes(f.label)) offered.push(f.label);
+    const fills: Array<{ selectorIndex: number; value: string; field?: string }> = [];
+    const at = (label: string): number => req.fields.findIndex((f) => f.label === label);
+    if (at("properties autocomplete") >= 0) fills.push({ selectorIndex: at("properties autocomplete"), value: JOB.street, field: "street" });
+    if (at("contractors autocomplete") >= 0) fills.push({ selectorIndex: at("contractors autocomplete"), value: COMPANY, field: "installerCompanyName" });
+    if (at("* Description of Work:") >= 0) fills.push({ selectorIndex: at("* Description of Work:"), value: "Roof-mounted solar PV", field: "workDescription" });
+    return { fills, atReview: false };
+  };
+  const r = await replay("none", SAVED, gap);
+  const gapFill = (r.data.gapFill ?? {}) as { filled?: string[] };
+  console.log(`   replay none + gap-fill: ${r.ms} ms offered=${JSON.stringify(offered)} filled=${JSON.stringify(gapFill.filled)} shown=${JSON.stringify(r.shown)}`);
+  check("gap-fill: the planner is asked about the other blanks (the pass ran)", offered.includes("* Description of Work:"), JSON.stringify(offered));
+  check("gap-fill: a search box is never offered to the planner, and never typed into",
+    !offered.includes("properties autocomplete") && !offered.includes("contractors autocomplete")
+      && r.shown.property === "" && r.shown.contractor === "" && !(gapFill.filled ?? []).some((l) => /autocomplete/.test(l)),
+    `offered=${JSON.stringify(offered)} filled=${JSON.stringify(gapFill.filled)} shown=${JSON.stringify(r.shown)}`);
   await r.page.close();
 }
 

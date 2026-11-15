@@ -14,6 +14,7 @@ import { buildLocator } from "./adapters/loginFlow";
 import { selectWithFallback } from "./comboboxFill";
 import { assertFilerIdentityHeld, FilerIdentityStop, filerIdentityFieldForSelect, filerIdentityStopMessage, selectFilerIdentity } from "./filerIdentitySelect";
 import { redactStatusText } from "./safeAction";
+import { typeaheadBoxReason } from "./typeaheadFill";
 
 // ---------------------------------------------------------------------------
 // LLM-assisted gap-fill (hybrid staging).
@@ -646,7 +647,18 @@ export async function gapFillCurrentPage(
     if (!empties.some((e) => e.field.required)) return out;
     // A submit-intent control is never offered (gapFillMayAnswer); it stays in `empties`, so a
     // required one left blank is still reported below for a person to answer.
-    const offered = empties.filter((e) => gapFillMayAnswer(e.field));
+    // A SEARCH-AS-YOU-TYPE BOX IS NEVER GIVEN PLAIN TEXT EITHER (#244): it takes a PICK, made by the
+    // recipe's step or the learner through typeaheadFill, by the job's own rule — a planner's text
+    // typed into it selects nothing and reads as filled (City of Star's iWorQ property box: the
+    // replay's search found nothing and left it empty, and this pass would have typed the address
+    // back in). Asked by the one predicate (the scan's strategy, else typeaheadBoxSays on the box);
+    // it stays in `empties`, so a required one left blank is reported below like any other.
+    const searchBoxes = new Set<ExtractedField>();
+    for (const e of empties) {
+      if (e.field.fieldType !== "text") continue;
+      if (e.field.fillStrategy === "typeahead" || await typeaheadBoxReason(e.loc)) searchBoxes.add(e.field);
+    }
+    const offered = empties.filter((e) => gapFillMayAnswer(e.field) && !searchBoxes.has(e.field));
 
     const url = typeof page.url === "function" ? String(page.url() ?? "") : "";
     const pageTitle = typeof page.title === "function" ? String((await page.title().catch(() => "")) ?? "") : "";
