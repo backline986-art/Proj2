@@ -408,9 +408,11 @@ for (const [tag, delay] of [
   a.currentStepIdx = 1;
   a.identityGuard = steps[1];
   const t0 = Date.now();
-  await a.resolveLocator(steps[1].selector, "");
+  // A throw here is reported as this case's failure, never allowed to hide the cases after it.
+  const threw = await a.resolveLocator(steps[1].selector, "").then(() => "", (e: unknown) => String(e instanceof Error ? e.message : e));
   const dt = Date.now() - t0;
   a.identityGuard = null;
+  check("c: the timed resolution ran", threw === "", threw);
   console.log(`   resolution of the Continue step took ${dt} ms`);
   check(`c: MUST KEEP — no added wait (resolution ${dt} ms, well under 1 s)`, dt < 1000 && a.namesakeStop == null,
     `took ${dt}ms, namesakeStop=${JSON.stringify(a.namesakeStop)}`);
