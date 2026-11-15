@@ -5080,6 +5080,13 @@ export interface RecipeStep {
    *  check/select answering a fact about the installer company). Replayed only for that client's
    *  jobs; on any other job (or when absent) the step is left for a person. Opaque, never the id. */
   companyFactOf?: string;
+  /** A RESULTS-ROW PICK (#235): the step chose one row of a search-results grid — the property's
+   *  address, parcel or owner row, the filing company's licence or contact record. Replay picks the
+   *  row by THIS job's own value (portal-bot learnDataInSelectors, RecipeAdapter
+   *  pickResultRowForProject), never by a recorded label (the learn job's data) or a recorded row
+   *  position; no unique match leaves the row for a person. Metadata only: never part of the
+   *  step's label or matching. */
+  rowRole?: "address" | "parcel" | "owner" | "licence" | "contact";
   /** See StepFingerprint — heal tie-break metadata captured at record time. */
   fingerprint?: StepFingerprint;
 }
