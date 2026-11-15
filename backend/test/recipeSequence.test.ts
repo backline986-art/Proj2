@@ -22,14 +22,16 @@
 //      not known.
 //   D. The doors, on the real write path: promoteRecordingIfEligible REFUSES and writes why (note,
 //      flag, audit); finishPortalRecipe (a person) PROMOTES and is shown the same findings; clean steps
-//      clear only this check's own flag.
+//      clear only this check's own flag, and so does an abandoned re-record restored to its snapshot.
 //   E. The learn's trust gate, through the real autoLearnPortal (browser and LLM stubbed): a learn whose
 //      saved steps re-fill page 1 after its advance is NOT trusted; a clean one still is.
 //
 // KILL CHECKS (each turns this file red for its own reason):
 //   K1 shared/src/recipeSequence.ts: recipeSequenceProblems returns [] -> A1-A5 and C fail, B passes.
 //   K2 backend/src/portalRecipes.ts at origin/main -> D fails (the looped recording is promoted).
-//   K3 backend/src/autoLearn.ts at origin/main -> E fails (the looped learn is trusted).
+//   K3 backend/src/autoLearn.ts at origin/main -> E1 fails (the looped learn is trusted).
+//   K4 finishPortalRecipe keeps any flag on clean steps -> D4 fails (the stale sequence flag survives).
+//   K5 restoreRecipeSnapshotIfAbandoned keeps the sequence flag -> D5 fails.
 //
 // Run: npx tsx backend/test/recipeSequence.test.ts
 import "./_isolate"; // FIRST — generated files land in a temp cwd, never the repo's backend/data
@@ -371,6 +373,26 @@ await check("D4 clean steps clear this check's own flag and note on a person's s
   const other = freshRecording(COOS_BAY_SHAPE);
   db.run("UPDATE portal_recipes SET flag_reason = ?, flagged_at = ? WHERE id = ?", ["A replay failed and the failure could not be attributed (x)", "2026-11-14T00:00:00Z", other]);
   assert.match(recipes.finishPortalRecipe(db, other, "Pat Reviewer").flagReason, /^A replay failed/, "a foreign flag was cleared");
+});
+
+await check("D5 an abandoned re-record restored to its proven snapshot drops the sequence flag written about the abandoned steps", () => {
+  // A small working recipe, made complete by a person (the real path)...
+  const scope = { scopeType: "ahj" as const, state: "OR", ahj: `City of Sequence ${++scopeSeq}`, portalUrl: "https://permits.example.test/Portal/" };
+  const first = recipes.startPortalRecording(db, scope);
+  recipes.savePortalRecipeSteps(db, first.id, [GOTO, fillId("w_a", "homeownerName", "Name"), fillId("w_b", "street", "Street"),
+    S({ action: "upload", phase: "fill", selector: { css: '[data-al-upl="f0"]' }, docType: "plan_set", note: "upload plan_set: Attach" }), advance("Next"), FINAL]);
+  recipes.finishPortalRecipe(db, first.id, "Pat Reviewer");
+  // ...re-recorded (its steps parked as a PROVEN snapshot), the re-record loops and is refused...
+  const again = recipes.startPortalRecording(db, scope);
+  assert.equal(again.id, first.id, "setup: the re-record resets the same row");
+  recipes.savePortalRecipeSteps(db, again.id, [...LOOPED, FINAL]);
+  recipes.promoteRecordingIfEligible(db, again.id, { finishedBy: "operator", via: "mark_submitted" });
+  assert.ok(recipes.getPortalRecipe(db, again.id).flagReason.startsWith(recipes.RECIPE_SEQUENCE_FLAG_PREFIX ?? "Sequence check:"), "setup: the looped re-record must be refused and flagged");
+  // ...and abandoned: the sweep hands back the working recipe, without a flag about steps it no longer has.
+  assert.equal(recipes.restoreRecipeSnapshotIfAbandoned(db, again.id), "complete");
+  const back = recipes.getPortalRecipe(db, again.id);
+  assert.equal(back.flagReason, "", `the restored working recipe still carries the abandoned steps' flag: "${back.flagReason}"`);
+  assert.deepEqual(sequenceSegments(back.notes), [], "the restored working recipe still carries the abandoned steps' note");
 });
 
 // ── E. the learn's trust gate, end to end ──────────────────────────────────────────────────────

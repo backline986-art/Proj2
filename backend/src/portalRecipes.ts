@@ -854,11 +854,19 @@ export function restoreRecipeSnapshotIfAbandoned(db: AppDb, recipeId: string): "
   const note = proven
     ? "[re-record abandoned — restored the previous working recipe]"
     : "[re-record abandoned — the previous steps were restored, but they had never been verified, so this needs a re-record rather than a promotion]";
+  // A SEQUENCE FINDING DESCRIBES THE STEPS IT READ (#241). When the abandoned attempt's steps give way
+  // to the snapshot, a "Sequence check:" flag and note written about them would name steps that are
+  // no longer there (and keep a restored working recipe out of the borrow pass), so they go with them.
+  // Any other flag is not this check's to clear.
+  const staleSequence = steps === snapshot;
+  const ownFlag = staleSequence && s(row.flag_reason).trim().startsWith(RECIPE_SEQUENCE_FLAG_PREFIX);
+  const merged = mergeRecipeNotes(base, note);
   db.run(
     `UPDATE portal_recipes SET steps_json = ?, status = ?, structure_sig = ?, prev_steps_json = NULL, auto_submit_enabled = 0,
-       notes = ?, updated_at = ? WHERE id = ? AND status = 'recording'`,
+       flag_reason = ?, flagged_at = ?, notes = ?, updated_at = ? WHERE id = ? AND status = 'recording'`,
     [asJson(steps), proven ? "complete" : "needs_rerecord", recipeStructureSignature(steps),
-      mergeRecipeNotes(base, note), nowIso(), recipeId],
+      ownFlag ? "" : s(row.flag_reason), ownFlag || !row.flagged_at ? null : s(row.flagged_at),
+      staleSequence ? withSequenceNote(merged, "") : merged, nowIso(), recipeId],
   );
   return proven ? "complete" : "needs_rerecord";
 }
