@@ -12838,10 +12838,12 @@ export class RecipeAdapter extends BasePortalAdapter {
       const before = remaining.length;
       remaining = await this.reassertPass(pastReview);
       if (remaining.length >= before) {
-        // No ground gained. Say so ONCE, in the terms the operator needs: this is not a
-        // value we failed to write, it is a page that will not keep it.
+        // No ground gained. Say so ONCE, in the terms the operator needs. The CAUSE is each
+        // field's own line above (a box the page clears on re-render, or a value this project
+        // does not have — live Tigard, replay v13 of 2026-11-15, where "the portal clears them"
+        // named the wrong fault); this line counts, names and hands over.
         const names = remaining.slice(0, 5).map((b) => b.replace(/ — the portal flagged this field$/, "")).join(", ");
-        this.driftWarnings.push(`${remaining.length} required field(s) would not stay filled on this page after two passes (${names}) — the portal clears them on re-render; they need entering by hand before submit`);
+        this.driftWarnings.push(`${remaining.length} required field(s) are still blank on this page after two passes (${names}) — each is named above with its reason; they need entering by hand before submit`);
         break;
       }
     }
@@ -12930,6 +12932,12 @@ export class RecipeAdapter extends BasePortalAdapter {
             // re-assert that could NOT re-fill leaves the field blank, and blocks.
             if (done) {
               this.agingNotes.push(`"${String(rs.note ?? rs.field ?? "").slice(0, 40)}" was filled earlier and had gone blank — re-asserted (the portal re-rendered it)`);
+            } else if (!this.resolveValue(rs)) {
+              // THE BLANK IS A VALUE GAP, NOT A LOST CONTROL (live City of Tigard, replay v13 of 2026-11-15):
+              // the recorded answer was the learn job's own and is not replayed onto this project, so the
+              // box is on the page and nothing can go into it — "the control may no longer be on this page"
+              // sent a reader after the wrong fault.
+              this.driftWarnings.push(`"${String(rs.note ?? rs.field ?? "").slice(0, 40)}" is blank and this project has no value for it (its recorded answer was the learn job's own, not replayed) — it needs entering by hand`);
             } else {
               this.driftWarnings.push(`"${String(rs.note ?? rs.field ?? "").slice(0, 40)}" is blank and its recorded step could not re-fill it here — the control may no longer be on this page`);
             }
