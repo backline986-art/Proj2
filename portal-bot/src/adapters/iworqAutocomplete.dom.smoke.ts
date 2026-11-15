@@ -19,7 +19,10 @@
 // beside it, and Next refuses to go on without both ids ("A property is required…"). Modes (?mode=):
 //   match     the job's property among neighbours, the company among a longer namesake;
 //   none      both searches answer "No results match your search";
-//   nohidden  a click writes the box but never the hidden id (the portal did not take the pick).
+//   nohidden  a reopened draft: the property box already shows an earlier pick and its hidden id
+//             holds it; typing empties that id (the widget's own selection), and a click writes the
+//             box but never the id again (the portal did not take the pick). A hidden input that was
+//             empty all along is never read as the selection (typeaheadSelectedValue.dom.smoke).
 // MUST EXCLUDE on the same page: a keyword box whose only hint is "Search…", a box whose class says
 // "autocomplete-off", a textarea and a number box — all stay plain fills.
 //
@@ -107,6 +110,7 @@ const formPage = (mode: string): string => `<!doctype html><html><head><title>So
     var hid = root.querySelector("input[type=hidden]");
     var results = root.querySelector(".autocomplete-results");
     var timer = null;
+    if (MODE === "nohidden" && resource === "properties") { box.value = "4812 W QUILLFEATHER DR"; hid.value = "p-4812"; }
     function close() { results.style.display = "none"; results.innerHTML = ""; }
     function render(q) {
       window.__searches.push(resource + ":" + q);
@@ -266,7 +270,9 @@ const list = (d: Record<string, unknown>, k: string): string[] => (Array.isArray
   check("replay: the contractor is SELECTED by the company rule (& is and; never the longer namesake)",
     r.shown.contractor === "QUILLFEATHER SOLAR AND ELECTRIC LLC" && r.shown.contractorId === "c-42",
     `contractor=${JSON.stringify(r.shown.contractor)} id=${JSON.stringify(r.shown.contractorId)}`);
-  check("replay: both are verified only now that they are selected",
+  // Not kill evidence on its own (main reported both verified too, unselected); with the two checks
+  // above, verified here means selected. Sections B and C carry "never verified unless selected".
+  check("replay: both are reported verified, nothing unverified",
     verified.includes("properties autocomplete") && verified.includes("contractors autocomplete") && !unverified.length,
     `verified=${JSON.stringify(verified)} unverified=${JSON.stringify(unverified)}`);
   check("replay: the switch from the recording is said, with the markup that decided it",
@@ -332,14 +338,14 @@ const list = (d: Record<string, unknown>, k: string): string[] => (Array.isArray
   await r.page.close();
 }
 
-// ---- C) REPLAY, THE PICK THE PORTAL DID NOT TAKE: box written, hidden id empty → never verified ---
+// ---- C) REPLAY, THE PICK THE PORTAL DID NOT TAKE: the id the typing emptied is never written again --
 {
   const r = await replay("nohidden", SAVED.slice(0, 1));
   const warnings = list(r.data, "driftWarnings");
   const verified = list(r.data, "fieldsVerified");
   console.log(`   replay nohidden: ${r.ms} ms shown=${JSON.stringify(r.shown)} warnings=${JSON.stringify(warnings.filter((w) => /autocomplete/.test(w)))}`);
-  check("replay: a pick whose selected id stayed empty is a FAILED step, named",
-    warnings.some((w) => /^FAILED "properties autocomplete"/.test(w) && /selected value/.test(w) && /stayed empty/.test(w)),
+  check("replay: a pick whose selected id (emptied by the typing) was not written again is a FAILED step, named",
+    warnings.some((w) => /^FAILED "properties autocomplete"/.test(w) && /selected value/.test(w) && /property_id/.test(w) && /not written again/.test(w)),
     JSON.stringify(warnings));
   check("...never verified, the box cleared", !verified.includes("properties autocomplete") && r.shown.property === "" && r.shown.propertyId === "",
     `verified=${JSON.stringify(verified)} shown=${JSON.stringify(r.shown)}`);

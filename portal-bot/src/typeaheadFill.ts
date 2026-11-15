@@ -29,8 +29,9 @@
 //   3. let the one predicate (typeaheadMatch) choose: exactly one match is clicked; a near miss or
 //      several equal candidates pick NOTHING and come back as a question for a person;
 //   4. read the box back: empty after the pick is a NAMED failure, never a silent drop — and so is a
-//      pick the widget's own selected value never took (#244: the hidden input beside the box that
-//      held nothing before the pick still holds nothing after it).
+//      pick the widget's own selected value never took (#244: a hidden value the widget itself
+//      emptied when the query was typed, still empty after the pick and its blur commit). A hidden
+//      input that was empty all along is never read as the widget's selection.
 // WHICH boxes take this path is the box's own markup (typeaheadBoxSays, #244), asked by the learner
 // and the replay at their fill doors; the list is the box's own, a fresh popup, or a list that
 // appeared inside the box's own widget (an iWorQ Vue autocomplete renders it there, unnamed).
@@ -57,7 +58,8 @@ export type TypeaheadOutcome =
   | { outcome: "ask"; question: string; offered: string[]; typed: string; why: string }
   /** `portalSaid`: the portal's own no-match words, when it printed any. */
   | { outcome: "no_suggestions"; why: string; typed: string[]; portalSaid?: string }
-  | { outcome: "no_match"; why: string; offered: string[]; typed: string; portalSaid?: string }
+  /** `listChanged`: the list re-rendered between the read and the click — not the portal's answer. */
+  | { outcome: "no_match"; why: string; offered: string[]; typed: string; portalSaid?: string; listChanged?: true }
   /** A suggestion was clicked and the box does not hold it. */
   | { outcome: "not_held"; why: string; picked: string }
   /** The box cannot be typed into (hidden, read-only, disabled) or there is nothing to type. */
@@ -164,21 +166,75 @@ export function stampTypeaheadWidgetInPage(): void {
   }
 }
 
+/** #244 fix round — the mark on a hidden input a fill has SEEN its widget empty when a query was typed:
+ *  the widget's own selection, remembered for this document (a later fill of the same box starts
+ *  from an empty value, because the first one's typing or clear emptied it). */
+export const TYPEAHEAD_OWNED_ATTR = "data-al-ta-owned";
+
 /**
- * Runs IN THE PAGE (#244). The hidden inputs inside the box's widget, in order — where a widget keeps
- * the SELECTED record's id (the box only shows its words). A pick that leaves every one of them as
- * empty as it was did not select anything. No nested functions.
+ * Runs IN THE PAGE (#244). The hidden inputs inside the box's widget, in order, each keyed by its
+ * name (or id) and its ordinal among inputs of that name, so two reads are compared input by input,
+ * with whether an earlier fill marked it the widget's own (TYPEAHEAD_OWNED_ATTR). Which of them is
+ * the widget's SELECTED value is decided by the caller (selectionInputsToWatch), never by being
+ * hidden and nearby. No nested functions.
  */
-export function typeaheadWidgetHiddenInPage(): Array<{ name: string; value: string }> {
-  const out: Array<{ name: string; value: string }> = [];
+export function typeaheadWidgetHiddenInPage(): Array<{ key: string; name: string; value: string; owned: boolean }> {
+  const out: Array<{ key: string; name: string; value: string; owned: boolean }> = [];
   const widget = document.querySelector("[data-al-ta-widget]");
   if (!widget) return out;
   const hidden = widget.querySelectorAll('input[type="hidden"]');
+  const seen: Record<string, number> = {};
   for (let i = 0; i < hidden.length; i++) {
     const h = hidden[i] as HTMLInputElement;
-    out.push({ name: String(h.getAttribute("name") || h.getAttribute("id") || "").slice(0, 60), value: String(h.value ?? "") });
+    const name = String(h.getAttribute("name") || h.getAttribute("id") || "").slice(0, 60);
+    seen[name] = (seen[name] ?? 0) + 1;
+    out.push({ key: `${name}#${seen[name]}`, name, value: String(h.value ?? ""), owned: h.getAttribute("data-al-ta-owned") === "1" });
   }
   return out;
+}
+
+/** Runs IN THE PAGE (#244 fix round). Mark the widget's hidden inputs named by `keys` (as keyed by
+ *  typeaheadWidgetHiddenInPage) as its own selection. No nested functions. */
+export function markOwnedHiddenInPage(keys: string[]): void {
+  const widget = document.querySelector("[data-al-ta-widget]");
+  if (!widget || !Array.isArray(keys) || !keys.length) return;
+  const hidden = widget.querySelectorAll('input[type="hidden"]');
+  const seen: Record<string, number> = {};
+  for (let i = 0; i < hidden.length; i++) {
+    const h = hidden[i];
+    const name = String(h.getAttribute("name") || h.getAttribute("id") || "").slice(0, 60);
+    seen[name] = (seen[name] ?? 0) + 1;
+    if (keys.indexOf(`${name}#${seen[name]}`) >= 0) h.setAttribute("data-al-ta-owned", "1");
+  }
+}
+
+/** THE WIDGET'S OWN SELECTED VALUE, BY WHAT IT DID (#244 fix round): the hidden inputs in the box's
+ *  widget that are EMPTY once the query is typed and that the widget demonstrably owns — it emptied
+ *  them itself (a value before anything was typed, none after), or an earlier fill in this document
+ *  saw it do so (TYPEAHEAD_OWNED_ATTR: that fill's typing or clear is why this one starts empty). A
+ *  pick must write one of them again. A hidden input that was empty all along proves nothing about
+ *  ownership and is never watched: an unrelated empty ClientState beside the box (Accela's shape)
+ *  and a widget that writes its id only on change/blur both failed correct picks when every empty
+ *  hidden input in the widget was watched (review of 5eb51ad3, shapes S1 and S2). */
+export function selectionInputsToWatch(
+  atRest: ReadonlyArray<{ key: string; value: string }> | null | undefined,
+  typed: ReadonlyArray<{ key: string; name: string; value: string; owned?: boolean }> | null | undefined,
+): Array<{ key: string; name: string }> {
+  const rest = new Map((Array.isArray(atRest) ? atRest : []).map((h) => [h.key, String(h.value ?? "")]));
+  return (Array.isArray(typed) ? typed : [])
+    .filter((h) => String(h.value ?? "") === "" && (!!rest.get(h.key) || h.owned === true))
+    .map((h) => ({ key: h.key, name: h.name }));
+}
+
+/** Did the pick write the widget's selection again? Any watched input holding a value again is a
+ *  yes; one that is gone (the widget re-rendered) is no opinion, so a yes; none watched is a yes. */
+export function selectionRewritten(
+  watched: ReadonlyArray<{ key: string }>,
+  after: ReadonlyArray<{ key: string; value: string }> | null | undefined,
+): boolean {
+  if (!watched.length) return true;
+  const now = new Map((Array.isArray(after) ? after : []).map((h) => [h.key, String(h.value ?? "")]));
+  return watched.some((w) => !now.has(w.key) || now.get(w.key) !== "");
 }
 
 /** THE BOX'S OWN MARKUP, JUDGED (#244): the reason it is a search-as-you-type box, "" when it is not
@@ -509,6 +565,9 @@ export async function fillTypeahead(page: any, loc: any, req: TypeaheadRequest):
   // the widget-local list and the selected-value read-back.
   if (typeof loc.evaluate === "function") await loc.evaluate(typeaheadBoxFactsInPage, true, { timeout: 1500 }).catch(() => null);
   await doc.evaluate(stampTypeaheadWidgetInPage).catch(() => null);
+  // The widget's hidden inputs AT REST, before the first clear and the first keystroke: the pick is
+  // judged against the ones the typing then empties (selectionInputsToWatch).
+  const hiddenAtRest = await doc.evaluate(typeaheadWidgetHiddenInPage).catch(() => [] as Array<{ key: string; name: string; value: string; owned: boolean }>);
 
   const typed: string[] = [];
   let rows: string[] = [];
@@ -591,15 +650,17 @@ export async function fillTypeahead(page: any, loc: any, req: TypeaheadRequest):
     const now = suggestionText(await row.textContent({ timeout: 1500 }).catch(() => ""));
     if (now !== choice.text || Date.now() >= deadline) {
       await clearBox(doc, loc, controlsId);
-      return { outcome: "no_match", why: `the suggestion list changed while it was being read ("${choice.text}" is no longer the row chosen)`, offered, typed: usedQuery };
+      return { outcome: "no_match", why: `the suggestion list changed while it was being read ("${choice.text}" is no longer the row chosen)`, offered, typed: usedQuery, listChanged: true };
     }
     // THE WIDGET'S OWN SELECTED VALUE (#244). A widget that keeps the selected record's id in a hidden
-    // input beside the box (the box only shows its words) selected nothing unless that id was
-    // written: the box reading the address is not the portal holding the property. Read just before
-    // the click: an empty hidden input there must be filled by it. None empty → no opinion.
-    const hiddenBefore = await doc.evaluate(typeaheadWidgetHiddenInPage).catch(() => [] as Array<{ name: string; value: string }>);
-    const filledCount = (vals: unknown): number => (Array.isArray(vals) ? vals.filter((h) => String((h as { value?: unknown })?.value ?? "") !== "").length : 0);
-    const watched = Array.isArray(hiddenBefore) ? hiddenBefore.filter((h) => String(h?.value ?? "") === "") : [];
+    // input (the box only shows its words) selected nothing unless that id is written again: the box
+    // reading the address is not the portal holding the property. Watched: only what the widget
+    // demonstrably owns, a hidden value it emptied itself when the query was typed (a reopened
+    // draft's earlier selection), remembered on the input for the next fill of this box in this
+    // document (selectionInputsToWatch). Read here, just before the click; judged only after the
+    // blur commit, because a widget may write its id on change/blur rather than in the click.
+    const watched = selectionInputsToWatch(hiddenAtRest, await doc.evaluate(typeaheadWidgetHiddenInPage).catch(() => []));
+    if (watched.length) await doc.evaluate(markOwnedHiddenInPage, watched.map((w) => w.key)).catch(() => null);
     const clicked = await withAutomationInput(page, () => row.click({ timeout: 4000 })).then(() => true).catch(() => false);
     if (!clicked) {
       await clearBox(doc, loc, controlsId);
@@ -612,13 +673,11 @@ export async function fillTypeahead(page: any, loc: any, req: TypeaheadRequest):
       || (req.mode === "company" ? normalizeCompanyLabel(h) === normalizeCompanyLabel(value)
         : req.mode === "exact" ? loose(h) === loose(value) : chooseAddressSuggestion([h], site).kind === "pick"));
     let held = "";
-    let selectedTook = watched.length === 0;
     const readUntil = Date.now() + 2000;
     for (;;) {
       await page.waitForTimeout?.(200).catch(() => null);
       held = String((await loc.inputValue({ timeout: 1000 }).catch(() => "")) ?? "").replace(/\s+/g, " ").trim();
-      if (!selectedTook) selectedTook = filledCount(await doc.evaluate(typeaheadWidgetHiddenInPage).catch(() => [])) > filledCount(hiddenBefore);
-      if ((holds(held) && selectedTook) || Date.now() >= readUntil) break;
+      if (holds(held) || Date.now() >= readUntil) break;
     }
     if (!held) return { outcome: "not_held", why: `picked "${choice.text}" and the box is empty afterwards`, picked: choice.text };
     const same = holds(held);
@@ -626,13 +685,26 @@ export async function fillTypeahead(page: any, loc: any, req: TypeaheadRequest):
       await clearBox(doc, loc, controlsId);
       return { outcome: "not_held", why: `picked "${choice.text}" and the box then showed "${held.slice(0, 120)}" — cleared`, picked: choice.text };
     }
-    if (!selectedTook) {
-      await clearBox(doc, loc, controlsId);
-      const names = watched.map((h) => h.name).filter(Boolean).slice(0, 3).map((n) => `"${n}"`).join(", ");
-      return { outcome: "not_held", why: `picked "${choice.text}" and the box shows it, but the widget's selected value (its hidden input${names ? ` ${names}` : ""}) stayed empty — the portal did not take the pick; cleared`, picked: choice.text };
-    }
     // Commit the way every fill commits (a per-field save on blur).
     if (typeof loc.blur === "function") await loc.blur().catch(() => null);
+    // ...and only then ask whether the widget's own selection was written again (read for up to 2 s:
+    // a change/blur handler, or the widget's own round trip). Not written: the box is cleared, so no
+    // unpicked words stay for the portal to take (a per-field autosave saw the pick's words on the
+    // blur and now sees the box emptied).
+    if (watched.length) {
+      let took = false;
+      const takeUntil = Date.now() + 2000;
+      for (;;) {
+        took = selectionRewritten(watched, await doc.evaluate(typeaheadWidgetHiddenInPage).catch(() => []));
+        if (took || Date.now() >= takeUntil) break;
+        await page.waitForTimeout?.(200).catch(() => null);
+      }
+      if (!took) {
+        await clearBox(doc, loc, controlsId);
+        const names = watched.map((h) => h.name).filter(Boolean).slice(0, 3).map((n) => `"${n}"`).join(", ");
+        return { outcome: "not_held", why: `picked "${choice.text}" and the box shows it, but the widget's selected value (its hidden input${names ? ` ${names}` : ""}, which the widget emptied when the search was typed) was not written again — the portal did not take the pick; cleared`, picked: choice.text };
+      }
+    }
     return { outcome: "picked", picked: choice.text, held, typed: usedQuery, why: choice.why, via: "list" };
   } finally {
     await clearPopupMarks(doc);
@@ -654,6 +726,16 @@ export class TypeaheadStop extends Error {
     super(message);
     this.name = "TypeaheadStop";
   }
+}
+
+/** THE PORTAL ITSELF ANSWERED THIS VALUE WITH NOTHING (#244 fix round): it printed its own no-match
+ *  words, or it listed rows and none is the job's. A search that only ran out of time, a list that
+ *  re-rendered under the read, or a pick the box did not keep is not an answer — it may differ on
+ *  the next try, so a caller that remembers "already searched" (the replay) must not remember it. */
+export function typeaheadPortalAnswered(o: TypeaheadOutcome): boolean {
+  if (o.outcome === "no_suggestions") return !!o.portalSaid;
+  if (o.outcome === "no_match") return !o.listChanged;
+  return false;
 }
 
 /** One operator-readable line for an outcome that picked nothing ("" for "picked"). */
