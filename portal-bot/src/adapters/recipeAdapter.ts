@@ -380,7 +380,7 @@ export const PAY_FEE_REPLAY_GATE = /\b(pay\s*(and|&)\s*submit|pay fees?|pay now|
 // Submit-ish keywords. A step matching these is HARD-BLOCKED in autoSubmit UNLESS it
 // also carries the explicit isFinalSubmit flag — we never decide "this is the submit
 // button" purely from a regex over recorded names.
-const SUBMIT_KEYWORDS = /\b(submit|file application|finalize|finish|complete application|send application|confirm submission)\b/i;
+export const SUBMIT_KEYWORDS = /\b(submit|file application|finalize|finish|complete application|send application|confirm submission)\b/i;
 
 // A recorded step may carry an operator/recorder-set `isFinalSubmit` flag. This field
 // is not (yet) in the shared RecipeStep type, so read it structurally + type-safely.
@@ -3804,7 +3804,13 @@ export class RecipeAdapter extends BasePortalAdapter {
       // sat over the Terms and Conditions checkbox, and a `check` step never reached the
       // clearing pass. It is a FIRST-RUN artifact, and per-portal browser profiles mean
       // every portal now gets a first run.
-      if (step.action === "click" || step.action === "goto" || step.action === "check" || step.action === "uncheck") {
+      // NOT BEFORE A STEP THAT LIVES INSIDE A DIALOG FRAME (#178): the frame IS the open dialog
+      // the step needs — Accela's "Address Search Result List" (radio rows + Select in
+      // ACADialogFrame) carries a "Close" the dismissor reads as a dismissal, and it closed the
+      // list between the row's tick and the Select (live-shaped smoke: Select then waited on a
+      // frame that was gone). A step the learner recorded in a frame opened that frame on purpose.
+      const inDialogFrame = !!step.selector?.frame || (step.selector?.fallbacks ?? []).some((f) => !!f.frame);
+      if (!inDialogFrame && (step.action === "click" || step.action === "goto" || step.action === "check" || step.action === "uncheck")) {
         await this.dismissModalsGuarded();
         await clearPageOverlays(this.page).catch(() => null);
       }
@@ -6636,10 +6642,20 @@ export class RecipeAdapter extends BasePortalAdapter {
     // the MAIN document and found no rows at all. It then returned false in silence, so the
     // step landed in `skipped` with no reason and the next step, waiting for a Continue
     // button that only appears once a row is chosen, took the blame for it.
+    // A LIST IN A POPUP WINDOW (#178): the learner records the pick with the reserved frame key
+    // "popup" — the search opened a new page of the context (Accela asks to allow pop-ups). The
+    // newest other open page is that window; waited for briefly, since it opens on the click before.
+    const popupScope = step.selector?.frame === "popup" ? await this.newestOtherPage() : null;
+    if (step.selector?.frame === "popup" && !popupScope) {
+      this.driftWarnings.push("address grid: the recorded pick was made in a popup window, and no popup opened this time — the address step was skipped");
+      return false;
+    }
     const evalScope: { evaluate: (fn: unknown) => Promise<Array<{ key: string; text: string }>> } =
-      step.selector?.frame
-        ? (this.page.frameLocator(frameSelectorFor(step.selector.frame)).locator("body") as never)
-        : (this.page as never);
+      popupScope
+        ? (popupScope as never)
+        : step.selector?.frame
+          ? (this.page.frameLocator(frameSelectorFor(step.selector.frame)).locator("body") as never)
+          : (this.page as never);
     // AN UNPAINTED GRID IS NOT AN EMPTY GRID — the same rule this file already applies to
     // form fields ("a portal that renders asynchronously looked identical to being on the
     // wrong page"). Accela draws the address results on a postback, and this scan got one
@@ -6651,16 +6667,16 @@ export class RecipeAdapter extends BasePortalAdapter {
       let n = 0;
       for (const tr of Array.from(document.querySelectorAll("tr"))) {
         if (!vis(tr)) continue;
-        // A ROW'S OWN RADIO OR CHECKBOX IS ITS SELECTOR TOO (live City of Boise, Accela ACA,
-        // 2026-11-15, #235): the Address Search Result List puts a radio in each row and ONE
-        // "Select" button under the grid, so a grid with two rows read as "no selectable rows"
-        // and the address step was skipped. A per-row "Select" link (Oregon ePermitting) still
-        // comes first; a header row carries neither.
-        const action = Array.from(tr.querySelectorAll("a, button, [role='button']"))
-          .find((a) => /^\s*select\s*$/i.test((a as HTMLElement).innerText || ""))
-          ?? Array.from(tr.querySelectorAll("input[type='radio'], input[type='checkbox']")).find((i) => vis(i) && !(i as HTMLInputElement).disabled);
-        if (!action) continue;
+        // A row's action: its own "Select" link — or (#178 / #235, Accela's Address Search Result List,
+        // live City of Boise 2026-11-15) the RADIO / checkbox that marks it, the dialog's one Select
+        // button being the next recorded step. A radio row must read like an address (a digit in it);
+        // the form's own Yes / No rows do not. Only a shown, enabled tick counts; a header row has none.
+        const link = Array.from(tr.querySelectorAll("a, button, [role='button']"))
+          .find((a) => /^\s*select\s*$/i.test((a as HTMLElement).innerText || ""));
+        const ticks = Array.from(tr.querySelectorAll("input[type='radio'], input[type='checkbox']")).filter((i) => vis(i) && !(i as HTMLInputElement).disabled);
         const text = ((tr as HTMLElement).innerText || "").replace(/\s+/g, " ").trim();
+        const action = link ?? (ticks.length === 1 && /\d/.test(text) ? ticks[0] : null);
+        if (!action) continue;
         if (!text || text.length > 400) continue;
         const key = `rr${n++}`;
         (action as HTMLElement).setAttribute("data-al-row", key);
@@ -6707,6 +6723,9 @@ export class RecipeAdapter extends BasePortalAdapter {
       homeownerName: this.fieldValues.homeownerName,
       isElectrical: wantsElectrical,
       issuingAgency: issuingAgency || undefined,
+      // #178: this project's street number, so a list that mixes in a neighbour, or the same address
+      // with and without a unit qualifier, resolves to the job's own row.
+      street: String(this.fieldValues.streetNumber ?? this.fieldValues.street ?? "").trim() || undefined,
     });
     // How many the grid offered, always — "which row did it pick" is unanswerable otherwise.
     this.agingNotes.push(`address grid: ${rows.length} result(s) offered for ${String(this.fieldValues.city ?? "(no city)")} ${String(this.fieldValues.zip ?? "")}`.slice(0, 140));
@@ -6727,10 +6746,11 @@ export class RecipeAdapter extends BasePortalAdapter {
       throw new Error(why);
     }
     const best = rows[ranked[0].index];
-    // THE ROW IS CLICKED IN THE FRAME IT WAS FOUND IN (#235). The scan stamps the row inside the
-    // step's frame (Boise's results dialog is an iframe), and a page-level locator never sees into
-    // an iframe: live 2026-11-15 the ranked row was found and "could not click it" (12 s timeout).
-    const rowScope = step.selector?.frame ? this.page.frameLocator(frameSelectorFor(step.selector.frame)) : this.page;
+    // CLICK IN THE FRAME THE ROWS WERE READ IN (#178, #235). The scan above was made frame-aware for
+    // Accela's work-location panel, but the click still looked for the stamped row in the MAIN
+    // document — so a candidate list inside a dialog frame (Accela's "Address Search Result List"
+    // after Find Address) was ranked, then "could not click it", and the step was skipped.
+    const rowScope = popupScope ? popupScope : step.selector?.frame ? this.page.frameLocator(frameSelectorFor(step.selector.frame)) : this.page;
     const okClick = await this.guardedClick(rowScope.locator(`[data-al-row="${best.key}"]`).first(), "select the ranked address version", { timeout: 12000 })
       .then(() => true).catch((err: unknown) => {
         // SAY WHY. This returned false in silence, so the step landed in `skipped` with no
@@ -6746,6 +6766,26 @@ export class RecipeAdapter extends BasePortalAdapter {
     await smartWait(this.page, 2500);
     this.agingNotes.push(`address version re-ranked live: ${(ranked[0].text.match(/(CITY|COUNTY|DEQ)\s+APPLICATIONS/i) || ["this property"])[0]}${preference.basis === "agency" ? ` (issuing agency ${issuingAgency})` : ""}${rejected.length ? `, ${rejected.length} other propert${rejected.length === 1 ? "y" : "ies"} rejected` : ""}`);
     return true;
+  }
+
+  /** The newest OTHER open page of this page's browser context (a popup a click opened), waited for
+   *  up to ~8 s, loaded; null when none. Read-only on the context: the walk's own page never moves. */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  private async newestOtherPage(): Promise<any | null> {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const ctx: any = (() => { try { return typeof this.page?.context === "function" ? this.page.context() : null; } catch { return null; } })();
+    if (!ctx || typeof ctx.pages !== "function") return null;
+    for (let waited = 0; waited <= 8000; waited += 500) {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const others = (ctx.pages() as any[]).filter((p) => p !== this.page && !(typeof p.isClosed === "function" && p.isClosed()));
+      if (others.length) {
+        const p = others[others.length - 1];
+        await p.waitForLoadState?.("domcontentloaded", { timeout: 5000 }).catch(() => null);
+        return p;
+      }
+      await sleep(500);
+    }
+    return null;
   }
 
   // WHICH PERMIT WE ARE APPLYING FOR IS NEVER CHOSEN BY ARRAY INDEX.
@@ -6874,7 +6914,14 @@ export class RecipeAdapter extends BasePortalAdapter {
         this.recordedStepView.set(idx, { doc: await this.docToken(), view, path: this.lastView?.path ?? "", ctl: recordedControlCss(step) });
       }
     }
-    if (!RecipeAdapter.WRITE_ACTIONS.has(step.action)) return this.executeStepInner(step, pastReview);
+    if (!RecipeAdapter.WRITE_ACTIONS.has(step.action)) {
+      const ok = await this.executeStepInner(step, pastReview);
+      // #178: a recorded lookup click (Find Address, Autofill) names the fields it populated; after the
+      // press they must hold a value — the parcel is never typed from a recipe, so a lookup that found
+      // nothing for THIS project is said here, by field, not discovered at the portal's bounce.
+      if (ok && step.action === "click" && step.populates?.length) await this.verifyLookupPopulated(step);
+      return ok;
+    }
     this.writtenTarget = null;
     const done = !this.backstop ? await this.executeStepInner(step, pastReview)
       : await withOwnWriteWindow(this.page, `recorded ${step.action}${step.note ? ` (${String(step.note).slice(0, 50)})` : ""}`, () => this.executeStepInner(step, pastReview));
@@ -6882,6 +6929,32 @@ export class RecipeAdapter extends BasePortalAdapter {
     this.writtenTarget = null;
     if (done && !this.inPolicyRetry) await this.recordingOverwrotePick(written);
     return done;
+  }
+
+  /** #178 — THE FIELDS A LOOKUP CLICK POPULATED AT LEARN TIME MUST HOLD A VALUE AT REPLAY. Each label
+   *  in step.populates that names a control on the page (getByLabel) is read back, with a bounded
+   *  wait for the portal's postback; a label that names no control (a section heading — "Applicant",
+   *  whose Autofill added a RECORD, not a value) is left to the click's own effect check
+   *  (assertAdvanced's pageEffect diff). A blank is a named failure, never a quiet advance. */
+  private async verifyLookupPopulated(step: RecipeStep): Promise<void> {
+    if (!this.page || typeof this.page.getByLabel !== "function") return;
+    const what = String(step.note ?? step.selector?.name ?? "lookup").slice(0, 60);
+    for (const raw of step.populates ?? []) {
+      const label = String(raw ?? "").replace(/[*:]\s*$/, "").trim();
+      if (!label) continue;
+      const loc = this.page.getByLabel(label, { exact: false }).first();
+      if (!(await loc.count().catch(() => 0))) continue; // a heading, not a control
+      let value = "";
+      for (let i = 0; i < 16; i++) {
+        value = String((await loc.inputValue({ timeout: 1500 }).catch(() => "")) ?? "").trim();
+        if (value) break;
+        await sleep(500);
+      }
+      if (!value) {
+        throw new Error(`The lookup "${what}" did not populate "${label}" — the portal's own lookup found nothing for this project's address (or its result did not land). A person must fill or verify "${label}" before the application goes on; it is never typed from a recipe.`);
+      }
+      this.agingNotes.push(`lookup "${what}" populated "${label}"`);
+    }
   }
 
   /** A PICK THE RECORDING THEN ANSWERS IS NO LONGER A PICK (#362). The mid-page gap-fill can answer

@@ -5086,6 +5086,13 @@ export interface RecipeStep {
    *  unit and city/ZIP — portal-bot typeaheadMatch), read it back. A near miss or several equal
    *  suggestions pick nothing and stop for a person. Absent = an ordinary fill. */
   fillStrategy?: "typeahead";
+  /** A LOOKUP / POPULATE BUTTON's click (#178 — Accela Step 1's "Find Address", "Autofill", "Look Up";
+   *  portalSafety isLookupButtonLabel): the labels of the fields the press populated at learn time
+   *  ("Parcel Number:"), or the section heading when the press added a RECORD rather than values
+   *  ("Applicant"). Replay presses the button by its label and verifies each named field holds a
+   *  value after the press — the parcel is never typed from a recipe. Metadata only: never part of
+   *  the step's label or matching. */
+  populates?: string[];
   /** Set when this step's recorded answer was withheld from the shared recipe and the step replays
    *  BLANK for a person to answer — why, in words (e.g. a company-identity literal the save guard
    *  refused to persist). Metadata only: never part of the step's label or matching. */

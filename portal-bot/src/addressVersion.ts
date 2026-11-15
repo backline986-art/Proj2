@@ -141,11 +141,20 @@ export function preferredRowLabel(opts: { issuingAgency?: string | null; city?: 
 
 export function rankAddressVersions(
   rowTexts: string[],
-  opts: { city?: string; zip?: string; homeownerName?: string; isElectrical: boolean; issuingAgency?: string | null },
+  opts: {
+    city?: string; zip?: string; homeownerName?: string; isElectrical: boolean; issuingAgency?: string | null;
+    /** #178: the job's street line ("33 N Broadway Ave") or just its number. When given, a row that
+     *  does not carry the street NUMBER is rejected (an address list after a search can mix in a
+     *  neighbour), and among equally scored rows the PLAIN address wins over one with a unit / suite /
+     *  tenant qualifier (Boise's list: "150 N CAPITOL BLVD, B C O T, Boise City Hall, Boise ID 83702"
+     *  and "150 N CAPITOL BLVD, Boise ID 83702" — the job has no unit, so the second is its row). */
+    street?: string;
+  },
 ): { ranked: AddressVersion[]; rejected: string[]; preference: AddressRowPreference } {
   const cityUpper = (opts.city || "").toUpperCase();
   const zip = (opts.zip || "").trim();
   const surname = (opts.homeownerName || "").trim().split(/\s+/).pop() || "";
+  const streetNo = ((opts.street || "").trim().match(/^\d+[A-Za-z]?/) || [""])[0];
   const convention = opts.isElectrical ? COUNTY_ROW : CITY_ROW;
   const agencyName = String(opts.issuingAgency ?? "").replace(/\s+/g, " ").trim();
   const agency = issuingAgencyRow(agencyName, { city: opts.city });
@@ -156,6 +165,7 @@ export function rankAddressVersions(
     if (!text) continue;
     const upper = text.toUpperCase();
     if (!((cityUpper && upper.includes(cityUpper)) || (zip && text.includes(zip)))) { rejected.push(text.slice(0, 60)); continue; }
+    if (streetNo && !new RegExp(`(^|[^0-9A-Za-z])${streetNo}(?![0-9])`, "i").test(text)) { rejected.push(text.slice(0, 60)); continue; }
     candidates.push({ index, text, upper });
   }
   // The agency decides only when a row of this property NAMES it; otherwise no row is invented.
@@ -170,7 +180,12 @@ export function rankAddressVersions(
     const score = (ownerHit ? 4 : 0) + (preferred ? 2 : 0) + (/DEQ/i.test(c.text) ? -3 : 0);
     return { index: c.index, text: c.text, score, ownerHit, kind: rowKind(c.upper), agencyHit: agencyHits[i] };
   });
-  ranked.sort((a, b) => b.score - a.score);
+  // Equal scores: the plain address before one carrying a unit / suite / tenant qualifier (a unit
+  // word, or more comma-separated parts), then the shorter text. Only with a street given (#178):
+  // without one the order stays the grid's, as every existing caller expects.
+  const UNIT = /\b(unit|suite|ste|apt|apartment|bldg|building|floor|fl|room|rm|tenant|space|lot)\b|#\s*\w/i;
+  const plainness = (t: string): number => (UNIT.test(t) ? 1000 : 0) + t.split(",").length * 10 + Math.min(t.length, 400) / 400;
+  ranked.sort((a, b) => (b.score - a.score) || (streetNo ? plainness(a.text) - plainness(b.text) : 0));
 
   const conv = `${conventionLabel(opts.isElectrical)} for ${opts.isElectrical ? "electrical" : "structural"}`;
   let note = "";
