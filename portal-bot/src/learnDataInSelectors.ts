@@ -138,11 +138,17 @@ function carriesValue(text: string, v: { kind: string; value: string }): boolean
     const d = digitsOf(v.value);
     return d.length >= 7 && digitsOf(t).includes(d);
   }
-  const want = tokensOf(v.value).filter((w) => w.length >= 2);
+  // A ONE-WORD NAME IS ONLY A NAME WHEN IT IS THE WHOLE TEXT: a company that trades as one word that
+  // is also a maker's ("Tesla") must not turn the "Tesla Powerwall" option into the company's row.
+  const want = tokensOf(v.value).filter((w) => w.length >= 2 && !NOT_A_NAME_WORD.test(w));
   if (!want.length) return false;
-  const have = new Set(tokensOf(t));
+  const haveList = tokensOf(t).filter((w) => !NOT_A_NAME_WORD.test(w));
+  if (want.length === 1) return haveList.length === 1 && haveList[0] === want[0];
+  const have = new Set(haveList);
   return want.every((w) => have.has(w));
 }
+/** Words a company or person name carries that name nobody (a corporate form, a joining word). */
+const NOT_A_NAME_WORD = /^(?:llc|inc|co|corp|corporation|company|ltd|the|of|and|dba)$/;
 
 /** The role of the first identity value `text` carries, or null. */
 export function identityRoleIn(text: string, identity: LearnIdentity | undefined): ResultRowRole | null {

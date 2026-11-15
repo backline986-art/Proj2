@@ -141,6 +141,11 @@ check("with the learn identity, a row carrying the learn company's name or stree
   assert.equal(resultRowRoleOf({ action: "click", selector: { role: "link", name: "Brightfold Energy LLC" }, note: "pick" }, LEARN), "contact");
   assert.equal(resultRowRoleOf({ action: "check", selector: { label: "929 HARROWGATE RD" } }, LEARN), "contact");
 });
+check("a one-word company name is the company only when it is the whole text (a maker's product is not)", () => {
+  const oneWord: LearnIdentity = { companyNames: ["Voltaro"] };
+  assert.equal(resultRowRoleOf({ action: "check", selector: { label: "Voltaro Powerbank 3" } }, oneWord), null);
+  assert.equal(resultRowRoleOf({ action: "check", selector: { label: "VOLTARO" } }, oneWord), "contact");
+});
 check("...and an attestation that only mentions the owner is not a row", () => {
   assert.equal(resultRowRoleOf({ action: "check", selector: { label: "Is Orrin Tavelwick the owner of record?" } }, LEARN), null);
 });
