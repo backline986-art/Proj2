@@ -1434,23 +1434,28 @@ async function testGotoLeavingThePortalStopsTheRun() {
   }
 }
 
-// #231 — THE SITE THE RECIPE'S OWN PORTAL URL LANDED ON IS ITS PORTAL TOO, AND NOTHING ELSE IS.
+// #231 — THE HOST THE RECIPE'S OWN PORTAL URL LANDED ON IS ITS PORTAL TOO, AND NOTHING ELSE IS.
 // City of Meridian, 2026-11-14: portalUrl citizenportal.meridiancity.org/CitizenAccess/ redirects to
 // aca-prod.accela.com/meridian/Default.aspx, and the recipe's own step 0 (goto aca-prod.accela.com/
-// MERIDIAN/Dashboard.aspx) was refused as leaving the portal. adoptLandedPortalSite is what login()
-// calls once the portal goto settles; the fake page's url() stands for where that goto landed.
-async function testLandedPortalSiteIsTheRecipesPortal() {
-  type Probe = { adoptLandedPortalSite?: (why: string) => string; landedPortalSite?: string };
-  const run = async (c: { scope: "ahj" | "utility"; portalUrl: string; landed: string; to: string[] }) => {
+// MERIDIAN/Dashboard.aspx) was refused as leaving the portal. adoptLandedPortalHost is what login()
+// calls once the portal goto settles; the fake page's url() stands for where that goto landed. Each
+// case asserts what the run DID (gotos, ok) before the adapter's private state.
+async function testLandedPortalHostIsTheRecipesPortal() {
+  type Probe = { adoptLandedPortalHost?: (why: string) => string; landedPortalHost?: string };
+  const run = async (c: { scope: "ahj" | "utility"; portalUrl: string; landed: string; to?: string[]; steps?: RecipeStep[]; missing?: RegExp }) => {
     const log: ActionLog = { clicks: [], fills: [], gotos: [], checks: 0 };
-    const steps = [...c.to.map((u) => ({ action: "goto", value: u, note: "entry url" }) as RecipeStep), { action: "stopForReview" } as RecipeStep];
+    const steps = c.steps ?? [...(c.to ?? []).map((u) => ({ action: "goto", value: u, note: "entry url" }) as RecipeStep), { action: "stopForReview" } as RecipeStep];
     const adapter = new RecipeAdapter({ ...baseRecipe(steps), scopeType: c.scope, portalUrl: c.portalUrl }, {}, {});
-    const page = makeFakePage({ log });
+    // `missing`: every locator key it matches is absent (role, text, label and CSS fallbacks alike).
+    const present = c.missing
+      ? new Proxy({} as Record<string, boolean>, { get: (_t, k) => (typeof k === "string" && c.missing!.test(k) ? false : undefined) })
+      : undefined;
+    const page = makeFakePage({ log, present });
     page.url = () => c.landed;
     withFakePage(adapter, page);
     const probe = adapter as unknown as Probe;
-    const refusal = typeof probe.adoptLandedPortalSite === "function" ? probe.adoptLandedPortalSite("open the recipe's portal") : "";
-    const adopted = probe.landedPortalSite ?? "";
+    const refusal = typeof probe.adoptLandedPortalHost === "function" ? probe.adoptLandedPortalHost("open the recipe's portal") : "";
+    const adopted = probe.landedPortalHost ?? "";
     const result = await adapter.fillApplication(fakeProject);
     const data = (result.data ?? {}) as { agingNotes?: string[]; guardRefusals?: string[] };
     return { refusal, adopted, result, gotos: log.gotos, notes: data.agingNotes ?? [], refusals: adapter.guardRefusals };
@@ -1461,55 +1466,100 @@ async function testLandedPortalSiteIsTheRecipesPortal() {
   const third = "https://www.example-other.org/apply";
 
   const a = await run({ scope: "ahj", portalUrl: meridian, landed, to: [dashboard] });
-  assert.equal(a.refusal, "", `MUST-PASS (Meridian): no refusal on landing (${a.refusal})`);
-  assert.equal(a.adopted, "accela.com", "MUST-PASS (Meridian): the landed site is the recipe's portal for this run");
-  assert.deepEqual(a.gotos, [dashboard], `MUST-PASS (Meridian): step 0's goto to the landed site ran (${a.result.message})`);
+  assert.deepEqual(a.gotos, [dashboard], `MUST-PASS (Meridian): step 0's goto to the landed host ran (${a.result.message})`);
   assert.equal(a.result.ok, true, `MUST-PASS (Meridian): ${a.result.message}`);
-  assert.ok(a.notes.some((n) => /landed on accela\.com/.test(n)), `MUST-PASS (Meridian): the landing is named in the run's notes (${JSON.stringify(a.notes)})`);
+  assert.equal(a.refusal, "", `MUST-PASS (Meridian): no refusal on landing (${a.refusal})`);
+  assert.equal(a.adopted, "aca-prod.accela.com", "MUST-PASS (Meridian): the landed HOST (not accela.com) is the recipe's portal for this run");
+  // Not a re-record signal: re-recording cannot change where portalUrl redirects (login() names the
+  // landing on its "portal goto" phase instead).
+  assert.ok(!a.notes.some((n) => /landed on/.test(n)), `MUST-PASS (Meridian): the landing is not an aging note (${JSON.stringify(a.notes)})`);
 
   const b = await run({ scope: "ahj", portalUrl: meridian, landed, to: [dashboard, third] });
-  assert.deepEqual(b.gotos, [dashboard], "MUST-EXCLUDE (third site): never navigated past the landed site");
+  assert.deepEqual(b.gotos, [dashboard], "MUST-EXCLUDE (third site): never navigated past the landed host");
   assert.equal(b.result.ok, false, "MUST-EXCLUDE (third site): the run stops");
-  assert.match(String(b.result.message), /replay safety gate refused: goto leaves the recipe's portal \(meridiancity\.org, landed on accela\.com\) for example-other\.org/, `MUST-EXCLUDE (third site): named (${b.result.message})`);
+  assert.match(String(b.result.message), /replay safety gate refused: goto leaves the recipe's portal \(meridiancity\.org, landed on aca-prod\.accela\.com\) for example-other\.org/, `MUST-EXCLUDE (third site): named (${b.result.message})`);
+
+  // ONE HOST, never its registrable domain: another tenant host on accela.com stays refused.
+  const oregon = "https://aca-oregon.accela.com/OREGON/Cap/CapHome.aspx";
+  const b2 = await run({ scope: "ahj", portalUrl: meridian, landed, to: [dashboard, oregon] });
+  assert.deepEqual(b2.gotos, [dashboard], "MUST-EXCLUDE (another host on the landed domain): never navigated there");
+  assert.match(String(b2.result.message), /goto leaves the recipe's portal \(meridiancity\.org, landed on aca-prod\.accela\.com\) for aca-oregon\.accela\.com/, `MUST-EXCLUDE (another host on the landed domain): named by host (${b2.result.message})`);
+  // …and the port is part of the host: a landing on localhost:3000 never vouches for localhost:8787.
+  const b3 = await run({ scope: "ahj", portalUrl: "https://portal.cityexample.gov/", landed: "http://localhost:3000/login", to: ["http://localhost:3000/dashboard", "http://localhost:8787/api/projects"] });
+  assert.deepEqual(b3.gotos, ["http://localhost:3000/dashboard"], `MUST-EXCLUDE (another port): never navigated there (${b3.result.message})`);
+  assert.match(String(b3.result.message), /landed on localhost:3000\) for localhost:8787/, `MUST-EXCLUDE (another port): named (${b3.result.message})`);
 
   const c = await run({ scope: "ahj", portalUrl: "https://permits.cityofexample.gov/apply", landed: "https://pgenm.powerclerk.com/MvcAccount/Login", to: ["https://pgenm.powerclerk.com/MvcProjects/Home"] });
-  assert.match(c.refusal, /landed on powerclerk\.com — a permit recipe may not open a utility \(PowerClerk\) portal/, `MUST-EXCLUDE (permit → PowerClerk): the landing itself is refused (${c.refusal})`);
-  assert.equal(c.adopted, "", "MUST-EXCLUDE (permit → PowerClerk): the utility portal is never adopted");
-  assert.ok(c.refusals.some((r) => /^REFUSED goto \(open the recipe's portal\): .*powerclerk/.test(r)), `MUST-EXCLUDE (permit → PowerClerk): recorded as a refusal (${JSON.stringify(c.refusals)})`);
   assert.deepEqual(c.gotos, [], "MUST-EXCLUDE (permit → PowerClerk): the recipe's goto there is still refused");
   assert.match(String(c.result.message), /replay safety gate refused: a permit recipe may not open a utility \(PowerClerk\) portal/, `MUST-EXCLUDE (permit → PowerClerk): by the track rule (${c.result.message})`);
+  assert.match(c.refusal, /landed on pgenm\.powerclerk\.com — a permit recipe may not open a utility \(PowerClerk\) portal/, `MUST-EXCLUDE (permit → PowerClerk): the landing itself is refused (${c.refusal})`);
+  assert.equal(c.adopted, "", "MUST-EXCLUDE (permit → PowerClerk): the utility portal is never adopted");
+  assert.ok(c.refusals.some((r) => /^REFUSED goto \(open the recipe's portal\): .*powerclerk/.test(r)), `MUST-EXCLUDE (permit → PowerClerk): recorded as a refusal (${JSON.stringify(c.refusals)})`);
+
+  // Rule 5's OWN track predicate (portalChannel.trackSafeUrl), not only the gate's regex: a utility
+  // platform the regex does not name (ComEd's interconnect.comed.com) is refused on the permit track.
+  const c2 = await run({ scope: "ahj", portalUrl: "https://permits.cityofexample.gov/apply", landed: "https://interconnect.comed.com/Home", to: ["https://interconnect.comed.com/Apply"] });
+  assert.deepEqual(c2.gotos, [], `MUST-EXCLUDE (permit → a utility platform): never navigated there (${c2.result.message})`);
+  assert.match(c2.refusal, /landed on interconnect\.comed\.com — a permit recipe may not open a utility portal: interconnect\.comed\.com/, `MUST-EXCLUDE (permit → a utility platform): the landing is refused (${c2.refusal})`);
+  assert.equal(c2.adopted, "", "MUST-EXCLUDE (permit → a utility platform): never adopted");
 
   const d = await run({ scope: "utility", portalUrl: "https://interconnect.utilityexample.com/", landed: "https://aca-prod.accela.com/CITY/Default.aspx", to: ["https://aca-prod.accela.com/CITY/Cap/CapHome.aspx"] });
+  assert.deepEqual(d.gotos, [], "MUST-EXCLUDE (utility → Accela): the recipe's goto there is still refused");
   assert.match(d.refusal, /a utility recipe may not open a permit portal: accela\.com/, `MUST-EXCLUDE (utility → Accela): the landing is refused (${d.refusal})`);
   assert.equal(d.adopted, "", "MUST-EXCLUDE (utility → Accela): never adopted");
-  assert.deepEqual(d.gotos, [], "MUST-EXCLUDE (utility → Accela): the recipe's goto there is still refused");
+
+  // Review of #231: a utility vanity URL that lands on a city's SELF-HOSTED Accela (/CitizenAccess,
+  // on no vendor domain — the regex misses it, trackSafeUrl does not). Its "navigate to application"
+  // click is missing, so replay re-enters the Apply flow by a URL built from page.url(), which no
+  // stored step carries; adopted, that drove a NEM replay into the permit portal's Apply flow.
+  const d3 = await run({
+    scope: "utility", portalUrl: "https://www.cityelectric.example/", landed: "https://permits.cityx.gov/CitizenAccess/Default.aspx", missing: /Apply/,
+    steps: [{ action: "click", selector: { role: "link", name: "Apply" }, note: "navigate to application: Apply" } as RecipeStep, { action: "stopForReview" } as RecipeStep],
+  });
+  assert.ok(!d3.gotos.some((u) => /CapApplyDisclaimer/i.test(u)), `MUST-EXCLUDE (utility → a self-hosted permit portal): the Apply re-entry never navigates (${JSON.stringify(d3.gotos)})`);
+  assert.equal(d3.result.ok, false, `MUST-EXCLUDE (utility → a self-hosted permit portal): the run stops (${d3.result.message})`);
+  assert.match(d3.refusal, /landed on permits\.cityx\.gov — a utility recipe may not open a permit portal: permits\.cityx\.gov/, `MUST-EXCLUDE (utility → a self-hosted permit portal): the landing is refused (${d3.refusal})`);
+  assert.equal(d3.adopted, "", "MUST-EXCLUDE (utility → a self-hosted permit portal): never adopted");
 
   // Rule 5's carve-out (a utility filing inside a verified city permit portal) covers THAT portal: a
   // redirect from it to another permit-platform site is refused, not adopted.
   const d2 = await run({ scope: "utility", portalUrl: "https://aca-prod.accela.com/SLC/Default.aspx", landed: "https://slc-ut.tylerhost.net/prod/selfservice", to: ["https://slc-ut.tylerhost.net/prod/selfservice#/apply"] });
-  assert.match(d2.refusal, /landed on tylerhost\.net — a utility recipe may not open a permit portal/, `MUST-EXCLUDE (carve-out → another permit site): refused (${d2.refusal})`);
-  assert.equal(d2.adopted, "", "MUST-EXCLUDE (carve-out → another permit site): never adopted");
   assert.deepEqual(d2.gotos, [], "MUST-EXCLUDE (carve-out → another permit site): the goto there stays refused");
+  assert.match(d2.refusal, /landed on slc-ut\.tylerhost\.net — a utility recipe may not open a permit portal/, `MUST-EXCLUDE (carve-out → another permit site): refused (${d2.refusal})`);
+  assert.equal(d2.adopted, "", "MUST-EXCLUDE (carve-out → another permit site): never adopted");
+  // MUST-KEEP: …and the carve-out portal ITSELF, landed on its own site (no redirect, or a redirect
+  // within portalUrl's site), is never asked the track question — no stop, the run goes on as before.
+  const k1 = await run({ scope: "utility", portalUrl: "https://aca-prod.accela.com/SLC/Default.aspx", landed: "https://aca-prod.accela.com/SLC/Default.aspx", to: ["https://aca-prod.accela.com/SLC/Cap/CapHome.aspx"] });
+  assert.deepEqual(k1.gotos, ["https://aca-prod.accela.com/SLC/Cap/CapHome.aspx"], `MUST-KEEP (carve-out portal, no redirect): runs (${k1.result.message})`);
+  assert.equal(k1.result.ok, true, `MUST-KEEP (carve-out portal, no redirect): ${k1.result.message}`);
+  assert.equal(k1.refusal, "", "MUST-KEEP (carve-out portal, no redirect): no landing refusal");
+  const k2 = await run({ scope: "utility", portalUrl: "https://www.slc.gov/CitizenAccess/", landed: "https://permits.slc.gov/CitizenAccess/Default.aspx", to: ["https://permits.slc.gov/CitizenAccess/Cap/CapHome.aspx"] });
+  assert.deepEqual(k2.gotos, ["https://permits.slc.gov/CitizenAccess/Cap/CapHome.aspx"], `MUST-KEEP (carve-out portal, redirect within its site): runs (${k2.result.message})`);
+  assert.equal(k2.refusal, "", "MUST-KEEP (carve-out portal, redirect within its site): no landing refusal");
 
   const e = await run({ scope: "ahj", portalUrl: "https://portal.cityexample.gov/", landed: "https://login.microsoftonline.com/common/oauth2/authorize", to: ["https://portal.cityexample.gov/apply", third] });
-  assert.equal(e.refusal, "", "an SSO landing is not refused");
-  assert.equal(e.adopted, "", "MUST-EXCLUDE (SSO): an identity provider is never adopted as the portal");
   assert.deepEqual(e.gotos, ["https://portal.cityexample.gov/apply"], "MUST-EXCLUDE (SSO): a third site is still refused");
+  assert.equal(e.refusal, "", "an SSO landing is not refused");
+  assert.equal(e.adopted, "", "MUST-EXCLUDE (SSO): a host on the eight SSO_SITES (already allowed) is not adopted");
 
   const f = await run({ scope: "ahj", portalUrl: meridian, landed: "chrome-error://chromewebdata/", to: [dashboard] });
-  assert.equal(f.adopted, "", "MUST-EXCLUDE (error page): a page that is not http(s) is never adopted");
   assert.deepEqual(f.gotos, [], "MUST-EXCLUDE (error page): the goto off portalUrl's site stays refused");
+  assert.equal(f.adopted, "", "MUST-EXCLUDE (error page): a page that is not http(s) is never adopted");
 
   const g = await run({ scope: "ahj", portalUrl: "", landed, to: ["https://www.cityexample.gov/apply", third] });
-  assert.equal(g.adopted, "", "MUST-EXCLUDE (no portalUrl): nothing was loaded from a portalUrl, so nothing is adopted");
   assert.deepEqual(g.gotos, ["https://www.cityexample.gov/apply"], "MUST-EXCLUDE (no portalUrl): the first goto stays the anchor");
+  assert.equal(g.adopted, "", "MUST-EXCLUDE (no portalUrl): nothing was loaded from a portalUrl, so nothing is adopted");
 
   // MUST-KEEP: no redirect — the gate and its words are exactly main's.
   const h = await run({ scope: "ahj", portalUrl: landed, landed, to: [dashboard, third] });
-  assert.equal(h.adopted, "", "MUST-KEEP (no redirect): nothing adopted");
   assert.deepEqual(h.gotos, [dashboard], "MUST-KEEP (no redirect): the own-site goto runs, the third site does not");
   assert.ok(String(h.result.message).includes("goto leaves the recipe's portal (accela.com) for example-other.org — stopped rather than followed"), `MUST-KEEP (no redirect): main's words (${h.result.message})`);
+  assert.equal(h.adopted, "", "MUST-KEEP (no redirect): nothing adopted");
   assert.ok(!h.notes.some((n) => /landed on/.test(n)), "MUST-KEEP (no redirect): no landing note");
+  // …and with nothing adopted, a goto whose host cannot be read ("") never matches the empty landing.
+  const h2 = await run({ scope: "ahj", portalUrl: landed, landed, to: ["http://"] });
+  assert.deepEqual(h2.gotos, [], `MUST-KEEP (no redirect): a goto with no readable host stays refused (${h2.result.message})`);
+  assert.match(String(h2.result.message), /goto leaves the recipe's portal \(accela\.com\) for  — stopped rather than followed/, `MUST-KEEP (no redirect): main's words (${h2.result.message})`);
 }
 
 const tests: Array<[string, () => Promise<void>]> = [
@@ -1518,7 +1568,7 @@ const tests: Array<[string, () => Promise<void>]> = [
   ["R1: the overlay dismissor replay imports stays behind the chokepoint (static)", testImportedHelpersStayBehindTheChokepoint],
   ["DRIFT: a scan that died mid-navigation is rescanned, never read as 'no drift'", testDriftPrecheckRescansAfterANavigationError],
   ["R1: a goto that leaves the recipe's portal stops the run, named (rule 5)", testGotoLeavingThePortalStopsTheRun],
-  ["R1 #231: the site the recipe's own portal URL landed on is its portal too; a third site, the other track and an SSO host are not", testLandedPortalSiteIsTheRecipesPortal],
+  ["R1 #231: the host the recipe's own portal URL landed on is its portal too; another host or port, the other track (rule 5's own predicate) and an SSO host are not", testLandedPortalHostIsTheRecipesPortal],
   ["R2: each missing input of the final-submit gate keeps it unclicked", testFinalSubmitGateRefusesEachMissingInput],
   ["R2: a quiet page after the approved click is unknown, reported, never retried", testFinalSubmitQuietPageIsUnknownAndNotRetried],
   ["MF-C: runs started together with ONE approval file at most once (claim before any await)", testConcurrentSameApprovalFilesAtMostOnce],
