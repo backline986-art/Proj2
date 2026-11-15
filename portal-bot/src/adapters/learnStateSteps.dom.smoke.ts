@@ -111,7 +111,22 @@ const HIDDEN_TOGGLE = shell(`
   <button id="toggleHelp" class="btn invisible" type="button">Show Help</button>
   <label for="notes">Notes to the utility</label><input id="notes">`);
 
-const PAGES: Record<string, string> = { "/switch": SWITCH, "/hiddentoggle": HIDDEN_TOGGLE, "/review": REVIEW, "/summary": SUMMARY, "/answered": ANSWERED, "/nopopup": NO_POPUP, "/noreveal": NO_REVEAL, "/lateshow": LATE_SHOW };
+// H — PowerClerk's shape of D: EVERY input carries the platform's generic test hook
+// data-test-role="textbox-element", and the learner records that hook as a fallback on each data step
+// (PacifiCorp 32f3d2b2 111/112: label, then #...Input, then the bare hook). The battery inverter block
+// is display:none (H) or not rendered (H2) on a job whose answers did not reveal it; H3 shows it.
+const pcBlock = (style: string): string => style === "absent" ? "" : `<div id="battInv" style="${style}">
+    <label for="BI7MAKE0001Input">Battery Inverter Manufacturer</label><input id="BI7MAKE0001Input" data-test-role="textbox-element">
+    <label for="BI7MODL0002Input">Battery Inverter Model</label><input id="BI7MODL0002Input" data-test-role="textbox-element"></div>`;
+const PC_COND = (style: string): string => shell(`
+  <h2>Inverter Clone System</h2>
+  <label for="NB7BATT0003Input">Number of Batteries</label><input id="NB7BATT0003Input" data-test-role="textbox-element" value="1">
+  ${pcBlock(style)}
+  <label for="BD7DISC0004Input">Battery Disconnect Manufacturer</label><input id="BD7DISC0004Input" data-test-role="textbox-element" value="DisconnectCo">
+  <label for="IQ7QNTY0005Input">Inverter Quantity</label><input id="IQ7QNTY0005Input" data-test-role="textbox-element">`);
+
+const PAGES: Record<string, string> = { "/switch": SWITCH, "/hiddentoggle": HIDDEN_TOGGLE, "/review": REVIEW, "/summary": SUMMARY, "/answered": ANSWERED, "/nopopup": NO_POPUP, "/noreveal": NO_REVEAL, "/lateshow": LATE_SHOW,
+  "/pchidden": PC_COND("display:none"), "/pcabsent": PC_COND("absent"), "/pcshown": PC_COND("") };
 const server = http.createServer((req, res) => {
   const url = new URL(req.url || "/", "http://127.0.0.1");
   res.writeHead(200, { "content-type": "text/html" });
@@ -148,9 +163,14 @@ const run = async (browser: Browser, recipe: PortalRecipe, fieldValues: Record<s
 };
 const tail = (r: Run): string => `ok=${r.ok} ${Math.round(r.ms / 1000)}s msg=${r.message.slice(0, 160)} | skipped=${JSON.stringify(r.skipped).slice(0, 200)} | aging=${JSON.stringify(r.aging).slice(0, 400)} | drift=${JSON.stringify(r.drift).slice(0, 300)}`;
 
+// `npx tsx <this file> A,H` runs only those groups (all by default).
+const only = (process.argv[2] ?? "").split(",").map((s) => s.trim()).filter(Boolean);
+const want = (k: string): boolean => !only.length || only.includes(k);
+
 const browser = await chromium.launch();
 try {
   // ---- A: the PGE header pager on the review page ------------------------------------------------
+  if (want("A")) {
   const pager = (): RecipeStep => ({ action: "click", note: "human-patch: Next page", selector: { css: "#HeaderNextBtn", fallbacks: [{ role: "button", name: "Next page" }] } } as RecipeStep);
   const a = await run(browser, recipeOf("learnstate-a", "/review", [
     pager(), pager(), pager(), pager(), pager(),
@@ -172,8 +192,10 @@ try {
   check("A2 MUST-PASS in the recipe's review tail (no write before the stop) the hidden pager clicks are skipped and the stop is reached",
     a2.ok && a2.aging.filter((n) => /Next page/.test(n) && /#237/.test(n)).length === 5, tail(a2));
   check("A2 MUST-PASS ...without a click timeout", a2.ms < 30_000, `${a2.ms} ms`);
+  }
 
   // ---- B: selects the portal already answered and disabled --------------------------------------
+  if (want("B")) {
   const b = await run(browser, recipeOf("learnstate-b", "/answered", [
     { action: "select", note: "Jurisdiction", value: "City of Exampleton", selector: { css: "#juris", fallbacks: [{ label: "Jurisdiction" }] } } as RecipeStep,
     { action: "select", note: "Permit Type", value: "Commercial", selector: { css: "#ptype", fallbacks: [{ label: "Permit Type" }] } } as RecipeStep,
@@ -190,8 +212,10 @@ try {
   check("B MUST-PASS no 38 s select timeouts — the whole page in well under one select's old cost", b.ms < 20_000, `${b.ms} ms`);
   check("B2 MUST-EXCLUDE the ENABLED select is written as before", b.values.scope === "PV" && b.verified.includes("Scope of Work"), JSON.stringify(b.values));
   check("B ...and nothing typed into the portal's answers", b.values.juris === "TIG" && b.values.ptype === "R" && b.values.parcel === "R0001234", JSON.stringify(b.values));
+  }
 
   // ---- C: the learn's popup "OK", no popup at replay ---------------------------------------------
+  if (want("C")) {
   const c = await run(browser, recipeOf("learnstate-c", "/nopopup", [
     { action: "click", note: "human-patch: OK", selector: { role: "button", name: "OK" } } as RecipeStep,
     { action: "fill", note: "Description", field: "workDescription", selector: { css: "#desc", fallbacks: [{ label: "Description" }] } } as RecipeStep,
@@ -203,8 +227,10 @@ try {
   // live. Either way the page is left; the application's own URL must still be the one shown.
   check("C MUST-PASS ...and no navigation link is clicked in its place (still on the application)", new URL(c.url).pathname === "/nopopup", c.url);
   check("C MUST-PASS ...the run carries on: the next step fills and the review stop is reached", c.ok && c.values.desc === "Rooftop solar", tail(c));
+  }
 
   // ---- D: a control the learn saw only after a reveal --------------------------------------------
+  if (want("D")) {
   const d = await run(browser, recipeOf("learnstate-d", "/noreveal", [
     { action: "select", note: "Battery Inverter Manufacturer", value: "Example Power", conditional: true, selector: { css: "#battMake", fallbacks: [{ label: "Battery Inverter Manufacturer" }] } } as RecipeStep,
     { action: "fill", note: "Total System Export (kW)", field: "exportKw", selector: { css: "#kw", fallbacks: [{ label: "Total System Export (kW)" }] } } as RecipeStep,
@@ -214,8 +240,10 @@ try {
   check("D MUST-PASS the absent conditional control is skipped, named as not revealed on this job",
     d.aging.some((n) => /Battery Inverter Manufacturer/.test(n) && /reveal/i.test(n) && /#237/.test(n)), JSON.stringify(d.aging));
   check("D MUST-PASS ...the run carries on to the next fill and the review stop", d.ok && d.values.kw === "7.6", tail(d));
+  }
 
   // ---- E: hidden for a moment, then shown: clicked, never skipped --------------------------------
+  if (want("E")) {
   const e = await run(browser, recipeOf("learnstate-e", "/lateshow", [
     { action: "click", note: "human-patch: Show Details", selector: { css: "#showMore" } } as RecipeStep,
     { action: "fill", note: "Description of Work", field: "workDescription", selector: { css: "#c1", fallbacks: [{ label: "Description of Work" }] } } as RecipeStep,
@@ -223,16 +251,20 @@ try {
   ]), { workDescription: "Rooftop solar" });
   console.log(`   E ${tail(e)}`);
   check("E MUST-EXCLUDE a control that shows within the grace is CLICKED (the box it reveals is filled)", e.ok && e.values.c1 === "Rooftop solar" && !e.aging.some((n) => /#237/.test(n)), tail(e));
+  }
 
   // ---- F: a conditional styled switch whose real box is concealed inside a visible label ----------
+  if (want("F")) {
   const f = await run(browser, recipeOf("learnstate-f", "/switch", [
     { action: "check", note: "Remote monitoring", conditional: true, selector: { css: "#mon", fallbacks: [{ label: "Remote monitoring" }] } } as RecipeStep,
     { action: "stopForReview", note: "review" } as RecipeStep,
   ]));
   console.log(`   F ${tail(f)}`);
   check("F MUST-EXCLUDE a conditional switch whose widget is up is never skipped as 'not revealed'", !f.aging.some((n) => /#237/.test(n)) && !f.skipped.some((s) => /Remote monitoring/.test(s)), tail(f));
+  }
 
   // ---- G: a non-advancing click left on a hidden control, mid-flow (a write follows) --------------
+  if (want("G")) {
   const g = await run(browser, recipeOf("learnstate-g", "/hiddentoggle", [
     { action: "click", note: "human-patch: Show Help", selector: { css: "#toggleHelp", fallbacks: [{ role: "button", name: "Show Help" }] } } as RecipeStep,
     { action: "fill", note: "Notes to the utility", field: "workDescription", selector: { css: "#notes", fallbacks: [{ label: "Notes to the utility" }] } } as RecipeStep,
@@ -241,6 +273,34 @@ try {
   console.log(`   G ${tail(g)}`);
   check("G MUST-PASS a non-advancing click resolution leaves on a hidden control is skipped, named", g.aging.some((n) => /Show Help/.test(n) && /hidden/i.test(n) && /#237/.test(n)), JSON.stringify(g.aging));
   check("G MUST-PASS ...never clicked into a timeout: the next write lands and the stop is reached quickly", g.ok && g.values.notes === "Rooftop solar" && g.ms < 30_000, tail(g));
+  }
+
+  // ---- H: D on PowerClerk's shape — every input carries the generic test hook ---------------------
+  if (want("H")) {
+  const HOOK = { css: "[data-test-role=\"textbox-element\"]" };
+  const pcSteps = (): RecipeStep[] => [
+    { action: "fill", field: "batteryMake", note: "Battery Inverter Manufacturer", conditional: true, selector: { label: "Battery Inverter Manufacturer", fallbacks: [{ css: "#BI7MAKE0001Input" }, HOOK] } } as RecipeStep,
+    { action: "fill", field: "batteryModel", note: "Battery Inverter Model", conditional: true, selector: { label: "Battery Inverter Model", fallbacks: [{ css: "#BI7MODL0002Input" }, HOOK] } } as RecipeStep,
+    { action: "fill", field: "invQty", note: "Inverter Quantity", selector: { label: "Inverter Quantity", fallbacks: [{ css: "#IQ7QNTY0005Input" }, HOOK] } } as RecipeStep,
+    { action: "stopForReview", note: "review" } as RecipeStep,
+  ];
+  const pcValues = { batteryMake: "ExampleCo", batteryModel: "EX-1", invQty: "2" };
+  const named = (r: Run): number => r.aging.filter((n) => /Battery Inverter (Manufacturer|Model)/.test(n) && /reveal/i.test(n) && /#237/.test(n)).length;
+  for (const [key, path] of [["H", "/pchidden"], ["H2", "/pcabsent"]] as const) {
+    const h = await run(browser, recipeOf(`learnstate-${key.toLowerCase()}`, path, pcSteps()), pcValues);
+    console.log(`   ${key} ${tail(h)}`);
+    check(`${key} MUST-PASS a conditional control the generic hook also matches (block ${path === "/pchidden" ? "hidden" : "not rendered"}) is skipped, named — the hook names every textbox, not this one`,
+      named(h) === 2, JSON.stringify(h.aging));
+    check(`${key} MUST-PASS ...its value is never written into another hooked textbox (Battery Disconnect keeps the portal's value)`,
+      h.values.BD7DISC0004Input === "DisconnectCo" && !Object.values(h.values).some((v) => v === "ExampleCo" || v === "EX-1"), JSON.stringify(h.values));
+    check(`${key} MUST-PASS ...the run carries on: the next fill lands and the review stop is reached without a fill timeout`,
+      h.ok && h.values.IQ7QNTY0005Input === "2" && h.ms < 30_000, tail(h));
+  }
+  const h3 = await run(browser, recipeOf("learnstate-h3", "/pcshown", pcSteps()), pcValues);
+  console.log(`   H3 ${tail(h3)}`);
+  check("H3 MUST-EXCLUDE when this job's answers DID reveal the block, both conditional controls are written",
+    h3.ok && h3.values.BI7MAKE0001Input === "ExampleCo" && h3.values.BI7MODL0002Input === "EX-1" && named(h3) === 0, tail(h3) + JSON.stringify(h3.values));
+  }
 } finally {
   await browser.close().catch(() => null);
   server.close();

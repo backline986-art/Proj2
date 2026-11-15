@@ -1055,6 +1055,37 @@ async function probeCall<T>(fn: () => unknown, dflt: T): Promise<T> {
   try { return (await fn()) as T; } catch { return dflt; }
 }
 
+/** The learner's test-hook attributes, as its testCss writes them (`[attr="value"]`). */
+const BARE_TEST_HOOK = /^\[(data-testid|data-test-role|data-test|data-cy|data-qa)=["']?([^"'\]]+)["']?\]$/;
+
+/** A recorded level whose css is ONLY a test hook (`[data-test-role="textbox-element"]`, the
+ *  learner's testCss), read as its attribute and value; null for any other css. THE one reading of
+ *  that shape: rowScopedStep builds a PV-array row's hook from it, identifyingLevels passes it over. */
+export function bareTestHook(level: RecipeSelector | undefined): { attr: string; value: string } | null {
+  const m = BARE_TEST_HOOK.exec(String(level?.css ?? "").trim());
+  return m ? { attr: m[1], value: m[2] } : null;
+}
+
+/**
+ * THE RECORDED LEVELS THAT NAME THIS STEP'S CONTROL — the primary, then each fallback, less any level
+ * that locates by a bare test hook alone (locator() reads its css only when it has no role and
+ * name, label, placeholder, test id or text). A test hook names a KIND of control on many portals:
+ * PowerClerk stamps every textbox data-test-role="textbox-element", and the learner records that
+ * hook as a fallback on each data step (PacifiCorp 32f3d2b2 100-103, 111, 112). Judged on it, a
+ * hidden or absent control read as "shown" because some OTHER textbox was visible, so the #237
+ * conditional skip never fired on PowerClerk — the platform the issue cites for it (review of #237,
+ * evidenceProbe2 P3b: verbatim 111/112 failed on a fill timeout, as on main). A step that recorded
+ * nothing but its hook is judged on the hook — all the learner had; on a page of look-alikes it
+ * reads "shown", and the step runs as recorded.
+ */
+export function identifyingLevels(sel: RecipeSelector): RecipeSelector[] {
+  const all: RecipeSelector[] = [sel, ...(sel.fallbacks ?? []).map((f) => ({ ...f, fallbacks: undefined }) as RecipeSelector)];
+  const byHookAlone = (l: RecipeSelector): boolean =>
+    !!bareTestHook(l) && !(l.role && l.name) && !l.label && !l.placeholder && !l.testId && !l.text;
+  const named = all.filter((l) => !byHookAlone(l));
+  return named.length ? named : all;
+}
+
 /** How long a #237 probe waits for a control to show before calling it hidden or absent: a control
  *  still rendering (a reveal's round-trip, a fade-in) shows well inside it. */
 const LEARN_STATE_GRACE_MS = 2500;
@@ -4782,8 +4813,10 @@ export class RecipeAdapter extends BasePortalAdapter {
     const volatileId = (css?: string): boolean => /^#[A-Za-z_][\w:.-]*$/.test(String(css ?? "").trim());
     const bare = (x: RecipeSelector): RecipeSelector => ({ ...x, nth: undefined, fallbacks: undefined });
     const all = [sel, ...(sel.fallbacks ?? [])];
-    const hookOf = (x: RecipeSelector): string =>
-      /^\[data-test-role=["']?([^"'\]]+)["']?\]$/.exec(String(x.css ?? "").trim())?.[1] ?? "";
+    const hookOf = (x: RecipeSelector): string => {
+      const h = bareTestHook(x);
+      return h?.attr === "data-test-role" ? h.value : "";
+    };
     const known = ROW_FIELD_HOOKS[String(s.field ?? "")];
     const role = all.map(hookOf).find(Boolean) || known?.role || "";
     const levels: RecipeSelector[] = [];
@@ -6362,11 +6395,11 @@ export class RecipeAdapter extends BasePortalAdapter {
    *  rescue, which may open a menu to look for it. */
   private learnStateSkipped: { step: RecipeStep; described: string } | null = null;
 
-  /** What a recorded selector's levels (the primary, then each fallback) show within `graceMs`
-   *  (targetSeen). A level the locator cannot build is passed over. */
+  /** What a recorded selector's levels that name its control (identifyingLevels) show within
+   *  `graceMs` (targetSeen). A level the locator cannot build is passed over. */
   private async recordedTargetSeen(sel: RecipeSelector, graceMs: number): Promise<{ state: RecordedTargetSeen; described: string }> {
     const levels: unknown[] = [];
-    for (const level of [sel, ...(sel.fallbacks ?? []).map((f) => ({ ...f, fallbacks: undefined }) as RecipeSelector)]) {
+    for (const level of identifyingLevels(sel)) {
       try { levels.push(this.locator(level)); } catch { /* an unbuildable level is passed over */ }
     }
     return this.targetSeen(levels, graceMs);
@@ -6471,17 +6504,17 @@ export class RecipeAdapter extends BasePortalAdapter {
    * #237 (2) — A CONTROL THE PORTAL HAS ALREADY ANSWERED, AND DISABLED. Tigard 92c16d00 steps 4 and
    * 10 select on controls EnerGov fills and locks itself: the busy-control wait (4 s), then every
    * select route's timeouts on a control that can never take a pick — about 38 s each — and a false
-   * SKIPPED "landed nothing" (audit p4). Returns the control when the step's recorded levels show
-   * one that is visible, disabled and already holding a value (the sweep's own reading,
-   * controlReadsUnanswered) and no level shows an ENABLED match the run could write instead; null
-   * otherwise (the ordinary resolution runs, exactly as before).
+   * SKIPPED "landed nothing" (audit p4). Returns the control when the step's recorded levels that
+   * name it (identifyingLevels — never a bare test hook that every textbox carries) show one that is
+   * visible, disabled and already holding a value (the sweep's own reading, controlReadsUnanswered)
+   * and no such level shows an ENABLED match the run could write instead; null otherwise (the
+   * ordinary resolution runs, exactly as before).
    */
   private async portalAnsweredControl(step: RecipeStep): Promise<unknown | null> {
     const sel = step.selector;
     if (!sel || !this.page || typeof this.page.locator !== "function") return null;
-    const levels: RecipeSelector[] = [sel, ...(sel.fallbacks ?? []).map((f) => ({ ...f, fallbacks: undefined }) as RecipeSelector)];
     let held: unknown = null;
-    for (const level of levels) {
+    for (const level of identifyingLevels(sel)) {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       let loc: any = null;
       try { loc = this.locator(level); } catch { loc = null; }

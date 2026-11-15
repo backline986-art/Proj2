@@ -9,7 +9,8 @@
 //
 // MUST-PASS: the learn marks the step it records on the revealed box `conditional`; a replay of the
 //   learned steps on a portal whose answer reveals nothing skips that step, named, and still fills
-//   what follows and reaches the review stop.
+//   what follows and reaches the review stop. Both again with PowerClerk's generic test hook on every
+//   box, which the learner records as a fallback that matches the other boxes (review of #237).
 // MUST-EXCLUDE: the controls present at entry (the choice, the rating) are never marked; a replay
 //   on the revealing portal still FILLS the conditional box (shown is always written).
 //
@@ -28,13 +29,20 @@ const check = (label: string, ok: boolean, detail = ""): void => {
 };
 
 const REVEALED = "Existing Transformer Number";
-const page = (reveal: boolean): string => `<!doctype html><html><head><title>Edit Project</title></head><body>
+// `hooks`: PowerClerk's shape — every box carries the platform's generic test hook, so the learner
+// records `[data-test-role="textbox-element"]` as a fallback on each step, and that hook matches the
+// OTHER visible boxes when the revealed one is not there (review of #237: the conditional skip never
+// fired on PowerClerk).
+const page = (reveal: boolean, hooks: boolean): string => {
+  const box = hooks ? ` data-test-role="textbox-element"` : "";
+  const list = hooks ? ` data-test-role="dropdownlist-element"` : "";
+  return `<!doctype html><html><head><title>Edit Project</title></head><body>
 <div id="step1">
   <h2>Service Details</h2>
   <div class="form-group"><label for="kind">Service type</label>
-    <select id="kind"><option value="">-- Select --</option><option>New service</option><option>Existing service</option></select></div>
+    <select id="kind"${list}><option value="">-- Select --</option><option>New service</option><option>Existing service</option></select></div>
   <div id="reveal"></div>
-  <div class="form-group"><label for="amps">Main Service Entrance Rating (Amps)</label><input id="amps" type="text"></div>
+  <div class="form-group"><label for="amps">Main Service Entrance Rating (Amps)</label><input id="amps" type="text"${box}></div>
   <button id="next" type="button">Next</button>
 </div>
 <div id="step2" style="display:none">
@@ -50,7 +58,7 @@ const page = (reveal: boolean): string => `<!doctype html><html><head><title>Edi
     setTimeout(function () {
       var host = document.getElementById('reveal');
       host.innerHTML = v === 'Existing service'
-        ? '<div class="form-group"><label for="xfmr">${REVEALED}</label><input id="xfmr" type="text"></div>' : '';
+        ? '<div class="form-group"><label for="xfmr">${REVEALED}</label><input id="xfmr" type="text"${box}></div>' : '';
     }, 300);` : ""}
   });
   document.getElementById('next').addEventListener('click', function () {
@@ -59,10 +67,12 @@ const page = (reveal: boolean): string => `<!doctype html><html><head><title>Edi
   });
 </script>
 </body></html>`;
+};
 
 const server = http.createServer((req, res) => {
+  const url = String(req.url || "");
   res.writeHead(200, { "Content-Type": "text/html" });
-  res.end(page(!String(req.url || "").startsWith("/noreveal")));
+  res.end(page(!url.replace(/^\/hooks(?=\/)/, "").startsWith("/noreveal"), url.startsWith("/hooks/")));
 });
 await new Promise<void>((r) => server.listen(0, "127.0.0.1", () => r()));
 const base = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
@@ -83,22 +93,29 @@ const planner: LearnPlanner = async (req) => {
 
 const browser: Browser = await chromium.launch();
 try {
+  for (const pre of ["", "/hooks"]) {
+  const tag = pre ? " [generic test hooks]" : "";
   const ctx = await browser.newContext();
   await ctx.addInitScript("globalThis.__name = globalThis.__name || function (fn) { return fn; };");
   const lp = await ctx.newPage();
-  await lp.goto(`${base}/app`);
+  await lp.goto(`${base}${pre}/app`);
   const learner = new AutoLearnAdapter("Example Utility (reveal-conditional smoke)", planner, { policyProfile: "none" });
   (learner as unknown as { page: unknown }).page = lp;
   const learned = await learner.learn({} as never, { mainServiceRating: "200", utilityTransformerNumber: "TX-4471" } as unknown as ProjectRecord);
   await ctx.close();
   const steps = learned.steps;
   const brief = steps.map((s) => `${s.action}:${String(s.note ?? "").slice(0, 40)}${s.conditional ? " [conditional]" : ""}`).join(" | ");
-  console.log(`   learned (${learned.reachedReview ? "reached review" : "no review"}): ${brief}`);
+  console.log(`   learned${tag} (${learned.reachedReview ? "reached review" : "no review"}): ${brief}`);
   const of = (label: string): RecipeStep | undefined => steps.find((s) => String(s.note ?? "").includes(label) || s.selector?.label === label);
 
-  check("the learn reaches review and records the revealed box", learned.reachedReview === true && !!of(REVEALED), brief);
-  check("MUST-PASS the step on the revealed box is marked conditional", of(REVEALED)?.conditional === true, brief);
-  check("MUST-EXCLUDE the controls present at entry are never marked", !of("Service type")?.conditional && !of("Main Service Entrance Rating")?.conditional, brief);
+  check(`the learn reaches review and records the revealed box${tag}`, learned.reachedReview === true && !!of(REVEALED), brief);
+  check(`MUST-PASS the step on the revealed box is marked conditional${tag}`, of(REVEALED)?.conditional === true, brief);
+  check(`MUST-EXCLUDE the controls present at entry are never marked${tag}`, !of("Service type")?.conditional && !of("Main Service Entrance Rating")?.conditional, brief);
+  if (pre) {
+    const sel = of(REVEALED)?.selector;
+    check(`${tag.trim()} the learner recorded the generic hook as a fallback on the revealed box (the shape under test)`,
+      [sel, ...(sel?.fallbacks ?? [])].some((l) => l?.css === "[data-test-role=\"textbox-element\"]"), JSON.stringify(sel));
+  }
 
   const replay = async (path: string): Promise<{ ok: boolean; message: string; aging: string[]; values: Record<string, string>; reachedReview: boolean }> => {
     const recipe = {
@@ -126,15 +143,16 @@ try {
     return { ok: r.ok === true, message: String(r.message ?? ""), aging: ((r.data ?? {}).agingNotes as string[]) ?? [], values, reachedReview };
   };
 
-  const none = await replay("/noreveal");
-  console.log(`   replay /noreveal: ok=${none.ok} review=${none.reachedReview} msg=${none.message.slice(0, 160)} values=${JSON.stringify(none.values)} aging=${JSON.stringify(none.aging).slice(0, 300)}`);
-  check("MUST-PASS on a portal whose answer reveals nothing, the conditional step is skipped, named",
+  const none = await replay(`${pre}/noreveal`);
+  console.log(`   replay ${pre}/noreveal: ok=${none.ok} review=${none.reachedReview} msg=${none.message.slice(0, 160)} values=${JSON.stringify(none.values)} aging=${JSON.stringify(none.aging).slice(0, 300)}`);
+  check(`MUST-PASS on a portal whose answer reveals nothing, the conditional step is skipped, named${tag}`,
     none.aging.some((n) => n.includes(REVEALED) && /reveal/i.test(n) && /#237/.test(n)), JSON.stringify(none.aging));
-  check("MUST-PASS ...and the run still fills what follows and reaches the review stop", none.ok && none.reachedReview && none.values.amps === "200", `ok=${none.ok} review=${none.reachedReview} ${none.message.slice(0, 200)} ${JSON.stringify(none.values)}`);
+  check(`MUST-PASS ...and the run still fills what follows and reaches the review stop${tag}`, none.ok && none.reachedReview && none.values.amps === "200", `ok=${none.ok} review=${none.reachedReview} ${none.message.slice(0, 200)} ${JSON.stringify(none.values)}`);
 
-  const shown = await replay("/app");
-  console.log(`   replay /app: ok=${shown.ok} review=${shown.reachedReview} values=${JSON.stringify(shown.values)}`);
-  check("MUST-EXCLUDE on the revealing portal the conditional box is still FILLED with this job's value", shown.ok && shown.values.xfmr === "TX-9902" && !shown.aging.some((n) => /#237/.test(n)), `${shown.message.slice(0, 200)} ${JSON.stringify(shown.values)} ${JSON.stringify(shown.aging).slice(0, 200)}`);
+  const shown = await replay(`${pre}/app`);
+  console.log(`   replay ${pre}/app: ok=${shown.ok} review=${shown.reachedReview} values=${JSON.stringify(shown.values)}`);
+  check(`MUST-EXCLUDE on the revealing portal the conditional box is still FILLED with this job's value${tag}`, shown.ok && shown.values.xfmr === "TX-9902" && !shown.aging.some((n) => /#237/.test(n)), `${shown.message.slice(0, 200)} ${JSON.stringify(shown.values)} ${JSON.stringify(shown.aging).slice(0, 200)}`);
+  }
 } finally {
   await browser.close().catch(() => null);
   server.close();
