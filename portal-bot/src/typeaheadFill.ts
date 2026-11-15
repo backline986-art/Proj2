@@ -81,6 +81,15 @@ export interface TypeaheadRequest {
   budgetMs?: number;
 }
 
+/** How long the box's own search is given to show its result rows (#198, Tigard): a geocode is a
+ *  network round trip. Bounded, and never past the fill's deadline. */
+const SEARCH_RESULT_WAIT_MS = 10_000;
+/** The budget the SEARCH PHASE adds to the fill's deadline when it begins (#198, Tigard): each query
+ *  pressed on the box's own search costs a selection read (6 s), the row wait above and a settle,
+ *  and two queries are tried. Charged against the suggestion budget, the first query's empty search
+ *  left the second one no turn at all (typeaheadFill smoke, the "one" shape). The whole fill stays
+ *  bounded: suggestions, then this. */
+const SEARCH_PHASE_BUDGET_MS = 40_000;
 const SUGGEST_WAIT_DEFAULT_MS = 5_000;
 const TYPEAHEAD_BUDGET_DEFAULT_MS = 30_000;
 const NAME_SHIM = "globalThis.__name = globalThis.__name || function (f) { return f; };";
@@ -305,11 +314,23 @@ async function searchResultTickAndAdd(
   page: any, doc: any, loc: any, site: TypeaheadSite, req: TypeaheadRequest, deadline: number,
 ): Promise<{ kind: "none" } | { kind: "picked"; text: string; why: string; add: string } | { kind: "ask"; question: string; offered: string[]; why: string } | { kind: "failed"; text: string; why: string }> {
   let texts: string[] = [];
-  for (let i = 0; i < 6 && Date.now() < deadline; i++) {
+  // THE SEARCH IS A NETWORK ROUND TRIP, SO THE ROWS ARE WAITED FOR BY TIME, NOT BY A FEW LOOKS.
+  // Live City of Tigard (EnerGov, 2026-11-15): the Esri geocode answers in a few seconds; six looks
+  // 400 ms apart read "no rows" where the learn, with more time already spent on the box, had ticked
+  // one. Up to SEARCH_RESULT_WAIT_MS, never past the fill's deadline (which the search phase extends
+  // for itself in fillTypeahead, so this never starves a later read).
+  const rowsUntil = Math.min(Date.now() + SEARCH_RESULT_WAIT_MS, deadline);
+  while (Date.now() < rowsUntil) {
     await doc.evaluate(NAME_SHIM).catch(() => null);
     const read = await doc.evaluate(searchResultRowsInPage).catch(() => [] as string[]);
     texts = Array.isArray(read) ? read.map((t: unknown) => String(t ?? "")) : [];
     if (texts.length) break;
+    // THE SEARCH MAY ANSWER WITH SUGGESTIONS INSTEAD OF ROWS (the typeaheadFill smoke's "one" shape,
+    // an Esri source that lists its hits as options): an address-like option (a digit in it — the
+    // row rule) means the search has answered, and the caller reads those options as before. The
+    // widget's standing "Use current location" option carries no digit and is not an answer.
+    const answered = await doc.evaluate(() => Array.from(document.querySelectorAll("[role='option']")).filter((o) => /\d/.test((o as HTMLElement).textContent || "")).length).catch(() => 0);
+    if (Number(answered) > 0) break;
     await page.waitForTimeout?.(400).catch(() => null);
   }
   if (!texts.length) return { kind: "none" };
@@ -509,7 +530,8 @@ async function typeInto(page: any, loc: any, text: string): Promise<boolean> {
  */
 export async function fillTypeahead(page: any, loc: any, req: TypeaheadRequest): Promise<TypeaheadOutcome> {
   const budgetMs = req.budgetMs && req.budgetMs > 0 ? req.budgetMs : TYPEAHEAD_BUDGET_DEFAULT_MS;
-  const deadline = Date.now() + budgetMs;
+  const startedAt = Date.now();
+  let deadline = startedAt + budgetMs; // extended once when the search phase begins (SEARCH_PHASE_BUDGET_MS)
   const waitMs = req.suggestWaitMs && req.suggestWaitMs > 0 ? req.suggestWaitMs : SUGGEST_WAIT_DEFAULT_MS;
   const value = String(req.value ?? "").replace(/\s+/g, " ").trim();
   if (!page || !loc) return { outcome: "unusable", why: "the box could not be located" };
@@ -593,6 +615,10 @@ export async function fillTypeahead(page: any, loc: any, req: TypeaheadRequest):
         if (loose(street) && loose(street) !== loose(t.q)) searchQueries.push(street);
         let found = false;
         let pressedAny = false;
+        // THE SEARCH PHASE HAS ITS OWN BUDGET, added here, once: the suggestion waits have spent most of
+        // the fill's, and a search is a network round trip the box answers in seconds (live City of
+        // Tigard 2026-11-15: rows 4.3 s after its Search). SEARCH_PHASE_BUDGET_MS says why.
+        deadline = Math.max(deadline, Date.now() + SEARCH_PHASE_BUDGET_MS);
         for (let qi = 0; qi < searchQueries.length && Date.now() < deadline; qi++) {
           const q = searchQueries[qi];
           let beforeQ = before;
@@ -653,7 +679,7 @@ export async function fillTypeahead(page: any, loc: any, req: TypeaheadRequest):
     }
     if (!rows.length) {
       await clearBox(doc, loc, controlsId);
-      const over = Date.now() >= deadline ? ` (its ${Math.round(budgetMs / 1000)} s budget ran out)` : "";
+      const over = Date.now() >= deadline ? ` (its ${Math.round((deadline - startedAt) / 1000)} s budget ran out)` : "";
       return {
         outcome: "no_suggestions",
         why: `typed ${typedLine()}${searchNote} and the box offered no suggestions${wholeListed ? ` (only ${wholeListed} other address(es) for the whole line)` : ""}${entered.size ? " and the portal selected nothing" : ""}${enterNote}${over}`,
