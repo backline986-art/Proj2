@@ -355,7 +355,8 @@ const ticked = async (page: Page): Promise<Record<string, boolean>> => {
 // and the step names no radio group (an older recording: id only). The owner list beside it shows the
 // owner's mailing address — the property's own. The address grid is still told by the recorded
 // control (its sibling _CB_0 has the same shape): read every row instead and the owner's row is a
-// second "address" match, and this job's own row is refused as ambiguous. main fails the step outright.
+// second "address" match, and this job's own row is refused as ambiguous. (main: the run fails after
+// ~85 s with nothing ticked.)
 {
   const page = await freshPage();
   const idOnly = { ...DIALOG_STEPS[0], fingerprint: { id: `${PP}_ucAddressList_gv_CB_1` } };
@@ -368,7 +369,8 @@ const ticked = async (page: Page): Promise<Record<string, boolean>> => {
 // ---- E3f (a same-shaped id is no "only row" authority) --------------------------------------------
 // The recorded parcel list (…gvList2_CB_1) returned nothing; another list whose ids differ only by a
 // digit (…gvList1, the address results) holds one row, and this job has no parcel number to compare.
-// That row is another list's: never ticked as "the only row". main fails the step (nothing ticked).
+// That row is another list's: never ticked as "the only row". (main: the run fails after ~75 s, and
+// that row ends up ticked.)
 {
   const page = await freshPage();
   const { parcelNumber: _none, ...noParcel } = THIS_JOB;
