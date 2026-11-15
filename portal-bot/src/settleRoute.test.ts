@@ -12,7 +12,10 @@
 // Review of #245: ONLY WHAT THE CLICK DID COUNTS. The round-1 rule also called undone a wizard that
 // moved on through a transient route (#/w?step=1 → #/loading → #/w?step=2) and a search whose router
 // re-added its default page=1 — the click's effect held both times, and the replay retried Continue
-// (skipping a page) or false-stopped "advance: Search". Those rows (T1-T4) fail on the round-1 rule.
+// (skipping a page) or false-stopped "advance: Search". Rows T1-T4, their variants and the two
+// flipped rows fail on the round-1 rule (8 failures); the search with no parameter before it is
+// pinned too, though round 1 already read it correctly (it compared only parameters `before` or the
+// click had, and q held).
 //
 // settleAfterRoute on a click that did not change the URL returns null with no page read beyond
 // page.url(): no evaluate, no wait (the issue's MUST-KEEP).
@@ -62,9 +65,9 @@ const cases: Array<{ label: string; before: string; clicked: string; settled: st
     before: `${H}#/w?step=1`, clicked: `${H}#/loading`, settled: `${H}#/w?step=1`, undone: true },
   { label: "back where it was with its parameters in another order → undone",
     before: `${H}#/list?a=1&b=2`, clicked: `${H}#/detail`, settled: `${H}#/list?b=2&a=1`, undone: true },
-  { label: "T2 search: #/search → ?q=solar → ?q=solar&page=1 (the router adds its default page) → not undone",
+  { label: "search with no parameter before it: #/search → ?q=solar → ?q=solar&page=1 → not undone (round 1 agreed)",
     before: `${H}#/search`, clicked: `${H}#/search?q=solar`, settled: `${H}#/search?q=solar&page=1`, undone: false },
-  { label: "search from a page=1 URL: #/search?page=1 → ?q=solar → ?q=solar&page=1 → not undone",
+  { label: "T2 search: #/search?page=1 → ?q=solar → ?q=solar&page=1 (the router re-adds its default page) → not undone",
     before: `${H}#/search?page=1`, clicked: `${H}#/search?q=solar`, settled: `${H}#/search?q=solar&page=1`, undone: false },
   { label: "T3 search on page 2: ?q=a&page=2 → ?q=b → ?q=b&page=1 (the default re-added) → not undone",
     before: `${H}#/s?q=a&page=2`, clicked: `${H}#/s?q=b`, settled: `${H}#/s?q=b&page=1`, undone: false },
