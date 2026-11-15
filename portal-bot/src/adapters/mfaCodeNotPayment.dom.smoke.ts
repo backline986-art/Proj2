@@ -15,7 +15,8 @@
 //         back of your card" is in SECOND_FACTOR_TEXT_SOURCE), so only card context can veto:
 //         card siblings on the page, a payment URL, a card number in a cross-origin child frame,
 //         a card step of the same recorded form, a card-number frame mounted 1.5 s after load (the
-//         bounded look), a card form in an open shadow root, a recorded "CVV Security Code", and a
+//         bounded look), a card-number frame the reader cannot read (an unknown is never "no
+//         card"), a card form in an open shadow root, a recorded "CVV Security Code", and a
 //         fee page reached after the application was filled (its card form in a CLOSED shadow root,
 //         which nothing can read: only "not at sign-in" can say card there);
 //     (b) the #238 reviewers' fee pages with NO second-factor wording, which round 1 paused as
@@ -30,6 +31,7 @@ import "../smokeArtifactDirs";
 import http from "node:http";
 import { chromium, type Page } from "playwright";
 import type { PortalRecipe, RecipeStep } from "../../../shared/src/types";
+import { PORTAL_SAFETY_GLOBAL } from "../../../shared/src/portalSafety";
 import { RecipeAdapter } from "./recipeAdapter";
 
 delete process.env.PORTAL_ALLOW_FINAL_SUBMIT;
@@ -77,6 +79,13 @@ const hostedMain = (port: number): string => page("Fees", `<h2>Pay Fees</h2>${SA
   <iframe id="cardFrame" src="http://localhost:${port}/hosted-card-frame" style="width:420px;height:90px;border:0"></iframe>
   <label for="csc">Security Code</label><input id="csc" name="csc">`);
 const HOSTED_FRAME = page("card", `<label for="cn">Card Number</label><input id="cn" name="cardnumber" autocomplete="cc-number">`);
+// A card frame the reader CANNOT read: the frame already owns the global the shared in-page source
+// installs itself under, so the injection is refused and the frame answers nothing.
+const UNREADABLE_FRAME = page("card", `<script>Object.defineProperty(window, ${JSON.stringify(PORTAL_SAFETY_GLOBAL)}, { value: 0, writable: false, configurable: false });</script>
+  <label for="cn">Card Number</label><input id="cn" name="cardnumber" autocomplete="cc-number">`);
+const unreadableMain = (port: number): string => page("Fees", `<h2>Pay Fees</h2>${SAYS}
+  <iframe id="cardFrame" src="http://localhost:${port}/unreadable-card-frame" style="width:420px;height:90px;border:0"></iframe>
+  <label for="csc">Security Code</label><input id="csc" name="csc">`);
 
 // A code box whose recorded form also held a card number the page has not drawn (yet): only the
 // recording can say "card" here.
@@ -137,6 +146,8 @@ const server = http.createServer((req, res) => {
     : p === "/m/payment/confirm" ? PAY_URL_FORM
     : p === "/permits/fees/hosted" ? hostedMain(port)
     : p === "/hosted-card-frame" ? HOSTED_FRAME
+    : p === "/unreadable-card-frame" ? UNREADABLE_FRAME
+    : p === "/permits/fees/unreadable" ? unreadableMain(port)
     : p === "/permits/fees/segment" ? SEGMENT_ONLY
     : p === "/permits/fees/late" ? lateFrame(port, Number(u.searchParams.get("delay") ?? "0"), says)
     : p === "/permits/fees/shadow" ? shadowForm(String(u.searchParams.get("mode")), says)
@@ -276,6 +287,13 @@ const frameHostOf = (pg: Page): string => {
   check("fixture: the late card frame loaded from another origin", r.boxes.frameHost === "localhost", brief(r));
   delete r.boxes.frameHost;
   atPayment("a card-number frame mounted 1.5 s after load, with second-factor-like wording", r);
+}
+{
+  // An unknown is never "no card": a frame the reader cannot read counts as a possible card.
+  const r = await replay(recipeOf("card-unreadable-frame-says", [gotoStep("/permits/fees/unreadable"), cvvStep()]), async (pg) =>
+    ({ csc: await valueOf(pg, "#csc"), cn: await valueOf(pg, "#cn", "#cardFrame") }));
+  console.log(`   card-number frame the reader cannot read, page says "Enter the security code": ${brief(r)}`);
+  atPayment("a card-number frame the reader cannot read, with second-factor-like wording", r);
 }
 {
   const r = await replay(recipeOf("card-open-shadow-says", [gotoStep("/permits/fees/shadow?mode=open&says=1"), cvvStep()]), cardBoxes);
