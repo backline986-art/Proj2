@@ -21,7 +21,14 @@
 // THE RECORD-TIME CHECK (clickSelectorForElement): names the scan cannot read — CSS ::after content,
 // spacing between block children — are caught by asking getByRole itself, before the click is
 // recorded, whether the role+name finds the stamped element. A name that finds a namesake is replaced
-// by the #id; one that finds nothing goes behind it; with no id the miss is reported, never guessed.
+// by the #id. A name that finds nothing stands as harvested and is reported: the replay's name rescue
+// reads the top-level name, which is what still reaches Cityworks' user menu when its counter id moves.
+// With no id the miss is reported, never guessed.
+//
+// THE REPLAY'S FACE TIE-BREAK: two id-less links sharing one aria-label replay onto the one whose face
+// the step recorded (shownText), and the face never locates a control on its own (the name rescue
+// with Tigard's face "Apply" finds the menu tab). And the live timing: the record type renders ~116 ms
+// after the assistant's Search, so one check resolves the recorded step at once and clicks it.
 //   npx tsx portal-bot/src/adapters/accessibleNameSelector.dom.smoke.ts
 import "../smokeArtifactDirs"; // hand-run safe: artifact dirs default to a temp folder, never data/
 import http from "node:http";
@@ -79,9 +86,44 @@ const PAGE = `<!doctype html><html><head><style>
   <a id="apply-sfx" class="sfx" href="#/permit/apply/96/0/0">Apply</a>
   <a id="start-blocks" href="#/permit/apply/97/0/0"><div>Start</div><div>Roof Mount</div></a>
   <a class="sfx nid" href="#/permit/apply/98/0/0">Apply</a>
+
+  <!-- Cityworks' user-menu trigger, as captured (fixtures/cityworks-case-create.html): a counter id and
+       role="menubutton", which is no ARIA role, so getByRole finds nothing by its name "User". -->
+  <button data-cw-id="btnUserMenu" id="CW-UI-MENU-1000000000000001-trigger" class="user-menu icon-button" aria-label="User"
+    aria-controls="CW-UI-MENU-1000000000000001" aria-expanded="false" aria-haspopup="true" role="menubutton"
+    style="width:32px;height:32px"><i aria-hidden="true" class="cw-icon cw-icon-user md-24 md-light"></i></button>
+
+  <!-- Two id-less links sharing one generic aria-label, with different faces. -->
+  <div class="pager"><a class="btn" href="#pager-cancel" aria-label="link">Cancel</a> <a class="btn btn-primary" href="#pager-next" aria-label="link">Next</a></div>
 </body></html>`;
 
-const server = http.createServer((_q, r) => { r.writeHead(200, { "Content-Type": "text/html" }); r.end(PAGE); });
+// The live timing: the assistant's results (both copies of each record type) render ~116 ms after its
+// Search is clicked. Every link click is recorded and kept from navigating.
+const RESULT_ROWS = `<div class="result-row"><span>Residential Renewable Energy - Prescriptive</span>`
+  + RECORD_TYPE("apply-btn-ResidentialRenewableEnergy-Prescriptive", "Residential Renewable Energy - Prescriptive", "#/permit/apply/94/0/0", false)
+  + RECORD_TYPE("apply-btn-ResidentialRenewableEnergy-Prescriptive", "Residential Renewable Energy - Prescriptive", "#/permit/apply/94/0/0", true)
+  + `</div>`;
+const DELAYED = `<!doctype html><html><head><style>.ng-hide { display: none !important; }</style></head><body>
+  <div id="sidebarMenu" style="display:none"><a id="link-Menu-Apply" class="mainMenuNav-a" href="/apps/selfservice/home#/applicationAssistant">Apply</a></div>
+  <ul class="mainMenu"><li><a id="link-Menu-Apply" class="mainMenuNav-a" href="/apps/selfservice/home#/applicationAssistant">Apply</a></li></ul>
+  <input id="assistant-q" type="text" value="solar"> <button id="assistant-search" type="button">Search</button>
+  <div class="results" id="results"></div>
+  <script>
+    window.__clicked = [];
+    document.addEventListener("click", function (e) {
+      var a = e.target && e.target.closest ? e.target.closest("a") : null;
+      if (a) { e.preventDefault(); window.__clicked.push(a.id); }
+    }, true);
+    document.getElementById("assistant-search").addEventListener("click", function () {
+      setTimeout(function () { document.getElementById("results").innerHTML = ${JSON.stringify(RESULT_ROWS)}; }, 116);
+    });
+  </script>
+</body></html>`;
+
+const server = http.createServer((q, r) => {
+  r.writeHead(200, { "Content-Type": "text/html" });
+  r.end(/delayed/.test(String(q.url ?? "")) ? DELAYED : PAGE);
+});
 await new Promise<void>((r) => server.listen(0, "127.0.0.1", () => r()));
 const port = (server.address() as { port: number }).port;
 const url = `http://127.0.0.1:${port}/`;
@@ -111,9 +153,16 @@ const recipe = {
 } as unknown as PortalRecipe;
 const replay = new RecipeAdapter(recipe, {}, {}, { autoSubmit: false });
 (replay as unknown as { page: Page }).page = page;
+/** RecipeAdapter.resolveLocator as a replayed click step reaches it: executeStep names the step it is
+ *  resolving, which is what lets a selector matching several controls choose by what it recorded. */
+const resolveAsStep = async (sel: RecipeSelector): Promise<unknown> => {
+  const r = replay as unknown as { resolvingStep: RecipeStep | null; resolveLocator: (s: RecipeSelector) => Promise<unknown> };
+  r.resolvingStep = { action: "click", phase: "fill", selector: sel, note: "" };
+  try { return await r.resolveLocator(sel); } finally { r.resolvingStep = null; }
+};
 const replayResolves = async (sel: RecipeSelector): Promise<string> => {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const loc: any = await (replay as unknown as { resolveLocator: (s: RecipeSelector) => Promise<unknown> }).resolveLocator(sel).catch(() => null);
+  const loc: any = await resolveAsStep(sel).catch(() => null);
   if (!loc || (await loc.count().catch(() => 0)) === 0) return "(nothing)";
   return await loc.first().evaluate((e: Element) => `${e.getAttribute("data-al-fx") || "?"}#${e.id || ""}`).catch(() => "(unreadable)") as string;
 };
@@ -194,7 +243,7 @@ await keep("a button named by aria-labelledby", (r) => r.id === "btn-begin", "Be
 // What the learner records for a click, through the adapter's own wrapper (the one its navigate,
 // advance, fallback-advance, verified-record-type and manual-entry doors call). A learner without the
 // check records the harvested selector as it is — which is what a missing export stands for here.
-type Pin = (p: Page, f: ExtractedField) => Promise<{ selector: RecipeSelector; repinned?: string; missed?: boolean }>;
+type Pin = (p: Page, f: ExtractedField) => Promise<{ selector: RecipeSelector; repinned?: string; missed?: string | boolean }>;
 const pin: Pin = (AL as unknown as { clickSelectorForElement?: Pin }).clickSelectorForElement
   ?? (async (_p, f) => ({ selector: f.selector }));
 const events: Array<Record<string, unknown>> = [];
@@ -225,10 +274,34 @@ const recordedVia = async (f: ExtractedField): Promise<RecipeSelector> => {
   const f = raw ? toExtractedField(raw) : null;
   if (!raw || !f) check("the scan reads the block-children link", false, "not harvested");
   else {
-    const rec = (await pin(page, f)).selector;
-    check("a role+name that finds NOTHING: the #id leads and the name is kept behind it",
-      rec.css === "#start-blocks" && (rec.fallbacks ?? [])[0]?.name === f.selector.name && (await replayResolves(rec)) === `${raw.fx}#start-blocks`,
-      `harvested ${show(f)} -> recorded ${JSON.stringify(rec)}`);
+    const r = await pin(page, f);
+    events.length = 0;
+    await recordedVia(f);
+    check("a role+name that finds NOTHING stands as harvested, never moved behind the #id (the replay's name rescue reads the top-level name)",
+      r.missed === "nothing" && !r.repinned && JSON.stringify(r.selector) === JSON.stringify(f.selector)
+        && (await replayResolves(r.selector)) === `${raw.fx}#start-blocks`,
+      `harvested ${show(f)} -> ${JSON.stringify(r)}`);
+    check("...and the miss is named in the debug bundle",
+      events.some((e) => e.type === "click_selector_misses_element" && /finds nothing/.test(String(e.why))), JSON.stringify(events));
+  }
+}
+{
+  // Review of #228, on real Cityworks markup: re-pinned behind its #id, this control was lost the moment
+  // the portal's counter moved (the name rescue had no top-level name to search by; ~70 s, then fail).
+  const CW = "CW-UI-MENU-1000000000000001-trigger";
+  const MOVED = "CW-UI-MENU-1000000000000003-trigger";
+  const raw = await rawFor((r) => r.id === CW);
+  const f = raw ? toExtractedField(raw) : null;
+  if (!raw || !f) check("the scan reads Cityworks' user-menu trigger", false, "not harvested");
+  else {
+    const rec = await recordedVia(f);
+    const before = await replayResolves(rec);
+    await page.evaluate(([from, to]) => { const el = document.getElementById(from); if (el) el.id = to; }, [CW, MOVED]);
+    const after = await replayResolves(rec);
+    await page.evaluate(([from, to]) => { const el = document.getElementById(from); if (el) el.id = to; }, [MOVED, CW]);
+    check("Cityworks' role=\"menubutton\" trigger is recorded as harvested, so when its counter id moves the replay still clicks it by its name",
+      !!rec.role && rec.name === "User" && after === `${raw.fx}#${MOVED}`,
+      `harvested ${show(f)} -> recorded ${JSON.stringify(rec)}; replay before the move -> ${before}, after -> ${after}`);
   }
 }
 {
@@ -238,8 +311,52 @@ const recordedVia = async (f: ExtractedField): Promise<RecipeSelector> => {
   else {
     const r = await pin(page, f);
     check("with NO id to lead with, the selector stands and the miss is reported (never a guess)",
-      r.missed === true && JSON.stringify(r.selector) === JSON.stringify(f.selector), JSON.stringify(r));
+      r.missed === "namesake" && JSON.stringify(r.selector) === JSON.stringify(f.selector), JSON.stringify(r));
   }
+}
+
+// ---- THE REPLAY'S FACE TIE-BREAK ----------------------------------------------------------------
+{
+  const raw = await rawFor((r) => r.fieldType === "button" && !r.id && r.href === "#pager-next");
+  const f = raw ? toExtractedField(raw) : null;
+  if (!raw || !f) check("the scan reads the pager's Next link", false, "not harvested");
+  else {
+    const rec = await recordedVia(f);
+    const got = await replayResolves(rec);
+    check("TWO ID-LESS LINKS SHARING ONE aria-label (faces \"Cancel\" and \"Next\"): the step recorded on Next replays onto Next, its face choosing between the name's own matches",
+      got === `${raw.fx}#`, `recorded ${JSON.stringify(rec)} -> replay landed on ${got}`);
+  }
+}
+{
+  // Why the face never LOCATES a control: the replay's name rescue, asked for Tigard's face "Apply",
+  // finds the top menu's tab, the exact #228 misclick. shownText chooses among a selector's matches only.
+  const hit = await (replay as unknown as { findEnabledControlByName: (w: string) => Promise<unknown> }).findEnabledControlByName("Apply");
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const landed = hit ? await (hit as any).evaluate((e: Element) => `${e.id}`).catch(() => "?") : "(nothing)";
+  check("MUST-KEEP: the name rescue asked for the face \"Apply\" finds the menu tab, so the face is never a locating name",
+    landed === "link-Menu-Apply", `rescue landed on ${landed}`);
+}
+
+// ---- THE LIVE TIMING: the record type renders ~116 ms after Search -------------------------------
+if (rtRaw) {
+  const rt = toExtractedField(rtRaw);
+  const dpage = await context.newPage();
+  await dpage.goto(`${url}delayed`);
+  const holder = replay as unknown as { page: Page };
+  holder.page = dpage;
+  let err = "";
+  try {
+    await dpage.click("#assistant-search");
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const loc: any = await resolveAsStep(rt.selector);
+    await loc.click({ timeout: 5000 });
+  } catch (e) { err = e instanceof Error ? e.message.split("\n")[0].slice(0, 120) : String(e); }
+  const clicked = await dpage.evaluate(() => (window as unknown as { __clicked?: string[] }).__clicked ?? []);
+  holder.page = page;
+  await dpage.close();
+  check("DELAYED RENDER: resolved the moment Search is clicked, the recorded record-type step clicks the record type, never the menu tab",
+    JSON.stringify(clicked) === JSON.stringify(["apply-btn-ResidentialRenewableEnergy-Prescriptive"]),
+    `recorded ${show(rt)} -> clicked ${JSON.stringify(clicked)}${err ? ` (${err})` : ""}`);
 }
 {
   // MUST-KEEP: a selector that already finds its element is recorded exactly as harvested.

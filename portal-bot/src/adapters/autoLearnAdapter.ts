@@ -2446,16 +2446,17 @@ export function toExtractedField(raw: RawField): ExtractedField {
  * the record type — or none at all. So before a click step is recorded, the same getByRole the replay
  * runs is asked which elements it finds, by the scan's stamp (data-al-fx) — only for a stamped element
  * that is shown, since a hidden one is in no role query whatever its name. If the stamped element is
- * among them, the selector stands (a choice between namesakes is the replay's to make). If not, and the
- * element's #id finds it, the step leads with the #id: a role+name that found a NAMESAKE is dropped,
- * because kept as a fallback it would click that namesake whenever the id misses; one that found
- * nothing is kept behind the id. With no id to lead with, the selector stands and `missed` says so.
- * Never throws and never waits long: any failure keeps the selector exactly as harvested.
+ * among them, the selector stands (a choice between namesakes is the replay's to make). If it found a
+ * NAMESAKE and the element's #id finds it, the step leads with the #id and the role+name is dropped,
+ * because kept as a fallback it would click that namesake whenever the id misses. A role+name that found
+ * NOTHING stands as harvested and is only reported (`missed: "nothing"`), and so does a namesake with no
+ * id to lead with (`missed: "namesake"`). Never throws and never waits long: any failure keeps the
+ * selector exactly as harvested.
  */
 export async function clickSelectorForElement(
   page: Page | null | undefined,
   field: Pick<ExtractedField, "selector" | "fx">,
-): Promise<{ selector: RecipeSelector; repinned?: "namesake" | "nothing"; missed?: boolean }> {
+): Promise<{ selector: RecipeSelector; repinned?: "namesake"; missed?: "nothing" | "namesake" }> {
   const sel = field.selector;
   const fx = field.fx?.id ?? "";
   if (!page || !sel?.role || !sel.name || !/^f\d+$/.test(fx)) return { selector: sel };
@@ -2479,11 +2480,18 @@ export async function clickSelectorForElement(
     if ((await stampsOf(stamped))?.length !== 1 || !(await stamped.isVisible().catch(() => false))) return { selector: sel };
     const byName = await stampsOf(scope.getByRole(sel.role, { name: sel.name, exact: sel.exact ?? false }));
     if (!byName || byName.includes(fx)) return { selector: sel };
+    // A NAME THAT FINDS NOTHING STANDS AS HARVESTED, REPORTED, NEVER MOVED BEHIND THE #ID. It cannot
+    // misclick, since it finds no control, and the replay already reaches the #id one level down. The
+    // replay's last-resort name rescue reads only the TOP-LEVEL name, so moved into a fallback it would
+    // leave a control whose id the portal regenerates with no way back. Review of #228, on Cityworks'
+    // user-menu trigger: id CW-UI-MENU-1000000000000001-trigger is a counter, and role="menubutton" is
+    // no ARIA role, so getByRole never finds it. Re-pinned, a replay with the counter moved waited ~70 s
+    // and failed; left as harvested, the name rescue clicked it by its aria-label "User".
+    if (byName.length === 0) return { selector: sel, missed: "nothing" };
     const idCss = (sel.fallbacks ?? []).map((fb) => fb.css).find((c): c is string => typeof c === "string" && /^#\S+$/.test(c));
     const byId = idCss ? await stampsOf(scope.locator(idCss)) : null;
-    if (!idCss || !byId || !byId.includes(fx)) return { selector: sel, missed: true };
-    const named: RecipeSelector = { role: sel.role, name: sel.name, ...(sel.exact != null ? { exact: sel.exact } : {}), ...(sel.frame ? { frame: sel.frame } : {}) };
-    const fallbacks = [...(byName.length === 0 ? [named] : []), ...(sel.fallbacks ?? []).filter((fb) => fb.css !== idCss)];
+    if (!idCss || !byId || !byId.includes(fx)) return { selector: sel, missed: "namesake" };
+    const fallbacks = (sel.fallbacks ?? []).filter((fb) => fb.css !== idCss);
     return {
       selector: {
         css: idCss,
@@ -2491,7 +2499,7 @@ export async function clickSelectorForElement(
         ...(sel.shownText ? { shownText: sel.shownText } : {}),
         ...(fallbacks.length ? { fallbacks } : {}),
       },
-      repinned: byName.length ? "namesake" : "nothing",
+      repinned: "namesake",
     };
   } catch {
     return { selector: sel };
@@ -14043,7 +14051,9 @@ export class AutoLearnAdapter extends BasePortalAdapter {
       this.debug?.event({
         type: r.repinned ? "click_selector_repinned" : "click_selector_misses_element",
         label: String(field.label ?? "").replace(/\s+/g, " ").trim().slice(0, 60),
-        ...(r.repinned ? { why: r.repinned === "namesake" ? "its name finds another control" : "its name finds nothing" } : {}),
+        why: r.repinned ? "its name finds another control; the step leads with its #id"
+          : r.missed === "nothing" ? "its name finds nothing; kept as harvested (the replay reaches it by a fallback or by name)"
+          : "its name finds another control and no #id finds it; kept as harvested",
       });
     }
     return r.selector;
