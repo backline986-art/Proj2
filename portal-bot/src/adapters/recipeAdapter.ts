@@ -1064,30 +1064,52 @@ const BARE_TEST_HOOK = /^\[(data-testid|data-test-role|data-test|data-cy|data-qa
 
 /** A recorded level whose css is ONLY a test hook (`[data-test-role="textbox-element"]`, the
  *  learner's testCss), read as its attribute and value; null for any other css. THE one reading of
- *  that shape: rowScopedStep builds a PV-array row's hook from it, identifyingLevels passes it over. */
+ *  that shape (componentRoleHook narrows it to the hooks that name a kind of control). */
 export function bareTestHook(level: RecipeSelector | undefined): { attr: string; value: string } | null {
   const m = BARE_TEST_HOOK.exec(String(level?.css ?? "").trim());
   return m ? { attr: m[1], value: m[2] } : null;
 }
 
+/** A RECORDED LEVEL THAT IS ONLY A COMPONENT HOOK, `[data-test-role="…"]`, read as its role; "" for
+ *  any other level. THE one reading of "this hook names a KIND of control, not this one". PowerClerk
+ *  stamps data-test-role per component type: every textbox is "textbox-element", every contact block
+ *  "contact-first-element", every PV-array row "pv-array-quantity" (ROW_HOOK_ROLES are such roles).
+ *  So rowScopedStep scopes the hook into one row before it names a control, and identifyingLevels
+ *  passes it over. data-testid / data-test / data-cy / data-qa are not read here, because the learner
+ *  records them as a control's own stable identity (testCss), and CityView's data-cy values each name
+ *  one control (inp-PRPermit4_TotalValuation) (#237). */
+export function componentRoleHook(level: RecipeSelector | undefined): string {
+  const h = bareTestHook(level);
+  return h?.attr === "data-test-role" ? h.value : "";
+}
+
 /**
- * THE RECORDED LEVELS THAT NAME THIS STEP'S CONTROL — the primary, then each fallback, less any level
- * that locates by a bare test hook alone (locator() reads its css only when it has no role and
- * name, label, placeholder, test id or text). A test hook names a KIND of control on many portals:
- * PowerClerk stamps every textbox data-test-role="textbox-element", and the learner records that
- * hook as a fallback on each data step (PacifiCorp 32f3d2b2 100-103, 111, 112). Judged on it, a
- * hidden or absent control read as "shown" because some OTHER textbox was visible, so the #237
- * conditional skip never fired on PowerClerk — the platform the issue cites for it (review of #237,
- * evidenceProbe2 P3b: verbatim 111/112 failed on a fill timeout, as on main). A step that recorded
- * nothing but its hook is judged on the hook — all the learner had; on a page of look-alikes it
- * reads "shown", and the step runs as recorded.
+ * THE RECORDED LEVELS THAT NAME THIS STEP'S CONTROL ARE EVERY LEVEL THE STEP RECORDED: label,
+ * role+name, placeholder, test id, text, #id, a data-testid / data-test / data-cy / data-qa hook,
+ * or any other css. Only a level that locates by a COMPONENT HOOK alone (componentRoleHook) is left
+ * out, and only when another recorded level is one of those identities. locator() reads a level's
+ * css only when the level has no role and name, label, placeholder, test id or text.
+ *
+ * Why the component hook goes: PowerClerk stamps every textbox data-test-role="textbox-element", and
+ * the learner records that hook as a fallback on each data step (PacifiCorp 32f3d2b2 100-103, 111,
+ * 112). Judged on it, an absent control read as "shown" because some OTHER textbox was visible, so
+ * the #237 conditional skip never fired on PowerClerk (review of #237, evidenceProbe2 P3b).
+ *
+ * Why every other hook stays: a level is left out for the KIND of attribute it is, never for being a
+ * hook. A unique data-testid is the learner's drift-recovery level ("a STABLE selector and a semantic
+ * identity for custom widgets that have no real label"). Take one revealed checkbox labelled only by
+ * a neighbouring div: getByLabel can never resolve it, but its data-testid always does. Dropping that
+ * level judged the checkbox absent and skipped it on the very job that revealed it (re-review of
+ * #237, rrLearnProbe). A step with no identity beside its component hook is judged on everything it
+ * recorded. On a page of look-alikes it then reads "shown", and it runs as recorded.
  */
 export function identifyingLevels(sel: RecipeSelector): RecipeSelector[] {
   const all: RecipeSelector[] = [sel, ...(sel.fallbacks ?? []).map((f) => ({ ...f, fallbacks: undefined }) as RecipeSelector)];
-  const byHookAlone = (l: RecipeSelector): boolean =>
-    !!bareTestHook(l) && !(l.role && l.name) && !l.label && !l.placeholder && !l.testId && !l.text;
-  const named = all.filter((l) => !byHookAlone(l));
-  return named.length ? named : all;
+  const byRoleHookAlone = (l: RecipeSelector): boolean =>
+    !!componentRoleHook(l) && !(l.role && l.name) && !l.label && !l.placeholder && !l.testId && !l.text;
+  const isIdentity = (l: RecipeSelector): boolean =>
+    !!((l.role && l.name) || l.label || l.placeholder || l.testId || l.text || (l.css && !byRoleHookAlone(l)));
+  return all.some(isIdentity) ? all.filter((l) => !byRoleHookAlone(l)) : all;
 }
 
 /** How long a #237 probe waits for a control to show before calling it hidden or absent: a control
@@ -4826,10 +4848,7 @@ export class RecipeAdapter extends BasePortalAdapter {
     const volatileId = (css?: string): boolean => /^#[A-Za-z_][\w:.-]*$/.test(String(css ?? "").trim());
     const bare = (x: RecipeSelector): RecipeSelector => ({ ...x, nth: undefined, fallbacks: undefined });
     const all = [sel, ...(sel.fallbacks ?? [])];
-    const hookOf = (x: RecipeSelector): string => {
-      const h = bareTestHook(x);
-      return h?.attr === "data-test-role" ? h.value : "";
-    };
+    const hookOf = componentRoleHook;
     const known = ROW_FIELD_HOOKS[String(s.field ?? "")];
     const role = all.map(hookOf).find(Boolean) || known?.role || "";
     const levels: RecipeSelector[] = [];
@@ -6559,7 +6578,7 @@ export class RecipeAdapter extends BasePortalAdapter {
    * 10 select on controls EnerGov fills and locks itself: the busy-control wait (4 s), then every
    * select route's timeouts on a control that can never take a pick — about 38 s each — and a false
    * SKIPPED "landed nothing" (audit p4). Returns the control when the step's recorded levels that
-   * name it (identifyingLevels — never a bare test hook that every textbox carries) show one that is
+   * name it (identifyingLevels, which drops PowerClerk's component hook beside an identity) show one that is
    * visible, disabled and already holding a value (the sweep's own reading, controlReadsUnanswered)
    * and no such level shows an ENABLED match the run could write instead; null otherwise (the
    * ordinary resolution runs, exactly as before).

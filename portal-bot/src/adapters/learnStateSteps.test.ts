@@ -11,7 +11,7 @@
 //   npx tsx portal-bot/src/adapters/learnStateSteps.test.ts
 import assert from "node:assert/strict";
 import type { RecipeStep } from "../../../shared/src/types";
-import { bareTestHook, identifyingLevels, inRecipeReviewTail, isCommitWordedClick, isDialogDismissalClick, learnStateNeverSkipped, learnStateSkipKind, learnStateSkippable } from "./recipeAdapter";
+import { bareTestHook, componentRoleHook, identifyingLevels,inRecipeReviewTail, isCommitWordedClick, isDialogDismissalClick, learnStateNeverSkipped, learnStateSkipKind, learnStateSkippable } from "./recipeAdapter";
 
 let failures = 0;
 const check = (label: string, fn: () => void): void => {
@@ -113,24 +113,42 @@ check("a dismissal is the WHOLE label: Book an Inspection, Lookup and Accept are
 });
 
 // ---- the levels a probe judges ------------------------------------------------------------------
-check("PacifiCorp 111's shape: the bare generic hook is passed over, the label and the id are judged", () => {
+check("PacifiCorp 111's shape (MUST-KEEP): the PowerClerk component hook is passed over, the label and the id are judged", () => {
   const sel = { label: "Battery Inverter Manufacturer", fallbacks: [{ css: "#A1B2C3D4E5F6Input" }, { css: "[data-test-role=\"textbox-element\"]" }] };
   assert.deepEqual(identifyingLevels(sel).map((l) => l.label ?? l.css), ["Battery Inverter Manufacturer", "#A1B2C3D4E5F6Input"]);
-  for (const css of ["[data-test-role=\"dropdownlist-element\"]", "[data-testid='text-field']", "[data-test=input]", "[data-cy=\"box\"]", "[data-qa=\"field\"]"]) {
-    assert.notEqual(bareTestHook({ css }), null, css);
+  for (const css of ["[data-test-role=\"dropdownlist-element\"]", "[data-test-role='checkbox-element']", "[data-test-role=pv-array-quantity]"]) {
+    assert.notEqual(componentRoleHook({ css }), "", css);
     assert.equal(identifyingLevels({ label: "Model", fallbacks: [{ css }] }).length, 1, css);
   }
 });
-check("a hook-only step is judged on its hook (all the learner had); a hook inside a richer css is not bare", () => {
+// The re-review of #237 found the fix round dropping these too. A revealed control findable only
+// through its unique test id was judged absent and skipped on the job that revealed it.
+check("MUST-PASS a data-testid / data-test / data-cy / data-qa level is judged: it names the control (the learner's drift-recovery level)", () => {
+  for (const css of ["[data-testid=\"xfmr-shared\"]", "[data-testid='battery-inverter-make']", "[data-test=input]", "[data-cy=\"inp-PRPermit4_TotalValuation\"]", "[data-qa=\"field\"]"]) {
+    assert.notEqual(bareTestHook({ css }), null, css);
+    assert.equal(componentRoleHook({ css }), "", css);
+    assert.deepEqual(identifyingLevels({ label: "Transformer is shared", fallbacks: [{ css }] }).map((l) => l.label ?? l.css), ["Transformer is shared", css], css);
+  }
+  // K1's shape: a drifted label, a per-render id, the unique test id, AND the component hook.
+  const k1 = { label: "Battery Inverter Make", fallbacks: [{ css: "#mui-12" }, { css: "[data-testid=\"battery-inverter-make\"]" }, { css: "[data-test-role=\"textbox-element\"]" }] };
+  assert.deepEqual(identifyingLevels(k1).map((l) => l.label ?? l.css), ["Battery Inverter Make", "#mui-12", "[data-testid=\"battery-inverter-make\"]"]);
+});
+check("a component hook is left out only when another level is an IDENTITY (a bare role or an nth alone is not one)", () => {
   const only = { css: "[data-test-role=\"inverter-model-select\"]" };
-  assert.deepEqual(identifyingLevels(only).map((l) => l.css), [only.css]);
+  assert.deepEqual(identifyingLevels(only).map((l) => l.css), [only.css], "hook-only: all the learner had");
+  const roleOnly = { role: "textbox", fallbacks: [{ css: "[data-test-role=\"textbox-element\"]" }] };
+  assert.equal(identifyingLevels(roleOnly).length, 2, "a bare role names no control: everything recorded is judged");
+  assert.equal(identifyingLevels({ css: "[data-test-role=\"textbox-element\"]", fallbacks: [{ nth: 2 } as never] }).length, 2, "an nth alone names no control");
+  assert.equal(identifyingLevels({ css: "[data-test-role=\"textbox-element\"]", fallbacks: [{ role: "textbox", name: "Model" }] }).length, 1, "role+name is an identity");
+  assert.equal(identifyingLevels({ css: "[data-test-role=\"textbox-element\"]", fallbacks: [{ css: "[data-cy=\"box\"]" }] }).length, 1, "a data-cy hook is an identity");
   assert.equal(bareTestHook({ css: "[data-test-role=\"pv-array\"] input" }), null);
   assert.equal(bareTestHook({ css: "#pcInputBase14" }), null);
   // A level that locates by its label never locates by the css riding along with it.
   assert.equal(identifyingLevels({ css: "#x", fallbacks: [{ label: "County", css: "[data-test-role=\"textbox-element\"]" }] }).length, 2);
 });
-check("the PV-array row hook reads the same shape (rowScopedStep keeps data-test-role only, as before)", () => {
-  assert.deepEqual(bareTestHook({ css: "[data-test-role=\"pv-array-qty\"]" }), { attr: "data-test-role", value: "pv-array-qty" });
+check("the PV-array row hook reads the same predicate (rowScopedStep keeps data-test-role only, as before)", () => {
+  assert.equal(componentRoleHook({ css: "[data-test-role=\"pv-array-quantity\"]" }), "pv-array-quantity");
+  assert.equal(componentRoleHook({ css: "[data-testid=\"qty\"]" }), "");
   assert.deepEqual(bareTestHook({ css: "[data-testid=\"qty\"]" }), { attr: "data-testid", value: "qty" });
 });
 
