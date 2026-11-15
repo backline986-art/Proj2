@@ -194,7 +194,7 @@ var continues = [];
 function step() { var m = /step=(\\d+)/.exec(location.hash); return m ? Number(m[1]) : 0; }
 function view(html) { document.getElementById("view").innerHTML = html; }
 function next() {
-  var n = step(); continues.push(n);
+  var n = step(); continues.push([n, Date.now()]);
   location.hash = "#/loading";
   setTimeout(function () { location.replace("#/w?step=" + (n + 1)); }, 250);
 }
@@ -250,7 +250,7 @@ interface Settle { step: number; ms: number; value: { clickedUrl: string; settle
 interface Run {
   res: { ok: boolean; message: string; data?: Record<string, unknown> };
   settles: Settle[];
-  clicks: Array<{ step: number; ms: number }>;
+  clicks: Array<{ step: number; ms: number; start: number; end: number }>;
   page: import("playwright").Page;
   close: () => Promise<void>;
 }
@@ -272,7 +272,7 @@ async function replay(id: string, entry: string, steps: RecipeStep[]): Promise<R
   // no routeSettle at all, and `settles` stays empty. Every click's whole executeClick (main has it
   // too, so the click times are measured on both sides of a kill run).
   const settles: Settle[] = [];
-  const clicks: Array<{ step: number; ms: number }> = [];
+  const clicks: Run["clicks"] = [];
   const a = adapter as unknown as {
     routeSettle?: (from: string) => Promise<unknown>;
     executeClick: (...args: unknown[]) => Promise<unknown>;
@@ -290,7 +290,7 @@ async function replay(id: string, entry: string, steps: RecipeStep[]): Promise<R
   const origClick = a.executeClick.bind(adapter);
   a.executeClick = async (...args) => {
     const t0 = Date.now();
-    try { return await origClick(...args); } finally { clicks.push({ step: a.currentStepIdx, ms: Date.now() - t0 }); }
+    try { return await origClick(...args); } finally { const end = Date.now(); clicks.push({ step: a.currentStepIdx, ms: end - t0, start: t0, end }); }
   };
   let res: Run["res"];
   try { res = await adapter.fillApplication({} as ProjectRecord) as Run["res"]; } catch (e) { res = { ok: false, message: `threw ${String(e).slice(0, 300)}` }; }
@@ -361,7 +361,11 @@ const cleanDetail = (r: Run): string => `ok=${r.res.ok} failedStepIndex=${String
   const classified = replayFailureTextWithoutPageContext(r.res.message);
   check("undone: the text the backend classifies says the page took back the route, and carries no URL material",
     /took back the route the click opened/.test(classified) && !/sectionName|showTemplates|mode=undo|→/.test(classified), classified.slice(0, 300));
-  const poisoned = String(r.res.message).replace(/\[url=[^\]]*→[^\]]*\]/, "[url=/app#/account/mfa-setup?sessionToken=Q7dnsK2 → /Error.aspx?code=500&kind=server]");
+  // The same stop on a portal whose routes carry those words: each route the message names, wherever
+  // it sits, swapped for one (the page-context bracket after it carries the live URL, left as is).
+  const poisoned = String(r.res.message)
+    .split("/app?mode=undo#/assistant?sectionName=All&showTemplates=false →").join("/app#/account/mfa-setup?sessionToken=Q7dnsK2 →")
+    .split("→ /app?mode=undo#/assistant?showTemplates=false").join("→ /Error.aspx?code=500&kind=server");
   const verdict = replayFailureBlamesRecipe(poisoned);
   check("undone: with URL words for MFA, DNS and a server error in the routes, the stop is still unattributed (kept and flagged for a person)",
     poisoned !== r.res.message && verdict.attribution === "unknown", `${verdict.attribution} — ${verdict.reason} :: ${poisoned.slice(0, 300)}`);
@@ -430,13 +434,20 @@ const cleanDetail = (r: Run): string => `ok=${r.res.ok} failedStepIndex=${String
   const r = await replay("spa-transient", `${base}/transient#/w?step=1`, steps);
   const secs = ((Date.now() - t0) / 1000).toFixed(1);
   const value = await r.page.locator("#final").inputValue({ timeout: 1000 }).catch(() => "(no step 3)");
-  const continues = await r.page.evaluate(() => (globalThis as unknown as { continues: number[] }).continues).catch(() => [] as number[]);
+  const continues = await r.page.evaluate(() => (globalThis as unknown as { continues: Array<[number, number]> }).continues).catch(() => [] as Array<[number, number]>);
   const at = await r.page.evaluate(() => location.hash).catch(() => "?");
-  console.log(`   transient (${secs}s): ok=${r.res.ok} failedStepIndex=${String(r.res.data?.failedStepIndex)} at=${at} continues=${JSON.stringify(continues)} msg=${String(r.res.message).slice(0, 300)}`);
+  // WHICH RECIPE STEP CLICKED EACH CONTINUE: the wizard step it was clicked on, by the executeClick
+  // window it fell in. The advance's own retry happens inside the same step's window, so a retry that
+  // skipped a page reads as two Continues in step 1 (on wizard steps 1 and 2), not one per step.
+  const byStep = [1, 2].map((s) => {
+    const w = r.clicks.find((c) => c.step === s);
+    return w ? continues.filter(([, t]) => t >= w.start && t <= w.end).map(([n]) => n) : [];
+  });
+  console.log(`   transient (${secs}s): ok=${r.res.ok} failedStepIndex=${String(r.res.data?.failedStepIndex)} at=${at} continues by recipe step=${JSON.stringify(byStep)} msg=${String(r.res.message).slice(0, 300)}`);
   console.log(`   transient trace=${JSON.stringify(trace(r).map((t) => `${t.i}:${t.outcome}`))} settles=${fmt(r.settles)} drift=${JSON.stringify(r.res.data?.driftWarnings ?? [])}`);
   await r.close();
-  check("MUST KEEP transient: each Continue was clicked once, on steps 1 and 2 (no retry skipped a page)",
-    JSON.stringify(continues) === "[1,2]", `continues=${JSON.stringify(continues)} at=${at}`);
+  check("MUST KEEP transient: recipe step 1 clicked Continue once, on wizard step 1, and recipe step 2 once, on wizard step 2 (no retry skipped a page)",
+    JSON.stringify(byStep) === "[[1],[2]]", `continues by recipe step=${JSON.stringify(byStep)} all=${JSON.stringify(continues)} at=${at}`);
   check("MUST KEEP transient: step 3's select was filled (\"Done\") and nothing failed or was skipped", value === "Done" && clean(r), `value=${value} ${cleanDetail(r)}`);
 }
 
