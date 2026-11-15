@@ -31,6 +31,7 @@ import { INFO_PAGE_PASS_EXPIRED, infoPageJobValues } from "../../shared/src/info
 import { isPlannerSecretKey, projectSecretValues } from "./projectSecrets";
 import { perJobAnswerKeyFor, perJobControlOfField } from "../../shared/src/perJobQuestions";
 import { parseHasBattery } from "../../shared/src/batteryControls";
+import { recipeSequenceProblems, recipeSequenceSentence } from "../../shared/src/recipeSequence";
 import { learnPortal, browserLimiter } from "../../portal-bot/src/index";
 import { resolveHeadless } from "../../portal-bot/src/browser";
 import { compareReviewFields, utilityIdentifiersEnteredBySteps } from "../../portal-bot/src/reviewScreenScraper";
@@ -456,6 +457,9 @@ export interface TrustGateSignals {
   substantiveFills: number;
   /** The form this run filled is not the form we meant to file (permit extension, renewal…). */
   formPurposeMismatch: boolean;
+  /** #241 — what in the SAVED steps cannot replay as recorded (shared/src/recipeSequence.ts, the
+   *  findings that refuse promotion, in words). Not an array = the steps were never checked. */
+  sequenceProblems: string[];
 }
 
 /**
@@ -505,6 +509,14 @@ export interface TrustGateSignals {
  *                             be recalculated". The model reaches item 6 too: the adapter now counts
  *                             an equipment value the portal did not keep as a required field left
  *                             blank, on whatever page it happened.)
+ *  12. THE SAVED STEPS REPLAY AS RECORDED (#241) — no refused advance followed by re-fills of the
+ *                             same page, no two writes that disagree on one control, no dialog left
+ *                             uncommitted or chooser left unpicked, no attachment-row step after the
+ *                             row's own commit (shared/src/recipeSequence.ts; the same check
+ *                             promoteRecordingIfEligible refuses on and finishPortalRecipe shows).
+ *                             Everything above reads what the walk SAW; this reads what it SAVED.
+ *                             (City of Bend structural, 2026-11-14: page 1 re-recorded after a
+ *                             refused "Next Step", and the live sweep stopped at that advance, #232.)
  *
  * Signal 3 is the one condition here that the pre-2026-09-10 gate computed and then ignored;
  * it is included deliberately, and it is the only change to the bar itself.
@@ -534,6 +546,8 @@ export function evaluateTrustGate(sig: TrustGateSignals): { trusted: boolean; bl
   if (sig.deadBindings.length) blockers.push(`step(s) bound to a field the resolver cannot produce: ${sig.deadBindings.slice(0, 8).join(", ")}`);
   if (sig.pageCount < 3 || sig.substantiveFills < 5) blockers.push(`too thin to auto-trust (${sig.pageCount} page(s), ${sig.substantiveFills} recorded fill(s))`);
   if (sig.formPurposeMismatch) blockers.push("the form this run filled is not the form this track files");
+  if (!Array.isArray(sig.sequenceProblems)) blockers.push("the recorded steps were not checked for a sequence that cannot replay");
+  else if (sig.sequenceProblems.length) blockers.push(`the recorded sequence cannot replay as recorded: ${sig.sequenceProblems.slice(0, 6).join("; ")}`);
   return { trusted: blockers.length === 0, blockers };
 }
 
@@ -2387,6 +2401,20 @@ async function autoLearnPortalInner(
     );
   }
 
+  // THE SAVED STEPS, READ AS A SEQUENCE (#241). Everything above reads what the walk saw; this reads
+  // the steps that will be saved and replayed (after the binding pass, so a literal the pass bound is
+  // judged as the binding replay will use). A finding that refuses promotion is a gate blocker and an
+  // issue in the notes; a note (no upload step while this filing carries documents) is an issue too,
+  // and rides on a trusted recipe's notes after its matching-key lead sentence.
+  const owedDocTypes = Object.keys(docsByType).filter((k) => docsByType[k]);
+  const sequence = recipeSequenceProblems(boundSteps, { owedDocuments: owedDocTypes.length ? owedDocTypes : null });
+  const sequenceRefusals = sequence.filter((p) => p.refusesPromotion).map((p) => p.detail);
+  const sequenceNotes = sequence.filter((p) => !p.refusesPromotion);
+  if (sequenceRefusals.length) {
+    verification.issues.push(`The recorded sequence cannot replay as recorded — ${sequenceRefusals.slice(0, 6).join("; ")}${sequenceRefusals.length > 6 ? `; +${sequenceRefusals.length - 6} more` : ""}. Re-learn this portal, or fix those steps, before trusting.`);
+  }
+  for (const n of sequenceNotes) verification.issues.push(`Sequence note: ${n.detail}.`);
+
   // THE TRUST GATE. Every condition above feeds evaluateTrustGate, which is where the bar is
   // written down in full — read that comment before changing anything here. Nothing may grant
   // trust past it: the code below only ever REMOVES trust (the replay self-test), never adds it.
@@ -2406,6 +2434,7 @@ async function autoLearnPortalInner(
     pageCount: learn.pageCount ?? 0,
     substantiveFills: substantiveSteps,
     formPurposeMismatch: purpose.mismatch,
+    sequenceProblems: sequenceRefusals,
   });
   let trusted = gate.trusted;
   if (hasHardBlockers) {
@@ -2551,7 +2580,8 @@ async function autoLearnPortalInner(
   savePortalRecipeSteps(db, stub.id, boundSteps, {
     status: trusted ? "complete" : "recording",
     notes: trusted
-      ? trustedWords.note
+      // The lead sentence is a matching key (notesSayVerified): a sequence note is its own segment AFTER it.
+      ? [trustedWords.note, ...(sequenceNotes.length ? [`[sequence check: ${recipeSequenceSentence(sequenceNotes)}]`] : [])].join(" | ")
       : `Auto-learned but NOT verified — review the captured fill and confirm before trusting.${bindingNote} Issues: ${verification.issues.join("; ") || "low confidence"}.`,
   });
   // The recipe row + steps now exist — route captured human fixes into it, and flush any

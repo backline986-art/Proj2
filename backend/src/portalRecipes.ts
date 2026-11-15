@@ -17,6 +17,7 @@ import {
 } from "./portalChannel";
 import { isHarnessAbort, looksBotBlocked } from "./runAbort";
 import { NOT_SERVED_FLAG_PREFIX } from "../../shared/src/portalNotServed";
+import { recipeSequenceProblems, recipeSequenceSentence, type RecipeSequenceProblem } from "../../shared/src/recipeSequence";
 import { certifiedModelFor } from "./cecEquipment";
 import { nowIso } from "./time";
 import { batteryStatus } from "./batteryServiceFeeder";
@@ -1084,23 +1085,73 @@ export function savePortalRecipeSteps(
   return getPortalRecipe(db, recipeId);
 }
 
+// ---------------------------------------------------------------------------
+// A SEQUENCE THAT CANNOT REPLAY AS RECORDED IS NOT PROMOTED, AND A PERSON WHO PROMOTES IT IS TOLD (#241).
+//
+// recipeSequenceProblems (shared/src/recipeSequence.ts) reads the saved steps: a refused advance
+// followed by re-fills of the same page, two writes that disagree on one control, a dialog left
+// uncommitted, a chooser left unpicked, attachment-row steps after the row's own commit, a recipe
+// that never reaches review. The 2026-11-14 audit of all 22 saved recipes found every one of these
+// in a saved recipe (City of Bend structural re-recorded page 1 after a refused "Next Step"; the live
+// sweep stopped there, #232), while both live-proven Coos Bay recipes carry none.
+//
+// The automatic door (promoteRecordingIfEligible) REFUSES on them. A person's "Recording looks right
+// — save recipe" (finishPortalRecipe) keeps its override — never block a person — but is SHOWN the
+// same findings: in its response, in a tagged note, and in the flag the dashboard's recipe row shows
+// with "Clear flag". A flag this check raised starts with RECIPE_SEQUENCE_FLAG_PREFIX, so the check
+// clears only its own flag when the steps come back clean — never an unattributed-replay flag, never
+// a portal's "not served" refusal. (A flagged recipe is never lent to another AHJ: the borrow pass
+// rejects every flagged donor.)
+// ---------------------------------------------------------------------------
+export const RECIPE_SEQUENCE_FLAG_PREFIX = "Sequence check:";
+const SEQUENCE_NOTE_TAG = "sequence check";
+
+/** The notes with this check's tagged segment replaced by `segment` ("" = removed). */
+function withSequenceNote(notes: unknown, segment: string): string {
+  if (segment) return upsertRecipeNote(notes, SEQUENCE_NOTE_TAG, segment);
+  return recipeNoteSegments(notes).filter((seg) => !seg.toLowerCase().startsWith(`[${SEQUENCE_NOTE_TAG}`)).join(" | ");
+}
+
+/** A finished recipe, with what the sequence check found in its steps (empty when nothing). */
+export type FinishedPortalRecipe = PortalRecipeWithFlag & { sequenceProblems: RecipeSequenceProblem[] };
+
 // Promote a "recording" recipe to "complete" once a human has verified/fixed the captured
 // fill (the "Recording looks right — save recipe" action, or automatically when the operator
 // marks the track submitted — their manual submit just demonstrated the flow works). A recipe
-// with no steps can't be promoted; already-complete is a no-op.
-export function finishPortalRecipe(db: AppDb, recipeId: string, finishedBy?: string): PortalRecipe {
+// with no steps can't be promoted; already-complete is a no-op (its findings are still returned).
+export function finishPortalRecipe(db: AppDb, recipeId: string, finishedBy?: string): FinishedPortalRecipe {
   const recipe = getPortalRecipe(db, recipeId);
-  if (recipe.status === "complete") return recipe;
+  if (recipe.status === "complete") return { ...recipe, sequenceProblems: recipeSequenceProblems(recipe.steps) };
   if (!recipe.steps.length) throw new HttpError(409, "This recording has no captured steps yet — nothing to save as a replayable recipe.");
+  const who = finishedBy || "operator";
+  const problems = recipeSequenceProblems(recipe.steps);
+  const refusing = problems.filter((p) => p.refusesPromotion);
+  const now = nowIso();
+  const sequenceNote = !problems.length ? ""
+    : refusing.length
+      ? `[sequence check ${now.slice(0, 10)}: promoted by ${who} although the recorded sequence cannot replay as recorded — ${recipeSequenceSentence(problems)}]`
+      : `[sequence check ${now.slice(0, 10)}: ${recipeSequenceSentence(problems)}]`;
+  const ownFlag = recipe.flagReason.trim().startsWith(RECIPE_SEQUENCE_FLAG_PREFIX);
+  const flag = refusing.length
+    ? `${RECIPE_SEQUENCE_FLAG_PREFIX} promoted by ${who} although the recorded sequence cannot replay as recorded — ${recipeSequenceSentence(refusing)}. Re-learn this portal, or fix those steps, then clear this flag.`
+    : ownFlag ? "" : recipe.flagReason;
+  const flaggedAt = refusing.length ? now : ownFlag ? null : recipe.flaggedAt;
   // The snapshot is dropped here, so its `[prev-recipe:…]` marker goes with it. Every
   // statement that clears prev_steps_json must strip the marker, or a marker outlives its
   // payload and describes the NEXT snapshot — the one thing that would make the stale
   // sweep's proven/unproven judgement lie.
-  db.run("UPDATE portal_recipes SET status = 'complete', prev_steps_json = NULL, auto_submit_enabled = 0, notes = ?, updated_at = ? WHERE id = ?", [
-    mergeRecipeNotes(stripPrevMarker(recipe.notes), `[verified by ${finishedBy || "operator"} — promoted from recording]`),
-    nowIso(), recipeId,
+  db.run("UPDATE portal_recipes SET status = 'complete', prev_steps_json = NULL, auto_submit_enabled = 0, notes = ?, flag_reason = ?, flagged_at = ?, updated_at = ? WHERE id = ?", [
+    withSequenceNote(mergeRecipeNotes(stripPrevMarker(recipe.notes), `[verified by ${who} — promoted from recording]`), sequenceNote),
+    flag, flaggedAt, now, recipeId,
   ]);
-  return getPortalRecipe(db, recipeId);
+  if (refusing.length) {
+    try {
+      addAuditLog(db, null, "human", who, "portal_recipe.promoted_over_sequence_findings", {
+        recipeId, profileKey: recipe.profileKey, problems: refusing.map((p) => ({ kind: p.kind, steps: p.steps.map((i) => i + 1) })),
+      });
+    } catch { /* audit is best-effort */ }
+  }
+  return { ...getPortalRecipe(db, recipeId), sequenceProblems: problems };
 }
 
 // AUTOMATIC promotion chokepoint (submit-observed signal, mark-submitted): promote a
@@ -1141,6 +1192,29 @@ export function promoteRecordingIfEligible(
       + `${(recipe.notes.match(/Required field\(s\) left blank[^.]*/i) || [""])[0].slice(0, 300)}. `
       + "Fill those fields (usually by adding the missing project/client data and re-learning), "
       + "or promote with an explicit written reason if the sweep is wrong.");
+  }
+
+  // REACHING REVIEW IS NOT THE SAME AS A REPLAYABLE SEQUENCE EITHER (#241). A learn that looped on a
+  // refused advance, or left a dialog uncommitted, still ends at review — and the operator's own
+  // submit of the CORRECTED fill in the left-open browser says nothing about the steps saved before
+  // the correction. Refused here, with WHY written on the recipe (a tagged note and the dashboard
+  // flag) and in the audit log, because every caller of this door swallows its outcome. A person can
+  // still promote it deliberately ("Recording looks right — save recipe", finishPortalRecipe).
+  const refusing = recipeSequenceProblems(recipe.steps).filter((p) => p.refusesPromotion);
+  if (refusing.length) {
+    const sentence = recipeSequenceSentence(refusing);
+    const now = nowIso();
+    db.run("UPDATE portal_recipes SET flag_reason = ?, flagged_at = ?, notes = ?, updated_at = ? WHERE id = ?", [
+      `${RECIPE_SEQUENCE_FLAG_PREFIX} not promoted to complete — the recorded sequence cannot replay as recorded: ${sentence}. Re-learn this portal, or fix those steps and use "Recording looks right — save recipe".`,
+      now, withSequenceNote(recipe.notes, `[sequence check ${now.slice(0, 10)}: not promoted (${opts.via}) — ${sentence}]`), now, recipeId,
+    ]);
+    try {
+      addAuditLog(db, opts.projectId ?? null, "system", "recipe promotion", "portal_recipe.promotion_refused", {
+        recipeId, via: opts.via, profileKey: recipe.profileKey,
+        problems: refusing.map((p) => ({ kind: p.kind, steps: p.steps.map((i) => i + 1) })),
+      });
+    } catch { /* audit is best-effort */ }
+    return null;
   }
   const finished = finishPortalRecipe(db, recipeId, opts.finishedBy);
   try {
