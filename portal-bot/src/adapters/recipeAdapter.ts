@@ -6528,16 +6528,17 @@ export class RecipeAdapter extends BasePortalAdapter {
     // portal that renders the hand-patched "Continue" onto the review page as a link, main reached
     // review through it and this rule stopped one page short (review of #237, fixture 2a; saved
     // recipes: PSE 26c953de step 6). Asked only for review_patch, after the kind is decided: a
-    // popup's absent "OK" handed to that rescue is Bend's "Book an Inspection". Its not-found line
-    // is this probe's answer, not the run's warning; a reading that could not run is an unknown,
-    // never a reason to skip.
+    // popup's absent "OK" handed to that rescue is Bend's "Book an Inspection". Whatever lines the
+    // rescue writes are this probe's, never the run's warnings (they are removed, by position, not
+    // by wording); found nothing, or could not read, and the skip stands as it did before this
+    // probe existed — the control already read absent or hidden on the review page.
     if (kind === "review_patch") {
       const want = String(sel.name || sel.text || "").trim();
       if (want) {
         const mark = this.driftWarnings.length;
         const named = await this.findEnabledControlByName(want);
-        const unknown = this.driftWarnings.splice(mark).filter((w) => !w.startsWith("no enabled control on this page has a name containing"));
-        if (named || unknown.length) { this.driftWarnings.push(...unknown); return null; }
+        this.driftWarnings.splice(mark);
+        if (named) return null;
       }
     }
     const label = (recordedClickLabel(step) || String(step.field ?? step.action)).slice(0, 48);
