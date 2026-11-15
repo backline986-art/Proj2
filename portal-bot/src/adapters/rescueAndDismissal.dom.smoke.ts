@@ -43,7 +43,8 @@ const shell = (body: string, script = ""): string => `<!doctype html><html><head
   body { font: 14px sans-serif; padding: 12px; }
   nav a { display:inline-block; padding:6px 10px; }
   button, a.btn { display:inline-block; padding:6px 10px; margin:4px; }
-  .dropdown-menu { display: none; } .dropdown:hover .dropdown-menu { display: block; }
+  .dropdown { position: relative; display: inline-block; }
+  .dropdown-menu { display: none; position: absolute; background: #fff; min-width: 200px; } .dropdown:hover .dropdown-menu { display: block; }
   .dropdown-menu a { display: block; padding: 6px; }
 </style></head><body>${body}<script>${script}</script></body></html>`;
 
@@ -133,9 +134,11 @@ const PAGES: Record<string, string> = {
       <a id="loginLink" class="btn" href="#/login">Log<span>in</span></a>
     </main>`, HITS),
   // [3] The closed-menu reveal's door: a DISABLED "Research" trigger (so the rescue passes it by)
-  // over a hover menu with one hidden entry; the recorded "Search" is hidden.
+  // over a hover menu with one hidden entry, Oregon's menu shape. The recorded "Search" is not on the
+  // page at all: a hidden one would itself be the first trigger the reveal arms (its innerText still
+  // reads "Search"), and the Research menu would never be asked about.
   "/researchmenu": shell(`
-    <main><button id="hiddenSearch" style="display:none">Search</button>
+    <main><h2>Records</h2>
       <div class="dropdown"><button id="researchBtn" disabled>Research</button>
         <div class="dropdown-menu"><a id="researchEntry" href="#/library">Research Library</a></div></div>
     </main>`, HITS),
