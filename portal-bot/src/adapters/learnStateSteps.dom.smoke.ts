@@ -14,11 +14,13 @@
 // Synthetic pages in those shapes (no real names, addresses or ids beyond the control shapes).
 //
 // MUST-PASS: A reaches the review stop with the five clicks skipped, named, never clicked into a
-//   timeout; B verifies the agreeing answer and names the differing one, each within seconds; C
-//   skips the absent "OK" and never clicks "Book an Inspection"; D skips the absent conditional
-//   control and still fills what follows.
+//   timeout (A2: on a last page whose words do not say review, by the recipe's own review tail); B
+//   verifies the agreeing answer and names the differing one, each within seconds; C skips the
+//   absent "OK" and never clicks "Book an Inspection"; D skips the absent conditional control and
+//   still fills what follows; G skips a mid-flow non-advancing click left on a hidden control.
 // MUST-EXCLUDE: a hidden control that SHOWS within the grace is clicked, not skipped (E); an
-//   ENABLED select is written as before, never judged "answered by the portal" (B2).
+//   ENABLED select is written as before, never judged "answered by the portal" (B2); a conditional
+//   switch whose real box is concealed inside a visible label is written, not skipped (F).
 //
 // Run: npx tsx portal-bot/src/adapters/learnStateSteps.dom.smoke.ts
 import "../smokeArtifactDirs";
@@ -102,7 +104,14 @@ const SWITCH = shell(`
   <style>.switch input{opacity:0;width:0;height:0;position:absolute} .slider{display:inline-block;width:40px;height:20px;background:#ccc}</style>
   <label class="switch" for="mon"><input type="checkbox" id="mon"><span class="slider"></span> Remote monitoring</label>`);
 
-const PAGES: Record<string, string> = { "/switch": SWITCH, "/review": REVIEW, "/summary": SUMMARY, "/answered": ANSWERED, "/nopopup": NO_POPUP, "/noreveal": NO_REVEAL, "/lateshow": LATE_SHOW };
+// G — a mid-flow page whose in-page toggle is hidden for good on this job (the learn's page showed
+// it): a non-advancing click resolution can only leave on a hidden control, with a write after it.
+const HIDDEN_TOGGLE = shell(`
+  <h2>Project Details</h2>
+  <button id="toggleHelp" class="btn invisible" type="button">Show Help</button>
+  <label for="notes">Notes to the utility</label><input id="notes">`);
+
+const PAGES: Record<string, string> = { "/switch": SWITCH, "/hiddentoggle": HIDDEN_TOGGLE, "/review": REVIEW, "/summary": SUMMARY, "/answered": ANSWERED, "/nopopup": NO_POPUP, "/noreveal": NO_REVEAL, "/lateshow": LATE_SHOW };
 const server = http.createServer((req, res) => {
   const url = new URL(req.url || "/", "http://127.0.0.1");
   res.writeHead(200, { "content-type": "text/html" });
@@ -221,6 +230,16 @@ try {
     { action: "stopForReview", note: "review" } as RecipeStep,
   ]));
   console.log(`   F ${tail(f)}`);
+
+  // ---- G: a non-advancing click left on a hidden control, mid-flow (a write follows) --------------
+  const g = await run(browser, recipeOf("learnstate-g", "/hiddentoggle", [
+    { action: "click", note: "human-patch: Show Help", selector: { css: "#toggleHelp", fallbacks: [{ role: "button", name: "Show Help" }] } } as RecipeStep,
+    { action: "fill", note: "Notes to the utility", field: "workDescription", selector: { css: "#notes", fallbacks: [{ label: "Notes to the utility" }] } } as RecipeStep,
+    { action: "stopForReview", note: "review" } as RecipeStep,
+  ]), { workDescription: "Rooftop solar" });
+  console.log(`   G ${tail(g)}`);
+  check("G MUST-PASS a non-advancing click resolution leaves on a hidden control is skipped, named", g.aging.some((n) => /Show Help/.test(n) && /hidden/i.test(n) && /#237/.test(n)), JSON.stringify(g.aging));
+  check("G MUST-PASS ...never clicked into a timeout: the next write lands and the stop is reached quickly", g.ok && g.values.notes === "Rooftop solar" && g.ms < 30_000, tail(g));
   check("F MUST-EXCLUDE a conditional switch whose widget is up is never skipped as 'not revealed'", !f.aging.some((n) => /#237/.test(n)) && !f.skipped.some((s) => /Remote monitoring/.test(s)), tail(f));
 } finally {
   await browser.close().catch(() => null);
