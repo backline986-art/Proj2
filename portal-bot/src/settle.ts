@@ -288,11 +288,18 @@ export async function waitForSettled(page: Page, opts: SettleOptions = {}): Prom
 }
 
 /**
- * THE BOUND ON A ROUTE SETTLE (#245). Tigard's (Tyler EnerGov, AngularJS) application assistant
- * finished initialising 1.12 s after the click that opened it (11:01:11.018 route change, 11:01:12.142
- * its own route rewrite; the three init responses landed 15-40 ms before the rewrite). 4 s is ~3.5x
- * that, and it is spent in full only by a page whose requests or URL never go quiet for the window
- * (a short-interval poll; a long-poll younger than the probe's 5 s request age).
+ * THE BOUND ON A ROUTE SETTLE (#245). It must outlast the rewrite that does the damage, not the whole
+ * request chain behind it. Tigard's (Tyler EnerGov, AngularJS) application assistant, opened from the
+ * menu, runs a chain with 4-15 ms between its stages (view template, settings, api/user/my ~500 ms,
+ * a 4-request batch, then a POST to ApplicationAssistant/trending of 1.3-2.5 s); from its first
+ * request to the end of trending that is 1.9-3.7 s in six learn traces. The route rewrite that wiped
+ * the live replay's search results lands at the end of the batch, before trending: 1.12 s after the
+ * click live (11:01:11.018 → 11:01:12.142), 1.1-1.9 s in the traces. So the settle normally waits
+ * the whole chain (2.7-4.0 s on Tigard) and returns settled; on the slowest trace it reaches this bound
+ * with trending still in flight, unsettled, having waited ~2 s past the rewrite. A larger bound buys
+ * nothing against the rewrite and is spent in full by a page whose requests or URL never go quiet for
+ * the window (a short-interval poll; a long-poll younger than the probe's 5 s request age). A settle
+ * that reaches the bound says so in the step's phase record (recipeAdapter routeSettle).
  */
 export const ROUTE_SETTLE_MS = 4_000;
 
@@ -341,32 +348,48 @@ export function routeText(url: string): string {
 
 /** A URL as a route and its parameters: the route is origin + path + the hash's path; the parameters
  *  are the query's (`?k`) and the hash query's (`#k`), so a hash router's `#/view?k=v` reads like a
- *  path router's `/view?k=v`. null when it does not parse. */
+ *  path router's `/view?k=v`. An empty parameter (`?q=`) is left out, so it reads like an absent one:
+ *  a router that drops it is normalising, not taking anything back. null when it does not parse. */
 function routeParts(url: string): { route: string; params: Map<string, string> } | null {
   let u: URL;
   try { u = new URL(url); } catch { return null; }
   const params = new Map<string, string>();
-  for (const k of new Set(u.searchParams.keys())) params.set(`?${k}`, u.searchParams.getAll(k).join(","));
+  const put = (k: string, v: string): void => { if (v !== "") params.set(k, v); };
+  for (const k of new Set(u.searchParams.keys())) put(`?${k}`, u.searchParams.getAll(k).join(","));
   const hash = u.hash.startsWith("#") ? u.hash.slice(1) : u.hash;
   const q = hash.indexOf("?");
   if (q >= 0) {
     const hp = new URLSearchParams(hash.slice(q + 1));
-    for (const k of new Set(hp.keys())) params.set(`#${k}`, hp.getAll(k).join(","));
+    for (const k of new Set(hp.keys())) put(`#${k}`, hp.getAll(k).join(","));
   }
   return { route: `${u.origin}${u.pathname}#${q >= 0 ? hash.slice(0, q) : hash}`, params };
 }
 
 /**
- * DID THE PAGE TAKE BACK THE ROUTE A CLICK OPENED? (#245) `before` is the URL before the click,
+ * DID THE PAGE TAKE BACK WHAT A CLICK DID TO ITS URL? (#245) `before` is the URL before the click,
  * `clicked` the URL the click left, `settled` the URL now. A URL that merely differs from `before` is
  * not proof of an advance: Tigard's "Search" went from #/applicationAssistant to
  * ?sectionName=All&showTemplates=false, and the assistant's own rewrite left ?showTemplates=false —
- * not `before`, yet the search was gone. Undone means:
- *   - the page left the click's route and went back to the one it was on; or
- *   - on the click's route still, a parameter the click set no longer holds the click's value.
+ * not `before`, yet the search was gone. Undone means exactly one of:
+ *   - the click left the route, and the page is back on it with the same parameters it had there:
+ *     back where it was (#/a → #/b → #/a; /apply → /apply/search?t=all → /apply);
+ *   - the click changed only parameters, the page is still on that route, and a parameter the click
+ *     SET (to a value) no longer holds it (Tigard: sectionName=All gone).
+ * ONLY WHAT THE CLICK DID COUNTS, never what the page added or restored around it, because a router
+ * normalising its own URL looks exactly like that and the click's effect held (review of #245):
+ *   - a page back on the route it left but in a NEW state is moving on, not going back: a wizard
+ *     #/w?step=1 → #/loading → #/w?step=2 (the round-1 rule called this undone, and its retry clicked
+ *     Continue a second time and skipped a page). A parameter the old state lacked is a new state too
+ *     (#/w → #/loading → #/w?step=2): the URL cannot tell that from a page that went back and added a
+ *     parameter of its own, so it keeps today's reading, moved;
+ *   - a parameter the click REMOVED that the page put back is a default re-added, not the click
+ *     taken back: a search #/s?q=a&page=2 → ?q=b → ?q=b&page=1 kept q=b (the round-1 rule called it
+ *     undone; a search page keeps its identity, so "advance: Search" false-stopped). A URL that went
+ *     all the way back to `before` this way still reads as not moved: the caller compares it with
+ *     `before` first.
  * A page that went on to another route ("#/loading" → "#/dashboard"), or that kept everything the
- * click set and added to it (Tigard's "Apply": #/applicationAssistant → ?showTemplates=false), is not.
- * Unparseable URLs, or a click that did not change the URL, are never undone (the caller keeps
+ * click set and added to it (Tigard's "Apply": #/applicationAssistant → ?showTemplates=false), is not
+ * undone. Unparseable URLs, or a click that did not change the URL, are never undone (the caller keeps
  * today's reading).
  */
 export function routeEffectUndone(before: string, clicked: string, settled: string): boolean {
@@ -375,11 +398,9 @@ export function routeEffectUndone(before: string, clicked: string, settled: stri
   const b = routeParts(clicked);
   const c = routeParts(settled);
   if (!a || !b || !c) return false;
-  if (c.route !== b.route) return c.route === a.route;
-  if (b.route !== a.route) return false;
-  for (const k of new Set([...a.params.keys(), ...b.params.keys()])) {
-    if (a.params.get(k) !== b.params.get(k) && c.params.get(k) !== b.params.get(k)) return true;
-  }
+  if (b.route !== a.route) return c.route === a.route && c.params.size === a.params.size && [...a.params].every(([k, v]) => c.params.get(k) === v);
+  if (c.route !== a.route) return false;
+  for (const [k, v] of b.params) if (a.params.get(k) !== v && c.params.get(k) !== v) return true;
   return false;
 }
 

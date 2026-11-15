@@ -9,6 +9,11 @@
 // that advance is real. routeEffectUndone must tell those two apart on the URLs alone, and must not
 // call a redirect to another route ("#/loading" → "#/dashboard") undone.
 //
+// Review of #245: ONLY WHAT THE CLICK DID COUNTS. The round-1 rule also called undone a wizard that
+// moved on through a transient route (#/w?step=1 → #/loading → #/w?step=2) and a search whose router
+// re-added its default page=1 — the click's effect held both times, and the replay retried Continue
+// (skipping a page) or false-stopped "advance: Search". Those rows (T1-T4) fail on the round-1 rule.
+//
 // settleAfterRoute on a click that did not change the URL returns null with no page read beyond
 // page.url(): no evaluate, no wait (the issue's MUST-KEEP).
 //
@@ -31,8 +36,10 @@ const cases: Array<{ label: string; before: string; clicked: string; settled: st
     before: `${H}#/home`, clicked: `${H}#/loading`, settled: `${H}#/dashboard`, undone: false },
   { label: "the page went back to the route it was on → undone",
     before: `${H}#/a`, clicked: `${H}#/b`, settled: `${H}#/a`, undone: true },
-  { label: "went back to the route it was on, with a parameter of its own → undone",
-    before: `${H}#/a`, clicked: `${H}#/b`, settled: `${H}#/a?x=1`, undone: true },
+  // Flipped in the review round: a parameter the old state lacked is a new state; the URL cannot tell
+  // "went back and added its own" from a wizard #/w → #/loading → #/w?step=2 that moved on (below).
+  { label: "back on the route it left, with a parameter it did not have there → not undone (a new state; today's reading)",
+    before: `${H}#/a`, clicked: `${H}#/b`, settled: `${H}#/a?x=1`, undone: false },
   { label: "the click's URL held → not undone",
     before: `${H}#/a`, clicked: `${H}#/b?q=1`, settled: `${H}#/b?q=1`, undone: false },
   { label: "a click that did not change the URL → never undone",
@@ -41,8 +48,36 @@ const cases: Array<{ label: string; before: string; clicked: string; settled: st
     before: `${H}#/s?q=1`, clicked: `${H}#/s?q=2`, settled: `${H}#/s?q=1`, undone: true },
   { label: "a parameter the click changed holds, another was added → not undone",
     before: `${H}#/s?q=1`, clicked: `${H}#/s?q=2`, settled: `${H}#/s?q=2&page=1`, undone: false },
-  { label: "a parameter the click removed was put back → undone",
-    before: `${H}#/s?q=1&f=x`, clicked: `${H}#/s?q=1`, settled: `${H}#/s?q=1&f=x`, undone: true },
+  // Flipped in the review round: only what the click SET counts. A removed parameter put back reads
+  // like a router re-adding its default; and this URL is `before` again, which the replay's urlMoved
+  // already reads as not moved before it asks this question, so only the stop's wording changes.
+  { label: "a parameter the click removed was put back → not undone (only what the click set counts)",
+    before: `${H}#/s?q=1&f=x`, clicked: `${H}#/s?q=1`, settled: `${H}#/s?q=1&f=x`, undone: false },
+  // ── review of #245: the shapes the round-1 rule called undone although the click's effect held ──
+  { label: "T1 transient: #/w?step=1 → #/loading → #/w?step=2 (back on the route, moved on) → not undone",
+    before: `${H}#/w?step=1`, clicked: `${H}#/loading`, settled: `${H}#/w?step=2`, undone: false },
+  { label: "transient from a step with no parameter: #/w → #/loading → #/w?step=2 → not undone",
+    before: `${H}#/w`, clicked: `${H}#/loading`, settled: `${H}#/w?step=2`, undone: false },
+  { label: "transient back exactly where it was: #/w?step=1 → #/loading → #/w?step=1 → undone",
+    before: `${H}#/w?step=1`, clicked: `${H}#/loading`, settled: `${H}#/w?step=1`, undone: true },
+  { label: "back where it was with its parameters in another order → undone",
+    before: `${H}#/list?a=1&b=2`, clicked: `${H}#/detail`, settled: `${H}#/list?b=2&a=1`, undone: true },
+  { label: "T2 search: #/search → ?q=solar → ?q=solar&page=1 (the router adds its default page) → not undone",
+    before: `${H}#/search`, clicked: `${H}#/search?q=solar`, settled: `${H}#/search?q=solar&page=1`, undone: false },
+  { label: "search from a page=1 URL: #/search?page=1 → ?q=solar → ?q=solar&page=1 → not undone",
+    before: `${H}#/search?page=1`, clicked: `${H}#/search?q=solar`, settled: `${H}#/search?q=solar&page=1`, undone: false },
+  { label: "T3 search on page 2: ?q=a&page=2 → ?q=b → ?q=b&page=1 (the default re-added) → not undone",
+    before: `${H}#/s?q=a&page=2`, clicked: `${H}#/s?q=b`, settled: `${H}#/s?q=b&page=1`, undone: false },
+  { label: "T4 EnerGov menu Apply from inside the assistant: ?showTemplates=false → (none) → ?showTemplates=false → not undone",
+    before: `${H}#/applicationAssistant?showTemplates=false`, clicked: `${H}#/applicationAssistant`, settled: `${H}#/applicationAssistant?showTemplates=false`, undone: false },
+  { label: "Tigard Search with Apply already settled (?sectionName=Trending): the rewrite dropped sectionName=All → undone",
+    before: `${H}#/applicationAssistant?sectionName=Trending&showTemplates=false`, clicked: `${H}#/applicationAssistant?sectionName=All&showTemplates=false`, settled: `${H}#/applicationAssistant?showTemplates=false`, undone: true },
+  { label: "an empty parameter the router drops is normalising: ?x=1 → ?x=1&q= → ?x=1&page=1 → not undone",
+    before: `${H}#/s?x=1`, clicked: `${H}#/s?x=1&q=`, settled: `${H}#/s?x=1&page=1`, undone: false },
+  { label: "path router search normalised: /search → /search?q=x → /search?q=x&page=1 → not undone",
+    before: "https://p.example.test/search", clicked: "https://p.example.test/search?q=x", settled: "https://p.example.test/search?q=x&page=1", undone: false },
+  { label: "a parameter-only click, then the page went on to another route → not undone",
+    before: `${H}#/s?q=1`, clicked: `${H}#/s?q=2`, settled: `${H}#/detail?id=9`, undone: false },
   { label: "path router: /apply → /apply/search?t=all → /apply (query dropped) → undone",
     before: "https://p.example.test/apply", clicked: "https://p.example.test/apply/search?t=all", settled: "https://p.example.test/apply", undone: true },
   { label: "path router: a full page load to a new path that then adds a query → not undone",
