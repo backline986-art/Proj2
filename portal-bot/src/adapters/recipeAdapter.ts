@@ -114,7 +114,7 @@ import { imageToPdfBytes, shouldConvertToPdf } from "../imageToPdf";
 import { removeUploadStaging, uploadPayloadFor, type PreparedUpload } from "./uploadPayload";
 import { attachmentTypeFor, isDocumentTypeList } from "./attachmentTypes";
 import { chooseSubmittedRecord, cleanRecordLink, readApplicationLedgerInPage, recordLinkForNumberInPage, type LedgerEntry } from "./submissionLedger";
-import { exactUploadDocType, fileTypeAllowed, formsSlotDocTypes, UPLOAD_LABEL_PATTERNS, uploadForbidsSubstitute, uploadTextNamesNoDocument } from "./autoLearnAdapter";
+import { DISMISS_LABEL, exactUploadDocType, fileTypeAllowed, formsSlotDocTypes, UPLOAD_LABEL_PATTERNS, uploadForbidsSubstitute, uploadTextNamesNoDocument } from "./autoLearnAdapter";
 import { readFeeStop, secretValuesOf, type FeeStopKind, type FeeStopReading } from "../feeStop";
 import { reviewComparison, scrapeReviewScreen as scrapeReviewScreenShared, utilityIdentifiersEnteredBySteps, type ReviewMismatch } from "../reviewScreenScraper";
 import { controlReadsUnanswered, pinEmptyRequiredControl, PINNED_CONTROL_ATTR, SWEPT_BLANK_ATTR, sweepEmptyRequiredControls, type EmptyRequired } from "../requiredControlSweep";
@@ -475,6 +475,68 @@ function isSignatureStep(step: RecipeStep): boolean {
 
 function isFinalSubmitStep(step: RecipeStep): boolean {
   return (step as { isFinalSubmit?: unknown }).isFinalSubmit === true;
+}
+
+/** THE NAME RESCUE MATCHES WHOLE WORDS, NEVER A FRAGMENT (#233). The pattern (a RegExp source for
+ *  the "u" flag) that finds `wants` in a label only on token boundaries: no letter or digit
+ *  directly before or after it, so the whole label matches and so do words inside a longer one,
+ *  but "ok" is never found in "Book an Inspection" or "Lookup". Bend's "advance: OK", its
+ *  upload-error popup absent, was handed to the rescue, which took the shortest label CONTAINING
+ *  "ok" — "Book an Inspection" — and the run navigated off the application. Both strings are
+ *  lower-cased by the caller. One predicate, three readers: findEnabledControlByName and
+ *  revealMenuAndPick's trigger search compile this source in the page (a closed-over function is a
+ *  ReferenceError there), and labelHasWholeWords answers it in Node. Only syntax characters are
+ *  escaped: under "u" any other identity escape is a SyntaxError.
+ *
+ *  THE LAST WANTED WORD MAY TAKE A PLURAL ENDING, "s" OR "es", AND NOTHING ELSE (#233). main's
+ *  substring test reached "Add Attachments" for a recorded "Add Attachment" and "Permits" for
+ *  "Permit"; whole words alone dropped those, a stop on a shape main ran clean. Only when `wants`
+ *  ends in a letter ("next »" and "cart (0)" take no ending), only at the end, never before it:
+ *  "ok" is still not in "Book", "Lookup" or "Bookmarks", "search" not in "Research", "apply" not in
+ *  "Applying". */
+export function wholeWordsPattern(wants: string): string {
+  const raw = String(wants ?? "");
+  const esc = raw.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const plural = /\p{L}$/u.test(raw) ? "(?:e?s)?" : "";
+  return `(?<![\\p{L}\\p{N}])${esc}${plural}(?![\\p{L}\\p{N}])`;
+}
+
+/** Does `label` carry `wants` as whole words? (wholeWordsPattern, answered in Node.) */
+export function labelHasWholeWords(label: string, wants: string): boolean {
+  if (!label || !wants) return false;
+  return new RegExp(wholeWordsPattern(wants), "u").test(label);
+}
+
+/** A recorded handle that names a popup: an id, class, frame or section carrying one of these
+ *  words (Bend's `#uploadErrorPopupOk`, a `.modal-footer` button, Accela's `ACADialogFrame`). */
+const POPUP_HANDLE = /popup|popover|modal|dialog|lightbox/i;
+
+/**
+ * A DIALOG-DISMISSAL CLICK (#233): a recorded click that only closed or acknowledged a popup the
+ * learn met. Both must hold, from the recording alone:
+ *   - its WHOLE label is a dismissal word — DISMISS_LABEL, the dismisser's own vocabulary ("OK",
+ *     "Close", "Dismiss", "×"). A label that only contains one is not ("Book an Inspection",
+ *     "OK, submit my application"), and neither is Accela's dialog "Continue" / "Select" / "Look
+ *     Up", whose ids all carry "phPopup";
+ *   - one of its recorded handles names a popup (POPUP_HANDLE): a css or test id of any selector
+ *     level, a frame, or the fingerprint's id, name, aria-label or section. A bare
+ *     `role=button "Close"` with nothing else is not enough, and keeps main's path.
+ * Never the flagged final submit. Bend's electrical step 22, "advance: OK" with the fallback
+ * `#uploadErrorPopupOk`, is one: the learn's upload hit an error popup and the learner dismissed it
+ * as a step. Such a step runs exactly main's path; only where main's click times out on a popup
+ * that is not showing is it skipped instead of failing the run (dismissalClickTimedOutUnshown).
+ */
+export function isDialogDismissalStep(step: RecipeStep): boolean {
+  if (!step || step.action !== "click" || isFinalSubmitStep(step)) return false;
+  const sel = (step.selector ?? {}) as RecipeSelector;
+  const own = String(sel.name || sel.text || "").replace(/\s+/g, " ").trim();
+  // A css-only selector: the label the learner wrote after its note prefix ("advance: OK").
+  const label = own || String(step.note ?? "").replace(/^[^:]*:\s*/, "").trim();
+  if (!DISMISS_LABEL.test(label)) return false;
+  const fp = step.fingerprint ?? {};
+  const handles: unknown[] = [sel, ...(sel.fallbacks ?? [])].flatMap((s) => [s?.css, s?.testId, s?.frame]);
+  handles.push(fp.id, fp.name, fp.ariaLabel, fp.section);
+  return handles.some((h) => POPUP_HANDLE.test(String(h ?? "")));
 }
 
 // A fill on a control that never becomes actionable must not cost Playwright's 30s
@@ -1614,6 +1676,10 @@ export class RecipeAdapter extends BasePortalAdapter {
   private namesakeReported = new Set<string>();
   /** #228 — the rescues (`<array pass>:<index>:<recorded id>`) an agingNotes line has already named. */
   private namesakeRescued = new Set<string>();
+  /** The control a dialog-dismissal click's attempt resolved to and handed to executeClick (#233),
+   *  read only by dismissalClickTimedOutUnshown when that click times out: a target that is showing
+   *  (its popup up, the click intercepted) keeps main's retry. Reset at the top of every step. */
+  private dismissalTarget: unknown = null;
   /** Every click/press/goto the chokepoint refused this run, in order. */
   guardRefusals: string[] = [];
   /** How long an upload step waits for its named file slot to MOUNT (client-rendered steps show a
@@ -3872,6 +3938,42 @@ export class RecipeAdapter extends BasePortalAdapter {
             return fail(err.message, { executed, skipped, healedSteps: this.healedSteps, driftWarnings: this.driftWarnings, agingNotes: this.agingNotes, guardRefusals: this.guardRefusals, failedStepIndex: stepIdx, trace, slowSteps, fieldsVerified: this.fieldsVerified, fieldsUnverified: this.fieldsUnverified, pageShotDir: this.pageShotDir, outcomeShotPath: this.outcomeShotPath });
           }
           if (!failureContext) failureContext = await this.timed("failure-context", () => this.captureFailureContext(step, stepIdx).catch(() => ""));
+          // A DIALOG-DISMISSAL CLICK THAT TIMED OUT ON A POPUP THAT IS NOT SHOWING IS SKIPPED, NAMED
+          // (#233) — where main would go on to fail the run, and only there.
+          //
+          // Bend's electrical step 22 is "advance: OK" on #uploadErrorPopupOk: the learn's upload hit
+          // an error popup and the learner dismissed it as a step. On a run whose upload goes through
+          // the popup never opens. Live 2026-11-14 main clicked the hidden OK into a 30 s timeout,
+          // retried it after three reloads (160 s) and failed the run. A click that only closes a
+          // popup has nothing to do when the popup is not there.
+          //
+          // The step has already run main's whole path: resolution with the whole-words rescue,
+          // executeClick's gates, main's waits. So a popup that paints at any time main's click
+          // would take it is clicked as on main, and so is one the rescue finds by name under any
+          // markup. Only the click's own TimeoutError, on a target and recorded levels that show
+          // nothing (dismissalClickTimedOutUnshown), skips — here, before the backoff and the reload:
+          // a reload is a new document, so main's retries cannot bring back a popup the previous
+          // step's round trip produced, and on a client-rendered wizard they throw away the page the
+          // next recorded step needs. Never another failure kind, never past review, never the
+          // flagged final submit, never a gate refusal. Nothing is clicked here.
+          if (await this.dismissalClickTimedOutUnshown(step, err, pastReview)) {
+            const said = String(step.note || step.selector?.name || "OK").slice(0, 44);
+            this.agingNotes.push(
+              `"${said}" dismisses a popup that is not showing on this run — its click timed out on a hidden or absent control, so the step was skipped as not applicable rather than failing the run (the learn met that popup; this run did not) (#233)`,
+            );
+            skipped.push(String(step.note || step.action).slice(0, 70));
+            performed = false;
+            // The trace names the skip without re-resolving the step: describeResolved would hand
+            // it to the name rescue and the closed-menu reveal (which hovers) after the fact.
+            trace.push({
+              i: stepIdx, action: step.action, note: String(step.note ?? "").slice(0, 52),
+              outcome: "SKIPPED", page: await currentPageLabel(),
+              resolved: "its popup is not showing — the click timed out on a hidden or absent control (skipped as not applicable)",
+              ...(skipped.length <= 3 && failureContext ? { shot: failureContext } : {}),
+            });
+            succeeded = true;
+            break;
+          }
           const isTimeout = err instanceof Error && /timeout|TimeoutError/i.test(err.message);
           // A STRICT-MODE VIOLATION IS ALWAYS WORTH ONE MORE PASS, and it is not a timeout.
           //
@@ -6792,6 +6894,7 @@ export class RecipeAdapter extends BasePortalAdapter {
   private static readonly WRITE_ACTIONS: ReadonlySet<string> = new Set(["fill", "select", "check", "uncheck", "upload"]);
 
   private async executeStepInner(step: RecipeStep, pastReview: boolean): Promise<boolean> {
+    this.dismissalTarget = null;
     // ONE CONTACT, ONE IDENTITY at replay (see trackContactBlock) — before the step runs, so a
     // dialog Continue is preceded by the dialog made the section identity.
     await this.trackContactBlock(step).catch(() => null);
@@ -7069,6 +7172,9 @@ export class RecipeAdapter extends BasePortalAdapter {
         return true;
       }
       case "click":
+        // What a dismissal click's attempt is about to wait on, for the retry loop's not-shown
+        // reading if that wait times out (#233). A read, never a change to the click.
+        if (isDialogDismissalStep(step)) this.dismissalTarget = scoped;
         return this.executeClick(step, scoped, pastReview);
       case "fill": {
         let v = this.resolveValue(step);
@@ -9922,6 +10028,54 @@ export class RecipeAdapter extends BasePortalAdapter {
   }
 
   /**
+   * DID A DIALOG-DISMISSAL CLICK FAIL ONLY BECAUSE ITS POPUP IS NOT SHOWING? (#233; see
+   * isDialogDismissalStep.) Asked by the retry loop about an attempt that has already thrown, so
+   * the step has run main's whole path first: its resolution (the whole-words name rescue
+   * included), executeClick's gates, waitForElement's 10 s and the click's own 30 s.
+   *
+   * True only when all of these hold — every doubt answers false, and false is main's retry:
+   *   - a recorded dismissal (isDialogDismissalStep: never the flagged final submit), before review;
+   *   - the error is THE CLICK'S Playwright TimeoutError. Not main's looser /timeout/ reading of
+   *     any message (assertAdvanced's "did not advance" can quote page text), never a gate refusal
+   *     (a ReplayGuardRefusal), a stop, or any other failure kind;
+   *   - the attempt reached the click with a target (dismissalTarget), and that target matches
+   *     nothing showing — no element at all, or only hidden ones (Bend's OK is display:none inside
+   *     a closed <dialog>, or not in the DOM). A SHOWING target whose click was intercepted is a
+   *     popup that is up, and keeps main's retry;
+   *   - no level of the recorded selector matches anything showing either.
+   * Read-only: count and computed style, never the name rescue (it tags an element) or the
+   * closed-menu reveal (it hovers). Nothing is clicked.
+   */
+  private async dismissalClickTimedOutUnshown(step: RecipeStep, err: unknown, pastReview: boolean): Promise<boolean> {
+    if (pastReview || !isDialogDismissalStep(step)) return false;
+    if (!(err instanceof Error) || err instanceof ReplayGuardRefusal) return false;
+    if (err.name !== "TimeoutError" || !/\bclick\b/.test(err.message)) return false;
+    if (!this.page || typeof this.page.evaluate !== "function" || !step.selector || !this.dismissalTarget) return false;
+    // Is anything this locator matches showing? null = cannot tell (main's path).
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const showing = async (loc: any): Promise<boolean | null> => {
+      if (!loc || typeof loc.count !== "function") return null;
+      let n: number;
+      try { n = await loc.count(); } catch { return null; }
+      for (let i = 0; i < Math.min(5, n); i++) {
+        const one = typeof loc.nth === "function" ? loc.nth(i) : loc;
+        if (typeof one?.evaluate !== "function") return null;
+        if (await this.isTrulyVisible(one)) return true;
+      }
+      return false;
+    };
+    if ((await showing(this.dismissalTarget)) !== false) return false;
+    const sel = step.selector;
+    for (const lv of [{ ...sel, fallbacks: undefined }, ...(sel.fallbacks ?? []).map((fb) => ({ ...fb, fallbacks: undefined }))] as RecipeSelector[]) {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      let loc: any = null;
+      try { loc = this.locator(lv); } catch { return false; }
+      if ((await showing(loc)) !== false) return false;
+    }
+    return true;
+  }
+
+  /**
    * Reduce a locator to exactly one element, choosing the way a person would.
    *
    * Silent when there is nothing to choose (0 or 1 match), which is the common case.
@@ -10117,14 +10271,32 @@ export class RecipeAdapter extends BasePortalAdapter {
   private async revealMenuAndPick(want: string, hint: string): Promise<unknown | null> {
     if (!this.page || typeof this.page.evaluate !== "function") return null;
     // 1) Find a trigger matching the recorded name that owns hidden links, and tag it.
-    const armed = await this.page.evaluate((needle: string) => {
+    //    WHOLE WORDS (#233), the name rescue's own test (wholeWordsPattern) on the same readings:
+    //    a "Research" menu is never the trigger for "Search". main's substring test stays the
+    //    pre-filter, so a trigger is one main also took.
+    const armed = await this.page.evaluate(({ needle, whole }: { needle: string; whole: string }) => {
       const norm = (t: string): string => t.replace(/\s+/g, " ").trim();
       const strip = (t: string): string => norm(t).replace(/^[a-z][a-z_]{2,}(?=[A-Z])/, "");
+      // The unglued second reading — findEnabledControlByName's: change one, change both.
+      const unglue = (el: HTMLElement, t: string): string => {
+        let s = t;
+        for (const d of Array.from(el.querySelectorAll("*"))) {
+          if (d.children.length) continue;
+          const tok = (d.textContent || "").trim();
+          if (!/^[a-z][a-z0-9_]{1,24}$/.test(tok) || tok.length >= s.length) continue;
+          if (s.endsWith(tok) && /[A-Za-z0-9]/.test(s.charAt(s.length - tok.length - 1))) s = s.slice(0, s.length - tok.length);
+          else if (s.startsWith(tok) && /[A-Za-z0-9]/.test(s.charAt(tok.length))) s = s.slice(tok.length);
+        }
+        return s;
+      };
+      const wholeWords = new RegExp(whole, "u");
       const wants = needle.toLowerCase();
       const triggers = Array.from(document.querySelectorAll("button, a, [role=button], summary")) as HTMLElement[];
       for (const t of triggers) {
         const label = strip(t.innerText || t.getAttribute("aria-label") || "");
         if (!label || !label.toLowerCase().includes(wants)) continue;
+        if (!wholeWords.test(label.toLowerCase())
+          && !(t.innerText && wholeWords.test(strip(unglue(t, norm(t.innerText))).toLowerCase()))) continue;
         // Its menu: the nearest ancestor that also holds links this trigger does not.
         let box: HTMLElement | null = t.parentElement;
         for (let up = 0; box && up < 3; up++, box = box.parentElement) {
@@ -10143,7 +10315,7 @@ export class RecipeAdapter extends BasePortalAdapter {
         }
       }
       return false;
-    }, want).catch(() => false);
+    }, { needle: want, whole: wholeWordsPattern(want.toLowerCase()) }).catch(() => false);
     if (!armed) return null;
 
     // 2) Open it the way a person would. Hover first — these menus are CSS-driven and the
@@ -10185,21 +10357,46 @@ export class RecipeAdapter extends BasePortalAdapter {
   }
 
   /**
-   * Find a visible, ENABLED clickable whose name contains `want`, ignoring icon-font noise.
+   * Find a visible, ENABLED clickable whose name carries `want` AS WHOLE WORDS, ignoring
+   * icon-font noise.
    *
    * Tags the winner with a data attribute and returns a locator for it, because there is no
    * other way to hand a specific in-page element back to Playwright from an evaluate.
    * Conservative on purpose: enabled and visible only, shortest match wins (so "Apply" does
    * not pick "Apply for a Licence" over "Apply"), and nothing is returned when the match is
    * ambiguous in size.
+   *
+   * WHOLE WORDS, NEVER A FRAGMENT (#233; see wholeWordsPattern). This matched
+   * `label.includes(wants)`: with Bend's upload-error popup absent, "OK" was found inside "Book an
+   * Inspection" and the run navigated off the application. main's substring test stays as the
+   * pre-filter, so every match here is one main also made — only fragments are dropped — and the
+   * shortest label still wins among them, measured as before.
    */
   private async findEnabledControlByName(want: string): Promise<unknown | null> {
     if (!this.page || typeof this.page.evaluate !== "function") return null;
-    const found = await this.page.evaluate((needle: string) => {
+    const found = await this.page.evaluate(({ needle, whole }: { needle: string; whole: string }) => {
       const norm = (t: string): string => t.replace(/\s+/g, " ").trim();
       // Icon ligatures sit immediately before the real label with no separator and are
       // always lowercase words: "check_circleApply" -> "Apply", "eventSchedule" -> "Schedule".
       const strip = (t: string): string => norm(t).replace(/^[a-z][a-z_]{2,}(?=[A-Z])/, "");
+      // A LIGATURE GLUED AFTER THE LABEL (#233): `<span>Next</span><i class="material-icons">
+      // arrow_forward</i>` reads "Nextarrow_forward", which carries "next" as no whole word. A leaf
+      // descendant whose whole text is one lowercase ligature-shaped token, glued to either end of
+      // the text, is cut — as a SECOND reading beside the label, never in its place, so
+      // "Log<span>in</span>" still reads "Login". The same reading as revealMenuAndPick's trigger
+      // search: change one, change both.
+      const unglue = (el: HTMLElement, t: string): string => {
+        let s = t;
+        for (const d of Array.from(el.querySelectorAll("*"))) {
+          if (d.children.length) continue;
+          const tok = (d.textContent || "").trim();
+          if (!/^[a-z][a-z0-9_]{1,24}$/.test(tok) || tok.length >= s.length) continue;
+          if (s.endsWith(tok) && /[A-Za-z0-9]/.test(s.charAt(s.length - tok.length - 1))) s = s.slice(0, s.length - tok.length);
+          else if (s.startsWith(tok) && /[A-Za-z0-9]/.test(s.charAt(tok.length))) s = s.slice(tok.length);
+        }
+        return s;
+      };
+      const wholeWords = new RegExp(whole, "u");
       const wants = needle.toLowerCase();
       let best: HTMLElement | null = null;
       let bestLen = Infinity;
@@ -10218,13 +10415,16 @@ export class RecipeAdapter extends BasePortalAdapter {
         );
         if (!label) continue;
         if (!label.toLowerCase().includes(wants)) continue;
+        // Whole words in the label, or in its unglued reading (#233).
+        if (!wholeWords.test(label.toLowerCase())
+          && !(el.innerText && wholeWords.test(strip(unglue(el, norm(el.innerText))).toLowerCase()))) continue;
         if (label.length < bestLen) { best = el; bestLen = label.length; }
       }
       if (!best) return false;
       document.querySelectorAll("[data-rc-name-hit]").forEach((e) => e.removeAttribute("data-rc-name-hit"));
       best.setAttribute("data-rc-name-hit", "1");
       return true;
-    }, want).catch((err: unknown) => {
+    }, { needle: want, whole: wholeWordsPattern(want.toLowerCase()) }).catch((err: unknown) => {
       // DO NOT SWALLOW THIS. A recovery that fails silently is indistinguishable from a page
       // that genuinely had no match, and this whole session has been about that difference.
       // The evaluate can throw for reasons worth knowing — a navigation mid-read, a CSP, the
@@ -10235,7 +10435,7 @@ export class RecipeAdapter extends BasePortalAdapter {
       return false;
     });
     if (!found) {
-      this.driftWarnings.push(`no enabled control on this page has a name containing "${want.slice(0, 40)}"`);
+      this.driftWarnings.push(`no enabled control on this page has a name containing "${want.slice(0, 40)}" as whole words`);
       return null;
     }
     return this.page.locator("[data-rc-name-hit='1']").first();
