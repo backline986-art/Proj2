@@ -8495,6 +8495,13 @@ export class RecipeAdapter extends BasePortalAdapter {
       const dialogsOf = (effect: string): string[] => String(effect.split("|")[4] ?? "").split(",").filter(Boolean);
       const opened = afterEffect ? dialogsOf(afterEffect).filter((d) => !dialogsOf(beforeEffect).includes(d)) : [];
       if (opened.length) {
+        // THE DIALOG'S OWN DOCUMENT MUST FINISH LOADING before the next step reads it (Boise: the
+        // address rows arrive in the dialog's iframe a moment after it opens, and a row step that
+        // ran at once found none). Bounded: the frame's domcontentloaded, then a short quiet.
+        const frameName = opened[0].includes("@") ? opened[0].split("@")[0] : "";
+        const frame = frameName && typeof this.page.frame === "function" ? this.page.frame({ name: frameName }) ?? this.page.frame(frameName) : null;
+        if (frame && typeof frame.waitForLoadState === "function") await frame.waitForLoadState("domcontentloaded", { timeout: 8000 }).catch(() => null);
+        await smartWait(this.page, 1500);
         this.agingNotes.push(`advance "${String(step.note ?? "click").slice(0, 44)}" opened a dialog (${opened[0].slice(0, 60)}) rather than moving the page — the step advanced into it`);
         return;
       }
