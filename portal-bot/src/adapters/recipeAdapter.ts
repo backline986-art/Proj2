@@ -11343,7 +11343,17 @@ export class RecipeAdapter extends BasePortalAdapter {
   // step's RECORDED ids there. On a counter-id postback wizard each fresh Next carries an id an
   // earlier Next recorded, so every Next paid the wait and a drift line. Such a click gives only its
   // stamp, if one survived; never its recorded ids, never its selector.
-  private namesakeSuspicion(own: string[], pickId: string, stampedBy: number, from: RecipeSelector | undefined): { why: string; keys: string[] } {
+  //
+  // A NAMESAKE CARRIES THE SAME NAME (round-4 review, #228). Only an earlier click whose recorded
+  // words EQUAL this step's (whitespace and case folded) can be the control this step's pick is
+  // mistaken for: Tigard's step 1 and step 3 both recorded "Apply". A reused node that two steps
+  // recorded under different words ("Continue", then "Save" on one persistent footer button) is
+  // never a namesake, and main's click stands with no wait. A step that recorded no words is never
+  // suspected.
+  private namesakeSuspicion(own: string[], pickId: string, stampedBy: number, from: RecipeSelector | undefined, words: string): { why: string; keys: string[] } {
+    const fold = (t: string): string => t.replace(/\s+/g, " ").trim().toLowerCase();
+    const mine = fold(words);
+    if (!mine) return { why: "", keys: [] };
     const upTo = Math.min(this.currentStepIdx, this.recipe.steps.length);
     const fromKey = selectorLevelKey(from);
     const keysFor = (k: number): string[] => [...(pickId ? [`id:${pickId}`] : []), `step:${k}`];
@@ -11353,6 +11363,7 @@ export class RecipeAdapter extends BasePortalAdapter {
       const s = this.recipe.steps[k];
       const rec = this.clickRecords.get(k);
       if (!s?.selector || s.action !== "click" || !rec) continue;
+      if (fold(recordedWordsOf(s.selector).text) !== mine) continue;
       if (recordedIdsOf(s.selector, s).some((id) => own.includes(id))) continue;
       if (stampedBy === k) return { why: `it is the very control step ${k + 1} clicked`, keys: keysFor(k) };
       if (rec.liveId == null) continue;
@@ -11418,7 +11429,7 @@ export class RecipeAdapter extends BasePortalAdapter {
     // The pick's own identity, read without touching the page.
     const first = await picked.evaluate(recordedIdentityInPage, { ...args, scan: false }, { timeout: 1500 }).catch(() => null) as Read | null;
     if (!first || first.own) return null;
-    const suspected = this.namesakeSuspicion(own, first.pickId, first.stampedBy, from);
+    const suspected = this.namesakeSuspicion(own, first.pickId, first.stampedBy, from, words.text);
     if (!suspected.why) return null;
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     type Look = { r: Read | null; hit: { loc: any; id: string; name: string } | null; other: number };

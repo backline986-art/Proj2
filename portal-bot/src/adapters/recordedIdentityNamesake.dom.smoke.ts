@@ -55,6 +55,8 @@
 //     P1/P2  the re-review's persistent footer (#btnNext1/#btnNext2 at learn; one #next now): page 3.
 //     N4/N4n  four footer Nexts (#btnNext1..4 at learn), with and without an id now: page 5, one
 //         wait and one drift line in all, not three.
+//     DW  round-4 review: one persistent footer button recorded as "Continue" then "Save" (relabelled
+//         in place): different words are no namesake — no wait, no #228 line.
 //     g   review R4: a WRITE is never moved by this rule.
 //     h   review R2: a recorded id now naming a same-word control of another role: refused.
 //
@@ -305,7 +307,22 @@ const PAGER = `<!doctype html><html><head><style>body { font: 14px sans-serif; p
 </script>
 </body></html>`;
 
-const PAGES: Record<string, string> = { "/pc": POWERCLERK, "/wizard": WIZARD, "/gone": GONE, "/counter": COUNTER, "/nb": NEIGHBOUR, "/footer": FOOTER, "/write": WRITE, "/pager": PAGER };
+// ---- (DW) round-4 review: one persistent footer button two steps recorded under DIFFERENT words ----
+// Page 1 reads "Continue", page 2 relabels the SAME node "Save" (a wizard that patches its button in
+// place). The learn saw two buttons (#btnC1, #btnS2); neither id exists now.
+const DIFFWORDS = `<!doctype html><html><head><style>body { font: 14px sans-serif; padding: 16px; }</style></head><body>
+  <main id="view"></main>
+  <footer><button id="ftr" type="button">Continue</button></footer>
+<script>
+  window.__page = 1;
+  var b = document.getElementById('ftr');
+  function render() { document.getElementById('view').innerHTML = '<h2>Page ' + window.__page + '</h2>'; b.textContent = window.__page === 1 ? 'Continue' : 'Save'; }
+  b.addEventListener('click', function () { window.__page++; render(); });
+  render();
+</script>
+</body></html>`;
+
+const PAGES: Record<string, string> = { "/pc": POWERCLERK, "/wizard": WIZARD, "/gone": GONE, "/counter": COUNTER, "/nb": NEIGHBOUR, "/footer": FOOTER, "/write": WRITE, "/pager": PAGER, "/diffwords": DIFFWORDS };
 const server = http.createServer((q, r) => {
   const [p, qs] = String(q.url ?? "/").split("?");
   const sp = new URLSearchParams(qs ?? "");
@@ -758,6 +775,29 @@ for (const [tag, path] of [["N4", "/footer?id=next"], ["N4n", "/footer?noid=1"]]
   const bound = 2 * twoNextBaselineMs + WAIT_MS + 12_000;
   check(`${tag}: MUST KEEP — total added time stays within one wait (run took ${(ms / 1000).toFixed(1)}s, bound ${(bound / 1000).toFixed(1)}s)`,
     twoNextBaselineMs > 0 && ms < bound, `took ${ms}ms, bound ${bound}ms`);
+  await page.context().close().catch(() => null);
+}
+
+// (DW) round-4 review: a NAMESAKE carries the SAME name. Step 2 ("Save") picks the node step 1
+// ("Continue") clicked — stamped by it — but the recorded words differ, so it is no namesake: main's
+// click, no wait, no #228 line. Round 4 paid a 10 s wait here.
+{
+  console.log("\nDW one persistent footer button recorded as \"Continue\" then \"Save\"");
+  const page = await freshPage("/diffwords");
+  const steps: RecipeStep[] = [
+    { action: "click", phase: "fill", selector: { role: "button", name: "Continue", exact: true, fallbacks: [{ css: "#btnC1" }] }, note: "advance: Continue" },
+    { action: "click", phase: "fill", selector: { role: "button", name: "Save", exact: true, fallbacks: [{ css: "#btnS2" }] }, note: "advance: Save" },
+  ] as RecipeStep[];
+  const { adapter, res, data, ms } = await replay(page, steps);
+  const reached = await page.evaluate(() => (window as unknown as { __page: number }).__page).catch(() => -1);
+  console.log(`   ok=${res.ok} in ${(ms / 1000).toFixed(1)}s, reached page ${reached}, waits started=${waitsStarted(adapter)}`);
+  check("DW: MUST KEEP — both clicks land (page 3, ok=true)", reached === 3 && res.ok === true, `reached ${reached}, ok=${res.ok}: ${String(res.message ?? "").slice(0, 300)}`);
+  check("DW: MUST KEEP — different recorded words are no namesake: no wait, no #228 line",
+    waitsStarted(adapter) === 0 && blocking228(data).length === 0, `waits=${waitsStarted(adapter)} ${JSON.stringify(blocking228(data))}`);
+  // Two advance clicks cost what case b's plain two-Next replay costs; a namesake wait would add 10 s.
+  const dwBound = twoNextBaselineMs + WAIT_MS / 2;
+  check(`DW: MUST KEEP — no added wait (took ${(ms / 1000).toFixed(1)}s, bound ${(dwBound / 1000).toFixed(1)}s = case b + 5 s)`,
+    twoNextBaselineMs > 0 && ms < dwBound, `took ${ms}ms, case b ${twoNextBaselineMs}ms`);
   await page.context().close().catch(() => null);
 }
 
