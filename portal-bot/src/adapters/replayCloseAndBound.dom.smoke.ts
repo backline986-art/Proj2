@@ -21,6 +21,8 @@
 //                   at its own step, and the closing step says so.
 //      MUST-PASS    a select whose target never exists (Tigard's shape) fails within the bound, named.
 //      MUST-PASS    a fill (with a value) whose target never exists fails within the bound, named.
+//                   (Main already failed it in ~20 s, as a bare Playwright fill timeout; the name and
+//                   the closing step are what is new.)
 //      MUST-PASS    a late control that only resolveLocator's rescue reaches (an icon ligature,
 //                   "check_circleApply" for a recorded "Apply") is clicked within the bound, never
 //                   reported as missing (#232 review).
