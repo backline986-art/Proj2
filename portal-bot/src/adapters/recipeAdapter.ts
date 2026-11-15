@@ -6482,16 +6482,28 @@ export class RecipeAdapter extends BasePortalAdapter {
     // control was demonstrably there with a `for` association, so this does not depend on
     // Playwright's accessible-name computation matching the recorded string exactly.
     const wanted = [...a];
+    // THE WHOLE RECORDED LABEL RANKS ABOVE A SHARED WORD. The strong-word set drops stopwords
+    // ("name", "number", "type"), so "Business Name" is {business} — and a page that also has
+    // "Business Phone" scored both alike, the visible one won, and the step was re-anchored onto
+    // the phone box (live City of Tigard contact lookup, 2026-11-15; the fill then timed out
+    // there). Every word of the recorded label, stopwords included and markers dropped, is sent
+    // beside the strong set: a candidate whose label carries the whole phrase ranks first, each
+    // further recorded word counts, and a strong word of the candidate's own that the recorded
+    // label never had ("phone") counts against it. The gate below is unchanged: a candidate still
+    // needs the strong words to be considered at all.
+    const fullWords = recorded.toLowerCase().replace(/[^a-z0-9\s]/g, " ").split(/\s+/)
+      .filter((w) => w && w !== "required" && w !== "optional");
     // NO NESTED FUNCTION DECLARATIONS IN HERE. esbuild's keepNames wraps any nameable
     // function as __name(fn, "..."), and __name does not exist in the page — the evaluate
     // then throws, the .catch swallows it, and this silently reports "no candidate found".
     // That is exactly what happened on the first live attempt: every re-anchor failed while
     // the control sat right there. The detection code above works because it declares
     // nothing. Keep it that way; the normalisation is inlined for the same reason.
-    const foundId = await this.page.evaluate((args: { words: string[] }) => {
+    const foundId = await this.page.evaluate((args: { words: string[]; full: string[] }) => {
       const controls = Array.from(document.querySelectorAll("input, select, textarea")) as HTMLElement[];
+      const phrase = args.full.join(" ");
       let bestId = "";
-      let bestScore = 0;
+      let bestScore = -Infinity;
       let bestWords = 0;
       for (const el of controls) {
         const id = el.getAttribute("id");
@@ -6508,18 +6520,26 @@ export class RecipeAdapter extends BasePortalAdapter {
         let score = 0;
         for (const w of args.words) if (text.indexOf(w) >= 0 || textCompact.indexOf(w) >= 0) score++;
         if (!score) continue;
+        // The whole recorded label, word by word and as one phrase; the candidate's own strong
+        // words the recorded label never had.
+        const textWords = text.split(/\s+/).filter((w) => w.length > 0);
+        let fullHits = 0;
+        for (const w of args.full) if (textWords.indexOf(w) >= 0 || textCompact.indexOf(w) >= 0) fullHits++;
+        const wholePhrase = phrase.length > 0 && text.replace(/\s+/g, " ").trim().indexOf(phrase) >= 0;
+        let extra = 0;
+        for (const w of textWords) if (w.length > 3 && args.full.indexOf(w) < 0 && w !== "required" && w !== "optional") extra++;
         // Visibility is a TIE-BREAK, not a filter. A portal that keeps its real control
         // behind a styled widget (PowerClerk does) would otherwise have every candidate
         // discarded before scoring — and selectWithFallback drives a hidden native fine.
         const r = el.getBoundingClientRect();
         const visible = !!r && (r.width > 0 || r.height > 0);
-        const rank = score * 2 + (visible ? 1 : 0);
+        const rank = score * 2 + (visible ? 1 : 0) + fullHits * 4 + (wholePhrase ? 100 : 0) - extra * 3;
         if (rank > bestScore) { bestScore = rank; bestId = id; bestWords = score; }
       }
       // Require a real overlap of MEANINGFUL WORDS, not one incidental hit. bestScore
       // carries the visibility tie-break, so gate on the word count itself.
       return bestWords >= (args.words.length < 2 ? 1 : 2) ? bestId : "";
-    }, { words: wanted }).catch(() => "") as string;
+    }, { words: wanted, full: fullWords }).catch(() => "") as string;
 
     if (foundId) {
       const reanchored = this.page.locator(`#${CSS_ESCAPE(foundId)}`);
