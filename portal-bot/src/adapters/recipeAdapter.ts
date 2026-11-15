@@ -6343,10 +6343,11 @@ export class RecipeAdapter extends BasePortalAdapter {
 
   /** What a recorded selector's levels (the primary, then each fallback) show within `graceMs`:
    *  "shown" as soon as any match is one a person can see — Playwright's measure, so opacity:0 is
-   *  shown, visibility:hidden (Bootstrap's .invisible) and display:none are not; a dropdown's own
-   *  concealed backing <input> (type=hidden or display:none ITSELF, #584) beside a rendered parent
-   *  is shown too, since its widget is up. "hidden" when matches exist and none is shown, "absent"
-   *  when nothing matches. A level the locator cannot build is passed over. */
+   *  shown, visibility:hidden (Bootstrap's .invisible) and display:none are not. An <input> (never a
+   *  button-type one) concealed ITSELF beside a rendered parent or label is shown too — a dropdown's
+   *  backing input (#584), a styled checkbox's real box: its widget is up. A control concealed by a
+   *  hidden section is not. "hidden" when matches exist and none is shown, "absent" when nothing
+   *  matches. A level the locator cannot build is passed over. */
   private async recordedTargetSeen(sel: RecipeSelector, graceMs: number): Promise<{ state: RecordedTargetSeen; described: string }> {
     const levels: RecipeSelector[] = [sel, ...(sel.fallbacks ?? []).map((f) => ({ ...f, fallbacks: undefined }) as RecipeSelector)];
     const deadline = Date.now() + graceMs;
@@ -6362,10 +6363,12 @@ export class RecipeAdapter extends BasePortalAdapter {
         for (let k = 0; k < Math.min(n, 8); k++) {
           const el = loc.nth(k);
           if (await el.isVisible().catch(() => false)) return { state: "shown", described: "" };
-          const backing = await el.evaluate((e: Element) => e.tagName === "INPUT"
-            && ((e as HTMLInputElement).type === "hidden" || getComputedStyle(e).display === "none")
-            && !!e.parentElement && e.parentElement.getClientRects().length > 0
-            && getComputedStyle(e.parentElement).visibility !== "hidden", undefined, { timeout: 1000 }).catch(() => false);
+          const backing = await el.evaluate((e: Element) => {
+            if (e.tagName !== "INPUT" || /^(submit|button|image|reset)$/i.test((e as HTMLInputElement).type || "")) return false;
+            const p = e.parentElement;
+            if (p && p.getClientRects().length > 0 && getComputedStyle(p).visibility !== "hidden") return true;
+            return Array.from((e as HTMLInputElement).labels ?? []).some((l) => l.getClientRects().length > 0 && getComputedStyle(l).visibility !== "hidden");
+          }, undefined, { timeout: 1000 }).catch(() => false);
           if (backing === true) return { state: "shown", described: "" };
         }
       }

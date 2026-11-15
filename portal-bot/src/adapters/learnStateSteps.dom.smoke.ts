@@ -95,7 +95,14 @@ const LATE_SHOW = shell(`
     document.getElementById('rows').innerHTML = '<label for="c1">Description of Work</label><input id="c1">';
   });`);
 
-const PAGES: Record<string, string> = { "/review": REVIEW, "/summary": SUMMARY, "/answered": ANSWERED, "/nopopup": NO_POPUP, "/noreveal": NO_REVEAL, "/lateshow": LATE_SHOW };
+// F — a revealed styled switch: its real <input> is 0x0 and transparent inside a visible label (the
+// common slider shape). Its widget IS up, so a conditional check on it is written, never skipped.
+const SWITCH = shell(`
+  <h2>Monitoring</h2>
+  <style>.switch input{opacity:0;width:0;height:0;position:absolute} .slider{display:inline-block;width:40px;height:20px;background:#ccc}</style>
+  <label class="switch" for="mon"><input type="checkbox" id="mon"><span class="slider"></span> Remote monitoring</label>`);
+
+const PAGES: Record<string, string> = { "/switch": SWITCH, "/review": REVIEW, "/summary": SUMMARY, "/answered": ANSWERED, "/nopopup": NO_POPUP, "/noreveal": NO_REVEAL, "/lateshow": LATE_SHOW };
 const server = http.createServer((req, res) => {
   const url = new URL(req.url || "/", "http://127.0.0.1");
   res.writeHead(200, { "content-type": "text/html" });
@@ -207,6 +214,14 @@ try {
   ]), { workDescription: "Rooftop solar" });
   console.log(`   E ${tail(e)}`);
   check("E MUST-EXCLUDE a control that shows within the grace is CLICKED (the box it reveals is filled)", e.ok && e.values.c1 === "Rooftop solar" && !e.aging.some((n) => /#237/.test(n)), tail(e));
+
+  // ---- F: a conditional styled switch whose real box is concealed inside a visible label ----------
+  const f = await run(browser, recipeOf("learnstate-f", "/switch", [
+    { action: "check", note: "Remote monitoring", conditional: true, selector: { css: "#mon", fallbacks: [{ label: "Remote monitoring" }] } } as RecipeStep,
+    { action: "stopForReview", note: "review" } as RecipeStep,
+  ]));
+  console.log(`   F ${tail(f)}`);
+  check("F MUST-EXCLUDE a conditional switch whose widget is up is never skipped as 'not revealed'", !f.aging.some((n) => /#237/.test(n)) && !f.skipped.some((s) => /Remote monitoring/.test(s)), tail(f));
 } finally {
   await browser.close().catch(() => null);
   server.close();
