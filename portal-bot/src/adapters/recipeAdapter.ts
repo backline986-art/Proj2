@@ -1684,10 +1684,10 @@ export class RecipeAdapter extends BasePortalAdapter {
   private readonly typeaheadEnterSelected = new Set<string>();
   /** #244 — THE BOX ITSELF CARRIES "ALREADY ANSWERED": a search box the PORTAL answered with nothing
    *  for this job's value (typeaheadPortalAnswered) is stamped TYPEAHEAD_ANSWERED_ATTR=<token>, and
-   *  the token maps here to that value and its FAILED line. A re-run of the step, or the required
-   *  sweep's re-assert, on THAT element with THAT value is not searched again (a required iWorQ box
-   *  re-searched three times: 82 s of the same "No results match your search" on the synthetic
-   *  replica). Keyed by the live element, never by the step's words: two boxes with the same note,
+   *  the token maps here to that value and the label it was searched as. A re-run of the step, or
+   *  the required sweep's re-assert, on THAT element with THAT value is not searched again (a
+   *  required iWorQ box re-searched three times: 82 s of the same "No results match your search" on
+   *  the synthetic replica). Keyed by the live element, never by the step's words: two boxes with the same note,
    *  binding and value (PowerClerk 32f3d2b2 has "Address"/street at steps 16 and 27) are two
    *  searches, and a new document is a new search (review of 5eb51ad3, shape S3). */
   private readonly typeaheadAnswered = new Map<string, { value: string; label: string }>();
