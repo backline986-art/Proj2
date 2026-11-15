@@ -1059,6 +1059,23 @@ async function probeCall<T>(fn: () => unknown, dflt: T): Promise<T> {
  *  valid selector" — an id that starts with a digit). Such a level can never match (targetSeen). */
 const MALFORMED_SELECTOR = /\bis not a valid selector\b|\bSyntaxError\b/;
 
+/** HOW MANY ELEMENTS A #237 PROBE'S LOCATOR MATCHES, OR -1 WHEN THE PROBE CANNOT TELL. A level the
+ *  browser rejects as a selector matches nothing (0), as resolveLocator passes it over. Any other
+ *  throw, or a non-number, is an unknown, and an unknown is never a reason to skip: the step runs as
+ *  on main. This is the one reading for targetSeen and portalAnsweredControl. */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+async function probeMatchCount(loc: any): Promise<number> {
+  const counted = await probeCall(() => Promise.resolve(loc.count()).catch((err: unknown) => {
+    if (MALFORMED_SELECTOR.test(String((err as Error)?.message ?? err))) return 0;
+    throw err;
+  }), -1);
+  return typeof counted === "number" && counted >= 0 ? counted : -1;
+}
+
+/** WHAT A #237 PROBE ANSWERS WHEN THE CONTROL SHOWS, OR WHEN THE PROBE CANNOT TELL: "shown". Either
+ *  way the step is never skipped, and it runs as recorded, exactly as on main. */
+const RUN_AS_RECORDED: { state: RecordedTargetSeen; described: string } = { state: "shown", described: "" };
+
 /** The learner's test-hook attributes, as its testCss writes them (`[attr="value"]`). */
 const BARE_TEST_HOOK = /^\[(data-testid|data-test-role|data-test|data-cy|data-qa)=["']?([^"'\]]+)["']?\]$/;
 
@@ -6428,13 +6445,29 @@ export class RecipeAdapter extends BasePortalAdapter {
   private learnStateSkipped: { step: RecipeStep; described: string; kind?: LearnStateSkipKind } | null = null;
 
   /** What a recorded selector's levels that name its control (identifyingLevels) show within
-   *  `graceMs` (targetSeen). A level the locator cannot build is passed over. */
+   *  `graceMs` (targetSeen). A PROBE THAT IS UNSURE NEVER SKIPS. A level the locator cannot build, or
+   *  a level scoped into a frame that is not on the page to be read, answers "shown", and the step
+   *  runs as recorded, as on main. A frame missing on this run may itself be what a reveal brings, and
+   *  reading "nothing inside it" as absent would be a guess (convergence of #237). */
   private async recordedTargetSeen(sel: RecipeSelector, graceMs: number): Promise<{ state: RecordedTargetSeen; described: string }> {
     const levels: unknown[] = [];
     for (const level of identifyingLevels(sel)) {
-      try { levels.push(this.locator(level)); } catch { /* an unbuildable level is passed over */ }
+      const loc = await this.probeLevel(level);
+      if (!loc) return RUN_AS_RECORDED;
+      levels.push(loc);
     }
     return this.targetSeen(levels, graceMs);
+  }
+
+  /** A recorded level's locator for a #237 probe, or null when the probe cannot read that level: the
+   *  locator cannot be built, or the level is scoped into a frame that is not on the page (or whose
+   *  presence cannot be read). The one reading for recordedTargetSeen and portalAnsweredControl. */
+  private async probeLevel(level: RecipeSelector): Promise<unknown | null> {
+    try {
+      const loc = this.locator(level);
+      if (level.frame && !((await probeMatchCount(this.page.locator(frameSelectorFor(level.frame)))) > 0)) return null;
+      return loc;
+    } catch { return null; }
   }
 
   /** What these locators show within `graceMs`: "shown" as soon as any match is one a person can
@@ -6443,9 +6476,14 @@ export class RecipeAdapter extends BasePortalAdapter {
    *  rendered parent or label is shown too — a dropdown's backing input (#584), a styled checkbox's
    *  real box: its widget is up. A control concealed by a hidden section is not. "hidden" when
    *  matches exist and none is shown, "absent" when nothing matches. `absentIsFinal`: nothing
-   *  matching ends the wait at once (the caller has no use for an absent control). AN UNKNOWN IS
-   *  NEVER A REASON TO SKIP: nothing that can be probed (a browser-free fake), or a count that
-   *  throws with nothing else matching, answers "shown" — the step runs as recorded.
+   *  matching ends the wait at once (the caller has no use for an absent control).
+   *
+   *  AN UNKNOWN IS NEVER A REASON TO SKIP, WHATEVER THE OTHER LEVELS MATCHED. Any of these answers
+   *  "shown" at once, and the step runs as recorded, as on main: a locator that cannot be asked (a
+   *  browser-free fake); a count that throws anything but the browser's "not a valid selector"
+   *  (probeMatchCount); a visibility or style read that throws (an element re-rendered mid-probe).
+   *  Before the convergence round a throwing level counted as no match whenever another level had
+   *  matched a hidden element, so the step was skipped on a guess (convergence of #237).
    *
    *  A LEVEL THE BROWSER REJECTS AS A SELECTOR IS NOT AN UNKNOWN: it can never match anything, so it
    *  counts as no match, as resolveLocator passes it over ("count() can throw on a malformed
@@ -6455,36 +6493,31 @@ export class RecipeAdapter extends BasePortalAdapter {
    *  Batteries" through the bare hook instead (review probe P3, rerun on the #237 fix round). */
   private async targetSeen(locators: unknown[], graceMs: number, absentIsFinal = false): Promise<{ state: RecordedTargetSeen; described: string }> {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const probeable = (locators as any[]).filter((loc) => !!loc && typeof loc.count === "function" && typeof loc.nth === "function");
-    if (!probeable.length) return { state: "shown", described: "" };
+    const locs = locators as any[];
+    if (!locs.length || locs.some((loc) => !loc || typeof loc.count !== "function" || typeof loc.nth !== "function")) return RUN_AS_RECORDED;
     const deadline = Date.now() + graceMs;
     for (;;) {
       let matched = 0;
-      let unreadable = false;
-      for (const loc of probeable) {
-        const counted = await probeCall(() => Promise.resolve(loc.count()).catch((err: unknown) => {
-          if (MALFORMED_SELECTOR.test(String((err as Error)?.message ?? err))) return 0;
-          throw err;
-        }), -1);
-        const n = typeof counted === "number" && counted >= 0 ? counted : 0;
-        if (n === 0 && counted !== 0) unreadable = true;
+      for (const loc of locs) {
+        const n = await probeMatchCount(loc);
+        if (n < 0) return RUN_AS_RECORDED;
         matched += n;
         for (let k = 0; k < Math.min(n, 8); k++) {
           const el = loc.nth(k);
-          // An element that cannot be asked (a fake) is an unknown: never a reason to skip.
-          if (typeof el?.isVisible !== "function" || typeof el?.evaluate !== "function") return { state: "shown", described: "" };
-          if (await probeCall(() => el.isVisible(), false)) return { state: "shown", described: "" };
+          if (typeof el?.isVisible !== "function" || typeof el?.evaluate !== "function") return RUN_AS_RECORDED;
+          // Visible, or a visibility read that threw: either way, never a reason to skip.
+          if ((await probeCall(() => el.isVisible(), null)) !== false) return RUN_AS_RECORDED;
           const backing = await probeCall(() => el.evaluate((e: Element) => {
             if (e.tagName !== "INPUT" || /^(submit|button|image|reset)$/i.test((e as HTMLInputElement).type || "")) return false;
             const p = e.parentElement;
             if (p && p.getClientRects().length > 0 && getComputedStyle(p).visibility !== "hidden") return true;
             return Array.from((e as HTMLInputElement).labels ?? []).some((l) => l.getClientRects().length > 0 && getComputedStyle(l).visibility !== "hidden");
-          }, undefined, { timeout: 1000 }), false);
-          if (backing === true) return { state: "shown", described: "" };
+          }, undefined, { timeout: 1000 }), null);
+          // A concealed input whose widget is up, or a style read that threw: never a reason to skip.
+          if (backing !== false) return RUN_AS_RECORDED;
         }
       }
       if (Date.now() >= deadline || (absentIsFinal && matched === 0)) {
-        if (!matched && unreadable) return { state: "shown", described: "" };
         return matched
           ? { state: "hidden", described: `${matched} match(es) for the recorded control, none visible (#237)` }
           : { state: "absent", described: "no element matched (#237)" };
@@ -6581,7 +6614,11 @@ export class RecipeAdapter extends BasePortalAdapter {
    * name it (identifyingLevels, which drops PowerClerk's component hook beside an identity) show one that is
    * visible, disabled and already holding a value (the sweep's own reading, controlReadsUnanswered)
    * and no such level shows an ENABLED match the run could write instead; null otherwise (the
-   * ordinary resolution runs, exactly as before).
+   * ordinary resolution runs, exactly as before). AN UNKNOWN IS NEVER THE PORTAL'S ANSWER. Any of
+   * these returns null: a level the probe cannot read (probeLevel: unbuildable, or in a frame not on
+   * the page), a count that throws (probeMatchCount, the browser's "not a valid selector" aside), or
+   * a visibility read that throws. The unreadable level may have named the enabled control the run
+   * would write, so the ordinary resolution runs, as on main (convergence of #237).
    */
   private async portalAnsweredControl(step: RecipeStep): Promise<unknown | null> {
     const sel = step.selector;
@@ -6589,16 +6626,18 @@ export class RecipeAdapter extends BasePortalAdapter {
     let held: unknown = null;
     for (const level of identifyingLevels(sel)) {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      let loc: any = null;
-      try { loc = this.locator(level); } catch { loc = null; }
-      if (!loc || typeof loc.count !== "function" || typeof loc.nth !== "function") continue;
-      const counted = await probeCall(() => loc.count(), 0);
-      const n = Math.min(typeof counted === "number" ? counted : 0, 8);
+      const loc: any = await this.probeLevel(level);
+      if (!loc || typeof loc.count !== "function" || typeof loc.nth !== "function") return null;
+      const counted = await probeMatchCount(loc);
+      if (counted < 0) return null;
+      const n = Math.min(counted, 8);
       for (let k = 0; k < n; k++) {
         const el = loc.nth(k);
         // A control that cannot be asked (a fake) is an unknown: the ordinary resolution runs.
         if (typeof el?.isVisible !== "function" || typeof el?.isEnabled !== "function" || typeof el?.evaluate !== "function") return null;
-        if (!(await probeCall(() => el.isVisible(), false))) continue;
+        const visible = await probeCall(() => el.isVisible(), null);
+        if (typeof visible !== "boolean") return null;
+        if (!visible) continue;
         if (await probeCall(() => el.isEnabled(), true)) return null;
         if (!held && (await probeCall(() => el.evaluate(controlReadsUnanswered, undefined, { timeout: 1000 }), true)) === false) held = el;
       }

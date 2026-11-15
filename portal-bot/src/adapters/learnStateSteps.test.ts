@@ -10,8 +10,8 @@
 //
 //   npx tsx portal-bot/src/adapters/learnStateSteps.test.ts
 import assert from "node:assert/strict";
-import type { RecipeStep } from "../../../shared/src/types";
-import { bareTestHook, componentRoleHook, identifyingLevels,inRecipeReviewTail, isCommitWordedClick, isDialogDismissalClick, learnStateNeverSkipped, learnStateSkipKind, learnStateSkippable } from "./recipeAdapter";
+import type { PortalRecipe, RecipeSelector, RecipeStep } from "../../../shared/src/types";
+import { bareTestHook, componentRoleHook, identifyingLevels, inRecipeReviewTail, isCommitWordedClick, isDialogDismissalClick, learnStateNeverSkipped, learnStateSkipKind, learnStateSkippable, RecipeAdapter } from "./recipeAdapter";
 
 let failures = 0;
 const check = (label: string, fn: () => void): void => {
@@ -164,6 +164,105 @@ check("the review tail: only clicks between the step and a recorded review stop 
   assert.equal(inRecipeReviewTail([s("click")], 0), false, "a one-click recipe is not a review");
   assert.equal(inRecipeReviewTail([s("click"), s("click", { isFinalSubmit: true })], 0), true, "the final submit");
 });
+
+// ---- what the probe reads off a page (a fake page: every answer, every throw, on demand) -------------
+// THE ABSENCE PROBE ASKS EVERY LEVEL THE STEP RECORDED, AND AN UNSURE PROBE NEVER SKIPS (convergence
+// of #237). "absent" / "hidden" license a skip, so each must be a reading the probe is sure of. A
+// level that throws, a visibility or style read that throws, or a frame that is not there to read
+// answers "shown", and the step runs as on main.
+type FakeEl = { visible: boolean | "throw"; backing?: boolean | "throw"; enabled?: boolean; answered?: boolean };
+type FakeMatch = FakeEl[] | "throw" | "malformed";
+const fakePage = (dom: Record<string, FakeMatch>): unknown => {
+  const loc = (key: string) => {
+    const m = dom[key] ?? [];
+    return {
+      count: async () => {
+        if (m === "throw") throw new Error("Target page, context or browser has been closed");
+        if (m === "malformed") throw new Error(`Failed to execute 'querySelectorAll' on 'Document': '${key}' is not a valid selector.`);
+        return m.length;
+      },
+      nth: (k: number) => {
+        const el = Array.isArray(m) ? m[k] : undefined;
+        return {
+          isVisible: async () => { if (el?.visible === "throw") throw new Error("Element is not attached to the DOM"); return el?.visible === true; },
+          isEnabled: async () => el?.enabled !== false,
+          // The backing-input reading (targetSeen) and controlReadsUnanswered (portalAnsweredControl).
+          evaluate: async (fn: { name?: string }) => {
+            if (el?.backing === "throw") throw new Error("locator.evaluate: Timeout 1000ms exceeded");
+            return /Unanswered/i.test(String(fn?.name ?? "")) ? el?.answered !== true : el?.backing === true;
+          },
+        };
+      },
+    };
+  };
+  const scope = (pre: string) => ({
+    getByLabel: (l: string) => loc(`${pre}label=${l}`),
+    getByRole: (r: string, o?: { name?: string }) => loc(`${pre}role=${r}${o?.name ? `[${o.name}]` : ""}`),
+    getByPlaceholder: (p: string) => loc(`${pre}placeholder=${p}`),
+    getByTestId: (t: string) => loc(`${pre}testid=${t}`),
+    getByText: (t: string) => loc(`${pre}text=${t}`),
+    locator: (css: string) => loc(`${pre}${css}`),
+  });
+  return { ...scope(""), frameLocator: (sel: string) => scope(`${sel} >> `) };
+};
+type Probe = { recordedTargetSeen: (sel: RecipeSelector, graceMs: number) => Promise<{ state: string }>; portalAnsweredControl: (s: RecipeStep) => Promise<unknown> };
+const prober = (dom: Record<string, FakeMatch>): Probe => {
+  const recipe = { id: "probe", steps: [], portalUrl: "http://127.0.0.1/", status: "complete" } as unknown as PortalRecipe;
+  const a = new RecipeAdapter(recipe, {}, {}, { autoSubmit: false }) as unknown as Probe & { page: unknown };
+  a.page = fakePage(dom);
+  return a;
+};
+const seen = async (dom: Record<string, FakeMatch>, sel: RecipeSelector): Promise<string> => (await prober(dom).recordedTargetSeen(sel, 0)).state;
+const SHOWN: FakeEl = { visible: true };
+const HIDDEN: FakeEl = { visible: false };
+const HOOK = "[data-test-role=\"textbox-element\"]";
+const asyncChecks: Array<[string, () => Promise<void>]> = [
+  ["MUST-PASS K1 at the probe: a drifted label and a stale id find nothing, the unique data-testid finds the shown box: shown (the step runs)", async () => {
+    const sel = { label: "Battery Inverter Make", fallbacks: [{ css: "#mui-12" }, { css: "[data-testid=\"battery-inverter-make\"]" }] };
+    assert.equal(await seen({ "[data-testid=\"battery-inverter-make\"]": [SHOWN] }, sel), "shown");
+    for (const css of ["[data-test=\"bim\"]", "[data-cy=\"bim\"]", "[data-qa=\"bim\"]"]) {
+      assert.equal(await seen({ [css]: [SHOWN] }, { label: "Battery Inverter Make", fallbacks: [{ css }] }), "shown", css);
+    }
+  }],
+  ["MUST-KEEP PacifiCorp 112 at the probe: label absent, the id rejected as a selector, only the component hook shows other boxes: absent", async () => {
+    const sel = { label: "Battery Inverter Model", fallbacks: [{ css: "#865S27BYAFHZInput" }, { css: HOOK }] };
+    assert.equal(await seen({ "#865S27BYAFHZInput": "malformed", [HOOK]: [SHOWN, SHOWN, SHOWN] }, sel), "absent");
+    assert.equal(await seen({ "label=Battery Inverter Model": [HIDDEN], [HOOK]: [SHOWN] }, sel), "hidden", "the block hidden: hidden");
+  }],
+  ["MUST-KEEP a data-testid level that finds nothing still lets an absent control read absent", async () => {
+    assert.equal(await seen({}, { label: "Transformer is shared", fallbacks: [{ css: "[data-testid=\"xfmr-shared\"]" }] }), "absent");
+  }],
+  ["UNSURE: a level whose count throws reads shown, even when another level matched only a hidden element", async () => {
+    const sel = { label: "Battery Inverter Make", fallbacks: [{ css: "#bim" }] };
+    assert.equal(await seen({ "label=Battery Inverter Make": [HIDDEN], "#bim": "throw" }, sel), "shown");
+    assert.equal(await seen({ "label=Battery Inverter Make": "throw" }, sel), "shown");
+  }],
+  ["UNSURE: a visibility read or a style read that throws reads shown", async () => {
+    assert.equal(await seen({ "#bim": [{ visible: "throw" }] }, { css: "#bim" }), "shown", "isVisible threw");
+    assert.equal(await seen({ "#bim": [{ visible: false, backing: "throw" }] }, { css: "#bim" }), "shown", "the backing-input read threw");
+  }],
+  ["UNSURE: a level scoped into a frame that is not on the page reads shown (main's behaviour), one in a frame that is there is read", async () => {
+    const sel = { label: "Card Holder", frame: "payframe" };
+    const frameCss = "iframe[name=\"payframe\"], iframe[id=\"payframe\"]";
+    assert.equal(await seen({}, sel), "shown", "no frame to read");
+    assert.equal(await seen({ [frameCss]: "throw" }, sel), "shown", "the frame's presence could not be read");
+    assert.equal(await seen({ [frameCss]: [SHOWN] }, sel), "absent", "the frame is there and holds no such control");
+  }],
+  ["UNSURE: a level the locator cannot build reads shown (it was passed over, and an absent primary then licensed a skip)", async () => {
+    assert.equal(await seen({}, { label: "County", fallbacks: [{ nth: 1 } as never] }), "shown");
+  }],
+  ["UNSURE: portalAnsweredControl never takes a disabled held control when another level's count throws (the ordinary resolution runs)", async () => {
+    const step = { action: "select", note: "Permit Type", selector: { label: "Permit Type", fallbacks: [{ css: "#ptype" }] } } as RecipeStep;
+    const held: FakeEl = { visible: true, enabled: false, answered: true };
+    assert.notEqual(await prober({ "label=Permit Type": [held], "#ptype": [held] }).portalAnsweredControl(step), null, "both readable: the portal's answer (Tigard)");
+    assert.equal(await prober({ "label=Permit Type": [held], "#ptype": "throw" }).portalAnsweredControl(step), null, "one level unreadable");
+    assert.equal(await prober({ "label=Permit Type": [{ visible: "throw", enabled: false, answered: true }] }).portalAnsweredControl(step), null, "visibility unreadable");
+  }],
+];
+for (const [label, fn] of asyncChecks) {
+  try { await fn(); console.log(`  ok   - ${label}`); }
+  catch (err) { failures++; console.error(`  FAIL - ${label}\n         ${err instanceof Error ? err.message : String(err)}`); }
+}
 
 if (failures) { console.error(`\n${failures} learn-state predicate check(s) FAILED.`); process.exit(1); }
 console.log("\nAll learn-state predicate checks passed.");
