@@ -2319,11 +2319,8 @@ export function extractFieldsInPage(els: Element[]): RawField[] {
     out.push({
       fx, fxText,
       label, fieldType, options, role, name, placeholder, id, text, href,
-<<<<<<< HEAD
       accName: accName || undefined,
-=======
       nameShared: nameShared || undefined,
->>>>>>> agent/229-bare-name-selector
       tile: tileLabel ? true : undefined,
       typeahead: typeahead && fieldType === "text" ? true : undefined,
       stampClass: !typeahead && fieldType === "text" && stampClass ? stampClass : undefined,
