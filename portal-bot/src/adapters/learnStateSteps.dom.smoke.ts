@@ -230,6 +230,7 @@ try {
     { action: "stopForReview", note: "review" } as RecipeStep,
   ]));
   console.log(`   F ${tail(f)}`);
+  check("F MUST-EXCLUDE a conditional switch whose widget is up is never skipped as 'not revealed'", !f.aging.some((n) => /#237/.test(n)) && !f.skipped.some((s) => /Remote monitoring/.test(s)), tail(f));
 
   // ---- G: a non-advancing click left on a hidden control, mid-flow (a write follows) --------------
   const g = await run(browser, recipeOf("learnstate-g", "/hiddentoggle", [
@@ -240,7 +241,6 @@ try {
   console.log(`   G ${tail(g)}`);
   check("G MUST-PASS a non-advancing click resolution leaves on a hidden control is skipped, named", g.aging.some((n) => /Show Help/.test(n) && /hidden/i.test(n) && /#237/.test(n)), JSON.stringify(g.aging));
   check("G MUST-PASS ...never clicked into a timeout: the next write lands and the stop is reached quickly", g.ok && g.values.notes === "Rooftop solar" && g.ms < 30_000, tail(g));
-  check("F MUST-EXCLUDE a conditional switch whose widget is up is never skipped as 'not revealed'", !f.aging.some((n) => /#237/.test(n)) && !f.skipped.some((s) => /Remote monitoring/.test(s)), tail(f));
 } finally {
   await browser.close().catch(() => null);
   server.close();
