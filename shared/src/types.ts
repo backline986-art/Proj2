@@ -5018,9 +5018,14 @@ export interface RecipeSelector {
   fallbacks?: RecipeSelector[];
 }
 
-/** Attributes of the recorded element captured at record time. NEVER used to
- *  build a locator; consumed only by replay self-heal to rank candidates when
- *  the label anchor is ambiguous (two bare "Manufacturer" fields). Attribute
+/** Attributes of the recorded element captured at record time. Never a step's
+ *  selector, but replay does read it as evidence of WHICH element was meant:
+ *  self-heal ranks candidates by it when the label anchor is ambiguous (two
+ *  bare "Manufacturer" fields), the section rescue resolves by `section`, a
+ *  write's identity check moves to the element `id`/`name` names when that
+ *  element's label or section agrees, and a click's recorded identity (#228)
+ *  lets the element `id` names, when its words equal the step's, displace a
+ *  match suspected of being an earlier click's control. Attribute
  *  names/labels only — never values, never secrets. Old recipes lack the bag. */
 export interface StepFingerprint {
   id?: string;
