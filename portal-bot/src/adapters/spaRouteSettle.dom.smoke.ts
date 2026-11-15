@@ -23,17 +23,21 @@
 //            route rewritten without sectionName) → "advance: Search" is NOT reported as advanced: the
 //            run stops at that step, "the portal did not advance", naming the route the page took
 //            back. (With the fix removed it reads the URL as the click left it, calls Search an
-//            advance, and dies a step later on the missing record type.)
+//            advance and races on; with only the settle and not routeEffectUndone, the settled URL
+//            still differs from the one before Search and it is called an advance all the same.)
 //   fullpage PowerClerk-style full page loads: a link to a new document that fires a 600 ms request
 //            on load → the replay still reaches the next page's select; the settle waited for that
 //            request (the new document carried the probe from its init script), so the added time is
 //            the request plus the quiet window, not a guess.
+//   ticker   MUST KEEP (cost): a route change on a page whose clock re-renders every 100 ms settles in
+//            the quiet window, not the 4 s bound — DOM mutations are not activity for a route settle.
 //
 //   npx tsx portal-bot/src/adapters/spaRouteSettle.dom.smoke.ts
 import "../smokeArtifactDirs"; // hand-run safe: artifact dirs default to a temp folder, never data/
 import http from "node:http";
 import { chromium } from "playwright";
 import type { PortalRecipe, ProjectRecord, RecipeStep } from "../../../shared/src/types";
+import { installSettleProbe, ROUTE_SETTLE_MS, settleAfterRoute } from "../settle";
 import { RecipeAdapter } from "./recipeAdapter";
 
 let failures = 0;
@@ -117,6 +121,11 @@ const FULL2 = `<!doctype html><html><body style="font:14px sans-serif;padding:16
 <script>document.addEventListener("DOMContentLoaded", function () { fetch("/api/slow").then(function (x) { return x.text(); }); });</script>
 </body></html>`;
 
+const TICKER = `<!doctype html><html><body style="font:14px sans-serif;padding:16px">
+<p>Now: <span id="clock"></span></p><a id="go" href="#/next">Go</a>
+<script>setInterval(function () { document.getElementById("clock").textContent = String(Date.now()); }, 100);</script>
+</body></html>`;
+
 const served: Array<{ at: number; path: string }> = [];
 const server = http.createServer((q, r) => {
   const url = new URL(String(q.url ?? "/"), "http://127.0.0.1");
@@ -129,6 +138,7 @@ const server = http.createServer((q, r) => {
   r.writeHead(200, { "Content-Type": "text/html" });
   if (url.pathname === "/full/1") return r.end(FULL1);
   if (url.pathname === "/full/2") return r.end(FULL2);
+  if (url.pathname === "/ticker") return r.end(TICKER);
   r.end(APP(url.searchParams.get("mode") || "race"));
 });
 await new Promise<void>((r) => server.listen(0, "127.0.0.1", () => r()));
@@ -243,6 +253,23 @@ const trace = (r: Run): Array<{ i: number; outcome: string; note: string }> => (
   check("fullpage: the settle counted the new document's load-time request (waited for it, then the quiet window)",
     !!next && next.value!.result.settled && next.ms >= FULL_LOAD_XHR_MS - 100 && /net×/.test(next.value!.result.reason), fmt(r.settles));
   console.log(`   ADDED TIME fullpage: "Next" (a ${FULL_LOAD_XHR_MS} ms load-time request) ${next?.ms ?? "?"} ms`);
+}
+
+// ── ticker: a view that never goes DOM-quiet still settles in the quiet window ────────────────────
+{
+  const ctx = await browser.newContext();
+  const page = await ctx.newPage();
+  await page.goto(`${base}/ticker#/here`);
+  await installSettleProbe(page);
+  const before = page.url();
+  await page.click("#go");
+  const t0 = Date.now();
+  const r = await settleAfterRoute(page, before);
+  const ms = Date.now() - t0;
+  await ctx.close();
+  console.log(`   ticker: ${ms} ms ${JSON.stringify(r?.result ?? null)}`);
+  check(`MUST KEEP ticker: a route change on a page with a 100 ms clock settles in the quiet window (< 1 s), not the ${ROUTE_SETTLE_MS} ms bound`,
+    !!r && r.result.settled && ms < 1000, `${ms} ms ${JSON.stringify(r?.result ?? null)}`);
 }
 
 await browser.close();
