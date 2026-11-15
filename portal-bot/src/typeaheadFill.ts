@@ -46,7 +46,7 @@ import { addressQueries, chooseAddressSuggestion, chooseExactSuggestion, noMatch
  *  portal selected it on Enter and shows it OUTSIDE the box (`held` is that shown text); the search
  *  box itself may be empty afterwards, and a read-back of the box must not call that a miss. */
 export type TypeaheadOutcome =
-  | { outcome: "picked"; picked: string; held: string; typed: string; why: string; via?: "list" | "enter" }
+  | { outcome: "picked"; picked: string; held: string; typed: string; why: string; via?: "list" | "enter" | "search" }
   /** A near miss or several equal candidates: nothing picked, the box cleared; ask `question`. */
   | { outcome: "ask"; question: string; offered: string[]; typed: string; why: string }
   /** `portalSaid`: the portal's own no-match words, when it printed any. */
@@ -70,6 +70,10 @@ export interface TypeaheadRequest {
    *  replay passes its guardAction (the full click gate on the form's default button, then the shared
    *  enterRefusalInPage); without one, the shared enterRefusalInPage alone. */
   enterGate?: (loc: any) => Promise<string>;
+  /** #198 — THE CLICK DOOR for the box's own search control: "" = it may be clicked, else the
+   *  refusal. The replay passes its guardAction (the full click gate); without one, the control's
+   *  own in-page checks (never a submitter, never submit- or pay-worded) are the gate. */
+  clickGate?: (loc: any) => Promise<string>;
   /** How long one query waits for its suggestions to settle. Default 5 s. */
   suggestWaitMs?: number;
   /** The whole fill's deadline, every query included. Default 30 s — far inside the walk's stall
@@ -232,6 +236,174 @@ async function enterRefusal(doc: any, loc: any): Promise<string> {
 }
 
 /**
+ * Runs IN THE PAGE (#198, Tigard's results panel). The TICKABLE RESULT ROWS a search brought: visible
+ * checkboxes that were not on the page before the search (data-al-oldcb), each read by the nearest
+ * ancestor (≤4 levels) whose text is a short line holding a digit. "Select All" is never a row. Stamps
+ * each row's checkbox data-al-tsr=<index>; returns the texts in order. No nested functions.
+ */
+export function searchResultRowsInPage(): string[] {
+  document.querySelectorAll("[data-al-tsr]").forEach((n) => n.removeAttribute("data-al-tsr"));
+  const out: string[] = [];
+  const boxes = document.querySelectorAll('input[type=checkbox]:not([data-al-oldcb]), [role=checkbox]:not([data-al-oldcb])');
+  for (let i = 0; i < boxes.length && out.length < 25; i++) {
+    const cb = boxes[i] as HTMLElement;
+    let node: HTMLElement | null = cb.parentElement;
+    let text = "";
+    let row: HTMLElement | null = null;
+    for (let up = 0; up < 4 && node && node !== document.body; up++, node = node.parentElement) {
+      const t = String(node.innerText || "").replace(/\s+/g, " ").trim();
+      if (t.length >= 5 && t.length <= 300 && /\d/.test(t)) { text = t; row = node; break; }
+      if (t.length > 300) break;
+    }
+    if (!text || !row || /^select\s+all\b/i.test(text)) continue;
+    const r = row.getBoundingClientRect();
+    const cs = getComputedStyle(row);
+    if (r.width <= 0 || r.height <= 0 || cs.visibility === "hidden" || cs.display === "none") continue;
+    cb.setAttribute("data-al-tsr", String(out.length));
+    out.push(text);
+  }
+  return out;
+}
+
+/**
+ * Runs IN THE PAGE, on a ticked result row's checkbox (#198). THE PANEL'S OWN "ADD": searching the
+ * row's ancestors outward (≤6 levels, never <body>), the first level holding any visible control whose
+ * whole label reads add / add selected / add location / select / use selected — exactly one there, or
+ * nothing. Never submit- or pay-worded by the shared predicates. Stamps data-al-tsadd="1".
+ */
+export function resultPanelAddInPage(cb: Element, g: string): string {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const ps = (globalThis as any)[g];
+  document.querySelectorAll("[data-al-tsadd]").forEach((n) => n.removeAttribute("data-al-tsadd"));
+  const WORDS = /^\+?\s*(?:add(?:\s+(?:selected|location|address|parcel|to\s+application))?|select(?:ed)?|use\s+selected)$/i;
+  let node: Element | null = cb.parentElement;
+  for (let level = 0; level < 6 && node && node !== document.body && node !== document.documentElement; level++, node = node.parentElement) {
+    const found = node.querySelectorAll("button, input[type=button], [role=button], a");
+    const fit: HTMLElement[] = [];
+    const labels: string[] = [];
+    for (let i = 0; i < found.length; i++) {
+      const c = found[i] as HTMLElement;
+      const r = c.getBoundingClientRect();
+      const cs = getComputedStyle(c);
+      if (r.width <= 0 || r.height <= 0 || cs.visibility === "hidden" || cs.display === "none") continue;
+      const text = String(c.innerText || (c as HTMLInputElement).value || c.getAttribute("aria-label") || c.getAttribute("title") || "").replace(/\s+/g, " ").trim();
+      if (!text || !WORDS.test(text)) continue;
+      if (ps && ((typeof ps.isSubmitIntent === "function" && ps.isSubmitIntent(text, null)) || (typeof ps.isPayFee === "function" && ps.isPayFee(text)))) continue;
+      fit.push(c);
+      labels.push(text);
+    }
+    if (fit.length > 1) return "";
+    if (fit.length === 1) { fit[0].setAttribute("data-al-tsadd", "1"); return labels[0]; }
+  }
+  return "";
+}
+
+/** #198 — after the box's own search: tick the ONE result row that is the job's address and press the
+ *  results panel's own "Add", then confirm the page now shows the address outside the search box.
+ *  "none" when the search brought no tickable rows (the caller reads the page the other ways). */
+async function searchResultTickAndAdd(
+  page: any, doc: any, loc: any, site: TypeaheadSite, req: TypeaheadRequest, deadline: number,
+): Promise<{ kind: "none" } | { kind: "picked"; text: string; why: string; add: string } | { kind: "ask"; question: string; offered: string[]; why: string } | { kind: "failed"; text: string; why: string }> {
+  let texts: string[] = [];
+  for (let i = 0; i < 6 && Date.now() < deadline; i++) {
+    await doc.evaluate(NAME_SHIM).catch(() => null);
+    const read = await doc.evaluate(searchResultRowsInPage).catch(() => [] as string[]);
+    texts = Array.isArray(read) ? read.map((t: unknown) => String(t ?? "")) : [];
+    if (texts.length) break;
+    await page.waitForTimeout?.(400).catch(() => null);
+  }
+  if (!texts.length) return { kind: "none" };
+  const choice = chooseAddressSuggestion(texts, site);
+  if (choice.kind === "ask") return { kind: "ask", question: choice.question, offered: texts, why: choice.why };
+  if (choice.kind !== "pick") return { kind: "none" };
+  const cb = doc.locator(`[data-al-tsr="${choice.index}"]`).first();
+  const ticked = await withAutomationInput(page, () => cb.click({ timeout: 3000 })).then(() => true)
+    .catch(() => withAutomationInput(page, () => cb.click({ timeout: 3000, force: true })).then(() => true).catch(() => false));
+  if (!ticked) return { kind: "failed", text: choice.text, why: `"${choice.text}" was found in the search results but its checkbox could not be ticked` };
+  // The panel's "Add" appears once a row is ticked: look for it near the row, briefly.
+  let addLabel = "";
+  for (let i = 0; i < 6 && !addLabel && Date.now() < deadline; i++) {
+    await page.waitForTimeout?.(400).catch(() => null);
+    await doc.evaluate(PORTAL_SAFETY_IN_PAGE_SOURCE).catch(() => null);
+    addLabel = String(await cb.evaluate(resultPanelAddInPage, PORTAL_SAFETY_GLOBAL).catch(() => "") ?? "");
+  }
+  if (!addLabel) return { kind: "failed", text: choice.text, why: `ticked "${choice.text}" in the search results and the panel offered no single "Add" to put it on the application` };
+  const add = doc.locator('[data-al-tsadd="1"]').first();
+  const addRefused = req.clickGate
+    ? String(await req.clickGate(add).catch((e: unknown) => `the click gate could not answer (${String((e as Error)?.message ?? e).slice(0, 80)})`) ?? "")
+    : "";
+  if (addRefused) return { kind: "failed", text: choice.text, why: `ticked "${choice.text}" but the panel's "${addLabel}" was refused: ${addRefused.slice(0, 120)}` };
+  const urlBefore = typeof page.url === "function" ? page.url() : "";
+  const added = await withAutomationInput(page, () => add.click({ timeout: 4000 })).then(() => true).catch(() => false);
+  if (!added) return { kind: "failed", text: choice.text, why: `ticked "${choice.text}" and the panel's "${addLabel}" could not be pressed` };
+  // CONFIRMED BY THE PAGE: the results panel's Add is gone (or the page moved) and the job's address
+  // is now shown on the page outside any input — the application's location card.
+  const house = (String(site.street ?? "").match(/^\s*(\d+[A-Za-z]?)\b/) ?? [])[1] ?? "";
+  for (let i = 0; i < 15 && Date.now() < deadline + 5000; i++) {
+    await page.waitForTimeout?.(400).catch(() => null);
+    const gone = !(await add.isVisible().catch(() => false)) || (typeof page.url === "function" && page.url() !== urlBefore);
+    if (!gone) continue;
+    const shows = house ? await doc.evaluate((h: string) => {
+      const body = String((document.body && (document.body as HTMLElement).innerText) || "");
+      return new RegExp(`(^|[^0-9])${h}([^0-9]|$)`).test(body);
+    }, house).catch(() => false) : true;
+    if (shows) return { kind: "picked", text: choice.text, why: choice.why, add: addLabel };
+  }
+  return { kind: "failed", text: choice.text, why: `ticked "${choice.text}" and pressed the panel's "${addLabel}", and the page did not then show the address` };
+}
+
+/**
+ * Runs IN THE PAGE, on the box (#198). THE BOX'S OWN SEARCH CONTROL: searching the box's ancestors
+ * outward, at most three levels and never <body>, the first level holding any qualifying control —
+ * and exactly ONE there, or nothing. A control qualifies when its whole short label reads as a search
+ * ("Search", "Find", "Go", "Look up", "Search address") or, wordless, it is drawn as a magnifier (its
+ * own or a child's class / icon name says search or magnif). Never a submitter (a submit / image
+ * input, a button that submits its form: the box's form may be the application), never submit- or
+ * pay-worded by the shared predicates. Stamps it data-al-tsb="1"; returns its label ("search" when
+ * wordless), or "". No nested functions (esbuild keepNames → __name).
+ */
+export function ownSearchControlInPage(box: Element, g: string): string {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const ps = (globalThis as any)[g];
+  document.querySelectorAll("[data-al-tsb]").forEach((n) => n.removeAttribute("data-al-tsb"));
+  const WORDS = /^(?:search|find|go|look\s?-?up|search\s+(?:address(?:es)?|location|parcels?)|find\s+(?:address|location|parcel))$/i;
+  let node: Element | null = box.parentElement;
+  for (let level = 0; level < 3 && node && node !== document.body && node !== document.documentElement; level++, node = node.parentElement) {
+    const found = node.querySelectorAll("button, input[type=button], input[type=submit], input[type=image], [role=button]");
+    const fit: HTMLElement[] = [];
+    const labels: string[] = [];
+    for (let i = 0; i < found.length; i++) {
+      const c = found[i] as HTMLElement;
+      const r = c.getBoundingClientRect();
+      const cs = getComputedStyle(c);
+      if (r.width <= 0 || r.height <= 0 || cs.visibility === "hidden" || cs.display === "none") continue;
+      const type = String(c.getAttribute("type") || "").toLowerCase();
+      const inForm = !!(c as HTMLButtonElement).form;
+      if ((c.tagName === "INPUT" && (type === "submit" || type === "image")) || (c.tagName === "BUTTON" && inForm && (type === "" || type === "submit"))) continue;
+      const text = String(c.innerText || (c as HTMLInputElement).value || c.getAttribute("aria-label") || c.getAttribute("title") || "")
+        .replace(/\s+/g, " ").trim();
+      if (ps && ((typeof ps.isSubmitIntent === "function" && ps.isSubmitIntent(text, null)) || (typeof ps.isPayFee === "function" && ps.isPayFee(text)))) continue;
+      let worded = !!text && text.length <= 30 && WORDS.test(text);
+      if (!text) {
+        const drawn = [String(c.className || ""), c.getAttribute("data-icon") || ""];
+        const kids = c.querySelectorAll("svg, i, span, img");
+        for (let k = 0; k < kids.length && k < 6; k++) {
+          const kid = kids[k] as Element;
+          drawn.push(String(kid.getAttribute("class") || ""), kid.getAttribute("data-icon") || "", kid.getAttribute("alt") || "");
+        }
+        worded = /search|magnif/i.test(drawn.join(" "));
+      }
+      if (!worded) continue;
+      fit.push(c);
+      labels.push(text || "search");
+    }
+    if (fit.length > 1) return "";
+    if (fit.length === 1) { fit[0].setAttribute("data-al-tsb", "1"); return labels[0]; }
+  }
+  return "";
+}
+
+/**
  * Press Enter in the box (the whole one-line address is in it) and read what the portal selected:
  * the texts that appeared on the page (pageShowsInPage `shown`, before vs after) judged by the ONE
  * address predicate. A postback reloads the document — every read tolerates that and retries until
@@ -240,6 +412,7 @@ async function enterRefusal(doc: any, loc: any): Promise<string> {
  */
 async function enterAndReadSelection(
   page: any, doc: any, loc: any, site: TypeaheadSite, before: { shown: string[]; notes: string[] } | null, deadline: number,
+  press?: () => Promise<unknown>,
 ): Promise<{ choice: ReturnType<typeof chooseAddressSuggestion> | null; said: string; pressed: boolean }> {
   // A box inside a form posts the form back on Enter: wait for THAT navigation (a real postback can
   // take seconds to start), never read the old document's stillness as "nothing selected".
@@ -247,7 +420,8 @@ async function enterAndReadSelection(
   const navigated = inForm && typeof doc.waitForNavigation === "function"
     ? doc.waitForNavigation({ waitUntil: "domcontentloaded", timeout: Math.max(0, Math.min(8_000, deadline - Date.now())) }).then(() => true).catch(() => false)
     : Promise.resolve(false);
-  const pressed = await withAutomationInput(page, () => loc.press("Enter", { timeout: 3000 })).then(() => true).catch(() => false);
+  // `press`: the box's own search control (#198) instead of Enter — read exactly the same way.
+  const pressed = await withAutomationInput(page, () => (press ? press() : loc.press("Enter", { timeout: 3000 }))).then(() => true).catch(() => false);
   if (!pressed) return { choice: null, said: "", pressed: false };
   await navigated;
   const old = new Set(before?.shown ?? []);
@@ -363,6 +537,7 @@ export async function fillTypeahead(page: any, loc: any, req: TypeaheadRequest):
   let usedQuery = "";
   let portalSaid = "";
   let enterNote = "";
+  let searchNote = "";
   let wholeListed = 0;
   const entered = new Set<number>();
   const typedLine = (): string => typed.map((q, i) => `"${q}"${entered.has(i) ? " + Enter" : ""}`).join(" then ") || "nothing";
@@ -395,7 +570,73 @@ export async function fillTypeahead(page: any, loc: any, req: TypeaheadRequest):
       const refusal = req.enterGate
         ? String(await req.enterGate(loc).catch((e: unknown) => `the Enter gate could not answer (${String((e as Error)?.message ?? e).slice(0, 80)})`) ?? "")
         : await enterRefusal(doc, loc);
-      if (refusal) { enterNote = ` (Enter was not pressed: ${refusal.slice(0, 160)})`; continue; }
+      // #198 — ENTER REFUSED: THE BOX'S OWN SEARCH CONTROL, ONCE (live City of Tigard, Tyler EnerGov
+      // "Add Location": an Esri "Address & Parcel Search" box offered no suggestions, Enter was refused
+      // because the page also holds an invoices menu, and its magnifier beside the box was never
+      // pressed). A control the box owns — never a submitter, never submit- or pay-worded — is a
+      // search, not the page's Enter; what it brings is read like Enter's answer: a results list
+      // (suggestion rows, picked by the same address rule below) or a selection the portal shows.
+      if (refusal) {
+        const searchLabel = req.mode === "site" && typeof loc.evaluate === "function"
+          ? String(await loc.evaluate(ownSearchControlInPage, PORTAL_SAFETY_GLOBAL).catch(() => "") ?? "")
+          : "";
+        if (!searchLabel) { enterNote = ` (Enter was not pressed: ${refusal.slice(0, 160)})`; continue; }
+        const control = doc.locator('[data-al-tsb="1"]').first();
+        const clickRefused = req.clickGate
+          ? String(await req.clickGate(control).catch((e: unknown) => `the click gate could not answer (${String((e as Error)?.message ?? e).slice(0, 80)})`) ?? "")
+          : "";
+        if (clickRefused) { enterNote = ` (Enter was not pressed: ${refusal.slice(0, 160)}; the box's own "${searchLabel}" was refused: ${clickRefused.slice(0, 120)})`; continue; }
+        // The whole line first; if that finds nothing, THE STREET LINE ALONE (live Tigard run 6: the
+        // Esri box answered "There are no matches available." for "13125 SW Hall Blvd, Tigard, OR
+        // 97223" — its address source matches the street line, and the city/ZIP tail defeats it).
+        const searchQueries = [t.q];
+        if (loose(street) && loose(street) !== loose(t.q)) searchQueries.push(street);
+        let found = false;
+        let pressedAny = false;
+        for (let qi = 0; qi < searchQueries.length && Date.now() < deadline; qi++) {
+          const q = searchQueries[qi];
+          let beforeQ = before;
+          if (qi > 0) {
+            await clearBox(doc, loc, controlsId);
+            await markExistingPopups(doc);
+            beforeQ = await readShows(doc);
+            typed.push(q);
+            if (!(await typeInto(page, loc, q))) continue;
+          }
+          await doc.evaluate(() => { document.querySelectorAll('input[type=checkbox], [role=checkbox]').forEach((n) => n.setAttribute("data-al-oldcb", "1")); }).catch(() => null);
+          const viaSearch = await enterAndReadSelection(page, doc, loc, site, beforeQ, deadline, () => control.click({ timeout: 3000 }));
+          if (viaSearch.said) portalSaid = viaSearch.said;
+          if (!viaSearch.pressed) continue;
+          pressedAny = true;
+          searchNote = ` + the box's own "${searchLabel}"`;
+          // A RESULTS PANEL OF TICKABLE ROWS (live City of Tigard, owner's walk-through 2026-11-13): the
+          // search lists each parcel as a row with its own checkbox (plus a "Select All"); ticking the
+          // row shows the panel's "Add", which puts the location on the application. Text that merely
+          // APPEARED is not a selection there — so this is read first, and only rows the search brought.
+          const tick = await searchResultTickAndAdd(page, doc, loc, site, req, deadline);
+          if (tick.kind === "picked") {
+            return { outcome: "picked", picked: tick.text, held: tick.text, typed: q, why: `${tick.why}; ticked in the results of the box's own "${searchLabel}" and added with the panel's "${tick.add}"`, via: "search" };
+          }
+          if (tick.kind === "ask") return { outcome: "ask", question: tick.question, offered: tick.offered, typed: q, why: tick.why };
+          if (tick.kind === "failed") return { outcome: "not_held", why: tick.why, picked: tick.text };
+          if (viaSearch.choice?.kind === "pick") {
+            return { outcome: "picked", picked: viaSearch.choice.text, held: viaSearch.choice.text, typed: q, why: `${viaSearch.choice.why}; selected by the portal after its own "${searchLabel}"`, via: "search" };
+          }
+          if (viaSearch.choice?.kind === "ask") {
+            return { outcome: "ask", question: `${viaSearch.choice.question} (The portal selected it after its own "${searchLabel}"; check its selection before going on.)`, offered: viaSearch.choice.candidates, typed: q, why: viaSearch.choice.why };
+          }
+          // A RESULTS LIST: rows the search opened, read and picked like a suggestion list. The
+          // selection read above already waited for the page; this is one short settle, not a second
+          // full wait (the whole fill's budget is shared).
+          const listed = await settledSuggestions(doc, controlsId, Math.min(waitMs, 1500), deadline);
+          if (listed.length) { rows = listed; usedQuery = q; found = true; break; }
+        }
+        if (found) break;
+        enterNote = pressedAny
+          ? ` (Enter was not pressed: ${refusal.slice(0, 160)}; the box's own "${searchLabel}" brought nothing)`
+          : ` (Enter was not pressed: ${refusal.slice(0, 160)}; the box's own "${searchLabel}" could not be pressed)`;
+        continue;
+      }
       const sel = await enterAndReadSelection(page, doc, loc, site, before, deadline);
       if (sel.said) portalSaid = sel.said;
       if (!sel.pressed) continue;
@@ -415,7 +656,7 @@ export async function fillTypeahead(page: any, loc: any, req: TypeaheadRequest):
       const over = Date.now() >= deadline ? ` (its ${Math.round(budgetMs / 1000)} s budget ran out)` : "";
       return {
         outcome: "no_suggestions",
-        why: `typed ${typedLine()} and the box offered no suggestions${wholeListed ? ` (only ${wholeListed} other address(es) for the whole line)` : ""}${entered.size ? " and the portal selected nothing" : ""}${enterNote}${over}`,
+        why: `typed ${typedLine()}${searchNote} and the box offered no suggestions${wholeListed ? ` (only ${wholeListed} other address(es) for the whole line)` : ""}${entered.size ? " and the portal selected nothing" : ""}${enterNote}${over}`,
         typed,
         ...(portalSaid ? { portalSaid } : {}),
       };

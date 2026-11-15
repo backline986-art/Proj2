@@ -5604,8 +5604,10 @@ export class RecipeAdapter extends BasePortalAdapter {
     // click gate on the form's default button, then the shared Enter question; a refusal is recorded
     // in guardRefusals / driftWarnings like any other.
     const enterGate = (loc: unknown): Promise<string> => this.guardAction({ kind: "press", key: "Enter", target: loc, why: `type-ahead search in "${label}"` });
-    const out = await fillTypeahead(this.page, scoped, { value: v, mode, site, enterGate });
-    if (out.outcome === "picked" && out.via === "enter") {
+    // #198: the box's own search control goes through the replay's full click gate, like any click.
+    const clickGate = (loc: unknown): Promise<string> => this.guardAction({ kind: "click", target: loc, why: `type-ahead search control beside "${label}"` });
+    const out = await fillTypeahead(this.page, scoped, { value: v, mode, site, enterGate, clickGate });
+    if (out.outcome === "picked" && (out.via === "enter" || out.via === "search")) {
       // #139: the PORTAL selected the job's address on Enter and shows it outside the box (verified
       // by the address predicate inside fillTypeahead); the search box itself comes back empty, so
       // reading the box back here would call a good selection a failure.

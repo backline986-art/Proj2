@@ -12041,7 +12041,8 @@ export class AutoLearnAdapter extends BasePortalAdapter {
       }
       return miss(line);
     }
-    if (out.via === "enter") this.typeaheadEnterPicks.set(boxKey, { label, held: out.held });
+    // A pick the portal SELECTED (Enter, or the box's own search control — #198) is shown outside the box.
+    if (out.via === "enter" || out.via === "search") this.typeaheadEnterPicks.set(boxKey, { label, held: out.held });
     const step: RecipeStep = {
       action: "fill",
       phase: "fill",
