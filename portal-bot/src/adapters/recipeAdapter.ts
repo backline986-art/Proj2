@@ -11401,7 +11401,7 @@ export class RecipeAdapter extends BasePortalAdapter {
         this.driftWarnings.push(`${line} — clicked it, verify (#228)`);
       }
     } else if (r.idTwin) {
-      this.resolveTrail.push(`  ...recorded identity: "${label}" — its pick ${pickShown} carries the id step ${r.idTwin.step + 1} recorded, but is not the node that step clicked; its own recorded #${own[0].slice(0, 80)} is not on the page — clicked (#228)`);
+      this.resolveTrail.push(`  ...recorded identity: "${label}" — its pick ${pickShown} carries the id step ${r.idTwin.step + 1} recorded, but is not the node that step clicked; its own recorded #${own[0].slice(0, 80)} ${r.ownShown > 0 ? "is on the page but is not this control" : "is not on the page"} — clicked (#228)`);
     }
     return null;
   }
