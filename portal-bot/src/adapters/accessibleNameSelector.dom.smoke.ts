@@ -399,8 +399,10 @@ if (rtRaw) {
     !!ht && !!hr && !hr.repinned && JSON.stringify(hr.selector) === JSON.stringify(ht.selector), JSON.stringify(hr));
 }
 
-// ---- THE WIRING: a real learn walk records its advance through the check -------------------------
-{
+// ---- THE WIRING: real learn walks record their advance through the check --------------------------
+// Two doors: the planner names the advance (advanceSelectorIndex), or it names none and the walk's
+// fallback advance finds it. Each door must ask the check before it records the step.
+for (const door of ["planner-named advance", "fallback advance"] as const) {
   const wctx = await browser.newContext();
   await wctx.addInitScript("globalThis.__name = globalThis.__name || function (fn) { return fn; };");
   const wpage = await wctx.newPage();
@@ -410,7 +412,12 @@ if (rtRaw) {
     asked++;
     if (asked > 1) return { fills: [], atReview: true };
     const owner = req.fields.findIndex((f) => String(f.label ?? "") === "Owner Name");
-    return { fills: owner >= 0 ? [{ selectorIndex: owner, value: "T" }] : [], atReview: false };
+    const adv = req.fields.findIndex((f) => (f.selector?.fallbacks ?? []).some((fb) => fb.css === "#btn-adv"));
+    return {
+      fills: owner >= 0 ? [{ selectorIndex: owner, value: "T" }] : [],
+      atReview: false,
+      ...(door === "planner-named advance" && adv >= 0 ? { advanceSelectorIndex: adv } : {}),
+    };
   };
   const adapter = new AutoLearnAdapter("Accessible Name Walk", planner, { maxPages: 2 });
   (adapter as unknown as { page: Page }).page = wpage;
@@ -426,7 +433,7 @@ if (rtRaw) {
   const reached = wpage.url();
   await wctx.close();
   const adv = steps.filter((s) => s.action === "click" && /^advance\b/i.test(String(s.note ?? "")));
-  check("THE ADVANCE DOOR: a walk records the advance whose name finds a disabled namesake by its #id, with the namesake's name dropped",
+  check(`THE WIRING (${door}): a walk records the advance whose name finds a disabled namesake by its #id, with the namesake's name dropped`,
     adv.length === 1 && adv[0].selector?.css === "#btn-adv" && !adv[0].selector?.name
       && !(adv[0].selector?.fallbacks ?? []).some((fb) => fb.role && fb.name === "Continue")
       && /walk2/.test(reached),
