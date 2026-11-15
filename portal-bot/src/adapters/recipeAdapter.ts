@@ -8403,9 +8403,15 @@ export class RecipeAdapter extends BasePortalAdapter {
       // iframe, and a dialog's Continue closes it — neither touches the main page's inputs, rows or
       // text, so both read as "changed nothing" (live Corvallis electrical recipe, 2026-09-28).
       // Which frames are showing, and what they show (the path, no query), is the effect.
+      // An open or modal dialog that is not an iframe counts the same way (#230): its presence is
+      // part of what the click did.
+      const modals = (Array.from(document.querySelectorAll("dialog[open], [role='dialog'], [role='alertdialog'], [aria-modal='true']")) as HTMLElement[])
+        .filter((d) => { const dr = d.getBoundingClientRect(); return dr.width > 0 && dr.height > 0; })
+        .map((d) => `modal:${d.id || d.getAttribute("aria-label") || d.tagName.toLowerCase()}`);
       const dialogs = (Array.from(document.querySelectorAll("iframe")) as HTMLIFrameElement[])
         .filter((f) => { const fr = f.getBoundingClientRect(); return fr.width > 0 && fr.height > 0; })
         .map((f) => `${f.getAttribute("name") || f.id || ""}@${String(f.getAttribute("src") || "").split("?")[0]}`)
+        .concat(modals)
         .join(",");
       return `${shown}|${options}|${rows}|${text.length}:${h}|${dialogs}|${vals.slice(0, 4000)}`;
     }).catch(() => "") as Promise<string>;
@@ -8475,6 +8481,24 @@ export class RecipeAdapter extends BasePortalAdapter {
     const words = `${step.selector?.name ?? ""} ${step.selector?.text ?? ""} ${step.selector?.label ?? ""} ${step.note ?? ""}`;
     const dialogStep = !!step.selector?.frame || isContactOpener(words);
     const isAdvance = /^advance\b/i.test(String(step.note ?? "").trim()) && !dialogStep;
+    // AN ADVANCE THAT OPENED A DIALOG HAS ADVANCED INTO IT (#230). Live City of Boise (Accela ACA,
+    // 2026-11-15): the learner recorded its second address Search as "advance: Search" (its advance
+    // door picked it). On replay that click opened the Address Search Result dialog — an iframe over
+    // the same page — so the main page's identity did not move and the step was refused, with the
+    // recipe's next three steps (the rows in that dialog) never reached. The contact-opener rule
+    // above is one instance of this; the general one is read from the page, with the reading
+    // pageEffect already takes: a dialog (a visible iframe, or an open or modal dialog) that was
+    // not showing before the click is showing after it. A click that opened nothing is still the
+    // refusal it was, and the retry below still runs for it.
+    if (isAdvance && beforeEffect) {
+      const afterEffect = await this.pageEffect();
+      const dialogsOf = (effect: string): string[] => String(effect.split("|")[4] ?? "").split(",").filter(Boolean);
+      const opened = afterEffect ? dialogsOf(afterEffect).filter((d) => !dialogsOf(beforeEffect).includes(d)) : [];
+      if (opened.length) {
+        this.agingNotes.push(`advance "${String(step.note ?? "click").slice(0, 44)}" opened a dialog (${opened[0].slice(0, 60)}) rather than moving the page — the step advanced into it`);
+        return;
+      }
+    }
     if (!blockers.length && !isAdvance) {
       // ASK THE SECOND QUESTION BEFORE GIVING UP ON THE ANSWER. The page did not move; did
       // anything happen at all? A total that filled, a row that appeared, an option list that
