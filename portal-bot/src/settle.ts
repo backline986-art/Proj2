@@ -14,7 +14,9 @@
 //     PRM hook is not installed yet (or a full-page postback) still reads as busy;
 //   - an in-flight fetch / XHR counter (requests older than maxRequestAgeMs — long-polls,
 //     heartbeats — stop counting, or they would never let a page settle);
-//   - a DOM-mutation quiet window.
+//   - a DOM-mutation quiet window (a caller may leave it out: `dom: false`, see settleAfterRoute);
+//   - a change of the page's own URL (a hash route, pushState/replaceState, back/forward): an
+//     app that rewrites its route has not finished arriving (#245).
 // The quiet window is measured from the START of the wait as well as from the last activity:
 // an autopostback control commonly defers its postback with setTimeout(…, 0), so right after a
 // commit NOTHING is in flight yet. Requiring quietMs of stillness after the commit is what
@@ -37,10 +39,12 @@ export const SETTLE_PROBE_SOURCE = String.raw`(function () {
   var now = function () { return (g.performance && performance.now) ? performance.now() : Date.now(); };
   var st = {
     doc: String(Math.random()).slice(2), prmInFlight: 0, postbackAt: -1, lastActivity: now(), net: new Map(), seq: 0,
-    saw: { prm: 0, postback: 0, net: 0, mutation: 0 },
+    // The same clock with DOM mutations left out, for a caller that settles on requests and route only.
+    lastNonDom: now(), href: String(location.href),
+    saw: { prm: 0, postback: 0, net: 0, mutation: 0, url: 0 },
     hooked: { prm: false, doPostBack: false }
   };
-  var touch = function (kind) { st.lastActivity = now(); if (kind) st.saw[kind]++; };
+  var touch = function (kind) { var t = now(); st.lastActivity = t; if (kind !== "mutation") st.lastNonDom = t; if (kind) st.saw[kind]++; };
 
   // --- PageRequestManager (guarded: Sys may never exist; getInstance may throw or be null) ---
   var hookPrm = function () {
@@ -115,17 +119,38 @@ export const SETTLE_PROBE_SOURCE = String.raw`(function () {
   };
   observe();
 
+  // --- the page's own URL (#245): a hash route, pushState / replaceState, back / forward ---
+  // An app that rewrites its route has not finished arriving: Tigard's (Tyler EnerGov) application
+  // assistant rewrote #/applicationAssistant?sectionName=All to ?showTemplates=false when its own
+  // initialisation ended, and wiped the search a replay had clicked in the meantime. A change is
+  // activity; the href is also compared at every poll and snapshot, so nothing that moves the URL
+  // without an event (a router that captured history methods before this ran) is missed.
+  var checkUrl = function () {
+    try { var h = String(location.href); if (h !== st.href) { st.href = h; touch("url"); } } catch (e) {}
+  };
+  try { g.addEventListener("hashchange", checkUrl, true); g.addEventListener("popstate", checkUrl, true); } catch (e) {}
+  try {
+    ["pushState", "replaceState"].forEach(function (m) {
+      var f = history[m];
+      if (typeof f !== "function" || f.__settleWrapped) return;
+      var wrapped = function () { var r = f.apply(this, arguments); checkUrl(); return r; };
+      wrapped.__settleWrapped = true;
+      history[m] = wrapped;
+    });
+  } catch (e) { /* locked history */ }
+
   // Sys and __doPostBack arrive with the page's own scripts, after this runs — and a
   // PageRequestManager re-assigns __doPostBack when it initialises. Re-check cheaply.
-  var poll = function () { hookPrm(); wrapDoPostBack(); };
+  var poll = function () { hookPrm(); wrapDoPostBack(); checkUrl(); };
   poll();
   try { document.addEventListener("DOMContentLoaded", poll); g.addEventListener("load", poll); } catch (e) {}
   setInterval(poll, 150);
 
   g.__settleProbe = {
     /** Start a wait: reset the "seen" tallies and return the page clock. */
-    begin: function () { st.saw = { prm: 0, postback: 0, net: 0, mutation: 0 }; poll(); return now(); },
-    snapshot: function (maxRequestAgeMs, postbackGraceMs) {
+    begin: function () { st.saw = { prm: 0, postback: 0, net: 0, mutation: 0, url: 0 }; poll(); return now(); },
+    /** dom === false: DOM mutations do not count as activity (requests, postbacks and route do). */
+    snapshot: function (maxRequestAgeMs, postbackGraceMs, dom) {
       poll();
       var t = now();
       var net = 0;
@@ -135,7 +160,7 @@ export const SETTLE_PROBE_SOURCE = String.raw`(function () {
       if (prmBusy()) busy.push("async postback in flight");
       if (pending) busy.push("postback began");
       if (net > 0) busy.push(net + " request(s) in flight");
-      return { doc: st.doc, now: t, busy: busy, lastActivity: st.lastActivity, saw: st.saw, hooked: st.hooked };
+      return { doc: st.doc, now: t, busy: busy, lastActivity: dom === false ? st.lastNonDom : st.lastActivity, saw: st.saw, hooked: st.hooked };
     }
   };
 })();`;
@@ -166,6 +191,9 @@ export interface SettleOptions {
   /** How long a "postback began" mark keeps the page busy without a PRM beginRequest (a full
    *  page postback navigates within this). Default 2000. */
   postbackGraceMs?: number;
+  /** Whether a DOM mutation is activity. Default true. false settles on requests, postbacks and the
+   *  page's URL alone (settleAfterRoute): a view with one ticking node never goes DOM-quiet. */
+  dom?: boolean;
 }
 
 export interface SettleResult {
@@ -182,7 +210,7 @@ interface Snapshot {
   now: number;
   busy: string[];
   lastActivity: number;
-  saw: { prm: number; postback: number; net: number; mutation: number };
+  saw: { prm: number; postback: number; net: number; mutation: number; url: number };
   hooked: { prm: boolean; doPostBack: boolean };
 }
 
@@ -190,8 +218,9 @@ const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms
 
 /**
  * Wait until the page has been still for quietMs: no async postback in flight (PageRequestManager),
- * no postback just begun, no young fetch/XHR, no DOM mutation. Returns {settled:false} on timeout
- * rather than throwing — the caller decides whether an unsettled page is fatal.
+ * no postback just begun, no young fetch/XHR, no change of its URL, no DOM mutation (unless
+ * `dom: false`). Returns {settled:false} on timeout rather than throwing — the caller decides
+ * whether an unsettled page is fatal.
  */
 export async function waitForSettled(page: Page, opts: SettleOptions = {}): Promise<SettleResult> {
   const timeoutMs = opts.timeoutMs ?? 10_000;
@@ -199,6 +228,7 @@ export async function waitForSettled(page: Page, opts: SettleOptions = {}): Prom
   const pollMs = opts.pollMs ?? 50;
   const maxRequestAgeMs = opts.maxRequestAgeMs ?? 5_000;
   const postbackGraceMs = opts.postbackGraceMs ?? 2_000;
+  const dom = opts.dom !== false;
   const started = Date.now();
   let pageStart: number | null = null;
   let last: Snapshot | null = null;
@@ -209,15 +239,15 @@ export async function waitForSettled(page: Page, opts: SettleOptions = {}): Prom
     let snap: Snapshot | null = null;
     try {
       snap = await page.evaluate(
-        ([age, grace, fresh]) => {
+        ([age, grace, fresh, withDom]) => {
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
           const p = (globalThis as any).__settleProbe;
           if (!p) return null;
-          const s = p.snapshot(age, grace);
+          const s = p.snapshot(age, grace, withDom);
           if (fresh) s.pageStart = p.begin();
           return s;
         },
-        [maxRequestAgeMs, postbackGraceMs, pageStart === null] as const,
+        [maxRequestAgeMs, postbackGraceMs, pageStart === null, dom] as const,
       ) as (Snapshot & { pageStart?: number }) | null;
       if (snap === null) {
         // A document without the probe (navigated, or never installed): install and restart the clock.
@@ -253,8 +283,102 @@ export async function waitForSettled(page: Page, opts: SettleOptions = {}): Prom
   return {
     settled: false,
     waitedMs: Date.now() - started,
-    reason: `timeout after ${timeoutMs}ms: ${last ? (last.busy.length ? last.busy.join("; ") : "DOM still changing") : "page never readable"}`,
+    reason: `timeout after ${timeoutMs}ms: ${last ? (last.busy.length ? last.busy.join("; ") : dom ? "DOM still changing" : "requests or the URL still changing") : "page never readable"}`,
   };
+}
+
+/**
+ * THE BOUND ON A ROUTE SETTLE (#245). Tigard's (Tyler EnerGov, AngularJS) application assistant
+ * finished initialising 1.12 s after the click that opened it (11:01:11.018 route change, 11:01:12.142
+ * its own route rewrite; the three init responses landed 15-40 ms before the rewrite). 4 s is ~3.5x
+ * that, and it is spent in full only by a page whose requests or URL never go quiet for the window
+ * (a short-interval poll; a long-poll younger than the probe's 5 s request age).
+ */
+export const ROUTE_SETTLE_MS = 4_000;
+
+export interface RouteSettle {
+  /** The URL the click left the page on, read as the click returned. */
+  clickedUrl: string;
+  /** The URL once the page settled, or when the bound ran out. */
+  settledUrl: string;
+  result: SettleResult;
+}
+
+/**
+ * A CLICK THAT CHANGED THE PAGE'S URL IS NOT DONE UNTIL THE PAGE HAS SETTLED (#245): no request in
+ * flight and no further change of its URL for the quiet window (the probe's 300 ms default, longer
+ * than a setTimeout-0 deferral and than the 15 ms between Tigard's last init response and its
+ * rewrite), bounded by ROUTE_SETTLE_MS. A single-page app's view goes on initialising after the
+ * route change that opened it, and may end by rewriting its own route; the live replay clicked
+ * Tigard's "Search" 0.8 s after "Apply" while the assistant was still initialising, and the
+ * assistant's rewrite then wiped the results the next step needed (the learn, with ~15 s between
+ * those steps, never raced). DOM mutations are left out (`dom: false`): the question is whether the
+ * view has finished arriving, which its requests and its route answer; a ticking node would make
+ * every navigation click pay the whole bound.
+ *
+ * A click whose URL did not change returns null at once: one page.url() read, nothing waited on.
+ * The probe must have been installed BEFORE the click (installSettleProbe; the recipe adapter does it
+ * for every click) or the requests the click started are invisible. A full page load is a new
+ * document, which restarts the quiet clock (waitForSettled) and carries the probe from its init
+ * script. Never throws.
+ */
+export async function settleAfterRoute(page: Page, beforeUrl: string, opts: { timeoutMs?: number } = {}): Promise<RouteSettle | null> {
+  if (!page || typeof page.url !== "function" || typeof page.evaluate !== "function" || typeof page.addInitScript !== "function") return null;
+  const urlNow = (): string => { try { return String(page.url() ?? ""); } catch { return ""; } };
+  const clickedUrl = urlNow();
+  if (!beforeUrl || !clickedUrl || clickedUrl === beforeUrl) return null;
+  const result = await waitForSettled(page, { timeoutMs: opts.timeoutMs ?? ROUTE_SETTLE_MS, dom: false })
+    .catch((e: unknown): SettleResult => ({ settled: false, waitedMs: 0, reason: `could not read the page: ${String((e as Error)?.message ?? e).slice(0, 120)}` }));
+  return { clickedUrl, settledUrl: urlNow(), result };
+}
+
+/** A URL as an operator reads a route in a message: path, query and hash, without the origin. */
+export function routeText(url: string): string {
+  try { const u = new URL(url); return `${u.pathname}${u.search}${u.hash}`; } catch { return String(url ?? ""); }
+}
+
+/** A URL as a route and its parameters: the route is origin + path + the hash's path; the parameters
+ *  are the query's (`?k`) and the hash query's (`#k`), so a hash router's `#/view?k=v` reads like a
+ *  path router's `/view?k=v`. null when it does not parse. */
+function routeParts(url: string): { route: string; params: Map<string, string> } | null {
+  let u: URL;
+  try { u = new URL(url); } catch { return null; }
+  const params = new Map<string, string>();
+  for (const k of new Set(u.searchParams.keys())) params.set(`?${k}`, u.searchParams.getAll(k).join(","));
+  const hash = u.hash.startsWith("#") ? u.hash.slice(1) : u.hash;
+  const q = hash.indexOf("?");
+  if (q >= 0) {
+    const hp = new URLSearchParams(hash.slice(q + 1));
+    for (const k of new Set(hp.keys())) params.set(`#${k}`, hp.getAll(k).join(","));
+  }
+  return { route: `${u.origin}${u.pathname}#${q >= 0 ? hash.slice(0, q) : hash}`, params };
+}
+
+/**
+ * DID THE PAGE TAKE BACK THE ROUTE A CLICK OPENED? (#245) `before` is the URL before the click,
+ * `clicked` the URL the click left, `settled` the URL now. A URL that merely differs from `before` is
+ * not proof of an advance: Tigard's "Search" went from #/applicationAssistant to
+ * ?sectionName=All&showTemplates=false, and the assistant's own rewrite left ?showTemplates=false —
+ * not `before`, yet the search was gone. Undone means:
+ *   - the page left the click's route and went back to the one it was on; or
+ *   - on the click's route still, a parameter the click set no longer holds the click's value.
+ * A page that went on to another route ("#/loading" → "#/dashboard"), or that kept everything the
+ * click set and added to it (Tigard's "Apply": #/applicationAssistant → ?showTemplates=false), is not.
+ * Unparseable URLs, or a click that did not change the URL, are never undone (the caller keeps
+ * today's reading).
+ */
+export function routeEffectUndone(before: string, clicked: string, settled: string): boolean {
+  if (!before || !clicked || !settled || clicked === before || settled === clicked) return false;
+  const a = routeParts(before);
+  const b = routeParts(clicked);
+  const c = routeParts(settled);
+  if (!a || !b || !c) return false;
+  if (c.route !== b.route) return c.route === a.route;
+  if (b.route !== a.route) return false;
+  for (const k of new Set([...a.params.keys(), ...b.params.keys()])) {
+    if (a.params.get(k) !== b.params.get(k) && c.params.get(k) !== b.params.get(k)) return true;
+  }
+  return false;
 }
 
 /**

@@ -111,7 +111,7 @@ import {
   isPayRequestUrl, isRecipeShapeValid, isSignatureNameLabel, isSignatureRequestControl, isSubmitIntent, isSubmitOrPayRequestUrl, PORTAL_SAFETY_GLOBAL, PORTAL_SAFETY_IN_PAGE_SOURCE, splitSignerName,
   type HealedStep, type RunApproval, type SubmissionOutcome,
 } from "../../../shared/src/portalSafety";
-import { commitField, installSettleProbe, waitForSettled } from "../settle";
+import { commitField, installSettleProbe, routeEffectUndone, routeText, settleAfterRoute, waitForSettled } from "../settle";
 import { siteOfUrl } from "../siteOf";
 import { dialogOpenedSince, readUnlessDialog } from "../personDialogs";
 import { cancelledMessage, cancelRequestOf, ReplayStallWatch, replayStallMsFromEnv, type RunCancelRequest } from "./replayStopControl";
@@ -8283,7 +8283,11 @@ export class RecipeAdapter extends BasePortalAdapter {
     // rating, and the advance that followed at once swept the page with Calculate still spinning.
     // The probe goes in before the click so the request it starts is counted.
     const computing = isComputeTotalsStep(step);
-    if (computing) await prepareComputeSettle(this.page);
+    // THE PROBE GOES IN BEFORE EVERY CLICK, NOT ONLY A COMPUTE CLICK (#245): a click that routes the
+    // page (Tigard's menu "Apply") starts its view's requests at once, and the route settle in
+    // assertAdvanced can only wait on requests the probe saw start. One evaluate when the probe is
+    // already in this document; nothing is waited on here.
+    await prepareComputeSettle(this.page);
     await waitForElement(scoped);
     await this.guardedClick(scoped, `recipe click${step.note ? ` (${String(step.note).slice(0, 50)})` : ""}`);
     // A recorded Next/Continue advances a Vue wizard to a not-yet-bound section. Wait for an
@@ -8426,8 +8430,22 @@ export class RecipeAdapter extends BasePortalAdapter {
     // No identity means a mock/no-DOM page (the unit-test doubles) — assert nothing.
     if (!beforeFp) return;
     const urlNow = (): string => (typeof this.page.url === "function" ? String(this.page.url() ?? "") : "");
+    // A CLICK THAT CHANGED THE URL IS READ ONCE THE PAGE HAS SETTLED (#245): no request in flight and
+    // no further URL change for the quiet window, bounded (settle.ts settleAfterRoute). Live Tigard
+    // (Tyler EnerGov): "Search" was clicked 0.8 s after "Apply" while the assistant was still
+    // initialising, and the assistant's own route rewrite then wiped the results. Paid only when the
+    // URL changed — a click that changed nothing reads one URL and waits on nothing, so fast path 1
+    // below stays free for it.
+    let routed = await this.timed("route-settle", () => settleAfterRoute(this.page, beforeUrl));
+    // A ROUTE THE PAGE TOOK BACK IS NOT AN ADVANCE (#245): Tigard's settled URL (?showTemplates=false)
+    // still differed from the one before "Search", yet the search the click opened was gone. While the
+    // click's route is undone the URL proves nothing and the page identity decides.
+    const urlMoved = (): boolean => {
+      const u = urlNow();
+      return !!u && u !== beforeUrl && !(routed && routeEffectUndone(beforeUrl, routed.clickedUrl, u));
+    };
     const moved = async (): Promise<boolean> => {
-      if (urlNow() && urlNow() !== beforeUrl) return true;
+      if (urlMoved()) return true;
       let fp = await this.pageIdentity();
       // CONTROLS THAT MERELY VANISHED ARE NOT AN ADVANCE (runs-finish item 4). A postback hides the
       // form under its "Please wait..." and brings the SAME page back: same path, same heading, no
@@ -8437,7 +8455,7 @@ export class RecipeAdapter extends BasePortalAdapter {
         const t0 = Date.now();
         while (Date.now() - t0 < RecipeAdapter.VANISHED_CONTROLS_WAIT_MS) {
           await sleep(250);
-          if (urlNow() && urlNow() !== beforeUrl) return true;
+          if (urlMoved()) return true;
           fp = await this.pageIdentity();
           if (!fp || !RecipeAdapter.controlsOnlyVanished(beforeFp, fp)) break;
         }
@@ -8504,12 +8522,19 @@ export class RecipeAdapter extends BasePortalAdapter {
     // iterations without it ever noticing.
     await this.timed("advance-settle", async () => { for (let i = 0; i < ADVANCE_SETTLE_TRIES && !(await moved()); i++) await sleep(ADVANCE_SETTLE_MS); });
     if (await moved()) return;
+    // #245: what the page did with the route the first click opened, for the words below; and where
+    // the retry starts from, so a retry that routes the page is settled and read like the first click.
+    const retryFrom = urlNow();
+    const tookBack = routed && routeEffectUndone(beforeUrl, routed.clickedUrl, retryFrom) ? `${routeText(routed.clickedUrl).slice(0, 100)} → ${routeText(retryFrom).slice(0, 100)}` : "";
     await this.timed("advance-overlays", async () => { await this.dismissModalsGuarded(); await clearPageOverlays(this.page).catch(() => null); });
     const again = await this.resolveLocator(step.selector).catch(() => null);
     if (again && typeof again.click === "function") await this.timed("advance-retry-click", () => this.guardedClick(again, "retry an advance that did not move", { timeout: 8000 }).catch(() => null));
+    routed = (await this.timed("route-settle", () => settleAfterRoute(this.page, retryFrom))) ?? routed;
     await this.timed("advance-settle", async () => { for (let i = 0; i < ADVANCE_SETTLE_TRIES && !(await moved()); i++) await sleep(ADVANCE_SETTLE_MS); });
     if (await moved()) {
-      this.driftWarnings.push(`advance "${String(step.note ?? "click").slice(0, 44)}" needed an overlay dismissed before it took`);
+      this.driftWarnings.push(tookBack
+        ? `advance "${String(step.note ?? "click").slice(0, 44)}" took on a second click — the page took back the route the first one opened (${tookBack})`
+        : `advance "${String(step.note ?? "click").slice(0, 44)}" needed an overlay dismissed before it took`);
       return;
     }
 
@@ -8518,7 +8543,9 @@ export class RecipeAdapter extends BasePortalAdapter {
     blockers = (await this.timed("refusal-read", () => this.readPortalRefusal())) || blockers;
     const said = blockers.length
       ? ` The portal says: ${blockers.slice(0, 6).join(" | ")}`
-      : " The portal gave no visible reason — check that page for a required field the recipe left blank.";
+      : tookBack
+        ? ` The page took back the route the click opened (${tookBack}) — it was still settling from the step before, or it undoes this step.`
+        : " The portal gave no visible reason — check that page for a required field the recipe left blank.";
     throw new Error(`the portal did not advance (it refused "${String(step.note ?? "the advance").slice(0, 44)}").${said}`);
   }
 
