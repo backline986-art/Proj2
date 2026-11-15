@@ -10329,6 +10329,30 @@ export class RecipeAdapter extends BasePortalAdapter {
    *  This is the cheap second look: control count, option count, and the values themselves.
    *  A real in-page action moves at least one of them; a click that was swallowed moves
    *  none. */
+  /** The words of an opened dialog (pageEffect's `modal:<id|aria-label|tag>`) when they say the page's
+   *  own fields are required or invalid — the portal refusing an advance, not a page the advance
+   *  reached; "" for any other dialog, a frame dialog, or one that cannot be read. */
+  private async validationAlertText(opened: string): Promise<string> {
+    if (!opened.startsWith("modal:") || !this.page || typeof this.page.evaluate !== "function") return "";
+    const key = opened.slice("modal:".length);
+    if (!key) return "";
+    const text = await this.page.evaluate((k: string) => {
+      const all = Array.from(document.querySelectorAll("dialog[open], [role='dialog'], [role='alertdialog'], [aria-modal='true']")) as HTMLElement[];
+      for (const d of all) {
+        const name = d.id || d.getAttribute("aria-label") || d.tagName.toLowerCase();
+        if (name !== k) continue;
+        const r = d.getBoundingClientRect();
+        if (!(r.width > 0 && r.height > 0)) continue;
+        return (d.innerText || d.textContent || "").replace(/\s+/g, " ").trim();
+      }
+      return "";
+    }, key).catch(() => "") as string;
+    if (!text) return "";
+    // The page's own validation vocabulary: a field is required, must be entered, is invalid, please
+    // correct. Not a confirmation, not a results dialog, not a notice.
+    return /\b(is required|are required|required field|must be (entered|selected|provided|completed)|is invalid|invalid (value|entry)|please (correct|complete|enter|provide)|cannot be (blank|empty))\b/i.test(text) ? text : "";
+  }
+
   private async pageEffect(): Promise<string> {
     if (!this.page || typeof this.page.evaluate !== "function") return "";
     return await this.page.evaluate(() => {
@@ -10470,15 +10494,28 @@ export class RecipeAdapter extends BasePortalAdapter {
       const dialogsOf = (effect: string): string[] => String(effect.split("|")[4] ?? "").split(",").filter(Boolean);
       const opened = afterEffect ? dialogsOf(afterEffect).filter((d) => !dialogsOf(beforeEffect).includes(d)) : [];
       if (opened.length) {
-        // THE DIALOG'S OWN DOCUMENT MUST FINISH LOADING before the next step reads it (Boise: the
-        // address rows arrive in the dialog's iframe a moment after it opens, and a row step that
-        // ran at once found none). Bounded: the frame's domcontentloaded, then a short quiet.
-        const frameName = opened[0].includes("@") ? opened[0].split("@")[0] : "";
-        const frame = frameName && typeof this.page.frame === "function" ? this.page.frame({ name: frameName }) ?? this.page.frame(frameName) : null;
-        if (frame && typeof frame.waitForLoadState === "function") await frame.waitForLoadState("domcontentloaded", { timeout: 8000 }).catch(() => null);
-        await smartWait(this.page, 1500);
-        this.agingNotes.push(`advance "${String(step.note ?? "click").slice(0, 44)}" opened a dialog (${opened[0].slice(0, 60)}) rather than moving the page — the step advanced into it`);
-        return;
+        // A VALIDATION ALERT IS THE PAGE REFUSING, NOT A PAGE (live City of Tigard, replay v12 of
+        // 2026-11-15): three required boxes stayed blank (their recorded answers were the learn job's
+        // own, rightly not replayed) and EnerGov answered "Next" with its message dialog — "Alert:
+        // Describe Location of Solar Array is required. …" — which this rule read as the page the
+        // advance reached; the uploads and the e-signature then ran against a page that had not
+        // moved. A dialog whose own words say the page's fields are required or invalid is the
+        // refusal the recorder's advance did not expect: named with those words, and the step falls
+        // through to what an advance that did not take has always been.
+        const alertText = await this.validationAlertText(opened[0]);
+        if (alertText) {
+          this.driftWarnings.push(`advance "${String(step.note ?? "click").slice(0, 44)}" was answered by the portal's validation alert — "${alertText.slice(0, 220)}" — so the page did not move; the fields it names need values before this page can advance`);
+        } else {
+          // THE DIALOG'S OWN DOCUMENT MUST FINISH LOADING before the next step reads it (Boise: the
+          // address rows arrive in the dialog's iframe a moment after it opens, and a row step that
+          // ran at once found none). Bounded: the frame's domcontentloaded, then a short quiet.
+          const frameName = opened[0].includes("@") ? opened[0].split("@")[0] : "";
+          const frame = frameName && typeof this.page.frame === "function" ? this.page.frame({ name: frameName }) ?? this.page.frame(frameName) : null;
+          if (frame && typeof frame.waitForLoadState === "function") await frame.waitForLoadState("domcontentloaded", { timeout: 8000 }).catch(() => null);
+          await smartWait(this.page, 1500);
+          this.agingNotes.push(`advance "${String(step.note ?? "click").slice(0, 44)}" opened a dialog (${opened[0].slice(0, 60)}) rather than moving the page — the step advanced into it`);
+          return;
+        }
       }
     }
     if (!blockers.length && !isAdvance) {
