@@ -348,6 +348,7 @@ await check("D3 a PERSON's save promotes the looped learn anyway — and is show
   const id = freshRecording([...LOOPED, FINAL]);
   const done = recipes.finishPortalRecipe(db, id, "Pat Reviewer");
   assert.equal(done.status, "complete", "a person must never be blocked");
+  assert.ok(Array.isArray(done.sequenceProblems), "the person's save does not return what the sequence check found");
   assert.deepEqual(done.sequenceProblems.filter((p) => p.refusesPromotion).map((p) => p.kind).sort(), ["conflicting_write", "refused_advance"]);
   assert.ok(done.flagReason.startsWith(recipes.RECIPE_SEQUENCE_FLAG_PREFIX), `the dashboard flag was not raised: "${done.flagReason}"`);
   assert.match(done.flagReason, /promoted by Pat Reviewer although the recorded sequence cannot replay as recorded/);
@@ -358,6 +359,9 @@ await check("D3 a PERSON's save promotes the looped learn anyway — and is show
 await check("D4 clean steps clear this check's own flag and note on a person's save — never another flag", () => {
   const id = freshRecording([...LOOPED, FINAL]);
   recipes.promoteRecordingIfEligible(db, id, { finishedBy: "operator", via: "mark_submitted" }); // refused: flag + note
+  const refused = recipes.getPortalRecipe(db, id);
+  assert.ok(refused.status === "recording" && refused.flagReason.startsWith(recipes.RECIPE_SEQUENCE_FLAG_PREFIX ?? "Sequence check:"),
+    `setup: the automatic door must refuse and flag the looped recording (status ${refused.status}, flag "${refused.flagReason}")`);
   recipes.savePortalRecipeSteps(db, id, COOS_BAY_SHAPE); // the person fixed the steps
   const fixed = recipes.finishPortalRecipe(db, id, "Pat Reviewer");
   assert.equal(fixed.flagReason, "", "the stale sequence flag survived clean steps");
