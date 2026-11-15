@@ -6472,26 +6472,56 @@ export class RecipeAdapter extends BasePortalAdapter {
    * Live: PGE b16d667e 68-72, five hand-patched "Next page" clicks on #HeaderNextBtn, which
    * PowerClerk hides with Bootstrap's .invisible on the review page — the click timed out at 30 s
    * and the run FAILED after ~6 min with no staged hand-off (snapReplay.audit on the learn's p011
-   * page). Returns true when the step is skipped.
+   * page). Returns the rule that skipped the step, or null when it runs as recorded.
    */
-  private async learnStateSkip(step: RecipeStep, moment: "before" | "after", resolved?: unknown): Promise<boolean> {
+  private async learnStateSkip(step: RecipeStep, moment: "before" | "after", resolved?: unknown): Promise<LearnStateSkipKind | null> {
     const all = learnStateSkippable(step);
-    if (!all || !step.selector || !this.page || typeof this.page.locator !== "function") return false;
+    if (!all || !step.selector || !this.page || typeof this.page.locator !== "function") return null;
     const can: LearnStateSkippable = moment === "before"
       ? { ...all, nonAdvancing: false }
       : { conditional: false, dialog: false, reviewPatch: false, nonAdvancing: all.nonAdvancing };
-    if (!can.conditional && !can.dialog && !can.reviewPatch && !can.nonAdvancing) return false;
+    if (!can.conditional && !can.dialog && !can.reviewPatch && !can.nonAdvancing) return null;
     // A STAMPED DRAFT-CREATING SUBMIT (#330) is clicked by its own gate, or left for a person.
-    if (this.draftCreatingStepAt(this.currentStepIdx) >= 0) return false;
-    const seen = moment === "before"
-      ? await this.recordedTargetSeen(step.selector, LEARN_STATE_GRACE_MS)
-      : await this.targetSeen([resolved], LEARN_STATE_GRACE_MS, true);
-    if (seen.state === "shown") return false;
+    if (this.draftCreatingStepAt(this.currentStepIdx) >= 0) return null;
+    const sel = step.selector;
+    const probe = (graceMs: number) => moment === "before"
+      ? this.recordedTargetSeen(sel, graceMs)
+      : this.targetSeen([resolved], graceMs, true);
+    let seen = await probe(0);
+    // A CONTROL STILL ON ITS WAY IS NOT A LEARN-STATE ONE. Main gave every recorded control up to
+    // 10 s (waitForElement) before acting; a slow upload-error modal or a reveal that waits on a
+    // round-trip can land after a fixed 2.5 s grace (review of #237). Only when the first look finds
+    // nothing shown: the page is let settle by what it is doing (settle.ts — requests in flight, a
+    // postback, DOM activity; ~300 ms on a quiet page), and THEN the grace runs. A control a pure
+    // timer reveals 2.5-10 s later, with nothing else moving, is the case this cannot see.
+    if (seen.state !== "shown") {
+      await this.settle();
+      seen = await probe(LEARN_STATE_GRACE_MS);
+    }
+    if (seen.state === "shown") return null;
     const askPage = can.reviewPatch && !can.conditional && !can.dialog;
     const inReviewTail = askPage && this.recipe.steps[this.currentStepIdx] === step && inRecipeReviewTail(this.recipe.steps, this.currentStepIdx);
     const onReviewPage = askPage && !inReviewTail && (await this.pageSafetyContext()).reviewPage === true;
     const kind = learnStateSkipKind(can, seen.state, { onReviewPage, inReviewTail });
-    if (!kind) return false;
+    if (!kind) return null;
+    // A HAND-PATCHED CLICK THE NAME RESCUE CAN STILL LAND IS NOT SKIPPED. resolveLocator's last
+    // resort clicks an enabled, visible control carrying the PRIMARY's recorded name or text
+    // (findEnabledControlByName — icon ligatures, a <a class="btn"> recorded as a button). On a
+    // portal that renders the hand-patched "Continue" onto the review page as a link, main reached
+    // review through it and this rule stopped one page short (review of #237, fixture 2a; saved
+    // recipes: PSE 26c953de step 6). Asked only for review_patch, after the kind is decided: a
+    // popup's absent "OK" handed to that rescue is Bend's "Book an Inspection". Its not-found line
+    // is this probe's answer, not the run's warning; a reading that could not run is an unknown,
+    // never a reason to skip.
+    if (kind === "review_patch") {
+      const want = String(sel.name || sel.text || "").trim();
+      if (want) {
+        const mark = this.driftWarnings.length;
+        const named = await this.findEnabledControlByName(want);
+        const unknown = this.driftWarnings.splice(mark).filter((w) => !w.startsWith("no enabled control on this page has a name containing"));
+        if (named || unknown.length) { this.driftWarnings.push(...unknown); return null; }
+      }
+    }
     const label = (recordedClickLabel(step) || String(step.field ?? step.action)).slice(0, 48);
     const shown = seen.state === "absent" ? "is not on the page" : "is on the page but hidden";
     const why: Record<LearnStateSkipKind, string> = {
@@ -6502,7 +6532,7 @@ export class RecipeAdapter extends BasePortalAdapter {
     };
     this.agingNotes.push(`"${label}" (step ${this.currentStepIdx + 1}) skipped: ${why[kind]} (#237)`);
     this.learnStateSkipped = { step, described: seen.described };
-    return true;
+    return kind;
   }
 
   /**

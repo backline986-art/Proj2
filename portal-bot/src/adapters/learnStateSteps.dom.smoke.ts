@@ -26,7 +26,10 @@
 //   ENABLED select is written as before, never judged "answered by the portal" (B2); a conditional
 //   switch whose real box is concealed inside a visible label is written, not skipped (F); a revealed
 //   PowerClerk block is written (H3); a select or box the portal disables for 3 s WHILE IT WORKS,
-//   keeping its old value meanwhile, is busy — written with the job's value as on main (I, I2).
+//   keeping its old value meanwhile, is busy — written with the job's value as on main (I, I2); a
+//   review-tail hand patch the name rescue can land (a "Continue" rendered as a link) is clicked
+//   (A4); a control or popup OK that a 4 s round-trip of the portal's own reveals is acted on, as
+//   main's 10 s wait did (J, J2 — J2 is the shape no other wait in the engine absorbs).
 //
 // Run: npx tsx portal-bot/src/adapters/learnStateSteps.dom.smoke.ts
 import "../smokeArtifactDirs";
@@ -162,10 +165,57 @@ const BUSY_BOX = busy("val", `
   <select id="pkind"><option value="">-- Select --</option><option value="RES">Residential</option><option value="COM">Commercial</option></select>
   <label for="val">Valuation</label><input id="val" value="0">`, "pkind");
 
-const PAGES: Record<string, string> = { "/busyselect": BUSY_SELECT, "/busybox": BUSY_BOX, "/switch": SWITCH, "/hiddentoggle": HIDDEN_TOGGLE, "/review": REVIEW, "/summary": SUMMARY, "/answered": ANSWERED, "/answeredbox": ANSWERED_BOX, "/nopopup": NO_POPUP, "/hiddenpopup": HIDDEN_POPUP, "/noreveal": NO_REVEAL, "/lateshow": LATE_SHOW,
+// A4 — the hand-patched "Continue" (recorded as a button) is rendered as a LINK styled as a button
+// on this run; the name rescue lands it, as on main, so it is never skipped as learn state.
+const LINK_CONTINUE = shell(`
+  <h2>Step 3 of 4: Contact</h2>
+  <label for="email">Contact Email</label><input id="email">
+  <a class="btn" href="/review2">Continue</a>`);
+const REVIEW2 = shell(`<h2>Review and Submit</h2><p>Please review your application before submitting.</p>`);
+
+// J — a reveal that waits on the portal's own 4 s round-trip: Energy Source answered, the inverter
+// make select is rendered when the request returns (well after a fixed 2.5 s grace). Reached from an
+// entry page through an advance, as a reveal is in a real run (the run's settle probe is on the page
+// from its first byte, so the portal's request is seen).
+const SLOW_ENTRY = shell(`
+  <h2>Project</h2>
+  <label for="proj">Project Name</label><input id="proj">
+  <button id="toEquip" type="button" onclick="location.href='/slowreveal'">Next</button>`);
+const SLOW_REVEAL = shell(`
+  <h2>Equipment</h2>
+  <label for="esrc">Energy Source</label>
+  <select id="esrc"><option value="">-- Select --</option><option value="PV">Solar PV</option><option value="W">Wind</option></select>
+  <div id="makeHost"></div>`, `
+  document.getElementById('esrc').addEventListener('change', function () {
+    fetch('/slow').then(function () {
+      document.getElementById('makeHost').innerHTML = '<label for="make">Inverter Manufacturer</label>'
+        + '<select id="make"><option value="">-- Select --</option><option value="EP">Example Power</option><option value="OT">Other</option></select>';
+    });
+  });`);
+
+// J2 — an in-page "Validate Address" click whose answer is a modal OK after the portal's own 4 s
+// round-trip. A click waits only for controls to mount (not for the page to settle), so the OK step
+// arrives while the request is in flight.
+const VERIFY = shell(`
+  <h2>Location</h2>
+  <button id="validate" type="button">Validate Address</button>
+  <div id="verifyModal" role="dialog" style="display:none"><p>Address verified.</p><button id="verifyOk" type="button">OK</button></div>
+  <label for="desc2">Description</label><input id="desc2"><input type="hidden" id="okClicked" value="">`, `
+  document.getElementById('validate').addEventListener('click', function () {
+    fetch('/slow').then(function () { document.getElementById('verifyModal').style.display = 'block'; });
+  });
+  document.getElementById('verifyOk').addEventListener('click', function () {
+    document.getElementById('verifyModal').style.display = 'none';
+    document.getElementById('okClicked').value = '1';
+  });`);
+const VERIFY_ENTRY = SLOW_ENTRY.replace("/slowreveal", "/verify");
+
+const PAGES: Record<string, string> = { "/verifyentry": VERIFY_ENTRY, "/verify": VERIFY, "/busyselect": BUSY_SELECT, "/busybox": BUSY_BOX, "/linkcontinue": LINK_CONTINUE, "/review2": REVIEW2, "/slowentry": SLOW_ENTRY, "/slowreveal": SLOW_REVEAL, "/switch": SWITCH, "/hiddentoggle": HIDDEN_TOGGLE, "/review": REVIEW, "/summary": SUMMARY, "/answered": ANSWERED, "/answeredbox": ANSWERED_BOX, "/nopopup": NO_POPUP, "/hiddenpopup": HIDDEN_POPUP, "/noreveal": NO_REVEAL, "/lateshow": LATE_SHOW,
   "/pchidden": PC_COND("display:none"), "/pcabsent": PC_COND("absent"), "/pcshown": PC_COND("") };
 const server = http.createServer((req, res) => {
   const url = new URL(req.url || "/", "http://127.0.0.1");
+  // The portal's own slow round-trip (J): answered after 4 s.
+  if (url.pathname === "/slow") { setTimeout(() => { res.writeHead(200, { "content-type": "text/plain" }); res.end("ok"); }, 4000); return; }
   res.writeHead(200, { "content-type": "text/html" });
   res.end(PAGES[url.pathname] ?? shell(`<h1>Book an Inspection</h1><p>You left the application.</p>`));
 });
@@ -241,6 +291,16 @@ try {
   check("A3 MUST-PASS on a page that reads as the review step, hidden hand-patched pager clicks are skipped (the page says review)",
     a3.ok && a3.aging.filter((n) => /Next page/.test(n) && /reads as the review step/.test(n) && /#237/.test(n)).length === 2, tail(a3));
   check("A3 MUST-PASS ...and the write after them lands", a3.values.revNote === "Rooftop solar", JSON.stringify(a3.values));
+
+  // A4 — a review-tail hand patch the name rescue can still land is clicked, never skipped.
+  const a4 = await run(browser, recipeOf("learnstate-a4", "/linkcontinue", [
+    { action: "fill", note: "Contact Email", field: "contactEmail", selector: { label: "Contact Email", fallbacks: [{ css: "#email" }] } } as RecipeStep,
+    { action: "click", note: "human-patch: Continue", selector: { role: "button", name: "Continue" } } as RecipeStep,
+    { action: "stopForReview", note: "review" } as RecipeStep,
+  ]), { contactEmail: "pat@example.test" });
+  console.log(`   A4 ${tail(a4)} path=${new URL(a4.url).pathname}`);
+  check("A4 MUST-EXCLUDE a hand-patched Continue rendered as a link is landed by the name rescue (review reached), not skipped",
+    new URL(a4.url).pathname === "/review2" && !a4.aging.some((n) => /#237/.test(n)) && !a4.skipped.length, tail(a4) + ` path=${new URL(a4.url).pathname}`);
   }
 
   // ---- B: selects the portal already answered and disabled --------------------------------------
@@ -381,6 +441,32 @@ try {
   console.log(`   I2 ${tail(i2)} values=${JSON.stringify(i2.values)}`);
   check("I2 MUST-EXCLUDE a box disabled for 3 s while the portal works (holding \"0\") is WRITTEN with the job's value",
     i2.values.val === "25000" && !i2.skipped.some((s) => /Valuation/.test(s)) && !i2.drift.some((w) => /answered by the portal/.test(w)), tail(i2) + JSON.stringify(i2.values));
+  }
+
+  // ---- J: a conditional control revealed by the portal's own slow round-trip -----------------------
+  if (want("J")) {
+  const j = await run(browser, recipeOf("learnstate-j", "/slowentry", [
+    { action: "fill", phase: "fill", note: "Project Name", field: "projectName", selector: { label: "Project Name", fallbacks: [{ css: "#proj" }] } } as RecipeStep,
+    { action: "click", phase: "fill", note: "advance: Next", selector: { role: "button", name: "Next", exact: true, fallbacks: [{ css: "#toEquip" }] } } as RecipeStep,
+    { action: "select", phase: "fill", note: "Energy Source", value: "Solar PV", selector: { label: "Energy Source", fallbacks: [{ css: "#esrc" }] } } as RecipeStep,
+    { action: "select", phase: "fill", note: "Inverter Manufacturer", value: "Example Power", conditional: true, selector: { label: "Inverter Manufacturer", fallbacks: [{ css: "#make" }] } } as RecipeStep,
+    { action: "stopForReview", note: "review" } as RecipeStep,
+  ]), { projectName: "Example Rooftop" });
+  console.log(`   J ${tail(j)} values=${JSON.stringify(j.values)}`);
+  check("J MUST-EXCLUDE a conditional control the answer reveals after a 4 s round-trip is WRITTEN, not skipped",
+    j.values.make === "EP" && !j.aging.some((n) => /#237/.test(n)), tail(j) + JSON.stringify(j.values));
+
+  const j2 = await run(browser, recipeOf("learnstate-j2", "/verifyentry", [
+    { action: "fill", phase: "fill", note: "Project Name", field: "projectName", selector: { label: "Project Name", fallbacks: [{ css: "#proj" }] } } as RecipeStep,
+    { action: "click", phase: "fill", note: "advance: Next", selector: { role: "button", name: "Next", exact: true, fallbacks: [{ css: "#toEquip" }] } } as RecipeStep,
+    { action: "click", phase: "fill", note: "click: Validate Address", selector: { role: "button", name: "Validate Address", exact: true, fallbacks: [{ css: "#validate" }] } } as RecipeStep,
+    { action: "click", phase: "fill", note: "click: OK", selector: { role: "button", name: "OK", exact: true, fallbacks: [{ css: "#verifyOk" }] } } as RecipeStep,
+    { action: "fill", phase: "fill", note: "Description", field: "workDescription", selector: { label: "Description", fallbacks: [{ css: "#desc2" }] } } as RecipeStep,
+    { action: "stopForReview", note: "review" } as RecipeStep,
+  ]), { projectName: "Example Rooftop", workDescription: "Rooftop solar" });
+  console.log(`   J2 ${tail(j2)} values=${JSON.stringify(j2.values)}`);
+  check("J2 MUST-EXCLUDE a popup OK that opens after the portal's 4 s round-trip is CLICKED (the page is let settle before the grace), not skipped as not applicable",
+    j2.values.okClicked === "1" && !j2.aging.some((n) => /#237/.test(n)) && j2.values.desc2 === "Rooftop solar", tail(j2) + JSON.stringify(j2.values));
   }
 } finally {
   await browser.close().catch(() => null);
