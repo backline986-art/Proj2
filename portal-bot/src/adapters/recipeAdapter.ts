@@ -12260,8 +12260,8 @@ export class RecipeAdapter extends BasePortalAdapter {
     // Washington St") — a value map holding only the street still names the job's address.
     const numRaw = String(this.fieldValues.streetNumber ?? "").trim() || (/^(\d+[a-z]?)\s/i.exec(streetRaw)?.[1] ?? "");
     // THE STREET LINE MAY ALREADY CARRY THE NUMBER (#235). Live City of Boise 2026-11-15: `street`
-    // was "150 N Capitol Blvd" and `streetNumber` "150", so the needle read "150 150 N Capitol
-    // Blvd" and no row matched the property's own address. The number is held once.
+    // held the whole line ("<number> <street>") and `streetNumber` the number, so the needle read
+    // the number twice and no row matched the property's own address. The number is held once.
     const num = numRaw;
     const street = num && new RegExp(`^${num.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\s+`, "i").test(streetRaw) ? streetRaw.replace(/^\S+\s+/, "").trim() : streetRaw;
     if (!num || !street) return false;
