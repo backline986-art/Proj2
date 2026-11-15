@@ -67,6 +67,13 @@ const page = (grid: string): string => `<!doctype html><html><head><title>Buildi
 
 const server = http.createServer((req, res) => {
   const name = new URL(req.url || "/", "http://127.0.0.1").pathname.replace(/^\//, "");
+  // Boise's dialog is an IFRAME (ACADialogFrame): the grid page framed, the step recorded with `frame`.
+  if (name === "boiseFrame") {
+    res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+    res.end(`<!doctype html><html><head><title>BuildingPermits.Test.gov</title></head><body><h2>Step 2: Project Location</h2>
+      <iframe id="ACADialogFrame" name="ACADialogFrame" src="/boise" style="width:900px;height:420px"></iframe><div id="picked"></div></body></html>`);
+    return;
+  }
   if (GRIDS[name] === undefined) { res.writeHead(404); res.end("nf"); return; }
   res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
   res.end(page(GRIDS[name]));
@@ -84,15 +91,20 @@ async function newPage(grid: string): Promise<{ page: Page; close: () => Promise
   await p.goto(`${base}/${grid}`);
   return { page: p, close: () => ctx.close().catch(() => undefined) };
 }
-const picked = (p: Page) => p.evaluate(() => document.getElementById("picked")?.textContent || "").catch(() => "(unreadable)");
+const picked = async (p: Page): Promise<string> => {
+  const top = await p.evaluate(() => document.getElementById("picked")?.textContent || "").catch(() => "(unreadable)");
+  if (top) return top;
+  const f = p.frame({ name: "ACADialogFrame" });
+  return f ? await f.evaluate(() => document.getElementById("picked")?.textContent || "").catch(() => "(unreadable)") : "";
+};
 
 // ── THE REPLAY DOOR (RecipeAdapter.pickAddressVersionLive) ─────────────────────────────────────
 interface ReplayOut { picked: string; ok: boolean; message: string; aging: string[]; drift: string[] }
-async function replay(grid: string, discipline: string, recordedNote: string, values: Record<string, string>): Promise<ReplayOut> {
+async function replay(grid: string, discipline: string, recordedNote: string, values: Record<string, string>, frame?: string): Promise<ReplayOut> {
   const { page: p, close } = await newPage(grid);
   const steps: RecipeStep[] = [
     { action: "goto", value: `${base}/${grid}`, note: "entry url" },
-    { action: "click", selector: { css: "[data-al-row=\"ar1\"]", fallbacks: [{ role: "link", name: "Select" }] }, note: recordedNote },
+    { action: "click", selector: { css: "[data-al-row=\"ar1\"]", fallbacks: [{ role: "link", name: "Select" }], ...(frame ? { frame } : {}) }, note: recordedNote },
     { action: "stopForReview" } as RecipeStep,
   ];
   const recipe = {
@@ -138,6 +150,9 @@ try {
   const b1 = await replay("boise", "structural", "address version: this property", { city: "Boise", zip: "83702", homeownerName: "Sample Customer" });
   check("MUST-PASS replay: Boise's radio-row grid — a row of this property is ticked (live 2026-11-15: \"no selectable rows\")",
     (b1.picked === "hall" || b1.picked === "plain") && b1.aging.some((a) => /2 result\(s\) offered/.test(a)), sayR(b1));
+  const b2 = await replay("boiseFrame", "structural", "address version: this property", { city: "Boise", zip: "83702", homeownerName: "Sample Customer" }, "ACADialogFrame");
+  check("MUST-PASS replay: the same grid inside Boise's ACADialogFrame iframe — the row is clicked IN the frame (live 2026-11-15: \"could not click it\")",
+    (b2.picked === "hall" || b2.picked === "plain"), sayR(b2));
 
   const x1 = await replay("two", "structural", STRUCT_NOTE(""), { ...JEFF_VALUES });
   check("MUST-EXCLUDE replay: agency unknown → today's convention (Jefferson structural → the CITY row)", x1.picked === "city", sayR(x1));

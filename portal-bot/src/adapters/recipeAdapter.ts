@@ -6037,7 +6037,11 @@ export class RecipeAdapter extends BasePortalAdapter {
       throw new Error(why);
     }
     const best = rows[ranked[0].index];
-    const okClick = await this.guardedClick(this.page.locator(`[data-al-row="${best.key}"]`).first(), "select the ranked address version", { timeout: 12000 })
+    // THE ROW IS CLICKED IN THE FRAME IT WAS FOUND IN (#235). The scan stamps the row inside the
+    // step's frame (Boise's results dialog is an iframe), and a page-level locator never sees into
+    // an iframe: live 2026-11-15 the ranked row was found and "could not click it" (12 s timeout).
+    const rowScope = step.selector?.frame ? this.page.frameLocator(frameSelectorFor(step.selector.frame)) : this.page;
+    const okClick = await this.guardedClick(rowScope.locator(`[data-al-row="${best.key}"]`).first(), "select the ranked address version", { timeout: 12000 })
       .then(() => true).catch((err: unknown) => {
         // SAY WHY. This returned false in silence, so the step landed in `skipped` with no
         // reason and the NEXT step — waiting for a Continue button that only appears once a
