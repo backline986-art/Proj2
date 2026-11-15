@@ -69,6 +69,12 @@ const ROWS_PAGE = `<!doctype html><html><head><title>Apply for Permit</title>
     <tr><td><button type="button" class="fav" aria-label="Add Favorite" title="Add Favorite"></button></td><td></td><td></td><td>305 SW Example Way Suite 111 Maplecrest ZZ 99999</td><td>QUILLFEATHER SOLAR LLC</td><td></td><td><button type="button" class="add" aria-label="Add Contact">Add</button></td></tr>
     <tr><td><button type="button" class="fav" aria-label="Add Favorite" title="Add Favorite"></button></td><td></td><td></td><td>808 SW Example Way Ste 3-337 Maplecrest ZZ 99999</td><td>QUILLFEATHER SOLAR LLC</td><td>[email]</td><td><button type="button" class="add" aria-label="Add Contact">Add</button></td></tr>
   </tbody></table>
+  <!-- As live after v10 (which had favourited the 808 contact): the inactive "My Favorites" panel lists the
+       same contact again, NOT shown. A row that is not shown is not a candidate, or the job's record reads as
+       two rows and the pick refuses to guess (replay v11). -->
+  <div id="tab-favorites" style="display:none"><table><tbody>
+    <tr><td><button type="button" class="fav" aria-label="Remove Favorite" title="Remove Favorite"></button></td><td></td><td></td><td>808 SW Example Way Ste 3-337 Maplecrest ZZ 99999</td><td>QUILLFEATHER SOLAR LLC</td><td>[email]</td><td><button type="button" class="add" aria-label="Add Contact">Add</button></td></tr>
+  </tbody></table></div>
   <script>
     var S = JSON.parse(sessionStorage.getItem("R") || '{"favs":0,"adds":[]}');
     function save(){ sessionStorage.setItem("R", JSON.stringify(S)); }

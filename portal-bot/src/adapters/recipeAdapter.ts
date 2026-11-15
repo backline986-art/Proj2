@@ -13418,6 +13418,12 @@ export class RecipeAdapter extends BasePortalAdapter {
         const rows: Array<{ text: string; ctl: Element }> = [];
         for (const tr of all) {
           if (tr.closest("thead") || !tr.querySelector("td") || tr.querySelector("table")) continue;
+          // A ROW THAT IS NOT SHOWN IS NOT A CANDIDATE (live City of Tigard, replay v11 of 2026-11-15): the
+          // dialog's inactive "My Favorites" panel lists the favourited contact too, so this job's record
+          // read as two rows and the pick refused to guess. display:none gives a zero rect; an off-screen
+          // row keeps its size and still counts.
+          const box = tr.getBoundingClientRect();
+          if (!(box.width > 0 && box.height > 0)) continue;
           const tick = tr.querySelector("input[type='radio'], input[type='checkbox']");
           const ctls = Array.from(tr.querySelectorAll("a, button, input[type='button'], input[type='submit'], [role='button']"));
           const act = ctls.find((a) => namesOf(a).some((t) => pick.test(t)))
