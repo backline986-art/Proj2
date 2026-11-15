@@ -316,7 +316,9 @@ try {
   console.log(`   B ${tail(b)}`);
   check("B2 MUST-EXCLUDE the ENABLED select is written as before", b.values.scope === "PV" && b.verified.includes("Scope of Work"), JSON.stringify(b.values));
   check("B MUST-PASS the agreeing disabled select is VERIFIED (not a false SKIPPED)", b.verified.includes("Jurisdiction") && !b.skipped.some((s) => /Jurisdiction/.test(s)), tail(b));
-  check("B MUST-PASS ...named as answered by the portal", b.aging.some((n) => /Jurisdiction/.test(n) && /answered by the portal/i.test(n)), JSON.stringify(b.aging));
+  // Verified is the whole record: an agingNote on every correct run would read as "worth
+  // re-recording", which no re-record can clear (the portal answers it every time).
+  check("B MUST-PASS ...and it is quiet: no agingNote for a control that agrees", !b.aging.some((n) => /Jurisdiction/.test(n)), JSON.stringify(b.aging));
   check("B MUST-PASS the differing disabled select is a NAMED drift (portal's answer vs this job's), not 'landed nothing'",
     b.drift.some((w) => /Permit Type/.test(w) && /answered by the portal/i.test(w)) && !b.drift.some((w) => /landed nothing/.test(w)), JSON.stringify(b.drift));
   check("B MUST-PASS no 38 s select timeouts — the whole page in well under one select's old cost", b.ms < 20_000, `${b.ms} ms`);
@@ -360,6 +362,10 @@ try {
   check("D MUST-PASS the absent conditional control is skipped, named as not revealed on this job",
     d.aging.some((n) => /Battery Inverter Manufacturer/.test(n) && /reveal/i.test(n) && /#237/.test(n)), JSON.stringify(d.aging));
   check("D MUST-PASS ...the run carries on to the next fill and the review stop", d.ok && d.values.kw === "7.6", tail(d));
+  // skipForNoBattery's convention: the section does not apply to this filing — not a step that
+  // failed to land, so never in `skipped` (which scores the run as failed, re-record or not).
+  check("D MUST-PASS ...counted as not applicable, never as a step that did not land",
+    !d.skipped.some((s) => /Battery Inverter/.test(s)) && /Replayed 3 recorded step/.test(d.message), JSON.stringify(d.skipped) + d.message.slice(0, 80));
   }
 
   // ---- E: hidden for a moment, then shown: clicked, never skipped --------------------------------
@@ -415,6 +421,7 @@ try {
       h.values.BD7DISC0004Input === "DisconnectCo" && !Object.values(h.values).some((v) => v === "ExampleCo" || v === "EX-1"), JSON.stringify(h.values));
     check(`${key} MUST-PASS ...the run carries on: the next fill lands and the review stop is reached without a fill timeout`,
       h.ok && h.values.IQ7QNTY0005Input === "2" && h.ms < 30_000, tail(h));
+    check(`${key} MUST-PASS ...counted as not applicable, never in skipped`, !h.skipped.some((s) => /Battery Inverter/.test(s)), JSON.stringify(h.skipped));
   }
   const h3 = await run(browser, recipeOf("learnstate-h3", "/pcshown", pcSteps()), pcValues);
   console.log(`   H3 ${tail(h3)}`);

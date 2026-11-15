@@ -3654,10 +3654,14 @@ export class RecipeAdapter extends BasePortalAdapter {
           }
           // The held-check distinguishes LANDED-THEN-LOST from NEVER-LANDED: only a
           // select that reported success is a candidate for "a re-render took it back".
-          if (done && step.action === "select" && recordedStep?.field) this.landedSelectFields.add(String(recordedStep.field));
+          // A CONDITIONAL STEP THIS JOB DID NOT REVEAL (#237) wrote nothing: never a select that
+          // landed (the equipment held-check would re-run it against an empty hidden control and
+          // warn "lost its fill"), and its trace line says what happened.
+          const notApplicable = done && this.learnStateSkipped?.step === step && this.learnStateSkipped.kind === "conditional";
+          if (done && !notApplicable && step.action === "select" && recordedStep?.field) this.landedSelectFields.add(String(recordedStep.field));
           trace.push({
             i: stepIdx, action: step.action, note: String(step.note ?? "").slice(0, 52),
-            outcome: done ? "ok" : "SKIPPED", page: await currentPageLabel(),
+            outcome: done ? (notApplicable ? "not applicable (not revealed on this job, #237)" : "ok") : "SKIPPED", page: await currentPageLabel(),
             // A SKIPPED step is the silent failure mode, and "it didn't take" says nothing
             // about WHY. Recording what its selector actually landed on separates a control
             // that isn't there from one that is the WRONG control — the difference between
@@ -6397,8 +6401,8 @@ export class RecipeAdapter extends BasePortalAdapter {
   /** The step a #237 rule just skipped (or found answered differently by the portal), with what its
    *  control showed: the skip's trace line reads this instead of re-resolving the step — a fresh
    *  resolution would wait out the busy-control wait again, or hand a hidden click's name to the
-   *  rescue, which may open a menu to look for it. */
-  private learnStateSkipped: { step: RecipeStep; described: string } | null = null;
+   *  rescue, which may open a menu to look for it. `kind`: the learn-state rule, when one skipped it. */
+  private learnStateSkipped: { step: RecipeStep; described: string; kind?: LearnStateSkipKind } | null = null;
 
   /** What a recorded selector's levels that name its control (identifyingLevels) show within
    *  `graceMs` (targetSeen). A level the locator cannot build is passed over. */
@@ -6531,7 +6535,7 @@ export class RecipeAdapter extends BasePortalAdapter {
       non_advancing: "the control it resolves to is hidden on this page — a control from the learn's page state; not an advance, a link, a submit, an upload commit, an opener or an attestation",
     };
     this.agingNotes.push(`"${label}" (step ${this.currentStepIdx + 1}) skipped: ${why[kind]} (#237)`);
-    this.learnStateSkipped = { step, described: seen.described };
+    this.learnStateSkipped = { step, described: seen.described, kind };
     return kind;
   }
 
@@ -6598,8 +6602,11 @@ export class RecipeAdapter extends BasePortalAdapter {
         agree = !!sh && !!want && (faceWords(sh.text) === want || (!!sh.value.trim() && faceWords(sh.value) === want));
       } else agree = await this.fillHeld(scoped, v);
       if (agree) {
+        // VERIFIED, AND NOTHING MORE TO SAY: the field is in fieldsVerified, which is the record. An
+        // agingNote here fired on every correct run and drives the re-record signal ("the recipe is
+        // worth re-recording"), which a re-record cannot clear — the portal answers this control
+        // every time (review of #237, Tigard).
         if (!this.fieldsVerified.includes(name)) this.fieldsVerified.push(name);
-        this.agingNotes.push(`"${name}" answered by the portal: its control is disabled and already shows this job's value — verified, nothing written (#237)`);
         return true;
       }
       if (Date.now() - t0 >= BUSY_CONTROL_WAIT_MS) break;
@@ -6702,7 +6709,13 @@ export class RecipeAdapter extends BasePortalAdapter {
     // a reveal showed) is skipped here, named, before resolution can wait on it or rescue it.
     const asRecorded = step;
     this.learnStateSkipped = null;
-    if (await this.learnStateSkip(step, "before")) return false;
+    // A CONDITIONAL SKIP IS THE SECTION NOT APPLYING TO THIS FILING, not a step that did not land:
+    // true with its note, skipForNoBattery's convention. A conditional step stays conditional when
+    // the recipe is re-recorded, so counting it in `skipped` would score every correct job that
+    // does not reveal it as a failed run, forever (review of #237; replayBenchmark's "did not
+    // land"). The other rules skip a step the recipe recorded and a re-record drops: false.
+    const learnState = await this.learnStateSkip(step, "before");
+    if (learnState) return learnState === "conditional";
     // #237 (2) — A WRITE ON A CONTROL THE PORTAL ALREADY ANSWERED AND DISABLED is taken as that
     // control (its case below waits the same busy window, BUSY_CONTROL_WAIT_MS, before naming a drift).
     const portalHeld = (step.action === "select" || step.action === "fill") && !isPinnedReassert(step)
