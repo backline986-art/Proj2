@@ -56,6 +56,7 @@ const FORM = `<!doctype html><html><head><title>Solar Permit or Panel Applicatio
       </div>
     </div>
     <button type="button" name="Next" id="decoy" onclick="document.body.dataset.clicked='decoy'">Previous</button>
+    <button type="button" name="btnPrint" class="btn" style="width:32px;height:24px" onclick="document.body.dataset.printed='1'"></button>
     <button type="button" id="go" onclick="document.body.dataset.clicked='next';document.getElementById('p1').hidden=true;document.getElementById('p2').hidden=false">Next</button>
   </section>
   <section id="p2" hidden><h2>Review</h2><p>Review your application.</p></section>
@@ -120,7 +121,16 @@ try {
   const lp: Page = await lctx.newPage();
   await lp.goto(base);
   const raws = (await lp.$$eval(EXTRACT_SEL, extractFieldsInPage as never)) as unknown as RawField[];
+  // A text-less, id-less button: its name ATTRIBUTE used to be written into the role+name slot,
+  // where it reads as an accessible name it does not have.
+  const btnRaw = raws.find((r) => r.fieldType === "button" && r.name === "btnPrint");
+  const btnSel = btnRaw ? toExtractedField(btnRaw).selector : undefined;
+  const btnHits = btnSel?.css ? await lp.locator(btnSel.css).evaluateAll((els) => els.map((e) => e.getAttribute("name"))) : [];
   await lctx.close();
+  console.log(`   learner recorded the text-less button: ${JSON.stringify(btnSel)}`);
+  check("MUST-PASS a text-less, id-less button records its name ATTRIBUTE as css, never as { role, name }",
+    !!btnSel && btnSel.css === nameAttributeCss("btnPrint") && !btnSel.role && !btnSel.name, JSON.stringify({ btnRaw, btnSel }));
+  check("...and that css addresses exactly that button", JSON.stringify(btnHits) === JSON.stringify(["btnPrint"]), JSON.stringify(btnHits));
   const raw = raws.find((r) => r.id === "fee244341");
   const learned = raw ? toExtractedField(raw).selector : undefined;
   console.log(`   learner recorded: ${JSON.stringify(learned)} (raw label ${JSON.stringify(raw?.label)})`);

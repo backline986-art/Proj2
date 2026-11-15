@@ -5419,7 +5419,8 @@ export class AutoLearnAdapter extends BasePortalAdapter {
       const labelFb = c.label ? [{ label: c.label }] : [];
       if (c.id && /^[A-Za-z][\w-]*$/.test(c.id)) return { css: `#${c.id}`, ...(labelFb.length ? { fallbacks: labelFb } : {}) };
       if (c.label) return { label: c.label };
-      if (c.name) return { css: `[name="${c.name.replace(/"/g, '\\"')}"]` };
+      // The one name-attribute builder (#229, shared/src/recipeSelector), never a second escaping.
+      if (c.name) return { css: nameAttributeCss(c.name) };
       return { css: "[data-al-sig]" };
     };
     // Which extracted fields are signature controls — by the mark the in-page reading left.
