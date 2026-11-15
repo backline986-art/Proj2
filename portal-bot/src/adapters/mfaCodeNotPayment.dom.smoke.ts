@@ -20,8 +20,8 @@
 //         which nothing can read: only "not at sign-in" can say card there);
 //     (b) the #238 reviewers' fee pages with NO second-factor wording, which round 1 paused as
 //         mfa_captcha on the mere absence of card context: a card-number frame mounted 500 ms and
-//         1500 ms after load, a shadow-DOM card form, a card form drawn 5 s late, and card labels
-//         the shared words do not know ("Card / Expires (MM/YY) / ZIP Code", "Card Account Number /
+//         1500 ms after load, a shadow-DOM card form, the rest of a card form drawn 5 s after its
+//         code box, and card labels the shared words do not know ("Card / Expires (MM/YY) / ZIP Code", "Card Account Number /
 //         Expiration Date / Card Security Code").
 //   MUST-KEEP    nothing is typed into the code box or any card box, and no Log In / Resend press.
 //
@@ -61,11 +61,12 @@ const DOPL = page("Online Services", `<div id="pageForm">
 
 // A fee step's card form on a path that is NOT a payment URL (Coos Bay's was CapFees.aspx): only the
 // card siblings can say "card" here.
-const CARD_FIELDS = `<label for="ccnum">Card Number</label><input id="ccnum" name="ccnum" autocomplete="cc-number">
+const CSC_FIELD = `<label for="csc">Security Code</label><input id="csc" name="csc">`;
+const CARD_REST = `<label for="ccnum">Card Number</label><input id="ccnum" name="ccnum" autocomplete="cc-number">
   <label for="expm">Expiration Month</label><select id="expm"><option value=""></option><option>04</option></select>
   <label for="expy">Expiration Year</label><select id="expy"><option value=""></option><option>2029</option></select>
-  <label for="csc">Security Code</label><input id="csc" name="csc">
   <label for="noc">Name on Card</label><input id="noc" name="noc">`;
+const CARD_FIELDS = `${CARD_REST}\n  ${CSC_FIELD}`;
 const CARD_FORM = page("Fees", `<h2>Pay Fees</h2>${SAYS}<form>${CARD_FIELDS}</form>`);
 
 // A lone code box with no card sibling, on a payment URL.
@@ -97,9 +98,12 @@ const lateFrame = (port: number, delay: number, says: boolean): string => page("
 const shadowForm = (mode: string, says: boolean): string => page("Fees", `<h2>Pay Fees</h2>${says ? SAYS : ""}<div id="cardHost"></div>
   <script>document.getElementById("cardHost").attachShadow({ mode: "${mode === "closed" ? "closed" : "open"}" }).innerHTML = ${JSON.stringify(CARD_FIELDS)};</script>`);
 
-// A single-page app that draws its whole card form 5 s after load.
-const SPA_LATE = page("Fees", `<h2>Pay Fees</h2><div id="app"></div>
-  <script>setTimeout(function () { document.getElementById("app").innerHTML = ${JSON.stringify(CARD_FIELDS)}; }, 5000);</script>`);
+// A single-page app that shows the code box at once and draws the rest of its card form 5 s after load.
+const SPA_LATE = page("Fees", `<h2>Pay Fees</h2>${CSC_FIELD}<div id="app"></div>
+  <script>setTimeout(function () { document.getElementById("app").innerHTML = ${JSON.stringify(CARD_REST)}; }, 5000);</script>`);
+
+// The step before a fee page: a plain Continue link (the reviewers reached the late-frame page by a click).
+const startPage = (to: string): string => page("Fees", `<h2>Fees due</h2><a id="next" href="${to.replace(/"/g, "&quot;")}">Continue</a>`);
 
 // Card labels the shared PAYMENT_WORDS does not know.
 const LABELS_A3 = page("Fees", `<h2>Pay Fees</h2><form>
@@ -141,6 +145,7 @@ const server = http.createServer((req, res) => {
     : p === "/permits/fees/labels-a3b" ? LABELS_A3B
     : p === "/permits/fees/saved-card" ? SAVED_CARD
     : p === "/permits/apply" ? APPLY
+    : p === "/permits/fees/start" ? startPage(String(u.searchParams.get("to") ?? "/"))
     : null;
   if (!body) { res.writeHead(404); res.end("not found"); return; }
   res.writeHead(200, { "Content-Type": "text/html" });
@@ -301,9 +306,16 @@ const frameHostOf = (pg: Page): string => {
 
 // (b) The #238 reviewers' fee pages, no second-factor wording.
 for (const delay of [500, 1500]) {
-  const r = await replay(recipeOf(`card-late-frame-${delay}`, [gotoStep(`/permits/fees/late?delay=${delay}`), cvvStep()]), async (pg) =>
-    ({ csc: await valueOf(pg, "#csc"), cn: await valueOf(pg, "#cn", "#cardFrame"), exp: await valueOf(pg, "#exp") }));
+  // Reached by a plain Continue click, as the reviewer's fixture was (a click carries no entry, so
+  // the code box is still "at sign-in" and only the missing wording keeps the payment stop).
+  const r = await replay(recipeOf(`card-late-frame-${delay}`, [
+    gotoStep(`/permits/fees/start?to=${encodeURIComponent(`/permits/fees/late?delay=${delay}`)}`),
+    { action: "click", phase: "fill", note: "advance: Continue", selector: { css: "#next", text: "Continue" } },
+    cvvStep(),
+  ]), async (pg) => ({ url: new URL(pg.url()).pathname, csc: await valueOf(pg, "#csc"), cn: await valueOf(pg, "#cn", "#cardFrame"), exp: await valueOf(pg, "#exp") }));
   console.log(`   card-number frame mounted ${delay} ms after load: ${brief(r)}`);
+  check(`fixture: the run reached the late-frame fee page (${delay} ms)`, r.boxes.url === "/permits/fees/late", brief(r));
+  delete r.boxes.url;
   atPayment(`a card-number frame mounted ${delay} ms after load`, r);
 }
 {
@@ -313,8 +325,8 @@ for (const delay of [500, 1500]) {
 }
 {
   const r = await replay(recipeOf("card-spa-late", [gotoStep("/permits/fees/spa"), cvvStep()]), cardBoxes);
-  console.log(`   card form drawn 5 s after load: ${brief(r)}`);
-  atPayment("a card form drawn 5 s after load", r);
+  console.log(`   code box at once, rest of the card form drawn 5 s after load: ${brief(r)}`);
+  atPayment("the rest of a card form drawn 5 s after the code box", r);
 }
 {
   const r = await replay(recipeOf("card-labels-a3", [gotoStep("/permits/fees/labels-a3"), cvvStep()]), async (pg) =>
