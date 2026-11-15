@@ -522,8 +522,11 @@ export function bindRecipeForReplay(input: {
     // type selects froze as "portal constants" at learn and replayed the learn job's address into every
     // later search. Bound in the vocabulary the recorded literal spoke; a component this address does
     // not have strips the step — the control stays as the portal shows it, which is that answer.
-    const componentKey = componentKeys[index];
-    if (componentKey && (step.action === "fill" || step.action === "select") && !step.field && hasKey(input.fieldValues, componentKey)) {
+    // A step bound at learn (convertLiteralsToBoundFields) is read here too: its key may be empty for
+    // THIS address, and an empty component is "leave it", never a blank the stage gate holds for.
+    const learnBound = step.field && componentOfKey(step.field) ? step.field : "";
+    const componentKey = learnBound || (!step.field ? componentKeys[index] : null);
+    if (componentKey && (step.action === "fill" || step.action === "select") && hasKey(input.fieldValues, componentKey)) {
       const was = String(step.value ?? "").trim();
       const words = COMPONENT_WORDS[componentOfKey(componentKey) ?? "direction"];
       const value = String(input.fieldValues[componentKey] ?? "").trim();
@@ -531,9 +534,11 @@ export function bindRecipeForReplay(input: {
         record("stripped", `"${label.slice(0, 40)}" — this project's address has no ${words}, so the control is left as the portal shows it${was ? ` (the recorded "${was}" was the learn job's address)` : ""}`);
         return;
       }
-      step = { ...step, field: componentKey };
-      delete step.value;
-      record("rebound", `"${label.slice(0, 40)}" bound to this project's ${words} "${value}"${was && was.toLowerCase() !== value.toLowerCase() ? `, not the recorded "${was}" (the learn job's address)` : ""}`);
+      if (!learnBound) {
+        step = { ...step, field: componentKey };
+        delete step.value;
+        record("rebound", `"${label.slice(0, 40)}" bound to this project's ${words} "${value}"${was && was.toLowerCase() !== value.toLowerCase() ? `, not the recorded "${was}" (the learn job's address)` : ""}`);
+      }
     }
 
     // R2 — project-specific free text.

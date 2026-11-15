@@ -129,6 +129,16 @@ check("MUST-PASS (replay, R13): a directionless address strips the Direction ste
   assert.equal(b.steps.find((s) => s.selector?.label === "Street Type:")?.field, "streetSuffix");
 });
 
+check("MUST-PASS (replay, R13): a step BOUND at learn is stripped on a directionless job — never a blank the stage gate holds for", () => {
+  const learned = convertLiteralsToBoundFields(SEARCH, SE_AVE).steps;
+  const b = bind(learned, WAY);
+  assert.equal(b.steps.some((s) => s.field === "streetDirection"), false);
+  assert.ok(b.changes.some((c) => c.kind === "stripped" && /no street direction/.test(c.reason)));
+  const again = bind(learned, SE_AVE);
+  assert.equal(again.steps.find((s) => s.selector?.label === "Direction:")?.field, "streetDirection");
+  assert.equal(again.changes.some((c) => /street direction/.test(c.reason)), false, "an already-bound step is not re-announced every replay");
+});
+
 check("MUST-PASS (replay, R13): a recorded WORD binds to the word form (\"Street\" -> streetSuffixWord)", () => {
   const words = SEARCH.map((s) => (s.selector?.label === "Street Type:" ? { ...s, value: "Street" } : s.selector?.label === "Direction:" ? { ...s, value: "Northwest" } : s));
   const b = bind(words, SE_AVE);
