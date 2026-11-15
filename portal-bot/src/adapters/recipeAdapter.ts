@@ -6654,6 +6654,14 @@ export class RecipeAdapter extends BasePortalAdapter {
    * the person at review). Enabled meanwhile,
    * or nothing held any more: null, and the ordinary write runs. A secret is never written into the
    * drift line.
+   *
+   * THE BOUND IS NARROWER THAN MAIN'S TOTAL, BY DESIGN. On main, after the busy window resolveLocator
+   * still handed back the disabled control, and the write's own actionability wait (~8 s) could land
+   * the job's value on a control the portal enabled 5-12 s later. Here such a control is a named drift,
+   * listed unverified with "check it before submit". The alternative was to wait ~12 s on every
+   * differing control, which is Tigard's 38 s again in a smaller size (re-review of #237, K4: disabled
+   * 6 s holding "0", main wrote 25000 at 8.2 s, this names the drift at ~4 s). Nothing is written
+   * wrongly either way. The person sees which value stands.
    */
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   private async answeredByPortal(step: RecipeStep, scoped: any, v: string, kind: "select" | "fill", asRecorded: RecipeStep): Promise<boolean | null> {

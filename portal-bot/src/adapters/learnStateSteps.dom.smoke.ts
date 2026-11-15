@@ -21,7 +21,12 @@
 //   that is hidden (C) or not there (C2) and never clicks "Book an Inspection"; D skips the absent
 //   conditional control and still fills what follows; G skips a mid-flow non-advancing click left on
 //   a hidden control; H / H2 skip conditional controls on PowerClerk's shape (a generic test hook
-//   on every box) without writing their value into another box.
+//   on every box) without writing their value into another box; K3 still skips a conditional
+//   control that only its unique test id names when it is truly absent.
+// MUST-PASS (re-review of #237; MUST-EXCLUDE of the fix round's skip): a revealed conditional
+//   control findable ONLY through its unique data-testid / data-test / data-cy / data-qa (a drifted
+//   label, a per-render id) is written on the job that reveals it (K1), and so is a revealed checkbox
+//   that only a neighbouring div labels (K2). The fix round judged both "absent" and skipped them.
 // MUST-EXCLUDE: a hidden control that SHOWS within the grace is clicked, not skipped (E); an
 //   ENABLED select is written as before, never judged "answered by the portal" (B2); a conditional
 //   switch whose real box is concealed inside a visible label is written, not skipped (F); a revealed
@@ -212,7 +217,29 @@ const VERIFY = shell(`
   });`);
 const VERIFY_ENTRY = SLOW_ENTRY.replace("/slowreveal", "/verify");
 
-const PAGES: Record<string, string> = { "/verifyentry": VERIFY_ENTRY, "/verify": VERIFY, "/busyselect": BUSY_SELECT, "/busybox": BUSY_BOX, "/linkcontinue": LINK_CONTINUE, "/review2": REVIEW2, "/slowentry": SLOW_ENTRY, "/slowreveal": SLOW_REVEAL, "/switch": SWITCH, "/hiddentoggle": HIDDEN_TOGGLE, "/review": REVIEW, "/summary": SUMMARY, "/answered": ANSWERED, "/answeredbox": ANSWERED_BOX, "/nopopup": NO_POPUP, "/hiddenpopup": HIDDEN_POPUP, "/noreveal": NO_REVEAL, "/lateshow": LATE_SHOW,
+// K: a revealed control that ONLY its unique test hook can find (re-review of #237, rrProbe K1/K2).
+// K1: the portal renamed the label since the learn ("Make" to "Manufacturer"), and its framework ids
+// are per-render (#mui-12 recorded, #mui-31 now). The test hook is the stable level the learner
+// recorded for exactly this drift. K2: a checkbox that a NEIGHBOURING div labels (no <label>, no id):
+// getByLabel can never resolve it, and its data-testid always can. `revealed` false: this job's answers
+// revealed nothing, and the block is not rendered (K3).
+const testHookPage = (attr: string, revealed: boolean): string => shell(`
+  <h2>Energy Storage</h2>
+  <label for="ess">Energy storage included?</label>
+  <select id="ess"><option value="">--</option><option${revealed ? " selected" : ""}>Yes</option><option${revealed ? "" : " selected"}>No</option></select>
+  <div id="battBlock">${revealed ? `<label for="mui-31">Battery Inverter Manufacturer</label><input id="mui-31" ${attr}="battery-inverter-make">` : ""}</div>
+  <label for="kw">Total System Export (kW)</label><input id="kw">`);
+const neighbourCheckPage = (revealed: boolean): string => shell(`
+  <h2>Energy Storage</h2>
+  ${revealed ? `<div class="row"><div class="chk"><input type="checkbox" data-testid="battery-dc-coupled"></div><div class="lbl">Battery is DC coupled</div></div>` : ""}
+  <label for="kw">Total System Export (kW)</label><input id="kw">`);
+const TEST_HOOK_ATTRS = ["data-testid", "data-test", "data-cy", "data-qa"] as const;
+const K_PAGES: Record<string, string> = {
+  ...Object.fromEntries(TEST_HOOK_ATTRS.map((a) => [`/k1/${a}`, testHookPage(a, true)])),
+  "/k1none": testHookPage("data-testid", false), "/k2": neighbourCheckPage(true), "/k2none": neighbourCheckPage(false),
+};
+
+const PAGES: Record<string, string> = { ...K_PAGES, "/verifyentry": VERIFY_ENTRY, "/verify": VERIFY, "/busyselect": BUSY_SELECT, "/busybox": BUSY_BOX, "/linkcontinue": LINK_CONTINUE, "/review2": REVIEW2, "/slowentry": SLOW_ENTRY, "/slowreveal": SLOW_REVEAL, "/switch": SWITCH, "/hiddentoggle": HIDDEN_TOGGLE, "/review": REVIEW, "/summary": SUMMARY, "/answered": ANSWERED, "/answeredbox": ANSWERED_BOX, "/nopopup": NO_POPUP, "/hiddenpopup": HIDDEN_POPUP, "/noreveal": NO_REVEAL, "/lateshow": LATE_SHOW,
   "/pchidden": PC_COND("display:none"), "/pcabsent": PC_COND("absent"), "/pcshown": PC_COND("") };
 const server = http.createServer((req, res) => {
   const url = new URL(req.url || "/", "http://127.0.0.1");
@@ -240,7 +267,11 @@ const run = async (browser: Browser, recipe: PortalRecipe, fieldValues: Record<s
   const t0 = Date.now();
   const r = await adapter.fillApplication({} as ProjectRecord).catch((e) => ({ ok: false, message: String(e) })) as { ok: boolean; message?: string; data?: Record<string, unknown> };
   const ms = Date.now() - t0;
-  const values = await pg.evaluate(() => Object.fromEntries(Array.from(document.querySelectorAll("input, select")).map((el) => [el.id, (el as HTMLInputElement).value]))).catch(() => ({} as Record<string, string>));
+  // Keyed by id, else the test id (K2's box has no id); a checkbox reads as its checked state.
+  const values = await pg.evaluate(() => Object.fromEntries(Array.from(document.querySelectorAll("input, select")).map((el) => [
+    el.id || el.getAttribute("data-testid") || "",
+    (el as HTMLInputElement).type === "checkbox" ? String((el as HTMLInputElement).checked) : (el as HTMLInputElement).value,
+  ]))).catch(() => ({} as Record<string, string>));
   const url = pg.url();
   await ctx.close();
   const d = (r.data ?? {}) as Record<string, unknown>;
@@ -476,6 +507,43 @@ try {
   console.log(`   J2 ${tail(j2)} values=${JSON.stringify(j2.values)}`);
   check("J2 MUST-EXCLUDE a popup OK that opens after the portal's 4 s round-trip is CLICKED (the page is let settle before the grace), not skipped as not applicable",
     j2.values.okClicked === "1" && !j2.aging.some((n) => /#237/.test(n)) && j2.values.desc2 === "Rooftop solar", tail(j2) + JSON.stringify(j2.values));
+  }
+
+  // ---- K: a revealed conditional control that only its unique test hook finds -----------------------
+  // The probe asks EVERY level the step recorded. A data-testid / data-test / data-cy / data-qa level
+  // names its control (the learner's drift-recovery level); only PowerClerk's component hook,
+  // data-test-role (H), is passed over beside an identity (re-review of #237).
+  if (want("K")) {
+  const exportKw = { action: "fill", phase: "fill", field: "exportKw", note: "Total System Export (kW)", selector: { label: "Total System Export (kW)", fallbacks: [{ css: "#kw" }] } } as RecipeStep;
+  const stop = { action: "stopForReview", note: "review" } as RecipeStep;
+  // rrProbe K1 as the reviewer wrote it: a drifted label, a stale per-render id, the unique hook.
+  const makeStep = (attr: string): RecipeStep => ({ action: "fill", phase: "fill", field: "batteryInverterMake", conditional: true, note: "Battery Inverter Make",
+    selector: { label: "Battery Inverter Make", fallbacks: [{ css: "#mui-12" }, { css: `[${attr}="battery-inverter-make"]` }] } } as RecipeStep);
+  const dcStep = { action: "check", phase: "fill", conditional: true, note: "Battery is DC coupled",
+    selector: { label: "Battery is DC coupled", fallbacks: [{ css: "[data-testid=\"battery-dc-coupled\"]" }] } } as RecipeStep;
+  const kValues = { batteryInverterMake: "ExampleCo", exportKw: "7.6" };
+  const no237 = (r: Run): boolean => !r.aging.some((n) => /#237/.test(n));
+  for (const attr of TEST_HOOK_ATTRS) {
+    const k1 = await run(browser, recipeOf(`learnstate-k1-${attr}`, `/k1/${attr}`, [makeStep(attr), exportKw, stop]), kValues);
+    console.log(`   K1 [${attr}] ${tail(k1)} values=${JSON.stringify(k1.values)}`);
+    check(`K1 MUST-PASS a revealed conditional box only its unique ${attr} finds (label drifted, id per-render) is WRITTEN on the job that reveals it, never skipped as not revealed`,
+      k1.ok && k1.values["mui-31"] === "ExampleCo" && no237(k1) && !k1.skipped.length && k1.values.kw === "7.6", tail(k1) + JSON.stringify(k1.values));
+  }
+  const k2 = await run(browser, recipeOf("learnstate-k2", "/k2", [dcStep, exportKw, stop]), kValues);
+  console.log(`   K2 ${tail(k2)} values=${JSON.stringify(k2.values)}`);
+  check("K2 MUST-PASS a revealed conditional checkbox only a neighbouring div labels (getByLabel never resolves it) is CHECKED through its data-testid, never skipped",
+    k2.ok && k2.values["battery-dc-coupled"] === "true" && no237(k2) && !k2.skipped.length, tail(k2) + JSON.stringify(k2.values));
+
+  // K3: the same recipes on a job whose answers revealed nothing. Every level, the test hook
+  // included, finds nothing: the conditional skip still holds.
+  const k3 = await run(browser, recipeOf("learnstate-k3", "/k1none", [makeStep("data-testid"), exportKw, stop]), kValues);
+  console.log(`   K3 ${tail(k3)} values=${JSON.stringify(k3.values)}`);
+  check("K3 MUST-KEEP the K1 step, truly absent (no level finds anything), is skipped, named as not revealed, and the run carries on",
+    k3.ok && k3.aging.some((n) => /Battery Inverter Make/.test(n) && /reveal/i.test(n) && /#237/.test(n)) && k3.values.kw === "7.6" && k3.ms < 30_000, tail(k3) + JSON.stringify(k3.values));
+  const k3b = await run(browser, recipeOf("learnstate-k3b", "/k2none", [dcStep, exportKw, stop]), kValues);
+  console.log(`   K3b ${tail(k3b)} values=${JSON.stringify(k3b.values)}`);
+  check("K3b MUST-KEEP the K2 checkbox, truly absent, is skipped, named, and the run carries on",
+    k3b.ok && k3b.aging.some((n) => /Battery is DC coupled/.test(n) && /reveal/i.test(n) && /#237/.test(n)) && k3b.values.kw === "7.6" && k3b.ms < 30_000, tail(k3b) + JSON.stringify(k3b.values));
   }
 } finally {
   await browser.close().catch(() => null);
