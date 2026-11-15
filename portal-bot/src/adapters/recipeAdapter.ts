@@ -103,7 +103,7 @@ import { reviewComparison, scrapeReviewScreen as scrapeReviewScreenShared, utili
 import { controlReadsUnanswered, pinEmptyRequiredControl, PINNED_CONTROL_ATTR, SWEPT_BLANK_ATTR, sweepEmptyRequiredControls, type EmptyRequired } from "../requiredControlSweep";
 import { openPortal } from "../browser";
 import { selectWithFallback, comboboxFaceInPage, type ComboboxPick } from "../comboboxFill";
-import { fillTypeahead, typeaheadBoxReason, typeaheadFailureLine, TypeaheadStop } from "../typeaheadFill";
+import { fillTypeahead, typeaheadBoxReason, typeaheadFailureLine, typeaheadPortalAnswered, TypeaheadStop } from "../typeaheadFill";
 import { typeaheadMatchMode, type TypeaheadSite } from "../typeaheadMatch";
 import { assertFilerIdentityHeld, FilerIdentityStop, filerIdentityFieldForSelect, filerIdentityStopMessage, isFilerIdentityField, isUnansweredOption, readNativeSelect, selectFilerIdentity } from "../filerIdentitySelect";
 import {
@@ -1682,12 +1682,21 @@ export class RecipeAdapter extends BasePortalAdapter {
    *  comes back empty while the selection shows elsewhere, so the required sweep's re-assert must not
    *  take it for a blank and search again (a second identical search, a second location row). */
   private readonly typeaheadEnterSelected = new Set<string>();
-  /** #244 — search boxes (note, binding, value; loose) whose type-ahead already came back with
-   *  nothing this run: no suggestions, none that is the job's, or a pick the portal did not take.
-   *  The portal's answer to the same value has not changed, so neither a re-run of the step nor the
-   *  required sweep's re-assert searches again (a required iWorQ box re-searched three times: 82 s
-   *  of the same "No results match your search" on the synthetic replica). */
-  private readonly typeaheadSearchedOut = new Set<string>();
+  /** #244 — THE BOX ITSELF CARRIES "ALREADY ANSWERED": a search box the PORTAL answered with nothing
+   *  for this job's value (typeaheadPortalAnswered) is stamped TYPEAHEAD_ANSWERED_ATTR=<token>, and
+   *  the token maps here to that value and its FAILED line. A re-run of the step, or the required
+   *  sweep's re-assert, on THAT element with THAT value is not searched again (a required iWorQ box
+   *  re-searched three times: 82 s of the same "No results match your search" on the synthetic
+   *  replica). Keyed by the live element, never by the step's words: two boxes with the same note,
+   *  binding and value (PowerClerk 32f3d2b2 has "Address"/street at steps 16 and 27) are two
+   *  searches, and a new document is a new search (review of 5eb51ad3, shape S3). */
+  private readonly typeaheadAnswered = new Map<string, { value: string; label: string }>();
+  private readonly typeaheadRunTag = Math.random().toString(36).slice(2, 8);
+  /** Set by fillTypeaheadStep whenever it returns false with its own FAILED line standing (searched
+   *  and found nothing, a pick the portal did not take, or not searched again because the box had
+   *  already answered) — the re-assert reads it so that box is not also called a control "no longer
+   *  on this page". */
+  private typeaheadFailureNamed = false;
   /** #333: after the hand-over, a person's own main-frame form request went (their submit, or a
    *  postback they made) — the run's end page is theirs now, not where the run "stopped". */
   private personMovedOn = false;
@@ -5037,10 +5046,16 @@ export class RecipeAdapter extends BasePortalAdapter {
   private async fillTypeaheadStep(step: RecipeStep, scoped: any, v: string): Promise<boolean> {
     const label = String(this.stepLabel(step) || step.note || "search box").slice(0, 60);
     const fieldName = String(step.note ?? step.field ?? step.action).slice(0, 60);
-    // #244: the same box and value already came back with nothing this run — its FAILED line stands.
-    const memo = this.typeaheadMemoKey(step, v);
-    if (this.typeaheadSearchedOut.has(memo)) {
+    // #244: THIS BOX (its own mark, read off the live element) already answered this job's value with
+    // nothing this run — its FAILED line stands and the same search is not typed again. Another
+    // step's words landing on that box are named once, so no step is skipped unnamed.
+    const answered = await this.typeaheadAnsweredBy(scoped, v);
+    if (answered) {
+      this.typeaheadFailureNamed = true;
       if (!this.fieldsUnverified.includes(fieldName)) this.fieldsUnverified.push(fieldName);
+      if (!this.driftWarnings.some((w) => w.startsWith(`FAILED "${label}"`))) {
+        this.driftWarnings.push(`FAILED "${label}": not searched again — this box already answered this job's value with nothing this run (searched as "${answered.label}") — nothing was picked and the box was left empty.`);
+      }
       return false;
     }
     const projectStreet = String(this.fieldValues.street || this.fieldValues.projectAddress || "");
@@ -5090,16 +5105,47 @@ export class RecipeAdapter extends BasePortalAdapter {
       if (!this.driftWarnings.includes(`STOPPED: ${line}`)) this.driftWarnings.push(`STOPPED: ${line}`);
       throw new TypeaheadStop(msg);
     }
-    if (out.outcome !== "unusable") this.typeaheadSearchedOut.add(memo);
-    this.driftWarnings.push(`FAILED ${line}`);
+    // Remembered on the box only when the PORTAL answered (its own no-match words, or a settled list
+    // with none of the job's): a search that ran out of time, a list that re-rendered under the read
+    // or a pick the box did not keep may go differently next time, so it is searched again.
+    if (typeaheadPortalAnswered(out)) await this.markTypeaheadAnswered(scoped, v, label);
+    // The box was there and its failure is named (a box that could not be used may be gone — the
+    // re-assert's own line says so). The same line from a re-run is not said twice.
+    if (out.outcome !== "unusable") this.typeaheadFailureNamed = true;
+    if (!this.driftWarnings.includes(`FAILED ${line}`)) this.driftWarnings.push(`FAILED ${line}`);
     return false;
   }
 
-  /** #244 — one type-ahead search: the step's note (stable under a re-assert's pinned selector), its
-   *  binding and this job's value, loose. */
-  private typeaheadMemoKey(step: RecipeStep, v: string): string {
-    const loose = (s: unknown): string => String(s ?? "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
-    return `${loose(step.note || this.stepLabel(step))}\u0000${loose(step.field)}\u0000${loose(v)}`;
+  /** #244 — the attribute that marks a search box the portal already answered with nothing. */
+  private static readonly TYPEAHEAD_ANSWERED_ATTR = "data-al-ta-answered";
+  private static typeaheadValueKey(v: string): string {
+    return String(v ?? "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+  }
+
+  /** #244 — THIS element's "already answered" mark, when this run made it for this value; else null.
+   *  Never throws (a stub locator's evaluate may not even return a promise). */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  private async typeaheadAnsweredBy(scoped: any, v: string): Promise<{ value: string; label: string } | null> {
+    if (!this.typeaheadAnswered.size || typeof scoped?.evaluate !== "function") return null;
+    try {
+      const token = String((await Promise.resolve(scoped.evaluate((el: Element, attr: string) => el.getAttribute(attr) || "", RecipeAdapter.TYPEAHEAD_ANSWERED_ATTR, { timeout: 1500 })).catch(() => "")) ?? "");
+      const hit = token ? this.typeaheadAnswered.get(token) : undefined;
+      return hit && hit.value === RecipeAdapter.typeaheadValueKey(v) ? hit : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /** #244 — stamp the box the portal answered with nothing for `v` (a run-local token; the value
+   *  itself never goes into the page). Unmarked on any failure: the next run of the step searches. */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  private async markTypeaheadAnswered(scoped: any, v: string, label: string): Promise<void> {
+    if (typeof scoped?.evaluate !== "function") return;
+    const token = `${this.typeaheadRunTag}-${this.typeaheadAnswered.size + 1}`;
+    try {
+      const ok = await Promise.resolve(scoped.evaluate((el: Element, a: { attr: string; token: string }) => { el.setAttribute(a.attr, a.token); return true; }, { attr: RecipeAdapter.TYPEAHEAD_ANSWERED_ATTR, token }, { timeout: 1500 })).catch(() => false);
+      if (ok === true) this.typeaheadAnswered.set(token, { value: RecipeAdapter.typeaheadValueKey(v), label });
+    } catch { /* unmarked */ }
   }
 
   /** #524 — record WHO IS FILING's stop (sticky for the run) and throw it. */
@@ -10723,9 +10769,6 @@ export class RecipeAdapter extends BasePortalAdapter {
             // filed; Part 1's own "Net Metering" did the same by substring. Left blank, a person
             // answers it.
             if (isSubmitIntentField(blank)) continue;
-            // A SEARCH THAT ALREADY FOUND NOTHING FOR THIS JOB'S VALUE IS NOT RE-RUN (#244): its FAILED
-            // line names the box and the portal's words, and a re-run only types the same query again.
-            if (rs.action === "fill" && this.typeaheadSearchedOut.size && this.typeaheadSearchedOut.has(this.typeaheadMemoKey(rs, this.resolveValue(rs)))) continue;
             // THE CONTROL THE STEP WILL WRITE, RESOLVED FIRST AND WRITTEN ONLY THROUGH ITSELF: it must
             // be the control the sweep called that blank, it must be on the page now (a step whose
             // control is gone waits out its whole timeout), and no question of it may read as
@@ -10742,8 +10785,14 @@ export class RecipeAdapter extends BasePortalAdapter {
               await this.noteUnrecordedWrite("pick", `re-assert into "${(target.label || blank).slice(0, 60)}" (the recorded "${String(rs.note ?? rs.field ?? "").slice(0, 40)}")`, { ...(target.control ?? {}), question: target.label || blank, questions: target.questions });
             }
             const step = target.pinned ? { ...rs, selector: target.pinned, fingerprint: undefined } as RecipeStep : rs;
+            this.typeaheadFailureNamed = false;
             const done = await this.executeStep(step, pastReview).catch(() => false);
             if (target.pinned) await this.unpinReassert(target.pinned);
+            // A SEARCH BOX'S FAILURE IS ITS OWN LINE (#244): one the portal already answered with nothing
+            // for this job's value was not searched again, and any other type-ahead miss named the box
+            // and the reason (the portal's words, the pick it did not take) — it is not also a control
+            // "no longer on this page".
+            if (!done && this.typeaheadFailureNamed) continue;
             // BOTH OUTCOMES, or this becomes the sixth silent path in this file. A
             // re-assert that fails says something different from one that was never
             // attempted, and today proved repeatedly that the difference is the whole
