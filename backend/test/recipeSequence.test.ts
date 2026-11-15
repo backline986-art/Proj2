@@ -106,6 +106,9 @@ await check("A1 the looped learn: a refused advance, a re-bound control, no revi
   // The refused advance alone refuses, even when the recipe goes on to a review it reached somehow.
   const withEnd = recipeSequenceProblems([...LOOPED, FINAL], KNOWN_DOCS);
   assert.deepEqual(kinds(refusing(withEnd)).sort(), ["conflicting_write", "refused_advance"]);
+  // A control written twice after the advance is one re-fill, named once (Bend's second pass).
+  const twice = recipeSequenceProblems([...LOOPED, selectId("applicationType", "Renovation/Alteration", "Choose the application type:*"), FINAL], KNOWN_DOCS);
+  assert.deepEqual(twice.find((x) => x.kind === "refused_advance")?.steps, [8, 9, 10, 11, 13], "a control's second write after the advance was listed as another re-fill");
 });
 
 // ── A2. truncated (ComEd shape) ────────────────────────────────────────────────────────────────
