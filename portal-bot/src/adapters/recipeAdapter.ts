@@ -9009,13 +9009,14 @@ export class RecipeAdapter extends BasePortalAdapter {
    * IS A DIALOG-DISMISSAL CLICK'S DIALOG NOT SHOWN? (#233; see isDialogDismissalStep.)
    *
    * True only when, for the whole DISMISSAL_DIALOG_WAIT_MS, no level of the step's selector matches
-   * anything visible and no hidden match sits in a popup container that is itself showing — and,
-   * at the end, no dialog is showing anywhere on the page (a popup up under markup the recording
-   * did not name is main's to handle: its rescue may find the dismissal by name). Bend's popup is
+   * anything visible, no hidden match sits in a popup container that is itself showing, and no
+   * dialog is showing anywhere on the page (DIALOG_SHOWN_SEL: a popup up under markup the recording
+   * did not name is main's to handle — its rescue may find the dismissal by name). Bend's popup is
    * a closed `<dialog>` whose OK is display:none, or not in the DOM at all.
    *
-   * Every doubt answers false, which leaves the step to run exactly as on main: a page or match
-   * that cannot be read (a test fake, a navigation mid-read), a showing control, a showing box.
+   * Every doubt answers false at once, which leaves the step to run exactly as on main: a page or
+   * match that cannot be read (a test fake, a navigation mid-read), a showing control, a showing
+   * box, a showing dialog. Only the not-shown answer waits out the budget.
    */
   private async dismissalDialogNotShown(step: RecipeStep): Promise<boolean> {
     if (!this.page || typeof this.page.evaluate !== "function" || !step.selector) return false;
@@ -9046,15 +9047,17 @@ export class RecipeAdapter extends BasePortalAdapter {
           if (boxShown !== false) return false; // its popup is up (its OK not yet shown): main's path
         }
       }
-      if (Date.now() >= deadline) break;
+      // A dialog up anywhere, under markup the recording did not name: main's path at once, with
+      // no wait main did not pay — its rescue may find the dismissal there by name.
+      const dialogShown = await this.page.evaluate((dlgSel: string) => Array.from(document.querySelectorAll(dlgSel)).some((d) => {
+        const r = d.getBoundingClientRect();
+        const cs = getComputedStyle(d as HTMLElement);
+        return r.width > 4 && r.height > 4 && cs.visibility !== "hidden" && cs.display !== "none" && Number(cs.opacity) !== 0;
+      }), DIALOG_SHOWN_SEL).catch(() => true);
+      if (dialogShown !== false) return false;
+      if (Date.now() >= deadline) return true;
       await sleep(250);
     }
-    const dialogShown = await this.page.evaluate((dlgSel: string) => Array.from(document.querySelectorAll(dlgSel)).some((d) => {
-      const r = d.getBoundingClientRect();
-      const cs = getComputedStyle(d as HTMLElement);
-      return r.width > 4 && r.height > 4 && cs.visibility !== "hidden" && cs.display !== "none" && Number(cs.opacity) !== 0;
-    }), DIALOG_SHOWN_SEL).catch(() => true);
-    return dialogShown === false;
   }
 
   /**
