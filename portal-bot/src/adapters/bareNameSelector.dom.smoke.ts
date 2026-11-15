@@ -85,8 +85,7 @@ const FORM = `<!doctype html><html><head><title>Solar Permit or Panel Applicatio
 // textarea's name, and an unlabeled box whose name attribute reads "OwnerSigns".
 const LEARN = `<!doctype html><html><head><title>Applicant</title><meta name="description" content="Permit application"></head><body>
 <form onsubmit="return false">
-  <h1>Occupancy and agreement</h1>
-  <p>We agree to process occ data.</p>
+  <h1>Applicant preferences</h1>
   <label for="em">Email me marketing updates (I agree)</label><input type="checkbox" id="em" name="emailOptIn">
   <table><tr><td><input type="checkbox" name="agree"></td></tr></table>
   <div class="form-group row"><div class="col-md-4"><h3>Owner</h3></div><div class="col-md-8"><input id="ownerFirst" name="firstName"></div></div>
