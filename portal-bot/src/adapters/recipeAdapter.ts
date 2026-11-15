@@ -107,7 +107,7 @@ import { fillTypeahead, typeaheadFailureLine, TypeaheadStop } from "../typeahead
 import { typeaheadMatchMode, type TypeaheadSite } from "../typeaheadMatch";
 import { assertFilerIdentityHeld, FilerIdentityStop, filerIdentityFieldForSelect, filerIdentityStopMessage, isFilerIdentityField, isUnansweredOption, readNativeSelect, selectFilerIdentity } from "../filerIdentitySelect";
 import {
-  classifySubmissionText, finalSubmitEnvAllows, finalSubmitRefusals, isFinalSubmitControl, isPayFee, isPayNowDialogText, mayClickFinalSubmit,
+  classifySubmissionText, finalSubmitEnvAllows, finalSubmitRefusals, isAcceptTermsLabel, isFinalSubmitControl, isPayFee, isPayNowDialogText, mayClickFinalSubmit,
   isPayRequestUrl, isRecipeShapeValid, isSignatureNameLabel, isSignatureRequestControl, isSubmitIntent, isSubmitOrPayRequestUrl, PORTAL_SAFETY_GLOBAL, PORTAL_SAFETY_IN_PAGE_SOURCE, splitSignerName,
   type HealedStep, type RunApproval, type SubmissionOutcome,
 } from "../../../shared/src/portalSafety";
@@ -874,6 +874,173 @@ export function isAdvancingClickStep(step: RecipeStep): boolean {
 export function stagedReviewExpectedPages(steps: readonly RecipeStep[]): number {
   return steps.filter((s) => s.action === "click" && !isFinalSubmitStep(s) && isAdvancingClickStep(s)).length + 1;
 }
+
+/** A CLICK WORDED AS A SAVE, UPLOAD, ATTACH OR COMMIT. After a page's uploads it is the attachment
+ *  commit the page must LIST the file for (runAll), and it is never skipped as a learn-state click
+ *  (#237). THE one reading of that wording; it was an inline test in runAll. */
+export function isCommitWordedClick(step: RecipeStep): boolean {
+  const said = `${String(step.note ?? "")} ${String(step.selector?.name ?? step.selector?.text ?? "")}`;
+  return /\b(save|upload|attach|commit)/i.test(said);
+}
+
+/** The recorder's own prefix on a note ("human-patch: OK", "advance: Next", "click: Close"). */
+const RECORDED_NOTE_PREFIX = /^(human-patch|advance|click)\s*:?\s*/i;
+const oneLine = (s: unknown): string => String(s ?? "").replace(/\s+/g, " ").trim();
+
+/** Every word a recorded step names its control by: its own name, text and label, its fallbacks',
+ *  and its note without the recorder's prefix. The never-skip readings below search all of it. */
+function recordedStepWords(step: RecipeStep): string {
+  const sel = step.selector ?? {};
+  return [sel.name, sel.text, sel.label, ...(sel.fallbacks ?? []).flatMap((f) => [f.name, f.text, f.label]),
+    String(step.note ?? "").replace(RECORDED_NOTE_PREFIX, "")].map(oneLine).filter(Boolean).join(" ");
+}
+
+/** The words a person reads ON a recorded click's control: its recorded name, text or label (or a
+ *  fallback's), else its note without the recorder's prefix. "" when it names nothing. */
+function recordedClickLabel(step: RecipeStep): string {
+  const sel = step.selector ?? {};
+  const own = [sel.name, sel.text, sel.label, ...(sel.fallbacks ?? []).flatMap((f) => [f.name, f.text, f.label])].map(oneLine).find(Boolean);
+  return own || oneLine(String(step.note ?? "").replace(RECORDED_NOTE_PREFIX, ""));
+}
+
+/** A popup's dismissal, by the WHOLE label (never a fragment: "OK" is not "Book" or "Lookup"). An
+ *  answer that agrees to something (Accept, I agree) is a consent and never one of these. */
+const DIALOG_DISMISSAL_LABEL = /^(ok|okay|close|dismiss|got it|cancel|no,? thanks|not now|×|x|✕|✖)$/i;
+/** An icon-only close control recorded by its class or aria-label. */
+const DIALOG_CLOSE_CSS = /\b(btn-close|x-tool-close|modal-close)\b|\[aria-label=["']?close\b/i;
+
+/** #237 (3) — IS THIS RECORDED CLICK A POPUP'S OK / CLOSE? Bend 8bbd9a74 step 22 is the learn's
+ *  upload-error popup "OK". At replay no popup opened, nothing matched it, and the name rescue then
+ *  took the shortest label containing "ok" — "Book an Inspection" — and the run left the
+ *  application (audit p6, live sweep 2026-11-14). Read from the click's own label as a whole word,
+ *  or an icon-only close control's class; the dialog's text is not recorded, so nothing else can
+ *  say it. */
+export function isDialogDismissalClick(step: RecipeStep): boolean {
+  if (step.action !== "click" || isFinalSubmitStep(step)) return false;
+  const label = recordedClickLabel(step);
+  if (label) return DIALOG_DISMISSAL_LABEL.test(label);
+  const sel = step.selector ?? {};
+  return [sel.css, ...(sel.fallbacks ?? []).map((f) => f.css)].some((c) => DIALOG_CLOSE_CSS.test(String(c ?? "")));
+}
+
+/** A recorder note naming a click that MOVES the run somewhere (into an application, a record type,
+ *  a program, an address): never a learn-state click, and a closed menu may hold its link — the
+ *  name rescue opens that menu (revealMenuAndPick), so a hidden match is no evidence here. */
+const NAVIGATION_NOTE = /^(application entry|navigate to application|create application|application program|permit type|record type|choice tile|accela|address row|address version|work location|submit by enter|final submit)\b/i;
+
+/** Does this recorded click name a LINK or a navigation the learner recorded? A link leaves the page
+ *  as surely as a Continue does, so it is an advance for every question #237 asks. */
+function isNavigationClick(step: RecipeStep): boolean {
+  if (NAVIGATION_NOTE.test(oneLine(step.note))) return true;
+  const sel = step.selector ?? {};
+  return [sel, ...(sel.fallbacks ?? [])].some((x) => x.role === "link" || /(^|[\s>+~,(])a(?=[#.[:\s]|$)|\ba\[href/i.test(String(x.css ?? "")));
+}
+
+/**
+ * #237 — WHAT A REPLAY NEVER SKIPS BECAUSE ITS CONTROL IS NOT SHOWN, by name; "" when nothing
+ * forbids it. Skipping a click whose control is hidden or absent is safe only when nothing after it
+ * depends on what it does, so these keep today's behaviour (the step runs and fails named, or #232
+ * bounds it): the final submit; a submit-, pay- or signature-request-worded control; a consent,
+ * attestation or signature (isAcceptTermsLabel, companyFactOf, isSignatureStep); an upload, and a
+ * save / upload / attach / commit click (isCommitWordedClick — the attachment commit); an opener
+ * (isContactOpener, isArrayAdderClick) or a compute (isComputeTotalsStep), because the steps after
+ * them fill what they make; and who is filing (isFilerIdentityField). An ADVANCE is not in this list
+ * because it is decided by kind (learnStateSkippable): it is never a "non-advancing" click, and only
+ * the review-page rule takes one. A draft-creating submit is decided at run time (its stamp).
+ */
+export function learnStateNeverSkipped(step: RecipeStep): string {
+  if (isFinalSubmitStep(step)) return "the final submit";
+  if (step.action === "upload") return "an upload";
+  const words = recordedStepWords(step);
+  if (SUBMIT_KEYWORDS.test(words) || PAY_FEE_REPLAY_GATE.test(words) || isSignatureRequestControl(words)) return "submit-, pay- or signature-request-worded";
+  if (isAcceptTermsLabel(words) || !!step.companyFactOf || isSignatureStep(step)) return "a consent, attestation or signature";
+  if (isFilerIdentityField(step.field)) return "who is filing";
+  if (step.action === "click") {
+    if (isCommitWordedClick(step)) return "a save / upload commit";
+    if (isContactOpener(words) || isArrayAdderClick(step)) return "an opener (the steps after it fill what it opens)";
+    if (isComputeTotalsStep(step)) return "a compute (the steps after it read what it computes)";
+  }
+  return "";
+}
+
+/** Which #237 rules may skip a step whose recorded control is not shown. */
+export interface LearnStateSkippable {
+  /** (4) the learner saw the control only after a reveal (RecipeStep.conditional). */
+  conditional: boolean;
+  /** (3) a popup's OK / Close (isDialogDismissalClick). */
+  dialog: boolean;
+  /** (1) a click that is neither an advance (isAdvancingClickStep) nor a link / recorded navigation. */
+  nonAdvancing: boolean;
+  /** (1) a hand-patched click: skippable on the review page, advance-worded or not. */
+  reviewPatch: boolean;
+}
+
+/** The rules a step falls under, or null when none can skip it (learnStateNeverSkipped, or a kind of
+ *  step none of them is about). Pure: the page decides the rest (learnStateSkipKind). */
+export function learnStateSkippable(step: RecipeStep): LearnStateSkippable | null {
+  if (learnStateNeverSkipped(step)) return null;
+  const click = step.action === "click";
+  const can: LearnStateSkippable = {
+    conditional: step.conditional === true && DATA_ACTIONS.has(step.action),
+    dialog: click && isDialogDismissalClick(step),
+    nonAdvancing: click && !isAdvancingClickStep(step) && !isNavigationClick(step),
+    reviewPatch: click && isHumanPatch(step),
+  };
+  return can.conditional || can.dialog || can.nonAdvancing || can.reviewPatch ? can : null;
+}
+
+/** What a step's recorded control showed after the grace: a visible match ("shown"), matches that
+ *  are all hidden ("hidden"), or no match at all ("absent"). */
+export type RecordedTargetSeen = "shown" | "hidden" | "absent";
+export type LearnStateSkipKind = "conditional" | "dialog" | "review_patch" | "non_advancing";
+
+/**
+ * #237 — THE ONE DECISION: may this step be skipped, and under which rule? null = run it as
+ * recorded. A control that SHOWS is always acted on. Otherwise:
+ *   conditional    — absent or hidden: this job's answers did not reveal it (PacifiCorp 102/111/112,
+ *                    Ameren 25). A late render is still caught: a required blank at the page's
+ *                    advance re-runs the recorded step (reassertBlanksOnce).
+ *   dialog         — absent or hidden: the popup it dismissed is not up (Bend 22).
+ *   review_patch   — a hand-patched click, absent or hidden, ON THE REVIEW PAGE: the page reads as
+ *                    the review step, or the recipe's own shape says it (inReviewTail: nothing after
+ *                    this click writes anything before the review stop or the final submit). There
+ *                    is nowhere further to go there but the final submit, which this never is, and
+ *                    no later write can land on the wrong page (PGE b16d667e 68-72).
+ *   non_advancing  — a non-advancing click whose only matches are HIDDEN (not absent: an absent one
+ *                    is #232's bounded failure, and may be the rescue's to find).
+ */
+export function learnStateSkipKind(
+  can: LearnStateSkippable | null,
+  seen: RecordedTargetSeen,
+  page: { onReviewPage: boolean; inReviewTail: boolean },
+): LearnStateSkipKind | null {
+  if (!can || seen === "shown") return null;
+  if (can.conditional) return "conditional";
+  if (can.dialog) return "dialog";
+  if (can.reviewPatch && (page.onReviewPage || page.inReviewTail)) return "review_patch";
+  if (can.nonAdvancing && seen === "hidden") return "non_advancing";
+  return null;
+}
+
+/** Is step `idx` in the recipe's REVIEW TAIL — every step after it up to the review stop, the
+ *  final submit or the recipe's end is a click (never a write, an upload, a key press or a goto)? */
+export function inRecipeReviewTail(steps: readonly RecipeStep[], idx: number): boolean {
+  if (idx < 0 || idx >= steps.length) return false;
+  for (let k = idx + 1; k < steps.length; k++) {
+    const s = steps[k];
+    if (s.action === "stopForReview" || isFinalSubmitStep(s)) return true;
+    if (s.action !== "click") return false;
+  }
+  return true;
+}
+
+/** How long a #237 probe waits for a control to show before calling it hidden or absent: a control
+ *  still rendering (a reveal's round-trip, a fade-in) shows well inside it. */
+const LEARN_STATE_GRACE_MS = 2500;
+/** How long a disabled control already holding a value is watched before it counts as the portal's
+ *  answer when it DIFFERS from the job's (an agreeing one is taken at once): a control the portal
+ *  is still working on enables inside it, and the ordinary write then runs. */
+const PORTAL_ANSWER_SETTLE_MS = 1000;
 
 export class RecipeAdapter extends BasePortalAdapter {
   portalName: string;
@@ -3678,9 +3845,8 @@ export class RecipeAdapter extends BasePortalAdapter {
       // A COMMIT CLICK AFTER THIS PAGE'S UPLOADS (the attachment Save): the page must LIST the file
       // before the run moves on (runs-finish item 4). An advance leaves the page's uploads behind.
       if (performed && step.action === "click" && this.uploadsPerformed.length > this.uploadsSettledUpTo) {
-        const said = `${String(step.note ?? "")} ${String(step.selector?.name ?? step.selector?.text ?? "")}`;
         if (/^advance\b/i.test(String(step.note ?? ""))) this.uploadsSettledUpTo = this.uploadsPerformed.length;
-        else if (/\b(save|upload|attach|commit)/i.test(said)) {
+        else if (isCommitWordedClick(step)) {
           // Only a LEARNER-STAMPED attachment Save is a place the committed list is known to show the
           // file; any other save-worded click (a form's "Save and continue", a portal with no list
           // grid) gets a warning, never the final-submit refusal (skeptic eb36a8f N1).
@@ -6169,6 +6335,161 @@ export class RecipeAdapter extends BasePortalAdapter {
   }
   private static readonly WRITE_ACTIONS: ReadonlySet<string> = new Set(["fill", "select", "check", "uncheck", "upload"]);
 
+  /** The step a #237 rule just skipped (or found answered differently by the portal), with what its
+   *  control showed: the skip's trace line reads this instead of re-resolving the step — a fresh
+   *  resolution would wait out the busy-control wait again, or hand a hidden click's name to the
+   *  rescue, which may open a menu to look for it. */
+  private learnStateSkipped: { step: RecipeStep; described: string } | null = null;
+
+  /** What a recorded selector's levels (the primary, then each fallback) show within `graceMs`:
+   *  "shown" as soon as any match is one a person can see — Playwright's measure, so opacity:0 is
+   *  shown, visibility:hidden (Bootstrap's .invisible) and display:none are not; a dropdown's own
+   *  concealed backing <input> (type=hidden or display:none ITSELF, #584) beside a rendered parent
+   *  is shown too, since its widget is up. "hidden" when matches exist and none is shown, "absent"
+   *  when nothing matches. A level the locator cannot build is passed over. */
+  private async recordedTargetSeen(sel: RecipeSelector, graceMs: number): Promise<{ state: RecordedTargetSeen; described: string }> {
+    const levels: RecipeSelector[] = [sel, ...(sel.fallbacks ?? []).map((f) => ({ ...f, fallbacks: undefined }) as RecipeSelector)];
+    const deadline = Date.now() + graceMs;
+    for (;;) {
+      let matched = 0;
+      for (const level of levels) {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        let loc: any = null;
+        try { loc = this.locator(level); } catch { loc = null; }
+        if (!loc || typeof loc.count !== "function") continue;
+        const n = await loc.count().catch(() => 0);
+        matched += n;
+        for (let k = 0; k < Math.min(n, 8); k++) {
+          const el = loc.nth(k);
+          if (await el.isVisible().catch(() => false)) return { state: "shown", described: "" };
+          const backing = await el.evaluate((e: Element) => e.tagName === "INPUT"
+            && ((e as HTMLInputElement).type === "hidden" || getComputedStyle(e).display === "none")
+            && !!e.parentElement && e.parentElement.getClientRects().length > 0
+            && getComputedStyle(e.parentElement).visibility !== "hidden", undefined, { timeout: 1000 }).catch(() => false);
+          if (backing === true) return { state: "shown", described: "" };
+        }
+      }
+      if (Date.now() >= deadline) {
+        return matched
+          ? { state: "hidden", described: `${matched} match(es) for the recorded control, none visible (#237)` }
+          : { state: "absent", described: "no element matched (#237)" };
+      }
+      await sleep(250);
+    }
+  }
+
+  /**
+   * #237 — A STEP THAT BELONGED TO THE LEARN'S PAGE STATE IS SKIPPED, NAMED, NOT RUN INTO A TIMEOUT.
+   * Asked before the step is resolved, so neither the busy-control wait nor the name rescue (which
+   * clicked "Book an Inspection" for a popup's absent "OK" on Bend) ever sees it. learnStateSkippable
+   * says which rules may apply (never an advance off the review page, a final submit, a draft
+   * submit, an upload commit, an opener or an attestation); recordedTargetSeen what the control
+   * shows; learnStateSkipKind decides. Live: PGE b16d667e 68-72, five hand-patched "Next page"
+   * clicks on #HeaderNextBtn, which PowerClerk hides with Bootstrap's .invisible on the review page —
+   * the click timed out at 30 s and the run FAILED after ~6 min with no staged hand-off
+   * (snapReplay.audit on the learn's p011 page). Returns true when the step is skipped.
+   */
+  private async learnStateSkip(step: RecipeStep): Promise<boolean> {
+    const can = learnStateSkippable(step);
+    if (!can || !step.selector || !this.page || typeof this.page.locator !== "function") return false;
+    // A STAMPED DRAFT-CREATING SUBMIT (#330) is clicked by its own gate, or left for a person.
+    if (this.draftCreatingStepAt(this.currentStepIdx) >= 0) return false;
+    const seen = await this.recordedTargetSeen(step.selector, LEARN_STATE_GRACE_MS);
+    if (seen.state === "shown") return false;
+    const askPage = can.reviewPatch && !can.conditional && !can.dialog;
+    const inReviewTail = askPage && this.recipe.steps[this.currentStepIdx] === step && inRecipeReviewTail(this.recipe.steps, this.currentStepIdx);
+    const onReviewPage = askPage && !inReviewTail && (await this.pageSafetyContext()).reviewPage === true;
+    const kind = learnStateSkipKind(can, seen.state, { onReviewPage, inReviewTail });
+    if (!kind) return false;
+    const label = (recordedClickLabel(step) || String(step.field ?? step.action)).slice(0, 48);
+    const shown = seen.state === "absent" ? "is not on the page" : "is on the page but hidden";
+    const why: Record<LearnStateSkipKind, string> = {
+      conditional: `the learn saw this control only after an answer revealed it, and this job's answers did not reveal it (it ${shown})`,
+      dialog: `not applicable — the popup whose "${label}" the learn clicked is not open on this run (its control ${shown})`,
+      review_patch: `a hand-patched click from the learn's page state; its control ${shown}, and the run is on the review page (${inReviewTail ? "the recipe writes nothing after this click before its review stop" : "the page reads as the review step"}), where there is nowhere further to go but the final submit, which this is not`,
+      non_advancing: "its only match is hidden on this page — a control from the learn's page state; not an advance, a link, a submit, an upload commit, an opener or an attestation",
+    };
+    this.agingNotes.push(`"${label}" (step ${this.currentStepIdx + 1}) skipped: ${why[kind]} (#237)`);
+    this.learnStateSkipped = { step, described: seen.described };
+    return true;
+  }
+
+  /**
+   * #237 (2) — A CONTROL THE PORTAL HAS ALREADY ANSWERED, AND DISABLED. Tigard 92c16d00 steps 4 and
+   * 10 select on controls EnerGov fills and locks itself: the busy-control wait (4 s), then every
+   * select route's timeouts on a control that can never take a pick — about 38 s each — and a false
+   * SKIPPED "landed nothing" (audit p4). Returns the control when the step's recorded levels show
+   * one that is visible, disabled and already holding a value (the sweep's own reading,
+   * controlReadsUnanswered) and no level shows an ENABLED match the run could write instead; null
+   * otherwise (the ordinary resolution runs, exactly as before).
+   */
+  private async portalAnsweredControl(step: RecipeStep): Promise<unknown | null> {
+    const sel = step.selector;
+    if (!sel || !this.page || typeof this.page.locator !== "function") return null;
+    const levels: RecipeSelector[] = [sel, ...(sel.fallbacks ?? []).map((f) => ({ ...f, fallbacks: undefined }) as RecipeSelector)];
+    let held: unknown = null;
+    for (const level of levels) {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      let loc: any = null;
+      try { loc = this.locator(level); } catch { loc = null; }
+      if (!loc || typeof loc.count !== "function") continue;
+      const n = Math.min(await loc.count().catch(() => 0), 8);
+      for (let k = 0; k < n; k++) {
+        const el = loc.nth(k);
+        if (!(await el.isVisible().catch(() => false))) continue;
+        if (await el.isEnabled().catch(() => true)) return null;
+        if (!held && (await el.evaluate(controlReadsUnanswered, undefined, { timeout: 1000 }).catch(() => true)) === false) held = el;
+      }
+    }
+    return held;
+  }
+
+  /**
+   * #237 (2) — THE PORTAL'S ANSWER, COMPARED WITH THE JOB'S. On a control portalAnsweredControl found
+   * disabled and holding a value: agreeing (the select read-back's selectionHeld, the fill
+   * read-back's fillHeld) is VERIFIED at once, nothing written; differing is watched for
+   * PORTAL_ANSWER_SETTLE_MS and is then a NAMED drift (left as the portal set it — a disabled
+   * control takes no write — and listed unverified for the person at review). Enabled meanwhile,
+   * or nothing held any more: null, and the ordinary write runs. A secret is never written into the
+   * drift line.
+   */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  private async answeredByPortal(step: RecipeStep, scoped: any, v: string, kind: "select" | "fill", asRecorded: RecipeStep): Promise<boolean | null> {
+    if (!scoped || typeof scoped.isEnabled !== "function" || typeof scoped.evaluate !== "function") return null;
+    const name = String(step.note ?? step.field ?? step.action).slice(0, 60);
+    const t0 = Date.now();
+    for (;;) {
+      if ((await scoped.isEnabled().catch(() => true)) !== false) return null;
+      if ((await scoped.evaluate(controlReadsUnanswered, undefined, { timeout: 1000 }).catch(() => true)) !== false) return null;
+      // AGREEING MEANS THE SAME ANSWER, not an overlap: the select read-back (selectionHeld) is
+      // lenient by design after a pick WE made, and its value branch let a key "R" (Residential)
+      // "contain" the wanted "Commercial". Here the portal chose, so a select agrees only when its
+      // option reads the same (faceWords keeps the symbols that tell options apart) or its value
+      // is the wanted one; a box keeps the fill read-back (fillHeld: a mask's decoration holds).
+      let agree: boolean;
+      if (kind === "select") {
+        const sh = await this.shownBy(scoped);
+        const want = faceWords(v);
+        agree = !!sh && !!want && (faceWords(sh.text) === want || (!!sh.value.trim() && faceWords(sh.value) === want));
+      } else agree = await this.fillHeld(scoped, v);
+      if (agree) {
+        if (!this.fieldsVerified.includes(name)) this.fieldsVerified.push(name);
+        this.agingNotes.push(`"${name}" answered by the portal: its control is disabled and already shows this job's value — verified, nothing written (#237)`);
+        return true;
+      }
+      if (Date.now() - t0 >= PORTAL_ANSWER_SETTLE_MS) break;
+      await sleep(250);
+    }
+    const shownBy = await this.shownBy(scoped);
+    const shown = oneLine(shownBy?.text || shownBy?.value || "");
+    const secrets = secretValuesOf(this.fieldValues);
+    const secret = !!step.sensitive || secrets.some((s) => v.includes(s) || shown.includes(s));
+    this.driftWarnings.push(`"${name}" answered by the portal: its control is disabled and shows ${secret ? "a value" : JSON.stringify(shown.slice(0, 40))}, not this job's ${secret ? "value" : JSON.stringify(v.slice(0, 40))} — left as the portal set it (a disabled control takes no write); check it before submit (#237)`);
+    if (!this.fieldsUnverified.includes(name)) this.fieldsUnverified.push(name);
+    this.learnStateSkipped = { step: asRecorded, described: `disabled control answered by the portal${secret ? "" : ` (shows ${JSON.stringify(shown.slice(0, 40))})`} (#237)` };
+    return false;
+  }
+
   private async executeStepInner(step: RecipeStep, pastReview: boolean): Promise<boolean> {
     // ONE CONTACT, ONE IDENTITY at replay (see trackContactBlock) — before the step runs, so a
     // dialog Continue is preceded by the dialog made the section identity.
@@ -6252,6 +6573,15 @@ export class RecipeAdapter extends BasePortalAdapter {
       const verdict = await this.fillFeeTierFromPage(step);
       if (verdict !== "normal") return verdict;
     }
+    // #237 — A STEP FROM THE LEARN'S PAGE STATE (a hidden pager, an absent popup's OK, a control only
+    // a reveal showed) is skipped here, named, before resolution can wait on it or rescue it.
+    const asRecorded = step;
+    this.learnStateSkipped = null;
+    if (await this.learnStateSkip(step)) return false;
+    // #237 (2) — A WRITE ON A CONTROL THE PORTAL ALREADY ANSWERED AND DISABLED is taken as that
+    // control (no busy-control wait: it is compared within PORTAL_ANSWER_SETTLE_MS in its case below).
+    const portalHeld = (step.action === "select" || step.action === "fill") && !isPinnedReassert(step)
+      ? await this.portalAnsweredControl(step) : null;
     // A POPUP LEFT OPEN BY THE LAST STEP MUST NOT SHADOW THIS ONE.
     //
     // Replay had no Escape anywhere in it; the learner has nine. Same asymmetry that
@@ -6286,7 +6616,9 @@ export class RecipeAdapter extends BasePortalAdapter {
     const nameHint = (step.action === "check" || step.action === "uncheck")
       ? "" : String(step.note ?? step.field ?? "");
     this.resolvingStep = step;
-    let scoped = await this.resolveLocator(step.selector, nameHint).finally(() => { this.resolvingStep = null; });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    let scoped = (portalHeld as any) ?? await this.resolveLocator(step.selector, nameHint).finally(() => { this.resolvingStep = null; });
+    this.resolvingStep = null;
     // A HIDDEN INPUT IS THE NORMAL STATE FOR A STYLED CHECKBOX, NOT A PROBLEM TO SOLVE.
     //
     // The third door onto the same regression. `isTrulyVisible` correctly calls an opacity:0
@@ -6441,6 +6773,10 @@ export class RecipeAdapter extends BasePortalAdapter {
           v = signer;
         }
         if (!v) { this.noteUnresolved(step); return false; }
+        if (portalHeld) {
+          const answered = await this.answeredByPortal(step, scoped, v, "fill", asRecorded);
+          if (answered !== null) return answered;
+        }
         await waitForElement(scoped);
         // A SEARCH-AS-YOU-TYPE BOX (#575): typed and picked by the learner's own rule, read back
         // by its own rule — the box holds the SUGGESTION, so fillHeld's "shows what we typed"
@@ -6571,6 +6907,11 @@ export class RecipeAdapter extends BasePortalAdapter {
             : `no contact code on file for this client, and the list shows "${shown?.selected?.label ?? ""}"`);
         }
         if (!v) { this.noteUnresolved(step); return false; }
+        // #237 (2): never for who is filing (#524 — that list is judged by its own exact rule).
+        if (portalHeld && !filerIdentity && !companyList) {
+          const answered = await this.answeredByPortal(step, scoped, v, "select", asRecorded);
+          if (answered !== null) return answered;
+        }
         // TWO "Manufacturer" SELECTS, ONE LABEL — THE FIELD NAME CARRIES THE SIDE.
         //
         // PowerClerk's spec block renders the INVERTER's Manufacturer/Model and, nested
@@ -11274,6 +11615,9 @@ export class RecipeAdapter extends BasePortalAdapter {
    * than the one acted on is worse than none, because it is believed.
    */
   private async describeResolved(step: RecipeStep, actual?: unknown): Promise<string> {
+    // #237: a step a learn-state rule skipped is described by what its probe saw — never resolved
+    // again (the busy-control wait, or the rescue opening a menu to look for a hidden click's name).
+    if (!actual && this.learnStateSkipped?.step === step) return this.learnStateSkipped.described;
     try {
       const loc = (actual as { count?: unknown } | undefined)?.count
         ? actual as never
@@ -11487,7 +11831,8 @@ export class RecipeAdapter extends BasePortalAdapter {
       const st = this.recipe.steps[i];
       if (st.action === "click" || st.action === "goto" || st.action === "stopForReview") break;
       if (st.action !== "fill" && st.action !== "select") continue;
-      if (st.optional || st.selector?.frame) continue;
+      // A CONDITIONAL STEP (#237) is a control only a reveal showed: absent is a legitimate state.
+      if (st.optional || st.conditional || st.selector?.frame) continue;
       // A STEP THIS RUN WILL NEVER EXECUTE IS NOT A MISSING FIELD.
       //
       // The same denominator error as counting blanks with nothing to divide by. This project
