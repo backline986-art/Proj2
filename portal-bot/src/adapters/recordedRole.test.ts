@@ -41,9 +41,15 @@ t("toExtractedField writes exactly recordedRoleOf into a click step's role+name 
     assert.deepEqual(sel.fallbacks, [{ css: "#apply-btn-x" }]);
   }
 });
-t("a name-only clickable control (no text) records recordedRoleOf too", () => {
+// #229 decides this shape: a clickable control known only by its name ATTRIBUTE records that
+// attribute as css and no role+name at all (a bare name is never an accessible name), so there is
+// no role for recordedRoleOf to write. A control with text or an id keeps the case above.
+t("a name-only clickable control (no text, no id) records its name attribute as css, no role", () => {
   const raw: RawField = { label: "", fieldType: "button", name: "go" };
-  assert.equal(toExtractedField(raw).selector.role, "button");
+  const sel = toExtractedField(raw).selector;
+  assert.equal(sel.role, undefined);
+  assert.equal(sel.name, undefined);
+  assert.match(String(sel.css ?? ""), /\[name="go"\]/);
 });
 
 if (failures) { console.error(`\nrecordedRole.test: ${failures} FAILURE(S)`); process.exit(1); }
