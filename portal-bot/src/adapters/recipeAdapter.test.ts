@@ -1494,13 +1494,17 @@ async function testLandedHostIsOneHost() {
   assert.match(String(b.result.message), /replay safety gate refused: goto leaves the recipe's portal \(meridiancity\.org, landed on aca-prod\.accela\.com\) for example-other\.org/, `MUST-EXCLUDE (third site): named (${b.result.message})`);
 }
 
-// Rule 5's OWN track predicate (portalChannel.trackSafeUrl), not only the gate's regex.
-async function testLandedHostRefusedByTrackSafeUrl() {
-  // A utility platform the regex does not name (ComEd's interconnect.comed.com), on the permit track.
+// Rule 5's OWN track predicate (portalChannel.trackSafeUrl), not only the gate's regex: a utility
+// platform the regex does not name (ComEd's interconnect.comed.com), on the permit track.
+async function testLandedHostUtilityPlatformRefusedByTrackSafeUrl() {
   const c2 = await landedRun({ scope: "ahj", portalUrl: "https://permits.cityofexample.gov/apply", landed: "https://interconnect.comed.com/Home", to: ["https://interconnect.comed.com/Apply"] });
   assert.deepEqual(c2.gotos, [], `MUST-EXCLUDE (permit → a utility platform): never navigated there (${c2.result.message})`);
   assert.match(c2.refusal, /landed on interconnect\.comed\.com — a permit recipe may not open a utility portal: interconnect\.comed\.com/, `MUST-EXCLUDE (permit → a utility platform): the landing is refused (${c2.refusal})`);
   assert.equal(c2.adopted, "", "MUST-EXCLUDE (permit → a utility platform): never adopted");
+}
+
+// …and on the NEM track, a permit portal on no vendor domain.
+async function testLandedHostSelfHostedPermitPortalRefusedByTrackSafeUrl() {
   // Review of #231: a utility vanity URL that lands on a city's SELF-HOSTED Accela (/CitizenAccess,
   // on no vendor domain — the regex misses it, trackSafeUrl does not). Its "navigate to application"
   // click is missing, so replay re-enters the Apply flow by a URL built from page.url(), which no
@@ -1582,7 +1586,8 @@ const tests: Array<[string, () => Promise<void>]> = [
   ["R1: a goto that leaves the recipe's portal stops the run, named (rule 5)", testGotoLeavingThePortalStopsTheRun],
   ["R1 #231 MUST-PASS: Meridian's step 0 goes to the host its portalUrl landed on; the landing is not an aging note", testLandedHostMeridianPasses],
   ["R1 #231 MUST-EXCLUDE: only that one host — another host on its domain, another port, a third site", testLandedHostIsOneHost],
-  ["R1 #231 MUST-EXCLUDE: a landing rule 5's own predicate (trackSafeUrl) refuses is never adopted — a utility platform; a self-hosted permit portal and its Apply re-entry", testLandedHostRefusedByTrackSafeUrl],
+  ["R1 #231 MUST-EXCLUDE: a landing rule 5's own predicate (trackSafeUrl) refuses is never adopted — a utility platform on the permit track", testLandedHostUtilityPlatformRefusedByTrackSafeUrl],
+  ["R1 #231 MUST-EXCLUDE: a landing rule 5's own predicate (trackSafeUrl) refuses is never adopted — a self-hosted permit portal on the NEM track, and its Apply re-entry", testLandedHostSelfHostedPermitPortalRefusedByTrackSafeUrl],
   ["R1 #231 MUST-EXCLUDE: a landing the gate's track rule refuses is never adopted — PowerClerk, Accela, carve-out to another permit site", testLandedHostRefusedByTheGatesTrackRule],
   ["R1 #231 MUST-KEEP: no redirect, the carve-out portal itself, SSO, an error page, no portalUrl, an unreadable host — main's decisions and words", testLandedHostKeepsMainsGate],
   ["R2: each missing input of the final-submit gate keeps it unclicked", testFinalSubmitGateRefusesEachMissingInput],
