@@ -65,7 +65,8 @@ function parse() {
 }
 function view(html) { document.getElementById("view").innerHTML = html; }
 function renderHome() {
-  view('<h2>Welcome</h2><button id="toggle-ann" type="button" onclick="announcements=!announcements;renderHome()">Show announcements</button>'
+  view('<h2>Welcome</h2><label for="home-q">Search records</label> <input id="home-q" type="text">'
+    + ' <button id="toggle-ann" type="button" onclick="announcements=!announcements;renderHome()">Show announcements</button>'
     + (announcements ? '<p id="ann">No announcements today.</p>' : ''));
 }
 function renderAssistant() {
@@ -185,12 +186,14 @@ const trace = (r: Run): Array<{ i: number; outcome: string; note: string }> => (
   const value = await r.page.locator("#addressTypeSelect").inputValue({ timeout: 1000 }).catch(() => "(no form)");
   const hits = served.filter((h) => /^\/api\//.test(h.path)).map((h) => h.path);
   console.log(`   race (${secs}s): ok=${r.res.ok} msg=${String(r.res.message).slice(0, 220)}`);
-  console.log(`   race trace=${JSON.stringify(trace(r).map((t) => `${t.i}:${t.outcome}`))} settles=${fmt(r.settles)}`);
+  console.log(`   race trace=${JSON.stringify(trace(r).map((t) => `${t.i}:${t.outcome}`))} slow=${JSON.stringify(r.res.data?.slowSteps ?? [])} settles=${fmt(r.settles)}`);
   await r.close();
   check("race: the form was reached and \"Address Type\" holds \"Location\" (the results survived the assistant's initialisation)",
     value === "Location", `value=${value} hits=${JSON.stringify(hits)}`);
-  check("race: the run did not stop on the record-type link (or anywhere before review)",
-    r.res.ok && r.res.data?.failedStepIndex === undefined, `ok=${r.res.ok} failedStepIndex=${String(r.res.data?.failedStepIndex)} trace=${JSON.stringify(trace(r))}`);
+  const skipped = (r.res.data?.skipped as unknown[] | undefined) ?? [];
+  check("race: no step was failed or skipped on the way (the record-type link was there to click)",
+    r.res.ok && r.res.data?.failedStepIndex === undefined && skipped.length === 0,
+    `ok=${r.res.ok} failedStepIndex=${String(r.res.data?.failedStepIndex)} skipped=${JSON.stringify(skipped).slice(0, 300)}`);
   const apply = r.settles.find((s) => s.step === 2 && s.value);
   check("race: the settle after \"Apply\" waited for the init request and saw the app's own rewrite",
     !!apply && apply.ms >= INIT_MS - 100 && /showTemplates=false$/.test(apply.value!.settledUrl) && apply.value!.result.settled && /url×/.test(apply.value!.result.reason),
