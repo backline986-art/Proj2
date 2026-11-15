@@ -11457,7 +11457,12 @@ export class RecipeAdapter extends BasePortalAdapter {
     if (!seen.r || seen.r.own) return null;
     const label = String(step.note || words.text || step.action).replace(/\s+/g, " ").slice(0, 80);
     const pickShown = first.pickId ? `#${first.pickId.slice(0, 80)}` : "an element with no id";
-    const alreadyTimedOut = suspected.keys.some((k) => this.namesakeTimedOut.has(k));
+    // THE STAMP IS NODE IDENTITY, WHATEVER THE WORDS (round-5 review, #228). A control with no id is
+    // known to the memos only by step keys; the word gate can skip the step that stamped it (a
+    // button relabelled Next/Save in place), so its keys would split per word group. Asked only
+    // once a suspicion exists, the stamping step's key can neither add a wait nor hide a needed one.
+    const memoKeys = first.stampedBy >= 0 ? [...suspected.keys, `step:${first.stampedBy}`] : suspected.keys;
+    const alreadyTimedOut = memoKeys.some((k) => this.namesakeTimedOut.has(k));
     let waited = 0;
     let timedOut = false;
     const waitKey = `${this.arrayPass}:${this.currentStepIdx}`;
@@ -11490,13 +11495,13 @@ export class RecipeAdapter extends BasePortalAdapter {
     }
     // The pick is clicked. This step's click re-stamps it with this step's index, so this step's key
     // joins the control's keys in each memo it is in.
-    const keys = [...suspected.keys, `step:${this.currentStepIdx}`];
+    const keys = [...memoKeys, `step:${this.currentStepIdx}`];
     if (timedOut || alreadyTimedOut) for (const k of keys) this.namesakeTimedOut.add(k);
     const ownState = seen.other > 0 ? "is on the page but names another control, so it was not waited for"
       : waited ? `never rendered (waited ${(waited / 1000).toFixed(1)} s)` : "has not rendered (already waited for once this run)";
     const line = `"${label}" — its selector matched ${pickShown}, a suspected namesake: ${suspected.why}; its own recorded #${own[0].slice(0, 80)} ${ownState} — clicked it, as without this check; verify it was this step's control (#228)`;
     this.resolveTrail.push(`  ...recorded identity: ${line}`);
-    if (!suspected.keys.some((k) => this.namesakeReported.has(k))) this.driftWarnings.push(line);
+    if (!memoKeys.some((k) => this.namesakeReported.has(k))) this.driftWarnings.push(line);
     for (const k of keys) this.namesakeReported.add(k);
     return null;
   }

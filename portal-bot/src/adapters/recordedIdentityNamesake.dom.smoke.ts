@@ -57,6 +57,8 @@
 //         wait and one drift line in all, not three.
 //     DW  round-4 review: one persistent footer button recorded as "Continue" then "Save" (relabelled
 //         in place): different words are no namesake — no wait, no #228 line.
+//     AW  round-5 review: one id-less footer button relabelled Next/Save/Next/Save: at most one wait
+//         and one #228 line in the run (the stamp is node identity whatever the words).
 //     g   review R4: a WRITE is never moved by this rule.
 //     h   review R2: a recorded id now naming a same-word control of another role: refused.
 //
@@ -322,7 +324,20 @@ const DIFFWORDS = `<!doctype html><html><head><style>body { font: 14px sans-seri
 </script>
 </body></html>`;
 
-const PAGES: Record<string, string> = { "/pc": POWERCLERK, "/wizard": WIZARD, "/gone": GONE, "/counter": COUNTER, "/nb": NEIGHBOUR, "/footer": FOOTER, "/write": WRITE, "/pager": PAGER, "/diffwords": DIFFWORDS };
+// (AW) round-5 review: one footer button with NO id, relabelled Next / Save / Next / Save in place.
+const ALTWORDS = `<!doctype html><html><head><style>body { font: 14px sans-serif; padding: 16px; }</style></head><body>
+  <main id="view"></main>
+  <footer><button type="button">Next</button></footer>
+<script>
+  window.__page = 1;
+  var b = document.querySelector('footer button');
+  function render() { document.getElementById('view').innerHTML = '<h2>Page ' + window.__page + '</h2>'; b.textContent = window.__page % 2 === 1 ? 'Next' : 'Save'; }
+  b.addEventListener('click', function () { window.__page++; render(); });
+  render();
+</script>
+</body></html>`;
+
+const PAGES: Record<string, string> = { "/pc": POWERCLERK, "/wizard": WIZARD, "/gone": GONE, "/counter": COUNTER, "/nb": NEIGHBOUR, "/footer": FOOTER, "/write": WRITE, "/pager": PAGER, "/diffwords": DIFFWORDS, "/altwords": ALTWORDS };
 const server = http.createServer((q, r) => {
   const [p, qs] = String(q.url ?? "/").split("?");
   const sp = new URLSearchParams(qs ?? "");
@@ -798,6 +813,23 @@ for (const [tag, path] of [["N4", "/footer?id=next"], ["N4n", "/footer?noid=1"]]
   const dwBound = twoNextBaselineMs + WAIT_MS / 2;
   check(`DW: MUST KEEP — no added wait (took ${(ms / 1000).toFixed(1)}s, bound ${(dwBound / 1000).toFixed(1)}s = case b + 5 s)`,
     twoNextBaselineMs > 0 && ms < dwBound, `took ${ms}ms, case b ${twoNextBaselineMs}ms`);
+  await page.context().close().catch(() => null);
+}
+
+// (AW) round-5 review: the stamp is node identity whatever the words. One id-less footer button
+// relabelled Next/Save/Next/Save; the learn saw four ids, none of which exists now. At most ONE
+// namesake wait and ONE #228 line in the run — not one per word group.
+{
+  console.log("\nAW one id-less footer button relabelled Next / Save / Next / Save");
+  const page = await freshPage("/altwords");
+  const step = (name: string, id: string): RecipeStep => ({ action: "click", phase: "fill", selector: { role: "button", name, exact: true, fallbacks: [{ css: `#${id}` }] }, note: `advance: ${name}` }) as RecipeStep;
+  const { adapter, res, data, ms } = await replay(page, [step("Next", "btnN1"), step("Save", "btnS2"), step("Next", "btnN3"), step("Save", "btnS4")]);
+  const reached = await page.evaluate(() => (window as unknown as { __page: number }).__page).catch(() => -1);
+  const lines = blocking228(data);
+  console.log(`   ok=${res.ok} in ${(ms / 1000).toFixed(1)}s, reached page ${reached}, waits started=${waitsStarted(adapter)}, #228 lines=${lines.length}`);
+  check("AW: MUST KEEP — all four clicks land (page 5, ok=true)", reached === 5 && res.ok === true, `reached ${reached}, ok=${res.ok}`);
+  check(`AW: at most one namesake wait in the run (waits started=${waitsStarted(adapter)})`, waitsStarted(adapter) <= 1, `waits=${waitsStarted(adapter)}`);
+  check(`AW: at most one #228 drift line in the run`, lines.length <= 1, JSON.stringify(lines));
   await page.context().close().catch(() => null);
 }
 
