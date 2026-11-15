@@ -9,11 +9,12 @@
 //       was judged before the blur commit, so a correct pick was cleared and FAILED;
 //   S3  "already searched out" was keyed by the step's words (note + binding + value), so a SECOND
 //       box with the same words, on the next page or beside the first, was never searched, and the
-//       run stopped short of the review page that main reached.
+//       run stopped short of the review page that main reached; and it remembered transient misses
+//       (a pick the box did not keep) for the whole run.
 // MUST KEEP (main reached /review, so this must too): S1; S2a (id empty at rest, written on blur);
 // S2b (a reopened draft: the id is emptied by the typing and written again on blur; the only shape
 // that tells "read after the blur" from "read before it"); S3 across two documents; S3 with two
-// boxes in one document.
+// boxes in one document; T (the first pick lost to a re-render, the required sweep picks again).
 // MUST CATCH: N, the same reopened draft whose id the click never writes again: FAILED, named,
 // cleared. And a DIFFERENT step that lands on a box which already answered is named, not searched.
 // The widgets are generic ARIA comboboxes (role=combobox, aria-autocomplete=list, aria-controls ->
@@ -46,11 +47,13 @@ const WITHOUT_JOB = [ROW("4812"), ROW("4830")];
 type Widget = {
   id: string; rows: Array<{ id: string; label: string }>; idWrite: "click" | "blur" | "never"; need: "box" | "id" | "none";
   clientState?: boolean; idInput?: boolean; draft?: { label: string; id: string };
+  /** The widget re-renders on its first pick and loses it (the box comes back empty); later picks hold. */
+  flaky?: boolean; required?: boolean;
 };
 const widgetHtml = (w: Widget): string => `
   <label for="${w.id}">Address</label>
-  <div class="ta-widget" data-rows='${JSON.stringify(w.rows)}' data-idwrite="${w.idWrite}" data-need="${w.need}">
-    <input id="${w.id}" type="text" role="combobox" aria-autocomplete="list" aria-expanded="false" aria-controls="${w.id}_list" autocomplete="off" value="${w.draft ? w.draft.label : ""}">
+  <div class="ta-widget" data-rows='${JSON.stringify(w.rows)}' data-idwrite="${w.idWrite}" data-need="${w.need}" data-flaky="${w.flaky ? "1" : ""}">
+    <input id="${w.id}" type="text" role="combobox" aria-autocomplete="list" aria-expanded="false" aria-controls="${w.id}_list" autocomplete="off" value="${w.draft ? w.draft.label : ""}"${w.required ? " required" : ""}>
     ${w.clientState ? `<input type="hidden" name="${w.id}_ClientState" value="">` : ""}
     ${w.idInput ? `<input type="hidden" name="${w.id}_id" value="${w.draft ? w.draft.id : ""}">` : ""}
   </div>`;
@@ -72,6 +75,7 @@ ${widgets.map((w) => `<ul id="${w.id}_list" role="listbox" style="display:none">
     var list = document.getElementById(box.getAttribute("aria-controls"));
     var rows = JSON.parse(w.getAttribute("data-rows"));
     var idWrite = w.getAttribute("data-idwrite");
+    var flaky = w.getAttribute("data-flaky") === "1";
     var pending = null, timer = null;
     function close() { list.style.display = "none"; list.innerHTML = ""; box.setAttribute("aria-expanded", "false"); }
     box.addEventListener("input", function () {
@@ -94,6 +98,7 @@ ${widgets.map((w) => `<ul id="${w.id}_list" role="listbox" style="display:none">
           var li = document.createElement("li"); li.setAttribute("role", "option"); li.textContent = r.label;
           li.addEventListener("mousedown", function (e) { e.preventDefault(); });
           li.addEventListener("click", function () {
+            if (flaky) { flaky = false; box.value = ""; close(); return; }
             box.value = r.label;
             if (hid && idWrite === "click") hid.value = r.id;
             if (idWrite === "blur") pending = r.id;
@@ -140,6 +145,7 @@ const PAGES: Record<string, string> = {
     { id: "a2", rows: WITH_JOB, idWrite: "click", need: "box" },
   ], "/review"),
   "/d": page("D Address", [{ id: "a1", rows: WITHOUT_JOB, idWrite: "click", need: "none" }], "/review"),
+  "/t": page("T Location", [{ id: "addr", rows: WITH_JOB, idWrite: "click", need: "box", flaky: true, required: true }], "/review"),
 };
 
 const served: string[] = [];
@@ -271,6 +277,18 @@ const say = (name: string, r: Run, extra = ""): void => {
   check("...and the box's search is not typed again for it",
     firstSearches > 0 && r.searches.every((s) => s.startsWith("a1:")) && new Set(r.searches).size === r.searches.length,
     `searches=${JSON.stringify(r.searches)}`);
+  await r.page.close();
+}
+
+// ---- T: a pick the box did not keep is NOT remembered as "searched out" — the re-assert tries again --
+// The first pick is lost to a re-render (the box comes back empty); the required sweep before Next
+// re-runs the step, which picks again and holds. Remembering that miss for the run left it empty.
+{
+  const r = await replay("/t", [ta("#addr"), NEXT]);
+  say("T first pick lost to a re-render, the re-assert picks again", r);
+  check("MUST KEEP T: a pick the box did not keep is tried again by the required sweep, and the run reaches the review with it",
+    /\/review/.test(r.url) && /addr=4821 W QUILLFEATHER DR/.test(decodeURIComponent(r.url)),
+    `url=${r.url} failed=${JSON.stringify(r.failed)}`);
   await r.page.close();
 }
 
