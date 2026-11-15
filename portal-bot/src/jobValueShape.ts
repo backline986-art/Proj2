@@ -11,13 +11,14 @@
 //   orientation       degrees, azimuth or tilt: a roof's ("180°", "22 deg", "azimuth")
 //   electrical units  a rating with its unit: a system's ("8.36 kW", "440W", "200 A", "240V", "13.5 kWh")
 //   module count      "(19) ZNShine …": a count and a make
-//   street address    a house number, a street and its type (draftCreated.siteKey, the one street parser)
+//   street address    a house number, a street and its type (draftCreated.siteKey or addressParse.readStreetLine)
 //   prose             two or more sentences of three or more words: a narrative written for one job
 //                     (a portal's own answer is a word or a phrase)
 // A value with such a shape is left blank for gap-fill and the reviewer: a blank required box is a
 // visible stop, another roof's orientation an invisible one.
 
 import { siteKey } from "./draftCreated";
+import { readStreetLine } from "./addressParse";
 
 export type JobValueShape = "orientation" | "electrical units" | "module count" | "street address" | "prose";
 
@@ -46,8 +47,12 @@ export function jobValueShape(value: unknown): JobValueShape | null {
   if (MODULE_COUNT.test(v)) return "module count";
   if (MULTI_LETTER_UNIT.test(v) || ONE_LETTER_UNIT.test(v)) return "electrical units";
   if (/^\d+[a-z]?\s/i.test(v)) {
+    // Either street reading: siteKey reads a line that runs on into its city and ZIP; it stops at a
+    // token spelling a state code, so an NE-quadrant or Court address is read by addressParse's
+    // readStreetLine (the search boxes' reading, #236 review).
     const site = siteKey({ street: v }, true);
-    if (site && site.suffix) return "street address";
+    const line = readStreetLine(v);
+    if ((site && site.suffix) || (line.readable && line.suffix)) return "street address";
   }
   if (isProse(v)) return "prose";
   return null;

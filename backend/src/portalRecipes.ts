@@ -23,7 +23,7 @@ import { batteryStatus } from "./batteryServiceFeeder";
 import { projectForTrack, sameRecordType } from "./permitProcess";
 import { readArrayAreaSqFt } from "./fireAccess";
 import { packageReadSources } from "./designCriteria";
-import { addressComponentFields, addressComponentKeysForSteps, parseStreetNumber, parseStreetName, parseStreetLine } from "../../portal-bot/src/addressParse";
+import { ADDRESS_COMPONENT_FIELD_KEYS, addressComponentFields, addressComponentKeysForSteps, parseStreetNumber, parseStreetName, parseStreetLine } from "../../portal-bot/src/addressParse";
 import { recordShapeOf } from "../../portal-bot/src/recordNumber";
 import { feeBracketFieldForLabel, feeBracketQuantityFields } from "./feeBracketFields";
 import { FEE_BRACKET_FIELD_PREFIX } from "../../portal-bot/src/feeBracketQuantity";
@@ -2137,7 +2137,9 @@ export function resolveRecipeFieldValues(
     // AND THE PIECES THE SAME SEARCH ASKS FOR IN SELECTS (#236): street direction, street type, unit
     // type, in both vocabularies ("SE"/"Southeast", "AVE"/"Avenue"). An address-component step binds
     // here (addressParse.addressComponentKeysForSteps) — the audit found Corvallis replaying the
-    // learn job's "NW" and "ST" into an "SE … Ave" project's search. "" when the address has none.
+    // learn job's "NW" and "ST" into an "SE … Ave" project's search. "" when the address has none;
+    // no key, and named under addressComponentsUnread, when it could not be read (the binder hands
+    // that control to a person — never "the address has none").
     ...addressComponentFields(project.projectAddress || ""),
     // SEGMENTED PHONE parts. Accela renders a US phone as three boxes (area/prefix/line);
     // recording the digits as literals would replay the LEARN project's phone number for
@@ -2717,6 +2719,10 @@ export function convertLiteralsToBoundFields(
   for (const [key, raw] of Object.entries(projectFields)) {
     if (key === "todayDate") continue;
     if (isParserEvidenceKey(key)) continue;
+    // THE ADDRESS COMPONENTS ARE PLACED BY A CONTROL'S LABEL, NEVER BY VALUE (#236 review): a learn job
+    // at "123 SW … St" would otherwise bind a "Roof Facing" = "Southwest" literal to streetDirectionWord,
+    // and every later replay would put the street's direction (or nothing) in the roof's box.
+    if (ADDRESS_COMPONENT_FIELD_KEYS.has(key)) continue;
     const nv = norm(raw);
     if (nv.length < 2) continue;
     const arr = valueToFields.get(nv) ?? [];

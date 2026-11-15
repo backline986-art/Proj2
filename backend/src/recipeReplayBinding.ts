@@ -80,7 +80,9 @@
 //      address search it belongs to) binds to THIS project's component in the vocabulary the recorded
 //      literal spoke ("ST" → streetSuffix "AVE"; "Street" → streetSuffixWord "Avenue"). A component this
 //      address does not have strips the step, named: no direction is an answer, never the learn job's
-//      "NW". (Audit 2026-11-14: Corvallis searched NW … ST for an SE … Ave project.)
+//      "NW". A component the reader could NOT read (ADDRESS_COMPONENTS_UNREAD_KEY) replays blank for a
+//      person, named — an unknown is never stated as "the address has none". (Audit 2026-11-14:
+//      Corvallis searched NW … ST for an SE … Ave project.)
 //   R14 FEE-LINE SIBLINGS (#236) — an unbound numeric fill on a page whose other steps are bound to fee
 //      quantities (feeLineQuantity:* / feeBracketQuantity:*) is a fee line too: a services/feeders label
 //      binds to its key (the one label grammar, shared serviceLineLabels), any other label replays BLANK,
@@ -100,7 +102,7 @@ import {
 } from "../../shared/src/contactRoles";
 import { FILING_CONTACT_EMAIL_KEY, emailSlotKind, planFilingContactEmails } from "../../shared/src/filingContactEmail";
 import { looksLikeEmail } from "../../shared/src/emailAddress";
-import { ADDRESS_COMPONENT_KEYS, addressComponentKeysForSteps, type AddressComponent } from "../../portal-bot/src/addressParse";
+import { ADDRESS_COMPONENT_KEYS, ADDRESS_COMPONENTS_UNREAD_KEY, addressComponentKeysForSteps, type AddressComponent } from "../../portal-bot/src/addressParse";
 import { FEE_LINE_FIELD_PREFIX, SERVICE_FEEDER_200A_FIELD, SERVICE_FEEDER_400A_FIELD, isServiceFeeder200Label, isServiceFeeder400Label } from "../../shared/src/serviceLineLabels";
 import { jobValueShape } from "../../portal-bot/src/jobValueShape";
 export { sameFeeTier };
@@ -524,9 +526,22 @@ export function bindRecipeForReplay(input: {
     // not have strips the step — the control stays as the portal shows it, which is that answer.
     // A step bound at learn (convertLiteralsToBoundFields) is read here too: its key may be empty for
     // THIS address, and an empty component is "leave it", never a blank the stage gate holds for.
+    // A COMPONENT THE READER COULD NOT READ IS NOT A COMPONENT THE ADDRESS LACKS (#236 review): the
+    // first reader stopped at "ne" and "ct" (state codes) and this rule then stripped an NE … Ct
+    // project's Direction and Street Type saying the address had neither. The resolver names what it
+    // could not read (ADDRESS_COMPONENTS_UNREAD_KEY: an unreadable line, a suffix outside the shared
+    // list, a directional written after the street); such a control replays BLANK for a person, named
+    // — never stripped as an answer, and never the learn job's recorded value.
     const learnBound = step.field && componentOfKey(step.field) ? step.field : "";
     const componentKey = learnBound || (!step.field ? componentKeys[index] : null);
-    if (componentKey && (step.action === "fill" || step.action === "select") && hasKey(input.fieldValues, componentKey)) {
+    const unreadComponents = new Set(String(input.fieldValues[ADDRESS_COMPONENTS_UNREAD_KEY] ?? "").split(",").filter(Boolean));
+    if (componentKey && (step.action === "fill" || step.action === "select") && !hasKey(input.fieldValues, componentKey) && unreadComponents.has(componentKey)) {
+      const was = String(step.value ?? "").trim();
+      const words = COMPONENT_WORDS[componentOfKey(componentKey) ?? "direction"];
+      const why = `"${label.slice(0, 40)}" — this project's ${words} could not be read from its address, so it is left blank for a person${was ? `, never the recorded "${was}" (the learn job's address)` : ""}`;
+      step = { ...step, value: "", field: REPLAY_BLANK_FIELD, operatorItem: why };
+      record("blanked", why);
+    } else if (componentKey && (step.action === "fill" || step.action === "select") && hasKey(input.fieldValues, componentKey)) {
       const was = String(step.value ?? "").trim();
       const words = COMPONENT_WORDS[componentOfKey(componentKey) ?? "direction"];
       const value = String(input.fieldValues[componentKey] ?? "").trim();

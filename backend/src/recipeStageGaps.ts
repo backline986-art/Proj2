@@ -27,7 +27,7 @@ import type { RecipeStageGap, RecipeStep } from "../../shared/src/types";
 import { REPLAY_BLANK_FIELD, openPerJobQuestions } from "./recipeReplayBinding";
 import { isPerJobAnswerKey } from "../../shared/src/perJobQuestions";
 import { licenceKeyForLabel } from "../../shared/src/licenceKinds";
-import { batteryControlKind, batteryControlOfStep, batteryQuestionTextOfStep, parseHasBattery } from "../../shared/src/batteryControls";
+import { batteryControlKind, batteryControlOfStep, parseHasBattery } from "../../shared/src/batteryControls";
 import { isSignatureNameLabel } from "../../shared/src/portalSafety";
 import { parseFeeBracketFieldKey, readTierLabel } from "../../portal-bot/src/feeBracketQuantity";
 import { isPlannerSecretKey } from "./projectSecrets";
@@ -108,9 +108,8 @@ function gateKeyFor(step: RecipeStep, fieldValues: Record<string, string>): stri
     if (parseFeeBracketFieldKey(field) || (tier && tier.kind !== "wind")) return null;
   }
   // Storage: the declaration is answered from hasBattery; a battery's spec is skipped on a job
-  // without storage (and replays as recorded while hasBattery is unknown). The step's question text is
-  // read the replay adapter's way (shared batteryQuestionTextOfStep, #236), so the gate and the run agree.
-  const battery = batteryControlKind(batteryQuestionTextOfStep(step), { control: batteryControlOfStep(step), options: (step as { options?: unknown[] }).options });
+  // without storage (and replays as recorded while hasBattery is unknown).
+  const battery = batteryControlKind(`${label} ${field}`, { control: batteryControlOfStep(step), options: (step as { options?: unknown[] }).options });
   if (battery === "declaration") return null;
   if (battery === "spec") {
     if (parseHasBattery(fieldValues.hasBattery) !== true) return null;

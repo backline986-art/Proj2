@@ -5,7 +5,7 @@
 // Live-verified against Oregon ePermitting (originally in oregonEPermitting.ts).
 import type { RecipeStep } from "../../shared/src/types";
 import { contactRoleOfStep } from "../../shared/src/contactRoles";
-import { DIRECTION_CANON, DIRECTIONAL, SUFFIXES, UNIT_WORD, siteKey } from "./draftCreated";
+import { DIRECTION_CANON, DIRECTIONAL, STATE, SUFFIXES, UNIT_WORD } from "./draftCreated";
 
 // The street LINE only — the part before the first comma. projectAddress is stored as
 // "925 N Grant St, Lafayette, OR, 97127"; everything after the first comma is city/state/zip
@@ -18,36 +18,89 @@ export function parseStreetNumber(address: string): string {
   return streetLine(address).split(/\s+/)[0] ?? "";
 }
 
-const STREET_DIRECTIONS = new Set(["n", "s", "e", "w", "ne", "nw", "se", "sw", "north", "south", "east", "west"]);
-const STREET_SUFFIXES = new Set([
-  "st", "street", "ave", "avenue", "blvd", "boulevard", "rd", "road", "dr", "drive",
-  "ln", "lane", "ct", "court", "way", "pl", "place", "ter", "terrace", "cir", "circle",
-  "hwy", "highway", "pkwy", "parkway", "loop", "trl", "trail",
-]);
-const clean = (w: string) => w.toLowerCase().replace(/[.,]/g, "");
+// ── THE STREET LINE, READ ONCE (#236 fix round) ─────────────────────────────────────────────────
+//
+// THE NUMBER, DIRECTION, NAME AND TYPE BOXES OF ONE SEARCH ARE CUT FROM ONE READING. Accela's split
+// search asks for each piece in its own control; when the name box and the type box were read by two
+// grammars they disagreed on the same address: "1234 North Ave" searched name "Ave" (the old name
+// parser took "North" for a direction), "1234 Example Cove" searched name "Example Cove" with type CV,
+// and the component reader — built on draftCreated.siteKey, which stops at any token spelling a state
+// code — read every NE-quadrant address ("ne" = Nebraska) and every Court ("ct" = Connecticut) as
+// having no direction or no type, and the binder then said so as fact (#236 review: Corvallis has NE
+// addresses; 5 of the scratch DB's 41 street lines carry such a token).
+//
+// So one reader, with the one street vocabulary (draftCreated DIRECTIONAL / SUFFIXES / UNIT_WORD /
+// DIRECTION_CANON), read from the right of the street line (the part before the first comma, so a
+// state code inside it is a street word, never a place): cut at a unit word that follows a street
+// word; then ONE trailing directional; then ONE suffix with a word before it; then a leading
+// directional only when a name word is left after it. parseStreetName, parseStreetDirection and
+// addressComponentFields are all this reading. siteKey is untouched: it matches list rows, and draft
+// verification and the #575 typeahead read it.
+//
+// `readable` is false when the line cannot be read with confidence — no house number first, no name
+// word left, or an address written WITHOUT a comma whose line carries a ZIP or ends in a state code
+// that is not also a street word (its city and state may be in the "street"). The component keys are
+// then not emitted, and the binder hands those controls to a person instead of claiming the address
+// has no direction (recipeReplayBinding R13): an unknown must not read as an answer.
+export interface StreetLineParts {
+  /** The first token of the street line (parseStreetNumber's answer). */
+  number: string;
+  /** The leading directional as written ("N", "Northeast"); "" when there is none. */
+  direction: string;
+  /** The core street name as written ("Grant", "Pan American", "North"). */
+  name: string;
+  /** The suffix, canonical lowercase ("ave"); "" when none from the shared list was read. */
+  suffix: string;
+  /** A trailing directional, canonical lowercase ("nw"); "" when there is none. */
+  postDirection: string;
+  /** The USPS unit designator ("APT"); "" when the line names none ("#4" names no type). */
+  unitType: string;
+  readable: boolean;
+}
+const streetWord = (w: string): string => w.toLowerCase().replace(/[.,]/g, "");
+
+export function readStreetLine(address: string): StreetLineParts {
+  const raw = String(address || "");
+  const tokens = streetLine(raw).split(/\s+/).filter(Boolean);
+  const number = tokens[0] ?? "";
+  let parts = tokens.slice(1);
+  // A unit word or "#" ends the street — but only after a street word: "1234 No Name Rd" is a street.
+  let unitType = "";
+  const unitAt = parts.findIndex((p, k) => (p.startsWith("#") || UNIT_WORD.test(streetWord(p)))
+    && parts.slice(0, k).some((q) => !DIRECTIONAL.test(streetWord(q))));
+  if (unitAt >= 0) {
+    unitType = UNIT_TYPE_CANON[streetWord(parts[unitAt])] ?? "";
+    parts = parts.slice(0, unitAt);
+  }
+  let postDirection = "";
+  if (parts.length >= 2 && DIRECTIONAL.test(streetWord(parts[parts.length - 1]))) {
+    const w = streetWord(parts.pop() as string);
+    postDirection = DIRECTION_CANON[w] ?? w;
+  }
+  let suffix = "";
+  if (parts.length >= 2 && SUFFIXES[streetWord(parts[parts.length - 1])]) suffix = SUFFIXES[streetWord(parts.pop() as string)];
+  let direction = "";
+  if (parts.length >= 2 && DIRECTIONAL.test(streetWord(parts[0]))) direction = (parts.shift() as string).replace(/[.,]/g, "");
+  const name = parts.join(" ");
+  const tail = tokens.slice(1).map(streetWord);
+  const last = tail[tail.length - 1] ?? "";
+  const carriesPlace = !raw.includes(",")
+    && (tail.some((w) => /^\d{5}(?:-\d{4})?$/.test(w)) || (STATE.test(last) && !SUFFIXES[last] && !DIRECTIONAL.test(last)));
+  const readable = /^\d+[a-z]?$/i.test(streetWord(number)) && name.length > 0 && !carriesPlace;
+  return { number, direction, name, suffix, postDirection, unitType, readable };
+}
 
 // Accela's "Street Name" search field wants the CORE name only — e.g. "925 N Grant St" must
 // be searched as "Grant" (the leading direction and trailing street-type suffix belong in
 // separate fields). Including them returns zero results, which silently breaks the flow.
 export function parseStreetName(address: string): string {
-  const parts = streetLine(address).split(/\s+/);
-  parts.shift(); // remove street number
-  if (parts.length > 1 && STREET_DIRECTIONS.has(clean(parts[0]))) parts.shift(); // leading direction
-  const unitKeywords = new Set(["apt", "unit", "ste", "suite", "#"]);
-  const unitIdx = parts.findIndex((p) => unitKeywords.has(p.toLowerCase()));
-  let core = unitIdx === -1 ? parts : parts.slice(0, unitIdx);
-  // strip trailing street-type suffix and/or trailing direction (e.g. "Grant St", "Main St NW")
-  while (core.length > 1 && (STREET_SUFFIXES.has(clean(core[core.length - 1])) || STREET_DIRECTIONS.has(clean(core[core.length - 1])))) {
-    core = core.slice(0, -1);
-  }
-  return core.join(" ");
+  return readStreetLine(address).name;
 }
 
-// Leading directional (N/S/E/W) of the street, for Accela's separate direction dropdown.
+// Leading directional of the street as written, upper-cased ("N", "NORTHEAST"), for Accela's
+// separate direction dropdown.
 export function parseStreetDirection(address: string): string {
-  const parts = streetLine(address).split(/\s+/);
-  parts.shift(); // street number
-  return parts.length > 1 && STREET_DIRECTIONS.has(clean(parts[0])) ? parts[0].toUpperCase().replace(/[.,]/g, "") : "";
+  return readStreetLine(address).direction.toUpperCase();
 }
 
 // THE STREET LINE, WHOLE. City/state/zip removed, nothing else.
@@ -91,11 +144,13 @@ export function isSplitAddressForm(labels: Array<string | undefined>): boolean {
   return labels.some((raw) => {
     const label = (raw || "").replace(/\s+/g, " ").trim();
     if (!label) return false;
-    // The street type / suffix / direction / unit-type control: the ONE component grammar
-    // (addressComponentOfLabel, #236) the binder asks too. A bare "Direction" is not enough here —
-    // it may be an array's — but a bare "Suffix" always was.
+    // The street type / suffix / direction control: the ONE component grammar (addressComponentOfLabel,
+    // #236) the binder asks too. A bare "Direction" is not enough here — it may be an array's — but a
+    // bare "Suffix" always was. A UNIT TYPE or POST-DIRECTION control alone never makes a form split:
+    // a combined "Property Address" box sits beside a "Unit Type" select on forms that want the whole
+    // line (#236 review: the learner's Miami correction would have been skipped there).
     const component = addressComponentOfLabel(label);
-    if (component && (component.explicit || component.component === "suffix")) return true;
+    if (component && (component.component === "suffix" || (component.component === "direction" && component.explicit))) return true;
     return /(street|house)\s*(no\.?\b|num\b|number\b)/i.test(label);
   });
 }
@@ -111,9 +166,8 @@ export function isSplitAddressForm(labels: Array<string | undefined>): boolean {
 //
 // So a control whose label names an address component binds to that component of THIS project's
 // address (addressComponentFields, in resolveRecipeFieldValues), at learn time
-// (convertLiteralsToBoundFields) and on every replay (recipeReplayBinding R13). Read with the one
-// street vocabulary (draftCreated DIRECTIONAL / SUFFIXES / UNIT_WORD, which siteKey parses with) —
-// never a third list.
+// (convertLiteralsToBoundFields) and on every replay (recipeReplayBinding R13). Read by readStreetLine
+// above — the same reading the number and name boxes get — with the one street vocabulary.
 //
 // The VALUE keeps the portal's own vocabulary: a recorded "ST" means the select lists USPS
 // abbreviations, a recorded "Street" means it lists words. Both forms are emitted ("AVE" and
@@ -129,10 +183,18 @@ export const ADDRESS_COMPONENT_KEYS: Readonly<Record<AddressComponent, { abbr: s
   suffix: Object.freeze({ abbr: "streetSuffix", word: "streetSuffixWord" }),
   unitType: Object.freeze({ abbr: "unitType", word: "unitTypeWord" }),
 });
-/** Every key above — the planner view leaves them out (the binder places them, never the model). */
-export const ADDRESS_COMPONENT_FIELD_KEYS: ReadonlySet<string> = new Set(
-  Object.values(ADDRESS_COMPONENT_KEYS).flatMap((k) => [k.abbr, k.word]),
-);
+/** WHICH COMPONENTS THE READER COULD NOT READ for this address, as the component keys (both forms),
+ *  comma-joined. resolveRecipeFieldValues carries it so the binder can tell "this address has no
+ *  direction" (the key is "", an answer) from "the direction could not be read" (named here; the
+ *  control goes to a person — recipeReplayBinding R13). */
+export const ADDRESS_COMPONENTS_UNREAD_KEY = "addressComponentsUnread";
+/** Every key above, and the unread marker — the planner view leaves them out (the binder places them,
+ *  never the model), and the save-time value match never binds to them (they are placed by a control's
+ *  LABEL: a "Roof Facing" = "Southwest" literal on a learn job at "… SW …" is not the street direction). */
+export const ADDRESS_COMPONENT_FIELD_KEYS: ReadonlySet<string> = new Set([
+  ...Object.values(ADDRESS_COMPONENT_KEYS).flatMap((k) => [k.abbr, k.word]),
+  ADDRESS_COMPONENTS_UNREAD_KEY,
+]);
 /** The keys an address SEARCH binds its number and name to — a bare "Direction" / "Suffix" label is an
  *  address component only on a page that searches an address this way. */
 export const ADDRESS_SEARCH_FIELD_KEYS: ReadonlySet<string> = new Set(["streetNumber", "streetNameCore", "streetNameSearchPortion"]);
@@ -146,7 +208,6 @@ const UNIT_TYPE_WORD: Readonly<Record<string, string>> = {
   APT: "Apartment", UNIT: "Unit", STE: "Suite", BLDG: "Building", LOT: "Lot", SPC: "Space", TRLR: "Trailer", RM: "Room", FL: "Floor",
 };
 const titleCase = (w: string): string => (w ? w[0].toUpperCase() + w.slice(1) : "");
-const tokensOf = (s: string): string[] => String(s || "").toLowerCase().replace(/[^a-z0-9#]+/g, " ").split(" ").filter(Boolean);
 /** "n" → "North", "se" → "Southeast" (DIRECTION_CANON read backwards). */
 function directionWord(canon: string): string {
   const word = Object.keys(DIRECTION_CANON).find((w) => DIRECTION_CANON[w] === canon);
@@ -158,39 +219,37 @@ function suffixWord(canon: string): string {
   return words.length ? titleCase(words[0]) : "";
 }
 
-/** The four components of the project's street line, canonical lowercase ("se", "ave", "apt"). */
-function addressComponentsOf(address: string): Record<AddressComponent, string> {
-  const line = streetLine(address);
-  const none = { direction: "", postDirection: "", suffix: "", unitType: "" };
-  const key = siteKey({ street: line }, true);
-  if (!key) return none;
-  const toks = tokensOf(line);
-  const house = toks.findIndex((w) => /^\d+[a-z]?$/.test(w));
-  const next = toks[house + 1] ?? "";
-  // A leading directional is one only when a street name follows it ("123 N Main St"), which siteKey
-  // has already established by finding words.
-  const direction = DIRECTIONAL.test(next) ? (DIRECTION_CANON[next] ?? next) : "";
-  const postDirection = (direction ? key.dirs.slice(1) : key.dirs)[0] ?? "";
-  const unitWord = toks.slice(house + 1).find((w) => UNIT_WORD.test(w) && UNIT_TYPE_CANON[w]) ?? "";
-  return { direction, postDirection: postDirection === direction && direction ? "" : postDirection, suffix: key.suffix, unitType: unitWord ? UNIT_TYPE_CANON[unitWord] : "" };
-}
-
 /** THIS PROJECT'S ADDRESS COMPONENTS, both vocabularies: { streetDirection: "SE", streetDirectionWord:
- *  "Southeast", streetSuffix: "AVE", streetSuffixWord: "Avenue", … }. "" for a component the
- *  address does not have — a directionless street has no direction, and that is an answer. */
+ *  "Southeast", streetSuffix: "AVE", streetSuffixWord: "Avenue", … }, read by readStreetLine. Three
+ *  states per component, never two:
+ *    a value  — the address has it;
+ *    ""       — the address certainly has none: a directionless street has no direction (the
+ *               directionals are a closed list), and no unit word means no unit type;
+ *    unread   — no key, and the component named under ADDRESS_COMPONENTS_UNREAD_KEY: the whole line
+ *               when it is not readable, a suffix when none from the shared list was read (SUFFIXES
+ *               is not every USPS suffix — "Plz", "Xing" — so "no type" is never claimed), and the
+ *               leading direction when the address writes its directional after the street ("Main St
+ *               NW": a single "Direction" control may want that NW). */
 export function addressComponentFields(address: string): Record<string, string> {
-  const c = addressComponentsOf(address);
   const k = ADDRESS_COMPONENT_KEYS;
-  return {
-    [k.direction.abbr]: c.direction.toUpperCase(),
-    [k.direction.word]: directionWord(c.direction),
-    [k.postDirection.abbr]: c.postDirection.toUpperCase(),
-    [k.postDirection.word]: directionWord(c.postDirection),
-    [k.suffix.abbr]: c.suffix.toUpperCase(),
-    [k.suffix.word]: suffixWord(c.suffix),
-    [k.unitType.abbr]: c.unitType,
-    [k.unitType.word]: UNIT_TYPE_WORD[c.unitType] ?? "",
+  const p = readStreetLine(address);
+  const unread = (...cs: AddressComponent[]): Record<string, string> =>
+    ({ [ADDRESS_COMPONENTS_UNREAD_KEY]: cs.flatMap((c) => [k[c].abbr, k[c].word]).join(",") });
+  if (!p.readable) return unread("direction", "postDirection", "suffix", "unitType");
+  const lead = streetWord(p.direction);
+  const direction = lead ? (DIRECTION_CANON[lead] ?? lead) : "";
+  const out: Record<string, string> = {
+    [k.postDirection.abbr]: p.postDirection.toUpperCase(),
+    [k.postDirection.word]: directionWord(p.postDirection),
+    [k.unitType.abbr]: p.unitType,
+    [k.unitType.word]: UNIT_TYPE_WORD[p.unitType] ?? "",
   };
+  const notRead: AddressComponent[] = [];
+  if (direction || !p.postDirection) Object.assign(out, { [k.direction.abbr]: direction.toUpperCase(), [k.direction.word]: directionWord(direction) });
+  else notRead.push("direction");
+  if (p.suffix) Object.assign(out, { [k.suffix.abbr]: p.suffix.toUpperCase(), [k.suffix.word]: suffixWord(p.suffix) });
+  else notRead.push("suffix");
+  return notRead.length ? { ...out, ...unread(...notRead) } : out;
 }
 
 /** WHICH ADDRESS COMPONENT DOES THIS CONTROL ASK FOR? `explicit` when the label says so on its own

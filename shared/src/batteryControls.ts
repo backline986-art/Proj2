@@ -207,8 +207,9 @@ export function bareAnswerPolarity(label: unknown): "yes" | "no" | null {
   return readsAsYesAnswer(t) ? "yes" : readsAsNoAnswer(t) ? "no" : null;
 }
 
-/** THE TEXT A RECORDED STEP'S STORAGE QUESTION READS AS — the one assembly every door that asks the
- *  predicate of a recorded step uses (replay's skip / answer logic, the stage gate).
+/** THE TEXT A RECORDED STEP'S STORAGE QUESTION READS AS — the replay adapter's skip / answer logic and
+ *  its radio-conflict check read it. (The stage gate reads only bound fill/select steps, whose label is
+ *  never a bare answer, so its own label + note + field reading is this same text.)
  *
  *  A RADIO OPTION'S QUESTION LIVES ONLY IN ITS SECTION (#236). Ameren Illinois records "Do you seek to
  *  install an Energy Storage System (ESS), or batteries as part of t…" as the fingerprint section of
