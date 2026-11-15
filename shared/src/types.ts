@@ -5059,6 +5059,14 @@ export interface RecipeStep {
   viaFileChooser?: boolean;
   /** Don't fail the run if this step's target isn't found. */
   optional?: boolean;
+  /** #237 — THE LEARN SAW THIS CONTROL ONLY AFTER AN ANSWER REVEALED IT: absent from the page's
+   *  entry scrape, recorded by the post-fill re-scan. Replay skips it, named, when it is absent or
+   *  hidden on this job (its answers did not reveal it — PacifiCorp's battery-inverter controls that
+   *  a later tick hides, Ameren's County that renders only once the address resolves); a control
+   *  that shows is written as always, and a failure on it still fails the step. Unlike `optional`,
+   *  never a licence to skip a control that IS there. Metadata only: never part of the label or
+   *  matching. Older recipes lack it. */
+  conditional?: boolean;
   /** A credential/secret field (password, account#, meter#, MFA). The recorder
    *  NEVER stores its literal value — it must be bound to the encrypted credential
    *  store / redacted project data, not a plaintext recipe value. */

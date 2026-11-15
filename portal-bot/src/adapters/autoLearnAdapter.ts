@@ -452,6 +452,11 @@ const REPEAT_PAGE_LIMIT = 3;
  *  land and render what it unlocks (a PowerClerk row's Model after its make) before the next
  *  re-scrape. Only paid when that pass actually filled something. */
 const LATE_EQUIP_REVEAL_GRACE_MS = 2_000;
+/** Does a field's section or label name a PV array? The equipment pass's row test (#535: on a page
+ *  of array rows such a control is a row's), and the re-scan never marks one `conditional` (#237):
+ *  the replay adds each row and fills it itself (row mode, the held-check), unlocking its controls
+ *  one save at a time — a probe for "revealed on this job" is not that machinery's question. */
+const namesPvArray = (f: { section?: string; label?: string }): boolean => /pv ?array|\barray\b/i.test(`${f.section || ""} ${f.label || ""}`);
 /** One planner-door click (advance or navigate), with its wait for the page after it: the most it may
  *  cost before the walk gives up on it (boundedClick). Well above a healthy click on a slow portal
  *  (Accela's AJAX dashboards, PowerClerk's project creation: tens of seconds), far below the ~15
@@ -3750,11 +3755,14 @@ export class AutoLearnAdapter extends BasePortalAdapter {
    *  from project data. Returns how many were filled; appends recipe steps + labels
    *  like other passes. Fills in DOM order so a manufacturer select's AJAX postback
    *  lands before its dependent model select is attempted (applyFill then waits for
-   *  the model option to exist via waitForOptionReady). */
+   *  the model option to exist via waitForOptionReady). `revealedOnly` (the post-fill re-scan's,
+   *  #237) marks a step `conditional` when its control was not on the page at entry (it never
+   *  answers yes for a PV array's control: see the re-scan). */
   private async fillEquipmentSelects(
     fields: ExtractedField[],
     alreadyFilledLabels: string[],
     steps: RecipeStep[],
+    revealedOnly?: (f: ExtractedField) => boolean,
   ): Promise<number> {
     let filled = 0;
     // Proximity side-tracking for portals with NO usable section headers: once a
@@ -3804,7 +3812,7 @@ export class AutoLearnAdapter extends BasePortalAdapter {
       // recorded, and the rows the learn adds from the recorded array1* steps got no Qty at all.
       // On a page of array rows, a control inside a row is never skipped for its label; the value
       // check below leaves one already holding this project's value alone.
-      const rowControl = arrayRowPage && /pv ?array|\barray\b/i.test(`${field.section || ""} ${field.label || ""}`);
+      const rowControl = arrayRowPage && namesPvArray(field);
       if (field.label && !dupLabel && !rowControl && alreadyFilledLabels.includes(field.label)) continue;
       // Proximity only carries WITHIN one section and only a few fields deep.
       if ((field.section || "") !== lastSection) {
@@ -3941,6 +3949,7 @@ export class AutoLearnAdapter extends BasePortalAdapter {
         // #535: a row control's earlier write this page (the planner's system total, a 405 W pick)
         // is superseded: its step goes, so the recipe types this control once, from this key.
         if (rowControl) this.dropSupersededRowSteps(steps, field);
+        if (revealedOnly?.(field)) step.conditional = true;
         steps.push(step);
         if (field.label) alreadyFilledLabels.push(field.label);
         this.equipmentLanded.set(failKey, candidate);
@@ -9805,6 +9814,17 @@ export class AutoLearnAdapter extends BasePortalAdapter {
         // the set of revealed controls has changed, and never twice at the same set.
         let lateEquipSig: string | null = null;
         let lastRevealSig = "";
+        // WHICH CONTROLS A FILL REVEALED: identity = section + label + type, against the page's
+        // entry scrape (`fields`). The revealed_controls event names them, and #237: a step this
+        // re-scan records on one is marked `conditional` — the replay skips it, named, on a job
+        // whose answers do not reveal it (PacifiCorp 32f3d2b2 102/111/112, battery-inverter
+        // controls a later tick hides; Ameren 07370f52 25, a County that renders only once the
+        // address resolves: run-fatal or a blank required step). A control present at entry is
+        // never marked, whatever pass fills it, and neither is a PV array's (namesPvArray).
+        const revealIdOf = (f: ExtractedField): string => `${String(f.section ?? "").trim()}\u0000${String(f.label ?? "").trim()}\u0000${f.fieldType}`;
+        const atEntry = new Set(fields.map(revealIdOf));
+        const appearedAfterEntry = (f: ExtractedField): boolean => !!f.label && !atEntry.has(revealIdOf(f));
+        const revealedOnly = (f: ExtractedField): boolean => appearedAfterEntry(f) && !namesPvArray(f);
         for (let rescanPass = 0; rescanPass < MAX_RESCAN_PASSES; rescanPass++) {
           let revealedThisPass = 0;
           try {
@@ -9842,13 +9862,11 @@ export class AutoLearnAdapter extends BasePortalAdapter {
             // WHAT THE FILLS REVEALED, NAMED (labels only). newFillable above is "not filled yet",
             // which includes every optional box that was there from the start; the operator's
             // question after a live miss (PGE 2026-09-28, the account/meter boxes a choice
-            // revealed) is which controls APPEARED. Identity = section + label + type against the
-            // page's entry scrape. Diagnostic only — it changes nothing that is planned or filled.
+            // revealed) is which controls APPEARED (appearedAfterEntry, above). This event changes
+            // nothing that is planned or filled; the conditional mark below reads the same set.
             {
-              const idOf = (f: ExtractedField): string => `${String(f.section ?? "").trim()}\u0000${String(f.label ?? "").trim()}\u0000${f.fieldType}`;
-              const atEntry = new Set(fields.map(idOf));
-              const appeared = postFields.filter((f) => f.label && f.fieldType !== "button" && !atEntry.has(idOf(f)));
-              const sig = appeared.map(idOf).join("\u0001");
+              const appeared = postFields.filter((f) => f.fieldType !== "button" && appearedAfterEntry(f));
+              const sig = appeared.map(revealIdOf).join("\u0001");
               if (appeared.length && sig !== lastRevealSig) {
                 lastRevealSig = sig;
                 this.debug?.event({
@@ -9866,7 +9884,7 @@ export class AutoLearnAdapter extends BasePortalAdapter {
               // back must not loop here; MAX_RESCAN_PASSES bounds it too).
               if (lateEquipSig !== lastRevealSig) {
                 lateEquipSig = lastRevealSig;
-                const lateEquip = await this.fillEquipmentSelects(postFields, alreadyFilledLabels, steps);
+                const lateEquip = await this.fillEquipmentSelects(postFields, alreadyFilledLabels, steps, revealedOnly);
                 if (lateEquip > 0) {
                   pageFillCount += lateEquip;
                   // A DEBOUNCED autosave is invisible to the settle (nothing is on the wire for a
@@ -9923,6 +9941,7 @@ export class AutoLearnAdapter extends BasePortalAdapter {
               if (inFilledGroup(field)) continue; // never re-answer a radio group filled this page
               const step = await this.applyFill(field, fillReq, false);
               if (step) {
+                if (revealedOnly(field)) step.conditional = true; // #237
                 steps.push(step);
                 pageFillCount++;
                 revealedThisPass++;
@@ -9953,6 +9972,7 @@ export class AutoLearnAdapter extends BasePortalAdapter {
               };
               const step = await this.applyFill(nf, syntheticFill, true);
               if (step) {
+                if (revealedOnly(nf)) step.conditional = true; // #237
                 steps.push(step);
                 pageFillCount++;
                 revealedThisPass++;
@@ -9973,7 +9993,7 @@ export class AutoLearnAdapter extends BasePortalAdapter {
             // repeater's manufacturer/model comboboxes appear only after the Energy
             // Source cascade, so this is where they usually become fillable.
             try {
-              const equipFilled = await this.fillEquipmentSelects(postFields, alreadyFilledLabels, steps);
+              const equipFilled = await this.fillEquipmentSelects(postFields, alreadyFilledLabels, steps, revealedOnly);
               pageFillCount += equipFilled;
               revealedThisPass += equipFilled;
               // #535 — the same grace as the late pass above. Here a control the pass cannot fill (an
