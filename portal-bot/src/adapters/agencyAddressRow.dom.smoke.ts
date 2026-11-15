@@ -49,6 +49,11 @@ const GRIDS: Record<string, string> = {
   live: row("county-owner", "100 EXAMPLE RD SE, 1701000, COUNTY APPLICATIONS, SOUTH, JEFFERSON MARION OR 97352, 100 EXAMPLE RD SE, JEFFERSON, OR 97352", "COUNTY APPLICATIONS", "JEFFERSON", "97352", "CUSTOMER, SAMPLE")
     + row("county-other", "100 EXAMPLE RD SE, 1701000, COUNTY APPLICATIONS, SOUTH, JEFFERSON MARION OR 97352, 100 EXAMPLE RD SE, JEFFERSON, OR 97352", "COUNTY APPLICATIONS", "JEFFERSON", "97352"),
   cityOnly: JEFF_CITY + JEFF_DEQ,
+  // City of Boise's Accela "Address Search Result List" (live 2026-11-15, synthetic street): a RADIO
+  // in each row and ONE "Select" button under the grid — no per-row Select link at all.
+  boise: `<tr><td><input type="radio" name="addr" onchange="pick('hall')"></td><td>100 TEST AVE, B C O T, City Hall, Boise ID 83702</td><td></td><td>Boise</td><td>ID</td><td>83702</td><td></td><td></td></tr>`
+    + `<tr><td><input type="radio" name="addr" onchange="pick('plain')"></td><td>100 TEST AVE, Boise ID 83702</td><td></td><td>Boise</td><td>ID</td><td>83702</td><td></td><td></td></tr>`
+    + `<tr><td colspan="8"><input type="button" value="Select"> <input type="button" value="Cancel"></td></tr>`,
   coos: row("deq", "540 MOCKUP AV, DEQ Applications, COOS BAY Coos OR 97420", "DEQ Applications", "COOS BAY", "97420", "SAMPLE, ALEX")
     + row("city", "540 MOCKUP AVE, City Applications, EMPIRE, COOS BAY COOS OR 97420", "City Applications", "COOS BAY", "97420", "SAKSCHEWSKI, GERHARD")
     + row("county", "540 MOCKUP AVE, COUNTY APPLICATIONS, COOS BAY COOS OR 97420", "COUNTY APPLICATIONS", "COOS BAY", "97420", "HUISMAN, VINCENT"),
@@ -128,6 +133,11 @@ try {
   check("MUST-PASS replay: Coos Bay ELECTRICAL, agency Coos County → the COUNTY row", r5.picked === "county", sayR(r5));
   const r6 = await replay("coos", "electrical", ELEC_NOTE(""), { ...COOS_VALUES });
   check("MUST-PASS replay: Coos Bay ELECTRICAL, agency unknown → the COUNTY row (the convention)", r6.picked === "county", sayR(r6));
+
+  // Boise (#235): radio rows, Select below the grid — a row is still found and ticked.
+  const b1 = await replay("boise", "structural", "address version: this property", { city: "Boise", zip: "83702", homeownerName: "Sample Customer" });
+  check("MUST-PASS replay: Boise's radio-row grid — a row of this property is ticked (live 2026-11-15: \"no selectable rows\")",
+    (b1.picked === "hall" || b1.picked === "plain") && b1.aging.some((a) => /2 result\(s\) offered/.test(a)), sayR(b1));
 
   const x1 = await replay("two", "structural", STRUCT_NOTE(""), { ...JEFF_VALUES });
   check("MUST-EXCLUDE replay: agency unknown → today's convention (Jefferson structural → the CITY row)", x1.picked === "city", sayR(x1));
