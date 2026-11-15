@@ -49,10 +49,10 @@ const contactPage = `<!doctype html><html><head><title>Apply for Permit</title><
     <button id="button-ContactSearchBar" class="btn css-btn-primary fa fa-search search-contact-button" aria-label="Search" disabled></button>
     </div></form>
   </div>
-  <table id="res"><thead><tr><th>Company</th><th>Address</th><th>Action</th></tr></thead><tbody></tbody></table>
+  <table id="res"><thead><tr><th>Favorite</th><th>Company</th><th>Address</th><th>Action</th></tr></thead><tbody></tbody></table>
 </div>
 <script>
-var S = JSON.parse(sessionStorage.getItem("S") || '{"tab":0,"mag":0,"adds":[],"manualTyped":0}');
+var S = JSON.parse(sessionStorage.getItem("S") || '{"tab":0,"mag":0,"adds":[],"manualTyped":0,"favs":0}');
 function save(){ sessionStorage.setItem("S", JSON.stringify(S)); }
 document.getElementById("tabSearch").onclick = function(){ S.tab++; save(); };
 document.getElementById("mCompany").oninput = function(){ S.manualTyped++; save(); };
@@ -65,7 +65,10 @@ document.getElementById("button-ContactSearchBar").onclick = function(){
   if (q.indexOf("quillmark") < 0) return;
   [["808 SE EXAMPLE DR STE 3-337 VANCOUVER WA 98683"], ["305 SE EXAMPLE DR SUITE 111 VANCOUVER WA 98683"]].forEach(function(r){
     var tr = document.createElement("tr");
-    tr.innerHTML = "<td>QUILLMARK SOLAR CO</td><td>" + r[0] + "</td><td><button type='button' class='add' aria-label='Add Contact'>Add</button></td>";
+    // As live (v10 step-018 HTML): every row BEGINS with a favourite star whose aria-label is "Add Favorite" —
+    // a control carrying the word "add" that is NOT the row's action. Pressing it must never count as the pick.
+    tr.innerHTML = "<td><button type='button' class='fav' aria-label='Add Favorite' title='Add Favorite' style='display:inline-block;width:22px;height:22px;background:#eee'></button></td><td>QUILLMARK SOLAR CO</td><td>" + r[0] + "</td><td><button type='button' class='add' aria-label='Add Contact'>Add</button></td>";
+    tr.querySelector(".fav").onclick = function(){ S.favs++; save(); };
     tr.querySelector(".add").onclick = function(){ S.adds.push(r[0]); save(); location.href = "/review"; };
     tb.appendChild(tr);
   });
@@ -123,7 +126,7 @@ try {
     let r: Awaited<ReturnType<AutoLearnAdapter["learn"]>> | null = null;
     let threw = "";
     try { r = await adapter.learn({ portalUrl: `${base}/contact` } as never, project); } catch (e) { threw = String(e).slice(0, 300); }
-    const st = await page.evaluate(() => JSON.parse(sessionStorage.getItem("S") || "{}")).catch(() => ({})) as { tab?: number; mag?: number; adds?: string[]; manualTyped?: number };
+    const st = await page.evaluate(() => JSON.parse(sessionStorage.getItem("S") || "{}")).catch(() => ({})) as { tab?: number; mag?: number; adds?: string[]; manualTyped?: number; favs?: number };
     await ctx.close().catch(() => null);
     const msg = String(r?.message ?? threw).replace(/\s+/g, " ").slice(0, 500);
     const detail = `state=${JSON.stringify(st)} posts=${JSON.stringify(posts)} ok=${String(r?.ok)} stop=${String(r?.stopReason)} msg=${msg}`;
@@ -131,6 +134,9 @@ try {
     console.log(`#   events: ${JSON.stringify(events.filter((e) => !/^page$|trace|shot/.test(String(e.type))).map((e) => ({ ...e, t: undefined, ms: undefined }))).slice(0, 1500)}`);
     check(`${variant}: no filing request, nothing typed into the hidden "Enter Manually" form`, !posts.includes("/api/submit") && !st.manualTyped, detail);
     check(`${variant}: the box's own magnifier searched (pressed at least once)`, (st.mag ?? 0) >= 1, detail);
+    // The favourite star carries the word "add" ("Add Favorite") and is the FIRST control of every row: it
+    // is never the row's pick (shared/src/rowPick.ts; live Tigard replay v10 pressed it instead of "Add").
+    check(`${variant}: a row's favourite star ("Add Favorite") is never pressed`, !(st.favs ?? 0), detail);
     if (variant === "street") {
       check("MUST-PASS street: the row at the client's business street (808) is added, once; the 305 row never", JSON.stringify(st.adds ?? []) === JSON.stringify(["808 SE EXAMPLE DR STE 3-337 VANCOUVER WA 98683"]), detail);
     } else {

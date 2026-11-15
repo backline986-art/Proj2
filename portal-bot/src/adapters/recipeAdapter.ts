@@ -106,6 +106,7 @@ export function looksLikeProjectData(label: string, value: string): boolean {
 import { rankAddressVersions } from "../addressVersion";
 import { jobValueShape } from "../jobValueShape";
 import { isVolatileControlId, volatileControlIdKind } from "../../../shared/src/volatileControlId";
+import { ROW_PICK_WORDS } from "../../../shared/src/rowPick";
 import { isCompanyIdentityLabel } from "../../../shared/src/companyFacts";
 import { licenceKeyForLabel } from "../../../shared/src/licenceKinds";
 import { completionEvidence, labelWords } from "../../../shared/src/portalSafety";
@@ -5970,6 +5971,40 @@ export class RecipeAdapter extends BasePortalAdapter {
     return false;
   }
 
+  /** The label (else aria-label, placeholder or id) of a VISIBLE typeable box on the page — or in one
+   *  of its frames — whose value is exactly `v` (whitespace collapsed, case-insensitive); "" when none.
+   *  The lookup-template skip's one reading (fill case). No nested functions in the evaluate. */
+  private async visibleBoxHolding(v: string): Promise<string> {
+    if (!this.page || typeof this.page.evaluate !== "function") return "";
+    const want = String(v ?? "").replace(/\s+/g, " ").trim().toLowerCase();
+    if (!want) return "";
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const docs: any[] = [this.page, ...(typeof this.page.frames === "function" ? (this.page.frames() as any[]).filter((f) => typeof f?.evaluate === "function" && f !== (typeof this.page.mainFrame === "function" ? this.page.mainFrame() : null)) : [])];
+    for (const doc of docs) {
+      const found = await doc.evaluate((needle: string) => {
+        const els = Array.from(document.querySelectorAll("input, textarea")) as HTMLInputElement[];
+        for (const el of els) {
+          const type = String(el.getAttribute("type") || "text").toLowerCase();
+          if (["hidden", "button", "submit", "checkbox", "radio", "file", "image", "reset", "password"].includes(type)) continue;
+          const val = String(el.value || "").replace(/\s+/g, " ").trim().toLowerCase();
+          if (val !== needle) continue;
+          const r = el.getBoundingClientRect();
+          if (!(r.width > 0 && r.height > 0)) continue;
+          const cs = getComputedStyle(el);
+          if (cs.visibility === "hidden" || cs.display === "none") continue;
+          const id = el.getAttribute("id") || "";
+          const forLbl = id ? document.querySelector(`label[for="${CSS.escape(id)}"]`) : null;
+          const wrap = el.closest("label");
+          const label = String((forLbl && (forLbl as HTMLElement).textContent) || (wrap && (wrap as HTMLElement).textContent) || el.getAttribute("aria-label") || el.getAttribute("placeholder") || id || "").replace(/\s+/g, " ").trim();
+          return label || "a box";
+        }
+        return "";
+      }, want).catch(() => "");
+      if (typeof found === "string" && found) return found;
+    }
+    return "";
+  }
+
   /** #244 — the attribute that marks a search box the portal already answered with nothing. */
   private static readonly TYPEAHEAD_ANSWERED_ATTR = "data-al-ta-answered";
   private static typeaheadValueKey(v: string): string {
@@ -7790,6 +7825,23 @@ export class RecipeAdapter extends BasePortalAdapter {
     // when narrowToOne did it, and again when this hint was added without the same guard.
     const nameHint = (step.action === "check" || step.action === "uncheck")
       ? "" : String(step.note ?? step.field ?? "");
+    // A LOOKUP TEMPLATE'S FILL IS DONE WHEN ITS VALUE ALREADY STANDS ON THE PAGE (#183's synthesised
+    // "lookup(…): business name"; live City of Tigard 2026-11-15, replays v8 and v9, step 16 of 40).
+    // The recorded steps had typed the company into the dialog's one search box and searched it; the
+    // template's step named its box "Business Name" with a bare `[id*='Name']` fallback, reached the
+    // inactive tab's First Name, was re-anchored onto "Business Phone" and timed out there. Read live,
+    // by value, BEFORE the selector is resolved (a resolution that lands on the wrong box writes a
+    // re-anchor note nobody should chase): a visible typeable box holding exactly this value means the
+    // lookup is fed — skipped, named, nothing typed into a box that is not the lookup's. Only a lookup
+    // template's fill: any other fill, and a lookup value standing nowhere, resolve and fill as before.
+    if (step.action === "fill" && /^lookup\(/.test(String(step.note ?? ""))) {
+      const lookupValue = this.resolveValue(step);
+      const holder = lookupValue ? await this.visibleBoxHolding(lookupValue) : "";
+      if (holder) {
+        this.agingNotes.push(`"${String(this.stepLabel(step) || step.note || "").slice(0, 60)}" skipped — its value already stands in "${holder.slice(0, 60)}" on this page (the lookup's own search box), so the lookup is fed without typing it again`);
+        return true;
+      }
+    }
     // #228: A CLICK THAT WILL BE PERFORMED ASKS ITS RECORDED IDENTITY (clickIdentityGuardFor).
     const guard = this.clickIdentityGuardFor(step, pastReview);
     this.resolvingStep = step;
@@ -7943,6 +7995,8 @@ export class RecipeAdapter extends BasePortalAdapter {
         return this.executeClick(step, scoped, pastReview);
       case "fill": {
         let v = this.resolveValue(step);
+        // (A lookup template's fill whose value already stands on the page was skipped, named, before
+        // the selector was resolved — executeStepInner, above the resolution.)
         // #232: a value to write into a control that is not on the page fails named within
         // TARGET_APPEAR_MS (no value is still a skip, whether or not the control is there).
         if (v) {
@@ -13324,7 +13378,7 @@ export class RecipeAdapter extends BasePortalAdapter {
     let gridTold: "exact" | "shape" | "" = "";
     const scan = async (): Promise<Pick> => {
       gridTold = await this.markResultGrid(step, doc);
-      return await doc.evaluate((args: { role: string; wanted: string[]; tiebreak: string[]; ownGrid: boolean }) => {
+      return await doc.evaluate((args: { role: string; wanted: string[]; tiebreak: string[]; ownGrid: boolean; pickSrc: string }) => {
         document.querySelectorAll("[data-al-projrow]").forEach((n) => n.removeAttribute("data-al-projrow"));
         const grid = document.querySelector('[data-al-grid="1"]') as HTMLTableElement | null;
         const all = grid ? Array.from(grid.rows) : Array.from(document.querySelectorAll("tr"));
@@ -13349,12 +13403,25 @@ export class RecipeAdapter extends BasePortalAdapter {
         // action — an exact-text test left the learn company's own record for a person. "Unselect" and
         // "Selected" are not the word.
         const ACTION = /\b(select|add|choose|pick|use)\b/i;
+        // THE ROW'S OWN ACTION IS THE CONTROL WHOSE NAME IS THE PICK WORD — alone or with the noun of what
+        // is picked — the learner's reading (ROW_PICK_WORDS, shared/src/rowPick.ts), asked of EACH of the
+        // control's names (text, value, aria-label, title) with any icon ligature dropped ("person_add
+        // Add" reads "Add"). Live City of Tigard, replay v10 of 2026-11-15: every EnerGov result row BEGINS
+        // with a favourite star whose aria-label is "Add Favorite"; the first control carrying the word
+        // "add" was that star, the row's "Add" was never pressed, and the walk stopped on a page that had
+        // not moved. The word-in-text reading stays as the fallback (#235 review: "Select Contact"), never
+        // for a favourite, note, comment or attachment control.
+        const pick = new RegExp(args.pickSrc, "i");
+        const NOT_THE_ROW = /\b(favou?rite|note|comment|attachment|file|document)s?\b/i;
+        const namesOf = (a: Element): string[] => [(a as HTMLElement).innerText || "", (a as HTMLInputElement).value || "", a.getAttribute("aria-label") || "", a.getAttribute("title") || ""]
+          .map((t) => t.replace(/\b[a-z]+_[a-z_]+\b/g, " ").replace(/\s+/g, " ").trim()).filter((t) => t.length > 0);
         const rows: Array<{ text: string; ctl: Element }> = [];
         for (const tr of all) {
           if (tr.closest("thead") || !tr.querySelector("td") || tr.querySelector("table")) continue;
           const tick = tr.querySelector("input[type='radio'], input[type='checkbox']");
           const ctls = Array.from(tr.querySelectorAll("a, button, input[type='button'], input[type='submit'], [role='button']"));
-          const act = ctls.find((a) => ACTION.test((a as HTMLElement).innerText || (a as HTMLInputElement).value || a.getAttribute("aria-label") || ""));
+          const act = ctls.find((a) => namesOf(a).some((t) => pick.test(t)))
+            ?? ctls.find((a) => namesOf(a).some((t) => ACTION.test(t) && !NOT_THE_ROW.test(t)));
           // A NUMBER THAT IS ITSELF THE LINK: a licence or parcel grid whose row is chosen by clicking its
           // number carries no action word and no tick — the link showing this job's value is the action.
           const valueLink = !tick && !act && numeric
@@ -13380,7 +13447,7 @@ export class RecipeAdapter extends BasePortalAdapter {
           picked: chosen ? chosen.text.slice(0, 90) : "", how, rows: rows.length, hits: hits.length,
           kind: chosen ? (chosen.ctl.tagName.toLowerCase() === "input" && (ty === "radio" || ty === "checkbox") ? "tick" : "click") : "",
         };
-      }, { role, wanted, tiebreak, ownGrid: gridTold === "exact" }).catch(() => ({ picked: "", how: "", rows: 0, hits: 0, kind: "" })) as Pick;
+      }, { role, wanted, tiebreak, ownGrid: gridTold === "exact", pickSrc: ROW_PICK_WORDS.source }).catch(() => ({ picked: "", how: "", rows: 0, hits: 0, kind: "" })) as Pick;
     };
     // AN UNPAINTED GRID IS NOT AN EMPTY GRID (the address-version scan's rule): results land on a
     // postback, so look again briefly before concluding there is nothing to pick.

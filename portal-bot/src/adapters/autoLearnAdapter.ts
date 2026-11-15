@@ -40,6 +40,7 @@ import { LIST_LINK } from "../statusFinder";
 import { readSignatureRequestStep, stageSignatureRequestStep, type SignatureStepOutcome } from "./signatureRequestStep";
 import type { SignatureRequestApproval } from "../../../shared/src/signatureRequestGate";
 import { nameAttributeCss, nameAttributeOf } from "../../../shared/src/recipeSelector";
+import { ROW_PICK_WORDS } from "../../../shared/src/rowPick";
 import { readSignatureStatuses, type SignatureCheck } from "./signatureStatusRead";
 import { signatureCompletion } from "../../../shared/src/signatureCompletion";
 
@@ -6188,6 +6189,9 @@ export class AutoLearnAdapter extends BasePortalAdapter {
      *  whether it holds the split-address boxes (Street No. / Street Name) and they are typed. */
     lookups: Array<{ lookupKey: number; id: string; label: string; role: "link" | "button" }>;
     requiredBlank: string[]; typedTotal: number; typedBlank: number; addressTyped: boolean;
+    /** The labels of the section's shown boxes that HOLD a value — what the walk (or the portal)
+     *  answered here; a section the walk filled is never stopped as "could not fill". */
+    typedLabels: string[];
   }> | null> {
     const page = this.page;
     if (!page || typeof page.evaluate !== "function") return null;
@@ -6195,7 +6199,7 @@ export class AutoLearnAdapter extends BasePortalAdapter {
     if (opts.lookups) await page.evaluate(PORTAL_SAFETY_IN_PAGE_SOURCE).catch(() => null);
     const raw = await page.evaluate((src: { lookups: boolean; global: string }) => {
       // NO named functions in here: keepNames wraps them in __name, which the page may lack.
-      type Sec = { key: number; heading: string; instruction: string; text: string; addNewId: string; selectId: string; editId: string; hasAddNew: boolean; hasEdit: boolean; lookups: Array<{ lookupKey: number; id: string; label: string; role: "link" | "button" }>; requiredBlank: string[]; typedTotal: number; typedBlank: number; addressTyped: boolean };
+      type Sec = { key: number; heading: string; instruction: string; text: string; addNewId: string; selectId: string; editId: string; hasAddNew: boolean; hasEdit: boolean; lookups: Array<{ lookupKey: number; id: string; label: string; role: "link" | "button" }>; requiredBlank: string[]; typedTotal: number; typedBlank: number; addressTyped: boolean; typedLabels: string[] };
       const out: Sec[] = [];
       const containers: Element[] = [];
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -6238,7 +6242,7 @@ export class AutoLearnAdapter extends BasePortalAdapter {
           containers.push(container);
           idx = containers.length - 1;
           container.setAttribute("data-al-csec", String(idx));
-          out.push({ key: idx, heading, instruction, text: "", addNewId: "", selectId: "", editId: "", hasAddNew: false, hasEdit: false, lookups: [], requiredBlank: [], typedTotal: 0, typedBlank: 0, addressTyped: false });
+          out.push({ key: idx, heading, instruction, text: "", addNewId: "", selectId: "", editId: "", hasAddNew: false, hasEdit: false, lookups: [], requiredBlank: [], typedTotal: 0, typedBlank: 0, addressTyped: false, typedLabels: [] });
         }
         const rec = out[idx];
         if (kind === "add" && !rec.hasAddNew) { rec.hasAddNew = true; rec.addNewId = el.id || ""; el.setAttribute("data-al-caddnew", String(idx)); }
@@ -6292,6 +6296,7 @@ export class AutoLearnAdapter extends BasePortalAdapter {
           if (shown) {
             out[i].typedTotal++;
             if (!val) out[i].typedBlank++;
+            else out[i].typedLabels.push(lbl || out[i].heading);
             if (/\b(street|house)\s*(no\.?|number|#|num)\b|\bstreet\s*name\b/i.test(lbl)) { streetBoxes++; if (!val) streetBlank++; }
             if (!val && requiredMark(el)) out[i].requiredBlank.push(lbl || out[i].heading);
           } else if (!val && ((el as HTMLInputElement).required || el.getAttribute("aria-required") === "true")) {
@@ -13194,7 +13199,16 @@ export class AutoLearnAdapter extends BasePortalAdapter {
     if (tried.length) {
       const final = (await readSections()) ?? sections ?? [];
       const addressMiss = tried.find((t) => t.addressSearch);
-      const still = final.filter((s) => s.lookups.length && s.requiredBlank.length && !s.hasEdit && !s.addressTyped && !sectionOwnedByContactPass(s));
+      // A SECTION THE WALK FILLED IS NOT "COULD NOT FILL" (typeaheadNoMatch smoke, the door shape: the
+      // address search found no match, the page's own "Can't find address?" revealed Street Address /
+      // City / Zip and the walk typed them — the search box and "The location you have selected" stay
+      // blank, and addressTyped reads only Accela's split Street No. / Street Name). Where a box the
+      // walk filled on this page sits in the section, the walk has answered it another way; whether
+      // that answer satisfies the portal is the portal's own validation at Next, never a stop here.
+      const normLabel = (t: string): string => t.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+      const walkFilled = new Set(ctx.alreadyFilledLabels.map(normLabel).filter(Boolean));
+      const walkFilledIn = (s: { typedLabels?: string[] }): boolean => (s.typedLabels ?? []).some((l) => walkFilled.has(normLabel(l)));
+      const still = final.filter((s) => s.lookups.length && s.requiredBlank.length && !s.hasEdit && !s.addressTyped && !sectionOwnedByContactPass(s) && !walkFilledIn(s));
       if (still.length) {
         const named = still.map((s) => {
           const own = tried.filter((t) => t.heading === s.heading && !t.addressSearch);
@@ -13436,7 +13450,27 @@ export class AutoLearnAdapter extends BasePortalAdapter {
       }
       if (!(await nameBox.count().catch(() => 0))) { opts.steps.length = mark; return (this.debug?.event({ type: "lookup_search_unusable", section: opts.heading.slice(0, 40), why: "no business, name or Search box in the form" }), out("unusable")); }
       if (!(await nameBox.fill(opts.companyName, { timeout: 8000 }).then(() => true).catch(() => false))) { opts.steps.length = mark; return (this.debug?.event({ type: "lookup_search_unusable", section: opts.heading.slice(0, 40), why: "the name box could not be filled" }), out("unusable")); }
-      opts.steps.push({ action: "fill", phase: "fill", selector: { label: "Business Name", fallbacks: [{ css: "input[id*='Business' i], input[id*='Company' i], input[id*='Name' i]", ...inFrame }], ...inFrame }, field: contactKeyFor("company", "business") ?? "installerCompanyName", value: opts.companyName, note: `lookup(${opts.heading.slice(0, 40)}): business name` });
+      // THE STEP RECORDS THE BOX THE LEARN FILLED, not only the template's name for it (live City of
+      // Tigard, replays v8/v9 of 2026-11-15): "Business Name" with a bare `[id*='Name']` fallback found
+      // nothing by label on EnerGov's dialog — its box is labelled "Search" with the placeholder "Name,
+      // E-mail, or Company" — so the fallback reached the inactive tab's First Name and the re-anchor
+      // "Business Phone", where the fill timed out. The box's own id, label and placeholder lead; the
+      // template's words ("Business Name", "Company Name") and the loose css stay behind them.
+      const own = await nameBox.evaluate((el: Element) => {
+        const id = el.getAttribute("id") || "";
+        const forLbl = id ? document.querySelector(`label[for="${CSS.escape(id)}"]`) : null;
+        const wrap = el.closest("label");
+        const label = String((forLbl && (forLbl as HTMLElement).innerText) || (wrap && (wrap as HTMLElement).innerText) || el.getAttribute("aria-label") || "").replace(/\s+/g, " ").trim();
+        return { id, label, placeholder: String(el.getAttribute("placeholder") || "").replace(/\s+/g, " ").trim() };
+      }).catch(() => ({ id: "", label: "", placeholder: "" }));
+      const ownFallbacks = [
+        ...(own.id ? [{ css: `[id="${own.id}"]`, ...inFrame }] : []),
+        ...(own.placeholder ? [{ placeholder: own.placeholder, ...inFrame }] : []),
+        ...(own.label && own.label !== "Business Name" ? [{ label: "Business Name", ...inFrame }] : []),
+        { label: "Company Name", ...inFrame },
+        { css: "input[id*='Business' i], input[id*='Company' i], input[id*='Name' i]", ...inFrame },
+      ];
+      opts.steps.push({ action: "fill", phase: "fill", selector: { label: own.label || "Business Name", fallbacks: ownFallbacks, ...inFrame }, field: contactKeyFor("company", "business") ?? "installerCompanyName", value: opts.companyName, note: `lookup(${opts.heading.slice(0, 40)}): business name` });
       searched = `searched by business name "${opts.companyName}"${typeChosen ? ` with ${typeSel!.label} "${typeChosen}"` : typeSelectPresent ? ` with ${typeSel!.label} left at its placeholder (no option names ${opts.discipline || "this discipline"})` : ""}`;
       // 3) The form's own search button — the same shared predicate, the same refusals; labels read in
       //    one pass (the button sits below the fold of a long form), scrolled into view before the click.
@@ -13563,7 +13597,10 @@ export class AutoLearnAdapter extends BasePortalAdapter {
           // #221 — every row that IS this client, then ONE chosen: the row's own control is its
           // Select / Add link or button or its radio (live Tigard rows carry their own "Add").
           // The visible word or the accessible name (live Tigard: <button aria-label="Add Contact">Add</button>).
-          const ROW_PICK = /^(select|add|choose|use)(\s+(this\s+)?(contact|record|contractor|licen[cs]e|company|applicant|professional))?$/i;
+          // ONE reading with the replay's pickResultRowForProject (shared/src/rowPick.ts): the learn
+          // and the replay must press the same kind of control, or a row's favourite star ("Add
+          // Favorite") is "Add" to one of them (live City of Tigard, replay v10 of 2026-11-15).
+          const ROW_PICK = ROW_PICK_WORDS;
           type Cand = { row: any; text: string; sel: any }; // eslint-disable-line @typescript-eslint/no-explicit-any
           const cands: Cand[] = [];
           const staleOurs: Cand[] = [];

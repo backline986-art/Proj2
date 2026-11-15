@@ -38,10 +38,59 @@ const PAGE = `<!doctype html><html><body>
   <button id="search" type="button">Search</button>
 </body></html>`;
 
-const server = http.createServer((_q, r) => { r.writeHead(200, { "Content-Type": "text/html" }); r.end(PAGE); });
+// The live dialog's shape (EnerGov "Add Contact", v9 step-015 HTML): a Search tab whose one box
+// ALREADY HOLDS the company name (the recorded steps typed and searched it), results with an Add
+// button, and an inactive "Enter Manually" tab whose boxes are present but not shown — First Name,
+// Last Name, a "Company Name" known only by aria-label, Business Phone.
+const LOOKUP_PAGE = `<!doctype html><html><body>
+  <h3>Add Contact</h3><h4 aria-label="Add Contact As Contractor">Add Contact As <b>Contractor</b></h4>
+  <div id="tab-search">
+    <label>Search <input id="input-ContactSearchBar" name="contactSearchText" placeholder="Name, E-mail, or Company" value="Quillfeather Solar LLC"></label>
+    <button id="button-ContactSearchBar" aria-label="Search" type="button">Go</button>
+    <table><tr><th>First Name</th><th>Last Name</th><th>Address</th><th>Company</th><th></th></tr>
+      <tr><td></td><td></td><td>808 SW Example Way</td><td>QUILLFEATHER SOLAR LLC</td><td><button type="button" aria-label="Add Contact">Add</button></td></tr></table>
+  </div>
+  <div id="tab-manual" style="display:none">
+    <input aria-label="First Name" id="FirstName" type="text">
+    <input aria-label="Last Name" id="LastName" type="text">
+    <input aria-label="Company Name" id="GlobalEntityName" type="text">
+    <label for="BusinessPhone">Business Phone</label><input aria-label="Business Phone" id="BusinessPhone" type="text">
+  </div>
+  <button id="next" type="button">Next</button>
+</body></html>`;
+
+// The live results grid (v10 step-018 HTML): every row BEGINS with a favourite star whose aria-label is
+// "Add Favorite", then the contact's cells, then its own "Add" (aria-label "Add Contact"). Pressing the
+// star changes nothing; pressing Add takes the page back to the application.
+const ROWS_PAGE = `<!doctype html><html><head><title>Apply for Permit</title>
+  <style>.fav{display:inline-block;width:22px;height:22px;background:#eee;border:1px solid #999}</style></head><body>
+  <h3>Add Contact</h3><h4 aria-label="Add Contact As Contractor">Add Contact As <b>Contractor</b></h4>
+  <table id="res"><thead><tr><th>Favorite</th><th>First Name</th><th>Last Name</th><th>Address</th><th>Company</th><th>Email</th><th>Action</th></tr></thead><tbody>
+    <tr><td><button type="button" class="fav" aria-label="Add Favorite" title="Add Favorite"></button></td><td></td><td></td><td>305 SW Example Way Suite 111 Maplecrest ZZ 99999</td><td>QUILLFEATHER SOLAR LLC</td><td></td><td><button type="button" class="add" aria-label="Add Contact">Add</button></td></tr>
+    <tr><td><button type="button" class="fav" aria-label="Add Favorite" title="Add Favorite"></button></td><td></td><td></td><td>808 SW Example Way Ste 3-337 Maplecrest ZZ 99999</td><td>QUILLFEATHER SOLAR LLC</td><td>[email]</td><td><button type="button" class="add" aria-label="Add Contact">Add</button></td></tr>
+  </tbody></table>
+  <script>
+    var S = JSON.parse(sessionStorage.getItem("R") || '{"favs":0,"adds":[]}');
+    function save(){ sessionStorage.setItem("R", JSON.stringify(S)); }
+    document.querySelectorAll("tr").forEach(function (tr) {
+      var f = tr.querySelector(".fav"), a = tr.querySelector(".add");
+      if (f) f.onclick = function(){ S.favs++; save(); };
+      if (a) a.onclick = function(){ S.adds.push(tr.cells[3].textContent.trim().slice(0, 3)); save(); location.href = "/review"; };
+    });
+  </script>
+</body></html>`;
+const REVIEW_PAGE = `<!doctype html><html><head><title>Apply for Permit</title></head><body><h2>Contacts</h2><p id="card">Contractor added.</p><button id="button-Next" type="button">Next</button></body></html>`;
+
+const server = http.createServer((q, r) => {
+  r.writeHead(200, { "Content-Type": "text/html" });
+  const u = String(q.url);
+  r.end(/lookup/.test(u) ? LOOKUP_PAGE : /rows/.test(u) ? ROWS_PAGE : /review/.test(u) ? REVIEW_PAGE : PAGE);
+});
 await new Promise<void>((r) => server.listen(0, "127.0.0.1", () => r()));
 const port = (server.address() as { port: number }).port;
 const url = `http://127.0.0.1:${port}/`;
+const lookupUrl = `${url}lookup`;
+const rowsUrl = `${url}rows`;
 
 const mkRecipe = (steps: RecipeStep[]) => ({
   id: "rwl1", scopeType: "ahj", profileKey: "zz||maplecrest", state: "ZZ", ahj: "City of Maplecrest", utility: "",
@@ -110,6 +159,74 @@ check("MUST-KEEP: a recorded phone label heals to the phone box or is skipped, n
   // the candidate scan — so today this heals to the phone box or skips; this pins that it never
   // lands anywhere else.
   assert.ok(phoneB === "503-555-0100" || phoneB === "", `#BusinessPhone holds ${JSON.stringify(phoneB)}`);
+});
+
+// CASE C — A LOOKUP TEMPLATE'S FILL IS DONE WHEN ITS VALUE ALREADY STANDS ON THE PAGE (live v9, step 16
+// of 40): the learner's synthesised "business name" step re-types what the recorded search box already
+// holds (the recorded steps typed and searched it). Its loose fallback reached the inactive tab's First
+// Name (not shown), the re-anchor then "Business Phone", the fill timed out there and the run stopped.
+// Read live, by value: the lookup is fed — skipped, named; nothing typed into the inactive tab.
+const pC = await context.newPage();
+await pC.goto(lookupUrl);
+const aC = new RecipeAdapter(mkRecipe([
+  {
+    action: "fill", phase: "fill", field: "installerCompanyName", note: "lookup(Add Contact As : Contractor): business name",
+    selector: { label: "Business Name", fallbacks: [{ css: LOOKUP_FALLBACK }] },
+  } as RecipeStep,
+]), { installerCompanyName: "Quillfeather Solar LLC" }, {}, { autoSubmit: false });
+(aC as unknown as { page: unknown }).page = pC;
+await aC.fillApplication({} as never);
+const firstC = await pC.locator("#FirstName").inputValue();
+const phoneC = await pC.locator("#BusinessPhone").inputValue();
+const companyC = await pC.locator("#GlobalEntityName").inputValue();
+const searchC = await pC.locator("#input-ContactSearchBar").inputValue();
+const agingC = ((aC as unknown as { agingNotes?: string[] }).agingNotes ?? []).join(" | ");
+const driftC = ((aC as unknown as { driftWarnings?: string[] }).driftWarnings ?? []).join(" | ");
+
+check("MUST-PASS (lookup): nothing is typed into the inactive tab's boxes", () => {
+  assert.equal(firstC, "", `#FirstName received ${JSON.stringify(firstC)}`);
+  assert.equal(phoneC, "", `#BusinessPhone received ${JSON.stringify(phoneC)} — the live v8/v9 failure`);
+  assert.equal(companyC, "", `#GlobalEntityName received ${JSON.stringify(companyC)}`);
+});
+check("MUST-PASS (lookup): the search box keeps the value it already held", () => {
+  assert.equal(searchC, "Quillfeather Solar LLC", `#input-ContactSearchBar holds ${JSON.stringify(searchC)}`);
+});
+check("MUST-PASS (lookup): the step is skipped, named — its value already stands on the page", () => {
+  assert.match(agingC, /already stands/, `aging: ${agingC.slice(0, 300)} | drift: ${driftC.slice(0, 300)}`);
+});
+check("MUST-PASS (lookup): no fill timeout and no re-anchor onto the phone box", () => {
+  assert.doesNotMatch(driftC, /Timeout|re-anchored by label to #BusinessPhone/, driftC.slice(0, 400));
+});
+
+// CASE D — THE ROW'S OWN ACTION, NOT THE FIRST CONTROL CARRYING THE WORD (live v10, step 18 of 40): the
+// replay chose this job's row by its company record and then pressed the row's FIRST control whose text
+// carried "add" — the favourite star ("Add Favorite"). The page did not move and the walk stopped at the
+// next "Next". The learner's reading (ROW_PICK_WORDS, shared/src/rowPick.ts) is now the replay's too.
+const pD = await context.newPage();
+await pD.goto(rowsUrl);
+const ROW = `tr:has-text("QUILLFEATHER SOLAR LLC"):has-text("808")`;
+const aD = new RecipeAdapter(mkRecipe([
+  {
+    action: "click", phase: "fill", note: "lookup(Add Contact As : Contractor): select this client's record (the row showing the company)",
+    selector: { css: `${ROW} a:has-text("Select"), ${ROW} button:has-text("Add"), ${ROW} a:has-text("Add"), ${ROW} input[type='radio']` },
+  } as RecipeStep,
+]), { installerCompanyName: "Quillfeather Solar LLC", installerStreet: "808 SW Example Way Ste 3-337" }, {}, { autoSubmit: false });
+(aD as unknown as { page: unknown }).page = pD;
+await aD.fillApplication({} as never);
+const stateD = await pD.evaluate(() => JSON.parse(sessionStorage.getItem("R") || "{}")).catch(() => ({})) as { favs?: number; adds?: string[] };
+const urlD = pD.url();
+const notesD = ((aD as unknown as { agingNotes?: string[] }).agingNotes ?? []).join(" | ");
+const driftD = ((aD as unknown as { driftWarnings?: string[] }).driftWarnings ?? []).join(" | ");
+
+check("MUST-PASS (rows): the row's own Add is pressed — the 808 row, once — and the page moves on", () => {
+  assert.deepEqual(stateD.adds ?? [], ["808"], `adds=${JSON.stringify(stateD.adds)} url=${urlD} notes=${notesD.slice(0, 200)} drift=${driftD.slice(0, 200)}`);
+  assert.match(urlD, /\/review$/, `url=${urlD}`);
+});
+check("MUST-PASS (rows): the favourite star (\"Add Favorite\") is never pressed", () => {
+  assert.equal(stateD.favs ?? 0, 0, `favs=${String(stateD.favs)} — the live v10 failure (the star took the click)`);
+});
+check("the pick is named by the job's own company record", () => {
+  assert.match(notesD, /contact row chosen by this job's own company record/, notesD.slice(0, 300) || driftD.slice(0, 300));
 });
 
 await browser.close();
