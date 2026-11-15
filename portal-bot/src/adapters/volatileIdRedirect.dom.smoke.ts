@@ -14,6 +14,7 @@
 //             stale id choose between the two "Last" boxes and the surname went silently there.
 //   ph-1      shift -1 with Company named by its placeholder alone (no label for the re-anchor to
 //             read), so only the counter classifier can refuse it.
+//   lb-1      shift -1 with every box named through aria-labelledby (the same: no label read).
 //
 // MUST-PASS: at every shift the six values land in the applicant's own boxes, Company and the
 //   co-applicant stay empty, nothing is written into "the recorded control", and the run is clean.
@@ -60,6 +61,25 @@ const block = (legend: string, stable: string, n: (k: number) => string, company
     <input id="${n(7)}" placeholder="Email">
     <label for="${n(8)}">Phone</label><input id="${n(8)}" placeholder="(###) ###-####">
   ${heading ? "</div>" : "</fieldset>"}`;
+// The same block with every box named through aria-labelledby (a <span> beside it), no placeholder,
+// no aria-label, no label element: the shape a portal on React/Angular often renders. The
+// re-anchor's own label reader sees no name on either box here.
+const blockLabelledBy = (legend: string, stable: string, n: (k: number) => string): string => {
+  const lb = (key: string, text: string): string => `<span id="${stable}-${key}">${text}</span>`;
+  const by = (key: string): string => `aria-labelledby="${stable}-${key}"`;
+  return `
+  <fieldset><legend>${legend}</legend>
+    ${lb("ec", "Existing contact to use for this contact")}<select id="${n(0)}" ${by("ec")}><option value="">New Contact</option></select>
+    ${lb("fi", "First")}<input id="${stable}First" ${by("fi")}>
+    ${lb("la", "Last")}<input id="${n(1)}" ${by("la")}>
+    ${lb("co", "Company")}<input id="${n(2)}" ${by("co")}>
+    ${lb("ti", "Title")}<input id="${n(3)}" ${by("ti")}>
+    ${lb("st", "Street")}<input id="${stable}Address" ${by("st")}>
+    ${lb("ci", "City")}<input id="${n(4)}" ${by("ci")}>
+    ${lb("sa", "State")}<select id="${n(5)}" ${by("sa")}><option value="">Select...</option><option value="OR">OR</option><option value="WA">WA</option></select>
+    ${lb("zi", "Zip Code")}<input id="${n(6)}" ${by("zi")}>
+  </fieldset>`;
+};
 // A legend longer than the learner's 80-character cut (sectionFor keeps 80), worded so the cut lands
 // on a space, as a real recording of it would.
 const LONG_LEGEND = "Is the interconnection customer requesting net metering under the State's rule? If yes, provide the meter details below.";
@@ -81,6 +101,8 @@ const mf5Page = (appId: string, ownerId: string, ownerLabel: string | null, owne
 const pageFor = (mode: string): string => {
   const pc = (base: number) => (k: number) => `pcInputBase${base + k}`;
   switch (mode) {
+    // "lb-1": both PGE blocks named through aria-labelledby, counter shifted by one.
+    case "lb-1": return page(`${blockLabelledBy(SECTION, "Q7XK2LM9P0AA", pc(9))}${blockLabelledBy(CO, "R4TN8WE3Z1BB", pc(18))}`, "<h1>PGE Customer Information</h1>");
     // MF5 (accela/relabelled): the owner's "E-mail:" became "Email Address:", so the label resolves
     // onto the applicant's box; the recorded stable id is the owner's.
     case "mf5": return mf5Page("ApplicantEdit_txtEmail", "OwnerEdit_txtEmail", "Email Address:");
@@ -233,6 +255,28 @@ try {
     check(`${must} ${where}: nothing was written into a fingerprinted neighbour`, !/recorded control #pcInputBase/.test(o.warnings), o.warnings.slice(0, 300));
     // A moved counter is a fact about the recipe, not a defect in today's filing.
     check(`${must} ${where}: the replay is clean (no driftWarnings)`, o.warnings === "", o.warnings.slice(0, 300));
+  }
+
+  // MUST-PASS lb-1: the same defect on a block named through aria-labelledby, shift -1. The label
+  // locator and the binding pick the applicant's Last; #pcInputBase11 names the applicant's Company,
+  // which the re-anchor's reader sees as nameless, so only the counter classifier refuses it. Main
+  // wrote the surname into Company, then City into State (a select) and threw. Last and City only:
+  // the page-drift precheck reads labels with the learner's scan, which does not read
+  // aria-labelledby, so a segment of three or more such labels stops before any step.
+  {
+    const lbSteps = STEPS.slice(0, 2).map((s) => {
+      const sel = s.selector as { placeholder?: string; label?: string; fallbacks?: unknown[] };
+      const fpr = (s as { fingerprint: { id: string; section: string } }).fingerprint;
+      return { ...s, selector: { label: sel.label || sel.placeholder, fallbacks: sel.fallbacks }, fingerprint: { id: fpr.id, section: fpr.section } };
+    }) as unknown as RecipeStep[];
+    const o = await run("lb-1", lbSteps);
+    show("lb-1", o);
+    check("MUST-PASS lb-1: the run reaches review", reached(o), why(o));
+    check("MUST-PASS lb-1: the surname and city are in the applicant's own boxes, Company and State untouched",
+      o.box(SECTION, "Last") === VALUES.homeownerLastName && o.box(SECTION, "City") === VALUES.city
+        && o.box(SECTION, "Company") === "" && o.box(SECTION, "State") === "", filled(o.boxes));
+    check("MUST-PASS lb-1: nothing was written into a fingerprinted neighbour, the co-applicant untouched, no driftWarnings",
+      o.warnings === "" && o.boxes.filter((b) => b.section === CO).every((b) => !b.v || b.v === "New Contact"), `${filled(o.boxes)} drift: ${o.warnings.slice(0, 300)}`);
   }
 
   // ---- MUST-KEEP: MF5 and its variants still redirect, exactly as on main. ----
