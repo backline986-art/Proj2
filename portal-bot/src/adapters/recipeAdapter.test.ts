@@ -157,6 +157,32 @@ function withFakePage(adapter: RecipeAdapter, page: any): RecipeAdapter {
   return adapter;
 }
 
+// #235 — THE ACCELA APPLY RE-ENTRY NEVER RUNS FROM INSIDE AN APPLICATION. Live City of Boise
+// 2026-11-15: a contact opener the learner had noted "navigate to application: Select a Contact"
+// was missing mid-form, and the re-entry went back to CapApplyDisclaimer, abandoning the
+// half-filled draft. Before any write has landed, the recovery is main's (Boise's own step 1).
+async function testAcaReentryNeverFromInsideAnApplication() {
+  const ACA = "https://aca-prod.accela.com/CITYX/Cap/CapEdit.aspx?stepNumber=3&pageNumber=1";
+  const run = async (steps: RecipeStep[]) => {
+    const log: ActionLog = { clicks: [], fills: [], gotos: [], checks: 0 };
+    const page = makeFakePage({ log, present: { "css:#missingNav": false } });
+    page.url = () => ACA;
+    const recipe = { ...baseRecipe(steps), portalPlatform: "accela", portalUrl: "https://aca-prod.accela.com/CITYX/Dashboard.aspx" } as PortalRecipe;
+    const adapter = withFakePage(new RecipeAdapter(recipe, { meterNumber: "TEST-123" }, {}, {}), page);
+    const result = await adapter.fillApplication(fakeProject);
+    return { log, result };
+  };
+  const nav: RecipeStep = { action: "click", phase: "open", selector: { css: "#missingNav" }, note: "navigate to application: Select a Contact" };
+  const stop = { action: "stopForReview" } as RecipeStep;
+  const before = await run([nav, stop]);
+  assert.ok(before.log.gotos.some((u) => /CapApplyDisclaimer\.aspx/i.test(u)),
+    `MUST-KEEP: with no write landed yet, a missing entry link still re-enters the Apply flow (gotos ${JSON.stringify(before.log.gotos)})`);
+  const after = await run([{ action: "fill", phase: "fill", selector: { css: "#meter" }, field: "meterNumber", note: "Meter Number" }, nav, stop]);
+  assert.equal(after.log.fills.length, 1, "precondition: the write landed");
+  assert.ok(!after.log.gotos.some((u) => /CapApplyDisclaimer\.aspx/i.test(u)),
+    `MUST-PASS: an application in progress is never abandoned for the Apply start (gotos ${JSON.stringify(after.log.gotos)})`);
+}
+
 // --- Tests -----------------------------------------------------------------------
 
 async function testStopForReviewHalts() {
@@ -1487,6 +1513,7 @@ const tests: Array<[string, () => Promise<void>]> = [
   ["COVERED CONTROL: THE FAIL-SAFE — an unverified value keeps it standing", testCoveredWarningStandsWhenAValueDidNotHold],
   ["PAGE DRIFT: a step this run will skip is not a missing field", testDriftDenominatorExcludesStepsThisRunWillSkip],
   ["PAGE DRIFT: THE FAIL-SAFE — a real battery keeps its fields in the count", testDriftDenominatorKeepsBatteryFieldsWhenThereIsABattery],
+  ["#235: the Accela Apply re-entry never runs from inside an application", testAcaReentryNeverFromInsideAnApplication],
 ];
 
 let failures = 0;
