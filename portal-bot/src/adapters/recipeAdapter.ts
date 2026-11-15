@@ -295,6 +295,8 @@ const normPhrase = (s: string | null | undefined): string => String(s ?? "").toL
 // seconds after its URL loads; judging it on the first DOM read failed whole runs.
 const DRIFT_SETTLE_MS = Math.max(2000, Number(process.env.RECIPE_DRIFT_SETTLE_MS ?? 15000));
 import { redactCaptureText, readbackMatches, detectChallengeFrame, frameSelectorFor, hasNumericValidationError, RETRY_BACKOFF_MS, sleep, smartWait, toBareNumber, waitForElement, waitForInteractiveControls } from "../safeAction";
+import { detectSecondFactor, ONE_TIME_CODE_FIELD } from "../safeAction";
+import { isPaymentField as isCardFieldIdentity, type FieldIdentity } from "../../../shared/src/portalSafety";
 import { findFilingStatus } from "../statusFinder";
 import { UNRECORDED_WRITE_ATTR, gapFillMayAnswer, isSubmitIntentField, questionsOfRaw } from "../llmGapFill";
 import { performLogin, portalErrorPage } from "./loginFlow";
@@ -385,6 +387,31 @@ function isPaymentField(step: RecipeStep): boolean {
   if (step.action !== "fill" && step.action !== "select" && step.action !== "check") return false;
   const label = `${step.note ?? ""} ${step.field ?? ""} ${step.selector?.label ?? ""} ${step.selector?.name ?? ""}`;
   return PAYMENT_FIELD.test(label);
+}
+
+/** The names a recorded step carries for its box, in the shape the shared card-field predicate
+ *  (portalSafety isPaymentField) reads a live one. A recording holds no autocomplete or type, so
+ *  only the words decide here. */
+function stepFieldIdentity(step: RecipeStep): FieldIdentity {
+  const sel = step.selector ?? {};
+  const fp = step.fingerprint ?? {};
+  return {
+    label: [step.note, sel.label].filter(Boolean).join(" "),
+    name: sel.name ?? fp.name ?? null,
+    id: fp.id ?? null,
+    placeholder: sel.placeholder ?? fp.placeholder ?? null,
+  };
+}
+
+/** A RECORDED ONE-TIME-CODE BOX MAY BE A SECOND FACTOR, NOT A CARD (#238). The step's names read as
+ *  a code box by the one regex detectSecondFactor reads a live box with (ONE_TIME_CODE_FIELD), and
+ *  none of them says card by the shared card-field predicate. PAYMENT_FIELD's "security code" is a
+ *  CVV synonym AND the name of an emailed sign-in code (live Idaho DOPL recipe 7e90272b), so passing
+ *  this is never the answer by itself: runAll then asks for card context (cardContextFor). */
+function isOneTimeCodeStep(step: RecipeStep): boolean {
+  if (step.action !== "fill") return false;
+  const label = `${step.note ?? ""} ${step.field ?? ""} ${step.selector?.label ?? ""} ${step.selector?.name ?? ""} ${step.selector?.placeholder ?? ""}`;
+  return ONE_TIME_CODE_FIELD.test(label) && !isCardFieldIdentity(stepFieldIdentity(step));
 }
 
 /** A recorded e-signature step: the learner's own (note "e-signature: ...") or any fill whose
@@ -3116,6 +3143,31 @@ export class RecipeAdapter extends BasePortalAdapter {
             { executed, skipped, healedSteps: this.healedSteps, driftWarnings: this.driftWarnings, agingNotes: this.agingNotes, guardRefusals: this.guardRefusals, failedStepIndex: stepIdx, trace, needsHuman: true }),
           pauseReason: "signature_no_signer",
         };
+      }
+
+      // A ONE-TIME CODE WITH NO CARD AROUND IT IS A SECOND FACTOR, NOT A CARD (#238). Asked BEFORE
+      // the payment stop below, and only of a step that stop would take: "security code" is a CVV
+      // synonym in PAYMENT_FIELD and also the name of an emailed sign-in code. Live Idaho DOPL recipe
+      // 7e90272b holds only the post-login "Security Code" (beside "Trust this device"); the audit's
+      // replay of it returned ok=true, stoppedAtPayment, "stopped at review … no mismatch" with 0
+      // fields read, so an MFA wall read as a clean staged filing. A code box counts as a card's
+      // only with card context (another card field of its recorded form or on the page, or a
+      // payment URL — cardContextFor, all shared predicates); with none the run pauses as
+      // mfa_captcha, the login flow's pause for a second factor. Rule 1 is unchanged: nothing is
+      // typed into the box either way; only the name and kind of the stop change.
+      if (isPaymentField(step) && isOneTimeCodeStep(step)) {
+        const card = await this.cardContextFor(stepIdx);
+        if (!card) {
+          const factor = await detectSecondFactor(this.page).catch(() => "");
+          const label = String(step.note || step.selector?.label || "a code box").slice(0, 40);
+          closePrevStepTiming();
+          trace.push({ i: stepIdx, action: String(step.action), note: label, outcome: "second factor: NOT typed (a person enters the code)", page: await currentPageLabel() });
+          return {
+            ...fail(`Paused at a second factor: the recorded step "${label}" is a one-time code, not a card field${factor ? `; the page reads as ${factor}` : ""}. No card field is in its recorded form or on the page, and this is not a payment page. Automation never answers a second factor and typed nothing into it. Complete it in a visible browser window, then run again.`,
+              { executed, skipped, healedSteps: this.healedSteps, driftWarnings: this.driftWarnings, agingNotes: this.agingNotes, guardRefusals: this.guardRefusals, failedStepIndex: stepIdx, trace, slowSteps, needsHuman: true, stoppedAtPayment: this.stoppedAtPayment, secondFactor: factor || `a recorded one-time-code box ("${label}") with no card context` }),
+            pauseReason: "mfa_captcha",
+          };
+        }
       }
 
       // STOP AT THE CARD, EVERY TIME, IN EVERY MODE. Not a skip: the steps after this one are
@@ -8138,6 +8190,53 @@ export class RecipeAdapter extends BasePortalAdapter {
       return "";
     }, PORTAL_SAFETY_GLOBAL).catch(() => "");
     return String(found || "");
+  }
+
+  /** CARD CONTEXT FOR A RECORDED CODE BOX (#238): why the "Security Code" at stepIdx is a CARD's
+   *  code, or "" when nothing says so. Three readings, each an existing shared predicate, never a new
+   *  regex: another fill/select/check of the same recorded page segment (between advancing clicks,
+   *  gotos and stopForReview) that the shared isPaymentField calls a card field; a payment URL
+   *  (isPayRequestUrl) on the page or any of its frames; a visible card field in ANY frame
+   *  (isPaymentElementInPage, which reads autocomplete "cc-csc" on the code box itself as a card's) —
+   *  every frame, because a hosted card form puts its card number in a child frame. Read only: types
+   *  nothing, clicks nothing, reads no value. A page it cannot read adds nothing. */
+  private async cardContextFor(stepIdx: number): Promise<string> {
+    const steps = this.recipe.steps;
+    const advances = (st: RecipeStep | undefined): boolean => !!st && (st.action === "click" || st.action === "goto" || st.action === "stopForReview");
+    const cardStep = (st: RecipeStep): boolean => (st.action === "fill" || st.action === "select" || st.action === "check") && isCardFieldIdentity(stepFieldIdentity(st));
+    for (let i = stepIdx - 1; i >= 0 && !advances(steps[i]); i--) {
+      if (cardStep(steps[i])) return `its recorded form also holds "${String(steps[i].note || steps[i].selector?.label || "a card field").slice(0, 40)}"`;
+    }
+    for (let i = stepIdx + 1; i < steps.length && !advances(steps[i]); i++) {
+      if (cardStep(steps[i])) return `its recorded form also holds "${String(steps[i].note || steps[i].selector?.label || "a card field").slice(0, 40)}"`;
+    }
+    type FrameRead = { url: () => string; evaluate: (fn: unknown, arg?: unknown) => Promise<unknown> };
+    const page = this.page as { frames?: () => FrameRead[] } | null;
+    if (!page || typeof page.frames !== "function") return "";
+    for (const frame of page.frames()) {
+      const url = String(frame.url() || "");
+      if (isPayRequestUrl(url)) {
+        let where = url;
+        try { const u = new URL(url); where = `${u.host}${u.pathname}`; } catch { /* keep the raw text */ }
+        return `a payment URL (${where.slice(0, 80)})`;
+      }
+    }
+    for (const frame of page.frames()) {
+      await frame.evaluate(PORTAL_SAFETY_IN_PAGE_SOURCE).catch(() => null);
+      const hit = await frame.evaluate((g: string) => {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const ps = (globalThis as any)[g];
+        if (!ps) return "";
+        for (const el of Array.from(document.querySelectorAll("input, select"))) {
+          const r = (el as HTMLElement).getBoundingClientRect();
+          if (!(r.width > 0 && r.height > 0)) continue;
+          if (ps.isPaymentElementInPage(el)) return String(ps.controlLabelInPage(el) || el.getAttribute("autocomplete") || "a card field").replace(/\s+/g, " ").trim().slice(0, 40);
+        }
+        return "";
+      }, PORTAL_SAFETY_GLOBAL).catch(() => "");
+      if (hit) return `a card field on the page ("${hit}")`;
+    }
+    return "";
   }
 
   // Click safety gate (P0-3 allowlist + P0-4 structural challenge detection).

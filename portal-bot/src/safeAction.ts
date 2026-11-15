@@ -627,13 +627,22 @@ export const SECOND_FACTOR_TEXT_SOURCE = [
   "multi[- ]factor", "approve the sign[- ]in", "check your (e-?mail|phone) for a code",
 ].join("|");
 
+/** A ONE-TIME-CODE BOX, BY THE NAMES IT CARRIES (name, id, autocomplete, aria-label, placeholder,
+ *  its own <label>). THE ONE REGEX for that question: detectSecondFactor reads a live box with it, and
+ *  the replay reads a recorded step's label with it (recipeAdapter, #238). A card's "Security Code"
+ *  matches too, so this is never the whole answer on a page that might take a card: the replay asks
+ *  for card context first (the shared isPaymentElementInPage / isPayRequestUrl) and only a code box
+ *  with none is a second factor. Live Idaho DOPL recipe 7e90272b: its only recorded step, the emailed
+ *  "Security Code", was read as a CVV and the run reported a clean review stop. */
+export const ONE_TIME_CODE_FIELD = /one-time-code|passcode|\botp\b|verification.?code|security.?code|mfa.?code|credentials\.passcode/i;
+
 export async function detectSecondFactor(page: Page | null | undefined): Promise<string> {
   if (!page || typeof (page as { frames?: unknown }).frames !== "function") return "";
   try {
     let wording = "";
     let codeField = false;
     for (const frame of page.frames()) {
-      const r = await frame.evaluate((src: string) => {
+      const r = await frame.evaluate(({ src, codeSrc }: { src: string; codeSrc: string }) => {
         // Fully inline — no named helper (the __name note in waitForInteractiveControls).
         const inputs = Array.from(document.querySelectorAll("input")) as HTMLInputElement[];
         let password = false;
@@ -649,12 +658,12 @@ export async function detectSecondFactor(page: Page | null | undefined): Promise
           const labelled = Array.from(el.labels || []).map((l) => (l as HTMLElement).innerText || "").join(" ");
           const hay = [el.name, el.id, el.getAttribute("autocomplete"), el.getAttribute("aria-label"), el.getAttribute("placeholder"), labelled]
             .filter(Boolean).join(" ");
-          if (/one-time-code|passcode|\botp\b|verification.?code|security.?code|mfa.?code|credentials\.passcode/i.test(hay)) code = true;
+          if (new RegExp(codeSrc, "i").test(hay)) code = true;
         }
         const text = String((document.body && (document.body as HTMLElement).innerText) || "").replace(/\s+/g, " ").slice(0, 6000);
         const m = text.match(new RegExp(src, "i"));
         return { password, code, wording: m ? m[0] : "" };
-      }, SECOND_FACTOR_TEXT_SOURCE).catch(() => null);
+      }, { src: SECOND_FACTOR_TEXT_SOURCE, codeSrc: ONE_TIME_CODE_FIELD.source }).catch(() => null);
       if (!r) continue;
       if (r.password) return ""; // still the password step, in some frame — never a second factor
       if (r.code) codeField = true;
