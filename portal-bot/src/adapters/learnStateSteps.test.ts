@@ -30,12 +30,16 @@ check("PGE 68-72: a hand-patched Next page hidden on the review page is skipped 
   assert.equal(kind(pager, "hidden", REVIEW), "review_patch");
   assert.equal(kind(pager, "absent", REVIEW), "review_patch");
   assert.equal(kind(pager, "hidden", TAIL), "review_patch");
+  // b16d667e 68-72 as recorded: role/name only (getByRole leaves the invisible button out: ABSENT).
+  assert.equal(kind(click("human-patch: Next page", { role: "button", name: "Next page" }), "absent", TAIL), "review_patch");
 });
 check("Bend 22: the learn's popup OK, absent or hidden, is skipped as a dialog dismissal", () => {
   const ok = click("human-patch: OK", { role: "button", name: "OK" });
   assert.equal(isDialogDismissalClick(ok), true);
   assert.equal(kind(ok, "absent"), "dialog");
   assert.equal(kind(ok, "hidden"), "dialog");
+  // 8bbd9a74 22 as recorded: "advance: OK", exact, with the popup's id as a fallback.
+  assert.equal(kind(click("advance: OK", { role: "button", name: "OK", exact: true, fallbacks: [{ css: "#uploadErrorPopupOk" }] }), "hidden"), "dialog");
   for (const w of ["Close", "Dismiss", "Got it", "Cancel", "×", "Okay"]) assert.equal(isDialogDismissalClick(click(`human-patch: ${w}`)), true, w);
   assert.equal(isDialogDismissalClick(click("human-patch", { css: "div.modal button.btn-close" })), true, "icon-only close by class");
 });
@@ -92,7 +96,7 @@ check("a consent / attestation / signature is never skipped, not even when condi
   assert.equal(kind({ action: "fill", note: "Signature", field: "authorizedSignerName", conditional: true, selector: { label: "Signature" } } as RecipeStep, "absent"), null);
 });
 check("a learn session's record number is never skipped (it is re-anchored to this run's record)", () => {
-  const rn = click("human-patch: 187-26-000309-STR", { role: "link", name: "187-26-000309-STR" });
+  const rn = click("human-patch: 999-26-000001-STR", { role: "link", name: "999-26-000001-STR" });
   assert.ok(learnStateNeverSkipped(rn));
   assert.equal(kind(rn, "absent", TAIL), null);
   assert.equal(kind(rn, "absent", REVIEW), null);

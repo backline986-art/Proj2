@@ -11,16 +11,21 @@
 //      rescue clicked "Book an Inspection" (audit p6).
 //   D. PacifiCorp 102/111/112, Ameren 25 — controls the learn saw only after a reveal; absent on a
 //      job whose answers do not reveal them.
-// Synthetic pages in those shapes (no real names, addresses or ids beyond the control shapes).
+// Synthetic pages in those shapes; the recorded steps copy the saved recipes' selector shapes
+// (recipes241/), never their values.
 //
-// MUST-PASS: A reaches the review stop with the five clicks skipped, named, never clicked into a
-//   timeout (A2: on a last page whose words do not say review, by the recipe's own review tail); B
-//   verifies the agreeing answer and names the differing one, each within seconds; C skips the
-//   absent "OK" and never clicks "Book an Inspection"; D skips the absent conditional control and
-//   still fills what follows; G skips a mid-flow non-advancing click left on a hidden control.
+// MUST-PASS: A reaches the review hand-off with the five clicks skipped, named, never clicked into a
+//   timeout (A2: on a last page whose words do not say review, by the recipe's own review tail; A3:
+//   a write follows, so the page's own review reading decides); B verifies the agreeing answer and
+//   names the differing one, each within seconds (B3: the disabled box); C skips the "OK" of a popup
+//   that is hidden (C) or not there (C2) and never clicks "Book an Inspection"; D skips the absent
+//   conditional control and still fills what follows; G skips a mid-flow non-advancing click left on
+//   a hidden control; H / H2 skip conditional controls on PowerClerk's shape (a generic test hook
+//   on every box) without writing their value into another box.
 // MUST-EXCLUDE: a hidden control that SHOWS within the grace is clicked, not skipped (E); an
 //   ENABLED select is written as before, never judged "answered by the portal" (B2); a conditional
-//   switch whose real box is concealed inside a visible label is written, not skipped (F).
+//   switch whose real box is concealed inside a visible label is written, not skipped (F); a revealed
+//   PowerClerk block is written (H3).
 //
 // Run: npx tsx portal-bot/src/adapters/learnStateSteps.dom.smoke.ts
 import "../smokeArtifactDirs";
@@ -40,6 +45,8 @@ const shell = (body: string, script = ""): string => `<!doctype html><html><head
 </head><body>${body}<script>${script}</script></body></html>`;
 
 // A — PowerClerk's review page: the title strip's pager carries .invisible (there is no next page).
+// A3 writes the reviewer note box after its pager clicks, so only the page's own review reading
+// licenses the skip there.
 const REVIEW = shell(`
   <div class="title-strip">
     <button id="HeaderPrevBtn" class="btn" type="button">Previous page</button>
@@ -48,7 +55,8 @@ const REVIEW = shell(`
   </div>
   <h2>Review and Submit</h2>
   <p>Please review your application before submitting. Account holder: Pat Example.</p>
-  <button id="submitApp" type="button">Submit Application</button>`);
+  <label for="revNote">Note to the reviewer</label><input id="revNote">
+  <button id="SubmitButton" type="button">Submit</button>`);
 
 // A2 — the same pager on a last page whose words do NOT name it the review step (the shared review
 // reading cannot tell): the recipe's own shape says it — nothing after these clicks writes anything
@@ -62,22 +70,31 @@ const SUMMARY = shell(`
   <h2>Application Summary</h2>
   <p>System size 7.6 kW. Account holder: Pat Example.</p>`);
 
-// B — the portal answered two selects (and a box) itself and disabled them; one select is live.
+// B — EnerGov's shape (Tigard 4 and 10: a label primary, an #id fallback, an aria-label on the
+// select): the portal answered two selects itself and disabled them; the live select comes FIRST, so
+// its must-exclude is read before anything else on the page can stop the run. B3 is the disabled box,
+// in a run of its own (a fill on a disabled box is run-fatal on main, which would mask B).
 const ANSWERED = shell(`
   <h2>Location</h2>
-  <label for="juris">Jurisdiction</label>
-  <select id="juris" disabled><option value="">-- Select --</option><option value="TIG" selected>City of Exampleton</option><option value="CO">Example County</option></select>
-  <label for="ptype">Permit Type</label>
-  <select id="ptype" disabled><option value="">-- Select --</option><option value="R" selected>Residential</option><option value="C">Commercial</option></select>
-  <label for="parcel">Parcel</label><input id="parcel" value="R0001234" disabled>
   <label for="scope">Scope of Work</label>
-  <select id="scope"><option value="">-- Select --</option><option value="PV">Solar PV</option><option value="ESS">Battery</option></select>`);
+  <select id="scope" aria-label="Scope of Work"><option value="">-- Select --</option><option value="PV">Solar PV</option><option value="ESS">Battery</option></select>
+  <label for="juris">Jurisdiction</label>
+  <select id="juris" aria-label="Jurisdiction" disabled><option value="">-- Select --</option><option value="TIG" selected>City of Exampleton</option><option value="CO">Example County</option></select>
+  <label for="ptype">Permit Type</label>
+  <select id="ptype" aria-label="Permit Type" disabled><option value="">-- Select --</option><option value="R" selected>Residential</option><option value="C">Commercial</option></select>`);
+const ANSWERED_BOX = shell(`
+  <h2>Location</h2>
+  <label for="parcel">Parcel</label><input id="parcel" aria-label="Parcel" value="R0001234" disabled>`);
 
-// C — no popup is open; the page's own navigation carries a link whose text CONTAINS "ok".
-const NO_POPUP = shell(`
+// C — Bend's shape: the upload-error popup sits in the DOM, display:none (C), or is not there at all
+// (C2); the page's own header carries a control whose text CONTAINS "ok".
+const popupPage = (popup: boolean): string => shell(`
   <nav><a href="/inspections" id="bookLink">Book an Inspection</a> <a href="/lookup">Lookup</a></nav>
+  ${popup ? `<div id="uploadErrorPopup" role="dialog" style="display:none"><p>The file could not be uploaded.</p><button id="uploadErrorPopupOk" type="button">OK</button></div>` : ""}
   <h2>Attachments</h2>
   <label for="desc">Description</label><input id="desc">`);
+const NO_POPUP = popupPage(false);
+const HIDDEN_POPUP = popupPage(true);
 
 // D — a job whose answers revealed nothing: the battery inverter block is not rendered at all.
 const NO_REVEAL = shell(`
@@ -125,7 +142,7 @@ const PC_COND = (style: string): string => shell(`
   <label for="BD7DISC0004Input">Battery Disconnect Manufacturer</label><input id="BD7DISC0004Input" data-test-role="textbox-element" value="DisconnectCo">
   <label for="IQ7QNTY0005Input">Inverter Quantity</label><input id="IQ7QNTY0005Input" data-test-role="textbox-element">`);
 
-const PAGES: Record<string, string> = { "/switch": SWITCH, "/hiddentoggle": HIDDEN_TOGGLE, "/review": REVIEW, "/summary": SUMMARY, "/answered": ANSWERED, "/nopopup": NO_POPUP, "/noreveal": NO_REVEAL, "/lateshow": LATE_SHOW,
+const PAGES: Record<string, string> = { "/switch": SWITCH, "/hiddentoggle": HIDDEN_TOGGLE, "/review": REVIEW, "/summary": SUMMARY, "/answered": ANSWERED, "/answeredbox": ANSWERED_BOX, "/nopopup": NO_POPUP, "/hiddenpopup": HIDDEN_POPUP, "/noreveal": NO_REVEAL, "/lateshow": LATE_SHOW,
   "/pchidden": PC_COND("display:none"), "/pcabsent": PC_COND("absent"), "/pcshown": PC_COND("") };
 const server = http.createServer((req, res) => {
   const url = new URL(req.url || "/", "http://127.0.0.1");
@@ -171,62 +188,85 @@ const browser = await chromium.launch();
 try {
   // ---- A: the PGE header pager on the review page ------------------------------------------------
   if (want("A")) {
-  const pager = (): RecipeStep => ({ action: "click", note: "human-patch: Next page", selector: { css: "#HeaderNextBtn", fallbacks: [{ role: "button", name: "Next page" }] } } as RecipeStep);
-  const a = await run(browser, recipeOf("learnstate-a", "/review", [
-    pager(), pager(), pager(), pager(), pager(),
-    { action: "stopForReview", note: "review" } as RecipeStep,
-    { action: "click", note: "final submit: Submit Application", isFinalSubmit: true, selector: { css: "#submitApp" } } as RecipeStep,
-  ]));
+  // b16d667e 68-73 as recorded: five role/name-only pager clicks (getByRole leaves a visibility:hidden
+  // button out, so they read ABSENT), then the flagged Submit directly — no stopForReview between.
+  const pager = (): RecipeStep => ({ action: "click", note: "human-patch: Next page", selector: { role: "button", name: "Next page" } } as RecipeStep);
+  // The css-primary shape reads HIDDEN instead (the button is found and is invisible).
+  const cssPager = (): RecipeStep => ({ action: "click", note: "human-patch: Next page", selector: { css: "#HeaderNextBtn", fallbacks: [{ role: "button", name: "Next page" }] } } as RecipeStep);
+  const finalSubmit = { action: "click", phase: "review", note: "final submit: Submit (recorded, NOT clicked)", isFinalSubmit: true, selector: { role: "button", name: "Submit", exact: true, fallbacks: [{ css: "#SubmitButton" }] } } as RecipeStep;
+  const a = await run(browser, recipeOf("learnstate-a", "/review", [pager(), pager(), pager(), pager(), pager(), finalSubmit]));
   console.log(`   A ${tail(a)}`);
-  check("A MUST-PASS the run reaches the review stop (ok) instead of FAILING on the hidden pager", a.ok, tail(a));
-  check("A MUST-PASS ...each of the five pager clicks is skipped, named as hidden on the review page",
+  check("A MUST-PASS the run reaches the review hand-off (ok) instead of FAILING on the hidden pager", a.ok, tail(a));
+  check("A MUST-PASS ...each of the five pager clicks is skipped, named as hand-patched on the review page",
     a.aging.filter((n) => /Next page/.test(n) && /review page/i.test(n) && /#237/.test(n)).length === 5, JSON.stringify(a.aging));
   check("A MUST-PASS ...never clicked into a 30 s timeout (whole run well under one click timeout)", a.ms < 30_000, `${a.ms} ms`);
-  check("A ...and the final submit is not clicked (the review stop is the hand-off)", !a.trace.some((t) => /final submit/i.test(t.note) && t.outcome === "ok"), JSON.stringify(a.trace));
+  check("A ...and the final submit is not clicked", !a.trace.some((t) => /final submit/i.test(t.note) && t.outcome === "ok"), JSON.stringify(a.trace));
 
   const a2 = await run(browser, recipeOf("learnstate-a2", "/summary", [
-    pager(), pager(), pager(), pager(), pager(),
+    cssPager(), cssPager(), cssPager(), cssPager(), cssPager(),
     { action: "stopForReview", note: "review" } as RecipeStep,
   ]));
   console.log(`   A2 ${tail(a2)}`);
   check("A2 MUST-PASS in the recipe's review tail (no write before the stop) the hidden pager clicks are skipped and the stop is reached",
     a2.ok && a2.aging.filter((n) => /Next page/.test(n) && /#237/.test(n)).length === 5, tail(a2));
   check("A2 MUST-PASS ...without a click timeout", a2.ms < 30_000, `${a2.ms} ms`);
+
+  // A3 — NOT a review tail (a write follows the clicks): only the page's own review reading licenses it.
+  const a3 = await run(browser, recipeOf("learnstate-a3", "/review", [
+    cssPager(), cssPager(),
+    { action: "fill", note: "Note to the reviewer", field: "workDescription", selector: { label: "Note to the reviewer", fallbacks: [{ css: "#revNote" }] } } as RecipeStep,
+    { action: "stopForReview", note: "review" } as RecipeStep,
+  ]), { workDescription: "Rooftop solar" });
+  console.log(`   A3 ${tail(a3)}`);
+  check("A3 MUST-PASS on a page that reads as the review step, hidden hand-patched pager clicks are skipped (the page says review)",
+    a3.ok && a3.aging.filter((n) => /Next page/.test(n) && /reads as the review step/.test(n) && /#237/.test(n)).length === 2, tail(a3));
+  check("A3 MUST-PASS ...and the write after them lands", a3.values.revNote === "Rooftop solar", JSON.stringify(a3.values));
   }
 
   // ---- B: selects the portal already answered and disabled --------------------------------------
   if (want("B")) {
+  // Tigard 4 / 10 as recorded: the label, then the #id.
+  const tig = (note: string, id: string, value: string): RecipeStep => ({ action: "select", phase: "fill", note, value, selector: { label: note, fallbacks: [{ css: `#${id}` }] } } as RecipeStep);
   const b = await run(browser, recipeOf("learnstate-b", "/answered", [
-    { action: "select", note: "Jurisdiction", value: "City of Exampleton", selector: { css: "#juris", fallbacks: [{ label: "Jurisdiction" }] } } as RecipeStep,
-    { action: "select", note: "Permit Type", value: "Commercial", selector: { css: "#ptype", fallbacks: [{ label: "Permit Type" }] } } as RecipeStep,
-    { action: "fill", note: "Parcel", field: "parcelNumber", selector: { css: "#parcel", fallbacks: [{ label: "Parcel" }] } } as RecipeStep,
-    { action: "select", note: "Scope of Work", value: "Solar PV", selector: { css: "#scope", fallbacks: [{ label: "Scope of Work" }] } } as RecipeStep,
+    tig("Scope of Work", "scope", "Solar PV"),
+    tig("Jurisdiction", "juris", "City of Exampleton"),
+    tig("Permit Type", "ptype", "Commercial"),
     { action: "stopForReview", note: "review" } as RecipeStep,
-  ]), { parcelNumber: "R0001234" });
+  ]));
   console.log(`   B ${tail(b)}`);
+  check("B2 MUST-EXCLUDE the ENABLED select is written as before", b.values.scope === "PV" && b.verified.includes("Scope of Work"), JSON.stringify(b.values));
   check("B MUST-PASS the agreeing disabled select is VERIFIED (not a false SKIPPED)", b.verified.includes("Jurisdiction") && !b.skipped.some((s) => /Jurisdiction/.test(s)), tail(b));
   check("B MUST-PASS ...named as answered by the portal", b.aging.some((n) => /Jurisdiction/.test(n) && /answered by the portal/i.test(n)), JSON.stringify(b.aging));
   check("B MUST-PASS the differing disabled select is a NAMED drift (portal's answer vs this job's), not 'landed nothing'",
-    b.drift.some((w) => /Permit Type/.test(w) && /answered by the portal/i.test(w)) && !b.drift.some((w) => /Permit Type.*landed nothing/.test(w)), JSON.stringify(b.drift));
-  check("B MUST-PASS the agreeing disabled box is verified too", b.verified.includes("Parcel"), tail(b));
+    b.drift.some((w) => /Permit Type/.test(w) && /answered by the portal/i.test(w)) && !b.drift.some((w) => /landed nothing/.test(w)), JSON.stringify(b.drift));
   check("B MUST-PASS no 38 s select timeouts — the whole page in well under one select's old cost", b.ms < 20_000, `${b.ms} ms`);
-  check("B2 MUST-EXCLUDE the ENABLED select is written as before", b.values.scope === "PV" && b.verified.includes("Scope of Work"), JSON.stringify(b.values));
-  check("B ...and nothing typed into the portal's answers", b.values.juris === "TIG" && b.values.ptype === "R" && b.values.parcel === "R0001234", JSON.stringify(b.values));
+  check("B ...and nothing typed into the portal's answers", b.values.juris === "TIG" && b.values.ptype === "R", JSON.stringify(b.values));
+
+  const b3 = await run(browser, recipeOf("learnstate-b3", "/answeredbox", [
+    { action: "fill", phase: "fill", note: "Parcel", field: "parcelNumber", selector: { label: "Parcel", fallbacks: [{ css: "#parcel" }] } } as RecipeStep,
+    { action: "stopForReview", note: "review" } as RecipeStep,
+  ]), { parcelNumber: "R0001234" });
+  console.log(`   B3 ${tail(b3)}`);
+  check("B3 MUST-PASS the agreeing disabled box is verified, nothing typed, no fill timeout", b3.ok && b3.verified.includes("Parcel") && b3.values.parcel === "R0001234" && b3.ms < 20_000, tail(b3));
   }
 
   // ---- C: the learn's popup "OK", no popup at replay ---------------------------------------------
   if (want("C")) {
-  const c = await run(browser, recipeOf("learnstate-c", "/nopopup", [
-    { action: "click", note: "human-patch: OK", selector: { role: "button", name: "OK" } } as RecipeStep,
-    { action: "fill", note: "Description", field: "workDescription", selector: { css: "#desc", fallbacks: [{ label: "Description" }] } } as RecipeStep,
-    { action: "stopForReview", note: "review" } as RecipeStep,
-  ]), { workDescription: "Rooftop solar" });
-  console.log(`   C ${tail(c)}`);
-  check("C MUST-PASS the absent popup's OK is skipped as not applicable, named", c.aging.some((n) => /"OK"/.test(n) && /not applicable/i.test(n) && /#237/.test(n)), JSON.stringify(c.aging));
-  // The name rescue takes the SHORTEST label containing "ok" — "Lookup" here, "Book an Inspection"
-  // live. Either way the page is left; the application's own URL must still be the one shown.
-  check("C MUST-PASS ...and no navigation link is clicked in its place (still on the application)", new URL(c.url).pathname === "/nopopup", c.url);
-  check("C MUST-PASS ...the run carries on: the next step fills and the review stop is reached", c.ok && c.values.desc === "Rooftop solar", tail(c));
+  // Bend 22 as recorded: "advance: OK", exact, with the popup's own id as a fallback.
+  for (const [key, path] of [["C", "/hiddenpopup"], ["C2", "/nopopup"]] as const) {
+    const c = await run(browser, recipeOf(`learnstate-${key.toLowerCase()}`, path, [
+      { action: "click", phase: "fill", note: "advance: OK", selector: { role: "button", name: "OK", exact: true, fallbacks: [{ css: "#uploadErrorPopupOk" }] } } as RecipeStep,
+      { action: "fill", note: "Description", field: "workDescription", selector: { css: "#desc", fallbacks: [{ label: "Description" }] } } as RecipeStep,
+      { action: "stopForReview", note: "review" } as RecipeStep,
+    ]), { workDescription: "Rooftop solar" });
+    console.log(`   ${key} ${tail(c)}`);
+    const where = path === "/hiddenpopup" ? "in the DOM but hidden" : "not on the page";
+    check(`${key} MUST-PASS the popup's OK (${where}) is skipped as not applicable, named`, c.aging.some((n) => /"OK"/.test(n) && /not applicable/i.test(n) && /#237/.test(n)), JSON.stringify(c.aging));
+    // The name rescue takes the SHORTEST label containing "ok" — "Lookup" here, "Book an Inspection"
+    // live. Either way the page is left; the application's own URL must still be the one shown.
+    check(`${key} MUST-PASS ...and no navigation link is clicked in its place (still on the application)`, new URL(c.url).pathname === path, c.url);
+    check(`${key} MUST-PASS ...the run carries on: the next step fills and the review stop is reached`, c.ok && c.values.desc === "Rooftop solar", tail(c));
+  }
   }
 
   // ---- D: a control the learn saw only after a reveal --------------------------------------------
