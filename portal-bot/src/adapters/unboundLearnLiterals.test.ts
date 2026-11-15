@@ -38,15 +38,16 @@ check("p3 MUST-EXCLUDE: the portal's own words still replay (and a bare count is
 // ── (2) THE STORAGE QUESTION THAT LIVES ONLY IN THE SECTION ────────────────────────────────────
 type Replay = {
   skipForNoBattery(s: RecipeStep): boolean; isBatteryDeclaration(s: RecipeStep): boolean;
-  batteryRadioConflict(s: RecipeStep): string | null; noteReplayedLearnAnswer(s: RecipeStep): void; agingNotes: string[];
+  batteryRadioConflict(s: RecipeStep): string | null; noteReplayedLearnAnswer(s: RecipeStep): void;
+  reviewHandoffNotes: string[]; agingNotes: string[];
 };
 const replayWith = (hasBattery: string): Replay => {
   const a = Object.create(RecipeAdapter.prototype) as Record<string, unknown>;
   a.fieldValues = { hasBattery };
   a.recipe = { steps: [] };
   a.agingNotes = [];
-  a.learnAnswersListed = new Set<string>();
-  a.learnAnswerOverflow = null;
+  a.reviewHandoffNotes = [];
+  a.learnAnswersListed = [];
   return a as unknown as Replay;
 };
 const radio = (label: string, section: string): RecipeStep =>
@@ -90,11 +91,25 @@ check("the hand-off names an unbound select and a radio answer replayed as recor
   r.noteReplayedLearnAnswer({ action: "select", phase: "fill", note: "Application Type", selector: { label: "Application Type" }, value: "Change to an existing system" } as RecipeStep);
   r.noteReplayedLearnAnswer(radio("Load Side", "Is this proposed generation to be connected on the line or load side of the main"));
   r.noteReplayedLearnAnswer(ESS_NO);
-  assert.deepEqual(r.agingNotes.map((n) => n.replace(/ — bound to nothing.*$/, "")), [
-    "replayed the learn's answer: \"Application Type\" = \"Change to an existing system\"",
-    "replayed the learn's answer: \"Is this proposed generation to be connected on the line or load side o\" = \"Load Side\"",
-    "replayed the learn's answer: \"Do you seek to install an Energy Storage System (ESS), or batteries as\" = \"No\"",
+  assert.deepEqual(r.reviewHandoffNotes, [
+    "replayed the learn's answer: \"Application Type\" = \"Change to an existing system\"; "
+    + "\"Is this proposed generation to be connected on the line or l\" = \"Load Side\"; "
+    + "\"Do you seek to install an Energy Storage System (ESS), or ba\" = \"No\""
+    + " — bound to nothing, so each of these 3 is the recorded job's answer; confirm each is this job's.",
   ]);
+  assert.deepEqual(r.agingNotes, [], "not a re-record signal: the benchmark and the KPI read agingNotes as \"took another route\"");
+});
+check("ONE hand-off line, rewritten in place — never six notes crowding out a held payment", () => {
+  const r = replayWith("");
+  r.reviewHandoffNotes.push("an earlier hand-off note");
+  r.noteReplayedLearnAnswer({ action: "select", phase: "fill", note: "Building Use", selector: { label: "Building Use" }, value: "Single Family Dwelling" } as RecipeStep);
+  assert.match(r.reviewHandoffNotes[1], /^replayed the learn's answer: "Building Use" = "Single Family Dwelling" — bound to nothing, so it is the recorded job's answer; confirm it is this job's\.$/);
+  r.reviewHandoffNotes = ["a note that leads", ...r.reviewHandoffNotes]; // a later reassignment (the payment note leads)
+  for (let i = 1; i <= 12; i++) r.noteReplayedLearnAnswer({ action: "select", phase: "fill", note: `Question ${i}`, selector: { label: `Question ${i}` }, value: `Answer ${i}` } as RecipeStep);
+  r.noteReplayedLearnAnswer({ action: "select", phase: "fill", note: "Question 1", selector: { label: "Question 1" }, value: "Answer 1" } as RecipeStep);
+  assert.equal(r.reviewHandoffNotes.length, 3);
+  assert.equal(r.reviewHandoffNotes[0], "a note that leads");
+  assert.match(r.reviewHandoffNotes[2], /^replayed the learn's answer: "Building Use" = "Single Family Dwelling"; "Question 1" = "Answer 1";.*"Question 9" = "Answer 9" \(\+3 more\) — bound to nothing, so each of these 13 is/);
 });
 check("MUST-EXCLUDE: answers taken from THIS job, and checks that answer no question, are not listed", () => {
   const r = replayWith("No");
@@ -103,14 +118,7 @@ check("MUST-EXCLUDE: answers taken from THIS job, and checks that answer no ques
   r.noteReplayedLearnAnswer({ action: "check", phase: "fill", note: "record type (verified): Residential Solar", selector: { label: "Residential Solar" } } as RecipeStep);
   r.noteReplayedLearnAnswer({ action: "check", phase: "fill", note: "I have read and accept the above terms:", selector: { label: "I have read and accept the above terms:" } } as RecipeStep);
   r.noteReplayedLearnAnswer(ESS_NO); // answered from hasBattery No — this job's answer
-  assert.deepEqual(r.agingNotes, []);
-});
-check("past the first fifteen, ONE running line carries the rest (a stop early still carries what was listed)", () => {
-  const r = replayWith("");
-  for (let i = 1; i <= 18; i++) r.noteReplayedLearnAnswer({ action: "select", phase: "fill", note: `Question ${i}`, selector: { label: `Question ${i}` }, value: `Answer ${i}` } as RecipeStep);
-  r.noteReplayedLearnAnswer({ action: "select", phase: "fill", note: "Question 1", selector: { label: "Question 1" }, value: "Answer 1" } as RecipeStep);
-  assert.equal(r.agingNotes.length, 16);
-  assert.match(r.agingNotes[15], /^replayed the learn's answer for 3 more unbound question\(s\): "Question 16" = "Answer 16"; "Question 17" = "Answer 17"; "Question 18" = "Answer 18"/);
+  assert.deepEqual(r.reviewHandoffNotes, []);
 });
 
 if (failures) { console.error(`\n${failures} unbound-learn-literal check(s) FAILED.`); process.exit(1); }

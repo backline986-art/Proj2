@@ -90,7 +90,7 @@ const searchSteps = (dir: string, type: string): RecipeStep[] => [
   { action: "select", phase: "fill", selector: { css: "#st", label: "State:" }, field: "state", note: "State:" },
 ] as RecipeStep[];
 
-async function replay(recipe: PortalRecipe, project: ProjectRecord, read: string[]): Promise<{ values: Record<string, string>; drift: string[]; aging: string[]; changes: string[] }> {
+async function replay(recipe: PortalRecipe, project: ProjectRecord, read: string[]): Promise<{ values: Record<string, string>; drift: string[]; changes: string[]; handoff: string[]; stopMessage: string }> {
   const fieldValues = resolveRecipeFieldValues(db, project, "accela", "permit");
   const binding = bindRecipeForReplay({
     steps: recipe.steps, portalUrl: recipe.portalUrl, project: { ...project, city: project.city } as never,
@@ -109,9 +109,16 @@ async function replay(recipe: PortalRecipe, project: ProjectRecord, read: string
     values[sel] = await page.locator(sel).evaluate((el) => (el instanceof HTMLInputElement && el.type === "radio")
       ? (el.checked ? "checked" : "") : (el as HTMLInputElement | HTMLSelectElement).value).catch(() => "?");
   }
-  const priv = a as unknown as { driftWarnings: string[]; agingNotes: string[] };
+  const priv = a as unknown as { driftWarnings: string[] };
+  // THE HAND-OFF, as the person reads it: the stop's own message and its reviewHandoffNotes (what the
+  // project's review banner shows), not a private field.
+  const stop = await a.stopAtReview().catch((e: unknown) => ({ ok: false, message: String((e as Error)?.message ?? e), data: {} }));
+  const stopData = (stop as { data?: { reviewHandoffNotes?: string[] } }).data ?? {};
   await browser.close();
-  return { values, drift: [...priv.driftWarnings], aging: [...priv.agingNotes], changes: binding.changes.map((c) => `${c.kind}: ${c.reason}`) };
+  return {
+    values, drift: [...priv.driftWarnings], changes: binding.changes.map((c) => `${c.kind}: ${c.reason}`),
+    handoff: [...(stopData.reviewHandoffNotes ?? [])], stopMessage: String((stop as { message?: string }).message ?? ""),
+  };
 }
 
 // ── E4: the learn job's NW ... ST must not search an SE ... Ave project ──────────────────────────
@@ -139,10 +146,14 @@ check("E4b: a recorded word answers in words — Southeast / Avenue, never \"Cre
   words.values["#dir"] === "Southeast" && words.values["#type"] === "Avenue", JSON.stringify(words.values));
 
 // ── H1: the hand-off names the unbound answer it replayed ───────────────────────────────────────
-check("H1: the unbound select replayed as recorded is named on the hand-off",
-  se.aging.some((n) => /^replayed the learn's answer: "Customer Type:" = "Residential"/.test(n)), JSON.stringify(se.aging));
-check("H1: a bound select (State) and the bound address components are not",
-  !se.aging.some((n) => /^replayed the learn's answer: "(State:|Direction:|Street Type:)"/.test(n)), JSON.stringify(se.aging));
+console.log(`   hand-off notes -> ${JSON.stringify(se.handoff)}`);
+const learnLine = se.handoff.find((n) => n.startsWith("replayed the learn's answer:")) ?? "";
+check("H1: the unbound select replayed as recorded is named on the review hand-off",
+  /^replayed the learn's answer: "Customer Type:" = "Residential" — bound to nothing/.test(learnLine), JSON.stringify(se.handoff));
+check("H1: ...and in the stop's own message the person reads",
+  se.stopMessage.includes("replayed the learn's answer: \"Customer Type:\" = \"Residential\""), se.stopMessage.slice(0, 300));
+check("H1: a bound select (State) and the bound address components are not named",
+  !/"(State:|Direction:|Street Type:)"/.test(learnLine), learnLine);
 
 // ── R1: the storage radio whose question is only its section ────────────────────────────────────
 const radioSteps = [
@@ -159,8 +170,10 @@ check("R1: on a job WITH a battery the learn job's No is not ticked",
   withBattery.values["#essNo"] === "", `No=${JSON.stringify(withBattery.values["#essNo"])} — the utility would be told there is no storage`);
 check("R1: ...nor is Yes chosen by position (the recipe never recorded that control)",
   withBattery.values["#essYes"] === "", JSON.stringify(withBattery.values));
-check("R1: ...and the question is named for a person",
-  withBattery.drift.some((d) => /^left "Do you seek to install an Energy Storage System.*for a person/.test(d)), JSON.stringify(withBattery.drift));
+check("R1: ...and the question is named for a person, on the review hand-off too",
+  withBattery.drift.some((d) => /^left "Do you seek to install an Energy Storage System.*for a person/.test(d))
+    && withBattery.handoff.some((d) => /^left "Do you seek to install an Energy Storage System.*for a person/.test(d)),
+  JSON.stringify({ drift: withBattery.drift, handoff: withBattery.handoff }));
 
 server.close();
 try { (db as unknown as { close?: () => void }).close?.(); } catch { /* the scratch DB is ours */ }

@@ -17,6 +17,8 @@ const FEE_TIER_NO_BOX_REASON = "the recorded kVA tier box was not found on this 
 /** #166: the learner's note on a person-verified record-type / work-item pick (autoLearnAdapter
  *  noteVerifiedRecordTypeTicked) — the replay finds that step by label, never by position. */
 const VERIFIED_RECORD_TYPE_NOTE = /^\s*record type \(verified\):\s*/i;
+/** #236: the review hand-off line naming the unbound answers a replay typed as recorded. */
+export const LEARN_ANSWER_NOTE_PREFIX = "replayed the learn's answer:";
 import { collectPortalErrorBanner } from "../safeAction";
 import { GROUP_TOGGLE_CSS, recordTypeGroupOf, tagToggleByText, toggledListOpen } from "./recordTypeGroup";
 import { SERVICE_FEEDER_200A_FIELD, SERVICE_FEEDER_400A_FIELD, isServiceFeeder200Label, isServiceFeeder400Label } from "../../../shared/src/serviceLineLabels";
@@ -5714,11 +5716,14 @@ export class RecipeAdapter extends BasePortalAdapter {
    *  apart, so it names every one on the review hand-off instead of letting a filled control read as
    *  checked: an unknown must not read as reassurance. Answers the run took from THIS job are not
    *  listed (a bound key, a battery declaration answered from hasBattery, a policy default, the
-   *  verified record type, the submitting company). Per item while the run goes, so a run that stops
-   *  early still carries them; the first LEARN_ANSWER_LINES each get a line, the rest one running line. */
-  private readonly learnAnswersListed = new Set<string>();
-  private learnAnswerOverflow: { at: number; labels: string[] } | null = null;
-  private static readonly LEARN_ANSWER_LINES = 15;
+   *  verified record type, the submitting company).
+   *
+   *  ONE running line in reviewHandoffNotes (the channel the stop message and the project's review
+   *  banner read), found by its prefix and rewritten as the run goes: the banner keeps six notes, so a
+   *  list must never crowd out a held payment or an unsaved answer. Not agingNotes: those mean "the
+   *  engine took another route; worth re-recording" to the benchmark and the KPI. */
+  private readonly learnAnswersListed: string[] = [];
+  private static readonly LEARN_ANSWER_SHOWN = 10;
   private noteReplayedLearnAnswer(step: RecipeStep): void {
     if (step.field || step.sensitive || (step.action !== "select" && step.action !== "check")) return;
     const note = String(step.note ?? "");
@@ -5742,18 +5747,16 @@ export class RecipeAdapter extends BasePortalAdapter {
       if (!answer || (!bareAnswerPolarity(answer) && !asks)) return;
       question = section || note;
     }
-    const q = question.replace(/\s+/g, " ").trim().slice(0, 70);
-    const a = answer.replace(/\s+/g, " ").trim().slice(0, 60);
-    const key = `${q}\u0000${a}`;
-    if (this.learnAnswersListed.has(key)) return;
-    this.learnAnswersListed.add(key);
-    if (this.learnAnswersListed.size <= RecipeAdapter.LEARN_ANSWER_LINES) {
-      this.agingNotes.push(`replayed the learn's answer: "${q}" = "${a}" — bound to nothing, so it is the recorded job's; confirm it is this job's`);
-      return;
-    }
-    const o = this.learnAnswerOverflow ?? (this.learnAnswerOverflow = { at: this.agingNotes.push("") - 1, labels: [] });
-    o.labels.push(`"${q.slice(0, 40)}" = "${a.slice(0, 30)}"`);
-    this.agingNotes[o.at] = `replayed the learn's answer for ${o.labels.length} more unbound question(s): ${o.labels.join("; ")} — confirm each is this job's`.slice(0, 600);
+    const item = `"${question.replace(/\s+/g, " ").trim().slice(0, 60)}" = "${answer.replace(/\s+/g, " ").trim().slice(0, 40)}"`;
+    if (this.learnAnswersListed.includes(item)) return;
+    this.learnAnswersListed.push(item);
+    const n = this.learnAnswersListed.length;
+    const shown = this.learnAnswersListed.slice(0, RecipeAdapter.LEARN_ANSWER_SHOWN).join("; ");
+    const more = n > RecipeAdapter.LEARN_ANSWER_SHOWN ? ` (+${n - RecipeAdapter.LEARN_ANSWER_SHOWN} more)` : "";
+    const line = `${LEARN_ANSWER_NOTE_PREFIX} ${shown}${more} — bound to nothing, so ${n === 1 ? "it is" : `each of these ${n} is`} the recorded job's answer; confirm ${n === 1 ? "it is" : "each is"} this job's.`;
+    const at = this.reviewHandoffNotes.findIndex((note) => note.startsWith(LEARN_ANSWER_NOTE_PREFIX));
+    if (at >= 0) this.reviewHandoffNotes[at] = line;
+    else this.reviewHandoffNotes.push(line);
   }
 
   /** The project's hasBattery, read the one way (shared parseHasBattery): false = no battery,
@@ -6338,6 +6341,8 @@ export class RecipeAdapter extends BasePortalAdapter {
     const radioConflict = this.batteryRadioConflict(step);
     if (radioConflict) {
       this.driftWarnings.push(radioConflict);
+      // The person taking the review page answers it, so the hand-off says so too.
+      if (!this.reviewHandoffNotes.includes(radioConflict)) this.reviewHandoffNotes.push(radioConflict);
       return true; // not a step failure: the question is the reviewer's, and the warning says so
     }
     // F1 — A kVA TIER BOX IS DECIDED FROM THE PAGE'S OWN LABELS, not from the recorded selector:
