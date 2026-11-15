@@ -34,7 +34,8 @@ const server = http.createServer((req, res) => {
     // The result renders IN PLACE — no redirect, so the document is a POST result.
     res.writeHead(200, { "content-type": "text/html" });
     res.end(`<!doctype html><html><body><h1>Parcel search results</h1><p>1 parcel found.</p>
-      <a id="nc" href="/nocontent">Refresh status</a> <a id="dl" href="/receipt.pdf">Download receipt</a></body></html>`);
+      <a id="nc" href="/nocontent">Refresh status</a> <a id="dl" href="/receipt.pdf">Download receipt</a>
+      <button id="add-row" type="button" style="display:none">Add Parcel Row</button></body></html>`);
     return;
   }
   gets[url.pathname] = (gets[url.pathname] ?? 0) + 1;
@@ -44,7 +45,8 @@ const server = http.createServer((req, res) => {
   res.writeHead(200, { "content-type": "text/html" });
   res.end(`<!doctype html><html><head><title>Portal</title></head><body><h1>Step 2: Parcel</h1>
     <form method="post" action="/lookup"><label for="q">Parcel Number</label><input id="q" name="q">
-    <button id="go" type="submit">Look up parcel</button></form></body></html>`);
+    <button id="go" type="submit">Look up parcel</button></form>
+    <button id="add-row" type="button" style="display:none">Add Parcel Row</button></body></html>`);
 });
 await new Promise<void>((r) => server.listen(0, "127.0.0.1", () => r()));
 const base = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
@@ -53,7 +55,12 @@ const recipe = (steps: RecipeStep[]): PortalRecipe => ({
   portalPlatform: "fixture", portalUrl: `${base}/form`, status: "complete", version: 1, createdBy: "s", createdAt: "", updatedAt: "", notes: "",
   steps,
 } as unknown as PortalRecipe);
-const missing = { action: "click", selector: { css: "#does-not-exist", role: "button", name: "Add Parcel Row" }, note: "add parcel row" } as RecipeStep;
+// THE STEP THAT TIMES OUT: a control that IS on the page and never becomes actionable (hidden), so the
+// click waits out its timeout and the retry loop runs. It used to be a control nothing on the page
+// matched — since #232 that fails named after one bounded wait and is never reloaded (a reload cannot
+// conjure a control the page does not have), so it no longer reaches the retry this smoke guards.
+// css only: a role+name level excludes hidden elements and would match nothing.
+const missing = { action: "click", selector: { css: "#add-row" }, note: "add parcel row" } as RecipeStep;
 
 const browser = await chromium.launch();
 try {
@@ -69,7 +76,7 @@ try {
     return { r, warnings: (adapter as unknown as { driftWarnings: string[] }).driftWarnings.join(" | ") };
   };
 
-  // MUST-EXCLUDE: POST result rendered in place, then a step that never resolves.
+  // MUST-EXCLUDE: POST result rendered in place, then a step whose control never becomes actionable.
   posts = 0;
   const a = await run([
     { action: "goto", value: `${base}/form`, note: "open" } as RecipeStep,

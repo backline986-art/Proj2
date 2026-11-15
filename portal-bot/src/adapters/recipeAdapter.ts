@@ -2094,8 +2094,9 @@ export class RecipeAdapter extends BasePortalAdapter {
     // This step used to close every run with the staged sentence whatever the replay had done: live
     // 2026-11-14 all six failed scratch replays ended with it, Meridian's after ZERO steps (its entry
     // goto was refused). The run's own ending decides it — ok stays as it was (the runner reads the
-    // failure from the fill step), and nothing below reads the page.
-    if (this.replayEnd && !this.replayEnd.ok) {
+    // failure from the fill step), and nothing below reads the page. A page the run HANDED OVER at
+    // review (#333) is the person's from then on: what became of it is told below, whatever failed after.
+    if (this.replayEnd && !this.replayEnd.ok && !this.handedOverBackstop) {
       const end = this.replayEnd;
       // What the person must know about the page still stands (an answer not yet saved, a call held back).
       const notes = this.reviewHandoffNotes;
