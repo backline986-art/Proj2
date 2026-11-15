@@ -21,6 +21,8 @@
 //         certification. MUST: ticked; the recorded final submit after it is NOT clicked.
 //   E5b — the same box named by aria-labelledby (no <label for>): main already ticks it, and
 //         this change must keep doing so (regression guard).
+//   E5c — the E5 box inside a layout table beside another, differently named checkbox (Accela lays
+//         pages out in tables): two boxes in one table are not a results grid. MUST: ticked.
 //   p2A — a contact search table (per-row Add, Tigard's shape). The recipe's css keys the row by
 //         the LEARN company's name and street number; for another client main matched nothing
 //         and stalled. MUST: THIS client's row's Add, in seconds.
@@ -79,15 +81,20 @@ const dialogHost = (variant: string): string => `<!doctype html><html><head><tit
 
 const today = ((): string => { const d = new Date(); return `${String(d.getMonth() + 1).padStart(2, "0")}/${String(d.getDate()).padStart(2, "0")}/${d.getFullYear()}`; })();
 const CERT_ID = "ctl00_PlaceHolderMain_capReviewCertification1_termReviewAccept";
+const certLabelled = `<input type="checkbox" id="${CERT_ID}" name="ctl00$PlaceHolderMain$capReviewCertification1$termReviewAccept"><label for="${CERT_ID}">By checking this box, I agree to the above certification.</label>`;
 const review = (variant: string): string => `<!doctype html><html><head><title>Step 4: Review</title></head><body>
 <h1>Step 4: Review</h1>
 <div id="certText">Per State Statute: I certify that the information above is true and correct.</div>
-<div class="ACA_TabRow">
+${variant === "E5c"
+    // Accela lays pages out in tables: the certification shares one with an opt-in box.
+    ? `<table class="ACA_Layout"><tr><td><input type="checkbox" id="ctl00_PlaceHolderMain_chkEmailNotice" name="emailNotice"><label for="ctl00_PlaceHolderMain_chkEmailNotice">Email me status updates</label></td></tr>
+<tr><td>${certLabelled} <span class="ACA_Date">Date: ${today}</span></td></tr></table>`
+    : `<div class="ACA_TabRow">
 ${variant === "E5"
-    ? `<input type="checkbox" id="${CERT_ID}" name="ctl00$PlaceHolderMain$capReviewCertification1$termReviewAccept"><label for="${CERT_ID}">By checking this box, I agree to the above certification.</label>`
+    ? certLabelled
     : `<span id="certSentence">By checking this box, I agree to the above certification.</span> <input type="checkbox" id="${CERT_ID}" aria-labelledby="certSentence" name="ctl00$PlaceHolderMain$capReviewCertification1$termReviewAccept">`}
 <span class="ACA_Date">Date: ${today}</span>
-</div>
+</div>`}
 <a id="ctl00_PlaceHolderMain_actionBarBottom_btnContinue" href="javascript:void(0)" onclick="window.__finalClicks=(window.__finalClicks||0)+1;return false;">Continue Application &raquo;</a>
 </body></html>`;
 
@@ -108,7 +115,8 @@ ${rows.map((r, i) => `<tr id="c${i}">${r.map((c) => `<td>${c}</td>`).join("")}<t
 const server = http.createServer((req, res) => {
   const u = new URL(req.url ?? "/", "http://x");
   const v = u.searchParams.get("v") ?? "";
-  const body = u.pathname === "/popup" ? popup(v) : u.pathname === "/dialog" ? dialogHost(v) : u.pathname === "/review" ? review(v) : u.pathname === "/contacts" ? contacts(v) : "";
+  const body = u.pathname === "/popup" ? popup(v) : u.pathname === "/dialog" ? dialogHost(v) : u.pathname === "/review" ? review(v) : u.pathname === "/contacts" ? contacts(v)
+    : u.pathname === "/lots" ? `<!doctype html><html><body><h2>Search Results</h2>${grid("Lot", ["Number", "Lot"], [["R4410062210", "7"], ["R5521007731", "4"]], true)}</body></html>` : "";
   res.writeHead(body ? 200 : 404, { "Content-Type": "text/html" });
   res.end(body || "not found");
 });
@@ -215,7 +223,7 @@ const ticked = async (page: Page): Promise<Record<string, boolean>> => {
   await page.context().close();
 }
 // ---- E5 / E5b -------------------------------------------------------------------------------
-for (const variant of ["E5", "E5b"]) {
+for (const variant of ["E5", "E5b", "E5c"]) {
   const page = await freshPage();
   const r = await replay(page, recipeOf(`/review?v=${variant}`, CERT_STEPS), THIS_JOB);
   const state = await page.evaluate((id: string) => ({
@@ -225,6 +233,24 @@ for (const variant of ["E5", "E5b"]) {
   console.log(`   ${variant}: ok=${r.ok} ${r.seconds.toFixed(1)}s cert=${state.checked} finalClicks=${state.finalClicks} finalSubmitClicked=${String(r.data.finalSubmitClicked)}\n       ${notes(r)}`);
   check(`${variant}: the certification is ticked on a day after the learn (a dated label is not identity)`, state.checked === true, notes(r));
   check(`${variant}: the recorded final submit is NOT clicked (no approval, no PORTAL_ALLOW_FINAL_SUBMIT)`, state.finalClicks === 0 && r.data.finalSubmitClicked !== true, `finalClicks=${state.finalClicks}`);
+  await page.context().close();
+}
+// ---- E3c (must-exclude, red on neither side) --------------------------------------------------
+// A grid tick whose control names no role ("ucLotList") is not routed to a picker; its recorded
+// label is a number, which is no identity evidence — and a results-grid row is never ticked by the
+// position the recording held. main skips it too (its label re-anchor finds no shared word); this
+// pins that the volatile-label rule does not turn it into an ordinal tick.
+{
+  const page = await freshPage();
+  const r = await replay(page, recipeOf("/lots", [{
+    action: "check", phase: "fill",
+    selector: { label: "R7730012645", fallbacks: [{ css: `#${PP}_ucLotList_gv_CB_0` }] },
+    note: "R7730012645",
+    fingerprint: { id: `${PP}_ucLotList_gv_CB_0`, name: `${PP}_ucLotList_gv_RadioButtonFieldGroupName` },
+  }]), THIS_JOB);
+  const lots = await page.evaluate(() => Array.from(document.querySelectorAll("input[type=radio]")).map((el) => (el as HTMLInputElement).checked)).catch(() => [true]);
+  console.log(`   E3c: ok=${r.ok} ${r.seconds.toFixed(1)}s ticked=${JSON.stringify(lots)}\n       ${notes(r)}`);
+  check("E3c: an unrouted grid tick with a numeric label ticks NO row (never the recorded position)", lots.every((x) => !x), JSON.stringify(lots));
   await page.context().close();
 }
 // ---- p2A / p2B / p2C ------------------------------------------------------------------------

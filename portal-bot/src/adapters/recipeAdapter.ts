@@ -5571,14 +5571,28 @@ export class RecipeAdapter extends BasePortalAdapter {
     // grid is a ROW, and a volatile label cannot say which one — that row is chosen by this job's
     // own value (pickResultRowForProject), never by the position the recording happened to hold.
     if (isVolatileLabel(recorded)) {
+      // A RESULTS GRID IS ORDINAL SIBLINGS, NOT TWO BOXES IN ONE TABLE: Accela lays whole pages out in
+      // tables, so a certification sharing a layout table with an opt-in box is no grid. A grid's
+      // rows carry the same control again — radios sharing one name, or ids that differ only by
+      // their row numbers (…_gv_CB_0 / _CB_1, …_ctl02_CB_0 / _ctl03_CB_0).
       const inResultsGrid = await el0.evaluate((el: Element) => {
         const ty = ((el as HTMLInputElement).type || "").toLowerCase();
         if (el.tagName.toLowerCase() !== "input" || (ty !== "radio" && ty !== "checkbox")) return false;
-        const table = el.closest("tr")?.closest("table") as HTMLTableElement | null;
-        if (!table) return false;
-        let rows = 0;
-        for (const tr of Array.from(table.rows)) if (tr.querySelector(`input[type="${ty}"]`) && tr.querySelector("td")) rows++;
-        return rows >= 2;
+        const ownRow = el.closest("tr");
+        const table = ownRow?.closest("table") as HTMLTableElement | null;
+        if (!ownRow || !table) return false;
+        const name = el.getAttribute("name") || "";
+        const id = el.getAttribute("id") || "";
+        const shape = id && /\d/.test(id) ? id.replace(/\d+/g, "#") : "";
+        for (const tr of Array.from(table.rows)) {
+          if (tr === ownRow) continue;
+          for (const other of Array.from(tr.querySelectorAll(`input[type="${ty}"]`))) {
+            if (ty === "radio" && name && other.getAttribute("name") === name) return true;
+            const oid = other.getAttribute("id") || "";
+            if (shape && oid && oid !== id && oid.replace(/\d+/g, "#") === shape) return true;
+          }
+        }
+        return false;
       }).catch(() => false) as boolean;
       if (inResultsGrid) {
         this.driftWarnings.push(
@@ -10945,8 +10959,10 @@ export class RecipeAdapter extends BasePortalAdapter {
    *  trying) and the post-failure fallback (Accela, whose recorded "Select" link can still
    *  work and is tried first). */
   private async pickAddressRowForProject(step: RecipeStep): Promise<boolean> {
-    const num = String(this.fieldValues.streetNumber ?? "").trim();
     const street = String(this.fieldValues.street ?? "").trim();
+    // The house number from its own key, else from the street line that carries it ("410 E
+    // Washington St") — a value map holding only the street still names the job's address.
+    const num = String(this.fieldValues.streetNumber ?? "").trim() || (/^(\d+[a-z]?)\s/i.exec(street)?.[1] ?? "");
     if (!num || !street) return false;
     // ACA returns ONE ROW PER JURISDICTION for the same address — city and county both serve
     // it. Which one is right is the discipline: a structural permit files with the CITY, an
