@@ -1035,6 +1035,12 @@ export function inRecipeReviewTail(steps: readonly RecipeStep[], idx: number): b
   return true;
 }
 
+/** A #237 probe call that never throws, sync or async — a browser-free fake may return a plain
+ *  value or lack the method: its value, else `dflt`. */
+async function probeCall<T>(fn: () => unknown, dflt: T): Promise<T> {
+  try { return (await fn()) as T; } catch { return dflt; }
+}
+
 /** How long a #237 probe waits for a control to show before calling it hidden or absent: a control
  *  still rendering (a reveal's round-trip, a fade-in) shows well inside it. */
 const LEARN_STATE_GRACE_MS = 2500;
@@ -6370,17 +6376,21 @@ export class RecipeAdapter extends BasePortalAdapter {
       let matched = 0;
       let unreadable = false;
       for (const loc of probeable) {
-        const n = await loc.count().catch(() => { unreadable = true; return 0; });
+        const counted = await probeCall(() => loc.count(), -1);
+        const n = typeof counted === "number" && counted >= 0 ? counted : 0;
+        if (n === 0 && counted !== 0) unreadable = true;
         matched += n;
         for (let k = 0; k < Math.min(n, 8); k++) {
           const el = loc.nth(k);
-          if (await el.isVisible().catch(() => false)) return { state: "shown", described: "" };
-          const backing = await el.evaluate((e: Element) => {
+          // An element that cannot be asked (a fake) is an unknown: never a reason to skip.
+          if (typeof el?.isVisible !== "function" || typeof el?.evaluate !== "function") return { state: "shown", described: "" };
+          if (await probeCall(() => el.isVisible(), false)) return { state: "shown", described: "" };
+          const backing = await probeCall(() => el.evaluate((e: Element) => {
             if (e.tagName !== "INPUT" || /^(submit|button|image|reset)$/i.test((e as HTMLInputElement).type || "")) return false;
             const p = e.parentElement;
             if (p && p.getClientRects().length > 0 && getComputedStyle(p).visibility !== "hidden") return true;
             return Array.from((e as HTMLInputElement).labels ?? []).some((l) => l.getClientRects().length > 0 && getComputedStyle(l).visibility !== "hidden");
-          }, undefined, { timeout: 1000 }).catch(() => false);
+          }, undefined, { timeout: 1000 }), false);
           if (backing === true) return { state: "shown", described: "" };
         }
       }
@@ -6461,13 +6471,16 @@ export class RecipeAdapter extends BasePortalAdapter {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       let loc: any = null;
       try { loc = this.locator(level); } catch { loc = null; }
-      if (!loc || typeof loc.count !== "function") continue;
-      const n = Math.min(await loc.count().catch(() => 0), 8);
+      if (!loc || typeof loc.count !== "function" || typeof loc.nth !== "function") continue;
+      const counted = await probeCall(() => loc.count(), 0);
+      const n = Math.min(typeof counted === "number" ? counted : 0, 8);
       for (let k = 0; k < n; k++) {
         const el = loc.nth(k);
-        if (!(await el.isVisible().catch(() => false))) continue;
-        if (await el.isEnabled().catch(() => true)) return null;
-        if (!held && (await el.evaluate(controlReadsUnanswered, undefined, { timeout: 1000 }).catch(() => true)) === false) held = el;
+        // A control that cannot be asked (a fake) is an unknown: the ordinary resolution runs.
+        if (typeof el?.isVisible !== "function" || typeof el?.isEnabled !== "function" || typeof el?.evaluate !== "function") return null;
+        if (!(await probeCall(() => el.isVisible(), false))) continue;
+        if (await probeCall(() => el.isEnabled(), true)) return null;
+        if (!held && (await probeCall(() => el.evaluate(controlReadsUnanswered, undefined, { timeout: 1000 }), true)) === false) held = el;
       }
     }
     return held;
@@ -6488,8 +6501,8 @@ export class RecipeAdapter extends BasePortalAdapter {
     const name = String(step.note ?? step.field ?? step.action).slice(0, 60);
     const t0 = Date.now();
     for (;;) {
-      if ((await scoped.isEnabled().catch(() => true)) !== false) return null;
-      if ((await scoped.evaluate(controlReadsUnanswered, undefined, { timeout: 1000 }).catch(() => true)) !== false) return null;
+      if ((await probeCall(() => scoped.isEnabled(), true)) !== false) return null;
+      if ((await probeCall(() => scoped.evaluate(controlReadsUnanswered, undefined, { timeout: 1000 }), true)) !== false) return null;
       // AGREEING MEANS THE SAME ANSWER, not an overlap: the select read-back (selectionHeld) is
       // lenient by design after a pick WE made, and its value branch let a key "R" (Residential)
       // "contain" the wanted "Commercial". Here the portal chose, so a select agrees only when its
