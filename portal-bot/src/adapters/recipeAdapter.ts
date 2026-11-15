@@ -10913,16 +10913,22 @@ export class RecipeAdapter extends BasePortalAdapter {
 
   /** Did the address search return ANY selectable result rows? Distinguishes "the portal
    *  does not serve this jurisdiction" from "it does, but the row could not be matched". */
-  private async addressSearchHadResults(): Promise<boolean> {
-    if (!this.page || typeof this.page.evaluate !== "function") return true;
-    return await this.page.evaluate(() => {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  private async addressSearchHadResults(docArg?: any): Promise<boolean> {
+    // The document the address step reads (#235: a dialog frame), else the page. Only a results
+    // dialog's rows count a radio as a result: on the page itself a form's own Yes/No rows would.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const doc: any = docArg ?? this.page;
+    if (!doc || typeof doc.evaluate !== "function") return true;
+    return await doc.evaluate((ticksCount: boolean) => {
       const rows = Array.from(document.querySelectorAll("tr"));
       for (const tr of rows) {
         const a = tr.querySelector("a");
         if (a && /select/i.test(a.textContent || "")) return true;
+        if (ticksCount && tr.querySelector("td") && tr.querySelector("input[type='radio']")) return true;
       }
       return false;
-    }).catch(() => true) as boolean;
+    }, doc !== this.page).catch(() => true) as boolean;
   }
 
   /**
@@ -10972,7 +10978,7 @@ export class RecipeAdapter extends BasePortalAdapter {
     // shape that earned it.
     const isEPermitting = /work location/i.test(String(step.note ?? ""))
       || /accela|epermitting/i.test(String(this.recipe.portalPlatform ?? ""));
-    if (!picked && isEPermitting && !(await this.addressSearchHadResults())) {
+    if (!picked && isEPermitting && !(await this.addressSearchHadResults(doc))) {
       throw new Error(
         `ADDRESS NOT IN OREGON EPERMITTING: the statewide portal returned no results for ${num} ${street}. `
         + `Participation is voluntary, so this almost certainly means ${this.recipe.ahj || "this jurisdiction"} runs its own permit portal. `
