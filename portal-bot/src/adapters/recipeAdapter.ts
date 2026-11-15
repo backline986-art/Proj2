@@ -6476,7 +6476,8 @@ export class RecipeAdapter extends BasePortalAdapter {
           if (!isSensitiveLabel(shown)) {
             const byMarkup = await typeaheadBoxReason(scoped);
             if (byMarkup) {
-              this.agingNotes.push(`"${shown || "search box"}" was recorded as a plain fill; the box's own markup says it is a search-as-you-type box (${byMarkup}) — typed and picked from its list instead`);
+              const note = `"${shown || "search box"}" was recorded as a plain fill; the box's own markup says it is a search-as-you-type box (${byMarkup}) — typed and picked from its list instead`;
+              if (!this.agingNotes.includes(note)) this.agingNotes.push(note);
               return this.fillTypeaheadStep(step, scoped, v);
             }
           }
