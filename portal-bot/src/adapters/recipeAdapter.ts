@@ -1320,7 +1320,18 @@ export function learnStateSkippable(step: RecipeStep): LearnStateSkippable | nul
     // asks exactly what resolution asks, a conditional step runs as on main: a missing one fails
     // bounded (#232), never silently. The learner's `conditional` mark stays, read by nothing else.
     conditional: false,
-    dialog: click && isDialogDismissalClick(step),
+    // THE DIALOG DOOR IS CLOSED TOO (rescueAndDismissal smoke on the merged branch, 2026-11-16): a
+    // popup's OK was decided BEFORE the click, within the 2.5 s grace, so a popup the previous step's
+    // round trip paints at 4 s or 20 s was skipped with the modal left up, and a dialog under markup
+    // the learn did not name (another <dialog>, a plain div) never reached the name rescue that
+    // clicks its "Ok" on main. The one answer to "is this dismissal's popup open?" is #233's, asked
+    // AFTER main's own click wait on the click's own TimeoutError (dismissalClickTimedOutUnshown):
+    // Bend 22 still skips, named, and never clicks "Book an Inspection" — ~40-70 s later than this
+    // door would have, which is main's cost and a correct one. isDialogDismissalClick stays, read by
+    // the unit pins. A dismissal recorded as a NON-ADVANCING click (no "advance:" note) stays under
+    // the non-advancing rule below, asked after resolution once every rescue has had its turn and
+    // the page has settled: decided here, written down.
+    dialog: false,
     nonAdvancing: click && !isAdvancingClickStep(step) && !isNavigationClick(step),
     reviewPatch: click && isHumanPatch(step),
   };
@@ -11059,13 +11070,20 @@ export class RecipeAdapter extends BasePortalAdapter {
    *
    * True only when all of these hold — every doubt answers false, and false is main's retry:
    *   - a recorded dismissal (isDialogDismissalStep: never the flagged final submit), before review;
-   *   - the error is THE CLICK'S Playwright TimeoutError. Not main's looser /timeout/ reading of
-   *     any message (assertAdvanced's "did not advance" can quote page text), never a gate refusal
-   *     (a ReplayGuardRefusal), a stop, or any other failure kind;
-   *   - the attempt reached the click with a target (dismissalTarget), and that target matches
-   *     nothing showing — no element at all, or only hidden ones (Bend's OK is display:none inside
-   *     a closed <dialog>, or not in the DOM). A SHOWING target whose click was intercepted is a
-   *     popup that is up, and keeps main's retry;
+   *   - the error is one of the two ways the merged engine says "the control is not there": THE
+   *     CLICK'S Playwright TimeoutError (a target resolved — Bend's OK, display:none inside a closed
+   *     <dialog> — and the click waited its 30 s), or the bounded ReplayTargetMissing of #232 (no
+   *     recorded level matched in 15 s and one full resolution, the whole-words name rescue
+   *     included, found nothing — the popup is not in the DOM at all). Before #232 the second shape
+   *     was main's own TimeoutError on a locator matching nothing (72 s); on the merged branch it
+   *     is this bounded error, and without this clause the absent popup failed the run
+   *     (rescueAndDismissal smoke /bendgone, learnStateSteps C2, 2026-11-16). Not main's looser
+   *     /timeout/ reading of any message (assertAdvanced's "did not advance" can quote page text),
+   *     never a gate refusal (a ReplayGuardRefusal), a stop, or any other failure kind;
+   *   - on the click's TimeoutError, the attempt reached the click with a target (dismissalTarget),
+   *     and that target matches nothing showing — no element at all, or only hidden ones. A SHOWING
+   *     target whose click was intercepted is a popup that is up, and keeps main's retry. On
+   *     ReplayTargetMissing there is no target by definition;
    *   - no level of the recorded selector matches anything showing either.
    * Read-only: count and computed style, never the name rescue (it tags an element) or the
    * closed-menu reveal (it hovers). Nothing is clicked.
@@ -11073,8 +11091,11 @@ export class RecipeAdapter extends BasePortalAdapter {
   private async dismissalClickTimedOutUnshown(step: RecipeStep, err: unknown, pastReview: boolean): Promise<boolean> {
     if (pastReview || !isDialogDismissalStep(step)) return false;
     if (!(err instanceof Error) || err instanceof ReplayGuardRefusal) return false;
-    if (err.name !== "TimeoutError" || !/\bclick\b/.test(err.message)) return false;
-    if (!this.page || typeof this.page.evaluate !== "function" || !step.selector || !this.dismissalTarget) return false;
+    const clickTimedOut = err.name === "TimeoutError" && /\bclick\b/.test(err.message);
+    const neverThere = err instanceof ReplayTargetMissing;
+    if (!clickTimedOut && !neverThere) return false;
+    if (!this.page || typeof this.page.evaluate !== "function" || !step.selector) return false;
+    if (clickTimedOut && !this.dismissalTarget) return false;
     // Is anything this locator matches showing? null = cannot tell (main's path).
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const showing = async (loc: any): Promise<boolean | null> => {
@@ -11088,7 +11109,7 @@ export class RecipeAdapter extends BasePortalAdapter {
       }
       return false;
     };
-    if ((await showing(this.dismissalTarget)) !== false) return false;
+    if (clickTimedOut && (await showing(this.dismissalTarget)) !== false) return false;
     const sel = step.selector;
     for (const lv of [{ ...sel, fallbacks: undefined }, ...(sel.fallbacks ?? []).map((fb) => ({ ...fb, fallbacks: undefined }))] as RecipeSelector[]) {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any

@@ -8,7 +8,10 @@
 //   B. Tigard 92c16d00 4 and 10 — selects on controls the portal had already answered and disabled:
 //      ~38 s each, then a false SKIPPED "landed nothing" (audit p4).
 //   C. Bend 8bbd9a74 22 — the learn's upload-error popup "OK": no popup at replay, and the name
-//      rescue clicked "Book an Inspection" (audit p6).
+//      rescue clicked "Book an Inspection" (audit p6). Since the merged branch (2026-11-16) the
+//      dialog door of #237 is closed: the skip is #233's, after the click's own wait
+//      (dismissalClickTimedOutUnshown), so a popup that paints late or under other markup is still
+//      clicked (rescueAndDismissal.dom.smoke.ts). C and C2 pin the outcome, not the moment.
 //   D. PacifiCorp 102/111/112, Ameren 25 — controls the learn saw only after a reveal; absent on a
 //      job whose answers do not reveal them.
 // Synthetic pages in those shapes; the recorded steps copy the saved recipes' selector shapes
@@ -376,7 +379,11 @@ try {
     ]), { workDescription: "Rooftop solar" });
     console.log(`   ${key} ${tail(c)}`);
     const where = path === "/hiddenpopup" ? "in the DOM but hidden" : "not on the page";
-    check(`${key} MUST-PASS the popup's OK (${where}) is skipped as not applicable, named`, c.aging.some((n) => /"OK"/.test(n) && /not applicable/i.test(n) && /#237/.test(n)), JSON.stringify(c.aging));
+    // #233's note, written after the click's own TimeoutError: `"advance: OK" dismisses a popup that
+    // is not showing on this run — ... skipped as not applicable ...`. Never a #237 pre-decision.
+    check(`${key} MUST-PASS the popup's OK (${where}) is skipped as not applicable, named, after the click's own wait (#233)`,
+      c.aging.some((n) => /advance: OK/.test(n) && /not showing on this run/.test(n) && /not applicable/i.test(n)) && !c.aging.some((n) => /"OK".*#237/.test(n)), JSON.stringify(c.aging));
+    check(`${key} MUST-PASS ...and it is skipped exactly once (one SKIPPED line for the OK)`, c.skipped.filter((s) => /advance: OK/.test(s)).length === 1, JSON.stringify(c.skipped));
     // The name rescue takes the SHORTEST label containing "ok" — "Lookup" here, "Book an Inspection"
     // live. Either way the page is left; the application's own URL must still be the one shown.
     check(`${key} MUST-PASS ...and no navigation link is clicked in its place (still on the application)`, new URL(c.url).pathname === path, c.url);

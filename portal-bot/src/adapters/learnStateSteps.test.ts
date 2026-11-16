@@ -33,13 +33,24 @@ check("PGE 68-72: a hand-patched Next page hidden on the review page is skipped 
   // b16d667e 68-72 as recorded: role/name only (getByRole leaves the invisible button out: ABSENT).
   assert.equal(kind(click("human-patch: Next page", { role: "button", name: "Next page" }), "absent", TAIL), "review_patch");
 });
-check("Bend 22: the learn's popup OK, absent or hidden, is skipped as a dialog dismissal", () => {
+check("Bend 22: the DIALOG door is closed — the learn's popup OK, absent or hidden, is NOT pre-decided; #233's path after the click's own wait skips it", () => {
   const ok = click("human-patch: OK", { role: "button", name: "OK" });
   assert.equal(isDialogDismissalClick(ok), true);
-  assert.equal(kind(ok, "absent"), "dialog");
-  assert.equal(kind(ok, "hidden"), "dialog");
-  // 8bbd9a74 22 as recorded: "advance: OK", exact, with the popup's id as a fallback.
-  assert.equal(kind(click("advance: OK", { role: "button", name: "OK", exact: true, fallbacks: [{ css: "#uploadErrorPopupOk" }] }), "hidden"), "dialog");
+  // The predicate still reads the step as a dismissal, and the rule no longer skips on it: a popup
+  // that paints at 4 s or 20 s, or a dialog under markup the learn did not name, is clicked as on
+  // main (rescueAndDismissal.dom.smoke.ts [2]); Bend's absent popup is skipped by
+  // dismissalClickTimedOutUnshown after the click's TimeoutError ([1]).
+  assert.equal(learnStateSkippable(ok)?.dialog, false);
+  assert.equal(kind(ok, "absent"), null);
+  // A hand-patched OK with no "advance:" note is still a NON-ADVANCING click: hidden after
+  // resolution (every rescue has had its turn, the page has settled) it is skipped by that rule,
+  // never by a dialog pre-decision. Absent, nothing pre-decides it.
+  assert.equal(kind(ok, "hidden"), "non_advancing");
+  // 8bbd9a74 22 as recorded: "advance: OK", exact, with the popup's id as a fallback — an advance,
+  // so not a non-advancing click either: nothing pre-decides it.
+  const bend22 = click("advance: OK", { role: "button", name: "OK", exact: true, fallbacks: [{ css: "#uploadErrorPopupOk" }] });
+  assert.equal(kind(bend22, "hidden"), null);
+  assert.equal(kind(bend22, "absent"), null);
   for (const w of ["Close", "Dismiss", "Got it", "Cancel", "×", "Okay"]) assert.equal(isDialogDismissalClick(click(`human-patch: ${w}`)), true, w);
   assert.equal(isDialogDismissalClick(click("human-patch", { css: "div.modal button.btn-close" })), true, "icon-only close by class");
 });

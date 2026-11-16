@@ -43,7 +43,7 @@ import assert from "node:assert/strict";
 import http from "node:http";
 import { chromium, errors } from "playwright";
 import type { PortalRecipe, RecipeStep } from "../../../shared/src/types";
-import { RecipeAdapter, ReplayGuardRefusal } from "./recipeAdapter";
+import { RecipeAdapter, ReplayGuardRefusal, ReplayTargetMissing } from "./recipeAdapter";
 
 let failures = 0;
 const check = (label: string, fn: () => void): void => {
@@ -309,10 +309,20 @@ for (const p of ["/bend", "/bendgone"]) {
     assert.deepEqual(r.hits, ["dummyUploadCompleteThenRedirect"], JSON.stringify(r.hits));
     assert.equal(r.path, p, r.path);
   });
-  check(`${p}: ...main's path ran first: the click's own Playwright TimeoutError, asked once`, () => {
+  // The engine's two ways of saying "not there", each asked once: a closed popup's hidden OK
+  // resolves and the click's own 30 s TimeoutError follows (/bend); a popup not in the DOM at all
+  // matches no recorded level in 15 s and one full resolution, and the bounded ReplayTargetMissing
+  // of #232 follows (/bendgone — before #232 this was main's own 72 s TimeoutError on a locator
+  // matching nothing).
+  check(`${p}: ...main's path ran first: the engine's own "not there" error (${p === "/bend" ? "the click's TimeoutError" : "#232's bounded ReplayTargetMissing"}), asked once`, () => {
     assert.equal(r.asked.length, 1, JSON.stringify(r.asked));
-    assert.equal(r.asked[0].name, "TimeoutError");
-    assert.match(r.asked[0].message, /^locator\.click: Timeout 30000ms exceeded/);
+    if (p === "/bend") {
+      assert.equal(r.asked[0].name, "TimeoutError");
+      assert.match(r.asked[0].message, /^locator\.click: Timeout 30000ms exceeded/);
+    } else {
+      assert.equal(r.asked[0].name, "ReplayTargetMissing");
+      assert.match(r.asked[0].message, /^no control on this page matches "advance: OK".*waited 1[5-9] s/);
+    }
     assert.equal(r.asked[0].verdict, true);
   });
   check(`${p}: ...the OK step is skipped as not applicable, said so by name`, () => {
@@ -331,10 +341,12 @@ for (const p of ["/bend", "/bendgone"]) {
     assert.equal(r.ok, true, r.message.slice(0, 200));
     assert.doesNotMatch(r.message, /Timeout \d+ms/);
   });
-  check(`${p}: ...after main's own click wait (30 s), on the first attempt — none of main's backoffs and reloads`, () => {
-    // Measured 42 s (/bend) and 72 s (/bendgone: main's own extra wait on a locator that matches
-    // nothing) — each main's FIRST attempt; main went on to ~180 s and ~300 s with three reloads.
-    assert.ok(r.ms >= 30000 && r.ms < 150000, `${r.ms} ms`);
+  check(`${p}: ...after the engine's own wait (${p === "/bend" ? "the click's 30 s" : "#232's 15 s"}), on the first attempt — none of main's backoffs and reloads`, () => {
+    // Measured 42 s (/bend: the click's own 30 s) and 16 s (/bendgone: #232's bounded 15 s; before
+    // #232 main's own extra wait on a locator matching nothing took 72 s) — each the FIRST attempt;
+    // main went on to ~180 s and ~300 s with three reloads.
+    if (p === "/bend") assert.ok(r.ms >= 30000 && r.ms < 150000, `${r.ms} ms`);
+    else assert.ok(r.ms >= 15000 && r.ms < 150000, `${r.ms} ms`);
   });
 }
 
@@ -497,6 +509,13 @@ console.log("\n[6] the skip's own question (dismissalClickTimedOutUnshown), aske
   const cases: Array<[string, () => Promise<boolean | string>, boolean]> = [
     ["MUST PASS: the click's TimeoutError on Bend's closed popup (OK display:none)", () => ask("/bend", {}), true],
     ["MUST PASS: the click's TimeoutError with the popup not in the DOM at all", () => ask("/bendgone", {}), true],
+    // #232's bounded "no control matches" is the merged engine's name for an absent target: there is
+    // no target by definition, and the recorded levels are still asked to show nothing.
+    ["MUST PASS: #232's ReplayTargetMissing with the popup not in the DOM at all (no target)", () => ask("/bendgone", { target: null, err: new ReplayTargetMissing("no control on this page matches \"advance: OK\" — waited 15 s for it to appear") }), true],
+    ["MUST PASS: #232's ReplayTargetMissing on the closed popup (OK display:none), no target", () => ask("/bend", { target: null, err: new ReplayTargetMissing("no control on this page matches \"advance: OK\"") }), true],
+    ["MUST EXCLUDE: #232's ReplayTargetMissing while a recorded level SHOWS (a popup that is up) keeps main's retry", () => ask("/popupshown", { target: null, err: new ReplayTargetMissing("no control on this page matches \"advance: OK\"") }), false],
+    ["MUST EXCLUDE: #232's ReplayTargetMissing past the review marker", () => ask("/bendgone", { target: null, pastReview: true, err: new ReplayTargetMissing("no control on this page matches \"advance: OK\"") }), false],
+    ["MUST EXCLUDE: #232's ReplayTargetMissing on a step that is not a dismissal", () => ask("/bendgone", { target: null, err: new ReplayTargetMissing("no control on this page matches \"advance: OK\""), step: { action: "click", phase: "fill", selector: { role: "button", name: "OK", exact: true }, note: "advance: OK" } }), false],
     ["MUST EXCLUDE: a SHOWING target (a popup that is up, its click intercepted) keeps main's retry", () => ask("/popupshown", {}), false],
     ["MUST EXCLUDE: a hidden target while a recorded level shows keeps main's retry", () => ask("/popupshown", { target: "#noSuchControl" }), false],
     ["MUST EXCLUDE: any other failure kind (not a timeout)", () => ask("/bend", { err: new Error("locator.click: Element is not attached to the DOM") }), false],
