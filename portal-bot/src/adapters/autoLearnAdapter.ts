@@ -12307,7 +12307,10 @@ export class AutoLearnAdapter extends BasePortalAdapter {
       // A State LIST takes the one option that IS this state ("OREGON" for "OR"), never a partial
       // match a select fallback could make ("OR" inside "FLORIDA"); none or several → left alone.
       let value = values[part];
-      if (part === "state" && f.fieldType === "select") {
+      // Any State box that OFFERS options is a list, whatever the extractor called it (live City of
+      // Bend re-learn, 2026-11-16: the "Can't find address?" dialog's State was not typed "select", so
+      // "Oregon" went in as typed and the list, which spells it "OREGON", took nothing).
+      if (part === "state" && (f.fieldType === "select" || (f.options?.length ?? 0) > 0)) {
         const want = usStateCode(value);
         const same = (f.options ?? []).filter((o) => !!want && usStateCode(o) === want);
         if (same.length !== 1) continue;
