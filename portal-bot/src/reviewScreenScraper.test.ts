@@ -295,6 +295,8 @@ function run() {
     const right = reviewComparison([...sigOnly, { label: "* Owner Name:", value: "Quillon Testcase", editable: true }], owner, { accountNumber: false, meterNumber: false }, "");
     assert.ok(!right.mismatches.some((m) => m.field === "homeownerName") && right.confirmed === 2, JSON.stringify(right));
     console.log("  ✅ #243 MUST-EXCLUDE: an owner box beside the signature is still checked (wrong caught, right confirmed)");
+  }
+
   // FILLED IS NOT SAVED (typedValuesOnReview): a value the replay typed is looked for on the review
   // page by its box's own label. Shape from the self-service replica: a contractor lookup whose
   // search box was typed (the box showed the licence) but whose Search / Add was never clicked.
