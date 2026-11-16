@@ -5,6 +5,7 @@
 
 import { redactStatusText } from "./safeAction";
 import { readReviewScreenFees, type PortalFeeReadResult } from "../../shared/src/portalFeeItems";
+import { redactSecretValues } from "../../shared/src/portalSafety";
 import type { ProjectRecord } from "../../shared/src/types";
 
 export interface ReviewField {
@@ -453,6 +454,31 @@ export function typedValuesOnReview(
     });
   }
   return { mismatches, compared, confirmed };
+}
+
+/** A typed value that CARRIES a secret in its text — an account or meter number written into a
+ *  free-text box ("Meter 1234-5678 on the north wall"). Rule 2 counts a secret embedded in prose, so
+ *  such a value is never kept for the review read-back (it would be printed as `expected`). Matched
+ *  by the one scrub, redactSecretValues: separators ignored, fullwidth digits counted. */
+export function typedValueCarriesSecret(value: string, secrets: Iterable<string>): boolean {
+  const v = String(value ?? "");
+  return v.length > 0 && redactSecretValues(v, secrets) !== v;
+}
+
+/**
+ * The review read-back with the typed-value check folded in — MISMATCHES ONLY.
+ *
+ * `confirmed` stays the PROJECT's count (reviewComparison's). It is not a display number: it lets
+ * whereTheRunStopped decide the page IS a review page (confirmed > 0 suppresses the "STOPPED, not on
+ * the review page" hand-over), and it is the "project value(s) confirmed" bar of the scoreboard's top
+ * rung and the cross-project PASS verdict. A recipe literal the replay typed and a page echoed proves
+ * neither, so it is carried as `typedConfirmed`, which nothing gates on.
+ */
+export function withTypedValues(
+  project: ReviewComparison,
+  typed: ReviewComparison,
+): { confirmed: number; typedConfirmed: number; mismatches: ReviewMismatch[] } {
+  return { confirmed: project.confirmed, typedConfirmed: typed.confirmed, mismatches: [...project.mismatches, ...typed.mismatches] };
 }
 
 /**

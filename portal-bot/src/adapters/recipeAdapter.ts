@@ -99,7 +99,7 @@ import { attachmentTypeFor, isDocumentTypeList } from "./attachmentTypes";
 import { chooseSubmittedRecord, cleanRecordLink, readApplicationLedgerInPage, recordLinkForNumberInPage, type LedgerEntry } from "./submissionLedger";
 import { exactUploadDocType, fileTypeAllowed, formsSlotDocTypes, isSensitiveLabel, UPLOAD_LABEL_PATTERNS, uploadForbidsSubstitute, uploadTextNamesNoDocument } from "./autoLearnAdapter";
 import { readFeeStop, secretValuesOf, type FeeStopKind, type FeeStopReading } from "../feeStop";
-import { reviewComparison, scrapeReviewScreen as scrapeReviewScreenShared, typedValuesOnReview, utilityIdentifiersEnteredBySteps, type ReviewMismatch, type TypedValue } from "../reviewScreenScraper";
+import { reviewComparison, scrapeReviewScreen as scrapeReviewScreenShared, typedValueCarriesSecret, typedValuesOnReview, utilityIdentifiersEnteredBySteps, withTypedValues, type ReviewMismatch, type TypedValue } from "../reviewScreenScraper";
 import { controlReadsUnanswered, pinEmptyRequiredControl, PINNED_CONTROL_ATTR, SWEPT_BLANK_ATTR, sweepEmptyRequiredControls, type EmptyRequired } from "../requiredControlSweep";
 import { openPortal } from "../browser";
 import { selectWithFallback, comboboxFaceInPage, type ComboboxPick } from "../comboboxFill";
@@ -2846,20 +2846,22 @@ export class RecipeAdapter extends BasePortalAdapter {
     // permit application that has no meter field.
     const cmp = reviewComparison(fields, project, utilityIdentifiersEnteredBySteps(this.recipe.steps), body);
     // FILLED IS NOT SAVED: each box this run typed, looked up on the review page by its own label.
-    const typed = typedValuesOnReview(fields, this.typedForReview, body);
-    return { fields, body, confirmed: cmp.confirmed + typed.confirmed, mismatches: [...cmp.mismatches, ...typed.mismatches] };
+    // Its mismatches are added; `confirmed` stays the project's own count (withTypedValues says why).
+    const merged = withTypedValues(cmp, typedValuesOnReview(fields, this.typedForReview, body));
+    return { fields, body, confirmed: merged.confirmed, mismatches: merged.mismatches };
   }
 
   /** Remember a value this run typed, for the review read-back. Never a secret: a step marked
    *  sensitive, a sensitive label (account, meter, password…), a utility-identifier key or a
-   *  signature box is left out — its value is never compared, printed or kept here. */
+   *  signature box is left out, and so is a value whose TEXT carries a known secret (rule 2: a secret
+   *  embedded in prose counts) — its value is never compared, printed or kept here. */
   private noteTypedForReview(step: RecipeStep): void {
     if (step.sensitive || isSignatureStep(step)) return;
     const label = this.stepLabel(step) || String(step.selector?.name ?? "").trim();
     if (!label || isSensitiveLabel(label)) return;
     if (/account|meter|password|passcode|ssn|social|esi|said|agreement|routing|card/i.test(String(step.field ?? ""))) return;
     const value = String(this.resolveValue(step) ?? "").trim();
-    if (!value) return;
+    if (!value || typedValueCarriesSecret(value, this.shotMaskSecrets())) return;
     if (this.typedForReview.length < 200) this.typedForReview.push({ label, value });
   }
 
