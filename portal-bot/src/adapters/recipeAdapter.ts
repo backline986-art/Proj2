@@ -7133,9 +7133,11 @@ export class RecipeAdapter extends BasePortalAdapter {
       homeownerName: this.fieldValues.homeownerName,
       isElectrical: wantsElectrical,
       issuingAgency: issuingAgency || undefined,
-      // #178: this project's street number, so a list that mixes in a neighbour, or the same address
-      // with and without a unit qualifier, resolves to the job's own row.
-      street: String(this.fieldValues.streetNumber ?? this.fieldValues.street ?? "").trim() || undefined,
+      // #178: this project's street LINE (number AND name), so a list that mixes in a neighbour, or
+      // the same address with and without a unit qualifier, resolves to the job's own row. The whole
+      // line, not the bare number (Helm review of PR #247): with only "150" the ranker cannot reject
+      // "150 W Main St" for a "150 N Capitol Blvd" job. The number alone only when no line is bound.
+      street: (String(this.fieldValues.street ?? "").trim() || String(this.fieldValues.streetNumber ?? "").trim()) || undefined,
     });
     // How many the grid offered, always — "which row did it pick" is unanswerable otherwise.
     this.agingNotes.push(`address grid: ${rows.length} result(s) offered for ${String(this.fieldValues.city ?? "(no city)")} ${String(this.fieldValues.zip ?? "")}`.slice(0, 140));
