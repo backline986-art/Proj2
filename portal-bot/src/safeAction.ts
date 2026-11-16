@@ -380,6 +380,13 @@ const CAPTCHA_FRAME_HOSTS = [
   "challenges.cloudflare.com",
   "arkoselabs",
   "funcaptcha",
+  // IMPERVA / INCAPSULA serves its bot check from the PORTAL'S OWN host, in a frame at
+  // /_Incapsula_Resource?SWUDNSAI=… (live City of Bend CityView, 2026-11-16: an image-grid
+  // "Click on what you can buy at a coffee shop" behind a page that read as empty text). Matched on
+  // the frame's path, since hostPath carries host AND path. Without it the learner closed on the
+  // person twice as "login_form_unrecognized" instead of parking for them to pass it.
+  "_incapsula_resource",
+  "incapsula",
 ];
 const MFA_FRAME_HOSTS = ["duosecurity", "duo.com", "microsoft.com/mfa"];
 // Read on the frame's path (+ hash route), never its query: an OAuth authorize URL routinely
