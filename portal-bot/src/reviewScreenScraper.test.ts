@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { compareReviewFields, reviewComparison, type ReviewField } from "./reviewScreenScraper";
+import { compareReviewFields, reviewComparison, typedValueCarriesSecret, typedValuesOnReview, withTypedValues, type ReviewField } from "./reviewScreenScraper";
 import type { ProjectRecord } from "../../shared/src/types";
 
 // Browser-free tests for compareReviewFields — the deterministic review-screen check that
@@ -295,6 +295,85 @@ function run() {
     const right = reviewComparison([...sigOnly, { label: "* Owner Name:", value: "Quillon Testcase", editable: true }], owner, { accountNumber: false, meterNumber: false }, "");
     assert.ok(!right.mismatches.some((m) => m.field === "homeownerName") && right.confirmed === 2, JSON.stringify(right));
     console.log("  ✅ #243 MUST-EXCLUDE: an owner box beside the signature is still checked (wrong caught, right confirmed)");
+  // FILLED IS NOT SAVED (typedValuesOnReview): a value the replay typed is looked for on the review
+  // page by its box's own label. Shape from the self-service replica: a contractor lookup whose
+  // search box was typed (the box showed the licence) but whose Search / Add was never clicked.
+  {
+    const typed = [
+      { label: "Contractor License Number", value: "220417" },
+      { label: "* Owner First Name:", value: "Testy" },
+      { label: "Project Description", value: "Roof-mounted PV, 24 modules" },
+      { label: "Install Date", value: "2026-11-16" },
+      { label: "Gate Code", value: "Blue door" },
+    ];
+    const fields: ReviewField[] = [
+      { label: "Owner First Name", value: "Testy" },
+      { label: "Project Description", value: "Roof-mounted PV, 24 modules" },
+      { label: "Install Date", value: "11/16/2026" },
+    ];
+    // innerText of the summary: the licence's <dt> stands alone (its <dd> is blank and the scraper
+    // drops empty pairs); "Gate Code" never appears on the page at all.
+    const body = "Review\nContacts\nOwner First Name\nTesty\nContractor License Number\n\nDetails\nProject Description\nRoof-mounted PV, 24 modules\nInstall Date\n11/16/2026\nSubmit Application";
+    const r = typedValuesOnReview(fields, typed, body);
+    assert.equal(r.mismatches.length, 1, JSON.stringify(r.mismatches));
+    assert.equal(r.mismatches[0].field, "Contractor License Number");
+    assert.match(r.mismatches[0].found, /blank/);
+    assert.ok(!/220417/.test(JSON.stringify(r.mismatches)), "a 6-digit value is masked in the report");
+    assert.equal(r.compared, 3, "licence + owner + description compared; the date and the unnamed box are not");
+    assert.equal(r.confirmed, 2);
+    console.log("  ✅ filled-not-saved: a typed box blank on the review page is named; dates and unshown boxes are not");
+
+    // Saved → confirmed (digits read through the scraper's last-4 mask).
+    const saved = typedValuesOnReview([...fields, { label: "Contractor License Number", value: "**0417" }], typed, body);
+    assert.equal(saved.mismatches.length, 0, JSON.stringify(saved.mismatches));
+    assert.equal(saved.confirmed, 3);
+    console.log("  ✅ filled-and-saved: the same licence on the review page (masked to last 4) confirms");
+
+    // A different value under the label is a mismatch that names what the page shows.
+    const wrong = typedValuesOnReview([{ label: "Owner First Name", value: "Bramble" }], [{ label: "Owner First Name", value: "Testy" }], "Owner First Name\nBramble");
+    assert.equal(wrong.mismatches.length, 1);
+    assert.equal(wrong.mismatches[0].found, "Bramble");
+    console.log("  ✅ a different value under the box's label is reported with what the page shows");
+
+    // A form, not a summary (every pair editable): nothing reported, nothing compared.
+    const form = typedValuesOnReview([{ label: "Owner First Name", value: "Bramble", editable: true }], [{ label: "Owner First Name", value: "Testy" }], "Owner First Name");
+    assert.deepEqual(form, { mismatches: [], compared: 0, confirmed: 0 });
+    // A one-word label never stands in for a longer one ("Name" is not "Business Name").
+    const loose = typedValuesOnReview([{ label: "Name", value: "Testy" }], [{ label: "Business Name", value: "Brightfield Solar" }], "Name\nTesty");
+    assert.equal(loose.compared, 0, JSON.stringify(loose));
+    console.log("  ✅ no report on a form page, and no loose one-word label match");
+  }
+
+  // HELM #252 (1): TYPED VALUES NEVER COUNT AS PROJECT EVIDENCE. `confirmed` lets whereTheRunStopped call a
+  // page a review page and is the scoreboard / cross-project "project values confirmed" bar. A page that
+  // echoes only what the replay typed (a header repeating a description) confirms no project value:
+  // confirmed stays 0, the typed count rides alone as typedConfirmed. KILL: return
+  // project.confirmed + typed.confirmed from withTypedValues -> this fails.
+  {
+    const echoed: ReviewField[] = [{ label: "Project Description", value: "Roof-mounted PV, 24 modules" }];
+    const body = "Project Description\nRoof-mounted PV, 24 modules";
+    const proj = reviewComparison(echoed, project, { accountNumber: false, meterNumber: false }, body);
+    const typedCmp = typedValuesOnReview(echoed, [{ label: "Project Description", value: "Roof-mounted PV, 24 modules" }], body);
+    assert.equal(typedCmp.confirmed, 1, "the typed description is on the page");
+    const merged = withTypedValues(proj, typedCmp);
+    assert.equal(proj.confirmed, 0, JSON.stringify(proj));
+    assert.equal(merged.confirmed, 0, "a typed value the page echoed is not a project value confirmed");
+    assert.equal(merged.typedConfirmed, 1);
+    // Mismatches from both still reach the hand-over.
+    const blank = typedValuesOnReview(echoed, [{ label: "Contractor License Number", value: "220417" }], body + "\nContractor License Number\n");
+    assert.equal(withTypedValues(proj, blank).mismatches.filter((m) => m.field === "Contractor License Number").length, 1);
+    console.log("  ✅ #252 (1): typed values confirm nothing about the project (confirmed stays 0); their mismatches still merge");
+  }
+
+  // HELM #252 (2): A TYPED VALUE CARRYING A SECRET IN ITS TEXT IS NEVER KEPT (rule 2: a secret embedded in
+  // prose counts), whatever separators it is written with. KILL: return false -> this fails.
+  {
+    const secrets = ["9990001111", "88812345"];
+    assert.equal(typedValueCarriesSecret("Meter 8881-2345 on the north wall", secrets), true);
+    assert.equal(typedValueCarriesSecret("acct 999 000 1111", secrets), true);
+    assert.equal(typedValueCarriesSecret("Roof-mounted PV, 24 modules", secrets), false);
+    assert.equal(typedValueCarriesSecret("220417", secrets), false);
+    console.log("  ✅ #252 (2): a typed value with an account or meter number in its text (any separators) is dropped");
   }
 
   console.log("\n✅ ALL PASS: review-screen comparison tests");

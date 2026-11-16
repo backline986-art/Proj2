@@ -117,7 +117,7 @@ import { attachmentTypeFor, isDocumentTypeList } from "./attachmentTypes";
 import { chooseSubmittedRecord, cleanRecordLink, readApplicationLedgerInPage, recordLinkForNumberInPage, type LedgerEntry } from "./submissionLedger";
 import { DISMISS_LABEL, exactUploadDocType, fileTypeAllowed, formsSlotDocTypes, isSensitiveLabel, UPLOAD_LABEL_PATTERNS, uploadForbidsSubstitute, uploadTextNamesNoDocument } from "./autoLearnAdapter";
 import { readFeeStop, secretValuesOf, type FeeStopKind, type FeeStopReading } from "../feeStop";
-import { reviewComparison, scrapeReviewScreen as scrapeReviewScreenShared, utilityIdentifiersEnteredBySteps, type ReviewMismatch } from "../reviewScreenScraper";
+import { reviewComparison, scrapeReviewScreen as scrapeReviewScreenShared, typedValueCarriesSecret, typedValuesOnReview, utilityIdentifiersEnteredBySteps, withTypedValues, type ReviewMismatch, type TypedValue } from "../reviewScreenScraper";
 import { controlReadsUnanswered, pinEmptyRequiredControl, PINNED_CONTROL_ATTR, SWEPT_BLANK_ATTR, sweepEmptyRequiredControls, type EmptyRequired } from "../requiredControlSweep";
 import { openPortal } from "../browser";
 import { selectWithFallback, comboboxFaceInPage, type ComboboxPick } from "../comboboxFill";
@@ -1836,6 +1836,9 @@ export class RecipeAdapter extends BasePortalAdapter {
    *  A field that never landed (ambiguous model left blank for the human) is not
    *  "lost to a re-render" and must not be repaired or reported as such. */
   private landedSelectFields = new Set<string>();
+  /** FILLED IS NOT SAVED: every non-secret value this run typed before the review marker, by its
+   *  box's label — the review read-back looks each one up (typedValuesOnReview). */
+  private typedForReview: TypedValue[] = [];
   /** Recorded uploads this run PERFORMED: the slot's recorded label and the file name the portal
    *  was handed. The read-back for an upload (see uploadSlotsHeld). */
   private uploadsPerformed: Array<{ label: string; fileName: string; docType?: string }> = [];
@@ -3596,7 +3599,24 @@ export class RecipeAdapter extends BasePortalAdapter {
     // A utility identifier is checked only when THIS recipe typed it (B8) — never a meter on a
     // permit application that has no meter field.
     const cmp = reviewComparison(fields, project, utilityIdentifiersEnteredBySteps(this.recipe.steps), body);
-    return { fields, body, confirmed: cmp.confirmed, mismatches: cmp.mismatches };
+    // FILLED IS NOT SAVED: each box this run typed, looked up on the review page by its own label.
+    // Its mismatches are added; `confirmed` stays the project's own count (withTypedValues says why).
+    const merged = withTypedValues(cmp, typedValuesOnReview(fields, this.typedForReview, body));
+    return { fields, body, confirmed: merged.confirmed, mismatches: merged.mismatches };
+  }
+
+  /** Remember a value this run typed, for the review read-back. Never a secret: a step marked
+   *  sensitive, a sensitive label (account, meter, password…), a utility-identifier key or a
+   *  signature box is left out, and so is a value whose TEXT carries a known secret (rule 2: a secret
+   *  embedded in prose counts) — its value is never compared, printed or kept here. */
+  private noteTypedForReview(step: RecipeStep): void {
+    if (step.sensitive || isSignatureStep(step)) return;
+    const label = this.stepLabel(step) || String(step.selector?.name ?? "").trim();
+    if (!label || isSensitiveLabel(label)) return;
+    if (/account|meter|password|passcode|ssn|social|esi|said|agreement|routing|card/i.test(String(step.field ?? ""))) return;
+    const value = String(this.resolveValue(step) ?? "").trim();
+    if (!value || typedValueCarriesSecret(value, this.shotMaskSecrets())) return;
+    if (this.typedForReview.length < 200) this.typedForReview.push({ label, value });
   }
 
   /** #340 — has a person cancelled this run, or has it stopped making progress? Records the first
@@ -4227,6 +4247,7 @@ export class RecipeAdapter extends BasePortalAdapter {
           // warn "lost its fill"), and its trace line says what happened.
           const notApplicable = done && this.learnStateSkipped?.step === step && this.learnStateSkipped.kind === "conditional";
           if (done && !notApplicable && step.action === "select" && recordedStep?.field) this.landedSelectFields.add(String(recordedStep.field));
+          if (done && !notApplicable && !pastReview && step.action === "fill") this.noteTypedForReview(step);
           trace.push({
             i: stepIdx, action: step.action, note: String(step.note ?? "").slice(0, 52),
             outcome: done ? (notApplicable ? "not applicable (not revealed on this job, #237)" : "ok") : "SKIPPED", page: await currentPageLabel(),
