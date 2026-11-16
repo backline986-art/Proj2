@@ -229,8 +229,22 @@ const carriedPrevMarker = (notes: unknown): string => (String(notes ?? "").match
  *  depth measure available on both a stored snapshot and a freshly-saved recording.
  *  Deliberately duplicated from autoLearn.substantiveStepCount rather than imported:
  *  autoLearn imports THIS module, and the reverse import would close a cycle. */
-function recipeDepth(steps: Array<{ action?: unknown }> | undefined): number {
-  return (steps ?? []).filter((st) => ["fill", "select", "check"].includes(String(st?.action ?? ""))).length;
+// DISTINCT controls, not counted steps: a learn that bounced ("Submission Error") and re-filled the
+// same page three times recorded the same fills thrice, and that looped junk read as "deeper" (28)
+// than the honest 12-page re-record that followed it (22) — live City of Bend structural,
+// 2026-11-16 — so the save kept the junk and threw the re-record away. A loop is not depth; the
+// same control counts once (by its field, else its label, name or css, else its note).
+function recipeDepth(steps: Array<{ action?: unknown; field?: unknown; note?: unknown; selector?: { label?: unknown; name?: unknown; css?: unknown } | null }> | undefined): number {
+  const keys = new Set<string>();
+  for (const st of steps ?? []) {
+    const action = String(st?.action ?? "");
+    if (!["fill", "select", "check"].includes(action)) continue;
+    // The CONTROL's own identity first (its label, name or css), the binding after: many boxes
+    // can bind one key (a trust-gate fixture binds sixty to homeownerName), and they are sixty.
+    const ident = String(st?.selector?.label || st?.selector?.name || st?.selector?.css || st?.field || st?.note || "").toLowerCase().replace(/\s+/g, " ").trim();
+    keys.add(`${action}|${ident || `#${keys.size}`}`);
+  }
+  return keys.size;
 }
 
 // Split a US phone into the three boxes segmented portal controls use (Accela renders
