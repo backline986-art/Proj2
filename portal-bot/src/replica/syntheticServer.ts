@@ -945,11 +945,11 @@ ${page.sections.map((s) => `<fieldset><legend>${esc(s)}</legend>${page.controls.
 <button type="button" id="btnDialogSave">Save</button><button type="button" id="btnDialogCancel">Cancel</button></div></div>`;
   } else if (page.controls.some((c) => c.docType)) {
     const types = page.controls.filter((c) => c.docType).map((c) => c.docType!);
-    const rows = page.controls.filter((c) => c.docType && state.values[c.key]).map((c) => `<tr><td>${esc(c.docType)}</td><td>${esc(state.values[c.key])}</td></tr>`).join("");
+    const rows = page.controls.filter((c) => c.docType && state.values[c.key]).map((c) => `<tr><td>${esc(c.docType)}</td><td>${esc(state.values[c.key])}</td><td>Uploaded</td><td><a href="#" class="att-remove">Remove</a></td></tr>`).join("");
     body = `<div class="uploader"><div class="field"><label for="fld_docType">Document Type</label><select id="fld_docType"><option value="">--Select--</option>${types.map((t) => `<option value="${esc(t)}">${esc(t)}</option>`).join("")}</select></div>
 <div class="field"><label for="fld_docFile">File</label><input type="file" id="fld_docFile" accept=".pdf"></div>
 <button type="button" id="btnAddAttachment">Add Attachment</button><div class="upload-msg" role="status"></div></div>
-<table class="attachments"><thead><tr><th>Document Type</th><th>File Name</th></tr></thead><tbody id="attachmentRows">${rows}</tbody></table>`;
+<table class="attachments"><thead><tr><th>Document Type</th><th>File Name</th><th>Status</th><th>Actions</th></tr></thead><tbody id="attachmentRows">${rows}</tbody></table>`;
   } else {
     body = page.sections.map((s) => `<fieldset><legend>${esc(s)}</legend>${page.controls.filter((c) => c.section === s).map((c) => ssField(c, state.values)).join("")}</fieldset>`).join("");
   }
@@ -1016,7 +1016,7 @@ const SS_SCRIPT = `
     msg.textContent='Uploading...';
     fetch('/api/attach?page='+encodeURIComponent(location.pathname),{method:'POST',body:fd}).then(function(r){return r.json();}).then(function(j){
       if(!j.ok){msg.textContent=j.error||'Upload failed.';return;}
-      var tr=document.createElement('tr');tr.innerHTML='<td>'+esc(type)+'</td><td>'+esc(j.file)+'</td>';document.getElementById('attachmentRows').appendChild(tr);
+      var tr=document.createElement('tr');tr.innerHTML='<td>'+esc(type)+'</td><td>'+esc(j.file)+'</td><td>Uploaded</td><td><a href="#" class="att-remove">Remove</a></td>';document.getElementById('attachmentRows').appendChild(tr);
       msg.textContent='Attachment added.';file.value='';document.getElementById('fld_docType').value='';
     });
   });}

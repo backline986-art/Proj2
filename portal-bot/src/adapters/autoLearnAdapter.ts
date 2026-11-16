@@ -1026,6 +1026,12 @@ export function isPayFee(text: string | undefined): boolean {
   return !!text && PAY_FEE.test(text);
 }
 
+/** A typed uploader findTypedUploader found: the commit control's role and visible name (what the
+ *  recipe records), its id selector when it has a plain one, and the file name the box holds. */
+interface TypedUploader { role: "button" | "link"; name: string; css: string; fileName: string }
+const TYPED_UPLOADER_ATTR = "data-al-typed-uploader";
+const TYPED_UPLOADER_COMMIT_ATTR = "data-al-typed-uploader-commit";
+
 export function isSensitiveLabel(label: string): boolean {
   return SENSITIVE_LABEL.test(label);
 }
@@ -6808,15 +6814,72 @@ export class AutoLearnAdapter extends BasePortalAdapter {
     return corrected;
   }
 
+  /**
+   * A TYPED UPLOADER on this page, or null: one container holding a file box, a DOCUMENT-TYPE list
+   * (attachmentTypes.isDocumentTypeList, the one predicate the ACA pass and the replay use) and the
+   * control that commits the pair ("Add Attachment", "Upload", "Attach", "Add", "Save"). Self-service
+   * portals (EnerGov's "Select Type + Add Attachment" rows, the bench's selfserve base) hold the chosen
+   * file in the box until that click; the learn used to leave it there, and the portal kept nothing.
+   * Tags the container and the commit control for accelaAttachmentSavePass. Reads only; clicks nothing.
+   */
+  private async findTypedUploader(): Promise<TypedUploader | null> {
+    const page = this.page;
+    if (!page || typeof page.evaluate !== "function") return null;
+    try {
+      const selects = page.locator("select");
+      const n = Math.min(await selects.count().catch(() => 0), 40);
+      for (let i = 0; i < n; i++) {
+        const sel = selects.nth(i);
+        if (!(await sel.isVisible().catch(() => false))) continue;
+        const texts = await sel.evaluate((el: HTMLSelectElement) => Array.from(el.options).map((o) => (o.text || "").trim())).catch(() => [] as string[]);
+        if (!isDocumentTypeList(texts)) continue;
+        const found = await sel.evaluate((el: Element, a: { box: string; commit: string }) => {
+          // No function declared in here (a named one needs the page's __name shim): the shown-test is inline.
+          const COMMIT = /^\s*(add|upload|attach|save)(\s+(an?\s+)?(attachment|document|file)s?)?\s*$/i;
+          let box: Element | null = el.parentElement;
+          for (let d = 0; box && d < 5; d++, box = box.parentElement) {
+            const file = box.querySelector("input[type=file]") as HTMLInputElement | null;
+            if (!file) continue;
+            const ctl = Array.from(box.querySelectorAll("button, a, input[type=button], input[type=submit]")).find((b) => {
+              const t = b.tagName === "INPUT" ? (b as HTMLInputElement).value : (b.textContent || "");
+              const r = b.getBoundingClientRect();
+              const cs = getComputedStyle(b);
+              const visible = r.width > 0 && r.height > 0 && cs.display !== "none" && cs.visibility !== "hidden";
+              return visible && !(b as HTMLButtonElement).disabled && COMMIT.test(t);
+            });
+            if (!ctl) return null; // the nearest box with the file has no commit: not a typed uploader
+            document.querySelectorAll(`[${a.box}], [${a.commit}]`).forEach((x) => { x.removeAttribute(a.box); x.removeAttribute(a.commit); });
+            box.setAttribute(a.box, "1");
+            ctl.setAttribute(a.commit, "1");
+            const name = (ctl.tagName === "INPUT" ? (ctl as HTMLInputElement).value : (ctl.textContent || "")).replace(/\s+/g, " ").trim();
+            const id = ctl.getAttribute("id");
+            return {
+              role: ctl.tagName === "A" ? "link" : "button",
+              name,
+              css: id && /^[A-Za-z][\w-]*$/.test(id) ? `#${id}` : "",
+              fileName: file.files && file.files[0] ? file.files[0].name : "",
+            };
+          }
+          return null;
+        }, { box: TYPED_UPLOADER_ATTR, commit: TYPED_UPLOADER_COMMIT_ATTR }).catch(() => null);
+        if (found && found.name) return found as TypedUploader;
+      }
+    } catch { /* a read that fails is no uploader, never a crash */ }
+    return null;
+  }
+
   // ACA ATTACHMENT step. Accela stages attachments in a pending list that is only
   // COMMITTED by the section's own "Save" button — "Continue Application" alone leaves
   // the files uncommitted (operator-reported, live). Each pending row also demands its
   // own required Description + Type before Save will take it. Deterministic: fill the
   // empty Description/Type on every pending row, click Save (never "Save and resume
   // later"), and wait for the grid to stop reading "No records found".
-  private async accelaAttachmentSavePass(project: ProjectRecord, steps: RecipeStep[]): Promise<boolean> {
+  private async accelaAttachmentSavePass(project: ProjectRecord, steps: RecipeStep[], uploader: TypedUploader | null): Promise<boolean> {
     const page = this.page;
     if (!page) return false;
+    // ACA's row is the whole page's attachment section; a typed uploader is ONE container (findTypedUploader
+    // tagged it), and only its own Type list, Description box and commit control are touched.
+    const scope = uploader ? page.locator(`[${TYPED_UPLOADER_ATTR}]`).first() : page;
     const isElectrical = /elec/i.test(project.permitType ?? "");
     const description = isElectrical
       ? "Solar PV plan set — electrical plans and specifications"
@@ -6851,7 +6914,7 @@ export class AutoLearnAdapter extends BasePortalAdapter {
       } catch { return []; }
     };
     // 1) Document-Type selects: fill only the EMPTY ones (--Select-- reads as "").
-    const allSelects = page.locator("select");
+    const allSelects = scope.locator("select");
     const selCount = await allSelects.count().catch(() => 0);
     let typeSet = 0;
     let sawTypeSelect = false;
@@ -6881,7 +6944,7 @@ export class AutoLearnAdapter extends BasePortalAdapter {
     //    "Description of Work" field on some other step.
     let descFilled = 0;
     if (sawTypeSelect) {
-      const descBoxes = page.locator("textarea");
+      const descBoxes = scope.locator("textarea");
       const descCount = await descBoxes.count().catch(() => 0);
       for (let i = 0; i < descCount; i++) {
         const box = descBoxes.nth(i);
@@ -6898,10 +6961,12 @@ export class AutoLearnAdapter extends BasePortalAdapter {
     //    hand-coded OregonEPermittingAdapter uses the link form for the same reason).
     //    The exact name keeps "Save and resume later:" out (its accessible name is that
     //    control's long img alt text).
-    const saveBtn = page.getByRole("link", { name: /^\s*Save\s*$/i })
-      .or(page.getByRole("button", { name: /^\s*Save\s*$/i }))
-      .or(page.locator("a[id*='btnSave' i], input[type='submit'][value='Save' i], input[type='button'][value='Save' i]"))
-      .first();
+    const saveBtn = uploader
+      ? page.locator(`[${TYPED_UPLOADER_COMMIT_ATTR}]`).first()
+      : page.getByRole("link", { name: /^\s*Save\s*$/i })
+        .or(page.getByRole("button", { name: /^\s*Save\s*$/i }))
+        .or(page.locator("a[id*='btnSave' i], input[type='submit'][value='Save' i], input[type='button'][value='Save' i]"))
+        .first();
     // ACA keeps the Save anchor inside a container it reveals with JS only once the
     // uploads finish, and a role locator skips the hidden a11y tree — so WAIT for it
     // instead of counting once.
@@ -6921,7 +6986,11 @@ export class AutoLearnAdapter extends BasePortalAdapter {
         .locator("body").innerText().catch(() => "")) ?? "");
     } catch { gridText = ""; }
     const verifyText = gridText || String((await page.locator("body").innerText().catch(() => "")) ?? "");
-    const committed = Boolean(verifyText) && !/no records found/i.test(verifyText);
+    // A typed uploader's commit lists the file by NAME (the box itself is cleared for the next one):
+    // the name in the page's text, outside the file box, is the evidence. No name known = not proven.
+    const committed = uploader
+      ? Boolean(uploader.fileName) && verifyText.includes(uploader.fileName)
+      : Boolean(verifyText) && !/no records found/i.test(verifyText);
     this.debug?.event({ type: "attachment_save", descFilled, typeSet, committed });
     if (descFilled) steps.push({ action: "fill", phase: "upload", selector: { css: "textarea" }, value: description, note: "attachment: description" });
     // Record the option the pass ACTUALLY selected - a fabricated label would replay as
@@ -6930,16 +6999,20 @@ export class AutoLearnAdapter extends BasePortalAdapter {
     steps.push({
       action: "click",
       phase: "upload",
-      selector: {
-        // LINK role - the live control is an anchor (see the locator note above).
-        role: "link",
-        name: "Save",
-        exact: true,
-        fallbacks: [
-          { css: "a[id*='btnSave' i]" },
-          { role: "button", name: "Save", exact: true },
-        ],
-      },
+      // The note is the replay's attachment-row vocabulary (recordedAttachmentRow): the commit of THIS
+      // row, whatever the portal calls it — ACA's "Save" link, a typed uploader's "Add Attachment".
+      selector: uploader
+        ? { role: uploader.role, name: uploader.name, exact: true, ...(uploader.css ? { fallbacks: [{ css: uploader.css }] } : {}) }
+        : {
+          // LINK role - the live control is an anchor (see the locator note above).
+          role: "link",
+          name: "Save",
+          exact: true,
+          fallbacks: [
+            { css: "a[id*='btnSave' i]" },
+            { role: "button", name: "Save", exact: true },
+          ],
+        },
       note: "attachment: save (commits the upload)",
     });
     return committed;
@@ -9516,12 +9589,15 @@ export class AutoLearnAdapter extends BasePortalAdapter {
         // ACA commits attachments only on the section's own Save (Continue Application
         // leaves them pending) — and each pending row needs its Description + Type first.
         // Never on a review page: the Save is a click, and the attach-only pass clicks nothing.
-        if (up.attached > 0 && !reviewUpload && this.isAcaPage(url, fields) && acaAttachmentSaves < 3) {
+        // A TYPED UPLOADER (one file box, a Document Type list and an Add button that commits the
+        // pair) holds its file just as ACA's pending row does: nothing is attached until the Add.
+        const typedUploader = up.attached > 0 && !reviewUpload && !this.isAcaPage(url, fields) ? await this.findTypedUploader() : null;
+        if (up.attached > 0 && !reviewUpload && (this.isAcaPage(url, fields) || typedUploader) && acaAttachmentSaves < 3) {
           acaAttachmentSaves++;
           const saved = await this.withPhaseTimeout(
             "attachment_save",
             90_000,
-            () => this.accelaAttachmentSavePass(_project, steps),
+            () => this.accelaAttachmentSavePass(_project, steps, typedUploader),
             false,
           );
           this.debug?.event({ type: "aca_attachment_save_pass", page: pageCount, saved });
@@ -10116,12 +10192,13 @@ export class AutoLearnAdapter extends BasePortalAdapter {
           // ACA commits an attachment only on its section's Save (see d0). The answers on this
           // page are already in, so commit in place rather than re-entering the page — and say
           // so when the Save did not take, never leave the file silently pending.
-          if (rev.attached > 0 && !reviewUpload && this.isAcaPage(url, fields) && acaAttachmentSaves < 3) {
+          const typedUploader = rev.attached > 0 && !reviewUpload && !this.isAcaPage(url, fields) ? await this.findTypedUploader() : null;
+          if (rev.attached > 0 && !reviewUpload && (this.isAcaPage(url, fields) || typedUploader) && acaAttachmentSaves < 3) {
             acaAttachmentSaves++;
             const saved = await this.withPhaseTimeout(
               "attachment_save",
               90_000,
-              () => this.accelaAttachmentSavePass(_project, steps),
+              () => this.accelaAttachmentSavePass(_project, steps, typedUploader),
               false,
             );
             this.debug?.event({ type: "aca_attachment_save_pass", page: pageCount, saved, pass: "revealed" });
