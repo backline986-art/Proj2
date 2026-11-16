@@ -106,7 +106,7 @@ export function looksLikeProjectData(label: string, value: string): boolean {
 import { rankAddressVersions } from "../addressVersion";
 import { jobValueShape } from "../jobValueShape";
 import { isVolatileControlId, volatileControlIdKind } from "../../../shared/src/volatileControlId";
-import { ROW_PICK_WORDS } from "../../../shared/src/rowPick";
+import { COMPANY_SUFFIX_WORDS, ROW_PICK_WORDS } from "../../../shared/src/rowPick";
 import { isCompanyIdentityLabel } from "../../../shared/src/companyFacts";
 import { licenceKeyForLabel } from "../../../shared/src/licenceKinds";
 import { completionEvidence, labelWords } from "../../../shared/src/portalSafety";
@@ -3664,11 +3664,16 @@ export class RecipeAdapter extends BasePortalAdapter {
    *  embedded in prose counts) — its value is never compared, printed or kept here. */
   private noteTypedForReview(step: RecipeStep): void {
     if (step.sensitive || isSignatureStep(step)) return;
+    // A LOOKUP'S SEARCH TERM IS NOT A SAVED VALUE: the learner stamps the words it typed into a search
+    // ("lookup(Contractor): business name") — the record the search picked is what the page keeps.
+    if (/^lookup\b/i.test(String(step.note ?? "").trim())) return;
     const label = this.stepLabel(step) || String(step.selector?.name ?? "").trim();
     if (!label || isSensitiveLabel(label)) return;
     if (/account|meter|password|passcode|ssn|social|esi|said|agreement|routing|card/i.test(String(step.field ?? ""))) return;
     const value = String(this.resolveValue(step) ?? "").trim();
     if (!value || typedValueCarriesSecret(value, this.shotMaskSecrets())) return;
+    // The same box typed again: what it holds now is the last value, never both.
+    this.typedForReview = this.typedForReview.filter((t) => t.label !== label);
     if (this.typedForReview.length < 200) this.typedForReview.push({ label, value });
   }
 
@@ -9296,6 +9301,9 @@ export class RecipeAdapter extends BasePortalAdapter {
     return String(found || "");
   }
 
+  /** How long a non-advancing click that seemed to move nothing is looked at again before it is
+   *  called a no-op (a search's results arrive late). Static so a smoke can shorten it. */
+  static LATE_EFFECT_WAIT_MS = 6_000;
   /** How long one click waits for a loading mask to clear. Static so a smoke can shorten it. */
   static LOADING_MASK_WAIT_MS = 20_000;
   /** Masks that outlasted a whole wait once this run: never waited on again (a permanently shown
@@ -10684,7 +10692,14 @@ export class RecipeAdapter extends BasePortalAdapter {
       // grew — any of those settles it as the in-page action the recorder said it was, and
       // there is nothing for a person to check. Only when NOTHING moved is this still the
       // open question it used to always be, and only then does it block a clean score.
-      const afterEffect = beforeEffect ? await this.pageEffect() : "";
+      let afterEffect = beforeEffect ? await this.pageEffect() : "";
+      // A SEARCH ANSWERS LATE (the results arrive on their own request after the click settles —
+      // EnerGov's contractor search, the selfserve replica's): before calling a click a no-op, look
+      // again for a bounded while. Only a click that still moved nothing pays the wait.
+      for (let waited = 0; beforeEffect && afterEffect && afterEffect === beforeEffect && waited < RecipeAdapter.LATE_EFFECT_WAIT_MS; waited += 500) {
+        await sleep(500);
+        afterEffect = await this.pageEffect();
+      }
       if (afterEffect && afterEffect !== beforeEffect) {
         this.agingNotes.push(`click "${String(step.note ?? "click").slice(0, 44)}" acted on the page without advancing it — the in-page action the recipe recorded`);
         return;
@@ -13593,7 +13608,7 @@ export class RecipeAdapter extends BasePortalAdapter {
     let gridTold: "exact" | "shape" | "" = "";
     const scan = async (): Promise<Pick> => {
       gridTold = await this.markResultGrid(step, doc);
-      return await doc.evaluate((args: { role: string; wanted: string[]; tiebreak: string[]; ownGrid: boolean; pickSrc: string }) => {
+      return await doc.evaluate((args: { role: string; wanted: string[]; tiebreak: string[]; ownGrid: boolean; pickSrc: string; suffixSrc: string }) => {
         document.querySelectorAll("[data-al-projrow]").forEach((n) => n.removeAttribute("data-al-projrow"));
         const grid = document.querySelector('[data-al-grid="1"]') as HTMLTableElement | null;
         const all = grid ? Array.from(grid.rows) : Array.from(document.querySelectorAll("tr"));
@@ -13630,7 +13645,7 @@ export class RecipeAdapter extends BasePortalAdapter {
         const NOT_THE_ROW = /\b(favou?rite|note|comment|attachment|file|document)s?\b/i;
         const namesOf = (a: Element): string[] => [(a as HTMLElement).innerText || "", (a as HTMLInputElement).value || "", a.getAttribute("aria-label") || "", a.getAttribute("title") || ""]
           .map((t) => t.replace(/\b[a-z]+_[a-z_]+\b/g, " ").replace(/\s+/g, " ").trim()).filter((t) => t.length > 0);
-        const rows: Array<{ text: string; ctl: Element }> = [];
+        const rows: Array<{ text: string; ctl: Element; cells: string[] }> = [];
         for (const tr of all) {
           if (tr.closest("thead") || !tr.querySelector("td") || tr.querySelector("table")) continue;
           // A ROW THAT IS NOT SHOWN IS NOT A CANDIDATE (live City of Tigard, replay v11 of 2026-11-15): the
@@ -13650,10 +13665,19 @@ export class RecipeAdapter extends BasePortalAdapter {
             : undefined;
           const ctl = tick || act || valueLink;
           if (!ctl) continue;
-          const text = Array.from(tr.querySelectorAll("td, th")).map((c) => (c.textContent || "").replace(/\s+/g, " ").trim()).filter(Boolean).join(" ");
-          rows.push({ text, ctl });
+          const cells = Array.from(tr.querySelectorAll("td, th")).map((c) => (c.textContent || "").replace(/\s+/g, " ").trim()).filter(Boolean);
+          rows.push({ text: cells.join(" "), ctl, cells });
         }
         let hits = args.wanted.length ? rows.filter((r) => args.wanted.some((v) => fits(r.text, v))) : [];
+        // SEVERAL ROWS CARRY THE COMPANY'S WORDS: the one whose own cell IS the company's name (rowPick.ts
+        // companyKey, the learner's reading) — "Kestrel Energy LLC", never "Kestrel Energy Supply Inc".
+        if (hits.length > 1 && args.role === "contact") {
+          const suffix = new RegExp(args.suffixSrc, "g");
+          const key = (v: string): string => v.toLowerCase().replace(/&/g, " and ").replace(suffix, " ").replace(/[^a-z0-9]+/g, " ").trim();
+          const wantKeys = args.wanted.map(key).filter(Boolean);
+          const exact = hits.filter((r) => r.cells.some((c) => wantKeys.includes(key(c))));
+          if (exact.length === 1) hits = exact;
+        }
         if (hits.length > 1 && args.tiebreak.length) {
           const narrowed = hits.filter((r) => args.tiebreak.every((t) => norm(r.text).indexOf(norm(t)) >= 0));
           if (narrowed.length) hits = narrowed;
@@ -13668,7 +13692,7 @@ export class RecipeAdapter extends BasePortalAdapter {
           picked: chosen ? chosen.text.slice(0, 90) : "", how, rows: rows.length, hits: hits.length,
           kind: chosen ? (chosen.ctl.tagName.toLowerCase() === "input" && (ty === "radio" || ty === "checkbox") ? "tick" : "click") : "",
         };
-      }, { role, wanted, tiebreak, ownGrid: gridTold === "exact", pickSrc: ROW_PICK_WORDS.source }).catch(() => ({ picked: "", how: "", rows: 0, hits: 0, kind: "" })) as Pick;
+      }, { role, wanted, tiebreak, ownGrid: gridTold === "exact", pickSrc: ROW_PICK_WORDS.source, suffixSrc: COMPANY_SUFFIX_WORDS.source }).catch(() => ({ picked: "", how: "", rows: 0, hits: 0, kind: "" })) as Pick;
     };
     // AN UNPAINTED GRID IS NOT AN EMPTY GRID (the address-version scan's rule): results land on a
     // postback, so look again briefly before concluding there is nothing to pick.
