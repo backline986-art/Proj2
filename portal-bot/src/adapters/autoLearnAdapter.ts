@@ -12902,7 +12902,10 @@ export class AutoLearnAdapter extends BasePortalAdapter {
     }).catch(() => [] as Array<{ key: string; controls: number }>);
     const readSections = async (): Promise<Sec[] | null> => {
       await this.waitForDynamicFieldsSettle().catch(() => null);
-      return this.acaContactSectionsOnPage({ lookups: true });
+      // A page that answers with anything but well-formed sections (no lookups list) has no
+      // lookup buttons to press: treat it as none instead of throwing out of the page walk.
+      const read = await this.acaContactSectionsOnPage({ lookups: true });
+      return Array.isArray(read) ? read.filter((s) => !!s && Array.isArray(s.lookups) && Array.isArray(s.requiredBlank)) : null;
     };
     let sections = await readSections();
     if (!sections || !sections.some((s) => s.lookups.length)) return none;
