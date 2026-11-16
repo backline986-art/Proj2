@@ -6862,7 +6862,17 @@ export class AutoLearnAdapter extends BasePortalAdapter {
           }
           return null;
         }, { box: TYPED_UPLOADER_ATTR, commit: TYPED_UPLOADER_COMMIT_ATTR }).catch(() => null);
-        if (found && found.name) return found as TypedUploader;
+        if (!found || !found.name) continue;
+        // ONE ANSWER AT EVERY DOOR (Helm review of #253): the commit's name goes through the shared
+        // submit-intent and pay predicates too, as lookupButtonPass's controls do. COMMIT already refuses
+        // them; this keeps the uploader from ever reading a filing or a payment as "save the file".
+        if (SUBMIT_INTENT.test(found.name) || sharedIsSubmitIntent(found.name) || isPayFee(found.name)) {
+          await page.evaluate((a: { box: string; commit: string }) => {
+            document.querySelectorAll(`[${a.box}], [${a.commit}]`).forEach((x) => { x.removeAttribute(a.box); x.removeAttribute(a.commit); });
+          }, { box: TYPED_UPLOADER_ATTR, commit: TYPED_UPLOADER_COMMIT_ATTR }).catch(() => null);
+          return null;
+        }
+        return found as TypedUploader;
       }
     } catch { /* a read that fails is no uploader, never a crash */ }
     return null;

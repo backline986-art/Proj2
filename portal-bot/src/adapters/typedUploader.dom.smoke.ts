@@ -13,7 +13,9 @@
 // MUST-NOT   [2] a file box beside a NON-document list ("Work Type") is not an uploader;
 //            [3] a file box whose container has no commit control is not one;
 //            [4] the container's "Submit Application" is never the commit (only add/upload/attach/save);
-//            [5] a commit the page never lists the file for is reported NOT committed.
+//            [5] a commit the page never lists the file for is reported NOT committed;
+//            [6] a container whose only button is "Submit" / "Pay" is not one (shared predicates);
+//            [7] a bare "Save" outside the file's container is never tagged as its commit.
 // KILL: make findTypedUploader return null -> [1] fails; drop the COMMIT name test -> [4] fails.
 import { chromium } from "playwright";
 import { writeFileSync } from "node:fs";
@@ -95,6 +97,23 @@ try {
   await page.setContent(uploaderPage({ commit: '<button type="button" id="btnNext">Next</button>' }));
   await page.setInputFiles("#docFile", pdf);
   check("[4] Submit Application / Next are never a commit", (await a.findTypedUploader()) === null);
+
+  // [6] a container whose only button is "Submit" or "Pay" is not a typed uploader (Helm review of #253:
+  // the commit's name also goes through the shared submit-intent / pay predicates).
+  for (const label of ["Submit", "Pay", "Pay Fees"]) {
+    await page.setContent(uploaderPage({ commit: `<button type="button" id="btnOnly">${label}</button>` }).replace(/<button type="button" id="btnSubmit"[^<]*<\/button>/, ""));
+    await page.setInputFiles("#docFile", pdf);
+    const got = await a.findTypedUploader();
+    const tagged = await page.locator("[data-al-typed-uploader-commit]").count();
+    check(`[6] a container whose only button is "${label}" is not a typed uploader, and nothing is tagged`, got === null && tagged === 0, JSON.stringify({ got, tagged }));
+  }
+
+  // [7] a bare "Save" OUTSIDE the file's container is never tagged as its commit.
+  await page.setContent(uploaderPage({ commit: "" }).replace("</table>", '</table><button type="button" id="pageSave">Save</button>'));
+  await page.setInputFiles("#docFile", pdf);
+  const got7 = await a.findTypedUploader();
+  const tagged7 = await page.locator("#pageSave[data-al-typed-uploader-commit]").count();
+  check("[7] a page-level Save outside the uploader's container is never its commit", got7 === null && tagged7 === 0, JSON.stringify({ got7, tagged7 }));
 
   // [5] the page never lists the file
   await page.setContent(uploaderPage({ list: false }));
