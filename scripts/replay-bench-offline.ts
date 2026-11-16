@@ -329,6 +329,8 @@ interface ReplayOutcomeRow {
   payPosts: number;
   rung: string;
   rungReason: string;
+  /** The fields the replay's review read-back flagged (names only — what a person is told to check). */
+  reviewFlags: string[];
   adapterOk: boolean;
   executed: number;
   recorded: number;
@@ -374,7 +376,7 @@ async function replayCell(flavor: Flavor, mutation: Mutation, learned: LearnOutc
   const cell = cut ? `${flavor}/${mutation} [${cut.name}]` : `${flavor}/${mutation}`;
   const row: ReplayOutcomeRow = {
     cell, status: "ran", seconds: 0, replayReachedReview: false, allFieldsCorrect: false, fieldsCorrect: 0, fieldsExpected: 0,
-    blanked: 0, wrongValue: 0, wrongBoxWrites: 0, leakedAValues: 0, submitPosts: 0, payPosts: 0, rung: "", rungReason: "",
+    blanked: 0, wrongValue: 0, wrongBoxWrites: 0, leakedAValues: 0, submitPosts: 0, payPosts: 0, rung: "", rungReason: "", reviewFlags: [],
     adapterOk: false, executed: 0, recorded: 0, skippedSteps: 0, message: "", adapterSkipped: [], adapterDrift: [], fieldVerdicts: [], validationErrors: [],
   };
   const wizard = cut?.wizard ?? buildWizard(flavor, mutation);
@@ -422,6 +424,9 @@ async function replayCell(flavor: Flavor, mutation: Mutation, learned: LearnOutc
     const rung = scoreReplayOutcome({ ...(merged as object), recorded: row.recorded } as never);
     row.rung = rung.rung;
     row.rungReason = rung.reason.slice(0, 160);
+    row.reviewFlags = Array.isArray(merged.reviewMismatches)
+      ? (merged.reviewMismatches as Array<{ field?: unknown }>).map((m) => String(m?.field ?? "").slice(0, 60)).slice(0, 12)
+      : [];
   } catch (err) {
     row.status = "skipped";
     row.skipReason = (err instanceof Error ? err.message : String(err)).slice(0, 200);
@@ -602,6 +607,7 @@ for (const r of replays) {
   if (r.skipReason) console.log(`${"".padEnd(34)}   reason: ${r.skipReason}`);
   if (!r.allFieldsCorrect && r.message) console.log(`${"".padEnd(34)}   adapter: ${r.message.slice(0, 160)}`);
   for (const d of r.allFieldsCorrect ? [] : r.adapterDrift.slice(0, 2)) console.log(`${"".padEnd(34)}   drift: ${d.slice(0, 160)}`);
+  if (r.reviewFlags?.length) console.log(`${"".padEnd(34)}   review flags: ${r.reviewFlags.join(", ")}`);
 }
 
 console.log("\n=== BY BASE ===");
