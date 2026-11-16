@@ -1238,9 +1238,17 @@ export function promoteRecordingIfEligible(
   if (refusing.length) {
     const sentence = recipeSequenceSentence(refusing);
     const now = nowIso();
+    // ANOTHER DOOR'S FLAG IS NOT OVERWRITTEN (Helm review of PR #247): an unattributed-replay flag
+    // (or any flag that is not this check's own) stays, with its own flagged_at; the sequence verdict
+    // then lives in the note alone. The sequence flag is written only onto an empty flag or its own.
+    const existingFlag = s(recipe.flagReason ?? "").trim();
+    const ownOrEmpty = !existingFlag || existingFlag.startsWith(RECIPE_SEQUENCE_FLAG_PREFIX);
+    const sequenceFlag = `${RECIPE_SEQUENCE_FLAG_PREFIX} not promoted to complete — the recorded sequence cannot replay as recorded: ${sentence}. Re-learn this portal, or fix those steps and use "Recording looks right — save recipe".`;
+    const existingFlaggedAt = s(db.get<Row>("SELECT flagged_at FROM portal_recipes WHERE id = ?", [recipeId])?.flagged_at) || now;
     db.run("UPDATE portal_recipes SET flag_reason = ?, flagged_at = ?, notes = ?, updated_at = ? WHERE id = ?", [
-      `${RECIPE_SEQUENCE_FLAG_PREFIX} not promoted to complete — the recorded sequence cannot replay as recorded: ${sentence}. Re-learn this portal, or fix those steps and use "Recording looks right — save recipe".`,
-      now, withSequenceNote(recipe.notes, `[sequence check ${now.slice(0, 10)}: not promoted (${opts.via}) — ${sentence}]`), now, recipeId,
+      ownOrEmpty ? sequenceFlag : existingFlag,
+      ownOrEmpty ? now : existingFlaggedAt,
+      withSequenceNote(recipe.notes, `[sequence check ${now.slice(0, 10)}: not promoted (${opts.via}) — ${sentence}${ownOrEmpty ? "" : "; the recipe's existing flag was kept"}]`), now, recipeId,
     ]);
     try {
       addAuditLog(db, opts.projectId ?? null, "system", "recipe promotion", "portal_recipe.promotion_refused", {

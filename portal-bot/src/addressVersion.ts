@@ -155,6 +155,16 @@ export function rankAddressVersions(
   const zip = (opts.zip || "").trim();
   const surname = (opts.homeownerName || "").trim().split(/\s+/).pop() || "";
   const streetNo = ((opts.street || "").trim().match(/^\d+[A-Za-z]?/) || [""])[0];
+  // THE STREET NAME TOO, NOT ONLY THE NUMBER (Helm review of PR #247): on a free search grid "150 W
+  // Main St, Boise ID 83702" carried the job's number 150 and city and beat the job's own "150 N
+  // Capitol Blvd" on plainness. Every core word of the job's street line — the tokens after the
+  // number that are not a direction or a street-type suffix ("capitol"; "8th") — must appear in the
+  // row as a whole word. The plainness tie-break below then only ever chooses between versions of
+  // the SAME property (#178's Boise case), never between two streets.
+  const STREET_NOISE = /^(n|s|e|w|ne|nw|se|sw|north|south|east|west|st|street|ave|avenue|blvd|boulevard|dr|drive|rd|road|ln|lane|ct|court|cir|circle|pl|place|way|hwy|highway|pkwy|parkway|ter|terrace|trl|trail|loop)$/i;
+  const streetCore = (opts.street || "").trim().replace(/^\d+[A-Za-z]?\s*/, "").split(/[^0-9A-Za-z]+/)
+    .filter((w) => w.length >= 2 && !STREET_NOISE.test(w));
+  const carriesStreetName = (text: string): boolean => streetCore.every((w) => new RegExp(`(^|[^0-9A-Za-z])${w}(?![0-9A-Za-z])`, "i").test(text));
   const convention = opts.isElectrical ? COUNTY_ROW : CITY_ROW;
   const agencyName = String(opts.issuingAgency ?? "").replace(/\s+/g, " ").trim();
   const agency = issuingAgencyRow(agencyName, { city: opts.city });
@@ -166,6 +176,7 @@ export function rankAddressVersions(
     const upper = text.toUpperCase();
     if (!((cityUpper && upper.includes(cityUpper)) || (zip && text.includes(zip)))) { rejected.push(text.slice(0, 60)); continue; }
     if (streetNo && !new RegExp(`(^|[^0-9A-Za-z])${streetNo}(?![0-9])`, "i").test(text)) { rejected.push(text.slice(0, 60)); continue; }
+    if (streetNo && streetCore.length && !carriesStreetName(text)) { rejected.push(text.slice(0, 60)); continue; }
     candidates.push({ index, text, upper });
   }
   // The agency decides only when a row of this property NAMES it; otherwise no row is invented.

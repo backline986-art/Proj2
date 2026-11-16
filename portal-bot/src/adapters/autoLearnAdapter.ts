@@ -13525,10 +13525,16 @@ export class AutoLearnAdapter extends BasePortalAdapter {
       // At most TWO searches per press: a second only when no type option fit (the register may
       // answer a bare name on a retry); with the type set, one empty answer is the answer.
       const tries = typeSelectPresent && !typeChosen ? 2 : 1;
-      // The "is this client" test: the shared knowledge-name matcher (case, punctuation and the
-      // INC / LLC / & vs AND suffixes do not matter) — only a row that IS this client is picked.
-      const isOurs = (text: string): boolean => knowledgeNameMatchScore(opts.companyName, text) >= 60
-        || text.toLowerCase().replace(/[^a-z0-9]/g, "").includes(opts.companyName.toLowerCase().replace(/[^a-z0-9]/g, ""));
+      // The "is this client" test: a cell that IS this company's name — case, punctuation, "&" vs
+      // "and" and the legal suffix (LLC / Inc / Corp / Co / Ltd / DBA…) ignored, nothing else. Not the
+      // AHJ/utility fuzzy scorer and not containment (Helm review of PR #247): "Acme Solar Electric"
+      // scored 70 against "Acme Solar Roofing" and "Acme Solar" sat inside "Acme Solar of Idaho", so
+      // another licensed company's record could be attached as this client's.
+      const companyKey = (v: string): string => v.toLowerCase().replace(/&/g, " and ")
+        .replace(/\b(llc|l\.l\.c|inc|incorporated|corp|corporation|co|company|ltd|limited|lp|llp|pllc|pc|dba)\b/g, " ")
+        .replace(/[^a-z0-9]+/g, " ").trim();
+      const ourKey = companyKey(opts.companyName);
+      const isOurs = (text: string): boolean => !!ourKey && companyKey(text) === ourKey;
       // ONLY ROWS THE SEARCH BROUGHT COUNT (live Meridian run 10: the licence register's own form is a
       // table of rows holding links and buttons, so "rows, none ours" fired ~2.4 s after the click —
       // before the results had arrived — and the event read empty:false). Rows present before the

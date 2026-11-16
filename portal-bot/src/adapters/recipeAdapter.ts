@@ -8680,7 +8680,9 @@ export class RecipeAdapter extends BasePortalAdapter {
                   await this.settle(1500);
                   slots = (await this.page.evaluate(tagUploadControls).catch(() => null) as Array<{ key: string; label: string }> | null) ?? [];
                   hit = pick(slots);
-                  if (slots.length) this.driftWarnings.push(`clicked through 1 page this jurisdiction has that the recipe does not (nothing to fill on it, and no file slot) before "${wanted.slice(0, 48) || recordedCss}"`);
+                  // Always named (Helm review of PR #247): the extra page advance happened whether or
+                  // not a slot appeared, and `moved` only says the click did not throw.
+                  this.driftWarnings.push(`clicked through 1 page this jurisdiction has that the recipe does not (nothing to fill on it, and no file slot) before "${wanted.slice(0, 48) || recordedCss}"${slots.length ? "" : " — the page it reached has no file slot either"}`);
                 }
               }
             }
@@ -10561,9 +10563,22 @@ export class RecipeAdapter extends BasePortalAdapter {
         // moved. A dialog whose own words say the page's fields are required or invalid is the
         // refusal the recorder's advance did not expect: named with those words, and the step falls
         // through to what an advance that did not take has always been.
-        const alertText = await this.validationAlertText(opened[0]);
+        //
+        // AND NOT EVERY NEW FRAME IS A PAGE (Helm review of PR #247): every opened entry is read, not
+        // only the first; the portal's own refusal (`blockers`, readPortalRefusal) is consulted
+        // first; a challenge frame (CAPTCHA / MFA) or a widget frame (chat, support) that happened to
+        // appear with the click is never the page the advance reached. Only a dialog that is none of
+        // those — a results list, a wizard step in an iframe (Boise's address rows) — is advanced into.
+        const CHALLENGE_OR_WIDGET = /recaptcha|hcaptcha|turnstile|challenges\.cloudflare|arkose|funcaptcha|incapsula|duosecurity|\/mfa|\/2fa|\/otp|intercom|drift\.com|zendesk|livechat|hubspot|tawk|olark|freshchat|crisp\.chat/i;
+        let alertText = "";
+        for (const o of opened) { alertText = await this.validationAlertText(o); if (alertText) break; }
+        const challenged = opened.filter((o) => CHALLENGE_OR_WIDGET.test(o));
         if (alertText) {
           this.driftWarnings.push(`advance "${String(step.note ?? "click").slice(0, 44)}" was answered by the portal's validation alert — "${alertText.slice(0, 220)}" — so the page did not move; the fields it names need values before this page can advance`);
+        } else if (blockers.length) {
+          this.driftWarnings.push(`advance "${String(step.note ?? "click").slice(0, 44)}" opened ${opened[0].slice(0, 50)} but the page itself refused it (${blockers.slice(0, 2).join("; ").slice(0, 160)}) — not read as the page the advance reached`);
+        } else if (challenged.length) {
+          this.driftWarnings.push(`advance "${String(step.note ?? "click").slice(0, 44)}" was followed by ${challenged[0].slice(0, 60)} — a challenge or widget frame, not the page the advance reached`);
         } else {
           // THE DIALOG'S OWN DOCUMENT MUST FINISH LOADING before the next step reads it (Boise: the
           // address rows arrive in the dialog's iframe a moment after it opens, and a row step that

@@ -450,7 +450,9 @@ export function portalSafetyFactory() {
     if (!t) return false;
     if (t.split(" ").length > 6) return false;
     if (!LOOKUP_WORDS.test(t)) return false;
-    return !isSubmitIntent(t) && !isPayFee(t) && !isFinalSubmitControl(t) && !isSignatureRequestControl(t);
+    // Accept / certify wording is never a lookup (Helm review of PR #247): "Validate & Certify"
+    // carries "validate" but is an attestation, the same class isAcceptTermsLabel already names.
+    return !isSubmitIntent(t) && !isPayFee(t) && !isFinalSubmitControl(t) && !isSignatureRequestControl(t) && !isAcceptTermsLabel(t);
   };
 
   /** How a capture surface (human recorder, human patch) must treat a click on this control. */
