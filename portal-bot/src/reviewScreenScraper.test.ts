@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { compareReviewFields, reviewComparison, type ReviewField } from "./reviewScreenScraper";
+import { compareReviewFields, reviewComparison, typedValuesOnReview, type ReviewField } from "./reviewScreenScraper";
 import type { ProjectRecord } from "../../shared/src/types";
 
 // Browser-free tests for compareReviewFields — the deterministic review-screen check that
@@ -262,6 +262,55 @@ function run() {
     const nem = reviewComparison(nemMissingMeter, project, { accountNumber: true, meterNumber: true }, "Customer Name Testy McTestface Service Address 1420 Marigold Street Account ******1111 Meter");
     assert.ok(nem.mismatches.some((m) => m.field === "meterNumber"), `a NEM page missing its meter was not flagged: ${JSON.stringify(nem.mismatches)}`);
     console.log("  ✅ B8 MUST-PASS: a NEM review page that lost the meter it typed is still flagged");
+  }
+
+  // FILLED IS NOT SAVED (typedValuesOnReview): a value the replay typed is looked for on the review
+  // page by its box's own label. Shape from the self-service replica: a contractor lookup whose
+  // search box was typed (the box showed the licence) but whose Search / Add was never clicked.
+  {
+    const typed = [
+      { label: "Contractor License Number", value: "220417" },
+      { label: "* Owner First Name:", value: "Testy" },
+      { label: "Project Description", value: "Roof-mounted PV, 24 modules" },
+      { label: "Install Date", value: "2026-11-16" },
+      { label: "Gate Code", value: "Blue door" },
+    ];
+    const fields: ReviewField[] = [
+      { label: "Owner First Name", value: "Testy" },
+      { label: "Project Description", value: "Roof-mounted PV, 24 modules" },
+      { label: "Install Date", value: "11/16/2026" },
+    ];
+    // innerText of the summary: the licence's <dt> stands alone (its <dd> is blank and the scraper
+    // drops empty pairs); "Gate Code" never appears on the page at all.
+    const body = "Review\nContacts\nOwner First Name\nTesty\nContractor License Number\n\nDetails\nProject Description\nRoof-mounted PV, 24 modules\nInstall Date\n11/16/2026\nSubmit Application";
+    const r = typedValuesOnReview(fields, typed, body);
+    assert.equal(r.mismatches.length, 1, JSON.stringify(r.mismatches));
+    assert.equal(r.mismatches[0].field, "Contractor License Number");
+    assert.match(r.mismatches[0].found, /blank/);
+    assert.ok(!/220417/.test(JSON.stringify(r.mismatches)), "a 6-digit value is masked in the report");
+    assert.equal(r.compared, 3, "licence + owner + description compared; the date and the unnamed box are not");
+    assert.equal(r.confirmed, 2);
+    console.log("  ✅ filled-not-saved: a typed box blank on the review page is named; dates and unshown boxes are not");
+
+    // Saved → confirmed (digits read through the scraper's last-4 mask).
+    const saved = typedValuesOnReview([...fields, { label: "Contractor License Number", value: "**0417" }], typed, body);
+    assert.equal(saved.mismatches.length, 0, JSON.stringify(saved.mismatches));
+    assert.equal(saved.confirmed, 3);
+    console.log("  ✅ filled-and-saved: the same licence on the review page (masked to last 4) confirms");
+
+    // A different value under the label is a mismatch that names what the page shows.
+    const wrong = typedValuesOnReview([{ label: "Owner First Name", value: "Bramble" }], [{ label: "Owner First Name", value: "Testy" }], "Owner First Name\nBramble");
+    assert.equal(wrong.mismatches.length, 1);
+    assert.equal(wrong.mismatches[0].found, "Bramble");
+    console.log("  ✅ a different value under the box's label is reported with what the page shows");
+
+    // A form, not a summary (every pair editable): nothing reported, nothing compared.
+    const form = typedValuesOnReview([{ label: "Owner First Name", value: "Bramble", editable: true }], [{ label: "Owner First Name", value: "Testy" }], "Owner First Name");
+    assert.deepEqual(form, { mismatches: [], compared: 0, confirmed: 0 });
+    // A one-word label never stands in for a longer one ("Name" is not "Business Name").
+    const loose = typedValuesOnReview([{ label: "Name", value: "Testy" }], [{ label: "Business Name", value: "Brightfield Solar" }], "Name\nTesty");
+    assert.equal(loose.compared, 0, JSON.stringify(loose));
+    console.log("  ✅ no report on a form page, and no loose one-word label match");
   }
 
   console.log("\n✅ ALL PASS: review-screen comparison tests");
