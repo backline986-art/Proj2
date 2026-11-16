@@ -255,7 +255,7 @@ async function learnCell(flavor: Flavor, mutation: Mutation): Promise<LearnOutco
       portalUrl: replica.entryUrl,
       project: projA,
       planner,
-      credential: flavor === "powerclerk" ? { username: PROJECT_A.portalUsername, password: PROJECT_A.portalPassword } : undefined,
+      credential: wizard.login ? { username: PROJECT_A.portalUsername, password: PROJECT_A.portalPassword } : undefined,
       headless: true,
       budgetMs: RUN_TIMEOUT_MS - 20_000,
       docsByType: docsA,
@@ -407,7 +407,7 @@ async function replayCell(flavor: Flavor, mutation: Mutation, learned: LearnOutc
     const fieldValues = resolveRecipeFieldValues(db, projB, portalType, scopeOf(flavor) === "utility" ? "nem" : "electrical");
     const result = await withTimeout(stageWithRecipe(recipe, projB, fieldValues, docsB, [], {
       headless: true,
-      credential: flavor === "powerclerk" ? { username: PROJECT_B.portalUsername, password: PROJECT_B.portalPassword } : undefined,
+      credential: wizard.login ? { username: PROJECT_B.portalUsername, password: PROJECT_B.portalPassword } : undefined,
       loginUrl: replica.entryUrl,
       autoSubmit: false,
     }), REPLAY_TIMEOUT_MS, `replay ${cell}`);

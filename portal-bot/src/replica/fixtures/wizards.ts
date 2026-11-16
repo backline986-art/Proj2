@@ -622,7 +622,7 @@ export function buildWizard(flavor: Flavor, mutation: Mutation): Wizard {
       for (const k of Object.keys(delays) as Array<keyof Delays>) delays[k] = delays[k] * 3;
       break;
   }
-  return { flavor, mutation, name: `${flavor}/${mutation}`, pages, delays, login: flavor === "powerclerk" };
+  return { flavor, mutation, name: `${flavor}/${mutation}`, pages, delays, login: flavor === "powerclerk" || flavor === "selfserve" };
 }
 
 /** Every scored control in the wizard, in page order. */

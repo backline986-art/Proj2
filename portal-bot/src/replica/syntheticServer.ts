@@ -198,7 +198,7 @@ export async function startSyntheticReplica(opts: {
 export function entryUrlOf(w: Wizard, base: string): string {
   return w.flavor === "accela" ? `${base}/CitizenAccess/Cap/${w.pages[0].slug}`
     : w.flavor === "powerclerk" ? `${base}/Account/Login`
-      : w.flavor === "selfserve" ? `${base}/${w.pages[0].slug}`
+      : w.flavor === "selfserve" ? `${base}/Account/Login`
         : `${base}/apply#/step/${w.pages[0].slug}`;
 }
 
@@ -871,6 +871,15 @@ ol.steps{display:flex;gap:16px;list-style:none;padding:0;color:#777}ol.steps li.
 .modal-content{background:#fff;margin:60px auto;padding:16px;max-width:520px}.modal[hidden],[hidden]{display:none}
 .btn,button{padding:6px 14px;margin:4px}table{border-collapse:collapse}td,th{border:1px solid #ccc;padding:4px 8px}`;
 
+function ssLogin(error: string): string {
+  return `<!doctype html><html><head><meta charset="utf-8"><title>Citizen Self Service - Sign In</title><style>${SS_STYLE}</style></head><body>
+<header class="portal-header"><span>Citizen Self Service</span></header><main><h1>Sign In</h1>
+${error ? `<div class="validation-summary" role="alert">${esc(error)}</div>` : ""}
+<form method="post" action="/Account/Login"><div class="field"><label for="Username">Username</label><input id="Username" name="Username" type="text" autocomplete="username"></div>
+<div class="field"><label for="Password">Password</label><input id="Password" name="Password" type="password" autocomplete="current-password"></div>
+<button type="submit" id="btnSignIn">Sign In</button></form><a href="#">Forgot password?</a> <a href="#">Register</a></main></body></html>`;
+}
+
 function ssSlugFromPath(w: Wizard, pathname: string): number {
   const p = pathname.replace(/^\/+/, "").replace(/\/+$/, "");
   return w.pages.findIndex((pg) => pg.slug.toLowerCase() === p.toLowerCase());
@@ -908,7 +917,7 @@ function ssDocument(ctx: Ctx, idx: number, errors: string[]): string {
   const forms = w.pages.filter((p) => p.kind === "form" || p.kind === "readonly" || p.kind === "review");
   const steps = `<ol class="steps">${forms.map((p) => `<li${p === page ? ' class="current"' : ""}>${esc(p.heading)}</li>`).join("")}</ol>`;
   const head = `<!doctype html><html><head><meta charset="utf-8"><title>${esc(page.title)}</title><style>${SS_STYLE}</style></head><body>
-<header class="portal-header"><span>Citizen Self Service</span><nav><a href="/Portal/Home">Home</a> <a href="/Portal/Home#my-work">My Work</a></nav></header><main>`;
+<header class="portal-header"><span>Citizen Self Service</span><nav><a href="/Portal/Home">Home</a> <a href="/Portal/Home#my-work">My Work</a> <a href="/Account/Logout">Sign Out</a></nav></header><main>`;
   const errs = errors.length ? `<div class="validation-summary" role="alert"><ul>${errors.map((e) => `<li>${esc(e)}</li>`).join("")}</ul></div>` : "";
   const note = page.note ? `<p class="note">${esc(page.note)}</p>` : "";
   const prev = w.pages[idx - 1];
@@ -1016,7 +1025,22 @@ const SS_SCRIPT = `
 const selfserveHandler: Handler = async (ctx, req, res, url) => {
   const { w, state } = ctx;
   const p = url.pathname;
-  if (p === "/") { redirect(res, `/${w.pages[0].slug}`); return; }
+  if (p === "/") { redirect(res, state.loggedIn ? `/${w.pages[0].slug}` : "/Account/Login"); return; }
+  // An account portal (EnerGov and CityView both are): every page is behind the sign-in.
+  if (p === "/Account/Login") {
+    if (req.method === "POST") {
+      const f = parseForm(await readBody(req), String(req.headers["content-type"] || ""));
+      ctx.logPost(p, "login", f);
+      const ok = !!ctx.credential && f.Username === ctx.credential.username && f.Password === ctx.credential.password;
+      if (ok) { state.loggedIn = true; redirect(res, `/${w.pages[0].slug}`); return; }
+      sendHtml(res, ssLogin("Invalid username or password."));
+      return;
+    }
+    sendHtml(res, ssLogin(""));
+    return;
+  }
+  if (p === "/Account/Logout") { state.loggedIn = false; redirect(res, "/Account/Login"); return; }
+  if (!state.loggedIn) { redirect(res, `/Account/Login?returnUrl=${encodeURIComponent(p)}`); return; }
   if (p === "/api/address") {
     await sleep(w.delays.postback);
     sendJson(res, ssAddressSuggestions(url.searchParams.get("q") ?? ""));

@@ -186,11 +186,20 @@ console.log("\n3. SPA: one URL, client-validated steps; Submit Application flags
 console.log("\n3b. SELF-SERVICE: each widget commits ONLY on the act a person does; Submit Application flags");
 {
   const w = buildWizard("selfserve", "base");
-  const r = await startSyntheticReplica({ wizard: w });
+  const r = await startSyntheticReplica({ wizard: w, credential: { username: "kestrel-ops", password: "synthetic-pass" } });
   const page = await newPage();
   const slugOf = (re: RegExp) => w.pages.find((p) => re.test(p.heading))!.slug;
-  await page.goto(r.entryUrl);
-  check("the entry page offers Start a New Application", await page.getByRole("link", { name: "Start a New Application" }).count() === 1);
+  await page.goto(`${r.base}/${slugOf(/location/i)}`);
+  check("an account portal: a page asked for before sign-in is the sign-in page", (await page.locator("input[type=password]").count()) === 1 && !r.state.loggedIn);
+  await page.fill("#Username", "kestrel-ops");
+  await page.fill("#Password", "wrong");
+  await page.click("#btnSignIn");
+  check("a wrong password stays signed out", !r.state.loggedIn);
+  await page.fill("#Username", "kestrel-ops");
+  await page.fill("#Password", "synthetic-pass");
+  await page.click("#btnSignIn");
+  await page.waitForLoadState("domcontentloaded");
+  check("signed in, the entry page offers Start a New Application and a Sign Out", r.state.loggedIn && await page.getByRole("link", { name: "Start a New Application" }).count() === 1 && await page.getByRole("link", { name: "Sign Out" }).count() === 1);
 
   // TYPE-AHEAD
   await page.goto(`${r.base}/${slugOf(/location/i)}`);
