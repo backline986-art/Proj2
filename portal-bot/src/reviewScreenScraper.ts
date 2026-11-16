@@ -5,6 +5,7 @@
 
 import { redactStatusText } from "./safeAction";
 import { readReviewScreenFees, type PortalFeeReadResult } from "../../shared/src/portalFeeItems";
+import { redactSecretValues } from "../../shared/src/portalSafety";
 import type { ProjectRecord } from "../../shared/src/types";
 
 export interface ReviewField {
@@ -342,6 +343,142 @@ export function reviewComparison(
   }
 
   return { mismatches, compared, confirmed };
+}
+
+/** One value a replay TYPED into a box, by the box's own label. Never a secret: the caller drops
+ *  secret / sensitive steps before they reach here (account, meter, password never compared). */
+export interface TypedValue {
+  /** The label the box carried on its form page (the recorded step's label). */
+  label: string;
+  /** What the replay typed. */
+  value: string;
+}
+
+const labelKey = (l: unknown): string => norm(String(l ?? "").replace(/[*:]/g, " "));
+
+/** Two labels name the same box: equal once normalised, or one contains the other where the
+ *  shorter is at least two words ("Owner First Name" / "First Name", never "Name" / "Business Name"). */
+function sameLabel(a: string, b: string): boolean {
+  if (!a || !b) return false;
+  if (a === b) return true;
+  const [short, long] = a.length <= b.length ? [a, b] : [b, a];
+  return short.split(" ").length >= 2 && ` ${long} `.includes(` ${short} `);
+}
+
+/**
+ * FILLED IS NOT SAVED: does the review page show what this run TYPED?
+ *
+ * A replay's read-back proves the box showed the value when it was typed. It cannot prove the
+ * portal kept it: a lookup whose search box was typed but whose Search / Add was never clicked
+ * (the box shows the licence; the application holds nothing), a type-ahead left with no
+ * suggestion picked, a pop-up closed without its Save. All of those read back clean on the form
+ * page and show BLANK on the review page — and reviewComparison never looked, because it checks
+ * only a fixed set of project fields (homeowner, address, size, utility ids).
+ *
+ * So every non-secret value the run typed is looked for on the review page BY ITS OWN LABEL:
+ * - a review field carrying that label (static, not an input someone could still type into)
+ *   shows the value → confirmed; shows something else → mismatch;
+ * - the label stands ALONE on a line of the page text (a summary row whose value is blank —
+ *   the scraper drops empty pairs) and the value is nowhere on the page → mismatch, named
+ *   "the portal may not have saved it";
+ * - the review page never names the label → not compared. Review pages leave fields out, and
+ *   a warning about a field the page never shows would be noise.
+ *
+ * Lenient where formats legitimately differ: text matches on its first meaningful word, digits
+ * on the digit run (last 4 when six or more — the scraper masks long runs), dates are skipped.
+ * Same "not a review screen" guard as reviewComparison: a page whose every pair is still an
+ * editable control is a form, and nothing here is reported.
+ */
+export function typedValuesOnReview(
+  reviewFields: ReviewField[],
+  typed: TypedValue[],
+  bodyText = "",
+): ReviewComparison {
+  const mismatches: ReviewMismatch[] = [];
+  let compared = 0;
+  let confirmed = 0;
+  const statics = reviewFields.filter((f) => f.editable !== true);
+  if (!statics.length || !typed.length) return { mismatches, compared, confirmed };
+  const bodyNorm = norm(bodyText);
+  const bodyDigits = String(bodyText ?? "").replace(/\D/g, "");
+  const bodyLines = new Set(String(bodyText ?? "").split(/\n+/).map(labelKey).filter(Boolean));
+  const seen = new Set<string>();
+  for (const t of typed) {
+    const label = labelKey(t.label);
+    const raw = String(t.value ?? "").replace(/\s+/g, " ").trim();
+    if (!label || raw.length < 3) continue;
+    // A date is re-rendered in the portal's own format (2026-11-16 → 11/16/2026): not comparable.
+    if (/^\d{1,4}[-/.]\d{1,2}[-/.]\d{1,4}$/.test(raw)) continue;
+    const key = `${label}|${raw.toLowerCase()}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    const digits = raw.replace(/\D/g, "");
+    const nonSpace = raw.replace(/\s/g, "");
+    const numeric = digits.length >= 4 && digits.length / Math.max(1, nonSpace.length) >= 0.6;
+    let shows: (hay: string, hayDigits: string) => boolean;
+    if (numeric) {
+      const needle = digits.length >= 6 ? digits.slice(-4) : digits;
+      if (/^(\d)\1+$/.test(needle)) continue; // one repeated digit proves nothing
+      shows = (_h, hd) => hd.includes(needle);
+    } else {
+      const first = norm(raw).split(" ").find((w) => w.length >= 3);
+      if (!first) continue;
+      shows = (h) => ` ${h} `.includes(` ${first} `);
+    }
+    // Static summary rows first; a box the page still holds as a control (a mixed confirm page)
+    // is read when no static row carries the label — page text never includes an input's value.
+    const sameStatic = statics.filter((f) => sameLabel(labelKey(f.label), label));
+    const own = sameStatic.length ? sameStatic : reviewFields.filter((f) => f.editable === true && sameLabel(labelKey(f.label), label));
+    const shownLabel = String(t.label).replace(/[*:]/g, "").replace(/\s+/g, " ").trim().slice(0, 60);
+    const typedShown = (redactStatusText(raw) ?? "").slice(0, 60);
+    if (own.length) {
+      compared++;
+      if (own.some((f) => shows(norm(f.value), f.value.replace(/\D/g, "")))) confirmed++;
+      else {
+        mismatches.push({
+          field: shownLabel,
+          expected: typedShown,
+          found: own.map((f) => f.value).join("; ").slice(0, 60),
+        });
+      }
+      continue;
+    }
+    if (!bodyLines.has(label)) continue; // the review page never names this box: not checkable
+    compared++;
+    if (shows(bodyNorm, bodyDigits)) { confirmed++; continue; }
+    mismatches.push({
+      field: shownLabel,
+      expected: typedShown,
+      // Short: the hand-over prints the first 40 characters.
+      found: "(blank: typed, never saved)",
+    });
+  }
+  return { mismatches, compared, confirmed };
+}
+
+/** A typed value that CARRIES a secret in its text — an account or meter number written into a
+ *  free-text box ("Meter 1234-5678 on the north wall"). Rule 2 counts a secret embedded in prose, so
+ *  such a value is never kept for the review read-back (it would be printed as `expected`). Matched
+ *  by the one scrub, redactSecretValues: separators ignored, fullwidth digits counted. */
+export function typedValueCarriesSecret(value: string, secrets: Iterable<string>): boolean {
+  const v = String(value ?? "");
+  return v.length > 0 && redactSecretValues(v, secrets) !== v;
+}
+
+/**
+ * The review read-back with the typed-value check folded in — MISMATCHES ONLY.
+ *
+ * `confirmed` stays the PROJECT's count (reviewComparison's). It is not a display number: it lets
+ * whereTheRunStopped decide the page IS a review page (confirmed > 0 suppresses the "STOPPED, not on
+ * the review page" hand-over), and it is the "project value(s) confirmed" bar of the scoreboard's top
+ * rung and the cross-project PASS verdict. A recipe literal the replay typed and a page echoed proves
+ * neither, so it is carried as `typedConfirmed`, which nothing gates on.
+ */
+export function withTypedValues(
+  project: ReviewComparison,
+  typed: ReviewComparison,
+): { confirmed: number; typedConfirmed: number; mismatches: ReviewMismatch[] } {
+  return { confirmed: project.confirmed, typedConfirmed: typed.confirmed, mismatches: [...project.mismatches, ...typed.mismatches] };
 }
 
 /**
