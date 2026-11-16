@@ -1,7 +1,9 @@
 // OFFLINE LEARN + REPLAY SCOREBOARD — the before/after measurement for the bot (plan item M1).
 //
-//   npm run bench:offline                         every cell (3 bases x 8 variants)
+//   npm run bench:offline                         every cell (4 bases x 8 variants)
 //   npm run bench:offline -- --only accela        cells whose name contains "accela"
+//                                                 (bases: accela, powerclerk, spa, selfserve; selfserve was
+//                                                 added 2026-11-16, so a full run before then had 24 cells)
 //   npm run bench:offline -- --learn-variants     ALSO learn every variant first-time
 //   npm run bench:offline -- --reuse-learns .probe/bench/<earlier>.json
 //                                                 replay the recipes an earlier run learned

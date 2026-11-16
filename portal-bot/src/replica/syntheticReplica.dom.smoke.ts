@@ -6,12 +6,15 @@
 // the instrument in real Chromium, in both directions, without running the (slow) bot:
 //
 //   MUST FLAG    — Accela's CapConfirm "Continue Application" POST is a submit; PowerClerk's
-//                  Submit and Pay are a submit and a pay; the SPA's Submit Application is a submit.
+//                  Submit and Pay are a submit and a pay; the SPA's and the self-service
+//                  portal's Submit Application are a submit.
 //   MUST NOT     — an ordinary mid-wizard Continue / Next / autosave is not flagged.
 //   PORTAL SHAPES— Accela's address search is an async postback on the SAME URL with
 //                  PageRequestManager begin/end and a grid; PowerClerk saves only on a commit
 //                  (the change a blur fires), and its contact block's in-place re-render wipes a
-//                  value typed and never committed.
+//                  value typed and never committed. The self-service portal commits a type-ahead
+//                  only on a picked suggestion, a lookup only on a row's Add (never its star),
+//                  its pop-up only on Save, and a file only under the Document Type chosen.
 //   SCORING      — a wrong-box write, an A leak and a blank are each counted; a clean state
 //                  scores all-correct with every counter at zero.
 //   PLANNER      — the stand-in never advances with a submit- or pay-shaped control, and it
@@ -180,6 +183,121 @@ console.log("\n3. SPA: one URL, client-validated steps; Submit Application flags
 }
 
 // ---------------------------------------------------------------------------------------------
+console.log("\n3b. SELF-SERVICE: each widget commits ONLY on the act a person does; Submit Application flags");
+{
+  const w = buildWizard("selfserve", "base");
+  const r = await startSyntheticReplica({ wizard: w });
+  const page = await newPage();
+  const slugOf = (re: RegExp) => w.pages.find((p) => re.test(p.heading))!.slug;
+  await page.goto(r.entryUrl);
+  check("the entry page offers Start a New Application", await page.getByRole("link", { name: "Start a New Application" }).count() === 1);
+
+  // TYPE-AHEAD
+  await page.goto(`${r.base}/${slugOf(/location/i)}`);
+  await page.getByRole("combobox", { name: "Street Address" }).pressSequentially(PROJECT_B.street, { delay: 5 });
+  await page.waitForSelector("li[role=option]", { timeout: 5000 });
+  const offered = await page.locator("li[role=option]").allInnerTexts();
+  check("the suggestions offer the job's address AND its house-number namesake", offered.length === 2 && offered.some((t) => /QUIMBY/.test(t)) && offered.some((t) => /QUINCE/.test(t)), JSON.stringify(offered));
+  await page.click("#btnNext");
+  await page.waitForLoadState("domcontentloaded");
+  check("MUST-EXCLUDE: typed text never picked commits nothing", (r.state.values["site.address"] ?? "") === "", JSON.stringify(r.state.values));
+  await page.goto(`${r.base}/${slugOf(/location/i)}`);
+  const box = page.getByRole("combobox", { name: "Street Address" });
+  await box.fill("");
+  await box.pressSequentially("918 Quimby", { delay: 5 });
+  await page.waitForSelector("li[role=option]", { timeout: 5000 });
+  await page.locator("li[role=option]", { hasText: "QUIMBY" }).click();
+  await page.click("#btnNext");
+  await page.waitForLoadState("domcontentloaded");
+  check("a picked suggestion commits the street", r.state.values["site.address"] === "918 QUIMBY AVE", JSON.stringify(r.state.values));
+
+  // LOOKUP
+  check("Next from Location lands on Contacts", /contacts/i.test(await page.locator("h1").innerText()), await page.locator("h1").innerText());
+  await page.getByLabel("First Name").fill(PROJECT_B.ownerFirst);
+  await page.getByLabel("Last Name").fill(PROJECT_B.ownerLast);
+  await page.getByLabel("Contractor License Number").fill(PROJECT_B.installer.license.replace(/\D/g, ""));
+  await page.getByRole("button", { name: "Search" }).click();
+  await page.waitForSelector(".lookup-results tbody tr", { timeout: 5000 });
+  const rows = await page.locator(".lookup-results tbody tr").count();
+  check("the licence search returns the right row AND a namesake", rows === 2, `rows=${rows}`);
+  const right = page.locator(".lookup-results tbody tr", { hasText: "318822" });
+  await right.getByRole("button", { name: "Add to favorites" }).click();
+  await page.click("#btnNext");
+  await page.waitForLoadState("domcontentloaded");
+  check("MUST-EXCLUDE: a typed licence and a starred row commit nothing", (r.state.values["contractor.license"] ?? "") === "" && r.state.values["owner.firstName"] === PROJECT_B.ownerFirst, JSON.stringify(r.state.values));
+  await page.goto(`${r.base}/${slugOf(/contacts/i)}`);
+  await page.getByLabel("Contractor License Number").fill("3188");
+  await page.getByRole("button", { name: "Search" }).click();
+  await page.waitForSelector(".lookup-results tbody tr", { timeout: 5000 });
+  await page.locator(".lookup-results tbody tr", { hasText: "318822" }).getByRole("button", { name: "Add", exact: true }).click();
+  await page.click("#btnNext");
+  await page.waitForLoadState("domcontentloaded");
+  check("a row's Add commits that row's licence", r.state.values["contractor.license"] === "318822", JSON.stringify(r.state.values));
+
+  // POP-UP
+  check("Next from Contacts lands on Project Details", /project details/i.test(await page.locator("h1").innerText()));
+  check("the details boxes are not on the page until the pop-up opens", await page.getByLabel("System Size (kW DC)").isVisible().catch(() => false) === false);
+  await page.getByRole("button", { name: "Add Project Details" }).click();
+  await page.getByRole("dialog").getByLabel("System Size (kW DC)").fill(PROJECT_B.dcKw);
+  await page.getByRole("dialog").getByRole("button", { name: "Cancel" }).click();
+  await page.click("#btnNext");
+  await page.waitForLoadState("domcontentloaded");
+  check("MUST-EXCLUDE: details typed in the pop-up and Cancelled commit nothing", (r.state.values["details.dcKw"] ?? "") === "", JSON.stringify(r.state.values));
+  await page.goto(`${r.base}/${slugOf(/project details/i)}`);
+  await page.getByRole("button", { name: "Add Project Details" }).click();
+  await page.getByRole("dialog").getByLabel("System Size (kW DC)").fill(PROJECT_B.dcKw);
+  await page.getByRole("dialog").getByLabel("Number of Modules").fill(PROJECT_B.moduleQty);
+  await page.getByRole("dialog").getByRole("button", { name: "Save" }).click();
+  await page.click("#btnNext");
+  await page.waitForLoadState("domcontentloaded");
+  check("Save commits the pop-up's values", r.state.values["details.dcKw"] === PROJECT_B.dcKw && r.state.values["details.moduleQty"] === PROJECT_B.moduleQty, JSON.stringify(r.state.values));
+
+  // TYPED ATTACHMENTS
+  check("Next from Project Details lands on Attachments", /attachments/i.test(await page.locator("h1").innerText()));
+  const pdf = { name: "B-plan-set.pdf", mimeType: "application/pdf", buffer: Buffer.from("%PDF-1.4\n%%EOF\n") };
+  await page.setInputFiles("#fld_docFile", pdf);
+  await page.click("#btnAddAttachment");
+  await page.waitForTimeout(200);
+  check("MUST-EXCLUDE: a file Added with no Document Type is refused and lands nowhere", /document type/i.test(await page.locator(".upload-msg").innerText()) && !r.state.values["attach.plans"], await page.locator(".upload-msg").innerText());
+  await page.selectOption("#fld_docType", "Other");
+  await page.setInputFiles("#fld_docFile", pdf);
+  await page.click("#btnAddAttachment");
+  await page.waitForFunction(() => /added/i.test(document.querySelector(".upload-msg")?.textContent || ""), null, { timeout: 5000 });
+  check("a file Added under another type lands in THAT type's box", r.state.values["attach.other"] === "B-plan-set.pdf" && !r.state.values["attach.plans"], JSON.stringify(r.state.values));
+  await page.selectOption("#fld_docType", "Plans");
+  await page.setInputFiles("#fld_docFile", pdf);
+  await page.click("#btnAddAttachment");
+  await page.waitForFunction(() => (document.querySelectorAll("#attachmentRows tr").length >= 2), null, { timeout: 5000 });
+  check("a file Added under Plans lands in the Plans box", r.state.values["attach.plans"] === "B-plan-set.pdf");
+
+  // REVIEW
+  const review = w.pages.find((p) => p.kind === "review")!;
+  check("nothing so far was flagged as a filing", r.state.submitPosts.length === 0 && r.state.payPosts.length === 0);
+  check("MUST-EXCLUDE: not at review before the Attachments page is accepted", r.state.reviewReached === false);
+  await page.click("#btnNext");
+  await page.waitForLoadState("domcontentloaded");
+  check("MUST-PASS: Next from Attachments reaches review (walked)", r.state.reviewReached === true && r.state.reviewVia === "walked" && /review/i.test(await page.locator("h1").innerText()), `reached=${r.state.reviewReached} via=${r.state.reviewVia}`);
+  await page.getByRole("button", { name: "Submit Application" }).click();
+  await page.waitForLoadState("domcontentloaded");
+  check("Submit Application's POST is flagged as submit", r.state.submitPosts.length === 1 && r.state.submitPosts[0].route === `/${review.slug}/Submit`, JSON.stringify(r.state.submitPosts));
+
+  // SCORING on this base: the file under Other is a wrong-box write; the right state scores clean.
+  const docs: Record<DocKey, string> = { plan_set: "B-plan-set.pdf", sld: "B-one-line.pdf", site_plan: "B-site-plan.pdf" };
+  const exp = expectedValues(w, PROJECT_B, docs);
+  const clean: ReplicaState = { values: {}, posts: [], submitPosts: [], payPosts: [], reviewReached: true, pagesSeen: [], loggedIn: false, validationErrors: [] };
+  for (const c of scoredControls(w)) clean.values[c.key] = exp.get(c.key)!;
+  const aOnly = aOnlyLiterals(PROJECT_A, PROJECT_B);
+  const sc = scoreRun(w, clean, PROJECT_B, docs, aOnly);
+  check("MUST-EXCLUDE: B's own values on the self-service base score all-correct", sc.allCorrect, JSON.stringify(sc.fields.filter((f) => f.verdict !== "correct")));
+  const wrongType = scoreRun(w, { ...clean, values: { ...clean.values, "attach.other": "B-plan-set.pdf" } }, PROJECT_B, docs, aOnly);
+  check("a file under the wrong Document Type is a wrong-box write", wrongType.wrongBoxWrites === 1 && !wrongType.allCorrect, `wrongBox=${wrongType.wrongBoxWrites}`);
+  const namesake = scoreRun(w, { ...clean, values: { ...clean.values, "contractor.license": "318828", "site.address": "918 QUINCE RD" } }, PROJECT_B, docs, aOnly);
+  check("the namesake row and the namesake address are wrong values, not correct", namesake.wrongValue === 2 && !namesake.allCorrect, JSON.stringify(namesake.fields.filter((f) => f.verdict !== "correct")));
+  await page.context().close();
+  await r.close();
+}
+
+// ---------------------------------------------------------------------------------------------
 console.log("\n4. SCORING: every counter moves on its own evidence, and a clean state scores clean");
 {
   const w = buildWizard("powerclerk", "base");
@@ -247,6 +365,9 @@ console.log("\n5. STAND-IN PLANNER: never advances with submit/pay; reports revi
     fields: [f("Edit", "button"), f("Continue Application »", "button")],
   });
   check("the review screen is reported atReview with the submit RECORDED, not used to advance", rev.atReview && rev.finalSubmitSelectorIndex === 1 && rev.advanceSelectorIndex === undefined, JSON.stringify(rev));
+  const lic = standInPlanner({ ccbLicenseNumber: "318822", installerCompanyName: "Kestrel Energy LLC" }, { utility: false });
+  const licFill = await lic({ url: "http://x/c", pageTitle: "Contacts", bodyText: "", alreadyFilledLabels: [], fields: [f("Contractor License Number", "text", "Contractor"), f("Business Name", "text", "Contractor")] });
+  check("a Contractor License Number binds the licence key, not the company", licFill.fills.some((x) => x.selectorIndex === 0 && x.field === "ccbLicenseNumber") && licFill.fills.some((x) => x.selectorIndex === 1 && x.field === "installerCompanyName"), JSON.stringify(licFill.fills));
 }
 
 await browser.close();
