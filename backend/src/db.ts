@@ -3979,8 +3979,11 @@ const VERSIONED_MIGRATIONS: VersionedMigration[] = [
       // "Save my fixes" (applied_at / applied_by), and only onto the exact recipe version and steps the
       // run replayed (recipe_version + steps_signature). anchor_index is the failed step in the STORED
       // recipe (-1 = unknown, -2 = after the last step). permit_path: the job's resolved path on a permit
-      // track ('' on NEM), what a path-naming fix was shown for. A child of the run, so it reaches an org
-      // through its project.
+      // track ('' on NEM), what a path-naming fix was shown for. submit_sighted_at / submit_label: the
+      // person clicked the portal's submit in that window (recorded, never merged: the filing may have
+      // gone). proven_by_run: the first later replay of the recipe that reached review cleanly after the
+      // fixes were saved; until then automaticSubmitRefusals refuses an automatic filing on that recipe.
+      // A child of the run, so it reaches an org through its project.
       db.exec(`
         CREATE TABLE IF NOT EXISTS portal_run_fix_steps (
           run_id TEXT PRIMARY KEY REFERENCES portal_runs(id) ON DELETE CASCADE,
@@ -3994,7 +3997,10 @@ const VERSIONED_MIGRATIONS: VersionedMigration[] = [
           applied_at TEXT,
           applied_by TEXT NOT NULL DEFAULT '',
           applied_mode TEXT NOT NULL DEFAULT '',
-          permit_path TEXT NOT NULL DEFAULT ''
+          permit_path TEXT NOT NULL DEFAULT '',
+          submit_sighted_at TEXT,
+          submit_label TEXT NOT NULL DEFAULT '',
+          proven_by_run TEXT NOT NULL DEFAULT ''
         )
       `);
     },

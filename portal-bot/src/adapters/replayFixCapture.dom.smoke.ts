@@ -6,12 +6,14 @@
 // of review). RecipeAdapter.armFixCaptureAfterFailure
 // then watches the same page, read only, and reports what the person does there through
 // options.onHumanFixStep: their typing and their ordinary clicks. Their final-submit click is never a
-// fix step, and nothing after it is reported (the latch: whatever follows a filing is not part of
+// fix step: it is handed on once as the sighting signal (the backend records it), and nothing after it
+// is reported (the latch: whatever follows a filing is not part of
 // the recipe). Without an onHumanFixStep caller nothing is armed.
 //
 // KILL TESTS (each must turn this file red):
 //   K1 recipeAdapter.armFixCaptureAfterFailure: return false at the top   → F1 F2 fail.
 //   K2 recipeAdapter.armFixCaptureAfterFailure: drop the latch on the submit-observed note → F3 fails.
+//   K2b ...: stop handing the sighting on (Helm, #257 review: a filing in this window must be visible) → F3 fails.
 //   K3 recipeAdapter.armFixCaptureAfterFailure: drop the onHumanFixStep check → F4 fails.
 //
 // Run: npx tsx portal-bot/src/adapters/replayFixCapture.dom.smoke.ts
@@ -21,6 +23,7 @@ import http from "node:http";
 import { chromium } from "playwright";
 import type { PortalRecipe, RecipeStep } from "../../../shared/src/types";
 import { RecipeAdapter } from "./recipeAdapter";
+import { HUMAN_SUBMIT_OBSERVED_NOTE } from "../humanCapture";
 
 let failures = 0;
 const check = async (label: string, fn: () => void | Promise<void>): Promise<void> => {
@@ -107,10 +110,11 @@ await check("F2 the person's typing and ordinary clicks are reported as steps", 
   assert.ok(got.some((s) => s.action === "click" && /Show more/.test(JSON.stringify(s.selector) + String(s.note ?? ""))), `steps: ${JSON.stringify(kinds)}`);
   assert.ok(got.some((s) => s.action === "fill" && s.value === "roof notes"), `steps: ${JSON.stringify(kinds)}`);
 });
-await check("F3 their submit is never a fix step, and nothing after it is reported", () => {
+await check("F3 their submit is handed on ONCE as the sighting signal (never a step), and nothing after it is reported", () => {
   const after = got.slice(beforeSubmit);
-  assert.deepEqual(after.map((s) => s.note), [], `reported after the submit: ${JSON.stringify(after)}`);
-  assert.ok(!got.some((s) => /Submit Application/.test(JSON.stringify(s.selector) + String(s.note ?? ""))), "the submit click is not a step");
+  assert.deepEqual(after.map((s) => s.note), [HUMAN_SUBMIT_OBSERVED_NOTE], `reported after the submit: ${JSON.stringify(after)}`);
+  assert.match(String(after[0]?.value ?? ""), /Submit Application/, "the sighting names the control clicked");
+  assert.ok(!got.slice(0, beforeSubmit).some((s) => /Submit Application/.test(JSON.stringify(s.selector) + String(s.note ?? ""))), "the submit click is not a step");
 });
 
 // Without a caller that keeps the fixes, nothing is armed.

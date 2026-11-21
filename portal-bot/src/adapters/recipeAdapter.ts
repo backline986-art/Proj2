@@ -2443,7 +2443,16 @@ export class RecipeAdapter extends BasePortalAdapter {
     // The page binding can be exposed only once: a watch this run already armed forwards fixes too.
     if (this.submitWatch) return this.submitWatch;
     return armHumanCaptureOnPage(page, (step) => {
-      if (String(step.note || "").includes(HUMAN_SUBMIT_OBSERVED_NOTE)) { this.humanFixLatched = true; return; }
+      // THE PERSON'S SUBMIT IN THIS WINDOW (Helm, #257 review): no submit capture runs here (a failed
+      // run is not a staged filing), but a filing made in it must not be invisible. The sighting is
+      // handed on ONCE, as the signal step itself (the backend records it and never merges it), and
+      // nothing after it is reported.
+      if (String(step.note || "").includes(HUMAN_SUBMIT_OBSERVED_NOTE)) {
+        if (this.humanFixLatched) return;
+        this.humanFixLatched = true;
+        try { this.options.onHumanFixStep?.(step); } catch { /* the person's window must never break */ }
+        return;
+      }
       this.forwardHumanFix(step);
     }, { oneShot: false }).catch(() => false);
   }

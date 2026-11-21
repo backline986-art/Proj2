@@ -1515,7 +1515,7 @@ export interface PortalRun {
   /** A person's hand fixes held on this run after a replay step failed and its window stayed open
    *  (runFixSteps.ts): how many steps, the stuck step (1-based, 0 unknown), and whether a named person
    *  saved them into the recipe yet. Absent on a run that holds none. */
-  handFixes?: { count: number; stuckStep: number; atEnd?: boolean; appliedAt: string | null; appliedBy: string; preview: string[] };
+  handFixes?: { count: number; stuckStep: number; atEnd?: boolean; appliedAt: string | null; appliedBy: string; preview: string[]; submitSightedAt?: string | null; submitLabel?: string };
 }
 
 export interface SubmissionRecord {

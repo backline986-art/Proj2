@@ -10339,6 +10339,11 @@ function renderPortalRuns() {
     // that step, and what the person did there is held on this run. "Save my fixes" writes it into the
     // recipe at the stuck step, under the person's name; nothing is clicked or submitted by saving.
     const hf = run.handFixes;
+    // A SUBMIT WAS CLICKED IN THE WINDOW THIS RUN LEFT OPEN: the filing may have gone. Said plainly, so
+    // nobody stages this track again before checking the portal.
+    const submitSighted = hf && hf.submitSightedAt
+      ? `<p class="submit-gate-check warning" style="margin-top:6px">A submit${hf.submitLabel ? ` ("${esc(hf.submitLabel)}")` : ""} was clicked in the window this run left open: check the portal and mark this track submitted. Do not stage it again until you have.</p>`
+      : "";
     const fixAction = hf && !hf.appliedAt
       ? `<div style="margin-top:6px">
           <p class="muted" style="font-size:12px;margin:0 0 4px">${hf.count
@@ -10362,6 +10367,7 @@ function renderPortalRuns() {
       <p class="muted">${esc(run.errorMessage || run.startedAt)}</p>
       ${resubmitAction}
       ${stopAction}
+      ${submitSighted}
       ${fixAction}
     </article>`;
   };
@@ -10431,9 +10437,9 @@ function renderPortalRuns() {
       if (!(auth && auth.enabled)) {
         let last = "";
         try { last = localStorage.getItem(APPROVER_NAME_KEY) || ""; } catch { last = ""; }
-        body.savedBy = String(prompt("Your name, recorded with this save:", last) || "").trim();
-        if (!body.savedBy) { showMessage("Nothing was saved: a recipe change is recorded under a person's name.", "warning"); return; }
-        try { localStorage.setItem(APPROVER_NAME_KEY, body.savedBy); } catch { /* per-viewer convenience only */ }
+        body.decidedBy = String(prompt("Your name, recorded with this save:", last) || "").trim();
+        if (!body.decidedBy) { showMessage("Nothing was saved: a recipe change is recorded under a person's name.", "warning"); return; }
+        try { localStorage.setItem(APPROVER_NAME_KEY, body.decidedBy); } catch { /* per-viewer convenience only */ }
       }
       button.disabled = true;
       try {

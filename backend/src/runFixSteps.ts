@@ -35,6 +35,7 @@ import {
 import { isPlannerSecretKey } from "./projectSecrets";
 import { stampPermitPathSteps } from "../../shared/src/permitPathSteps";
 import { UPLOAD_LABEL_PATTERNS } from "../../portal-bot/src/adapters/autoLearnAdapter";
+import { HUMAN_SUBMIT_OBSERVED_NOTE } from "../../portal-bot/src/humanCapture";
 
 /** A run never holds more hand steps than this (a person walking the rest of a long form by hand
  *  stays well under it; anything past it is dropped, not stored). */
@@ -123,7 +124,17 @@ export function openRunFixCapture(
   },
 ): { onStep: (step: RecipeStep) => void; anchor: (executedIndex: number | null, atEnd?: boolean) => void } {
   const pending: RecipeStep[] = [];
+  let pendingSubmit: string | null = null;
   let anchored = false;
+  /** THE PERSON CLICKED THE PORTAL'S SUBMIT IN THIS WINDOW (Helm, #257 review): recorded on the run row
+   *  and the project's audit, never merged. A filing made here must be visible, so nobody stages again. */
+  const recordSubmit = (label: string): void => {
+    db.run("UPDATE portal_run_fix_steps SET submit_sighted_at = COALESCE(submit_sighted_at, ?), submit_label = ? WHERE run_id = ?",
+      [nowIso(), label.slice(0, 120), opts.runId]);
+    addAuditLog(db, opts.projectId, "system", "portal_bot", "portal.fix_window_submit_sighted", {
+      runId: opts.runId, recipeId: opts.recipeId, label: label.slice(0, 120),
+    });
+  };
   let stored = 0;
   const append = (steps: RecipeStep[]): void => {
     if (!steps.length) return;
@@ -142,13 +153,18 @@ export function openRunFixCapture(
   return {
     onStep: (step) => {
       try {
+        if (String(step?.note ?? "").includes(HUMAN_SUBMIT_OBSERVED_NOTE)) {
+          const label = String(step.value ?? "").trim() || "submit";
+          if (!anchored) pendingSubmit = label; else recordSubmit(label);
+          return;
+        }
         const ready = prepareFixStep(db, step, ctx);
         if (!ready.length) return;
         if (!anchored) { if (pending.length < MAX_FIX_STEPS) pending.push(...ready); return; }
         if (stored >= MAX_FIX_STEPS) return;
         append(ready);
         if (stored === ready.length) {
-          addAuditLog(db, opts.projectId, "human", "operator", "portal.run_hand_fix_started", { runId: opts.runId, recipeId: opts.recipeId });
+          addAuditLog(db, opts.projectId, "system", "portal_bot", "portal.run_hand_fix_started", { runId: opts.runId, recipeId: opts.recipeId });
         }
       } catch { /* capture is a convenience; it must never disturb the person's window */ }
     },
@@ -166,6 +182,7 @@ export function openRunFixCapture(
           [opts.runId, opts.projectId, opts.recipeId, opts.recipeVersion, opts.stepsSignature, anchorIndex, nowIso(), runPath],
         );
         append(pending.splice(0));
+        if (pendingSubmit !== null) recordSubmit(pendingSubmit);
       } catch { /* a capture that cannot be written leaves the run exactly as it was */ }
     },
   };
@@ -182,6 +199,9 @@ export interface RunFixSummary {
   appliedAt: string | null;
   appliedBy: string;
   appliedMode: string;
+  /** The person clicked the portal's submit in the window (the filing may have gone), and its label. */
+  submitSightedAt: string | null;
+  submitLabel: string;
   /** Each held step in a few words (action + label), for the person deciding to save them. */
   preview: string[];
 }
@@ -207,6 +227,7 @@ export function runFixSummaries(db: AppDb, projectId: string): Map<string, RunFi
       stuckStep: Number(r.anchor_index) >= 0 ? Number(r.anchor_index) + 1 : 0,
       atEnd: Number(r.anchor_index) === AT_END,
       appliedAt: r.applied_at ? String(r.applied_at) : null, appliedBy: String(r.applied_by ?? ""), appliedMode: String(r.applied_mode ?? ""),
+      submitSightedAt: r.submit_sighted_at ? String(r.submit_sighted_at) : null, submitLabel: String(r.submit_label ?? ""),
       preview: steps.slice(0, 12).map(describeStep),
     });
   }
@@ -260,9 +281,17 @@ export function applyRunFixSteps(
   const runPath = String(row.permit_path ?? "");
   const otherPath = (st: RecipeStep | undefined) => Boolean(st?.whenPermitPath) && st!.whenPermitPath !== runPath;
   if (mode === "replace_rest") {
+    // WHERE A KEPT OTHER-PATH STEP GOES: right before this path's counterpart choice among the fixes
+    // (the first fix stamped with this run's path), since a path choice answers the same question on
+    // the same page as its counterpart; with no counterpart, where the replaced range began (its place
+    // relative to the steps before it is unchanged). Kept steps stay in their recorded order. This is
+    // safe for the other path's replay: on that path this run's stamped choices are left out (R14),
+    // so its own choice runs at the position this path's answered.
     const keptOther = steps.slice(anchor, cut).filter(otherPath);
     replaced = cut - anchor - keptOther.length;
-    merged = [...steps.slice(0, anchor), ...keptOther, ...fixes, ...steps.slice(cut)];
+    const at = fixes.findIndex((f) => Boolean(f.whenPermitPath) && f.whenPermitPath === runPath);
+    const body = at >= 0 ? [...fixes.slice(0, at), ...keptOther, ...fixes.slice(at)] : [...keptOther, ...fixes];
+    merged = [...steps.slice(0, anchor), ...body, ...steps.slice(cut)];
   } else {
     replaced = anchor < cut && !otherPath(steps[anchor]) && fixes.some((f) => sameControl(f, steps[anchor])) ? 1 : 0;
     merged = [...steps.slice(0, anchor), ...fixes, ...steps.slice(anchor + replaced)];
@@ -275,12 +304,19 @@ export function applyRunFixSteps(
   // names THIS run: any other demotion stays for a person to look at.
   let status = recipe.status;
   if (status === "needs_rerecord") {
-    const last = db.get<{ details: string }>(
-      "SELECT details FROM audit_logs WHERE action = 'portal_recipe.demoted' AND details LIKE ? ORDER BY created_at DESC LIMIT 1",
+    // Newest first, matched on the PARSED recipeId (a row that merely mentions the id never counts).
+    const rows = db.query<{ details: string }>(
+      "SELECT details FROM audit_logs WHERE action = 'portal_recipe.demoted' AND details LIKE ? ORDER BY created_at DESC, rowid DESC LIMIT 50",
       [`%${recipe.id}%`],
     );
-    let lastRun = "";
-    try { lastRun = String(JSON.parse(last?.details || "{}").runId ?? ""); } catch { lastRun = ""; }
+    let lastRun: string | null = null;
+    for (const r of rows) {
+      let d: { recipeId?: unknown; runId?: unknown } = {};
+      try { d = JSON.parse(r.details || "{}"); } catch { continue; }
+      if (String(d.recipeId ?? "") !== recipe.id) continue;
+      lastRun = String(d.runId ?? "");
+      break;
+    }
     if (lastRun === runId) status = "complete";
   }
   const notes = upsertRecipeNote(recipe.notes, "hand fixes", `[hand fixes ${now.slice(0, 10)} by ${appliedBy}: ${fixes.length} step(s) ${anchor === cut ? "after the last step" : `at step ${anchor + 1}`}${mode === "replace_rest" ? ", replacing the rest to review" : ""}]`);
@@ -294,4 +330,29 @@ export function applyRunFixSteps(
     recipeId: recipe.id, saved: fixes.length, mode, replaced,
     message: `${untypedUploads ? `${untypedUploads} of your upload(s) did not say which document goes there: set its doc type under Portal recipes, steps, or the replay skips it. ` : ""}Saved ${fixes.length} step(s) into the recipe ${anchor === cut ? "after its last step, before the review stop" : `at step ${anchor + 1}`}${replaced ? ` (replacing ${replaced} step(s) there)` : ""}. The next stage replays them; it still stops at the review page.`,
   };
+}
+
+/**
+ * HAND-FIXED STEPS ARE UNPROVEN UNTIL A REPLAY CARRIES THEM TO REVIEW (Helm, #257 review). A saved
+ * fix is a person's demonstration on one page, never an end-to-end run, so the recipe it went into may
+ * not file automatically until one later replay of it reaches the review page cleanly. Read by
+ * repository.automaticSubmitRefusals (the one final-submit gate). null = nothing awaits proof.
+ */
+export function handFixesAwaitingProof(db: AppDb, recipeId: string | null): { appliedAt: string; appliedBy: string } | null {
+  if (!recipeId) return null;
+  const row = db.get<{ applied_at: string; applied_by: string }>(
+    "SELECT applied_at, applied_by FROM portal_run_fix_steps WHERE recipe_id = ? AND applied_at IS NOT NULL AND proven_by_run = '' ORDER BY applied_at DESC LIMIT 1",
+    [recipeId],
+  );
+  return row ? { appliedAt: String(row.applied_at), appliedBy: String(row.applied_by ?? "") } : null;
+}
+
+/** A replay of this recipe that STARTED after the fixes were saved reached the review page cleanly
+ *  (outcome awaiting_human_submit): the fixes saved before it are proven by that run. */
+export function markHandFixesProven(db: AppDb, recipeId: string, runId: string, runStartedAt: string): number {
+  db.run(
+    "UPDATE portal_run_fix_steps SET proven_by_run = ? WHERE recipe_id = ? AND applied_at IS NOT NULL AND proven_by_run = '' AND applied_at < ?",
+    [runId, recipeId, runStartedAt],
+  );
+  return Number(db.get<{ n: number }>("SELECT changes() AS n")?.n ?? 0);
 }

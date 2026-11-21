@@ -4652,14 +4652,18 @@ app.post("/api/portal-runs/:id/cancel", (req, res) => {
 // failed replay step left open into the recipe, at the step that got stuck. Never clicks anything.
 // mode "insert" (default) or "replace_rest" (they finished the application by hand to review).
 // Scope: /api/portal-runs/:id, so the child scope guard 404s another tenant's run (rule 6).
-app.post("/api/portal-runs/:id/save-fixes", (req, res) => {
-  const user = currentUser(db, req);
-  const appliedBy = user?.name || user?.email || String(req.body?.savedBy ?? "").trim();
+app.post("/api/portal-runs/:id/save-fixes", asyncHandler(async (req, res) => {
+  // A NAMED PERSON, like every decision that changes shared state: signed in, the account (a role-only
+  // display name is recorded by its email); signed out, the name the dashboard sends, never a blank or
+  // a placeholder such as "operator".
+  const { isConfirmingPerson } = await import("./feeConfirm");
+  const appliedBy = namedPersonDecider(req, "decidedBy", "Sign in to save fixes into a recipe.",
+    `Name the person saving these fixes: a recipe change is recorded against them, and "operator" is not a person.`, isConfirmingPerson);
   const mode = String(req.body?.mode ?? "") === "replace_rest" ? "replace_rest" : "insert";
   const saved = applyRunFixSteps(db, String(req.params.id), { appliedBy, mode });
   const projectId = db.get<{ project_id: string }>("SELECT project_id FROM portal_runs WHERE id = ?", [String(req.params.id)])?.project_id;
   res.json({ ...saved, ...(projectId ? { detail: getProjectDetail(db, projectId) } : {}) });
-});
+}));
 
 app.post("/api/portal-runs/:id/capture-confirmation", (req, res) => {
   res.json(captureConfirmation(db, req.params.id, req.body || {}));

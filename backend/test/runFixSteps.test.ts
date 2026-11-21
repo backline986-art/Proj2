@@ -182,4 +182,84 @@ await check("(h) a hand upload names its document from the slot's label; one it 
   assert.match(out.message, /^1 of your upload\(s\) did not say which document/);
 });
 
+await check("(i) a submit clicked in the fix window is recorded (row, audit, run card), never stored as a step; none clicked, none recorded", async () => {
+  const SIGNAL = { action: "click", selector: {}, optional: true, note: "__human_submit_observed__", value: "Submit Application" } as RecipeStep;
+  // Sighted after the run returned.
+  const a = await stageStuckAt(1);
+  a.later({ action: "click", selector: { text: "Next" }, note: "Next" } as RecipeStep);
+  a.later(SIGNAL);
+  const rowA = fixRow(a.runId)!;
+  assert.ok(rowA.submit_sighted_at, "the sighting is on the run row");
+  assert.equal(rowA.submit_label, "Submit Application");
+  assert.deepEqual(heldSteps(a.runId).map((st) => st.note), ["hand-fix: Next"], "the signal is never a step");
+  assert.equal(fx.audits("portal.fix_window_submit_sighted").filter((x) => JSON.parse(x.details).runId === a.runId).length, 1);
+  const card = repo.getProjectDetail(db, a.projectId).portalRuns.find((r) => r.id === a.runId)!;
+  assert.ok(card.handFixes?.submitSightedAt);
+  // Sighted while the run was still returning (before the anchor): recorded once the row exists.
+  const b = await stageStuckAt(1, { during: [SIGNAL] });
+  assert.ok(fixRow(b.runId)!.submit_sighted_at, "an early sighting is recorded at the anchor");
+  // None clicked.
+  const c = await stageStuckAt(1);
+  c.later({ action: "click", selector: { text: "Next" }, note: "Next" } as RecipeStep);
+  assert.equal(fixRow(c.runId)!.submit_sighted_at, null);
+  assert.equal(repo.getProjectDetail(db, c.projectId).portalRuns.find((r) => r.id === c.runId)!.handFixes?.submitSightedAt, null);
+});
+
+const refusals = (recipeId: string) => repo.automaticSubmitRefusals(db, { recipeId, runApproval: null, runId: "r-x", filingDoor: null })
+  .filter((r) => /hand fixes/.test(r));
+
+await check("(j) saved hand fixes refuse an automatic filing until a later replay reaches review cleanly; a failed replay proves nothing", async () => {
+  const { runId, recipe, later } = await stageStuckAt(1);
+  later({ action: "click", selector: { text: "Open section" }, note: "Open section" } as RecipeStep);
+  fixes.applyRunFixSteps(db, runId, { appliedBy: "Dana" });
+  assert.equal(fx.recipeRow(recipe.id).status, "complete", "setup: the save restored complete");
+  assert.equal(refusals(recipe.id).length, 1, "the first replay after a save may not file");
+  // A later replay that FAILS proves nothing.
+  const p1 = fx.newProject();
+  fx.stubRunner(async () => fx.failingStep("Recipe step failed (click — Open section): element is not visible"));
+  await repo.prepareSubmission(db, p1).catch(() => undefined);
+  assert.equal(refusals(recipe.id).length, 1, "a failed replay is no proof");
+  // Re-trust the recipe the failure demoted, as a person would after looking (keeps the save unproven).
+  db.run("UPDATE portal_recipes SET status = 'complete' WHERE id = ?", [recipe.id]);
+  const p2 = fx.newProject();
+  fx.stubRunner(async () => ({ portalName: "stub", ok: true, finalSubmitClicked: false, pauseReason: null, browserLeftOpen: false,
+    steps: [{ ok: true, message: "Opened stub portal." }, { ok: true, message: "Filled." }, { ok: true, message: "Staged at the review screen. AUTOMATION HAS STOPPED.", data: { finalSubmitClicked: false } }] }));
+  await repo.prepareSubmission(db, p2).catch(() => undefined);
+  assert.equal(String(fx.latestRun(p2)!.status), "awaiting_human_submit", "setup: the replay reached review");
+  assert.deepEqual(refusals(recipe.id), [], "a clean review-reaching replay proves the fixes");
+  assert.ok(fx.audits("portal_recipe.hand_fixes_proven").some((x) => JSON.parse(x.details).recipeId === recipe.id));
+});
+
+await check("(j2) a recipe that stayed complete at the save (keep-and-flag) is refused the same way", async () => {
+  const { runId, recipe, later } = await stageStuckAt(1);
+  later({ action: "click", selector: { text: "Tab two" }, note: "Tab two" } as RecipeStep);
+  db.run("UPDATE portal_recipes SET status = 'complete' WHERE id = ?", [recipe.id]);
+  fixes.applyRunFixSteps(db, runId, { appliedBy: "Dana" });
+  assert.equal(refusals(recipe.id).length, 1);
+});
+
+await check("(k) replace_rest keeps the other path's choice right before this path's counterpart among the fixes", async () => {
+  const steps = [...fx.fills(2),
+    { action: "check", selector: { label: "Engineered review" }, note: "Engineered review", whenPermitPath: "engineered" } as RecipeStep,
+    ...fx.fills(4).slice(2), fx.REVIEW, fx.FINAL];
+  const { runId, recipe, later } = await stageStuckAt(1, { steps });
+  later({ action: "click", selector: { text: "Applicant" }, note: "Applicant" } as RecipeStep);
+  later({ action: "check", selector: { label: "Prescriptive (no plan review)" }, note: "Prescriptive (no plan review)" } as RecipeStep);
+  later({ action: "click", selector: { text: "Next page" }, note: "Next page" } as RecipeStep);
+  fixes.applyRunFixSteps(db, runId, { appliedBy: "Dana", mode: "replace_rest" });
+  assert.deepEqual(recipes.getPortalRecipe(db, recipe.id).steps.map((st) => st.note),
+    ["Field 0", "hand-fix: Applicant", "Engineered review", "hand-fix: Prescriptive (no plan review)", "hand-fix: Next page", undefined, "final submit"]);
+});
+
+await check("(l) the demotion read is the latest row whose PARSED recipeId is this recipe, never one that only mentions it", async () => {
+  const { runId, recipe, later } = await stageStuckAt(1);
+  later({ action: "click", selector: { text: "Section B" }, note: "Section B" } as RecipeStep);
+  assert.equal(fx.recipeRow(recipe.id).status, "needs_rerecord", "setup: this run demoted it");
+  const { addAuditLog } = await import("../src/audit");
+  await new Promise((r) => setTimeout(r, 5));
+  addAuditLog(db, null, "system", "recipe replay", "portal_recipe.demoted", { recipeId: "another-recipe", note: `see ${recipe.id}`, runId: "some-other-run" });
+  fixes.applyRunFixSteps(db, runId, { appliedBy: "Dana" });
+  assert.equal(fx.recipeRow(recipe.id).status, "complete");
+});
+
 finish("run fix steps");

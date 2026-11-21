@@ -82,7 +82,7 @@ import { checkStatusWithAdapter, runCorrectionReopen, stageWithAccela, stageWith
 import { readRecordLinkSignedIn } from "../../portal-bot/src/recordLinkRead";
 import { liveReviewSessionUnder } from "../../portal-bot/src/reviewSession";
 import { portalAutomationDisabled, resolveHeadless } from "../../portal-bot/src/browser";
-import { openRunFixCapture, runFixSummaries, secretFreeFields } from "./runFixSteps";
+import { handFixesAwaitingProof, markHandFixesProven, openRunFixCapture, runFixSummaries, secretFreeFields } from "./runFixSteps";
 import { learnRecordNumberFormat, findCompleteRecipeForProject, findAnyRecipeForProject, resolveRecipeFieldValues, markPortalRecipeForRerecord, demoteOnReplayFailure, collectHealedSteps, persistHealedSteps, getPortalRecipe, portalEntityEvidence, recipeHostFit, findBorrowableRecipe, replayFailureBlamesRecipe, recipeStepsSignature, isNotServedRecipe, recordPortalNotServed, type BorrowedRecipeChoice } from "./portalRecipes";
 import { notServedInResult } from "../../shared/src/portalNotServed";
 import { notifyClientOfStatusChange, shouldNotifyClient } from "./clientNotifier";
@@ -765,7 +765,7 @@ function withHandFixes(db: AppDb, projectId: string, runs: PortalRun[]): PortalR
   if (!fixes.size) return runs;
   return runs.map((r) => {
     const f = fixes.get(r.id);
-    return f ? { ...r, handFixes: { count: f.count, stuckStep: f.stuckStep, atEnd: f.atEnd, appliedAt: f.appliedAt, appliedBy: f.appliedBy, preview: f.preview } } : r;
+    return f ? { ...r, handFixes: { count: f.count, stuckStep: f.stuckStep, atEnd: f.atEnd, appliedAt: f.appliedAt, appliedBy: f.appliedBy, preview: f.preview, submitSightedAt: f.submitSightedAt, submitLabel: f.submitLabel } } : r;
   });
 }
 
@@ -8760,6 +8760,10 @@ export function automaticSubmitRefusals(
     out.push("no recorded recipe drives this run (a final submit needs a recipe with a flagged, terminal submit step)");
   } else {
     if (text(row.status) !== "complete") out.push(`the recipe is ${text(row.status) || "unknown"}, not complete`);
+    // HAND FIXES NO REPLAY HAS YET CARRIED TO REVIEW (runFixSteps.ts): a person's save is not an
+    // end-to-end run, so the first replay after it always stops at review.
+    const unproven = handFixesAwaitingProof(db, input.recipeId);
+    if (unproven) out.push(`the recipe carries hand fixes saved ${unproven.appliedAt.slice(0, 16)}${unproven.appliedBy ? ` by ${unproven.appliedBy}` : ""} that no replay has yet carried cleanly to the review page — stage it once (it stops at review), then approve`);
     const steps = parseJson<Array<{ action: string; isFinalSubmit?: boolean; value?: unknown }>>(text(row.steps_json) || "[]", []);
     const flagged = steps.filter((st) => st && st.isFinalSubmit === true).length;
     if (flagged === 0) out.push("the recipe has no flagged final-submit step");
@@ -11470,6 +11474,15 @@ export async function prepareSubmission(
     // #333: a filing the person made from the review window while this run was finishing — recorded
     // now, on top of the outcome (an awaiting_human_submit row, or the run's own failed row), never
     // under it. Whatever the run reported, a filing that went is recorded as submitted.
+    // A REPLAY THAT REACHED REVIEW CLEANLY PROVES THE HAND FIXES SAVED BEFORE IT STARTED (runFixSteps):
+    // only an own recipe's replay (a borrowed one never carries this recipe's fixes as its own).
+    if (runStatus === "awaiting_human_submit" && recipe && runActorLabel === "RecipeAdapter" && !borrowed) {
+      try {
+        const proven = markHandFixesProven(db, recipe.id, runId, ts);
+        if (proven) addAuditLog(db, projectId, "system", "recipe replay", "portal_recipe.hand_fixes_proven", { recipeId: recipe.id, runId, saves: proven });
+      } catch { /* proof is recorded best-effort; until it is, the gate keeps refusing (fail closed) */ }
+    }
+
     runOutcomeRecorded = true;
     for (const capture of capturesBeforeOutcome.splice(0)) recordSubmitCapture(capture);
   } catch (err) {
