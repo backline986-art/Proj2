@@ -330,6 +330,10 @@ interface StageOptions {
   /** #340 — a replay with no new step for this long ends as a named failure (`replayStalled`).
    *  Default PORTAL_REPLAY_STALL_MINUTES, 8 minutes. */
   stallTimeoutMs?: number;
+  /** MANUAL TEACHING THAT ADAPTS: a recipe replay reports the person's fixes in the window it leaves
+   *  open (at review, or at a failed step — then the window stays open for them; see runAdapter). The
+   *  backend keeps them on the run; a person decides whether they go into the recipe. */
+  onHumanFixStep?: (step: import("../../shared/src/types").RecipeStep) => void;
 }
 
 // Headed, guided-manual staging leaves the browser OPEN at the review screen so the human
@@ -543,6 +547,8 @@ async function runAdapter(
   // A headed, guided-manual run (stop at review, no autosubmit) leaves the browser open for
   // the human to submit. Set once we've staged cleanly to review; checked in finally.
   let leaveBrowserOpen = false;
+  // ...and whether that is a FAILED recipe step's window kept for the person's fix (no submit watch).
+  let leftOpenForFix = false;
   // Re-staging the same client+portal? Close the previously left-open window first so the
   // persistent-profile lock is free for this run to launch.
   await closePriorStagingBrowser(options.userDataDir);
@@ -656,6 +662,19 @@ async function runAdapter(
     // backstop is already off (fillApplication disposes it before returning), so nothing blocks
     // that person's own clicks.
     if (stepPause && options.headless === false && !!options.userDataDir) leaveBrowserOpen = true;
+    // A RECIPE STEP THAT FAILED (or a replay that ran its steps and still stopped short of the review
+    // page) KEEPS ITS WINDOW FOR THE PERSON TO FINISH (owner 2026-11-21: "the fix
+    // screen was hit, I approved it, then it was still getting stuck"). Closing it threw away the one
+    // page where a person could show the step the recipe could not do. Only a headed guided replay
+    // whose caller keeps the person's fixes (onHumanFixStep), that got past login into the steps, and
+    // that clicked nothing filing-shaped: never after a cancel or a stall (a stopped run is closed),
+    // never after a draft click or an approved run. The network backstop is already off (fillApplication
+    // disposed it), so nothing blocks the person; automation does nothing more in this window.
+    leftOpenForFix = !leaveBrowserOpen && !ok && !options.autoSubmit && options.headless === false && !!options.userDataDir
+      && typeof options.onHumanFixStep === "function" && typeof adapter.armFixCaptureAfterFailure === "function"
+      && openResult.ok && (fillResult.ok === false || reviewResult.ok === false) && !finalSubmitClicked && !runCancelled && !replayStalled
+      && !draftCreatedByReplay && !draftSubmitUnexpected && !existingDraft;
+    if (leftOpenForFix) leaveBrowserOpen = true;
 
     // DID THE APPROVED CLICK'S REQUEST REACH THE PORTAL? (portal-run-close-2 M3.) The network
     // backstop's own record: true = a state-changing request was admitted in the approved slot or
@@ -703,6 +722,17 @@ async function runAdapter(
       // True when the staged browser is left open at the review screen for the human to
       // submit (so the UI can say "the portal is open — verify and click Submit").
       browserLeftOpen: leaveBrowserOpen,
+      // The window was kept at a FAILED step for the person to finish (their fixes are reported).
+      // fixAnchorStepIndex: the failed step, as an index into the steps THIS run executed (the caller maps
+      // it back to the stored recipe), so the person's fixes land exactly there.
+      // fixAnchorAtEnd: every step ran but the run stopped short of the review page (a step found
+      // nothing to act on and was skipped), so the person carries on from the page it ended on — their
+      // fixes go after the last step, before the review stop.
+      ...(leftOpenForFix
+        ? fillResult.ok === false
+          ? { browserLeftOpenForFix: true, fixAnchorStepIndex: typeof fillResult.data?.failedStepIndex === "number" ? fillResult.data.failedStepIndex : null }
+          : { browserLeftOpenForFix: true, fixAnchorStepIndex: null, fixAnchorAtEnd: true }
+        : {}),
       capturedPermitNumber: captured?.permitNumber || "",
       capturedConfirmationNumber: captured?.confirmationNumber || "",
       capturedRecordLink: captured?.recordLink || "",
@@ -738,7 +768,12 @@ async function runAdapter(
     // screen so the human can submit, tracked by userDataDir so the next run closes it.
     // Every other path (autosubmit, headless, failed, errored) closes so the profile lock
     // is released and the next run can launch.
-    if (leaveBrowserOpen && options.userDataDir) {
+    if (leftOpenForFix && options.userDataDir) {
+      // The person finishes the step the replay could not; their fixes are reported, never merged
+      // here. No submit capture: a run that failed is not a staged filing (they mark it submitted).
+      trackOpenAdapter(options.userDataDir, adapter);
+      try { await adapter.armFixCaptureAfterFailure?.(); } catch { /* best-effort */ }
+    } else if (leaveBrowserOpen && options.userDataDir) {
       trackOpenAdapter(options.userDataDir, adapter);
       // WATCH FOR THE OPERATOR'S SUBMIT. This is the window they file in, and the page that
       // comes back after their click carries the record number the whole product keys on —
@@ -787,6 +822,7 @@ export async function stageWithRecipe(
     stagedReview: options.stagedReview ?? null,
     abortSignal: options.abortSignal ?? null,
     stallTimeoutMs: options.stallTimeoutMs,
+    onHumanFixStep: options.onHumanFixStep,
   }), project, files, options));
 }
 

@@ -3966,6 +3966,38 @@ const VERSIONED_MIGRATIONS: VersionedMigration[] = [
         )
       `);
     },
+  },  {
+    // v91 (replays learn from a person's hand fixes; owner 2026-11-21 "get the manual learning going and
+    // adapted"). Helm renumbers at merge if the queue changes — nothing here depends on the number.
+    version: 91,
+    name: "portal_run_fix_steps",
+    up: (db) => {
+      // WHAT A PERSON DID BY HAND AFTER A REPLAY STEP FAILED (runFixSteps.ts), one row per run. The
+      // window stays open at the failed step; the person's fills/clicks are captured (read only),
+      // prepared like the learner's review patch (no submit/pay click, no secret value, literals bound
+      // to the job's fields) and held here. Nothing reaches the recipe until a named person presses
+      // "Save my fixes" (applied_at / applied_by), and only onto the exact recipe version and steps the
+      // run replayed (recipe_version + steps_signature). anchor_index is the failed step in the STORED
+      // recipe (-1 = unknown, -2 = after the last step). permit_path: the job's resolved path on a permit
+      // track ('' on NEM), what a path-naming fix was shown for. A child of the run, so it reaches an org
+      // through its project.
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS portal_run_fix_steps (
+          run_id TEXT PRIMARY KEY REFERENCES portal_runs(id) ON DELETE CASCADE,
+          project_id TEXT NOT NULL,
+          recipe_id TEXT NOT NULL,
+          recipe_version INTEGER NOT NULL,
+          steps_signature TEXT NOT NULL,
+          anchor_index INTEGER NOT NULL DEFAULT -1,
+          steps_json TEXT NOT NULL DEFAULT '[]',
+          captured_at TEXT NOT NULL,
+          applied_at TEXT,
+          applied_by TEXT NOT NULL DEFAULT '',
+          applied_mode TEXT NOT NULL DEFAULT '',
+          permit_path TEXT NOT NULL DEFAULT ''
+        )
+      `);
+    },
   },
 ];
 

@@ -10335,6 +10335,24 @@ function renderPortalRuns() {
           <span class="muted" style="font-size:11px">Stops at the next step: nothing more is filled or clicked, nothing is submitted.</span>
         </div>`
       : "";
+    // REPLAYS LEARN FROM YOUR HAND FIXES (runFixSteps.ts): a replay step failed, its window stayed open at
+    // that step, and what the person did there is held on this run. "Save my fixes" writes it into the
+    // recipe at the stuck step, under the person's name; nothing is clicked or submitted by saving.
+    const hf = run.handFixes;
+    const fixAction = hf && !hf.appliedAt
+      ? `<div style="margin-top:6px">
+          <p class="muted" style="font-size:12px;margin:0 0 4px">${hf.count
+            ? `You did ${esc(String(hf.count))} step(s) by hand${hf.stuckStep ? ` after step ${esc(String(hf.stuckStep))} got stuck` : hf.atEnd ? " after the run stopped short of the review page" : ""}:`
+            : `The portal window was left open where the run got stuck${hf.stuckStep ? ` (step ${esc(String(hf.stuckStep))})` : ""}. Finish by hand up to the review page (never submit or pay), then refresh: your steps show here.`}</p>
+          ${hf.count ? `<ul class="muted" style="font-size:11px;margin:0 0 6px 16px">${(hf.preview || []).map((p) => `<li>${esc(p)}</li>`).join("")}${hf.count > (hf.preview || []).length ? `<li>and ${esc(String(hf.count - (hf.preview || []).length))} more</li>` : ""}</ul>
+          <div style="display:flex;gap:8px;flex-wrap:wrap">
+            <button class="secondary" data-save-fixes="${esc(run.id)}" data-fix-mode="insert" style="font-size:12px">Save my fixes</button>
+            <button class="secondary" data-save-fixes="${esc(run.id)}" data-fix-mode="replace_rest" style="font-size:12px" title="Use when you finished the whole application by hand to its review page">I finished it to review: replace the rest</button>
+          </div>` : ""}
+        </div>`
+      : hf && hf.appliedAt
+        ? `<p class="muted" style="font-size:11px;margin-top:6px">Your ${esc(String(hf.count))} hand fix(es) were saved into the recipe${hf.appliedBy ? ` by ${esc(hf.appliedBy)}` : ""}.</p>`
+        : "";
     return `
     <article class="item ${cardClass}">
       <div class="item-title"><span>${esc(humanize(run.runType))}</span>${statusBadge(run.status)}</div>
@@ -10344,6 +10362,7 @@ function renderPortalRuns() {
       <p class="muted">${esc(run.errorMessage || run.startedAt)}</p>
       ${resubmitAction}
       ${stopAction}
+      ${fixAction}
     </article>`;
   };
   // PIN WHAT A PERSON MUST ACT ON; FOLD THE HISTORY WITH ITS COUNTS. On 7ec74634 the one
@@ -10354,8 +10373,10 @@ function renderPortalRuns() {
   // count is never hidden with the cards.
   // A RUNNING stage is pinned too (#340): its Stop control must not sit folded under old runs.
   const pinnedStatuses = ["running", "awaiting_human_submit", "awaiting_human_resubmit", "paused_for_human", "awaiting_payment"];
-  const pinned = runs.filter((run) => pinnedStatuses.includes(run.status));
-  const earlier = runs.filter((run) => !pinnedStatuses.includes(run.status));
+  // A run holding hand fixes nobody has saved yet is pinned too: its Save button must not sit folded.
+  const isPinned = (run) => pinnedStatuses.includes(run.status) || Boolean(run.handFixes && !run.handFixes.appliedAt);
+  const pinned = runs.filter(isPinned);
+  const earlier = runs.filter((run) => !isPinned(run));
   const earlierFailed = earlier.filter((run) => run.status === "failed").length;
   const pinnedWrap = $("portalRunsPinned");
   const prevFold = $("portalRuns").querySelector("details.runs-fold");
@@ -10394,6 +10415,34 @@ function renderPortalRuns() {
         showMessage(err.message, "error");
         button.disabled = false;
         button.textContent = originalLabel;
+      }
+    });
+  });
+
+  document.querySelectorAll("#portalRunsPinned button[data-save-fixes], #portalRuns button[data-save-fixes]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const mode = button.dataset.fixMode === "replace_rest" ? "replace_rest" : "insert";
+      const ask = mode === "replace_rest"
+        ? "Replace the recipe from the stuck step to the review page with what you did by hand?\n\nOnly when you finished the whole application by hand. Nothing is clicked or submitted by saving."
+        : "Add what you did by hand to the recipe at the stuck step?\n\nThe next stage replays it. Nothing is clicked or submitted by saving.";
+      if (!confirm(ask)) return;
+      const body = { mode };
+      const auth = await authForDecision();
+      if (!(auth && auth.enabled)) {
+        let last = "";
+        try { last = localStorage.getItem(APPROVER_NAME_KEY) || ""; } catch { last = ""; }
+        body.savedBy = String(prompt("Your name, recorded with this save:", last) || "").trim();
+        if (!body.savedBy) { showMessage("Nothing was saved: a recipe change is recorded under a person's name.", "warning"); return; }
+        try { localStorage.setItem(APPROVER_NAME_KEY, body.savedBy); } catch { /* per-viewer convenience only */ }
+      }
+      button.disabled = true;
+      try {
+        const result = await api(`/api/portal-runs/${encodeURIComponent(button.dataset.saveFixes)}/save-fixes`, { method: "POST", body: JSON.stringify(body) });
+        showMessage(result.message, "info");
+        await selectProject(state.selectedProjectId);
+      } catch (err) {
+        showMessage(err.message, "error");
+        button.disabled = false;
       }
     });
   });

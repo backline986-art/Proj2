@@ -37,6 +37,20 @@ import {
   type FieldIdentity,
 } from "../../shared/src/portalSafety";
 import { openPortal } from "./browser";
+import { UPLOAD_LABEL_PATTERNS } from "./adapters/autoLearnAdapter";
+
+/** WHICH OF THE JOB'S DOCUMENTS A RECORDED UPLOAD SLOT TAKES, read off the slot's own label with the
+ *  learner's table (autoLearnAdapter UPLOAD_LABEL_PATTERNS), so a hand recording names its documents
+ *  the way a learned recipe does. "" when the label names none: the person is asked at save. An upload
+ *  saved with no document type is skipped at replay, and the portal then refuses to go on. */
+export function guessUploadDocType(label: string | undefined): string {
+  const l = String(label ?? "").trim();
+  if (!l) return "";
+  return UPLOAD_LABEL_PATTERNS.find(({ re }) => re.test(l))?.docType ?? "";
+}
+
+/** The document types a person can pick for an upload slot (the learner's table, in its order). */
+export const UPLOAD_DOC_TYPE_CHOICES: string[] = [...new Set(["plan_set", ...UPLOAD_LABEL_PATTERNS.map((p) => p.docType)])];
 
 /** What the in-page capture reports for one interaction. Attribute names and labels only,
  *  except `value`, which crosses this in-memory binding so it can be bound to a field key. */
@@ -158,7 +172,9 @@ export function createRecorderSink(
     } else if (payload.kind === "uncheck") {
       steps.push({ action: "uncheck", selector: sel, ...fp, note: payload.label });
     } else if (payload.kind === "upload") {
-      steps.push({ action: "upload", selector: sel, docType: "", ...(payload.viaFileChooser ? { viaFileChooser: true } : {}), note: `UPLOAD — set docType (e.g. sld, site_plan) in the dashboard. ${payload.label ?? ""}` });
+      const docType = guessUploadDocType(payload.label);
+      steps.push({ action: "upload", selector: sel, docType, ...(payload.viaFileChooser ? { viaFileChooser: true } : {}),
+        note: docType ? `upload ${docType}: ${payload.label ?? ""}` : `UPLOAD — set docType (e.g. sld, site_plan) in the dashboard. ${payload.label ?? ""}` });
     }
   };
 }
@@ -337,6 +353,9 @@ async function main(): Promise<void> {
 
   // Terminal review marker so replay always stops before submit — in the one valid shape.
   const closed = finalizeRecordedSteps(steps);
+  // EVERY UPLOAD NAMES ITS DOCUMENT BEFORE THE RECIPE IS SAVED. A slot whose label named none is asked
+  // about here (an interactive terminal); Enter leaves it for the dashboard, and the save says so.
+  await askUploadDocTypes(closed);
 
   // LLM-assisted binding: for fill/select steps without an exact-match field key, ask the
   // model to identify which project/client field each typed value corresponds to.
@@ -368,12 +387,36 @@ async function main(): Promise<void> {
   const saveRes = await fetch(`${api}/api/portal-recipes/${recipe.id}/steps`, {
     method: "PUT",
     headers: recorderRequestHeaders(auth, { json: true }),
-    body: JSON.stringify({ steps: finalSteps, status: "complete" }),
+    // recordedOnProjectId: the job this was recorded on, so a choice naming a permit path
+    // ("Prescriptive") is stamped with that job's path and replays only on jobs of the same path.
+    body: JSON.stringify({ steps: finalSteps, status: "complete", ...(projectId ? { recordedOnProjectId: projectId } : {}) }),
   });
   if (!saveRes.ok) throw await refused("Failed to save recipe", saveRes);
   const boundCount = finalSteps.filter((s: RecipeStep) => s.field).length;
-  console.log(`\nSaved ${finalSteps.length} step(s) to recipe ${recipe.id} (${boundCount} data-bound). Set any UPLOAD docTypes in the dashboard, then the bot will replay it.`);
+  const untyped = finalSteps.filter((s: RecipeStep) => s.action === "upload" && !s.docType).length;
+  console.log(`\nSaved ${finalSteps.length} step(s) to recipe ${recipe.id} (${boundCount} data-bound).`
+    + (untyped ? ` ${untyped} upload(s) still have NO document type: set them under Portal recipes, steps, "doc type", or those uploads are skipped and the portal will not go on.` : " Every upload names its document."));
   process.exit(0);
+}
+
+/** Ask, in the recorder's terminal, which document each upload with no document type takes. Only on an
+ *  interactive terminal; anything typed that is not a known type is refused and asked again once. */
+async function askUploadDocTypes(steps: RecipeStep[]): Promise<void> {
+  const blanks = steps.filter((s) => s.action === "upload" && !s.docType);
+  if (!blanks.length || !process.stdin.isTTY) return;
+  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+  const ask = (q: string) => new Promise<string>((resolve) => rl.question(q, (a) => resolve(String(a ?? "").trim())));
+  console.log(`\n${blanks.length} upload(s) did not say which document they take. Types: ${UPLOAD_DOC_TYPE_CHOICES.join(", ")}`);
+  for (const step of blanks) {
+    const where = String(step.note ?? "").replace(/^UPLOAD — set docType \(e\.g\. sld, site_plan\) in the dashboard\.\s*/, "").slice(0, 80) || "an upload slot";
+    for (let tries = 0; tries < 2; tries++) {
+      const typed = (await ask(`  Which document goes in "${where}"? (Enter = decide later in the dashboard) `)).toLowerCase();
+      if (!typed) break;
+      if (UPLOAD_DOC_TYPE_CHOICES.includes(typed)) { step.docType = typed; step.note = `upload ${typed}: ${where}`; break; }
+      console.log(`  "${typed}" is not a document type Keelix files. Pick one of the types above.`);
+    }
+  }
+  rl.close();
 }
 
 // Browser-side capture: generates a portable selector for the target element and reports

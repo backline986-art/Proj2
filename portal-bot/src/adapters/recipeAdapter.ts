@@ -1389,6 +1389,13 @@ export class RecipeAdapter extends BasePortalAdapter {
       /** The review tail's budget once the step loop is done (ReplayStallWatch.enterTail). Default
        *  PORTAL_REPLAY_REVIEW_TAIL_MINUTES (30 minutes); never below stallTimeoutMs. */
       reviewTailTimeoutMs?: number;
+      /** A PERSON'S FIXES IN THE WINDOW THIS RUN LEFT OPEN (owner 2026-11-21: manual teaching that
+       *  adapts). After the hand-over at review, or after a failed step whose window stays open, every
+       *  fill / select / check / upload / navigation click the person makes is reported here (the
+       *  shared capture: never a submit, pay or card field; a secret's value only in memory, to bind).
+       *  Nothing is merged by this: the backend keeps them on the run until a person saves them into
+       *  the recipe. Stops at the person's final submit (nothing after a filing belongs to a recipe). */
+      onHumanFixStep?: (step: RecipeStep) => void;
     } = {},
   ) {
     super();
@@ -2413,9 +2420,32 @@ export class RecipeAdapter extends BasePortalAdapter {
     // clicked; every other captured step belongs to the learn path and is ignored here. Round 4: it
     // keeps watching (oneShot:false) — a click is a sighting, committed on the evidence after it.
     this.submitWatch = armHumanCaptureOnPage(page, (step) => {
-      if (String(step.note || "").includes(HUMAN_SUBMIT_OBSERVED_NOTE)) this.sightHumanSubmit(step.value || undefined);
+      if (String(step.note || "").includes(HUMAN_SUBMIT_OBSERVED_NOTE)) { this.sightHumanSubmit(step.value || undefined); return; }
+      this.forwardHumanFix(step);
     }, { oneShot: false }).catch(() => false);
     return this.submitWatch;
+  }
+
+  /** The person's own fix in a window this run handed over (see options.onHumanFixStep). Latched off
+   *  at their final submit: the click detector's sighting, which no later navigation can undo. */
+  private forwardHumanFix(step: RecipeStep): void {
+    if (this.humanSubmit || this.humanFixLatched) return;
+    try { this.options.onHumanFixStep?.(step); } catch { /* the person's window must never break */ }
+  }
+  private humanFixLatched = false;
+
+  /** A FAILED STEP'S WINDOW, LEFT OPEN FOR THE PERSON TO FINISH (index.ts runAdapter): arm the same
+   *  capture the review hand-over uses, so what they do at the step this run could not is reported
+   *  for the backend to keep. Read only: nothing here fills or clicks. True when armed. */
+  async armFixCaptureAfterFailure(): Promise<boolean> {
+    const page = this.page;
+    if (!page || typeof this.options.onHumanFixStep !== "function") return false;
+    // The page binding can be exposed only once: a watch this run already armed forwards fixes too.
+    if (this.submitWatch) return this.submitWatch;
+    return armHumanCaptureOnPage(page, (step) => {
+      if (String(step.note || "").includes(HUMAN_SUBMIT_OBSERVED_NOTE)) { this.humanFixLatched = true; return; }
+      this.forwardHumanFix(step);
+    }, { oneShot: false }).catch(() => false);
   }
 
   /** #333 — HAND THE REVIEW PAGE TO THE PERSON, before the run's read-only housekeeping. The backstop

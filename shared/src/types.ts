@@ -1512,6 +1512,10 @@ export interface PortalRun {
   // `portalName` into it (measured on the live DB: 59 AutoLearnAdapter rows carry none), so a
   // renderer reading it would name the portal on some filings and go silent on others.
   permitType?: string;
+  /** A person's hand fixes held on this run after a replay step failed and its window stayed open
+   *  (runFixSteps.ts): how many steps, the stuck step (1-based, 0 unknown), and whether a named person
+   *  saved them into the recipe yet. Absent on a run that holds none. */
+  handFixes?: { count: number; stuckStep: number; atEnd?: boolean; appliedAt: string | null; appliedBy: string; preview: string[] };
 }
 
 export interface SubmissionRecord {
@@ -5076,6 +5080,11 @@ export interface RecipeStep {
    *  BLANK for a person to answer — why, in words (e.g. a company-identity literal the save guard
    *  refused to persist). Metadata only: never part of the step's label or matching. */
   operatorItem?: string;
+  /** A CHOICE THAT NAMES A PERMIT PATH ("Prescriptive", "Engineered / structural review"), stamped with
+   *  the path of the job a person recorded or fixed it on (shared/src/permitPathSteps.ts). Replayed only
+   *  on a job whose resolved path is the same; on the other path it is left out, so a recording made
+   *  on a prescriptive job never picks "prescriptive" on an engineered one. Absent = every job. */
+  whenPermitPath?: "prescriptive" | "engineered";
   /** companyFacts.companyFactStamp of the client whose job recorded this company ATTESTATION (a
    *  check/select answering a fact about the installer company). Replayed only for that client's
    *  jobs; on any other job (or when absent) the step is left for a person. Opaque, never the id. */
