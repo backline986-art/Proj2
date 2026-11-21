@@ -30,7 +30,7 @@ import {
   findAnyRecipeForProject,
   assertOperatorPortalUrlFits,
 } from "./portalRecipes";
-import { trackSafeUrl } from "./portalChannel";
+import { recordingDisciplineOf, trackSafeUrl } from "./portalChannel";
 import { listPortalPauses, pausePortal, resumePortal } from "./portalPause";
 import {
   listPortalCredentials,
@@ -2494,6 +2494,9 @@ app.post("/api/portal-recipes/record", (req, res) => {
     portalPlatform: b.portalPlatform ? String(b.portalPlatform) : undefined,
     portalUrl: b.portalUrl ? String(b.portalUrl) : undefined,
     createdBy: user ? (user.name || user.email) : b.createdBy ? String(b.createdBy) : undefined,
+    // Which permit this recording is for (the recorder's --discipline / --track): keyed like a learn of
+    // that permit, so the stage of that track replays it. A utility recording has none (blanked there).
+    discipline: recordingDisciplineOf({ discipline: b.discipline, track: b.track }),
   });
   addAuditLog(db, null, "human", user?.email || "operator", "portal_recipe.recording_started", {
     recipeId: recipe.id, profileKey: recipe.profileKey, via: recorderPrincipal(req) ? "recorder_token" : user ? "session" : "none", orgId: user?.orgId ?? null,
@@ -2649,6 +2652,9 @@ app.post("/api/projects/:id/launch-record", (req, res) => {
     ...(scope === "ahj" ? ["--ahj", q(p.ahj || "")] : ["--utility", q(p.utility || "")]),
     ...(p.state ? ["--state", p.state] : []),
     ...(b.portalUrl ? ["--url", q(b.portalUrl)] : []),
+    // The permit this recording is for, from the track card (or the picker): see recordingDisciplineOf.
+    ...(scope === "ahj" && recordingDisciplineOf({ discipline: b.discipline, track: b.track })
+      ? ["--discipline", recordingDisciplineOf({ discipline: b.discipline, track: b.track })] : []),
     "--project", p.id,
     "--api", `http://localhost:${port}`,
     "--profile", `./.portal-profiles/${slug}`,

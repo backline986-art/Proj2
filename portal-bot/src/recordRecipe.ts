@@ -259,6 +259,9 @@ async function main(): Promise<void> {
   const state = arg("state");
   const url = arg("url");
   const platform = arg("platform");
+  // Which of the AHJ's permits this recording is for (structural | electrical | combo): the recipe is
+  // keyed on it, so that permit's stage replays THIS recording rather than an older learned one.
+  const discipline = scope === "ahj" ? arg("discipline") : "";
   const projectId = arg("project");
   const profileDir = arg("profile", "./.portal-profiles/recorder");
   const api = arg("api", process.env.API_BASE || "http://localhost:4173");
@@ -279,7 +282,7 @@ async function main(): Promise<void> {
   const startRes = await fetch(`${api}/api/portal-recipes/record`, {
     method: "POST",
     headers: recorderRequestHeaders(auth, { json: true }),
-    body: JSON.stringify({ scopeType: scope, ahj, utility, state, portalPlatform: platform, portalUrl: url }),
+    body: JSON.stringify({ scopeType: scope, ahj, utility, state, portalPlatform: platform, portalUrl: url, ...(discipline ? { discipline } : {}) }),
   });
   if (!startRes.ok) throw await refused("Failed to start recording", startRes);
   const recipe = await startRes.json();

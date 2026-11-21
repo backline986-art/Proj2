@@ -4144,6 +4144,10 @@ function buildRecordCommand() {
   else parts.push(`--utility "${p.utility || ""}"`);
   if (p.state) parts.push(`--state ${p.state}`);
   if (url) parts.push(`--url "${url}"`);
+  // The permit this recording is for (the same picker the auto-learn reads): the recipe is keyed on it,
+  // so that permit's stage replays the recording. "Whole permit" sends none.
+  const pick = $("recordPermitType")?.value;
+  if (scope === "ahj" && (pick === "structural" || pick === "electrical")) parts.push(`--discipline ${pick}`);
   parts.push(`--project ${p.id}`, `--api ${api}`, `--profile ./.portal-profiles/${recordSlug(name || scope)}`);
   return parts.join(" ");
 }
@@ -4697,7 +4701,8 @@ async function launchRecordSession() {
   try {
     const res = await api(`/api/projects/${p.id}/launch-record`, {
       method: "POST",
-      body: JSON.stringify({ scope, portalUrl: url || undefined }),
+      // The permit picked for an AHJ recording keys the recipe (see buildRecordCommand).
+      body: JSON.stringify({ scope, portalUrl: url || undefined, discipline: scope === "ahj" ? ($("recordPermitType")?.value || undefined) : undefined }),
     });
     if (statusEl) { statusEl.textContent = res.message || "Browser session started — complete the form in the opened browser window, then type save."; statusEl.className = ""; }
   } catch (err) {
@@ -12740,6 +12745,7 @@ if ($("knowledgeModal")) $("knowledgeModal").addEventListener("click", (e) => { 
 // Record-this-portal helper (Submit stage): rebuild the command live, copy, download .bat.
 if ($("recordScope")) $("recordScope").addEventListener("change", renderRecordPortal);
 if ($("recordScope")) $("recordScope").addEventListener("change", syncRecordPermitType);
+if ($("recordPermitType")) $("recordPermitType").addEventListener("change", renderRecordPortal);
 if ($("recordPortalUrl")) $("recordPortalUrl").addEventListener("input", () => { const el = $("recordCmdPreview"); if (el) el.textContent = buildRecordCommand(); });
 if ($("copyRecordCmdBtn")) $("copyRecordCmdBtn").addEventListener("click", copyRecordCommand);
 if ($("downloadRecordBatBtn")) $("downloadRecordBatBtn").addEventListener("click", downloadRecordBat);
