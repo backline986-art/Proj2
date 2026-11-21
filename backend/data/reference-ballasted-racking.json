@@ -1,0 +1,15 @@
+{
+  "about": "Racking product families whose maker sells them as BALLASTED (held down by weight, not attached through the roof), read by backend/src/ballastRacking.ts. Plan sets often name the product ('UNIRAC RM10 EVO', 'ECOFOOT2+') without ever writing the word 'ballast', so the product name is evidence on its own. Each pattern is matched on the text upper-cased with every run of non-letters/digits turned into one space, as whole words: write it in that form ('RM10 EVO', not 'RM10-EVO'). A family whose maker sells both ballasted and attached versions under one name does not belong here: name only the ballasted model. Adding a product is a record here, never code.",
+  "asOf": "2026-11-21",
+  "products": [
+    { "maker": "IronRidge", "family": "BX (ballasted flat-roof system)", "patterns": ["IRONRIDGE BX", "IRON RIDGE BX"] },
+    { "maker": "Unirac", "family": "RM ballasted roof mount (RM10, RM10 EVO, RM5, RM DT)", "patterns": ["UNIRAC RM10", "UNIRAC RM 10", "UNIRAC RM5", "UNIRAC RM 5", "UNIRAC RM DT", "RM10 EVO", "RM 10 EVO"] },
+    { "maker": "Ecolibrium Solar", "family": "EcoFoot ballasted flat-roof racking", "patterns": ["ECOFOOT", "ECOFOOT2", "ECOFOOT 2", "ECOFOOT5D", "ECOFOOT 5D"] },
+    { "maker": "PanelClaw", "family": "clawFR ballasted flat-roof racking", "patterns": ["CLAWFR", "CLAW FR"] },
+    { "maker": "Sollega", "family": "FastRack ballasted flat-roof racking", "patterns": ["SOLLEGA"] },
+    { "maker": "Esdec", "family": "FlatFix ballasted flat-roof racking", "patterns": ["FLATFIX FUSION", "FLATFIX WAVE", "ESDEC FLATFIX"] },
+    { "maker": "Renusol", "family": "ConSole ballasted flat-roof tub", "patterns": ["RENUSOL CONSOLE"] },
+    { "maker": "SunLink", "family": "RMS ballasted roof mount", "patterns": ["SUNLINK RMS"] },
+    { "maker": "Aerocompact", "family": "CompactFLAT ballasted flat-roof racking", "patterns": ["COMPACTFLAT"] }
+  ]
+}
