@@ -4072,6 +4072,9 @@ export function getSubmitGateReport(db: AppDb, projectId: string): SubmitGateRep
         requirement: "The prescriptive and engineered (PE-stamped) permit applications are mutually exclusive and the AHJ accepts exactly one. The permit path must be confirmed before the AHJ permit can be staged.",
         evidence: [
           gatePermitPath === "unknown" ? "Permit path not yet confirmed for this project." : `Permit path: ${gatePermitPath}.`,
+          // WHY it is not confirmed (the resolver's last word: e.g. an unclear ballast reading), so the
+          // person settling it sees the question, not only that there is one.
+          ...(gatePermitPath === "unknown" && gatePathResolution.basis.length ? [gatePathResolution.basis[gatePathResolution.basis.length - 1]] : []),
           ...(gatePermitPath === "prescriptive" ? prescriptiveChecklistNo.map((clause) => `BCD 5952 ${clause}`) : []),
         ],
         nextAction: gatePermitPath === "unknown"

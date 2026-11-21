@@ -22,6 +22,7 @@
 import type { PrescriptiveLimits, ProjectRecord } from "../../shared/src/types";
 import { assumedRoofLayersNote, classifyRoofCovering, roofingRowAgainst } from "./roofCovering";
 import { engineeredGroundMount } from "./mountKind";
+import { readBallastedRacking } from "./ballastRacking";
 import { describeSnowLabelIssue, planSheets, readSnowLabels } from "./planAttachmentRead";
 import { usStateCode } from "./usState";
 import { criteriaDefaultLimits, permitPathRecordFor, splitScreenNames, statewidePathRecords, type JurisdictionPermitPathRecord } from "./jurisdictionPermitPaths";
@@ -401,7 +402,8 @@ export function resolveStampRequirement(
  *   2. Parser hint (snapshot.permitPath) when it explicitly says prescriptive/engineered.
  *   3. Stamp recommendation that calls for a stamp/engineering → engineered.
  *   4. Structural prescriptive screen (snow ≤70, dead load ≤4.5, rafter spacing ≤24,
- *      wind B/C). Any failure → engineered. Microinverter roof mounts that pass the
+ *      wind B/C, and ballasted racking where the jurisdiction's cited rule excludes it).
+ *      Any failure → engineered; an unclear ballast reading → unknown (a person confirms). Microinverter roof mounts that pass the
  *      screen → prescriptive.
  *   5. Default for a standard residential roof mount → prescriptive.
  */
@@ -689,6 +691,27 @@ export function resolvePermitPath(project: PermitPathInputs, opts: PermitPathOpt
   if (windSpeed != null && speedCap != null && windSpeed > speedCap) {
     screenFailures.push(`ultimate design wind speed ${windSpeed} mph > ${speedCap} mph ${whose} cap${wind ? ` at exposure ${wind.toUpperCase()}` : ""}`);
   }
+  // BALLASTED RACKING LEAVES THE PRESCRIPTIVE PATH where the jurisdiction's own cited rule says so
+  // (its record's `ballastedRacking`: Oregon's BCD 440-5952 admits only direct attachment, and a city's
+  // worksheet may say it in its own words). Before this, the path screen never read the racking: a
+  // ballasted job with clean numbers routed PRESCRIPTIVE and only the reviewer's refusal caught it,
+  // after the wrong application was built. One reading (ballastRacking.ts): a clear one routes
+  // engineered; an unclear one (ballast named in the plan text while the package also shows an
+  // attachment to the framing, a pitched roof, or only a conditional / roofing mention) is a person's
+  // to settle, so the path asks instead of guessing. A ground mount the field names keeps step 5.
+  const ballastRule = record?.ballastedRacking;
+  let ballastQuestion = "";
+  if (record && ballastRule && !engineeredGroundMount(project)) {
+    const reading = readBallastedRacking(project);
+    const ahjText = clean(project.ahj).toLowerCase();
+    const local = ahjText ? ballastRule.localReadings?.find((l) => l.ahjNames.some((n) => ahjText.includes(n))) : undefined;
+    const words = `${ballastRule.source}: "${ballastRule.quote}"${local ? `; ${local.source}: "${local.quote}"` : ""}`;
+    if (reading.verdict === "ballasted") {
+      screenFailures.push(`ballasted / non-penetrating racking (${reading.evidence}) is not a ${record.displayName} prescriptive attachment (${words})`);
+    } else if (reading.verdict === "unclear") {
+      ballastQuestion = `Ballasted racking unclear: ${reading.doubt} (${reading.evidence}). Ballasted racking is not a ${record.displayName} prescriptive attachment (${words}), so a person confirms how the array is held down before the path is chosen: Manual entry → Permit path.`;
+    }
+  }
   // THE OTHER BCD 5952 ROWS DO NOT ROUTE THE PATH — operator ruling pending: a 5952 No row warns, it
   // does not route engineered (dry-run 2026-09-28 B4c). A comp-shingle job at 48 in o.c., 120 mph
   // Exposure C answers the attachment row No, yet a real issued Coos Bay permit for that design was
@@ -699,6 +722,10 @@ export function resolvePermitPath(project: PermitPathInputs, opts: PermitPathOpt
   if (screenFailures.length) {
     basis.push(`Structural prescriptive screen failed: ${screenFailures.join("; ")}.`);
     return finalize("engineered", "structural-screen");
+  }
+  if (ballastQuestion) {
+    basis.push(ballastQuestion);
+    return finalize("unknown", "default");
   }
 
   // 5. Default — a standard residential roof mount that clears the screen is prescriptive.

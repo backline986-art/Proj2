@@ -32,7 +32,7 @@ import { logger } from "./logger";
 import { resolvePermitPath, usStateCode } from "./permitPath";
 import { structureTypeForProject } from "./codeReviewRules";
 import { mountKindForProject } from "./mountKind";
-import { ballastedRackingEvidence } from "./ballastRacking";
+import { readBallastedRacking } from "./ballastRacking";
 import { isValidQcScreenValue } from "./jurisdictionQcRules";
 
 type Row = Record<string, unknown>;
@@ -221,8 +221,10 @@ export function statePrescriptiveFindings(project: ProjectRecord, rules: StatePe
   const unread: Reason[] = [];
   const attachment = rule("attachmentMethods");
   if (attachment) {
-    const ballast = ballastedRackingEvidence(project);
-    if (ballast) forcing.push({ why: `ballasted / non-penetrating racking (${ballast}) is attached by none of the state's prescriptive methods`, rule: attachment });
+    const ballast = readBallastedRacking(project);
+    if (ballast.verdict === "ballasted") forcing.push({ why: `ballasted / non-penetrating racking (${ballast.evidence}) is attached by none of the state's prescriptive methods`, rule: attachment });
+    // An UNCLEAR reading is never a pass and never a guessed refusal: a person settles it.
+    else if (ballast.verdict === "unclear") unread.push({ why: `whether the racking is ballasted is unclear: ${ballast.doubt} (${ballast.evidence})`, rule: attachment });
     else if (!textOf(project, "rackingSystem") && !textOf(project, "attachmentHardware") && !/^y/i.test(textOf(project, "attachmentToFraming"))) {
       unread.push({ why: "the plans do not name the racking or how it attaches to the roof", rule: attachment });
     }
