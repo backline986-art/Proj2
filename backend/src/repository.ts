@@ -972,8 +972,10 @@ export function updateProject(
    *  never PUT /api/projects/:id, which the parser and API keys use (#270). See recordMicroSupersession.
    *  expectedVersion: the project's editVersion the editor LOADED (#440). Given, a project that has
    *  moved on since — a teammate's save, or a background write of its data — is refused with a 409 and nothing
-   *  is written. Omitted (the parser, API keys, internal callers), the save is unconditional, as before. */
-  options: { humanInverterEdit?: boolean; expectedVersion?: number } = {},
+   *  is written. Omitted (the parser, API keys, internal callers), the save is unconditional, as before.
+   *  editedBy: the signed-in person who saved it (PUT /api/projects/:id); omitted, the history says
+   *  "front-end parser" as before. */
+  options: { humanInverterEdit?: boolean; expectedVersion?: number; editedBy?: string } = {},
 ): ProjectDetail {
   const existing = getProjectDetail(db, projectId).project;
   // Drop the non-persistent plan-set text overlay (re-derived from project_documents
@@ -1069,10 +1071,11 @@ export function updateProject(
       ],
     );
     insertExtractedFields(db, projectId, mergedSnapshot, true);
-    addAuditLog(db, projectId, "system", "front-end parser", "project.updated_from_parser_snapshot", { fields: Object.keys(payload).length });
+    const editedBy = text(options.editedBy).trim();
+    addAuditLog(db, projectId, editedBy ? "human" : "system", editedBy || "front-end parser", "project.updated_from_parser_snapshot", { fields: Object.keys(payload).length });
     // Who issues a permit track decides which portal it files on: its own row in the history.
     for (const change of issuerChanges) {
-      addAuditLog(db, projectId, "human", "operator", "project.track_issuer_set", change);
+      addAuditLog(db, projectId, "human", editedBy || "operator", "project.track_issuer_set", change);
     }
   });
   runQcForProject(db, projectId);
@@ -1546,7 +1549,7 @@ export function getProjectDetail(db: AppDb, projectId: string): ProjectDetail {
 // rebuildKnowledgeRollup lives in knowledgeBase.ts (it also derives the timeline from
 // permit_timeline_samples, and the correction relearn path there needs it).
 
-export function deleteProject(db: AppDb, projectId: string): { deleted: true; projectId: string; affectedKnowledgeProfiles: number } {
+export function deleteProject(db: AppDb, projectId: string, deletedBy = "dashboard"): { deleted: true; projectId: string; affectedKnowledgeProfiles: number } {
   const project = db.get<Row>("SELECT id, homeowner_name, project_address FROM projects WHERE id = ?", [projectId]);
   if (!project) throw new HttpError(404, "Project not found.");
 
@@ -1633,7 +1636,7 @@ export function deleteProject(db: AppDb, projectId: string): { deleted: true; pr
     db.run("DELETE FROM projects WHERE id = ?", [projectId]);
 
     for (const key of affectedKeys) rebuildKnowledgeRollup(db, key);
-    addAuditLog(db, null, "human", "dashboard", "project.deleted", {
+    addAuditLog(db, null, "human", deletedBy || "dashboard", "project.deleted", {
       projectId,
       homeownerName: text(project.homeowner_name),
       projectAddress: text(project.project_address),
@@ -2017,7 +2020,7 @@ export function addProjectNote(
      VALUES (?, ?, ?, ?, ?, ?)`,
     [id(), projectId, noteType, body, text(input.createdBy) || "ops user", ts],
   );
-  addAuditLog(db, projectId, "human", "operations plan", "project_note.added", {
+  addAuditLog(db, projectId, "human", text(input.createdBy).trim() || "operations plan", "project_note.added", {
     noteType,
     bodyPreview: body.slice(0, 160),
   });
@@ -11474,7 +11477,7 @@ function filesFromProject(payload: ParserPayload): string[] {
 export function humanVerify(
   db: AppDb,
   projectId: string,
-  input: { reviewItemId: string; action: "approve" | "edit" | "reject"; fieldValue?: string; notes?: string },
+  input: { reviewItemId: string; action: "approve" | "edit" | "reject"; fieldValue?: string; notes?: string; verifiedBy?: string },
 ): ProjectDetail {
   const item = db.get<Row>("SELECT * FROM human_review_items WHERE id = ? AND project_id = ?", [input.reviewItemId, projectId]);
   if (!item) throw new HttpError(404, "Human review item not found.");
@@ -11506,7 +11509,7 @@ export function humanVerify(
       );
     }
 
-    addAuditLog(db, projectId, "human", "dashboard", "human_review.updated", {
+    addAuditLog(db, projectId, "human", text(input.verifiedBy).trim() || "dashboard", "human_review.updated", {
       reviewItemId: input.reviewItemId,
       action: input.action,
       fieldName,
