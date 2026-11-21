@@ -10821,7 +10821,13 @@ export async function prepareSubmission(
       // Nor after a person's cancel or a stall (#340): a stopped run is not retried in a second browser.
       const stoppedFromOutside = cancelSignal.aborted || Boolean((result as { runCancelled?: unknown }).runCancelled)
         || Boolean((result as { replayStalled?: unknown }).replayStalled);
-      if (!result.ok && !draftClickReachedPortal && !stoppedFromOutside && looksBotBlocked(stageFailureText(result)) && stageOptions.headless !== false
+      // Nor after a FINAL SUBMIT WAS CLICKED (Helm, #254 follow-up): that click may have filed, so a
+      // second browser would start the application again. Read off the result and every step, in case
+      // a step's data carries it and the summary does not.
+      const finalClickInResult = Boolean((result as { finalSubmitClicked?: unknown }).finalSubmitClicked)
+        || (Array.isArray((result as { steps?: unknown[] }).steps)
+          && ((result as { steps: Array<{ data?: { finalSubmitClicked?: unknown } }> }).steps).some((st) => st?.data?.finalSubmitClicked === true));
+      if (!result.ok && !draftClickReachedPortal && !stoppedFromOutside && !finalClickInResult && looksBotBlocked(stageFailureText(result)) && stageOptions.headless !== false
           && process.env.PORTAL_HEADED_RETRY !== "0") {
         logger.info("portal", "portal refused a headless browser at staging — retrying with a real window", {
           projectId, portal: portalLabel,
