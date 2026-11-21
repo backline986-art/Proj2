@@ -1194,9 +1194,11 @@ const TRANSIENT_FAILURE: Array<[RegExp, string]> = [
   // not looking the way the recipe remembers, which is exactly the drift that should demote —
   // so it is deliberately absent from this list.
   [/page\.goto|navigation timeout|timeout .{0,20}exceeded.{0,20}navigat|net::ERR_TIMED_OUT|page\.waitFor(URL|LoadState|Navigation)/i, "the page never finished loading"],
-  // Every recorded step ran; only the read-only review checks after them ran past their budget
-  // (replayStopControl ReplayStallWatch.enterTail). That says nothing about the recipe's steps.
-  [/stalled after its last recorded step/i, "every recorded step ran; only the read-only review checks after them ran long"],
+  // Every recorded step ran; only the checks after them (no filing click) ran past their budget
+  // (replayStopControl ReplayStallWatch.enterTail). That says nothing about the recipe's steps. This
+  // class only decides demotion: nothing reads it as "safe to retry" (a run whose approved final
+  // submit was clicked is recorded submitted/submitted_unconfirmed before any failure is judged).
+  [/stalled after its last recorded step|stalled after the approved final submit was clicked/i, "every recorded step ran; only the checks after them ran long"],
 ];
 
 // NOT ABOUT THE RECIPE, EITHER — the run was stopped by something about THIS PROJECT or by the

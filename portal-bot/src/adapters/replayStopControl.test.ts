@@ -14,6 +14,8 @@
 //   K3 make ReplayStallWatch.note() refresh on a repeated key → (c) fails.
 //   K4 drop the enterTail() call after runAll's step loop → (f) fails (a staged run reads "stalled").
 //   K5 make enterTail() keep the step budget → (g) fails.
+//   K6 drop { finalSubmitClicked } from the enterTail() call → (j) fails.
+//   K7 make message() ignore the click → (i) and (j) fail.
 //
 //   npx tsx portal-bot/src/adapters/replayStopControl.test.ts
 import assert from "node:assert/strict";
@@ -243,6 +245,37 @@ await check("(h) the tail budget: default 30 minutes; junk is the default; never
   assert.equal(w.note(1, 1, "late"), false, "a note after the tail began counted as progress");
   now = 10 * 60_000;
   assert.ok((w.stalledMs() ?? 0) >= 10 * 60_000);
+});
+
+await check("(i) a tail stall's sentence follows THIS run's click: after the approved final submit it says the filing may have gone and not to file again; without it, nothing was submitted", () => {
+  const filed = new ReplayStallWatch(60_000);
+  filed.enterTail(120_000, { finalSubmitClicked: true });
+  assert.match(filed.message(), /approved final submit WAS clicked/);
+  assert.match(filed.message(), /do not file again/);
+  assert.doesNotMatch(filed.message(), /nothing was submitted/i);
+  const staged = new ReplayStallWatch(60_000);
+  staged.enterTail(120_000, { finalSubmitClicked: false });
+  assert.match(staged.message(), /nothing was submitted/);
+  assert.doesNotMatch(staged.message(), /WAS clicked/);
+  const unsaid = new ReplayStallWatch(60_000);
+  unsaid.enterTail(120_000);
+  assert.match(unsaid.message(), /nothing was submitted/, "no record of a click must read as no click");
+});
+
+await check("(j) the adapter feeds its own record of the approved click to the tail: a slow confirmation read after it never reads \"nothing was submitted\"", async () => {
+  const log: Log = { fills: [], clicks: [], closed: false, touchedAfterClose: 0 };
+  const steps = [fill("Qty"), { action: "stopForReview" } as RecipeStep];
+  const adapter = new RecipeAdapter(recipe(steps), values, {}, { stallTimeoutMs: 100, reviewTailTimeoutMs: 150 });
+  const a = adapter as unknown as { page: unknown; finalSubmitClicked: boolean; captureSubmissionConfirmation: () => Promise<unknown>; replayStop: { message: string } | null };
+  // The approved click is the run's own record, set inside the loop (here: by the first fill, standing
+  // in for the gated terminal click, whose gate this browser-free test does not stand up).
+  a.page = makePage(log, { onFill: () => { a.finalSubmitClicked = true; } });
+  a.captureSubmissionConfirmation = async () => { await new Promise((r) => setTimeout(r, 500)); return { ok: true, data: {} }; };
+  await adapter.fillApplication(project);
+  assert.ok(a.replayStop, "the slow confirmation read was not recorded as a tail stall");
+  assert.match(a.replayStop!.message, /approved final submit WAS clicked/);
+  assert.doesNotMatch(a.replayStop!.message, /nothing was submitted/i);
+  assert.equal(log.closed, false, "the watchdog closed the window after the approved click");
 });
 
 if (failures) { console.error(`\n${failures} replayStopControl check(s) FAILED.`); process.exit(1); }

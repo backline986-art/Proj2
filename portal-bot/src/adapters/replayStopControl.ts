@@ -24,7 +24,7 @@ export interface RunCancelRequest {
 export const DEFAULT_REPLAY_STALL_MINUTES = 8;
 
 /** THE REVIEW TAIL'S OWN BUDGET. Once the step loop is done there is no "next step" to reach, yet the
- *  run still has its read-only work at the review stop: the last page's re-assert and gap-fill, the
+ *  run still has work at the review stop, none of it a filing click: the last page's re-assert and gap-fill, the
  *  staged draft's page-by-page walk (#436, a GET per step page with a polite gap), the masked
  *  picture, the hand-over and the review read-back. On a live PGE NEM stage (2026-11-20) that work
  *  outlasted the 8-minute step clock: a run that HAD staged the application to review was ended as
@@ -68,6 +68,10 @@ export class ReplayStallWatch {
   private budgetMs: number;
   /** The step loop is done: the clock now measures the review tail (enterTail), not a step. */
   inTail = false;
+  /** This run's own record of the approved final-submit click, as it stood when the tail began (the
+   *  gated click is a loop step, so it is always decided by then). A tail stall after it is the
+   *  confirmation read running long, never "nothing was submitted" (rule 1: one filing). */
+  private finalSubmitClicked = false;
   current: { stepIndex: number; pass: number; label: string } | null = null;
 
   constructor(readonly stallMs: number, private readonly now: () => number = Date.now) {
@@ -78,9 +82,10 @@ export class ReplayStallWatch {
   /** The step loop has ended (review reached, or the recorded steps ran out). There is no next step
    *  to wait for, so the step clock stops; the tail gets its own, longer budget from now. A note()
    *  after this (none is expected) never shortens it again. */
-  enterTail(tailMs: number): void {
+  enterTail(tailMs: number, opts: { finalSubmitClicked?: boolean } = {}): void {
     if (this.inTail) return;
     this.inTail = true;
+    this.finalSubmitClicked = opts.finalSubmitClicked === true;
     this.budgetMs = Math.max(this.stallMs, tailMs);
     this.lastProgressAt = this.now();
   }
@@ -106,6 +111,9 @@ export class ReplayStallWatch {
   message(): string {
     if (this.inTail) {
       const tailMinutes = Math.max(1, Math.round(this.budgetMs / 60_000));
+      if (this.finalSubmitClicked) {
+        return `Replay stalled after the approved final submit WAS clicked: reading the portal's confirmation (completion page, record number) did not finish within ${tailMinutes} minute(s). The run was ended and nothing further was clicked. THE APPLICATION MAY HAVE BEEN FILED: check the portal for the filing and its record number, and do not file again.`;
+      }
       return `Replay stalled after its last recorded step: the review checks (re-check of the last page, the staged draft's read, the review read-back) did not finish within ${tailMinutes} minute(s). The run was ended; nothing further was filled or clicked, and nothing was submitted. Check the portal: the application may be complete up to its review page.`;
     }
     const at = this.current;

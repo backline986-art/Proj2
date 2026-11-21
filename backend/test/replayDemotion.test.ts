@@ -100,6 +100,7 @@ await check("classifier: production messages land in the right family (MUST-PASS
     // recipe (live PGE NEM stage 2026-11-20). A step-loop stall stays unattributed (keep and flag).
     [new ReplayStallWatch(60_000).message(), "unknown"],
     [(() => { const w = new ReplayStallWatch(60_000); w.enterTail(1_800_000); return w.message(); })(), "not_recipe"],
+    [(() => { const w = new ReplayStallWatch(60_000); w.enterTail(1_800_000, { finalSubmitClicked: true }); return w.message(); })(), "not_recipe"],
   ];
   // #352: the replay's stop for a REQUIRED control the recipe has no step for and this job has no
   // value for (the AC disconnect part with no plan-set part and no client standard; an unanswered

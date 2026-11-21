@@ -3808,10 +3808,15 @@ export class RecipeAdapter extends BasePortalAdapter {
       }
     }
     // THE STEP CLOCK ENDS WITH THE STEPS. What follows is the review tail (re-assert, gap-fill, the
-    // staged draft's walk, the picture, the hand-over, the read-back): bounded by its own budget, never
-    // by "no new step for 8 minutes" — there is no next step, so a slow tail on a run that staged
-    // cleanly used to end it as a stall (live PGE NEM stage 2026-11-20).
-    this.stallWatch?.enterTail(this.options.reviewTailTimeoutMs && this.options.reviewTailTimeoutMs > 0 ? this.options.reviewTailTimeoutMs : replayReviewTailMsFromEnv());
+    // staged draft's walk, the picture, the hand-over, the read-back; on an approved run, the
+    // confirmation read after the click): bounded by its own budget, never by "no new step for 8
+    // minutes" — there is no next step, so a slow tail on a run that staged cleanly used to end it as a
+    // stall (live NEM stage 2026-11-20). No filing click happens in the tail. Whether THIS run clicked
+    // the approved final submit (a loop step, so decided by now) picks the stall's sentence.
+    this.stallWatch?.enterTail(
+      this.options.reviewTailTimeoutMs && this.options.reviewTailTimeoutMs > 0 ? this.options.reviewTailTimeoutMs : replayReviewTailMsFromEnv(),
+      { finalSubmitClicked: this.finalSubmitClicked },
+    );
 
     // THE REPLAY'S OWN DRAFT-CREATING CLICK MADE THE DRAFT (#330). Nothing was filed: this run ends on
     // the draft-created page (not a review page, so the review read and the before-review stop below
