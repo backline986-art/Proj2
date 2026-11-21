@@ -6827,6 +6827,64 @@ export class AutoLearnAdapter extends BasePortalAdapter {
   }
 
   /**
+   * COMMIT A POP-UP THE WALK OPENED (#131). planHiddenReveal tags the dialog it opened
+   * (`data-al-popup`); once the page's fills are done and the dialog is still shown, its own commit
+   * control is clicked: Save / OK / Done / Apply / Update (optionally "and close" / "changes" /
+   * "details"), never a submit, a payment or a cancel, and the shared predicates have the last word
+   * (SUBMIT_INTENT, isSubmitIntent, isPayFee: one answer at every door). Committed means the dialog
+   * closed; the click is recorded as "pop-up: save (commits the pop-up)". A dialog that will not
+   * close is said in the run log and left for the page's own read-back to name.
+   */
+  private async popupCommitPass(steps: RecipeStep[], pageCount: number): Promise<boolean> {
+    const page = this.page;
+    if (!page || typeof page.evaluate !== "function" || typeof page.locator !== "function") return false;
+    const found = await page.evaluate((attr: string) => {
+      const dlg = document.querySelector(`[${attr}]`) as HTMLElement | null;
+      if (!dlg) return null;
+      const r = dlg.getBoundingClientRect();
+      const cs = getComputedStyle(dlg);
+      if (!(r.width > 0 && r.height > 0) || cs.display === "none" || cs.visibility === "hidden") return null;
+      const COMMIT = /^\s*(save|ok|okay|done|apply|update)(\s+(and\s+close|&\s+close|changes|details))?\s*$/i;
+      for (const b of Array.from(dlg.querySelectorAll("button, a, [role=button], input[type=button], input[type=submit]"))) {
+        const t = String(b.tagName === "INPUT" ? (b as HTMLInputElement).value : ((b as HTMLElement).innerText || b.textContent || "")).replace(/\s+/g, " ").trim();
+        const br = b.getBoundingClientRect();
+        const bs = getComputedStyle(b);
+        if (!(br.width > 0 && br.height > 0) || bs.display === "none" || bs.visibility === "hidden" || (b as HTMLButtonElement).disabled) continue;
+        if (!COMMIT.test(t)) continue;
+        b.setAttribute("data-al-popup-commit", "1");
+        const id = b.getAttribute("id") || "";
+        return { role: b.tagName === "A" ? "link" : "button", name: t, id: /^[A-Za-z][\w-]*$/.test(id) ? id : "" };
+      }
+      return { role: "", name: "", id: "" };
+    }, "data-al-popup").catch(() => null) as { role: string; name: string; id: string } | null;
+    if (!found) return false;
+    if (!found.name || SUBMIT_INTENT.test(found.name) || sharedIsSubmitIntent(found.name) || isPayFee(found.name)) {
+      this.debug?.event({ type: "popup_no_commit", page: pageCount, name: found.name.slice(0, 40) });
+      return false;
+    }
+    await page.locator("[data-al-popup-commit]").first().click({ timeout: 3000 });
+    await sleep(400);
+    const closed = await page.evaluate((attr: string) => {
+      const dlg = document.querySelector(`[${attr}]`) as HTMLElement | null;
+      if (!dlg) return true;
+      const r = dlg.getBoundingClientRect();
+      const cs = getComputedStyle(dlg);
+      return !(r.width > 0 && r.height > 0) || cs.display === "none" || cs.visibility === "hidden";
+    }, "data-al-popup").catch(() => false);
+    await page.evaluate(() => {
+      document.querySelectorAll("[data-al-popup], [data-al-popup-commit]").forEach((n) => { n.removeAttribute("data-al-popup"); n.removeAttribute("data-al-popup-commit"); });
+    }).catch(() => null);
+    this.debug?.event({ type: closed ? "popup_committed" : "popup_commit_did_not_close", page: pageCount, name: found.name.slice(0, 40) });
+    if (!closed) return false;
+    steps.push({
+      action: "click", phase: "fill",
+      selector: { role: found.role === "link" ? "link" : "button", name: found.name, exact: true, ...(found.id ? { fallbacks: [{ css: `#${found.id}` }] } : {}) },
+      note: "pop-up: save (commits the pop-up)",
+    } as RecipeStep);
+    return true;
+  }
+
+  /**
    * A TYPED UPLOADER on this page, or null: one container holding a file box, a DOCUMENT-TYPE list
    * (attachmentTypes.isDocumentTypeList, the one predicate the ACA pass and the replay use) and the
    * control that commits the pair ("Add Attachment", "Upload", "Attach", "Add", "Save"). Self-service
@@ -10416,6 +10474,10 @@ export class AutoLearnAdapter extends BasePortalAdapter {
           }
         }
       }
+
+      // d4b) A POP-UP THE WALK OPENED AND FILLED IS SAVED (#131): its boxes post nothing until the
+      //      dialog's own Save copies them into the page. Left open, the page advanced with them blank.
+      if (!isDashboard) await this.popupCommitPass(steps, pageCount).catch(() => null);
 
       // d4c) THE PAGE AS THE WALK LEAVES IT (#536, #534) — a field the portal shows as invalid, a
       //      required box left unchecked, an equipment write that strayed, an equipment value the
@@ -14801,6 +14863,16 @@ export class AutoLearnAdapter extends BasePortalAdapter {
       await this.page.locator("[data-al-reveal]").first().click({ timeout: 3000 });
       await sleep(500);
       const now = typeof l.isVisible === "function" ? await l.isVisible().catch(() => false) : false;
+      // A POP-UP THE WALK OPENED IS PART OF THE RECIPE (#131): a replay must press the same opener
+      // before it can fill the dialog's boxes. Recorded with the fills it opened for (drained by the
+      // caller just ahead of this field's own step); its Save is popupCommitPass's.
+      if (now && plan.popup?.name) {
+        this.typeaheadDoorSteps.push({
+          action: "click", phase: "fill",
+          selector: { role: plan.popup.role, name: plan.popup.name, exact: true, ...(plan.popup.id ? { fallbacks: [{ css: `#${plan.popup.id}` }] } : {}) },
+          note: `pop-up: open (${plan.popup.name.slice(0, 50)})`,
+        } as RecipeStep);
+      }
       this.debug?.event({
         type: now ? "hidden_field_revealed" : "hidden_field_reveal_failed",
         label: (field.label || "").slice(0, 60),
