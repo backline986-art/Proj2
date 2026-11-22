@@ -55,6 +55,9 @@ export interface PortalAdapter {
    *  human still clicks; this only watches. Optional — an adapter with no live page
    *  returns false. */
   armSubmitWatch?(onSubmitObserved: (clickedLabel?: string) => void): Promise<boolean>;
+  /** A recipe replay whose step failed, its window left open for the person: report their fixes
+   *  (RecipeAdapter options.onHumanFixStep). Read only. */
+  armFixCaptureAfterFailure?(): Promise<boolean>;
   /** Read-only status scrape — navigates to the portal's project status page and returns
    *  the raw status text for the given application/permit numbers.
    *  SAFETY: must never click submit, modify, or pay anything.
