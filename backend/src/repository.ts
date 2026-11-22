@@ -82,6 +82,7 @@ import { checkStatusWithAdapter, runCorrectionReopen, stageWithAccela, stageWith
 import { readRecordLinkSignedIn } from "../../portal-bot/src/recordLinkRead";
 import { liveReviewSessionUnder } from "../../portal-bot/src/reviewSession";
 import { portalAutomationDisabled, resolveHeadless } from "../../portal-bot/src/browser";
+import { handFixesAwaitingProof, markHandFixesProven, openRunFixCapture, runFixSummaries, secretFreeFields } from "./runFixSteps";
 import { learnRecordNumberFormat, findCompleteRecipeForProject, findAnyRecipeForProject, resolveRecipeFieldValues, markPortalRecipeForRerecord, demoteOnReplayFailure, collectHealedSteps, persistHealedSteps, getPortalRecipe, portalEntityEvidence, recipeHostFit, findBorrowableRecipe, replayFailureBlamesRecipe, recipeStepsSignature, isNotServedRecipe, recordPortalNotServed, type BorrowedRecipeChoice } from "./portalRecipes";
 import { notServedInResult } from "../../shared/src/portalNotServed";
 import { notifyClientOfStatusChange, shouldNotifyClient } from "./clientNotifier";
@@ -755,6 +756,17 @@ function mapPortalRun(row: Row): PortalRun {
     // field's note in shared/src/types.ts for why result_json is not a usable source.
     permitType: row.permit_type ? text(row.permit_type) : undefined,
   };
+}
+
+/** A run that holds a person's hand fixes (runFixSteps.ts) carries their summary for its card. */
+function withHandFixes(db: AppDb, projectId: string, runs: PortalRun[]): PortalRun[] {
+  let fixes: ReturnType<typeof runFixSummaries>;
+  try { fixes = runFixSummaries(db, projectId); } catch { return runs; }
+  if (!fixes.size) return runs;
+  return runs.map((r) => {
+    const f = fixes.get(r.id);
+    return f ? { ...r, handFixes: { count: f.count, stuckStep: f.stuckStep, atEnd: f.atEnd, appliedAt: f.appliedAt, appliedBy: f.appliedBy, preview: f.preview, submitSightedAt: f.submitSightedAt, submitLabel: f.submitLabel } } : r;
+  });
 }
 
 function mapSubmission(row: Row): SubmissionRecord {
@@ -1534,7 +1546,7 @@ export function getProjectDetail(db: AppDb, projectId: string): ProjectDetail {
     emailProjectMatches: db
       .query<Row>("SELECT * FROM email_project_matches WHERE project_id = ? ORDER BY created_at DESC LIMIT 50", [projectId])
       .map(mapEmailProjectMatch),
-    portalRuns: db.query<Row>("SELECT * FROM portal_runs WHERE project_id = ? ORDER BY started_at DESC", [projectId]).map(mapPortalRun),
+    portalRuns: withHandFixes(db, projectId, db.query<Row>("SELECT * FROM portal_runs WHERE project_id = ? ORDER BY started_at DESC", [projectId]).map(mapPortalRun)),
     submissions: db.query<Row>("SELECT * FROM submissions WHERE project_id = ? ORDER BY created_at DESC", [projectId]).map(mapSubmission),
     auditLogs: db.query<Row>("SELECT * FROM audit_logs WHERE project_id = ? ORDER BY created_at DESC LIMIT 100", [projectId]).map(mapAudit),
     projectNotes: db.query<Row>("SELECT * FROM project_notes WHERE project_id = ? ORDER BY created_at DESC LIMIT 50", [projectId]).map(mapProjectNote),
@@ -1584,6 +1596,8 @@ export function deleteProject(db: AppDb, projectId: string, deletedBy = "dashboa
     db.run("DELETE FROM email_project_matches WHERE project_id = ?", [projectId]);
     db.run("DELETE FROM permit_status_checks WHERE project_id = ?", [projectId]);
     db.run("DELETE FROM permit_check_targets WHERE project_id = ?", [projectId]);
+    // A run's held hand fixes (migration v91) go with the run (they also cascade on its FK).
+    db.run("DELETE FROM portal_run_fix_steps WHERE project_id = ?", [projectId]);
     db.run("DELETE FROM portal_runs WHERE project_id = ?", [projectId]);
     // Approve & Submit approvals (migration v35) carry a FK to projects.
     db.run("DELETE FROM portal_run_approvals WHERE project_id = ?", [projectId]);
@@ -8749,6 +8763,10 @@ export function automaticSubmitRefusals(
     out.push("no recorded recipe drives this run (a final submit needs a recipe with a flagged, terminal submit step)");
   } else {
     if (text(row.status) !== "complete") out.push(`the recipe is ${text(row.status) || "unknown"}, not complete`);
+    // HAND FIXES NO REPLAY HAS YET CARRIED TO REVIEW (runFixSteps.ts): a person's save is not an
+    // end-to-end run, so the first replay after it always stops at review.
+    const unproven = handFixesAwaitingProof(db, input.recipeId);
+    if (unproven) out.push(`the recipe carries hand fixes saved ${unproven.appliedAt.slice(0, 16)}${unproven.appliedBy ? ` by ${unproven.appliedBy}` : ""} that no replay has yet carried cleanly to the review page — stage it once (it stops at review), then approve`);
     const steps = parseJson<Array<{ action: string; isFinalSubmit?: boolean; value?: unknown }>>(text(row.steps_json) || "[]", []);
     const flagged = steps.filter((st) => st && st.isFinalSubmit === true).length;
     if (flagged === 0) out.push("the recipe has no flagged final-submit step");
@@ -10732,6 +10750,8 @@ export async function prepareSubmission(
         steps: recipe.steps ?? [], portalUrl: recipe.portalUrl, project: portalProject, fieldValues: replayFieldValues, track,
         borrowed: borrowed ? { learnedFor: borrowed.learnedFor, discipline: borrowed.discipline } : null,
         agency: issuingAgencyFor(portalProject, track),
+        // R14: a choice recorded for the other permit path is left out (permit tracks only).
+        permitPath: track === "nem" ? null : resolvePermitPath(portalProject).path,
       });
       if (replayBinding.changes.length) {
         addAuditLog(db, projectId, "system", "portal staging", "portal.replay_binding", {
@@ -10766,7 +10786,23 @@ export async function prepareSubmission(
       // #340 — THIS REPLAY CAN BE STOPPED: a person's cancel (POST /api/portal-runs/:id/cancel) aborts
       // this signal; the replay stops at its next step boundary. Closed in the finally below.
       const cancelSignal = openStageCancel(runId);
-      const replayOptions = { ...stageOptions, draftSubmitStamp, stagedReview, abortSignal: cancelSignal };
+      // REPLAYS LEARN FROM THE PERSON'S HAND FIXES (runFixSteps.ts, owner 2026-11-21). A headed guided
+      // replay whose step fails keeps its window open at that step; what the person then does there is
+      // reported here, made safe to store, and held on this run until a named person presses "Save my
+      // fixes". Only on this entity's OWN recipe: a borrowed recipe is never changed by another
+      // entity's run. An approved run never keeps a window for this (portal-bot refuses it too).
+      const fixCapture = !borrowed && !resolvedAutoSubmit
+        ? openRunFixCapture(db, {
+            runId, projectId, recipeId: recipe.id, recipeVersion: Number(recipe.version ?? 0), stepsSignature: replayStepsSig,
+            originalIndex: replayBinding.originalIndex,
+            fields: secretFreeFields(boundValues, projectSecretValues(stagedProject)),
+            secretValues: projectSecretValues(stagedProject),
+            accountNumber: stagedProject.accountNumber, meterNumber: stagedProject.meterNumber,
+            clientId: portalProject.clientId ?? null,
+            permitPath: track === "nem" ? null : resolvePermitPath(portalProject).path,
+          })
+        : null;
+      const replayOptions = { ...stageOptions, draftSubmitStamp, stagedReview, abortSignal: cancelSignal, ...(fixCapture ? { onHumanFixStep: fixCapture.onStep } : {}) };
       ledgerStagingLaunch(`staging replay (${track ?? "permit"} track, run ${runId})`, String(recipe.portalUrl || credentialUrl || ""));
       result = await recipeStageRunner(boundRecipe, stagedProject, boundValues, docsByType, files, replayOptions);
 
@@ -10792,7 +10828,13 @@ export async function prepareSubmission(
       // Nor after a person's cancel or a stall (#340): a stopped run is not retried in a second browser.
       const stoppedFromOutside = cancelSignal.aborted || Boolean((result as { runCancelled?: unknown }).runCancelled)
         || Boolean((result as { replayStalled?: unknown }).replayStalled);
-      if (!result.ok && !draftClickReachedPortal && !stoppedFromOutside && looksBotBlocked(stageFailureText(result)) && stageOptions.headless !== false
+      // Nor after a FINAL SUBMIT WAS CLICKED (Helm, #254 follow-up): that click may have filed, so a
+      // second browser would start the application again. Read off the result and every step, in case
+      // a step's data carries it and the summary does not.
+      const finalClickInResult = Boolean((result as { finalSubmitClicked?: unknown }).finalSubmitClicked)
+        || (Array.isArray((result as { steps?: unknown[] }).steps)
+          && ((result as { steps: Array<{ data?: { finalSubmitClicked?: unknown } }> }).steps).some((st) => st?.data?.finalSubmitClicked === true));
+      if (!result.ok && !draftClickReachedPortal && !stoppedFromOutside && !finalClickInResult && looksBotBlocked(stageFailureText(result)) && stageOptions.headless !== false
           && process.env.PORTAL_HEADED_RETRY !== "0") {
         logger.info("portal", "portal refused a headless browser at staging — retrying with a real window", {
           projectId, portal: portalLabel,
@@ -10813,6 +10855,13 @@ export async function prepareSubmission(
         } catch (e) {
           logger.warn("portal", "headed retry failed", { projectId, err: e instanceof Error ? e.message : String(e) });
         }
+      }
+      // THE WINDOW STAYED OPEN AT THE STUCK STEP FOR THE PERSON (portal-bot browserLeftOpenForFix): the
+      // capture is anchored there, and the run's message says what to do.
+      if (fixCapture && (result as { browserLeftOpenForFix?: unknown }).browserLeftOpenForFix === true) {
+        const at = (result as { fixAnchorStepIndex?: unknown }).fixAnchorStepIndex;
+        fixCapture.anchor(typeof at === "number" ? at : null, (result as { fixAnchorAtEnd?: unknown }).fixAnchorAtEnd === true);
+        result.message = `${String(result.message ?? "").trim()} THE PORTAL WINDOW WAS LEFT OPEN AT THE STUCK STEP: finish that page by hand (never submit or pay), then press "Save my fixes" on this run so the next stage does it the same way.`.trim();
       }
       // SELF-HEALED STEPS: replay repaired drifted selectors. Persist each heal onto the ONE step
       // it healed (by stepIndex), only if the recipe is still the version this replay read — see
@@ -11428,6 +11477,15 @@ export async function prepareSubmission(
     // #333: a filing the person made from the review window while this run was finishing — recorded
     // now, on top of the outcome (an awaiting_human_submit row, or the run's own failed row), never
     // under it. Whatever the run reported, a filing that went is recorded as submitted.
+    // A REPLAY THAT REACHED REVIEW CLEANLY PROVES THE HAND FIXES SAVED BEFORE IT STARTED (runFixSteps):
+    // only an own recipe's replay (a borrowed one never carries this recipe's fixes as its own).
+    if (runStatus === "awaiting_human_submit" && recipe && runActorLabel === "RecipeAdapter" && !borrowed) {
+      try {
+        const proven = markHandFixesProven(db, recipe.id, runId, ts);
+        if (proven) addAuditLog(db, projectId, "system", "recipe replay", "portal_recipe.hand_fixes_proven", { recipeId: recipe.id, runId, saves: proven });
+      } catch { /* proof is recorded best-effort; until it is, the gate keeps refusing (fail closed) */ }
+    }
+
     runOutcomeRecorded = true;
     for (const capture of capturesBeforeOutcome.splice(0)) recordSubmitCapture(capture);
   } catch (err) {

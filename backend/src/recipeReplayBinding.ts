@@ -174,6 +174,9 @@ export function bindRecipeForReplay(input: {
   borrowed: { learnedFor: string; discipline: string } | null;
   /** The issuing agency the per-job lookup found for this AHJ and track (permitProcess). */
   agency: CitedFact<string> | null;
+  /** THIS job's resolved permit path (permitPath.resolvePermitPath), on a permit track only. A step
+   *  stamped for the other path (step.whenPermitPath) is left out. Absent / unknown = nothing left out. */
+  permitPath?: string | null;
 }): ReplayBinding {
   const changes: ReplayBindingChange[] = [];
   const steps: RecipeStep[] = [];
@@ -236,6 +239,16 @@ export function bindRecipeForReplay(input: {
         record("stripped", `clicks the specific filed record ${m[0]} — replaying it would open a previous customer's record`);
         return;
       }
+    }
+
+    // R14 — A CHOICE RECORDED FOR THE OTHER PERMIT PATH (shared/src/permitPathSteps.ts). A recording or
+    // hand fix made on a prescriptive job stamps its "Prescriptive" pick; on an engineered job it is left
+    // out (and the other way round), so the job's own path is never answered with the recording job's.
+    // A job whose path is not settled keeps every step (a permit stage refuses an unknown path anyway).
+    const jobPath = input.permitPath === "prescriptive" || input.permitPath === "engineered" ? input.permitPath : null;
+    if (step.whenPermitPath && jobPath && step.whenPermitPath !== jobPath) {
+      record("stripped", `a ${step.whenPermitPath} choice ("${label.slice(0, 50)}") recorded on a ${step.whenPermitPath} job — this job is ${jobPath}, so it is left out`);
+      return;
     }
 
     // R8 — a COMPANY ATTESTATION (workers'-comp exemption, "no employees", insurance type, "I'm a
