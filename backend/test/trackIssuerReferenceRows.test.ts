@@ -1,9 +1,9 @@
 // THE SHIPPED ROWS THE PER-TRACK ISSUER READS (worker-trackissuer). Pins, on the real reference file:
 //   - every electricalPermitIssuer citation is whole and its value is in the issuer vocabulary (first
 //     word "state" or the AHJ itself), so none is silently ignored;
-//   - a state named as issuer has exactly ONE state authority row (stateAuthorityFor "electrical"),
-//     which carries no filing door (no submission method, no submissionMethod citation): its door
-//     starts unknown and is a person's Confirm;
+//   - a state named as issuer has exactly ONE state authority row (stateAuthorityFor "electrical");
+//     a filing door on it (#152) is only a CITED seeded proposal (a whole submissionMethod citation
+//     naming that address), so it lands seeded and is a person's Confirm;
 //   - a separate-counter citation reuses a page and words already cited for the issuer (no uncited
 //     claim), and names no URL (it is not a door anyone can launch);
 //   - every row still lands seeded: no row claims a tier.
@@ -37,7 +37,7 @@ run("every electricalPermitIssuer citation is whole and in the vocabulary", () =
   assert.ok(n > 0, "issuer citations are on file");
 });
 
-run("a state named as issuer has exactly one authority row, with no door on it", () => {
+run("a state named as issuer has exactly one authority row; a door on it is cited", () => {
   const states = new Set(file.profiles.filter((p) => citedElectricalIssuer(p)?.kind === "state").map((p) => p.state));
   assert.ok(states.size > 0, "at least one AHJ names the state");
   for (const st of states) {
@@ -45,8 +45,9 @@ run("a state named as issuer has exactly one authority row, with no door on it",
     assert.equal(rows.length, 1, `${st}: one state electrical authority row`);
     const row = stateAuthorityRowFor(st, "electrical")!;
     assert.equal(row.ahj, rows[0].ahj);
-    assert.equal(String(row.submissionMethod ?? "").trim(), "", `${st}: the authority's door is not on file (a person confirms it)`);
-    assert.ok(!raw(row).some((c) => c.field === "submissionMethod"), `${st}: no door citation`);
+    const door = String(row.submissionMethod ?? "").trim();
+    if (door) assert.ok(wholeCitations(row, "submissionMethod").some((c) => c.value === door), `${st}: the authority's door is cited (a seeded proposal a person confirms)`);
+    else assert.ok(!raw(row).some((c) => c.field === "submissionMethod"), `${st}: no door, no door citation`);
     assert.ok(wholeCitations(row).length > 0, `${st}: the authority's name is cited`);
   }
 });
