@@ -250,35 +250,54 @@ export function requestOrg(db: AppDb, req: Request): OrgInfo {
   return getOrg(db, DEFAULT_ORG_ID);
 }
 
-// Simple in-memory per-IP login throttle to blunt brute force on the internet-facing
-// login. Locks an IP for LOGIN_LOCK_MS after LOGIN_MAX_FAILS consecutive failures;
-// resets on success. (For multi-instance later, move this to a shared store.)
-const loginAttempts = new Map<string, { fails: number; lockedUntil: number }>();
+// In-memory login throttle to blunt brute force on the internet-facing login. Two counters:
+//  - PER ACCOUNT FROM AN ADDRESS (address + email): LOGIN_MAX_FAILS consecutive failures lock that
+//    pair for LOGIN_LOCK_MS. Several staff often reach the server from ONE address (an office line,
+//    a shared remote session, the proxy): one person's mistyped password must not lock the others.
+//  - PER ADDRESS (any email): a wider cap, so spraying many emails from one address still locks.
+// A counter forgets failures older than LOGIN_LOCK_MS; a success clears its account's counter.
+// (For multi-instance later, move this to a shared store.)
+const loginAttempts = new Map<string, { fails: number; lockedUntil: number; lastFailAt: number }>();
 const LOGIN_MAX_FAILS = 8;
+const LOGIN_MAX_FAILS_PER_ADDRESS = 30;
 const LOGIN_LOCK_MS = 15 * 60_000;
+
+function loginLocked(key: string, now: number): boolean {
+  const rec = loginAttempts.get(key);
+  return !!rec && rec.lockedUntil > now;
+}
+function recordLoginFailure(key: string, limit: number, now: number): void {
+  const prior = loginAttempts.get(key);
+  const rec = prior && now - prior.lastFailAt < LOGIN_LOCK_MS ? prior : { fails: 0, lockedUntil: 0, lastFailAt: 0 };
+  rec.fails += 1;
+  rec.lastFailAt = now;
+  if (rec.fails >= limit) { rec.lockedUntil = now + LOGIN_LOCK_MS; rec.fails = 0; }
+  loginAttempts.set(key, rec);
+}
+/** Test hook: forget every login counter. */
+export function resetLoginThrottleForTests(): void { loginAttempts.clear(); }
 
 // POST /api/auth/login  { email, password }
 export function login(db: AppDb, req: Request, res: Response): void {
   const ip = String(req.ip || req.socket?.remoteAddress || "unknown");
   const now = Date.now();
-  const attempt = loginAttempts.get(ip);
-  if (attempt && attempt.lockedUntil > now) {
+  const email = String(req.body?.email || "").trim().toLowerCase();
+  const password = String(req.body?.password || "");
+  const accountKey = `account:${ip}|${email}`;
+  const addressKey = `address:${ip}`;
+  if (loginLocked(accountKey, now) || loginLocked(addressKey, now)) {
     res.status(429).json({ error: "Too many failed login attempts. Try again in a few minutes." });
     return;
   }
 
-  const email = String(req.body?.email || "").trim().toLowerCase();
-  const password = String(req.body?.password || "");
   const row = db.get<Row>("SELECT id, name, email, role, org_id, password_hash FROM users WHERE email = ? AND active = 1", [email]);
   if (!row || !row.password_hash || !verifyPassword(password, String(row.password_hash))) {
-    const rec = loginAttempts.get(ip) ?? { fails: 0, lockedUntil: 0 };
-    rec.fails += 1;
-    if (rec.fails >= LOGIN_MAX_FAILS) { rec.lockedUntil = now + LOGIN_LOCK_MS; rec.fails = 0; }
-    loginAttempts.set(ip, rec);
+    recordLoginFailure(accountKey, LOGIN_MAX_FAILS, now);
+    recordLoginFailure(addressKey, LOGIN_MAX_FAILS_PER_ADDRESS, now);
     res.status(401).json({ error: "Invalid email or password." });
     return;
   }
-  loginAttempts.delete(ip);
+  loginAttempts.delete(accountKey);
   issueSessionCookie(db, req, res, String(row.id));
   res.json({ user: { id: String(row.id), name: String(row.name), email: String(row.email), role: String(row.role), orgId: String(row.org_id || DEFAULT_ORG_ID) } });
 }

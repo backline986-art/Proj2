@@ -134,7 +134,7 @@ import { commitField, installSettleProbe, routeEffectUndone, routeText, settleAf
 import { siteOfUrl } from "../siteOf";
 import { isPathTenantedHost, portalHostOf, portalTenantKey, portalTenantOf, trackSafeUrl } from "../../../backend/src/portalChannel";
 import { dialogOpenedSince, readUnlessDialog } from "../personDialogs";
-import { cancelledMessage, cancelRequestOf, ReplayStallWatch, replayStallMsFromEnv, type RunCancelRequest } from "./replayStopControl";
+import { cancelledMessage, cancelRequestOf, ReplayStallWatch, replayReviewTailMsFromEnv, replayStallMsFromEnv, type RunCancelRequest } from "./replayStopControl";
 import { installFilingBackstop, withBackstopWindow, withOwnWriteWindow, withAutomationInput, describeBackstopAbort, backstopSentLine, drainOwnWrites, unsavedAtReviewWarning, portalOwnCallsBlockedAtReview, reviewBlockedCallsLine, isStoppingAbort, type BackstopAbort, type FilingBackstop, type BackstopHumanRequest } from "../filingBackstop";
 
 /** #333: the run did not hand the review page over — its input watch could not be armed, or (Helm
@@ -2052,6 +2052,9 @@ export class RecipeAdapter extends BasePortalAdapter {
       /** #340 — no new step for this long ends the run as a named failure. Default
        *  PORTAL_REPLAY_STALL_MINUTES (8 minutes); never unbounded. */
       stallTimeoutMs?: number;
+      /** The review tail's budget once the step loop is done (ReplayStallWatch.enterTail). Default
+       *  PORTAL_REPLAY_REVIEW_TAIL_MINUTES (30 minutes); never below stallTimeoutMs. */
+      reviewTailTimeoutMs?: number;
     } = {},
   ) {
     super();
@@ -4657,6 +4660,16 @@ export class RecipeAdapter extends BasePortalAdapter {
         }
       }
     }
+    // THE STEP CLOCK ENDS WITH THE STEPS. What follows is the review tail (re-assert, gap-fill, the
+    // staged draft's walk, the picture, the hand-over, the read-back; on an approved run, the
+    // confirmation read after the click): bounded by its own budget, never by "no new step for 8
+    // minutes" — there is no next step, so a slow tail on a run that staged cleanly used to end it as a
+    // stall (live NEM stage 2026-11-20). No filing click happens in the tail. Whether THIS run clicked
+    // the approved final submit (a loop step, so decided by now) picks the stall's sentence.
+    this.stallWatch?.enterTail(
+      this.options.reviewTailTimeoutMs && this.options.reviewTailTimeoutMs > 0 ? this.options.reviewTailTimeoutMs : replayReviewTailMsFromEnv(),
+      { finalSubmitClicked: this.finalSubmitClicked },
+    );
 
     // THE REPLAY'S OWN DRAFT-CREATING CLICK MADE THE DRAFT (#330). Nothing was filed: this run ends on
     // the draft-created page (not a review page, so the review read and the before-review stop below

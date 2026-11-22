@@ -518,7 +518,7 @@ async function checkHealth() {
 // their DOM so renders never error), so their two endpoints are no longer fetched on every
 // board load and refresh. loadOpsReport/loadOpsActions stay defined; restore the calls here
 // when the panels are un-hidden.
-async function loadProjects() {
+async function loadProjects(opts) {
   await fetchProjectPage(false);
   await loadKnowledgeBase();
   await loadPortalRecipes();
@@ -530,7 +530,7 @@ async function loadProjects() {
   // Don't auto-open a project on load — the landing page is the Dashboard board.
   // Only refresh the open project's detail when the operator is actually on its
   // workflow page (so a background list refresh doesn't yank them off Dashboard).
-  if (state.selectedProjectId && selectedStillExists && state.page === "project") {
+  if (state.selectedProjectId && selectedStillExists && state.page === "project" && !(opts && opts.reselect === false)) {
     await selectProject(state.selectedProjectId);
   } else if (!selectedStillExists) {
     state.selectedProjectId = null;
@@ -1520,8 +1520,13 @@ async function hydrateBoardGates() {
       const queue = [].concat(state.boardAll || [], state.projects || [])
         .filter((p) => p && p.id && !seen.has(p.id) && seen.add(p.id) && rowNeedsGateAnswer(p, now))
         .sort((a, b) => Number((NEXT_STEP_CHIP[b.nextStep.key] || {}).pill === "ready") - Number((NEXT_STEP_CHIP[a.nextStep.key] || {}).pill === "ready"));
+      // PAUSED ON THE PROJECT PAGE. The board is hidden there, and every gate read is a full
+      // submit-gate run on the server: three in flight at a time queued the open project's own
+      // ~30 reads behind them, so opening a job waited on cards nobody could see. Rows not yet
+      // asked stay unasked and are picked up when a list page shows again (showPage).
+      const onProjectPage = () => typeof state !== "undefined" && state && state.page === "project";
       const worker = async () => {
-        while (queue.length) {
+        while (queue.length && !onProjectPage()) {
           const p = queue.shift();
           const stamp = gateStampFor(p);
           state.gateAnswers[p.id] = { stamp, inFlight: true };
@@ -1786,6 +1791,8 @@ function showPage(page, opts = {}) {
     t.setAttribute("aria-selected", String(t.dataset.page === (isProject ? "" : page)));
   });
   if (page === "team" && !opts.skipLoad) loadTeamWorkload();
+  // Back on a list page: finish the gate answers the project page paused (hydrateBoardGates).
+  if (!isProject && typeof fetch === "function") void hydrateBoardGates();
   if (window.lucide) window.lucide.createIcons();
 }
 
@@ -14242,6 +14249,34 @@ const SSE_EVENT_KINDS = {
   reviewer_gate_rejudged: "info",
 };
 
+// ONE REFRESH PER BURST OF EVENTS. Every event used to reload the whole board (list, knowledge
+// base, code profiles, recipes, forms…) in every open dashboard, and — when a project page was open —
+// reload that page's ~30 panels TWICE (once for the event, once inside loadProjects), whichever
+// project the event was about. The job queue emits one event per pipeline pass and the inbox one per
+// poll that fetched mail, so a busy minute kept the open job reloading. Now the toast still shows at
+// once; the data refresh waits for the burst to settle, runs once, and reopens the open project only
+// when an event named it (or named no project, so it may concern it) and the person is on its page.
+// Opening a project from the board is no longer done for them: a refresh never navigates.
+const SSE_REFRESH_DELAY_MS = 1500;
+const sseRefresh = { timer: null, projectIds: new Set(), unnamed: false };
+function scheduleSseRefresh(projectId) {
+  if (projectId) sseRefresh.projectIds.add(projectId);
+  else sseRefresh.unnamed = true;
+  if (sseRefresh.timer) return;
+  sseRefresh.timer = setTimeout(async () => {
+    sseRefresh.timer = null;
+    const named = sseRefresh.projectIds;
+    const unnamed = sseRefresh.unnamed;
+    sseRefresh.projectIds = new Set();
+    sseRefresh.unnamed = false;
+    try { await loadProjects({ reselect: false }); } catch { /* the next event or a manual refresh retries */ }
+    const openId = state.selectedProjectId;
+    if (openId && state.page === "project" && (unnamed || named.has(openId))) {
+      selectProject(openId).catch(() => null);
+    }
+  }, SSE_REFRESH_DELAY_MS);
+}
+
 function connectSse() {
   const es = new EventSource("/api/events");
   es.addEventListener("ping", () => { /* heartbeat — no action needed */ });
@@ -14251,12 +14286,8 @@ function connectSse() {
         const data = JSON.parse(ev.data);
         showToast(data.message || type, kind);
         bumpNotifBadge(data.message || type, kind);
-        // Refresh the affected project row if it's currently open.
-        if (data.projectId && state.selectedProjectId === data.projectId) {
-          selectProject(data.projectId).catch(() => null);
-        }
-        // Refresh the project list so board status badges update.
-        loadProjects().catch(() => null);
+        // Refresh the board, and the open project if the event may concern it — once per burst.
+        scheduleSseRefresh(data.projectId || null);
       } catch { /* malformed event — ignore */ }
     });
   }
