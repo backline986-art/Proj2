@@ -325,8 +325,9 @@ export function buildReviewerReportFor(db: AppDb, project: ProjectRecord): Revie
 export function reviewerGateReportFor(db: AppDb, project: ProjectRecord, opts: { verdictsWrittenBefore?: string } = {}): ReviewerReport {
   // The as-of-approval read (#226) is always computed. The plain read is shared inside ONE synchronous
   // read (readMemo.ts, #263): same project in full, same database state, a copy per reader.
-  if (opts.verdictsWrittenBefore !== undefined) return applyCachedVisionVerdicts(db, buildReviewerReportFor(db, project), opts);
-  return memoRead(db, `gate:${project.id}`, () => JSON.stringify(project), () => applyCachedVisionVerdicts(db, buildReviewerReportFor(db, project), {}));
+  const build = (): ReviewerReport => applyCachedVisionVerdicts(db, buildReviewerReportFor(db, project), opts);
+  if (opts.verdictsWrittenBefore !== undefined) return build();
+  return memoRead(db, `gate:${project.id}`, () => JSON.stringify(project), build);
 }
 
 /** The application package for a project as stored, shared inside one synchronous read (readMemo.ts). */
