@@ -24,6 +24,7 @@
 //     human completes in portal" — nothing is ever filed without explicit support.
 // ---------------------------------------------------------------------------
 
+import { withReadMemo } from "./readMemo";
 import { performance } from "node:perf_hooks";
 import type { AppDb, SqlParam } from "./db";
 import { HttpError } from "./httpError";
@@ -328,6 +329,10 @@ function reviewInfoFromRun(run: Row | null): { reviewMismatches: ReviewMismatch[
 // operator block and the per-track staging outcome — the same facts the next-step rule table
 // reads — and the job's own result is carried only as `lastRun` (history).
 export function getAutopilotState(db: AppDb, projectId: string): AutopilotState {
+  return withReadMemo(db, () => autopilotStateOnce(db, projectId));
+}
+
+function autopilotStateOnce(db: AppDb, projectId: string): AutopilotState {
   const detail = getProjectDetail(db, projectId);
   const project = detail.project;
   const ts = project.updatedAt || nowIso();
