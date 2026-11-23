@@ -74,6 +74,10 @@ export interface RecordedPayload {
   /** kind "clickCandidate" / "clickChanged" / "clickSettled" (#280): a click on something that is not
    *  a control is held under this id until the page is seen to change (armRecorder). */
   candidateId?: string;
+  /** For a click: it sits in a dialog or overlay (a <dialog>, role=dialog/alertdialog, aria-modal, or
+   *  a fixed-position layer) that does NOT hold the control clicked just before it: the shape of a
+   *  confirmation that the earlier click opened. Only ever a reason to record LESS. */
+  inDialog?: boolean;
   /** For an upload: the slot's name as the page shows it (the learner's slot reader, painted text only). */
   slot?: string;
   /** For an upload: the chosen file's name and size. They cross this in-memory binding only, to be
@@ -82,10 +86,12 @@ export interface RecordedPayload {
   fileSize?: number;
 }
 
-/** Is the recording's last step the blocked FINAL-SUBMIT marker (targetless, flagged)? The click that
- *  follows it is the portal's own confirmation of that submit ("Yes", "Confirm", or its "Cancel"): it
- *  belongs to the submit the recorder blocked, and is never a step. */
-export function followsBlockedFinalSubmit(steps: ReadonlyArray<RecipeStep>): boolean {
+/** Is this click the portal's own confirmation of the final submit the recorder just blocked? True
+ *  when the recording's last step is the blocked FINAL-SUBMIT marker (targetless, flagged) and the
+ *  click sits in a dialog the control clicked before it was not part of (`inDialog`, read in the
+ *  page). Such a click belongs to the blocked submit and is never a step. */
+export function answersBlockedFinalSubmit(steps: ReadonlyArray<RecipeStep>, payload: Pick<RecordedPayload, "kind" | "inDialog">): boolean {
+  if (payload.kind !== "click" || payload.inDialog !== true) return false;
   const last = steps[steps.length - 1];
   return !!last && last.action === "click" && last.isFinalSubmit === true && !(last.selector && Object.keys(last.selector).length);
 }
@@ -141,13 +147,14 @@ export function createRecorderSink(
     // Heal tie-break metadata (attribute names only) — attached to form-control steps.
     const fp = payload.fingerprint ? { fingerprint: payload.fingerprint } : {};
     if (payload.kind === "click") {
-      // THE CLICK RIGHT AFTER THE BLOCKED FINAL SUBMIT IS THAT SUBMIT'S OWN CONFIRMATION (#280): the
-      // portal's "Yes" / "Confirm" (or its "Cancel") on the dialog the submit opened. It is not a
-      // step of any kind: recorded as a click it replayed after the review stop's marker and broke
-      // the one valid closing shape; recorded as a second marker it took the first one's place.
-      // Decided on the recording's SHAPE (the previous step is the flagged marker), never on the
-      // confirmation's wording. The marker itself is untouched; the next form entry ends this.
-      if (followsBlockedFinalSubmit(steps)) return;
+      // A CLICK IN THE DIALOG THE BLOCKED FINAL SUBMIT OPENED IS THAT SUBMIT'S OWN CONFIRMATION (#280):
+      // the portal's "Yes" / "Confirm" (or its "Cancel"). It is not a step of any kind: recorded as
+      // a click it sat after the marker, so the marker was no longer last and lost its place behind
+      // the review stop; recorded as a second marker it took the first one's place. Decided on
+      // SHAPE, never on the confirmation's wording: the previous step is the flagged marker, and
+      // the click sits in a dialog or overlay the control clicked before it was not part of. The
+      // marker itself is untouched. A page can only make this drop a click, never add one.
+      if (answersBlockedFinalSubmit(steps, payload)) return;
       const ctx = {
         readOnlyPage: payload.readOnlyPage,
         reviewPage: payload.reviewPage,
@@ -307,7 +314,7 @@ export async function armRecorder(page: Page, opts: RecorderSessionOptions): Pro
   let stopped = false;
   const record = (payload: RecordedPayload): void => {
     const before = steps.length;
-    const afterBlockedSubmit = payload.kind === "click" && followsBlockedFinalSubmit(steps);
+    const afterBlockedSubmit = answersBlockedFinalSubmit(steps, payload);
     sink(payload);
     if (steps.length > before) {
       const s = steps[steps.length - 1];
@@ -751,6 +758,20 @@ export function captureScript(): void {
     const i = c as HTMLInputElement;
     return i.type === "checkbox" || i.type === "radio" ? String(i.checked) : String(i.value ?? "");
   }
+  // IS THIS CLICK INSIDE A DIALOG THE PREVIOUS CLICK OPENED? The nearest dialog-like ancestor (a
+  // <dialog>, role=dialog/alertdialog, aria-modal, or a fixed-position layer), when the control
+  // clicked just before is not inside it too. Node uses it for one thing: the click that follows
+  // the blocked final submit and sits in such a dialog is that submit's confirmation, not a step.
+  let lastClicked: Element | null = null;
+  function inDialogApartFromLastClick(el: Element): boolean {
+    for (let n: Element | null = el; n && !isTop(n); n = n.parentElement) {
+      const role = String(n.getAttribute("role") || "").toLowerCase();
+      const dialogLike = (n.tagName === "DIALOG" && (n as HTMLDialogElement).open) || role === "dialog" || role === "alertdialog"
+        || n.getAttribute("aria-modal") === "true" || getComputedStyle(n).position === "fixed";
+      if (dialogLike) return !(lastClicked && lastClicked.isConnected && n.contains(lastClicked));
+    }
+    return false;
+  }
   let endWatch: (() => void) | null = null;
   let candidateSeq = 0;
   function reportCandidate(el: Element): void {
@@ -764,7 +785,8 @@ export function captureScript(): void {
     const controls = Array.from(document.querySelectorAll("input, select, textarea")).slice(0, 400);
     const statesBefore = controls.map(controlState);
     const controlsBefore = new Set(controls);
-    w.__recordStep({ kind: "clickCandidate", candidateId, ...described, readOnlyPage: readOnlyPage(), reviewPage: reviewPage() });
+    w.__recordStep({ kind: "clickCandidate", candidateId, ...described, readOnlyPage: readOnlyPage(), reviewPage: reviewPage(), inDialog: inDialogApartFromLastClick(card) });
+    lastClicked = card;
     let done = false;
     let debounce: ReturnType<typeof setTimeout> | undefined;
     // changed: the page changed because of the click. settled: it did not (the person moved on, or
@@ -904,7 +926,8 @@ export function captureScript(): void {
     // A click on a control ends any wait on an earlier click; it is recorded as it always was.
     if (endWatch) endWatch();
     if ((actionable as HTMLInputElement).type === "file") return; // handled by change
-    w.__recordStep({ kind: "click", ...describe(actionable), readOnlyPage: readOnlyPage(), reviewPage: reviewPage() });
+    w.__recordStep({ kind: "click", ...describe(actionable), readOnlyPage: readOnlyPage(), reviewPage: reviewPage(), inDialog: inDialogApartFromLastClick(actionable) });
+    lastClicked = actionable;
   }, true);
   document.addEventListener("change", (e) => {
     if (w.__recordStopped) return;

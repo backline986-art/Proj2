@@ -8,7 +8,7 @@
 //
 //   site A  server-rendered pages. Tiles are <div> cards with an onclick property and a pointer
 //           cursor; the click navigates to a new document after a 700 ms delay. Uploads are
-//           <label for> + <input type=file>. The submit opens a role=dialog confirmation.
+//           <label for> + <input type=file>. The submit opens a confirmation in a fixed-position layer (no ARIA).
 //   site B  a single-page app. Tiles are <li> items under ONE delegated listener (no onclick, no
 //           cursor, no tabindex); the click is a history.pushState route change and a re-render.
 //           Uploads are a heading above a "Choose File" face, and a requirement table row. The
@@ -65,7 +65,7 @@ const A_FORM = page(`<h1>Rooftop array request</h1>
     <p class="up"><label for="f2">Owner letter</label><input type="file" id="f2" name="f2"></p>
     <button type="button" id="send">Submit application</button>
   </form>
-  <div id="dlg" role="dialog" aria-modal="true" hidden><p>Send this application now?</p><button type="button" id="yes">Yes</button><button type="button" id="no">No</button></div>
+  <div id="dlg" class="veil" style="position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,.4)" hidden><p>Send this application now?</p><button type="button" id="yes">Yes</button><button type="button" id="no">No</button></div>
   <div id="done" hidden><p>Request received.</p><button type="button" id="again">Print a copy</button><input id="late" name="late"></div>
   <script>document.getElementById('send').onclick=function(){document.getElementById('dlg').hidden=false;};
     document.getElementById('yes').onclick=function(){document.getElementById('dlg').hidden=true;document.getElementById('done').hidden=false;};</script>`);
@@ -152,7 +152,7 @@ interface Site {
 
 const SITES: Site[] = [
   {
-    name: "A (server pages, div cards, delayed navigation, role=dialog)",
+    name: "A (server pages, div cards, delayed navigation, fixed-layer confirmation)",
     start: "/a/start",
     toChooser: async (p) => { await p.click("text=Start an application"); await p.waitForURL(/\/a\/choose/); },
     chooserUrl: "/a/choose",
@@ -325,19 +325,25 @@ try {
   }
   {
     // The rule after a blocked final submit is about the recording's shape, not the confirmation's
-    // words: "No" is not a step either, and the next form entry ends it.
+    // words: a "No" in the dialog is not a step either, and a submit-worded "Yes, submit" there adds
+    // no second marker. A click that is NOT in a dialog is recorded as it always was.
     const steps: RecipeStep[] = [];
     const sink = createRecorderSink(steps, () => undefined, { startsFresh: true });
     sink({ kind: "fill", selector: { role: "textbox", name: "Owner name" }, value: "ZZ Test Owner", label: "Owner name" });
     sink({ kind: "click", selector: { role: "button", name: "Submit application" }, label: "Submit application" });
-    sink({ kind: "click", selector: { role: "button", name: "No" }, label: "No" });
-    sink({ kind: "click", selector: { role: "button", name: "Submit application" }, label: "Submit application" });
-    check("after the blocked final submit: neither a \"No\" nor a second submit click adds a step or a second marker",
+    sink({ kind: "click", selector: { role: "button", name: "No" }, label: "No", inDialog: true });
+    sink({ kind: "click", selector: { role: "button", name: "Submit application" }, label: "Submit application", inDialog: true });
+    check("after the blocked final submit: neither a \"No\" nor a submit-worded confirmation in its dialog adds a step or a second marker",
       steps.length === 2 && isMarker(steps[1]) && steps[1].isFinalSubmit === true, show(steps));
-    sink({ kind: "fill", selector: { role: "textbox", name: "Project note" }, value: "ZZ note", label: "Project note" });
     sink({ kind: "click", selector: { role: "button", name: "Next" }, label: "Next" });
-    check("the next form entry ends it: a later \"Next\" is an ordinary click again",
-      steps.length === 4 && steps[3].action === "click" && !isMarker(steps[3]), show(steps));
+    check("a click outside any dialog is recorded as before (the rule needs the dialog)",
+      steps.length === 3 && steps[2].action === "click" && !isMarker(steps[2]), show(steps));
+    const plain: RecipeStep[] = [];
+    const plainSink = createRecorderSink(plain, () => undefined, { startsFresh: true });
+    plainSink({ kind: "click", selector: { role: "button", name: "Start" }, label: "Start" });
+    plainSink({ kind: "click", selector: { role: "button", name: "Agree" }, label: "Agree", inDialog: true });
+    check("a dialog click that follows an ordinary step is recorded as before (the rule needs the blocked final submit)",
+      plain.length === 2 && plain.every((s) => s.action === "click" && !isMarker(s)), show(plain));
     // A page cannot name a document type: only the Node-side match of the job's documents can.
     const up: RecipeStep[] = [];
     createRecorderSink(up, () => undefined)({ kind: "upload", selector: { css: "#x" }, label: "", fileName: "zz-drawings.pdf", fileSize: 2311, ...({ docType: "plan_set", matchedDocType: "plan_set" } as object) });
