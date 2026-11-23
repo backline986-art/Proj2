@@ -148,6 +148,7 @@ import { extractCorrectionFromPage } from "./correctionExtract";
 import { parseCorrectionProposals, attachJurisdictionProposals } from "./correctionAgent";
 import type { AppDb } from "./db";
 import { DEFAULT_ORG_ID } from "./db";
+import { memoRead, withReadMemo } from "./readMemo";
 import { HttpError } from "./httpError";
 import { buildHistoricalFailureReport } from "./historicalFailures";
 import { id } from "./ids";
@@ -322,7 +323,15 @@ export function buildReviewerReportFor(db: AppDb, project: ProjectRecord): Revie
 // run reads the gate a second time this way, as of its approval, so a verdict a concurrent stage_step
 // wrote after the Approve click cannot be what lets that run's final submit through.
 export function reviewerGateReportFor(db: AppDb, project: ProjectRecord, opts: { verdictsWrittenBefore?: string } = {}): ReviewerReport {
-  return applyCachedVisionVerdicts(db, buildReviewerReportFor(db, project), opts);
+  // The as-of-approval read (#226) is always computed. The plain read is shared inside ONE synchronous
+  // read (readMemo.ts, #263): same project in full, same database state, a copy per reader.
+  if (opts.verdictsWrittenBefore !== undefined) return applyCachedVisionVerdicts(db, buildReviewerReportFor(db, project), opts);
+  return memoRead(db, `gate:${project.id}`, () => JSON.stringify(project), () => applyCachedVisionVerdicts(db, buildReviewerReportFor(db, project), {}));
+}
+
+/** The application package for a project as stored, shared inside one synchronous read (readMemo.ts). */
+function applicationPackageFor(db: AppDb, project: ProjectRecord): ReturnType<typeof buildApplicationDocumentPackage> {
+  return memoRead(db, `appdocs:${project.id}`, () => JSON.stringify(project), () => buildApplicationDocumentPackage(project));
 }
 
 /** The audit row for a gate that let a filing through on a vision verdict (#226): staging
@@ -1749,7 +1758,7 @@ function operationDrafts(db: AppDb, detail: ProjectDetail): OperationStepDraft[]
   const project = detail.project;
   const historicalReport = buildHistoricalFailureReport(db, project.id, null);
   const reviewerReport = reviewerGateReportFor(db, project);
-  const applicationDocs = buildApplicationDocumentPackage(project);
+  const applicationDocs = applicationPackageFor(db, project);
   const pendingCritical = detail.humanReviewItems.filter(isCriticalReviewItem).length;
   const pendingCorrections = detail.humanReviewItems.filter((item) => item.status === "pending" && item.fieldName === "correction").length;
   const qcFails = detail.qcResults.filter((item) => item.qcStatus === "fail").length;
@@ -2235,11 +2244,15 @@ function handoffLine(label: string, value: string): string {
 }
 
 export function getOperationsBrief(db: AppDb, projectId: string): OperationsBrief {
+  return withReadMemo(db, () => operationsBriefOnce(db, projectId));
+}
+
+function operationsBriefOnce(db: AppDb, projectId: string): OperationsBrief {
   const detail = getProjectDetail(db, projectId);
   const plan = syncOperationsPlan(db, projectId);
   const project = detail.project;
   const reviewerReport = reviewerGateReportFor(db, project);
-  const applicationDocs = buildApplicationDocumentPackage(project);
+  const applicationDocs = applicationPackageFor(db, project);
   const historicalReport = buildHistoricalFailureReport(db, projectId, null);
   const blockers: OperationsBriefSignal[] = [];
   const readySignals: OperationsBriefSignal[] = [];
@@ -2873,7 +2886,7 @@ export function getLiveProjectReadinessReport(db: AppDb, projectId: string): Liv
   const project = detail.project;
   const historicalReport = buildHistoricalFailureReport(db, projectId, null);
   const reviewerReport = reviewerGateReportFor(db, project);
-  const applicationDocs = buildApplicationDocumentPackage(project);
+  const applicationDocs = applicationPackageFor(db, project);
   const activeEmailSources = db.query<Row>("SELECT id, label, last_checked_at, last_matched_count, last_error FROM email_tracking_sources WHERE active = 1 ORDER BY updated_at DESC");
 
   const accountEvidence = evidenceForTopic(project, "accountVerification");
@@ -3166,11 +3179,15 @@ function hasPermitSignal(check: PermitStatusCheck | EmailProjectMatch): boolean 
 }
 
 export function getProjectProcessMap(db: AppDb, projectId: string): ProjectProcessMap {
+  return withReadMemo(db, () => memoRead(db, `pmap:${projectId}`, () => "", () => projectProcessMapOnce(db, projectId)));
+}
+
+function projectProcessMapOnce(db: AppDb, projectId: string): ProjectProcessMap {
   const detail = getProjectDetail(db, projectId);
   const project = detail.project;
   const historicalReport = buildHistoricalFailureReport(db, projectId, null);
   const reviewerReport = reviewerGateReportFor(db, project);
-  const applicationDocs = buildApplicationDocumentPackage(project);
+  const applicationDocs = applicationPackageFor(db, project);
 
   const accountEvidence = evidenceForTopic(project, "accountVerification");
   const meterEvidence = evidenceForTopic(project, "meterPhoto");
@@ -3532,11 +3549,15 @@ function renderInstallerActionText(packet: Omit<InstallerActionPacket, "reportTe
 }
 
 export function getInstallerActionPacket(db: AppDb, projectId: string): InstallerActionPacket {
+  return withReadMemo(db, () => installerActionPacketOnce(db, projectId));
+}
+
+function installerActionPacketOnce(db: AppDb, projectId: string): InstallerActionPacket {
   const detail = getProjectDetail(db, projectId);
   const project = detail.project;
   const reviewerReport = reviewerGateReportFor(db, project);
   const historicalReport = buildHistoricalFailureReport(db, projectId, null);
-  const applicationDocs = buildApplicationDocumentPackage(project);
+  const applicationDocs = applicationPackageFor(db, project);
   const processMap = getProjectProcessMap(db, projectId);
   const accountEvidence = evidenceForTopic(project, "accountVerification");
   const meterEvidence = evidenceForTopic(project, "meterPhoto");
@@ -3819,11 +3840,15 @@ function renderSubmitGateReportText(report: Omit<SubmitGateReport, "reportText">
 }
 
 export function getSubmitGateReport(db: AppDb, projectId: string): SubmitGateReport {
+  return withReadMemo(db, () => submitGateReportOnce(db, projectId));
+}
+
+function submitGateReportOnce(db: AppDb, projectId: string): SubmitGateReport {
   const detail = getProjectDetail(db, projectId);
   const project = detail.project;
   const historicalReport = buildHistoricalFailureReport(db, projectId, null);
   const reviewerReport = reviewerGateReportFor(db, project);
-  const applicationDocs = buildApplicationDocumentPackage(project);
+  const applicationDocs = applicationPackageFor(db, project);
   const docInventory = documentInventory(db, project);
   // What the operator OWES — the document check below and Stage/Approve read this one answer.
   const gateDocs = owedMissingDocuments(db, project, docInventory);
@@ -5197,7 +5222,7 @@ export function runProjectWorkflow(db: AppDb, projectId: string): ProjectWorkflo
   const detail = getProjectDetail(db, projectId);
   const historicalReport = buildHistoricalFailureReport(db, projectId, null);
   const reviewerReport = reviewerGateReportFor(db, detail.project);
-  const applicationDocs = buildApplicationDocumentPackage(detail.project);
+  const applicationDocs = applicationPackageFor(db, detail.project);
 
   const qcFails = detail.qcResults.filter((item) => item.qcStatus === "fail").length;
   const qcWarnings = detail.qcResults.filter((item) => item.qcStatus === "warning").length;
