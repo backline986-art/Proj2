@@ -28,6 +28,7 @@
 import path from "node:path";
 import readline from "node:readline";
 import { pathToFileURL } from "node:url";
+import type { Page } from "playwright";
 import type { RecipeSelector, RecipeStep, StepFingerprint } from "../../shared/src/types";
 import {
   capturedFieldIsSecret,
@@ -198,6 +199,52 @@ export function finalizeRecordedSteps(steps: ReadonlyArray<RecipeStep>): RecipeS
   return terminal ? [...body, review, terminal] : [...body, review];
 }
 
+/** One of the recording job's own documents, as GET /api/projects/:id/documents lists it. */
+export interface JobDocument {
+  docType: string;
+  originalFilename: string;
+  sizeBytes: number;
+}
+
+/** The job's documents (type, file name, size only: no contents). Any failure is an empty list. */
+export async function fetchJobDocuments(_api: string, _projectId: string, _headers: Record<string, string>): Promise<JobDocument[]> {
+  return [];
+}
+
+export interface RecorderSessionOptions {
+  bindField: (typed: string) => string | undefined;
+  startsFresh?: boolean;
+  /** Where the "captured ..." lines go (the CLI: stdout). */
+  log?: (line: string) => void;
+  jobDocuments?: ReadonlyArray<JobDocument>;
+}
+
+export interface RecorderSession {
+  steps: RecipeStep[];
+  /** The person typed save: nothing after this is captured or printed. */
+  stop(): void;
+}
+
+/** Arm one page with the recorder: the step binding, the shared safety predicates and the in-page
+ *  capture, on this document and every later one. The CLI and the DOM smoke both go through here. */
+export async function armRecorder(page: Page, opts: RecorderSessionOptions): Promise<RecorderSession> {
+  const steps: RecipeStep[] = [];
+  const log = opts.log ?? ((line: string) => { process.stdout.write(`${line}\n`); });
+  const sink = createRecorderSink(steps, opts.bindField, { startsFresh: opts.startsFresh });
+  await page.exposeBinding("__recordStep", (_src: unknown, payload: RecordedPayload) => {
+    const before = steps.length;
+    sink(payload);
+    if (steps.length > before) {
+      const s = steps[steps.length - 1];
+      log(`  · captured ${payload.kind}${s.isFinalSubmit ? " (FINAL SUBMIT — blocked, flagged)" : !s.selector || !Object.keys(s.selector).length ? " (blocked, not replayable)" : ""}${s.field ? ` → field ${s.field}` : ""}`);
+    }
+  });
+  // Inject the shared safety predicates, then the capture listeners, into every page/frame.
+  await page.addInitScript({ content: PORTAL_SAFETY_IN_PAGE_SOURCE });
+  await page.addInitScript(captureScript);
+  return { steps, stop: () => undefined };
+}
+
 function argFrom(argv: readonly string[], name: string, fallback = ""): string {
   const i = argv.indexOf(`--${name}`);
   return i >= 0 && argv[i + 1] ? String(argv[i + 1]) : fallback;
@@ -316,27 +363,16 @@ async function main(): Promise<void> {
   }
   const bindField = (typed: string): string | undefined => valueToField.get(String(typed || "").trim().toLowerCase());
 
-  const steps: RecipeStep[] = [];
+  // The job's own documents (type, file name, size): an upload of one of them names its own type.
+  const jobDocuments = projectId ? await fetchJobDocuments(api, projectId, recorderRequestHeaders(auth)) : [];
 
   // 2) Open the browser with a persistent profile (login persists across runs).
   const { page } = await openPortal({ userDataDir: profileDir, headless: false });
 
-  // The page calls this binding for every captured interaction.
   // Fresh only when this CLI opens the portal itself; without --url the operator's persistent
   // profile may resume a draft mid-flow.
-  const sink = createRecorderSink(steps, bindField, { startsFresh: !!url });
-  await page.exposeBinding("__recordStep", (_src: unknown, payload: RecordedPayload) => {
-    const before = steps.length;
-    sink(payload);
-    if (steps.length > before) {
-      const s = steps[steps.length - 1];
-      process.stdout.write(`  · captured ${payload.kind}${s.isFinalSubmit ? " (FINAL SUBMIT — blocked, flagged)" : !s.selector || !Object.keys(s.selector).length ? " (blocked, not replayable)" : ""}${s.field ? ` → field ${s.field}` : ""}\n`);
-    }
-  });
-
-  // Inject the shared safety predicates, then the capture listeners, into every page/frame.
-  await page.addInitScript({ content: PORTAL_SAFETY_IN_PAGE_SOURCE });
-  await page.addInitScript(captureScript);
+  const session = await armRecorder(page, { bindField, startsFresh: !!url, jobDocuments });
+  const steps = session.steps;
   if (url) await page.goto(url);
 
   console.log(`\nRecording "${ahj || utility}" (${platform || "portal"}).`);
@@ -346,7 +382,7 @@ async function main(): Promise<void> {
   const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
   await new Promise<void>((resolve) => {
     rl.on("line", (line) => {
-      if (line.trim().toLowerCase() === "save") resolve();
+      if (line.trim().toLowerCase() === "save") { session.stop(); resolve(); }
     });
   });
   rl.close();
@@ -401,11 +437,11 @@ async function main(): Promise<void> {
 
 /** Ask, in the recorder's terminal, which document each upload with no document type takes. Only on an
  *  interactive terminal; anything typed that is not a known type is refused and asked again once. */
-async function askUploadDocTypes(steps: RecipeStep[]): Promise<void> {
+export async function askUploadDocTypes(steps: RecipeStep[], asker?: (question: string) => Promise<string>): Promise<void> {
   const blanks = steps.filter((s) => s.action === "upload" && !s.docType);
-  if (!blanks.length || !process.stdin.isTTY) return;
-  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-  const ask = (q: string) => new Promise<string>((resolve) => rl.question(q, (a) => resolve(String(a ?? "").trim())));
+  if (!blanks.length || (!asker && !process.stdin.isTTY)) return;
+  const rl = asker ? null : readline.createInterface({ input: process.stdin, output: process.stdout });
+  const ask = asker ?? ((q: string) => new Promise<string>((resolve) => rl!.question(q, (a) => resolve(String(a ?? "").trim()))));
   console.log(`\n${blanks.length} upload(s) did not say which document they take. Types: ${UPLOAD_DOC_TYPE_CHOICES.join(", ")}`);
   for (const step of blanks) {
     const where = String(step.note ?? "").replace(/^UPLOAD — set docType \(e\.g\. sld, site_plan\) in the dashboard\.\s*/, "").slice(0, 80) || "an upload slot";
@@ -416,7 +452,7 @@ async function askUploadDocTypes(steps: RecipeStep[]): Promise<void> {
       console.log(`  "${typed}" is not a document type Keelix files. Pick one of the types above.`);
     }
   }
-  rl.close();
+  rl?.close();
 }
 
 // Browser-side capture: generates a portable selector for the target element and reports
