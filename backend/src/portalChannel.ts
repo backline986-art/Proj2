@@ -244,6 +244,17 @@ export function recipeDisciplineForTrack(track: string | null | undefined): stri
   }
 }
 
+// THE DISCIPLINE A HAND RECORDING IS SAVED UNDER. The recorder used to send none, so an AHJ recording
+// landed as discipline "" — and a building/electrical stage asks for ITS discipline first
+// (findCompleteRecipeForProject), so an older auto-learned row of that discipline kept replaying and the
+// person's recording never ran. An explicit discipline wins; else the track the recording was opened
+// from; else "" (the whole-permit recording every track falls back to). Anything unknown is "".
+export function recordingDisciplineOf(input: { discipline?: unknown; track?: unknown }): string {
+  const d = String(input.discipline ?? "").trim().toLowerCase();
+  if (d === "structural" || d === "electrical" || d === "combo") return d;
+  return recipeDisciplineForTrack(typeof input.track === "string" ? input.track.trim().toLowerCase() : "");
+}
+
 // ── Recipe permit-discipline detection ──────────────────────────────────────────────────
 // The ACA learner's deterministic passes record jurisdiction-row and record-type steps
 // whose notes carry the LEARN project's permit discipline ("work location: select

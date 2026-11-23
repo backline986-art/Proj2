@@ -30,7 +30,10 @@ import {
   findAnyRecipeForProject,
   assertOperatorPortalUrlFits,
 } from "./portalRecipes";
-import { trackSafeUrl } from "./portalChannel";
+import { applyRunFixSteps } from "./runFixSteps";
+import { stampPermitPathSteps } from "../../shared/src/permitPathSteps";
+import { resolvePermitPath } from "./permitPath";
+import { recordingDisciplineOf, trackSafeUrl } from "./portalChannel";
 import { listPortalPauses, pausePortal, resumePortal } from "./portalPause";
 import {
   listPortalCredentials,
@@ -2514,6 +2517,9 @@ app.post("/api/portal-recipes/record", (req, res) => {
     portalPlatform: b.portalPlatform ? String(b.portalPlatform) : undefined,
     portalUrl: b.portalUrl ? String(b.portalUrl) : undefined,
     createdBy: user ? (user.name || user.email) : b.createdBy ? String(b.createdBy) : undefined,
+    // Which permit this recording is for (the recorder's --discipline / --track): keyed like a learn of
+    // that permit, so the stage of that track replays it. A utility recording has none (blanked there).
+    discipline: recordingDisciplineOf({ discipline: b.discipline, track: b.track }),
   });
   addAuditLog(db, null, "human", user?.email || "operator", "portal_recipe.recording_started", {
     recipeId: recipe.id, profileKey: recipe.profileKey, via: recorderPrincipal(req) ? "recorder_token" : user ? "session" : "none", orgId: user?.orgId ?? null,
@@ -2521,7 +2527,17 @@ app.post("/api/portal-recipes/record", (req, res) => {
   res.status(201).json(recipe);
 });
 app.put("/api/portal-recipes/:id/steps", (req, res) => {
-  const steps = Array.isArray(req.body?.steps) ? req.body.steps : [];
+  let steps = Array.isArray(req.body?.steps) ? req.body.steps : [];
+  // THE JOB A PERSON RECORDED ON (the recorder sends it): a choice that names a permit path is stamped
+  // with that job's path, so it replays only on jobs of the same path (shared/src/permitPathSteps.ts).
+  // The id arrives in the BODY, where no mounted scope guard reaches it: another org's project is a 404.
+  const recordedOn = String(req.body?.recordedOnProjectId ?? "").trim();
+  if (recordedOn) {
+    assertRefInScope(requestScope(db, req), "projects", recordedOn, "Project");
+    if (getPortalRecipe(db, String(req.params.id)).scopeType === "ahj") {
+      steps = stampPermitPathSteps(steps, resolvePermitPath(getProjectDetail(db, recordedOn).project).path);
+    }
+  }
   const saved = savePortalRecipeSteps(db, String(req.params.id), steps, {
     status: req.body?.status,
     notes: req.body?.notes ? String(req.body.notes) : undefined,
@@ -2670,6 +2686,9 @@ app.post("/api/projects/:id/launch-record", (req, res) => {
     ...(scope === "ahj" ? ["--ahj", q(p.ahj || "")] : ["--utility", q(p.utility || "")]),
     ...(p.state ? ["--state", p.state] : []),
     ...(b.portalUrl ? ["--url", q(b.portalUrl)] : []),
+    // The permit this recording is for, from the track card (or the picker): see recordingDisciplineOf.
+    ...(scope === "ahj" && recordingDisciplineOf({ discipline: b.discipline, track: b.track })
+      ? ["--discipline", recordingDisciplineOf({ discipline: b.discipline, track: b.track })] : []),
     "--project", p.id,
     "--api", `http://localhost:${port}`,
     "--profile", `./.portal-profiles/${slug}`,
@@ -4660,6 +4679,23 @@ app.post("/api/projects/:id/autofill-specs", asyncHandler(async (req, res) => {
 app.post("/api/portal-runs/:id/cancel", (req, res) => {
   res.json(cancelPortalRun(db, String(req.params.id), currentUser(db, req)?.email || "operator"));
 });
+
+// "SAVE MY FIXES" (runFixSteps.ts): a named person writes what they did by hand in the window a
+// failed replay step left open into the recipe, at the step that got stuck. Never clicks anything.
+// mode "insert" (default) or "replace_rest" (they finished the application by hand to review).
+// Scope: /api/portal-runs/:id, so the child scope guard 404s another tenant's run (rule 6).
+app.post("/api/portal-runs/:id/save-fixes", asyncHandler(async (req, res) => {
+  // A NAMED PERSON, like every decision that changes shared state: signed in, the account (a role-only
+  // display name is recorded by its email); signed out, the name the dashboard sends, never a blank or
+  // a placeholder such as "operator".
+  const { isConfirmingPerson } = await import("./feeConfirm");
+  const appliedBy = namedPersonDecider(req, "decidedBy", "Sign in to save fixes into a recipe.",
+    `Name the person saving these fixes: a recipe change is recorded against them, and "operator" is not a person.`, isConfirmingPerson);
+  const mode = String(req.body?.mode ?? "") === "replace_rest" ? "replace_rest" : "insert";
+  const saved = applyRunFixSteps(db, String(req.params.id), { appliedBy, mode });
+  const projectId = db.get<{ project_id: string }>("SELECT project_id FROM portal_runs WHERE id = ?", [String(req.params.id)])?.project_id;
+  res.json({ ...saved, ...(projectId ? { detail: getProjectDetail(db, projectId) } : {}) });
+}));
 
 app.post("/api/portal-runs/:id/capture-confirmation", (req, res) => {
   const b = req.body || {};

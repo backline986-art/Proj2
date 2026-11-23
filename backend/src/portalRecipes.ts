@@ -3022,6 +3022,48 @@ export function appendHumanPatchSteps(
   clientId?: string | null,
 ): PortalRecipe {
   const recipe = getPortalRecipe(db, recipeId);
+  const bound = prepareHumanPatchSteps(db, newSteps, projectFields, clientId);
+  if (!bound.length) return recipe;
+  const steps = [...(recipe.steps || [])];
+  // Split off the trailing terminal markers (stopForReview and/or the recorded
+  // final-submit) so patches land before them, in replayable position.
+  const cut = terminalTailStart(steps);
+  const merged = [...steps.slice(0, cut), ...bound, ...steps.slice(cut)];
+  // One idempotent notes marker with the TOTAL patched count — steps stream in one at a
+  // time as the human works, so a per-call append would spam the notes field.
+  const totalPatched = merged.filter((st) => (st.note || "").startsWith("human-patch")).length;
+  const baseNotes = (recipe.notes || "").replace(/\s*\[human-patch:[^\]]*\]/g, "").trim();
+  return savePortalRecipeSteps(db, recipeId, merged, {
+    status: recipe.status as PortalRecipeStatus,
+    notes: `${baseNotes} [human-patch: ${totalPatched} step(s) demonstrated at review]`.trim(),
+  });
+}
+
+/** Where a recipe's terminal tail starts: the trailing stopForReview and/or recorded final-submit
+ *  steps. A person's demonstrated steps always land before it (replay stops at that tail). */
+export function terminalTailStart(steps: RecipeStep[]): number {
+  let cut = steps.length;
+  while (cut > 0) {
+    const tailStep = steps[cut - 1] as RecipeStep & { isFinalSubmit?: boolean };
+    if (tailStep.action === "stopForReview" || tailStep.isFinalSubmit === true) cut--;
+    else break;
+  }
+  return cut;
+}
+
+/**
+ * THE ONE PREPARATION OF STEPS A PERSON DEMONSTRATED (the learner's review patch, and a replay's
+ * hand fixes, runFixSteps.ts): company attestations stamped, submit/pay clicks and the
+ * submit-observed signal dropped, a sensitive value bound by name and its literal ALWAYS removed,
+ * literals that match the job's data bound to its fields, and the company's own licence never kept
+ * as a literal. What comes out is safe to store and replays each later job's own data.
+ */
+export function prepareHumanPatchSteps(
+  db: AppDb,
+  newSteps: RecipeStep[],
+  projectFields: Record<string, string>,
+  clientId?: string | null,
+): RecipeStep[] {
   newSteps = stampCompanyAttestations(newSteps, clientId);
   // DEFENSE IN DEPTH: the capture script already refuses submit/pay clicks, but a
   // mislabeled button can slip through (a real run recorded a bare "Submit" click).
@@ -3046,7 +3088,7 @@ export function appendHumanPatchSteps(
     if (!label && SUBMIT_PAY.test(JSON.stringify(st.selector || {}))) return false;
     return true;
   });
-  if (!newSteps.length) return recipe;
+  if (!newSteps.length) return [];
   // SENSITIVE steps: the capture ships the typed value in-memory ONLY so it can be bound
   // to a project field key here (account/meter numbers live in project data). Bind on a
   // unique match, then ALWAYS strip the literal before anything is persisted — a secret
@@ -3058,25 +3100,7 @@ export function appendHumanPatchSteps(
     delete next.value;
     return next;
   });
-  const steps = [...(recipe.steps || [])];
-  // Split off the trailing terminal markers (stopForReview and/or the recorded
-  // final-submit) so patches land before them, in replayable position.
-  let cut = steps.length;
-  while (cut > 0) {
-    const tailStep = steps[cut - 1] as RecipeStep & { isFinalSubmit?: boolean };
-    if (tailStep.action === "stopForReview" || tailStep.isFinalSubmit === true) cut--;
-    else break;
-  }
   // A patch literal that is the patching company's own licence (any state, any kind) never stays a
   // literal in the shared recipe (withholdClientLicenceLiterals, licences skeptic L1).
-  const bound = withholdClientLicenceLiteralsFor(db, convertLiteralsToBoundFields(newSteps, projectFields).steps, clientId);
-  const merged = [...steps.slice(0, cut), ...bound, ...steps.slice(cut)];
-  // One idempotent notes marker with the TOTAL patched count — steps stream in one at a
-  // time as the human works, so a per-call append would spam the notes field.
-  const totalPatched = merged.filter((st) => (st.note || "").startsWith("human-patch")).length;
-  const baseNotes = (recipe.notes || "").replace(/\s*\[human-patch:[^\]]*\]/g, "").trim();
-  return savePortalRecipeSteps(db, recipeId, merged, {
-    status: recipe.status as PortalRecipeStatus,
-    notes: `${baseNotes} [human-patch: ${totalPatched} step(s) demonstrated at review]`.trim(),
-  });
+  return withholdClientLicenceLiteralsFor(db, convertLiteralsToBoundFields(newSteps, projectFields).steps, clientId);
 }
