@@ -46,6 +46,7 @@ import http from "node:http";
 import { chromium, type Page } from "playwright";
 import { AutoLearnAdapter, type LearnPlanner } from "./autoLearnAdapter";
 import { RecipeAdapter } from "./recipeAdapter";
+import { RESULT_ROW_MARKER_CSS, ROW_ROLE_NOTE } from "../learnDataInSelectors";
 import type { PortalRecipe, ProjectRecord, RecipeStep } from "../../../shared/src/types";
 
 delete process.env.PORTAL_ALLOW_FINAL_SUBMIT;
@@ -418,7 +419,7 @@ try {
       const lastGroup = steps[steps.indexOf(findStep as RecipeStep)];
       check("MUST-PASS nomatch: `populates` on the Find Address click names Parcel Number", (lastGroup?.populates ?? []).some((l) => /parcel number/i.test(l)), `populates=${JSON.stringify(lastGroup?.populates)}`);
       check("MUST-PASS nomatch: Look Up tried — License Type set to Electrical, the dialog searched ONCE by the BUSINESS name (never a person's box), found nothing, no dialog steps kept",
-        st.lookups === 1 && Number(st.dialog?.searches) === 1 && st.dialog?.lastName === "Keelix Test Co" && st.dialog?.type === "Electrical" && !st.dialog?.firstName && !notes.some((n) => /^lookup\(Contractor\)/.test(n)),
+        st.lookups === 1 && Number(st.dialog?.searches) === 1 && st.dialog?.lastName === "Keelix Test Co" && st.dialog?.type === "Electrical" && !st.dialog?.firstName && !notes.some((n) => /^lookup\(Contractor\)|^contact row:/i.test(n)) && !steps.some((s) => s.rowRole === "contact"),
         `lookups=${String(st.lookups)} dialog=${JSON.stringify(st.dialog)} notes=${JSON.stringify(notes)}`);
       check("MUST-PASS nomatch: the walk stops NAMED on the Contractor section only (not Parcel, not Applicant), stopReason required_blank, the message says what was searched, Continue never pressed",
         r?.ok === false && r?.stopReason === "required_blank" && /"Contractor" section/.test(msg) && /Look Up/.test(msg) && /searched by business name "Keelix Test Co" with License Type "Electrical"/.test(msg) && !/Applicant|Parcel Number/.test(msg.replace(/the steps before this page were recorded\./, "")) && st.continues === 0 && /CapEdit/.test(where),
@@ -428,16 +429,27 @@ try {
       const typeStep = steps.find((s) => s.action === "select" && /^lookup\(Contractor\): License Type/.test(String(s.note ?? "")));
       const nameStep = steps.find((s) => s.action === "fill" && /^lookup\(Contractor\): business name/.test(String(s.note ?? "")));
       const searchStep = steps.find((s) => s.action === "click" && /^lookup\(Contractor\): Search/.test(String(s.note ?? "")));
-      const pickStep = steps.find((s) => s.action === "click" && /^lookup\(Contractor\): select this client's record/.test(String(s.note ?? "")));
-      check("MUST-PASS licensematch: Look Up → License Type set to Electrical (by label, in the frame), the business name typed, ONE search, the client's row (\"KEELIX TEST CO., INC.\") picked, the Contractor section populated, the dialog closed",
+      // #235: the lookup pass's row pick leaves the walk as a ROW ROLE — the marker css, rowRole "contact",
+      // ROW_ROLE_NOTE.contact, no learn-company text — still in the dialog frame, still carrying populates.
+      // (Its learn-time note "lookup(Contractor): select this client's record" is rewritten by
+      // withoutLearnDataInSelectors on every walk exit; the old find-by-note read the step as absent.)
+      const contactPicks = steps.filter((s) => s.rowRole === "contact");
+      const pickStep: RecipeStep | undefined = contactPicks[0];
+      check("MUST-PASS licensematch: Look Up → License Type set to Electrical (by label, in the frame), the business name typed, ONE search, the client's row (\"KEELIX TEST CO., INC.\") picked ONCE by the lookup pass and recorded as ONE contact row-role step (no #221 contact-pass step), the Contractor section populated, the dialog closed",
         st.lookups === 1 && Number(st.dialog?.searches) === 1 && st.dialog?.type === "Electrical" && st.dialog?.lastName === "Keelix Test Co" && Number(st.contractorPicked) === 1 && Number(st.frameClosed ?? 0) >= 1
-          && !!lookupStep && !!pickStep && (pickStep.populates ?? []).includes("Contractor"),
-        `lookups=${String(st.lookups)} dialog=${JSON.stringify(st.dialog)} contractorPicked=${String(st.contractorPicked)} lookupStep=${JSON.stringify(lookupStep)}`);
-      check("MUST-PASS licensematch: the steps recorded in order — Look Up click, select License Type by label (value Electrical, frame), fill business name (bound to the company key), Search click, row pick — all in ACADialogFrame",
+          && !!lookupStep && contactPicks.length === 1 && !!pickStep && pickStep.action === "click" && pickStep.note === ROW_ROLE_NOTE.contact
+          && (pickStep.populates ?? []).includes("Contractor")
+          && !notes.some((n) => /select this client's record/i.test(n)) && !notes.some((n) => /^contact[(:]/i.test(n)),
+        `lookups=${String(st.lookups)} dialog=${JSON.stringify(st.dialog)} contractorPicked=${String(st.contractorPicked)} frameClosed=${String(st.frameClosed)} lookupStep=${JSON.stringify(lookupStep)} contactPicks=${JSON.stringify(contactPicks)}`);
+      check("MUST-PASS licensematch: the steps recorded in order — Look Up click, select License Type by label (value Electrical, frame), fill business name (bound to the company key), Search click, then IMMEDIATELY the contact row-role pick (marker css, no fallbacks, no company text) — every one with ACADialogFrame on its MAIN selector",
         !!typeStep && typeStep.selector?.label === "License Type" && typeStep.value === "Electrical" && typeStep.selector?.frame === "ACADialogFrame"
-          && !!nameStep && nameStep.selector?.frame === "ACADialogFrame" && !!nameStep.field && !!searchStep && searchStep.selector?.frame === "ACADialogFrame" && !!pickStep && pickStep.selector?.frame === "ACADialogFrame"
+          && !!nameStep && nameStep.selector?.frame === "ACADialogFrame" && !!nameStep.field && !!searchStep && searchStep.selector?.frame === "ACADialogFrame"
+          && !!pickStep && pickStep.selector?.frame === "ACADialogFrame" && pickStep.selector?.css === RESULT_ROW_MARKER_CSS
+          && !(pickStep.selector?.fallbacks ?? []).length && !/keelix/i.test(JSON.stringify(pickStep))
+          && (pickStep.populates ?? []).includes("Contractor")
+          && steps.indexOf(pickStep) === steps.indexOf(searchStep as RecipeStep) + 1
           && [lookupStep, typeStep, nameStep, searchStep, pickStep].map((s) => steps.indexOf(s as RecipeStep)).every((ix, k, arr) => ix >= 0 && (k === 0 || ix > arr[k - 1])),
-        `typeStep=${JSON.stringify(typeStep)} nameStep=${JSON.stringify(nameStep)} searchStep=${JSON.stringify(searchStep)} pickStep=${JSON.stringify(pickStep)} notes=${JSON.stringify(notes)}`);
+        `typeStep=${JSON.stringify(typeStep)} nameStep=${JSON.stringify(nameStep)} searchStep=${JSON.stringify(searchStep)} pickStep=${JSON.stringify(pickStep)} contactPicks=${JSON.stringify(contactPicks)} notes=${JSON.stringify(notes)}`);
       check("MUST-PASS licensematch: the walk reaches Step 2: Review by Continue Application",
         r?.reachedReview === true && /CapConfirm/i.test(where) && st.continues === 1, `reachedReview=${String(r?.reachedReview)} at=${where} continues=${String(st.continues)} ${msg}`);
     } else if (variant === "modalnone") {

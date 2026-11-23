@@ -26,7 +26,7 @@ import {
 import { adoptedNecEdition, necEditionRequirements, NEC_EDITION_REQUIREMENTS } from "./necEditions";
 import { moduleLevelElectronicsEquipment, type ModuleLevelElectronicsEvidence } from "./moduleLevelElectronics";
 import { designText, mountKind, type MountKind } from "./mountKind";
-import { ballastedRackingEvidence } from "./ballastRacking";
+import { readBallastedRacking } from "./ballastRacking";
 import { microEvidenceSupersededIn } from "./normalize";
 import { engineerSealStates, stateName } from "./engineerSeal";
 import { readPlanFraming } from "./planFraming";
@@ -1270,7 +1270,24 @@ export function evaluateDesignCodeFindings(
   // the question becomes what holds a ballasted array down: the ballast layout and weights, the roof's
   // capacity for them, and the wind/seismic basis or anchorage. Asked as a warning when the package
   // does not show it (Helm ruling on #689); without ballast evidence today's blocker stands unchanged.
-  const ballast = roofMounted ? ballastedRackingEvidence(project) : "";
+  const ballastReading = roofMounted ? readBallastedRacking(project) : null;
+  const ballast = ballastReading?.verdict === "ballasted" ? ballastReading.evidence : "";
+  // BALLASTED OR ATTACHED, WHEN THE PACKAGE DOES NOT SAY CLEARLY. A jurisdiction may take a ballasted
+  // array off its prescriptive path, so this is never guessed: the reading names what points each way
+  // and a person settles it (the attachment-detail check below still runs as for any attached array).
+  if (ballastReading?.verdict === "unclear") {
+    out.push(finding({
+      id: "city.struct.ballast-unclear",
+      severity: "warning",
+      category: "structural",
+      title: "Ballasted or attached? The package is not clear",
+      message: `Ballast is mentioned (${ballastReading.evidence}), but ${ballastReading.doubt}. Whether the array is ballasted decides the permit path where a jurisdiction keeps ballasted racking off its prescriptive path.`,
+      cityFeedback: "State how the array is held down: ballasted (with the ballast layout and calculation) or attached to the roof framing (with the attachment detail).",
+      designTeamAction: "Confirm with the designer whether the racking is ballasted or attached, then correct the racking / attachment fields (and the permit path if it changes).",
+      evidenceNeeded: ["Racking product and how it is held down (ballast or attachment to framing)"],
+      codeReferences: [roofLoadsRef],
+    }));
+  }
   if (roofMounted && ballast && !hasAny(all, BALLAST_PLAN_PATTERNS)) {
     out.push(finding({
       id: "city.struct.ballast-plan-missing",

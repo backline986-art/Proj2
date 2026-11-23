@@ -134,7 +134,7 @@ import { commitField, installSettleProbe, routeEffectUndone, routeText, settleAf
 import { siteOfUrl } from "../siteOf";
 import { isPathTenantedHost, portalHostOf, portalTenantKey, portalTenantOf, trackSafeUrl } from "../../../backend/src/portalChannel";
 import { dialogOpenedSince, readUnlessDialog } from "../personDialogs";
-import { cancelledMessage, cancelRequestOf, ReplayStallWatch, replayStallMsFromEnv, type RunCancelRequest } from "./replayStopControl";
+import { cancelledMessage, cancelRequestOf, ReplayStallWatch, replayReviewTailMsFromEnv, replayStallMsFromEnv, type RunCancelRequest } from "./replayStopControl";
 import { installFilingBackstop, withBackstopWindow, withOwnWriteWindow, withAutomationInput, describeBackstopAbort, backstopSentLine, drainOwnWrites, unsavedAtReviewWarning, portalOwnCallsBlockedAtReview, reviewBlockedCallsLine, isStoppingAbort, type BackstopAbort, type FilingBackstop, type BackstopHumanRequest } from "../filingBackstop";
 
 /** #333: the run did not hand the review page over — its input watch could not be armed, or (Helm
@@ -1320,7 +1320,18 @@ export function learnStateSkippable(step: RecipeStep): LearnStateSkippable | nul
     // asks exactly what resolution asks, a conditional step runs as on main: a missing one fails
     // bounded (#232), never silently. The learner's `conditional` mark stays, read by nothing else.
     conditional: false,
-    dialog: click && isDialogDismissalClick(step),
+    // THE DIALOG DOOR IS CLOSED TOO (rescueAndDismissal smoke on the merged branch, 2026-11-16): a
+    // popup's OK was decided BEFORE the click, within the 2.5 s grace, so a popup the previous step's
+    // round trip paints at 4 s or 20 s was skipped with the modal left up, and a dialog under markup
+    // the learn did not name (another <dialog>, a plain div) never reached the name rescue that
+    // clicks its "Ok" on main. The one answer to "is this dismissal's popup open?" is #233's, asked
+    // AFTER main's own click wait on the click's own TimeoutError (dismissalClickTimedOutUnshown):
+    // Bend 22 still skips, named, and never clicks "Book an Inspection" — ~40-70 s later than this
+    // door would have, which is main's cost and a correct one. isDialogDismissalClick stays, read by
+    // the unit pins. A dismissal recorded as a NON-ADVANCING click (no "advance:" note) stays under
+    // the non-advancing rule below, asked after resolution once every rescue has had its turn and
+    // the page has settled: decided here, written down.
+    dialog: false,
     nonAdvancing: click && !isAdvancingClickStep(step) && !isNavigationClick(step),
     reviewPatch: click && isHumanPatch(step),
   };
@@ -2041,6 +2052,16 @@ export class RecipeAdapter extends BasePortalAdapter {
       /** #340 — no new step for this long ends the run as a named failure. Default
        *  PORTAL_REPLAY_STALL_MINUTES (8 minutes); never unbounded. */
       stallTimeoutMs?: number;
+      /** The review tail's budget once the step loop is done (ReplayStallWatch.enterTail). Default
+       *  PORTAL_REPLAY_REVIEW_TAIL_MINUTES (30 minutes); never below stallTimeoutMs. */
+      reviewTailTimeoutMs?: number;
+      /** A PERSON'S FIXES IN THE WINDOW THIS RUN LEFT OPEN (owner 2026-11-21: manual teaching that
+       *  adapts). After the hand-over at review, or after a failed step whose window stays open, every
+       *  fill / select / check / upload / navigation click the person makes is reported here (the
+       *  shared capture: never a submit, pay or card field; a secret's value only in memory, to bind).
+       *  Nothing is merged by this: the backend keeps them on the run until a person saves them into
+       *  the recipe. Stops at the person's final submit (nothing after a filing belongs to a recipe). */
+      onHumanFixStep?: (step: RecipeStep) => void;
     } = {},
   ) {
     super();
@@ -3164,9 +3185,41 @@ export class RecipeAdapter extends BasePortalAdapter {
     // clicked; every other captured step belongs to the learn path and is ignored here. Round 4: it
     // keeps watching (oneShot:false) — a click is a sighting, committed on the evidence after it.
     this.submitWatch = armHumanCaptureOnPage(page, (step) => {
-      if (String(step.note || "").includes(HUMAN_SUBMIT_OBSERVED_NOTE)) this.sightHumanSubmit(step.value || undefined);
+      if (String(step.note || "").includes(HUMAN_SUBMIT_OBSERVED_NOTE)) { this.sightHumanSubmit(step.value || undefined); return; }
+      this.forwardHumanFix(step);
     }, { oneShot: false }).catch(() => false);
     return this.submitWatch;
+  }
+
+  /** The person's own fix in a window this run handed over (see options.onHumanFixStep). Latched off
+   *  at their final submit: the click detector's sighting, which no later navigation can undo. */
+  private forwardHumanFix(step: RecipeStep): void {
+    if (this.humanSubmit || this.humanFixLatched) return;
+    try { this.options.onHumanFixStep?.(step); } catch { /* the person's window must never break */ }
+  }
+  private humanFixLatched = false;
+
+  /** A FAILED STEP'S WINDOW, LEFT OPEN FOR THE PERSON TO FINISH (index.ts runAdapter): arm the same
+   *  capture the review hand-over uses, so what they do at the step this run could not is reported
+   *  for the backend to keep. Read only: nothing here fills or clicks. True when armed. */
+  async armFixCaptureAfterFailure(): Promise<boolean> {
+    const page = this.page;
+    if (!page || typeof this.options.onHumanFixStep !== "function") return false;
+    // The page binding can be exposed only once: a watch this run already armed forwards fixes too.
+    if (this.submitWatch) return this.submitWatch;
+    return armHumanCaptureOnPage(page, (step) => {
+      // THE PERSON'S SUBMIT IN THIS WINDOW (Helm, #257 review): no submit capture runs here (a failed
+      // run is not a staged filing), but a filing made in it must not be invisible. The sighting is
+      // handed on ONCE, as the signal step itself (the backend records it and never merges it), and
+      // nothing after it is reported.
+      if (String(step.note || "").includes(HUMAN_SUBMIT_OBSERVED_NOTE)) {
+        if (this.humanFixLatched) return;
+        this.humanFixLatched = true;
+        try { this.options.onHumanFixStep?.(step); } catch { /* the person's window must never break */ }
+        return;
+      }
+      this.forwardHumanFix(step);
+    }, { oneShot: false }).catch(() => false);
   }
 
   /** #333 — HAND THE REVIEW PAGE TO THE PERSON, before the run's read-only housekeeping. The backstop
@@ -4646,6 +4699,16 @@ export class RecipeAdapter extends BasePortalAdapter {
         }
       }
     }
+    // THE STEP CLOCK ENDS WITH THE STEPS. What follows is the review tail (re-assert, gap-fill, the
+    // staged draft's walk, the picture, the hand-over, the read-back; on an approved run, the
+    // confirmation read after the click): bounded by its own budget, never by "no new step for 8
+    // minutes" — there is no next step, so a slow tail on a run that staged cleanly used to end it as a
+    // stall (live NEM stage 2026-11-20). No filing click happens in the tail. Whether THIS run clicked
+    // the approved final submit (a loop step, so decided by now) picks the stall's sentence.
+    this.stallWatch?.enterTail(
+      this.options.reviewTailTimeoutMs && this.options.reviewTailTimeoutMs > 0 ? this.options.reviewTailTimeoutMs : replayReviewTailMsFromEnv(),
+      { finalSubmitClicked: this.finalSubmitClicked },
+    );
 
     // THE REPLAY'S OWN DRAFT-CREATING CLICK MADE THE DRAFT (#330). Nothing was filed: this run ends on
     // the draft-created page (not a review page, so the review read and the before-review stop below
@@ -11080,13 +11143,20 @@ export class RecipeAdapter extends BasePortalAdapter {
    *
    * True only when all of these hold — every doubt answers false, and false is main's retry:
    *   - a recorded dismissal (isDialogDismissalStep: never the flagged final submit), before review;
-   *   - the error is THE CLICK'S Playwright TimeoutError. Not main's looser /timeout/ reading of
-   *     any message (assertAdvanced's "did not advance" can quote page text), never a gate refusal
-   *     (a ReplayGuardRefusal), a stop, or any other failure kind;
-   *   - the attempt reached the click with a target (dismissalTarget), and that target matches
-   *     nothing showing — no element at all, or only hidden ones (Bend's OK is display:none inside
-   *     a closed <dialog>, or not in the DOM). A SHOWING target whose click was intercepted is a
-   *     popup that is up, and keeps main's retry;
+   *   - the error is one of the two ways the merged engine says "the control is not there": THE
+   *     CLICK'S Playwright TimeoutError (a target resolved — Bend's OK, display:none inside a closed
+   *     <dialog> — and the click waited its 30 s), or the bounded ReplayTargetMissing of #232 (no
+   *     recorded level matched in 15 s and one full resolution, the whole-words name rescue
+   *     included, found nothing — the popup is not in the DOM at all). Before #232 the second shape
+   *     was main's own TimeoutError on a locator matching nothing (72 s); on the merged branch it
+   *     is this bounded error, and without this clause the absent popup failed the run
+   *     (rescueAndDismissal smoke /bendgone, learnStateSteps C2, 2026-11-16). Not main's looser
+   *     /timeout/ reading of any message (assertAdvanced's "did not advance" can quote page text),
+   *     never a gate refusal (a ReplayGuardRefusal), a stop, or any other failure kind;
+   *   - on the click's TimeoutError, the attempt reached the click with a target (dismissalTarget),
+   *     and that target matches nothing showing — no element at all, or only hidden ones. A SHOWING
+   *     target whose click was intercepted is a popup that is up, and keeps main's retry. On
+   *     ReplayTargetMissing there is no target by definition;
    *   - no level of the recorded selector matches anything showing either.
    * Read-only: count and computed style, never the name rescue (it tags an element) or the
    * closed-menu reveal (it hovers). Nothing is clicked.
@@ -11094,8 +11164,11 @@ export class RecipeAdapter extends BasePortalAdapter {
   private async dismissalClickTimedOutUnshown(step: RecipeStep, err: unknown, pastReview: boolean): Promise<boolean> {
     if (pastReview || !isDialogDismissalStep(step)) return false;
     if (!(err instanceof Error) || err instanceof ReplayGuardRefusal) return false;
-    if (err.name !== "TimeoutError" || !/\bclick\b/.test(err.message)) return false;
-    if (!this.page || typeof this.page.evaluate !== "function" || !step.selector || !this.dismissalTarget) return false;
+    const clickTimedOut = err.name === "TimeoutError" && /\bclick\b/.test(err.message);
+    const neverThere = err instanceof ReplayTargetMissing;
+    if (!clickTimedOut && !neverThere) return false;
+    if (!this.page || typeof this.page.evaluate !== "function" || !step.selector) return false;
+    if (clickTimedOut && !this.dismissalTarget) return false;
     // Is anything this locator matches showing? null = cannot tell (main's path).
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const showing = async (loc: any): Promise<boolean | null> => {
@@ -11109,7 +11182,7 @@ export class RecipeAdapter extends BasePortalAdapter {
       }
       return false;
     };
-    if ((await showing(this.dismissalTarget)) !== false) return false;
+    if (clickTimedOut && (await showing(this.dismissalTarget)) !== false) return false;
     const sel = step.selector;
     for (const lv of [{ ...sel, fallbacks: undefined }, ...(sel.fallbacks ?? []).map((fb) => ({ ...fb, fallbacks: undefined }))] as RecipeSelector[]) {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any

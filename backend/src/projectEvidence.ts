@@ -90,7 +90,75 @@ function pageHintFor(sourceLabel: string, excerpt: string): string {
   return match ? cleanExcerpt(match[0]).slice(0, 80) : sourceLabel;
 }
 
+// THE SOURCES ARE BUILT ONCE PER UNCHANGED PROJECT, not once per question. One submit-gate read asks
+// evidenceForTopic / hasAny dozens of times, and each ask rebuilt every source — scrubbing the whole
+// plan-set text with redactSecretValues (three regex passes per secret) every time. Measured on a
+// 300-job board: ~350 ms of blocking work per next-step read, two-thirds of it this scrub, and the
+// board asks for every open card. The memo returns the SAME sources only when every input that
+// built them is identical (Object.is on each raw value and on the secret list), so a changed field,
+// a re-parsed plan set or a new account number rebuilds them. Bounded; keyed by project id.
+const SOURCE_KEYS: Array<[string, string]> = [
+  ["planSetExtractedText", "Uploaded plan set text"],
+  ["splitPagesText", "Split page mapping"],
+  ["packetReadinessText", "Packet readiness"],
+  ["utilityDownloadChecklistText", "Utility download checklist"],
+  ["utilityUploadNotesText", "Utility upload notes"],
+  ["projectDescriptionText", "Project description"],
+  ["sitePlanNotesText", "Site plan notes"],
+  ["roofPlanNotesText", "Roof plan notes"],
+  ["structuralCalcText", "Structural calculation text"],
+  ["electricalCalcText", "Electrical calculation text"],
+  ["inverterSettings", "Inverter settings"],
+  ["inverterSettingsText", "Inverter settings text"],
+  ["labelsText", "Labels text"],
+  ["ubMeterVerification", "Utility bill/meter verification"],
+  ["locateCalloutText", "Locate callout"],
+  ["stampRecommendation", "Stamp recommendation"],
+  ["reviewFlags", "Parser review flags"],
+  ["batteryMake", "Battery make"],
+  ["batteryModel", "Battery model"],
+  ["batteryQty", "Battery quantity"],
+  ["invMake", "Inverter make"],
+  ["invModel", "Inverter model"],
+  ["pvMicroMake", "Microinverter make"],
+  ["pvMicroModel", "Microinverter model"],
+];
+const SOURCES_MEMO_MAX = 64;
+const sourcesMemo = new Map<string, { inputs: unknown[]; sources: EvidenceSource[]; joined: string | null }>();
+
+function sourceInputs(project: ProjectRecord, secrets: string[]): unknown[] {
+  const snapshot = project.parserSnapshot as Record<string, unknown> | undefined;
+  return [
+    project.utility, project.ahj, project.interconnectionMethod, project.parserConfidenceSummary,
+    project.accountNumber, project.meterNumber,
+    ...SOURCE_KEYS.map(([key]) => snapshot?.[key]),
+    secrets.length, ...secrets,
+  ];
+}
+
+function memoFor(project: ProjectRecord): { inputs: unknown[]; sources: EvidenceSource[]; joined: string | null } {
+  const secrets = projectSecretValues(project);
+  const inputs = sourceInputs(project, secrets);
+  const id = typeof project.id === "string" ? project.id : "";
+  const hit = id ? sourcesMemo.get(id) : undefined;
+  if (hit && hit.inputs.length === inputs.length && hit.inputs.every((v, i) => Object.is(v, inputs[i]))) {
+    sourcesMemo.delete(id); sourcesMemo.set(id, hit); // most recently used last
+    return hit;
+  }
+  const entry = { inputs, sources: buildSources(project, secrets), joined: null as string | null };
+  if (id) {
+    sourcesMemo.delete(id);
+    sourcesMemo.set(id, entry);
+    while (sourcesMemo.size > SOURCES_MEMO_MAX) sourcesMemo.delete(sourcesMemo.keys().next().value as string);
+  }
+  return entry;
+}
+
 function sourcesFor(project: ProjectRecord): EvidenceSource[] {
+  return memoFor(project).sources;
+}
+
+function buildSources(project: ProjectRecord, secrets: string[]): EvidenceSource[] {
   const snapshot = project.parserSnapshot;
   const base: EvidenceSource[] = [
     { label: "Project utility", text: project.utility },
@@ -101,39 +169,12 @@ function sourcesFor(project: ProjectRecord): EvidenceSource[] {
     { label: "Meter number", text: project.meterNumber ? `meter number captured ${maskIdentifier(project.meterNumber)}` : "" },
   ];
 
-  const keys: Array<[string, string]> = [
-    ["planSetExtractedText", "Uploaded plan set text"],
-    ["splitPagesText", "Split page mapping"],
-    ["packetReadinessText", "Packet readiness"],
-    ["utilityDownloadChecklistText", "Utility download checklist"],
-    ["utilityUploadNotesText", "Utility upload notes"],
-    ["projectDescriptionText", "Project description"],
-    ["sitePlanNotesText", "Site plan notes"],
-    ["roofPlanNotesText", "Roof plan notes"],
-    ["structuralCalcText", "Structural calculation text"],
-    ["electricalCalcText", "Electrical calculation text"],
-    ["inverterSettings", "Inverter settings"],
-    ["inverterSettingsText", "Inverter settings text"],
-    ["labelsText", "Labels text"],
-    ["ubMeterVerification", "Utility bill/meter verification"],
-    ["locateCalloutText", "Locate callout"],
-    ["stampRecommendation", "Stamp recommendation"],
-    ["reviewFlags", "Parser review flags"],
-    ["batteryMake", "Battery make"],
-    ["batteryModel", "Battery model"],
-    ["batteryQty", "Battery quantity"],
-    ["invMake", "Inverter make"],
-    ["invModel", "Inverter model"],
-    ["pvMicroMake", "Microinverter make"],
-    ["pvMicroModel", "Microinverter model"],
-  ];
 
   // RULE 2 AT THE SOURCE (#260 review). An excerpt is a window cut from these texts and capped, and it
   // lands in a finding's evidence, its evidenceNeeded and the vision prompt. A window that ENDS inside
   // a meter number keeps a digit prefix the whole-number scrub can no longer match, so the texts are
   // scrubbed whole, before any window — as the design digest does (autoLearn.digestLines).
-  const secrets = projectSecretValues(project);
-  for (const [key, label] of keys) {
+  for (const [key, label] of SOURCE_KEYS) {
     const value = redactSecretValues(text(snapshot[key]).trim(), secrets);
     if (value) base.push({ label, text: value });
   }
@@ -141,9 +182,9 @@ function sourcesFor(project: ProjectRecord): EvidenceSource[] {
 }
 
 export function allProjectEvidenceText(project: ProjectRecord): string {
-  return sourcesFor(project)
-    .map((source) => `${source.label}: ${source.text}`)
-    .join("\n");
+  const memo = memoFor(project);
+  if (memo.joined === null) memo.joined = memo.sources.map((source) => `${source.label}: ${source.text}`).join("\n");
+  return memo.joined;
 }
 
 function matchSources(project: ProjectRecord, patterns: RegExp[], limit = 4): { excerpts: string[]; sources: string[]; hits: ProjectEvidenceHit[] } {
@@ -196,7 +237,8 @@ function matchSources(project: ProjectRecord, patterns: RegExp[], limit = 4): { 
 }
 
 function hasAny(project: ProjectRecord, patterns: RegExp[]): boolean {
-  return patterns.some((pattern) => pattern.test(allProjectEvidenceText(project)));
+  const all = allProjectEvidenceText(project);
+  return patterns.some((pattern) => pattern.test(all));
 }
 
 // FIREFIGHTER ACCESS IS NOT THE SAME WORD AS A ZONING SETBACK.

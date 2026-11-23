@@ -518,7 +518,7 @@ async function checkHealth() {
 // their DOM so renders never error), so their two endpoints are no longer fetched on every
 // board load and refresh. loadOpsReport/loadOpsActions stay defined; restore the calls here
 // when the panels are un-hidden.
-async function loadProjects() {
+async function loadProjects(opts) {
   await fetchProjectPage(false);
   await loadKnowledgeBase();
   await loadPortalRecipes();
@@ -530,7 +530,7 @@ async function loadProjects() {
   // Don't auto-open a project on load — the landing page is the Dashboard board.
   // Only refresh the open project's detail when the operator is actually on its
   // workflow page (so a background list refresh doesn't yank them off Dashboard).
-  if (state.selectedProjectId && selectedStillExists && state.page === "project") {
+  if (state.selectedProjectId && selectedStillExists && state.page === "project" && !(opts && opts.reselect === false)) {
     await selectProject(state.selectedProjectId);
   } else if (!selectedStillExists) {
     state.selectedProjectId = null;
@@ -1520,8 +1520,13 @@ async function hydrateBoardGates() {
       const queue = [].concat(state.boardAll || [], state.projects || [])
         .filter((p) => p && p.id && !seen.has(p.id) && seen.add(p.id) && rowNeedsGateAnswer(p, now))
         .sort((a, b) => Number((NEXT_STEP_CHIP[b.nextStep.key] || {}).pill === "ready") - Number((NEXT_STEP_CHIP[a.nextStep.key] || {}).pill === "ready"));
+      // PAUSED ON THE PROJECT PAGE. The board is hidden there, and every gate read is a full
+      // submit-gate run on the server: three in flight at a time queued the open project's own
+      // ~30 reads behind them, so opening a job waited on cards nobody could see. Rows not yet
+      // asked stay unasked and are picked up when a list page shows again (showPage).
+      const onProjectPage = () => typeof state !== "undefined" && state && state.page === "project";
       const worker = async () => {
-        while (queue.length) {
+        while (queue.length && !onProjectPage()) {
           const p = queue.shift();
           const stamp = gateStampFor(p);
           state.gateAnswers[p.id] = { stamp, inFlight: true };
@@ -1786,6 +1791,8 @@ function showPage(page, opts = {}) {
     t.setAttribute("aria-selected", String(t.dataset.page === (isProject ? "" : page)));
   });
   if (page === "team" && !opts.skipLoad) loadTeamWorkload();
+  // Back on a list page: finish the gate answers the project page paused (hydrateBoardGates).
+  if (!isProject && typeof fetch === "function") void hydrateBoardGates();
   if (window.lucide) window.lucide.createIcons();
 }
 
@@ -4144,6 +4151,10 @@ function buildRecordCommand() {
   else parts.push(`--utility "${p.utility || ""}"`);
   if (p.state) parts.push(`--state ${p.state}`);
   if (url) parts.push(`--url "${url}"`);
+  // The permit this recording is for (the same picker the auto-learn reads): the recipe is keyed on it,
+  // so that permit's stage replays the recording. "Whole permit" sends none.
+  const pick = $("recordPermitType")?.value;
+  if (scope === "ahj" && (pick === "structural" || pick === "electrical")) parts.push(`--discipline ${pick}`);
   parts.push(`--project ${p.id}`, `--api ${api}`, `--profile ./.portal-profiles/${recordSlug(name || scope)}`);
   return parts.join(" ");
 }
@@ -4697,7 +4708,8 @@ async function launchRecordSession() {
   try {
     const res = await api(`/api/projects/${p.id}/launch-record`, {
       method: "POST",
-      body: JSON.stringify({ scope, portalUrl: url || undefined }),
+      // The permit picked for an AHJ recording keys the recipe (see buildRecordCommand).
+      body: JSON.stringify({ scope, portalUrl: url || undefined, discipline: scope === "ahj" ? ($("recordPermitType")?.value || undefined) : undefined }),
     });
     if (statusEl) { statusEl.textContent = res.message || "Browser session started — complete the form in the opened browser window, then type save."; statusEl.className = ""; }
   } catch (err) {
@@ -10340,6 +10352,29 @@ function renderPortalRuns() {
           <span class="muted" style="font-size:11px">Stops at the next step: nothing more is filled or clicked, nothing is submitted.</span>
         </div>`
       : "";
+    // REPLAYS LEARN FROM YOUR HAND FIXES (runFixSteps.ts): a replay step failed, its window stayed open at
+    // that step, and what the person did there is held on this run. "Save my fixes" writes it into the
+    // recipe at the stuck step, under the person's name; nothing is clicked or submitted by saving.
+    const hf = run.handFixes;
+    // A SUBMIT WAS CLICKED IN THE WINDOW THIS RUN LEFT OPEN: the filing may have gone. Said plainly, so
+    // nobody stages this track again before checking the portal.
+    const submitSighted = hf && hf.submitSightedAt
+      ? `<p class="submit-gate-check warning" style="margin-top:6px">A submit${hf.submitLabel ? ` ("${esc(hf.submitLabel)}")` : ""} was clicked in the window this run left open: check the portal and mark this track submitted. Do not stage it again until you have.</p>`
+      : "";
+    const fixAction = hf && !hf.appliedAt
+      ? `<div style="margin-top:6px">
+          <p class="muted" style="font-size:12px;margin:0 0 4px">${hf.count
+            ? `You did ${esc(String(hf.count))} step(s) by hand${hf.stuckStep ? ` after step ${esc(String(hf.stuckStep))} got stuck` : hf.atEnd ? " after the run stopped short of the review page" : ""}:`
+            : `The portal window was left open where the run got stuck${hf.stuckStep ? ` (step ${esc(String(hf.stuckStep))})` : ""}. Finish by hand up to the review page (never submit or pay), then refresh: your steps show here.`}</p>
+          ${hf.count ? `<ul class="muted" style="font-size:11px;margin:0 0 6px 16px">${(hf.preview || []).map((p) => `<li>${esc(p)}</li>`).join("")}${hf.count > (hf.preview || []).length ? `<li>and ${esc(String(hf.count - (hf.preview || []).length))} more</li>` : ""}</ul>
+          <div style="display:flex;gap:8px;flex-wrap:wrap">
+            <button class="secondary" data-save-fixes="${esc(run.id)}" data-fix-mode="insert" style="font-size:12px">Save my fixes</button>
+            <button class="secondary" data-save-fixes="${esc(run.id)}" data-fix-mode="replace_rest" style="font-size:12px" title="Use when you finished the whole application by hand to its review page">I finished it to review: replace the rest</button>
+          </div>` : ""}
+        </div>`
+      : hf && hf.appliedAt
+        ? `<p class="muted" style="font-size:11px;margin-top:6px">Your ${esc(String(hf.count))} hand fix(es) were saved into the recipe${hf.appliedBy ? ` by ${esc(hf.appliedBy)}` : ""}.</p>`
+        : "";
     return `
     <article class="item ${cardClass}">
       <div class="item-title"><span>${esc(humanize(run.runType))}</span>${statusBadge(run.status)}</div>
@@ -10349,6 +10384,8 @@ function renderPortalRuns() {
       <p class="muted">${esc(run.errorMessage || run.startedAt)}</p>
       ${resubmitAction}
       ${stopAction}
+      ${submitSighted}
+      ${fixAction}
     </article>`;
   };
   // PIN WHAT A PERSON MUST ACT ON; FOLD THE HISTORY WITH ITS COUNTS. On 7ec74634 the one
@@ -10359,8 +10396,10 @@ function renderPortalRuns() {
   // count is never hidden with the cards.
   // A RUNNING stage is pinned too (#340): its Stop control must not sit folded under old runs.
   const pinnedStatuses = ["running", "awaiting_human_submit", "awaiting_human_resubmit", "paused_for_human", "awaiting_payment"];
-  const pinned = runs.filter((run) => pinnedStatuses.includes(run.status));
-  const earlier = runs.filter((run) => !pinnedStatuses.includes(run.status));
+  // A run holding hand fixes nobody has saved yet is pinned too: its Save button must not sit folded.
+  const isPinned = (run) => pinnedStatuses.includes(run.status) || Boolean(run.handFixes && !run.handFixes.appliedAt);
+  const pinned = runs.filter(isPinned);
+  const earlier = runs.filter((run) => !isPinned(run));
   const earlierFailed = earlier.filter((run) => run.status === "failed").length;
   const pinnedWrap = $("portalRunsPinned");
   const prevFold = $("portalRuns").querySelector("details.runs-fold");
@@ -10399,6 +10438,34 @@ function renderPortalRuns() {
         showMessage(err.message, "error");
         button.disabled = false;
         button.textContent = originalLabel;
+      }
+    });
+  });
+
+  document.querySelectorAll("#portalRunsPinned button[data-save-fixes], #portalRuns button[data-save-fixes]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const mode = button.dataset.fixMode === "replace_rest" ? "replace_rest" : "insert";
+      const ask = mode === "replace_rest"
+        ? "Replace the recipe from the stuck step to the review page with what you did by hand?\n\nOnly when you finished the whole application by hand. Nothing is clicked or submitted by saving."
+        : "Add what you did by hand to the recipe at the stuck step?\n\nThe next stage replays it. Nothing is clicked or submitted by saving.";
+      if (!confirm(ask)) return;
+      const body = { mode };
+      const auth = await authForDecision();
+      if (!(auth && auth.enabled)) {
+        let last = "";
+        try { last = localStorage.getItem(APPROVER_NAME_KEY) || ""; } catch { last = ""; }
+        body.decidedBy = String(prompt("Your name, recorded with this save:", last) || "").trim();
+        if (!body.decidedBy) { showMessage("Nothing was saved: a recipe change is recorded under a person's name.", "warning"); return; }
+        try { localStorage.setItem(APPROVER_NAME_KEY, body.decidedBy); } catch { /* per-viewer convenience only */ }
+      }
+      button.disabled = true;
+      try {
+        const result = await api(`/api/portal-runs/${encodeURIComponent(button.dataset.saveFixes)}/save-fixes`, { method: "POST", body: JSON.stringify(body) });
+        showMessage(result.message, "info");
+        await selectProject(state.selectedProjectId);
+      } catch (err) {
+        showMessage(err.message, "error");
+        button.disabled = false;
       }
     });
   });
@@ -12750,6 +12817,7 @@ if ($("knowledgeModal")) $("knowledgeModal").addEventListener("click", (e) => { 
 // Record-this-portal helper (Submit stage): rebuild the command live, copy, download .bat.
 if ($("recordScope")) $("recordScope").addEventListener("change", renderRecordPortal);
 if ($("recordScope")) $("recordScope").addEventListener("change", syncRecordPermitType);
+if ($("recordPermitType")) $("recordPermitType").addEventListener("change", renderRecordPortal);
 if ($("recordPortalUrl")) $("recordPortalUrl").addEventListener("input", () => { const el = $("recordCmdPreview"); if (el) el.textContent = buildRecordCommand(); });
 if ($("copyRecordCmdBtn")) $("copyRecordCmdBtn").addEventListener("click", copyRecordCommand);
 if ($("downloadRecordBatBtn")) $("downloadRecordBatBtn").addEventListener("click", downloadRecordBat);
@@ -14242,6 +14310,34 @@ const SSE_EVENT_KINDS = {
   reviewer_gate_rejudged: "info",
 };
 
+// ONE REFRESH PER BURST OF EVENTS. Every event used to reload the whole board (list, knowledge
+// base, code profiles, recipes, forms…) in every open dashboard, and — when a project page was open —
+// reload that page's ~30 panels TWICE (once for the event, once inside loadProjects), whichever
+// project the event was about. The job queue emits one event per pipeline pass and the inbox one per
+// poll that fetched mail, so a busy minute kept the open job reloading. Now the toast still shows at
+// once; the data refresh waits for the burst to settle, runs once, and reopens the open project only
+// when an event named it (or named no project, so it may concern it) and the person is on its page.
+// Opening a project from the board is no longer done for them: a refresh never navigates.
+const SSE_REFRESH_DELAY_MS = 1500;
+const sseRefresh = { timer: null, projectIds: new Set(), unnamed: false };
+function scheduleSseRefresh(projectId) {
+  if (projectId) sseRefresh.projectIds.add(projectId);
+  else sseRefresh.unnamed = true;
+  if (sseRefresh.timer) return;
+  sseRefresh.timer = setTimeout(async () => {
+    sseRefresh.timer = null;
+    const named = sseRefresh.projectIds;
+    const unnamed = sseRefresh.unnamed;
+    sseRefresh.projectIds = new Set();
+    sseRefresh.unnamed = false;
+    try { await loadProjects({ reselect: false }); } catch { /* the next event or a manual refresh retries */ }
+    const openId = state.selectedProjectId;
+    if (openId && state.page === "project" && (unnamed || named.has(openId))) {
+      selectProject(openId).catch(() => null);
+    }
+  }, SSE_REFRESH_DELAY_MS);
+}
+
 function connectSse() {
   const es = new EventSource("/api/events");
   es.addEventListener("ping", () => { /* heartbeat — no action needed */ });
@@ -14251,12 +14347,8 @@ function connectSse() {
         const data = JSON.parse(ev.data);
         showToast(data.message || type, kind);
         bumpNotifBadge(data.message || type, kind);
-        // Refresh the affected project row if it's currently open.
-        if (data.projectId && state.selectedProjectId === data.projectId) {
-          selectProject(data.projectId).catch(() => null);
-        }
-        // Refresh the project list so board status badges update.
-        loadProjects().catch(() => null);
+        // Refresh the board, and the open project if the event may concern it — once per burst.
+        scheduleSseRefresh(data.projectId || null);
       } catch { /* malformed event — ignore */ }
     });
   }

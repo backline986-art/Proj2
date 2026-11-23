@@ -30,7 +30,10 @@ import {
   findAnyRecipeForProject,
   assertOperatorPortalUrlFits,
 } from "./portalRecipes";
-import { trackSafeUrl } from "./portalChannel";
+import { applyRunFixSteps } from "./runFixSteps";
+import { stampPermitPathSteps } from "../../shared/src/permitPathSteps";
+import { resolvePermitPath } from "./permitPath";
+import { recordingDisciplineOf, trackSafeUrl } from "./portalChannel";
 import { listPortalPauses, pausePortal, resumePortal } from "./portalPause";
 import {
   listPortalCredentials,
@@ -586,7 +589,9 @@ app.put("/api/projects/:id", (req, res) => {
       throw new HttpError(400, "expectedVersion must be the project's editVersion (a whole number).", { field: "expectedVersion" });
     }
   }
-  const updated = updateProject(db, String(req.params.id), payload, { expectedVersion });
+  // Signed in, the save is the person's (an API key or the parser has no person: "front-end parser").
+  const editor = AUTH_ENABLED ? staffActorName(req, undefined, "") : "";
+  const updated = updateProject(db, String(req.params.id), payload, { expectedVersion, ...(editor ? { editedBy: editor } : {}) });
   // A re-save from the parser is the repair door for a qc_failed project — the operator fixed
   // the intake, so the chain gets a fresh start. Guarded inside: only statuses the chain owns
   // (parsed/qc_passed/ready_to_stage) do anything; a submitted project no-ops.
@@ -1378,6 +1383,23 @@ const namedPersonDecider = (req: Request, field: "decidedBy" | "verifiedBy", sig
   if (!named || (isPerson && !isPerson(named))) throw new HttpError(400, nameIt);
   return named;
 };
+// WHO DID IT, for a staff action that is RECORDED rather than decided (mark filed, a payment, a pause,
+// an assignment…), so several staff on one server can see who did what. Signed in, it is the account:
+// its name, or its email when the name is blank or only a role ("Admin") — a name the browser sends
+// never stands in for the signed-in person. Sign-in off (one desk), the name the request carries, else
+// the route's own label, exactly as before. Unlike namedPersonDecider it never refuses: recording who
+// did it must not block the action.
+const ROLE_ONLY_NAME = /^(?:super\s*admin|superadmin|admin(?:istrator)?|operator|staff|user)$/i;
+const staffActorName = (req: Request, sentName: unknown, fallback: string): string => {
+  if (AUTH_ENABLED) {
+    const user = currentUser(db, req);
+    const name = String(user?.name || "").trim();
+    const who = name && !ROLE_ONLY_NAME.test(name) ? name : String(user?.email || name).trim();
+    if (who) return who.slice(0, 120);
+  }
+  const sent = typeof sentName === "string" ? sentName.trim().slice(0, 120) : "";
+  return sent || fallback;
+};
 const editionProposalDecider = (req: Request): string => namedPersonDecider(req, "decidedBy",
   "Sign in to decide an edition proposal.",
   "Name the person deciding: an edition proposal is approved or dismissed by a named person.");
@@ -1979,7 +2001,7 @@ app.get("/api/projects/:id", (req, res) => {
 });
 
 app.delete("/api/projects/:id", (req, res) => {
-  res.json(deleteProject(db, req.params.id));
+  res.json(deleteProject(db, req.params.id, staffActorName(req, undefined, "dashboard")));
 });
 
 // Model spend for ONE project: per-label calls, tokens and ESTIMATED cost from llm_calls.
@@ -2061,7 +2083,8 @@ app.post("/api/projects/:id/ops-steps/:stepId", (req, res) => {
 });
 
 app.post("/api/projects/:id/notes", (req, res) => {
-  res.status(201).json(addProjectNote(db, req.params.id, req.body || {}));
+  const noteBody = req.body || {};
+  res.status(201).json(addProjectNote(db, req.params.id, { ...noteBody, createdBy: staffActorName(req, noteBody.createdBy, "") || undefined }));
 });
 
 // THE CLOSEOUT MILESTONES (#497): installed, final passed, PTO requested, PTO granted — recorded by
@@ -2494,6 +2517,9 @@ app.post("/api/portal-recipes/record", (req, res) => {
     portalPlatform: b.portalPlatform ? String(b.portalPlatform) : undefined,
     portalUrl: b.portalUrl ? String(b.portalUrl) : undefined,
     createdBy: user ? (user.name || user.email) : b.createdBy ? String(b.createdBy) : undefined,
+    // Which permit this recording is for (the recorder's --discipline / --track): keyed like a learn of
+    // that permit, so the stage of that track replays it. A utility recording has none (blanked there).
+    discipline: recordingDisciplineOf({ discipline: b.discipline, track: b.track }),
   });
   addAuditLog(db, null, "human", user?.email || "operator", "portal_recipe.recording_started", {
     recipeId: recipe.id, profileKey: recipe.profileKey, via: recorderPrincipal(req) ? "recorder_token" : user ? "session" : "none", orgId: user?.orgId ?? null,
@@ -2501,7 +2527,17 @@ app.post("/api/portal-recipes/record", (req, res) => {
   res.status(201).json(recipe);
 });
 app.put("/api/portal-recipes/:id/steps", (req, res) => {
-  const steps = Array.isArray(req.body?.steps) ? req.body.steps : [];
+  let steps = Array.isArray(req.body?.steps) ? req.body.steps : [];
+  // THE JOB A PERSON RECORDED ON (the recorder sends it): a choice that names a permit path is stamped
+  // with that job's path, so it replays only on jobs of the same path (shared/src/permitPathSteps.ts).
+  // The id arrives in the BODY, where no mounted scope guard reaches it: another org's project is a 404.
+  const recordedOn = String(req.body?.recordedOnProjectId ?? "").trim();
+  if (recordedOn) {
+    assertRefInScope(requestScope(db, req), "projects", recordedOn, "Project");
+    if (getPortalRecipe(db, String(req.params.id)).scopeType === "ahj") {
+      steps = stampPermitPathSteps(steps, resolvePermitPath(getProjectDetail(db, recordedOn).project).path);
+    }
+  }
   const saved = savePortalRecipeSteps(db, String(req.params.id), steps, {
     status: req.body?.status,
     notes: req.body?.notes ? String(req.body.notes) : undefined,
@@ -2530,10 +2566,11 @@ function closeReviewBrowsers(clientId: string, scope: "utility" | "ahj"): void {
 // Human verified/fixed the captured fill in the review browser → promote the recording to a
 // replayable "complete" recipe and close the left-open review browser for that client profile.
 app.post("/api/portal-recipes/:id/finish", asyncHandler(async (req, res) => {
-  const recipe = finishPortalRecipe(db, String(req.params.id), req.body?.finishedBy ? String(req.body.finishedBy) : undefined);
+  const finishedBy = staffActorName(req, req.body?.finishedBy, "") || undefined;
+  const recipe = finishPortalRecipe(db, String(req.params.id), finishedBy);
   const clientId = req.body?.clientId ? String(req.body.clientId) : "";
   if (clientId) closeReviewBrowsers(clientId, recipe.scopeType === "utility" ? "utility" : "ahj");
-  addAuditLog(db, null, "human", "operator", "portal_recipe.finished", { recipeId: recipe.id, profileKey: recipe.profileKey });
+  addAuditLog(db, null, "human", finishedBy || "operator", "portal_recipe.finished", { recipeId: recipe.id, profileKey: recipe.profileKey });
   res.json(recipe);
 }));
 app.post("/api/portal-recipes/:id/rerecord", (req, res) => {
@@ -2598,14 +2635,14 @@ app.post("/api/portal-pauses", (req, res) => {
         }
       : undefined,
     reason: body.reason,
-    pausedBy: body.pausedBy,
+    pausedBy: staffActorName(req, body.pausedBy, "") || undefined,
   });
-  addAuditLog(db, null, "human", "operator", "portal.paused", { kind: pause.kind, pauseKey: pause.pauseKey, reason: pause.reason });
+  addAuditLog(db, null, "human", staffActorName(req, body.pausedBy, "operator"), "portal.paused", { kind: pause.kind, pauseKey: pause.pauseKey, reason: pause.reason });
   res.status(201).json(pause);
 });
 app.delete("/api/portal-pauses/:id", (req, res) => {
   const result = resumePortal(db, String(req.params.id));
-  if (result.resumed) addAuditLog(db, null, "human", "operator", "portal.resumed", { pauseId: String(req.params.id) });
+  if (result.resumed) addAuditLog(db, null, "human", staffActorName(req, undefined, "operator"), "portal.resumed", { pauseId: String(req.params.id) });
   res.json(result);
 });
 
@@ -2649,6 +2686,9 @@ app.post("/api/projects/:id/launch-record", (req, res) => {
     ...(scope === "ahj" ? ["--ahj", q(p.ahj || "")] : ["--utility", q(p.utility || "")]),
     ...(p.state ? ["--state", p.state] : []),
     ...(b.portalUrl ? ["--url", q(b.portalUrl)] : []),
+    // The permit this recording is for, from the track card (or the picker): see recordingDisciplineOf.
+    ...(scope === "ahj" && recordingDisciplineOf({ discipline: b.discipline, track: b.track })
+      ? ["--discipline", recordingDisciplineOf({ discipline: b.discipline, track: b.track })] : []),
     "--project", p.id,
     "--api", `http://localhost:${port}`,
     "--profile", `./.portal-profiles/${slug}`,
@@ -2729,7 +2769,7 @@ app.post("/api/projects/:id/auto-learn", (req, res) => {
   const job = enqueueJob(db, "auto_learn", {
     scope,
     portalUrl,
-    createdBy: b.createdBy ?? "operator",
+    createdBy: staffActorName(req, b.createdBy, "operator"),
     permitType: b.permitType,
   }, { projectId, priority: 7, maxRetries: 0 });
   processNextJob(db).catch((err) => {
@@ -3289,7 +3329,12 @@ app.put("/api/users/:id", (req, res) => {
 });
 app.get("/api/users/workload", (req, res) => { res.json(getUserWorkload(db, reqOrgFilter(db, req))); });
 app.post("/api/projects/:id/assign", (req, res) => {
-  assignProjectToUser(db, req.params.id, req.body?.userId || null, requestOrg(db, req).id);
+  const assignee = req.body?.userId ? String(req.body.userId) : null;
+  assignProjectToUser(db, req.params.id, assignee, requestOrg(db, req).id);
+  const assigneeRow = assignee ? db.get<{ name: string; email: string }>("SELECT name, email FROM users WHERE id = ?", [assignee]) : undefined;
+  addAuditLog(db, String(req.params.id), "human", staffActorName(req, undefined, "dashboard"), "project.assigned", {
+    userId: assignee, assignee: assigneeRow ? String(assigneeRow.name || assigneeRow.email || "") : "",
+  });
   res.json({ ok: true });
 });
 
@@ -4065,11 +4110,12 @@ app.post("/api/projects/:id/payment/mark-paid", asyncHandler(async (req, res) =>
     paymentReference: typeof req.body?.paymentReference === "string" ? req.body.paymentReference : "",
     actualPermitFeeUsd: req.body?.actualPermitFeeUsd,
   });
-  addAuditLog(db, detail.project.id, "human", "operator", "payment.marked_paid", {
+  const payActor = staffActorName(req, undefined, "operator");
+  addAuditLog(db, detail.project.id, "human", payActor, "payment.marked_paid", {
     track: quote.track, totalUsd: quote.totalUsd, reference: quote.payment?.paymentReference || "",
   });
   if (req.body?.actualPermitFeeUsd != null && req.body?.actualPermitFeeUsd !== "") {
-    (await import("./feeFloat")).afterFeeRecorded(db, detail.project, "operator");
+    (await import("./feeFloat")).afterFeeRecorded(db, detail.project, payActor);
   }
   maybeResumeAutopilot(db, detail.project.id, "a fee payment was recorded"); // clears the 402 gate
   res.json({ quote });
@@ -4079,7 +4125,7 @@ app.post("/api/projects/:id/payment/waive", asyncHandler(async (req, res) => {
   const { waiveSubmissionPayment } = await import("./submissionFees");
   const detail = getProjectDetail(db, String(req.params.id));
   const quote = waiveSubmissionPayment(db, detail.project, String(req.body?.track || ""));
-  addAuditLog(db, detail.project.id, "human", "operator", "payment.waived", { track: quote.track });
+  addAuditLog(db, detail.project.id, "human", staffActorName(req, undefined, "operator"), "payment.waived", { track: quote.track });
   maybeResumeAutopilot(db, detail.project.id, "a fee was waived"); // clears the 402 gate
   res.json({ quote });
 }));
@@ -4090,12 +4136,13 @@ app.post("/api/projects/:id/payment/waive", asyncHandler(async (req, res) => {
 app.post("/api/projects/:id/payment/record-fee", asyncHandler(async (req, res) => {
   const { recordActualPermitFee } = await import("./submissionFees");
   const detail = getProjectDetail(db, String(req.params.id));
+  const feeActor = staffActorName(req, undefined, "operator");
   const quote = recordActualPermitFee(db, detail.project, String(req.body?.track || ""), req.body?.actualPermitFeeUsd, "operator");
-  addAuditLog(db, detail.project.id, "human", "operator", "payment.fee_recorded", {
+  addAuditLog(db, detail.project.id, "human", feeActor, "payment.fee_recorded", {
     track: quote.track, permitFeeUsd: quote.permitFeeUsd,
   });
   // A fee we paid goes on the job's own invoice now, due on receipt (owner 2026-11-13), as a draft.
-  const jobInvoice = (await import("./feeFloat")).afterFeeRecorded(db, detail.project, "operator");
+  const jobInvoice = (await import("./feeFloat")).afterFeeRecorded(db, detail.project, feeActor);
   res.json({ quote, jobInvoice: jobInvoice ? { id: jobInvoice.id, number: jobInvoice.number, dueTotalUsd: jobInvoice.dueTotalUsd } : null });
 }));
 
@@ -4442,6 +4489,9 @@ app.post("/api/projects/:id/prepare-submission", (req, res) => {
     ...finalSubmitJobPayload({ track, autoSubmit, allowFinalSubmit, approval }),
     ...(signatureApproval ? { signatureRequestApprovalId: signatureApproval.id } : {}),
   }, { projectId, priority: 7, maxRetries: 0 });
+  // Who pressed Stage (an approval names its approver separately): with several staff on one server,
+  // the job alone does not say whose run this is. A record only; it gates nothing.
+  addAuditLog(db, projectId, "human", staffActorName(req, undefined, "dashboard"), "portal.stage_requested", { track: track ?? null, jobId: job.id });
   processNextJob(db)
     .then(() => {
       // Check the JOB first: a staging-gate 409 (QC/docs/CCB/permit-path/host conflict)
@@ -4565,6 +4615,7 @@ app.post("/api/projects/:id/human-verify", (req, res) => {
     action: action as "approve" | "edit" | "reject",
     fieldValue: req.body?.fieldValue,
     notes: req.body?.notes,
+    verifiedBy: staffActorName(req, undefined, "dashboard"),
   });
   maybeResumeAutopilot(db, String(req.params.id), "a human review item was verified"); // may unblock QC
   // humanVerify re-runs QC, so a verified item can carry a project to qc_passed. /qc already
@@ -4629,8 +4680,26 @@ app.post("/api/portal-runs/:id/cancel", (req, res) => {
   res.json(cancelPortalRun(db, String(req.params.id), currentUser(db, req)?.email || "operator"));
 });
 
+// "SAVE MY FIXES" (runFixSteps.ts): a named person writes what they did by hand in the window a
+// failed replay step left open into the recipe, at the step that got stuck. Never clicks anything.
+// mode "insert" (default) or "replace_rest" (they finished the application by hand to review).
+// Scope: /api/portal-runs/:id, so the child scope guard 404s another tenant's run (rule 6).
+app.post("/api/portal-runs/:id/save-fixes", asyncHandler(async (req, res) => {
+  // A NAMED PERSON, like every decision that changes shared state: signed in, the account (a role-only
+  // display name is recorded by its email); signed out, the name the dashboard sends, never a blank or
+  // a placeholder such as "operator".
+  const { isConfirmingPerson } = await import("./feeConfirm");
+  const appliedBy = namedPersonDecider(req, "decidedBy", "Sign in to save fixes into a recipe.",
+    `Name the person saving these fixes: a recipe change is recorded against them, and "operator" is not a person.`, isConfirmingPerson);
+  const mode = String(req.body?.mode ?? "") === "replace_rest" ? "replace_rest" : "insert";
+  const saved = applyRunFixSteps(db, String(req.params.id), { appliedBy, mode });
+  const projectId = db.get<{ project_id: string }>("SELECT project_id FROM portal_runs WHERE id = ?", [String(req.params.id)])?.project_id;
+  res.json({ ...saved, ...(projectId ? { detail: getProjectDetail(db, projectId) } : {}) });
+}));
+
 app.post("/api/portal-runs/:id/capture-confirmation", (req, res) => {
-  res.json(captureConfirmation(db, req.params.id, req.body || {}));
+  const b = req.body || {};
+  res.json(captureConfirmation(db, req.params.id, { ...b, submittedBy: staffActorName(req, b.submittedBy, "") || undefined }));
 });
 
 // The HUMAN's record that a reopened correction form was actually resubmitted in the portal.
@@ -4645,7 +4714,8 @@ app.post("/api/portal-runs/:id/capture-confirmation", (req, res) => {
 // foreign tenant's run 404s, never 403s) and sits behind the same deny-by-default
 // entitlementGate as its capture-confirmation sibling — no new top-level path.
 app.post("/api/portal-runs/:id/mark-resubmitted", (req, res) => {
-  res.json(markCorrectionResubmitted(db, String(req.params.id), req.body || {}));
+  const b = req.body || {};
+  res.json(markCorrectionResubmitted(db, String(req.params.id), { ...b, submittedBy: staffActorName(req, b.submittedBy, "") || undefined }));
 });
 
 // Save a public AHJ portal tracking URL (no login required) for a portal run or
@@ -4840,16 +4910,26 @@ app.post("/api/projects/:id/submittal-tracks/:type/mark-submitted", asyncHandler
   if (!SUBMITTAL_TRACK_TYPES.includes(type)) throw new HttpError(400, "Unknown submittal track type.");
   const detail = getProjectDetail(db, String(req.params.id));
   const b = req.body || {};
+  // The person who says this track went in: the signed-in account (or, sign-in off, the name sent).
+  const submittedBy = staffActorName(req, b.submittedBy, "") || undefined;
   markTrackSubmitted(db, detail.project, type, {
     applicationNumber: b.applicationNumber ? String(b.applicationNumber) : undefined,
     permitNumber: b.permitNumber ? String(b.permitNumber) : undefined,
     confirmationNumber: b.confirmationNumber ? String(b.confirmationNumber) : undefined,
     trackingUrl: b.trackingUrl ? String(b.trackingUrl) : undefined,
-    submittedBy: b.submittedBy ? String(b.submittedBy) : undefined,
+    submittedBy,
     notes: b.notes ? String(b.notes) : undefined,
     // Blank means today, which is the same-sitting case. Supplied means the filing really went
     // in on that day and is being recorded later — the client's review clock runs from it.
     submittedAt: b.submittedAt ? String(b.submittedAt) : undefined,
+  });
+  // A filing recorded by hand is the moment the client's clock starts: say who recorded it.
+  addAuditLog(db, detail.project.id, "human", submittedBy || "dashboard", "track.marked_submitted", {
+    track: type,
+    applicationNumber: b.applicationNumber ? String(b.applicationNumber).slice(0, 80) : "",
+    permitNumber: b.permitNumber ? String(b.permitNumber).slice(0, 80) : "",
+    confirmationNumber: b.confirmationNumber ? String(b.confirmationNumber).slice(0, 80) : "",
+    submittedAt: b.submittedAt ? String(b.submittedAt).slice(0, 40) : "",
   });
   // The operator just SUBMITTED this track by hand from the staged review browser — that
   // manual submit is the strongest verification the captured fill works. If the track's
@@ -4866,7 +4946,7 @@ app.post("/api/projects/:id/submittal-tracks/:type/mark-submitted", asyncHandler
       // Eligibility-guarded (reached-review) promotion — a paused/partial or stale
       // abandoned recording must NOT be silently promoted by an unrelated manual submit.
       promoteRecordingIfEligible(db, draft.id, {
-        finishedBy: b.submittedBy ? String(b.submittedBy) : "operator (marked track submitted)",
+        finishedBy: submittedBy || "operator (marked track submitted)",
         via: "mark_submitted",
         projectId: detail.project.id,
       });
