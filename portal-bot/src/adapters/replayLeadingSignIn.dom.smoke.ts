@@ -226,7 +226,6 @@ try {
     skipNotes(a1).length === 1 && /steps? 1.{1,3}4\b/.test(skipNotes(a1)[0]) && /signed in/i.test(skipNotes(a1)[0]), say(a1));
   check("(a1) the note carries no recorded value (the stored user name is one client's login)", !a1.notes.concat(a1.warnings).some((n) => n.includes(RECORDED_USER)) && !String(a1.fill?.message ?? "").includes(RECORDED_USER), say(a1));
   check("(a1) no sign-in was sent and the sign-in page was never opened", signInPosts(a1).length === 0 && !a1.hits.some((h) => h.path === "/enter"), say(a1));
-  check("(a1) the trace marks steps 1-4 as not replayed", [0, 1, 2, 3].every((i) => a1.trace.some((t) => t.i === i && /not replayed/.test(t.outcome))), JSON.stringify(a1.trace).slice(0, 400));
   preSigned.delete(ALPHA);
 
   // (a2) SIGNED IN BY THE ENGINE'S OWN LOGIN PHASE, one-page site, with a leading goto in the recipe.

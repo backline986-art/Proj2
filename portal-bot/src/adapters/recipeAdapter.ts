@@ -320,6 +320,7 @@ import { isPaymentField as isCardFieldIdentity, type FieldIdentity } from "../..
 import { findFilingStatus } from "../statusFinder";
 import { UNRECORDED_WRITE_ATTR, gapFillMayAnswer, isSubmitIntentField, questionsOfRaw } from "../llmGapFill";
 import { performLogin, portalErrorPage } from "./loginFlow";
+import { describeLeadingSignIn, leadingSignInSequence } from "./leadingSignIn";
 import { chooseCorrectionForm, correctionFormSelector, isRefusal, scanProjectForms, type ProjectFormRow } from "./correctionForm";
 import { type ExtractedField, type RawField, EXTRACT_SEL, extractFieldsInPage, toExtractedField, recordedRoleOf, dismissPageModals, clearPageOverlays, equipmentMakeCandidates, pageFingerprintOf, collectValidationErrorsFrom, acaApplyEntryFrom, advanceSignatureOf } from "./autoLearnAdapter";
 import { tagUploadControls, visibleBodyText, policyScopeFor } from "./autoLearnAdapter";
@@ -1931,6 +1932,12 @@ export class RecipeAdapter extends BasePortalAdapter {
   private learnedRecordFormat(): LearnedRecordFormat {
     return learnRecordFormat((this.ledgerBefore ?? []).map((e) => e.id), this.recipe.recordNumberShapes ?? []);
   }
+  /** #280 — THE LOGIN PHASE'S OWN ANSWER, kept for the step loop: performLogin (login()) reported
+   *  the session signed in ("logged_in" / "already_authenticated") before the recipe's first step.
+   *  It is the ONE signed-in signal — nothing re-reads the page for it. False until login() says
+   *  so, and false for a portal with no login ("no_login_required"): the recipe then replays every
+   *  step as recorded. Read only to skip the recipe's leading sign-in sequence (leadingSignIn.ts). */
+  private signedInAtRecipeStart = false;
   /** The recipe step index the loop is on — the final-submit gate's "is this the terminal step". */
   private currentStepIdx = -1;
   /** #232 — the step loop arrived at the review marker (stopForReview, the recorded final submit, or a
@@ -2093,6 +2100,7 @@ export class RecipeAdapter extends BasePortalAdapter {
 
   async login(context: PortalContext): Promise<PortalStepResult> {
     const tStart = Date.now();
+    this.signedInAtRecipeStart = false;
     try {
       const opened = await openPortal({
         userDataDir: context.userDataDir,
@@ -2144,6 +2152,8 @@ export class RecipeAdapter extends BasePortalAdapter {
         return fail(`${this.portalName}: ${login.message}`);
       }
 
+      // #280: only a POSITIVELY proven session counts (the two statuses performLogin gives one).
+      this.signedInAtRecipeStart = login.status === "logged_in" || login.status === "already_authenticated";
       this.progress("login", "Signed in — starting the recipe", Date.now() - tStart);
       return ok(`Opened ${this.portalName}. ${login.message}`, { phaseTimings: this.phaseTimings, msToRecipeStart: Date.now() - tStart });
     } catch (err) {
@@ -3794,6 +3804,14 @@ export class RecipeAdapter extends BasePortalAdapter {
       }
       this.stepPhases = {};
     };
+    // #280 — THE RECIPE'S LEADING SIGN-IN SEQUENCE IS NOT REPLAYED INTO A SIGNED-IN SESSION. A hand
+    // recording starts with the person signing in; the login phase has already done that with the
+    // stored login, so those steps name controls the signed-in page no longer has (the run failed
+    // at step 1: "no control on this page matches …"). Skipped as a unit, named once, and ONLY when
+    // the login phase itself reported the session signed in — otherwise every step runs as recorded
+    // and a step that cannot be found fails as before. The sequence is defined by the recorder's
+    // sensitive credential fill (leadingSignIn.ts), never by wording.
+    const signInSeq = this.signedInAtRecipeStart ? leadingSignInSequence(this.recipe.steps) : null;
     for (let stepIdx = 0; stepIdx < this.recipe.steps.length; stepIdx++) {
       // THE BACKSTOP ABORTED A FILING OR A PAYMENT: stop here, named. Carrying on would retry the
       // step (or reload the entry URL) and serve the same filing control again.
@@ -3825,6 +3843,16 @@ export class RecipeAdapter extends BasePortalAdapter {
       if (this.checkReplayStop(stepIdx)) {
         closePrevStepTiming();
         return fail(this.replayStop!.message, { ...this.replayStopData(), executed, skipped, healedSteps: this.healedSteps, driftWarnings: this.driftWarnings, agingNotes: this.agingNotes, guardRefusals: this.guardRefusals, failedStepIndex: stepIdx, trace, slowSteps });
+      }
+      // #280 — a step of the leading sign-in sequence, in a session the login phase signed in: not
+      // replayed. Nothing is located, typed or clicked for it; the note (once) names the steps by
+      // number and label, never a value.
+      if (signInSeq && stepIdx >= signInSeq.start && stepIdx <= signInSeq.end) {
+        if (stepIdx === signInSeq.start) {
+          this.agingNotes.push(`recorded sign-in not replayed (${describeLeadingSignIn(this.recipe.steps, signInSeq)}) — the session was already signed in when the recipe's steps began (the login phase signed in with the stored login, or found the existing session); the replay continues at step ${signInSeq.end + 2}`);
+        }
+        trace.push({ i: stepIdx, action: String(recordedStep.action), note: recordedStep.sensitive ? "(credential)" : String(recordedStep.note ?? "").slice(0, 52), outcome: "not replayed (leading sign-in; the session is already signed in)", page: await currentPageLabel() });
+        continue;
       }
       // #382 — A RECORDED "ADD ARRAY" CLICK IS NEVER REPLAYED. It adds a fixed number of rows (the
       // learn project's), whatever this project has; the rows this project needs are added after
