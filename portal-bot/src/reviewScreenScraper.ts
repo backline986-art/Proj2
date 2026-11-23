@@ -5,8 +5,7 @@
 
 import { redactStatusText } from "./safeAction";
 import { readReviewScreenFees, type PortalFeeReadResult } from "../../shared/src/portalFeeItems";
-import { isSignatureNameLabel } from "../../shared/src/portalSafety";
-import { redactSecretValues } from "../../shared/src/portalSafety";
+import { isSignatureNameLabel, redactSecretValues } from "../../shared/src/portalSafety";
 import type { ProjectRecord } from "../../shared/src/types";
 
 export interface ReviewField {
