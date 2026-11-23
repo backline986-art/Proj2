@@ -135,7 +135,7 @@ import { siteOfUrl } from "../siteOf";
 import { isPathTenantedHost, portalHostOf, portalTenantKey, portalTenantOf, trackSafeUrl } from "../../../backend/src/portalChannel";
 import { dialogOpenedSince, readUnlessDialog } from "../personDialogs";
 import { cancelledMessage, cancelRequestOf, ReplayStallWatch, replayReviewTailMsFromEnv, replayStallMsFromEnv, type RunCancelRequest } from "./replayStopControl";
-import { installFilingBackstop, withBackstopWindow, withOwnWriteWindow, withAutomationInput, describeBackstopAbort, backstopSentLine, drainOwnWrites, unsavedAtReviewWarning, portalOwnCallsBlockedAtReview, reviewBlockedCallsLine, isStoppingAbort, type BackstopAbort, type FilingBackstop, type BackstopHumanRequest } from "../filingBackstop";
+import { autosavePending, installFilingBackstop, withBackstopWindow, withOwnWriteWindow, withAutomationInput, describeBackstopAbort, backstopSentLine, drainOwnWrites, unsavedAtReviewWarning, portalOwnCallsBlockedAtReview, reviewBlockedCallsLine, isStoppingAbort, type BackstopAbort, type FilingBackstop, type BackstopHumanRequest } from "../filingBackstop";
 
 /** #333: the run did not hand the review page over — its input watch could not be armed, or (Helm
  *  Should-fix 3) a stopping abort the watch did not flag as the person's is on record, so the run
@@ -3836,6 +3836,19 @@ export class RecipeAdapter extends BasePortalAdapter {
         closePrevStepTiming();
         return fail(this.replayStop!.message, { ...this.replayStopData(), executed, skipped, healedSteps: this.healedSteps, driftWarnings: this.driftWarnings, agingNotes: this.agingNotes, guardRefusals: this.guardRefusals, failedStepIndex: stepIdx, trace, slowSteps });
       }
+      // THE PORTAL ENDED THE SESSION: STOP NOW, NOT 8 MINUTES LATER (live PGE replay, 2026-11-23). The
+      // page after step 48 read "Session Ended"; step 49 then hung until the stall clock ended the run
+      // and the failure could not be attributed. Asked before every step once one has run: a page that
+      // names itself a session end is never filled or clicked. Same wording as the step-failure path,
+      // so the run is kept as the environment's fault, never the recipe's.
+      if (executed > 0) {
+        const ended = await this.sessionEndedBanner();
+        if (ended) {
+          closePrevStepTiming();
+          trace.push({ i: stepIdx, action: String(recordedStep?.action ?? ""), note: String(recordedStep?.note ?? "").slice(0, 52), outcome: "not run (session ended)", page: await currentPageLabel() });
+          return fail(`THE PORTAL ENDED THIS SESSION mid-run ("${ended}") before step ${stepIdx + 1} — commonly a concurrent login with the same account, or the portal's own time limit. The run stopped here: nothing further was filled or clicked, and nothing was submitted. Check the portal for the partly filled application before staging again.`, { executed, skipped, healedSteps: this.healedSteps, driftWarnings: this.driftWarnings, agingNotes: this.agingNotes, guardRefusals: this.guardRefusals, failedStepIndex: stepIdx, trace, slowSteps });
+        }
+      }
       // #382 — A RECORDED "ADD ARRAY" CLICK IS NEVER REPLAYED. It adds a fixed number of rows (the
       // learn project's), whatever this project has; the rows this project needs are added after
       // the array block, one per array (afterArrayBlock), and only there.
@@ -7112,18 +7125,27 @@ export class RecipeAdapter extends BasePortalAdapter {
   // indicator is the platform's own commit signal (data-test-role project-save-state →
   // save-state-saved), so waiting on it is exact, not a guessed sleep. No indicator on the
   // page = nothing to wait for = zero cost on every other portal.
+  //
+  // WAIT WHILE IT SAYS IT IS SAVING, NOT UNTIL IT SAYS "SAVED" (live PGE replay, 2026-11-23). This
+  // waited for the word "saved" and spent its whole 8 s budget whenever the indicator said nothing:
+  // the replay-doctor output showed every PGE contact fill at 8.2-8.7 s, so 48 steps took ~7 min and
+  // the portal's session ended mid-run. It now asks the one reading the review drain already uses
+  // (filingBackstop autosavePending): "Saving…", "Unsaved changes", or any text without "saved" is
+  // still pending; the saved marker, "saved", or an EMPTY indicator is not. "Unsaved changes" read as
+  // committed here before (/saved/ matched it) — the other way round, and now pending too. When the
+  // budget does run out, what the indicator said is noted, so the next run says why.
   private async waitForAutosaveCommitted(): Promise<void> {
     if (!this.page || typeof this.page.locator !== "function") return;
     const state = this.page.locator("[data-test-role='project-save-state']");
     if (typeof state?.evaluate !== "function") return; // test fakes — nothing to wait on
     if (!(await state.count?.().catch(() => 0))) return;
     for (let i = 0; i < 20; i++) {
-      const saved = await state.evaluate((el: Element) =>
-        Boolean(el.querySelector("[data-test-role='save-state-saved']")) || /saved/i.test((el as HTMLElement).innerText || ""),
-      ).catch(() => true);
-      if (saved) return;
+      if (!(await autosavePending(this.page))) return;
       await sleep(400);
     }
+    const said = String(await state.evaluate((el: Element) => ((el as HTMLElement).innerText || el.textContent || "").replace(/\s+/g, " ").trim()).catch(() => "")).slice(0, 40);
+    const note = `the portal's save indicator still read "${said || "(unreadable)"}" after 8 s — went on; the read-back of each value decides whether it held`;
+    if (!this.agingNotes.includes(note)) this.agingNotes.push(note);
   }
 
   /** True only when the page CARRIES the autosave indicator AND it reports committed —
@@ -7136,9 +7158,12 @@ export class RecipeAdapter extends BasePortalAdapter {
     if (typeof state?.evaluate !== "function") return false;
     if (!(await state.count?.().catch(() => 0))) return false;
     await this.waitForAutosaveCommitted();
-    return await state.evaluate((el: Element) =>
-      Boolean(el.querySelector("[data-test-role='save-state-saved']")) || /saved/i.test((el as HTMLElement).innerText || ""),
-    ).catch(() => false);
+    // "Saved" said in words, or the marker — never "Unsaved changes", which /saved/ used to accept.
+    return await state.evaluate((el: Element) => {
+      if (el.querySelector("[data-test-role='save-state-saved']")) return true;
+      const text = (el as HTMLElement).innerText || el.textContent || "";
+      return /\bsaved\b/i.test(text) && !/saving|unsaved|pending/i.test(text);
+    }).catch(() => false);
   }
 
   // data-al-row IS A LEARN-TIME TAG, NOT A SELECTOR. chooseProjectAddressRow stamps it while
