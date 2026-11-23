@@ -5269,7 +5269,7 @@
     {
       "state": "ID",
       "ahj": "Idaho Division of Occupational and Professional Licenses (DOPL)",
-      "submissionMethod": "",
+      "submissionMethod": "https://web.dbs.idaho.gov/etrakit3/",
       "timeline": "",
       "requiresElectricianSign": false,
       "requiresElectricalStamp": false,
@@ -5283,7 +5283,7 @@
       "requiresFloodplainCheck": false,
       "requiresJurisdictionCheck": false,
       "otherRequirements": "",
-      "reviewerNotes": "The state's electrical permit authority: where a city or county does not run its own electrical program, the electrical permit track files with this office. State pages (read 2026-11-11): the Division offers online permits to licensed electrical contractors, bought in its online permit system after registering an account; since January 1, 2023 all state permits are bought online; its permit map takes the job address and sends the applicant to the right site, so the address decides whether a job is the state's. Permits are bought before work starts. Fee for a solar, renewable or storage job (the state's contractor worksheet lists them under other installations; IDAPA 24.39.10.500.02.b), on the total cost of the electrical system: up to $10,000, $60 plus 2 percent; over $10,000 up to $100,000, $260 plus 1 percent of the cost over $10,000; over $100,000, $1,160 plus 0.5 percent of the cost over $100,000. Renewable energy needs a plan check before final inspection: $65 minimum for the first hour, then $65 per hour. Reinspection $65. At the on-site inspection the inspector asks for a one-line diagram, manufacturer specification sheets, load calculations where the main breaker is downsized or a standby panel or transfer switch is used, and pictures of work in attics and basements; storage systems and transfer switches must be installed before final. Service changes or upgrades need their own permit. Its online permit system is cited here as a note only (the link the state's own FAQ gives), not as a filing door: a person opens it and records the filing address. Seeded from the state's own pages, NOT verified.",
+      "reviewerNotes": "The state's electrical permit authority: where a city or county does not run its own electrical program, the electrical permit track files with this office. State pages (read 2026-11-11): the Division offers online permits to licensed electrical contractors, bought in its online permit system after registering an account; since January 1, 2023 all state permits are bought online; its permit map takes the job address and sends the applicant to the right site, so the address decides whether a job is the state's. Permits are bought before work starts. Fee for a solar, renewable or storage job (the state's contractor worksheet lists them under other installations; IDAPA 24.39.10.500.02.b), on the total cost of the electrical system: up to $10,000, $60 plus 2 percent; over $10,000 up to $100,000, $260 plus 1 percent of the cost over $10,000; over $100,000, $1,160 plus 0.5 percent of the cost over $100,000. Renewable energy needs a plan check before final inspection: $65 minimum for the first hour, then $65 per hour. Reinspection $65. At the on-site inspection the inspector asks for a one-line diagram, manufacturer specification sheets, load calculations where the main breaker is downsized or a standby panel or transfer switch is used, and pictures of work in attics and basements; storage systems and transfer switches must be installed before final. Service changes or upgrades need their own permit. Its online permit system (the link the state's own FAQ gives) is on file as a seeded door: a person opens it, signs in as the contractor and confirms the address before anything is filed there. Seeded from the state's own pages, NOT verified.",
       "stateAuthorityFor": [
         "electrical"
       ],
@@ -5305,6 +5305,13 @@
           "sourceUrl": "https://www.canyoncounty.id.gov/building-department",
           "quote": "all Mechanical, Electrical and Plumbing permits and inspections are handled by the State of Idaho, Division of Occupational and Professional Licenses (DOPL)",
           "fetchedAt": "2026-11-10T08:24:31Z"
+        },
+        {
+          "field": "submissionMethod",
+          "value": "https://web.dbs.idaho.gov/etrakit3/",
+          "sourceUrl": "https://dopl.idaho.gov/ele/ele-faqs/",
+          "quote": "Register and establish a free account and purchase your permit online",
+          "fetchedAt": "2026-11-11T20:22:45Z"
         },
         {
           "field": "permitSystem",
