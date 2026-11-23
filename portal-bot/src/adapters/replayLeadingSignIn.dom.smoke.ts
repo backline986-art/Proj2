@@ -180,7 +180,7 @@ const application = (start: RecipeStep): RecipeStep[] => [start, fillTitle, next
 
 // ── the runs ──────────────────────────────────────────────────────────────────────────────────
 type StepResult = { ok: boolean; message: string; data?: Record<string, unknown> };
-type Outcome = { login: StepResult | null; fill: StepResult | null; url: string; heading: string; shownTitle: string; hits: Hit[]; notes: string[]; warnings: string[]; trace: Array<{ i: number; outcome: string }> };
+type Outcome = { login: StepResult | null; fill: StepResult | null; url: string; heading: string; shownTitle: string; hits: Hit[]; named: string; notes: string[]; warnings: string[]; trace: Array<{ i: number; outcome: string }> };
 const FIELDS = { projectName: "Synthetic Project 280", accountNumber: "SYNTH-ACCT" };
 const readEnd = async (pg: Page | null): Promise<{ url: string; heading: string; shownTitle: string }> => {
   if (!pg) return { url: "", heading: "", shownTitle: "" };
@@ -192,8 +192,8 @@ const readEnd = async (pg: Page | null): Promise<{ url: string; heading: string;
 };
 const outcomeOf = async (adapter: RecipeAdapter, login: StepResult | null, fill: StepResult | null, pg: Page | null): Promise<Outcome> => {
   const inner = adapter as unknown as { agingNotes: string[]; driftWarnings: string[] };
-  const data = (fill?.data ?? {}) as { trace?: Array<{ i: number; outcome: string }> };
-  return { login, fill, ...(await readEnd(pg)), hits: [...hits], notes: [...inner.agingNotes], warnings: [...inner.driftWarnings], trace: data.trace ?? [] };
+  const data = (fill?.data ?? {}) as { trace?: Array<{ i: number; outcome: string }>; signInNotReplayed?: unknown };
+  return { login, fill, ...(await readEnd(pg)), hits: [...hits], named: typeof data.signInNotReplayed === "string" ? data.signInNotReplayed : "", notes: [...inner.agingNotes], warnings: [...inner.driftWarnings], trace: data.trace ?? [] };
 };
 /** The real path: login() (the engine's own sign-in phase) and then the recipe. */
 async function run(recipe: PortalRecipe): Promise<Outcome> {
@@ -211,8 +211,11 @@ async function run(recipe: PortalRecipe): Promise<Outcome> {
     await adapter.close().catch(() => null);
   }
 }
-const say = (o: Outcome): string => `login=${o.login ? `${o.login.ok}:${o.login.message.slice(0, 160)}` : "(not run)"} | fill=${o.fill ? `${o.fill.ok}:${o.fill.message.slice(0, 400)}` : "(not run)"} | url=${o.url} heading=${JSON.stringify(o.heading)} title=${JSON.stringify(o.shownTitle)} | notes=${JSON.stringify(o.notes)} | warnings=${JSON.stringify(o.warnings).slice(0, 300)} | hits=${JSON.stringify(o.hits.map((h) => `${h.method} ${h.host.split(".")[1]}${h.path}`))}`;
-const skipNotes = (o: Outcome): string[] => o.notes.filter((n) => /sign-in/i.test(n) && /not replayed/i.test(n));
+const say = (o: Outcome): string => `login=${o.login ? `${o.login.ok}:${o.login.message.slice(0, 160)}` : "(not run)"} | fill=${o.fill ? `${o.fill.ok}:${o.fill.message.slice(0, 400)}` : "(not run)"} | url=${o.url} heading=${JSON.stringify(o.heading)} title=${JSON.stringify(o.shownTitle)} | named=${JSON.stringify(o.named)} notes=${JSON.stringify(o.notes)} | warnings=${JSON.stringify(o.warnings).slice(0, 300)} | hits=${JSON.stringify(o.hits.map((h) => `${h.method} ${h.host.split(".")[1]}${h.path}`))}`;
+// Every place the skip could be named: the fill result's own line (data.signInNotReplayed), plus any
+// aging note or drift warning saying the same (there must be none: those drive the re-record signal).
+const inLists = (o: Outcome): string[] => o.notes.concat(o.warnings).filter((n) => /sign-in/i.test(n) && /not replayed/i.test(n));
+const skipNotes = (o: Outcome): string[] => [...(o.named ? [o.named] : []), ...inLists(o)];
 const atReview = (o: Outcome): boolean => !!o.fill?.ok && /Review your application/.test(o.heading) && o.shownTitle === FIELDS.projectName;
 const signInPosts = (o: Outcome): Hit[] => o.hits.filter((h) => h.method === "POST" && (h.path === "/enter" || h.path === "/session"));
 
@@ -224,7 +227,8 @@ try {
   check("(a1) MUST-PASS: already signed in — the application steps run and review is reached", atReview(a1), say(a1));
   check("(a1) MUST-PASS: the leading sign-in sequence is named ONCE, with its step numbers and why",
     skipNotes(a1).length === 1 && /steps? 1.{1,3}4\b/.test(skipNotes(a1)[0]) && /signed in/i.test(skipNotes(a1)[0]), say(a1));
-  check("(a1) the note carries no recorded value (the stored user name is one client's login)", !a1.notes.concat(a1.warnings).some((n) => n.includes(RECORDED_USER)) && !String(a1.fill?.message ?? "").includes(RECORDED_USER), say(a1));
+  check("(a1) the note carries no recorded value (the stored user name is one client's login)", !a1.notes.concat(a1.warnings, [a1.named]).some((n) => n.includes(RECORDED_USER)) && !String(a1.fill?.message ?? "").includes(RECORDED_USER), say(a1));
+  check("(a1) the line is on the fill result itself (data.signInNotReplayed), never an aging note or a drift warning (re-recording cannot change it)", !!a1.named && inLists(a1).length === 0, say(a1));
   check("(a1) no sign-in was sent and the sign-in page was never opened", signInPosts(a1).length === 0 && !a1.hits.some((h) => h.path === "/enter"), say(a1));
   preSigned.delete(ALPHA);
 

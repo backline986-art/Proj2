@@ -1938,6 +1938,8 @@ export class RecipeAdapter extends BasePortalAdapter {
    *  so, and false for a portal with no login ("no_login_required"): the recipe then replays every
    *  step as recorded. Read only to skip the recipe's leading sign-in sequence (leadingSignIn.ts). */
   private signedInAtRecipeStart = false;
+  /** #280 — the one line naming the leading sign-in steps this run did not replay ("" = none). */
+  private signInNotReplayed = "";
   /** The recipe step index the loop is on — the final-submit gate's "is this the terminal step". */
   private currentStepIdx = -1;
   /** #232 — the step loop arrived at the review marker (stopForReview, the recorded final submit, or a
@@ -2256,6 +2258,7 @@ export class RecipeAdapter extends BasePortalAdapter {
     // #232: this run's ending is its own (endReplay sets it on the way out).
     this.reachedReviewMarker = false;
     this.replayEnd = null;
+    this.signInNotReplayed = "";
     try {
       // A FilerIdentityStop that escaped the step loop (a click between steps) is the run's answer too.
       const stopTimer = this.startStopWatchdog();
@@ -2307,8 +2310,11 @@ export class RecipeAdapter extends BasePortalAdapter {
   }
 
   /** #232 — the replay's own ending, kept for the closing step: whether it ended clean, and if not,
-   *  at which step (failedStepIndex, else the step the loop was on) and why. Returns `res` as is. */
-  private endReplay(res: PortalStepResult): PortalStepResult {
+   *  at which step (failedStepIndex, else the step the loop was on) and why. Returns `res` as is —
+   *  plus, when the run did not replay the recipe's leading sign-in (#280), that one line in
+   *  data.signInNotReplayed, whatever the ending. */
+  private endReplay(res0: PortalStepResult): PortalStepResult {
+    const res: PortalStepResult = this.signInNotReplayed ? { ...res0, data: { ...(res0.data ?? {}), signInNotReplayed: this.signInNotReplayed } } : res0;
     const at = (res.data as { failedStepIndex?: unknown } | undefined)?.failedStepIndex;
     this.replayEnd = {
       started: true, ok: res.ok, pauseReason: typeof res.pauseReason === "string" && res.pauseReason ? res.pauseReason : null,
@@ -3849,7 +3855,11 @@ export class RecipeAdapter extends BasePortalAdapter {
       // number and label, never a value.
       if (signInSeq && stepIdx >= signInSeq.start && stepIdx <= signInSeq.end) {
         if (stepIdx === signInSeq.start) {
-          this.agingNotes.push(`recorded sign-in not replayed (${describeLeadingSignIn(this.recipe.steps, signInSeq)}) — the session was already signed in when the recipe's steps began (the login phase signed in with the stored login, or found the existing session); the replay continues at step ${signInSeq.end + 2}`);
+          // NOT an aging note and not a drift warning: agingNotes drive the re-record signal, and
+          // re-recording cannot change this (a hand recording always starts with the sign-in). It
+          // is the run's own fact, carried once on the fill result (endReplay: signInNotReplayed).
+          this.signInNotReplayed = (`recorded sign-in not replayed (${describeLeadingSignIn(this.recipe.steps, signInSeq)}) — the session was already signed in when the recipe's steps began (the login phase signed in with the stored login, or found the existing session); the replay continues at step ${signInSeq.end + 2}`);
+          this.progress("step", "Already signed in — the recorded sign-in steps are not replayed", 0, stepIdx);
         }
         trace.push({ i: stepIdx, action: String(recordedStep.action), note: recordedStep.sensitive ? "(credential)" : String(recordedStep.note ?? "").slice(0, 52), outcome: "not replayed (leading sign-in; the session is already signed in)", page: await currentPageLabel() });
         continue;

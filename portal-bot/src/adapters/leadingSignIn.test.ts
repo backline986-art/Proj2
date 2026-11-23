@@ -39,6 +39,10 @@ const is = (steps: RecipeStep[], start: number, end: number): boolean => {
   check("MUST-PASS: a remembered user name (no user-name fill)", is(noUser, 0, 2), show(noUser));
   const valueless = [click("Open the sign-in"), s({ ...user, value: undefined }), secret, click("Send")];
   check("MUST-PASS: a user-name fill stored without a value", is(valueless, 0, 3), show(valueless));
+  // A click the recorder stored as a selector-less placeholder (never replayable, not the final
+  // submit) may be the sending step: replay never clicks it either way, so skipping it changes nothing.
+  const blockedSend = [click("Open the sign-in"), user, secret, s({ action: "click", selector: {}, optional: true, note: "BLOCKED — human clicked a submit/pay-like control here; not replayable." }), click("Start")];
+  check("MUST-PASS: a selector-less placeholder click (not the final submit) may be the sending step", is(blockedSend, 0, 3), show(blockedSend));
   const line = describeLeadingSignIn(incident, { start: 0, end: 3 });
   check("the description names the step numbers and labels", /^steps 1-4: click "Open the sign-in", fill "Login name", fill \(credential/.test(line) && /click "Send"$/.test(line), line);
   check("the description never carries a recorded value or a sensitive step's label", !line.includes("recorded-literal") && !/Secret/.test(line), line);
