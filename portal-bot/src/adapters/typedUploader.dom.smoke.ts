@@ -17,6 +17,7 @@
 //            [6] a container whose only button is "Submit" / "Pay" is not one (shared predicates);
 //            [7] a bare "Save" outside the file's container is never tagged as its commit.
 // KILL: make findTypedUploader return null -> [1] fails; drop the COMMIT name test -> [4] fails.
+import "../smokeArtifactDirs";
 import { chromium } from "playwright";
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
