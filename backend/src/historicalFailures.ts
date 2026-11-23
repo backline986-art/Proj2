@@ -1,3 +1,4 @@
+import { memoRead } from "./readMemo";
 import type {
   CorrectionBucket,
   HistoricalChecklistItem,
@@ -246,6 +247,11 @@ function summarySubject(project: ProjectRecord, tags: string[]): string {
  * pooled, name-free patterns live on the shared knowledge rows' common_corrections.)
  */
 export function buildHistoricalFailureReport(db: AppDb, projectId: string, orgId: string | null): HistoricalFailureReport {
+  // Shared inside one synchronous read (readMemo.ts, #263): the gate asked for this four times.
+  return memoRead(db, `hist:${projectId}:${orgId === null ? "*" : `o:${orgId}`}`, () => "", () => historicalFailureReportOnce(db, projectId, orgId));
+}
+
+function historicalFailureReportOnce(db: AppDb, projectId: string, orgId: string | null): HistoricalFailureReport {
   const row = db.get<Row>("SELECT * FROM projects WHERE id = ?", [projectId]);
   if (!row) throw new Error("Project not found.");
   const projectOrgId = text(row.org_id) || DEFAULT_ORG_ID;
