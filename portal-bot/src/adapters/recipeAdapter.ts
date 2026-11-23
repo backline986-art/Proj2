@@ -327,6 +327,7 @@ import { answerForUnrecordedControl, missingRequiredStopMessage, UNPINNED_CONTRO
 import { answerForRecordedPolicyStep, parsePolicyDefaultNote } from "../recordedPolicyAnswer";
 import { isComputeTotalsStep, prepareComputeSettle, waitForComputeSettled } from "../computeSettle";
 import { portalSaysNotServed } from "../../../shared/src/portalNotServed";
+import { tightenAttachmentSaveStep } from "../attachmentSave";
 import { accessibleNameOf, nameAttributeCss, nameAttributeOf, nameAttributeOfCss, recordedNameAttribute } from "../../../shared/src/recipeSelector";
 
 // RecipeAdapter — replays a recorded portal recipe (see portal_recipes / the recorder).
@@ -3907,9 +3908,11 @@ export class RecipeAdapter extends BasePortalAdapter {
       // block's controls, so the Nth match IS array N. When the recorded selector is a
       // row-unique id there is no Nth match, the step finds nothing and skips — which
       // leaves array 1 intact rather than corrupting it.
-      const step = (this.arrayPass > 1 && inArrayBlock && recordedStep?.selector)
+      // A recipe learned before the attachment Save's fallback was tightened still names the action
+      // bar's "Save and resume later" as a way to it (attachmentSave.ts): replay the tightened selector.
+      const step = tightenAttachmentSaveStep((this.arrayPass > 1 && inArrayBlock && recordedStep?.selector)
         ? this.arrayPassStep(recordedStep)
-        : recordedStep;
+        : recordedStep);
       closePrevStepTiming();
       prevStart = Date.now();
       prevStep = { i: stepIdx, action: String(step?.action ?? ""), note: String(step?.note ?? "").slice(0, 52) };
@@ -10115,6 +10118,17 @@ export class RecipeAdapter extends BasePortalAdapter {
     return String(found || "");
   }
 
+  /** Is the recipe's NEXT step one that needs the freshly mounted page fully up — it types into the
+   *  page (a fill, pick, tick or upload), or it is the review stop / recorded final submit, whose
+   *  read-back and gates read the page? Only then does it get the full wait for an interactive
+   *  control; a plain click's own locator wait covers its target. No next step reads as needing it. */
+  private nextStepNeedsControls(): boolean {
+    const next = this.recipe.steps[this.currentStepIdx + 1];
+    if (!next) return true;
+    if (next.action === "stopForReview" || isFinalSubmitStep(next)) return true;
+    return ["fill", "select", "check", "uncheck", "upload", "press"].includes(String(next.action));
+  }
+
   /** A RECORDED CODE BOX IS A SIGN-IN CODE ONLY ON POSITIVE EVIDENCE (#238). Returns the reason to
    *  pause with, or "" for the payment stop, which is the answer whenever anything is unknown. All
    *  four must hold:
@@ -10391,7 +10405,12 @@ export class RecipeAdapter extends BasePortalAdapter {
     // A recorded Next/Continue advances a Vue wizard to a not-yet-bound section. Wait for an
     // interactive control to mount before the next fill so we never type onto an unmounted page
     // (best-effort; never skips — the retry/reload loop still recovers a genuine miss).
-    await waitForInteractiveControls(this.page);
+    // The FULL budget only when the next step types into something, or is the review stop / final
+    // submit whose gates read the page (the recorded goto cuts it before a click the same way). A page with no input to mount (a lookup page of buttons, a read-only page)
+    // burned the whole 12 s on every such click: the offline bench measured two per Self-Service-
+    // shaped replay, 24 of its 47 s. A next click's own locator wait covers its target, and
+    // assertAdvanced below still holds an advance to having moved.
+    await this.timed("controls-wait", () => waitForInteractiveControls(this.page, this.nextStepNeedsControls() ? undefined : 3000));
     if (computing) {
       // Before the effect comparison below, so "did the click do anything" reads the computed page.
       const computed = await this.timed("compute-settle", () => waitForComputeSettled(this.page));
