@@ -37,7 +37,7 @@ import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import { chromium, type Page } from "playwright";
-import { armRecorder, askUploadDocTypes, fetchJobDocuments, finalizeRecordedSteps, guessUploadDocType } from "./recordRecipe";
+import { armRecorder, askUploadDocTypes, createRecorderSink, fetchJobDocuments, finalizeRecordedSteps, guessUploadDocType } from "./recordRecipe";
 import { buildLocator } from "./adapters/loginFlow";
 import type { RecipeStep } from "../../shared/src/types";
 
@@ -53,10 +53,11 @@ const page = (body: string) => `<!doctype html><html><head><meta charset="utf-8"
 const A_START = page(`<h1>ZZ Test Office</h1><a href="/a/choose">Start an application</a>`);
 const A_CHOOSE = page(`<style>.card{cursor:pointer;border:1px solid #888;padding:24px;margin:12px;width:320px}</style>
   <h1>What are you applying for?</h1><p id="blurb">Pick the kind of request you are making today.</p>
-  <div class="cards"><div class="card"><h3>Rooftop array request</h3><p class="d">For panels fixed to a house roof</p></div><div class="card"><h3>Fence request</h3><p class="d">For a new boundary fence</p></div></div>
+  <div class="cards"><div class="card"><h3>Rooftop array request</h3><p class="d">For panels fixed to a house roof</p></div><div class="card"><h3>Fence request</h3><p class="d">For a new boundary fence</p></div><div class="card" aria-label="Open the cashier"><h3>Pay the fee now</h3><p class="d">Card payments only</p></div></div>
   <script>var cs=document.querySelectorAll('.card');
     cs[0].onclick=function(){setTimeout(function(){location.href='/a/form';},700);};
-    cs[1].onclick=function(){location.href='/a/other';};</script>`);
+    cs[1].onclick=function(){location.href='/a/other';};
+    cs[2].onclick=function(){location.href='/a/other';};</script>`);
 const A_FORM = page(`<h1>Rooftop array request</h1>
   <form onsubmit="return false">
     <p><label for="own">Owner name</label><input id="own" name="own"></p>
@@ -304,6 +305,43 @@ try {
     check(`C: only the unmatched upload is asked about, by its slot's name ("${site.askedSlot}")`,
       questions.length === 1 && questions[0].includes(`"${site.askedSlot}"`) && !/an upload slot/.test(questions[0]), JSON.stringify(questions));
     await ctx.close();
+  }
+
+  console.log("\n[safety: a tile is asked the same question as a button]");
+  {
+    // A tile whose accessible name is harmless ("Open the cashier") and whose FACE reads "Pay the
+    // fee now": it navigates, so it is recorded — as the blocked placeholder, never a replayable click.
+    const ctx = await mk();
+    const p = await ctx.newPage();
+    const session = await armRecorder(p, { bindField: () => undefined, startsFresh: true, log: () => undefined });
+    await p.goto(`${base}/a/choose`, { waitUntil: "domcontentloaded" });
+    await p.locator(".card").nth(2).click({ position: { x: 6, y: 6 } });
+    await p.waitForURL(/\/a\/other/);
+    await p.waitForTimeout(300);
+    const s = session.steps;
+    check("a pay-worded tile that navigates is a blocked placeholder: no selector, optional, not a final submit",
+      s.length === 1 && isMarker(s[0]) && s[0].optional === true && s[0].isFinalSubmit !== true && /^BLOCKED/.test(String(s[0].note)), show(s));
+    await ctx.close();
+  }
+  {
+    // The rule after a blocked final submit is about the recording's shape, not the confirmation's
+    // words: "No" is not a step either, and the next form entry ends it.
+    const steps: RecipeStep[] = [];
+    const sink = createRecorderSink(steps, () => undefined, { startsFresh: true });
+    sink({ kind: "fill", selector: { role: "textbox", name: "Owner name" }, value: "ZZ Test Owner", label: "Owner name" });
+    sink({ kind: "click", selector: { role: "button", name: "Submit application" }, label: "Submit application" });
+    sink({ kind: "click", selector: { role: "button", name: "No" }, label: "No" });
+    sink({ kind: "click", selector: { role: "button", name: "Submit application" }, label: "Submit application" });
+    check("after the blocked final submit: neither a \"No\" nor a second submit click adds a step or a second marker",
+      steps.length === 2 && isMarker(steps[1]) && steps[1].isFinalSubmit === true, show(steps));
+    sink({ kind: "fill", selector: { role: "textbox", name: "Project note" }, value: "ZZ note", label: "Project note" });
+    sink({ kind: "click", selector: { role: "button", name: "Next" }, label: "Next" });
+    check("the next form entry ends it: a later \"Next\" is an ordinary click again",
+      steps.length === 4 && steps[3].action === "click" && !isMarker(steps[3]), show(steps));
+    // A page cannot name a document type: only the Node-side match of the job's documents can.
+    const up: RecipeStep[] = [];
+    createRecorderSink(up, () => undefined)({ kind: "upload", selector: { css: "#x" }, label: "", fileName: "zz-drawings.pdf", fileSize: 2311, ...({ docType: "plan_set", matchedDocType: "plan_set" } as object) });
+    check("an upload names no document type unless the recorder matched the file to the job's documents", up.length === 1 && up[0].docType === "", show(up));
   }
 } finally {
   await browser.close();
