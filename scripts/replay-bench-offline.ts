@@ -155,6 +155,11 @@ function makeProject(p: SynthProject): ProjectRecord {
     moduleManufacturer: p.moduleMake, moduleModel: p.moduleModel, moduleQuantity: p.moduleQty,
     inverterManufacturer: p.inverterMake, inverterModel: p.inverterModel, inverterQuantity: p.inverterQty,
     hasBattery: "No", permitPathOverride: "prescriptive",
+    // The synthetic jobs ARE roof-mounted, and every wizard's scope-of-work answer says so. Without
+    // the parser's mounting field the product (rightly) writes no mount adjective for an unknown
+    // mount (mountAdjective), so every Accela and self-serve cell scored the description "wrong"
+    // against a sentence the job never claimed (2026-11-23: accela 18/19 on all 16 cells).
+    mounting: "Roof",
   } as never, undefined, { learningExcluded: true });
   return { ...getProjectDetail(db, detail.project.id).project, permitType: "electrical" } as ProjectRecord;
 }
@@ -199,6 +204,8 @@ interface LearnOutcome {
   validationErrors: string[];
   /** The bound steps as saved — kept so a later run can --reuse-learns them. Synthetic data only. */
   recipeSteps?: import("../shared/src/types").RecipeStep[];
+  /** The recipe row's portal URL as THIS learn saved it (see replayCell: a later learn may rewrite the row). */
+  recipePortalUrl?: string;
   /** Set when this learn was not run but taken from an earlier report. */
   reusedFrom?: string;
   /** The recipe ROW's identity as the learn created it. --reuse-learns re-creates exactly this
@@ -282,6 +289,7 @@ async function learnCell(flavor: Flavor, mutation: Mutation): Promise<LearnOutco
     out.recipeId = recipe.id;
     out.learnBase = replica.base;
     out.recipeSteps = bound.steps;
+    out.recipePortalUrl = getPortalRecipe(db, recipe.id)?.portalUrl ?? replica.entryUrl;
     const s = scoreRun(wizard, replica.state, PROJECT_A, docNames(docsA), []);
     out.learnReachedReview = s.reachedReview;
     out.fieldsCorrect = s.fieldsCorrect;
@@ -341,6 +349,8 @@ interface ReplayOutcomeRow {
   adapterDrift: string[];
   fieldVerdicts: Array<{ key: string; verdict: string; note?: string }>;
   validationErrors: string[];
+  /** The replay's own slow steps (>= 4 s) as the adapter timed them — diagnosis, NOT part of the score. */
+  slowSteps?: Array<{ i?: number; action?: string; note?: string; ms?: number; phases?: Record<string, number> }>;
   /** The cell failed on infrastructure (the browser never launched / closed before any work). */
   infrastructure?: boolean;
 }
@@ -389,7 +399,15 @@ async function replayCell(flavor: Flavor, mutation: Mutation, learned: LearnOutc
   }
   const replica = await startSyntheticReplica({ wizard, credential: { username: PROJECT_B.portalUsername, password: PROJECT_B.portalPassword } });
   try {
-    const stored = getPortalRecipe(db, learned.recipeId);
+    // THE BASE LEARN'S OWN STEPS, NOT THE ROW AS IT IS NOW. A utility recipe is one row per
+    // utility (no per-cell discipline), so with --learn-variants every later utility learn
+    // rewrote the base's row: its steps pointed at that learn's closed replica, and every
+    // PowerClerk replay ended in 0.1 s at the first goto (2026-11-23 run, 0/8). Replaying the
+    // snapshot this learn saved measures the base recipe on every variant, as the topology says.
+    const saved = getPortalRecipe(db, learned.recipeId);
+    const stored = learned.recipeSteps?.length
+      ? { ...saved, steps: learned.recipeSteps, portalUrl: learned.recipePortalUrl ?? saved.portalUrl }
+      : saved;
     // HARNESS AFFORDANCE: the recipe was recorded against the learn server's port; the
     // variant runs on its own port. Only the origin is rewritten — path and query are the
     // recipe's own, so a recipe that recorded the wrong page still goes to the wrong page.
@@ -421,6 +439,7 @@ async function replayCell(flavor: Flavor, mutation: Mutation, learned: LearnOutc
     const strs = (v: unknown) => (Array.isArray(v) ? v.map((x) => String(typeof x === "string" ? x : JSON.stringify(x)).slice(0, 200)).slice(0, 12) : []);
     row.adapterSkipped = strs(merged.skipped);
     row.adapterDrift = strs(merged.driftWarnings);
+    row.slowSteps = Array.isArray(merged.slowSteps) ? (merged.slowSteps as ReplayOutcomeRow["slowSteps"])!.slice(0, 40) : [];
     const rung = scoreReplayOutcome({ ...(merged as object), recorded: row.recorded } as never);
     row.rung = rung.rung;
     row.rungReason = rung.reason.slice(0, 160);

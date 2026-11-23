@@ -73,6 +73,7 @@ import {
   type ContactFieldKind, type ContactRole, type ContactTrack,
 } from "../../../shared/src/contactRoles";
 import { portalSaysNotServed } from "../../../shared/src/portalNotServed";
+import { ATTACHMENT_SAVE_CSS } from "../attachmentSave";
 import { computeStaleAtExit, prepareComputeSettle, waitForComputeSettled } from "../computeSettle";
 
 // AutoLearnAdapter — AUTONOMOUSLY learns an unknown AHJ/utility portal form instead of
@@ -6579,7 +6580,8 @@ export class AutoLearnAdapter extends BasePortalAdapter {
     //    control's long img alt text).
     const saveBtn = page.getByRole("link", { name: /^\s*Save\s*$/i })
       .or(page.getByRole("button", { name: /^\s*Save\s*$/i }))
-      .or(page.locator("a[id*='btnSave' i], input[type='submit'][value='Save' i], input[type='button'][value='Save' i]"))
+      // Never the action bar's "Save and resume later" (attachmentSave.ts): it also has btnSave in its id.
+      .or(page.locator(`${ATTACHMENT_SAVE_CSS}, input[type='submit'][value='Save' i], input[type='button'][value='Save' i]`))
       .first();
     // ACA keeps the Save anchor inside a container it reveals with JS only once the
     // uploads finish, and a role locator skips the hidden a11y tree — so WAIT for it
@@ -6615,7 +6617,7 @@ export class AutoLearnAdapter extends BasePortalAdapter {
         name: "Save",
         exact: true,
         fallbacks: [
-          { css: "a[id*='btnSave' i]" },
+          { css: ATTACHMENT_SAVE_CSS },
           { role: "button", name: "Save", exact: true },
         ],
       },
