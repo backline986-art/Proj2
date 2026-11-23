@@ -38,7 +38,7 @@ import {
   type FieldIdentity,
 } from "../../shared/src/portalSafety";
 import { openPortal } from "./browser";
-import { UPLOAD_LABEL_PATTERNS } from "./adapters/autoLearnAdapter";
+import { tagUploadControls, UPLOAD_LABEL_PATTERNS } from "./adapters/autoLearnAdapter";
 
 /** WHICH OF THE JOB'S DOCUMENTS A RECORDED UPLOAD SLOT TAKES, read off the slot's own label with the
  *  learner's table (autoLearnAdapter UPLOAD_LABEL_PATTERNS), so a hand recording names its documents
@@ -71,6 +71,36 @@ export interface RecordedPayload {
   reviewPage?: boolean;
   /** The page could not run the shared labeler: the click's label is UNKNOWN, so it is blocked. */
   safetyUnavailable?: boolean;
+  /** kind "clickCandidate" / "clickChanged" / "clickSettled" (#280): a click on something that is not
+   *  a control is held under this id until the page is seen to change (armRecorder). */
+  candidateId?: string;
+  /** For an upload: the slot's name as the page shows it (the learner's slot reader, painted text only). */
+  slot?: string;
+  /** For an upload: the chosen file's name and size. They cross this in-memory binding only, to be
+   *  matched against the job's own documents; neither is stored in a step or printed. */
+  fileName?: string;
+  fileSize?: number;
+}
+
+/** Is the recording's last step the blocked FINAL-SUBMIT marker (targetless, flagged)? The click that
+ *  follows it is the portal's own confirmation of that submit ("Yes", "Confirm", or its "Cancel"): it
+ *  belongs to the submit the recorder blocked, and is never a step. */
+export function followsBlockedFinalSubmit(steps: ReadonlyArray<RecipeStep>): boolean {
+  const last = steps[steps.length - 1];
+  return !!last && last.action === "click" && last.isFinalSubmit === true && !(last.selector && Object.keys(last.selector).length);
+}
+
+/** WHICH OF THE JOB'S DOCUMENTS THE PERSON CHOSE, by file name AND size (no contents are read). ""
+ *  when none matches, when the match has no type, or when two matches disagree on the type: an
+ *  unknown is asked about, never guessed. */
+export function matchJobDocument(documents: ReadonlyArray<JobDocument>, fileName: string | undefined, fileSize: number | undefined): string {
+  const base = (s: unknown): string => String(s ?? "").split(/[\\/]/).pop()!.trim().toLowerCase();
+  const want = base(fileName);
+  if (!want || typeof fileSize !== "number" || !Number.isFinite(fileSize)) return "";
+  const types = new Set(documents
+    .filter((d) => base(d.originalFilename) === want && Number(d.sizeBytes) === fileSize)
+    .map((d) => String(d.docType ?? "").trim()));
+  return types.size === 1 ? [...types][0] : "";
 }
 
 /** Has the recording entered real form data yet? The shared predicate (humanCapture asks the
@@ -96,6 +126,9 @@ export function createRecorderSink(
      *  empty recording KNOWS nothing was entered. false = it may start mid-flow (a resumed
      *  draft): until this recording enters data, formDataEntered stays UNKNOWN, never false. */
     startsFresh?: boolean;
+    /** The document type of the job's own document with this file name and size, "" when it is not
+     *  one of them (matchJobDocument). Node-side only: nothing the page sends can name a type. */
+    docTypeForFile?: (fileName: string | undefined, fileSize: number | undefined) => string;
   } = {},
 ): (payload: RecordedPayload) => void {
   // UNKNOWN BY DEFAULT, like createHumanCaptureSink: only a caller that KNOWS it opened the
@@ -108,18 +141,31 @@ export function createRecorderSink(
     // Heal tie-break metadata (attribute names only) — attached to form-control steps.
     const fp = payload.fingerprint ? { fingerprint: payload.fingerprint } : {};
     if (payload.kind === "click") {
+      // THE CLICK RIGHT AFTER THE BLOCKED FINAL SUBMIT IS THAT SUBMIT'S OWN CONFIRMATION (#280): the
+      // portal's "Yes" / "Confirm" (or its "Cancel") on the dialog the submit opened. It is not a
+      // step of any kind: recorded as a click it replayed after the review stop's marker and broke
+      // the one valid closing shape; recorded as a second marker it took the first one's place.
+      // Decided on the recording's SHAPE (the previous step is the flagged marker), never on the
+      // confirmation's wording. The marker itself is untouched; the next form entry ends this.
+      if (followsBlockedFinalSubmit(steps)) return;
+      const ctx = {
+        readOnlyPage: payload.readOnlyPage,
+        reviewPage: payload.reviewPage,
+        // The recorder opens the portal itself and sees every step from the first page, so an
+        // empty recording is KNOWN to have entered nothing (the entry disclaimer's advance is a
+        // pass-through). A review page still files: reviewPage outranks this.
+        formDataEntered: recordingHasFormData(steps) ? true : startsFresh ? false : undefined,
+      };
       // A page that could not run the shared labeler reports an UNKNOWN label: blocked, never
       // a replayable click (an empty label reads as "not submit" to every classifier).
-      const cls = payload.safetyUnavailable
-        ? "blocked"
-        : classifyRecordedClick(payload.label, {
-          readOnlyPage: payload.readOnlyPage,
-          reviewPage: payload.reviewPage,
-          // The recorder opens the portal itself and sees every step from the first page, so an
-          // empty recording is KNOWN to have entered nothing (the entry disclaimer's advance is a
-          // pass-through). A review page still files: reviewPage outranks this.
-          formDataEntered: recordingHasFormData(steps) ? true : startsFresh ? false : undefined,
-        });
+      let cls = payload.safetyUnavailable ? "blocked" : classifyRecordedClick(payload.label, ctx);
+      // The words on the control's FACE, when the capture kept them apart from its accessible name
+      // (selector.shownText), are asked the same question: the stricter answer wins.
+      const face = String((sel as RecipeSelector | undefined)?.shownText ?? "").trim();
+      if (face && cls !== "finalSubmit" && !payload.safetyUnavailable) {
+        const faceCls = classifyRecordedClick(face, ctx);
+        if (faceCls !== "capture") cls = faceCls;
+      }
       if (cls === "capture") {
         steps.push({ action: "click", selector: sel, note: payload.label });
         return;
@@ -173,8 +219,14 @@ export function createRecorderSink(
     } else if (payload.kind === "uncheck") {
       steps.push({ action: "uncheck", selector: sel, ...fp, note: payload.label });
     } else if (payload.kind === "upload") {
-      const docType = guessUploadDocType(payload.label);
-      steps.push({ action: "upload", selector: sel, docType, ...(payload.viaFileChooser ? { viaFileChooser: true } : {}),
+      // THE SLOT NAMES ITSELF AND THE FILE NAMES ITS DOCUMENT (#280). `slot` is the name the page
+      // shows for this file input (its own field: the note and the selector keep their old form).
+      // The document type is the job's own document the person chose (file name and size), else what
+      // the slot's label or name says with the learner's table; "" is asked about at save.
+      const slot = String(payload.slot ?? "").replace(/\s+/g, " ").trim().slice(0, 120);
+      const docType = String(opts.docTypeForFile?.(payload.fileName, payload.fileSize) ?? "").trim()
+        || guessUploadDocType(payload.label) || guessUploadDocType(slot);
+      steps.push({ action: "upload", selector: sel, docType, ...(slot ? { slot } : {}), ...(payload.viaFileChooser ? { viaFileChooser: true } : {}),
         note: docType ? `upload ${docType}: ${payload.label ?? ""}` : `UPLOAD — set docType (e.g. sld, site_plan) in the dashboard. ${payload.label ?? ""}` });
     }
   };
@@ -207,9 +259,24 @@ export interface JobDocument {
 }
 
 /** The job's documents (type, file name, size only: no contents). Any failure is an empty list. */
-export async function fetchJobDocuments(_api: string, _projectId: string, _headers: Record<string, string>): Promise<JobDocument[]> {
-  return [];
+export async function fetchJobDocuments(api: string, projectId: string, headers: Record<string, string>): Promise<JobDocument[]> {
+  try {
+    const res = await fetch(`${api}/api/projects/${encodeURIComponent(projectId)}/documents`, { headers });
+    if (!res.ok) return [];
+    const body = await res.json() as { documents?: unknown };
+    if (!Array.isArray(body.documents)) return [];
+    return body.documents
+      .map((d) => d as Partial<JobDocument>)
+      .filter((d) => d && typeof d.originalFilename === "string" && typeof d.docType === "string" && Number.isFinite(Number(d.sizeBytes)))
+      .map((d) => ({ docType: String(d.docType), originalFilename: String(d.originalFilename), sizeBytes: Number(d.sizeBytes) }));
+  } catch {
+    return [];
+  }
 }
+
+/** How long after a click on a non-control a NEW DOCUMENT still counts as that click's doing. The
+ *  page itself ends the wait sooner: the person's next key or pointer press settles the click. */
+const CLICK_NAVIGATION_WINDOW_MS = 30_000;
 
 export interface RecorderSessionOptions {
   bindField: (typed: string) => string | undefined;
@@ -230,19 +297,79 @@ export interface RecorderSession {
 export async function armRecorder(page: Page, opts: RecorderSessionOptions): Promise<RecorderSession> {
   const steps: RecipeStep[] = [];
   const log = opts.log ?? ((line: string) => { process.stdout.write(`${line}\n`); });
-  const sink = createRecorderSink(steps, opts.bindField, { startsFresh: opts.startsFresh });
-  await page.exposeBinding("__recordStep", (_src: unknown, payload: RecordedPayload) => {
+  const documents = opts.jobDocuments ?? [];
+  const sink = createRecorderSink(steps, opts.bindField, {
+    startsFresh: opts.startsFresh,
+    docTypeForFile: (name, size) => matchJobDocument(documents, name, size),
+  });
+  // CAPTURE ENDS AT "save" (#280): after stop() nothing is recorded and nothing is printed. Decided
+  // here in Node, so it holds for every page and frame whatever the page does.
+  let stopped = false;
+  const record = (payload: RecordedPayload): void => {
     const before = steps.length;
+    const afterBlockedSubmit = payload.kind === "click" && followsBlockedFinalSubmit(steps);
     sink(payload);
     if (steps.length > before) {
       const s = steps[steps.length - 1];
       log(`  · captured ${payload.kind}${s.isFinalSubmit ? " (FINAL SUBMIT — blocked, flagged)" : !s.selector || !Object.keys(s.selector).length ? " (blocked, not replayable)" : ""}${s.field ? ` → field ${s.field}` : ""}`);
+    } else if (afterBlockedSubmit) {
+      log("  · not recorded: that click answers the final submit blocked just before it");
     }
+  };
+  // A CLICK ON SOMETHING THAT IS NOT A CONTROL (a card, a list row, a plain block with a handler) is
+  // a step only when the page CHANGES because of it (#280). The page reports it at once as a
+  // candidate and it waits here, in its place, until one of:
+  //   - the page says its view changed (a route change, a new view rendered): recorded;
+  //   - its frame, or the main frame, navigates (a new document: the old page cannot report), or a
+  //     new tab opens: recorded;
+  //   - anything else is captured first, or the page says the person moved on: dropped. A click that
+  //     only wrote a field (a toggle, a picker) arrives as that field's own step and drops it, so
+  //     replay never does one thing twice.
+  let pending: { id: string; payload: RecordedPayload; frame: unknown; at: number } | null = null;
+  const confirmPending = (): void => {
+    if (!pending || stopped) return;
+    const held = pending;
+    pending = null;
+    if (Date.now() - held.at > CLICK_NAVIGATION_WINDOW_MS) return;
+    record({ ...held.payload, kind: "click" });
+  };
+  await page.exposeBinding("__recordStep", (src: { frame?: unknown } | undefined, payload: RecordedPayload) => {
+    if (stopped || !payload || typeof payload !== "object") return;
+    if (payload.kind === "clickCandidate") {
+      pending = { id: String(payload.candidateId ?? ""), payload, frame: src?.frame, at: Date.now() };
+      return;
+    }
+    if (payload.kind === "clickChanged") {
+      if (pending && pending.id === String(payload.candidateId ?? "")) confirmPending();
+      return;
+    }
+    if (payload.kind === "clickSettled") {
+      if (pending && pending.id === String(payload.candidateId ?? "")) pending = null;
+      return;
+    }
+    pending = null;
+    record(payload);
   });
-  // Inject the shared safety predicates, then the capture listeners, into every page/frame.
+  page.on("framenavigated", (frame) => {
+    if (pending && (frame === pending.frame || frame === page.mainFrame())) confirmPending();
+  });
+  page.on("popup", () => confirmPending());
+  // Inject the shared safety predicates, the learner's upload-slot reader (the one that names a slot
+  // by its label, its heading or its requirement row), then the capture listeners, into every
+  // page/frame. The safety source carries the __name shim the two serialized functions need.
   await page.addInitScript({ content: PORTAL_SAFETY_IN_PAGE_SOURCE });
+  await page.addInitScript({ content: `window.__recorderUploadSlots = ${tagUploadControls.toString()};` });
   await page.addInitScript(captureScript);
-  return { steps, stop: () => undefined };
+  return {
+    steps,
+    stop: () => {
+      stopped = true;
+      pending = null;
+      // Best effort, so the pages stop reporting at all; the gate above is what guarantees it.
+      for (const frame of page.frames()) void frame.evaluate("window.__recordStopped = true").catch(() => null);
+      void page.addInitScript({ content: "window.__recordStopped = true;" }).catch(() => null);
+    },
+  };
 }
 
 function argFrom(argv: readonly string[], name: string, fallback = ""): string {
@@ -444,7 +571,9 @@ export async function askUploadDocTypes(steps: RecipeStep[], asker?: (question: 
   const ask = asker ?? ((q: string) => new Promise<string>((resolve) => rl!.question(q, (a) => resolve(String(a ?? "").trim()))));
   console.log(`\n${blanks.length} upload(s) did not say which document they take. Types: ${UPLOAD_DOC_TYPE_CHOICES.join(", ")}`);
   for (const step of blanks) {
-    const where = String(step.note ?? "").replace(/^UPLOAD — set docType \(e\.g\. sld, site_plan\) in the dashboard\.\s*/, "").slice(0, 80) || "an upload slot";
+    // The slot's own name, as the page shows it, when the capture read one (#280).
+    const where = String(step.slot ?? "").trim().slice(0, 80)
+      || String(step.note ?? "").replace(/^UPLOAD — set docType \(e\.g\. sld, site_plan\) in the dashboard\.\s*/, "").slice(0, 80) || "an upload slot";
     for (let tries = 0; tries < 2; tries++) {
       const typed = (await ask(`  Which document goes in "${where}"? (Enter = decide later in the dashboard) `)).toLowerCase();
       if (!typed) break;
@@ -523,7 +652,200 @@ export function captureScript(): void {
     const ps = w.__portalSafety;
     try { return ps && typeof ps.reviewPageInPage === "function" ? ps.reviewPageInPage() : undefined; } catch { return undefined; }
   }
+  // ---- A CLICK THAT CHANGES THE PAGE IS A STEP, WHATEVER WAS CLICKED (#280) -----------------------
+  // A chooser of TILES (cards that are neither buttons nor links, with a click handler that
+  // navigates) left a hole in a hand recording: the click was dropped as "a plain page click", so
+  // the recipe went from the entry link straight to the form's "Next" and every replay looked for
+  // "Next" on the chooser. The rule has no list of element kinds: a click on anything that is not a
+  // control is REPORTED as a candidate, and it becomes a step only when the page is then seen to
+  // change — a navigation (seen from Node: this document is gone by then), a route change, or a new
+  // view in place of the one the person clicked in. A click that changes nothing is never a step.
+  const oneLine = (s: unknown): string => String(s ?? "").replace(/\s+/g, " ").trim();
+  function shown(n: Element): boolean {
+    const r = n.getBoundingClientRect();
+    const cs = getComputedStyle(n);
+    return r.width > 0 && r.height > 0 && cs.visibility !== "hidden" && cs.display !== "none";
+  }
+  // The lines a person can read in a node: innerText, which leaves out what the browser does not render.
+  function visibleLines(n: Element | null): string[] {
+    return String((n as HTMLElement | null)?.innerText ?? "").split(/\n+/).map(oneLine).filter(Boolean);
+  }
+  function isTop(n: Element | null): boolean {
+    return !n || n === document.body || n === document.documentElement;
+  }
+  // THE THING THE PERSON CLICKED: the nearest ancestor that owns the click (an onclick handler, a
+  // tab stop, an interactive role, or where a pointer cursor starts); else the nearest ancestor
+  // that is one of several alike (the card among cards, the row among rows: a delegated listener
+  // leaves no mark on the card itself); else the clicked element. Never something too big to be
+  // one choice.
+  function cardOf(el: Element): Element {
+    const fits = (n: Element): boolean => oneLine((n as HTMLElement).innerText).length <= 300;
+    let n: Element | null = el;
+    for (let d = 0; n && !isTop(n) && d < 8; d++, n = n.parentElement) {
+      const tab = n.getAttribute("tabindex");
+      const role = String(n.getAttribute("role") || "").toLowerCase();
+      const parent: Element | null = n.parentElement;
+      const pointerStarts = getComputedStyle(n).cursor === "pointer" && !(parent && getComputedStyle(parent).cursor === "pointer");
+      if (typeof (n as HTMLElement).onclick === "function" || (tab !== null && tab !== "-1") || pointerStarts
+        || /^(tab|menuitem|menuitemcheckbox|menuitemradio|treeitem|switch|checkbox|radio)$/.test(role)) return fits(n) ? n : el;
+    }
+    n = el;
+    for (let d = 0; n && !isTop(n) && d < 6; d++, n = n.parentElement) {
+      const parent: Element | null = n.parentElement;
+      const tag = n.tagName;
+      const cls = n.getAttribute("class") || "";
+      const self: Element = n;
+      if (parent && Array.from(parent.children).some((s) => s !== self && s.tagName === tag && (s.getAttribute("class") || "") === cls)) return fits(n) ? n : el;
+    }
+    return el;
+  }
+  // Name and selector of a clicked non-control. NAME: its accessible name (aria-label) first, else
+  // the text a person read on it, one line, capped. SELECTOR: one the replay can resolve — the
+  // learner's own shape for a choice tile: the TITLE text, exact (which resolves the title element;
+  // a click there reaches the card's handler), with role fallbacks. A role that takes its name from
+  // its content is recorded by role and name. The control's label and role are NOT read with the
+  // field labeler here: that one glues a card's title to its description and reads text no one sees.
+  function describeCard(card: Element): Record<string, unknown> | null {
+    const ps = w.__portalSafety;
+    const safetyUnavailable = !ps || typeof ps.controlLabelInPage !== "function" || typeof ps.controlRoleInPage !== "function";
+    const aria = oneLine(card.getAttribute("aria-label"));
+    const lines = visibleLines(card);
+    const seen = lines.join(" ");
+    const label = (aria || seen).slice(0, 120);
+    // Something a person could read: at least two letters or digits.
+    if (!/[\p{L}\p{N}][^\p{L}\p{N}]*[\p{L}\p{N}]/u.test(label)) return null;
+    const text = (n: Element): string => oneLine(n.textContent);
+    const title = lines[0] || "";
+    let target = "";
+    if (title && title.length <= 200) {
+      if ([card, ...Array.from(card.querySelectorAll("*"))].some((n) => text(n) === title && shown(n))) target = title;
+      else if (text(card) && text(card).length <= 200) target = text(card);
+    }
+    const sel: Record<string, unknown> = {};
+    const frameName = window.name || (window !== window.top ? `src:${window.location.pathname}` : "");
+    if (frameName) sel.frame = frameName;
+    const fallbacks: Record<string, unknown>[] = [];
+    const role = String(card.getAttribute("role") || "").toLowerCase();
+    if (/^(tab|menuitem|treeitem)$/.test(role)) {
+      sel.role = role; sel.name = label;
+      if (target) fallbacks.push({ text: target, exact: true });
+    } else if (target) {
+      sel.text = target; sel.exact = true;
+      // Which of the page's elements reading exactly this the click was in, when not the first.
+      const same = Array.from(document.body.querySelectorAll("*")).filter((n) => !n.closest("script, style, noscript")
+        && text(n) === target && !Array.from(n.children).some((c) => text(c) === target));
+      const at = same.findIndex((n) => card.contains(n));
+      if (at > 0) sel.nth = at;
+      fallbacks.push({ role: "link", name: target, exact: true }, { role: "button", name: target, exact: true });
+    } else if (aria) sel.label = aria;
+    else return null;
+    const id = card.getAttribute("id");
+    if (id) fallbacks.push({ css: `#${CSS.escape(id)}` });
+    if (fallbacks.length) sel.fallbacks = fallbacks;
+    // The words on its face, when its accessible name says something else: the click classifier
+    // reads both (createRecorderSink), so a pay- or submit-worded face is never a replayable click.
+    if (aria && seen && seen !== aria) sel.shownText = seen.slice(0, 120);
+    return { selector: sel, label, ...(safetyUnavailable ? { safetyUnavailable: true } : {}) };
+  }
+  function controlState(c: Element): string {
+    const i = c as HTMLInputElement;
+    return i.type === "checkbox" || i.type === "radio" ? String(i.checked) : String(i.value ?? "");
+  }
+  let endWatch: (() => void) | null = null;
+  let candidateSeq = 0;
+  function reportCandidate(el: Element): void {
+    if (endWatch) endWatch();
+    const card = cardOf(el);
+    const described = describeCard(card);
+    if (!described) return;
+    const candidateId = `${Date.now().toString(36)}-${++candidateSeq}`;
+    const href = location.href;
+    const linesBefore = new Set(visibleLines(document.body));
+    const controls = Array.from(document.querySelectorAll("input, select, textarea")).slice(0, 400);
+    const statesBefore = controls.map(controlState);
+    const controlsBefore = new Set(controls);
+    w.__recordStep({ kind: "clickCandidate", candidateId, ...described, readOnlyPage: readOnlyPage(), reviewPage: reviewPage() });
+    let done = false;
+    let debounce: ReturnType<typeof setTimeout> | undefined;
+    // changed: the page changed because of the click. settled: it did not (the person moved on, or
+    // the click wrote a field, which is that field's own step). silent: stop looking, say nothing —
+    // a slow navigation can still arrive, and Node sees that.
+    function finish(outcome: "clickChanged" | "clickSettled" | "silent"): void {
+      if (done) return;
+      done = true;
+      observer.disconnect();
+      clearInterval(poll);
+      clearTimeout(cap);
+      clearTimeout(debounce);
+      document.removeEventListener("pointerdown", onGesture, true);
+      document.removeEventListener("keydown", onGesture, true);
+      endWatch = null;
+      if (outcome !== "silent") { try { w.__recordStep({ kind: outcome, candidateId }); } catch { /* the page is going away */ } }
+    }
+    function look(): void {
+      if (done) return;
+      if (location.href !== href) { finish("clickChanged"); return; }
+      // The click wrote a field (a toggle, a date picker's day, a custom control): the field's step.
+      if (controls.some((c, i) => c.isConnected && controlState(c) !== statesBefore[i])) { finish("clickSettled"); return; }
+      // A NEW VIEW: what was clicked is gone, and either much of what the page said went with it
+      // or the page now shows a field it did not have.
+      if (card.isConnected && shown(card)) return;
+      const linesNow = new Set(visibleLines(document.body));
+      let lost = 0;
+      linesBefore.forEach((l) => { if (!linesNow.has(l)) lost++; });
+      const newField = Array.from(document.querySelectorAll("input, select, textarea"))
+        .some((c) => !controlsBefore.has(c) && (c as HTMLInputElement).type !== "hidden" && shown(c));
+      if (newField || (linesBefore.size > 0 && lost / linesBefore.size >= 0.3)) finish("clickChanged");
+    }
+    function onGesture(e: Event): void {
+      if (e.isTrusted) finish("clickSettled");
+    }
+    const observer = new MutationObserver(() => { clearTimeout(debounce); debounce = setTimeout(look, 80); });
+    observer.observe(document.documentElement, { subtree: true, childList: true, attributes: true, characterData: true });
+    const poll = setInterval(look, 300);
+    const cap = setTimeout(() => finish("silent"), 15000);
+    // The person's NEXT key or pointer press ends the wait (registered after this click is over).
+    setTimeout(() => {
+      if (done) return;
+      document.addEventListener("pointerdown", onGesture, true);
+      document.addEventListener("keydown", onGesture, true);
+    }, 0);
+    endWatch = () => finish("clickSettled");
+  }
+  // THE NAME THE PAGE SHOWS FOR A FILE INPUT (#280): the learner's own slot reader (its label, the
+  // heading it sits under, or its requirement row), kept only when the browser PAINTS that text. A
+  // label that is never rendered is not something a person read, so it is not the slot's name.
+  function paintedText(text: string, near: Element): boolean {
+    const want = oneLine(text).toLowerCase();
+    if (!want) return false;
+    const root = near.getRootNode() as Document | ShadowRoot;
+    const walker = document.createTreeWalker(root, 4 /* SHOW_TEXT */);
+    for (let t = walker.nextNode(); t; t = walker.nextNode()) {
+      const s = oneLine(t.textContent).toLowerCase();
+      if (!s || !(s.includes(want) || (want.includes(s) && s.length * 2 >= want.length))) continue;
+      const p = (t as Text).parentElement;
+      if (!p || p.closest("script, style, noscript, option")) continue;
+      const r = p.getBoundingClientRect();
+      if (r.width <= 1 || r.height <= 1) continue; // a 1px clip is a screen-reader-only label
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const cv = (p as any).checkVisibility;
+      const visible = typeof cv === "function" ? cv.call(p, { checkOpacity: true, checkVisibilityCSS: true }) === true : shown(p);
+      if (visible) return true;
+    }
+    return false;
+  }
+  function uploadSlotName(el: Element): string {
+    try {
+      if (typeof w.__recorderUploadSlots !== "function") return "";
+      const slots = w.__recorderUploadSlots() as Array<{ key: string; heading?: string }>;
+      const key = el.getAttribute("data-al-upl");
+      const slot = Array.isArray(slots) ? slots.find((s) => s && s.key === key) : undefined;
+      const name = oneLine(slot && slot.heading);
+      return name && paintedText(name, el) ? name.slice(0, 120) : "";
+    } catch { return ""; }
+  }
   document.addEventListener("click", (e) => {
+    if (w.__recordStopped) return;
     const el = target(e);
     if (!el) return;
     // Custom (non-native) dropdown: a click on an option-like element is recorded as a
@@ -573,11 +895,19 @@ export function captureScript(): void {
     }
     // Only actionable elements — plain page clicks are noise, not replayable steps.
     const actionable = el.closest('button,a,[role="button"],[role="link"],input[type="button"],input[type="submit"],input[type="image"],summary');
-    if (!actionable) return;
+    if (!actionable) {
+      // Not a control. A form field or its label is the change handler's (a click there is how a
+      // person fills it); anything else is a step only if the page changes because of it.
+      if (!el.closest('input, select, textarea, label, option, [contenteditable]:not([contenteditable="false"])')) reportCandidate(el);
+      return;
+    }
+    // A click on a control ends any wait on an earlier click; it is recorded as it always was.
+    if (endWatch) endWatch();
     if ((actionable as HTMLInputElement).type === "file") return; // handled by change
     w.__recordStep({ kind: "click", ...describe(actionable), readOnlyPage: readOnlyPage(), reviewPage: reviewPage() });
   }, true);
   document.addEventListener("change", (e) => {
+    if (w.__recordStopped) return;
     const el = target(e) as HTMLInputElement | null;
     if (!el || !(el instanceof Element)) return;
     // Payment-card fields are refused before any kind branches: no step, no value, of any kind.
@@ -587,7 +917,10 @@ export function captureScript(): void {
       // A hidden/offscreen file input belongs to a custom Browse widget — replay must
       // go through the file-chooser dialog (click + setFiles), not setInputFiles.
       const viaFileChooser = !(el as unknown as HTMLElement).offsetParent && getComputedStyle(el).position !== "fixed";
-      w.__recordStep({ kind: "upload", viaFileChooser, ...d });
+      // The slot's own name, and the chosen file's name and size (never its contents): Node matches
+      // them to the job's documents to name the document type, and stores neither.
+      const chosen = el.files && el.files.length ? el.files[0] : null;
+      w.__recordStep({ kind: "upload", viaFileChooser, ...d, slot: uploadSlotName(el), ...(chosen ? { fileName: chosen.name, fileSize: chosen.size } : {}) });
     }
     else if (el.tagName === "SELECT") {
       // Record the option's LABEL as the value (replay's selectWithFallback matches
