@@ -17,19 +17,26 @@
 //
 // The fixture is one server-rendered wizard at ONE address with ONE title and ONE page heading (the
 // site's name), every step advanced by the same "Next Step":
-//   1. Project Name                                   — its own controls; the advance works.
-//   2. Kind of Place / Search for place / Work Notes  — the FIRST Next Step is refused: the same form
-//      comes back under the notice, Work Notes still holding its value, the other two blank.
+//   1. Project Name / Project Summary                 — its own controls; the advance works.
+//   2. Kind of Place / Search for place / Work Notes  — the first TWO Next Steps are refused: the
+//      same form comes back under the notice (the same words both times, the value searched for
+//      echoed beside it), Work Notes still holding its value, the other two blank. The third works.
 //   3. Helper Name ("first helper")                   — the advance works.
 //   4. Helper Name ("second helper")                  — THE SAME FORM AS 3, and a different page: the
-//      portal says nothing, the box is blank. Its advance works.
+//      box is blank, and the only thing in the portal's alert region is the maintenance banner page
+//      3 carried too. Its advance works.
 //   5. Review, with a Submit Application that is recorded and never clicked.
 //
-// MUST-PASS: step 2 is recorded once (one select, one fill — the redo's — and one advance), Work
-// Notes is kept, and the sequence check finds nothing to object to in those steps.
-// MUST-EXCLUDE: step 1's fill and its same-label advance are untouched; steps 3 and 4 keep BOTH
-// fills and BOTH advances (the page did change: no notice, nothing dropped); the final submit is
-// still recorded, flagged, last, and was never clicked.
+// MUST-PASS: step 2 is recorded once (one select, one fill — the last redo's — and one advance),
+// Work Notes is kept, and the sequence check finds nothing to object to in those steps.
+// MUST-EXCLUDE: step 1's fills and its same-label advance are untouched; steps 3 and 4 keep BOTH
+// fills and BOTH advances (the page did change: the portal said nothing new, nothing is dropped);
+// the final submit is still recorded, flagged, last, and was never clicked.
+//
+// KILL CHECKS (each turns this file red for its own reason):
+//   K1 the learner as it was (no mark, no clean pass)       -> the MUST-PASS checks fail.
+//   K2 the mark asks for no NEW word from the portal        -> the twin pages (3, 4) lose a pass.
+//   K3 the mark forgets a form that already came back once  -> the second refusal's steps stay.
 //
 // Synthetic page, names and values. Run: npx tsx portal-bot/src/adapters/refusedAdvancePass.dom.smoke.ts
 import "../smokeArtifactDirs"; // hand-run safe: artifact dirs default to a temp folder, never data/
@@ -53,12 +60,15 @@ const check = (label: string, ok: boolean, detail = ""): void => {
 
 // ---- the portal -------------------------------------------------------------------------------
 const NOTICE = "The search value did not match a place";
+const BANNER = "Scheduled maintenance on Sunday evening.";
+const REFUSALS = 2;
 const state = {
   step: 1,
   /** Every "Next Step" the server received: the step it was pressed on, and whether it was taken. */
   nexts: [] as Array<{ step: number; taken: boolean }>,
   submits: 0,
   notes: "",
+  searched: "",
 };
 const esc = (s: string): string => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/"/g, "&quot;");
 const shell = (title: string, banner: string, body: string): string => `<!doctype html><html><head><title>${title}</title></head><body>
@@ -73,11 +83,12 @@ const TITLE = "Sample Application | Test Portal";
 const render = (refused = false): string => {
   if (state.step === 1) {
     return shell(TITLE, "", `<h3>About the work</h3>
-    <div><label for="projName">Project Name</label><input id="projName" name="projName" type="text"></div>`);
+    <div><label for="projName">Project Name</label><input id="projName" name="projName" type="text"></div>
+    <div><label for="projSummary">Project Summary</label><input id="projSummary" name="projSummary" type="text"></div>`);
   }
   if (state.step === 2) {
     return shell(refused ? `Submission Error - ${TITLE}` : TITLE,
-      refused ? `<div class="validation-summary-errors">${NOTICE}</div>` : "",
+      refused ? `<div class="validation-summary-errors">${NOTICE}</div><p>You searched for: ${esc(state.searched)}</p>` : "",
       `<h3>Place of the work</h3>
     <div><label for="placeKind">Kind of Place to Search For</label>
       <select id="placeKind" name="placeKind"><option value="">Choose one</option><option>Any</option><option>Street Address</option><option>Lot</option></select></div>
@@ -85,7 +96,7 @@ const render = (refused = false): string => {
     <div><label for="workNotes">Work Notes</label><input id="workNotes" name="workNotes" type="text" value="${esc(state.notes)}"></div>`);
   }
   if (state.step === 3 || state.step === 4) {
-    return shell(TITLE, "", `<h3>People helping with the work</h3>
+    return shell(TITLE, `<div role="alert">${BANNER}</div>`, `<h3>People helping with the work</h3>
     <p>${state.step === 3 ? "Name the first helper." : "Name the second helper, when there is one."}</p>
     <div><label for="helperName">Helper Name</label><input id="helperName" name="helperName" type="text"></div>`);
   }
@@ -107,10 +118,11 @@ const server = http.createServer((req, res) => {
     if (u.pathname === "/submit") { state.submits++; html("filed"); return; }
     const form = new URLSearchParams(raw);
     const pressedOn = state.step;
-    // THE REFUSAL: the first Next Step on step 2 comes back as the same form under the notice. The
+    // THE REFUSAL: the first Next Steps on step 2 come back as the same form under the notice. The
     // portal keeps what it could read (Work Notes) and empties the two search controls.
-    if (pressedOn === 2 && !state.nexts.some((n) => n.step === 2)) {
+    if (pressedOn === 2 && state.nexts.filter((n) => n.step === 2).length < REFUSALS) {
       state.notes = form.get("workNotes") ?? "";
+      state.searched = form.get("placeQuery") ?? "";
       state.nexts.push({ step: 2, taken: false });
       html(render(true));
       return;
@@ -125,8 +137,7 @@ const base = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
 
 // ---- the planner ------------------------------------------------------------------------------
 const norm = (s: unknown): string => String(s ?? "").replace(/\s+/g, " ").trim();
-const FIRST_QUERY = "100 Test St";
-const REDO_QUERY = "100 Test St, Testville";
+const QUERIES = ["100 Test St", "100 Test St, Testville", "100 Test St, Testville ZZ"];
 type Call = { page: string; fills: string[]; advance: string };
 const calls: Call[] = [];
 const planner: LearnPlanner = async (req: LearnPlanRequest): Promise<LearnPlanResponse> => {
@@ -141,24 +152,33 @@ const planner: LearnPlanner = async (req: LearnPlanRequest): Promise<LearnPlanRe
     const submit = at(/^submit application$/i, "button");
     return done("review", [], false, { atReview: true, ...(submit >= 0 ? { finalSubmitSelectorIndex: submit } : {}) });
   }
-  if (at(/^project name/i) >= 0) return done("about", [{ selectorIndex: at(/^project name/i), value: "Sample Project" }], true);
+  if (at(/^project name/i) >= 0) {
+    return done("about", [
+      { selectorIndex: at(/^project name/i), value: "Sample Project" },
+      { selectorIndex: at(/^project summary/i), value: "Sample roof work" },
+    ], true);
+  }
   if (at(/^kind of place/i) >= 0) {
     // As the live plan did: no advance named the first time (the walk's own finder pressed Next
     // Step); on the form that came back under the notice, both search controls again — not Work
-    // Notes, which the portal kept — and Next Step.
+    // Notes, which the portal kept. The second time it comes back the plan names Next Step itself.
     if (!req.bodyText.includes(NOTICE)) {
       return done("place", [
         { selectorIndex: at(/^kind of place/i), value: "Street Address" },
-        { selectorIndex: at(/^search for place/i), value: FIRST_QUERY },
+        { selectorIndex: at(/^search for place/i), value: QUERIES[0] },
         { selectorIndex: at(/^work notes/i), value: "Roof work" },
       ], false);
     }
-    return done("place redo", [
+    const second = req.bodyText.includes(`You searched for: ${QUERIES[1]}`);
+    return done(second ? "place redo 2" : "place redo 1", [
       { selectorIndex: at(/^kind of place/i), value: "Street Address" },
-      { selectorIndex: at(/^search for place/i), value: REDO_QUERY },
-    ], true);
+      { selectorIndex: at(/^search for place/i), value: second ? QUERIES[2] : QUERIES[1] },
+    ], second);
   }
-  if (at(/^helper name/i) >= 0) return done("helper", [{ selectorIndex: at(/^helper name/i), value: "ZZ Test Helper" }], true);
+  // No advance named on the twin pages either: the walk's own finder presses Next Step and reads the
+  // next page as moved, so both advances stay recorded and the refused-advance read is asked of
+  // page 4 exactly as it was of the place page (same form, an alert region that is not empty).
+  if (at(/^helper name/i) >= 0) return done("helper", [{ selectorIndex: at(/^helper name/i), value: "ZZ Test Helper" }], false);
   return done("unknown", [], false);
 };
 
@@ -212,20 +232,21 @@ try {
     `plans=${JSON.stringify(calls.map((c) => `${c.page}[${c.fills.join(",")}]->${c.advance}`))} steps=${JSON.stringify(lines)} ` +
     `ok=${res?.ok} reachedReview=${res?.reachedReview} stopReason=${res?.stopReason ?? "-"} message=${norm(res?.message ?? thrown).slice(0, 240)}`;
   console.log(`   ${trace}`);
-  console.log(`   events=${JSON.stringify(evTypes.filter((t) => /advance|notice|refused|recovery|stop/.test(t)))}`);
+  console.log(`   events=${JSON.stringify(evTypes.filter((t) => /advance|notice|refused|recovery|stop|validation/.test(t)))}`);
 
   // ---- preconditions: without these the checks below pass on a walk that never met the shape ----
   check(`precondition: the walk ends on its own within ${DEADLINE_S} s and reaches review`, !hung && !!res && res.reachedReview === true, trace);
-  check("precondition: the portal refused the FIRST Next Step on the place page and took the second",
-    JSON.stringify(state.nexts.filter((n) => n.step === 2)) === JSON.stringify([{ step: 2, taken: false }, { step: 2, taken: true }]), trace);
-  const firstPlans = calls.filter((c) => c.page === "place");
-  const redoPlans = calls.filter((c) => c.page === "place redo");
-  check("precondition: the place page was planned with no advance named, then again under the notice — both search controls, not Work Notes",
-    firstPlans.length >= 1 && firstPlans.every((c) => c.fills.length === 3 && c.advance === "-") &&
-    redoPlans.length >= 1 && redoPlans.every((c) => c.fills.length === 2 && c.advance === "Next Step") &&
-    calls.findIndex((c) => c.page === "place redo") > calls.findIndex((c) => c.page === "place"), trace);
-  check("precondition: the refused click was the walk's own Next Step finder, and the portal's notice was read",
-    evTypes.includes("fallback_advance") && events.some((e) => e.type === "portal_notice" && JSON.stringify(e.notices ?? "").includes(NOTICE)), `events=${JSON.stringify(evTypes)}`);
+  check(`precondition: the portal refused the first ${REFUSALS} Next Steps on the place page and took the third`,
+    JSON.stringify(state.nexts.filter((n) => n.step === 2).map((n) => n.taken)) === JSON.stringify([false, false, true]), trace);
+  const pagesPlanned = calls.map((c) => c.page).filter((p, i, all) => p !== all[i - 1]);
+  check("precondition: the place page was planned with no advance named, then twice under the notice — both search controls each time, never Work Notes",
+    JSON.stringify(pagesPlanned.filter((p) => /^place/.test(p))) === JSON.stringify(["place", "place redo 1", "place redo 2"]) &&
+    calls.filter((c) => /^place redo/.test(c.page)).every((c) => c.fills.length === 2), trace);
+  check("precondition: BOTH refused clicks were kept as steps by the walk (its own Next Step finder read the page as moved), and the notice was read",
+    events.filter((e) => e.type === "fallback_advance").length >= 2 && !evTypes.includes("fallback_advance_did_nothing") && !evTypes.includes("validation_blocked") &&
+    events.some((e) => e.type === "portal_notice" && JSON.stringify(e.notices ?? "").includes(NOTICE)), `events=${JSON.stringify(evTypes)}`);
+  check("precondition: the twin pages' alert region is not empty (a banner every page carries), and it was read",
+    events.some((e) => e.type === "portal_notice" && JSON.stringify(e.notices ?? "").includes(BANNER)), `events=${JSON.stringify(events.filter((e) => e.type === "portal_notice"))}`);
   check("precondition: every write is recorded against its control's own id (what the sequence check reads)",
     steps.filter((s) => ["fill", "select", "check"].includes(String(s.action))).every((s) => !!idOf(s)), trace);
 
@@ -234,13 +255,13 @@ try {
   const queries = steps.filter((s) => s.action === "fill" && idOf(s) === "placeQuery");
   const notes = steps.filter((s) => s.action === "fill" && idOf(s) === "workNotes");
   check("MUST-PASS: the place page's select is recorded ONCE", selects.length === 1, trace);
-  check("MUST-PASS: its search box is recorded ONCE, and it is the redo's write (the one the portal took)",
-    queries.length === 1 && String(queries[0]?.value ?? "") === REDO_QUERY, `${trace} | query values=${JSON.stringify(queries.map((q) => q.value))}`);
+  check("MUST-PASS: its search box is recorded ONCE, and it is the last redo's write (the one the portal took)",
+    queries.length === 1 && String(queries[0]?.value ?? "") === QUERIES[2], `${trace} | query values=${JSON.stringify(queries.map((q) => q.value))}`);
   check("MUST-PASS: Work Notes — written on the first attempt only, kept by the portal — is still recorded, before the redo's writes",
     notes.length === 1 && selects.length >= 1 && steps.indexOf(notes[0]) < steps.indexOf(selects[selects.length - 1]), trace);
   const EXPECTED = [
     "goto",
-    "fill#projName", "advance: Next Step",
+    "fill#projName", "fill#projSummary", "advance: Next Step",
     "fill#workNotes", "select#placeKind", "fill#placeQuery", "advance: Next Step",
     "fill#helperName", "advance: Next Step",
     "fill#helperName", "advance: Next Step",
@@ -256,13 +277,13 @@ try {
     firstHelper > 0 && objections.length === 0, `${objections.map((p) => p.detail).join(" | ")} | ${trace}`);
 
   // ---- MUST-EXCLUDE: nothing else is dropped or moved ---------------------------------------------
-  check("MUST-EXCLUDE: the page before it keeps its fill and its own same-label advance",
-    lines[0] === "goto" && lines[1] === "fill#projName" && lines[2] === "advance: Next Step", trace);
+  check("MUST-EXCLUDE: the page before it keeps its fills and its own same-label advance",
+    JSON.stringify(lines.slice(0, 4)) === JSON.stringify(EXPECTED.slice(0, 4)), trace);
   const helperFills = steps.filter((s) => s.action === "fill" && idOf(s) === "helperName");
-  check("MUST-EXCLUDE: two pages that share a form, an address and a title keep BOTH fills and BOTH advances (the page did change)",
+  check("MUST-EXCLUDE: two pages that share a form, an address, a title and a standing banner keep BOTH fills and BOTH advances (the page did change)",
     helperFills.length === 2 && helperFills.every((h) => isAdvance(steps[steps.indexOf(h) + 1] ?? ({} as RecipeStep))) &&
     JSON.stringify(state.nexts.filter((n) => n.step >= 3)) === JSON.stringify([{ step: 3, taken: true }, { step: 4, taken: true }]), trace);
-  check("MUST-EXCLUDE: every advance the portal TOOK is still a step (four pages left, four advances)",
+  check("MUST: the advances recorded are exactly the ones the portal TOOK (four pages left, four advances)",
     steps.filter(isAdvance).length === state.nexts.filter((n) => n.taken).length && state.nexts.filter((n) => n.taken).length === 4, trace);
   const finals = steps.filter((s) => s.isFinalSubmit === true);
   check("MUST-EXCLUDE: the final submit is recorded once, still flagged, last — and was never clicked",

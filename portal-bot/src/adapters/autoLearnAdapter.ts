@@ -7630,9 +7630,10 @@ export class AutoLearnAdapter extends BasePortalAdapter {
     // itself cannot spend the budget re-planning; past the cap the walk behaves as before.
     let pageMovedReplans = 0;
     const PAGE_MOVED_REPLAN_MAX = 4;
-    // The page the last iteration read (pageIdentityOf) and how many steps were recorded by then:
-    // what "the advance came back to its own form" is asked against.
-    let lastScrape: { where: string; controls: string; stepsAt: number } | null = null;
+    // The page the last iteration read (pageIdentityOf), how many steps were recorded by then, what
+    // its error summary said then (null: not read) and whether that read was itself an advance
+    // coming back refused: what "the advance came back to its own form" is asked against.
+    let lastScrape: { where: string; controls: string; stepsAt: number; said: string[] | null; cameBack: boolean } | null = null;
     // A REQUIRED BLANK STOPS THE ADVANCE (#410): pages (by identity) already given their one
     // re-plan for required fields still blank, and a per-run cap on those planner calls.
     const requiredReplanned = new Set<string>();
@@ -7890,22 +7891,30 @@ export class AutoLearnAdapter extends BasePortalAdapter {
       // the redo's writes then look for this page's controls on the next one). Known only here, on
       // the next read: the last recorded step is the advance pressed on the page the last iteration
       // read, this read is that page again (same path and heading, four in five of its controls —
-      // the #139 notion of the same form), AND the portal says something in its error summary. Two
-      // wizard steps that share a form, a path and a title are two pages: the portal says nothing
-      // there, and nothing is marked. The step is only MARKED here (steps are held by index and by
-      // identity all through the walk); learn() makes the one clean pass on every exit.
+      // the #139 notion of the same form), AND its error summary says something it did not say when
+      // the advance was pressed (or says it again, on a form that had already come back refused).
+      // Two wizard steps that share a form, a path and a title are two pages: the portal says
+      // nothing new there — a banner every page carries is not an answer — and nothing is marked.
+      // The step is only MARKED here (steps are held by index and by identity all through the
+      // walk); learn() makes the one clean pass on every exit.
       {
         const last = steps[steps.length - 1];
-        if (lastScrape && scrapedIdentity && last && steps.length > lastScrape.stepsAt && isHeldPageAdvance(last) && scrapedIdentity.where === lastScrape.where) {
+        let cameBack = false;
+        if (lastScrape && lastScrape.said && scrapedIdentity && last && steps.length > lastScrape.stepsAt && isHeldPageAdvance(last) && scrapedIdentity.where === lastScrape.where) {
           const was = lastScrape.controls.split(",").filter(Boolean);
           const now = scrapedIdentity.controls.split(",").filter(Boolean);
           const shared = now.filter((c) => was.includes(c)).length;
-          if (was.length && now.length && shared / Math.max(was.length, now.length) >= 0.8 && (await collectPortalNoticesFrom(this.page)).length > 0) {
+          if (was.length && now.length && shared / Math.max(was.length, now.length) >= 0.8) {
+            const saidBefore: string[] = lastScrape.said;
+            const says: string[] = (await collectPortalNoticesFrom(this.page)).map((n) => this.scrubSecrets(n));
+            cameBack = says.length > 0 && (lastScrape.cameBack || says.some((n) => !saidBefore.includes(n)));
+          }
+          if (cameBack) {
             this.refusedAdvanceSteps.add(last);
             this.debug?.event({ type: "advance_refused", page: pageCount, label: String(last.note ?? "").replace(/^advance:\s*/i, "").slice(0, 60) });
           }
         }
-        lastScrape = scrapedIdentity ? { ...scrapedIdentity, stepsAt: steps.length } : null;
+        lastScrape = scrapedIdentity ? { ...scrapedIdentity, stepsAt: steps.length, said: null, cameBack } : null;
       }
       const pageMovedUnderPlan = async (phase: "before the planner was asked" | "while the planner worked"): Promise<boolean> => {
         if (!scrapedIdentity || pageMovedReplans >= PAGE_MOVED_REPLAN_MAX) return false;
@@ -9081,6 +9090,8 @@ export class AutoLearnAdapter extends BasePortalAdapter {
           // Scrubbed before they are kept: a portal repeats a typed account back ("Account number …
           // could not be found"), and these leave the process (result.portalNotices, messages).
           const notices = (await collectPortalNoticesFrom(this.page)).map((n) => this.scrubSecrets(n));
+          // What this page said before anything was pressed on it (the refused-advance read above).
+          if (lastScrape) lastScrape.said = notices;
           // PSE's red Part 1 notice (#302): a change to an existing system goes on the ORIGINAL
           // record as a modification, when one exists. A person decides that — a review note, never
           // a stop.
