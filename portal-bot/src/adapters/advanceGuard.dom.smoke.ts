@@ -52,7 +52,31 @@ const PAGE = `<!doctype html><html><body>
   </script>
 </body></html>`;
 
-const server = http.createServer((_q, r) => { r.writeHead(200, { "Content-Type": "text/html" }); r.end(PAGE); });
+// CASE 3's shape (#230, live City of Boise 2026-11-15): a lookup "Search" the learner recorded as
+// "advance: Search". The click opens a results DIALOG — an iframe over the same page; the URL, the
+// heading and the page's own controls do not change — and the recipe's next step is a row in it.
+const DIALOG_PAGE = `<!doctype html><html><body>
+  <h2 id="heading">Step 2: Project Location</h2>
+  <label for="no">Street No.</label><input id="no" type="text">
+  <button id="search" type="button">Search</button>
+  <div id="dlg" style="display:none;position:fixed;top:40px;left:40px;width:600px;height:300px;background:#fff;border:1px solid #333">
+    <iframe id="ACADialogFrame" name="ACADialogFrame" style="width:580px;height:260px"></iframe>
+  </div>
+  <script>
+    document.getElementById('search').addEventListener('click', function () {
+      document.getElementById('dlg').style.display = 'block';
+      document.getElementById('ACADialogFrame').src = '/frame';
+    });
+  </script>
+</body></html>`;
+const FRAME_PAGE = `<!doctype html><html><body><h3>Address Search Result List</h3>
+  <table><tr><td><input type="radio" name="addr" id="row1"></td><td>100 TEST AVE, Boise ID 83702</td></tr></table>
+  <input type="button" value="Select"></body></html>`;
+const server = http.createServer((q, r) => {
+  const p = String(q.url ?? "/").split("?")[0];
+  r.writeHead(200, { "Content-Type": "text/html" });
+  r.end(p === "/dlg" ? DIALOG_PAGE : p === "/frame" ? FRAME_PAGE : PAGE);
+});
 await new Promise<void>((r) => server.listen(0, "127.0.0.1", () => r()));
 const port = (server.address() as { port: number }).port;
 const url = `http://127.0.0.1:${port}/`;
@@ -135,6 +159,29 @@ check("and its later steps still run", () => {
 });
 check("the next page's step filled normally", () => {
   assert.equal(v2, "Solar PV", `got ${JSON.stringify(v2)}`);
+});
+
+// CASE 3 — AN ADVANCE THAT OPENED A DIALOG HAS ADVANCED INTO IT (#230). The page's identity does
+// not move (same URL, heading and controls), so without the rule this is case 1's refusal; the
+// dialog that appeared is what the click did, and the recipe's next step lives in it.
+const dlgPage = await context.newPage();
+await dlgPage.goto(`${url}dlg`);
+const a3 = new RecipeAdapter(mkRecipe([
+  { action: "click", phase: "fill", selector: { css: "#search" }, note: "advance: Search" },
+  { action: "check", phase: "fill", selector: { css: "#row1", frame: "ACADialogFrame" }, note: "100 TEST AVE row" },
+]), {}, {}, { autoSubmit: false });
+(a3 as unknown as { page: unknown }).page = dlgPage;
+const r3 = await a3.fillApplication({} as never);
+const rowTicked = await dlgPage.frameLocator("#ACADialogFrame").locator("#row1").isChecked().catch(() => false);
+const aging3 = ((r3 as { data?: { agingNotes?: string[] } }).data?.agingNotes ?? []).join(" | ");
+check("MUST-PASS an \"advance:\" click that opened a dialog is not refused (live Boise: the second address Search)", () => {
+  assert.equal(r3.ok, true, `refused: ${String(r3.message ?? "").slice(0, 240)}`);
+});
+check("MUST-PASS ...the recipe's next step, a row in that dialog, ran", () => {
+  assert.equal(rowTicked, true, "the row inside the dialog frame was not ticked");
+});
+check("MUST-PASS ...and the run says the advance went into a dialog", () => {
+  assert.match(aging3, /opened a dialog .* advanced into it/, `aging: ${aging3.slice(0, 300)}`);
 });
 
 await browser.close();

@@ -28,7 +28,13 @@
 //      page-wide row search, which reads the site navigation as suggestions;
 //   3. let the one predicate (typeaheadMatch) choose: exactly one match is clicked; a near miss or
 //      several equal candidates pick NOTHING and come back as a question for a person;
-//   4. read the box back: empty after the pick is a NAMED failure, never a silent drop.
+//   4. read the box back: empty after the pick is a NAMED failure, never a silent drop — and so is a
+//      pick the widget's own selected value never took (#244: a hidden value the widget itself
+//      emptied when the query was typed, still empty after the pick and its blur commit). A hidden
+//      input that was empty all along is never read as the widget's selection.
+// WHICH boxes take this path is the box's own markup (typeaheadBoxSays, #244), asked by the learner
+// and the replay at their fill doors; the list is the box's own, a fresh popup, or a list that
+// appeared inside the box's own widget (an iWorQ Vue autocomplete renders it there, unnamed).
 // Never Enter but in step 0, behind the shared gate (the form's default button may file); never a
 // containment guess; the box is cleared whenever nothing was picked, so no half-typed address is
 // left for the portal to take. A box that found nothing says what the PORTAL said (noMatchSaid).
@@ -40,18 +46,24 @@
 import { PORTAL_SAFETY_GLOBAL, PORTAL_SAFETY_IN_PAGE_SOURCE } from "../../shared/src/portalSafety";
 import { FRESH_POPUP_SELECTORS, clearPopupMarks, markExistingPopups } from "./comboboxFill";
 import { withAutomationInput } from "./filingBackstop";
-import { addressQueries, chooseAddressSuggestion, chooseExactSuggestion, noMatchSaid, oneLineAddress, suggestionText, type TypeaheadSite } from "./typeaheadMatch";
+import { normalizeCompanyLabel } from "./filerIdentitySelect";
+import { addressQueries, chooseAddressSuggestion, chooseCompanySuggestion, chooseExactSuggestion, noMatchSaid, oneLineAddress, suggestionText, typeaheadBoxSays, type TypeaheadBoxFacts, type TypeaheadSite } from "./typeaheadMatch";
 
 /** What a typeahead fill did. Only "picked" wrote a value the portal kept. `via: "enter"` — the
  *  portal selected it on Enter and shows it OUTSIDE the box (`held` is that shown text); the search
  *  box itself may be empty afterwards, and a read-back of the box must not call that a miss. */
 export type TypeaheadOutcome =
-  | { outcome: "picked"; picked: string; held: string; typed: string; why: string; via?: "list" | "enter" }
+  | { outcome: "picked"; picked: string; held: string; typed: string; why: string; via?: "list" | "enter" | "search" }
   /** A near miss or several equal candidates: nothing picked, the box cleared; ask `question`. */
   | { outcome: "ask"; question: string; offered: string[]; typed: string; why: string }
   /** `portalSaid`: the portal's own no-match words, when it printed any. */
-  | { outcome: "no_suggestions"; why: string; typed: string[]; portalSaid?: string }
-  | { outcome: "no_match"; why: string; offered: string[]; typed: string; portalSaid?: string }
+  | { outcome: "no_suggestions"; why: string; typed: string[]; portalSaid?: string;
+      /** `portalSaid` appeared AFTER the typing (it was not on screen before): the portal's answer to
+       *  this search, not static copy or another box's leftover panel. Only such an answer is
+       *  remembered as "already answered" (typeaheadPortalAnswered). */
+      portalSaidFresh?: true }
+  /** `listChanged`: the list re-rendered between the read and the click — not the portal's answer. */
+  | { outcome: "no_match"; why: string; offered: string[]; typed: string; portalSaid?: string; listChanged?: true }
   /** A suggestion was clicked and the box does not hold it. */
   | { outcome: "not_held"; why: string; picked: string }
   /** The box cannot be typed into (hidden, read-only, disabled) or there is nothing to type. */
@@ -61,8 +73,9 @@ export interface TypeaheadRequest {
   /** The value to enter (the planner's / the recipe's resolved value). */
   value: string;
   /** typeaheadMatch.typeaheadMatchMode: "site" (the job's own address: city/ZIP checked where a
-   *  suggestion shows them), "address" (another street address), "exact" (any other lookup). */
-  mode: "site" | "address" | "exact";
+   *  suggestion shows them), "address" (another street address), "company" (the submitting company,
+   *  chooseCompanySuggestion), "exact" (any other lookup). */
+  mode: "site" | "address" | "exact" | "company";
   /** The job's address for "site" (street, city, ZIP); for "address" only `street` is read. */
   site?: TypeaheadSite;
   /** #139 fix round — THE ENTER DOOR the caller's recorded Enter goes through: "" = Enter may be
@@ -70,6 +83,10 @@ export interface TypeaheadRequest {
    *  replay passes its guardAction (the full click gate on the form's default button, then the shared
    *  enterRefusalInPage); without one, the shared enterRefusalInPage alone. */
   enterGate?: (loc: any) => Promise<string>;
+  /** #198 — THE CLICK DOOR for the box's own search control: "" = it may be clicked, else the
+   *  refusal. The replay passes its guardAction (the full click gate); without one, the control's
+   *  own in-page checks (never a submitter, never submit- or pay-worded) are the gate. */
+  clickGate?: (loc: any) => Promise<string>;
   /** How long one query waits for its suggestions to settle. Default 5 s. */
   suggestWaitMs?: number;
   /** The whole fill's deadline, every query included. Default 30 s — far inside the walk's stall
@@ -77,6 +94,15 @@ export interface TypeaheadRequest {
   budgetMs?: number;
 }
 
+/** How long the box's own search is given to show its result rows (#198, Tigard): a geocode is a
+ *  network round trip. Bounded, and never past the fill's deadline. */
+const SEARCH_RESULT_WAIT_MS = 10_000;
+/** The budget the SEARCH PHASE adds to the fill's deadline when it begins (#198, Tigard): each query
+ *  pressed on the box's own search costs a selection read (6 s), the row wait above and a settle,
+ *  and two queries are tried. Charged against the suggestion budget, the first query's empty search
+ *  left the second one no turn at all (typeaheadFill smoke, the "one" shape). The whole fill stays
+ *  bounded: suggestions, then this. */
+const SEARCH_PHASE_BUDGET_MS = 40_000;
 const SUGGEST_WAIT_DEFAULT_MS = 5_000;
 const TYPEAHEAD_BUDGET_DEFAULT_MS = 30_000;
 const NAME_SHIM = "globalThis.__name = globalThis.__name || function (f) { return f; };";
@@ -84,10 +110,172 @@ const NAME_SHIM = "globalThis.__name = globalThis.__name || function (f) { retur
 const loose = (s: string): string => String(s ?? "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
 
 /**
+ * Runs IN THE PAGE (#244). What the box's own markup says about it, for typeaheadBoxSays: its role,
+ * aria-autocomplete, id, aria-label and class, and the classes of ITS OWN WIDGET — its ancestors up
+ * to the highest one that holds no other text-entry control (at most four levels, never past a
+ * <form>): the iWorQ box sits in div.input-group > div.autocomplete-template > its section, and the
+ * row above that holds the contractor box. With `mark`, the box (data-al-ta-box) and that widget
+ * (data-al-ta-widget) are marked for the fill's list and selected-value reads. No nested functions
+ * (esbuild keepNames → __name).
+ */
+export function typeaheadBoxFactsInPage(el: Element, mark: boolean): TypeaheadBoxFacts {
+  if (mark) {
+    const old = document.querySelectorAll("[data-al-ta-widget], [data-al-ta-box], [data-al-ta-pre]");
+    for (let i = 0; i < old.length; i++) {
+      old[i].removeAttribute("data-al-ta-widget");
+      old[i].removeAttribute("data-al-ta-box");
+      old[i].removeAttribute("data-al-ta-pre");
+    }
+  }
+  const box = el as HTMLInputElement;
+  const type = String(el.getAttribute("type") || "text").toLowerCase();
+  const textBox = el.tagName === "INPUT" && (type === "text" || type === "search");
+  const editable = !box.readOnly && !box.disabled && el.getAttribute("aria-readonly") !== "true" && el.getAttribute("aria-disabled") !== "true";
+  const ENTRY = 'input:not([type=hidden]):not([type=submit]):not([type=button]):not([type=reset]):not([type=image]):not([type=checkbox]):not([type=radio]):not([type=file]), select, textarea, [contenteditable="true"], [contenteditable=""]';
+  const widgetClasses: string[] = [];
+  let widget: Element | null = null;
+  let p: Element | null = el.parentElement;
+  for (let depth = 0; depth < 4 && p && p !== document.body && p !== document.documentElement && p.tagName !== "FORM"; depth++) {
+    const entries = p.querySelectorAll(ENTRY);
+    let other = false;
+    for (let i = 0; i < entries.length; i++) {
+      if (entries[i] !== el) { other = true; break; }
+    }
+    if (other) break;
+    widget = p;
+    widgetClasses.push(String(p.getAttribute("class") || "").slice(0, 300));
+    p = p.parentElement;
+  }
+  if (mark) {
+    el.setAttribute("data-al-ta-box", "1");
+    if (widget) widget.setAttribute("data-al-ta-widget", "1");
+  }
+  return {
+    textBox,
+    editable,
+    role: String(el.getAttribute("role") || ""),
+    ariaAutocomplete: String(el.getAttribute("aria-autocomplete") || ""),
+    className: String(el.getAttribute("class") || "").slice(0, 300),
+    id: String(el.getAttribute("id") || "").slice(0, 120),
+    ariaLabel: String(el.getAttribute("aria-label") || "").slice(0, 200),
+    widgetClasses,
+  };
+}
+
+/**
+ * Runs IN THE PAGE (#244). Stamp what is on screen inside the box's widget (data-al-ta-pre) before a
+ * query is typed, so a list that appears there afterwards is told from what was already showing — a
+ * Vue list kept in the DOM while hidden (v-show) counts as new when it shows. No nested functions.
+ */
+export function stampTypeaheadWidgetInPage(): void {
+  const old = document.querySelectorAll("[data-al-ta-pre]");
+  for (let i = 0; i < old.length; i++) old[i].removeAttribute("data-al-ta-pre");
+  const widget = document.querySelector("[data-al-ta-widget]");
+  if (!widget) return;
+  const all = widget.querySelectorAll("*");
+  for (let i = 0; i < all.length; i++) {
+    const n = all[i] as HTMLElement;
+    const r = n.getBoundingClientRect();
+    if (r.width <= 0 || r.height <= 0) continue;
+    const s = getComputedStyle(n);
+    if (s.visibility === "hidden" || s.display === "none") continue;
+    n.setAttribute("data-al-ta-pre", "1");
+  }
+}
+
+/** #244 fix round — the mark on a hidden input a fill has SEEN its widget empty when a query was typed:
+ *  the widget's own selection, remembered for this document (a later fill of the same box starts
+ *  from an empty value, because the first one's typing or clear emptied it). */
+export const TYPEAHEAD_OWNED_ATTR = "data-al-ta-owned";
+
+/**
+ * Runs IN THE PAGE (#244). The hidden inputs inside the box's widget, in order, each keyed by its
+ * name (or id) and its ordinal among inputs of that name, so two reads are compared input by input,
+ * with whether an earlier fill marked it the widget's own (TYPEAHEAD_OWNED_ATTR). Which of them is
+ * the widget's SELECTED value is decided by the caller (selectionInputsToWatch), never by being
+ * hidden and nearby. No nested functions.
+ */
+export function typeaheadWidgetHiddenInPage(): Array<{ key: string; name: string; value: string; owned: boolean }> {
+  const out: Array<{ key: string; name: string; value: string; owned: boolean }> = [];
+  const widget = document.querySelector("[data-al-ta-widget]");
+  if (!widget) return out;
+  const hidden = widget.querySelectorAll('input[type="hidden"]');
+  const seen: Record<string, number> = {};
+  for (let i = 0; i < hidden.length; i++) {
+    const h = hidden[i] as HTMLInputElement;
+    const name = String(h.getAttribute("name") || h.getAttribute("id") || "").slice(0, 60);
+    seen[name] = (seen[name] ?? 0) + 1;
+    out.push({ key: `${name}#${seen[name]}`, name, value: String(h.value ?? ""), owned: h.getAttribute("data-al-ta-owned") === "1" });
+  }
+  return out;
+}
+
+/** Runs IN THE PAGE (#244 fix round). Mark the widget's hidden inputs named by `keys` (as keyed by
+ *  typeaheadWidgetHiddenInPage) as its own selection. No nested functions. */
+export function markOwnedHiddenInPage(keys: string[]): void {
+  const widget = document.querySelector("[data-al-ta-widget]");
+  if (!widget || !Array.isArray(keys) || !keys.length) return;
+  const hidden = widget.querySelectorAll('input[type="hidden"]');
+  const seen: Record<string, number> = {};
+  for (let i = 0; i < hidden.length; i++) {
+    const h = hidden[i];
+    const name = String(h.getAttribute("name") || h.getAttribute("id") || "").slice(0, 60);
+    seen[name] = (seen[name] ?? 0) + 1;
+    if (keys.indexOf(`${name}#${seen[name]}`) >= 0) h.setAttribute("data-al-ta-owned", "1");
+  }
+}
+
+/** THE WIDGET'S OWN SELECTED VALUE, BY WHAT IT DID (#244 fix round): the hidden inputs in the box's
+ *  widget that are EMPTY once the query is typed and that the widget demonstrably owns — it emptied
+ *  them itself (a value before anything was typed, none after), or an earlier fill in this document
+ *  saw it do so (TYPEAHEAD_OWNED_ATTR: that fill's typing or clear is why this one starts empty). A
+ *  pick must write one of them again. A hidden input that was empty all along proves nothing about
+ *  ownership and is never watched: an unrelated empty ClientState beside the box (Accela's shape)
+ *  and a widget that writes its id only on change/blur both failed correct picks when every empty
+ *  hidden input in the widget was watched (review of 5eb51ad3, shapes S1 and S2). */
+export function selectionInputsToWatch(
+  atRest: ReadonlyArray<{ key: string; value: string }> | null | undefined,
+  typed: ReadonlyArray<{ key: string; name: string; value: string; owned?: boolean }> | null | undefined,
+): Array<{ key: string; name: string }> {
+  const rest = new Map((Array.isArray(atRest) ? atRest : []).map((h) => [h.key, String(h.value ?? "")]));
+  return (Array.isArray(typed) ? typed : [])
+    .filter((h) => String(h.value ?? "") === "" && (!!rest.get(h.key) || h.owned === true))
+    .map((h) => ({ key: h.key, name: h.name }));
+}
+
+/** Did the pick write the widget's selection again? Any watched input holding a value again is a
+ *  yes; one that is gone (the widget re-rendered) is no opinion, so a yes; none watched is a yes. */
+export function selectionRewritten(
+  watched: ReadonlyArray<{ key: string }>,
+  after: ReadonlyArray<{ key: string; value: string }> | null | undefined,
+): boolean {
+  if (!watched.length) return true;
+  const now = new Map((Array.isArray(after) ? after : []).map((h) => [h.key, String(h.value ?? "")]));
+  return watched.some((w) => !now.has(w.key) || now.get(w.key) !== "");
+}
+
+/** THE BOX'S OWN MARKUP, JUDGED (#244): the reason it is a search-as-you-type box, "" when it is not
+ *  or cannot be read. One read, bounded; the learner's, the replay's and the gap-fill's fill doors
+ *  all ask it. Never throws (a stub locator's evaluate may not even return a promise). */
+export async function typeaheadBoxReason(loc: any): Promise<string> {
+  if (!loc || typeof loc.evaluate !== "function") return "";
+  try {
+    const facts = await loc.evaluate(typeaheadBoxFactsInPage, false, { timeout: 1500 });
+    return typeaheadBoxSays(facts as TypeaheadBoxFacts | null);
+  } catch {
+    return "";
+  }
+}
+
+/**
  * Runs IN THE PAGE. The visible suggestion rows of the box's list, in order, each marked
  * data-al-sugg="<its index>" so the row that was read is the row that is clicked. The list is the
  * one the box names (aria-controls / aria-owns), else the last list that was not on screen before
- * typing (comboboxFill's fresh-popup stamp). No nested functions (esbuild keepNames → __name).
+ * typing (comboboxFill's fresh-popup stamp), else (#244) a list that appeared INSIDE the box's own
+ * widget since the query was typed (data-al-ta-widget / data-al-ta-pre) — an iWorQ Vue autocomplete
+ * renders its results there with no role and no menu/option class, so neither reading above saw
+ * them (City of Star, live 2026-11-15: the panel spans the widget's column, not the box). No nested
+ * functions (esbuild keepNames → __name).
  */
 export function readSuggestionsInPage(args: { controlsId: string; fresh: string }): string[] {
   const out: string[] = [];
@@ -104,13 +292,41 @@ export function readSuggestionsInPage(args: { controlsId: string; fresh: string 
     const fresh = Array.from(document.querySelectorAll(args.fresh));
     for (let i = fresh.length - 1; i >= 0; i--) lists.push(fresh[i]);
   }
+  // #244 — read only when nothing above had rows: the outermost lists inside the box's widget that
+  // were not on screen before typing (and do not hold the box), then, as a last reading, the widget
+  // itself, whose rows are only the option / li elements that appeared since typing.
+  const widget = document.querySelector("[data-al-ta-widget]");
+  const boxEl = document.querySelector("[data-al-ta-box]");
+  if (widget) {
+    const found = widget.querySelectorAll('[role="listbox"], [role="list"], ul, ol');
+    const own: Element[] = [];
+    for (let i = 0; i < found.length; i++) {
+      const l = found[i];
+      if (l.hasAttribute("data-al-ta-pre") || (boxEl && l.contains(boxEl))) continue;
+      let inner = false;
+      for (let j = 0; j < own.length; j++) {
+        if (own[j].contains(l)) { inner = true; break; }
+      }
+      if (!inner) own.push(l);
+    }
+    for (let i = 0; i < own.length; i++) lists.push(own[i]);
+    lists.push(widget);
+  }
   for (const list of lists) {
     const lr = (list as HTMLElement).getBoundingClientRect();
     const ls = getComputedStyle(list as HTMLElement);
     if (lr.width <= 0 || lr.height <= 0 || ls.visibility === "hidden" || ls.display === "none") continue;
-    let rows: Element[] = Array.from(list.querySelectorAll('[role="option"]'));
-    if (!rows.length) rows = Array.from(list.querySelectorAll("li"));
-    if (!rows.length) rows = Array.from(list.children);
+    let rows: Element[] = [];
+    if (list === widget) {
+      const cand = widget.querySelectorAll('[role="option"], li');
+      for (let i = 0; i < cand.length; i++) {
+        if (!cand[i].hasAttribute("data-al-ta-pre") && !(boxEl && cand[i].contains(boxEl))) rows.push(cand[i]);
+      }
+    } else {
+      rows = Array.from(list.querySelectorAll('[role="option"]'));
+      if (!rows.length) rows = Array.from(list.querySelectorAll("li"));
+      if (!rows.length) rows = Array.from(list.children);
+    }
     for (const row of rows) {
       const r = (row as HTMLElement).getBoundingClientRect();
       const s = getComputedStyle(row as HTMLElement);
@@ -212,12 +428,19 @@ async function readShows(doc: any): Promise<{ shown: string[]; notes: string[] }
   return r && Array.isArray(r.shown) && Array.isArray(r.notes) ? r : null;
 }
 
-/** The first no-match sentence in `after` that was not on screen in `before`, else the first one
- *  at all ("" when none). */
-function freshNoMatch(before: string[] | null | undefined, after: string[] | null | undefined): string {
+/** The no-match sentence in `after` that was not on screen in `before`, else one at all ("" when
+ *  none) — THE SHORTEST, so it is the portal's own words and not a container that holds them (#244:
+ *  the quote read "* Property Information No results match your search * Contractor(s) Contractors
+ *  with expired licenses…", the whole row of an iWorQ form, which also named the other box). */
+function freshNoMatch(before: string[] | null | undefined, after: string[] | null | undefined, freshOnly = false): string {
   const old = new Set(before ?? []);
   const said = (after ?? []).map(noMatchSaid).filter(Boolean);
-  return said.find((t) => !old.has(t)) ?? said[0] ?? "";
+  const shortest = (list: string[]): string => list.reduce((a, b) => (b.length < a.length ? b : a), list[0] ?? "");
+  // `freshOnly`: only a sentence that was NOT on screen before the typing. The fallback (a sentence
+  // that was already there — static help copy "Address not found? Call the permit desk.", another
+  // box's leftover panel) is still worth quoting, but it is not the portal's answer to THIS search
+  // (review of d1c7acd1): a caller that remembers "already answered" must not remember it.
+  return shortest(said.filter((t) => !old.has(t))) || (freshOnly ? "" : shortest(said));
 }
 
 /** THE SHARED ENTER QUESTION (hard rule 1), asked of this box in its own document: "" = Enter may be
@@ -232,6 +455,186 @@ async function enterRefusal(doc: any, loc: any): Promise<string> {
 }
 
 /**
+ * Runs IN THE PAGE (#198, Tigard's results panel). The TICKABLE RESULT ROWS a search brought: visible
+ * checkboxes that were not on the page before the search (data-al-oldcb), each read by the nearest
+ * ancestor (≤4 levels) whose text is a short line holding a digit. "Select All" is never a row. Stamps
+ * each row's checkbox data-al-tsr=<index>; returns the texts in order. No nested functions.
+ */
+export function searchResultRowsInPage(): string[] {
+  document.querySelectorAll("[data-al-tsr]").forEach((n) => n.removeAttribute("data-al-tsr"));
+  const out: string[] = [];
+  const boxes = document.querySelectorAll('input[type=checkbox]:not([data-al-oldcb]), [role=checkbox]:not([data-al-oldcb])');
+  for (let i = 0; i < boxes.length && out.length < 25; i++) {
+    const cb = boxes[i] as HTMLElement;
+    let node: HTMLElement | null = cb.parentElement;
+    let text = "";
+    let row: HTMLElement | null = null;
+    for (let up = 0; up < 4 && node && node !== document.body; up++, node = node.parentElement) {
+      const t = String(node.innerText || "").replace(/\s+/g, " ").trim();
+      if (t.length >= 5 && t.length <= 300 && /\d/.test(t)) { text = t; row = node; break; }
+      if (t.length > 300) break;
+    }
+    if (!text || !row || /^select\s+all\b/i.test(text)) continue;
+    const r = row.getBoundingClientRect();
+    const cs = getComputedStyle(row);
+    if (r.width <= 0 || r.height <= 0 || cs.visibility === "hidden" || cs.display === "none") continue;
+    cb.setAttribute("data-al-tsr", String(out.length));
+    out.push(text);
+  }
+  return out;
+}
+
+/**
+ * Runs IN THE PAGE, on a ticked result row's checkbox (#198). THE PANEL'S OWN "ADD": searching the
+ * row's ancestors outward (≤6 levels, never <body>), the first level holding any visible control whose
+ * whole label reads add / add selected / add location / select / use selected — exactly one there, or
+ * nothing. Never submit- or pay-worded by the shared predicates. Stamps data-al-tsadd="1".
+ */
+export function resultPanelAddInPage(cb: Element, g: string): string {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const ps = (globalThis as any)[g];
+  document.querySelectorAll("[data-al-tsadd]").forEach((n) => n.removeAttribute("data-al-tsadd"));
+  const WORDS = /^\+?\s*(?:add(?:\s+(?:selected|location|address|parcel|to\s+application))?|select(?:ed)?|use\s+selected)$/i;
+  let node: Element | null = cb.parentElement;
+  for (let level = 0; level < 6 && node && node !== document.body && node !== document.documentElement; level++, node = node.parentElement) {
+    const found = node.querySelectorAll("button, input[type=button], [role=button], a");
+    const fit: HTMLElement[] = [];
+    const labels: string[] = [];
+    for (let i = 0; i < found.length; i++) {
+      const c = found[i] as HTMLElement;
+      const r = c.getBoundingClientRect();
+      const cs = getComputedStyle(c);
+      if (r.width <= 0 || r.height <= 0 || cs.visibility === "hidden" || cs.display === "none") continue;
+      const text = String(c.innerText || (c as HTMLInputElement).value || c.getAttribute("aria-label") || c.getAttribute("title") || "").replace(/\s+/g, " ").trim();
+      if (!text || !WORDS.test(text)) continue;
+      if (ps && ((typeof ps.isSubmitIntent === "function" && ps.isSubmitIntent(text, null)) || (typeof ps.isPayFee === "function" && ps.isPayFee(text)))) continue;
+      fit.push(c);
+      labels.push(text);
+    }
+    if (fit.length > 1) return "";
+    if (fit.length === 1) { fit[0].setAttribute("data-al-tsadd", "1"); return labels[0]; }
+  }
+  return "";
+}
+
+/** #198 — after the box's own search: tick the ONE result row that is the job's address and press the
+ *  results panel's own "Add", then confirm the page now shows the address outside the search box.
+ *  "none" when the search brought no tickable rows (the caller reads the page the other ways). */
+async function searchResultTickAndAdd(
+  page: any, doc: any, loc: any, site: TypeaheadSite, req: TypeaheadRequest, deadline: number,
+): Promise<{ kind: "none" } | { kind: "picked"; text: string; why: string; add: string } | { kind: "ask"; question: string; offered: string[]; why: string } | { kind: "failed"; text: string; why: string }> {
+  let texts: string[] = [];
+  // THE SEARCH IS A NETWORK ROUND TRIP, SO THE ROWS ARE WAITED FOR BY TIME, NOT BY A FEW LOOKS.
+  // Live City of Tigard (EnerGov, 2026-11-15): the Esri geocode answers in a few seconds; six looks
+  // 400 ms apart read "no rows" where the learn, with more time already spent on the box, had ticked
+  // one. Up to SEARCH_RESULT_WAIT_MS, never past the fill's deadline (which the search phase extends
+  // for itself in fillTypeahead, so this never starves a later read).
+  const rowsUntil = Math.min(Date.now() + SEARCH_RESULT_WAIT_MS, deadline);
+  while (Date.now() < rowsUntil) {
+    await doc.evaluate(NAME_SHIM).catch(() => null);
+    const read = await doc.evaluate(searchResultRowsInPage).catch(() => [] as string[]);
+    texts = Array.isArray(read) ? read.map((t: unknown) => String(t ?? "")) : [];
+    if (texts.length) break;
+    // THE SEARCH MAY ANSWER WITH SUGGESTIONS INSTEAD OF ROWS (the typeaheadFill smoke's "one" shape,
+    // an Esri source that lists its hits as options): an address-like option (a digit in it — the
+    // row rule) means the search has answered, and the caller reads those options as before. The
+    // widget's standing "Use current location" option carries no digit and is not an answer.
+    const answered = await doc.evaluate(() => Array.from(document.querySelectorAll("[role='option']")).filter((o) => /\d/.test((o as HTMLElement).textContent || "")).length).catch(() => 0);
+    if (Number(answered) > 0) break;
+    await page.waitForTimeout?.(400).catch(() => null);
+  }
+  if (!texts.length) return { kind: "none" };
+  const choice = chooseAddressSuggestion(texts, site);
+  if (choice.kind === "ask") return { kind: "ask", question: choice.question, offered: texts, why: choice.why };
+  if (choice.kind !== "pick") return { kind: "none" };
+  const cb = doc.locator(`[data-al-tsr="${choice.index}"]`).first();
+  const ticked = await withAutomationInput(page, () => cb.click({ timeout: 3000 })).then(() => true)
+    .catch(() => withAutomationInput(page, () => cb.click({ timeout: 3000, force: true })).then(() => true).catch(() => false));
+  if (!ticked) return { kind: "failed", text: choice.text, why: `"${choice.text}" was found in the search results but its checkbox could not be ticked` };
+  // The panel's "Add" appears once a row is ticked: look for it near the row, briefly.
+  let addLabel = "";
+  for (let i = 0; i < 6 && !addLabel && Date.now() < deadline; i++) {
+    await page.waitForTimeout?.(400).catch(() => null);
+    await doc.evaluate(PORTAL_SAFETY_IN_PAGE_SOURCE).catch(() => null);
+    addLabel = String(await cb.evaluate(resultPanelAddInPage, PORTAL_SAFETY_GLOBAL).catch(() => "") ?? "");
+  }
+  if (!addLabel) return { kind: "failed", text: choice.text, why: `ticked "${choice.text}" in the search results and the panel offered no single "Add" to put it on the application` };
+  const add = doc.locator('[data-al-tsadd="1"]').first();
+  const addRefused = req.clickGate
+    ? String(await req.clickGate(add).catch((e: unknown) => `the click gate could not answer (${String((e as Error)?.message ?? e).slice(0, 80)})`) ?? "")
+    : "";
+  if (addRefused) return { kind: "failed", text: choice.text, why: `ticked "${choice.text}" but the panel's "${addLabel}" was refused: ${addRefused.slice(0, 120)}` };
+  const urlBefore = typeof page.url === "function" ? page.url() : "";
+  const added = await withAutomationInput(page, () => add.click({ timeout: 4000 })).then(() => true).catch(() => false);
+  if (!added) return { kind: "failed", text: choice.text, why: `ticked "${choice.text}" and the panel's "${addLabel}" could not be pressed` };
+  // CONFIRMED BY THE PAGE: the results panel's Add is gone (or the page moved) and the job's address
+  // is now shown on the page outside any input — the application's location card.
+  const house = (String(site.street ?? "").match(/^\s*(\d+[A-Za-z]?)\b/) ?? [])[1] ?? "";
+  for (let i = 0; i < 15 && Date.now() < deadline + 5000; i++) {
+    await page.waitForTimeout?.(400).catch(() => null);
+    const gone = !(await add.isVisible().catch(() => false)) || (typeof page.url === "function" && page.url() !== urlBefore);
+    if (!gone) continue;
+    const shows = house ? await doc.evaluate((h: string) => {
+      const body = String((document.body && (document.body as HTMLElement).innerText) || "");
+      return new RegExp(`(^|[^0-9])${h}([^0-9]|$)`).test(body);
+    }, house).catch(() => false) : true;
+    if (shows) return { kind: "picked", text: choice.text, why: choice.why, add: addLabel };
+  }
+  return { kind: "failed", text: choice.text, why: `ticked "${choice.text}" and pressed the panel's "${addLabel}", and the page did not then show the address` };
+}
+
+/**
+ * Runs IN THE PAGE, on the box (#198). THE BOX'S OWN SEARCH CONTROL: searching the box's ancestors
+ * outward, at most three levels and never <body>, the first level holding any qualifying control —
+ * and exactly ONE there, or nothing. A control qualifies when its whole short label reads as a search
+ * ("Search", "Find", "Go", "Look up", "Search address") or, wordless, it is drawn as a magnifier (its
+ * own or a child's class / icon name says search or magnif). Never a submitter (a submit / image
+ * input, a button that submits its form: the box's form may be the application), never submit- or
+ * pay-worded by the shared predicates. Stamps it data-al-tsb="1"; returns its label ("search" when
+ * wordless), or "". No nested functions (esbuild keepNames → __name).
+ */
+export function ownSearchControlInPage(box: Element, g: string): string {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const ps = (globalThis as any)[g];
+  document.querySelectorAll("[data-al-tsb]").forEach((n) => n.removeAttribute("data-al-tsb"));
+  const WORDS = /^(?:search|find|go|look\s?-?up|search\s+(?:address(?:es)?|location|parcels?)|find\s+(?:address|location|parcel))$/i;
+  let node: Element | null = box.parentElement;
+  for (let level = 0; level < 3 && node && node !== document.body && node !== document.documentElement; level++, node = node.parentElement) {
+    const found = node.querySelectorAll("button, input[type=button], input[type=submit], input[type=image], [role=button]");
+    const fit: HTMLElement[] = [];
+    const labels: string[] = [];
+    for (let i = 0; i < found.length; i++) {
+      const c = found[i] as HTMLElement;
+      const r = c.getBoundingClientRect();
+      const cs = getComputedStyle(c);
+      if (r.width <= 0 || r.height <= 0 || cs.visibility === "hidden" || cs.display === "none") continue;
+      const type = String(c.getAttribute("type") || "").toLowerCase();
+      const inForm = !!(c as HTMLButtonElement).form;
+      if ((c.tagName === "INPUT" && (type === "submit" || type === "image")) || (c.tagName === "BUTTON" && inForm && (type === "" || type === "submit"))) continue;
+      const text = String(c.innerText || (c as HTMLInputElement).value || c.getAttribute("aria-label") || c.getAttribute("title") || "")
+        .replace(/\s+/g, " ").trim();
+      if (ps && ((typeof ps.isSubmitIntent === "function" && ps.isSubmitIntent(text, null)) || (typeof ps.isPayFee === "function" && ps.isPayFee(text)))) continue;
+      let worded = !!text && text.length <= 30 && WORDS.test(text);
+      if (!text) {
+        const drawn = [String(c.className || ""), c.getAttribute("data-icon") || ""];
+        const kids = c.querySelectorAll("svg, i, span, img");
+        for (let k = 0; k < kids.length && k < 6; k++) {
+          const kid = kids[k] as Element;
+          drawn.push(String(kid.getAttribute("class") || ""), kid.getAttribute("data-icon") || "", kid.getAttribute("alt") || "");
+        }
+        worded = /search|magnif/i.test(drawn.join(" "));
+      }
+      if (!worded) continue;
+      fit.push(c);
+      labels.push(text || "search");
+    }
+    if (fit.length > 1) return "";
+    if (fit.length === 1) { fit[0].setAttribute("data-al-tsb", "1"); return labels[0]; }
+  }
+  return "";
+}
+
+/**
  * Press Enter in the box (the whole one-line address is in it) and read what the portal selected:
  * the texts that appeared on the page (pageShowsInPage `shown`, before vs after) judged by the ONE
  * address predicate. A postback reloads the document — every read tolerates that and retries until
@@ -240,19 +643,22 @@ async function enterRefusal(doc: any, loc: any): Promise<string> {
  */
 async function enterAndReadSelection(
   page: any, doc: any, loc: any, site: TypeaheadSite, before: { shown: string[]; notes: string[] } | null, deadline: number,
-): Promise<{ choice: ReturnType<typeof chooseAddressSuggestion> | null; said: string; pressed: boolean }> {
+  press?: () => Promise<unknown>,
+): Promise<{ choice: ReturnType<typeof chooseAddressSuggestion> | null; said: string; saidFresh: boolean; pressed: boolean }> {
   // A box inside a form posts the form back on Enter: wait for THAT navigation (a real postback can
   // take seconds to start), never read the old document's stillness as "nothing selected".
   const inForm = await loc.evaluate((el: Element) => !!(el as HTMLInputElement).form).catch(() => false);
   const navigated = inForm && typeof doc.waitForNavigation === "function"
     ? doc.waitForNavigation({ waitUntil: "domcontentloaded", timeout: Math.max(0, Math.min(8_000, deadline - Date.now())) }).then(() => true).catch(() => false)
     : Promise.resolve(false);
-  const pressed = await withAutomationInput(page, () => loc.press("Enter", { timeout: 3000 })).then(() => true).catch(() => false);
-  if (!pressed) return { choice: null, said: "", pressed: false };
+  // `press`: the box's own search control (#198) instead of Enter — read exactly the same way.
+  const pressed = await withAutomationInput(page, () => (press ? press() : loc.press("Enter", { timeout: 3000 }))).then(() => true).catch(() => false);
+  if (!pressed) return { choice: null, said: "", saidFresh: false, pressed: false };
   await navigated;
   const old = new Set(before?.shown ?? []);
   const until = Math.min(Date.now() + 6_000, deadline);
   let said = "";
+  let saidFresh = false;
   let quiet = 0;
   let lastSig = "";
   while (Date.now() < until) {
@@ -261,10 +667,12 @@ async function enterAndReadSelection(
     const now = await readShows(doc);
     if (!now) continue; // mid-navigation
     const fresh = now.shown.filter((t) => !old.has(t));
-    said = freshNoMatch(before?.notes, now.notes) || said;
+    const freshSaid = freshNoMatch(before?.notes, now.notes, true);
+    if (freshSaid) saidFresh = true;
+    said = freshSaid || freshNoMatch(before?.notes, now.notes) || said;
     if (fresh.length) {
       const choice = chooseAddressSuggestion(fresh, site);
-      if (choice.kind === "pick" || choice.kind === "ask") return { choice, said, pressed: true };
+      if (choice.kind === "pick" || choice.kind === "ask") return { choice, said, saidFresh, pressed: true };
     }
     // Nothing selected (yet): settle once the page has held still for a moment, or said "no match".
     const sig = JSON.stringify(now.shown);
@@ -273,7 +681,7 @@ async function enterAndReadSelection(
     if (said && quiet >= 1) break;
     if (quiet >= 4) break;
   }
-  return { choice: null, said, pressed: true };
+  return { choice: null, said, saidFresh, pressed: true };
 }
 
 /** Poll until the suggestions hold still (two equal reads in a row) or the wait ends. Returns the
@@ -335,7 +743,8 @@ async function typeInto(page: any, loc: any, text: string): Promise<boolean> {
  */
 export async function fillTypeahead(page: any, loc: any, req: TypeaheadRequest): Promise<TypeaheadOutcome> {
   const budgetMs = req.budgetMs && req.budgetMs > 0 ? req.budgetMs : TYPEAHEAD_BUDGET_DEFAULT_MS;
-  const deadline = Date.now() + budgetMs;
+  const startedAt = Date.now();
+  let deadline = startedAt + budgetMs; // extended once when the search phase begins (SEARCH_PHASE_BUDGET_MS)
   const waitMs = req.suggestWaitMs && req.suggestWaitMs > 0 ? req.suggestWaitMs : SUGGEST_WAIT_DEFAULT_MS;
   const value = String(req.value ?? "").replace(/\s+/g, " ").trim();
   if (!page || !loc) return { outcome: "unusable", why: "the box could not be located" };
@@ -351,18 +760,29 @@ export async function fillTypeahead(page: any, loc: any, req: TypeaheadRequest):
     : { street };
   // What is typed, in order. The job's own address: its whole one-line form first (Enter allowed
   // there only), then the house number + street-name core, then the house number alone.
-  const tries: Array<{ q: string; enter: boolean }> = (req.mode === "exact" ? [value] : addressQueries(street)).map((q) => ({ q, enter: false }));
+  // A value lookup (a company, any other lookup) is typed as itself; an address is widened.
+  const valueMode = req.mode === "exact" || req.mode === "company";
+  const tries: Array<{ q: string; enter: boolean }> = (valueMode ? [value] : addressQueries(street)).map((q) => ({ q, enter: false }));
   const whole = req.mode === "site" ? oneLineAddress(site) : "";
   if (whole && !tries.some((t) => loose(t.q) === loose(whole))) tries.unshift({ q: whole, enter: true });
   if (!tries.length) return { outcome: "unusable", why: "there is no address to type" };
   const doc = await ownerScope(page, loc);
   await doc.evaluate(NAME_SHIM).catch(() => null);
+  // #244: mark the box and its own widget, and what that widget shows before anything is typed, for
+  // the widget-local list and the selected-value read-back.
+  if (typeof loc.evaluate === "function") await loc.evaluate(typeaheadBoxFactsInPage, true, { timeout: 1500 }).catch(() => null);
+  await doc.evaluate(stampTypeaheadWidgetInPage).catch(() => null);
+  // The widget's hidden inputs AT REST, before the first clear and the first keystroke: the pick is
+  // judged against the ones the typing then empties (selectionInputsToWatch).
+  const hiddenAtRest = await doc.evaluate(typeaheadWidgetHiddenInPage).catch(() => [] as Array<{ key: string; name: string; value: string; owned: boolean }>);
 
   const typed: string[] = [];
   let rows: string[] = [];
   let usedQuery = "";
   let portalSaid = "";
+  let portalSaidFresh = false; // set only by a sentence that appeared after the typing (freshNoMatch freshOnly)
   let enterNote = "";
+  let searchNote = "";
   let wholeListed = 0;
   const entered = new Set<number>();
   const typedLine = (): string => typed.map((q, i) => `"${q}"${entered.has(i) ? " + Enter" : ""}`).join(" then ") || "nothing";
@@ -372,6 +792,7 @@ export async function fillTypeahead(page: any, loc: any, req: TypeaheadRequest):
       await clearBox(doc, loc, controlsId);
       // Whatever list is on screen now is not this box's answer to what we are about to type.
       await markExistingPopups(doc);
+      await doc.evaluate(stampTypeaheadWidgetInPage).catch(() => null);
       const before = await readShows(doc);
       typed.push(t.q);
       if (!(await typeInto(page, loc, t.q))) continue;
@@ -388,16 +809,88 @@ export async function fillTypeahead(page: any, loc: any, req: TypeaheadRequest):
         break;
       }
       const afterTyping = await readShows(doc);
-      portalSaid = freshNoMatch(before?.notes, afterTyping?.notes) || portalSaid;
+      const freshSaid = freshNoMatch(before?.notes, afterTyping?.notes, true);
+      if (freshSaid) portalSaidFresh = true;
+      portalSaid = freshSaid || freshNoMatch(before?.notes, afterTyping?.notes) || portalSaid;
       if (!t.enter || Date.now() >= deadline) continue;
       // No list for the whole address: a search that runs on Enter (#139), through the caller's Enter
       // door (the replay's guardAction), else the shared Enter question.
       const refusal = req.enterGate
         ? String(await req.enterGate(loc).catch((e: unknown) => `the Enter gate could not answer (${String((e as Error)?.message ?? e).slice(0, 80)})`) ?? "")
         : await enterRefusal(doc, loc);
-      if (refusal) { enterNote = ` (Enter was not pressed: ${refusal.slice(0, 160)})`; continue; }
+      // #198 — ENTER REFUSED: THE BOX'S OWN SEARCH CONTROL, ONCE (live City of Tigard, Tyler EnerGov
+      // "Add Location": an Esri "Address & Parcel Search" box offered no suggestions, Enter was refused
+      // because the page also holds an invoices menu, and its magnifier beside the box was never
+      // pressed). A control the box owns — never a submitter, never submit- or pay-worded — is a
+      // search, not the page's Enter; what it brings is read like Enter's answer: a results list
+      // (suggestion rows, picked by the same address rule below) or a selection the portal shows.
+      if (refusal) {
+        const searchLabel = req.mode === "site" && typeof loc.evaluate === "function"
+          ? String(await loc.evaluate(ownSearchControlInPage, PORTAL_SAFETY_GLOBAL).catch(() => "") ?? "")
+          : "";
+        if (!searchLabel) { enterNote = ` (Enter was not pressed: ${refusal.slice(0, 160)})`; continue; }
+        const control = doc.locator('[data-al-tsb="1"]').first();
+        const clickRefused = req.clickGate
+          ? String(await req.clickGate(control).catch((e: unknown) => `the click gate could not answer (${String((e as Error)?.message ?? e).slice(0, 80)})`) ?? "")
+          : "";
+        if (clickRefused) { enterNote = ` (Enter was not pressed: ${refusal.slice(0, 160)}; the box's own "${searchLabel}" was refused: ${clickRefused.slice(0, 120)})`; continue; }
+        // The whole line first; if that finds nothing, THE STREET LINE ALONE (live Tigard run 6: the
+        // Esri box answered "There are no matches available." for "13125 SW Hall Blvd, Tigard, OR
+        // 97223" — its address source matches the street line, and the city/ZIP tail defeats it).
+        const searchQueries = [t.q];
+        if (loose(street) && loose(street) !== loose(t.q)) searchQueries.push(street);
+        let found = false;
+        let pressedAny = false;
+        // THE SEARCH PHASE HAS ITS OWN BUDGET, added here, once: the suggestion waits have spent most of
+        // the fill's, and a search is a network round trip the box answers in seconds (live City of
+        // Tigard 2026-11-15: rows 4.3 s after its Search). SEARCH_PHASE_BUDGET_MS says why.
+        deadline = Math.max(deadline, Date.now() + SEARCH_PHASE_BUDGET_MS);
+        for (let qi = 0; qi < searchQueries.length && Date.now() < deadline; qi++) {
+          const q = searchQueries[qi];
+          let beforeQ = before;
+          if (qi > 0) {
+            await clearBox(doc, loc, controlsId);
+            await markExistingPopups(doc);
+            beforeQ = await readShows(doc);
+            typed.push(q);
+            if (!(await typeInto(page, loc, q))) continue;
+          }
+          await doc.evaluate(() => { document.querySelectorAll('input[type=checkbox], [role=checkbox]').forEach((n) => n.setAttribute("data-al-oldcb", "1")); }).catch(() => null);
+          const viaSearch = await enterAndReadSelection(page, doc, loc, site, beforeQ, deadline, () => control.click({ timeout: 3000 }));
+          if (viaSearch.said) portalSaid = viaSearch.said;
+          if (!viaSearch.pressed) continue;
+          pressedAny = true;
+          searchNote = ` + the box's own "${searchLabel}"`;
+          // A RESULTS PANEL OF TICKABLE ROWS (live City of Tigard, owner's walk-through 2026-11-13): the
+          // search lists each parcel as a row with its own checkbox (plus a "Select All"); ticking the
+          // row shows the panel's "Add", which puts the location on the application. Text that merely
+          // APPEARED is not a selection there — so this is read first, and only rows the search brought.
+          const tick = await searchResultTickAndAdd(page, doc, loc, site, req, deadline);
+          if (tick.kind === "picked") {
+            return { outcome: "picked", picked: tick.text, held: tick.text, typed: q, why: `${tick.why}; ticked in the results of the box's own "${searchLabel}" and added with the panel's "${tick.add}"`, via: "search" };
+          }
+          if (tick.kind === "ask") return { outcome: "ask", question: tick.question, offered: tick.offered, typed: q, why: tick.why };
+          if (tick.kind === "failed") return { outcome: "not_held", why: tick.why, picked: tick.text };
+          if (viaSearch.choice?.kind === "pick") {
+            return { outcome: "picked", picked: viaSearch.choice.text, held: viaSearch.choice.text, typed: q, why: `${viaSearch.choice.why}; selected by the portal after its own "${searchLabel}"`, via: "search" };
+          }
+          if (viaSearch.choice?.kind === "ask") {
+            return { outcome: "ask", question: `${viaSearch.choice.question} (The portal selected it after its own "${searchLabel}"; check its selection before going on.)`, offered: viaSearch.choice.candidates, typed: q, why: viaSearch.choice.why };
+          }
+          // A RESULTS LIST: rows the search opened, read and picked like a suggestion list. The
+          // selection read above already waited for the page; this is one short settle, not a second
+          // full wait (the whole fill's budget is shared).
+          const listed = await settledSuggestions(doc, controlsId, Math.min(waitMs, 1500), deadline);
+          if (listed.length) { rows = listed; usedQuery = q; found = true; break; }
+        }
+        if (found) break;
+        enterNote = pressedAny
+          ? ` (Enter was not pressed: ${refusal.slice(0, 160)}; the box's own "${searchLabel}" brought nothing)`
+          : ` (Enter was not pressed: ${refusal.slice(0, 160)}; the box's own "${searchLabel}" could not be pressed)`;
+        continue;
+      }
       const sel = await enterAndReadSelection(page, doc, loc, site, before, deadline);
-      if (sel.said) portalSaid = sel.said;
+      if (sel.said) { portalSaid = sel.said; if (sel.saidFresh) portalSaidFresh = true; }
       if (!sel.pressed) continue;
       entered.add(typed.length - 1);
       if (sel.choice?.kind === "pick") {
@@ -412,16 +905,19 @@ export async function fillTypeahead(page: any, loc: any, req: TypeaheadRequest):
     }
     if (!rows.length) {
       await clearBox(doc, loc, controlsId);
-      const over = Date.now() >= deadline ? ` (its ${Math.round(budgetMs / 1000)} s budget ran out)` : "";
+      const over = Date.now() >= deadline ? ` (its ${Math.round((deadline - startedAt) / 1000)} s budget ran out)` : "";
       return {
         outcome: "no_suggestions",
-        why: `typed ${typedLine()} and the box offered no suggestions${wholeListed ? ` (only ${wholeListed} other address(es) for the whole line)` : ""}${entered.size ? " and the portal selected nothing" : ""}${enterNote}${over}`,
+        why: `typed ${typedLine()}${searchNote} and the box offered no suggestions${wholeListed ? ` (only ${wholeListed} other address(es) for the whole line)` : ""}${entered.size ? " and the portal selected nothing" : ""}${enterNote}${over}`,
         typed,
         ...(portalSaid ? { portalSaid } : {}),
+        ...(portalSaid && portalSaidFresh ? { portalSaidFresh: true as const } : {}),
       };
     }
     const offered = rows.map(suggestionText).filter(Boolean);
-    const choice = req.mode === "exact" ? chooseExactSuggestion(rows, value) : chooseAddressSuggestion(rows, site);
+    const choice = req.mode === "company" ? chooseCompanySuggestion(rows, value)
+      : req.mode === "exact" ? chooseExactSuggestion(rows, value)
+        : chooseAddressSuggestion(rows, site);
     if (choice.kind === "ask") {
       await clearBox(doc, loc, controlsId);
       return { outcome: "ask", question: choice.question, offered, typed: usedQuery, why: choice.why };
@@ -436,8 +932,17 @@ export async function fillTypeahead(page: any, loc: any, req: TypeaheadRequest):
     const now = suggestionText(await row.textContent({ timeout: 1500 }).catch(() => ""));
     if (now !== choice.text || Date.now() >= deadline) {
       await clearBox(doc, loc, controlsId);
-      return { outcome: "no_match", why: `the suggestion list changed while it was being read ("${choice.text}" is no longer the row chosen)`, offered, typed: usedQuery };
+      return { outcome: "no_match", why: `the suggestion list changed while it was being read ("${choice.text}" is no longer the row chosen)`, offered, typed: usedQuery, listChanged: true };
     }
+    // THE WIDGET'S OWN SELECTED VALUE (#244). A widget that keeps the selected record's id in a hidden
+    // input (the box only shows its words) selected nothing unless that id is written again: the box
+    // reading the address is not the portal holding the property. Watched: only what the widget
+    // demonstrably owns, a hidden value it emptied itself when the query was typed (a reopened
+    // draft's earlier selection), remembered on the input for the next fill of this box in this
+    // document (selectionInputsToWatch). Read here, just before the click; judged only after the
+    // blur commit, because a widget may write its id on change/blur rather than in the click.
+    const watched = selectionInputsToWatch(hiddenAtRest, await doc.evaluate(typeaheadWidgetHiddenInPage).catch(() => []));
+    if (watched.length) await doc.evaluate(markOwnedHiddenInPage, watched.map((w) => w.key)).catch(() => null);
     const clicked = await withAutomationInput(page, () => row.click({ timeout: 4000 })).then(() => true).catch(() => false);
     if (!clicked) {
       await clearBox(doc, loc, controlsId);
@@ -447,7 +952,8 @@ export async function fillTypeahead(page: any, loc: any, req: TypeaheadRequest):
     // widget may write the box only after its own round trip (a geocode, a map zoom), so it is read
     // back for up to 2 s before it is judged: a slow but good pick is not called a miss.
     const holds = (h: string): boolean => !!h && (loose(h) === loose(choice.text)
-      || (req.mode === "exact" ? loose(h) === loose(value) : chooseAddressSuggestion([h], site).kind === "pick"));
+      || (req.mode === "company" ? normalizeCompanyLabel(h) === normalizeCompanyLabel(value)
+        : req.mode === "exact" ? loose(h) === loose(value) : chooseAddressSuggestion([h], site).kind === "pick"));
     let held = "";
     const readUntil = Date.now() + 2000;
     for (;;) {
@@ -463,10 +969,35 @@ export async function fillTypeahead(page: any, loc: any, req: TypeaheadRequest):
     }
     // Commit the way every fill commits (a per-field save on blur).
     if (typeof loc.blur === "function") await loc.blur().catch(() => null);
+    // ...and only then ask whether the widget's own selection was written again (read for up to 2 s:
+    // a change/blur handler, or the widget's own round trip). Not written: the box is cleared, so no
+    // unpicked words stay for the portal to take (a per-field autosave saw the pick's words on the
+    // blur and now sees the box emptied).
+    if (watched.length) {
+      let took = false;
+      const takeUntil = Date.now() + 2000;
+      for (;;) {
+        took = selectionRewritten(watched, await doc.evaluate(typeaheadWidgetHiddenInPage).catch(() => []));
+        if (took || Date.now() >= takeUntil) break;
+        await page.waitForTimeout?.(200).catch(() => null);
+      }
+      if (!took) {
+        await clearBox(doc, loc, controlsId);
+        const names = watched.map((h) => h.name).filter(Boolean).slice(0, 3).map((n) => `"${n}"`).join(", ");
+        return { outcome: "not_held", why: `picked "${choice.text}" and the box shows it, but the widget's selected value (its hidden input${names ? ` ${names}` : ""}, which the widget emptied when the search was typed) was not written again — the portal did not take the pick; cleared`, picked: choice.text };
+      }
+    }
     return { outcome: "picked", picked: choice.text, held, typed: usedQuery, why: choice.why, via: "list" };
   } finally {
     await clearPopupMarks(doc);
     await doc.evaluate(() => { document.querySelectorAll("[data-al-sugg]").forEach((n) => n.removeAttribute("data-al-sugg")); }).catch(() => null);
+    await doc.evaluate(() => {
+      document.querySelectorAll("[data-al-ta-widget], [data-al-ta-box], [data-al-ta-pre]").forEach((n) => {
+        n.removeAttribute("data-al-ta-widget");
+        n.removeAttribute("data-al-ta-box");
+        n.removeAttribute("data-al-ta-pre");
+      });
+    }).catch(() => null);
   }
 }
 
@@ -477,6 +1008,18 @@ export class TypeaheadStop extends Error {
     super(message);
     this.name = "TypeaheadStop";
   }
+}
+
+/** THE PORTAL ITSELF ANSWERED THIS VALUE WITH NOTHING (#244 fix round): it printed its own no-match
+ *  words, or it listed rows and none is the job's. A search that only ran out of time, a list that
+ *  re-rendered under the read, or a pick the box did not keep is not an answer — it may differ on
+ *  the next try, so a caller that remembers "already searched" (the replay) must not remember it. */
+export function typeaheadPortalAnswered(o: TypeaheadOutcome): boolean {
+  // Its own words, printed FOR this search — a no-match sentence that was already on screen (static
+  // help copy, another box's panel) is quoted but is not an answer (review of d1c7acd1).
+  if (o.outcome === "no_suggestions") return !!o.portalSaid && o.portalSaidFresh === true;
+  if (o.outcome === "no_match") return !o.listChanged;
+  return false;
 }
 
 /** One operator-readable line for an outcome that picked nothing ("" for "picked"). */

@@ -5,7 +5,7 @@
 
 import { redactStatusText } from "./safeAction";
 import { readReviewScreenFees, type PortalFeeReadResult } from "../../shared/src/portalFeeItems";
-import { redactSecretValues } from "../../shared/src/portalSafety";
+import { isSignatureNameLabel, redactSecretValues } from "../../shared/src/portalSafety";
 import type { ProjectRecord } from "../../shared/src/types";
 
 export interface ReviewField {
@@ -225,12 +225,15 @@ export function reviewComparison(
   // Pick the review fields whose (normalized) label contains one of the keywords. Falls
   // back to all fields when nothing matches, so absence is still detectable — but the
   // caller must know WHICH it got, because the two mean opposite things to a human.
-  const scopeFor = (labelKeywords: string[]): { fields: ReviewField[]; labelled: boolean } => {
-    const scoped = reviewFields.filter((f) => {
+  // `notThis` (#243): a field that holds ANOTHER person's value is never in the scope — not the
+  // labelled one, and not the fallback either.
+  const scopeFor = (labelKeywords: string[], notThis?: (label: string) => boolean): { fields: ReviewField[]; labelled: boolean } => {
+    const own = notThis ? reviewFields.filter((f) => !notThis(f.label)) : reviewFields;
+    const scoped = own.filter((f) => {
       const nl = norm(f.label);
       return labelKeywords.some((k) => nl.includes(k));
     });
-    return scoped.length > 0 ? { fields: scoped, labelled: true } : { fields: reviewFields, labelled: false };
+    return scoped.length > 0 ? { fields: scoped, labelled: true } : { fields: own, labelled: false };
   };
 
   // "ABSENT FROM THE REVIEW PAGE" IS NOT "THE REVIEW PAGE DISAGREES".
@@ -262,12 +265,12 @@ export function reviewComparison(
 
   // Text check: the first meaningful word of the expected value must appear among the
   // label-scoped fields' values (or the page text).
-  const checkText = (fieldName: string, expected: unknown, labelKeywords: string[]): void => {
+  const checkText = (fieldName: string, expected: unknown, labelKeywords: string[], notThis?: (label: string) => boolean): void => {
     const e = norm(expected);
     if (!e || e.length < 2) return;
     const firstWord = e.split(" ")[0];
     if (firstWord.length < 3) return; // too short to match reliably
-    const scope = scopeFor(labelKeywords);
+    const scope = scopeFor(labelKeywords, notThis);
     compared++;
     if (!present(scope, firstWord)) {
       mismatches.push({ field: fieldName, expected: String(expected ?? "").slice(0, 60), found: summarize(scope) });
@@ -302,7 +305,14 @@ export function reviewComparison(
     } else confirmed++;
   };
 
-  checkText("homeownerName", project.homeownerName, ["name", "owner", "applicant", "customer", "contact"]);
+  // THE SIGNER'S NAME IS NOT THE HOMEOWNER'S (#243). "name" scoped the homeowner check to every
+  // name-labelled box, and a typed e-signature box is one: live 2026-11-15, City of Star (iWorQ),
+  // whose form has no homeowner field at all, reported "VERIFY BEFORE SUBMITTING … homeownerName:
+  // shows <the client's authorized signer>" off its "Signature Name" box. Which box is the signer's
+  // is the ONE signer-box reading the fill guard and replay's resolveValue use (isSignatureNameLabel,
+  // portalSafety.ts) — it is excluded from this check's scope and from its fallback, so a signer
+  // whose first name happens to match the homeowner's cannot "confirm" it either.
+  checkText("homeownerName", project.homeownerName, ["name", "owner", "applicant", "customer", "contact"], isSignatureNameLabel);
   checkText("projectAddress", (project.projectAddress ?? "").split(",")[0], ["address", "street", "site", "location", "premise", "service"]);
   checkDigits("systemSizeDcKw", project.systemSizeDcKw, ["size", "kw", "kva", "dc", "capacity", "nameplate", "rating", "system"]);
   // A utility identifier is looked for only when THIS filing typed it (B8): a skipped check is not

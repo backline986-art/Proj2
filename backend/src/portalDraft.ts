@@ -176,6 +176,27 @@ function healRecordFor(db: AppDb, recipeId: string, idx: number, step: RecipeSte
 }
 
 /**
+ * WHETHER THESE STEPS END ON A SUBMIT A PERSON'S CLICK WAS SEEN TO TURN INTO A DRAFT: the heal's own
+ * record (healRecordFor — the server-owned row or its audit, by index, label and selector, never the
+ * step's note) names the LAST step, and that step is a click no longer flagged final. For a reader
+ * that asks whether a recording reached its end — #241's sequence check, so a healed draft-only
+ * Part 1 a person saves is not told it never reached review. It is NEVER click authority: only
+ * draftSubmitStampForReplay answers what a replay may click, and nothing here writes. Never throws.
+ */
+export function stepsEndOnHealedDraftSubmit(db: AppDb, recipeId: string, steps: readonly RecipeStep[]): boolean {
+  try {
+    const list = Array.isArray(steps) ? steps : [];
+    const idx = list.length - 1;
+    const step = list[idx];
+    if (!step || step.action !== "click" || step.isFinalSubmit === true) return false;
+    const label = stepLabel(step);
+    return !!label && healRecordFor(db, recipeId, idx, step, label);
+  } catch {
+    return false;
+  }
+}
+
+/**
  * 4 above, for a step already healed (a heal with no tenant on the page read, one written before #330,
  * or one whose recipe has changed since): the draft is seen again after a person clicked the recipe's
  * LAST step, which a heal record names by index, label and selector (healRecordFor), which is not flagged final, and whose label is

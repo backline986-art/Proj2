@@ -6,12 +6,15 @@ import type { Page, Frame, Locator } from "playwright";
 import type { LearnTargetRecordType, PortalRecipe, ProjectRecord, RecipeSelector, RecipeStep, StepFingerprint } from "../../../shared/src/types";
 // #166: the ONE record-type label matcher (the replay's borrow reads the same one — findBorrowableRecipe).
 import { sameRecordType } from "../../../backend/src/permitProcess";
+// #178: the ONE name matcher (case, punctuation, INC / LLC / &-vs-AND suffixes) for "is this row this client".
+import { knowledgeNameMatchScore } from "../../../backend/src/knowledgeBase";
 import { BasePortalAdapter, HUMAN_REVIEW_MESSAGE, type PortalContext, type PortalStepResult } from "../adapter";
 import { openPortal } from "../browser";
 import { selectWithFallback, readClosedComboboxOptions } from "../comboboxFill";
-import { fillTypeahead, typeaheadFailureLine } from "../typeaheadFill";
+import { fillTypeahead, typeaheadBoxReason, typeaheadFailureLine } from "../typeaheadFill";
 import { usStateCode } from "../../../backend/src/usState";
 import { typeaheadMatchMode, type TypeaheadSite } from "../typeaheadMatch";
+import { withoutLearnDataInSelectors, type LearnIdentity } from "../learnDataInSelectors";
 import { assertFilerIdentityHeld, FilerIdentityStop, filerIdentityFieldForSelect, filerIdentityStopMessage, selectFilerIdentity } from "../filerIdentitySelect";
 import { detectChallengeFrame, frameSelectorFor, maskId, readbackMatches, redactCaptureText, redactStatusText, safeAction, sleep, smartWait, waitForElement, waitForInteractiveControls } from "../safeAction";
 import { clearSecretTags, secretMaskPatterns, tagSecretsForMask } from "../secretMask";
@@ -36,6 +39,8 @@ import { readApplicationLedgerInPage, type LedgerEntry } from "./submissionLedge
 import { LIST_LINK } from "../statusFinder";
 import { readSignatureRequestStep, stageSignatureRequestStep, type SignatureStepOutcome } from "./signatureRequestStep";
 import type { SignatureRequestApproval } from "../../../shared/src/signatureRequestGate";
+import { nameAttributeCss, nameAttributeOf } from "../../../shared/src/recipeSelector";
+import { companyKey, ROW_PICK_WORDS } from "../../../shared/src/rowPick";
 import { readSignatureStatuses, type SignatureCheck } from "./signatureStatusRead";
 import { signatureCompletion } from "../../../shared/src/signatureCompletion";
 
@@ -59,7 +64,7 @@ export interface ContinueDraft {
    *  Submit; not signed, or unreadable, it stops on the record page and names why. */
   awaitingSignature?: boolean;
 }
-import { PORTAL_SAFETY_GLOBAL, PORTAL_SAFETY_IN_PAGE_SOURCE, isAutocompleteWidgetClass, isFinalSubmitControl, isInterstitialForwardLabel as sharedIsInterstitialForwardLabel, isSignatureNameLabel, isSignatureRequestControl, isTypeSignatureToggleLabel, looksLikeReviewUrl, redactSecretValues, reviewSignals as sharedReviewSignals, splitSignerName } from "../../../shared/src/portalSafety";
+import { PORTAL_SAFETY_GLOBAL, PORTAL_SAFETY_IN_PAGE_SOURCE, isAutocompleteWidgetClass, isFinalSubmitControl, isLookupButtonLabel, isSubmitIntent as sharedIsSubmitIntent, isInterstitialForwardLabel as sharedIsInterstitialForwardLabel, isSignatureNameLabel, isSignatureRequestControl, isTypeSignatureToggleLabel, looksLikeReviewUrl, redactSecretValues, reviewSignals as sharedReviewSignals, splitSignerName } from "../../../shared/src/portalSafety";
 import { BATTERY_DECLARATION_QUESTION, batteryAttestationAnswer, batteryControlKind, batteryDeclarationAnswer } from "../../../shared/src/batteryControls";
 import { installFilingBackstop, withAutomationInput, withBackstopWindow, withOwnWriteWindow, describeBackstopAbort, backstopSentLine, backstopFor, isStoppingAbort, drainOwnWrites, unsavedAtReviewWarning, portalOwnCallsBlockedAtReview, reviewBlockedCallsLine } from "../filingBackstop";
 // Types only (erased): the information-page door is reached duck-typed on the installed backstop.
@@ -449,6 +454,11 @@ const REPEAT_PAGE_LIMIT = 3;
  *  land and render what it unlocks (a PowerClerk row's Model after its make) before the next
  *  re-scrape. Only paid when that pass actually filled something. */
 const LATE_EQUIP_REVEAL_GRACE_MS = 2_000;
+/** Does a field's section or label name a PV array? The equipment pass's row test (#535: on a page
+ *  of array rows such a control is a row's), and the re-scan never marks one `conditional` (#237):
+ *  the replay adds each row and fills it itself (row mode, the held-check), unlocking its controls
+ *  one save at a time — a probe for "revealed on this job" is not that machinery's question. */
+const namesPvArray = (f: { section?: string; label?: string }): boolean => /pv ?array|\barray\b/i.test(`${f.section || ""} ${f.label || ""}`);
 /** One planner-door click (advance or navigate), with its wait for the page after it: the most it may
  *  cost before the walk gives up on it (boundedClick). Well above a healthy click on a slow portal
  *  (Accela's AJAX dashboards, PowerClerk's project creation: tens of seconds), far below the ~15
@@ -501,7 +511,7 @@ const STALL_WATCHDOG_DEFAULT_MS = 300_000;
  *  AUTOLEARN_PLANNER_STALL_MS tunes it; never below the walk's own budget. */
 const PLANNER_STALL_DEFAULT_MS = 600_000;
 
-const SUBMIT_INTENT = /\b(continue application|submit application|file application|submit|finish|finalize|confirm submission|place order|complete submission)\b/i;
+export const SUBMIT_INTENT = /\b(continue application|submit application|file application|submit|finish|finalize|confirm submission|place order|complete submission)\b/i;
 /** A login-worded control ("Sign In", "Log in", "Login", "Log On"). Never a walk advance while its
  *  credential boxes are empty — see the login_advance_refused stop. */
 const LOGIN_ADVANCE = /^\s*(sign\s*-?\s*in|log\s*-?\s*in|login|log\s*on|sign\s*on)\b/i;
@@ -1016,6 +1026,12 @@ export function uploadForbidsSubstitute(label: string | undefined): boolean {
 export function isPayFee(text: string | undefined): boolean {
   return !!text && PAY_FEE.test(text);
 }
+
+/** A typed uploader findTypedUploader found: the commit control's role and visible name (what the
+ *  recipe records), its id selector when it has a plain one, and the file name the box holds. */
+interface TypedUploader { role: "button" | "link"; name: string; css: string; fileName: string }
+const TYPED_UPLOADER_ATTR = "data-al-typed-uploader";
+const TYPED_UPLOADER_COMMIT_ATTR = "data-al-typed-uploader-commit";
 
 export function isSensitiveLabel(label: string): boolean {
   return SENSITIVE_LABEL.test(label);
@@ -1570,10 +1586,19 @@ export interface RawField {
   // Selector hints captured from the element.
   role?: string;
   name?: string;
+  /** True when another input / select / textarea / button in the same document (or shadow root)
+   *  carries the same name attribute — radios, checkboxes and hidden inputs not counted. A shared
+   *  name is not this control's identity, so toExtractedField never records it as the address (#229). */
+  nameShared?: boolean;
   placeholder?: string;
   id?: string;
   css?: string;
+  /** The words on a button/link's face (aria-hidden parts removed; the aria-label only for an
+   *  icon) — read by the off-limits tests. NOT the name a role selector matches: see accName. */
   text?: string;
+  /** #228: a button/link's ACCESSIBLE NAME (aria-labelledby, aria-label, rendered content, a button
+   *  input's value) — the name getByRole matches, so the one its role selector is built from. */
+  accName?: string;
   href?: string;
   required?: boolean;
   /** aria-label attribute, captured for the step fingerprint (heal tie-break). */
@@ -1928,6 +1953,8 @@ export function extractFieldsInPage(els: Element[]): RawField[] {
   // position instead. The literal selector is repeated here because this function is
   // serialized into the page and cannot close over ACTIVE_SCOPE_CSS.
   const scopeEl = document.querySelector('[data-al-activescope="1"]');
+  // How many form controls carry each name attribute, per document / shadow root (nameShared).
+  const nameCounts = new Map<Node, Map<string, number>>();
 
   const out: RawField[] = [];
   for (const el of els) {
@@ -2126,6 +2153,29 @@ export function extractFieldsInPage(els: Element[]): RawField[] {
     const genericLabel = /^(please\s+)?select\.{0,3}$|^select$|^qty$|^\s*$/i.test(rawLabel);
     const label = widgetLabel || ((genericLabel && testHint) ? testHint : (rawLabel || testHint || ""));
     const name = el.getAttribute("name") || undefined;
+    // A NAME ATTRIBUTE SEVERAL CONTROLS CARRY IS NOT ONE CONTROL'S ADDRESS (#229 review). Two
+    // contact blocks that both name their box "firstName", or icon buttons sharing name="cmd",
+    // recorded one identical `[name=…]` selector, and replay then filled the FIRST block or clicked
+    // the first button with ok:true. Counted over the control's own root, inline (this function is
+    // serialized into the page), radios / checkboxes / hidden inputs left out: a radio's name is its
+    // group's, and a hidden twin is never the one a fill or click lands on.
+    let nameShared = false;
+    if (name) {
+      const root = el.getRootNode();
+      let counts = nameCounts.get(root);
+      if (!counts) {
+        counts = new Map<string, number>();
+        const scopeRoot = root as Document | ShadowRoot;
+        for (const c of Array.from(typeof scopeRoot.querySelectorAll === "function" ? scopeRoot.querySelectorAll("input, select, textarea, button") : [])) {
+          const cn = c.getAttribute("name");
+          const ct = (c.getAttribute("type") || "").toLowerCase();
+          if (!cn || ct === "radio" || ct === "checkbox" || ct === "hidden") continue;
+          counts.set(cn, (counts.get(cn) ?? 0) + 1);
+        }
+        nameCounts.set(root, counts);
+      }
+      nameShared = (counts.get(name) ?? 0) > 1;
+    }
     const placeholder = el.getAttribute("placeholder") || undefined;
     const id = el.getAttribute("id") || undefined;
     // <a> elements have ARIA role "link", not "button", even though we treat them as
@@ -2164,6 +2214,50 @@ export function extractFieldsInPage(els: Element[]): RawField[] {
     // A tile's text is its TITLE, never the whole card (the body's prose would become the
     // name a replay has to match).
     const text = tileLabel ? tileLabel : fieldType === "button" ? buttonText || undefined : undefined;
+    // THE NAME A ROLE SELECTOR IS BUILT FROM IS THE ACCESSIBLE NAME, READ IN THE SPEC'S ORDER (#228):
+    // aria-labelledby (the referenced elements' own aria-label or text), else a non-empty aria-label,
+    // else the content without its aria-hidden or unrendered (display:none / visibility:hidden)
+    // parts, else a button input's value — whitespace collapsed, as getByRole compares it. `text`
+    // above takes the aria-label only for an icon, so whenever an aria-label (or a labelledby) is set
+    // and says something else, a selector named by the text names ANOTHER control or none. Live, City
+    // of Tigard (EnerGov), 2026-11-14: each record type's button is <a role="link" aria-label="Apply
+    // Residential Renewable Energy - Prescriptive">Apply</a>; recorded as getByRole('link', { name:
+    // 'Apply', exact: true }) it never matched itself and matched exactly one control on the page, the
+    // top menu's "Apply" tab, which the replay clicked as the record type. Only the selector's name
+    // changes: the LABEL (what the planner reads, what loop guards and replay healing key on) and
+    // `text` (the words on the control's face, which the off-limits tests read) are untouched.
+    const accName = ((): string => {
+      if (fieldType !== "button" || tileLabel) return "";
+      const ownRoot = el.getRootNode() as Document | ShadowRoot;
+      const refs = (el.getAttribute("aria-labelledby") || "").split(/\s+/).filter(Boolean);
+      if (refs.length) {
+        const by = refs.map((ref) => {
+          const n = (typeof ownRoot.getElementById === "function" ? ownRoot.getElementById(ref) : null) || document.getElementById(ref);
+          return n ? ((n.getAttribute("aria-label") || "").trim() || n.textContent || "") : "";
+        }).join(" ").replace(/\s+/g, " ").trim();
+        if (by) return by;
+      }
+      if (ariaName) return ariaName.replace(/\s+/g, " ").trim();
+      // The content, walked (no helper function: this runs in the page), skipping what getByRole
+      // leaves out of a name — an aria-hidden subtree (#556's icon wrapper) and an unrendered one.
+      let content = "";
+      const stack: Node[] = Array.from(el.childNodes).reverse();
+      while (stack.length) {
+        const n = stack.pop() as Node;
+        if (n.nodeType === 3) { content += n.textContent || ""; continue; }
+        if (n.nodeType !== 1) continue;
+        const ce = n as Element;
+        if (ce.getAttribute("aria-hidden") === "true") continue;
+        const cs = window.getComputedStyle(ce);
+        if (cs.display === "none" || cs.visibility === "hidden") continue;
+        const kids = Array.from(ce.childNodes);
+        for (let k = kids.length - 1; k >= 0; k--) stack.push(kids[k]);
+      }
+      content = content.replace(/\s+/g, " ").trim();
+      if (content) return content;
+      if (tag === "input") return String((el as HTMLInputElement).value || el.getAttribute("value") || "").replace(/\s+/g, " ").trim();
+      return "";
+    })();
     // Capture href for anchors so a hidden/menu-nested nav link can be reached by direct
     // navigation when it can't be clicked.
     const href = tag === "a" ? (el.getAttribute("href") || undefined) : undefined;
@@ -2244,6 +2338,8 @@ export function extractFieldsInPage(els: Element[]): RawField[] {
     out.push({
       fx, fxText,
       label, fieldType, options, role, name, placeholder, id, text, href,
+      accName: accName || undefined,
+      nameShared: nameShared || undefined,
       tile: tileLabel ? true : undefined,
       typeahead: typeahead && fieldType === "text" ? true : undefined,
       stampClass: !typeahead && fieldType === "text" && stampClass ? stampClass : undefined,
@@ -2273,6 +2369,23 @@ export function extractFieldsInPage(els: Element[]): RawField[] {
   return out;
 }
 
+/**
+ * THE ROLE A RECORDED STEP NAMES THIS CONTROL BY: one rule, the learner's (#228). A clickable
+ * control (a button-type field) gets its explicit role. Failing that, it gets the role
+ * extractFieldsInPage read for it, which is "link" for every <a>, href or not. Failing both, it is
+ * "button". Any other field is named only by its explicit role.
+ *
+ * toExtractedField writes this into a click step's selector. Replay's recorded-identity check
+ * (recipeAdapter) asks the same question of the element a step's recorded id names now, by running
+ * extractFieldsInPage on that element and then this function. Recording and checking therefore
+ * share one rule. The check once kept a second role table that gave an href-less <a> no role. An
+ * AngularJS anchor that routes by ng-click, the record-type control the step had recorded as a
+ * link, was then refused, and its namesake was clicked instead.
+ */
+export function recordedRoleOf(raw: Pick<RawField, "fieldType" | "role">): string {
+  return raw.fieldType === "button" ? (raw.role || "button") : (raw.role || "");
+}
+
 // Turn a RawField captured in the page into the contract's ExtractedField, building a
 // stable RecipeSelector preferring label / role+name / name, falling back to css #id.
 export function toExtractedField(raw: RawField): ExtractedField {
@@ -2293,10 +2406,17 @@ export function toExtractedField(raw: RawField): ExtractedField {
   } else if (raw.fieldType === "button") {
     // Use the element's actual ARIA role ("link" for <a> tags, "button" otherwise).
     // getByRole("button", {name}) never matches a plain <a> — it must be "link".
-    const ariaRole = raw.role || "button";
+    const ariaRole = recordedRoleOf(raw);
     if (raw.text) {
       selector.role = ariaRole;
-      selector.name = raw.text;
+      // THE ACCESSIBLE NAME, NOT THE FACE TEXT (#228): getByRole matches nothing else, and Tigard's
+      // record-type link — face "Apply", aria-label "Apply Residential Renewable Energy -
+      // Prescriptive" — recorded by its face matched only the top menu's "Apply". The face words,
+      // when they differ, ride along as shownText for the safety haystacks that read them before.
+      const accName = String(raw.accName ?? "").trim();
+      selector.name = accName || raw.text;
+      const shown = raw.text.replace(/\s+/g, " ").trim();
+      if (accName && shown && shown !== accName) selector.shownText = shown;
       // EXACT name match: a substring match makes "Next" also match "Next page" (a decoy
       // pager button), and .first() then resolves to whichever is first in the DOM — the
       // wrong control. Exact matching pins it to the button whose accessible name IS the
@@ -2306,10 +2426,10 @@ export function toExtractedField(raw: RawField): ExtractedField {
       if (raw.id) selector.fallbacks = [{ css: `#${raw.id}` }];
     } else if (raw.id) {
       selector.css = `#${raw.id}`;
-    } else if (raw.name) {
-      selector.name = raw.name;
-      selector.role = ariaRole;
-      selector.exact = true;
+    } else if (raw.name && !raw.nameShared) {
+      // The name ATTRIBUTE, not the accessible name a `role` beside `name` would claim (#229) —
+      // and only when no other control carries it: a shared one is nobody's address (nameShared).
+      selector.css = nameAttributeCss(raw.name);
     }
   } else {
     // Inputs/selects: prefer label, then placeholder, then name, then css id.
@@ -2319,20 +2439,35 @@ export function toExtractedField(raw: RawField): ExtractedField {
       selector.label = raw.label;
     } else if (raw.placeholder) {
       selector.placeholder = raw.placeholder;
-    } else if (raw.name) {
-      selector.name = raw.name;
+    } else if (raw.name && !raw.nameShared && raw.fieldType !== "radio" && raw.fieldType !== "checkbox") {
+      // THE NAME ATTRIBUTE IS WRITTEN AS CSS, NEVER AS A BARE `name` (#229).
+      //
+      // A bare `name` reads as an accessible name everywhere a role stands beside it, and replay
+      // had no reading for it alone: City of Star's valuation box, recorded `{ name: "fee244341" }`
+      // because its label is not tied to it, failed "no usable selector" on every replay. Written
+      // through the one builder (shared/src/recipeSelector), which replay also uses for the bare
+      // names already saved. A radio's or checkbox's name is its GROUP's, and a name another
+      // control also carries is nobody's (nameShared), so those take their #id.
+      selector.css = nameAttributeCss(raw.name);
     } else if (raw.id) {
       selector.css = `#${raw.id}`;
     }
     // Always keep a css #id fallback when we have one and didn't already use it.
-    if (raw.id && !selector.css) {
+    if (raw.id && selector.css !== `#${raw.id}`) {
       selector.fallbacks = [{ css: `#${raw.id}` }];
     }
   }
   // Absolute last resort so the selector is always usable.
+  //
+  // A LABEL THAT IS ONLY THE NAME ATTRIBUTE IS NEVER PAGE TEXT (#229 review). The label falls back
+  // to the name attribute, so an id-less, label-less checkbox `<input type=checkbox name="agree">`
+  // reached here as `{ text: "agree" }`, and replay's getByText found "Email me marketing updates
+  // (I agree)" and ticked THAT label's checkbox with ok:true — where main failed the step loudly.
+  // Such a control keeps no address at all (`{}`): the learner's locator() bails on it at once, as
+  // it did on main's bare `{ name }`, and nothing guessed is recorded.
   if (!selector.label && !selector.role && !selector.name && !selector.placeholder && !selector.css) {
     if (raw.id) selector.css = `#${raw.id}`;
-    else if (raw.label) selector.text = raw.label;
+    else if (raw.label && !isLikelyOnlyName(raw)) selector.text = raw.label;
   }
   // A data-test* attribute is the most stable hook for a custom widget — use it as the primary
   // selector when nothing better was derived, else keep it as a fallback so replay can still find
@@ -2381,6 +2516,76 @@ export function toExtractedField(raw: RawField): ExtractedField {
   if (raw.questions?.length) field.questions = [...raw.questions];
   if (raw.fx && /^f\d+$/.test(raw.fx)) field.fx = { id: raw.fx, text: String(raw.fxText ?? "") };
   return field;
+}
+
+/**
+ * A RECORDED CLICK'S ROLE+NAME MUST FIND THE ELEMENT THAT WAS READ — ASKED OF PLAYWRIGHT, AT RECORD
+ * TIME (#228). The scan computes the accessible name itself (accName), and a page can still name a
+ * control in ways it does not read: CSS ::before/::after content, spacing between block children, an
+ * <img alt> inside the text, a <label for> on a button (each measured in real Chromium against
+ * getByRole). When that happens the role+name the step records may find ANOTHER control — Tigard's
+ * record type, recorded as "Apply", found only the top menu's "Apply" tab, and the replay clicked it as
+ * the record type — or none at all. So before a click step is recorded, the same getByRole the replay
+ * runs is asked which elements it finds, by the scan's stamp (data-al-fx) — only for a stamped element
+ * that is shown, since a hidden one is in no role query whatever its name. If the stamped element is
+ * among them, the selector stands (a choice between namesakes is the replay's to make). If it found a
+ * NAMESAKE and the element's #id finds it, the step leads with the #id and the role+name is dropped,
+ * because kept as a fallback it would click that namesake whenever the id misses. A role+name that found
+ * NOTHING stands as harvested and is only reported (`missed: "nothing"`), and so does a namesake with no
+ * id to lead with (`missed: "namesake"`). Never throws and never waits long: any failure keeps the
+ * selector exactly as harvested.
+ */
+export async function clickSelectorForElement(
+  page: Page | null | undefined,
+  field: Pick<ExtractedField, "selector" | "fx">,
+): Promise<{ selector: RecipeSelector; repinned?: "namesake"; missed?: "nothing" | "namesake" }> {
+  const sel = field.selector;
+  const fx = field.fx?.id ?? "";
+  if (!page || !sel?.role || !sel.name || !/^f\d+$/.test(fx)) return { selector: sel };
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const scope: any = sel.frame ? page.frameLocator(frameSelectorFor(sel.frame)) : page;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const stampsOf = async (loc: any): Promise<string[] | null> => {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        return await Promise.race([
+          loc.evaluateAll((els: Element[]) => els.map((e) => e.getAttribute("data-al-fx") || "")) as Promise<string[]>,
+          new Promise<null>((r) => { timer = setTimeout(() => r(null), 3000); }),
+        ]);
+      } catch { return null; } finally { if (timer) clearTimeout(timer); }
+    };
+    // Only a control getByRole CAN find is judged: one stamped element, shown. A hidden one (a menu-
+    // nested link the walk reaches by its href) is never in a role query, whatever its name, and its
+    // recorded name is what the replay's closed-menu reveal searches by — so it stands untouched.
+    const stamped = scope.locator(`[data-al-fx="${fx}"]`);
+    if ((await stampsOf(stamped))?.length !== 1 || !(await stamped.isVisible().catch(() => false))) return { selector: sel };
+    const byName = await stampsOf(scope.getByRole(sel.role, { name: sel.name, exact: sel.exact ?? false }));
+    if (!byName || byName.includes(fx)) return { selector: sel };
+    // A NAME THAT FINDS NOTHING STANDS AS HARVESTED, REPORTED, NEVER MOVED BEHIND THE #ID. It cannot
+    // misclick, since it finds no control, and the replay already reaches the #id one level down. The
+    // replay's last-resort name rescue reads only the TOP-LEVEL name, so moved into a fallback it would
+    // leave a control whose id the portal regenerates with no way back. Review of #228, on Cityworks'
+    // user-menu trigger: id CW-UI-MENU-1000000000000001-trigger is a counter, and role="menubutton" is
+    // no ARIA role, so getByRole never finds it. Re-pinned, a replay with the counter moved waited ~70 s
+    // and failed; left as harvested, the name rescue clicked it by its aria-label "User".
+    if (byName.length === 0) return { selector: sel, missed: "nothing" };
+    const idCss = (sel.fallbacks ?? []).map((fb) => fb.css).find((c): c is string => typeof c === "string" && /^#\S+$/.test(c));
+    const byId = idCss ? await stampsOf(scope.locator(idCss)) : null;
+    if (!idCss || !byId || !byId.includes(fx)) return { selector: sel, missed: "namesake" };
+    const fallbacks = (sel.fallbacks ?? []).filter((fb) => fb.css !== idCss);
+    return {
+      selector: {
+        css: idCss,
+        ...(sel.frame ? { frame: sel.frame } : {}),
+        ...(sel.shownText ? { shownText: sel.shownText } : {}),
+        ...(fallbacks.length ? { fallbacks } : {}),
+      },
+      repinned: "namesake",
+    };
+  } catch {
+    return { selector: sel };
+  }
 }
 
 // The derived label equals the name attribute only — a label-based locator would then
@@ -2934,6 +3139,12 @@ export class AutoLearnAdapter extends BasePortalAdapter {
    *  DOM order is never the tie-break, and handing the page to the planner meant Continue pressed with
    *  nothing selected. */
   private recordTypeRefused: { reason: Exclude<RecordTypeChoice["reason"], "matched" | "unmatched">; jobClass: string; candidates: string[] } | null = null;
+  /** #178: the lookup buttons the pass pressed ON THIS PAGE that populated something, by label (lower
+   *  case). Reset at each pass. A control in here is never the page's advance — live City of Boise
+   *  run 3: the planner had chosen the address "Search" as the page's advance (reasonable before the
+   *  pass existed); the pass searched, picked the row, filled the parcel and closed the dialog, and
+   *  the advance then pressed Search again and re-opened the dialog. */
+  private lookupPopulatedLabels = new Set<string>();
   /** Set when the review page's own save was still pending when the learn handed over (B3). */
   private reviewUnsavedWarning = "";
   /** THE PROJECT'S OWN SECRETS, READ BY NAME AT FILL TIME (hard rule 2). Live on PGE (2026-09-28):
@@ -2987,6 +3198,9 @@ export class AutoLearnAdapter extends BasePortalAdapter {
   /** The completion/receipt page as text + URL, captured while standing on it. */
   finalSubmitPageText = "";
   finalSubmitUrl = "";
+  /** #178 — lookup / populate buttons already pressed, by page path + section + label + the section's
+   *  state (its blanks, whether it holds a record): never pressed twice in the same page state. */
+  private readonly lookupPressed = new Set<string>();
   // A grid is chosen once per run; re-choosing on a re-scrape would re-click the row.
   private addressRowChosen = false;
   /** Set when the ranked chooser REFUSED the grid: the looked-up issuing agency names no row and
@@ -3549,11 +3763,14 @@ export class AutoLearnAdapter extends BasePortalAdapter {
    *  from project data. Returns how many were filled; appends recipe steps + labels
    *  like other passes. Fills in DOM order so a manufacturer select's AJAX postback
    *  lands before its dependent model select is attempted (applyFill then waits for
-   *  the model option to exist via waitForOptionReady). */
+   *  the model option to exist via waitForOptionReady). `revealedOnly` (the post-fill re-scan's,
+   *  #237) marks a step `conditional` when its control was not on the page at entry (it never
+   *  answers yes for a PV array's control: see the re-scan). */
   private async fillEquipmentSelects(
     fields: ExtractedField[],
     alreadyFilledLabels: string[],
     steps: RecipeStep[],
+    revealedOnly?: (f: ExtractedField) => boolean,
   ): Promise<number> {
     let filled = 0;
     // Proximity side-tracking for portals with NO usable section headers: once a
@@ -3603,7 +3820,7 @@ export class AutoLearnAdapter extends BasePortalAdapter {
       // recorded, and the rows the learn adds from the recorded array1* steps got no Qty at all.
       // On a page of array rows, a control inside a row is never skipped for its label; the value
       // check below leaves one already holding this project's value alone.
-      const rowControl = arrayRowPage && /pv ?array|\barray\b/i.test(`${field.section || ""} ${field.label || ""}`);
+      const rowControl = arrayRowPage && namesPvArray(field);
       if (field.label && !dupLabel && !rowControl && alreadyFilledLabels.includes(field.label)) continue;
       // Proximity only carries WITHIN one section and only a few fields deep.
       if ((field.section || "") !== lastSection) {
@@ -3740,6 +3957,7 @@ export class AutoLearnAdapter extends BasePortalAdapter {
         // #535: a row control's earlier write this page (the planner's system total, a 405 W pick)
         // is superseded: its step goes, so the recipe types this control once, from this key.
         if (rowControl) this.dropSupersededRowSteps(steps, field);
+        if (revealedOnly?.(field)) step.conditional = true;
         steps.push(step);
         if (field.label) alreadyFilledLabels.push(field.label);
         this.equipmentLanded.set(failKey, candidate);
@@ -5206,6 +5424,19 @@ export class AutoLearnAdapter extends BasePortalAdapter {
       // left, ended, stopped or found nothing fillable on without entering this job's own data there
       // — the incident, settled here (every exit of the walk), before the backstop is disposed.
       result = this.settleInfoPageProof(result, backstop);
+      // THE LEARNER NEVER WRITES THE LEARN JOB'S DATA OR A DATE INTO A SELECTOR (#235). The walk
+      // records what the page showed: a results row by its content (Boise's address, parcel, owner
+      // and licence rows, labelled with the learn property's own values), a certification tick by the
+      // date printed beside it. A recipe is replayed for every job on the portal, so on every exit of
+      // the walk a results-row pick becomes a ROW ROLE (replayed by THAT job's value) and a dated
+      // label becomes the control's own id — one predicate with the replay (learnDataInSelectors).
+      {
+        const scrubbed = withoutLearnDataInSelectors(result.steps ?? [], this.learnIdentityOf(project));
+        if (scrubbed.changed.length) {
+          result = { ...result, steps: scrubbed.steps };
+          this.debug?.event({ type: "learn_data_scrubbed", changed: scrubbed.changed.slice(0, 20) });
+        }
+      }
       // #394: the walk starts on the page login left loaded — if the redirect guard could not
       // cover it, the result says so (never silent).
       if (guardNote) result = { ...result, message: `${result.message} ${guardNote}`.trim() };
@@ -5312,6 +5543,28 @@ export class AutoLearnAdapter extends BasePortalAdapter {
       // so this reaches the caller) — it's how the backend + UI surface "where to look".
       if (result && this.debug) result.debugDir = this.debug.dir;
     }
+  }
+
+  /** #235 — the learn job's own values, as withoutLearnDataInSelectors matches them: the property's
+   *  street, owner and parcel (the project and the site contact), and the filing company's names,
+   *  street, phone and email (the applicant contact). The learner has no licence numbers: a licence
+   *  row is told by its shape (a long number in a licence list). */
+  private learnIdentityOf(project: ProjectRecord): LearnIdentity {
+    const site = this.siteContactIdentity ?? {};
+    const company = this.contactIdentity ?? {};
+    const snapshot = ((project as { parserSnapshot?: Record<string, unknown> }).parserSnapshot ?? {}) as Record<string, unknown>;
+    const s = (v: unknown): string => String(v ?? "").trim();
+    const fullName = (c: ContactIdentity): string => s(c.fullName) || [s(c.firstName), s(c.lastName)].filter(Boolean).join(" ");
+    return {
+      siteStreet: s(project.projectAddress).split(",")[0].trim(),
+      ownerNames: [s(project.homeownerName), fullName(site)].filter(Boolean),
+      parcels: [s(site.parcel), s(snapshot.apn), s(snapshot.parcelNumber)].filter(Boolean),
+      companyNames: [s(company.companyName), ...(company.ownNames ?? []).map(s)].filter(Boolean),
+      companyStreet: s(company.street),
+      companyContacts: [s(company.phone), s(company.email)].filter(Boolean),
+      // The walk is ending now: only today's date (within the slack) printed in a label is volatile.
+      learnedAt: Date.now(),
+    };
   }
 
   // ---------------------------------------------------------------------------
@@ -5427,7 +5680,8 @@ export class AutoLearnAdapter extends BasePortalAdapter {
       const labelFb = c.label ? [{ label: c.label }] : [];
       if (c.id && /^[A-Za-z][\w-]*$/.test(c.id)) return { css: `#${c.id}`, ...(labelFb.length ? { fallbacks: labelFb } : {}) };
       if (c.label) return { label: c.label };
-      if (c.name) return { css: `[name="${c.name.replace(/"/g, '\\"')}"]` };
+      // The one name-attribute builder (#229, shared/src/recipeSelector), never a second escaping.
+      if (c.name) return { css: nameAttributeCss(c.name) };
       return { css: "[data-al-sig]" };
     };
     // Which extracted fields are signature controls — by the mark the in-page reading left.
@@ -5856,7 +6110,7 @@ export class AutoLearnAdapter extends BasePortalAdapter {
     };
     if (!(await stillUp())) return true;
     // The modal's own close control first, then Escape.
-    for (const sel of ["#ACADialogFrame_Close", ".ui-dialog-titlebar-close", 'a[title="Close" i]', 'button[aria-label="Close" i]', 'img[alt="Close" i]']) {
+    for (const sel of ["#ACADialogFrame_Close", "#ACADialog_closebtn", ".ui-dialog-titlebar-close", 'a[title="Close" i]', 'button[aria-label="Close" i]', 'img[alt="Close" i]']) {
       const c = page.locator(sel).first();
       const closeVisible = (await c.count().catch(() => 0)) > 0
         && (typeof c.isVisible === "function" ? await c.isVisible().catch(() => false) : false);
@@ -5932,23 +6186,45 @@ export class AutoLearnAdapter extends BasePortalAdapter {
    *  text, the section's own text, and its control ids. Each section container, Add New and Edit
    *  is stamped (data-al-csec / data-al-caddnew / data-al-cedit) so the pass can act on exactly
    *  that section. null when the page cannot be read (a stub page) — the positional fallback. */
-  private async acaContactSectionsOnPage(): Promise<Array<{
+  private async acaContactSectionsOnPage(opts: { lookups?: boolean } = {}): Promise<Array<{
     key: number; heading: string; instruction: string; text: string;
     addNewId: string; selectId: string; editId: string; hasAddNew: boolean; hasEdit: boolean;
+    /** #178 (only with opts.lookups): the section's lookup / populate buttons (portalSafety
+     *  isLookupButtonLabel, judged IN the page), stamped data-al-clookup=<lookupKey>, in document
+     *  order; the required inputs still blank (visible, or a hidden aria-required validator — ACA
+     *  marks a required RECORD section with one); the typed inputs it holds and how many are blank;
+     *  whether it holds the split-address boxes (Street No. / Street Name) and they are typed. */
+    lookups: Array<{ lookupKey: number; id: string; label: string; role: "link" | "button" }>;
+    requiredBlank: string[]; typedTotal: number; typedBlank: number; addressTyped: boolean;
+    /** The labels of the section's shown boxes that HOLD a value — what the walk (or the portal)
+     *  answered here; a section the walk filled is never stopped as "could not fill". */
+    typedLabels: string[];
+    /** A SEARCH THAT WAS TYPED BUT NEVER COMMITTED: shown boxes holding a value that post NOTHING (no
+     *  name, no form attribute — a search box, whose value reaches the application only through the
+     *  section's search and a picked row), and the section's named hidden inputs, with how many hold a
+     *  value (what a pick writes). Read with the rest; lookupButtonPass's rule 3. */
+    searchOnlyFilled: number; hiddenNamed: number; hiddenNamedFilled: number;
   }> | null> {
     const page = this.page;
     if (!page || typeof page.evaluate !== "function") return null;
-    const raw = await page.evaluate(() => {
+    // The lookup words are the SHARED predicate's, asked in the page (never a second list here).
+    if (opts.lookups) await page.evaluate(PORTAL_SAFETY_IN_PAGE_SOURCE).catch(() => null);
+    const raw = await page.evaluate((src: { lookups: boolean; global: string }) => {
       // NO named functions in here: keepNames wraps them in __name, which the page may lack.
-      const out: Array<{ key: number; heading: string; instruction: string; text: string; addNewId: string; selectId: string; editId: string; hasAddNew: boolean; hasEdit: boolean }> = [];
+      type Sec = { key: number; heading: string; instruction: string; text: string; addNewId: string; selectId: string; editId: string; hasAddNew: boolean; hasEdit: boolean; lookups: Array<{ lookupKey: number; id: string; label: string; role: "link" | "button" }>; requiredBlank: string[]; typedTotal: number; typedBlank: number; addressTyped: boolean; typedLabels: string[]; searchOnlyFilled: number; hiddenNamed: number; hiddenNamedFilled: number };
+      const out: Sec[] = [];
       const containers: Element[] = [];
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const ps = (globalThis as any)[src.global];
+      const isLookup = (label: string): boolean => src.lookups && !!ps && typeof ps.isLookupButtonLabel === "function" && ps.isLookupButtonLabel(label) === true;
+      let lookupSeq = 0;
       const controls = Array.from(document.querySelectorAll("a, button, input[type='button'], input[type='submit']")) as HTMLElement[];
       for (const el of controls) {
         const own = el.tagName === "INPUT" ? String((el as HTMLInputElement).value || "") : String(el.innerText || el.textContent || el.getAttribute("title") || "");
         const label = own.replace(/\s+/g, " ").trim();
         // "Look Up" marks a LOOK-UP section (Corvallis's Licensed Professional: a CCB search, no
         // Add New) — read so the pass knows the page is not all its own to settle.
-        const kind = /^add new$/i.test(label) ? "add" : /^select from account$/i.test(label) ? "select" : /^edit$/i.test(label) ? "edit" : /^look ?up$/i.test(label) ? "lookup" : "";
+        const kind = /^add new$/i.test(label) ? "add" : /^select from account$/i.test(label) ? "select" : /^edit$/i.test(label) ? "edit" : /^look ?up$/i.test(label) ? "lookup" : isLookup(label) ? "lookup" : "";
         if (!kind) continue;
         const r = el.getBoundingClientRect();
         const st = window.getComputedStyle(el);
@@ -5978,16 +6254,79 @@ export class AutoLearnAdapter extends BasePortalAdapter {
           containers.push(container);
           idx = containers.length - 1;
           container.setAttribute("data-al-csec", String(idx));
-          out.push({ key: idx, heading, instruction, text: "", addNewId: "", selectId: "", editId: "", hasAddNew: false, hasEdit: false });
+          out.push({ key: idx, heading, instruction, text: "", addNewId: "", selectId: "", editId: "", hasAddNew: false, hasEdit: false, lookups: [], requiredBlank: [], typedTotal: 0, typedBlank: 0, addressTyped: false, typedLabels: [], searchOnlyFilled: 0, hiddenNamed: 0, hiddenNamedFilled: 0 });
         }
         const rec = out[idx];
         if (kind === "add" && !rec.hasAddNew) { rec.hasAddNew = true; rec.addNewId = el.id || ""; el.setAttribute("data-al-caddnew", String(idx)); }
         if (kind === "select" && !rec.selectId) rec.selectId = el.id || "";
         if (kind === "edit" && !rec.hasEdit) { rec.hasEdit = true; rec.editId = el.id || ""; el.setAttribute("data-al-cedit", String(idx)); }
+        // #178: every lookup / populate button of the section, by the SHARED predicate (a "Select
+        // from Account" is a populate word too, so the contact pass's picker is read here as well
+        // — the lookup pass never presses one on a section the contact pass owns).
+        if (src.lookups && isLookup(label)) {
+          const lookupKey = lookupSeq++;
+          el.setAttribute("data-al-clookup", String(lookupKey));
+          rec.lookups.push({ lookupKey, id: el.id || "", label, role: el.tagName === "A" ? "link" : "button" });
+        }
       }
-      for (let i = 0; i < out.length; i++) out[i].text = String((containers[i] as HTMLElement).innerText || "").replace(/\s+/g, " ").trim().slice(0, 800);
+      for (let i = 0; i < out.length; i++) {
+        const c = containers[i] as HTMLElement;
+        out[i].text = String(c.innerText || "").replace(/\s+/g, " ").trim().slice(0, 800);
+        if (!src.lookups) continue;
+        // THE SECTION'S OWN INPUTS. A required box is blank when it is visible, required (the
+        // attribute, aria-required, a "Required" title, an asterisk on its label or beside it) and
+        // empty — or when it is a HIDDEN required validator (ACA's txtValidateSectionRequired, in a
+        // display:none table with aria-required="true"): that is how the portal marks a record
+        // section as required before anything is added, and the required sweep cannot see it.
+        const vis = (e: Element) => { const rr = (e as HTMLElement).getBoundingClientRect(); return rr.width > 0 && rr.height > 0; };
+        const norm = (s: string | null | undefined) => String(s || "").replace(/\s+/g, " ").trim();
+        const labelOf = (el: Element): string => {
+          const id = el.getAttribute("id");
+          if (id) { const l = document.querySelector(`label[for="${CSS.escape(id)}"]`); if (l && norm(l.textContent)) return norm(l.textContent); }
+          const w = el.closest("label"); if (w && norm(w.textContent)) return norm(w.textContent);
+          return norm(el.getAttribute("aria-label") || el.getAttribute("placeholder") || "");
+        };
+        const requiredMark = (el: Element): boolean => {
+          if ((el as HTMLInputElement).required || el.getAttribute("aria-required") === "true") return true;
+          if (/\brequired\b/i.test(String(el.getAttribute("title") || ""))) return true;
+          const id = el.getAttribute("id");
+          if (id) { const l = document.querySelector(`label[for="${CSS.escape(id)}"]`); if (l && /\*/.test(l.textContent || "")) return true; }
+          const grp = el.closest("[class*='element_group'], .form-group, [class*='form-group'], fieldset, [class*='Field'], [class*='field']");
+          return !!grp && !!grp.querySelector("[class*='equired']");
+        };
+        let streetBoxes = 0;
+        let streetBlank = 0;
+        for (const el of Array.from(c.querySelectorAll("input, select, textarea"))) {
+          const type = String(el.getAttribute("type") || "").toLowerCase();
+          if (type === "hidden" && el.getAttribute("name")) {
+            out[i].hiddenNamed++;
+            if (norm((el as HTMLInputElement).value)) out[i].hiddenNamedFilled++;
+          }
+          if (["hidden", "button", "submit", "checkbox", "radio", "file", "image", "reset"].includes(type)) continue;
+          const tag = el.tagName.toLowerCase();
+          const val = tag === "select"
+            ? (/^(please\s+)?select\.{0,3}$|^--/i.test(norm((el as HTMLSelectElement).selectedOptions?.[0]?.textContent)) ? "" : norm((el as HTMLSelectElement).value))
+            : norm((el as HTMLInputElement).value);
+          const shown = vis(el);
+          const lbl = labelOf(el);
+          if (shown) {
+            out[i].typedTotal++;
+            if (!val) out[i].typedBlank++;
+            else {
+              out[i].typedLabels.push(lbl || out[i].heading);
+              if (tag === "input" && !el.getAttribute("name") && !el.getAttribute("form")) out[i].searchOnlyFilled++;
+            }
+            if (/\b(street|house)\s*(no\.?|number|#|num)\b|\bstreet\s*name\b/i.test(lbl)) { streetBoxes++; if (!val) streetBlank++; }
+            if (!val && requiredMark(el)) out[i].requiredBlank.push(lbl || out[i].heading);
+          } else if (!val && ((el as HTMLInputElement).required || el.getAttribute("aria-required") === "true")) {
+            // The hidden validator: required by attribute, nothing else. Named by the heading.
+            if (!out[i].requiredBlank.includes(out[i].heading)) out[i].requiredBlank.push(out[i].heading);
+          }
+        }
+        out[i].addressTyped = streetBoxes >= 2 && streetBlank === 0;
+      }
       return out;
-    }).catch(() => null);
+    }, { lookups: !!opts.lookups, global: PORTAL_SAFETY_GLOBAL }).catch(() => null);
     return Array.isArray(raw) ? raw : null;
   }
 
@@ -6488,15 +6827,168 @@ export class AutoLearnAdapter extends BasePortalAdapter {
     return corrected;
   }
 
+  /**
+   * COMMIT A POP-UP THE WALK OPENED (#131). planHiddenReveal tags the dialog it opened
+   * (`data-al-popup`); once the page's fills are done and the dialog is still shown, its own commit
+   * control is clicked: Save / OK / Done / Apply / Update (optionally "and close" / "changes" /
+   * "details"), never a submit, a payment or a cancel, and the shared predicates have the last word
+   * (SUBMIT_INTENT, isSubmitIntent, isPayFee: one answer at every door). Committed means the dialog
+   * closed; the click is recorded as "pop-up: save (commits the pop-up)". A dialog that will not
+   * close is said in the run log and left for the page's own read-back to name.
+   */
+  /** A pop-up control (its opener, or the dialog's own title) that reads as a filing, a payment or a
+   *  signature request by the shared predicates — the one answer every other door asks. */
+  static popupControlRefused(name: string): boolean {
+    const n = String(name ?? "").trim();
+    return !!n && (SUBMIT_INTENT.test(n) || sharedIsSubmitIntent(n) || isPayFee(n) || isSignatureRequestControl(n));
+  }
+
+  private async popupCommitPass(steps: RecipeStep[], pageCount: number): Promise<boolean> {
+    const page = this.page;
+    if (!page || typeof page.evaluate !== "function" || typeof page.locator !== "function") return false;
+    const found = await page.evaluate((attr: string) => {
+      const dlg = document.querySelector(`[${attr}]`) as HTMLElement | null;
+      if (!dlg) return null;
+      const r = dlg.getBoundingClientRect();
+      const cs = getComputedStyle(dlg);
+      if (!(r.width > 0 && r.height > 0) || cs.display === "none" || cs.visibility === "hidden") return null;
+      // THE DIALOG, NOT ONLY ITS BUTTON (Helm review of #268): its title (the reading planHiddenReveal
+      // uses) and the labels of its boxes, judged in node by the shared predicates.
+      const labelledBy = String(dlg.getAttribute("aria-labelledby") || "").split(/\s+/).filter(Boolean)
+        .map((i) => { const n = document.getElementById(i); return n ? n.textContent || "" : ""; }).join(" ");
+      const head = dlg.querySelector("h1, h2, h3, h4, legend");
+      const title = String(dlg.getAttribute("aria-label") || labelledBy || (head ? head.textContent || "" : "")).replace(/\s+/g, " ").trim().slice(0, 120);
+      const boxes: string[] = [];
+      for (const el of Array.from(dlg.querySelectorAll("input, textarea"))) {
+        const ty = String((el as HTMLInputElement).type || "").toLowerCase();
+        if (["hidden", "button", "submit", "checkbox", "radio", "file", "image", "reset"].includes(ty)) continue;
+        const id = el.getAttribute("id");
+        const lab = id ? document.querySelector(`label[for="${CSS.escape(id)}"]`) : el.closest("label");
+        boxes.push(String((lab ? lab.textContent : "") || el.getAttribute("aria-label") || el.getAttribute("placeholder") || el.getAttribute("title") || "").replace(/\s+/g, " ").trim().slice(0, 120));
+      }
+      const COMMIT = /^\s*(save|ok|okay|done|apply|update)(\s+(and\s+close|&\s+close|changes|details))?\s*$/i;
+      for (const b of Array.from(dlg.querySelectorAll("button, a, [role=button], input[type=button], input[type=submit]"))) {
+        const t = String(b.tagName === "INPUT" ? (b as HTMLInputElement).value : ((b as HTMLElement).innerText || b.textContent || "")).replace(/\s+/g, " ").trim();
+        const br = b.getBoundingClientRect();
+        const bs = getComputedStyle(b);
+        if (!(br.width > 0 && br.height > 0) || bs.display === "none" || bs.visibility === "hidden" || (b as HTMLButtonElement).disabled) continue;
+        if (!COMMIT.test(t)) continue;
+        b.setAttribute("data-al-popup-commit", "1");
+        const id = b.getAttribute("id") || "";
+        return { role: b.tagName === "A" ? "link" : "button", name: t, id: /^[A-Za-z][\w-]*$/.test(id) ? id : "", title, boxes };
+      }
+      return { role: "", name: "", id: "", title, boxes };
+    }, "data-al-popup").catch(() => null) as { role: string; name: string; id: string; title: string; boxes: string[] } | null;
+    if (!found) return false;
+    const signatureBox = (found.boxes ?? []).find((b) => !!b && isSignatureNameLabel(b));
+    if (AutoLearnAdapter.popupControlRefused(found.title) || signatureBox) {
+      // Refused means logged, not clicked: the pop-up is left for the page's read-back to name.
+      this.debug?.event({ type: "popup_commit_refused", page: pageCount, title: String(found.title ?? "").slice(0, 60), why: signatureBox ? "the pop-up holds a signature-name box" : "the pop-up's title reads as a filing, payment or signature" });
+      await page.evaluate(() => { document.querySelectorAll("[data-al-popup], [data-al-popup-commit]").forEach((n) => { n.removeAttribute("data-al-popup"); n.removeAttribute("data-al-popup-commit"); }); }).catch(() => null);
+      return false;
+    }
+    if (!found.name || AutoLearnAdapter.popupControlRefused(found.name)) {
+      this.debug?.event({ type: "popup_no_commit", page: pageCount, name: found.name.slice(0, 40) });
+      return false;
+    }
+    await page.locator("[data-al-popup-commit]").first().click({ timeout: 3000 });
+    await sleep(400);
+    const closed = await page.evaluate((attr: string) => {
+      const dlg = document.querySelector(`[${attr}]`) as HTMLElement | null;
+      if (!dlg) return true;
+      const r = dlg.getBoundingClientRect();
+      const cs = getComputedStyle(dlg);
+      return !(r.width > 0 && r.height > 0) || cs.display === "none" || cs.visibility === "hidden";
+    }, "data-al-popup").catch(() => false);
+    await page.evaluate(() => {
+      document.querySelectorAll("[data-al-popup], [data-al-popup-commit]").forEach((n) => { n.removeAttribute("data-al-popup"); n.removeAttribute("data-al-popup-commit"); });
+    }).catch(() => null);
+    this.debug?.event({ type: closed ? "popup_committed" : "popup_commit_did_not_close", page: pageCount, name: found.name.slice(0, 40) });
+    if (!closed) return false;
+    steps.push({
+      action: "click", phase: "fill",
+      selector: { role: found.role === "link" ? "link" : "button", name: found.name, exact: true, ...(found.id ? { fallbacks: [{ css: `#${found.id}` }] } : {}) },
+      note: "pop-up: save (commits the pop-up)",
+    } as RecipeStep);
+    return true;
+  }
+
+  /**
+   * A TYPED UPLOADER on this page, or null: one container holding a file box, a DOCUMENT-TYPE list
+   * (attachmentTypes.isDocumentTypeList, the one predicate the ACA pass and the replay use) and the
+   * control that commits the pair ("Add Attachment", "Upload", "Attach", "Add", "Save"). Self-service
+   * portals (EnerGov's "Select Type + Add Attachment" rows, the bench's selfserve base) hold the chosen
+   * file in the box until that click; the learn used to leave it there, and the portal kept nothing.
+   * Tags the container and the commit control for accelaAttachmentSavePass. Reads only; clicks nothing.
+   */
+  private async findTypedUploader(): Promise<TypedUploader | null> {
+    const page = this.page;
+    if (!page || typeof page.evaluate !== "function") return null;
+    try {
+      const selects = page.locator("select");
+      const n = Math.min(await selects.count().catch(() => 0), 40);
+      for (let i = 0; i < n; i++) {
+        const sel = selects.nth(i);
+        if (!(await sel.isVisible().catch(() => false))) continue;
+        const texts = await sel.evaluate((el: HTMLSelectElement) => Array.from(el.options).map((o) => (o.text || "").trim())).catch(() => [] as string[]);
+        if (!isDocumentTypeList(texts)) continue;
+        const found = await sel.evaluate((el: Element, a: { box: string; commit: string }) => {
+          // No function declared in here (a named one needs the page's __name shim): the shown-test is inline.
+          const COMMIT = /^\s*(add|upload|attach|save)(\s+(an?\s+)?(attachment|document|file)s?)?\s*$/i;
+          let box: Element | null = el.parentElement;
+          for (let d = 0; box && d < 5; d++, box = box.parentElement) {
+            const file = box.querySelector("input[type=file]") as HTMLInputElement | null;
+            if (!file) continue;
+            const ctl = Array.from(box.querySelectorAll("button, a, input[type=button], input[type=submit]")).find((b) => {
+              const t = b.tagName === "INPUT" ? (b as HTMLInputElement).value : (b.textContent || "");
+              const r = b.getBoundingClientRect();
+              const cs = getComputedStyle(b);
+              const visible = r.width > 0 && r.height > 0 && cs.display !== "none" && cs.visibility !== "hidden";
+              return visible && !(b as HTMLButtonElement).disabled && COMMIT.test(t);
+            });
+            if (!ctl) return null; // the nearest box with the file has no commit: not a typed uploader
+            document.querySelectorAll(`[${a.box}], [${a.commit}]`).forEach((x) => { x.removeAttribute(a.box); x.removeAttribute(a.commit); });
+            box.setAttribute(a.box, "1");
+            ctl.setAttribute(a.commit, "1");
+            const name = (ctl.tagName === "INPUT" ? (ctl as HTMLInputElement).value : (ctl.textContent || "")).replace(/\s+/g, " ").trim();
+            const id = ctl.getAttribute("id");
+            return {
+              role: ctl.tagName === "A" ? "link" : "button",
+              name,
+              css: id && /^[A-Za-z][\w-]*$/.test(id) ? `#${id}` : "",
+              fileName: file.files && file.files[0] ? file.files[0].name : "",
+            };
+          }
+          return null;
+        }, { box: TYPED_UPLOADER_ATTR, commit: TYPED_UPLOADER_COMMIT_ATTR }).catch(() => null);
+        if (!found || !found.name) continue;
+        // ONE ANSWER AT EVERY DOOR (Helm review of #253): the commit's name goes through the shared
+        // submit-intent and pay predicates too, as lookupButtonPass's controls do. COMMIT already refuses
+        // them; this keeps the uploader from ever reading a filing or a payment as "save the file".
+        if (SUBMIT_INTENT.test(found.name) || sharedIsSubmitIntent(found.name) || isPayFee(found.name)) {
+          await page.evaluate((a: { box: string; commit: string }) => {
+            document.querySelectorAll(`[${a.box}], [${a.commit}]`).forEach((x) => { x.removeAttribute(a.box); x.removeAttribute(a.commit); });
+          }, { box: TYPED_UPLOADER_ATTR, commit: TYPED_UPLOADER_COMMIT_ATTR }).catch(() => null);
+          return null;
+        }
+        return found as TypedUploader;
+      }
+    } catch { /* a read that fails is no uploader, never a crash */ }
+    return null;
+  }
+
   // ACA ATTACHMENT step. Accela stages attachments in a pending list that is only
   // COMMITTED by the section's own "Save" button — "Continue Application" alone leaves
   // the files uncommitted (operator-reported, live). Each pending row also demands its
   // own required Description + Type before Save will take it. Deterministic: fill the
   // empty Description/Type on every pending row, click Save (never "Save and resume
   // later"), and wait for the grid to stop reading "No records found".
-  private async accelaAttachmentSavePass(project: ProjectRecord, steps: RecipeStep[]): Promise<boolean> {
+  private async accelaAttachmentSavePass(project: ProjectRecord, steps: RecipeStep[], uploader: TypedUploader | null): Promise<boolean> {
     const page = this.page;
     if (!page) return false;
+    // ACA's row is the whole page's attachment section; a typed uploader is ONE container (findTypedUploader
+    // tagged it), and only its own Type list, Description box and commit control are touched.
+    const scope = uploader ? page.locator(`[${TYPED_UPLOADER_ATTR}]`).first() : page;
     const isElectrical = /elec/i.test(project.permitType ?? "");
     const description = isElectrical
       ? "Solar PV plan set — electrical plans and specifications"
@@ -6531,7 +7023,7 @@ export class AutoLearnAdapter extends BasePortalAdapter {
       } catch { return []; }
     };
     // 1) Document-Type selects: fill only the EMPTY ones (--Select-- reads as "").
-    const allSelects = page.locator("select");
+    const allSelects = scope.locator("select");
     const selCount = await allSelects.count().catch(() => 0);
     let typeSet = 0;
     let sawTypeSelect = false;
@@ -6561,7 +7053,7 @@ export class AutoLearnAdapter extends BasePortalAdapter {
     //    "Description of Work" field on some other step.
     let descFilled = 0;
     if (sawTypeSelect) {
-      const descBoxes = page.locator("textarea");
+      const descBoxes = scope.locator("textarea");
       const descCount = await descBoxes.count().catch(() => 0);
       for (let i = 0; i < descCount; i++) {
         const box = descBoxes.nth(i);
@@ -6578,11 +7070,13 @@ export class AutoLearnAdapter extends BasePortalAdapter {
     //    hand-coded OregonEPermittingAdapter uses the link form for the same reason).
     //    The exact name keeps "Save and resume later:" out (its accessible name is that
     //    control's long img alt text).
-    const saveBtn = page.getByRole("link", { name: /^\s*Save\s*$/i })
-      .or(page.getByRole("button", { name: /^\s*Save\s*$/i }))
-      // Never the action bar's "Save and resume later" (attachmentSave.ts): it also has btnSave in its id.
-      .or(page.locator(`${ATTACHMENT_SAVE_CSS}, input[type='submit'][value='Save' i], input[type='button'][value='Save' i]`))
-      .first();
+    const saveBtn = uploader
+      ? page.locator(`[${TYPED_UPLOADER_COMMIT_ATTR}]`).first()
+      : page.getByRole("link", { name: /^\s*Save\s*$/i })
+        .or(page.getByRole("button", { name: /^\s*Save\s*$/i }))
+        // Never the action bar's "Save and resume later" (attachmentSave.ts): it also has btnSave in its id.
+        .or(page.locator(`${ATTACHMENT_SAVE_CSS}, input[type='submit'][value='Save' i], input[type='button'][value='Save' i]`))
+        .first();
     // ACA keeps the Save anchor inside a container it reveals with JS only once the
     // uploads finish, and a role locator skips the hidden a11y tree — so WAIT for it
     // instead of counting once.
@@ -6602,7 +7096,11 @@ export class AutoLearnAdapter extends BasePortalAdapter {
         .locator("body").innerText().catch(() => "")) ?? "");
     } catch { gridText = ""; }
     const verifyText = gridText || String((await page.locator("body").innerText().catch(() => "")) ?? "");
-    const committed = Boolean(verifyText) && !/no records found/i.test(verifyText);
+    // A typed uploader's commit lists the file by NAME (the box itself is cleared for the next one):
+    // the name in the page's text, outside the file box, is the evidence. No name known = not proven.
+    const committed = uploader
+      ? Boolean(uploader.fileName) && verifyText.includes(uploader.fileName)
+      : Boolean(verifyText) && !/no records found/i.test(verifyText);
     this.debug?.event({ type: "attachment_save", descFilled, typeSet, committed });
     if (descFilled) steps.push({ action: "fill", phase: "upload", selector: { css: "textarea" }, value: description, note: "attachment: description" });
     // Record the option the pass ACTUALLY selected - a fabricated label would replay as
@@ -6611,16 +7109,20 @@ export class AutoLearnAdapter extends BasePortalAdapter {
     steps.push({
       action: "click",
       phase: "upload",
-      selector: {
-        // LINK role - the live control is an anchor (see the locator note above).
-        role: "link",
-        name: "Save",
-        exact: true,
-        fallbacks: [
-          { css: ATTACHMENT_SAVE_CSS },
-          { role: "button", name: "Save", exact: true },
-        ],
-      },
+      // The note is the replay's attachment-row vocabulary (recordedAttachmentRow): the commit of THIS
+      // row, whatever the portal calls it — ACA's "Save" link, a typed uploader's "Add Attachment".
+      selector: uploader
+        ? { role: uploader.role, name: uploader.name, exact: true, ...(uploader.css ? { fallbacks: [{ css: uploader.css }] } : {}) }
+        : {
+          // LINK role - the live control is an anchor (see the locator note above).
+          role: "link",
+          name: "Save",
+          exact: true,
+          fallbacks: [
+            { css: ATTACHMENT_SAVE_CSS },
+            { role: "button", name: "Save", exact: true },
+          ],
+        },
       note: "attachment: save (commits the upload)",
     });
     return committed;
@@ -6869,10 +7371,11 @@ export class AutoLearnAdapter extends BasePortalAdapter {
     return false;
   }
 
-  private noteVerifiedRecordTypeTicked(field: ExtractedField, offeredCount: number, steps: RecipeStep[]): void {
+  private noteVerifiedRecordTypeTicked(field: ExtractedField, offeredCount: number, steps: RecipeStep[], selector?: RecipeSelector): void {
     const label = String(field.label || "").trim();
     // A catalog's "Apply <type>" BUTTON is clicked, not checked (Tyler EnerGov's Application Assistant).
-    steps.push({ action: field.fieldType === "button" ? "click" : "check", phase: "fill", selector: field.selector, note: `record type (verified): ${label.slice(0, 60)}` });
+    // `selector`: the one checked against the element before the click (#228, recordedClickSelector).
+    steps.push({ action: field.fieldType === "button" ? "click" : "check", phase: "fill", selector: selector ?? field.selector, note: `record type (verified): ${label.slice(0, 60)}` });
     // A button pick leaves the catalog: the walk re-reads the page before anything else is asked.
     if (field.fieldType === "button") this.verifiedPickNavigated = true;
     this.verifiedRecordTypeTicked = true;
@@ -6932,6 +7435,8 @@ export class AutoLearnAdapter extends BasePortalAdapter {
       const listCount = checkables.filter((f) => this.sameRecordTypeList(f, on)).length;
       if (!this.verifiedRecordTypeTicked) {
         const loc = await this.locator(hit.selector).catch(() => null);
+        // A catalog button's step selector is checked against it now, while it is on the page (#228).
+        const recorded = hit.fieldType === "button" ? await this.recordedClickSelector(hit) : undefined;
         const ok = hit.fieldType === "button"
           ? await this.clickCatalogEntry(String(hit.label || ""), loc, pageCount)
           : loc
@@ -6943,7 +7448,7 @@ export class AutoLearnAdapter extends BasePortalAdapter {
           // another option — a person ticks this one.
           this.debug?.event({ type: "record_type_verified_tick_failed", label: on.label.slice(0, 70), page: pageCount });
         } else {
-          this.noteVerifiedRecordTypeTicked(hit, listCount, steps);
+          this.noteVerifiedRecordTypeTicked(hit, listCount, steps, recorded);
           await this.waitForDynamicFieldsSettle().catch(() => null);
         }
       }
@@ -8995,7 +9500,8 @@ export class AutoLearnAdapter extends BasePortalAdapter {
           const navStep: RecipeStep = {
             action: "click",
             phase: "open",
-            selector: navField.selector,
+            // Checked against the element before the click (#228): a name that finds a namesake leads with the #id.
+            selector: await this.recordedClickSelector(navField),
             note: `navigate to application: ${navField.label || "link"}`,
           };
           steps.push(navStep);
@@ -9193,12 +9699,15 @@ export class AutoLearnAdapter extends BasePortalAdapter {
         // ACA commits attachments only on the section's own Save (Continue Application
         // leaves them pending) — and each pending row needs its Description + Type first.
         // Never on a review page: the Save is a click, and the attach-only pass clicks nothing.
-        if (up.attached > 0 && !reviewUpload && this.isAcaPage(url, fields) && acaAttachmentSaves < 3) {
+        // A TYPED UPLOADER (one file box, a Document Type list and an Add button that commits the
+        // pair) holds its file just as ACA's pending row does: nothing is attached until the Add.
+        const typedUploader = up.attached > 0 && !reviewUpload && !this.isAcaPage(url, fields) ? await this.findTypedUploader() : null;
+        if (up.attached > 0 && !reviewUpload && (this.isAcaPage(url, fields) || typedUploader) && acaAttachmentSaves < 3) {
           acaAttachmentSaves++;
           const saved = await this.withPhaseTimeout(
             "attachment_save",
             90_000,
-            () => this.accelaAttachmentSavePass(_project, steps),
+            () => this.accelaAttachmentSavePass(_project, steps, typedUploader),
             false,
           );
           this.debug?.event({ type: "aca_attachment_save_pass", page: pageCount, saved });
@@ -9496,6 +10005,17 @@ export class AutoLearnAdapter extends BasePortalAdapter {
         // the set of revealed controls has changed, and never twice at the same set.
         let lateEquipSig: string | null = null;
         let lastRevealSig = "";
+        // WHICH CONTROLS A FILL REVEALED: identity = section + label + type, against the page's
+        // entry scrape (`fields`). The revealed_controls event names them, and #237: a step this
+        // re-scan records on one is marked `conditional` — the replay skips it, named, on a job
+        // whose answers do not reveal it (PacifiCorp 32f3d2b2 102/111/112, battery-inverter
+        // controls a later tick hides; Ameren 07370f52 25, a County that renders only once the
+        // address resolves: run-fatal or a blank required step). A control present at entry is
+        // never marked, whatever pass fills it, and neither is a PV array's (namesPvArray).
+        const revealIdOf = (f: ExtractedField): string => `${String(f.section ?? "").trim()}\u0000${String(f.label ?? "").trim()}\u0000${f.fieldType}`;
+        const atEntry = new Set(fields.map(revealIdOf));
+        const appearedAfterEntry = (f: ExtractedField): boolean => !!f.label && !atEntry.has(revealIdOf(f));
+        const revealedOnly = (f: ExtractedField): boolean => appearedAfterEntry(f) && !namesPvArray(f);
         for (let rescanPass = 0; rescanPass < MAX_RESCAN_PASSES; rescanPass++) {
           let revealedThisPass = 0;
           try {
@@ -9533,13 +10053,11 @@ export class AutoLearnAdapter extends BasePortalAdapter {
             // WHAT THE FILLS REVEALED, NAMED (labels only). newFillable above is "not filled yet",
             // which includes every optional box that was there from the start; the operator's
             // question after a live miss (PGE 2026-09-28, the account/meter boxes a choice
-            // revealed) is which controls APPEARED. Identity = section + label + type against the
-            // page's entry scrape. Diagnostic only — it changes nothing that is planned or filled.
+            // revealed) is which controls APPEARED (appearedAfterEntry, above). This event changes
+            // nothing that is planned or filled; the conditional mark below reads the same set.
             {
-              const idOf = (f: ExtractedField): string => `${String(f.section ?? "").trim()}\u0000${String(f.label ?? "").trim()}\u0000${f.fieldType}`;
-              const atEntry = new Set(fields.map(idOf));
-              const appeared = postFields.filter((f) => f.label && f.fieldType !== "button" && !atEntry.has(idOf(f)));
-              const sig = appeared.map(idOf).join("\u0001");
+              const appeared = postFields.filter((f) => f.fieldType !== "button" && appearedAfterEntry(f));
+              const sig = appeared.map(revealIdOf).join("\u0001");
               if (appeared.length && sig !== lastRevealSig) {
                 lastRevealSig = sig;
                 this.debug?.event({
@@ -9557,7 +10075,7 @@ export class AutoLearnAdapter extends BasePortalAdapter {
               // back must not loop here; MAX_RESCAN_PASSES bounds it too).
               if (lateEquipSig !== lastRevealSig) {
                 lateEquipSig = lastRevealSig;
-                const lateEquip = await this.fillEquipmentSelects(postFields, alreadyFilledLabels, steps);
+                const lateEquip = await this.fillEquipmentSelects(postFields, alreadyFilledLabels, steps, revealedOnly);
                 if (lateEquip > 0) {
                   pageFillCount += lateEquip;
                   // A DEBOUNCED autosave is invisible to the settle (nothing is on the wire for a
@@ -9614,6 +10132,7 @@ export class AutoLearnAdapter extends BasePortalAdapter {
               if (inFilledGroup(field)) continue; // never re-answer a radio group filled this page
               const step = await this.applyFill(field, fillReq, false);
               if (step) {
+                if (revealedOnly(field)) step.conditional = true; // #237
                 steps.push(step);
                 pageFillCount++;
                 revealedThisPass++;
@@ -9644,6 +10163,7 @@ export class AutoLearnAdapter extends BasePortalAdapter {
               };
               const step = await this.applyFill(nf, syntheticFill, true);
               if (step) {
+                if (revealedOnly(nf)) step.conditional = true; // #237
                 steps.push(step);
                 pageFillCount++;
                 revealedThisPass++;
@@ -9664,7 +10184,7 @@ export class AutoLearnAdapter extends BasePortalAdapter {
             // repeater's manufacturer/model comboboxes appear only after the Energy
             // Source cascade, so this is where they usually become fillable.
             try {
-              const equipFilled = await this.fillEquipmentSelects(postFields, alreadyFilledLabels, steps);
+              const equipFilled = await this.fillEquipmentSelects(postFields, alreadyFilledLabels, steps, revealedOnly);
               pageFillCount += equipFilled;
               revealedThisPass += equipFilled;
               // #535 — the same grace as the late pass above. Here a control the pass cannot fill (an
@@ -9782,12 +10302,13 @@ export class AutoLearnAdapter extends BasePortalAdapter {
           // ACA commits an attachment only on its section's Save (see d0). The answers on this
           // page are already in, so commit in place rather than re-entering the page — and say
           // so when the Save did not take, never leave the file silently pending.
-          if (rev.attached > 0 && !reviewUpload && this.isAcaPage(url, fields) && acaAttachmentSaves < 3) {
+          const typedUploader = rev.attached > 0 && !reviewUpload && !this.isAcaPage(url, fields) ? await this.findTypedUploader() : null;
+          if (rev.attached > 0 && !reviewUpload && (this.isAcaPage(url, fields) || typedUploader) && acaAttachmentSaves < 3) {
             acaAttachmentSaves++;
             const saved = await this.withPhaseTimeout(
               "attachment_save",
               90_000,
-              () => this.accelaAttachmentSavePass(_project, steps),
+              () => this.accelaAttachmentSavePass(_project, steps, typedUploader),
               false,
             );
             this.debug?.event({ type: "aca_attachment_save_pass", page: pageCount, saved, pass: "revealed" });
@@ -9828,6 +10349,34 @@ export class AutoLearnAdapter extends BasePortalAdapter {
 
         // Debug: capture the page AFTER fills have settled so it can be compared with "before".
         await saveDebugShot(`p${pageCount.toString().padStart(3, "0")}-after-${(pageTitle || "page").replace(/\s+/g, "_").slice(0, 40)}`);
+      }
+
+      // d3f) THE PAGE'S OWN LOOKUP / POPULATE BUTTONS, PRESSED ONCE PER SECTION (#178). Live City
+      //      of Meridian (Accela Step 1, 2026-11-12): the walk typed Street No. / Street Name, every
+      //      solar question and the signature, then Continue bounced — "Parcel Number: Required" and
+      //      "This section is required. Please add one record." for Contractor, Applicant and
+      //      Contact. All four are filled by a BUTTON the walk never pressed: "Find Address" runs the
+      //      address search and populates the Parcel section, "Autofill" copies the account's contact
+      //      into Applicant / Contact, "Look Up" searches the licensed-professional register. Generic:
+      //      the labels are read from the page (portalSafety isLookupButtonLabel — disjoint from every
+      //      filing word), a section is the heading-scoped container acaContactSectionsOnPage already
+      //      reads, the address section's button goes first (its result feeds the parcel), then every
+      //      section with a required blank, top to bottom; what a press populated is recorded as the
+      //      button click (never a typed parcel); a candidate list is the ranked address chooser's; a
+      //      REQUIRED section its button could not fill ends the page named. Never on a review page.
+      if (!plan.atReview && !isDashboard && hasFillable && this.page) {
+        const lookups = await this.withPhaseTimeout(
+          "lookup_buttons",
+          120_000,
+          () => this.lookupButtonPass({ steps, url, pageCount, alreadyFilledLabels, portalNotices, pageTrace, shot: saveDebugShot }),
+          { pressed: 0, stop: null as LearnResult | null },
+        );
+        if (lookups.stop) return lookups.stop;
+        if (lookups.pressed > 0) {
+          pageFillCount += lookups.pressed;
+          await this.waitForAutosaveIndicator(3000);
+          await sleep(400);
+        }
       }
 
       // d4) VERIFY THE FILLS LANDED before advancing. A portal can silently drop a fill — a
@@ -9956,6 +10505,10 @@ export class AutoLearnAdapter extends BasePortalAdapter {
         }
       }
 
+      // d4b) A POP-UP THE WALK OPENED AND FILLED IS SAVED (#131): its boxes post nothing until the
+      //      dialog's own Save copies them into the page. Left open, the page advanced with them blank.
+      if (!isDashboard) await this.popupCommitPass(steps, pageCount).catch(() => null);
+
       // d4c) THE PAGE AS THE WALK LEAVES IT (#536, #534) — a field the portal shows as invalid, a
       //      required box left unchecked, an equipment write that strayed, an equipment value the
       //      portal did not keep, a computed total still to be recalculated. Reads only; nothing here
@@ -10055,6 +10608,20 @@ export class AutoLearnAdapter extends BasePortalAdapter {
       if (typeof plan.advanceSelectorIndex === "number") {
         const advanceField = fields[plan.advanceSelectorIndex];
         if (!advanceField) break; // bad index — stop cleanly.
+        // A LOOKUP THE PASS ALREADY PRESSED IS NOT THE PAGE'S WAY FORWARD (#178, City of Boise run 3):
+        // the planner chose the address "Search" as this page's advance; the lookup pass had already
+        // searched, picked the row and filled the parcel, so pressing it again only re-opens the list.
+        // The curated forward finder takes over (never a submit, never pay) — else the planner re-plans.
+        {
+          const advLabel = String(advanceField.label ?? "").replace(/\s+/g, " ").trim().toLowerCase();
+          if (advLabel && this.lookupPopulatedLabels.has(advLabel)) {
+            this.debug?.event({ type: "advance_is_pressed_lookup", page: pageCount, label: advLabel.slice(0, 40) });
+            this.lookupPopulatedLabels.delete(advLabel);
+            if (await this.clickFallbackAdvance(steps, fields)) continue;
+            this.debug?.event({ type: "dead_advance_replan", page: pageCount, label: advLabel.slice(0, 40) });
+            continue;
+          }
+        }
         // Already proven not to move this page — fall through to the fallback finder, which
         // will pick a different control rather than repeating a click that does nothing.
         {
@@ -10194,11 +10761,13 @@ export class AutoLearnAdapter extends BasePortalAdapter {
         // An interstitial's forward control is clicked once per page (c2i'): remembered now, as
         // the click is made, so a return to the same page stops instead of clicking it again.
         if (interstitialAdvanceKey) this.navClicksByPath.add(interstitialAdvanceKey);
-        // Record the advance click, then perform it.
+        // Record the advance click, then perform it. Its selector is checked against the element first
+        // (#228) — except an interstitial's forward click, whose information-page pass (#344) judges the
+        // control its recorded selector resolves and is left exactly as it was.
         steps.push({
           action: "click",
           phase: "fill",
-          selector: advanceField.selector,
+          selector: interstitialAdvanceKey ? advanceField.selector : await this.recordedClickSelector(advanceField),
           note: `advance: ${advanceField.label || "next"}`,
         });
         // #344 — A HUMAN-VERIFIED INFORMATION PAGE: on the interstitial's forward click only (c2i'),
@@ -11824,7 +12393,8 @@ export class AutoLearnAdapter extends BasePortalAdapter {
       }
       return miss(line);
     }
-    if (out.via === "enter") this.typeaheadEnterPicks.set(boxKey, { label, held: out.held });
+    // A pick the portal SELECTED (Enter, or the box's own search control — #198) is shown outside the box.
+    if (out.via === "enter" || out.via === "search") this.typeaheadEnterPicks.set(boxKey, { label, held: out.held });
     const step: RecipeStep = {
       action: "fill",
       phase: "fill",
@@ -11907,9 +12477,11 @@ export class AutoLearnAdapter extends BasePortalAdapter {
     }
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const doorLoc = (await this.locator(doorField.selector).catch(() => null)) as any;
+    // The step's selector, checked against the door while it is still on the page (#228).
+    const doorRecorded = await this.recordedClickSelector(doorField);
     const clicked = doorLoc ? await withAutomationInput(this.page, () => doorLoc.click({ timeout: 5000 })).then(() => true).catch(() => false) : false;
     if (!clicked) return { ok: false, door: found, why: "the door could not be clicked" };
-    const doorStep: RecipeStep = { action: "click", phase: "fill", selector: doorField.selector, note: doorField.label || found, ...(doorField.fingerprint ? { fingerprint: doorField.fingerprint } : {}) };
+    const doorStep: RecipeStep = { action: "click", phase: "fill", selector: doorRecorded, note: doorField.label || found, ...(doorField.fingerprint ? { fingerprint: doorField.fingerprint } : {}) };
     await this.waitForDynamicFieldsSettle().catch(() => null);
     const after = (await this.extractAllFrames(EXTRACT_SEL)).map(toExtractedField);
     const values: Record<"street" | "city" | "state" | "zip", string> = {
@@ -11926,7 +12498,10 @@ export class AutoLearnAdapter extends BasePortalAdapter {
       // A State LIST takes the one option that IS this state ("OREGON" for "OR"), never a partial
       // match a select fallback could make ("OR" inside "FLORIDA"); none or several → left alone.
       let value = values[part];
-      if (part === "state" && f.fieldType === "select") {
+      // Any State box that OFFERS options is a list, whatever the extractor called it (live City of
+      // Bend re-learn, 2026-11-16: the "Can't find address?" dialog's State was not typed "select", so
+      // "Oregon" went in as typed and the list, which spells it "OREGON", took nothing).
+      if (part === "state" && (f.fieldType === "select" || (f.options?.length ?? 0) > 0)) {
         const want = usStateCode(value);
         const same = (f.options ?? []).filter((o) => !!want && usStateCode(o) === want);
         if (same.length !== 1) continue;
@@ -12171,6 +12746,20 @@ export class AutoLearnAdapter extends BasePortalAdapter {
 
     // A SEARCH-AS-YOU-TYPE BOX IS TYPED INTO AND PICKED FROM (#575): fill() would leave the value
     // un-picked in the box (which then reads as "held"), and the select path opens an empty list.
+    // ...AND THE BOX'S OWN MARKUP IS ASKED HERE (#244), by the one predicate the replay asks at its
+    // fill door (typeaheadBoxSays): an iWorQ autocomplete has no ARIA and no widget stamp for the
+    // scan to read (City of Star, live 2026-11-15: <input id="autocomplete_1" aria-label="properties
+    // autocomplete"> in div.autocomplete-template), so it was recorded as a plain fill and nothing
+    // was ever picked. The strategy goes ON THE FIELD, because the page's applied list and the
+    // re-assert pass read it there — without it the re-assert would fill() over the pick.
+    if (action === "fill" && field.fieldType === "text" && field.fillStrategy !== "typeahead" && !sensitive) {
+      const box = await this.locator(field.selector).catch(() => null);
+      const byMarkup = box ? await typeaheadBoxReason(box) : "";
+      if (byMarkup) {
+        field.fillStrategy = "typeahead";
+        this.debug?.event({ type: "typeahead_by_markup", label: String(field.label ?? "").slice(0, 60), why: byMarkup.slice(0, 120) });
+      }
+    }
     if (action === "fill" && field.fillStrategy === "typeahead") return this.applyTypeaheadFill(field, fillReq, value, sensitive);
 
     const res = await safeAction(
@@ -12357,6 +12946,959 @@ export class AutoLearnAdapter extends BasePortalAdapter {
       step.value = value;
     }
     return step;
+  }
+
+  /** #178 — PRESS THE PAGE'S LOOKUP / POPULATE BUTTONS, ONCE PER SECTION STATE, AND RE-READ.
+   *
+   *  The shape is clickComputeButton's (press a button so the page fills itself in, record the
+   *  click), generalised to sections: every heading-scoped container acaContactSectionsOnPage reads
+   *  (one heading-walk, not a second one), with its lookup-worded buttons (the SHARED predicate
+   *  isLookupButtonLabel, judged in the page), its required blanks and its typed inputs.
+   *
+   *  Candidates, in order:
+   *    1. the section holding the typed Street No. / Street Name boxes (address_split_form), when
+   *       they are filled — its "Find Address" validates the address and populates OTHER sections
+   *       (Accela's Parcel), so its own blanks do not decide it;
+   *    2. then, top to bottom, every section with a required blank (a visible required box, or the
+   *       hidden required validator ACA marks a record section with) — preferring a populate word
+   *       (Autofill) over a search word (Look Up) when a section offers both; a SEARCH button whose
+   *       section's own typed boxes are all blank is skipped (Accela's "FIND PARCEL" with no parcel
+   *       typed searches for nothing — and once Find Address has populated it, it is not blank).
+   *  Never: a label the filing predicates also claim (structurally impossible, pinned by
+   *  lookupButtonWords.test), "Select from Account" (the contact pass refuses the account picker on
+   *  purpose — a shared operator account would attach another company's contact), a section the
+   *  contact pass settled, the same section in the same state twice, or a review page (the caller).
+   *
+   *  After a press: a candidate list (two or more address rows) goes to the ranked address chooser
+   *  (chooseProjectAddressRow — the job's own address or a refusal, never the first row); a search
+   *  form that opened (Look Up's dialog) is searched ONCE by this client's business name, and only a
+   *  result that IS this client is picked; then the sections are re-read. What the press populated
+   *  (blanks that vanished anywhere on the page, a record that appeared, a section's hidden state
+   *  that filled) is recorded as the button click — by its label, css fallbacks, `populates` naming
+   *  the fields — never as a typed value, and the labels join alreadyFilledLabels so the re-plan
+   *  never types a parcel. A press that changed nothing records nothing.
+   *
+   *  A REQUIRED section still empty after its button (the Keelix test client has no Idaho licence,
+   *  so Contractor's Look Up finds nothing — the honest outcome) ends the page named: advancing is
+   *  the retry the portal already refused, and the page's own fallback ("Add New") is a person's. */
+  private async lookupButtonPass(ctx: {
+    steps: RecipeStep[];
+    url: string;
+    pageCount: number;
+    alreadyFilledLabels: string[];
+    portalNotices: string[];
+    pageTrace: string[];
+    /** The learn's bundle shot (saveDebugShot): one per press, after it settles, so a live miss is
+     *  diagnosable from the bundle (the Meridian 05:20 run had none). */
+    shot?: (label: string) => Promise<void>;
+  }): Promise<{ pressed: number; stop: LearnResult | null }> {
+    const page = this.page;
+    const none = { pressed: 0, stop: null };
+    this.lookupPopulatedLabels = new Set<string>();
+    if (!page || typeof page.evaluate !== "function" || typeof page.locator !== "function") return none;
+    /** A document token, so a FULL postback (the DOM replaced — ACA's __doPostBack on Find Address /
+     *  Look Up) is told from an in-page change: stamps from before the press are gone either way and
+     *  the sections are re-read, but "the page reloaded; no section changed" is a different finding. */
+    const stampDoc = async (): Promise<string> => page.evaluate(() => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const w = window as any;
+      if (!w.__alLookupDoc) w.__alLookupDoc = `d${Date.now()}${Math.floor(Math.random() * 1e6)}`;
+      return String(w.__alLookupDoc);
+    }).catch(() => "");
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const readDoc = async (): Promise<string> => page.evaluate(() => String((window as any).__alLookupDoc || "")).catch(() => "");
+    /** POSTBACK SETTLE: the loading indicator the press raised (ACA's ProcessLoading — an element whose
+     *  id or class reads loading / progress, or aria-busy, visible after the click) must be gone, AND
+     *  the network idle, bounded; then the dynamic-fields settle as everywhere else. A visible DIALOG
+     *  ends the wait at once: Accela's page-overlay-blocker mask is PART of an open dialog, not a
+     *  "busy" sign (Meridian 06:01: every modal-opening press waited the full 20 s on it). */
+    const settleAfterPress = async (): Promise<void> => {
+      const deadline = Date.now() + 20_000;
+      await page.waitForLoadState?.("domcontentloaded", { timeout: 15000 }).catch(() => null);
+      while (Date.now() < deadline) {
+        const state = await page.evaluate(() => {
+          const vis = (e: Element) => { const r = (e as HTMLElement).getBoundingClientRect(); const st = window.getComputedStyle(e); return r.width > 0 && r.height > 0 && st.visibility !== "hidden" && st.display !== "none"; };
+          for (const el of Array.from(document.querySelectorAll("[role='dialog'], [aria-modal='true'], [class*='dialog' i]:not([class*='mask' i]), [id*='dialog' i]:not([id*='mask' i])"))) {
+            if (vis(el) && el.querySelector("iframe, input, select, table, button, a")) return "dialog";
+          }
+          for (const el of Array.from(document.querySelectorAll("[id*='loading' i], [class*='loading' i], [id*='progress' i], [class*='progress' i], [aria-busy='true']"))) {
+            if (vis(el)) return "busy";
+          }
+          return "idle";
+        }).catch(() => "idle");
+        if (state !== "busy") break;
+        await sleep(400);
+      }
+      await page.waitForLoadState?.("networkidle", { timeout: Math.max(1000, deadline - Date.now()) }).catch(() => null);
+      await this.waitForDynamicFieldsSettle().catch(() => null);
+      await sleep(600);
+    };
+    /** The browser context, for a popup WINDOW the press opens (Accela asks to allow pop-ups). */
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const browserContext = (): any => { try { return typeof page.context === "function" ? page.context() : this.opened?.context; } catch { return this.opened?.context; } };
+    type Sec = NonNullable<Awaited<ReturnType<AutoLearnAdapter["acaContactSectionsOnPage"]>>>[number];
+    let path = "";
+    try { const u = new URL(ctx.url); path = u.host + u.pathname; } catch { path = String(ctx.url || "").split(/[?#]/)[0]; }
+    const norm = (s: string) => String(s ?? "").replace(/[*:]/g, " ").replace(/\s+/g, " ").trim().toLowerCase();
+    const stateKey = (s: Sec, label: string) => `${path}|${norm(s.heading)}|${norm(label)}|${s.requiredBlank.map(norm).join(",")}|${s.hasEdit ? "record" : "empty"}`;
+    const isPopulateWord = (label: string) => /auto-?fill|populate/i.test(label);
+    /** Rule 3's reading (see acaContactSectionsOnPage's searchOnlyFilled): typed into a box that posts
+     *  nothing, and nothing the section posts holds a value — the search was never committed. */
+    const uncommittedSearch = (s: Sec): boolean => s.searchOnlyFilled > 0 && s.hiddenNamed > 0 && s.hiddenNamedFilled === 0 && !s.hasEdit;
+    const sectionOwnedByContactPass = (s: Sec): boolean =>
+      this.acaFilledSectionHeadings.has(s.heading.toLowerCase())
+      || [s.addNewId, s.editId, s.selectId].some((id) => id && (this.acaFilledSectionControls.has(id) || this.acaEmptySectionControls.has(id)));
+    /** Visible, hidden-but-filled state of a section container — a Find Address that validated the
+     *  address writes the portal's address id into hidden boxes even when nothing visible moves. */
+    const hiddenFilled = async (key: number): Promise<number> => page.evaluate((k: number) => {
+      const c = document.querySelector(`[data-al-csec="${k}"]`);
+      if (!c) return 0;
+      let n = 0;
+      for (const el of Array.from(c.querySelectorAll("input[type='hidden']"))) if (String((el as HTMLInputElement).value || "").trim()) n++;
+      return n;
+    }, key).catch(() => 0);
+    // Visible iframes that can HOLD a dialog: named or id'd, or with a real document — never ACA's
+    // unnamed, pointer-events:none mask iframe (dvACADialogLayerMask), which appears together with the
+    // dialog and, read as "the new frame", shadowed the real ACADialogFrame (Meridian 06:01: the
+    // address list sat in the dialog frame while the pass read "changed nothing").
+    const visibleFrames = async (): Promise<string[]> => page.evaluate(() => (Array.from(document.querySelectorAll("iframe")) as HTMLIFrameElement[])
+      .filter((f) => { const r = f.getBoundingClientRect(); const st = window.getComputedStyle(f); return r.width > 0 && r.height > 0 && st.pointerEvents !== "none" && !/\bmask\b/i.test(f.className); })
+      .map((f) => f.getAttribute("name") || f.id || (/^(about:blank|javascript:|)$/i.test(String(f.getAttribute("src") || "").trim()) ? "" : String(f.getAttribute("src") || "").split("?")[0]))
+      .filter(Boolean)).catch(() => [] as string[]);
+    /** IN-DOCUMENT OVERLAYS (Boise 05:29: Accela's "Address Search Result List" is a modal DIV in the
+     *  main document — role / aria-modal / a modal-dialog-popup-overlay class or id, or a fixed /
+     *  absolute box covering most of the viewport). Each visible one is stamped data-al-overlay=<n>
+     *  (once), so the one that APPEARED after a press is the press's result and the search scope —
+     *  never "no effect". A bare mask (no rows, inputs or controls inside) is not the scope. */
+    const visibleOverlays = async (): Promise<Array<{ key: string; controls: number }>> => page.evaluate(() => {
+      const out: Array<{ key: string; controls: number }> = [];
+      const vw = window.innerWidth || 1;
+      const vh = window.innerHeight || 1;
+      const vis = (e: Element) => { const r = (e as HTMLElement).getBoundingClientRect(); const st = window.getComputedStyle(e); return r.width > 0 && r.height > 0 && st.visibility !== "hidden" && st.display !== "none"; };
+      const named = Array.from(document.querySelectorAll("[role='dialog'], [aria-modal='true'], [class*='modal' i], [id*='modal' i], [class*='dialog' i], [id*='dialog' i], [class*='popup' i], [id*='popup' i], [class*='overlay' i], [id*='overlay' i]"));
+      const big = Array.from(document.querySelectorAll("div, section, aside, form")).filter((e) => {
+        const st = window.getComputedStyle(e);
+        if (st.position !== "fixed" && st.position !== "absolute") return false;
+        const r = (e as HTMLElement).getBoundingClientRect();
+        return r.width * r.height >= 0.5 * vw * vh;
+      });
+      let seq = Number(document.body.getAttribute("data-al-overlay-seq") || "0");
+      for (const e of [...named, ...big]) {
+        if (!vis(e)) continue;
+        if (e === document.body || e === document.documentElement) continue;
+        let key = e.getAttribute("data-al-overlay");
+        if (!key) { key = `ov${seq++}`; e.setAttribute("data-al-overlay", key); }
+        if (out.some((o) => o.key === key)) continue;
+        out.push({ key, controls: e.querySelectorAll("tr, input, select, button, a").length });
+      }
+      document.body.setAttribute("data-al-overlay-seq", String(seq));
+      return out;
+    }).catch(() => [] as Array<{ key: string; controls: number }>);
+    const readSections = async (): Promise<Sec[] | null> => {
+      await this.waitForDynamicFieldsSettle().catch(() => null);
+      // A page that answers with anything but well-formed sections (no lookups list) has no
+      // lookup buttons to press: treat it as none instead of throwing out of the page walk.
+      const read = await this.acaContactSectionsOnPage({ lookups: true });
+      return Array.isArray(read) ? read.filter((s) => !!s && Array.isArray(s.lookups) && Array.isArray(s.requiredBlank)) : null;
+    };
+    let sections = await readSections();
+    if (!sections || !sections.some((s) => s.lookups.length)) return none;
+    this.debug?.event({
+      type: "lookup_sections", page: ctx.pageCount,
+      sections: sections.filter((s) => s.lookups.length).map((s) => ({ heading: s.heading.slice(0, 40), buttons: s.lookups.map((l) => l.label.slice(0, 30)), blanks: s.requiredBlank.slice(0, 6), typed: `${s.typedTotal - s.typedBlank}/${s.typedTotal}`, address: s.addressTyped, record: s.hasEdit })),
+    });
+    let pressed = 0;
+    let presses = 0; // every press, including the ones with no effect
+    const tried: Array<{ heading: string; label: string; why: string; addressSearch: boolean }> = [];
+    const identity = this.identityForRole("company");
+    for (let round = 0; round < 8 && sections; round++) {
+      // The next candidate, by the rules above. The address section first; then document order.
+      const pick = (s: Sec): { lookupKey: number; id: string; label: string; role: "link" | "button" } | null => {
+        if (sectionOwnedByContactPass(s)) return null;
+        const usable = s.lookups.filter((l) => isLookupButtonLabel(l.label) && !/select from account/i.test(l.label) && !isPayFee(l.label) && !SUBMIT_INTENT.test(l.label) && !sharedIsSubmitIntent(l.label));
+        if (!usable.length) return null;
+        const ordered = [...usable.filter((l) => isPopulateWord(l.label)), ...usable.filter((l) => !isPopulateWord(l.label))];
+        for (const l of ordered) {
+          if (this.lookupPressed.has(stateKey(s, l.label))) continue;
+          if (s.addressTyped && !isPopulateWord(l.label)) return l; // rule 1: the address search
+          // rule 3: a search the walk TYPED that nothing committed — a box that posts nothing holds the
+          // value, and the section's hidden inputs (what a picked row writes) are all still empty.
+          if (!s.requiredBlank.length && uncommittedSearch(s) && !isPopulateWord(l.label)) return l;
+          if (!s.requiredBlank.length) continue;
+          if (!isPopulateWord(l.label) && s.typedTotal > 0 && s.typedBlank === s.typedTotal) continue; // a search with nothing typed
+          return l;
+        }
+        return null;
+      };
+      let target: { sec: Sec; btn: NonNullable<ReturnType<typeof pick>> } | null = null;
+      for (const s of [...sections.filter((s) => s.addressTyped), ...sections.filter((s) => !s.addressTyped)]) {
+        const btn = pick(s);
+        if (btn) { target = { sec: s, btn }; break; }
+      }
+      if (!target) break;
+      const { sec, btn } = target;
+      this.lookupPressed.add(stateKey(sec, btn.label));
+      const loc = page.locator(`[data-al-clookup="${btn.lookupKey}"]`).first();
+      if (!(await loc.count().catch(() => 0))) continue;
+      const stepMark = ctx.steps.length;
+      const blanksBefore = new Map(sections.map((s) => [s.key, s.requiredBlank] as const));
+      const recordsBefore = new Set(sections.filter((s) => s.hasEdit).map((s) => s.key));
+      const hiddenBefore = await hiddenFilled(sec.key);
+      const framesBefore = await visibleFrames();
+      const overlaysBefore = (await visibleOverlays()).map((o) => o.key);
+      const docBefore = await stampDoc();
+      const addressSearch = sec.addressTyped && !isPopulateWord(btn.label);
+      if (addressSearch) { this.addressRowChosen = false; this.addressRowRefusal = null; } // a fresh search is a fresh grid
+      this.debug?.event({ type: "lookup_button_press", page: ctx.pageCount, section: sec.heading.slice(0, 40), label: btn.label.slice(0, 40), blanks: sec.requiredBlank.slice(0, 6) });
+      // A POPUP WINDOW the press opens is the dialog (Accela: "Please Allow Pop-ups from This Site"):
+      // listened for BEFORE the click on the page and on the context, adopted as the search scope
+      // below, closed afterwards — never adopted as the walk's page.
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      let popup: any = null;
+      const bctx = browserContext();
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const onPage = (p: any) => { if (!popup && p !== page) popup = p; };
+      try { bctx?.on?.("page", onPage); } catch { /* no context events */ }
+      const popupWait = typeof page.waitForEvent === "function" ? page.waitForEvent("popup", { timeout: 6000 }).catch(() => null) : Promise.resolve(null);
+      const clicked = await this.clickResilient(loc).then(() => true).catch(() => false);
+      if (!clicked) {
+        try { bctx?.off?.("page", onPage); } catch { /* ignore */ }
+        this.debug?.event({ type: "lookup_button_click_failed", section: sec.heading.slice(0, 40), label: btn.label.slice(0, 40) });
+        continue;
+      }
+      await settleAfterPress();
+      popup = (await popupWait) ?? popup;
+      try { bctx?.off?.("page", onPage); } catch { /* ignore */ }
+      if (popup) {
+        await popup.waitForLoadState?.("domcontentloaded", { timeout: 10000 }).catch(() => null);
+        await popup.waitForLoadState?.("networkidle", { timeout: 8000 }).catch(() => null);
+      }
+      const reloaded = docBefore !== "" && (await readDoc()) !== docBefore;
+      await ctx.shot?.(`p${String(ctx.pageCount).padStart(3, "0")}-lookup-${btn.label.replace(/[^A-Za-z0-9]+/g, "_").slice(0, 24)}`).catch(() => null);
+      this.debug?.event({ type: "lookup_button_settled", page: ctx.pageCount, label: btn.label.slice(0, 40), reloaded, popup: !!popup });
+      // The click, recorded by LABEL with css fallbacks — appended only if the press did something.
+      const clickStep: RecipeStep = {
+        action: "click", phase: "fill",
+        selector: {
+          role: btn.role, name: btn.label, exact: true,
+          fallbacks: [...(btn.id ? [{ css: `[id="${btn.id}"]` }] : []), { css: `a[title="${btn.label}"], input[value="${btn.label}"], button:has-text("${btn.label}")` }],
+        },
+        note: `lookup: ${btn.label} [${sec.heading.slice(0, 40)}]`,
+        fingerprint: { ...(btn.id ? { id: btn.id } : {}), section: sec.heading.slice(0, 80) },
+      };
+      ctx.steps.push(clickStep);
+      const framesAfter = await visibleFrames();
+      const newFrames = framesAfter.filter((f) => !framesBefore.includes(f));
+      let newFrame: string | null = newFrames[0] ?? null;
+      // The in-document overlay the press opened, if any: the newly visible one with the most controls.
+      const newOverlay = (await visibleOverlays()).filter((o) => !overlaysBefore.includes(o.key) && o.controls > 0).sort((a, b) => b.controls - a.controls)[0]?.key ?? null;
+      const overlaySel = newOverlay ? `[data-al-overlay="${newOverlay}"]` : "";
+      let searchVerdict: "picked" | "empty" | "unusable" | "ambiguous" | null = null;
+      let searchedWords = ""; // what the search form was asked, for the named stop
+      /** Close an in-document overlay the pass is leaving: its own Cancel / Close / × first, then Escape. */
+      const closeOverlay = async (): Promise<void> => {
+        if (!overlaySel) return;
+        const ov = page.locator(overlaySel);
+        if (!(await ov.count().catch(() => 0))) return;
+        for (const sel of ["a[title='Close' i]", "button[aria-label='Close' i]", "[class*='close' i]", "img[alt='Close' i]"]) {
+          const c = ov.locator(sel).first();
+          if ((await c.count().catch(() => 0)) && (typeof c.isVisible !== "function" || await c.isVisible().catch(() => false))) { await c.click({ timeout: 4000 }).catch(() => null); break; }
+        }
+        const cancel = ov.getByRole("button", { name: /^cancel$/i }).or(ov.getByRole("link", { name: /^cancel$/i })).first();
+        if ((await cancel.count().catch(() => 0)) && (typeof cancel.isVisible !== "function" || await cancel.isVisible().catch(() => false))) await cancel.click({ timeout: 4000 }).catch(() => null);
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const kb = (page as any)?.keyboard;
+        if (kb && typeof kb.press === "function") await kb.press("Escape").catch(() => null);
+        await sleep(400);
+      };
+      // A CANDIDATE LIST (two or more address rows) — in the page, or in a dialog the search opened:
+      // the ranked chooser picks the job's own address, or refuses, which ends the page named: a
+      // learn opens a real application, never on a property that is not this job's.
+      const closePopup = async (): Promise<void> => { try { if (popup && !(typeof popup.isClosed === "function" && popup.isClosed())) await popup.close(); } catch { /* already gone */ } };
+      /** Which of the press's dialogs is still showing: the in-document modal, the dialog frame, the
+       *  popup window — or "" when none. */
+      const dialogStillOpen = async (): Promise<string> => {
+        if (overlaySel && await page.locator(overlaySel).first().isVisible().catch(() => false)) return "modal";
+        if (newFrame && await page.locator(`iframe[name="${newFrame}"], iframe[id="${newFrame}"]`).first().isVisible().catch(() => false)) return "dialog frame";
+        if (popup && !(typeof popup.isClosed === "function" && popup.isClosed())) return "popup window";
+        return "";
+      };
+      /** AFTER A SUCCESSFUL PICK THE DIALOG MUST BE GONE BEFORE THE RE-READ (Boise building run 2:
+       *  the list stayed open after Select on that tenant, the next two page reads were of the dialog,
+       *  and the planner reached for its hidden Submit). Wait ~8 s for it to close on its own; else
+       *  close it the pass's way (×, Cancel, Escape — never its Submit); a dialog that re-opens is
+       *  closed once more and then named in events. The pass owns the dialog until it is closed. */
+      const ensureDialogClosed = async (): Promise<void> => {
+        let kind = await dialogStillOpen();
+        for (let w = 0; kind && w < 16; w++) { await sleep(500); kind = await dialogStillOpen(); }
+        if (!kind) { this.debug?.event({ type: "lookup_dialog_closed", page: ctx.pageCount, label: btn.label.slice(0, 40), how: "itself" }); return; }
+        const closeOnce = async (): Promise<void> => { if (newFrame) await this.closeLookupDialog(newFrame); await closeOverlay(); await closePopup(); await sleep(600); };
+        await closeOnce();
+        const again = await dialogStillOpen();
+        this.debug?.event({ type: "lookup_dialog_closed", page: ctx.pageCount, label: btn.label.slice(0, 40), how: again ? `closed by the pass, re-opened (${again})` : `closed by the pass (${kind})` });
+        if (again) {
+          await closeOnce();
+          const still = await dialogStillOpen();
+          if (still) this.debug?.event({ type: "lookup_dialog_stays_open", page: ctx.pageCount, label: btn.label.slice(0, 40), kind: still });
+        }
+      };
+      if (addressSearch) {
+        // The list is wherever the press put it: the page, an in-document modal, a dialog frame, a
+        // popup window — the modal first (Boise 05:29: the scan over the whole page would also see
+        // the form's own radio rows).
+        let chosen = overlaySel ? await this.chooseAddressRowInScope(page, "", ctx.steps, overlaySel) : false;
+        if (!chosen && !this.addressRowRefusal && !overlaySel) chosen = await this.chooseProjectAddressRow(ctx.steps);
+        for (const f of newFrames) {
+          if (chosen || this.addressRowRefusal) break;
+          chosen = await this.chooseAddressRowInFrame(f, ctx.steps);
+          if (chosen) newFrame = f;
+        }
+        if (!chosen && !this.addressRowRefusal && popup) chosen = await this.chooseAddressRowInScope(popup, "popup", ctx.steps);
+        if (chosen) {
+          await settleAfterPress();
+          await ensureDialogClosed();
+        } else if (this.addressRowRefusal) {
+          ctx.steps.length = stepMark;
+          if (newFrame) await this.closeLookupDialog(newFrame);
+          await closeOverlay();
+          await closePopup();
+          return { pressed, stop: { ...fail(ctx.steps, this.portalName, `Stopped for a person on page ${ctx.pageCount}: "${btn.label}" listed several addresses and none could be taken as this job's — ${this.addressRowRefusal.slice(0, 300)}. Pick the address by hand and run again; the steps before this page were recorded.`, null, ctx.pageCount, ctx.portalNotices), stopReason: "address_candidates", pageTrace: ctx.pageTrace.slice(0, 40) } };
+        } else {
+          // A dialog / modal / popup with nothing to pick ("Address not found", a list shape the
+          // chooser does not read): closed, so it cannot swallow the next click; the section then
+          // reads as unchanged. Never left open when the pass ends.
+          if (newFrame) await this.closeLookupDialog(newFrame);
+          await closeOverlay();
+          await closePopup();
+        }
+      }
+      // A SEARCH FORM THAT OPENED (Look Up's dialog, a popup window, or an inline panel): searched
+      // once by this client's business name; only a result that IS this client is picked.
+      if (!addressSearch) {
+        const midSections = await readSections();
+        const mid = midSections?.find((s) => s.key === sec.key || s.heading === sec.heading) ?? null;
+        const inlineFormOpened = !!mid && mid.typedTotal > sec.typedTotal && !!mid.lookups.some((l) => l.lookupKey !== btn.lookupKey || l.label !== btn.label);
+        // #221 — THE SEARCH FORM WAS ALREADY THE SECTION (live Tigard "Add Contact As: Contractor": the
+        // "Search" pressed was the already-active tab; the section itself holds the search box, its
+        // magnifier and the results table). Nothing changed and the section still has a required blank
+        // and a typed box: the section is searched as the form.
+        const pressChangedNothing = !popup && !newFrame && !overlaySel && !inlineFormOpened && !!mid
+          && mid.requiredBlank.length >= sec.requiredBlank.length;
+        // ...and that form may sit BESIDE the section block, not in it (live Tigard run 12: the section
+        // container held the heading and the tabs; the search box and the results table were siblings).
+        // Widened from the section up (≤4 levels) to the nearest container holding a VISIBLE box
+        // labelled "Search"; the section itself otherwise.
+        let inlineScopeSel = `[data-al-csec="${sec.key}"]`;
+        let searchHolder = false;
+        if (pressChangedNothing) {
+          const widened = await page.evaluate((key: string) => {
+            document.querySelectorAll("[data-al-csearch]").forEach((n) => n.removeAttribute("data-al-csearch"));
+            let node: Element | null = document.querySelector(`[data-al-csec="${key}"]`);
+            for (let up = 0; up < 5 && node && node.tagName !== "BODY"; up++, node = node.parentElement) {
+              const boxes = node.querySelectorAll("input[type=text], input[type=search], input:not([type])");
+              for (let k = 0; k < boxes.length; k++) {
+                const b = boxes[k] as HTMLElement;
+                const r = b.getBoundingClientRect();
+                const cs = getComputedStyle(b);
+                if (!(r.width > 0 && r.height > 0) || cs.visibility === "hidden" || cs.display === "none") continue;
+                const id = b.getAttribute("id");
+                const l = id ? document.querySelector(`label[for="${CSS.escape(id)}"]`) : null;
+                const lbl = [String((l && (l as HTMLElement).innerText) || ""), b.getAttribute("aria-label") || "", b.getAttribute("title") || ""].join(" ");
+                if (/\bsearch\b/i.test(lbl)) { node.setAttribute("data-al-csearch", "1"); return true; }
+              }
+            }
+            return false;
+          }, String(sec.key)).catch(() => false);
+          if (widened) { inlineScopeSel = '[data-al-csearch="1"]'; searchHolder = true; }
+        }
+        // The section is searched as the form only when a visible "Search" box was found in it or beside it.
+        // Rule 3's section: its own typed box IS the search box (it posts nothing; it only drives this
+        // search), so the section is the form even when no box there is labelled "Search".
+        if (pressChangedNothing && !searchHolder && !sec.requiredBlank.length && uncommittedSearch(sec)) searchHolder = true;
+        const unchangedInline = pressChangedNothing && searchHolder;
+        if (popup || newFrame || overlaySel || inlineFormOpened || unchangedInline) {
+          const form = await this.lookupSearchForm({
+            scope: popup ? popup : newFrame ? page.frameLocator(`iframe[name="${newFrame}"], iframe[id="${newFrame}"]`) : overlaySel ? page.locator(overlaySel) : page.locator(inlineScopeSel).first(),
+            frame: popup ? "popup" : newFrame ?? undefined,
+            heading: sec.heading,
+            companyName: String(identity.companyName ?? "").trim(),
+            companyStreet: String(identity.street ?? "").trim(),
+            discipline: this.siteIdentity?.isElectrical === true ? "electrical" : this.siteIdentity?.isElectrical === false ? "structural" : "",
+            steps: ctx.steps,
+            shot: ctx.shot ? (l: string) => ctx.shot!(`p${String(ctx.pageCount).padStart(3, "0")}-lookup-${l}`) : undefined,
+          });
+          searchVerdict = form.verdict;
+          searchedWords = form.searched;
+          this.debug?.event({ type: "lookup_search_form", section: sec.heading.slice(0, 40), label: btn.label.slice(0, 40), verdict: searchVerdict, dialog: popup ? "popup window" : newFrame ? newFrame.slice(0, 40) : overlaySel ? "modal" : "inline" });
+          if (searchVerdict !== "picked" && !popup) { await this.closeLookupDialog(newFrame); await closeOverlay(); }
+          if (popup) { await settleAfterPress(); await closePopup(); }
+          if (searchVerdict === "picked") { await settleAfterPress(); await ensureDialogClosed(); }
+        }
+      }
+      // RE-READ: what did the press populate — anywhere on the page?
+      const after = await readSections();
+      if (!after) break;
+      const populated: string[] = [];
+      for (const s of after) {
+        const before = blanksBefore.get(s.key) ?? [];
+        for (const l of before) if (!s.requiredBlank.includes(l) && !populated.includes(l)) populated.push(l);
+        if (s.hasEdit && !recordsBefore.has(s.key) && !populated.includes(s.heading)) populated.push(s.heading);
+      }
+      const hiddenAfter = await hiddenFilled(sec.key);
+      if (!populated.length && hiddenAfter > hiddenBefore) populated.push(sec.heading);
+      // #221 — A CONFIRMED PICK THAT TOOK THE PAGE BACK (live Tigard run 15: "Add Contact" on the
+      // contact search page returns to the application, so the section that was read is gone and
+      // nothing on the new page reads as "populated"). The search form's verdict "picked" — this
+      // client's row, its own control pressed — with the section no longer on the page is the fill.
+      if (!populated.length && searchVerdict === "picked" && !after.some((s) => s.heading === sec.heading)) populated.push(sec.heading);
+      if (populated.length && searchVerdict !== "empty") {
+        pressed++;
+        // On the LAST step of the group: a candidate list fills the parcel only once its row is
+        // picked, so replay verifies the fields after the pick, not after the search click.
+        (ctx.steps[ctx.steps.length - 1] ?? clickStep).populates = populated.slice(0, 12);
+        for (const l of populated) if (!ctx.alreadyFilledLabels.includes(l)) ctx.alreadyFilledLabels.push(l);
+        this.acaFilledSectionHeadings.add(sec.heading.toLowerCase());
+        this.lookupPopulatedLabels.add(btn.label.replace(/\s+/g, " ").trim().toLowerCase());
+        this.debug?.event({ type: "lookup_button_populated", page: ctx.pageCount, section: sec.heading.slice(0, 40), label: btn.label.slice(0, 40), populated: populated.slice(0, 8).map((l) => l.slice(0, 60)) });
+      } else {
+        ctx.steps.length = stepMark; // a press that changed nothing is not a step to replay
+        const why = searchVerdict === "ambiguous" ? `its "${btn.label}" search listed this client more than once and the client record's business address did not single one out${searchedWords ? ` (${searchedWords})` : ""} — pick the right record by hand, or correct the client's business address`
+          : searchVerdict === "empty" ? `its "${btn.label}" search found no record for this client${searchedWords ? ` (${searchedWords})` : ""}`
+          : searchVerdict === "unusable" ? `its "${btn.label}" search asks for something this client record does not carry`
+          : reloaded ? `its "${btn.label}" reloaded the page; no section changed`
+          : `its "${btn.label}" changed nothing on the page`;
+        this.debug?.event({ type: "lookup_button_no_effect", page: ctx.pageCount, section: sec.heading.slice(0, 40), label: btn.label.slice(0, 40), why });
+        tried.push({ heading: sec.heading, label: btn.label, why, addressSearch });
+        presses++;
+      }
+      sections = after;
+    }
+    // THE STOP NAMES EVERY SECTION STILL REQUIRED-BLANK AFTER THE PASS (Meridian 05:20 run: the stop
+    // said "Contractor" while Parcel's required "Parcel Number" was also blank — Find Address had no
+    // effect and FIND PARCEL was rightly skipped with nothing typed; the person must fix both in one
+    // visit). Each with its button and why: the button pressed here with no effect, or the button
+    // not pressed and why ("nothing typed to search by"), plus the address search that should have
+    // fed it. Only after a press on this page FAILED — a page where every press worked, or where
+    // nothing was pressed, is the required sweep's as before (never a stop the portal may not make).
+    // NO DIALOG OUTLIVES THE PASS: a page read made through an open dialog is not the page, and the
+    // planner must never be asked on it. ACA's own dialog first, then any stamped overlay with controls
+    // (its Close / × / Cancel) — never a Submit.
+    {
+      await this.closeAcaDialog().catch(() => null);
+      const left = (await visibleOverlays()).filter((o) => o.controls > 0);
+      for (const o of left) {
+        const ov = page.locator(`[data-al-overlay="${o.key}"]`);
+        let how = "";
+        for (const sel of ["a[title='Close' i]", "button[aria-label='Close' i]", "[class*='close' i]", "img[alt='Close' i]"]) {
+          const c = ov.locator(sel).first();
+          if ((await c.count().catch(() => 0)) && (typeof c.isVisible !== "function" || await c.isVisible().catch(() => false))) { await c.click({ timeout: 4000 }).catch(() => null); how = sel; break; }
+        }
+        if (!how) {
+          const cancel = ov.getByRole("button", { name: /^cancel$/i }).or(ov.getByRole("link", { name: /^cancel$/i })).first();
+          if ((await cancel.count().catch(() => 0)) && (typeof cancel.isVisible !== "function" || await cancel.isVisible().catch(() => false))) { await cancel.click({ timeout: 4000 }).catch(() => null); how = "Cancel"; }
+        }
+        await sleep(400);
+        const gone = !(await ov.first().isVisible().catch(() => false));
+        this.debug?.event({ type: gone ? "lookup_dialog_closed" : "lookup_dialog_stays_open", page: ctx.pageCount, how: `pass-end sweep${how ? ` (${how})` : ""}`, kind: "modal" });
+      }
+    }
+    if (tried.length) {
+      const final = (await readSections()) ?? sections ?? [];
+      const addressMiss = tried.find((t) => t.addressSearch);
+      // A SECTION THE WALK FILLED IS NOT "COULD NOT FILL" (typeaheadNoMatch smoke, the door shape: the
+      // address search found no match, the page's own "Can't find address?" revealed Street Address /
+      // City / Zip and the walk typed them — the search box and "The location you have selected" stay
+      // blank, and addressTyped reads only Accela's split Street No. / Street Name). Where a box the
+      // walk filled on this page sits in the section, the walk has answered it another way; whether
+      // that answer satisfies the portal is the portal's own validation at Next, never a stop here.
+      const normLabel = (t: string): string => t.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+      const walkFilled = new Set(ctx.alreadyFilledLabels.map(normLabel).filter(Boolean));
+      const walkFilledIn = (s: { typedLabels?: string[] }): boolean => (s.typedLabels ?? []).some((l) => walkFilled.has(normLabel(l)));
+      const still = final.filter((s) => s.lookups.length && s.requiredBlank.length && !s.hasEdit && !s.addressTyped && !sectionOwnedByContactPass(s) && !walkFilledIn(s));
+      if (still.length) {
+        const named = still.map((s) => {
+          const own = tried.filter((t) => t.heading === s.heading && !t.addressSearch);
+          const parts: string[] = [];
+          if (own.length) parts.push(...own.map((t) => t.why));
+          else {
+            const btnLabel = s.lookups.map((l) => l.label).find((l) => isLookupButtonLabel(l)) ?? s.lookups[0]?.label ?? "lookup";
+            parts.push(`its "${btnLabel}" was not pressed — nothing typed to search by`);
+          }
+          if (addressMiss) parts.push(`and the address search ("${addressMiss.label}" in ${addressMiss.heading.slice(0, 40)}) ${addressMiss.why.replace(/^its "[^"]*" /, "")}`);
+          return `the "${s.heading.slice(0, 40)}" section (${s.requiredBlank.slice(0, 4).join(", ")}: ${parts.join("; ")})`;
+        }).join("; ");
+        this.debug?.event({ type: "lookup_section_stop", page: ctx.pageCount, sections: still.map((s) => s.heading.slice(0, 40)) });
+        return {
+          pressed,
+          stop: {
+            ...fail(ctx.steps, this.portalName,
+              `Stopped for a person on page ${ctx.pageCount}: ${named}. The portal requires these and the page's own lookups could not fill them — fill or add them by hand (the page offers "Add New" / its own search) or add the missing data to the project or client record, then run again; the steps before this page were recorded.`,
+              null, ctx.pageCount, ctx.portalNotices),
+            stopReason: "required_blank",
+            requiredFieldMisses: still.flatMap((s) => s.requiredBlank.slice(0, 4)),
+            pageTrace: ctx.pageTrace.slice(0, 40),
+          },
+        };
+      }
+    }
+    return { pressed, stop: null };
+  }
+
+  /** #178 — THE CANDIDATE LIST INSIDE A DIALOG the address search opened: the same ranking as
+   *  chooseProjectAddressRow (rankAddressVersions on the job's city / ZIP / owner), the rows read in
+   *  THAT frame (one Select action per result row), the pick recorded with the frame so replay's
+   *  pickAddressVersionLive scans the same frame. Rows the chooser cannot read (a radio per row and
+   *  one Select button) pick nothing — the section then reads as unchanged and is named as today. */
+  private async chooseAddressRowInFrame(frameName: string, steps: RecipeStep[]): Promise<boolean> {
+    const page = this.page;
+    if (!page) return false;
+    const frames: Frame[] = typeof page.frames === "function" ? page.frames() : [];
+    const frame = frames.find((f) => { try { return f.name() === frameName; } catch { return false; } })
+      ?? (typeof page.frame === "function" ? page.frame({ name: frameName }) : null);
+    if (!frame) return false;
+    return this.chooseAddressRowInScope(frame, frameName, steps);
+  }
+
+  /** The candidate-list pick in ANY scope that can evaluate and locate — a child frame (recorded with
+   *  its frame key) or a popup WINDOW the search opened (recorded with the reserved key "popup", which
+   *  replay's pickAddressVersionLive reads as "the newest other page of the context"). */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  private async chooseAddressRowInScope(frame: any, frameKey: string, steps: RecipeStep[], rootSel = ""): Promise<boolean> {
+    if (this.addressRowChosen || this.addressRowRefusal || !this.siteIdentity || !this.page) return false;
+    const id = this.siteIdentity;
+    if (!id.city && !id.zip) return false;
+    if (!frame || typeof frame.evaluate !== "function" || typeof frame.locator !== "function") return false;
+    const frameName = frameKey;
+    const inFrame: Partial<RecipeSelector> = frameName ? { frame: frameName } : {};
+    // Rows: one "Select" link each (Oregon's grid), OR a radio / checkbox each with the dialog's one
+    // Select button (Accela's Address Search Result List — Boise 05:29). A radio row must read like an
+    // address (a digit in it): a form's own Yes / No radio rows are not candidates. Scoped to rootSel
+    // (an in-document modal) when given, else the whole document of the scope.
+    const scan = async (): Promise<Array<{ key: string; text: string; tick: boolean }>> => frame.evaluate((sel: string) => {
+      const root: ParentNode = (sel && document.querySelector(sel)) || document;
+      const vis = (e: Element) => { const r = (e as HTMLElement).getBoundingClientRect(); return r.width > 0 && r.height > 0; };
+      const out: Array<{ key: string; text: string; tick: boolean }> = [];
+      let n = 0;
+      for (const tr of Array.from(root.querySelectorAll("tr"))) {
+        if (!vis(tr)) continue;
+        const links = Array.from(tr.querySelectorAll("a, button, [role='button']")).filter((a) => /^\s*select\s*$/i.test((a as HTMLElement).innerText || ""));
+        const ticks = Array.from(tr.querySelectorAll("input[type='radio'], input[type='checkbox']"));
+        const text = ((tr as HTMLElement).innerText || "").replace(/\s+/g, " ").trim();
+        if (!text || text.length > 400) continue;
+        const action = links.length === 1 ? links[0] : (!links.length && ticks.length === 1 && /\d/.test(text) ? ticks[0] : null);
+        if (!action) continue;
+        const key = `af${n++}`;
+        (action as HTMLElement).setAttribute("data-al-row", key);
+        out.push({ key, text, tick: action === ticks[0] });
+      }
+      return out;
+    }, rootSel).catch(() => [] as Array<{ key: string; text: string; tick: boolean }>);
+    let rows = await scan();
+    for (let waited = 0; rows.length < 2 && waited < 6000; waited += 600) { await sleep(600); rows = await scan(); }
+    // Counts only (no addresses): a list the scan could not read as rows is otherwise a silent miss.
+    this.debug?.event({ type: "address_rows_read", scope: (frameName || rootSel || "page").slice(0, 40), rows: rows.length, radios: rows.filter((r) => r.tick).length });
+    if (rows.length < 2) return false;
+    const { ranked, rejected, preference } = rankAddressVersions(rows.map((r) => r.text), {
+      city: id.city, zip: id.zip, homeownerName: id.homeownerName, isElectrical: id.isElectrical === true, issuingAgency: id.issuingAgency ?? undefined,
+      street: this.typeaheadSite.street || undefined,
+    });
+    if (ranked.length === 0) {
+      this.addressRowRefusal = `none of the ${rows.length} addresses listed is this job's (${[this.typeaheadSite.street, id.city, id.zip].filter(Boolean).join(", ")})`.replace(/\s+/g, " ").trim();
+      this.debug?.event({ type: "address_row_refused", why: "no result in the dialog is this project's property", rejected: rejected.slice(0, 3).join(" | ").slice(0, 200) });
+      return false;
+    }
+    if (preference.contradicts) {
+      this.addressRowRefusal = preference.note;
+      this.debug?.event({ type: "address_row_refused", why: preference.note.slice(0, 300) });
+      return false;
+    }
+    const best = rows[ranked[0].index];
+    const css = `[data-al-row="${best.key}"]`;
+    if (!(await frame.locator(css).first().click({ timeout: 12000 }).then(() => true).catch(() => false))) return false;
+    this.addressRowChosen = true;
+    await this.waitForDynamicFieldsSettle().catch(() => null);
+    this.debug?.event({ type: "address_row_chosen", jurisdiction: (ranked[0].text.match(/(CITY|COUNTY|DEQ)\s+APPLICATIONS/i) || [])[0] || "unlabelled", basis: preference.basis, ownerMatched: ranked[0].ownerHit, considered: ranked.length, rejected: rejected.length, dialog: (frameName || rootSel || "page").slice(0, 40), shape: best.tick ? "radio + Select button" : "Select link" });
+    steps.push({
+      action: "click", phase: "fill",
+      selector: { css, ...inFrame, fallbacks: [{ role: "link", name: "Select", ...inFrame }] },
+      note: `address version: ${(ranked[0].text.match(/(CITY|COUNTY|DEQ)\s+APPLICATIONS/i) || ["this property"])[0]}`,
+    });
+    if (best.tick) {
+      // THE DIALOG'S OWN SELECT BUTTON — allowed INSIDE the list's scope only (never a page-level
+      // "Select"), by whole label, and still never a filing / paying word.
+      // Select / OK / Choose / "use this address" only: a dialog's "Continue" or "Done" is too close to
+      // the application's own Continue to be pressed on a word match (lead ruling, #178).
+      const DIALOG_OK = /^(select|ok|choose|use (this|selected) address)\s*[»›>→]*$/i;
+      const scope = rootSel ? frame.locator(rootSel) : frame;
+      const controls = scope.locator("a, button, input[type='button'], input[type='submit']");
+      // Every control's label in one read (the list can carry many links: a header sort link, a
+      // pager, a hidden select anchor), then the first that is the dialog's own Select — scrolled
+      // into view (Accela's sits below the fold of a 15-row list) and clicked; a button the page
+      // keeps disabled until a row is ticked is waited for by the click's own actionability check.
+      const found: Array<{ label: string; tag: string; id: string }> = await controls.evaluateAll((els: Element[]) => els.map((el) => {
+        const r = (el as HTMLElement).getBoundingClientRect();
+        const label = !(r.width > 0 && r.height > 0) ? "" : String(el.tagName === "INPUT" ? (el as HTMLInputElement).value : ((el as HTMLElement).innerText || el.textContent || el.getAttribute("title") || "")).replace(/\s+/g, " ").trim();
+        return { label, tag: el.tagName, id: el.getAttribute("id") || "" };
+      })).catch(() => [] as Array<{ label: string; tag: string; id: string }>);
+      for (let i = 0; i < found.length; i++) {
+        const { label, tag, id: cid } = found[i];
+        if (!label || !DIALOG_OK.test(label) || isPayFee(label) || SUBMIT_INTENT.test(label) || sharedIsSubmitIntent(label)) continue;
+        const c = controls.nth(i);
+        await c.scrollIntoViewIfNeeded?.({ timeout: 3000 }).catch(() => null);
+        if (!(await c.click({ timeout: 10000 }).then(() => true).catch(() => false))) continue;
+        // Recorded by the control's own id when it has one (ACA's ctl00_phPopup_btnSelect is stable,
+        // and its <a> has no href — so no link role — until a row is ticked), the label by the role
+        // the tag implies as the fallback: replay resolves the first selector that is there (a
+        // "button" role on an <a> was waited on for its whole timeout, live-shaped smoke).
+        const byLabel = { role: tag === "A" ? "link" as const : "button" as const, name: label, exact: true, ...inFrame };
+        steps.push({
+          action: "click", phase: "fill",
+          selector: cid
+            ? { css: `[id="${cid}"]`, ...inFrame, fallbacks: [byLabel, { css: `a[title="${label}"], input[value="${label}"]`, ...inFrame }] }
+            : { ...byLabel, fallbacks: [{ css: `a[title="${label}"], input[value="${label}"]`, ...inFrame }] },
+          note: `lookup: ${label} [address list]`,
+        });
+        await this.waitForDynamicFieldsSettle().catch(() => null);
+        return true;
+      }
+      this.debug?.event({ type: "address_row_select_button_missing", dialog: (frameName || rootSel || "page").slice(0, 40) });
+    }
+    return true;
+  }
+
+  /** #178 — a lookup button opened a SEARCH FORM (Accela's Look Up dialog: licence number / business
+   *  name + Search; or an inline panel). Searched ONCE by this client's business name; a result row
+   *  that holds the business name is picked (its Select link or radio); "no records found" or rows
+   *  that are not this client pick nothing. Steps (the fill, the search click, the pick) are recorded
+   *  only on a pick, bound to the company-name key, in the dialog's frame. */
+  private async lookupSearchForm(opts: {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    scope: any;
+    frame?: string;
+    heading: string;
+    companyName: string;
+    /** #221 — the client's business STREET (company identity): when several result rows are this
+     *  client (Tigard lists two TML INTERNATIONAL LLC records), the row whose address is this street. */
+    companyStreet?: string;
+    /** This learn's discipline (siteIdentity.isElectrical): the TYPE select of a licence register
+     *  (Accela's "License Type") is set to the option naming it before the name search — live
+     *  Meridian run 8 searched "Look Up License" with the type at --Select-- and got nothing. */
+    discipline?: "electrical" | "structural" | "";
+    steps: RecipeStep[];
+    /** The learn's bundle shot, taken once the results have been read (hit or miss). */
+    shot?: (label: string) => Promise<void>;
+  }): Promise<{ verdict: "picked" | "empty" | "unusable" | "ambiguous"; searched: string }> {
+    const page = this.page;
+    const inFrame: Partial<RecipeSelector> = opts.frame ? { frame: opts.frame } : {};
+    const mark = opts.steps.length;
+    const { scope } = opts;
+    let searched = "";
+    const out = (verdict: "picked" | "empty" | "unusable" | "ambiguous") => ({ verdict, searched });
+    if (!page) return (this.debug?.event({ type: "lookup_search_unusable", section: opts.heading.slice(0, 40), why: "no page" }), out("unusable"));
+    try {
+      await sleep(600);
+      if (!opts.companyName) return (this.debug?.event({ type: "lookup_search_unusable", section: opts.heading.slice(0, 40), why: "the client record has no company name" }), out("unusable"));
+      // 1) A TYPE / CATEGORY SELECT, set first: the option naming this learn's discipline (electrical
+      //    → /electric/; structural or building → /building|general|contractor/), else the single
+      //    non-placeholder option when there is exactly one; nothing fits → left at its placeholder
+      //    and the search still runs (today's behaviour). Recorded by its label.
+      const typeWanted = opts.discipline === "electrical" ? /electric/i : opts.discipline === "structural" ? /building|general|contractor/i : null;
+      const selects: Array<{ label: string; id: string; options: Array<{ value: string; text: string }> }> = await scope.locator("select").evaluateAll((els: Element[]) => els.map((el) => {
+        const r = (el as HTMLElement).getBoundingClientRect();
+        if (!(r.width > 0 && r.height > 0)) return { label: "", id: "", options: [] };
+        const id = el.getAttribute("id") || "";
+        const lab = (id && document.querySelector(`label[for="${CSS.escape(id)}"]`)) || el.closest("label");
+        const label = String((lab && (lab as HTMLElement).innerText) || el.getAttribute("aria-label") || el.getAttribute("title") || "").replace(/\s+/g, " ").replace(/[*:]\s*$/, "").trim();
+        return { label, id, options: Array.from((el as HTMLSelectElement).options).map((o) => ({ value: o.value, text: String(o.textContent || "").replace(/\s+/g, " ").trim() })) };
+      })).catch(() => []);
+      const typeSel = selects.find((s) => s.label && /\b(licen[cs]e\s+type|contractor\s+type|type|category|trade|discipline|kind)\b/i.test(s.label));
+      let typeChosen = "";
+      let typeSelectPresent = false;
+      if (typeSel) {
+        typeSelectPresent = true;
+        const real = typeSel.options.filter((o) => o.value && !/^(please\s+)?select\b|^--|^choose\b|^\(?none\)?$/i.test(o.text));
+        const hit = (typeWanted ? real.find((o) => typeWanted.test(o.text)) : undefined) ?? (real.length === 1 ? real[0] : undefined);
+        if (hit) {
+          const sel = typeSel.id ? scope.locator(`[id="${typeSel.id}"]`).first() : scope.getByLabel(typeSel.label, { exact: false }).first();
+          if (await sel.selectOption({ label: hit.text }).then(() => true).catch(async () => sel.selectOption(hit.value).then(() => true).catch(() => false))) {
+            typeChosen = hit.text;
+            opts.steps.push({ action: "select", phase: "fill", selector: { label: typeSel.label, fallbacks: [...(typeSel.id ? [{ css: `[id="${typeSel.id}"]`, ...inFrame }] : [])], ...inFrame }, value: hit.text, note: `lookup(${opts.heading.slice(0, 40)}): ${typeSel.label}` });
+            await sleep(400);
+          }
+        }
+      }
+      // 2) The BUSINESS name box, never a person's: Accela's licence register lists First / Middle /
+      //    Last before "Name of Business", so a bare /name/ took "First". Business words first; a bare
+      //    "Name" only when no business-worded box exists and it is not a person's part.
+      // VISIBLE boxes only (#221, live Tigard: a hidden "Company Name" in the inactive "Enter Manually"
+      // tab was found first and could not be filled).
+      // TYPEABLE boxes only, too (live Tigard run 13: the section heading <h4 aria-label="Add Contact As
+      // Contractor"> matched "contractor" by its aria-label and the fill failed — "unusable").
+      const typeable = (page ?? scope).locator("input:not([type=hidden]):not([type=checkbox]):not([type=radio]):not([type=button]):not([type=submit]), textarea");
+      let nameBox = scope.getByLabel(/business|company|organi[sz]ation|contractor|licensee/i).and(typeable).filter({ visible: true }).first();
+      if (!(await nameBox.count().catch(() => 0))) {
+        nameBox = scope.getByLabel(/\bname\b/i).and(typeable).filter({ visible: true }).first();
+        if (await nameBox.count().catch(() => 0)) {
+          const lbl = String(await nameBox.evaluate((el: Element) => { const id = el.getAttribute("id"); const l = id && document.querySelector(`label[for="${CSS.escape(id)}"]`); return String((l && (l as HTMLElement).innerText) || el.getAttribute("aria-label") || ""); }).catch(() => "") ?? "");
+          if (/\b(first|middle|last|given|family|contact|your)\b/i.test(lbl)) { opts.steps.length = mark; return (this.debug?.event({ type: "lookup_search_unusable", section: opts.heading.slice(0, 40), why: "the only name box is a person's name" }), out("unusable")); }
+        }
+      }
+      // #221 — A PLAIN "SEARCH" BOX (Tyler EnerGov "Add Contact": the only text box is labelled
+      // "Search") when no business- or name-worded box exists, and it is the scope's ONE text box.
+      if (!(await nameBox.count().catch(() => 0))) {
+        const lone = scope.locator("input[type='text']:visible, input[type='search']:visible, input:not([type]):visible");
+        if ((await lone.count().catch(() => 0)) === 1) {
+          // The box's own LABEL names it a search; its placeholder may list what it searches (Tigard's
+          // reads "Name, E-mail, or Company"), so only the label is held to the exclusions.
+          const lbl = String(await lone.first().evaluate((el: Element) => { const id = el.getAttribute("id"); const l = id && document.querySelector(`label[for="${CSS.escape(id)}"]`); return [String((l && (l as HTMLElement).innerText) || ""), el.getAttribute("aria-label") || "", el.getAttribute("title") || ""].join(" "); }).catch(() => "") ?? "");
+          if (/\bsearch\b/i.test(lbl) && !/\b(first|middle|last|given|family|address|street|parcel|e-?mail|phone)\b/i.test(lbl)) nameBox = lone.first();
+        }
+      }
+      if (!(await nameBox.count().catch(() => 0))) { opts.steps.length = mark; return (this.debug?.event({ type: "lookup_search_unusable", section: opts.heading.slice(0, 40), why: "no business, name or Search box in the form" }), out("unusable")); }
+      if (!(await nameBox.fill(opts.companyName, { timeout: 8000 }).then(() => true).catch(() => false))) { opts.steps.length = mark; return (this.debug?.event({ type: "lookup_search_unusable", section: opts.heading.slice(0, 40), why: "the name box could not be filled" }), out("unusable")); }
+      // THE STEP RECORDS THE BOX THE LEARN FILLED, not only the template's name for it (live City of
+      // Tigard, replays v8/v9 of 2026-11-15): "Business Name" with a bare `[id*='Name']` fallback found
+      // nothing by label on EnerGov's dialog — its box is labelled "Search" with the placeholder "Name,
+      // E-mail, or Company" — so the fallback reached the inactive tab's First Name and the re-anchor
+      // "Business Phone", where the fill timed out. The box's own id, label and placeholder lead; the
+      // template's words ("Business Name", "Company Name") and the loose css stay behind them.
+      const own = await nameBox.evaluate((el: Element) => {
+        const id = el.getAttribute("id") || "";
+        const forLbl = id ? document.querySelector(`label[for="${CSS.escape(id)}"]`) : null;
+        const wrap = el.closest("label");
+        const label = String((forLbl && (forLbl as HTMLElement).innerText) || (wrap && (wrap as HTMLElement).innerText) || el.getAttribute("aria-label") || "").replace(/\s+/g, " ").trim();
+        return { id, label, placeholder: String(el.getAttribute("placeholder") || "").replace(/\s+/g, " ").trim() };
+      }).catch(() => ({ id: "", label: "", placeholder: "" }));
+      const ownFallbacks = [
+        ...(own.id ? [{ css: `[id="${own.id}"]`, ...inFrame }] : []),
+        ...(own.placeholder ? [{ placeholder: own.placeholder, ...inFrame }] : []),
+        ...(own.label && own.label !== "Business Name" ? [{ label: "Business Name", ...inFrame }] : []),
+        { label: "Company Name", ...inFrame },
+        { css: "input[id*='Business' i], input[id*='Company' i], input[id*='Name' i]", ...inFrame },
+      ];
+      opts.steps.push({ action: "fill", phase: "fill", selector: { label: own.label || "Business Name", fallbacks: ownFallbacks, ...inFrame }, field: contactKeyFor("company", "business") ?? "installerCompanyName", value: opts.companyName, note: `lookup(${opts.heading.slice(0, 40)}): business name` });
+      searched = `searched by business name "${opts.companyName}"${typeChosen ? ` with ${typeSel!.label} "${typeChosen}"` : typeSelectPresent ? ` with ${typeSel!.label} left at its placeholder (no option names ${opts.discipline || "this discipline"})` : ""}`;
+      // 3) The form's own search button — the same shared predicate, the same refusals; labels read in
+      //    one pass (the button sits below the fold of a long form), scrolled into view before the click.
+      const controls = scope.locator("a, button, input[type='button'], input[type='submit']");
+      const labels: string[] = await controls.evaluateAll((els: Element[]) => els.map((el) => {
+        const r = (el as HTMLElement).getBoundingClientRect();
+        if (!(r.width > 0 && r.height > 0)) return "";
+        return String(el.tagName === "INPUT" ? (el as HTMLInputElement).value : ((el as HTMLElement).innerText || el.textContent || el.getAttribute("title") || "")).replace(/\s+/g, " ").trim();
+      })).catch(() => [] as string[]);
+      // #221 — THE NAME BOX'S OWN SEARCH CONTROL FIRST (live Tigard "Add Contact As: Contractor": a
+      // "Search" TAB — already the active one — sits above the box; the box's own magnifier, wordless,
+      // sits beside it). Nearest ancestor level (≤3) holding exactly one search-worded or magnifier
+      // control; a tab (role=tab, aria-selected / aria-current, an active / selected class) never is.
+      const owned = String(await nameBox.evaluate((box: Element) => {
+        document.querySelectorAll("[data-al-lsb]").forEach((n) => n.removeAttribute("data-al-lsb"));
+        let node: Element | null = box.parentElement;
+        for (let level = 0; level < 3 && node && node !== document.body; level++, node = node.parentElement) {
+          const found = node.querySelectorAll("button, input[type=button], input[type=submit], [role=button], a");
+          const fit: HTMLElement[] = [];
+          const names: string[] = [];
+          for (let i = 0; i < found.length; i++) {
+            const c = found[i] as HTMLElement;
+            const r = c.getBoundingClientRect();
+            if (!(r.width > 0 && r.height > 0)) continue;
+            const cls = String(c.className || "");
+            if (c.getAttribute("role") === "tab" || c.getAttribute("aria-selected") === "true" || c.getAttribute("aria-current") || /(^|\s)(active|selected|is-active)(\s|$)/i.test(cls)) continue;
+            const text = String(c.innerText || (c as HTMLInputElement).value || c.getAttribute("aria-label") || c.getAttribute("title") || "").replace(/\s+/g, " ").trim();
+            let ok = !!text && text.length <= 30 && /^(search|find|go|look\s?-?up)$/i.test(text);
+            if (!text) {
+              const drawn = [cls, c.getAttribute("data-icon") || ""];
+              const kids = c.querySelectorAll("i, span, svg, img");
+              for (let k = 0; k < kids.length && k < 6; k++) drawn.push(String((kids[k] as Element).getAttribute("class") || ""), (kids[k] as Element).getAttribute("alt") || "");
+              ok = /search|magnif/i.test(drawn.join(" "));
+            }
+            if (!ok) continue;
+            fit.push(c);
+            names.push(text || "search");
+          }
+          if (fit.length > 1) return "";
+          if (fit.length === 1) { fit[0].setAttribute("data-al-lsb", "1"); return names[0]; }
+        }
+        return "";
+      }).catch(() => "") ?? "");
+      const tabFlags: boolean[] = await controls.evaluateAll((els: Element[]) => els.map((el) => el.getAttribute("role") === "tab" || el.getAttribute("aria-selected") === "true" || !!el.getAttribute("aria-current") || /(^|\s)(active|selected|is-active)(\s|$)/i.test(String((el as HTMLElement).className || "")))).catch(() => [] as boolean[]);
+      const si = owned ? -1 : labels.findIndex((label, i) => !!label && !tabFlags[i] && /search|look\s?-?up|find/i.test(label) && isLookupButtonLabel(label) && !isPayFee(label) && !SUBMIT_INTENT.test(label));
+      if (!owned && si < 0) { opts.steps.length = mark; return (this.debug?.event({ type: "lookup_search_unusable", section: opts.heading.slice(0, 40), why: "no search control beside the name box or by its words" }), out("unusable")); }
+      const searchBtn = owned ? scope.locator('[data-al-lsb="1"]').first() : controls.nth(si);
+      const searchLabel = owned || labels[si];
+      // At most TWO searches per press: a second only when no type option fit (the register may
+      // answer a bare name on a retry); with the type set, one empty answer is the answer.
+      const tries = typeSelectPresent && !typeChosen ? 2 : 1;
+      // The "is this client" test: a cell that IS this company's name — case, punctuation, "&" vs
+      // "and" and the legal suffix (LLC / Inc / Corp / Co / Ltd / DBA…) ignored, nothing else. Not the
+      // AHJ/utility fuzzy scorer and not containment (Helm review of PR #247): "Acme Solar Electric"
+      // scored 70 against "Acme Solar Roofing" and "Acme Solar" sat inside "Acme Solar of Idaho", so
+      // another licensed company's record could be attached as this client's.
+      // (shared/src/rowPick.ts companyKey — the replay narrows several matching rows by the same key.)
+      const ourKey = companyKey(opts.companyName);
+      const isOurs = (text: string): boolean => !!ourKey && companyKey(text) === ourKey;
+      // ONLY ROWS THE SEARCH BROUGHT COUNT (live Meridian run 10: the licence register's own form is a
+      // table of rows holding links and buttons, so "rows, none ours" fired ~2.4 s after the click —
+      // before the results had arrived — and the event read empty:false). Rows present before the
+      // click are the form, never a result.
+      const rowSel = "tr";
+      const rowTexts = async (): Promise<string[]> => scope.locator(rowSel).allInnerTexts().then((a: string[]) => a.map((t) => t.replace(/\s+/g, " ").trim())).catch(() => [] as string[]);
+      // The list's own Select / OK button, pressed after a row's radio is ticked (the address dialog's
+      // shape, here for a licence register that marks rows with radios).
+      const LIST_OK = /^(select|ok|choose)\s*[»›>→]*$/i;
+      const pressListOk = async (): Promise<boolean> => {
+        const ctl = scope.locator("a, button, input[type='button'], input[type='submit']");
+        const labels: string[] = await ctl.evaluateAll((els: Element[]) => els.map((el) => {
+          const r = (el as HTMLElement).getBoundingClientRect();
+          if (!(r.width > 0 && r.height > 0)) return "";
+          return String(el.tagName === "INPUT" ? (el as HTMLInputElement).value : ((el as HTMLElement).innerText || el.textContent || el.getAttribute("title") || "")).replace(/\s+/g, " ").trim();
+        })).catch(() => [] as string[]);
+        const k = labels.findIndex((l) => !!l && LIST_OK.test(l) && !isPayFee(l) && !SUBMIT_INTENT.test(l) && !sharedIsSubmitIntent(l));
+        if (k < 0) return false;
+        const b = ctl.nth(k);
+        await b.scrollIntoViewIfNeeded?.({ timeout: 3000 }).catch(() => null);
+        if (!(await b.click({ timeout: 8000 }).then(() => true).catch(() => false))) return false;
+        opts.steps.push({ action: "click", phase: "fill", selector: { role: "button", name: labels[k], exact: true, fallbacks: [{ role: "link", name: labels[k], exact: true, ...inFrame }], ...inFrame }, note: `lookup(${opts.heading.slice(0, 40)}): ${labels[k]} [result list]` });
+        return true;
+      };
+      for (let attempt = 0; attempt < tries; attempt++) {
+        const before = new Set(await rowTexts());
+        // Rows on screen before the press are marked: a row the press RE-RENDERED is a result even
+        // when its text is unchanged (the same query run twice), a row it left alone is not.
+        await scope.locator(rowSel).evaluateAll((els: Element[]) => els.forEach((e) => e.setAttribute("data-al-oldrow", "1"))).catch(() => null);
+        // ...and every row in the name box's own document, for the wider result scope below.
+        await nameBox.evaluate((box: Element) => { (box.ownerDocument || document).querySelectorAll("tr").forEach((e) => e.setAttribute("data-al-oldrow", "1")); }).catch(() => null);
+        await searchBtn.scrollIntoViewIfNeeded?.({ timeout: 3000 }).catch(() => null);
+        if (!(await searchBtn.click({ timeout: 8000 }).then(() => true).catch(() => false))) { opts.steps.length = mark; return (this.debug?.event({ type: "lookup_search_unusable", section: opts.heading.slice(0, 40), why: "the search control could not be clicked" }), out("unusable")); }
+        if (attempt === 0) opts.steps.push({ action: "click", phase: "fill", selector: { role: "button", name: searchLabel, exact: true, fallbacks: [{ role: "link", name: searchLabel, exact: true, ...inFrame }, { css: `a[title="${searchLabel}"], input[value="${searchLabel}"]`, ...inFrame }], ...inFrame }, note: `lookup(${opts.heading.slice(0, 40)}): ${searchLabel}` });
+        await page.waitForLoadState?.("networkidle", { timeout: 15000 }).catch(() => null);
+        // Poll: rows, or the form's own "nothing found".
+        let sawEmpty = false;
+        let freshSeen = 0;
+        let freshSample: string[] = [];
+        for (let i = 0; i < 15; i++) {
+          await sleep(800);
+          // Bounded: a SECTION scope (#221, the search form inline in a section) has no <body> inside it,
+          // and an unbounded read waited the context's whole default timeout on every poll.
+          const body = (await scope.locator("body").count().catch(() => 0))
+            ? String((await scope.locator("body").innerText({ timeout: 2000 }).catch(() => "")) ?? "")
+            : String((await scope.innerText?.({ timeout: 2000 }).catch(() => "")) ?? "");
+          // #221 — THE RESULTS MAY SIT OUTSIDE THE SCOPE handed in (live Tigard: the section container
+          // holds the search box, the results table is further out). With no result rows in the scope,
+          // the nearest ancestor of the name box (≤6 levels) that holds rows with controls.
+          let rowScope = scope;
+          if (!(await scope.locator(rowSel).filter({ has: (page ?? scope).locator("a, button, input[type='radio']") }).count().catch(() => 0)) && !opts.frame) {
+            const held = await nameBox.evaluate((box: Element) => {
+              (box.ownerDocument || document).querySelectorAll("[data-al-lrows]").forEach((n) => n.removeAttribute("data-al-lrows"));
+              let node: Element | null = box.parentElement;
+              for (let up = 0; up < 6 && node && node.tagName !== "BODY"; up++, node = node.parentElement) {
+                const trs = node.querySelectorAll("tr");
+                for (let k = 0; k < trs.length; k++) if (trs[k].querySelector("a, button, input[type=radio]")) { node.setAttribute("data-al-lrows", "1"); return true; }
+              }
+              return false;
+            }).catch(() => false);
+            if (held && page) rowScope = page.locator('[data-al-lrows="1"]').first();
+          }
+          // The row's "has a control" test is a PAGE-rooted selector: an inner locator built from a section
+          // scope carries the section's own selector and can never match inside a row.
+          const rows = rowScope.locator(rowSel).filter({ has: (page ?? rowScope).locator("a, button, input[type='radio']") });
+          const rn = await rows.count().catch(() => 0);
+          let fresh = 0;
+          const sample: string[] = [];
+          // #221 — every row that IS this client, then ONE chosen: the row's own control is its
+          // Select / Add link or button or its radio (live Tigard rows carry their own "Add").
+          // The visible word or the accessible name (live Tigard: <button aria-label="Add Contact">Add</button>).
+          // ONE reading with the replay's pickResultRowForProject (shared/src/rowPick.ts): the learn
+          // and the replay must press the same kind of control, or a row's favourite star ("Add
+          // Favorite") is "Add" to one of them (live City of Tigard, replay v10 of 2026-11-15).
+          const ROW_PICK = ROW_PICK_WORDS;
+          type Cand = { row: any; text: string; sel: any }; // eslint-disable-line @typescript-eslint/no-explicit-any
+          const cands: Cand[] = [];
+          const staleOurs: Cand[] = [];
+          for (let r = 0; r < Math.min(rn, 60); r++) {
+            const row = rows.nth(r);
+            const text = String((await row.innerText().catch(() => "")) ?? "").replace(/\s+/g, " ").trim();
+            if (!text || text.length > 400) continue;
+            const rerendered = !(await row.getAttribute("data-al-oldrow").catch(() => null));
+            const isFresh = rerendered || !before.has(text);
+            if (isFresh) { fresh++; if (sample.length < 3) sample.push(text.slice(0, 70)); }
+            // The row's own name cells, not the whole text: a licence number or address never matches.
+            const cells: string[] = await row.locator("td").allInnerTexts().catch(() => [] as string[]);
+            const names = (cells.length ? cells : [text]).map((c) => c.replace(/\s+/g, " ").trim()).filter(Boolean);
+            if (!names.some(isOurs)) continue;
+            const sel = row.getByRole("link", { name: ROW_PICK }).or(row.getByRole("button", { name: ROW_PICK })).or(row.locator("input[type='radio']")).first();
+            if (!(await sel.count().catch(() => 0))) continue;
+            (isFresh ? cands : staleOurs).push({ row, text, sel });
+          }
+          // The same query run again may leave its rows untouched: they ARE this search's answer when
+          // the name box holds exactly this client's name (after the poll has waited for a re-render).
+          if (!cands.length && !fresh && staleOurs.length && i >= 3) {
+            const held = String(await nameBox.inputValue().catch(() => "") ?? "").trim().toLowerCase();
+            if (held === opts.companyName.trim().toLowerCase()) cands.push(...staleOurs);
+          }
+          let pickedCand: Cand | null = null;
+          let byStreet = "";
+          if (cands.length === 1) pickedCand = cands[0];
+          else if (cands.length > 1) {
+            // SEVERAL ROWS ARE THIS CLIENT: the one at the client record's business street (house number
+            // and the street's first word), else a named stop — never the first row.
+            const m = String(opts.companyStreet ?? "").trim().match(/^(\d+[A-Za-z]?)\s+(?:(?:N|S|E|W|NE|NW|SE|SW|North|South|East|West)\.?\s+)?([A-Za-z0-9]+)/i);
+            const atStreet = m ? cands.filter((c) => new RegExp(`(^|\\D)${m[1]}\\b`, "i").test(c.text) && new RegExp(`\\b${m[2]}\\b`, "i").test(c.text)) : [];
+            if (atStreet.length === 1) { pickedCand = atStreet[0]; byStreet = `${m![1]} ${m![2]}`; }
+            else {
+              this.debug?.event({ type: "lookup_search_rows", section: opts.heading.slice(0, 40), fresh, ours: cands.length, picked: false, ambiguous: true, streetKnown: !!m });
+              await opts.shot?.(`search-results-ambiguous`).catch?.(() => null);
+              opts.steps.length = mark;
+              return out("ambiguous");
+            }
+          }
+          if (pickedCand) {
+            const { sel } = pickedCand;
+            const isRadio = await sel.evaluate((el: Element) => (el as HTMLInputElement).type === "radio" || (el as HTMLInputElement).type === "checkbox").catch(() => false);
+            const ok = await sel.click({ timeout: 8000 }).then(() => true).catch(() => false);
+            if (!ok) continue;
+            const rowSelCss = byStreet ? `tr:has-text("${opts.companyName}"):has-text("${byStreet.split(" ")[0]}")` : `tr:has-text("${opts.companyName}")`;
+            opts.steps.push({ action: "click", phase: "fill", selector: { css: `${rowSelCss} a:has-text("Select"), ${rowSelCss} button:has-text("Add"), ${rowSelCss} a:has-text("Add"), ${rowSelCss} input[type='radio']`, ...inFrame }, note: `lookup(${opts.heading.slice(0, 40)}): select this client's record${byStreet ? ` (the row at ${byStreet})` : ""}` });
+            // A ticked radio is not a pick until the list's own Select is pressed.
+            if (isRadio) await pressListOk();
+            await page.waitForLoadState?.("networkidle", { timeout: 15000 }).catch(() => null);
+            await sleep(600);
+            this.debug?.event({ type: "lookup_search_rows", section: opts.heading.slice(0, 40), fresh, picked: true });
+            return out("picked");
+          }
+          freshSeen = fresh;
+          freshSample = sample;
+          if (/no records? (were |was )?found|no results? (were )?(found|returned)|returned no results|not found|0 records?/i.test(body)) { sawEmpty = true; break; }
+          if (fresh > 0 && i >= 3) break; // results arrived, none ours
+        }
+        this.debug?.event({ type: "lookup_search_rows", section: opts.heading.slice(0, 40), fresh: freshSeen, sample: freshSample, empty: sawEmpty });
+        await opts.shot?.(`search-results-${attempt + 1}`).catch?.(() => null);
+        this.debug?.event({ type: "lookup_search_attempt", section: opts.heading.slice(0, 40), attempt: attempt + 1, licenseType: typeChosen || (typeSelectPresent ? "(placeholder)" : "(no type select)"), empty: sawEmpty });
+      }
+      opts.steps.length = mark;
+      return out("empty");
+    } catch {
+      opts.steps.length = mark;
+      return out("unusable");
+    }
+  }
+
+  /** Close a dialog a lookup opened and did not resolve: ACA's own (closeAcaDialog), any other
+   *  frame's close control, then Escape. */
+  private async closeLookupDialog(frame: string | null): Promise<void> {
+    const page = this.page;
+    if (!page) return;
+    await this.closeAcaDialog().catch(() => null);
+    if (frame) {
+      for (const sel of ["a[title='Close' i]", "button[aria-label='Close' i]", "img[alt='Close' i]", ".ui-dialog-titlebar-close", `[id="${frame}_Close"]`]) {
+        const c = page.locator(sel).first();
+        const vis = (await c.count().catch(() => 0)) > 0 && (typeof c.isVisible === "function" ? await c.isVisible().catch(() => false) : false);
+        if (vis) { await c.click({ timeout: 4000 }).catch(() => null); break; }
+      }
+    }
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const kb = (page as any)?.keyboard;
+    if (kb && typeof kb.press === "function") await kb.press("Escape").catch(() => null);
+    await sleep(400);
   }
 
   // Click a "Calculate" / "Update Totals" style button that computes derived values from the
@@ -13109,7 +14651,7 @@ export class AutoLearnAdapter extends BasePortalAdapter {
     steps.push({
       action: "click",
       phase: "fill",
-      selector: candidate.selector,
+      selector: await this.recordedClickSelector(candidate as ExtractedField), // checked before the click (#228)
       note: `advance: ${candidate.label || "next"}`,
     });
     const res = await safeAction("fallback-advance", async () => {
@@ -13243,11 +14785,14 @@ export class AutoLearnAdapter extends BasePortalAdapter {
 
   private isOffLimitsButton(field: ExtractedField): boolean {
     const sel = field.selector;
-    return isPayFee(field.label) || isPayFee(sel?.name) || isPayFee(sel?.text)
-      || isSignatureRequestControl(field.label) || isSignatureRequestControl(sel?.text)
+    // The FACE words too (#228): since the selector is named by the accessible name, a control
+    // reading "Pay Fees" under an aria-label that does not would otherwise leave this test.
+    return isPayFee(field.label) || isPayFee(sel?.name) || isPayFee(sel?.text) || isPayFee(sel?.shownText)
+      || isSignatureRequestControl(field.label) || isSignatureRequestControl(sel?.text) || isSignatureRequestControl(sel?.shownText)
       || EXISTING_RECORD_ACTION.test(field.label || "")
       || EXISTING_RECORD_ACTION.test(sel?.name || "")
-      || EXISTING_RECORD_ACTION.test(sel?.text || "");
+      || EXISTING_RECORD_ACTION.test(sel?.text || "")
+      || EXISTING_RECORD_ACTION.test(sel?.shownText || "");
   }
 
   /** Off-limits for a DASHBOARD navigate specifically. On a logged-in home the only valid
@@ -13262,7 +14807,7 @@ export class AutoLearnAdapter extends BasePortalAdapter {
     // Only test text we actually have: isExcludedEntryLabel treats an EMPTY label as
     // excluded (nothing to start an application with), which would refuse every control
     // whose selector happens to carry no name/text.
-    const texts = [field.label, sel?.name, sel?.text].map((t) => String(t ?? "").trim()).filter(Boolean);
+    const texts = [field.label, sel?.name, sel?.text, sel?.shownText].map((t) => String(t ?? "").trim()).filter(Boolean);
     return texts.some((t) => isExcludedEntryLabel(t));
   }
 
@@ -13345,9 +14890,31 @@ export class AutoLearnAdapter extends BasePortalAdapter {
         await l.evaluate((el: Element) => el.removeAttribute("data-al-hidden-target")).catch(() => {});
         return false;
       }
+      // A POP-UP'S OPENER GOES THROUGH THE SHARED DOORS (Helm review of #268): the in-page word list
+      // misses filing words the shared predicates catch ("Complete Application", "Finalize
+      // Application", "Send Application", "Place Order"), and an aria-haspopup opener needs no title
+      // match. Refused means not clicked, said in the run log, the field skipped as before.
+      if (plan.popup && AutoLearnAdapter.popupControlRefused(plan.popup.name)) {
+        this.debug?.event({ type: "popup_opener_refused", label: (field.label || "").slice(0, 60), opener: plan.popup.name.slice(0, 60) });
+        await this.page.evaluate(() => {
+          document.querySelectorAll("[data-al-reveal], [data-al-popup]").forEach((n) => { n.removeAttribute("data-al-reveal"); n.removeAttribute("data-al-popup"); });
+        }).catch(() => null);
+        await l.evaluate((el: Element) => el.removeAttribute("data-al-hidden-target")).catch(() => {});
+        return false;
+      }
       await this.page.locator("[data-al-reveal]").first().click({ timeout: 3000 });
       await sleep(500);
       const now = typeof l.isVisible === "function" ? await l.isVisible().catch(() => false) : false;
+      // A POP-UP THE WALK OPENED IS PART OF THE RECIPE (#131): a replay must press the same opener
+      // before it can fill the dialog's boxes. Recorded with the fills it opened for (drained by the
+      // caller just ahead of this field's own step); its Save is popupCommitPass's.
+      if (now && plan.popup?.name) {
+        this.typeaheadDoorSteps.push({
+          action: "click", phase: "fill",
+          selector: { role: plan.popup.role, name: plan.popup.name, exact: true, ...(plan.popup.id ? { fallbacks: [{ css: `#${plan.popup.id}` }] } : {}) },
+          note: `pop-up: open (${plan.popup.name.slice(0, 50)})`,
+        } as RecipeStep);
+      }
       this.debug?.event({
         type: now ? "hidden_field_revealed" : "hidden_field_reveal_failed",
         label: (field.label || "").slice(0, 60),
@@ -13828,6 +15395,8 @@ export class AutoLearnAdapter extends BasePortalAdapter {
     else if (sel.testId) loc = scope.getByTestId(sel.testId);
     else if (sel.text) loc = scope.getByText(sel.text, { exact: sel.exact });
     else if (sel.css) loc = scope.locator(sel.css);
+    // A bare `name` is the name attribute: the same reading replay makes (#229, shared/src/recipeSelector).
+    else if (nameAttributeOf(sel)) loc = scope.locator(nameAttributeCss(nameAttributeOf(sel)));
     else if (sel.role) loc = scope.getByRole(sel.role);
     else throw new Error("AutoLearn selector has no usable strategy.");
     if (typeof sel.nth === "number") return loc.nth(sel.nth);
@@ -13918,6 +15487,25 @@ export class AutoLearnAdapter extends BasePortalAdapter {
    *  navigate door re-plans, the advance door treats it as an advance that did nothing). What is
    *  NOT guaranteed: a change landing in the milliseconds between that re-read and Playwright's own
    *  gesture — the same window a role/name lookup has between resolving and clicking. */
+  /** #228 — THE SELECTOR A CLICK STEP RECORDS FOR `field`, checked against the element it was read
+   *  from (clickSelectorForElement). Asked while that element is still on the page — before the
+   *  click — and only at the doors that record a scanned button: navigate, advance, the fallback
+   *  advance, the verified record type, the manual-entry door. A re-pin or a miss is named in the
+   *  debug bundle; the walk itself is never stopped by it. */
+  private async recordedClickSelector(field: ExtractedField): Promise<RecipeSelector> {
+    const r = await clickSelectorForElement(this.page, field);
+    if (r.repinned || r.missed) {
+      this.debug?.event({
+        type: r.repinned ? "click_selector_repinned" : "click_selector_misses_element",
+        label: String(field.label ?? "").replace(/\s+/g, " ").trim().slice(0, 60),
+        why: r.repinned ? "its name finds another control; the step leads with its #id"
+          : r.missed === "nothing" ? "its name finds nothing; kept as harvested (the replay reaches it by a fallback or by name)"
+          : "its name finds another control and no #id finds it; kept as harvested",
+      });
+    }
+    return r.selector;
+  }
+
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   private async fieldClickLocator(field: ExtractedField): Promise<any | null> {
     if (!this.page) return null;
@@ -14020,6 +15608,13 @@ export class AutoLearnAdapter extends BasePortalAdapter {
   }
 }
 
+/** A POPUP'S DISMISSAL WORDS: a control whose WHOLE label is one of these only closes or
+ *  acknowledges a popup. One vocabulary for two questions (#233): the dismisser's fast path asks
+ *  it in the page (passed as `.source` with the same "i" flag, since a closed-over constant is a
+ *  ReferenceError there — the regex text is unchanged), and replay asks it of a recorded click
+ *  (isDialogDismissalStep), so the two cannot disagree about what "OK" is. */
+export const DISMISS_LABEL = /^(got it|dismiss|close|accept all|accept|ok|×|x)$/i;
+
 // SHARED WITH REPLAY. Extracted verbatim from AutoLearnAdapter.dismissModals so the RecipeAdapter
 // can run the same pass: replay had NO modal handling at all, and the first live replay died
 // on step 2 of 99 because PowerClerk's "What's new?" popover — which this code already knows
@@ -14042,15 +15637,15 @@ export async function dismissPageModals(
   // any button whose text is a dismissal? Deliberately broader than the selectors below, so
   // it can only skip work that would have found nothing.
   if (typeof page.evaluate === "function") {
-    const worthDoing = await page.evaluate(() => {
+    const worthDoing = await page.evaluate((dismissSource: string) => {
       const CSS_HINTS = '.modal, .popover, .modal-backdrop, [class*="backdrop"], [id*="cpr-banner"],'
         + ' [class*="cookie"], [class*="consent"], .btn-close, [aria-label="Close"], [aria-label="close"],'
         + ' .x-tool-close, [class*="x-window"], [class*="modal"], [class*="popover"]';
       if (document.querySelector(CSS_HINTS)) return true;
-      const DISMISS_TEXT = /^(got it|dismiss|close|accept all|accept|ok|×|x)$/i;
+      const DISMISS_TEXT = new RegExp(dismissSource, "i");
       const els = Array.from(document.querySelectorAll("button, a, .btn, [role=button]"));
       return els.some((el) => DISMISS_TEXT.test(((el as HTMLElement).innerText || "").trim()));
-    }).catch(() => true); // unreadable page → do the full walk, as before
+    }, DISMISS_LABEL.source).catch(() => true); // unreadable page → do the full walk, as before
     if (!worthDoing) return out;
   }
   // Match dismiss controls whether they're <button>, <a>, or .btn (PowerClerk uses

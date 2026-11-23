@@ -270,7 +270,9 @@ async function learnCell(flavor: Flavor, mutation: Mutation): Promise<LearnOutco
       policyProfile: scopeType === "utility" ? "residential_nem" : "none",
       bindableFields: Array.from(new Set([...Object.keys(resolveRecipeFieldValues(db, projA, portalType, scopeType === "utility" ? "nem" : "electrical")), ...Object.keys(RECIPE_FIELD_DESCRIPTIONS)])),
       siteContactIdentity: { firstName: pf.homeownerFirstName || "", lastName: pf.homeownerLastName || "", email: pf.homeownerEmail || "", phone: pf.homeownerPhone || "", street: pf.street || "", city: pf.city || "", state: pf.state || "", zip: pf.zip || "" },
-      contactIdentity: { firstName: pf.installerFirstName || "", lastName: pf.installerLastName || pf.installerCompanyName || "", email: pf.installerEmail || "", phone: pf.installerPhone || "", street: pf.installerStreet || "", city: pf.installerCity || "", state: pf.installerState || "", zip: pf.installerZip || "" },
+      // As autoLearnPortal builds it (backend/src/autoLearn.ts): the company's full and business names
+      // too, which the lookup / contact passes search and confirm a row by.
+      contactIdentity: { fullName: pf.installerContactName || "", companyName: pf.installerCompanyName || "", firstName: pf.installerFirstName || "", lastName: pf.installerLastName || pf.installerCompanyName || "", email: pf.installerEmail || "", phone: pf.installerPhone || "", street: pf.installerStreet || "", city: pf.installerCity || "", state: pf.installerState || "", zip: pf.installerZip || "" },
       equipment: {
         inverterMake: pf.inverterMake || "", inverterModel: pf.inverterModel || "", moduleMake: pf.moduleMake || "", moduleModel: pf.moduleModel || "",
         inverterQty: pf.inverterQty || "", moduleQty: pf.moduleQty || "", tracking: "Fixed",

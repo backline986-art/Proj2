@@ -380,6 +380,13 @@ const CAPTCHA_FRAME_HOSTS = [
   "challenges.cloudflare.com",
   "arkoselabs",
   "funcaptcha",
+  // IMPERVA / INCAPSULA serves its bot check from the PORTAL'S OWN host, in a frame at
+  // /_Incapsula_Resource?SWUDNSAI=… (live City of Bend CityView, 2026-11-16: an image-grid
+  // "Click on what you can buy at a coffee shop" behind a page that read as empty text). Matched on
+  // the frame's path, since hostPath carries host AND path. Without it the learner closed on the
+  // person twice as "login_form_unrecognized" instead of parking for them to pass it.
+  "_incapsula_resource",
+  "incapsula",
 ];
 const MFA_FRAME_HOSTS = ["duosecurity", "duo.com", "microsoft.com/mfa"];
 // Read on the frame's path (+ hash route), never its query: an OAuth authorize URL routinely
@@ -627,13 +634,31 @@ export const SECOND_FACTOR_TEXT_SOURCE = [
   "multi[- ]factor", "approve the sign[- ]in", "check your (e-?mail|phone) for a code",
 ].join("|");
 
-export async function detectSecondFactor(page: Page | null | undefined): Promise<string> {
-  if (!page || typeof (page as { frames?: unknown }).frames !== "function") return "";
+/** A ONE-TIME-CODE BOX, BY THE NAMES IT CARRIES (name, id, autocomplete, aria-label, placeholder,
+ *  its own <label>). THE ONE REGEX for that question: detectSecondFactor reads a live box with it, and
+ *  the replay reads a recorded step's label with it (recipeAdapter, #238). A card's "Security Code"
+ *  matches too, so this is never the whole answer on a page that might take a card: the replay
+ *  pauses for a second factor only on the page's own second-factor WORDING with no card anywhere
+ *  (recipeAdapter secondFactorAtSignIn). Live Idaho DOPL recipe 7e90272b: its only recorded step, the
+ *  emailed "Security Code", was read as a CVV and the run reported a clean review stop. */
+export const ONE_TIME_CODE_FIELD = /one-time-code|passcode|\botp\b|verification.?code|security.?code|mfa.?code|credentials\.passcode/i;
+
+/** What every frame of the page says about a second factor, as DATA: a visible password box (the
+ *  password step, never a second factor), the first SECOND_FACTOR_TEXT_SOURCE wording found, and
+ *  whether a visible box is named like a one-time code (ONE_TIME_CODE_FIELD). THE ONE READER:
+ *  detectSecondFactor formats it for the login flow, and the replay asks it for the WORDING alone
+ *  (#238), because there a CVV named "Security Code" makes the code-box half true on a card page
+ *  too. A page it cannot read reads as nothing. Reads only; types nothing and clicks nothing. */
+export type SecondFactorReading = { password: boolean; wording: string; codeField: boolean };
+
+export async function readSecondFactor(page: Page | null | undefined): Promise<SecondFactorReading> {
+  const none: SecondFactorReading = { password: false, wording: "", codeField: false };
+  if (!page || typeof (page as { frames?: unknown }).frames !== "function") return none;
   try {
     let wording = "";
     let codeField = false;
     for (const frame of page.frames()) {
-      const r = await frame.evaluate((src: string) => {
+      const r = await frame.evaluate(({ src, codeSrc }: { src: string; codeSrc: string }) => {
         // Fully inline — no named helper (the __name note in waitForInteractiveControls).
         const inputs = Array.from(document.querySelectorAll("input")) as HTMLInputElement[];
         let password = false;
@@ -649,23 +674,33 @@ export async function detectSecondFactor(page: Page | null | undefined): Promise
           const labelled = Array.from(el.labels || []).map((l) => (l as HTMLElement).innerText || "").join(" ");
           const hay = [el.name, el.id, el.getAttribute("autocomplete"), el.getAttribute("aria-label"), el.getAttribute("placeholder"), labelled]
             .filter(Boolean).join(" ");
-          if (/one-time-code|passcode|\botp\b|verification.?code|security.?code|mfa.?code|credentials\.passcode/i.test(hay)) code = true;
+          if (new RegExp(codeSrc, "i").test(hay)) code = true;
         }
         const text = String((document.body && (document.body as HTMLElement).innerText) || "").replace(/\s+/g, " ").slice(0, 6000);
         const m = text.match(new RegExp(src, "i"));
         return { password, code, wording: m ? m[0] : "" };
-      }, SECOND_FACTOR_TEXT_SOURCE).catch(() => null);
+      }, { src: SECOND_FACTOR_TEXT_SOURCE, codeSrc: ONE_TIME_CODE_FIELD.source }).catch(() => null);
       if (!r) continue;
-      if (r.password) return ""; // still the password step, in some frame — never a second factor
+      if (r.password) return { password: true, wording: "", codeField: false }; // still the password step, in some frame — never a second factor
       if (r.code) codeField = true;
       if (r.wording && !wording) wording = r.wording;
     }
-    if (wording) return `a second-factor screen ("${wording.slice(0, 50)}")${codeField ? " with a code field" : ""}`;
-    if (codeField) return "a second-factor screen (a one-time-code field and no password field)";
-    return "";
+    return { password: false, wording, codeField };
   } catch {
-    return "";
+    return none;
   }
+}
+
+/** The short reason a reading gives for a second factor, or "" when it gives none. */
+export function secondFactorReason(r: SecondFactorReading): string {
+  if (r.password) return "";
+  if (r.wording) return `a second-factor screen ("${r.wording.slice(0, 50)}")${r.codeField ? " with a code field" : ""}`;
+  if (r.codeField) return "a second-factor screen (a one-time-code field and no password field)";
+  return "";
+}
+
+export async function detectSecondFactor(page: Page | null | undefined): Promise<string> {
+  return secondFactorReason(await readSecondFactor(page));
 }
 
 // ---------------------------------------------------------------------------
