@@ -1850,6 +1850,10 @@ export class RecipeAdapter extends BasePortalAdapter {
   /** FILLED IS NOT SAVED: every non-secret value this run typed before the review marker, by its
    *  box's label — the review read-back looks each one up (typedValuesOnReview). */
   private typedForReview: TypedValue[] = [];
+  /** A POP-UP THE RECIPE OPENED (#131): set when a "pop-up: open" step lands, cleared by its
+   *  "pop-up: save" (or any advance). While set, the modal dismissor is not run before a step: the
+   *  dialog IS the thing the next steps fill, and its Cancel is what the dismissor would press. */
+  private recipePopupOpen = false;
   /** Recorded uploads this run PERFORMED: the slot's recorded label and the file name the portal
    *  was handed. The read-back for an upload (see uploadSlotsHeld). */
   private uploadsPerformed: Array<{ label: string; fileName: string; docType?: string }> = [];
@@ -4188,7 +4192,12 @@ export class RecipeAdapter extends BasePortalAdapter {
       // list between the row's tick and the Select (live-shaped smoke: Select then waited on a
       // frame that was gone). A step the learner recorded in a frame opened that frame on purpose.
       const inDialogFrame = !!step.selector?.frame || (step.selector?.fallbacks ?? []).some((f) => !!f.frame);
-      if (!inDialogFrame && (step.action === "click" || step.action === "goto" || step.action === "check" || step.action === "uncheck")) {
+      // NOR INSIDE A POP-UP THE RECIPE OPENED (#131): the learner recorded "pop-up: open", the fills,
+      // then "pop-up: save"; the dismissor read the open dialog as an overlay and pressed its Cancel
+      // before the Save (bench selfserve: the Save then waited on a dialog that was gone).
+      const popupNote = /^pop-up:/i.test(String(step.note ?? "").trim());
+      if (!popupNote && step.phase !== "fill") this.recipePopupOpen = false;
+      if (!inDialogFrame && !popupNote && !this.recipePopupOpen && (step.action === "click" || step.action === "goto" || step.action === "check" || step.action === "uncheck")) {
         await this.dismissModalsGuarded();
         await clearPageOverlays(this.page).catch(() => null);
       }
@@ -4306,6 +4315,8 @@ export class RecipeAdapter extends BasePortalAdapter {
           const notApplicable = done && this.learnStateSkipped?.step === step && this.learnStateSkipped.kind === "conditional";
           if (done && !notApplicable && step.action === "select" && recordedStep?.field) this.landedSelectFields.add(String(recordedStep.field));
           if (done && !notApplicable && !pastReview && step.action === "fill") this.noteTypedForReview(step);
+          if (done && /^pop-up:\s*open\b/i.test(String(step.note ?? "").trim())) this.recipePopupOpen = true;
+          if (/^pop-up:\s*save\b/i.test(String(step.note ?? "").trim())) this.recipePopupOpen = false;
           trace.push({
             i: stepIdx, action: step.action, note: String(step.note ?? "").slice(0, 52),
             outcome: done ? (notApplicable ? "not applicable (not revealed on this job, #237)" : "ok") : "SKIPPED", page: await currentPageLabel(),
