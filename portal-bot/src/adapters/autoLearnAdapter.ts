@@ -6835,6 +6835,13 @@ export class AutoLearnAdapter extends BasePortalAdapter {
    * closed; the click is recorded as "pop-up: save (commits the pop-up)". A dialog that will not
    * close is said in the run log and left for the page's own read-back to name.
    */
+  /** A pop-up control (its opener, or the dialog's own title) that reads as a filing, a payment or a
+   *  signature request by the shared predicates — the one answer every other door asks. */
+  static popupControlRefused(name: string): boolean {
+    const n = String(name ?? "").trim();
+    return !!n && (SUBMIT_INTENT.test(n) || sharedIsSubmitIntent(n) || isPayFee(n) || isSignatureRequestControl(n));
+  }
+
   private async popupCommitPass(steps: RecipeStep[], pageCount: number): Promise<boolean> {
     const page = this.page;
     if (!page || typeof page.evaluate !== "function" || typeof page.locator !== "function") return false;
@@ -6844,6 +6851,20 @@ export class AutoLearnAdapter extends BasePortalAdapter {
       const r = dlg.getBoundingClientRect();
       const cs = getComputedStyle(dlg);
       if (!(r.width > 0 && r.height > 0) || cs.display === "none" || cs.visibility === "hidden") return null;
+      // THE DIALOG, NOT ONLY ITS BUTTON (Helm review of #268): its title (the reading planHiddenReveal
+      // uses) and the labels of its boxes, judged in node by the shared predicates.
+      const labelledBy = String(dlg.getAttribute("aria-labelledby") || "").split(/\s+/).filter(Boolean)
+        .map((i) => { const n = document.getElementById(i); return n ? n.textContent || "" : ""; }).join(" ");
+      const head = dlg.querySelector("h1, h2, h3, h4, legend");
+      const title = String(dlg.getAttribute("aria-label") || labelledBy || (head ? head.textContent || "" : "")).replace(/\s+/g, " ").trim().slice(0, 120);
+      const boxes: string[] = [];
+      for (const el of Array.from(dlg.querySelectorAll("input, textarea"))) {
+        const ty = String((el as HTMLInputElement).type || "").toLowerCase();
+        if (["hidden", "button", "submit", "checkbox", "radio", "file", "image", "reset"].includes(ty)) continue;
+        const id = el.getAttribute("id");
+        const lab = id ? document.querySelector(`label[for="${CSS.escape(id)}"]`) : el.closest("label");
+        boxes.push(String((lab ? lab.textContent : "") || el.getAttribute("aria-label") || el.getAttribute("placeholder") || el.getAttribute("title") || "").replace(/\s+/g, " ").trim().slice(0, 120));
+      }
       const COMMIT = /^\s*(save|ok|okay|done|apply|update)(\s+(and\s+close|&\s+close|changes|details))?\s*$/i;
       for (const b of Array.from(dlg.querySelectorAll("button, a, [role=button], input[type=button], input[type=submit]"))) {
         const t = String(b.tagName === "INPUT" ? (b as HTMLInputElement).value : ((b as HTMLElement).innerText || b.textContent || "")).replace(/\s+/g, " ").trim();
@@ -6853,12 +6874,19 @@ export class AutoLearnAdapter extends BasePortalAdapter {
         if (!COMMIT.test(t)) continue;
         b.setAttribute("data-al-popup-commit", "1");
         const id = b.getAttribute("id") || "";
-        return { role: b.tagName === "A" ? "link" : "button", name: t, id: /^[A-Za-z][\w-]*$/.test(id) ? id : "" };
+        return { role: b.tagName === "A" ? "link" : "button", name: t, id: /^[A-Za-z][\w-]*$/.test(id) ? id : "", title, boxes };
       }
-      return { role: "", name: "", id: "" };
-    }, "data-al-popup").catch(() => null) as { role: string; name: string; id: string } | null;
+      return { role: "", name: "", id: "", title, boxes };
+    }, "data-al-popup").catch(() => null) as { role: string; name: string; id: string; title: string; boxes: string[] } | null;
     if (!found) return false;
-    if (!found.name || SUBMIT_INTENT.test(found.name) || sharedIsSubmitIntent(found.name) || isPayFee(found.name)) {
+    const signatureBox = (found.boxes ?? []).find((b) => !!b && isSignatureNameLabel(b));
+    if (AutoLearnAdapter.popupControlRefused(found.title) || signatureBox) {
+      // Refused means logged, not clicked: the pop-up is left for the page's read-back to name.
+      this.debug?.event({ type: "popup_commit_refused", page: pageCount, title: String(found.title ?? "").slice(0, 60), why: signatureBox ? "the pop-up holds a signature-name box" : "the pop-up's title reads as a filing, payment or signature" });
+      await page.evaluate(() => { document.querySelectorAll("[data-al-popup], [data-al-popup-commit]").forEach((n) => { n.removeAttribute("data-al-popup"); n.removeAttribute("data-al-popup-commit"); }); }).catch(() => null);
+      return false;
+    }
+    if (!found.name || AutoLearnAdapter.popupControlRefused(found.name)) {
       this.debug?.event({ type: "popup_no_commit", page: pageCount, name: found.name.slice(0, 40) });
       return false;
     }
@@ -14857,6 +14885,18 @@ export class AutoLearnAdapter extends BasePortalAdapter {
           label: (field.label || "").slice(0, 60),
           why: plan?.why || "not concealed by any ancestor we recognise",
         });
+        await l.evaluate((el: Element) => el.removeAttribute("data-al-hidden-target")).catch(() => {});
+        return false;
+      }
+      // A POP-UP'S OPENER GOES THROUGH THE SHARED DOORS (Helm review of #268): the in-page word list
+      // misses filing words the shared predicates catch ("Complete Application", "Finalize
+      // Application", "Send Application", "Place Order"), and an aria-haspopup opener needs no title
+      // match. Refused means not clicked, said in the run log, the field skipped as before.
+      if (plan.popup && AutoLearnAdapter.popupControlRefused(plan.popup.name)) {
+        this.debug?.event({ type: "popup_opener_refused", label: (field.label || "").slice(0, 60), opener: plan.popup.name.slice(0, 60) });
+        await this.page.evaluate(() => {
+          document.querySelectorAll("[data-al-reveal], [data-al-popup]").forEach((n) => { n.removeAttribute("data-al-reveal"); n.removeAttribute("data-al-popup"); });
+        }).catch(() => null);
         await l.evaluate((el: Element) => el.removeAttribute("data-al-hidden-target")).catch(() => {});
         return false;
       }

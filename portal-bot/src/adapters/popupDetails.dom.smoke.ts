@@ -14,12 +14,19 @@
 // MUST-NOT  [2] two controls carry the title's words ("Add Project Details" / "Edit Project Details"):
 //               ambiguous, nothing is opened;
 //           [3] the only worded control is "Submit Project Details": never an opener;
-//           [4] the dialog's only button is "Submit": nothing is clicked, nothing recorded.
+//           [4] the dialog's only button is "Submit": nothing is clicked, nothing recorded;
+//           [6] a DECLARED opener (aria-haspopup="dialog") named "Complete Application" is never clicked
+//               (the shared submit-intent predicate, Helm review of #268);
+//           [7] a dialog TITLED "Submit Application", opened by an innocently named control: its OK is
+//               never clicked (the dialog is judged, not only its button);
+//           [8] a dialog holding a signature-name box is not committed.
 // REPLAY:
 // MUST-PASS [5] the recorded open / fill / save replays: the dialog is NOT dismissed between the open
 //               and the Save, the page's hidden input holds THIS job's value.
-// KILL: drop the `!popupNote && !this.recipePopupOpen` guard in recipeAdapter -> [5] fails; drop rule 5
-//       in revealHidden.ts -> [1] fails.
+// KILL: drop the `!popupNote && !this.recipePopupOpen` guard in recipeAdapter -> [5] fails; drop the
+//       pop-up rule in revealHidden.ts -> [1] fails; drop the popupControlRefused(plan.popup.name) refusal
+//       in tryRevealHidden -> [6] fails; drop popupControlRefused(found.title) in popupCommitPass -> [7]
+//       fails; drop the signatureBox test there -> [8] fails.
 import "../smokeArtifactDirs";
 import http from "node:http";
 import { chromium, type Page } from "playwright";
@@ -36,20 +43,23 @@ const check = (label: string, ok: boolean, detail = ""): void => {
   else { failures++; console.error(`  FAIL - ${label}\n         ${detail}`); }
 };
 
-const page = (opts: { openers?: string; dialogButtons?: string } = {}): string => `<!doctype html><html><head><meta charset="utf-8"><title>Apply</title>
+const page = (opts: { openers?: string; dialogButtons?: string; title?: string; extraBoxes?: string } = {}): string => `<!doctype html><html><head><meta charset="utf-8"><title>Apply</title>
 <style>.modal{position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:100}.modal-content{background:#fff;margin:60px auto;padding:16px;max-width:520px}[hidden]{display:none}</style></head><body>
 <main><h1>Project Details</h1><p id="summary">No project details entered.</p>
 ${opts.openers ?? '<button type="button" id="btnOpen" class="opener">Add Project Details</button>'}
 <input type="hidden" name="Details.DcKw" value="">
 <button type="button" id="btnSaveDraft">Save Draft</button> <button type="button" id="btnNext">Next</button>
 <div class="modal" role="dialog" aria-modal="true" aria-labelledby="dlgTitle" id="dlg" hidden><div class="modal-content">
-<h2 id="dlgTitle">Project Details</h2>
+<h2 id="dlgTitle">${opts.title ?? "Project Details"}</h2>
 <div class="field"><label for="fld_dcKw">System Size (kW DC)</label><input type="text" id="fld_dcKw" data-name="Details.DcKw"></div>
+${opts.extraBoxes ?? ""}
 ${opts.dialogButtons ?? '<button type="button" id="btnDialogSave">Save</button><button type="button" id="btnDialogCancel">Cancel</button>'}
 </div></div></main>
 <script>
   var dlg = document.getElementById('dlg');
-  document.querySelectorAll('.opener').forEach(function (b) { b.addEventListener('click', function () { dlg.hidden = false; }); });
+  window.__openClicks = 0; window.__commitClicks = 0;
+  document.querySelectorAll('.opener').forEach(function (b) { b.addEventListener('click', function () { window.__openClicks++; dlg.hidden = false; }); });
+  dlg.querySelectorAll('button').forEach(function (b) { if (!/cancel/i.test(b.textContent)) b.addEventListener('click', function () { window.__commitClicks++; }); });
   var save = document.getElementById('btnDialogSave');
   if (save) save.addEventListener('click', function () {
     var box = document.getElementById('fld_dcKw');
@@ -129,6 +139,50 @@ for (const [tag, openers, why] of [
   const committed = await a.popupCommitPass(steps, 1);
   const submitted = await p.evaluate(() => (window as unknown as { __submitted?: number }).__submitted);
   check("[4] a dialog whose only button is Submit: nothing clicked, nothing recorded", committed === false && !submitted && steps.length === 0, JSON.stringify({ committed, submitted, steps }));
+  await p.context().close();
+}
+
+// [6] / [7] / [8] MUST-NOT (Helm review of #268), each with click counters on the fixture.
+const clicks = (p: Page): Promise<{ open: number; commit: number }> =>
+  p.evaluate(() => ({ open: Number((window as unknown as { __openClicks?: number }).__openClicks || 0), commit: Number((window as unknown as { __commitClicks?: number }).__commitClicks || 0) }));
+{
+  const p = await fresh();
+  await p.setContent(page({ openers: '<button type="button" class="opener" aria-haspopup="dialog">Complete Application</button>' }));
+  const a = learner(p);
+  const revealed = await a.tryRevealHidden(p.locator("#fld_dcKw"), field);
+  const opened = a.typeaheadDoorSteps.splice(0);
+  const c = await clicks(p);
+  check("[6] a declared opener named 'Complete Application' is never clicked", revealed === false && c.open === 0 && opened.length === 0 && !(await dialogShown(p)), JSON.stringify({ revealed, c, opened }));
+  await p.context().close();
+}
+{
+  const p = await fresh();
+  await p.setContent(page({
+    title: "Submit Application",
+    openers: '<button type="button" class="opener" aria-haspopup="dialog">Details</button>',
+    dialogButtons: '<button type="button" id="btnDialogOk">OK</button>',
+  }));
+  const a = learner(p);
+  const revealed = await a.tryRevealHidden(p.locator("#fld_dcKw"), field);
+  a.typeaheadDoorSteps.splice(0);
+  await p.locator("#fld_dcKw").fill("7.2").catch(() => null);
+  const steps: RecipeStep[] = [];
+  const committed = await a.popupCommitPass(steps, 1);
+  const c = await clicks(p);
+  check("[7] a dialog titled 'Submit Application' is opened by its innocent opener, and its OK is never clicked", revealed === true && committed === false && c.commit === 0 && steps.length === 0, JSON.stringify({ revealed, committed, c, steps }));
+  await p.context().close();
+}
+{
+  const p = await fresh();
+  await p.setContent(page({ extraBoxes: '<div class="field"><label for="fld_sig">Applicant Signature</label><input type="text" id="fld_sig"></div>' }));
+  const a = learner(p);
+  const revealed = await a.tryRevealHidden(p.locator("#fld_dcKw"), field);
+  a.typeaheadDoorSteps.splice(0);
+  await p.locator("#fld_dcKw").fill("7.2").catch(() => null);
+  const steps: RecipeStep[] = [];
+  const committed = await a.popupCommitPass(steps, 1);
+  const c = await clicks(p);
+  check("[8] a pop-up holding a signature-name box is not committed (its Save never clicked)", revealed === true && committed === false && c.commit === 0 && steps.length === 0, JSON.stringify({ revealed, committed, c, steps }));
   await p.context().close();
 }
 
