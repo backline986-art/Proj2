@@ -13,6 +13,7 @@
 
 import type { Page, Frame, Locator } from "playwright";
 import type { RecipeSelector } from "../../../shared/src/types";
+import { nameAttributeCss, nameAttributeOf } from "../../../shared/src/recipeSelector";
 import { detectChallengeFrame, detectSecondFactor, sleep, smartWait, waitForElement } from "../safeAction";
 import { resolveHeadless } from "../browser";
 import { DISCLOSURE_TOGGLE_SELECTOR, isDisclosureToggle } from "./disclosureToggle";
@@ -632,6 +633,8 @@ export function buildLocator(pageOrFrame: Page | Frame, sel: RecipeSelector): Lo
   else if (sel.testId) loc = scope.getByTestId(sel.testId);
   else if (sel.text) loc = scope.getByText(sel.text, { exact: sel.exact });
   else if (sel.css) loc = scope.locator(sel.css);
+  // A bare `name` is the name attribute, the adapters' one reading (#229, shared/src/recipeSelector).
+  else if (nameAttributeOf(sel)) loc = scope.locator(nameAttributeCss(nameAttributeOf(sel)));
   else if (sel.role) loc = scope.getByRole(role);
   else return null;
   return (typeof sel.nth === "number" ? loc.nth(sel.nth) : loc.first()) as Locator;
@@ -770,6 +773,7 @@ function buildLocatorAll(pageOrFrame: Page | Frame, sel: RecipeSelector): Locato
   else if (sel.testId) loc = scope.getByTestId(sel.testId);
   else if (sel.text) loc = scope.getByText(sel.text, { exact: sel.exact });
   else if (sel.css) loc = scope.locator(sel.css);
+  else if (nameAttributeOf(sel)) loc = scope.locator(nameAttributeCss(nameAttributeOf(sel)));
   else if (sel.role) loc = scope.getByRole(role);
   else return null;
   return loc as Locator;
