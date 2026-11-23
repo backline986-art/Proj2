@@ -23,8 +23,10 @@
 // Pure (no browser): the learner (autoLearnAdapter) and the replay (recipeAdapter) both reach it
 // through typeaheadFill.ts, so a learn that picks a suggestion replays by the same rule.
 // ---------------------------------------------------------------------------
+import { isAutocompleteWidgetClass } from "../../shared/src/portalSafety";
 import { parseStreetName, parseStreetNumber } from "./addressParse";
 import { DIRECTIONAL, SUFFIXES, rowFit, siteKey, type SiteKey } from "./draftCreated";
+import { matchFilerIdentityOption, normalizeCompanyLabel } from "./filerIdentitySelect";
 
 /** What to do with a list of suggestions. */
 export type TypeaheadChoice =
@@ -86,8 +88,15 @@ const escapeRe = (s: string): string => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
  *  number. The whole text when the house number is not in it. */
 function addressPart(text: string, house: string): string {
   const m = new RegExp(`(^|[^0-9a-z])(${escapeRe(house)})([^0-9a-z]|$)`, "i").exec(text);
-  return m ? text.slice(m.index + m[1].length) : text;
+  return (m ? text.slice(m.index + m[1].length) : text).replace(PARCEL_TAIL, "");
 }
+
+/** A PARCEL / ACCOUNT ID AFTER THE ADDRESS is a label, not a place (live City of Tigard, Esri
+ *  search, 2026-11-12: "13125 SW HALL BLVD Parcel: 2S102DA00401" read "parcel" as the city and was
+ *  asked about instead of picked). The label word, then an id that carries a digit, at the end. A
+ *  street that merely starts with such a word ("Pin Oak Dr", "Parcel Rd") has no digit id after it
+ *  and is kept. */
+const PARCEL_TAIL = /[\s,;|(-]+(?:parcel|apn|pin|tax\s*lot|tax\s*id|tlid|property\s*id|acct|account)\b\.?\s*(?:#|no\.?|number|id)?\s*[:#]?\s*(?=[A-Z0-9.-]*\d)[A-Z0-9.-]+\)?\s*$/i;
 
 // A STATE CODE THAT IS ALSO A STREET WORD. siteKey stops a street at a state code before it asks
 // whether the token is a suffix or a directional, so "Quillfeather CT" reads as Connecticut (no
@@ -234,6 +243,106 @@ export function chooseExactSuggestion(suggestions: unknown[], value: string): Ty
   };
 }
 
+/** THE SUBMITTING COMPANY IN A CONTRACTOR SEARCH (#244): the one suggestion that is this client's
+ *  company, by the SAME rule a company select is answered by (filerIdentitySelect
+ *  matchFilerIdentityOption, #524) — the exact name wins, else the one suggestion that folds to the
+ *  same name ("Acme Solar & Electric LLC" is "ACME SOLAR AND ELECTRIC LLC"); words are never dropped,
+ *  so "Acme Solar" is never "Acme Solar of Idaho". Two that read as the name → ask; none → none. Why:
+ *  an iWorQ "Contractor(s)" search (City of Star, live 2026-11-15) decides who files the permit, and
+ *  a second, looser reading of "is this row my company?" would let the two answers disagree. */
+export function chooseCompanySuggestion(suggestions: unknown[], company: string): TypeaheadChoice {
+  const want = String(company ?? "").replace(/\s+/g, " ").trim();
+  if (!normalizeCompanyLabel(want)) return { kind: "none", why: "there is no company name to match a suggestion against" };
+  const texts = (Array.isArray(suggestions) ? suggestions : []).map(suggestionText);
+  const options = texts.map((label, i) => ({ value: String(i), label })).filter((o) => o.label);
+  const offered = texts.filter(Boolean);
+  const m = matchFilerIdentityOption(options, want, "company");
+  if ("hit" in m) {
+    const index = Number(m.hit.value);
+    return { kind: "pick", index, text: texts[index], why: `"${texts[index]}" is the submitting company "${want}"` };
+  }
+  const folded = normalizeCompanyLabel(want);
+  const same = offered.filter((t) => normalizeCompanyLabel(t) === folded);
+  if (same.length > 1) {
+    return {
+      kind: "ask",
+      candidates: same,
+      why: m.why,
+      question: `The portal's list shows ${same.length} entries that read as the submitting company "${want}": ${same.slice(0, 5).map((t) => `"${t}"`).join(" | ")}. Which one is this job's?`,
+    };
+  }
+  return {
+    kind: "none",
+    why: offered.length
+      ? `none of the ${offered.length} suggestion(s) is the submitting company "${want}" (offered: ${offered.slice(0, 5).map((t) => `"${t}"`).join(" | ")})`
+      : "the box offered no suggestions",
+  };
+}
+
+/** What a box's own markup says about it, read in the page (typeaheadFill typeaheadBoxFactsInPage)
+ *  and judged here by typeaheadBoxSays. */
+export interface TypeaheadBoxFacts {
+  /** An <input> of type text or search (or no type). */
+  textBox: boolean;
+  /** Not read-only and not disabled (natively or by aria). */
+  editable: boolean;
+  role?: string;
+  ariaAutocomplete?: string;
+  /** The box's own class attribute. */
+  className?: string;
+  id?: string;
+  ariaLabel?: string;
+  /** The class attributes of the box's own widget, nearest first: its ancestors up to the highest one
+   *  that holds no other text-entry control (at most four levels, never past a <form>). */
+  widgetClasses?: string[];
+}
+
+/** A word that names a search-as-you-type widget, inside one class token / id / label word. */
+const TYPEAHEAD_WORD = /autocomplete|typeahead|autosuggest/;
+/** A token that says the opposite ("autocomplete-off", "noautocomplete", "typeahead-disabled") —
+ *  the reading isAutocompleteWidgetClass applies to the box's own stamp. */
+const NEGATED_TOKEN = /off|no|disable/;
+const namesTypeahead = (token: string): boolean => {
+  const t = String(token ?? "").toLowerCase();
+  return !!t && TYPEAHEAD_WORD.test(t) && !NEGATED_TOKEN.test(t);
+};
+const classTokens = (cls: unknown): string[] => String(cls ?? "").toLowerCase().split(/\s+/).filter(Boolean);
+
+/**
+ * IS THIS BOX A SEARCH-AS-YOU-TYPE BOX? — THE ONE ANSWER, FROM THE BOX'S OWN MARKUP (#244). The
+ * reason ("" when it is not). The learner asks it at its fill door, the replay at its own, so a step
+ * recorded as a plain fill before the box was recognised still types and picks: the markup decides,
+ * not the recording. An editable text/search <input> only, and any of:
+ *   1. ARIA: role=combobox with aria-autocomplete list|both (#575, a Cityworks GIS "Location");
+ *   2. an autocomplete widget's stamp on the box (portalSafety isAutocompleteWidgetClass, #139 — the
+ *      predicate the Enter question reads; READ here, never widened here);
+ *   3. THE WIDGET NAMES ITSELF ONE, with no ARIA and no stamp: an "autocomplete" / "typeahead" /
+ *      "autosuggest" token in the box's own id, its aria-label, its class, or the class of its own
+ *      widget container — never a token that says the opposite. Live City of Star (iWorQ,
+ *      2026-11-15): <input id="autocomplete_1" aria-label="properties autocomplete" class="form-control"
+ *      placeholder="Search properties…"> inside div.autocomplete-template, no role, no name; recorded
+ *      as a plain fill, the replay typed the address, picked nothing, and called the step verified.
+ * Never "Search…" wording alone: a keyword box (Tigard's) is typed into and searched, not picked from.
+ */
+export function typeaheadBoxSays(f: TypeaheadBoxFacts | null | undefined): string {
+  if (!f || !f.textBox || !f.editable) return "";
+  const role = String(f.role ?? "").trim().toLowerCase();
+  const completes = String(f.ariaAutocomplete ?? "").trim().toLowerCase();
+  if (role === "combobox" && (completes === "list" || completes === "both")) return `role=combobox with aria-autocomplete=${completes}`;
+  if (isAutocompleteWidgetClass(f.className)) return `an autocomplete widget's stamp on the box (class "${String(f.className ?? "").trim().slice(0, 60)}")`;
+  const id = String(f.id ?? "").trim();
+  if (namesTypeahead(id)) return `its own id "${id.slice(0, 60)}" names it an autocomplete`;
+  const aria = String(f.ariaLabel ?? "").replace(/\s+/g, " ").trim();
+  if (!/\b(?:off|disabled?|no|not|without)\b/i.test(aria) && aria.split(" ").some(namesTypeahead)) return `its aria-label "${aria.slice(0, 60)}" names it an autocomplete`;
+  const own = classTokens(f.className).find(namesTypeahead);
+  if (own) return `its class "${own.slice(0, 60)}" names it an autocomplete`;
+  for (const cls of f.widgetClasses ?? []) {
+    const tok = classTokens(cls).find(namesTypeahead);
+    if (tok) return `its widget ("${tok.slice(0, 60)}") names itself an autocomplete`;
+  }
+  return "";
+}
+
 /** What to TYPE into an address search, in order: the house number and the street's core name
  *  ("123 Example" — no directional, no suffix, so a list holding "123 S EXAMPLE DR" still answers),
  *  then the house number alone (wider: a list that matches from the start of its entries). An
@@ -254,13 +363,15 @@ const SITE_ADDRESS_FIELDS = new Set(["street", "projectAddress"]);
 
 /** How a typeahead fill is judged: "site" — the project's own address (house, street, direction,
  *  unit, city/ZIP); "address" — some other street address (a mailing address: no city/ZIP check);
- *  "exact" — anything else. By the binding first; then a value that IS the project's street line
- *  (same house number and street words — a literal of the job's own address); then, for a value in
- *  a box labelled as an address, the address rule without the job's city. Never by "the value
- *  starts with a digit" alone ("100 Amp"). */
-export function typeaheadMatchMode(fill: { field?: string | null; label?: string | null; value?: string | null; projectStreet?: string | null }): "site" | "address" | "exact" {
+ *  "company" — the submitting company (#244: bound to installerCompanyName, judged by
+ *  chooseCompanySuggestion); "exact" — anything else. By the binding first; then a value that IS the
+ *  project's street line (same house number and street words — a literal of the job's own address);
+ *  then, for a value in a box labelled as an address, the address rule without the job's city. Never
+ *  by "the value starts with a digit" alone ("100 Amp"). */
+export function typeaheadMatchMode(fill: { field?: string | null; label?: string | null; value?: string | null; projectStreet?: string | null }): "site" | "address" | "exact" | "company" {
   const field = String(fill.field ?? "").trim();
   if (SITE_ADDRESS_FIELDS.has(field)) return "site";
+  if (field === "installerCompanyName") return "company";
   const own = siteKey({ street: keyable(String(fill.value ?? "")) });
   if (!own) return "exact";
   const project = siteKey({ street: keyable(String(fill.projectStreet ?? "")) });

@@ -5005,6 +5005,15 @@ export interface RecipeSelector {
   /** 0-based index when multiple match; omitted means .first(). */
   nth?: number;
   exact?: boolean;
+  /** #228: the words on the control's FACE when they differ from `name` (its accessible name, e.g.
+   *  a link reading "Apply" whose aria-label is "Apply Residential Renewable Energy"). NEVER a
+   *  locating strategy — no locator builder and no name rescue reads it (Tigard's menu tab reads
+   *  "Apply" too). Read by the click-safety haystacks (the learner's off-limits tests, the replay's
+   *  pay/submit gates) and the word tests that read the name (advance, contact opener, record
+   *  number), so a word a person sees on the control counts exactly as it did when the face text
+   *  was the name; and by the replay only to CHOOSE among controls the selector itself already
+   *  found (disambiguateByRecordedIdentity: a unique visible match by face), never to find one. */
+  shownText?: string;
   /** Alternate locator strategies tried in order when the primary selector finds
    *  nothing — survives portal UI updates that change one attribute but not all.
    *  Recorder contributors should capture 1-2 fallbacks (e.g. a stable css id as a
@@ -5013,9 +5022,14 @@ export interface RecipeSelector {
   fallbacks?: RecipeSelector[];
 }
 
-/** Attributes of the recorded element captured at record time. NEVER used to
- *  build a locator; consumed only by replay self-heal to rank candidates when
- *  the label anchor is ambiguous (two bare "Manufacturer" fields). Attribute
+/** Attributes of the recorded element captured at record time. Never a step's
+ *  selector, but replay does read it as evidence of WHICH element was meant:
+ *  self-heal ranks candidates by it when the label anchor is ambiguous (two
+ *  bare "Manufacturer" fields), the section rescue resolves by `section`, a
+ *  write's identity check moves to the element `id`/`name` names when that
+ *  element's label or section agrees, and a click's recorded identity (#228)
+ *  lets the element `id` names, when its words equal the step's, displace a
+ *  match suspected of being an earlier click's control. Attribute
  *  names/labels only — never values, never secrets. Old recipes lack the bag. */
 export interface StepFingerprint {
   id?: string;
@@ -5049,6 +5063,14 @@ export interface RecipeStep {
   viaFileChooser?: boolean;
   /** Don't fail the run if this step's target isn't found. */
   optional?: boolean;
+  /** #237 — THE LEARN SAW THIS CONTROL ONLY AFTER AN ANSWER REVEALED IT: absent from the page's
+   *  entry scrape, recorded by the post-fill re-scan. Replay skips it, named, when it is absent or
+   *  hidden on this job (its answers did not reveal it — PacifiCorp's battery-inverter controls that
+   *  a later tick hides, Ameren's County that renders only once the address resolves); a control
+   *  that shows is written as always, and a failure on it still fails the step. Unlike `optional`,
+   *  never a licence to skip a control that IS there. Metadata only: never part of the label or
+   *  matching. Older recipes lack it. */
+  conditional?: boolean;
   /** A credential/secret field (password, account#, meter#, MFA). The recorder
    *  NEVER stores its literal value — it must be bound to the encrypted credential
    *  store / redacted project data, not a plaintext recipe value. */
@@ -5076,6 +5098,13 @@ export interface RecipeStep {
    *  unit and city/ZIP — portal-bot typeaheadMatch), read it back. A near miss or several equal
    *  suggestions pick nothing and stop for a person. Absent = an ordinary fill. */
   fillStrategy?: "typeahead";
+  /** A LOOKUP / POPULATE BUTTON's click (#178 — Accela Step 1's "Find Address", "Autofill", "Look Up";
+   *  portalSafety isLookupButtonLabel): the labels of the fields the press populated at learn time
+   *  ("Parcel Number:"), or the section heading when the press added a RECORD rather than values
+   *  ("Applicant"). Replay presses the button by its label and verifies each named field holds a
+   *  value after the press — the parcel is never typed from a recipe. Metadata only: never part of
+   *  the step's label or matching. */
+  populates?: string[];
   /** Set when this step's recorded answer was withheld from the shared recipe and the step replays
    *  BLANK for a person to answer — why, in words (e.g. a company-identity literal the save guard
    *  refused to persist). Metadata only: never part of the step's label or matching. */
@@ -5089,6 +5118,13 @@ export interface RecipeStep {
    *  check/select answering a fact about the installer company). Replayed only for that client's
    *  jobs; on any other job (or when absent) the step is left for a person. Opaque, never the id. */
   companyFactOf?: string;
+  /** A RESULTS-ROW PICK (#235): the step chose one row of a search-results grid — the property's
+   *  address, parcel or owner row, the filing company's licence or contact record. Replay picks the
+   *  row by THIS job's own value (portal-bot learnDataInSelectors, RecipeAdapter
+   *  pickResultRowForProject), never by a recorded label (the learn job's data) or a recorded row
+   *  position; no unique match leaves the row for a person. Metadata only: never part of the
+   *  step's label or matching. */
+  rowRole?: "address" | "parcel" | "owner" | "licence" | "contact";
   /** See StepFingerprint — heal tie-break metadata captured at record time. */
   fingerprint?: StepFingerprint;
 }

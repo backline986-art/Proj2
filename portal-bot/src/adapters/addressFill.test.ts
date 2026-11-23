@@ -57,6 +57,12 @@ assert.equal(isSplitAddressForm(["Address", "City", "State", "Zip"]), false);
 // A contact block's Jr./Sr. box is not a street suffix.
 assert.equal(isSplitAddressForm(["First Name", "Last Name", "Name Suffix"]), false);
 assert.equal(isSplitAddressForm([undefined, ""]), false);
+// #236 review: a unit-type or post-direction control beside ONE combined box does not split the
+// street line (the component grammar is shared with the binder, which does read those labels).
+assert.equal(isSplitAddressForm(["Property Address", "Unit Type", "Unit Number", "City", "State", "Zip"]), false);
+assert.equal(isSplitAddressForm(["Address", "Suite Type", "City"]), false);
+assert.equal(isSplitAddressForm(["Service Address", "Apt/Suite Type", "City"]), false);
+assert.equal(isSplitAddressForm(["Site Address", "Post Direction"]), false);
 console.log("ok - combined address boxes are NOT read as split");
 
 // --- the correction: MUST PASS --------------------------------------------------------

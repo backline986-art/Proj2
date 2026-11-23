@@ -141,11 +141,30 @@ export function preferredRowLabel(opts: { issuingAgency?: string | null; city?: 
 
 export function rankAddressVersions(
   rowTexts: string[],
-  opts: { city?: string; zip?: string; homeownerName?: string; isElectrical: boolean; issuingAgency?: string | null },
+  opts: {
+    city?: string; zip?: string; homeownerName?: string; isElectrical: boolean; issuingAgency?: string | null;
+    /** #178: the job's street line ("33 N Broadway Ave") or just its number. When given, a row that
+     *  does not carry the street NUMBER is rejected (an address list after a search can mix in a
+     *  neighbour), and among equally scored rows the PLAIN address wins over one with a unit / suite /
+     *  tenant qualifier (Boise's list: "150 N CAPITOL BLVD, B C O T, Boise City Hall, Boise ID 83702"
+     *  and "150 N CAPITOL BLVD, Boise ID 83702" — the job has no unit, so the second is its row). */
+    street?: string;
+  },
 ): { ranked: AddressVersion[]; rejected: string[]; preference: AddressRowPreference } {
   const cityUpper = (opts.city || "").toUpperCase();
   const zip = (opts.zip || "").trim();
   const surname = (opts.homeownerName || "").trim().split(/\s+/).pop() || "";
+  const streetNo = ((opts.street || "").trim().match(/^\d+[A-Za-z]?/) || [""])[0];
+  // THE STREET NAME TOO, NOT ONLY THE NUMBER (Helm review of PR #247): on a free search grid "150 W
+  // Main St, Boise ID 83702" carried the job's number 150 and city and beat the job's own "150 N
+  // Capitol Blvd" on plainness. Every core word of the job's street line — the tokens after the
+  // number that are not a direction or a street-type suffix ("capitol"; "8th") — must appear in the
+  // row as a whole word. The plainness tie-break below then only ever chooses between versions of
+  // the SAME property (#178's Boise case), never between two streets.
+  const STREET_NOISE = /^(n|s|e|w|ne|nw|se|sw|north|south|east|west|st|street|ave|avenue|blvd|boulevard|dr|drive|rd|road|ln|lane|ct|court|cir|circle|pl|place|way|hwy|highway|pkwy|parkway|ter|terrace|trl|trail|loop)$/i;
+  const streetCore = (opts.street || "").trim().replace(/^\d+[A-Za-z]?\s*/, "").split(/[^0-9A-Za-z]+/)
+    .filter((w) => w.length >= 2 && !STREET_NOISE.test(w));
+  const carriesStreetName = (text: string): boolean => streetCore.every((w) => new RegExp(`(^|[^0-9A-Za-z])${w}(?![0-9A-Za-z])`, "i").test(text));
   const convention = opts.isElectrical ? COUNTY_ROW : CITY_ROW;
   const agencyName = String(opts.issuingAgency ?? "").replace(/\s+/g, " ").trim();
   const agency = issuingAgencyRow(agencyName, { city: opts.city });
@@ -156,6 +175,8 @@ export function rankAddressVersions(
     if (!text) continue;
     const upper = text.toUpperCase();
     if (!((cityUpper && upper.includes(cityUpper)) || (zip && text.includes(zip)))) { rejected.push(text.slice(0, 60)); continue; }
+    if (streetNo && !new RegExp(`(^|[^0-9A-Za-z])${streetNo}(?![0-9])`, "i").test(text)) { rejected.push(text.slice(0, 60)); continue; }
+    if (streetNo && streetCore.length && !carriesStreetName(text)) { rejected.push(text.slice(0, 60)); continue; }
     candidates.push({ index, text, upper });
   }
   // The agency decides only when a row of this property NAMES it; otherwise no row is invented.
@@ -170,7 +191,12 @@ export function rankAddressVersions(
     const score = (ownerHit ? 4 : 0) + (preferred ? 2 : 0) + (/DEQ/i.test(c.text) ? -3 : 0);
     return { index: c.index, text: c.text, score, ownerHit, kind: rowKind(c.upper), agencyHit: agencyHits[i] };
   });
-  ranked.sort((a, b) => b.score - a.score);
+  // Equal scores: the plain address before one carrying a unit / suite / tenant qualifier (a unit
+  // word, or more comma-separated parts), then the shorter text. Only with a street given (#178):
+  // without one the order stays the grid's, as every existing caller expects.
+  const UNIT = /\b(unit|suite|ste|apt|apartment|bldg|building|floor|fl|room|rm|tenant|space|lot)\b|#\s*\w/i;
+  const plainness = (t: string): number => (UNIT.test(t) ? 1000 : 0) + t.split(",").length * 10 + Math.min(t.length, 400) / 400;
+  ranked.sort((a, b) => (b.score - a.score) || (streetNo ? plainness(a.text) - plainness(b.text) : 0));
 
   const conv = `${conventionLabel(opts.isElectrical)} for ${opts.isElectrical ? "electrical" : "structural"}`;
   let note = "";
