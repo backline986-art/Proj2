@@ -24,11 +24,19 @@
 //      documents (name and size, from a stubbed API) names its document type without a question; only
 //      the unmatched one is asked, with the slot's name in the question; a label the browser never
 //      paints is not a slot name; the chosen file's name is in no step and no printed line.
-//   D. the confirmation click after the blocked final submit is not a step: exactly one blocked
-//      marker, naming the submit control, and after finalize the recipe ends stopForReview, marker.
+//   D. the click in the confirmation dialog the blocked final submit opened is not a step: exactly
+//      one blocked marker, naming the submit control, and after finalize the recipe ends
+//      stopForReview, marker. Outside a dialog, or after an ordinary step, nothing changes.
+//   SAFETY. A tile is asked the click classifier's question on its accessible name AND its face: a
+//      pay-worded tile that navigates is the blocked placeholder. A page cannot name a document type.
 //
-// KILL (recordRecipe.ts restored to the extraction-only source): A tile, B, C slot/type/question and
-// D all go red; the guards (stray click, toggle, existing click/fill steps) stay green.
+// KILL, each run by copying the source aside (2026-11-23):
+//   - recordRecipe.ts as it was before the rules (armRecorder extracted, nothing else): 33 checks
+//     red — every A tile check, B, C slot / type / question, D, and the safety block; the guards
+//     (stray click, toggle, upload count, no file name stored) stay green.
+//   - the painted-text test removed: "upload 3 has no slot name" red.
+//   - the face classification removed: the pay-worded tile red.
+//   - rule D removed: the D checks red on both sites.
 //
 // Run: npx tsx portal-bot/src/recordRecipeTile.dom.smoke.ts
 import "./smokeArtifactDirs";
