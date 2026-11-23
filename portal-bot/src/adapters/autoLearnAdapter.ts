@@ -40,7 +40,7 @@ import { LIST_LINK } from "../statusFinder";
 import { readSignatureRequestStep, stageSignatureRequestStep, type SignatureStepOutcome } from "./signatureRequestStep";
 import type { SignatureRequestApproval } from "../../../shared/src/signatureRequestGate";
 import { nameAttributeCss, nameAttributeOf } from "../../../shared/src/recipeSelector";
-import { ROW_PICK_WORDS } from "../../../shared/src/rowPick";
+import { companyKey, ROW_PICK_WORDS } from "../../../shared/src/rowPick";
 import { readSignatureStatuses, type SignatureCheck } from "./signatureStatusRead";
 import { signatureCompletion } from "../../../shared/src/signatureCompletion";
 
@@ -6198,6 +6198,11 @@ export class AutoLearnAdapter extends BasePortalAdapter {
     /** The labels of the section's shown boxes that HOLD a value — what the walk (or the portal)
      *  answered here; a section the walk filled is never stopped as "could not fill". */
     typedLabels: string[];
+    /** A SEARCH THAT WAS TYPED BUT NEVER COMMITTED: shown boxes holding a value that post NOTHING (no
+     *  name, no form attribute — a search box, whose value reaches the application only through the
+     *  section's search and a picked row), and the section's named hidden inputs, with how many hold a
+     *  value (what a pick writes). Read with the rest; lookupButtonPass's rule 3. */
+    searchOnlyFilled: number; hiddenNamed: number; hiddenNamedFilled: number;
   }> | null> {
     const page = this.page;
     if (!page || typeof page.evaluate !== "function") return null;
@@ -6205,7 +6210,7 @@ export class AutoLearnAdapter extends BasePortalAdapter {
     if (opts.lookups) await page.evaluate(PORTAL_SAFETY_IN_PAGE_SOURCE).catch(() => null);
     const raw = await page.evaluate((src: { lookups: boolean; global: string }) => {
       // NO named functions in here: keepNames wraps them in __name, which the page may lack.
-      type Sec = { key: number; heading: string; instruction: string; text: string; addNewId: string; selectId: string; editId: string; hasAddNew: boolean; hasEdit: boolean; lookups: Array<{ lookupKey: number; id: string; label: string; role: "link" | "button" }>; requiredBlank: string[]; typedTotal: number; typedBlank: number; addressTyped: boolean; typedLabels: string[] };
+      type Sec = { key: number; heading: string; instruction: string; text: string; addNewId: string; selectId: string; editId: string; hasAddNew: boolean; hasEdit: boolean; lookups: Array<{ lookupKey: number; id: string; label: string; role: "link" | "button" }>; requiredBlank: string[]; typedTotal: number; typedBlank: number; addressTyped: boolean; typedLabels: string[]; searchOnlyFilled: number; hiddenNamed: number; hiddenNamedFilled: number };
       const out: Sec[] = [];
       const containers: Element[] = [];
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -6248,7 +6253,7 @@ export class AutoLearnAdapter extends BasePortalAdapter {
           containers.push(container);
           idx = containers.length - 1;
           container.setAttribute("data-al-csec", String(idx));
-          out.push({ key: idx, heading, instruction, text: "", addNewId: "", selectId: "", editId: "", hasAddNew: false, hasEdit: false, lookups: [], requiredBlank: [], typedTotal: 0, typedBlank: 0, addressTyped: false, typedLabels: [] });
+          out.push({ key: idx, heading, instruction, text: "", addNewId: "", selectId: "", editId: "", hasAddNew: false, hasEdit: false, lookups: [], requiredBlank: [], typedTotal: 0, typedBlank: 0, addressTyped: false, typedLabels: [], searchOnlyFilled: 0, hiddenNamed: 0, hiddenNamedFilled: 0 });
         }
         const rec = out[idx];
         if (kind === "add" && !rec.hasAddNew) { rec.hasAddNew = true; rec.addNewId = el.id || ""; el.setAttribute("data-al-caddnew", String(idx)); }
@@ -6292,6 +6297,10 @@ export class AutoLearnAdapter extends BasePortalAdapter {
         let streetBlank = 0;
         for (const el of Array.from(c.querySelectorAll("input, select, textarea"))) {
           const type = String(el.getAttribute("type") || "").toLowerCase();
+          if (type === "hidden" && el.getAttribute("name")) {
+            out[i].hiddenNamed++;
+            if (norm((el as HTMLInputElement).value)) out[i].hiddenNamedFilled++;
+          }
           if (["hidden", "button", "submit", "checkbox", "radio", "file", "image", "reset"].includes(type)) continue;
           const tag = el.tagName.toLowerCase();
           const val = tag === "select"
@@ -6302,7 +6311,10 @@ export class AutoLearnAdapter extends BasePortalAdapter {
           if (shown) {
             out[i].typedTotal++;
             if (!val) out[i].typedBlank++;
-            else out[i].typedLabels.push(lbl || out[i].heading);
+            else {
+              out[i].typedLabels.push(lbl || out[i].heading);
+              if (tag === "input" && !el.getAttribute("name") && !el.getAttribute("form")) out[i].searchOnlyFilled++;
+            }
             if (/\b(street|house)\s*(no\.?|number|#|num)\b|\bstreet\s*name\b/i.test(lbl)) { streetBoxes++; if (!val) streetBlank++; }
             if (!val && requiredMark(el)) out[i].requiredBlank.push(lbl || out[i].heading);
           } else if (!val && ((el as HTMLInputElement).required || el.getAttribute("aria-required") === "true")) {
@@ -12938,6 +12950,9 @@ export class AutoLearnAdapter extends BasePortalAdapter {
     const norm = (s: string) => String(s ?? "").replace(/[*:]/g, " ").replace(/\s+/g, " ").trim().toLowerCase();
     const stateKey = (s: Sec, label: string) => `${path}|${norm(s.heading)}|${norm(label)}|${s.requiredBlank.map(norm).join(",")}|${s.hasEdit ? "record" : "empty"}`;
     const isPopulateWord = (label: string) => /auto-?fill|populate/i.test(label);
+    /** Rule 3's reading (see acaContactSectionsOnPage's searchOnlyFilled): typed into a box that posts
+     *  nothing, and nothing the section posts holds a value — the search was never committed. */
+    const uncommittedSearch = (s: Sec): boolean => s.searchOnlyFilled > 0 && s.hiddenNamed > 0 && s.hiddenNamedFilled === 0 && !s.hasEdit;
     const sectionOwnedByContactPass = (s: Sec): boolean =>
       this.acaFilledSectionHeadings.has(s.heading.toLowerCase())
       || [s.addNewId, s.editId, s.selectId].some((id) => id && (this.acaFilledSectionControls.has(id) || this.acaEmptySectionControls.has(id)));
@@ -13014,6 +13029,9 @@ export class AutoLearnAdapter extends BasePortalAdapter {
         for (const l of ordered) {
           if (this.lookupPressed.has(stateKey(s, l.label))) continue;
           if (s.addressTyped && !isPopulateWord(l.label)) return l; // rule 1: the address search
+          // rule 3: a search the walk TYPED that nothing committed — a box that posts nothing holds the
+          // value, and the section's hidden inputs (what a picked row writes) are all still empty.
+          if (!s.requiredBlank.length && uncommittedSearch(s) && !isPopulateWord(l.label)) return l;
           if (!s.requiredBlank.length) continue;
           if (!isPopulateWord(l.label) && s.typedTotal > 0 && s.typedBlank === s.typedTotal) continue; // a search with nothing typed
           return l;
@@ -13202,6 +13220,9 @@ export class AutoLearnAdapter extends BasePortalAdapter {
           if (widened) { inlineScopeSel = '[data-al-csearch="1"]'; searchHolder = true; }
         }
         // The section is searched as the form only when a visible "Search" box was found in it or beside it.
+        // Rule 3's section: its own typed box IS the search box (it posts nothing; it only drives this
+        // search), so the section is the form even when no box there is labelled "Search".
+        if (pressChangedNothing && !searchHolder && !sec.requiredBlank.length && uncommittedSearch(sec)) searchHolder = true;
         const unchangedInline = pressChangedNothing && searchHolder;
         if (popup || newFrame || overlaySel || inlineFormOpened || unchangedInline) {
           const form = await this.lookupSearchForm({
@@ -13620,9 +13641,7 @@ export class AutoLearnAdapter extends BasePortalAdapter {
       // AHJ/utility fuzzy scorer and not containment (Helm review of PR #247): "Acme Solar Electric"
       // scored 70 against "Acme Solar Roofing" and "Acme Solar" sat inside "Acme Solar of Idaho", so
       // another licensed company's record could be attached as this client's.
-      const companyKey = (v: string): string => v.toLowerCase().replace(/&/g, " and ")
-        .replace(/\b(llc|l\.l\.c|inc|incorporated|corp|corporation|co|company|ltd|limited|lp|llp|pllc|pc|dba)\b/g, " ")
-        .replace(/[^a-z0-9]+/g, " ").trim();
+      // (shared/src/rowPick.ts companyKey — the replay narrows several matching rows by the same key.)
       const ourKey = companyKey(opts.companyName);
       const isOurs = (text: string): boolean => !!ourKey && companyKey(text) === ourKey;
       // ONLY ROWS THE SEARCH BROUGHT COUNT (live Meridian run 10: the licence register's own form is a

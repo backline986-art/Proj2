@@ -21,3 +21,19 @@ const LIGATURE = /\b[a-z]+_[a-z_]+\b/g;
 export function isRowPickName(text: string | null | undefined): boolean {
   return ROW_PICK_WORDS.test(String(text ?? "").replace(LIGATURE, " ").replace(/\s+/g, " ").trim());
 }
+
+// WHICH ROW IS THIS COMPANY — one reading for the learner and the replay (the same lesson as the pick
+// word above). A cell IS this company's name when the two read the same once case, punctuation, "&" vs
+// "and" and the legal suffix are ignored — nothing else. Not containment (Helm review of PR #247):
+// "Acme Solar" sits inside "Acme Solar of Idaho", "Kestrel Energy" inside "Kestrel Energy Supply Inc",
+// and another licensed company's record would be attached as this client's. The learner picks its row
+// by this key (lookupSearchForm); the replay, which first finds every row whose text carries the
+// company's words, narrows several to the one whose cell has this key (pickResultRowForProject).
+export const COMPANY_SUFFIX_WORDS = /\b(llc|l\.l\.c|inc|incorporated|corp|corporation|co|company|ltd|limited|lp|llp|pllc|pc|dba)\b/g;
+
+/** A company name's key: lower case, "&" read as "and", the legal suffix dropped, punctuation collapsed. */
+export function companyKey(v: string | null | undefined): string {
+  return String(v ?? "").toLowerCase().replace(/&/g, " and ")
+    .replace(new RegExp(COMPANY_SUFFIX_WORDS.source, "g"), " ")
+    .replace(/[^a-z0-9]+/g, " ").trim();
+}
