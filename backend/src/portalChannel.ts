@@ -753,6 +753,9 @@ function isAgencyContentPage(raw: string, host: string, segs: string[]): boolean
   if (ext && !/^(?:html?|shtml)$/i.test(ext)) return false;
   return segs.every((seg) => {
     const bare = seg.replace(/\.[a-z0-9]+$/i, "");
+    // The install root of a self-hosted permit system on the agency's own host (issue #152: a
+    // state's "/etrakit3/") names an application system, as a host label would: not a content page.
+    if (SELF_HOSTED_PERMIT_PATH_SEGMENT.test(bare)) return false;
     if (APP_PATH_WORD.test(bare.replace(/[-_\s]/g, ""))) return false;
     return !bare.split(/[-_\s]+/).some((t) => APP_PATH_TOKEN.test(t));
   });
