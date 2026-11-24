@@ -21,6 +21,10 @@
 //            [5] learner: the same empty selection ends the walk named before the page is left
 //                (KILL: return null at the top of AutoLearnAdapter.typeaheadLocationResult).
 // NEVER      [7] the map, near-me and manual-entry buttons are never clicked, in any mode.
+// SCOPE      [8] only the location is judged: read-only "City *" / "Zip *" the pick auto-fills, and an
+//                empty read-only "Start date *" a later step fills, go forward; a location selection
+//                holding only a city refuses (KILL: judge every changed or empty required read-only box,
+//                as the first cut did -> the two go-forward checks fail).
 import "../smokeArtifactDirs";
 import http from "node:http";
 import { chromium, type Page } from "playwright";
@@ -42,7 +46,7 @@ const LOT = "17-12-32-CB-01400";
 const OURS = "4821 W QUILLFEATHER DR, MARROWVALE, UT 84999";
 const NEIGHBOUR = "4823 W QUILLFEATHER DR, MARROWVALE, UT 84999";
 
-type Mode = "good" | "late" | "unheld" | "wrong" | "taxlot";
+type Mode = "good" | "late" | "unheld" | "wrong" | "taxlot" | "cityzip" | "date" | "cityonly";
 const posts: Array<{ mode: string; submitter: string }> = [];
 
 const html = (mode: Mode): string => `<!doctype html><html><head><title>Permit Application</title>
@@ -56,6 +60,8 @@ const html = (mode: Mode): string => `<!doctype html><html><head><title>Permit A
   <p style="margin-top:120px"><button type="button" id="manual">Can't find address?</button>
      <button type="button" id="map">Select on map</button> <button type="button" id="near">Near me</button></p>
   <p><label for="sel" class="required">The location you have selected *</label> <input type="text" id="sel" name="sel" readonly required style="width:400px"></p>
+  ${mode === "cityzip" ? `<p><label for="city">City *</label> <input type="text" id="city" name="city" readonly required> <label for="zipc">Zip *</label> <input type="text" id="zipc" name="zipc" readonly required></p>` : ""}
+  ${mode === "date" ? `<p><label for="start">Start date *</label> <input type="text" id="start" name="start" readonly required></p>` : ""}
   <p><button type="submit" name="bnext" value="1">Next Step</button></p>
 </form>
 <script>
@@ -84,7 +90,9 @@ const html = (mode: Mode): string => `<!doctype html><html><head><title>Permit A
         li.className = "ui-menu-item"; li.setAttribute("role", "option"); li.textContent = h;
         li.addEventListener("click", function () {
           q.value = h;
-          if (MODE === "good" || MODE === "late") sel.value = h;
+          if (MODE === "good" || MODE === "late" || MODE === "date") sel.value = h;
+          else if (MODE === "cityzip") { sel.value = h; document.getElementById("city").value = "MARROWVALE"; document.getElementById("zipc").value = "84999"; }
+          else if (MODE === "cityonly") sel.value = "MARROWVALE";
           else if (MODE === "wrong") sel.value = ${JSON.stringify(NEIGHBOUR)};
           else if (MODE === "taxlot") sel.value = "Tax lot 171232CB01400";
           close();
@@ -207,6 +215,20 @@ const replay = async (mode: Mode): Promise<{ filled: boolean; sel: string; next:
     `next=${r.next} posts=${JSON.stringify(posts.filter((p) => p.mode === "wrong"))}`);
 }
 
+// [8] JUDGED ONLY WHERE IT IS THE LOCATION (Helm's review of #297): components the pick auto-fills
+//     and a required box a later step fills are not the location; a location box with only a city is.
+{
+  const cz = await replay("cityzip");
+  console.log(`   [8] cityzip next=${cz.next.slice(0, 200)}`);
+  check("[8] a pick that also fills read-only \"City *\" / \"Zip *\" goes forward (components are not judged)", cz.next === "clicked" && postsOf("cityzip", "bnext") === 1, cz.next);
+  const dt = await replay("date");
+  console.log(`   [8] date next=${dt.next.slice(0, 200)}`);
+  check("[8] an empty required read-only \"Start date *\" a later step fills is not judged: forward goes", dt.next === "clicked" && postsOf("date", "bnext") === 1, dt.next);
+  const co = await replay("cityonly");
+  console.log(`   [8] cityonly next=${co.next.slice(0, 200)}`);
+  check("[8] the location selection holding only a city refuses \"Next Step\"", co.next.startsWith("TypeaheadStop") && /not the job's address/.test(co.next) && postsOf("cityonly", "bnext") === 0, co.next);
+}
+
 // [5] / [6] the learner's door: applyTypeaheadFill, then the page's d4b'' question.
 const learn = async (mode: Mode): Promise<{ step: RecipeStep | null; stop: { stopReason?: string; message?: string } | null }> => {
   const page = await open(mode);
@@ -247,7 +269,7 @@ const learn = async (mode: Mode): Promise<{ step: RecipeStep | null; stop: { sto
 }
 
 // [7] NEVER — map, near-me and manual entry untouched in every mode.
-check("[7] the map, near-me and manual-entry buttons were never clicked", sideButtons.length >= 7 && sideButtons.every((s) => s.map === 0 && s.near === 0 && s.manual === 0), JSON.stringify(sideButtons));
+check("[7] the map, near-me and manual-entry buttons were never clicked", sideButtons.length >= 10 && sideButtons.every((s) => s.map === 0 && s.near === 0 && s.manual === 0), JSON.stringify(sideButtons));
 
 await browser.close();
 server.close();

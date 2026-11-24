@@ -12537,7 +12537,7 @@ export class AutoLearnAdapter extends BasePortalAdapter {
       return refusal;
     };
     const out = loc
-      ? await fillTypeahead(this.page, loc, { value: v, mode, site, enterGate })
+      ? await fillTypeahead(this.page, loc, { value: v, mode, site, enterGate, parcels: this.typeaheadParcels })
       : { outcome: "unusable" as const, why: "the box could not be located" };
     // Outcome and counts only — never the address or the suggestions themselves.
     this.debug?.event({ type: "typeahead_fill", label: label.slice(0, 60), mode, outcome: out.outcome, ...("offered" in out ? { offered: out.offered.length } : {}), ...(out.outcome === "picked" && out.via ? { via: out.via } : {}) });

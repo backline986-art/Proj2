@@ -54,9 +54,9 @@ import { addressQueries, chooseAddressSuggestion, chooseCompanySuggestion, choos
  *  box itself may be empty afterwards, and a read-back of the box must not call that a miss. */
 export type TypeaheadOutcome =
   | { outcome: "picked"; picked: string; held: string; typed: string; why: string; via?: "list" | "enter" | "search";
-      /** #161 — the required read-only box(es) the location pick fills ("The location you have
-       *  selected"): the ones in the box's form the pick changed or left empty, and any that name a
-       *  location. The step's forward control is judged against them (locationResultRefusal). */
+      /** #161 — the required read-only box(es) of the box's form the forward question judges: one
+       *  labelled as a location selection ("The location you have selected"), or one the pick changed
+       *  to the job's address / tax lot (locationResultBoxesOf, locationResultRefusal). */
       resultBoxes?: LocationResultBox[] }
   /** A near miss or several equal candidates: nothing picked, the box cleared; ask `question`. */
   | { outcome: "ask"; question: string; offered: string[]; typed: string; why: string }
@@ -91,6 +91,8 @@ export interface TypeaheadRequest {
    *  refusal. The replay passes its guardAction (the full click gate); without one, the control's
    *  own in-page checks (never a submitter, never submit- or pay-worded) are the gate. */
   clickGate?: (loc: any) => Promise<string>;
+  /** #161 — the job's tax lot / parcel numbers: a location selection may show one instead of the street. */
+  parcels?: string[];
   /** How long one query waits for its suggestions to settle. Default 5 s. */
   suggestWaitMs?: number;
   /** The whole fill's deadline, every query included. Default 30 s — far inside the walk's stall
@@ -760,8 +762,10 @@ async function typeInto(page: any, loc: any, text: string): Promise<boolean> {
 /** A read-only required box a location pick fills: how it is found again, its label, its value. */
 export interface LocationResultBox { key: string; how: "id" | "name" | "mark"; label: string; value: string }
 
-/** Words that say a box holds the location (generic; no place names). */
-const LOCATION_WORDS = /\b(location|address|parcel|property|site|tax\s*lot|lot)\b/i;
+/** A label that names a LOCATION SELECTION (generic; no place names): "The location you have
+ *  selected", "Parcel", "Tax lot", "Property address", "Selected address". Never a bare component
+ *  ("City", "Zip", "State") or a bare "Address" (a mailing or contractor address may sit beside it). */
+export const LOCATION_SELECTION_LABEL = /\blocation\b|\bparcel\b|\btax\s*lot\b|\b(property|site|project|job|work)\s+address\b|\b(selected|chosen)\b.*\baddress\b|\baddress\b.*\b(selected|chosen)\b/i;
 
 /**
  * Runs IN THE PAGE (#161). The VISIBLE read-only (or disabled) text boxes of the type-ahead box's
@@ -834,13 +838,18 @@ export async function readLocationResultBoxes(page: any, boxes: LocationResultBo
   });
 }
 
-/** The boxes a pick fills, from the reads before and after it: changed, empty, or naming a location. */
-export function locationResultBoxesOf(before: LocationResultBox[], after: Array<LocationResultBox & { found: boolean }>): LocationResultBox[] {
+/** The boxes the forward question judges, from the reads before and after the pick: a box whose label
+ *  names a location selection (LOCATION_SELECTION_LABEL), whatever it holds; or a box the pick
+ *  changed TO the job's address or tax lot. Not judged: a box the pick filled with a component (a
+ *  "City", a "Zip"), or an empty box with no location wording (a date a later step fills). */
+export function locationResultBoxesOf(before: LocationResultBox[], after: Array<LocationResultBox & { found: boolean }>, site: TypeaheadSite, parcels: string[] = []): LocationResultBox[] {
   const out: LocationResultBox[] = [];
   for (const b of before) {
     const a = after.find((x) => x.key === b.key && x.how === b.how);
     if (!a || !a.found) continue;
-    if (!a.value || a.value !== b.value || LOCATION_WORDS.test(b.label)) out.push({ key: b.key, how: b.how, label: b.label, value: a.value });
+    const named = LOCATION_SELECTION_LABEL.test(b.label);
+    const tookTheJob = !!a.value && a.value !== b.value && locationAgrees(a.value, site, parcels);
+    if (named || tookTheJob) out.push({ key: b.key, how: b.how, label: b.label, value: a.value });
   }
   return out;
 }
@@ -886,7 +895,8 @@ export async function fillTypeahead(page: any, loc: any, req: TypeaheadRequest):
     : [];
   const out = await fillTypeaheadInner(page, loc, req);
   if (out.outcome !== "picked" || !Array.isArray(before) || !before.length) return out;
-  const boxes = locationResultBoxesOf(before, await readLocationResultBoxes(page, before));
+  const site: TypeaheadSite = { street: req.site?.street ?? req.value, city: req.site?.city, zip: req.site?.zip, state: req.site?.state };
+  const boxes = locationResultBoxesOf(before, await readLocationResultBoxes(page, before), site, req.parcels ?? []);
   return boxes.length ? { ...out, resultBoxes: boxes } : out;
 }
 

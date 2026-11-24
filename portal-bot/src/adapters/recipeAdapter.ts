@@ -6046,11 +6046,11 @@ export class RecipeAdapter extends BasePortalAdapter {
     const enterGate = (loc: unknown): Promise<string> => this.guardAction({ kind: "press", key: "Enter", target: loc, why: `type-ahead search in "${label}"` });
     // #198: the box's own search control goes through the replay's full click gate, like any click.
     const clickGate = (loc: unknown): Promise<string> => this.guardAction({ kind: "click", target: loc, why: `type-ahead search control beside "${label}"` });
-    const out = await fillTypeahead(this.page, scoped, { value: v, mode, site, enterGate, clickGate });
+    const parcels = [this.fieldValues.parcelNumber, this.fieldValues.parcel].map((p) => String(p ?? "").trim()).filter(Boolean);
+    const out = await fillTypeahead(this.page, scoped, { value: v, mode, site, enterGate, clickGate, parcels });
     // #161: a pick of the job's location that fills a required read-only selection arms the forward
     // question: the step's "Next" is clicked only while that selection holds this job's location.
     if (out.outcome === "picked" && mode === "site" && out.resultBoxes?.length) {
-      const parcels = [this.fieldValues.parcelNumber, this.fieldValues.parcel].map((p) => String(p ?? "").trim()).filter(Boolean);
       this.locationResultGuard = { boxes: out.resultBoxes, site, parcels, label };
     }
     if (out.outcome === "picked" && (out.via === "enter" || out.via === "search")) {
