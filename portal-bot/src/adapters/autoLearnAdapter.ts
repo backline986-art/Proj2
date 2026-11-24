@@ -70,7 +70,7 @@ import { installFilingBackstop, withAutomationInput, withBackstopWindow, withOwn
 // Types only (erased): the information-page door is reached duck-typed on the installed backstop.
 import type { FilingBackstop, InfoPageCandidateTake, InfoPagePassOpen } from "../filingBackstop";
 import { INFO_PAGE_PRIOR_PROGRESS_REFUSAL, infoPageEvidence, infoPageProofOfProgressRefusals, infoPageProofStepRefusals, type InfoPageProofStep, type InfoPageRunState, type InfoPageRunStep } from "../../../shared/src/infoPagePass";
-import type { InfoPageCandidateCapture, InfoPageIncident, VerifiedInfoPage } from "../../../shared/src/types";
+import type { InfoPageCandidateCapture, InfoPageIncident, InfoPageNextInformation, VerifiedInfoPage } from "../../../shared/src/types";
 import { hostOfUrl, sameCredentialScope } from "../siteOf";
 import { attachmentTypeFor, isDocumentTypeList, isPlanSetDocType } from "./attachmentTypes";
 import {
@@ -383,6 +383,8 @@ export interface LearnResult {
    *  (held exactly as on main), or the page after the verified click did not read as an unfiled
    *  form (the walk stopped, stopReason "info_page_incident"). The backend withdraws each pass. */
   infoPageIncidents?: InfoPageIncident[];
+  /** #279: verified passes whose page after read as another information page (kept; evidence). */
+  infoPageNextInfo?: InfoPageNextInformation[];
   /** VERIFIED information pages this walk was HELD at only because the backend said this project
    *  already made progress on this portal (round 2): the page matched, nothing was sent. A person may
    *  allow the pass once more for the project (project -> Portal runs). */
@@ -3107,6 +3109,8 @@ export class AutoLearnAdapter extends BasePortalAdapter {
   private infoPageCandidateWithHistory = false;
   private infoPagePassed: Array<{ passId: string; where: string }> = [];
   private infoPageIncidents: InfoPageIncident[] = [];
+  /** #279: verified passes whose page after read as ANOTHER information page — kept, not incidents. */
+  private infoPageNextInfo: InfoPageNextInformation[] = [];
   private infoPageHeldVerified: Array<{ passId: string; where: string; why: string[] }> = [];
   /** #344 round 2 — told AT ONCE of every admission (the backend writes the use down before anything
    *  else can happen: a learn that throws later still has it on record). */
@@ -5512,6 +5516,13 @@ export class AutoLearnAdapter extends BasePortalAdapter {
       if (this.infoPageCandidate) result = { ...result, infoPageCandidate: this.infoPageCandidate };
       if (this.infoPagePassed.length) result = { ...result, infoPagePassed: [...this.infoPagePassed] };
       if (this.infoPageIncidents.length) result = { ...result, infoPageIncidents: this.infoPageIncidents.map((i) => ({ ...i, why: i.why.map((w) => this.scrubSecrets(w)) })) };
+      if (this.infoPageNextInfo.length) {
+        result = {
+          ...result,
+          infoPageNextInfo: this.infoPageNextInfo.map((i) => ({ ...i, afterText: this.scrubSecrets(i.afterText) })),
+          message: `${String(result.message ?? "")} A verified information page led to ANOTHER information page (no form, no filing evidence): that verification is kept, and nothing leaves the next page until a person verifies it too.`.trim(),
+        };
+      }
       if (this.infoPageHeldVerified.length) result = { ...result, infoPageHeldVerified: this.infoPageHeldVerified.map((h) => ({ ...h, why: h.why.map((w) => this.scrubSecrets(w)) })) };
       // Hand-off first (the route comes off), then every abort up to that moment is counted.
       await this.disposeBackstopWithin(backstop);
@@ -9057,11 +9068,22 @@ export class AutoLearnAdapter extends BasePortalAdapter {
       const reviewShaped = hasSubmitIntentBtn || hasAcceptTermsCheckbox || looksLikeReviewUrl(url)
         || fields.some((f) => f.fieldType === "button" && onPageControl(f) && isFinalSubmitControl(f.label));
       const plannerSaidReview = plan.atReview === true;
-      const interstitial = !hasFillable && !reviewShaped && !anyFormMutationRecorded && !entryDisclaimer
+      // #279: THE NEXT INFORMATION PAGE — a verified information page's click led here and the backstop
+      // read this page as another information page (its NEXT INFORMATION PAGE hold is on): it is an
+      // interstitial of the interview even where it reads as a dashboard by structure (no review
+      // words, no submit control), so its forward click asks for its own pass or is held as a candidate.
+      let nextInfoHere = false;
+      if (!hasFillable && !reviewShaped && !entryDisclaimer && this.page) {
+        try {
+          const door = backstopFor(this.page) as Partial<FilingBackstop> | null;
+          nextInfoHere = !!door && typeof door.infoPageProofState === "function" && door.infoPageProofState() === "next_info";
+        } catch { nextInfoHere = false; }
+      }
+      const interstitial = (!hasFillable && !reviewShaped && !anyFormMutationRecorded && !entryDisclaimer
         && !this.continuedDraft && !this.signatureCheck && !signatureDone
         && !this.formPageSeen
         && steps.some((s) => /^(application entry|permit type):/.test(String(s.note ?? "")))
-        && (!isDashboard || plannerSaidReview);
+        && (!isDashboard || plannerSaidReview)) || nextInfoHere;
       // A READ-ONLY PAGE INSIDE THE WIZARD IS NOT THE REVIEW PAGE (#271). Accela's advance on EVERY
       // step is "Continue Application »", which is submit-worded, so a page with nothing to fill
       // after a form page (a "Licensed Professional" step that only shows the account's licence)
@@ -9188,7 +9210,7 @@ export class AutoLearnAdapter extends BasePortalAdapter {
         const norm = (s: unknown): string => String(s ?? "").replace(/\s+/g, " ").trim();
         const fwdCands = fields.map((f, i) => ({ f, i })).filter(({ f }) => f.fieldType === "button" && !f.disabled && !f.tile
           && onPageControl(f) && isInterstitialForwardLabel(f.label) && !this.isOffLimitsButton(f));
-        const oneWay = !isDashboard && fwdCands.length > 0 && fwdCands.length <= 2
+        const oneWay = (!isDashboard || nextInfoHere) && fwdCands.length > 0 && fwdCands.length <= 2
           && new Set(fwdCands.map(({ f }) => norm(f.label).toLowerCase())).size === 1;
         const fwd = oneWay ? fwdCands[0].i : -1;
         const fwdLabel = fwd >= 0 ? norm(fields[fwd].label) : "";
@@ -10960,9 +10982,26 @@ export class AutoLearnAdapter extends BasePortalAdapter {
           const after = door && typeof door.checkInfoPageAfterClick === "function"
             ? await door.checkInfoPageAfterClick(this.page).catch((e: unknown) => ({ ok: false, refusals: [`the page after the click could not be read (${String((e as { message?: string })?.message ?? e).slice(0, 80)})`] }))
             : { ok: false, refusals: ["the network backstop cannot read the page after the click"] };
-          this.debug?.event({ type: after.ok ? "info_page_after_click_ok" : "info_page_incident", page: pageCount, phase: "after", refusals: after.refusals.slice(0, 6).map((x) => this.scrubSecrets(x).slice(0, 160)) });
-          if (!after.ok) {
-            for (const a of infoAdmitted) this.infoPageIncidents.push({ passId: a.passId, phase: "after", why: after.refusals.slice(0, 6), where: a.where });
+          const nextInfoPage = !after.ok && (after as { nextInfoPage?: boolean }).nextInfoPage === true;
+          // THE PAGE AFTER, KEPT WITH THE RECORD (#279): its text (scrubbed, capped) and a masked
+          // screenshot, so a person can tell a second information page from a receipt.
+          const afterText = redactCaptureText(this.scrubSecrets(String((after as { text?: string }).text ?? "")), 4000);
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const afterPg: any = this.page;
+          const afterShot = after.ok || !afterPg || typeof afterPg.screenshot !== "function" ? undefined
+            : await this.withSecretMask("info page after screenshot", (mask) => afterPg.screenshot({ fullPage: true, mask })).then((b) => (b ? Buffer.from(b as Buffer).toString("base64") : undefined)).catch(() => undefined);
+          this.debug?.event({ type: after.ok ? "info_page_after_click_ok" : nextInfoPage ? "info_page_next_information_page" : "info_page_incident", page: pageCount, phase: "after", refusals: after.refusals.slice(0, 6).map((x) => this.scrubSecrets(x).slice(0, 160)), ...(after.ok ? {} : { afterText, afterScreenshot: !!afterShot }) });
+          if (!after.ok && afterShot) this.debug?.writeFile(`info-page-after-p${pageCount}.png`, Buffer.from(afterShot, "base64"));
+          if (nextInfoPage) {
+            // #279 (owner's option 1): ANOTHER INFORMATION PAGE, not a filing — the verification just
+            // used is KEPT (no incident). Nothing leaves this page unless a person verified it too
+            // (the backstop's NEXT INFORMATION PAGE hold): the walk goes on to it, its forward click
+            // is held and recorded as a candidate for a person (with its screenshot), or passed by
+            // its own verification. No proof of progress is asked here: that belongs to the page the
+            // last pass of the chain leads to.
+            for (const a of infoAdmitted) this.infoPageNextInfo.push({ passId: a.passId, where: a.where, afterText: afterText.slice(0, 1200) });
+          } else if (!after.ok) {
+            for (const a of infoAdmitted) this.infoPageIncidents.push({ passId: a.passId, phase: "after", why: after.refusals.slice(0, 6), where: a.where, afterText: afterText.slice(0, 1200) });
             return {
               ...fail(steps, this.portalName, `STOPPED AFTER A VERIFIED INFORMATION PAGE: the network backstop let "${String(advanceField.label ?? "").slice(0, 40)}" through on the page a person verified, and the page it led to ${after.refusals.slice(0, 3).map((r) => r.replace(/^the page after the click /, "")).join("; ")}. Nothing more was sent, nothing is recorded as filed, and that verification is withdrawn. The verified page may have filed — check the portal for this project before any run continues.`, null, pageCount, portalNotices),
               stopReason: "info_page_incident",
@@ -10973,8 +11012,10 @@ export class AutoLearnAdapter extends BasePortalAdapter {
           // until a fill / select / check bound to one of the job's values is recorded there
           // (applyFill reports it); leaving, ending or stopping first is the incident (learn()'s
           // settleInfoPageProof).
-          this.infoProof = { passes: [...infoAdmitted], page: pageCount, step: null, left: false, candidates: [] };
-          this.debug?.event({ type: "info_page_proof_pending", page: pageCount });
+          if (!nextInfoPage) {
+            this.infoProof = { passes: [...infoAdmitted], page: pageCount, step: null, left: false, candidates: [] };
+            this.debug?.event({ type: "info_page_proof_pending", page: pageCount });
+          }
         }
         if (!res.ok && !controlAbsent) {
           return fail(steps, this.portalName, `Failed to click the advance button on page ${pageCount}: ${res.message ?? "unknown"}`, null, pageCount, portalNotices);

@@ -16,6 +16,9 @@
 //     review   — the review page (review wording, a certify box, Submit Application);
 //     error    — "There was an error processing your request." beside the form;
 //     same     — the same information page again (no field);
+//   #279 (owner's option 1) — info2: a SECOND information page after the verified one (no form,
+//   "successfully", its own Next). Not an incident: the verification is kept, the second page's Next
+//   is held and the page is the candidate a person verifies; once verified, the chain walks to the form.
 //     blank    — an empty page;
 //   ROUND 2 (the old check passed these: "a visible field and no known filed phrase") — each a
 //   receipt worded outside classifySubmissionText's vocabulary beside a search or feedback box:
@@ -78,6 +81,10 @@
 //
 // Kill checks: without the after-click check (checkInfoPageAfterClick) the receipt walk does not
 // stop as an incident; with main's filingBackstop.ts no walk passes the page at all.
+// #279 kill checks (each run, each red only on the info2 checks): infoPageAfterClickIsNextInformationPage
+// answering false → info2 is an incident again (the owner's loop); the NEXT INFORMATION PAGE hold not
+// admitting the next page's own pass → the verified chain never reaches the form; the learner not
+// reading that page as an interstitial (nextInfoHere) → no candidate comes back for a person.
 //
 //   npx tsx portal-bot/src/adapters/infoPageIncident.dom.smoke.ts
 import "../smokeArtifactDirs"; // hand-run safe: artifact dirs default to a temp folder, never data/
@@ -108,6 +115,8 @@ const check = (label: string, ok: boolean, detail = ""): void => {
 const ACCOUNT = "Placeholder Solar Co";
 const SOLAR = "Solar Permit Request";
 const NEXT = "t_n1685049573549";
+// #279: the SECOND information page's own Next (a different submitter on the same interview endpoint).
+const NEXT2 = "t_n1685049573551";
 const P = "/x";
 const INFO_PROSE = `<p><span>This is a permit request only.</span> A Permit Tech will review your submission for minimum submittal standards, and if met, a permit will be created. Once your permit has been deemed complete for intake, you will be provided with instructions via email for how to pay your intake fees. If you already have the information you need to apply, scroll to the bottom of the page and click "Continue". Please do not submit additional requests for the same scope of work.</p>`;
 const card = (id: string, title: string, body: string): string =>
@@ -164,6 +173,15 @@ const infoPage = (drift: boolean): string => shell({
   title: "Permitting Information", method: "POST", enctype: "multipart/form-data", nav: PREV_NEXT,
   content: `${INFO_PROSE}${drift ? "<p>New: intake now opens on weekdays only.</p>" : ""}`,
 });
+// #279 — A SECOND INFORMATION PAGE (the owner's city interview: "Permitting Information", then more
+// information pages, then the form). No form by design, "successfully" in its prose, its own Previous /
+// Next. It does NOT read as the review / terminal page (the owner's page did not: its refusals were the
+// acknowledgement and the missing form only), so on main nothing would hold its Next — the NEXT
+// INFORMATION PAGE hold does.
+const INFO2_PROSE = `<p>Your permit account was set up successfully.</p><p>Before you apply, have your site plan and one-line diagram ready, then click Next.</p>`;
+const infoPage2 = (): string => shell({
+  title: "Before You Apply", method: "POST", enctype: "multipart/form-data", nav: PREV_NEXT.replace(`name="${NEXT}"`, `name="${NEXT2}"`), content: INFO2_PROSE,
+});
 const plain = (title: string, body: string): string => `<!doctype html><html><head><meta charset="utf-8"><title>${title}</title></head><body>${body}</body></html>`;
 // Round 2 widgets: a search box in the page's header (its own GET form, role=search), one INSIDE the
 // big SmartGuide form (an ASP.NET-style page wraps everything in one POST form), a feedback box in
@@ -213,6 +231,7 @@ const AFTER: Record<string, () => string> = {
   }),
   error: () => shell({ title: "Project Information", method: "GET", action: `${P}/sg2`, content: `<p class="alert">There was an error processing your request.</p><div class="form-group"><label for="addr">Site Address</label><input id="addr" name="addr" type="text"></div>`, nav: PREV_NEXT }),
   same: () => infoPage(false),
+  info2: () => infoPage2(),
   blank: () => `<!doctype html><html><head><title></title></head><body></body></html>`,
   // ROUND 2 — every after-click shape the round-1 verifiers found PASSING the old check ("a visible
   // field and no known filed phrase"): a receipt worded outside classifySubmissionText's vocabulary
@@ -349,6 +368,11 @@ const server = http.createServer((q, r) => {
     if (pathOnly === `${P}/home`) return send(homePage());
     if (pathOnly === `${P}/apply`) return send(applyPage(mode));
     if (pathOnly === `${P}/info`) return send(infoPage(mode === "drift"));
+    if (pathOnly === `${P}/sg` && method === "POST" && names.includes(NEXT2)) {
+      r.writeHead(303, { Location: `${P}/form2` });
+      return r.end();
+    }
+    if (pathOnly === `${P}/form2`) return send(AFTER.form());
     if (pathOnly === `${P}/sg` && method === "POST" && names.includes(NEXT)) {
       r.writeHead(303, { Location: `${P}/after` });
       return r.end();
@@ -368,6 +392,8 @@ interface Walk {
   notes: string[]; finals: string[]; locks: string[];
   hits: Array<{ method: string; url: string; names: string[] }>;
   candidate?: InfoPageCandidateCapture; passed?: Array<{ passId: string; where: string }>; incidents?: InfoPageIncident[];
+  /** #279: passes whose page after read as another information page (kept). */
+  nextInfo?: Array<{ passId: string; where: string; afterText: string }>;
   /** Round 2: what the learner reported AT ONCE through onInfoPagePassed, and the verified pages it
    *  was held at because of the project's prior progress. */
   reported: Array<{ passId: string; where: string }>; heldVerified?: Array<{ passId: string; where: string; why: string[] }>;
@@ -428,6 +454,7 @@ const walk = async (mode: string, entries: VerifiedInfoPage[], permitType = "str
   const plan: LearnPlanner = async (req) => {
     let at = "";
     try { at = new URL(req.url).pathname; } catch { at = ""; }
+    if (at === `${P}/form2`) return PLANS.form(req);
     return at === `${P}/after` && PLANS[mode] ? PLANS[mode](req) : { fills: [], atReview: false };
   };
   const reported: Array<{ passId: string; where: string }> = [];
@@ -461,7 +488,7 @@ const walk = async (mode: string, entries: VerifiedInfoPage[], permitType = "str
     ok: r.ok === true, message: String(r.message ?? ""), stopReason: r.stopReason as string | undefined, reachedReview: r.reachedReview as boolean | undefined,
     notes: steps.map((s) => String(s.note ?? "")), finals: steps.filter((s) => s.isFinalSubmit).map((s) => String(s.note ?? "")), locks,
     hits: hits.filter((h) => h.mode === mode).map(({ method, url, names }) => ({ method, url, names })),
-    candidate: r.infoPageCandidate as InfoPageCandidateCapture | undefined, passed: r.infoPagePassed as Walk["passed"], incidents: r.infoPageIncidents as InfoPageIncident[] | undefined,
+    candidate: r.infoPageCandidate as InfoPageCandidateCapture | undefined, passed: r.infoPagePassed as Walk["passed"], incidents: r.infoPageIncidents as InfoPageIncident[] | undefined, nextInfo: r.infoPageNextInfo as Walk["nextInfo"],
     reported, heldVerified: r.infoPageHeldVerified as Walk["heldVerified"], reserved,
     secs: Math.round((Date.now() - t0) / 1000),
   };
@@ -532,7 +559,7 @@ const results: Record<string, Walk> = {};
 // other walks pack around them and the smoke stays well inside the runner's 600 s budget.
 const SLOW_FIRST = Object.keys(HELM_V6);
 const queue: Array<[string, string]> = [...SLOW_FIRST, ...AFTER_MODES.filter((m) => !SLOW_FIRST.includes(m))].map((m) => [m, "structural"] as [string, string])
-  .concat([["form", "structural"], ["progress", "structural"], ["drift", "structural"], ["tileb", "structural"]]);
+  .concat([["form", "structural"], ["progress", "structural"], ["drift", "structural"], ["tileb", "structural"], ["info2", "structural"]]);
 await Promise.all(Array.from({ length: 4 }, async () => {
   while (queue.length) {
     const [mode, permitType] = queue.shift()!;
@@ -667,6 +694,44 @@ for (const [mode, sent] of Object.entries(HELM_V6)) {
     posts(w).length === 0 && !(w.passed ?? []).length && (w.incidents ?? []).some((i) => i.passId === "pass-incident" && i.phase === "before" && i.why.some((x) => /different steps/.test(x))),
     JSON.stringify({ posts: posts(w), passed: w.passed, incidents: w.incidents, message: w.message.slice(0, 200) }));
   lines.push(`  note - [tileb] ${w.secs}s`);
+}
+
+{
+  // #279 (owner's option 1) — A SECOND INFORMATION PAGE AFTER THE VERIFIED ONE. Not an incident: the
+  // verification is KEPT, nothing leaves the second page (its Next is held), and that page comes back
+  // as the candidate a person verifies — with its text kept on the record. (On main this walk was an
+  // incident and the verification was withdrawn every time: the owner's loop.)
+  const w = results.info2;
+  const p = posts(w);
+  check("[info2] (#279): the verified Next passed ONCE; the second information page's own Next is HELD (never reached the server)",
+    p.length === 1 && p[0].startsWith(`POST ${P}/sg [`) && p[0].includes(NEXT) && !w.hits.some((h) => h.method !== "GET" && h.names.includes(NEXT2)) && (w.passed ?? []).length === 1,
+    JSON.stringify({ posts: p, passed: w.passed }));
+  check("[info2] (#279): NOT an incident — nothing reported for withdrawal, no sticky lock; the pass is recorded as kept, with the second page's text",
+    !(w.incidents ?? []).length && w.stopReason !== "info_page_incident" && !w.locks.some((l) => /did not read as an unfiled form/.test(l))
+    && (w.nextInfo ?? []).length === 1 && w.nextInfo![0].passId === "pass-incident" && /Before you apply/i.test(w.nextInfo![0].afterText),
+    JSON.stringify({ incidents: w.incidents, stop: w.stopReason, locks: w.locks, nextInfo: w.nextInfo, message: w.message.slice(0, 300) }));
+  check("[info2] (#279): the second information page is the CANDIDATE a person verifies (its held request observed), distinct from the verified one",
+    !!w.candidate && !!w.candidate.observed && w.candidate.identitySha256 !== entry?.identitySha256 && /Before You Apply/.test(JSON.stringify(w.candidate.evidence ?? {})),
+    JSON.stringify({ cand: w.candidate?.identitySha256?.slice(0, 12), observed: !!w.candidate?.observed }));
+  check("[info2] (#279): nothing is recorded as filed — no final submit, review not reached", w.finals.length === 0 && w.reachedReview !== true, JSON.stringify({ finals: w.finals }));
+  lines.push(`  note - [info2] ${w.secs}s: ${w.message.slice(-200)}`);
+  // ...AND ONCE A PERSON VERIFIES THAT PAGE TOO, THE CHAIN WALKS: page 1's pass, page 2's pass, then the
+  // form, where the proof of progress applies as before (the job's street entered, the form's Next sent).
+  const entry2: VerifiedInfoPage | null = w.candidate
+    ? { id: "pass-info2", verifiedAt: "2026-10-16T12:00:00.000Z", ...verifiedInfoPageFromCandidate({ identityVersion: w.candidate.identityVersion, identitySha256: w.candidate.identitySha256, digest: w.candidate.digest as InfoPageDigest, prefix: w.candidate.prefix }) }
+    : null;
+  if (entry && entry2) {
+    const v = await walk("info2", [entry, entry2]);
+    const pv = posts(v);
+    check("[info2, both verified] (#279): page 1's pass and page 2's pass each admitted once, in order; no incident",
+      (v.passed ?? []).map((x) => x.passId).join(",") === "pass-incident,pass-info2" && !(v.incidents ?? []).length
+      && pv[0]?.includes(NEXT) && pv.some((x) => x.includes(NEXT2)),
+      JSON.stringify({ passed: v.passed, incidents: v.incidents, posts: pv, message: v.message.slice(0, 300) }));
+    check("[info2, both verified] (#279): the form after the chain took the job's street (its autosave passed the proof hold) and its Next was sent",
+      v.hits.some((h) => h.method === "POST" && h.url === `${P}/autosave`) && v.hits.some((h) => h.method === "POST" && h.url === `${P}/sg` && h.names.includes("t_n2")),
+      JSON.stringify(pv));
+    lines.push(`  note - [info2 verified] ${v.secs}s`);
+  } else check("[info2] premise: the second page came back as a candidate to verify", false);
 }
 
 await browser.close();
