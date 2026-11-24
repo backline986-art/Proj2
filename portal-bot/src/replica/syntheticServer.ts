@@ -316,7 +316,8 @@ function acaPanel(ctx: Ctx, idx: number, errors: string[], notice = ""): string 
       const pi = ctx.w.pages.indexOf(p);
       return `<div class="ACA_Section"><h2 class="ACA_Title">${esc(p.heading.replace(/^Step \d+:\s*/, ""))} <a class="ACA_LinkButton" href="javascript:__doPostBack('ctl00$PlaceHolderMain$btnEdit${pi}','')">Edit</a></h2><table class="ACA_ReadOnly">${p.controls.filter((c) => !c.mustStayEmpty && !/To$/.test(c.key)).map((c) => `<tr><td>${esc(c.label)}</td><td>${esc(values[c.key] ?? "")}</td></tr>`).join("")}</table></div>`;
     }).join("") : "";
-    body = `<p class="ACA_Instruction">${esc(page.note ?? "")}</p>${summary}`;
+    const actions = (page.actions ?? []).map((a) => `<a id="${esc(a.id)}" class="ACA_LinkButton" href="javascript:void(0)">${esc(a.label)}</a>`).join(" ");
+    body = `<p class="ACA_Instruction">${esc(page.note ?? "")}</p>${summary}${actions ? `<div class="ACA_Actions">${actions}</div>` : ""}`;
   } else {
     const sections = page.sections.length ? page.sections : [""];
     body = (page.note ? `<p class="ACA_Instruction">${esc(page.note)}</p>` : "") + sections.map((s) => {
