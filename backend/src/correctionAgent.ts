@@ -649,7 +649,7 @@ export function applyCorrectionApproval(db: AppDb, correctionId: string, fields:
     closeReviewedCorrectionIfDone(db, correctionId, actor);
     return { ...getProjectDetail(db, jurisdiction.projectId), jurisdictionCriteria: jurisdiction };
   }
-  return { ...applyCorrectionProposals(db, correctionId, fields), ...(jurisdiction.attempted ? { jurisdictionCriteria: jurisdiction } : {}) };
+  return { ...applyCorrectionProposals(db, correctionId, fields, actor), ...(jurisdiction.attempted ? { jurisdictionCriteria: jurisdiction } : {}) };
 }
 
 /**

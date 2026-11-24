@@ -4014,6 +4014,20 @@ const VERSIONED_MIGRATIONS: VersionedMigration[] = [
       `);
     },
   },
+  {
+    // v92 (what intake read for each field, and who changed it; fieldHistory.ts). extracted_fields becomes
+    // a per-field history: intake's read at creation, then one row per CHANGED field per save, with the
+    // value before (previous_value, NULL = blank or none recorded) and the named person who made it (changed_by,
+    // '' = not a person: source_method says what). Helm renumbers at merge if the queue changes —
+    // nothing here depends on the number.
+    version: 92,
+    name: "field_change_history",
+    up: (db) => {
+      addColumnIfMissing(db, "extracted_fields", "previous_value", "TEXT");
+      addColumnIfMissing(db, "extracted_fields", "changed_by", "TEXT NOT NULL DEFAULT ''");
+      db.exec("CREATE INDEX IF NOT EXISTS idx_extracted_fields_project ON extracted_fields(project_id, created_at)");
+    },
+  },
 ];
 
 /** v47 was edited in place while #218 was open (Helm's review at 0116f98a): a DB that ran an earlier

@@ -22,8 +22,9 @@
 //   person_confirmed        a person approved the extracted value in the review queue;
 //   client_record           the submitting company's record supplies it (the staging overlay);
 //   per_job_answer          a per-job portal question, answered by a person or the intake link;
-//   changed_after_extraction the creation parse wrote a different value; a later save changed it
-//                           (a person's edit or a re-parse: which one is not recorded);
+//   changed_after_extraction the creation parse wrote a different value; a later save that was not
+//                           a named person's changed it (a re-parse, the client form, a reader);
+//                           a named person's change (field history, v92) reads person_corrected;
 //   not_recorded            no record either way (derived by the replay, or a key the parse
 //                           history does not track).
 // A person's review outranks a document read, which outranks the creation parse.
@@ -150,6 +151,8 @@ interface ProjectEvidence {
   review: Map<string, string>;
   documentRead: Set<string>;
   birth: Map<string, string[]>;
+  /** Fields a NAMED person changed after intake (field history, migration v92: changed_by set). */
+  personChanged: Set<string>;
 }
 function projectEvidence(db: AppDb, projectId: string): ProjectEvidence {
   const review = new Map<string, string>();
@@ -166,13 +169,18 @@ function projectEvidence(db: AppDb, projectId: string): ProjectEvidence {
       if (Array.isArray(d.fields)) for (const f of d.fields) documentRead.add(String(f));
     } catch { /* an unreadable audit row is no evidence */ }
   }
-  // The creation parse (createProject: human_verified 0). A later updateProject writes rows marked
-  // human_verified 1 for EVERY save, the parser's included, so those prove nothing about a person.
+  // The creation parse (source_method "intake"; "regex" before v92). Before v92 every later save wrote
+  // rows marked human_verified 1, the parser's included, so those prove nothing about a person; since
+  // v92 a later save writes only the fields it changed, naming the person in changed_by when one did.
   const birth = new Map<string, string[]>();
-  for (const r of db.query<{ field_name: string; field_value: string }>(
-    "SELECT field_name, field_value FROM extracted_fields WHERE project_id = ? AND human_verified = 0", [projectId],
-  )) birth.set(r.field_name, [...(birth.get(r.field_name) ?? []), s(r.field_value)]);
-  return { review, documentRead, birth };
+  const personChanged = new Set<string>();
+  for (const r of db.query<{ field_name: string; field_value: string; source_method: string; changed_by: string | null }>(
+    "SELECT field_name, field_value, source_method, changed_by FROM extracted_fields WHERE project_id = ?", [projectId],
+  )) {
+    if (r.source_method === "intake" || r.source_method === "regex") birth.set(r.field_name, [...(birth.get(r.field_name) ?? []), s(r.field_value)]);
+    else if (s(r.changed_by).trim()) personChanged.add(r.field_name);
+  }
+  return { review, documentRead, birth, personChanged };
 }
 
 export function provenanceOf(entry: RecipeStageKey, value: string, ev: ProjectEvidence): Provenance | null {
@@ -185,7 +193,10 @@ export function provenanceOf(entry: RecipeStageKey, value: string, ev: ProjectEv
   if (reviewed === "approved") return "person_confirmed";
   if (names.some((n) => ev.documentRead.has(n))) return "extracted";
   const born = names.flatMap((n) => ev.birth.get(n) ?? []);
-  if (born.length) return born.some((b) => sameValue(b, value)) ? "extracted" : "changed_after_extraction";
+  if (born.length) {
+    if (born.some((b) => sameValue(b, value))) return "extracted";
+    return names.some((n) => ev.personChanged.has(n)) ? "person_corrected" : "changed_after_extraction";
+  }
   return "not_recorded";
 }
 

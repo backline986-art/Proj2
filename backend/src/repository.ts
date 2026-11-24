@@ -200,6 +200,7 @@ import type { PvWorksheetGateInput } from "./pvWorksheetGate";
 import { resolveEffectiveCodeContext, ensureCodeProfilesResearched, ownCodeProfileRow, resolvePermitPathForProject, recordApprovedDesignObservation, isStructuralPermitTrack } from "./codeProfiles";
 import { applyCachedVisionVerdicts, visionRelaxedBlockers } from "./reviewerVision";
 import { nowIso } from "./time";
+import { recordFieldChanges, recordIntakeRead } from "./fieldHistory";
 import { isHarnessAbort, looksBotBlocked } from "./runAbort";
 import { finalSubmitEnvAllows, recipeShapeProblems, runApprovalRefusals } from "../../shared/src/portalSafety";
 import { PAGE_READ_MIN_GAP_MS } from "./agencyPageReader";
@@ -894,7 +895,8 @@ export function createProject(
       ],
     );
 
-    insertExtractedFields(db, project.id, payload, false);
+    // Intake's read of every field, the baseline later changes are measured against (fieldHistory.ts).
+    recordIntakeRead(db, project.id, project.parserSnapshot as Record<string, unknown>);
     addAuditLog(db, project.id, "system", "front-end parser", "project.created_from_parser_snapshot", {
       source: "Solar Submission Engine HTML",
     });
@@ -996,8 +998,9 @@ export function updateProject(
    *  moved on since — a teammate's save, or a background write of its data — is refused with a 409 and nothing
    *  is written. Omitted (the parser, API keys, internal callers), the save is unconditional, as before.
    *  editedBy: the signed-in person who saved it (PUT /api/projects/:id); omitted, the history says
-   *  "front-end parser" as before. */
-  options: { humanInverterEdit?: boolean; expectedVersion?: number; editedBy?: string } = {},
+   *  "front-end parser" as before. changeSource: what made the change when no person did ("client form",
+   *  "bill reader"…), recorded on each changed field's history row (fieldHistory.ts). */
+  options: { humanInverterEdit?: boolean; expectedVersion?: number; editedBy?: string; changeSource?: string } = {},
 ): ProjectDetail {
   const existing = getProjectDetail(db, projectId).project;
   // Drop the non-persistent plan-set text overlay (re-derived from project_documents
@@ -1063,6 +1066,10 @@ export function updateProject(
     // connection's write in between makes this transaction's write fail rather than land). The throw
     // rolls back; QC and learning below never run for a refused save.
     if (options.expectedVersion !== undefined) assertProjectEditVersion(db, projectId, options.expectedVersion);
+    // The stored snapshot as it was, read in the write's own transaction: what this save changed is
+    // measured against it (fieldHistory.ts), not against the overlaid copy loaded above.
+    const storedBefore = parseJson<Record<string, unknown>>(
+      db.get<{ parser_json: string }>("SELECT parser_json FROM projects WHERE id = ?", [projectId])?.parser_json, {});
     db.run(
       `UPDATE projects SET
         client_id = ?, homeowner_name = ?, project_address = ?, city = ?, state = ?, zip = ?, ahj = ?, utility = ?,
@@ -1092,9 +1099,16 @@ export function updateProject(
         projectId,
       ],
     );
-    insertExtractedFields(db, projectId, mergedSnapshot, true);
     const editedBy = text(options.editedBy).trim();
-    addAuditLog(db, projectId, editedBy ? "human" : "system", editedBy || "front-end parser", "project.updated_from_parser_snapshot", { fields: Object.keys(payload).length });
+    // One history row per field this save CHANGED, naming who (fieldHistory.ts). Only a named
+    // person's change counts as human-verified; a re-sent snapshot that changed nothing records nothing.
+    const changed = recordFieldChanges(db, projectId, storedBefore, project.parserSnapshot as Record<string, unknown>, {
+      person: editedBy, source: options.changeSource || "front-end parser",
+    });
+    // Field NAMES only: values (account numbers among them) stay out of the audit trail.
+    addAuditLog(db, projectId, editedBy ? "human" : "system", editedBy || options.changeSource || "front-end parser", "project.updated_from_parser_snapshot", {
+      fields: Object.keys(payload).length, changed,
+    });
     // Who issues a permit track decides which portal it files on: its own row in the history.
     for (const change of issuerChanges) {
       addAuditLog(db, projectId, "human", editedBy || "operator", "project.track_issuer_set", change);
@@ -1280,25 +1294,6 @@ export function assignProjectClient(db: AppDb, projectId: string, clientId: stri
   db.run("UPDATE projects SET client_id = ?, updated_at = ? WHERE id = ?", [clientId, nowIso(), projectId]);
   addAuditLog(db, projectId, "human", "client assignment", "project.client_assigned", { clientId });
   return getProjectDetail(db, projectId);
-}
-
-function insertExtractedFields(db: AppDb, projectId: string, payload: ParserPayload, humanVerified: boolean): void {
-  const seen = new Set<string>();
-  const ts = nowIso();
-  for (const aliases of Object.values(fieldAliases)) {
-    for (const alias of aliases) {
-      if (seen.has(alias)) continue;
-      seen.add(alias);
-      const value = payload[alias];
-      if (value == null || value === "") continue;
-      db.run(
-        `INSERT INTO extracted_fields
-           (id, project_id, field_name, field_value, source_file_id, source_method, confidence, human_verified, notes, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        [id(), projectId, alias, text(value), null, humanVerified ? "human" : "regex", null, humanVerified ? 1 : 0, "", ts],
-      );
-    }
-  }
 }
 
 /** The label an emailed fee request reads as (#576): the track's fee_due, not a generic review. */
@@ -5966,6 +5961,8 @@ export function applyCorrectionProposals(
   db: AppDb,
   correctionId: string,
   approvedFields?: string[],
+  /** The person approving (the apply route's signed-in user): named on each changed field's history. */
+  approvedBy?: string,
 ): ProjectDetail {
   const correction = db.get<Row>("SELECT * FROM corrections WHERE id = ?", [correctionId]);
   if (!correction) throw new HttpError(404, "Correction not found.");
@@ -6008,7 +6005,12 @@ export function applyCorrectionProposals(
   }
   // A person approved these proposals (/api/corrections/:id/apply): their inverter model is a human
   // statement (#270).
-  if (Object.keys(payload).length) updateProject(db, projectId, payload, { humanInverterEdit: true });
+  if (Object.keys(payload).length) {
+    updateProject(db, projectId, payload, {
+      humanInverterEdit: true, changeSource: "correction",
+      ...(text(approvedBy).trim() ? { editedBy: text(approvedBy).trim() } : {}),
+    });
+  }
 
   const ts = nowIso();
   db.run("UPDATE corrections SET human_approved = 1 WHERE id = ?", [correctionId]);
@@ -11587,9 +11589,9 @@ export function humanVerify(
       applyVerifiedField(db, projectId, oldPayload, fieldName, value);
       db.run(
         `INSERT INTO extracted_fields
-          (id, project_id, field_name, field_value, source_file_id, source_method, confidence, human_verified, notes, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        [id(), projectId, fieldName, value, null, "human", 1, 1, input.notes || "Human verified from review queue.", nowIso()],
+          (id, project_id, field_name, field_value, previous_value, source_file_id, source_method, confidence, human_verified, changed_by, notes, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [id(), projectId, fieldName, value, text(oldPayload[fieldName]) || null, null, "human", 1, 1, text(input.verifiedBy).trim(), input.notes || "Human verified from review queue.", nowIso()],
       );
     }
 
