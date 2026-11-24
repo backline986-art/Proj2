@@ -680,7 +680,7 @@ export function submitIntakeRequest(
 
   const firstCompletion = row.status !== "completed";
   if (Object.keys(payload).length > 0) {
-    updateProject(db, row.project_id, payload);
+    updateProject(db, row.project_id, payload, { changeSource: "client form" });
     // Answers bound to a per-job answer COLUMN (migration v17) land there too:
     // resolveRecipeFieldValues reads the column directly, so replay sees the
     // installer's answer either way. Column names come only from the allowlist
@@ -732,6 +732,8 @@ export async function answerPortalQuestions(
   db: AppDb,
   projectId: string,
   answers: Record<string, string>,
+  /** The signed-in person answering on the parser page, when there is one: named on the field history. */
+  answeredBy?: string,
 ): Promise<{ written: string[]; alreadyAnswered: Array<{ key: string; label: string; answer: string }>; remaining: number }> {
   const project = getProjectDetail(db, projectId).project;
   const unanswered = await unansweredPortalQuestions(db, project);
@@ -765,7 +767,7 @@ export async function answerPortalQuestions(
     const stillOpen = await unansweredPortalQuestions(db, getProjectDetail(db, projectId).project);
     return { written, alreadyAnswered, remaining: stillOpen.length };
   }
-  updateProject(db, projectId, payload);
+  updateProject(db, projectId, payload, { changeSource: "portal questions", ...(answeredBy?.trim() ? { editedBy: answeredBy.trim() } : {}) });
   for (const [key, column] of Object.entries(PER_JOB_ANSWER_COLUMNS)) {
     const value = payload[key];
     if (value == null || String(value) === "") continue;
