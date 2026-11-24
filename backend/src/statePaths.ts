@@ -101,6 +101,11 @@ export function stagedReviewShotsDir(o?: StatePathOptions): string {
   return path.join(replayRunsDir(o), "staged-reviews");
 }
 
+/** The masked page captures local runs keep per portal (portal-bot/src/pageCapture.ts). */
+export function pageCapturesDir(o?: StatePathOptions): string {
+  return pick(o, "PORTAL_PAGE_CAPTURE_DIR", path.join(runDataDir(o), "page-captures"));
+}
+
 export function screenshotsDir(o?: StatePathOptions): string {
   return pick(o, "PORTAL_SCREENSHOT_DIR", path.join(runDataDir(o), "screenshots"));
 }

@@ -31,6 +31,7 @@ import { chooseRow, scanRowChoices, markAddressRow, type AddressRowPick } from "
 import { parseStreetName, parseStreetNumber, parseStreetLine, correctTruncatedAddressFill, isSplitAddressForm } from "../addressParse";
 import { portalUploadCapBytes } from "../uploadCap";
 import { LearnRunDebug } from "../learnDebug";
+import { PageCaptureLog } from "../pageCapture";
 import { armHumanCaptureOnPage } from "../humanCapture";
 import { isStartNewApplicationControl, readExistingApplicationNotice } from "../existingApplicationNotice";
 import { chooseDraftForm, findSiteDraft, isDraftFormRefusal, modificationOnOriginalNotice, readsAsUnsubmittedDraft } from "../draftCreated";
@@ -7920,6 +7921,7 @@ export class AutoLearnAdapter extends BasePortalAdapter {
     // pNNN-plan.json / pNNN-rescan.json sidecars (see .env.example). Lets the operator see
     // exactly what the bot saw and what it changed without re-running blind. Best-effort only;
     // PNGs alone can be disabled with AUTOLEARN_DEBUG_SCREENSHOTS=0 (sidecars still written).
+    let pageLog: PageCaptureLog | null | undefined;
     const saveDebugShot = async (label: string) => {
       // Bundle PNGs mask a known secret too (the trace stays the documented raw render).
       // Fails closed like the others: a secret typed and no mask buildable = no PNG this time.
@@ -7929,6 +7931,12 @@ export class AutoLearnAdapter extends BasePortalAdapter {
       // And keep the page's own markup, blanked of the operator's data — this is what the
       // offline portal replica is built from (see learnDebug.capturePageHtml).
       await this.debug?.capturePageHtml(this.page, label);
+      // The masked picture and trimmed snapshot a reviewer can be sent (pageCapture.ts): one per
+      // distinct page of the portal, refreshed daily. The bundle above stays the raw forensic copy.
+      try {
+        if (pageLog === undefined) pageLog = PageCaptureLog.start({ kind: "learn", portal: this.portalName, secrets: () => this.knownSecrets() });
+        await pageLog?.capture(this.page, label);
+      } catch { /* best-effort: never fail a learn over a capture */ }
     };
 
     // Required fields that did NOT hold their value after filling (portal silently dropped them).
