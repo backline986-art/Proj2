@@ -2701,6 +2701,35 @@ export function tagUploadControls(): UploadSlot[] {
   // click-to-open trigger. Text that says only this names no document, so it is not a slot label.
   const TRIGGER = /^(browse|upload|choose(\s+file)?|attach|add\s+file|select\s+file|choose\s+files?|upload\s+file)\.{0,3}$/i;
 
+  // A SLOT IS KNOWN BY TEXT A PERSON CAN SEE. Two readings below keep to that:
+  //  - shownText: an element's text without what a browser never paints — <noscript> (with
+  //    scripting on, its content is ONE RAW TEXT NODE, tags included: an upload widget's
+  //    "<p>Please enable JavaScript…</p>" fallback became every slot's heading, and the plan set
+  //    went to the first slot on the page), <script>, <style>, <template>. An element holding none
+  //    of them reads exactly as its textContent, so no existing label changes.
+  //  - hiddenApartFrom: the node is under display:none (the `hidden` attribute and a closed
+  //    <dialog> compute to it) by an ancestor the control does not share. Text hidden TOGETHER
+  //    with its control (a collapsed section) still names it; opacity and clipping never count,
+  //    so a visually-hidden label keeps naming its slot.
+  const UNPAINTED = "noscript, script, style, template";
+  function shownText(node: Element): string {
+    if (!node.querySelector(UNPAINTED)) return node.textContent || "";
+    let out = "";
+    const walker = document.createTreeWalker(node, 4 /* SHOW_TEXT */);
+    for (let t = walker.nextNode(); t; t = walker.nextNode()) {
+      const p = (t as Text).parentElement;
+      if (p && p.closest(UNPAINTED)) continue;
+      out += t.textContent || "";
+    }
+    return out;
+  }
+  function hiddenApartFrom(node: Element, control: Element): boolean {
+    for (let x: Element | null = node; x && !x.contains(control); x = x.parentElement) {
+      if (getComputedStyle(x).display === "none") return true;
+    }
+    return false;
+  }
+
   // A SLOT NAMED BY ITS HEADING (#140). iWorQ renders each required document as
   //   <h3>Plans</h3> <div>(File Types: .pdf):</div>
   //   <div><label for="newfile_…" class="btn">Choose File</label> <input type=file id="newfile_…"> <textarea …></div>
@@ -2726,7 +2755,9 @@ export function tagUploadControls(): UploadSlot[] {
         if (forId && forId !== el.getAttribute("id")) continue;
         // …and so is text wrapping a control of its own (<label><input> I agree</label>).
         if (h.querySelector("input, select, textarea, button")) continue;
-        const t = (h.textContent || "").trim().replace(/\s+/g, " ");
+        // …and a heading the page does not show names nothing.
+        if (hiddenApartFrom(h, el)) continue;
+        const t = shownText(h).trim().replace(/\s+/g, " ");
         if (!t || t.length > 80 || namesNoDocument(t)) continue;
         // Another upload control between this heading and ours means the heading belongs to it.
         if (others.some((o) => (h.compareDocumentPosition(o) & FOLLOWING) !== 0 && (o.compareDocumentPosition(el) & FOLLOWING) !== 0)) return null;
@@ -2776,13 +2807,14 @@ export function tagUploadControls(): UploadSlot[] {
     const isUpload = (n: Element) => n !== el && !n.contains(el) && (n.matches(UPLOADS) || !!n.querySelector(UPLOADS));
     const FOLLOWING = 4; // Node.DOCUMENT_POSITION_FOLLOWING
     // The leaf text chunks of a node in document order: each text node's trimmed text, outside
-    // controls, scripts and table header cells.
+    // controls, text a browser never paints, table header cells, and text the page is not showing
+    // (a hidden caption row between the name and the control, a closed dialog repeating the name).
     const chunks = (node: Node, beforeEl: boolean): string[] => {
       const out: string[] = [];
       const walker = document.createTreeWalker(node, 4 /* SHOW_TEXT */);
       for (let t = walker.nextNode(); t; t = walker.nextNode()) {
         const p = (t as Text).parentElement;
-        if (!p || p.closest(`${CONTROL}, script, style, th, thead`)) continue;
+        if (!p || p.closest(`${CONTROL}, ${UNPAINTED}, th, thead`) || hiddenApartFrom(p, el)) continue;
         if (beforeEl && (t.compareDocumentPosition(el) & FOLLOWING) === 0) break;
         const s = (t.textContent || "").replace(/\s+/g, " ").trim();
         if (s) out.push(s);
@@ -2800,8 +2832,11 @@ export function tagUploadControls(): UploadSlot[] {
       }
       return heading ? { heading, required } : null;
     };
+    // Six levels out, counting only levels that offer something else to read: a wrapper around ONE
+    // element (an upload widget's shells, a cell that is its row's only cell) adds nothing, and
+    // stepping out of it costs no depth — a control four shells deep in its cell still reads its row.
     let anc: Element | null = el.parentElement;
-    for (let depth = 0; anc && depth < 6 && !/^(form|body|html)$/i.test(anc.tagName); depth++, anc = anc.parentElement) {
+    for (let depth = 0; anc && depth < 6 && !/^(form|body|html)$/i.test(anc.tagName); anc = anc.parentElement) {
       // Another upload control before ours inside this ancestor: its text is spoken for.
       if (Array.from(anc.querySelectorAll(UPLOADS)).some((o) => isUpload(o) && (o.compareDocumentPosition(el) & FOLLOWING) !== 0)) return null;
       const own = nameIn(chunks(anc, true));
@@ -2816,6 +2851,7 @@ export function tagUploadControls(): UploadSlot[] {
           return { heading: got.heading, required: got.required || ownStatus };
         }
       }
+      if (!anc.parentElement || anc.parentElement.children.length !== 1) depth++;
     }
     return null;
   }
@@ -2842,21 +2878,21 @@ export function tagUploadControls(): UploadSlot[] {
       // Element's own root, so a label inside the same shadow root is found too.
       const root = el.getRootNode() as Document | ShadowRoot;
       const forLbl = root.querySelector(`label[for="${(window.CSS && CSS.escape) ? CSS.escape(id) : id}"]`);
-      if (forLbl && forLbl.textContent && forLbl.textContent.trim()) return forLbl.textContent.trim();
+      if (forLbl && shownText(forLbl).trim()) return shownText(forLbl).trim();
     }
     const wrapLbl = el.closest("label");
-    if (wrapLbl && wrapLbl.textContent && wrapLbl.textContent.trim()) return wrapLbl.textContent.trim();
+    if (wrapLbl && shownText(wrapLbl).trim()) return shownText(wrapLbl).trim();
     const container = el.closest('[class*="form-group"], [class*="field"], [class*="row"], li, tr, dd, p, div');
     if (container) {
       const lbl = container.querySelector("label, .control-label, .field-label, strong, b, h1, h2, h3, h4, h5, legend");
-      if (lbl && lbl.textContent && lbl.textContent.trim()) return lbl.textContent.trim().replace(/\s+/g, " ");
+      if (lbl && shownText(lbl).trim()) return shownText(lbl).trim().replace(/\s+/g, " ");
       // Fall back to the container's leading text node (e.g. "Cut Sheets" before the Browse box).
-      const own = (container.textContent || "").trim().replace(/\s+/g, " ");
+      const own = shownText(container).trim().replace(/\s+/g, " ");
       if (own) return own.slice(0, 80);
     }
     const aria = el.getAttribute("aria-label");
     if (aria) return aria.trim();
-    return (el.textContent || "").trim() || "Document";
+    return shownText(el).trim() || "Document";
   }
 
   function isRequired(el: Element): boolean {
