@@ -512,6 +512,10 @@ const STALL_WATCHDOG_DEFAULT_MS = 300_000;
 const PLANNER_STALL_DEFAULT_MS = 600_000;
 
 export const SUBMIT_INTENT = /\b(continue application|submit application|file application|submit|finish|finalize|confirm submission|place order|complete submission)\b/i;
+/** Accela's every-step advance. Submit-worded, but alone it files only on a page that names itself
+ *  the review step (#271; the shared isFinalSubmitControl rule). */
+const CONTINUE_APPLICATION_WORDS = /\bcontinue\s+application\b/i;
+const CONTINUE_APPLICATION_WORDS_G = /\bcontinue\s+application\b/gi;
 /** A login-worded control ("Sign In", "Log in", "Login", "Log On"). Never a walk advance while its
  *  credential boxes are empty — see the login_advance_refused stop. */
 const LOGIN_ADVANCE = /^\s*(sign\s*-?\s*in|log\s*-?\s*in|login|log\s*on|sign\s*on)\b/i;
@@ -9058,21 +9062,43 @@ export class AutoLearnAdapter extends BasePortalAdapter {
         && !this.formPageSeen
         && steps.some((s) => /^(application entry|permit type):/.test(String(s.note ?? "")))
         && (!isDashboard || plannerSaidReview);
+      // A READ-ONLY PAGE INSIDE THE WIZARD IS NOT THE REVIEW PAGE (#271). Accela's advance on EVERY
+      // step is "Continue Application »", which is submit-worded, so a page with nothing to fill
+      // after a form page (a "Licensed Professional" step that only shows the account's licence)
+      // read as review: the learn stopped there with 4 of 19 fields, and its Continue was promoted
+      // to the final submit. After a form page, a page with no fillable control is review only on
+      // POSITIVE evidence: its text or URL names the review step, a submit-intent control other
+      // than "Continue Application" alone, a terms gate, or the planner saying so. Otherwise it is
+      // a pass-through page and its click is recorded as an advance. "After a form page" is a
+      // page with a fillable control this run OR form data already recorded (the offline bench's
+      // accela/extra_readonly_page learn entered data without the walk marking a form page seen,
+      // and still stopped at 4 of 19). Before both, the interstitial reading answers, unchanged.
+      const continueOnly = (label: string | null | undefined): boolean =>
+        CONTINUE_APPLICATION_WORDS.test(String(label ?? "")) && !SUBMIT_INTENT.test(String(label ?? "").replace(CONTINUE_APPLICATION_WORDS_G, " "));
+      const strongSubmitIntentBtn = fields.some((f) => f.fieldType === "button" && onPageControl(f)
+        && SUBMIT_INTENT.test(f.label) && !continueOnly(f.label) && !this.isOffLimitsButton(f));
+      const readOnlyMidWizard = !hasFillable && !isDashboard && (this.formPageSeen || anyFormMutationRecorded)
+        && !reviewSignals && !looksLikeReviewUrl(url) && !strongSubmitIntentBtn && !hasAcceptTermsCheckbox && !plannerSaidReview;
+      if (readOnlyMidWizard) this.debug?.event({ type: "readonly_mid_wizard_pass_through", page: pageCount });
       if (hasFillable) this.formPageSeen = true;
       const isReviewPage =
-        ((!hasFillable && !isDashboard) ||
+        ((!hasFillable && !isDashboard && !readOnlyMidWizard) ||
           (reviewSignals && hasSubmitIntentBtn) ||
           (hasSubmitIntentBtn && hasAcceptTermsCheckbox)) && !entryDisclaimer && !interstitial;
       if (isReviewPage && !plan.atReview) {
         // Promote a planner "advance" that is actually a submit-intent button to finalSubmit.
         let promotedFinal = typeof plan.finalSubmitSelectorIndex === "number" ? plan.finalSubmitSelectorIndex : undefined;
+        // "Continue Application" alone is the filing click only on a page that NAMES itself the
+        // review step (the shared isFinalSubmitControl rule, #271): on a review page proven some
+        // other way (a terms gate, a planner stop) it stays unflagged and a person clicks it.
+        const promotable = (f: ExtractedField | undefined): boolean => !!f && f.fieldType === "button"
+          && SUBMIT_INTENT.test(f.label) && !this.isOffLimitsButton(f) && (!continueOnly(f.label) || reviewSignals);
         if (promotedFinal == null && typeof plan.advanceSelectorIndex === "number") {
-          const adv = fields[plan.advanceSelectorIndex];
-          if (adv && SUBMIT_INTENT.test(adv.label) && !this.isOffLimitsButton(adv)) promotedFinal = plan.advanceSelectorIndex;
+          if (promotable(fields[plan.advanceSelectorIndex])) promotedFinal = plan.advanceSelectorIndex;
         }
         if (promotedFinal == null) {
           // Fall back to the first submit-intent (non-pay) button on the page.
-          const idx = fields.findIndex((f) => f.fieldType === "button" && SUBMIT_INTENT.test(f.label) && !this.isOffLimitsButton(f));
+          const idx = fields.findIndex((f) => promotable(f));
           if (idx >= 0) promotedFinal = idx;
         }
         // Auto-check the required terms/certification gate(s) so the recorded recipe ticks them
@@ -9224,6 +9250,19 @@ export class AutoLearnAdapter extends BasePortalAdapter {
             plan = { ...plan, finalSubmitSelectorIndex: undefined };
             this.debug?.event({ type: "planner_final_submit_navigator_dropped", page: pageCount, control, atReview: plan.atReview === true });
           }
+        }
+      }
+
+      // c2o) A PLANNER'S "Continue Application" ON A READ-ONLY PAGE THAT DOES NOT NAME ITSELF REVIEW
+      //      IS NEVER THE FINAL SUBMIT (#271). The planner may still stop here (a person reads the
+      //      page at review), but the step it would record as isFinalSubmit is Accela's every-step
+      //      advance: dropped, so no recipe carries a mid-wizard Continue as the filing click.
+      {
+        const fsIdx = plan.finalSubmitSelectorIndex;
+        const fsField = typeof fsIdx === "number" ? fields[fsIdx] : undefined;
+        if (fsField && !hasFillable && !reviewSignals && continueOnly(fsField.label)) {
+          plan = { ...plan, finalSubmitSelectorIndex: undefined };
+          this.debug?.event({ type: "planner_final_submit_continue_dropped", page: pageCount, control: String(fsField.label ?? "").slice(0, 60) });
         }
       }
 
