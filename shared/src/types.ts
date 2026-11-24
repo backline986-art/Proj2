@@ -5433,6 +5433,17 @@ export interface PaidFeeReceipt {
   invoiceNumber?: string;
   totalPaidUsd: number;
   paidAt: string;
+  /** The fee lines an itemized receipt prints, when every line read and they add up to the
+   *  receipt (feeReceipts.transactionReceiptLines). What a schedule's own lines are checked against. */
+  lines?: PaidFeeReceiptLine[];
+}
+
+/** One printed fee line: the authority's price for it (`feeUsd`) and what this payment put on it
+ *  (`paidUsd`; a partial payment pays less). The fee item's own name only, never an address. */
+export interface PaidFeeReceiptLine {
+  label: string;
+  feeUsd: number;
+  paidUsd: number;
 }
 
 // ── PER-JOB PERMIT PROCESS (operator steer 2026-09-25: "It needs to look up the right stuff per job") ──
