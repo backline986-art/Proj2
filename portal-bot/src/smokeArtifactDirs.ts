@@ -24,6 +24,7 @@ export const SMOKE_ARTIFACT_ENV = [
   "REPLAY_CAPTURE_DIR",
   "PORTAL_SCREENSHOT_DIR",
   "POWERCLERK_DEBUG_DIR",
+  "PORTAL_PAGE_CAPTURE_DIR",
 ] as const;
 
 export interface SmokeArtifactDefaults {

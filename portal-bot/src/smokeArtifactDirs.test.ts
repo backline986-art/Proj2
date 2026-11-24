@@ -61,7 +61,7 @@ check("MUST-EXCLUDE: a var pointing inside data/ (absolute or relative) is redir
     POWERCLERK_DEBUG_DIR: DATA,
   };
   const r = defaultSmokeArtifactDirs(env, { cwd: REPO });
-  assert.deepEqual([...r.set].sort(), ["AUTOLEARN_RUN_DIR", "POWERCLERK_DEBUG_DIR", "REPLAY_CAPTURE_DIR", "REPLAY_RUN_DIR"]);
+  assert.deepEqual([...r.set].sort(), ["AUTOLEARN_RUN_DIR", "PORTAL_PAGE_CAPTURE_DIR", "POWERCLERK_DEBUG_DIR", "REPLAY_CAPTURE_DIR", "REPLAY_RUN_DIR"]);
   for (const k of r.set) assert.ok(!under(env[k]!, DATA), `${k} still under data/`);
   assert.equal(env.PORTAL_SCREENSHOT_DIR, path.join(os.tmpdir(), "kept-screens"));
   if (r.root) fs.rmSync(r.root, { recursive: true, force: true });
