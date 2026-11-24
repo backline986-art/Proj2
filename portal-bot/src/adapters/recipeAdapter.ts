@@ -3,6 +3,7 @@ import path from "path";
 import type { PortalRecipe, ProjectRecord, RecipeSelector, RecipeStep, StagedReviewCapture } from "../../../shared/src/types";
 import { buildStagedReviewCapture, countRecordedControl, openPlaywrightDigestNavigator, readDigestPage, shownOnlyWithScripts, unapprovableStagedReview, walkStagedDraft } from "../reviewDigest";
 import { maskedFullPageScreenshot } from "../secretMask";
+import { PageCaptureLog } from "../pageCapture";
 import { stagedReviewShotsDir } from "../../../backend/src/statePaths";
 import { BasePortalAdapter, HUMAN_REVIEW_MESSAGE, ok, fail, type PortalContext, type PortalStepResult } from "../adapter";
 import { applyFormatHint } from "../formatHint";
@@ -1820,6 +1821,8 @@ export class RecipeAdapter extends BasePortalAdapter {
    *  once, at the first fee stop. Carried on the step result (data.feeStop). Read only. */
   private feeStop: FeeStopReading | null = null;
   private pageShotCount = 0;
+  /** The run's masked page captures (pageCapture.ts): made on the first page, null when turned off. */
+  private pageCaptureLog: PageCaptureLog | null | undefined;
   private arrayPass = 1;
   /** Bounds of the recorded array block — the span of steps bound to array1*. -1 when the
    *  recipe has none. */
@@ -11774,6 +11777,7 @@ export class RecipeAdapter extends BasePortalAdapter {
   private async captureReviewShot(): Promise<void> {
     const page = this.page;
     if (!page || typeof page.screenshot !== "function" || typeof page.evaluate !== "function") return;
+    await this.capturePageForReviewers("review");
     try {
       // A fixed name, never the page's own words (a title could carry a value the mask covers in the
       // picture but not in a file name). The backend serves a folder's picture only by this name.
@@ -11786,6 +11790,23 @@ export class RecipeAdapter extends BasePortalAdapter {
     }
   }
 
+  /** THE PAGE, MASKED, FOR A REVIEWER (pageCapture.ts): each page the run leaves, and the page it stops
+   *  on. A page this portal already has a recent capture of costs one DOM read; a new or stale one gets
+   *  a masked picture and a trimmed snapshot. Separate from the run's own page shots, which stay as
+   *  they were. Read only, never throws. */
+  private async capturePageForReviewers(label: string): Promise<void> {
+    try {
+      if (this.pageCaptureLog === undefined) {
+        this.pageCaptureLog = PageCaptureLog.start({
+          kind: "replay",
+          portal: String(this.recipe?.utility || this.recipe?.ahj || ""),
+          secrets: () => this.shotMaskSecrets(),
+        });
+      }
+      if (this.page) await this.pageCaptureLog?.capture(this.page, label);
+    } catch { /* best-effort: never fail a replay over a capture */ }
+  }
+
   /** #569 — the confirmation screenshot's fields for a step's data: the masked file, or why none. */
   private confirmationShotData(): { confirmationShotPath?: string; confirmationShotRefused?: string } {
     const c = this.confirmationShot;
@@ -11795,6 +11816,7 @@ export class RecipeAdapter extends BasePortalAdapter {
 
   private async capturePageShot(label: string, force = false): Promise<void> {
     if (!this.page || typeof this.page.screenshot !== "function") return;
+    await this.capturePageForReviewers(label);
     // The OUTCOME shot is never dropped for the cap. It is the one picture that says what
     // happened to the filing — the record number on the completion page, or the portal's
     // refusal — and it is taken at the end of a long run, exactly where the cap bites.

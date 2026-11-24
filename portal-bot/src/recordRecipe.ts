@@ -38,6 +38,8 @@ import {
   type FieldIdentity,
 } from "../../shared/src/portalSafety";
 import { openPortal } from "./browser";
+import { secretValuesOf } from "./feeStop";
+import { PageCaptureLog } from "./pageCapture";
 import { tagUploadControls, UPLOAD_LABEL_PATTERNS } from "./adapters/autoLearnAdapter";
 
 /** WHICH OF THE JOB'S DOCUMENTS A RECORDED UPLOAD SLOT TAKES, read off the slot's own label with the
@@ -291,6 +293,9 @@ export interface RecorderSessionOptions {
   /** Where the "captured ..." lines go (the CLI: stdout). */
   log?: (line: string) => void;
   jobDocuments?: ReadonlyArray<JobDocument>;
+  /** A picture and snapshot of each page the person walks (pageCapture.ts), taken only while the
+   *  page is quiet and no click is waiting to be judged. Read only: it records no step. */
+  pageLog?: PageCaptureLog | null;
 }
 
 export interface RecorderSession {
@@ -312,10 +317,25 @@ export async function armRecorder(page: Page, opts: RecorderSessionOptions): Pro
   // CAPTURE ENDS AT "save" (#280): after stop() nothing is recorded and nothing is printed. Decided
   // here in Node, so it holds for every page and frame whatever the page does.
   let stopped = false;
+  // THE PAGE, KEPT AS THE PERSON SEES IT (pageCapture.ts): after a page loads and after each step,
+  // once the page has been still for a moment. Never while a click waits to be judged (the picture
+  // must not be what "changed" the page) and never while a box is focused or a list is open (the
+  // capture skips itself then, and the next step or load tries again).
+  let captureTimer: ReturnType<typeof setTimeout> | null = null;
+  const scheduleCapture = (why: string, delayMs: number): void => {
+    if (!opts.pageLog || stopped) return;
+    if (captureTimer) clearTimeout(captureTimer);
+    captureTimer = setTimeout(() => {
+      captureTimer = null;
+      if (stopped || pending || page.isClosed()) return;
+      void opts.pageLog!.capture(page, why, { onlyWhenQuiet: true }).catch(() => null);
+    }, delayMs);
+  };
   const record = (payload: RecordedPayload): void => {
     const before = steps.length;
     const afterBlockedSubmit = answersBlockedFinalSubmit(steps, payload);
     sink(payload);
+    if (steps.length > before) scheduleCapture(`after ${payload.kind}`, 2500);
     if (steps.length > before) {
       const s = steps[steps.length - 1];
       log(`  · captured ${payload.kind}${s.isFinalSubmit ? " (FINAL SUBMIT — blocked, flagged)" : !s.selector || !Object.keys(s.selector).length ? " (blocked, not replayable)" : ""}${s.field ? ` → field ${s.field}` : ""}`);
@@ -361,6 +381,7 @@ export async function armRecorder(page: Page, opts: RecorderSessionOptions): Pro
     if (pending && (frame === pending.frame || frame === page.mainFrame())) confirmPending();
   });
   page.on("popup", () => confirmPending());
+  page.on("load", () => scheduleCapture("page loaded", 1500));
   // Inject the shared safety predicates, the learner's upload-slot reader (the one that names a slot
   // by its label, its heading or its requirement row), then the capture listeners, into every
   // page/frame. The safety source carries the __name shim the two serialized functions need.
@@ -372,6 +393,7 @@ export async function armRecorder(page: Page, opts: RecorderSessionOptions): Pro
     stop: () => {
       stopped = true;
       pending = null;
+      if (captureTimer) { clearTimeout(captureTimer); captureTimer = null; }
       // Best effort, so the pages stop reporting at all; the gate above is what guarantees it.
       for (const frame of page.frames()) void frame.evaluate("window.__recordStopped = true").catch(() => null);
       void page.addInitScript({ content: "window.__recordStopped = true;" }).catch(() => null);
@@ -505,7 +527,14 @@ async function main(): Promise<void> {
 
   // Fresh only when this CLI opens the portal itself; without --url the operator's persistent
   // profile may resume a draft mid-flow.
-  const session = await armRecorder(page, { bindField, startsFresh: !!url, jobDocuments });
+  // The pages, kept locally and masked (pageCapture.ts): the job's account/meter values and whatever
+  // the page holds in a password or account box are painted over. PORTAL_PAGE_CAPTURE=0 turns it off.
+  const pageLog = PageCaptureLog.start({
+    kind: "record",
+    portal: ahj || utility,
+    secrets: () => [...secretValuesOf(fieldValues), String(fieldValues.accountNumber ?? ""), String(fieldValues.meterNumber ?? "")],
+  });
+  const session = await armRecorder(page, { bindField, startsFresh: !!url, jobDocuments, pageLog });
   const steps = session.steps;
   if (url) await page.goto(url);
 
@@ -520,6 +549,11 @@ async function main(): Promise<void> {
     });
   });
   rl.close();
+  // The page the person stopped on (the review page, usually): kept like the others.
+  if (pageLog) {
+    await pageLog.capture(page, "at save").catch(() => null);
+    console.log(`  · page pictures (masked) kept locally in ${pageLog.dir} (share them with: npm run portal:pages:export -- --portal "${ahj || utility}")`);
+  }
 
   // Terminal review marker so replay always stops before submit — in the one valid shape.
   const closed = finalizeRecordedSteps(steps);
