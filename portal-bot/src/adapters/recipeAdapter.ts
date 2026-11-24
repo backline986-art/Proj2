@@ -121,7 +121,7 @@ import { reviewComparison, scrapeReviewScreen as scrapeReviewScreenShared, typed
 import { controlReadsUnanswered, pinEmptyRequiredControl, PINNED_CONTROL_ATTR, SWEPT_BLANK_ATTR, sweepEmptyRequiredControls, type EmptyRequired } from "../requiredControlSweep";
 import { openPortal } from "../browser";
 import { selectWithFallback, comboboxFaceInPage, type ComboboxPick } from "../comboboxFill";
-import { fillTypeahead, typeaheadBoxReason, typeaheadFailureLine, typeaheadPortalAnswered, TypeaheadStop } from "../typeaheadFill";
+import { fillTypeahead, LOCATION_FORWARD_WORDS, locationResultRefusal, readLocationResultBoxes, typeaheadBoxReason, typeaheadFailureLine, typeaheadPortalAnswered, TypeaheadStop, type LocationResultBox } from "../typeaheadFill";
 import { typeaheadMatchMode, type TypeaheadSite } from "../typeaheadMatch";
 import { isPrintedDateLabel, resultRowRoleOf, type ResultRowRole } from "../learnDataInSelectors";
 import { assertFilerIdentityHeld, FilerIdentityStop, filerIdentityFieldForSelect, filerIdentityStopMessage, isFilerIdentityField, isUnansweredOption, readNativeSelect, selectFilerIdentity } from "../filerIdentitySelect";
@@ -2413,6 +2413,10 @@ export class RecipeAdapter extends BasePortalAdapter {
    *  step, click and key press refuses — so a caller that swallows the stop (the re-assert pass)
    *  cannot carry the run on to Next without the address. */
   private typeaheadStop = "";
+  /** #161 — the required read-only box(es) THIS run's location pick filled, and the job's location
+   *  they must hold. Armed by a picked type-ahead (fillTypeaheadStep); asked at the next forward
+   *  click (guardedClick), which an empty or disagreeing box refuses (a sticky stop). */
+  private locationResultGuard: { boxes: LocationResultBox[]; site: TypeaheadSite; parcels: string[]; label: string } | null = null;
   /** #139 — the names (note / label, loose) of search boxes the PORTAL answered on Enter: the box
    *  comes back empty while the selection shows elsewhere, so the required sweep's re-assert must not
    *  take it for a blank and search again (a second identical search, a second location row). */
@@ -6043,6 +6047,12 @@ export class RecipeAdapter extends BasePortalAdapter {
     // #198: the box's own search control goes through the replay's full click gate, like any click.
     const clickGate = (loc: unknown): Promise<string> => this.guardAction({ kind: "click", target: loc, why: `type-ahead search control beside "${label}"` });
     const out = await fillTypeahead(this.page, scoped, { value: v, mode, site, enterGate, clickGate });
+    // #161: a pick of the job's location that fills a required read-only selection arms the forward
+    // question: the step's "Next" is clicked only while that selection holds this job's location.
+    if (out.outcome === "picked" && mode === "site" && out.resultBoxes?.length) {
+      const parcels = [this.fieldValues.parcelNumber, this.fieldValues.parcel].map((p) => String(p ?? "").trim()).filter(Boolean);
+      this.locationResultGuard = { boxes: out.resultBoxes, site, parcels, label };
+    }
     if (out.outcome === "picked" && (out.via === "enter" || out.via === "search")) {
       // #139: the PORTAL selected the job's address on Enter and shows it outside the box (verified
       // by the address predicate inside fillTypeahead); the search box itself comes back empty, so
@@ -9719,6 +9729,7 @@ export class RecipeAdapter extends BasePortalAdapter {
     if (this.typeaheadStop) throw new TypeaheadStop(this.typeaheadStop);
     const reason = await this.guardAction({ kind: "click", target, why, ...flags });
     if (reason) throw new ReplayGuardRefusal(reason);
+    await this.locationForwardCheck(target, why);
     // THE APPROVED FINAL SUBMIT (and its confirm dialog) is the one click whose FILING request
     // the backstop lets through — a named person approved this run and finalSubmitRefusalsNow()
     // passed. A payment endpoint stays blocked even then.
@@ -9730,6 +9741,28 @@ export class RecipeAdapter extends BasePortalAdapter {
     if (flags.finalSubmitApproved || flags.draftCreatingApproved) this.backstop?.allowApprovedFiling(20_000, { page: this.page });
     // #333 — THE FENCE: the run's own click is never recorded as a person's input.
     await withAutomationInput(this.inputPageOf(target), () => (target as { click: (o?: unknown) => Promise<void> }).click(opts));
+  }
+
+  /** #161 — THE FORWARD QUESTION. While a location pick's required selection is armed, a forward
+   *  control ("Next Step", "Continue") is clicked only if that selection, read now, is non-empty and
+   *  is this job's location (typeaheadFill.locationResultRefusal). Asked once, at the first forward
+   *  click after the pick; a refusal is a sticky, named stop — never retried, never clicked through. */
+  private async locationForwardCheck(target: unknown, why: string): Promise<void> {
+    const g = this.locationResultGuard;
+    if (!g) return;
+    const label = await this.controlLabelOf(target);
+    if (!LOCATION_FORWARD_WORDS.test(label)) return;
+    this.locationResultGuard = null;
+    const refusal = locationResultRefusal(await readLocationResultBoxes(this.page, g.boxes), g.site, g.parcels);
+    if (!refusal) return;
+    const line = `REFUSED click (${why}): "${label.slice(0, 60)}" — ${refusal}`;
+    this.guardRefusals.push(line);
+    this.driftWarnings.push(line);
+    const fieldName = g.label.slice(0, 60);
+    if (!this.fieldsUnverified.includes(fieldName)) this.fieldsUnverified.push(fieldName);
+    const msg = `Stopped for a person: "${g.label}" — ${refusal}. Select the location (or correct the project's address) and run again.`;
+    this.typeaheadStop = msg;
+    throw new TypeaheadStop(msg);
   }
 
   /** The page a target acts on (a locator in a popup acts on the popup), else the run's page. */
