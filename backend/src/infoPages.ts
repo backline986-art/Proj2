@@ -1305,6 +1305,19 @@ export function deleteProjectInfoPages(db: AppDb, projectId: string): void {
     if (passId) used.add(passId);
   }
   for (const passId of used) addAuditLog(db, null, "system", "project deletion", ACT_USE_RETAINED, { passId, projectId });
+  // #279 — A WAIT NEVER LAPSES WITH ITS PROJECT (Helm's review of #294): a pass waiting on a page this
+  // project's run reached is on hold only through this project's audit rows, which deleteProject
+  // deletes after this, and its card goes with the candidates below. Fail closed: such a pass is
+  // WITHDRAWN here, before its rows go (nobody ruled; a person re-verifies the page if it is one).
+  const waitedHere = new Set<string>();
+  for (const w of db.query<{ details: string }>("SELECT details FROM audit_logs WHERE project_id = ? AND action = ?", [projectId, ACT_NEXT_INFO])) {
+    const passId = s(parse<Row>(w.details, {}).passId);
+    if (passId && infoPagePassWaiting(db, passId)) waitedHere.add(passId);
+  }
+  for (const passId of waitedHere) {
+    const r = db.get<Row>("SELECT * FROM portal_info_page_passes WHERE id = ?", [passId]);
+    if (r) removeInfoPagePass(db, r, { projectId: null, actorType: "system", actor: "project deletion", action: "portal.info_page_pass_withdrawn", details: { reason: "it waited for a person's ruling on the page it led to, and the project that page was recorded on was deleted" } });
+  }
   const verified = db.query<Row>("SELECT id, pass_id FROM portal_info_page_candidates WHERE project_id = ? AND status = 'verified' AND pass_id <> ''", [projectId]);
   for (const c of verified) {
     const r = db.get<Row>("SELECT * FROM portal_info_page_passes WHERE id = ? AND source_candidate_id = ?", [s(c.pass_id), s(c.id)]);

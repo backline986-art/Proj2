@@ -569,6 +569,23 @@ await check("#279 W6 SAME ATTEMPT, no verified page after: a use admitted BEFORE
   assert.ok(IP.infoPagePassWaiting(db, first.passId), "a use admitted before it released the wait");
 });
 
+await check("#279 W7 A WAIT NEVER LAPSES WITH ITS PROJECT: deleting the project whose run put a pass on hold withdraws that pass (audited with no project); a pass with no wait there is untouched", async () => {
+  // KILL CHECK: delete the waitedHere loop in deleteProjectInfoPages → this check fails (the pass goes live again).
+  const { passId: waitingPass } = await verifiedPage("Wait Deleted Verified Page");
+  const R = fx.newProject();
+  const nextPage = capture(material((m) => { m.title = "Wait Deleted Second Page"; m.text = "Wait Deleted Second Page Thank you. Continue"; }));
+  await runLearn(R, nextPage, [{ passId: waitingPass, where: SFJSP }], undefined, [{ passId: waitingPass, where: SFJSP, afterText: "Wait Deleted Second Page Thank you. Continue" }]);
+  const { passId: untouched } = await verifiedPage("Wait Deleted Untouched Page");
+  assert.ok(IP.infoPagePassWaiting(db, waitingPass), "the pass was not on hold");
+  fx.repo.deleteProject(db, R);
+  assert.equal(db.query("SELECT id FROM portal_info_page_passes WHERE id = ?", [waitingPass]).length, 0, "the waiting pass outlived its project's wait");
+  assert.ok(!IP.liveInfoPagePasses(db).some((p) => p.id === waitingPass));
+  const a = fx.audits("portal.info_page_pass_withdrawn").filter((x) => JSON.parse(x.details).passId === waitingPass);
+  assert.equal(a.length, 1);
+  assert.equal(a[0].project_id, null);
+  assert.match(JSON.parse(a[0].details).reason, /waited for a person's ruling/);
+  assert.ok(IP.liveInfoPagePasses(db).some((p) => p.id === untouched), "a pass with no wait on that project was withdrawn");
+});
 await check("an incident on a pass that is already gone is audited all the same (withdrawn: false)", async () => {
   const P = fx.newProject();
   await runLearn(P, undefined, undefined, [{ passId: "gone-pass", phase: "before", why: ["x"], where: `${ORIGIN}/permits/sfjsp` }]);
