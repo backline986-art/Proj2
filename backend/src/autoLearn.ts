@@ -50,7 +50,7 @@ import { ensurePlanSetSplit } from "./docSplitter";
 import { addAuditLog } from "./audit";
 import { HttpError } from "./httpError";
 import { projectClassHoldReason } from "./projectClassHold";
-import { expiredInfoPagePassFor, infoPagePriorProgress, isCleanInfoPageHold, liveInfoPagePasses, recordInfoPageCandidate, recordInfoPageHeldVerified, recordInfoPageLearnClean, recordInfoPageLearnStart, recordInfoPageNextInformation, recordInfoPagePassIncidents, recordInfoPagePassUses, reserveInfoPagePassUse } from "./infoPages";
+import { expiredInfoPagePassFor, infoPagePriorProgress, isCleanInfoPageHold, liveInfoPagePasses, recordInfoPageCandidate, recordInfoPageHeldVerified, recordInfoPageLearnClean, linkInfoPageNextInformationPage, recordInfoPageLearnStart, recordInfoPageNextInformation, recordInfoPagePassIncidents, recordInfoPagePassUses, reserveInfoPagePassUse } from "./infoPages";
 import { formPurposeMismatch } from "./formPurpose";
 import { looksBotBlocked } from "./runAbort";
 import { id } from "./ids";
@@ -1464,7 +1464,15 @@ async function autoLearnPortalInner(
       }
     }
     if (!threw && Array.isArray(l?.infoPageNextInfo) && l.infoPageNextInfo.length) {
-      try { recordInfoPageNextInformation(db, infoPageProjectRow ? projectId : null, runId, l.infoPageNextInfo); } catch { /* evidence only */ }
+      // #279: the WAIT is authority (Helm's review of #294): a pass whose wait could not be written is
+      // withdrawn as an after-click incident instead — never left usable unseen.
+      try { recordInfoPageNextInformation(db, infoPageProjectRow ? projectId : null, runId, l.infoPageNextInfo, thisAttempt); } catch {
+        try {
+          recordInfoPagePassIncidents(db, infoPageProjectRow ? projectId : null, runId, (l.infoPageNextInfo as Array<{ passId?: unknown; where?: unknown }>).map((x) => ({
+            passId: String(x?.passId ?? ""), phase: "after" as const, why: ["the page it led to (another information page) could not be put on record for a person"], where: String(x?.where ?? ""),
+          })));
+        } catch { /* the held-at-review lock and the learn's own stop stand */ }
+      }
     }
     if (!threw && infoPageCall.attemptStartId && !thisAttempt.length && isCleanInfoPageHold(l)) {
       try { recordInfoPageLearnClean(db, projectId, scopeType, infoPageCall.attemptStartId); } catch { /* not clean, then */ }
@@ -1888,6 +1896,11 @@ async function autoLearnPortalInner(
     if (cand && cand.observed && projectRow) {
       try {
         const rec = recordInfoPageCandidate(db, projectId, learnRunId, cand);
+        // #279: when this page is the one a verified page led to, it is the card where a person rules
+        // on that pass's wait (verify = released; not an information page = withdrawn as an incident).
+        if (rec && Array.isArray(learn.infoPageNextInfo) && learn.infoPageNextInfo.length) {
+          try { linkInfoPageNextInformationPage(db, projectId, learn.infoPageNextInfo.map((x: { passId?: unknown }) => String(x?.passId ?? "")), rec); } catch { /* the wait stands: a person can still withdraw the pass */ }
+        }
         if (rec) {
           infoPageSummary = { identitySha256: cand.identitySha256, origin: cand.origin, path: cand.path, controlLabel: String(cand.controlLabel ?? "").slice(0, 80) };
           if (rec.inserted) {

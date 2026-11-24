@@ -49,7 +49,7 @@ import { HttpError } from "./httpError";
 import { id as newId } from "./ids";
 import { nowIso } from "./time";
 import {
-  INFO_PAGE_IDENTITY_VERSION, infoPagePassExpiryRefusals, infoPageProjectValueRefusals, infoPageRequestRefusals, infoPageShapeRefusals, infoPageVerifyWarnings,
+  INFO_PAGE_IDENTITY_VERSION, infoPageAfterClickAckWording, infoPagePassExpiryRefusals, infoPageProjectValueRefusals, infoPageRequestRefusals, infoPageShapeRefusals, infoPageVerifyWarnings,
   verifiedInfoPageFromCandidate,
   type InfoPageDigest, type InfoPageEvidence, type InfoPageObservedRequest, type InfoPagePrefixStep,
 } from "../../shared/src/infoPagePass";
@@ -204,6 +204,14 @@ const ACT_MAY_HAVE_FILED = "portal.info_page_may_have_filed";
 /** ROUND 4: a deleted project's uses of a pass, kept project-less so the expiry count never drops
  *  (deleting a project deletes its audit rows). Authority for the count: one writer. */
 const ACT_USE_RETAINED = "portal.info_page_pass_use_retained";
+/** #279 (Helm's review of #294): a verified page's click led to ANOTHER information page. The pass is
+ *  kept, but it WAITS: no run may use it again until a person rules on the page it led to. */
+const ACT_NEXT_INFO = "portal.info_page_next_information";
+/** The page it led to, as recorded for a person to verify: the candidate that rules on the wait. */
+const ACT_NEXT_INFO_PAGE = "portal.info_page_next_information_page";
+/** The ruling: "released" (a person verified the page it led to) or "declined" (a person said it is
+ *  not an information page: the pass is withdrawn as an after-click incident). */
+const ACT_NEXT_INFO_RULED = "portal.info_page_next_information_ruled";
 
 type Side = "ahj" | "utility";
 const sideOf = (scope: unknown): Side | "" => (scope === "ahj" || scope === "utility" ? scope : "");
@@ -907,8 +915,29 @@ const candidateRowToRecord = (db: AppDb, r: Row, usesOf: UsesOf = usesOnce(db)):
     // ROUND 4: this exact page's verification EXPIRED (30 days / 10 projects): the run was held as on
     // main, and a person re-verifies on this card.
     expiredPass: s(r.status) === "open" ? expiredInfoPagePassFor(db, s(r.identity_sha256), Date.now(), usesOf) : null,
+    ledFromVerified: s(r.status) === "open" ? ledFromVerifiedOf(db, s(r.project_id), s(r.id)) : [],
   };
 };
+
+/** #279 — the waiting passes whose next-information page this candidate is, with what the run saw on
+ *  it (its text as audited on THIS project, and its acknowledgement wording called out). Reads only. */
+function ledFromVerifiedOf(db: AppDb, projectId: string, candidateId: string): NonNullable<InfoPageCandidateRecord["ledFromVerified"]> {
+  return passesWaitingOn(db, candidateId).map((passId) => {
+    const p = db.get<Row>("SELECT origin, path, control_label FROM portal_info_page_passes WHERE id = ?", [passId]);
+    const ev = db.query<{ details: string; created_at: string }>("SELECT details, created_at FROM audit_logs WHERE project_id = ? AND action = ? ORDER BY rowid DESC LIMIT 20", [projectId, ACT_NEXT_INFO])
+      .find((x) => s(parse<Row>(x.details, {}).passId) === passId);
+    const d = ev ? parse<Row>(ev.details, {}) : {};
+    const afterText = s(d.afterText);
+    return {
+      passId,
+      where: p ? `${s(p.origin)}${s(p.path)}` : s(d.where),
+      controlLabel: p ? s(p.control_label) : "",
+      afterText,
+      acknowledgement: infoPageAfterClickAckWording(afterText),
+      at: ev ? s(ev.created_at) : "",
+    };
+  });
+}
 
 /** The project's candidates for the card (never screenshot bytes). Reads only. */
 export function listInfoPageCandidates(db: AppDb, projectId: string): InfoPageCandidateRecord[] {
@@ -979,6 +1008,10 @@ export function verifyInfoPageCandidate(
       prefix: pass.prefix.map(([a, n]) => `${a}${n ? ` ${n}` : ""}`),
       identitySha256Prefix: pass.identitySha256.slice(0, 12),
     });
+    // #279: this page was the one a verified page led to — those waits end here, released by this person.
+    for (const waitingId of passesWaitingOn(db, candidateId)) {
+      addAuditLog(db, projectId, "human", input.verifiedBy, ACT_NEXT_INFO_RULED, { passId: waitingId, candidateId, ruling: "released", nextPassId: passId, byUserId: input.userId });
+    }
     return { passId };
   });
 }
@@ -1030,6 +1063,7 @@ export function isInfoPageDeciderName(name: string): boolean {
 
 /** "Not an information page": the card leaves the open list and a re-capture never re-nags. */
 export function dismissInfoPageCandidate(db: AppDb, projectId: string, candidateId: string, input: { dismissedBy: string; userId: string }): void {
+  let declined: string[] = [];
   db.transaction(() => {
     const r = db.get<Row>("SELECT id, status, origin, path FROM portal_info_page_candidates WHERE id = ? AND project_id = ?", [candidateId, projectId]);
     if (!r) throw new HttpError(404, "Information page candidate not found.");
@@ -1037,7 +1071,23 @@ export function dismissInfoPageCandidate(db: AppDb, projectId: string, candidate
     db.run("UPDATE portal_info_page_candidates SET status = 'dismissed', decided_by = ?, decided_by_user_id = ?, decided_at = ? WHERE id = ?",
       [input.dismissedBy, input.userId, nowIso(), candidateId]);
     addAuditLog(db, projectId, "human", input.dismissedBy, "portal.info_page_candidate_dismissed", { candidateId, origin: s(r.origin), path: s(r.path) });
+    declined = passesWaitingOn(db, candidateId);
+    for (const passId of declined) {
+      addAuditLog(db, projectId, "human", input.dismissedBy, ACT_NEXT_INFO_RULED, { passId, candidateId, ruling: "declined", byUserId: input.userId });
+    }
   });
+  // #279: the page a verified page led to is NOT an information page (a receipt, say): that pass is
+  // withdrawn exactly as an after-click incident, with its may-have-filed warning on every project
+  // that used it.
+  if (declined.length) declineWaitingInfoPagePasses(db, projectId, declined, `${input.dismissedBy} marked the page this verified page led to "not an information page"`);
+}
+
+/** Withdraw waiting passes as AFTER-CLICK incidents (the one incident path: delete + may-have-filed). */
+function declineWaitingInfoPagePasses(db: AppDb, projectId: string, passIds: ReadonlyArray<string>, why: string): void {
+  recordInfoPagePassIncidents(db, projectId, "", passIds.map((passId) => {
+    const p = db.get<Row>("SELECT origin, path FROM portal_info_page_passes WHERE id = ?", [passId]);
+    return { passId, phase: "after" as const, why: [why.slice(0, 240)], where: p ? `${s(p.origin)}${s(p.path)}` : "" };
+  }));
 }
 
 /** A PERSON WITHDRAWS a pass: the row is deleted (the audit keeps its history). Runs that start
@@ -1077,13 +1127,49 @@ export function withdrawInfoPagePass(db: AppDb, passId: string, input: { by: str
 /** #279 (owner's option 1): a verified information page's click led to ANOTHER information page.
  *  Evidence only — the pass is KEPT (never withdrawn here), and the page after is audited with its
  *  text so a person can see what the run saw. */
-export function recordInfoPageNextInformation(db: AppDb, projectId: string | null, runId: string, rows: ReadonlyArray<{ passId?: unknown; where?: unknown; afterText?: unknown }> | null | undefined): void {
+export function recordInfoPageNextInformation(
+  db: AppDb, projectId: string | null, runId: string, rows: ReadonlyArray<{ passId?: unknown; where?: unknown; afterText?: unknown }> | null | undefined,
+  usesInOrder: ReadonlyArray<{ passId: string }> = [],
+): void {
   for (const r of Array.isArray(rows) ? rows.slice(0, 3) : []) {
     const passId = s(r?.passId).slice(0, 80);
     if (!passId) continue;
-    addAuditLog(db, projectId, "portal_bot", "network backstop", "portal.info_page_next_information", {
-      passId, where: s(r?.where).slice(0, 200), runId: s(runId).slice(0, 120), afterText: s(r?.afterText).slice(0, 1200), withdrawn: false,
+    db.transaction(() => {
+      // THE WAIT (Helm's review of #294): from this row on, the pass is not usable again until a person
+      // rules on the page it led to (infoPagePassWaiting, asked at every admission).
+      addAuditLog(db, projectId, "portal_bot", "network backstop", ACT_NEXT_INFO, {
+        passId, where: s(r?.where).slice(0, 200), runId: s(runId).slice(0, 120), afterText: s(r?.afterText).slice(0, 1200), withdrawn: false, waiting: true,
+      });
+      // …unless a person ALREADY ruled on that page: the NEXT INFORMATION PAGE hold lets nothing leave
+      // it but that page's own verified pass, so the use admitted right after this one in the same
+      // attempt IS the page it led to, verified by a person. Its verification is the ruling, when it
+      // is still a person's verification on record.
+      const i = usesInOrder.findIndex((u) => s(u?.passId) === passId);
+      const next = i >= 0 ? s(usesInOrder[i + 1]?.passId) : "";
+      if (next && next !== passId) {
+        const q = db.get<Row>("SELECT * FROM portal_info_page_passes WHERE id = ?", [next]);
+        if (q && Number(q.identity_version) === INFO_PAGE_IDENTITY_VERSION && passIsOnRecord(db, q)) {
+          addAuditLog(db, projectId, "portal_bot", "network backstop", ACT_NEXT_INFO_RULED, { passId, ruling: "released", nextPassId: next, runId: s(runId).slice(0, 120), why: "the page it led to is itself a verified information page" });
+        }
+      }
     });
+  }
+}
+
+/** #279: the candidate a learn recorded for the page a verified page led to — the card where a person
+ *  rules on each waiting pass. A page a person ALREADY marked "not an information page" declines the
+ *  waits at once (withdrawn as an after-click incident). */
+export function linkInfoPageNextInformationPage(db: AppDb, projectId: string, passIds: ReadonlyArray<string>, candidate: { id: string; status: "open" | "dismissed"; decidedBy?: string }): void {
+  const waiting = passIds.map((x) => s(x).slice(0, 80)).filter((x) => x && infoPagePassWaiting(db, x) !== null);
+  if (!waiting.length) return;
+  db.transaction(() => {
+    for (const passId of waiting) addAuditLog(db, projectId, "portal_bot", "network backstop", ACT_NEXT_INFO_PAGE, { passId, candidateId: s(candidate.id) });
+  });
+  if (candidate.status === "dismissed") {
+    db.transaction(() => {
+      for (const passId of waiting) addAuditLog(db, projectId, "portal_bot", "network backstop", ACT_NEXT_INFO_RULED, { passId, candidateId: s(candidate.id), ruling: "declined", why: "a person had already marked that page not an information page" });
+    });
+    declineWaitingInfoPagePasses(db, projectId, waiting, `the page this verified page led to was already marked "not an information page" by ${candidate.decidedBy || "a person"}`);
   }
 }
 
@@ -1235,6 +1321,7 @@ export function listInfoPagePasses(db: AppDb, nowMs: number = Date.now()): InfoP
   const usesOf = usesOnce(db);
   return db.query<Row>("SELECT * FROM portal_info_page_passes ORDER BY verified_at DESC LIMIT 200").map((r) => {
     const expired = passExpiry(db, r, nowMs, usesOf);
+    const waiting = infoPagePassWaiting(db, s(r.id));
     return {
       id: s(r.id),
       origin: s(r.origin),
@@ -1245,10 +1332,50 @@ export function listInfoPagePasses(db: AppDb, nowMs: number = Date.now()): InfoP
       request: { method: s(r.request_method), where: s(r.request_where), media: s(r.request_media), fieldNames: parse<Array<[string, string]>>(r.request_body_json, []).map(([n]) => n) },
       identityPrefix: s(r.identity_sha256).slice(0, 12),
       verifiedAt: s(r.verified_at),
-      live: Number(r.identity_version) === INFO_PAGE_IDENTITY_VERSION && passIsOnRecord(db, r) && expired.length === 0,
+      live: Number(r.identity_version) === INFO_PAGE_IDENTITY_VERSION && passIsOnRecord(db, r) && expired.length === 0 && !waiting,
       expired,
+      ...(waiting ? { waiting: `led to another information page${waiting.at ? ` on ${waiting.at.slice(0, 10)}` : ""}: waits until a person rules on that page` } : {}),
     };
   });
+}
+
+/**
+ * #279 — IS THIS PASS WAITING FOR A PERSON'S RULING ON THE PAGE IT LED TO? (Helm's review of #294.)
+ * A receipt with only acknowledgement wording and a "Continue" reads as "another information page"
+ * (shared infoPageAfterClickIsNextInformationPage), so a kept pass is not usable again until a person
+ * has looked at that page: its latest next-information row with no "released" ruling after it is a
+ * wait. A declined ruling deletes the pass (an incident), so only "released" ends a wait. Shared
+ * knowledge, like the pass: a wait holds every tenant's runs. A ledger that cannot be read is a wait
+ * (an unknown never reassures). Returns the wait's evidence, or null. Reads only.
+ */
+export function infoPagePassWaiting(db: AppDb, passId: string): { at: string; where: string; reason: string } | null {
+  try {
+    const rows = db.query<{ rid: number; action: string; details: string; created_at: string }>(
+      "SELECT rowid AS rid, action, details, created_at FROM audit_logs WHERE action IN (?, ?) ORDER BY rowid", [ACT_NEXT_INFO, ACT_NEXT_INFO_RULED]);
+    let wait: { at: string; where: string } | null = null;
+    for (const r of rows) {
+      const d = parse<Row>(r.details, {});
+      if (s(d.passId) !== passId) continue;
+      if (s(r.action) === ACT_NEXT_INFO) wait = { at: s(r.created_at), where: s(d.where) };
+      else if (s(d.ruling) === "released") wait = null;
+    }
+    return wait ? { ...wait, reason: INFO_PAGE_WAITING_REFUSAL } : null;
+  } catch {
+    return { at: "", where: "", reason: "the use could not be reserved (whether this verification waits for a person's ruling could not be read)" };
+  }
+}
+
+/** The refusal a waiting pass gives at the admission. */
+export const INFO_PAGE_WAITING_REFUSAL = "this verified page last led to another information page, and it waits until a person rules on that page (verify it, or mark it not an information page) on the project's Portal runs";
+
+/** The passes a candidate rules on: the waiting passes whose next-information page it is. */
+function passesWaitingOn(db: AppDb, candidateId: string): string[] {
+  const ids = new Set<string>();
+  for (const r of db.query<{ details: string }>("SELECT details FROM audit_logs WHERE action = ?", [ACT_NEXT_INFO_PAGE])) {
+    const d = parse<Row>(r.details, {});
+    if (s(d.candidateId) === candidateId && s(d.passId)) ids.add(s(d.passId));
+  }
+  return Array.from(ids).filter((id) => infoPagePassWaiting(db, id) !== null);
 }
 
 /**
@@ -1288,6 +1415,10 @@ export function reserveInfoPagePassUse(
       const uses = infoPagePassUseCounts(db);
       const why = infoPagePassExpiryRefusals(s(r.verified_at), uses ? uses.get(passId) ?? 0 : null, nowMs);
       if (why.length) return why;
+      // #279: the page this verified page last led to was another information page, and no person has
+      // ruled on it yet (verified it, or marked it not an information page): held as on main.
+      const waiting = infoPagePassWaiting(db, passId);
+      if (waiting) return [waiting.reason];
       // AT MOST ONCE PER PROJECT, DECIDED HERE TOO (Helm's review of #349). The hand-out asks it
       // (infoPagePriorProgress), but runs of the SAME project in flight at once were each handed the
       // pass: only this transaction decides. An earlier admitted use of this project on this side,
