@@ -2681,10 +2681,13 @@ export interface FireSetbackRule {
 /** A roof-plan fire access dimension (IRC R324.6 / IFC 1205): a pathway's width or the array's
  *  clear setback from a ridge. Hip/valley clearances are not read yet. */
 export type RoofPlanDimensionKind = "pathwayWidth" | "ridgeSetback";
+/** What a plan can STATE: a pathway, a ridge setback, or a "FIRE SETBACK" that names no roof line
+ *  (fireSetback — never compared on its own; evaluateFirePathwayFindings says how it counts). */
+export type StatedRoofPlanDimensionKind = RoofPlanDimensionKind | "fireSetback";
 
 /** One fire access dimension a text STATES (label-anchored), in inches. */
 export interface StatedRoofPlanDimension {
-  kind: RoofPlanDimensionKind;
+  kind: StatedRoofPlanDimensionKind;
   inches: number;
   source: string;
   excerpt: string;
