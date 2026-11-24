@@ -25,8 +25,8 @@ import AdmZip from "adm-zip";
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "page-capture-test-"));
 process.env.PORTAL_PAGE_CAPTURE_DIR = path.join(tmp, "captures");
 
-const { sanitizeCaptureUrl, pageFingerprint, scrubKnownSecrets, portalSlug, PageCaptureLog } = await import("./pageCapture");
-const { exportPageCaptures, listCapturedPortals, scrubForExport } = await import("./pageCaptureExport");
+const { sanitizeCaptureUrl, pageFingerprint, scrubKnownSecrets, portalSlug, PageCaptureLog, secretTripwire, scrubCaptureText } = await import("./pageCapture");
+const { exportPageCaptures, listCapturedPortals, scrubForExport, exportTextLeaks } = await import("./pageCaptureExport");
 
 let failures = 0;
 let total = 0;
@@ -71,6 +71,19 @@ console.log("\n3. Secret scrub");
   check("portal slug from the name", portalSlug("City of Bend") === "city-of-bend" && portalSlug("", "https://cityview.ci.bend.or.us/x") === "cityview-ci-bend-or-us");
 }
 
+console.log("\n3b. The tripwire (Helm's review of #296)");
+{
+  check("a meter number the run did not know trips it", secretTripwire(["Service details  Meter Number: 5550 9876 12"], []).includes("meter"));
+  check("an account number on another row trips it", secretTripwire(["Other applications", "Account # 4411-220-987"], []).includes("account"));
+  check("an ESI id trips it", secretTripwire(["ESI ID 10443720001234567"], []).includes("utility-id"));
+  check("a written password trips it", secretTripwire(["Password: Hunter2Zebra!"], []).includes("password"));
+  check("a value the run knew (and so masked) does not", secretTripwire(["Account Number: 7734 009 155"], ["7734009155"]).length === 0);
+  check("a rating is not an id ('meter 200A', '240 V')", secretTripwire(["Main panel 200A, meter 200A, service 240 V"], []).length === 0);
+  check("a page with no secret wording does not", secretTripwire(["Enter the location for the subject property. Tax lot 171232CA05700"], []).length === 0);
+  const t = scrubCaptureText("Meter Number: 55509876 and account 4411220987 x@y.com", []);
+  check("the snapshot scrub removes what the tripwire finds", !/55509876|4411220987|x@y\.com/.test(t), t);
+}
+
 console.log("\n4. Turned off");
 {
   process.env.PORTAL_PAGE_CAPTURE = "0";
@@ -96,23 +109,28 @@ console.log("\n5. Export");
     headings: [heading], shot,
     frames: [{ url: "", title: "", headings: [heading], text: `Enter the location ${extra}`, controls: [{ tag: "input", type: "text", label: "Search for location:", name: "", id: "", required: false, visible: true, disabled: false, secret: false }], actions: ["CAN'T FIND ADDRESS?"], html: "<html></html>" }],
   });
-  fs.writeFileSync(path.join(pages, `${okFp}.json`), JSON.stringify(rec(okFp, "2026-11-24T16:00:00.000Z", "Location", { file: `${okFp}.png`, masked: true, secretsMasked: 1 }, "acct 5550001111 x@y.com")));
+  fs.writeFileSync(path.join(pages, `${okFp}.json`), JSON.stringify(rec(okFp, "2026-11-24T16:00:00.000Z", "Location", { file: `${okFp}.png`, masked: true, tripwire: "clear", secretsMasked: 1 }, "acct 5550001111 x@y.com")));
   fs.writeFileSync(path.join(pages, `${okFp}.png`), Buffer.from("PNGOK"));
   fs.writeFileSync(path.join(pages, `${badFp}.json`), JSON.stringify(rec(badFp, "2026-11-24T16:05:00.000Z", "Contacts", { file: "", masked: false, refused: "the page holds 1 closed shadow root(s)" })));
   // A picture beside the refused page (an old build, a hand copy): must NOT be exported.
   fs.writeFileSync(path.join(pages, `${badFp}.png`), Buffer.from("PNGRAW"));
+  // A picture an earlier build marked masked with no tripwire reading: never exported.
+  const oldFp = "00000000aaaaaaaa";
+  fs.writeFileSync(path.join(pages, `${oldFp}.json`), JSON.stringify(rec(oldFp, "2026-11-24T16:10:00.000Z", "Review", { file: `${oldFp}.png`, masked: true, secretsMasked: 0 })));
+  fs.writeFileSync(path.join(pages, `${oldFp}.png`), Buffer.from("PNGOLD"));
   // Something else in the folder that is not a capture.
   fs.writeFileSync(path.join(pages, "notes.json"), JSON.stringify({ fp: "../../etc", capturedAt: "x" }));
   fs.writeFileSync(path.join(process.env.PORTAL_PAGE_CAPTURE_DIR!, "city-of-bend", "secret.txt"), "7734009155");
 
   const listed = listCapturedPortals();
-  check("list names the portal and its page count", listed.length === 1 && listed[0].portal === "city-of-bend" && listed[0].pages === 3, JSON.stringify(listed));
+  check("list names the portal and its page count", listed.length === 1 && listed[0].portal === "city-of-bend" && listed[0].pages === 4, JSON.stringify(listed));
   const out = path.join(tmp, "exports");
   const res = exportPageCaptures({ portal: "Bend", out, now: new Date("2026-11-24T17:00:00Z") });
   check("one zip for the matching portal", res.length === 1 && fs.existsSync(res[0].zip) && res[0].zip.startsWith(out), JSON.stringify(res));
   const zip = new AdmZip(res[0].zip);
   const names = zip.getEntries().map((e) => e.entryName).sort();
-  check("zip holds README, two snapshots and ONE picture", JSON.stringify(names) === JSON.stringify(["01-location.json", "01-location.png", "02-contacts.json", "README.md"]), JSON.stringify(names));
+  check("zip holds README, three snapshots and ONE picture", JSON.stringify(names) === JSON.stringify(["01-location.json", "01-location.png", "02-contacts.json", "03-review.json", "README.md"]), JSON.stringify(names));
+  check("export: a picture marked masked with no tripwire reading is not exported", !names.includes("03-review.png"));
   check("export: refused page has no picture", !names.includes("02-contacts.png"));
   const first = zip.readAsText("01-location.json");
   check("export: snapshot re-scrubbed", !first.includes("5550001111") && !first.includes("x@y.com"), first.slice(0, 400));
@@ -126,6 +144,33 @@ console.log("\n5. Export");
   let threw = false;
   try { exportPageCaptures({ portal: "  " }); } catch { threw = true; }
   check("no portal named: refused", threw);
+  // THE MODEL-BOUND OUTPUT: secret-shaped values planted in every place a snapshot carries page text.
+  const PLANT = ["Meter Number: 55509876", "Account # 4411-220-987", "ESI ID 10443720001234567", "SSN 523-45-6789", "Password: Hunter2Zebra!", "x9@example.org"];
+  const plant = PLANT.join(" | ");
+  const leakFp = "1111222233334444";
+  const leaky = rec(leakFp, "2026-11-24T16:20:00.000Z", `Heading ${plant}`, { file: `${leakFp}.png`, masked: true, tripwire: "clear" }, plant);
+  leaky.title = plant;
+  leaky.reason = plant;
+  (leaky.frames as Array<Record<string, unknown>>)[0].html = `<html><body><p>${plant}</p><label>${plant}</label></body></html>`;
+  (leaky.frames as Array<Record<string, unknown>>)[0].actions = [plant];
+  (leaky.frames as Array<Record<string, unknown>>)[0].controls = [{ tag: "select", type: "select", label: plant, name: plant, id: "", required: false, visible: true, disabled: false, secret: false, options: [plant] }];
+  fs.writeFileSync(path.join(pages, `${leakFp}.json`), JSON.stringify(leaky));
+  fs.writeFileSync(path.join(pages, `${leakFp}.png`), Buffer.from("PNGLEAK"));
+  const res2 = exportPageCaptures({ portal: "bend", out: path.join(tmp, "exports3") });
+  const z2 = new AdmZip(res2[0].zip);
+  const texts = z2.getEntries().filter((e) => !e.entryName.endsWith(".png")).map((e) => z2.readAsText(e));
+  check("model-bound: every text in the zip passes the model door's scan", texts.every((t) => exportTextLeaks(t).length === 0), texts.map(exportTextLeaks).join(";"));
+  check("model-bound: no planted value survives anywhere", !texts.some((t) => /55509876|4411.?220.?987|10443720001234567|523-45-6789|Hunter2Zebra|x9@example\.org/.test(t)));
+  const leakJson = z2.getEntries().find((e) => e.entryName.endsWith(".json") && z2.readAsText(e).includes(leakFp));
+  check("model-bound: the planted page still goes, scrubbed", !!leakJson);
+  // PIN THE SNAPSHOT'S FIELDS: a new field must be added here on purpose, with its scrub.
+  const one = JSON.parse(z2.readAsText(leakJson!)) as Record<string, unknown>;
+  const frame0 = (one.frames as Array<Record<string, unknown>>)[0];
+  check("model-bound: the snapshot's fields are exactly the pinned ones",
+    JSON.stringify(Object.keys(one).sort()) === JSON.stringify(["capturedAt", "fp", "frames", "headings", "kind", "portal", "reason", "runId", "shot", "title", "url"])
+    && JSON.stringify(Object.keys(frame0).sort()) === JSON.stringify(["actions", "controls", "headings", "html", "text", "title", "url"])
+    && JSON.stringify(Object.keys((frame0.controls as Array<Record<string, unknown>>)[0]).sort()) === JSON.stringify(["disabled", "id", "label", "name", "options", "required", "secret", "tag", "type", "visible"]),
+    JSON.stringify([Object.keys(one), Object.keys(frame0)]));
   const s = scrubForExport({ fp: "0011223344556677", capturedAt: "2026-11-24T16:00:00.000Z", title: "Acct 7734009155" });
   check("scrubForExport leaves the record keys, scrubs the page text", s.fp === "0011223344556677" && s.capturedAt === "2026-11-24T16:00:00.000Z" && !String(s.title).includes("7734009155"), JSON.stringify(s));
 }

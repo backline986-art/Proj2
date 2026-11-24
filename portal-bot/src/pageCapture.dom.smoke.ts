@@ -14,6 +14,10 @@
 //   [B] MUST-PASS    the same step again (another job's values typed): "seen", no new picture.
 //   [C] MUST-EXCLUDE a page the mask cannot prove (the account in a CLOSED shadow root): no picture,
 //                    the snapshot says why.
+//   [C2] MUST-EXCLUDE a secret list (an account select): none of its options (the customer's OTHER
+//                    accounts) reaches the snapshot's markup, text or controls.
+//   [C3] MUST-EXCLUDE a page that PRINTS a meter number the run never knew: no picture (masked false,
+//                    tripwire "tripped"), and the value is redacted in the snapshot.
 //   [D] MUST-EXCLUDE onlyWhenQuiet: a focused box or an open suggestion list -> nothing captured.
 //   [E] MUST-PASS    the recorder (armRecorder with a page log) captures each page the person loads,
 //                    on its own, and still records the person's steps.
@@ -21,7 +25,8 @@
 //
 // Kill: pass [] instead of the run's secrets in capture() -> [A] printed-account box fails; drop the
 // page's own secret values (secretValues) -> [A] unknown-account box fails; take the picture with
-// page.screenshot -> [A] and [C] fail; drop the onlyWhenQuiet check -> [D] fails; drop the recorder's
+// page.screenshot -> [A] and [C] fail; drop the secret list's options from secretValues or keep them
+// in the clone -> [C2] fails; drop the tripwire -> [C3] fails; drop the onlyWhenQuiet check -> [D] fails; drop the recorder's
 // load hook -> [E] fails; drop the capture in recipeAdapter.capturePageShot -> [F] fails.
 //
 //   npx tsx portal-bot/src/pageCapture.dom.smoke.ts
@@ -75,11 +80,22 @@ const CONTACTS = page("Permit Application | City of Fernhollow", `<h2>Contacts</
 const REPLAY_LOC = page("Permit Application | City of Fernhollow", `<h2>Location</h2>
   <label for="search">Search for location:</label> <input id="search" type="text" value="">
   <a href="/contacts?referenceNumber=TMPPR20260017175&isstep=True" id="next">NEXT STEP</a>`);
+// A secret LIST: the customer's other accounts, which the run does not know (Helm's review of #296).
+const OTHER_A = "4411220987";
+const OTHER_B = "5550003333";
+const ACCOUNTS = page("Service", `<h2>Service account</h2>
+  <label for="acs">Account Number</label>
+  <select id="acs" name="accountNumber"><option value="">Select one</option><option value="${OTHER_A}">${OTHER_A} (Elm Street home)</option><option value="${OTHER_B}">Acct ${OTHER_B}</option></select>
+  <label for="rt">Rate</label><select id="rt"><option>Residential</option><option>Time of Use</option></select>`);
+// A page that PRINTS a meter number the run never knew (another application's row).
+const UNKNOWN_METER = "5550987612";
+const DASHBOARD = page("My applications", `<h2>My applications</h2><table><tr><td>APP-1</td><td>Meter Number: ${UNKNOWN_METER}</td></tr></table>`);
 const SHADOW = page("Review", `<h2>Review</h2><div id="host" style="${at(BOX)}"></div>
   <script>document.getElementById("host").attachShadow({ mode: "closed" }).innerHTML = "<span>Account ${ACCOUNT}</span>";</script>`);
 const server = http.createServer((req, res) => {
   const url = new URL(req.url || "/", "http://127.0.0.1");
-  const body = url.pathname.startsWith("/contacts") ? CONTACTS : url.pathname.startsWith("/r/location") ? REPLAY_LOC : url.pathname.startsWith("/shadow") ? SHADOW : LOCATION;
+  const body = url.pathname.startsWith("/accounts") ? ACCOUNTS : url.pathname.startsWith("/dashboard") ? DASHBOARD
+    : url.pathname.startsWith("/contacts") ? CONTACTS : url.pathname.startsWith("/r/location") ? REPLAY_LOC : url.pathname.startsWith("/shadow") ? SHADOW : LOCATION;
   res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
   res.end(body);
 });
@@ -119,7 +135,12 @@ try {
   check("snapshot marks the account box and the password box secret", /"label": "Account Number"[^}]*"secret": true/.test(snapText) && /"type": "password"[^}]*"secret": true/.test(snapText), snapText.slice(0, 200));
   check("snapshot holds no account, password or record reference", !snapText.includes(ACCOUNT) && !snapText.includes(UNKNOWN_ACCOUNT) && !snapText.includes(PASSWORD) && !snapText.includes("TMPPR"));
   check("snapshot URL keeps the path and the plain words", String(snap.url ?? "").endsWith("/location?referenceNumber=…&isstep=True"), String(snap.url));
-  check("snapshot says the picture was masked", (snap.shot as { masked?: boolean } | undefined)?.masked === true, JSON.stringify(snap.shot));
+  check("snapshot says the picture was masked and the tripwire was clear", (snap.shot as { masked?: boolean; tripwire?: string } | undefined)?.masked === true && (snap.shot as { tripwire?: string }).tripwire === "clear", JSON.stringify(snap.shot));
+  // PIN WHAT A CAPTURE WRITES (the export is model-bound): a new field must be added on purpose.
+  const f0 = (snap.frames as Array<Record<string, unknown>>)[0] ?? {};
+  check("the written snapshot's fields are exactly the pinned ones",
+    JSON.stringify(Object.keys(snap).sort()) === JSON.stringify(["capturedAt", "fp", "frames", "headings", "kind", "portal", "reason", "runId", "shot", "title", "url"])
+    && JSON.stringify(Object.keys(f0).sort()) === JSON.stringify(["actions", "controls", "headings", "html", "text", "title", "url"]), JSON.stringify([Object.keys(snap), Object.keys(f0)]));
   const live = await p.evaluate(() => ({
     acct: (document.getElementById("acctno") as HTMLInputElement).value,
     pw: (document.getElementById("pw") as HTMLInputElement).value,
@@ -143,6 +164,24 @@ try {
   const cs = c.json ? readJson(c.json) : {};
   check("no picture, and the snapshot says why", c.status === "captured" && !c.png && !fs.existsSync(path.join(path.dirname(c.json ?? ""), `${c.fp}.png`))
     && (cs.shot as { masked?: boolean; refused?: string } | undefined)?.masked === false && /shadow root/.test(String((cs.shot as { refused?: string } | undefined)?.refused)), JSON.stringify(c) + JSON.stringify(cs.shot));
+
+  console.log("\n[C2] a secret list: the customer's other accounts");
+  await p.goto(`${base}/accounts`);
+  const g = await log.capture(p, "accounts");
+  const gText = g.json ? fs.readFileSync(g.json, "utf8") : "";
+  check("captured WITH a picture: the list's numbers were given to the mask, so the tripwire is clear", g.status === "captured" && !!g.json && !!g.png, JSON.stringify(g));
+  check("no other account of the list survives anywhere in the snapshot (markup, text, controls)", !!gText && !gText.includes(OTHER_A) && !gText.includes(OTHER_B), gText.slice(0, 300));
+  check("the secret list keeps no option in the markup; a plain list keeps its options", !gText.includes("Elm Street home") && gText.includes("Time of Use"), gText.slice(0, 300));
+
+  console.log("\n[C3] the tripwire: a meter number the run never knew is printed on the page");
+  const tripLog = PageCaptureLog.start({ kind: "record", portal: "Tripwire Check", secrets: () => [] })!;
+  await p.goto(`${base}/dashboard`);
+  const h = await tripLog.capture(p, "dashboard");
+  const hs = h.json ? readJson(h.json) : {};
+  const hText = h.json ? fs.readFileSync(h.json, "utf8") : "";
+  check("no picture: the page is not marked masked, the tripwire says tripped", h.status === "captured" && !h.png && !fs.existsSync(path.join(path.dirname(h.json ?? "x"), `${h.fp}.png`))
+    && (hs.shot as { masked?: boolean } | undefined)?.masked === false && (hs.shot as { tripwire?: string }).tripwire === "tripped", JSON.stringify(hs.shot));
+  check("the value is redacted in the snapshot", !!hText && !hText.includes(UNKNOWN_METER), hText.slice(0, 300));
 
   console.log("\n[D] never while the person is typing or choosing");
   const quietLog = PageCaptureLog.start({ kind: "record", portal: "Quiet Check", secrets: () => [] })!;

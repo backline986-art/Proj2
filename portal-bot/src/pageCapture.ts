@@ -12,9 +12,13 @@
 // Where: <PORTAL_PAGE_CAPTURE_DIR, default data/page-captures>/<portal-slug>/
 //   pages/<fp>.png   the page, through maskedFullPageScreenshot (the one masking path, rule 2):
 //                    the run's known secrets AND whatever the page holds in a password box or a
-//                    box the shared safety predicates call secret (account, meter, ESI/SA id) are
-//                    painted over. A page the mask cannot prove (a closed shadow root, a secret it
-//                    cannot reach) gets NO picture and the sidecar says why.
+//                    box the shared safety predicates call secret (account, meter, ESI/SA id), and
+//                    every digit-bearing option of a secret list, are painted over. A page the mask
+//                    cannot prove (a closed shadow root, a secret it cannot reach) gets NO picture,
+//                    and so does a page that TRIPS THE TRIPWIRE: its visible text, after the known
+//                    secrets are taken out, still holds a secret-worded value (the model door's own
+//                    patterns: "Meter Number: 5550987612" on another application's row) that the mask
+//                    was never given. `shot.masked` is true only for a picture that passed both.
 //   pages/<fp>.json  the trimmed snapshot: sanitized URL, title, headings, visible text, every
 //                    control's label/type/required/visibility (NEVER a value), the visible buttons
 //                    and links, and the frame's markup with every value, script and style removed.
@@ -28,7 +32,9 @@
 //
 // Stays local: the folder is under data/ (gitignored) and nothing here sends a capture anywhere —
 // no model call, no network. Sharing is a separate staff step (pageCaptureExport.ts) that copies
-// only masked pictures and re-scrubs every snapshot.
+// only masked pictures and re-scrubs every snapshot. That export is MODEL-BOUND (it exists to show a
+// page to a reviewer in the cloud), so rule 2 holds here in full: a secret list keeps no option in
+// the snapshot, and every kept string passes the model door's patterns (scrubCaptureText).
 //
 // Read-only on the page: nothing is clicked, typed, focused or navigated. The mask's own tags are
 // set and cleared by maskedFullPageScreenshot. The recorder asks for `onlyWhenQuiet`, which skips
@@ -44,6 +50,7 @@ import path from "node:path";
 import type { Page } from "playwright";
 import { pageCapturesDir as statePageCapturesDir } from "../../backend/src/statePaths";
 import { PORTAL_SAFETY_GLOBAL, PORTAL_SAFETY_IN_PAGE_SOURCE, redactSecretValues } from "../../shared/src/portalSafety";
+import { scanText } from "../../backend/src/modelPayloadScan";
 import { redactCaptureText } from "./safeAction";
 import { maskedFullPageScreenshot } from "./secretMask";
 
@@ -157,11 +164,20 @@ export interface CapturedFrame {
   html: string;
 }
 
-/** What the in-page read returns. `secretValues` crosses to Node only to build the mask and the
- *  scrub, and is never written. */
-interface RawFrameRead extends CapturedFrame {
+/** The light read of each frame: enough to name the page, decide whether it is quiet, and build the
+ *  mask. `secretValues` crosses to Node only to build the mask and the scrub, and is never written. */
+interface LightFrameRead {
+  url: string;
+  headings: string[];
+  labels: string[];
   busy: boolean;
   secretValues: string[];
+}
+
+/** The full read, taken only for a page that will be written. `tripText` is the frame's whole
+ *  visible text, read by the tripwire and never written. */
+interface FullFrameRead extends CapturedFrame {
+  tripText: string;
 }
 
 export interface PageCaptureResult {
@@ -175,8 +191,61 @@ export interface PageCaptureResult {
   why?: string;
 }
 
-/** The in-page read, run in each frame. Pure DOM: it changes nothing on the live page. */
-function readFrameInPage(arg: { g: string; maxHtml: number }): RawFrameRead {
+/** The light in-page read, run in each frame. Pure DOM: it changes nothing on the live page. A
+ *  secret box's value, and every option of a secret list that carries digits (a meter or account
+ *  list names the customer's OTHER meters and accounts, which the run does not know), join
+ *  secretValues, so the mask paints them and the scrub removes them. */
+function lightReadInPage(arg: { g: string }): LightFrameRead {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const ps = (globalThis as any)[arg.g];
+  const clean = (t: unknown, n = 160): string => String(t ?? "").replace(/\s+/g, " ").trim().slice(0, n);
+  const shown = (el: Element): boolean => {
+    const st = getComputedStyle(el as HTMLElement);
+    const r = (el as HTMLElement).getBoundingClientRect();
+    return st.display !== "none" && st.visibility !== "hidden" && Number(st.opacity) !== 0 && r.width >= 2 && r.height >= 2;
+  };
+  const isSecret = (el: Element): boolean => {
+    if ((el as HTMLInputElement).type === "password") return true;
+    try { return !!ps && ps.isSecretField(ps.fieldIdentityInPage(el)); } catch { return true; }
+  };
+  const labelOf = (el: Element): string => {
+    const aria = el.getAttribute("aria-label");
+    if (aria) return clean(aria);
+    const labels = (el as HTMLInputElement).labels;
+    if (labels && labels.length) return clean(Array.from(labels).map((l) => l.textContent ?? "").join(" "));
+    return clean(el.getAttribute("name") || el.getAttribute("placeholder") || "");
+  };
+  const secretValues: string[] = [];
+  const labels: string[] = [];
+  for (const el of Array.from(document.querySelectorAll("input, select, textarea")).slice(0, 400)) {
+    if ((el as HTMLInputElement).type === "hidden") continue;
+    if (isSecret(el)) {
+      const v = String((el as HTMLInputElement).value ?? "").trim();
+      if (v.length >= 4) secretValues.push(v);
+      if (el.tagName === "SELECT") {
+        for (const o of Array.from((el as HTMLSelectElement).options)) {
+          for (const t of [o.text, o.value]) {
+            const x = String(t ?? "").trim();
+            if (x.length >= 4 && (x.match(/\d/g) ?? []).length >= 4) secretValues.push(x);
+          }
+        }
+      }
+    }
+    if (shown(el)) labels.push(labelOf(el));
+  }
+  const headings = Array.from(document.querySelectorAll("h1, h2, h3, legend, [aria-current='step'], [role=heading]"))
+    .filter(shown).map((h) => clean((h as HTMLElement).innerText, 100)).filter(Boolean).slice(0, 12);
+  const ae = document.activeElement as HTMLElement | null;
+  const editing = !!ae && ae !== document.body && (
+    ae.isContentEditable || ae.tagName === "TEXTAREA" || ae.tagName === "SELECT"
+    || (ae.tagName === "INPUT" && !/^(checkbox|radio|button|submit|reset|file|image)$/i.test(String((ae as HTMLInputElement).type || ""))));
+  const openList = Array.from(document.querySelectorAll("[role=listbox], [role=menu], [aria-expanded='true'], .ui-autocomplete, .pac-container"))
+    .some((el) => shown(el) && el.getAttribute("aria-expanded") !== "false");
+  return { url: location.href, headings, labels, busy: editing || openList, secretValues };
+}
+
+/** The full in-page read, for a page that will be written. Pure DOM: the markup is a clone. */
+function fullReadInPage(arg: { g: string; maxHtml: number }): FullFrameRead {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const ps = (globalThis as any)[arg.g];
   const clean = (t: unknown, n = 160): string => String(t ?? "").replace(/\s+/g, " ").trim().slice(0, n);
@@ -203,16 +272,13 @@ function readFrameInPage(arg: { g: string; maxHtml: number }): RawFrameRead {
     if (wrap) return clean(wrap.textContent);
     return clean(el.getAttribute("placeholder") || el.getAttribute("title") || "");
   };
-  const secretValues: string[] = [];
+  const secretSelects = new Set<Element>();
   const controls: CapturedControl[] = [];
   for (const el of Array.from(document.querySelectorAll("input, select, textarea")).slice(0, 400)) {
     const type = el.tagName === "INPUT" ? String((el as HTMLInputElement).type || "text").toLowerCase() : el.tagName.toLowerCase();
     if (type === "hidden") continue;
     const secret = isSecret(el);
-    if (secret) {
-      const v = String((el as HTMLInputElement).value ?? "").trim();
-      if (v.length >= 4) secretValues.push(v);
-    }
+    if (secret && el.tagName === "SELECT") secretSelects.add(el);
     const c: CapturedControl = {
       tag: el.tagName.toLowerCase(),
       type,
@@ -240,11 +306,17 @@ function readFrameInPage(arg: { g: string; maxHtml: number }): RawFrameRead {
     .filter(shown).map((h) => clean((h as HTMLElement).innerText, 100)).filter(Boolean).slice(0, 12);
   // THE MARKUP, TRIMMED: a clone (the live page is never touched), visibility marked from the live
   // twin walked in the same order, every value and script gone, only the attributes a reader needs.
+  // A secret list keeps no option at all; if the twin walk cannot be lined up, no list keeps one.
   const live = Array.from(document.querySelectorAll("body *"));
   const doc = document.documentElement.cloneNode(true) as HTMLElement;
   const cloned = Array.from(doc.querySelectorAll("body *"));
   if (cloned.length === live.length) {
-    for (let i = 0; i < live.length; i++) if (!shown(live[i])) cloned[i].setAttribute("data-invisible", "1");
+    for (let i = 0; i < live.length; i++) {
+      if (!shown(live[i])) cloned[i].setAttribute("data-invisible", "1");
+      if (secretSelects.has(live[i])) cloned[i].textContent = "";
+    }
+  } else {
+    for (const sel of Array.from(doc.querySelectorAll("select"))) sel.textContent = "";
   }
   for (const el of Array.from(doc.querySelectorAll("script, noscript, style, link, meta, svg, canvas, template"))) el.remove();
   const KEEP = /^(id|name|type|role|for|class|aria-[a-z]+|required|disabled|readonly|hidden|placeholder|title|alt|href|data-invisible|colspan|rowspan)$/;
@@ -262,24 +334,43 @@ function readFrameInPage(arg: { g: string; maxHtml: number }): RawFrameRead {
       if ((t === "submit" || t === "button" || t === "reset") && own) el.setAttribute("aria-label", own.slice(0, 80));
     }
   }
-  const bodyText = clean(document.body ? document.body.innerText : "", 6000);
-  const ae = document.activeElement as HTMLElement | null;
-  const editing = !!ae && ae !== document.body && (
-    ae.isContentEditable || ae.tagName === "TEXTAREA" || ae.tagName === "SELECT"
-    || (ae.tagName === "INPUT" && !/^(checkbox|radio|button|submit|reset|file|image)$/i.test(String((ae as HTMLInputElement).type || ""))));
-  const openList = Array.from(document.querySelectorAll("[role=listbox], [role=menu], [aria-expanded='true'], .ui-autocomplete, .pac-container"))
-    .some((el) => shown(el) && el.getAttribute("aria-expanded") !== "false");
+  const whole = document.body ? document.body.innerText : "";
+  // A list's innerText is every option: a secret list's options leave the kept text too.
+  let kept = whole;
+  secretSelects.forEach((sel) => {
+    for (const o of Array.from((sel as HTMLSelectElement).options)) {
+      const t = String(o.text ?? "").trim();
+      if (t) kept = kept.split(t).join(" ");
+    }
+  });
   return {
     url: location.href,
     title: clean(document.title, 160),
     headings,
-    text: bodyText,
+    text: clean(kept, 6000),
     controls,
     actions,
     html: `<!doctype html><html>${doc.innerHTML}</html>`.slice(0, arg.maxHtml),
-    busy: editing || openList,
-    secretValues,
+    tripText: String(whole).slice(0, 300_000),
   };
+}
+
+/** THE TRIPWIRE (Helm's review of #296): a secret-worded label (account, meter, ESI/SA id, SSN,
+ *  password) followed by a value the run's scrub did not already cover — the shared model-door
+ *  patterns (modelPayloadScan.SECRET_SHAPED_PATTERNS) over the page's visible text after the known
+ *  secrets are taken out. A value it finds was never given to the mask, so the picture would show it
+ *  in clear: the page gets no picture. Returns the kinds found (never the values). */
+export function secretTripwire(texts: readonly string[], secrets: readonly string[]): string[] {
+  const hits = new Map<string, number>();
+  for (const t of texts) scanText(scrubKnownSecrets(String(t ?? ""), secrets), [], NO_EXEMPT, hits as Map<never, number>);
+  return Array.from(hits.keys()).sort();
+}
+const NO_EXEMPT: ReadonlySet<never> = new Set<never>();
+
+/** Every string a snapshot keeps, on its way to disk: the run's known secrets, then the model door's
+ *  secret-shaped patterns, then digit runs and emails. */
+export function scrubCaptureText(text: string, secrets: readonly string[], max = 400_000): string {
+  return redactCaptureText(scanText(scrubKnownSecrets(String(text ?? ""), secrets), [], NO_EXEMPT, new Map()), max);
 }
 
 interface IndexedPage { capturedAt: string; }
@@ -335,23 +426,21 @@ export class PageCaptureLog {
     }
     this.busy = true;
     try {
+      // THE LIGHT READ FIRST (Helm's review of #296): on a page this portal already has (the common
+      // replay case) a capture costs this read and nothing else.
       const frames = p.frames().slice(0, 9);
-      const reads: RawFrameRead[] = [];
+      const lights: Array<{ frame: (typeof frames)[number]; read: LightFrameRead }> = [];
       for (const fr of frames) {
         try {
           await fr.evaluate(PORTAL_SAFETY_IN_PAGE_SOURCE).catch(() => null);
-          const r = await fr.evaluate(readFrameInPage, { g: PORTAL_SAFETY_GLOBAL, maxHtml: 400_000 }) as RawFrameRead;
-          if (r && typeof r.url === "string") reads.push(r);
+          const r = await fr.evaluate(lightReadInPage, { g: PORTAL_SAFETY_GLOBAL }) as LightFrameRead;
+          if (r && typeof r.url === "string") lights.push({ frame: fr, read: r });
         } catch { /* a detached or cross-process frame: left out */ }
-        if (fr === p.mainFrame() && !reads.length) return { status: "skipped", why: "the page could not be read" };
+        if (fr === p.mainFrame() && !lights.length) return { status: "skipped", why: "the page could not be read" };
       }
-      const main = reads[0];
+      const main = lights[0].read;
       if (opts.onlyWhenQuiet && main.busy) return { status: "skipped", why: "a box is focused or a list is open" };
-      const fp = pageFingerprint({
-        url: main.url,
-        headings: main.headings,
-        labels: reads.flatMap((r) => r.controls.filter((c) => c.visible).map((c) => c.label || c.name)),
-      });
+      const fp = pageFingerprint({ url: main.url, headings: main.headings, labels: lights.flatMap((l) => l.read.labels) });
       const pagesDir = path.join(this.dir, "pages");
       const jsonPath = path.join(pagesDir, `${fp}.json`);
       const pngPath = path.join(pagesDir, `${fp}.png`);
@@ -363,26 +452,39 @@ export class PageCaptureLog {
           fresh = Date.now() - Date.parse(prior.capturedAt) < refreshMs;
         } catch { fresh = false; }
       }
-      const secrets = this.allSecrets(reads.flatMap((r) => r.secretValues));
-      const scrub = (s: string): string => redactCaptureText(scrubKnownSecrets(s, secrets), 400_000);
+      const secrets = this.allSecrets(lights.flatMap((l) => l.read.secretValues));
+      const scrub = (s: string): string => scrubCaptureText(s, secrets);
       const label = scrub(String(reason ?? "")).slice(0, 80);
       if (fresh) {
         this.seenThisRun.add(fp);
         this.logRun({ fp, label, status: "seen" });
         return { status: "seen", fp };
       }
+      // The full read, only for a page that will be written.
+      const reads: FullFrameRead[] = [];
+      for (const { frame } of lights) {
+        try {
+          const r = await frame.evaluate(fullReadInPage, { g: PORTAL_SAFETY_GLOBAL, maxHtml: 400_000 }) as FullFrameRead;
+          if (r && typeof r.url === "string") reads.push(r);
+        } catch { /* left out */ }
+      }
+      if (!reads.length) return { status: "skipped", why: "the page could not be read" };
       fs.mkdirSync(pagesDir, { recursive: true });
-      const shot = await maskedFullPageScreenshot(p as Page, secrets, pngPath).catch((err: unknown) => ({
-        ok: false, why: `the picture could not be taken (${err instanceof Error ? err.message.slice(0, 120) : String(err)})`,
-      }));
+      // No picture when the page shows a secret-worded value the mask was never given.
+      const tripped = secretTripwire(reads.map((r) => r.tripText), secrets);
+      const shot = tripped.length
+        ? { ok: false, why: `the page shows ${tripped.join(", ")} value(s) the run did not know, so no picture was taken` }
+        : await maskedFullPageScreenshot(p as Page, secrets, pngPath).catch((err: unknown) => ({
+          ok: false, why: `the picture could not be taken (${err instanceof Error ? err.message.slice(0, 120) : String(err)})`,
+        }));
       if (!shot.ok) fs.rmSync(pngPath, { force: true });
-      const frameOut: CapturedFrame[] = reads.map(({ busy: _b, secretValues: _s, ...rest }) => ({ ...rest, url: sanitizeCaptureUrl(rest.url) }));
+      const frameOut: CapturedFrame[] = reads.map(({ tripText: _t, ...rest }) => ({ ...rest, url: sanitizeCaptureUrl(rest.url) }));
       // What the page said goes through the scrub; the record's own keys (hash, time, run id) do
       // not, since a date or a hash would read as a digit run.
       const seen = deepMapStrings({
-        url: sanitizeCaptureUrl(main.url),
-        title: main.title,
-        headings: main.headings,
+        url: sanitizeCaptureUrl(reads[0].url),
+        title: reads[0].title,
+        headings: reads[0].headings,
         frames: frameOut,
         refused: shot.ok ? "" : shot.why || "the secret mask could not be proven on this page",
       }, scrub);
@@ -396,9 +498,10 @@ export class PageCaptureLog {
         url: seen.url,
         title: seen.title,
         headings: seen.headings,
+        // masked: true ONLY for a picture taken through the mask on a page that passed the tripwire.
         shot: shot.ok
-          ? { file: `${fp}.png`, masked: true, secretsMasked: secrets.length }
-          : { file: "", masked: false, refused: seen.refused },
+          ? { file: `${fp}.png`, masked: true, tripwire: "clear", secretsMasked: secrets.length }
+          : { file: "", masked: false, tripwire: tripped.length ? "tripped" : "clear", refused: seen.refused },
         frames: seen.frames,
       };
       fs.writeFileSync(jsonPath, JSON.stringify(record, null, 1));
