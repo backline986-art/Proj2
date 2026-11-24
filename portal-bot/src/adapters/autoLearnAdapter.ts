@@ -9077,8 +9077,21 @@ export class AutoLearnAdapter extends BasePortalAdapter {
         CONTINUE_APPLICATION_WORDS.test(String(label ?? "")) && !SUBMIT_INTENT.test(String(label ?? "").replace(CONTINUE_APPLICATION_WORDS_G, " "));
       const strongSubmitIntentBtn = fields.some((f) => f.fieldType === "button" && onPageControl(f)
         && SUBMIT_INTENT.test(f.label) && !continueOnly(f.label) && !this.isOffLimitsButton(f));
+      // A PAY OR SIGNATURE-REQUEST CONTROL ON THE PAGE IS POSITIVE EVIDENCE TOO (Helm on #290). A
+      // read-only page showing "Pay Fees" or "Request Signatures" beside "Continue Application" is
+      // a checkout or sign-off step, not a pass-through: strongSubmitIntentBtn leaves off-limits
+      // controls out, and "Pay Fees" is not submit-worded, so without this term such a page would
+      // be walked through. It stops as review, as before #271 (its Continue stays unflagged: the
+      // page does not name itself review). Fail-closed on purpose: a stray "Fees" link costs one
+      // page a person finishes. The step navigator is cut, as for the submit test above (Accela
+      // lists "Pay Fees" as a step on every page). Existing-record actions are not counted.
+      const faceWords = (f: ExtractedField): Array<string | undefined> =>
+        [f.label, f.selector?.name, f.selector?.text, f.selector?.shownText];
+      const payOrSignatureCtl = fields.some((f) => f.fieldType === "button" && onPageControl(f)
+        && faceWords(f).some((t) => isPayFee(t) || isSignatureRequestControl(t)));
       const readOnlyMidWizard = !hasFillable && !isDashboard && (this.formPageSeen || anyFormMutationRecorded)
-        && !reviewSignals && !looksLikeReviewUrl(url) && !strongSubmitIntentBtn && !hasAcceptTermsCheckbox && !plannerSaidReview;
+        && !reviewSignals && !looksLikeReviewUrl(url) && !strongSubmitIntentBtn && !payOrSignatureCtl
+        && !hasAcceptTermsCheckbox && !plannerSaidReview;
       if (readOnlyMidWizard) this.debug?.event({ type: "readonly_mid_wizard_pass_through", page: pageCount });
       if (hasFillable) this.formPageSeen = true;
       const isReviewPage =

@@ -16,12 +16,22 @@
 //   R3 MUST-EXCLUDE a planner that says atReview on the read-only page and names its Continue as
 //                  the final submit: the run may stop there for a person, but no step carries
 //                  isFinalSubmit (the page does not name itself the review step).
+//   R5 MUST-EXCLUDE the same read-only page with a "Pay Fees" control beside its Continue: it is
+//                  not walked through (a checkout step is positive evidence, Helm on #290). The
+//                  learn stops there, no step carries isFinalSubmit, and the pay control is never
+//                  clicked or recorded.
+//   R6 MUST-EXCLUDE the same with a "Request Signatures" control: same outcome, except that the
+//                  signature step (signatureRequestStep.ts) records its own stopForReview on the
+//                  control first: a stop, never a click and never final.
 //   Every case: no filing POST reached the replica.
 //
 // KILL TESTS (each must turn this file red):
 //   K1 autoLearnAdapter isReviewPage: drop `&& !readOnlyMidWizard`              → R1 fails.
 //   K2 autoLearnAdapter: delete the c2o block (planner final submit on a continue-only page) → R3 fails.
 //   K3 autoLearnAdapter promotable: `(!continueOnly(f.label) || false)`          → R4 fails.
+//   K4 autoLearnAdapter readOnlyMidWizard: drop `&& !payOrSignatureCtl`         → R5 fails. (R6
+//      stays green: the signature step stops there first, so for a signature control the new
+//      term is a second layer behind it.)
 //   (The other half of "after a form page", form data already recorded, is pinned by the offline
 //   bench's accela/extra_readonly_page learn: 4 of 19 fields without it, 19 of 19 with it.)
 //
@@ -169,6 +179,28 @@ async function run(c: Case) {
       x.finals.length === 1 && /continue application/i.test(String(x.finals[0]?.note ?? "")) && x.filled === x.scored,
       `finals=${x.finals.map((s) => s.note).join(" | ")} fields=${x.filled}/${x.scored}`);
     check("R4 no filing POST", x.submits === 0, `submits=${x.submits}`);
+  }
+}
+
+// R5 / R6 MUST-EXCLUDE — a pay or signature-request control on the read-only page is positive
+// evidence: the page is not a pass-through, and nothing on it is recorded as the final submit.
+for (const [name, id, label] of [["r5-pay-fees", "lnkPayFees", "Pay Fees"], ["r6-request-signatures", "lnkRequestSig", "Request Signatures"]] as const) {
+  const wizard = buildWizard("accela", "extra_readonly_page");
+  const ro = wizard.pages.find((pg) => pg.kind === "readonly");
+  if (!ro) { check(`${name} fixture has a read-only page`, false); continue; }
+  ro.actions = [{ id, label }];
+  const x = await run({ name, wizard });
+  if (x) {
+    const tag = name.slice(0, 2).toUpperCase();
+    const re = new RegExp(label, "i");
+    check(`${tag} MUST-EXCLUDE a read-only page showing "${label}" is not walked through: the learn stops there`,
+      !x.walked && x.filled < x.scored, `walkedToReview=${x.walked} fields=${x.filled}/${x.scored}`);
+    check(`${tag} no step carries isFinalSubmit`, x.finals.length === 0, `finals=${x.finals.map((s) => s.note).join(" | ")}`);
+    const named = x.steps.filter((s) => re.test(String(s.note ?? "")) || re.test(String(s.selector?.name ?? "")) || re.test(String(s.selector?.text ?? "")));
+    check(`${tag} the "${label}" control is never recorded as a click (at most the signature step's own stop)`,
+      named.every((s) => s.action === "stopForReview" && s.isFinalSubmit !== true),
+      named.map((s) => `${s.action}: ${s.note}`).join(" | "));
+    check(`${tag} no filing POST`, x.submits === 0, `submits=${x.submits}`);
   }
 }
 
