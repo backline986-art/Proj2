@@ -67,11 +67,11 @@ const runOne = async (url: string, steps: unknown[], fieldValues: Record<string,
   const adapter = new RecipeAdapter(recipeFor(url, steps), fieldValues, {}, { autoSubmit: false });
   (adapter as unknown as { page: unknown }).page = page;
   const t0 = Date.now();
-  const res = await adapter.fillApplication({} as never) as unknown as { success?: boolean; error?: string; data?: { slowSteps?: Out["slow"]; driftWarnings?: string[] } };
+  const res = await adapter.fillApplication({} as never) as unknown as { ok?: boolean; message?: string; data?: { slowSteps?: Out["slow"]; driftWarnings?: string[] } };
   const ms = Date.now() - t0;
   const value = await page.locator("#desc").inputValue({ timeout: 1000 }).catch(() => "");
   await browser.close();
-  return { ok: !!res.success, ms, slow: res.data?.slowSteps ?? [], value, drift: res.data?.driftWarnings ?? [], error: String(res.error ?? "") };
+  return { ok: !!res.ok, ms, slow: res.data?.slowSteps ?? [], value, drift: res.data?.driftWarnings ?? [], error: String(res.message ?? "") };
 };
 
 // ---------------------------------------------------------------------------
