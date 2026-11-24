@@ -1074,6 +1074,19 @@ export function withdrawInfoPagePass(db: AppDb, passId: string, input: { by: str
  * (shared knowledge), `generic: true`, nothing else — and the run message counts only the incident
  * org's projects (`warnedInOrg`). An org that cannot be read is another org (generic).
  */
+/** #279 (owner's option 1): a verified information page's click led to ANOTHER information page.
+ *  Evidence only — the pass is KEPT (never withdrawn here), and the page after is audited with its
+ *  text so a person can see what the run saw. */
+export function recordInfoPageNextInformation(db: AppDb, projectId: string | null, runId: string, rows: ReadonlyArray<{ passId?: unknown; where?: unknown; afterText?: unknown }> | null | undefined): void {
+  for (const r of Array.isArray(rows) ? rows.slice(0, 3) : []) {
+    const passId = s(r?.passId).slice(0, 80);
+    if (!passId) continue;
+    addAuditLog(db, projectId, "portal_bot", "network backstop", "portal.info_page_next_information", {
+      passId, where: s(r?.where).slice(0, 200), runId: s(runId).slice(0, 120), afterText: s(r?.afterText).slice(0, 1200), withdrawn: false,
+    });
+  }
+}
+
 export function recordInfoPagePassIncidents(db: AppDb, projectId: string | null, runId: string, incidents: ReadonlyArray<InfoPageIncident> | null | undefined): { withdrawn: string[]; warned: string[]; warnedInOrg: string[]; warnError: string } {
   const withdrawn: string[] = [];
   const warned: string[] = [];
@@ -1090,7 +1103,8 @@ export function recordInfoPagePassIncidents(db: AppDb, projectId: string | null,
     let controlLabel = "";
     db.transaction(() => {
       const r = db.get<Row>("SELECT * FROM portal_info_page_passes WHERE id = ?", [passId]);
-      const details = { phase, why, runId: s(runId).slice(0, 120), where };
+      const afterText = phase === "after" ? s((inc as { afterText?: unknown })?.afterText).slice(0, 1200) : "";
+      const details = { phase, why, runId: s(runId).slice(0, 120), where, ...(afterText ? { afterText } : {}) };
       if (r) {
         if (!where) where = `${s(r.origin)}${s(r.path)}`;
         controlLabel = s(r.control_label);

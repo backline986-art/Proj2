@@ -50,7 +50,7 @@ import { ensurePlanSetSplit } from "./docSplitter";
 import { addAuditLog } from "./audit";
 import { HttpError } from "./httpError";
 import { projectClassHoldReason } from "./projectClassHold";
-import { expiredInfoPagePassFor, infoPagePriorProgress, isCleanInfoPageHold, liveInfoPagePasses, recordInfoPageCandidate, recordInfoPageHeldVerified, recordInfoPageLearnClean, recordInfoPageLearnStart, recordInfoPagePassIncidents, recordInfoPagePassUses, reserveInfoPagePassUse } from "./infoPages";
+import { expiredInfoPagePassFor, infoPagePriorProgress, isCleanInfoPageHold, liveInfoPagePasses, recordInfoPageCandidate, recordInfoPageHeldVerified, recordInfoPageLearnClean, recordInfoPageLearnStart, recordInfoPageNextInformation, recordInfoPagePassIncidents, recordInfoPagePassUses, reserveInfoPagePassUse } from "./infoPages";
 import { formPurposeMismatch } from "./formPurpose";
 import { looksBotBlocked } from "./runAbort";
 import { id } from "./ids";
@@ -1462,6 +1462,9 @@ async function autoLearnPortalInner(
       } catch (err) {
         infoPageCall.incidentError = err instanceof Error ? err.message.slice(0, 120) : String(err);
       }
+    }
+    if (!threw && Array.isArray(l?.infoPageNextInfo) && l.infoPageNextInfo.length) {
+      try { recordInfoPageNextInformation(db, infoPageProjectRow ? projectId : null, runId, l.infoPageNextInfo); } catch { /* evidence only */ }
     }
     if (!threw && infoPageCall.attemptStartId && !thisAttempt.length && isCleanInfoPageHold(l)) {
       try { recordInfoPageLearnClean(db, projectId, scopeType, infoPageCall.attemptStartId); } catch { /* not clean, then */ }

@@ -70,7 +70,7 @@ import {
   INFO_PAGE_IDENTITY_VERSION, digestInfoPageIdentity, infoPageEvidence, infoPagePrefixOf, sha256Hex,
   type InfoPageIdentityMaterial,
 } from "../../shared/src/infoPagePass";
-import type { InfoPageCandidateCapture, InfoPageIncident } from "../../shared/src/types";
+import type { InfoPageCandidateCapture, InfoPageIncident, InfoPageNextInformation } from "../../shared/src/types";
 
 const fx = await setupStageFixture("info-pages");
 const { db } = fx;
@@ -146,11 +146,12 @@ let handed: { infoPagePasses?: unknown[]; infoPagePriorProgress?: boolean } | nu
 let nextCapture: InfoPageCandidateCapture | undefined;
 let nextPassed: Array<{ passId: string; where: string }> | undefined;
 let nextIncidents: InfoPageIncident[] | undefined;
+let nextNextInfo: InfoPageNextInformation[] | undefined;
 const stubLearn = () => ({
   ok: false, portalName: "stub", steps: [], reviewScreen: { fields: [], bodyTextSnippet: "" }, finalSubmitRecorded: false, pageCount: 2, pauseReason: null,
   message: nextIncidents?.some((i) => i.phase === "after") ? "STOPPED AFTER A VERIFIED INFORMATION PAGE: the page it led to reads as filed." : "HELD AT AN INFORMATION PAGE NO PERSON HAS VERIFIED: the network backstop held \"Next\".",
   stopReason: nextIncidents?.some((i) => i.phase === "after") ? "info_page_incident" : "backstop_abort",
-  ...(nextCapture ? { infoPageCandidate: nextCapture } : {}), ...(nextPassed ? { infoPagePassed: nextPassed } : {}), ...(nextIncidents ? { infoPageIncidents: nextIncidents } : {}),
+  ...(nextCapture ? { infoPageCandidate: nextCapture } : {}), ...(nextPassed ? { infoPagePassed: nextPassed } : {}), ...(nextIncidents ? { infoPageIncidents: nextIncidents } : {}), ...(nextNextInfo ? { infoPageNextInfo: nextNextInfo } : {}),
 });
 // Round 2: every attempt's input is kept (the headed retry is a second call), and a test may script
 // the attempts itself (report a use through the learner's own callback, throw, look bot-blocked…).
@@ -166,8 +167,8 @@ autoLearn.setAutoLearnSeamsForTests({ learnPortal: (async (input: LearnInput) =>
   const next = scripted.shift();
   return next ? next(input) : stubLearn();
 }) as never });
-const runLearn = async (projectId: string, c?: InfoPageCandidateCapture, passed?: Array<{ passId: string; where: string }>, incidents?: InfoPageIncident[]) => {
-  nextCapture = c; nextPassed = passed; nextIncidents = incidents; handed = null; handedAll = [];
+const runLearn = async (projectId: string, c?: InfoPageCandidateCapture, passed?: Array<{ passId: string; where: string }>, incidents?: InfoPageIncident[], nextInfo?: InfoPageNextInformation[]) => {
+  nextCapture = c; nextPassed = passed; nextIncidents = incidents; nextNextInfo = nextInfo; handed = null; handedAll = [];
   return autoLearn.autoLearnPortal(db, projectId, { scope: "ahj", portalUrl: `${ORIGIN}/permits/sfjsp?interviewID=Home`, createdBy: "operator", permitType: "structural" });
 };
 
@@ -457,6 +458,27 @@ await check("INCIDENT AFTER THE CLICK: the pass is DELETED and audited; the lear
   assert.equal(db.query("SELECT id FROM submissions WHERE project_id = ? AND status IN ('submitted', 'submitted_unconfirmed', 'awaiting_human_submit', 'staged')", [P]).length, 0);
   assert.equal(db.query("SELECT id FROM portal_runs WHERE project_id = ? AND (confirmation_number <> '' OR status = 'submitted')", [P]).length, 0);
   assert.equal(db.query("SELECT id FROM permit_check_targets WHERE project_id = ? AND (application_number <> '' OR permit_number <> '')", [P]).length, 0);
+});
+await check("#279: an after-click incident keeps the page after's text on its audit row", async () => {
+  const { P, passId } = await verifiedPage("Incident After Text Page");
+  await runLearn(P, undefined, [{ passId, where: `${ORIGIN}/permits/sfjsp` }],
+    [{ passId, phase: "after", why: ["the page after the click reads as filed"], where: `${ORIGIN}/permits/sfjsp`, afterText: "Request received. Confirmation number: PR-####-####" }]);
+  const a = fx.audits("portal.info_page_pass_incident").filter((x) => JSON.parse(x.details).passId === passId);
+  assert.equal(a.length, 1);
+  assert.equal(JSON.parse(a[0].details).afterText, "Request received. Confirmation number: PR-####-####");
+});
+await check("#279 (option 1): a verified page that led to ANOTHER information page — the pass is KEPT, the evidence audited, and the second page recorded as a candidate", async () => {
+  const { P, passId } = await verifiedPage("Chain First Page");
+  const second = capture(material((m) => { m.title = "Before You Apply"; m.text = "Before You Apply Your account was set up successfully. Previous Next"; }));
+  await runLearn(P, second, [{ passId, where: `${ORIGIN}/permits/sfjsp` }], undefined, [{ passId, where: `${ORIGIN}/permits/sfjsp`, afterText: "Before You Apply Your account was set up successfully. Previous Next" }]);
+  assert.ok(IP.liveInfoPagePasses(db).some((p) => p.id === passId), "the first verification was withdrawn");
+  assert.equal(fx.audits("portal.info_page_pass_incident").filter((x) => JSON.parse(x.details).passId === passId).length, 0);
+  const ev = fx.audits("portal.info_page_next_information").filter((x) => JSON.parse(x.details).passId === passId);
+  assert.equal(ev.length, 1);
+  assert.equal(ev[0].project_id, P);
+  assert.equal(JSON.parse(ev[0].details).withdrawn, false);
+  assert.match(JSON.parse(ev[0].details).afterText, /Before You Apply/);
+  assert.ok(cand(P).some((x) => x.status === "open" && x.identity_sha256 === second.identitySha256), "the second page was not recorded for a person to verify");
 });
 await check("an incident on a pass that is already gone is audited all the same (withdrawn: false)", async () => {
   const P = fx.newProject();

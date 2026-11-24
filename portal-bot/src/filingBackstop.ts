@@ -130,7 +130,7 @@
 import { randomBytes } from "node:crypto";
 import { isFilingOrPaymentRequest, isPayRequestUrl, paymentDialogVerdict, PORTAL_SAFETY_GLOBAL, PORTAL_SAFETY_IN_PAGE_SOURCE } from "../../shared/src/portalSafety";
 import {
-  digestInfoPageIdentity, infoPageAfterClickAckWording, infoPageAfterClickRefusals, infoPageDriftedEntries, infoPageNumberTokens, infoPageMatchRefusals, infoPageObservedRequest, infoPagePassEntry, infoPagePassRefusals,
+  digestInfoPageIdentity, infoPageAfterClickAckWording, infoPageAfterClickIsNextInformationPage, infoPageAfterClickRefusals, infoPageDriftedEntries, infoPageNumberTokens, infoPageMatchRefusals, infoPageObservedRequest, infoPagePassEntry, infoPagePassRefusals,
   infoPagePrefixOf, infoPageProjectValueRefusals, infoPageRequestRefusals, isMatchClassRefusal, opensInfoPageCandidateWatch,
   type InfoPageAfterClickBaseline, type InfoPageAfterClickReading, type InfoPageDigest, type InfoPageExpectedRequest, type InfoPageIdentityMaterial, type InfoPageIdentityReading,
   type InfoPageObservedRequest, type InfoPagePrefixStep, type InfoPageRunState,
@@ -359,7 +359,7 @@ export interface FilingBackstop {
    *  page did not carry), twice, 1.2 s apart. Any refusal arms the sticky
    *  review lock (nothing more posts from here) and is the run's incident: it stops, the backend
    *  withdraws the pass, nothing is recorded as filed. */
-  checkInfoPageAfterClick(page?: unknown): Promise<{ ok: boolean; refusals: string[] }>;
+  checkInfoPageAfterClick(page?: unknown): Promise<{ ok: boolean; refusals: string[]; nextInfoPage?: boolean; text?: string }>;
   /** PROOF OF PROGRESS (round 3): the learner recorded a fill / select / check bound to this job's
    *  own data on the page a verified click led to (infoPagePass.infoPageProofStepRefusals). Lifts the
    *  hold checkInfoPageAfterClick armed — only while the run is still on that page's document (state
@@ -367,7 +367,7 @@ export interface FilingBackstop {
   infoPageProofGiven(): boolean;
   /** "none" (no verified click passed), "pending" (held, on the page), "proved", or "left" (the page's
    *  document was left before the proof: the hold stays for the rest of the run). */
-  infoPageProofState(): "none" | "pending" | "proved" | "left" | "continued" | "strayed";
+  infoPageProofState(): "none" | "pending" | "proved" | "left" | "continued" | "strayed" | "next_info";
   /** The unverified page whose forward request was held, once (then forgotten), or null. */
   takeInfoPageCandidate(): InfoPageCandidateTake | null;
   /** Each request the info-page slot admitted: exempted = it passed 4(b) only because of the
@@ -1315,7 +1315,7 @@ export async function installFilingBackstop(page: any, label = "run"): Promise<F
   // watch, and what each admitted. Every closer below also closes these.
   let everWrote = false;
   let approvedEverOpened = false;
-  type InfoSlot = { page: unknown; entryId: string; expected: InfoPageExpectedRequest; pageKey: string; beforeTokens: string[]; beforeAck: string[]; reserve: InfoPageReserve; until: number; open: boolean; timer: ReturnType<typeof setTimeout> | null; detach: () => void };
+  type InfoSlot = { page: unknown; entryId: string; expected: InfoPageExpectedRequest; pageKey: string; beforeTokens: string[]; beforeAck: string[]; beforeText: string; reserve: InfoPageReserve; until: number; open: boolean; timer: ReturnType<typeof setTimeout> | null; detach: () => void };
   let infoSlot: InfoSlot | null = null;
   type InfoWatch = { page: unknown; capture: InfoPageCandidateTake; until: number; open: boolean; timer: ReturnType<typeof setTimeout> | null; detach: () => void };
   let infoWatch: InfoWatch | null = null;
@@ -1329,7 +1329,10 @@ export async function installFilingBackstop(page: any, label = "run"): Promise<F
   // PROOF OF PROGRESS (round 3): armed when the page a verified click led to passed the after-click
   // reading; until the learner proves it entered this job's own data there, nothing state-changing
   // but the run's own writes passes (the hold in the handler, rule 3b).
-  let infoProof: { page: unknown; entryId: string; state: "pending" | "proved" | "left" | "continued" | "strayed"; checked: boolean } | null = null;
+  // #279 "next_info": the page after read as ANOTHER information page (infoPageAfterClickIsNextInformationPage):
+  // nothing state-changing leaves it but that page's OWN verified pass (4b); its held forward request
+  // is observed for a person to verify. The verification just used is kept (not an incident).
+  let infoProof: { page: unknown; entryId: string; state: "pending" | "proved" | "left" | "continued" | "strayed" | "next_info"; checked: boolean } | null = null;
   // Q4 — SAME INTERVIEW: the origin + path the admitted verified request went to (whereOf). Once the
   // proof is given, the one way off the page it led to is that interview's own form posting back there.
   let infoProofEndpoint = "";
@@ -1536,7 +1539,7 @@ export async function installFilingBackstop(page: any, label = "run"): Promise<F
     // slot is gone, and consuming it changes no rule's outcome: the request meets payment, the
     // filing-URL rule, the windows and the sticky lock (4a) below exactly as on main, and only 4(b)
     // can be lifted — only when R2-R5 all hold (URL, media, ordered body, the page's address).
-    let infoAdmit: { entryId: string; refusals: string[]; tokens: string[]; ack: string[]; reserve: InfoPageReserve } | null = null;
+    let infoAdmit: { entryId: string; refusals: string[]; tokens: string[]; ack: string[]; text: string; reserve: InfoPageReserve } | null = null;
     if (!via && infoSlotLive()) {
       const s = infoSlot!;
       const pg = pageOfRequest(request);
@@ -1562,10 +1565,48 @@ export async function installFilingBackstop(page: any, label = "run"): Promise<F
         // file, pay or post a form while the run was between the open and the click — means the run is
         // stopping: the slot it opened is no longer good for anything (asked here, at consumption).
         if (aborts.some(isStoppingAbort)) refusals.push(INFO_PAGE_STOPPING_ABORT_REFUSAL);
-        infoAdmit ={ entryId: s.entryId, refusals, tokens: s.beforeTokens, ack: s.beforeAck, reserve: s.reserve };
+        infoAdmit ={ entryId: s.entryId, refusals, tokens: s.beforeTokens, ack: s.beforeAck, text: s.beforeText, reserve: s.reserve };
         if (refusals.length) infoPageRefusedRequests.push({ where: whereOf(url), refusals });
       }
     }
+    // THE ADMISSION OF A VERIFIED INFORMATION PAGE'S ONE REQUEST (#344, 4b; #279: also the NEXT
+    // information page's own pass). The slot matched this exact request; the use is reserved, then the
+    // request is let through and the proof hold of THIS pass is armed. false = not admitted (held by
+    // the caller, its reason recorded on the slot).
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const admitInfoSlot = async (pg: any): Promise<boolean> => {
+      if (!infoAdmit) return false;
+      if (infoAdmit && infoAdmit.refusals.length === 0) {
+        let reserved: string[];
+        try {
+          const answer = await infoAdmit.reserve(infoAdmit.entryId, whereOf(url));
+          reserved = Array.isArray(answer) ? answer.map((x) => String(x)) : ["the use could not be reserved (no answer)"];
+        } catch (e) {
+          reserved = [`the use could not be reserved (${String((e as { message?: string })?.message ?? e).slice(0, 80)})`];
+        }
+        // The await is the one place this handler yields with a slot's request in hand: a run that
+        // locked or was disposed meanwhile is never let through (the use stays counted).
+        if (!reserved.length && (locked || disposed)) reserved = ["the run locked while the use was being reserved"];
+        // F3: …and one that met a stopping abort meanwhile (the use stays counted).
+        if (!reserved.length && aborts.some(isStoppingAbort)) reserved = [INFO_PAGE_STOPPING_ABORT_REFUSAL];
+        if (reserved.length) {
+          infoAdmit.refusals.push(...reserved);
+          infoPageRefusedRequests.push({ where: whereOf(url), refusals: reserved });
+        }
+      }
+      if (infoAdmit && infoAdmit.refusals.length === 0) {
+        infoPageAdmissions.push({ entryId: infoAdmit.entryId, where: whereOf(url), exempted: true });
+        admittedEntryIds.push(infoAdmit.entryId);
+        infoAfterBaseline = { entryId: infoAdmit.entryId, tokens: [...infoAdmit.tokens], ack: [...infoAdmit.ack], text: infoAdmit.text };
+        // F1 FIX: the proof hold (3b) is ARMED AT THE ADMISSION — the next document's own requests
+        // are held from its first byte, not only after checkInfoPageAfterClick returns.
+        infoProof = { page: pg, entryId: infoAdmit.entryId, state: "pending", checked: false };
+        infoProofEndpoint = whereOf(url);
+        await letThrough(route, request, via);
+        return true;
+      }
+      return false;
+    };
     // 1. PAYMENT: never, in any frame, any type, whatever was approved.
     if (isPayRequestUrl(url)) { await abort("filing-url", "a fee-payment endpoint — automation never pays"); return; }
     // The approved click's ONE request takes the slot (checked after the payment rule: a payment
@@ -1618,7 +1659,37 @@ export async function installFilingBackstop(page: any, label = "run"): Promise<F
     // type document, or any navigation) in the window is the page posting a form — an ASP.NET
     // AutoPostBack's oninput / onchange "this.form.submit()" sends the receipt's form with the job's
     // street — never the write's own commit: it is judged exactly as with no window open (held here).
-    if (!approved && infoProof && infoProof.state !== "proved" && infoProof.state !== "continued") {
+    // #279 NEXT INFORMATION PAGE: the page after read as another information page. Its OWN verified
+    // pass (a slot that matched this request exactly) goes on to 4(b), which admits it and arms that
+    // pass's own proof; an unverified page's forward request is OBSERVED for a person to verify (the
+    // candidate watch) and held, as 3b holds everything else.
+    if (!approved && infoProof && infoProof.state === "next_info") {
+      const pg = pageOfRequest(request);
+      // That page's OWN verified pass (its slot matched this exact request): admitted here, whatever
+      // the page's terminal reading — the hold, not 4(b), is what held it.
+      if (await admitInfoSlot(pg)) return;
+      let navigation = true;
+      try { navigation = !!request.isNavigationRequest(); } catch { /* unknown: a navigation */ }
+      if (infoWatchLive() && pg && pg === infoWatch!.page && navigation && /^document$/i.test(resourceType)) {
+        let mainFrame = false;
+        try { mainFrame = typeof pg.mainFrame === "function" && request.frame() === pg.mainFrame(); } catch { mainFrame = false; }
+        if (mainFrame) {
+          const w = infoWatch!;
+          let contentType = "";
+          try {
+            const h = typeof request.allHeaders === "function" ? await request.allHeaders() : request.headers();
+            contentType = String((h && (h["content-type"] ?? h["Content-Type"])) || "");
+          } catch { contentType = ""; }
+          let buf: Buffer | null = null;
+          try { buf = request.postDataBuffer(); } catch { buf = null; }
+          if (!w.capture.observed) w.capture.observed = infoPageObservedRequest(method || "?", url, contentType, buf);
+          closeInfoWatch();
+        }
+      }
+      await abort("review-lockdown", `NEXT INFORMATION PAGE — the page a verified information page led to reads as another information page; nothing leaves it until a person verifies that page too (${label})`);
+      return;
+    }
+    if (!approved && infoProof && infoProof.state !== "proved" && infoProof.state !== "continued" && infoProof.state !== "next_info") {
       const pg = pageOfRequest(request);
       let navigation = true;
       try { navigation = !!request.isNavigationRequest(); } catch { /* unknown: a navigation */ }
@@ -1715,35 +1786,7 @@ export async function installFilingBackstop(page: any, label = "run"): Promise<F
         // projects, a skewed clock, still on record) are checked again and the use written in one
         // backend transaction before anything is let through. A refusal, a throw or a malformed
         // answer falls through to the abort below — the hold exactly as on main, its reason named.
-        if (infoAdmit && infoAdmit.refusals.length === 0) {
-          let reserved: string[];
-          try {
-            const answer = await infoAdmit.reserve(infoAdmit.entryId, whereOf(url));
-            reserved = Array.isArray(answer) ? answer.map((x) => String(x)) : ["the use could not be reserved (no answer)"];
-          } catch (e) {
-            reserved = [`the use could not be reserved (${String((e as { message?: string })?.message ?? e).slice(0, 80)})`];
-          }
-          // The await is the one place this handler yields with a slot's request in hand: a run that
-          // locked or was disposed meanwhile is never let through (the use stays counted).
-          if (!reserved.length && (locked || disposed)) reserved = ["the run locked while the use was being reserved"];
-          // F3: …and one that met a stopping abort meanwhile (the use stays counted).
-          if (!reserved.length && aborts.some(isStoppingAbort)) reserved = [INFO_PAGE_STOPPING_ABORT_REFUSAL];
-          if (reserved.length) {
-            infoAdmit.refusals.push(...reserved);
-            infoPageRefusedRequests.push({ where: whereOf(url), refusals: reserved });
-          }
-        }
-        if (infoAdmit && infoAdmit.refusals.length === 0) {
-          infoPageAdmissions.push({ entryId: infoAdmit.entryId, where: whereOf(url), exempted: true });
-          admittedEntryIds.push(infoAdmit.entryId);
-          infoAfterBaseline = { entryId: infoAdmit.entryId, tokens: [...infoAdmit.tokens], ack: [...infoAdmit.ack] };
-          // F1 FIX: the proof hold (3b) is ARMED AT THE ADMISSION — the next document's own requests
-          // are held from its first byte, not only after checkInfoPageAfterClick returns.
-          infoProof = { page: pg, entryId: infoAdmit.entryId, state: "pending", checked: false };
-          infoProofEndpoint = whereOf(url);
-          await letThrough(route, request, via);
-          return;
-        }
+        if (await admitInfoSlot(pg)) return;
         // AN UNVERIFIED INFORMATION PAGE'S HELD REQUEST, OBSERVED (#344): the watch the click opened
         // records what the page's forward control sent — method, URL hash, media, body hashes — so
         // the run can offer the page to a person. The abort below is unchanged.
@@ -2054,6 +2097,9 @@ export async function installFilingBackstop(page: any, label = "run"): Promise<F
       // cannot be asked live). Only a page whose click 4(b) would hold asks for a pass or a candidate.
       let wideTerminal: boolean | null = lastReading.has(p) ? lastReading.get(p) ?? null : null;
       if (wideTerminal === null && p && typeof p.mainFrame === "function") wideTerminal = await mainFrameIsTerminal(p.mainFrame()).catch(() => null);
+      // #279: on the NEXT information page every forward request is held (the 3b hold) whatever its
+      // terminal reading — so it asks for its own pass, or opens the candidate watch, as a held page does.
+      if (infoProof && infoProof.state === "next_info" && infoProof.page === p) wideTerminal = true;
       // The backstop's own state, read AFTER the identity read (a page script may have tripped a
       // stopping abort, or the run locked, while it ran).
       const state = {
@@ -2084,7 +2130,7 @@ export async function installFilingBackstop(page: any, label = "run"): Promise<F
         const m = reading.material;
         const q = m.page.query.map(([k, v]) => [k, v]);
         const s: InfoSlot = {
-          page: p, entryId: entry.id, expected: digest.expected, beforeTokens: infoPageNumberTokens(m.text), beforeAck: infoPageAfterClickAckWording(m.text), reserve,
+          page: p, entryId: entry.id, expected: digest.expected, beforeTokens: infoPageNumberTokens(m.text), beforeAck: infoPageAfterClickAckWording(m.text), beforeText: String(m.text ?? ""), reserve,
           pageKey: JSON.stringify([m.page.origin, m.page.path, q]), until: Date.now() + INFO_PAGE_SLOT_MS, open: true, timer: null, detach: () => undefined,
         };
         const c = bindInfoClosers(p, () => { if (infoSlot === s) closeInfoSlot(); });
@@ -2131,9 +2177,11 @@ export async function installFilingBackstop(page: any, label = "run"): Promise<F
       // The information page whose request this run admitted, and its own tokens (none = refused).
       const baseline = infoAfterBaseline;
       let refusals: string[] = ["the page after the click could not be read"];
+      let lastRead: InfoPageAfterClickReading | null = null;
       let clean = 0;
       for (;;) {
-        refusals = infoPageAfterClickRefusals(await readAfterClick(p).catch(() => null), baseline);
+        lastRead = await readAfterClick(p).catch(() => null);
+        refusals = infoPageAfterClickRefusals(lastRead, baseline);
         // TWO clean readings, INFO_PAGE_AFTER_CLICK_CONFIRM_MS apart: a form skeleton that a script
         // swaps for a receipt after the first reading is caught by the second (round 2).
         if (!refusals.length) {
@@ -2148,12 +2196,19 @@ export async function installFilingBackstop(page: any, label = "run"): Promise<F
         if (!waitable || Date.now() >= deadline) break;
         await new Promise((r) => setTimeout(r, 500));
       }
+      // #279: ANOTHER INFORMATION PAGE (only its own shape refused: no form, at most acknowledgement
+      // wording, and not the verified page again) — not an incident. No lock; the NEXT INFORMATION
+      // PAGE hold (3b) lets nothing leave it but its own verified pass.
+      if (refusals.length && infoPageAfterClickIsNextInformationPage(refusals, lastRead, baseline)) {
+        infoProof = { page: p, entryId: baseline ? baseline.entryId : "", state: "next_info", checked: true };
+        return { ok: false, refusals, nextInfoPage: true, text: String(lastRead?.text ?? "") };
+      }
       if (refusals.length) bs.lockReview(`the page after a verified information page did not read as an unfiled form (${refusals[0].slice(0, 60)})`);
       // PROOF OF PROGRESS (round 3): a page that reads as an unfiled form must now TAKE this job's
       // data before anything leaves it — the hold (rule 3b) is armed on it until the learner proves it.
       else if (infoProof && infoProof.page === p && !infoProof.checked) infoProof.checked = true;
       else infoProof = { page: p, entryId: baseline ? baseline.entryId : "", state: "pending", checked: true };
-      return { ok: refusals.length === 0, refusals };
+      return { ok: refusals.length === 0, refusals, text: String(lastRead?.text ?? "") };
     },
     infoPageProofGiven() {
       if (!infoProof) return false;
