@@ -53,7 +53,11 @@ import { addressQueries, chooseAddressSuggestion, chooseCompanySuggestion, choos
  *  portal selected it on Enter and shows it OUTSIDE the box (`held` is that shown text); the search
  *  box itself may be empty afterwards, and a read-back of the box must not call that a miss. */
 export type TypeaheadOutcome =
-  | { outcome: "picked"; picked: string; held: string; typed: string; why: string; via?: "list" | "enter" | "search" }
+  | { outcome: "picked"; picked: string; held: string; typed: string; why: string; via?: "list" | "enter" | "search";
+      /** #161 — the required read-only box(es) of the box's form the forward question judges: one
+       *  labelled as a location selection ("The location you have selected"), or one the pick changed
+       *  to the job's address / tax lot (locationResultBoxesOf, locationResultRefusal). */
+      resultBoxes?: LocationResultBox[] }
   /** A near miss or several equal candidates: nothing picked, the box cleared; ask `question`. */
   | { outcome: "ask"; question: string; offered: string[]; typed: string; why: string }
   /** `portalSaid`: the portal's own no-match words, when it printed any. */
@@ -87,6 +91,8 @@ export interface TypeaheadRequest {
    *  refusal. The replay passes its guardAction (the full click gate); without one, the control's
    *  own in-page checks (never a submitter, never submit- or pay-worded) are the gate. */
   clickGate?: (loc: any) => Promise<string>;
+  /** #161 — the job's tax lot / parcel numbers: a location selection may show one instead of the street. */
+  parcels?: string[];
   /** How long one query waits for its suggestions to settle. Default 5 s. */
   suggestWaitMs?: number;
   /** The whole fill's deadline, every query included. Default 30 s — far inside the walk's stall
@@ -104,6 +110,8 @@ const SEARCH_RESULT_WAIT_MS = 10_000;
  *  bounded: suggestions, then this. */
 const SEARCH_PHASE_BUDGET_MS = 40_000;
 const SUGGEST_WAIT_DEFAULT_MS = 5_000;
+/** #161 — the second look for a list before any Enter (a list that came late is picked, not entered). */
+const LATE_LIST_WAIT_MS = 1_500;
 const TYPEAHEAD_BUDGET_DEFAULT_MS = 30_000;
 const NAME_SHIM = "globalThis.__name = globalThis.__name || function (f) { return f; };";
 
@@ -738,10 +746,164 @@ async function typeInto(page: any, loc: any, text: string): Promise<boolean> {
   return loc.fill(text, { timeout: 4000 }).then(() => true).catch(() => false);
 }
 
+// ---------------------------------------------------------------------------
+// #161 — THE REQUIRED SELECTION A LOCATION PICK FILLS, AND THE FORWARD CLICK THAT DEPENDS ON IT.
+//
+// A location step is a type-ahead whose pick fills a READ-ONLY, REQUIRED box beside it ("The location
+// you have selected"); the step's forward control ("Next Step") posts whatever that box holds. A pick
+// the search box shows but that box never took, or a box holding another address, must not be walked
+// past: the forward control is refused, named, for a person (owner's settling of #161, 2026-11-24:
+// "never click forward on an empty required location"). Read before the fill and again after a
+// pick; judged again just before the forward click, in every frame, by id or name (an Enter postback
+// re-renders the page). Agreement is the ONE address predicate (chooseAddressSuggestion), or the
+// job's tax lot / parcel inside the box's words.
+// ---------------------------------------------------------------------------
+
+/** A read-only required box a location pick fills: how it is found again, its label, its value. */
+export interface LocationResultBox { key: string; how: "id" | "name" | "mark"; label: string; value: string }
+
+/** A label that names a LOCATION SELECTION (generic; no place names): "The location you have
+ *  selected", "Parcel", "Tax lot", "Property address", "Selected address". Never a bare component
+ *  ("City", "Zip", "State") or a bare "Address" (a mailing or contractor address may sit beside it). */
+export const LOCATION_SELECTION_LABEL = /\blocation\b|\bparcel\b|\btax\s*lot\b|\b(property|site|project|job|work)\s+address\b|\b(selected|chosen)\b.*\baddress\b|\baddress\b.*\b(selected|chosen)\b/i;
+
 /**
- * Fill one typeahead box. Never throws; every outcome but "picked" leaves the box empty.
+ * Runs IN THE PAGE (#161). The VISIBLE read-only (or disabled) text boxes of the type-ahead box's
+ * form — the page when it has none — that are REQUIRED (required / aria-required, an asterisk in
+ * the label, a label marked required), with their values. Each is keyed by id, else name, else a
+ * data-al-locres mark. No nested functions (esbuild keepNames -> __name).
+ */
+export function locationResultBoxesInPage(el: Element): LocationResultBox[] {
+  const own = el as HTMLInputElement;
+  const scope: ParentNode = own.form || (el.closest ? el.closest("form") : null) || document;
+  const out: LocationResultBox[] = [];
+  const all = Array.from(scope.querySelectorAll("input, textarea"));
+  let n = 0;
+  for (const c of all) {
+    if (c === el) continue;
+    const type = String(c.getAttribute("type") || "text").toLowerCase();
+    if (c.tagName === "INPUT" && type !== "text" && type !== "search") continue;
+    const i = c as HTMLInputElement;
+    if (!(i.readOnly || i.disabled || c.getAttribute("aria-readonly") === "true")) continue;
+    const r = c.getBoundingClientRect();
+    const cs = getComputedStyle(c);
+    if (!(r.width > 1 && r.height > 1) || cs.display === "none" || cs.visibility === "hidden") continue;
+    const id = c.getAttribute("id") || "";
+    let labelEl: Element | null = id ? document.querySelector(`label[for="${CSS.escape(id)}"]`) : null;
+    if (!labelEl) labelEl = c.closest("label");
+    const raw = String((labelEl && labelEl.textContent) || c.getAttribute("aria-label") || c.getAttribute("title") || "").replace(/\s+/g, " ").trim();
+    const required = i.required || c.getAttribute("aria-required") === "true" || /\*/.test(raw)
+      || (!!labelEl && /(^|[\s_-])required($|[\s_-])/i.test(String(labelEl.getAttribute("class") || "")));
+    if (!required) continue;
+    const name = c.getAttribute("name") || "";
+    let key = id;
+    let how: "id" | "name" | "mark" = "id";
+    if (!key && name) { key = name; how = "name"; }
+    if (!key) { n++; key = `r${n}`; how = "mark"; c.setAttribute("data-al-locres", key); }
+    out.push({ key, how, label: raw.replace(/\*/g, "").replace(/\s+/g, " ").trim().slice(0, 80), value: String(i.value ?? "").replace(/\s+/g, " ").trim() });
+  }
+  return out;
+}
+
+/** Runs IN THE PAGE (#161). The current value of each keyed box; `found` false where it is not here. */
+export function locationResultReadInPage(keys: Array<{ key: string; how: string }>): Array<{ key: string; how: string; found: boolean; value: string }> {
+  const out: Array<{ key: string; how: string; found: boolean; value: string }> = [];
+  for (const k of keys) {
+    let el: Element | null = null;
+    if (k.how === "id") el = document.getElementById(k.key);
+    else if (k.how === "name") el = document.querySelector(`input[name="${CSS.escape(k.key)}"], textarea[name="${CSS.escape(k.key)}"]`);
+    else el = document.querySelector(`[data-al-locres="${CSS.escape(k.key)}"]`);
+    out.push({ key: k.key, how: k.how, found: !!el, value: el ? String((el as HTMLInputElement).value ?? "").replace(/\s+/g, " ").trim() : "" });
+  }
+  return out;
+}
+
+/** The boxes, read now in the page and each of its frames (the first frame that has a box answers for it). */
+export async function readLocationResultBoxes(page: any, boxes: LocationResultBox[]): Promise<Array<LocationResultBox & { found: boolean }>> {
+  const keys = boxes.map((b) => ({ key: b.key, how: b.how }));
+  const docs: any[] = [page];
+  try {
+    const main = typeof page?.mainFrame === "function" ? page.mainFrame() : null;
+    for (const f of (typeof page?.frames === "function" ? page.frames() : []) as any[]) if (f && f !== main && typeof f.evaluate === "function") docs.push(f);
+  } catch { /* the page alone */ }
+  const got = new Map<string, string>();
+  for (const d of docs) {
+    if (got.size === keys.length) break;
+    const read = await d.evaluate?.(locationResultReadInPage, keys).catch(() => null) as Array<{ key: string; how: string; found: boolean; value: string }> | null;
+    for (const r of Array.isArray(read) ? read : []) if (r.found && !got.has(`${r.how}\u0000${r.key}`)) got.set(`${r.how}\u0000${r.key}`, r.value);
+  }
+  return boxes.map((b) => {
+    const k = `${b.how}\u0000${b.key}`;
+    return { ...b, found: got.has(k), value: got.get(k) ?? "" };
+  });
+}
+
+/** The boxes the forward question judges, from the reads before and after the pick: a box whose label
+ *  names a location selection (LOCATION_SELECTION_LABEL), whatever it holds; or a box the pick
+ *  changed TO the job's address or tax lot. Not judged: a box the pick filled with a component (a
+ *  "City", a "Zip"), or an empty box with no location wording (a date a later step fills). */
+export function locationResultBoxesOf(before: LocationResultBox[], after: Array<LocationResultBox & { found: boolean }>, site: TypeaheadSite, parcels: string[] = []): LocationResultBox[] {
+  const out: LocationResultBox[] = [];
+  for (const b of before) {
+    const a = after.find((x) => x.key === b.key && x.how === b.how);
+    if (!a || !a.found) continue;
+    const named = LOCATION_SELECTION_LABEL.test(b.label);
+    const tookTheJob = !!a.value && a.value !== b.value && locationAgrees(a.value, site, parcels);
+    if (named || tookTheJob) out.push({ key: b.key, how: b.how, label: b.label, value: a.value });
+  }
+  return out;
+}
+
+const alnum = (s: string): string => String(s ?? "").toLowerCase().replace(/[^a-z0-9]+/g, "");
+
+/** Does this box's text name the job's location: the job's address by the ONE address predicate, or
+ *  its tax lot / parcel (letters and digits only, at least 6) inside the words. */
+export function locationAgrees(value: string, site: TypeaheadSite, parcels: string[] = []): boolean {
+  const v = String(value ?? "").replace(/\s+/g, " ").trim();
+  if (!v) return false;
+  if (chooseAddressSuggestion([v], site).kind === "pick") return true;
+  const a = alnum(v);
+  return parcels.some((p) => { const k = alnum(p); return k.length >= 6 && a.includes(k); });
+}
+
+/** THE FORWARD QUESTION (#161): "" = the step's forward control may be clicked, else why not. Each
+ *  box the pick fills, read now: missing from the page is not judged (the page moved on); empty, or
+ *  holding something that is not the job's location, refuses. */
+export function locationResultRefusal(read: Array<LocationResultBox & { found: boolean }>, site: TypeaheadSite, parcels: string[] = []): string {
+  for (const b of read) {
+    if (!b.found) continue;
+    const name = b.label ? `"${b.label}"` : "the location selection";
+    if (!b.value) return `the required ${name} box is empty — the location was not selected, so the step's forward control is not clicked`;
+    if (!locationAgrees(b.value, site, parcels)) return `the required ${name} box shows "${b.value.slice(0, 80)}", which is not the job's address (${streetOnly(site)}) — the forward control is not clicked`;
+  }
+  return "";
+}
+
+const streetOnly = (site: TypeaheadSite): string => String(site?.street ?? "").replace(/\s+/g, " ").trim().slice(0, 80) || "no street on the project";
+
+/** A forward control by its words (the step's own "Next Step", "Continue", "Save and Continue"). */
+export const LOCATION_FORWARD_WORDS = /\b(next|continue|proceed|forward|save\s*(and|&)\s*continue)\b/i;
+
+/**
+ * Fill one typeahead box. Never throws; every outcome but "picked" leaves the box empty. A pick of
+ * the job's own address (mode "site") also says which required read-only boxes it filled
+ * (`resultBoxes`, #161), for the forward question.
  */
 export async function fillTypeahead(page: any, loc: any, req: TypeaheadRequest): Promise<TypeaheadOutcome> {
+  const before: LocationResultBox[] = req.mode === "site" && loc && typeof loc.evaluate === "function"
+    ? await loc.evaluate(locationResultBoxesInPage, undefined, { timeout: 1500 }).catch(() => [] as LocationResultBox[])
+    : [];
+  const out = await fillTypeaheadInner(page, loc, req);
+  if (out.outcome !== "picked" || !Array.isArray(before) || !before.length) return out;
+  const site: TypeaheadSite = { street: req.site?.street ?? req.value, city: req.site?.city, zip: req.site?.zip, state: req.site?.state };
+  const boxes = locationResultBoxesOf(before, await readLocationResultBoxes(page, before), site, req.parcels ?? []);
+  return boxes.length ? { ...out, resultBoxes: boxes } : out;
+}
+
+/**
+ * The fill itself (fillTypeahead wraps it). Never throws; every outcome but "picked" leaves the box empty.
+ */
+async function fillTypeaheadInner(page: any, loc: any, req: TypeaheadRequest): Promise<TypeaheadOutcome> {
   const budgetMs = req.budgetMs && req.budgetMs > 0 ? req.budgetMs : TYPEAHEAD_BUDGET_DEFAULT_MS;
   const startedAt = Date.now();
   let deadline = startedAt + budgetMs; // extended once when the search phase begins (SEARCH_PHASE_BUDGET_MS)
@@ -813,6 +975,22 @@ export async function fillTypeahead(page: any, loc: any, req: TypeaheadRequest):
       if (freshSaid) portalSaidFresh = true;
       portalSaid = freshSaid || freshNoMatch(before?.notes, afterTyping?.notes) || portalSaid;
       if (!t.enter || Date.now() >= deadline) continue;
+      // #161 — A LIST THAT CAME LATE IS STILL THE ANSWER, NEVER ENTER. A type-ahead whose results
+      // arrive just after the wait above (a slow geocode) selects by its suggestion: picking a result
+      // is what fills the required selection, and Enter would post the form's hidden default instead.
+      // Read once more before any Enter; a list now up is judged exactly as the first read's.
+      {
+        const late = await settledSuggestions(doc, controlsId, LATE_LIST_WAIT_MS, deadline);
+        if (late.length) {
+          if (t !== tries[tries.length - 1] && chooseAddressSuggestion(late, site).kind === "none") {
+            wholeListed = late.map(suggestionText).filter(Boolean).length;
+            continue;
+          }
+          rows = late;
+          usedQuery = t.q;
+          break;
+        }
+      }
       // No list for the whole address: a search that runs on Enter (#139), through the caller's Enter
       // door (the replay's guardAction), else the shared Enter question.
       const refusal = req.enterGate

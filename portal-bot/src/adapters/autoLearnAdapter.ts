@@ -11,7 +11,7 @@ import { knowledgeNameMatchScore } from "../../../backend/src/knowledgeBase";
 import { BasePortalAdapter, HUMAN_REVIEW_MESSAGE, type PortalContext, type PortalStepResult } from "../adapter";
 import { openPortal } from "../browser";
 import { selectWithFallback, readClosedComboboxOptions } from "../comboboxFill";
-import { fillTypeahead, typeaheadBoxReason, typeaheadFailureLine } from "../typeaheadFill";
+import { fillTypeahead, locationResultRefusal, readLocationResultBoxes, typeaheadBoxReason, typeaheadFailureLine, type LocationResultBox } from "../typeaheadFill";
 import { usStateCode } from "../../../backend/src/usState";
 import { typeaheadMatchMode, type TypeaheadSite } from "../typeaheadMatch";
 import { withoutLearnDataInSelectors, type LearnIdentity } from "../learnDataInSelectors";
@@ -3222,6 +3222,11 @@ export class AutoLearnAdapter extends BasePortalAdapter {
   private readonly typeaheadTried = new Map<string, string>();
   /** #575 — the job's site address, which an address suggestion is judged against (set by learn()). */
   private typeaheadSite: TypeaheadSite = { street: "" };
+  /** #161 — the job's tax lot / parcel numbers, which a location selection may show instead of the street. */
+  private typeaheadParcels: string[] = [];
+  /** #161 — the required read-only box(es) this page's location pick filled; asked before the page is
+   *  left (typeaheadLocationResult): an empty or disagreeing selection ends the walk, named. */
+  private locationResultGuard: { boxes: LocationResultBox[]; site: TypeaheadSite; label: string } | null = null;
   /** #139 — a type-ahead that found no match and had no manual-entry door (or the door failed):
    *  the NAMED stop the page ends with (label, what was typed, the portal's words). Read once the
    *  page's fills are applied, like typeaheadQuestion. `label` joins the run's required misses. */
@@ -5449,6 +5454,10 @@ export class AutoLearnAdapter extends BasePortalAdapter {
         // #139: the one-line address a location search is typed with ("street, city, ST zip").
         state: String(project.state ?? "").trim() || undefined,
       };
+      {
+        const snap = ((project as { parserSnapshot?: Record<string, unknown> }).parserSnapshot ?? {}) as Record<string, unknown>;
+        this.typeaheadParcels = [this.siteContactIdentity?.parcel, snap.apn, snap.parcelNumber].map((p) => String(p ?? "").trim()).filter(Boolean);
+      }
       // The secrets a recorded step binds by name, read from the SAME project fields the replay's
       // value map uses (portalRecipes.resolveRecipeFieldValues: accountNumber / meterNumber).
       this.secretSource = {
@@ -10649,6 +10658,14 @@ export class AutoLearnAdapter extends BasePortalAdapter {
       //      dialog's own Save copies them into the page. Left open, the page advanced with them blank.
       if (!isDashboard) await this.popupCommitPass(steps, pageCount).catch(() => null);
 
+      // d4b'') THE LOCATION THE PAGE IS LEFT WITH (#161). A location step's pick fills a required
+      //        read-only selection; the step's forward control posts whatever it holds. Empty, or not
+      //        this job's address: the walk ends here, named — the forward control is never clicked.
+      {
+        const stopped = await this.typeaheadLocationResult(steps, pageCount, portalNotices, fillVerifyMisses, pageTrace);
+        if (stopped) return stopped;
+      }
+
       // d4c) THE PAGE AS THE WALK LEAVES IT (#536, #534) — a field the portal shows as invalid, a
       //      required box left unchecked, an equipment write that strayed, an equipment value the
       //      portal did not keep, a computed total still to be recalculated. Reads only; nothing here
@@ -12528,7 +12545,7 @@ export class AutoLearnAdapter extends BasePortalAdapter {
       return refusal;
     };
     const out = loc
-      ? await fillTypeahead(this.page, loc, { value: v, mode, site, enterGate })
+      ? await fillTypeahead(this.page, loc, { value: v, mode, site, enterGate, parcels: this.typeaheadParcels })
       : { outcome: "unusable" as const, why: "the box could not be located" };
     // Outcome and counts only — never the address or the suggestions themselves.
     this.debug?.event({ type: "typeahead_fill", label: label.slice(0, 60), mode, outcome: out.outcome, ...("offered" in out ? { offered: out.offered.length } : {}), ...(out.outcome === "picked" && out.via ? { via: out.via } : {}) });
@@ -12554,6 +12571,8 @@ export class AutoLearnAdapter extends BasePortalAdapter {
     }
     // A pick the portal SELECTED (Enter, or the box's own search control — #198) is shown outside the box.
     if (out.via === "enter" || out.via === "search") this.typeaheadEnterPicks.set(boxKey, { label, held: out.held });
+    // #161: the required selection this pick filled is asked again before the page is left.
+    if (mode === "site" && out.resultBoxes?.length) this.locationResultGuard = { boxes: out.resultBoxes, site, label };
     const step: RecipeStep = {
       action: "fill",
       phase: "fill",
@@ -12586,6 +12605,27 @@ export class AutoLearnAdapter extends BasePortalAdapter {
       if (s.note) alreadyFilledLabels.push(s.note);
     }
     return fills;
+  }
+
+  /** #161 — THE FORWARD QUESTION, BEFORE THE PAGE IS LEFT. The required read-only selection this
+   *  page's location pick filled ("The location you have selected"), read now: empty, or holding
+   *  something that is not the job's address or tax lot, ends the walk NAMED — the step's forward
+   *  control is never clicked on an empty or wrong location. null when there is nothing to ask. */
+  private async typeaheadLocationResult(steps: RecipeStep[], pageCount: number, portalNotices: string[], fillVerifyMisses: string[], pageTrace: string[]): Promise<LearnResult | null> {
+    const g = this.locationResultGuard;
+    if (!g) return null;
+    this.locationResultGuard = null;
+    const refusal = locationResultRefusal(await readLocationResultBoxes(this.page, g.boxes), g.site, this.typeaheadParcels);
+    if (!refusal) return null;
+    this.debug?.event({ type: "typeahead_location_unselected", page: pageCount, label: g.label.slice(0, 60) });
+    const misses = fillVerifyMisses.includes(g.label) ? [...fillVerifyMisses] : [...fillVerifyMisses, g.label];
+    return {
+      ...fail(steps, this.portalName, `Stopped for a person on page ${pageCount}: 📍 Not selected — "${g.label}": ${refusal}. Select the location by hand (or correct the project's address) and run again; the steps before this page were recorded.`, null, pageCount, portalNotices),
+      stopReason: "typeahead_location_unselected",
+      typeaheadMisses: [...this.typeaheadMisses],
+      requiredFieldMisses: misses,
+      pageTrace: pageTrace.slice(0, 40),
+    };
   }
 
   /** #139 — the NAMED stop a type-ahead with no match (and no working door) ends its page with; null
