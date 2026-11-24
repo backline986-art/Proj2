@@ -10385,9 +10385,18 @@ export class AutoLearnAdapter extends BasePortalAdapter {
       //     only resurfaces (if at all) as a blank at the review screen. Read each filled control
       //     back; re-apply once if it didn't hold; record any REQUIRED field that still won't hold
       //     its value so the operator sees exactly what to fix.
+      // What THIS page's read-back reported unheld, and which of those it newly put on the run's
+      // lists: the only labels the re-plan below may take off them again (settleReplannedWrites) —
+      // another page's blank of the same label stays.
+      let didNotHoldHere: string[] = [];
+      const newMissesHere: string[] = [];
+      const newDidNotHoldHere: string[] = [];
       if (appliedThisPage.length > 0) {
         const misses = await this.verifyFillsLanded(appliedThisPage);
+        didNotHoldHere = misses;
         for (const m of misses) {
+          if (!fillVerifyMisses.includes(m)) newMissesHere.push(m);
+          if (!missesDidNotHold.includes(m)) newDidNotHoldHere.push(m);
           if (!fillVerifyMisses.includes(m)) fillVerifyMisses.push(m);
           // TYPED-AND-LOST AND NEVER-TYPED NEED OPPOSITE FIXES, and they were being merged
           // into one list. Ameren's review reports Street, Name, Company, Address blank every
@@ -10397,6 +10406,8 @@ export class AutoLearnAdapter extends BasePortalAdapter {
           if (!missesDidNotHold.includes(m)) missesDidNotHold.push(m);
         }
         if (misses.length) this.debug?.event({ type: "fills_did_not_hold", page: pageCount, labels: misses.slice(0, 8) });
+        // After the read-back's one re-apply: a select of a value the list never offered is not a step.
+        this.dropUnofferedSelectSteps(steps, pageStepsFrom, appliedThisPage, alreadyFilledLabels);
       }
 
       // d4b) REQUIRED-FIELD SWEEP — before advancing, scan the live page for REQUIRED fields
@@ -10417,12 +10428,23 @@ export class AutoLearnAdapter extends BasePortalAdapter {
           const replanKey = scrapedIdentity ? `${scrapedIdentity.where}#${scrapedIdentity.controls}` : deadPageKey(url, fields.length);
           if (!requiredReplanned.has(replanKey)) {
             requiredReplanned.add(replanKey);
+            const replanStepsFrom = steps.length;
+            const replanAppliedFrom = appliedThisPage.length;
             const filled = await this.replanRequiredBlanks({ blanks: unfilled, url, pageTitle, steps, alreadyFilledLabels, appliedThisPage });
             this.debug?.event({ type: "required_blank_replan", page: pageCount, blanks: unfilled.slice(0, 8), filled });
+            // The re-plan's own select of a value the list does not offer is not a step either.
+            this.dropUnofferedSelectSteps(steps, replanStepsFrom, appliedThisPage, alreadyFilledLabels);
             if (filled > 0) {
               await this.waitForAutosaveIndicator(3000);
               await sleep(400);
               unfilled = await this.collectUnfilledRequired();
+              // THE RECIPE AND THE LISTS SAY THE PAGE AS IT IS LEFT: a write the read-back reported
+              // unheld, which the re-plan then wrote and the page now holds, is one step and no blank.
+              await this.settleReplannedWrites({
+                steps, pageStepsFrom, stepsFrom: replanStepsFrom, applied: appliedThisPage, appliedFrom: replanAppliedFrom,
+                didNotHold: didNotHoldHere, unfilled,
+                lists: [{ list: fillVerifyMisses, addedHere: newMissesHere }, { list: missesDidNotHold, addedHere: newDidNotHoldHere }],
+              }).catch(() => null);
             }
           }
         }
@@ -12812,7 +12834,10 @@ export class AutoLearnAdapter extends BasePortalAdapter {
           // A CHOICE THE LIST DOES NOT HOLD IS SAID, WITH THE LIST (#530). This miss used to be
           // silent here and surface only later as "fills_did_not_hold" + "required_never_filled",
           // which cannot tell a portal that cleared the answer from one that never offered it.
-          if (!took) await this.noteSelectNotOffered(loc, field.label || "", value, sensitive);
+          // ...AND IT IS NOT A STEP: the scraped control is marked, and the page's read-back drops the
+          // step unless a later attempt at the same control took (dropUnofferedSelectSteps).
+          if (took) this.unofferedSelects.delete(field.selector);
+          else if (await this.noteSelectNotOffered(loc, field.label || "", value, sensitive)) this.unofferedSelects.add(field.selector);
         } else if (action === "check") {
           if (negated) {
             // Explicit false/no → uncheck the box (leave it unchecked).
@@ -14315,19 +14340,21 @@ export class AutoLearnAdapter extends BasePortalAdapter {
    *  than as a fill the portal took back. Native <select> only (a styled widget's list is not in
    *  the DOM until opened). The wanted value of a sensitive field is never logged. Never throws. */
   private selectNotOfferedSeen = new Set<string>();
+  /** Returns true when the control is a native <select> whose list was read (so the miss is the
+   *  list's, whether or not this call was the one that logged it); false for anything else. */
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  private async noteSelectNotOffered(loc: any, label: string, value: string, sensitive: boolean): Promise<void> {
+  private async noteSelectNotOffered(loc: any, label: string, value: string, sensitive: boolean): Promise<boolean> {
     try {
-      if (!loc || typeof loc.evaluate !== "function") return;
+      if (!loc || typeof loc.evaluate !== "function") return false;
       const offered = await loc.evaluate((el: Element) => {
         if ((el.tagName || "").toLowerCase() !== "select") return null;
         return Array.from((el as HTMLSelectElement).options)
           .map((o) => (o.textContent || "").replace(/\s+/g, " ").trim())
           .filter((t) => t && !/^(please\s+)?(select|choose)\b\.{0,3}|^--/i.test(t));
       }).catch(() => null) as string[] | null;
-      if (!Array.isArray(offered)) return;
+      if (!Array.isArray(offered)) return false;
       const key = sensitive ? label : `${label}\u0000${value}`;
-      if (this.selectNotOfferedSeen.has(key)) return;
+      if (this.selectNotOfferedSeen.has(key)) return true;
       this.selectNotOfferedSeen.add(key);
       this.debug?.event({
         type: "select_value_not_offered",
@@ -14336,7 +14363,100 @@ export class AutoLearnAdapter extends BasePortalAdapter {
         offered: offered.slice(0, 12).map((o) => o.slice(0, 60)),
         ...(offered.length > 12 ? { more: offered.length - 12 } : {}),
       });
-    } catch { /* reporting only */ }
+      return true;
+    } catch { return false; /* reporting only */ }
+  }
+
+  /** The scraped controls (by their selector object, which the recorded step and the page's applied
+   *  record share) whose last select took NONE of a native list's options. Cleared when a later
+   *  attempt at the same control takes — the read-back's one re-apply, for a list that loaded late. */
+  private unofferedSelects = new WeakSet<object>();
+
+  /** A SELECT OF A VALUE THE LIST NEVER OFFERED IS NOT A RECORDED STEP. The planner chose a value a
+   *  required native select does not hold; the step was recorded anyway, the page's re-plan then
+   *  chose an offered one, and the recipe carried both — a replay would select a value that is not
+   *  there, and two different writes to one control on a page are refused by the sequence check.
+   *  Dropped from `steps[from..]` with its applied record, so no later pass re-tries it and the
+   *  recipe says only what the page took. The blank itself is reported as before: a required one
+   *  was already named by the read-back, and the required sweep still finds it. */
+  private dropUnofferedSelectSteps(steps: RecipeStep[], from: number, applied: AppliedFill[], alreadyFilledLabels: string[]): void {
+    for (let k = steps.length - 1; k >= Math.max(0, from); k--) {
+      const st = steps[k];
+      if (st.action !== "select" || !st.selector || !this.unofferedSelects.has(st.selector)) continue;
+      steps.splice(k, 1); // descending order: earlier indices stay valid
+      for (let a = applied.length - 1; a >= 0; a--) if (applied[a].selector === st.selector) applied.splice(a, 1);
+      const at = st.note ? alreadyFilledLabels.lastIndexOf(st.note) : -1;
+      if (at >= 0) alreadyFilledLabels.splice(at, 1);
+      this.debug?.event({ type: "unoffered_select_not_recorded", label: String(st.note ?? "").slice(0, 80) });
+    }
+  }
+
+  /** WHAT THE PAGE'S RE-PLAN WROTE SUCCESSFULLY REPLACES WHAT DID NOT HOLD. `didNotHold` are the
+   *  labels this page's read-back just reported (typed, re-applied once, still not held); the
+   *  re-plan's own writes are `applied[appliedFrom..]` / `steps[stepsFrom..]`. For each re-plan
+   *  write that READS BACK AS HELD:
+   *   - this page's earlier fill / select of the same scraped control, where that write is one the
+   *     read-back said did not hold, leaves the recorded steps (the page never took it; with it the
+   *     recipe writes the control twice, and the sequence check refuses the pair);
+   *   - its label leaves `lists` (the run's blank / typed-but-not-kept lists) when the sweep after
+   *     the re-plan (`unfilled`) no longer names it and no other control of that label on this page
+   *     is still unheld. A list loses only a label THIS page put on it (`addedHere`): another
+   *     page's blank of the same label stays reported. A field still blank is never retracted. */
+  private async settleReplannedWrites(ctx: {
+    steps: RecipeStep[];
+    pageStepsFrom: number;
+    stepsFrom: number;
+    applied: AppliedFill[];
+    appliedFrom: number;
+    didNotHold: string[];
+    unfilled: string[];
+    lists: Array<{ list: string[]; addedHere: string[] }>;
+  }): Promise<void> {
+    if (!ctx.didNotHold.length) return;
+    const norm = (s: string): string => String(s ?? "").replace(/[*:]/g, " ").replace(/\s+/g, " ").trim().toLowerCase();
+    const holds = async (a: AppliedFill): Promise<boolean> => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const loc = (await this.locator(a.selector).catch(() => null)) as any;
+      return !!loc && this.fieldHoldsValue(loc, a);
+    };
+    let { stepsFrom, appliedFrom } = ctx;
+    const answered = new Set<string>();
+    for (const late of ctx.applied.slice(appliedFrom)) {
+      if (late.sensitive || !ctx.didNotHold.includes(late.label) || !(await holds(late))) continue;
+      answered.add(late.label);
+      const key = JSON.stringify(late.selector);
+      let superseded = false;
+      for (let a = appliedFrom - 1; a >= 0; a--) {
+        const early = ctx.applied[a];
+        if (JSON.stringify(early.selector) !== key || !ctx.didNotHold.includes(early.label)) continue;
+        ctx.applied.splice(a, 1);
+        appliedFrom--;
+        superseded = true;
+      }
+      if (!superseded) continue;
+      for (let k = stepsFrom - 1; k >= Math.max(0, ctx.pageStepsFrom); k--) {
+        const st = ctx.steps[k];
+        if ((st.action !== "fill" && st.action !== "select") || JSON.stringify(st.selector) !== key) continue;
+        ctx.steps.splice(k, 1); // descending order: earlier indices stay valid
+        stepsFrom--;
+        this.debug?.event({ type: "unheld_write_superseded", label: late.label.slice(0, 80) });
+      }
+    }
+    const stillBlank = ctx.unfilled.map(norm);
+    for (const label of answered) {
+      if (stillBlank.includes(norm(label))) continue;
+      let allHeld = true;
+      for (const a of ctx.applied) {
+        if (a.label !== label || !a.required || (a.sensitive && !a.secretBinding)) continue;
+        if (!(await holds(a))) { allHeld = false; break; }
+      }
+      if (!allHeld) continue;
+      for (const { list, addedHere } of ctx.lists) {
+        const at = addedHere.includes(label) ? list.indexOf(label) : -1;
+        if (at >= 0) list.splice(at, 1);
+      }
+      this.debug?.event({ type: "did_not_hold_answered", label: label.slice(0, 80) });
+    }
   }
 
   private async verifyFillsLanded(applied: AppliedFill[], opts?: { budgetMs?: number; requiredOnly?: boolean }): Promise<string[]> {
@@ -14401,7 +14521,8 @@ export class AutoLearnAdapter extends BasePortalAdapter {
             if (again.outcome === "ask" && !this.typeaheadQuestion) this.typeaheadQuestion = line;
           }
         } else if (a.fieldType === "select") {
-          if (!(await selectWithFallback(this.page!, loc, a.expected))) await this.noteSelectNotOffered(loc, a.label, a.expected, a.sensitive);
+          if (await selectWithFallback(this.page!, loc, a.expected)) this.unofferedSelects.delete(a.selector);
+          else await this.noteSelectNotOffered(loc, a.label, a.expected, a.sensitive);
         } else if (a.fieldType === "checkbox" || a.fieldType === "radio") {
           if (/^(true|yes|on|1)$/i.test(a.expected) && typeof loc.check === "function") await loc.check({ timeout: 5000 });
         } else if (typeof loc.fill === "function") {
