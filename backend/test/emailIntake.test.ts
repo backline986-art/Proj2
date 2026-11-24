@@ -212,6 +212,26 @@ await run("the reply goes to the From address with the status link and what is m
   assert.ok(!String(comm?.body).includes(METER));
 });
 
+await run("the first reply already links the job's client form for job value, homeowner email and phone (back-test 2026-11-24)", () => {
+  const mail = outbox[0];
+  assert.match(mail.body, /Please fill these in on one short form \(no login needed\)/);
+  assert.match(mail.body, /Homeowner email/);
+  assert.match(mail.body, /Homeowner phone/);
+  assert.match(mail.body, /Project contract \/ installed cost/);
+  const req = db.get<Record<string, unknown>>("SELECT * FROM project_intake_requests WHERE project_id = ? AND status = 'pending'", [projectId]);
+  assert.ok(req, "no client form request was made at intake");
+  assert.ok(mail.body.includes(`https://keelix.example.test/intake?token=${req!.token}`), "the reply does not carry the job's own form link");
+  for (const f of ["jobValue", "homeownerEmail", "homeownerPhone"]) assert.ok(String(req!.fields_json).includes(f), `the form does not ask ${f}`);
+});
+
+await run("the form section is left out when there is nothing to ask, or no reachable link", () => {
+  const p = { projectAddress: "1 Synthetic Way", city: "", state: "" } as never;
+  const base = { project: p, attached: false, link: "https://keelix.example.test/status?token=t", missing: [], unsure: [], refused: [], secrets: [] };
+  assert.doesNotMatch(intakeReplyEmail(base).body, /short form/);
+  assert.doesNotMatch(intakeReplyEmail({ ...base, form: { url: "https://keelix.example.test/intake?token=x", items: [] } }).body, /short form/);
+  assert.doesNotMatch(intakeReplyEmail({ ...base, form: { url: "/intake?token=x", items: ["Homeowner email"] } }).body, /short form/, "a relative link is not a link");
+});
+
 await run("the same message re-read by the next poll makes nothing new", async () => {
   const r = await processIntakeMessages(db, [firstRaw], opts);
   assert.equal(r.skippedDuplicates, 1);
