@@ -1,4 +1,5 @@
 import crypto from "node:crypto";
+import { currentMessageText, decodeEncodedWords, decodeMimeBody } from "./mimeText";
 import fs from "node:fs";
 import readline from "node:readline";
 import type {
@@ -1801,31 +1802,49 @@ export function emailAsksForInformation(text: string): boolean {
     });
 }
 
-function correctionTaxonomy(value: string, bucket: MboxEmailBucket): { category: string | null; subcategory: string | null; requiredAction: string | null; docs: string[] } {
-  const docs = docsFromCorrection(value);
-  const docAction = (category: string, subcategory: string, action: string, doc?: string) => ({
-    category,
-    subcategory,
-    requiredAction: action,
-    docs: doc ? mergeUnique(docs, [doc]) : docs,
-  });
-  if (bucket === "fee_request") return docAction("Fees", "Payment", "Pay required fee or capture fee due before issuance.");
-  if (bucket === "inspection_final_notice") return docAction("Inspection", "Final notice", "Record inspection/final status and update project stage.");
-  if (/revision narrative|rev narrative/i.test(value)) return docAction("Documentation", "Revision Narrative", "Upload revision narrative.", "Revision narrative");
-  if (/owner authorization|authorization|signature|signed/i.test(value)) return docAction("Documentation", "Owner Authorization", "Upload signed owner authorization/application.", "Signed application / owner authorization");
-  if (/meter photo|meter picture/i.test(value)) return docAction("Utility/NEM", "Meter Photo", "Upload legible meter photo that matches parsed meter number.", "Meter photo");
-  if (/utility bill|account holder|account verification|account number/i.test(value)) return docAction("Utility/NEM", "Account Verification", "Upload/verify utility bill account holder, account number, and service address.", "Utility bill / account / meter evidence");
-  if (/1741|inverter settings|smart inverter|ieee 1547/i.test(value)) return docAction("Utility/NEM", "Inverter Settings", "Upload inverter settings / UL 1741 SB evidence.", "UL 1741 SB / inverter settings evidence");
-  if (/single line|one.line|one-line|sld|3-line|three.line/i.test(value)) return docAction("Electrical", "One-Line / SLD", "Revise/upload one-line or SLD.", "Electrical one-line / SLD / 3-line");
-  if (/site plan|plot plan|roof plan/i.test(value)) return docAction("Documentation", "Site/Roof Plan", "Revise/upload site or roof plan.", "Site / plot plan");
-  if (/fire|pathway|setback/i.test(value)) return docAction("Design", "Fire Pathway", "Add fire pathway/setback evidence to plan set.", "Fire access pathway plan");
-  if (/rafter|truss|framing|structural|engineer|stamp/i.test(value)) return docAction("Structural", "Framing/Engineering", "Provide structural/framing evidence or stamped engineering.", "Roof framing plan or structural documentation");
-  if (/label|placard/i.test(value)) return docAction("Electrical", "Labels/Placards", "Upload label/placard schedule.", "PV label / placard schedule");
-  if (/application|form/i.test(value)) return docAction("Documentation", "Application Form", "Complete and upload required application form.", "Required application form");
-  if (bucket === "permit_correction" || bucket === "nem_correction" || bucket === "missing_info_request") {
-    return docAction("Documentation", "General Missing/Correction", "Review email, add missing document/data, and update pre-submission QC rule.");
-  }
-  return { category: null, subcategory: null, requiredAction: null, docs };
+// WHAT AN IMPORTED EMAIL ASKS FOR, read from the NEWEST message only (mimeText.currentMessageText:
+// no quoted history, no signature block). Each pattern names the thing being asked for, not a word
+// that can sit anywhere in an email: the back-test (2026-11-23) found a footer's "signature" filed as
+// a missing owner signature and any "application"/"form" filed as a missing application form.
+const MBOX_DEFICIENCY_PATTERNS: Array<{ re: RegExp; category: string; subcategory: string; action: string; doc: string }> = [
+  { re: /\brev(?:ision)?\.?\s+narrative\b/i, category: "Documentation", subcategory: "Revision Narrative", action: "Upload revision narrative.", doc: "Revision narrative" },
+  {
+    re: /\b(?:home)?owner'?s?\s+authori[sz]ation\b|\bletter\s+of\s+authori[sz]ation\b|\b(?:missing|required|requires?|needs?|provide|obtain|lacks?|without)\s+(?:a\s+|the\s+)?(?:(?:home)?owner'?s?\s+|customer'?s?\s+|applicant'?s?\s+|wet\s+)?signatures?\b|\b(?:not|un)\s?signed\b|\bmust\s+be\s+signed\b|\bsign(?:ed)?\s+(?:and|&)\s+(?:dated?|return)/i,
+    category: "Documentation", subcategory: "Owner Authorization", action: "Upload signed owner authorization/application.", doc: "Signed application / owner authorization",
+  },
+  { re: /\bmeter\s+(?:photo|picture|image)s?\b/i, category: "Utility/NEM", subcategory: "Meter Photo", action: "Upload legible meter photo that matches parsed meter number.", doc: "Meter photo" },
+  { re: /\b(?:copy\s+of\s+(?:the\s+|a\s+)?utility\s+bill|utility\s+bill\s+(?:is\s+)?(?:required|needed|missing)|account\s+holder\s+(?:name\s+)?(?:does\s+not|doesn'?t)\s+match|account\s+verification|(?:incorrect|invalid|missing)\s+account\s+number)\b/i, category: "Utility/NEM", subcategory: "Account Verification", action: "Upload/verify utility bill account holder, account number, and service address.", doc: "Utility bill / account / meter evidence" },
+  { re: /\b(?:ul\s?)?1741(?:-?sb)?\b|\binverter\s+settings?\b|\bsmart\s+inverter\b|\bieee\s?1547\b/i, category: "Utility/NEM", subcategory: "Inverter Settings", action: "Upload inverter settings / UL 1741 SB evidence.", doc: "UL 1741 SB / inverter settings evidence" },
+  { re: /\bsingle[\s-]line\b|\bone[\s-]line\b|\bsld\b|\b(?:3|three)[\s-]line\b/i, category: "Electrical", subcategory: "One-Line / SLD", action: "Revise/upload one-line or SLD.", doc: "Electrical one-line / SLD / 3-line" },
+  { re: /\b(?:site|plot|roof)\s+plan\b/i, category: "Documentation", subcategory: "Site/Roof Plan", action: "Revise/upload site or roof plan.", doc: "Site / plot plan" },
+  { re: /\bfire\s+(?:access|pathways?|setbacks?|clearances?|code)\b|\b(?:access\s+)?pathways?\b|\bsetbacks?\b/i, category: "Design", subcategory: "Fire Pathway", action: "Add fire pathway/setback evidence to plan set.", doc: "Fire access pathway plan" },
+  { re: /\b(?:rafters?|truss(?:es)?|framing|structural|engineer(?:ing|ed)?\s+(?:letter|calcs?|calculations?|report|review)|(?:pe|wet|engineer'?s?)\s+stamp|stamped)\b/i, category: "Structural", subcategory: "Framing/Engineering", action: "Provide structural/framing evidence or stamped engineering.", doc: "Roof framing plan or structural documentation" },
+  { re: /\b(?:labels?|placards?)\b/i, category: "Electrical", subcategory: "Labels/Placards", action: "Upload label/placard schedule.", doc: "PV label / placard schedule" },
+  {
+    re: /\b(?:complete|completed|submit|fill(?:ed)?\s+out|provide|upload|attach|missing|incomplete|revise|correct)\s+(?:the\s+|a\s+|an\s+|your\s+)?(?:[\w-]+\s+){0,3}(?:application|form)s?\b|\b(?:application|form)s?\s+(?:is\s+|are\s+|was\s+)?(?:incomplete|missing|required|not\s+(?:complete|signed))\b/i,
+    category: "Documentation", subcategory: "Application Form", action: "Complete and upload required application form.", doc: "Required application form",
+  },
+];
+
+// A plan-review correction stated outright, not only an "information needed" ask (emailAsksForInformation).
+const MBOX_CORRECTION_STATED = /\b(?:corrections?\s+(?:are\s+|is\s+)?(?:required|needed)|deficienc(?:y|ies)|(?:plan\s+(?:check|review)|review)\s+comments|check\s?sheets?|not\s+approved|(?:was|has\s+been|is)\s+rejected|(?:revise|correct)\s+and\s+resubmit|please\s+resubmit|failed\s+review)\b/i;
+
+/**
+ * Category, action and document for an imported email — ONLY when it is a real deficiency request:
+ * a correction bucket, the newest message ASKS (emailAsksForInformation) or states a correction, and
+ * it names a specific thing. A notice ("has been assigned to your application", "is under review"),
+ * a generic "additional information is required, log in to view" and an approval carry none: they
+ * stay timeline/status records and are never filed as a correction example or a required document.
+ * Fee and inspection emails keep their own categories (they are not deficiencies).
+ */
+function correctionTaxonomy(askText: string, bucket: MboxEmailBucket): { category: string | null; subcategory: string | null; requiredAction: string | null; docs: string[] } {
+  if (bucket === "fee_request") return { category: "Fees", subcategory: "Payment", requiredAction: "Pay required fee or capture fee due before issuance.", docs: [] };
+  if (bucket === "inspection_final_notice") return { category: "Inspection", subcategory: "Final notice", requiredAction: "Record inspection/final status and update project stage.", docs: [] };
+  const none = { category: null, subcategory: null, requiredAction: null, docs: [] as string[] };
+  if (bucket !== "permit_correction" && bucket !== "nem_correction" && bucket !== "missing_info_request") return none;
+  if (!emailAsksForInformation(askText) && !MBOX_CORRECTION_STATED.test(askText)) return none;
+  const hit = MBOX_DEFICIENCY_PATTERNS.find((p) => p.re.test(askText));
+  return hit ? { category: hit.category, subcategory: hit.subcategory, requiredAction: hit.action, docs: [hit.doc] } : none;
 }
 
 function statusLabelForBucket(bucket: MboxEmailBucket): string {
@@ -1865,7 +1884,14 @@ function splitMboxMessages(mboxText: string): string[] {
     .filter(Boolean);
 }
 
-function parseMessage(message: string): { headers: Record<string, string>; body: string } {
+/**
+ * One mbox message: its headers, the READABLE body (MIME decoded: mimeText.decodeMimeBody), the
+ * decoded subject, and `rawBody`, the body exactly as this reader used to return it. rawBody and the
+ * raw subject header are what a message's source signature is made of, frozen: a mailbox imported
+ * or watched before decoding is still recognised, so nothing is imported twice and a watched
+ * mailbox's old notices are never matched to a job again.
+ */
+function parseMessage(message: string): { headers: Record<string, string>; body: string; rawBody: string; subject: string } {
   const cleaned = message.replace(/^From [^\n]+\n/, "");
   const [rawHeaders, ...bodyParts] = cleaned.split(/\n\n/);
   const headers: Record<string, string> = {};
@@ -1881,7 +1907,9 @@ function parseMessage(message: string): { headers: Record<string, string>; body:
       headers[current] = line.slice(index + 1).trim();
     }
   }
-  return { headers, body: bodyParts.join("\n\n").replace(/--[a-z0-9_=-]+/gi, "\n") };
+  const rawBody = bodyParts.join("\n\n").replace(/--[a-z0-9_=-]+/gi, "\n");
+  const body = decodeMimeBody(headers, bodyParts.join("\n\n")) || rawBody;
+  return { headers, body, rawBody, subject: decodeEncodedWords(headers.subject || "") };
 }
 
 function safeDate(value: string): string {
@@ -1891,6 +1919,8 @@ function safeDate(value: string): string {
 
 function buildMboxLearningRecord(input: {
   combined: string;
+  /** The decoded body (parseMessage): the newest message of it is what the email asks. */
+  body: string;
   subject: string;
   from: string;
   date: string;
@@ -1901,8 +1931,11 @@ function buildMboxLearningRecord(input: {
   const jurisdiction = input.defaults.ahj || inferAhj(input.combined);
   const state = input.defaults.state || inferState(input.combined, jurisdiction, utility);
   const portalName = inferPortal(input.combined, state);
-  const taxonomy = correctionTaxonomy(input.combined, bucket.bucket);
-  const sample = redactSample(`${input.subject}\n${input.from}\n${input.combined}`);
+  // What this email asks is read from its newest message only, never the quoted history or footer.
+  const askText = `${input.subject}\n${currentMessageText(input.body)}`;
+  const taxonomy = correctionTaxonomy(askText, bucket.bucket);
+  // A readable sample: the subject and the newest message, redacted (was headers and HTML noise).
+  const sample = redactSample(askText);
   const record: MboxExtractedLearningRecord = {
     source: "email",
     type: bucket.bucket,
@@ -1927,8 +1960,11 @@ function buildMboxLearningRecord(input: {
   return { record, state, portalName };
 }
 
+/** A correction example is filed only for a real deficiency request: a correction bucket AND a
+ *  specific category (correctionTaxonomy names one only when the email asks for that thing). */
 function shouldCreateFailureExample(record: MboxExtractedLearningRecord): boolean {
-  return record.type === "permit_correction" || record.type === "nem_correction" || record.type === "missing_info_request";
+  const correctionBucket = record.type === "permit_correction" || record.type === "nem_correction" || record.type === "missing_info_request";
+  return correctionBucket && Boolean(record.correctionCategory && record.correctionSubcategory);
 }
 
 function correctionForMboxRecord(record: MboxExtractedLearningRecord): NonNullable<KnowledgeFacts["correction"]> {
@@ -1975,14 +2011,16 @@ export async function classifyMboxMessages(input: {
 
   for (const raw of splitMboxMessages(input.mboxText).slice(0, 10000)) {
     const parsed = parseMessage(raw);
-    const subject = parsed.headers.subject || "";
-    const from = parsed.headers.from || "";
+    const subject = parsed.subject;
+    const from = decodeEncodedWords(parsed.headers.from || "");
     const date = parsed.headers.date || "";
     const body = parsed.body.slice(0, 12000);
     const combined = `${subject}\n${from}\n${body}`;
-    const { sourceSignature, legacySourceSignature } = mboxSourceSignatures(sourceLabel, subject, date, body);
+    // The signature is made of the RAW subject and body, frozen (parseMessage): see there.
+    const { sourceSignature, legacySourceSignature } = mboxSourceSignatures(sourceLabel, parsed.headers.subject || "", date, parsed.rawBody.slice(0, 12000));
     const built = buildMboxLearningRecord({
       combined,
+      body,
       subject,
       from,
       date,
@@ -2086,12 +2124,13 @@ async function runMboxImport(
   for await (const raw of rawMessages) {
     messagesScanned += 1;
     const parsed = parseMessage(raw);
-    const subject = parsed.headers.subject || "";
-    const from = parsed.headers.from || "";
+    const subject = parsed.subject;
+    const from = decodeEncodedWords(parsed.headers.from || "");
     const date = parsed.headers.date || "";
     const body = parsed.body.slice(0, 12000);
     const combined = `${subject}\n${from}\n${body}`;
-    const { sourceSignature, legacySourceSignature } = mboxSourceSignatures(sourceLabel, subject, date, body);
+    // The signature is made of the RAW subject and body, frozen (parseMessage): see there.
+    const { sourceSignature, legacySourceSignature } = mboxSourceSignatures(sourceLabel, parsed.headers.subject || "", date, parsed.rawBody.slice(0, 12000));
     if (db.get<Row>("SELECT id FROM mbox_learning_records WHERE source_signature IN (?, ?)", [sourceSignature, legacySourceSignature])) {
       duplicateMessages += 1;
       continue;
@@ -2099,6 +2138,7 @@ async function runMboxImport(
 
     const built = buildMboxLearningRecord({
       combined,
+      body,
       subject,
       from,
       date,
@@ -2210,6 +2250,148 @@ export async function importMboxKnowledgeFromFile(
   input: { orgId: string; filePath: string; sourceLabel?: string; defaultState?: string; defaultAhj?: string; defaultUtility?: string },
 ): Promise<MboxKnowledgeImportResult> {
   return runMboxImport(db, streamMboxMessagesFromFile(input.filePath, MBOX_MESSAGE_CAP), input);
+}
+
+export type MboxRelearnResult = {
+  messagesScanned: number;
+  /** Messages found among the earlier imports (by source signature, under any import label). */
+  matched: number;
+  /** Messages never imported before: left alone (an import imports them). */
+  notImported: number;
+  bucketChanged: number;
+  failureExamplesBefore: number;
+  failureExamplesAfter: number;
+  /** Real deficiency requests per category after the re-read: names and counts only. */
+  byCategory: Record<string, number>;
+  profilesRebuilt: number;
+  dryRun: boolean;
+};
+
+/**
+ * RE-READ A MAILBOX THAT WAS ALREADY IMPORTED, WITH THE CURRENT READER (2026-11-23 back-test).
+ *
+ * The earlier reader classified raw MIME, so its stored records and correction examples are wrong.
+ * A plain re-import cannot fix them: every message is recognised as a duplicate and skipped. This
+ * finds each message's earlier record (by its frozen source signature, under every import label on
+ * file), re-reads it, and replaces in place: the record's bucket, category, action, documents and
+ * sample; its correction example is removed, and filed again only for a real deficiency request.
+ * The shared rollup of every profile touched is then rebuilt from the examples
+ * (rebuildKnowledgeRollup), so the old counts leave it.
+ *
+ * WHERE a record belongs (state, AHJ, utility, profile) is kept as stored: this re-reads what an
+ * email says, it never moves knowledge to another place. Deterministic only (no model call). A
+ * required-document line an earlier import merged into a shared profile is not removed (it cannot be
+ * told apart from other sources); new imports add one only for a real deficiency request.
+ * dryRun: counts only, nothing written (the database may be opened read-only).
+ */
+async function relearnMboxMessages(
+  db: AppDb,
+  rawMessages: AsyncIterable<string>,
+  input: { orgId: string; dryRun?: boolean },
+): Promise<MboxRelearnResult> {
+  const dryRun = Boolean(input.dryRun);
+  const labels = db.query<Row>("SELECT DISTINCT source_label FROM mbox_learning_records").map((r) => text(r.source_label));
+  const result: MboxRelearnResult = {
+    messagesScanned: 0, matched: 0, notImported: 0, bucketChanged: 0,
+    failureExamplesBefore: 0, failureExamplesAfter: 0, byCategory: {}, profilesRebuilt: 0, dryRun,
+  };
+  const touched = new Set<string>();
+  for await (const raw of rawMessages) {
+    result.messagesScanned += 1;
+    const parsed = parseMessage(raw);
+    const date = parsed.headers.date || "";
+    let row: Row | null | undefined;
+    let sigs: { sourceSignature: string; legacySourceSignature: string } | null = null;
+    for (const label of labels) {
+      const s = mboxSourceSignatures(label, parsed.headers.subject || "", date, parsed.rawBody.slice(0, 12000));
+      row = db.get<Row>("SELECT * FROM mbox_learning_records WHERE source_signature IN (?, ?)", [s.sourceSignature, s.legacySourceSignature]);
+      if (row) { sigs = s; break; }
+    }
+    if (!row || !sigs) { result.notImported += 1; continue; }
+    result.matched += 1;
+    const subject = parsed.subject;
+    const from = decodeEncodedWords(parsed.headers.from || "");
+    const body = parsed.body.slice(0, 12000);
+    const built = buildMboxLearningRecord({
+      combined: `${subject}\n${from}\n${body}`,
+      body,
+      subject,
+      from,
+      date,
+      defaults: { state: text(row.state), ahj: text(row.jurisdiction), utility: text(row.utility) },
+    });
+    const record = built.record;
+    if (record.type !== text(row.bucket)) result.bucketChanged += 1;
+    const oldExamples = db.query<Row>(
+      "SELECT id, profile_key, org_id FROM historical_failure_examples WHERE source_type = 'mbox' AND source_signature IN (?, ?)",
+      [signatureFor(sigs.sourceSignature), signatureFor(sigs.legacySourceSignature)],
+    );
+    result.failureExamplesBefore += oldExamples.length;
+    const file = shouldCreateFailureExample(record);
+    if (file) {
+      result.failureExamplesAfter += 1;
+      const key = text(record.correctionSubcategory);
+      result.byCategory[key] = (result.byCategory[key] ?? 0) + 1;
+    }
+    if (dryRun) continue;
+    db.transaction(() => {
+      db.run(
+        `UPDATE mbox_learning_records SET bucket = ?, workflow = ?, correction_category = ?, correction_subcategory = ?,
+           required_action = ?, preventable = ?, required_documents_json = ?, timeline_signal = ?, status_label = ?,
+           classifier = ?, confidence = ?, sample = ?
+         WHERE id = ?`,
+        [
+          record.type, record.workflow, record.correctionCategory || "", record.correctionSubcategory || "",
+          record.requiredAction || "", record.preventable ? 1 : 0, asJson(record.requiredDocuments), record.timelineSignal || "",
+          record.statusLabel || "", record.classifier, record.confidence, record.sample, text(row!.id),
+        ],
+      );
+      for (const old of oldExamples) {
+        db.run("DELETE FROM historical_failure_examples WHERE id = ?", [text(old.id)]);
+        touched.add(text(old.profile_key));
+      }
+      if (file) {
+        const facts: KnowledgeFacts = {
+          state: text(row!.state),
+          ahj: text(row!.jurisdiction),
+          utility: text(row!.utility),
+          portalName: text(row!.portal_name),
+          correction: correctionForMboxRecord(record),
+          sources: [learnedSource("learned_correction", text(row!.source_label))],
+          confidence: "learned",
+        };
+        insertHistoricalFailureExample(db, {
+          orgId: text(oldExamples[0]?.org_id) || input.orgId,
+          facts,
+          correction: facts.correction!,
+          sourceType: "mbox",
+          sourceLabel: text(row!.source_label),
+          occurredAt: record.occurredAt,
+          signatureSeed: text(row!.source_signature),
+        });
+        touched.add(profileKey(facts));
+      }
+    });
+  }
+  if (!dryRun) {
+    for (const key of touched) if (key) rebuildKnowledgeRollup(db, key);
+    result.profilesRebuilt = [...touched].filter(Boolean).length;
+  }
+  return result;
+}
+
+export async function relearnMboxKnowledgeFromFile(
+  db: AppDb,
+  input: { orgId: string; filePath: string; dryRun?: boolean },
+): Promise<MboxRelearnResult> {
+  return relearnMboxMessages(db, streamMboxMessagesFromFile(input.filePath, MBOX_MESSAGE_CAP), input);
+}
+
+export async function relearnMboxKnowledge(
+  db: AppDb,
+  input: { orgId: string; mboxText: string; dryRun?: boolean },
+): Promise<MboxRelearnResult> {
+  return relearnMboxMessages(db, messagesFromArray(splitMboxMessages(input.mboxText).slice(0, MBOX_MESSAGE_CAP)), input);
 }
 
 export function learnFromPermitStatus(
