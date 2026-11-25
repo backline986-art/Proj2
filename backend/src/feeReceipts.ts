@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import type { PaidFeeReceipt } from "../../shared/src/types";
+import type { PaidFeeReceipt, PaidFeeReceiptLine } from "../../shared/src/types";
 import type { AppDb } from "./db";
 import { nowIso } from "./time";
 
@@ -32,6 +32,38 @@ function wrappedId(t: string, label: string): string {
   return id;
 }
 
+/** THE FEE LINES AN ITEMIZED RECEIPT PRINTS (the "Transaction Receipt" / "Fees Paid" table): each
+ * line's fee item, the authority's price for it (fee amount) and what this payment put on it (paid
+ * amount). The extractor yields a row as
+ *   "7/20/26  Renewable energy for electrical systems- 5.01kva through 15kva BUILD  $94.00  $94.00 1.00 Ea"
+ * — date, fee item, account code, fee amount, paid amount, units. The header prints "Paid amount
+ * Fee amount" but the rows print the fee FIRST: a partial payment of a $94.00 line reads
+ * "$94.00  $15.00", and only the second figures add up to the receipt's total.
+ *
+ * Kept only when every row reads and the paid amounts add up to the receipt's total: a table read
+ * wrong is worse than none, because a line is what a fee schedule is checked against. The worksite,
+ * parcel and payer sit outside the table and are never read into a line. */
+function transactionReceiptLines(t: string, total: number | null): PaidFeeReceiptLine[] | undefined {
+  const head = /\bFee amount\b/i.exec(t), foot = /\bPayment Method:/i.exec(t);
+  if (total == null || !head || !foot || foot.index <= head.index) return undefined;
+  const rows = t.slice(head.index + head[0].length, foot.index).split(/(?:^|\s)\d{1,2}\/\d{1,2}\/\d{2,4}\s+/).slice(1);
+  const lines: PaidFeeReceiptLine[] = [];
+  for (const row of rows) {
+    // After the two amounts: the units ("1.00 Ea", "7.00 Qty", "1.00 Hours", a valuation the line is
+    // a percent of, "12,903.44 Ea") and any "Fee Notes:" — none of it read.
+    const m = /^(.+?)\s+\$(-?[\d,]+\.\d{2})\s+\$(-?[\d,]+\.\d{2})\s+[\d,]+(?:\.\d+)?(?:\s.*)?$/.exec(row.trim());
+    if (!m) return undefined;
+    // The account code rides at the end of the item ("BUILD", "STATE", "110-3010020-34116-PL6",
+    // "22432 02 000 04 20 10 - P1", "21207-212-1300-329.41- 10", "01.0.341"): never part of the name.
+    const label = m[1].replace(/(?:\s+(?:[A-Z]{3,}|-|(?=[A-Z\d.-]*\d)[A-Z\d.-]+))+$/, "").trim().slice(0, 120);
+    const feeUsd = Number(m[2].replace(/,/g, "")), paidUsd = Number(m[3].replace(/,/g, ""));
+    if (!label || /@/.test(label) || !Number.isFinite(feeUsd) || !Number.isFinite(paidUsd)) return undefined;
+    lines.push({ label, feeUsd, paidUsd });
+  }
+  const paid = Math.round(lines.reduce((sum, l) => sum + l.paidUsd, 0) * 100) / 100;
+  return lines.length && near(paid, total) ? lines : undefined;
+}
+
 /** Elavon "Order Confirmation" emails, by the merchant profile the authority pays through.
  * A profile is only trusted with its issuer's own wording beside it (Clackamas County's
  * Building Codes profile is "DTD BUILDING CODES", which on its own names no county), and
@@ -60,6 +92,7 @@ export function parsePaidFeeReceipt(raw: string): PaidFeeReceipt | null {
   const t = raw.replace(/\s+/g, " ");
   let jurisdiction = "", permitNumber = "", receiptNumber = "", paidAt = "", invoiceNumber = "";
   let unmatchedPermit = false;
+  let feeLines: PaidFeeReceiptLine[] | undefined;
   let recordDiscipline: PaidFeeReceipt["discipline"] | "" = "";
   let amount: number | null = null, processing = 0, total: number | null = null;
   const elavon = /Your payment has been approved/i.test(t) && /Total of all charges and fees/i.test(t)
@@ -76,6 +109,7 @@ export function parsePaidFeeReceipt(raw: string): PaidFeeReceipt | null {
     jurisdiction = issuer.replace(/\s+(?:Building Department|Building Codes Division)$/i, "").trim();
     total = dollars(grab(t, `Receipt Total:\\s*\\$${money}`));
     amount = total;
+    feeLines = transactionReceiptLines(t, total);
   } else if (/City of Tigard/.test(t) && /Transaction type:\s*Purchase/i.test(t)) {
     const permits = [...t.matchAll(/Permit:\s*([A-Z0-9-]+)/gi)];
     if (permits.length !== 1) return null;
@@ -206,7 +240,8 @@ export function parsePaidFeeReceipt(raw: string): PaidFeeReceipt | null {
   // Key order is part of the stored source string, which is how a re-read is told apart from a
   // conflict: invoiceNumber sits after permitNumber, as in the receipts already on file.
   return { jurisdiction, permitNumber, ...(invoiceNumber ? { invoiceNumber } : {}), receiptNumber, discipline,
-    authorityAmountUsd: amount, processingFeeUsd: processing, totalPaidUsd: total, paidAt };
+    authorityAmountUsd: amount, processingFeeUsd: processing, totalPaidUsd: total, paidAt,
+    ...(feeLines ? { lines: feeLines } : {}) };
 }
 
 /** Store components under a source namespace excluded from whole-filing quotes.

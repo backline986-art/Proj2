@@ -31,7 +31,7 @@
 import assert from "node:assert/strict";
 import http from "node:http";
 import { chromium, type BrowserContext, type Page } from "playwright";
-import { loginWasRefused, performLogin } from "./loginFlow";
+import { loginWasRefused, performLogin, revealLoginForm } from "./loginFlow";
 
 let failures = 0;
 const check = async (label: string, fn: () => Promise<void>): Promise<void> => {
@@ -248,8 +248,96 @@ const LANDING = `<!doctype html><html><head><title>City Permit Center</title></h
   </script>
 </body></html>`;
 
+// OPENGOV-SHAPED identifier-first sign-in (live City of Mountain Home ID, 2026-11-12): the form
+// paints late (a React mount), an image carousel sits beside it whose buttons are "Previous Image" /
+// "Next Image" / "Pause automatic rotation", and step 1's submit reads "Continue" but is NAMED
+// aria-label "login button". The carousel buttons report each press to the server (a hit is the
+// failure). Step 2 is a password page in the same shape.
+const OG_CAROUSEL = '<section aria-label="Image carousel"><button aria-label="Previous Image" title="Previous Image" type="button" onclick="fetch(\'/og-carousel-hit\')">&lt;</button>' +
+  '<button aria-label="Next Image" title="Next Image" type="button" onclick="fetch(\'/og-carousel-hit\')">&gt;</button>' +
+  '<button aria-label="Pause automatic rotation" type="button" onclick="fetch(\'/og-carousel-hit\')">||</button></section>';
+const OG_STEP1_FORM = '<form novalidate aria-label="Sign in" action="/og-login/password" method="get"><h1>Sign in to your account</h1><label for="email">Email</label>' +
+  '<input type="email" id="email" placeholder="Email address" name="email"><button type="submit" aria-label="login button">Continue</button></form>';
+const OG_STEP1 = `<!doctype html><html><head><title>OpenGov</title></head><body><div id="root"></div><script>
+  setTimeout(function () { document.getElementById('root').innerHTML = ${JSON.stringify(OG_CAROUSEL + OG_STEP1_FORM)}; }, 1500);
+</script></body></html>`;
+// Step 2 echoes the identifier as the account being signed in (with an "Edit" link), as the live one does.
+const OG_STEP2 = (email: string) => `<!doctype html><html><head><title>OpenGov</title></head><body>${OG_CAROUSEL}
+  <form aria-label="Sign in" action="/og-login/done" method="get"><h1>Enter your password</h1>
+  <div><span class="identifier">${email.replace(/[<>&"]/g, "")}</span> <a href="/og-login">Edit</a></div>
+  <input type="hidden" name="username" value="${email.replace(/[<>&"]/g, "")}"><label for="password">Password</label>
+  <input type="password" id="password" name="password"><button type="submit" aria-label="login button">Sign in</button></form></body></html>`;
+
+// FAST-PLATFORM (live Idaho DOPL Online Services, 2026-11-12) identifier-first sign-in with NO
+// login <form> of its own (the WHOLE page is one ASP.NET-style form, with a type-less Help button
+// that reports any press): a plain panel holds the Email box (a hidden password box beside it), a type="button"
+// "Log in", "Sign in with a passkey" (reports any press: the failure) and a "Sign Up" link, with
+// public-search tiles below. "Log in" with an email typed opens a SEPARATE password page (as the
+// owner's screenshots show): the email echoed with "Change username", Password, "Continue",
+// "Forgot password?" and "Choose another way to sign in" (both report any press). Nothing is a form submit.
+const DOPL = `<!doctype html><html><head><title>Online Services</title></head><body><form id="pageForm" action="/dopl-os/_/" method="post">
+  <button type="button" aria-label="Help" onclick="fetch('/dopl-help-hit')">?</button>
+  <h1>Online Services</h1>
+  <p>First time? Sign-Up (See <a href="/dopl-help/Registering-an-Account.mp4" target="_blank">How to Create an Online Profile</a> for help)</p>
+  <div class="LogonPanel"><div class="row">
+    <input type="text" autocomplete="username webauthn" id="Dd-a" aria-label="Email Address" placeholder="Email Address">
+    <div style="display:none"><input type="password" autocomplete="current-password webauthn" id="Dd-b" aria-label="Password" placeholder="Password">
+      <button type="button">Show/Hide Password</button></div>
+    <button type="button" id="Dd-c"><span>Log in</span></button></div>
+    <div>Or</div><button type="button" id="pk" onclick="fetch('/dopl-passkey-hit')">Sign in with a passkey</button>
+    <div>New to Online Services? <a href="/dopl-signup">Sign Up</a></div></div>
+  <section><h2>Public Searches</h2><a href="/dopl-search">Search for Permits</a></section></form>
+  <script>
+    // FAST transitions IN PLACE: the password view is drawn at once, the old view (with its still
+    // visible "Log in") is detached 2.5 s later — the window in which run 4 picked the old button.
+    document.getElementById('Dd-c').onclick = function () {
+      var v = document.getElementById('Dd-a').value;
+      if (!v || document.getElementById('pw')) return;
+      var view = document.createElement('div'); view.className = 'card';
+      view.innerHTML = '<h1>Log in to Online Services</h1><div class="who"></div><a href="/dopl-os/_/">Change username</a>' +
+        '<label for="pw">Password</label><input type="password" id="pw" autocomplete="current-password">' +
+        '<button type="button" id="cont">Continue</button>' +
+        '<a href="#" data-hit="/dopl-forgot-hit">Forgot password?</a> ' +
+        '<a href="#" data-hit="/dopl-another-way-hit">Choose another way to sign in</a>';
+      view.querySelectorAll('[data-hit]').forEach(function (l) { l.onclick = function () { fetch(l.getAttribute('data-hit')); return false; }; });
+      view.querySelector('.who').textContent = v;
+      var pf = document.getElementById('pageForm'); pf.insertBefore(view, pf.querySelector('h1'));
+      document.getElementById('cont').onclick = function () {
+        if (!document.getElementById('pw').value) return;
+        if (location.search.indexOf('mfa=1') < 0) { location.href = '/home'; return; }
+        // ?mfa=1: DOPL's emailed-code step, drawn in place under a new hash. The code box is named
+        // ONLY by <label for>; "Log In" and "Resend security code" report any press.
+        // Like live DOPL: the hash moves and the view is BLANK for a moment before the code step draws.
+        location.hash = '#3';
+        view.innerHTML = '';
+        setTimeout(function () { drawCode(); }, 1200);
+      };
+      var drawCode = function () {
+        view.innerHTML = '<h1>Two-Step Verification</h1><p>An email with your Online Services security code was sent to d***@e***.test.</p>' +
+          '<label for="Dc-91">Security Code</label><input type="text" id="Dc-91" name="Dc-91" autocomplete="off">' +
+          '<input type="checkbox" id="Dc-c1"><label for="Dc-c1">Trust this device</label>' +
+          '<button type="button" id="mfaGo">Log In</button><p>Didn\\'t receive your code?</p><a href="#" id="resend">Resend security code</a>';
+        document.getElementById('mfaGo').onclick = function () { fetch('/dopl-mfa-login-hit'); };
+        document.getElementById('resend').onclick = function () { fetch('/dopl-resend-hit'); return false; };
+      };
+      setTimeout(function () { var old = document.querySelector('.LogonPanel'); if (old) old.remove(); }, 2500);
+    };
+  </script>
+</body></html>`;
+const DOPL_PW = (email: string) => `<!doctype html><html><head><title>Online Services</title></head><body>
+  <div class="card"><h1>Log in to Online Services</h1>
+    <div>${email.replace(/[<>&"]/g, "")}</div><a href="/dopl-os/_/">Change username</a>
+    <label for="pw">Password</label><input type="password" id="pw" autocomplete="current-password">
+    <button type="button" id="cont">Continue</button>
+    <a href="#" onclick="fetch('/dopl-forgot-hit');return false;">Forgot password?</a>
+    <a href="#" onclick="fetch('/dopl-another-way-hit');return false;">Choose another way to sign in</a></div>
+  <script>document.getElementById('cont').onclick = function () { if (document.getElementById('pw').value) location.href = '/home'; };</script>
+</body></html>`;
+
 const server = http.createServer((q, r) => {
   const url = q.url || "";
+  if (url.startsWith("/dopl-os/_/")) { r.writeHead(200, { "Content-Type": "text/html" }); return r.end(DOPL); }
+  if (url.startsWith("/dopl-password")) { r.writeHead(200, { "Content-Type": "text/html" }); return r.end(DOPL_PW(new URL(url, "http://x").searchParams.get("u") || "")); }
   const send = (body: string) => { r.writeHead(200, { "Content-Type": "text/html" }); r.end(body); };
   if (url.startsWith("/LEECO/Login.aspx")) return send(LEE_MAIN());
   if (url.startsWith("/LEECO/login-frame")) return send(LEE_FRAME());
@@ -257,6 +345,9 @@ const server = http.createServer((q, r) => {
   if (url.startsWith("/plain-login")) return send(PLAIN);
   if (url.startsWith("/permit-center")) return send(LANDING);
   if (url.startsWith("/home")) return send(PLAIN_HOME);
+  if (url.startsWith("/og-login/password")) return send(OG_STEP2(new URL(url, "http://x").searchParams.get("email") || ""));
+  if (url.startsWith("/og-login/done")) { r.writeHead(302, { Location: "/home" }); return r.end(); }
+  if (url.startsWith("/og-login")) return send(OG_STEP1);
   localHits.push(url);
   return send("<html><body>not here</body></html>");
 });
@@ -414,6 +505,56 @@ await check("MUST-PASS: a plain one-page login", async () => {
   await context.close();
 });
 
+await check("MUST-PASS / MUST-EXCLUDE (OpenGov shape): a late form's own 'login button' submit advances step 1; the carousel's Next Image is never pressed", async () => {
+  localHits.length = 0;
+  const { context, page } = await freshPage();
+  await page.goto(`http://127.0.0.1:${port}/og-login?state=abc`);
+  const res = await performLogin(page, { username: "og-user@example.test", password: "Og-Pa55-word" });
+  results.push(res.message);
+  assert.equal(res.status, "logged_in", `got ${res.status}: ${res.message}`);
+  assert.match(page.url(), /\/home/);
+  assert.deepEqual(localHits.filter((h) => h.startsWith("/og-carousel-hit")), [], "a carousel control was pressed");
+  await context.close();
+});
+
+await check("MUST-EXCLUDE (race, deterministic): the reveal pass never presses an identifier step's own submit — an email step that has painted ends the reveal", async () => {
+  // performLogin's late-paint race made reproducible: the identifier step is already on screen
+  // when the reveal runs. Its {button, "Login"} candidate matches the form's submit (aria-label
+  // "login button"); pressing it would send an EMPTY email to the password page.
+  const { context, page } = await freshPage();
+  await page.goto(`http://127.0.0.1:${port}/og-login?state=race`);
+  await page.locator("#email").waitFor({ state: "visible", timeout: 10000 });
+  const revealed = await revealLoginForm(page);
+  await page.waitForTimeout(800);
+  assert.equal(revealed, false, "the reveal reported a login form");
+  assert.doesNotMatch(page.url(), /\/og-login\/password/, `the reveal pressed the email step's submit: now on ${page.url()}`);
+  await context.close();
+});
+
+await check("MUST-PASS / MUST-EXCLUDE (FAST / Idaho DOPL shape): no <form>; the panel's 'Log in' opens the password page, Continue signs in; passkey / forgot / another-way never pressed", async () => {
+  localHits.length = 0;
+  const { context, page } = await freshPage();
+  await page.goto(`http://127.0.0.1:${port}/dopl-os/_/`);
+  const res = await performLogin(page, { username: "dopl-user@example.test", password: "Dopl-Pa55-word" });
+  results.push(res.message);
+  assert.equal(res.status, "logged_in", `got ${res.status}: ${res.message}`);
+  assert.match(page.url(), /\/home/);
+  assert.deepEqual(localHits.filter((h) => /dopl-(passkey|signup|search|forgot|another-way|help)/.test(h)), [], `a never-click control was followed: ${localHits.join(", ")}`);
+  await context.close();
+});
+
+await check("MUST-EXCLUDE (DOPL emailed code): 'Two-Step Verification' with a label-only Security Code box is a second factor — mfa_captcha, never logged_in; the code box, Log In and Resend are never touched", async () => {
+  localHits.length = 0;
+  const { context, page } = await freshPage();
+  await page.goto(`http://127.0.0.1:${port}/dopl-os/_/?mfa=1`);
+  const res = await performLogin(page, { username: "dopl-user@example.test", password: "Dopl-Pa55-word" });
+  results.push(res.message);
+  assert.equal(res.status, "mfa_captcha", `got ${res.status}: ${res.message}`);
+  assert.equal(await page.locator("#Dc-91").inputValue().catch(() => "gone"), "", "something was typed into the security-code box");
+  assert.deepEqual(localHits.filter((h) => /dopl-(mfa-login|resend)-hit/.test(h)), [], `a factor control was pressed: ${localHits.join(", ")}`);
+  await context.close();
+});
+
 await check("MUST-PASS (Lee County shape): the ACA login inside a cross-origin IFRAME is found, filled and signed in", async () => {
   localHits.length = 0;
   const { context, page } = await freshPage();
@@ -442,7 +583,7 @@ await check("MUST-PASS / MUST-EXCLUDE: a landing page reveals its real login; th
 });
 
 await check("MUST-EXCLUDE: neither the username nor any password appears in a log line or a result message", async () => {
-  const secrets = [GOOD_PW, MFA_PW, BAD_PW, "plain-pass-123", "Lee-Pa55-word", "landing-pass-1", USER];
+  const secrets = [GOOD_PW, MFA_PW, BAD_PW, "plain-pass-123", "Lee-Pa55-word", "landing-pass-1", "Og-Pa55-word", "Dopl-Pa55-word", USER];
   for (const s of secrets) {
     const inLog = logLines.find((l) => l.includes(s));
     assert.equal(inLog, undefined, `a secret reached a log line: ${String(inLog).slice(0, 120)}`);

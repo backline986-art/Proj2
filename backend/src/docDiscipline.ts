@@ -81,6 +81,8 @@ export const DOC_DISCIPLINE: Readonly<Record<string, DocDiscipline>> = {
   application_manifest: ANY_AHJ,
   application_worksheet: ANY_AHJ,
   bid_sheet: ANY_AHJ,
+  // The installer's own bid / proposal (#140) — an AHJ document, never the utility's.
+  bid: ANY_AHJ,
 
   // THE UTILITY's documents.
   utility_application: UTILITY,

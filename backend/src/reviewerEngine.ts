@@ -12,6 +12,7 @@ import { nowIso } from "./time";
 import { hasMpuScope } from "./serviceScope";
 import { resolveValuation } from "./valuation";
 import { requirementForGate, requirementMayBlock, resolveUtilityRequirements } from "./utilityRequirements";
+import { describeImageDisconnectRead, type PlanSetImageDisconnectRead } from "./acDisconnectIntake";
 import { batteryStatus } from "../../shared/src/batteryControls";
 import { sourceHostOf } from "../../shared/src/officialSource";
 import { resolvePermitPath, resolveStampRequirement, hasStampedStructuralEvidence } from "./permitPath";
@@ -19,6 +20,7 @@ import { evaluatePermitPrecedentFindings } from "./permitPrecedents";
 import { citeStateSealRule, statePrescriptiveFindings } from "./stateRules";
 import type { EffectiveCodeContext } from "./codeProfiles";
 import type { ParcelJurisdictionReading } from "./parcelJurisdiction";
+import { inverterSettingsByStandingAnswer, type CecUl1741SbAnswer } from "./cecEquipment";
 import type { JobScope } from "../../shared/src/types";
 import { deriveJobScope, jobScopeLabel, scopeHasNewPv, storageFactGaps } from "./jobScope";
 
@@ -130,6 +132,16 @@ export function buildReviewerReport(
      *  the shipped seed overlaid by the utility's filing row). undefined = not read here, so the shipped
      *  seed alone is used; null = read, and nothing is on file for this utility. */
     utilityRequirements?: UtilityRequirementList | null;
+    /** What the server's own image read of THIS job's stored plan set said about its AC disconnect
+     *  (planSetImageReads.planSetImageDisconnectRead, #135). undefined / null = no such read: the
+     *  utility's AC-disconnect item reads the package text alone, as before. Never taken from the
+     *  job's snapshot. */
+    planSetImageDisconnectRead?: PlanSetImageDisconnectRead | null;
+    /** What the CEC's own inverter list says about the job's inverter and UL 1741 SB
+     *  (cecEquipment.jobInverterUl1741Sb, the one reader QC uses too). Certified there = the utility's
+     *  "UL 1741 SB inverter listing" item is met. undefined / null = no answer: the item reads the
+     *  package text alone, as before. Never taken from the job's snapshot. */
+    inverterUl1741Sb?: CecUl1741SbAnswer | null;
     /** Which jurisdiction the job's parcel is in, as the county's own service answered (review-audit
      *  draft 09, parcelJurisdiction.readParcelJurisdiction — the cache, read only). undefined = not
      *  read here: the profile's callout stands, worded "not checked". */
@@ -168,7 +180,8 @@ export function buildReviewerReport(
   // The AHJ's array-placement rules (roof pathways, setbacks) are about an array; a storage scope has none.
   if (newArray) addPlacementRuleFindings(project, opts.codeContext, findings, opts.documentTexts ?? []);
   const utilityAliases = addUtilityFindings(project, findings,
-    opts.utilityRequirements === undefined ? resolveUtilityRequirements(null, project.state, project.utility) : opts.utilityRequirements);
+    opts.utilityRequirements === undefined ? resolveUtilityRequirements(null, project.state, project.utility) : opts.utilityRequirements,
+    opts.planSetImageDisconnectRead ?? null, opts.inverterUl1741Sb ?? null);
   addProfileFindings(project, profile, findings, opts.uploadedDocTypes ?? []);
   addParcelJurisdictionFindings(project, profile, opts.parcelJurisdiction, findings);
   addPermitPathFindings(project, findings);
@@ -1177,6 +1190,8 @@ function requirementReference(u: string, item: UtilityApplicationRequirement): C
 }
 
 /** The finding id a requirement reports under: the seed's kept id, else reviewer.utility.<key>. */
+const IMAGE_READ_SOURCE = "Plan set page image (intake read)";
+
 export function requirementFindingId(item: Pick<UtilityApplicationRequirement, "key" | "findingId">): string {
   return item.findingId || `reviewer.utility.${item.key.replace(/_/g, "-")}`;
 }
@@ -1189,7 +1204,7 @@ export function requirementFindingId(item: Pick<UtilityApplicationRequirement, "
  * bar). No list on file = one callout that the utility side was not reviewed, never silence. A storage
  * item is asked only on a job with a battery. Returns each finding's dedupe family (id -> alias).
  */
-function addUtilityFindings(project: ProjectRecord, findings: ReviewerFinding[], list: UtilityRequirementList | null): Map<string, string> {
+function addUtilityFindings(project: ProjectRecord, findings: ReviewerFinding[], list: UtilityRequirementList | null, imageDisconnectRead: PlanSetImageDisconnectRead | null = null, inverterUl1741Sb: CecUl1741SbAnswer | null = null): Map<string, string> {
   const aliases = new Map<string, string>();
   const utilityName = String(project.utility ?? "").trim();
   if (list && list.requirements.length) {
@@ -1199,8 +1214,24 @@ function addUtilityFindings(project: ProjectRecord, findings: ReviewerFinding[],
       if (item.key === "storage_mode_declaration" && !battery) continue;
       const topic = REQUIREMENT_TOPIC[item.key];
       if (!topic || !requirementForGate(item, "reviewer")) continue;
-      const check = evidenceForTopic(project, topic);
-      if (check.confidence === "high") continue;
+      // VERIFIED FIRST (owner, 2026-11-13): the CEC's own inverter list printing UL 1741 SB for the job's
+      // inverter meets the listing item; QC records where it came from.
+      if (item.key === "inverter_listing_ul1741sb" && inverterUl1741Sb?.certified) continue;
+      // The settings item: the operator's standing answer that installs are commissioned with the
+      // utility's settings, on an inverter the list certifies (owner, 2026-11-13). Both, or it asks.
+      if (item.key === "inverter_settings" && inverterSettingsByStandingAnswer(inverterUl1741Sb)) continue;
+      const textCheck = evidenceForTopic(project, topic);
+      if (textCheck.confidence === "high") continue;
+      // AN IMAGE-ONLY PLAN SET (#135): the package text names no AC disconnect because the plan set
+      // has no text, but the server's own image read of this job's stored plan set did (the one
+      // reader, planSetImageReads). That counts as SHOWN, never proven: the item stays a warning for
+      // a person to check on the sheet, with the read as its evidence. Text that names the disconnect
+      // is read exactly as before, and a job with neither is held exactly as before.
+      const fromImage = topic === "acDisconnect" && !textCheck.present ? imageDisconnectRead : null;
+      const imageLine = fromImage ? describeImageDisconnectRead(fromImage) : "";
+      const check: ProjectEvidence = fromImage
+        ? { ...textCheck, present: true, confidence: "medium", excerpts: [imageLine], sources: [IMAGE_READ_SOURCE], hits: [{ sourceLabel: IMAGE_READ_SOURCE, excerpt: imageLine, pageHint: fromImage.sheet || "Plan set" }] }
+        : textCheck;
       const words = REQUIREMENT_WORDS[item.key];
       const mayBlock = requirementMayBlock(item);
       const severity: ReviewerFinding["severity"] = !check.present && mayBlock ? "blocker" : "warning";
@@ -1221,6 +1252,21 @@ function addUtilityFindings(project: ProjectRecord, findings: ReviewerFinding[],
           designTeamAction: words.action(u),
           evidenceNeeded: evidenceNeeded(check),
           codeReferences: requirementReference(u, item),
+          // Its own evidence, so attachEvidence does not borrow the (empty) text topic's "missing".
+          ...(fromImage ? {
+            evidenceStatus: "weak" as const,
+            evidenceFound: [{
+              kind: "field_value" as const,
+              label: "AC disconnect read off the plan set's page image — check the sheet",
+              source: IMAGE_READ_SOURCE,
+              excerpt: imageLine,
+              confidence: "medium" as const,
+              pageHint: fromImage.sheet || "Plan set",
+              screenshotPath: "",
+              verifier: "vision" as const,
+              note: "The plan set has no text to confirm this. The intake read it once from the page image; a person checks the sheet shows the utility's disconnect.",
+            }],
+          } : {}),
         },
       ));
       const alias = REQUIREMENT_ALIAS[item.key];
@@ -1347,8 +1393,11 @@ function addProfileFindings(project: ProjectRecord, profile: AhjProcessProfile |
 function addParcelJurisdictionFindings(project: ProjectRecord, profile: AhjProcessProfile | null, reading: ParcelJurisdictionReading | undefined, findings: ReviewerFinding[]): void {
   const ahj = String(project.ahj ?? "").trim();
   const when = reading?.checkedAt ? `, checked ${reading.checkedAt.slice(0, 10)}` : "";
-  // A hosted map platform (draft 16 B) is named as such, with the person who verified the county links it.
-  const hosted = reading?.serviceVerifiedBy ? `, a hosted map ${reading.serviceVerifiedBy} verified the county links` : "";
+  // A hosted map platform (draft 16 B) is named as such, with the person who verified the county links
+  // it, or the county page Keelix read to confirm it (official, never shown as a person's check).
+  const hosted = reading?.serviceVerifiedBy ? `, a hosted map ${reading.serviceVerifiedBy} verified the county links`
+    : reading?.serviceConfirmedFrom ? `, a hosted map the county's own page links, from ${reading.serviceConfirmedFrom.pageHost}, read ${reading.serviceConfirmedFrom.readAt.slice(0, 10)}; not checked by a person`
+    : "";
   const from = reading ? `${reading.county ? `${reading.county}'s` : "the county's"} parcel service${reading.host ? ` (${reading.host}${hosted}${when})` : ""}` : "";
   if (reading?.status === "disagrees" && reading.parcelAgency) {
     const blocks = reading.mayBlock === true;

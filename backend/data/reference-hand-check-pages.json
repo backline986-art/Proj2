@@ -56,6 +56,27 @@
       "happened": "HTTP 503 on an automated read (the city's own page links it as its permitting portal)",
       "check": "Open it and confirm it is the contractor permit portal for solar (building and electrical), and whether a battery system's fire permit is applied for there too.",
       "recordedAt": "2026-11-10", "source": "refdata-id-local-checklist.md"
+    },
+    {
+      "authorityKind": "ahj", "state": "OR", "authority": "Bend",
+      "pageUrl": "https://www.bendoregon.gov/government/departments/community-development",
+      "happened": "HTTP 403 Forbidden on an automated read (every bendoregon.gov page)",
+      "check": "The permit center: the online permit portal's exact link for solar (the operator sheet says 'Bend Portal'), whether the city issues the electrical permit itself, its solar fees and review times, and anything on batteries.",
+      "recordedAt": "2026-11-10", "source": "refdata-bend-local-checklist.md"
+    },
+    {
+      "authorityKind": "ahj", "state": "OR", "authority": "Bend",
+      "pageUrl": "https://bendoregon.gov/wp-content/uploads/2025/12/Residential-Prescreen-Checklist_7_8_25.pdf",
+      "happened": "HTTP 403 Forbidden on an automated read (every bendoregon.gov page)",
+      "check": "The residential prescreen checklist, and the city's solar prescriptive installation checklist: note what a solar submittal must include.",
+      "recordedAt": "2026-11-10", "source": "refdata-bend-local-checklist.md"
+    },
+    {
+      "authorityKind": "utility", "state": "OR", "authority": "Central Electric Cooperative",
+      "pageUrl": "https://www.cec.coop/about-cec/service-area/",
+      "happened": "not read: the address check on this page is a map service, which the research does not call",
+      "check": "Use the page's map with the job's address: it says whether the address is served by Central Electric or Pacific Power (some Bend addresses can be served by either). Record the utility on the job.",
+      "recordedAt": "2026-11-10", "source": "refdata-bend-local-checklist.md"
     }
-  ]
+]
 }

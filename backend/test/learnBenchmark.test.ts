@@ -40,6 +40,26 @@ check("login_failed / credential: a refused password is the OPERATOR's to fix", 
   assert.equal(s.owner, "credential", "a stale password is not an engine defect");
 });
 
+check("login_failed / ENGINE: a submit click that toggled a panel instead of posting is OURS, not the credential's", () => {
+  // City of Bend (CityView), 2026-11-11: the submit pick clicked <legend role=button aria-expanded>,
+  // the panel collapsed, nothing posted. Same status as a refusal; the detail names the cause.
+  const s = scoreLearnOutcome({
+    status: "failed",
+    message: "The submit click did not post the form (the control clicked was a panel toggle: <legend role=button aria-expanded=true→false>); no request left the browser and the login panel toggled on the same page.",
+    events: [{ type: "login", status: "still_on_login", detail: { submittedVia: "button", posted: false, cause: "toggle_click" } }],
+  });
+  assert.equal(s.rung, "login_failed");
+  assert.equal(s.owner, "engine", `a form that never posted says nothing about the password (got owner=${s.owner}: ${s.reason})`);
+  assert.match(s.reason, /did not post|panel toggle/i);
+  // A bundle written before the detail existed: the message alone must still land on engine.
+  const old = scoreLearnOutcome({
+    status: "failed",
+    message: "The submit click did not post the form (the control clicked was a panel toggle: <legend role=button>).",
+    events: [{ type: "login", status: "still_on_login" }],
+  });
+  assert.equal(old.owner, "engine");
+});
+
 check("A WRONG STORED URL keeps its own diagnosis instead of a generic one", () => {
   // Miramar FL's stored URL lands on a GovDelivery newsletter page. Reporting "no
   // credential is stored" sends someone hunting for a password that exists.

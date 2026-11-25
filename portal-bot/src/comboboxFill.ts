@@ -790,6 +790,29 @@ export async function fillCustomCombobox(page: any, loc: any, value: string, pic
  * something, or fillCustomCombobox reported a click — false when NOTHING was selected,
  * so callers can surface the miss instead of silently continuing.
  */
+/** How long a native <select> is given to come to list an answer's exact option (a cascade
+ *  still replacing its options) before the partial match takes over. */
+export const NATIVE_EXACT_WAIT_MS = 1500;
+
+/** Does this native <select> list an option whose value or label IS `value` (selectOption's own
+ *  exact rule: value as written, label with whitespace collapsed)? Polled for up to `waitMs`,
+ *  returning true the moment one shows. false = read, and not there; null = the control could not
+ *  be read (no evaluate, detached, not a select) — the caller keeps its old behaviour then. */
+export async function nativeExactOptionAppears(loc: any, value: string, waitMs = NATIVE_EXACT_WAIT_MS): Promise<boolean | null> {
+  if (typeof loc?.evaluate !== "function") return null;
+  const deadline = Date.now() + Math.max(0, waitMs);
+  for (;;) {
+    const has = await loc.evaluate((el: Element, want: string) => {
+      if ((el.tagName || "").toLowerCase() !== "select") return null;
+      const lbl = (s: string) => (s || "").replace(/\s+/g, " ").trim();
+      return Array.from((el as HTMLSelectElement).options).some((o) => o.value === want || lbl(o.label) === lbl(want));
+    }, value).catch(() => null);
+    if (has !== false) return has;
+    if (Date.now() >= deadline) return false;
+    await new Promise((r) => setTimeout(r, 150));
+  }
+}
+
 export async function selectWithFallback(page: any, loc: any, value: string, pick?: ComboboxPick): Promise<boolean> {
   if (pick) pick.text = "";
   // Only a real <select> can take selectOption. Running it on a styled-div widget or a
@@ -806,8 +829,21 @@ export async function selectWithFallback(page: any, loc: any, value: string, pic
   // Short timeouts on the native attempts: a HIDDEN native <select> behind a styled
   // widget can never pass actionability, so the default timeout would stall twice
   // before the combobox path even runs.
-  try { await loc.selectOption(value, { timeout: 5000 }); return true; } catch { /* try label */ }
-  try { await loc.selectOption({ label: value }, { timeout: 5000 }); return true; } catch { /* try partial */ }
+  //
+  // ASK THE LIST BEFORE WAITING ON IT (replay speed, 2026-11-23). selectOption WAITS for an option
+  // with that exact value or label to appear, so an answer the list words differently ("Enphase"
+  // for "Enphase Energy Inc.", the commonest shape there is) spent the whole 5 s twice before the
+  // partial match below picked the same option it always picks: 10 s per such select, measured
+  // as 20 of a PowerClerk-shaped replay's 79 s. Now the exact attempts run only when the list
+  // HAS that option, or while it may still be loading: the option list is polled for up to
+  // NATIVE_EXACT_WAIT_MS (a cascade lands in ~600 ms) and left early the moment the exact option
+  // shows. A list that never offers it goes straight to the same partial match as before. A
+  // control that cannot be read (fake locator) keeps the old attempts exactly.
+  const exactThere = await nativeExactOptionAppears(loc, value);
+  if (exactThere !== false) {
+    try { await loc.selectOption(value, { timeout: 5000 }); return true; } catch { /* try label */ }
+    try { await loc.selectOption({ label: value }, { timeout: 5000 }); return true; } catch { /* try partial */ }
+  }
   // NATIVE PARTIAL MATCH: selectOption(value)/{label} require an EXACT option text/value.
   // Portals routinely list "Schedule 7 - Residential Net Metering" while the bound value is
   // just "Schedule 7", so both exact attempts miss and the value is silently dropped. Before

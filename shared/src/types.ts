@@ -276,6 +276,14 @@ export interface ClientRecord {
   billingMode: string;
   /** Operator's per-submission service fee ("top fee") in USD; null = env default. */
   serviceFeeUsd: number | null;
+  /** This client's own price per filing by track (#187), ahead of serviceFeeUsd and the org price list. */
+  serviceFeePermitUsd: number | null;
+  serviceFeeNemUsd: number | null;
+  /** "founding" = billed at the founding prices and cap on the price list (#187); "" = standard. */
+  pricingTier: string;
+  /** The most we carry in fees we paid for this client and are not yet paid back for; null = the
+   *  default (FEE_FLOAT_LIMIT_USD, else $2,500). Over it, a filing whose fee we would pay waits. */
+  feeLimitUsd: number | null;
   portalIdentities: ClientPortalIdentity[];
   /** Contractor licences beyond the named columns, one per issuing state/kind (Iowa "EL"
    *  electrical, Florida EC/CVC, Texas TECL, Utah DOPL...). clientMatch matches them like a CCB. */
@@ -388,6 +396,9 @@ export interface SubmissionPaymentRecord {
    *  when the gate still asked for permit fee + service fee, so what that payment covered is a
    *  question for a person, never something an invoice may assume. */
   gateCollectedUsd: number | null;
+  /** How much of the client's paid onboarding fee this gate row took off its service fee (#208).
+   *  serviceFeeUsd is what is left to collect; counted as used only once the row is paid. */
+  creditAppliedUsd: number;
   updatedAt: string;
 }
 
@@ -400,10 +411,13 @@ export type FeePaymentMethod = "portal" | "mailed_check" | "none" | "unknown";
 
 /** How much to trust the amount. "actual" is the portal's own number. "verified"
  *  means a human stands behind it — a human-checked schedule row, or a median of
- *  fees people read off real portal screens. "seeded" is unreviewed research, so
+ *  fees people read off real portal screens. "official" (owner, 2026-11-11; rule 3's official tier)
+ *  is a published-schedule amount whose printed line Keelix itself read on the authority's own
+ *  official page: used as published and shown "Verified from <host>, <date>" (owner, 2026-11-13;
+ *  officialSourceWords), never under a person's name, and never over a person's verified amount. "seeded" is unreviewed research, so
  *  it never auto-overwrites anything (safety rule 3). "estimated" is the
  *  valuation heuristic, which knows nothing about the jurisdiction. */
-export type FeeConfidence = "actual" | "verified" | "seeded" | "estimated" | "unknown";
+export type FeeConfidence = "actual" | "verified" | "official" | "seeded" | "estimated" | "unknown";
 
 /** "actual" is the portal's fee TYPED BY THE OPERATOR off its fee/review screen; "portal_record"
  *  is the portal's fee READ AUTOMATICALLY off the filed record by the permit monitor. Both rank
@@ -616,6 +630,14 @@ export interface SubmissionPaymentQuote {
   /** The jurisdiction's own fee page, when a published schedule supplied or
    *  corroborated the number — so the operator can click through and check. */
   permitFeeSourceUrl: string | null;
+  /** WHEN KEELIX READ THAT SOURCE (ISO), "" when the fee row cannot say (fee round, 2026-11). Beside
+   *  permitFeeConfidence (the tier: seeded or person-verified) and permitFeeEvidenceQuote (the
+   *  printed line), this is what a fee needs before it is charged: who vouches, what was read, when. */
+  permitFeeSourceReadAt?: string;
+  /** FEE PAGES A PERSON READS while this amount is not from a schedule or the portal's own figure:
+   *  refused, dated or unreadable fee pages and cited fees that did not land (feeNeedsPerson).
+   *  Empty when there is nothing to read. Never a number. */
+  feeNeedsPersonRead?: Array<{ url: string; reason: string }>;
   /** The schedule line this project's size landed on ("5.01 kVA through 15 kVA").
    *  Carrying the bracket is the point: a replayed filing that freezes the learn
    *  project's bracket bills a 20 kW job at the 15 kVA rate. */
@@ -638,6 +660,9 @@ export interface SubmissionPaymentQuote {
    *  published_schedule and its confidence "verified". */
   permitFeeVerifiedBy: string;
   permitFeeVerifiedAt: string;
+  /** WHERE AN "official" AMOUNT WAS READ (the authority's own page, and when). Present only when
+   *  permitFeeConfidence is "official". */
+  permitFeeOfficialSource?: { host: string; sourceUrl: string; fetchedAt: string };
   /** The portal's figure beside the researched one, whenever a portal figure exists (read off
    *  the record, or typed by the operator) — both numbers and the difference. */
   permitFeeComparison: FeeComparison | null;
@@ -648,6 +673,11 @@ export interface SubmissionPaymentQuote {
   portalFeeRecords: PortalFeeRecordSummary | null;
   paymentMethod: FeePaymentMethod;
   serviceFeeUsd: number;
+  /** Where our service fee came from (#187): "the price list's price per permit filing", "this
+   *  client's own price per NEM application", or that no price is set (then serviceFeeUsd is 0). */
+  serviceFeeSource?: string;
+  /** The onboarding credit taken off serviceFeeUsd on this quote (#208); 0 when none. */
+  onboardingCreditUsd?: number;
   /** What this filing costs in all: the jurisdiction fee plus our service fee. A fact about the
    *  submission, NOT what the client hands us at the gate — see gateAmountUsd. */
   totalUsd: number | null;
@@ -685,6 +715,8 @@ export interface PublishedFeeResult {
   bracketLabel?: string | null;
   /** The jurisdiction's published fee page. */
   sourceUrl?: string | null;
+  /** When Keelix read that page (ISO), "" / absent when the row cannot say. */
+  sourceReadAt?: string | null;
   /** The SCHEDULE's own citation — provenance of the table. Row grain, so on a
    *  bracketed schedule it agrees with at most one of the brackets: read it as a
    *  pointer back to the document (and, as below, as a mailed-check hint), never
@@ -833,6 +865,9 @@ export interface ProjectFeeSheetLine {
    *  on the published_schedule tier. */
   verifiedBy: string;
   verifiedAt: string;
+  /** Where an "official" amount was read (SubmissionPaymentQuote.permitFeeOfficialSource): shown
+   *  "from <host>, read <date>". Present only when confidence is "official". */
+  officialSource?: { host: string; sourceUrl: string; fetchedAt: string };
   /** See SubmissionPaymentQuote.permitFeeComparison / portalFeeRecords. */
   comparison: FeeComparison | null;
   /** See SubmissionPaymentQuote.printedFormCheck. Absent on the local-review line. */
@@ -1159,6 +1194,10 @@ export type NextStepKey =
   | "staged_awaiting_submit"
   | "awaiting_signature"
   | "approved_awaiting_filing"
+  // #28: a two-stage permit filing whose application is made and paid — waiting on the agency's
+  // plan-upload invite, then a person uploads the plans in the second system by hand.
+  | "second_stage_invite"
+  | "second_stage_upload"
   | "fee_due"
   | "correction_open"
   | "payment_due"
@@ -1473,6 +1512,10 @@ export interface PortalRun {
   // `portalName` into it (measured on the live DB: 59 AutoLearnAdapter rows carry none), so a
   // renderer reading it would name the portal on some filings and go silent on others.
   permitType?: string;
+  /** A person's hand fixes held on this run after a replay step failed and its window stayed open
+   *  (runFixSteps.ts): how many steps, the stuck step (1-based, 0 unknown), and whether a named person
+   *  saved them into the recipe yet. Absent on a run that holds none. */
+  handFixes?: { count: number; stuckStep: number; atEnd?: boolean; appliedAt: string | null; appliedBy: string; preview: string[]; submitSightedAt?: string | null; submitLabel?: string };
 }
 
 export interface SubmissionRecord {
@@ -1483,7 +1526,9 @@ export interface SubmissionRecord {
   /** The filing's discipline (`permit_type`: building, electrical, combo, mpu, nem, …) — names the
    *  filing in the dashboard's corrections picker (#58). */
   permitType?: string;
-  status: "staged" | "awaiting_human_submit" | "paused_for_human" | "awaiting_payment" | "submitted" | "failed" | "approved";
+  /** awaiting_second_stage (#28): the application is made (and its fee paid) on a two-stage AHJ whose
+   *  plans go into a second system by hand — NOT filed until a named person marks that upload done. */
+  status: "staged" | "awaiting_human_submit" | "paused_for_human" | "awaiting_payment" | "awaiting_second_stage" | "submitted" | "failed" | "approved";
   applicationNumber: string;
   permitNumber: string;
   confirmationNumber: string;
@@ -2636,10 +2681,13 @@ export interface FireSetbackRule {
 /** A roof-plan fire access dimension (IRC R324.6 / IFC 1205): a pathway's width or the array's
  *  clear setback from a ridge. Hip/valley clearances are not read yet. */
 export type RoofPlanDimensionKind = "pathwayWidth" | "ridgeSetback";
+/** What a plan can STATE: a pathway, a ridge setback, or a "FIRE SETBACK" that names no roof line
+ *  (fireSetback — never compared on its own; evaluateFirePathwayFindings says how it counts). */
+export type StatedRoofPlanDimensionKind = RoofPlanDimensionKind | "fireSetback";
 
 /** One fire access dimension a text STATES (label-anchored), in inches. */
 export interface StatedRoofPlanDimension {
-  kind: RoofPlanDimensionKind;
+  kind: StatedRoofPlanDimensionKind;
   inches: number;
   source: string;
   excerpt: string;
@@ -4960,6 +5008,15 @@ export interface RecipeSelector {
   /** 0-based index when multiple match; omitted means .first(). */
   nth?: number;
   exact?: boolean;
+  /** #228: the words on the control's FACE when they differ from `name` (its accessible name, e.g.
+   *  a link reading "Apply" whose aria-label is "Apply Residential Renewable Energy"). NEVER a
+   *  locating strategy — no locator builder and no name rescue reads it (Tigard's menu tab reads
+   *  "Apply" too). Read by the click-safety haystacks (the learner's off-limits tests, the replay's
+   *  pay/submit gates) and the word tests that read the name (advance, contact opener, record
+   *  number), so a word a person sees on the control counts exactly as it did when the face text
+   *  was the name; and by the replay only to CHOOSE among controls the selector itself already
+   *  found (disambiguateByRecordedIdentity: a unique visible match by face), never to find one. */
+  shownText?: string;
   /** Alternate locator strategies tried in order when the primary selector finds
    *  nothing — survives portal UI updates that change one attribute but not all.
    *  Recorder contributors should capture 1-2 fallbacks (e.g. a stable css id as a
@@ -4968,9 +5025,14 @@ export interface RecipeSelector {
   fallbacks?: RecipeSelector[];
 }
 
-/** Attributes of the recorded element captured at record time. NEVER used to
- *  build a locator; consumed only by replay self-heal to rank candidates when
- *  the label anchor is ambiguous (two bare "Manufacturer" fields). Attribute
+/** Attributes of the recorded element captured at record time. Never a step's
+ *  selector, but replay does read it as evidence of WHICH element was meant:
+ *  self-heal ranks candidates by it when the label anchor is ambiguous (two
+ *  bare "Manufacturer" fields), the section rescue resolves by `section`, a
+ *  write's identity check moves to the element `id`/`name` names when that
+ *  element's label or section agrees, and a click's recorded identity (#228)
+ *  lets the element `id` names, when its words equal the step's, displace a
+ *  match suspected of being an earlier click's control. Attribute
  *  names/labels only — never values, never secrets. Old recipes lack the bag. */
 export interface StepFingerprint {
   id?: string;
@@ -4993,12 +5055,25 @@ export interface RecipeStep {
   value?: string;
   /** For upload: which document type to attach (e.g. "sld", "site_plan"). */
   docType?: string;
+  /** For upload: the heading of the requirement slot the document went into ("Electrical Plans",
+   *  "Bid"), as the portal named it (#140). Replay finds the slot by this heading first and falls
+   *  back to the recorded positional selector only when no slot on the page carries it. Absent
+   *  when the slot's own text named no document (a bare "Browse"). */
+  slot?: string;
   /** For upload: the control is a custom Browse/Upload widget whose real <input> is
    *  created on click — replay it via the browser file-chooser dialog (click + setFiles)
    *  rather than setInputFiles on a (non-existent) static input. */
   viaFileChooser?: boolean;
   /** Don't fail the run if this step's target isn't found. */
   optional?: boolean;
+  /** #237 — THE LEARN SAW THIS CONTROL ONLY AFTER AN ANSWER REVEALED IT: absent from the page's
+   *  entry scrape, recorded by the post-fill re-scan. Replay skips it, named, when it is absent or
+   *  hidden on this job (its answers did not reveal it — PacifiCorp's battery-inverter controls that
+   *  a later tick hides, Ameren's County that renders only once the address resolves); a control
+   *  that shows is written as always, and a failure on it still fails the step. Unlike `optional`,
+   *  never a licence to skip a control that IS there. Metadata only: never part of the label or
+   *  matching. Older recipes lack it. */
+  conditional?: boolean;
   /** A credential/secret field (password, account#, meter#, MFA). The recorder
    *  NEVER stores its literal value — it must be bound to the encrypted credential
    *  store / redacted project data, not a plaintext recipe value. */
@@ -5026,14 +5101,33 @@ export interface RecipeStep {
    *  unit and city/ZIP — portal-bot typeaheadMatch), read it back. A near miss or several equal
    *  suggestions pick nothing and stop for a person. Absent = an ordinary fill. */
   fillStrategy?: "typeahead";
+  /** A LOOKUP / POPULATE BUTTON's click (#178 — Accela Step 1's "Find Address", "Autofill", "Look Up";
+   *  portalSafety isLookupButtonLabel): the labels of the fields the press populated at learn time
+   *  ("Parcel Number:"), or the section heading when the press added a RECORD rather than values
+   *  ("Applicant"). Replay presses the button by its label and verifies each named field holds a
+   *  value after the press — the parcel is never typed from a recipe. Metadata only: never part of
+   *  the step's label or matching. */
+  populates?: string[];
   /** Set when this step's recorded answer was withheld from the shared recipe and the step replays
    *  BLANK for a person to answer — why, in words (e.g. a company-identity literal the save guard
    *  refused to persist). Metadata only: never part of the step's label or matching. */
   operatorItem?: string;
+  /** A CHOICE THAT NAMES A PERMIT PATH ("Prescriptive", "Engineered / structural review"), stamped with
+   *  the path of the job a person recorded or fixed it on (shared/src/permitPathSteps.ts). Replayed only
+   *  on a job whose resolved path is the same; on the other path it is left out, so a recording made
+   *  on a prescriptive job never picks "prescriptive" on an engineered one. Absent = every job. */
+  whenPermitPath?: "prescriptive" | "engineered";
   /** companyFacts.companyFactStamp of the client whose job recorded this company ATTESTATION (a
    *  check/select answering a fact about the installer company). Replayed only for that client's
    *  jobs; on any other job (or when absent) the step is left for a person. Opaque, never the id. */
   companyFactOf?: string;
+  /** A RESULTS-ROW PICK (#235): the step chose one row of a search-results grid — the property's
+   *  address, parcel or owner row, the filing company's licence or contact record. Replay picks the
+   *  row by THIS job's own value (portal-bot learnDataInSelectors, RecipeAdapter
+   *  pickResultRowForProject), never by a recorded label (the learn job's data) or a recorded row
+   *  position; no unique match leaves the row for a person. Metadata only: never part of the
+   *  step's label or matching. */
+  rowRole?: "address" | "parcel" | "owner" | "licence" | "contact";
   /** See StepFingerprint — heal tie-break metadata captured at record time. */
   fingerprint?: StepFingerprint;
 }
@@ -5124,6 +5218,11 @@ export interface InfoPageCandidateRecord {
    *  INFO_PAGE_PASS_MAX_PROJECTS) — the run was held as on main; a person re-verifies on this card
    *  (the verify replaces the expired pass). null = none. */
   expiredPass: { passId: string; verifiedAt: string; why: string[] } | null;
+  /** #279 (Helm's review of #294): the verified pages whose click led to THIS page. Each such pass
+   *  WAITS (no run may use it) until a person rules here: verifying this page releases it, "not an
+   *  information page" withdraws it as an after-click incident. `afterText` is what the run read on
+   *  this page (redacted); `acknowledgement` is the acknowledgement wording found in it, called out. */
+  ledFromVerified?: Array<{ passId: string; where: string; controlLabel: string; afterText: string; acknowledgement: string[]; at: string }>;
 }
 
 /** A shared pass as GET /api/info-page-passes lists it (critique [5]: no component or value hashes,
@@ -5161,6 +5260,9 @@ export interface InfoPagePassRecord {
   /** #344 round 4: why the verification expired (30 days / 10 projects — the limit reached, never a
    *  count); empty = within both limits. */
   expired: string[];
+  /** #279: the page this verified page last led to was another information page, and no person has
+   *  ruled on it yet. A waiting pass is not live (the admission refuses it). */
+  waiting?: string;
 }
 
 /**
@@ -5178,6 +5280,20 @@ export interface InfoPageIncident {
   why: string[];
   /** origin + path of the page (never a query). */
   where: string;
+  /** #279: phase "after" — the page the verified click led to, as read (scrubbed, capped), so a person
+   *  can tell a receipt from a second information page. Its masked screenshot is in the run's bundle. */
+  afterText?: string;
+}
+
+/** #279 (owner's option 1) — a verified information page's click led to ANOTHER information page (no
+ *  form, at most acknowledgement wording, no filing evidence): the verification is KEPT, nothing
+ *  leaves that page unless a person verifies it too, and this is the evidence. */
+export interface InfoPageNextInformation {
+  passId: string;
+  /** origin + path of the verified page (never a query). */
+  where: string;
+  /** The page after, as read (scrubbed, capped). */
+  afterText: string;
 }
 
 /** #344 round 3 — on a PROJECT's card: a pass this project used was withdrawn by an after-click
@@ -5339,6 +5455,17 @@ export interface PaidFeeReceipt {
   invoiceNumber?: string;
   totalPaidUsd: number;
   paidAt: string;
+  /** The fee lines an itemized receipt prints, when every line read and they add up to the
+   *  receipt (feeReceipts.transactionReceiptLines). What a schedule's own lines are checked against. */
+  lines?: PaidFeeReceiptLine[];
+}
+
+/** One printed fee line: the authority's price for it (`feeUsd`) and what this payment put on it
+ *  (`paidUsd`; a partial payment pays less). The fee item's own name only, never an address. */
+export interface PaidFeeReceiptLine {
+  label: string;
+  feeUsd: number;
+  paidUsd: number;
 }
 
 // ── PER-JOB PERMIT PROCESS (operator steer 2026-09-25: "It needs to look up the right stuff per job") ──
@@ -5368,6 +5495,12 @@ export interface CitedFact<T> {
   /** Other pages that state the SAME fact in other words (a prerequisite collapsed from
    *  near-duplicates, permitProcessPrerequisites.classifyPrerequisites) — every source is kept. */
   alsoSourceUrls?: string[];
+  /** OFFICIAL (owner, 2026-11-11; backend/src/lookupFactTiers.ts): Keelix read this fact's quote, naming
+   *  its value, in the bytes it retrieved from the authority's own official page at `fetchedAt`. Shown
+   *  "Verified from <host>, <date>"; never a person's verification, never on a filing door or a fee.
+   *  Absent = seeded. Re-checked whenever the row is served (withHonouredFactTiers). */
+  tier?: "official";
+  fetchedAt?: string;
 }
 export type PermitProcessDiscipline = "structural" | "electrical" | "combo" | "other";
 export interface PermitFeeAnswer {
@@ -5409,6 +5542,17 @@ export interface PermitProcessPermitAnswer {
   /** Other ways the same page says the permit may be filed ("you may also fax, email, mail or bring
    *  it in"), each cited; never the primary. */
   alternateChannels?: Array<CitedFact<PermitFilingChannel>>;
+  /** A SECOND STAGE of this permit's filing (#28), cited: after the application (and its fee) the
+   *  agency takes the plans in ANOTHER system, opened by something it sends (an emailed invite).
+   *  A description only: it never changes what a track asks for until a named person confirms it
+   *  (secondStage.ts), and it is never a filing door. Absent on older rows (= none stated). */
+  secondStage?: CitedFact<PermitSecondStageAnswer>;
+}
+/** A two-stage filing's second stage as a page states it: the system the plans are uploaded in, and
+ *  what opens it ("an invitation email after the fee is paid"), both in the page's own words. */
+export interface PermitSecondStageAnswer {
+  system: string;
+  trigger: string;
 }
 export type BatteryPermittingKind = "sameReview" | "separatePermit" | "fireReview" | "fireApprovalLetter";
 export interface BatteryPermittingAnswer {
@@ -5417,6 +5561,29 @@ export interface BatteryPermittingAnswer {
   agency?: string;
   /** Documents the page names for the battery (a storage packet, a fire approval letter). */
   documents?: string[];
+}
+/** THE RECORD TYPE / WORK ITEM a learn is told to tick (#166): the per-job lookup's record type for
+ *  the permit this learn files, with the standing of the row it came from. `verified` is true only
+ *  when that lookup row is person-verified (permitProcess.isVerifiedPermitProcess) — rule 3's line:
+ *  a verified name is the deterministic pick wherever a page offers it (matched by label with
+ *  permitProcess.sameRecordType, never by position); a seeded one is a planner hint and nothing
+ *  more. null = no record type on file, or a utility (interconnection) learn. */
+export interface LearnTargetRecordType {
+  value: string;
+  verified: boolean;
+}
+/** A GOVERNMENT PAGE VOUCHED FOR THIS AUTHORITY'S OWN SITE (owner, 2026-11-13): a .gov page Keelix read
+ *  itself links `host` with words naming the authority, so facts read on `host` can be official
+ *  (backend/src/governmentVouches.ts holds the conditions and re-checks them on every read). Never a
+ *  filing door: where a filing goes and whether one is sent stay person-verified. */
+export interface SiteVouch {
+  host: string;
+  /** The government page that links it, as read. */
+  vouchedByUrl: string;
+  /** The link's own words on that page. */
+  linkText: string;
+  /** When Keelix read the vouching page (ISO). */
+  fetchedAt: string;
 }
 export interface PermitProcessLookup {
   profileKey: string;
@@ -5446,6 +5613,8 @@ export interface PermitProcessLookup {
   /** Pages the lookup READ ITSELF (agency pages, the portal's public catalog, fee schedules), each
    *  with what came of the read — the audit trail for every value cited to one of them. */
   pagesRead?: Array<{ url: string; ok: boolean; reason: string }>;
+  /** Government pages that link this AHJ's own non-government site (SiteVouch). */
+  siteVouches?: SiteVouch[];
   /** HOW A BATTERY (ESS) JOB IS PERMITTED here (lookup-battery-and-fees, 2026-11-10), each cited:
    *  in the same PV review, a separate storage permit, a fire review, a fire approval letter (several
    *  may hold). Read only on a storage job, as a warning (essRequirements.essPermitStep); never a
@@ -5456,6 +5625,10 @@ export interface PermitProcessLookup {
   /** Pages the lookup was REFUSED (a challenge, 401/403/429, a host backed off after a refusal): a
    *  person reads them (lookup-door-fixes, 2026-11-10). Never retried in another style. */
   needsPersonRead?: Array<{ url: string; reason: string }>;
+  /** FEE PAGES A PERSON READS (fee round, 2026-11): a fee schedule Keelix found and does not rely
+   *  on (dated, archived, gone, or with no readable text). Shown on the fee quote while the fee is
+   *  not from a schedule or the portal's own figure. Never a number. */
+  feeReadsForPerson?: Array<{ url: string; reason: string }>;
   lookedUpAt: string;
   model?: string;
   costUsd?: number;

@@ -32,13 +32,19 @@ const constLine = (name: string): string => {
   if (!m) throw new Error(`dashboard.js: could not find const ${name}`);
   return m[0];
 };
+const constBlock = (name: string): string => {
+  const m = new RegExp(`^const ${name} = \\[[\\s\\S]*?\\n\\];$`, "m").exec(dashboard);
+  if (!m) throw new Error(`dashboard.js: could not find const ${name}`);
+  return m[0];
+};
 const bundle = [
   ...["PL_NO_LOGIN_CHANNELS", "PORTAL_TYPE_NAMES", "PORTAL_VENDOR_NAMES"].map(constLine),
-  ...["esc", "humanize", "plPortalSlug", "portalHostname", "portalDisplayName", "plLoginFits", "plProjectPortals", "plCredRowHtml", "plListHtml"].map(cut),
+  constBlock("FEE_PAYER_CHOICES"),
+  ...["esc", "humanize", "plPortalSlug", "portalHostname", "portalDisplayName", "plLoginFits", "plProjectPortals", "feePayerControlHtml", "plCredRowHtml", "plListHtml"].map(cut),
 ].join("\n\n");
 
-type Cred = { id: string; portalType: string; portalUrl: string; usernameReference: string; hasSecret: boolean };
-type Portal = { label: string; url: string; slug: string; host: string; matched: boolean };
+type Cred = { id: string; portalType: string; portalUrl: string; usernameReference: string; hasSecret: boolean; feeResponsibility?: string };
+type Portal = { label: string; url: string; slug: string; host: string; matched: boolean; payerMissing?: boolean };
 type View = { known: boolean; portals: Portal[]; used: Cred[]; others: Cred[] };
 const lib = new Function(`${bundle}\nreturn { plProjectPortals, plListHtml };`)() as {
   plProjectPortals: (tracks: unknown, creds: Cred[]) => View;
@@ -117,6 +123,21 @@ check("(e) a portal with no saved login yet reads as missing, with the pick-a-po
 check("(f) the client name is escaped into the toggle", () => {
   const html = lib.plListHtml(lib.plProjectPortals(tracks, creds), false, "<b>x</b>");
   assert.doesNotMatch(html, /<b>x<\/b>/);
+});
+
+// #201: who pays each portal's fees. A saved login with no answer stalls the job at the portal's fee
+// screen, so the project's portal is flagged and the row says so; an answered login is not flagged.
+check("(g) a project portal whose login has no 'who pays' is flagged; an answered one is not", () => {
+  const answered = creds.map((c) => (c.id === "c-city" ? { ...c, feeResponsibility: "card-on-file" } : c));
+  const v = lib.plProjectPortals(tracks, answered);
+  const byLabel = Object.fromEntries(v.portals.map((p) => [p.label, p]));
+  assert.equal(byLabel["Building permit"].payerMissing, false);
+  const html = lib.plListHtml(v, false, "Acme Solar");
+  assert.match(html, /data-pl-fee="c-city"/);
+  const blank = lib.plProjectPortals(tracks, creds);
+  assert.ok(blank.portals.filter((p) => p.matched).every((p) => p.payerMissing), JSON.stringify(blank.portals));
+  assert.match(lib.plListHtml(blank, false, "Acme Solar"), /who pays not set/);
+  assert.ok(lib.plProjectPortals(tracks, []).portals.every((p) => !p.payerMissing), "a missing login is 'needs login', not 'who pays'");
 });
 
 if (failed) { console.log(`\n${failed} check(s) failed`); process.exit(1); }

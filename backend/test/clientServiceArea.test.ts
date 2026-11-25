@@ -262,6 +262,9 @@ await check("(g) the area stays client data: only its readers read it, no model 
   for (const d of ["backend/src", "portal-bot/src", "shared/src", "scripts", "tools"]) if (fs.existsSync(path.join(REPO, d))) walk(d);
   const readers = files.filter((f) => /service_area_json|clientServiceArea|serviceAreaEntries/.test(fs.readFileSync(path.join(REPO, f), "utf8"))).sort();
   assert.deepEqual(readers, [
+    // clientOnboarding.ts: the client's own Company setup page proposes service-area ADDITIONS; only a
+    // named person's accept writes them, through updateClient (the one writer pinned below).
+    "backend/src/clientOnboarding.ts",
     "backend/src/clientServiceArea.ts", "backend/src/clients.ts", "backend/src/db.ts", "backend/src/filingDestinationProposals.ts",
     "backend/src/serviceAreaEntries.ts", "scripts/coverage-report.ts", "scripts/onboard-company.ts", "shared/src/types.ts",
   ].sort());

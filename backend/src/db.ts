@@ -30,6 +30,7 @@ function bindable(params: SqlParams): unknown[] {
 // call sites are untouched.
 export class AppDb {
   private transactionDepth = 0;
+  private writes = 0;
   private readonly stmtCache = new Map<string, Statement>();
 
   constructor(private readonly db: DB) {}
@@ -40,6 +41,12 @@ export class AppDb {
    *  this a snapshot OF. A backup directory that cannot tell is a directory where a throwaway
    *  test database can quietly file itself alongside the operator's real restore points — which
    *  is not hypothetical, it is what happened. */
+  /** Counts every statement sent through `run` or `exec` on this handle. A read memo (readMemo.ts)
+   *  reuses an answer only while this has not moved, so no write can sit between two readers of it. */
+  get writeSeq(): number {
+    return this.writes;
+  }
+
   get sourcePath(): string {
     return this.db.name;
   }
@@ -69,11 +76,13 @@ export class AppDb {
   }
 
   run(sql: string, params: SqlParams = []): void {
+    this.writes += 1;
     this.prepare(sql).run(...bindable(params));
   }
 
   // Multi-statement DDL/seed scripts. Not parameterized.
   exec(sql: string): void {
+    this.writes += 1;
     this.db.exec(sql);
   }
 
@@ -3614,6 +3623,411 @@ const VERSIONED_MIGRATIONS: VersionedMigration[] = [
       addColumnIfMissing(db, "clients", "service_area_json", "TEXT NOT NULL DEFAULT '[]'");
     },
   },
+  {
+    // v81 (client self-onboarding): the Company setup link, the client's proposals and its
+    // certificate uploads. Client data, scoped by client_id (rule 6); nothing here is shared knowledge.
+    version: 81,
+    name: "client_onboarding",
+    up: (db) => {
+      // A CLIENT FILLS IN ITS OWN COMPANY SETUP (clientOnboarding.ts). Three tables, all CLIENT DATA
+      // keyed on client_id (org-scoped through the client row, rule 6), none of them shared knowledge
+      // and none of them read by a prompt.
+      //   client_onboarding_links: the staff-minted, revocable, expiring link. Only the SHA-256 of the
+      //     token is stored (the URL is shown once, at mint). draft_json is the client's work in
+      //     progress, saved across sessions until it submits; status open / submitted / revoked.
+      //   client_onboarding_proposals: what the client submitted, one row per field that differs from
+      //     the client record. NOTHING here writes the client row: a named staff person accepts (as
+      //     sent or edited) or rejects each one, and only the accept calls updateClient.
+      //   client_onboarding_files: the optional certificate uploads (type and size capped). Bytes in
+      //     the row, so a purge of the client takes them; never parsed, never sent to a model.
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS client_onboarding_links (
+          id TEXT PRIMARY KEY,
+          client_id TEXT NOT NULL,
+          token_hash TEXT NOT NULL UNIQUE,
+          status TEXT NOT NULL DEFAULT 'open',
+          draft_json TEXT NOT NULL DEFAULT '{}',
+          draft_saved_at TEXT,
+          created_by TEXT NOT NULL DEFAULT '',
+          created_at TEXT NOT NULL,
+          expires_at TEXT NOT NULL,
+          submitted_at TEXT,
+          revoked_at TEXT,
+          revoked_by TEXT NOT NULL DEFAULT '',
+          portal_requests INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE INDEX IF NOT EXISTS idx_client_onboarding_links_client ON client_onboarding_links(client_id, created_at);
+        CREATE TABLE IF NOT EXISTS client_onboarding_proposals (
+          id TEXT PRIMARY KEY,
+          client_id TEXT NOT NULL,
+          link_id TEXT NOT NULL,
+          field TEXT NOT NULL,
+          proposed_json TEXT NOT NULL,
+          current_json TEXT NOT NULL DEFAULT 'null',
+          source TEXT NOT NULL DEFAULT 'client-supplied',
+          status TEXT NOT NULL DEFAULT 'pending',
+          created_at TEXT NOT NULL,
+          decided_by TEXT NOT NULL DEFAULT '',
+          decided_at TEXT,
+          applied_json TEXT NOT NULL DEFAULT ''
+        );
+        CREATE INDEX IF NOT EXISTS idx_client_onboarding_proposals_client ON client_onboarding_proposals(client_id, status);
+        CREATE TABLE IF NOT EXISTS client_onboarding_files (
+          id TEXT PRIMARY KEY,
+          client_id TEXT NOT NULL,
+          link_id TEXT NOT NULL,
+          kind TEXT NOT NULL,
+          file_name TEXT NOT NULL DEFAULT '',
+          mime TEXT NOT NULL,
+          size_bytes INTEGER NOT NULL,
+          sha256 TEXT NOT NULL,
+          bytes BLOB NOT NULL,
+          created_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_client_onboarding_files_client ON client_onboarding_files(client_id, created_at);
+      `);
+    },
+  },
+  {
+    // v82 (client filing details): what a CLIENT says about how it files with each authority in its
+    // service area (clientFilingStatements.ts) — a portal address or an intake email, whether it holds
+    // an account there (yes/no, never a login) and an example record number. CLIENT DATA, scoped by
+    // client_id (rule 6), and only ever a SOURCE for a destination proposal a person decides
+    // (filingDestinationProposals.ts): no channel, stage, launch or send reads this table. Created
+    // here, never lazily: reading a proposal writes nothing.
+    version: 82,
+    name: "client_filing_statements",
+    up: (db) => {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS client_filing_statements (
+          id TEXT PRIMARY KEY,
+          client_id TEXT NOT NULL,
+          link_id TEXT NOT NULL DEFAULT '',
+          authority_kind TEXT NOT NULL,
+          authority_state TEXT NOT NULL DEFAULT '',
+          authority_name TEXT NOT NULL,
+          profile_key TEXT NOT NULL,
+          kind TEXT NOT NULL,
+          address TEXT NOT NULL,
+          has_account TEXT NOT NULL DEFAULT '',
+          example_number TEXT NOT NULL DEFAULT '',
+          source TEXT NOT NULL DEFAULT 'client-supplied',
+          status TEXT NOT NULL DEFAULT 'current',
+          created_at TEXT NOT NULL,
+          dismissed_by TEXT NOT NULL DEFAULT '',
+          dismissed_at TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_client_filing_statements_authority ON client_filing_statements(client_id, authority_kind, profile_key, status);
+      `);
+    },
+  },  {
+    // WHAT THE SERVER'S OWN IMAGE READ OF A PLAN SET SAID ABOUT ITS AC DISCONNECT (#135,
+    // planSetImageReads.ts). Written only by the plan-scan route, at the one place the intake reads a
+    // scanned plan set by vision, keyed by the PDF's bytes (sha-256) because no job exists yet, and by
+    // the org that posted it (rule 6: its own org_id, from the session). Only the AC disconnect's own
+    // fields, value and sheet; never the read's other fields. Created here, never lazily: the gate and
+    // QC read it, and a read writes nothing.
+    version: 83,
+    name: "plan_set_image_reads",
+    up: (db) => {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS plan_set_image_reads (
+          org_id TEXT NOT NULL,
+          pdf_sha256 TEXT NOT NULL,
+          field TEXT NOT NULL,
+          value TEXT NOT NULL,
+          sheet TEXT NOT NULL DEFAULT '',
+          read_mode TEXT NOT NULL DEFAULT 'vision',
+          read_at TEXT NOT NULL,
+          PRIMARY KEY (org_id, pdf_sha256, field)
+        );
+      `);
+    },
+  },
+  {
+    // v84 (two-stage permit filings, #28 part 1): the number the coordinator assigned
+    // (v81 to v83 are on main). Nothing depends on the number.
+    version: 84,
+    name: "permit_second_stages",
+    up: (db) => {
+      // (a) THE SECOND STAGE A PERSON CONFIRMED FOR AN ISSUING AGENCY (secondStage.ts): after the
+      //     application and its fee, the plans go into another system the agency opens with an invite.
+      //     SHARED per-agency process knowledge, like permit_process_lookups (an agency's process
+      //     learned once serves every tenant; it holds no job, client or homeowner data). Written ONLY
+      //     by a named person's Confirm (rule 3: a seeded or cited description never lands here by
+      //     itself). One row per (state, agency). It names a system, never an address: no door.
+      // (b) ONE JOB'S PROGRESS THROUGH IT: a child row of the project (org reached through the
+      //     project, rule 6). first_stage_*: the application a person recorded (Paid at the fee stop,
+      //     or made by hand). invite_*: the agency's invite email once the filings inbox matches it;
+      //     invite_link is kept only when its host passed rule 5's predicate at match time, and is
+      //     judged again at every read. uploaded_*: the named person's mark that the plans went in;
+      //     screenshot_path: that person's own picture of the confirmation (staff-only route).
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS permit_second_stages (
+          id TEXT PRIMARY KEY,
+          state TEXT NOT NULL,
+          agency_key TEXT NOT NULL,
+          agency TEXT NOT NULL DEFAULT '',
+          system_name TEXT NOT NULL,
+          trigger_text TEXT NOT NULL DEFAULT '',
+          source_url TEXT NOT NULL DEFAULT '',
+          quote TEXT NOT NULL DEFAULT '',
+          verified_by TEXT NOT NULL,
+          verified_at TEXT NOT NULL,
+          UNIQUE (state, agency_key)
+        );
+        CREATE TABLE IF NOT EXISTS track_second_stages (
+          id TEXT PRIMARY KEY,
+          project_id TEXT NOT NULL,
+          track TEXT NOT NULL,
+          submission_id TEXT NOT NULL DEFAULT '',
+          system_name TEXT NOT NULL DEFAULT '',
+          first_stage_at TEXT NOT NULL,
+          first_stage_number TEXT NOT NULL DEFAULT '',
+          first_stage_by TEXT NOT NULL DEFAULT '',
+          first_stage_via TEXT NOT NULL DEFAULT '',
+          invite_signature TEXT NOT NULL DEFAULT '',
+          invite_subject TEXT NOT NULL DEFAULT '',
+          invite_from TEXT NOT NULL DEFAULT '',
+          invite_received_at TEXT NOT NULL DEFAULT '',
+          invite_link TEXT NOT NULL DEFAULT '',
+          invite_link_hidden_host TEXT NOT NULL DEFAULT '',
+          invite_link_hidden_why TEXT NOT NULL DEFAULT '',
+          uploaded_at TEXT NOT NULL DEFAULT '',
+          uploaded_by TEXT NOT NULL DEFAULT '',
+          confirmation_number TEXT NOT NULL DEFAULT '',
+          screenshot_path TEXT NOT NULL DEFAULT '',
+          created_at TEXT NOT NULL,
+          UNIQUE (project_id, track),
+          FOREIGN KEY (project_id) REFERENCES projects(id)
+        );
+      `);
+    },
+  },
+  {
+    // v85 (#187, the founding prices): OUR OWN PRICE PER FILING, as data (servicePrices.ts).
+    // (a) service_prices: the org's price list, per pricing tier (founding | standard) and item (permit,
+    //     nem, project_cap), set by a named admin. Per org (the tenant that sells), never a shared table.
+    //     No row = no price (or no cap).
+    // (b) filing_service_charges: the price saved on each filing, written ONCE per (project, filing
+    //     type) by the filing doors beside fee_quote_snapshots, with the client's billing mode at that
+    //     moment: the tier, the list price, the project cap and the charged amount (the price cut to what
+    //     the cap leaves). A child of projects: it reaches an org through its project and carries no org_id.
+    //     A statement bills it (clientInvoices.ts), except the first filing of each track under
+    //     per-submission billing, which the gate collected.
+    //     waived_*: a named person's "do not bill this filing", with the reason.
+    // The client's own price per track (service_fee_permit_usd / service_fee_nem_usd) and pricing tier
+    // (pricing_tier) are in the client column list, added on every boot like the client's other columns.
+    version: 85,
+    name: "service_price_list",
+    up: (db) => {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS service_prices (
+          org_id TEXT NOT NULL,
+          tier TEXT NOT NULL,
+          item TEXT NOT NULL,
+          price_usd REAL NOT NULL,
+          set_by TEXT NOT NULL DEFAULT '',
+          set_at TEXT NOT NULL,
+          PRIMARY KEY (org_id, tier, item)
+        );
+        CREATE TABLE IF NOT EXISTS filing_service_charges (
+          id TEXT PRIMARY KEY,
+          project_id TEXT NOT NULL,
+          permit_type TEXT NOT NULL,
+          billing_track TEXT NOT NULL,
+          billing_mode TEXT NOT NULL DEFAULT '',
+          pricing_tier TEXT NOT NULL DEFAULT 'standard',
+          list_price_usd REAL,
+          cap_usd REAL,
+          price_usd REAL,
+          price_basis TEXT NOT NULL DEFAULT 'unset',
+          price_label TEXT NOT NULL DEFAULT '',
+          submission_id TEXT NOT NULL DEFAULT '',
+          filed_at TEXT NOT NULL,
+          waived_at TEXT NOT NULL DEFAULT '',
+          waived_by TEXT NOT NULL DEFAULT '',
+          waive_reason TEXT NOT NULL DEFAULT '',
+          created_at TEXT NOT NULL,
+          UNIQUE (project_id, permit_type),
+          FOREIGN KEY (project_id) REFERENCES projects(id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_filing_service_charges_project ON filing_service_charges(project_id);
+      `);
+    },
+  },
+  {
+    // v86 (#199, chasing late invoices; invoiceCollections.ts): children of client_invoices, reaching an
+    // org through the invoice's client (rule 6), so no org_id.
+    // (a) invoice_reminders: every reminder a named person sent (or tried to: delivered 0 = a draft or a
+    //     failure, which does not count as sent).
+    // (b) invoice_hold_lifts: a named person's lift of one invoice's hold on the client's new filings,
+    //     with the reason. One per invoice. The invoice stays owed.
+    version: 86,
+    name: "invoice_collections",
+    up: (db) => {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS invoice_reminders (
+          id TEXT PRIMARY KEY,
+          invoice_id TEXT NOT NULL,
+          kind TEXT NOT NULL,
+          sent_by TEXT NOT NULL,
+          sent_at TEXT NOT NULL,
+          delivered INTEGER NOT NULL DEFAULT 0,
+          detail TEXT NOT NULL DEFAULT ''
+        );
+        CREATE INDEX IF NOT EXISTS idx_invoice_reminders_invoice ON invoice_reminders(invoice_id);
+        CREATE TABLE IF NOT EXISTS invoice_hold_lifts (
+          id TEXT PRIMARY KEY,
+          invoice_id TEXT NOT NULL UNIQUE,
+          client_id TEXT NOT NULL,
+          lifted_by TEXT NOT NULL,
+          lifted_at TEXT NOT NULL,
+          reason TEXT NOT NULL
+        );
+      `);
+    },
+  },
+  {
+    // v87 (draft 16 B, automated; owner 2026-11-12): the next free number on main 16a7fb4 (#199 holds v86).
+    // Helm renumbers at merge if the queue changes — nothing here depends on the number.
+    version: 87,
+    name: "parcel_service_link_checks",
+    up: (db) => {
+      // KEELIX'S READ OF A COUNTY'S OWN GOVERNMENT PAGE: DOES IT LINK THE HOSTED PARCEL SERVICE?
+      // (parcelServiceLink.ts.) Written ONLY by the parcel_jurisdiction_check job, before any address
+      // is sent; the gate and the door read it. One row per (record, its source page, its service
+      // root): the latest check. status confirmed | refused; kind service | organisation |
+      // organisation_site; link_url + quote = the link and the page's own bytes around it, verbatim;
+      // organisation_id / organisation_source = what the organisation's own site said it is (for
+      // organisation_site). Shared on purpose like the other jurisdiction tables: a public page and a
+      // public link, no tenant data, no address.
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS parcel_service_link_checks (
+          source_key TEXT NOT NULL,
+          source_url TEXT NOT NULL,
+          service_root TEXT NOT NULL,
+          status TEXT NOT NULL,
+          kind TEXT NOT NULL DEFAULT '',
+          page_url TEXT NOT NULL DEFAULT '',
+          link_url TEXT NOT NULL DEFAULT '',
+          quote TEXT NOT NULL DEFAULT '',
+          organisation_id TEXT NOT NULL DEFAULT '',
+          organisation_source TEXT NOT NULL DEFAULT '',
+          page_sha256 TEXT NOT NULL DEFAULT '',
+          detail TEXT NOT NULL DEFAULT '',
+          checked_at TEXT NOT NULL,
+          PRIMARY KEY (source_key, source_url, service_root)
+        )
+      `);
+    },
+  },
+  {
+    // v88 (#208, the onboarding credit; onboardingCredit.ts): how much of the client's paid onboarding
+    // fee each per-submission gate row took off its service fee. service_fee_usd stays what the gate
+    // asks for (after the credit); service_fee_usd + credit_applied_usd is the filing's price after
+    // the project cap. Counted as used only once the row is paid. No balance is stored anywhere: the
+    // credit is derived from paid invoices and these rows.
+    version: 88,
+    name: "onboarding_credit",
+    up: (db) => {
+      addColumnIfMissing(db, "submission_payments", "credit_applied_usd", "REAL NOT NULL DEFAULT 0");
+    },
+  },
+  {
+    // v89 (#209, fee float; feeFloat.ts): an invoice for ONE job's fees we paid, due on receipt. project_id ''
+    // is a statement for a period (as before). The client's fee limit is a client column (fee_limit_usd,
+    // in the client column list).
+    version: 89,
+    name: "job_fee_invoices",
+    up: (db) => {
+      addColumnIfMissing(db, "client_invoices", "project_id", "TEXT NOT NULL DEFAULT ''");
+    },
+  },
+  {
+    // v90 (#220, rapid shutdown from the maker's spec sheet; owner card 2026-11-13 "Keelix attaches the
+    // maker's spec sheet"): Helm's number. v88 and v89 are in main ahead of it.
+    // Helm renumbers at merge if the queue changes — nothing here depends on the number.
+    version: 90,
+    name: "maker_spec_sheets",
+    up: (db) => {
+      // A MAKER'S OWN DATASHEET FOR ONE PRODUCT (makerSpecSheets.ts), fetched once per make + model and
+      // shared on purpose like cec_equipment: a public PDF from the maker's own site, no tenant data.
+      // status found = the sheet names the model and says it is listed rapid-shutdown equipment
+      // (rsd_quote, the sheet's own words); no_listing = the sheet was read and does not say so;
+      // not_found = no sheet on the maker's own site could be read (detail says why). Written ONLY by
+      // the maker_spec_sheet job; a project gets a COPY as its own inverter_spec document.
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS maker_spec_sheets (
+          make_key TEXT NOT NULL,
+          model_key TEXT NOT NULL,
+          make TEXT NOT NULL DEFAULT '',
+          model TEXT NOT NULL DEFAULT '',
+          status TEXT NOT NULL,
+          source_url TEXT NOT NULL DEFAULT '',
+          host TEXT NOT NULL DEFAULT '',
+          sha256 TEXT NOT NULL DEFAULT '',
+          stored_path TEXT NOT NULL DEFAULT '',
+          rsd_quote TEXT NOT NULL DEFAULT '',
+          detail TEXT NOT NULL DEFAULT '',
+          fetched_at TEXT NOT NULL,
+          PRIMARY KEY (make_key, model_key)
+        )
+      `);
+    },
+  },  {
+    // v91 (replays learn from a person's hand fixes; owner 2026-11-21 "get the manual learning going and
+    // adapted"). Helm renumbers at merge if the queue changes — nothing here depends on the number.
+    version: 91,
+    name: "portal_run_fix_steps",
+    up: (db) => {
+      // WHAT A PERSON DID BY HAND AFTER A REPLAY STEP FAILED (runFixSteps.ts), one row per run. The
+      // window stays open at the failed step; the person's fills/clicks are captured (read only),
+      // prepared like the learner's review patch (no submit/pay click, no secret value, literals bound
+      // to the job's fields) and held here. Nothing reaches the recipe until a named person presses
+      // "Save my fixes" (applied_at / applied_by), and only onto the exact recipe version and steps the
+      // run replayed (recipe_version + steps_signature). anchor_index is the failed step in the STORED
+      // recipe (-1 = unknown, -2 = after the last step). permit_path: the job's resolved path on a permit
+      // track ('' on NEM), what a path-naming fix was shown for. submit_sighted_at / submit_label: the
+      // person clicked the portal's submit in that window (recorded, never merged: the filing may have
+      // gone). proven_by_run: the first later replay of the recipe that reached review cleanly after the
+      // fixes were saved; until then automaticSubmitRefusals refuses an automatic filing on that recipe.
+      // A child of the run, so it reaches an org through its project.
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS portal_run_fix_steps (
+          run_id TEXT PRIMARY KEY REFERENCES portal_runs(id) ON DELETE CASCADE,
+          project_id TEXT NOT NULL,
+          recipe_id TEXT NOT NULL,
+          recipe_version INTEGER NOT NULL,
+          steps_signature TEXT NOT NULL,
+          anchor_index INTEGER NOT NULL DEFAULT -1,
+          steps_json TEXT NOT NULL DEFAULT '[]',
+          captured_at TEXT NOT NULL,
+          applied_at TEXT,
+          applied_by TEXT NOT NULL DEFAULT '',
+          applied_mode TEXT NOT NULL DEFAULT '',
+          permit_path TEXT NOT NULL DEFAULT '',
+          submit_sighted_at TEXT,
+          submit_label TEXT NOT NULL DEFAULT '',
+          proven_by_run TEXT NOT NULL DEFAULT ''
+        )
+      `);
+    },
+  },
+  {
+    // v92 (what intake read for each field, and who changed it; fieldHistory.ts). extracted_fields becomes
+    // a per-field history: intake's read at creation, then one row per CHANGED field per save, with the
+    // value before (previous_value, NULL = blank or none recorded) and the named person who made it (changed_by,
+    // '' = not a person: source_method says what). Helm renumbers at merge if the queue changes —
+    // nothing here depends on the number.
+    version: 92,
+    name: "field_change_history",
+    up: (db) => {
+      addColumnIfMissing(db, "extracted_fields", "previous_value", "TEXT");
+      addColumnIfMissing(db, "extracted_fields", "changed_by", "TEXT NOT NULL DEFAULT ''");
+      db.exec("CREATE INDEX IF NOT EXISTS idx_extracted_fields_project ON extracted_fields(project_id, created_at)");
+    },
+  },
 ];
 
 /** v47 was edited in place while #218 was open (Helm's review at 0116f98a): a DB that ran an earlier
@@ -3821,6 +4235,15 @@ const CLIENT_LICENSING_COLUMNS: [string, string][] = [
   // The operator's per-submission service fee ("top fee") for this client, in USD.
   // Null falls back to the SUBMISSION_SERVICE_FEE_USD env default.
   ["service_fee_usd", "REAL"],
+  // This client's own price per filing, by billing track (#187): ahead of service_fee_usd and the
+  // org's price list (servicePrices.resolveServicePrice). Null = not set for this client.
+  ["service_fee_permit_usd", "REAL"],
+  ["service_fee_nem_usd", "REAL"],
+  // "founding" = the founding prices and cap on the price list; anything else is the standard tier (#187).
+  ["pricing_tier", "TEXT NOT NULL DEFAULT ''"],
+  // The most we carry for this client in fees we paid on its behalf and have not been paid back for
+  // (feeFloat.ts). Null = the default (FEE_FLOAT_LIMIT_USD, else $2,500).
+  ["fee_limit_usd", "REAL"],
 ];
 
 const CORRECTION_SLA_COLUMNS: [string, string][] = [

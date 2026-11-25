@@ -18,7 +18,9 @@ import {
   PROGRAM_EXCLUDE,
   chooseProgram,
   explainProgramChoice,
+  explainRecordTypeChoice,
   jobClassOf,
+  namesJobClassAndDiscipline,
   programClassFit,
   readSizeBound,
   type ProgramGroup,
@@ -144,6 +146,77 @@ check("jobClassOf: residential unless the project is held as commercial", () => 
   assert.equal(jobClassOf({ projectClass: "residential" }), "residential");
   assert.equal(jobClassOf({ projectClass: "Commercial" }), "commercial");
   assert.equal(jobClassOf({ projectClass: "probably commercial" }), "residential");
+});
+
+// ---------------------------------------------------------------------------
+// THE SAME RULE FOR A RECORD-TYPE LIST (#176). Accela tenants list Commercial groups first; the
+// record-type pass took the first solar label in DOM order — "Commercial Electrical Solar Array"
+// — for a residential job (owner-watched City of Meridian run). explainRecordTypeChoice is the
+// pass's tier walk through programClassFit; namesJobClassAndDiscipline is the expansion pass's
+// "which group to open" reading. Invented labels; the tiers are the pass's own.
+// ---------------------------------------------------------------------------
+const TIERS = [/solar|photovoltaic|\bpv\b/i, /residential\s*[-–—]?\s*electrical/i];
+const ELECTRICAL = /\belectrical\b/i;
+
+check("THE REGRESSION (#176): the other class's solar type listed first -> this class's solar type", () => {
+  const labels = ["Commercial Addition", "Commercial Electrical Solar Array", "Residential Electrical Floor Heat", "Residential Electrical Solar Array"];
+  const c = explainRecordTypeChoice(labels, TIERS, {}, ELECTRICAL);
+  assert.equal(c.reason, "matched");
+  assert.equal(labels[c.index!], "Residential Electrical Solar Array");
+});
+
+check("...and the reverse for a commercial job", () => {
+  const labels = ["Residential Electrical Solar Array", "Commercial Electrical Solar Array"];
+  const c = explainRecordTypeChoice(labels, TIERS, { jobClass: "commercial" }, ELECTRICAL);
+  assert.equal(labels[c.index!], "Commercial Electrical Solar Array");
+});
+
+check("only the other class's type offered -> other_class, names it, picks nothing (never DOM order)", () => {
+  const c = explainRecordTypeChoice(["Commercial Electrical Solar Array", "Residential Building Deck"], TIERS, {}, ELECTRICAL);
+  assert.equal(c.reason, "other_class");
+  assert.equal(c.index, undefined);
+  assert.deepEqual(c.candidates, ["Commercial Electrical Solar Array"]);
+});
+
+check("a tier whose matches are all the other class is passed over; the next tier may still hold ours", () => {
+  const labels = ["Commercial Solar Array", "Residential - Electrical"];
+  const c = explainRecordTypeChoice(labels, TIERS, {}, ELECTRICAL);
+  assert.equal(labels[c.index!], "Residential - Electrical");
+});
+
+check("two of our class at the deciding tier: the discipline's words settle it", () => {
+  const labels = ["Residential Building Solar Array", "Residential Electrical Solar Array"];
+  const c = explainRecordTypeChoice(labels, TIERS, {}, ELECTRICAL);
+  assert.equal(labels[c.index!], "Residential Electrical Solar Array");
+  const s = explainRecordTypeChoice(labels, TIERS, {}, /\bstructural\b|\bbuilding\b/i);
+  assert.equal(labels[s.index!], "Residential Building Solar Array");
+});
+
+check("two the labels do not settle -> ambiguous, both named, nothing picked", () => {
+  const c = explainRecordTypeChoice(["Residential Electrical Solar Array", "Residential Electrical PV System"], TIERS, {}, ELECTRICAL);
+  assert.equal(c.reason, "ambiguous");
+  assert.equal(c.index, undefined);
+  assert.deepEqual(c.candidates, ["Residential Electrical Solar Array", "Residential Electrical PV System"]);
+});
+
+check("a single neutral match is taken as before (a label saying nothing about class is not refused)", () => {
+  const labels = ["Electrical Permit", "Solar Photovoltaic System"];
+  const c = explainRecordTypeChoice(labels, TIERS, {}, ELECTRICAL);
+  assert.equal(labels[c.index!], "Solar Photovoltaic System");
+  assert.equal(c.reason, "matched");
+});
+
+check("nothing matches any tier -> unmatched (the caller's old bail path)", () => {
+  assert.equal(explainRecordTypeChoice(["Fence", "Demolition"], TIERS, {}, ELECTRICAL).reason, "unmatched");
+});
+
+check("namesJobClassAndDiscipline: the group to open is this class AND discipline, derived from the job", () => {
+  assert.equal(namesJobClassAndDiscipline("Residential Electrical", {}, ELECTRICAL), true);
+  assert.equal(namesJobClassAndDiscipline("Residential", {}, ELECTRICAL), false);
+  assert.equal(namesJobClassAndDiscipline("Residential Building", {}, ELECTRICAL), false);
+  assert.equal(namesJobClassAndDiscipline("Commercial Electrical", {}, ELECTRICAL), false);
+  assert.equal(namesJobClassAndDiscipline("Commercial Electrical", { jobClass: "commercial" }, ELECTRICAL), true);
+  assert.equal(namesJobClassAndDiscipline("Residential Electrical", {}, undefined), false);
 });
 
 if (failures) {

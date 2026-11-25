@@ -53,6 +53,21 @@ export interface RoofingRowRecord {
   layersLimit: string;
 }
 
+/** A cited rule that ballasted / non-penetrating racking leaves this prescriptive path. It
+ *  ROUTES the path to engineered; it never blocks on its own. Without a verbatim quote and a named
+ *  source it is no rule (dropped at load), so an uncited guess never moves a job's path. */
+export interface BallastedRackingRule {
+  source: string;
+  sourceUrl: string;
+  /** The source's own words, verbatim. */
+  quote: string;
+  /** When the quote was read from sourceUrl (ISO date). */
+  fetchedAt?: string;
+  /** A narrower authority's own words for the same rule, printed in the path's basis when the job's
+   *  AHJ contains one of `ahjNames` (lower-case substring). */
+  localReadings?: Array<{ ahjNames: string[]; source: string; sourceUrl: string; quote: string; fetchedAt?: string }>;
+}
+
 export interface JurisdictionPermitPathRecord {
   state: string;
   /** "" = the state itself; else the AHJ this record narrows to. */
@@ -69,6 +84,7 @@ export interface JurisdictionPermitPathRecord {
   criteriaDefault: boolean;
   limits: PathScreenLimits;
   roofingRow?: RoofingRowRecord;
+  ballastedRacking?: BallastedRackingRule;
 }
 
 type Obj = Record<string, unknown>;
@@ -103,6 +119,24 @@ function sanitizeRoofingRow(raw: unknown): RoofingRowRecord | undefined {
   return row.name && row.admits && row.eligible && row.layersLimit ? row : undefined;
 }
 
+const isUrl = (v: unknown): boolean => /^https:\/\//i.test(str(v));
+function sanitizeBallastRule(raw: unknown): BallastedRackingRule | undefined {
+  const o = obj(raw);
+  if (!str(o.source) || !str(o.quote) || !isUrl(o.sourceUrl)) return undefined;
+  const localReadings = (Array.isArray(o.localReadings) ? o.localReadings : []).flatMap((x) => {
+    const l = obj(x);
+    const ahjNames = (Array.isArray(l.ahjNames) ? l.ahjNames : []).map((n) => str(n).toLowerCase()).filter(Boolean);
+    return ahjNames.length && str(l.source) && str(l.quote) && isUrl(l.sourceUrl)
+      ? [{ ahjNames, source: str(l.source), sourceUrl: str(l.sourceUrl), quote: str(l.quote), ...(str(l.fetchedAt) ? { fetchedAt: str(l.fetchedAt) } : {}) }]
+      : [];
+  });
+  return {
+    source: str(o.source), sourceUrl: str(o.sourceUrl), quote: str(o.quote),
+    ...(str(o.fetchedAt) ? { fetchedAt: str(o.fetchedAt) } : {}),
+    ...(localReadings.length ? { localReadings } : {}),
+  };
+}
+
 function sanitizeRecord(raw: unknown): JurisdictionPermitPathRecord | null {
   const o = obj(raw);
   const state = usStateCode(str(o.state));
@@ -114,6 +148,7 @@ function sanitizeRecord(raw: unknown): JurisdictionPermitPathRecord | null {
   // an AHJ record must also say how the AHJ is named. Anything less is no record (never a guess).
   if (!state || !displayName || !code || (ahj && !ahjNames.length) || o.split !== true) return null;
   const roofingRow = sanitizeRoofingRow(o.roofingRow);
+  const ballastedRacking = sanitizeBallastRule(o.ballastedRacking);
   return {
     state, ahj, displayName, ahjNames, split: true, code,
     source: str(o.source),
@@ -121,6 +156,7 @@ function sanitizeRecord(raw: unknown): JurisdictionPermitPathRecord | null {
     criteriaDefault: o.criteriaDefault === true && !ahj,
     limits: sanitizePathLimits(o.limits),
     ...(roofingRow ? { roofingRow } : {}),
+    ...(ballastedRacking ? { ballastedRacking } : {}),
   };
 }
 

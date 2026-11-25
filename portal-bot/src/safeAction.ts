@@ -380,6 +380,13 @@ const CAPTCHA_FRAME_HOSTS = [
   "challenges.cloudflare.com",
   "arkoselabs",
   "funcaptcha",
+  // IMPERVA / INCAPSULA serves its bot check from the PORTAL'S OWN host, in a frame at
+  // /_Incapsula_Resource?SWUDNSAI=… (live City of Bend CityView, 2026-11-16: an image-grid
+  // "Click on what you can buy at a coffee shop" behind a page that read as empty text). Matched on
+  // the frame's path, since hostPath carries host AND path. Without it the learner closed on the
+  // person twice as "login_form_unrecognized" instead of parking for them to pass it.
+  "_incapsula_resource",
+  "incapsula",
 ];
 const MFA_FRAME_HOSTS = ["duosecurity", "duo.com", "microsoft.com/mfa"];
 // Read on the frame's path (+ hash route), never its query: an OAuth authorize URL routinely
@@ -409,6 +416,22 @@ function challengeUrlHit(rawUrl: string): { cls: ChallengeClass; hit: string } |
   if (frag) return { cls: "mfa", hit: frag[0].toLowerCase() };
   if (VERIFY_PATH.test(path.split("#")[0] ?? "")) return { cls: "mfa", hit: "verify" };
   return null;
+}
+
+/**
+ * IS THIS reCAPTCHA FRAME ONLY THE BADGE? Invisible reCAPTCHA (v3, v2-invisible) loads an anchor
+ * frame whose URL carries size=invisible — the corner badge — and a bframe kept hidden until the
+ * site asks for a challenge. Neither asks anything of a person on an ordinary form. true = not a
+ * challenge: the invisible anchor, or any reCAPTCHA frame whose iframe element is NOT showing.
+ * A reCAPTCHA frame with no iframe element to answer for it (a frame url the DOM read missed)
+ * is NOT a badge: fail closed. Other captcha vendors are untouched here.
+ */
+export function recaptchaBadgeOnly(url: string, iframeShown: ReadonlyMap<string, boolean>): boolean {
+  const raw = String(url || "");
+  if (!/recaptcha/i.test(raw)) return false;
+  if (/[?&]size=invisible(&|$)/i.test(raw)) return true;
+  const shown = iframeShown.get(raw);
+  return shown === false;
 }
 
 // Page titles that signal a challenge screen, by class.
@@ -498,14 +521,31 @@ export async function detectChallengeFrame(
       try { url = typeof frame.url === "function" ? String(frame.url() ?? "") : ""; } catch { url = ""; }
       if (url) urls.push({ url, kind: "frame" });
     }
+    // Each iframe element with whether it is SHOWING (own box, and no ancestor hiding it:
+    // visibility inherits, display:none zeroes the box). Read once, used to tell a reCAPTCHA
+    // badge from a reCAPTCHA challenge below.
+    let iframeShown = new Map<string, boolean>();
     try {
-      const srcs: string[] = await (page as { locator: (s: string) => { evaluateAll: (fn: (e: Element[]) => string[]) => Promise<string[]> } })
+      const els: Array<{ src: string; shown: boolean }> = await (page as { locator: (s: string) => { evaluateAll: (fn: (e: Element[]) => Array<{ src: string; shown: boolean }>) => Promise<Array<{ src: string; shown: boolean }>> } })
         .locator("iframe")
-        .evaluateAll((els: Element[]) => els.map((el) => (el as HTMLIFrameElement).getAttribute("src") || ""))
-        .catch(() => [] as string[]);
-      for (const src of srcs) if (src) urls.push({ url: String(src), kind: "iframe src" });
+        .evaluateAll((els: Element[]) => els.map((el) => {
+          const rect = el.getBoundingClientRect();
+          const st = getComputedStyle(el);
+          return { src: (el as HTMLIFrameElement).getAttribute("src") || "", shown: rect.width > 2 && rect.height > 2 && st.visibility !== "hidden" && st.display !== "none" && Number(st.opacity || "1") > 0 };
+        }))
+        .catch(() => [] as Array<{ src: string; shown: boolean }>);
+      iframeShown = new Map(els.filter((e) => e.src).map((e) => [e.src, e.shown]));
+      for (const e of els) if (e.src) urls.push({ url: e.src, kind: "iframe src" });
     } catch { /* ignore */ }
-    const hits = urls.map((u) => ({ ...u, h: challengeUrlHit(u.url) })).filter((u) => u.h);
+    const hits = urls.map((u) => ({ ...u, h: challengeUrlHit(u.url) }))
+      .filter((u) => u.h)
+      // A reCAPTCHA BADGE IS NOT A CHALLENGE. Invisible reCAPTCHA (v3, and v2 "invisible") puts an
+      // anchor frame with size=invisible in a page corner and a hidden bframe beside it on EVERY load
+      // of an ordinary application form; nothing is asked of anyone until a submit. Parking there
+      // stopped every such form before a field was filled (City of Star, iWorQ). A challenge is a
+      // reCAPTCHA frame that is SHOWING and is not the invisible anchor: the v2 checkbox anchor, or a
+      // bframe the site has opened. A frame no element answers for stays a challenge (fail closed).
+      .filter((u) => !recaptchaBadgeOnly(u.url, iframeShown));
     const say = (u: { kind: string; h: { hit: string } | null }) => `challenge ${u.kind} detected (${u.h!.hit})`;
 
     // 2) CAPTCHA — always a challenge.
@@ -587,17 +627,38 @@ export const SECOND_FACTOR_TEXT_SOURCE = [
   "we sent (you )?(an e-?mail|a code|a verification)", "enter (a|the|your) (verification |security |one[- ]time )?code",
   "verification code", "one[- ]time (code|passcode|password)", "get a push notification",
   "push notification (has been )?sent", "okta verify", "google authenticator", "authenticator app",
-  "security key or biometric", "answer (your|the) security question", "two[- ]factor", "2-step verification",
+  "security key or biometric", "answer (your|the) security question", "two[- ]factor", "(2|two)[- ]step verification",
+  // Live Idaho DOPL (FAST platform), 2026-11-12: "Two-Step Verification" / "An email with your Online
+  // Services security code was sent to …" / "Resend security code" matched none of the above.
+  "(security|verification|one[- ]time|login|sign[- ]in) code (was|has been) sent", "resend (the |a |your )?(security |verification )?code",
   "multi[- ]factor", "approve the sign[- ]in", "check your (e-?mail|phone) for a code",
 ].join("|");
 
-export async function detectSecondFactor(page: Page | null | undefined): Promise<string> {
-  if (!page || typeof (page as { frames?: unknown }).frames !== "function") return "";
+/** A ONE-TIME-CODE BOX, BY THE NAMES IT CARRIES (name, id, autocomplete, aria-label, placeholder,
+ *  its own <label>). THE ONE REGEX for that question: detectSecondFactor reads a live box with it, and
+ *  the replay reads a recorded step's label with it (recipeAdapter, #238). A card's "Security Code"
+ *  matches too, so this is never the whole answer on a page that might take a card: the replay
+ *  pauses for a second factor only on the page's own second-factor WORDING with no card anywhere
+ *  (recipeAdapter secondFactorAtSignIn). Live Idaho DOPL recipe 7e90272b: its only recorded step, the
+ *  emailed "Security Code", was read as a CVV and the run reported a clean review stop. */
+export const ONE_TIME_CODE_FIELD = /one-time-code|passcode|\botp\b|verification.?code|security.?code|mfa.?code|credentials\.passcode/i;
+
+/** What every frame of the page says about a second factor, as DATA: a visible password box (the
+ *  password step, never a second factor), the first SECOND_FACTOR_TEXT_SOURCE wording found, and
+ *  whether a visible box is named like a one-time code (ONE_TIME_CODE_FIELD). THE ONE READER:
+ *  detectSecondFactor formats it for the login flow, and the replay asks it for the WORDING alone
+ *  (#238), because there a CVV named "Security Code" makes the code-box half true on a card page
+ *  too. A page it cannot read reads as nothing. Reads only; types nothing and clicks nothing. */
+export type SecondFactorReading = { password: boolean; wording: string; codeField: boolean };
+
+export async function readSecondFactor(page: Page | null | undefined): Promise<SecondFactorReading> {
+  const none: SecondFactorReading = { password: false, wording: "", codeField: false };
+  if (!page || typeof (page as { frames?: unknown }).frames !== "function") return none;
   try {
     let wording = "";
     let codeField = false;
     for (const frame of page.frames()) {
-      const r = await frame.evaluate((src: string) => {
+      const r = await frame.evaluate(({ src, codeSrc }: { src: string; codeSrc: string }) => {
         // Fully inline — no named helper (the __name note in waitForInteractiveControls).
         const inputs = Array.from(document.querySelectorAll("input")) as HTMLInputElement[];
         let password = false;
@@ -608,25 +669,38 @@ export async function detectSecondFactor(page: Page | null | undefined): Promise
           if (!(rect.width > 2 && rect.height > 2 && st.visibility !== "hidden" && st.display !== "none")) continue;
           const type = (el.getAttribute("type") || "text").toLowerCase();
           if (type === "password") { if (!el.disabled && !el.readOnly) password = true; continue; }
-          const hay = [el.name, el.id, el.getAttribute("autocomplete"), el.getAttribute("aria-label"), el.getAttribute("placeholder")]
+          // The box's own <label> text counts too (live Idaho DOPL: the code box is id="Dc-91",
+          // named only by <label for> "Security Code").
+          const labelled = Array.from(el.labels || []).map((l) => (l as HTMLElement).innerText || "").join(" ");
+          const hay = [el.name, el.id, el.getAttribute("autocomplete"), el.getAttribute("aria-label"), el.getAttribute("placeholder"), labelled]
             .filter(Boolean).join(" ");
-          if (/one-time-code|passcode|\botp\b|verification.?code|security.?code|mfa.?code|credentials\.passcode/i.test(hay)) code = true;
+          if (new RegExp(codeSrc, "i").test(hay)) code = true;
         }
         const text = String((document.body && (document.body as HTMLElement).innerText) || "").replace(/\s+/g, " ").slice(0, 6000);
         const m = text.match(new RegExp(src, "i"));
         return { password, code, wording: m ? m[0] : "" };
-      }, SECOND_FACTOR_TEXT_SOURCE).catch(() => null);
+      }, { src: SECOND_FACTOR_TEXT_SOURCE, codeSrc: ONE_TIME_CODE_FIELD.source }).catch(() => null);
       if (!r) continue;
-      if (r.password) return ""; // still the password step, in some frame — never a second factor
+      if (r.password) return { password: true, wording: "", codeField: false }; // still the password step, in some frame — never a second factor
       if (r.code) codeField = true;
       if (r.wording && !wording) wording = r.wording;
     }
-    if (wording) return `a second-factor screen ("${wording.slice(0, 50)}")${codeField ? " with a code field" : ""}`;
-    if (codeField) return "a second-factor screen (a one-time-code field and no password field)";
-    return "";
+    return { password: false, wording, codeField };
   } catch {
-    return "";
+    return none;
   }
+}
+
+/** The short reason a reading gives for a second factor, or "" when it gives none. */
+export function secondFactorReason(r: SecondFactorReading): string {
+  if (r.password) return "";
+  if (r.wording) return `a second-factor screen ("${r.wording.slice(0, 50)}")${r.codeField ? " with a code field" : ""}`;
+  if (r.codeField) return "a second-factor screen (a one-time-code field and no password field)";
+  return "";
+}
+
+export async function detectSecondFactor(page: Page | null | undefined): Promise<string> {
+  return secondFactorReason(await readSecondFactor(page));
 }
 
 // ---------------------------------------------------------------------------

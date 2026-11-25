@@ -98,6 +98,15 @@ const pages: Record<string, () => string> = {
   // An identity host that titles its identifier page "… Authentication".
   "/auth-title": () => IDENTIFIER_STEP.replace(/<title>[^<]*<\/title>/, "<title>Community Access - Authentication</title>"),
   "/recaptcha-login": () => PASSWORD_STEP.replace(/\{\{IDENTIFIER\}\}/g, USER).replace("</form>", `</form><iframe title="reCAPTCHA" src="https://www.google.com/recaptcha/api2/anchor?k=FAKE" width="304" height="78"></iframe>`),
+  // An ordinary application form carrying INVISIBLE reCAPTCHA: the corner badge (anchor, size=invisible)
+  // and the hidden challenge frame it keeps beside it (City of Star, iWorQ). Nothing to complete.
+  "/solar-form-badge": () => `<!doctype html><html><head><title>Solar Permit Application</title></head><body><form><label for="d">Description of Work</label><textarea id="d"></textarea><button type="submit" disabled>Submit</button></form>
+    <div class="grecaptcha-badge" style="position:fixed;bottom:14px;right:14px;width:256px;height:60px"><iframe title="reCAPTCHA" src="https://www.google.com/recaptcha/api2/anchor?ar=1&k=FAKE&size=invisible&cb=abc" width="256" height="60"></iframe></div>
+    <div style="visibility:hidden;position:absolute;top:0"><iframe title="recaptcha challenge expires in two minutes" src="https://www.google.com/recaptcha/api2/bframe?hl=en&v=1&k=FAKE" width="400" height="580"></iframe></div></body></html>`,
+  // The same form once the site has OPENED the challenge: the bframe is showing.
+  "/solar-form-challenge-open": () => `<!doctype html><html><head><title>Solar Permit Application</title></head><body><form><label for="d">Description of Work</label><textarea id="d"></textarea></form>
+    <div class="grecaptcha-badge" style="position:fixed;bottom:14px;right:14px;width:256px;height:60px"><iframe title="reCAPTCHA" src="https://www.google.com/recaptcha/api2/anchor?ar=1&k=FAKE&size=invisible&cb=abc" width="256" height="60"></iframe></div>
+    <div style="visibility:visible;position:absolute;top:40px"><iframe title="recaptcha challenge expires in two minutes" src="https://www.google.com/recaptcha/api2/bframe?hl=en&v=1&k=FAKE" width="400" height="580"></iframe></div></body></html>`,
   "/hcaptcha": () => `<!doctype html><html><head><title>Continue</title></head><body><iframe src="https://newassets.hcaptcha.com/captcha/v1/abc/static/hcaptcha.html#frame=checkbox" width="300" height="80"></iframe></body></html>`,
   "/turnstile": () => `<!doctype html><html><head><title>Just a moment</title></head><body><iframe src="https://challenges.cloudflare.com/cdn-cgi/challenge-platform/h/b/turnstile/if/ov2/av0/rcv0/0/abc/light/normal" width="300" height="65"></iframe></body></html>`,
   "/robot": () => `<!doctype html><html><head><title>Sign in</title></head><body><label for="u">Email</label><input id="u" type="email"><label for="p">Password</label><input id="p" type="password">
@@ -179,6 +188,8 @@ for (const [name, p] of [
   ["an identifier page titled \"… Authentication\"", "/auth-title"],
   // Unencoded, as some OAuth clients send it: the old whole-URL substring read "/otp" here.
   ["an authorize URL whose redirect_uri carries /otp/ and /verify/", "/id?client_id=0oaFAKE&redirect_uri=https://tenant.energov-example.test/otp/verify/callback&state=abc"],
+  // The invisible reCAPTCHA badge + its hidden challenge frame on an application form: a FORM, not a challenge.
+  ["an application form with the invisible reCAPTCHA badge and a hidden bframe", "/solar-form-badge"],
 ] as const) {
   await check(`MUST-PASS detectChallengeFrame: ${name} is a LOGIN, not a challenge`, async () => {
     const { context, page } = await at(p);
@@ -191,6 +202,7 @@ for (const [name, p, re] of [
   ["an Okta \"Enter a code\" page (a code box, no password box)", "/code", /title|text/],
   ["an Okta Verify push page", "/push", /title|text/],
   ["a reCAPTCHA frame BESIDE a password box", "/recaptcha-login", /recaptcha/],
+  ["an invisible reCAPTCHA whose challenge frame the site has OPENED", "/solar-form-challenge-open", /recaptcha/],
   ["an hCaptcha frame", "/hcaptcha", /hcaptcha/],
   ["a Cloudflare Turnstile frame", "/turnstile", /challenges\.cloudflare|turnstile/],
   ["an \"I'm not a robot\" box beside a password box", "/robot", /captcha/],

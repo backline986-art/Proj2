@@ -7,7 +7,7 @@
 // tier and source. This renders that list:
 //   - each item with what it is, what a missing one does (warns / may block), where it came from
 //     (SEEDED: the shipped reference or a lookup's proposal, not checked by a person; OFFICIAL (#683):
-//     "from <host>", read on the utility's own official page; VERIFIED: "Verified by <name>, <date>"),
+//     "Verified from <host>, <date>", read on the utility's own official page; VERIFIED: "Verified by <name>, <date>"),
 //     its source link (http(s) only) and the page's own words; an item a higher tier replaces is marked
 //     "superseded";
 //   - "Verify…" on a seeded or official item and "Edit…" on a person's, which fill the form below with
@@ -57,13 +57,21 @@
   };
   const KEYS = Object.keys(KINDS);
 
-  // "Verified by <name>, <date>" / "from <host>" / "Seeded …" (plain text; the caller escapes).
+  // "Verified from <host>, <date>": the official tier's words (owner, 2026-11-13). The same shape as
+  // shared/src/officialSource.officialSourceWords (pinned by officialSourceWords.test).
+  function officialSourceWords(host, fetchedAt) {
+    const h = str(host);
+    const day = /^\d{4}-\d{2}-\d{2}/.test(str(fetchedAt)) ? str(fetchedAt).slice(0, 10) : '';
+    return `Verified from ${h || "the authority's own page"}${day ? `, ${day}` : ''}`;
+  }
+
+  // "Verified by <name>, <date>" / "Verified from <host>, <date>" / "Seeded …" (plain text; the caller escapes).
   function provenance(item) {
     if (item.tier === 'verified') {
       const day = str(item.verifiedAt).slice(0, 10);
       return `Verified${str(item.verifiedBy) ? ` by ${str(item.verifiedBy)}` : ''}${day ? `, ${day}` : ''}`;
     }
-    if (item.tier === 'official') return hostOf(item.sourceUrl) ? `from ${hostOf(item.sourceUrl)}` : 'from an official source';
+    if (item.tier === 'official') return officialSourceWords(hostOf(item.sourceUrl), item.fetchedAt);
     return item.origin === 'shipped' ? 'Seeded (shipped reference)' : 'Seeded by research';
   }
   const BADGE = { verified: 'badge-pass', official: 'badge-info', seeded: 'badge-none' };

@@ -76,9 +76,22 @@ check("UNSTATED GEOMETRY IS 0 (operator ruling): height, stories, existing area 
 });
 
 check("ROOFTOP FACTS DEFAULT: no new area, one unit, one building", () => {
-  assert.equal(BLANK.newBuildingArea, "0", "adding panels to a roof creates no new building area");
+  assert.equal(BLANK.newBuildingArea, "0", "no array area readable from the package: 0");
   assert.equal(BLANK.dwellingUnits, "1");
   assert.equal(BLANK.numberOfBuildings, "1");
+});
+
+// OWNER RULING 2026-11-12 ("Always array sq ft"): City of Boise refused 0 for both Existing and New
+// Building Area on a PV permit; the owner's own Boise filing entered the array (835 sq ft) as New and
+// Total. New Building Area is the PV array's plan-view area whenever the plan set states it (or its
+// module count x module size); Total is existing + new. KILL: newBuildingArea back to "0" → fails.
+check("NEW BUILDING AREA IS THE ARRAY'S AREA (owner ruling): stated array area → New and Total", () => {
+  const withArray = resolveRecipeFieldValues(db, projectWith({ planSetExtractedText: "PV-1 SITE PLAN  ARRAY AREA: 412 SQ FT  ROOF AREA: 2,100 SQ FT" }), "accela");
+  assert.equal(withArray.newBuildingArea, "412", `got ${JSON.stringify(withArray.newBuildingArea)}`);
+  assert.equal(withArray.totalBuildingArea, "412", "existing unstated (0) + new 412");
+  const withHouse = resolveRecipeFieldValues(db, projectWith({ existingBuildingArea: "1800", planSetExtractedText: "ARRAY AREA: 412 SQ FT" }), "accela");
+  assert.equal(withHouse.totalBuildingArea, "2212", "existing 1800 + array 412");
+  assert.equal(BLANK.totalBuildingArea, "0", "no house, no array read: 0");
 });
 
 check("...and the plan set overrides those defaults when it says otherwise", () => {

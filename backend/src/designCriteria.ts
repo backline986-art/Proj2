@@ -45,6 +45,7 @@ import type {
   ReviewerFindingEvidence,
   ReviewerVisionVerdict,
   RoofPlanDimensionKind,
+  StatedRoofPlanDimensionKind,
   RoofPlanRequiredDimension,
   StatedCodeBasisEntry,
   StatedDesignCriteria,
@@ -1853,22 +1854,36 @@ export function extractAttachmentSpacings(text: string): StatedAttachmentSpacing
  *  tail of a feet value; group 3 marks an inch-only value. */
 // The units carry no leading \b, so "36in" and "3ft" (no space) read too.
 const ROOF_DIM_VALUE = /(?<![\d.])(\d+(?:\.\d+)?)\s*\)?\s*-?\s*(?:(?:'(?!')|’|ft\b\.?|feet\b|foot\b)(?:\s*-?\s*(\d+(?:\.\d+)?)\s*(?:"|”|in\b\.?|inch(?:es)?\b))?|(''|"|”|in\b\.?|inch(?:es)?\b))/gi;
-const ROOF_DIM_LABEL = /\b(?:(?<path>(?:fire\s+)?(?:access\s+)?path(?:way)?s?|walkways?|access\s+aisles?|fire\s+access)|(?<ridge>ridges?)|(?<other>eaves?|rakes?|hips?|valleys?|gutters?|edges?|(?:property|lot)\s+lines?))\b/gi;
+// A FIRE SETBACK that names no roof line ("36\" FIRE SETBACK", a roof-plan legend in most of the
+// operator's plan sets, measured 2026-11-23: 155 of 269 real sets) is its own kind: it says how far
+// the array stays back for firefighters but not from WHAT, so it is read, then used only the way
+// evaluateFirePathwayFindings allows. Text extraction splits the word ("FIRE SETBAC", "FIRE SETB K",
+// "FIR SETBACK"); those read too. "FIRE CLEARANCE" and "FIRE CODE SETBACK" are the same label.
+const ROOF_DIM_LABEL = /\b(?:(?<fire>fire?\s+(?:code\s+)?(?:set\s*-?\s*(?:backs?|bac|b\s?k)|clearances?))|(?<path>(?:fire\s+)?(?:access\s+)?path(?:way)?s?|walkways?|access\s+aisles?|fire\s+access)|(?<ridge>ridges?)|(?<other>eaves?|rakes?|hips?|valleys?|gutters?|edges?|(?:property|lot)\s+lines?))\b/gi;
 /** A clause ends at a sentence stop (not an abbreviation's or a decimal's dot), a list mark, a
  *  comma or a joining "and"/"&": "36\" FROM RIDGE AND 18\" CLEAR OF HIPS" is two clauses, and the
  *  18" is the hips' (read across the "and", the ridge label won and a compliant plan blocked). */
 const CLAUSE_BREAK = /(?<!\b(?:min|max|typ|approx|in|ft|no|o\.c|e\.g|i\.e))\.(?!\d)|[;,&•▪●■◦]|\band\b/i;
 /** The gap from a value to the label after it is only a preposition ("36\" FROM RIDGE", "18\" CLEAR
  *  OF HIPS"): the value is attached to that label, even with no break after a ridge label before it. */
-const ATTACHED_AFTER = /^\s*(?:(?:clear|setback|set\s+back|offset|min(?:imum)?\.?|max(?:imum)?\.?)\s+)?(?:from|of|to|at)\s+(?:the\s+)?$/i;
+const ATTACHED_AFTER = /^\s*(?:(?:fire?\s+(?:code\s+)?)?(?:clear(?:ance)?|setback|set\s+back|offset|min(?:imum)?\.?|max(?:imum)?\.?)\s+)?(?:from|of|to|at)\s+(?:the\s+)?$/i;
 /** "RIDGE VENT 12\"", "RIDGE HEIGHT": a ridge, but not a setback from it. */
 const RIDGE_NOT_SETBACK = /\b(?:vent|cap|height|board|beam|elev(?:ation)?)\b/i;
+/** The same words straight AFTER the ridge label: "2\" X 8\" RIDGE BEAM" is framing (measured on the
+ *  operator's plan sets, 2026-11-23: it read as an 8 in ridge setback in about one set in six). */
+const RIDGE_MEMBER_AFTER = /^\s*(?:vents?|caps?|heights?|boards?|beams?|elev(?:ation)?|straps?|blocking)\b/i;
+/** Words that make the text between a value and its label something else: attachment spacing
+ *  ("PATHWAY ROOF ATTACHMENTS SHALL BE SPACED ... 48 IN."), a drawing scale, framing. */
+const ROOF_DIM_FOREIGN_GAP = /\b(?:spac(?:ed|ing)|o\.\s?c\b|scale|attachments?|rafters?|truss(?:es)?|joists?)\b/i;
+/** A lumber or module size ("2\" X 8\"", "41\" X 68\""): its numbers are not roof-plan dimensions. */
+const CROSS_SECTION_BEFORE = /[x×]\s*$/i;
+const CROSS_SECTION_AFTER = /^\s*[x×]\s*\d/i;
 const ROOF_DIM_WINDOW = 60;
 
 /** One fire access dimension a text states: where, which, how many inches. */
 export interface ReadRoofPlanDimension {
   at: number;
-  kind: RoofPlanDimensionKind;
+  kind: StatedRoofPlanDimensionKind;
   inches: number;
   excerpt: string;
 }
@@ -1889,6 +1904,7 @@ export function readRoofPlanDimensions(text: string): ReadRoofPlanDimension[] {
   }
   for (const v of values) {
     if (v.inches < 6 || v.inches > 120) continue;
+    if (CROSS_SECTION_BEFORE.test(src.slice(Math.max(0, v.at - 4), v.at)) || CROSS_SECTION_AFTER.test(src.slice(v.end, v.end + 6))) continue;
     // The value's clause, at most ROOF_DIM_WINDOW characters either side.
     let from = Math.max(0, v.at - ROOF_DIM_WINDOW);
     const before = src.slice(from, v.at);
@@ -1898,7 +1914,7 @@ export function readRoofPlanDimensions(text: string): ReadRoofPlanDimension[] {
     let to = Math.min(src.length, v.end + ROOF_DIM_WINDOW);
     const after = src.slice(v.end, to).search(CLAUSE_BREAK);
     if (after >= 0) to = v.end + after;
-    let best: { kind: "path" | "ridge" | "other"; dist: number; start: number; end: number } | null = null;
+    let best: { kind: "fire" | "path" | "ridge" | "other"; dist: number; start: number; end: number } | null = null;
     for (const l of src.slice(from, to).matchAll(ROOF_DIM_LABEL)) {
       const start = from + (l.index ?? 0);
       const end = start + l[0].length;
@@ -1906,8 +1922,14 @@ export function readRoofPlanDimensions(text: string): ReadRoofPlanDimension[] {
       if (gap == null) continue;
       // Another dimension between them: the label is that one's.
       if (values.some((o) => o !== v && o.at >= Math.min(end, v.end) && o.end <= Math.max(start, v.at))) continue;
-      const kind = l.groups?.path ? "path" : l.groups?.ridge ? "ridge" : "other";
-      if (kind === "ridge" && RIDGE_NOT_SETBACK.test(gap)) continue;
+      const kind = l.groups?.fire ? "fire" : l.groups?.path ? "path" : l.groups?.ridge ? "ridge" : "other";
+      // "18\" FIRE SETBACK FROM RIDGE": the label names its roof line next; that line's label decides.
+      if (kind === "fire" && /^\s*(?:from|of|to|at)\s+(?:the\s+)?(?:ridges?|eaves?|rakes?|hips?|valleys?|gutters?|edges?|(?:property|lot)\s+lines?)\b/i.test(src.slice(end, end + 40))) continue;
+      if (kind === "ridge" && (RIDGE_NOT_SETBACK.test(gap) || RIDGE_MEMBER_AFTER.test(src.slice(end, end + 20)))) continue;
+      if (ROOF_DIM_FOREIGN_GAP.test(gap)) continue;
+      // A legend entry ("12\" ROOF OVERHANG = FIRE PATHWAY"): what stands before "=" is the symbol's
+      // name, and the value is not the label's.
+      if (end > v.at && gap.includes("=")) continue;
       // "RIDGE SETBACK: 18\"" assigns; "18\" CLEAR OF HIPS" attaches to the label after it;
       // otherwise a label AFTER the value wins a tie (callouts print "36\" FIRE ACCESS PATHWAY").
       const dist = end <= v.at ? (/^\s*[:=]/.test(gap) ? -1 : gap.length + 0.5) : ATTACHED_AFTER.test(gap) ? -0.5 : gap.length;
@@ -1916,7 +1938,7 @@ export function readRoofPlanDimensions(text: string): ReadRoofPlanDimension[] {
     if (!best || best.kind === "other") continue;
     out.push({
       at: v.at,
-      kind: best.kind === "path" ? "pathwayWidth" : "ridgeSetback",
+      kind: best.kind === "fire" ? "fireSetback" : best.kind === "path" ? "pathwayWidth" : "ridgeSetback",
       inches: Math.round(v.inches * 100) / 100,
       excerpt: src.slice(Math.min(best.start, v.at), Math.max(best.end, v.end)).slice(0, 120),
     });
@@ -2042,7 +2064,7 @@ const ROOF_DIM_NAME: Record<RoofPlanDimensionKind, string> = {
 
 interface RoofPlanBelowLine {
   req: RoofPlanRequiredDimension;
-  values: Array<{ inches: number; source: string; excerpt: string; derived: boolean }>;
+  values: Array<{ inches: number; source: string; excerpt: string; derived: boolean; kind?: StatedRoofPlanDimensionKind }>;
 }
 
 /**
@@ -2052,7 +2074,7 @@ interface RoofPlanBelowLine {
  * read off the sheet image) is a WARNING that says which of those it lacks.
  */
 function roofPlanBelowFinding(lines: RoofPlanBelowLine[], codeReferences: CodeReference[], vision: ReviewerVisionVerdict | null, ruleBasis: ReviewerRuleBasis | null = null): ReviewerFinding {
-  const blocks = !vision && lines.some((l) => l.req.basis === "ahj" && l.req.verified && l.values.some((v) => !v.derived));
+  const blocks = !vision && lines.some((l) => l.req.basis === "ahj" && l.req.verified && l.values.some((v) => !v.derived && v.kind !== "fireSetback"));
   const text = lines.map((l) => {
     const stated = [...new Set(l.values.map((v) => `${v.inches} in (${v.source})`))].join(", ");
     const why = blocks ? [] : [
@@ -2060,6 +2082,7 @@ function roofPlanBelowFinding(lines: RoofPlanBelowLine[], codeReferences: CodeRe
       l.req.basis === "model_code" ? "the requirement is the model-code default, not a rule on file for this jurisdiction" : "",
       l.req.basis === "ahj" && !l.req.verified ? "the jurisdiction's rule is not human-verified" : "",
       !vision && l.values.every((v) => v.derived) ? "only the parser's reading states it" : "",
+      !vision && l.values.some((v) => v.kind === "fireSetback") && l.values.every((v) => v.derived || v.kind === "fireSetback") ? `the plan's "FIRE SETBACK" label names no roof line${l.req.kind === "pathwayWidth" ? ", so its largest is read as the pathway" : ""}` : "",
     ].filter(Boolean);
     return `${ROOF_DIM_NAME[l.req.kind]}: stated ${stated}; requires at least ${l.req.inches} in — ${l.req.source}${why.length ? ` (a warning: ${why.join("; ")})` : ""}`;
   });
@@ -2096,6 +2119,35 @@ function roofPlanRef(ctx: EffectiveCodeContext): CodeReference {
 }
 
 /**
+ * WHICH OF THE PLAN'S READINGS ANSWER ONE REQUIREMENT.
+ *   · Readings of the requirement's own kind (a pathway, a ridge setback): as always — any below it
+ *     is short, else they meet it.
+ *   · None of its kind: the plan's unqualified "FIRE SETBACK" readings (fireSetback) answer it, read
+ *     the way a reviewer reads a legend that names no roof line. A pathway is the LARGEST of them
+ *     (a legend of 36" and 12" draws its pathways at 36"). A ridge setback is met only when every one
+ *     of them meets it, short only when even the largest is short; otherwise which one is the ridge's
+ *     is not said, and the requirement stays unmeasured with that reason.
+ * An unqualified reading is never a document's statement OF THAT DIMENSION, so it never blocks
+ * (roofPlanBelowFinding treats it like a derived reading).
+ */
+export function resolveRoofPlanReadings(req: RoofPlanRequiredDimension, stated: StatedRoofPlanDimension[]): { below: StatedRoofPlanDimension[]; met: StatedRoofPlanDimension[]; unresolved: string } {
+  const own = stated.filter((s) => s.kind === req.kind);
+  if (own.length) {
+    const below = own.filter((s) => s.inches < req.inches);
+    return { below, met: below.length ? [] : own, unresolved: "" };
+  }
+  const fire = stated.filter((s) => s.kind === "fireSetback");
+  if (!fire.length) return { below: [], met: [], unresolved: "" };
+  const largest = Math.max(...fire.map((s) => s.inches));
+  const atLargest = fire.filter((s) => s.inches === largest);
+  if (req.kind === "pathwayWidth") return largest >= req.inches ? { below: [], met: atLargest, unresolved: "" } : { below: atLargest, met: [], unresolved: "" };
+  if (fire.every((s) => s.inches >= req.inches)) return { below: [], met: fire, unresolved: "" };
+  if (largest < req.inches) return { below: atLargest, met: [], unresolved: "" };
+  const sizes = [...new Set(fire.map((s) => s.inches))].sort((a, b) => b - a).map((n) => `${n} in`).join(" and ");
+  return { below: [], met: [], unresolved: `the plan labels ${sizes} "FIRE SETBACK" without naming the roof line, so which is the ridge setback is not said` };
+}
+
+/**
  * The measured fire access rule and its honest fallback, for a roof-mounted array:
  *   city.fire.pathway-below-required  a stated dimension below what the plan must show
  *   city.fire.pathway-unmeasured      no dimension readable from the text: a callout carrying the
@@ -2107,10 +2159,10 @@ function roofPlanRef(ctx: EffectiveCodeContext): CodeReference {
 export function evaluateFirePathwayFindings(
   project: ProjectRecord,
   ctx: EffectiveCodeContext,
-  opts: { roofMounted: boolean; extraTexts?: DesignTextSource[]; facts?: FireAccessFacts | null },
+  opts: { roofMounted: boolean; extraTexts?: DesignTextSource[]; facts?: FireAccessFacts | null; roofPlanReadings?: StatedRoofPlanDimension[] },
 ): { findings: ReviewerFinding[]; measured: boolean } {
   if (!opts.roofMounted) return { findings: [], measured: false };
-  const stated = extractRoofPlanDimensions(project, opts.extraTexts ?? []);
+  const stated = opts.roofPlanReadings ?? extractRoofPlanDimensions(project, opts.extraTexts ?? []);
   const required = requiredRoofPlanDimensions(ctx, opts.facts ?? null);
   const codeReferences = [roofPlanRef(ctx)];
   if (!stated.length) {
@@ -2150,27 +2202,38 @@ export function evaluateFirePathwayFindings(
       }],
     };
   }
+  // Each requirement is answered by the plan's readings OF ITS KIND; only where the plan states none
+  // does an unqualified "FIRE SETBACK" answer it (resolveRoofPlanReadings), and it never blocks.
   const lines: RoofPlanBelowLine[] = [];
+  const meets: Array<{ req: RoofPlanRequiredDimension; values: StatedRoofPlanDimension[] }> = [];
+  const absent: Array<{ req: RoofPlanRequiredDimension; why: string }> = [];
   for (const req of required) {
-    const values = stated.filter((s) => s.kind === req.kind && s.inches < req.inches);
-    if (values.length) lines.push({ req, values });
+    const r = resolveRoofPlanReadings(req, stated);
+    if (r.below.length) lines.push({ req, values: r.below });
+    else if (r.met.length) meets.push({ req, values: r.met });
+    else absent.push({ req, why: r.unresolved });
+  }
+  if (!lines.length && !meets.length) {
+    // Something was read, but it answers no requirement (only an ambiguous "FIRE SETBACK"): the
+    // honest state is still "not measured", so the vision pass can make its measurement.
+    const unmeasured = evaluateFirePathwayFindings(project, ctx, { ...opts, roofPlanReadings: [] });
+    const note = absent.map((a) => a.why).filter(Boolean)[0];
+    return { measured: false, findings: unmeasured.findings.map((f) => note && f.id === FIRE_PATHWAY_UNMEASURED_ID ? { ...f, message: `${f.message} ${note}` } : f) };
   }
   // CHECK RECORDS (review-audit draft 07): each required dimension the plan states and meets, and
   // each it does not state at all (the other one was read, so the unmeasured callout is not raised).
   const records: ReviewerFinding[] = [];
   const check = { ruleId: FIRE_PATHWAY_BELOW_ID, category: "plan_set" as const, codeReferences };
-  const meets = required.filter((r) => !lines.some((l) => l.req === r) && stated.some((s) => s.kind === r.kind));
-  const absent = required.filter((r) => !stated.some((s) => s.kind === r.kind));
   if (meets.length) {
     records.push(passRecord({
-      ...check, title: "Fire access pathway / ridge setback dimensions", ruleBasis: weakestRuleBasis(meets.map((r) => roofPlanRuleBasis(ctx, r))),
-      arithmetic: `${meets.map((r) => `${ROOF_DIM_NAME[r.kind]}: stated ${[...new Set(stated.filter((s) => s.kind === r.kind).map((s) => `${s.inches} in (${s.source})`))].join(", ")} >= ${r.inches} in — ${r.source}`).join(". ")}.`,
+      ...check, title: "Fire access pathway / ridge setback dimensions", ruleBasis: weakestRuleBasis(meets.map((m) => roofPlanRuleBasis(ctx, m.req))),
+      arithmetic: `${meets.map((m) => `${ROOF_DIM_NAME[m.req.kind]}: stated ${[...new Set(m.values.map((s) => `${s.inches} in (${s.source}${s.kind === "fireSetback" ? `, labelled "${s.excerpt}", no roof line named` : ""})`))].join(", ")} >= ${m.req.inches} in — ${m.req.source}`).join(". ")}.`,
     }));
   }
   if (absent.length) {
     records.push(notCheckedRecord({
-      ...check, title: "Fire access pathway / ridge setback dimensions", ruleBasis: weakestRuleBasis(absent.map((r) => roofPlanRuleBasis(ctx, r))),
-      inputs: absent.map((r) => `the ${ROOF_DIM_NAME[r.kind].toLowerCase()} (at least ${r.inches} in)`),
+      ...check, title: "Fire access pathway / ridge setback dimensions", ruleBasis: weakestRuleBasis(absent.map((a) => roofPlanRuleBasis(ctx, a.req))),
+      inputs: absent.map((a) => `the ${ROOF_DIM_NAME[a.req.kind].toLowerCase()} (at least ${a.req.inches} in)${a.why ? ` — ${a.why}` : ""}`),
     }));
   }
   const belowBasis = weakestRuleBasis(lines.map((l) => roofPlanRuleBasis(ctx, l.req)));

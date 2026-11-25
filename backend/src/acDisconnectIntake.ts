@@ -190,3 +190,74 @@ export function supplementAcDisconnect(result: ParserLlmExtraction, planText: st
   fillEmpty("acDiscFused", read.fused);
   return { ...result, fields, ...(conflicts.length ? { conflicts } : {}) };
 }
+
+/**
+ * THE JOB'S AC DISCONNECT PART, BACKED BY ITS OWN PLAN SET — the ONE reader for "does this job show an
+ * AC disconnect from a captured part", asked by the reviewer gate's acDisconnect topic
+ * (projectEvidence.evidenceForTopic) and by QC's ac_disconnect package read (qc.ts hands the answer to
+ * baselineRules). The part as one line ("Eaton DG222URB"), "" when it does not count.
+ *
+ * It counts ONLY when both hold:
+ *   - the job holds a part in its plan-set key (acDiscMakeModel; planSetDisconnectPart), AND
+ *   - the job's own plan-set text names THAT part at its AC-disconnect label (readAcDisconnect above,
+ *     the same plan_set read that fills the key at intake).
+ * The job's fields keep no record of where a value came from (a parse, a person's edit and an API
+ * body all save the same key), so the key alone is never evidence: the plan set is. A part a person
+ * typed that the plan set does not name, acDiscReq alone, a rating line that names no part, and the
+ * client's standard part (company data, never read off this plan set) all count for nothing, and a
+ * utility's AC-disconnect requirement then reads exactly as before.
+ */
+export function capturedDisconnectPart(snapshot: Record<string, unknown> | null | undefined, planSetText: unknown): string {
+  const held = planSetDisconnectPart(snapshot ?? {});
+  if (!held.named || !held.model) return "";
+  const text = String(planSetText ?? "");
+  if (!text.trim()) return "";
+  const onSet = readAcDisconnect(text).parts.find((p) => compact(p.model) === compact(held.model) && (!held.make || compact(p.make) === compact(held.make)));
+  return onSet ? `${onSet.make} ${onSet.model}` : "";
+}
+
+/**
+ * THE WORDINGS THAT NAME AN AC DISCONNECT IN PLAN TEXT — the ONE list for "the text names an AC /
+ * utility disconnect", read by the reviewer gate's acDisconnect topic (projectEvidence, over all of the
+ * job's evidence text) and by QC's ac_disconnect package read (qc.ts hands the answer to baselineRules,
+ * on the plan-set text the gate sees). They were the gate's own; QC looked only at the split-page list
+ * and the upload notes, so a plan set that says "AC DISCONNECT" cleared the gate while QC still listed
+ * the disconnect as possibly missing (#134). A DC, rapid-shutdown or storage disconnect matches none.
+ */
+export const AC_DISCONNECT_TEXT_PATTERNS: readonly RegExp[] = [/\bAC\s+disconnect/i, /\butility\s+(?:accessible\s+|external\s+)?disconnect/i, /\bexternal\s+disconnect/i, /\blockable\s+disconnect/i, /\bvisible[-\s]?(?:break|blade|open)/i, /\bPV\s+system\s+disconnect/i, /\b690\.13\b/i];
+
+/** True when the job's plan-set text names an AC / utility disconnect in the gate's own wordings. */
+export function planTextNamesAcDisconnect(planSetText: unknown): boolean {
+  const text = String(planSetText ?? "");
+  return Boolean(text.trim()) && AC_DISCONNECT_TEXT_PATTERNS.some((pattern) => pattern.test(text));
+}
+
+/**
+ * True when a short quoted callout names the AC disconnect's own label: the intake's label forms
+ * (AC_LABEL above: "A.C. DISCONNECT", "AC SAFETY DISCONNECT", "VISIBLE, LOCKABLE, LABELED DISCONNECT")
+ * or the gate's wordings (the one list above). Asked of the callout a plan-set IMAGE read quoted for an
+ * AC-disconnect field (planSetImageReads, #135). A DC, rapid-shutdown or storage disconnect is not it.
+ */
+export function namesAcDisconnectLabel(callout: unknown): boolean {
+  const text = String(callout ?? "");
+  if (!text.trim()) return false;
+  return new RegExp(AC_LABEL.source, "i").test(text) || planTextNamesAcDisconnect(text);
+}
+
+/** What the server's own image read of a job's stored plan set said about its AC disconnect: the one
+ *  shape planSetImageReads writes and reads (#135), kept here so the reviewer gate can word it without
+ *  reaching the database module. */
+export interface PlanSetImageDisconnectRead {
+  field: "acDiscMakeModel" | "acDiscAmps" | "acDiscFused" | "acDiscReq";
+  /** "Eaton DG222URB", "60A", "non-fusible", "shown". */
+  value: string;
+  /** The sheet the read named ("E-1", "Page 3"); "" when it named none. */
+  sheet: string;
+  readAt: string;
+}
+
+/** One line for a finding's evidence and an operator's eye. */
+export function describeImageDisconnectRead(read: PlanSetImageDisconnectRead): string {
+  const what = read.field === "acDiscMakeModel" ? read.value : read.field === "acDiscReq" ? "an AC disconnect is shown" : `${read.value} AC disconnect`;
+  return `AC disconnect read off the plan set's page image at intake${read.sheet ? ` (${read.sheet})` : ""}: ${what}`;
+}

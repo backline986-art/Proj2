@@ -95,7 +95,7 @@ export const DOC_SLOTS: ReadonlyArray<{ docType: string; label: string }> = [
 ];
 
 /** Job types that must NOT exist for a demo project after seeding (research, learn, staging). */
-export const FORBIDDEN_JOB_TYPES = ["code_research", "fee_research", "state_fee_research", "design_criteria_research", "auto_learn", "autopilot", "prepare_submission", "stage_step"] as const;
+export const FORBIDDEN_JOB_TYPES = ["code_research", "fee_research", "state_fee_research", "design_criteria_research", "maker_spec_sheet", "auto_learn", "autopilot", "prepare_submission", "stage_step"] as const;
 
 /**
  * The product's own switches, set on THIS process before the backend loads: no automatic
@@ -114,6 +114,7 @@ export function applyDemoSeedEnv(env: NodeJS.ProcessEnv = process.env): void {
   env.AHJ_FORM_DOWNLOADS = "off";
   env.AHJ_FORM_RESEARCH = "off";
   env.PORTAL_URL_RESEARCH = "off";
+  env.MAKER_SPEC_SHEETS = "off";
   env.RUN_TRIAGE = "off";
   env.PORTAL_AUTOSEED = "0";
   env.SEED_TEST_INSTALLER = "false";

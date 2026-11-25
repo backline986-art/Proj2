@@ -9,7 +9,8 @@
 // THE SERVER IS THE SCOREKEEPER. What a portal "has" is what it RECEIVED: every POST is
 // logged, the committed value of every logical control is held in `state.values`, and any
 // POST that would file the application (Accela's CapConfirm "Continue Application",
-// PowerClerk's Submit, the SPA's Submit Application) or pay a fee is FLAGGED. A replay that
+// PowerClerk's Submit, the SPA's and the self-service portal's Submit Application) or pay a fee
+// is FLAGGED. A replay that
 // reached the review screen with every value right and nothing flagged is the only result that
 // counts as a success, and it is read from here — never from the bot's own report.
 //
@@ -172,7 +173,7 @@ export async function startSyntheticReplica(opts: {
     if (state.reviewVia !== "walked") state.reviewVia = via;
   };
 
-  const handler = w.flavor === "accela" ? accelaHandler : w.flavor === "powerclerk" ? powerClerkHandler : spaHandler;
+  const handler = w.flavor === "accela" ? accelaHandler : w.flavor === "powerclerk" ? powerClerkHandler : w.flavor === "selfserve" ? selfserveHandler : spaHandler;
   const ctx: Ctx = { w, state, byKey, logPost, seen, advancedTo, credential: opts.credential, accelaLogin: w.flavor === "accela" ? opts.accelaLogin : undefined };
 
   const server = http.createServer((req, res) => {
@@ -197,7 +198,8 @@ export async function startSyntheticReplica(opts: {
 export function entryUrlOf(w: Wizard, base: string): string {
   return w.flavor === "accela" ? `${base}/CitizenAccess/Cap/${w.pages[0].slug}`
     : w.flavor === "powerclerk" ? `${base}/Account/Login`
-      : `${base}/apply#/step/${w.pages[0].slug}`;
+      : w.flavor === "selfserve" ? `${base}/Account/Login`
+        : `${base}/apply#/step/${w.pages[0].slug}`;
 }
 
 interface Ctx {
@@ -314,7 +316,8 @@ function acaPanel(ctx: Ctx, idx: number, errors: string[], notice = ""): string 
       const pi = ctx.w.pages.indexOf(p);
       return `<div class="ACA_Section"><h2 class="ACA_Title">${esc(p.heading.replace(/^Step \d+:\s*/, ""))} <a class="ACA_LinkButton" href="javascript:__doPostBack('ctl00$PlaceHolderMain$btnEdit${pi}','')">Edit</a></h2><table class="ACA_ReadOnly">${p.controls.filter((c) => !c.mustStayEmpty && !/To$/.test(c.key)).map((c) => `<tr><td>${esc(c.label)}</td><td>${esc(values[c.key] ?? "")}</td></tr>`).join("")}</table></div>`;
     }).join("") : "";
-    body = `<p class="ACA_Instruction">${esc(page.note ?? "")}</p>${summary}`;
+    const actions = (page.actions ?? []).map((a) => `<a id="${esc(a.id)}" class="ACA_LinkButton" href="javascript:void(0)">${esc(a.label)}</a>`).join(" ");
+    body = `<p class="ACA_Instruction">${esc(page.note ?? "")}</p>${summary}${actions ? `<div class="ACA_Actions">${actions}</div>` : ""}`;
   } else {
     const sections = page.sections.length ? page.sections : [""];
     body = (page.note ? `<p class="ACA_Instruction">${esc(page.note)}</p>` : "") + sections.map((s) => {
@@ -823,6 +826,279 @@ function pcLogin(error: string): string {
     <button type="submit" id="btnSignIn">Sign In</button>
   </form><a href="#">Forgot your password?</a></body></html>`;
 }
+
+// =============================================================================================
+// SELF-SERVICE (citizen permit portal): server-rendered pages + the widgets the live sweep broke on
+// =============================================================================================
+//
+// Every widget writes a HIDDEN input that the page's ordinary form post carries; the visible box
+// has no name. So the portal holds exactly what a person would have committed: typed text that
+// was never picked from the suggestions, a licence typed into the search box with no row added,
+// details typed into the pop-up and never Saved, a file chosen and never Added — each is a blank.
+
+/** The contractor register the lookup searches: each project's contractor plus a namesake whose
+ *  licence shares its first four digits, so a search returns more than the one right row. */
+export const SS_CONTRACTORS = [
+  { license: "220417", business: "Brightfield Solar Co", city: "Tillwater" },
+  { license: "220471", business: "Brightfield Roofing LLC", city: "Tillwater" },
+  { license: "318822", business: "Kestrel Energy LLC", city: "Bramford" },
+  { license: "318828", business: "Kestrel Energy Supply Inc", city: "Bramford" },
+];
+
+/** Address suggestions: every register row with the typed house number (so 918 offers Quimby
+ *  AND Quince), else every row whose street contains the typed text. Value = the street. */
+export function ssAddressSuggestions(q: string): Array<{ value: string; text: string }> {
+  const t = q.trim().toUpperCase();
+  if (t.length < 3) return [];
+  const num = /^(\d+)/.exec(t)?.[1];
+  const rows = ADDRESS_REGISTER.filter((r) => (num ? r.number === num : r.street.toUpperCase().includes(t)));
+  return rows.map((r) => ({ value: r.street.toUpperCase(), text: `${r.street.toUpperCase()}, FERNHOLLOW OR ${r.zip}` }));
+}
+
+/** Contractor search: a licence's first four digits, or any word of three letters or more. */
+export function ssContractorSearch(q: string): typeof SS_CONTRACTORS {
+  const d = q.replace(/\D/g, "");
+  if (d.length >= 4) return SS_CONTRACTORS.filter((c) => c.license.startsWith(d.slice(0, 4)));
+  const words = q.toLowerCase().split(/[^a-z0-9]+/).filter((x) => x.length >= 3);
+  if (!words.length) return [];
+  return SS_CONTRACTORS.filter((c) => words.some((x) => c.business.toLowerCase().includes(x)));
+}
+
+const SS_STYLE = `body{font:14px Arial,sans-serif;margin:0}header.portal-header{background:#1d4f91;color:#fff;padding:12px 16px;display:flex;gap:24px}
+header a{color:#fff}main{padding:16px 24px;max-width:900px}.field{margin:10px 0}.field label{display:block;font-weight:bold}
+ol.steps{display:flex;gap:16px;list-style:none;padding:0;color:#777}ol.steps li.current{color:#000;font-weight:bold}
+.validation-summary{color:#b00;border:1px solid #b00;padding:8px}.suggestions{border:1px solid #999;list-style:none;padding:0;margin:0;max-width:420px}
+.suggestions li{padding:6px;cursor:pointer}.suggestions li.active{background:#dde}.modal{position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:100}
+.modal-content{background:#fff;margin:60px auto;padding:16px;max-width:520px}.modal[hidden],[hidden]{display:none}
+.btn,button{padding:6px 14px;margin:4px}table{border-collapse:collapse}td,th{border:1px solid #ccc;padding:4px 8px}`;
+
+function ssLogin(error: string): string {
+  return `<!doctype html><html><head><meta charset="utf-8"><title>Citizen Self Service - Sign In</title><style>${SS_STYLE}</style></head><body>
+<header class="portal-header"><span>Citizen Self Service</span></header><main><h1>Sign In</h1>
+${error ? `<div class="validation-summary" role="alert">${esc(error)}</div>` : ""}
+<form method="post" action="/Account/Login"><div class="field"><label for="Username">Username</label><input id="Username" name="Username" type="text" autocomplete="username"></div>
+<div class="field"><label for="Password">Password</label><input id="Password" name="Password" type="password" autocomplete="current-password"></div>
+<button type="submit" id="btnSignIn">Sign In</button></form><a href="#">Forgot password?</a> <a href="#">Register</a></main></body></html>`;
+}
+
+function ssSlugFromPath(w: Wizard, pathname: string): number {
+  const p = pathname.replace(/^\/+/, "").replace(/\/+$/, "");
+  return w.pages.findIndex((pg) => pg.slug.toLowerCase() === p.toLowerCase());
+}
+
+function ssField(c: Ctl, values: Record<string, string>, opts: { inDialog?: boolean } = {}): string {
+  const v = values[c.key] ?? "";
+  const req = c.required ? ' <span class="required">*</span>' : "";
+  const label = `<label for="${esc(c.id)}">${esc(c.label)}${req}</label>`;
+  // In the pop-up the boxes carry no name: only Save writes the hidden inputs the page posts.
+  const nameAttr = opts.inDialog ? `data-name="${esc(c.name)}"` : `name="${esc(c.name)}"`;
+  if (c.kind === "textarea") return `<div class="field">${label}<textarea id="${esc(c.id)}" ${nameAttr}${c.required ? " required" : ""}>${esc(v)}</textarea></div>`;
+  if (c.kind === "typeahead") {
+    return `<div class="field typeahead">${label}
+      <input type="text" id="${esc(c.id)}" role="combobox" aria-autocomplete="list" aria-expanded="false" aria-controls="${esc(c.id)}-listbox" autocomplete="off" placeholder="Start typing an address" value="${esc(v)}">
+      <button type="button" class="btn-search" data-for="${esc(c.id)}" aria-label="Search address">Search</button>
+      <input type="hidden" name="${esc(c.name)}" data-commit-for="${esc(c.id)}" value="${esc(v)}">
+      <ul role="listbox" id="${esc(c.id)}-listbox" class="suggestions" hidden></ul></div>`;
+  }
+  if (c.kind === "lookup") {
+    const row = SS_CONTRACTORS.find((r) => r.license === v);
+    return `<div class="field lookup">${label}
+      <input type="text" id="${esc(c.id)}" placeholder="License # or business name" autocomplete="off">
+      <button type="button" class="btn-lookup" data-for="${esc(c.id)}">Search</button>
+      <input type="hidden" name="${esc(c.name)}" data-commit-for="${esc(c.id)}" value="${esc(v)}">
+      <div class="lookup-selected" id="${esc(c.id)}-selected">${row ? `Selected contractor: ${esc(row.business)} (${esc(row.license)})` : "No contractor selected."}</div>
+      <table class="lookup-results" id="${esc(c.id)}-results" hidden><thead><tr><th>License #</th><th>Business Name</th><th>City</th><th>Actions</th></tr></thead><tbody></tbody></table></div>`;
+  }
+  return `<div class="field">${label}<input type="text" id="${esc(c.id)}" ${nameAttr} value="${opts.inDialog ? "" : esc(v)}"${c.required ? " required" : ""}></div>`;
+}
+
+function ssDocument(ctx: Ctx, idx: number, errors: string[]): string {
+  const { w, state } = ctx;
+  const page = w.pages[idx];
+  const forms = w.pages.filter((p) => p.kind === "form" || p.kind === "readonly" || p.kind === "review");
+  const steps = `<ol class="steps">${forms.map((p) => `<li${p === page ? ' class="current"' : ""}>${esc(p.heading)}</li>`).join("")}</ol>`;
+  const head = `<!doctype html><html><head><meta charset="utf-8"><title>${esc(page.title)}</title><style>${SS_STYLE}</style></head><body>
+<header class="portal-header"><span>Citizen Self Service</span><nav><a href="/Portal/Home">Home</a> <a href="/Portal/Home#my-work">My Work</a> <a href="/Account/Logout">Sign Out</a></nav></header><main>`;
+  const errs = errors.length ? `<div class="validation-summary" role="alert"><ul>${errors.map((e) => `<li>${esc(e)}</li>`).join("")}</ul></div>` : "";
+  const note = page.note ? `<p class="note">${esc(page.note)}</p>` : "";
+  const prev = w.pages[idx - 1];
+  const back = prev && prev.kind !== "dashboard" ? `<a class="btn" href="/${esc(prev.slug)}">Back</a>` : "";
+  if (page.kind === "dashboard") {
+    const first = w.pages.find((p) => p.kind !== "dashboard")!;
+    return `${head}<h1>${esc(page.heading)}</h1>${note}<a class="btn" id="btnApply" href="/${esc(first.slug)}">Start a New Application</a></main></body></html>`;
+  }
+  if (page.kind === "review") {
+    const summary = w.pages.filter((p) => p.kind === "form").map((p) => `<h3>${esc(p.heading)}</h3><dl>${p.controls.filter((c) => !c.mustStayEmpty).map((c) => `<dt>${esc(c.label)}</dt><dd>${esc(state.values[c.key] ?? "")}</dd>`).join("")}</dl>`).join("");
+    return `${head}${steps}<h1>${esc(page.heading)}</h1>${note}${summary}
+<form method="post" action="/${esc(page.slug)}/Submit">${back}<button type="submit" id="btnSubmit">Submit Application</button></form></main></body></html>`;
+  }
+  let body = "";
+  if (page.kind === "readonly") {
+    body = "";
+  } else if (page.overlay) {
+    const saved = page.controls.filter((c) => (state.values[c.key] ?? "").trim());
+    body = `<p class="details-summary" id="detailsSummary">${saved.length ? `${saved.length} detail(s) saved.` : "No project details entered."}</p>
+<button type="button" id="btnOpenDetails">${esc(page.overlay.opener)}</button>
+${page.controls.map((c) => `<input type="hidden" name="${esc(c.name)}" value="${esc(state.values[c.key] ?? "")}">`).join("")}
+<div class="modal" role="dialog" aria-modal="true" aria-labelledby="dlgTitle" id="detailsDialog" hidden><div class="modal-content">
+<h2 id="dlgTitle">${esc(page.heading)}</h2>
+${page.sections.map((s) => `<fieldset><legend>${esc(s)}</legend>${page.controls.filter((c) => c.section === s).map((c) => ssField(c, state.values, { inDialog: true })).join("")}</fieldset>`).join("")}
+<button type="button" id="btnDialogSave">Save</button><button type="button" id="btnDialogCancel">Cancel</button></div></div>`;
+  } else if (page.controls.some((c) => c.docType)) {
+    const types = page.controls.filter((c) => c.docType).map((c) => c.docType!);
+    const rows = page.controls.filter((c) => c.docType && state.values[c.key]).map((c) => `<tr><td>${esc(c.docType)}</td><td>${esc(state.values[c.key])}</td><td>Uploaded</td><td><a href="#" class="att-remove">Remove</a></td></tr>`).join("");
+    body = `<div class="uploader"><div class="field"><label for="fld_docType">Document Type</label><select id="fld_docType"><option value="">--Select--</option>${types.map((t) => `<option value="${esc(t)}">${esc(t)}</option>`).join("")}</select></div>
+<div class="field"><label for="fld_docFile">File</label><input type="file" id="fld_docFile" accept=".pdf"></div>
+<button type="button" id="btnAddAttachment">Add Attachment</button><div class="upload-msg" role="status"></div></div>
+<table class="attachments"><thead><tr><th>Document Type</th><th>File Name</th><th>Status</th><th>Actions</th></tr></thead><tbody id="attachmentRows">${rows}</tbody></table>`;
+  } else {
+    body = page.sections.map((s) => `<fieldset><legend>${esc(s)}</legend>${page.controls.filter((c) => c.section === s).map((c) => ssField(c, state.values)).join("")}</fieldset>`).join("");
+  }
+  return `${head}${steps}<h1>${esc(page.heading)}</h1>${errs}${note}
+<form method="post" action="/${esc(page.slug)}" id="appForm">${body}
+<div class="actions">${back}<button type="submit" id="btnNext">Next</button></div></form></main>
+<script>${SS_SCRIPT}</script></body></html>`;
+}
+
+/** The widgets. Plain DOM; no template-literal syntax inside (this sits in one). */
+const SS_SCRIPT = `
+(function(){
+  function esc(s){return String(s==null?"":s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;");}
+  function hiddenFor(id){return document.querySelector('input[type=hidden][data-commit-for="'+id+'"]');}
+  // TYPE-AHEAD: suggestions after the server's round trip; only a picked option commits.
+  document.querySelectorAll('.typeahead input[role=combobox]').forEach(function(box){
+    var list=document.getElementById(box.getAttribute('aria-controls'));var hidden=hiddenFor(box.id);var timer=null;var seq=0;
+    function close(){list.hidden=true;list.innerHTML='';box.setAttribute('aria-expanded','false');box.removeAttribute('aria-activedescendant');}
+    function pick(li){hidden.value=li.getAttribute('data-value');box.value=li.getAttribute('data-value');close();}
+    function lookup(){var q=box.value;var my=++seq;fetch('/api/address?q='+encodeURIComponent(q)).then(function(r){return r.json();}).then(function(rows){
+      if(my!==seq)return;list.innerHTML=rows.map(function(o,i){return '<li role="option" id="'+box.id+'-opt-'+i+'" data-value="'+esc(o.value)+'">'+esc(o.text)+'</li>';}).join('');
+      if(rows.length){list.hidden=false;box.setAttribute('aria-expanded','true');}else{list.hidden=false;list.innerHTML='<li class="no-results" aria-disabled="true">No matching addresses</li>';}
+    });}
+    box.addEventListener('input',function(){hidden.value='';clearTimeout(timer);timer=setTimeout(lookup,250);});
+    box.parentNode.querySelector('.btn-search').addEventListener('click',lookup);
+    list.addEventListener('mousedown',function(ev){var li=ev.target.closest('li[role=option]');if(li){ev.preventDefault();pick(li);}});
+    box.addEventListener('keydown',function(ev){
+      var opts=[].slice.call(list.querySelectorAll('li[role=option]'));var cur=list.querySelector('li.active');var i=opts.indexOf(cur);
+      if(ev.key==='ArrowDown'&&opts.length){ev.preventDefault();if(cur)cur.classList.remove('active');var n=opts[Math.min(opts.length-1,i+1)];n.classList.add('active');box.setAttribute('aria-activedescendant',n.id);}
+      else if(ev.key==='ArrowUp'&&opts.length){ev.preventDefault();if(cur)cur.classList.remove('active');var u=opts[Math.max(0,i-1)];u.classList.add('active');box.setAttribute('aria-activedescendant',u.id);}
+      else if(ev.key==='Enter'){ev.preventDefault();if(cur)pick(cur);}
+      else if(ev.key==='Escape'){close();}
+    });
+  });
+  // LOOKUP: a results table; the star does nothing to the application, only a row's Add commits.
+  document.querySelectorAll('.lookup').forEach(function(wrap){
+    var box=wrap.querySelector('input[type=text]');var hidden=hiddenFor(box.id);var table=document.getElementById(box.id+'-results');var sel=document.getElementById(box.id+'-selected');
+    function search(){fetch('/api/contractors?q='+encodeURIComponent(box.value)).then(function(r){return r.json();}).then(function(rows){
+      table.querySelector('tbody').innerHTML=rows.length?rows.map(function(r){return '<tr><td>'+esc(r.license)+'</td><td>'+esc(r.business)+'</td><td>'+esc(r.city)+'</td><td><button type="button" class="fav" aria-label="Add to favorites" title="Add to favorites">&#9734;</button><button type="button" class="add-row" data-license="'+esc(r.license)+'" data-business="'+esc(r.business)+'">Add</button></td></tr>';}).join(''):'<tr><td colspan="4">No results found.</td></tr>';
+      table.hidden=false;
+    });}
+    wrap.querySelector('.btn-lookup').addEventListener('click',search);
+    box.addEventListener('keydown',function(ev){if(ev.key==='Enter'){ev.preventDefault();search();}});
+    table.addEventListener('click',function(ev){
+      var fav=ev.target.closest('button.fav');if(fav){fav.innerHTML=fav.innerHTML.charCodeAt(0)===9734?'&#9733;':'&#9734;';return;}
+      var add=ev.target.closest('button.add-row');if(!add)return;
+      hidden.value=add.getAttribute('data-license');sel.textContent='Selected contractor: '+add.getAttribute('data-business')+' ('+add.getAttribute('data-license')+')';table.hidden=true;
+    });
+  });
+  // POP-UP DETAILS: the dialog's boxes carry no name; Save copies them into the page's hidden inputs.
+  var open=document.getElementById('btnOpenDetails');var dlg=document.getElementById('detailsDialog');
+  if(open&&dlg){
+    open.addEventListener('click',function(){dlg.querySelectorAll('[data-name]').forEach(function(el){var h=document.querySelector('input[type=hidden][name="'+el.getAttribute('data-name')+'"]');el.value=h?h.value:'';});dlg.hidden=false;var f=dlg.querySelector('[data-name]');if(f)f.focus();});
+    document.getElementById('btnDialogCancel').addEventListener('click',function(){dlg.hidden=true;});
+    document.getElementById('btnDialogSave').addEventListener('click',function(){var n=0;dlg.querySelectorAll('[data-name]').forEach(function(el){var h=document.querySelector('input[type=hidden][name="'+el.getAttribute('data-name')+'"]');if(h){h.value=el.value;if(el.value.trim())n++;}});dlg.hidden=true;document.getElementById('detailsSummary').textContent=n+' detail(s) saved.';});
+  }
+  // ATTACHMENTS: one uploader; the file lands under the Document Type chosen when Add is clicked.
+  var addBtn=document.getElementById('btnAddAttachment');
+  if(addBtn){addBtn.addEventListener('click',function(){
+    var type=document.getElementById('fld_docType').value;var file=document.getElementById('fld_docFile');var msg=document.querySelector('.upload-msg');
+    if(!type){msg.textContent='Select a Document Type.';return;}
+    if(!file.files||!file.files[0]){msg.textContent='Choose a file to upload.';return;}
+    var fd=new FormData();fd.append('docType',type);fd.append('file',file.files[0],file.files[0].name);
+    msg.textContent='Uploading...';
+    fetch('/api/attach?page='+encodeURIComponent(location.pathname),{method:'POST',body:fd}).then(function(r){return r.json();}).then(function(j){
+      if(!j.ok){msg.textContent=j.error||'Upload failed.';return;}
+      var tr=document.createElement('tr');tr.innerHTML='<td>'+esc(type)+'</td><td>'+esc(j.file)+'</td><td>Uploaded</td><td><a href="#" class="att-remove">Remove</a></td>';document.getElementById('attachmentRows').appendChild(tr);
+      msg.textContent='Attachment added.';file.value='';document.getElementById('fld_docType').value='';
+    });
+  });}
+})();`;
+
+const selfserveHandler: Handler = async (ctx, req, res, url) => {
+  const { w, state } = ctx;
+  const p = url.pathname;
+  if (p === "/") { redirect(res, state.loggedIn ? `/${w.pages[0].slug}` : "/Account/Login"); return; }
+  // An account portal (EnerGov and CityView both are): every page is behind the sign-in.
+  if (p === "/Account/Login") {
+    if (req.method === "POST") {
+      const f = parseForm(await readBody(req), String(req.headers["content-type"] || ""));
+      ctx.logPost(p, "login", f);
+      const ok = !!ctx.credential && f.Username === ctx.credential.username && f.Password === ctx.credential.password;
+      if (ok) { state.loggedIn = true; redirect(res, `/${w.pages[0].slug}`); return; }
+      sendHtml(res, ssLogin("Invalid username or password."));
+      return;
+    }
+    sendHtml(res, ssLogin(""));
+    return;
+  }
+  if (p === "/Account/Logout") { state.loggedIn = false; redirect(res, "/Account/Login"); return; }
+  if (!state.loggedIn) { redirect(res, `/Account/Login?returnUrl=${encodeURIComponent(p)}`); return; }
+  if (p === "/api/address") {
+    await sleep(w.delays.postback);
+    sendJson(res, ssAddressSuggestions(url.searchParams.get("q") ?? ""));
+    return;
+  }
+  if (p === "/api/contractors") {
+    await sleep(w.delays.postback);
+    sendJson(res, ssContractorSearch(url.searchParams.get("q") ?? ""));
+    return;
+  }
+  if (p === "/api/attach" && req.method === "POST") {
+    const f = parseForm(await readBody(req), String(req.headers["content-type"] || ""));
+    ctx.logPost(p, "upload", f);
+    await sleep(w.delays.postback);
+    const idx = ssSlugFromPath(w, url.searchParams.get("page") ?? "");
+    const target = (idx >= 0 ? w.pages[idx].controls : []).find((c) => c.docType && c.docType === f.docType);
+    if (!target) { sendJson(res, { ok: false, error: "Select a Document Type." }); return; }
+    if (!f.file) { sendJson(res, { ok: false, error: "Choose a file to upload." }); return; }
+    state.values[target.key] = f.file;
+    sendJson(res, { ok: true, file: f.file });
+    return;
+  }
+  const submitMatch = /^\/(.+)\/Submit$/i.exec(p);
+  if (submitMatch && req.method === "POST") {
+    const f = parseForm(await readBody(req), String(req.headers["content-type"] || ""));
+    ctx.logPost(p, "submit", f);
+    sendHtml(res, `<!doctype html><html><head><title>Application Submitted</title></head><body><h1>Application submitted</h1><p>Your application number is BLD-2026-01187.</p></body></html>`);
+    return;
+  }
+  const idx = ssSlugFromPath(w, p);
+  if (idx < 0) {
+    if (req.method === "POST") ctx.logPost(p, "other", {});
+    sendHtml(res, "<!doctype html><html><body><h1>Page not found</h1></body></html>", 404);
+    return;
+  }
+  const page = w.pages[idx];
+  if (req.method === "POST") {
+    const f = parseForm(await readBody(req), String(req.headers["content-type"] || ""));
+    ctx.logPost(p, "full", f);
+    for (const c of page.controls) {
+      if (c.kind === "file") continue;
+      if (c.name in f) state.values[c.key] = String(f[c.name] ?? "");
+    }
+    const miss = missingRequired(page, state.values);
+    if (miss.length) {
+      state.validationErrors.push(`${page.heading}: ${miss.join(", ")}`);
+      sendHtml(res, ssDocument(ctx, idx, miss.map((m) => `${m} is required.`)));
+      return;
+    }
+    const next = w.pages[idx + 1];
+    ctx.advancedTo(next, "walked");
+    redirect(res, `/${(next ?? page).slug}`);
+    return;
+  }
+  ctx.seen(page);
+  sendHtml(res, ssDocument(ctx, idx, []));
+};
 
 // =============================================================================================
 // SPA: one URL, client-rendered steps, client-side model

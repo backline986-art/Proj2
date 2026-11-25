@@ -24,6 +24,7 @@
 //     human completes in portal" — nothing is ever filed without explicit support.
 // ---------------------------------------------------------------------------
 
+import { withReadMemo } from "./readMemo";
 import { performance } from "node:perf_hooks";
 import type { AppDb, SqlParam } from "./db";
 import { HttpError } from "./httpError";
@@ -40,6 +41,7 @@ import { paymentNeededForRun } from "./feePause";
 import { decideNextStep, gateBlockerHoldsTrack, loadFullNextStepFacts, reviewInfoFromResultJson, reviewerBlockerList, reviewerBlockersFor, reviewerGateRead, stagingFailedFor, withoutCodeResearch, type NextStepFacts, type ReviewMismatch } from "./nextStep";
 import { portalAutomationDisabled } from "../../portal-bot/src/browser";
 import { projectClassHoldReason } from "./projectClassHold";
+import { billingHoldSentence, clientBillingHold } from "./invoiceCollections";
 // STATIC, and the synchrony is load-bearing (see maybeResumeAutopilot). No load-time cycle:
 // jobQueue reaches this module only through the worker's dynamic import() in processNextJob,
 // exactly as it reaches autoStageSteps.ts, which imports enqueueJob the same way.
@@ -327,6 +329,10 @@ function reviewInfoFromRun(run: Row | null): { reviewMismatches: ReviewMismatch[
 // operator block and the per-track staging outcome — the same facts the next-step rule table
 // reads — and the job's own result is carried only as `lastRun` (history).
 export function getAutopilotState(db: AppDb, projectId: string): AutopilotState {
+  return withReadMemo(db, () => autopilotStateOnce(db, projectId));
+}
+
+function autopilotStateOnce(db: AppDb, projectId: string): AutopilotState {
   const detail = getProjectDetail(db, projectId);
   const project = detail.project;
   const ts = project.updatedAt || nowIso();
@@ -522,6 +528,7 @@ export function getAutopilotState(db: AppDb, projectId: string): AutopilotState 
   // payment gate, and the submit gate's blockers — as they stand NOW.
   const operatorBlock = operatorBlockedOutcome(db, projectId);
   const unpaid = unfinished.filter((t) => t.paymentDue && stillToStage.includes(t.track));
+  const billingHold = clientBillingHold(db, project.clientId);
   // AN UNKNOWN MUST NOT READ AS "NOTHING BLOCKS IT NOW". A blocker the last run recorded that
   // none of the live checks above re-derives (a generic 409 — e.g. "staged by another run
   // meanwhile") is kept, marked as the last run's, until a newer portal run supersedes it.
@@ -536,6 +543,8 @@ export function getAutopilotState(db: AppDb, projectId: string): AutopilotState 
     ...(operatorBlock ? [operatorBlock] : []),
     ...stagingFailed.map((t) => ({ code: "stage_failed", detail: `${t.track}: ${t.latestRun?.errorMessage || "the staging run failed before the review screen — see the run's debug bundle"}` })),
     ...(unpaid.length ? [{ code: "payment_required", detail: `Payment required before staging ${unpaid.map((t) => t.track).join(", ")}: this client bills per submission — collect it on the Payment screen, then mark it paid.` }] : []),
+    // A late invoice holding this client's new filings (#199): the staging door's own 402, live.
+    ...(stillToStage.length && billingHold.length ? [{ code: "payment_required", detail: billingHoldSentence(billingHold) }] : []),
     // Only the gate blockers that hold a filing still to be made, each worded for the tracks it
     // holds (gateBlockersForTracks — the Stage button's own answer).
     ...(unfinished.length ? gateBlockersForTracks(db, project, facts.gate, unfinished.map((t) => t.track)).map((b) => ({ code: b.id, detail: b.nextAction })) : []),

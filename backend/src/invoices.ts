@@ -39,6 +39,8 @@ import type { AppDb } from "./db";
 import type { ClientRecord, ProjectRecord, SubmissionPaymentRecord } from "../../shared/src/types";
 import { getSubmissionPayment, defaultServiceFeeUsd } from "./submissionFees";
 import { feeForProject } from "./feeSchedules";
+import { officialSourceOfFeeLine } from "./feeOfficial";
+import { officialSourceWords } from "../../shared/src/officialSource";
 import { getClient } from "./clients";
 import { text } from "./json";
 import { nowIso } from "./time";
@@ -59,6 +61,32 @@ export interface InvoiceComposition {
   sourceUrl: string;
   /** Non-empty when this share is collected by an authority other than the project's AHJ. */
   collectedVia: string;
+  /** WHO VOUCHES FOR THIS SHARE (fee round, 2026-11): "verified" only when a person confirmed it
+   *  (hard rule 3); "official" when the printed line was read on the authority's own official page
+   *  (feeOfficial, rule 3's official tier: worded "from <host>", never as verified); everything
+   *  else research or a lookup read is "seeded". */
+  tier: "seeded" | "official" | "verified";
+  /** tier "official" only: the host the line was read on. */
+  officialHost?: string;
+  /** The printed line this share was read from, verbatim ("" when the schedule holds none). */
+  sourceQuote: string;
+  /** When Keelix read the source (ISO), "" when the fee row cannot say. */
+  sourceReadAt: string;
+}
+
+/** HOW A PUBLISHED FEE IS VOUCHED FOR, in the words an invoice line may carry: every share
+ *  person-verified, or seeded (with the oldest read date when every share states one). */
+export function publishedFeeProvenance(composition: InvoiceComposition[]): string {
+  if (!composition.length) return "";
+  if (composition.every((c) => c.tier === "verified")) return "person-verified schedule";
+  // Every share person-verified or official, at least one official: the authority's own page.
+  if (composition.every((c) => c.tier === "verified" || c.tier === "official")) {
+    const hosts = [...new Set(composition.filter((c) => c.tier === "official").map((c) => c.officialHost || "").filter(Boolean))];
+    const read = composition.filter((c) => c.tier === "official").map((c) => c.sourceReadAt.slice(0, 10)).filter(Boolean).sort()[0];
+    return officialSourceWords(hosts.join(" and "), read);
+  }
+  const dates = composition.map((c) => c.sourceReadAt.slice(0, 10)).filter(Boolean).sort();
+  return `seeded schedule, not person-verified${dates.length === composition.length ? `; source read ${dates[0]}` : ""}`;
 }
 
 /** WHERE THE NUMBER CAME FROM, and the invoice always says.
@@ -163,13 +191,21 @@ function compositionFor(db: AppDb, project: ProjectRecord, track: InvoiceTrack):
   try {
     const resolved = feeForProject(db, project, track);
     if (!resolved || !resolved.lines.length) return [];
-    return resolved.lines.map((l) => ({
-      authority: text(l.authority),
-      discipline: text(l.discipline),
-      amountUsd: l.feeUsd,
-      sourceUrl: text(l.sourceUrl),
-      collectedVia: text(l.hoppedFrom),
-    }));
+    return resolved.lines.map((l) => {
+      // The official grade, line by line (feeOfficial): a person's verified line outranks it.
+      const official = l.confidence === "verified" ? null : officialSourceOfFeeLine(db, text(project.state), track, l);
+      return {
+        authority: text(l.authority),
+        discipline: text(l.discipline),
+        amountUsd: l.feeUsd,
+        sourceUrl: text(l.sourceUrl),
+        collectedVia: text(l.hoppedFrom),
+        tier: l.confidence === "verified" ? "verified" as const : official ? "official" as const : "seeded" as const,
+        ...(official ? { officialHost: official.host } : {}),
+        sourceQuote: text(l.bracketQuote).slice(0, 300),
+        sourceReadAt: official ? official.fetchedAt : text(l.sourceReadAt),
+      };
+    });
   } catch {
     return [];
   }
@@ -325,7 +361,9 @@ export function invoiceLinesForPayment(
       kind: "reimbursement",
       basis: "published",
       provisional: true,
-      description: `${TRACK_LABEL[track]} — estimated from the published schedule, pending the portal's own figure`,
+      // The estimate says how far it is vouched for (fee round, 2026-11): a seeded schedule is named
+      // as seeded, with the date its source was read, and only a person's confirm reads "verified".
+      description: `${TRACK_LABEL[track]} — estimated from the published schedule${publishedFeeProvenance(published) ? ` (${publishedFeeProvenance(published)})` : ""}, pending the portal's own figure`,
       amountUsd: publishedTotal,
       composition: published,
       reconciliation: "",
@@ -376,7 +414,7 @@ export function invoiceLinesForPayment(
     excluded.push({
       track,
       reason: `A service fee of $${serviceFee.toFixed(2)} is quoted, but this client is billed ${billingMode || "monthly/none"} rather than per submission.`,
-      resolution: "Nothing to do — it belongs on the monthly arrangement, not on this project.",
+      resolution: "Nothing to do here — each filing is billed on the client's statement at the price saved when it was filed (#187).",
       amountSeenUsd: serviceFee,
     });
   }
