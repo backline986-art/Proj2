@@ -116,7 +116,10 @@ process.env.DOCUMENT_FETCH_ALLOW_ORIGINS = PUBLIC;
 // Dynamic imports so this file runs to the end on a tree without the fix and reports each
 // failure, rather than dying on the first missing export.
 const guard = await import("../src/publicUrlGuard").catch(() => null) as null | typeof import("../src/publicUrlGuard");
-const { fetchPublicDocument } = await import("../src/documentFetch");
+const { fetchPublicDocument, _setDocumentFetchPoliteness } = await import("../src/documentFetch");
+// The loopback stub stands in for several public hosts; the 10 s per-host gap (#130) is not what
+// this suite measures. (The spawned server below keeps the real gap — it is a real process.)
+_setDocumentFetchPoliteness({ minGapMs: 0 });
 const ahjFormAuto = await import("../src/ahjFormAuto");
 const toolFetch = (ahjFormAuto as { FORM_FILL_TOOL_FETCH?: { allowBrowser?: boolean } }).FORM_FILL_TOOL_FETCH;
 
