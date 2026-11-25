@@ -26,6 +26,8 @@ const RULES: Rule[] = [
   { re: /first\s*name/i, keys: (c) => (c.installer && !c.owner ? ["installerFirstName"] : c.utility ? ["ubAccountHolderFirstName", "homeownerFirstName"] : ["homeownerFirstName"]) },
   { re: /last\s*name/i, keys: (c) => (c.installer && !c.owner ? ["installerLastName"] : c.utility ? ["ubAccountHolderLastName", "homeownerLastName"] : ["homeownerLastName"]) },
   { re: /^\s*(full\s*)?name\s*\*?:?\s*$/i, keys: (c) => (/electric/i.test(c.section) ? ["electricalSupervisorName"] : c.installer ? ["installerContactName"] : ["homeownerName"]) },
+  // Before company: "Contractor License Number" is the licence, not the contractor's name.
+  { re: /licen[cs]e\s*(number|#|no\b)/i, keys: () => ["ccbLicenseNumber", "contractorLicenseNumber"] },
   { re: /company|business\s*name/i, keys: () => ["installerCompanyName"] },
   { re: /e-?\s*mail/i, keys: (c) => (c.installer && !c.owner ? ["installerEmail"] : c.utility ? ["ubAccountHolderEmail", "homeownerEmail"] : ["homeownerEmail"]) },
   { re: /phone/i, keys: (c) => (c.installer && !c.owner ? ["installerPhone"] : c.utility ? ["ubAccountHolderPhone", "homeownerPhone"] : ["homeownerPhone"]) },

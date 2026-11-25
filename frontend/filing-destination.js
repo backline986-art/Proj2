@@ -15,6 +15,11 @@
 //     Reject. Confirm is DISABLED with the reasons when the server says it would be refused;
 //   - the proposals a person rejected (who, when, why) with "Offer again";
 //   - candidates that were not proposed and why (not an official page, no words), folded away.
+// A CLIENT'S OWN ANSWER (from "client_supplied": what the client typed on its Company setup page) is
+// shown as a proposal too, marked as the client's word: it has no page of the authority's and no
+// words from it, so Confirm is always disabled and a person records it through Edit as their own
+// check. Where a person already verified the destination and the client says otherwise, the queue
+// lists the difference ("The client says otherwise") with Set aside; the verified record stands.
 // dashboard.js does the clicks (named-person confirm first, then the route). Universal: no city,
 // utility, portal or state is special. dashboard.html loads it as a classic script
 // (window.FilingDestination); backend/test/filingDestinationControl.test.ts loads it through node:vm.
@@ -38,7 +43,15 @@
   const day = (iso) => str(iso).slice(0, 10);
 
   const KIND = { portal: 'Application portal', email: 'Applications by email to', with_permit: 'Filed inside the AHJ permit application' };
-  const FROM = { reference: 'reference data', permit_lookup: 'per-job permit lookup', utility_lookup: "utility's filing lookup" };
+  const FROM = { reference: 'reference data', permit_lookup: 'per-job permit lookup', utility_lookup: "utility's filing lookup", client_supplied: "client's own answer", seeded_kb: 'seeded knowledge base' };
+  const ACCOUNT = { yes: 'The client says it has an account there.', no: 'The client says it has no account there.' };
+
+  /** What the client said beside the address: the account yes/no and its example number. Never a login. */
+  function clientNoteHtml(note) {
+    if (!note || typeof note !== 'object') return '';
+    const parts = [ACCOUNT[str(note.hasAccount)] || '', str(note.example) ? `Example number: ${esc(str(note.example))}.` : ''].filter(Boolean);
+    return parts.length ? `<div class="muted" data-fd-client-note>${parts.join(' ')}</div>` : '';
+  }
 
   /** Which authority kinds a track group shows: the utility group shows the utility's, the permit group the AHJ's. */
   function forGroup(payload, authorityKind) {
@@ -68,7 +81,35 @@
     return Boolean(d && d.serviceArea && !(p && (p.act || p.areaAct)));
   }
 
+  /** A SEEDED knowledge-base address with no page words on file: shown so the queue does not hide it,
+   *  for Edit only. No Confirm button is drawn (the server refuses one anyway); the person opens the
+   *  authority's page and saves the page and its words as their own check. */
+  function seededProposalHtml(d, p) {
+    const link = httpUrl(p.sourceUrl);
+    const page = link ? ` The entry names this page: <a href="${esc(link)}" target="_blank" rel="noopener">${esc(p.sourceHost || link)}</a>.` : '';
+    const attrs = `${actAttrs(d, p)} data-fd-id="${esc(p.id)}"`;
+    return `<div class="fd-proposal" data-fd-proposal="${esc(p.id)}" data-fd-seeded>
+  <div>${addressLine(p)} <span class="badge">Seeded — not yet confirmed</span></div>
+  <div class="muted">From the seeded knowledge base: no page words are on file, so it cannot be confirmed by one click.${page}</div>
+  <p class="warn">Edit only: open ${esc(d.authority.name)}'s own application page, check this address, then save the page and its words as your own check.</p>
+  ${noActionHere(d, p) ? `<p class="muted" data-fd-area-noact>No job names ${esc(d.authority.name)} yet: Edit and Reject open on the first job's track card.</p>` : `<div class="fd-actions">
+    <button type="button" class="btn btn-primary" data-fd-edit ${attrs}>Edit and save</button>
+    <button type="button" class="btn" data-fd-reject ${attrs}>Reject</button>
+  </div>`}
+  ${noActionHere(d, p) ? '' : `<div class="fd-edit" data-fd-edit-slot="${esc(p.id)}" hidden>
+    <label>Address <input type="text" data-fd-field="address" value="${esc(p.address)}"></label>
+    <label>Page you read it on <input type="url" data-fd-field="sourceUrl" value="${esc(link)}"></label>
+    <label>The page's words <textarea data-fd-field="quote" rows="3"></textarea></label>
+    <input type="hidden" data-fd-field="kind" value="${esc(p.kind)}">
+    <input type="hidden" data-fd-field="name" value="${esc(p.name || '')}">
+    <button type="button" class="btn btn-primary" data-fd-save ${attrs}>Save as confirmed by me</button>
+  </div>`}
+</div>`;
+  }
+
   function proposalHtml(d, p) {
+    const fromClient = p.from === 'client_supplied';
+    if (p.seeded === true || p.from === 'seeded_kb') return seededProposalHtml(d, p);
     const link = httpUrl(p.sourceUrl);
     const source = link
       ? `<a href="${esc(link)}" target="_blank" rel="noopener">${esc(p.sourceHost || link)}</a>`
@@ -81,11 +122,16 @@
       ? `<p class="warn">Cannot be confirmed: ${esc(p.problems.join('; '))}</p>` : '';
     const disabled = (p.problems || []).length ? ' disabled' : '';
     const attrs = `${actAttrs(d, p)} data-fd-id="${esc(p.id)}"`;
-    return `<div class="fd-proposal" data-fd-proposal="${esc(p.id)}">
-  <div>${addressLine(p)} <span class="badge">Proposed — not yet confirmed</span></div>
-  <div class="muted">From ${source} (${p.official === false ? 'not an official page: Edit only' : 'official page'}), read ${esc(day(p.fetchedAt))}, via the ${esc(FROM[p.from] || p.from)}.</div>
+    const provenance = fromClient
+      ? `<div class="muted" data-fd-client-supplied>From the client's own answer on its Company setup page, ${esc(day(p.fetchedAt))}. It is the client's word, not a page of ${esc(d.authority.name)}'s: check it yourself, then use Edit.</div>
+  ${clientNoteHtml(p.clientSupplied)}`
+      : `<div class="muted">From ${source} (${p.official === false ? 'not an official page: Edit only' : 'official page'}), read ${esc(day(p.fetchedAt))}, via the ${esc(FROM[p.from] || p.from)}.</div>
   <blockquote class="fd-quote">${esc(p.quote)}</blockquote>
   ${names}
+  ${p.clientSupplied ? `<div class="muted" data-fd-client-agrees>The client's own answer names this address too.</div>${clientNoteHtml(p.clientSupplied)}` : ''}`;
+    return `<div class="fd-proposal" data-fd-proposal="${esc(p.id)}">
+  <div>${addressLine(p)} <span class="badge">${fromClient ? 'Client-supplied — not yet confirmed' : 'Proposed — not yet confirmed'}</span></div>
+  ${provenance}
   ${problems}
   ${noActionHere(d, p) ? `<p class="muted" data-fd-area-noact>No job names ${esc(d.authority.name)} yet: Confirm, Edit and Reject open on the first job's track card.</p>` : `<div class="fd-actions">
     <button type="button" class="btn btn-primary" data-fd-confirm ${attrs}${disabled}>Confirm (I checked the page)</button>
@@ -194,6 +240,21 @@
 </div>`;
   }
 
+  /** A verified authority this client's own answer disagrees with: both shown, the verified one stands. */
+  function conflictsHtml(cl) {
+    const list = Array.isArray(cl.conflicts) ? cl.conflicts : [];
+    if (!list.length) return '';
+    return list.map((x) => `<div class="fd-block fd-conflict" data-fd-conflict="${esc(x.authority.profileKey)}">
+  <div class="fd-head"><strong>${esc(x.authority.name)}</strong> <span class="badge">The client says otherwise</span> <span class="muted">A person already verified where ${esc(x.authority.name)} takes filings. That record stands; nothing changes unless a person re-verifies it.</span></div>
+  <div>Verified: ${esc(x.verified)}</div>
+  ${(x.conflicts || []).map((c) => `<div class="fd-proposal" data-fd-conflict-statement="${esc(c.statementId)}">
+    <div>The client says: ${esc(KIND[c.kind] || c.kind)}: <code>${esc(c.address)}</code> <span class="muted">(${esc(day(c.statedAt))})</span></div>
+    ${clientNoteHtml(c)}
+    <div class="fd-actions"><button type="button" class="btn" data-fd-dismiss-statement="${esc(c.statementId)}" data-fd-client="${esc(cl.clientId)}">Set the client's answer aside</button></div>
+  </div>`).join('')}
+</div>`).join('');
+  }
+
   /** The whole view. '' never: an empty queue says so. */
   function renderQueue(q) {
     const clients = (q && Array.isArray(q.clients)) ? q.clients : [];
@@ -202,9 +263,9 @@
     if (!clients.length) {
       return `${lede}<p class="muted" data-fd-queue-empty>Every authority your open jobs and your clients' service areas name has a person-verified destination${c.alreadyVerified ? ` (${esc(c.alreadyVerified)} verified)` : ''}.</p>`;
     }
-    const summary = `<p class="fd-queue-summary" data-fd-queue-summary><strong>${esc(c.authorities || 0)}</strong> ${(c.authorities || 0) === 1 ? 'authority waits' : 'authorities wait'} on a person: ${esc(c.oneClick || 0)} one-click, ${esc(c.editOnly || 0)} need Edit, ${esc(c.noProposal || 0)} with nothing to propose${c.handCheck ? `, ${esc(c.handCheck)} with pages to check by hand` : ''}${c.serviceArea ? `; ${esc(c.serviceArea)} only in a service area, with no job yet` : ''}. ${esc(c.alreadyVerified || 0)} already verified.</p>`;
+    const summary = `<p class="fd-queue-summary" data-fd-queue-summary><strong>${esc(c.authorities || 0)}</strong> ${(c.authorities || 0) === 1 ? 'authority waits' : 'authorities wait'} on a person: ${esc(c.oneClick || 0)} one-click, ${esc(c.editOnly || 0)} need Edit, ${esc(c.noProposal || 0)} with nothing to propose${c.handCheck ? `, ${esc(c.handCheck)} with pages to check by hand` : ''}${c.serviceArea ? `; ${esc(c.serviceArea)} only in a service area, with no job yet` : ''}. ${esc(c.alreadyVerified || 0)} already verified.${c.conflicts ? ` On ${esc(c.conflicts)} of those a client's own answer says otherwise.` : ''}</p>`;
     return lede + summary + clients.map((cl) =>
-      `<section class="fd-queue-client" data-fd-client="${esc(cl.clientId)}"><h3>${esc(cl.clientName)} <span class="muted">(${esc((cl.authorities || []).length)})</span></h3>${(cl.authorities || []).map(queueAuthorityHtml).join('')}</section>`).join('');
+      `<section class="fd-queue-client" data-fd-client="${esc(cl.clientId)}"><h3>${esc(cl.clientName)} <span class="muted">(${esc((cl.authorities || []).length)})</span></h3>${(cl.authorities || []).map(queueAuthorityHtml).join('')}${conflictsHtml(cl)}</section>`).join('');
   }
 
   /** The queue as the payload findProposal reads (every authority, flat). */

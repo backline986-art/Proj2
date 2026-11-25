@@ -689,6 +689,8 @@ console.log("\n3. AFTER THE WATCH IS ARMED THE RUN ONLY READS (Helm Should-fix 8
     armHumanCaptureOnPage: "humanCapture.ts: listens for the person's submit (an observer); no input",
     scrapeReviewScreenShared: "reviewScreenScraper.ts: the review read-back (scanned whole below)",
     reviewComparison: "reviewScreenScraper.ts: compares two readings",
+    typedValuesOnReview: "reviewScreenScraper.ts: compares the values this run typed with the fields already read (pure, no page)",
+    withTypedValues: "reviewScreenScraper.ts: joins two comparisons (pure)",
     utilityIdentifiersEnteredBySteps: "reviewScreenScraper.ts: reads the recipe's steps",
     redactCaptureText: "safeAction.ts: scrubs text",
     collectPortalErrorBanner: "safeAction.ts: reads the page's error banner",

@@ -126,6 +126,13 @@ export function permitProcessFor(project: Pick<ProjectRecord, "state" | "ahj">):
   return registry.get(permitProcessKey(project.state, project.ahj)) ?? null;
 }
 
+/** A PERSON VERIFIED THIS LOOKUP ROW (verifyPermitProcessLookup — confidence "verified" / verified_at).
+ *  The one predicate for a process row's standing (hard rule 3): this table has no "official"
+ *  origin, so row-verified is the whole notion. A seeded row is a lookup's reading, never authority. */
+export function isVerifiedPermitProcess(lookup: Pick<PermitProcessLookup, "confidence" | "verifiedAt"> | null | undefined): boolean {
+  return Boolean(lookup) && (lookup!.confidence === "verified" || Boolean(lookup!.verifiedAt));
+}
+
 /** A document name that says it is a downloadable blank (a PDF, a form to download / fill). */
 const NAMES_PDF_BLANK = /\bpdf\b|\.pdf\b|\bform\b|\bfillable\b|\bdownload/i;
 
@@ -147,7 +154,7 @@ export function lookupPortalOnlyFor(project: Pick<ProjectRecord, "state" | "ahj"
   if (!withPortal) return null;
   if (permits.some((p) => (p.documents?.value ?? []).some((d) => NAMES_PDF_BLANK.test(String(d || ""))))) return null;
   const portalUrl = String(withPortal.portalUrl.value).trim();
-  const verified = lookup.confidence === "verified" || Boolean(lookup.verifiedAt);
+  const verified = isVerifiedPermitProcess(lookup);
   return { portalUrl, waives: verified || isApplicationPortalShapedUrl(portalUrl) };
 }
 /** The card's / the gate's words for it. */
@@ -721,19 +728,34 @@ export function permitAnswerForTrack(project: Pick<ProjectRecord, "state" | "ahj
 /** permitAnswerForTrack, saying WHOSE ROW answered (#59): "project" — on a track view, the project
  *  AHJ's own lookup whose permit cites the issuer (the Marion case); "issuer" — the row keyed on
  *  project.ahj (on a view, the issuer's own lookup). The card names the agency whose lookup it is. */
-export function permitAnswerForTrackFrom(project: Pick<ProjectRecord, "state" | "ahj"> & Partial<Pick<ProjectRecord, "trackView">>, track: string | null | undefined): { answer: PermitProcessPermitAnswer; from: "issuer" | "project" } | null {
+export function permitAnswerForTrackFrom(project: Pick<ProjectRecord, "state" | "ahj"> & Partial<Pick<ProjectRecord, "trackView">>, track: string | null | undefined): { answer: PermitProcessPermitAnswer; from: "issuer" | "project"; viaCombo: boolean } | null {
   const want = track === "building" ? "structural" : track === "electrical" || track === "mpu" ? "electrical" : track === "combo" || track === "permit" ? "combo" : "";
   if (!want) return null;
+  // ONE COMBO PERMIT ANSWERS BOTH TRACKS (#177). Live at City of Meridian (2026-11-12): the owner
+  // verified the record type on the row's one `combo` permit (one Accela record covers the PV job),
+  // and an electrical learn asked for an `electrical` permit, found none, and walked as if nothing
+  // were verified. Where the AHJ files one combined permit there is no other permit to ask, so a
+  // building or electrical track takes the combo permit's facts — and says so (viaCombo) so a card
+  // can word it. A discipline-specific permit still wins when the row has one (specific beats
+  // combo), and the reverse never happens: a combo track never takes a discipline permit, which
+  // names half the job.
+  const pick = (permits: PermitProcessPermitAnswer[] | undefined): { answer: PermitProcessPermitAnswer; viaCombo: boolean } | null => {
+    const exact = permits?.find((p) => p.discipline === want);
+    if (exact) return { answer: exact, viaCombo: false };
+    if (want !== "structural" && want !== "electrical") return null;
+    const combo = permits?.find((p) => p.discipline === "combo");
+    return combo ? { answer: combo, viaCombo: true } : null;
+  };
   const view = project.trackView;
   if (view && String(view.projectAhj ?? "").trim()) {
     const base = permitProcessFor({ state: project.state, ahj: view.projectAhj });
-    const fromBase = base?.permits?.find((p) => p.discipline === want) ?? null;
-    if (fromBase && answered(fromBase.issuingAgency) && sameAgencyName(fromBase.issuingAgency.value, project.ahj)) return { answer: fromBase, from: "project" };
+    const fromBase = pick(base?.permits);
+    if (fromBase && answered(fromBase.answer.issuingAgency) && sameAgencyName(fromBase.answer.issuingAgency.value, project.ahj)) return { ...fromBase, from: "project" };
   }
   const lk = permitProcessFor(project);
   if (!lk?.permits?.length) return null;
-  const own = lk.permits.find((p) => p.discipline === want);
-  return own ? { answer: own, from: "issuer" } : null;
+  const own = pick(lk.permits);
+  return own ? { ...own, from: "issuer" } : null;
 }
 
 /** "by email to x@y", "in person at City Hall", "by mail", "with the Building permit", "online"
@@ -1022,6 +1044,34 @@ export function projectForTrack<T extends IssuerProject>(project: T, track: stri
 export function lookedUpRecordType(project: Pick<ProjectRecord, "state" | "ahj">, track: string | null | undefined): CitedFact<string> | null {
   const p = permitAnswerForTrack(project, track);
   return p && answered(p.recordType) ? p.recordType : null;
+}
+
+/**
+ * THE RECORD TYPE A LEARN IS TOLD TO TICK (#166): lookedUpRecordType with the standing of THE ROW
+ * THAT ANSWERED. On a track view the project's own row can answer for the issuer (the Marion case,
+ * permitAnswerForTrackFrom "project"), so `verified` is read off that row — never off
+ * permitProcessFor(project), which on a view is the issuer's row and may not exist.
+ *
+ * A watched City of Bend learn (2026-11-12) ticked "Renewable energy up to 25KVA" while the job's
+ * person-verified process row named "Prescriptive photovoltaic systems": the verified name never
+ * reached the learner. It does now, and the learner's pass (autoLearnAdapter) ticks the offered
+ * option whose label sameRecordType()s it — a VERIFIED one deterministically, a seeded one is only
+ * ever the planner's hint (hard rule 3).
+ */
+export function lookedUpRecordTypeFor(
+  project: Pick<ProjectRecord, "state" | "ahj"> & Partial<Pick<ProjectRecord, "trackView">>,
+  track: string | null | undefined,
+): { value: string; verified: boolean; sourceUrl: string } | null {
+  const hit = permitAnswerForTrackFrom(project, track);
+  if (!hit || !answered(hit.answer.recordType)) return null;
+  const row = hit.from === "project"
+    ? permitProcessFor({ state: project.state, ahj: String(project.trackView?.projectAhj ?? "") })
+    : permitProcessFor(project);
+  return {
+    value: String(hit.answer.recordType.value).trim(),
+    verified: isVerifiedPermitProcess(row),
+    sourceUrl: String(hit.answer.recordType.sourceUrl ?? ""),
+  };
 }
 
 /** "Residential - Structural" ≈ "Residential Structural" ≈ "residential structural permit". */

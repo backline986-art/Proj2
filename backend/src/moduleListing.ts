@@ -40,7 +40,7 @@ export async function ensureModuleListingAgency(
   const fromText = listingAgencyFromText(String(row.extracted_text ?? ""));
   const save = async (agency: string, quote: string, source: "text" | "vision") => {
     const { updateProject } = await import("./repository");
-    updateProject(db, project.id, { moduleListingAgency: agency, moduleListingAgencyEvidence: `${source === "vision" ? "module datasheet (vision read)" : "module datasheet text"}: ${quote}`.slice(0, 300) } as never);
+    updateProject(db, project.id, { moduleListingAgency: agency, moduleListingAgencyEvidence: `${source === "vision" ? "module datasheet (vision read)" : "module datasheet text"}: ${quote}`.slice(0, 300) } as never, { changeSource: "module datasheet reader" });
   };
   if (fromText.agency) {
     await save(fromText.agency, fromText.quote, "text");
@@ -77,6 +77,6 @@ export async function ensureModuleListingAgency(
     return { ...found, source: "vision" };
   }
   if (withheld.length) return { agency: "", quote: "", source: "none", withheld };
-  updateProject(db, project.id, { moduleListingAgencyLookedAt: new Date().toISOString() } as never);
+  updateProject(db, project.id, { moduleListingAgencyLookedAt: new Date().toISOString() } as never, { changeSource: "module datasheet reader" });
   return { agency: "", quote: "", source: "none" };
 }

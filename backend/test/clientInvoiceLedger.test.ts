@@ -188,8 +188,10 @@ async function main(): Promise<void> {
   const prov = s2.lines.filter((l) => l.projectId === p2.id && l.kind === "reimbursement");
   check("a published-schedule fee bills PROVISIONALLY",
     prov.length === 1 && prov[0].provisional && prov[0].amountUsd === 200, JSON.stringify(prov));
-  check("MONTHLY client: no service-fee line, and the statement says why",
-    !s2.lines.some((l) => l.kind === "service") && s2.notes.some((x) => /not per submission/.test(x)), JSON.stringify(s2.notes));
+  // A quote is not a filing: a monthly client is billed our fee per filing RECORDED (#187,
+  // filingServiceCharges.test), never per quote, and the statement says how.
+  check("MONTHLY client: a quoted, unfiled job has no service-fee line, and the statement says how filings bill",
+    !s2.lines.some((l) => l.kind === "service") && s2.notes.some((x) => /each filing is a line at the price saved/.test(x)), JSON.stringify(s2.notes));
   check("a login with no fee agreement is listed", s2.loginsWithoutFeeAgreement.length === 1, JSON.stringify(s2.loginsWithoutFeeAgreement));
   const inv3 = L.createClientInvoice(db, monthly.id, period, "Test Person");
   check("the provisional line is invoiced", inv3.reimbursementTotalUsd === 200, String(inv3.reimbursementTotalUsd));

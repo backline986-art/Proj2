@@ -15,7 +15,7 @@
 // All addresses are synthetic: invented streets, numbers and cities.
 // Run: tsx portal-bot/src/typeaheadMatch.test.ts
 import assert from "node:assert/strict";
-import { addressQueries, chooseAddressSuggestion, chooseExactSuggestion, suggestionText, typeaheadMatchMode } from "./typeaheadMatch";
+import { addressQueries, chooseAddressSuggestion, chooseCompanySuggestion, chooseExactSuggestion, noMatchSaid, oneLineAddress, suggestionText, typeaheadBoxSays, typeaheadMatchMode } from "./typeaheadMatch";
 import { siteKey } from "./draftCreated";
 
 let failures = 0;
@@ -49,6 +49,18 @@ check("...with the suggestion naming no city or ZIP", () => {
 check("...with a parcel id in front of the address", () => {
   const c = chooseAddressSuggestion(["12-345-0067 | 4821 W QUILLFEATHER DR MARROWVALE"], SITE);
   assert.equal(c.kind, "pick", JSON.stringify(c));
+});
+check("...with a parcel id AFTER the address (live Tigard Esri: 'Parcel: 2S102DA00401')", () => {
+  for (const row of ["4821 W QUILLFEATHER DR Parcel: 2S1-02DA00401", "4821 W QUILLFEATHER DR (APN 123-456-78)", "4821 W QUILLFEATHER DR, Tax Lot 2S102DA00401"]) {
+    const c = chooseAddressSuggestion([row], SITE);
+    assert.equal(c.kind, "pick", `${row}: ${JSON.stringify(c)}`);
+  }
+});
+check("MUST NOT: a street that starts with a label word keeps its words (no digit id after it)", () => {
+  const c = chooseAddressSuggestion(["4821 W PIN OAK DR"], SITE);
+  assert.notEqual(c.kind, "pick", JSON.stringify(c));
+  const own = chooseAddressSuggestion(["77 PIN OAK DR"], { street: "77 Pin Oak Dr", city: "Marrowvale", zip: "84999" });
+  assert.equal(own.kind, "pick", JSON.stringify(own));
 });
 check("...with the direction spelled out on one side", () => {
   const c = chooseAddressSuggestion(["4821 West Quillfeather Dr"], SITE);
@@ -161,6 +173,28 @@ check("an address with no house number is typed as its street line", () => {
   assert.deepEqual(addressQueries("Rural Route Quillfeather"), ["Rural Route Quillfeather"]);
 });
 
+// ---- #139: THE WHOLE ONE-LINE ADDRESS, AND THE PORTAL SAYING "NO MATCH" -------------------------
+check("the job's address as one line: street, city, ST zip (what a person types into a location search)", () => {
+  assert.equal(oneLineAddress({ street: "4821 W Quillfeather Dr, Marrowvale, UT, 84999", city: "Marrowvale", state: "UT", zip: "84999" }), "4821 W Quillfeather Dr, Marrowvale, UT 84999");
+  assert.equal(oneLineAddress({ street: "4821 W Quillfeather Dr", city: "Marrowvale", zip: "84999" }), "4821 W Quillfeather Dr, Marrowvale, 84999");
+  assert.equal(oneLineAddress({ street: "4821 W Quillfeather Dr" }), "4821 W Quillfeather Dr");
+  assert.equal(oneLineAddress({ street: "" , city: "Marrowvale" }), "");
+});
+check("the portal's own no-match words are read (CityView after Enter, iWorQ's list, the usual empty states)", () => {
+  for (const t of ["The search value did not match an address", "No results match your search", "No results found", "Property Address not found.", "0 results"]) {
+    assert.equal(noMatchSaid(t), t, t);
+  }
+});
+check("MUST EXCLUDE: an address, a label or a long paragraph is not the portal saying no match", () => {
+  for (const t of ["4821 W QUILLFEATHER DR, MARROWVALE, UT 84999", "Search for location:", "Next Step", `If you cannot find your property ${"in the list below, ".repeat(12)}contact the city.`]) {
+    assert.equal(noMatchSaid(t), "", t);
+  }
+});
+check("a no-match status row in a suggestion list is not a suggestion; an address row still is", () => {
+  assert.equal(suggestionText("No results match your search"), "");
+  assert.equal(suggestionText("4821 W QUILLFEATHER DR, MARROWVALE, UT 84999"), "4821 W QUILLFEATHER DR, MARROWVALE, UT 84999");
+});
+
 // ---- HOW A FILL IS JUDGED -------------------------------------------------------------------
 check("bound to the project's street: judged as the job's site (city/ZIP checked)", () => {
   assert.equal(typeaheadMatchMode({ field: "street", label: "Location", value: "4821 W Quillfeather Dr" }), "site");
@@ -189,6 +223,62 @@ check("siteKey reads the directionals and leaves words / suffix / unit as before
   assert.equal(post!.suffix, "ave");
   const none = siteKey({ street: "77 Brindlecove Ln" });
   assert.deepEqual(none!.dirs, []);
+});
+
+// ---- #244: THE SUBMITTING COMPANY, BY THE COMPANY SELECT'S OWN RULE ---------------------------
+check("a box bound to installerCompanyName is judged as the company", () => {
+  assert.equal(typeaheadMatchMode({ field: "installerCompanyName", label: "contractors autocomplete", value: "Bramblecrest Solar Co" }), "company");
+});
+check("the company folds & to and, case and punctuation (the select's rule), and only the name", () => {
+  const c = chooseCompanySuggestion([
+    "BRAMBLECREST SOLAR AND ELECTRIC LLC OF IDAHO",
+    "BRAMBLECREST SOLAR AND ELECTRIC, LLC",
+    "No results match your search",
+  ], "Bramblecrest Solar & Electric LLC");
+  assert.equal(c.kind, "pick");
+  if (c.kind === "pick") assert.equal(c.index, 1);
+});
+check("MUST REFUSE: a longer name that contains the company is never it", () => {
+  const c = chooseCompanySuggestion(["BRAMBLECREST SOLAR AND ELECTRIC LLC OF IDAHO"], "Bramblecrest Solar & Electric LLC");
+  assert.equal(c.kind, "none");
+});
+check("MUST ASK: two entries that both read as the company", () => {
+  const c = chooseCompanySuggestion(["Bramblecrest Solar Co.", "BRAMBLECREST SOLAR CO"], "Bramblecrest Solar Co");
+  assert.equal(c.kind, "ask");
+  if (c.kind === "ask") assert.equal(c.candidates.length, 2);
+});
+
+// ---- #244: IS THIS BOX A SEARCH-AS-YOU-TYPE BOX? — from its own markup ------------------------
+// The iWorQ shape is the live City of Star markup (2026-11-15) with nothing else: no role, no
+// aria-autocomplete, no widget stamp, no name.
+const IWORQ = {
+  textBox: true, editable: true, role: "", ariaAutocomplete: "", className: "form-control",
+  id: "autocomplete_1", ariaLabel: "properties autocomplete",
+  widgetClasses: ["input-group", "autocomplete-template", "col-12 col-sm-6 mb-4 mb-sm-0"],
+};
+check("MUST CATCH: the iWorQ autocomplete (by its id, its aria-label, or its widget alone)", () => {
+  assert.match(typeaheadBoxSays(IWORQ), /autocomplete/);
+  assert.match(typeaheadBoxSays({ ...IWORQ, id: "", ariaLabel: "" }), /widget \("autocomplete-template"\)/);
+  assert.match(typeaheadBoxSays({ ...IWORQ, id: "", widgetClasses: [] }), /aria-label "properties autocomplete"/);
+  assert.match(typeaheadBoxSays({ ...IWORQ, ariaLabel: "", widgetClasses: [] }), /id "autocomplete_1"/);
+});
+check("MUST CATCH: ARIA (role=combobox + aria-autocomplete list|both) and a widget's stamp, as before", () => {
+  assert.match(typeaheadBoxSays({ textBox: true, editable: true, role: "combobox", ariaAutocomplete: "list" }), /aria-autocomplete=list/);
+  assert.match(typeaheadBoxSays({ textBox: true, editable: true, className: "ui-autocomplete-input" }), /stamp/);
+  assert.match(typeaheadBoxSays({ textBox: true, editable: true, widgetClasses: ["react-autosuggest__container"] }), /autosuggest/);
+});
+check("MUST EXCLUDE: a keyword box whose only hint is \"Search…\", and a plain text box", () => {
+  assert.equal(typeaheadBoxSays({ textBox: true, editable: true, id: "keyword", ariaLabel: "Search permits", className: "form-control", widgetClasses: ["input-group search-bar"] }), "");
+  assert.equal(typeaheadBoxSays({ textBox: true, editable: true, id: "field267055", className: "form-control", widgetClasses: ["col"] }), "");
+});
+check("MUST EXCLUDE: tokens that say the opposite, a read-only box, a non-text control", () => {
+  assert.equal(typeaheadBoxSays({ textBox: true, editable: true, className: "autocomplete-off" }), "");
+  assert.equal(typeaheadBoxSays({ textBox: true, editable: true, widgetClasses: ["typeahead-disabled"] }), "");
+  assert.equal(typeaheadBoxSays({ textBox: true, editable: true, ariaLabel: "Address (autocomplete off)" }), "");
+  assert.equal(typeaheadBoxSays({ ...IWORQ, editable: false }), "");
+  assert.equal(typeaheadBoxSays({ ...IWORQ, textBox: false }), "");
+  assert.equal(typeaheadBoxSays({ textBox: true, editable: true, role: "combobox", ariaAutocomplete: "none" }), "");
+  assert.equal(typeaheadBoxSays(null), "");
 });
 
 if (failures) { console.error(`\n${failures} typeaheadMatch check(s) failed`); process.exit(1); }

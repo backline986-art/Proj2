@@ -32,6 +32,7 @@
 // Nothing here names a utility, a state or a portal. Reads write nothing.
 // ---------------------------------------------------------------------------
 
+import { vouchedHosts } from "./governmentVouches";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -361,6 +362,21 @@ export function utilityPersonVerifiedHosts(db: AppDb, state: string, utility: st
   return [...hosts];
 }
 
+/**
+ * THE UTILITY'S OWN DOMAINS, for grading a FACT official: a person's (utilityPersonVerifiedHosts) and a
+ * government page's (owner, 2026-11-13; governmentVouches.ts — the utility lookup row's vouches, each
+ * re-checked as read). NEVER for a filing door: filingDestinationProposals and the rule 5 carve-out
+ * read person-verified hosts alone. A read.
+ */
+export function utilityOfficialHosts(db: AppDb, state: string, utility: string, rowItems?: UtilityApplicationRequirement[]): string[] {
+  let vouched: string[] = [];
+  try {
+    const lookup = getUtilityFilingLookup(db, state, utility);
+    vouched = vouchedHosts(lookup?.siteVouches, { kind: "utility", state, names: [utility] });
+  } catch { vouched = []; }
+  return [...new Set([...utilityPersonVerifiedHosts(db, state, utility, rowItems), ...vouched])];
+}
+
 /** The items on the utility's filing row (seeded proposals, official reads, a person's), and whether the
  *  row exists. A read. `honour: false` = the tiers as stored (for writers, so a re-check never writes a
  *  downgrade back); by default each official item is re-checked against the shared predicate. */
@@ -378,7 +394,7 @@ export function filingRowRequirements(db: AppDb | null, state: string, utility: 
       })
       .filter((r): r is UtilityApplicationRequirement => r != null);
     if (opts.honour === false) return { rowExists: true, requirements };
-    const hosts = utilityPersonVerifiedHosts(db, state, utility, requirements);
+    const hosts = utilityOfficialHosts(db, state, utility, requirements);
     return { rowExists: true, requirements: requirements.map((r) => honouredTier(r, hosts)) };
   } catch {
     return { rowExists: false, requirements: [] };

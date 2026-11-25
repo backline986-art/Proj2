@@ -883,6 +883,19 @@ await check("network recorder flags filing and payment URLs through the shared p
   for (const u of ["https://x.test/api/SaveField", "https://x.test/Project/UpdateSection", ""]) {
     assert.ok(!isSubmitOrPayRequestUrl(u), u);
   }
+  // #144 — a SUBMITTAL is a document set, never a submit: CityView's draft upload, EnerGov's
+  // requirements page. The one spelling that still files is a URL that ends in "submit" after it.
+  for (const u of [
+    "https://cityview.example.test/Portal/Permit/UploadAndCommitSubmittalRequirementFile",
+    "https://energov.example.test/SelfService/SubmittalRequirements/Upload",
+    "https://x.test/Permit/Submittal/Add",
+  ]) {
+    assert.ok(!isSubmitOrPayRequestUrl(u), `a submittal upload is not a filing: ${u}`);
+    assert.ok(!isFilingOrPaymentRequest("POST", u), `POST ${u}`);
+  }
+  for (const u of ["https://x.test/Portal/Permit/Submit", "https://x.test/Permit/SubmittalSubmit", "https://x.test/submitApplication.aspx"]) {
+    assert.ok(isSubmitOrPayRequestUrl(u), `still a filing: ${u}`);
+  }
   const rec = new NetworkRecorder({ fieldValues: {} });
   const handlers: Record<string, (r: unknown) => void> = {};
   rec.attach({ on: (ev: string, fn: (r: unknown) => void) => { handlers[ev] = fn; } });

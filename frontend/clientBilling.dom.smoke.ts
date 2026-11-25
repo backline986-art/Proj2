@@ -13,6 +13,10 @@
 //               shows its QuickBooks number and status (escaped) and offers neither. "Send to
 //               QuickBooks" POSTs the typed person's name. The QuickBooks block shows the chosen Items
 //               and never a token.
+//   MUST PASS (#187) — the Prices block shows the org's price per permit filing and per NEM application
+//               (an unset one flagged NOT SET); "Save prices" PUTs both with the named person. A filing
+//               line on the statement offers "Don't bill", which POSTs a reason and the named person
+//               for that charge only.
 //
 // Hermetic: a throwaway static server over frontend/, stubbed /api/clients/... with FAKE data,
 // everything else 404. No backend, no database, nothing emailed.
@@ -50,6 +54,7 @@ const STATEMENT = {
     line({}),
     line({ lineKey: "row-1:service", kind: "service", basis: "service", amountUsd: 175, alreadyPaid: true, description: "Submission service fee (paid at the gate)" }),
     line({ lineKey: "row-1:received", kind: "received", role: "received", basis: "received", amountUsd: 175, alreadyPaid: true, description: "Service fee paid at the per-submission gate" }),
+    line({ lineKey: "filing:chg-1:service", paymentId: "chg-1", kind: "service", basis: "price_list", amountUsd: 99, description: "Filing service fee — building permit filing filed 2026-11-04", reconciliation: "Price saved when it was filed: the price list's price per permit filing." }),
     line({ lineKey: "row-2:reimbursement:adj:x", projectLabel: "Second Owner", role: "adjustment", amountUsd: 14.5, description: "true-up", adjusts: { billedUsd: 200, invoiceNumbers: ["INV-2026-0001"] } }),
   ],
   excluded: [{ track: "permit", projectId: "p-3", projectLabel: "Third Owner", reason: "No fee responsibility is on file <b>bold</b>", resolution: "Record it.", amountSeenUsd: 99 }],
@@ -69,6 +74,34 @@ const QB_STATUS = {
   lastStatusSyncAt: "", lastError: "", settingsBy: "Test Person",
   items: { service: { id: "11", name: "Filing service fee" }, passthrough: { id: "12", name: "Permit & portal fee (pass-through)" }, onboarding: { id: "", name: "" } },
 };
+const PRICES = {
+  orgId: "org-default", envDefaultUsd: null,
+  tiers: {
+    founding: {
+      permit: { priceUsd: 99, setBy: "Test <b>Admin</b>", setAt: "2026-11-12T00:00:00Z" },
+      nem: { priceUsd: null, setBy: "", setAt: "" },
+      project_cap: { priceUsd: 230, setBy: "Test Person", setAt: "2026-11-12T00:00:00Z" },
+      onboarding: { priceUsd: 500, setBy: "Test Person", setAt: "2026-11-13T00:00:00Z" },
+    },
+    standard: {
+      permit: { priceUsd: null, setBy: "", setAt: "" },
+      nem: { priceUsd: null, setBy: "", setAt: "" },
+      project_cap: { priceUsd: 275, setBy: "Test Person", setAt: "2026-11-12T00:00:00Z" },
+      onboarding: { priceUsd: null, setBy: "", setAt: "" },
+    },
+  },
+};
+// #199: two late invoices: one 7 days late wanting its late reminder, one 31 days late holding filings.
+const OVERDUE = {
+  reminderLateDays: 7, holdDays: 30,
+  overdue: [
+    { invoiceId: "inv-late", number: "INV-2026-0101", clientId: "client-1", clientName: "Held <img src=x onerror=1> Solar", billTo: "ap@example.test", dueAt: "2026-10-12",
+      dueTotalUsd: 230, daysLate: 31, reminderDue: null, holdsFilings: true, holdLifted: null, qbStatus: "",
+      reminders: [{ id: "r1", invoiceId: "inv-late", kind: "due", sentBy: "Test Person", sentAt: "2026-10-12T00:00:00Z", delivered: true, detail: "" }] },
+    { invoiceId: "inv-week", number: "INV-2026-0102", clientId: "client-1", clientName: "Week Solar", billTo: "ap@example.test", dueAt: "2026-11-05",
+      dueTotalUsd: 99, daysLate: 7, reminderDue: "late", holdsFilings: false, holdLifted: null, qbStatus: "", reminders: [] },
+  ],
+};
 const posted: string[] = [];
 const MIME: Record<string, string> = { ".html": "text/html; charset=utf-8", ".css": "text/css; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".woff2": "font/woff2" };
 
@@ -84,6 +117,31 @@ const startServer = async (): Promise<{ base: string; close: () => Promise<void>
       if (/^\/api\/users/.test(p)) return json({ users: [] });
       if (/^\/api\/clients\/[^/]+\/portal-credentials$/.test(p)) return json({ credentials: [] });
       if (p === "/api/quickbooks/status") return json({ quickbooks: QB_STATUS });
+      if (p === "/api/billing/prices") {
+        if (req.method === "PUT") {
+          let body = "";
+          req.on("data", (c) => { body += c; });
+          req.on("end", () => { posted.push(`PUT prices ${body}`); json({ prices: { ...PRICES, tiers: { ...PRICES.tiers, founding: { ...PRICES.tiers.founding, nem: { priceUsd: 79, setBy: "Test Person", setAt: "2026-11-12T00:00:00Z" } } } } }); });
+          return;
+        }
+        return json({ prices: PRICES });
+      }
+      if (/^\/api\/clients\/[^/]+\/filing-charges\/[^/]+\/waive$/.test(p) && req.method === "POST") {
+        let body = "";
+        req.on("data", (c) => { body += c; });
+        req.on("end", () => { posted.push(`POST waive ${p.split("/")[5]} ${body}`); json({ charge: { id: "chg-1", waivedBy: "Test Person" } }); });
+        return;
+      }
+      if (p === "/api/billing/overdue") return json(OVERDUE);
+      if (/^\/api\/clients\/[^/]+\/invoices\/[^/]+\/(remind|lift-hold)$/.test(p) && req.method === "POST") {
+        let body = "";
+        req.on("data", (c) => { body += c; });
+        req.on("end", () => {
+          posted.push(`POST ${p.split("/")[6]} ${p.split("/")[5]} ${body}`);
+          json(p.endsWith("/remind") ? { delivered: true, kind: "late", detail: "" } : { holds: [] });
+        });
+        return;
+      }
       if (/^\/api\/clients\/[^/]+\/invoices\/[^/]+\/quickbooks$/.test(p) && req.method === "POST") {
         let body = "";
         req.on("data", (c) => { body += c; });
@@ -177,6 +235,47 @@ async function main(): Promise<void> {
       check(/1 portal login has no fee agreement/.test(st.text), `${tag}: an unagreed login is warned about`);
       check(st.createEnabled, `${tag}: Create invoice is enabled once a statement with lines is shown`);
       check(posted.some((x) => /^GET statement \d{4}-\d{2}$/.test(x)), `${tag}: the statement is asked for by month`, posted.join(" | "));
+
+      // #187: the price list and "Don't bill" on a filing line.
+      const pr = await page.evaluate(() => ({
+        text: (document.getElementById("servicePricesBlock")?.textContent || "").replace(/\s+/g, " "),
+        permit: (document.getElementById("price_founding_permitUsd") as HTMLInputElement | null)?.value,
+        nem: (document.getElementById("price_founding_nemUsd") as HTMLInputElement | null)?.value,
+        foundingCap: (document.getElementById("price_founding_capUsd") as HTMLInputElement | null)?.value,
+        standardCap: (document.getElementById("price_standard_capUsd") as HTMLInputElement | null)?.value,
+        markup: Boolean(document.querySelector("#servicePricesBlock b")),
+      }));
+      check(pr.permit === "99" && pr.nem === "" && pr.foundingCap === "230" && pr.standardCap === "275"
+        && /Founding clients/.test(pr.text) && /Everyone else/.test(pr.text) && /NEM: NOT SET/.test(pr.text) && /Test <b>Admin<\/b>/.test(pr.text) && !pr.markup,
+        `${tag}: the Prices block shows both tiers with their caps, flags an unset price, and renders a name with markup as text`, JSON.stringify(pr));
+      await page.evaluate(() => { (document.getElementById("price_founding_nemUsd") as HTMLInputElement).value = "79"; (document.getElementById("savePricesBtn") as HTMLButtonElement).click(); });
+      await page.waitForFunction(() => /Prices saved/.test(document.getElementById("billingStatus")?.textContent || ""), null, { timeout: 15000 });
+      check(posted.some((x) => x === 'PUT prices {"founding":{"permitUsd":"99","nemUsd":"79","capUsd":"230","onboardingUsd":"500"},"standard":{"permitUsd":"","nemUsd":"","capUsd":"275","onboardingUsd":""},"decidedBy":"Test Person"}'),
+        `${tag}: Save prices PUTs both tiers' prices, caps and onboarding fees with the named person`, posted.join(" | "));
+      const tierOpts = await page.evaluate(() => [...document.querySelectorAll("#c_pricingTier option")].map((o) => (o as HTMLOptionElement).value));
+      check(tierOpts.join(",") === ",founding", `${tag}: the client form offers Standard and Founding pricing`, JSON.stringify(tierOpts));
+      const waiveBtns = await page.evaluate(() => [...document.querySelectorAll("#billingStatement [data-waive-charge]")].map((b) => b.getAttribute("data-waive-charge")));
+      check(waiveBtns.join(",") === "chg-1", `${tag}: only the filing line offers "Don't bill"`, JSON.stringify(waiveBtns));
+      await page.evaluate(() => (document.querySelector('#billingStatement [data-waive-charge="chg-1"]') as HTMLButtonElement).click());
+      await page.waitForFunction(() => /will not be billed/.test(document.getElementById("billingStatus")?.textContent || ""), null, { timeout: 15000 });
+      check(posted.some((x) => x === 'POST waive chg-1 {"reason":"Test Person","decidedBy":"Test Person"}'), `${tag}: Don't bill POSTs a reason and the named person for that charge`, posted.join(" | "));
+
+      // #199: the late-invoice list, a reminder and a lift.
+      const od = await page.evaluate(() => ({
+        text: (document.getElementById("overdueBlock")?.textContent || "").replace(/\s+/g, " "),
+        injected: Boolean(document.querySelector("#overdueBlock img")),
+        buttons: [...document.querySelectorAll("#overdueBlock [data-overdue-action]")].map((b) => `${b.getAttribute("data-overdue-action")}:${b.getAttribute("data-inv-id")}`),
+      }));
+      check(/31 days late/.test(od.text) && /FILINGS HELD/.test(od.text) && /7 days late/.test(od.text) && /due-date reminder 2026-10-12 by Test Person/.test(od.text),
+        `${tag}: the late list shows days late, the held client and the reminders sent`, od.text.slice(0, 300));
+      check(!od.injected && /Held <img src=x onerror=1> Solar/.test(od.text), `${tag}: a client name carrying markup renders as text in the late list`);
+      check(od.buttons.join(",") === "lift:inv-late,remind:inv-week", `${tag}: a held invoice offers Lift hold; a week-late one offers its late reminder`, JSON.stringify(od.buttons));
+      await page.evaluate(() => (document.querySelector('#overdueBlock [data-overdue-action="remind"]') as HTMLButtonElement).click());
+      await page.waitForFunction(() => /Reminder sent/.test(document.getElementById("billingStatus")?.textContent || ""), null, { timeout: 15000 });
+      check(posted.some((x) => x === 'POST remind inv-week {"decidedBy":"Test Person"}'), `${tag}: Send late reminder POSTs the named person, for that invoice only`, posted.join(" | "));
+      await page.evaluate(() => (document.querySelector('#overdueBlock [data-overdue-action="lift"]') as HTMLButtonElement).click());
+      await page.waitForFunction(() => /Hold lifted/.test(document.getElementById("billingStatus")?.textContent || ""), null, { timeout: 15000 });
+      check(posted.some((x) => x === 'POST lift-hold inv-late {"reason":"Test Person","decidedBy":"Test Person"}'), `${tag}: Lift hold POSTs a reason and the named person`, posted.join(" | "));
 
       await page.evaluate(() => (document.getElementById("billingCreateBtn") as HTMLButtonElement).click());
       await page.waitForFunction(() => /Created INV-2026-0003/.test(document.getElementById("billingStatus")?.textContent || ""), null, { timeout: 15000 });

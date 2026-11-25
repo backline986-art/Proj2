@@ -1,7 +1,9 @@
 import type { AppDb } from "./db";
-import { cecListing, cecTableCount } from "./cecEquipment";
+import { officialSourceWords, sourceHostOf } from "../../shared/src/officialSource";
+import { cecListing, cecTableCount, inverterSettingsByStandingAnswer, jobInverterForCec, jobInverterUl1741Sb, type CecUl1741SbAnswer } from "./cecEquipment";
 import { evaluateBaselineRules } from "./baselineRules";
-import { certificationList, eligibilityRecordsForState } from "./eligibilityLimits";
+import { certificationList } from "./eligibilityLimits";
+import { eligibilityRecordsOnFile } from "./eligibilityOfficial";
 import { resolveUtilityRequirements } from "./utilityRequirements";
 import { resolveJurisdictionQcRecords, type JurisdictionQcRecord } from "./jurisdictionQcRules";
 import type { UtilityRequirementList } from "../../shared/src/types";
@@ -12,6 +14,8 @@ import { logger } from "./logger";
 import { documentInventory, owedMissingDocuments, requiredListCheck, sheetContentGaps } from "./requiredDocuments";
 import { startedAtLabel } from "./formAcquisitionPlan";
 import { planSetTextForProject, shippedPlanSetOutlinedPages } from "./projectDocuments";
+import { capturedDisconnectPart, planTextNamesAcDisconnect } from "./acDisconnectIntake";
+import { planSetImageDisconnectRead } from "./planSetImageReads";
 import { outlinedPagesMissingSheetNote, outlinedPagesReport } from "./outlinedTextPages";
 import { nowIso } from "./time";
 import { addAuditLog } from "./audit";
@@ -622,16 +626,37 @@ export function runQcForProject(db: AppDb, projectId: string, options: QcRunOpti
             `The list of documents this filing needs${where} is not yet confirmed — no cited per-job process lookup and no shipped profile names it. ${!gateDocs.owed.length && !inv.missingAdvisory.length ? "The universal set (plan set, site plan, SLD, specs) is attached; " : ""}confirm the AHJ's own submittal list before staging.${filledNote}`,
             createdAt],
         );
-      } else if (list.missing.length) {
+      }
+      // VERIFY FIRST (owner, 2026-11-13: "verify first, then verify prior to warning"). An item on the
+      // list that staging itself makes (a form filled from its stored template, or one Stage downloads
+      // and fills) is not missing: QC already says so in its own pass row, so it is not counted again
+      // here. Everything else stays as it was: an item no document slot can hold is still a warning
+      // (a workers' comp affidavit is a real requirement Keelix cannot see, not a verified one).
+      const madeAtStaging = new Set([...gateDocs.filledAtStaging, ...gateDocs.acquiredAtStaging].map((d) => d.docType));
+      const listMissing = list.source === "unknown" ? [] : list.missing;
+      const stagingMakes = listMissing.filter((m) => m.docTypes.some((t) => madeAtStaging.has(t)));
+      const stillMissing = listMissing.filter((m) => !stagingMakes.includes(m));
+      const stagingNote = stagingMakes.length ? ` Made at staging, so not counted missing: ${stagingMakes.map((m) => m.text).join("; ")}.` : "";
+      if (list.source === "unknown") {
+        // said above
+      } else if (stillMissing.length) {
         warningCount += 1;
         db.run(
           `INSERT INTO qc_results (id, project_id, qc_status, rule_id, rule_name, message, severity, created_at)
            VALUES (?, ?, 'warning', 'docs.complete', 'Required documents', ?, 'warning', ?)`,
           [id(), projectId,
-            `Not every document on the required list${where} is attached (${list.missing.length} of ${list.items.length} missing, list from ${list.sourceLabel}): ${list.missing.map((m) => m.docTypes.length ? m.text : `${m.text} (could not match to a document type; attach as additional — no document slot holds this, so its absence cannot be proven and it never blocks)`).join("; ")}.${filledNote}`,
+            `Not every document on the required list${where} is attached (${stillMissing.length} of ${list.items.length} missing, list from ${list.sourceLabel}): ${stillMissing.map((m) => m.docTypes.length ? m.text : `${m.text} (could not match to a document type; attach as additional — no document slot holds this, so its absence cannot be proven and it never blocks)`).join("; ")}.${stagingNote}${filledNote}`,
             createdAt],
         );
-      } else if (!gateDocs.owed.length && !inv.missingAdvisory.length) {
+      } else if (listMissing.length) {
+        db.run(
+          `INSERT INTO qc_results (id, project_id, qc_status, rule_id, rule_name, message, severity, created_at)
+           VALUES (?, ?, 'pass', 'docs.complete', 'Required documents', ?, 'info', ?)`,
+          [id(), projectId,
+            `Every document on the required list${where} is attached or made at staging (list from ${list.sourceLabel}).${stagingNote}${filledNote}`,
+            createdAt],
+        );
+      } else if (!listMissing.length && !gateDocs.owed.length && !inv.missingAdvisory.length) {
         const applied = list.items.filter((i) => !i.skipped).length;
         db.run(
           `INSERT INTO qc_results (id, project_id, qc_status, rule_id, rule_name, message, severity, created_at)
@@ -702,7 +727,7 @@ export function runQcForProject(db: AppDb, projectId: string, options: QcRunOpti
     // PROGRAM / PERMIT-PATH ELIGIBILITY (#679): the cited records on file for the job's state, and the
     // project's OWN client's certifications (null when the project has no client row to read).
     const eligibility = {
-      records: eligibilityRecordsForState(db, clean(baselinePayload.state)),
+      records: eligibilityRecordsOnFile(db, clean(baselinePayload.state)),
       clientCertifications: std ? certificationList(std.installer_certifications) : null,
       reportUnknownProgram: true,
     };
@@ -714,7 +739,39 @@ export function runQcForProject(db: AppDb, projectId: string, options: QcRunOpti
     // "qc" rows in state_permit_rules (a person's or an official read).
     let jurisdictionRecords: JurisdictionQcRecord[];
     try { jurisdictionRecords = resolveJurisdictionQcRecords(db, clean(baselinePayload.state), clean(baselinePayload.ahj)); } catch { jurisdictionRecords = resolveJurisdictionQcRecords(null, clean(baselinePayload.state), clean(baselinePayload.ahj)); }
-    for (const baseline of evaluateBaselineRules(baselinePayload, codeCtx, eligibility, { requirements: utilityRequirements, reportUnresearched: true, scope: scope.scope }, { records: jurisdictionRecords })) {
+    // THE JOB'S AC DISCONNECT PART, ONLY WHEN ITS OWN PLAN SET NAMES IT (acDisconnectIntake, the one
+    // reader the reviewer gate uses too), read on the same plan-set text the gate sees: the parser's own
+    // text when the job carries it, else the uploaded plan-set documents' (getProjectDetail's overlay).
+    // The same text also answers "does the plan set name an AC / utility disconnect" in the gate's own
+    // wordings (planTextNamesAcDisconnect, the one list): QC then stops listing it as possibly missing
+    // where the gate is clear (#134).
+    let disconnectPartOnPlanSet = "";
+    let planSetNamesAcDisconnect = false;
+    try {
+      const planSetText = clean(payload.planSetExtractedText) || planSetTextForProject(db, projectId);
+      disconnectPartOnPlanSet = capturedDisconnectPart(payload as Record<string, unknown>, planSetText);
+      // An image-only plan set has no text to name it: the server's own image read of the job's
+      // stored plan set answers instead (planSetImageReads, the one reader the gate uses too, #135).
+      planSetNamesAcDisconnect = planTextNamesAcDisconnect(planSetText) || Boolean(planSetImageDisconnectRead(db, projectId));
+    } catch { disconnectPartOnPlanSet = ""; planSetNamesAcDisconnect = false; }
+    // VERIFY FIRST (owner, 2026-11-13): the CEC's own inverter list answers "is it UL 1741 SB
+    // certified" for the job's inverter (cecEquipment.jobInverterUl1741Sb, the one reader the reviewer
+    // gate uses too). Certified on the list = the utility's listing item is met, and QC says where that
+    // came from instead of warning. A failed read is no answer: the item reads the package as before.
+    let ul1741Sb: CecUl1741SbAnswer | null = null;
+    try { ul1741Sb = jobInverterUl1741Sb(db, payload as Record<string, unknown>); } catch { ul1741Sb = null; }
+    if (ul1741Sb?.certified) {
+      const { model } = jobInverterForCec(payload as Record<string, unknown>);
+      const listed = ul1741Sb.listedModels.length === 1 ? `"${ul1741Sb.listedModels[0]}"` : `${ul1741Sb.listedModels.length} listings (${ul1741Sb.listedModels.slice(0, 3).map((m) => `"${m}"`).join(", ")}${ul1741Sb.listedModels.length > 3 ? ", …" : ""}), every one`;
+      db.run(
+        `INSERT INTO qc_results (id, project_id, qc_status, rule_id, rule_name, message, severity, created_at)
+         VALUES (?, ?, 'pass', 'cec.inverter_ul1741sb', 'Inverter UL 1741 SB listing', ?, 'info', ?)`,
+        [id(), projectId,
+         `${officialSourceWords(sourceHostOf(ul1741Sb.sourceUrl), ul1741Sb.syncedAt)} (the CEC equipment list): inverter "${model}" is listed as ${listed} UL 1741 SB certified${ul1741Sb.certifiedBy ? ` (${ul1741Sb.certifiedBy})` : ""}.${inverterSettingsByStandingAnswer(ul1741Sb) ? " The utility's required inverter settings are taken as applied at commissioning (the operator's standing answer)." : ""}`,
+         createdAt],
+      );
+    }
+    for (const baseline of evaluateBaselineRules(baselinePayload, codeCtx, eligibility, { requirements: utilityRequirements, reportUnresearched: true, scope: scope.scope, disconnectPartOnPlanSet, planSetNamesAcDisconnect, inverterUl1741SbOnCecList: ul1741Sb?.certified === true, inverterSettingsByStandingAnswer: inverterSettingsByStandingAnswer(ul1741Sb) }, { records: jurisdictionRecords })) {
       if (baseline.qcStatus === "fail") failCount += 1;
       if (baseline.qcStatus === "fail" && !priorFails.has(baseline.ruleId)) newFailsOutsideBill += 1;
       if (baseline.qcStatus === "warning") warningCount += 1;
@@ -787,10 +844,10 @@ export function runQcForProject(db: AppDb, projectId: string, options: QcRunOpti
         const firstArray = (Array.isArray(payload.pvArrays) ? payload.pvArrays[0] : null) as Record<string, unknown> | null;
         const moduleMake = clean(payload.moduleMake) || clean(payload.moduleManufacturer) || clean(firstArray?.moduleManufacturer ?? firstArray?.moduleMake ?? firstArray?.manufacturer);
         const moduleWatts = clean(payload.moduleWattage) || clean(firstArray?.moduleWattage ?? firstArray?.wattage ?? firstArray?.watts);
-        const micro = !clean(payload.invModel) && Boolean(clean(payload.pvMicroModel));
+        const inverter = jobInverterForCec(payload as Record<string, unknown>);
         const checks: Array<["module" | "inverter", string, string, string, string]> = [
           ["module", "cec.module_listed", clean(payload.moduleModel), moduleMake, moduleWatts],
-          ["inverter", "cec.inverter_listed", clean(payload.invModel) || clean(payload.pvMicroModel), micro ? clean(payload.pvMicroMake) : clean(payload.invMake) || clean(payload.inverterManufacturer), ""],
+          ["inverter", "cec.inverter_listed", inverter.model, inverter.make, ""],
         ];
         for (const [kind, ruleId, model, make, watts] of checks) {
           if (!model) continue;
@@ -923,6 +980,11 @@ export function runQcForProject(db: AppDb, projectId: string, options: QcRunOpti
         // only, cached by address hash). QC is a write path; the gate only reads the cache.
         const { ensureParcelJurisdictionChecked } = await import("./parcelJurisdiction");
         await ensureParcelJurisdictionChecked(db, projectId);
+        // RAPID SHUTDOWN FROM THE MAKER'S OWN SHEET (#220): a microinverter job whose package does not
+        // say its equipment is listed gets the maker's datasheet attached (kept once per model), or
+        // one lookup queued for it.
+        const { ensureMakerSpecSheetForProject } = await import("./makerSpecSheets");
+        await ensureMakerSpecSheetForProject(db, projectId);
       }
     })().catch(() => null));
   } catch (err) {

@@ -29,6 +29,10 @@ export interface HiddenRevealPlan {
   opener: string;
   /** Why the field was invisible, for the trail. */
   why: string;
+  /** Set when the closed container is a POP-UP (role=dialog / aria-modal / <dialog>): the opener's
+   *  role and name, so the learn can record the click that opens it (a replay must open it too),
+   *  and the dialog is tagged `data-al-popup` for the pass that commits it (its Save). */
+  popup?: { role: "button" | "link"; name: string; id: string };
 }
 
 /**
@@ -50,10 +54,36 @@ export function planHiddenReveal(): HiddenRevealPlan {
     if ((el as HTMLElement).hasAttribute("hidden")) return true;
     if (el.getAttribute("aria-hidden") === "true") return true;
     const r = (el as HTMLElement).getBoundingClientRect();
-    return r.width < 2 || r.height < 2;
+    if (r.width >= 2 && r.height >= 2) return false;
+    // A BOX WITH NO SIZE OF ITS OWN WHOSE CONTENT STILL RENDERS CONCEALS NOTHING (#176). Meridian's
+    // <main id="mainContent"> measured 0px tall — its children float — around a fully visible page,
+    // and reading it as "hidden" made it the container and the page's skip link its opener. Only a
+    // box that clips (overflow not visible) or whose descendants render nothing is shut; a
+    // display:none container still reads as shut because every descendant measures 0. Bounded.
+    if (String(st.overflow || "visible").split(/\s+/).every((v) => v === "visible")) {
+      const queue: Element[] = Array.from(el.children);
+      for (let seen = 0; queue.length && seen < 400; seen++) {
+        const child = queue.shift() as Element;
+        const cr = (child as HTMLElement).getBoundingClientRect();
+        if (cr.width >= 2 && cr.height >= 2) return false;
+        for (const g of Array.from(child.children)) queue.push(g);
+      }
+    }
+    return true;
   };
 
-  // THE OUTERMOST HIDDEN ANCESTOR, NOT THE NEAREST.
+  // A SKIP / JUMP LINK IS NEVER AN OPENER (#176): it moves focus to a landmark and opens nothing,
+  // and on Meridian "Skip to main content" (href="#mainContent") was returned as the record-type
+  // group's toggle. Read from the link's own words, aria-label and title.
+  const isSkipLink = (el: Element): boolean => {
+    const words = `${(el as HTMLElement).innerText || ""} ${el.getAttribute("aria-label") || ""} ${el.getAttribute("title") || ""}`;
+    return /\b(skip|jump)\s+(to|over|past)\b/i.test(words) || /\bskip\b[^.]{0,30}\b(navigation|nav|content|main)\b/i.test(words);
+  };
+  // A page landmark is a region, not a closed container: nothing legitimately "opens" <main>.
+  const isLandmark = (el: Element): boolean =>
+    el.matches("main, [role=main], nav, [role=navigation], header, [role=banner], footer, [role=contentinfo], body, html");
+
+  // THE OUTERMOST HIDDEN ANCESTOR, NOT THE NEAREST — AND NOT PAST THE BOUNDARY EITHER (#176).
   //
   // The first version stopped at the nearest concealed ancestor, which on any real portal is
   // an inner wrapper that nothing opens. Momentum's annotated capture shows why — reading
@@ -70,6 +100,12 @@ export function planHiddenReveal(): HiddenRevealPlan {
   // A control that opens something is associated with the boundary between hidden and
   // visible, never with a div three levels inside it. Climbing to the last hidden ancestor
   // before the first visible parent is what "the container that is closed" actually means.
+  //
+  // "Before the first visible parent" is load-bearing. The first version kept climbing past it
+  // and took ANY concealed node within twelve levels: on Meridian five visible ancestors were
+  // walked through to a 0px-tall <main>, which became "the container" and whose skip link
+  // became "the opener". Once a concealed ancestor is in hand, the first visible one ends the
+  // climb — that is the boundary.
   let container: Element | null = null;
   let why = "";
   let node: Element | null = target.parentElement;
@@ -83,6 +119,8 @@ export function planHiddenReveal(): HiddenRevealPlan {
     if (concealed(node)) {
       container = node;
       why = `inside a hidden <${node.tagName.toLowerCase()}${node.className ? `.${String(node.className).split(/\s+/)[0]}` : ""}>`;
+    } else if (container) {
+      break;
     }
     node = node.parentElement;
   }
@@ -102,29 +140,79 @@ export function planHiddenReveal(): HiddenRevealPlan {
     if (summary) return tag(summary, "summary of a closed details");
   }
 
-  const id = container.id;
+  // The container's own id, or its DIRECT wrapper's when the container has none and is the
+  // wrapper's only element — the two shapes a target attribute may legitimately point at.
+  const wrapper = container.parentElement;
+  const id = container.id || (wrapper && !isLandmark(wrapper) && wrapper.children.length === 1 ? wrapper.id : "");
   // 2. Something that explicitly says it controls this container. The strongest signal
-  //    there is, and the one an accessible portal provides on purpose.
-  if (id) {
-    const byControls = document.querySelector(`[aria-controls="${CSS.escape(id)}"]`);
+  //    there is, and the one an accessible portal provides on purpose. Never a skip/jump link,
+  //    never a hidden control, and never for a landmark (#176): a[href="#main"] is navigation.
+  if (id && !isLandmark(container)) {
+    const byControls = Array.from(document.querySelectorAll(`[aria-controls="${CSS.escape(id)}"]`))
+      .find((el) => !concealed(el) && !isSkipLink(el));
     if (byControls) return tag(byControls, "aria-controls");
-    const byTarget = document.querySelector(
+    const byTarget = Array.from(document.querySelectorAll(
       `[data-bs-target="#${CSS.escape(id)}"], [data-target="#${CSS.escape(id)}"], a[href="#${CSS.escape(id)}"]`,
-    );
+    )).find((el) => !concealed(el) && !isSkipLink(el));
     if (byTarget) return tag(byTarget, "data-target/href");
   }
 
-  // 3. A collapsed toggle immediately before the container — the shape a hand-rolled
-  //    accordion takes when nobody wired up aria.
+  // 3. A CLOSED POP-UP (#131), before the sibling/header toggles below: a dialog is not an accordion,
+  //    and the control beside it in the markup is whatever the page put there (a smoke's "Next").
+  //    A pop-up: the fields live in a dialog (role=dialog / aria-modal / <dialog>) that a
+  //    button elsewhere on the page opens — EnerGov's "Add Project Details", the bench's selfserve base.
+  //    Nothing points at it (no aria-controls, not adjacent), so the opener is read from the WORDS: a
+  //    shown control outside the dialog that declares it opens a dialog (aria-haspopup="dialog"), or
+  //    whose words carry every significant word of the dialog's own title ("Add Project Details" for a
+  //    dialog titled "Project Details"). Exactly one such control, never a submit / pay / navigation /
+  //    destructive one; otherwise nothing is tried. The click is RECORDED by the learn (the replay must
+  //    open it too) and the dialog is tagged for the pass that commits it.
+  const DIALOG = "[role=dialog], [role=alertdialog], [aria-modal=true], dialog";
+  const dlg = container.matches(DIALOG) ? container : container.closest(DIALOG) || container.querySelector(DIALOG);
+  if (dlg) {
+    const labelledBy = String(dlg.getAttribute("aria-labelledby") || "").split(/\s+/).filter(Boolean)
+      .map((i) => { const n = document.getElementById(i); return n ? n.textContent || "" : ""; }).join(" ");
+    const heading = dlg.querySelector("h1, h2, h3, h4, legend");
+    const title = String(dlg.getAttribute("aria-label") || labelledBy || (heading ? heading.textContent || "" : "")).replace(/\s+/g, " ").trim();
+    const STOP = /^(the|and|for|of|to|a|an|your|this|add|edit|enter|new|view|open|update|more|information|info)$/i;
+    const titleWords = title.toLowerCase().split(/[^a-z0-9]+/).filter((w) => w.length >= 3 && !STOP.test(w));
+    const NOT_AN_OPENER = /\b(submit|pay|payment|fees?|next|continue|back|previous|cancel|close|sign\s*out|log\s*out|delete|remove|save|finish|search)\b/i;
+    const nameOf = (el: Element): string => String(el.tagName === "INPUT" ? (el as HTMLInputElement).value : ((el as HTMLElement).innerText || el.textContent || ""))
+      .replace(/\s+/g, " ").trim() || String(el.getAttribute("aria-label") || el.getAttribute("title") || "").trim();
+    const shown = Array.from(document.querySelectorAll("button, a, [role=button], input[type=button]"))
+      .filter((el) => !dlg.contains(el) && !concealed(el) && !isSkipLink(el) && !(el as HTMLButtonElement).disabled)
+      .filter((el) => { const n = nameOf(el); return !!n && n.length <= 60 && !NOT_AN_OPENER.test(n); });
+    const declared = shown.filter((el) => /^dialog$/i.test(String(el.getAttribute("aria-haspopup") || "")));
+    const worded = titleWords.length ? shown.filter((el) => {
+      const words = nameOf(el).toLowerCase().split(/[^a-z0-9]+/);
+      return titleWords.every((w) => words.indexOf(w) >= 0);
+    }) : [];
+    const pick = declared.length === 1 ? declared[0] : worded.length === 1 ? worded[0] : null;
+    if (!pick) return { opener: "", why: `${why} (a pop-up; no single control opens it by its words)` };
+    {
+      document.querySelectorAll("[data-al-popup]").forEach((n) => n.removeAttribute("data-al-popup"));
+      dlg.setAttribute("data-al-popup", "1");
+      const plan = tag(pick, declared.length === 1 ? "opens the pop-up (aria-haspopup)" : "opens the pop-up (its title's words)");
+      const id = pick.getAttribute("id") || "";
+      return { ...plan, popup: { role: pick.tagName === "A" ? "link" : "button", name: nameOf(pick), id: /^[A-Za-z][\w-]*$/.test(id) ? id : "" } };
+    }
+  }
+
+  // 4. A collapsed toggle immediately before the container — the shape a hand-rolled
+  //    accordion takes when nobody wired up aria. Any clickable counts (#174): Accela's
+  //    record-type group header is <a href="javascript:void(0)" onclick="ToggleRecordTypeList(this)">,
+  //    and other builds draw the same header as a bare [onclick] div or an [aria-expanded] span.
+  //    The set is recordTypeGroup.GROUP_TOGGLE_CSS, spelled out here because this function is
+  //    serialized into the page and cannot import it.
   const prev = container.previousElementSibling;
   if (prev) {
-    const toggle = prev.matches("button, summary, [role=button], a")
+    const toggle = prev.matches("button, summary, [role=button], a, [onclick], [aria-expanded]")
       ? prev
-      : prev.querySelector("button, summary, [role=button], a");
+      : prev.querySelector("button, summary, [role=button], a, [onclick], [aria-expanded]");
     if (toggle && !concealed(toggle)) return tag(toggle, "toggle preceding the hidden container");
   }
 
-  // 4. A toggle inside the container's own header, for the layout where the opener sits
+  // 5. A toggle inside the container's own header, for the layout where the opener sits
   //    inside the thing it opens.
   const header = container.querySelector(":scope > button, :scope > summary, :scope > [role=button], :scope > .card-header, :scope > .panel-heading");
   if (header && !concealed(header)) {

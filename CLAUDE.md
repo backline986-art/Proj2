@@ -92,9 +92,9 @@ production data.
    a fact read from an OFFICIAL source lands as `official` and is used at once
    (`isVerifiedKnowledge()` accepts it). Official = the document's own host passes the one
    shared predicate (government domain — .gov, .mil, state.xx.us / .xx.us, .gov.xx — or the
-   authority's own domain where that domain is recorded human-verified for the authority) AND the row carries its source URL, a verbatim quote
+   authority's own domain where that domain is recorded human-verified for the authority, or that a government page Keelix read links in the authority's name: governmentVouches.ts) AND the row carries its source URL, a verbatim quote
    containing the value and fetched-at, the quote confirmed in the retrieved bytes, never
-   model memory. It is shown as "from [source]", never as person-verified. It never
+   model memory. It counts as verified and is shown as "Verified from [host], [date]", always distinct from a person's "Verified by [name]"; it never claims a person checked it. It never
    overwrites a human-verified row (a differing read becomes a conflict for a person),
    refreshes only from the same official host, and replaces a seeded row. It never stands
    in for a person on WHERE a filing goes or WHETHER one is sent (rule 1, rule 5's

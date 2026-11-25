@@ -69,6 +69,7 @@ import { stagedDraftReference } from "./stagedDraftReference";
 import { dialogsLeftToPerson } from "./personDialogs";
 import { recordNumberCandidates } from "./recordNumber";
 import { closedShadowRootCount } from "./secretMask";
+import { nameAttributeCss, nameAttributeOf } from "../../shared/src/recipeSelector";
 
 export const REVIEW_DIGEST_VERSION = 1;
 /** More rows than this on one page and the page is refused ("over the cap"), never hashed. */
@@ -973,6 +974,8 @@ export async function countRecordedControl(page: Page, sel: RecipeSelector | nul
     if (s.testId) out.push(() => page.getByTestId(String(s.testId)));
     if (s.text) out.push(() => page.getByText(String(s.text), { exact }));
     if (s.css) out.push(() => page.locator(String(s.css)));
+    // A bare `name` is the name attribute, as replay reads it (#229, shared/src/recipeSelector).
+    if (nameAttributeOf(s)) out.push(() => page.locator(nameAttributeCss(nameAttributeOf(s))));
     return out;
   };
   if (!sel) return 0;

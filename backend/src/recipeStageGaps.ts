@@ -29,6 +29,7 @@ import { isPerJobAnswerKey } from "../../shared/src/perJobQuestions";
 import { licenceKeyForLabel } from "../../shared/src/licenceKinds";
 import { batteryControlKind, batteryControlOfStep, parseHasBattery } from "../../shared/src/batteryControls";
 import { isESignatureStep, isSignatureNameLabel } from "../../shared/src/portalSafety";
+import { nameAttributeOfCss } from "../../shared/src/recipeSelector";
 import { parseFeeBracketFieldKey, readTierLabel } from "../../portal-bot/src/feeBracketQuantity";
 import { isPlannerSecretKey } from "./projectSecrets";
 
@@ -85,7 +86,9 @@ function isSignatureStep(step: RecipeStep): boolean {
   if (isESignatureStep(step)) return true;
   if (step.action !== "fill") return false;
   const sel = (step.selector ?? {}) as NonNullable<RecipeStep["selector"]> & { fallbacks?: Array<{ label?: string; placeholder?: string; css?: string }> };
-  const words = (s: unknown): string => String(s ?? "").replace(/([a-z0-9])([A-Z])/g, "$1 $2").replace(/[#_\-.[\]="']+/g, " ");
+  // A css the name-attribute builder wrote reads as that NAME, as the bare `name` it replaced did
+  // (#229 review): its scaffolding's word "name" must not make "OwnerSigns" a signature box.
+  const words = (s: unknown): string => nameAttributeOfCss(String(s ?? "")) || String(s ?? "").replace(/([a-z0-9])([A-Z])/g, "$1 $2").replace(/[#_\-.[\]="']+/g, " ");
   const names = [sel.label, sel.placeholder, sel.name, words(sel.css), ...(sel.fallbacks ?? []).map((f) => f.label ?? f.placeholder ?? words(f.css))]
     .map((s) => String(s ?? "").trim()).filter(Boolean);
   return names.some((n) => isSignatureNameLabel(n));

@@ -15,6 +15,9 @@
 //   MUST PASS — at 390: the columns stack (editor below the list), nothing overflows, nothing
 //               wraps, no horizontal page scroll.
 //   MUST PASS — dark theme at 1440: the same geometry holds.
+//   MUST PASS — who pays (#201), at 1440: every saved login shows who pays its portal's fees and a
+//               blank one is flagged; changing it PUTs only that answer for that login; the new-login
+//               form starts on "Keelix pays, then bills it at cost" (owner, 2026-11-13) and its save POSTs the answer.
 //
 // Hermetic: a throwaway static server over frontend/ (or CLIENTS_SMOKE_FRONTEND, to prove the
 // smoke fails on an older checkout), stubbed /api/clients + one client's four FAKE logins,
@@ -56,7 +59,7 @@ const CLIENT = {
 };
 const CREDS = [
   { id: "cred-1", portalType: "accela_oregon", usernameReference: "fake.user.one@example.invalid", hasSecret: true },
-  { id: "cred-2", portalType: "powerclerk_pge", usernameReference: "fake-installer-two", hasSecret: true },
+  { id: "cred-2", portalType: "powerclerk_pge", usernameReference: "fake-installer-two", hasSecret: true, feeResponsibility: "card-on-file" },
   { id: "cred-3", portalType: "citizenserve_test", usernameReference: "fake_three_long_username_for_wrap_test@example.invalid", hasSecret: true },
   { id: "cred-4", portalType: "energov_demo", usernameReference: "fake4", hasSecret: true },
 ];
@@ -68,10 +71,20 @@ const API_STUBS: Array<[RegExp, string]> = [
   [/^\/api\/users/, '{"users":[]}'],
 ];
 
+const sent: string[] = [];
 const startServer = async (): Promise<{ base: string; close: () => Promise<void> }> => {
   const server = http.createServer((req, res) => {
     const url = new URL(req.url || "/", "http://localhost");
     if (url.pathname === "/health") { res.writeHead(200, { "content-type": "application/json" }).end('{"ok":true}'); return; }
+    if (url.pathname.startsWith("/api/") && /\/portal-credentials/.test(url.pathname) && (req.method === "POST" || req.method === "PUT")) {
+      let body = "";
+      req.on("data", (c) => { body += c; });
+      req.on("end", () => {
+        sent.push(`${req.method} ${url.pathname.split("/").slice(4).join("/")} ${body}`);
+        res.writeHead(200, { "content-type": "application/json" }).end('{"id":"cred-new"}');
+      });
+      return;
+    }
     if (url.pathname.startsWith("/api/")) {
       const hit = API_STUBS.find(([re]) => re.test(url.pathname));
       if (!hit) { res.writeHead(404, { "content-type": "application/json" }).end('{"error":"not stubbed"}'); return; }
@@ -161,6 +174,35 @@ async function main(): Promise<void> {
         check(g.listH >= 300, `${tag}: the list column is full height, not squashed`, d);
       } else {
         check(g.credsTop >= g.listBottom - 1, `${tag}: the columns stack (editor below the list)`, d);
+      }
+      if (vp.w === 1440 && !vp.dark) {
+        const fee = await page.evaluate(() => ({
+          rows: [...document.querySelectorAll("#credList [data-cred-fee]")].map((el) => `${el.getAttribute("data-cred-fee")}=${(el as HTMLSelectElement).value}`),
+          flagged: document.querySelectorAll("#credList .fee-payer-missing").length,
+          formValue: (document.getElementById("cred_feeResponsibility") as HTMLSelectElement | null)?.value,
+          formOptions: [...document.querySelectorAll("#cred_feeResponsibility option")].map((o) => (o as HTMLOptionElement).value),
+          plOptions: [...document.querySelectorAll("#pl_feeResponsibility option")].map((o) => (o as HTMLOptionElement).value),
+        }));
+        check(fee.rows.join(",") === "cred-1=,cred-2=card-on-file,cred-3=,cred-4=" && fee.flagged === 3,
+          `${tag}: each saved login shows who pays, and the three without an answer are flagged`, JSON.stringify(fee));
+        check(fee.formValue === "keelix-pays" && fee.formOptions.join(",") === "card-on-file,customer-pays,mailed-check,keelix-pays"
+          && fee.plOptions.join(",") === fee.formOptions.join(","),
+          `${tag}: both new-login forms ask who pays, starting on Keelix pays (owner, 2026-11-13)`, JSON.stringify(fee));
+        await page.evaluate(() => {
+          const sel = document.querySelector('#credList [data-cred-fee="cred-1"]') as HTMLSelectElement;
+          sel.value = "keelix-pays"; sel.dispatchEvent(new Event("change", { bubbles: true }));
+        });
+        await page.waitForFunction(() => /Who pays saved/.test(document.getElementById("credStatus")?.textContent || ""), null, { timeout: 15000 });
+        check(sent.includes('PUT portal-credentials/cred-1 {"feeResponsibility":"keelix-pays"}'), `${tag}: changing who pays PUTs only that answer, for that login`, sent.join(" | "));
+        await page.evaluate(() => {
+          (document.getElementById("cred_portalType") as HTMLInputElement).value = "fake_portal";
+          (document.getElementById("cred_portalUrl") as HTMLInputElement).value = "https://portal.example.invalid/";
+          (document.getElementById("cred_username") as HTMLInputElement).value = "fake.user";
+          (document.getElementById("cred_password") as HTMLInputElement).value = "not-a-real-password";
+          (document.getElementById("addCredentialBtn") as HTMLButtonElement).click();
+        });
+        await page.waitForFunction(() => /Saved \(encrypted\)/.test(document.getElementById("credStatus")?.textContent || ""), null, { timeout: 15000 });
+        check(sent.some((x) => x.startsWith("POST portal-credentials ") && x.includes('"feeResponsibility":"keelix-pays"')), `${tag}: saving a new login sends who pays`, sent.join(" | "));
       }
       await ctx.close();
     }

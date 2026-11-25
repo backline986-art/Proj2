@@ -29,7 +29,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
-  INFO_PAGE_IDENTITY_VERSION, INFO_PAGE_NO_MATCH, INFO_PAGE_NO_PROGRESS, INFO_PAGE_PASS_CLOCK_SKEW_MS, INFO_PAGE_PASS_EXPIRED, INFO_PAGE_PASS_MAX_AGE_DAYS, INFO_PAGE_PASS_MAX_PROJECTS, digestInfoPageIdentity, infoPageAfterClickSentWording, infoPageJobValueKeys, infoPageJobValues, infoPagePassExpiryRefusals, infoPageProofNorm, infoPageLabeledCodes, infoPageProofOfProgressRefusals, infoPageProofStepRefusals, infoPageAfterClickRefusals, infoPageBackstopRefusals, infoPageDriftedEntries, infoPageEvidence, infoPageMatchRefusals,
+  INFO_PAGE_IDENTITY_VERSION, INFO_PAGE_NO_MATCH, INFO_PAGE_NO_PROGRESS, INFO_PAGE_PASS_CLOCK_SKEW_MS, INFO_PAGE_PASS_EXPIRED, INFO_PAGE_PASS_MAX_AGE_DAYS, INFO_PAGE_PASS_MAX_PROJECTS, digestInfoPageIdentity, infoPageAfterClickSentWording, infoPageJobValueKeys, infoPageJobValues, infoPagePassExpiryRefusals, infoPageProofNorm, infoPageLabeledCodes, infoPageProofOfProgressRefusals, infoPageProofStepRefusals, infoPageAfterClickRefusals, infoPageAfterClickIsNextInformationPage, infoPageBackstopRefusals, infoPageDriftedEntries, infoPageEvidence, infoPageMatchRefusals,
   infoPageNumberTokens, infoPageAfterClickAckWording, infoPageObservedRequest, infoPagePassRefusals, infoPagePrefixOf, infoPageProjectValueRefusals, infoPageRequestRefusals, infoPageRunStateRefusals,
   infoPageShapeRefusals, infoPageVerifyWarnings, isDigitRunValue, isMatchClassRefusal, isSecretLikeFieldName, mayPassInfoPage, opensInfoPageCandidateWatch, parseFormBodyFields, verifiedInfoPageFromCandidate,
   INFO_PAGE_PRIOR_PROGRESS_REFUSAL,
@@ -420,6 +420,38 @@ console.log("\nAFTER THE CLICK (proposal §4; round 2): only POSITIVE evidence o
     }
     const legit = infoPageAfterClickRefusals(formReading(`Project Information Please complete the following. Site Address Unit / Suite Next ${INFO_TEXT}`), ackBase);
     check("Q4: the next step's form (the information page's own wording beside it) is not an acknowledgement", legit.length === 0, JSON.stringify(legit));
+  }
+  // #279 (owner's option 1): ANOTHER INFORMATION PAGE — refused (no form, "successfully"), but only its
+  // own shape refused, it offers a Next, and it is not the verified page again: not an incident.
+  {
+    const base279 = { tokens: infoPageNumberTokens(INFO_TEXT), ack: infoPageAfterClickAckWording(INFO_TEXT), text: INFO_TEXT };
+    const page = (text: string, controlLabels: string[] = ["Previous", "Next"]) => ({ readable: true, fillable: 0, terminal: false, text, formFields: 0, frames: 0, controlLabels });
+    const next = page("Before You Apply Your permit account was set up successfully. Have your site plan ready, then click Next. Previous Next Call 503-000-0000 or TTY 711.");
+    const nr = infoPageAfterClickRefusals(next, base279);
+    check("#279: a second information page is refused by the after-click reading (no form, acknowledgement)", nr.some((x) => /no application form/.test(x)) && nr.some((x) => /acknowledgement/.test(x)), JSON.stringify(nr));
+    check("#279 MUST-PASS: ...and reads as ANOTHER information page (only its own shape refused, a Next, not the verified page)",
+      infoPageAfterClickIsNextInformationPage(nr, next, base279), JSON.stringify(nr));
+    const same = page(INFO_TEXT);
+    check("#279 MUST-EXCLUDE: the verified page shown again is never 'another information page'",
+      !infoPageAfterClickIsNextInformationPage(infoPageAfterClickRefusals(same, base279), same, base279));
+    const noNext = page("Thank You We've got your permit request. A Permit Tech will contact you by email. Search", ["Search"]);
+    check("#279 MUST-EXCLUDE: a receipt with no way forward (round 2's f_receipt_miss2) stays an incident",
+      !infoPageAfterClickIsNextInformationPage(infoPageAfterClickRefusals(noNext, base279), noNext, base279));
+    for (const [why, text, labels] of [
+      ["a new record number", "Before You Apply Request 26-104233 was created successfully. Previous Next", ["Previous", "Next"]],
+      ["sent / received wording", "Your request was sent to the City. Previous Next", ["Previous", "Next"]],
+      ["filed wording (the shared receipt reader)", "Your application has been submitted. Previous Next", ["Previous", "Next"]],
+      ["a submit-worded control", "Before You Apply Have your site plan ready. Previous Submit Application", ["Previous", "Submit Application"]],
+    ] as Array<[string, string, string[]]>) {
+      const rd = page(text, labels);
+      check(`#279 MUST-EXCLUDE: ${why} keeps the incident (the verification is withdrawn)`,
+        !infoPageAfterClickIsNextInformationPage(infoPageAfterClickRefusals(rd, base279), rd, base279), JSON.stringify(infoPageAfterClickRefusals(rd, base279)));
+    }
+    const terminal = { ...next, terminal: true };
+    check("#279 MUST-EXCLUDE: the review / terminal reading keeps the incident",
+      !infoPageAfterClickIsNextInformationPage(infoPageAfterClickRefusals(terminal, base279), terminal, base279));
+    check("#279 MUST-EXCLUDE: no kept text of the verified page = never 'another information page' (fail closed)",
+      !infoPageAfterClickIsNextInformationPage(nr, next, { tokens: base279.tokens, ack: base279.ack }));
   }
   const form = { readable: true, fillable: 3, terminal: false, text: "Project Information Site Address Unit / Suite Previous Next Call 503-000-0000 or TTY 711.", formFields: 2, frames: 0, controlLabels: ["Placeholder Solar Co", "Previous", "Next"] };
   check("the application form (two empty plain fields in one form, not terminal, neither filed nor an error, no new number) passes",

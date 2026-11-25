@@ -9,9 +9,11 @@
 // One predicate and one landing function, shared by every writer that stores a cited fact:
 //   - isGovernmentHost(host): .gov / .mil, a US locality's or state's .us, a country's gov. second level;
 //   - isOfficialSourceHost(url, verifiedAuthorityHosts): a government host, or the authority's own
-//     domain where that domain is itself recorded HUMAN-verified for that authority (many cities and
-//     utilities run on .org / .com; a seeded or inferred domain never qualifies). A vendor, an
-//     aggregator or a file on someone else's CDN never qualifies;
+//     domain where that domain is RECORDED as that authority's own (many cities and utilities run on
+//     .org / .com): by a person, or (owner, 2026-11-13) by a government page Keelix read that links
+//     it in the authority's name (backend/src/governmentVouches.ts). A seeded or inferred domain never
+//     qualifies; a vendor, an aggregator or a file on someone else's CDN never qualifies. A filing
+//     door's caller passes person-verified hosts only;
 //   - landingTierFor(...): "official" only when the host passes, the quote names the value, and the
 //     quote is found in the bytes this process RETRIEVED from that page at `fetchedAt` (never a
 //     model's memory, never a model's own quote of a page we did not read); else "seeded".
@@ -44,9 +46,10 @@ export function siteOfHost(host: string): string {
 }
 
 /**
- * IS THIS PAGE THE AUTHORITY'S OWN OFFICIAL PAGE? A government host, or a host on a domain that a
- * PERSON verified as this authority's own (`verifiedAuthorityHosts`: hosts cited by the authority's
- * human-verified rows — never a seeded row, never a guess from the name).
+ * IS THIS PAGE THE AUTHORITY'S OWN OFFICIAL PAGE? A government host, or a host on a domain recorded as
+ * this authority's own (`verifiedAuthorityHosts`: hosts cited by the authority's human-verified rows,
+ * and hosts a government page vouched for — governmentVouches.ts; never a seeded row, never a guess
+ * from the name). Callers deciding a filing door pass person-verified hosts only.
  */
 export function isOfficialSourceHost(url: string, verifiedAuthorityHosts: readonly string[] = []): boolean {
   const host = sourceHostOf(url);
@@ -102,6 +105,20 @@ export interface CitationEvidence {
   /** Hosts cited by this authority's HUMAN-verified rows (see isOfficialSourceHost). */
   verifiedAuthorityHosts?: readonly string[];
 }
+/**
+ * THE WORDS FOR AN OFFICIAL FACT (owner, 2026-11-13, decision card "Choose how facts read from an
+ * official page are labelled": "Verified from site, with date"): "Verified from <host>, <YYYY-MM-DD>".
+ * It counts as verified, and it always names the SITE and the read date, never a person: a person's
+ * mark stays "Verified by <name>, <date>", so the two can never be mistaken for each other. Every
+ * screen, quote and invoice line that shows the official tier uses these words (the frontend's
+ * vanilla-JS copies are pinned to the same shape by officialSourceWords.test).
+ */
+export function officialSourceWords(host: string, fetchedAt?: string | null): string {
+  const h = String(host ?? "").trim();
+  const day = /^\d{4}-\d{2}-\d{2}/.test(String(fetchedAt ?? "")) ? String(fetchedAt).slice(0, 10) : "";
+  return `Verified from ${h || "the authority's own page"}${day ? `, ${day}` : ""}`;
+}
+
 export function citationShortfalls(input: CitationEvidence): { host: string; quote: string; reasons: string[] } {
   const reasons: string[] = [];
   const host = sourceHostOf(input.sourceUrl);

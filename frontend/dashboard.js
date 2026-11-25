@@ -518,7 +518,7 @@ async function checkHealth() {
 // their DOM so renders never error), so their two endpoints are no longer fetched on every
 // board load and refresh. loadOpsReport/loadOpsActions stay defined; restore the calls here
 // when the panels are un-hidden.
-async function loadProjects() {
+async function loadProjects(opts) {
   await fetchProjectPage(false);
   await loadKnowledgeBase();
   await loadPortalRecipes();
@@ -530,7 +530,7 @@ async function loadProjects() {
   // Don't auto-open a project on load — the landing page is the Dashboard board.
   // Only refresh the open project's detail when the operator is actually on its
   // workflow page (so a background list refresh doesn't yank them off Dashboard).
-  if (state.selectedProjectId && selectedStillExists && state.page === "project") {
+  if (state.selectedProjectId && selectedStillExists && state.page === "project" && !(opts && opts.reselect === false)) {
     await selectProject(state.selectedProjectId);
   } else if (!selectedStillExists) {
     state.selectedProjectId = null;
@@ -867,6 +867,9 @@ function renderAhjForms() {
       provBits.push('<span class="muted" style="font-size:11px">no source link (uploaded)</span>');
     }
     if (prov.retrievedAt) provBits.push(`<span class="muted" style="font-size:11px">pulled ${esc(String(prov.retrievedAt).slice(0, 10))}</span>`);
+    // The BLANK is the authority's own document (server: officialFormDocument). The words say whose
+    // the mapping is too, so an official blank is never read as a person-checked map.
+    if (r.officialDocumentWords) provBits.push(`<span class="muted" style="font-size:11px" data-official-form="${esc(r.id)}">${esc(r.officialDocumentWords)}</span>`);
     return `
     <div class="card" style="padding:8px 10px;margin-bottom:6px">
       <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap">
@@ -1379,6 +1382,8 @@ const NEXT_STEP_CHIP = {
   staged_awaiting_submit: { pill: "your_submit", tone: "warning", label: "Your submit" },
   awaiting_signature: { pill: "waiting", tone: "neutral", label: "Awaiting signature" },
   approved_awaiting_filing: { pill: "your_submit", tone: "warning", label: "Approved — file it" },
+  second_stage_invite: { pill: "waiting", tone: "neutral", label: "Awaiting upload invite" },
+  second_stage_upload: { pill: "to_fix", tone: "warning", label: "Upload the plans" },
   fee_due: { pill: "to_fix", tone: "warning", label: "Fee due" },
   correction_open: { pill: "corrections", tone: "neutral", label: "Correction open" },
   payment_due: { pill: "ready", tone: "warning", label: "Payment due" },
@@ -1515,8 +1520,13 @@ async function hydrateBoardGates() {
       const queue = [].concat(state.boardAll || [], state.projects || [])
         .filter((p) => p && p.id && !seen.has(p.id) && seen.add(p.id) && rowNeedsGateAnswer(p, now))
         .sort((a, b) => Number((NEXT_STEP_CHIP[b.nextStep.key] || {}).pill === "ready") - Number((NEXT_STEP_CHIP[a.nextStep.key] || {}).pill === "ready"));
+      // PAUSED ON THE PROJECT PAGE. The board is hidden there, and every gate read is a full
+      // submit-gate run on the server: three in flight at a time queued the open project's own
+      // ~30 reads behind them, so opening a job waited on cards nobody could see. Rows not yet
+      // asked stay unasked and are picked up when a list page shows again (showPage).
+      const onProjectPage = () => typeof state !== "undefined" && state && state.page === "project";
       const worker = async () => {
-        while (queue.length) {
+        while (queue.length && !onProjectPage()) {
           const p = queue.shift();
           const stamp = gateStampFor(p);
           state.gateAnswers[p.id] = { stamp, inFlight: true };
@@ -1781,6 +1791,8 @@ function showPage(page, opts = {}) {
     t.setAttribute("aria-selected", String(t.dataset.page === (isProject ? "" : page)));
   });
   if (page === "team" && !opts.skipLoad) loadTeamWorkload();
+  // Back on a list page: finish the gate answers the project page paused (hydrateBoardGates).
+  if (!isProject && typeof fetch === "function") void hydrateBoardGates();
   if (window.lucide) window.lucide.createIcons();
 }
 
@@ -2569,7 +2581,7 @@ function renderPaymentQuoteCard(quote) {
       <table style="font-size:12px;margin:4px 0;border-collapse:collapse">
         <tr><td style="padding:1px 14px 1px 0">Permit fees</td><td style="text-align:right"><strong>${quote.permitFeeIsFloor && quote.permitFeeUsd != null ? "at least " : ""}${money(quote.permitFeeUsd)}</strong></td>
             <td style="padding-left:10px" class="muted">${esc(FEE_SOURCE_LABELS[quote.permitFeeSource] || "")}</td></tr>
-        <tr><td style="padding:1px 14px 1px 0">Our service fee</td><td style="text-align:right"><strong>${money(quote.serviceFeeUsd)}</strong></td><td></td></tr>
+        <tr><td style="padding:1px 14px 1px 0">Our service fee</td><td style="text-align:right"><strong>${money(quote.serviceFeeUsd)}</strong></td><td class="muted" style="padding-left:8px">${quote.serviceFeeSource ? esc(quote.serviceFeeSource) : ""}</td></tr>
         <tr class="muted"><td style="padding:1px 14px 1px 0">Filing cost, all fees</td><td style="text-align:right">${money(quote.totalUsd)}</td><td></td></tr>
         <tr style="border-top:1px solid var(--border)"><td style="padding:3px 14px 1px 0"><strong>Collect from client now</strong></td><td style="text-align:right"><strong>${money(quote.gateAmountUsd)}</strong></td>
             <td style="padding-left:10px" class="muted">service fee only — the permit fee is paid on the portal and invoiced after, only if we paid it</td></tr>
@@ -2725,6 +2737,14 @@ const FEE_SOURCE_TEXT = {
 const FEE_CONFIDENCE = {
   actual: { badge: "badge-pass", label: "actual", note: "" },
   verified: { badge: "badge-pass", label: "verified", note: "" },
+  // READ ON THE AUTHORITY'S OWN OFFICIAL PAGE (rule 3's official tier): used as published, and
+  // shown "Verified from <host>, <date>" (owner, 2026-11-13): verified by the SITE, never under a
+  // person's name ("Verified by <name>" is a person's). The card names the host and the date.
+  official: {
+    badge: "badge-info",
+    label: "verified from the authority's page",
+    note: "Keelix read this line on the authority's own published schedule and uses it as published. Confirm fee adds your own name to it.",
+  },
   seeded: {
     badge: "badge-warning",
     label: "provisional — not verified",
@@ -2752,6 +2772,14 @@ const FEE_CONFIDENCE = {
     note: "The permit monitor read this off the portal's own record. A machine read it; no person has checked it.",
   },
 };
+
+// "Verified from <host>, <date>": the words for the official tier (owner, 2026-11-13). The same
+// shape as shared/src/officialSource.officialSourceWords (pinned by officialSourceWords.test).
+function officialSourceWords(host, fetchedAt) {
+  const h = String(host == null ? "" : host).trim();
+  const day = /^\d{4}-\d{2}-\d{2}/.test(String(fetchedAt == null ? "" : fetchedAt)) ? String(fetchedAt).slice(0, 10) : "";
+  return `Verified from ${h || "the authority's own page"}${day ? `, ${day}` : ""}`;
+}
 
 // WHICH FEE_CONFIDENCE ENTRY A LINE WEARS — the one predicate the card and the folded
 // summary both ask, so "matches the published schedule" cannot appear in one and not the other.
@@ -2968,6 +2996,10 @@ function renderFeeSheetLine(line) {
     : "";
   // THE ONE-CLICK CONFIRM, only where the server says a person may (a researched published-
   // schedule amount). The click asks who is confirming before anything is written.
+  // WHERE AN OFFICIAL AMOUNT WAS READ: the host and the date, never a person's name.
+  const officialNote = line.confidence === "official" && line.officialSource && line.officialSource.host
+    ? `<p class="fee-face-official" data-fee-official style="margin:2px 0;font-size:12px">${esc(officialSourceWords(line.officialSource.host, line.officialSource.fetchedAt))}. Keelix read it on the authority's own page.</p>`
+    : "";
   const confirmControl = line.confirmable === true
     ? `<p class="fee-confirm" style="margin:4px 0"><button class="secondary" style="font-size:12px" data-fee-confirm="${esc(line.track)}" title="Mark the brackets and amounts on this card as verified by you — only those. Automation never changes a schedule a person has verified.">Confirm fee — I checked it against the published schedule</button></p>`
     : "";
@@ -2975,7 +3007,7 @@ function renderFeeSheetLine(line) {
   // Keyed on "is there a number" rather than `known`: an ESTIMATE is known:false now
   // (an estimate is not knowledge) but it still has a figure to act on — it warns, it
   // does not block. Blocker stays for the line with no number at all.
-  const tone = line.confidence === "actual" || line.confidence === "verified" ? "pass" : line.feeUsd != null ? "warning" : "blocker";
+  const tone = line.confidence === "actual" || line.confidence === "verified" || line.confidence === "official" ? "pass" : line.feeUsd != null ? "warning" : "blocker";
   // "Utility interconnection", not "NEM": Oncor and SRP jobs have no utility net metering, and the
   // fee is the interconnection application's either way (new-AHJ e2e gap 3).
   const trackLabel = line.track === "nem" ? "Utility interconnection" : "Permit (AHJ)";
@@ -3005,6 +3037,7 @@ function renderFeeSheetLine(line) {
       ${matchEvidence}
       ${portalProvenance}
       ${verifiedNote}
+      ${officialNote}
       ${feeComparisonHtml(line)}
       ${printedFormCheckHtml(line.printedFormCheck)}
       ${confirmControl}
@@ -3089,7 +3122,7 @@ function renderFeeSheetPanel() {
   // and the human-checkout rule — an unknown must never read as a final number because the
   // detail is one click away. Plain text built from sheet fields, escaped.
   const foldMoney = (v) => (v == null ? "UNKNOWN" : `$${Number(v).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`);
-  const FOLD_QUALIFIER = { actual: "actual", verified: "verified", seeded: "provisional", estimated: "estimate", unknown: "unknown", schedule_match: "matches published schedule", portal_read: "actual, read from portal" };
+  const FOLD_QUALIFIER = { actual: "actual", verified: "verified", official: "verified from the authority's page", seeded: "provisional", estimated: "estimate", unknown: "unknown", schedule_match: "matches published schedule", portal_read: "actual, read from portal" };
   const trackParts = sheet.lines.map((line) => {
     const name = line.track === "nem" ? "Utility" : line.role === "local_review" ? "Zoning review" : "Permit";
     const q = FOLD_QUALIFIER[feeConfidenceKey(line)] || "unknown";
@@ -4118,6 +4151,10 @@ function buildRecordCommand() {
   else parts.push(`--utility "${p.utility || ""}"`);
   if (p.state) parts.push(`--state ${p.state}`);
   if (url) parts.push(`--url "${url}"`);
+  // The permit this recording is for (the same picker the auto-learn reads): the recipe is keyed on it,
+  // so that permit's stage replays the recording. "Whole permit" sends none.
+  const pick = $("recordPermitType")?.value;
+  if (scope === "ahj" && (pick === "structural" || pick === "electrical")) parts.push(`--discipline ${pick}`);
   parts.push(`--project ${p.id}`, `--api ${api}`, `--profile ./.portal-profiles/${recordSlug(name || scope)}`);
   return parts.join(" ");
 }
@@ -4671,7 +4708,8 @@ async function launchRecordSession() {
   try {
     const res = await api(`/api/projects/${p.id}/launch-record`, {
       method: "POST",
-      body: JSON.stringify({ scope, portalUrl: url || undefined }),
+      // The permit picked for an AHJ recording keys the recipe (see buildRecordCommand).
+      body: JSON.stringify({ scope, portalUrl: url || undefined, discipline: scope === "ahj" ? ($("recordPermitType")?.value || undefined) : undefined }),
     });
     if (statusEl) { statusEl.textContent = res.message || "Browser session started — complete the form in the opened browser window, then type save."; statusEl.className = ""; }
   } catch (err) {
@@ -5314,6 +5352,24 @@ function bindFilingDestinationButtons(wrap, where) {
 // (filing-destination.js); each button names the job and track whose card shows it, and the click goes
 // through decideFilingDestination above with this context — so the same named-person confirm, the same
 // body and the same /api/projects/:id/filing-destinations route. One authority per click; no bulk.
+// SET A CLIENT'S "HOW WE FILE THERE" ANSWER ASIDE, as a named person. It stops being shown as a
+// proposal or a conflict. No filing destination is written, changed or removed by this.
+async function dismissFilingStatement(clientId, statementId, btn) {
+  if (!clientId || !statementId) return false;
+  const auth = await authForDecision();
+  const by = namedPersonConsent(auth, "Set this answer of the client's aside? It stops being shown. No filing destination is changed.", "set it aside", "a client's filing answer is set aside by a named person");
+  if (by == null) return false;
+  if (btn) btn.disabled = true;
+  try {
+    await api(`/api/clients/${encodeURIComponent(clientId)}/onboarding/filing-statements/${encodeURIComponent(statementId)}/dismiss`, { method: "POST", body: JSON.stringify(by ? { decidedBy: by } : {}) });
+  } catch (err) {
+    if (btn) btn.disabled = false;
+    showToast(`Not recorded: ${err.message}`, "error");
+    return false;
+  }
+  showToast("Set aside. No filing destination was changed.", "success");
+  return true;
+}
 function destinationQueueContext(btn) {
   const FD = window.FilingDestination;
   return {
@@ -5343,6 +5399,11 @@ async function loadDestinationQueue() {
   }
   body.innerHTML = FD.renderQueue(state.destinationQueue);
   bindFilingDestinationButtons(body, destinationQueueContext);
+  // A client's own answer beside a verified destination: a named person sets it aside (the client's
+  // row only; the verified record is not touched).
+  body.querySelectorAll("button[data-fd-dismiss-statement]").forEach((btn) => btn.addEventListener("click", async () => {
+    if (await dismissFilingStatement(btn.dataset.fdClient, btn.dataset.fdDismissStatement, btn)) await loadDestinationQueue();
+  }));
   // A job link closes the view and opens that job (its track card has the same buttons).
   body.querySelectorAll('a[href^="#/project/"]').forEach((a) => a.addEventListener("click", () => { $("destQueueModal").hidden = true; }));
   if (window.lucide) window.lucide.createIcons();
@@ -5747,6 +5808,33 @@ const FEE_RESPONSIBILITY_TEXT = {
   "mailed-check": "a mailed check",
   "keelix-pays": "we pay (then invoice it)",
 };
+// WHO PAYS EACH PORTAL'S FEES (#201): asked on every login a person saves, changeable in place.
+// The owner's rule (2026-11-13): new logins start on Keelix paying with the company card and billing it
+// at cost after (keeps filing speed predictable); a person can switch any login. A RECORD OF AN AGREEMENT, never an authorisation: automation never pays.
+const FEE_PAYER_CHOICES = [
+  ["card-on-file", "Client's card saved in the portal"],
+  ["customer-pays", "Client pays it themselves"],
+  ["mailed-check", "Mailed check"],
+  ["keelix-pays", "Keelix pays, then bills it at cost"],
+];
+/** The in-place "who pays" control on a saved login. A blank one says NOT SET and is flagged. */
+function feePayerControlHtml(c, attr) {
+  const v = String(c.feeResponsibility || "");
+  const opts = (v ? [] : [["", "Who pays: NOT SET"]]).concat(FEE_PAYER_CHOICES)
+    .map(([val, label]) => `<option value="${esc(val)}"${val === v ? " selected" : ""}>${esc(label)}</option>`).join("");
+  return `<label class="fee-payer${v ? "" : " fee-payer-missing"}" style="font-size:12px;display:inline-flex;gap:4px;align-items:center">
+      ${v ? "Who pays" : '<span class="badge badge-warning">who pays not set</span>'}
+      <select ${attr}="${esc(c.id)}" aria-label="Who pays this portal's fees">${opts}</select></label>`;
+}
+/** Saves a changed "who pays" on one login (the existing PUT; only that key is sent). */
+async function saveFeePayer(clientId, credId, value, statusEl, reload) {
+  try {
+    await api(`/api/clients/${encodeURIComponent(clientId)}/portal-credentials/${encodeURIComponent(credId)}`, { method: "PUT", body: JSON.stringify({ feeResponsibility: value }) });
+    if (statusEl) statusEl.textContent = "Who pays saved.";
+    await reload();
+  } catch (err) { if (statusEl) statusEl.textContent = err.message || "Could not save who pays."; }
+}
+
 function trackPaymentHtml(t) {
   const p = t && t.payment;
   if (!p) return "";
@@ -5805,6 +5893,91 @@ function trackFeeDueHtml(t) {
         : ""}`).join("; ")}</p>`
     : "";
   return due + paid;
+}
+
+// A TWO-STAGE FILING (#28): the application and its fee go into one portal; the plans are then uploaded
+// BY HAND in a second system the agency opens with an invite. The server's own block (secondStage.ts):
+// a cited description a person can Confirm (it changes nothing until then), or — confirmed — where this
+// job stands, the invite email once the inbox matched it, the documents to upload and the form that
+// marks the upload done. Nothing here opens the invite or the second system: the link, when the server
+// lets one through (rule 5's predicate), is a plain link a person clicks. Server data esc()'d.
+function trackSecondStageHtml(t) {
+  const ss = t && t.secondStage;
+  if (!ss || typeof ss !== "object") {
+    // Nothing on file for this agency. A person who knows it takes the plans in a second system says
+    // so here (their name is recorded); offered only on an agency track that has not filed.
+    if (!t || t.type === "nem" || (t.status !== "not_started" && t.status !== "staged") || t.payment) return "";
+    const ty = esc(t.type);
+    return `<details style="margin:2px 0 6px;font-size:12px" data-second-stage-add="${ty}"><summary class="muted">Plans uploaded in a second system after the application?</summary>
+      <div style="display:flex;flex-wrap:wrap;gap:6px;align-items:flex-end;margin:4px 0 0">
+        <label class="track-field"><span>System the plans are uploaded in (its name, not an address)</span><input data-second-stage-field="system" data-track="${ty}" /></label>
+        <button type="button" class="secondary" data-second-stage-confirm="${ty}" title="Recorded under your name. From then on this agency's permit track waits for the plan upload before it reads as filed. Nothing is opened or filed."><i data-lucide="check"></i><span>Confirm second stage</span></button>
+      </div>
+    </details>`;
+  }
+  const type = esc(t.type);
+  const http = (u) => (/^https?:\/\//i.test(String(u || "")) ? String(u) : "");
+  const source = http(ss.sourceUrl)
+    ? `<p class="muted" style="margin:2px 0;font-size:11px">Source: <a href="${esc(ss.sourceUrl)}" target="_blank" rel="noopener">${esc(ss.sourceUrl)}</a>${ss.quote ? ` — <q>${esc(ss.quote)}</q>` : ""}</p>`
+    : "";
+  if (ss.basis === "described") {
+    return `<div class="submit-gate-check info" style="margin:4px 0 6px;font-size:12px" data-second-stage="${type}" data-second-stage-state="described">
+      <p style="margin:0 0 2px"><strong>Second stage (described, not confirmed by a person):</strong> ${esc(ss.sentence || "")}</p>
+      ${source}
+      <div style="display:flex;flex-wrap:wrap;gap:6px;align-items:flex-end;margin:4px 0 0">
+        <label class="track-field"><span>System the plans are uploaded in</span><input data-second-stage-field="system" data-track="${type}" value="${esc(ss.system || "")}" /></label>
+        <button type="button" class="secondary" data-second-stage-confirm="${type}" title="Recorded under your name. From then on this agency's permit track waits for the plan upload before it reads as filed. Nothing is opened or filed."><i data-lucide="check"></i><span>Confirm second stage</span></button>
+      </div>
+    </div>`;
+  }
+  const who = ss.verifiedBy ? `<span class="muted"> (confirmed by ${esc(ss.verifiedBy)}${ss.verifiedAt ? `, ${esc(String(ss.verifiedAt).slice(0, 10))}` : ""})</span>` : "";
+  if (ss.state === "uploaded") {
+    const u = ss.uploaded || {};
+    const shot = /^\/api\/projects\/[^/]+\/submittal-tracks\/[^/]+\/second-stage\/screenshot$/.test(String(u.screenshotUrl || ""))
+      ? ` · <a href="${esc(u.screenshotUrl)}" target="_blank" rel="noopener">screenshot</a>` : "";
+    return `<p class="muted" style="margin:0 0 4px;font-size:11px" data-second-stage="${type}" data-second-stage-state="uploaded">Second stage: ${esc(ss.sentence || "")}${u.confirmationNumber ? ` Confirmation ${esc(u.confirmationNumber)}.` : ""}${shot}</p>`;
+  }
+  if (ss.state === "before_application") {
+    return `<div class="submit-gate-check info" style="margin:4px 0 6px;font-size:12px" data-second-stage="${type}" data-second-stage-state="before_application">
+      <p style="margin:0 0 2px"><strong>Two-stage filing${ss.system ? ` (plans go into ${esc(ss.system)})` : ""}</strong>${who}: ${esc(ss.sentence || "")}</p>
+      ${source}
+      <details style="margin:4px 0 0"><summary style="font-size:12px">The application was made by hand</summary>
+        <div style="display:flex;flex-wrap:wrap;gap:6px;align-items:flex-end;margin:4px 0 0">
+          <label class="track-field"><span>Record / application number</span><input data-second-stage-field="recordNumber" data-track="${type}" placeholder="as the portal shows it" /></label>
+          <button type="button" class="secondary" data-second-stage-application="${type}" title="Records that a person made the application (and paid its fee) on the portal. The track then waits for the plan upload; it is not filed yet."><i data-lucide="file-check"></i><span>Record the application</span></button>
+          <button type="button" class="ghost" data-second-stage-remove="${type}" title="This agency no longer takes the plans in a second system. Recorded under your name."><span>Not a two-stage filing</span></button>
+        </div>
+      </details>
+    </div>`;
+  }
+  // waiting_invite / upload: the application is made, the plans are not uploaded. NOT filed.
+  const inv = ss.invite;
+  const invite = inv
+    ? `<p style="margin:2px 0" data-second-stage-invite="${type}"><strong>Invite email</strong> ${esc(String(inv.receivedAt || "").slice(0, 10))}${inv.from ? ` from ${esc(inv.from)}` : ""}: “${esc(inv.subject || "(no subject)")}”${
+        http(inv.link)
+          ? ` · <a href="${esc(inv.link)}" target="_blank" rel="noopener" data-second-stage-invite-link="${type}">its link</a> <span class="muted">(you open it; nothing opens it for you)</span>`
+          : inv.linkHidden && inv.linkHidden.host
+            ? ` <span class="muted" data-second-stage-invite-hidden="${type}">Its link (on ${esc(inv.linkHidden.host)}) is not shown: ${esc(inv.linkHidden.why || "the host is not on file for this agency's permit filing")}. Open it from the email itself.</span>`
+            : ""}</p>`
+    : `<p class="muted" style="margin:2px 0" data-second-stage-no-invite="${type}">No invite matched in the filings inbox yet.</p>`;
+  const docs = Array.isArray(ss.documents) ? ss.documents : [];
+  const docList = docs.length
+    ? `<p style="margin:4px 0 0"><strong>Upload these by hand</strong> (the job's required-documents list for this permit):</p>
+       <ul style="margin:2px 0 4px 16px;font-size:12px" data-second-stage-documents="${type}">${docs.map((d) => `<li>${esc(d.label)} — ${d.present ? `<span class="muted">on file${d.via ? ` (${esc(d.via)})` : ""}</span>` : "<strong>not on file yet</strong>"}</li>`).join("")}</ul>`
+    : "";
+  const shotOnFile = /^\/api\/projects\/[^/]+\/submittal-tracks\/[^/]+\/second-stage\/screenshot$/.test(String(ss.screenshotUrl || ""))
+    ? `<a href="${esc(ss.screenshotUrl)}" target="_blank" rel="noopener" class="muted" style="font-size:11px">screenshot on file</a>` : "";
+  return `<div class="submit-gate-check warning" style="margin:4px 0 6px;font-size:12px" data-second-stage="${type}" data-second-stage-state="${esc(ss.state)}">
+    <p style="margin:0 0 2px"><strong>Second stage${ss.system ? `: ${esc(ss.system)}` : ""}</strong>${who}. Application ${esc((ss.application && ss.application.number) || "")} made ${esc(String((ss.application && ss.application.at) || "").slice(0, 10))}. <strong>Not filed yet.</strong></p>
+    ${invite}
+    ${docList}
+    <div style="display:flex;flex-wrap:wrap;gap:6px;align-items:flex-end;margin:6px 0 2px" data-second-stage-form="${type}">
+      <label class="track-field"><span>Confirmation number</span><input data-second-stage-field="confirmationNumber" data-track="${type}" placeholder="as the second system shows it" /></label>
+      <label class="track-field"><span>or a screenshot (PNG / JPEG)</span><input type="file" accept="image/png,image/jpeg" data-second-stage-field="screenshot" data-track="${type}" /></label>
+      ${shotOnFile}
+      <button type="button" class="primary" data-second-stage-uploaded="${type}" title="Recorded under your name: you uploaded the plans in the second system yourself. This is what files the track. Nothing is opened, uploaded or submitted for you."><i data-lucide="upload"></i><span>Plans uploaded: mark done</span></button>
+    </div>
+  </div>`;
 }
 
 function trackStageGapsHtml(t) {
@@ -6031,7 +6204,16 @@ function trackCardHtml(t) {
   // filed and the approval is spent) or, when the list row does not match the address, starts a
   // SECOND application. So while the track holds a staged draft the button is held with the reason.
   // (The words are APPROVE_HELD_BY_STAGED_DRAFT's, spelled here so the card renders on its own.)
-  const approveHeld = t.type === "nem" && t.status === "staged"
+  // #28: an application waiting on its second stage is filed by the hand upload's mark, never by a run.
+  const secondStagePending = Boolean(t.secondStage && t.secondStage.pending);
+  // A confirmed second stage with no application on record yet: this portal's submit is the
+  // application, which a person submits (the server's gate refuses an approved run the same way).
+  const secondStageOwed = Boolean(t.secondStage && t.secondStage.basis === "verified" && t.secondStage.state === "before_application" && !submitted);
+  const approveHeld = secondStagePending
+    ? "This application is made; its plans are uploaded by hand in the second system, then marked done below. There is nothing for a run to submit."
+    : secondStageOwed
+    ? "This agency takes the plans in a second system by hand, so this portal's submit is not the whole filing. Stage it to review, submit the application yourself and record it; the plan upload's mark files the track."
+    : t.type === "nem" && t.status === "staged"
     ? "This filing has a staged draft; finish it from the review window or by staging again, then a person submits."
     : "";
   // #436 RULING 5 (owner 2026-11-03): A FILING ALREADY SUBMITTED AND TRACKED IS NEVER STAGED AGAIN. The
@@ -6068,6 +6250,7 @@ function trackCardHtml(t) {
     <p style="margin:0 0 6px;font-size:12px">→ ${linkifyText(trackNextActionText(t))}</p>
     ${trackPaymentHtml(t)}
     ${trackFeeDueHtml(t)}
+    ${trackSecondStageHtml(t)}
     ${trackStageGapsHtml(t)}
     ${confirmationLine}
     ${captured ? `<p style="margin:0 0 4px">${captured} ${trackLink ? "&nbsp;·&nbsp; " + trackLink : ""}</p>` : (trackLink ? `<p style="margin:0 0 4px">${trackLink}</p>` : "")}
@@ -6103,13 +6286,13 @@ function trackCardHtml(t) {
       <summary>Filing by email</summary>
       <div data-filing-email-body="${esc(t.type)}"><p class="muted" style="font-size:12px">Loading…</p></div>
     </details>
-    <details class="track-submit"${t.status === "staged" || t.payment ? " open" : ""}>
+    ${secondStagePending || secondStageOwed ? "" : `<details class="track-submit"${t.status === "staged" || t.payment ? " open" : ""}>
       <summary>${submitted ? "Update numbers / status link" : "I submitted it → capture #"}</summary>
       <div class="track-submit-form">
         ${fieldsHtml}
         <button type="button" class="primary" data-track-submit="${esc(t.type)}"><i data-lucide="check"></i><span>Save &amp; track</span></button>
       </div>
-    </details>
+    </details>`}
   </article>`;
 }
 
@@ -6230,6 +6413,19 @@ function renderSubmittalTracks() {
   wrap.querySelectorAll("button[data-track-paid]").forEach((btn) => {
     btn.addEventListener("click", () => markTrackPaid(btn.dataset.trackPaid, btn));
   });
+  // #28: the second stage of a two-stage filing — each press records what a person did or decided.
+  wrap.querySelectorAll("button[data-second-stage-confirm]").forEach((btn) => {
+    btn.addEventListener("click", () => secondStageAction(btn.dataset.secondStageConfirm, "confirm", btn));
+  });
+  wrap.querySelectorAll("button[data-second-stage-remove]").forEach((btn) => {
+    btn.addEventListener("click", () => secondStageAction(btn.dataset.secondStageRemove, "remove", btn));
+  });
+  wrap.querySelectorAll("button[data-second-stage-application]").forEach((btn) => {
+    btn.addEventListener("click", () => secondStageAction(btn.dataset.secondStageApplication, "application-made", btn));
+  });
+  wrap.querySelectorAll("button[data-second-stage-uploaded]").forEach((btn) => {
+    btn.addEventListener("click", () => secondStageAction(btn.dataset.secondStageUploaded, "uploaded", btn));
+  });
   // Filing by email (#672): loaded when a person opens it — a read; the panel never sends.
   wrap.querySelectorAll("details[data-filing-email]").forEach((d) => {
     d.addEventListener("toggle", () => {
@@ -6294,11 +6490,21 @@ function renderSubmittalTracks() {
     btn.addEventListener("click", async () => {
       btn.disabled = true;
       try {
-        await api(`/api/portal-recipes/${btn.dataset.trackFinishRecipe}/finish`, {
+        const finished = await api(`/api/portal-recipes/${btn.dataset.trackFinishRecipe}/finish`, {
           method: "POST",
           body: JSON.stringify({ clientId: state.detail?.project?.clientId || "" }),
         });
-        showMessage("Recipe saved — the bot will replay this portal automatically for future projects. Review browser closed.", "info");
+        // #241: the person's save is never blocked, but they are shown what the sequence check found
+        // in the steps they just promoted — the same findings that refuse an automatic promotion.
+        const found = Array.isArray(finished?.sequenceProblems) ? finished.sequenceProblems : [];
+        const refusing = found.filter((p) => p && p.refusesPromotion);
+        const notes = found.filter((p) => p && !p.refusesPromotion);
+        const words = (list) => list.slice(0, 4).map((p) => String(p.detail || "")).join("; ") + (list.length > 4 ? `; +${list.length - 4} more` : "");
+        if (refusing.length) {
+          showMessage(`Recipe saved as you asked, but its recorded steps cannot replay as recorded: ${words(refusing)}. It is flagged on the Recipes list — re-learn the portal, or fix those steps, then clear the flag.`, "warning");
+        } else {
+          showMessage(`Recipe saved — the bot will replay this portal automatically for future projects. Review browser closed.${notes.length ? ` Note: ${words(notes)}.` : ""}`, "info");
+        }
         await loadSubmittalTracks();
         renderDetail();
       } catch (err) {
@@ -6958,6 +7164,60 @@ async function markTrackPaid(type, btn) {
   } catch (err) {
     if (btn) btn.disabled = false;
     showMessage(err.message || "Could not record the payment.", "error");
+  }
+}
+
+// #28: ONE handler for the second-stage presses (confirm / remove / application-made / uploaded). Each
+// posts to the track's own project-scoped route; the server names the person from the session when
+// sign-in is on, else from the name asked for here. A screenshot, when chosen, is sent first as the
+// image itself. Nothing here opens the invite or the second system.
+const SECOND_STAGE_ASK = {
+  confirm: "Confirm this second stage?\n\nRecorded under your name. From now on this agency's permit track waits for the plan upload (by hand, in the second system) before it reads as filed. Nothing is opened or filed.",
+  remove: "Remove the second stage for this agency?\n\nRecorded under your name. New applications there will read as filed when recorded.",
+  "application-made": "Record that the application was made by hand?\n\nThe track then waits for the plan-upload invite and the hand upload. It is NOT filed yet.",
+  uploaded: "Did you upload the plans in the second system yourself?\n\nRecorded under your name. This is what files the track: the client is told it is filed and tracking starts.",
+};
+async function secondStageAction(type, action, btn) {
+  if (!state.selectedProjectId || !type || !SECOND_STAGE_ASK[action]) return;
+  const field = (name) => document.querySelector(`[data-second-stage-field="${name}"][data-track="${type}"]`);
+  const body = {};
+  let shot = null;
+  if (action === "confirm") body.system = String(field("system")?.value || "").trim();
+  if (action === "application-made") {
+    body.recordNumber = String(field("recordNumber")?.value || "").trim();
+    if (!body.recordNumber) { showMessage("Enter the record or application number the portal shows.", "warning"); return; }
+  }
+  if (action === "uploaded") {
+    body.confirmationNumber = String(field("confirmationNumber")?.value || "").trim();
+    shot = field("screenshot")?.files?.[0] || null;
+  }
+  if (!confirm(SECOND_STAGE_ASK[action])) return;
+  // WHO: the signed-in person when sign-in is on (the server takes the session, never a typed name);
+  // otherwise the name asked for here, as Approve & auto-submit asks. No name, nothing recorded.
+  const auth = await authForDecision();
+  if (!(auth && auth.enabled)) {
+    let last = "";
+    try { last = localStorage.getItem(APPROVER_NAME_KEY) || ""; } catch { last = ""; }
+    body.by = String(prompt("Your name, recorded with this:", last) || "").trim();
+    if (!body.by) { showMessage("Nothing was recorded: this is recorded under a person's name.", "warning"); return; }
+    try { localStorage.setItem(APPROVER_NAME_KEY, body.by); } catch { /* per-viewer convenience only */ }
+  }
+  if (btn) btn.disabled = true;
+  const base = `/api/projects/${state.selectedProjectId}/submittal-tracks/${encodeURIComponent(type)}/second-stage`;
+  try {
+    if (shot) {
+      const up = await fetch(`${base}/screenshot${body.by ? `?by=${encodeURIComponent(body.by)}` : ""}`, { method: "POST", headers: { "Content-Type": shot.type || "image/png" }, body: shot });
+      if (!up.ok) throw new Error((await up.json().catch(() => ({}))).error || "The screenshot could not be saved.");
+    }
+    const res = await api(`${base}/${action}`, { method: "POST", body: JSON.stringify(body) });
+    state.submittalTracks = res.tracks || state.submittalTracks;
+    state.detail = await api(`/api/projects/${state.selectedProjectId}`);
+    await loadProcessMap();
+    renderDetail();
+    showMessage(action === "uploaded" ? "Recorded: the plans are uploaded and the track is filed." : action === "application-made" ? "Recorded: the application is made. Not filed until the plan upload is marked done." : action === "confirm" ? "Second stage confirmed for this agency." : "Second stage removed for this agency.", "info");
+  } catch (err) {
+    if (btn) btn.disabled = false;
+    showMessage(err.message || "Could not record that.", "error");
   }
 }
 
@@ -8551,6 +8811,7 @@ function renderFilledForms(projectId) {
       ${ok && !isStored && !f.signaturesLocked ? `<p class="muted"><button type="button" class="secondary" data-detect-sign="${esc(f.formId)}" style="font-size:12px">Detect signature lines (AI)</button> — stamp your stored signature on this form.</p>` : ""}
       ${ok ? `<p class="muted"><button type="button" class="secondary" data-verify-vision="${esc(f.formId)}" style="font-size:12px">Verify fill with vision</button> — reads the filled PDF back and lists each value under the printed label it sits beside. Reports only; it never changes the form.</p><div data-vision-result="${esc(f.formId)}"></div>` : ""}
       ${ok && !isStored && f.signaturesLocked ? `<p class="muted">✓ Built-in form — signature + date auto-placed on the authorized-signature line. No verification needed.</p>` : ""}
+      ${isStored && f.officialDocumentWords ? `<p class="muted" data-official-form="${esc(f.templateId)}">${esc(f.officialDocumentWords)}</p>` : ""}
       ${f.documentStale ? `<p class="muted"><strong>This blank dates itself “${esc(f.documentDate)}”</strong> — over two years old. Re-check the AHJ's current forms page before filing${f.sourceUrl ? ` (<a href="${esc(f.sourceUrl)}" target="_blank" rel="noopener noreferrer">source</a>)` : ""}. Check any printed fee rates against the current schedule.</p>` : ""}
       ${extra ? `<p class="muted">${esc(extra)}</p>` : ""}
       ${ok && operatorItems.length ? `<p><strong>Fill by hand before filing (${operatorItems.length}):</strong></p><ul class="muted" style="margin:2px 0 6px 18px">${operatorItems.map((it) => `<li>${esc(it)}</li>`).join("")}</ul>` : ""}
@@ -9852,10 +10113,27 @@ function infoPageCandidateCardsHtml(candidates, projectId) {
     const frames = (Array.isArray(ev.frames) ? ev.frames : []).map((f) => `${esc(f[0])} ${esc(f[1])}`);
     // Round 4: this exact page was verified before, and that verification EXPIRED (30 days / 10 projects).
     const expired = c.expiredPass && typeof c.expiredPass === "object" ? c.expiredPass : null;
+    // #279: verified pages whose click led HERE. Each waits (no run uses it) until a person rules on this page.
+    const ledFrom = Array.isArray(c.ledFromVerified) ? c.ledFromVerified : [];
+    const ledFromHtml = ledFrom.map((w) => {
+      const ack = Array.isArray(w.acknowledgement) ? w.acknowledgement.filter(Boolean) : [];
+      // Escape first, then mark each acknowledgement phrase (matched case-insensitively on the escaped text).
+      let text = esc(w.afterText || "");
+      for (const a of ack) {
+        const e = esc(a).replace(/[.*+?^${}()|[\]\\]/g, "\\$&").replace(/\s+/g, "\\s+");
+        text = text.replace(new RegExp(e, "gi"), (m) => `<mark>${m}</mark>`);
+      }
+      return `<div style="font-size:12px;border-left:3px solid var(--warning, #c80);padding-left:8px;margin:6px 0" data-info-led-from="${esc(w.passId)}">
+        <p><strong>This page came after the verified page ${esc(w.where)}</strong>${w.controlLabel ? ` (its "${esc(w.controlLabel)}")` : ""}${w.at ? `, ${esc(String(w.at).slice(0, 10))}` : ""}. That verification is ON HOLD for every run until you rule here: <strong>verify</strong> if this is another information page (the earlier verification resumes), or <strong>Not an information page</strong> if it is a receipt or anything else (the earlier verification is withdrawn as an incident, and every project that used it is warned it may have filed).</p>
+        ${ack.length ? `<p><strong>Acknowledgement wording on this page:</strong> ${ack.map((a) => `<mark>${esc(a)}</mark>`).join(", ")}. A receipt often reads like this; look at the screenshot before verifying.</p>` : ""}
+        <pre style="white-space:pre-wrap;max-height:160px;overflow:auto;font-size:12px">${text}</pre>
+      </div>`;
+    }).join("");
     return `
     <article class="item warning" data-info-candidate="${esc(c.id)}">
       <div class="item-title"><span>Information page to verify</span><span class="badge warning">${expired ? "verification expired — a person re-verifies" : "held by the network backstop"}</span></div>
       ${expired ? `<p style="font-size:12px" data-info-expired="${esc(expired.passId)}"><strong>Verification expired — a person re-verifies.</strong> This exact page was verified on ${esc(String(expired.verifiedAt || "").slice(0, 10))}; ${esc((Array.isArray(expired.why) ? expired.why : []).join("; "))}. Until a person verifies it again, runs stop here exactly as before it was verified.</p>` : ""}
+      ${ledFromHtml}
       <p>The run stopped at <strong>${esc(c.origin)}${esc(c.path)}</strong>${(c.queryKeys || []).length ? ` (query keys: ${esc(c.queryKeys.join(", "))})` : ""}: its <strong>${esc(c.controlLabel)}</strong> was held because the page's own words read as review. Nothing was sent.</p>
       <p class="muted" style="font-size:12px">Held request: ${esc(req.method)} ${esc(req.where)} · ${esc(req.media)} · fields: ${esc((req.fieldNames || []).join(", ") || "none")} · seen ${esc(String(c.seenCount || 1))} time(s), first ${esc(String(c.firstSeenAt || "").slice(0, 10))}, last ${esc(String(c.lastSeenAt || "").slice(0, 10))}</p>
       <p class="muted" style="font-size:12px">Reached by exactly these steps (a pass never applies after other ones): ${esc((Array.isArray(c.steps) ? c.steps : []).join(" → ") || "none recorded")}</p>
@@ -10003,7 +10281,8 @@ function infoPagePassRowsHtml(passes) {
     const expired = Array.isArray(p.expired) ? p.expired : [];
     return `
     <article class="item ${live ? "info" : "warning"}">
-      <div class="item-title"><span>${esc(p.origin)}${esc(p.path)}</span><span class="badge">${live ? "live" : expired.length ? "verification expired — a person re-verifies" : "no verification on record — never used"}</span></div>
+      <div class="item-title"><span>${esc(p.origin)}${esc(p.path)}</span><span class="badge">${live ? "live" : p.waiting ? "on hold — a person rules on the page it led to" : expired.length ? "verification expired — a person re-verifies" : "no verification on record — never used"}</span></div>
+      ${!live && p.waiting ? `<p class="muted" style="font-size:12px" data-info-pass-waiting="${esc(p.id)}">This verified page ${esc(p.waiting)} (the project's Portal runs card for that page). Until then runs stop here exactly as before it was verified.</p>` : ""}
       ${!live && expired.length ? `<p class="muted" style="font-size:12px">${esc(expired.join("; "))}. A run that reaches the page stops there and offers it on the project's card for a person to verify again.</p>` : ""}
       <p class="muted" style="font-size:12px">Control: <strong>${esc(p.controlLabel)}</strong> (${esc(p.controlName)}) · request ${esc(req.method)} ${esc(req.where)} · ${esc(req.media)} · fields: ${esc((req.fieldNames || []).join(", ") || "none")} · identity ${esc(p.identityPrefix)}…</p>
       <p class="muted" style="font-size:12px">Verified ${esc(String(p.verifiedAt || "").slice(0, 10))}</p>
@@ -10091,6 +10370,29 @@ function renderPortalRuns() {
           <span class="muted" style="font-size:11px">Stops at the next step: nothing more is filled or clicked, nothing is submitted.</span>
         </div>`
       : "";
+    // REPLAYS LEARN FROM YOUR HAND FIXES (runFixSteps.ts): a replay step failed, its window stayed open at
+    // that step, and what the person did there is held on this run. "Save my fixes" writes it into the
+    // recipe at the stuck step, under the person's name; nothing is clicked or submitted by saving.
+    const hf = run.handFixes;
+    // A SUBMIT WAS CLICKED IN THE WINDOW THIS RUN LEFT OPEN: the filing may have gone. Said plainly, so
+    // nobody stages this track again before checking the portal.
+    const submitSighted = hf && hf.submitSightedAt
+      ? `<p class="submit-gate-check warning" style="margin-top:6px">A submit${hf.submitLabel ? ` ("${esc(hf.submitLabel)}")` : ""} was clicked in the window this run left open: check the portal and mark this track submitted. Do not stage it again until you have.</p>`
+      : "";
+    const fixAction = hf && !hf.appliedAt
+      ? `<div style="margin-top:6px">
+          <p class="muted" style="font-size:12px;margin:0 0 4px">${hf.count
+            ? `You did ${esc(String(hf.count))} step(s) by hand${hf.stuckStep ? ` after step ${esc(String(hf.stuckStep))} got stuck` : hf.atEnd ? " after the run stopped short of the review page" : ""}:`
+            : `The portal window was left open where the run got stuck${hf.stuckStep ? ` (step ${esc(String(hf.stuckStep))})` : ""}. Finish by hand up to the review page (never submit or pay), then refresh: your steps show here.`}</p>
+          ${hf.count ? `<ul class="muted" style="font-size:11px;margin:0 0 6px 16px">${(hf.preview || []).map((p) => `<li>${esc(p)}</li>`).join("")}${hf.count > (hf.preview || []).length ? `<li>and ${esc(String(hf.count - (hf.preview || []).length))} more</li>` : ""}</ul>
+          <div style="display:flex;gap:8px;flex-wrap:wrap">
+            <button class="secondary" data-save-fixes="${esc(run.id)}" data-fix-mode="insert" style="font-size:12px">Save my fixes</button>
+            <button class="secondary" data-save-fixes="${esc(run.id)}" data-fix-mode="replace_rest" style="font-size:12px" title="Use when you finished the whole application by hand to its review page">I finished it to review: replace the rest</button>
+          </div>` : ""}
+        </div>`
+      : hf && hf.appliedAt
+        ? `<p class="muted" style="font-size:11px;margin-top:6px">Your ${esc(String(hf.count))} hand fix(es) were saved into the recipe${hf.appliedBy ? ` by ${esc(hf.appliedBy)}` : ""}.</p>`
+        : "";
     return `
     <article class="item ${cardClass}">
       <div class="item-title"><span>${esc(humanize(run.runType))}</span>${statusBadge(run.status)}</div>
@@ -10100,6 +10402,8 @@ function renderPortalRuns() {
       <p class="muted">${esc(run.errorMessage || run.startedAt)}</p>
       ${resubmitAction}
       ${stopAction}
+      ${submitSighted}
+      ${fixAction}
     </article>`;
   };
   // PIN WHAT A PERSON MUST ACT ON; FOLD THE HISTORY WITH ITS COUNTS. On 7ec74634 the one
@@ -10110,8 +10414,10 @@ function renderPortalRuns() {
   // count is never hidden with the cards.
   // A RUNNING stage is pinned too (#340): its Stop control must not sit folded under old runs.
   const pinnedStatuses = ["running", "awaiting_human_submit", "awaiting_human_resubmit", "paused_for_human", "awaiting_payment"];
-  const pinned = runs.filter((run) => pinnedStatuses.includes(run.status));
-  const earlier = runs.filter((run) => !pinnedStatuses.includes(run.status));
+  // A run holding hand fixes nobody has saved yet is pinned too: its Save button must not sit folded.
+  const isPinned = (run) => pinnedStatuses.includes(run.status) || Boolean(run.handFixes && !run.handFixes.appliedAt);
+  const pinned = runs.filter(isPinned);
+  const earlier = runs.filter((run) => !isPinned(run));
   const earlierFailed = earlier.filter((run) => run.status === "failed").length;
   const pinnedWrap = $("portalRunsPinned");
   const prevFold = $("portalRuns").querySelector("details.runs-fold");
@@ -10150,6 +10456,34 @@ function renderPortalRuns() {
         showMessage(err.message, "error");
         button.disabled = false;
         button.textContent = originalLabel;
+      }
+    });
+  });
+
+  document.querySelectorAll("#portalRunsPinned button[data-save-fixes], #portalRuns button[data-save-fixes]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const mode = button.dataset.fixMode === "replace_rest" ? "replace_rest" : "insert";
+      const ask = mode === "replace_rest"
+        ? "Replace the recipe from the stuck step to the review page with what you did by hand?\n\nOnly when you finished the whole application by hand. Nothing is clicked or submitted by saving."
+        : "Add what you did by hand to the recipe at the stuck step?\n\nThe next stage replays it. Nothing is clicked or submitted by saving.";
+      if (!confirm(ask)) return;
+      const body = { mode };
+      const auth = await authForDecision();
+      if (!(auth && auth.enabled)) {
+        let last = "";
+        try { last = localStorage.getItem(APPROVER_NAME_KEY) || ""; } catch { last = ""; }
+        body.decidedBy = String(prompt("Your name, recorded with this save:", last) || "").trim();
+        if (!body.decidedBy) { showMessage("Nothing was saved: a recipe change is recorded under a person's name.", "warning"); return; }
+        try { localStorage.setItem(APPROVER_NAME_KEY, body.decidedBy); } catch { /* per-viewer convenience only */ }
+      }
+      button.disabled = true;
+      try {
+        const result = await api(`/api/portal-runs/${encodeURIComponent(button.dataset.saveFixes)}/save-fixes`, { method: "POST", body: JSON.stringify(body) });
+        showMessage(result.message, "info");
+        await selectProject(state.selectedProjectId);
+      } catch (err) {
+        showMessage(err.message, "error");
+        button.disabled = false;
       }
     });
   });
@@ -11515,7 +11849,7 @@ async function loadJobDrops() {
 
 // ----- Clients & contractor licensing -----
 const CLIENT_TEXT_FIELDS = [
-  "companyName", "legalBusinessName", "dba", "contactName", "contactEmail", "phone", "billingStatus", "billingMode", "serviceFeeUsd",
+  "companyName", "legalBusinessName", "dba", "contactName", "contactEmail", "phone", "billingStatus", "billingMode", "serviceFeeUsd", "serviceFeePermitUsd", "serviceFeeNemUsd", "pricingTier", "feeLimitUsd",
   "requestLinksAutoSend", "handoffAutoSend", "intakeTag", "intakeSenders",
   "ccbLicenseNumber", "ccbExpiration", "electricalLicenseNumber", "metroCityLicenseNumber",
   "electricalSupervisorName", "electricianLicenseNumber", "installerCertifications",
@@ -11790,6 +12124,9 @@ function blankClientForm() {
   state.editingClientId = null;
   $("clientId").value = "";
   CLIENT_TEXT_FIELDS.forEach((field) => { const el = $("c_" + field); if (el) el.value = ""; });
+  // A NEW client pays our fee before each job is filed (owner, 2026-11-12: "Before filing, per job");
+  // staff may switch a trusted client to monthly. An existing client keeps whatever it has.
+  if ($("c_billingMode")) $("c_billingMode").value = "per_submission";
   state.portalIdentitiesDraft = [];
   renderPortalIdentities();
   // A new client: its licence list starts empty and IS the list saved with it.
@@ -11814,10 +12151,14 @@ async function loadClientCredentials(clientId) {
     const creds = data.credentials || [];
     list.innerHTML = creds.length
       ? creds.map((c) => `<div class="cred-row">
-          <div class="cred-row-text"><strong>${esc(portalDisplayName(c.portalType, c.portalUrl))}</strong><span class="cred-row-user">${esc(c.usernameReference)}${c.hasSecret ? ' <span class="cred-row-lock" title="Password stored encrypted">🔒</span>' : ""}</span></div>
+          <div class="cred-row-text"><strong>${esc(portalDisplayName(c.portalType, c.portalUrl))}</strong><span class="cred-row-user">${esc(c.usernameReference)}${c.hasSecret ? ' <span class="cred-row-lock" title="Password stored encrypted">🔒</span>' : ""}</span>
+            ${feePayerControlHtml(c, "data-cred-fee")}</div>
           <button type="button" class="danger-button cred-row-del" data-cred-del="${esc(c.id)}"><i data-lucide="trash-2"></i><span>Delete</span></button></div>`).join("")
       : '<p class="muted clients-creds-hint">No saved logins yet.</p>';
     if (window.lucide) window.lucide.createIcons();
+    list.querySelectorAll("[data-cred-fee]").forEach((sel) => sel.addEventListener("change", () => {
+      if (sel.value) saveFeePayer(clientId, sel.getAttribute("data-cred-fee"), sel.value, $("credStatus"), () => loadClientCredentials(clientId));
+    }));
     list.querySelectorAll("[data-cred-del]").forEach((b) => b.addEventListener("click", async () => {
       try {
         // A stored portal login is unrecoverable once deleted (encrypted at rest,
@@ -11868,7 +12209,7 @@ function billingLineFlags(l) {
   return flags.length ? ` <span class="muted">(${esc(flags.join("; "))})</span>` : "";
 }
 
-function billingLinesHtml(lines) {
+function billingLinesHtml(lines, opts = {}) {
   const kinds = ["reimbursement", "service", "onboarding", "received"];
   return kinds.map((kind) => {
     const list = (lines || []).filter((l) => l.kind === kind);
@@ -11879,7 +12220,7 @@ function billingLinesHtml(lines) {
           <td style="padding:1px 8px 1px 0;white-space:nowrap;vertical-align:top">${esc(String(l.eventAt || "").slice(0, 10))}</td>
           <td style="padding:1px 8px 1px 0;vertical-align:top">${esc(l.projectLabel)}<br><span class="muted">${esc(l.description)}</span>${billingLineFlags(l)}
             ${l.reconciliation ? `<br><span class="muted">⚠ ${esc(l.reconciliation)}</span>` : ""}</td>
-          <td style="padding:1px 0;text-align:right;white-space:nowrap;vertical-align:top">${kind === "received" ? "" : l.alreadyPaid ? '<span class="muted">paid</span> ' : ""}${billingMoney(l.amountUsd)}</td>
+          <td style="padding:1px 0;text-align:right;white-space:nowrap;vertical-align:top">${kind === "received" ? "" : l.alreadyPaid ? '<span class="muted">paid</span> ' : ""}${billingMoney(l.amountUsd)}${opts.waive && String(l.lineKey || "").startsWith("filing:") ? `<br><button type="button" class="secondary" style="font-size:11px;padding:1px 6px" data-waive-charge="${esc(l.paymentId)}"><span style="white-space:nowrap">Don't bill</span></button>` : ""}</td>
         </tr>`).join("")}
       </table></div>`;
   }).join("");
@@ -11905,7 +12246,7 @@ function renderBillingStatement(st) {
       <p style="margin:0 0 4px;font-size:12px"><strong>Draft statement, ${esc(st.periodStart)} to ${esc(st.periodEnd)}</strong> (end not included) ·
         bill to ${st.billTo ? esc(st.billTo) : '<span class="badge badge-warning">NO ADDRESS</span>'}
         <span class="muted">(${esc(String(st.billToSource || "").replaceAll("_", " "))}; billed ${esc(st.billingMode)})</span></p>
-      ${(st.lines || []).length ? billingLinesHtml(st.lines) + billingTotalsHtml(st) : '<p class="muted" style="font-size:12px">Nothing new to bill for this period: every billable line is already on an invoice, or nothing is billable yet.</p>'}
+      ${(st.lines || []).length ? billingLinesHtml(st.lines, { waive: true }) + billingTotalsHtml(st) : '<p class="muted" style="font-size:12px">Nothing new to bill for this period: every billable line is already on an invoice, or nothing is billable yet.</p>'}
       ${(st.notes || []).map((n) => `<p class="muted" style="font-size:12px;margin:4px 0">${esc(n)}</p>`).join("")}
       ${logins.length ? `<p style="font-size:12px;margin:4px 0"><strong>⚠ ${esc(String(logins.length))} portal login${logins.length === 1 ? " has" : "s have"} no fee agreement on file</strong> (${esc(logins.join(", "))}). A fee we pay through ${logins.length === 1 ? "it" : "them"} cannot be invoiced until who pays is recorded on the login.</p>` : ""}
       ${excluded.length ? `<details class="provenance"><summary><strong>${esc(String(excluded.length))} not on this statement, and why</strong></summary>
@@ -11913,6 +12254,151 @@ function renderBillingStatement(st) {
           ${excluded.map((x) => `<li><strong>${esc(x.projectLabel)}</strong> (${esc(x.track)}): ${esc(x.reason)}${x.amountSeenUsd != null ? ` <span class="muted">[${billingMoney(x.amountSeenUsd)} seen]</span>` : ""}<br><span class="muted">${esc(x.resolution)}</span></li>`).join("")}
         </ul></div></details>` : ""}
     </div>`;
+  box.querySelectorAll("[data-waive-charge]").forEach((b) => b.addEventListener("click", () => waiveFilingCharge(b.dataset.waiveCharge)));
+}
+
+/* A person decides one filing is not billed (filed in error, a courtesy refile): named, with a reason. */
+async function waiveFilingCharge(chargeId) {
+  const clientId = state.editingClientId;
+  if (!clientId || !chargeId) return;
+  const reason = window.prompt("Why is this filing not billed? (recorded on the filing)", "");
+  if (reason == null) return;
+  if (!String(reason).trim()) { billingStatus("Say why this filing is not billed.", "error"); return; }
+  const decidedBy = namedPersonConsent(await authForDecision(), "Leave this filing off every invoice?", "waived the filing charge", "a filing charge is waived by a named person");
+  if (decidedBy == null) return;
+  try {
+    await api(`/api/clients/${encodeURIComponent(clientId)}/filing-charges/${encodeURIComponent(chargeId)}/waive`, { method: "POST", body: JSON.stringify({ reason, decidedBy }) });
+    await previewBillingStatement();
+    billingStatus("That filing will not be billed.");
+  } catch (err) { billingStatus(err.message || "Could not waive that filing.", "error"); }
+}
+
+/* ===========================================================================
+   LATE INVOICES (#199) — every client's sent invoices past due. A reminder is
+   a named person's click; 30 days late holds the client's new filings until it
+   is paid, voided, or a named person lifts the hold. Every server string esc().
+   =========================================================================== */
+async function loadOverdueInvoices() {
+  const box = $("overdueBlock");
+  if (!box) return;
+  try {
+    state.overdue = await api("/api/billing/overdue");
+  } catch (err) {
+    box.innerHTML = `<p class="muted clients-creds-hint">${esc(err.message || "Could not read the late invoices.")}</p>`;
+    return;
+  }
+  renderOverdueInvoices();
+}
+
+const REMINDER_LABEL = { due: "Send due-date reminder", late: "Send late reminder" };
+
+function renderOverdueInvoices() {
+  const box = $("overdueBlock");
+  const data = state.overdue;
+  if (!box || !data) return;
+  const list = data.overdue || [];
+  if (!list.length) { box.innerHTML = '<p class="muted clients-creds-hint">No invoice is past due.</p>'; return; }
+  box.innerHTML = `<p class="muted clients-creds-hint" style="margin:0 0 4px">Reminders go out only when someone presses the button: at the due date, then ${esc(String(data.reminderLateDays))} days after. At ${esc(String(data.holdDays))} days late, that client's new filings wait.</p>`
+    + list.map((x) => {
+      const sent = (x.reminders || []).filter((r) => r.delivered).map((r) => `${r.kind === "late" ? "late" : "due-date"} reminder ${String(r.sentAt).slice(0, 10)} by ${r.sentBy}`);
+      const drafts = (x.reminders || []).filter((r) => !r.delivered).length;
+      return `<div class="cred-row" style="flex-wrap:wrap;gap:6px">
+        <div class="cred-row-text"><strong>${esc(x.clientName)}</strong> · ${esc(x.number)} · ${billingMoney(x.dueTotalUsd)}
+          <span class="muted">due ${esc(x.dueAt)}, ${x.daysLate === 0 ? "today" : `${esc(String(x.daysLate))} day${x.daysLate === 1 ? "" : "s"} late`}</span>
+          ${x.holdsFilings ? '<span class="badge badge-fail">FILINGS HELD</span>' : ""}
+          ${x.holdLifted ? `<span class="badge badge-info" title="${esc(x.holdLifted.reason)}">hold lifted by ${esc(x.holdLifted.by)}</span>` : ""}
+          ${sent.length ? `<br><span class="muted">${esc(sent.join("; "))}</span>` : ""}
+          ${drafts ? `<br><span class="muted">${esc(String(drafts))} reminder${drafts === 1 ? "" : "s"} saved as a draft, not sent</span>` : ""}</div>
+        <div class="actions" style="margin:0">
+          ${x.reminderDue ? `<button type="button" class="secondary" data-overdue-action="remind" data-client-id="${esc(x.clientId)}" data-inv-id="${esc(x.invoiceId)}"><span style="white-space:nowrap">${esc(REMINDER_LABEL[x.reminderDue] || "Send reminder")}</span></button>` : ""}
+          ${x.holdsFilings ? `<button type="button" class="secondary" data-overdue-action="lift" data-client-id="${esc(x.clientId)}" data-inv-id="${esc(x.invoiceId)}"><span style="white-space:nowrap">Lift hold</span></button>` : ""}
+        </div></div>`;
+    }).join("");
+  box.querySelectorAll("[data-overdue-action]").forEach((b) => b.addEventListener("click", () => overdueAction(b.dataset.overdueAction, b.dataset.clientId, b.dataset.invId)));
+}
+
+async function overdueAction(action, clientId, invoiceId) {
+  if (!clientId || !invoiceId) return;
+  const base = `/api/clients/${encodeURIComponent(clientId)}/invoices/${encodeURIComponent(invoiceId)}`;
+  try {
+    if (action === "remind") {
+      const decidedBy = namedPersonConsent(await authForDecision(), "Email this client a payment reminder now?", "sent the reminder", "a reminder is sent by a named person");
+      if (decidedBy == null) return;
+      const r = await api(`${base}/remind`, { method: "POST", body: JSON.stringify({ decidedBy }) });
+      billingStatus(r.delivered ? "Reminder sent." : `Reminder not sent: ${r.detail}`, r.delivered ? "info" : "error");
+    } else if (action === "lift") {
+      const reason = window.prompt("Why lift the hold? (a payment plan, a dispute being settled…)", "");
+      if (reason == null) return;
+      if (!String(reason).trim()) { billingStatus("Say why the hold is lifted.", "error"); return; }
+      const decidedBy = namedPersonConsent(await authForDecision(), "Let this client's new filings go ahead while the invoice is still owed?", "lifted the hold", "a hold is lifted by a named person");
+      if (decidedBy == null) return;
+      await api(`${base}/lift-hold`, { method: "POST", body: JSON.stringify({ reason, decidedBy }) });
+      billingStatus("Hold lifted: the invoice is still owed.");
+    }
+    await loadOverdueInvoices();
+  } catch (err) { billingStatus(err.message || "That did not work.", "error"); }
+}
+
+/* ===========================================================================
+   OUR PRICES (#187) — one price per permit filing and per NEM application for
+   the organisation. Data set by a named admin, never code; each filing keeps
+   the price in force when it was filed. Every server string goes through esc().
+   =========================================================================== */
+async function loadServicePrices() {
+  const box = $("servicePricesBlock");
+  if (!box) return;
+  try {
+    const { prices } = await api("/api/billing/prices");
+    state.servicePrices = prices;
+  } catch (err) {
+    box.innerHTML = `<p class="muted clients-creds-hint">${esc(err.message || "Could not read the prices.")}</p>`;
+    return;
+  }
+  renderServicePrices();
+}
+
+function renderServicePrices() {
+  const box = $("servicePricesBlock");
+  const list = state.servicePrices;
+  if (!box || !list) return;
+  const tiers = list.tiers || {};
+  const val = (e) => (e && e.priceUsd != null ? esc(String(e.priceUsd)) : "");
+  const who = (e) => (e && e.setAt ? ` <span class="muted">set by ${esc(e.setBy || "?")} on ${esc(String(e.setAt).slice(0, 10))}</span>` : ' <span class="badge badge-warning">NOT SET</span>');
+  const tierHtml = (tier, title, hint) => {
+    const t = tiers[tier] || {};
+    return `<p class="clients-creds-hint" style="margin:6px 0 2px"><strong>${esc(title)}</strong> <span class="muted">${esc(hint)}</span></p>
+    <div class="form-row">
+      <label>Per permit filing ($)<input id="price_${tier}_permitUsd" type="number" min="0" step="0.01" value="${val(t.permit)}" /></label>
+      <label>Per NEM application ($)<input id="price_${tier}_nemUsd" type="number" min="0" step="0.01" value="${val(t.nem)}" /></label>
+      <label>Cap per project ($)<input id="price_${tier}_capUsd" type="number" min="0" step="0.01" value="${val(t.project_cap)}" placeholder="blank = no cap" /></label>
+      <label>Onboarding fee ($)<input id="price_${tier}_onboardingUsd" type="number" min="0" step="0.01" value="${val(t.onboarding)}" placeholder="blank = none" /></label>
+    </div>
+    <p class="clients-creds-hint" style="margin:0 0 4px">Permit:${who(t.permit)} · NEM:${who(t.nem)} · Cap:${who(t.project_cap)} · Onboarding:${who(t.onboarding)}</p>`;
+  };
+  box.innerHTML = `<p class="muted clients-creds-hint" style="margin:0 0 4px">For every client without its own price. A job's filings together never bill more than its tier's cap. A new client's first statement carries the onboarding fee; once it is paid, it comes off their filing fees (the up-front fee first) until used. Each filing keeps the price in force when it was filed; a change applies to filings from now on.${list.envDefaultUsd != null ? ` A blank price falls back to the server default, ${billingMoney(list.envDefaultUsd)}.` : " A blank price bills nothing and is listed on the statement."}</p>
+    ${tierHtml("founding", "Founding clients", "(clients marked Founding)")}
+    ${tierHtml("standard", "Everyone else", "(standard)")}
+    <div class="actions" style="margin:0"><button type="button" class="secondary" id="savePricesBtn"><span style="white-space:nowrap">Save prices</span></button></div>`;
+  $("savePricesBtn")?.addEventListener("click", saveServicePrices);
+}
+
+async function saveServicePrices() {
+  const decidedBy = namedPersonConsent(await authForDecision(), "Save these prices? Filings from now on are charged at them; filings already made keep their price.", "set the prices", "prices are set by a named person");
+  if (decidedBy == null) return;
+  try {
+    const tierInput = (tier) => ({
+      permitUsd: $(`price_${tier}_permitUsd`)?.value ?? "",
+      nemUsd: $(`price_${tier}_nemUsd`)?.value ?? "",
+      capUsd: $(`price_${tier}_capUsd`)?.value ?? "",
+      onboardingUsd: $(`price_${tier}_onboardingUsd`)?.value ?? "",
+    });
+    const { prices } = await api("/api/billing/prices", { method: "PUT", body: JSON.stringify({
+      founding: tierInput("founding"), standard: tierInput("standard"), decidedBy,
+    }) });
+    state.servicePrices = prices;
+    renderServicePrices();
+    billingStatus("Prices saved.");
+  } catch (err) { billingStatus(err.message || "Could not save the prices.", "error"); }
 }
 
 const INVOICE_STATUS_BADGE = { draft: "badge-warning", sent: "badge-info", paid: "badge-pass", void: "" };
@@ -11926,7 +12412,8 @@ function renderBillingInvoices(invoices) {
     return `<div class="cred-row" style="flex-wrap:wrap;gap:6px">
       <div class="cred-row-text"><strong>${esc(inv.number)}</strong>
         <span class="badge ${esc(INVOICE_STATUS_BADGE[inv.status] || "")}">${esc(inv.status)}</span>
-        <span class="muted">${esc(inv.periodStart)} to ${esc(inv.periodEnd)} · due ${billingMoney(inv.dueTotalUsd)}${inv.dueAt ? ` by ${esc(inv.dueAt)}` : ""}${inv.paidAt ? ` · paid ${esc(inv.paidAt.slice(0, 10))}${inv.paidReference ? ` (${esc(inv.paidReference)})` : ""}` : ""}${inv.voidReason ? ` · void: ${esc(inv.voidReason)}` : ""}</span>
+        ${inv.projectId ? `<span class="badge badge-info" title="One job's fees we paid, due on receipt">Job fees${inv.lines && inv.lines[0] ? `: ${esc(inv.lines[0].projectLabel)}` : ""}</span>` : ""}
+        <span class="muted">${inv.projectId ? "due on receipt" : `${esc(inv.periodStart)} to ${esc(inv.periodEnd)}`} · due ${billingMoney(inv.dueTotalUsd)}${inv.dueAt ? ` by ${esc(inv.dueAt)}` : ""}${inv.paidAt ? ` · paid ${esc(inv.paidAt.slice(0, 10))}${inv.paidReference ? ` (${esc(inv.paidReference)})` : ""}` : ""}${inv.voidReason ? ` · void: ${esc(inv.voidReason)}` : ""}</span>
         ${inv.externalRef ? `<span class="badge badge-info" title="Sent to QuickBooks by ${esc(inv.qbPushedBy)}">QuickBooks #${esc(inv.externalRef)}${inv.qbStatus ? `: ${esc(inv.qbStatus)}` : ""}</span>` : ""}</div>
       <div class="actions" style="margin:0">
         <button type="button" class="secondary" data-inv-action="print" data-inv-id="${esc(inv.id)}"><span style="white-space:nowrap">View / print</span></button>
@@ -12053,6 +12540,8 @@ async function loadClientBilling(clientId) {
   try {
     // The QuickBooks status first: the invoice rows offer "Send to QuickBooks" only when connected.
     await loadQuickBooksStatus();
+    await loadServicePrices();
+    await loadOverdueInvoices();
     const data = await api(`/api/clients/${encodeURIComponent(clientId)}/invoices`);
     if (state.editingClientId === clientId) renderBillingInvoices(data.invoices || []);
   } catch (err) {
@@ -12181,7 +12670,7 @@ function editClient(clientId) {
   if ($("clientLinkResultWrap")) $("clientLinkResultWrap").hidden = true;
   if ($("clientLinkStatus")) $("clientLinkStatus").textContent = "";
   $("clientId").value = clientId;
-  CLIENT_TEXT_FIELDS.forEach((field) => { const el = $("c_" + field); if (el) el.value = client[field] || ""; });
+  CLIENT_TEXT_FIELDS.forEach((field) => { const el = $("c_" + field); if (el) el.value = client[field] ?? ""; }); // ?? keeps a $0 price (a free client) from reading back as blank
   state.portalIdentitiesDraft = (client.portalIdentities || []).map((i) => ({
     portalType: i.portalType, installerCompanyLabel: i.installerCompanyLabel, installerContactCode: i.installerContactCode, notes: i.notes,
   }));
@@ -12196,6 +12685,9 @@ function editClient(clientId) {
   clientFormStatus("");
   loadClientCredentials(clientId);
   loadClientBilling(clientId);
+  if ($("onboardingLinkResultWrap")) $("onboardingLinkResultWrap").hidden = true;
+  onboardingStatus("");
+  loadClientOnboarding(clientId);
   renderClientsList();
 }
 
@@ -12343,6 +12835,7 @@ if ($("knowledgeModal")) $("knowledgeModal").addEventListener("click", (e) => { 
 // Record-this-portal helper (Submit stage): rebuild the command live, copy, download .bat.
 if ($("recordScope")) $("recordScope").addEventListener("change", renderRecordPortal);
 if ($("recordScope")) $("recordScope").addEventListener("change", syncRecordPermitType);
+if ($("recordPermitType")) $("recordPermitType").addEventListener("change", renderRecordPortal);
 if ($("recordPortalUrl")) $("recordPortalUrl").addEventListener("input", () => { const el = $("recordCmdPreview"); if (el) el.textContent = buildRecordCommand(); });
 if ($("copyRecordCmdBtn")) $("copyRecordCmdBtn").addEventListener("click", copyRecordCommand);
 if ($("downloadRecordBatBtn")) $("downloadRecordBatBtn").addEventListener("click", downloadRecordBat);
@@ -12381,11 +12874,14 @@ if ($("addCredentialBtn")) {
       portalUrl: $("cred_portalUrl").value.trim(),
       username: $("cred_username").value.trim(),
       password: $("cred_password").value,
+      feeResponsibility: $("cred_feeResponsibility") ? $("cred_feeResponsibility").value : "",
     };
     if (!body.username || !body.password) { $("credStatus").textContent = "Username and password are required."; return; }
+    if (!body.feeResponsibility) { $("credStatus").textContent = "Say who pays this portal's fees."; return; }
     try {
       await api(`/api/clients/${clientId}/portal-credentials`, { method: "POST", body: JSON.stringify(body) });
       $("cred_username").value = ""; $("cred_password").value = ""; $("cred_portalType").value = ""; $("cred_portalUrl").value = "";
+      if ($("cred_feeResponsibility")) $("cred_feeResponsibility").value = "keelix-pays";
       $("credStatus").textContent = "Saved (encrypted).";
       await loadClientCredentials(clientId);
     } catch (err) { $("credStatus").textContent = err.message || "Save failed."; }
@@ -12484,6 +12980,8 @@ function plProjectPortals(tracks, creds) {
     let host = ""; try { host = url ? new URL(url).hostname.toLowerCase() : ""; } catch { /* ignore */ }
     const portal = { label: t.label || t.channel || t.type, url, slug, host, matched: false };
     portal.matched = all.some((c) => plLoginFits(c, portal));
+    // #201: a saved login nobody has said who pays for stalls the job at the portal's fee screen.
+    portal.payerMissing = portal.matched && !all.some((c) => plLoginFits(c, portal) && c.feeResponsibility);
     portals.push(portal);
   }
   // Missing first: that is what the operator opened the modal to fix. (Array sort is stable.)
@@ -12500,6 +12998,7 @@ function plCredRowHtml(c) {
         <div>
           <div class="pl-cred-meta"><strong>${esc(name)}</strong> · ${esc(c.usernameReference)} ${c.hasSecret ? "🔒" : ""}</div>
           ${host && host !== name ? `<div class="pl-cred-url">${esc(host)}</div>` : ""}
+          ${feePayerControlHtml(c, "data-pl-fee")}
         </div>
         <button type="button" class="danger-button danger-button-sm" data-pl-del="${esc(c.id)}">Delete</button>
       </div>`;
@@ -12537,7 +13036,7 @@ async function renderPortalLogins() {
   $("plPortalChips").innerHTML = view.portals.map((p) => `<button type="button" class="pl-chip" data-pl-slug="${esc(p.slug)}" data-pl-url="${esc(p.url)}" data-has-secret="${p.matched ? 1 : 0}">
       <i data-lucide="${p.matched ? "shield-check" : "key-round"}"></i>
       <span>${esc(p.label)}</span>
-      <span class="pl-chip-state">${p.matched ? "login saved" : "needs login"}</span>
+      <span class="pl-chip-state">${p.matched ? (p.payerMissing ? "who pays not set" : "login saved") : "needs login"}</span>
     </button>`).join("");
   $("plPortalChips").querySelectorAll("[data-pl-slug]").forEach((chip) => chip.addEventListener("click", () => {
     $("pl_portalType").value = chip.getAttribute("data-pl-slug");
@@ -12549,6 +13048,9 @@ async function renderPortalLogins() {
   $("plList").querySelectorAll("[data-pl-toggle]").forEach((b) => b.addEventListener("click", async () => {
     state.plShowAllLogins = !state.plShowAllLogins;
     await renderPortalLogins();
+  }));
+  $("plList").querySelectorAll("[data-pl-fee]").forEach((sel) => sel.addEventListener("change", () => {
+    if (sel.value) saveFeePayer(client.id, sel.getAttribute("data-pl-fee"), sel.value, $("plStatus"), renderPortalLogins);
   }));
   $("plList").querySelectorAll("[data-pl-del]").forEach((b) => b.addEventListener("click", async () => {
     try {
@@ -12562,7 +13064,9 @@ async function renderPortalLogins() {
   if (summary) {
     const total = view.portals.length;
     const ready = view.portals.filter((p) => p.matched).length;
-    summary.textContent = total ? `${ready}/${total} portal logins saved` : (creds.length ? `${creds.length} saved` : "");
+    const unpaid = view.portals.filter((p) => p.payerMissing).length;
+    summary.textContent = (total ? `${ready}/${total} portal logins saved` : (creds.length ? `${creds.length} saved` : ""))
+      + (unpaid ? ` · ${unpaid} without who pays` : "");
   }
   if (window.lucide) window.lucide.createIcons();
 }
@@ -12579,12 +13083,15 @@ if ($("plSaveBtn")) $("plSaveBtn").addEventListener("click", async () => {
     portalUrl: $("pl_portalUrl").value.trim(),
     username: $("pl_username").value.trim(),
     password: $("pl_password").value,
+    feeResponsibility: $("pl_feeResponsibility") ? $("pl_feeResponsibility").value : "",
   };
   if (!body.username || !body.password) { $("plStatus").textContent = "Username and password are required."; return; }
+  if (!body.feeResponsibility) { $("plStatus").textContent = "Say who pays this portal's fees."; return; }
   if (!body.portalUrl) { $("plStatus").textContent = "Portal URL is required so the bot matches this login to the right portal."; return; }
   try {
     await api(`/api/clients/${client.id}/portal-credentials`, { method: "POST", body: JSON.stringify(body) });
     $("pl_username").value = ""; $("pl_password").value = "";
+    if ($("pl_feeResponsibility")) $("pl_feeResponsibility").value = "keelix-pays";
     $("plStatus").textContent = "Saved (encrypted).";
     await renderPortalLogins();
   } catch (err) { $("plStatus").textContent = err.message || "Save failed."; }
@@ -13821,6 +14328,34 @@ const SSE_EVENT_KINDS = {
   reviewer_gate_rejudged: "info",
 };
 
+// ONE REFRESH PER BURST OF EVENTS. Every event used to reload the whole board (list, knowledge
+// base, code profiles, recipes, forms…) in every open dashboard, and — when a project page was open —
+// reload that page's ~30 panels TWICE (once for the event, once inside loadProjects), whichever
+// project the event was about. The job queue emits one event per pipeline pass and the inbox one per
+// poll that fetched mail, so a busy minute kept the open job reloading. Now the toast still shows at
+// once; the data refresh waits for the burst to settle, runs once, and reopens the open project only
+// when an event named it (or named no project, so it may concern it) and the person is on its page.
+// Opening a project from the board is no longer done for them: a refresh never navigates.
+const SSE_REFRESH_DELAY_MS = 1500;
+const sseRefresh = { timer: null, projectIds: new Set(), unnamed: false };
+function scheduleSseRefresh(projectId) {
+  if (projectId) sseRefresh.projectIds.add(projectId);
+  else sseRefresh.unnamed = true;
+  if (sseRefresh.timer) return;
+  sseRefresh.timer = setTimeout(async () => {
+    sseRefresh.timer = null;
+    const named = sseRefresh.projectIds;
+    const unnamed = sseRefresh.unnamed;
+    sseRefresh.projectIds = new Set();
+    sseRefresh.unnamed = false;
+    try { await loadProjects({ reselect: false }); } catch { /* the next event or a manual refresh retries */ }
+    const openId = state.selectedProjectId;
+    if (openId && state.page === "project" && (unnamed || named.has(openId))) {
+      selectProject(openId).catch(() => null);
+    }
+  }, SSE_REFRESH_DELAY_MS);
+}
+
 function connectSse() {
   const es = new EventSource("/api/events");
   es.addEventListener("ping", () => { /* heartbeat — no action needed */ });
@@ -13830,12 +14365,8 @@ function connectSse() {
         const data = JSON.parse(ev.data);
         showToast(data.message || type, kind);
         bumpNotifBadge(data.message || type, kind);
-        // Refresh the affected project row if it's currently open.
-        if (data.projectId && state.selectedProjectId === data.projectId) {
-          selectProject(data.projectId).catch(() => null);
-        }
-        // Refresh the project list so board status badges update.
-        loadProjects().catch(() => null);
+        // Refresh the board, and the open project if the event may concern it — once per burst.
+        scheduleSseRefresh(data.projectId || null);
       } catch { /* malformed event — ignore */ }
     });
   }
@@ -14008,6 +14539,122 @@ async function createClientLink(kind) {
     status.textContent = kind === "tracking" ? "Read-only company tracking link. Copy and share it with this client." : "One-time login request, valid for 72 hours. Copy and share it with this client.";
   } catch (err) { status.textContent = err.message || "Could not create link."; }
 }
+// ---------------------------------------------------------------------------
+// COMPANY SETUP (backend/src/clientOnboarding.ts). Staff mint the client's own setup link, then accept,
+// edit or reject each "client-supplied" answer. Only an accept changes the client record, and it is
+// recorded against the named person (signed in, or the name typed when sign-in is off).
+// ---------------------------------------------------------------------------
+function onboardingValueText(p, value) {
+  if (Array.isArray(value)) {
+    if (!value.length) return "(none)";
+    if (p.type === "licences") return value.map((l) => `${l.state} ${String(l.kind || "").replace(/_/g, " ")} ${l.number}${l.expires ? ` (expires ${l.expires})` : ""}`).join("; ");
+    if (p.type === "serviceArea") return value.map((a) => (a.kind === "state" ? `${a.state} (whole state)` : `${a.kind}: ${a.name}, ${a.state}`)).join("; ");
+    return value.join("; ");
+  }
+  return value == null || value === "" ? "(blank)" : String(value);
+}
+function onboardingStatus(text, kind) {
+  const el = $("onboardingStatus");
+  if (!el) return;
+  el.textContent = text || "";
+  el.className = `muted clients-creds-hint${kind === "error" ? " error" : ""}`;
+}
+async function loadClientOnboarding(clientId) {
+  const linksEl = $("onboardingLinks"); const propsEl = $("onboardingProposals"); const filesEl = $("onboardingFiles");
+  if (!linksEl || !propsEl || !filesEl) return;
+  let data;
+  try { data = await api(`/api/clients/${clientId}/onboarding`); }
+  catch (err) { onboardingStatus(err.message || "Could not load company setup.", "error"); return; }
+  if (state.editingClientId !== clientId) return;
+  state.onboarding = data;
+  const links = data.links || [];
+  linksEl.innerHTML = links.length
+    ? `<ul class="cred-list">${links.slice(0, 5).map((l) => `<li class="cred-row"><span>Link ${esc(l.state)} · created ${esc(String(l.createdAt || "").slice(0, 10))} by ${esc(l.createdBy || "")}${l.state === "open" ? ` · expires ${esc(String(l.expiresAt || "").slice(0, 10))}${l.draftSavedAt ? " · client has saved a draft" : ""}` : ""}${l.submittedAt ? ` · sent ${esc(String(l.submittedAt).slice(0, 10))}` : ""}</span>${l.state === "open" ? `<button type="button" class="secondary" data-onboarding-revoke="${esc(l.id)}">Revoke</button>` : ""}</li>`).join("")}</ul>`
+    : `<p class="muted clients-creds-hint">No setup link yet.</p>`;
+  const props = data.proposals || [];
+  propsEl.innerHTML = props.length
+    ? `<h4 style="margin:10px 0 4px">Answers waiting (${props.length}, client-supplied)</h4>
+       <table class="onboarding-proposals"><thead><tr><th>Field</th><th>On file</th><th>Client sent</th><th></th></tr></thead><tbody>
+       ${props.map((p) => `<tr data-proposal-id="${esc(p.id)}"><td>${esc(p.label)}</td><td>${esc(onboardingValueText(p, p.current))}</td><td>${esc(onboardingValueText(p, p.proposed))}${p.type === "licences" || p.type === "serviceArea" ? ` <span class="muted">(added to what is on file)</span>` : ""}</td>
+         <td><button type="button" class="secondary" data-onboarding-accept="${esc(p.id)}">Accept</button>${p.type === "licences" || p.type === "serviceArea" ? "" : `<button type="button" class="secondary" data-onboarding-edit="${esc(p.id)}">Edit…</button>`}<button type="button" class="danger-button" data-onboarding-reject="${esc(p.id)}">Reject</button></td></tr>`).join("")}
+       </tbody></table>
+       <div class="actions"><button type="button" class="primary" id="onboardingAcceptAllBtn">Accept all</button></div>`
+    : "";
+  const files = data.files || [];
+  filesEl.innerHTML = files.length
+    ? `<h4 style="margin:10px 0 4px">Certificates the client uploaded</h4><ul class="cred-list">${files.map((f) => `<li class="cred-row"><a href="/api/clients/${encodeURIComponent(clientId)}/onboarding/files/${encodeURIComponent(f.id)}">${esc(f.fileName)}</a> <span class="muted">${esc(String(f.kind).replace(/_/g, " "))} · ${esc(String(Math.ceil(Number(f.sizeBytes) / 1024)))} KB</span></li>`).join("")}</ul>`
+    : "";
+  // HOW THE CLIENT SAYS IT FILES with each authority (its own word; never a destination). A person
+  // checks and confirms each in Destinations to confirm; here they can only set an answer aside.
+  const filing = data.filingStatements || [];
+  if (filing.length) {
+    filesEl.innerHTML += `<h4 style="margin:10px 0 4px">How the client says it files (${filing.length}, client-supplied)</h4>
+      <p class="muted clients-creds-hint">The client's word only. Check and confirm each one in Destinations to confirm; nothing files to an address until a person confirms it there.</p>
+      <ul class="cred-list">${filing.map((f) => `<li class="cred-row" data-filing-statement="${esc(f.id)}"><span><strong>${esc(f.authority.name)}</strong>${f.authority.state ? `, ${esc(f.authority.state)}` : ""} · ${f.kind === "email" ? "email" : "portal"}: <code>${esc(f.address)}</code>${f.hasAccount ? ` · account: ${esc(f.hasAccount)}` : ""}${f.example ? ` · example: ${esc(f.example)}` : ""} <span class="muted">${esc(String(f.statedAt || "").slice(0, 10))}</span></span> <button type="button" class="secondary" data-filing-dismiss="${esc(f.id)}">Set aside</button></li>`).join("")}</ul>`;
+    filesEl.querySelectorAll("[data-filing-dismiss]").forEach((b) => b.addEventListener("click", async () => {
+      if (await dismissFilingStatement(clientId, b.dataset.filingDismiss, b)) loadClientOnboarding(clientId);
+    }));
+  }
+  linksEl.querySelectorAll("[data-onboarding-revoke]").forEach((b) => b.addEventListener("click", () => revokeOnboardingLink(b.dataset.onboardingRevoke)));
+  propsEl.querySelectorAll("[data-onboarding-accept]").forEach((b) => b.addEventListener("click", () => decideOnboarding({ accept: [b.dataset.onboardingAccept] })));
+  propsEl.querySelectorAll("[data-onboarding-reject]").forEach((b) => b.addEventListener("click", () => decideOnboarding({ reject: [b.dataset.onboardingReject] })));
+  propsEl.querySelectorAll("[data-onboarding-edit]").forEach((b) => b.addEventListener("click", () => {
+    const p = props.find((x) => x.id === b.dataset.onboardingEdit);
+    if (!p) return;
+    const typed = window.prompt(`${p.label}: the value to save (the client sent "${onboardingValueText(p, p.proposed)}")`, onboardingValueText(p, p.proposed));
+    if (typed == null) return;
+    decideOnboarding({ edits: { [p.id]: typed } });
+  }));
+  $("onboardingAcceptAllBtn")?.addEventListener("click", () => decideOnboarding({ acceptAll: true }));
+}
+async function onboardingPerson(lede) {
+  const auth = await authForDecision();
+  return namedPersonConsent(auth, lede, "decided", "a client's company setup is reviewed by a named person");
+}
+async function decideOnboarding(body) {
+  const clientId = state.editingClientId;
+  if (!clientId) return;
+  const lede = body.acceptAll ? "Accept every answer this client sent? They are written to the client record." : body.reject ? "Reject this answer? The client record stays as it is." : "Accept this answer? It is written to the client record.";
+  const by = await onboardingPerson(lede);
+  if (by == null) return;
+  try {
+    const out = await api(`/api/clients/${clientId}/onboarding/decide`, { method: "POST", body: JSON.stringify({ ...body, ...(by ? { decidedBy: by } : {}) }) });
+    onboardingStatus(`${out.accepted} accepted, ${out.rejected} rejected.`);
+    await loadClients();
+    editClient(clientId);
+  } catch (err) { onboardingStatus(err.message || "That did not work.", "error"); }
+}
+async function revokeOnboardingLink(linkId) {
+  const clientId = state.editingClientId;
+  if (!clientId) return;
+  const by = await onboardingPerson("Revoke this company setup link? The client can no longer open it.");
+  if (by == null) return;
+  try {
+    await api(`/api/clients/${clientId}/onboarding-links/${encodeURIComponent(linkId)}/revoke`, { method: "POST", body: JSON.stringify(by ? { decidedBy: by } : {}) });
+    onboardingStatus("Link revoked.");
+    await loadClientOnboarding(clientId);
+  } catch (err) { onboardingStatus(err.message || "Could not revoke.", "error"); }
+}
+async function createOnboardingLink() {
+  const clientId = state.editingClientId;
+  if (!clientId) return;
+  const by = await onboardingPerson("Create a company setup link for this client? Any open setup link is replaced (its draft carries over).");
+  if (by == null) return;
+  $("onboardingLinkResultWrap").hidden = true;
+  try {
+    const out = await api(`/api/clients/${clientId}/onboarding-links`, { method: "POST", body: JSON.stringify(by ? { decidedBy: by } : {}) });
+    if (state.editingClientId !== clientId) return;
+    $("onboardingLinkResult").value = new URL(out.url, location.origin).href;
+    $("onboardingLinkResultWrap").hidden = false;
+    $("onboardingLinkResult").select();
+    // The go-live link guard: a link built on a base the client cannot open is said so, before it is shared.
+    onboardingStatus(out.linkProblem
+      ? `Do not send this yet: ${out.linkProblem}. Fix PUBLIC_BASE_URL, then create the link again.`
+      : `Valid until ${String(out.expiresAt || "").slice(0, 10)}. Copy and share it with this client; it is not shown again.`, out.linkProblem ? "error" : "");
+    await loadClientOnboarding(clientId);
+  } catch (err) { onboardingStatus(err.message || "Could not create the link.", "error"); }
+}
+$("onboardingLinkBtn")?.addEventListener("click", () => createOnboardingLink());
 $("clientTrackingLinkBtn")?.addEventListener("click", () => createClientLink("tracking"));
 $("clientCredentialLinkBtn")?.addEventListener("click", () => createClientLink("credentials"));
 $("billingPreviewBtn")?.addEventListener("click", () => previewBillingStatement());

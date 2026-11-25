@@ -81,6 +81,10 @@ function mapClient(row: Row, identities: ClientPortalIdentity[]): ClientRecord {
     logoMime: s(row.logo_mime) || "image/png",
     billingMode: s(row.billing_mode),
     serviceFeeUsd: row.service_fee_usd == null || row.service_fee_usd === "" ? null : Number(row.service_fee_usd),
+    serviceFeePermitUsd: row.service_fee_permit_usd == null || row.service_fee_permit_usd === "" ? null : Number(row.service_fee_permit_usd),
+    serviceFeeNemUsd: row.service_fee_nem_usd == null || row.service_fee_nem_usd === "" ? null : Number(row.service_fee_nem_usd),
+    pricingTier: s(row.pricing_tier) === "founding" ? "founding" : "",
+    feeLimitUsd: row.fee_limit_usd == null || row.fee_limit_usd === "" ? null : Number(row.fee_limit_usd),
     portalIdentities: identities,
     stateLicenses: parseStateLicenses(row.state_licenses_json),
     partnerContacts: parsePartnerContacts(row.partner_contacts_json),
@@ -508,12 +512,20 @@ const FIELD_COLUMNS: [keyof ClientRecord, string][] = [
   ["authorizedSignerTitle", "authorized_signer_title"],
   ["billingMode", "billing_mode"],
   ["serviceFeeUsd", "service_fee_usd"],
+  ["serviceFeePermitUsd", "service_fee_permit_usd"],
+  ["serviceFeeNemUsd", "service_fee_nem_usd"],
+  ["pricingTier", "pricing_tier"],
+  ["feeLimitUsd", "fee_limit_usd"],
 ];
 
-// serviceFeeUsd is REAL; the intake tag is normalised (#489); everything else is coerced to string.
+const MONEY_FIELDS = new Set<keyof ClientRecord>(["serviceFeeUsd", "serviceFeePermitUsd", "serviceFeeNemUsd", "feeLimitUsd"]);
+
+// The service fees are REAL; the intake tag is normalised (#489); everything else is coerced to string.
 function fieldValue(key: keyof ClientRecord, raw: unknown): string | number | null {
   if (key === "intakeTag") return normalizeIntakeTag(raw);
-  return key === "serviceFeeUsd" ? moneyOrNull(raw) : s(raw);
+  // Only "founding" means anything (the founding prices and cap); anything else is the standard tier.
+  if (key === "pricingTier") return s(raw).trim().toLowerCase() === "founding" ? "founding" : "";
+  return MONEY_FIELDS.has(key) ? moneyOrNull(raw) : s(raw);
 }
 
 /** The intake tag as stored: lower-case, and only what can sit after the + of an email address
@@ -736,6 +748,12 @@ export function deleteClient(db: AppDb, clientId: string): { deleted: boolean } 
     throw new HttpError(409, `Cannot delete client: ${linked.count} project(s) are still linked to it.`);
   }
   return db.transaction(() => {
+    // The Company setup link (clientOnboarding.ts, v81): its links, the client's proposals and its
+    // uploaded certificates, and what it said about how it files (v82), are its data and leave with it.
+    for (const t of ["client_onboarding_files", "client_onboarding_proposals", "client_onboarding_links", "client_filing_statements"]) {
+      try { db.run(`DELETE FROM ${t} WHERE client_id = ?`, [clientId]); }
+      catch { /* a database older than v81: no such table, nothing to purge */ }
+    }
     db.run("DELETE FROM client_portal_identities WHERE client_id = ?", [clientId]);
     db.run("DELETE FROM portal_profiles WHERE client_id = ?", [clientId]);
     db.run("DELETE FROM clients WHERE id = ?", [clientId]);
@@ -986,6 +1004,12 @@ export async function offboardClient(db: AppDb, clientId: string, opts: Offboard
     // way the runbook recommends.
     try { db.run("DELETE FROM credential_requests WHERE client_id = ?", [clientId]); }
     catch { /* pre-secure-link database: no such table, nothing to purge */ }
+    // The Company setup link (clientOnboarding.ts, v81): its links, the client's proposals and its
+    // uploaded certificates, and what it said about how it files (v82), are its data and leave with it.
+    for (const t of ["client_onboarding_files", "client_onboarding_proposals", "client_onboarding_links", "client_filing_statements"]) {
+      try { db.run(`DELETE FROM ${t} WHERE client_id = ?`, [clientId]); }
+      catch { /* a database older than v81: no such table, nothing to purge */ }
+    }
     // Per-client IMAP sources carry imap_pass_encrypted — another live secret.
     db.run("DELETE FROM email_tracking_sources WHERE client_id = ?", [clientId]);
     db.run("DELETE FROM client_portal_identities WHERE client_id = ?", [clientId]);

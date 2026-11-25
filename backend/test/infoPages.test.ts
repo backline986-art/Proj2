@@ -70,7 +70,7 @@ import {
   INFO_PAGE_IDENTITY_VERSION, digestInfoPageIdentity, infoPageEvidence, infoPagePrefixOf, sha256Hex,
   type InfoPageIdentityMaterial,
 } from "../../shared/src/infoPagePass";
-import type { InfoPageCandidateCapture, InfoPageIncident } from "../../shared/src/types";
+import type { InfoPageCandidateCapture, InfoPageIncident, InfoPageNextInformation } from "../../shared/src/types";
 
 const fx = await setupStageFixture("info-pages");
 const { db } = fx;
@@ -146,11 +146,12 @@ let handed: { infoPagePasses?: unknown[]; infoPagePriorProgress?: boolean } | nu
 let nextCapture: InfoPageCandidateCapture | undefined;
 let nextPassed: Array<{ passId: string; where: string }> | undefined;
 let nextIncidents: InfoPageIncident[] | undefined;
+let nextNextInfo: InfoPageNextInformation[] | undefined;
 const stubLearn = () => ({
   ok: false, portalName: "stub", steps: [], reviewScreen: { fields: [], bodyTextSnippet: "" }, finalSubmitRecorded: false, pageCount: 2, pauseReason: null,
   message: nextIncidents?.some((i) => i.phase === "after") ? "STOPPED AFTER A VERIFIED INFORMATION PAGE: the page it led to reads as filed." : "HELD AT AN INFORMATION PAGE NO PERSON HAS VERIFIED: the network backstop held \"Next\".",
   stopReason: nextIncidents?.some((i) => i.phase === "after") ? "info_page_incident" : "backstop_abort",
-  ...(nextCapture ? { infoPageCandidate: nextCapture } : {}), ...(nextPassed ? { infoPagePassed: nextPassed } : {}), ...(nextIncidents ? { infoPageIncidents: nextIncidents } : {}),
+  ...(nextCapture ? { infoPageCandidate: nextCapture } : {}), ...(nextPassed ? { infoPagePassed: nextPassed } : {}), ...(nextIncidents ? { infoPageIncidents: nextIncidents } : {}), ...(nextNextInfo ? { infoPageNextInfo: nextNextInfo } : {}),
 });
 // Round 2: every attempt's input is kept (the headed retry is a second call), and a test may script
 // the attempts itself (report a use through the learner's own callback, throw, look bot-blocked…).
@@ -166,8 +167,8 @@ autoLearn.setAutoLearnSeamsForTests({ learnPortal: (async (input: LearnInput) =>
   const next = scripted.shift();
   return next ? next(input) : stubLearn();
 }) as never });
-const runLearn = async (projectId: string, c?: InfoPageCandidateCapture, passed?: Array<{ passId: string; where: string }>, incidents?: InfoPageIncident[]) => {
-  nextCapture = c; nextPassed = passed; nextIncidents = incidents; handed = null; handedAll = [];
+const runLearn = async (projectId: string, c?: InfoPageCandidateCapture, passed?: Array<{ passId: string; where: string }>, incidents?: InfoPageIncident[], nextInfo?: InfoPageNextInformation[]) => {
+  nextCapture = c; nextPassed = passed; nextIncidents = incidents; nextNextInfo = nextInfo; handed = null; handedAll = [];
   return autoLearn.autoLearnPortal(db, projectId, { scope: "ahj", portalUrl: `${ORIGIN}/permits/sfjsp?interviewID=Home`, createdBy: "operator", permitType: "structural" });
 };
 
@@ -457,6 +458,133 @@ await check("INCIDENT AFTER THE CLICK: the pass is DELETED and audited; the lear
   assert.equal(db.query("SELECT id FROM submissions WHERE project_id = ? AND status IN ('submitted', 'submitted_unconfirmed', 'awaiting_human_submit', 'staged')", [P]).length, 0);
   assert.equal(db.query("SELECT id FROM portal_runs WHERE project_id = ? AND (confirmation_number <> '' OR status = 'submitted')", [P]).length, 0);
   assert.equal(db.query("SELECT id FROM permit_check_targets WHERE project_id = ? AND (application_number <> '' OR permit_number <> '')", [P]).length, 0);
+});
+await check("#279: an after-click incident keeps the page after's text on its audit row", async () => {
+  const { P, passId } = await verifiedPage("Incident After Text Page");
+  await runLearn(P, undefined, [{ passId, where: `${ORIGIN}/permits/sfjsp` }],
+    [{ passId, phase: "after", why: ["the page after the click reads as filed"], where: `${ORIGIN}/permits/sfjsp`, afterText: "Request received. Confirmation number: PR-####-####" }]);
+  const a = fx.audits("portal.info_page_pass_incident").filter((x) => JSON.parse(x.details).passId === passId);
+  assert.equal(a.length, 1);
+  assert.equal(JSON.parse(a[0].details).afterText, "Request received. Confirmation number: PR-####-####");
+});
+await check("#279 (option 1): a verified page that led to ANOTHER information page — the pass is KEPT, the evidence audited, and the second page recorded as a candidate", async () => {
+  const { P, passId } = await verifiedPage("Chain First Page");
+  const second = capture(material((m) => { m.title = "Before You Apply"; m.text = "Before You Apply Your account was set up successfully. Previous Next"; }));
+  await runLearn(P, second, [{ passId, where: `${ORIGIN}/permits/sfjsp` }], undefined, [{ passId, where: `${ORIGIN}/permits/sfjsp`, afterText: "Before You Apply Your account was set up successfully. Previous Next" }]);
+  assert.ok(IP.liveInfoPagePasses(db).some((p) => p.id === passId), "the first verification was withdrawn");
+  assert.equal(fx.audits("portal.info_page_pass_incident").filter((x) => JSON.parse(x.details).passId === passId).length, 0);
+  const ev = fx.audits("portal.info_page_next_information").filter((x) => JSON.parse(x.details).passId === passId);
+  assert.equal(ev.length, 1);
+  assert.equal(ev[0].project_id, P);
+  assert.equal(JSON.parse(ev[0].details).withdrawn, false);
+  assert.match(JSON.parse(ev[0].details).afterText, /Before You Apply/);
+  assert.ok(cand(P).some((x) => x.status === "open" && x.identity_sha256 === second.identitySha256), "the second page was not recorded for a person to verify");
+});
+// #279 — THE WAIT (Helm's review of #294). A receipt with only acknowledgement wording and a
+// "Continue" reads as another information page, so a kept pass must not be usable again until a
+// person has ruled on the page it led to.
+// KILL CHECK: delete `if (waiting) return [waiting.reason];` in reserveInfoPagePassUse → W1 fails.
+const SFJSP = `${ORIGIN}/permits/sfjsp`;
+const chainTo = async (first: string, second: string, secondText: string) => {
+  const { P, passId } = await verifiedPage(first);
+  const next = capture(material((m) => { m.title = second; m.text = secondText; }));
+  await runLearn(P, next, [{ passId, where: SFJSP }], undefined, [{ passId, where: SFJSP, afterText: secondText }]);
+  const nextCid = String(cand(P).find((x) => x.identity_sha256 === next.identitySha256)?.id ?? "");
+  assert.ok(nextCid, "the page it led to was not recorded as a candidate");
+  return { P, passId, next, nextCid };
+};
+await check("#279 W1 WAIT: a pass whose page led to another information page is refused at every admission (another project too), shown on hold, and its card names the page with its acknowledgement wording", async () => {
+  const { P, passId, nextCid } = await chainTo("Wait First Page", "Wait Second Page", "Wait Second Page Thank you! Your request was sent successfully. Continue");
+  const Q = fx.newProject();
+  assert.deepEqual(IP.reserveInfoPagePassUse(db, Q, "", "ahj", { passId, where: SFJSP }), [IP.INFO_PAGE_WAITING_REFUSAL]);
+  assert.equal(fx.audits("portal.info_page_passed").filter((x) => JSON.parse(x.details).passId === passId && x.project_id === Q).length, 0, "a refused admission wrote a use");
+  const listed = IP.listInfoPagePasses(db).find((x) => x.id === passId)!;
+  assert.equal(listed.live, false);
+  assert.match(String(listed.waiting), /led to another information page/);
+  const card = IP.listInfoPageCandidates(db, P).find((x) => x.id === nextCid)!;
+  assert.equal(card.ledFromVerified?.length, 1);
+  assert.equal(card.ledFromVerified![0].passId, passId);
+  assert.match(card.ledFromVerified![0].afterText, /Thank you!/);
+  assert.ok(card.ledFromVerified![0].acknowledgement.includes("successfully") && card.ledFromVerified![0].acknowledgement.some((a) => /thank/.test(a)), JSON.stringify(card.ledFromVerified![0].acknowledgement));
+});
+await check("#279 W2 RELEASE: a named person verifying the page it led to ends the wait (audited), and the admission takes the pass again", async () => {
+  const { P, passId, next, nextCid } = await chainTo("Release First Page", "Release Second Page", "Release Second Page Your account was set up successfully. Previous Next");
+  const Q = fx.newProject();
+  assert.deepEqual(IP.reserveInfoPagePassUse(db, Q, "", "ahj", { passId, where: SFJSP }), [IP.INFO_PAGE_WAITING_REFUSAL]);
+  const second = verifyFn(P, nextCid, next.identitySha256).passId;
+  const ruled = fx.audits("portal.info_page_next_information_ruled").filter((x) => JSON.parse(x.details).passId === passId);
+  assert.equal(ruled.length, 1);
+  assert.equal(JSON.parse(ruled[0].details).ruling, "released");
+  assert.equal(JSON.parse(ruled[0].details).nextPassId, second);
+  assert.equal(ruled[0].actor_name, "Pat Verifier");
+  assert.equal(IP.infoPagePassWaiting(db, passId), null);
+  assert.deepEqual(IP.reserveInfoPagePassUse(db, Q, "", "ahj", { passId, where: SFJSP }), []);
+  assert.equal(IP.listInfoPagePasses(db).find((x) => x.id === passId)!.live, true);
+});
+await check("#279 W3 DECLINE: \"Not an information page\" on the page it led to withdraws the waiting pass as an AFTER-CLICK incident, with the may-have-filed warning", async () => {
+  const { P, passId, nextCid } = await chainTo("Decline First Page", "Decline Second Page", "Decline Second Page We received your request. Thank you. Continue");
+  IP.dismissInfoPageCandidate(db, P, nextCid, { dismissedBy: "Dana Dismisser", userId: "" });
+  assert.equal(db.query("SELECT id FROM portal_info_page_passes WHERE id = ?", [passId]).length, 0, "the pass is still there");
+  const inc = fx.audits("portal.info_page_pass_incident").filter((x) => JSON.parse(x.details).passId === passId);
+  assert.equal(inc.length, 1);
+  assert.equal(JSON.parse(inc[0].details).phase, "after");
+  assert.equal(JSON.parse(inc[0].details).withdrawn, true);
+  assert.match(JSON.parse(inc[0].details).why[0], /Dana Dismisser marked the page this verified page led to "not an information page"/);
+  assert.ok(IP.listInfoPageFilingWarnings(db, P).some((w) => w.passId === passId), "no may-have-filed warning on the project that used it");
+  const ruled = fx.audits("portal.info_page_next_information_ruled").filter((x) => JSON.parse(x.details).passId === passId);
+  assert.equal(ruled.length, 1);
+  assert.equal(JSON.parse(ruled[0].details).ruling, "declined");
+});
+await check("#279 W4 A PAGE ALREADY MARKED \"not an information page\" declines the wait at once (withdrawn as an incident)", async () => {
+  const text = "Known Receipt Page Thanks for applying. Continue";
+  const P0 = fx.newProject();
+  const receipt = capture(material((m) => { m.title = "Known Receipt Page"; m.text = text; }));
+  await runLearn(P0, receipt);
+  IP.dismissInfoPageCandidate(db, P0, String(cand(P0)[0].id), { dismissedBy: "Dana Dismisser", userId: "" });
+  const { P, passId } = await verifiedPage("Known Receipt First Page");
+  // The same page reached from P: recordInfoPageCandidate answers with P's own row (a new open one or,
+  // when P itself had dismissed it, that row). Dismiss it on P first, then run the chain.
+  await runLearn(P, receipt);
+  IP.dismissInfoPageCandidate(db, P, String(cand(P).find((x) => x.identity_sha256 === receipt.identitySha256)!.id), { dismissedBy: "Dana Dismisser", userId: "" });
+  await runLearn(P, receipt, [{ passId, where: SFJSP }], undefined, [{ passId, where: SFJSP, afterText: text }]);
+  assert.equal(db.query("SELECT id FROM portal_info_page_passes WHERE id = ?", [passId]).length, 0, "the pass is still there");
+  assert.equal(fx.audits("portal.info_page_pass_incident").filter((x) => JSON.parse(x.details).passId === passId && JSON.parse(x.details).phase === "after").length, 1);
+});
+await check("#279 W5 SAME ATTEMPT: the page it led to is itself verified and its own pass was admitted right after: the ruling is on record, no wait", async () => {
+  const first = await verifiedPage("Both Verified First Page");
+  const second = await verifiedPage("Both Verified Second Page");
+  const R = fx.newProject();
+  await runLearn(R, undefined, [{ passId: first.passId, where: SFJSP }, { passId: second.passId, where: SFJSP }], undefined, [{ passId: first.passId, where: SFJSP, afterText: "Both Verified Second Page Previous Next" }]);
+  assert.equal(IP.infoPagePassWaiting(db, first.passId), null);
+  const ruled = fx.audits("portal.info_page_next_information_ruled").filter((x) => JSON.parse(x.details).passId === first.passId);
+  assert.equal(ruled.length, 1);
+  assert.equal(JSON.parse(ruled[0].details).nextPassId, second.passId);
+  assert.deepEqual(IP.reserveInfoPagePassUse(db, fx.newProject(), "", "ahj", { passId: first.passId, where: SFJSP }), []);
+});
+await check("#279 W6 SAME ATTEMPT, no verified page after: a use admitted BEFORE it, or none after it, releases nothing", async () => {
+  const first = await verifiedPage("Order First Page");
+  const other = await verifiedPage("Order Other Page");
+  const R = fx.newProject();
+  await runLearn(R, undefined, [{ passId: other.passId, where: SFJSP }, { passId: first.passId, where: SFJSP }], undefined, [{ passId: first.passId, where: SFJSP, afterText: "Order Second Page Previous Next" }]);
+  assert.ok(IP.infoPagePassWaiting(db, first.passId), "a use admitted before it released the wait");
+});
+
+await check("#279 W7 A WAIT NEVER LAPSES WITH ITS PROJECT: deleting the project whose run put a pass on hold withdraws that pass (audited with no project); a pass with no wait there is untouched", async () => {
+  // KILL CHECK: delete the waitedHere loop in deleteProjectInfoPages → this check fails (the pass goes live again).
+  const { passId: waitingPass } = await verifiedPage("Wait Deleted Verified Page");
+  const R = fx.newProject();
+  const nextPage = capture(material((m) => { m.title = "Wait Deleted Second Page"; m.text = "Wait Deleted Second Page Thank you. Continue"; }));
+  await runLearn(R, nextPage, [{ passId: waitingPass, where: SFJSP }], undefined, [{ passId: waitingPass, where: SFJSP, afterText: "Wait Deleted Second Page Thank you. Continue" }]);
+  const { passId: untouched } = await verifiedPage("Wait Deleted Untouched Page");
+  assert.ok(IP.infoPagePassWaiting(db, waitingPass), "the pass was not on hold");
+  fx.repo.deleteProject(db, R);
+  assert.equal(db.query("SELECT id FROM portal_info_page_passes WHERE id = ?", [waitingPass]).length, 0, "the waiting pass outlived its project's wait");
+  assert.ok(!IP.liveInfoPagePasses(db).some((p) => p.id === waitingPass));
+  const a = fx.audits("portal.info_page_pass_withdrawn").filter((x) => JSON.parse(x.details).passId === waitingPass);
+  assert.equal(a.length, 1);
+  assert.equal(a[0].project_id, null);
+  assert.match(JSON.parse(a[0].details).reason, /waited for a person's ruling/);
+  assert.ok(IP.liveInfoPagePasses(db).some((p) => p.id === untouched), "a pass with no wait on that project was withdrawn");
 });
 await check("an incident on a pass that is already gone is audited all the same (withdrawn: false)", async () => {
   const P = fx.newProject();

@@ -1,7 +1,9 @@
 // OFFLINE LEARN + REPLAY SCOREBOARD — the before/after measurement for the bot (plan item M1).
 //
-//   npm run bench:offline                         every cell (3 bases x 8 variants)
+//   npm run bench:offline                         every cell (4 bases x 8 variants)
 //   npm run bench:offline -- --only accela        cells whose name contains "accela"
+//                                                 (bases: accela, powerclerk, spa, selfserve; selfserve was
+//                                                 added 2026-11-16, so a full run before then had 24 cells)
 //   npm run bench:offline -- --learn-variants     ALSO learn every variant first-time
 //   npm run bench:offline -- --reuse-learns .probe/bench/<earlier>.json
 //                                                 replay the recipes an earlier run learned
@@ -153,6 +155,11 @@ function makeProject(p: SynthProject): ProjectRecord {
     moduleManufacturer: p.moduleMake, moduleModel: p.moduleModel, moduleQuantity: p.moduleQty,
     inverterManufacturer: p.inverterMake, inverterModel: p.inverterModel, inverterQuantity: p.inverterQty,
     hasBattery: "No", permitPathOverride: "prescriptive",
+    // The synthetic jobs ARE roof-mounted, and every wizard's scope-of-work answer says so. Without
+    // the parser's mounting field the product (rightly) writes no mount adjective for an unknown
+    // mount (mountAdjective), so every Accela and self-serve cell scored the description "wrong"
+    // against a sentence the job never claimed (2026-11-23: accela 18/19 on all 16 cells).
+    mounting: "Roof",
   } as never, undefined, { learningExcluded: true });
   return { ...getProjectDetail(db, detail.project.id).project, permitType: "electrical" } as ProjectRecord;
 }
@@ -197,6 +204,8 @@ interface LearnOutcome {
   validationErrors: string[];
   /** The bound steps as saved — kept so a later run can --reuse-learns them. Synthetic data only. */
   recipeSteps?: import("../shared/src/types").RecipeStep[];
+  /** The recipe row's portal URL as THIS learn saved it (see replayCell: a later learn may rewrite the row). */
+  recipePortalUrl?: string;
   /** Set when this learn was not run but taken from an earlier report. */
   reusedFrom?: string;
   /** The recipe ROW's identity as the learn created it. --reuse-learns re-creates exactly this
@@ -253,7 +262,7 @@ async function learnCell(flavor: Flavor, mutation: Mutation): Promise<LearnOutco
       portalUrl: replica.entryUrl,
       project: projA,
       planner,
-      credential: flavor === "powerclerk" ? { username: PROJECT_A.portalUsername, password: PROJECT_A.portalPassword } : undefined,
+      credential: wizard.login ? { username: PROJECT_A.portalUsername, password: PROJECT_A.portalPassword } : undefined,
       headless: true,
       budgetMs: RUN_TIMEOUT_MS - 20_000,
       docsByType: docsA,
@@ -261,7 +270,9 @@ async function learnCell(flavor: Flavor, mutation: Mutation): Promise<LearnOutco
       policyProfile: scopeType === "utility" ? "residential_nem" : "none",
       bindableFields: Array.from(new Set([...Object.keys(resolveRecipeFieldValues(db, projA, portalType, scopeType === "utility" ? "nem" : "electrical")), ...Object.keys(RECIPE_FIELD_DESCRIPTIONS)])),
       siteContactIdentity: { firstName: pf.homeownerFirstName || "", lastName: pf.homeownerLastName || "", email: pf.homeownerEmail || "", phone: pf.homeownerPhone || "", street: pf.street || "", city: pf.city || "", state: pf.state || "", zip: pf.zip || "" },
-      contactIdentity: { firstName: pf.installerFirstName || "", lastName: pf.installerLastName || pf.installerCompanyName || "", email: pf.installerEmail || "", phone: pf.installerPhone || "", street: pf.installerStreet || "", city: pf.installerCity || "", state: pf.installerState || "", zip: pf.installerZip || "" },
+      // As autoLearnPortal builds it (backend/src/autoLearn.ts): the company's full and business names
+      // too, which the lookup / contact passes search and confirm a row by.
+      contactIdentity: { fullName: pf.installerContactName || "", companyName: pf.installerCompanyName || "", firstName: pf.installerFirstName || "", lastName: pf.installerLastName || pf.installerCompanyName || "", email: pf.installerEmail || "", phone: pf.installerPhone || "", street: pf.installerStreet || "", city: pf.installerCity || "", state: pf.installerState || "", zip: pf.installerZip || "" },
       equipment: {
         inverterMake: pf.inverterMake || "", inverterModel: pf.inverterModel || "", moduleMake: pf.moduleMake || "", moduleModel: pf.moduleModel || "",
         inverterQty: pf.inverterQty || "", moduleQty: pf.moduleQty || "", tracking: "Fixed",
@@ -280,6 +291,7 @@ async function learnCell(flavor: Flavor, mutation: Mutation): Promise<LearnOutco
     out.recipeId = recipe.id;
     out.learnBase = replica.base;
     out.recipeSteps = bound.steps;
+    out.recipePortalUrl = getPortalRecipe(db, recipe.id)?.portalUrl ?? replica.entryUrl;
     const s = scoreRun(wizard, replica.state, PROJECT_A, docNames(docsA), []);
     out.learnReachedReview = s.reachedReview;
     out.fieldsCorrect = s.fieldsCorrect;
@@ -327,6 +339,8 @@ interface ReplayOutcomeRow {
   payPosts: number;
   rung: string;
   rungReason: string;
+  /** The fields the replay's review read-back flagged (names only — what a person is told to check). */
+  reviewFlags: string[];
   adapterOk: boolean;
   executed: number;
   recorded: number;
@@ -337,6 +351,8 @@ interface ReplayOutcomeRow {
   adapterDrift: string[];
   fieldVerdicts: Array<{ key: string; verdict: string; note?: string }>;
   validationErrors: string[];
+  /** The replay's own slow steps (>= 4 s) as the adapter timed them — diagnosis, NOT part of the score. */
+  slowSteps?: Array<{ i?: number; action?: string; note?: string; ms?: number; phases?: Record<string, number> }>;
   /** The cell failed on infrastructure (the browser never launched / closed before any work). */
   infrastructure?: boolean;
 }
@@ -372,7 +388,7 @@ async function replayCell(flavor: Flavor, mutation: Mutation, learned: LearnOutc
   const cell = cut ? `${flavor}/${mutation} [${cut.name}]` : `${flavor}/${mutation}`;
   const row: ReplayOutcomeRow = {
     cell, status: "ran", seconds: 0, replayReachedReview: false, allFieldsCorrect: false, fieldsCorrect: 0, fieldsExpected: 0,
-    blanked: 0, wrongValue: 0, wrongBoxWrites: 0, leakedAValues: 0, submitPosts: 0, payPosts: 0, rung: "", rungReason: "",
+    blanked: 0, wrongValue: 0, wrongBoxWrites: 0, leakedAValues: 0, submitPosts: 0, payPosts: 0, rung: "", rungReason: "", reviewFlags: [],
     adapterOk: false, executed: 0, recorded: 0, skippedSteps: 0, message: "", adapterSkipped: [], adapterDrift: [], fieldVerdicts: [], validationErrors: [],
   };
   const wizard = cut?.wizard ?? buildWizard(flavor, mutation);
@@ -385,7 +401,15 @@ async function replayCell(flavor: Flavor, mutation: Mutation, learned: LearnOutc
   }
   const replica = await startSyntheticReplica({ wizard, credential: { username: PROJECT_B.portalUsername, password: PROJECT_B.portalPassword } });
   try {
-    const stored = getPortalRecipe(db, learned.recipeId);
+    // THE BASE LEARN'S OWN STEPS, NOT THE ROW AS IT IS NOW. A utility recipe is one row per
+    // utility (no per-cell discipline), so with --learn-variants every later utility learn
+    // rewrote the base's row: its steps pointed at that learn's closed replica, and every
+    // PowerClerk replay ended in 0.1 s at the first goto (2026-11-23 run, 0/8). Replaying the
+    // snapshot this learn saved measures the base recipe on every variant, as the topology says.
+    const saved = getPortalRecipe(db, learned.recipeId);
+    const stored = learned.recipeSteps?.length
+      ? { ...saved, steps: learned.recipeSteps, portalUrl: learned.recipePortalUrl ?? saved.portalUrl }
+      : saved;
     // HARNESS AFFORDANCE: the recipe was recorded against the learn server's port; the
     // variant runs on its own port. Only the origin is rewritten — path and query are the
     // recipe's own, so a recipe that recorded the wrong page still goes to the wrong page.
@@ -405,7 +429,7 @@ async function replayCell(flavor: Flavor, mutation: Mutation, learned: LearnOutc
     const fieldValues = resolveRecipeFieldValues(db, projB, portalType, scopeOf(flavor) === "utility" ? "nem" : "electrical");
     const result = await withTimeout(stageWithRecipe(recipe, projB, fieldValues, docsB, [], {
       headless: true,
-      credential: flavor === "powerclerk" ? { username: PROJECT_B.portalUsername, password: PROJECT_B.portalPassword } : undefined,
+      credential: wizard.login ? { username: PROJECT_B.portalUsername, password: PROJECT_B.portalPassword } : undefined,
       loginUrl: replica.entryUrl,
       autoSubmit: false,
     }), REPLAY_TIMEOUT_MS, `replay ${cell}`);
@@ -417,9 +441,13 @@ async function replayCell(flavor: Flavor, mutation: Mutation, learned: LearnOutc
     const strs = (v: unknown) => (Array.isArray(v) ? v.map((x) => String(typeof x === "string" ? x : JSON.stringify(x)).slice(0, 200)).slice(0, 12) : []);
     row.adapterSkipped = strs(merged.skipped);
     row.adapterDrift = strs(merged.driftWarnings);
+    row.slowSteps = Array.isArray(merged.slowSteps) ? (merged.slowSteps as ReplayOutcomeRow["slowSteps"])!.slice(0, 40) : [];
     const rung = scoreReplayOutcome({ ...(merged as object), recorded: row.recorded } as never);
     row.rung = rung.rung;
     row.rungReason = rung.reason.slice(0, 160);
+    row.reviewFlags = Array.isArray(merged.reviewMismatches)
+      ? (merged.reviewMismatches as Array<{ field?: unknown }>).map((m) => String(m?.field ?? "").slice(0, 60)).slice(0, 12)
+      : [];
   } catch (err) {
     row.status = "skipped";
     row.skipReason = (err instanceof Error ? err.message : String(err)).slice(0, 200);
@@ -600,6 +628,7 @@ for (const r of replays) {
   if (r.skipReason) console.log(`${"".padEnd(34)}   reason: ${r.skipReason}`);
   if (!r.allFieldsCorrect && r.message) console.log(`${"".padEnd(34)}   adapter: ${r.message.slice(0, 160)}`);
   for (const d of r.allFieldsCorrect ? [] : r.adapterDrift.slice(0, 2)) console.log(`${"".padEnd(34)}   drift: ${d.slice(0, 160)}`);
+  if (r.reviewFlags?.length) console.log(`${"".padEnd(34)}   review flags: ${r.reviewFlags.join(", ")}`);
 }
 
 console.log("\n=== BY BASE ===");

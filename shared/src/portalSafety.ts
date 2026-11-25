@@ -432,6 +432,31 @@ export function portalSafetyFactory() {
     return SIGNATURE_REQUEST.test(t) && !SUBMIT_AND_SIGN.test(t);
   };
 
+  // A LOOKUP / POPULATE BUTTON (#178): a control on a form page that fills a SECTION from the
+  // portal's own data instead of the person typing it — Accela Step 1's "Find Address" (the address
+  // search, which also populates the Parcel section), "Autofill" (the account's contact into
+  // Applicant / Contact), "Look Up" (a licensed-professional search), "FIND PARCEL", a "Validate
+  // Address". The learner presses one ONCE after the section's typed inputs are in and re-reads the
+  // section. The words are DISJOINT from every filing / paying word above by construction: a label
+  // that is also submit-, pay-, final-submit- or signature-request-worded ("Search and Submit",
+  // "Find & Pay") is NEVER a lookup button — the same filing predicates say no first. A unit test
+  // pins the disjointness (portal-bot/src/lookupButtonWords.test.ts). Whole-label bounded: a label
+  // that merely CONTAINS "find" inside a sentence ("Find out how to apply") is a help link, not
+  // a button that populates anything — so at most six words, the lookup word among them.
+  const LOOKUP_BUTTON_WORDS: readonly string[] = Object.freeze([
+    "find", "look up", "lookup", "search", "autofill", "auto-fill", "populate", "select from account", "validate", "verify address",
+  ]);
+  const LOOKUP_WORDS = /\b(find|look\s?-?up|search|auto-?fill|populate|select from account|validate|verify address)\b/i;
+  const isLookupButtonLabel = (label: string | null | undefined): boolean => {
+    const t = String(label ?? "").replace(/\s+/g, " ").replace(/[»›>→]+\s*$/, "").trim();
+    if (!t) return false;
+    if (t.split(" ").length > 6) return false;
+    if (!LOOKUP_WORDS.test(t)) return false;
+    // Accept / certify wording is never a lookup (Helm review of PR #247): "Validate & Certify"
+    // carries "validate" but is an attestation, the same class isAcceptTermsLabel already names.
+    return !isSubmitIntent(t) && !isPayFee(t) && !isFinalSubmitControl(t) && !isSignatureRequestControl(t) && !isAcceptTermsLabel(t);
+  };
+
   /** How a capture surface (human recorder, human patch) must treat a click on this control. */
   const classifyRecordedClick = (label: string | null | undefined, ctx?: ControlContext | null): RecordedClickClass => {
     if (isFinalSubmitControl(label, ctx)) return "finalSubmit";
@@ -613,7 +638,8 @@ export function portalSafetyFactory() {
   // Both agree: that is the answer. Only NARROW names review — the words sit inside a
   // class-matched container, and it takes positive evidence of a FORM step to call it one: a
   // live fillable control on the page (readOnlyPageInPage false), or a bar that marks its active
-  // step and none of the active steps is review. With neither, it is the review page — the
+  // step and none of the active steps is terminal-worded (review / submit / sign / confirm / pay —
+  // stepOneLabelTerminal, #188). With neither, it is the review page — the
   // direction that cannot file. And whatever either reading says, the page IS review when a
   // bar's ACTIVE step (aria-current / aria-selected / a whole "active"/"current" class token —
   // not mat-stepper's "mat-step-label-active", which a non-linear stepper puts on every step) or
@@ -651,8 +677,15 @@ export function portalSafetyFactory() {
     return r.width > 2 && r.height > 2 && cs.display !== "none" && cs.visibility !== "hidden";
   };
   const ACTIVE_STEP_ATTR = "[aria-current]:not([aria-current=false]), [aria-selected=true]";
+  // WHOLE class tokens only. AngularJS Material's md-steppers marks the ONE current step
+  // "md-active" (ng-class "stepNumber === stepper.currentStep"; EnerGov CSS's 7-step wizard, #188:
+  // read without it, step 1 had no active step, its "7 Review and Submit" bubble kept the page
+  // review, and the walk stopped on step 1). Angular Material's "mat-step-label-active" is NOT
+  // here and never may be: a non-linear mat-stepper puts it on every step, so it marks no step
+  // as THE current one — it would name the review step active on every form page, and the form
+  // steps active on the review page.
   const activeByClass = (el: Element): boolean => String(typeof el.className === "string" ? el.className : "").split(/\s+/)
-    .some((k) => /^(active|current|is-active|is-current|selected|is-selected)$/i.test(k));
+    .some((k) => /^(active|current|is-active|is-current|selected|is-selected|md-active)$/i.test(k));
   // The texts of the steps a bar marks active (each short; a bar's own container is never one).
   const activeStepTexts = (bars: Element[]): string[] => {
     const out: string[] = [];
@@ -768,7 +801,7 @@ export function portalSafetyFactory() {
     .filter((el) => { const r = (el as HTMLElement).getBoundingClientRect(); return r.width > 2 && r.height > 2; })
     .map((el) => String(controlLabelInPage(el) || (el as HTMLElement).innerText || (el as HTMLInputElement).value || ""))
     .some((t) => isFinalSubmitControl(t, { reviewPage: true }) || isSubmitIntent(t, { reviewPage: true, readOnlyPage: true }) || isPayFee(t) || isSignatureRequestControl(t) || SIGN_CONTROL.test(t));
-  const reviewReadingInPage = (d: Document): { review: boolean; text: string; navs: Element[] } => {
+  const reviewReadingInPage = (d: Document): { review: boolean; text: string; navs: Element[]; active: string[] } => {
     const url = (globalThis as { location?: { href?: string } }).location?.href;
     const wide = wideBarsInPage(d);
     const narrow = narrowBarsInPage(d);
@@ -781,11 +814,20 @@ export function portalSafetyFactory() {
     const named = active.concat(panelNamesInPage(d)).filter((t) => isReviewPageText(t));
     // The positive read's words ride on the text, so a caller that applies its own wording
     // (the learner's reviewTextInPage) reaches the same answer.
-    if (named.length) return { review: true, text: `${textNarrow} \n ${named.join(" \n ")}`, navs: narrow };
-    if (reviewSignals(textWide, url)) return { review: true, text: textWide, navs: wide };
-    if (!reviewSignals(textNarrow, url)) return { review: false, text: textWide, navs: wide };
-    const formEvidence = active.length > 0 || readOnlyPageInPage() === false;
-    return formEvidence ? { review: false, text: textWide, navs: wide } : { review: true, text: textNarrow, navs: narrow };
+    // `active` rides along unchanged (read-only): the learner's planner-review demotion (#188)
+    // asks the same reading whether the CURRENT step is a review step — never a second reading.
+    if (named.length) return { review: true, text: `${textNarrow} \n ${named.join(" \n ")}`, navs: narrow, active };
+    if (reviewSignals(textWide, url)) return { review: true, text: textWide, navs: wide, active };
+    if (!reviewSignals(textNarrow, url)) return { review: false, text: textWide, navs: wide, active };
+    // A CURRENT STEP IS FORM EVIDENCE ONLY WHEN IT IS NOT A TERMINAL STEP (#188, adversarial
+    // review N1). With md-active read, an md-steppers wizard whose last step is "7 Submit" or
+    // "7 Sign & Submit" (the bar's "6 Review and Submit" listing review) marked that last step
+    // current, and "an active step that is not review-worded" turned its own submit page into a
+    // form step — on the base it read review (no active step, read-only). The step-one rule's
+    // words decide (stepOneLabelTerminal: review / summary / confirm / certify / sign / submit /
+    // pay), the same ones navigatorActiveStepsInPage reports. Only ever fewer form steps.
+    const formEvidence = (active.length > 0 && !active.some((t) => stepOneLabelTerminal(t))) || readOnlyPageInPage() === false;
+    return formEvidence ? { review: false, text: textWide, navs: wide, active } : { review: true, text: textNarrow, navs: narrow, active };
   };
   const pageTextWithoutNavigatorInPage = (d: Document): string => reviewReadingInPage(d).text;
 
@@ -1170,6 +1212,19 @@ export function portalSafetyFactory() {
       for (const n of names) target.add(n);
     }
     return Array.from(inNav).filter((l) => !outside.has(l));
+  };
+
+  /** Runs IN THE PAGE: the step(s) a step navigator marks CURRENT — the reading's own `active`
+   *  (aria-current / aria-selected / a whole active-class token, only in a bar that lists the
+   *  review step) — and whether any of them is a terminal step, by the step-one rule's own words
+   *  (stepOneLabelTerminal: review / summary / confirm / certify / sign / submit / pay). Read-only;
+   *  nothing in the shared reading changes. Asked by the learner's planner-review demotion (#188):
+   *  no current step, or a terminal-worded one, is no evidence of a form step. */
+  const navigatorActiveStepsInPage = (): { steps: string[]; terminal: boolean } => {
+    const d = (globalThis as { document?: Document }).document;
+    if (!d || !d.body) return { steps: [], terminal: false };
+    const steps = reviewReadingInPage(d).active;
+    return { steps, terminal: steps.some((t) => stepOneLabelTerminal(t)) };
   };
 
   /**
@@ -1570,7 +1625,11 @@ export function portalSafetyFactory() {
 
   // Request-URL predicates (network recorder, implicit submission). Portal endpoints concatenate
   // words ("SubmitApplication", "CompleteApplication"), so these have no trailing word boundary.
-  const FINAL_SUBMIT_URL = /(submit|finali[sz]e|completeapplication|fileapplication|continueapplication)/i;
+  // "Submittal" is a document set, not a submit (#144, owner ruling 2026-11-11): CityView uploads a
+  // draft's documents to ".../UploadAndCommitSubmittalRequirementFile", EnerGov has "Submittal
+  // Requirements", and the backstop aborted every such upload. A URL that ENDS in "submit" after
+  // "Submittal" ("SubmittalSubmit") still files.
+  const FINAL_SUBMIT_URL = /(submit(?!tal)|finali[sz]e|completeapplication|fileapplication|continueapplication)/i;
   // Rule 1's whole vocabulary (filingBackstop's PAYMENT RULE): payment stays blocked only for URLs
   // this names. After the hand-over a person's input lifts the filing-URL rule and the lockdown for
   // 4 s, so a processor it does not name passes then like any other request. Processors (Helm
@@ -1620,6 +1679,31 @@ export function portalSafetyFactory() {
    * skeptic, enter-probe.log). The default button is tagged data-al-default-submit="1" so the
    * caller can judge it with its full click gate.
    */
+  /** AN AUTOCOMPLETE WIDGET'S OWN STAMP (#139): a class token a widget library writes on the input it
+   *  drives — jQuery UI "ui-autocomplete-input", typeahead.js "tt-input", "autocomplete-input" and
+   *  "<lib>-autocomplete-input", a whole "typeahead" token. Never a token that says the opposite
+   *  ("autocomplete-off", "noautocomplete", "typeahead-disabled"), and never a box's own wording (a
+   *  placeholder "Autocomplete disabled" is not a widget). THE ONE ANSWER: the Enter identity
+   *  (enterIdentityInPage) and the learner's type-ahead classifier (toExtractedField) both read it. */
+  const isAutocompleteWidgetClass = (className: string | null | undefined): boolean => {
+    const tokens = String(className ?? "").toLowerCase().split(/\s+/).filter(Boolean);
+    return tokens.some((t) => !/off|no|disable/.test(t)
+      && (t === "ui-autocomplete-input" || t === "tt-input" || t === "autocomplete-input" || t === "typeahead"
+        || /^[a-z0-9]+(?:-[a-z0-9]+)*-autocomplete-input$/.test(t)));
+  };
+
+  /** WHERE A SUBMITTER POSTS (#139 fix round). `button.formAction` is the PAGE's own URL when the
+   *  button has no formaction attribute (HTML: a missing formaction reflects the document address),
+   *  so `btn.formAction || form.action` never read the form's action: a box in
+   *  <form action="/permit/submitApplication"> with a plain <button>Go</button> was allowed Enter and
+   *  posted the filing (adversarial probe). The button's own formaction only when it has one, else
+   *  the form's action (the document address when the form names none, which is where it posts). */
+  const submitActionOf = (btn: Element, form: HTMLFormElement | null): string => {
+    const own = btn.hasAttribute && btn.hasAttribute("formaction") ? String((btn as HTMLButtonElement).formAction || "") : "";
+    const formOwner = ((btn as HTMLButtonElement).form || form) as HTMLFormElement | null;
+    return own || String(formOwner ? formOwner.action : "") || "";
+  };
+
   const implicitSubmitInPage = (el: Element | null | undefined): { label: string; action: string; tagged: boolean; missingDefault?: string } | null => {
     if (!el) return null;
     const tag = el.tagName;
@@ -1657,7 +1741,7 @@ export function portalSafetyFactory() {
       if (!declared) return { label: "", action: "", tagged: false, missingDefault: id.slice(0, 60) };
       declared.setAttribute("data-al-default-submit", "1");
       const label = String(controlLabelInPage(declared) || (declared as HTMLElement).innerText || (declared as HTMLInputElement).value || "").replace(/\s+/g, " ").trim();
-      return { label, action: String((declared as HTMLButtonElement).formAction || (form ? form.action : "") || ""), tagged: true };
+      return { label, action: submitActionOf(declared, form), tagged: true };
     }
     if (!form) return null;
     const btn = Array.from(form.elements).find((c) => (c.tagName === "BUTTON" && String((c as HTMLButtonElement).type || "submit").toLowerCase() === "submit")
@@ -1665,7 +1749,7 @@ export function portalSafetyFactory() {
     if (btn) {
       btn.setAttribute("data-al-default-submit", "1");
       const label = String(controlLabelInPage(btn) || (btn as HTMLElement).innerText || (btn as HTMLInputElement).value || "").replace(/\s+/g, " ").trim();
-      return { label, action: String(btn.formAction || form.action || ""), tagged: true };
+      return { label, action: submitActionOf(btn, form), tagged: true };
     }
     return { label: "", action: String(form.action || ""), tagged: false };
   };
@@ -1679,6 +1763,16 @@ export function portalSafetyFactory() {
     if (isPayFee(imp.label)) return `Enter here activates "${imp.label.slice(0, 60)}", which pays a fee`;
     if (isSubmitIntent(imp.label, null) || isFinalSubmitControl(imp.label, { reviewPage: true })) return `Enter here activates "${imp.label.slice(0, 60)}", which is submit-worded`;
     if (isSubmitOrPayRequestUrl(imp.action)) return `Enter here submits the form to ${imp.action.slice(0, 80)}, a filing/payment endpoint`;
+    // A FORM WHOSE OWN ACTION FILES OR PAYS refuses Enter whatever button it has (#139 fix round): a
+    // button's formaction may point elsewhere today, and a page script can submit the form itself.
+    const box = el as Element;
+    const form = ((box as HTMLInputElement).form || (box.closest ? box.closest("form") : null)) as HTMLFormElement | null;
+    const formAction = form && form.hasAttribute("action") ? String(form.action || "") : "";
+    if (formAction && isSubmitOrPayRequestUrl(formAction)) return `Enter here is inside a form that posts to ${formAction.slice(0, 80)}, a filing/payment endpoint`;
+    // A SIGNATURE REQUEST is never Enter's to send (#139 fix round): the replay's click gate refused
+    // it on the default button and this shared question did not ("Request Signatures" as the form's
+    // default: allowed, posted).
+    if (isSignatureRequestControl(imp.label)) return `Enter here activates "${imp.label.slice(0, 60)}", which sends a signature request`;
     return "";
   };
 
@@ -1699,7 +1793,8 @@ export function portalSafetyFactory() {
    * passes each found three new shapes a deny rule did not know):
    *   0. The box must be POSITIVELY identified as a search / autocomplete / login control
    *      (enterIdentityInPage: role searchbox/combobox, type=search, aria-autocomplete,
-   *      enterkeyhint/inputmode=search, a search landmark, a password form). Anything else —
+   *      enterkeyhint/inputmode=search, an autocomplete widget's stamp (#139), a search landmark, a
+   *      password form). Anything else —
    *      "Parcel Number", an unnamed text box — is refused by name.
    *   2'. The scope is THE PAGE, whether or not the box sits in a form (a document keydown can
    *      map Enter to any control: checker's enterNoForm, and enterFormScope — a search box in
@@ -1718,6 +1813,11 @@ export function portalSafetyFactory() {
     const ac = attr("aria-autocomplete");
     if (ac && ac !== "none") return "aria-autocomplete";
     if (attr("enterkeyhint") === "search" || attr("inputmode") === "search") return "a search keyboard hint";
+    // AN AUTOCOMPLETE WIDGET'S OWN STAMP ON THE BOX (#139): jQuery UI stamps class
+    // "ui-autocomplete-input" on the input it drives and adds no ARIA (a CityView location search).
+    // Known stamps only (isAutocompleteWidgetClass) — the ONE predicate the learner's type-ahead
+    // classifier reads too. Identity only — every refusal below still applies.
+    if (el.tagName === "INPUT" && /^(text|search)$/.test(type || "text") && isAutocompleteWidgetClass(el.getAttribute("class"))) return "an autocomplete widget's stamp";
     if (el.closest && el.closest("[role=search], search")) return "a search landmark";
     const form = ((el as HTMLInputElement).form || (el.closest ? el.closest("form") : null)) as HTMLFormElement | null;
     if (form && el.tagName === "INPUT" && /^(text|email|password|tel)$/.test(type || "text") && form.querySelector("input[type=password]")) return "a login form";
@@ -1731,7 +1831,7 @@ export function portalSafetyFactory() {
     if (own) return own;
     if (!enterIdentityInPage(el)) {
       const name = clean(controlLabelInPage(el)).slice(0, 40) || "(unlabelled box)";
-      return `Enter is pressed only in a positively identified search, autocomplete or login box (role searchbox/combobox, type=search, aria-autocomplete, a search landmark, a password form) — "${name}" is none of these`;
+      return `Enter is pressed only in a positively identified search, autocomplete or login box (role searchbox/combobox, type=search, aria-autocomplete, an autocomplete widget's stamp, a search landmark, a password form) — "${name}" is none of these`;
     }
     const form = ((el as HTMLInputElement).form || (el.closest ? el.closest("form") : null)) as HTMLFormElement | null;
     const reviewPage = reviewPageInPage();
@@ -1759,6 +1859,7 @@ export function portalSafetyFactory() {
       const where = whereOf(c);
       if (isPayFee(label)) return `the ${where} also holds${what} "${label.slice(0, 50)}", which pays a fee — a page script can map Enter to it`;
       if (isSubmitIntent(label, ctx)) return `the ${where} also holds${what} "${label.slice(0, 50)}", which is submit-worded — a page script can map Enter to it`;
+      if (isSignatureRequestControl(label)) return `the ${where} also holds${what} "${label.slice(0, 50)}", which sends a signature request — a page script can map Enter to it`;
       return "";
     };
     // Native and role controls. A SUBMITTER counts hidden; any other control counts when visible.
@@ -2270,6 +2371,7 @@ export function portalSafetyFactory() {
     implicitSubmitRefusalInPage,
     enterIdentityInPage,
     enterRefusalInPage,
+    isAutocompleteWidgetClass,
     submitsOrNavigatesInPage,
     isSubmitOrPayRequestUrl,
     isPayRequestUrl,
@@ -2280,6 +2382,8 @@ export function portalSafetyFactory() {
     isPayNowDialogText,
     isFinalSubmitControl,
     isSignatureRequestControl,
+    LOOKUP_BUTTON_WORDS,
+    isLookupButtonLabel,
     classifyRecordedClick,
     isSecretField,
     isPaymentField,
@@ -2291,6 +2395,7 @@ export function portalSafetyFactory() {
     reviewPageInPage,
     reviewTextInPage,
     navigatorOnlyControlLabelsInPage,
+    navigatorActiveStepsInPage,
     isSignatureNameLabel,
     isSignatureNameBox,
     signatureNamePartOf,
@@ -2320,6 +2425,13 @@ export const paymentDialogVerdict = impl.paymentDialogVerdict;
 export const isPayNowDialogText = impl.isPayNowDialogText;
 export const isFinalSubmitControl = impl.isFinalSubmitControl;
 export const isSignatureRequestControl = impl.isSignatureRequestControl;
+/** #139 — an autocomplete widget's own class stamp on a box (the Enter identity and the learner's
+ *  type-ahead classifier read this one answer). */
+export const isAutocompleteWidgetClass = impl.isAutocompleteWidgetClass;
+/** #178: the words a form page's lookup / populate button reads with ("Find Address", "Autofill",
+ *  "Look Up") — disjoint from every filing / paying word; `isLookupButtonLabel` is the one answer. */
+export const LOOKUP_BUTTON_WORDS = impl.LOOKUP_BUTTON_WORDS;
+export const isLookupButtonLabel = impl.isLookupButtonLabel;
 export const classifyRecordedClick = impl.classifyRecordedClick;
 export const isSecretField = impl.isSecretField;
 export const isPaymentField = impl.isPaymentField;

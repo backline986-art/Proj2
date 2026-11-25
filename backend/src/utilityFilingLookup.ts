@@ -22,6 +22,9 @@
 // The track is labelled by what the program IS — net metering only when a cited page says so.
 // ---------------------------------------------------------------------------
 
+import type { SiteVouch } from "../../shared/src/types";
+import { isOfficialSourceHost } from "../../shared/src/officialSource";
+import { findSiteVouches, mergeVouches } from "./governmentVouches";
 import type { AppDb } from "./db";
 import type { CitedFact, EligibilityLimits, LLMProvider, ProjectRecord, WebLookupResult } from "../../shared/src/types";
 import { hostFitsTrackAndEntity, isInformationalPageUrl, namedInterconnectionPlatforms, portalHostOf } from "./portalChannel";
@@ -29,11 +32,12 @@ import { logger } from "./logger";
 import { knownPowerClerkUtility } from "./utilityIdentity";
 import { isVerifiedKnowledge, knowledgeProfileKey } from "./knowledgeBase";
 import { portalEntityEvidence } from "./portalRecipes";
-import { acceptProposedLimits, saveEligibilityRecord } from "./eligibilityLimits";
+import { acceptProposedLimits, landLookupEligibilityRecord, type RetrievedLimitPage } from "./eligibilityLimits";
 // Text constants only (the prompt); the landing is imported where it runs, so this module and
 // utilityRequirements.ts (which reads this one's keys) never load each other at start-up.
 import { UTILITY_REQUIREMENTS_RESEARCH_RULE, UTILITY_REQUIREMENTS_RESEARCH_SCHEMA } from "./utilityRequirementsResearchPrompt";
 import type { UtilityRequirementsLanding } from "./utilityRequirementsResearch";
+import type { UtilityFeeLanding } from "./utilityFeeLanding";
 import type { PageReader, ReadPage } from "./agencyPageReader";
 import { quoteStatesFee, quoteStatesReviewTime } from "./citedReviewTime";
 
@@ -95,6 +99,12 @@ export interface UtilityFilingLookup {
   serviceArea?: CitedFact<UtilityServiceArea>;
   /** Pages Keelix's reader was refused (403 / challenge / back-off): a person reads them in a browser. */
   needsPersonRead?: Array<{ url: string; reason: string }>;
+  /** CITED FEES THAT DID NOT LAND IN THE FEE SCHEDULE and need a person (utilityFeeLanding: two
+   *  application fees, a fee by size or level, a page Keelix could not re-read, a difference from the
+   *  fee on file). Shown on the fee quote; never a number Keelix charges. */
+  feesHeld?: Array<{ label: string; amountUsd: number; sourceUrl: string; reason: string }>;
+  /** Government pages that link this utility's own non-government site (governmentVouches.ts). */
+  siteVouches?: SiteVouch[];
   lookedUpAt: string;
   verifiedAt?: string | null;
   verifiedBy?: string | null;
@@ -548,10 +558,9 @@ export const UTILITY_FILING_SYSTEM = `You find, for ONE electric utility in the 
 
 EVERY value carries "sourceUrl" (a page your search returned or you opened) and "quote" (the exact words on that page that state it, under 250 characters, containing the answer itself: the portal's name or link for the filing; the words net metering / export credit / retail provider for the program). If no page states it, "value": null and say what you searched in "notFound". Never answer from memory. Never guess.
 
-5. serviceArea — ONLY when the utility's own page says some locations in or near its area are served by ANOTHER utility (an overlapping or shared territory): {"value": {"sharedWith": ["<the other utility as named>"], "mapUrl": "<the page's service-area map, if it names one>"}, "sourceUrl": "", "quote": "<the words saying so>"}; null otherwise.
-4. fees — the utility's OWN fees for a residential application (an application / net-metering / meter fee), each {"value": {"label": "<as printed>", "amountUsd": <number>}, "sourceUrl": "", "quote": "<the printed words with the amount>"}; [] when no page prints one. reviewTime — the review / processing time the utility's page states ("up to 10 business days"), {"value": "<as printed>", "sourceUrl": "", "quote": ""}, or null.
-
 3. limits — ONLY where the program page or tariff you read states them for residential customers: "maxDcKw" / "maxAcKw" (the program's size cap in kW), "productionMeterRequired" (true when a separate production / generation meter is required), "installerCertification" ({"name": "<the certification>", "effectiveFrom": "YYYY-MM-DD" or ""}). Each as {"value": ..., "citation": {"sourceName": "<the page or tariff by name>", "sourceUrl": "", "quote": "<the exact words, containing the value>"}}. Leave out any limit no page states; {} when none.
+4. fees — the utility's OWN fees for a residential application (an application / net-metering / meter fee), ONE ENTRY PER PRINTED FEE: the fee every application owes under the name the page gives it, and each charge owed only in some cases (a return trip, a modification, a transfer of ownership, a study) as its own entry whose label names that case; a fee that depends on system size or application level is one entry per band, the band in its label. Each {"value": {"label": "<as printed>", "amountUsd": <number>}, "sourceUrl": "", "quote": "<the printed words with the amount>"}; [] when no page prints one. reviewTime — the review / processing time the utility's page states ("up to 10 business days"), {"value": "<as printed>", "sourceUrl": "", "quote": ""}, or null.
+5. serviceArea — ONLY when the utility's own page says some locations in or near its area are served by ANOTHER utility (an overlapping or shared territory): {"value": {"sharedWith": ["<the other utility as named>"], "mapUrl": "<the page's service-area map, if it names one>"}, "sourceUrl": "", "quote": "<the words saying so>"}; null otherwise.
 
 ${UTILITY_REQUIREMENTS_RESEARCH_RULE}
 
@@ -586,6 +595,8 @@ export interface UtilityFilingLookupRun {
   timedOut?: boolean;
   /** The application requirement items the lookup proposed, landed (utilityRequirementsResearch.ts). */
   requirements?: UtilityRequirementsLanding;
+  /** What became of the cited application fee: landed in the fee schedule, or held for a person. */
+  feeLanding?: UtilityFeeLanding;
 }
 
 /** The answer's filing member as the model wrote it (null when the text is not JSON). */
@@ -595,6 +606,9 @@ function rawFilingOf(text: string): RawFact {
   if (a < 0 || b <= a) return null;
   try { return ((JSON.parse(t.slice(a, b + 1)) as Record<string, unknown>).filing ?? null) as RawFact; } catch { return null; }
 }
+
+/** Pages read to confirm a lookup's program limits (each limit usually cites one tariff or program page). */
+const LIMIT_CONFIRM_MAX_READS = 3;
 
 const isTimeout = (r: Pick<WebLookupResult, "timedOut" | "error">) => Boolean(r.timedOut) || /\b(?:abort(?:ed)?|timed? ?out)\b/i.test(str(r.error));
 
@@ -690,22 +704,59 @@ export async function runUtilityFilingLookup(
   const keepFiling = !parsed.filing.value && existing?.filing?.value;
   const keepProgram = !parsed.program.value && existing?.program?.value;
   const programName = keepProgram ? existing?.programName ?? "" : parsed.programName;
+  // A GOVERNMENT PAGE VOUCHES (owner, 2026-11-13; governmentVouches.ts): when the answer's pages sit on
+  // a non-government site that could be this utility's and is not yet recorded as its own, the
+  // government pages among the search's results (a state commission's list of utilities, ≤ 2) are read
+  // for a link to that site in the utility's name.
+  let siteVouchRun: { vouches: SiteVouch[]; read: string[] } = { vouches: [], read: [] };
+  if (!ungrounded) {
+    try {
+      const { utilityOfficialHosts } = await import("./utilityRequirements");
+      const candidateUrls = [str(parsed.filing.sourceUrl), str(parsed.program.sourceUrl), ...seen].filter(Boolean);
+      siteVouchRun = await findSiteVouches(await getReader(), { kind: "utility", state: input.state, names: [input.utility] },
+        { candidateUrls, officialHosts: utilityOfficialHosts(db, input.state, input.utility) });
+    } catch (err) {
+      logger.warn("utility-filing", `site vouch read failed for ${input.utility}: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+  const siteVouches = mergeVouches(existing?.siteVouches, siteVouchRun.vouches, siteVouchRun.read);
   const save = saveUtilityFilingLookup(db, {
     state: input.state, utility: input.utility,
+    ...(siteVouches.length ? { siteVouches } : {}),
     filing: (keepFiling ? existing!.filing : parsed.filing) as UtilityFilingFact,
     program: (keepProgram ? existing!.program : parsed.program) as CitedFact<UtilityProgramKind>,
     ...(programName ? { programName } : {}),
     // A re-run that found none keeps the earlier cited fees / review time.
     ...(parsed.fees?.length ? { fees: parsed.fees } : existing?.fees?.length ? { fees: existing.fees } : {}),
+    // ...and the earlier fees' held-for-a-person list with them (a new set of fees is judged afresh below).
+    ...(!parsed.fees?.length && existing?.fees?.length && existing.feesHeld?.length ? { feesHeld: existing.feesHeld } : {}),
     ...(parsed.reviewTime?.value ? { reviewTime: parsed.reviewTime } : existing?.reviewTime?.value ? { reviewTime: existing.reviewTime } : {}),
     ...(parsed.serviceArea?.value ? { serviceArea: parsed.serviceArea } : existing?.serviceArea?.value ? { serviceArea: existing.serviceArea } : {}),
     lookedUpAt: new Date().toISOString(),
   });
-  // The cited program limits land as the utility's own eligibility record, SEEDED (never over a
-  // verified or official row — saveEligibilityRecord refuses those, rule 3).
+  // The cited program limits land as the utility's own eligibility record (official-source slice 4):
+  // OFFICIAL when every limit's quote is in a page Keelix read here, on the utility's own official host
+  // (vouches included, the row just saved carries this run's); SEEDED otherwise. Never over a person's
+  // record (a differing official read is a conflict for a person), never over an official one except
+  // from its own hosts (landLookupEligibilityRecord, rule 3).
   if (Object.keys(parsed.limits).length) {
     try {
-      saveEligibilityRecord(db, { authorityKind: "utility_program", state: input.state, authority: input.utility, programName: programName || `${input.utility} customer-generation program`, limits: parsed.limits });
+      const { utilityOfficialHosts } = await import("./utilityRequirements");
+      const hosts = utilityOfficialHosts(db, input.state, input.utility);
+      const pages = new Map<string, RetrievedLimitPage>();
+      const urls = [...new Set(Object.values(parsed.limits).map((l) => str((l as { citation?: { sourceUrl?: string } })?.citation?.sourceUrl)))]
+        .filter((u) => isOfficialSourceHost(u, hosts));
+      const rd = urls.length ? await getReader() : null;
+      for (const url of rd ? urls.slice(0, LIMIT_CONFIRM_MAX_READS) : []) {
+        try {
+          const page = await rd!.read(url);
+          if (page.ok && page.text) pages.set(url, { text: page.text, fetchedAt: new Date().toISOString() });
+        } catch (err) {
+          logger.warn("utility-filing", `could not read ${url} to confirm program limits: ${err instanceof Error ? err.message : String(err)}`);
+        }
+      }
+      const landed = landLookupEligibilityRecord(db, { authorityKind: "utility_program", state: input.state, authority: input.utility, programName: programName || `${input.utility} customer-generation program`, limits: parsed.limits }, { pages, authorityHosts: hosts });
+      parsed.dropped.push(`program limits: ${landed.reason}`);
     } catch (err) {
       logger.warn("utility-filing", `could not store program limits for ${input.utility}: ${err instanceof Error ? err.message : String(err)}`);
     }
@@ -714,16 +765,32 @@ export async function runUtilityFilingLookup(
   // just saved (official only through #683's landing on bytes read here; never over a person's item).
   const requirements = save.saved && !ungrounded ? await landLookupRequirements(db, input, parsed.rawRequirements, seen, r.groundedSearches > 0) : undefined;
   if (requirements) parsed.dropped.push(...requirements.dropped);
+  // ONE STORE FOR FEES (fee round, 2026-11): the application fee this run cited lands in the fee
+  // schedule through saveFeeSchedule (seeded, never over a person's row), after Keelix re-reads its
+  // page. A fee the earlier row carried forward is not re-landed. What does not land is held for a person.
+  let feeLanding: UtilityFeeLanding | undefined;
+  if (save.saved && save.lookup && !ungrounded && parsed.fees?.length) {
+    try {
+      const { landUtilityLookupFees } = await import("./utilityFeeLanding");
+      const { utilityOfficialHosts } = await import("./utilityRequirements");
+      feeLanding = await landUtilityLookupFees(db, save.lookup, { reader: await getReader(), verifiedHosts: utilityOfficialHosts(db, input.state, input.utility) });
+      parsed.dropped.push(`utility fee: ${feeLanding.reason}`);
+    } catch (err) {
+      logger.warn("utility-filing", `could not land the utility fee for ${input.utility}: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
   // A REFUSED READ IS NOT SILENT (as the permit lookup, lookup-door-fixes 5): pages the reader was refused
   // are recorded on the row for a person's browser. The reader's one try and host back-off are unchanged.
   let lookup = save.lookup;
   const refused = (await import("./permitProcessLookup")).readsNeedingAPerson([...((reader ?? null)?.log ?? []), ...(requirements?.readLog ?? [])]);
-  if (save.saved && lookup && refused.length) {
-    const again = saveUtilityFilingLookup(db, { ...lookup, needsPersonRead: refused, confidence: "seeded" });
+  const feesHeld = feeLanding?.held ?? [];
+  if (save.saved && lookup && (refused.length || feesHeld.length)) {
+    const again = saveUtilityFilingLookup(db, { ...lookup, ...(refused.length ? { needsPersonRead: refused } : {}), ...(feesHeld.length ? { feesHeld } : {}), confidence: "seeded" });
     if (again.saved) lookup = again.lookup;
   }
   return { saved: save.saved, reason: r.error ? `${save.reason} (partial results kept after: ${r.error.slice(0, 120)})` : save.reason, lookup, grounded: r.groundedSearches, dropped: parsed.dropped,
     ...(requirements?.landing ? { requirements: requirements.landing } : {}),
+    ...(feeLanding ? { feeLanding } : {}),
     ...(r.error ? { error: r.error, timedOut } : {}) };
 }
 
@@ -855,6 +922,12 @@ export interface UtilityTrackPresentation {
   /** #664: a person VERIFIED that this utility's application rides in the AHJ permit application
    *  (nemFiledWithPermit). Absent otherwise — a seeded with-permit row never sets it. */
   filedWithPermit?: NemFiledWithPermit;
+  /** Set only when the address the track shows is the utility's SEEDED knowledge-base row (basis
+   *  "profile", no person's verify): the row's portal name, its address (already through rule 5's
+   *  hostFitsTrackAndEntity in utilityKbChannel) and the page the row names as its source ("" when it
+   *  names none). Read by the Destinations queue to offer it for a person's Edit-and-save
+   *  (filingDestinationProposals); it decides nothing here. */
+  seededDoor?: { name: string; url: string; source: string };
 }
 
 export const UTILITY_TRACK_LABELS: Record<UtilityProgramKind | "unknown", string> = {
@@ -978,6 +1051,7 @@ export function utilityTrackPresentation(db: AppDb | null, project: Pick<Project
       portalUrl: kb.url,
       program,
       basis: kb.verified ? "verified" : "profile",
+      ...(kb.verified ? {} : { seededDoor: { name: kb.name, url: kb.url, source: kb.source } }),
     };
   }
   const filing = lookupFiling;

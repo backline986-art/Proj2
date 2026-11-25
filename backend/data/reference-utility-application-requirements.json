@@ -3,6 +3,61 @@
   "records": [
     {
       "states": [
+        "OR"
+      ],
+      "utility": "Central Electric Cooperative",
+      "displayName": "Central Electric Cooperative",
+      "matchNames": [
+        "central electric cooperative",
+        "central electric coop",
+        "central electric co op",
+        "central electric co-op"
+      ],
+      "filingDoor": {
+        "name": "Central Electric Cooperative Small Net-Metering Agreement (online form, 25 kW or less)",
+        "url": "https://www.cec.coop/energy-programs/renewable-power/net-metering/small-net-metering-agreement/",
+        "sourceName": "Central Electric Cooperative — Net metering",
+        "sourceUrl": "https://www.cec.coop/energy-programs/renewable-power/net-metering/",
+        "quote": "Small Net-Metering Agreement (for qualifying Net-Metering Facilities with a maximum nameplate generating capacity of not more than 25 kW)",
+        "fetchedAt": "2026-11-10T18:27:31Z"
+      },
+      "requirements": [
+        {
+          "key": "one_line",
+          "whenMissing": "warning",
+          "sourceName": "Central Electric Cooperative — Net meter installation requirements",
+          "sourceUrl": "https://www.cec.coop/net-meter-installation-requirements/",
+          "quote": "Once designed, please include a simple one-line drawing and site plan for your system with the application.",
+          "fetchedAt": "2026-11-10T18:27:32Z"
+        },
+        {
+          "key": "site_plan",
+          "whenMissing": "warning",
+          "sourceName": "Central Electric Cooperative — Net meter installation requirements",
+          "sourceUrl": "https://www.cec.coop/net-meter-installation-requirements/",
+          "quote": "Once designed, please include a simple one-line drawing and site plan for your system with the application.",
+          "fetchedAt": "2026-11-10T18:27:32Z"
+        },
+        {
+          "key": "ac_disconnect",
+          "whenMissing": "blocker",
+          "sourceName": "Central Electric Cooperative — Net meter installation requirements",
+          "sourceUrl": "https://www.cec.coop/net-meter-installation-requirements/",
+          "quote": "As a safety feature, the AC disconnect must be installed near the meter base so it can be quickly located and operated in an emergency. For CEC, the distance can be no more than 10 feet.",
+          "fetchedAt": "2026-11-10T18:27:32Z"
+        },
+        {
+          "key": "owner_signature",
+          "whenMissing": "warning",
+          "sourceName": "Central Electric Cooperative — Net metering agreement",
+          "sourceUrl": "https://www.cec.coop/net-metering-agreement/",
+          "quote": "To enter into a binding agreement with CEC, Customer-Generator shall sign this Agreement",
+          "fetchedAt": "2026-11-10T18:27:34Z"
+        }
+      ]
+    },
+    {
+      "states": [
         "ID"
       ],
       "utility": "Idaho Power",

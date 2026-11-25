@@ -1,30 +1,15 @@
-# Solar Submission Autopilot
 
 **Proprietary and confidential.** Copyright (c) 2026 Keelix. All rights reserved. This code is
 Keelix's property and trade secret; no licence is granted without a written agreement with Keelix.
 See [LICENSE](LICENSE).
 
-Automates residential solar **permit** (AHJ) and **NEM/interconnection**
-(utility) submissions end-to-end — parse plan set → QC → code-cited reviewer
-gate → build/fill official AHJ forms → stage the portal application via
-learned automation — with a human always making the final submit. Everything
-it does once (portals, forms, fees, requirements) is learned and reused.
+
 
 ## Quick start (local)
 
-```bash
-npm install
-npx playwright install chromium
-npm run dev          # dashboard + API on :4000
-npm run smoke        # end-to-end check on a scratch DB
-```
 
-## Deploy for your team (cloud)
 
-Follow **`docs/SERVER_SETUP.md`** — single VM, systemd + Caddy HTTPS,
-`AUTH_ENABLED=true`, employee logins, client-safe share links, backups,
-update runbook, and the Stripe how-to for collecting per-submission client
-payments.
+
 
 ## Documentation map
 

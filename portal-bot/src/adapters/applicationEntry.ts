@@ -14,6 +14,7 @@
 // checked FIRST and win over any positive match.
 
 import type { Page, Frame, Locator } from "playwright";
+import { DISCLOSURE_TOGGLE_SELECTOR } from "./disclosureToggle";
 
 export interface ApplicationEntryMatch {
   /** The visible label of the control we would click. */
@@ -61,6 +62,10 @@ const SUBMIT_START_PHRASE =
 const ENTRY_PATTERNS: RegExp[] = [
   /\bcreate an application\b/i,                        // Accela ACA
   /\bapply for (a |an )?(new )?(permit|license|application)\b/i, // OpenGov / SmartGov / Citizenserve / BS&A
+  // "Apply for a <kind> Permit" — the permit noun after a qualifier (live Idaho DOPL, 2026-11-12:
+  // "Apply for a Building/Trade Permit/Plan Review" matched nothing, so the run took the only
+  // match on the page, "Apply for a License/Registration/Certification", into a licence form).
+  /\bapply for (a |an )?(new )?(?:[a-z/&-]+\s+){1,3}permits?\b/i,
   /\bstart (a |an )?(new )?(application|permit)\b/i,
   // "New <qualifier> Application" — the utility/interconnection phrasing. Ameren Illinois
   // offers "New Interconnection Application" (verified live), and a fixed
@@ -99,6 +104,12 @@ const EXCLUDE_PATTERNS: RegExp[] = [
   /\bcancel\b|\bwithdraw\b|\bdelete\b/i,
   /\bexisting\b|\bdraft\b/i,
   /\bregister\b|\bsign ?up\b|\bcreate an account\b/i, // account creation, not an application
+  // A LICENCE / REGISTRATION / CERTIFICATION DOOR IS NOT A PERMIT DOOR. This engine files
+  // permits and interconnection applications; a door that names only a licence (no permit,
+  // interconnection, building, electrical or solar word) starts an occupational licence
+  // application (live Idaho DOPL: the state licensing agency's "Apply for a License/
+  // Registration/Certification" sits beside its "Apply for a Building/Trade Permit/Plan Review").
+  /^(?!.*\b(permits?|interconnection|building|electrical|solar)\b).*\b(licen[cs]es?|registrations?|certifications?)\b/i,
   // A PRE-application is a different, usually paid, product — an optional engineering study
   // that does not file anything. Ameren Illinois lists "New Pre-Application" right beside
   // the real "New Interconnection Application", so the broadened new-application pattern
@@ -213,7 +224,7 @@ function entryRank(label: string): number {
 // ---------------------------------------------------------------------------
 
 /** Stamp the page's chrome — account, toggle, frame — for every door to read. Returns counts. */
-export function markSiteChromeInPage(): { account: number; toggle: number; frame: number } {
+export function markSiteChromeInPage(disclosureSel: string = "[aria-expanded]"): { account: number; toggle: number; frame: number } {
   for (const prev of Array.from(document.querySelectorAll("[data-al-chrome]"))) prev.removeAttribute("data-al-chrome");
   const FRAME = "nav, header, footer, [role='navigation'], [role='banner'], [role='contentinfo'], [role='tablist'], "
     + "[role='menu'], [role='menubar'], [aria-label*='step' i], [class*='stepper'], [class*='steps'], [class*='stepNav'], "
@@ -234,7 +245,7 @@ export function markSiteChromeInPage(): { account: number; toggle: number; frame
 
   const anchors: Element[] = [];
   // Toggles first: decide "account" or "toggle" by what the menu they open holds.
-  for (const t of Array.from(document.querySelectorAll("[data-bs-toggle='dropdown'], [data-toggle='dropdown'], .dropdown-toggle, [aria-haspopup], [aria-expanded]"))) {
+  for (const t of Array.from(document.querySelectorAll(`[data-bs-toggle='dropdown'], [data-toggle='dropdown'], .dropdown-toggle, [aria-haspopup], ${disclosureSel}`))) {
     if (t === root || t === body) continue;
     let menu: Element | null = null;
     const ctl = (t.getAttribute("aria-controls") || "").split(/\s+/).filter(Boolean)[0];
@@ -247,7 +258,10 @@ export function markSiteChromeInPage(): { account: number; toggle: number; frame
     const pop = (t.getAttribute("aria-haspopup") || "").toLowerCase();
     const declared = t.matches("[data-bs-toggle='dropdown'], [data-toggle='dropdown'], .dropdown-toggle")
       || pop === "true" || pop === "menu" || pop === "listbox";
-    if (!declared && !menu) continue; // aria-expanded alone — an accordion, a disclosure — is not a toggle
+    // A disclosure alone (DISCLOSURE_TOGGLE_SELECTOR — an accordion, a collapsible legend) that
+    // opens no menu is not a dropdown toggle. The same predicate keeps the login's submit pick
+    // off such a control (loginFlow).
+    if (!declared && !menu) continue;
     const ownLabel = `${t.getAttribute("aria-label") || ""} ${t.getAttribute("title") || ""}`;
     const accountish = (menu !== null && ACCOUNT_ACTION.test(menu.textContent || ""))
       || ACCOUNT_LABEL.test(ownLabel);
@@ -304,7 +318,7 @@ export function markSiteChromeInPage(): { account: number; toggle: number; frame
  *  leaves every door exactly as it was before this existed. */
 export async function markSiteChrome(scope: Page | Frame): Promise<void> {
   if (!scope || typeof (scope as Frame).evaluate !== "function") return;
-  try { await (scope as Frame).evaluate(markSiteChromeInPage); } catch { /* fail open */ }
+  try { await (scope as Frame).evaluate(markSiteChromeInPage, DISCLOSURE_TOGGLE_SELECTOR); } catch { /* fail open */ }
 }
 
 // ---------------------------------------------------------------------------

@@ -17,14 +17,18 @@ import {
 } from "./portalChannel";
 import { isHarnessAbort, looksBotBlocked } from "./runAbort";
 import { NOT_SERVED_FLAG_PREFIX } from "../../shared/src/portalNotServed";
+import { recipeSequenceProblems, recipeSequenceSentence, type RecipeSequenceProblem } from "../../shared/src/recipeSequence";
 import { certifiedModelFor } from "./cecEquipment";
 import { nowIso } from "./time";
 import { batteryStatus } from "./batteryServiceFeeder";
 import { projectForTrack, sameRecordType } from "./permitProcess";
-import { parseStreetNumber, parseStreetName, parseStreetLine } from "../../portal-bot/src/addressParse";
+import { readArrayAreaSqFt } from "./fireAccess";
+import { packageReadSources } from "./designCriteria";
+import { ADDRESS_COMPONENT_FIELD_KEYS, addressComponentFields, addressComponentKeysForSteps, parseStreetNumber, parseStreetName, parseStreetLine } from "../../portal-bot/src/addressParse";
 import { recordShapeOf } from "../../portal-bot/src/recordNumber";
 import { feeBracketFieldForLabel, feeBracketQuantityFields } from "./feeBracketFields";
 import { FEE_BRACKET_FIELD_PREFIX } from "../../portal-bot/src/feeBracketQuantity";
+import { DATE_LITERAL } from "../../portal-bot/src/learnDataInSelectors";
 import { filingValuationText } from "./valuation";
 import { planSetDisconnectPart, standardDisconnectConflicts } from "./baselineRules";
 import { clientCompanyFactFields } from "./clients";
@@ -36,7 +40,7 @@ import { provablyDifferentUtility, sameUtilityEntity } from "./utilityIdentity";
 import { sameAgencyName } from "./permitProcessLookup";
 import { isFormDataStep, labelWords, type FormDataStep } from "../../shared/src/portalSafety";
 // A cycle (portalDraft imports this module); safe because it is only called inside a function.
-import { disarmDraftCreatingSubmit } from "./portalDraft";
+import { disarmDraftCreatingSubmit, stepsEndOnHealedDraftSubmit } from "./portalDraft";
 import { firstEmail, looksLikeEmail } from "../../shared/src/emailAddress";
 import { contactKeyRole } from "../../shared/src/contactRoles";
 import { mountAdjective, mountKindForProject } from "./codeReviewRules";
@@ -213,15 +217,35 @@ const prevSnapshotMarker = (status: string, version: number): string =>
 export function snapshotIsProven(notes: unknown): boolean {
   return /\[prev-recipe:\s*proven/i.test(String(notes ?? ""));
 }
-const stripPrevMarker = (notes: unknown): string => String(notes ?? "").replace(PREV_SNAPSHOT_MARKER_RE, "").trim();
+// THE SEPARATOR GOES WITH THE MARKER. The marker is space-joined onto the notes, so on a row whose
+// notes were empty it is the whole first segment, and removing it alone left the " | " after it
+// dangling: "| [sequence check …]" is a segment that no longer starts with its own tag, so an upsert
+// by tag kept the stale copy beside the new one, and a removal by tag missed it (#241 review).
+const stripPrevMarker = (notes: unknown): string =>
+  String(notes ?? "").replace(PREV_SNAPSHOT_MARKER_RE, "").trim().replace(/^\|\s*/, "").replace(/\s*\|$/, "").trim();
 const carriedPrevMarker = (notes: unknown): string => (String(notes ?? "").match(PREV_SNAPSHOT_MARKER_RE) ?? [])[0]?.trim() ?? "";
 
-/** THE ONE DEPTH MEASURE of a recording: its steps that entered form data (the shared
- *  isFormDataStep — the e-signature steps and terms acknowledgments are not depth, #131). Read
- *  by the save path and the rollback here and, as substantiveStepCount, by the trust gate and
- *  the benchmark, so "deeper" can never keep a recipe those score as empty. */
-export function recipeDepth(steps: Array<{ action?: unknown }> | undefined): number {
-  return (steps ?? []).filter((st) => st && isFormDataStep({ ...(st as FormDataStep), action: String(st.action ?? "") })).length;
+/** THE ONE DEPTH MEASURE of a recording: the DISTINCT controls its steps entered form data into
+ *  (the shared isFormDataStep — the e-signature steps and terms acknowledgments are not depth,
+ *  #131). Read by the save path and the rollback here and, as substantiveStepCount, by the trust
+ *  gate and the benchmark, so "deeper" can never keep a recipe those score as empty. */
+// DISTINCT controls, not counted steps: a learn that bounced ("Submission Error") and re-filled the
+// same page three times recorded the same fills thrice, and that looped junk read as "deeper" (28)
+// than the honest 12-page re-record that followed it (22) — live City of Bend structural,
+// 2026-11-16 — so the save kept the junk and threw the re-record away. A loop is not depth; the
+// same control counts once (by its label, name or css, else its field, else its note).
+export function recipeDepth(steps: Array<{ action?: unknown; field?: unknown; note?: unknown; selector?: { label?: unknown; name?: unknown; css?: unknown } | null }> | undefined): number {
+  const keys = new Set<string>();
+  for (const st of steps ?? []) {
+    if (!st) continue;
+    const action = String(st.action ?? "");
+    if (!isFormDataStep({ ...(st as unknown as FormDataStep), action })) continue;
+    // The CONTROL's own identity first (its label, name or css), the binding after: many boxes
+    // can bind one key (a trust-gate fixture binds sixty to homeownerName), and they are sixty.
+    const ident = String(st.selector?.label || st.selector?.name || st.selector?.css || st.field || st.note || "").toLowerCase().replace(/\s+/g, " ").trim();
+    keys.add(`${action}|${ident || `#${keys.size}`}`);
+  }
+  return keys.size;
 }
 
 // Split a US phone into the three boxes segmented portal controls use (Accela renders
@@ -851,11 +875,19 @@ export function restoreRecipeSnapshotIfAbandoned(db: AppDb, recipeId: string): "
   const note = proven
     ? "[re-record abandoned — restored the previous working recipe]"
     : "[re-record abandoned — the previous steps were restored, but they had never been verified, so this needs a re-record rather than a promotion]";
+  // A SEQUENCE FINDING DESCRIBES THE STEPS IT READ (#241). When the abandoned attempt's steps give way
+  // to the snapshot, a "Sequence check:" flag and note written about them would name steps that are
+  // no longer there (and keep a restored working recipe out of the borrow pass), so they go with them.
+  // Any other flag is not this check's to clear.
+  const staleSequence = steps === snapshot;
+  const ownFlag = staleSequence && s(row.flag_reason).trim().startsWith(RECIPE_SEQUENCE_FLAG_PREFIX);
+  const merged = mergeRecipeNotes(base, note);
   db.run(
     `UPDATE portal_recipes SET steps_json = ?, status = ?, structure_sig = ?, prev_steps_json = NULL, auto_submit_enabled = 0,
-       notes = ?, updated_at = ? WHERE id = ? AND status = 'recording'`,
+       flag_reason = ?, flagged_at = ?, notes = ?, updated_at = ? WHERE id = ? AND status = 'recording'`,
     [asJson(steps), proven ? "complete" : "needs_rerecord", recipeStructureSignature(steps),
-      mergeRecipeNotes(base, note), nowIso(), recipeId],
+      ownFlag ? "" : s(row.flag_reason), ownFlag || !row.flagged_at ? null : s(row.flagged_at),
+      staleSequence ? withSequenceNote(merged, "") : merged, nowIso(), recipeId],
   );
   return proven ? "complete" : "needs_rerecord";
 }
@@ -1082,23 +1114,79 @@ export function savePortalRecipeSteps(
   return getPortalRecipe(db, recipeId);
 }
 
+// ---------------------------------------------------------------------------
+// A SEQUENCE THAT CANNOT REPLAY AS RECORDED IS NOT PROMOTED, AND A PERSON WHO PROMOTES IT IS TOLD (#241).
+//
+// recipeSequenceProblems (shared/src/recipeSequence.ts) reads the saved steps: a refused advance
+// followed by re-fills of the same page, two writes that disagree on one control, a dialog left
+// uncommitted, a chooser left unpicked, attachment-row steps after the row's own commit, a recipe
+// that never reaches review. The 2026-11-14 audit of all 22 saved recipes found every one of these
+// in a saved recipe (City of Bend structural re-recorded page 1 after a refused "Next Step"; the live
+// sweep stopped there, #232), while both live-proven Coos Bay recipes carry none.
+//
+// The automatic door (promoteRecordingIfEligible) REFUSES on them. A person's "Recording looks right
+// — save recipe" (finishPortalRecipe) keeps its override — never block a person — but is SHOWN the
+// same findings: in its response, in a tagged note, and in the flag the dashboard's recipe row shows
+// with "Clear flag". A flag this check raised starts with RECIPE_SEQUENCE_FLAG_PREFIX, so the check
+// clears only its own flag when the steps come back clean — never an unattributed-replay flag, never
+// a portal's "not served" refusal. (A flagged recipe is never lent to another AHJ: the borrow pass
+// rejects every flagged donor.)
+// ---------------------------------------------------------------------------
+export const RECIPE_SEQUENCE_FLAG_PREFIX = "Sequence check:";
+const SEQUENCE_NOTE_TAG = "sequence check";
+
+/** The notes with this check's tagged segment replaced by `segment` ("" = removed). */
+function withSequenceNote(notes: unknown, segment: string): string {
+  if (segment) return upsertRecipeNote(notes, SEQUENCE_NOTE_TAG, segment);
+  return recipeNoteSegments(notes).filter((seg) => !seg.toLowerCase().startsWith(`[${SEQUENCE_NOTE_TAG}`)).join(" | ");
+}
+
+/** A finished recipe, with what the sequence check found in its steps (empty when nothing). */
+export type FinishedPortalRecipe = PortalRecipeWithFlag & { sequenceProblems: RecipeSequenceProblem[] };
+
 // Promote a "recording" recipe to "complete" once a human has verified/fixed the captured
 // fill (the "Recording looks right — save recipe" action, or automatically when the operator
 // marks the track submitted — their manual submit just demonstrated the flow works). A recipe
-// with no steps can't be promoted; already-complete is a no-op.
-export function finishPortalRecipe(db: AppDb, recipeId: string, finishedBy?: string): PortalRecipe {
+// with no steps can't be promoted; already-complete is a no-op (its findings are still returned).
+export function finishPortalRecipe(db: AppDb, recipeId: string, finishedBy?: string): FinishedPortalRecipe {
   const recipe = getPortalRecipe(db, recipeId);
-  if (recipe.status === "complete") return recipe;
+  // THE ONE EVIDENCE THIS DOOR HOLDS THAT THE RECORDING REACHED ITS END, beyond a terminal step: the
+  // heal record names the last step as a submit a person's click was seen to turn into a draft. The
+  // heal removes isFinalSubmit by design, and a draft-only Part 1 (PSE) is never promoted any other
+  // way, so without this every such save was flagged "never reached review" (#241 review). Read-only;
+  // it decides what this check reports, never what a replay may click.
+  const sequenceOpts = { reachedReview: stepsEndOnHealedDraftSubmit(db, recipeId, recipe.steps) };
+  if (recipe.status === "complete") return { ...recipe, sequenceProblems: recipeSequenceProblems(recipe.steps, sequenceOpts) };
   if (!recipe.steps.length) throw new HttpError(409, "This recording has no captured steps yet — nothing to save as a replayable recipe.");
+  const who = finishedBy || "operator";
+  const problems = recipeSequenceProblems(recipe.steps, sequenceOpts);
+  const refusing = problems.filter((p) => p.refusesPromotion);
+  const now = nowIso();
+  const sequenceNote = !problems.length ? ""
+    : refusing.length
+      ? `[sequence check ${now.slice(0, 10)}: promoted by ${who} although the recorded sequence cannot replay as recorded — ${recipeSequenceSentence(problems)}]`
+      : `[sequence check ${now.slice(0, 10)}: ${recipeSequenceSentence(problems)}]`;
+  const ownFlag = recipe.flagReason.trim().startsWith(RECIPE_SEQUENCE_FLAG_PREFIX);
+  const flag = refusing.length
+    ? `${RECIPE_SEQUENCE_FLAG_PREFIX} promoted by ${who} although the recorded sequence cannot replay as recorded — ${recipeSequenceSentence(refusing)}. Re-learn this portal, or fix those steps, then clear this flag.`
+    : ownFlag ? "" : recipe.flagReason;
+  const flaggedAt = refusing.length ? now : ownFlag ? null : recipe.flaggedAt;
   // The snapshot is dropped here, so its `[prev-recipe:…]` marker goes with it. Every
   // statement that clears prev_steps_json must strip the marker, or a marker outlives its
   // payload and describes the NEXT snapshot — the one thing that would make the stale
   // sweep's proven/unproven judgement lie.
-  db.run("UPDATE portal_recipes SET status = 'complete', prev_steps_json = NULL, auto_submit_enabled = 0, notes = ?, updated_at = ? WHERE id = ?", [
-    mergeRecipeNotes(stripPrevMarker(recipe.notes), `[verified by ${finishedBy || "operator"} — promoted from recording]`),
-    nowIso(), recipeId,
+  db.run("UPDATE portal_recipes SET status = 'complete', prev_steps_json = NULL, auto_submit_enabled = 0, notes = ?, flag_reason = ?, flagged_at = ?, updated_at = ? WHERE id = ?", [
+    withSequenceNote(mergeRecipeNotes(stripPrevMarker(recipe.notes), `[verified by ${who} — promoted from recording]`), sequenceNote),
+    flag, flaggedAt, now, recipeId,
   ]);
-  return getPortalRecipe(db, recipeId);
+  if (refusing.length) {
+    try {
+      addAuditLog(db, null, "human", who, "portal_recipe.promoted_over_sequence_findings", {
+        recipeId, profileKey: recipe.profileKey, problems: refusing.map((p) => ({ kind: p.kind, steps: p.steps.map((i) => i + 1) })),
+      });
+    } catch { /* audit is best-effort */ }
+  }
+  return { ...getPortalRecipe(db, recipeId), sequenceProblems: problems };
 }
 
 // AUTOMATIC promotion chokepoint (submit-observed signal, mark-submitted): promote a
@@ -1139,6 +1227,37 @@ export function promoteRecordingIfEligible(
       + `${(recipe.notes.match(/Required field\(s\) left blank[^.]*/i) || [""])[0].slice(0, 300)}. `
       + "Fill those fields (usually by adding the missing project/client data and re-learning), "
       + "or promote with an explicit written reason if the sweep is wrong.");
+  }
+
+  // REACHING REVIEW IS NOT THE SAME AS A REPLAYABLE SEQUENCE EITHER (#241). A learn that looped on a
+  // refused advance, or left a dialog uncommitted, still ends at review — and the operator's own
+  // submit of the CORRECTED fill in the left-open browser says nothing about the steps saved before
+  // the correction. Refused here, with WHY written on the recipe (a tagged note and the dashboard
+  // flag) and in the audit log, because every caller of this door swallows its outcome. A person can
+  // still promote it deliberately ("Recording looks right — save recipe", finishPortalRecipe).
+  const refusing = recipeSequenceProblems(recipe.steps).filter((p) => p.refusesPromotion);
+  if (refusing.length) {
+    const sentence = recipeSequenceSentence(refusing);
+    const now = nowIso();
+    // ANOTHER DOOR'S FLAG IS NOT OVERWRITTEN (Helm review of PR #247): an unattributed-replay flag
+    // (or any flag that is not this check's own) stays, with its own flagged_at; the sequence verdict
+    // then lives in the note alone. The sequence flag is written only onto an empty flag or its own.
+    const existingFlag = s(recipe.flagReason ?? "").trim();
+    const ownOrEmpty = !existingFlag || existingFlag.startsWith(RECIPE_SEQUENCE_FLAG_PREFIX);
+    const sequenceFlag = `${RECIPE_SEQUENCE_FLAG_PREFIX} not promoted to complete — the recorded sequence cannot replay as recorded: ${sentence}. Re-learn this portal, or fix those steps and use "Recording looks right — save recipe".`;
+    const existingFlaggedAt = s(db.get<Row>("SELECT flagged_at FROM portal_recipes WHERE id = ?", [recipeId])?.flagged_at) || now;
+    db.run("UPDATE portal_recipes SET flag_reason = ?, flagged_at = ?, notes = ?, updated_at = ? WHERE id = ?", [
+      ownOrEmpty ? sequenceFlag : existingFlag,
+      ownOrEmpty ? now : existingFlaggedAt,
+      withSequenceNote(recipe.notes, `[sequence check ${now.slice(0, 10)}: not promoted (${opts.via}) — ${sentence}${ownOrEmpty ? "" : "; the recipe's existing flag was kept"}]`), now, recipeId,
+    ]);
+    try {
+      addAuditLog(db, opts.projectId ?? null, "system", "recipe promotion", "portal_recipe.promotion_refused", {
+        recipeId, via: opts.via, profileKey: recipe.profileKey,
+        problems: refusing.map((p) => ({ kind: p.kind, steps: p.steps.map((i) => i + 1) })),
+      });
+    } catch { /* audit is best-effort */ }
+    return null;
   }
   const finished = finishPortalRecipe(db, recipeId, opts.finishedBy);
   try {
@@ -1192,6 +1311,11 @@ const TRANSIENT_FAILURE: Array<[RegExp, string]> = [
   // not looking the way the recipe remembers, which is exactly the drift that should demote —
   // so it is deliberately absent from this list.
   [/page\.goto|navigation timeout|timeout .{0,20}exceeded.{0,20}navigat|net::ERR_TIMED_OUT|page\.waitFor(URL|LoadState|Navigation)/i, "the page never finished loading"],
+  // Every recorded step ran; only the checks after them (no filing click) ran past their budget
+  // (replayStopControl ReplayStallWatch.enterTail). That says nothing about the recipe's steps. This
+  // class only decides demotion: nothing reads it as "safe to retry" (a run whose approved final
+  // submit was clicked is recorded submitted/submitted_unconfirmed before any failure is judged).
+  [/stalled after its last recorded step|stalled after the approved final submit was clicked/i, "every recorded step ran; only the checks after them ran long"],
 ];
 
 // NOT ABOUT THE RECIPE, EITHER — the run was stopped by something about THIS PROJECT or by the
@@ -1700,7 +1824,8 @@ export const RECIPE_FIELD_DESCRIPTIONS: Record<string, string> = {
   buildingHeightFeet: "Existing building height, whole feet (grade to ridge)",
   buildingHeightInches: "Existing building height, remaining inches",
   numberOfStories: "Number of storeys of the existing building",
-  newBuildingArea: "New building area created by this work (0 for a rooftop retrofit)",
+  newBuildingArea: "New building area for this work: the PV array's area in square feet (owner ruling 2026-11-12)",
+  totalBuildingArea: "Total building area: existing + new building area, in square feet",
   dwellingUnits: "Dwelling units in the building (1 for a single-family house)",
   numberOfBuildings: "Buildings covered by this permit (1 unless the plans show more)",
   county: "County the project site is in",
@@ -1771,8 +1896,8 @@ function dateFields(): Record<string, string> {
 
 // Which date field a recorded date literal should become. Value-equality binding cannot
 // reach these (that is exactly why they froze), so this matches on the CONTROL's label
-// and picks the format the portal already demonstrated it accepts.
-const DATE_LITERAL = /^(\d{4}-\d{2}-\d{2}|\d{1,2}\/\d{1,2}\/\d{4})$/;
+// and picks the format the portal already demonstrated it accepts. DATE_LITERAL is the one date
+// grammar (portal-bot learnDataInSelectors): the learner reads a date printed in a label by it too.
 const FUTURE_DATE_LABEL = /commission|in[- ]?service|energiz|operation|installation|completion|start|planned|expected|estimated|anticipat|schedul/i;
 // AN EXPIRY IS NEITHER A SIGNATURE DATE NOR A COMMISSIONING ESTIMATE.
 //
@@ -2083,6 +2208,18 @@ export function resolveRecipeFieldValues(
   // So homeowner* stays the property owner, always and on every portal, and the account
   // holder has its own name. A recording binds the customer block to ubAccountHolder* and the
   // owner block to homeowner*, which is what the form is actually asking for.
+  // Building areas (owner ruling 2026-11-12): New = the plan set's stated new area, else the PV
+  // array's plan-view area, else 0; Existing = the plan set's, else 0 (ruling 2026-09-27).
+  const existingAreaText = String(snapshotFlat.existingBuildingArea ?? "").trim() || "0";
+  const newAreaText = ((): string => {
+    const stated = String(snapshotFlat.newBuildingArea ?? "").trim();
+    if (stated) return stated;
+    try {
+      const array = readArrayAreaSqFt(project, packageReadSources(project));
+      if (array && Number.isFinite(array.value) && array.value > 0) return String(Math.round(array.value));
+    } catch { /* no readable package: 0 below */ }
+    return "0";
+  })();
   const projectFields: Record<string, string> = {
     homeownerName: project.homeownerName,
     // The permit's "Project Name" always follows the PROJECT, never the billing name — it is
@@ -2119,6 +2256,13 @@ export function resolveRecipeFieldValues(
     // Bound instead of streetNameCore when the LEARN run's full-name search returned
     // zero results and its 3-char retry succeeded (the portal's own search hint).
     streetNameSearchPortion: parseStreetName(project.projectAddress || "").slice(0, 3),
+    // AND THE PIECES THE SAME SEARCH ASKS FOR IN SELECTS (#236): street direction, street type, unit
+    // type, in both vocabularies ("SE"/"Southeast", "AVE"/"Avenue"). An address-component step binds
+    // here (addressParse.addressComponentKeysForSteps) — the audit found Corvallis replaying the
+    // learn job's "NW" and "ST" into an "SE … Ave" project's search. "" when the address has none;
+    // no key, and named under addressComponentsUnread, when it could not be read (the binder hands
+    // that control to a person — never "the address has none").
+    ...addressComponentFields(project.projectAddress || ""),
     // SEGMENTED PHONE parts. Accela renders a US phone as three boxes (area/prefix/line);
     // recording the digits as literals would replay the LEARN project's phone number for
     // every future project, so each segment binds to its own derived key.
@@ -2175,14 +2319,17 @@ export function resolveRecipeFieldValues(
     // (operator ruling 2026-09-27, Jules Testperson's Marion building page refused three blanks:
     // "Just put 0's there, that's what we do normally"): a rooftop retrofit's permit geometry is
     // entered as 0 by the operators themselves, and a blank only stops the filing.
-    existingBuildingArea: String(snapshotFlat.existingBuildingArea ?? "").trim() || "0",
+    existingBuildingArea: existingAreaText,
     buildingHeightFeet: String(snapshotFlat.buildingHeightFeet ?? "").trim() || "0",
     buildingHeightInches: String(snapshotFlat.buildingHeightInches ?? "").trim() || "0",
     numberOfStories: String(snapshotFlat.numberOfStories ?? "").trim() || "0",
-    // Defaults that are facts about a ROOFTOP RETROFIT rather than about a project: adding
-    // panels to an existing roof creates no new building area, and the permit covers the one
-    // house the array sits on. The plan set overrides both whenever it says otherwise.
-    newBuildingArea: String(snapshotFlat.newBuildingArea ?? "0").trim(),
+    // NEW BUILDING AREA IS THE ARRAY'S AREA (owner ruling 2026-11-12, "Always array sq ft"). City of
+    // Boise refused 0 for both Existing and New Building Area on a PV permit, and the owner's own
+    // Boise filing entered the array (835 sq ft) as New and Total. So: the plan set's stated new area
+    // when it has one, else the PV array's plan-view area (the one reader fireAccess uses), else 0.
+    newBuildingArea: newAreaText,
+    totalBuildingArea: String(snapshotFlat.totalBuildingArea ?? "").trim() || String((Number(existingAreaText) || 0) + (Number(newAreaText) || 0)),
+    // The permit covers the one house the array sits on unless the plan set says otherwise.
     dwellingUnits: String(snapshotFlat.dwellingUnits ?? "1").trim(),
     numberOfBuildings: String(snapshotFlat.numberOfBuildings ?? "1").trim(),
     // The county the SITE is in — asked by Ameren, and previously frozen as "Sangamon" (the
@@ -2694,6 +2841,10 @@ export function convertLiteralsToBoundFields(
   for (const [key, raw] of Object.entries(projectFields)) {
     if (key === "todayDate") continue;
     if (isParserEvidenceKey(key)) continue;
+    // THE ADDRESS COMPONENTS ARE PLACED BY A CONTROL'S LABEL, NEVER BY VALUE (#236 review): a learn job
+    // at "123 SW … St" would otherwise bind a "Roof Facing" = "Southwest" literal to streetDirectionWord,
+    // and every later replay would put the street's direction (or nothing) in the roof's box.
+    if (ADDRESS_COMPONENT_FIELD_KEYS.has(key)) continue;
     const nv = norm(raw);
     if (nv.length < 2) continue;
     const arr = valueToFields.get(nv) ?? [];
@@ -2704,12 +2855,26 @@ export function convertLiteralsToBoundFields(
   const bound: LiteralBindingResult["bound"] = [];
   const ambiguous: LiteralBindingResult["ambiguous"] = [];
   const portalConstants: Array<{ value: string; note?: string }> = [];
-  const out = steps.map((step) => {
+  // The address-component key each step's LABEL names (#236) — over the whole recipe, because a bare
+  // "Direction" is a street direction only on the page that searches an address.
+  const componentKeys = addressComponentKeysForSteps(steps);
+  const out = steps.map((step, index) => {
     const bindable = (step.action === "fill" || step.action === "select") && !!step.value && !step.field && !step.sensitive;
     if (!bindable) return step;
     // A STANDING POLICY ANSWER IS A LITERAL ON PURPOSE ("policy default: Are the AC disconnect(s)…
     // -> Yes"): the operator's answer for every job, never a value to rebind to project data.
     if (POLICY_DEFAULT_NOTE.test(String(step.note ?? ""))) return step;
+    // AN ADDRESS COMPONENT IS BOUND BY ITS LABEL, BEFORE ANY VALUE MATCH (#236). Street Direction "NW"
+    // and Street Type "ST" are the learn job's address; value equality cannot reach them ("N" is one
+    // character, under the two the value map keeps) and they then froze as portal constants that every
+    // later job's address search replayed. Bound to this project's component in the recorded vocabulary.
+    const componentKey = componentKeys[index];
+    if (componentKey) {
+      bound.push({ value: step.value as string, field: componentKey, note: step.note });
+      const next: RecipeStep = { ...step, field: componentKey };
+      delete next.value;
+      return next;
+    }
     // A DATE never matches by value (todayDate is skipped above as volatile), so it would
     // otherwise stay frozen and replay a stale — eventually PAST — date onto a live
     // application. Rebind it by the control's label to a field recomputed every replay.
@@ -2858,6 +3023,48 @@ export function appendHumanPatchSteps(
   clientId?: string | null,
 ): PortalRecipe {
   const recipe = getPortalRecipe(db, recipeId);
+  const bound = prepareHumanPatchSteps(db, newSteps, projectFields, clientId);
+  if (!bound.length) return recipe;
+  const steps = [...(recipe.steps || [])];
+  // Split off the trailing terminal markers (stopForReview and/or the recorded
+  // final-submit) so patches land before them, in replayable position.
+  const cut = terminalTailStart(steps);
+  const merged = [...steps.slice(0, cut), ...bound, ...steps.slice(cut)];
+  // One idempotent notes marker with the TOTAL patched count — steps stream in one at a
+  // time as the human works, so a per-call append would spam the notes field.
+  const totalPatched = merged.filter((st) => (st.note || "").startsWith("human-patch")).length;
+  const baseNotes = (recipe.notes || "").replace(/\s*\[human-patch:[^\]]*\]/g, "").trim();
+  return savePortalRecipeSteps(db, recipeId, merged, {
+    status: recipe.status as PortalRecipeStatus,
+    notes: `${baseNotes} [human-patch: ${totalPatched} step(s) demonstrated at review]`.trim(),
+  });
+}
+
+/** Where a recipe's terminal tail starts: the trailing stopForReview and/or recorded final-submit
+ *  steps. A person's demonstrated steps always land before it (replay stops at that tail). */
+export function terminalTailStart(steps: RecipeStep[]): number {
+  let cut = steps.length;
+  while (cut > 0) {
+    const tailStep = steps[cut - 1] as RecipeStep & { isFinalSubmit?: boolean };
+    if (tailStep.action === "stopForReview" || tailStep.isFinalSubmit === true) cut--;
+    else break;
+  }
+  return cut;
+}
+
+/**
+ * THE ONE PREPARATION OF STEPS A PERSON DEMONSTRATED (the learner's review patch, and a replay's
+ * hand fixes, runFixSteps.ts): company attestations stamped, submit/pay clicks and the
+ * submit-observed signal dropped, a sensitive value bound by name and its literal ALWAYS removed,
+ * literals that match the job's data bound to its fields, and the company's own licence never kept
+ * as a literal. What comes out is safe to store and replays each later job's own data.
+ */
+export function prepareHumanPatchSteps(
+  db: AppDb,
+  newSteps: RecipeStep[],
+  projectFields: Record<string, string>,
+  clientId?: string | null,
+): RecipeStep[] {
   newSteps = stampCompanyAttestations(newSteps, clientId);
   // DEFENSE IN DEPTH: the capture script already refuses submit/pay clicks, but a
   // mislabeled button can slip through (a real run recorded a bare "Submit" click).
@@ -2882,7 +3089,7 @@ export function appendHumanPatchSteps(
     if (!label && SUBMIT_PAY.test(JSON.stringify(st.selector || {}))) return false;
     return true;
   });
-  if (!newSteps.length) return recipe;
+  if (!newSteps.length) return [];
   // SENSITIVE steps: the capture ships the typed value in-memory ONLY so it can be bound
   // to a project field key here (account/meter numbers live in project data). Bind on a
   // unique match, then ALWAYS strip the literal before anything is persisted — a secret
@@ -2894,25 +3101,7 @@ export function appendHumanPatchSteps(
     delete next.value;
     return next;
   });
-  const steps = [...(recipe.steps || [])];
-  // Split off the trailing terminal markers (stopForReview and/or the recorded
-  // final-submit) so patches land before them, in replayable position.
-  let cut = steps.length;
-  while (cut > 0) {
-    const tailStep = steps[cut - 1] as RecipeStep & { isFinalSubmit?: boolean };
-    if (tailStep.action === "stopForReview" || tailStep.isFinalSubmit === true) cut--;
-    else break;
-  }
   // A patch literal that is the patching company's own licence (any state, any kind) never stays a
   // literal in the shared recipe (withholdClientLicenceLiterals, licences skeptic L1).
-  const bound = withholdClientLicenceLiteralsFor(db, convertLiteralsToBoundFields(newSteps, projectFields).steps, clientId);
-  const merged = [...steps.slice(0, cut), ...bound, ...steps.slice(cut)];
-  // One idempotent notes marker with the TOTAL patched count — steps stream in one at a
-  // time as the human works, so a per-call append would spam the notes field.
-  const totalPatched = merged.filter((st) => (st.note || "").startsWith("human-patch")).length;
-  const baseNotes = (recipe.notes || "").replace(/\s*\[human-patch:[^\]]*\]/g, "").trim();
-  return savePortalRecipeSteps(db, recipeId, merged, {
-    status: recipe.status as PortalRecipeStatus,
-    notes: `${baseNotes} [human-patch: ${totalPatched} step(s) demonstrated at review]`.trim(),
-  });
+  return withholdClientLicenceLiteralsFor(db, convertLiteralsToBoundFields(newSteps, projectFields).steps, clientId);
 }

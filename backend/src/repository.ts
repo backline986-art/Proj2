@@ -82,6 +82,7 @@ import { checkStatusWithAdapter, runCorrectionReopen, stageWithAccela, stageWith
 import { readRecordLinkSignedIn } from "../../portal-bot/src/recordLinkRead";
 import { liveReviewSessionUnder } from "../../portal-bot/src/reviewSession";
 import { portalAutomationDisabled, resolveHeadless } from "../../portal-bot/src/browser";
+import { handFixesAwaitingProof, markHandFixesProven, openRunFixCapture, runFixSummaries, secretFreeFields } from "./runFixSteps";
 import { learnRecordNumberFormat, findCompleteRecipeForProject, findAnyRecipeForProject, resolveRecipeFieldValues, markPortalRecipeForRerecord, demoteOnReplayFailure, collectHealedSteps, persistHealedSteps, getPortalRecipe, portalEntityEvidence, recipeHostFit, findBorrowableRecipe, replayFailureBlamesRecipe, recipeStepsSignature, isNotServedRecipe, recordPortalNotServed, type BorrowedRecipeChoice } from "./portalRecipes";
 import { notServedInResult } from "../../shared/src/portalNotServed";
 import { notifyClientOfStatusChange, shouldNotifyClient } from "./clientNotifier";
@@ -113,6 +114,8 @@ import { clientLicenceRow, clientStagingOverlay, contractorLicenceForState, getC
 import { planSetLicenceWarning } from "./clientMatch";
 import { assertSubmissionPaid } from "./submissionFees";
 import { snapshotFilingQuote } from "./feeAccuracy";
+import { recordFilingServiceCharge } from "./servicePrices";
+import { assertNoBillingHold } from "./invoiceCollections";
 import { readAndRecordPortalFees } from "./portalFeeReadings";
 import { closeoutDocumentLines, fetchIssuedRecordDocuments, isFinishedOutcome, issuedDocumentsByTarget } from "./portalIssuedDocuments";
 import { clientHasLoginOnHost, getDecryptedCredential, getDecryptedCredentialByUrl, getDecryptedCredentialAny, listPortalCredentials, lockedOutCredential, recordLoginOutcome, storedCredentialFor } from "./portalCredentials";
@@ -130,7 +133,7 @@ import { isPortalPaused } from "./portalPause";
 // The ONE creator of permit_check_targets rows (extracted from markTrackSubmitted).
 // Direction matters: submittalTracks must never import repository — jobQueue statically
 // imports repository, and the circular-import guard in CLAUDE.md is about that edge.
-import { ensureCheckTarget, refuseUtilityUrlOnPermitTarget, getSubmittalTracks, isTrackDone, personVerifiedFilingDoor, requiredTracks, SUBMITTAL_TRACK_TYPES, trackHasFiling, trackPermitTypes, trackSubmittedAndTracked, trackSubmittedSentence, unfinishedTracks, unfinishedUnattributedTargets, withPermitStageSentence } from "./submittalTracks";
+import { ensureCheckTarget, refuseUtilityUrlOnPermitTarget, getSubmittalTracks, isTrackDone, markTrackFirstStage, personVerifiedFilingDoor, requiredTracks, secondStageHold, SUBMITTAL_TRACK_TYPES, trackHasFiling, trackPermitTypes, trackSubmittedAndTracked, trackSubmittedSentence, unfinishedTracks, unfinishedUnattributedTargets, withPermitStageSentence } from "./submittalTracks";
 import { nemTrackDropFor } from "./utilityStorageModes";
 import { nemFiledWithPermit } from "./utilityFilingLookup";
 import { recordStagedReview, supersedeStagedReviews, takeStagedReviewCapture } from "./stagedReviews";
@@ -145,6 +148,7 @@ import { extractCorrectionFromPage } from "./correctionExtract";
 import { parseCorrectionProposals, attachJurisdictionProposals } from "./correctionAgent";
 import type { AppDb } from "./db";
 import { DEFAULT_ORG_ID } from "./db";
+import { memoRead, withReadMemo } from "./readMemo";
 import { HttpError } from "./httpError";
 import { buildHistoricalFailureReport } from "./historicalFailures";
 import { id } from "./ids";
@@ -181,6 +185,8 @@ import { linkLookupRanRecently, signedInOutcome, statusReadGap, type ReadGapFact
 import { evidenceForTopic, evidenceLines, type EvidenceTopic } from "./projectEvidence";
 import { resolveUtilityRequirements } from "./utilityRequirements";
 import { readParcelJurisdiction, type ParcelJurisdictionReading } from "./parcelJurisdiction";
+import { planSetImageDisconnectRead as planSetImageDisconnectReadOf } from "./planSetImageReads";
+import { jobInverterUl1741Sb } from "./cecEquipment";
 import { customerBillOnFile, runQcForProject, WAITING_ON_BILL_ISSUE_TYPE, type QcRunOptions } from "./qc";
 import { resolveJobScope } from "./jobScope";
 import { loadStoredTemplates, formAllowedForPath } from "./ahjForms";
@@ -194,6 +200,7 @@ import type { PvWorksheetGateInput } from "./pvWorksheetGate";
 import { resolveEffectiveCodeContext, ensureCodeProfilesResearched, ownCodeProfileRow, resolvePermitPathForProject, recordApprovedDesignObservation, isStructuralPermitTrack } from "./codeProfiles";
 import { applyCachedVisionVerdicts, visionRelaxedBlockers } from "./reviewerVision";
 import { nowIso } from "./time";
+import { recordFieldChanges, recordIntakeRead } from "./fieldHistory";
 import { isHarnessAbort, looksBotBlocked } from "./runAbort";
 import { finalSubmitEnvAllows, recipeShapeProblems, runApprovalRefusals } from "../../shared/src/portalSafety";
 import { PAGE_READ_MIN_GAP_MS } from "./agencyPageReader";
@@ -281,7 +288,16 @@ export function buildReviewerReportFor(db: AppDb, project: ProjectRecord): Revie
   // "not checked", which raises only today's callout.
   let parcelJurisdiction: ParcelJurisdictionReading | undefined;
   try { parcelJurisdiction = readParcelJurisdiction(db, project); } catch { parcelJurisdiction = undefined; }
-  return buildReviewerReport(project, { codeContext, codeProfileRow, uploadedDocTypes, documentTexts: designDocumentTexts(db, project.id), pvWorksheet: filedPvWorksheetInput(db, project), structuralCertification, stateRules, jobScope, utilityRequirements, parcelJurisdiction });
+  // What the server's own image read of this job's stored plan set said about its AC disconnect
+  // (#135): the one reader QC uses too, by the stored file's bytes — never the job's snapshot. A
+  // failed read is "no such read", which holds the job exactly as before.
+  let planSetImageDisconnectRead: ReturnType<typeof planSetImageDisconnectReadOf> = null;
+  try { planSetImageDisconnectRead = planSetImageDisconnectReadOf(db, project.id); } catch { planSetImageDisconnectRead = null; }
+  // What the CEC's own inverter list says about the job's inverter and UL 1741 SB (the one reader QC
+  // uses too). A failed read is no answer, which checks the package text exactly as before.
+  let inverterUl1741Sb: ReturnType<typeof jobInverterUl1741Sb> = null;
+  try { inverterUl1741Sb = jobInverterUl1741Sb(db, project.parserSnapshot as Record<string, unknown>); } catch { inverterUl1741Sb = null; }
+  return buildReviewerReport(project, { planSetImageDisconnectRead, inverterUl1741Sb, codeContext, codeProfileRow, uploadedDocTypes, documentTexts: designDocumentTexts(db, project.id), pvWorksheet: filedPvWorksheetInput(db, project), structuralCertification, stateRules, jobScope, utilityRequirements, parcelJurisdiction });
 }
 
 // WHAT HOLDS THIS FILING: ONE ANSWER (#214). The text report with the cached vision verdicts folded
@@ -308,7 +324,16 @@ export function buildReviewerReportFor(db: AppDb, project: ProjectRecord): Revie
 // run reads the gate a second time this way, as of its approval, so a verdict a concurrent stage_step
 // wrote after the Approve click cannot be what lets that run's final submit through.
 export function reviewerGateReportFor(db: AppDb, project: ProjectRecord, opts: { verdictsWrittenBefore?: string } = {}): ReviewerReport {
-  return applyCachedVisionVerdicts(db, buildReviewerReportFor(db, project), opts);
+  // The as-of-approval read (#226) is always computed. The plain read is shared inside ONE synchronous
+  // read (readMemo.ts, #263): same project in full, same database state, a copy per reader.
+  const build = (): ReviewerReport => applyCachedVisionVerdicts(db, buildReviewerReportFor(db, project), opts);
+  if (opts.verdictsWrittenBefore !== undefined) return build();
+  return memoRead(db, `gate:${project.id}`, () => JSON.stringify(project), build);
+}
+
+/** The application package for a project as stored, shared inside one synchronous read (readMemo.ts). */
+function applicationPackageFor(db: AppDb, project: ProjectRecord): ReturnType<typeof buildApplicationDocumentPackage> {
+  return memoRead(db, `appdocs:${project.id}`, () => JSON.stringify(project), () => buildApplicationDocumentPackage(project));
 }
 
 /** The audit row for a gate that let a filing through on a vision verdict (#226): staging
@@ -365,7 +390,7 @@ const DESIGN_DOC_LABELS: Record<string, string> = {
   sld: "Single-line diagram", site_plan: "Site plan", labels: "Labels sheet",
   module_spec: "Module spec sheet", inverter_spec: "Inverter spec sheet",
 };
-function designDocumentTexts(db: AppDb, projectId: string): DesignTextSource[] {
+export function designDocumentTexts(db: AppDb, projectId: string): DesignTextSource[] {
   const out: DesignTextSource[] = [];
   const seen = new Set<string>();
   for (const row of db.query<Row>(
@@ -744,6 +769,17 @@ function mapPortalRun(row: Row): PortalRun {
   };
 }
 
+/** A run that holds a person's hand fixes (runFixSteps.ts) carries their summary for its card. */
+function withHandFixes(db: AppDb, projectId: string, runs: PortalRun[]): PortalRun[] {
+  let fixes: ReturnType<typeof runFixSummaries>;
+  try { fixes = runFixSummaries(db, projectId); } catch { return runs; }
+  if (!fixes.size) return runs;
+  return runs.map((r) => {
+    const f = fixes.get(r.id);
+    return f ? { ...r, handFixes: { count: f.count, stuckStep: f.stuckStep, atEnd: f.atEnd, appliedAt: f.appliedAt, appliedBy: f.appliedBy, preview: f.preview, submitSightedAt: f.submitSightedAt, submitLabel: f.submitLabel } } : r;
+  });
+}
+
 function mapSubmission(row: Row): SubmissionRecord {
   return {
     id: text(row.id),
@@ -859,7 +895,8 @@ export function createProject(
       ],
     );
 
-    insertExtractedFields(db, project.id, payload, false);
+    // Intake's read of every field, the baseline later changes are measured against (fieldHistory.ts).
+    recordIntakeRead(db, project.id, project.parserSnapshot as Record<string, unknown>);
     addAuditLog(db, project.id, "system", "front-end parser", "project.created_from_parser_snapshot", {
       source: "Solar Submission Engine HTML",
     });
@@ -959,8 +996,11 @@ export function updateProject(
    *  never PUT /api/projects/:id, which the parser and API keys use (#270). See recordMicroSupersession.
    *  expectedVersion: the project's editVersion the editor LOADED (#440). Given, a project that has
    *  moved on since — a teammate's save, or a background write of its data — is refused with a 409 and nothing
-   *  is written. Omitted (the parser, API keys, internal callers), the save is unconditional, as before. */
-  options: { humanInverterEdit?: boolean; expectedVersion?: number } = {},
+   *  is written. Omitted (the parser, API keys, internal callers), the save is unconditional, as before.
+   *  editedBy: the signed-in person who saved it (PUT /api/projects/:id); omitted, the history says
+   *  "front-end parser" as before. changeSource: what made the change when no person did ("client form",
+   *  "bill reader"…), recorded on each changed field's history row (fieldHistory.ts). */
+  options: { humanInverterEdit?: boolean; expectedVersion?: number; editedBy?: string; changeSource?: string } = {},
 ): ProjectDetail {
   const existing = getProjectDetail(db, projectId).project;
   // Drop the non-persistent plan-set text overlay (re-derived from project_documents
@@ -1026,6 +1066,10 @@ export function updateProject(
     // connection's write in between makes this transaction's write fail rather than land). The throw
     // rolls back; QC and learning below never run for a refused save.
     if (options.expectedVersion !== undefined) assertProjectEditVersion(db, projectId, options.expectedVersion);
+    // The stored snapshot as it was, read in the write's own transaction: what this save changed is
+    // measured against it (fieldHistory.ts), not against the overlaid copy loaded above.
+    const storedBefore = parseJson<Record<string, unknown>>(
+      db.get<{ parser_json: string }>("SELECT parser_json FROM projects WHERE id = ?", [projectId])?.parser_json, {});
     db.run(
       `UPDATE projects SET
         client_id = ?, homeowner_name = ?, project_address = ?, city = ?, state = ?, zip = ?, ahj = ?, utility = ?,
@@ -1055,11 +1099,19 @@ export function updateProject(
         projectId,
       ],
     );
-    insertExtractedFields(db, projectId, mergedSnapshot, true);
-    addAuditLog(db, projectId, "system", "front-end parser", "project.updated_from_parser_snapshot", { fields: Object.keys(payload).length });
+    const editedBy = text(options.editedBy).trim();
+    // One history row per field this save CHANGED, naming who (fieldHistory.ts). Only a named
+    // person's change counts as human-verified; a re-sent snapshot that changed nothing records nothing.
+    const changed = recordFieldChanges(db, projectId, storedBefore, project.parserSnapshot as Record<string, unknown>, {
+      person: editedBy, source: options.changeSource || "front-end parser",
+    });
+    // Field NAMES only: values (account numbers among them) stay out of the audit trail.
+    addAuditLog(db, projectId, editedBy ? "human" : "system", editedBy || options.changeSource || "front-end parser", "project.updated_from_parser_snapshot", {
+      fields: Object.keys(payload).length, changed,
+    });
     // Who issues a permit track decides which portal it files on: its own row in the history.
     for (const change of issuerChanges) {
-      addAuditLog(db, projectId, "human", "operator", "project.track_issuer_set", change);
+      addAuditLog(db, projectId, "human", editedBy || "operator", "project.track_issuer_set", change);
     }
   });
   runQcForProject(db, projectId);
@@ -1242,25 +1294,6 @@ export function assignProjectClient(db: AppDb, projectId: string, clientId: stri
   db.run("UPDATE projects SET client_id = ?, updated_at = ? WHERE id = ?", [clientId, nowIso(), projectId]);
   addAuditLog(db, projectId, "human", "client assignment", "project.client_assigned", { clientId });
   return getProjectDetail(db, projectId);
-}
-
-function insertExtractedFields(db: AppDb, projectId: string, payload: ParserPayload, humanVerified: boolean): void {
-  const seen = new Set<string>();
-  const ts = nowIso();
-  for (const aliases of Object.values(fieldAliases)) {
-    for (const alias of aliases) {
-      if (seen.has(alias)) continue;
-      seen.add(alias);
-      const value = payload[alias];
-      if (value == null || value === "") continue;
-      db.run(
-        `INSERT INTO extracted_fields
-           (id, project_id, field_name, field_value, source_file_id, source_method, confidence, human_verified, notes, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        [id(), projectId, alias, text(value), null, humanVerified ? "human" : "regex", null, humanVerified ? 1 : 0, "", ts],
-      );
-    }
-  }
 }
 
 /** The label an emailed fee request reads as (#576): the track's fee_due, not a generic review. */
@@ -1518,7 +1551,7 @@ export function getProjectDetail(db: AppDb, projectId: string): ProjectDetail {
     emailProjectMatches: db
       .query<Row>("SELECT * FROM email_project_matches WHERE project_id = ? ORDER BY created_at DESC LIMIT 50", [projectId])
       .map(mapEmailProjectMatch),
-    portalRuns: db.query<Row>("SELECT * FROM portal_runs WHERE project_id = ? ORDER BY started_at DESC", [projectId]).map(mapPortalRun),
+    portalRuns: withHandFixes(db, projectId, db.query<Row>("SELECT * FROM portal_runs WHERE project_id = ? ORDER BY started_at DESC", [projectId]).map(mapPortalRun)),
     submissions: db.query<Row>("SELECT * FROM submissions WHERE project_id = ? ORDER BY created_at DESC", [projectId]).map(mapSubmission),
     auditLogs: db.query<Row>("SELECT * FROM audit_logs WHERE project_id = ? ORDER BY created_at DESC LIMIT 100", [projectId]).map(mapAudit),
     projectNotes: db.query<Row>("SELECT * FROM project_notes WHERE project_id = ? ORDER BY created_at DESC LIMIT 50", [projectId]).map(mapProjectNote),
@@ -1533,7 +1566,7 @@ export function getProjectDetail(db: AppDb, projectId: string): ProjectDetail {
 // rebuildKnowledgeRollup lives in knowledgeBase.ts (it also derives the timeline from
 // permit_timeline_samples, and the correction relearn path there needs it).
 
-export function deleteProject(db: AppDb, projectId: string): { deleted: true; projectId: string; affectedKnowledgeProfiles: number } {
+export function deleteProject(db: AppDb, projectId: string, deletedBy = "dashboard"): { deleted: true; projectId: string; affectedKnowledgeProfiles: number } {
   const project = db.get<Row>("SELECT id, homeowner_name, project_address FROM projects WHERE id = ?", [projectId]);
   if (!project) throw new HttpError(404, "Project not found.");
 
@@ -1568,6 +1601,8 @@ export function deleteProject(db: AppDb, projectId: string): { deleted: true; pr
     db.run("DELETE FROM email_project_matches WHERE project_id = ?", [projectId]);
     db.run("DELETE FROM permit_status_checks WHERE project_id = ?", [projectId]);
     db.run("DELETE FROM permit_check_targets WHERE project_id = ?", [projectId]);
+    // A run's held hand fixes (migration v91) go with the run (they also cascade on its FK).
+    db.run("DELETE FROM portal_run_fix_steps WHERE project_id = ?", [projectId]);
     db.run("DELETE FROM portal_runs WHERE project_id = ?", [projectId]);
     // Approve & Submit approvals (migration v35) carry a FK to projects.
     db.run("DELETE FROM portal_run_approvals WHERE project_id = ?", [projectId]);
@@ -1608,6 +1643,11 @@ export function deleteProject(db: AppDb, projectId: string): { deleted: true; pr
     db.run("DELETE FROM fee_quote_snapshots WHERE project_id = ?", [projectId]);
     // A person's "Paid" records (migration v62, #576) carry the same FK.
     db.run("DELETE FROM track_fee_payments WHERE project_id = ?", [projectId]);
+    // A two-stage filing's per-job progress (migration v84, #28) carries the same FK.
+    db.run("DELETE FROM track_second_stages WHERE project_id = ?", [projectId]);
+    // The price saved on each filing (migration v85, #187) carries the same FK. A line already on an
+    // invoice keeps its own copy (client_invoice_lines has no FK), so the invoice is unchanged.
+    db.run("DELETE FROM filing_service_charges WHERE project_id = ?", [projectId]);
     // Keep permit_fee_history (learned real fees) but unlink the deleted project.
     db.run("UPDATE permit_fee_history SET project_id = NULL WHERE project_id = ?", [projectId]);
     // Communications may belong to a customer too — unlink rather than destroy correspondence.
@@ -1615,7 +1655,7 @@ export function deleteProject(db: AppDb, projectId: string): { deleted: true; pr
     db.run("DELETE FROM projects WHERE id = ?", [projectId]);
 
     for (const key of affectedKeys) rebuildKnowledgeRollup(db, key);
-    addAuditLog(db, null, "human", "dashboard", "project.deleted", {
+    addAuditLog(db, null, "human", deletedBy || "dashboard", "project.deleted", {
       projectId,
       homeownerName: text(project.homeowner_name),
       projectAddress: text(project.project_address),
@@ -1714,7 +1754,7 @@ function operationDrafts(db: AppDb, detail: ProjectDetail): OperationStepDraft[]
   const project = detail.project;
   const historicalReport = buildHistoricalFailureReport(db, project.id, null);
   const reviewerReport = reviewerGateReportFor(db, project);
-  const applicationDocs = buildApplicationDocumentPackage(project);
+  const applicationDocs = applicationPackageFor(db, project);
   const pendingCritical = detail.humanReviewItems.filter(isCriticalReviewItem).length;
   const pendingCorrections = detail.humanReviewItems.filter((item) => item.status === "pending" && item.fieldName === "correction").length;
   const qcFails = detail.qcResults.filter((item) => item.qcStatus === "fail").length;
@@ -1999,7 +2039,7 @@ export function addProjectNote(
      VALUES (?, ?, ?, ?, ?, ?)`,
     [id(), projectId, noteType, body, text(input.createdBy) || "ops user", ts],
   );
-  addAuditLog(db, projectId, "human", "operations plan", "project_note.added", {
+  addAuditLog(db, projectId, "human", text(input.createdBy).trim() || "operations plan", "project_note.added", {
     noteType,
     bodyPreview: body.slice(0, 160),
   });
@@ -2200,11 +2240,15 @@ function handoffLine(label: string, value: string): string {
 }
 
 export function getOperationsBrief(db: AppDb, projectId: string): OperationsBrief {
+  return withReadMemo(db, () => operationsBriefOnce(db, projectId));
+}
+
+function operationsBriefOnce(db: AppDb, projectId: string): OperationsBrief {
   const detail = getProjectDetail(db, projectId);
   const plan = syncOperationsPlan(db, projectId);
   const project = detail.project;
   const reviewerReport = reviewerGateReportFor(db, project);
-  const applicationDocs = buildApplicationDocumentPackage(project);
+  const applicationDocs = applicationPackageFor(db, project);
   const historicalReport = buildHistoricalFailureReport(db, projectId, null);
   const blockers: OperationsBriefSignal[] = [];
   const readySignals: OperationsBriefSignal[] = [];
@@ -2838,7 +2882,7 @@ export function getLiveProjectReadinessReport(db: AppDb, projectId: string): Liv
   const project = detail.project;
   const historicalReport = buildHistoricalFailureReport(db, projectId, null);
   const reviewerReport = reviewerGateReportFor(db, project);
-  const applicationDocs = buildApplicationDocumentPackage(project);
+  const applicationDocs = applicationPackageFor(db, project);
   const activeEmailSources = db.query<Row>("SELECT id, label, last_checked_at, last_matched_count, last_error FROM email_tracking_sources WHERE active = 1 ORDER BY updated_at DESC");
 
   const accountEvidence = evidenceForTopic(project, "accountVerification");
@@ -3131,11 +3175,15 @@ function hasPermitSignal(check: PermitStatusCheck | EmailProjectMatch): boolean 
 }
 
 export function getProjectProcessMap(db: AppDb, projectId: string): ProjectProcessMap {
+  return withReadMemo(db, () => memoRead(db, `pmap:${projectId}`, () => "", () => projectProcessMapOnce(db, projectId)));
+}
+
+function projectProcessMapOnce(db: AppDb, projectId: string): ProjectProcessMap {
   const detail = getProjectDetail(db, projectId);
   const project = detail.project;
   const historicalReport = buildHistoricalFailureReport(db, projectId, null);
   const reviewerReport = reviewerGateReportFor(db, project);
-  const applicationDocs = buildApplicationDocumentPackage(project);
+  const applicationDocs = applicationPackageFor(db, project);
 
   const accountEvidence = evidenceForTopic(project, "accountVerification");
   const meterEvidence = evidenceForTopic(project, "meterPhoto");
@@ -3497,11 +3545,15 @@ function renderInstallerActionText(packet: Omit<InstallerActionPacket, "reportTe
 }
 
 export function getInstallerActionPacket(db: AppDb, projectId: string): InstallerActionPacket {
+  return withReadMemo(db, () => installerActionPacketOnce(db, projectId));
+}
+
+function installerActionPacketOnce(db: AppDb, projectId: string): InstallerActionPacket {
   const detail = getProjectDetail(db, projectId);
   const project = detail.project;
   const reviewerReport = reviewerGateReportFor(db, project);
   const historicalReport = buildHistoricalFailureReport(db, projectId, null);
-  const applicationDocs = buildApplicationDocumentPackage(project);
+  const applicationDocs = applicationPackageFor(db, project);
   const processMap = getProjectProcessMap(db, projectId);
   const accountEvidence = evidenceForTopic(project, "accountVerification");
   const meterEvidence = evidenceForTopic(project, "meterPhoto");
@@ -3784,11 +3836,15 @@ function renderSubmitGateReportText(report: Omit<SubmitGateReport, "reportText">
 }
 
 export function getSubmitGateReport(db: AppDb, projectId: string): SubmitGateReport {
+  return withReadMemo(db, () => submitGateReportOnce(db, projectId));
+}
+
+function submitGateReportOnce(db: AppDb, projectId: string): SubmitGateReport {
   const detail = getProjectDetail(db, projectId);
   const project = detail.project;
   const historicalReport = buildHistoricalFailureReport(db, projectId, null);
   const reviewerReport = reviewerGateReportFor(db, project);
-  const applicationDocs = buildApplicationDocumentPackage(project);
+  const applicationDocs = applicationPackageFor(db, project);
   const docInventory = documentInventory(db, project);
   // What the operator OWES — the document check below and Stage/Approve read this one answer.
   const gateDocs = owedMissingDocuments(db, project, docInventory);
@@ -4054,6 +4110,9 @@ export function getSubmitGateReport(db: AppDb, projectId: string): SubmitGateRep
         requirement: "The prescriptive and engineered (PE-stamped) permit applications are mutually exclusive and the AHJ accepts exactly one. The permit path must be confirmed before the AHJ permit can be staged.",
         evidence: [
           gatePermitPath === "unknown" ? "Permit path not yet confirmed for this project." : `Permit path: ${gatePermitPath}.`,
+          // WHY it is not confirmed (the resolver's last word: e.g. an unclear ballast reading), so the
+          // person settling it sees the question, not only that there is one.
+          ...(gatePermitPath === "unknown" && gatePathResolution.basis.length ? [gatePathResolution.basis[gatePathResolution.basis.length - 1]] : []),
           ...(gatePermitPath === "prescriptive" ? prescriptiveChecklistNo.map((clause) => `BCD 5952 ${clause}`) : []),
         ],
         nextAction: gatePermitPath === "unknown"
@@ -4983,8 +5042,30 @@ export async function runEmailTracker(
       messageCount = classified.messages.length;
       result.messagesScanned += messageCount;
 
+      // #28: jobs of this org whose application waits on a plan-upload invite. Usually none, and then
+      // an unbucketed email costs nothing more than it did.
+      const { noteSecondStageInvite, projectsAwaitingInvite } = await import("./secondStage");
+      const awaitingInvite = projectsAwaitingInvite(db);
       for (const message of classified.messages) {
-        if (message.record.type === "spam_irrelevant") continue;
+        if (message.record.type === "spam_irrelevant") {
+          // A PLAN-UPLOAD INVITE READS AS NOTHING TO THE CLASSIFIER ("you are invited to upload your
+          // plans" is no status, correction or fee). While a job waits on one, such an email is still
+          // placed by the same scoped match (thread, number, address) and, when it is that job's
+          // invite, shown on its track. Display only: no reading, no match row, nothing opened.
+          if (awaitingInvite.size) {
+            const { filingEmailReplyProject } = await import("./filingEmail");
+            const reply = filingEmailReplyProject(db, message, { orgId: sourceOrgId, clientId: sourceClientId });
+            const replyRow = reply ? db.get<ProjectRow>("SELECT * FROM projects WHERE id = ?", [reply.projectId]) : undefined;
+            const placed = replyRow ? mapProject(replyRow) : matchProjectForEmail(db, message, { orgId: sourceOrgId, clientId: sourceClientId })?.project;
+            if (placed && awaitingInvite.has(placed.id)) {
+              noteSecondStageInvite(db, placed, {
+                subject: message.subject, from: message.from, text: message.rawSearchText,
+                occurredAt: message.record.occurredAt || message.date, signature: message.sourceSignature,
+              }, replyRow ? reply!.track : null);
+            }
+          }
+          continue;
+        }
         if (db.get<Row>("SELECT id FROM email_project_matches WHERE source_signature IN (?, ?)", [message.sourceSignature, message.legacySourceSignature])) {
           result.skippedDuplicates += 1;
           continue;
@@ -5015,13 +5096,29 @@ export async function runEmailTracker(
           continue;
         }
 
+        // #28: an email placed on a job whose permit waits on its SECOND STAGE may be the agency's
+        // plan-upload invite. It is shown on that track (subject, sender, date; its link only when the
+        // host passes rule 5's predicate) — display only. An invite is not a reading of a filed
+        // application (nothing is filed yet and no tracking target exists), so the ordinary reading
+        // below is skipped for it: recorded with no target it would only raise a "needs a person's
+        // check" item in front of the upload. A correction notice is never taken as the invite, and
+        // an email the classifier read as a fee request keeps its fee reading as well as being shown
+        // (an invite often says the fee was received; a fee that IS due must still surface).
+        let secondStageInvite = false;
+        if (awaitingInvite.has(match.project.id) && !emailIsCorrectionNotice(message)) {
+          secondStageInvite = noteSecondStageInvite(db, match.project, {
+            subject: message.subject, from: message.from, text: message.rawSearchText,
+            occurredAt: message.record.occurredAt || message.date, signature: message.sourceSignature,
+          }, threadedRow ? threaded!.track : null).length > 0 && message.record.type !== "fee_request";
+        }
+
         const before = getProjectDetail(db, match.project.id);
         // THE EMAIL'S OWN TRACK picks the target (emailTrackTargetId) — never the project's newest.
         // A threaded reply is about the track its filing email was for, whatever the classifier guessed.
         const filing = emailTrackTargetId(db, match.project.id, threadedRow ? (threaded!.track === "nem" ? "nem" : "permit") : text(message.record.workflow));
         const applicationNumber = extractTrackingNumber(message.rawSearchText, [/\b(?:application|app|record)\s*(?:number|#|no\.?)?\s*[:#-]?\s*([A-Z0-9-]{4,})/i]);
         const permitNumber = extractTrackingNumber(message.rawSearchText, [/\bpermit\s*(?:number|#|no\.?)?\s*[:#-]?\s*([A-Z0-9-]{4,})/i]);
-        const updated = await recordPermitStatusCheck(db, match.project.id, {
+        const updated = secondStageInvite ? before : await recordPermitStatusCheck(db, match.project.id, {
           targetId: filing.targetId,
           track: filing.track,
           source: "email",
@@ -5032,7 +5129,7 @@ export async function runEmailTracker(
           // The agency's fee request reads as the track's fee due (#576), not a generic review.
           feeRequested: message.record.type === "fee_request",
         });
-        const statusCheck = updated.permitStatusChecks[0] || null;
+        const statusCheck = secondStageInvite ? null : updated.permitStatusChecks[0] || null;
         const beforeCorrectionIds = new Set(before.corrections.map((item) => item.id));
         const newCorrection = updated.corrections.find((item) => !beforeCorrectionIds.has(item.id)) || null;
         const matchId = id();
@@ -5121,7 +5218,7 @@ export function runProjectWorkflow(db: AppDb, projectId: string): ProjectWorkflo
   const detail = getProjectDetail(db, projectId);
   const historicalReport = buildHistoricalFailureReport(db, projectId, null);
   const reviewerReport = reviewerGateReportFor(db, detail.project);
-  const applicationDocs = buildApplicationDocumentPackage(detail.project);
+  const applicationDocs = applicationPackageFor(db, detail.project);
 
   const qcFails = detail.qcResults.filter((item) => item.qcStatus === "fail").length;
   const qcWarnings = detail.qcResults.filter((item) => item.qcStatus === "warning").length;
@@ -5864,6 +5961,8 @@ export function applyCorrectionProposals(
   db: AppDb,
   correctionId: string,
   approvedFields?: string[],
+  /** The person approving (the apply route's signed-in user): named on each changed field's history. */
+  approvedBy?: string,
 ): ProjectDetail {
   const correction = db.get<Row>("SELECT * FROM corrections WHERE id = ?", [correctionId]);
   if (!correction) throw new HttpError(404, "Correction not found.");
@@ -5906,7 +6005,12 @@ export function applyCorrectionProposals(
   }
   // A person approved these proposals (/api/corrections/:id/apply): their inverter model is a human
   // statement (#270).
-  if (Object.keys(payload).length) updateProject(db, projectId, payload, { humanInverterEdit: true });
+  if (Object.keys(payload).length) {
+    updateProject(db, projectId, payload, {
+      humanInverterEdit: true, changeSource: "correction",
+      ...(text(approvedBy).trim() ? { editedBy: text(approvedBy).trim() } : {}),
+    });
+  }
 
   const ts = nowIso();
   db.run("UPDATE corrections SET human_approved = 1 WHERE id = ?", [correctionId]);
@@ -8687,6 +8791,10 @@ export function automaticSubmitRefusals(
     out.push("no recorded recipe drives this run (a final submit needs a recipe with a flagged, terminal submit step)");
   } else {
     if (text(row.status) !== "complete") out.push(`the recipe is ${text(row.status) || "unknown"}, not complete`);
+    // HAND FIXES NO REPLAY HAS YET CARRIED TO REVIEW (runFixSteps.ts): a person's save is not an
+    // end-to-end run, so the first replay after it always stops at review.
+    const unproven = handFixesAwaitingProof(db, input.recipeId);
+    if (unproven) out.push(`the recipe carries hand fixes saved ${unproven.appliedAt.slice(0, 16)}${unproven.appliedBy ? ` by ${unproven.appliedBy}` : ""} that no replay has yet carried cleanly to the review page — stage it once (it stops at review), then approve`);
     const steps = parseJson<Array<{ action: string; isFinalSubmit?: boolean; value?: unknown }>>(text(row.steps_json) || "[]", []);
     const flagged = steps.filter((st) => st && st.isFinalSubmit === true).length;
     if (flagged === 0) out.push("the recipe has no flagged final-submit step");
@@ -9554,6 +9662,14 @@ export async function prepareSubmission(
   // operator's service fee) paid or waived before anything is staged. This bills
   // the CLIENT; the portal's own fee checkout stays human-only regardless.
   assertSubmissionPaid(db, detail.project, track);
+  // THE LATE-INVOICE HOLD (#199, owner 2026-11-12): a client with an invoice 30+ days past due files
+  // nothing new until it is paid, voided, or a named person lifts the hold. A stop only; 402 like the
+  // gate above, so the autopilot reports it as a payment blocker and resumes when it clears.
+  assertNoBillingHold(db, detail.project);
+  // THE FEE LIMIT (owner 2026-11-13): a filing whose portal fee WE would pay waits while the client
+  // already owes us its limit in fees we paid. A stop only, 402 like the two above. Dynamic: feeFloat
+  // reaches clientInvoices, which imports this module.
+  (await import("./feeFloat")).assertUnderFeeLimit(db, detail.project, track);
 
   // A TRACK THAT IS ALREADY FILED MUST NOT BE FILED AGAIN.
   //
@@ -10133,6 +10249,16 @@ export async function prepareSubmission(
   const submitRefusals = wantsFinalSubmit
     ? automaticSubmitRefusals(db, { recipeId: gateRecipeId, runApproval, runId, borrowedFrom: borrowed?.learnedFor ?? null, relaxedSinceApproval, unacknowledgedSinceApproval, filingDoor })
     : [];
+  // #28 — A TWO-STAGE AGENCY (adds a stop only): what this portal's submit sends is the application;
+  // the filing is complete only when a person has uploaded the plans in the agency's second system.
+  // An approved run therefore does not click it: the run stops at review, a person submits the
+  // application and records it, and the upload's mark is what files the track.
+  if (wantsFinalSubmit && track && track !== "nem") {
+    const hold = secondStageHold(db, detail.project, track);
+    if (hold) {
+      submitRefusals.push(`this agency takes the plans in a second system (${hold.system}) by hand, so this portal's submit is not the whole filing — a person submits the application and marks the plan upload done`);
+    }
+  }
   const resolvedAutoSubmit = wantsFinalSubmit && submitRefusals.length === 0;
   if (wantsFinalSubmit && !resolvedAutoSubmit) {
     addAuditLog(db, projectId, "system", "submit gate", "portal.auto_submit_declined", {
@@ -10652,6 +10778,8 @@ export async function prepareSubmission(
         steps: recipe.steps ?? [], portalUrl: recipe.portalUrl, project: portalProject, fieldValues: replayFieldValues, track,
         borrowed: borrowed ? { learnedFor: borrowed.learnedFor, discipline: borrowed.discipline } : null,
         agency: issuingAgencyFor(portalProject, track),
+        // R14: a choice recorded for the other permit path is left out (permit tracks only).
+        permitPath: track === "nem" ? null : resolvePermitPath(portalProject).path,
       });
       if (replayBinding.changes.length) {
         addAuditLog(db, projectId, "system", "portal staging", "portal.replay_binding", {
@@ -10686,7 +10814,23 @@ export async function prepareSubmission(
       // #340 — THIS REPLAY CAN BE STOPPED: a person's cancel (POST /api/portal-runs/:id/cancel) aborts
       // this signal; the replay stops at its next step boundary. Closed in the finally below.
       const cancelSignal = openStageCancel(runId);
-      const replayOptions = { ...stageOptions, draftSubmitStamp, stagedReview, abortSignal: cancelSignal };
+      // REPLAYS LEARN FROM THE PERSON'S HAND FIXES (runFixSteps.ts, owner 2026-11-21). A headed guided
+      // replay whose step fails keeps its window open at that step; what the person then does there is
+      // reported here, made safe to store, and held on this run until a named person presses "Save my
+      // fixes". Only on this entity's OWN recipe: a borrowed recipe is never changed by another
+      // entity's run. An approved run never keeps a window for this (portal-bot refuses it too).
+      const fixCapture = !borrowed && !resolvedAutoSubmit
+        ? openRunFixCapture(db, {
+            runId, projectId, recipeId: recipe.id, recipeVersion: Number(recipe.version ?? 0), stepsSignature: replayStepsSig,
+            originalIndex: replayBinding.originalIndex,
+            fields: secretFreeFields(boundValues, projectSecretValues(stagedProject)),
+            secretValues: projectSecretValues(stagedProject),
+            accountNumber: stagedProject.accountNumber, meterNumber: stagedProject.meterNumber,
+            clientId: portalProject.clientId ?? null,
+            permitPath: track === "nem" ? null : resolvePermitPath(portalProject).path,
+          })
+        : null;
+      const replayOptions = { ...stageOptions, draftSubmitStamp, stagedReview, abortSignal: cancelSignal, ...(fixCapture ? { onHumanFixStep: fixCapture.onStep } : {}) };
       ledgerStagingLaunch(`staging replay (${track ?? "permit"} track, run ${runId})`, String(recipe.portalUrl || credentialUrl || ""));
       result = await recipeStageRunner(boundRecipe, stagedProject, boundValues, docsByType, files, replayOptions);
 
@@ -10712,7 +10856,13 @@ export async function prepareSubmission(
       // Nor after a person's cancel or a stall (#340): a stopped run is not retried in a second browser.
       const stoppedFromOutside = cancelSignal.aborted || Boolean((result as { runCancelled?: unknown }).runCancelled)
         || Boolean((result as { replayStalled?: unknown }).replayStalled);
-      if (!result.ok && !draftClickReachedPortal && !stoppedFromOutside && looksBotBlocked(stageFailureText(result)) && stageOptions.headless !== false
+      // Nor after a FINAL SUBMIT WAS CLICKED (Helm, #254 follow-up): that click may have filed, so a
+      // second browser would start the application again. Read off the result and every step, in case
+      // a step's data carries it and the summary does not.
+      const finalClickInResult = Boolean((result as { finalSubmitClicked?: unknown }).finalSubmitClicked)
+        || (Array.isArray((result as { steps?: unknown[] }).steps)
+          && ((result as { steps: Array<{ data?: { finalSubmitClicked?: unknown } }> }).steps).some((st) => st?.data?.finalSubmitClicked === true));
+      if (!result.ok && !draftClickReachedPortal && !stoppedFromOutside && !finalClickInResult && looksBotBlocked(stageFailureText(result)) && stageOptions.headless !== false
           && process.env.PORTAL_HEADED_RETRY !== "0") {
         logger.info("portal", "portal refused a headless browser at staging — retrying with a real window", {
           projectId, portal: portalLabel,
@@ -10733,6 +10883,13 @@ export async function prepareSubmission(
         } catch (e) {
           logger.warn("portal", "headed retry failed", { projectId, err: e instanceof Error ? e.message : String(e) });
         }
+      }
+      // THE WINDOW STAYED OPEN AT THE STUCK STEP FOR THE PERSON (portal-bot browserLeftOpenForFix): the
+      // capture is anchored there, and the run's message says what to do.
+      if (fixCapture && (result as { browserLeftOpenForFix?: unknown }).browserLeftOpenForFix === true) {
+        const at = (result as { fixAnchorStepIndex?: unknown }).fixAnchorStepIndex;
+        fixCapture.anchor(typeof at === "number" ? at : null, (result as { fixAnchorAtEnd?: unknown }).fixAnchorAtEnd === true);
+        result.message = `${String(result.message ?? "").trim()} THE PORTAL WINDOW WAS LEFT OPEN AT THE STUCK STEP: finish that page by hand (never submit or pay), then press "Save my fixes" on this run so the next stage does it the same way.`.trim();
       }
       // SELF-HEALED STEPS: replay repaired drifted selectors. Persist each heal onto the ONE step
       // it healed (by stepIndex), only if the recipe is still the version this replay read — see
@@ -11331,6 +11488,8 @@ export async function prepareSubmission(
       void notifyClientOfFiling(db, detail.project, { track: permitTypeTag, permitNumber: capturedPermitNumber, via: "auto_submit" });
       // The quote in force as it was filed (#494), once per billing track; never throws.
       snapshotFilingQuote(db, detail.project, permitTypeTag, submissionId);
+      // Our price in force as it was filed (#187), once per filing type; never throws.
+      recordFilingServiceCharge(db, detail.project, permitTypeTag, submissionId);
     }
 
     // STAFF ALERT (#487) — after the run's row committed, fire-and-forget, never into this path.
@@ -11346,6 +11505,15 @@ export async function prepareSubmission(
     // #333: a filing the person made from the review window while this run was finishing — recorded
     // now, on top of the outcome (an awaiting_human_submit row, or the run's own failed row), never
     // under it. Whatever the run reported, a filing that went is recorded as submitted.
+    // A REPLAY THAT REACHED REVIEW CLEANLY PROVES THE HAND FIXES SAVED BEFORE IT STARTED (runFixSteps):
+    // only an own recipe's replay (a borrowed one never carries this recipe's fixes as its own).
+    if (runStatus === "awaiting_human_submit" && recipe && runActorLabel === "RecipeAdapter" && !borrowed) {
+      try {
+        const proven = markHandFixesProven(db, recipe.id, runId, ts);
+        if (proven) addAuditLog(db, projectId, "system", "recipe replay", "portal_recipe.hand_fixes_proven", { recipeId: recipe.id, runId, saves: proven });
+      } catch { /* proof is recorded best-effort; until it is, the gate keeps refusing (fail closed) */ }
+    }
+
     runOutcomeRecorded = true;
     for (const capture of capturesBeforeOutcome.splice(0)) recordSubmitCapture(capture);
   } catch (err) {
@@ -11395,7 +11563,7 @@ function filesFromProject(payload: ParserPayload): string[] {
 export function humanVerify(
   db: AppDb,
   projectId: string,
-  input: { reviewItemId: string; action: "approve" | "edit" | "reject"; fieldValue?: string; notes?: string },
+  input: { reviewItemId: string; action: "approve" | "edit" | "reject"; fieldValue?: string; notes?: string; verifiedBy?: string },
 ): ProjectDetail {
   const item = db.get<Row>("SELECT * FROM human_review_items WHERE id = ? AND project_id = ?", [input.reviewItemId, projectId]);
   if (!item) throw new HttpError(404, "Human review item not found.");
@@ -11421,13 +11589,13 @@ export function humanVerify(
       applyVerifiedField(db, projectId, oldPayload, fieldName, value);
       db.run(
         `INSERT INTO extracted_fields
-          (id, project_id, field_name, field_value, source_file_id, source_method, confidence, human_verified, notes, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        [id(), projectId, fieldName, value, null, "human", 1, 1, input.notes || "Human verified from review queue.", nowIso()],
+          (id, project_id, field_name, field_value, previous_value, source_file_id, source_method, confidence, human_verified, changed_by, notes, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [id(), projectId, fieldName, value, text(oldPayload[fieldName]) || null, null, "human", 1, 1, text(input.verifiedBy).trim(), input.notes || "Human verified from review queue.", nowIso()],
       );
     }
 
-    addAuditLog(db, projectId, "human", "dashboard", "human_review.updated", {
+    addAuditLog(db, projectId, "human", text(input.verifiedBy).trim() || "dashboard", "human_review.updated", {
       reviewItemId: input.reviewItemId,
       action: input.action,
       fieldName,
@@ -11620,6 +11788,25 @@ export function captureConfirmation(
   // is not a record the status page can be searched by.
   const filingNumber = (input.applicationNumber || "").trim() || (input.permitNumber || "").trim();
   const recordLink = storableRecordLink(input.recordLink);
+  // #28 — ON A TWO-STAGE AGENCY THIS CONFIRMATION IS THE APPLICATION, NOT THE FILING. A person
+  // confirmed that the agency takes the plans in a second system afterwards, by hand: the number
+  // captured here (typed, or read off the completion page of the person's own submit) records the
+  // application as made and waiting on that upload — no 'submitted' row, no tracking target, no
+  // client "filed" notice. Only the upload's mark files the track (submittalTracks).
+  if (runPermitType && runPermitType !== "nem" && (SUBMITTAL_TRACK_TYPES as readonly string[]).includes(runPermitType)) {
+    const stageTrack = runPermitType as SubmittalTrackType;
+    const hold = secondStageHold(db, projectForTarget, stageTrack);
+    if (hold?.owed === "upload") throw new HttpError(409, hold.sentence, { track: stageTrack, secondStage: true, owed: hold.owed });
+    if (hold?.owed === "application") {
+      if (!filingNumber) {
+        throw new HttpError(400, `Enter the record or application number the portal shows. ${hold.sentence}`, { track: stageTrack, secondStage: true, owed: hold.owed });
+      }
+      markTrackFirstStage(db, projectForTarget, stageTrack, { recordNumber: filingNumber, by: input.submittedBy || "human", via: "by_hand" });
+      // The run this confirmation was captured on is closed with it, whatever state it was in.
+      db.run("UPDATE portal_runs SET status = 'submitted', finished_at = COALESCE(finished_at, ?) WHERE id = ? AND status != 'submitted'", [ts, portalRunId]);
+      return getProjectDetail(db, projectId);
+    }
+  }
   let recordLinkRefused = false;
   // Hoisted so the post-transaction correction close can read it — see below.
   let remainingTracks = 0;
@@ -11679,7 +11866,7 @@ export function captureConfirmation(
       // real tracks (4x interconnection/nem + 1x permit/building); Fixture cf1c56aa shows 9 rows
       // for 1 track. A row-count here made "are all tracks in?" unanswerable and left the
       // correction closer permanently waiting on filings that do not exist.
-      "SELECT COUNT(*) AS n FROM (SELECT status, ROW_NUMBER() OVER (PARTITION BY submission_type, COALESCE(permit_type, '') ORDER BY created_at DESC, id DESC) AS rn FROM submissions WHERE project_id = ?) WHERE rn = 1 AND status = 'awaiting_human_submit'",
+      "SELECT COUNT(*) AS n FROM (SELECT status, ROW_NUMBER() OVER (PARTITION BY submission_type, COALESCE(permit_type, '') ORDER BY created_at DESC, id DESC) AS rn FROM submissions WHERE project_id = ?) WHERE rn = 1 AND status IN ('awaiting_human_submit', 'awaiting_second_stage')",
       [projectId],
     );
     const remaining = Number(stillAwaiting?.n ?? 0);
@@ -11818,6 +12005,8 @@ export function captureConfirmation(
   // report. Outside the transaction and never throwing, for the same reason as the close above.
   // A legacy run with no track and no stamped row bills as the permit track (billingTrack).
   snapshotFilingQuote(db, projectForTarget, filedTrack, filedSubmissionId);
+  // Our price in force as it was filed (#187), once per filing type; never throws.
+  recordFilingServiceCharge(db, projectForTarget, filedTrack, filedSubmissionId);
 
   const detail = getProjectDetail(db, projectId);
   // A PERSON CONFIRMED THIS FILING (the dashboard's capture form, or the hand-over's confident read
@@ -11939,7 +12128,7 @@ export function markCorrectionResubmitted(
     // track and runs the same closer.
     const stillAwaiting = db.get<{ n: number }>(
       // Same track-not-row rule as captureConfirmation above, for the same reason.
-      "SELECT COUNT(*) AS n FROM (SELECT status, ROW_NUMBER() OVER (PARTITION BY submission_type, COALESCE(permit_type, '') ORDER BY created_at DESC, id DESC) AS rn FROM submissions WHERE project_id = ?) WHERE rn = 1 AND status = 'awaiting_human_submit'", [projectId],
+      "SELECT COUNT(*) AS n FROM (SELECT status, ROW_NUMBER() OVER (PARTITION BY submission_type, COALESCE(permit_type, '') ORDER BY created_at DESC, id DESC) AS rn FROM submissions WHERE project_id = ?) WHERE rn = 1 AND status IN ('awaiting_human_submit', 'awaiting_second_stage')", [projectId],
     );
     remainingTracks = Number(stillAwaiting?.n ?? 0);
 

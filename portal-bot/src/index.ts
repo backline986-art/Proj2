@@ -11,6 +11,7 @@ import { decryptStorageState } from "./cryptoStorage";
 import { resolveHeadless } from "./browser";
 import { HUMAN_REVIEW_MESSAGE } from "./adapter";
 import { clearReviewOpen, markReviewOpen } from "./reviewSession";
+import { ACCOUNT_WAIT_MS, AccountLeaseBusy, accountLeaseKey, accountSiteOf, acquireAccountLease } from "./accountLease";
 import { leaveDialogsToPerson } from "./personDialogs";
 import { draftReferenceFromUrl } from "./adapters/submissionLedger";
 import { readDraftCreated, type DraftCreatedRead } from "./draftCreated";
@@ -108,10 +109,12 @@ export async function submitStagedRun(
   options: StageOptions = {},
 ): Promise<Record<string, unknown>> {
   let tmpStatePath: string | undefined;
-  // Close any browser left open by a prior guided-manual stage on this profile so the lock
-  // is free and this submit re-opens cleanly.
-  await closePriorStagingBrowser(options.userDataDir);
+  // Hold the login (#281), then close any browser left open by a prior guided-manual stage of this
+  // filing on this profile so the lock is free and this submit re-opens cleanly.
+  let releaseLogin: () => void = () => {};
   try {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    releaseLogin = await beginPortalSession({ userDataDir: options.userDataDir, loginUrl: options.loginUrl ?? (adapter as any)?.recipe?.portalUrl, username: options.credential?.username, owner: windowOwnerOf(project.id, adapter) });
     tmpStatePath = resolveStorageStatePath(options.encryptedStorageStatePath);
     const loginResult = await adapter.login({
       storageStatePath: tmpStatePath,
@@ -159,6 +162,7 @@ export async function submitStagedRun(
     };
   } finally {
     await adapter.close();
+    releaseLogin();
     shredTmpStateFile(tmpStatePath);
   }
 }
@@ -330,6 +334,10 @@ interface StageOptions {
   /** #340 — a replay with no new step for this long ends as a named failure (`replayStalled`).
    *  Default PORTAL_REPLAY_STALL_MINUTES, 8 minutes. */
   stallTimeoutMs?: number;
+  /** MANUAL TEACHING THAT ADAPTS: a recipe replay reports the person's fixes in the window it leaves
+   *  open (at review, or at a failed step — then the window stays open for them; see runAdapter). The
+   *  backend keeps them on the run; a person decides whether they go into the recipe. */
+  onHumanFixStep?: (step: import("../../shared/src/types").RecipeStep) => void;
 }
 
 // Headed, guided-manual staging leaves the browser OPEN at the review screen so the human
@@ -338,6 +346,81 @@ interface StageOptions {
 // adapter by its per-client userDataDir so the NEXT stage for the same client+portal closes
 // the prior window first, releasing the profile lock and preventing orphan browsers.
 const openStagingAdapters = new Map<string, import("./adapter").PortalAdapter>();
+// #281 — WHOSE window each one is, and the account lease it still holds. A window a person is in
+// is the same portal session as the run that opened it, so the run's login lease (accountLease.ts)
+// stays with the window until it closes. The owner ("<project>|<filing>") tells a re-stage of the
+// same filing (which closes its own old window, as always) from ANOTHER filing on the same profile
+// (which must not take a window a person is reviewing in — a live permit's unsaved application was
+// lost that way, 2026-11-23).
+const openWindowOwners = new Map<string, string>();
+const openWindowLeases = new Map<string, () => void>();
+
+/** The window on this profile is gone: stop tracking it and let its login go. */
+function forgetOpenWindow(userDataDir: string): void {
+  openStagingAdapters.delete(userDataDir);
+  openWindowOwners.delete(userDataDir);
+  const release = openWindowLeases.get(userDataDir);
+  openWindowLeases.delete(userDataDir);
+  try { release?.(); } catch { /* release is idempotent */ }
+}
+
+/** A run's filing, for the prior-window rule: the project, and the recipe's track when there is one.
+ *  "*" as the track matches any track of the same project (a learn). */
+function windowOwnerOf(projectId: string | undefined, adapter: unknown, track?: string): string {
+  if (!projectId) return "";
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const r = (adapter as any)?.recipe as { scopeType?: string; discipline?: string } | undefined;
+  return `${projectId}|${track ?? (r ? `${r.scopeType ?? ""}:${r.discipline ?? ""}` : String((adapter as { portalName?: string })?.portalName ?? ""))}`;
+}
+function sameFiling(a: string, b: string): boolean {
+  if (!a || !b) return true; // unknown on either side: today's rule (the prior window is closed)
+  const [pa, ta] = [a.slice(0, a.indexOf("|")), a.slice(a.indexOf("|") + 1)];
+  const [pb, tb] = [b.slice(0, b.indexOf("|")), b.slice(b.indexOf("|") + 1)];
+  return pa === pb && (ta === "*" || tb === "*" || ta === tb);
+}
+
+/**
+ * #281 — BEFORE A RUN SIGNS IN: hold its login (waiting, bounded, for a run or open window on another
+ * profile that uses the same login on the same platform), then deal with this profile's left-open
+ * window: the same filing's is closed as always; another filing's is waited for, and the run is
+ * refused if a person is still in it. Returns the lease's release; a refusal throws AccountLeaseBusy
+ * (the run never opened a browser).
+ */
+export async function beginPortalSession(opts: { userDataDir?: string; loginUrl?: string; username?: string; owner?: string; waitMs?: number }): Promise<() => void> {
+  const site = accountSiteOf(opts.loginUrl, opts.userDataDir);
+  const key = accountLeaseKey(opts.loginUrl, opts.username, opts.userDataDir);
+  const waitMs = opts.waitMs ?? ACCOUNT_WAIT_MS;
+  const release = await acquireAccountLease(key, opts.userDataDir, waitMs, site);
+  try {
+    const dir = opts.userDataDir;
+    if (dir && openStagingAdapters.has(dir) && !sameFiling(openWindowOwners.get(dir) ?? "", opts.owner ?? "")) {
+      const deadline = Date.now() + Math.max(0, waitMs);
+      while (openStagingAdapters.has(dir) && Date.now() < deadline) await new Promise((r) => setTimeout(r, Math.min(1000, Math.max(1, deadline - Date.now()))));
+      if (openStagingAdapters.has(dir)) {
+        throw new AccountLeaseBusy(
+          `Timed out after ${Math.round(waitMs / 1000)}s waiting for the portal login to free up${site ? ` on ${site}` : ""}: a window is still open on this portal for a person to review another filing in, and starting this run would take it over (an unsaved application there would be lost). `
+          + "This run was not started; retry it once that window is closed or that filing is marked submitted.",
+        );
+      }
+    }
+    await closePriorStagingBrowser(dir);
+  } catch (err) {
+    release();
+    throw err;
+  }
+  return release;
+}
+
+/** The run is over: keep its login with the window it left open for a person, else let it go. */
+export function endPortalSession(userDataDir: string | undefined, release: () => void, leftOpen: boolean): void {
+  if (leftOpen && userDataDir && openStagingAdapters.has(userDataDir)) {
+    const prior = openWindowLeases.get(userDataDir);
+    openWindowLeases.set(userDataDir, release);
+    if (prior && prior !== release) { try { prior(); } catch { /* idempotent */ } }
+    return;
+  }
+  release();
+}
 
 // Track a left-open adapter AND watch for the human closing its window by hand — without
 // the close listener the Map keeps a dead adapter forever (and the UI can't tell the
@@ -425,8 +508,9 @@ export async function armSubmitCapture(
   } catch { /* watching is best-effort — a run must never fail because of it */ }
 }
 
-export function trackOpenAdapter(userDataDir: string, adapter: import("./adapter").PortalAdapter): void {
+export function trackOpenAdapter(userDataDir: string, adapter: import("./adapter").PortalAdapter, owner = ""): void {
   openStagingAdapters.set(userDataDir, adapter);
+  openWindowOwners.set(userDataDir, owner);
   // ADVERTISE THE REVIEW SESSION ON DISK. In-memory tracking dies with this process; the
   // window it is tracking does not. The marker is what stops the NEXT process reaping the
   // operator mid-filing (see reviewSession.ts).
@@ -442,7 +526,7 @@ export function trackOpenAdapter(userDataDir: string, adapter: import("./adapter
     const ctx = page && typeof page.context === "function" ? page.context() : null;
     if (ctx && typeof ctx.on === "function") {
       ctx.on("close", () => {
-        if (openStagingAdapters.get(userDataDir) === adapter) openStagingAdapters.delete(userDataDir);
+        if (openStagingAdapters.get(userDataDir) === adapter) forgetOpenWindow(userDataDir);
         clearReviewOpen(userDataDir); // they closed it — the profile is reapable again
         // THE HUMAN CLOSING THE WINDOW IS THE END OF THIS ADAPTER'S BROWSER, so the large
         // documents it staged by path (uploadPayload.ts) can go now. Nothing else would remove
@@ -463,7 +547,7 @@ async function closePriorStagingBrowser(userDataDir: string | undefined): Promis
   if (!userDataDir) return;
   const prior = openStagingAdapters.get(userDataDir);
   if (!prior) return;
-  openStagingAdapters.delete(userDataDir);
+  forgetOpenWindow(userDataDir);
   // A new run is taking this profile, so the previous review session is over whatever its
   // marker says — clear it before closing so a crash mid-close cannot leave the profile
   // protected by a marker for a window that no longer exists.
@@ -491,7 +575,7 @@ export async function closeStagingBrowsersForTrack(
   let closed = 0;
   for (const [dir, adapter] of [...openStagingAdapters]) {
     if (!subdirs.some((sub) => dir === path.join(clientRoot, sub) || dir.startsWith(path.join(clientRoot, sub) + path.sep))) continue;
-    openStagingAdapters.delete(dir);
+    forgetOpenWindow(dir);
     try { await adapter.close(); } catch { /* best effort — the human may have closed it already */ }
     closed++;
   }
@@ -508,7 +592,7 @@ export async function closeStagingBrowsersUnder(dirPrefix: string | undefined): 
   let closed = 0;
   for (const [dir, adapter] of [...openStagingAdapters]) {
     if (dir !== dirPrefix && !dir.startsWith(dirPrefix + path.sep)) continue;
-    openStagingAdapters.delete(dir);
+    forgetOpenWindow(dir);
     try { await adapter.close(); } catch { /* best effort — the human may have closed it already */ }
     closed++;
   }
@@ -518,7 +602,7 @@ export async function closeStagingBrowsersUnder(dirPrefix: string | undefined): 
 // Close every browser left open for human submit (call on server shutdown).
 export async function closeAllStagingBrowsers(): Promise<void> {
   for (const [dir, adapter] of [...openStagingAdapters]) {
-    openStagingAdapters.delete(dir);
+    forgetOpenWindow(dir);
     try { await adapter.close(); } catch { /* best effort */ }
   }
 }
@@ -543,10 +627,16 @@ async function runAdapter(
   // A headed, guided-manual run (stop at review, no autosubmit) leaves the browser open for
   // the human to submit. Set once we've staged cleanly to review; checked in finally.
   let leaveBrowserOpen = false;
-  // Re-staging the same client+portal? Close the previously left-open window first so the
-  // persistent-profile lock is free for this run to launch.
-  await closePriorStagingBrowser(options.userDataDir);
+  // ...and whether that is a FAILED recipe step's window kept for the person's fix (no submit watch).
+  let leftOpenForFix = false;
+  // #281 — hold this run's portal login first (another run, or a person's open window, signed in
+  // with the same login on this platform ends this run's session otherwise). Then re-staging the
+  // same filing closes its previously left-open window so the profile lock is free to launch.
+  const owner = windowOwnerOf(project.id, adapter);
+  let releaseLogin: () => void = () => {};
   try {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    releaseLogin = await beginPortalSession({ userDataDir: options.userDataDir, loginUrl: options.loginUrl ?? (adapter as any)?.recipe?.portalUrl, username: options.credential?.username, owner });
     tmpStatePath = resolveStorageStatePath(options.encryptedStorageStatePath);
 
     // Enable LLM-assisted gap-fill when the runner provided a planner + project values, so the
@@ -656,6 +746,19 @@ async function runAdapter(
     // backstop is already off (fillApplication disposes it before returning), so nothing blocks
     // that person's own clicks.
     if (stepPause && options.headless === false && !!options.userDataDir) leaveBrowserOpen = true;
+    // A RECIPE STEP THAT FAILED (or a replay that ran its steps and still stopped short of the review
+    // page) KEEPS ITS WINDOW FOR THE PERSON TO FINISH (owner 2026-11-21: "the fix
+    // screen was hit, I approved it, then it was still getting stuck"). Closing it threw away the one
+    // page where a person could show the step the recipe could not do. Only a headed guided replay
+    // whose caller keeps the person's fixes (onHumanFixStep), that got past login into the steps, and
+    // that clicked nothing filing-shaped: never after a cancel or a stall (a stopped run is closed),
+    // never after a draft click or an approved run. The network backstop is already off (fillApplication
+    // disposed it), so nothing blocks the person; automation does nothing more in this window.
+    leftOpenForFix = !leaveBrowserOpen && !ok && !options.autoSubmit && options.headless === false && !!options.userDataDir
+      && typeof options.onHumanFixStep === "function" && typeof adapter.armFixCaptureAfterFailure === "function"
+      && openResult.ok && (fillResult.ok === false || reviewResult.ok === false) && !finalSubmitClicked && !runCancelled && !replayStalled
+      && !draftCreatedByReplay && !draftSubmitUnexpected && !existingDraft;
+    if (leftOpenForFix) leaveBrowserOpen = true;
 
     // DID THE APPROVED CLICK'S REQUEST REACH THE PORTAL? (portal-run-close-2 M3.) The network
     // backstop's own record: true = a state-changing request was admitted in the approved slot or
@@ -703,6 +806,17 @@ async function runAdapter(
       // True when the staged browser is left open at the review screen for the human to
       // submit (so the UI can say "the portal is open — verify and click Submit").
       browserLeftOpen: leaveBrowserOpen,
+      // The window was kept at a FAILED step for the person to finish (their fixes are reported).
+      // fixAnchorStepIndex: the failed step, as an index into the steps THIS run executed (the caller maps
+      // it back to the stored recipe), so the person's fixes land exactly there.
+      // fixAnchorAtEnd: every step ran but the run stopped short of the review page (a step found
+      // nothing to act on and was skipped), so the person carries on from the page it ended on — their
+      // fixes go after the last step, before the review stop.
+      ...(leftOpenForFix
+        ? fillResult.ok === false
+          ? { browserLeftOpenForFix: true, fixAnchorStepIndex: typeof fillResult.data?.failedStepIndex === "number" ? fillResult.data.failedStepIndex : null }
+          : { browserLeftOpenForFix: true, fixAnchorStepIndex: null, fixAnchorAtEnd: true }
+        : {}),
       capturedPermitNumber: captured?.permitNumber || "",
       capturedConfirmationNumber: captured?.confirmationNumber || "",
       capturedRecordLink: captured?.recordLink || "",
@@ -738,8 +852,13 @@ async function runAdapter(
     // screen so the human can submit, tracked by userDataDir so the next run closes it.
     // Every other path (autosubmit, headless, failed, errored) closes so the profile lock
     // is released and the next run can launch.
-    if (leaveBrowserOpen && options.userDataDir) {
-      trackOpenAdapter(options.userDataDir, adapter);
+    if (leftOpenForFix && options.userDataDir) {
+      // The person finishes the step the replay could not; their fixes are reported, never merged
+      // here. No submit capture: a run that failed is not a staged filing (they mark it submitted).
+      trackOpenAdapter(options.userDataDir, adapter, owner);
+      try { await adapter.armFixCaptureAfterFailure?.(); } catch { /* best-effort */ }
+    } else if (leaveBrowserOpen && options.userDataDir) {
+      trackOpenAdapter(options.userDataDir, adapter, owner);
       // WATCH FOR THE OPERATOR'S SUBMIT. This is the window they file in, and the page that
       // comes back after their click carries the record number the whole product keys on —
       // which until now a person read off the screen and typed into a form (~258
@@ -750,6 +869,7 @@ async function runAdapter(
     } else {
       await adapter.close();
     }
+    endPortalSession(options.userDataDir, releaseLogin, (leftOpenForFix || leaveBrowserOpen) && !!options.userDataDir);
     // The plaintext session file is always shredded — it's already loaded into the open
     // context, so removing it from disk does not affect a left-open browser.
     shredTmpStateFile(tmpStatePath);
@@ -787,6 +907,7 @@ export async function stageWithRecipe(
     stagedReview: options.stagedReview ?? null,
     abortSignal: options.abortSignal ?? null,
     stallTimeoutMs: options.stallTimeoutMs,
+    onHumanFixStep: options.onHumanFixStep,
   }), project, files, options));
 }
 
@@ -812,9 +933,12 @@ export async function runCorrectionReopen(
     const adapter = new RecipeAdapter(recipe, {}, docsByType, { beforeUpload: options.beforeUpload });
     let tmpStatePath: string | undefined;
     let leaveBrowserOpen = false;
-    // Release the profile lock a prior guided-manual review browser may still hold.
-    await closePriorStagingBrowser(options.userDataDir);
+    // Hold the login (#281), then release the profile lock a prior guided-manual review browser of
+    // this filing may still hold.
+    const owner = `reopen:${String(applicationNumber ?? "")}|${recipe.scopeType ?? ""}`;
+    let releaseLogin: () => void = () => {};
     try {
+      releaseLogin = await beginPortalSession({ userDataDir: options.userDataDir, loginUrl: options.loginUrl ?? recipe.portalUrl, username: options.credential?.username, owner });
       tmpStatePath = resolveStorageStatePath(options.encryptedStorageStatePath);
       const loginResult = await adapter.login({
         storageStatePath: tmpStatePath,
@@ -872,10 +996,11 @@ export async function runCorrectionReopen(
       };
     } finally {
       if (leaveBrowserOpen && options.userDataDir) {
-        trackOpenAdapter(options.userDataDir, adapter);
+        trackOpenAdapter(options.userDataDir, adapter, owner);
       } else {
         await adapter.close();
       }
+      endPortalSession(options.userDataDir, releaseLogin, leaveBrowserOpen && !!options.userDataDir);
       shredTmpStateFile(tmpStatePath);
     }
   });
@@ -955,6 +1080,10 @@ export async function learnPortal(input: {
   /** City/ZIP/owner + discipline, so an address-disambiguation grid can refuse a row that
    *  belongs to another property rather than guessing between them. */
   siteIdentity?: import("./addressVersion").SiteIdentity;
+  /** #166: the per-job lookup's record type / work item for this permit, with its standing. A
+   *  VERIFIED one is ticked by the learner wherever a page offers it (by label); a seeded one is
+   *  the planner's hint only. null / omitted on a utility learn or with nothing on file. */
+  targetRecordType?: import("../../shared/src/types").LearnTargetRecordType | null;
   /** Operator delegation: click the recorded final submit rather than leaving it for a human.
    *  Honoured only alongside PORTAL_ALLOW_FINAL_SUBMIT=1, checked at the click itself. */
   allowFinalSubmit?: boolean;
@@ -986,12 +1115,28 @@ export async function learnPortal(input: {
       input.onProgress?.({ phase: "page", pageCount: 0, maxPages: input.maxPages ?? 18, message: `Paused for a person: ${String(info.reason ?? "").slice(0, 200)}` });
     } catch { /* a notifier must never change the outcome */ }
   };
-  const adapter = new AutoLearnAdapter(input.portalName, input.planner, { parkMs: input.parkMs, credentialForUrl: input.credentialForUrl, noProgressBudgetMs: input.noProgressBudgetMs, maxPages: input.maxPages, budgetMs: input.budgetMs, docsByType: input.docsByType, beforeUpload: input.beforeUpload, uploadMode: input.uploadMode, policyProfile: input.policyProfile, bindableFields: input.bindableFields, onProgress: input.onProgress, onPark, equipment: input.equipment, certifiedAliases: input.certifiedAliases, contactIdentity: input.contactIdentity, siteContactIdentity: input.siteContactIdentity, siteIdentity: input.siteIdentity, allowFinalSubmit: input.allowFinalSubmit, hasBattery: input.hasBattery, allowConsentAccept: input.allowConsentAccept, continueDraft: input.continueDraft, signatureRequestApproval: input.signatureRequestApproval ?? null, runId: input.runId, infoPagePasses: input.infoPagePasses, infoPagePriorProgress: input.infoPagePriorProgress, infoPagePassUnavailable: input.infoPagePassUnavailable, reserveInfoPagePass: input.reserveInfoPagePass, onInfoPagePassed: input.onInfoPagePassed, infoPageProofValues: input.infoPageProofValues });
+  const adapter = new AutoLearnAdapter(input.portalName, input.planner, { parkMs: input.parkMs, credentialForUrl: input.credentialForUrl, noProgressBudgetMs: input.noProgressBudgetMs, maxPages: input.maxPages, budgetMs: input.budgetMs, docsByType: input.docsByType, beforeUpload: input.beforeUpload, uploadMode: input.uploadMode, policyProfile: input.policyProfile, bindableFields: input.bindableFields, onProgress: input.onProgress, onPark, equipment: input.equipment, certifiedAliases: input.certifiedAliases, contactIdentity: input.contactIdentity, siteContactIdentity: input.siteContactIdentity, siteIdentity: input.siteIdentity, targetRecordType: input.targetRecordType ?? null, allowFinalSubmit: input.allowFinalSubmit, hasBattery: input.hasBattery, allowConsentAccept: input.allowConsentAccept, continueDraft: input.continueDraft, signatureRequestApproval: input.signatureRequestApproval ?? null, runId: input.runId, infoPagePasses: input.infoPagePasses, infoPagePriorProgress: input.infoPagePriorProgress, infoPagePassUnavailable: input.infoPagePassUnavailable, reserveInfoPagePass: input.reserveInfoPagePass, onInfoPagePassed: input.onInfoPagePassed, infoPageProofValues: input.infoPageProofValues });
   let tmpStatePath: string | undefined;
   let leaveOpen = false;
-  // A browser left open by a prior guided-manual stage holds this profile's lock — close it
-  // so the recorder can launch.
-  await closePriorStagingBrowser(input.userDataDir);
+  // Hold the login (#281: the second sign-in of 2026-11-23 was a LEARN on another utility's tenant),
+  // then close a browser a prior guided-manual stage of this project left open on this profile so the
+  // recorder can launch. Before the wall-clock ceiling below, so waiting never eats the learn's time.
+  const learnOwner = windowOwnerOf(input.project?.id, adapter, "*");
+  let releaseLogin: () => void;
+  try {
+    releaseLogin = await beginPortalSession({ userDataDir: input.userDataDir, loginUrl: input.portalUrl, username: input.credential?.username, owner: learnOwner });
+  } catch (err) {
+    return {
+      ok: false,
+      portalName: input.portalName,
+      steps: [],
+      reviewScreen: { fields: [], bodyTextSnippet: "" },
+      finalSubmitRecorded: false,
+      pageCount: 0,
+      pauseReason: null,
+      message: `Auto-learn errored: ${err instanceof Error ? err.message : String(err)}`,
+    };
+  }
 
   // HARD WALL-CLOCK CEILING. A learn could previously hang forever: measured live on
   // 2026-08-31, an Accela run went silent mid-wizard for 13+ minutes, still holding a
@@ -1023,6 +1168,9 @@ export async function learnPortal(input: {
       userDataDir: input.userDataDir,
       startUrl: input.portalUrl,
     });
+    // How the login ended, carried on BOTH outcomes so the backend's login health is keyed on
+    // the status (a success clears a stale mark; a never-posted form writes nothing).
+    const login = (loginResult.data as { login?: import("./adapters/autoLearnAdapter").LearnResult["login"] } | undefined)?.login;
     if (!loginResult.ok) {
       adapter.debug?.finalize({ outcome: "login_failed", ok: false, pauseReason: loginResult.pauseReason ?? null, message: loginResult.message });
       return {
@@ -1035,6 +1183,7 @@ export async function learnPortal(input: {
         pauseReason: loginResult.pauseReason ?? null,
         message: loginResult.message,
         debugDir: adapter.debug?.dir,
+        ...(login ? { login } : {}),
       };
     }
     input.onProgress?.({
@@ -1064,6 +1213,7 @@ export async function learnPortal(input: {
     if (leaveOpen && input.onHumanStep) {
       try { await adapter.armHumanCapture(draftAwareHumanSink(adapter, input.onHumanStep, input.onDraftCreated)); } catch { /* capture is best-effort */ }
     }
+    if (login && !learnResult.login) learnResult.login = login;
     return learnResult;
   } catch (err) {
     // learn() already recorded the error + stack into the bundle and finalized it; make sure
@@ -1087,10 +1237,11 @@ export async function learnPortal(input: {
     // Keep a reached-review headed browser open for the human (tracked for cleanup); every other
     // path (login fail, headless/server, error, never-reached-review) closes to release the lock.
     if (leaveOpen && input.userDataDir) {
-      trackOpenAdapter(input.userDataDir, adapter);
+      trackOpenAdapter(input.userDataDir, adapter, learnOwner);
     } else {
       await adapter.close();
     }
+    endPortalSession(input.userDataDir, releaseLogin, leaveOpen && !!input.userDataDir);
     shredTmpStateFile(tmpStatePath);
   }
 }

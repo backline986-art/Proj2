@@ -213,6 +213,24 @@ export interface BaselineUtilityContext {
    *  included). Absent = what the job's own evidence says (deriveJobScope), which stays "pv" unless the
    *  plan set itself shows no new modules: the strict default keeps every PV item. */
   scope?: JobScope;
+  /** The job's AC disconnect part, ONLY when its own plan set names that part at its AC-disconnect
+   *  label (acDisconnectIntake.capturedDisconnectPart, computed by qc.ts on the plan-set text the gate
+   *  sees). "" / absent = none: the ac_disconnect item reads the package text alone, as before. */
+  disconnectPartOnPlanSet?: string;
+  /** True when the job's plan-set text names an AC / utility disconnect in the wordings the reviewer
+   *  gate reads (acDisconnectIntake.planTextNamesAcDisconnect, the one list; qc.ts hands it in on the
+   *  same plan-set text), or, for a plan set with no text, when the server's own image read of the
+   *  job's stored plan set named one (planSetImageReads, #135). Absent / false = the ac_disconnect item reads the split-page list and the
+   *  upload notes alone, as before (#134). */
+  planSetNamesAcDisconnect?: boolean;
+  /** True when the CEC's own inverter list prints UL 1741 SB "Y" for every listing the job's inverter
+   *  model can be (cecEquipment.jobInverterUl1741Sb, read by qc.ts; the reviewer gate reads the same
+   *  answer). Absent / false = the inverter_listing_ul1741sb item reads the package text alone, as before. */
+  inverterUl1741SbOnCecList?: boolean;
+  /** True when the CEC list certifies the inverter AND the operator's standing answer says installs use
+   *  the utility's required settings (cecEquipment.inverterSettingsByStandingAnswer, read by qc.ts).
+   *  Absent / false = the inverter_settings item reads the package text alone, as before. */
+  inverterSettingsByStandingAnswer?: boolean;
 }
 
 /** The jurisdiction records the QC baseline reads (jurisdictionQcRules.ts). */
@@ -609,12 +627,17 @@ export function evaluateBaselineRules(payload: ParserPayload, ctx?: EffectiveCod
 // ── THE UTILITY'S APPLICATION REQUIREMENTS, CHECKED ON THE PACKAGE (QC) ─────────────────────────
 // What QC reads for each KIND of item: the package text the plan-set split and the upload notes carry,
 // and the parser's account / meter fields. Kinds, never utilities.
-type QcReadInput = { payload: ParserPayload; split: string; notes: string; newPv: boolean };
+type QcReadInput = { payload: ParserPayload; split: string; notes: string; newPv: boolean; disconnectPart: string; disconnectNamed: boolean; sbOnCecList: boolean; settingsByStandingAnswer: boolean };
 const QC_SHOWN: Record<UtilityRequirementKey, (t: QcReadInput) => boolean> = {
   account_verification: ({ payload }) => Boolean(str(payload, "account") || str(payload, "ubAccountNumber")),
   meter_photo: ({ payload }) => Boolean(str(payload, "meter") || str(payload, "ubMeterNumber")),
-  inverter_settings: ({ split, notes }) => hasAny(`${split}\n${notes}`, [/UL\s*1741\s*SB/i, /inverter settings/i, /smart inverter/i]),
-  inverter_listing_ul1741sb: ({ split, notes }) => hasAny(`${split}\n${notes}`, [/UL\s*1741\s*SB/i]),
+  // The operator's standing answer (installs are commissioned with the utility's settings) on an
+  // inverter the CEC list certifies to UL 1741 SB answers it (owner, 2026-11-13).
+  inverter_settings: ({ split, notes, settingsByStandingAnswer }) => settingsByStandingAnswer || hasAny(`${split}\n${notes}`, [/UL\s*1741\s*SB/i, /inverter settings/i, /smart inverter/i]),
+  // VERIFIED FIRST (owner, 2026-11-13): the CEC's own list printing UL 1741 SB "Y" for the job's inverter
+  // answers the listing, so the package text need not say it again. Settings (inverter_settings) are a
+  // different question the list does not answer.
+  inverter_listing_ul1741sb: ({ split, notes, sbOnCecList }) => sbOnCecList || hasAny(`${split}\n${notes}`, [/UL\s*1741\s*SB/i]),
   // A ONE-LINE DIAGRAM IS AN SLD: "one-line", "one line", "1-line" and "single-line" name the same sheet,
   // so a package that calls it only that must not read as missing it.
   one_line: ({ split }) => hasAny(split, [/SLD/i, /3-line/i, /single line/i, /\b(?:one|1|single)[\s-]line\b/i]),
@@ -623,7 +646,11 @@ const QC_SHOWN: Record<UtilityRequirementKey, (t: QcReadInput) => boolean> = {
   // On a scope that adds no modules the inverter is the battery inverter / PCS (#673's storage rows), whose
   // sheet may name it only that.
   inverter_spec: ({ split, newPv }) => hasAny(split, newPv ? [/inverter/i, /microinverter/i] : [/inverter/i, /microinverter/i, /\bPCS\b/i, /power conversion/i]),
-  ac_disconnect: ({ split, notes }) => hasAny(`${split}\n${notes}`, [/disconnect/i]),
+  // The job's part that its own plan set names counts (acDisconnectIntake.capturedDisconnectPart, the
+  // ONE reader the reviewer gate's acDisconnect topic uses too; qc.ts hands its answer in, with the
+  // plan-set text the gate sees); or that plan-set text names an AC / utility disconnect in the gate's
+  // own wordings (the one list, also handed in by qc.ts, #134); else the package text names a disconnect.
+  ac_disconnect: ({ split, notes, disconnectPart, disconnectNamed }) => Boolean(disconnectPart) || disconnectNamed || hasAny(`${split}\n${notes}`, [/disconnect/i]),
   // The job's own operating-mode field counts (the one reader QC's storage row and the reviewer gate use).
   storage_mode_declaration: ({ payload, split, notes }) => Boolean(storageOperatingMode(payload)) || hasAny(`${split}\n${notes}`, [/operating mode/i, /back[-\s]?up/i, /self[-\s]?consumption/i, /export/i]),
   owner_signature: ({ split, notes }) => hasAny(`${split}\n${notes}`, [/signature/i, /signed/i, /owner authorization/i]),
@@ -679,7 +706,7 @@ function utilityRequirementResults(payload: ParserPayload, state: string, utilit
   // WHAT THE JOB INSTALLS (#673): a job that adds no modules is never asked for a module spec, and its
   // inverter is the battery inverter / PCS.
   const newPv = scopeHasNewPv(ctx.scope ?? deriveJobScope(payload).scope);
-  const read: QcReadInput = { payload, split, notes, newPv };
+  const read: QcReadInput = { payload, split, notes, newPv, disconnectPart: String(ctx.disconnectPartOnPlanSet ?? "").trim(), disconnectNamed: ctx.planSetNamesAcDisconnect === true, sbOnCecList: ctx.inverterUl1741SbOnCecList === true, settingsByStandingAnswer: ctx.inverterSettingsByStandingAnswer === true };
   const groups = new Map<string, { qc: { ruleId: string; ruleName: string; message: string; fieldName: string }; order: number; first: number; missing: string[]; block: boolean }>();
   items.forEach((item, index) => {
     if (!requirementForGate(item, "qc")) return;

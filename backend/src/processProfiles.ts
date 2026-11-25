@@ -314,6 +314,23 @@ function richness(profile: AhjProcessProfile): number {
   return r;
 }
 
+// A PROFILE'S NAME PARTS ARE A PURE FUNCTION OF ITS AHJ STRING, so they are worked out once per
+// string rather than for every profile in the state on every lookup (the board's next-step reads
+// call this several times per project; it was ~15% of each read). Bounded: the registry's names
+// are a fixed set, and the cap only guards against an unbounded stream of distinct names.
+const PROFILE_NAME_PARTS_MAX = 5000;
+const profileNamePartsCache = new Map<string, { names: ReadonlyArray<{ core: string; kind: JurisdictionKind }>; tokens: ReadonlySet<string> }>();
+function profileNameParts(rawAhj: string): { names: ReadonlyArray<{ core: string; kind: JurisdictionKind }>; tokens: ReadonlySet<string> } {
+  const key = String(rawAhj ?? "");
+  const hit = profileNamePartsCache.get(key);
+  if (hit) return hit;
+  const names = Object.freeze(jurisdictionNames(key).map((n) => Object.freeze({ ...n })));
+  const entry = { names, tokens: new Set(names.flatMap((n) => tokens(n.core))) };
+  if (profileNamePartsCache.size >= PROFILE_NAME_PARTS_MAX) profileNamePartsCache.clear();
+  profileNamePartsCache.set(key, entry);
+  return entry;
+}
+
 export function findAhjProcessProfile(input: ProjectRecord | ParserPayload): AhjProcessProfile | null {
   const profiles = loadProfiles();
   const state = stateFrom(input);
@@ -324,7 +341,7 @@ export function findAhjProcessProfile(input: ProjectRecord | ParserPayload): Ahj
   const candidates: Array<{ profile: AhjProcessProfile; score: number; rich: number }> = [];
   const hayTokens = new Set(projectNames.flatMap((n) => tokens(n.core)));
   for (const profile of stateProfiles) {
-    const profileNames = jurisdictionNames(profile.ahj);
+    const { names: profileNames, tokens: profileTokens } = profileNameParts(profile.ahj);
     if (!profileNames.length) continue;
     // Score by the BEST kind-compatible pairing of a project name with a profile sub-name.
     // Kind-incompatible pairs score nothing — "Santa Fe" (a city's short name) is never the
@@ -344,7 +361,7 @@ export function findAhjProcessProfile(input: ProjectRecord | ParserPayload): Ahj
     }
     if (!best) continue;
     let score = best;
-    for (const token of new Set(profileNames.flatMap((n) => tokens(n.core)))) {
+    for (const token of profileTokens) {
       if (hayTokens.has(token)) score += 12;
     }
     candidates.push({ profile, score, rich: richness(profile) });

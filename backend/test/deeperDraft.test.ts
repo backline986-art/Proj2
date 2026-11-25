@@ -89,4 +89,28 @@ assert.equal(
 );
 ok("a complete recipe is left to its own guard");
 
+// --- A LOOP IS NOT DEPTH (live City of Bend structural, 2026-11-16) ------------------------
+// The learn bounced on CityView's "Submission Error" and re-filled the same 10 boxes three times:
+// 30 fill steps of 10 controls. The honest 12-page re-record filled 12 distinct boxes once.
+// Counting steps, 30 > 12 kept the junk and threw the re-record away ("kept the deeper
+// recording: this save carried 22 filled field(s), the row already had 28"). Distinct controls:
+// 10 < 12, and the re-record is saved.
+const labelled = (labels: string[], repeats: number): Array<{ action: string; selector: { label: string } }> =>
+  Array.from({ length: repeats }, () => labels.map((label) => ({ action: "fill", selector: { label } }))).flat();
+const tenBoxes = Array.from({ length: 10 }, (_, i) => `Box ${i + 1}:*`);
+const twelveBoxes = Array.from({ length: 12 }, (_, i) => `Field ${i + 1}:*`);
+assert.equal(substantiveStepCount(labelled(tenBoxes, 3)), 10, "the same ten boxes filled three times are ten controls, not thirty");
+assert.equal(
+  shouldKeepDeeperDraft(labelled(tenBoxes, 3), labelled(twelveBoxes, 1), { protectComplete: false, hasExisting: true }),
+  false,
+  "MUST NOT KEEP: a looped 30-step snapshot of 10 controls does not outrank an honest 12-control re-record",
+);
+ok("a looped snapshot is not deeper than an honest re-record");
+// MUST KEEP: the Miami case still holds when the steps carry labels — 39 distinct boxes beat 18.
+assert.equal(
+  shouldKeepDeeperDraft(labelled(Array.from({ length: 39 }, (_, i) => `M${i}`), 1), labelled(Array.from({ length: 18 }, (_, i) => `M${i}`), 1), { protectComplete: false, hasExisting: true }),
+  true,
+);
+ok("thirty-nine distinct boxes still outrank eighteen");
+
 console.log(`\nAll ${passed} deeper-draft checks passed.`);

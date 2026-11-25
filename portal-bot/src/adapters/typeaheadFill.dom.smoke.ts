@@ -58,6 +58,9 @@ const BOOKS: Record<string, string[]> = {
   ],
 };
 
+/** #139: the job's whole one-line address, typed first into its own site's search. */
+const LOC_FULL = `${JOB.street}, ${JOB.city}, ${JOB.state} ${JOB.zip}`;
+
 // ---- the replica ---------------------------------------------------------------------------------
 const formPage = (mode: string): string => `<!doctype html><html><head><title>PublicAccess</title>
 <style>
@@ -343,15 +346,17 @@ if (recorded) {
   await page.goto(`${base}/?mode=none`);
   const t0 = Date.now();
   const out = await fillTypeahead(page, page.locator("#cw-ui-input-2000000000000002"), {
-    value: JOB.street, mode: "site", site: { street: JOB.street, city: JOB.city, zip: JOB.zip },
+    value: JOB.street, mode: "site", site: { street: JOB.street, city: JOB.city, zip: JOB.zip, state: JOB.state },
   });
   const ms = Date.now() - t0;
   const searches = await page.evaluate(() => (window as unknown as { __searches: string[] }).__searches);
   const after = await read(page);
   console.log(`   no suggestions: ${ms} ms outcome=${out.outcome} why=${"why" in out ? out.why : ""} searched=${JSON.stringify(searches)}`);
   check("no suggestions is a NAMED outcome, not a pick", out.outcome === "no_suggestions" && /offered no suggestions/.test("why" in out ? out.why : ""), JSON.stringify(out));
-  check("...after widening from house + street to the house number alone",
-    JSON.stringify(searches) === JSON.stringify(["4821 Quillfeather", "4821"]), JSON.stringify(searches));
+  // #139: the job's whole one-line address goes in first (Enter there, behind the shared gate), and
+  // the house + street core and the house number alone only after it.
+  check("...after widening from the whole address to house + street, then the house number alone",
+    JSON.stringify(searches) === JSON.stringify([LOC_FULL, "4821 Quillfeather", "4821"]), JSON.stringify(searches));
   check("...within the fill's 30 s budget", ms < 30_000, `${ms} ms`);
   check("...and the box is left empty", after.value === "" && after.picked === "", JSON.stringify(after));
   await page.close();
@@ -403,6 +408,88 @@ if (recorded) {
   check("a typeahead inside an iframe is read and picked in its own frame",
     out.outcome === "picked" && pickedText === "PICKED 4821 W QUILLFEATHER DR, MARROWVALE, UT 84999",
     `outcome=${JSON.stringify(out)} picked=${JSON.stringify(pickedText)} — reading the top document finds no list`);
+  await page.close();
+}
+
+// ---- I) #198 ENTER REFUSED: THE BOX'S OWN SEARCH CONTROL, ONCE (live City of Tigard, EnerGov) -----
+// An Esri-style "Address & Parcel Search" box: typing offers no suggestions; the page also holds an
+// invoices menu in its header (and a "Pay Invoices" nav link), so the shared Enter question refuses
+// Enter; no <form> around the widget (as live); a wordless
+// magnifier (role=button, a search icon) beside the box lists results when pressed. `results=none`:
+// the magnifier finds nothing. Every press of a pay / invoice control is counted (a press = failure).
+const esri = (results: "one" | "none" | "panel"): string => `<!doctype html><html><head><title>Apply for Permit</title></head><body>
+<div class="header"><button type="button" aria-label="User dropdown menu to update profile, view invoice" onclick="window.__pay++">Me</button></div>
+<nav><a href="#" id="payInv" onclick="window.__pay++;return false;">Pay Invoices</a></nav>
+<div id="app">
+<div class="esri-search"><div class="esri-search__form">
+  <input id="addr" type="text" role="combobox" aria-autocomplete="list" aria-controls="sugg" placeholder="Address &amp; Parcel Search" aria-label="Address &amp; Parcel Search">
+  <div role="button" tabindex="0" aria-label="" class="esri-search__submit-button" id="mag" style="display:inline-block;width:32px;height:32px;border:1px solid #888"><span class="esri-icon-search"></span></div>
+</div><ul id="sugg" role="listbox"></ul></div>
+<div id="panel"></div>
+<div id="popup" style="display:none"><b>4821 W QUILLFEATHER DR</b> <button type="button" id="popAdd" onclick="window.__popAdd++">+ Add</button></div>
+<div id="picked"></div>
+<button type="button" id="next" onclick="window.__posted++">Next</button>
+</div>
+<script>
+window.__pay = 0; window.__posted = 0; window.__searched = 0; window.__popAdd = 0; window.__selAll = 0;
+var R = ${JSON.stringify(results)};
+document.getElementById('mag').onclick = function () {
+  window.__searched++;
+  var ul = document.getElementById('sugg'); ul.innerHTML = '';
+  // Like live Tigard's address source: the whole "street, city, ST zip" line finds nothing; the street line does.
+  if (R === 'none' || document.getElementById('addr').value.indexOf(',') >= 0) return;
+  if (R === 'panel') {
+    // Live Tigard (owner's walk-through): a results panel of tickable rows + "Select All"; ticking a row
+    // shows the panel's "Add"; Add puts the location card on the application. A map pop-up "+ Add" too.
+    var panel = document.getElementById('panel');
+    panel.innerHTML = '<div class="hdr"><label><input type="checkbox" id="selAll"> Select All</label> <span id="addSlot"></span></div>';
+    document.getElementById('selAll').onclick = function () { window.__selAll++; };
+    [['4821 W QUILLFEATHER DR', 'Parcel: 2S104AB04700'], ['4823 W QUILLFEATHER DR', 'Parcel: 2S104AB04800']].forEach(function (r) {
+      var row = document.createElement('div'); row.className = 'row';
+      row.innerHTML = '<input type="checkbox"> <div><b>' + r[0] + '</b><div>' + r[1] + '</div></div>';
+      row.querySelector('input').onchange = function () {
+        var slot = document.getElementById('addSlot');
+        if (!document.getElementById('addBtn')) slot.innerHTML = '<button type="button" id="addBtn">Add</button>';
+        window.__ticked = r[0];
+        document.getElementById('addBtn').onclick = function () {
+          panel.innerHTML = ''; document.getElementById('popup').style.display = 'none';
+          document.getElementById('picked').textContent = 'Type: Location ' + window.__ticked + ' MARROWVALE,84999';
+        };
+      };
+      panel.appendChild(row);
+    });
+    document.getElementById('popup').style.display = '';
+    return;
+  }
+  ['4821 W QUILLFEATHER DR, MARROWVALE, UT 84999', '4823 W QUILLFEATHER DR, MARROWVALE, UT 84999'].forEach(function (t) {
+    var li = document.createElement('li'); li.setAttribute('role', 'option'); li.textContent = t;
+    li.onclick = function () { document.getElementById('addr').value = t; document.getElementById('picked').textContent = 'PICKED ' + t; ul.innerHTML = ''; };
+    ul.appendChild(li);
+  });
+};
+</script></body></html>`;
+for (const results of ["one", "none", "panel"] as const) {
+  const page = await ctx.newPage();
+  await page.setContent(esri(results));
+  const out = await fillTypeahead(page, page.locator("#addr"), {
+    value: JOB.street, mode: "site", site: { street: JOB.street, city: JOB.city, zip: JOB.zip, state: JOB.state },
+  });
+  const st = await page.evaluate(() => { const w = window as unknown as Record<string, number>; return { pay: w.__pay, posted: w.__posted, searched: w.__searched, popAdd: w.__popAdd, selAll: w.__selAll }; });
+  const pickedText = ((await page.locator("#picked").textContent().catch(() => "")) ?? "").trim();
+  console.log(`   esri ${results}: outcome=${out.outcome} via=${"via" in out ? out.via : ""} why=${"why" in out ? out.why : ""} state=${JSON.stringify(st)} picked=${JSON.stringify(pickedText)}`);
+  check(`#198 (${results}): no pay / invoice control pressed, nothing posted`, st.pay === 0 && st.posted === 0, JSON.stringify(st));
+  check(`#198 (${results}): the box's own magnifier was pressed (Enter was refused)`, st.searched >= 1, JSON.stringify(st));
+  if (results === "one") {
+    check("#198: the job's address is picked from the list the magnifier opened (not its neighbour)",
+      out.outcome === "picked" && pickedText === "PICKED 4821 W QUILLFEATHER DR, MARROWVALE, UT 84999", JSON.stringify(out));
+  } else if (results === "panel") {
+    check("#198 (Tigard panel): the job's row is ticked and the panel's Add puts THAT location on the application (not its neighbour)",
+      out.outcome === "picked" && pickedText === "Type: Location 4821 W QUILLFEATHER DR MARROWVALE,84999", `${JSON.stringify(out)} picked=${pickedText}`);
+    check("#198 (Tigard panel): never 'Select All', never the map pop-up's '+ Add'", st.selAll === 0 && st.popAdd === 0, JSON.stringify(st));
+  } else {
+    check("#198: a magnifier that finds nothing stays a NAMED no-suggestions outcome that says it searched",
+      out.outcome === "no_suggestions" && /own "search"/.test("why" in out ? out.why : ""), JSON.stringify(out));
+  }
   await page.close();
 }
 

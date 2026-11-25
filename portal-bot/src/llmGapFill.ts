@@ -11,9 +11,11 @@ import {
   type LearnPlanRequest,
 } from "./adapters/autoLearnAdapter";
 import { buildLocator } from "./adapters/loginFlow";
+import { recordedNameAttribute } from "../../shared/src/recipeSelector";
 import { selectWithFallback } from "./comboboxFill";
 import { assertFilerIdentityHeld, FilerIdentityStop, filerIdentityFieldForSelect, filerIdentityStopMessage, selectFilerIdentity } from "./filerIdentitySelect";
 import { redactStatusText } from "./safeAction";
+import { typeaheadBoxReason } from "./typeaheadFill";
 
 // ---------------------------------------------------------------------------
 // LLM-assisted gap-fill (hybrid staging).
@@ -429,6 +431,22 @@ function labelIsOnlyIdent(field: ExtractedField): boolean {
   const l = String(field.label ?? "").trim();
   return !l || l === field.fingerprint?.id || l === field.fingerprint?.name || l === field.group;
 }
+/** A CONTROL WHOSE ONLY IDENTITY IS ITS NAME ATTRIBUTE IS NOT THE GAP-FILL'S (#229 review, Helm
+ *  review of 381204a C6). Main recorded such a control — a name attribute, no label, no
+ *  placeholder: nothing a person reads — as a bare `{ name }` that loginFlow's buildLocator could
+ *  not build, so it was never offered, never written and never reported missing. #229 made the
+ *  name attribute addressable (the learner writes it as css, a saved bare name reads as it) and
+ *  gave a label-less radio or checkbox its #id instead. Asked of the selector, that set leaked in
+ *  the fix's first round: draftSubmitPins b_titleSelect's READY select, whose question sits only
+ *  in its title, was answered "Yes" and the fixture's draft-creating Part 1 submit posted it; on
+ *  a captured Accela ACA page (offline), the txtValidateSectionRequired validation boxes reached
+ *  the operator's "add this to the project" list. So it is asked of the CONTROL: it has a name
+ *  attribute and the selector carries no label or placeholder — exactly the controls main's name
+ *  branch recorded (bareNameSelector smoke, red without this). */
+function identifiedOnlyByName(field: ExtractedField): boolean {
+  const sel = field.selector ?? {};
+  return !!(field.fingerprint?.name || recordedNameAttribute(sel)) && !sel.label && !sel.placeholder;
+}
 
 /** THE CONTROL THE EXTRACTOR SAW, AND ONLY IT (#362, Helm review of 4081f12, Blocking 3). A label
  *  locator is a substring match ("Yes" lands on the first Yes of the page, "Net Metering" on "Are
@@ -440,8 +458,9 @@ function labelIsOnlyIdent(field: ExtractedField): boolean {
 async function locateExtracted(page: any, field: ExtractedField): Promise<any | null> {
   // A control named only by its id / name (nothing a person reads) keeps main's locator: an
   // `[id=…]` built for it answered a READY select whose question was not read (Helm review of
-  // 381204a, C6), where main never wrote it.
-  if (labelIsOnlyIdent(field)) return buildLocator(page, field.selector);
+  // 381204a, C6), where main never wrote it. One addressed only by its name attribute is not
+  // located at all, as on main (identifiedOnlyByName).
+  if (labelIsOnlyIdent(field)) return identifiedOnlyByName(field) ? null : buildLocator(page, field.selector);
   const frame = field.selector?.frame;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const scope: any = frame ? (typeof page.frameLocator === "function" ? page.frameLocator(`iframe[name="${cssStr(frame)}"]`) : null) : page;
@@ -646,7 +665,18 @@ export async function gapFillCurrentPage(
     if (!empties.some((e) => e.field.required)) return out;
     // A submit-intent control is never offered (gapFillMayAnswer); it stays in `empties`, so a
     // required one left blank is still reported below for a person to answer.
-    const offered = empties.filter((e) => gapFillMayAnswer(e.field));
+    // A SEARCH-AS-YOU-TYPE BOX IS NEVER GIVEN PLAIN TEXT EITHER (#244): it takes a PICK, made by the
+    // recipe's step or the learner through typeaheadFill, by the job's own rule — a planner's text
+    // typed into it selects nothing and reads as filled (City of Star's iWorQ property box: the
+    // replay's search found nothing and left it empty, and this pass would have typed the address
+    // back in). Asked by the one predicate (the scan's strategy, else typeaheadBoxSays on the box);
+    // it stays in `empties`, so a required one left blank is reported below like any other.
+    const searchBoxes = new Set<ExtractedField>();
+    for (const e of empties) {
+      if (e.field.fieldType !== "text") continue;
+      if (e.field.fillStrategy === "typeahead" || await typeaheadBoxReason(e.loc)) searchBoxes.add(e.field);
+    }
+    const offered = empties.filter((e) => gapFillMayAnswer(e.field) && !searchBoxes.has(e.field));
 
     const url = typeof page.url === "function" ? String(page.url() ?? "") : "";
     const pageTitle = typeof page.title === "function" ? String((await page.title().catch(() => "")) ?? "") : "";
