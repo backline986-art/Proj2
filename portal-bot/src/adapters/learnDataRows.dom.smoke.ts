@@ -49,6 +49,9 @@
 //   p2B — two records of this client's company at different streets: the client's street number
 //         decides. MUST: that row's Add, never the other.
 //   p2C — this client is not in the results: nothing is added, named, in seconds (no stall).
+//   p2F — a namesake: "HALCYON SOLAR WORKS SUPPLY INC" and "HALCYON SOLAR WORKS LLC", neither at the
+//         client's street. MUST: the LLC row (its own cell is the company; the learner's companyKey),
+//         never the supplier; main refused both as ambiguous.
 //   p2D / p2E — the recipe replayed for the company it was learned for, its action worded "Add" with
 //         an icon's text, or "Select Contact": main adds it, and so must this (#235 review).
 //
@@ -134,7 +137,11 @@ ${variant === "E5"
 </body></html>`;
 
 const contacts = (variant: string): string => {
-  const rows: string[][] = variant === "p2C"
+  const rows: string[][] = variant === "p2F"
+    // A NAMESAKE: both rows carry this client's words, neither at its street. The row whose own cell
+    // IS the company (rowPick.ts companyKey: "LLC" is a suffix, "Supply" is not) is the one.
+    ? [["Dov", "Reyes", "15 Mill St", "HALCYON SOLAR WORKS SUPPLY INC"], ["Ana", "Bell", "12 Elmstone Ct", "NORTHGLEN ROOFING"], ["Dov", "Reyes", "88 Pine Rd", "HALCYON SOLAR WORKS LLC"]]
+    : variant === "p2C"
     ? [["Mara", "Quist", "61 Fennick Ave", "QUIST ELECTRIC CO"], ["Ana", "Bell", "12 Elmstone Ct", "NORTHGLEN ROOFING"]]
     : variant === "p2B"
       ? [["Dov", "Reyes", "77 Brookside Rd", "HALCYON SOLAR WORKS"], ["Mara", "Quist", "61 Fennick Ave", "QUIST ELECTRIC CO"], ["Dov", "Reyes", "4400 Copperline Way", "HALCYON SOLAR WORKS"]]
@@ -530,7 +537,7 @@ for (const variant of ["A1", "A1b"]) {
 const SAME_CLIENT: Record<string, string> = {
   ...THIS_JOB, installerCompanyName: "Brightfold Energy LLC", installerStreetNumber: "929", installerStreet: "929 Harrowgate Rd",
 };
-for (const [variant, want] of [["p2A", "c1"], ["p2B", "c2"], ["p2C", ""], ["p2D", "c1"], ["p2E", "c1"]] as const) {
+for (const [variant, want] of [["p2A", "c1"], ["p2B", "c2"], ["p2C", ""], ["p2D", "c1"], ["p2E", "c1"], ["p2F", "c2"]] as const) {
   const page = await freshPage();
   const added: string[] = [];
   page.on("console", (m) => { const hit = /^ADDED (c\d+)$/.exec(m.text()); if (hit) added.push(hit[1]); });

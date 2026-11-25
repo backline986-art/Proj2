@@ -29,6 +29,10 @@ export interface HiddenRevealPlan {
   opener: string;
   /** Why the field was invisible, for the trail. */
   why: string;
+  /** Set when the closed container is a POP-UP (role=dialog / aria-modal / <dialog>): the opener's
+   *  role and name, so the learn can record the click that opens it (a replay must open it too),
+   *  and the dialog is tagged `data-al-popup` for the pass that commits it (its Save). */
+  popup?: { role: "button" | "link"; name: string; id: string };
 }
 
 /**
@@ -153,7 +157,48 @@ export function planHiddenReveal(): HiddenRevealPlan {
     if (byTarget) return tag(byTarget, "data-target/href");
   }
 
-  // 3. A collapsed toggle immediately before the container — the shape a hand-rolled
+  // 3. A CLOSED POP-UP (#131), before the sibling/header toggles below: a dialog is not an accordion,
+  //    and the control beside it in the markup is whatever the page put there (a smoke's "Next").
+  //    A pop-up: the fields live in a dialog (role=dialog / aria-modal / <dialog>) that a
+  //    button elsewhere on the page opens — EnerGov's "Add Project Details", the bench's selfserve base.
+  //    Nothing points at it (no aria-controls, not adjacent), so the opener is read from the WORDS: a
+  //    shown control outside the dialog that declares it opens a dialog (aria-haspopup="dialog"), or
+  //    whose words carry every significant word of the dialog's own title ("Add Project Details" for a
+  //    dialog titled "Project Details"). Exactly one such control, never a submit / pay / navigation /
+  //    destructive one; otherwise nothing is tried. The click is RECORDED by the learn (the replay must
+  //    open it too) and the dialog is tagged for the pass that commits it.
+  const DIALOG = "[role=dialog], [role=alertdialog], [aria-modal=true], dialog";
+  const dlg = container.matches(DIALOG) ? container : container.closest(DIALOG) || container.querySelector(DIALOG);
+  if (dlg) {
+    const labelledBy = String(dlg.getAttribute("aria-labelledby") || "").split(/\s+/).filter(Boolean)
+      .map((i) => { const n = document.getElementById(i); return n ? n.textContent || "" : ""; }).join(" ");
+    const heading = dlg.querySelector("h1, h2, h3, h4, legend");
+    const title = String(dlg.getAttribute("aria-label") || labelledBy || (heading ? heading.textContent || "" : "")).replace(/\s+/g, " ").trim();
+    const STOP = /^(the|and|for|of|to|a|an|your|this|add|edit|enter|new|view|open|update|more|information|info)$/i;
+    const titleWords = title.toLowerCase().split(/[^a-z0-9]+/).filter((w) => w.length >= 3 && !STOP.test(w));
+    const NOT_AN_OPENER = /\b(submit|pay|payment|fees?|next|continue|back|previous|cancel|close|sign\s*out|log\s*out|delete|remove|save|finish|search)\b/i;
+    const nameOf = (el: Element): string => String(el.tagName === "INPUT" ? (el as HTMLInputElement).value : ((el as HTMLElement).innerText || el.textContent || ""))
+      .replace(/\s+/g, " ").trim() || String(el.getAttribute("aria-label") || el.getAttribute("title") || "").trim();
+    const shown = Array.from(document.querySelectorAll("button, a, [role=button], input[type=button]"))
+      .filter((el) => !dlg.contains(el) && !concealed(el) && !isSkipLink(el) && !(el as HTMLButtonElement).disabled)
+      .filter((el) => { const n = nameOf(el); return !!n && n.length <= 60 && !NOT_AN_OPENER.test(n); });
+    const declared = shown.filter((el) => /^dialog$/i.test(String(el.getAttribute("aria-haspopup") || "")));
+    const worded = titleWords.length ? shown.filter((el) => {
+      const words = nameOf(el).toLowerCase().split(/[^a-z0-9]+/);
+      return titleWords.every((w) => words.indexOf(w) >= 0);
+    }) : [];
+    const pick = declared.length === 1 ? declared[0] : worded.length === 1 ? worded[0] : null;
+    if (!pick) return { opener: "", why: `${why} (a pop-up; no single control opens it by its words)` };
+    {
+      document.querySelectorAll("[data-al-popup]").forEach((n) => n.removeAttribute("data-al-popup"));
+      dlg.setAttribute("data-al-popup", "1");
+      const plan = tag(pick, declared.length === 1 ? "opens the pop-up (aria-haspopup)" : "opens the pop-up (its title's words)");
+      const id = pick.getAttribute("id") || "";
+      return { ...plan, popup: { role: pick.tagName === "A" ? "link" : "button", name: nameOf(pick), id: /^[A-Za-z][\w-]*$/.test(id) ? id : "" } };
+    }
+  }
+
+  // 4. A collapsed toggle immediately before the container — the shape a hand-rolled
   //    accordion takes when nobody wired up aria. Any clickable counts (#174): Accela's
   //    record-type group header is <a href="javascript:void(0)" onclick="ToggleRecordTypeList(this)">,
   //    and other builds draw the same header as a bare [onclick] div or an [aria-expanded] span.
@@ -167,7 +212,7 @@ export function planHiddenReveal(): HiddenRevealPlan {
     if (toggle && !concealed(toggle)) return tag(toggle, "toggle preceding the hidden container");
   }
 
-  // 4. A toggle inside the container's own header, for the layout where the opener sits
+  // 5. A toggle inside the container's own header, for the layout where the opener sits
   //    inside the thing it opens.
   const header = container.querySelector(":scope > button, :scope > summary, :scope > [role=button], :scope > .card-header, :scope > .panel-heading");
   if (header && !concealed(header)) {
