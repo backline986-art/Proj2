@@ -41,7 +41,7 @@ import { loginWasRefused } from "../../portal-bot/src/adapters/loginFlow";
 import { createLLMProvider, getRecentLlmCalls } from "./llm";
 import { getDecryptedCredentialForPortal, getDecryptedCredentialByUrl, listPortalCredentials, nearestStoredLogins, recordLoginOutcome } from "./portalCredentials";
 import { learnNoteTopicsFromMisses, activeLearnedNoteTerms } from "./noteTopics";
-import { RECIPE_FIELD_DESCRIPTIONS, deadFieldBindings, resolveRecipeFieldValues, startPortalRecording, savePortalRecipeSteps, getPortalRecipe, convertLiteralsToBoundFields, findAnyRecipeForProject, appendHumanPatchSteps, promoteRecordingIfEligible, recipeProfileKey, portalEntityEvidence, stampCompanyAttestations, withholdClientLicenceLiteralsFor, recordPortalNotServed } from "./portalRecipes";
+import { RECIPE_FIELD_DESCRIPTIONS, deadFieldBindings, resolveRecipeFieldValues, startPortalRecording, savePortalRecipeSteps, getPortalRecipe, convertLiteralsToBoundFields, findAnyRecipeForProject, appendHumanPatchSteps, promoteRecordingIfEligible, recipeDepth, recipeProfileKey, portalEntityEvidence, stampCompanyAttestations, withholdClientLicenceLiteralsFor, recordPortalNotServed } from "./portalRecipes";
 import { notServedInResult } from "../../shared/src/portalNotServed";
 import { HUMAN_SUBMIT_OBSERVED_NOTE } from "../../portal-bot/src/humanCapture";
 import { submissionDocumentsByType, uploadDocumentGuard } from "./submissionDocuments";
@@ -387,25 +387,11 @@ export function buildLearnKbContext(
 // plus the project's secret-free field values. Shared by autonomous learning AND the hybrid
 // staging gap-fill so both use identical data + safety handling. Secrets (account/meter/SSN/
 // password) are stripped here and NEVER reach the LLM — the adapter binds those deterministically.
-/** Fills, selects and checks - the steps that actually put data into a form. The only
- *  depth measure available on both a stored draft and a fresh learn. */
-// DISTINCT controls, not counted steps (the same rule as portalRecipes.recipeDepth — duplicated, not
-// imported: that module imports this one). A learn that bounced ("Submission Error") and re-filled
-// the same page three times recorded the same fills thrice, and that looped junk read as deeper (28)
-// than the honest 12-page re-record that followed it (22) — live City of Bend structural,
-// 2026-11-16 — so the re-record was thrown away. A loop is not depth; a control counts once.
-export function substantiveStepCount(steps: Array<{ action?: unknown; field?: unknown; note?: unknown; selector?: { label?: unknown; name?: unknown; css?: unknown } | null }> | undefined): number {
-  const keys = new Set<string>();
-  for (const st of steps ?? []) {
-    const action = String(st?.action ?? "");
-    if (!["fill", "select", "check"].includes(action)) continue;
-    // The CONTROL's own identity first (its label, name or css), the binding after: many boxes
-    // can bind one key (a trust-gate fixture binds sixty to homeownerName), and they are sixty.
-    const ident = String(st?.selector?.label || st?.selector?.name || st?.selector?.css || st?.field || st?.note || "").toLowerCase().replace(/\s+/g, " ").trim();
-    keys.add(`${action}|${ident || `#${keys.size}`}`);
-  }
-  return keys.size;
-}
+/** The steps that put form data into a portal — the depth of a learn, the trust floor's count and
+ *  the benchmark's fills. The SAME function the recipe save path and rollback rank drafts by
+ *  (portalRecipes.recipeDepth: DISTINCT controls, so a bounced learn's looped re-fills are not
+ *  depth), so no path can call a recording deeper than the gate scores it. */
+export const substantiveStepCount = recipeDepth;
 
 /**
  * DEPTH IS INFORMATION, AND A SHORTER DRAFT MUST NOT ERASE A LONGER ONE.
@@ -2185,8 +2171,12 @@ async function autoLearnPortalInner(
   const reachedReview = learn.reachedReview === true;
   const filledSomething = learn.filledSomething === true;
   if (!reachedReview || !filledSomething) {
+    // Says which of the two held. A run whose only fills were the e-signature (#131) has
+    // filledSomething false: "filled fields" would be the same false claim one layer up.
     const why = !reachedReview
-      ? "filled fields but never reached the portal's review screen"
+      ? (filledSomething
+        ? "filled fields but never reached the portal's review screen"
+        : "entered no form data and never reached the portal's review screen")
       : "reached a screen treated as review but filled no fields (likely a landing/disclaimer page misread as the review screen)";
     if (protectComplete) {
       return preserved("failed", null, { accurate: false, confidence: "low", matches: [], issues: [learn.message] }, `Nothing was staged — ${why}.`);
@@ -2398,7 +2388,7 @@ async function autoLearnPortalInner(
   // and was promoted with an EMPTY application — "accurate" was vacuous: nothing present,
   // nothing contradicted. Below these minimums the recipe stays draft for human
   // confirmation; it is never auto-trusted.
-  const substantiveSteps = (learn.steps ?? []).filter((s) => s.action === "fill" || s.action === "select" || s.action === "check").length;
+  const substantiveSteps = substantiveStepCount(learn.steps);
   const tooThin = (learn.pageCount ?? 0) < 3 || substantiveSteps < 5;
   if (tooThin) {
     verification.issues.push(

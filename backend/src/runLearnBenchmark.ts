@@ -19,7 +19,7 @@ import path from "node:path";
 import { runDataDir } from "./statePaths";
 import { openDatabase } from "./db";
 import { createProject, deleteProject } from "./repository";
-import { autoLearnPortal } from "./autoLearn";
+import { autoLearnPortal, substantiveStepCount } from "./autoLearn";
 import { listPortalCredentials, listStaleCredentials } from "./portalCredentials";
 import { isUtilityPlatformUrl } from "./portalChannel";
 import { recordDraftTouch } from "./draftLedger";
@@ -307,13 +307,10 @@ async function main(): Promise<void> {
       outcome = {
         status: r.status, pageCount: r.pageCount, message: r.message,
         steps: recipeSteps.length,
-        // fill/select/check only — a goto and four clicks is navigation, not a recipe.
-        // Same rule autoLearn's trust gate uses, so the benchmark and the promotion
-        // decision cannot disagree about what a recipe is.
-        substantiveSteps: recipeSteps.filter((st) => {
-          const a = String((st as { action?: unknown }).action ?? "");
-          return a === "fill" || a === "select" || a === "check";
-        }).length,
+        // Form data only — a goto and four clicks is navigation, not a recipe, and neither is
+        // the e-signature (#131). The SAME count autoLearn's trust gate uses, so the benchmark
+        // and the promotion decision cannot disagree about what a recipe is.
+        substantiveSteps: substantiveStepCount(recipeSteps as Array<{ action?: unknown }>),
         // The run's own page trace, not a regex over the closing prose — see
         // reachedReviewFromEvents. These two readings disagreed and the benchmark reported
         // the difference as a regression.

@@ -90,7 +90,7 @@ export function outcomeFromBundle(dir: string): LearnOutcome | null {
   // that nothing was recorded. A live run scores from the persisted recipe and is always
   // the authority; this path is for reading a bundle after the fact, and it must not claim
   // more than the bundle can prove.
-  const saidNothingRecorded = /no steps recorded|nothing fillable/i.test(String(result?.message ?? ""));
+  const saidNothingRecorded = /no steps recorded|nothing fillable|none of (which|them) entered form data/i.test(String(result?.message ?? ""));
   const substantiveSteps = result && !saidNothingRecorded
     ? pageEvents.reduce((n, e) => n + Number(/fills=(\d+)/.exec(String(e.trace || ""))?.[1] ?? 0), 0)
     : 0;
@@ -147,4 +147,7 @@ function main(): void {
   console.log(`\nwritten: ${file}${path.resolve(file) !== latest ? " and latest.json" : ""}`);
 }
 
-main();
+// Only run the CLI when this file IS the entry point; outcomeFromBundle is imported by the unit
+// test (rescoreBenchmark.test.ts), which must not rescore a scorecard on import.
+const invokedDirectly = process.argv[1] ? process.argv[1].replace(/\\/g, "/").endsWith("rescoreBenchmark.ts") : false;
+if (invokedDirectly) main();
