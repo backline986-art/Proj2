@@ -11041,6 +11041,28 @@ export class AutoLearnAdapter extends BasePortalAdapter {
             message: `Stopped: the planner returned a pay/fee control ("${advanceField.label}") as the advance button. Never automated. The recipe was recorded up to this page; a human must continue.`,
           };
         }
+        // A SUBMIT-WORDED CONTROL IS NEVER A MID-FLOW ADVANCE (widget corpus, "midsubmit"): on a
+        // fillable page not read as the review step the planner named a visible "Submit" as the
+        // advance, and the advance door pressed it — the filing POST went to the wizard's own URL,
+        // which the backstop's URL rule cannot know. The review page promotes such a control to the
+        // final submit (recorded, never clicked) above; anywhere else it is refused here by the SAME
+        // predicate replay's click gate uses (isFinalSubmitControl / isSubmitIntent with
+        // reviewPage:false, readOnlyPage:false — "Continue Application" on a fillable page stays an
+        // advance). Not clicked, not recorded; the walk stops, named.
+        {
+          const advLabel = String(advanceField.label ?? "").replace(/\s+/g, " ").trim();
+          if (advLabel && (isFinalSubmitControl(advLabel, { reviewPage: false }) || sharedIsSubmitIntent(advLabel, { reviewPage: false, readOnlyPage: false }))) {
+            this.debug?.event({ type: "advance_submit_refused", page: pageCount, label: advLabel.slice(0, 60) });
+            // The one submit-worded control the walk may press stays exactly as it was: a create
+            // dialog's own Submit, under clickCreateDialogAdvance's full conjunction (the path the
+            // walk takes when the planner names no advance).
+            if (await this.clickCreateDialogAdvance(steps)) continue;
+            return {
+              ...fail(steps, this.portalName, `Stopped: the planner returned a submit-worded control ("${advLabel.slice(0, 60)}") as the advance on page ${pageCount}, which does not read as the review step. The learn never presses a submit; the recipe was recorded up to this page and a person must continue.`, null, pageCount, portalNotices),
+              stopReason: "submit_worded_advance",
+            };
+          }
+        }
         // "SIGN IN" IS NEVER AN ADVANCE WHILE ITS CREDENTIAL BOXES ARE EMPTY (production,
         // city-of-jefferson: Sign In pressed on an empty Accela login form, 90 s timeout, then
         // re-entry and again, for six minutes). A login is the login pass's job (a1 above, with
@@ -15689,6 +15711,27 @@ export class AutoLearnAdapter extends BasePortalAdapter {
         if (dbg && broke) console.error(`[clickResilient] attempt ${attempt}: neutralized an interceptor`);
         try { await this.page!.keyboard?.press?.("Escape"); } catch { /* no keyboard (mock) */ }
         await smartWait(this.page!, 600);
+      }
+    }
+    // A CONTROL NOBODY CAN SEE IS NEVER CLICKED SYNTHETICALLY (widget corpus "confirm"): a
+    // closed modal's display:none "Yes, submit" failed every real click as not visible, and the
+    // dispatchEvent fallback below then fired an untrusted click on it — the page's handler ran
+    // and filed. The fallbacks exist for a VISIBLE control something covers; a control with no
+    // layout box is absent to a person, so it is absent here (each door's named-absent handling).
+    // A hidden checkbox / radio stays clickable: custom toggles hide the real input behind a face.
+    // Hidden controls stay in the scrape on purpose; the gate is here, at the click.
+    {
+      const visible = typeof loc.isVisible === "function" ? await loc.isVisible().catch(() => true) : true;
+      if (visible === false) {
+        const toggle = typeof loc.evaluate === "function"
+          ? await loc.evaluate((el: Element) => el instanceof HTMLInputElement && /^(checkbox|radio)$/i.test(el.type)).catch(() => false)
+          : false;
+        if (!toggle) {
+          const nowUrl = (this.page && typeof this.page.url === "function") ? String(this.page.url() ?? "") : "";
+          if ((nowUrl && nowUrl !== preClickUrl) || this.tabCount() > preClickTabs) return;
+          if (dbg) console.error(`[clickResilient] not visible after retries — no force / synthetic click`);
+          throw new ControlAbsentError();
+        }
       }
     }
     // Fallback 1: force-click — bypasses Playwright's coverage/actionability check. Useful
