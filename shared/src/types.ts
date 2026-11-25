@@ -3122,6 +3122,14 @@ export interface ReviewerVisionVerdict {
   question?: string;
 }
 
+/** One person's override of one reviewer blocker on one project (#640), as the gate shows it. */
+export interface ReviewerBlockerOverrideView {
+  id: string;
+  by: string;
+  at: string;
+  reason: string;
+}
+
 /** WHERE A RULE'S VALUE CAME FROM (review-audit draft 07; words: shared/src/ruleBasis.ruleBasisLabel). */
 export type RuleBasisTier = "model_code" | "seeded" | "official" | "verified";
 export interface ReviewerRuleBasis {
@@ -3155,6 +3163,24 @@ export interface ReviewerFinding {
   /** The text severity a vision verdict relaxed to a callout (reviewerVision.applyVerdict); absent
    *  when vision relaxed nothing. "blocker" = staging and Approve proceed past it on a vision read. */
   visionRelaxedFrom?: "warning" | "blocker";
+  /** Set when a NAMED PERSON's override released this blocker on this project (#640;
+   *  reviewerOverrides.applyReviewerBlockerOverrides): the finding reads as a callout, stays visible,
+   *  and staging and Approve proceed past it. Absent when no standing override applies. */
+  overriddenFrom?: "blocker";
+  /** Who released it, when, and why (set with overriddenFrom). */
+  override?: ReviewerBlockerOverrideView;
+  /** On a finding that still BLOCKS although an override was recorded for it: that override no longer
+   *  covers what is on file (the plan set was replaced, or the finding itself changed), and why. */
+  overrideVoided?: ReviewerBlockerOverrideView & { why: string };
+  /** On a blocker a person MAY override: an opaque token of what the gate shows right now (a hash of
+   *  the finding's fingerprint and the plan set's identity; reviewerOverrides.seenAsToken). The
+   *  dashboard echoes it with an override, and the writer refuses 409 when the finding or the plan set
+   *  changed between the page and the click, so an override binds to what the person looked at. */
+  overrideSeenAs?: string;
+  /** On a blocker NO override may release (reviewerOverrides.NOT_OVERRIDABLE, owner ruling 1 on #640):
+   *  the door that does release it. The dashboard shows this instead of an Override control, so
+   *  "which blockers can be overridden" has one answer, the server's. */
+  overrideRefusal?: string;
   /** On city.fire.pathway-unmeasured only: what the roof plan must show, so the vision pass can
    *  compare a measured sheet against the same requirement the text rule used. */
   roofPlanRequired?: RoofPlanRequiredDimension[];

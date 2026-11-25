@@ -134,6 +134,9 @@ export interface EmailFilingContext {
   priorSendOnTrack: boolean;
   /** Reviewer blockers a vision verdict cached after the approval relaxed (#226): the approver saw them as blockers. */
   relaxedSinceApproval?: string[];
+  /** Reviewer blockers released by a named person's override that was NOT in force at the approval
+   *  (#640): recorded after it, or void then and applying again since. The approver saw them as blockers. */
+  overriddenSinceApproval?: string[];
   /** Review-audit draft 01: why the approval's acknowledgements do not cover the measured warnings and
    *  unverified form mappings this filing carries now (backend approvalReviewItems.acknowledgementProblems). */
   unacknowledgedSinceApproval?: string[];
@@ -2864,6 +2867,7 @@ export function finalSubmitRefusals(ctx: FinalSubmitContext | EmailFilingContext
     out.push(...problems.map((p) => `filing email: ${p}`));
     if (ctx.priorSendOnTrack !== false) out.push("a filing email for this track is already on record (sent, in flight or failed) — a retry never re-sends");
     if (ctx.relaxedSinceApproval?.length) out.push(`a vision verdict cached after the approval relaxed ${ctx.relaxedSinceApproval.join(", ")} — approve again to file`);
+    if (ctx.overriddenSinceApproval?.length) out.push(`a blocker override not in force at the approval (recorded after it, or void then) released ${ctx.overriddenSinceApproval.join(", ")} — approve again to file`);
     if (ctx.unacknowledgedSinceApproval?.length) out.push(`the approval does not cover this filing's open review items (${ctx.unacknowledgedSinceApproval.join("; ")}) — approve again to file`);
     return out;
   }

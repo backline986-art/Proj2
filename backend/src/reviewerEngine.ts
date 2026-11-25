@@ -702,7 +702,9 @@ function renderFinding(finding: ReviewerFinding): string {
       ${visionHtml}
       ${finding.ruleBasis ? `<p class="meta"><strong>Rule basis:</strong> ${esc(finding.ruleBasis.label)}${finding.ruleBasis.source ? ` — ${esc(finding.ruleBasis.source)}` : ""}</p>` : ""}
       <p><strong>Reviewer comment:</strong> ${esc(finding.cityFeedback)}</p>
-      <p><strong>Required correction:</strong> ${esc(finding.designTeamAction)}</p>
+      <p><strong>Required correction:</strong> ${esc(finding.designTeamAction)}</p>${finding.overrideVoided
+        ? `\n      <p><strong>Override no longer applies:</strong> ${esc(finding.overrideVoided.by)} overrode this on ${esc(finding.overrideVoided.at.slice(0, 10))} (${esc(finding.overrideVoided.reason)}), but ${esc(finding.overrideVoided.why)}.</p>`
+        : ""}
       <div class="grid">
         <div><strong>Evidence required</strong><ul>${evidence}</ul></div>
         <div><strong>Code / basis</strong><ul>${refs}</ul></div>

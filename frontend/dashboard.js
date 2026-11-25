@@ -7995,6 +7995,101 @@ function findingPlanSetLine(finding) {
   return "Nothing on the submitted set answers this yet.";
 }
 
+// A NAMED PERSON'S OVERRIDE OF ONE REVIEWER BLOCKER (#640; owner request 2026-11-09). Pure: returns
+// HTML, every value esc()'d; the buttons are wired in renderReviewerGate by data-reviewer-override-action.
+// On a blocker: why an earlier override no longer applies (overrideVoided), then an "Override…" fold
+// with the reason (and, with sign-in off, the person's name; with it on the server records the
+// signed-in person and ignores anything typed). The stamped-structural hold has its own door (the
+// structural-letter card on the submit gate) and gets no Override control — on the tile path too.
+// A void override keeps a Withdraw button, so a stale row can be cleared instead of waiting to apply
+// again. The Override button carries the blocker's overrideSeenAs: the server refuses (409) when the
+// finding or the plan set changed between this page and the click.
+// Which blockers cannot be overridden is the SERVER's answer (finding.overrideRefusal, from
+// reviewerOverrides.NOT_OVERRIDABLE): the dashboard keeps no list of its own.
+function reviewerOverrideControlHtml(finding, authOn) {
+  if (!finding || finding.severity !== "blocker") return "";
+  const v = finding.overrideVoided;
+  const voidedNote = v
+    ? `<p class="muted kx-override-void">The override by ${esc(v.by)} on ${esc(String(v.at || "").slice(0, 10))} (${esc(v.reason)}) no longer applies: ${esc(v.why)}.
+      <button type="button" class="secondary" data-reviewer-override-action="withdraw" data-finding-id="${esc(finding.id)}">Withdraw</button></p>`
+    : "";
+  if (finding.overrideRefusal) {
+    return `${voidedNote}<p class="muted">${esc(finding.overrideRefusal)}</p>`;
+  }
+  return `${voidedNote}<details class="kx-override" data-reviewer-override-form="${esc(finding.id)}">
+      <summary>Override…</summary>
+      <div class="kx-inline-tool">
+        <span class="kx-inline-tool-title">Push past this blocker on this project only. Recorded under your name with the reason; a new plan set or a change to this finding voids it.</span>
+        <label>Reason (required)<textarea rows="2" data-reviewer-override-reason placeholder="Why this should not hold the filing"></textarea></label>
+        ${authOn ? "" : `<label>Your name<input type="text" data-reviewer-override-name autocomplete="name" /></label>`}
+        <div class="kx-inline-tool-row">
+          <button type="button" data-reviewer-override-action="override" data-finding-id="${esc(finding.id)}" data-seen-as="${esc(finding.overrideSeenAs || "")}">Override this blocker</button>
+        </div>
+      </div>
+    </details>`;
+}
+
+/** On a callout a person's override released: who, when, why, and a Withdraw button. */
+function reviewerOverrideNoteHtml(finding) {
+  if (!finding || finding.overriddenFrom !== "blocker" || !finding.override) return "";
+  const o = finding.override;
+  return `<span class="kx-check-note kx-override-note">Overridden by ${esc(o.by)} on ${esc(String(o.at || "").slice(0, 10))}: ${esc(o.reason)}
+      <button type="button" class="secondary" data-reviewer-override-action="withdraw" data-finding-id="${esc(finding.id)}">Withdraw</button></span>`;
+}
+
+// Override / withdraw from the reviewer gate. With sign-in on, the server records the signed-in person
+// and ignores anything sent; with it off, the person's typed name (a placeholder is refused).
+async function reviewerOverrideAction(action, btn) {
+  const id = state.selectedProjectId;
+  if (!id) return;
+  const findingId = btn.getAttribute("data-finding-id") || "";
+  let auth = state.authMe;
+  if (!auth) {
+    try { auth = await api("/api/auth/me"); state.authMe = auth; } catch { auth = { enabled: false, user: null }; }
+  }
+  const authOn = Boolean(auth && auth.enabled);
+  let lastName = "";
+  try { lastName = localStorage.getItem("feeConfirmName") || ""; } catch { lastName = ""; }
+  let name = "";
+  let reason = "";
+  if (action === "override") {
+    const form = btn.closest("[data-reviewer-override-form]");
+    const reasonEl = form && form.querySelector("[data-reviewer-override-reason]");
+    reason = String((reasonEl && reasonEl.value) || "").trim();
+    if (!reason) { showMessage("Say why this blocker should not hold the filing — a reason is required.", "warning"); return; }
+    if (!authOn) {
+      const nameEl = form && form.querySelector("[data-reviewer-override-name]");
+      name = String((nameEl && nameEl.value) || lastName).trim();
+      if (!name) { showMessage("Enter your name — an override is a person vouching for it.", "warning"); return; }
+    }
+    const who = authOn ? ((auth.user && (auth.user.name || auth.user.email)) || "you") : name;
+    if (!confirm(`Override this reviewer blocker on this project?\n\nReason: ${reason}\n\nRecorded as: ${who}. Staging and Approve will go past it; a new plan set or a change to this finding voids it.`)) return;
+  } else {
+    const lede = "Withdraw this override? The blocker holds the filing again until someone overrides it again.";
+    if (authOn) {
+      if (!confirm(`${lede}\n\nRecorded as: ${(auth.user && (auth.user.name || auth.user.email)) || "you"}`)) return;
+    } else {
+      const typed = window.prompt(`${lede}\n\nYour name (recorded as the person who withdrew it):`, lastName);
+      if (typed == null) return;
+      name = String(typed).trim();
+      if (!name) { showMessage("Enter your name — a withdrawal is recorded under a person.", "warning"); return; }
+    }
+  }
+  if (name) { try { localStorage.setItem("feeConfirmName", name); } catch { /* per-viewer convenience only */ } }
+  btn.disabled = true;
+  try {
+    const body = action === "override"
+      ? { reason, overriddenBy: name, seenAs: btn.getAttribute("data-seen-as") || "" }
+      : { withdrawnBy: name };
+    await api(`/api/projects/${id}/reviewer-blockers/${encodeURIComponent(findingId)}/${action}`, { method: "POST", body: JSON.stringify(body) });
+    showMessage(action === "override" ? "Blocker overridden — recorded with your name and reason." : "Override withdrawn — the blocker holds again.");
+    if (state.selectedProjectId === id) await selectProject(id);
+  } catch (err) {
+    showMessage(`${action === "override" ? "Override" : "Withdraw"} failed: ${err.message}`, "error");
+    btn.disabled = false;
+  }
+}
+
 /**
  * THE AHJ PREFLIGHT CARD.
  *
@@ -8025,7 +8120,10 @@ function renderReviewerGate() {
   // Check records (review-audit draft 07) are grouped apart from the callouts: passes with their
   // arithmetic and the checks that could not run, by category, collapsed.
   const records = findings.filter((item) => item.checkOutcome === "passed" || item.checkOutcome === "not_checked");
-  const clears = findings.filter((item) => (item.severity === "pass" || item.severity === "callout") && !records.includes(item));
+  // A person's override (#640) leads the column, so a long list of passes never hides one.
+  const clears = findings.filter((item) => (item.severity === "pass" || item.severity === "callout") && !records.includes(item))
+    .sort((a, b) => Number(b.overriddenFrom === "blocker") - Number(a.overriddenFrom === "blocker"));
+  const authOn = Boolean(state.authMe && state.authMe.enabled);
   $("reviewerCounts").textContent = `${blockers.length} blocker / ${warnings.length} warn`;
 
   const issues = [...blockers, ...warnings].slice(0, 18);
@@ -8039,7 +8137,7 @@ function renderReviewerGate() {
     ? recordsHtml + clears.slice(0, 14).map((item) => `
         <div class="kx-check ${item.severity === "callout" ? "is-warn" : ""}">
           <span class="kx-check-mark" aria-hidden="true">${item.severity === "callout" ? "!" : "✓"}</span>
-          <span class="kx-check-text">${esc(item.title)}${item.message || item.designTeamAction ? `<span class="kx-check-note">${esc([item.message, item.severity === "callout" ? item.designTeamAction : ""].filter(Boolean).join(" "))}</span>` : ""}${item.id === "reviewer.jurisdiction.parcel" && /^Jurisdiction accepted by /.test(String(item.title || "")) ? parcelWithdrawHtml() : ""}</span>
+          <span class="kx-check-text">${esc(item.title)}${item.message || item.designTeamAction ? `<span class="kx-check-note">${esc([item.message, item.severity === "callout" && item.overriddenFrom !== "blocker" ? item.designTeamAction : ""].filter(Boolean).join(" "))}</span>` : ""}${reviewerOverrideNoteHtml(item)}${item.id === "reviewer.jurisdiction.parcel" && /^Jurisdiction accepted by /.test(String(item.title || "")) ? parcelWithdrawHtml() : ""}</span>
         </div>`).join("")
     : `<span class="kx-check-empty">The gate produced no cleared checks for this project yet — everything it looked at is on the right.</span>`;
 
@@ -8062,6 +8160,7 @@ function renderReviewerGate() {
           </div>
           ${finding.id === "reviewer.jurisdiction.parcel" ? parcelAcceptFormHtml() : ""}
           ${finding.ruleBasis ? `<div class="kx-issue-field"><span class="kx-issue-field-label">Rule basis</span><span class="kx-issue-field-value">${esc(finding.ruleBasis.label)}${finding.ruleBasis.source ? ` — ${esc(finding.ruleBasis.source)}` : ""}</span></div>` : ""}
+          ${reviewerOverrideControlHtml(finding, authOn)}
           <details class="provenance">
             <summary>${esc(humanize(finding.category))} · evidence and code anchors</summary>
             <div class="provenance-body">
@@ -8109,6 +8208,9 @@ function renderReviewerGate() {
   // Note: installer callouts are a subset of the findings rendered above (each
   // carries installerCallout=true), so they're intentionally NOT shown again as a
   // separate block — that was duplicating the city-style correction comments.
+  $("reviewerGate").querySelectorAll("[data-reviewer-override-action]").forEach((b) => {
+    b.addEventListener("click", () => reviewerOverrideAction(b.getAttribute("data-reviewer-override-action"), b));
+  });
 }
 
 // The permit form describes ONE filing: the one the "Filing this status is about" selector names

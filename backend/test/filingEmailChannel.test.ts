@@ -118,6 +118,10 @@ await check("(c)(d)(e) the email gate is the one final-submit gate: approval of 
   assert.equal(safety.mayClickFinalSubmit({ ...ctx, recordProblems: ["unverified"] }), false);
   assert.equal(safety.mayClickFinalSubmit({ ...ctx, priorSendOnTrack: true }), false);
   assert.equal(safety.mayClickFinalSubmit({ ...ctx, relaxedSinceApproval: ["f1"] }), false);
+  // #640: a blocker released by an override that was not in force at the approval stops the email
+  // door too, exactly as it stops the portal door (automaticSubmitRefusals.overriddenSinceApproval).
+  assert.equal(safety.mayClickFinalSubmit({ ...ctx, overriddenSinceApproval: ["f1"] }), false, "an override recorded after the approval let the email send");
+  assert.match(safety.finalSubmitRefusals({ ...ctx, overriddenSinceApproval: ["f1"] }).join(" | "), /override not in force at the approval.*f1/);
   // Its OWN switch: PORTAL_ALLOW_FINAL_SUBMIT never turns email on, and the email switch is exactly "1".
   assert.equal(safety.filingEmailEnvAllows({ PORTAL_ALLOW_FINAL_SUBMIT: "1" }), false);
   assert.equal(safety.filingEmailEnvAllows({ FILING_EMAIL_ALLOW_SEND: "true" }), false);

@@ -83,6 +83,7 @@ import { clientAsksForProject } from "./clientAsks";
 import { installerHandoffRecords, type InstallerHandoffRecord } from "./installerHandoff";
 import { SIGNATURE_REQUEST_CONFIRMED_ACTION, reduceNemSignatureState } from "./signatureTrack";
 import { visionRelaxedBlockers } from "./reviewerVision";
+import { overriddenBlockers } from "./reviewerOverrides";
 import { startedAtLabel } from "./formAcquisitionPlan";
 import { paymentNeededForRun } from "./feePause";
 import { feeDueReadings, feePaidMarks, trackFeeDueFrom } from "./feeDue";
@@ -172,12 +173,18 @@ export function reviewerBlockerList(db: AppDb, project: ProjectRecord): Reviewer
 /** reviewerBlockerList plus the blockers a cached vision verdict relaxed (visionRelaxedBlockers),
  *  from ONE read of the gate: Approve passes the second list to the audit row it writes when it
  *  proceeds past one (#226). Read-only, like reviewerBlockerList. */
-export function reviewerGateRead(db: AppDb, project: ProjectRecord): { blockers: ReviewerBlocker[]; visionRelaxed: Array<ReviewerBlocker & { finding: ReviewerFinding }> } {
+export function reviewerGateRead(db: AppDb, project: ProjectRecord): {
+  blockers: ReviewerBlocker[];
+  visionRelaxed: Array<ReviewerBlocker & { finding: ReviewerFinding }>;
+  /** The blockers a named person's override released (#640; reviewerOverrides.overriddenBlockers). */
+  overridden: Array<ReviewerBlocker & { finding: ReviewerFinding }>;
+} {
   const report = withoutCodeResearch(() => reviewerGateReportFor(db, project));
   const asBlocker = (finding: ReviewerFinding): ReviewerBlocker => ({ code: finding.id, detail: finding.title, tracks: tracksHeld(findingHoldScope(finding)) });
   return {
     blockers: report.findings.filter((finding) => finding.severity === "blocker").map(asBlocker),
     visionRelaxed: visionRelaxedBlockers(report).map((finding) => ({ ...asBlocker(finding), finding })),
+    overridden: overriddenBlockers(report).map((finding) => ({ ...asBlocker(finding), finding })),
   };
 }
 
