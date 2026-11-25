@@ -52,6 +52,13 @@ import { stateSurchargeRuleFor } from "./stateFeeRules";
 import { localPermitReview, permitFeeProject } from "./feeIssuer";
 import { portalFeeSummary } from "./portalFeeReadings";
 import { printedFormCheck, printedFormQuote } from "./printedFormFees";
+import { feeReadsNeedingAPerson, feeReadsSentence } from "./feeNeedsPerson";
+import { priorYearOfFeeSource } from "./permitPlatformCatalog";
+import { officialFeeWords, officialSourceOfFeeResolution } from "./feeOfficial";
+import type { ProjectFeeResolution } from "./feeSchedules";
+import { resolveProjectCap, resolveServicePrice, underCap, type PriceBasis } from "./servicePrices";
+import { onboardingCredit } from "./onboardingCredit";
+import { addAuditLog } from "./audit";
 
 /** The portal's own total for the filing — typed by a person ("actual") or read off the record
  *  ("portal_record"). Either already contains every line the jurisdiction billed. */
@@ -90,6 +97,8 @@ function mapPayment(row: Row): SubmissionPaymentRecord {
     feeRecordedAt: text(row.fee_recorded_at),
     quotedAt: text(row.quoted_at),
     paidAt: row.paid_at ? text(row.paid_at) : null,
+    gateCollectedUsd: num(row.gate_collected_usd),
+    creditAppliedUsd: num(row.credit_applied_usd) ?? 0,
     updatedAt: text(row.updated_at),
   };
 }
@@ -105,15 +114,44 @@ export function getSubmissionPayment(db: AppDb, projectId: string, track?: strin
 interface ClientBilling {
   billingMode: string;
   serviceFeeUsd: number;
+  /** Where the service fee came from (servicePrices.resolveServicePrice). */
+  serviceFeeBasis: PriceBasis;
+  serviceFeeLabel: string;
+  /** The onboarding credit taken off the fee (#208); serviceFeeUsd is already net of it. */
+  creditUsd: number;
 }
 
-function clientBilling(db: AppDb, clientId: string | null): ClientBilling {
-  if (!clientId) return { billingMode: "", serviceFeeUsd: defaultServiceFeeUsd() };
-  const row = db.get<Row>("SELECT billing_mode, service_fee_usd FROM clients WHERE id = ?", [clientId]);
-  const fee = row?.service_fee_usd == null ? null : Number(row.service_fee_usd);
+/** The client's billing mode and OUR price for this track (#187): the client's own price per track,
+ *  its single fee, the org's price list, then the env default. No price anywhere quotes $0, as before. */
+function clientBilling(db: AppDb, project: ProjectRecord, track: "permit" | "nem"): ClientBilling {
+  const row = project.clientId ? db.get<Row>("SELECT billing_mode FROM clients WHERE id = ?", [project.clientId]) : null;
+  const price = resolveServicePrice(db, project.clientId, track, project.id);
+  // THE PROJECT CAP (#187) holds at the gate too: this track's fee is cut to what the cap leaves after
+  // the project's other track. At the founding prices one permit + one NEM sits under the cap; a
+  // client's own higher prices may not.
+  const { capUsd } = resolveProjectCap(db, project.clientId, project.id);
+  // The other track's PRICE counts toward the cap, credit or not: a credit pays a fee, it does not
+  // lower it.
+  const other = db.get<Row>("SELECT service_fee_usd, credit_applied_usd FROM submission_payments WHERE project_id = ? AND track = ?", [project.id, track === "nem" ? "permit" : "nem"]);
+  const otherUsd = (Number(other?.service_fee_usd ?? 0) || 0) + (Number(other?.credit_applied_usd ?? 0) || 0);
+  const fee = price.priceUsd == null ? 0 : underCap(price.priceUsd, capUsd, otherUsd);
+  const capLabel = price.priceUsd != null && fee < price.priceUsd
+    ? `${price.label}, cut to $${fee.toFixed(2)} by the $${Number(capUsd).toFixed(2)} project cap`
+    : price.label;
+  // THE ONBOARDING CREDIT (#208, owner 2026-11-13 "Covers the first filings' fees"): once the client
+  // has paid its onboarding fee, what is left of it comes off this fee. This row's own earlier claim is
+  // left out of "used" (it is being re-quoted); a quoted row never holds credit another row could use.
+  const mine = db.get<Row>("SELECT id FROM submission_payments WHERE project_id = ? AND track = ?", [project.id, track]);
+  const credit = fee > 0 ? Math.min(fee, onboardingCredit(db, project.clientId, text(mine?.id)).remainingUsd) : 0;
+  const creditUsd = Math.round(credit * 100) / 100;
   return {
     billingMode: text(row?.billing_mode).toLowerCase(),
-    serviceFeeUsd: fee != null && Number.isFinite(fee) && fee >= 0 ? fee : defaultServiceFeeUsd(),
+    serviceFeeUsd: Math.round((fee - creditUsd) * 100) / 100,
+    serviceFeeBasis: price.basis,
+    serviceFeeLabel: creditUsd > 0
+      ? `${capLabel}; $${creditUsd.toFixed(2)} taken from the onboarding credit${fee - creditUsd <= 0 ? ", so nothing is due" : ""}`
+      : capLabel,
+    creditUsd,
   };
 }
 
@@ -264,6 +302,8 @@ interface ScheduleFee {
   feeUsd: number | null;
   bracketLabel: string | null;
   sourceUrl: string | null;
+  /** When Keelix read the source (ISO), "" when the producer could not say. */
+  sourceReadAt: string;
   /** The ROW's citation. Read below by MAILED_CHECK_RE — a signal about how the
    *  money moves — and NEVER printed beside the amount: a bracketed schedule has
    *  one of these and N brackets, so it agrees with at most one of them. */
@@ -281,6 +321,10 @@ interface ScheduleFee {
    *  offered as this fee's published line. Anything unrecognised reads "none". */
   evidenceVerdict: "names_permit" | "other_permit" | "unnamed" | "none";
   confidence: "verified" | "seeded";
+  /** READ ON THE AUTHORITY'S OWN OFFICIAL PAGE (feeOfficial, rule 3's official tier): where and
+   *  when, null unless every seeded line of this amount is official. Beside `confidence`, which
+   *  stays "seeded": the quote grades the amount "official" and words it "from <host>". */
+  official: { host: string; sourceUrl: string; fetchedAt: string } | null;
   /** Who verified it and when — "" unless confidence is "verified". The NAME is a tenant's fact:
    *  shown only when every org in verifiedOrgIds is the project's own (verifierNameFor). */
   verifiedBy: string;
@@ -331,7 +375,7 @@ const CHARGE_CAP = 16;
 /** Trust order for FeeConfidence, weakest last — buildProjectFeeSheet grades a
  *  TOTAL by the weakest line summed into it. Same vocabulary as the lines. */
 const FEE_CONFIDENCE_RANK: Record<FeeConfidence, number> = {
-  actual: 4, verified: 3, seeded: 2, estimated: 1, unknown: 0,
+  actual: 5, verified: 4, official: 3, seeded: 2, estimated: 1, unknown: 0,
 };
 
 // A schedule that spells out payment by post is stating a process automation
@@ -426,12 +470,16 @@ function normalizeScheduleResult(raw: unknown): ScheduleFee | null {
     feeUsd: usable ? round2(fee) : null,
     bracketLabel: text(r.bracketLabel).trim().slice(0, 200) || null,
     sourceUrl: /^https?:\/\//i.test(url) ? url.slice(0, 500) : null,
+    sourceReadAt: /^\d{4}-\d{2}-\d{2}T/.test(text(r.sourceReadAt).trim()) ? text(r.sourceReadAt).trim().slice(0, 30) : "",
     sourceQuote: quote,
     bracketQuote: text(r.bracketQuote).trim().slice(0, 400),
     corroborated: r.corroborated === true,
     evidenceVerdict: (["names_permit", "other_permit", "unnamed"] as const).find((v) => v === text(r.evidenceVerdict)) ?? "none",
     // Research lands as seeded (safety rule 3); only a human promotes it.
     confidence: verified ? "verified" : "seeded",
+    // Set by scheduleFeeAt, which holds the database the official grade needs; never read off
+    // the producer's own object (a module owned elsewhere cannot claim it).
+    official: null,
     // A name beside a seeded row would read as a vouch nobody made — read only beside verified.
     verifiedBy: verified ? text(r.verifiedBy).trim().slice(0, 120) : "",
     verifiedAt: verified ? text(r.verifiedAt).trim().slice(0, 40) : "",
@@ -606,12 +654,45 @@ function publishedScheduleFee(db: AppDb, project: ProjectRecord, track: "permit"
   return scheduleFeeAt(db, track === "permit" ? permitFeeProject(project) : project, track);
 }
 
+/** THE AMOUNT'S OFFICIAL SOURCE (feeOfficial.officialSourceOfFeeResolution), through the same
+ *  whitelist discipline as every field crossing this seam: a host, an http(s) page and a read time,
+ *  or nothing. Never throws: a fee that cannot show its official read is seeded. */
+function officialSourceOf(db: AppDb, project: ProjectRecord, track: "permit" | "nem", raw: unknown): ScheduleFee["official"] {
+  try {
+    if (!raw || typeof raw !== "object" || !Array.isArray((raw as { lines?: unknown }).lines)) return null;
+    const o = officialSourceOfFeeResolution(db, text(project.state), track, raw as ProjectFeeResolution);
+    if (!o) return null;
+    const host = text(o.host).trim().toLowerCase().slice(0, 120);
+    const sourceUrl = text(o.sourceUrl).trim().slice(0, 500);
+    const fetchedAt = text(o.fetchedAt).trim().slice(0, 30);
+    return host && /^https?:\/\//i.test(sourceUrl) && /^\d{4}-\d{2}-\d{2}T/.test(fetchedAt) ? { host, sourceUrl, fetchedAt } : null;
+  } catch { return null; }
+}
+
+/** Does every state surcharge the quote ADDS to this amount rest on a state rule that is official
+ *  or person-verified? True when the quote adds none. Never throws: unknown reads as "no". */
+function modeledSurchargeRuleStands(db: AppDb, project: ProjectRecord, fee: ScheduleFee): boolean {
+  if (!fee.modeledSurcharges.length) return true;
+  try {
+    const rule = stateSurchargeRuleFor(db, project.state);
+    return rule.status === "rule" && (rule.confidence === "official" || rule.confidence === "verified");
+  } catch { return false; }
+}
+
 /** The published-schedule lookup for exactly this project's agency, no issuer re-keying. */
 function scheduleFeeAt(db: AppDb, project: ProjectRecord, track: "permit" | "nem"): ScheduleFee | null {
   const lookup = feeScheduleLookup();
   if (!lookup) return null;
   try {
-    return normalizeScheduleResult(lookup(db, project, track));
+    const raw = lookup(db, project, track);
+    const fee = normalizeScheduleResult(raw);
+    // THE WEAKEST PART DECIDES. A state surcharge the QUOTE adds (#421) is part of the amount shown
+    // and the schedule does not print it, so the amount is "official" only when that state rule is
+    // itself official or person-verified. A seeded state rule leaves the whole amount seeded.
+    if (fee && fee.feeUsd != null && fee.confidence === "seeded" && !fee.valuationEstimated && modeledSurchargeRuleStands(db, project, fee)) {
+      fee.official = officialSourceOf(db, project, track, raw);
+    }
+    return fee;
   } catch (err) {
     if (!loadWarned) {
       loadWarned = true;
@@ -723,11 +804,13 @@ export function feeConfirmRows(db: AppDb, project: ProjectRecord, track: "permit
 
 /** MAY A PERSON CONFIRM THIS AMOUNT? The one answer, asked by the fee sheet (to draw the
  *  Confirm control) and by feeConfirm.confirmPublishedFee (to refuse anything else): a
- *  researched, unchecked ("seeded") amount read off a published schedule. An estimate rests on
+ *  researched, unchecked ("seeded") amount read off a published schedule, or one read on the
+ *  authority's own official page ("official": used already, and a person may still put their name
+ *  to it). An estimate rests on
  *  a guessed valuation, not on the table a person would be vouching for; an actual, a learned
  *  median and an already-verified row have nothing on the schedule left to confirm. */
 export function feeLineConfirmable(source: PermitFeeSource, confidence: FeeConfidence): boolean {
-  return source === "published_schedule" && confidence === "seeded";
+  return source === "published_schedule" && (confidence === "seeded" || confidence === "official");
 }
 
 /** Build (and persist, unless already paid/waived) the payment quote for a track. */
@@ -749,6 +832,13 @@ export interface ResearchedPermitQuote {
   jurisdiction: string;
 }
 
+/** The same quote buildPaymentQuote answers (the portal's own figure on top of the researched
+ *  ladder), WITHOUT writing the submission_payments row: for a read path that must write nothing
+ *  (the approval sheet, review-audit draft 02). */
+export function readPaymentQuote(db: AppDb, project: ProjectRecord, trackInput?: string | null): SubmissionPaymentQuote {
+  return computePaymentQuote(db, project, trackInput, false).quote;
+}
+
 export function researchedPermitQuote(db: AppDb, project: ProjectRecord, trackInput?: string | null): ResearchedPermitQuote {
   return computePaymentQuote(db, project, trackInput, false).researched;
 }
@@ -760,7 +850,7 @@ function computePaymentQuote(
   persist: boolean,
 ): { quote: SubmissionPaymentQuote; researched: ResearchedPermitQuote } {
   const track = billingTrack(trackInput);
-  const billing = clientBilling(db, project.clientId);
+  const billing = clientBilling(db, project, track);
   const existing = getSubmissionPayment(db, project.id, track);
 
   // Resolved for EVERY quote, whichever tier wins the amount: the payment method
@@ -783,6 +873,8 @@ function computePaymentQuote(
   let permitFeeEvidenceQuote = "";
   let permitFeeVerifiedBy = "";
   let permitFeeVerifiedAt = "";
+  // Set on the published_schedule tier only: where the amount's official read came from.
+  let permitFeeOfficial: ScheduleFee["official"] = null;
   let permitFeeBracketLabel: string | null = schedule?.bracketLabel ?? null;
   const permitFeeSourceUrl: string | null = schedule?.sourceUrl ?? null;
 
@@ -842,7 +934,11 @@ function computePaymentQuote(
       // to tell the operator to true it up from the portal's own fee screen. That is exactly
       // the right instruction here, and it is the difference between a number a customer can
       // be quoted and one that only looks like it.
-      permitFeeConfidence = schedule.valuationEstimated ? "estimated" : schedule.confidence;
+      // OFFICIAL (rule 3, owner 2026-11-11): every seeded line of this amount is a printed row Keelix
+      // itself read on the authority's own official page. Used as published, worded "from <host>",
+      // never under a person's name; a person's verified amount outranks it.
+      permitFeeOfficial = schedule.confidence === "seeded" && !schedule.valuationEstimated ? schedule.official : null;
+      permitFeeConfidence = schedule.valuationEstimated ? "estimated" : permitFeeOfficial ? "official" : schedule.confidence;
       const who = schedule.matchedName || (track === "nem" ? project.utility : feeProject.ahj) || "this jurisdiction";
       // THE SENTENCE BESIDE THE NUMBER MUST BE ABOUT THAT NUMBER.
       //
@@ -891,6 +987,8 @@ function computePaymentQuote(
       permitFeeVerifiedAt = schedule.verifiedAt;
       const vouching = schedule.confidence === "verified"
         ? ` (human-verified${permitFeeVerifiedBy ? ` by ${permitFeeVerifiedBy}` : ""}${schedule.verifiedAt ? ` on ${schedule.verifiedAt.slice(0, 10)}` : ""})`
+        : permitFeeOfficial
+          ? ` (${officialFeeWords(permitFeeOfficial)}: Keelix read it on the authority's own published schedule and uses it as published)`
         : permitFeeCorroborated
           ? " (matches the published schedule — CORROBORATED: a machine re-read the cited document and found this line printed in it; no person has confirmed it yet)"
           : matchBadgeOn && schedule.corroborated
@@ -900,6 +998,12 @@ function computePaymentQuote(
         + `${vouching}.`
         + evidenceClause
         + `${schedule.sourceUrl ? ` ${schedule.sourceUrl}` : ""}`
+        // The read date beside the source (fee round, 2026-11): a fee that may be charged says when
+        // its page was read. Only where the row states one; never the row's last-touched time.
+        + `${schedule.sourceReadAt ? ` Source read ${schedule.sourceReadAt.slice(0, 10)}.` : ""}`
+        // A schedule whose own address dates it to a prior year says so beside the amount (owner,
+        // 2026-11-11: the newest schedule an agency still links counts, and the quote names its year).
+        + `${priorYearOfFeeSource(schedule.sourceUrl ?? "") ? ` The schedule is dated ${priorYearOfFeeSource(schedule.sourceUrl ?? "")}.` : ""}`
         + modeledSurchargeClause(schedule)
         + (track === "permit" ? stateSurchargeNotice(db, project.state, schedule.surchargeGaps) : "");
     } else if (schedule && floorUsd != null && floorWins()) {
@@ -988,6 +1092,7 @@ function computePaymentQuote(
     permitFeeIsFloor = false;
     permitFeeCorroborated = false;
     permitFeeEvidenceQuote = "";
+    permitFeeOfficial = null;
     permitFeeVerifiedBy = "";
     permitFeeVerifiedAt = "";
     // Kept as the fee-quantity fact it has always been beside an actual (a fact about the job's
@@ -1058,22 +1163,28 @@ function computePaymentQuote(
   if (persist && !existing) {
     db.run(
       `INSERT INTO submission_payments
-         (id, project_id, track, status, permit_fee_estimate_usd, permit_fee_actual_usd, service_fee_usd, total_usd, fee_basis, quoted_at, updated_at)
-       VALUES (?, ?, ?, 'quoted', ?, NULL, ?, ?, ?, ?, ?)`,
+         (id, project_id, track, status, permit_fee_estimate_usd, permit_fee_actual_usd, service_fee_usd, credit_applied_usd, total_usd, fee_basis, quoted_at, updated_at)
+       VALUES (?, ?, ?, 'quoted', ?, NULL, ?, ?, ?, ?, ?, ?)`,
       // The ESTIMATE column holds what research says; a portal read is not an estimate, so beside
       // one it keeps the researched figure (and permit_fee_actual_usd — a person's column — is
       // never written from a machine read).
-      [id(), project.id, track, permitFeeSource === "actual" ? null : permitFeeSource === "portal_record" ? researched.usd : permitFeeUsd, serviceFeeUsd, totalUsd ?? 0, permitFeeBasis, ts, ts],
+      [id(), project.id, track, permitFeeSource === "actual" ? null : permitFeeSource === "portal_record" ? researched.usd : permitFeeUsd, serviceFeeUsd, billing.creditUsd, totalUsd ?? 0, permitFeeBasis, ts, ts],
     );
   } else if (persist && existing?.status === "quoted") {
     db.run(
       `UPDATE submission_payments
-         SET permit_fee_estimate_usd = ?, service_fee_usd = ?, total_usd = ?, fee_basis = ?, updated_at = ?
+         SET permit_fee_estimate_usd = ?, service_fee_usd = ?, credit_applied_usd = ?, total_usd = ?, fee_basis = ?, updated_at = ?
        WHERE id = ?`,
-      [permitFeeSource === "actual" ? existing.permitFeeEstimateUsd : permitFeeSource === "portal_record" ? researched.usd : permitFeeUsd, serviceFeeUsd, totalUsd ?? 0, permitFeeBasis, ts, existing.id],
+      [permitFeeSource === "actual" ? existing.permitFeeEstimateUsd : permitFeeSource === "portal_record" ? researched.usd : permitFeeUsd, serviceFeeUsd, billing.creditUsd, totalUsd ?? 0, permitFeeBasis, ts, existing.id],
     );
   }
 
+  // THE FEE PAGES A PERSON READS, while the amount is not a schedule's or the portal's own figure
+  // (feeNeedsPerson). A display value like the archive notice below: computed per quote, so it
+  // stops being shown the moment a schedule lands or a person records the real fee.
+  const needsPerson = permitFeeSource === "published_schedule" || permitFeeSource === "actual" || permitFeeSource === "portal_record"
+    ? [] : [...feeReadsNeedingAPerson(db, feeProject, track), ...(feeProject !== project ? feeReadsNeedingAPerson(db, project, track) : [])]
+      .filter((r, i, all) => all.findIndex((x) => x.url === r.url) === i).slice(0, 6);
   const quote: SubmissionPaymentQuote = {
     track,
     required: billing.billingMode === "per_submission",
@@ -1086,9 +1197,11 @@ function computePaymentQuote(
     // and would have to be scrubbed on un-archive; computed per quote it simply
     // stops being true. The stored sentence stays the reason for the AMOUNT,
     // which is what a re-read of that column is for.
-    permitFeeBasis: archivedNotice(project) + permitFeeBasis,
+    permitFeeBasis: archivedNotice(project) + permitFeeBasis + feeReadsSentence(needsPerson),
     ...(permitFeeIsFloor ? { permitFeeIsFloor: true } : {}),
     permitFeeSourceUrl,
+    ...(permitFeeSource === "published_schedule" && schedule?.sourceReadAt ? { permitFeeSourceReadAt: schedule.sourceReadAt } : {}),
+    ...(needsPerson.length ? { feeNeedsPersonRead: needsPerson } : {}),
     permitFeeBracketLabel,
     // Named only when the payee is not the AHJ. "cited" is about the SCHEDULE: said only when the
     // amount came off a published (sourced) state schedule; otherwise the line says none is on file.
@@ -1101,12 +1214,20 @@ function computePaymentQuote(
     permitFeeEvidenceQuote,
     permitFeeVerifiedBy,
     permitFeeVerifiedAt,
+    ...(permitFeeOfficial && permitFeeConfidence === "official" ? { permitFeeOfficialSource: permitFeeOfficial } : {}),
     permitFeeComparison,
     printedFormCheck: printedCheck,
     portalFeeRecords,
     paymentMethod,
     serviceFeeUsd,
+    serviceFeeSource: billing.serviceFeeLabel,
+    ...(billing.creditUsd > 0 ? { onboardingCreditUsd: billing.creditUsd } : {}),
     totalUsd,
+    // The gate takes our own fee and nothing else (#699), whoever the jurisdiction fee belongs
+    // to. A 'card-on-file' or 'customer-pays' fee is never ours to collect; a 'keelix-pays' fee is
+    // not owed until we have paid it, and then it is invoiced at its real figure. totalUsd above
+    // stays the filing's whole cost, which is what the fee sheet and the quote are about.
+    gateAmountUsd: billing.billingMode === "per_submission" ? serviceFeeUsd : 0,
     payment: getSubmissionPayment(db, project.id, track),
     // RESOLVED FOR EVERY QUOTE, WHICHEVER TIER WON THE AMOUNT — deliberately not
     // gated on `permitFeeSource === "published_schedule"`.
@@ -1250,9 +1371,12 @@ export function markSubmissionPaid(
   const track = billingTrack(trackInput);
   const existing = getSubmissionPayment(db, project.id, track)!;
   const ts = nowIso();
+  // "CLIENT PAID US": the gate's own payment, which is the service fee and only that (#699).
+  // Stamped so the invoice can show it as received rather than bill it again. Marking paid twice
+  // re-stamps the same row, never a second payment: the row is one per (project, track).
   db.run(
-    `UPDATE submission_payments SET status = 'paid', payment_reference = ?, paid_at = ?, updated_at = ? WHERE id = ?`,
-    [text(input.paymentReference).slice(0, 200), ts, ts, existing.id],
+    `UPDATE submission_payments SET status = 'paid', payment_reference = ?, paid_at = ?, gate_collected_usd = ?, updated_at = ? WHERE id = ?`,
+    [text(input.paymentReference).slice(0, 200), ts, round2(existing.serviceFeeUsd), ts, existing.id],
   );
   return buildPaymentQuote(db, project, track);
 }
@@ -1301,6 +1425,7 @@ export function buildProjectFeeSheet(db: AppDb, project: ProjectRecord): Project
     confirmRows: feeLineConfirmable(quote.permitFeeSource, quote.permitFeeConfidence) ? feeConfirmRows(db, project, track) : [],
     verifiedBy: quote.permitFeeVerifiedBy,
     verifiedAt: quote.permitFeeVerifiedAt,
+    ...(quote.permitFeeOfficialSource ? { officialSource: quote.permitFeeOfficialSource } : {}),
     comparison: quote.permitFeeComparison,
     printedFormCheck: quote.printedFormCheck,
     portalRecords: quote.portalFeeRecords,
@@ -1512,7 +1637,8 @@ function localReviewLine(db: AppDb, project: ProjectRecord, review: { ahj: strin
   let s: ScheduleFee | null = null;
   try { s = normalizeScheduleResult(localReviewLookup()?.(db, at, "permit")); } catch { s = null; }
   const priced = s != null && s.feeUsd != null;
-  const confidence: FeeConfidence = priced ? (s!.valuationEstimated ? "estimated" : s!.confidence) : "unknown";
+  const official = priced && s!.confidence === "seeded" && !s!.valuationEstimated ? s!.official : null;
+  const confidence: FeeConfidence = priced ? (s!.valuationEstimated ? "estimated" : official ? "official" : s!.confidence) : "unknown";
   return {
     track: "permit",
     role: "local_review",
@@ -1522,7 +1648,7 @@ function localReviewLine(db: AppDb, project: ProjectRecord, review: { ahj: strin
     source: priced ? "published_schedule" : "unknown",
     basis: priced
       ? `${review.ahj}'s own zoning / site-development review fee, read off its published schedule${s!.bracketLabel ? ` ("${s!.bracketLabel}")` : ""}`
-        + `${s!.confidence === "verified" ? "." : " — researched, not yet checked by a person."} ${review.issuer} issues the building and electrical permits; this is ${review.ahj}'s separate charge.`
+        + `${s!.confidence === "verified" ? "." : official ? ` (${officialFeeWords(official)}: Keelix read it on the authority's own published schedule).` : " — researched, not yet checked by a person."} ${review.issuer} issues the building and electrical permits; this is ${review.ahj}'s separate charge.`
       : `No published zoning / site-development review fee on file for ${review.ahj} yet${s?.reason ? ` (${s.reason})` : ""}. `
         + `${review.ahj} issues no building or electrical permit here — ${review.issuer} does — but it reviews the site plan first and may charge for it. `
         + `Ask ${review.ahj}'s planning office for the fee.`,
@@ -1552,7 +1678,17 @@ export function assertSubmissionPaid(db: AppDb, project: ProjectRecord, trackInp
   if (!quote.required) return;
   const status = quote.payment?.status;
   if (status === "paid" || status === "waived") return;
-  throw new HttpError(402, `Payment required before staging: this client bills per submission. Collect ${quote.totalUsd != null ? `$${quote.totalUsd.toFixed(2)}` : "the submission total"} (permit fees${quote.permitFeeUsd != null ? ` $${quote.permitFeeUsd.toFixed(2)}` : ""} + service fee $${quote.serviceFeeUsd.toFixed(2)}) on the Payment screen, then mark it paid.`, {
+  // FULLY COVERED BY THE ONBOARDING CREDIT (#208): nothing is left to collect, so the credit IS the
+  // payment. Recorded as paid (which is what spends the credit: a quoted row never does), with the
+  // reference saying so, and audited. A $0 fee with no credit behind it still waits for a person.
+  if (status === "quoted" && quote.gateAmountUsd <= 0 && (quote.onboardingCreditUsd ?? 0) > 0) {
+    markSubmissionPaid(db, project, trackInput, { paymentReference: "Onboarding credit" });
+    addAuditLog(db, project.id, "system", "onboarding credit", "billing.gate_paid_by_credit", { track: quote.track, creditUsd: quote.onboardingCreditUsd });
+    return;
+  }
+  // The service fee only (#699). The jurisdiction fee is not collected here: it is paid on the
+  // portal, and re-billed on the invoice only when we advanced it.
+  throw new HttpError(402, `Payment required before staging: this client bills per submission. Collect the service fee $${quote.gateAmountUsd.toFixed(2)} on the Payment screen, then press "Client paid us". The permit fee is not collected here: it is invoiced after it is paid, and only if we paid it.`, {
     paymentRequired: true,
     quote,
   });

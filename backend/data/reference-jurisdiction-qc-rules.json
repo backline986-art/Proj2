@@ -1,0 +1,66 @@
+{
+  "about": "Per-jurisdiction QC baseline screens, as data (review-audit draft 12). baselineRules.ts reads these records with ONE generic rule and names no state, city or utility. A STATE record (ahj empty) applies to a job whose state is `state`, or, when the job has no state, whose AHJ contains one of `ahjNames` (lower-case, substring). A CITY record (ahj set) applies inside its state record's jurisdiction when the AHJ contains one of its `ahjNames`. `prescriptive.defaults` are the limits screened when the caller passes no code context (qc.ts always passes one, from jurisdiction_code_profiles); `prescriptive.publishesPath` says the jurisdiction publishes a prescriptive rooftop-PV path, so the screens run on whatever limits the context carries; `prescriptive.ruleIds` and `exportScreen` keep the rule ids and words QC history, blocker gating and the goldens key on. `screens` are checks by KIND (code reads the package per kind; the words are here). Severity follows the Helm #637 bar: a screen asks for `severity: blocker` and blocks only with a verbatim `quote` and a named `source` (or a person's / official row); otherwise it warns. Every shipped screen warns. Overlaid per ruleId by state_permit_rules rows of family `qc` (a person's or an official read). Catalogue entries for the `rules` table are in `ruleDefinitions`, in catalogue order.",
+  "asOf": "2026-11-10",
+  "records": [
+    {
+      "state": "OR",
+      "ahj": "",
+      "displayName": "Oregon",
+      "ahjNames": ["oregon", "portland", "hillsboro", "beaverton", "gresham", "clackamas", "washington county"],
+      "prescriptive": {
+        "publishesPath": true,
+        "source": "Oregon BCD Form 440-5952",
+        "defaults": { "maxGroundSnowPsf": 70, "maxPvDeadLoadPsf": 4.5, "maxRafterSpacingIn": 24, "allowedWindExposures": ["B", "C"], "maxExportKwWithoutStudy": 25 },
+        "ruleIds": { "snow": "or-prescriptive-snow-70", "dead": "or-prescriptive-deadload-4_5", "framing": "or-prescriptive-roof-framing", "wind": "or-prescriptive-wind-exposure", "fire": "or-fire-pathways", "export": "or-nem-tier1-export-25kw" },
+        "exportScreen": {
+          "ruleName": "Oregon Tier 1 export screen",
+          "message": "Generation/export may exceed Tier 1 screens ({dcKw} kW DC{combinedNote} / {exportKw} kW export). Confirm Tier 2/3 utility path.",
+          "source": "OAR 860-039-0030"
+        }
+      },
+      "screens": [
+        {
+          "kind": "manual_disconnect",
+          "ruleId": "or-nem-manual-disconnect",
+          "ruleName": "Oregon NEM manual disconnect",
+          "message": "AC/manual disconnect requirement was not clearly identified. Confirm lockable load-break disconnect or documented utility exception.",
+          "fieldName": "acDiscReq",
+          "source": "OAR 860-039-0005"
+        }
+      ]
+    },
+    {
+      "state": "OR",
+      "ahj": "Portland",
+      "displayName": "Portland",
+      "ahjNames": ["portland"],
+      "screens": [
+        {
+          "kind": "submittal_documents",
+          "ruleId": "portland-submittal-docs",
+          "ruleName": "Portland solar submittal documents",
+          "message": "Portland package may be missing: {missing}.",
+          "fieldName": "splitPagesText",
+          "source": "Portland Solar Permits",
+          "items": [
+            { "key": "site_plan", "label": "site/plot plan" },
+            { "key": "fire_access_path", "label": "fire access path" },
+            { "key": "roof_framing", "label": "roof framing/roof plan" },
+            { "key": "roof_cross_section", "label": "roof cross-section" },
+            { "key": "racking_attachment", "label": "racking attachment" }
+          ]
+        }
+      ]
+    }
+  ],
+  "ruleDefinitions": [
+    { "id": "or-nem-tier1-export-25kw", "ruleType": "qc", "name": "Oregon Tier 1 export screen", "jurisdictionScope": "Oregon", "utilityScope": "Oregon public utilities", "source": "OAR 860-039-0030", "severity": "warning", "trigger": "Export capacity over 25 kW or generation over 50 kW", "action": "Flag likely Tier 2/3 utility review path before submission." },
+    { "id": "or-nem-manual-disconnect", "ruleType": "qc", "name": "Oregon NEM manual disconnect", "jurisdictionScope": "Oregon", "utilityScope": "Oregon public utilities", "source": "OAR 860-039-0005", "severity": "warning", "trigger": "AC disconnect requirement not identified", "action": "Confirm lockable load-break disconnect or documented utility exception." },
+    { "id": "or-prescriptive-snow-70", "ruleType": "qc", "name": "Oregon prescriptive snow limit", "jurisdictionScope": "Oregon", "utilityScope": "", "source": "Oregon BCD Form 440-5952", "severity": "warning", "trigger": "Ground snow load over 70 psf or missing", "action": "Route to engineered path or human structural review." },
+    { "id": "or-prescriptive-deadload-4_5", "ruleType": "qc", "name": "Oregon prescriptive dead load limit", "jurisdictionScope": "Oregon", "utilityScope": "", "source": "Oregon BCD Form 440-5952", "severity": "warning", "trigger": "PV system dead load over 4.5 psf or missing", "action": "Route to engineered path or verify stamped structural basis." },
+    { "id": "or-prescriptive-roof-framing", "ruleType": "qc", "name": "Oregon prescriptive roof framing", "jurisdictionScope": "Oregon", "utilityScope": "", "source": "Oregon BCD Form 440-5952", "severity": "warning", "trigger": "Rafter/truss spacing missing or over 24 inches", "action": "Require engineered path or verified framing exception." },
+    { "id": "or-fire-pathways", "ruleType": "qc", "name": "Oregon PV firefighter pathways", "jurisdictionScope": "Oregon", "utilityScope": "", "source": "Oregon BCD PV Pathways Technical Bulletin", "severity": "warning", "trigger": "Rooftop PV with no pathway/site plan evidence", "action": "Confirm site plan shows required firefighter access and escape pathways." },
+    { "id": "portland-submittal-docs", "ruleType": "qc", "name": "Portland solar submittal documents", "jurisdictionScope": "Portland", "utilityScope": "", "source": "Portland Solar Permits", "severity": "warning", "trigger": "Portland project missing site/fire/framing/cross-section/racking evidence", "action": "Flag missing plan sheets before DevHub submission." },
+    { "id": "portland-ready-for-issue", "ruleType": "monitor", "name": "Portland ready for issue status", "jurisdictionScope": "Portland", "utilityScope": "", "source": "Portland Solar Permits pre-issuance section", "severity": "info", "trigger": "Pre-issuance complete / ready to issue / fees due", "action": "Flag ready_for_issue and queue human fee/payment/download step." }
+  ]
+}

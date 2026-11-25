@@ -58,6 +58,7 @@ import { isLoopbackHost } from "./demo-portal/network";
 import { PII_MASK_LAYER_ID, piiMaskInitScript, piiMaskShapesFor, piiMaskValues, piiRawSourceStrings, type PiiMaskAudit } from "./lib/piiMask";
 import { ffmpegAvailable, ocrBlindValues, ocrFrames, ocrUnavailableReason, piiHitsInText, sampleVideoFrames } from "./lib/ocrFrames";
 import { realRunRefusals } from "./lib/realRunGuard";
+import { fileURLToPath } from "node:url";
 
 const SKIP_EXIT_CODE = 3;
 const CORNER_ONLY = process.argv.includes("--corner-only");
@@ -69,7 +70,7 @@ const check = (label: string, ok: boolean, detail = ""): void => {
   else { failures++; console.error(`  FAIL - ${label}\n         ${detail}`); }
 };
 
-const REPO = path.resolve(path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, "$1")), "..");
+const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url).replace(/^\/([A-Za-z]:)/, "$1")), "..");
 const work = fs.mkdtempSync(path.join(os.tmpdir(), "demo-mask-smoke-"));
 const PDF = Buffer.from("%PDF-1.4\n1 0 obj<</Type/Catalog>>endobj\n%%EOF\n");
 const DOCS: Record<DocKey, string> = { plan_set: "B-plan-set.pdf", sld: "B-one-line.pdf", site_plan: "B-site-plan.pdf" };

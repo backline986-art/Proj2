@@ -47,6 +47,8 @@ async function main(): Promise<void> {
   const { createClient } = await import("../src/clients");
   const { buildPaymentQuote } = await import("../src/submissionFees");
   const db = await openDatabase();
+  const { stateSurchargeRuleFor } = await import("../src/stateFeeRules");
+  const OR_RULE = stateSurchargeRuleFor(db, "OR");
 
   let failures = 0;
   const check = (name: string, ok: boolean, detail = ""): void => {
@@ -248,7 +250,7 @@ async function main(): Promise<void> {
 
   const corroborated = corroborateBrackets(
     finding({ basis: "system_kw", brackets: countyBrackets.slice(0, 3), sourceUrl: COUNTY_URL }),
-    ledgerWith(COUNTY_PAGE),
+    ledgerWith(COUNTY_PAGE), OR_RULE
   );
   check("every real bracket is corroborated off its own printed row",
     corroborated.every((b) => b.corroboration?.corroborated === true),
@@ -273,7 +275,7 @@ async function main(): Promise<void> {
       ],
       sourceUrl: COUNTY_URL,
     }),
-    ledgerWith(COUNTY_PAGE),
+    ledgerWith(COUNTY_PAGE), OR_RULE
   );
   check("A FEE PRINTED ON THE WIND ROW DOES NOT CORROBORATE A SOLAR BRACKET",
     wind.every((b) => !b.corroboration), JSON.stringify(wind.map((b) => [b.feeUsd, !!b.corroboration])));
@@ -288,7 +290,7 @@ async function main(): Promise<void> {
       }],
       sourceUrl: COUNTY_URL,
     }),
-    ledgerWith(COUNTY_PAGE),
+    ledgerWith(COUNTY_PAGE), OR_RULE
   );
   check("a bracket that ARRIVES claiming corroboration has it stripped and re-derived",
     !selfClaimed[0].corroboration, JSON.stringify(selfClaimed[0].corroboration));
@@ -304,7 +306,7 @@ async function main(): Promise<void> {
     basis: "system_kw",
     brackets: corroborateBrackets(
       finding({ basis: "system_kw", brackets: countyBrackets.slice(0, 3) }),
-      ledgerWith(COUNTY_PAGE),
+      ledgerWith(COUNTY_PAGE), OR_RULE
     ),
     sourceUrl: COUNTY_URL, sourceQuote: LIVE_QUOTE,
   }), { corroborateAgainst: ledgerWith(COUNTY_PAGE) });
@@ -353,7 +355,7 @@ async function main(): Promise<void> {
     basis: "system_kw",
     brackets: corroborateBrackets(
       finding({ basis: "system_kw", brackets: countyBrackets.slice(0, 3) }),
-      ledgerWith(COUNTY_PAGE),
+      ledgerWith(COUNTY_PAGE), OR_RULE
     ),
     sourceUrl: COUNTY_URL, sourceQuote: "5 KVA or less | $135.00",
   });

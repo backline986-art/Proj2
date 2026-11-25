@@ -92,10 +92,17 @@ const mk = (j: typeof HERE): string => {
   return d.project.id;
 };
 const { rerunQc } = await import("../src/repository");
+const { qcBackgroundTriggersSettled } = await import("../src/qc");
 const docsComplete = (pid: string) => db.get<{ qc_status: string; message: string; created_at: string }>(
   "SELECT qc_status, message, created_at FROM qc_results WHERE project_id = ? AND rule_id = 'docs.complete'", [pid]);
 const parserJson = (pid: string) => String(db.get<{ parser_json: string }>("SELECT parser_json FROM projects WHERE id = ?", [pid])?.parser_json ?? "");
 const tick = () => new Promise((r) => setTimeout(r, 15)); // ISO timestamps are ms-grained
+// QC's research trigger is fire-and-forget and reads PERMIT_PROCESS_LOOKUP / the model key only after
+// an `await import()`. Every park below waits for the triggers the setup's QC runs started, on the
+// real condition (they settled), never a sleep: a trigger still in flight when part 4 turns the lookup
+// on read the NEW switches and queued a lookup for GONE after the job had failed (a load flake that
+// read as check 4 failing under --concurrency 4).
+const settleQc = () => qcBackgroundTriggersSettled();
 
 const here = mk(HERE);
 const elsewhere = mk(ELSEWHERE);
@@ -113,6 +120,7 @@ check("setup: QC before the lookup says the list is not yet confirmed",
   JSON.stringify([docsComplete(here), docsComplete(elsewhere)]));
 const elsewhereBefore = docsComplete(elsewhere);
 const parserBefore = parserJson(here);
+await settleQc();
 await tick();
 
 // What the lookup job's run wrote (savePermitProcessLookup lands it 'seeded' before the job leaves
@@ -168,6 +176,7 @@ const GONE = { state: "PA", city: "Gull Ridge", ahj: "City of Gull Ridge", utili
 const gone = mk(GONE);
 rerunQc(db, gone, { holdStatusOnNewBillOnlyFails: true });
 db.run("UPDATE projects SET status = 'qc_passed' WHERE id = ?", [gone]);
+await settleQc();
 await tick();
 db.run("UPDATE job_queue SET status = 'failed', error = 'parked by test' WHERE status = 'pending'");
 const { ClaudeLLMProvider } = await import("../src/llm");
@@ -184,6 +193,7 @@ const failedJob = jobQueue.enqueueJob(db, "permit_process_lookup", { state: GONE
 check("setup: the worker ran the failing lookup job", await jobQueue.processNextJob(db));
 // QC's lookup trigger is fire-and-forget (void async): give it, and any drain it kicks, time to land.
 for (let i = 0; i < 20; i++) await tick();
+await settleQc(); // and any QC a landing re-judge started reads the switches while they are still on
 process.env.ANTHROPIC_API_KEY = "";
 process.env.PERMIT_PROCESS_LOOKUP = "off";
 check("setup: the lookup job failed for good (the stub provider was asked and threw)",

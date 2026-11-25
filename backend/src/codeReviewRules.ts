@@ -1,10 +1,14 @@
 import type { AhjProcessProfile, CodeReference, NecEditionRequirements, ProjectRecord, ReviewerFinding, ReviewerFindingEvidence, StructureTypeFact } from "../../shared/src/types";
-import { isPlaceholderBatteryModel } from "../../shared/src/batteryControls";
+import { batteryStatus, isPlaceholderBatteryModel } from "../../shared/src/batteryControls";
+import { acSizesDisagree, inverterAcFromPlan, inverterAcMissingInputs, threePhaseService } from "./sizesAgree";
+import { notCheckedRecord, passRecord } from "./checkRecords";
 import type { EffectiveCodeContext } from "./codeProfiles";
 import { FIRE_PATHWAY_PATTERNS, packageShowsSld } from "./projectEvidence";
 import { evaluateElectricalSizingFindings } from "./electricalSizing";
+import { evaluateEeroFindings, evaluatePolicyFindings, readFireAccessFacts } from "./fireAccess";
 import { evaluateWireTableFindings } from "./wireTableArithmetic";
 import { evaluateAmendmentFindings } from "./amendmentChecks";
+import { evaluateEssFindings } from "./essReview";
 import { evaluatePriorCorrectionFindings } from "./ahjReviewRules";
 import { pathWordingScope, resolvePermitPath, usStateCode } from "./permitPath";
 import { classifyRoofCovering, statedRoofDeadLoads, tileAttachmentFromText, tileAttachmentMethodOf, TILE_MIN_ROOF_DEAD_LOAD_PSF } from "./roofCovering";
@@ -12,6 +16,7 @@ import {
   evaluateDesignCriteriaFindings,
   evaluateFirePathwayFindings,
   extractAttachmentSpacings,
+  fieldRuleBasis,
   packageTextSources,
   PARSED_FIELDS_SOURCE,
   residentialCodeRef,
@@ -21,12 +26,15 @@ import {
 import { adoptedNecEdition, necEditionRequirements, NEC_EDITION_REQUIREMENTS } from "./necEditions";
 import { moduleLevelElectronicsEquipment, type ModuleLevelElectronicsEvidence } from "./moduleLevelElectronics";
 import { designText, mountKind, type MountKind } from "./mountKind";
+import { readBallastedRacking } from "./ballastRacking";
 import { microEvidenceSupersededIn } from "./normalize";
 import { engineerSealStates, stateName } from "./engineerSeal";
 import { readPlanFraming } from "./planFraming";
 import { describeQuotes, describeSnowLabelIssue, planSheets, readDeckMount, readSnowLabels, type PlanSheet, type SheetQuote } from "./planAttachmentRead";
 import { readNecEditionCitations, readOtherMethodItems, readRapidShutdownStatements, readServiceLocationConflicts, readSupplySideDisconnectRating } from "./planConsistency";
-export { designText, engineeredGroundMount, groundMountFromField, isGroundMount, mountKind, mountKindForProject, type MountKind } from "./mountKind";
+import type { JobScope } from "../../shared/src/types";
+import { scopeHasNewPv } from "./jobScope";
+export { designText, engineeredGroundMount, groundMountFromField, isGroundMount, mountAdjective, mountKind, mountKindForProject, type MountKind } from "./mountKind";
 
 const oregonElectrical2023: CodeReference = {
   code: "2023 OESC / 2023 NEC",
@@ -192,6 +200,53 @@ function num(project: ProjectRecord, keys: string[]): number | null {
   return null;
 }
 
+// WHAT A BALLAST PLAN CONTAINS (#689 3d): the layout or schedule of the ballast, its weights, the
+// manufacturer's ballast calculation, or the anchorage/seismic restraint. The bare word "ballast" is the
+// TRIGGER, never the evidence: a set that only says "ballasted racking" has said nothing about it.
+const BALLAST_PLAN_PATTERNS: RegExp[] = [
+  /ballast\w*\s*(?:layout|plan|schedule|map|calc\w*|design|weight|block\s*(?:count|weight|layout)|tray|bay)/i,
+  /\bblock\s*(?:count|weight|layout|schedule)/i,
+  /ballast\w*[^.\n]{0,60}?\b\d+(?:\.\d+)?\s*(?:lbs?|pounds|psf)\b/i,
+  /\b\d+(?:\.\d+)?\s*(?:lbs?|pounds)\s+(?:of\s+)?ballast/i,
+  /\banchorage\b/i,
+  /\bseismic\s*(?:anchor\w*|restraint|attachment|tie.?down)/i,
+];
+
+// THE DECLARED DC SIZE IS A ROUNDED FIGURE (#689 3c). A flat 0.15 kW tolerance blocked a set whose
+// 455 x 550 W modules make 250.25 kW against a declared "250 kW" (0.1%): the designer wrote the size to
+// the kilowatt, and 250.25 kW written to the kilowatt IS 250. The tolerance is now what the declared
+// figure can round away, at the precision it is written in — half a unit of its last digit ("250" ->
+// 0.5 kW, "8.36" -> 0.005 kW) — or the 0.15 kW it has always allowed, whichever is looser. It stays
+// strict for a COUNT error: a gap of a whole module or more is never rounding, so a figure written
+// coarser than one module ("8" for 20 x 400 W) cannot absorb a miscounted module (21 x 400 W = 8.4 kW
+// still blocks). Nothing here is keyed to a place: it is arithmetic on the set's own numbers.
+const DC_SIZE_FLOOR_KW = 0.15;
+
+/** The declared DC size as it is WRITTEN, so its precision can be read: the snapshot's own dcKw text
+ *  when it states the same figure, else the number itself (a parser number loses trailing zeros:
+ *  "8.00" arrives as 8 — read as written to the kilowatt, and the one-module bound still holds). */
+function declaredDcText(project: ProjectRecord, dcKw: number): string {
+  const raw = str(project, "dcKw");
+  return raw && parseRating(raw) === dcKw ? raw : String(dcKw);
+}
+
+/** Decimal places the figure is written to: "250" -> 0, "8.36 kW" -> 2, "8.000" -> 3. */
+function writtenDecimals(text: string): number {
+  const m = text.replace(/,/g, "").match(/\d+(?:\.(\d+))?/);
+  return m?.[1]?.length ?? 0;
+}
+
+/** Does the modules' DC agree with the declared figure? Within the 0.15 kW floor, or within the
+ *  declared figure's own rounding AND short of one whole module. */
+export function dcSizeAgrees(calculatedKw: number, declaredKw: number, declaredText: string, moduleKw: number): boolean {
+  const gap = Math.abs(calculatedKw - declaredKw);
+  const EPS = 1e-9; // binary fractions: 455 * 550 / 1000 is not exactly 250.25
+  if (gap <= DC_SIZE_FLOOR_KW + EPS) return true;
+  const halfUnit = 0.5 * 10 ** -writtenDecimals(declaredText);
+  // A tie rounds away from the declared figure (250.5 written to the kilowatt is 251), so strictly less.
+  return gap < halfUnit - EPS && gap < moduleKw - EPS;
+}
+
 function hasAny(text: string, patterns: RegExp[]): boolean {
   return patterns.some((pattern) => pattern.test(text));
 }
@@ -203,15 +258,11 @@ function isOregon(project: ProjectRecord, _profile: AhjProcessProfile | null): b
   return usStateCode(project.state) === "OR";
 }
 
-// IS THIS ON A ROOF? — the one mount predicate (mountKind / mountKindForProject) lives in
-// mountKind.ts, so permitPath and requiredDocuments ask the same question without importing this
-// module (which imports permitPath). Re-exported here for the callers that always read it from here.
+// IS THIS ON A ROOF? — the one mount predicate (mountKind / mountKindForProject) and the adjective it
+// is written with (mountAdjective) live in mountKind.ts, so permitPath, requiredDocuments and
+// applicationDocs ask the same question without importing this module (which imports permitPath).
+// Re-exported here for the callers that always read it from here.
 
-/** The mount, as the scope-of-work sentence names it — "" when the mount is not known: an unknown
- *  mount is never written as "roof-mounted" on an application (leak sweep 2026-09-28). */
-export function mountAdjective(kind: MountKind): string {
-  return kind === "roof" ? "Roof-mounted" : kind === "ground" ? "Ground-mounted" : kind === "carport" ? "Carport-mounted" : "";
-}
 
 /** True when the array sits on a roof and the roof rule family applies. */
 export function isRoofMounted(project: ProjectRecord, allText: string): boolean {
@@ -712,6 +763,12 @@ const RSD_OPTION_TITLE = /(690\.12\s*\(\s*B\s*\)\s*\(\s*2\s*\)\s*\(\s*3\s*\))\s*
 function withoutRsdOptionTitle(sources: DesignTextSource[]): DesignTextSource[] {
   return sources.map((s) => ({ ...s, text: String(s.text || "").replace(RSD_OPTION_TITLE, "$1") }));
 }
+/** DOES THE PACKAGE SAY ITS RAPID-SHUTDOWN EQUIPMENT IS LISTED (690.12(B)(2))? The one answer: the
+ *  edition rule below asks it, and the maker's spec-sheet fetch (makerSpecSheets.ts) asks it of a
+ *  maker's sheet before attaching one, so a sheet is attached only when it would answer the rule. */
+export function rsdListedEquipmentAffirmed(sources: DesignTextSource[]): Affirmed | null {
+  return affirmedIn(withoutRsdOptionTitle(sources), RSD_LISTED_EQUIPMENT_PATTERNS);
+}
 /** city.ess.details-missing's trigger: a mention of storage scope. */
 const ESS_TRIGGER_PATTERNS: RegExp[] = [/battery/i, /\bESS\b/i, /powerwall/i, /encharge/i, /backup/i];
 const STORAGE_WORD = String.raw`(?:batter(?:y|ies)|ESS|backup|powerwall|encharge|energy\s+storage(?:\s+system)?|storage)`;
@@ -844,8 +901,11 @@ function finding(input: {
   evidenceNeeded: string[];
   codeReferences: CodeReference[];
   installerCallout?: boolean;
+  /** The tier of the jurisdiction data the finding measured against (review-audit draft 07). */
+  ruleBasis?: ReviewerFinding["ruleBasis"];
 }): ReviewerFinding {
   return {
+    ...(input.ruleBasis ? { ruleBasis: input.ruleBasis } : {}),
     id: input.id,
     severity: input.severity,
     category: input.category,
@@ -880,13 +940,20 @@ export function evaluateDesignCodeFindings(
    *  ruling 2026-10-08): the letter is in the package and only its seal — an image the text layer
    *  cannot read — is left to verify. Never set from text. */
   structuralCertification: { confirmedBy: string; confirmedAt: string } | null = null,
+  /** What the job installs (#673; draft 06). Default pv: today's findings, exactly. A storage scope
+   *  installs no array, so the roof / fire-pathway / framing / attachment / rapid-shutdown / module
+   *  rules below do not run; the storage facts are required by the reviewer engine instead. */
+  scope: JobScope = "pv",
 ): ReviewerFinding[] {
   const out: ReviewerFinding[] = [];
   const all = designText(project);
+  const newArray = scopeHasNewPv(scope);
   // A STAMP IS A DOCUMENT, NOT A SENTENCE ABOUT ONE.
   const hasStampedEngineering = uploadedDocTypes.some((t) => STAMPED_ENGINEERING_DOC_TYPES.includes(String(t)));
-  const roofMounted = isRoofMounted(project, all);
-  const rsdApplies = rapidShutdownApplies(project, all);
+  // No new array, no roof array and no PV rapid shutdown (NEC 690.12 governs PV): every rule gated on
+  // these two is an array rule.
+  const roofMounted = newArray && isRoofMounted(project, all);
+  const rsdApplies = newArray && rapidShutdownApplies(project, all);
   const oregon = isOregon(project, profile);
   // "NON-PRESCRIPTIVE" CONTAINS "PRESCRIPTIVE". A bare substring test therefore read an
   // explicitly engineered project as a prescriptive one and inverted the structural gate:
@@ -989,8 +1056,19 @@ export function evaluateDesignCodeFindings(
   // MEASURED FIRST (issue #142): the plan's stated pathway widths and ridge setback against the
   // jurisdiction's fireSetbacks, else the adopted edition's model-code default. The word list
   // below is now only the fallback, for a plan with no pathway text AND no readable dimension.
-  const fire = ctx ? evaluateFirePathwayFindings(project, ctx, { roofMounted, extraTexts: documentTexts }) : { findings: [], measured: false };
+  //
+  // WHAT THE REQUIREMENT READS (review-audit draft 08, fireAccess.ts): the roof coverage (33% / 66%
+  // sprinklered → 18 or 36 in from the ridge; not stated → 36 in, said), a stated sprinkler system,
+  // and the jurisdiction's alternative pathway policy where it is applied (verified with its page, or
+  // official). Then the emergency escape and rescue openings (R324.6), and a policy on file that is
+  // not applied, shown for a person to verify.
+  const fireFacts = ctx && roofMounted ? readFireAccessFacts(project, ctx, documentTexts) : null;
+  const fire = ctx ? evaluateFirePathwayFindings(project, ctx, { roofMounted, extraTexts: documentTexts, facts: fireFacts }) : { findings: [], measured: false };
   out.push(...fire.findings);
+  if (ctx && roofMounted && fireFacts) {
+    out.push(...evaluateEeroFindings(project, ctx, documentTexts));
+    out.push(...evaluatePolicyFindings(ctx, fireFacts));
+  }
   if (roofMounted && !fire.measured && !hasAny(all, FIRE_PATHWAY_PATTERNS)) {
     out.push(finding({
       id: "city.fire.pathways-missing",
@@ -1185,7 +1263,45 @@ export function evaluateDesignCodeFindings(
   // `mounting` FIELD reads "Roof mount". /rail/i was satisfied by a guardrail and /lag/i by
   // any word containing those three letters. Ask instead for what an attachment detail
   // actually contains.
-  if (roofMounted && !hasAny(all, [
+  //
+  // A BALLASTED ROOF HAS NO PENETRATIONS TO DETAIL (#689 3d). The screen asked every rooftop for lag
+  // screws and flashing, so a ballasted, non-penetrating array (the one predicate,
+  // ballastedRackingEvidence) was blocked for a detail it cannot have. On that positive evidence only,
+  // the question becomes what holds a ballasted array down: the ballast layout and weights, the roof's
+  // capacity for them, and the wind/seismic basis or anchorage. Asked as a warning when the package
+  // does not show it (Helm ruling on #689); without ballast evidence today's blocker stands unchanged.
+  const ballastReading = roofMounted ? readBallastedRacking(project) : null;
+  const ballast = ballastReading?.verdict === "ballasted" ? ballastReading.evidence : "";
+  // BALLASTED OR ATTACHED, WHEN THE PACKAGE DOES NOT SAY CLEARLY. A jurisdiction may take a ballasted
+  // array off its prescriptive path, so this is never guessed: the reading names what points each way
+  // and a person settles it (the attachment-detail check below still runs as for any attached array).
+  if (ballastReading?.verdict === "unclear") {
+    out.push(finding({
+      id: "city.struct.ballast-unclear",
+      severity: "warning",
+      category: "structural",
+      title: "Ballasted or attached? The package is not clear",
+      message: `Ballast is mentioned (${ballastReading.evidence}), but ${ballastReading.doubt}. Whether the array is ballasted decides the permit path where a jurisdiction keeps ballasted racking off its prescriptive path.`,
+      cityFeedback: "State how the array is held down: ballasted (with the ballast layout and calculation) or attached to the roof framing (with the attachment detail).",
+      designTeamAction: "Confirm with the designer whether the racking is ballasted or attached, then correct the racking / attachment fields (and the permit path if it changes).",
+      evidenceNeeded: ["Racking product and how it is held down (ballast or attachment to framing)"],
+      codeReferences: [roofLoadsRef],
+    }));
+  }
+  if (roofMounted && ballast && !hasAny(all, BALLAST_PLAN_PATTERNS)) {
+    out.push(finding({
+      id: "city.struct.ballast-plan-missing",
+      severity: "warning",
+      category: "structural",
+      title: "Ballast / anchorage plan not shown",
+      message: `The racking is ballasted / non-penetrating (${ballast}), so a roof attachment detail does not apply, but the package does not show the ballast layout or what holds the array in place.`,
+      cityFeedback: "Provide the ballast layout and schedule (ballast count and weight per bay), the racking manufacturer's ballast calculation for wind uplift and sliding, the roof structure's capacity for the added ballast dead load, and the seismic basis for an unattached array or the anchorage that restrains it.",
+      designTeamAction: "Add the racking manufacturer's ballast layout/calculation and the roof capacity check, or the anchorage detail where the array is attached.",
+      evidenceNeeded: ["Ballast layout and schedule (count and weight per bay)", "Manufacturer ballast calculation (wind uplift, sliding)", "Roof capacity for the ballast dead load", "Seismic basis or anchorage detail"],
+      codeReferences: [roofLoadsRef],
+    }));
+  }
+  if (roofMounted && !ballast && !hasAny(all, [
     /attachment\s*(?:detail|schedule|spacing|point)/i,
     /standoff/i, /flashing/i, /flashfoot/i, /l.?foot/i,
     /lag\s*(?:screw|bolt)/i, /fastener/i, /embedment/i, /pull.?out/i,
@@ -1462,7 +1578,7 @@ export function evaluateDesignCodeFindings(
   // exactly as a roof array does; the gate used to be `ctx && roofMounted`, so a job read as ground
   // or carport never had the listings checked at all. Only the racking's words follow the mount —
   // the roof wording is unchanged, and so is the severity (listingEvidenceRequired).
-  if (ctx) {
+  if (ctx && newArray) {
     const listingMount = roofMounted ? "roof" : mountKind(project, all);
     const racking = listingMount === "ground" ? "ground-mount racking" : listingMount === "carport" ? "carport racking/mounting" : "racking/mounting";
     const mountNote = listingMount === "ground"
@@ -1571,8 +1687,11 @@ export function evaluateDesignCodeFindings(
     }
     const profileNote = ctx.verified ? "human-verified code profile" : "seeded code profile (not yet human-verified)";
     const ref = residentialCodeRef(ctx, roofLoads.section, roofLoads.title, roofLoads.note);
+    // The tier of the limit this rule measures against, in words (review-audit draft 07).
+    const spacingBasis = fieldRuleBasis(ctx, "prescriptive.maxAttachmentSpacingIn");
     if (!stated.length) {
       out.push(finding({
+        ruleBasis: spacingBasis,
         id: "city.struct.anchor-spacing-unchecked",
         severity: "callout",
         category: "structural",
@@ -1586,10 +1705,18 @@ export function evaluateDesignCodeFindings(
       }));
     } else {
       const fieldSpacing = Math.max(...stated.map((s) => s.inches));
+      if (fieldSpacing <= ahjMaxSpacing) {
+        out.push(passRecord({
+          ruleId: "city.struct.anchor-spacing-exceeds-ahj", category: "structural", title: "Roof anchor spacing against the jurisdiction's limit",
+          codeReferences: [ref], ruleBasis: spacingBasis,
+          arithmetic: `The plan's widest attachment spacing is ${fieldSpacing}" o.c. (${[...new Set(stated.filter((x) => x.inches === fieldSpacing).map((x) => x.source))].join(", ")}) <= ${who}'s ${ahjMaxSpacing}" o.c. limit.`,
+        }));
+      }
       if (fieldSpacing > ahjMaxSpacing) {
         const over = stated.filter((s) => s.inches > ahjMaxSpacing);
         out.push({
           ...finding({
+            ruleBasis: spacingBasis,
             id: "city.struct.anchor-spacing-exceeds-ahj",
             severity: screeningSeverity,
             category: "structural",
@@ -1779,7 +1906,8 @@ export function evaluateDesignCodeFindings(
   const intercoText = `${project.interconnectionMethod}\n${str(project, "interco")}`;
   const bus = num(project, ["busRating"]);
   const mainBreaker = num(project, ["mainBreaker"]);
-  const pvBreaker = num(project, ["pvBreaker"]);
+  // On a storage scope the backfed breaker is the battery inverter's (#673: essBreaker, else pvBreaker).
+  const pvBreaker = num(project, newArray ? ["pvBreaker"] : ["essBreaker", "pvBreaker"]);
 
   // WHICH SIDE OF THE SERVICE IS THIS? The 120% busbar screen is NEC 705.12(B)(3)(2) — a
   // LOAD-SIDE rule. A SUPPLY-SIDE (line-side) tap is 705.11 and is not governed by it at all:
@@ -1962,7 +2090,9 @@ export function evaluateDesignCodeFindings(
   // confirms — not a warning that the equipment is "missing". The warning/blocker
   // is reserved for genuinely missing core fields.
   const coreEquipmentPresent = moduleFields.length >= 4 && inverterFields.length >= 2;
-  if (moduleFields.length < 4 || inverterFields.length < 2 || !hasModuleSpec || !hasInverterSpec) {
+  // The module / inverter schedule is an array question; a storage scope's equipment facts are asked by
+  // reviewer.storage.facts-missing, and the ESS spec sheet by the required documents (battery_spec).
+  if (newArray && (moduleFields.length < 4 || inverterFields.length < 2 || !hasModuleSpec || !hasInverterSpec)) {
     const severity = !coreEquipmentPresent ? "blocker" : "callout";
     out.push(finding({
       id: "city.elec.equipment-specs-incomplete",
@@ -1984,9 +2114,17 @@ export function evaluateDesignCodeFindings(
   const dcKw = project.systemSizeDcKw ?? num(project, ["dcKw"]);
   const moduleQty = num(project, ["moduleQty"]);
   const moduleWattage = num(project, ["moduleWattage"]);
+  // CHECK RECORDS (review-audit draft 07, checkRecords.ts): the DC and AC cross-checks say when they
+  // ran and agreed, or what they lacked. Display only. A storage-only scope installs no array.
+  const dcCheck = { ruleId: "city.elec.dc-size-mismatch", category: "electrical" as const, title: "DC size against the modules", codeReferences: [electricalRef] };
+  if (newArray && (dcKw == null || moduleQty == null || moduleWattage == null)) {
+    out.push(notCheckedRecord({ ...dcCheck, inputs: [dcKw == null ? "the DC system size" : "", moduleQty == null ? "the module count" : "", moduleWattage == null ? "the module wattage" : ""] }));
+  }
   if (dcKw != null && moduleQty != null && moduleWattage != null) {
     const calculatedDc = (moduleQty * moduleWattage) / 1000;
-    if (Math.abs(calculatedDc - dcKw) > 0.15) {
+    if (dcSizeAgrees(calculatedDc, dcKw, declaredDcText(project, dcKw), moduleWattage / 1000)) {
+      out.push(passRecord({ ...dcCheck, arithmetic: `${moduleQty} x ${moduleWattage} W = ${calculatedDc.toFixed(2)} kW DC, matching the project's ${dcKw.toFixed(2)} kW DC.` }));
+    } else {
       out.push(finding({
         id: "city.elec.dc-size-mismatch",
         severity: "blocker",
@@ -1996,6 +2134,48 @@ export function evaluateDesignCodeFindings(
         cityFeedback: "Revise the equipment schedule/application so module quantity, module wattage, and DC system size match across all sheets and portal fields.",
         designTeamAction: "Correct either module quantity, module wattage, or DC kW and regenerate affected application fields.",
         evidenceNeeded: ["Corrected equipment schedule", "Corrected application DC size", "Matching SLD/module sheet"],
+        codeReferences: [electricalRef],
+      }));
+    }
+  }
+
+  // THE AC SIZE AGAINST THE INVERTERS (review-audit draft 04): the AC nameplate is what the utility
+  // application carries and what its reviewer checks, and the gate only cross-checked DC. The inverters'
+  // AC comes from sizesAgree.inverterAcFromPlan, the ONE reader the approval sheet's AC row uses too
+  // (draft 11): per-unit output in amps x the service's single-phase voltage (or watts above 100),
+  // skipped on a battery, an existing system or a three-phase service. Same tolerance as the sheet.
+  // A WARNING, not a blocker: the voltage is the plan's or a single-phase assumption, so the derived
+  // figure is an estimate, unlike the DC product of module count and wattage.
+  const acKw = project.systemSizeAcKw ?? num(project, ["acKw"]);
+  const acReading = acKw != null && acKw > 0
+    ? inverterAcFromPlan(
+      { num: (key) => num(project, [key]), text: (key) => str(project, key) },
+      { battery: batteryStatus(project.parserSnapshot as Record<string, unknown> | undefined) === "yes", existingSystem: Boolean(project.existingSystem?.hasExistingSystem) },
+    )
+    : null;
+  const acCheck = { ruleId: "city.elec.ac-size-mismatch", category: "electrical" as const, title: "AC size against the inverters", codeReferences: [electricalRef] };
+  const acRead = { num: (key: string) => num(project, [key]), text: (key: string) => str(project, key) };
+  if (newArray && !acReading && batteryStatus(project.parserSnapshot as Record<string, unknown> | undefined) !== "yes"
+      && !project.existingSystem?.hasExistingSystem && !threePhaseService(acRead)) {
+    const missingAc = [acKw == null || !(acKw > 0) ? "the AC system size" : "", ...inverterAcMissingInputs(acRead)].filter(Boolean);
+    if (missingAc.length) out.push(notCheckedRecord({ ...acCheck, inputs: missingAc }));
+  }
+  if (acKw != null && acReading && !acSizesDisagree(acKw, acReading)) {
+    out.push(passRecord({ ...acCheck, arithmetic: `The inverters add up to about ${acReading.kw.toFixed(2)} kW AC (${acReading.how}), matching the project's ${acKw.toFixed(2)} kW AC.` }));
+  }
+  if (acKw != null && acReading) {
+    const derivedAc = acReading.kw;
+    if (acSizesDisagree(acKw, acReading)) {
+      const how = acReading.how;
+      out.push(finding({
+        id: "city.elec.ac-size-mismatch",
+        severity: "warning",
+        category: "electrical",
+        title: "AC size mismatch",
+        message: `The inverters add up to about ${derivedAc.toFixed(2)} kW AC (${how}) but the project AC size is ${acKw.toFixed(2)} kW.`,
+        cityFeedback: "Revise the equipment schedule/application so inverter quantity, inverter output and the AC system size match across all sheets and the utility application.",
+        designTeamAction: "Correct the inverter quantity, the inverter output or the AC kW and regenerate the affected application fields.",
+        evidenceNeeded: ["Corrected equipment schedule", "Corrected application AC size", "Matching SLD/inverter sheet"],
         codeReferences: [electricalRef],
       }));
     }
@@ -2011,34 +2191,29 @@ export function evaluateDesignCodeFindings(
     { label: "batteryQty", text: str(project, "batteryQty") },
     { label: "design text", text: designText(project, ["splitPagesText", "utilityDownloadChecklistText", "packetReadinessText"]) },
   ];
-  const batteryText = batterySources.map((s) => s.text).join("\n");
-  // The suppression list held a bare /fire/i — and since the fire-pathway work every plan set
-  // reliably carries "FIRE ACCESS PATHWAY", so that fix would itself have switched off every
-  // battery review. It also held an unbounded /ESS/i, which matches "addrESS" and "procESS".
-  // Word-boundary the acronym, and take fire SEPARATION/rating rather than the bare word.
-  // The acronym itself is a TRIGGER only (#245): it also sat in the suppression list, so an
-  // equipment-schedule line reading "ESS" both raised this review and cleared it. Suppression
-  // takes real detail evidence — a 706/R328/1207/NFPA 855 citation, clearances, fire separation.
+  // History: the keyword check this replaced was cleared by a bare /fire/i (every set carries "FIRE
+  // ACCESS PATHWAY"), by an unbounded /ESS/i ("addrESS"), and by the acronym that raised it (#245).
+  // The acronym stays a TRIGGER only; nothing clears the review but the facts themselves.
   // A NEGATED mention is not storage scope (#257): "ESS: N/A", "NO ESS PROPOSED",
   // "BATTERY / ESS: NONE" — affirmedIn's negation read, plus a run of storage words before the
   // denial ("BATTERY / ESS: NONE", "NO BATTERY / ESS").
-  if (affirmedIn(batterySources, ESS_TRIGGER_PATTERNS, essMentionDenied)
-    && !hasAny(batteryText, [
-      /clearance/i, /working\s*space/i,
-      /\b706\b/i, /R\s*328/i, /\b1207\b/i, /NFPA\s*855/i,
-      /fire\s*(?:separation|barrier|rating)|fire.?rated/i,
-    ])) {
-    out.push(finding({
-      id: "city.ess.details-missing",
-      severity: "warning",
-      category: "electrical",
-      title: "Battery/ESS detail not reviewable",
-      message: "Battery/ESS scope appears present but location, clearance, disconnect, and fire-code details are not obvious.",
-      cityFeedback: "Provide ESS equipment schedule, location plan, working clearance, ventilation/listing basis, disconnect/emergency shutdown details, labels, and local fire-code notes.",
-      designTeamAction: "Add ESS detail sheets and verify local fire/AHJ requirements.",
-      evidenceNeeded: ["ESS model/quantity", "ESS location plan", "Clearance and working space notes", "Disconnect/shutdown/label callouts"],
-      codeReferences: [essRef],
-    }));
+  //
+  // A JOB WITH STORAGE GETS THE ESS REVIEW (review-audit draft 05, essReview.ts): the facts an AHJ
+  // checks — listing, kWh per unit and by location, location, spacing, distance to openings,
+  // protection, alarm, the disconnecting means — read and compared with the jurisdiction's rules
+  // over the model-code baseline. Storage = the one battery predicate (batteryStatus, #673's too) or
+  // an affirmed storage mention on the sheets. Citation words alone no longer clear the review: a
+  // "706" or "R328" note is not the facts it asks for. A job with neither (PV-only) gets nothing
+  // here, exactly as before (essReviewPvOnlyGolden pins it).
+  const storagePresent = batteryStatus(project.parserSnapshot as Record<string, unknown> | undefined) === "yes"
+    || !!affirmedIn(batterySources, ESS_TRIGGER_PATTERNS, essMentionDenied);
+  if (storagePresent) {
+    // A storage scope's quantity and usable kWh are already required by reviewer.storage.facts-missing
+    // (draft 06, a blocker); the ESS review does not ask for them a second time.
+    out.push(...evaluateEssFindings(project, ctx, documentTexts, { quantityAskedByScope: !newArray }).map((f) => (f.id === "city.ess.details-missing"
+      // The generic ESS reference the keyword check cited stays, under the adopted edition.
+      ? { ...f, codeReferences: [...f.codeReferences, essRef] }
+      : f)));
   }
 
   return out;

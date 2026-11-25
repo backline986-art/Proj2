@@ -87,7 +87,18 @@ if (reimbursements.length) {
 
 if (services.length) {
   line("  OUR SERVICE FEES");
-  for (const l of services) line(`      ${money(l.amountUsd).padStart(11)}   ${l.description}`);
+  for (const l of services) line(`      ${money(l.amountUsd).padStart(11)}   ${l.description}${l.alreadyPaid ? "   [ALREADY PAID]" : ""}`);
+  line();
+}
+
+// #699: money the client already paid us (the per-submission gate) is a payment RECEIVED, never a
+// second charge. Its line above is marked and left out of the amounts due below.
+if (inv.paymentsReceived.length) {
+  line("  PAYMENTS RECEIVED — already paid, not charged again");
+  for (const r of inv.paymentsReceived) {
+    line(`      ${(r.amountUsd == null ? "amount not on file" : money(r.amountUsd)).padStart(11)}   ${r.description}`);
+    if (r.paymentReference) line(`                      ref ${r.paymentReference}`);
+  }
   line();
 }
 

@@ -18,7 +18,9 @@
 //      comments, building height, stories, areas, dwelling units, buildings) binds to THIS
 //      project's value (resolveRecipeFieldValues already derives each key; an empty value is a
 //      blank the reviewer sees, never the learn job's answer). Any other free-text literal that
-//      carries system figures (kW, watts, a "(19) Make Model" module count) is blanked.
+//      carries system figures (kW, watts, a "(19) Make Model" module count) is blanked — and, since
+//      #236, any value the one job-data shape reading names (portal-bot jobValueShape: degrees /
+//      azimuth / tilt, electrical units, multi-sentence prose, a street address).
 //   R3 AGENCY (the address-version / jurisdiction row) — bound to the issuing agency the per-job
 //      lookup found for THIS AHJ and track (fieldValues.issuingAgency). The replay re-ranks a
 //      live address-version step ([data-al-row]) by that agency (portal-bot addressVersion —
@@ -73,6 +75,19 @@
 //      2026-11-02, "we still need the ho to get the nem email"), the contractor's on any other. With no
 //      setting, a filingContactEmail step replays as it did before the key existed: an applicant /
 //      agent / preparer box the contractor's email, an extra-contact box blank.
+//   R13 ADDRESS COMPONENTS (#236) — a fill/select whose label names a street direction, street type /
+//      suffix or unit type (portal-bot addressParse, the one grammar; a bare "Direction" only beside the
+//      address search it belongs to) binds to THIS project's component in the vocabulary the recorded
+//      literal spoke ("ST" → streetSuffix "AVE"; "Street" → streetSuffixWord "Avenue"). A component this
+//      address does not have strips the step, named: no direction is an answer, never the learn job's
+//      "NW". A component the reader could NOT read (ADDRESS_COMPONENTS_UNREAD_KEY) replays blank for a
+//      person, named — an unknown is never stated as "the address has none". (Audit 2026-11-14:
+//      Corvallis searched NW … ST for an SE … Ave project.)
+//   R14 FEE-LINE SIBLINGS (#236) — an unbound numeric fill on a page whose other steps are bound to fee
+//      quantities (feeLineQuantity:* / feeBracketQuantity:*) is a fee line too: a services/feeders label
+//      binds to its key (the one label grammar, shared serviceLineLabels), any other label replays BLANK,
+//      named for a person — never the learn job's count. (Tigard: "Without Service or Feeder" = 1 and
+//      "With Service or Feeder" = 0 replayed beside two fee-bound siblings.)
 import type { CitedFact, ProjectRecord, RecipeStep } from "../../shared/src/types";
 import { stateRulesFor } from "./permitProcess";
 import { feeBracketFieldKey, parseFeeBracketFieldKey, sameFeeTier, tierBoundsFromLabel } from "../../portal-bot/src/feeBracketQuantity";
@@ -87,6 +102,9 @@ import {
 } from "../../shared/src/contactRoles";
 import { FILING_CONTACT_EMAIL_KEY, emailSlotKind, planFilingContactEmails } from "../../shared/src/filingContactEmail";
 import { looksLikeEmail } from "../../shared/src/emailAddress";
+import { ADDRESS_COMPONENT_KEYS, ADDRESS_COMPONENTS_UNREAD_KEY, addressComponentKeysForSteps, type AddressComponent } from "../../portal-bot/src/addressParse";
+import { FEE_LINE_FIELD_PREFIX, SERVICE_FEEDER_200A_FIELD, SERVICE_FEEDER_400A_FIELD, isServiceFeeder200Label, isServiceFeeder400Label } from "../../shared/src/serviceLineLabels";
+import { jobValueShape } from "../../portal-bot/src/jobValueShape";
 export { sameFeeTier };
 
 
@@ -119,11 +137,21 @@ const PROJECT_LITERAL_BINDINGS: Array<{ re: RegExp; field: string }> = [
   { re: /number of stories|^\*?stories:?$/i, field: "numberOfStories" },
   { re: /new building area/i, field: "newBuildingArea" },
   { re: /existing building area/i, field: "existingBuildingArea" },
+  { re: /total building area/i, field: "totalBuildingArea" },
   { re: /dwelling units/i, field: "dwellingUnits" },
   { re: /number of buildings/i, field: "numberOfBuildings" },
 ];
-/** Free text that carries a system's figures: "8.36 kW", "440W", "(19) ZNShine …". */
-const SYSTEM_FIGURES = /\b\d+(?:\.\d+)?\s*kW\b|\b\d{3}\s?W\b|\(\d+\)\s*[A-Za-z]/i;
+/** The words a component's change is named with. */
+const COMPONENT_WORDS: Readonly<Record<AddressComponent, string>> = {
+  direction: "street direction", postDirection: "trailing street direction", suffix: "street type", unitType: "unit type",
+};
+const componentOfKey = (key: string): AddressComponent | null =>
+  (Object.keys(ADDRESS_COMPONENT_KEYS) as AddressComponent[]).find((c) => ADDRESS_COMPONENT_KEYS[c].abbr === key || ADDRESS_COMPONENT_KEYS[c].word === key) ?? null;
+/** A recorded fee QUANTITY key: the services/feeders lines or a kVA tier box. */
+const isFeeQuantityKey = (field: unknown): boolean => {
+  const f = String(field ?? "");
+  return f.startsWith(FEE_LINE_FIELD_PREFIX) || Boolean(parseFeeBracketFieldKey(f));
+};
 
 const labelOf = (s: RecipeStep): string => String(s.selector?.label || s.selector?.name || s.selector?.text || s.note || "").trim();
 const cssOf = (s: RecipeStep): string[] => [s.selector?.css ?? "", ...(s.selector?.fallbacks ?? []).map((f) => f.css ?? "")].filter(Boolean);
@@ -173,6 +201,9 @@ export function bindRecipeForReplay(input: {
   borrowed: { learnedFor: string; discipline: string } | null;
   /** The issuing agency the per-job lookup found for this AHJ and track (permitProcess). */
   agency: CitedFact<string> | null;
+  /** THIS job's resolved permit path (permitPath.resolvePermitPath), on a permit track only. A step
+   *  stamped for the other path (step.whenPermitPath) is left out. Absent / unknown = nothing left out. */
+  permitPath?: string | null;
 }): ReplayBinding {
   const changes: ReplayBindingChange[] = [];
   const steps: RecipeStep[] = [];
@@ -220,6 +251,19 @@ export function bindRecipeForReplay(input: {
   const filingSlot = new Set<number>(planFilingContactEmails(fillBoxes, { track: contactTrack, enabled: true })
     .map((yes, j) => (yes ? fillAt[j] : -1)).filter((i) => i >= 0));
   const filingContact = String(input.fieldValues[FILING_CONTACT_EMAIL_KEY] ?? "").trim();
+  // R13's reading of every recorded step (a bare "Direction" needs the address search on its page).
+  const componentKeys = addressComponentKeysForSteps(input.steps);
+  // R14's pages: the run of steps between clicks / navigations, and which pages carry a step bound to a
+  // fee quantity as recorded.
+  const pageOf: number[] = [];
+  {
+    let page = 0;
+    input.steps.forEach((s, i) => {
+      if (s.action === "click" || s.action === "goto" || s.action === "stopForReview") page++;
+      pageOf[i] = page;
+    });
+  }
+  const feePages = new Set<number>(input.steps.flatMap((s, i) => (isFeeQuantityKey(s.field) ? [pageOf[i]] : [])));
 
   input.steps.forEach((original, index) => {
     let step: RecipeStep = { ...original, selector: original.selector ? { ...original.selector, fallbacks: original.selector.fallbacks ? [...original.selector.fallbacks] : undefined } : original.selector };
@@ -229,12 +273,24 @@ export function bindRecipeForReplay(input: {
 
     // R1 — never open a specific filed record.
     if ((step.action === "click" || step.action === "check") && !step.isFinalSubmit) {
-      const hay = [step.selector?.name, step.selector?.text, step.selector?.label, note].map((v) => String(v ?? "")).join(" ");
+      // The face words too (#228): a link the learner names by its aria-label ("Open record") keeps
+      // the record number its face shows as shownText — which was the recorded name before.
+      const hay = [step.selector?.name, step.selector?.text, step.selector?.shownText, step.selector?.label, note].map((v) => String(v ?? "")).join(" ");
       const m = RECORD_NUMBER.exec(hay);
       if (m) {
         record("stripped", `clicks the specific filed record ${m[0]} — replaying it would open a previous customer's record`);
         return;
       }
+    }
+
+    // R14 — A CHOICE RECORDED FOR THE OTHER PERMIT PATH (shared/src/permitPathSteps.ts). A recording or
+    // hand fix made on a prescriptive job stamps its "Prescriptive" pick; on an engineered job it is left
+    // out (and the other way round), so the job's own path is never answered with the recording job's.
+    // A job whose path is not settled keeps every step (a permit stage refuses an unknown path anyway).
+    const jobPath = input.permitPath === "prescriptive" || input.permitPath === "engineered" ? input.permitPath : null;
+    if (step.whenPermitPath && jobPath && step.whenPermitPath !== jobPath) {
+      record("stripped", `a ${step.whenPermitPath} choice ("${label.slice(0, 50)}") recorded on a ${step.whenPermitPath} job — this job is ${jobPath}, so it is left out`);
+      return;
     }
 
     // R8 — a COMPANY ATTESTATION (workers'-comp exemption, "no employees", insurance type, "I'm a
@@ -411,7 +467,8 @@ export function bindRecipeForReplay(input: {
     // section says nothing is left exactly as recorded — never guessed.
     {
       const inFrame = Boolean(original.selector?.frame);
-      const words = `${original.selector?.name ?? ""} ${original.selector?.text ?? ""} ${original.selector?.label ?? ""} ${note}`;
+      // The face words too (#228), as the replay's own opener tests read them.
+      const words = `${original.selector?.name ?? ""} ${original.selector?.text ?? ""} ${original.selector?.shownText ?? ""} ${original.selector?.label ?? ""} ${note}`;
       const opener = original.action === "click" && !inFrame && isContactOpener(words);
       if (opener) {
         contactBlock = { role: contactRoleOfStep(original, { track: contactTrack }), label: label.slice(0, 40) };
@@ -479,6 +536,42 @@ export function bindRecipeForReplay(input: {
       }
     }
 
+    // R13 — AN ADDRESS COMPONENT IS THIS PROJECT'S ADDRESS (#236). Street direction / street type / unit
+    // type selects froze as "portal constants" at learn and replayed the learn job's address into every
+    // later search. Bound in the vocabulary the recorded literal spoke; a component this address does
+    // not have strips the step — the control stays as the portal shows it, which is that answer.
+    // A step bound at learn (convertLiteralsToBoundFields) is read here too: its key may be empty for
+    // THIS address, and an empty component is "leave it", never a blank the stage gate holds for.
+    // A COMPONENT THE READER COULD NOT READ IS NOT A COMPONENT THE ADDRESS LACKS (#236 review): the
+    // first reader stopped at "ne" and "ct" (state codes) and this rule then stripped an NE … Ct
+    // project's Direction and Street Type saying the address had neither. The resolver names what it
+    // could not read (ADDRESS_COMPONENTS_UNREAD_KEY: an unreadable line, a suffix outside the shared
+    // list, a directional written after the street); such a control replays BLANK for a person, named
+    // — never stripped as an answer, and never the learn job's recorded value.
+    const learnBound = step.field && componentOfKey(step.field) ? step.field : "";
+    const componentKey = learnBound || (!step.field ? componentKeys[index] : null);
+    const unreadComponents = new Set(String(input.fieldValues[ADDRESS_COMPONENTS_UNREAD_KEY] ?? "").split(",").filter(Boolean));
+    if (componentKey && (step.action === "fill" || step.action === "select") && !hasKey(input.fieldValues, componentKey) && unreadComponents.has(componentKey)) {
+      const was = String(step.value ?? "").trim();
+      const words = COMPONENT_WORDS[componentOfKey(componentKey) ?? "direction"];
+      const why = `"${label.slice(0, 40)}" — this project's ${words} could not be read from its address, so it is left blank for a person${was ? `, never the recorded "${was}" (the learn job's address)` : ""}`;
+      step = { ...step, value: "", field: REPLAY_BLANK_FIELD, operatorItem: why };
+      record("blanked", why);
+    } else if (componentKey && (step.action === "fill" || step.action === "select") && hasKey(input.fieldValues, componentKey)) {
+      const was = String(step.value ?? "").trim();
+      const words = COMPONENT_WORDS[componentOfKey(componentKey) ?? "direction"];
+      const value = String(input.fieldValues[componentKey] ?? "").trim();
+      if (!value) {
+        record("stripped", `"${label.slice(0, 40)}" — this project's address has no ${words}, so the control is left as the portal shows it${was ? ` (the recorded "${was}" was the learn job's address)` : ""}`);
+        return;
+      }
+      if (!learnBound) {
+        step = { ...step, field: componentKey };
+        delete step.value;
+        record("rebound", `"${label.slice(0, 40)}" bound to this project's ${words} "${value}"${was && was.toLowerCase() !== value.toLowerCase() ? `, not the recorded "${was}" (the learn job's address)` : ""}`);
+      }
+    }
+
     // R2 — project-specific free text.
     if (step.action === "fill" && step.field !== REPLAY_BLANK_FIELD) {
       const known = step.field && Object.prototype.hasOwnProperty.call(input.fieldValues, step.field);
@@ -488,9 +581,34 @@ export function bindRecipeForReplay(input: {
         if (binding && Object.prototype.hasOwnProperty.call(input.fieldValues, binding.field)) {
           step = { ...step, field: binding.field };
           record("rebound", `bound to this project's ${binding.field}${literal ? " (the recorded answer was the learn project's)" : ""}`);
-        } else if (literal && SYSTEM_FIGURES.test(literal)) {
+        } else if (literal && jobValueShape(literal)) {
+          // The ONE value-shape reading (portal-bot jobValueShape — the replay adapter's
+          // looksLikeProjectData asks it too): system figures, degrees / azimuth / tilt, electrical
+          // units, multi-sentence prose, a street address (#236: Tigard's array description carried
+          // the learn job's "180° azimuth, 22° tilt").
           step = { ...step, value: "", field: REPLAY_BLANK_FIELD };
-          record("blanked", "a free-text literal carrying the learn project's system figures");
+          record("blanked", `a free-text literal carrying the learn project's system figures (${jobValueShape(literal)})`);
+        }
+      }
+    }
+
+    // R14 — A FEE LINE WITH NO KEY IS STILL A FEE LINE (#236). On a page whose other steps are bound to
+    // fee quantities, an unbound count is the learn job's count on that page's schedule. A
+    // services/feeders label binds to its key (the one label grammar — feeBracketFields'
+    // feeBracketFieldForLabel asks the same two predicates); a kVA tier label is R6's and the
+    // adapter's (decided from the live page); any other label replays BLANK, named for a person.
+    if (step.action === "fill" && !step.field && !step.sensitive && feePages.has(pageOf[index])) {
+      const literal = String(step.value ?? "").trim();
+      if (/^\d+(?:\.\d+)?$/.test(literal) && !tierKeyForLabel(label)) {
+        const key = isServiceFeeder200Label(label) ? SERVICE_FEEDER_200A_FIELD : isServiceFeeder400Label(label) ? SERVICE_FEEDER_400A_FIELD : "";
+        if (key && hasKey(input.fieldValues, key)) {
+          step = { ...step, field: key };
+          delete step.value;
+          record("rebound", `"${label.slice(0, 40)}" is a services/feeders fee line — bound to this project's ${key.replace(/^feeLineQuantity:/, "")} count, not the recorded "${literal}"`);
+        } else {
+          const why = `"${label.slice(0, 40)}" sits among this page's fee quantities but names no fee line this project's count can answer — left blank for a person, never the learn job's "${literal}"`;
+          step = { ...step, value: "", field: REPLAY_BLANK_FIELD, operatorItem: why };
+          record("blanked", why);
         }
       }
     }

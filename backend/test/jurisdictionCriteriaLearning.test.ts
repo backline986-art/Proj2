@@ -31,6 +31,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import type { DesignCriteriaResearchResult, JurisdictionCodeProfile, LLMProvider } from "../../shared/src/types";
+import { fileURLToPath } from "node:url";
 
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "jurisdiction-criteria-"));
 process.env.AUTOPILOT_DB_PATH = path.join(tmp, "t.sqlite");
@@ -1123,7 +1124,7 @@ await check("THE PAGE FETCH (stubbed client): the lookup offers web_fetch capped
 });
 
 await check("MUST EXCLUDE: the other web-research calls are NOT given the page fetch", () => {
-  const src = fs.readFileSync(path.join(path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, "$1")), "..", "src", "llm.ts"), "utf8");
+  const src = fs.readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url).replace(/^\/([A-Za-z]:)/, "$1")), "..", "src", "llm.ts"), "utf8");
   const calls = [...src.matchAll(/this\.askWithWebSearch\(\s*"([A-Za-z]+)"[^\n]*/g)].map((m) => [m[1], /designLookupFetchTool\(\)/.test(m[0])] as const);
   assert.ok(calls.length >= 4, "fixture precondition: the research callers were found");
   for (const [label, hasFetch] of calls) assert.equal(hasFetch, label === "researchDesignCriteria", `${label}: page fetch ${hasFetch ? "offered" : "missing"}`);

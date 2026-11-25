@@ -12,6 +12,9 @@
 // job upgrading its service — the grammar demanded "feeder" in the label.
 // ---------------------------------------------------------------------------
 
+/** The key family every fee-LINE quantity binds under (recipeReplayBinding R14 reads a page's
+ *  fee-bound steps by it, #236). */
+export const FEE_LINE_FIELD_PREFIX = "feeLineQuantity:";
 /** The flat-map key a recorded portal box binds to. NOT under the "feeBracketQuantity:" prefix:
  *  that family is the kVA brackets, and the portal-bot coverage check reads every key under it as
  *  a kVA row, which a services box is not. */

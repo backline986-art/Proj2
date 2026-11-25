@@ -8,10 +8,12 @@ import { findPlanSetPdf, renderPdfPageForVision, selectTopPagesForTopic } from "
 import { extractPdfPages } from "./batchImport";
 import type { EvidenceTopic } from "./projectEvidence";
 import { applyRoofPlanMeasurement, FIRE_PATHWAY_BELOW_ID, FIRE_PATHWAY_UNMEASURED_ID } from "./designCriteria";
+import { FIRE_EERO_OBSTRUCTED_ID } from "./fireAccess";
 import { AMENDMENT_NOT_MET_ID } from "./amendmentChecks";
 import { PRIOR_CORRECTION_ID } from "./ahjReviewRules";
 import { PRECEDENT_DEPARTURE_ID } from "./permitPrecedents";
 import { WIRE_TABLE_FINDING_IDS } from "./wireTableArithmetic";
+import { ESS_MEASURED_FINDING_IDS } from "./essReview";
 import { nowIso } from "./time";
 import { redactSecretValues } from "../../shared/src/portalSafety";
 import { projectSecretValuesById } from "./projectSecrets";
@@ -116,6 +118,7 @@ function writeCache(db: AppDb, projectId: string, findingId: string, sig: string
 // hardcoded set like this otherwise rots silently the first time a rule is renamed.
 export const MEASURED_FINDING_IDS: ReadonlySet<string> = new Set([
   "city.elec.dc-size-mismatch",     // module count x wattage vs declared DC size
+  "city.elec.ac-size-mismatch",     // inverter count x output vs declared AC size
   "city.elec.interconnection-ambiguous",    // the design names two sides; a photo cannot pick
   "city.elec.interconnection-unclassified", // seeing an SLD does not classify the method
   // Design criteria compared for VALUE (designCriteria.ts): two documents disagree, a stated
@@ -153,6 +156,9 @@ export const MEASURED_FINDING_IDS: ReadonlySet<string> = new Set([
   // A stated (or vision-measured) pathway width / ridge setback against the required one is
   // arithmetic (issue #142). A sheet showing a pathway does not make it wide enough.
   FIRE_PATHWAY_BELOW_ID,
+  // Modules the plan places below an emergency escape and rescue opening (draft 08, fireAccess.ts):
+  // a sheet showing the opening does not move the array off the roof below it.
+  FIRE_EERO_OBSTRUCTED_ID,
   // A classified local amendment compared with the plan's stated value or wording (#145): a sheet
   // showing a snow note or a placard does not make the value meet the amendment.
   AMENDMENT_NOT_MET_ID,
@@ -164,6 +170,11 @@ export const MEASURED_FINDING_IDS: ReadonlySet<string> = new Set([
   // recorded values; a sheet showing an attachment detail cannot say it is the accepted one (and
   // "attachment" in its title would map it to rackingAttachment).
   PRECEDENT_DEPARTURE_ID,
+  // A stated battery fact against an ESS rule (essReview.ts, review-audit draft 05): kWh per unit and
+  // by location, a habitable-room location, spacing, distance to doors and windows. A sheet showing
+  // the battery does not make it small enough or far enough away. (Its "detail not shown" twin is
+  // absence, so vision may relax that one.)
+  ...ESS_MEASURED_FINDING_IDS,
 ]);
 
 /** False when the finding reports a measured result rather than missing evidence. */

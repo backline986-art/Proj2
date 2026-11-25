@@ -88,7 +88,17 @@ export function duplicateUploads(docs: Record<string, string>): Array<{ docType:
   const rank = (t: string) => { const i = DUPLICATE_PRECEDENCE.indexOf(t); return i < 0 ? DUPLICATE_PRECEDENCE.length : i; };
   const hashes = new Map<string, string>();
   const out: Array<{ docType: string; sameAs: string }> = [];
+  // Two files of different length are never the same file, so only an upload whose length another
+  // upload shares is read and hashed (#263: every job read used to hash every upload, plan set
+  // included). If any upload cannot be sized, every upload is read as before.
+  const sizeOf = new Map<string, number>();
+  const sharing = new Map<number, number>();
+  let allSized = true;
+  for (const [type, file] of Object.entries(docs)) {
+    try { const size = fs.statSync(file).size; sizeOf.set(type, size); sharing.set(size, (sharing.get(size) || 0) + 1); } catch { allSized = false; }
+  }
   for (const [type, file] of Object.entries(docs).sort((a, b) => rank(a[0]) - rank(b[0]))) {
+    if (allSized && sharing.get(sizeOf.get(type) as number) === 1) continue;
     let digest = "";
     try { digest = createHash("sha256").update(fs.readFileSync(file)).digest("hex"); } catch { continue; }
     const first = hashes.get(digest);

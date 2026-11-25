@@ -844,6 +844,9 @@ export interface InfoPageAfterClickReading {
  *  page AFTER the click that was not on the information page is a new record number. */
 export interface InfoPageAfterClickBaseline {
   tokens: string[];
+  /** #279: the information page's own text (whitespace collapsed), so the page after can be told
+   *  apart from the same page shown again. Absent = unknown (never "another information page"). */
+  text?: string;
   /** Q4: the acknowledgement wording the information page itself carried (infoPageAfterClickAckWording):
    *  the same words on the page after are not new. Absent = nothing excused. */
   ack?: string[];
@@ -1057,6 +1060,37 @@ export function infoPageAfterClickRefusals(r: InfoPageAfterClickReading | null |
     if (fresh.length) out.push(`the page after the click shows a number that was not on the information page ("${mask(fresh[0])}") — a confirmation, request or receipt number`);
   }
   return out;
+}
+
+/** The refusal prefixes an information page's OWN shape produces on the page after (#279). */
+const AFTER_CLICK_ACK_REFUSAL = /^the page after the click reads as an acknowledgement, not the next step\b/;
+const AFTER_CLICK_NO_FORM_REFUSAL = /^the page after the click shows no application form\b/;
+
+/**
+ * #279 (owner's option 1) — THE PAGE AFTER A VERIFIED INFORMATION PAGE READS AS ANOTHER INFORMATION
+ * PAGE, not as a filing: an interview may show two or three information pages before its form, and
+ * the second one has no form by design and may say "successfully". True ONLY when every refusal is
+ * one an information page's own shape produces — it shows no application form (required) and, at
+ * most, acknowledgement wording — the page offers a way forward (Next / Continue), and it is not
+ * the verified page shown again. Anything else
+ * (filed or error wording, something sent or received, a number that was not on the verified page, a
+ * filing-, submit- or pay-worded control, the review / terminal reading, a frame, an unread page)
+ * keeps today's incident: the verification is withdrawn. A page that answers true is NOT accepted
+ * either: nothing leaves it unless a person has verified it too (the backstop's NEXT INFORMATION
+ * PAGE hold), so a person sees it, with its screenshot, before any run goes past it.
+ */
+export function infoPageAfterClickIsNextInformationPage(refusals: ReadonlyArray<string>, r: Pick<InfoPageAfterClickReading, "text" | "controlLabels"> | null | undefined, baseline: InfoPageAfterClickBaseline | null | undefined): boolean {
+  if (!Array.isArray(refusals) || !refusals.length) return false;
+  // An interview's next page offers its own way FORWARD (Next / Continue / Proceed): a receipt does
+  // not (round 2's no-number receipts — "We've got your permit request", "Thank you! Your request is
+  // complete" — offer a search or feedback box, never a Next), so they stay incidents.
+  if (!r || !Array.isArray(r.controlLabels) || !r.controlLabels.some((l) => isInterstitialForwardLabel(collapse(String(l ?? ""))))) return false;
+  if (!refusals.some((x) => AFTER_CLICK_NO_FORM_REFUSAL.test(String(x)))) return false;
+  if (!refusals.every((x) => AFTER_CLICK_NO_FORM_REFUSAL.test(String(x)) || AFTER_CLICK_ACK_REFUSAL.test(String(x)))) return false;
+  const norm = (t: unknown): string => String(t ?? "").replace(/[\u00AD\u200B-\u200F\u2060\uFEFF]/g, "").replace(/\s+/g, " ").trim();
+  const after = norm(r?.text);
+  if (!after || !baseline || typeof baseline.text !== "string" || !norm(baseline.text)) return false;
+  return after !== norm(baseline.text);
 }
 
 // ---------------------------------------------------------------------------------------------

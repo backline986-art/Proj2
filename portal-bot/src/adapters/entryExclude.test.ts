@@ -124,6 +124,20 @@ check("the checklist exclusion that came before it still holds", () => {
   assert.equal(isExcludedEntryLabel("Application Instructions"), true);
 });
 
+check("LIVE IDAHO DOPL: the permit door matches; the licence door beside it never does", () => {
+  assert.equal(matchesEntryLabel("Apply for a Building/Trade Permit/Plan Review"), true, "the permit door must match");
+  assert.equal(matchesEntryLabel("Apply for an Electrical Permit"), true);
+  assert.equal(matchesEntryLabel("Apply for a License/Registration/Certification"), false, "a licence door matched");
+  assert.equal(matchesEntryLabel("Apply for a License"), false);
+  assert.equal(matchesEntryLabel("Apply for Certification"), false);
+});
+
+check("MUST-PASS: doors that name a permit, and the plain phrasings, still match", () => {
+  for (const label of ["Apply for a Permit", "Apply for a Permit/License", "Create an Application", "Apply for an Application", "Apply Online", "New Interconnection Application", "Apply for a Solar Permit"]) {
+    assert.equal(matchesEntryLabel(label), true, `lost: ${label}`);
+  }
+});
+
 if (failures) { console.error(`\n${failures} entry-exclude check(s) FAILED.`); process.exit(1); }
 console.log("\nAll entry-exclude checks passed.");
 process.exit(0);

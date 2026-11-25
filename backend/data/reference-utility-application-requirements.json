@@ -1,0 +1,720 @@
+{
+  "_comment": "What each utility's own interconnection application asks for (review-audit draft 03), as cited DATA: loaded by backend/src/utilityRequirements.ts and read by the reviewer gate for the job's utility. Rows land SEEDED. A missing item is a warning unless the row quotes the utility's own page verbatim with a named source and the quote names the item (Helm's #637 bar); only then may whenMissing 'blocker' block. Records match the job's state and utility name (any of matchNames, as whole words, after lower-casing and '&' -> 'and'). A person's verified items or an official read on the utility's filing row (utility_filing_lookups.application_requirements_json) override these per key. To add a utility, add a record here: no code. Quotes were read from the page bytes on fetchedAt. Each item may carry `gates` (reviewer / qc; absent = both) and a `qc` block: how the QC baseline (baselineRules) reports it missing — items sharing a ruleId report as one result listing each item's label in {missing}; {utility} is the record's displayName. `strictDefault` is what QC checks for a utility with NO record (uncited, so it only warns and says the utility is not researched). `qcRuleDefinitions` is the QC rule catalogue for those rule ids (the rules table). A record may carry `filingDoor` {name, url, sourceName, sourceUrl, quote, fetchedAt}: where the utility takes its application, as its own page links it; kept only whole (https link, https source, quote, fetchedAt) and seeded at boot into the utility's KB row as SEEDED (utilityRequirements.seedShippedUtilityFilingDoors), never official and never over a row a person verified: a person verifies where a filing goes.",
+  "records": [
+    {
+      "states": [
+        "OR"
+      ],
+      "utility": "Central Electric Cooperative",
+      "displayName": "Central Electric Cooperative",
+      "matchNames": [
+        "central electric cooperative",
+        "central electric coop",
+        "central electric co op",
+        "central electric co-op"
+      ],
+      "filingDoor": {
+        "name": "Central Electric Cooperative Small Net-Metering Agreement (online form, 25 kW or less)",
+        "url": "https://www.cec.coop/energy-programs/renewable-power/net-metering/small-net-metering-agreement/",
+        "sourceName": "Central Electric Cooperative — Net metering",
+        "sourceUrl": "https://www.cec.coop/energy-programs/renewable-power/net-metering/",
+        "quote": "Small Net-Metering Agreement (for qualifying Net-Metering Facilities with a maximum nameplate generating capacity of not more than 25 kW)",
+        "fetchedAt": "2026-11-10T18:27:31Z"
+      },
+      "requirements": [
+        {
+          "key": "one_line",
+          "whenMissing": "warning",
+          "sourceName": "Central Electric Cooperative — Net meter installation requirements",
+          "sourceUrl": "https://www.cec.coop/net-meter-installation-requirements/",
+          "quote": "Once designed, please include a simple one-line drawing and site plan for your system with the application.",
+          "fetchedAt": "2026-11-10T18:27:32Z"
+        },
+        {
+          "key": "site_plan",
+          "whenMissing": "warning",
+          "sourceName": "Central Electric Cooperative — Net meter installation requirements",
+          "sourceUrl": "https://www.cec.coop/net-meter-installation-requirements/",
+          "quote": "Once designed, please include a simple one-line drawing and site plan for your system with the application.",
+          "fetchedAt": "2026-11-10T18:27:32Z"
+        },
+        {
+          "key": "ac_disconnect",
+          "whenMissing": "blocker",
+          "sourceName": "Central Electric Cooperative — Net meter installation requirements",
+          "sourceUrl": "https://www.cec.coop/net-meter-installation-requirements/",
+          "quote": "As a safety feature, the AC disconnect must be installed near the meter base so it can be quickly located and operated in an emergency. For CEC, the distance can be no more than 10 feet.",
+          "fetchedAt": "2026-11-10T18:27:32Z"
+        },
+        {
+          "key": "owner_signature",
+          "whenMissing": "warning",
+          "sourceName": "Central Electric Cooperative — Net metering agreement",
+          "sourceUrl": "https://www.cec.coop/net-metering-agreement/",
+          "quote": "To enter into a binding agreement with CEC, Customer-Generator shall sign this Agreement",
+          "fetchedAt": "2026-11-10T18:27:34Z"
+        }
+      ]
+    },
+    {
+      "states": [
+        "ID"
+      ],
+      "utility": "Idaho Power",
+      "displayName": "Idaho Power",
+      "matchNames": [
+        "idaho power",
+        "idahopower"
+      ],
+      "filingDoor": {
+        "name": "Idaho Power customer generation application form",
+        "url": "https://tools.idahopower.com/forms/CustomerGenerationApplication/Submit",
+        "sourceName": "Idaho Power — Apply to connect your system",
+        "sourceUrl": "https://www.idahopower.com/accounts-service/clean-choices/solar-power-options-customer-generation/apply-to-connect-your-system/",
+        "quote": "Application Form – Solar PV, Wind, Hydroelectric, & Other Projects",
+        "fetchedAt": "2026-11-10T08:25:03Z"
+      },
+      "requirements": [
+        {
+          "key": "owner_signature",
+          "whenMissing": "warning",
+          "sourceName": "Idaho Power — Apply to connect your system",
+          "sourceUrl": "https://www.idahopower.com/accounts-service/clean-choices/solar-power-options-customer-generation/apply-to-connect-your-system/",
+          "quote": "Applications will be considered complete once a signed application and fee, plus any requested documentation (i.e. single line), have been received.",
+          "fetchedAt": "2026-11-10T08:25:03Z"
+        },
+        {
+          "key": "one_line",
+          "whenMissing": "warning",
+          "sourceName": "Idaho Power — Apply to connect your system",
+          "sourceUrl": "https://www.idahopower.com/accounts-service/clean-choices/solar-power-options-customer-generation/apply-to-connect-your-system/",
+          "quote": "Applications will be considered complete once a signed application and fee, plus any requested documentation (i.e. single line), have been received.",
+          "fetchedAt": "2026-11-10T08:25:03Z"
+        },
+        {
+          "key": "inverter_settings",
+          "whenMissing": "warning",
+          "sourceName": "Idaho Power — Apply to connect your system",
+          "sourceUrl": "https://www.idahopower.com/accounts-service/clean-choices/solar-power-options-customer-generation/apply-to-connect-your-system/",
+          "quote": "Required inverter settings in a downloadable CSV common file format",
+          "fetchedAt": "2026-11-10T08:25:03Z"
+        },
+        {
+          "key": "inverter_listing_ul1741sb",
+          "whenMissing": "warning",
+          "sourceName": "Idaho Power — Customer generation frequently asked questions",
+          "sourceUrl": "https://www.idahopower.com/accounts-service/clean-choices/solar-power-options-customer-generation/frequently-asked-questions/",
+          "quote": "Idaho Power requires smart inverters that comply with IEEE 1547-2018 and are UL 1741 SB certified.",
+          "fetchedAt": "2026-11-10T08:25:08Z"
+        },
+        {
+          "key": "ac_disconnect",
+          "whenMissing": "blocker",
+          "sourceName": "Idaho Power — Customer generation frequently asked questions",
+          "sourceUrl": "https://www.idahopower.com/accounts-service/clean-choices/solar-power-options-customer-generation/frequently-asked-questions/",
+          "quote": "Idaho Power also requires an AC disconnect switch on the customer’s side of the meter. Breakers do not meet these requirements.",
+          "fetchedAt": "2026-11-10T08:25:08Z"
+        },
+        {
+          "key": "storage_mode_declaration",
+          "whenMissing": "warning",
+          "sourceName": "Idaho Power — Customer generation frequently asked questions",
+          "sourceUrl": "https://www.idahopower.com/accounts-service/clean-choices/solar-power-options-customer-generation/frequently-asked-questions/",
+          "quote": "A battery storage system was installed but not disclosed on the System Verification Form.",
+          "fetchedAt": "2026-11-10T08:25:08Z"
+        }
+      ]
+    },
+    {
+      "states": [
+        "UT",
+        "ID",
+        "WY"
+      ],
+      "utility": "Rocky Mountain Power",
+      "displayName": "Rocky Mountain Power",
+      "matchNames": [
+        "rocky mountain power",
+        "rocky mtn power",
+        "rockymountain power",
+        "rocky mountainpower",
+        "rockymountainpower",
+        "rockymtn power",
+        "pacificorp",
+        "pacific power",
+        "pacificpower",
+        "pac power",
+        "pacpower",
+        "rmp"
+      ],
+      "requirements": [
+        {
+          "key": "meter_photo",
+          "whenMissing": "blocker",
+          "findingId": "reviewer.utility.pacpower-meter-photo",
+          "sourceName": "Rocky Mountain Power — Customer generation",
+          "sourceUrl": "https://www.rockymountainpower.net/savings-energy-choices/customer-generation.html",
+          "quote": "APPLY: Submit an online application with the proposed system, including a picture of the meter.",
+          "fetchedAt": "2026-11-10T01:12:00Z",
+          "qc": {
+            "ruleId": "pacpower-meter-photo",
+            "ruleName": "{utility} meter photo requirement",
+            "message": "{utility} application should include meter evidence; no meter number was captured.",
+            "fieldName": "meter",
+            "order": 2
+          }
+        },
+        {
+          "key": "inverter_settings",
+          "whenMissing": "warning",
+          "findingId": "reviewer.utility.pacpower-settings",
+          "sourceName": "Rocky Mountain Power — Customer generation",
+          "sourceUrl": "https://www.rockymountainpower.net/savings-energy-choices/customer-generation.html",
+          "quote": "Please note: All inverter-based Customer Generation applications need to use the provided settings.",
+          "fetchedAt": "2026-11-10T01:12:00Z",
+          "qc": {
+            "ruleId": "pacpower-ul1741sb",
+            "ruleName": "{utility} UL 1741 SB inverter settings",
+            "message": "{utility} project lacks clear UL 1741 SB / inverter settings evidence.",
+            "fieldName": "utilityUploadNotesText",
+            "order": 1
+          }
+        }
+      ]
+    },
+    {
+      "states": [
+        "OR",
+        "WA",
+        "CA"
+      ],
+      "utility": "Pacific Power",
+      "displayName": "Pacific Power",
+      "matchNames": [
+        "pacific power",
+        "pacificpower",
+        "pac power",
+        "pacpower",
+        "pacificorp",
+        "rocky mountain power",
+        "rocky mtn power",
+        "rockymountain power",
+        "rocky mountainpower",
+        "rockymountainpower",
+        "rockymtn power"
+      ],
+      "requirements": [
+        {
+          "key": "meter_photo",
+          "whenMissing": "blocker",
+          "findingId": "reviewer.utility.pacpower-meter-photo",
+          "sourceName": "Pacific Power — Customer generation",
+          "sourceUrl": "https://www.pacificpower.net/savings-energy-choices/customer-generation.html",
+          "quote": "APPLY: Submit an online application with the proposed system, including a picture of the meter.",
+          "fetchedAt": "2026-11-10T01:12:00Z",
+          "qc": {
+            "ruleId": "pacpower-meter-photo",
+            "ruleName": "{utility} meter photo requirement",
+            "message": "{utility} application should include meter evidence; no meter number was captured.",
+            "fieldName": "meter",
+            "order": 2
+          }
+        },
+        {
+          "key": "inverter_settings",
+          "whenMissing": "warning",
+          "findingId": "reviewer.utility.pacpower-settings",
+          "sourceName": "Pacific Power — Customer generation",
+          "sourceUrl": "https://www.pacificpower.net/savings-energy-choices/customer-generation.html",
+          "quote": "Please note: All inverter-based Customer Generation applications need to use the provided settings.",
+          "fetchedAt": "2026-11-10T01:12:00Z",
+          "qc": {
+            "ruleId": "pacpower-ul1741sb",
+            "ruleName": "{utility} UL 1741 SB inverter settings",
+            "message": "{utility} project lacks clear UL 1741 SB / inverter settings evidence.",
+            "fieldName": "utilityUploadNotesText",
+            "order": 1
+          }
+        }
+      ]
+    },
+    {
+      "states": [
+        "OR"
+      ],
+      "utility": "Portland General Electric",
+      "displayName": "PGE",
+      "matchNames": [
+        "portland general",
+        "portland ge",
+        "portland g e",
+        "pge",
+        "p g e",
+        "pg e",
+        "p ge"
+      ],
+      "requirements": [
+        {
+          "key": "one_line",
+          "whenMissing": "warning",
+          "gates": [
+            "qc"
+          ],
+          "sourceName": "PGE Interconnection Resource Library",
+          "sourceUrl": "https://portlandgeneral.com/renewable-installers/interconnection-process-overview",
+          "quote": "",
+          "qc": {
+            "ruleId": "pge-powerclerk-docs",
+            "ruleName": "{utility} interconnection package",
+            "message": "{utility} package may be missing: {missing}.",
+            "fieldName": "utilityDownloadChecklistText",
+            "label": "SLD/3-line"
+          }
+        },
+        {
+          "key": "site_plan",
+          "whenMissing": "warning",
+          "gates": [
+            "qc"
+          ],
+          "sourceName": "PGE Interconnection Resource Library",
+          "sourceUrl": "https://portlandgeneral.com/renewable-installers/interconnection-process-overview",
+          "quote": "",
+          "qc": {
+            "ruleId": "pge-powerclerk-docs",
+            "ruleName": "{utility} interconnection package",
+            "message": "{utility} package may be missing: {missing}.",
+            "fieldName": "utilityDownloadChecklistText",
+            "label": "site/plot plan"
+          }
+        },
+        {
+          "key": "module_spec",
+          "whenMissing": "warning",
+          "gates": [
+            "qc"
+          ],
+          "sourceName": "PGE Interconnection Resource Library",
+          "sourceUrl": "https://portlandgeneral.com/renewable-installers/interconnection-process-overview",
+          "quote": "",
+          "qc": {
+            "ruleId": "pge-powerclerk-docs",
+            "ruleName": "{utility} interconnection package",
+            "message": "{utility} package may be missing: {missing}.",
+            "fieldName": "utilityDownloadChecklistText",
+            "label": "module spec"
+          }
+        },
+        {
+          "key": "inverter_spec",
+          "whenMissing": "warning",
+          "gates": [
+            "qc"
+          ],
+          "sourceName": "PGE Interconnection Resource Library",
+          "sourceUrl": "https://portlandgeneral.com/renewable-installers/interconnection-process-overview",
+          "quote": "",
+          "qc": {
+            "ruleId": "pge-powerclerk-docs",
+            "ruleName": "{utility} interconnection package",
+            "message": "{utility} package may be missing: {missing}.",
+            "fieldName": "utilityDownloadChecklistText",
+            "label": "inverter spec"
+          }
+        },
+        {
+          "key": "account_verification",
+          "whenMissing": "blocker",
+          "findingId": "reviewer.utility.pge-account",
+          "sourceName": "PGE Interconnection Resource Library",
+          "sourceUrl": "https://portlandgeneral.com/renewable-installers/interconnection-process-overview",
+          "quote": "",
+          "_note": "UNCITED: PGE's page refused an automated read on 2026-11-10, so no verbatim words are on file and this item warns (the generic account-number blocker still holds a job with no account number). A person who reads the page can record its words (PUT /api/projects/:id/utility-filing/application-requirements) to let it block.",
+          "qc": {
+            "ruleId": "pge-powerclerk-docs",
+            "ruleName": "{utility} interconnection package",
+            "message": "{utility} package may be missing: {missing}.",
+            "fieldName": "utilityDownloadChecklistText",
+            "label": "utility account"
+          }
+        }
+      ]
+    },
+    {
+      "states": [
+        "UT"
+      ],
+      "utility": "Murray City Power",
+      "displayName": "Murray City Power",
+      "matchNames": [
+        "murray city power",
+        "murray power",
+        "murray city light and power",
+        "murray city"
+      ],
+      "requirements": [
+        {
+          "key": "ac_disconnect",
+          "whenMissing": "blocker",
+          "tier": "official",
+          "sourceName": "Murray City Power Net Metering Checklist / Residential Solar Panel Plan Submittal Requirements",
+          "sourceUrl": "https://murray.utah.gov/DocumentCenter/View/15321/Solar-Check-List-042524",
+          "quote": "A separate safety disconnect must be installed between the solar system inverter and the production meter base, and located within several feet of the net meter base.",
+          "fetchedAt": "2026-11-10T08:19:28Z"
+        },
+        {
+          "key": "one_line",
+          "whenMissing": "warning",
+          "tier": "official",
+          "sourceName": "Murray City Power Net Metering Checklist / Residential Solar Panel Plan Submittal Requirements",
+          "sourceUrl": "https://murray.utah.gov/DocumentCenter/View/15321/Solar-Check-List-042524",
+          "quote": "ONE-LINE DIAGRAM showing the following information:",
+          "fetchedAt": "2026-11-10T08:19:28Z"
+        },
+        {
+          "key": "site_plan",
+          "whenMissing": "warning",
+          "tier": "official",
+          "sourceName": "Murray City Power Net Metering Checklist / Residential Solar Panel Plan Submittal Requirements",
+          "sourceUrl": "https://murray.utah.gov/DocumentCenter/View/15321/Solar-Check-List-042524",
+          "quote": "SITE PLAN (PLOT PLAN):",
+          "fetchedAt": "2026-11-10T08:19:28Z"
+        },
+        {
+          "key": "module_spec",
+          "whenMissing": "warning",
+          "sourceName": "Murray City Power Net Metering Checklist / Residential Solar Panel Plan Submittal Requirements",
+          "sourceUrl": "https://murray.utah.gov/DocumentCenter/View/15321/Solar-Check-List-042524",
+          "quote": "Provide manufacturer’s detailed specification sheets including installation guides for above items",
+          "fetchedAt": "2026-11-10T08:19:28Z"
+        },
+        {
+          "key": "inverter_spec",
+          "whenMissing": "warning",
+          "sourceName": "Murray City Power Net Metering Checklist / Residential Solar Panel Plan Submittal Requirements",
+          "sourceUrl": "https://murray.utah.gov/DocumentCenter/View/15321/Solar-Check-List-042524",
+          "quote": "Provide manufacturer’s detailed specification sheets including installation guides for above items",
+          "fetchedAt": "2026-11-10T08:19:28Z"
+        }
+      ]
+    },
+    {
+      "states": [
+        "UT"
+      ],
+      "utility": "Bountiful City Light & Power",
+      "displayName": "Bountiful City Light & Power",
+      "matchNames": [
+        "bountiful city light and power",
+        "bountiful light and power",
+        "bountiful city power",
+        "bountiful power",
+        "bcl and p",
+        "bclp"
+      ],
+      "requirements": [
+        {
+          "key": "ac_disconnect",
+          "whenMissing": "blocker",
+          "tier": "official",
+          "sourceName": "Bountiful City Light & Power, Solar Packet - Net Meter",
+          "sourceUrl": "https://www.bountiful.gov/DocumentCenter/View/343/Solar-Packet-Net-Meter-PDF",
+          "quote": "The customer is required to provide and install a visible disconnect switch between the photovoltaic system inverter and the customer's breaker panel.",
+          "fetchedAt": "2026-11-10T08:21:07Z"
+        },
+        {
+          "key": "one_line",
+          "whenMissing": "warning",
+          "tier": "official",
+          "sourceName": "Bountiful City Light & Power, Solar Packet - Net Meter",
+          "sourceUrl": "https://www.bountiful.gov/DocumentCenter/View/343/Solar-Packet-Net-Meter-PDF",
+          "quote": "ONE-LINE DIAGRAM (electrical diagram or block diagram): Two sets (diagram must follow Bountiful City Light & Power sample diagram included in the solar packet – Attachment 4).",
+          "fetchedAt": "2026-11-10T08:21:07Z"
+        },
+        {
+          "key": "site_plan",
+          "whenMissing": "warning",
+          "tier": "official",
+          "sourceName": "Bountiful City Light & Power, Solar Packet - Net Meter",
+          "sourceUrl": "https://www.bountiful.gov/DocumentCenter/View/343/Solar-Packet-Net-Meter-PDF",
+          "quote": "SITE PLAN: The proposed site plan shall include:",
+          "fetchedAt": "2026-11-10T08:21:07Z"
+        },
+        {
+          "key": "owner_signature",
+          "whenMissing": "warning",
+          "tier": "official",
+          "sourceName": "Bountiful City Light & Power, Solar Packet - Net Meter",
+          "sourceUrl": "https://www.bountiful.gov/DocumentCenter/View/343/Solar-Packet-Net-Meter-PDF",
+          "quote": "Photo Voltaic System NET Metered Agreement (signed by prop. owner) (Attachment 3)",
+          "fetchedAt": "2026-11-10T08:21:07Z"
+        },
+        {
+          "key": "meter_photo",
+          "whenMissing": "warning",
+          "tier": "official",
+          "sourceName": "Bountiful City Light & Power, Solar Packet - Net Meter",
+          "sourceUrl": "https://www.bountiful.gov/DocumentCenter/View/343/Solar-Packet-Net-Meter-PDF",
+          "quote": "PHOTOS: Electrical service (City meter main with disconnect)",
+          "fetchedAt": "2026-11-10T08:21:07Z"
+        }
+      ]
+    },
+    {
+      "states": [
+        "UT"
+      ],
+      "utility": "Kaysville City Power",
+      "displayName": "Kaysville City Power",
+      "matchNames": [
+        "kaysville city power",
+        "kaysville power",
+        "kaysville city light and power",
+        "kaysville city"
+      ],
+      "requirements": [
+        {
+          "key": "owner_signature",
+          "whenMissing": "warning",
+          "tier": "official",
+          "sourceName": "Kaysville City Solar Checklist",
+          "sourceUrl": "https://www.kaysville.gov/DocumentCenter/View/5290/Solar-Checklist",
+          "quote": "Net meter agreement- signed and notarized (attachment available on-line w/application)",
+          "fetchedAt": "2026-11-10T08:20:45Z"
+        },
+        {
+          "key": "one_line",
+          "whenMissing": "warning",
+          "tier": "official",
+          "sourceName": "Kaysville City Solar Checklist",
+          "sourceUrl": "https://www.kaysville.gov/DocumentCenter/View/5290/Solar-Checklist",
+          "quote": "One-line diagram showing the following information:",
+          "fetchedAt": "2026-11-10T08:20:45Z"
+        },
+        {
+          "key": "site_plan",
+          "whenMissing": "warning",
+          "tier": "official",
+          "sourceName": "Kaysville City Solar Checklist",
+          "sourceUrl": "https://www.kaysville.gov/DocumentCenter/View/5290/Solar-Checklist",
+          "quote": "Site plan",
+          "fetchedAt": "2026-11-10T08:20:45Z"
+        },
+        {
+          "key": "ac_disconnect",
+          "whenMissing": "warning",
+          "tier": "official",
+          "sourceName": "Kaysville City Net Metering and Interconnection Agreement (2018), for 11-15 kW facilities",
+          "sourceUrl": "https://www.kaysville.gov/DocumentCenter/View/1921/RESIDENTIAL-NET-METERING-AGREEMENT",
+          "quote": "An interconnection Customer of the City must install and maintain a manual disconnect switch which will disconnect the generating facility from the utility’s distribution system.",
+          "fetchedAt": "2026-11-10T08:20:30Z"
+        }
+      ]
+    }
+  ],
+  "strictDefault": {
+    "_comment": "Applied only to a utility with no record here and none on its filing row, in a known state. Never blocks.",
+    "requirements": [
+      {
+        "key": "one_line",
+        "whenMissing": "warning",
+        "gates": [
+          "qc"
+        ],
+        "sourceName": "Strictest common set of the researched utilities' applications (this file)",
+        "sourceUrl": "",
+        "quote": "",
+        "qc": {
+          "ruleId": "utility-requirements-not-researched",
+          "ruleName": "{utility} application requirements not researched",
+          "message": "{utility}'s application requirements are not researched, so the strictest common set was checked; the package may be missing: {missing}. Confirm against the utility's own application.",
+          "fieldName": "utilityDownloadChecklistText",
+          "label": "SLD/3-line"
+        }
+      },
+      {
+        "key": "site_plan",
+        "whenMissing": "warning",
+        "gates": [
+          "qc"
+        ],
+        "sourceName": "Strictest common set of the researched utilities' applications (this file)",
+        "sourceUrl": "",
+        "quote": "",
+        "qc": {
+          "ruleId": "utility-requirements-not-researched",
+          "ruleName": "{utility} application requirements not researched",
+          "message": "{utility}'s application requirements are not researched, so the strictest common set was checked; the package may be missing: {missing}. Confirm against the utility's own application.",
+          "fieldName": "utilityDownloadChecklistText",
+          "label": "site/plot plan"
+        }
+      },
+      {
+        "key": "module_spec",
+        "whenMissing": "warning",
+        "gates": [
+          "qc"
+        ],
+        "sourceName": "Strictest common set of the researched utilities' applications (this file)",
+        "sourceUrl": "",
+        "quote": "",
+        "qc": {
+          "ruleId": "utility-requirements-not-researched",
+          "ruleName": "{utility} application requirements not researched",
+          "message": "{utility}'s application requirements are not researched, so the strictest common set was checked; the package may be missing: {missing}. Confirm against the utility's own application.",
+          "fieldName": "utilityDownloadChecklistText",
+          "label": "module spec"
+        }
+      },
+      {
+        "key": "inverter_spec",
+        "whenMissing": "warning",
+        "gates": [
+          "qc"
+        ],
+        "sourceName": "Strictest common set of the researched utilities' applications (this file)",
+        "sourceUrl": "",
+        "quote": "",
+        "qc": {
+          "ruleId": "utility-requirements-not-researched",
+          "ruleName": "{utility} application requirements not researched",
+          "message": "{utility}'s application requirements are not researched, so the strictest common set was checked; the package may be missing: {missing}. Confirm against the utility's own application.",
+          "fieldName": "utilityDownloadChecklistText",
+          "label": "inverter spec"
+        }
+      },
+      {
+        "key": "account_verification",
+        "whenMissing": "warning",
+        "gates": [
+          "qc"
+        ],
+        "sourceName": "Strictest common set of the researched utilities' applications (this file)",
+        "sourceUrl": "",
+        "quote": "",
+        "qc": {
+          "ruleId": "utility-requirements-not-researched",
+          "ruleName": "{utility} application requirements not researched",
+          "message": "{utility}'s application requirements are not researched, so the strictest common set was checked; the package may be missing: {missing}. Confirm against the utility's own application.",
+          "fieldName": "utilityDownloadChecklistText",
+          "label": "utility account"
+        }
+      },
+      {
+        "key": "meter_photo",
+        "whenMissing": "warning",
+        "gates": [
+          "qc"
+        ],
+        "sourceName": "Strictest common set of the researched utilities' applications (this file)",
+        "sourceUrl": "",
+        "quote": "",
+        "qc": {
+          "ruleId": "utility-requirements-not-researched",
+          "ruleName": "{utility} application requirements not researched",
+          "message": "{utility}'s application requirements are not researched, so the strictest common set was checked; the package may be missing: {missing}. Confirm against the utility's own application.",
+          "fieldName": "utilityDownloadChecklistText",
+          "label": "meter evidence"
+        }
+      },
+      {
+        "key": "inverter_settings",
+        "whenMissing": "warning",
+        "gates": [
+          "qc"
+        ],
+        "sourceName": "Strictest common set of the researched utilities' applications (this file)",
+        "sourceUrl": "",
+        "quote": "",
+        "qc": {
+          "ruleId": "utility-requirements-not-researched",
+          "ruleName": "{utility} application requirements not researched",
+          "message": "{utility}'s application requirements are not researched, so the strictest common set was checked; the package may be missing: {missing}. Confirm against the utility's own application.",
+          "fieldName": "utilityDownloadChecklistText",
+          "label": "UL 1741 SB / inverter settings evidence"
+        }
+      },
+      {
+        "key": "ac_disconnect",
+        "whenMissing": "warning",
+        "gates": [
+          "qc"
+        ],
+        "sourceName": "Strictest common set of the researched utilities' applications (this file)",
+        "sourceUrl": "",
+        "quote": "",
+        "qc": {
+          "ruleId": "utility-requirements-not-researched",
+          "ruleName": "{utility} application requirements not researched",
+          "message": "{utility}'s application requirements are not researched, so the strictest common set was checked; the package may be missing: {missing}. Confirm against the utility's own application.",
+          "fieldName": "utilityDownloadChecklistText",
+          "label": "AC disconnect"
+        }
+      },
+      {
+        "key": "storage_mode_declaration",
+        "whenMissing": "warning",
+        "gates": [
+          "qc"
+        ],
+        "sourceName": "Strictest common set of the researched utilities' applications (this file)",
+        "sourceUrl": "",
+        "quote": "",
+        "qc": {
+          "ruleId": "utility-requirements-not-researched",
+          "ruleName": "{utility} application requirements not researched",
+          "message": "{utility}'s application requirements are not researched, so the strictest common set was checked; the package may be missing: {missing}. Confirm against the utility's own application.",
+          "fieldName": "utilityDownloadChecklistText",
+          "label": "battery operating mode"
+        }
+      }
+    ]
+  },
+  "qcRuleDefinitions": [
+    {
+      "id": "pacpower-ul1741sb",
+      "name": "Pacific Power UL 1741 SB inverter settings",
+      "jurisdictionScope": "PacifiCorp states (OR/WA/CA Pacific Power; UT/ID/WY Rocky Mountain Power)",
+      "utilityScope": "Pacific Power/Rocky Mountain Power/PacifiCorp",
+      "source": "Pacific Power Customer Generation",
+      "trigger": "Pacific Power project lacks UL 1741 SB / inverter settings evidence",
+      "action": "Confirm inverter spec/settings package before NEM submission."
+    },
+    {
+      "id": "pacpower-meter-photo",
+      "name": "Pacific Power meter photo requirement",
+      "jurisdictionScope": "PacifiCorp states (OR/WA/CA Pacific Power; UT/ID/WY Rocky Mountain Power)",
+      "utilityScope": "Pacific Power/Rocky Mountain Power/PacifiCorp",
+      "source": "Pacific Power Customer Generation",
+      "trigger": "Pacific Power project missing meter evidence",
+      "action": "Require meter number/photo before application."
+    },
+    {
+      "id": "pge-powerclerk-docs",
+      "name": "PGE interconnection package",
+      "jurisdictionScope": "Oregon",
+      "utilityScope": "PGE",
+      "source": "PGE Interconnection Resource Library",
+      "trigger": "PGE project missing SLD/site/spec package evidence",
+      "action": "Confirm SLD, site/plot plan, equipment specs, and utility bill/meter data."
+    },
+    {
+      "id": "utility-application-package",
+      "name": "Utility application package",
+      "jurisdictionScope": "Any",
+      "utilityScope": "Any utility with application requirements on file",
+      "source": "The utility's own requirement record (cited)",
+      "trigger": "A recorded application requirement of the job's utility is not shown in the package",
+      "action": "Add the missing item to the utility application package before filing."
+    },
+    {
+      "id": "utility-requirements-not-researched",
+      "name": "Utility application requirements not researched",
+      "jurisdictionScope": "Any",
+      "utilityScope": "Any utility with no requirement record",
+      "source": "Strictest common set of the researched utilities' applications",
+      "trigger": "The job's utility has no requirement record and the package lacks an item of the strictest common set",
+      "action": "Check the utility's own application requirements by hand and record them with their page and words."
+    }
+  ]
+}

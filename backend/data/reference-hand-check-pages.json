@@ -1,0 +1,82 @@
+{
+  "_comment": "PAGES A PERSON CHECKS BY HAND, as per-authority DATA: loaded by backend/src/handCheckPages.ts and shown on the dashboard's 'Destinations to confirm' view beside the authority. One record per public page that REFUSED an automated read (connection reset, a bot wall, an HTTP error) when the reference rows were researched, so the authority's rows may be missing what that page says. Copied from the research workers' local checklists (soft-runs/refdata-*-local-checklist.md, 2026-11-10). A record names no filing door and verifies nothing: it is a link a person opens in a normal browser, then records what they read through the dashboard's own Confirm / Edit / Verify (rule 3: as a PERSON, never by editing this file). FIELDS: authorityKind ('ahj' or 'utility'); state (two letters); authority (the AHJ or utility name; an AHJ matches by its distinctive name core, so 'Example City' and 'City of Example' are the same authority; a utility by its normalized name); pageUrl (http(s), the page to open; a record with any other URL is dropped at load); happened (what the automated read got); check (what to read and record); recordedAt (date); source (the checklist it came from). A new market adds rows here, never code.",
+  "pages": [
+    {
+      "authorityKind": "ahj", "state": "UT", "authority": "Murray City",
+      "pageUrl": "https://murray.utah.gov/171",
+      "happened": "connection reset on an automated read",
+      "check": "The building permits page: whether solar takes one permit or separate building and electrical permits, and anything on batteries.",
+      "recordedAt": "2026-11-10", "source": "refdata-ut-local-checklist.md"
+    },
+    {
+      "authorityKind": "ahj", "state": "UT", "authority": "Murray City",
+      "pageUrl": "https://murray.utah.gov/DocumentCenter/View/17199",
+      "happened": "connection reset on an automated read",
+      "check": "A document linked from the city's solar pages: note anything that changes where or how the permit is filed.",
+      "recordedAt": "2026-11-10", "source": "refdata-ut-local-checklist.md"
+    },
+    {
+      "authorityKind": "ahj", "state": "UT", "authority": "Ogden",
+      "pageUrl": "https://bids.ogdencity.com/188/Permit-Applications",
+      "happened": "connection reset on an automated read (the city's .gov copy of the page was read instead)",
+      "check": "Check that this copy matches the page the rows were read from, and that solar goes through the Residential category in the permit portal.",
+      "recordedAt": "2026-11-10", "source": "refdata-ut-local-checklist.md"
+    },
+    {
+      "authorityKind": "ahj", "state": "UT", "authority": "Clearfield",
+      "pageUrl": "https://www.clearfieldcity.org/",
+      "happened": "proxy error 502 on an automated read (the city's newer domain was read instead)",
+      "check": "Check whether this older domain is still the city's own site; the proposed portal was read on the newer domain.",
+      "recordedAt": "2026-11-10", "source": "refdata-ut-local-checklist.md"
+    },
+    {
+      "authorityKind": "ahj", "state": "ID", "authority": "Meridian",
+      "pageUrl": "https://meridiancity.org/",
+      "happened": "bot wall on an automated read",
+      "check": "The Building Division / Permits pages: the permit portal's exact address, whether solar needs a separate electrical permit and who issues it (the city or the state), and whether a battery job needs a fire review or its own permit.",
+      "recordedAt": "2026-11-10", "source": "refdata-id-local-checklist.md"
+    },
+    {
+      "authorityKind": "ahj", "state": "ID", "authority": "Nampa",
+      "pageUrl": "https://cityofnampa.us/",
+      "happened": "bot wall on an automated read",
+      "check": "The Building / Permits pages: the permit portal's exact address, who issues the electrical permit, and whether a battery job needs a fire review.",
+      "recordedAt": "2026-11-10", "source": "refdata-id-local-checklist.md"
+    },
+    {
+      "authorityKind": "ahj", "state": "ID", "authority": "Ada County",
+      "pageUrl": "https://adacounty.id.gov/",
+      "happened": "access denied on an automated read",
+      "check": "Development Services / Building: how the building permit is submitted (the intake email address or the portal address), that electrical goes to the state, and any battery or fire review.",
+      "recordedAt": "2026-11-10", "source": "refdata-id-local-checklist.md"
+    },
+    {
+      "authorityKind": "ahj", "state": "ID", "authority": "Boise",
+      "pageUrl": "https://permits.cityofboise.org/",
+      "happened": "HTTP 503 on an automated read (the city's own page links it as its permitting portal)",
+      "check": "Open it and confirm it is the contractor permit portal for solar (building and electrical), and whether a battery system's fire permit is applied for there too.",
+      "recordedAt": "2026-11-10", "source": "refdata-id-local-checklist.md"
+    },
+    {
+      "authorityKind": "ahj", "state": "OR", "authority": "Bend",
+      "pageUrl": "https://www.bendoregon.gov/government/departments/community-development",
+      "happened": "HTTP 403 Forbidden on an automated read (every bendoregon.gov page)",
+      "check": "The permit center: the online permit portal's exact link for solar (the operator sheet says 'Bend Portal'), whether the city issues the electrical permit itself, its solar fees and review times, and anything on batteries.",
+      "recordedAt": "2026-11-10", "source": "refdata-bend-local-checklist.md"
+    },
+    {
+      "authorityKind": "ahj", "state": "OR", "authority": "Bend",
+      "pageUrl": "https://bendoregon.gov/wp-content/uploads/2025/12/Residential-Prescreen-Checklist_7_8_25.pdf",
+      "happened": "HTTP 403 Forbidden on an automated read (every bendoregon.gov page)",
+      "check": "The residential prescreen checklist, and the city's solar prescriptive installation checklist: note what a solar submittal must include.",
+      "recordedAt": "2026-11-10", "source": "refdata-bend-local-checklist.md"
+    },
+    {
+      "authorityKind": "utility", "state": "OR", "authority": "Central Electric Cooperative",
+      "pageUrl": "https://www.cec.coop/about-cec/service-area/",
+      "happened": "not read: the address check on this page is a map service, which the research does not call",
+      "check": "Use the page's map with the job's address: it says whether the address is served by Central Electric or Pacific Power (some Bend addresses can be served by either). Record the utility on the job.",
+      "recordedAt": "2026-11-10", "source": "refdata-bend-local-checklist.md"
+    }
+]
+}

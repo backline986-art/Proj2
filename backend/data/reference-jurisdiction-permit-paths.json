@@ -1,0 +1,48 @@
+{
+  "about": "Per-jurisdiction PRESCRIPTIVE ROOFTOP-PV PATHS, as data (review-audit draft 14). permitPath.ts reads these records with one generic rule and names no state. A record says the jurisdiction publishes the prescriptive-vs-engineered SPLIT (`split`: two applications, the AHJ takes exactly one): its screen `limits`, its `roofingRow` (the coverings and layer counts its prescriptive path admits, with the row's own words), the `code` the words cite and the `displayName` they use. A STATE record (ahj empty) applies to a job whose state normalises to `state` (usStateCode; an unrecognised spelling matches nothing and the path asks). An AHJ record (ahj set) applies inside its state when the job's AHJ contains one of `ahjNames` (lower-case substring) and wins over the state record. Limits: a job with a record is screened on the record's limits; a PERSON-VERIFIED (or official) jurisdiction_code_profiles row's stated limits overlay them field by field (rule 3), a seeded profile never does. A job with no record keeps the existing rule: its own researched hasPrescriptivePath decides, else the standard structural review. `criteriaDefault` marks the record whose limits sit underneath evaluatePrescriptiveCriteria when a caller asks for defaults (the strictest full set on file). Nothing here blocks on its own: a failed screen routes the path, as before. `ballastedRacking` is the jurisdiction's cited rule that ballasted / non-penetrating racking leaves its prescriptive path (source, https sourceUrl and the verbatim quote, or it is dropped at load): a ballasted reading (ballastRacking.ts) routes the path engineered, an unclear one leaves it for a person to confirm. `localReadings` are a narrower authority's own words for the same rule, printed in the basis when the job's AHJ contains one of their `ahjNames`.",
+  "asOf": "2026-11-21",
+  "records": [
+    {
+      "state": "OR",
+      "ahj": "",
+      "displayName": "Oregon",
+      "ahjNames": [],
+      "split": true,
+      "code": "ORSC / BCD 440-5952",
+      "source": "Oregon BCD Form 440-5952 (Prescriptive Solar PV Installation Checklist)",
+      "criteriaDefault": true,
+      "limits": {
+        "maxGroundSnowPsf": 70,
+        "maxPvDeadLoadPsf": 4.5,
+        "maxRafterSpacingIn": 24,
+        "allowedWindExposures": ["B", "C"],
+        "maxWindSpeedMphExpC": 120,
+        "maxWindSpeedMphExpB": 135,
+        "maxModuleHeightIn": 18,
+        "maxRoofLayers": 1
+      },
+      "roofingRow": {
+        "name": "the BCD 5952 roofing row",
+        "allows": { "metal": true, "compositionLayers": 2, "woodLayers": 1 },
+        "admits": "only metal, single-layer wood shingles/shakes, or <=2-layer composition",
+        "eligible": "metal, wood shingle/shake, or <=2-layer composition",
+        "layersLimit": "no more than two layers of composition (one of wood shingles/shakes)"
+      },
+      "ballastedRacking": {
+        "source": "Oregon BCD Form 440-5952 (5/24), Part III",
+        "sourceUrl": "https://www.washingtoncountyor.gov/lut/building-services/documents/solar-checklist/download?inline=",
+        "quote": "PV modules or racking will be attached to the roof using one of the following methods: (check one) Attachment Method 1 1. Direct attachment to the roof framing or blocking",
+        "fetchedAt": "2026-11-21",
+        "localReadings": [
+          {
+            "ahjNames": ["portland"],
+            "source": "City of Portland BDS Solar Worksheet (02-2023), Section 2: Prescriptive Path Eligibility",
+            "sourceUrl": "https://www.portland.gov/ppd/documents/solar-worksheet/download",
+            "quote": "Is this a ballasted roof system? Continue if you answered \u201cNO\u201d to the question above. If \u201cYES\u201d, STOP! Take the engineered path.",
+            "fetchedAt": "2026-11-21"
+          }
+        ]
+      }
+    }
+  ]
+}

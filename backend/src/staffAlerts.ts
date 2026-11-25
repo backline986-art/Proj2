@@ -22,6 +22,9 @@
 //                       answered (#445). No run row exists, so the run alert never fired (#551).
 //                       ref = project + track, state = the gap keys, so a retry of the same
 //                       refusal sends nothing and a changed set of gaps sends once more.
+//              client_onboarding  a client submitted its Company setup page (ref = the link id,
+//                       state = "submitted"): staff accept or reject what it sent on the Clients
+//                       screen. No project; the org is the client row's own.
 //            The dedupe is the newest staff_notifications row for (org, kind, ref): the same
 //            state there means this transition was already handled, so a re-entered writer or a
 //            re-poll sends nothing — the same idea as shouldNotifyClient, kept in the table so it
@@ -58,7 +61,7 @@ import { redactSecretValues } from "../../shared/src/portalSafety";
 import { usd } from "./feePause";
 import { configuredStaffOrgs, staffAlertChannels, staffDigestHour, type StaffAlertChannels } from "./staffAlertConfig";
 
-export type StaffAlertKind = "run" | "correction" | "status" | "digest" | "unmatched_email" | "unsorted_intake" | "stage_held";
+export type StaffAlertKind = "run" | "correction" | "status" | "digest" | "unmatched_email" | "unsorted_intake" | "stage_held" | "client_onboarding";
 
 /** Stage-run endings that need a person. awaiting_human_submit (staged cleanly, waiting for
  *  review) is deliberately absent: it is the expected end of a run and the digest carries it. */
@@ -515,6 +518,44 @@ export function alertStaffOnUnsortedIntake(
     return recordAndSend(db, { orgId: input.orgId || DEFAULT_ORG_ID, projectId: null, kind: "unsorted_intake", ref: input.intakeId, state: "unsorted", ...mail });
   } catch (err) {
     logger.warn("staff-alert", `unsorted intake alert skipped: ${err instanceof Error ? err.message : String(err)}`);
+    return Promise.resolve();
+  }
+}
+
+/** The Company setup alert: the company's name (it is our client, not a homeowner) and how many
+ *  answers wait for a person. Never a value the client typed. */
+export function clientOnboardingAlert(input: { companyName: string; proposals: number; files: number; filingAnswers?: number }): StaffEmail {
+  const company = scrubStaffText(input.companyName || "A client", []);
+  const n = Math.max(0, Math.floor(input.proposals));
+  const f = Math.max(0, Math.floor(input.files));
+  return renderStaff(`Action needed: ${company} sent its company setup`, {
+    audience: "staff",
+    preheader: `${company} filled in its Company setup page: ${n} answer${n === 1 ? "" : "s"} wait for a person.`,
+    eyebrow: "Action needed · Clients",
+    headline: "A client sent its company setup",
+    intro: ["Nothing it typed is on the client record yet. Each answer waits on the Clients screen until a person accepts, edits or rejects it."],
+    rows: [
+      ["Client", company],
+      ["Answers to review", String(n)],
+      ["Certificates", String(f)],
+      ...(Number(input.filingAnswers) > 0 ? [["How they file", `${Math.floor(Number(input.filingAnswers))} answer(s), in Destinations to confirm`] as [string, string]] : []),
+      ["Next", "open Clients, pick the company, and review Company setup."],
+    ],
+    action: { label: `Open ${BRAND}`, url: dashboardLink() },
+  });
+}
+
+/** A client submitted its Company setup page (clientOnboarding.ts). Deduped per link: a link submits
+ *  once. RULE 6: the org is the client row's own. Callers `void` it. */
+export function alertStaffOnClientOnboarding(
+  db: AppDb,
+  input: { orgId: string; linkId: string; companyName: string; proposals: number; files: number; filingAnswers?: number },
+): Promise<void> {
+  try {
+    const mail = clientOnboardingAlert(input);
+    return recordAndSend(db, { orgId: input.orgId || DEFAULT_ORG_ID, projectId: null, kind: "client_onboarding", ref: input.linkId, state: "submitted", ...mail });
+  } catch (err) {
+    logger.warn("staff-alert", `client onboarding alert skipped: ${err instanceof Error ? err.message : String(err)}`);
     return Promise.resolve();
   }
 }

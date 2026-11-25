@@ -1,0 +1,1302 @@
+{
+ "_comment": "Every state, city or utility name left in code under backend/src, portal-bot/src and shared/src, per file, with a category and a one-line reason (placeNameGuard.test.ts; review-audit draft 14 item 3). THIS LIST MAY ONLY SHRINK: move a rule to per-jurisdiction data, then lower its counts (and ALLOWLIST_CEILING) in the same change. Categories, in move order: rule (a decision keyed to a place: the next moves), data (facts written as TypeScript: move to backend/data), table (lookup tables), door (a hard-safety-rule door: listed, never touched by a data move), prompt (example text in prompts or notes), adapter (a hand-coded portal adapter), harness (benchmarks and smokes with synthetic fixtures), not-a-place (a token that only looks like one).",
+ "total": 1534,
+ "files": {
+  "backend/src/applicationDocs.ts": {
+   "category": "rule",
+   "reason": "hand-written Oregon AHJ application-profile registry plus its OR-only registry gate; give each profile a state and move the registry to data",
+   "names": {
+    "\"OR\"": 8,
+    "Clackamas": 7,
+    "Hillsboro": 6,
+    "Junction City": 7,
+    "Keizer": 5,
+    "Marion County": 10,
+    "Oregon": 48,
+    "Pacific Power": 1,
+    "PacifiCorp": 1,
+    "Portland": 8,
+    "Salem": 6,
+    "Washington": 4,
+    "Washington County": 4
+   }
+  },
+  "backend/src/codeReviewRules.ts": {
+   "category": "rule",
+   "reason": "Oregon code citations and fallbacks (ORSC/OSSC sections, oregon.gov links) inside review rules; move to code-profile citation data",
+   "names": {
+    "\"OR\"": 2,
+    "Oregon": 33,
+    "Portland": 6
+   }
+  },
+  "backend/src/feeReceipts.ts": {
+   "category": "rule",
+   "reason": "receipt-issuer patterns for named AHJs (Clackamas, Portland, Washington County); move to fee-issuer data",
+   "names": {
+    "Beaverton": 2,
+    "Clackamas": 4,
+    "Oregon": 1,
+    "Portland": 4,
+    "Salem": 1,
+    "Tigard": 2,
+    "Washington": 3,
+    "Washington County": 3
+   }
+  },
+  "backend/src/ahjForms.ts": {
+   "category": "rule",
+   "reason": "OR-keyed jurisdictionOnly switch and BCD 5952 checklist wiring; read both from the permit-path record",
+   "names": {
+    "\"OR\"": 5,
+    "Iowa": 2,
+    "Oregon": 5,
+    "Portland": 5
+   }
+  },
+  "backend/src/ahjFormAuto.ts": {
+   "category": "rule",
+   "reason": "Oregon / Iowa form-family routing by state; move to per-jurisdiction form data",
+   "names": {
+    "\"IA\"": 1,
+    "\"OR\"": 1,
+    "Iowa": 4,
+    "Oregon": 7,
+    "Portland": 2
+   }
+  },
+  "backend/src/repository.ts": {
+   "category": "rule",
+   "reason": "staging routes OR jobs to the hand-coded accela_oregon adapter; key the adapter by portal recipe, not state",
+   "names": {
+    "\"OR\"": 2,
+    "Oregon": 11,
+    "Pacific Power": 1,
+    "PacifiCorp": 1
+   }
+  },
+  "backend/src/iowaPvWorksheet.ts": {
+   "category": "rule",
+   "reason": "Iowa PV worksheet form filler (one state's form); form data, not code",
+   "names": {
+    "Iowa": 14
+   }
+  },
+  "backend/src/clients.ts": {
+   "category": "rule",
+   "reason": "client defaults keyed to OR and the accela_oregon adapter; move to per-state licence/portal data",
+   "names": {
+    "\"OR\"": 5,
+    "Oregon": 7
+   }
+  },
+  "backend/src/pvWorksheetGate.ts": {
+   "category": "rule",
+   "reason": "gate for the Iowa PV worksheet; key it by form record, not state",
+   "names": {
+    "Iowa": 11
+   }
+  },
+  "backend/src/formFieldChecks.ts": {
+   "category": "rule",
+   "reason": "Oregon CCB licence binding keyed to OR (OREGON_CCB_SOURCE, oregonCcb); move to per-state licence data",
+   "names": {
+    "\"OR\"": 1,
+    "Oregon": 9
+   }
+  },
+  "backend/src/requiredDocuments.ts": {
+   "category": "rule",
+   "reason": "OR-keyed separate-permit statute (OAR 918-050-0180) and renewable-energy wording; move to the statewide profile data",
+   "names": {
+    "\"OR\"": 3,
+    "Oregon": 7
+   }
+  },
+  "backend/src/utilityFilingLookup.ts": {
+   "category": "rule",
+   "reason": "knownOregonNemUtility shortcut and seeded utility names; move to utility filing reference data",
+   "names": {
+    "\"OR\"": 1,
+    "Oregon": 2,
+    "Pacific Power": 1,
+    "PacifiCorp": 1,
+    "PGE": 1,
+    "Portland": 1,
+    "Portland General": 1
+   }
+  },
+  "backend/src/roofCovering.ts": {
+   "category": "rule",
+   "reason": "oregonRoofingRow helpers for the BCD 5952 form filler (permitPath now reads the row from data); rename/retire with the form filler",
+   "names": {
+    "Oregon": 7
+   }
+  },
+  "backend/src/applicationDocsAgency.ts": {
+   "category": "rule",
+   "reason": "OR-only BCD 5952 checklist item with its oregon.gov URL; read it from the permit-path record",
+   "names": {
+    "\"OR\"": 1,
+    "Oregon": 5
+   }
+  },
+  "backend/src/codeProfiles.ts": {
+   "category": "rule",
+   "reason": "foreignOregonSource guard drops Oregon citations outside OR; tag each citation with its jurisdiction instead",
+   "names": {
+    "\"OR\"": 1,
+    "Oregon": 5
+   }
+  },
+  "backend/src/portalRecipes.ts": {
+   "category": "rule",
+   "reason": "licence-field hints and an Oregon ePermitting refusal pattern named by state; move to per-portal recipe data",
+   "names": {
+    "\"IL\"": 1,
+    "\"OR\"": 1,
+    "Illinois": 1,
+    "Massachusetts": 1,
+    "Oregon": 2
+   }
+  },
+  "backend/src/bcdChecklistFacts.ts": {
+   "category": "rule",
+   "reason": "Oregon BCD 440-5952 checklist facts (one state's form filler)",
+   "names": {
+    "\"OR\"": 1,
+    "Oregon": 4
+   }
+  },
+  "backend/src/bcd5952Template.ts": {
+   "category": "rule",
+   "reason": "Oregon BCD 440-5952 template (one state's form)",
+   "names": {
+    "Oregon": 3
+   }
+  },
+  "backend/src/formAcquisitionPlan.ts": {
+   "category": "rule",
+   "reason": "OR-only BCD 5952 checklist step with its URL; read it from the permit-path record",
+   "names": {
+    "\"OR\"": 1,
+    "Oregon": 2
+   }
+  },
+  "backend/src/intakeRequests.ts": {
+   "category": "rule",
+   "reason": "OR-only checklist question and the Iowa worksheet intake; read both from per-jurisdiction form data",
+   "names": {
+    "\"OR\"": 1,
+    "Iowa": 2
+   }
+  },
+  "backend/src/qc.ts": {
+   "category": "rule",
+   "reason": "an IL-keyed QC branch and utility examples in field help; move the IL rule to jurisdiction QC data",
+   "names": {
+    "\"IL\"": 1,
+    "Pacific Power": 1,
+    "PGE": 1
+   }
+  },
+  "backend/src/prescriptiveChecklist.ts": {
+   "category": "rule",
+   "reason": "Oregon BCD 5952 checklist limits and recovery (one state's form)",
+   "names": {
+    "Oregon": 2
+   }
+  },
+  "shared/src/batteryControls.ts": {
+   "category": "rule",
+   "reason": "PacifiCorp battery attestation ruling (#536) worded by utility name; move to utility requirement data",
+   "names": {
+    "Pacific Power": 1,
+    "PacifiCorp": 1
+   }
+  },
+  "backend/src/projectEvidence.ts": {
+   "category": "rule",
+   "reason": "utility-named approval pattern (SRP); move to utility requirement data",
+   "names": {
+    "SRP": 1
+   }
+  },
+  "backend/src/recipeStageGapsView.ts": {
+   "category": "rule",
+   "reason": "accela_oregon adapter id in the stage-gap view; key by adapter registry",
+   "names": {
+    "Oregon": 1
+   }
+  },
+  "backend/src/knowledgeBase.ts": {
+   "category": "data",
+   "reason": "shipped knowledge-base seed (utility and AHJ names, aliases, portals) written as TypeScript; move to backend/data",
+   "names": {
+    "\"AZ\"": 1,
+    "\"FL\"": 1,
+    "\"NM\"": 1,
+    "\"OR\"": 8,
+    "\"UT\"": 1,
+    "Alabama": 1,
+    "Alaska": 1,
+    "APS": 1,
+    "Arizona": 2,
+    "Arkansas": 1,
+    "California": 1,
+    "Clackamas": 1,
+    "Colorado": 1,
+    "Connecticut": 1,
+    "Coos Bay": 1,
+    "Delaware": 1,
+    "Duke Energy": 3,
+    "Florida": 2,
+    "Georgia": 1,
+    "Hawaii": 1,
+    "Hillsboro": 1,
+    "Idaho": 3,
+    "Idaho Power": 2,
+    "Illinois": 1,
+    "Indiana": 1,
+    "Iowa": 1,
+    "Kansas": 1,
+    "Keizer": 3,
+    "Kentucky": 1,
+    "Louisiana": 1,
+    "Maine": 1,
+    "Marion County": 1,
+    "Maryland": 1,
+    "Massachusetts": 1,
+    "Michigan": 1,
+    "Minnesota": 1,
+    "Mississippi": 1,
+    "Missouri": 1,
+    "Montana": 1,
+    "Nebraska": 1,
+    "Nevada": 1,
+    "New Hampshire": 1,
+    "New Jersey": 1,
+    "New Mexico": 2,
+    "New York": 1,
+    "North Carolina": 1,
+    "North Dakota": 1,
+    "NV Energy": 2,
+    "Ohio": 1,
+    "Oklahoma": 1,
+    "Oregon": 12,
+    "Pacific Power": 17,
+    "PacifiCorp": 8,
+    "Pennsylvania": 1,
+    "PGE": 9,
+    "Phoenix": 1,
+    "Portland": 18,
+    "Portland General": 9,
+    "PSE": 1,
+    "Rhode Island": 1,
+    "Rocky Mountain Power": 8,
+    "Salem": 9,
+    "South Carolina": 1,
+    "South Dakota": 1,
+    "SRP": 1,
+    "Tennessee": 1,
+    "Texas": 1,
+    "Tucson": 1,
+    "Utah": 6,
+    "Vermont": 1,
+    "Virginia": 2,
+    "Washington": 2,
+    "Washington County": 1,
+    "West Virginia": 1,
+    "Wisconsin": 1,
+    "Wyoming": 1
+   }
+  },
+  "backend/src/permitProcess.ts": {
+   "category": "data",
+   "reason": "seeded permit-process facts in code (state-served AHJs, issuers); move to reference-ahj-processes.json",
+   "names": {
+    "\"AK\"": 1,
+    "\"AL\"": 1,
+    "\"AR\"": 1,
+    "\"AZ\"": 1,
+    "\"CA\"": 1,
+    "\"CO\"": 1,
+    "\"CT\"": 1,
+    "\"DC\"": 1,
+    "\"DE\"": 1,
+    "\"FL\"": 1,
+    "\"GA\"": 1,
+    "\"HI\"": 1,
+    "\"IA\"": 1,
+    "\"ID\"": 1,
+    "\"IL\"": 1,
+    "\"IN\"": 1,
+    "\"KS\"": 1,
+    "\"KY\"": 1,
+    "\"LA\"": 1,
+    "\"MA\"": 1,
+    "\"MD\"": 1,
+    "\"ME\"": 1,
+    "\"MI\"": 1,
+    "\"MN\"": 1,
+    "\"MO\"": 1,
+    "\"MS\"": 1,
+    "\"MT\"": 1,
+    "\"NC\"": 1,
+    "\"ND\"": 1,
+    "\"NE\"": 1,
+    "\"NH\"": 1,
+    "\"NJ\"": 1,
+    "\"NM\"": 1,
+    "\"NV\"": 1,
+    "\"NY\"": 1,
+    "\"OH\"": 1,
+    "\"OK\"": 1,
+    "\"OR\"": 1,
+    "\"PA\"": 1,
+    "\"RI\"": 1,
+    "\"SC\"": 1,
+    "\"SD\"": 1,
+    "\"TN\"": 1,
+    "\"TX\"": 1,
+    "\"UT\"": 1,
+    "\"VA\"": 1,
+    "\"VT\"": 1,
+    "\"WA\"": 1,
+    "\"WI\"": 1,
+    "\"WV\"": 1,
+    "\"WY\"": 1,
+    "Alabama": 1,
+    "Alaska": 1,
+    "Arizona": 1,
+    "Arkansas": 1,
+    "California": 1,
+    "Colorado": 1,
+    "Connecticut": 1,
+    "Delaware": 1,
+    "Florida": 1,
+    "Georgia": 1,
+    "Hawaii": 1,
+    "Idaho": 1,
+    "Illinois": 1,
+    "Indiana": 1,
+    "Iowa": 8,
+    "Kansas": 1,
+    "Kentucky": 1,
+    "Louisiana": 1,
+    "Maine": 1,
+    "Maryland": 1,
+    "Massachusetts": 1,
+    "Michigan": 1,
+    "Minnesota": 1,
+    "Mississippi": 1,
+    "Missouri": 1,
+    "Montana": 1,
+    "Nebraska": 1,
+    "Nevada": 1,
+    "New Hampshire": 1,
+    "New Jersey": 1,
+    "New Mexico": 5,
+    "New York": 1,
+    "North Carolina": 1,
+    "North Dakota": 1,
+    "Ohio": 1,
+    "Oklahoma": 1,
+    "Oregon": 10,
+    "Pennsylvania": 1,
+    "Rhode Island": 1,
+    "South Carolina": 1,
+    "South Dakota": 1,
+    "Tennessee": 1,
+    "Texas": 1,
+    "Utah": 1,
+    "Vermont": 1,
+    "Virginia": 2,
+    "Washington": 1,
+    "West Virginia": 1,
+    "Wisconsin": 1,
+    "Wyoming": 1
+   }
+  },
+  "backend/src/utilityIdentity.ts": {
+   "category": "data",
+   "reason": "utility identity/alias table (names, domains); move to reference data",
+   "names": {
+    "\"CA\"": 2,
+    "\"ID\"": 2,
+    "\"OR\"": 2,
+    "\"UT\"": 2,
+    "\"WA\"": 1,
+    "\"WY\"": 2,
+    "Pacific Power": 6,
+    "PacifiCorp": 21,
+    "PG&E": 1,
+    "PGE": 2,
+    "Portland": 18,
+    "Portland General": 19,
+    "Rocky Mountain Power": 8
+   }
+  },
+  "backend/src/portalCredentials.ts": {
+   "category": "data",
+   "reason": "utility portal names and hosts for credential matching; move to portal data",
+   "names": {
+    "Oregon": 9,
+    "Pacific Power": 6,
+    "Portland General": 6,
+    "Rocky Mountain Power": 6
+   }
+  },
+  "backend/src/curatedAhjForms.ts": {
+   "category": "data",
+   "reason": "curated AHJ form registry (Oregon cities) in code; move to data",
+   "names": {
+    "\"OR\"": 5,
+    "Coos Bay": 3,
+    "Marion County": 9,
+    "Tigard": 6
+   }
+  },
+  "backend/src/batchImport.ts": {
+   "category": "data",
+   "reason": "utility name aliases for CSV import; read the utility identity data",
+   "names": {
+    "California": 1,
+    "Pacific Power": 1,
+    "PacifiCorp": 1,
+    "PG&E": 1,
+    "PGE": 1,
+    "Portland": 1,
+    "PSE": 1,
+    "SCE": 1,
+    "SDG&E": 1
+   }
+  },
+  "backend/src/baselineRules.ts": {
+   "category": "data",
+   "reason": "#679's or-nem-residential-25kw catalogue entry (draft 12 left it; #679 owns it)",
+   "names": {
+    "Oregon": 3,
+    "Pacific Power": 1,
+    "PGE": 1
+   }
+  },
+  "backend/src/db.ts": {
+   "category": "data",
+   "reason": "a WA row in a migration seed and an example name in schema text",
+   "names": {
+    "\"WA\"": 1,
+    "Portland": 1
+   }
+  },
+  "backend/src/usState.ts": {
+   "category": "table",
+   "reason": "the US state normaliser table (a lookup, not a rule; kept by the brief)",
+   "names": {
+    "\"AK\"": 1,
+    "\"AL\"": 1,
+    "\"AR\"": 1,
+    "\"AZ\"": 2,
+    "\"CA\"": 3,
+    "\"CO\"": 2,
+    "\"CT\"": 2,
+    "\"DC\"": 1,
+    "\"DE\"": 2,
+    "\"FL\"": 2,
+    "\"GA\"": 1,
+    "\"HI\"": 1,
+    "\"IA\"": 1,
+    "\"ID\"": 1,
+    "\"IL\"": 2,
+    "\"IN\"": 2,
+    "\"KS\"": 2,
+    "\"KY\"": 1,
+    "\"LA\"": 1,
+    "\"MA\"": 2,
+    "\"MD\"": 1,
+    "\"ME\"": 1,
+    "\"MI\"": 2,
+    "\"MN\"": 2,
+    "\"MO\"": 1,
+    "\"MS\"": 2,
+    "\"MT\"": 1,
+    "\"NC\"": 1,
+    "\"ND\"": 1,
+    "\"NE\"": 2,
+    "\"NH\"": 1,
+    "\"NJ\"": 1,
+    "\"NM\"": 1,
+    "\"NV\"": 2,
+    "\"NY\"": 1,
+    "\"OH\"": 1,
+    "\"OK\"": 2,
+    "\"OR\"": 3,
+    "\"PA\"": 3,
+    "\"RI\"": 1,
+    "\"SC\"": 1,
+    "\"SD\"": 1,
+    "\"TN\"": 2,
+    "\"TX\"": 2,
+    "\"UT\"": 1,
+    "\"VA\"": 1,
+    "\"VT\"": 1,
+    "\"WA\"": 2,
+    "\"WI\"": 3,
+    "\"WV\"": 1,
+    "\"WY\"": 2,
+    "Alabama": 1,
+    "Alaska": 1,
+    "Arizona": 1,
+    "Arkansas": 1,
+    "California": 1,
+    "Colorado": 1,
+    "Connecticut": 1,
+    "Delaware": 1,
+    "Florida": 1,
+    "Georgia": 1,
+    "Hawaii": 1,
+    "Idaho": 1,
+    "Illinois": 1,
+    "Indiana": 1,
+    "Iowa": 1,
+    "Kansas": 1,
+    "Kentucky": 1,
+    "Louisiana": 1,
+    "Maine": 1,
+    "Maryland": 1,
+    "Massachusetts": 1,
+    "Michigan": 1,
+    "Minnesota": 1,
+    "Mississippi": 1,
+    "Missouri": 1,
+    "Montana": 1,
+    "Nebraska": 1,
+    "Nevada": 1,
+    "New Hampshire": 1,
+    "New Jersey": 1,
+    "New Mexico": 1,
+    "New York": 1,
+    "North Carolina": 1,
+    "North Dakota": 1,
+    "Ohio": 1,
+    "Oklahoma": 1,
+    "Oregon": 1,
+    "Pennsylvania": 1,
+    "Rhode Island": 1,
+    "South Carolina": 1,
+    "South Dakota": 1,
+    "Tennessee": 1,
+    "Texas": 1,
+    "Utah": 1,
+    "Vermont": 1,
+    "Virginia": 2,
+    "Washington": 1,
+    "West Virginia": 1,
+    "Wisconsin": 1,
+    "Wyoming": 1
+   }
+  },
+  "backend/src/engineerSeal.ts": {
+   "category": "table",
+   "reason": "a state name/code table to read the state a seal names (a lookup, not a rule; duplicates usState's table: reuse it)",
+   "names": {
+    "\"AK\"": 1,
+    "\"AL\"": 1,
+    "\"AR\"": 1,
+    "\"AZ\"": 1,
+    "\"CA\"": 1,
+    "\"CO\"": 1,
+    "\"CT\"": 1,
+    "\"DC\"": 1,
+    "\"DE\"": 1,
+    "\"FL\"": 1,
+    "\"GA\"": 1,
+    "\"HI\"": 1,
+    "\"IA\"": 1,
+    "\"ID\"": 1,
+    "\"IL\"": 1,
+    "\"IN\"": 1,
+    "\"KS\"": 1,
+    "\"KY\"": 1,
+    "\"LA\"": 1,
+    "\"MA\"": 1,
+    "\"MD\"": 1,
+    "\"ME\"": 1,
+    "\"MI\"": 1,
+    "\"MN\"": 1,
+    "\"MO\"": 1,
+    "\"MS\"": 1,
+    "\"MT\"": 1,
+    "\"NC\"": 1,
+    "\"ND\"": 1,
+    "\"NE\"": 1,
+    "\"NH\"": 1,
+    "\"NJ\"": 1,
+    "\"NM\"": 1,
+    "\"NV\"": 1,
+    "\"NY\"": 1,
+    "\"OH\"": 1,
+    "\"OK\"": 1,
+    "\"OR\"": 1,
+    "\"PA\"": 1,
+    "\"RI\"": 1,
+    "\"SC\"": 1,
+    "\"SD\"": 1,
+    "\"TN\"": 1,
+    "\"TX\"": 1,
+    "\"UT\"": 1,
+    "\"VA\"": 1,
+    "\"VT\"": 1,
+    "\"WA\"": 1,
+    "\"WI\"": 1,
+    "\"WV\"": 1,
+    "\"WY\"": 1,
+    "Alabama": 1,
+    "Alaska": 1,
+    "Arizona": 1,
+    "Arkansas": 1,
+    "California": 1,
+    "Colorado": 1,
+    "Connecticut": 1,
+    "Delaware": 1,
+    "Florida": 1,
+    "Georgia": 1,
+    "Hawaii": 1,
+    "Idaho": 1,
+    "Illinois": 1,
+    "Indiana": 1,
+    "Iowa": 1,
+    "Kansas": 1,
+    "Kentucky": 1,
+    "Louisiana": 1,
+    "Maine": 1,
+    "Maryland": 1,
+    "Massachusetts": 1,
+    "Michigan": 1,
+    "Minnesota": 1,
+    "Mississippi": 1,
+    "Missouri": 1,
+    "Montana": 1,
+    "Nebraska": 1,
+    "Nevada": 1,
+    "New Hampshire": 1,
+    "New Jersey": 1,
+    "New Mexico": 1,
+    "New York": 1,
+    "North Carolina": 1,
+    "North Dakota": 1,
+    "Ohio": 1,
+    "Oklahoma": 1,
+    "Oregon": 1,
+    "Pennsylvania": 1,
+    "Rhode Island": 1,
+    "South Carolina": 1,
+    "South Dakota": 1,
+    "Tennessee": 1,
+    "Texas": 1,
+    "Utah": 1,
+    "Vermont": 1,
+    "Virginia": 2,
+    "Washington": 1,
+    "West Virginia": 1,
+    "Wisconsin": 1,
+    "Wyoming": 1
+   }
+  },
+  "backend/src/feeSchedules.ts": {
+   "category": "table",
+   "reason": "state name/code lookup tables for fee research and an example utility in prompt text",
+   "names": {
+    "\"DC\"": 1,
+    "Alabama": 1,
+    "Alaska": 1,
+    "Arizona": 1,
+    "Arkansas": 1,
+    "California": 1,
+    "Colorado": 2,
+    "Connecticut": 2,
+    "Coos Bay": 1,
+    "Delaware": 1,
+    "Florida": 1,
+    "Georgia": 1,
+    "Hawaii": 1,
+    "Idaho": 1,
+    "Illinois": 2,
+    "Indiana": 1,
+    "Iowa": 1,
+    "Kansas": 1,
+    "Kentucky": 1,
+    "Louisiana": 1,
+    "Maine": 1,
+    "Maryland": 1,
+    "Massachusetts": 3,
+    "Michigan": 1,
+    "Minnesota": 1,
+    "Mississippi": 1,
+    "Missouri": 1,
+    "Montana": 1,
+    "Nebraska": 1,
+    "Nevada": 1,
+    "New Hampshire": 1,
+    "New Jersey": 1,
+    "New Mexico": 1,
+    "New York": 1,
+    "North Carolina": 1,
+    "North Dakota": 1,
+    "Ohio": 2,
+    "Oklahoma": 1,
+    "Oregon": 2,
+    "Pennsylvania": 2,
+    "Rhode Island": 1,
+    "Scottsdale": 1,
+    "South Carolina": 1,
+    "South Dakota": 1,
+    "Tennessee": 1,
+    "Texas": 1,
+    "Utah": 1,
+    "Vermont": 1,
+    "Virginia": 2,
+    "Washington": 1,
+    "West Virginia": 1,
+    "Wisconsin": 1,
+    "Wyoming": 1,
+    "Xcel": 1
+   }
+  },
+  "backend/src/portalProcessImport.ts": {
+   "category": "table",
+   "reason": "state name/code lookup for the process import",
+   "names": {
+    "\"AK\"": 1,
+    "\"AL\"": 1,
+    "\"AR\"": 1,
+    "\"AZ\"": 1,
+    "\"CA\"": 1,
+    "\"CO\"": 1,
+    "\"CT\"": 1,
+    "\"DE\"": 1,
+    "\"FL\"": 1,
+    "\"GA\"": 1,
+    "\"HI\"": 1,
+    "\"IA\"": 1,
+    "\"ID\"": 1,
+    "\"IL\"": 1,
+    "\"IN\"": 1,
+    "\"KS\"": 1,
+    "\"KY\"": 1,
+    "\"LA\"": 1,
+    "\"MA\"": 1,
+    "\"MD\"": 1,
+    "\"ME\"": 1,
+    "\"MI\"": 1,
+    "\"MN\"": 1,
+    "\"MO\"": 1,
+    "\"MS\"": 1,
+    "\"MT\"": 1,
+    "\"NC\"": 1,
+    "\"ND\"": 1,
+    "\"NE\"": 1,
+    "\"NH\"": 2,
+    "\"NJ\"": 2,
+    "\"NM\"": 2,
+    "\"NV\"": 1,
+    "\"NY\"": 2,
+    "\"OH\"": 1,
+    "\"OK\"": 1,
+    "\"OR\"": 1,
+    "\"PA\"": 1,
+    "\"RI\"": 1,
+    "\"SC\"": 1,
+    "\"SD\"": 1,
+    "\"TN\"": 1,
+    "\"TX\"": 1,
+    "\"UT\"": 1,
+    "\"VA\"": 1,
+    "\"VT\"": 1,
+    "\"WA\"": 1,
+    "\"WI\"": 1,
+    "\"WV\"": 1,
+    "\"WY\"": 1,
+    "New Hampshire": 1,
+    "New Jersey": 1,
+    "New Mexico": 1,
+    "New York": 1
+   }
+  },
+  "backend/src/referenceImport.ts": {
+   "category": "table",
+   "reason": "state name/code lookup for the reference spreadsheet import",
+   "names": {
+    "\"AK\"": 1,
+    "\"AL\"": 1,
+    "\"AR\"": 1,
+    "\"AZ\"": 1,
+    "\"CA\"": 1,
+    "\"CO\"": 1,
+    "\"CT\"": 1,
+    "\"DC\"": 1,
+    "\"DE\"": 1,
+    "\"FL\"": 1,
+    "\"GA\"": 1,
+    "\"HI\"": 1,
+    "\"IA\"": 1,
+    "\"ID\"": 1,
+    "\"IL\"": 1,
+    "\"IN\"": 1,
+    "\"KS\"": 1,
+    "\"KY\"": 1,
+    "\"LA\"": 1,
+    "\"MA\"": 1,
+    "\"MD\"": 1,
+    "\"ME\"": 1,
+    "\"MI\"": 1,
+    "\"MN\"": 1,
+    "\"MO\"": 1,
+    "\"MS\"": 1,
+    "\"MT\"": 1,
+    "\"NC\"": 1,
+    "\"ND\"": 1,
+    "\"NE\"": 1,
+    "\"NH\"": 1,
+    "\"NJ\"": 1,
+    "\"NM\"": 1,
+    "\"NV\"": 1,
+    "\"NY\"": 2,
+    "\"OH\"": 1,
+    "\"OK\"": 1,
+    "\"OR\"": 1,
+    "\"PA\"": 1,
+    "\"RI\"": 1,
+    "\"SC\"": 1,
+    "\"SD\"": 1,
+    "\"TN\"": 1,
+    "\"TX\"": 1,
+    "\"UT\"": 1,
+    "\"VA\"": 1,
+    "\"VT\"": 1,
+    "\"WA\"": 1,
+    "\"WI\"": 1,
+    "\"WV\"": 1,
+    "\"WY\"": 1
+   }
+  },
+  "backend/src/permitPlatformCatalog.ts": {
+   "category": "table",
+   "reason": "a state code/name table for the platform catalogue (a lookup, not a rule; duplicates usState's table: reuse it)",
+   "names": {
+    "Alabama": 1,
+    "Alaska": 1,
+    "Arizona": 1,
+    "Arkansas": 1,
+    "California": 1,
+    "Colorado": 1,
+    "Connecticut": 1,
+    "Delaware": 1,
+    "Florida": 1,
+    "Georgia": 1,
+    "Hawaii": 1,
+    "Idaho": 1,
+    "Illinois": 1,
+    "Indiana": 1,
+    "Iowa": 1,
+    "Kansas": 1,
+    "Kentucky": 1,
+    "Louisiana": 1,
+    "Maine": 1,
+    "Maryland": 1,
+    "Massachusetts": 1,
+    "Michigan": 1,
+    "Minnesota": 1,
+    "Mississippi": 1,
+    "Missouri": 1,
+    "Montana": 1,
+    "Nebraska": 1,
+    "Nevada": 1,
+    "New Hampshire": 1,
+    "New Jersey": 1,
+    "New Mexico": 1,
+    "New York": 1,
+    "North Carolina": 1,
+    "North Dakota": 1,
+    "Ohio": 1,
+    "Oklahoma": 1,
+    "Oregon": 1,
+    "Pennsylvania": 1,
+    "Rhode Island": 1,
+    "South Carolina": 1,
+    "South Dakota": 1,
+    "Tennessee": 1,
+    "Texas": 1,
+    "Utah": 1,
+    "Vermont": 1,
+    "Virginia": 2,
+    "Washington": 1,
+    "West Virginia": 1,
+    "Wisconsin": 1,
+    "Wyoming": 1
+   }
+  },
+  "backend/src/pvPlacementRules.ts": {
+   "category": "table",
+   "reason": "a US state-name set (a lookup, not a rule; duplicates usState's table: reuse it)",
+   "names": {
+    "Alabama": 1,
+    "Alaska": 1,
+    "Arizona": 1,
+    "Arkansas": 1,
+    "California": 1,
+    "Colorado": 1,
+    "Connecticut": 1,
+    "Delaware": 1,
+    "Florida": 1,
+    "Georgia": 1,
+    "Hawaii": 1,
+    "Idaho": 1,
+    "Illinois": 1,
+    "Indiana": 1,
+    "Iowa": 1,
+    "Kansas": 1,
+    "Kentucky": 1,
+    "Louisiana": 1,
+    "Maine": 1,
+    "Maryland": 1,
+    "Massachusetts": 1,
+    "Michigan": 1,
+    "Minnesota": 1,
+    "Mississippi": 1,
+    "Missouri": 1,
+    "Montana": 1,
+    "Nebraska": 1,
+    "Nevada": 1,
+    "New Hampshire": 1,
+    "New Jersey": 1,
+    "New Mexico": 1,
+    "New York": 1,
+    "North Carolina": 1,
+    "North Dakota": 1,
+    "Ohio": 1,
+    "Oklahoma": 1,
+    "Oregon": 1,
+    "Pennsylvania": 1,
+    "Rhode Island": 1,
+    "South Carolina": 1,
+    "South Dakota": 1,
+    "Tennessee": 1,
+    "Texas": 1,
+    "Utah": 1,
+    "Vermont": 1,
+    "Virginia": 2,
+    "Washington": 1,
+    "West Virginia": 1,
+    "Wisconsin": 1,
+    "Wyoming": 1
+   }
+  },
+  "backend/src/portalChannel.ts": {
+   "category": "door",
+   "reason": "RULE-5 DOOR: hostFitsTrackAndEntity's utility/portal host tables; listed, not touched (owner-merged change only)",
+   "names": {
+    "Alabama": 1,
+    "Alaska": 1,
+    "Arizona": 1,
+    "Arkansas": 1,
+    "California": 1,
+    "Colorado": 1,
+    "Connecticut": 1,
+    "Delaware": 1,
+    "Florida": 1,
+    "Georgia": 1,
+    "Hawaii": 1,
+    "Idaho": 1,
+    "Idaho Power": 1,
+    "Illinois": 1,
+    "Indiana": 1,
+    "Iowa": 1,
+    "Kansas": 1,
+    "Kentucky": 1,
+    "Louisiana": 1,
+    "Maine": 1,
+    "Maryland": 1,
+    "Massachusetts": 1,
+    "Michigan": 1,
+    "Minnesota": 1,
+    "Mississippi": 1,
+    "Missouri": 1,
+    "Montana": 1,
+    "Nebraska": 1,
+    "Nevada": 1,
+    "New Hampshire": 1,
+    "New Jersey": 1,
+    "New Mexico": 1,
+    "New York": 1,
+    "North Carolina": 1,
+    "North Dakota": 1,
+    "Ohio": 1,
+    "Oklahoma": 1,
+    "Oregon": 2,
+    "Pacific Power": 1,
+    "PacifiCorp": 1,
+    "Pennsylvania": 1,
+    "Portland General": 1,
+    "Rhode Island": 1,
+    "Rocky Mountain Power": 1,
+    "South Carolina": 1,
+    "South Dakota": 1,
+    "Tennessee": 1,
+    "Texas": 1,
+    "Utah": 1,
+    "Vermont": 1,
+    "Virginia": 1,
+    "Washington": 1,
+    "West Virginia": 1,
+    "Wisconsin": 1,
+    "Wyoming": 1
+   }
+  },
+  "backend/src/llm.ts": {
+   "category": "prompt",
+   "reason": "examples inside LLM prompt text",
+   "names": {
+    "APS": 1,
+    "Arizona": 1,
+    "California": 1,
+    "Connecticut": 1,
+    "Coos Bay": 1,
+    "Duke Energy": 1,
+    "Florida": 2,
+    "Hillsboro": 1,
+    "Iowa": 1,
+    "Massachusetts": 2,
+    "Michigan": 1,
+    "Nevada": 1,
+    "Ohio": 1,
+    "Oregon": 8,
+    "Pacific Power": 3,
+    "PacifiCorp": 1,
+    "Pennsylvania": 1,
+    "PGE": 2,
+    "Portland": 4,
+    "Portland General": 1,
+    "Salem": 1,
+    "SRP": 2,
+    "Texas": 2,
+    "Washington": 2
+   }
+  },
+  "backend/src/modelRouting.ts": {
+   "category": "prompt",
+   "reason": "a release note string naming an Iowa example",
+   "names": {
+    "Iowa": 1
+   }
+  },
+  "backend/src/permitProcessLookup.ts": {
+   "category": "prompt",
+   "reason": "example jurisdiction inside the lookup prompt",
+   "names": {
+    "Marion County": 1
+   }
+  },
+  "backend/src/submissionFees.ts": {
+   "category": "prompt",
+   "reason": "example utility (Ameren Illinois) in an explanatory note string",
+   "names": {
+    "Illinois": 1
+   }
+  },
+  "portal-bot/src/adapters/powerClerk.ts": {
+   "category": "adapter",
+   "reason": "PowerClerk adapter's per-tenant quirks named by utility; move to recipe data",
+   "names": {
+    "\"OR\"": 1,
+    "Pacific Power": 2,
+    "PacifiCorp": 1,
+    "PGE": 10,
+    "Portland": 1,
+    "Portland General": 1
+   }
+  },
+  "portal-bot/src/adapters/oregonEPermitting.ts": {
+   "category": "adapter",
+   "reason": "the hand-coded Oregon ePermitting (Accela) adapter; retire for a learned recipe",
+   "names": {
+    "Oregon": 7
+   }
+  },
+  "portal-bot/src/index.ts": {
+   "category": "adapter",
+   "reason": "adapter registry entry for the Oregon ePermitting adapter",
+   "names": {
+    "Oregon": 4
+   }
+  },
+  "portal-bot/src/adapters/recipeAdapter.ts": {
+   "category": "adapter",
+   "reason": "recipe adapter's Oregon ePermitting special case",
+   "names": {
+    "Oregon": 1
+   }
+  },
+  "backend/src/runCrossProjectReplay.ts": {
+   "category": "harness",
+   "reason": "operator replay benchmark with synthetic fixtures",
+   "names": {
+    "APS": 1,
+    "Boise": 1,
+    "Coos Bay": 3,
+    "Duke Energy": 1,
+    "Florida": 1,
+    "Idaho": 1,
+    "Idaho Power": 1,
+    "Illinois": 1,
+    "Maine": 1,
+    "Multnomah": 1,
+    "Ohio": 1,
+    "Phoenix": 1,
+    "Portland": 4,
+    "Portland General": 1,
+    "Puget Sound": 1,
+    "Salem": 1,
+    "Washington": 1
+   }
+  },
+  "backend/src/runLearnBenchmark.ts": {
+   "category": "harness",
+   "reason": "operator learn benchmark with synthetic fixtures",
+   "names": {
+    "APS": 1,
+    "Boise": 1,
+    "Duke Energy": 1,
+    "Florida": 1,
+    "Idaho": 1,
+    "Idaho Power": 1,
+    "Illinois": 2,
+    "Maine": 1,
+    "Ohio": 1,
+    "Pacific Power": 1,
+    "Phoenix": 1,
+    "Portland": 3,
+    "Portland General": 2,
+    "Puget Sound": 1,
+    "Salem": 1,
+    "Washington": 1
+   }
+  },
+  "portal-bot/src/demoReplay.ts": {
+   "category": "harness",
+   "reason": "demo replay with synthetic fixtures",
+   "names": {
+    "Illinois": 1,
+    "Oregon": 2,
+    "Pacific Power": 2,
+    "PacifiCorp": 4,
+    "PGE": 1,
+    "Portland": 2,
+    "Portland General": 2
+   }
+  },
+  "backend/src/runReplayBenchmark.ts": {
+   "category": "harness",
+   "reason": "operator replay benchmark with synthetic fixtures",
+   "names": {
+    "\"OR\"": 4,
+    "Coos Bay": 4,
+    "Pacific Power": 1,
+    "Salem": 4
+   }
+  },
+  "backend/src/smoke.ts": {
+   "category": "harness",
+   "reason": "npm run smoke's synthetic project",
+   "names": {
+    "\"OR\"": 1,
+    "Oregon": 1,
+    "Pacific Power": 1,
+    "PGE": 2,
+    "Portland": 6
+   }
+  },
+  "portal-bot/src/testRun.ts": {
+   "category": "harness",
+   "reason": "mock-portal test run with synthetic fixtures",
+   "names": {
+    "\"OR\"": 1,
+    "Oregon": 3,
+    "PGE": 1
+   }
+  },
+  "portal-bot/src/adapters/infoPageHeldHarness.ts": {
+   "category": "harness",
+   "reason": "info-page harness with synthetic fixtures",
+   "names": {
+    "\"IL\"": 1,
+    "\"WA\"": 2,
+    "PSE": 1
+   }
+  },
+  "portal-bot/src/adapters/powerClerkRowFixture.ts": {
+   "category": "harness",
+   "reason": "PowerClerk row fixture (synthetic)",
+   "names": {
+    "\"OR\"": 1,
+    "Pacific Power": 2
+   }
+  },
+  "portal-bot/src/adapters/powerClerkLearnOwnRowsHarness.ts": {
+   "category": "harness",
+   "reason": "PowerClerk learn harness (synthetic)",
+   "names": {
+    "PacifiCorp": 1
+   }
+  },
+  "portal-bot/src/adapters/powerClerkLearnRowsHarness.ts": {
+   "category": "harness",
+   "reason": "PowerClerk learn harness (synthetic)",
+   "names": {
+    "PacifiCorp": 1
+   }
+  },
+  "backend/src/electricalSizing.ts": {
+   "category": "not-a-place",
+   "reason": "\"AL\" is aluminium conductor, not Alabama",
+   "names": {
+    "\"AL\"": 6
+   }
+  },
+  "backend/src/wireTableArithmetic.ts": {
+   "category": "not-a-place",
+   "reason": "\"AL\" is aluminium conductor, not Alabama",
+   "names": {
+    "\"AL\"": 2
+   }
+  },
+  "backend/src/crm.ts": {
+   "category": "not-a-place",
+   "reason": "\" OR \" is SQL, not Oregon",
+   "names": {
+    "\"OR\"": 1
+   }
+  },
+  "backend/src/designCriteria.ts": {
+   "category": "not-a-place",
+   "reason": "\"IN\" is a name stopword, not Indiana",
+   "names": {
+    "\"IN\"": 1
+   }
+  },
+  "portal-bot/src/cryptoStorage.ts": {
+   "category": "not-a-place",
+   "reason": "\"SCE1\" is a cipher label, not Southern California Edison",
+   "names": {
+    "SCE": 1
+   }
+  },
+  "portal-bot/src/liveSpecsProbe.ts": {
+   "category": "not-a-place",
+   "reason": "\"OK\" is a status, not Oklahoma",
+   "names": {
+    "\"OK\"": 1
+   }
+  }
+ }
+}

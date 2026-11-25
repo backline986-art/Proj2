@@ -39,7 +39,7 @@
 // surface when the API/dashboard build lands.
 // ---------------------------------------------------------------------------
 
-import Anthropic from "@anthropic-ai/sdk";
+import { createModelClient, runInModelCallScope } from "./modelPayloadScan";
 import { performance } from "node:perf_hooks";
 import type { AppDb } from "./db";
 import type { FeeChargeBreakdown, FeePaymentMethod, PaidFeeReceipt, ProjectRecord } from "../../shared/src/types";
@@ -68,7 +68,7 @@ import type { FeeLineKind, FeeLineSighting } from "./feeLineKinds";
 // THIS file. See pathWordingScope's header for the full argument.
 import { resolvePermitPath, pathWordingScope, pathWordingContradicts } from "./permitPath";
 import type { PermitPath, PermitPathInputs } from "./permitPath";
-import { resolveValuation } from "./valuation";
+import { resolveContractCost, resolveValuation } from "./valuation";
 import {
   feeFilingIsElectrical, isServiceFeeder200Label, isServiceFeeder400Label, serviceLineCounts,
   SERVICE_FEEDER_200A_LABEL, SERVICE_FEEDER_CHARGE_KIND,
@@ -88,6 +88,8 @@ import { placeHistoryCacheBreakpoint, recordLlmCall, sanitizeApiKey, webSearchRe
 import { routeFor } from "./modelRouting";
 import { getPermitProcessLookup } from "./permitProcess";
 import { stateSurchargeRuleFor, type StateSurchargeAnswer } from "./stateFeeRules";
+import { citationShortfalls, isOfficialSourceHost, quoteNamesValue, sourceHostOf } from "../../shared/src/officialSource";
+import { officialAuthorityHosts } from "./officialAuthorityHosts";
 import { CURATED_AHJ_FORMS } from "./curatedAhjForms";
 import { localPermitReview, permitFeeProject, trackForFeeDiscipline } from "./feeIssuer";
 import { logger } from "./logger";
@@ -309,6 +311,18 @@ export interface FeeScheduleSource {
   documentDateIso: string;
   /** What THIS document printed, before anything was merged or tagged. */
   brackets: FeeBracket[];
+  /** WHEN KEELIX READ THIS DOCUMENT (ISO), "" when nobody can say. Stamped by saveFeeSchedule only
+   *  where the bytes were retrieved by this process (a research ledger) or the caller states the
+   *  read time (a lookup's own lookedUpAt): a hand-applied finding with no date stays "", never
+   *  the save time dressed up as a read. The row's updated_at is NOT this: a refused re-research
+   *  appends a note and moves it. Optional so a source built as a literal still types. */
+  fetchedAt?: string;
+}
+
+/** The read date a fee row can state: the most recent of its sources' own, "" when none carries one. */
+export function feeSourceReadAt(schedule: Pick<FeeScheduleRecord, "sources"> | null | undefined): string {
+  const dates = (schedule?.sources ?? []).map((x) => clean(x.fetchedAt)).filter(Boolean).sort();
+  return dates[dates.length - 1] ?? "";
 }
 
 export interface FeeScheduleRecord {
@@ -444,6 +458,10 @@ export interface FeeScheduleResearchInput {
   /** What the KB already knows about this jurisdiction/utility — several of the
    *  permit_utility_knowledge rows already carry the AHJ's own fee-page URL. */
   knownContext?: string;
+  /** The state's surcharge record (stateFeeRules), read by researchFeeSchedule so the researcher's
+   *  corroboration preview holds the same printed surcharge the save will (#674). Absent = nothing
+   *  on file, so no printed surcharge is held. */
+  stateSurcharge?: StateSurchargeAnswer;
 }
 
 /** The optional second argument is the RETRIEVAL LEDGER: pass one in and the
@@ -467,6 +485,10 @@ export interface FeeScheduleResearchOutcome {
    *  distinct: a person reads the two candidates and picks, they do not go
    *  looking for a better source. */
   refusedConflicted: boolean;
+  /** True when the stored row's amounts were read on the authority's own OFFICIAL page and this
+   *  finding could not show a read of that same host (rule 3's official tier: an official row is
+   *  refreshed only from its own official host). Its finding went to notes; nothing else changed. */
+  refusedOfficial?: boolean;
   profileKey: string;
   track: FeeTrack;
   /** The row as it stands AFTER the pass — unchanged when refusedVerified. */
@@ -477,6 +499,10 @@ export interface FeeScheduleResearchOutcome {
    *  permit-process lookup had already landed a cited fee for this AHJ + discipline (its row is
    *  `schedule`). Distinct from found:false so a skip can never read as a miss. */
   skipped?: "lookup_fee_landed";
+  /** DOCUMENTS THIS PASS ASKED FOR AND DID NOT GET (fee round, 2026-11): on a pass that saved
+   *  nothing, every URL research tried that came back with no bytes. A person reads them; the
+   *  fee quote lists them (feeNeedsPerson). Public agency addresses only. */
+  unread?: Array<{ url: string; reason: string }>;
 }
 
 export interface ProjectFeeResolution {
@@ -499,6 +525,9 @@ export interface ProjectFeeResolution {
    *  about how the money moves, which is a fact about the schedule, not the
    *  bracket. */
   sourceQuote: string;
+  /** When Keelix read the source(s) behind this amount: the oldest line's read date, "" unless
+   *  every line states one. */
+  sourceReadAt?: string;
   /** THE EVIDENCE FOR *THIS AMOUNT*, verbatim, and the only quote that may be
    *  shown beside it. "" when the total is made of more than one permit: no
    *  single published line supports a sum that no document anywhere prints. */
@@ -506,6 +535,10 @@ export interface ProjectFeeResolution {
   /** True only when EVERY line was found printed — label and fee on one row — in
    *  the cited document. Never a promotion: confidence stays 'seeded'. */
   corroborated: boolean;
+  /** READ ON THE AUTHORITY'S OWN OFFICIAL PAGE (officialFeeResolutionSource, owner 2026-11-11):
+   *  set by the callers that hold the person-verified hosts (feeOfficial.ts), never stored. Beside
+   *  `confidence`, never inside it: confidence stays 'seeded' and only a person writes 'verified'. */
+  official?: OfficialFeeSource;
   /** What the printed evidence says about the permit (corroborationVerdict), the WORST across the
    *  lines: "other_permit" when any line's row names another trade/scope/discipline — the quote
    *  must then not offer that row as this fee's published line (skeptic M8). */
@@ -576,6 +609,10 @@ export interface FeeScheduleLine {
   /** Present only when this bracket was found printed in the cited document. */
   corroboration?: FeeBracketCorroboration;
   confidence: FeeConfidence;
+  /** This line's official source (officialFeeLineSource), when a caller graded it. Never stored. */
+  official?: OfficialFeeSource;
+  /** When Keelix read the source behind this line (feeSourceReadAt), "" when the row cannot say. */
+  sourceReadAt?: string;
   /** True when this amount was computed from a per-watt ESTIMATED valuation rather than a
    *  contract figure. The schedule can be perfect and the answer still a guess. */
   valuationEstimated?: boolean;
@@ -870,6 +907,27 @@ function normalizeUnpricedLines(raw: unknown): FeeUnpricedLine[] {
  *  liked and have it printed next to the amount as evidence. A ledger is
  *  something only a process that actually retrieved bytes can produce, so
  *  requiring one is what makes the sentence above true instead of hopeful. */
+/** A held surcharge's shape: a readable percentage of the permit fee, above 0 and at most 100. */
+function heldSurchargeShape(raw: unknown): boolean {
+  if (!raw || typeof raw !== "object") return false;
+  const percent = (raw as { percent?: unknown }).percent;
+  return typeof percent === "number" && Number.isFinite(percent) && percent > 0 && percent <= 100;
+}
+
+/** IS A PRINTED STATE SURCHARGE THE STATE'S OWN? (#674)
+ *
+ *  A document's "State surcharge (N% of permit fee)" is held on a bracket only when N is what the
+ *  job state's cited fee record (stateFeeRules, #663) says: the same percentage, or — where the
+ *  record is a statutory MAXIMUM ("at most 12%") — any positive rate up to it. A state with no
+ *  researched rule, a cited "none", or a row the quote cannot model holds nothing: the quote then
+ *  says the surcharge is missing rather than trusting a number no record backs. No state and no
+ *  percentage is named here; both are data. */
+export function printedSurchargeFitsStateRule(percent: number, rule: StateSurchargeAnswer): boolean {
+  if (rule.status !== "rule" || !Number.isFinite(percent) || percent <= 0) return false;
+  if (Math.abs(percent - rule.percent) <= 0.001) return true;
+  return rule.maximum && percent < rule.percent;
+}
+
 function normalizeBrackets(raw: unknown[], opts: { trusted?: boolean } = {}): FeeBracket[] {
   const out: FeeBracket[] = [];
   for (const item of raw) {
@@ -891,11 +949,13 @@ function normalizeBrackets(raw: unknown[], opts: { trusted?: boolean } = {}): Fe
       feeUsd: round2(fee),
       label: clean(b.label).slice(0, 200),
       ...(corroboration ? { corroboration } : {}),
-      ...(opts.trusted && b.stateSurcharge && typeof b.stateSurcharge === "object"
-        && (b.stateSurcharge as FeeBracket["stateSurcharge"])?.percent === 12
+      // A HELD SURCHARGE IS KEPT AT WHATEVER RATE IT WAS HELD (#674). Only the trusted path keeps
+      // one at all, and the only writers on that path (corroborateBrackets, the cited lookup in
+      // saveFeeSchedule) check the printed percentage against the state's own cited fee record
+      // before they hold it. A percentage literal here dropped every state but one on the next read.
+      ...(opts.trusted && heldSurchargeShape(b.stateSurcharge)
         ? { stateSurcharge: b.stateSurcharge as NonNullable<FeeBracket["stateSurcharge"]> } : {}),
-      ...(opts.trusted && b.communitySurcharge && typeof b.communitySurcharge === "object"
-        && (b.communitySurcharge as FeeBracket["communitySurcharge"])?.percent === 5
+      ...(opts.trusted && heldSurchargeShape(b.communitySurcharge)
         ? { communitySurcharge: b.communitySurcharge as NonNullable<FeeBracket["communitySurcharge"]> } : {}),
       ...(ancillaryCharges.length ? { ancillaryCharges } : {}),
       ...(unpricedLines.length ? { unpricedLines } : {}),
@@ -914,6 +974,12 @@ function parseSources(raw: unknown): FeeScheduleSource[] {
   return normalizeSources(parsed);
 }
 
+/** An ISO instant as stored ("2026-11-11T20:23:15.000Z"), or "" for anything else. */
+function isoInstant(value: unknown): string {
+  const v = clean(value).slice(0, 30);
+  return /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/.test(v) && Number.isFinite(Date.parse(v)) ? v : "";
+}
+
 function normalizeSources(raw: unknown[]): FeeScheduleSource[] {
   const out: FeeScheduleSource[] = [];
   for (const item of raw) {
@@ -930,6 +996,7 @@ function normalizeSources(raw: unknown[]): FeeScheduleSource[] {
       // the comparable date can never disagree about the same document.
       documentDateIso: isoForDocumentDate(documentDate),
       brackets: normalizeBrackets(Array.isArray(s.brackets) ? s.brackets : []),
+      ...(isoInstant(s.fetchedAt) ? { fetchedAt: isoInstant(s.fetchedAt) } : {}),
     });
     if (out.length >= 8) break;
   }
@@ -1331,6 +1398,45 @@ export function foreignMunicipalitySource(
     + `It may be another municipality's schedule (Halifax Township's was cited for Corry). Find ${clean(input.ahj)}'s own schedule, or record the agency that collects its fees as a delegation.`;
 }
 
+/** The hosts recorded as this AHJ's own (a person's, or a government page's vouch); a broken lookup
+ *  row reads as none. */
+function safeVerifiedHosts(db: AppDb, state: string, ahj: string): string[] {
+  try { return state && ahj ? officialAuthorityHosts(db, state, ahj) : []; } catch { return []; }
+}
+
+/** THE OFFICIAL HOSTS A ROW'S PRINTED LINES WERE READ ON: every bracket whose corroboration (written
+ *  only by corroborateBrackets, from bytes this process retrieved) names a document on a host that
+ *  passes the one shared predicate, with a read time. Row grain, for the save guard only; whether a
+ *  LINE is official is officialFeeLineSource's answer. */
+export function officialBracketHosts(brackets: ReadonlyArray<FeeBracket>, verifiedAuthorityHosts: readonly string[] = []): string[] {
+  const out = new Set<string>();
+  for (const b of brackets ?? []) {
+    const c = b.corroboration;
+    if (!c?.corroborated || !clean(c.matchedLine) || Number.isNaN(Date.parse(clean(c.checkedAt)))) continue;
+    if (isOfficialSourceHost(clean(c.sourceUrl), verifiedAuthorityHosts)) out.add(sourceHostOf(clean(c.sourceUrl)));
+  }
+  return [...out].filter(Boolean);
+}
+
+/** A LEDGER FROM PAGES A LOOKUP READ ITSELF: the same retrieval trail a research pass keeps, built
+ *  from the page texts a lookup's own polite reader returned in this run, so a fee the lookup lands
+ *  is corroborated against bytes Keelix retrieved exactly as a researched one is. Pages with no
+ *  http(s) address or no text are left out; an empty result is no ledger at all. */
+export function feeLedgerFromPages(pages: ReadonlyArray<{ url: string; text: string }>): FeeDocumentLedger | undefined {
+  const seen = new Set<string>();
+  const evidence: FeeResearchEvidence[] = [];
+  const corpus: string[] = [];
+  for (const pg of pages ?? []) {
+    const url = clean(pg?.url);
+    const body = String(pg?.text ?? "");
+    if (!/^https?:\/\//i.test(url) || !body.trim() || seen.has(url)) continue;
+    seen.add(url);
+    evidence.push({ url, via: "http", status: 200, kind: /\.pdf(?:$|[?#])/i.test(url) ? "pdf" : "html", bytes: body.length, handed: 0 });
+    corpus.push(body);
+  }
+  return evidence.length ? { evidence, corpus } : undefined;
+}
+
 export function saveFeeSchedule(
   db: AppDb,
   input: { state: string; ahj?: string; utility?: string; track: FeeTrack; discipline?: string },
@@ -1340,9 +1446,18 @@ export function saveFeeSchedule(
     /** A STATE SURCHARGE THE AGENCY'S OWN CITED SOURCE STATES (close M3). Passed only by the per-job
      *  lookup's fee landing (permitProcessLookup.applyLookupFees), and only when the quote that passed
      *  acceptCited itself prints the percentage and that percentage is within the state's cited
-     *  maximum (permitProcess.STATE_PERMIT_RULES.surcharge). Attached to every bracket whose label
-     *  does not already include surcharges; the read path keeps the 12% form it has always kept. */
+     *  maximum (the state's cited fee record, stateFeeRules). Attached to every bracket whose label
+     *  does not already include surcharges, after the same check against that record (#674). */
     citedStateSurcharge?: { percent: number; quote: string; sourceUrl: string };
+    /** WHEN THE CITED SOURCE WAS READ, stated by a caller that read it itself (a lookup's own
+     *  lookedUpAt). A research pass needs not say: its ledger is this process's own retrieval and
+     *  the save time is the read time. With neither, the sources carry no read date. */
+    fetchedAt?: string;
+    /** Hosts a PERSON verified as this authority's own, when the caller holds them (the utility
+     *  track: the utility's person-verified filing row). The permit track reads its own
+     *  (officialAuthorityHosts). Used only to tell whether a row's printed lines were read on an
+     *  official host (officialBracketHosts); never a promotion. */
+    verifiedAuthorityHosts?: readonly string[];
   } = {},
 ): FeeScheduleResearchOutcome {
   const track = input.track;
@@ -1361,10 +1476,11 @@ export function saveFeeSchedule(
   // read. Without one: untrusted, and corroboration is stripped — a caller that
   // cannot show what it read cannot claim to have read it.
   const brackets = opts.corroborateAgainst
-    ? normalizeBrackets(corroborateBrackets({...finding, discipline}, opts.corroborateAgainst), { trusted: true })
+    ? normalizeBrackets(corroborateBrackets({...finding, discipline}, opts.corroborateAgainst, stateSurchargeRuleFor(db, input.state)), { trusted: true })
     : normalizeBrackets(finding.brackets || [], {});
   const cited = opts.citedStateSurcharge;
-  if (cited && cited.percent === 12 && clean(cited.quote) && /^https?:\/\//i.test(clean(cited.sourceUrl))) {
+  if (cited && printedSurchargeFitsStateRule(cited.percent, stateSurchargeRuleFor(db, input.state))
+    && clean(cited.quote) && /^https?:\/\//i.test(clean(cited.sourceUrl))) {
     for (const b of brackets) {
       if (!b.stateSurcharge && !feeIncludesSurcharges(`${b.label ?? ""}`)) {
         b.stateSurcharge = { percent: cited.percent, quote: clean(cited.quote).slice(0, 300), sourceUrl: clean(cited.sourceUrl) };
@@ -1445,6 +1561,28 @@ export function saveFeeSchedule(
     };
   }
 
+  // AN OFFICIAL ROW IS REFRESHED ONLY FROM ITS OWN OFFICIAL HOST (rule 3's official tier, applied
+  // to fees 2026-11-11). Where the stored row's printed lines were read by Keelix on the
+  // authority's own official page, a later finding replaces them only when it, too, shows a read
+  // of a printed line on that same host. Anything else (a search answer with no document behind
+  // it, another site's copy, a hand-applied finding) is recorded in notes for a person, exactly as
+  // a finding against a person-verified row is, and nothing else changes. A person's Confirm, or a
+  // finding that resolves a conflict, is not stopped here.
+  if (existing && !finding.resolvesConflict && status !== "conflicted") {
+    const hosts = [...(opts.verifiedAuthorityHosts ?? []), ...(track === "permit" ? safeVerifiedHosts(db, clean(input.state), clean(input.ahj)) : [])];
+    const standing = officialBracketHosts(existing.brackets, hosts);
+    if (standing.length && !officialBracketHosts(brackets, hosts).some((h) => standing.includes(h))) {
+      const segment = `Research ${ts.slice(0, 10)} (NOT applied — the row's lines were read on ${standing.join(", ")}, the authority's own official page, and this finding shows no read of that site): ${findingSummary({ ...finding, brackets })}`;
+      db.run("UPDATE fee_schedules SET notes = ?, updated_at = ? WHERE id = ?", [mergeNotes(existing.notes, [segment]), ts, existing.id]);
+      logger.info("fees", "write refused against an official-source fee schedule", { profileKey, track, discipline });
+      return {
+        ...base, saved: false, refusedVerified: false, refusedConflicted: false, refusedOfficial: true,
+        reason: `Row was read on ${standing.join(", ")} (the authority's own official page) — finding recorded in notes, schedule unchanged. It is refreshed only by a read of that same site, or by a person.`,
+        schedule: getFeeSchedule(db, profileKey, track, discipline),
+      };
+    }
+  }
+
   // EVERY ROW EXPLAINS ITSELF, conflicted or not. A finding that named its
   // sources keeps them; one that did not gets a single entry synthesised from
   // itself, because a row with an empty source list cannot say where its number
@@ -1460,6 +1598,9 @@ export function saveFeeSchedule(
       brackets,
     });
   }
+  // THE READ DATE, where one can honestly be stated (FeeScheduleSource.fetchedAt).
+  const readAt = isoInstant(opts.fetchedAt) || (opts.corroborateAgainst?.evidence.length ? ts : "");
+  if (readAt) for (const src of sources) if (!src.fetchedAt) src.fetchedAt = readAt;
 
   const notes = mergeNotes(existing?.notes, noteSegments(finding.notes));
   // A schedule that says nothing about payment does not erase what the row already
@@ -1569,6 +1710,9 @@ export interface FeeDocumentLedger {
    *  that refused us are the half of that sentence `evidence` cannot supply.
    *  Optional so a ledger built as a literal (tests, older callers) still types. */
   attempted?: string[];
+  /** The asks that came back with no bytes, each with the reason the fetch gave (fee round,
+   *  2026-11): what a pass that saved nothing hands a person to read (feeDocumentsNotRetrieved). */
+  notRetrieved?: Array<{ url: string; reason: string }>;
 }
 
 export function newFeeDocumentLedger(): FeeDocumentLedger {
@@ -1634,6 +1778,8 @@ const rowText = (row: PdfTextRow): string => `p${row.page}  ${row.cells.join(" |
 
 /** Rows matching the filter, each with one line of context either side, so a
  *  bracket row is never read without the "Renewable Energy" heading above it. */
+const PRINTED_SURCHARGE_ROW_RE = /\d+(?:\.\d+)?\s*%.*surcharge|\bsurcharge\s*\d+(?:\.\d+)?\s*%/i;
+
 function selectRows(rows: PdfTextRow[], pages: number[], find: string): { picked: PdfTextRow[]; how: string } {
   const ordered = [...rows].sort((a, b) => a.page - b.page || b.y - a.y);
   if (pages.length) {
@@ -1647,7 +1793,9 @@ function selectRows(rows: PdfTextRow[], pages: number[], find: string): { picked
   };
   const keep = new Set<number>();
   ordered.forEach((r, i) => {
-    if (!hit(r) && !/12\s*%.*surcharge|Community Dev surcharge 5%/i.test(r.cells.join(" "))) return;
+    // A printed surcharge row at ANY rate is kept as context (#674): which rate is the state's is
+    // decided later, against the state's cited record, never by the row selector.
+    if (!hit(r) && !PRINTED_SURCHARGE_ROW_RE.test(r.cells.join(" "))) return;
     for (let j = Math.max(0, i - 1); j <= Math.min(ordered.length - 1, i + 1); j++) keep.add(j);
   });
   return {
@@ -1764,12 +1912,14 @@ export async function openFeeDocument(
   try {
     doc = await fetchPublicDocument(url, opts);
   } catch (err) {
+    (ledger.notRetrieved ??= []).push({ url, reason: err instanceof Error ? err.message : String(err) });
     return `Could not retrieve ${url}: ${err instanceof Error ? err.message : String(err)}`;
   }
   if (!doc.ok || !doc.bytes) {
     // The reason names what blocked us — status, Server header, whether a real
     // window was tried. That is a fact about this jurisdiction worth reporting
     // in notes, so it goes to the model rather than being flattened to "failed".
+    (ledger.notRetrieved ??= []).push({ url, reason: clean(doc.reason) });
     return `Could not retrieve ${url}. ${doc.reason}`;
   }
 
@@ -1958,7 +2108,14 @@ function labelFragments(label: string): string[] {
  *  That is the guard, not the `trusted` flag: even if a model's output reached
  *  here with `corroborated: true` glued to an invented fee, this function throws
  *  it away and asks the corpus. */
-export function corroborateBrackets(finding: FeeScheduleFinding, ledger: FeeDocumentLedger): FeeBracket[] {
+export function corroborateBrackets(
+  finding: FeeScheduleFinding,
+  ledger: FeeDocumentLedger,
+  /** The job state's surcharge record (stateFeeRules.stateSurchargeRuleFor). Required, not
+   *  defaulted: a printed state surcharge is held only at a rate this record allows (#674), and a
+   *  caller that forgot it must be a compile error rather than a silent rate. */
+  stateRule: StateSurchargeAnswer,
+): FeeBracket[] {
   const brackets: FeeBracket[] = (finding.brackets || []).map((b) => {
     const copy: FeeBracket = { ...b };
     delete copy.corroboration;
@@ -2028,13 +2185,19 @@ export function corroborateBrackets(finding: FeeScheduleFinding, ledger: FeeDocu
     // Deliberately narrow: only a mandatory surcharge on ALL permit fees.
     // "12% of valuation", optional review, and totals already including the
     // surcharge must never be converted into an additional permit charge.
+    // THE RATE IS READ OFF THE PRINT AND CHECKED AGAINST THE STATE'S RECORD (#674) — never a
+    // literal: a state whose agency prints its own surcharge at another rate gets it held, and a
+    // printed rate the record does not allow (15% against a 12% maximum) is not held at all.
     const corpus = String(ledger.corpus[hitLine.doc] ?? "").replace(/\s+/g, " ");
-    const surcharge = /\b12\s*%\s+surcharge\s+fee\s+as\s+mandated\s+by\s+the\s+State\s+Building\s+Codes\s+Division\s+is\s+applied\s+to\s+all\s+permit\s+fees/i.exec(corpus);
-    const printed = /State surcharge\s*\(12% of permit fee\):\s*\$\s*(\d+(?:\.\d{2})?)/i.exec(corpus);
+    const mandated = /\b(\d+(?:\.\d+)?)\s*%\s+surcharge\s+fee\s+as\s+mandated\s+by\s+the\s+State\b[^.;]{0,80}?\bis\s+applied\s+to\s+all\s+permit\s+fees/i.exec(corpus);
+    const surcharge = mandated && printedSurchargeFitsStateRule(Number(mandated[1]), stateRule) ? mandated : null;
+    const printed = /State surcharge\s*\((\d+(?:\.\d+)?)% of permit fee\):\s*\$\s*(\d+(?:\.\d{2})?)/i.exec(corpus);
     const applicationSurcharge = printed && /prescriptive photovoltaic solar panel system permit fee/i.test(b.label ?? "")
-      && round2(b.feeUsd * .12) === Number(printed[1]) ? printed : null;
+      && printedSurchargeFitsStateRule(Number(printed[1]), stateRule)
+      && round2(b.feeUsd * (Number(printed[1]) / 100)) === Number(printed[2]) ? printed : null;
     if ((surcharge || applicationSurcharge) && !feeIncludesSurcharges(`${b.label ?? ''} ${hitLine.raw}`)) {
-      b.stateSurcharge = { percent: 12, quote: (surcharge || applicationSurcharge)![0], sourceUrl: b.corroboration.sourceUrl };
+      const held = (surcharge || applicationSurcharge)!;
+      b.stateSurcharge = { percent: Number(held[1]), quote: held[0], sourceUrl: b.corroboration.sourceUrl };
     }
     // A published APPLICATION can supply two surcharge rows while the authority's separate schedule
     // supplies the base (Coos County was the first). Require BOTH retrieved sources from the same
@@ -2045,11 +2208,19 @@ export function corroborateBrackets(finding: FeeScheduleFinding, ledger: FeeDocu
     if (companions.length) {
       const formIndex = ledger.evidence.findIndex(e => companions.includes(e.url));
       const form = formIndex < 0 ? '' : String(ledger.corpus[formIndex]).replace(/\s+/g,' ');
-      if (/12%\s*surcharge\s*\(?\s*\.?12\s*x\s*subtotal/i.test(form) && /Community Dev surcharge 5%/i.test(form)
+      // "N% surcharge (.N x subtotal)": the printed percentage and its printed multiplier must be the
+      // same number, and the percentage must be one the state's record allows (#674).
+      const stateRow = /(\d+(?:\.\d+)?)%\s*surcharge\s*\(?\s*(0?\.\d+)\s*x\s*subtotal/i.exec(form);
+      const community = /Community Dev surcharge (\d+(?:\.\d+)?)%/i.exec(form);
+      const statePercent = stateRow ? Number(stateRow[1]) : NaN;
+      const communityPercent = community ? Number(community[1]) : NaN;
+      if (stateRow && community && Math.abs(statePercent / 100 - Number(stateRow[2])) < 1e-9
+        && printedSurchargeFitsStateRule(statePercent, stateRule)
+        && communityPercent > 0 && communityPercent <= 100
         && !feeIncludesSurcharges(`${b.label ?? ''} ${hitLine.raw}`)) {
         const sourceUrl = ledger.evidence[formIndex].url;
-        b.stateSurcharge = {percent:12,quote:'12% surcharge (.12 x subtotal)',sourceUrl};
-        b.communitySurcharge = {percent:5,quote:'Community Dev surcharge 5%',sourceUrl};
+        b.stateSurcharge = {percent:statePercent,quote:`${stateRow[1]}% surcharge (${stateRow[2]} x subtotal)`,sourceUrl};
+        b.communitySurcharge = {percent:communityPercent,quote:`Community Dev surcharge ${community[1]}%`,sourceUrl};
       }
     }
   }
@@ -2174,6 +2345,81 @@ export function corroborationNamesThisPermit(
   track: FeeTrack,
 ): boolean {
   return corroborationVerdict(line, track) === "names_permit";
+}
+
+/** WHERE AN OFFICIAL FEE WAS READ: the host as shown ("from <host>"), the document, and when. */
+export interface OfficialFeeSource { host: string; sourceUrl: string; fetchedAt: string }
+
+/**
+ * IS THIS LINE'S AMOUNT A FEE READ ON THE AUTHORITY'S OWN OFFICIAL PAGE? (owner, 2026-11-11: "If its
+ * from an official source we can use it to come into us as verified already" — rule 3's official
+ * tier, #683, applied to fees.)
+ *
+ * The evidence is the bracket's corroboration, which only corroborateBrackets writes and only from
+ * bytes this process retrieved: the printed row where the label and the fee sit together
+ * (matchedLine), the document it was read from (sourceUrl) and when (checkedAt). On top of that, ALL
+ * of these, or the line stays seeded:
+ *   - the document's host passes the ONE shared predicate (citationShortfalls: a government host, or
+ *     a domain a person verified as the authority's own — `verifiedAuthorityHosts`);
+ *   - the printed row itself states this line's base amount, and carries a read time;
+ *   - the row (with its heading) NAMES this permit (corroborationVerdict "names_permit"): a bare
+ *     size row or another trade's row is a machine's guess at which fee this is, never official;
+ *   - the amount is the printed one, not computed from a guessed valuation (a state surcharge the
+ *     quote adds from the state's own cited rule is a separate line with its own citation);
+ *   - a line reached through another authority's pointer has that hop vouched by a person (who
+ *     collects is not something a fee row's own print states).
+ * A person-verified line is not "official": a person outranks a page (rule 3). Pure; no DB.
+ */
+export function officialFeeLineSource(
+  line: Pick<FeeScheduleLine, "feeUsd" | "baseFeeUsd" | "corroboration" | "bracketLabel" | "discipline" | "confidence" | "valuationEstimated" | "delegatedFromScheduleId" | "hopVouched">,
+  track: FeeTrack,
+  verifiedAuthorityHosts: readonly string[] = [],
+): OfficialFeeSource | null {
+  if (line.feeUsd == null || line.confidence !== "seeded" || line.valuationEstimated === true) return null;
+  if (line.delegatedFromScheduleId && line.hopVouched !== true) return null;
+  const c = line.corroboration;
+  if (!c?.corroborated || corroborationVerdict(line, track) !== "names_permit") return null;
+  const printed = line.baseFeeUsd ?? line.feeUsd;
+  const { host, reasons } = citationShortfalls({
+    sourceUrl: clean(c.sourceUrl), quote: c.matchedLine, fetchedAt: clean(c.checkedAt), verifiedAuthorityHosts,
+    quoteStatesValue: (q) => quoteNamesValue(q, printed),
+  });
+  return reasons.length || !host ? null : { host, sourceUrl: clean(c.sourceUrl), fetchedAt: clean(c.checkedAt) };
+}
+
+/**
+ * THE TOTAL'S OFFICIAL SOURCE: only when the total exists, every line in it is person-verified or
+ * official (`hostsFor` gives each line's authority its person-verified hosts), at least one is
+ * official, and every other charge summed into it carries its own printed row from an official host.
+ * The weakest link, like confidence: one seeded line makes the total seeded. The source shown is the
+ * oldest official read among the lines.
+ */
+export function officialFeeResolutionSource(
+  resolution: Pick<ProjectFeeResolution, "feeUsd" | "lines" | "charges" | "valuationEstimated">,
+  track: FeeTrack,
+  hostsFor: (line: FeeScheduleLine) => readonly string[],
+): OfficialFeeSource | null {
+  if (resolution.feeUsd == null || resolution.valuationEstimated === true || !resolution.lines.length) return null;
+  const officials: OfficialFeeSource[] = [];
+  for (const line of resolution.lines) {
+    if (line.confidence === "verified") continue;
+    const o = officialFeeLineSource(line, track, hostsFor(line));
+    if (!o) return null;
+    officials.push(o);
+  }
+  if (!officials.length) return null;
+  const allHosts = [...new Set(resolution.lines.flatMap((l) => [...hostsFor(l)]))];
+  for (const c of resolution.charges ?? []) {
+    if (c.partOfLineFee || c.amountUsd == null) continue;
+    const short = citationShortfalls({
+      sourceUrl: clean(c.sourceUrl), quote: c.quote, fetchedAt: officials[0].fetchedAt, verifiedAuthorityHosts: allHosts,
+      // THE SAME BAR A LINE MEETS (Helm, PR #157): the charge's own printed words must state ITS
+      // amount. A charge whose quote prints no amount, or another amount, leaves the total seeded.
+      quoteStatesValue: (q) => quoteNamesValue(q, c.amountUsd as number),
+    });
+    if (short.reasons.length) return null;
+  }
+  return [...officials].sort((a, b) => a.fetchedAt.localeCompare(b.fetchedAt))[0];
 }
 
 /** One line for the notes trail, in the operator's vocabulary. Says CORROBORATED
@@ -2837,7 +3083,9 @@ export const claudeFeeScheduleResearcher: FeeScheduleResearcher = async (input, 
   const timer = setTimeout(() => { timedOut = true; controller.abort(); }, timeoutMs);
   const ledger = options?.ledger ?? newFeeDocumentLedger();
   try {
-    const client = new Anthropic({ apiKey, maxRetries: 3, timeout: FEE_RESEARCH_CLIENT_TIMEOUT_MS });
+    // createModelClient, never `new Anthropic`: this loop forwards fetched documents as tool results,
+    // and every request it sends passes the rule-2 payload scan (modelPayloadScan.ts) first.
+    const client = createModelClient({ apiKey, maxRetries: 3, timeout: FEE_RESEARCH_CLIENT_TIMEOUT_MS });
     logger.debug("fees", "→ researchFeeSchedule", { model, track: input.track, state: input.state });
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -2862,7 +3110,7 @@ export const claudeFeeScheduleResearcher: FeeScheduleResearcher = async (input, 
       if (Date.now() >= deadline) { timedOut = true; controller.abort(); break; }
       const startedAt = Date.now();
       const t0 = performance.now();
-      const msg = await client.messages
+      const msg = await runInModelCallScope({ label: `researchFeeSchedule[${who4}]#${turn + 1}` }, () => client.messages
         .stream(
           {
             model,
@@ -2887,7 +3135,7 @@ export const claudeFeeScheduleResearcher: FeeScheduleResearcher = async (input, 
           },
           { signal: controller.signal },
         )
-        .finalMessage();
+        .finalMessage());
       // EVERY TURN IS A RECORD, and it carries the cache columns on purpose: a
       // cache that silently stops hitting looks exactly like a cache that is
       // working, right up until the bill. cacheRead near zero on turn two of a pass
@@ -2984,7 +3232,10 @@ export const claudeFeeScheduleResearcher: FeeScheduleResearcher = async (input, 
     // Re-derived from retrieved bytes, and it discards anything the model may
     // have attached to its own brackets. Runs BEFORE the quote check so the
     // notes describe the same corpus the corroboration was drawn from.
-    finding.brackets = corroborateBrackets(finding, ledger);
+    // The state's surcharge record travels on the input (researchFeeSchedule reads it): this preview
+    // must hold exactly what the save re-derives, or attachAncillaryCharges below would keep a
+    // surcharge as an ancillary charge that the save then also holds on the bracket — twice.
+    finding.brackets = corroborateBrackets(finding, ledger, input.stateSurcharge ?? { status: "not_researched", state: clean(input.state) });
 
     // THE REST OF THE BILL. Gated against the same corpus, then ATTACHED TO EVERY
     // BRACKET: these charges are levied on the FILING, not on one size tier, and
@@ -3132,6 +3383,21 @@ export async function researchFeeSchedule(
       return { found: true, saved: false, refusedVerified: false, refusedConflicted: false, profileKey, track, schedule: landed.schedule, finding: null, skipped: "lookup_fee_landed", reason };
     }
   }
+  // THE SAME FOR A UTILITY (fee round, 2026-11): the utility lookup now lands the application fee it
+  // read on the utility's own page (utilityFeeLanding). While that row stands as the lookup wrote
+  // it, a second paid search for the same fee is skipped, named the same way.
+  if (track === "nem") {
+    try {
+      const { getUtilityFilingLookup } = await import("./utilityFilingLookup");
+      const { lookupLandedUtilityFee } = await import("./utilityFeeLanding");
+      const landed = lookupLandedUtilityFee(getFeeSchedule(db, profileKey, "nem", ""), getUtilityFilingLookup(db, clean(input.state), subject));
+      if (landed) {
+        const reason = `Skipped — no research ran: the utility lookup already landed a cited application fee for ${subject} (${landed.summary}) from ${landed.schedule.sourceUrl}; the fee sheet shows that fee and its source.`;
+        logger.info("fees", "fee research skipped — the utility lookup already landed this fee", { profileKey, track, sourceUrl: landed.schedule.sourceUrl });
+        return { found: true, saved: false, refusedVerified: false, refusedConflicted: false, profileKey, track, schedule: landed.schedule, finding: null, skipped: "lookup_fee_landed", reason };
+      }
+    } catch { /* the lookup is optional here: research runs as before */ }
+  }
   // Seed the search with what the KB already holds — several permit_utility_knowledge
   // rows carry the AHJ's own fee-page URL in their notes, which is the page we want.
   let knownContext: string | undefined;
@@ -3152,7 +3418,8 @@ export async function researchFeeSchedule(
   const ledger = options.ledger ?? newFeeDocumentLedger();
   let finding: FeeScheduleFinding;
   try {
-    finding = await researcher({ state: input.state, ahj: input.ahj, utility: input.utility, track, discipline: input.discipline, knownContext }, { ledger });
+    finding = await researcher({ state: input.state, ahj: input.ahj, utility: input.utility, track, discipline: input.discipline, knownContext,
+      stateSurcharge: stateSurchargeRuleFor(db, input.state) }, { ledger });
   } catch (err) {
     finding = emptyFinding(`Researcher threw: ${err instanceof Error ? err.message : String(err)}`);
   }
@@ -3173,7 +3440,26 @@ export async function researchFeeSchedule(
   // The caller's discipline travels on the INPUT side of saveFeeSchedule, where it
   // wins over anything the researcher inferred — the row that lands is keyed to the
   // permit the caller asked to price (see FeeScheduleResearchInput.discipline).
-  return saveFeeSchedule(db, { state: input.state, ahj: input.ahj, utility: input.utility, track, discipline: input.discipline }, finding, { corroborateAgainst: ledger });
+  const outcome = saveFeeSchedule(db, { state: input.state, ahj: input.ahj, utility: input.utility, track, discipline: input.discipline }, finding, { corroborateAgainst: ledger });
+  // A PASS THAT SAVED NOTHING NAMES WHAT IT COULD NOT READ, so a person knows which document to open.
+  if (!outcome.saved && !outcome.refusedVerified && !outcome.refusedConflicted) {
+    const unread = feeDocumentsNotRetrieved(ledger);
+    if (unread.length) outcome.unread = unread;
+  }
+  return outcome;
+}
+
+/** Every document this pass asked for that came back with no bytes and was not retrieved on a
+ *  later ask (FeeDocumentLedger.notRetrieved), in the order tried, with the fetch's own reason. */
+export function feeDocumentsNotRetrieved(ledger: FeeDocumentLedger): Array<{ url: string; reason: string }> {
+  const key = (u: string) => clean(u).replace(/[#?].*$/, "").replace(/\/+$/, "").toLowerCase();
+  const got = new Set(ledger.evidence.map((e) => key(e.url)));
+  const out: Array<{ url: string; reason: string }> = [];
+  for (const n of ledger.notRetrieved ?? []) {
+    if (!/^https?:\/\//i.test(clean(n.url)) || got.has(key(n.url)) || out.some((o) => key(o.url) === key(n.url))) continue;
+    out.push({ url: clean(n.url).slice(0, 500), reason: clean(n.reason).slice(0, 160) });
+  }
+  return out.slice(0, 6);
 }
 
 // ---------------------------------------------------------------------------
@@ -3553,6 +3839,10 @@ interface FeeEvalInputs {
    *  walked on an estimate produces a number to the cent that is only as good as the guess
    *  underneath it, and a fee that looks computed must not hide a valuation that was not. */
   valuationIsEstimate?: boolean;
+  /** The total cost of the system (the contract), for a fee printed as a percentage "of cost"
+   *  (#692). Absent or null = not known, and such a fee then asks for it rather than pricing. */
+  totalCostUsd?: number | null;
+  totalCostIsEstimate?: boolean;
   permitPath: FeePathInput;
 }
 
@@ -3647,6 +3937,34 @@ function applicableSchedules(db: AppDb, key: string, track: FeeTrack): FeeSchedu
   return all;
 }
 
+/** THE COSTS A SCHEDULE'S FEE CAN BE TAKEN ON, resolved only when it needs them.
+ *
+ *  The valuation is walked when the schedule brackets on valuation (as before) OR when one of its
+ *  brackets prints a percentage of a cost (#692): a flat or "other" row can be "1.5% of cost" too.
+ *  The contract (total cost) is resolved only for the latter. A caller that brought its own inputs
+ *  (lookupPublishedFee, no parser snapshot) decided them: a cost it did not bring is unknown. */
+function costInputsFor(
+  project: Pick<ProjectRecord, "systemSizeDcKw" | "parserSnapshot">,
+  schedule: FeeScheduleRecord,
+  inputs: FeeEvalInputs | undefined,
+): { valuationUsd: number | null; valuationIsEstimate: boolean; totalCostUsd: number | null; totalCostIsEstimate: boolean } {
+  if (inputs) {
+    return {
+      valuationUsd: inputs.valuationUsd, valuationIsEstimate: inputs.valuationIsEstimate === true,
+      totalCostUsd: inputs.totalCostUsd ?? null, totalCostIsEstimate: inputs.totalCostIsEstimate === true,
+    };
+  }
+  const percent = schedule.brackets.some((b) => bracketDescribesPercentOfCost(b.label));
+  const valuation = schedule.basis !== "valuation" && !percent ? null : resolveValuation(project.parserSnapshot, project.systemSizeDcKw);
+  const cost = percent ? resolveContractCost(project.parserSnapshot, project.systemSizeDcKw) : null;
+  return {
+    valuationUsd: valuation ? valuation.value : null,
+    valuationIsEstimate: valuation?.method !== "contract",
+    totalCostUsd: cost ? cost.value : null,
+    totalCostIsEstimate: cost?.method !== "contract",
+  };
+}
+
 export function feeLinesForProject(
   db: AppDb,
   project: Pick<ProjectRecord, "state" | "ahj" | "utility" | "systemSizeAcKw" | "systemSizeDcKw" | "parserSnapshot">,
@@ -3680,12 +3998,10 @@ export function feeLinesForProject(
     const hop = followCollectedBy(db, row);
     const schedule = hop.record;
     const hoppedFrom = hop.collectedBy ? (track === "nem" ? row.utility : row.ahj) : "";
-    const valuation = inputs || schedule.basis !== "valuation" ? null : resolveValuation(project.parserSnapshot, project.systemSizeDcKw);
-    const valuationUsd = inputs ? inputs.valuationUsd : (valuation ? valuation.value : null);
-    const valuationIsEstimate = inputs ? inputs.valuationIsEstimate === true : valuation?.method !== "contract";
+    const { valuationUsd, valuationIsEstimate, totalCostUsd, totalCostIsEstimate } = costInputsFor(project, schedule, inputs);
     const evaluated: ReturnType<typeof evaluateSchedule> = hop.unresolved
       ? { feeUsd: null, bracketLabel: "", bracketQuote: "", corroboration: undefined, reason: hop.unresolved }
-      : evaluateSchedule(schedule, { kw, kwSource: which, valuationUsd, valuationIsEstimate, track, permitPath, electricalReviewRequired: knownElectricalReviewRequired(project.parserSnapshot),
+      : evaluateSchedule(schedule, { kw, kwSource: which, valuationUsd, valuationIsEstimate, totalCostUsd, totalCostIsEstimate, track, permitPath, electricalReviewRequired: knownElectricalReviewRequired(project.parserSnapshot),
         // The FILING is the row asked for (a hopped city row is still the electrical
         // permit), not the collecting authority's row it hops to.
         serviceFeeder: serviceFeederLinesFor(project, track, row.discipline), stateSurcharge: stateSurchargeRuleFor(db, schedule.state) });
@@ -3703,6 +4019,7 @@ export function feeLinesForProject(
       paymentMethod: schedule.paymentMethod,
       sourceUrl: schedule.sourceUrl,
       sourceQuote: schedule.sourceQuote,
+      sourceReadAt: feeSourceReadAt(schedule),
       bracketQuote: evaluated.bracketQuote,
       ...(evaluated.corroboration ? { corroboration: evaluated.corroboration } : {}),
       // A hopped line's confidence is the WEAKER of the pointer and the collecting row — a
@@ -3797,8 +4114,155 @@ const FORMULA_LABEL =
   /\bper\s+(add|addl|additional|each)|\beach\s+(add|addl|additional|kva|kw|kilowatt|\$)|\bfor\s+each\b|\bplus\s*\$|\+\s*\$[\d.,]+\s*(for|per)|\bper\s+(kva|kw|kilowatt)\b|\bper\s+\$\s*1,?000|\brate\s+plus\b/i;
 
 export function bracketDescribesFormula(label: string | undefined): boolean {
-  return FORMULA_LABEL.test(String(label ?? "")) || /\bno\s*[-–]?\s*additional charge\b/i.test(String(label ?? ""));
+  return FORMULA_LABEL.test(String(label ?? "")) || /\bno\s*[-–]?\s*additional charge\b/i.test(String(label ?? ""))
+    || bracketDescribesPercentOfCost(label);
 }
+
+// A PERCENTAGE OF WHAT THE JOB COSTS IS A FORMULA TOO (#692).
+//
+// "$180.00 base fee + .5% (of portion over $10,000.00)" was stored with feeUsd 180 and, because no
+// pattern above names a percentage, priced as a flat $180: a value-priced permit quoted at its base,
+// complete-looking and short by whatever the job is worth. The same for "sixty dollars ($60) plus
+// two percent (2%) of total wiring cost" and "Residential Solar Panels 1.5% of cost, min $200, max
+// $1,000". Any label that charges a percentage OF a cost (cost, value, valuation, wiring, a portion
+// of it) now describes a formula, so it either computes (parsePercentOfCostFormula) or REFUSES —
+// never the base. A percentage of a FEE (a surcharge, a plan review "65% of the permit fee") is not
+// this: its noun is a fee, and those are priced as charges on the permit (ancillaryCharges).
+//   The second pattern is the multiplication spelling ("(total cost of system x 0.025) + 60"). It is
+// recognised so the row refuses; it is not computed, because nothing here reads its tiers yet.
+const PERCENT_OF_COST_RE = /(?:%|\bpercent\b)\s*\)?\s*\(?\s*of\s+(?:the\s+)?(?:(?:total|declared|project|job|construction|system|installed|contract|estimated)\s+){0,3}(?:portion|costs?|value|valuation|wiring|electrical\s+costs?|contract|price)\b/i;
+const MULTIPLIED_COST_RE = /\b(?:costs?|valuation|value)\b[^|;]{0,40}?[x×*]\s*0?\.\d+/i;
+
+export function bracketDescribesPercentOfCost(label: string | undefined): boolean {
+  const text = String(label ?? "");
+  return PERCENT_OF_COST_RE.test(text) || MULTIPLIED_COST_RE.test(text);
+}
+
+/** Which cost a percentage is taken on, read off the printed words (#692):
+ *    valuation    — "value", "valuation", or an unnamed "portion" on a bracket bounded by valuation:
+ *                   the job valuation the permit application declares;
+ *    total_cost   — "cost", "contract", "price": what the work costs, the contract
+ *                   (valuation.resolveContractCost), never the reduced declared valuation;
+ *    wiring_cost  — "wiring" / "electrical cost": no job carries it yet, so such a fee refuses. */
+export type PercentCostBasis = "valuation" | "total_cost" | "wiring_cost";
+
+/** A percentage-of-cost formula read out of a bracket's own printed wording. */
+export interface PercentOfCostFormula {
+  /** The flat part printed before the percentage ("$180.00 base fee +"); 0 when none is printed. */
+  baseUsd: number;
+  percent: number;
+  /** The percentage is charged on the cost ABOVE this ("portion over $10,000"); 0 = on all of it. */
+  aboveUsd: number;
+  minUsd: number | null;
+  maxUsd: number | null;
+  basis: PercentCostBasis;
+  /** The clause this was read from, verbatim. */
+  quote: string;
+}
+
+const PERCENT_WORDS: Record<string, number> = {
+  "one half of one": 0.5, "one quarter of one": 0.25, "three quarters of one": 0.75,
+  one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10,
+};
+const WORD_PERCENT_RE = /\b(one[- ]half\s+of\s+one|one[- ]quarter\s+of\s+one|three[- ]quarters\s+of\s+one|one|two|three|four|five|six|seven|eight|nine|ten)\s+percent\b/gi;
+const DIGIT_PERCENT_RE = /(\d*\.?\d+)\s*(?:%|percent\b)/gi;
+
+/**
+ * "$180.00 base fee + .5% (of portion over $10,000.00)" IS ARITHMETIC (#692). Reads, from the label
+ * alone (the ladder's rule: no new column, no new place for an untrusted writer to put a number):
+ *   an optional base before "+"/"plus"; ONE percentage, in digits and/or words ("two percent (2%)",
+ *   "one-half of one percent (.5%)" — when both are printed they must agree); what it is OF (the
+ *   basis); an optional threshold ("over" / "in excess of" $X); an optional "min $A" / "max $B".
+ * Returns null — and the bracket then REFUSES, since bracketDescribesFormula is true for it — when
+ * any part is unreadable: two percentages, a base in words only ("sixty dollars plus"), a threshold
+ * with no printed amount, a dollar figure the reader cannot place, "whichever is greater", an
+ * unnamed "portion" on a bracket that is not bounded by valuation, or a printed base that is not
+ * the bracket's own feeUsd (two readings of one schedule disagree — the ladder's rule). With no
+ * base printed, the stored feeUsd must be 0, the percentage, or the printed min/max: anything else
+ * is a number no part of the label explains.
+ */
+export function parsePercentOfCostFormula(b: FeeBracket): PercentOfCostFormula | null {
+  const label = String(b.label ?? "");
+  if (!PERCENT_OF_COST_RE.test(label)) return null;
+  if (/\bwhichever\b/i.test(label)) return null;
+  const money = (s: string): number => Number(s.replace(/,/g, ""));
+
+  const digits = [...label.matchAll(DIGIT_PERCENT_RE)];
+  const words = [...label.matchAll(WORD_PERCENT_RE)];
+  if (digits.length > 1 || words.length > 1 || (!digits.length && !words.length)) return null;
+  const fromDigits = digits.length ? Number(digits[0][1]) : null;
+  const fromWords = words.length ? PERCENT_WORDS[words[0][1].toLowerCase().replace(/[-\s]+/g, " ")] ?? null : null;
+  if (words.length && fromWords == null) return null;
+  if (fromDigits != null && fromWords != null && Math.abs(fromDigits - fromWords) > 1e-9) return null;
+  const percent = fromDigits ?? fromWords;
+  if (percent == null || !Number.isFinite(percent) || percent <= 0 || percent > 100) return null;
+
+  const marks = [...digits, ...words];
+  const start = Math.min(...marks.map((m) => m.index ?? 0));
+  const end = Math.max(...marks.map((m) => (m.index ?? 0) + m[0].length));
+  const pre = label.slice(0, start).replace(/\(\s*$/, "");
+  const post = label.slice(end);
+
+  // THE BASE: the amount right before "+"/"plus". A bracket's printed range before it ("$10,001
+  // and up: $180.00 base fee +") is allowed; a pre-clause with money or "dollars" and no "+" is a
+  // relation this reader does not know ("$500 or 2% …") and refuses.
+  let baseUsd = 0;
+  if (/(?:\+|\bplus\b)\s*$/i.test(pre)) {
+    const m = /\$\s*([\d,]+(?:\.\d+)?)\s*\)?\s*(?:base\s+fee\s*)?(?:\+|\bplus\b)\s*$/i.exec(pre);
+    if (!m) return null;
+    baseUsd = money(m[1]);
+  } else if (/\$\s*\d|\bdollars?\b|\bbase\b|\bmin(?:imum)?\b|\bmax(?:imum)?\b/i.test(pre)) {
+    return null;
+  }
+
+  // WHAT IT IS OF.
+  const of = /^\s*\)?\s*\(?\s*of\s+([^|;]{0,80})/i.exec(post);
+  if (!of) return null;
+  const tail = of[1];
+  let basis: PercentCostBasis | null = null;
+  if (/\b(?:wiring|electrical)\b/i.test(tail)) basis = "wiring_cost";
+  else if (/\b(?:costs?|contract|price)\b/i.test(tail)) basis = "total_cost";
+  else if (/\b(?:valuation|value)\b/i.test(tail)) basis = "valuation";
+  else if (/^(?:the\s+)?portion\b/i.test(tail) && (b.minValuationUsd != null || b.maxValuationUsd != null)) basis = "valuation";
+  if (!basis) return null;
+
+  // THE THRESHOLD, THE FLOOR, THE CEILING — and no other dollar figure after the percentage.
+  const over = /\b(?:over|above|exceeding|in\s+excess\s+of|more\s+than)\s*\$\s*([\d,]+(?:\.\d+)?)/i.exec(post);
+  if (!over && /\b(?:over|above|exceed\w*|excess|more\s+than|additional)\b/i.test(post)) return null;
+  const min = /\bmin(?:imum)?\.?(?:\s+fee)?\s*(?:of\s*)?[:=]?\s*\$\s*([\d,]+(?:\.\d+)?)/i.exec(post);
+  const max = /\bmax(?:imum)?\.?(?:\s+fee)?\s*(?:of\s*)?[:=]?\s*\$\s*([\d,]+(?:\.\d+)?)/i.exec(post);
+  const printedAfter = [...post.matchAll(/\$\s*[\d,]+(?:\.\d+)?/g)].length;
+  if (printedAfter !== [over, min, max].filter(Boolean).length) return null;
+  const aboveUsd = over ? money(over[1]) : 0;
+  const minUsd = min ? money(min[1]) : null;
+  const maxUsd = max ? money(max[1]) : null;
+  if (![baseUsd, aboveUsd, minUsd ?? 0, maxUsd ?? 0].every((n) => Number.isFinite(n) && n >= 0)) return null;
+  if (minUsd != null && maxUsd != null && minUsd > maxUsd) return null;
+
+  // THE FORMULA AND THE BRACKET MUST BE THE SAME MONEY.
+  if (baseUsd > 0) {
+    if (Math.abs(baseUsd - b.feeUsd) > 0.005) return null;
+  } else if (![0, percent, minUsd, maxUsd].some((v) => v != null && Math.abs(v - b.feeUsd) <= 0.005)) {
+    return null;
+  }
+  return { baseUsd, percent, aboveUsd, minUsd, maxUsd, basis, quote: label };
+}
+
+/** Price one percentage-of-cost formula. Returns null when the cost it is taken on is not known. */
+export function evaluatePercentOfCostFormula(f: PercentOfCostFormula, costUsd: number | null): number | null {
+  if (costUsd == null || !Number.isFinite(costUsd) || costUsd < 0) return null;
+  let fee = f.baseUsd + (f.percent / 100) * Math.max(0, costUsd - f.aboveUsd);
+  if (f.minUsd != null) fee = Math.max(fee, f.minUsd);
+  if (f.maxUsd != null) fee = Math.min(fee, f.maxUsd);
+  return round2(fee);
+}
+
+/** What each basis is called on a quote line. */
+const PERCENT_BASIS_NAME: Record<PercentCostBasis, string> = {
+  valuation: "job valuation",
+  total_cost: "total cost of the system (contract)",
+  wiring_cost: "wiring cost",
+};
 
 /** A valuation ladder read out of a bracket's own printed wording. */
 export interface ValuationLadder {
@@ -4509,8 +4973,35 @@ function ancillaryCharges(
   schedule: FeeScheduleRecord,
   b: FeeBracket,
   inputs: { electricalReviewRequired?: boolean; kw?: number | null; serviceFeeder?: ServiceLineCounts | null },
+  serviceCharges: readonly FeeChargeBreakdown[] = [],
 ): FeeChargeBreakdown[] {
   const out: FeeChargeBreakdown[] = [];
+  // A LOCAL PERCENT FEE (technology, administrative) IS TAKEN ON THE FILING'S PERMIT FEES, not on the
+  // permit line alone. Paid receipts (owner export 2026-11-23, 19 jurisdictions) print it on every
+  // permit line of the filing, the services/feeders line included (3% of a $150 permit line + a $150
+  // services line = $9.00, not $4.50), and on plan review too where the schedule says so ("of permit
+  // and plan review fees", "of total fees": 10% of $495.50 + $322.08 = $81.76). Services lines are
+  // permit fees by the same rule the state surcharge follows (modeledStateSurcharge.ofUsd). Plan review
+  // itself stays a percent of the permit line, and a surcharge stays where it is: a held state
+  // surcharge rides the services line already (serviceFeederCharges), and adding it here would bill
+  // it twice.
+  const servicesUsd = serviceCharges.filter((s) => isServiceLineBaseKind(s.kind) && s.amountUsd != null)
+    .reduce((sum, s) => sum + (s.amountUsd ?? 0), 0);
+  const ridesThisFiling = (c: FeeAncillaryCharge) => !c.appliesTo || c.appliesTo === schedule.discipline;
+  const planReviewUsd = (b.ancillaryCharges ?? [])
+    .filter((c) => c.kind === "plan_review" && !c.conditional && ridesThisFiling(c))
+    .reduce((sum, c) => sum + (c.percent != null ? round2(b.feeUsd * c.percent / 100) : round2(c.amountUsd ?? 0)), 0);
+  const percentBase = (c: FeeAncillaryCharge): { usd: number; of: string } => {
+    // Only a technology or administrative fee: a "processing" charge is as often plan review under
+    // another name (Portland's "Bldg Plan Rvw/Processing", 65% of the building permit fee).
+    const localPercentFee = c.kind === "technology"
+      || (c.kind === "processing" && /\b(?:technology|administrative|admin)\b/i.test(c.label) && !/\bplan\s*r(?:e)?v/i.test(c.label));
+    if (!localPercentFee) return { usd: b.feeUsd, of: clean(c.percentOf) || "the permit fee" };
+    const withReview = planReviewUsd > 0 && /\bplan\s+review\b|\btotal\b|\ball\s+fees\b/i.test(clean(c.percentOf));
+    const usd = round2(b.feeUsd + servicesUsd + (withReview ? planReviewUsd : 0));
+    const parts = ["the permit fee", ...(servicesUsd > 0 ? ["the services/feeders fees"] : []), ...(withReview ? ["plan review"] : [])];
+    return { usd, of: parts.length > 1 ? `${parts.slice(0, -1).join(", ")} and ${parts[parts.length - 1]}` : clean(c.percentOf) || parts[0] };
+  };
   for (const c of b.ancillaryCharges ?? []) {
     if (c.appliesTo && c.appliesTo !== schedule.discipline) continue;
     // A job's services/feeders lines (a battery's <=200A line, a service upgrade's line in
@@ -4530,9 +5021,10 @@ function ancillaryCharges(
     if (c.kind === "minimum") continue;
     // Rule 2 above: a percentage is a function of the BASE permit fee, evaluated
     // here and rounded here, never a product somebody stored.
-    const amount = c.percent != null ? round2(b.feeUsd * c.percent / 100) : round2(c.amountUsd ?? 0);
-    const basis = c.percent != null
-      ? `${c.percent}% of ${clean(c.percentOf) || "the permit fee"} ($${b.feeUsd.toFixed(2)})`
+    const base = c.percent != null ? percentBase(c) : null;
+    const amount = c.percent != null && base ? round2(base.usd * c.percent / 100) : round2(c.amountUsd ?? 0);
+    const basis = c.percent != null && base
+      ? `${c.percent}% of ${base.of} ($${base.usd.toFixed(2)})`
       : "";
     const known = c.conditional ? conditionalChargeApplies(c.condition, inputs) : true;
     // THE SCHEDULE ANSWERED NO. A charge whose printed trigger is a kVA threshold this project
@@ -4775,7 +5267,9 @@ function serviceFeederCharges(
  *  evaluations would drift, and the boundary is the whole point of the table. */
 function evaluateSchedule(
   schedule: FeeScheduleRecord,
-  inputs: { kw: number | null; kwSource: string; valuationUsd: number | null; valuationIsEstimate?: boolean; track?: FeeTrack; permitPath?: FeePathInput; electricalReviewRequired?: boolean; serviceFeeder?: ServiceLineCounts | null;
+  inputs: { kw: number | null; kwSource: string; valuationUsd: number | null; valuationIsEstimate?: boolean;
+    /** The contract (valuation.resolveContractCost), for a percentage taken "of cost" (#692). Absent = not known. */
+    totalCostUsd?: number | null; totalCostIsEstimate?: boolean; track?: FeeTrack; permitPath?: FeePathInput; electricalReviewRequired?: boolean; serviceFeeder?: ServiceLineCounts | null;
     /** The schedule's state's surcharge record (stateFeeRules, #663) — read by the caller, which has
      *  the db, so this evaluator stays pure. Required: forgetting it must not price a state at zero. */
     stateSurcharge: StateSurchargeAnswer },
@@ -4803,8 +5297,33 @@ function evaluateSchedule(
     let ladderFeeUsd: number | null = null;
     // A per-kW rate formula whose parts are all printed (FirstEnergy Level 2 "$250.00 + $1.00 per
     // kW"): computed on the system rating, then every rule below runs on it like a ladder's answer.
-    const kwFormula = bracketDescribesFormula(b.label) && schedule.basis !== "valuation" ? parseKwRateFormula(b) : null;
-    if (kwFormula) {
+    // A PERCENTAGE OF THE JOB'S COST (#692), computed on the cost its label names — and only on
+    // that cost. A job that does not carry it gets a question, never the base: the strict default.
+    const percentFormula = bracketDescribesPercentOfCost(b.label) ? parsePercentOfCostFormula(b) : null;
+    const percentCost = !percentFormula ? null
+      : percentFormula.basis === "valuation" ? { usd: inputs.valuationUsd, estimate: inputs.valuationIsEstimate === true }
+      : percentFormula.basis === "total_cost" ? { usd: inputs.totalCostUsd ?? null, estimate: inputs.totalCostIsEstimate === true }
+      : { usd: null, estimate: false };
+    const kwFormula = !percentFormula && bracketDescribesFormula(b.label) && schedule.basis !== "valuation" ? parseKwRateFormula(b) : null;
+    if (percentFormula && percentCost) {
+      const computed = evaluatePercentOfCostFormula(percentFormula, percentCost.usd);
+      if (computed == null) {
+        const f = percentFormula;
+        const named = PERCENT_BASIS_NAME[f.basis];
+        return {
+          feeUsd: null, bracketLabel, bracketQuote, corroboration,
+          reason: `This fee is ${f.baseUsd ? `$${f.baseUsd.toFixed(2)} plus ` : ""}${f.percent}% of the ${named}`
+            + `${f.aboveUsd ? ` over $${f.aboveUsd.toLocaleString("en-US")}` : ""}`
+            + `${f.minUsd != null ? `, at least $${f.minUsd.toFixed(2)}` : ""}${f.maxUsd != null ? `, at most $${f.maxUsd.toFixed(2)}` : ""}`
+            + ` — but this project carries NO ${named.toUpperCase()}, so the fee is not known. `
+            + (f.basis === "wiring_cost"
+              ? `The wiring cost is not recorded on a job yet; work the fee from the published schedule and enter the portal's own figure.`
+              : `Record it and this resolves itself.`)
+            + ` The stored $${b.feeUsd.toFixed(2)} is only part of the formula and is not quoted.`,
+        };
+      }
+      ladderFeeUsd = computed;
+    } else if (kwFormula) {
       const computed = evaluateKwRateFormula(kwFormula, inputs.kw);
       if (computed == null) {
         return {
@@ -4915,7 +5434,7 @@ function evaluateSchedule(
     const serviceCharges = serviceFeederCharges(schedule, eb, inputs, heldSurcharge);
     const pricedCharges = [
       ...permitCharges(schedule, eb, bracketLabel, bracketQuote, stateSurchargeUsd, communitySurchargeUsd),
-      ...ancillaryCharges(schedule, eb, inputs),
+      ...ancillaryCharges(schedule, eb, inputs, serviceCharges),
       ...serviceCharges,
     ];
     const charges = [...pricedCharges, ...unpricedLineCharges(schedule, eb, pricedCharges, lineSurcharge != null)];
@@ -4933,8 +5452,11 @@ function evaluateSchedule(
       : undefined;
     return { feeUsd: round2(eb.feeUsd + (stateSurchargeUsd ?? 0) + (communitySurchargeUsd ?? 0)), baseFeeUsd: feeIncludesSurcharges(`${b.label ?? ''} ${bracketQuote}`) ? undefined : eb.feeUsd, stateSurchargeUsd, communitySurchargeUsd, charges,
       ...(modeledStateSurcharge ? { modeledStateSurcharge } : {}),
-      fromEstimatedValuation: ladderFeeUsd != null && !kwFormula && inputs.valuationIsEstimate === true,
-      bracketLabel: `${kwFormula ? `${bracketLabel} (computed on ${inputs.kw} ${kwFormula.unit}${inputs.kwSource ? ` ${inputs.kwSource}` : ""}: $${eb.feeUsd.toFixed(2)})` : bracketLabel}`
+      fromEstimatedValuation: ladderFeeUsd != null && !kwFormula && (percentCost ? percentCost.estimate : inputs.valuationIsEstimate === true),
+      bracketLabel: `${kwFormula ? `${bracketLabel} (computed on ${inputs.kw} ${kwFormula.unit}${inputs.kwSource ? ` ${inputs.kwSource}` : ""}: $${eb.feeUsd.toFixed(2)})`
+        : percentFormula && percentCost?.usd != null && ladderFeeUsd != null
+          ? `${bracketLabel} (computed on the ${PERCENT_BASIS_NAME[percentFormula.basis]} $${percentCost.usd.toLocaleString("en-US")}: $${ladderFeeUsd.toFixed(2)})`
+          : bracketLabel}`
         + (minimumApplied ? ` (the schedule's minimum applies: "${noPipe(minimum.label)}" $${minimum.amountUsd.toFixed(2)})` : ""),
       bracketQuote: stateSurchargeUsd == null ? bracketQuote
         : `${bracketQuote}; ${eb.stateSurcharge!.quote} (+$${stateSurchargeUsd.toFixed(2)})${communitySurchargeUsd == null ? '' : `; ${eb.communitySurcharge!.quote} (+$${communitySurchargeUsd.toFixed(2)})`}.`, corroboration, reason: "" };
@@ -5100,13 +5622,11 @@ function lineFor(
   pointer: FeeScheduleRecord | null,
 ): FeeScheduleLine {
   const { kw, which } = inputs ? { kw: inputs.kw, which: inputs.kwSource } : systemRatingKw(project);
-  // Only pay for the valuation walk when the schedule actually keys on it.
-  const valuation = inputs || schedule.basis !== "valuation" ? null : resolveValuation(project.parserSnapshot, project.systemSizeDcKw);
-  const valuationUsd = inputs ? inputs.valuationUsd : (valuation ? valuation.value : null);
-  const valuationIsEstimate = inputs ? inputs.valuationIsEstimate === true : valuation?.method !== "contract";
+  // Only pay for the valuation walk when the schedule actually keys on it (costInputsFor).
+  const { valuationUsd, valuationIsEstimate, totalCostUsd, totalCostIsEstimate } = costInputsFor(project, schedule, inputs);
   // Same ternary, same reason as feeLinesForProject — see the note there.
   const permitPath: FeePathInput = inputs ? inputs.permitPath : pathForProject(project, track);
-  const evaluated = evaluateSchedule(schedule, { kw, kwSource: which, valuationUsd, valuationIsEstimate, track, permitPath, electricalReviewRequired: knownElectricalReviewRequired(project.parserSnapshot),
+  const evaluated = evaluateSchedule(schedule, { kw, kwSource: which, valuationUsd, valuationIsEstimate, totalCostUsd, totalCostIsEstimate, track, permitPath, electricalReviewRequired: knownElectricalReviewRequired(project.parserSnapshot),
     serviceFeeder: serviceFeederLinesFor(project, track, filing), stateSurcharge: stateSurchargeRuleFor(db, schedule.state) });
   return {
     discipline: schedule.discipline,
@@ -5122,6 +5642,7 @@ function lineFor(
     paymentMethod: schedule.paymentMethod,
     sourceUrl: schedule.sourceUrl,
     sourceQuote: schedule.sourceQuote,
+    sourceReadAt: feeSourceReadAt(schedule),
     bracketQuote: evaluated.bracketQuote,
     ...(evaluated.corroboration ? { corroboration: evaluated.corroboration } : {}),
     // WHO VOUCHES, at the grain a person saw it (lineGrade) — the same answer as the sibling
@@ -5237,6 +5758,9 @@ function resolutionFrom(lines: FeeScheduleLine[], track: FeeTrack): Omit<Project
     paymentMethod: lines.every((l) => l.paymentMethod === primary.paymentMethod) ? primary.paymentMethod : "unknown",
     sourceUrl: primary.sourceUrl,
     sourceQuote: primary.sourceQuote,
+    // The OLDEST read among the lines, and only when every line states one: a total is as fresh
+    // as its stalest part, and one undated line makes the total's date unknown.
+    sourceReadAt: lines.every((l) => l.sourceReadAt) ? lines.map((l) => l.sourceReadAt as string).sort()[0] : "",
     // NO SINGLE PUBLISHED LINE SUPPORTS A TOTAL OF TWO PERMITS. A Coos Bay
     // rooftop owes the city $200 and the county $135; no document anywhere
     // prints $335, so quoting ANY row beside it — which is what propagating
@@ -5612,6 +6136,25 @@ function receiptCandidates(parts: ReceiptPart[]): ReceiptCandidate[] {
   return out;
 }
 
+/** The schedule key(s) a receipt belongs to: its BEST-scoring jurisdiction only, never every name
+ *  that clears the bar; same state where both carry one; never a county for a city. */
+function receiptScheduleKeys(groups: ReadonlyMap<string, FeeScheduleRecord[]>, r: ReceiptRow): string[] {
+  let best = 0;
+  let keys: string[] = [];
+  for (const [key, rows] of groups) {
+    const s = rows[0];
+    const rowState = s.state.trim().toUpperCase();
+    if (r.state && rowState && rowState !== r.state) continue;
+    const a = jurisdictionKind(r.receipt.jurisdiction), b = jurisdictionKind(s.ahj);
+    if (a && b && a !== b) continue;
+    const score = knowledgeNameMatchScore(r.receipt.jurisdiction, s.ahj);
+    if (score < 60 || score < best) continue;
+    if (score > best) { best = score; keys = []; }
+    keys.push(key);
+  }
+  return keys;
+}
+
 /** READ-ONLY. Compare every paid receipt with the permit schedule(s) held for the same
  *  jurisdiction — fuzzy name + state, as learnedFee matches — and say, per schedule,
  *  whether the receipts corroborate it. Never writes; never changes a schedule. */
@@ -5621,25 +6164,11 @@ export function reconcileReceiptsWithSchedules(db: AppDb): ReceiptReconciliation
   const groups = new Map<string, FeeScheduleRecord[]>();
   for (const s of usable) groups.set(s.profileKey, [...(groups.get(s.profileKey) ?? []), s]);
 
-  // Each receipt goes to its BEST-scoring jurisdiction only, never to every name
-  // that clears the bar.
   const receipts = receiptsFromHistory(db);
   const byGroup = new Map<string, ReceiptRow[]>();
   let receiptsWithoutSchedule = 0;
   for (const r of receipts) {
-    let best = 0;
-    let keys: string[] = [];
-    for (const [key, rows] of groups) {
-      const s = rows[0];
-      const rowState = s.state.trim().toUpperCase();
-      if (r.state && rowState && rowState !== r.state) continue;
-      const a = jurisdictionKind(r.receipt.jurisdiction), b = jurisdictionKind(s.ahj);
-      if (a && b && a !== b) continue;
-      const score = knowledgeNameMatchScore(r.receipt.jurisdiction, s.ahj);
-      if (score < 60 || score < best) continue;
-      if (score > best) { best = score; keys = []; }
-      keys.push(key);
-    }
+    const keys = receiptScheduleKeys(groups, r);
     if (!keys.length) { receiptsWithoutSchedule++; continue; }
     for (const key of keys) byGroup.set(key, [...(byGroup.get(key) ?? []), r]);
   }
@@ -5692,6 +6221,131 @@ export function reconcileReceiptsWithSchedules(db: AppDb): ReceiptReconciliation
     receiptsRead: receipts.length,
     receiptsWithoutSchedule,
   };
+}
+
+// ── LINE BY LINE: THE SCHEDULE'S PRICE FOR A LINE AGAINST THE PRICE AN ITEMIZED RECEIPT PRINTS ──
+//
+// A receipt's TOTAL is a poor test of a schedule. It mixes the permit line with the state surcharge,
+// plan review, a local technology or administrative fee and partial payments, so a schedule that is
+// right about the permit line can still fail to "explain" the total, and one that is wrong can be
+// explained by a lucky combination. An itemized receipt prints each line's own price ("Renewable
+// energy for electrical systems- 5.01kva through 15kva $94.00"), and that is held directly against
+// the schedule's bracket for the same band. READ-ONLY, like the reconcile above: a disagreement is
+// reported for a person to check against the fee sheet; no schedule is ever changed (rule 3).
+//
+// Two kinds of printed line are compared, both named by the receipt in the jurisdiction's own words:
+//   · a kVA band of a solar / renewable-energy electrical line ("5kva or less", "5.01kva through
+//     15kva"), against the electrical (or undifferentiated) bracket whose kW/kVA range holds the band;
+//   · a prescriptive PV installation fee (not "non prescriptive"), against a flat bracket the
+//     schedule itself labels prescriptive.
+// A formula bracket (a rate per kVA, a percent of cost) is not a price and is not compared.
+
+export type ReceiptLineVerdict = "matches" | "differs" | "no_bracket";
+
+export interface ReceiptLineCheck {
+  profileKey: string;
+  ahj: string;
+  discipline: FeeDiscipline;
+  confidence: FeeConfidence;
+  /** The receipt's jurisdiction and printed line, as the receipt names them. */
+  jurisdiction: string;
+  receiptLine: string;
+  /** The authority's price for the line (its fee amount, not a partial payment of it). */
+  receiptFeeUsd: number;
+  paidAt: string;
+  /** The schedule's price for the same line, before any surcharge; null = no bracket holds it. */
+  scheduleFeeUsd: number | null;
+  scheduleLabel: string;
+  verdict: ReceiptLineVerdict;
+}
+
+export interface ReceiptLineCheckReport {
+  checks: ReceiptLineCheck[];
+  /** Denominators. */
+  receiptsRead: number;
+  itemizedReceipts: number;
+  linesComparable: number;
+  receiptsWithoutSchedule: number;
+}
+
+/** The kVA band a printed solar / renewable-energy electrical line names, or null. */
+export function receiptLineKvaBand(label: string): { min: number; max: number } | null {
+  if (!/\b(?:renewable|solar|photovoltaic|pv)\b/i.test(label) || /\b(?:wind|thermal)\b/i.test(label)) return null;
+  const range = /(\d+(?:\.\d+)?)\s*kva\s+(?:through|to|-)\s+(\d+(?:\.\d+)?)\s*kva\b/i.exec(label);
+  if (range) return { min: Number(range[1]), max: Number(range[2]) };
+  const upTo = /(\d+(?:\.\d+)?)\s*kva\s+or\s+less\b/i.exec(label);
+  return upTo ? { min: 0, max: Number(upTo[1]) } : null;
+}
+
+/** A printed prescriptive PV installation line ("Prescriptive photovoltaic installations"). */
+export function receiptLineIsPrescriptivePv(label: string): boolean {
+  return /\bprescriptive\b/i.test(label) && !/\bnon[-\s]?prescriptive\b/i.test(label)
+    && /\b(?:photovoltaic|solar|pv)\b/i.test(label);
+}
+
+function bracketIsPrice(b: FeeBracket): boolean {
+  const fee = Number(b.feeUsd);
+  return Number.isFinite(fee) && fee > 0 && !bracketDescribesFormula(b.label) && !parseKwRateFormula(b);
+}
+
+/** READ-ONLY. Every comparable line of every itemized receipt, against the schedule(s) on file for
+ *  its jurisdiction. `receipts` defaults to those recorded in permit_fee_history; a caller may pass
+ *  receipts it has only read (a dry run of an import), with state "" when it does not know one. */
+export function checkReceiptLinesAgainstSchedules(
+  db: AppDb,
+  receipts: ReadonlyArray<{ receipt: PaidFeeReceipt; state: string; projectId?: string | null }> = receiptsFromHistory(db),
+): ReceiptLineCheckReport {
+  const all = db.query<Row>("SELECT * FROM fee_schedules WHERE track = 'permit' ORDER BY profile_key, discipline").map(mapSchedule);
+  const usable = all.filter((s) => s.status === "ok" && !s.collectedByProfileKey && s.brackets.length > 0);
+  const groups = new Map<string, FeeScheduleRecord[]>();
+  for (const s of usable) groups.set(s.profileKey, [...(groups.get(s.profileKey) ?? []), s]);
+  const checks: ReceiptLineCheck[] = [];
+  let itemizedReceipts = 0, linesComparable = 0, receiptsWithoutSchedule = 0;
+  for (const r of receipts) {
+    const lines = Array.isArray(r.receipt.lines) ? r.receipt.lines : [];
+    if (!lines.length) continue;
+    itemizedReceipts++;
+    const comparable = lines.filter((l) => Number(l.feeUsd) > 0 && (receiptLineKvaBand(l.label) || receiptLineIsPrescriptivePv(l.label)));
+    linesComparable += comparable.length;
+    if (!comparable.length) continue;
+    const keys = receiptScheduleKeys(groups, { receipt: r.receipt, state: clean(r.state).toUpperCase(), projectId: r.projectId ?? null });
+    if (!keys.length) { receiptsWithoutSchedule++; continue; }
+    for (const key of keys) {
+      const rows = groups.get(key) ?? [];
+      for (const line of comparable) {
+        const band = receiptLineKvaBand(line.label);
+        // The electrical line is held against an electrical, combo or undifferentiated row; the
+        // prescriptive structural line against a structural, combo or undifferentiated row.
+        const fits = rows.filter((s) => band ? s.discipline !== "structural" : s.discipline !== "electrical");
+        let hit: { s: FeeScheduleRecord; b: FeeBracket } | null = null;
+        for (const s of fits) {
+          for (const b of s.brackets) {
+            if (!bracketIsPrice(b)) continue;
+            if (band) {
+              // The bracket whose range holds the band's middle: "5.01 to 15 kVA" holds 10.005.
+              const mid = (band.min + band.max) / 2;
+              if (b.minKw == null && b.maxKw == null) continue;
+              if (mid < (b.minKw ?? 0) || mid > (b.maxKw ?? Infinity)) continue;
+            } else if (!receiptLineIsPrescriptivePv(clean(b.label)) || b.minKw != null || b.maxKw != null) continue;
+            hit = { s, b };
+            break;
+          }
+          if (hit) break;
+        }
+        const receiptFeeUsd = round2(Number(line.feeUsd));
+        const scheduleFeeUsd = hit ? round2(Number(hit.b.feeUsd)) : null;
+        const owner = hit?.s ?? fits[0] ?? rows[0];
+        checks.push({
+          profileKey: key, ahj: owner.ahj, discipline: owner.discipline, confidence: owner.confidence,
+          jurisdiction: clean(r.receipt.jurisdiction), receiptLine: clean(line.label).slice(0, 120), receiptFeeUsd,
+          paidAt: clean(r.receipt.paidAt), scheduleFeeUsd, scheduleLabel: hit ? clean(hit.b.label).slice(0, 120) : "",
+          verdict: scheduleFeeUsd == null ? "no_bracket"
+            : Math.abs(scheduleFeeUsd - receiptFeeUsd) <= RECEIPT_MATCH_TOLERANCE_USD ? "matches" : "differs",
+        });
+      }
+    }
+  }
+  return { checks, receiptsRead: receipts.length, itemizedReceipts, linesComparable, receiptsWithoutSchedule };
 }
 
 export const RECEIPT_REVIEW_ISSUE_TYPE = "Fee schedule disagrees with paid receipts";

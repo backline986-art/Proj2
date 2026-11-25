@@ -1,4 +1,5 @@
-import type { AhjProcessProfile, CodeReference, ProjectRecord, ReviewerFinding, ReviewerFindingEvidence, ReviewerReport, StatePermitRule } from "../../shared/src/types";
+import type { AhjProcessProfile, CodeReference, ProjectRecord, ReviewerFinding, ReviewerFindingEvidence, ReviewerReport, StatePermitRule, UtilityApplicationRequirement, UtilityRequirementKey, UtilityRequirementList } from "../../shared/src/types";
+import { isCheckRecord } from "./checkRecords";
 import { looksLikeEmail } from "../../shared/src/emailAddress";
 import { evaluateDesignCodeFindings, mountKindForProject, isMlpeDesignForProject } from "./codeReviewRules";
 import { pvWorksheetFindings, serviceRatingConsistencyFindings, type PvWorksheetGateInput } from "./pvWorksheetGate";
@@ -10,11 +11,18 @@ import { evidenceForTopic, evidenceLines, fieldValue, requirementsForTopic, type
 import { nowIso } from "./time";
 import { hasMpuScope } from "./serviceScope";
 import { resolveValuation } from "./valuation";
-import { knownPowerClerkUtility, pacifiCorpBrand } from "./utilityIdentity";
+import { requirementForGate, requirementMayBlock, resolveUtilityRequirements } from "./utilityRequirements";
+import { describeImageDisconnectRead, type PlanSetImageDisconnectRead } from "./acDisconnectIntake";
+import { batteryStatus } from "../../shared/src/batteryControls";
+import { sourceHostOf } from "../../shared/src/officialSource";
 import { resolvePermitPath, resolveStampRequirement, hasStampedStructuralEvidence } from "./permitPath";
 import { evaluatePermitPrecedentFindings } from "./permitPrecedents";
 import { citeStateSealRule, statePrescriptiveFindings } from "./stateRules";
 import type { EffectiveCodeContext } from "./codeProfiles";
+import type { ParcelJurisdictionReading } from "./parcelJurisdiction";
+import { inverterSettingsByStandingAnswer, type CecUl1741SbAnswer } from "./cecEquipment";
+import type { JobScope } from "../../shared/src/types";
+import { deriveJobScope, jobScopeLabel, scopeHasNewPv, storageFactGaps } from "./jobScope";
 
 function payload(project: ProjectRecord, key: string): string {
   return fieldValue(project, key);
@@ -67,6 +75,7 @@ const TOPIC_LABEL: Record<EvidenceTopic, string> = {
   rapidShutdown: "Rapid shutdown",
   labels: "PV labels / placards",
   inverterSettings: "Inverter listing / settings",
+  acDisconnect: "AC / utility disconnect",
   batteryMode: "Battery operating mode",
   utilityApproval: "Utility approval",
   ownerAuthorization: "Owner authorization",
@@ -115,17 +124,45 @@ export function buildReviewerReport(
     /** The job state's structural rules (state_permit_rules, #595 PR2): what refuses a prescriptive
      *  filing, and the seal rule the out-of-state seal finding cites. Absent = none on file. */
     stateRules?: StatePermitRule[];
+    /** What the job installs (#673, jobScope.resolveJobScope — a person's scope included). Absent:
+     *  the plan set's own evidence decides (deriveJobScope), which is pv unless the job names no new
+     *  module AND the plan set says so on both sheets. */
+    jobScope?: JobScope;
+    /** What the job's utility's own application asks for (utilityRequirements.resolveUtilityRequirements:
+     *  the shipped seed overlaid by the utility's filing row). undefined = not read here, so the shipped
+     *  seed alone is used; null = read, and nothing is on file for this utility. */
+    utilityRequirements?: UtilityRequirementList | null;
+    /** What the server's own image read of THIS job's stored plan set said about its AC disconnect
+     *  (planSetImageReads.planSetImageDisconnectRead, #135). undefined / null = no such read: the
+     *  utility's AC-disconnect item reads the package text alone, as before. Never taken from the
+     *  job's snapshot. */
+    planSetImageDisconnectRead?: PlanSetImageDisconnectRead | null;
+    /** What the CEC's own inverter list says about the job's inverter and UL 1741 SB
+     *  (cecEquipment.jobInverterUl1741Sb, the one reader QC uses too). Certified there = the utility's
+     *  "UL 1741 SB inverter listing" item is met. undefined / null = no answer: the item reads the
+     *  package text alone, as before. Never taken from the job's snapshot. */
+    inverterUl1741Sb?: CecUl1741SbAnswer | null;
+    /** Which jurisdiction the job's parcel is in, as the county's own service answered (review-audit
+     *  draft 09, parcelJurisdiction.readParcelJurisdiction — the cache, read only). undefined = not
+     *  read here: the profile's callout stands, worded "not checked". */
+    parcelJurisdiction?: ParcelJurisdictionReading;
   } = {},
 ): ReviewerReport {
   const profile = findAhjProcessProfile(project);
   const findings: ReviewerFinding[] = [];
+  // THE GATE READS #673'S ONE SCOPE (draft 06). A storage scope installs no new array: the roof,
+  // fire-pathway, framing, attachment, rapid-shutdown and module findings do not run, and the
+  // storage facts are required instead, as blockers. Every PV scope — and the unknown one, which is
+  // pv — runs exactly today's findings.
+  const scope: JobScope = opts.jobScope ?? deriveJobScope(project.parserSnapshot).scope;
+  const newArray = scopeHasNewPv(scope);
 
   const standalone = isStandaloneReviewSubject(project);
-  addCoreProjectFindings(project, findings);
+  addCoreProjectFindings(project, findings, scope);
   // Valuation, homeowner email/phone and company assignment feed the portal APPLICATION; the
   // standalone gate files nothing and its form has none of those fields.
   if (!standalone) addSubmittalDataFindings(project, findings);
-  findings.push(...evaluateDesignCodeFindings(project, profile, opts.codeContext, opts.uploadedDocTypes ?? [], opts.documentTexts ?? [], opts.structuralCertification ?? null));
+  findings.push(...evaluateDesignCodeFindings(project, profile, opts.codeContext, opts.uploadedDocTypes ?? [], opts.documentTexts ?? [], opts.structuralCertification ?? null, scope));
   // The state's own cited rules (#595 PR2): refuse a prescriptive filing the rules send engineered,
   // name the reasons, and cite the state's seal rule on an out-of-state seal.
   if (opts.stateRules?.length) {
@@ -139,10 +176,14 @@ export function buildReviewerReport(
   // service ratings against the rest of the set (the package's own words, not parser notes).
   if (opts.pvWorksheet) findings.push(...pvWorksheetFindings(project, opts.pvWorksheet));
   findings.push(...serviceRatingConsistencyFindings(project, [String(project.parserSnapshot?.planSetExtractedText ?? ""), ...(opts.documentTexts ?? []).map((d) => d.text)].join("\n")));
-  addPlanSetFindings(project, findings);
-  addPlacementRuleFindings(project, opts.codeContext, findings, opts.documentTexts ?? []);
-  addUtilityFindings(project, findings);
+  addPlanSetFindings(project, findings, newArray);
+  // The AHJ's array-placement rules (roof pathways, setbacks) are about an array; a storage scope has none.
+  if (newArray) addPlacementRuleFindings(project, opts.codeContext, findings, opts.documentTexts ?? []);
+  const utilityAliases = addUtilityFindings(project, findings,
+    opts.utilityRequirements === undefined ? resolveUtilityRequirements(null, project.state, project.utility) : opts.utilityRequirements,
+    opts.planSetImageDisconnectRead ?? null, opts.inverterUl1741Sb ?? null);
   addProfileFindings(project, profile, findings, opts.uploadedDocTypes ?? []);
+  addParcelJurisdictionFindings(project, profile, opts.parcelJurisdiction, findings);
   addPermitPathFindings(project, findings);
   addInstallerCallouts(project, profile, findings);
 
@@ -162,11 +203,11 @@ export function buildReviewerReport(
     "city.elec.rapid-shutdown-missing": "topic:rapid-shutdown",
     "reviewer.plan.rapid-shutdown": "topic:rapid-shutdown",
     "reviewer.core.account": "topic:account",
-    "reviewer.utility.pge-account": "topic:account",
     "reviewer.core.meter": "topic:meter",
-    "reviewer.utility.pacpower-meter-photo": "topic:meter",
   };
-  const dedupeKey = (f: ReviewerFinding): string => DEDUPE_ALIASES[f.id] || f.id;
+  // A utility requirement finding joins its topic's family by what it checks (its item key), never by
+  // which utility it is for (addUtilityFindings returns the aliases).
+  const dedupeKey = (f: ReviewerFinding): string => DEDUPE_ALIASES[f.id] || utilityAliases.get(f.id) || f.id;
   // KEEP THE MOST ACTIONABLE of an aliased pair, not merely the first one added.
   // addCoreProjectFindings runs before addUtilityFindings, so first-wins always kept the
   // generic "Utility account number missing." and discarded the utility-specific finding
@@ -190,8 +231,8 @@ export function buildReviewerReport(
     if (!keep.has(findings[i])) { findings.splice(i, 1); i--; continue; }
     keep.delete(findings[i]); // a duplicate object reference must not survive twice
   }
-  // On the standalone gate a utility-specific account / meter finding (PGE account, Pacific
-  // Power meter photo) asks for something the form cannot take — advisory there, never a blocker.
+  // On the standalone gate a utility-specific account / meter finding (a utility's own account
+  // verification or meter photo requirement) asks for something the form cannot take — advisory there, never a blocker.
   if (standalone) {
     for (let i = 0; i < findings.length; i++) {
       const key = dedupeKey(findings[i]);
@@ -206,7 +247,9 @@ export function buildReviewerReport(
   // matched" while the packet had used the Oregon statewide profile read as a contradiction.
   const appProfile = findApplicationProfile(project);
   const looked = permitProcessFor(project);
-  const statewideApplied = appProfile.id === "oregon-generic-epermitting";
+  // The statewide fallback is a flag on the profile (draft 14), worded from the profile's own fields.
+  const statewide = appProfile.statewide;
+  const statewideApplied = Boolean(statewide);
   if (!profile) {
     // THIS FINDING IS ABOUT THE PERMIT PROCESS RECORD, AND SAYS SO (#217). Its trigger is only that
     // the shipped reference file (reference-ahj-processes.json, seeded) has no row for this AHJ; it
@@ -243,13 +286,13 @@ export function buildReviewerReport(
       "ahj_profile",
     looked
       ? `${processRecord}: per-job lookup found it (${lookupStatus}); not in the shipped reference file`
-      : statewideApplied
-        ? `${processRecord}: Oregon statewide profile applied; no ${project.ahj || "City"}-specific process record (per-job lookup found none)`
+      : statewide
+        ? `${processRecord}: ${statewide.name} statewide profile applied; no ${project.ahj || "City"}-specific process record (per-job lookup found none)`
         : `${processRecord}: not in the shipped reference file and the per-job lookup found none`,
     `${looked
       ? lookedMessage(looked)
-      : statewideApplied
-        ? "The packet used the Oregon ePermitting statewide profile (separate structural + electrical permits, OAR 918-050-0180(2)); verify any local application, stamp or signature requirement."
+      : statewide
+        ? `The packet used the ${statewide.label} (${statewide.permits}); verify any local application, stamp or signature requirement.`
         : "Use generic AHJ docs and verify local application/stamp/signature requirements manually before submittal."} ${codeRecord}`,
     true,
     {
@@ -347,7 +390,26 @@ export function findingOutranks(candidate: ReviewerFinding, held: ReviewerFindin
   return isGeneric(held) && !isGeneric(candidate);
 }
 
+// A UTILITY REQUIREMENT FINDING NAMES ITS ITEM IN ITS ID (utilityRequirements keys, dashed, or the
+// legacy ids the seed rows keep): the topic comes from there, never from the title, which carries the
+// utility's own name — "Verify Rocky MOUNTain Power inverter settings" was read as the racking topic
+// and showed "Racking/attachment text found" on every Rocky Mountain Power job (review-audit draft 04).
+const UTILITY_ID_TOPIC: Array<[RegExp, EvidenceTopic]> = [
+  [/account/, "accountVerification"],
+  [/meter-photo/, "meterPhoto"],
+  [/settings|1741/, "inverterSettings"],
+  [/one-line/, "sld"],
+  [/site-plan/, "siteRoofPlan"],
+  [/ac-disconnect/, "acDisconnect"],
+  [/storage-mode/, "batteryMode"],
+  [/owner-signature/, "ownerAuthorization"],
+];
+
 export function topicForFinding(finding: ReviewerFinding): EvidenceTopic | null {
+  if (finding.id.startsWith("reviewer.utility.")) {
+    const byId = UTILITY_ID_TOPIC.find(([re]) => re.test(finding.id));
+    if (byId) return byId[1];
+  }
   const idTitle = `${finding.id} ${finding.title}`.toLowerCase();
   if (/account/.test(idTitle)) return "accountVerification";
   if (/meter/.test(idTitle)) return "meterPhoto";
@@ -355,11 +417,13 @@ export function topicForFinding(finding: ReviewerFinding): EvidenceTopic | null 
   if (/site|roof plan|layout/.test(idTitle)) return "siteRoofPlan";
   if (/fire|pathway|setback/.test(idTitle)) return "firePathway";
   if (/framing|rafter|truss|span/.test(idTitle)) return "roofFraming";
-  if (/attachment|racking|flashing|mount/.test(idTitle)) return "rackingAttachment";
+  // The specific listing / settings words before racking, and "mount" as a word: a bare /mount/
+  // matched "Mountain" in a utility's name (review-audit draft 04).
+  if (/inverter settings|1741|smart inverter/.test(idTitle)) return "inverterSettings";
+  if (/attachment|racking|flashing|\bmount(?:s|ing|ed)?\b/.test(idTitle)) return "rackingAttachment";
   if (/load criteria|snow|dead load|wind/.test(idTitle)) return "structuralLoads";
   if (/rapid|rsd|690\.12/.test(idTitle)) return "rapidShutdown";
   if (/label|placard|directory/.test(idTitle)) return "labels";
-  if (/inverter settings|1741|smart inverter/.test(idTitle)) return "inverterSettings";
   if (/equipment schedule|spec package|equipment.*spec|spec.*sheet|dc.size|equipment field/.test(idTitle)) return "sld";
   // "ess" as a WORD: a bare /ess/ matched "process" / "access", routing the permit-process
   // finding to the battery topic (its evidence then read "Battery operating mode — not found").
@@ -522,6 +586,7 @@ const TOPIC_NOUN: Record<EvidenceTopic, string> = {
   rapidShutdown: "Rapid shutdown callout",
   labels: "Label callouts",
   inverterSettings: "Inverter listing/settings text",
+  acDisconnect: "Disconnect callout",
   batteryMode: "Battery text",
   utilityApproval: "Utility approval text",
   ownerAuthorization: "Authorization text",
@@ -553,6 +618,26 @@ export function borrowedTopicEvidence(
 
 function attachEvidence(project: ProjectRecord, profile: AhjProcessProfile | null, finding: ReviewerFinding): ReviewerFinding {
   if (finding.evidenceFound?.length) return finding;
+  // A CHECK RECORD (review-audit draft 07) is its own evidence: the recompute that passed, or the
+  // input it lacked. Never a topic's borrowed sheet excerpt, which would read as "the check found this".
+  if (isCheckRecord(finding)) {
+    const passed = finding.checkOutcome === "passed";
+    return {
+      ...finding,
+      evidenceStatus: passed ? "verified" : "missing",
+      evidenceFound: [{
+        kind: passed ? "field_value" : "absence_check",
+        label: passed ? "Recomputed from the plan's own values" : "Input not on the plans",
+        source: "Rule engine",
+        excerpt: finding.message,
+        confidence: passed ? "high" : "low",
+        pageHint: "",
+        screenshotPath: "",
+        verifier: "rule_engine",
+        note: passed ? "A check record: the rule ran and passed. It never blocks or relaxes anything." : "A check record: the rule could not run. It never blocks or relaxes anything.",
+      }],
+    };
+  }
   const topic = topicForFinding(finding);
   if (topic) return { ...finding, ...borrowedTopicEvidence(project.id, finding, evidenceForTopic(project, topic)) };
   const evidenceFound = genericEvidence(project, profile, finding);
@@ -615,6 +700,7 @@ function renderFinding(finding: ReviewerFinding): string {
         <span>${esc(finding.severity)} | ${esc(finding.category)} | evidence: ${esc(finding.evidenceStatus || "unknown")}</span>
       </div>
       ${visionHtml}
+      ${finding.ruleBasis ? `<p class="meta"><strong>Rule basis:</strong> ${esc(finding.ruleBasis.label)}${finding.ruleBasis.source ? ` — ${esc(finding.ruleBasis.source)}` : ""}</p>` : ""}
       <p><strong>Reviewer comment:</strong> ${esc(finding.cityFeedback)}</p>
       <p><strong>Required correction:</strong> ${esc(finding.designTeamAction)}</p>${finding.overrideVoided
         ? `\n      <p><strong>Override no longer applies:</strong> ${esc(finding.overrideVoided.by)} overrode this on ${esc(finding.overrideVoided.at.slice(0, 10))} (${esc(finding.overrideVoided.reason)}), but ${esc(finding.overrideVoided.why)}.</p>`
@@ -680,8 +766,14 @@ export function renderReviewerReportHtml(project: ProjectRecord, report: Reviewe
     </section>
     <section>
       <h2>City-Style Correction Comments</h2>
-      ${report.findings.map(renderFinding).join("")}
+      ${report.findings.filter((f) => !isCheckRecord(f)).map(renderFinding).join("")}
     </section>
+    ${report.findings.some(isCheckRecord) ? `
+    <section class="summary">
+      <h2>Checks Run</h2>
+      <p class="meta">What the measured rules checked: passed with the arithmetic, or not checked because an input is not on the plans. Display only; none of these is a correction.</p>
+      <ul>${report.findings.filter(isCheckRecord).map((f) => `<li><strong>${f.checkOutcome === "passed" ? "Passed" : "Not checked"} — ${esc(f.title)}:</strong> ${esc(f.message)}${f.ruleBasis ? ` <span>(${esc(f.ruleBasis.label)})</span>` : ""}</li>`).join("")}</ul>
+    </section>` : ""}
     ${report.installerCallouts.length ? `
     <section class="summary">
       <h2>Installer Callouts — Quick Checklist</h2>
@@ -728,8 +820,10 @@ function addStandaloneCoreFindings(project: ProjectRecord, findings: ReviewerFin
   }
 }
 
-function addCoreProjectFindings(project: ProjectRecord, findings: ReviewerFinding[]): void {
+function addCoreProjectFindings(project: ProjectRecord, findings: ReviewerFinding[], scope: JobScope = "pv"): void {
   if (isStandaloneReviewSubject(project)) { addStandaloneCoreFindings(project, findings); return; }
+  const newArray = scopeHasNewPv(scope);
+  const batteryKw = Number.parseFloat(payload(project, "batteryOutputKw").replace(/[^0-9.-]/g, ""));
   const required: Array<[string, string | number | null, string]> = [
     ["homeowner", project.homeownerName, "Homeowner name missing."],
     ["address", project.projectAddress, "Service/project address missing."],
@@ -737,12 +831,29 @@ function addCoreProjectFindings(project: ProjectRecord, findings: ReviewerFindin
     ["utility", project.utility, "Utility missing."],
     ["account", project.accountNumber, "Utility account number missing."],
     ["meter", project.meterNumber, "Meter number missing."],
-    ["dc", project.systemSizeDcKw, "DC system size missing."],
-    ["ac", project.systemSizeAcKw, "AC system size missing."],
+    // A storage scope has no new DC array; its AC rating is the battery inverter / PCS output (#673).
+    ...(newArray
+      ? [["dc", project.systemSizeDcKw, "DC system size missing."], ["ac", project.systemSizeAcKw, "AC system size missing."]] as Array<[string, string | number | null, string]>
+      : [["ac", batteryKw > 0 ? batteryKw : null, "Battery inverter / PCS AC output (kW) missing — on a storage job this is the system's AC rating."]] as Array<[string, string | number | null, string]>),
     ["interconnection", project.interconnectionMethod, "Interconnection method missing."],
   ];
   for (const [id, value, message] of required) {
     if (value == null || value === "") findings.push(finding(`reviewer.core.${id}`, "blocker", "project_data", "Critical project field missing", message, true));
+  }
+  // THE STORAGE FACTS, REQUIRED (#673's list, jobScope.storageFactGaps — the same facts QC's storage
+  // rows ask for). One blocker naming every missing fact.
+  const gaps = storageFactGaps(project.parserSnapshot, scope);
+  if (gaps.length) {
+    const list = gaps.map((g) => g.label).join(", ");
+    findings.push(finding("reviewer.storage.facts-missing", "blocker", "project_data",
+      `Storage facts missing (${jobScopeLabel(scope)})`,
+      `This job is checked as ${jobScopeLabel(scope)}, so the reviewer needs the storage system's facts instead of module facts. Missing: ${list}.`,
+      true,
+      {
+        cityFeedback: `Provide the energy storage system's ${list} on the equipment schedule / ESS spec sheet and the one-line.`,
+        designTeamAction: `Add the missing storage facts (${list}) to the plan set and the job.`,
+        evidenceNeeded: gaps.map((g) => g.label),
+      }));
   }
 }
 
@@ -821,7 +932,7 @@ function addSubmittalDataFindings(project: ProjectRecord, findings: ReviewerFind
   }
 }
 
-function addPlanSetFindings(project: ProjectRecord, findings: ReviewerFinding[]): void {
+function addPlanSetFindings(project: ProjectRecord, findings: ReviewerFinding[], newArray = true): void {
   // THE SAME MOUNT QUESTION, ANSWERED IN ONE PLACE. These rules are paired with the
   // code-rule engine's via DEDUPE_ALIASES (topic:fire, topic:rapid-shutdown), and the
   // code-rule side wins. So while codeReviewRules was the only mount-aware layer, a ground
@@ -831,7 +942,9 @@ function addPlanSetFindings(project: ProjectRecord, findings: ReviewerFinding[])
   // Import the predicate rather than re-deriving it: two vocabularies is what caused this.
   const kind = mountKindForProject(project);
   const onARoof = kind === "roof" || kind === "unknown";
-  const rsdApplies = kind !== "ground";
+  // A storage scope (#673) installs no array: no rapid-shutdown, fire-pathway or ground-array question
+  // here. The SLD and site plan rows stay — the ESS, its disconnect and its location live on them.
+  const rsdApplies = newArray && kind !== "ground";
 
   const requiredDocs: Array<[string, ReturnType<typeof evidenceForTopic>, string, string]> = [
     ["sld", evidenceForTopic(project, "sld"), "SLD/one-line sheet not clearly mapped", "Provide or remap the one-line/SLD sheet so interconnection and equipment can be reviewed."],
@@ -880,7 +993,7 @@ function addPlanSetFindings(project: ProjectRecord, findings: ReviewerFinding[])
   // access/setback question is replaced by the questions a ground array actually raises, so
   // the operator gets a prompt instead of silence. Six of the eight supply-side projects on
   // the live book taught that lesson: the finding that never fires reads as approval.
-  if (!onARoof) {
+  if (newArray && !onARoof) {
     findings.push(finding(
       "reviewer.plan.ground-array-site",
       "callout",
@@ -897,7 +1010,7 @@ function addPlanSetFindings(project: ProjectRecord, findings: ReviewerFinding[])
   }
 
   const firePathway = evidenceForTopic(project, "firePathway");
-  if (onARoof && firePathway.confidence !== "high") {
+  if (newArray && onARoof && firePathway.confidence !== "high") {
     findings.push(finding(
       "reviewer.plan.fire-path",
       firePathway.present ? "warning" : "blocker",
@@ -972,78 +1085,225 @@ function addPlacementRuleFindings(project: ProjectRecord, ctx: EffectiveCodeCont
   ));
 }
 
-function addUtilityFindings(project: ProjectRecord, findings: ReviewerFinding[]): void {
-  const account = evidenceForTopic(project, "accountVerification");
-  // WHICH UTILITY, by the one state-gated identity (utilityIdentity): a CA PG&E job ("Pacific Gas and
-  // Electric", or typed "PGE") is neither Portland General nor PacifiCorp, and was blocked on both.
-  const knownUtility = knownPowerClerkUtility(project);
-  if (knownUtility === "portland_general" && account.confidence !== "high") {
+// ── THE UTILITY SIDE, FROM EACH UTILITY'S OWN RECORDED REQUIREMENTS (review-audit draft 03) ─────
+// What a requirement item asks the package to show, read with the existing evidence readers.
+// A kind with no evidence reader here (module_spec, inverter_spec: the QC baseline reads those) is not
+// asked by the gate.
+const REQUIREMENT_TOPIC: Partial<Record<UtilityRequirementKey, EvidenceTopic>> = {
+  account_verification: "accountVerification",
+  meter_photo: "meterPhoto",
+  inverter_settings: "inverterSettings",
+  inverter_listing_ul1741sb: "inverterSettings",
+  one_line: "sld",
+  site_plan: "siteRoofPlan",
+  ac_disconnect: "acDisconnect",
+  storage_mode_declaration: "batteryMode",
+  owner_signature: "ownerAuthorization",
+};
+// The family a requirement finding dedupes with: the same thing asked by the core field check or the
+// plan-set pass is one finding on the gate, the most severe kept (findingOutranks).
+const REQUIREMENT_ALIAS: Partial<Record<UtilityRequirementKey, string>> = {
+  account_verification: "topic:account",
+  meter_photo: "topic:meter",
+  one_line: "topic:sld",
+  site_plan: "topic:site-roof",
+};
+
+interface RequirementWords {
+  verifyTitle: (u: string) => string;
+  missingTitle: (u: string) => string;
+  shownMessage: (u: string, check: ProjectEvidence) => string;
+  missingMessage: (u: string) => string;
+  shownFeedback: string;
+  missingFeedback: string;
+  action: (u: string) => string;
+}
+// Worded per KIND of item, with the utility's name as data. The first three keep the wording the gate
+// used before this list existed (pinned by utilityRequirementsGate.test.ts).
+function genericWords(noun: string): RequirementWords {
+  return {
+    verifyTitle: (u) => `Verify ${u} ${noun}`,
+    missingTitle: (u) => `${u} ${noun} missing`,
+    shownMessage: (u, check) => `${u}'s application asks for the ${noun}; what the package shows needs review. ${evidenceSummary(check)}`,
+    missingMessage: (u) => `${u}'s application asks for the ${noun}; it was not found in the package.`,
+    shownFeedback: `The ${noun} the utility asks for is not clearly shown.`,
+    missingFeedback: `The ${noun} the utility asks for was not found.`,
+    action: (u) => `Add or confirm the ${noun} in the ${u} application package.`,
+  };
+}
+const REQUIREMENT_WORDS: Record<UtilityRequirementKey, RequirementWords> = {
+  account_verification: {
+    verifyTitle: (u) => `Verify ${u} account evidence`,
+    missingTitle: (u) => `${u} account verification unresolved`,
+    shownMessage: (u, check) => `${u}/NEM submission has an account value, but parsed utility bill/account match evidence is not strong enough. ${evidenceSummary(check)}`,
+    missingMessage: (u) => `${u}/NEM submission should not be staged without a verified utility account number.`,
+    shownFeedback: "Utility account evidence is incomplete: account number alone is not enough for a clean intake pass.",
+    missingFeedback: "Utility account number and account verification were not found.",
+    action: () => "Verify utility bill/account holder/service address match before staging the NEM application.",
+  },
+  meter_photo: {
+    verifyTitle: (u) => `Verify ${u} meter photo`,
+    missingTitle: (u) => `${u} meter photo missing`,
+    shownMessage: (_u, check) => `Meter evidence needs review before customer generation staging. ${evidenceSummary(check)}`,
+    missingMessage: (u) => `${u} customer generation packages should not be staged without meter photo/evidence.`,
+    shownFeedback: "A meter number or weak meter evidence was captured, but a meter photo/evidence match was not proven.",
+    missingFeedback: "Meter photo/evidence was not found in the parsed project package.",
+    action: () => "Confirm the meter photo is present, legible, and matches the parsed meter number before staging.",
+  },
+  inverter_settings: {
+    verifyTitle: (u) => `Verify ${u} inverter settings`,
+    missingTitle: (u) => `${u} inverter settings evidence missing`,
+    // SAID FROM WHAT WAS READ (review-audit draft 04): "shown" here is an inverter model or a spec
+    // sheet with no listing / settings words (evidenceForTopic's medium), so the old "UL 1741 evidence
+    // was captured … No parsed inverter listing / settings evidence was found" contradicted itself.
+    shownMessage: (_u, check) => `An inverter model or spec sheet is on file; no UL 1741 SB / settings text was found.${check.excerpts.length ? ` ${evidenceSummary(check)}` : ""}`,
+    missingMessage: () => "Confirm UL 1741 SB / smart inverter settings evidence is included before NEM submission.",
+    shownFeedback: "Utility-required inverter settings need human verification, not just a generic inverter spec.",
+    missingFeedback: "Utility-required inverter settings/UL 1741 SB evidence was not found.",
+    action: (u) => `Add or verify ${u} inverter settings/UL 1741 SB evidence in the utility upload package.`,
+  },
+  inverter_listing_ul1741sb: genericWords("UL 1741 SB inverter listing"),
+  one_line: genericWords("one-line diagram"),
+  site_plan: genericWords("site plan"),
+  ac_disconnect: genericWords("AC disconnect"),
+  storage_mode_declaration: genericWords("battery operating mode declaration"),
+  owner_signature: genericWords("owner signature"),
+  module_spec: genericWords("module spec sheet"),
+  inverter_spec: genericWords("inverter spec sheet"),
+};
+
+/** The item's citation as the finding shows it — only when its row quotes the source (an uncited item
+ *  cites nothing, and says so in its message when that is why it does not block). */
+function requirementReference(u: string, item: UtilityApplicationRequirement): CodeReference[] {
+  if (!item.quote) return [];
+  const status = item.tier === "verified"
+    ? `Recorded by ${item.verifiedBy && !looksLikeEmail(item.verifiedBy) ? item.verifiedBy : "a person"}`
+    : item.tier === "official"
+      ? `From ${sourceHostOf(item.sourceUrl) || "the utility's official page"} (official source)`
+      : "Seeded from the utility's page; verify locally";
+  return [{
+    code: item.sourceName || u,
+    section: "",
+    title: `${u} application requirement`,
+    adoptionScope: status,
+    sourceUrl: item.sourceUrl,
+    note: `"${item.quote}"${item.fetchedAt ? ` (read ${item.fetchedAt.slice(0, 10)})` : ""}`,
+  }];
+}
+
+/** The finding id a requirement reports under: the seed's kept id, else reviewer.utility.<key>. */
+const IMAGE_READ_SOURCE = "Plan set page image (intake read)";
+
+export function requirementFindingId(item: Pick<UtilityApplicationRequirement, "key" | "findingId">): string {
+  return item.findingId || `reviewer.utility.${item.key.replace(/_/g, "-")}`;
+}
+
+/**
+ * THE UTILITY SIDE OF THE REVIEW: each item the job's utility's own application asks for, checked
+ * against the package's evidence. Met (high confidence) = nothing; shown but not proven = a warning;
+ * missing = a warning, or a blocker only when the item may block (requirementMayBlock: a person's or an
+ * official item, or a seeded row quoting its named source in words that name the item — Helm's #637
+ * bar). No list on file = one callout that the utility side was not reviewed, never silence. A storage
+ * item is asked only on a job with a battery. Returns each finding's dedupe family (id -> alias).
+ */
+function addUtilityFindings(project: ProjectRecord, findings: ReviewerFinding[], list: UtilityRequirementList | null, imageDisconnectRead: PlanSetImageDisconnectRead | null = null, inverterUl1741Sb: CecUl1741SbAnswer | null = null): Map<string, string> {
+  const aliases = new Map<string, string>();
+  const utilityName = String(project.utility ?? "").trim();
+  if (list && list.requirements.length) {
+    const u = list.displayName || utilityName;
+    const battery = batteryStatus(project.parserSnapshot as Record<string, unknown> | undefined) === "yes";
+    for (const item of list.requirements) {
+      if (item.key === "storage_mode_declaration" && !battery) continue;
+      const topic = REQUIREMENT_TOPIC[item.key];
+      if (!topic || !requirementForGate(item, "reviewer")) continue;
+      // VERIFIED FIRST (owner, 2026-11-13): the CEC's own inverter list printing UL 1741 SB for the job's
+      // inverter meets the listing item; QC records where it came from.
+      if (item.key === "inverter_listing_ul1741sb" && inverterUl1741Sb?.certified) continue;
+      // The settings item: the operator's standing answer that installs are commissioned with the
+      // utility's settings, on an inverter the list certifies (owner, 2026-11-13). Both, or it asks.
+      if (item.key === "inverter_settings" && inverterSettingsByStandingAnswer(inverterUl1741Sb)) continue;
+      const textCheck = evidenceForTopic(project, topic);
+      if (textCheck.confidence === "high") continue;
+      // AN IMAGE-ONLY PLAN SET (#135): the package text names no AC disconnect because the plan set
+      // has no text, but the server's own image read of this job's stored plan set did (the one
+      // reader, planSetImageReads). That counts as SHOWN, never proven: the item stays a warning for
+      // a person to check on the sheet, with the read as its evidence. Text that names the disconnect
+      // is read exactly as before, and a job with neither is held exactly as before.
+      const fromImage = topic === "acDisconnect" && !textCheck.present ? imageDisconnectRead : null;
+      const imageLine = fromImage ? describeImageDisconnectRead(fromImage) : "";
+      const check: ProjectEvidence = fromImage
+        ? { ...textCheck, present: true, confidence: "medium", excerpts: [imageLine], sources: [IMAGE_READ_SOURCE], hits: [{ sourceLabel: IMAGE_READ_SOURCE, excerpt: imageLine, pageHint: fromImage.sheet || "Plan set" }] }
+        : textCheck;
+      const words = REQUIREMENT_WORDS[item.key];
+      const mayBlock = requirementMayBlock(item);
+      const severity: ReviewerFinding["severity"] = !check.present && mayBlock ? "blocker" : "warning";
+      // Why a "blocker" item only warns: its row does not quote the utility's own words for it.
+      const uncitedNote = !check.present && item.whenMissing === "blocker" && !mayBlock
+        ? " Not a blocker: the utility's own words for this item are not on file — a person can record them."
+        : "";
+      const id = requirementFindingId(item);
+      findings.push(finding(
+        id,
+        severity,
+        "utility_nem",
+        check.present ? words.verifyTitle(u) : words.missingTitle(u),
+        check.present ? words.shownMessage(u, check) : `${words.missingMessage(u)}${uncitedNote}`,
+        true,
+        {
+          cityFeedback: check.present ? words.shownFeedback : words.missingFeedback,
+          designTeamAction: words.action(u),
+          evidenceNeeded: evidenceNeeded(check),
+          codeReferences: requirementReference(u, item),
+          // Its own evidence, so attachEvidence does not borrow the (empty) text topic's "missing".
+          ...(fromImage ? {
+            evidenceStatus: "weak" as const,
+            evidenceFound: [{
+              kind: "field_value" as const,
+              label: "AC disconnect read off the plan set's page image — check the sheet",
+              source: IMAGE_READ_SOURCE,
+              excerpt: imageLine,
+              confidence: "medium" as const,
+              pageHint: fromImage.sheet || "Plan set",
+              screenshotPath: "",
+              verifier: "vision" as const,
+              note: "The plan set has no text to confirm this. The intake read it once from the page image; a person checks the sheet shows the utility's disconnect.",
+            }],
+          } : {}),
+        },
+      ));
+      const alias = REQUIREMENT_ALIAS[item.key];
+      if (alias) aliases.set(id, alias);
+    }
+  } else if (utilityName) {
     findings.push(finding(
-      "reviewer.utility.pge-account",
-      account.present ? "warning" : "blocker",
+      "reviewer.utility.requirements-not-on-file",
+      "callout",
       "utility_nem",
-      account.present ? "Verify PGE account evidence" : "PGE account verification unresolved",
-      account.present
-        ? `PGE/NEM submission has an account value, but parsed utility bill/account match evidence is not strong enough. ${evidenceSummary(account)}`
-        : "PGE/NEM submission should not be staged without a verified utility account number.",
+      `${utilityName}'s application requirements are not on file`,
+      `${utilityName}'s application requirements are not on file; the utility side was not reviewed.`,
       true,
       {
-        cityFeedback: account.present
-          ? "Utility account evidence is incomplete: account number alone is not enough for a clean intake pass."
-          : "Utility account number and account verification were not found.",
-        designTeamAction: "Verify utility bill/account holder/service address match before staging the NEM application.",
-        evidenceNeeded: evidenceNeeded(account),
+        cityFeedback: `What ${utilityName}'s own interconnection application asks for (meter photo, one-line, inverter listing, disconnect, storage mode…) is not recorded, so none of it was checked.`,
+        designTeamAction: `Check ${utilityName}'s application requirements by hand, and record them with their page and words so the gate checks them next time.`,
+        evidenceFound: [{
+          kind: "absence_check",
+          label: "Utility application requirements — none on file",
+          source: "Utility requirement list (shipped seed and the utility's filing record)",
+          excerpt: `No requirement list for ${utilityName} in ${project.state || "this state"}.`,
+          confidence: "low",
+          pageHint: "",
+          screenshotPath: "",
+          verifier: "rule_engine",
+          note: "Not a finding about the package: the utility's requirements were not checked at all.",
+        }],
+        evidenceStatus: "missing",
       },
     ));
-  }
-  if (knownUtility === "pacificorp") {
-    // The name this job goes by (#562): Rocky Mountain Power in UT/ID/WY. Finding IDs stay.
-    const brand = pacifiCorpBrand(project.state);
-    const meterPhoto = evidenceForTopic(project, "meterPhoto");
-    if (meterPhoto.confidence !== "high") {
-      findings.push(finding(
-        "reviewer.utility.pacpower-meter-photo",
-        meterPhoto.present ? "warning" : "blocker",
-        "utility_nem",
-        meterPhoto.present ? `Verify ${brand} meter photo` : `${brand} meter photo missing`,
-        meterPhoto.present
-          ? `Meter evidence needs review before customer generation staging. ${evidenceSummary(meterPhoto)}`
-          : `${brand} customer generation packages should not be staged without meter photo/evidence.`,
-        true,
-        {
-          cityFeedback: meterPhoto.present
-            ? "A meter number or weak meter evidence was captured, but a meter photo/evidence match was not proven."
-            : "Meter photo/evidence was not found in the parsed project package.",
-          designTeamAction: "Confirm the meter photo is present, legible, and matches the parsed meter number before staging.",
-          evidenceNeeded: evidenceNeeded(meterPhoto),
-        },
-      ));
-    }
-
-    const inverterSettings = evidenceForTopic(project, "inverterSettings");
-    if (inverterSettings.confidence !== "high") {
-      findings.push(finding(
-        "reviewer.utility.pacpower-settings",
-        "warning",
-        "utility_nem",
-        inverterSettings.present ? `Verify ${brand} inverter settings` : `${brand} inverter settings evidence missing`,
-        inverterSettings.present
-          ? `UL 1741/inverter spec evidence was captured, but utility-specific settings are not fully proven. ${evidenceSummary(inverterSettings)}`
-          : "Confirm UL 1741 SB / smart inverter settings evidence is included before NEM submission.",
-        true,
-        {
-          cityFeedback: inverterSettings.present
-            ? "Utility-required inverter settings need human verification, not just a generic inverter spec."
-            : "Utility-required inverter settings/UL 1741 SB evidence was not found.",
-          designTeamAction: `Add or verify ${brand} inverter settings/UL 1741 SB evidence in the utility upload package.`,
-          evidenceNeeded: evidenceNeeded(inverterSettings),
-        },
-      ));
-    }
   }
   if (payload(project, "ubMeterVerification") && /mismatch/i.test(payload(project, "ubMeterVerification"))) {
     findings.push(finding("reviewer.utility.meter-mismatch", "blocker", "utility_nem", "Meter mismatch", payload(project, "ubMeterVerification"), true));
   }
+  return aliases;
 }
 
 function addProfileFindings(project: ProjectRecord, profile: AhjProcessProfile | null, findings: ReviewerFinding[], uploadedDocTypes: string[] = []): void {
@@ -1117,9 +1377,80 @@ function addProfileFindings(project: ProjectRecord, profile: AhjProcessProfile |
     // Jurisdiction/FEMA determination — external to the autopilot. Advisory only.
     findings.push(finding("reviewer.profile.flood", "callout", "ahj_profile", "Floodplain/FEMA check (jurisdiction-determined)", `${profile.ahj} references flood/FEMA review. Confirm the jurisdiction/design team has addressed it before submittal.`, true));
   }
-  if (profile.requiresJurisdictionCheck) {
-    findings.push(finding("reviewer.profile.jurisdiction", "callout", "ahj_profile", "Jurisdiction/address verification recommended", `${profile.ahj} process profile calls out jurisdiction or address verification. Confirm before submittal.`, true));
+  // The profile's jurisdiction / address check is answered by the parcel (addParcelJurisdictionFindings).
+}
+
+/**
+ * IS THE PARCEL IN THE PROJECT AHJ? (review-audit draft 09.) A mailing city is a postal name: an
+ * address that says one city can sit on a parcel in the unincorporated county, and a permit filed
+ * with the wrong agency is refused (its fee often kept). The answer is the county's own parcel
+ * service, read by a job and cached (parcelJurisdiction.ts); this only reads it.
+ *   - disagrees -> a BLOCKER on permit tracks (category ahj_profile: gateScope holds the permit lane
+ *     only) when the lookup record may block (verified, official, or a seeded record that names and
+ *     quotes its source — Helm's #637 bar); a WARNING from an uncited seeded record;
+ *   - agrees -> a pass;
+ *   - not checked -> the profile's callout, worded "not checked" with the reason — shown where the
+ *     process profile asks for the check (today's callout) or a lookup record covers the address.
+ */
+function addParcelJurisdictionFindings(project: ProjectRecord, profile: AhjProcessProfile | null, reading: ParcelJurisdictionReading | undefined, findings: ReviewerFinding[]): void {
+  const ahj = String(project.ahj ?? "").trim();
+  const when = reading?.checkedAt ? `, checked ${reading.checkedAt.slice(0, 10)}` : "";
+  // A hosted map platform (draft 16 B) is named as such, with the person who verified the county links
+  // it, or the county page Keelix read to confirm it (official, never shown as a person's check).
+  const hosted = reading?.serviceVerifiedBy ? `, a hosted map ${reading.serviceVerifiedBy} verified the county links`
+    : reading?.serviceConfirmedFrom ? `, a hosted map the county's own page links, from ${reading.serviceConfirmedFrom.pageHost}, read ${reading.serviceConfirmedFrom.readAt.slice(0, 10)}; not checked by a person`
+    : "";
+  const from = reading ? `${reading.county ? `${reading.county}'s` : "the county's"} parcel service${reading.host ? ` (${reading.host}${hosted}${when})` : ""}` : "";
+  if (reading?.status === "disagrees" && reading.parcelAgency) {
+    const blocks = reading.mayBlock === true;
+    findings.push(finding(
+      "reviewer.jurisdiction.parcel",
+      blocks ? "blocker" : "warning",
+      "ahj_profile",
+      `Parcel is in ${reading.parcelAgency}, not ${ahj}`,
+      `${from} places the job's address in ${reading.parcelAgency}; the project AHJ is ${ahj}. A permit filed with the wrong agency is refused, and its fee is often not refunded.${blocks ? "" : " The lookup record is seeded and uncited, so this is a warning: confirm the parcel's jurisdiction before filing."}`,
+      true,
+      {
+        cityFeedback: `The parcel is in ${reading.parcelAgency}, not ${ahj}.`,
+        designTeamAction: `Confirm the parcel's jurisdiction, then correct the project AHJ to ${reading.parcelAgency} before filing the permit — or, if ${ahj} does file for this parcel, record that with your name and the reason (Accept on this finding).`,
+      },
+    ));
+    return;
   }
+  if (reading?.status === "agrees" && reading.parcelAgency && reading.acceptedBy) {
+    // A NAMED PERSON accepted that this AHJ files for the parcel (draft 16 A): a pass that names them and
+    // keeps the parcel's own answer in view — never automatic, and gone when the address, AHJ or answer changes.
+    const a = reading.acceptedBy;
+    findings.push(finding(
+      "reviewer.jurisdiction.parcel",
+      "pass",
+      "ahj_profile",
+      `Jurisdiction accepted by ${a.by}: ${ahj} files for this parcel`,
+      `${from} places the job's address in ${reading.parcelAgency}, not ${ahj}. ${a.by} accepted on ${a.at.slice(0, 10)} that ${ahj} files for this parcel: "${a.reason}".`,
+    ));
+    return;
+  }
+  if (reading?.status === "agrees" && reading.parcelAgency) {
+    findings.push(finding(
+      "reviewer.jurisdiction.parcel",
+      "pass",
+      "ahj_profile",
+      `Jurisdiction confirmed from the parcel: ${reading.parcelAgency}`,
+      `${from} places the job's address in ${reading.parcelAgency}, which matches the project AHJ (${ahj}).`,
+    ));
+    return;
+  }
+  if (!profile?.requiresJurisdictionCheck && !reading?.covered) return;
+  const why = reading?.reason ? ` (${reading.reason})` : "";
+  const asks = profile?.requiresJurisdictionCheck ? `${profile.ahj} process profile calls out jurisdiction or address verification. ` : "";
+  findings.push(finding(
+    "reviewer.profile.jurisdiction",
+    "callout",
+    "ahj_profile",
+    "Jurisdiction/address not checked against the parcel",
+    `${asks}The parcel's jurisdiction was not checked${why}. Confirm the address is inside ${ahj || "the AHJ"} and not in the unincorporated county before submittal.`,
+    true,
+  ));
 }
 
 // Permit-path findings — prescriptive vs engineered (non-prescriptive). On the

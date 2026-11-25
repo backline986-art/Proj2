@@ -18,6 +18,8 @@
 //
 // FIRST MATCH WINS, in this order (derived from "who is stopped, and how badly"):
 //   1  operator_blocked        a person said stop — nothing else matters until lifted
+//   1b class_held              the job is commercial / probably commercial (#688) and still has a
+//                              filing to make: a person works it or confirms the class
 //   2  correction_overdue      an agency stopped a filing AND our clock ran out
 //   3  portal_paused           a live browser is waiting on a human at MFA/CAPTCHA
 //   4  automation_running      a staging/autopilot job is in flight — wait for it
@@ -28,6 +30,9 @@
 //   9  resubmit_awaiting_me    a reopened correction form waits for the human resubmit
 //  10  staged_awaiting_submit  a staged draft waits for review + approval (per track)
 //  11  approved_awaiting_filing  approval recorded, the human filing not captured yet
+//  11b second_stage_invite / second_stage_upload   a two-stage filing (#28): the application is made
+//                              and paid; the agency's plan-upload invite is awaited, then a person
+//                              uploads the plans in the second system by hand and marks it done
 //  12  fee_due                 the AHJ approved a permit (or emailed a fee request); a person pays,
 //                              then presses Paid (feeDue.ts)
 //  13  correction_open         an open (not overdue) correction — owner by triage bucket
@@ -47,6 +52,7 @@
 // repository export; keep it that way.
 // ---------------------------------------------------------------------------
 
+import { withReadMemo } from "./readMemo";
 import type { AppDb } from "./db";
 import type {
   ClientAskSent,
@@ -81,6 +87,7 @@ import { overriddenBlockers } from "./reviewerOverrides";
 import { startedAtLabel } from "./formAcquisitionPlan";
 import { paymentNeededForRun } from "./feePause";
 import { feeDueReadings, feePaidMarks, trackFeeDueFrom } from "./feeDue";
+import { projectClassStatusFor } from "./projectClassHold";
 import {
   getProjectDetail,
   getSubmitGateReport,
@@ -264,6 +271,10 @@ export interface TrackFacts {
    *  portal_runs.submit_capture_candidates of the staged run) — offered for one-click
    *  confirmation, never treated as a filing. Absent when there are none. */
   recordCandidates?: Array<{ recordNumber: string; recordLink: string; source: "completion_page" | "account_list" }>;
+  /** #28: the track's application is made on a two-stage agency and its plans are NOT uploaded in the
+   *  second system yet (track_second_stages, no upload mark). The track is not filed and is never
+   *  "to stage". inviteAt: when the filings inbox matched the agency's plan-upload invite, else null. */
+  secondStage?: { system: string; number: string; since: string; inviteAt: string | null };
 }
 
 export interface NextStepFacts {
@@ -274,6 +285,9 @@ export interface NextStepFacts {
   ahj: string;
   utility: string;
   operatorHold: { reason: string; since: string | null } | null;
+  /** The job is held for a person by its class (#688; shared/src/projectClass.ts): a commercial job,
+   *  or "probably commercial" with nobody's confirmation. Optional so hand-built facts stay valid. */
+  classHold?: { reason: string; commercial: boolean } | null;
   openCorrections: CorrectionRecord[];
   /** step: what the job says it is doing right now (job_queue.progress_note — the automatic chain
    *  names each step), so the banner can show "Checking the AHJ's required official forms… (started
@@ -440,6 +454,18 @@ export function loadNextStepFacts(db: AppDb, projects: ProjectRecord[]): Map<str
   // #664: the utilities a person verified as filing inside the permit application — one query.
   const withPermitKeys = verifiedWithPermitKeys(db);
 
+  // #28: applications made on a two-stage agency whose plans are not marked as uploaded — one query.
+  // (An older schema has no such table: nothing waits.)
+  let secondStageRows: Row[] = [];
+  try {
+    secondStageRows = db.query<Row>(
+      `SELECT project_id, track, system_name, first_stage_number, first_stage_at, invite_received_at, invite_subject
+         FROM track_second_stages WHERE project_id IN (${ph}) AND uploaded_at = ''`,
+      ids,
+    );
+  } catch { secondStageRows = []; }
+  const secondStages = groupBy(secondStageRows, (r) => s(r.project_id));
+
   const stagedRunIds: string[] = [];
   for (const project of projects) {
     const pid = project.id;
@@ -460,13 +486,15 @@ export function loadNextStepFacts(db: AppDb, projects: ProjectRecord[]): Map<str
         || (trackKind(s(r.target_type), s(r.permit_type)) === kind && !claimed.has(s(r.permit_type)));
       const targetEvidence = (numberedTargets.get(pid) ?? []).some(ownsTarget);
       const feeAsk = trackFeeDueFrom(feeReadings.get(pid) ?? [], feePaid.get(pid) ?? [], track, family, kind, claimed);
+      const second = (secondStages.get(pid) ?? []).find((r) => s(r.track) === track);
       return {
         track,
         filed: Boolean(filedRow) || targetEvidence,
         filedAt: filedRow ? s(filedRow.submitted_at) || null : null,
         done: withTargets.has(pid) ? isTrackDone(db, pid, track, tracksRequired) : false,
         latestRun: familyRuns[0] ?? null,
-        onPortal: familyRuns.some((r) => ON_PORTAL.has(r.status)),
+        // An application made by hand on a two-stage agency (#28) is on the portal with no run of ours.
+        onPortal: familyRuns.some((r) => ON_PORTAL.has(r.status)) || Boolean(second),
         stagedRun: staged,
         gapFillMissing: [],
         // THIS track's filing reads ready-for-issue — not "some permit filing does". Matched by kind
@@ -479,6 +507,10 @@ export function loadNextStepFacts(db: AppDb, projects: ProjectRecord[]): Map<str
           && !(payments.get(pid) ?? []).some((r) => s(r.track) === billingTrack(track) && (s(r.status) === "paid" || s(r.status) === "waived")),
         // A registry read (permitProcess), never the db — the "reads write nothing" invariant holds.
         agency: track === "nem" ? s(project.utility).trim() : issuingAuthorityForTrack(project, track),
+        ...(second ? { secondStage: {
+          system: s(second.system_name), number: s(second.first_stage_number), since: s(second.first_stage_at),
+          inviteAt: s(second.invite_received_at) || (s(second.invite_subject) ? s(second.first_stage_at) : null),
+        } } : {}),
       };
     });
     // #664: the NEM track of a with-permit utility follows the permit tracks while it has no
@@ -509,6 +541,11 @@ export function loadNextStepFacts(db: AppDb, projects: ProjectRecord[]): Map<str
       ahj: s(project.ahj).trim(),
       utility: s(project.utility).trim(),
       operatorHold,
+      classHold: (() => {
+        // The same read every door makes (projectClassHold — the stored row), never a second derivation.
+        const cs = projectClassStatusFor(db, pid);
+        return cs?.held && cs.holdReason ? { reason: cs.holdReason, commercial: cs.projectClass === "commercial" } : null;
+      })(),
       openCorrections: openCorr.get(pid) ?? [],
       jobInFlight: jobs.get(pid) ?? null,
       tracks,
@@ -581,6 +618,7 @@ export const NEXT_STEP_BUTTON_IDS = [
   "addPermitTargetBtn",
   "copyHandoffPacketBtn",
   "sendHandoffPacketBtn",
+  "confirmProjectClassBtn",
 ] as const;
 /** Every fixTarget id the rule table can emit — same test. */
 export const NEXT_STEP_FIX_TARGETS = [
@@ -596,6 +634,7 @@ export const NEXT_STEP_FIX_TARGETS = [
   "submittalTracks",
   "permitTargets",
   "paymentPanel",
+  "projectClassPanel",
 ] as const;
 type ButtonId = typeof NEXT_STEP_BUTTON_IDS[number];
 type FixTarget = typeof NEXT_STEP_FIX_TARGETS[number];
@@ -717,6 +756,19 @@ export function decideNextStep(facts: NextStepFacts): NextStep {
       "Blocked by an operator — nothing is staged or filed until the block is lifted.",
       [why(`Reason given: ${facts.operatorHold.reason}`, "statusOverrideWrap")],
       btn("applyStatusOverrideBtn", "Change status"), facts.operatorHold.since);
+  }
+
+  // 1b. The job is held for a person by its class (#688) while something is still to file: nothing
+  // below (QC, the gate, staging) is automation's to do. A commercial job a person filed by hand
+  // falls through to the tracking steps like any other.
+  if (facts.classHold && unfinished.length) {
+    return facts.classHold.commercial
+      ? make("class_held", "me", "today",
+        "Commercial job — held for a person. Automation does not stage, replay or file it; file it by hand.",
+        [why(facts.classHold.reason, "projectClassPanel")], null)
+      : make("class_held", "me", "today",
+        "Probably commercial — confirm the job's class. Automation holds it until a person does.",
+        [why(facts.classHold.reason, "projectClassPanel")], btn("confirmProjectClassBtn", "Confirm class"));
   }
 
   // 2. An agency stopped a filing and our clock ran out.
@@ -928,13 +980,37 @@ export function decideNextStep(facts: NextStepFacts): NextStep {
       approved[0].stagedRun!.startedAt);
   }
 
+  // 11b. A TWO-STAGE FILING (#28): the application is made (and paid) and the plans are not uploaded
+  //      in the agency's second system. Not filed. First the agency's invite is awaited; once the
+  //      inbox matched it (or whenever the person has it), a person uploads by hand and marks it done.
+  const secondStage = unfinished.filter((t) => t.secondStage);
+  if (secondStage.length) {
+    const invited = secondStage.filter((t) => t.secondStage!.inviteAt);
+    if (invited.length) {
+      const first = invited[0];
+      return make("second_stage_upload", "me", "today",
+        `${joinNames(invited.map((t) => `${agencyOf(facts, t)}'s plan-upload invite for the ${TRACK_NAME[t.track]} arrived`))} — upload the plans in ${first.secondStage!.system || "the second system"} by hand, then mark the upload done on the track card with the confirmation number or a screenshot. Not filed until then.`,
+        [
+          ...invited.map((t) => why(`${TRACK_NAME[t.track]}: application ${t.secondStage!.number} made ${t.secondStage!.since.slice(0, 10)}; invite received ${String(t.secondStage!.inviteAt).slice(0, 10)}. The track card lists the documents to upload.`, "submittalTracks")),
+          why("Automation does not open the invite, upload or submit in the second system.", "submittalTracks"),
+        ], null, first.secondStage!.inviteAt);
+    }
+    const first = secondStage[0];
+    return make("second_stage_invite", "ahj", "waiting",
+      `Application made — waiting for ${joinNames(secondStage.map((t) => `${agencyOf(facts, t)}'s plan-upload invite for the ${TRACK_NAME[t.track]}`))}. Not filed until the plans are uploaded in ${first.secondStage!.system || "the second system"} by hand and marked done on the track card.`,
+      [
+        ...secondStage.map((t) => why(`${TRACK_NAME[t.track]}: application ${t.secondStage!.number} made ${t.secondStage!.since.slice(0, 10)}; no invite matched in the filings inbox yet.`, "submittalTracks")),
+        why("If the invite reached another inbox, upload the plans and mark the upload done all the same.", "submittalTracks"),
+      ], null, first.secondStage!.since);
+  }
+
   // 12. Approved by the AHJ, issuance fee due (a person pays — automation never does).
   const feeDue = facts.tracks.filter((t) => t.feeDue && !t.done);
   if (feeDue.length) {
     return make("fee_due", "me", "today",
       feeDue.every((t) => t.feeDueApproved !== false)
-        ? `${joinNames(feeDue.map((t) => `${agencyOf(facts, t)} approved the ${TRACK_NAME[t.track]}`))} — pay the issuance fee in the portal, then press Paid on the track with the permit number and the amount (automation never pays fees).`
-        : `Fee due: ${joinNames(feeDue.map((t) => `${agencyOf(facts, t)} asked for the ${TRACK_NAME[t.track]} fee`))} — pay it in the portal, then press Paid on the track with the record number and the amount (automation never pays fees).`,
+        ? `${joinNames(feeDue.map((t) => `${agencyOf(facts, t)} approved the ${TRACK_NAME[t.track]}`))} — pay the issuance fee in the portal, then press We paid the portal on the track with the permit number and the amount (automation never pays fees).`
+        : `Fee due: ${joinNames(feeDue.map((t) => `${agencyOf(facts, t)} asked for the ${TRACK_NAME[t.track]} fee`))} — pay it in the portal, then press We paid the portal on the track with the record number and the amount (automation never pays fees).`,
       [], null);
   }
 
@@ -1062,7 +1138,7 @@ export function compactNextStep(step: NextStep): NextStepCompact {
 export function loadFullNextStepFacts(db: AppDb, projectId: string): NextStepFacts {
   const project = getProjectDetail(db, projectId).project;
   const facts = loadNextStepFacts(db, [project]).get(projectId)!;
-  return withoutCodeResearch(() => {
+  return withReadMemo(db, () => withoutCodeResearch(() => {
     const gate = getSubmitGateReport(db, projectId);
     return {
       ...facts,
@@ -1073,7 +1149,7 @@ export function loadFullNextStepFacts(db: AppDb, projectId: string): NextStepFac
       reviewerBlockers: reviewerBlockerList(db, project),
       clientAsks: clientAsksForProject(db, projectId),
     };
-  });
+  }));
 }
 
 /** S1 — the full answer for one project. READ-ONLY. */

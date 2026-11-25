@@ -204,7 +204,7 @@ await check("(b2) the confirm states the three conditions, that a stop at review
 const CARD_NAMES = [
   "esc", "humanize", "fmtDate", "statusBadge", "httpUrl", "portalHostname",
   "TRACK_STATUS_CLASS", "TRACK_CHANNEL_BASIS", "linkifyText", "trackChannelHtml", "OFF_TOOL_CHANNEL", "offToolChannelHtml", "trackPrerequisitesHtml", "ESS_STEP_BASIS", "trackEssStepHtml", "trackNextActionText",
-  "TRACK_ISSUER_KEY", "TRACK_ISSUER_SOURCE", "trackIssuerHtml", "trackIssuerEditHtml", "FEE_RESPONSIBILITY_TEXT", "trackPaymentHtml", "trackPaidFormHtml", "trackFeeDueHtml", "STAGE_GAP_LINK", "trackStageGapsHtml", "trackCardHtml",
+  "TRACK_ISSUER_KEY", "TRACK_ISSUER_SOURCE", "trackIssuerHtml", "trackIssuerEditHtml", "FEE_RESPONSIBILITY_TEXT", "trackPaymentHtml", "trackPaidFormHtml", "trackFeeDueHtml", "trackSecondStageHtml", "STAGE_GAP_LINK", "trackStageGapsHtml", "trackCardHtml",
 ];
 const cardCode = `const screenshotMisses = new Set(); const screenshotKey = (a, b, c) => \`\${a}:\${b}:\${c}\`;\n${CARD_NAMES.map(lift).join("\n\n")}\n${lift("APPROVE_HELD_BY_STAGED_DRAFT")}`;
 // eslint-disable-next-line no-new-func
@@ -288,6 +288,8 @@ const held = () => {
   return pid;
 };
 const heldFor = { c1: held(), c2: held(), c3: held() };
+// What the approval sheet's ticks send (review-audit draft 01), read before the server owns the DB.
+const c2Acks = fx.acknowledgeAll(heldFor.c2, "building");
 const dbPath = String(process.env.AUTOPILOT_DB_PATH);
 const PORT = 5380 + Math.floor(Math.random() * 15); // never 4173 / 4270
 const BASE = `http://127.0.0.1:${PORT}`;
@@ -342,7 +344,7 @@ try {
 
   await check("(c2) sign-in off: a named autoSubmit mints exactly one approval under that name and the 202 names it", async () => {
     const pid = heldFor.c2;
-    const res = await post(`/api/projects/${pid}/prepare-submission`, { track: "building", autoSubmit: true, approverName: "  Pat Approver " });
+    const res = await post(`/api/projects/${pid}/prepare-submission`, { track: "building", autoSubmit: true, approverName: "  Pat Approver ", acknowledgements: c2Acks });
     const text = await res.text();
     assert.equal(res.status, 202, text);
     const body = JSON.parse(text) as { jobId: string; finalSubmitApproval?: { recorded: boolean; approver: string | null } };

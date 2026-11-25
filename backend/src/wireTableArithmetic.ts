@@ -33,6 +33,8 @@ import type { DesignTextSource } from "./designCriteria";
 import { AMPACITY, fillAdjustment, parseConductor, SMALL_CONDUCTOR_MAX, type ParsedConductor } from "./electricalSizing";
 import { nextStandardOcpd } from "./iowaPvWorksheet";
 import { sheetIdOf } from "./planAttachmentRead";
+import { notCheckedRecord, passRecord } from "./checkRecords";
+import { makeRuleBasis } from "../../shared/src/ruleBasis";
 
 export const WIRE_TABLE_FINDING_IDS = [
   "city.elec.wire-table-egc-undersized",
@@ -341,18 +343,30 @@ function pagesOf(project: ProjectRecord, documentTexts: DesignTextSource[]): Arr
 
 export function evaluateWireTableFindings(project: ProjectRecord, opts: WireTableOptions = {}): ReviewerFinding[] {
   const cite = opts.cite ?? ((_code: string, fallback: CodeReference) => fallback);
+  // CHECK RECORDS (review-audit draft 07, checkRecords.ts): each table check that ran clean, and one
+  // "not checked" when no wire table row could be read at all. Display only.
+  const basis = (ref: CodeReference) => { const c = cite("NEC", ref); return makeRuleBasis("model_code", `NEC ${c.section}`, c.sourceUrl); };
   const pages = pagesOf(project, opts.documentTexts ?? []);
-  if (!pages.length) return [];
-  const rows = readWireTableRows(pages, opts.supplySide === true);
+  const rows = pages.length ? readWireTableRows(pages, opts.supplySide === true) : [];
+  if (!rows.length) {
+    return [notCheckedRecord({
+      ruleId: "city.elec.wire-table", category: "electrical", title: "Wire table arithmetic (EGC, ampacity vs OCPD, raceway fill)",
+      inputs: ["a wire table (conductor, OCPD, ground and raceway per tag)"], codeReferences: [cite("NEC", egcRef), cite("NEC", ampacityRef)], ruleBasis: basis(egcRef),
+    })];
+  }
   const out: ReviewerFinding[] = [];
+  const records: ReviewerFinding[] = [];
 
   // (a) EGC against Table 250.122, or (on the tap) the supply-side bonding jumper against 250.102(C)(1).
   const egcShort: string[] = [];
   const bondShort: string[] = [];
+  const egcOk: string[] = [];
+  const bondOk: string[] = [];
   for (const r of rows) {
     const g = r.ground;
     if (r.supplySide) {
       const need = minSupplyBondingJumper(r.phase, g.material);
+      if (need && rank(g.size) >= rank(need)) bondOk.push(`${where(r)}: #${g.size} ${g.material} >= #${need} ${g.material} for ${desc(r.phase)}`);
       if (need && rank(g.size) < rank(need)) {
         bondShort.push(`${where(r)}: ungrounded ${desc(r.phase)} on the supply side -> Table 250.102(C)(1) requires at least #${need} ${g.material}; the table shows a #${g.size} ${g.material} ground`);
       }
@@ -361,9 +375,16 @@ export function evaluateWireTableFindings(project: ProjectRecord, opts: WireTabl
     let need = minEgc(r.ocpd, g.material);
     // 250.122(A): the EGC need not be larger than the circuit conductors (same material only).
     if (need && g.material === r.phase.material && rank(r.phase.size) < rank(need)) need = r.phase.size;
+    if (need && rank(g.size) >= rank(need)) egcOk.push(`${where(r)}: #${g.size} ${g.material} EGC >= #${need} ${g.material} behind ${r.ocpd} A`);
     if (need && rank(g.size) < rank(need)) {
       egcShort.push(`${where(r)}: ${desc(r.phase)} behind a ${r.ocpd} A OCPD -> Table 250.122 requires at least #${need} ${g.material}; the table shows a #${g.size} ${g.material} EGC`);
     }
+  }
+  if (!egcShort.length && egcOk.length) {
+    records.push(passRecord({ ruleId: "city.elec.wire-table-egc-undersized", category: "electrical", title: "Equipment grounding conductors against Table 250.122", codeReferences: [cite("NEC", egcRef)], ruleBasis: basis(egcRef), arithmetic: `250.122, from the plan set's own wire table: ${egcOk.join("; ")}.` }));
+  }
+  if (!bondShort.length && bondOk.length) {
+    records.push(passRecord({ ruleId: "city.elec.wire-table-bonding-jumper-undersized", category: "electrical", title: "Supply-side bonding jumper against Table 250.102(C)(1)", codeReferences: [cite("NEC", bondingRef)], ruleBasis: basis(bondingRef), arithmetic: `250.102(C)(1), from the plan set's own wire table: ${bondOk.join("; ")}.` }));
   }
   if (egcShort.length) {
     out.push(finding({
@@ -395,6 +416,7 @@ export function evaluateWireTableFindings(project: ProjectRecord, opts: WireTabl
   const sizedConductor = parseConductor(String(project.parserSnapshot?.acConductor ?? ""));
   const sizedBreaker = Number.parseFloat(String(project.parserSnapshot?.pvBreaker ?? ""));
   const overAmpacity: string[] = [];
+  const ampacityOk: string[] = [];
   for (const r of rows) {
     const c = r.phase;
     if (sizedConductor && sizedConductor.size === c.size && sizedConductor.material === c.material && sizedBreaker === r.ocpd) continue;
@@ -409,9 +431,13 @@ export function evaluateWireTableFindings(project: ProjectRecord, opts: WireTabl
     const ampacity = Math.min(derated, terminal);
     const small = SMALL_CONDUCTOR_MAX[c.material][c.size];
     const maxOcpd = Math.min(nextStandardOcpd(ampacity) ?? Infinity, small ?? Infinity);
+    if (r.ocpd <= maxOcpd + 1e-9) ampacityOk.push(`${where(r)}: ${desc(c)} ${fmt(ampacity, 2)} A, largest permitted OCPD ${maxOcpd} A >= ${r.ocpd} A`);
     if (r.ocpd > maxOcpd + 1e-9) {
       overAmpacity.push(`${where(r)}: ${desc(c)}${c.insulation ? "" : " (insulation not stated; 90 C column assumed)"} ${base} A (Table 310.16, ${column} C)${counted != null ? ` x ${factor} for ${counted} current-carrying conductors` : ""} = ${fmt(derated, 2)} A${ampacity < derated ? `, ${fmt(ampacity, 2)} A at ${column === 60 ? 60 : 75} C terminations (110.14(C))` : ""}; largest permitted OCPD ${maxOcpd} A${small != null && small <= maxOcpd ? " (240.4(D))" : ""}, but the table shows ${r.ocpd} A`);
     }
+  }
+  if (!overAmpacity.length && ampacityOk.length) {
+    records.push(passRecord({ ruleId: "city.elec.wire-table-ocpd-over-ampacity", category: "electrical", title: "Wire table OCPD within each conductor's adjusted ampacity", codeReferences: [cite("NEC", ampacityRef)], ruleBasis: basis(ampacityRef), arithmetic: `240.4 / 310.15, from the plan set's own wire table (30 C ambient assumed): ${ampacityOk.join("; ")}.` }));
   }
   if (overAmpacity.length) {
     out.push(finding({
@@ -431,6 +457,10 @@ export function evaluateWireTableFindings(project: ProjectRecord, opts: WireTabl
     const f = r.fill!;
     return `${where(r)}: ${f.parts.join(" + ")} = ${fmt(f.area)} in² in a ${f.tradeSize}" ${f.raceway}, above its 40 % allowance of ${f.allowance} in² (Chapter 9 Table 4)`;
   });
+  const fillOk = rows.filter((r) => r.fill && r.fill.area <= r.fill.allowance + 1e-9).map((r) => `${where(r)}: ${fmt(r.fill!.area)} in² <= ${r.fill!.allowance} in² in a ${r.fill!.tradeSize}" ${r.fill!.raceway}`);
+  if (!overFill.length && fillOk.length) {
+    records.push(passRecord({ ruleId: "city.elec.wire-table-raceway-fill", category: "electrical", title: "Raceway fill within 40 percent", codeReferences: [cite("NEC", fillRef)], ruleBasis: basis(fillRef), arithmetic: `Chapter 9 Table 1, from the plan set's own wire table: ${fillOk.join("; ")}.` }));
+  }
   if (overFill.length) {
     out.push(finding({
       id: "city.elec.wire-table-raceway-fill",
@@ -458,5 +488,5 @@ export function evaluateWireTableFindings(project: ProjectRecord, opts: WireTabl
       codeReferences: [cite("NEC", spacesRef)],
     }));
   }
-  return out;
+  return [...out, ...records];
 }

@@ -18,6 +18,7 @@
 // enqueue the gate would make for an un-profiled AHJ is suppressed for the read
 // (withoutCodeResearch), and no LLM is called — vision verdicts are read from cache only.
 // ===========================================================================
+import { isCheckRecord } from "./checkRecords";
 import type {
   CorrectionNotice,
   CorrectionNoticeGroup,
@@ -122,7 +123,10 @@ export function provenanceLineFor(ctx: Pick<CorrectionNoticeContext, "ahj" | "st
 export function buildCorrectionNotice(report: ReviewerReport, ctx: CorrectionNoticeContext): CorrectionNotice {
   const drafted = report.findings
     .map((finding, index) => ({ finding, index }))
-    .filter(({ finding }) => finding.severity !== "pass")
+    // A correction notice lists CORRECTIONS: never a pass, never a check record (review-audit draft
+    // 07: "not checked: <input> not on the plans" says what the gate could not run, not what the AHJ
+    // would correct; the ask for a missing input is the rule's own finding where it has one).
+    .filter(({ finding }) => finding.severity !== "pass" && !isCheckRecord(finding))
     .map(({ finding, index }) => ({
       index,
       group: correctionNoticeGroupFor(finding),

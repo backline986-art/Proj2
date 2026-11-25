@@ -178,6 +178,12 @@ function mountKindFromText(probe: string): MountKind {
   return "unknown";
 }
 
+/** The mount, as the scope-of-work sentence names it — "" when the mount is not known: an unknown
+ *  mount is never written as "roof-mounted" on an application (leak sweep 2026-09-28). */
+export function mountAdjective(kind: MountKind): string {
+  return kind === "roof" ? "Roof-mounted" : kind === "ground" ? "Ground-mounted" : kind === "carport" ? "Carport-mounted" : "";
+}
+
 // The one entry point other modules should use. It derives the design text itself, so a second
 // caller cannot reach a different answer by feeding the predicate a different blob — which is
 // precisely how the reviewer engine and this module came to disagree about the same array.

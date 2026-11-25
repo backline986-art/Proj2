@@ -15,6 +15,7 @@ import { text as s } from "./json";
 import { addAuditLog } from "./audit";
 import { deleteCustomer } from "./crm";
 import { filingContactEmailSetting } from "./filingContact";
+import { parseServiceArea, serviceAreaProblems } from "./serviceAreaEntries";
 
 type Row = Record<string, unknown>;
 
@@ -49,6 +50,7 @@ function mapClient(row: Row, identities: ClientPortalIdentity[]): ClientRecord {
     ccbLicenseNumber: s(row.ccb_license_number),
     standardDisconnectMake: s(row.standard_disconnect_make),
     standardDisconnectModel: s(row.standard_disconnect_model),
+    installerCertifications: s(row.installer_certifications),
     ccbExpiration: s(row.ccb_expiration),
     electricalLicenseNumber: s(row.electrical_license_number),
     docketNumber: s(row.docket_number),
@@ -79,9 +81,14 @@ function mapClient(row: Row, identities: ClientPortalIdentity[]): ClientRecord {
     logoMime: s(row.logo_mime) || "image/png",
     billingMode: s(row.billing_mode),
     serviceFeeUsd: row.service_fee_usd == null || row.service_fee_usd === "" ? null : Number(row.service_fee_usd),
+    serviceFeePermitUsd: row.service_fee_permit_usd == null || row.service_fee_permit_usd === "" ? null : Number(row.service_fee_permit_usd),
+    serviceFeeNemUsd: row.service_fee_nem_usd == null || row.service_fee_nem_usd === "" ? null : Number(row.service_fee_nem_usd),
+    pricingTier: s(row.pricing_tier) === "founding" ? "founding" : "",
+    feeLimitUsd: row.fee_limit_usd == null || row.fee_limit_usd === "" ? null : Number(row.fee_limit_usd),
     portalIdentities: identities,
     stateLicenses: parseStateLicenses(row.state_licenses_json),
     partnerContacts: parsePartnerContacts(row.partner_contacts_json),
+    serviceArea: parseServiceArea(row.service_area_json),
     createdAt: s(row.created_at),
   };
 }
@@ -476,6 +483,7 @@ const FIELD_COLUMNS: [keyof ClientRecord, string][] = [
   ["ccbLicenseNumber", "ccb_license_number"],
   ["standardDisconnectMake", "standard_disconnect_make"],
   ["standardDisconnectModel", "standard_disconnect_model"],
+  ["installerCertifications", "installer_certifications"],
   ["ccbExpiration", "ccb_expiration"],
   ["electricalLicenseNumber", "electrical_license_number"],
   ["docketNumber", "docket_number"],
@@ -504,12 +512,20 @@ const FIELD_COLUMNS: [keyof ClientRecord, string][] = [
   ["authorizedSignerTitle", "authorized_signer_title"],
   ["billingMode", "billing_mode"],
   ["serviceFeeUsd", "service_fee_usd"],
+  ["serviceFeePermitUsd", "service_fee_permit_usd"],
+  ["serviceFeeNemUsd", "service_fee_nem_usd"],
+  ["pricingTier", "pricing_tier"],
+  ["feeLimitUsd", "fee_limit_usd"],
 ];
 
-// serviceFeeUsd is REAL; the intake tag is normalised (#489); everything else is coerced to string.
+const MONEY_FIELDS = new Set<keyof ClientRecord>(["serviceFeeUsd", "serviceFeePermitUsd", "serviceFeeNemUsd", "feeLimitUsd"]);
+
+// The service fees are REAL; the intake tag is normalised (#489); everything else is coerced to string.
 function fieldValue(key: keyof ClientRecord, raw: unknown): string | number | null {
   if (key === "intakeTag") return normalizeIntakeTag(raw);
-  return key === "serviceFeeUsd" ? moneyOrNull(raw) : s(raw);
+  // Only "founding" means anything (the founding prices and cap); anything else is the standard tier.
+  if (key === "pricingTier") return s(raw).trim().toLowerCase() === "founding" ? "founding" : "";
+  return MONEY_FIELDS.has(key) ? moneyOrNull(raw) : s(raw);
 }
 
 /** The intake tag as stored: lower-case, and only what can sit after the + of an email address
@@ -621,6 +637,7 @@ function replaceIdentities(db: AppDb, clientId: string, identities: PortalIdenti
 export function createClient(db: AppDb, payload: Record<string, unknown>, orgId: string = DEFAULT_ORG_ID): ClientRecord {
   const companyName = s(payload.companyName).trim() || s(payload.legalBusinessName).trim();
   if (!companyName) throw new HttpError(400, "companyName (or legalBusinessName) is required.");
+  assertServiceAreaWritable(payload);
 
   const clientId = id();
   const columns = ["id", "created_at", "org_id", ...FIELD_COLUMNS.map(([, col]) => col)];
@@ -639,6 +656,7 @@ export function createClient(db: AppDb, payload: Record<string, unknown>, orgId:
 export function updateClient(db: AppDb, clientId: string, payload: Record<string, unknown>): ClientRecord {
   const existing = db.get<Row>("SELECT id, org_id FROM clients WHERE id = ?", [clientId]);
   if (!existing) throw new HttpError(404, "Client not found.");
+  assertServiceAreaWritable(payload);
   if ("intakeTag" in payload) assertIntakeTagFree(db, s(existing.org_id) || DEFAULT_ORG_ID, normalizeIntakeTag(payload.intakeTag), clientId);
 
   // Only update fields present in the payload (partial update supported).
@@ -693,8 +711,18 @@ export function mergeStateLicenceSave(storedRaw: unknown, incoming: unknown): Re
   return [...out, ...invisible];
 }
 
-/** stateLicenses / partnerContacts: written only when present in the payload (partial update). */
+/** A service area that cannot be stored is refused with every reason, before anything is written:
+ *  an entry that names nothing must not be kept and then silently ignored. */
+function assertServiceAreaWritable(payload: Record<string, unknown>): void {
+  if (!("serviceArea" in payload)) return;
+  const problems = serviceAreaProblems(payload.serviceArea);
+  if (problems.length) throw new HttpError(400, `Service area not saved: ${problems.join(" ")}`);
+}
+
+/** stateLicenses / partnerContacts / serviceArea: written only when present in the payload (partial
+ *  update). serviceArea is the editor's FULL list (the client screen sends what it loaded and edited). */
 function writeLicenceAndPartnerJson(db: AppDb, clientId: string, payload: Record<string, unknown>): void {
+  if ("serviceArea" in payload) db.run("UPDATE clients SET service_area_json = ? WHERE id = ?", [JSON.stringify(parseServiceArea(payload.serviceArea ?? [])), clientId]);
   if ("stateLicenses" in payload) {
     const stored = db.get<Row>("SELECT state_licenses_json FROM clients WHERE id = ?", [clientId])?.state_licenses_json;
     db.run("UPDATE clients SET state_licenses_json = ? WHERE id = ?", [JSON.stringify(mergeStateLicenceSave(stored, payload.stateLicenses)), clientId]);
@@ -720,6 +748,12 @@ export function deleteClient(db: AppDb, clientId: string): { deleted: boolean } 
     throw new HttpError(409, `Cannot delete client: ${linked.count} project(s) are still linked to it.`);
   }
   return db.transaction(() => {
+    // The Company setup link (clientOnboarding.ts, v81): its links, the client's proposals and its
+    // uploaded certificates, and what it said about how it files (v82), are its data and leave with it.
+    for (const t of ["client_onboarding_files", "client_onboarding_proposals", "client_onboarding_links", "client_filing_statements"]) {
+      try { db.run(`DELETE FROM ${t} WHERE client_id = ?`, [clientId]); }
+      catch { /* a database older than v81: no such table, nothing to purge */ }
+    }
     db.run("DELETE FROM client_portal_identities WHERE client_id = ?", [clientId]);
     db.run("DELETE FROM portal_profiles WHERE client_id = ?", [clientId]);
     db.run("DELETE FROM clients WHERE id = ?", [clientId]);
@@ -970,6 +1004,12 @@ export async function offboardClient(db: AppDb, clientId: string, opts: Offboard
     // way the runbook recommends.
     try { db.run("DELETE FROM credential_requests WHERE client_id = ?", [clientId]); }
     catch { /* pre-secure-link database: no such table, nothing to purge */ }
+    // The Company setup link (clientOnboarding.ts, v81): its links, the client's proposals and its
+    // uploaded certificates, and what it said about how it files (v82), are its data and leave with it.
+    for (const t of ["client_onboarding_files", "client_onboarding_proposals", "client_onboarding_links", "client_filing_statements"]) {
+      try { db.run(`DELETE FROM ${t} WHERE client_id = ?`, [clientId]); }
+      catch { /* a database older than v81: no such table, nothing to purge */ }
+    }
     // Per-client IMAP sources carry imap_pass_encrypted — another live secret.
     db.run("DELETE FROM email_tracking_sources WHERE client_id = ?", [clientId]);
     db.run("DELETE FROM client_portal_identities WHERE client_id = ?", [clientId]);

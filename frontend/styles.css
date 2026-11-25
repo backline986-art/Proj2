@@ -946,6 +946,9 @@ tbody tr:hover, tbody tr.active { background: var(--tint-select); }
 .state-licence-row { display: grid; grid-template-columns: 56px minmax(0, 1.4fr) minmax(0, 1fr) minmax(0, 1fr) minmax(0, 1fr) auto; gap: 6px; align-items: center; margin-bottom: 6px; }
 .state-licence-row input, .state-licence-row select { min-width: 0; width: 100%; }
 .state-licence-row .danger-button { padding: 6px 8px; }
+.service-area-row { display: grid; grid-template-columns: minmax(0, 1fr) 56px minmax(0, 2fr) auto; gap: 6px; align-items: center; margin-bottom: 6px; }
+.service-area-row input, .service-area-row select { min-width: 0; width: 100%; }
+.service-area-row .danger-button { padding: 6px 8px; }
 
 /* --- Clients & Contractor Licensing: list column + selected-client editor -----------------
    Scoped to .clients-modal-body; the Customers and Users modals share .modal-body /
@@ -1046,6 +1049,9 @@ tbody tr:hover, tbody tr.active { background: var(--tint-select); }
   .clients-modal-body .portal-identity-row .danger-button { justify-self: end; }
   .clients-modal-body .state-licence-row { grid-template-columns: 56px minmax(0, 1fr); }
   .clients-modal-body .state-licence-row .danger-button { justify-self: end; grid-column: 2; }
+  .clients-modal-body .service-area-row { grid-template-columns: minmax(0, 1fr) 56px; }
+  .clients-modal-body .service-area-row input[data-sa="name"] { grid-column: 1 / -1; }
+  .clients-modal-body .service-area-row .danger-button { justify-self: end; grid-column: 2; }
 }
 @media (min-width: 721px) and (max-width: 1180px) {
   .clients-modal-body .state-licence-row { grid-template-columns: 56px minmax(0, 1fr) minmax(0, 1fr) auto; }
@@ -1108,6 +1114,26 @@ body.server-shared .shared-server-note,
 body.recorder-needs-token .shared-server-note { display: block; margin: 6px 0; padding: 6px 9px; font-size: 12px; color: var(--muted); border: 1px dashed var(--line); border-radius: var(--radius-sm); }
 body.server-shared .local-disk-only,
 body.server-shared [data-track-open-recorder] { display: none !important; }
+
+/* Destinations to confirm (filing-destination.js renderQueue) */
+.dest-queue-body { padding: 20px; overflow-y: auto; }
+.fd-queue-client { margin-top: 16px; }
+.fd-queue-client h3 { margin: 0 0 8px; }
+.fd-queue-authority { border: 1px solid var(--line); border-radius: var(--radius-sm); padding: 10px 12px; margin-bottom: 10px; }
+.fd-handcheck { margin: 6px 0; padding: 6px 9px; border: 1px dashed var(--line); border-radius: var(--radius-sm); }
+.fd-handcheck ul { margin: 4px 0 0 18px; padding: 0; }
+
+/* Go-live check (go-live.js render) */
+.golive-body { padding: 20px; overflow-y: auto; }
+.golive-area { margin-top: 14px; }
+.golive-area h3 { margin: 0 0 6px; }
+.golive-lines { list-style: none; margin: 0; padding: 0; }
+.golive-line { border: 1px solid var(--line); border-radius: var(--radius-sm); padding: 8px 10px; margin-bottom: 6px; }
+.golive-meaning { margin-top: 4px; }
+.golive-settings { margin-top: 4px; font-size: 12px; }
+.golive-setting { margin-right: 8px; white-space: nowrap; }
+.golive-setting.is-set code { font-weight: 600; }
+.golive-other { margin-top: 16px; }
 
 /* KPI dashboard */
 .kpi-body { padding: 20px; overflow-y: auto; }

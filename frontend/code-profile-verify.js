@@ -49,11 +49,20 @@
     const section = (title, items) => rows.push(`<div class="rv-vsec"><h4>${esc(title)}</h4>${items.length
       ? `<ul>${items.join('')}</ul>` : '<p class="rv-muted muted">None recorded.</p>'}</div>`);
     section('Adopted codes', ((p && p.adoptedCodes) || []).map((c) =>
-      `<li><b>${esc(c.code)} ${esc(c.edition)}</b>${c.title ? ` — ${esc(c.title)}` : ''}${c.basedOn ? ` <span class="rv-muted muted">(based on ${esc(c.basedOn)})</span>` : ''}${c.effectiveDate ? ` <span class="rv-muted muted">effective ${esc(c.effectiveDate)}</span>` : ''}${sourceLink(c.sourceUrl)}</li>`));
+      `<li><b>${esc(c.code)} ${esc(c.edition)}</b>${c.title ? ` — ${esc(c.title)}` : ''}${c.basedOn ? ` <span class="rv-muted muted">(based on ${esc(c.basedOn)})</span>` : ''}${c.effectiveDate ? ` <span class="rv-muted muted">effective ${esc(c.effectiveDate)}</span>` : ''}${c.mandatoryDate ? ` <span class="rv-muted muted">mandatory ${esc(c.mandatoryDate)}</span>` : ''}${c.previousEdition ? ` <span class="rv-muted muted">replaces ${esc(c.previousEdition)}</span>` : ''}${sourceLink(c.sourceUrl)}</li>`));
     section('Amendments', ((p && p.amendments) || []).map((a) =>
       `<li><b>${esc([a.code, a.section].filter(Boolean).join(' '))}</b>${a.summary ? ` — ${esc(a.summary)}` : ''}${sourceLink(a.sourceUrl)}</li>`));
-    const kv = (obj, labels = {}) => Object.entries(obj || {}).filter(([k, v]) => k !== 'sourceUrl' && v !== '' && v != null)
-      .map(([k, v]) => `<li><b>${esc(labels[k] ? labels[k][0] : humanKey(k))}:</b> ${esc(plainValue(v))}${esc(labels[k] ? labels[k][1] : '')}</li>`);
+    // OFFICIAL (#683): a value read on the jurisdiction's own official page is shown "from <host>",
+    // never as verified by anyone (the newest citation for the field decides, as the server does).
+    const officialFrom = (block, k) => {
+      const c = ((p && p.citations) || []).filter((x) => x && x.field === `${block}.${k}`).pop();
+      if (!c || c.tier !== 'official' || !c.fetchedAt || !httpUrl(c.sourceUrl)) return '';
+      let host = '';
+      try { host = new URL(c.sourceUrl).hostname; } catch { return ''; }
+      return ` <span class="rv-muted muted" data-official-source="${esc(k)}">from ${esc(host)}, read ${esc(String(c.fetchedAt).slice(0, 10))}</span>${sourceLink(c.sourceUrl)}`;
+    };
+    const kv = (obj, labels = {}, block = '') => Object.entries(obj || {}).filter(([k, v]) => k !== 'sourceUrl' && v !== '' && v != null)
+      .map(([k, v]) => `<li><b>${esc(labels[k] ? labels[k][0] : humanKey(k))}:</b> ${esc(plainValue(v))}${esc(labels[k] ? labels[k][1] : '')}${block ? officialFrom(block, k) : ''}</li>`);
     // Fields whose generic label would mislead (a unit glued to the name, a value no rule reads).
     const dc = kv(p && p.designCriteria, {
       groundSnowLoadPsf: ['Ground snow load Pg', ' psf'],
@@ -62,11 +71,26 @@
       weathering: ['Weathering (informational)', ''],
       termite: ['Termite (informational)', ''],
       soilBearingPsf: ['Soil bearing (informational)', ' psf'],
-    });
+    }, 'designCriteria');
     if (dc.length && httpUrl(p.designCriteria && p.designCriteria.sourceUrl)) dc.push(`<li class="rv-muted muted">Design criteria${sourceLink(p.designCriteria.sourceUrl)}</li>`);
     section('Design criteria', dc);
     section('Prescriptive limits', kv(p && p.prescriptive));
     section('Fire setbacks', ((p && p.fireSetbacks) || []).map((f) => `<li>${esc(plainValue(f))}</li>`));
+    // The battery (ESS) rules (review-audit draft 05): only where the row records its own; the model-code
+    // baseline applies to everything else. Shown so a person never verifies a rule they were not shown.
+    if (p && p.essRules && Object.keys(p.essRules).length) section('Battery / ESS rules', kv(p.essRules, {}, 'essRules'));
+    // The alternative roof-access policy (review-audit draft 08): shown so a person never verifies a
+    // policy they were not shown; verifying it lets it replace the model-code pathway numbers.
+    if (p && p.firePathwayPolicy) {
+      const fp = kv(p.firePathwayPolicy, {
+        arrayAreaMaxSqFt: ['Applies to arrays up to', ' sq ft'],
+        ridgeSetbackIn: ['Ridge setback', ' in'],
+        pathwayWidthIn: ['Pathway width', ' in'],
+        pathwaysExemptMaxCoveragePct: ['No pathways at or below roof coverage of', '%'],
+      });
+      if (httpUrl(p.firePathwayPolicy.sourceUrl)) fp.push(`<li class="rv-muted muted">Policy page${sourceLink(p.firePathwayPolicy.sourceUrl)}</li>`);
+      section('Alternative roof-access policy', fp);
+    }
     section('Citations', ((p && p.citations) || []).map((c) =>
       `<li>${esc(c.label || httpUrl(c.sourceUrl) || 'Source')}${sourceLink(c.sourceUrl)}</li>`));
     return rows.join('');
@@ -79,6 +103,8 @@
       adoptedCodes: p.adoptedCodes, amendments: p.amendments,
       designCriteria: p.designCriteria, prescriptive: p.prescriptive,
       fireSetbacks: p.fireSetbacks, citations: p.citations,
+      ...(p.essRules ? { essRules: p.essRules } : {}),
+      ...(p.firePathwayPolicy ? { firePathwayPolicy: p.firePathwayPolicy } : {}),
     };
   }
 

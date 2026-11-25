@@ -51,10 +51,18 @@ const NAMES = [
   // The permit card's issuer line and its set/clear control (split issuer) — trackCardHtml calls both.
   "TRACK_ISSUER_KEY", "TRACK_ISSUER_SOURCE", "trackIssuerHtml", "trackIssuerEditHtml", "saveTrackIssuer",
   // What the recipe will fill that the job has no value for (#445) — trackCardHtml calls it.
-  "FEE_RESPONSIBILITY_TEXT", "trackPaymentHtml", "trackPaidFormHtml", "trackFeeDueHtml", "STAGE_GAP_LINK", "trackStageGapsHtml",
+  "FEE_RESPONSIBILITY_TEXT", "trackPaymentHtml", "trackPaidFormHtml", "trackFeeDueHtml", "trackSecondStageHtml", "STAGE_GAP_LINK", "trackStageGapsHtml",
   "trackCardHtml", "utilityGroupTitle",
+  // The job's permit-process / utility-filing row above each group (#695); with no window.LookupVerify it draws nothing.
+  "trackLookupHtml",
+  // What the utility's application asks for, under the utility group's lookup row (utility requirements panel); with no window.UtilityRequirements it draws nothing.
+  "utilityRequirementsHtml",
+  // The proposed filing destinations above each group (filing-destination.js); with no window.FilingDestination it draws nothing.
+  "filingDestinationHtml", "decideFilingDestination", "bindFilingDestinationButtons",
   // The closeout milestones group (#497) — renderSubmittalTracks draws and binds it.
   "closeoutGroupHtml", "bindCloseoutMilestones", "saveProjectMilestone",
+  // The utility track a person's storage record dropped (draft 10) — renderSubmittalTracks draws it first.
+  "nemTrackDropHtml", "saveNemTrackKeep",
   "renderSubmittalTracks",
 ];
 const preamble = "const screenshotMisses = new Set(); const screenshotKey = (a, b, c) => `${a}:${b}:${c}`;";

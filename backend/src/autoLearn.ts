@@ -25,12 +25,13 @@ import path from "node:path";
 import { portalProfilesDir, screenshotsDir } from "./statePaths";
 import fs from "node:fs";
 import type { AppDb } from "./db";
-import type { InfoPageIncident, PortalRecipe, ProjectRecord, RecipeStep } from "../../shared/src/types";
+import type { InfoPageIncident, LearnTargetRecordType, PortalRecipe, ProjectRecord, RecipeStep } from "../../shared/src/types";
 import { FINAL_SUBMIT_GATE_SENTENCE, redactSecretValues } from "../../shared/src/portalSafety";
 import { INFO_PAGE_PASS_EXPIRED, infoPageJobValues } from "../../shared/src/infoPagePass";
 import { isPlannerSecretKey, projectSecretValues } from "./projectSecrets";
 import { perJobAnswerKeyFor, perJobControlOfField } from "../../shared/src/perJobQuestions";
 import { parseHasBattery } from "../../shared/src/batteryControls";
+import { recipeSequenceProblems, recipeSequenceSentence } from "../../shared/src/recipeSequence";
 import { learnPortal, browserLimiter } from "../../portal-bot/src/index";
 import { resolveHeadless } from "../../portal-bot/src/browser";
 import { compareReviewFields, utilityIdentifiersEnteredBySteps } from "../../portal-bot/src/reviewScreenScraper";
@@ -48,23 +49,25 @@ import { logger } from "./logger";
 import { ensurePlanSetSplit } from "./docSplitter";
 import { addAuditLog } from "./audit";
 import { HttpError } from "./httpError";
-import { expiredInfoPagePassFor, infoPagePriorProgress, isCleanInfoPageHold, liveInfoPagePasses, recordInfoPageCandidate, recordInfoPageHeldVerified, recordInfoPageLearnClean, recordInfoPageLearnStart, recordInfoPagePassIncidents, recordInfoPagePassUses, reserveInfoPagePassUse } from "./infoPages";
+import { projectClassHoldReason } from "./projectClassHold";
+import { expiredInfoPagePassFor, infoPagePriorProgress, isCleanInfoPageHold, liveInfoPagePasses, recordInfoPageCandidate, recordInfoPageHeldVerified, recordInfoPageLearnClean, linkInfoPageNextInformationPage, recordInfoPageLearnStart, recordInfoPageNextInformation, recordInfoPagePassIncidents, recordInfoPagePassUses, reserveInfoPagePassUse } from "./infoPages";
 import { formPurposeMismatch } from "./formPurpose";
 import { looksBotBlocked } from "./runAbort";
 import { id } from "./ids";
-import { knowledgeProfileKey, findKnowledgeForLearn, isVerifiedKnowledge, learnSafeNotes } from "./knowledgeBase";
+import { knowledgeProfileKey, findKnowledgeForLearn, isVerifiedKnowledge, learnPortalRequiredUploads, learnSafeNotes } from "./knowledgeBase";
 import { hostFitsTrackAndEntity, trackSafeUrl, type PortalUrlSource } from "./portalChannel";
 import { getCodeProfile } from "./codeProfiles";
 import { certifiedNamesForMake } from "./cecEquipment";
 import { annotateDraft, buildDraftTouch, recordDraftTouch, type DraftTouch } from "./draftLedger";
 import { healDraftCreatingFinalSubmit, recordPortalDraft, type ObservedDraft } from "./portalDraft";
 import { draftReferenceFromUrl } from "../../portal-bot/src/adapters/submissionLedger";
-import { issuingAgencyFor, projectForTrack } from "./permitProcess";
+import { issuingAgencyFor, lookedUpRecordTypeFor, projectForTrack } from "./permitProcess";
 import { DECLARED_VALUATION_FIELD, rebindsToValuation } from "./valuation";
 import { feeBracketFieldForLabel } from "./feeBracketFields";
 import { SERVICE_FEEDER_200A_FIELD, SERVICE_FEEDER_400A_FIELD } from "./batteryServiceFeeder";
 import { DESIGN_NOTE_SOURCES, EXPORT_LIMITING_NO_EVIDENCE_KEY } from "../../shared/src/exportLimiting";
 import { FILING_CONTACT_EMAIL_KEY, contactTrackOf, isOwnerEmailSlot, planFilingContactEmails } from "../../shared/src/filingContactEmail";
+import { ADDRESS_COMPONENT_FIELD_KEYS } from "../../portal-bot/src/addressParse";
 
 /** The submittal track an AHJ learn files, from the recipe discipline it will be keyed under
  *  (authoritative — the value the recipe lookup asks for), else the requested permit type.
@@ -247,7 +250,10 @@ export function plannerFieldView(projectFields: Record<string, string>): Record<
   // gets exportLimiting itself, as before, and no new text.
   // The filing contact's email (#520) is placed by the one slot predicate after the plan
   // (applyFilingContactEmail), never by the model: it is not the model's to choose where it goes.
-  const omit = new Set<string>([...DESIGN_NOTE_SOURCES, ...PLANNER_REVIEW_PROSE_KEYS, EXPORT_LIMITING_NO_EVIDENCE_KEY, FILING_CONTACT_EMAIL_KEY]);
+  // The address components (#236) are bound by their control's label at save
+  // (convertLiteralsToBoundFields), never chosen by the model — and the planner already reads the
+  // street line they are cut from, so offering them again would only spend prompt.
+  const omit = new Set<string>([...DESIGN_NOTE_SOURCES, ...PLANNER_REVIEW_PROSE_KEYS, EXPORT_LIMITING_NO_EVIDENCE_KEY, FILING_CONTACT_EMAIL_KEY, ...ADDRESS_COMPONENT_FIELD_KEYS]);
   const same = (a: string | undefined, b: string | undefined) =>
     String(a ?? "").trim().toLowerCase() === String(b ?? "").trim().toLowerCase();
   const out: Record<string, string> = {};
@@ -383,8 +389,22 @@ export function buildLearnKbContext(
 // password) are stripped here and NEVER reach the LLM — the adapter binds those deterministically.
 /** Fills, selects and checks - the steps that actually put data into a form. The only
  *  depth measure available on both a stored draft and a fresh learn. */
-export function substantiveStepCount(steps: Array<{ action?: unknown }> | undefined): number {
-  return (steps ?? []).filter((st) => ["fill", "select", "check"].includes(String(st?.action ?? ""))).length;
+// DISTINCT controls, not counted steps (the same rule as portalRecipes.recipeDepth — duplicated, not
+// imported: that module imports this one). A learn that bounced ("Submission Error") and re-filled
+// the same page three times recorded the same fills thrice, and that looped junk read as deeper (28)
+// than the honest 12-page re-record that followed it (22) — live City of Bend structural,
+// 2026-11-16 — so the re-record was thrown away. A loop is not depth; a control counts once.
+export function substantiveStepCount(steps: Array<{ action?: unknown; field?: unknown; note?: unknown; selector?: { label?: unknown; name?: unknown; css?: unknown } | null }> | undefined): number {
+  const keys = new Set<string>();
+  for (const st of steps ?? []) {
+    const action = String(st?.action ?? "");
+    if (!["fill", "select", "check"].includes(action)) continue;
+    // The CONTROL's own identity first (its label, name or css), the binding after: many boxes
+    // can bind one key (a trust-gate fixture binds sixty to homeownerName), and they are sixty.
+    const ident = String(st?.selector?.label || st?.selector?.name || st?.selector?.css || st?.field || st?.note || "").toLowerCase().replace(/\s+/g, " ").trim();
+    keys.add(`${action}|${ident || `#${keys.size}`}`);
+  }
+  return keys.size;
 }
 
 /**
@@ -455,6 +475,9 @@ export interface TrustGateSignals {
   substantiveFills: number;
   /** The form this run filled is not the form we meant to file (permit extension, renewal…). */
   formPurposeMismatch: boolean;
+  /** #241 — what in the SAVED steps cannot replay as recorded (shared/src/recipeSequence.ts, the
+   *  findings that refuse promotion, in words). Not an array = the steps were never checked. */
+  sequenceProblems: string[];
 }
 
 /**
@@ -504,6 +527,14 @@ export interface TrustGateSignals {
  *                             be recalculated". The model reaches item 6 too: the adapter now counts
  *                             an equipment value the portal did not keep as a required field left
  *                             blank, on whatever page it happened.)
+ *  12. THE SAVED STEPS REPLAY AS RECORDED (#241) — no refused advance followed by re-fills of the
+ *                             same page, no two writes that disagree on one control, no dialog left
+ *                             uncommitted or chooser left unpicked, no attachment-row step after the
+ *                             row's own commit (shared/src/recipeSequence.ts; the same check
+ *                             promoteRecordingIfEligible refuses on and finishPortalRecipe shows).
+ *                             Everything above reads what the walk SAW; this reads what it SAVED.
+ *                             (City of Bend structural, 2026-11-14: page 1 re-recorded after a
+ *                             refused "Next Step", and the live sweep stopped at that advance, #232.)
  *
  * Signal 3 is the one condition here that the pre-2026-09-10 gate computed and then ignored;
  * it is included deliberately, and it is the only change to the bar itself.
@@ -533,6 +564,8 @@ export function evaluateTrustGate(sig: TrustGateSignals): { trusted: boolean; bl
   if (sig.deadBindings.length) blockers.push(`step(s) bound to a field the resolver cannot produce: ${sig.deadBindings.slice(0, 8).join(", ")}`);
   if (sig.pageCount < 3 || sig.substantiveFills < 5) blockers.push(`too thin to auto-trust (${sig.pageCount} page(s), ${sig.substantiveFills} recorded fill(s))`);
   if (sig.formPurposeMismatch) blockers.push("the form this run filled is not the form this track files");
+  if (!Array.isArray(sig.sequenceProblems)) blockers.push("the recorded steps were not checked for a sequence that cannot replay");
+  else if (sig.sequenceProblems.length) blockers.push(`the recorded sequence cannot replay as recorded: ${sig.sequenceProblems.slice(0, 6).join("; ")}`);
   return { trusted: blockers.length === 0, blockers };
 }
 
@@ -642,6 +675,29 @@ export function learnClientNames(db: AppDb, project: Pick<ProjectRecord, "client
   }
 }
 
+/** THE PLANNER'S ONE LINE about the record type on file (#166). Exported for its test. */
+export function recordTypePlannerLine(target: LearnTargetRecordType | null | undefined): string {
+  const value = String(target?.value ?? "").trim();
+  if (!value) return "";
+  return target!.verified
+    ? `recordType (person-verified for this permit — tick exactly this record type / work item where a page offers it; if a page does not offer it, choose the nearest and say so in notes): ${value}`
+    : `recordTypeHint (the per-job lookup read the record type as this; unverified — a hint, not an instruction): ${value}`;
+}
+
+/** THE TARGET RECORD TYPE FOR A LEARN (#166): lookedUpRecordTypeFor on the same track view the
+ *  learn's issuing agency reads (siteIdentity.issuingAgency). Utility scope → null. */
+export function learnTargetRecordType(
+  project: ProjectRecord,
+  scopeType: "ahj" | "utility",
+  learnTrack: string | null,
+  issuerTrack: string | null,
+): LearnTargetRecordType | null {
+  if (scopeType === "utility") return null;
+  const track = issuerTrack === null && learnTrack && projectForTrack(project, learnTrack) === project ? learnTrack : issuerTrack;
+  const hit = lookedUpRecordTypeFor(project, track);
+  return hit ? { value: hit.value, verified: hit.verified } : null;
+}
+
 export function buildPortalPlanner(
   db: AppDb,
   project: ProjectRecord,
@@ -651,6 +707,9 @@ export function buildPortalPlanner(
      *  other than the licence track's (a learn keyed on its stage's own view — learnIssuerTrack).
      *  Omitted: `track`. */
     issuerTrack?: string | null;
+    /** #166: the per-job lookup's record type for this permit, with its standing (learnTargetRecordType).
+     *  Reaches the planner as a jurisdictionContext line — verified: the name to tick; seeded: a hint. */
+    targetRecordType?: LearnTargetRecordType | null;
   },
 ): { planner: (req: LearnPlanRequest) => Promise<LearnPlanResponse>; projectFields: Record<string, string> } {
   // The filing this planner fills — the licence keys answer "the licence THIS permit takes".
@@ -745,6 +804,11 @@ export function buildPortalPlanner(
       project.ahj ? `targetJurisdiction (AHJ): ${project.ahj}` : "",
       project.city ? `projectCity: ${project.city}` : "",
       project.state ? `state: ${project.state}` : "",
+      // #166: the record type / work item on file for THIS permit. A person-verified name is ticked
+      // by the learner itself wherever a page offers it (the planner then sees it in
+      // alreadyFilledLabels); the line is for the page that does NOT offer it, so the planner names
+      // the nearest. A seeded one is a lookup's reading and only ever a hint (hard rule 3).
+      recordTypePlannerLine(opts.targetRecordType),
     ].filter(Boolean).join("\n");
   }
 
@@ -1039,6 +1103,22 @@ export async function autoLearnPortal(
 ): Promise<AutoLearnResult> {
   const projectRow = db.get<Record<string, unknown>>("SELECT * FROM projects WHERE id = ?", [projectId]);
   if (!projectRow) throw new HttpError(404, "Project not found.");
+  // THE LEARN DOOR REFUSES A JOB HELD BY ITS CLASS (#688) — first, before any recipe lookup, KB
+  // read, recording or browser. portal_recipes is unique on (profile_key, discipline) and a
+  // utility's key carries no class, so startPortalRecording on a commercial job would RESET that
+  // portal's residential recipe (and park its steps), and the learn would write the job's facts into
+  // the shared rows. Until recipes are keyed by class, a held job learns nothing, automatically or
+  // supervised (scripts/learn-supervised.ts calls this same function).
+  const learnClassHold = projectClassHoldReason(db, projectId);
+  if (learnClassHold) {
+    addAuditLog(db, projectId, "system", "auto-learn", "portal.learn_refused_class_hold", {
+      scope: input.scope, reason: learnClassHold,
+    });
+    throw new HttpError(409,
+      `${learnClassHold} A held job is never used to learn a portal: its recording would replace the portal's residential recipe. `
+      + "Learn the portal on a residential job, or confirm this job's class first if it really is residential.",
+      { classHeld: true, reason: learnClassHold });
+  }
   // getProjectDetail is the canonical mapper; import lazily to avoid a cycle. A caller may pass
   // a pre-overlaid project (staging self-seed); otherwise load the canonical record.
   const { getProjectDetail } = await import("./repository");
@@ -1152,12 +1232,16 @@ async function autoLearnPortalInner(
   const issuerTrack = scopeType === "utility" ? "nem" : learnIssuerTrack(input);
   // Secrets are stripped inside buildPortalPlanner — they never reach the LLM; the adapter
   // binds account/meter deterministically from the encrypted credential store.
+  // #166: the record type / work item on file for this permit, read once for the planner's hint and
+  // the learner's deterministic pick (the same value both ways).
+  const targetRecordType = learnTargetRecordType(project, scopeType, learnTrack, issuerTrack);
   const { planner, projectFields } = buildPortalPlanner(db, project, {
     portalType,
     scopeType,
     permitType: input.permitType,
     track: learnTrack,
     issuerTrack,
+    targetRecordType,
   });
 
   // Credential lookup (B11): the portal's URL decides FIRST (host + first path segment), then
@@ -1377,6 +1461,17 @@ async function autoLearnPortalInner(
         if (incidents.some((i) => i.phase === "after")) infoPageCall.afterIncident = true;
       } catch (err) {
         infoPageCall.incidentError = err instanceof Error ? err.message.slice(0, 120) : String(err);
+      }
+    }
+    if (!threw && Array.isArray(l?.infoPageNextInfo) && l.infoPageNextInfo.length) {
+      // #279: the WAIT is authority (Helm's review of #294): a pass whose wait could not be written is
+      // withdrawn as an after-click incident instead — never left usable unseen.
+      try { recordInfoPageNextInformation(db, infoPageProjectRow ? projectId : null, runId, l.infoPageNextInfo, thisAttempt); } catch {
+        try {
+          recordInfoPagePassIncidents(db, infoPageProjectRow ? projectId : null, runId, (l.infoPageNextInfo as Array<{ passId?: unknown; where?: unknown }>).map((x) => ({
+            passId: String(x?.passId ?? ""), phase: "after" as const, why: ["the page it led to (another information page) could not be put on record for a person"], where: String(x?.where ?? ""),
+          })));
+        } catch { /* the held-at-review lock and the learn's own stop stand */ }
       }
     }
     if (!threw && infoPageCall.attemptStartId && !thisAttempt.length && isCleanInfoPageHold(l)) {
@@ -1607,6 +1702,10 @@ async function autoLearnPortalInner(
         issuingAgency: scopeType === "utility" ? null : (issuingAgencyFor(project,
           issuerTrack === null && learnTrack && projectForTrack(project, learnTrack) === project ? learnTrack : issuerTrack)?.value ?? null),
       },
+      // #166: THE RECORD TYPE / WORK ITEM ON FILE for this permit (same track view as issuingAgency).
+      // Verified → the learner ticks the offered option whose label matches, before the planner is
+      // asked; seeded → the planner's hint only. null on a utility learn.
+      targetRecordType,
       onProgress: input.onProgress,
       onHumanStep,
       onDraftCreated,
@@ -1706,13 +1805,25 @@ async function autoLearnPortalInner(
   if (credential && project.clientId) {
     try {
       const msg = String(learn.message || "");
-      const rejected = loginWasRefused(msg);
-      const reachedPortal = learn.ok || learn.pageCount > 0 || /review|advance|fill/i.test(msg);
-      if (rejected) {
-        recordLoginOutcome(db, project.clientId, portalUrl, { ok: false, note: msg.slice(0, 240) });
-      } else if (reachedPortal) {
-        recordLoginOutcome(db, project.clientId, portalUrl, { ok: true, note: "login accepted" });
+      // KEYED ON THE LOGIN'S STATUS when the run carries one (LearnResult.login), on the
+      // message's wording only for a result written before it did. A refusal is recorded with
+      // the portal's own banner as the note; a success clears a stale mark. A submit click that
+      // never posted the form (City of Bend's panel toggle, detail.cause toggle_click) writes
+      // NOTHING — the password was never presented, so the page is not the portal's answer.
+      const login = (learn as { login?: { status?: string; detail?: { cause?: string; banner?: string } | null } }).login;
+      let verdict: { ok: boolean; note: string } | null = null;
+      if (login?.status) {
+        if (login.status === "logged_in" || login.status === "already_authenticated" || login.status === "no_login_required") {
+          verdict = { ok: true, note: "login accepted" };
+        } else if (login.detail?.cause !== "toggle_click" && loginWasRefused(msg)) {
+          verdict = { ok: false, note: (login.detail?.banner ? `the portal answered "${login.detail.banner}"` : msg).slice(0, 240) };
+        }
+      } else if (loginWasRefused(msg)) {
+        verdict = { ok: false, note: msg.slice(0, 240) };
+      } else if (learn.ok || learn.pageCount > 0 || /review|advance|fill/i.test(msg)) {
+        verdict = { ok: true, note: "login accepted" };
       }
+      if (verdict) recordLoginOutcome(db, project.clientId, portalUrl, verdict);
     } catch { /* diagnostic only */ }
   }
 
@@ -1785,6 +1896,11 @@ async function autoLearnPortalInner(
     if (cand && cand.observed && projectRow) {
       try {
         const rec = recordInfoPageCandidate(db, projectId, learnRunId, cand);
+        // #279: when this page is the one a verified page led to, it is the card where a person rules
+        // on that pass's wait (verify = released; not an information page = withdrawn as an incident).
+        if (rec && Array.isArray(learn.infoPageNextInfo) && learn.infoPageNextInfo.length) {
+          try { linkInfoPageNextInformationPage(db, projectId, learn.infoPageNextInfo.map((x: { passId?: unknown }) => String(x?.passId ?? "")), rec); } catch { /* the wait stands: a person can still withdraw the pass */ }
+        }
         if (rec) {
           infoPageSummary = { identitySha256: cand.identitySha256, origin: cand.origin, path: cand.path, controlLabel: String(cand.controlLabel ?? "").slice(0, 80) };
           if (rec.inserted) {
@@ -2201,6 +2317,19 @@ async function autoLearnPortalInner(
   const equipmentNotHeld = learn.equipmentNotHeld ?? [];
   try { learnNoteTopicsFromMisses(db, requiredMisses.filter((m) => !equipmentNotHeld.includes(m))); } catch { /* best-effort */ }
   const docMisses = learn.missingRequiredDocs ?? [];
+  // A REQUIRED SLOT THIS JOB COULD NOT FILL JOINS THE AHJ'S CHECKLIST (#140): the next job here is
+  // stopped at staging naming it, not at the portal. Permit portals only (the AHJ's row); seeded,
+  // never onto a person-verified row. A KB write never changes this learn's outcome.
+  if (scopeType === "ahj" && docMisses.length) {
+    try {
+      const kb = learnPortalRequiredUploads(db, project, docMisses, learnTrack);
+      if ("written" in kb && kb.written.length) {
+        addAuditLog(db, projectId, "system", "auto-learn", "portal.required_upload_learned", { profileKey: kb.profileKey, lines: kb.written });
+      } else if ("skipped" in kb && kb.skipped === "verified") {
+        verification.issues.push(`The portal requires upload(s) this job lacks (${docMisses.slice(0, 6).join(", ")}), and ${project.ahj}'s knowledge-base profile is person-verified, so it was not changed — add them to that profile by hand if they belong there.`);
+      }
+    } catch { /* best-effort: knowledge, never the learn's verdict */ }
+  }
   const validationBlocks = learn.validationBlocks ?? [];
   // #534 — what each page still showed as the walk LEFT it, on any page, and which pages were read.
   const exit = pageExitTrustSignals(learn);
@@ -2294,6 +2423,35 @@ async function autoLearnPortalInner(
     [portalUrl, ...gotoUrls],
   );
   if (purpose.mismatch) verification.issues.push(purpose.reason);
+  // #166: the person-verified record type was NOT on the record-type page, so the walk's work item
+  // is the planner's choice — named here in words a person can act on (confirm the item, or correct
+  // the process row), whatever the gate decides below.
+  if (learn.recordTypeNotOffered) {
+    const gap = learn.recordTypeNotOffered;
+    const ticked = gap.ticked.length ? gap.ticked.map((l) => `"${l}"`).join(", ") : "nothing";
+    verification.issues.push(
+      `The verified record type "${gap.wanted}" is not on this portal's record-type page; the walk ticked ${ticked}` +
+      ` (offered: ${gap.offered.slice(0, 12).join("; ") || "(none read)"}). Confirm the work item before trusting this recipe, or correct the process row.`,
+    );
+  }
+
+  // THE SAVED STEPS, READ AS A SEQUENCE (#241). Everything above reads what the walk saw; this reads
+  // the steps that will be saved and replayed (after the binding pass, so a literal the pass bound is
+  // judged as the binding replay will use). A finding that refuses promotion is a gate blocker and an
+  // issue in the notes; a note (no upload step while this filing carries documents) is an issue too,
+  // pushed AFTER the hard-blocker issues so it never takes one of the operator message's few slots
+  // ahead of a blocker, and rides on a trusted recipe's notes after its matching-key lead sentence.
+  // The walk's own review signal goes in: a learn that reached review but could not keep its submit
+  // (pay- or signature-worded) saves no terminal step, and that is not "never reached review" (#241
+  // review). An empty docsByType stays "not known" (null), never "owes none": documents not built
+  // yet are not documents not owed.
+  const owedDocTypes = Object.keys(docsByType).filter((k) => docsByType[k]);
+  const sequence = recipeSequenceProblems(boundSteps, { owedDocuments: owedDocTypes.length ? owedDocTypes : null, reachedReview });
+  const sequenceRefusals = sequence.filter((p) => p.refusesPromotion).map((p) => p.detail);
+  const sequenceNotes = sequence.filter((p) => !p.refusesPromotion);
+  if (sequenceRefusals.length) {
+    verification.issues.push(`The recorded sequence cannot replay as recorded — ${sequenceRefusals.slice(0, 6).join("; ")}${sequenceRefusals.length > 6 ? `; +${sequenceRefusals.length - 6} more` : ""}. Re-learn this portal, or fix those steps, before trusting.`);
+  }
 
   // THE TRUST GATE. Every condition above feeds evaluateTrustGate, which is where the bar is
   // written down in full — read that comment before changing anything here. Nothing may grant
@@ -2314,6 +2472,7 @@ async function autoLearnPortalInner(
     pageCount: learn.pageCount ?? 0,
     substantiveFills: substantiveSteps,
     formPurposeMismatch: purpose.mismatch,
+    sequenceProblems: sequenceRefusals,
   });
   let trusted = gate.trusted;
   if (hasHardBlockers) {
@@ -2328,6 +2487,7 @@ async function autoLearnPortalInner(
     else if (exitUnread.length) verification.issues.push(`Page(s) ${exitUnread.slice(0, 12).join(", ")} could not be read as the walk left them — review each before trusting.`);
     else if (!exit.exitPagesRead?.read.length) verification.issues.push("No page was read as the walk left it — review every page before trusting.");
   }
+  for (const n of sequenceNotes) verification.issues.push(`Sequence note: ${n.detail}.`);
 
   // While a verified-complete recipe is being protected, the stub (which RESETS that row) is
   // created only after the FINAL trust decision — the replay self-test below can still downgrade
@@ -2459,7 +2619,8 @@ async function autoLearnPortalInner(
   savePortalRecipeSteps(db, stub.id, boundSteps, {
     status: trusted ? "complete" : "recording",
     notes: trusted
-      ? trustedWords.note
+      // The lead sentence is a matching key (notesSayVerified): a sequence note is its own segment AFTER it.
+      ? [trustedWords.note, ...(sequenceNotes.length ? [`[sequence check: ${recipeSequenceSentence(sequenceNotes)}]`] : [])].join(" | ")
       : `Auto-learned but NOT verified — review the captured fill and confirm before trusting.${bindingNote} Issues: ${verification.issues.join("; ") || "low confidence"}.`,
   });
   // The recipe row + steps now exist — route captured human fixes into it, and flush any

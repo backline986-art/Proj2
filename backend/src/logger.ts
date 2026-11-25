@@ -131,10 +131,21 @@ export const logger = {
 };
 
 // --- Sensitive-data hygiene --------------------------------------------------
-const SENSITIVE_QUERY = /token|key|secret|password|cookie|auth|account|meter|mfa|otp/i;
+// `code` and `state` are an OAuth callback's single-use authorization code and its CSRF state (#701,
+// QuickBooks): matched as whole parameter names, so a US-state filter like `?state=OR` is also hidden
+// (harmless) but `postalCode`-style names are not swept up by accident.
+const SENSITIVE_QUERY = /token|key|secret|password|cookie|auth|account|meter|mfa|otp|^code$|^state$/i;
+
+/** A tokenized public path with its token masked: /api/public/<kind>/<token>[/…] and /api/intake/<token>.
+ *  The token IS the authorization on those routes, so a log line must never carry it. */
+export function maskPublicTokenPath(p: string): string {
+  return String(p ?? "")
+    .replace(/^(\/api\/public\/[^/]+\/)[^/]+/i, "$1[token]")
+    .replace(/^(\/api\/intake\/)[^/]+/i, "$1[token]");
+}
 
 function safePath(req: Request): string {
-  const base = req.path || req.url.split("?")[0];
+  const base = maskPublicTokenPath(req.path || req.url.split("?")[0]);
   const q = req.query && Object.keys(req.query).length
     ? "?" + Object.keys(req.query).map((k) => `${k}=${SENSITIVE_QUERY.test(k) ? "[redacted]" : String(req.query[k]).slice(0, 40)}`).join("&")
     : "";

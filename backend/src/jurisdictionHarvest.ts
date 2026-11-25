@@ -111,6 +111,7 @@ import {
   type FeeScheduleSource,
 } from "./feeSchedules";
 import { knowledgeResearchHint } from "./knowledgeBase";
+import { stateSurchargeRuleFor } from "./stateFeeRules";
 import { logger } from "./logger";
 import { extractPdfRows, findFeeRows, inclusiveMaxFromLabel, parseBracketRow } from "./pdfTables";
 import { nowIso } from "./time";
@@ -1359,7 +1360,7 @@ async function resolveFees(
   // exactly this ledger and gets exactly this answer. (It is deliberately not the
   // corroborated brackets that are assigned to `finding.brackets` — the save owns
   // that, and one owner is the whole point of round 2's fix.)
-  const corroborationLine = corroborationNotes(corroborateBrackets(finding, cfg.ledger));
+  const corroborationLine = corroborationNotes(corroborateBrackets(finding, cfg.ledger, stateSurchargeRuleFor(db, cfg.state)));
   finding.notes = [finding.notes, ...corroborationLine].filter(Boolean).join(" | ");
 
   if (!cfg.apply) {

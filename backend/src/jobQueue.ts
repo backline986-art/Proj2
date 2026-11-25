@@ -32,9 +32,19 @@ export type JobType =
   // and landed seeded, the first time a permit job lands in a state with none on file
   // (stateFeeResearch.ensureStateFeeRulesResearched).
   | "state_fee_research"
+  // WHICH JURISDICTION THE JOB'S PARCEL IS IN (review-audit draft 09, parcelJurisdiction.ts): one plain
+  // GET to the county's public parcel service — a government host only, or a hosted map (ArcGIS Online)
+  // the county's own government page links (a person verified it, or Keelix read that page first and
+  // confirmed it: parcelServiceLink.ts) — cached by address hash. Queued by QC for a permit-track job;
+  // never by a page read.
+  | "parcel_jurisdiction_check"
   // THE PER-JOB PERMIT-PROCESS LOOKUP (permitProcessLookup.ts): agency, combo vs separate, portal +
   // record type, documents and fees per permit — cited, seeded — for an AHJ with no process of its own.
   | "permit_process_lookup"
+  // THE MAKER'S OWN SPEC SHEET FOR ONE MICROINVERTER MODEL (#220, makerSpecSheets.ts): one grounded
+  // lookup + fetch of the maker's datasheet PDF, kept once per make + model, then a copy attached to
+  // the project when it says the product is listed rapid-shutdown equipment. Queued by QC.
+  | "maker_spec_sheet"
   | "run_triage"
   | "correction_triage"
   // The LOCAL pipeline steps (QC, doc package, reviewer gate, historical check) running
@@ -691,6 +701,19 @@ function permitLookupRunningFor(db: AppDb, state: string, ahj: string): boolean 
  *  AHJ's cited required-documents list) re-judges QC's document rows instead (#112).
  *  Best effort: a failure here never changes the job's own outcome. */
 async function rejudgeAfterJurisdictionLookup(db: AppDb, job: JobRecord): Promise<void> {
+  if (job.jobType === "parcel_jurisdiction_check") {
+    // The parcel's answer landed for ONE project: re-judge that project's gate (pre-stage only, and
+    // only once its gate has run), so the page shows the parcel finding without a reload.
+    const landed = db.get<{ status: string }>("SELECT status FROM job_queue WHERE id = ?", [job.id]);
+    if (String(landed?.status) !== "done" || !job.projectId) return;
+    try {
+      const { rejudgeReviewerGateForProject } = await import("./repository");
+      await rejudgeReviewerGateForProject(db, job.projectId, `${job.jobType}_landed`);
+    } catch (err) {
+      logger.warn("job-worker", `re-judge after ${job.jobType} failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+    return;
+  }
   if (job.jobType === "permit_process_lookup") {
     // The AHJ's cited required-documents list landed (savePermitProcessLookup wrote it before the job
     // left 'running'): QC's docs.* / docs.complete rows were judged without it, so re-judge them for
@@ -917,6 +940,18 @@ async function runClaimedJob(db: AppDb, job: JobRecord): Promise<boolean> {
       // seeded, through the one write path that never touches a verified row (rule 3).
       const { runStateFeeResearch } = await import("./stateFeeResearch");
       result = await runStateFeeResearch(db, job.payload as Record<string, unknown>);
+    } else if (job.jobType === "maker_spec_sheet") {
+      // Make + model only go to the lookup; the sheet must come from the maker's own site and say
+      // the product is listed rapid-shutdown equipment before a copy reaches the project (#220).
+      const { runMakerSpecSheetJob } = await import("./makerSpecSheets");
+      const { createLLMProvider } = await import("./llm");
+      result = await runMakerSpecSheetJob(db, job.payload as Record<string, unknown>, job.projectId, createLLMProvider());
+    } else if (job.jobType === "parcel_jurisdiction_check") {
+      // One read of the county's parcel service per covering record, government hosts only (or a hosted
+      // map the county's own page is confirmed to link, that page read first), no model; the answer
+      // lands in parcel_jurisdiction_checks by address hash (the gate reads it after).
+      const { runParcelJurisdictionCheck } = await import("./parcelJurisdiction");
+      result = await runParcelJurisdictionCheck(db, job.payload as Record<string, unknown>);
     } else if (job.jobType === "fee_research") {
       // Autonomous fee-schedule onboarding: web-research the jurisdiction's (or
       // utility's) published fee schedule and land it through the REAL save path —
@@ -978,6 +1013,8 @@ async function runClaimedJob(db: AppDb, job: JobRecord): Promise<boolean> {
           profileKey: outcome.profileKey, track: outcome.track, discipline,
           refusedVerified: outcome.refusedVerified, refusedConflicted: outcome.refusedConflicted,
           reason: outcome.reason || undefined,
+          // The documents a pass that saved nothing could not get: a person reads them (feeNeedsPerson).
+          ...(outcome.unread?.length ? { unread: outcome.unread } : {}),
         };
         // The attempt is a visible fact either way (the cold-start portal-URL
         // research does the same): a save says where the fee sheet's new number came

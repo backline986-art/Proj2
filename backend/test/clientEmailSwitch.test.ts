@@ -10,6 +10,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "client-email-switch-"));
 process.env.AUTOPILOT_DB_PATH = path.join(tmpDir, "test.sqlite");
@@ -82,7 +83,7 @@ check("CLIENT_REQUEST_AUTO_SEND=off still stops request links for the allowed te
 
 console.log("3. ONE PREDICATE");
 check("no module but clientNotifier.ts reads CLIENT_NOTIFICATIONS itself", () => {
-  const dir = path.join(path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, "$1")), "..", "src");
+  const dir = path.join(path.dirname(fileURLToPath(import.meta.url).replace(/^\/([A-Za-z]:)/, "$1")), "..", "src");
   const readers = fs.readdirSync(dir).filter((f) => f.endsWith(".ts"))
     .filter((f) => /process\.env\.CLIENT_NOTIFICATIONS\b/.test(fs.readFileSync(path.join(dir, f), "utf8")));
   assert.deepEqual(readers, ["clientNotifier.ts"]);

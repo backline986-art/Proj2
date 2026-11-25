@@ -7,7 +7,8 @@ import { portalUploadCapBytes } from "../../portal-bot/src/uploadCap";
 import type { AppDb } from "./db";
 import type { LLMProvider, PlanSheetKind } from "../../shared/src/types";
 import { HttpError } from "./httpError";
-import { saveProjectDocument, listProjectDocuments, projectDocsByType, shippedPlanSet, shippedPlanSetDocumentId, documentTypesDeletedSince, withdrawSplitPart } from "./projectDocuments";
+import { outlinedTextPagesOfPdf } from "./outlinedTextPages";
+import { recordOutlinedPagesValue, saveProjectDocument, listProjectDocuments, projectDocsByType, shippedPlanSet, shippedPlanSetDocumentId, documentTypesDeletedSince, withdrawSplitPart } from "./projectDocuments";
 
 // Sheet/content patterns → upload doc category. Ported from the parser's detectSplitPages;
 // pages are scored against each category and assigned to the best match. The categories are
@@ -50,7 +51,14 @@ export const CATEGORY_PATTERNS: Array<{ docType: string; label: string; patterns
   // diagram went unsplit and the submit gate reported the SLD missing from a plan set that
   // plainly contains one. Anchored on LINE DIAGRAM with an electrical qualifier; a bare
   // /LINE DIAGRAM/ is deliberately NOT used ("property line", "setback line" prose risk).
-  { docType: "sld", label: "SLD / one-line", patterns: [/\b3-?LINE DIAGRAM\b/i, /\bONE-?LINE\b/i, /\bSINGLE-?LINE\b/i, /\bELECTRICAL\s+LINE\s+DIAGRAM\b/i], sheetNumbers: [/\bE\s*1\.1\b/i] },
+  //
+  // A SPACE IS A HYPHEN IN A SHEET TITLE (#691). "-?" let "SINGLE-LINE" and "3-LINE DIAGRAM" through
+  // but not "SINGLE LINE DIAGRAM" or "3 LINE DIAGRAM", and "THREE LINE DIAGRAM" / "ELECTRICAL
+  // SCHEMATIC" had no pattern, so a NEM package reported the SLD missing from a set that has one.
+  // Hyphen OR whitespace now, by title wording, never by jurisdiction. Two words stay anchored so prose
+  // cannot pass for a title: the 3 / THREE form needs DIAGRAM ("THREE LINE ITEMS", "PROPERTY LINE"),
+  // and a SPACED "ONE LINE" needs a diagram noun after it ("ONE LINE PER CIRCUIT" is a note).
+  { docType: "sld", label: "SLD / one-line", patterns: [/\b(?:3|THREE)[\s-]?LINE\s+DIAGRAM\b/i, /\bONE(?:-?LINE\b|\s+LINE\s+(?:DIAGRAM|DWG|DRAWING|SCHEMATIC)\b)/i, /\bSINGLE[\s-]?LINE\b/i, /\bELECTRICAL\s+LINE\s+DIAGRAM\b/i, /\bELECTRICAL\s+SCHEMATIC\b/i], sheetNumbers: [/\bE\s*1\.1\b/i] },
   // Fire access pathways / setbacks are drawn and labeled on the site plan (the fire-access
   // sheet the gate asks for), so they identify it alongside the sheet name.
   { docType: "site_plan", label: "Site / plot plan", patterns: [/\bSITE PLAN\b/i, /\bPLOT PLAN\b/i, /\bFIRE\s+(?:PATHWAYS?|SETBACKS?|ACCESS)\b/i], sheetNumbers: [/\bPV\s*1\.[01]\b/i] },
@@ -377,6 +385,10 @@ export interface UtilityPackageResult {
   /** Undecided spec pages never sent to the read because their text reads as a bill or meter
    *  record (rule 2). They stay undecided. */
   specPagesWithheld?: number[];
+  /** 1-based pages whose text is DRAWN AS OUTLINES (#696, outlinedTextPages.ts): "unread: text drawn
+   *  as outlines; a person reads this page". Always in `unclassifiedPages` too — never filed under a
+   *  type on whatever stray text they carry, and never sent to the page-index read. */
+  outlinedTextPages: number[];
 }
 
 // A split part that holds a page the page-index read decided (#79) says so in its filename. The
@@ -433,7 +445,9 @@ export async function buildUtilityPackage(
   const source = await PDFDocument.load(planBytes);
   const total = source.getPageCount();
   const classified = await classifyPlanSetPages(planSet.path, total);
-  const { byCategory, unclassified, pageTexts } = classified;
+  const { byCategory, unclassified, pageTexts, outlined } = classified;
+  // The shipped plan set's unread pages, for QC and the submit gate (#696): the split read them anyway.
+  try { recordOutlinedPagesValue(db, planSet.id, outlined); } catch { /* the gate reads '' as not checked */ }
   let { undecidedSpec, undecidedSpecFiledAs } = classified;
   const visionTypes = new Set<string>();
   let specPagesByVision: Record<string, PlanSheetKind> | undefined;
@@ -552,7 +566,7 @@ export async function buildUtilityPackage(
   const missingSheetTypes = CATEGORY_PATTERNS
     .map((c) => c.docType)
     .filter((t) => wanted.includes(t) && !CONDITIONAL_PACKAGE_DOC_TYPES.has(t) && !parts.some((p) => p.docType === t));
-  return { target, planSetDocId: planSet.id, pages: total, parts, packagedDocTypes: packaged, missingDocTypes: missing, zipDocumentId: zipDoc.id, unclassifiedPages: unclassified, missingSheetTypes, undecidedSpecPages: undecidedSpec, undecidedSpecFiledAs,
+  return { target, planSetDocId: planSet.id, pages: total, parts, packagedDocTypes: packaged, missingDocTypes: missing, zipDocumentId: zipDoc.id, unclassifiedPages: unclassified, missingSheetTypes, undecidedSpecPages: undecidedSpec, undecidedSpecFiledAs, outlinedTextPages: outlined,
     ...(specPagesByVision ? { specPagesByVision } : {}), ...(specPagesWithheld ? { specPagesWithheld } : {}) };
 }
 
@@ -560,14 +574,27 @@ export async function buildUtilityPackage(
 // the pages that name a spec sheet but landed in no spec part are listed as undecided spec pages,
 // with the category that took each one, if any (#91) — unless that category won on a title-block
 // sheet-name hit (#119).
-async function classifyPlanSetPages(planSetPath: string, total: number): Promise<{ byCategory: Map<string, number[]>; unclassified: number[]; undecidedSpec: number[]; undecidedSpecFiledAs: Record<string, string>; pageTexts: string[] }> {
+//
+// OUTLINED TEXT (#696). A page whose text is drawn as outlines (outlinedTextPages.ts: no or near-no
+// text layer, no raster, a vector-heavy drawing) is UNCLASSIFIED, whatever its few stray text items
+// score: the text cannot say what the sheet is, so filing it would be a guess. It is named in
+// `outlined` so every report says why it was not read. Only pages whose text is already short are
+// opened to check; a normal text page is classified exactly as before.
+async function classifyPlanSetPages(planSetPath: string, total: number): Promise<{ byCategory: Map<string, number[]>; unclassified: number[]; undecidedSpec: number[]; undecidedSpecFiledAs: Record<string, string>; pageTexts: string[]; outlined: number[] }> {
   const pageTexts = await extractPdfPages(planSetPath, 80);
+  let outlined: number[] = [];
+  try {
+    outlined = (await outlinedTextPagesOfPdf(new Uint8Array(fs.readFileSync(planSetPath)), { pageTexts: pageTexts.slice(0, total), maxPages: Math.min(total, 80) }))
+      .filter((p) => p <= total);
+  } catch { outlined = []; /* unreadable drawing: classified by its text, as before */ }
+  const outlinedSet = new Set(outlined);
   const byCategory = new Map<string, number[]>();
   const unclassified: number[] = [];
   const undecidedSpec: number[] = [];
   const undecidedSpecFiledAs: Record<string, string> = {};
   const index = indexSpecSheets(pageTexts.slice(0, total));
   for (let i = 0; i < total; i++) {
+    if (outlinedSet.has(i + 1)) { unclassified.push(i + 1); continue; }
     const text = pageTexts[i] ?? "";
     const { docTypes, byPattern } = scorePage(text);
     for (const docType of docTypes) {
@@ -585,7 +612,7 @@ async function classifyPlanSetPages(planSetPath: string, total: number): Promise
       if (docTypes.length) undecidedSpecFiledAs[String(i + 1)] = docTypes[0];
     }
   }
-  return { byCategory, unclassified, undecidedSpec, undecidedSpecFiledAs, pageTexts };
+  return { byCategory, unclassified, undecidedSpec, undecidedSpecFiledAs, pageTexts, outlined };
 }
 
 // A page that names a spec sheet, is not a calculations or index page, landed in no spec part, and
@@ -637,7 +664,7 @@ export async function reconcileSplitParts(db: AppDb, projectId: string): Promise
   // The plan set the package ships (#198): one "newest" rule, so reconcile judges the same plan set.
   const shipped = shippedPlanSet(db, projectId);
   const latest = shipped ? { stored_path: shipped.storedPath, uploaded_at: shipped.uploadedAt } : undefined;
-  const none: ReconcileResult = { withdrawn: [], gaps: [], undecidedSpecPages: [], undecidedSpecFiledAs: {} };
+  const none: ReconcileResult = { withdrawn: [], gaps: [], undecidedSpecPages: [], undecidedSpecFiledAs: {}, outlinedTextPages: [] };
   if (!latest?.stored_path || !fs.existsSync(latest.stored_path)) return none;
   const sheetTypes = CATEGORY_PATTERNS.map((c) => c.docType);
   const splitParts = db.query<{ id: string; doc_type: string; stored_path: string; uploaded_at: string; original_filename: string }>(
@@ -648,8 +675,8 @@ export async function reconcileSplitParts(db: AppDb, projectId: string): Promise
   if (splitParts.length === 0) return none;
   const deletedByPerson = documentTypesDeletedSince(db, projectId, latest.uploaded_at);
   const total = (await PDFDocument.load(fs.readFileSync(latest.stored_path))).getPageCount();
-  const { byCategory, pageTexts, undecidedSpec, undecidedSpecFiledAs } = await classifyPlanSetPages(latest.stored_path, total);
-  const undecided = { undecidedSpecPages: undecidedSpec, undecidedSpecFiledAs };
+  const { byCategory, pageTexts, undecidedSpec, undecidedSpecFiledAs, outlined } = await classifyPlanSetPages(latest.stored_path, total);
+  const undecided = { undecidedSpecPages: undecidedSpec, undecidedSpecFiledAs, outlinedTextPages: outlined };
 
   const withdrawn = new Set<string>();
   if (pageTexts.some((t) => pageKey(t))) {
@@ -689,6 +716,8 @@ export interface ReconcileResult {
   /** As UtilityPackageResult's: the newest plan set's spec-named pages no spec part holds (#91). */
   undecidedSpecPages: number[];
   undecidedSpecFiledAs: Record<string, string>;
+  /** As UtilityPackageResult's: the newest plan set's pages whose text is drawn as outlines (#696). */
+  outlinedTextPages: number[];
 }
 
 /**

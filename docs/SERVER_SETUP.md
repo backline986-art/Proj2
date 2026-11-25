@@ -18,7 +18,9 @@
    listens on 127.0.0.1, so only this machine can reach it.
 4. `npm run dev` → dashboard at http://localhost:4000. `npm run smoke` to
    verify the install.
-5. Updating: `git pull && npm install && npm run smoke` — DB migrations
+5. Updating: `git pull && npm install && npx playwright install chromium && npm run smoke`
+   (the browser step matters after a Playwright bump: npm never fetches the Chromium build the new
+   version drives, and portal runs fail at launch without it) — DB migrations
    apply themselves on next start. Your DB lives at backend/data/ (or
    AUTOPILOT_DB_PATH); back it up before big pulls.
 6. Windows notes: run commands in PowerShell; if `npx tsx` complains about
@@ -83,7 +85,7 @@ still wins over the root and splits the state again. In Docker the image already
 mounted volume, `/app/backend/data` (DEPLOY.md §3).
 
 Rules: ONE instance only (SQLite). Updates: `git pull && npm install
-&& npm run smoke && systemctl restart solar` — migrations self-apply.
+&& npx playwright install chromium && npm run smoke && systemctl restart solar` — migrations self-apply.
 Confirm the restart took: the banner / `curl localhost:4000/health` → `build.label`
 reads the new commit (`2026.09.24 · 0c466bb`; date version from the running code's
 own git commit — see DEPLOY.md §4). A git checkout needs no `BUILD_*` env vars.
@@ -205,16 +207,17 @@ changes and no token is needed.
 
 Today (no code needed):
 1. Create a Stripe account → Payment Links (or Invoices) for your common
-   totals, or create one ad-hoc per quote (the Payment screen shows the
-   client total = real permit fees + your service fee).
-2. Send the client the link; when Stripe shows it paid, click **Mark paid**
+   totals, or create one ad-hoc per quote (the Payment screen shows
+   "Collect from client now" = your service fee only; the permit fee is paid
+   on the portal and invoiced afterwards, only when you advanced it).
+2. Send the client the link; when Stripe shows it paid, click **Client paid us**
    on the project's Payment panel and paste the Stripe payment/invoice id
    into the reference field — it lands in `submission_payments.payment_reference`
    and the staging gate unlocks. Waive covers comped jobs.
 
 When you want it automatic (small build, ~a day):
 - `npm i stripe`; env `STRIPE_SECRET_KEY` + `STRIPE_WEBHOOK_SECRET`.
-- On quote: create a Checkout Session/Payment Link for `totalUsd`, store its
+- On quote: create a Checkout Session/Payment Link for `gateAmountUsd`, store its
   id on the payment row, show the URL on the Payment panel.
 - Webhook `POST /api/public/stripe/webhook` (public prefix, signature-verified
   with the webhook secret): on `checkout.session.completed`, call

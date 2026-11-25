@@ -20,9 +20,12 @@
 // ---------------------------------------------------------------------------
 
 import type { PrescriptiveLimits, ProjectRecord } from "../../shared/src/types";
-import { assumedRoofLayersNote, classifyRoofCovering, oregonRoofingRowQualifies } from "./roofCovering";
+import { assumedRoofLayersNote, classifyRoofCovering, roofingRowAgainst } from "./roofCovering";
 import { engineeredGroundMount } from "./mountKind";
+import { readBallastedRacking } from "./ballastRacking";
 import { describeSnowLabelIssue, planSheets, readSnowLabels } from "./planAttachmentRead";
+import { usStateCode } from "./usState";
+import { criteriaDefaultLimits, permitPathRecordFor, splitScreenNames, statewidePathRecords, type JurisdictionPermitPathRecord } from "./jurisdictionPermitPaths";
 
 export type PermitPath = "prescriptive" | "engineered" | "unknown";
 
@@ -71,43 +74,8 @@ function clean(value: unknown): string {
   return typeof value === "string" ? value.trim() : value == null ? "" : String(value).trim();
 }
 
-// THE STATE IS AN ALLOWLIST, NOT "ANYTHING THAT IS NOT OR" (2026-09-24, D1 verification MF2).
-//
-// Intake stores the state as typed (createProject has no normaliser), and the standard-review
-// rule below routes every non-Oregon state past Oregon's prescriptive-vs-engineered confirmation.
-// Its first normaliser only knew "OREGON" and "ORE", so a Portland project stored as "Oreg.",
-// "OR 97201", "Portland, OR", "97201", "OR, USA", "O.R." or "Oregon State" was NOT "OR", routed to
-// the standard review, and skipped the confirmation with no gate blocker at all — the fail-open
-// the previous "unknown" fallback had prevented. Now a state routes only when it normalises to a
-// recognised two-letter US code: full names and the common abbreviations map to their code;
-// anything else resolves UNKNOWN with the "add the project's state" basis, which the gate blocks
-// on. Inlined (designCriteria.US_STATES is the same list) because this module must not import
-// the design-criteria engine for a two-line lookup.
-const US_STATE_CODES = new Set("AL AK AZ AR CA CO CT DE FL GA HI ID IL IN IA KS KY LA ME MD MA MI MN MS MO MT NE NV NH NJ NM NY NC ND OH OK OR PA RI SC SD TN TX UT VT VA WA WV WI WY DC".split(" "));
-const US_STATE_NAMES: Record<string, string> = {
-  ALABAMA: "AL", ALASKA: "AK", ARIZONA: "AZ", ARKANSAS: "AR", CALIFORNIA: "CA", COLORADO: "CO", CONNECTICUT: "CT",
-  DELAWARE: "DE", FLORIDA: "FL", GEORGIA: "GA", HAWAII: "HI", IDAHO: "ID", ILLINOIS: "IL", INDIANA: "IN", IOWA: "IA",
-  KANSAS: "KS", KENTUCKY: "KY", LOUISIANA: "LA", MAINE: "ME", MARYLAND: "MD", MASSACHUSETTS: "MA", MICHIGAN: "MI",
-  MINNESOTA: "MN", MISSISSIPPI: "MS", MISSOURI: "MO", MONTANA: "MT", NEBRASKA: "NE", NEVADA: "NV", "NEW HAMPSHIRE": "NH",
-  "NEW JERSEY": "NJ", "NEW MEXICO": "NM", "NEW YORK": "NY", "NORTH CAROLINA": "NC", "NORTH DAKOTA": "ND", OHIO: "OH",
-  OKLAHOMA: "OK", OREGON: "OR", PENNSYLVANIA: "PA", "RHODE ISLAND": "RI", "SOUTH CAROLINA": "SC", "SOUTH DAKOTA": "SD",
-  TENNESSEE: "TN", TEXAS: "TX", UTAH: "UT", VERMONT: "VT", VIRGINIA: "VA", WASHINGTON: "WA", "WEST VIRGINIA": "WV",
-  WISCONSIN: "WI", WYOMING: "WY", "DISTRICT OF COLUMBIA": "DC",
-  // Common abbreviations (AP style and the ones operators type).
-  ORE: "OR", OREG: "OR", CALIF: "CA", CAL: "CA", TEX: "TX", FLA: "FL", WASH: "WA", ARIZ: "AZ", COLO: "CO", ILL: "IL",
-  MASS: "MA", MICH: "MI", MINN: "MN", MISS: "MS", NEB: "NE", NEV: "NV", OKLA: "OK", PENN: "PA", PENNA: "PA", TENN: "TN",
-  WIS: "WI", WISC: "WI", WYO: "WY", KANS: "KS", CONN: "CT", DEL: "DE", IND: "IN",
-};
-
-/** The two-letter US state code a stored state spelling means, or "" when it is not one we
- *  recognise. "Oregon", "Ore.", "oreg", " or " → "OR"; "OR 97201", "Portland, OR", "97201",
- *  "OR, USA", "O.R.", "OR-Oregon", "Oregon State" → "" (never guessed: the gate asks). */
-export function usStateCode(value: unknown): string {
-  const raw = clean(value).toUpperCase().replace(/\.+$/, "").replace(/\s+/g, " ").trim();
-  if (!raw) return "";
-  if (US_STATE_CODES.has(raw)) return raw;
-  return US_STATE_NAMES[raw] ?? "";
-}
+// The state normaliser (usStateCode) lives in usState.ts; re-exported here for every existing import.
+export { usStateCode };
 
 function snap(project: PermitPathInputs, key: string): string {
   return clean((project.parserSnapshot || {})[key]);
@@ -434,7 +402,8 @@ export function resolveStampRequirement(
  *   2. Parser hint (snapshot.permitPath) when it explicitly says prescriptive/engineered.
  *   3. Stamp recommendation that calls for a stamp/engineering → engineered.
  *   4. Structural prescriptive screen (snow ≤70, dead load ≤4.5, rafter spacing ≤24,
- *      wind B/C). Any failure → engineered. Microinverter roof mounts that pass the
+ *      wind B/C, and ballasted racking where the jurisdiction's cited rule excludes it).
+ *      Any failure → engineered; an unclear ballast reading → unknown (a person confirms). Microinverter roof mounts that pass the
  *      screen → prescriptive.
  *   5. Default for a standard residential roof mount → prescriptive.
  */
@@ -443,14 +412,40 @@ export interface PermitPathOptions {
    *  resolvePermitPathForProject (which has the db); absent here means "not researched
    *  yet", never "no limits apply". */
   limits?: PrescriptiveLimits;
+  /** The tier of the code-profile row `limits` came from. Where the jurisdiction's permit-path RECORD
+   *  supplies the screen (reference-jurisdiction-permit-paths.json), only a PERSON-VERIFIED (or
+   *  official) row's stated limits overlay the record's (rule 3); a seeded or untiered one never does,
+   *  so the record's screen stands exactly as shipped. */
+  limitsTier?: "seeded" | "official" | "verified";
 }
+
+/** The screen's limits for a job whose jurisdiction has a permit-path record: the record's, overlaid
+ *  field by field by a person-verified / official code profile's stated limits. */
+function recordScreenLimits(record: JurisdictionPermitPathRecord, opts: PermitPathOptions): JurisdictionPermitPathRecord["limits"] {
+  if (!opts.limits || (opts.limitsTier !== "verified" && opts.limitsTier !== "official")) return record.limits;
+  const own = opts.limits;
+  return {
+    ...record.limits,
+    ...(own.maxGroundSnowPsf != null ? { maxGroundSnowPsf: own.maxGroundSnowPsf } : {}),
+    ...(own.maxPvDeadLoadPsf != null ? { maxPvDeadLoadPsf: own.maxPvDeadLoadPsf } : {}),
+    ...(own.maxRafterSpacingIn != null ? { maxRafterSpacingIn: own.maxRafterSpacingIn } : {}),
+    ...(own.allowedWindExposures?.length ? { allowedWindExposures: own.allowedWindExposures } : {}),
+    ...(own.maxWindSpeedMphExpC != null ? { maxWindSpeedMphExpC: own.maxWindSpeedMphExpC } : {}),
+    ...(own.maxWindSpeedMphExpB != null ? { maxWindSpeedMphExpB: own.maxWindSpeedMphExpB } : {}),
+  };
+}
+
+/** Where the split exists, in words built from the records ("Oregon's ORSC / BCD 440-5952"). */
+const splitRuleWords = (): string => splitScreenNames((r) => `${r.displayName}'s ${r.code} rule`) || "a rule of a jurisdiction that publishes one";
+const splitScreenWords = (): string => splitScreenNames((r) => `${r.displayName}'s ${r.code}`) || "none on file";
+const splitLimitsWords = (): string => splitScreenNames((r) => `${r.displayName}'s (${r.code} limits)`) || "not on file for any jurisdiction";
 
 /** Does the prescriptive-vs-engineered SPLIT (two applications, the AHJ takes one) exist for this
  *  project's jurisdiction? Oregon's statewide one (ORSC / BCD 440-5952), or a jurisdiction whose OWN
  *  cited research says it publishes a prescriptive rooftop-PV path. Everywhere else there is one
  *  building-side application, and every consumer's Oregon vocabulary stays off the page. */
-export function prescriptiveSplitApplies(project: Pick<PermitPathInputs, "state">, limits: PrescriptiveLimits | undefined): boolean {
-  return usStateCode(project.state) === "OR" || limits?.hasPrescriptivePath === true;
+export function prescriptiveSplitApplies(project: Pick<PermitPathInputs, "state"> & Partial<Pick<PermitPathInputs, "ahj">>, limits: PrescriptiveLimits | undefined): boolean {
+  return permitPathRecordFor(project.state, project.ahj)?.split === true || limits?.hasPrescriptivePath === true;
 }
 
 export function resolvePermitPath(project: PermitPathInputs, opts: PermitPathOptions = {}): PermitPathResolution {
@@ -497,7 +492,7 @@ export function resolvePermitPath(project: PermitPathInputs, opts: PermitPathOpt
     if (!splitApplies) {
       // Worded without the split's own phrases ("prescriptive path", "prescriptive application"…): this
       // line is printed on the package cover of a non-Oregon job, which must carry none of them.
-      basis.push(`Manual-entry permit path "prescriptive" set aside: ${usStateCode(project.state) || "this jurisdiction"} offers no such choice (that split is Oregon's ORSC / BCD 440-5952 rule) — reviewed as a standard structural review.`);
+      basis.push(`Manual-entry permit path "prescriptive" set aside: ${usStateCode(project.state) || "this jurisdiction"} offers no such choice (that split is ${splitRuleWords()}) — reviewed as a standard structural review.`);
     } else {
       basis.push("Operator selected the prescriptive path.");
       return finalize("prescriptive", "operator");
@@ -564,6 +559,9 @@ export function resolvePermitPath(project: PermitPathInputs, opts: PermitPathOpt
   // spelling it does not recognise is "" and resolves UNKNOWN below, which the gate blocks on.
   const stateCode = usStateCode(project.state);
   const stateUnrecognised = !stateCode && Boolean(clean(project.state));
+  // THE JURISDICTION'S PUBLISHED PATH, AS DATA (draft 14): the record that says this state / AHJ
+  // publishes the split, its limits and its roofing row. Only a recognised state can have one.
+  const record = permitPathRecordFor(project.state, project.ahj);
   const jurisdiction: PrescriptiveLimits = opts.limits ?? {};
   // A STRAY LIMIT IS NOT A PRESCRIPTIVE PATH. Only the explicit hasPrescriptivePath flag —
   // which research sets by asking the question directly — says this jurisdiction publishes
@@ -590,26 +588,26 @@ export function resolvePermitPath(project: PermitPathInputs, opts: PermitPathOpt
   // the jurisdiction's own stamp rule says so (resolveStampRequirement). The operator can still
   // pick prescriptive for a jurisdiction that publishes one; its researched limits take over once
   // they land. Never "prescriptive": no Oregon number judges a Florida roof.
-  if (stateCode && stateCode !== "OR" && !hasResearchedLimits) {
+  if (stateCode && !record && !hasResearchedLimits) {
     const where = project.ahj || stateCode;
     basis.push(
       jurisdiction.hasPrescriptivePath === false
         ? `${where} publishes no prescriptive rooftop-PV path${jurisdiction.sourceUrl ? ` (${jurisdiction.sourceUrl})` : ""}, so rooftop PV goes through standard structural review.`
-        : `No prescriptive rooftop-PV path is on file for ${where} (the screen encoded here is Oregon's ORSC / BCD 440-5952, which does not apply in ${stateCode}), so rooftop PV goes through the standard structural (building) review — one application, no path choice to confirm.`,
+        : `No prescriptive rooftop-PV path is on file for ${where} (the screen encoded here is ${splitScreenWords()}, which does not apply in ${stateCode}), so rooftop PV goes through the standard structural (building) review — one application, no path choice to confirm.`,
       `What that review needs: the roof framing + attachment detail, and a PE-sealed structural letter only if ${where}'s own rule requires one. If ${where} publishes a prescriptive rooftop-PV route, choose it (Manual entry → Permit path).`,
     );
     return finalize("engineered", "structural-screen", true);
   }
 
-  if (stateCode !== "OR" && !hasResearchedLimits) {
+  if (!record && !hasResearchedLimits) {
     // No state on file, or a spelling this resolver does not recognise: there is no jurisdiction
     // to route by, so no claim is made — never "some other state, standard review".
     basis.push(
-      `The prescriptive screen encoded here is Oregon's (ORSC / BCD 440-5952 limits). `
+      `The prescriptive screen encoded here is ${splitLimitsWords()}. `
       + (stateUnrecognised
         ? `This project's state ("${clean(project.state).slice(0, 40)}") is not a recognised US state spelling, so no path is inferred from it. `
         : `This project has no state on file, so those limits do not apply and no path is inferred from them. `)
-      + `${stateUnrecognised ? "Correct" : "Add"} the project's state (a two-letter code, e.g. OR) or confirm the path on Manual entry → Permit path.`,
+      + `${stateUnrecognised ? "Correct" : "Add"} the project's state (a two-letter code${statewidePathRecords()[0] ? `, e.g. ${statewidePathRecords()[0].state}` : ""}) or confirm the path on Manual entry → Permit path.`,
     );
     return finalize("unknown", "default");
   }
@@ -623,13 +621,14 @@ export function resolvePermitPath(project: PermitPathInputs, opts: PermitPathOpt
   // researched from the jurisdiction itself (we only reach this line outside Oregon when
   // some were found). A limit nobody published stays undefined and its check is SKIPPED —
   // an absent limit is not a limit of zero, and it must never borrow Oregon's number.
+  const screen = record ? recordScreenLimits(record, opts) : jurisdiction;
   const L = {
-    snow: stateCode === "OR" ? OREGON_PRESCRIPTIVE_DEFAULTS.maxGroundSnowPsf : jurisdiction.maxGroundSnowPsf,
-    dead: stateCode === "OR" ? OREGON_PRESCRIPTIVE_DEFAULTS.maxPvDeadLoadPsf : jurisdiction.maxPvDeadLoadPsf,
-    spacing: stateCode === "OR" ? OREGON_PRESCRIPTIVE_DEFAULTS.maxRafterSpacingIn : jurisdiction.maxRafterSpacingIn,
-    exposures: stateCode === "OR" ? OREGON_PRESCRIPTIVE_DEFAULTS.allowedWindExposures : jurisdiction.allowedWindExposures,
+    snow: screen.maxGroundSnowPsf,
+    dead: screen.maxPvDeadLoadPsf,
+    spacing: screen.maxRafterSpacingIn,
+    exposures: screen.allowedWindExposures,
   };
-  const whose = stateCode === "OR" ? "prescriptive" : `${project.ahj || stateCode} prescriptive`;
+  const whose = record ? "prescriptive" : `${project.ahj || stateCode} prescriptive`;
   const screenFailures: string[] = [];
   if (snow != null && L.snow != null && snow > L.snow) screenFailures.push(`ground snow load ${snow} psf > ${L.snow} psf ${whose} limit`);
   if (deadLoad != null && L.dead != null && deadLoad > L.dead) screenFailures.push(`PV dead load ${deadLoad} psf > ${L.dead} psf ${whose} limit`);
@@ -656,25 +655,28 @@ export function resolvePermitPath(project: PermitPathInputs, opts: PermitPathOpt
   // A roof described only by its material ("Concrete", "Clay", "Terra cotta") is tile; slate is its
   // own recognised family — both outside the row's allowlist (roofCovering.ts decides).
   const nonPrescriptiveRoof = covering.family === "membrane" || covering.family === "tile" || covering.family === "slate";
+  // The jurisdiction's own roofing row (its record), or none: a published path with no roofing row on
+  // file says nothing about the covering.
+  const roofingRow = record?.roofingRow;
   // The roofing rule is Oregon's ORSC row, so it only speaks for Oregon. Another state's
   // published path may admit membranes or tile; until its own rule is researched, this stays
   // quiet rather than asserting Oregon's into a Florida verdict.
   // The same row also refuses a THIRD layer of composition (or a second of wood) — the checklist
   // answers No there, so the path must not say prescriptive while its own form says No.
-  const layersFail = !nonPrescriptiveRoof && stateCode === "OR"
-    && oregonRoofingRowQualifies(roofMaterial, snap(project, "roofMaterialSubtype"), snap(project, "roofLayers")) === false;
-  if (layersFail) {
-    screenFailures.push(`${snap(project, "roofLayers")} existing layer(s) of "${roofMaterial}" — the BCD 5952 roofing row admits no more than two layers of composition (one of wood shingles/shakes)`);
+  const layersFail = !nonPrescriptiveRoof && !!roofingRow
+    && roofingRowAgainst(roofingRow.allows, roofMaterial, snap(project, "roofMaterialSubtype"), snap(project, "roofLayers")).qualifies === false;
+  if (layersFail && roofingRow) {
+    screenFailures.push(`${snap(project, "roofLayers")} existing layer(s) of "${roofMaterial}" — ${roofingRow.name} admits ${roofingRow.layersLimit}`);
   }
   // AN UNSTATED LAYER COUNT PASSES ON THE OPERATOR'S DEFAULT (roofCovering.oregonRoofingRow, operator
   // ruling 2026-09-28) — said in the basis, so the path never rests on an assumption nobody can see.
-  const assumedLayers = stateCode === "OR" && !nonPrescriptiveRoof
-    ? assumedRoofLayersNote(roofMaterial, snap(project, "roofMaterialSubtype"), snap(project, "roofLayers")) : "";
+  const assumedLayers = roofingRow && !nonPrescriptiveRoof
+    ? assumedRoofLayersNote(roofMaterial, snap(project, "roofMaterialSubtype"), snap(project, "roofLayers"), roofingRow.allows) : "";
   if (assumedLayers) basis.push(`Roofing: ${assumedLayers}.`);
-  if (nonPrescriptiveRoof && stateCode === "OR") {
+  if (nonPrescriptiveRoof && roofingRow && record) {
     screenFailures.push(covering.family === "tile"
-      ? `roofing material "${roofMaterial}"${covering.subtype && !roofMaterial.toLowerCase().includes(covering.subtype.toLowerCase()) ? ` (${covering.subtype})` : ""} is tile — not a prescriptive-eligible covering (the BCD 5952 roofing row admits only metal, single-layer wood shingles/shakes, or <=2-layer composition), so tile-roof PV is non-prescriptive in Oregon: file the engineered/structural application`
-      : `roofing material "${roofMaterial}" is not a prescriptive-eligible covering (metal, wood shingle/shake, or <=2-layer composition) — ${covering.family}-roof PV is non-prescriptive in Oregon`);
+      ? `roofing material "${roofMaterial}"${covering.subtype && !roofMaterial.toLowerCase().includes(covering.subtype.toLowerCase()) ? ` (${covering.subtype})` : ""} is tile — not a prescriptive-eligible covering (${roofingRow.name} admits ${roofingRow.admits}), so tile-roof PV is non-prescriptive in ${record.displayName}: file the engineered/structural application`
+      : `roofing material "${roofMaterial}" is not a prescriptive-eligible covering (${roofingRow.eligible}) — ${covering.family}-roof PV is non-prescriptive in ${record.displayName}`);
   }
   // ULTIMATE WIND SPEED, not just exposure. A COASTAL site routinely parses as exposure C —
   // inside the B/C allowance — while its design wind speed sits in the special wind region
@@ -685,11 +687,30 @@ export function resolvePermitPath(project: PermitPathInputs, opts: PermitPathOpt
   // projects routed engineered only because their title blocks lacked a seal — the screen
   // itself was blind to the coast.
   const windSpeed = num(project, "windSpeed");
-  const speedCap = stateCode === "OR"
-    ? (/\bB\b/i.test(wind) ? OREGON_PRESCRIPTIVE_DEFAULTS.maxWindSpeedMphExpB : OREGON_PRESCRIPTIVE_DEFAULTS.maxWindSpeedMphExpC)
-    : (/\bB\b/i.test(wind) ? jurisdiction.maxWindSpeedMphExpB : jurisdiction.maxWindSpeedMphExpC);
+  const speedCap = /\bB\b/i.test(wind) ? screen.maxWindSpeedMphExpB : screen.maxWindSpeedMphExpC;
   if (windSpeed != null && speedCap != null && windSpeed > speedCap) {
     screenFailures.push(`ultimate design wind speed ${windSpeed} mph > ${speedCap} mph ${whose} cap${wind ? ` at exposure ${wind.toUpperCase()}` : ""}`);
+  }
+  // BALLASTED RACKING LEAVES THE PRESCRIPTIVE PATH where the jurisdiction's own cited rule says so
+  // (its record's `ballastedRacking`: Oregon's BCD 440-5952 admits only direct attachment, and a city's
+  // worksheet may say it in its own words). Before this, the path screen never read the racking: a
+  // ballasted job with clean numbers routed PRESCRIPTIVE and only the reviewer's refusal caught it,
+  // after the wrong application was built. One reading (ballastRacking.ts): a clear one routes
+  // engineered; an unclear one (ballast named in the plan text while the package also shows an
+  // attachment to the framing, a pitched roof, or only a conditional / roofing mention) is a person's
+  // to settle, so the path asks instead of guessing. A ground mount the field names keeps step 5.
+  const ballastRule = record?.ballastedRacking;
+  let ballastQuestion = "";
+  if (record && ballastRule && !engineeredGroundMount(project)) {
+    const reading = readBallastedRacking(project);
+    const ahjText = clean(project.ahj).toLowerCase();
+    const local = ahjText ? ballastRule.localReadings?.find((l) => l.ahjNames.some((n) => ahjText.includes(n))) : undefined;
+    const words = `${ballastRule.source}: "${ballastRule.quote}"${local ? `; ${local.source}: "${local.quote}"` : ""}`;
+    if (reading.verdict === "ballasted") {
+      screenFailures.push(`ballasted / non-penetrating racking (${reading.evidence}) is not a ${record.displayName} prescriptive attachment (${words})`);
+    } else if (reading.verdict === "unclear") {
+      ballastQuestion = `Ballasted racking unclear: ${reading.doubt} (${reading.evidence}). Ballasted racking is not a ${record.displayName} prescriptive attachment (${words}), so a person confirms how the array is held down before the path is chosen: Manual entry → Permit path.`;
+    }
   }
   // THE OTHER BCD 5952 ROWS DO NOT ROUTE THE PATH — operator ruling pending: a 5952 No row warns, it
   // does not route engineered (dry-run 2026-09-28 B4c). A comp-shingle job at 48 in o.c., 120 mph
@@ -701,6 +722,10 @@ export function resolvePermitPath(project: PermitPathInputs, opts: PermitPathOpt
   if (screenFailures.length) {
     basis.push(`Structural prescriptive screen failed: ${screenFailures.join("; ")}.`);
     return finalize("engineered", "structural-screen");
+  }
+  if (ballastQuestion) {
+    basis.push(ballastQuestion);
+    return finalize("unknown", "default");
   }
 
   // 5. Default — a standard residential roof mount that clears the screen is prescriptive.
@@ -778,17 +803,6 @@ export function prescriptiveCriterionCatalog(): Array<{ key: PrescriptiveCriteri
   return evaluatePrescriptiveCriteria(empty, {}, { jurisdictionOnly: true }).map(({ key, label }) => ({ key, label }));
 }
 
-const OREGON_PRESCRIPTIVE_DEFAULTS: Required<PrescriptiveLimitInputs> = {
-  maxGroundSnowPsf: 70,
-  maxPvDeadLoadPsf: 4.5,
-  maxRafterSpacingIn: 24,
-  allowedWindExposures: ["B", "C"],
-  maxWindSpeedMphExpC: 120,
-  maxWindSpeedMphExpB: 135,
-  maxModuleHeightIn: 18,
-  maxRoofLayers: 1,
-};
-
 function yesNoFlag(raw: string): PrescriptiveAnswer {
   const v = raw.toLowerCase();
   if (!v) return "[verify]";
@@ -807,7 +821,8 @@ export function evaluatePrescriptiveCriteria(
    *  limit the jurisdiction never published answers [verify] (blank), as resolvePermitPath does. */
   opts: { jurisdictionOnly?: boolean } = {},
 ): PrescriptiveCriterion[] {
-  const L: PrescriptiveLimitInputs = opts.jurisdictionOnly ? { ...limits } : { ...OREGON_PRESCRIPTIVE_DEFAULTS, ...limits };
+  // The defaults underneath are the criteriaDefault permit-path record's limits (data, draft 14).
+  const L: PrescriptiveLimitInputs = opts.jurisdictionOnly ? { ...limits } : { ...criteriaDefaultLimits(), ...limits };
   const rows: PrescriptiveCriterion[] = [];
   const NO_LIMIT = "no prescriptive limit on file for this jurisdiction — verify";
 

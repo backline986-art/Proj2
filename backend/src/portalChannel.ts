@@ -244,6 +244,17 @@ export function recipeDisciplineForTrack(track: string | null | undefined): stri
   }
 }
 
+// THE DISCIPLINE A HAND RECORDING IS SAVED UNDER. The recorder used to send none, so an AHJ recording
+// landed as discipline "" — and a building/electrical stage asks for ITS discipline first
+// (findCompleteRecipeForProject), so an older auto-learned row of that discipline kept replaying and the
+// person's recording never ran. An explicit discipline wins; else the track the recording was opened
+// from; else "" (the whole-permit recording every track falls back to). Anything unknown is "".
+export function recordingDisciplineOf(input: { discipline?: unknown; track?: unknown }): string {
+  const d = String(input.discipline ?? "").trim().toLowerCase();
+  if (d === "structural" || d === "electrical" || d === "combo") return d;
+  return recipeDisciplineForTrack(typeof input.track === "string" ? input.track.trim().toLowerCase() : "");
+}
+
 // ── Recipe permit-discipline detection ──────────────────────────────────────────────────
 // The ACA learner's deterministic passes record jurisdiction-row and record-type steps
 // whose notes carry the LEARN project's permit discipline ("work location: select
@@ -742,6 +753,9 @@ function isAgencyContentPage(raw: string, host: string, segs: string[]): boolean
   if (ext && !/^(?:html?|shtml)$/i.test(ext)) return false;
   return segs.every((seg) => {
     const bare = seg.replace(/\.[a-z0-9]+$/i, "");
+    // The install root of a self-hosted permit system on the agency's own host (issue #152: a
+    // state's "/etrakit3/") names an application system, as a host label would: not a content page.
+    if (SELF_HOSTED_PERMIT_PATH_SEGMENT.test(bare)) return false;
     if (APP_PATH_WORD.test(bare.replace(/[-_\s]/g, ""))) return false;
     return !bare.split(/[-_\s]+/).some((t) => APP_PATH_TOKEN.test(t));
   });
@@ -921,6 +935,21 @@ export function samePortal(a: string | null | undefined, b: string | null | unde
   const ta = portalTenantOf(a);
   const tb = portalTenantOf(b);
   return !ta || !tb || ta === tb;
+}
+
+/**
+ * IS THIS URL ON THE FILING DOOR A PERSON VERIFIED? (the final-submit gate's door check,
+ * repository.automaticSubmitRefusals). Same host, and on a shared vendor instance (one host serving
+ * many agencies by path or query tenant) the same NAMED tenant: a door that names no tenant on such
+ * a host is the vendor's shared site, which is nobody's door, so it matches nothing. Strict by
+ * design: a run whose URL fails this stops at review; nothing here opens or files anything.
+ */
+export function sameFilingDoor(door: string | null | undefined, url: string | null | undefined): boolean {
+  const host = portalHostOf(door);
+  if (!host || host !== portalHostOf(url)) return false;
+  if (!isPathTenantedHost(host)) return true;
+  const key = portalTenantKey(door);
+  return key !== "" && key !== portalTenantKey(`https://${host}/`) && key === portalTenantKey(url);
 }
 
 /** The recipe scope a track files under: NEM → the utility; every permit track (and a

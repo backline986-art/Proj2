@@ -8,11 +8,13 @@ import { RESEARCH_PORTAL_UNCONFIRMED_NOTE } from "./researchedPortalUrl";
 import { documentNameQueries, scopeResultsToState, stateScopeOf, stateScopedFormQueries } from "./formSearchScope";
 import { logger } from "./logger";
 import { persistLlmCall } from "./llmAccounting";
+import { createModelClient, ModelPayloadLeakError, projectKnownSecrets, runInModelCallScope, withIntakeDocumentRead, withModelSecrets } from "./modelPayloadScan";
 import { routeFor, taskForLabel, takeAdvisorSlot, describeRoutes, BASELINE_MODEL, type LlmEffort, type LlmTask, type ResolvedRoute, type AdvisorConfig } from "./modelRouting";
 import { lookupCecInverter, lookupCecModuleMake } from "./cecEquipment";
 import { planTextForExtraction } from "./structuralIntake";
 import { CONTRACT_PRICE_LABEL, VALUATION_BOX_LABEL } from "./valuation";
 import { parseAmendmentCheck } from "./amendmentChecks";
+import { ESS_RULES_RESEARCH_RULE, ESS_RULES_RESEARCH_SCHEMA, researchedEssRules } from "./essRulesResearch";
 import { exposureValue } from "./designCriteria";
 import type { CodeResearchProvenance } from "./codeProfiles";
 
@@ -1043,6 +1045,55 @@ function numbersIn(quote: string): Array<{ n: number; at: number; end: number }>
   return out;
 }
 
+/** The units a published design value is printed in, each as the words right after its number.
+ *  Order matters: kPa before a bare "k…", m/s and km/h before metres, inches ('' / ") before feet ('). */
+const UNIT_WORDS: Array<{ unit: string; re: RegExp }> = [
+  { unit: "kPa", re: /^\s*(?:kpa\b|kn\s*\/\s*m\s*(?:\^?2|²))/i },
+  { unit: "psf", re: /^\s*(?:psf\b|p\.s\.f\.?|(?:lbs?|pounds?|#)\.?\s*(?:\/|per)\s*(?:sq(?:uare)?\.?\s*(?:ft|feet|foot)\b\.?|ft\s*(?:\^?2|²)|sf\b)|pounds?\b|lbs?\b\.?)/i },
+  { unit: "km/h", re: /^\s*(?:km\s*\/\s*hr?\b|kph\b|kilomet(?:er|re)s?\s+per\s+hour)/i },
+  { unit: "m/s", re: /^\s*(?:m\s*\/\s*s(?:ec)?\b|met(?:er|re)s?\s+per\s+second)/i },
+  { unit: "mph", re: /^\s*(?:mph\b|mi(?:les)?\.?\s*(?:\/|per)\s*h(?:ou)?r\b)/i },
+  { unit: "in", re: /^\s*(?:in(?:ch(?:es)?)?\b\.?|"|”|″|'')/i },
+  { unit: "ft", re: /^\s*(?:f(?:ee|oo)?t\b\.?|'|’|′)/i },
+  { unit: "cm", re: /^\s*(?:cm\b|centimet(?:er|re)s?\b)/i },
+  { unit: "mm", re: /^\s*(?:mm\b|millimet(?:er|re)s?\b)/i },
+  { unit: "m", re: /^\s*(?:m\b(?!\s*\/)|met(?:er|re)s?\b)/i },
+];
+/** Per field: each unit it can hold, as a factor into the field's own unit (psf, mph, in), and how
+ *  finely the converted value is kept. A unit missing here is one the field cannot hold. */
+const FIELD_UNITS: Record<"load" | "speed" | "depth", { factors: Record<string, number>; step: number }> = {
+  load: { factors: { "": 1, psf: 1, kPa: 20.8854 }, step: 1 },
+  speed: { factors: { "": 1, mph: 1, "km/h": 0.621371, "m/s": 2.23694 }, step: 1 },
+  depth: { factors: { "": 1, in: 1, ft: 12, cm: 1 / 2.54, mm: 1 / 25.4, m: 39.3701 }, step: 0.1 },
+};
+function unitAfter(quote: string, end: number): string {
+  const after = quote.slice(end, end + 40);
+  return UNIT_WORDS.find((u) => u.re.test(after))?.unit ?? "";
+}
+/**
+ * ONE PUBLISHED NUMBER IN THE FIELD'S OWN UNIT (#561). `norm` is the number converted (psf for a
+ * load, mph for a wind speed, inches for a frost depth), or null when its unit is one the field
+ * cannot hold ("30 inches" of snow is a depth; "30 psf" is not a frost line) or when it is only the
+ * inches tail of a feet-and-inches length ("2 ft 6 in": the 6 is not a depth on its own). A bare
+ * number is read in the field's own unit, as a design-criteria table prints it ("31 pounds").
+ */
+export function publishedMeasure(criterion: string, quote: string, nums: Array<{ n: number; at: number; end: number }>, i: number): { norm: number | null; unit: string } {
+  const kind = criterion === "windSpeedMph" ? "speed" : criterion === "frostDepthIn" ? "depth"
+    : /SnowLoad|soilBearing/.test(criterion) ? "load" : null;
+  const unit = unitAfter(quote, nums[i].end);
+  if (!kind) return { norm: nums[i].n, unit };
+  // The inches of "2 ft 6 in" / 2'-6": the feet number before it carries the whole length.
+  if (kind === "depth" && unit === "in" && i > 0 && unitAfter(quote, nums[i - 1].end) === "ft"
+    && /^\s*(?:f(?:ee|oo)?t\b\.?|'|’|′)\s*(?:-|–|and\b)?\s*$/i.test(quote.slice(nums[i - 1].end, nums[i].at))) return { norm: null, unit: "in (part of a feet-and-inches length)" };
+  const { factors, step } = FIELD_UNITS[kind];
+  const factor = factors[unit];
+  if (factor === undefined) return { norm: null, unit };
+  let n = nums[i].n * factor;
+  if (kind === "depth" && unit === "ft" && i + 1 < nums.length && unitAfter(quote, nums[i + 1].end) === "in"
+    && /^\s*(?:f(?:ee|oo)?t\b\.?|'|’|′)\s*(?:-|–|and\b)?\s*$/i.test(quote.slice(nums[i].end, nums[i + 1].at))) n += nums[i + 1].n;
+  return { norm: Number((Math.round(n / step) * step).toFixed(step < 1 ? 1 : 0)), unit };
+}
+
 /** The number sits in a range or a list ("20-25 psf", "115/125/140", "25 or 30 psf"): not ONE value. */
 function inRangeOrList(quote: string, at: number, end: number): boolean {
   const before = quote.slice(Math.max(0, at - 8), at);
@@ -1198,7 +1249,7 @@ export function parseDesignCriteriaLookup(
       const rawText = String(v.value ?? "").trim().toUpperCase();
       // Weathering is one of three words, stored lower-case; termite is kept as published ("Slight
       // to Moderate"), whitespace collapsed — too long for the field is dropped below, never cut.
-      const value = criterion === "weathering" ? String(v.value ?? "").trim().toLowerCase()
+      let value = criterion === "weathering" ? String(v.value ?? "").trim().toLowerCase()
         : criterion === "termite" ? String(v.value ?? "").trim().replace(/\s+/g, " ")
         : criterion === "windExposure" ? exposureValue(rawText) ?? rawText
         : isText ? (criterion === "riskCategory" ? romanRisk[rawText] ?? rawText : rawText) : typeof v.value === "number" ? v.value : Number.NaN;
@@ -1247,8 +1298,14 @@ export function parseDesignCriteriaLookup(
         // not a "1, 500" list. Only there — a comma between two loads is a list.
         const q = criterion === "soilBearingPsf" ? quote.replace(/(\d),(?=\d{3}(?!\d))/g, "$1") : quote;
         const nums = numbersIn(q);
-        const hits = nums.map((x, i) => ({ ...x, i })).filter((x) => x.n === value);
-        if (!hits.length) why = "quote does not contain the value";
+        // EVERY NUMBER IS READ WITH ITS UNIT (#561): "2.5 feet" of frost is 30 in, "1.44 kPa" of snow
+        // is 30 psf, and "30 inches" of snow is a depth, never a load. A number matches the answer
+        // as published or once converted to the field's unit; a unit the field cannot hold drops it.
+        const measured = nums.map((x, i) => ({ ...x, i, ...publishedMeasure(criterion, q, nums, i) }));
+        const hits = measured.filter((x) => x.norm !== null && (x.n === value || x.norm === value));
+        const misfit = measured.find((x) => x.norm === null && x.n === value);
+        if (!hits.length && misfit) why = `the value is published in ${misfit.unit}, not a unit this field holds`;
+        else if (!hits.length) why = "quote does not contain the value";
         else if (hits.every((h) => inRangeOrList(q, h.at, h.end))) why = "value sits in a range or list";
         else if (SITE_CONDITIONAL.test(q)) why = "quote makes the value site-specific";
         else if (criterion === "frostDepthIn") {
@@ -1296,11 +1353,23 @@ export function parseDesignCriteriaLookup(
       // page must not become a jurisdiction's seeded value).
       if (!why && !isOfficialCodeSource(sourceUrl, jurisdiction)) why = "source is not an official government or code-publisher page";
       if (why) { dropped.push(`${key} ${value} (${why})`); continue; }
+      // The number as the page printed it, when a unit was converted ("2.5" feet -> 30 in): the
+      // official-source landing checks the quote for THIS number (#683).
+      let publishedValue: number | undefined;
+      // Stored in the field's own unit: the converted reading of the number the checks above bound.
+      if (typeof value === "number" && !isText) {
+        const q = criterion === "soilBearingPsf" ? quote.replace(/(\d),(?=\d{3}(?!\d))/g, "$1") : quote;
+        const nums = numbersIn(q);
+        const read = nums.map((x, i) => ({ ...x, ...publishedMeasure(criterion, q, nums, i) }))
+          .find((x) => x.norm !== null && (x.n === value || x.norm === value) && !inRangeOrList(q, x.at, x.end));
+        if (read?.norm != null && read.norm !== value) { publishedValue = read.n; value = read.norm; }
+        else if (read?.norm != null && read.n !== read.norm) publishedValue = read.n;
+      }
       // One value per stored field: a strength Pg and a pg(asd) may both land; two answers for the
       // same one (the model put a pg(asd) quote under groundSnowLoadPsf and also answered the asd key) keep the first.
       if (values.some((x) => x.criterion === criterion && (x.qualifier ?? "") === (qualifier ?? ""))) { dropped.push(`${key} ${value} (a second value for the same field)`); continue; }
       const weakSource = weakDesignSourceReason(sourceUrl, v.sourceKind);
-      const item: LookupValue = { criterion, value, sourceUrl, quote: quote.slice(0, 240), ...(qualifier ? { qualifier } : {}), ...(weakSource ? { weakSource } : {}) };
+      const item: LookupValue = { criterion, value, sourceUrl, quote: quote.slice(0, 240), ...(publishedValue !== undefined ? { publishedValue } : {}), ...(qualifier ? { qualifier } : {}), ...(weakSource ? { weakSource } : {}) };
       values.push(item);
     }
   }
@@ -1469,7 +1538,10 @@ export class ClaudeLLMProvider implements LLMProvider {
     // window closed by hand, killing the run at page 9). The heaviest legitimate planner
     // calls finish in well under two minutes; four bounds the stall while retries recover
     // it, and instrument() logs the ✗ so the wait is at least visible.
-    this.client = new Anthropic({ apiKey, maxRetries: 5, timeout: 240000 });
+    //
+    // createModelClient, never `new Anthropic`: every request this client sends passes the rule-2
+    // payload scan first (modelPayloadScan.ts — the one door to the model).
+    this.client = createModelClient({ apiKey, maxRetries: 5, timeout: 240000 });
   }
 
   // ---------------------------------------------------------------------------
@@ -1545,7 +1617,8 @@ export class ClaudeLLMProvider implements LLMProvider {
     const sent: CallTarget = target.advisor && !takeAdvisorSlot() ? { ...target, advisor: null } : target;
     for (let attempt = 0; attempt <= TRANSIENT_RETRY_DELAYS_MS.length; attempt++) {
       try {
-        msg = await exec(sent);
+        // The label rides the call scope so the payload scan can name the builder in its audit row.
+        msg = await runInModelCallScope({ label }, () => exec(sent));
         if (attempt > 0) logger.info("llm", `✓ ${label} recovered after ${attempt} retry(ies)`, { ...meta });
         lastErr = undefined;
         break;
@@ -1707,16 +1780,17 @@ export class ClaudeLLMProvider implements LLMProvider {
     const startedAt = Date.now();
     const t0 = performance.now();
     try {
-      const whole = await this.client.messages.countTokens({
+      // count_tokens sends the prompt too, so it is scanned under its own label.
+      const whole = await runInModelCallScope({ label: `${label}.countTokens` }, () => this.client.messages.countTokens({
         model: MODEL,
         system: this.cachedSystem(systemPrompt),
         messages: [{ role: "user", content: userMessage }],
-      });
-      const systemOnly = await this.client.messages.countTokens({
+      }));
+      const systemOnly = await runInModelCallScope({ label: `${label}.countTokens` }, () => this.client.messages.countTokens({
         model: MODEL,
         system: this.cachedSystem(systemPrompt),
         messages: [{ role: "user", content: "." }],
-      });
+      }));
       const userTokens = Math.max(0, whole.input_tokens - systemOnly.input_tokens);
       recordLlmCall({
         at: startedAt,
@@ -1908,7 +1982,15 @@ Set confidence (0-1) for each field. Return only valid JSON.`;
     return this.textOf(msg);
   }
 
-  async extractProjectFields(input: {
+  /** RULE 2'S ONE ALLOWED READ. Intake reads the customer's own documents (the utility bill's text,
+   *  the meter photo's OCR, beside the plan set) to FIND the account/meter, so this call — and only
+   *  this one and extractProjectFieldsFromImages — runs as INTAKE_DOCUMENT_READ: the payload scan
+   *  lets account/meter/utility ids through here and nowhere else (modelPayloadScan.ts). */
+  extractProjectFields(input: Parameters<ClaudeLLMProvider["extractProjectFieldsUnscoped"]>[0]): Promise<ParserLlmExtraction> {
+    return withIntakeDocumentRead(() => this.extractProjectFieldsUnscoped(input));
+  }
+
+  private async extractProjectFieldsUnscoped(input: {
     planText?: string;
     utilityBillText?: string;
     meterText?: string;
@@ -1973,6 +2055,10 @@ SYSTEM / EQUIPMENT
 - acRunLengthFt (number, feet): the ONE-WAY length of that circuit when the SLD or voltage-drop calc states it. Omit if not stated — never estimate it from a drawing.
 - inverterSettings: note grid-support listing / settings, e.g. "UL 1741 SB" or "UL 1741 SA, PCS profile" (needed for utility interconnection)
 - batteryMake, batteryModel, batteryQty (number)
+- batteryCapacityKwh (number): the battery system's USABLE energy in kWh, all units together; batteryOutputKw (number): the battery inverter / PCS continuous AC output in kW
+- essInverterModel: the battery inverter / PCS model (an all-in-one battery's own inverter model); essBreaker: the backfed breaker / OCPD the battery inverter lands on, in amps
+- batteryMode: the storage operating mode the plan set states: "export", "non-export" (export-limited / PCS to zero) or "backup-only"; omit when it does not say
+- newModulesOnSchedule, newModulesOnSld: "yes" or "no" — does the EQUIPMENT SCHEDULE (resp. the SLD / one-line) show NEW modules or a new PV array? Existing modules shown remaining in service are not new. Omit either when that sheet is not in the set
 - roofMaterial (e.g. "Composition Shingle"), mounting (e.g. "Roof Mount"). A TILE roof is tile — never "shingle": write e.g. "Concrete Tile", "Clay S-Tile", "Flat Concrete Tile" exactly as the sheets say (a "concrete shake tile" is tile, not wood shake)
 - roofMaterialSubtype: tile roofs only — "Concrete", "Clay", "S-tile", "Flat tile" (or two joined with " / ", e.g. "Concrete / S-tile"); omit for non-tile roofs
 - tileAttachmentMethod: tile roofs only — "tile hook", "tile-replacement mount" or "comp-out", from the attachment detail / racking notes; omit if the sheets do not say
@@ -2299,7 +2385,12 @@ Return ONLY JSON, no prose: {"pages":[{"page":<n>,"rotate":<the D of the upright
     };
   }
 
-  async extractProjectFieldsFromImages(input: {
+  /** Rule 2's one allowed read, from photos/scans of the bill and meter (see extractProjectFields). */
+  extractProjectFieldsFromImages(input: Parameters<ClaudeLLMProvider["extractProjectFieldsFromImagesUnscoped"]>[0]): Promise<ParserLlmExtraction> {
+    return withIntakeDocumentRead(() => this.extractProjectFieldsFromImagesUnscoped(input));
+  }
+
+  private async extractProjectFieldsFromImagesUnscoped(input: {
     images: { kind: "utility_bill" | "meter_photo" | "plan_page"; base64: string; mimeType: "image/png" | "image/jpeg" | "image/webp" }[];
     defaultState?: string;
   }): Promise<ParserLlmExtraction> {
@@ -2357,7 +2448,13 @@ CRITICAL accuracy rules:
     );
   }
 
-  async classifyCorrection(input: { correctionText: string; project?: ProjectRecord }): Promise<{ bucket: CorrectionBucket; confidence: number; notes: string }> {
+  /** The project object a caller hands in is a source of known secrets too: the payload scan matches
+   *  its account/meter in the correction text even outside a job's context. */
+  classifyCorrection(input: { correctionText: string; project?: ProjectRecord }): Promise<{ bucket: CorrectionBucket; confidence: number; notes: string }> {
+    return withModelSecrets(projectKnownSecrets(input.project), () => this.classifyCorrectionScoped(input));
+  }
+
+  private async classifyCorrectionScoped(input: { correctionText: string; project?: ProjectRecord }): Promise<{ bucket: CorrectionBucket; confidence: number; notes: string }> {
     const system = `You are a solar permit correction classifier for AHJ (Authority Having Jurisdiction) permit applications.
 Classify the correction request into exactly one bucket:
 - permit_approval: permit was approved
@@ -2398,12 +2495,17 @@ Return JSON: {"bucket": "<bucket>", "confidence": 0.0-1.0, "notes": "<brief reas
       if (!out) return fallback;
       return { bucket: out.bucket as CorrectionBucket, confidence: out.confidence, notes: out.notes };
     } catch (err) {
+      if (err instanceof ModelPayloadLeakError) throw err; // a rule-2 leak under test is not a parse failure
       logger.warn("llm", "classifyCorrection could not be read", { err: errMsg(err).slice(0, 160) });
       return fallback;
     }
   }
 
-  async draftResponse(input: { correctionText: string; project?: ProjectRecord }): Promise<{ draft: string; confidence: number }> {
+  draftResponse(input: { correctionText: string; project?: ProjectRecord }): Promise<{ draft: string; confidence: number }> {
+    return withModelSecrets(projectKnownSecrets(input.project), () => this.draftResponseScoped(input));
+  }
+
+  private async draftResponseScoped(input: { correctionText: string; project?: ProjectRecord }): Promise<{ draft: string; confidence: number }> {
     const system = `You are a solar permit specialist drafting a response to an AHJ correction request.
 Write a professional, factual response. Be concise. Do NOT invent specifications — only reference what is provided.
 IMPORTANT: This is an advisory draft only. A human must review before sending. Note that at the top.
@@ -2740,6 +2842,7 @@ Rules:
   "amendments": [{"code": "<family>", "section": "<section if known>", "summary": "<what the state/local amendment changes>", "sourceUrl": "<source>", "check": {"kind": "min_value|max_value|required_text|prohibited", "field": "groundSnowPsf|windSpeedMph|pvDeadLoadPsf|pathwayWidthIn|ridgeSetbackIn|attachmentSpacingIn|planText", "value": <number, or the exact wording>, "unit": "psf|mph|in|ft"} or omit}],
   "designCriteria": {"groundSnowLoadPsf": <number or omit>, "windSpeedMph": <number or omit>, "windExposure": "<B|C|D or omit>", "seismicDesignCategory": "<or omit>", "frostDepthIn": <number or omit>, "sourceUrl": "<the county/city design-criteria page>"},
   "prescriptive": {"hasPrescriptivePath": <true|false — omit ONLY if you genuinely could not tell>, "maxGroundSnowPsf": <number or omit>, "maxPvDeadLoadPsf": <number or omit>, "maxRafterSpacingIn": <number or omit>, "allowedWindExposures": ["<B>","<C>"] or omit, "maxWindSpeedMphExpB": <number or omit>, "maxWindSpeedMphExpC": <number or omit>, "engineerStampOverKwDc": <number or omit>, "sourceUrl": "<the page publishing the prescriptive path>"},
+  ${ESS_RULES_RESEARCH_SCHEMA}
   "citations": [{"label": "<what this source establishes>", "sourceUrl": "<url>"}],
   "confidenceNotes": "<what you could and could not confirm>"
 }
@@ -2757,6 +2860,7 @@ Rules:${stateLayer ? `
   jurisdiction has no published prescriptive PV path. Never copy Oregon's numbers into
   another state: omit any limit you did not find published for THIS jurisdiction.
 - An amendment's "check" makes it comparable with a plan set — give one ONLY when the cited page states it plainly, else omit it: min_value / max_value with a numeric field and its unit (a ground snow minimum, a minimum pathway width or ridge setback, a maximum PV dead load or attachment spacing, a minimum design wind speed); required_text with field "planText" and the exact wording the plans must carry (a required placard); prohibited with field "planText" and the wording a plan would show for the prohibited item (e.g. "roof-mounted disconnect"). Anything else stays a summary with no check.
+${ESS_RULES_RESEARCH_RULE}
 - This is ADVISORY and will be human-verified — never invent a sourceUrl.
 - Return valid JSON only.`;
     const system = `${intro}\n\n${searchStep}\n\n${body}`;
@@ -2764,6 +2868,7 @@ Rules:${stateLayer ? `
     interface Raw {
       adoptionModel?: Record<string, unknown>; adoptedCodes?: unknown; upcoming?: unknown; amendments?: unknown;
       designCriteria?: Record<string, unknown>; prescriptive?: Record<string, unknown>; citations?: unknown; confidenceNotes?: unknown;
+      essRules?: unknown;
     }
     let parsed: Raw = {};
     let webGrounded = false;
@@ -2899,12 +3004,16 @@ Rules:${stateLayer ? `
         ...(evidence.outputTokens !== undefined ? { outputTokens: evidence.outputTokens } : {}),
       },
     };
+    // The jurisdiction's own battery / ESS rules, each cited and quoted (ESS data follow-up): kept apart
+    // from the profile, because each value lands field by field through the official-source landing.
+    const ess = researchedEssRules(parsed.essRules, webGrounded);
     return {
       provider: "claude",
       profile,
+      ...(ess.reads.length ? { essRules: ess.reads } : {}),
       webGrounded,
       needsHumanVerification: true,
-      notes: researchNotes,
+      notes: ess.dropped.length ? `${researchNotes} ESS rules dropped: ${ess.dropped.slice(0, 6).join("; ")}.`.slice(0, 1600) : researchNotes,
     };
   }
 

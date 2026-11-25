@@ -24,7 +24,9 @@ import type { IssuerProject } from "./permitProcess";
  *  "electrical", "combo"); a bare "permit" asks about the permit filing as a whole. NEM → project. */
 export function permitFeeProject<T extends IssuerProject>(project: T, track: string | null | undefined = "permit"): T {
   const view = projectForTrack(project, track);
-  return view !== project && view.trackView?.source === "state_rule" ? view : project;
+  // A state issuer named by the AHJ's own cited reference row ("reference", worker-trackissuer) is the
+  // state's permit too: its fee is the state authority's, never the AHJ's schedule.
+  return view !== project && (view.trackView?.source === "state_rule" || view.trackView?.source === "reference") ? view : project;
 }
 
 /** The submittal track a fee discipline is filed on (the inverse of recipeDisciplineForTrack). */

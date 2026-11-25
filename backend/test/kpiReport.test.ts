@@ -8,6 +8,7 @@ import "./_isolate";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { removeTempDir } from "./_tmpdir";
 
 const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "kpi-report-"));
 process.env.AUTOPILOT_DB_PATH = path.join(tmpDir, "test.sqlite");
@@ -225,6 +226,6 @@ check("org scope: null reads across orgs", across.filings.firstPass.overall.of =
 check("rule 2: no correction text in the report", !JSON.stringify(report).includes("Synthetic item"));
 void f1;
 
-fs.rmSync(tmpDir, { recursive: true, force: true });
+removeTempDir(tmpDir);
 if (failures) { console.error(`\n${failures} failure(s)`); process.exit(1); }
 console.log("\nall kpiReport checks passed");

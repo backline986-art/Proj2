@@ -34,6 +34,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { recorderRequestHeaders } from "../../portal-bot/src/recordRecipe";
+import { removeTempDir } from "./_tmpdir";
 
 const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "recorder-tokens-test-"));
 
@@ -432,6 +433,19 @@ try {
     const save = await anyone(`/api/portal-recipes/${id}/steps`, json("PUT", { steps: [{ action: "stopForReview" }], status: "recording" }));
     assert.equal(save.status, 200, (await save.text()).slice(0, 300));
   });
+  await run("a hand recording is saved under the permit it is for: --discipline wins, else the track; a utility recording has none", async () => {
+    const start = async (body: Record<string, unknown>): Promise<string> => {
+      const res = await anyone("/api/portal-recipes/record", json("POST", body));
+      const text = await res.text();
+      assert.equal(res.status, 201, text.slice(0, 300));
+      const id = (JSON.parse(text) as { id: string }).id;
+      return String((await readDb(DB2, (db) => db.get<{ discipline: string }>("SELECT discipline FROM portal_recipes WHERE id = ?", [id])))?.discipline ?? "?");
+    };
+    assert.equal(await start({ scopeType: "ahj", ahj: "City of Alderwick", state: "OR", discipline: "electrical" }), "electrical");
+    assert.equal(await start({ scopeType: "ahj", ahj: "City of Alderwick", state: "OR", track: "building" }), "structural");
+    assert.equal(await start({ scopeType: "ahj", ahj: "City of Alderwick", state: "OR", discipline: "plumbing" }), "", "an unknown discipline keyed a recipe");
+    assert.equal(await start({ scopeType: "utility", utility: "Alderwick Power", state: "OR", discipline: "electrical" }), "", "a utility recording carried a discipline");
+  });
   await run("sign-in off: listing says authEnabled false; minting is 409 auth_disabled", async () => {
     const list = await (await anyone("/api/auth/recorder-tokens")).json() as { authEnabled: boolean; tokens: unknown[] };
     assert.equal(list.authEnabled, false);
@@ -446,6 +460,6 @@ try {
   two.server.kill();
 }
 
-fs.rmSync(tmpDir, { recursive: true, force: true });
+removeTempDir(tmpDir);
 console.log(failures === 0 ? "\nrecorderTokens: all checks passed" : `\nrecorderTokens: ${failures} FAILURE(S)`);
 process.exit(failures === 0 ? 0 : 1);

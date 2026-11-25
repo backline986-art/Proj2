@@ -72,7 +72,7 @@ export interface LearnOutcome {
    */
   reviewContradicted?: boolean;
   /** Parsed events.jsonl from the run's debug bundle, if available. */
-  events?: Array<{ type?: string; status?: string; ok?: boolean; trace?: string }>;
+  events?: Array<{ type?: string; status?: string; ok?: boolean; trace?: string; detail?: unknown }>;
 }
 
 export interface LearnScore {
@@ -257,6 +257,15 @@ function scoreLearnOutcomeInner(outcome: LearnOutcome): LearnScore {
       return { rung: "login_failed", index: 1, reason: msg2.slice(0, 180), owner: "credential" };
     }
     return { rung: "login_failed", index: 1, reason: "a login page was reached but no credential is stored for this portal", owner: "credential" };
+  }
+  // A CLICK THAT POSTED NOTHING IS NOT A REFUSAL. The login flow reuses still_on_login for a
+  // submit pick that toggled a panel (City of Bend's <legend role=button>), and names the cause
+  // in its detail; the message carries it for bundles written before the detail existed. The
+  // password was never presented, so the owner is the engine. Asked BEFORE the status
+  // short-circuit below, which would file it under the credential.
+  const loginCause = String((login?.detail as { cause?: unknown } | undefined)?.cause || "");
+  if (loginCause === "toggle_click" || /did not post the form/i.test(msg)) {
+    return { rung: "login_failed", index: 1, reason: "the submit click did not post the login form (a panel toggle was clicked as the submit)", owner: "engine" };
   }
   if (loginStatus === "still_on_login" || /still on the login form|likely rejected/i.test(msg)) {
     return { rung: "login_failed", index: 1, reason: "the stored credential was refused by the portal", owner: "credential" };

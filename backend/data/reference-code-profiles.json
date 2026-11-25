@@ -1,5 +1,5 @@
 {
- "comment": "Jurisdiction code profiles seeded at boot (codeProfiles.seedReferenceCodeProfiles). NEVER overwrites rows that already exist in the DB \u2014 operator edits and verifications always win. 'verified' here is reserved for values lifted verbatim from the previously hardcoded, production-proven rule constants (Oregon). Everything else ships 'seeded' and MUST be verified against official sources (research flow + human verify) before its citations are treated as authoritative.",
+ "comment": "Jurisdiction code profiles seeded at boot (codeProfiles.seedReferenceCodeProfiles). A profile that carries 'asOf' (the day every value was confirmed on its cited official page) also lands on a city/county row that already exists (#561): merged onto a SEEDED row unless a grounded research newer than asOf is there; on a HUMAN-VERIFIED row it is never written \u2014 differing editions or effective dates become a proposal a person decides. A profile with no asOf never touches an existing row. 'verified' here is reserved for values lifted verbatim from the previously hardcoded, production-proven rule constants (Oregon). Everything else ships 'seeded' and MUST be verified against official sources (research flow + human verify) before its citations are treated as authoritative.",
  "profiles": [
   {
    "key": "",
@@ -9,16 +9,16 @@
    "adoptedCodes": [
     {
      "code": "OESC",
-     "edition": "2023",
-     "title": "Oregon Electrical Specialty Code (based on the 2023 NEC)",
-     "sourceUrl": "https://www.oregon.gov/bcd/codes-stand/pages/electrical.aspx",
-     "notes": "Oregon BCD lists the 2023 OESC effective Oct. 1, 2023, based on the 2023 NEC."
+     "edition": "2026",
+     "title": "Oregon Electrical Specialty Code (based on the 2026 NEC)",
+     "sourceUrl": "https://www.oregon.gov/bcd/codes-stand/Pages/oesc-adoption.aspx",
+     "notes": "Oregon BCD (checked 2026-11-07 and 2026-11-09): \"2026 Oregon Electrical Specialty Code (OESC) ... Effective Oct. 1, 2026 ... Based on the 2026 NFPA 70 / National Electrical Code (NEC)\". No phase-in or mandatory date is stated. Replaces the 2023 OESC (effective Oct. 1, 2023, based on the 2023 NEC)."
     },
     {
      "code": "NEC",
-     "edition": "2023",
-     "title": "National Electrical Code as adopted via the 2023 OESC",
-     "sourceUrl": "https://www.oregon.gov/bcd/codes-stand/pages/electrical.aspx"
+     "edition": "2026",
+     "title": "National Electrical Code as adopted via the 2026 OESC",
+     "sourceUrl": "https://www.oregon.gov/bcd/codes-stand/Pages/oesc-adoption.aspx"
     },
     {
      "code": "ORSC",
@@ -721,6 +721,7 @@
    "key": "",
    "state": "UT",
    "ahj": "City of Saratoga Springs",
+   "asOf": "2026-10-06",
    "confidence": "seeded",
    "adoptedCodes": [
     {
@@ -775,6 +776,7 @@
    ],
    "designCriteria": {
     "groundSnowLoadPsf": 31,
+    "roofSnowLoadPsf": 30,
     "windSpeedMph": 103,
     "seismicDesignCategory": "D2",
     "frostDepthIn": 30,
@@ -2302,13 +2304,13 @@
     {
      "family": "residential",
      "code": "ORSC",
-     "edition": "2023",
-     "basedOn": "2021 IRC",
-     "effectiveDate": "2023-10-01",
-     "mandatoryDate": "2024-04-01",
-     "previousEdition": "2021",
-     "sourceUrl": "https://secure.sos.state.or.us/oard/displayDivisionRules.action?selectedDivision=4173",
-     "quote": "Effective October 1, 2023, the 2023 Oregon Residential Specialty Code consists of the following: ... The 2021 edition of the International Residential Code for One- and Two-Family Dwellings as published by the International Code Council, Inc. ... The 2021 Oregon Residential Specialty Code, with the "
+     "edition": "2026",
+     "basedOn": "2024 IRC",
+     "effectiveDate": "2026-10-01",
+     "mandatoryDate": "2027-04-01",
+     "previousEdition": "2023",
+     "sourceUrl": "https://www.oregon.gov/bcd/laws-rules/Documents/20261001-2026orsc-adoption-pr.pdf",
+     "quote": "The 2026 ORSC is based on the 2024 edition of the International Residential Code for One-and Two-Family Dwellings (IRC) ... Administrative provisions (Chapter 1): effective and mandatory Oct. 1, 2026 ... Construction provisions (Chapters 2 - 44 and appendices): effective Oct. 1, 2026, with a six-month phase-in period and mandatory April 1, 2027"
     },
     {
      "family": "building",
@@ -2324,11 +2326,13 @@
     {
      "family": "electrical",
      "code": "OESC",
-     "edition": "2023",
-     "basedOn": "2023 NEC (NFPA 70)",
-     "effectiveDate": "2023-10-01",
-     "sourceUrl": "https://www.oregon.gov/bcd/codes-stand/Pages/electrical.aspx",
-     "quote": "2023 Oregon Electrical Specialty Code (OESC) ... Effective Oct. 1, 2023 ... Based on the 2023 National Electrical Code (NEC)"
+     "edition": "2026",
+     "basedOn": "2026 NEC (NFPA 70)",
+     "effectiveDate": "2026-10-01",
+     "mandatoryDate": "2026-10-01",
+     "previousEdition": "2023",
+     "sourceUrl": "https://content.govdelivery.com/accounts/ORDCBS/bulletins/42e1509",
+     "quote": "2026 Oregon Electrical Specialty Code (OESC) ... adopted through permanent rule ... Effective and mandatory Oct. 1, 2026 ... 2026 NEC"
     },
     {
      "family": "fire",
@@ -2365,39 +2369,13 @@
     {
      "family": "plumbing",
      "code": "OPSC",
-     "edition": "2023",
-     "basedOn": "2021 UPC",
-     "effectiveDate": "2023-10-01",
-     "sourceUrl": "https://www.oregon.gov/bcd/codes-stand/Pages/adopted-codes.aspx",
-     "quote": "2023 Oregon Plumbing Specialty Code (OPSC) ... Effective Oct. 1, 2023 ... Based on the 2021 OPSC and 2021 Uniform Plumbing Code (UPC)"
-    }
-   ],
-   "upcoming": [
-    {
-     "family": "residential",
-     "code": "ORSC",
-     "edition": "2026",
-     "basedOn": "2024 IRC",
-     "anticipatedDate": "2026-10-01",
-     "status": "in rulemaking",
-     "sourceUrl": "https://www.oregon.gov/bcd/codes-stand/Documents/26orsc-timeline.pdf"
-    },
-    {
-     "family": "electrical",
-     "code": "OESC",
-     "edition": "2026",
-     "basedOn": "2026 NEC (NFPA 70)",
-     "anticipatedDate": "2026-10-01",
-     "sourceUrl": "https://www.oregon.gov/bcd/codes-stand/Pages/oesc-adoption.aspx"
-    },
-    {
-     "family": "plumbing",
-     "code": "OPSC",
      "edition": "2026",
      "basedOn": "2024 UPC",
-     "anticipatedDate": "2026-10-01",
-     "status": "in rulemaking",
-     "sourceUrl": "https://www.oregon.gov/bcd/codes-stand/Pages/OPSC-adoption.aspx"
+     "effectiveDate": "2026-10-01",
+     "mandatoryDate": "2026-10-01",
+     "previousEdition": "2023",
+     "sourceUrl": "https://www.oregon.gov/bcd/codes-stand/Pages/OPSC-adoption.aspx",
+     "quote": "Effective Oct. 1, 2026 ... Based on the 2024 Uniform Plumbing Code (UPC) (adoption page); \"2026 OPSC ... Effective and mandatory: Oct. 1, 2026 ... adopted through permanent rule\" (BCD bulletin 2026-10-05)"
     }
    ],
    "citations": [

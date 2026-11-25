@@ -14,6 +14,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { PDFDocument, StandardFonts } from "pdf-lib";
+import { fileURLToPath } from "node:url";
 
 const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "gates-proper-"));
 process.env.AUTOPILOT_DB_PATH = path.join(tmpDir, "test.sqlite");
@@ -272,7 +273,7 @@ const { prepareOfficialDocuments } = await import("../src/prepareOfficialDocumen
 const { archiveProject } = await import("../src/projectArchive");
 const { owedMissingDocuments, documentInventory } = await import("../src/requiredDocuments");
 const plan = await import("../src/formAcquisitionPlan");
-const REPO = path.resolve(path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, "$1")), "..", "..");
+const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url).replace(/^\/([A-Za-z]:)/, "$1")), "..", "..");
 const fixturePdf = (name: string) => fs.readFileSync(path.join(REPO, "backend/test/fixtures", name));
 const B01S_URL = "https://www.co.marion.or.us/PW/BuildingInspection/Documents/B-01S%20Solar%20Prescriptive%20Installation%20Application%20Filleable.pdf";
 const E01_URL = "https://www.co.marion.or.us/PW/BuildingInspection/Documents/E-01%20Renewable%20Energy%20Permit%20Application.pdf";

@@ -19,6 +19,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { removeTempDir } from "./_tmpdir";
 
 const scratch = fs.mkdtempSync(path.join(os.tmpdir(), "email-intake-reply-to-"));
 process.env.AUTOPILOT_DB_PATH = path.join(scratch, "test.sqlite");
@@ -208,6 +209,6 @@ await run("a client with no tag gets no Reply-To (the bare intake address would 
   try { assert.equal(intakeReplyToAddress(db, acme.id), null); } finally { process.env.EMAIL_INTAKE_ADDRESS = saved; }
 });
 
-fs.rmSync(scratch, { recursive: true, force: true });
+removeTempDir(scratch);
 console.log(failures ? `\n${failures} failure(s)` : "\nemailIntakeReplyTo: all checks passed");
 process.exit(failures ? 1 : 0);

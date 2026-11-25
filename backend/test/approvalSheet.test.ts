@@ -99,7 +99,7 @@ await check("(M1) mismatches are named in words: bill address, bill account, inv
   assert.equal(byRow.account?.kind, "mismatch");
   assert.match(byRow.account.text, /the utility bill reads •••• 7899, the filing would carry •••• 7890/);
   assert.equal(byRow.acKw?.kind, "mismatch");
-  assert.match(byRow.acKw.text, /inverters add up to 6\.5 kW \(20 × 325 W\), not 7\.6 kW/);
+  assert.match(byRow.acKw.text, /inverters add up to about 6\.5 kW AC \(20 × 325 W\), not 7\.6 kW/);
   assert.equal(byRow.meter, undefined, "the meter agrees with the bill: no mismatch");
   assert.equal(rowOf(sheet, "dcKw").check, "match", "the DC size still matches the modules");
 });
@@ -202,7 +202,7 @@ const lift = (name: string): string => {
   return dashboard.slice(m.index, i) + (isConst ? ";" : "");
 };
 const ui = (stubs: Record<string, unknown>) => new Function(...Object.keys(stubs),
-  `${["esc", "humanize", "APPROVE_AUTO_SUBMIT_LEDE", "approvalSheetHtml", "confirmApprovalSheet"].map(lift).join("\n\n")}\nreturn { approvalSheetHtml, confirmApprovalSheet };`,
+  `${["esc", "humanize", "APPROVE_AUTO_SUBMIT_LEDE", "CHECK_CATEGORY_LABEL", "checkRecordsHtml", "approvalOpenItemsHtml", "approvalSheetHtml", "confirmApprovalSheet"].map(lift).join("\n\n")}\nreturn { approvalSheetHtml, confirmApprovalSheet };`,
 )(...Object.values(stubs)) as { approvalSheetHtml: (s: unknown, who: string) => string; confirmApprovalSheet: (t: string, who?: string) => Promise<boolean> };
 
 await check("(D1) the sheet's HTML lists the red items before the table, and escapes every value", () => {

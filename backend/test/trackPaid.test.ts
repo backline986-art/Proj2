@@ -92,11 +92,11 @@ await repo.recordPermitStatusCheck(db, pid2, { targetId: target2, source: "manua
 await check("FEE DUE: ready for issue is fee_due on nextStep and on the card, which offers Paid", () => {
   const step = computeNextStep(db, pid2);
   assert.equal(step.key, "fee_due", `${step.key}: ${step.headline}`);
-  assert.match(step.headline, /approved the .*press Paid/i, step.headline);
+  assert.match(step.headline, /approved the .*press We paid the portal/i, step.headline);
   const t = combo(pid2);
   assert.ok(t.feeDue, JSON.stringify(t).slice(0, 300));
   assert.equal(t.feeDue!.approved, true);
-  assert.match(t.feeDue!.sentence, /press Paid/);
+  assert.match(t.feeDue!.sentence, /press We paid the portal/);
 });
 await check("FEE DUE: Paid with the permit number clears fee_due; the actual fee is the sum of the track's Paid", () => {
   const r = markTrackPaid(db, project(pid2), "combo", { recordNumber: "BLD-26-07001", amountPaidUsd: "275" });
@@ -132,7 +132,7 @@ await check("EMAIL: the fee request reads 'Fee requested' with the fee due — n
   assert.equal(reviewItems(pid3), 0);
   const step = computeNextStep(db, pid3);
   assert.equal(step.key, "fee_due", `${step.key}: ${step.headline}`);
-  assert.match(step.headline, /^Fee due: .*asked for the .*fee .*press Paid/i, step.headline);
+  assert.match(step.headline, /^Fee due: .*asked for the .*fee .*press We paid the portal/i, step.headline);
   assert.doesNotMatch(step.headline, /approved/i, "a fee request is not an approval");
   assert.equal(combo(pid3).feeDue?.approved, false);
 });

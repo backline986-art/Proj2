@@ -89,7 +89,7 @@ console.log("\n1. MUST-PASS: upload + Save + advance — the server holds the pl
   const o = await run("uploaded", () => [UPLOAD, SAVE, ADVANCE, { action: "stopForReview" }]);
   check("the server holds the uploaded plan set", /plan-set\.pdf/i.test(o.serverDoc), `server attach.plans="${o.serverDoc}"`);
   check("no required field reported blank", !/Plans - Construction/i.test(o.stillEmpty), o.stillEmpty);
-  check("no 'would not stay filled' warning", !/would not stay filled/i.test(o.drift), o.drift.slice(0, 300));
+  check("no 'still blank after two passes' warning", !/would not stay filled|still blank on this page after two passes/i.test(o.drift), o.drift.slice(0, 300));
   check("the held upload is noted (aging), not silently dropped", /file box reads empty.*lists the uploaded file/i.test(o.aging), o.aging.slice(0, 300));
   check("no filing POST", o.submitPosts === 0);
 }

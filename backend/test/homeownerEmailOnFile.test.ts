@@ -16,6 +16,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { removeTempDir } from "./_tmpdir";
 
 const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "homeowner-email-on-file-test-"));
 process.env.AUTOPILOT_DB_PATH = path.join(tmpDir, "test.sqlite");
@@ -171,6 +172,6 @@ console.log("\n[7] a curated-form Email cell takes an email or nothing, and is n
   run("…and nothing is named", ![...(good.acro.unmappedRequested ?? []), ...(good.flat.unmappedRequested ?? [])].some((l) => /email/i.test(l)));
 }
 
-fs.rmSync(tmpDir, { recursive: true, force: true });
+removeTempDir(tmpDir);
 if (failures) { console.error(`\n${failures} check(s) failed`); process.exit(1); }
 console.log("\nall checks passed");

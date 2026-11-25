@@ -28,6 +28,7 @@
 import type {
   CitedFact,
   IssuerTrackKey,
+  PermitFilingChannel,
   PermitProcessLookup,
   PermitProcessPermitAnswer,
   ProjectRecord,
@@ -41,6 +42,8 @@ import { hostAliasesOf } from "./portalCredentials";
 import { isApplicationPortalShapedUrl } from "./portalChannel";
 import { structureType } from "./codeReviewRules";
 import { classifyPrerequisites } from "./permitProcessPrerequisites";
+import { findAhjProcessProfile } from "./processProfiles";
+import { citedElectricalIssuer, isStateAuthorityRow, stateAuthorityRowFor } from "./ahjRowCitations";
 
 // ── Keys ────────────────────────────────────────────────────────────────────────────────
 /** "City of Jefferson, OR" / "city of  jefferson" → "city of jefferson". A trailing state code
@@ -123,6 +126,13 @@ export function permitProcessFor(project: Pick<ProjectRecord, "state" | "ahj">):
   return registry.get(permitProcessKey(project.state, project.ahj)) ?? null;
 }
 
+/** A PERSON VERIFIED THIS LOOKUP ROW (verifyPermitProcessLookup — confidence "verified" / verified_at).
+ *  The one predicate for a process row's standing (hard rule 3): this table has no "official"
+ *  origin, so row-verified is the whole notion. A seeded row is a lookup's reading, never authority. */
+export function isVerifiedPermitProcess(lookup: Pick<PermitProcessLookup, "confidence" | "verifiedAt"> | null | undefined): boolean {
+  return Boolean(lookup) && (lookup!.confidence === "verified" || Boolean(lookup!.verifiedAt));
+}
+
 /** A document name that says it is a downloadable blank (a PDF, a form to download / fill). */
 const NAMES_PDF_BLANK = /\bpdf\b|\.pdf\b|\bform\b|\bfillable\b|\bdownload/i;
 
@@ -144,7 +154,7 @@ export function lookupPortalOnlyFor(project: Pick<ProjectRecord, "state" | "ahj"
   if (!withPortal) return null;
   if (permits.some((p) => (p.documents?.value ?? []).some((d) => NAMES_PDF_BLANK.test(String(d || ""))))) return null;
   const portalUrl = String(withPortal.portalUrl.value).trim();
-  const verified = lookup.confidence === "verified" || Boolean(lookup.verifiedAt);
+  const verified = isVerifiedPermitProcess(lookup);
   return { portalUrl, waives: verified || isApplicationPortalShapedUrl(portalUrl) };
 }
 /** The card's / the gate's words for it. */
@@ -718,19 +728,63 @@ export function permitAnswerForTrack(project: Pick<ProjectRecord, "state" | "ahj
 /** permitAnswerForTrack, saying WHOSE ROW answered (#59): "project" — on a track view, the project
  *  AHJ's own lookup whose permit cites the issuer (the Marion case); "issuer" — the row keyed on
  *  project.ahj (on a view, the issuer's own lookup). The card names the agency whose lookup it is. */
-export function permitAnswerForTrackFrom(project: Pick<ProjectRecord, "state" | "ahj"> & Partial<Pick<ProjectRecord, "trackView">>, track: string | null | undefined): { answer: PermitProcessPermitAnswer; from: "issuer" | "project" } | null {
+export function permitAnswerForTrackFrom(project: Pick<ProjectRecord, "state" | "ahj"> & Partial<Pick<ProjectRecord, "trackView">>, track: string | null | undefined): { answer: PermitProcessPermitAnswer; from: "issuer" | "project"; viaCombo: boolean } | null {
   const want = track === "building" ? "structural" : track === "electrical" || track === "mpu" ? "electrical" : track === "combo" || track === "permit" ? "combo" : "";
   if (!want) return null;
+  // ONE COMBO PERMIT ANSWERS BOTH TRACKS (#177). Live at City of Meridian (2026-11-12): the owner
+  // verified the record type on the row's one `combo` permit (one Accela record covers the PV job),
+  // and an electrical learn asked for an `electrical` permit, found none, and walked as if nothing
+  // were verified. Where the AHJ files one combined permit there is no other permit to ask, so a
+  // building or electrical track takes the combo permit's facts — and says so (viaCombo) so a card
+  // can word it. A discipline-specific permit still wins when the row has one (specific beats
+  // combo), and the reverse never happens: a combo track never takes a discipline permit, which
+  // names half the job.
+  const pick = (permits: PermitProcessPermitAnswer[] | undefined): { answer: PermitProcessPermitAnswer; viaCombo: boolean } | null => {
+    const exact = permits?.find((p) => p.discipline === want);
+    if (exact) return { answer: exact, viaCombo: false };
+    if (want !== "structural" && want !== "electrical") return null;
+    const combo = permits?.find((p) => p.discipline === "combo");
+    return combo ? { answer: combo, viaCombo: true } : null;
+  };
   const view = project.trackView;
   if (view && String(view.projectAhj ?? "").trim()) {
     const base = permitProcessFor({ state: project.state, ahj: view.projectAhj });
-    const fromBase = base?.permits?.find((p) => p.discipline === want) ?? null;
-    if (fromBase && answered(fromBase.issuingAgency) && sameAgencyName(fromBase.issuingAgency.value, project.ahj)) return { answer: fromBase, from: "project" };
+    const fromBase = pick(base?.permits);
+    if (fromBase && answered(fromBase.answer.issuingAgency) && sameAgencyName(fromBase.answer.issuingAgency.value, project.ahj)) return { ...fromBase, from: "project" };
   }
   const lk = permitProcessFor(project);
   if (!lk?.permits?.length) return null;
-  const own = lk.permits.find((p) => p.discipline === want);
-  return own ? { answer: own, from: "issuer" } : null;
+  const own = pick(lk.permits);
+  return own ? { ...own, from: "issuer" } : null;
+}
+
+/** "by email to x@y", "in person at City Hall", "by mail", "with the Building permit", "online"
+ *  (lookup-permit-filing-channel): the words a card and a note use for a cited filing channel. */
+export function channelPhrase(c: PermitFilingChannel): string {
+  switch (c.kind) {
+    case "email": return c.value ? `by email to ${c.value}` : "by email (no address stated)";
+    case "in_person": return c.value ? `in person at ${c.value}` : "in person";
+    case "mail": return c.value ? `by mail to ${c.value}` : "by mail";
+    case "with_other_permit": return `with the ${c.value || "other"} permit`;
+    case "portal": return c.value ? `online at ${c.value}` : "online";
+  }
+}
+/** THIS TRACK'S PERMIT IS FILED SOME WAY OTHER THAN A PORTAL, as the per-job lookup's cited page says
+ *  (email, in person, by mail, with another permit) — or null (a portal, or no channel on file). The
+ *  lookup's portal is then never launched for the track (repository's stage), and the stop says where
+ *  it is filed instead (filingChannelStopSentence). A person-verified portal still outranks it. */
+export function citedNonPortalChannelFor(project: Pick<ProjectRecord, "state" | "ahj"> & Partial<Pick<ProjectRecord, "trackView">>, track: string | null | undefined): CitedFact<PermitFilingChannel> | null {
+  const c = permitAnswerForTrack(project, track)?.channel;
+  return c?.value && c.value.kind !== "portal" ? c : null;
+}
+/** The stop's words for such a track: "file at <office>" with the page's own words — no launch. */
+export function filingChannelStopSentence(project: Pick<ProjectRecord, "state" | "ahj"> & Partial<Pick<ProjectRecord, "trackView">>, track: string | null | undefined): string {
+  const c = citedNonPortalChannelFor(project, track);
+  if (!c?.value) return "";
+  const where = String(project.ahj ?? "").trim() || "This AHJ";
+  const alts = (permitAnswerForTrack(project, track)?.alternateChannels ?? []).map((a) => a.value).filter((v): v is PermitFilingChannel => Boolean(v));
+  const how = c.value.kind === "in_person" ? `File it ${channelPhrase(c.value)}` : c.value.kind === "email" ? `File it ${channelPhrase(c.value)} (the address becomes a filing destination to confirm; nothing is sent automatically)` : `File it ${channelPhrase(c.value)}`;
+  return `${where}'s ${track ?? "permit"} permit is not filed in a portal: the lookup's cited page says "${String(c.quote).slice(0, 160)}" (${c.sourceUrl}). ${how}. Nothing was opened.${alts.length ? ` The page also allows: ${alts.map(channelPhrase).join("; ")}.` : ""}`;
 }
 
 /** The agency that issues this track's permit: the OPERATOR's per-track issuer (trackIssuer's first
@@ -882,6 +936,8 @@ function baseOfView<T extends IssuerProject>(project: T): T {
  *      permit's own answer, else the AHJ-wide one) when it clears the cited bar AND names another
  *      agency than the project AHJ (sameAgencyName — "City of Salem Permit Center" is Salem, a
  *      department suffix never re-keys a project) AND is not a known utility's name;
+ *   b2. the AHJ's own reference row, cited, saying the STATE issues the electrical permit (electrical /
+ *      MPU only): the state's authority row (referenceStateIssuerFor) — its own door, never the AHJ's;
  *   c. a cited STATE rule naming a state issuer for this AHJ (stateTradeIssuerFor: New Mexico CID,
  *      or MHD for a manufactured home, where the AHJ has no building department);
  *   d. the project AHJ.
@@ -915,6 +971,11 @@ export function trackIssuer(project: IssuerProject, track: string | null | undef
       override, ...(refused ? { refused } : {}),
     };
   }
+  // b2. THE AHJ'S OWN REFERENCE ROW, CITED, NAMES THE STATE as this track's issuer (electrical / MPU):
+  //     the state authority's own row (data), whose door is its own and starts unknown — the AHJ's
+  //     door is never copied onto it (referenceStateIssuerFor).
+  const ref = ahj ? referenceStateIssuerFor(base, key) : null;
+  if (ref) return { name: ref.name, source: "reference", sourceUrl: ref.sourceUrl, quote: ref.quote, override, ...(refused ? { refused } : {}) };
   const st = ahj ? stateTradeIssuerFor(base) : null;
   // Source "state_rule" whether the seed or the lookup's cited buildingProgram put this AHJ on the
   // state issuer: the ISSUER is the state rule's agency either way, and the fee path
@@ -922,6 +983,33 @@ export function trackIssuer(project: IssuerProject, track: string | null | undef
   // review). The citation travels in sourceUrl/quote — the lookup's page when the lookup decided.
   if (st) return { name: st.value, source: "state_rule", sourceUrl: st.sourceUrl, quote: st.quote, override, ...(refused ? { refused } : {}) };
   return { name: ahj, source: "project", override, ...(refused ? { refused } : {}) };
+}
+
+/** The name a track's issuer takes when the AHJ's page says the STATE issues it and no state
+ *  authority row is on file for that state: a name, never an address, so its door stays unknown. */
+export function unknownStateAuthorityName(state: string | null | undefined): string {
+  return `State electrical permit authority (${String(state ?? "").trim().toUpperCase() || "state"}) — not on file`;
+}
+
+/** LAYER b2 OF trackIssuer (worker-trackissuer): the AHJ's own reference row cites, on its page, that
+ *  the STATE issues the electrical permit (citations[field=electricalPermitIssuer], first word
+ *  "state"). The issuer is then the state's authority row for electrical permits (stateAuthorityFor,
+ *  data) — or, with none on file, unknownStateAuthorityName. Electrical and MPU tracks only (MPU
+ *  follows electrical); a state authority's own row never names itself. The citation is the AHJ's page. */
+export function referenceStateIssuerFor(project: IssuerProject, track: string | null | undefined): { name: string; sourceUrl: string; quote: string } | null {
+  const key = issuerTrackKey(track);
+  if (key !== "electrical" && key !== "mpu") return null;
+  const base = baseOfView(project);
+  if (!String(base.ahj ?? "").trim()) return null;
+  let row;
+  try { row = findAhjProcessProfile(base as unknown as ProjectRecord); } catch { row = null; }
+  if (!row || isStateAuthorityRow(row)) return null;
+  const cited = citedElectricalIssuer(row);
+  if (cited?.kind !== "state") return null;
+  const authority = stateAuthorityRowFor(base.state, "electrical");
+  const name = authority ? String(authority.ahj).trim() : unknownStateAuthorityName(base.state);
+  if (!name || sameAgencyName(name, String(base.ahj ?? ""))) return null;
+  return { name, sourceUrl: cited.citation.sourceUrl, quote: cited.citation.quote };
 }
 
 /**
@@ -948,7 +1036,7 @@ export function projectForTrack<T extends IssuerProject>(project: T, track: stri
     ...base,
     ahj: issuer.name,
     ...(snap !== undefined ? { parserSnapshot: snap } : {}),
-    trackView: { track: key, projectAhj: ahj, source: issuer.source as "operator" | "lookup" | "state_rule" },
+    trackView: { track: key, projectAhj: ahj, source: issuer.source as "operator" | "lookup" | "reference" | "state_rule" },
   } as T;
 }
 
@@ -956,6 +1044,34 @@ export function projectForTrack<T extends IssuerProject>(project: T, track: stri
 export function lookedUpRecordType(project: Pick<ProjectRecord, "state" | "ahj">, track: string | null | undefined): CitedFact<string> | null {
   const p = permitAnswerForTrack(project, track);
   return p && answered(p.recordType) ? p.recordType : null;
+}
+
+/**
+ * THE RECORD TYPE A LEARN IS TOLD TO TICK (#166): lookedUpRecordType with the standing of THE ROW
+ * THAT ANSWERED. On a track view the project's own row can answer for the issuer (the Marion case,
+ * permitAnswerForTrackFrom "project"), so `verified` is read off that row — never off
+ * permitProcessFor(project), which on a view is the issuer's row and may not exist.
+ *
+ * A watched City of Bend learn (2026-11-12) ticked "Renewable energy up to 25KVA" while the job's
+ * person-verified process row named "Prescriptive photovoltaic systems": the verified name never
+ * reached the learner. It does now, and the learner's pass (autoLearnAdapter) ticks the offered
+ * option whose label sameRecordType()s it — a VERIFIED one deterministically, a seeded one is only
+ * ever the planner's hint (hard rule 3).
+ */
+export function lookedUpRecordTypeFor(
+  project: Pick<ProjectRecord, "state" | "ahj"> & Partial<Pick<ProjectRecord, "trackView">>,
+  track: string | null | undefined,
+): { value: string; verified: boolean; sourceUrl: string } | null {
+  const hit = permitAnswerForTrackFrom(project, track);
+  if (!hit || !answered(hit.answer.recordType)) return null;
+  const row = hit.from === "project"
+    ? permitProcessFor({ state: project.state, ahj: String(project.trackView?.projectAhj ?? "") })
+    : permitProcessFor(project);
+  return {
+    value: String(hit.answer.recordType.value).trim(),
+    verified: isVerifiedPermitProcess(row),
+    sourceUrl: String(hit.answer.recordType.sourceUrl ?? ""),
+  };
 }
 
 /** "Residential - Structural" ≈ "Residential Structural" ≈ "residential structural permit". */

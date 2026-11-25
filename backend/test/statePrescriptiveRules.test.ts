@@ -8,9 +8,11 @@
 //   - migration v63 creates state_permit_rules; the shipped rules seed as `seeded`, every one cited;
 //     re-seeding never writes a row a person verified (rule 3), and refreshes a seeded one;
 //   - Utah, Idaho, Nevada, Arizona carry no prescriptive rule (nothing citable), only the seal rule;
-//   - an Oregon prescriptive job with ballasted racking is REFUSED (blocker) naming the reason and
-//     quoting the rule; a "NON-BALLASTED" note is not ballast; an engineered job gets the reason as a
-//     callout; an operator "prescriptive" against a snow load over the limit is refused too;
+//   - ballasted racking routes the path itself engineered (a callout names why); an operator
+//     "prescriptive" over it is REFUSED (blocker) naming the reason and quoting the rule; a
+//     "NON-BALLASTED" note is not ballast; plan-text ballast against flashed attachments on a shingle
+//     roof is a person's question (warning), never a guess; an operator "prescriptive" against a snow
+//     load over the limit is refused too;
 //   - an input the rules need that the plans do not state, and an Oregon rafter span (its limits are
 //     not on file), is "check with an engineer", never a pass;
 //   - the out-of-state seal finding (PR1) cites the job state's own seal statute.
@@ -98,20 +100,32 @@ check("a clean Oregon prescriptive truss job raises nothing", () => {
   assert.deepEqual(statePrescriptiveFindings(mk({}), OR_RULES).map((f) => f.id), []);
 });
 
-check("ballasted racking on an Oregon prescriptive job is REFUSED, naming the reason and quoting BCD 440-5952", () => {
+check("ballasted racking: the path itself routes engineered (callout); an operator 'prescriptive' is REFUSED, naming the reason and quoting BCD 440-5952", () => {
   const p = mk({ attachmentHardware: "IronRidge BX chassis / blocks / anchors", rackingSystem: "IronRidge BX", attachmentToFraming: "" });
-  const f = byId(buildReviewerReport(p, { stateRules: OR_RULES }).findings, REFUSED);
+  // The path screen reads the racking now: the wrong (prescriptive) application is never built.
+  assert.equal(byId(buildReviewerReport(p, { stateRules: OR_RULES }).findings, REFUSED), undefined);
+  assert.equal(byId(statePrescriptiveFindings(p, OR_RULES), "state.struct.engineered-reasons")?.severity, "callout");
+  // A person who picks prescriptive anyway is refused, with the rule quoted.
+  const forced = mk({ attachmentHardware: "IronRidge BX chassis / blocks / anchors", rackingSystem: "IronRidge BX", attachmentToFraming: "", permitPathOverride: "prescriptive" });
+  const f = byId(buildReviewerReport(forced, { stateRules: OR_RULES }).findings, REFUSED);
   assert.ok(f, "refused");
   assert.equal(f!.severity, "blocker");
   assert.match(f!.title, /ballasted \/ non-penetrating racking.*→ engineered/);
   assert.match(f!.message, /Direct attachment to the roof framing or blocking/);
   assert.ok(f!.codeReferences.some((r) => /440-5952/.test(r.title) && r.sourceUrl.startsWith("https://")));
-  assert.equal(byId(buildReviewerReport(p, {}).findings, REFUSED), undefined, "no rules on file: nothing new");
+  assert.equal(byId(buildReviewerReport(forced, {}).findings, REFUSED), undefined, "no rules on file: nothing new");
 });
 
-check("ballast read from the plan text; a NON-BALLASTED note is not ballast", () => {
-  assert.ok(byId(statePrescriptiveFindings(mk({ planSetExtractedText: "ARRAY ON BALLASTED RACKING WITH CONCRETE BLOCKS." }), OR_RULES), REFUSED));
+check("ballast read from the plan text; a NON-BALLASTED note is not ballast; a conflicting package is a person's question", () => {
+  const flat = { attachmentHardware: "", attachmentToFraming: "", roofMaterial: "TPO membrane", permitPathOverride: "prescriptive" };
+  assert.ok(byId(statePrescriptiveFindings(mk({ ...flat, planSetExtractedText: "ARRAY ON BALLASTED RACKING WITH CONCRETE BLOCKS." }), OR_RULES), REFUSED));
   assert.equal(byId(statePrescriptiveFindings(mk({ planSetExtractedText: "NON-BALLASTED SYSTEM. ALL ATTACHMENTS LAGGED TO RAFTERS." }), OR_RULES), REFUSED), undefined);
+  // Ballast in the plan text while the fields say flashed attachments to the framing on a shingle
+  // roof: never a guessed refusal, never a pass.
+  const mixed = byId(statePrescriptiveFindings(mk({ permitPathOverride: "prescriptive", planSetExtractedText: "ARRAY ON BALLASTED RACKING WITH CONCRETE BLOCKS." }), OR_RULES), UNVERIFIED);
+  assert.equal(byId(statePrescriptiveFindings(mk({ permitPathOverride: "prescriptive", planSetExtractedText: "ARRAY ON BALLASTED RACKING WITH CONCRETE BLOCKS." }), OR_RULES), REFUSED), undefined);
+  assert.equal(mixed?.severity, "warning");
+  assert.match(String(mixed?.message), /whether the racking is ballasted is unclear/);
 });
 
 check("an engineered job with ballast gets the reason as a callout, not a refusal", () => {

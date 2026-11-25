@@ -57,12 +57,15 @@ const auditFor = (action: string, recipeId: string, runId?: unknown) => fx.audit
   .filter((a) => JSON.parse(a.details).recipeId === recipeId && (runId === undefined || JSON.parse(a.details).runId === runId));
 
 // ── the classifier, on the messages production actually wrote ────────────────────────────────
+const { ReplayStallWatch } = await import("../../portal-bot/src/adapters/replayStopControl");
 await check("classifier: production messages land in the right family (MUST-PASS and MUST-EXCLUDE)", async () => {
   const cases: Array<[string, "recipe" | "not_recipe" | "unknown"]> = [
     // not the recipe — harness / our lease / document gate / project data / the filing's outcome
     ["Recipe step failed (fill — Email): locator.fill: Target page, context or browser has been closed [url=https://pgenm.powerclerk.com/x]", "not_recipe"],
     ["Recipe step failed (upload — upload site_plan: Please upload your site plan): The site_plan document changed or no longer matches this permit path. Rebuild and restart the run.", "not_recipe"],
     ["Recipe login failed: Timed out after 900s waiting for the portal profile to free up: C:\\profiles\\x", "not_recipe"],
+    // #281: our own ACCOUNT lease refusing to sign in with a login another run or open window is using.
+    ["Portal run errored: Timed out after 900s waiting for the portal login to free up on powerclerk.com: another run, or a window a person is reviewing in, is signed in with the same login", "not_recipe"],
     ["Recipe step failed (click — final submit: Submit (recorded, NOT clicked)): After the submit click the page neither confirmed nor rejected the filing", "not_recipe"],
     ["Recipe step failed (click — final submit): Final submit clicked; outcome unknown — human must verify.", "not_recipe"],
     ["Recipe step failed (check — record type): Record type \"Residential - Structural\" is not offered here — refusing to pick another permit type.", "not_recipe"],
@@ -95,6 +98,11 @@ await check("classifier: production messages land in the right family (MUST-PASS
     // A slow portal (a navigation wait) is not the recipe.
     ["Recipe step failed (fill — Email): page.waitForLoadState: Timeout 30000ms exceeded.", "not_recipe"],
     ["Recipe step failed (click — Next): page.waitForURL: Timeout 30000ms exceeded.", "not_recipe"],
+    // Every step ran; only the read-only review checks after them ran past their budget — not the
+    // recipe (live PGE NEM stage 2026-11-20). A step-loop stall stays unattributed (keep and flag).
+    [new ReplayStallWatch(60_000).message(), "unknown"],
+    [(() => { const w = new ReplayStallWatch(60_000); w.enterTail(1_800_000); return w.message(); })(), "not_recipe"],
+    [(() => { const w = new ReplayStallWatch(60_000); w.enterTail(1_800_000, { finalSubmitClicked: true }); return w.message(); })(), "not_recipe"],
   ];
   // #352: the replay's stop for a REQUIRED control the recipe has no step for and this job has no
   // value for (the AC disconnect part with no plan-set part and no client standard; an unanswered

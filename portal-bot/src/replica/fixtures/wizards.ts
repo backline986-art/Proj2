@@ -18,6 +18,14 @@
 //   spa        — an unknown-shape Angular-like wizard: one URL, hash routes, generated
 //                mat-input-N ids, a role=combobox listbox for State, client-side validation,
 //                and a "Submit Application" review step.
+//   selfserve  — a citizen self-service permit portal of the kind the 2026-11-14/15 live sweep
+//                failed on (EnerGov, CityView, iWorQ shapes; no one vendor copied): a type-ahead
+//                address box whose value commits ONLY when a suggestion is picked, a contractor
+//                lookup whose results table has a favourite star and an "Add" on every row (only
+//                Add commits), the project details inside a pop-up dialog that commits only on
+//                its Save, and ONE attachment uploader (pick a Document Type, choose the file,
+//                click Add Attachment) where a file under the wrong type is a wrong-box write.
+//                Server-rendered pages with ordinary form posts; the widgets write hidden inputs.
 //
 // Each base has seven mutations (see MUTATIONS) that model how a portal drifts between the
 // learn and the replay. Every control carries a LOGICAL key that never changes across
@@ -28,8 +36,8 @@
 // do not drift per jurisdiction, and the engine's deterministic passes key on them.
 import type { SynthProject } from "./syntheticProjects";
 
-export type Flavor = "accela" | "powerclerk" | "spa";
-export const FLAVORS: Flavor[] = ["accela", "powerclerk", "spa"];
+export type Flavor = "accela" | "powerclerk" | "spa" | "selfserve";
+export const FLAVORS: Flavor[] = ["accela", "powerclerk", "spa", "selfserve"];
 
 export type Mutation =
   | "base"
@@ -59,7 +67,12 @@ export interface Expect {
 
 export interface Ctl {
   key: string;
-  kind: "text" | "textarea" | "select" | "radio" | "checklist" | "checkbox" | "file" | "date" | "combo";
+  kind: "text" | "textarea" | "select" | "radio" | "checklist" | "checkbox" | "file" | "date" | "combo"
+    /** selfserve: a search-as-you-type box; the value commits only when a suggestion is picked. */
+    | "typeahead"
+    /** selfserve: search box + Search button + a results table with a star and an Add per row;
+     *  only a row's Add commits (the row's licence number). */
+    | "lookup";
   label: string;
   section: string;
   id: string;
@@ -84,6 +97,8 @@ export interface Ctl {
   stableId?: boolean;
   /** Shown only once another control holds a value (Accela ASI dependent field). */
   dependsOn?: { key: string; value: string };
+  /** selfserve attachments: the Document Type a file must be added under to land in THIS control. */
+  docType?: string;
 }
 
 export type PageKind = "login" | "dashboard" | "disclaimer" | "worklocation" | "form" | "readonly" | "review";
@@ -97,6 +112,12 @@ export interface PageSpec {
   controls: Ctl[];
   /** Read-only body copy for notice/review pages. */
   note?: string;
+  /** Accela read-only pages only: extra inert links (href="javascript:void(0)", so the scan reads them) shown above the action bar (a smoke adds a
+   *  "Pay Fees" or "Request Signatures" control here). Clicking one posts nothing. */
+  actions?: Array<{ id: string; label: string }>;
+  /** selfserve: this page's controls live in a pop-up dialog opened by `opener` and committed
+   *  only by its Save button (closed unsaved = nothing committed). */
+  overlay?: { opener: string };
 }
 
 export interface Delays {
@@ -406,6 +427,74 @@ function spaBase(): PageSpec[] {
 }
 
 // ---------------------------------------------------------------------------------------------
+// SELF-SERVICE (citizen permit portal) BASE
+// ---------------------------------------------------------------------------------------------
+
+/** MVC-style dotted names ("Application.Owner.FirstName") behind generated fld_ ids. */
+function ssCtl(id: string, name: string, c: Omit<Ctl, "id" | "name">): Ctl {
+  return { ...c, id: `fld_${id}`, name: `Application.${name}` };
+}
+
+/** The Document Types the attachment uploader offers, in its order. */
+export const SS_DOC_TYPES = ["Plans", "Electrical One-Line", "Site Plan", "Other"];
+
+function selfserveBase(): PageSpec[] {
+  return [
+    {
+      slug: "Portal/Home", title: "Citizen Self Service", heading: "Welcome", kind: "dashboard", sections: [], controls: [],
+      note: "Apply for a residential building or electrical permit online.",
+    },
+    {
+      slug: "Portal/Apply/Location", title: "Citizen Self Service - Apply", heading: "Project Location", kind: "form", sections: ["Location"],
+      note: "Start typing the street number and name, then choose the address from the list.",
+      controls: [
+        // Optional on purpose (as the SPA's State): a required widget the walk cannot work would
+        // stop every walk here and hide the later pages. Its blank still fails the strict score.
+        ssCtl("siteAddress", "Location.Address", { key: "site.address", kind: "typeahead", label: "Street Address", section: "Location", relabel: "Address Line 1", expect: ex((p) => p.street, "ci") }),
+      ],
+    },
+    {
+      slug: "Portal/Apply/Contacts", title: "Citizen Self Service - Apply", heading: "Contacts", kind: "form", sections: ["Property Owner", "Contractor"],
+      controls: [
+        ssCtl("ownerFirstName", "Owner.FirstName", { key: "owner.firstName", kind: "text", label: "First Name", section: "Property Owner", required: true, expect: ex((p) => p.ownerFirst) }),
+        ssCtl("ownerLastName", "Owner.LastName", { key: "owner.lastName", kind: "text", label: "Last Name", section: "Property Owner", required: true, expect: ex((p) => p.ownerLast) }),
+        ssCtl("ownerEmail", "Owner.Email", { key: "owner.email", kind: "text", label: "Email", section: "Property Owner", relabel: "Email Address", expect: ex((p) => p.ownerEmail) }),
+        ssCtl("ownerPhone", "Owner.Phone", { key: "owner.phone", kind: "text", label: "Phone", section: "Property Owner", expect: ex((p) => p.ownerPhone, "digits") }),
+        // The licence the portal holds is the ROW the person added, never the text typed in the
+        // search box: the box has no name, the row's Add writes a hidden input. Optional on purpose.
+        ssCtl("contractorLicense", "Contractor.LicenseNumber", { key: "contractor.license", kind: "lookup", label: "Contractor License Number", section: "Contractor", expect: ex((p) => p.installer.license.replace(/\D/g, ""), "exact") }),
+      ],
+    },
+    {
+      slug: "Portal/Apply/Details", title: "Citizen Self Service - Apply", heading: "Project Details", kind: "form", sections: ["Project Details"],
+      overlay: { opener: "Add Project Details" },
+      note: "Click Add Project Details, complete the form and click Save.",
+      controls: [
+        ssCtl("workDescription", "Details.Description", { key: "details.description", kind: "textarea", label: "Description of Work", section: "Project Details", relabel: "Scope of Work", expect: ex((p) => `Roof-mounted residential solar PV system, ${p.dcKw} kW DC / ${p.acKw} kW AC`) }),
+        ssCtl("dcKw", "Details.SystemSizeKw", { key: "details.dcKw", kind: "text", label: "System Size (kW DC)", section: "Project Details", expect: ex((p) => p.dcKw, "exact") }),
+        ssCtl("moduleQty", "Details.ModuleCount", { key: "details.moduleQty", kind: "text", label: "Number of Modules", section: "Project Details", relabel: "Module Count", expect: ex((p) => p.moduleQty, "exact") }),
+      ],
+    },
+    {
+      slug: "Portal/Apply/Attachments", title: "Citizen Self Service - Apply", heading: "Attachments", kind: "form", sections: ["Attachments"],
+      note: "Choose a Document Type, choose the file, then click Add Attachment. Upload all plan pages as ONE PDF under Plans.",
+      controls: [
+        ssCtl("attachPlans", "Attachments.Plans", { key: "attach.plans", kind: "file", label: "Plans", section: "Attachments", docType: "Plans", expect: ex((_p, d) => d.plan_set, "ci") }),
+        // A file added under any other type is in the wrong box.
+        ssCtl("attachOneLine", "Attachments.OneLine", { key: "attach.oneLine", kind: "file", label: "Electrical One-Line", section: "Attachments", docType: "Electrical One-Line", mustStayEmpty: true }),
+        ssCtl("attachSitePlan", "Attachments.SitePlan", { key: "attach.sitePlan", kind: "file", label: "Site Plan", section: "Attachments", docType: "Site Plan", mustStayEmpty: true }),
+        ssCtl("attachOther", "Attachments.Other", { key: "attach.other", kind: "file", label: "Other", section: "Attachments", docType: "Other", mustStayEmpty: true }),
+      ],
+    },
+    {
+      slug: "Portal/Apply/Review", title: "Citizen Self Service - Apply", heading: "Review and Submit", kind: "review", sections: [],
+      note: "Review your application. It is not submitted until you click Submit Application.",
+      controls: [],
+    },
+  ];
+}
+
+// ---------------------------------------------------------------------------------------------
 // Mutations
 // ---------------------------------------------------------------------------------------------
 
@@ -413,6 +502,8 @@ const BASE_DELAYS: Record<Flavor, Delays> = {
   accela: { postback: 700, cascade: 0, lateOptions: 0, autosave: 0, rerender: 0, render: 0 },
   powerclerk: { postback: 0, cascade: 600, lateOptions: 1500, autosave: 250, rerender: 300, render: 0 },
   spa: { postback: 300, cascade: 0, lateOptions: 0, autosave: 0, rerender: 0, render: 400 },
+  // postback = the suggestion / lookup / attachment round trip (Tigard's geocoder took ~4 s live).
+  selfserve: { postback: 900, cascade: 0, lateOptions: 0, autosave: 0, rerender: 0, render: 0 },
 };
 
 function renameId(flavor: Flavor, c: Ctl): Ctl {
@@ -426,6 +517,10 @@ function renameId(flavor: Flavor, c: Ctl): Ctl {
   if (flavor === "powerclerk") {
     const n = Number(c.id.replace(/\D+/g, "")) + 37;
     return { ...c, id: `pcInputBase${n}`, name: `pcInputBase${n}` };
+  }
+  if (flavor === "selfserve") {
+    // A new release regenerates the control ids and moves the model under another root.
+    return { ...c, id: c.id.replace(/^fld_/, "ctl_"), name: c.name.replace(/^Application\./, "PermitApplication.") };
   }
   const n = Number(c.id.replace(/\D+/g, "")) + 11;
   return { ...c, id: `mat-input-${n}`, name: `${c.name}V2` };
@@ -446,6 +541,12 @@ function readonlyPage(flavor: Flavor): PageSpec {
       note: "This program accepts residential systems up to 25 kW AC. Continue to the next section.",
     };
   }
+  if (flavor === "selfserve") {
+    return {
+      slug: "Portal/Apply/Notice", title: "Citizen Self Service - Apply", heading: "Important Information", kind: "readonly", sections: [], controls: [],
+      note: "Solar permits are reviewed in the order received. No changes are needed on this page.",
+    };
+  }
   return {
     slug: "notice", title: "Permit Portal", heading: "Before you continue", kind: "readonly", sections: [], controls: [],
     note: "Inspections are scheduled after the permit is issued. Continue to the next step.",
@@ -462,15 +563,16 @@ function duplicateSection(flavor: Flavor, page: PageSpec): PageSpec {
   for (const src of [phone, email]) {
     if (!src) continue;
     n++;
-    const id = flavor === "accela" ? `${PM}EmergencyEdit_txt${n}` : flavor === "powerclerk" ? `pcInputBase${95 + n}` : `mat-input-${60 + n}`;
-    extras.push({ key: `decoy.${n}`, kind: "text", label: src.label, section: sec, id, name: flavor === "accela" ? pmName(id) : flavor === "spa" ? `secondary${n}` : id, mustStayEmpty: true });
+    const id = flavor === "accela" ? `${PM}EmergencyEdit_txt${n}` : flavor === "powerclerk" ? `pcInputBase${95 + n}` : flavor === "selfserve" ? `fld_secondary${n}` : `mat-input-${60 + n}`;
+    const name = flavor === "accela" ? pmName(id) : flavor === "spa" ? `secondary${n}` : flavor === "selfserve" ? `Application.Secondary.Field${n}` : id;
+    extras.push({ key: `decoy.${n}`, kind: "text", label: src.label, section: sec, id, name, mustStayEmpty: true });
   }
   return { ...page, sections: [sec, ...page.sections], controls: [...extras, ...page.controls] };
 }
 
 /** Build one concrete wizard: a base shape with one mutation applied. */
 export function buildWizard(flavor: Flavor, mutation: Mutation): Wizard {
-  let pages = flavor === "accela" ? accelaBase() : flavor === "powerclerk" ? powerClerkBase() : spaBase();
+  let pages = flavor === "accela" ? accelaBase() : flavor === "powerclerk" ? powerClerkBase() : flavor === "selfserve" ? selfserveBase() : spaBase();
   const delays = { ...BASE_DELAYS[flavor] };
   const formIdx = () => pages.map((p, i) => ({ p, i })).filter((x) => x.p.kind === "form");
   const reviewIdx = () => pages.findIndex((p) => p.kind === "review");
@@ -514,7 +616,8 @@ export function buildWizard(flavor: Flavor, mutation: Mutation): Wizard {
     case "duplicate_label_pair": {
       const target = flavor === "accela" ? pages.findIndex((p) => /contacts/i.test(p.heading))
         : flavor === "powerclerk" ? pages.findIndex((p) => /customer information/i.test(p.heading))
-          : pages.findIndex((p) => p.slug === "property");
+          : flavor === "selfserve" ? pages.findIndex((p) => /contacts/i.test(p.heading))
+            : pages.findIndex((p) => p.slug === "property");
       pages = pages.map((p, i) => (i === target ? duplicateSection(flavor, p) : p));
       break;
     }
@@ -522,7 +625,7 @@ export function buildWizard(flavor: Flavor, mutation: Mutation): Wizard {
       for (const k of Object.keys(delays) as Array<keyof Delays>) delays[k] = delays[k] * 3;
       break;
   }
-  return { flavor, mutation, name: `${flavor}/${mutation}`, pages, delays, login: flavor === "powerclerk" };
+  return { flavor, mutation, name: `${flavor}/${mutation}`, pages, delays, login: flavor === "powerclerk" || flavor === "selfserve" };
 }
 
 /** Every scored control in the wizard, in page order. */

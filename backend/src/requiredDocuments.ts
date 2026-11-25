@@ -35,7 +35,8 @@
 // ---------------------------------------------------------------------------
 
 import type { AppDb } from "./db";
-import type { CodeEdition, ProjectRecord } from "../../shared/src/types";
+import type { CodeEdition, JobScope, ProjectRecord } from "../../shared/src/types";
+import { deriveJobScope, resolveJobScope, scopeHasNewPv } from "./jobScope";
 import { projectDocsByType } from "./projectDocuments";
 import { activeStructuralLetterConfirmation, confirmedByLine } from "./structuralLetter";
 import { duplicateUploads, uploadedSubmissionDocuments } from "./submissionDocuments";
@@ -53,7 +54,7 @@ import {
   type AgencyApplicationForm, type AgencyLineStatus, type AgencyLineStatusOf, type FormTrack,
 } from "./applicationDocsAgency";
 import { filledApplicationForms, heldUnfillableAgencyBlanks } from "./ahjForms";
-import { requirementSlots } from "./requirementSlots";
+import { parsePortalRequiredUpload, requirementSlots } from "./requirementSlots";
 import { deadLinkSentence, stageAcquiresForm, stageAcquisitionFor, type StageAcquiredForm, type StageAcquisition } from "./formAcquisitionPlan";
 import {
   designText, INVERTER_LISTING_PATTERNS, LOAD_SIDE_CALC_PATTERNS, MODULE_LISTING_PATTERNS, POWER_SOURCE_DIRECTORY_PATTERNS, RAPID_SHUTDOWN_PATTERNS, SUPPLY_SIDE_DETAIL_PATTERNS,
@@ -62,6 +63,7 @@ import { FIRE_PATHWAY_PATTERNS } from "./projectEvidence";
 import { groundMountFromField } from "./mountKind";
 import { adoptedNecEdition } from "./necEditions";
 import { essDocumentRows, projectHasBattery } from "./essRequirements";
+import { outlinedPagesMissingSheetNote } from "./outlinedTextPages";
 import { nemFiledWithPermit, type NemFiledWithPermit } from "./utilityFilingLookup";
 
 export interface RequiredDocItem {
@@ -106,6 +108,12 @@ export interface RequiredDocItem {
    * the QC row and the packet can show whose requirement it is.
    */
   verifiedList?: { text: string; sourceUrl: string; quote: string };
+  /**
+   * Set when the row comes from a required upload slot a learn met on the AHJ's permit portal and
+   * could not fill (#140, portalRequiredUploadItems): the KB line it rests on. The portal's own form
+   * refuses the filing without it, so the row blocks staging and says "attach it".
+   */
+  portalRequired?: { line: string };
 }
 
 /** An application/checklist row, which always names its discipline. */
@@ -473,6 +481,9 @@ export function requiredDocuments(
      *  APPLICATION is demanded at all, which is what keeps this function safe to
      *  call with a bare project that has no ahj/state. */
     application?: ApplicationDocContext;
+    /** What the job installs (#673). Absent: the plan set's own evidence (deriveJobScope) — pv unless
+     *  the job names no new module and both sheets say so. */
+    jobScope?: JobScope;
   } = {},
 ): RequiredDocItem[] {
   const hasUtility = Boolean((project.utility || "").trim());
@@ -486,11 +497,26 @@ export function requiredDocuments(
     { docType: "labels", label: "Label / placard schedule", why: "Placard/label schedule (705.10 directory, RSD, disconnects) — usually a plan-set sheet.", lane: "permit", blocking: false },
   ];
 
+  // A STORAGE SCOPE INSTALLS NO ARRAY (#673; draft 06). No roof framing / attachment detail and no
+  // module cut sheet; the site plan is asked for the ESS location, the one-line for the ESS, and the
+  // inverter sheet is the battery inverter / PCS sheet. The ESS rows (battery_spec, ess_detail) join
+  // below as on any battery job. Every PV scope — and an unknown one, which is pv — keeps the set as is.
+  const scope: JobScope = opts.jobScope ?? deriveJobScope(project.parserSnapshot).scope;
+  if (!scopeHasNewPv(scope)) {
+    for (let i = items.length - 1; i >= 0; i--) if (items[i].docType === "structural" || items[i].docType === "module_spec") items.splice(i, 1);
+    for (const it of items) {
+      if (it.docType === "site_plan") { it.label = "Site plan with the ESS location + service equipment"; it.why = "The AHJ reviews where the battery and its disconnect are installed (NEC 706 / IRC R328) relative to the service equipment."; }
+      if (it.docType === "sld") { it.label = "Electrical one-line / SLD (ESS + NEC 705.12)"; it.why = "Shows the battery inverter / PCS, its disconnect and backfed breaker, and the point of interconnection — for the electrical permit and the utility application."; }
+      if (it.docType === "inverter_spec") { it.label = "Battery inverter / PCS spec sheet (UL 1741)"; }
+      if (it.docType === "labels") { it.why = "Placard/label schedule (705.10 directory, ESS and disconnect labels) — usually a plan-set sheet."; }
+    }
+  }
+
   // A GROUND / POLE ARRAY HAS NO ROOF (#247). The mounting FIELD decides (mountKind.groundMountFromField
   // — plan prose never does): a pure ground array's rows replace roof framing in place; a roof + ground
   // combination keeps roof framing and adds them after it. Rooftop, carport and unknown-mount jobs never
   // take this branch — their set is unchanged.
-  const groundMount = groundMountFromField(project);
+  const groundMount = scopeHasNewPv(scope) ? groundMountFromField(project) : null;
   if (groundMount) {
     const at = items.findIndex((i) => i.docType === "structural");
     if (at < 0) items.push(...groundMountDocItems(project));
@@ -1019,6 +1045,7 @@ export function documentInventory(db: AppDb, project: ProjectRecord): DocumentIn
   // and/or checklist some AHJs want attached alongside the plan set. Learned data, so
   // advisory and never fatal to the inventory.
   let kbItems: RequiredDocItem[] = [];
+  let portalItems: RequiredDocItem[] = [];
   // Structure + process flags + the AHJ's own name for the path-chosen
   // application. Resolved HERE, where the guarded lookups belong, and threaded
   // into the pure function.
@@ -1053,7 +1080,9 @@ export function documentInventory(db: AppDb, project: ProjectRecord): DocumentIn
       { ahjKnowledgeUnavailable: true },
     );
   }
-  const docOpts = { stampThresholdKwDc, stampThresholdConfirmed, stampThresholdBasis, jurisdictionLabel, processProfileRequiresStamp, application };
+  // What the job installs (#673; draft 06), a person's scope included.
+  const jobScope = resolveJobScope(db, String(project.id ?? ""), project.parserSnapshot).scope;
+  const docOpts = { stampThresholdKwDc, stampThresholdConfirmed, stampThresholdBasis, jurisdictionLabel, processProfileRequiresStamp, application, jobScope };
   const baselineItems = requiredDocuments(project, docOpts);
   // A HELD BUT UNFILLABLE AGENCY APPLICATION IS STILL REQUIRED — AS A FILE TO ATTACH. The row
   // keeps blocking exactly as before; its words stop promising a fill that cannot happen.
@@ -1081,10 +1110,14 @@ export function documentInventory(db: AppDb, project: ProjectRecord): DocumentIn
       // the same mutually-exclusive rule one layer down: on this path the PE stamp +
       // sealed structural letter is the evidence, and the checklist is simply not owed.
       if (permitPath === "engineered") baseline.add("solar_checklist");
-      kbItems = kbApplicationDocItems(reqs, baseline);
+      // A required upload the AHJ's own portal demanded (#140) — its own reader, ahead of the prose
+      // mapper, which never sees those lines.
+      portalItems = portalRequiredUploadItems(reqs, baseline);
+      for (const p of portalItems) for (const t of [p.docType, ...(p.altDocTypes || [])]) baseline.add(t);
+      kbItems = kbApplicationDocItems(reqs.filter((r) => !parsePortalRequiredUpload(r)), baseline);
     }
   } catch { /* KB optional */ }
-  const required = [...baselineItems, ...kbItems];
+  const required = [...baselineItems, ...kbItems, ...portalItems];
   // THE UTILITY'S APPLICATION RIDES IN THE PERMIT PACKET (#664) — only when a person VERIFIED that this
   // utility files inside the AHJ permit application (nemFiledWithPermit; a seeded row adds nothing).
   try {
@@ -1443,7 +1476,7 @@ export function requiredListCheck(db: AppDb, project: ProjectRecord, inventory: 
   const knownProfile = (): { label: string; lines: string[] } | null => {
     let profile: ReturnType<typeof findApplicationProfile> | null = null;
     try { profile = findApplicationProfile(project); } catch { profile = null; }
-    if (!profile || !(profile.id.startsWith("process-") || (applicationProfiles.includes(profile) && profile.id !== "oregon-generic-epermitting"))) return null;
+    if (!profile || !(profile.id.startsWith("process-") || (applicationProfiles.includes(profile) && !profile.statewide))) return null;
     return {
       label: profile.id.startsWith("process-") ? `the seeded ${project.ahj || "AHJ"} process profile (not confirmed on an agency page)` : `the ${profile.name} profile`,
       lines: profile.requiredDocuments.filter((t) => String(t || "").trim()),
@@ -1644,12 +1677,18 @@ export function isApplicationFormRow(d: Pick<DocPresence, "docType" | "altDocTyp
  * county's application). Anything else (a plan sheet, a PE letter, a spec, a bill) is attached or
  * split out of the plan set.
  */
-export function owedDocumentAction(d: Pick<DocPresence, "docType" | "altDocTypes" | "lane">, deadLinks: string[] = []): string {
+export function owedDocumentAction(d: Pick<DocPresence, "docType" | "altDocTypes" | "lane" | "portalRequired">, deadLinks: string[] = [], unreadPlanPages: readonly number[] = []): string {
+  // A slot the portal's own form requires (#140): a file only a person has — attach it.
+  if (d.portalRequired) return "attach it — the permit portal's own form requires this upload and will not submit without it";
   // FOUND, DEAD LINK (issue #205): the search found the blank and its link answered 404 — said so, with
   // the URL, so the operator looks for where the AHJ moved the file rather than for a form "none exists".
-  return d.lane === "permit" && isApplicationFormRow(d)
-    ? `${deadLinks.length ? `${deadLinkSentence(deadLinks)}; ` : ""}find the official form (App Docs → Find missing official forms) or upload the blank`
-    : "attach it or split it out of the plan set";
+  if (d.lane === "permit" && isApplicationFormRow(d)) {
+    return `${deadLinks.length ? `${deadLinkSentence(deadLinks)}; ` : ""}find the official form (App Docs → Find missing official forms) or upload the blank`;
+  }
+  // A plan sheet "missing" from a set with pages whose text is drawn as outlines (#696) may be on one
+  // of them: nobody read those pages, so the reason names them (shippedPlanSetOutlinedPages).
+  const unread = outlinedPagesMissingSheetNote(d.docType, unreadPlanPages);
+  return `attach it or split it out of the plan set${unread ? `; ${unread}` : ""}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -1690,6 +1729,41 @@ export const KB_APPLICATION_DOC_PATTERNS: Array<{ re: RegExp; docType: string; l
   { re: /checklist|worksheet|eligibilit/i, docType: "solar_checklist", label: "Solar prescriptive checklist (filled)" },
   { re: /(solar|permit|completed|signed)\s*application|application\s*(form|packet)/i, docType: "permit_application", label: "Permit application (filled)" },
 ];
+
+/**
+ * A REQUIRED UPLOAD THE AHJ'S OWN PORTAL DEMANDED (#140) — the KB lines a learn wrote
+ * (knowledgeBase.learnPortalRequiredUploads, parsed only by requirementSlots.parsePortalRequiredUpload).
+ *
+ * BLOCKING, unlike the prose rows below, and on purpose: those are research about what an AHJ
+ * wants, which varies in quality; this is a file input the portal's form marked required and would
+ * not submit without (City of Star: "The required uploads were not found", Submit disabled). Missing
+ * it, the job cannot be filed there anyway — the block only moves the stop from the portal to
+ * staging, where it names the document. The row carries the discipline the learn filed under, so it
+ * holds only that permit's track. A misread row is removed by a person editing the AHJ's profile.
+ * `alreadyRequired` suppresses a slot the baseline already demands (a "Plans" slot is the plan set).
+ */
+export function portalRequiredUploadItems(requirements: string[], alreadyRequired: Set<string> = new Set()): RequiredDocItem[] {
+  const seen = new Set<string>();
+  const out: RequiredDocItem[] = [];
+  for (const raw of requirements || []) {
+    const parsed = parsePortalRequiredUpload(raw);
+    if (!parsed) continue;
+    const slots = requirementSlots(parsed.label);
+    if (!slots.length || seen.has(slots[0]) || slots.some((s) => alreadyRequired.has(s))) continue;
+    seen.add(slots[0]);
+    out.push({
+      docType: slots[0],
+      ...(slots.length > 1 ? { altDocTypes: slots.slice(1) } : {}),
+      label: parsed.label,
+      why: `This AHJ's permit portal marks "${parsed.label}" as a required upload and will not take the application without it (learned on a previous filing). If that is wrong for this job, correct the AHJ's profile in the knowledge base.`,
+      lane: "permit",
+      blocking: true,
+      ...(parsed.discipline ? { discipline: parsed.discipline } : {}),
+      portalRequired: { line: String(raw) },
+    });
+  }
+  return out;
+}
 
 /**
  * Map a KB profile's required-documents prose to the application/checklist documents this

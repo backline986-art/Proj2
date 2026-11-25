@@ -157,6 +157,8 @@ await check("(d) a draft on record: the Part 1 recipe's terminal Submit never co
   process.env.PORTAL_AUTOSEED = "0";
   process.env.PORTAL_ALLOW_FINAL_SUBMIT = "1";
   try {
+    // A named person verified where this utility files (the gate refuses an unverified door).
+    fx.verifyDoor({ scope: "utility", utility: "PGE", portalUrl: "https://pge.powerclerk.example/MvcAccount/Login" });
     const control = fx.newProject();
     const a0 = repo.createRunApproval(db, { projectId: control, track: "nem", approver: "Pat Approver" });
     await repo.prepareSubmission(db, control, "nem", true, false, a0.id);

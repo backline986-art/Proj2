@@ -16,6 +16,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "credential-type-first-"));
 process.env.AUTOPILOT_DB_PATH = path.join(tmpDir, "test.sqlite");
@@ -78,7 +79,7 @@ check("MUST-EXCLUDE: ...but never on another host", () => {
 });
 
 check("the learn's real lookup is this function (autoLearn.ts no longer asks by portal_type first)", () => {
-  const src = fs.readFileSync(path.join(path.dirname(new URL(import.meta.url).pathname).replace(/^\/([A-Za-z]:)/, "$1"), "../src/autoLearn.ts"), "utf8");
+  const src = fs.readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)).replace(/^\/([A-Za-z]:)/, "$1"), "../src/autoLearn.ts"), "utf8");
   assert.match(src, /getDecryptedCredentialForPortal\(db, project\.clientId, portalType, portalUrl\)/);
   assert.doesNotMatch(src, /getDecryptedCredential\(db, project\.clientId, portalType\)/);
 });

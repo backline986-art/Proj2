@@ -98,6 +98,7 @@ import { BRAND } from "./clientUpdates";
 import { clientEmailsOffFor, ensureStatusShareToken, formatProjectAddress, sendEmail, smtpConfigured, statusShareUrl } from "./clientNotifier";
 import { mapEmailText, renderEmail, type EmailContent, type EmailSection } from "./emailLayout";
 import { addCommunication } from "./crm";
+import { clientLinkRefusal } from "./clientLinkGuard";
 import { describeKind, isImageKind, looksLikeCad, sniffFileKind } from "./fileTypes";
 import { HttpError } from "./httpError";
 import { intakeAuthRefusal } from "./intakeAuth";
@@ -108,6 +109,7 @@ import { normalizeProject, normalizeTokens } from "./normalize";
 import { saveProjectDocument } from "./projectDocuments";
 import { isPlannerSecretKey, projectSecretValuesById } from "./projectSecrets";
 import { createProject, getProjectDetail } from "./repository";
+import { INTAKE_FIELD_LABELS, createIntakeRequest, missingIntakeFields } from "./intakeRequests";
 import { alertStaffOnUnsortedIntake } from "./staffAlerts";
 import { backendDataDir } from "./statePaths";
 import { nowIso } from "./time";
@@ -360,7 +362,8 @@ async function sortAttachments(attachments: IntakeJobFile[]): Promise<WorkingFil
 export const PARSER_PROJECT_FIELDS: ReadonlySet<string> = new Set([
   "owner", "street", "city", "state", "zip", "ahj", "utility", "account", "meter", "dcKw", "acKw", "interco",
   "moduleMake", "moduleModel", "moduleWattage", "moduleQty", "invMake", "invModel", "invQty", "batteryMake",
-  "batteryModel", "batteryQty", "roofMaterial", "mounting", "rackingSystem", "roofRafterSpan", "invOutputW",
+  "batteryModel", "batteryQty", "batteryCapacityKwh", "batteryOutputKw", "essInverterModel", "essBreaker", "batteryMode",
+  "newModulesOnSchedule", "newModulesOnSld", "roofMaterial", "mounting", "rackingSystem", "roofRafterSpan", "invOutputW",
   "pvMicroMake", "pvMicroModel", "pvMicroQty", "pvMicroOutputW", "inverterSettings", "moduleVoc",
   "moduleIsc", "moduleVocTempCoeff", "pvMicroMaxDcInputV", "modulesPerString", "siteLowTempC",
   "dwellingUnits", "constructionCategory", "invMaxDcInputV", "siteHighTempC", "acConductor",
@@ -598,9 +601,19 @@ export function intakeReplyEmail(input: {
   project: ProjectRecord; attached: boolean; link: string; missing: string[]; unsure: string[]; refused: EmailIntakeFile[];
   /** Every secret value to scrub (projectSecretValuesById plus the read's own secret fields). */
   secrets: string[];
+  /** ASKED IN THE FIRST REPLY (back-test 2026-11-24: every later client ask carried job value,
+   *  homeowner email and phone): the details the documents did not give, with the job's own
+   *  no-login form. Labels only, never a value. */
+  form?: { url: string; items: string[] };
 }): { subject: string; body: string; html: string } {
   const address = formatProjectAddress(input.project) || "your job";
   const sections: EmailSection[] = [];
+  if (input.form?.items.length && /^https?:\/\//i.test(input.form.url)) {
+    sections.push({
+      heading: "Please fill these in on one short form (no login needed)",
+      items: input.form.items.map((text, i, all) => (i === all.length - 1 ? { text, url: input.form!.url, linkLabel: "Open the form" } : text)),
+    });
+  }
   if (input.missing.length) sections.push({ heading: "Still needed — reply with these, or send them in a new email to the same address", items: input.missing });
   if (input.unsure.length) sections.push({ heading: "We will double-check these against your documents before anything is filed", items: input.unsure });
   if (input.refused.length) sections.push({ heading: "Files we could not use", items: input.refused.map((f) => `${f.name}: ${f.refused}`) });
@@ -640,8 +653,12 @@ const sendWithLayout: IntakeSender = (to, subject, body, html, headers) => sendE
 async function reply(db: AppDb, input: { project: ProjectRecord; orgId: string; to: string; subject: string; body: string; html: string; headers: IntakeReplyHeaders; draftOnly?: string }, opts: IntakeOptions): Promise<string> {
   let status: "sent" | "draft" | "failed" = "draft";
   let detail = input.draftOnly || autoReplyOff(input.project.clientId);
+  // NO DEAD LINK TO A CLIENT (clientLinkGuard.ts): the other dead bases, and a scan of the reply's links.
+  const linkRefusal = clientLinkRefusal({ body: input.body, html: input.html });
   if (detail) { /* stays a draft */ }
   else if (!String(process.env.PUBLIC_BASE_URL ?? "").trim()) detail = "PUBLIC_BASE_URL is not set, so the status link would point at this machine; nothing was sent.";
+  // NO DEAD LINK TO A CLIENT (clientLinkGuard.ts): the other dead bases, and a scan of the reply's links.
+  else if (linkRefusal) detail = linkRefusal;
   else if (!opts.send && !smtpConfigured()) detail = "SMTP is not configured (SMTP_HOST / SMTP_FROM are unset), so no send was attempted.";
   else {
     try { await (opts.send ?? sendWithLayout)(input.to, input.subject, input.body, input.html, input.headers); status = "sent"; }
@@ -676,6 +693,34 @@ const MISSING_DOCS: Array<[string, string]> = [["plan_set", "The plan set (PDF)"
 const IDENTITY_FIELDS: Array<[keyof ProjectRecord, string]> = [
   ["homeownerName", "Homeowner name"], ["utility", "Utility"], ["ahj", "Permitting jurisdiction (AHJ)"], ["systemSizeDcKw", "System size (DC kW)"],
 ];
+
+/**
+ * THE DETAILS ONLY THE CLIENT HAS, ASKED IN THE FIRST REPLY. Job value, homeowner email and phone
+ * are rarely on the documents, and the job's client form used to be sent only when the automatic
+ * chain stopped on the client — often days in (back-test 2026-11-24: all 8 later asks carried these
+ * three). So the first reply already links the job's own no-login form (intakeRequests — the same
+ * request the later ask reuses, so the client never gets two different links) with what it still
+ * lacks, plus any per-job portal question already known. Nothing is asked when nothing is missing,
+ * and the form link is only offered when PUBLIC_BASE_URL makes it reachable.
+ */
+async function firstReplyForm(db: AppDb, projectId: string): Promise<{ url: string; items: string[] } | null> {
+  const base = String(process.env.PUBLIC_BASE_URL ?? "").trim().replace(/\/+$/, "");
+  if (!base) return null;
+  try {
+    const fields = missingIntakeFields(db, projectId);
+    if (!fields.length) return null;
+    const req = await createIntakeRequest(db, projectId, { fields, createdBy: ACTOR, expiresInDays: FIRST_REPLY_FORM_DAYS });
+    const items = [
+      ...req.fields.map((f) => INTAKE_FIELD_LABELS[f]),
+      ...req.questions.map((q) => `Your answer to the portal's question: "${q.label}"`),
+    ];
+    return items.length ? { url: `${base}${req.path}`, items } : null;
+  } catch (err) {
+    logger.warn("email-intake", `first-reply form not offered for project ${projectId}: ${err instanceof Error ? err.message : String(err)}`);
+    return null;
+  }
+}
+const FIRST_REPLY_FORM_DAYS = 30;
 
 /** What the per-job pipeline did with one job's files. */
 export type IntakeJobPlacement =
@@ -868,9 +913,11 @@ async function processOne(db: AppDb, raw: Buffer, opts: IntakeOptions, result: E
     const readSecrets = Object.entries(extraction?.fields ?? {})
       .filter(([k, f]) => isPlannerSecretKey(k) && (typeof f?.value === "string" || typeof f?.value === "number"))
       .map(([, f]) => String(f.value));
+    const form = await firstReplyForm(db, projectId);
     const email = intakeReplyEmail({
       project, attached: Boolean(existingId), link: statusShareUrl(ensureStatusShareToken(db, projectId)),
       missing, unsure: unsure.map((k) => intakeFieldLabel(k)), refused, secrets: [...projectSecrets, ...readSecrets],
+      ...(form ? { form } : {}),
     });
     // THE WAY BACK (#540): a Reply goes to intake+<this client's tag>@… and names this project.
     const replyTo = intakeReplyToAddress(db, client.id);

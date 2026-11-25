@@ -37,6 +37,7 @@
 import type {
   CodeEdition,
   CodeReference,
+  FireAccessFacts,
   JurisdictionCriterionKey,
   JurisdictionDesignCriteria,
   ProjectRecord,
@@ -44,6 +45,7 @@ import type {
   ReviewerFindingEvidence,
   ReviewerVisionVerdict,
   RoofPlanDimensionKind,
+  StatedRoofPlanDimensionKind,
   RoofPlanRequiredDimension,
   StatedCodeBasisEntry,
   StatedDesignCriteria,
@@ -54,6 +56,11 @@ import type {
   UpcomingCodeEdition,
 } from "../../shared/src/types";
 import type { EffectiveCodeContext, PresentedCodeEdition } from "./codeProfiles";
+import { officialCitationFor } from "../../shared/src/officialSource";
+import { COVERAGE_LIMIT_PCT, COVERAGE_LIMIT_SPRINKLERED_PCT, describePolicy, policyCoversArray } from "../../shared/src/firePathwayPolicy";
+import { makeRuleBasis, weakestRuleBasis } from "../../shared/src/ruleBasis";
+import type { ReviewerRuleBasis } from "../../shared/src/types";
+import { notCheckedRecord, passRecord } from "./checkRecords";
 import { codeFamilyOf, editionsInEffect, type EditionsInEffect } from "./codeFamilies";
 
 export interface DesignTextSource {
@@ -1847,22 +1854,36 @@ export function extractAttachmentSpacings(text: string): StatedAttachmentSpacing
  *  tail of a feet value; group 3 marks an inch-only value. */
 // The units carry no leading \b, so "36in" and "3ft" (no space) read too.
 const ROOF_DIM_VALUE = /(?<![\d.])(\d+(?:\.\d+)?)\s*\)?\s*-?\s*(?:(?:'(?!')|’|ft\b\.?|feet\b|foot\b)(?:\s*-?\s*(\d+(?:\.\d+)?)\s*(?:"|”|in\b\.?|inch(?:es)?\b))?|(''|"|”|in\b\.?|inch(?:es)?\b))/gi;
-const ROOF_DIM_LABEL = /\b(?:(?<path>(?:fire\s+)?(?:access\s+)?path(?:way)?s?|walkways?|access\s+aisles?|fire\s+access)|(?<ridge>ridges?)|(?<other>eaves?|rakes?|hips?|valleys?|gutters?|edges?|(?:property|lot)\s+lines?))\b/gi;
+// A FIRE SETBACK that names no roof line ("36\" FIRE SETBACK", a roof-plan legend in most of the
+// operator's plan sets, measured 2026-11-23: 155 of 269 real sets) is its own kind: it says how far
+// the array stays back for firefighters but not from WHAT, so it is read, then used only the way
+// evaluateFirePathwayFindings allows. Text extraction splits the word ("FIRE SETBAC", "FIRE SETB K",
+// "FIR SETBACK"); those read too. "FIRE CLEARANCE" and "FIRE CODE SETBACK" are the same label.
+const ROOF_DIM_LABEL = /\b(?:(?<fire>fire?\s+(?:code\s+)?(?:set\s*-?\s*(?:backs?|bac|b\s?k)|clearances?))|(?<path>(?:fire\s+)?(?:access\s+)?path(?:way)?s?|walkways?|access\s+aisles?|fire\s+access)|(?<ridge>ridges?)|(?<other>eaves?|rakes?|hips?|valleys?|gutters?|edges?|(?:property|lot)\s+lines?))\b/gi;
 /** A clause ends at a sentence stop (not an abbreviation's or a decimal's dot), a list mark, a
  *  comma or a joining "and"/"&": "36\" FROM RIDGE AND 18\" CLEAR OF HIPS" is two clauses, and the
  *  18" is the hips' (read across the "and", the ridge label won and a compliant plan blocked). */
 const CLAUSE_BREAK = /(?<!\b(?:min|max|typ|approx|in|ft|no|o\.c|e\.g|i\.e))\.(?!\d)|[;,&•▪●■◦]|\band\b/i;
 /** The gap from a value to the label after it is only a preposition ("36\" FROM RIDGE", "18\" CLEAR
  *  OF HIPS"): the value is attached to that label, even with no break after a ridge label before it. */
-const ATTACHED_AFTER = /^\s*(?:(?:clear|setback|set\s+back|offset|min(?:imum)?\.?|max(?:imum)?\.?)\s+)?(?:from|of|to|at)\s+(?:the\s+)?$/i;
+const ATTACHED_AFTER = /^\s*(?:(?:fire?\s+(?:code\s+)?)?(?:clear(?:ance)?|setback|set\s+back|offset|min(?:imum)?\.?|max(?:imum)?\.?)\s+)?(?:from|of|to|at)\s+(?:the\s+)?$/i;
 /** "RIDGE VENT 12\"", "RIDGE HEIGHT": a ridge, but not a setback from it. */
 const RIDGE_NOT_SETBACK = /\b(?:vent|cap|height|board|beam|elev(?:ation)?)\b/i;
+/** The same words straight AFTER the ridge label: "2\" X 8\" RIDGE BEAM" is framing (measured on the
+ *  operator's plan sets, 2026-11-23: it read as an 8 in ridge setback in about one set in six). */
+const RIDGE_MEMBER_AFTER = /^\s*(?:vents?|caps?|heights?|boards?|beams?|elev(?:ation)?|straps?|blocking)\b/i;
+/** Words that make the text between a value and its label something else: attachment spacing
+ *  ("PATHWAY ROOF ATTACHMENTS SHALL BE SPACED ... 48 IN."), a drawing scale, framing. */
+const ROOF_DIM_FOREIGN_GAP = /\b(?:spac(?:ed|ing)|o\.\s?c\b|scale|attachments?|rafters?|truss(?:es)?|joists?)\b/i;
+/** A lumber or module size ("2\" X 8\"", "41\" X 68\""): its numbers are not roof-plan dimensions. */
+const CROSS_SECTION_BEFORE = /[x×]\s*$/i;
+const CROSS_SECTION_AFTER = /^\s*[x×]\s*\d/i;
 const ROOF_DIM_WINDOW = 60;
 
 /** One fire access dimension a text states: where, which, how many inches. */
 export interface ReadRoofPlanDimension {
   at: number;
-  kind: RoofPlanDimensionKind;
+  kind: StatedRoofPlanDimensionKind;
   inches: number;
   excerpt: string;
 }
@@ -1883,6 +1904,7 @@ export function readRoofPlanDimensions(text: string): ReadRoofPlanDimension[] {
   }
   for (const v of values) {
     if (v.inches < 6 || v.inches > 120) continue;
+    if (CROSS_SECTION_BEFORE.test(src.slice(Math.max(0, v.at - 4), v.at)) || CROSS_SECTION_AFTER.test(src.slice(v.end, v.end + 6))) continue;
     // The value's clause, at most ROOF_DIM_WINDOW characters either side.
     let from = Math.max(0, v.at - ROOF_DIM_WINDOW);
     const before = src.slice(from, v.at);
@@ -1892,7 +1914,7 @@ export function readRoofPlanDimensions(text: string): ReadRoofPlanDimension[] {
     let to = Math.min(src.length, v.end + ROOF_DIM_WINDOW);
     const after = src.slice(v.end, to).search(CLAUSE_BREAK);
     if (after >= 0) to = v.end + after;
-    let best: { kind: "path" | "ridge" | "other"; dist: number; start: number; end: number } | null = null;
+    let best: { kind: "fire" | "path" | "ridge" | "other"; dist: number; start: number; end: number } | null = null;
     for (const l of src.slice(from, to).matchAll(ROOF_DIM_LABEL)) {
       const start = from + (l.index ?? 0);
       const end = start + l[0].length;
@@ -1900,8 +1922,14 @@ export function readRoofPlanDimensions(text: string): ReadRoofPlanDimension[] {
       if (gap == null) continue;
       // Another dimension between them: the label is that one's.
       if (values.some((o) => o !== v && o.at >= Math.min(end, v.end) && o.end <= Math.max(start, v.at))) continue;
-      const kind = l.groups?.path ? "path" : l.groups?.ridge ? "ridge" : "other";
-      if (kind === "ridge" && RIDGE_NOT_SETBACK.test(gap)) continue;
+      const kind = l.groups?.fire ? "fire" : l.groups?.path ? "path" : l.groups?.ridge ? "ridge" : "other";
+      // "18\" FIRE SETBACK FROM RIDGE": the label names its roof line next; that line's label decides.
+      if (kind === "fire" && /^\s*(?:from|of|to|at)\s+(?:the\s+)?(?:ridges?|eaves?|rakes?|hips?|valleys?|gutters?|edges?|(?:property|lot)\s+lines?)\b/i.test(src.slice(end, end + 40))) continue;
+      if (kind === "ridge" && (RIDGE_NOT_SETBACK.test(gap) || RIDGE_MEMBER_AFTER.test(src.slice(end, end + 20)))) continue;
+      if (ROOF_DIM_FOREIGN_GAP.test(gap)) continue;
+      // A legend entry ("12\" ROOF OVERHANG = FIRE PATHWAY"): what stands before "=" is the symbol's
+      // name, and the value is not the label's.
+      if (end > v.at && gap.includes("=")) continue;
       // "RIDGE SETBACK: 18\"" assigns; "18\" CLEAR OF HIPS" attaches to the label after it;
       // otherwise a label AFTER the value wins a tie (callouts print "36\" FIRE ACCESS PATHWAY").
       const dist = end <= v.at ? (/^\s*[:=]/.test(gap) ? -1 : gap.length + 0.5) : ATTACHED_AFTER.test(gap) ? -0.5 : gap.length;
@@ -1910,7 +1938,7 @@ export function readRoofPlanDimensions(text: string): ReadRoofPlanDimension[] {
     if (!best || best.kind === "other") continue;
     out.push({
       at: v.at,
-      kind: best.kind === "path" ? "pathwayWidth" : "ridgeSetback",
+      kind: best.kind === "fire" ? "fireSetback" : best.kind === "path" ? "pathwayWidth" : "ridgeSetback",
       inches: Math.round(v.inches * 100) / 100,
       excerpt: src.slice(Math.min(best.start, v.at), Math.max(best.end, v.end)).slice(0, 120),
     });
@@ -1950,21 +1978,45 @@ function fireCodeEditionYear(ctx: EffectiveCodeContext): number | null {
 }
 
 /**
- * WHAT THE ROOF PLAN MUST SHOW, per dimension: the jurisdiction's own number where one of its
- * fireSetbacks rules states it (the strictest, when several do), else the model-code default for
- * the adopted edition: 36 in pathways (IRC R324.6.1); a ridge setback of 18 in from the 2015 IRC
- * on (R324.6.2, mirroring IFC 2015 605.11.3.2.3: 18 in where the array covers no more than 33% of
- * the roof, 36 in above; coverage is not read here, so 18 in is the floor and the message names the
- * 36 in case), and 36 in before it (the 36-in-only text is the 2012 IFC's). Model-code lines never
- * block, so the floor can only under-warn, never stop a compliant plan.
+ * WHAT THE ROOF PLAN MUST SHOW, per dimension:
+ *   1. the jurisdiction's APPLIED alternative pathway policy (review-audit draft 08, fireAccess.ts:
+ *      person-verified with its page, or official #683), where it covers this array (its area ceiling)
+ *      and states that dimension — or, for pathways, where the roof coverage is at or below its
+ *      exemption (then no pathway width is required);
+ *   2. else the jurisdiction's own number where one of its fireSetbacks rules states it (the
+ *      strictest, when several do);
+ *   3. else the model-code default for the adopted edition: 36 in pathways (IRC R324.6.1); a ridge
+ *      setback from the 2015 IRC on (R324.6.2, mirroring IFC 2015 605.11.3.2.3) of 18 in where the
+ *      array covers no more than 33% of the plan-view roof (66% where the dwelling is stated to be
+ *      sprinklered) and 36 in above — and 36 in when the coverage is NOT STATED (the strictest
+ *      default, said in the source); 36 in before 2015 (the 2012 IFC's text).
+ * `facts` are the job's (fireAccess.readFireAccessFacts); without them coverage is unknown. Model-code
+ * lines never block, so the strict default can only warn, never stop a compliant plan.
  */
-export function requiredRoofPlanDimensions(ctx: EffectiveCodeContext): RoofPlanRequiredDimension[] {
+export function requiredRoofPlanDimensions(ctx: EffectiveCodeContext, facts: FireAccessFacts | null = null): RoofPlanRequiredDimension[] {
   const who = ctx.ahj || ctx.state || "the jurisdiction";
   const prov = fieldProvenance(ctx, "fireSetbacks");
   const year = fireCodeEditionYear(ctx);
   const edition = year != null ? `IRC ${year}` : "IRC (adopted edition not on file; 2015 or later assumed)";
+  const coverage = facts?.coverage ?? null;
+  const policyOnFile = facts?.policy?.applied ? facts.policy : null;
+  const policy = policyOnFile && policyCoversArray(policyOnFile.policy, facts?.arrayAreaSqFt ?? null) ? policyOnFile : null;
+  // An applied policy whose area ceiling this array is over (or whose area is not stated): said, not used.
+  const policyNote = policyOnFile && !policy
+    ? `; ${policyOnFile.provenance} covers arrays up to ${policyOnFile.policy.arrayAreaMaxSqFt} sq ft, and ${facts?.arrayAreaSqFt != null ? `this array is ${facts.arrayAreaSqFt} sq ft` : "the array's area is not stated"}`
+    : "";
   const out: RoofPlanRequiredDimension[] = [];
   for (const kind of ["pathwayWidth", "ridgeSetback"] as const) {
+    if (policy) {
+      const p = policy.policy;
+      if (kind === "pathwayWidth" && p.pathwaysExemptMaxCoveragePct !== undefined && coverage && coverage.pct <= p.pathwaysExemptMaxCoveragePct) continue;
+      const inches = kind === "pathwayWidth" ? p.pathwayWidthIn : p.ridgeSetbackIn;
+      if (inches !== undefined) {
+        // A policy may back a blocker only with its own words on file (Helm's #637 bar).
+        out.push({ kind, inches, basis: "ahj", verified: Boolean(p.quote), fromPolicy: true, source: `${policy.provenance}: ${describePolicy(p)}` });
+        continue;
+      }
+    }
     let best: { inches: number; description: string } | null = null;
     for (const rule of ctx.fireSetbacks ?? []) {
       for (const d of readRoofPlanDimensions(rule.description)) {
@@ -1974,14 +2026,33 @@ export function requiredRoofPlanDimensions(ctx: EffectiveCodeContext): RoofPlanR
     if (best) {
       out.push({ kind, inches: best.inches, basis: "ahj", verified: prov.verified, source: `${who}'s rule "${flat(best.description).slice(0, 160)}" (${prov.text})` });
     } else if (kind === "pathwayWidth") {
-      out.push({ kind, inches: 36, basis: "model_code", verified: false, source: `${edition} R324.6.1 model-code default; no ${who} pathway width on file` });
+      out.push({ kind, inches: 36, basis: "model_code", verified: false, source: `${edition} R324.6.1 model-code default; no ${who} pathway width on file${policyNote}` });
     } else if (year != null && year < 2015) {
-      out.push({ kind, inches: 36, basis: "model_code", verified: false, source: `${edition} model-code default (3 ft from the ridge, IFC 2012); no ${who} ridge setback on file` });
+      out.push({ kind, inches: 36, basis: "model_code", verified: false, source: `${edition} model-code default (3 ft from the ridge, IFC 2012); no ${who} ridge setback on file${policyNote}` });
     } else {
-      out.push({ kind, inches: 18, basis: "model_code", verified: false, source: `${edition} R324.6.2 / IFC 605.11.3.2.3 model-code default (18 in each side of a horizontal ridge where the array covers no more than 33% of the roof; 36 in where it covers more, which is not read here); no ${who} ridge setback on file` });
+      const limit = facts?.sprinklered ? COVERAGE_LIMIT_SPRINKLERED_PCT : COVERAGE_LIMIT_PCT;
+      const rule = `${edition} R324.6.2 / IFC 605.11.3.2.3 model-code default (18 in each side of a horizontal ridge where the array covers no more than 33% of the roof, 66% on a sprinklered dwelling; 36 in where it covers more)`;
+      const sprinkler = facts?.sprinklered ? `; the dwelling is stated to be sprinklered ("${facts.sprinklered.excerpt}", ${facts.sprinklered.source})` : "";
+      if (!coverage) {
+        out.push({ kind, inches: 36, basis: "model_code", verified: false, source: `${rule}: roof coverage not stated on the plan, so the stricter 36 in applies${sprinkler}; no ${who} ridge setback on file${policyNote}` });
+      } else {
+        const covers = `the array covers ${coverage.pct}% of the roof (${coverage.basis === "stated" ? "stated" : "array area / roof area"}: "${coverage.excerpt}", ${coverage.source})`;
+        out.push({ kind, inches: coverage.pct <= limit ? 18 : 36, basis: "model_code", verified: false, source: `${rule}: ${covers}${coverage.pct <= limit ? `, no more than ${limit}%` : `, more than ${limit}%`}${sprinkler}; no ${who} ridge setback on file${policyNote}` });
+      }
     }
   }
   return out;
+}
+
+/** The rule basis of one roof-plan requirement: the jurisdiction's fireSetbacks row (its tier), or
+ *  the adopted edition's model-code default (review-audit draft 07). */
+function roofPlanRuleBasis(ctx: EffectiveCodeContext, req: RoofPlanRequiredDimension): ReviewerRuleBasis {
+  if (req.basis === "model_code") {
+    const year = fireCodeEditionYear(ctx);
+    return makeRuleBasis("model_code", `IRC${year != null ? ` ${year}` : ""} R324.6 default`, roofPlanRef(ctx).sourceUrl);
+  }
+  // The AHJ's applied alternative pathway policy (draft 08) answers with its own tier.
+  return fieldRuleBasis(ctx, req.fromPolicy ? "firePathwayPolicy" : "fireSetbacks");
 }
 
 export const FIRE_PATHWAY_BELOW_ID = "city.fire.pathway-below-required";
@@ -1993,7 +2064,7 @@ const ROOF_DIM_NAME: Record<RoofPlanDimensionKind, string> = {
 
 interface RoofPlanBelowLine {
   req: RoofPlanRequiredDimension;
-  values: Array<{ inches: number; source: string; excerpt: string; derived: boolean }>;
+  values: Array<{ inches: number; source: string; excerpt: string; derived: boolean; kind?: StatedRoofPlanDimensionKind }>;
 }
 
 /**
@@ -2002,8 +2073,8 @@ interface RoofPlanBelowLine {
  * other short dimension (a model-code default, a seeded rule, a parser summary, a number vision
  * read off the sheet image) is a WARNING that says which of those it lacks.
  */
-function roofPlanBelowFinding(lines: RoofPlanBelowLine[], codeReferences: CodeReference[], vision: ReviewerVisionVerdict | null): ReviewerFinding {
-  const blocks = !vision && lines.some((l) => l.req.basis === "ahj" && l.req.verified && l.values.some((v) => !v.derived));
+function roofPlanBelowFinding(lines: RoofPlanBelowLine[], codeReferences: CodeReference[], vision: ReviewerVisionVerdict | null, ruleBasis: ReviewerRuleBasis | null = null): ReviewerFinding {
+  const blocks = !vision && lines.some((l) => l.req.basis === "ahj" && l.req.verified && l.values.some((v) => !v.derived && v.kind !== "fireSetback"));
   const text = lines.map((l) => {
     const stated = [...new Set(l.values.map((v) => `${v.inches} in (${v.source})`))].join(", ");
     const why = blocks ? [] : [
@@ -2011,11 +2082,13 @@ function roofPlanBelowFinding(lines: RoofPlanBelowLine[], codeReferences: CodeRe
       l.req.basis === "model_code" ? "the requirement is the model-code default, not a rule on file for this jurisdiction" : "",
       l.req.basis === "ahj" && !l.req.verified ? "the jurisdiction's rule is not human-verified" : "",
       !vision && l.values.every((v) => v.derived) ? "only the parser's reading states it" : "",
+      !vision && l.values.some((v) => v.kind === "fireSetback") && l.values.every((v) => v.derived || v.kind === "fireSetback") ? `the plan's "FIRE SETBACK" label names no roof line${l.req.kind === "pathwayWidth" ? ", so its largest is read as the pathway" : ""}` : "",
     ].filter(Boolean);
     return `${ROOF_DIM_NAME[l.req.kind]}: stated ${stated}; requires at least ${l.req.inches} in — ${l.req.source}${why.length ? ` (a warning: ${why.join("; ")})` : ""}`;
   });
   const asks = lines.map((l) => l.req.kind === "pathwayWidth" ? `fire access pathways at least ${l.req.inches} in wide` : `the array at least ${l.req.inches} in from the ridge`);
   return {
+    ...(ruleBasis ? { ruleBasis } : {}),
     id: FIRE_PATHWAY_BELOW_ID,
     severity: blocks ? "blocker" : "warning",
     category: "plan_set",
@@ -2046,6 +2119,35 @@ function roofPlanRef(ctx: EffectiveCodeContext): CodeReference {
 }
 
 /**
+ * WHICH OF THE PLAN'S READINGS ANSWER ONE REQUIREMENT.
+ *   · Readings of the requirement's own kind (a pathway, a ridge setback): as always — any below it
+ *     is short, else they meet it.
+ *   · None of its kind: the plan's unqualified "FIRE SETBACK" readings (fireSetback) answer it, read
+ *     the way a reviewer reads a legend that names no roof line. A pathway is the LARGEST of them
+ *     (a legend of 36" and 12" draws its pathways at 36"). A ridge setback is met only when every one
+ *     of them meets it, short only when even the largest is short; otherwise which one is the ridge's
+ *     is not said, and the requirement stays unmeasured with that reason.
+ * An unqualified reading is never a document's statement OF THAT DIMENSION, so it never blocks
+ * (roofPlanBelowFinding treats it like a derived reading).
+ */
+export function resolveRoofPlanReadings(req: RoofPlanRequiredDimension, stated: StatedRoofPlanDimension[]): { below: StatedRoofPlanDimension[]; met: StatedRoofPlanDimension[]; unresolved: string } {
+  const own = stated.filter((s) => s.kind === req.kind);
+  if (own.length) {
+    const below = own.filter((s) => s.inches < req.inches);
+    return { below, met: below.length ? [] : own, unresolved: "" };
+  }
+  const fire = stated.filter((s) => s.kind === "fireSetback");
+  if (!fire.length) return { below: [], met: [], unresolved: "" };
+  const largest = Math.max(...fire.map((s) => s.inches));
+  const atLargest = fire.filter((s) => s.inches === largest);
+  if (req.kind === "pathwayWidth") return largest >= req.inches ? { below: [], met: atLargest, unresolved: "" } : { below: atLargest, met: [], unresolved: "" };
+  if (fire.every((s) => s.inches >= req.inches)) return { below: [], met: fire, unresolved: "" };
+  if (largest < req.inches) return { below: atLargest, met: [], unresolved: "" };
+  const sizes = [...new Set(fire.map((s) => s.inches))].sort((a, b) => b - a).map((n) => `${n} in`).join(" and ");
+  return { below: [], met: [], unresolved: `the plan labels ${sizes} "FIRE SETBACK" without naming the roof line, so which is the ridge setback is not said` };
+}
+
+/**
  * The measured fire access rule and its honest fallback, for a roof-mounted array:
  *   city.fire.pathway-below-required  a stated dimension below what the plan must show
  *   city.fire.pathway-unmeasured      no dimension readable from the text: a callout carrying the
@@ -2057,11 +2159,11 @@ function roofPlanRef(ctx: EffectiveCodeContext): CodeReference {
 export function evaluateFirePathwayFindings(
   project: ProjectRecord,
   ctx: EffectiveCodeContext,
-  opts: { roofMounted: boolean; extraTexts?: DesignTextSource[] },
+  opts: { roofMounted: boolean; extraTexts?: DesignTextSource[]; facts?: FireAccessFacts | null; roofPlanReadings?: StatedRoofPlanDimension[] },
 ): { findings: ReviewerFinding[]; measured: boolean } {
   if (!opts.roofMounted) return { findings: [], measured: false };
-  const stated = extractRoofPlanDimensions(project, opts.extraTexts ?? []);
-  const required = requiredRoofPlanDimensions(ctx);
+  const stated = opts.roofPlanReadings ?? extractRoofPlanDimensions(project, opts.extraTexts ?? []);
+  const required = requiredRoofPlanDimensions(ctx, opts.facts ?? null);
   const codeReferences = [roofPlanRef(ctx)];
   if (!stated.length) {
     const who = ctx.ahj || ctx.state || "the jurisdiction";
@@ -2080,6 +2182,7 @@ export function evaluateFirePathwayFindings(
     return {
       measured: false,
       findings: [{
+        ...(() => { const b = weakestRuleBasis(required.map((r) => roofPlanRuleBasis(ctx, r))); return b ? { ruleBasis: b } : {}; })(),
         id: FIRE_PATHWAY_UNMEASURED_ID,
         severity: "callout",
         category: "plan_set",
@@ -2087,7 +2190,7 @@ export function evaluateFirePathwayFindings(
         message: `No fire access pathway width or ridge setback could be read from the package text, so neither has been measured against ${wants.join("; ")}.`
           + (quote ? ` The plan says: "${quote.excerpt}" (${quote.source}).` : " The package text does not mention fire access pathways at all."),
         cityFeedback: `Dimension the fire access pathways and the ridge setback on the roof plan; ${who} reviews them against ${required.map((r) => `${r.inches} in`).join(" / ")}.`,
-        designTeamAction: `Confirm the roof plan dimensions each fire access pathway (at least ${required.find((r) => r.kind === "pathwayWidth")?.inches} in) and the ridge setback (at least ${required.find((r) => r.kind === "ridgeSetback")?.inches} in).`,
+        designTeamAction: `Confirm the roof plan dimensions ${required.map((r) => r.kind === "pathwayWidth" ? `each fire access pathway (at least ${r.inches} in)` : `the ridge setback (at least ${r.inches} in)`).join(" and ")}.`,
         evidenceNeeded: ["Dimensioned fire access pathways on the roof plan", "Dimensioned ridge setback on the roof plan"],
         codeReferences,
         installerCallout: false,
@@ -2099,12 +2202,42 @@ export function evaluateFirePathwayFindings(
       }],
     };
   }
+  // Each requirement is answered by the plan's readings OF ITS KIND; only where the plan states none
+  // does an unqualified "FIRE SETBACK" answer it (resolveRoofPlanReadings), and it never blocks.
   const lines: RoofPlanBelowLine[] = [];
+  const meets: Array<{ req: RoofPlanRequiredDimension; values: StatedRoofPlanDimension[] }> = [];
+  const absent: Array<{ req: RoofPlanRequiredDimension; why: string }> = [];
   for (const req of required) {
-    const values = stated.filter((s) => s.kind === req.kind && s.inches < req.inches);
-    if (values.length) lines.push({ req, values });
+    const r = resolveRoofPlanReadings(req, stated);
+    if (r.below.length) lines.push({ req, values: r.below });
+    else if (r.met.length) meets.push({ req, values: r.met });
+    else absent.push({ req, why: r.unresolved });
   }
-  return { measured: true, findings: lines.length ? [roofPlanBelowFinding(lines, codeReferences, null)] : [] };
+  if (!lines.length && !meets.length) {
+    // Something was read, but it answers no requirement (only an ambiguous "FIRE SETBACK"): the
+    // honest state is still "not measured", so the vision pass can make its measurement.
+    const unmeasured = evaluateFirePathwayFindings(project, ctx, { ...opts, roofPlanReadings: [] });
+    const note = absent.map((a) => a.why).filter(Boolean)[0];
+    return { measured: false, findings: unmeasured.findings.map((f) => note && f.id === FIRE_PATHWAY_UNMEASURED_ID ? { ...f, message: `${f.message} ${note}` } : f) };
+  }
+  // CHECK RECORDS (review-audit draft 07): each required dimension the plan states and meets, and
+  // each it does not state at all (the other one was read, so the unmeasured callout is not raised).
+  const records: ReviewerFinding[] = [];
+  const check = { ruleId: FIRE_PATHWAY_BELOW_ID, category: "plan_set" as const, codeReferences };
+  if (meets.length) {
+    records.push(passRecord({
+      ...check, title: "Fire access pathway / ridge setback dimensions", ruleBasis: weakestRuleBasis(meets.map((m) => roofPlanRuleBasis(ctx, m.req))),
+      arithmetic: `${meets.map((m) => `${ROOF_DIM_NAME[m.req.kind]}: stated ${[...new Set(m.values.map((s) => `${s.inches} in (${s.source}${s.kind === "fireSetback" ? `, labelled "${s.excerpt}", no roof line named` : ""})`))].join(", ")} >= ${m.req.inches} in — ${m.req.source}`).join(". ")}.`,
+    }));
+  }
+  if (absent.length) {
+    records.push(notCheckedRecord({
+      ...check, title: "Fire access pathway / ridge setback dimensions", ruleBasis: weakestRuleBasis(absent.map((a) => roofPlanRuleBasis(ctx, a.req))),
+      inputs: absent.map((a) => `the ${ROOF_DIM_NAME[a.req.kind].toLowerCase()} (at least ${a.req.inches} in)${a.why ? ` — ${a.why}` : ""}`),
+    }));
+  }
+  const belowBasis = weakestRuleBasis(lines.map((l) => roofPlanRuleBasis(ctx, l.req)));
+  return { measured: true, findings: [...(lines.length ? [roofPlanBelowFinding(lines, codeReferences, null, belowBasis)] : []), ...records] };
 }
 
 /**
@@ -2126,7 +2259,7 @@ export function applyRoofPlanMeasurement(finding: ReviewerFinding, verdict: Revi
     }
   }
   if (!lines.length) return out;
-  return { ...roofPlanBelowFinding(lines, finding.codeReferences, verdict), visionVerification: verdict };
+  return { ...roofPlanBelowFinding(lines, finding.codeReferences, verdict, finding.ruleBasis ?? null), visionVerification: verdict };
 }
 
 /**
@@ -2524,6 +2657,18 @@ function graceWindowFor(ctx: EffectiveCodeContext, asOf: string | undefined): (s
   };
 }
 
+/** A plan edition NEWER than every edition the profile records for the compared code (#597; owner,
+ *  2026-11-07). Years only: an edition that is not a plain four-digit year, on either side, answers
+ *  false, so the line keeps its old answer (a blocker on a verified profile) instead of failing open.
+ *  Newer than one recorded row but not another (a state row and a city's own) is not newer. */
+function newerThanEvery(planEdition: string, profileEditions: string[]): boolean {
+  const year = (e: string): number | null => (/^\s*(19|20)\d{2}\s*$/.test(String(e ?? "")) ? Number(String(e).trim()) : null);
+  const plan = year(planEdition);
+  if (plan === null || !profileEditions.length) return false;
+  const recorded = profileEditions.map(year);
+  return recorded.every((y) => y !== null && plan > y);
+}
+
 /**
  * NO EDITIONS ON FILE — the plan's code basis next to the lookup state. A callout, never more:
  * the model-code defaults are placeholders (the "current cycle" says nothing about what this AHJ
@@ -2551,6 +2696,7 @@ function codeBasisUnverified(ctx: EffectiveCodeContext, basis: StatedCodeBasisEn
     .filter((b) => defaults.has(normCodeToken(b.code)) && defaults.get(normCodeToken(b.code)) !== b.edition)
     .map((b) => `${b.code} ${b.edition} (current model edition ${defaults.get(normCodeToken(b.code))})`))];
   return {
+    ruleBasis: fieldRuleBasis(ctx, "adoptedCodes"),
     id: "city.code.basis-unverified",
     severity: "callout",
     category: "plan_set",
@@ -2784,7 +2930,13 @@ function profileCodeEntry(a: { code: string; edition: string; title?: string; no
  *  field (JurisdictionCodeProfile.fieldSources); a single row answers for all its fields. */
 function fieldProvenance(ctx: EffectiveCodeContext, field: string): { verified: boolean; text: string; owner: string } {
   const src = ctx.profile?.fieldSources?.[field];
-  const verified = src ? src.confidence === "verified" : ctx.verified;
+  // OFFICIAL (#683): the value was read on the authority's own official page (a government host, or
+  // a domain a person verified as its own) and its quote is in the bytes read. It is USED as a
+  // confirmed value (a blocker may rest on it, under the #637 bar: it carries a verbatim citation),
+  // and worded "from <host>" — never "human-verified". A single row answers from its own citations.
+  const official = src ? (src.confidence === "official" ? src.officialSource ?? null : null)
+    : !ctx.verified && ctx.profile ? officialCitationFor(ctx.profile.citations, field) : null;
+  const verified = src ? src.confidence === "verified" || !!official : ctx.verified || !!official;
   const ahj = src ? src.ahj : ctx.profile?.ahj ?? "";
   const state = (src?.state || ctx.profile?.state || ctx.state || "").toUpperCase();
   const verifiedBy = src ? src.verifiedBy : ctx.profile?.verifiedBy;
@@ -2792,9 +2944,30 @@ function fieldProvenance(ctx: EffectiveCodeContext, field: string): { verified: 
   const who = ahj ? `${ahj} (${state})` : `${state || "state"} state-level`;
   // Whose minimum it is, in a sentence: the state's, unless the AHJ's own row carries it.
   const owner = ahj || state || "the state";
+  if (official) return { verified, owner, text: `${who} code profile (from ${official.host}, the jurisdiction's own official page, read ${official.fetchedAt.slice(0, 10)}: ${official.sourceUrl})` };
   if (!verified) return { verified, owner, text: `${who} code profile (seeded — researched/imported, not yet human-verified)` };
   if (verifiedBy === "reference-seed") return { verified, owner, text: `${who} code profile (verified via the shipped reference seed, not by an operator here)` };
   return { verified, owner, text: `${who} code profile (human-verified${verifiedBy ? ` by ${verifiedBy}` : ""}${verifiedAt ? ` on ${verifiedAt.slice(0, 10)}` : ""})` };
+}
+
+/** THE RULE BASIS OF ONE PROFILE FIELD (review-audit draft 07): the same answer fieldProvenance gives
+ *  in a sentence, as { tier, source, sourceUrl } in #683's words (shared/src/ruleBasis). Official is
+ *  "from <host>", never person-verified; a row a person verified names the person. */
+export function fieldRuleBasis(ctx: EffectiveCodeContext, field: string): ReviewerRuleBasis {
+  const src = ctx.profile?.fieldSources?.[field];
+  const official = src ? (src.confidence === "official" ? src.officialSource ?? null : null)
+    : !ctx.verified && ctx.profile ? officialCitationFor(ctx.profile.citations, field) : null;
+  const ahj = src ? src.ahj : ctx.profile?.ahj ?? "";
+  const state = (src?.state || ctx.profile?.state || ctx.state || "").toUpperCase();
+  const source = `${ahj ? `${ahj} (${state})` : `${state || "state"} state-level`} code profile`;
+  if (official) return makeRuleBasis("official", source, official.sourceUrl);
+  const verified = src ? src.confidence === "verified" : ctx.verified;
+  const cited = ctx.profile?.citations?.find((c) => c.field === field && c.sourceUrl)?.sourceUrl
+    || (field.startsWith("designCriteria.") ? ctx.designCriteria?.sourceUrl : "")
+    || (field === "firePathwayPolicy" ? ctx.profile?.firePathwayPolicy?.sourceUrl : "") || "";
+  return verified
+    ? makeRuleBasis("verified", source, cited, (src ? src.verifiedBy : ctx.profile?.verifiedBy) || undefined)
+    : makeRuleBasis("seeded", source, cited);
 }
 
 /** The minimum ground snow load that applies to this project's path, and which profile field holds
@@ -2863,6 +3036,26 @@ function ambiguousPgNote(reading: Extract<GroundSnowReading, { status: "ambiguou
   return `The package's ground snow load ${what} (${describeGroundReadings(reading)}), so the ground snow load is a warning here, not a blocker: confirm which value is the design Pg on the plan set and in the engineer's letter/calculations.`;
 }
 
+/** THE STATE-MINIMUM CHECK'S RECORD (draft 07): passed (every stated Pg at or above the minimum for
+ *  the path) or not checked (the package states no Pg). Null when no minimum is on file for the path
+ *  (nothing to check against) or when the violation fires. Display only. */
+function groundSnowMinimumRecord(stated: StatedReading, ctx: EffectiveCodeContext, path: "prescriptive" | "engineered" | ""): ReviewerFinding | null {
+  const applies = groundSnowMinimumFor(ctx, path);
+  if (!applies) return null;
+  const { required, field } = applies;
+  const pg = stated.criteria.filter((c) => c.criterion === "groundSnowPsf" && c.qualifier === "ground" && typeof c.value === "number");
+  const check = {
+    ruleId: "city.struct.ground-snow-below-state-minimum", category: "structural" as const,
+    title: "Ground snow load against the state's minimum", ruleBasis: fieldRuleBasis(ctx, field),
+    codeReferences: [ref(ctx, "R301.2.3", "Snow loads", `Minimum ground snow load ${required} psf.`)],
+  };
+  if (!pg.length) return notCheckedRecord({ ...check, inputs: ["the design ground snow load (Pg)"] });
+  if (pg.some((c) => (c.value as number) < required)) return null;
+  const values = [...new Set(pg.map((c) => c.value as number))].sort((a, b) => a - b);
+  const citation = String(ctx.prescriptive?.minGroundSnowCitation || "").trim();
+  return passRecord({ ...check, arithmetic: `Ground snow load Pg: stated ${values.map((v) => `${v} psf`).join(", ")} >= the ${fieldProvenance(ctx, field).owner} minimum of ${required} psf${path ? ` for ${path === "prescriptive" ? "prescriptive" : "non-prescriptive"} design` : " (the stricter minimum: the permit path is unknown)"}${citation ? ` (${citation})` : ""}.` });
+}
+
 function groundSnowMinimumFinding(
   stated: StatedReading,
   ctx: EffectiveCodeContext,
@@ -2905,6 +3098,7 @@ function groundSnowMinimumFinding(
     ambiguous ? ambiguousPgNote(ambiguous) : "",
   ].filter(Boolean).join(" ");
   return {
+    ruleBasis: fieldRuleBasis(ctx, field),
     id: "city.struct.ground-snow-below-state-minimum",
     // A BLOCKER only on an UNAMBIGUOUS reading (readGroundSnow): the minimum never fires from a
     // number the extractor itself was unsure of, nor from one the package contradicts elsewhere.
@@ -2991,6 +3185,9 @@ export function evaluateDesignCriteriaFindings(
   const sources = readSources(project, opts.extraTexts ?? []);
   const stated = extractFromSources(project, sources);
   const out: ReviewerFinding[] = [];
+  // CHECK RECORDS (review-audit draft 07, checkRecords.ts): the comparisons that ran clean and the
+  // criteria the package does not state, appended after the findings. Display only.
+  const records: ReviewerFinding[] = [];
   // ONE DOCUMENT, NOT TWO: a text wholly contained in another (a sheet re-uploaded on its own,
   // a page copied into a combined PDF) is the same pages, not a second document agreeing or
   // disagreeing with the first.
@@ -3098,6 +3295,19 @@ export function evaluateDesignCriteriaFindings(
     : null;
   const below: StatedDesignCriterion[] = [];
   const belowLines: string[] = [];
+  // DRAFT 07: what each comparison found when it did NOT fire — the stated values that meet the
+  // jurisdiction's (a pass line) or the criterion the package does not state (not checked).
+  const meetLines: string[] = [];
+  const meetFields: string[] = [];
+  const notStated: string[] = [];
+  const notStatedFields: string[] = [];
+  const track = (field: string, label: string, unit: string, required: string, same: (c: StatedDesignCriterion) => boolean, isBelow: (c: StatedDesignCriterion) => boolean): void => {
+    const all = stated.criteria.filter(same);
+    if (!all.length) { notStated.push(label.toLowerCase()); notStatedFields.push(`designCriteria.${field}`); return; }
+    if (all.some(isBelow)) return;
+    meetFields.push(`designCriteria.${field}`);
+    meetLines.push(`${label}: stated ${[...new Set(all.map((c) => `${c.value}${unit}`))].join(", ")} — ${who} requires ${required}`);
+  };
   // The profile field behind each line: its severity is THAT field's row's (fieldProvenance).
   const belowFields: string[] = [];
   const collect = (field: string, label: string, unit: string, required: string, pick: (c: StatedDesignCriterion) => boolean): void => {
@@ -3114,9 +3324,11 @@ export function evaluateDesignCriteriaFindings(
     belowLines.push(`${label}: stated ${describeValues([...byValue.values()], unit)} — ${who} requires ${required}`);
   };
   if (ahjWind != null) {
+    track("windSpeedMph", "Wind speed", " mph", `${ahjWind} mph (ultimate)`, (c) => c.criterion === "windSpeedMph" && c.qualifier !== "nominal" && typeof c.value === "number", (c) => (c.value as number) < ahjWind);
     collect("windSpeedMph", "Wind speed", " mph", `${ahjWind} mph (ultimate)`, (c) => c.criterion === "windSpeedMph" && c.qualifier !== "nominal" && typeof c.value === "number" && c.value < ahjWind);
   }
   if (ahjExposure) {
+    track("windExposure", "Wind exposure", "", `Exposure ${ahjExposure}`, (c) => c.criterion === "windExposure", (c) => (EXPOSURE_RANK[String(c.value)] ?? 99) < EXPOSURE_RANK[ahjExposure]);
     collect("windExposure", "Wind exposure", "", `Exposure ${ahjExposure}`, (c) => c.criterion === "windExposure" && (EXPOSURE_RANK[String(c.value)] ?? 99) < EXPOSURE_RANK[ahjExposure]);
   }
   // The wind lines can block; the ground snow line blocks only on an UNAMBIGUOUS reading
@@ -3124,6 +3336,7 @@ export function evaluateDesignCriteriaFindings(
   const linesBeforeSnow = belowLines.length;
   let snowAmbiguous = false;
   if (ahjSnow != null) {
+    track("groundSnowLoadPsf", "Ground snow load", " psf", `${ahjSnow} psf`, (c) => c.criterion === "groundSnowPsf" && c.qualifier === "ground" && typeof c.value === "number", (c) => (c.value as number) < ahjSnow);
     collect("groundSnowLoadPsf", "Ground snow load", " psf", `${ahjSnow} psf`, (c) => c.criterion === "groundSnowPsf" && c.qualifier === "ground" && typeof c.value === "number" && c.value < ahjSnow);
     const reading = belowLines.length > linesBeforeSnow ? readGroundSnow(stated) : null;
     if (reading?.status === "ambiguous") {
@@ -3161,6 +3374,7 @@ export function evaluateDesignCriteriaFindings(
     arithmetic?: (hits: StatedDesignCriterion[]) => string,
   ): void => {
     const before = belowLines.length;
+    track(field, label, unit, required, same, isBelow);
     collect(field, label, unit, required, (c) => same(c) && isBelow(c));
     if (belowLines.length === before) return;
     const hits = stated.criteria.filter((c) => same(c) && isBelow(c));
@@ -3213,11 +3427,24 @@ export function evaluateDesignCriteriaFindings(
       (c) => (c.value as number) < ahjRoofSnow,
       (hits) => [...new Set(hits.map((c) => c.value as number))].sort((a, b) => a - b).map((v) => `${v} psf < ${ahjRoofSnow} psf`).join("; "));
   }
-  const belowProvenance = ctx.profile?.fieldSources
-    ? [...new Set(belowFields.map((f) => fieldProvenance(ctx, f).text))].join(" / ")
+  // Per field on a layered read, and for a single row's OFFICIAL field (#683: "from <host>").
+  const officialOnRow = (f: string): boolean => !ctx.verified && !!ctx.profile && !!officialCitationFor(ctx.profile.citations, f);
+  const belowProvenance = ctx.profile?.fieldSources || belowFields.some(officialOnRow)
+    ? [...new Set(belowFields.map((f) => (ctx.profile?.fieldSources || officialOnRow(f) ? fieldProvenance(ctx, f).text : provenance(ctx))))].join(" / ")
     : provenance(ctx);
+  const belowCheck = {
+    ruleId: "city.struct.design-criteria-below-ahj", category: "structural" as const, title: "Design criteria against the jurisdiction's",
+    codeReferences: [ref(ctx, "Table R301.2", "Climatic and geographic design criteria (established by the jurisdiction)", "The jurisdiction sets wind speed, exposure and ground snow load.")],
+  };
+  if (meetLines.length) {
+    records.push(passRecord({ ...belowCheck, ruleBasis: weakestRuleBasis(meetFields.map((f) => fieldRuleBasis(ctx, f))), arithmetic: `${meetLines.join(". ")}.` }));
+  }
+  if (notStated.length) {
+    records.push(notCheckedRecord({ ...belowCheck, ruleBasis: weakestRuleBasis(notStatedFields.map((f) => fieldRuleBasis(ctx, f))), inputs: notStated.map((l) => `the design ${l}`) }));
+  }
   if (belowLines.length) {
     out.push({
+      ruleBasis: weakestRuleBasis(belowFields.map((f) => fieldRuleBasis(ctx, f))) ?? undefined,
       id: "city.struct.design-criteria-below-ahj",
       severity: belowBlocks || moreBlocks ? "blocker" : "warning",
       category: "structural",
@@ -3249,6 +3476,8 @@ export function evaluateDesignCriteriaFindings(
   // warning that says so.
   const minFinding = groundSnowMinimumFinding(stated, ctx, opts.permitPath ?? "");
   if (minFinding) out.push(minFinding);
+  const minRecord = minFinding ? null : groundSnowMinimumRecord(stated, ctx, opts.permitPath ?? "");
+  if (minRecord) records.push(minRecord);
 
   // (b3) ABOVE THE PRESCRIPTIVE PATH'S WIND CAP — the plan's stated Vult against the cap for the
   // exposure it states (maxWindSpeedMphExpB / ExpC), on the prescriptive path only. Always a
@@ -3265,10 +3494,16 @@ export function evaluateDesignCriteriaFindings(
     const capLines: string[] = [];
     const capItems: StatedDesignCriterion[] = [];
     const capFields: string[] = [];
+    const withinLines: string[] = [];
+    const withinFields: string[] = [];
     for (const letter of [...new Set(exposures.map((c) => String(c.value)))]) {
       const cap = caps[letter];
       if (cap == null) continue;
       const over = winds.filter((c) => (c.value as number) > cap);
+      if (!over.length && winds.length) {
+        withinFields.push(`prescriptive.maxWindSpeedMphExp${letter}`);
+        withinLines.push(`Wind speed: stated ${[...new Set(winds.map((c) => `${c.value} mph`))].join(", ")} in Exposure ${letter} <= ${who}'s prescriptive limit of ${cap} mph in Exposure ${letter}`);
+      }
       if (!over.length) continue;
       const byValue = new Map<string, { value: string | number; sources: Set<string> }>();
       for (const c of over) {
@@ -3281,8 +3516,19 @@ export function evaluateDesignCriteriaFindings(
       capLines.push(`Wind speed: stated ${describeValues([...byValue.values()], " mph")} in Exposure ${letter} — ${who}'s prescriptive path allows at most ${cap} mph in Exposure ${letter} (${fieldProvenance(ctx, field).text})`);
       capItems.push(...over, ...exposures.filter((c) => String(c.value) === letter));
     }
+    const capCheck = {
+      ruleId: "city.struct.wind-exceeds-prescriptive-cap", category: "structural" as const, title: "Wind speed within the prescriptive path's limit",
+      codeReferences: [ref(ctx, "R301.2.1", "Wind design criteria", "The prescriptive path applies only up to the jurisdiction's wind-speed limit for the exposure.")],
+    };
+    if (!capLines.length && withinLines.length) {
+      records.push(passRecord({ ...capCheck, ruleBasis: weakestRuleBasis(withinFields.map((f) => fieldRuleBasis(ctx, f))), arithmetic: `${withinLines.join(". ")}.` }));
+    } else if (!capLines.length && (caps.B != null || caps.C != null) && (!winds.length || !exposures.length)) {
+      const capFieldsOnFile = (["B", "C"] as const).filter((l) => caps[l] != null).map((l) => `prescriptive.maxWindSpeedMphExp${l}`);
+      records.push(notCheckedRecord({ ...capCheck, ruleBasis: weakestRuleBasis(capFieldsOnFile.map((f) => fieldRuleBasis(ctx, f))), inputs: [!winds.length ? "the design wind speed" : "", !exposures.length ? "the wind exposure category" : ""] }));
+    }
     if (capLines.length) {
       out.push({
+        ruleBasis: weakestRuleBasis(capFields.map((f) => fieldRuleBasis(ctx, f))) ?? undefined,
         id: "city.struct.wind-exceeds-prescriptive-cap",
         severity: "warning",
         category: "structural",
@@ -3379,6 +3625,11 @@ export function evaluateDesignCriteriaFindings(
   //   · a plan on the PREVIOUS edition inside a recorded phase-in (effective <= asOf < mandatory,
   //     previous edition on file) -> not a mismatch: a callout naming the mandatory date, on a
   //     verified or a seeded profile (#216). From the mandatory date on it blocks as above.
+  //   · a plan NEWER than every edition a VERIFIED profile records for that code (years compared;
+  //     anything not a plain year fails closed) -> a warning that asks a person to check the profile,
+  //     never a blocker (#597; owner 2026-11-07). The profile lagging an adoption is the usual cause
+  //     (#596: Oregon's 2026 OESC against a verified 2023 row), and a plan built to the newer code
+  //     meets the older one. It never writes the profile (hard rule 3). OLDER keeps blocking.
   //
   // LIKE WITH LIKE. A plan entry is compared with the profile entry of the SAME named code
   // (state code to state code: ORSC with ORSC). Base model codes are compared only when a base
@@ -3408,18 +3659,29 @@ export function evaluateDesignCriteriaFindings(
     // another reading of the same code in the package matches the profile — not every reading
     // disagrees. These never block; they land as a callout naming the weak reading.
     const weakLines = new Set<string>();
-    const report = (key: string, line: string, rows: CodeEdition[], compared: { code: string; edition: string }, graceVia?: { code: string; edition: string }, weakWhy?: string): void => {
+    // Lines whose plan edition is NEWER than every edition the verified profile records for the
+    // compared code (#597): these never block; they ask a person to check the profile.
+    const newer = new Set<string>();
+    // `against`: the profile editions the line was compared with (the newer-than test reads them).
+    const report = (key: string, line: string, rows: CodeEdition[], compared: { code: string; edition: string }, against: string[], graceVia?: { code: string; edition: string }, weakWhy?: string): void => {
       if (seen.has(key)) return;
       seen.add(key);
       for (const r of rows) comparedRows.add(r);
       const due = upcomingFor(compared);
       const grace = due ? null : graceFor(compared) ?? (graceVia ? graceFor(graceVia) : null);
+      // The upcoming-edition (#124) and phase-in (#216) answers keep their own wording; only a line
+      // neither of them explains is read for "newer than the profile". A seeded profile already
+      // only warns, so the note is for a verified one.
+      const isNewer = !due && !grace && ctx.verified && newerThanEvery(compared.edition, against);
       const base = weakWhy ? `${line} — ${weakWhy}` : line;
       const text = due
         ? `${base} — the plan's edition is the upcoming ${due.code} ${due.edition}, anticipated effective ${due.anticipatedDate}`
-        : grace ? `${base} — still allowed during the phase-in: ${grace.note.replace(/\.$/, "")}` : base;
+        : grace ? `${base} — still allowed during the phase-in: ${grace.note.replace(/\.$/, "")}`
+          : isNewer ? `${base} — newer than the profile on file: if ${who} has adopted ${compared.code} ${compared.edition}, the profile is out of date (check the profile)`
+            : base;
       if (due) softened.add(text);
       if (grace) inGrace.add(text);
+      if (isNewer) newer.add(text);
       if (weakWhy) weakLines.add(text);
       lines.push(text);
     };
@@ -3437,7 +3699,7 @@ export function evaluateDesignCriteriaFindings(
       const same = profileEntries.filter((a) => a.code === code);
       if (same.length && !same.some((a) => a.edition === b.edition)) {
         const agreeing = stated.codeBasis.filter((o) => normCodeToken(o.code) === code && same.some((a) => a.edition === o.edition));
-        report(`${code}|${b.edition}`, `plan states ${b.code} ${b.edition} (${b.source}) — profile records ${same.map((a) => a.label).join(" / ")}`, same.map((a) => a.row), b, undefined, weakWhyFor(b, code, agreeing));
+        report(`${code}|${b.edition}`, `plan states ${b.code} ${b.edition} (${b.source}) — profile records ${same.map((a) => a.label).join(" / ")}`, same.map((a) => a.row), b, same.map((a) => a.edition), undefined, weakWhyFor(b, code, agreeing));
       }
       // The plan's printed base, compared with a base the profile states for that model code.
       if (b.baseCode && b.baseEdition) {
@@ -3451,7 +3713,7 @@ export function evaluateDesignCriteriaFindings(
           if (recorded.length && !recorded.some((r) => r.edition === b.baseEdition)) {
             const agreeing = stated.codeBasis.filter((o) => (normCodeToken(o.code) === model && recorded.some((r) => r.edition === o.edition))
               || (o.baseCode && normCodeToken(o.baseCode) === model && recorded.some((r) => r.edition === o.baseEdition)));
-            report(`${code}|${b.edition}|${model}|${b.baseEdition}`, `plan states ${b.code} ${b.edition} based on ${model} ${b.baseEdition} (${b.source}) — profile records ${recorded.map((r) => r.label).join(" / ")}`, recorded.map((r) => r.row), { code: model, edition: b.baseEdition }, b, weakWhyFor(b, model, agreeing));
+            report(`${code}|${b.edition}|${model}|${b.baseEdition}`, `plan states ${b.code} ${b.edition} based on ${model} ${b.baseEdition} (${b.source}) — profile records ${recorded.map((r) => r.label).join(" / ")}`, recorded.map((r) => r.row), { code: model, edition: b.baseEdition }, recorded.map((r) => r.edition), b, weakWhyFor(b, model, agreeing));
           }
         }
       }
@@ -3461,7 +3723,7 @@ export function evaluateDesignCriteriaFindings(
         const via = profileEntries.filter((a) => a.base?.code === code);
         if (via.length && !via.some((a) => a.base!.edition === b.edition)) {
           const agreeing = stated.codeBasis.filter((o) => normCodeToken(o.code) === code && via.some((a) => a.base!.edition === o.edition));
-          report(`${code}|${b.edition}`, `plan states ${b.code} ${b.edition} (${b.source}) — profile records ${via.map((a) => `${a.label} (based on ${code} ${a.base!.edition})`).join(" / ")}`, via.map((a) => a.row), b, undefined, weakWhyFor(b, code, agreeing));
+          report(`${code}|${b.edition}`, `plan states ${b.code} ${b.edition} (${b.source}) — profile records ${via.map((a) => `${a.label} (based on ${code} ${a.base!.edition})`).join(" / ")}`, via.map((a) => a.row), b, via.map((a) => a.base!.edition), undefined, weakWhyFor(b, code, agreeing));
         }
       }
     }
@@ -3471,23 +3733,32 @@ export function evaluateDesignCriteriaFindings(
       // plan wholly inside a recorded phase-in is no mismatch at all: a callout naming the date.
       // A line resting on a weak reading never blocks either (#312): when every line is weak (or
       // softened, or in grace) the finding is a callout naming the weak reading.
-      // Softening only ever lowers severity (rule 3): one line outside all three still blocks.
-      const blocks = ctx.verified && lines.some((l) => !softened.has(l) && !inGrace.has(l) && !weakLines.has(l));
+      // Softening only ever lowers severity (rule 3): one line outside all four still blocks — a mixed
+      // package (one line newer, one older) blocks on the older line, and says the newer one is not it.
+      const blocks = ctx.verified && lines.some((l) => !softened.has(l) && !inGrace.has(l) && !weakLines.has(l) && !newer.has(l));
       const graceOnly = inGrace.size === lines.length;
       const weakOnly = !graceOnly && weakLines.size > 0 && lines.every((l) => weakLines.has(l) || inGrace.has(l) || softened.has(l));
+      // Nothing blocks and at least one line is newer than the verified profile: the ask is to check
+      // the profile, not to change the plan (#597).
+      const newerOnly = !blocks && !graceOnly && !weakOnly && newer.size > 0;
       out.push({
+        ruleBasis: fieldRuleBasis(ctx, "adoptedCodes"),
         id: "city.code.basis-mismatch",
         severity: blocks ? "blocker" : graceOnly || weakOnly ? "callout" : "warning",
         category: "plan_set",
         title: graceOnly
           ? "Plan's code basis is the previous edition — still allowed during the phase-in"
-          : "Plan's code basis differs from the jurisdiction's adopted codes",
+          : newerOnly
+            ? "Plan cites a newer code edition than the profile on file — check the profile"
+            : "Plan's code basis differs from the jurisdiction's adopted codes",
         message: `${lines.join("; ")}. Profile: ${codeEditionsProvenance(ctx, [...comparedRows])}. ${blocks
-          ? "The adopted editions are verified — the plan's governing-codes block must state them."
+          ? `The adopted editions are verified — the plan's governing-codes block must state them.${newer.size ? " A line marked newer than the profile is not what blocks — check the profile for it." : ""}`
           : graceOnly
             ? "The jurisdiction still accepts the previous edition until the mandatory date — a submittal on or after that date must state the new edition."
             : weakOnly
               ? "A reading the extractor could not anchor surely, or one that another sheet of the package contradicts, never blocks — verify the named document before asking for a change."
+            : newerOnly
+              ? "The plan cites a newer edition than the verified profile records — usually the profile lagging an adoption. Check the profile; if the jurisdiction has adopted it, a person updates the profile through the research/verify flow. The plan needs no change for this."
             : softened.size === lines.length
               ? "The plan anticipates the upcoming edition — confirm which edition the jurisdiction will review under on the submittal date."
               : softened.size + inGrace.size === lines.length
@@ -3499,16 +3770,20 @@ export function evaluateDesignCriteriaFindings(
         // change; otherwise the ask is to confirm with the AHJ, and it is not an installer callout.
         cityFeedback: graceOnly
           ? `The plan's governing-codes block states the previous edition, which ${who} still accepts during its phase-in — submit before the mandatory date or update the block to the new edition.`
+          : newerOnly
+          ? `The plan's governing-codes block cites a newer edition than the code profile on file for ${who} — no change to the plan is asked while the profile is checked.`
           : ctx.verified
           ? `Update the plan's governing-codes block to the code editions currently adopted by ${who}.`
           : `Confirm with ${who} which code editions are currently adopted before changing the plan's governing-codes block — the editions on file are unverified.`,
-        designTeamAction: "Confirm the adopted editions with the jurisdiction; correct the plan's GOVERNING CODES block, or correct the jurisdiction's code profile if the plan is right.",
+        designTeamAction: newerOnly
+          ? "Check the jurisdiction's code profile: the plan cites a newer edition than the verified profile records. If the jurisdiction has adopted it, update the profile through the research/verify flow (a person re-verifies it); the plan needs no change."
+          : "Confirm the adopted editions with the jurisdiction; correct the plan's GOVERNING CODES block, or correct the jurisdiction's code profile if the plan is right.",
         evidenceNeeded: ["Governing-codes block on the cover sheet", ...lines].slice(0, 6),
         codeReferences: [...new Set(stated.codeBasis.map((b) => b.code))]
           .filter((code) => profileEntries.some((a) => a.code === normCodeToken(code)))
           .slice(0, 4)
           .map((code) => ctx.citationFor(code, "Adopted edition", `${code} as adopted by ${who}`)),
-        installerCallout: ctx.verified && !graceOnly && !weakOnly,
+        installerCallout: ctx.verified && !graceOnly && !weakOnly && !newerOnly,
         evidenceStatus: "verified",
         evidenceFound: stated.codeBasis.slice(0, 12).map((b) => ({
           kind: "source_excerpt" as const,
@@ -3525,5 +3800,5 @@ export function evaluateDesignCriteriaFindings(
     }
   }
 
-  return out;
+  return [...out, ...records];
 }

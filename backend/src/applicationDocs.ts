@@ -10,6 +10,7 @@ import { isBillHolderName } from "./accountHolders";
 import { nowIso } from "./time";
 import { hasMpuScope } from "./serviceScope";
 import { findAhjProcessProfile, ahjProcessKnowledgeStatus, jurisdictionCore, registryTermMatches } from "./processProfiles";
+import { citedRowStructure, isStateAuthorityRow } from "./ahjRowCitations";
 import { describeCited, isStatewidePortalUrl, permitChannelLabel, permitProcessFor, statePermitStructure, stateRulesFor, stateTradeIssuerFor, unincorporatedZoningFor, ZONING_SIGNOFF } from "./permitProcess";
 import { resolvePermitPath, resolveStampRequirement, permitPathCallout, hasStampedStructuralEvidence, evaluatePrescriptiveCriteria, usStateCode, type PermitPathResolution } from "./permitPath";
 // Functions only, called at run time: this module sits inside the permitProcessLookup ->
@@ -17,6 +18,10 @@ import { resolvePermitPath, resolveStampRequirement, permitPathCallout, hasStamp
 import { agencyListReplacesLine, issuingAgencyDocumentList, type AgencyDocumentList, type AgencyLineStatusOf } from "./applicationDocsAgency";
 import { knownPowerClerkUtility } from "./utilityIdentity";
 import { describeQuotes, planSheets, readDeckMount } from "./planAttachmentRead";
+// Functions only: the service voltage as a plan writes it ("277/480Y", "120/240V") -> line to line.
+import { serviceVoltageOf } from "./iowaPvWorksheet";
+import { serviceFieldText } from "./normalize";
+import { mountAdjective, mountKindForProject } from "./mountKind";
 // Functions only (same cycle): the licences a document lists are licenceFor's (clients.ts).
 import { licenceJobState, stateLicenceLines } from "./clients";
 
@@ -50,7 +55,7 @@ const isOregonJob = (project: Pick<ProjectRecord, "state">): boolean => licenceJ
 // (a fire review, a zoning sign-off, a plan examination that "is not a permit") is its own
 // step, from the lookup's cited prerequisites, and is never the issuing agency.
 // ---------------------------------------------------------------------------
-export type PermitStructureLevel = "verified" | "cited" | "curated" | "reference" | "state_rule" | "unknown";
+export type PermitStructureLevel = "verified" | "cited" | "curated" | "reference_cited" | "reference" | "state_rule" | "unknown";
 export interface PermitPrerequisiteStep {
   /** The step in the source's words ("Fire Prevention plan review before the building permit"). */
   step: string;
@@ -72,6 +77,10 @@ export interface PermitStructureAnswer {
   prerequisites: PermitPrerequisiteStep[];
   /** A STATE agency issues the permits instead of the AHJ (stateTradeIssuerFor: New Mexico CID / MHD). */
   issuer?: string;
+  /** Pages the per-job lookup was refused (lookup-door-fixes): a person reads them. */
+  needsPersonRead?: Array<{ url: string; reason: string }>;
+  /** The review time the AHJ's page states (lookup-battery-and-fees), cited. Display only. */
+  reviewTime?: { value: string; sourceUrl: string; quote: string };
 }
 
 const HEDGED = /\?|\blooks like\b|\bmaybe\b|\bmight\b|\bpossibly\b|\bprobably\b|\bnot sure\b|\bunclear\b|\bi think\b|\bseems\b/i;
@@ -119,6 +128,21 @@ export function permitStructureAnswer(
   project: ProjectRecord,
   opts: { researched?: "separate" | "combo" | "unknown" | null; researchedFrom?: string } = {},
 ): PermitStructureAnswer {
+  const a = structureAnswerFromSources(project, opts);
+  // The per-job lookup's refused reads ride with the answer, whichever source settled it.
+  const lk = permitProcessFor(project);
+  const unread = lk?.needsPersonRead ?? [];
+  const rt = lk?.reviewTime;
+  return {
+    ...a,
+    ...(unread.length ? { needsPersonRead: unread.slice(0, 5) } : {}),
+    ...(rt?.value && /^https?:\/\//i.test(String(rt.sourceUrl || "")) ? { reviewTime: { value: String(rt.value), sourceUrl: String(rt.sourceUrl), quote: String(rt.quote || "") } } : {}),
+  };
+}
+function structureAnswerFromSources(
+  project: ProjectRecord,
+  opts: { researched?: "separate" | "combo" | "unknown" | null; researchedFrom?: string },
+): PermitStructureAnswer {
   const prerequisites = citedPrerequisites(project);
   const settle = (structure: "separate" | "combo", level: PermitStructureLevel, basis: string, sourceUrl = "", quote = ""): PermitStructureAnswer =>
     ({ structure, level, basis, sourceUrl, quote, hint: "", prerequisites });
@@ -139,7 +163,7 @@ export function permitStructureAnswer(
 
   // 2. A hand-written (human-curated) application profile.
   const profile = findApplicationProfile(project);
-  const handWritten = applicationProfiles.includes(profile) && profile.id !== "oregon-generic-epermitting";
+  const handWritten = applicationProfiles.includes(profile) && !profile.statewide;
   if (handWritten && profile.permitStructure && profile.permitStructure !== "unknown") {
     return settle(profile.permitStructure, "curated", `Permit structure: ${profile.permitStructure} — the hand-written ${profile.name} profile${profile.sourceUrl ? `, ${profile.sourceUrl}` : ""}`, profile.sourceUrl);
   }
@@ -147,8 +171,23 @@ export function permitStructureAnswer(
     return settle("separate", "curated", `Permit structure: separate — the hand-written ${profile.name} profile names both a structural and an electrical application${profile.sourceUrl ? `, ${profile.sourceUrl}` : ""}`, profile.sourceUrl);
   }
 
-  // 3. The seeded process profile's own words, unhedged.
-  const note = processNoteStructure(project);
+  // 3a. THE SEEDED ROW'S STRUCTURED FIELDS, BACKED BY ITS PAGES (ahjRowCitations.citedRowStructure,
+  //     worker-trackissuer): the state issues the electrical permit, it is bought at another counter,
+  //     the page says "separate"/"combo", or the page requires both a building and an electrical
+  //     permit. Read as cited — the AHJ's own page and its words — never as the operator's note. A row
+  //     with such a field that does not settle the structure is not read by word at all (3b): a field
+  //     outranks prose, so a note's wording can never split or join what the fields say.
+  // A state-issuer AHJ (4a) keeps its own answer, with the zoning step and the state issuer it names.
+  const rowFields = stateTradeIssuerFor(project) ? null : citedRowStructure(findAhjProcessProfile(project));
+  if (rowFields && "structure" in rowFields) {
+    const c = rowFields.citation;
+    return settle(rowFields.structure, "reference_cited",
+      `Permit structure: ${rowFields.structure} — ${rowFields.why}: from the AHJ's own page (${c.sourceUrl}), quoted: "${c.quote.slice(0, 160)}" (reference row, not person-verified)`,
+      c.sourceUrl, c.quote);
+  }
+
+  // 3b. The seeded process profile's own words, unhedged — only for a row with no structure field.
+  const note = rowFields ? null : processNoteStructure(project);
   if (note && "structure" in note) {
     return settle(note.structure, "reference", `Permit structure: ${note.structure} — the operator's seeded process note for this AHJ ("${note.note}"), not confirmed on an agency page`, "", note.note);
   }
@@ -235,7 +274,7 @@ export function permitStructureWithBasis(project: ProjectRecord): { structure: "
 /** May this answer be printed as "both must be filed" / "one permit"? Levels 1, 2 and 4 only —
  *  a seeded note is the operator's reference, stated as such. */
 export function permitStructureIsCitedOrVerified(a: Pick<PermitStructureAnswer, "level">): boolean {
-  return a.level === "verified" || a.level === "cited" || a.level === "curated" || a.level === "state_rule";
+  return a.level === "verified" || a.level === "cited" || a.level === "curated" || a.level === "reference_cited" || a.level === "state_rule";
 }
 
 /** The one sentence every surface prints for the structure (tracks, form finder, package, email). */
@@ -246,6 +285,7 @@ export function permitStructureSentence(a: PermitStructureAnswer): string {
 function permitStructureParts(a: PermitStructureAnswer): { core: string; pre: string } {
   const firm = permitStructureIsCitedOrVerified(a);
   const where = a.level === "state_rule" ? "state rule" : a.level === "cited" ? "cited agency page" : a.level === "verified" ? "verified by a person"
+    : a.level === "reference_cited" ? `the AHJ's own page, quoted: ${a.sourceUrl}`
     : a.level === "curated" ? "hand-written AHJ profile" : "operator's seeded note — not confirmed on an agency page";
   const core = a.issuer && a.structure === "separate"
     ? `Separate building (BLD) + electrical (ELE) permits issued by ${a.issuer} on the state's application, not by the local AHJ — both must be filed (${where})`
@@ -255,7 +295,9 @@ function permitStructureParts(a: PermitStructureAnswer): { core: string; pre: st
       ? `One combined building + electrical permit (${where})`
       : `One permit or separate building + electrical permits: not yet confirmed — verify on the AHJ site${a.hint ? ` (unconfirmed lead: ${a.hint})` : ""}`;
   const pre = a.prerequisites.length ? ` FIRST, at another office: ${a.prerequisites.map((p) => p.step).join("; then ")}.` : "";
-  return { core, pre };
+  const unread = a.needsPersonRead?.length ? ` Needs a person to read (the site refused Keelix's read): ${a.needsPersonRead.map((r) => `${r.url} (${r.reason})`).join("; ")}.` : "";
+  const review = a.reviewTime ? ` Review time (the AHJ's page): ${a.reviewTime.value} — ${a.reviewTime.sourceUrl}.` : "";
+  return { core, pre: `${pre}${unread}${review}` };
 }
 
 /**
@@ -268,7 +310,7 @@ function permitStructureParts(a: PermitStructureAnswer): { core: string; pre: st
  */
 export function shippedProfileNeedsPerJobLookup(project: ProjectRecord): boolean {
   const profile = findApplicationProfile(project);
-  if (applicationProfiles.includes(profile) && profile.id !== "oregon-generic-epermitting") return false;
+  if (applicationProfiles.includes(profile) && !profile.statewide) return false;
   // A STATE issuer (New Mexico CID) rests on a seeded list of state-served jurisdictions — never a
   // reason to skip asking about this AHJ: a cited lookup outranks it.
   const a = permitStructureAnswer(project);
@@ -292,7 +334,7 @@ export function shippedProfileIsAuthoritative(project: ProjectRecord): boolean {
     // A hand-written application profile (Portland, Marion County…) is authoritative on its own.
     try {
       const profile = findApplicationProfile(project);
-      return applicationProfiles.includes(profile) && profile.id !== "oregon-generic-epermitting";
+      return applicationProfiles.includes(profile) && !profile.statewide;
     } catch { return false; }
   }
   try { return !shippedProfileNeedsPerJobLookup(project); } catch { return false; }
@@ -548,6 +590,12 @@ export const applicationProfiles: ApplicationRequirementProfile[] = [
     requiresPortalEntryOnly: true,
     requiredDocuments: ["Residential/Commercial Structural Solar PV portal entry", "Prescriptive/non-prescriptive checklist", "Plan set and specs"],
     notes: ["Use this fallback when the AHJ is in Oregon but no specific local profile is seeded yet."],
+    statewide: {
+      state: "OR",
+      name: "Oregon",
+      label: "Oregon ePermitting statewide profile",
+      permits: "separate structural + electrical permits, OAR 918-050-0180(2)",
+    },
   },
 ];
 
@@ -568,11 +616,29 @@ function yesNo(value: string): string {
   return value ? value : "[verify]";
 }
 
+/** The service phase as the plan states it (the parser's `servicePhase`, else the legacy `phase`). */
+function servicePhase(project: ProjectRecord): string {
+  return serviceFieldText(project.parserSnapshot, "phase");
+}
+
+/** The service voltage, normalised (#689 3a): the plan's own wording plus the line-to-line voltage
+ *  serviceVoltageOf reads from it — "277/480Y" -> "277/480Y (480 V line to line)", "240V" -> "240 V".
+ *  Text that does not read as a voltage is not passed off as one: it is shown and marked [verify].
+ *  "" when the plan states none (the template prints [verify]). */
+function serviceVoltage(project: ProjectRecord): string {
+  const raw = serviceFieldText(project.parserSnapshot, "voltage");
+  if (!raw) return "";
+  const volts = serviceVoltageOf(raw);
+  if (volts == null) return `[verify] "${raw}" does not read as a service voltage`;
+  return /^\d{3}\s*(?:v|volts?)?\.?$/i.test(raw) ? `${volts} V` : `${raw} (${volts} V line to line)`;
+}
+
 // Synthesize an application profile from the AHJ PROCESS profile (the 380+ seeded
 // jurisdiction records). This is the generalized accuracy fix: any AHJ we have real
 // process knowledge for gets its true required-document set + submission method, even
 // without a hand-written static profile — so the doc builder pulls the right forms
 // for "the AHJs we give it" instead of falling back to a generic package.
+const EMAIL_ADDRESS = /[\w.+-]+@[\w-]+(?:\.[\w-]+)+/;
 function applicationProfileFromProcess(project: ProjectRecord): ApplicationRequirementProfile | null {
   const proc = findAhjProcessProfile(project);
   if (!proc) return null;
@@ -587,12 +653,21 @@ function applicationProfileFromProcess(project: ProjectRecord): ApplicationRequi
   if (!hasSignal) return null;
 
   const method = (proc.submissionMethod || "").toLowerCase();
+  // THE CHANNEL IS THE FIELD, NOT THE PROSE (draft 18 A, worker-trackissuer). A row whose
+  // submissionMethod field names how it files decides its channel by that field: a note that merely
+  // mentions email ("returns a signed copy by email", "corrections come by email") never turns a
+  // portal filing into an email one. The notes may still NAME THE PLATFORM of a portal the field
+  // already says it is (an online/portal/URL method), and decide the channel only for a row whose
+  // field is empty — the word reading is the fallback, not the answer.
+  const methodSaysPortal = /\bportal\b|\bonline\b|https?:\/\/|\baccela\b|\baca\b|e-?permitting|projectdox|avolve/.test(method);
+  const notesMay = !method.trim() || methodSaysPortal;
+  const notesDecide = !method.trim();
   // WHOLE WORDS: a bare "aca" substring matched "placa", "vacaville"; "accela" and "e-permitting"
   // name a platform, not a state.
-  const accela = /\baccela\b|\baca\b/.test(method) || /\baccela\b/.test(notes);
-  const isEpermitting = accela || /\be-?permitting\b/.test(method) || /\be-?permitting\b/.test(notes);
-  const isProjectDox = /projectdox|avolve/.test(method) || /projectdox|avolve/.test(notes);
-  const isEmail = /email/.test(method) || /email/.test(notes);
+  const accela = /\baccela\b|\baca\b/.test(method) || (notesMay && /\baccela\b/.test(notes));
+  const isEpermitting = accela || /\be-?permitting\b/.test(method) || (notesMay && /\be-?permitting\b/.test(notes));
+  const isProjectDox = /projectdox|avolve/.test(method) || (notesMay && /projectdox|avolve/.test(notes));
+  const isEmail = /email/.test(method) || (notesDecide && /email/.test(notes));
   const portalOnly = isEpermitting || isProjectDox || /portal|online/.test(method);
   // AN IN-PERSON CLAUSE IN THE SEEDED METHOD IS THE CHANNEL. Bernalillo County's reads "BPA: In person
   // EPA: Bernalillo County accela" — the building permit is filed at the counter; labelling the whole
@@ -648,8 +723,12 @@ function applicationProfileFromProcess(project: ProjectRecord): ApplicationRequi
     : accela ? "Accela Citizen Access (online portal)"
     : isEpermitting ? (proc.submissionMethod || "Online e-permitting portal")
     : isProjectDox ? "ProjectDox (online plan review)"
-    : isEmail ? "Email"
-    : (proc.submissionMethod || "Verify on the AHJ site");
+    // A seeded method that NAMES the intake address keeps it, so the card shows where it goes; sending
+    // still needs a person-verified address (filingEmail.ts), so a seeded address is only shown.
+    : isEmail ? (EMAIL_ADDRESS.test(proc.submissionMethod || "") ? (proc.submissionMethod || "").trim() : "Email")
+    // A STATE AUTHORITY's row with no method on file (ahjRowCitations): its door is unknown, said so —
+    // the channel then falls through to what a person verified for it, else "Unknown — verify".
+    : (proc.submissionMethod || (isStateAuthorityRow(proc) ? "Unknown — verify on the issuer's site" : "Verify on the AHJ site"));
 
   // A SEEDED NOTE IS A NOTE, NOT AN INSTRUCTION. Scottsdale's reads 'Select "Solar Systems/Green
   // Including Commercial Solar Projects"' — the portal's real type is "Residential Solar" — and the
@@ -738,10 +817,12 @@ export function registryApplicationProfileFor(project: Pick<ProjectRecord, "stat
 /** Profiles that are NOT an AHJ's own knowledge: the generic Oregon fallback, the generic package,
  *  the per-job lookup's shell. Their portal name / source URL is never written or read as the AHJ's
  *  portal (learnFromProject, the channel label). */
-export const FALLBACK_PROFILE_IDS: ReadonlySet<string> = new Set(["oregon-generic-epermitting", "generic-unknown-ahj", "lookup-per-job"]);
+export const FALLBACK_PROFILE_IDS: ReadonlySet<string> = new Set([...applicationProfiles.filter((p) => p.statewide).map((p) => p.id), "generic-unknown-ahj", "lookup-per-job"]);
 
 export function findApplicationProfile(project: ProjectRecord): ApplicationRequirementProfile {
-  const oregonProject = usStateCode(project.state) === "OR";
+  // A STATEWIDE fallback profile is recognised by its flag (draft 14), never by an id or a state name.
+  const stateCode = usStateCode(project.state);
+  const statewide = stateCode ? applicationProfiles.find((profile) => profile.statewide?.state === stateCode) : undefined;
   const specific = registryApplicationProfileFor(project);
   if (specific) return specific;
   // No hand-written profile — synthesize from the AHJ's seeded process knowledge so
@@ -749,9 +830,8 @@ export function findApplicationProfile(project: ProjectRecord): ApplicationRequi
   const found = lookedUpDocuments(project);
   const synthesized = applicationProfileFromProcess(project);
   if (synthesized) return found ? { ...synthesized, requiredDocuments: found.documents, notes: [found.note, ...synthesized.notes] } : synthesized;
-  if (oregonProject) {
-    const generic = applicationProfiles.find((profile) => profile.id === "oregon-generic-epermitting")!;
-    return found ? { ...generic, requiredDocuments: found.documents, notes: [found.note, ...generic.notes] } : generic;
+  if (statewide) {
+    return found ? { ...statewide, requiredDocuments: found.documents, notes: [found.note, ...statewide.notes] } : statewide;
   }
   if (found) {
     return {
@@ -1244,6 +1324,26 @@ ${profile.notes.map((note) => `- ${note}`).join("\n")}
   );
 }
 
+// THE MOUNT THE PLANS STATE, NOT A ROOF BY DEFAULT (#689 3b). A blank projectType printed "Roof-mounted
+// solar PV / Install roof-mounted photovoltaic system" on carports and ground arrays: the transfer sheet
+// never asked the mount. It now asks the one mount predicate (mountKindForProject: the `mounting` field,
+// then `mountType`, then the design text) and writes its adjective (mountAdjective) — the same words
+// the portal description and the PDF forms use. An unknown mount is never written as roof-mounted on an
+// application (leak sweep 2026-09-28): it is named for a person to verify. A stated projectType wins.
+function projectTypeText(project: ProjectRecord): string {
+  const stated = payload(project, "projectType");
+  if (stated) return stated;
+  const mount = mountAdjective(mountKindForProject(project));
+  return mount ? `${mount} solar PV` : "Solar PV ([verify] roof, ground or carport mount)";
+}
+
+function scopeSubject(project: ProjectRecord): string {
+  const stated = payload(project, "projectType");
+  if (stated) return stated.toLowerCase();
+  const mount = mountAdjective(mountKindForProject(project));
+  return mount ? `${mount.toLowerCase()} photovoltaic system` : "photovoltaic system ([verify] roof, ground or carport mount)";
+}
+
 function buildAhjWorksheet(project: ProjectRecord, profile: ApplicationRequirementProfile, client: ClientRecord | null): GeneratedApplicationDocument {
   const contractorLine = client
     ? (isOregonJob(project)
@@ -1265,9 +1365,9 @@ Contractor: ${contractorLine}
 
 ${commonProjectBlock(project)}
 
-Project type: ${payload(project, "projectType") || "Roof-mounted solar PV"}
+Project type: ${projectTypeText(project)}
 Scope of work:
-Install ${(payload(project, "projectType") || "roof-mounted photovoltaic system").toLowerCase()}. ${project.systemSizeDcKw ?? "[verify]"} kW DC / ${project.systemSizeAcKw ?? "[verify]"} kW AC. Interconnection method: ${project.interconnectionMethod || "[verify]"}.${/^yes$/i.test(payload(project, "hasExistingSystem")) || /^yes$/i.test(payload(project, "existingSystem")) ? ` ADDITION to an existing PV system${payload(project, "existingDcKw") ? ` (existing ${payload(project, "existingDcKw")} kW DC${payload(project, "combinedDcKw") ? `, combined ${payload(project, "combinedDcKw")} kW DC` : ""})` : ""} — existing system remains in service.` : ""}
+Install ${scopeSubject(project)}. ${project.systemSizeDcKw ?? "[verify]"} kW DC / ${project.systemSizeAcKw ?? "[verify]"} kW AC. Interconnection method: ${project.interconnectionMethod || "[verify]"}.${/^yes$/i.test(payload(project, "hasExistingSystem")) || /^yes$/i.test(payload(project, "existingSystem")) ? ` ADDITION to an existing PV system${payload(project, "existingDcKw") ? ` (existing ${payload(project, "existingDcKw")} kW DC${payload(project, "combinedDcKw") ? `, combined ${payload(project, "combinedDcKw")} kW DC` : ""})` : ""} — existing system remains in service.` : ""}
 
 Equipment:
 - Modules: ${yesNo(payload(project, "moduleQty"))} x ${yesNo(payload(project, "moduleMake"))} ${yesNo(payload(project, "moduleModel"))}, ${yesNo(payload(project, "moduleWattage"))} W
@@ -1276,7 +1376,7 @@ Equipment:
 - Racking: ${yesNo(payload(project, "racking"))}
 
 Electrical:
-- Service phase/voltage: ${yesNo(payload(project, "phase"))} / ${yesNo(payload(project, "voltage"))}
+- Service phase/voltage: ${yesNo(servicePhase(project))} / ${yesNo(serviceVoltage(project))}
 - MSP bus/main: ${yesNo(ampsOnly(payload(project, "busRating")))} A bus / ${yesNo(ampsOnly(payload(project, "mainBreaker")))} A main
 - PV breaker/OCPD: ${yesNo(payload(project, "pvBreaker"))}
 - AC disconnect: ${yesNo(payload(project, "acDiscReq"))} ${payload(project, "acDiscAmp") ? `(${payload(project, "acDiscAmp")} A)` : ""}
@@ -1358,7 +1458,7 @@ ${commonProjectBlock(project)}
 
 Electrical scope:
 - Interconnection: ${yesNo(project.interconnectionMethod)}
-- Service: ${yesNo(payload(project, "phase"))}, ${yesNo(payload(project, "voltage"))}
+- Service: ${yesNo(servicePhase(project))}, ${yesNo(serviceVoltage(project))}
 - Bus/main: ${yesNo(payload(project, "busRating"))} A / ${yesNo(payload(project, "mainBreaker"))} A
 - PV OCPD: ${yesNo(payload(project, "pvBreaker"))}
 - AC disconnect: ${yesNo(payload(project, "acDiscReq"))}

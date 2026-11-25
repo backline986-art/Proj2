@@ -34,6 +34,7 @@ import { addCommunication, undeliveredCommunications } from "./crm";
 import { clientEmailSubject, clientUpdateFor, clientUpdateEmail, isClientFacingOutcome, recordClientUpdateNote, type ClientUpdate } from "./clientUpdates";
 import { mailFrom, wrapPlainText } from "./emailLayout";
 import { addAuditLog } from "./audit";
+import { clientLinkRefusal } from "./clientLinkGuard";
 import { text } from "./json";
 import { logger } from "./logger";
 import { outcomeTrack, type ReadingProvenance } from "./permitMonitor";
@@ -197,6 +198,15 @@ export async function resendCommunication(
     return { delivered: false, to: "(none)", detail };
   }
   const body = refreshStatusLink(db, comm.projectId, comm.body);
+  // NO DEAD LINK TO A CLIENT (clientLinkGuard.ts): a project's message carries its status link, so it
+  // needs a base a client can open; every body is scanned for a local link. Refused = left a draft
+  // with the reason, never marked failed (nothing was tried) and never sent.
+  const linkRefusal = clientLinkRefusal({ body, carriesLink: Boolean(comm.projectId) });
+  if (linkRefusal) {
+    db.run("UPDATE communications SET delivery_status = 'draft', delivery_detail = ?, recipient = ?, body = ? WHERE id = ?", [linkRefusal, to, body, comm.id]);
+    logger.warn("notify", `held back a stranded client message to ${to}: ${linkRefusal}`);
+    return { delivered: false, to, detail: linkRefusal };
+  }
   // AN INSTALLER HANDOFF DRAFTED WHILE SMTP WAS UNSET (#491) lists its documents as attached, so
   // the backlog sends it WITH them — resolved now through the same allowlist the first attempt
   // used, never a list stored on the row.
@@ -365,7 +375,12 @@ export async function notifyClientOfStatusChange(
     // string, and the deployment step went undone for twelve days behind it.
     let deliveryStatus = "draft";
     let deliveryDetail = "SMTP is not configured (SMTP_HOST / SMTP_FROM are unset), so no send was attempted.";
-    if (smtpConfigured()) {
+    // NO DEAD LINK TO A CLIENT (clientLinkGuard.ts): the status link must open off this machine.
+    // Asked only when a send would happen, so the "never tried" draft above keeps its own reason.
+    const linkRefusal = smtpConfigured() ? clientLinkRefusal({ body, html }) : null;
+    if (linkRefusal) {
+      deliveryDetail = linkRefusal;
+    } else if (smtpConfigured()) {
       try {
         await sendEmail(to, subject, body, [], { html });
         deliveryStatus = "sent";

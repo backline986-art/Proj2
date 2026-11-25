@@ -1,5 +1,6 @@
 import type { HistoricalChecklistItem, ProjectRecord } from "../../shared/src/types";
 import { text } from "./json";
+import { AC_DISCONNECT_TEXT_PATTERNS, capturedDisconnectPart } from "./acDisconnectIntake";
 import { hasStampedStructuralEvidence } from "./permitPath";
 import { projectSecretValues } from "./projectSecrets";
 import { redactSecretValues } from "../../shared/src/portalSafety";
@@ -18,6 +19,7 @@ export type EvidenceTopic =
   | "rapidShutdown"
   | "labels"
   | "inverterSettings"
+  | "acDisconnect"
   | "batteryMode"
   | "utilityApproval"
   | "ownerAuthorization";
@@ -55,6 +57,7 @@ const topicRequirements: Record<EvidenceTopic, string[]> = {
   rapidShutdown: ["Rapid shutdown equipment", "RSD initiation/control location", "RSD label/placard callout"],
   labels: ["PV label schedule", "Placard locations", "Power source directory"],
   inverterSettings: ["UL 1741 SB listing", "Utility-required inverter settings", "Inverter spec sheet"],
+  acDisconnect: ["AC / utility disconnect on the one-line", "Disconnect location (lockable, visible break if the utility asks)", "Disconnect label"],
   batteryMode: ["Battery model/quantity", "Backup/non-backup mode", "Export setting", "Backup panel scope"],
   utilityApproval: ["Utility approval or interconnection approval", "Utility application confirmation", "Approval letter if AHJ requires it"],
   ownerAuthorization: ["Signed application", "Owner authorization", "Customer/owner signature"],
@@ -70,11 +73,14 @@ function maskIdentifier(value: string): string {
   return `${"*".repeat(Math.max(0, cleaned.length - 4))}${cleaned.slice(-4)}`;
 }
 
+// An identifier after "account" / "meter" is masked only when it holds a digit: a WORD there
+// ("account number captured: ******7890") is not a number, and masking it printed
+// "account number ****ured: ******7890" on the submit gate (review-audit draft 04).
 function cleanExcerpt(value: string): string {
   return value
     .replace(/\s+/g, " ")
-    .replace(/\b(account(?:\s*(?:number|#|no\.?))?\s*[:#]?\s*)([A-Z0-9-]{5,})/gi, (_match, label: string, account: string) => `${label}${maskIdentifier(account)}`)
-    .replace(/\b(meter(?:\s*(?:number|#|no\.?))?\s*[:#]?\s*)([A-Z0-9-]{5,})/gi, (_match, label: string, meter: string) => `${label}${maskIdentifier(meter)}`)
+    .replace(/\b(account(?:\s*(?:number|#|no\.?))?\s*[:#]?\s*)((?=[A-Z-]*\d)[A-Z0-9-]{5,})/gi, (_match, label: string, account: string) => `${label}${maskIdentifier(account)}`)
+    .replace(/\b(meter(?:\s*(?:number|#|no\.?))?\s*[:#]?\s*)((?=[A-Z-]*\d)[A-Z0-9-]{5,})/gi, (_match, label: string, meter: string) => `${label}${maskIdentifier(meter)}`)
     .trim()
     .slice(0, 220);
 }
@@ -84,7 +90,75 @@ function pageHintFor(sourceLabel: string, excerpt: string): string {
   return match ? cleanExcerpt(match[0]).slice(0, 80) : sourceLabel;
 }
 
+// THE SOURCES ARE BUILT ONCE PER UNCHANGED PROJECT, not once per question. One submit-gate read asks
+// evidenceForTopic / hasAny dozens of times, and each ask rebuilt every source — scrubbing the whole
+// plan-set text with redactSecretValues (three regex passes per secret) every time. Measured on a
+// 300-job board: ~350 ms of blocking work per next-step read, two-thirds of it this scrub, and the
+// board asks for every open card. The memo returns the SAME sources only when every input that
+// built them is identical (Object.is on each raw value and on the secret list), so a changed field,
+// a re-parsed plan set or a new account number rebuilds them. Bounded; keyed by project id.
+const SOURCE_KEYS: Array<[string, string]> = [
+  ["planSetExtractedText", "Uploaded plan set text"],
+  ["splitPagesText", "Split page mapping"],
+  ["packetReadinessText", "Packet readiness"],
+  ["utilityDownloadChecklistText", "Utility download checklist"],
+  ["utilityUploadNotesText", "Utility upload notes"],
+  ["projectDescriptionText", "Project description"],
+  ["sitePlanNotesText", "Site plan notes"],
+  ["roofPlanNotesText", "Roof plan notes"],
+  ["structuralCalcText", "Structural calculation text"],
+  ["electricalCalcText", "Electrical calculation text"],
+  ["inverterSettings", "Inverter settings"],
+  ["inverterSettingsText", "Inverter settings text"],
+  ["labelsText", "Labels text"],
+  ["ubMeterVerification", "Utility bill/meter verification"],
+  ["locateCalloutText", "Locate callout"],
+  ["stampRecommendation", "Stamp recommendation"],
+  ["reviewFlags", "Parser review flags"],
+  ["batteryMake", "Battery make"],
+  ["batteryModel", "Battery model"],
+  ["batteryQty", "Battery quantity"],
+  ["invMake", "Inverter make"],
+  ["invModel", "Inverter model"],
+  ["pvMicroMake", "Microinverter make"],
+  ["pvMicroModel", "Microinverter model"],
+];
+const SOURCES_MEMO_MAX = 64;
+const sourcesMemo = new Map<string, { inputs: unknown[]; sources: EvidenceSource[]; joined: string | null }>();
+
+function sourceInputs(project: ProjectRecord, secrets: string[]): unknown[] {
+  const snapshot = project.parserSnapshot as Record<string, unknown> | undefined;
+  return [
+    project.utility, project.ahj, project.interconnectionMethod, project.parserConfidenceSummary,
+    project.accountNumber, project.meterNumber,
+    ...SOURCE_KEYS.map(([key]) => snapshot?.[key]),
+    secrets.length, ...secrets,
+  ];
+}
+
+function memoFor(project: ProjectRecord): { inputs: unknown[]; sources: EvidenceSource[]; joined: string | null } {
+  const secrets = projectSecretValues(project);
+  const inputs = sourceInputs(project, secrets);
+  const id = typeof project.id === "string" ? project.id : "";
+  const hit = id ? sourcesMemo.get(id) : undefined;
+  if (hit && hit.inputs.length === inputs.length && hit.inputs.every((v, i) => Object.is(v, inputs[i]))) {
+    sourcesMemo.delete(id); sourcesMemo.set(id, hit); // most recently used last
+    return hit;
+  }
+  const entry = { inputs, sources: buildSources(project, secrets), joined: null as string | null };
+  if (id) {
+    sourcesMemo.delete(id);
+    sourcesMemo.set(id, entry);
+    while (sourcesMemo.size > SOURCES_MEMO_MAX) sourcesMemo.delete(sourcesMemo.keys().next().value as string);
+  }
+  return entry;
+}
+
 function sourcesFor(project: ProjectRecord): EvidenceSource[] {
+  return memoFor(project).sources;
+}
+
+function buildSources(project: ProjectRecord, secrets: string[]): EvidenceSource[] {
   const snapshot = project.parserSnapshot;
   const base: EvidenceSource[] = [
     { label: "Project utility", text: project.utility },
@@ -95,39 +169,12 @@ function sourcesFor(project: ProjectRecord): EvidenceSource[] {
     { label: "Meter number", text: project.meterNumber ? `meter number captured ${maskIdentifier(project.meterNumber)}` : "" },
   ];
 
-  const keys: Array<[string, string]> = [
-    ["planSetExtractedText", "Uploaded plan set text"],
-    ["splitPagesText", "Split page mapping"],
-    ["packetReadinessText", "Packet readiness"],
-    ["utilityDownloadChecklistText", "Utility download checklist"],
-    ["utilityUploadNotesText", "Utility upload notes"],
-    ["projectDescriptionText", "Project description"],
-    ["sitePlanNotesText", "Site plan notes"],
-    ["roofPlanNotesText", "Roof plan notes"],
-    ["structuralCalcText", "Structural calculation text"],
-    ["electricalCalcText", "Electrical calculation text"],
-    ["inverterSettings", "Inverter settings"],
-    ["inverterSettingsText", "Inverter settings text"],
-    ["labelsText", "Labels text"],
-    ["ubMeterVerification", "Utility bill/meter verification"],
-    ["locateCalloutText", "Locate callout"],
-    ["stampRecommendation", "Stamp recommendation"],
-    ["reviewFlags", "Parser review flags"],
-    ["batteryMake", "Battery make"],
-    ["batteryModel", "Battery model"],
-    ["batteryQty", "Battery quantity"],
-    ["invMake", "Inverter make"],
-    ["invModel", "Inverter model"],
-    ["pvMicroMake", "Microinverter make"],
-    ["pvMicroModel", "Microinverter model"],
-  ];
 
   // RULE 2 AT THE SOURCE (#260 review). An excerpt is a window cut from these texts and capped, and it
   // lands in a finding's evidence, its evidenceNeeded and the vision prompt. A window that ENDS inside
   // a meter number keeps a digit prefix the whole-number scrub can no longer match, so the texts are
   // scrubbed whole, before any window — as the design digest does (autoLearn.digestLines).
-  const secrets = projectSecretValues(project);
-  for (const [key, label] of keys) {
+  for (const [key, label] of SOURCE_KEYS) {
     const value = redactSecretValues(text(snapshot[key]).trim(), secrets);
     if (value) base.push({ label, text: value });
   }
@@ -135,9 +182,9 @@ function sourcesFor(project: ProjectRecord): EvidenceSource[] {
 }
 
 export function allProjectEvidenceText(project: ProjectRecord): string {
-  return sourcesFor(project)
-    .map((source) => `${source.label}: ${source.text}`)
-    .join("\n");
+  const memo = memoFor(project);
+  if (memo.joined === null) memo.joined = memo.sources.map((source) => `${source.label}: ${source.text}`).join("\n");
+  return memo.joined;
 }
 
 function matchSources(project: ProjectRecord, patterns: RegExp[], limit = 4): { excerpts: string[]; sources: string[]; hits: ProjectEvidenceHit[] } {
@@ -190,7 +237,8 @@ function matchSources(project: ProjectRecord, patterns: RegExp[], limit = 4): { 
 }
 
 function hasAny(project: ProjectRecord, patterns: RegExp[]): boolean {
-  return patterns.some((pattern) => pattern.test(allProjectEvidenceText(project)));
+  const all = allProjectEvidenceText(project);
+  return patterns.some((pattern) => pattern.test(all));
 }
 
 // FIREFIGHTER ACCESS IS NOT THE SAME WORD AS A ZONING SETBACK.
@@ -484,6 +532,30 @@ export function evidenceForTopic(project: ProjectRecord, topic: EvidenceTopic): 
         hasAny(project, [/inverter spec/i, /microinverter spec/i, /cut ?sheet/i, /\bUL\s*1741\b/i, /datasheet/i])
       );
       return evidence(project, topic, present || specOnly, present ? "high" : specOnly ? "medium" : "low", patterns);
+    }
+    case "acDisconnect": {
+      // The utility's AC disconnect (a utility asks for it on its application: an external, lockable,
+      // visible-break switch near the meter). Shown = the set names an AC / utility disconnect; proven =
+      // the set also says where it is or what kind it is.
+      // The wordings are acDisconnectIntake's one list, which QC's ac_disconnect read uses too (#134).
+      const patterns = [...AC_DISCONNECT_TEXT_PATTERNS];
+      //
+      // THE JOB'S PART THAT ITS OWN PLAN SET NAMES COUNTS AS SHOWN (soft run on main f280d056): the
+      // intake reads the part off the plan set's AC-disconnect label in forms the patterns above do not
+      // ("A.C. DISCONNECT", "AC SAFETY DISCONNECT", "VISIBLE, LOCKABLE, LABELED DISCONNECT"), so a job
+      // holding the part its plan set names could still read "missing" and be blocked by a utility
+      // whose cited list asks for the disconnect. capturedDisconnectPart is the ONE reader QC's
+      // ac_disconnect read uses too. The key alone is never evidence (a person can type it): the part
+      // counts only when this job's plan-set text names it at the AC-disconnect label — never acDiscReq
+      // alone, never the client's standard part. Otherwise exactly the text read above, and the blocker
+      // stays. A part alone is SHOWN, not proven (a part number does not say where the switch is): the
+      // finding stays as a warning for a person; only the patterns above prove it, as before.
+      const snapshot = (project.parserSnapshot || {}) as Record<string, unknown>;
+      const part = capturedDisconnectPart(snapshot, snapshot.planSetExtractedText);
+      const named = hasAny(project, patterns);
+      const present = named || Boolean(part);
+      const high = named && /lockable|visible|within sight|adjacent to (?:the )?meter|location|sheet|page/i.test(all);
+      return evidence(project, topic, present, high ? "high" : present ? "medium" : "low", patterns, part ? [`AC disconnect part named on the plan set: ${part}`] : []);
     }
     case "batteryMode": {
       const batteryScope = /battery|\bESS\b|powerwall|encharge|backup/i.test(all);

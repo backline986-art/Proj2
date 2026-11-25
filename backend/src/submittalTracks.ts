@@ -37,18 +37,26 @@ import { HttpError } from "./httpError";
 import { isInformationalPageUrl, isUtilityPlatformUrl, portalHostOf, recipeDisciplineForTrack, trackSafeUrl } from "./portalChannel";
 import { classifyChannelWords, normalizeAhjName, permitAnswerForTrackFrom, permitChannelLabel, permitProcessFor, projectForTrack, trackIssuer } from "./permitProcess";
 import { statewideDecisionFor, statewideUrlRefusal } from "./statewideEvidence";
-import { nemFiledWithPermit, utilityTrackPresentation, type NemFiledWithPermit } from "./utilityFilingLookup";
+import { getUtilityFilingLookup, nemFiledWithPermit, utilityFeesAndReviewSentence, utilityTrackPresentation, type NemFiledWithPermit } from "./utilityFilingLookup";
+import { shippedRecordFor } from "./utilityRequirements";
+import { nemTrackDropFor } from "./utilityStorageModes";
 import { nowIso } from "./time";
 import { hasMpuScope } from "./serviceScope";
 import { essPermitStep, type EssPermitStep } from "./essRequirements";
+import { separateCounterFor } from "./ahjRowCitations";
 import { randomUUID } from "node:crypto";
 import { snapshotFilingQuote } from "./feeAccuracy";
+import { recordFilingServiceCharge } from "./servicePrices";
 import { nemSignatureState, type NemSignatureView } from "./signatureTrack";
 import { notifyClientOfFiling } from "./clientFilingUpdate";
 import { trackPaymentView, type TrackPaymentView } from "./feePauseView";
 import { feeDueReadings, feePaidMarks, trackFeeDueFrom, type FeeDueReading } from "./feeDue";
 import { lastUnreadableByTarget } from "./lastUnreadable";
 import { projectSecretValuesById } from "./projectSecrets";
+import { projectClassHoldReason } from "./projectClassHold";
+import { AWAITING_SECOND_STAGE, beginSecondStageUpload, recordFirstStage, secondStagePending, secondStageView, trackSecondStage, trackSecondStageRow, type SecondStageView, type TrackSecondStageRow } from "./secondStage";
+import { documentInventory } from "./requiredDocuments";
+import { docFitsTrack } from "./docDiscipline";
 
 /** Words that claim the statewide portal ("Oregon ePermitting", "OR E-permitting") with no URL —
  *  on a learned row, often the generic fallback's own words laundered in (portal-truth D2/D4). */
@@ -80,6 +88,13 @@ function permitTrackLabel(type: SubmittalTrackType, answer: PermitStructureAnswe
     if (answer.structure === "combo") return "Building + electrical permit (combo)";
     return "AHJ permit — one permit or separate building + electrical not yet confirmed";
   }
+  // THE AHJ'S OWN PAGE, QUOTED (the reference row's citations, worker-trackissuer): said as what it is —
+  // a page and its words, not a person's check — instead of "the operator's seeded note".
+  if ((type === "building" || type === "electrical") && answer.level === "reference_cited") {
+    let host = "";
+    try { host = answer.sourceUrl ? new URL(answer.sourceUrl).host : ""; } catch { host = ""; }
+    return `${TRACK_LABELS[type]} — from the AHJ's own page${host ? ` (${host})` : ""}, quoted; not person-verified`;
+  }
   if ((type === "building" || type === "electrical") && !permitStructureIsCitedOrVerified(answer)) {
     return `${TRACK_LABELS[type]} — per the operator's seeded note, not confirmed on an agency page`;
   }
@@ -95,6 +110,10 @@ export interface SubmittalTrackView extends SubmittalTrack {
   prerequisites?: PermitPrerequisiteStep[];
   /** How the channel is known: "cited" (per-job lookup), "verified", "profile", "researched", "unknown". */
   channelBasis?: string;
+  /** The page and its verbatim words a NOT-YET-VERIFIED channel came from (Helm nit on the filing-
+   *  destination PR): shown beside the channel so a person reads the source before confirming it.
+   *  Display only: it never decides the channel, its kind or a URL. Absent when verified or uncited. */
+  channelCitation?: { sourceUrl: string; quote: string; fetchedAt?: string };
   /** Battery jobs only (#246): the fire review / separate ESS permit as the records on file say it. */
   essStep?: EssPermitStep;
   /** The track's newest staging run stopped on a fee (#576): what to pay, where, with whose card,
@@ -115,6 +134,24 @@ export interface SubmittalTrackView extends SubmittalTrack {
   /** #569 — the newest filing of this track that keeps a confirmation screenshot (masked): the card's
    *  "Submitted: <number> · confirmation screenshot". Absent when none was kept. */
   confirmation?: TrackConfirmationView;
+  /** #28 — a two-stage filing's second stage (secondStage.ts): a cited description awaiting a
+   *  person's Confirm, or (confirmed) where this job stands in it, with the documents to upload by
+   *  hand while the plans are still out. Absent when the track's agency has none on file. */
+  secondStage?: SecondStageView & { documents?: SecondStageDocument[] };
+}
+
+/** One line of the hand-upload list: a document the job's required-documents list names for this
+ *  track, and whether the job holds it. Never a file path. */
+export interface SecondStageDocument { label: string; docType: string; present: boolean; via: string }
+
+/** WHAT TO UPLOAD IN THE SECOND SYSTEM: the job's own required-documents list (documentInventory),
+ *  narrowed to this track with the one doc/track table (docFitsTrack) the staging run uses. A read. */
+export function secondStageDocuments(db: AppDb, project: ProjectRecord, track: SubmittalTrackType): SecondStageDocument[] {
+  try {
+    return documentInventory(db, project).presence
+      .filter((d) => d.lane !== "nem" && docFitsTrack(d.docType, track, new Set()))
+      .map((d) => ({ label: d.label, docType: d.docType, present: d.present, via: d.via }));
+  } catch { return []; }
 }
 
 /** Every submittal track, derived from the label Record so it cannot go stale: adding a
@@ -161,14 +198,17 @@ function hasUtility(project: ProjectRecord): boolean {
 }
 
 /**
- * The tracks a project must file. NEM whenever there's a utility, plus the AHJ
+ * The tracks a project must file. NEM whenever there's a utility (unless a person's cited storage
+ * record dropped it on this job: nemTrackDropFor), plus the AHJ
  * permit(s): one combo permit, or separate building + electrical when the AHJ
  * files them apart. "unknown" structure defaults to a single combo permit (the
  * common case) so the operator always has at least one actionable permit track.
  */
 export function requiredTracks(project: ProjectRecord): SubmittalTrackType[] {
   const tracks: SubmittalTrackType[] = [];
-  if (hasUtility(project)) tracks.push("nem");
+  // A storage job whose utility's PERSON-verified record says its battery mode needs no application
+  // (draft 10): THE ONE PREDICATE, read here so every door that asks for the tracks loses it together.
+  if (hasUtility(project) && !nemTrackDropFor(project)) tracks.push("nem");
 
   // Resolve combo vs separate across all signals (AHJ process notes/flags included),
   // so AHJs like Beaverton that file SEPARATE building + electrical permits split into
@@ -251,16 +291,75 @@ function verifiedAhjPortalUrl(db: AppDb | null, project: ProjectRecord, track: S
 }
 
 /**
+ * THE WORDS BEHIND A NOT-YET-VERIFIED CHANNEL (display only). The utility's own filing lookup or its
+ * shipped door when that is what the channel names; the per-job permit lookup's cited portal; the AHJ's
+ * reference profile citation for its submission method. Never read by channelKindOf, staging or a gate.
+ */
+function channelCitationFor(
+  db: AppDb | null, track: SubmittalTrackType, project: ProjectRecord,
+  res: { basis: string; portalUrl: string; citation?: { sourceUrl: string; quote: string; fetchedAt?: string } },
+): { sourceUrl: string; quote: string; fetchedAt?: string } | undefined {
+  if (res.basis === "verified") return undefined;
+  // The resolution names its own page (a separate counter's): that page, never the AHJ's door's.
+  if (res.citation) return res.citation;
+  const cite = (sourceUrl: unknown, quote: unknown, fetchedAt?: unknown) => {
+    const u = s(sourceUrl).trim(); const q = s(quote).trim();
+    return /^https?:\/\//i.test(u) && q.length >= 3 ? { sourceUrl: u, quote: q.slice(0, 400), ...(s(fetchedAt).trim() ? { fetchedAt: s(fetchedAt).trim() } : {}) } : undefined;
+  };
+  try {
+    if (track === "nem") {
+      const lookup = db ? getUtilityFilingLookup(db, project.state, project.utility) : null;
+      const f = lookup?.filing;
+      if (f?.value && (!res.portalUrl || s(f.value.url) === res.portalUrl)) {
+        const c = cite(f.sourceUrl, f.quote, lookup?.lookedUpAt);
+        if (c) return c;
+      }
+      const door = shippedRecordFor(project.state, project.utility)?.filingDoor;
+      if (door && res.portalUrl && door.url === res.portalUrl) return cite(door.sourceUrl, door.quote, door.fetchedAt);
+      return undefined;
+    }
+    if (res.basis === "cited" && res.portalUrl) {
+      for (const p of permitProcessFor(project)?.permits ?? []) {
+        if (s(p.portalUrl?.value) === res.portalUrl) { const c = cite(p.portalUrl.sourceUrl, p.portalUrl.quote); if (c) return c; }
+      }
+    }
+    if (res.basis === "profile") {
+      const raw = (findAhjProcessProfile(project) as unknown as { citations?: unknown } | null)?.citations;
+      for (const c of Array.isArray(raw) ? raw as Array<Record<string, unknown>> : []) {
+        if (s(c?.field) !== "submissionMethod") continue;
+        const got = cite(c.sourceUrl, c.quote, c.fetchedAt);
+        if (got) return got;
+      }
+    }
+  } catch { /* display only: a failed read shows no citation */ }
+  return undefined;
+}
+
+/**
  * WHERE THIS TRACK IS FILED, and how that is known. A portal / "no portal, paper" / record type
  * the per-job lookup FOUND reaches the card (new-AHJ e2e: Iowa City's EnerGov URL and Waltham's
  * "paper drop-off" were found, and the tracks still said "Unknown — verify"). Order: the lookup
  * (cited) → the AHJ's hand-written / seeded profile → the AHJ's knowledge-base row (a person's
  * verified row, else research — said as such) → unknown.
  */
-function channelResolution(db: AppDb | null, track: SubmittalTrackType, project: ProjectRecord): { channel: string; basis: string; portalUrl: string; filedWithPermit?: boolean } {
+function channelResolution(db: AppDb | null, track: SubmittalTrackType, project: ProjectRecord): { channel: string; basis: string; portalUrl: string; filedWithPermit?: boolean; citation?: { sourceUrl: string; quote: string; fetchedAt?: string } } {
   if (track === "nem") {
     const u = utilityTrackPresentation(db, project);
-    return { channel: u.channel, basis: u.basis, portalUrl: u.portalUrl, ...(u.filedWithPermit ? { filedWithPermit: true } : {}) };
+    return { channel: `${u.channel}${utilityFeesAndReviewSentence(db, project)}`, basis: u.basis, portalUrl: u.portalUrl, ...(u.filedWithPermit ? { filedWithPermit: true } : {}) };
+  }
+  // ANOTHER COUNTER OF THE SAME AHJ (worker-trackissuer): the AHJ's page says its electrical permit is
+  // filed somewhere other than its building permit ("purchased separately at City Hall"). This track's
+  // door is that counter, as the page words it — never the AHJ's own door, not even one a person
+  // verified for the AHJ (they verified where the building permit files), and no URL: it starts
+  // unknown, so the gate (personVerifiedFilingDoor) never finds a verified door here.
+  const counter = separateCounterFor(project, track);
+  if (counter) {
+    return {
+      channel: `${counter.value} — a separate counter from ${String(project.ahj ?? "").trim() || "the AHJ"}'s building permit (from the AHJ's own page, quoted — verify)`,
+      basis: "profile",
+      portalUrl: "",
+      citation: { sourceUrl: counter.sourceUrl, quote: counter.quote.slice(0, 400), ...(counter.fetchedAt ? { fetchedAt: counter.fetchedAt } : {}) },
+    };
   }
   // THE LABEL IS THE RESOLVED PORTAL'S HOST (portal-truth D4, permitProcess.permitChannelLabel):
   // "Oregon ePermitting (Accela)" only on the statewide host; an AHJ's own Accela tenant is
@@ -341,6 +440,26 @@ function channelResolution(db: AppDb | null, track: SubmittalTrackType, project:
     }
   }
   return { channel: `Unknown — verify on ${site}`, basis: "unknown", portalUrl: "" };
+}
+
+/**
+ * THE FILING DOOR A NAMED PERSON VERIFIED FOR THIS TRACK, or null. The same answer the track card
+ * shows as "verified by a person" (channelResolution basis "verified" with a portal URL: a person's
+ * verified knowledge-base row for the AHJ / utility, or the utility filing lookup a named person
+ * verified); every other basis (cited, seeded profile, shipped door, researched, known, unknown) is
+ * null, and so is a verified "filed inside the permit application" (it names no portal). Read by
+ * the final-submit gate (repository.automaticSubmitRefusals): automation clicks a final submit only
+ * on this door. `trackProject` is the track's own view (permitProcess.projectForTrack: the issuer
+ * for a permit track, the project for NEM). Reads only; a failed read is null (the gate refuses).
+ */
+export function personVerifiedFilingDoor(db: AppDb, track: SubmittalTrackType, trackProject: ProjectRecord): { url: string } | null {
+  try {
+    const res = channelResolution(db, track, trackProject);
+    const url = s(res.portalUrl).trim();
+    return res.basis === "verified" && /^https?:\/\//i.test(url) && !res.filedWithPermit ? { url } : null;
+  } catch {
+    return null;
+  }
 }
 
 /** HOW THIS TRACK IS FILED, AS A KIND (operator 09-28: "City of Waltham only does in-person permit
@@ -545,7 +664,9 @@ export function trackFilingOnRecord(db: AppDb, projectId: string, track: Submitt
       WHERE project_id = ? AND permit_type IN (${ph})
         AND (status IN ('submitted', 'submitted_unconfirmed')
           -- a fee stop AFTER the approved click (#576): submitted_at is stamped only on a click
-          OR (status = 'awaiting_payment' AND submitted_at IS NOT NULL))
+          OR (status = 'awaiting_payment' AND submitted_at IS NOT NULL)
+          -- a two-stage filing's application, made on the first portal (#28): never staged again
+          OR status = 'awaiting_second_stage')
       ORDER BY submitted_at DESC LIMIT 1`,
     [projectId, ...family],
   ) ?? db.get<Row>(
@@ -570,7 +691,7 @@ export interface TrackSubmittedEvidence {
   track: SubmittalTrackType;
   /** How the filing is on record (trackFilingOnRecord): a person captured it ('submitted'), or
    *  automation clicked the final submit ('submitted_unconfirmed' / 'automation_click'). */
-  via: "submitted" | "submitted_unconfirmed" | "automation_click";
+  via: "submitted" | "submitted_unconfirmed" | "automation_click" | "awaiting_second_stage";
   /** The filing's number ("" when automation clicked and nothing was captured). */
   number: string;
   at: string | null;
@@ -604,7 +725,7 @@ export function trackSubmittedAndTracked(db: AppDb, projectId: string, track: Su
   const { own, pool, poolDemand } = trackTargets(db, projectId, track, Array.from(new Set([...required, track])));
   return {
     track,
-    via: via === "submitted" || via === "submitted_unconfirmed" ? via : "automation_click",
+    via: via === "submitted" || via === "submitted_unconfirmed" || via === AWAITING_SECOND_STAGE ? via : "automation_click",
     number: s(filed.permit_number) || s(filed.application_number),
     at: s(filed.submitted_at) || null,
     tracked: Boolean(own) || (poolDemand <= 1 && pool.length > 0),
@@ -614,6 +735,11 @@ export function trackSubmittedAndTracked(db: AppDb, projectId: string, track: Su
 /** The refusal a Stage of a filed track reads (the route's 409, the job's, the card) — main's
  *  duplicate-guard sentence, word for word. */
 export function trackSubmittedSentence(e: TrackSubmittedEvidence): string {
+  // A two-stage filing (#28): the application exists; what is left is the hand upload, never a Stage.
+  if (e.via === AWAITING_SECOND_STAGE) {
+    return `The ${e.track} track's application is already made on the portal${e.number ? ` as ${e.number}` : ""}; it is not filed until its plans are uploaded in the second system. `
+      + "Staging it again would open a duplicate application with the jurisdiction. Upload the plans by hand and mark the upload done on this card.";
+  }
   const when = e.at ? ` on ${e.at.slice(0, 10)}` : "";
   const num = e.number
     || (e.via !== "submitted"
@@ -755,6 +881,9 @@ function deriveStatus(state: TrackState): SubmittalTrackStatus {
   if (state.submissionStatus === "awaiting_human_submit" || state.submissionStatus === "staged" || state.submissionStatus === "awaiting_payment") {
     return "staged";
   }
+  // A two-stage filing whose application is made (#28): on the first portal, its plans not yet
+  // uploaded in the second system. NOT filed — the card's second-stage block says what is next.
+  if (state.submissionStatus === AWAITING_SECOND_STAGE) return "staged";
   // paused_for_human / failed runs staged NOTHING on the portal — the track genuinely
   // has not started; the portal-runs panel carries the pause/failure banner.
   if (fromOutcome) return fromOutcome; // a target exists even without a submission row
@@ -991,6 +1120,9 @@ export function getSubmittalTracks(db: AppDb, project: ProjectRecord): Submittal
   const essStep = essPermitStep(project);
   // Every track's own state first: the NEM track of a with-permit utility (#664) follows the permits'.
   const states = new Map(required.map((type) => [type, readTrackState(db, project.id, type, required)] as const));
+  // THE CLASS HOLD (#688): one read for every card. A held job's cards say so and name no recipe
+  // (none on file was learned for a job like this one) — a read, like the rest of this view.
+  const classHold = projectClassHoldReason(db, project.id);
   const withPermit = utility?.filedWithPermit ?? null;
   const nemFollow = withPermit && !hasOwnTrackEvidence(states.get("nem")!)
     ? nemStatusFollowingPermit(required.filter((t) => t !== "nem").map((t) => deriveStatus(states.get(t)!)))
@@ -1005,7 +1137,8 @@ export function getSubmittalTracks(db: AppDb, project: ProjectRecord): Submittal
     const submittedEvidence = trackSubmittedAndTracked(db, project.id, type, required);
     const stageBlocked = submittedEvidence
       ? trackSubmittedSentence(submittedEvidence)
-      : type === "nem" && withPermit ? withPermitStageSentence(withPermit, project.utility) : "";
+      : type === "nem" && withPermit ? withPermitStageSentence(withPermit, project.utility)
+      : classHold ? classHold : "";
     // A PERMIT CARD IS ITS ISSUER'S (split issuer): channel, recipe and portal on file are the agency
     // that issues THIS track's permit — the same view staging stages with (projectForTrack; the
     // project itself when that is the project AHJ). The utility card: the project.
@@ -1039,7 +1172,9 @@ export function getSubmittalTracks(db: AppDb, project: ProjectRecord): Submittal
       r ? { id: r.id, status: s(r.status), portal_url: s(r.portalUrl) } : null;
     // #664: a with-permit NEM track has no portal of its own — no recipe, no portal URL (rule 5).
     const noPortal = type === "nem" && Boolean(withPermit);
-    const completeRecipe = noPortal ? null : findCompleteRecipeForProject(db, resolverInput);
+    // A held job (#688) replays no recipe, so its card names none.
+    const noRecipe = noPortal || Boolean(classHold);
+    const completeRecipe = noRecipe ? null : findCompleteRecipeForProject(db, resolverInput);
     let recipeRow: CardRecipe | null = cardRecipe(completeRecipe);
     // WHAT THAT RECIPE WILL FILL THAT THIS JOB HAS NO VALUE FOR (#445) — the stage gate's own reading,
     // shown before anyone clicks Stage. Only for a complete recipe of the track's own (what the next
@@ -1052,7 +1187,7 @@ export function getSubmittalTracks(db: AppDb, project: ProjectRecord): Submittal
     // entity on the same portal (portalRecipes.findBorrowableRecipe) and records it on the run
     // (result_json.borrowedRecipe). The card says which one THIS project's last run of this track used.
     let borrowedRecipe: SubmittalTrackView["borrowedRecipe"] = null;
-    if (!recipeRow && !noPortal) for (const r of db.query<Row>(
+    if (!recipeRow && !noRecipe) for (const r of db.query<Row>(
       `SELECT recipe_id, result_json, started_at FROM portal_runs
         WHERE project_id = ? AND permit_type IN (${family.map(() => "?").join(",")}) AND run_type = 'prepare_submit'
         ORDER BY started_at DESC, rowid DESC LIMIT 5`,
@@ -1070,7 +1205,7 @@ export function getSubmittalTracks(db: AppDb, project: ProjectRecord): Submittal
       const used = s(r.recipe_id) ? db.get<Row>("SELECT id, status, portal_url FROM portal_recipes WHERE id = ?", [s(r.recipe_id)]) : undefined;
       if (used) { recipeRow = { id: s(used.id), status: s(used.status), portal_url: s(used.portal_url) }; break; }
     }
-    if (!recipeRow && !borrowedRecipe && !noPortal) recipeRow = cardRecipe(findAnyRecipeForProject(db, resolverInput));
+    if (!recipeRow && !borrowedRecipe && !noRecipe) recipeRow = cardRecipe(findAnyRecipeForProject(db, resolverInput));
 
     // WHERE THE NEM TRACK STANDS BETWEEN THE SIGNATURE REQUEST AND THE FILING (#308, #310): the card
     // offers "Approve & request signatures" (and "I sent the signature request") only in front of
@@ -1099,7 +1234,9 @@ export function getSubmittalTracks(db: AppDb, project: ProjectRecord): Submittal
     // row can hold the other track's portal (rule 5).
     const fitsHere = (u: string) => Boolean(u) && Boolean(trackSafeUrl(type, u)) && !isInformationalPageUrl(u);
     let kbPortalUrl: string | undefined;
-    if (!noPortal && (!recipeRow || !s(recipeRow.portal_url))) {
+    // A separate counter's track has no portal of the AHJ's to fall back on (its door is the counter).
+    const ownCounter = category === "permit" && Boolean(separateCounterFor(issuerProject, type));
+    if (!noPortal && !ownCounter && (!recipeRow || !s(recipeRow.portal_url))) {
       if (fitsHere(resolved.portalUrl)) kbPortalUrl = resolved.portalUrl;
       const kbField = scopeType === "utility" ? "utility" : "ahj";
       const kbVal = scopeType === "utility" ? project.utility : issuerProject.ahj;
@@ -1128,10 +1265,16 @@ export function getSubmittalTracks(db: AppDb, project: ProjectRecord): Submittal
           since: feeAsk.readAt,
           approved: feeAsk.approved,
           sentence: feeAsk.approved
-            ? "Approved: pay the issuance fee on the portal, then press Paid with the permit number and the amount."
-            : "The agency asked for a fee: pay it on the portal, then press Paid with the record number and the amount.",
+            ? "Approved: pay the issuance fee on the portal, then press We paid the portal with the permit number and the amount."
+            : "The agency asked for a fee: pay it on the portal, then press We paid the portal with the record number and the amount.",
         }
       : null;
+    // A TWO-STAGE FILING (#28): the cited description, or where this job stands once a person
+    // confirmed it. While the application is made and the plans are out, the card says so in place
+    // of "staged — submit manually", and lists what to upload by hand.
+    const second = category === "permit" ? secondStageView(db, project, type) : null;
+    const secondHolds = Boolean(second?.pending) && status === "staged" && !payment;
+    const secondDocuments = second?.pending ? secondStageDocuments(db, project, type) : [];
     const paid = db.query<Row>(
       "SELECT kind, amount_usd, record_number, paid_by, paid_at, confirmation_shot_path FROM track_fee_payments WHERE project_id = ? AND track = ? ORDER BY paid_at DESC, rowid DESC",
       [project.id, type],
@@ -1147,6 +1290,10 @@ export function getSubmittalTracks(db: AppDb, project: ProjectRecord): Submittal
       category,
       channel,
       channelBasis: resolved.basis,
+      ...((): { channelCitation?: { sourceUrl: string; quote: string; fetchedAt?: string } } => {
+        const c = channelCitationFor(db, type, issuerProject, resolved);
+        return c ? { channelCitation: c } : {};
+      })(),
       channelKind: channelKindOf(resolved),
       ...(category === "permit" ? { structureBasis: answer.basis, prerequisites } : {}),
       // On the card the prerequisites ride (the building-side filing, or the one permit).
@@ -1154,11 +1301,11 @@ export function getSubmittalTracks(db: AppDb, project: ProjectRecord): Submittal
       status,
       // The portal's own words — unless they say "issued" of a track isTrackDone did not accept
       // (one pooled target cannot finish two tracks), where they would contradict the status.
-      statusLabel: payment ? "Payment needed" : follows ? withPermitStatusLabel(follows.status, follows.permitStatus) : signatureHolds && signatureRequest
+      statusLabel: payment ? "Payment needed" : secondHolds ? second!.statusLabel : follows ? withPermitStatusLabel(follows.status, follows.permitStatus) : signatureHolds && signatureRequest
         ? SIGNATURE_STATUS_LABEL[signatureRequest.state] ?? statusLabelFor(status, category)
         : (!state.done && (state.outcome === "issued" || state.outcome === "nem_approved") ? "" : state.statusLabel)
           || statusLabelFor(status, category),
-      nextAction: payment ? payment.sentence : follows && withPermit ? withPermitNextAction(follows.status, withPermit, project.utility)
+      nextAction: payment ? payment.sentence : secondHolds ? second!.sentence : follows && withPermit ? withPermitNextAction(follows.status, withPermit, project.utility)
         : signatureHolds && signatureRequest && SIGNATURE_NEXT_ACTION[signatureRequest.state]
         ? SIGNATURE_NEXT_ACTION[signatureRequest.state]
         : nextActionFor(status, channel, type, prerequisites, issuerProject.trackView ? issuerProject.ahj : ""),
@@ -1187,6 +1334,7 @@ export function getSubmittalTracks(db: AppDb, project: ProjectRecord): Submittal
       ...(type === "nem" && status === "staged" ? { stagedReview: stagedReviewViewFor(db, project.id) } : {}),
       ...(stageBlocked ? { stageBlocked } : {}),
       ...(confirmation ? { confirmation } : {}),
+      ...(second ? { secondStage: { ...second, ...(secondDocuments.length ? { documents: secondDocuments } : {}) } } : {}),
     };
   });
 }
@@ -1221,10 +1369,17 @@ export function markTrackSubmitted(
      *  would appear to start two days late. ISO date or datetime. */
     submittedAt?: string;
   },
+  /** Internal: true only from markSecondStageUploaded, the one door that files a track whose
+   *  application waits on its second stage. Never a request field. */
+  opts: { secondStageUploaded?: boolean } = {},
 ): void {
   if (!requiredTracks(project).includes(type)) {
     throw new HttpError(400, `This project does not require a "${type}" submittal track.`);
   }
+  // A TWO-STAGE FILING IS FILED BY THE UPLOAD MARK, NOT HERE (#28): while the application waits on
+  // its plan upload, "I submitted it" would call the track filed with the plans still out.
+  const hold = opts.secondStageUploaded ? null : secondStageHold(db, project, type);
+  if (hold) throw new HttpError(409, hold.sentence, { track: type, secondStage: true, owed: hold.owed });
   const ts = nowIso();
   // THE FILING DATE IS VALIDATED, NEVER COERCED. An unparseable string stored here reaches a
   // client's page as a confident wrong fact about the only date that matters to them, and a
@@ -1264,7 +1419,7 @@ export function markTrackSubmitted(
     // closed as submitted (staging is refused while a run waits on payment).
     const awaiting = db.get<Row>(
       `SELECT id FROM submissions
-        WHERE project_id = ? AND permit_type = ? AND status IN ('awaiting_human_submit', 'awaiting_payment')
+        WHERE project_id = ? AND permit_type = ? AND status IN ('awaiting_human_submit', 'awaiting_payment', 'awaiting_second_stage')
         ORDER BY created_at DESC LIMIT 1`,
       [project.id, type],
     );
@@ -1333,7 +1488,8 @@ export function markTrackSubmitted(
     // manual submit can be recorded against.
     if (project.status === "awaiting_human_submit") {
       const stillAwaiting = db.get<{ n: number }>(
-        "SELECT COUNT(*) AS n FROM submissions WHERE project_id = ? AND status = 'awaiting_human_submit'",
+        // An application waiting on its second stage (#28) is a track still to be filed too.
+        "SELECT COUNT(*) AS n FROM submissions WHERE project_id = ? AND status IN ('awaiting_human_submit', 'awaiting_second_stage')",
         [project.id],
       );
       const remaining = Number(stillAwaiting?.n ?? 0);
@@ -1370,6 +1526,93 @@ export function markTrackSubmitted(
   // THE QUOTE IN FORCE AS IT WAS FILED (#494), kept once per billing track for the fee accuracy
   // report. After the transaction and never throwing: the filing is the fact that matters.
   snapshotFilingQuote(db, project, type, submissionId);
+  // OUR PRICE IN FORCE AS IT WAS FILED (#187), once per filing type; never throws.
+  recordFilingServiceCharge(db, project, type, submissionId);
+}
+
+// ── TWO-STAGE FILINGS (#28): the two person doors, here because they close and record filings ──
+
+/**
+ * WHAT A FILING DOOR OWES INSTEAD OF A FILING on this track, or null when it may file as ever:
+ *   "upload"       the application is on record and its plans are not marked uploaded — only the
+ *                  upload's mark (markSecondStageUploaded) files it;
+ *   "application"  a person confirmed a second stage for this track's agency and the track has no
+ *                  filing and no application on record yet — what a person submits at the first
+ *                  portal is the APPLICATION (markTrackFirstStage), never the filing.
+ * A track already filed (before anyone confirmed the stage, or by its upload's mark) owes nothing.
+ * Every door that would call a track filed asks this: "I submitted it", the confirmation capture,
+ * and the approved run's gate.
+ */
+export function secondStageHold(
+  db: AppDb,
+  project: ProjectRecord,
+  type: SubmittalTrackType,
+): { owed: "application" | "upload"; system: string; sentence: string } | null {
+  const waiting = secondStagePending(db, project.id, type);
+  if (waiting) {
+    return {
+      owed: "upload", system: waiting.system,
+      sentence: `The ${type} track's application (${waiting.firstStageNumber}) is made, and its plans are not marked as uploaded in ${waiting.system || "the second system"} yet. Mark the upload done on the track card (with the confirmation number or a screenshot): that records the filing.`,
+    };
+  }
+  const stage = trackSecondStage(db, project, type);
+  if (!stage || trackSecondStageRow(db, project.id, type)) return null;
+  const family = trackPermitTypes(type);
+  const filed = db.get<Record<string, unknown>>(
+    `SELECT id FROM submissions WHERE project_id = ? AND permit_type IN (${family.map(() => "?").join(",")}) AND status = 'submitted' LIMIT 1`,
+    [project.id, ...family],
+  );
+  if (filed) return null;
+  return {
+    owed: "application", system: stage.system,
+    sentence: `${stage.agency || "This agency"} takes the plans in a second system (${stage.system}) after the application, by hand. What is submitted at its portal is the application, not the filing: record it on the track card ("The application was made by hand", or Paid at a fee stop), then mark the plan upload done. That mark records the filing.`,
+  };
+}
+
+/** Does this track's agency have a person-verified second stage (secondStage.trackSecondStage)?
+ *  Yes/no only: a door deciding what to do asks secondStageHold above. */
+export function trackHasSecondStage(db: AppDb, project: ProjectRecord, type: SubmittalTrackType): boolean {
+  return Boolean(trackSecondStage(db, project, type));
+}
+
+/**
+ * THE APPLICATION IS MADE on a two-stage agency (a person paid at the fee stop, or made it by hand):
+ * recorded as waiting on its second stage, never as the filing. Refuses a track the project does not
+ * require and one whose agency has no person-verified second stage (secondStage.recordFirstStage).
+ */
+export function markTrackFirstStage(
+  db: AppDb,
+  project: ProjectRecord,
+  type: SubmittalTrackType,
+  input: { recordNumber: string; by: string; via: "paid" | "by_hand"; note?: string },
+): TrackSecondStageRow {
+  if (!requiredTracks(project).includes(type)) {
+    throw new HttpError(400, `This project does not require a "${type}" submittal track.`);
+  }
+  return recordFirstStage(db, project, type, input, trackPermitTypes(type));
+}
+
+/**
+ * A NAMED PERSON MARKS THE PLAN UPLOAD DONE (the second system, by hand), with its confirmation
+ * number or a screenshot. This — and only this — files a track that waits on its second stage: the
+ * ordinary filing door records it (the waiting row becomes the filing; tracking target; the client
+ * hears "filed"; the quote snapshot), then the mark is stamped and audited.
+ */
+export function markSecondStageUploaded(
+  db: AppDb,
+  project: ProjectRecord,
+  type: SubmittalTrackType,
+  input: { confirmationNumber?: unknown; uploadedBy?: unknown },
+): TrackSecondStageRow {
+  const mark = beginSecondStageUpload(db, project, type, input);
+  markTrackSubmitted(db, project, type, {
+    applicationNumber: mark.row.firstStageNumber,
+    confirmationNumber: mark.confirmationNumber || undefined,
+    submittedBy: mark.uploadedBy,
+    notes: `Plans uploaded in ${mark.row.system || "the second system"} by hand; filed. Application ${mark.row.firstStageNumber} was made ${mark.row.firstStageAt.slice(0, 10)}.`,
+  }, { secondStageUploaded: true });
+  mark.finish();
+  return { ...mark.row, uploadedAt: nowIso(), uploadedBy: mark.uploadedBy, confirmationNumber: mark.confirmationNumber };
 }
 
 // ---------------------------------------------------------------------------

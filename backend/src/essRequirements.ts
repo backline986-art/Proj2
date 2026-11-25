@@ -25,6 +25,7 @@ import type { RequiredDocItem } from "./requiredDocuments";
 import { batteryStatus } from "./batteryServiceFeeder";
 import { permitProcessFor } from "./permitProcess";
 import { findAhjProcessProfile } from "./processProfiles";
+import { wholeCitations } from "./ahjRowCitations";
 
 /** Does this project carry battery storage? The one predicate, batteryStatus() === "yes" (which
  *  already reads a placeholder model as no evidence — isPlaceholderBatteryModel). */
@@ -48,7 +49,9 @@ export interface EssStepEntry {
   /** "" for a seeded process note (not a page). */
   sourceUrl: string;
   quote: string;
-  basis: "lookup_permit" | "lookup_prerequisite" | "process_note";
+  /** "reference_cited": the AHJ's reference row cites its own page for storage (citations[field=ess]),
+   *  the page's words quoted — cited, not person-verified. */
+  basis: "lookup_permit" | "lookup_prerequisite" | "lookup_battery" | "reference_cited" | "process_note";
   /** Does the source itself name storage? false: a cited FIRE permit/review that never says it
    *  covers the battery — shown hedged, never as the ESS requirement. */
   namesStorage: boolean;
@@ -88,6 +91,23 @@ export function essPermitStep(project: ProjectRecord): EssPermitStep | null {
     entries.push({ step, sourceUrl: String(cite.sourceUrl), quote, basis: "lookup_permit", namesStorage: ESS_WORDS.test(`${words} ${quote}`) });
   }
 
+  // 1b. THE LOOKUP'S CITED BATTERY-PERMITTING ANSWERS (lookup-battery-and-fees): how this AHJ's own
+  //     page says a storage job is permitted, each quote naming the storage. A warning on the card,
+  //     never a blocker (#637's bar: only an official quote making it mandatory could block, and
+  //     these land seeded).
+  const BATTERY_STEP: Record<string, string> = {
+    sameReview: "Batteries are reviewed in the same PV permit / plan review",
+    separatePermit: "A separate battery / storage permit or packet",
+    fireReview: "A fire review or fire permit for the battery",
+    fireApprovalLetter: "A fire approval letter for the battery, submitted with the application",
+  };
+  for (const b of lk?.batteryPermitting ?? []) {
+    const v = b?.value;
+    if (!v || !citedOk(b.sourceUrl, b.quote)) continue;
+    const step = `${BATTERY_STEP[v.kind] ?? v.kind}${v.agency ? ` — ${v.agency}` : ""}${v.documents?.length ? ` (documents: ${v.documents.join("; ")})` : ""}`;
+    entries.push({ step, sourceUrl: String(b.sourceUrl), quote: String(b.quote).trim(), basis: "lookup_battery", namesStorage: true });
+  }
+
   // 2. A cited prerequisite at another office that names storage or fire review.
   for (const pre of lk?.prerequisites ?? []) {
     const step = typeof pre?.value === "string" ? pre.value.trim() : "";
@@ -97,11 +117,21 @@ export function essPermitStep(project: ProjectRecord): EssPermitStep | null {
     entries.push({ step, sourceUrl: String(pre.sourceUrl), quote, basis: "lookup_prerequisite", namesStorage: ESS_WORDS.test(`${step} ${quote}`) });
   }
 
-  // 3. The AHJ's seeded process notes, per sentence/clause (as mpuNeedsOwnPermit reads them, but on
+  // 3. THE AHJ'S REFERENCE ROW, CITED (worker-trackissuer): citations[field=ess] — its own page and
+  //    the page's words — read as cited, not as the operator's note. When the row cites its page for
+  //    storage, its notes (which only restate those pages) are not listed again as "seeded notes".
+  const ahj = findAhjProcessProfile(project);
+  const essCites = wholeCitations(ahj, "ess");
+  for (const c of essCites) {
+    const step = (c.value || c.quote).trim();
+    if (entries.some((e) => e.step.toLowerCase() === step.toLowerCase())) continue;
+    entries.push({ step, sourceUrl: c.sourceUrl, quote: c.quote, basis: "reference_cited", namesStorage: ESS_WORDS.test(`${c.value} ${c.quote}`) });
+  }
+
+  // 4. The AHJ's seeded process notes, per sentence/clause (as mpuNeedsOwnPermit reads them, but on
   //    sentence boundaries so "NEC 706.10" stays whole): a clause that names storage is quoted as the
   //    operator's note — never turned into a conclusion.
-  const ahj = findAhjProcessProfile(project);
-  const notes = `${ahj?.reviewerNotes || ""} | ${ahj?.otherRequirements || ""}`;
+  const notes = essCites.length ? "" : `${ahj?.reviewerNotes || ""} | ${ahj?.otherRequirements || ""}`;
   for (const segment of notes.split(/(?<=[.!?])\s+|[;|\n]+/).map((x) => x.trim().replace(/[.!?]+$/, "")).filter(Boolean)) {
     if (!ESS_WORDS.test(segment)) continue;
     if (entries.some((e) => e.step.toLowerCase() === segment.toLowerCase())) continue;
@@ -117,5 +147,15 @@ export function essPermitStep(project: ProjectRecord): EssPermitStep | null {
     process_note: "Battery/ESS: only the seeded process notes mention storage (unverified, not a cited page) — confirm with the AHJ whether a fire review or separate ESS permit applies.",
     not_on_file: "Battery/ESS: whether this AHJ wants a fire review or a separate ESS permit is not on file — verify with the AHJ / fire marshal before filing.",
   }[status];
+  // Cited ONLY by the AHJ's reference row: its own page says what storage needs (a checklist line, a
+  // fire permit, a ventilation note) — said as that, not as "a separate permit is on file".
+  // The AHJ's own page says how a storage job is permitted (the lookup's cited answer): said as that.
+  if (status === "cited" && entries.some((e) => e.basis === "lookup_battery") && !entries.some((e) => (e.basis === "lookup_permit" || e.basis === "lookup_prerequisite") && e.namesStorage)) {
+    return { status, entries, summary: `Battery/ESS: this AHJ's own page says how a battery is permitted (cited, not person-verified): ${entries.filter((e) => e.basis === "lookup_battery").map((e) => e.step).join("; ")} — from ${[...new Set(entries.filter((e) => e.basis === "lookup_battery").map((e) => e.sourceUrl))].join(", ")}.` };
+  }
+  const onlyReference = status === "cited" && !entries.some((e) => (e.basis === "lookup_permit" || e.basis === "lookup_prerequisite") && e.namesStorage);
+  if (onlyReference) {
+    return { status, entries, summary: "Battery/ESS: the AHJ's own page states what the storage needs (quoted below, from the reference row — cited, not person-verified) — include it with this permit and confirm any separate fire / ESS permit it names." };
+  }
   return { status, entries, summary };
 }

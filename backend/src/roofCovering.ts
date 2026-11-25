@@ -11,6 +11,8 @@
 // shingle / shake / flat word too ("concrete shake tile", "flat tile", "tile shingle") — and a
 // tile roof must never collapse into composition shingle or wood shake.
 
+import type { RoofingRowAllowance } from "./jurisdictionPermitPaths";
+
 export type RoofFamily = "tile" | "membrane" | "metal" | "composition" | "wood" | "slate" | "unknown";
 
 export interface RoofCovering {
@@ -78,17 +80,29 @@ export interface OregonRoofingRow {
 }
 export const ROOF_LAYERS_RULING = "operator ruling 2026-09-28";
 export function oregonRoofingRow(material: unknown, subtype: unknown, layers: unknown): OregonRoofingRow {
+  return roofingRowAgainst(BCD_5952_ROOFING_ALLOWANCE, material, subtype, layers);
+}
+/** The BCD 440-5952 checklist's own roofing row (bcdChecklistFacts fills that form). permitPath reads
+ *  each jurisdiction's row from its permit-path record instead (reference-jurisdiction-permit-paths.json). */
+export const BCD_5952_ROOFING_ALLOWANCE: RoofingRowAllowance = { metal: true, compositionLayers: 2, woodLayers: 1 };
+
+/** ANY JURISDICTION'S ROOFING ROW (review-audit draft 14): the same answer as above, against the
+ *  coverings and layer counts THAT row admits. The row is an allowlist: a recognised covering it does
+ *  not list answers No; an unknown covering is null; a composition / wood roof with no stated layer
+ *  count passes on the operator's default (assumedLayers), a stated count over the row's limit fails. */
+export function roofingRowAgainst(allows: RoofingRowAllowance, material: unknown, subtype: unknown, layers: unknown): OregonRoofingRow {
   const covering = classifyRoofCovering(material, subtype).family;
   const m = String(layers ?? "").trim().match(/^\s*(\d+(?:\.\d+)?)/);
   const n = m ? Number(m[1]) : null;
   const known = (qualifies: boolean | null): OregonRoofingRow => ({ qualifies, assumedLayers: false });
   if (!String(material ?? "").trim() && covering !== "tile") return known(null);
-  // The row is an ALLOWLIST: a recognised covering outside it answers No.
   if (covering === "tile" || covering === "membrane" || covering === "slate") return known(false);
-  if (covering === "metal") return known(true);
+  if (covering === "metal") return known(allows.metal === true);
   if (covering === "composition" || covering === "wood") {
+    const max = covering === "composition" ? allows.compositionLayers : allows.woodLayers;
+    if (max == null) return known(false);
     if (n == null) return { qualifies: true, assumedLayers: true };
-    return known(covering === "composition" ? n <= 2 : n <= 1);
+    return known(n <= max);
   }
   return known(null);
 }
@@ -98,10 +112,14 @@ export function oregonRoofingRowQualifies(material: unknown, subtype: unknown, l
 
 /** The words that name an assumed layer count, for a fill note / path basis ("" when the row did
  *  not pass on the default). Wood is said as ONE layer: the row admits one, not two. */
-export function assumedRoofLayersNote(material: unknown, subtype: unknown, layers: unknown): string {
-  if (!oregonRoofingRow(material, subtype, layers).assumedLayers) return "";
+export function assumedRoofLayersNote(material: unknown, subtype: unknown, layers: unknown, allows: RoofingRowAllowance = BCD_5952_ROOFING_ALLOWANCE): string {
+  if (!roofingRowAgainst(allows, material, subtype, layers).assumedLayers) return "";
   const wood = classifyRoofCovering(material, subtype).family === "wood";
-  return `roof layer count not stated — assumed ${wood ? "a single layer of wood shingles/shakes" : "1-2 layers of composition"} (${ROOF_LAYERS_RULING}, "Assume 1-2 layers is good"); a stated ${wood ? "second layer" : "3 or more layers"} fails the roofing row`;
+  const max = (wood ? allows.woodLayers : allows.compositionLayers) ?? 1;
+  const what = wood ? "wood shingles/shakes" : "composition";
+  const assumed = max === 1 ? `a single layer of ${what}` : `1-${max} layers of ${what}`;
+  const fails = max === 1 ? "second layer" : `${max + 1} or more layers`;
+  return `roof layer count not stated — assumed ${assumed} (${ROOF_LAYERS_RULING}, "Assume 1-2 layers is good"); a stated ${fails} fails the roofing row`;
 }
 
 export type TileAttachmentMethod = "tile hook" | "tile-replacement mount" | "comp-out";

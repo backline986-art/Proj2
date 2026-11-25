@@ -46,7 +46,9 @@
 //                  permit track, which is what track "permit" passes in production). Any part
 //                  may be empty: "IL||Ameren Illinois" is a utility-only NEM jurisdiction.
 //                  Omitted: the distinct (state, ahj|city, utility) triples of this client's
-//                  own projects — the set the engine would actually resolve against.
+//                  own projects — the set the engine would actually resolve against — plus every
+//                  city / county and utility the client's SERVICE AREA names that no job does
+//                  yet (clientServiceArea.ts), each marked "service area".
 //                  The intake file's own `jurisdictions` array is the customer's answer to
 //                  S3.5; transcribe it here at kickoff.
 // --json           print the machine-readable report and NOTHING else, for the operator to
@@ -85,6 +87,7 @@ import { hostFitsTrackAndEntity, isUtilityPlatformUrl } from "../backend/src/por
 import { findAhjProcessProfile } from "../backend/src/processProfiles";
 import { authorityForTrack, filingEmailRecordProblems, readFilingEmail } from "../backend/src/filingEmail";
 import { getUtilityFilingLookup, nemFiledWithPermit } from "../backend/src/utilityFilingLookup";
+import { serviceAreaAuthorities } from "../backend/src/clientServiceArea";
 
 const s = (v: unknown): string => (v === null || v === undefined ? "" : String(v));
 const blank = (v: unknown): boolean => !s(v).trim();
@@ -188,6 +191,8 @@ export interface CoverageRow extends CoverageSignals {
   discipline: string;
   /** Display label: "OR | City of Coos Bay | Pacific Power". */
   jurisdiction: string;
+  /** True when only the client's service area names this jurisdiction: no job has been filed there yet. */
+  serviceArea?: boolean;
   /** The portal this row is about, in the customer's words. */
   portalLabel: string;
   reason: string;
@@ -219,6 +224,25 @@ export function parseJurisdictions(raw: string): JurisdictionSpec[] {
     })
     .filter((j) => !blank(j.state) || !blank(j.ahj) || !blank(j.utility));
 }
+
+/**
+ * THE CLIENT'S SERVICE AREA (clientServiceArea.ts): every city / county and utility the client's own
+ * row names, resolved to the authority name on file in that state, as one jurisdiction each, marked
+ * "service area". `known` are the jurisdictions already in scope (the client's jobs): an area entry
+ * whose authority one of them already names is not repeated. Reads only.
+ */
+export function jurisdictionsFromServiceArea(db: AppDb, clientId: string, known: JurisdictionSpec[] = []): JurisdictionSpec[] {
+  const has = (kind: "ahj" | "utility", state: string, name: string): boolean =>
+    known.some((j) => j.state.toUpperCase() === state.toUpperCase() && s(kind === "ahj" ? j.ahj : j.utility).trim().toLowerCase() === name.toLowerCase());
+  const out: JurisdictionSpec[] = [];
+  for (const a of serviceAreaAuthorities(db, clientId)) {
+    if (has(a.kind, a.state, a.name) || out.some((j) => j.state === a.state && (a.kind === "ahj" ? j.ahj : j.utility) === a.name)) continue;
+    out.push({ state: a.state, ahj: a.kind === "ahj" ? a.name : "", utility: a.kind === "utility" ? a.name : "", discipline: "", source: SERVICE_AREA_SOURCE });
+  }
+  return out;
+}
+/** The `source` of a jurisdiction that only the client's service area names (no job yet). */
+export const SERVICE_AREA_SOURCE = "service area";
 
 export function jurisdictionsFromProjects(db: AppDb, clientId: string): JurisdictionSpec[] {
   // `ahj || city` mirrors what the knowledge base itself keys on, so a project whose ahj was
@@ -883,6 +907,7 @@ export function buildCoverageReport(
         utility: j.utility,
         discipline: j.discipline,
         jurisdiction: label,
+        ...(j.source === SERVICE_AREA_SOURCE ? { serviceArea: true } : {}),
         portalLabel,
         reason: verdict.reason,
         unblocks: verdict.unblocks,
@@ -898,7 +923,7 @@ export function buildCoverageReport(
     database: s(process.env.AUTOPILOT_DB_PATH) || "backend/data/autopilot.sqlite",
     client,
     jurisdictionCount: jurisdictions.length,
-    jurisdictionSource: jurisdictions[0]?.source ?? "none",
+    jurisdictionSource: [...new Set(jurisdictions.map((j) => j.source))].join(" + ") || "none",
     counts,
     rows,
   };
@@ -946,7 +971,7 @@ export function renderCoverageReport(report: CoverageReport): string {
     }
     for (const row of rows) {
       line();
-      line(`  ${row.jurisdiction}`);
+      line(`  ${row.jurisdiction}${row.serviceArea ? "   (service area: no job here yet)" : ""}`);
       line(
         `    track     ${row.track === "nem" ? "NEM / interconnection" : `permit${row.discipline ? ` (${row.discipline})` : ""}`}` +
           `   ${describeChannel(row)}`,
@@ -964,6 +989,16 @@ export function renderCoverageReport(report: CoverageReport): string {
   line(`── SUMMARY ${"─".repeat(56)}`);
   for (const bucket of COVERAGE_BUCKETS) {
     line(`  ${BUCKET_LABEL[bucket].padEnd(22)} ${String(report.counts[bucket]).padStart(3)} of ${report.rows.length}`);
+  }
+  // BILLING (#700): a fee we advance through a login with no recorded agreement can never be
+  // invoiced (invoices.ts holds it as "no fee responsibility on file"), so say it here, in the
+  // report the customer actually reads at kickoff, not only on each row.
+  const unagreed = feesNotAgreed(report.rows);
+  if (unagreed.length) {
+    line();
+    line(`  ⚠ FEES NOT AGREED on ${unagreed.length} stored login(s): ${wrap(unagreed.join(", "), 4)}`);
+    line("    Who pays each portal's fees (S3.7) is blank there. A fee we pay through one of these");
+    line("    cannot be invoiced back until it is recorded on the login.");
   }
   line();
   line("  What this report is NOT: a claim that any filing will succeed. READY NOW means a recorded");
@@ -1004,6 +1039,16 @@ const FEE_WORDS: Record<string, string> = {
   "mailed-check": "a cheque they post (Ameren Illinois' $50 Level 1 fee is one of these)",
   "keelix-pays": "we pay it and invoice it back",
 };
+
+/** The distinct stored logins (by portal host) whose fee agreement is blank. */
+export function feesNotAgreed(rows: CoverageRow[]): string[] {
+  const out = new Set<string>();
+  for (const row of rows) {
+    if (row.channel?.kind === "email" || row.channel?.kind === "with_permit") continue;
+    if (row.credential.stored && !s(row.feeResponsibility)) out.add(row.portalHost || row.jurisdiction);
+  }
+  return [...out];
+}
 
 /** S3.7 is agreed PER PORTAL at kickoff, so it belongs on a per-portal row. It never moves a
  *  row between buckets: automation never pays a portal fee under any value of this column.
@@ -1103,7 +1148,9 @@ if (invokedDirectly) {
   }
 
   const jurisdictionsArg = flag("jurisdictions");
-  const jurisdictions = jurisdictionsArg ? parseJurisdictions(jurisdictionsArg) : jurisdictionsFromProjects(db, picked.id);
+  // Omitted: the client's own jobs, then every place its service area names that no job does yet.
+  const fromProjects = jurisdictionsArg ? [] : jurisdictionsFromProjects(db, picked.id);
+  const jurisdictions = jurisdictionsArg ? parseJurisdictions(jurisdictionsArg) : [...fromProjects, ...jurisdictionsFromServiceArea(db, picked.id, fromProjects)];
   const report = buildCoverageReport(
     db,
     { id: picked.id, name: picked.companyName || picked.legalBusinessName },

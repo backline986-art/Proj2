@@ -1,7 +1,7 @@
 {
   "generatedFrom": "Permit Processes.xlsx",
   "redaction": "Credential/contact columns and credential-like values removed; credential-bearing notes dropped. Customer-specific files excluded.",
-  "count": 386,
+  "count": 398,
   "profiles": [
     {
       "state": "NJ",
@@ -1286,21 +1286,146 @@
     {
       "state": "OR",
       "ahj": "Deschutes Co (La Pine)",
-      "submissionMethod": "OR E-permitting",
-      "timeline": "1 day..... to 5 weeks",
+      "submissionMethod": "https://aca-oregon.accela.com/oregon/",
+      "timeline": "Intake about 1 week; residential building review 8-9 weeks in queue (county posted times, from a complete application); electrical permits auto-issue",
       "requiresElectricianSign": false,
       "requiresElectricalStamp": false,
       "requiresStructuralStamp": false,
-      "requiresElectricalPermitApplication": false,
-      "requiresBuildingPermitApplication": false,
+      "requiresElectricalPermitApplication": true,
+      "requiresBuildingPermitApplication": true,
       "requiresSolarChecklist": true,
       "requiresPlanSet": true,
       "requiresUtilityApproval": false,
       "requiresCustomerSignature": false,
       "requiresFloodplainCheck": false,
       "requiresJurisdictionCheck": false,
-      "otherRequirements": "Electrical stickers",
-      "reviewerNotes": "",
+      "otherRequirements": "Electrical stickers; PDF uploads only (no ZIP); site plan as its own PDF",
+      "reviewerNotes": "Deschutes County's own row (unincorporated addresses). Operator sheet: OR E-permitting, timeline 1 day..... to 5 weeks. Deschutes County pages (read 2026-11-10): permits are applied for on the Oregon ePermitting website (the county links BuildingPermits.Oregon.gov, which opens the state's Accela portal); the county issues residential electrical permits there itself, they auto-issue but can be retracted within one business day, and no documents are uploaded for them. The building side is a Residential Structural permit (Oregon BCD: a structural permit is required for all qualifying solar installs). Fees (FY2027 schedule): prescriptive solar building permit $109.75 including plan review; non-prescriptive by structural valuation; renewable energy electrical $79 up to 5 kVA, $94 for 5.01-15 kVA, $156 for 15.01-25 kVA. Posted times: intake about 1 week, building review 8-9 weeks, counted from a complete application. Battery storage: nothing found on the county's pages (check by hand). Seeded from the authority's own pages, NOT verified.",
+      "documents": {
+        "items": [
+          "Residential Structural permit application on Oregon ePermitting (prescriptive or non-prescriptive solar)",
+          "Site plan, uploaded as a separate, individual PDF",
+          "Plans and documents as PDF only (ZIP files are not accepted)",
+          "Residential Electrical permit application on Oregon ePermitting (no documents uploaded)"
+        ],
+        "sourceUrl": "https://www.deschutescounty.gov/620/Construction-Plan-Requirements-Residenti",
+        "quote": "Site Plan shall be uploaded as a separate, individual PDF.",
+        "observedAt": "2026-11-10"
+      },
+      "citations": [
+        {
+          "field": "submissionMethod",
+          "value": "https://aca-oregon.accela.com/oregon/",
+          "sourceUrl": "https://www.deschutescounty.gov/611/Electrical-Mechanical-and-Plumbing-Permi",
+          "quote": "Step 1: Log into your account on the Oregon ePermitting website:",
+          "fetchedAt": "2026-11-10T18:25:05Z"
+        },
+        {
+          "field": "permitSystem",
+          "value": "Oregon ePermitting",
+          "sourceUrl": "https://www.deschutescounty.gov/601/Oregon-ePermitting-FAQs",
+          "quote": "The Oregon ePermitting Website allows licensed contractors and homeowners to apply for building permits with just a few clicks of a mouse.",
+          "fetchedAt": "2026-11-10T18:25:08Z"
+        },
+        {
+          "field": "electricalPermitIssuer",
+          "value": "county",
+          "sourceUrl": "https://www.deschutescounty.gov/611/Electrical-Mechanical-and-Plumbing-Permi",
+          "quote": "Step 5: Electrical, Mechanical and Plumbing permits auto issue ,but can be retracted within one business day if deemed incomplete",
+          "fetchedAt": "2026-11-10T18:25:05Z"
+        },
+        {
+          "field": "requiresElectricalPermitApplication",
+          "value": "true",
+          "sourceUrl": "https://www.deschutescounty.gov/611/Electrical-Mechanical-and-Plumbing-Permi",
+          "quote": "You need a residential electrical permit to Install, change or repair any hard-wired electrical system",
+          "fetchedAt": "2026-11-10T18:25:05Z"
+        },
+        {
+          "field": "requiresBuildingPermitApplication",
+          "value": "true",
+          "sourceUrl": "https://www.oregon.gov/bcd/epermitting/help/records/Pages/permit-for-solar.aspx",
+          "quote": "A structural permit is required for all qualifying Solar/PV Installs.",
+          "fetchedAt": "2026-11-10T18:27:00Z"
+        },
+        {
+          "field": "requiresBuildingPermitApplication",
+          "value": "true",
+          "sourceUrl": "https://www.oregon.gov/bcd/epermitting/help/records/Pages/permit-for-solar.aspx",
+          "quote": "Applicant applies for a Commercial or Residential Structural permit",
+          "fetchedAt": "2026-11-10T18:27:00Z"
+        },
+        {
+          "field": "documents",
+          "value": "no documents uploaded for the electrical permit",
+          "sourceUrl": "https://www.deschutescounty.gov/611/Electrical-Mechanical-and-Plumbing-Permi",
+          "quote": "Note: No documents are required to be uploaded for these types of permits.",
+          "fetchedAt": "2026-11-10T18:25:05Z"
+        },
+        {
+          "field": "documents",
+          "value": "PDF only, no ZIP",
+          "sourceUrl": "https://www.deschutescounty.gov/613/1-2-Family-Dwelling-and-Structural-Appli",
+          "quote": "PDF documents are the only document file type that will be reviewed,.ZIP files will not be accepted.",
+          "fetchedAt": "2026-11-10T18:25:40Z"
+        },
+        {
+          "field": "timeline",
+          "value": "application intake 1 week",
+          "sourceUrl": "https://www.deschutescounty.gov/598/Processing-Times-for-Permits",
+          "quote": "Application Intake 1 Week",
+          "fetchedAt": "2026-11-10T18:25:07Z"
+        },
+        {
+          "field": "timeline",
+          "value": "building review 8-9 weeks",
+          "sourceUrl": "https://www.deschutescounty.gov/598/Processing-Times-for-Permits",
+          "quote": "Building Review 8 - 9 Weeks",
+          "fetchedAt": "2026-11-10T18:25:07Z"
+        },
+        {
+          "field": "timeline",
+          "value": "counted from a complete application",
+          "sourceUrl": "https://www.deschutescounty.gov/598/Processing-Times-for-Permits",
+          "quote": "The Review times are calculated off of a complete application to include all required documents, not when the application was submitted.",
+          "fetchedAt": "2026-11-10T18:25:07Z"
+        },
+        {
+          "field": "fees",
+          "value": "109.75",
+          "sourceUrl": "https://www.deschutescounty.gov/DocumentCenter/View/8607/FY-2027-Fee-Schedule_Revised-08-18-26",
+          "quote": "Solar Building Permit - Prescriptive (includes plan review) $ 109.75",
+          "fetchedAt": "2026-11-10T18:25:54Z"
+        },
+        {
+          "field": "fees",
+          "value": "prescriptive fee includes plan review",
+          "sourceUrl": "https://www.oregon.gov/bcd/epermitting/help/records/Pages/permit-for-solar.aspx",
+          "quote": "the Prescriptive Photovoltaic fee already includes plan review, so plan review is not separately charged with this system type.",
+          "fetchedAt": "2026-11-10T18:27:00Z"
+        },
+        {
+          "field": "fees",
+          "value": "79.00",
+          "sourceUrl": "https://www.deschutescounty.gov/DocumentCenter/View/8607/FY-2027-Fee-Schedule_Revised-08-18-26",
+          "quote": "5 KVA or less $ 79.00",
+          "fetchedAt": "2026-11-10T18:25:54Z"
+        },
+        {
+          "field": "fees",
+          "value": "94.00",
+          "sourceUrl": "https://www.deschutescounty.gov/DocumentCenter/View/8607/FY-2027-Fee-Schedule_Revised-08-18-26",
+          "quote": "5.01 KVA to 15KVA $ 94.00",
+          "fetchedAt": "2026-11-10T18:25:54Z"
+        },
+        {
+          "field": "fees",
+          "value": "156.00",
+          "sourceUrl": "https://www.deschutescounty.gov/DocumentCenter/View/8607/FY-2027-Fee-Schedule_Revised-08-18-26",
+          "quote": "15.01 KVA to 25 KVA $ 156.00",
+          "fetchedAt": "2026-11-10T18:25:54Z"
+        }
+      ],
       "sourceSheet": "OR PROCESS"
     },
     {
@@ -5000,19 +5125,28 @@
       "requiresFloodplainCheck": false,
       "requiresJurisdictionCheck": true,
       "otherRequirements": "",
-      "reviewerNotes": "EPA comes from ID state. Form in prep folder and submit to ID state. Project value will only include the cost of the mounting system and the labor to install said system. Do not include the cost of the solar panels themselves in your valuation. Stamped plans on site.",
+      "reviewerNotes": "EPA comes from ID state. Form in prep folder and submit to ID state. Project value will only include the cost of the mounting system and the labor to install said system. Do not include the cost of the solar panels themselves in your valuation. Stamped plans on site. State chart (the Division's inspector list of 2023-01-19, which its electrical FAQ links as the chart showing jurisdiction; read 2026-11-11): in this county the state's electrical inspector covers the county outside the city limits, so the electrical permit for an unincorporated address is the state's. The chart is from 2023; the state's current answer for one address is its permit map. Seeded from the state's own pages, NOT verified.",
+      "citations": [
+        {
+          "field": "electricalPermitIssuer",
+          "value": "state (state chart: its electrical inspector covers the county outside city limits)",
+          "sourceUrl": "https://dopl.idaho.gov/wp-content/uploads/2023/09/BCRE-Inspector-List-with-Schedules-2023-01-19.pdf",
+          "quote": "BOISE 83705 ADA CLINT PIERCE MTW TODD MTW BRUCE HOLLAND MTW RUSS GARDINA 208-606-6951 SCHWENDIMAN 208-867-4192 208-606-5915 County Only",
+          "fetchedAt": "2026-11-11T20:23:00Z"
+        }
+      ],
       "sourceSheet": "ID PROCESS"
     },
     {
       "state": "ID",
       "ahj": "Boise",
-      "submissionMethod": "Boise Portal EPlans upload",
+      "submissionMethod": "https://permits.cityofboise.org/",
       "timeline": "",
       "requiresElectricianSign": false,
       "requiresElectricalStamp": false,
       "requiresStructuralStamp": false,
-      "requiresElectricalPermitApplication": false,
-      "requiresBuildingPermitApplication": false,
+      "requiresElectricalPermitApplication": true,
+      "requiresBuildingPermitApplication": true,
       "requiresSolarChecklist": false,
       "requiresPlanSet": true,
       "requiresUtilityApproval": false,
@@ -5020,7 +5154,80 @@
       "requiresFloodplainCheck": false,
       "requiresJurisdictionCheck": true,
       "otherRequirements": "",
-      "reviewerNotes": "For Electrical Fixtures mark \"1\" for \"photovoltaic system\" Apply for Solar on portal first. After issued, apply for the electrical portion. Upload files separate sheets and rename. When/If resubmitting corrections, please only upload affected sheets with same naming conventions.",
+      "reviewerNotes": "For Electrical Fixtures mark \"1\" for \"photovoltaic system\" Apply for Solar on portal first. After issued, apply for the electrical portion. Upload files separate sheets and rename. When/If resubmitting corrections, please only upload affected sheets with same naming conventions. Operator sheet channel: Boise Portal EPlans upload. City of Boise pages (read 2026-11-10): city permits are applied for through its Permitting & Licensing portal; PV needs a building permit and an electrical permit, and the electrical trade permit is obtained separately with its own fee. Battery backup jobs: the #406 checklist asks for battery specifications showing UL 9540 testing, the battery manufacturer's installation guidelines, and floor plans showing the battery location and any bollard or ventilation. Fire: the Boise Fire Department's battery systems permit applies to installing a stationary battery system. State chart (the Division's inspector list of 2023-01-19, which its electrical FAQ links as the chart showing jurisdiction; read 2026-11-11): for this city's ZIP the state's electrical inspector covers the county only, so inside the city limits the electrical permit is the city's own. The chart is from 2023; the state's current answer for one address is its permit map. Seeded from the authority's own pages and the state's, NOT verified.",
+      "documents": {
+        "items": [
+          "Form #406 Residential Addition, Alteration & Accessory Building Application",
+          "Roof plan drawn to scale with the exact location of panels and the fire-fighter access clearances",
+          "Structural calculations, where applicable, stamped and signed by an Idaho licensed engineer",
+          "Manufacturer specifications for panels, inverters, racking and other equipment showing the UL listing",
+          "One-line electrical diagram (equipment location, voltage and current ratings, wire size, disconnect and overcurrent ratings)",
+          "ICC-ES Evaluation Services Report for all mounting brackets",
+          "Certificate of Appropriateness from Planning (installations in a Historic District)",
+          "Battery backup: battery NRTL certification (UL 9540), manufacturer installation guidelines, floor plans with the battery location"
+        ],
+        "sourceUrl": "https://www.cityofboise.org/media/17322/406-residential-photovoltaic-system-submittal-checklist-_fillable_oct-2022.pdf",
+        "quote": "Please check in at the Permit Counter with a completed #406 Application, this checklist, and all other required documents (see below).",
+        "observedAt": "2026-11-10"
+      },
+      "citations": [
+        {
+          "field": "submissionMethod",
+          "value": "https://permits.cityofboise.org/",
+          "sourceUrl": "https://www.cityofboise.org/permitting-and-licensing-portal/",
+          "quote": "To apply for a city permit, license or file a code compliance complaint, you'll be required to do so through our new Permitting & Licensing portal.",
+          "fetchedAt": "2026-11-10T08:20:10Z"
+        },
+        {
+          "field": "requiresElectricalPermitApplication",
+          "value": "true",
+          "sourceUrl": "https://www.cityofboise.org/media/3698/solar_photovoltaic_pv_field_inspection_process_pdf-a.pdf",
+          "quote": "Boise City Code requires a Building permit and an Electrical permit prior to commencing installation of Photovoltaic panels.",
+          "fetchedAt": "2026-11-10T08:20:53Z"
+        },
+        {
+          "field": "requiresBuildingPermitApplication",
+          "value": "true",
+          "sourceUrl": "https://www.cityofboise.org/media/3698/solar_photovoltaic_pv_field_inspection_process_pdf-a.pdf",
+          "quote": "Boise City Code requires a Building permit and an Electrical permit prior to commencing installation of Photovoltaic panels.",
+          "fetchedAt": "2026-11-10T08:20:53Z"
+        },
+        {
+          "field": "electricalPermitIssuer",
+          "value": "city",
+          "sourceUrl": "https://www.cityofboise.org/media/9168/solar-photovoltaic-systems-fee-guide_dec-2019_final.pdf",
+          "quote": "Note: Trade permits, such as electrical, are obtained separately with a separate fee.",
+          "fetchedAt": "2026-11-10T08:20:52Z"
+        },
+        {
+          "field": "ess",
+          "value": "battery specifications showing UL 9540 testing",
+          "sourceUrl": "https://www.cityofboise.org/media/17322/406-residential-photovoltaic-system-submittal-checklist-_fillable_oct-2022.pdf",
+          "quote": "Battery NRTL certification Specifications need to show batteries as tested in accordance with UL 9540.",
+          "fetchedAt": "2026-11-10T08:20:43Z"
+        },
+        {
+          "field": "ess",
+          "value": "floor plans with the battery location",
+          "sourceUrl": "https://www.cityofboise.org/media/17322/406-residential-photovoltaic-system-submittal-checklist-_fillable_oct-2022.pdf",
+          "quote": "Include exact location of batteries in the home and any required bollard or ventilation locations.",
+          "fetchedAt": "2026-11-10T08:20:43Z"
+        },
+        {
+          "field": "ess",
+          "value": "Fire Department battery systems permit for a stationary battery system",
+          "sourceUrl": "https://www.cityofboise.org/departments/fire/fire-prevention/permits/special-use-and-operations/battery-systems-permit/",
+          "quote": "The battery systems permit applies to the installation of a stationary battery system.",
+          "fetchedAt": "2026-11-10T08:20:04Z"
+        },
+        {
+          "field": "electricalPermitIssuer",
+          "value": "city (state chart: its electrical inspector covers 'County Only' here)",
+          "sourceUrl": "https://dopl.idaho.gov/wp-content/uploads/2023/09/BCRE-Inspector-List-with-Schedules-2023-01-19.pdf",
+          "quote": "BOISE 83709 ADA ALAN KLINE MTW TODD MTW JP SIMONS MTW RUSS GARDINA 208-807-0611 SCHWENDIMAN 208-514-6753 208-606-5915 County Only",
+          "fetchedAt": "2026-11-11T20:23:00Z"
+        }
+      ],
       "sourceSheet": "ID PROCESS"
     },
     {
@@ -5040,8 +5247,228 @@
       "requiresFloodplainCheck": false,
       "requiresJurisdictionCheck": true,
       "otherRequirements": "Credit Card Authorization",
-      "reviewerNotes": "",
+      "reviewerNotes": "Canyon County building department page (read 2026-11-10): mechanical, electrical and plumbing permits and inspections are handled by the State of Idaho (DOPL), not the county. State chart (the Division's inspector list of 2023-01-19, which its electrical FAQ links as the chart showing jurisdiction; read 2026-11-11): in this county the state's electrical inspector covers the county outside the city limits, so the electrical permit for an unincorporated address is the state's. The chart is from 2023; the state's current answer for one address is its permit map. Seeded from the authority's own pages and the state's, NOT verified.",
+      "citations": [
+        {
+          "field": "electricalPermitIssuer",
+          "value": "state (DOPL)",
+          "sourceUrl": "https://www.canyoncounty.id.gov/building-department",
+          "quote": "all Mechanical, Electrical and Plumbing permits and inspections are handled by the State of Idaho, Division of Occupational and Professional Licenses (DOPL)",
+          "fetchedAt": "2026-11-10T08:24:31Z"
+        },
+        {
+          "field": "electricalPermitIssuer",
+          "value": "state (state chart: its electrical inspector covers the county outside city limits)",
+          "sourceUrl": "https://dopl.idaho.gov/wp-content/uploads/2023/09/BCRE-Inspector-List-with-Schedules-2023-01-19.pdf",
+          "quote": "MIDDLETON 83644 CANYON MILENKO JOKIC MTW DANNY STRAIN MTW DARREN MCRAE MTW MIKE DAVIS 208-616-2901 208-870-6824 208-608-3690 County Only",
+          "fetchedAt": "2026-11-11T20:23:00Z"
+        }
+      ],
       "sourceSheet": "ID PROCESS"
+    },
+    {
+      "state": "ID",
+      "ahj": "Idaho Division of Occupational and Professional Licenses (DOPL)",
+      "submissionMethod": "https://web.dbs.idaho.gov/etrakit3/",
+      "timeline": "",
+      "requiresElectricianSign": false,
+      "requiresElectricalStamp": false,
+      "requiresStructuralStamp": false,
+      "requiresElectricalPermitApplication": true,
+      "requiresBuildingPermitApplication": false,
+      "requiresSolarChecklist": false,
+      "requiresPlanSet": false,
+      "requiresUtilityApproval": false,
+      "requiresCustomerSignature": false,
+      "requiresFloodplainCheck": false,
+      "requiresJurisdictionCheck": false,
+      "otherRequirements": "",
+      "reviewerNotes": "The state's electrical permit authority: where a city or county does not run its own electrical program, the electrical permit track files with this office. State pages (read 2026-11-11): the Division offers online permits to licensed electrical contractors, bought in its online permit system after registering an account; since January 1, 2023 all state permits are bought online; its permit map takes the job address and sends the applicant to the right site, so the address decides whether a job is the state's. Permits are bought before work starts. Fee for a solar, renewable or storage job (the state's contractor worksheet lists them under other installations; IDAPA 24.39.10.500.02.b), on the total cost of the electrical system: up to $10,000, $60 plus 2 percent; over $10,000 up to $100,000, $260 plus 1 percent of the cost over $10,000; over $100,000, $1,160 plus 0.5 percent of the cost over $100,000. Renewable energy needs a plan check before final inspection: $65 minimum for the first hour, then $65 per hour. Reinspection $65. At the on-site inspection the inspector asks for a one-line diagram, manufacturer specification sheets, load calculations where the main breaker is downsized or a standby panel or transfer switch is used, and pictures of work in attics and basements; storage systems and transfer switches must be installed before final. Service changes or upgrades need their own permit. Its online permit system (the link the state's own FAQ gives) is on file as a seeded door: a person opens it, signs in as the contractor and confirms the address before anything is filed there. Seeded from the state's own pages, NOT verified.",
+      "stateAuthorityFor": [
+        "electrical"
+      ],
+      "documents": {
+        "items": [
+          "One-line diagram: service equipment, panels, disconnects, transfer switches, overcurrent devices, wiring methods, grounding electrode system, arrays and strings, point of connection",
+          "Manufacturer's specification sheets: modules, inverters, optimizers, rapid shutdown components, mounting system, charge controllers, energy storage systems, combiners",
+          "Load calculations (NEC 220 Part III or IV) when the main breaker is downsized, for an optional standby or stand-alone panel, or when an automatic transfer switch is used",
+          "Pictures of installation in areas like attics and basements"
+        ],
+        "sourceUrl": "https://dopl.idaho.gov/wp-content/uploads/2023/11/ELE-Renewable-Energy-and-Energy-Storage-Systems-on_site-Electrical-Inspection-Requirements-5_24_22.pdf",
+        "quote": "it is requested that you provide the following documentation at the time of on-site electrical inspection.",
+        "observedAt": "2026-11-11"
+      },
+      "citations": [
+        {
+          "field": "ahj",
+          "value": "State of Idaho, Division of Occupational and Professional Licenses (DOPL)",
+          "sourceUrl": "https://www.canyoncounty.id.gov/building-department",
+          "quote": "all Mechanical, Electrical and Plumbing permits and inspections are handled by the State of Idaho, Division of Occupational and Professional Licenses (DOPL)",
+          "fetchedAt": "2026-11-10T08:24:31Z"
+        },
+        {
+          "field": "submissionMethod",
+          "value": "https://web.dbs.idaho.gov/etrakit3/",
+          "sourceUrl": "https://dopl.idaho.gov/ele/ele-faqs/",
+          "quote": "Register and establish a free account and purchase your permit online",
+          "fetchedAt": "2026-11-11T20:22:45Z"
+        },
+        {
+          "field": "permitSystem",
+          "value": "online permit system (the link the FAQ gives): https://web.dbs.idaho.gov/etrakit3/",
+          "sourceUrl": "https://dopl.idaho.gov/ele/ele-faqs/",
+          "quote": "Register and establish a free account and purchase your permit online",
+          "fetchedAt": "2026-11-11T20:22:45Z"
+        },
+        {
+          "field": "permitSystem",
+          "value": "online permits for licensed electrical contractors",
+          "sourceUrl": "https://dopl.idaho.gov/ele/ele-faqs/",
+          "quote": "The Division of Occupational and Professional Licenses offers online permits to licensed Electrical contractors as well as homeowners performing work on their primary or secondary residences.",
+          "fetchedAt": "2026-11-11T20:22:45Z"
+        },
+        {
+          "field": "permitSystem",
+          "value": "all permits bought online since 2023-01-01",
+          "sourceUrl": "https://dopl.idaho.gov/wp-content/uploads/2023/11/ELE-Contractor-Electrical-Permit-Application.pdf",
+          "quote": "As of January 1, 2023, all permits will need to be purchased Online at DBS.IDAHO.GOV",
+          "fetchedAt": "2026-11-11T20:22:58Z"
+        },
+        {
+          "field": "permitSystem",
+          "value": "the state permit map routes each address to the right site",
+          "sourceUrl": "https://dopl.idaho.gov/purchase-a-trade-permit/",
+          "quote": "Click the appropriate permit type in the list on the right. You will be directed to the appropriate website to purchase the permit needed.",
+          "fetchedAt": "2026-11-11T20:22:47Z"
+        },
+        {
+          "field": "requiresElectricalPermitApplication",
+          "value": "true",
+          "sourceUrl": "https://adminrules.idaho.gov/rules/current/24/243910.pdf",
+          "quote": "All electrical permits shall be purchased before work is commenced.",
+          "fetchedAt": "2026-11-11T20:22:56Z"
+        },
+        {
+          "field": "jurisdiction",
+          "value": "cities and counties may run their own electrical program",
+          "sourceUrl": "https://dopl.idaho.gov/ele/ele-faqs/",
+          "quote": "Because the legislature has authorized several cities and counties to assume jurisdiction within their boundaries, permit requirements vary widely throughout the state.",
+          "fetchedAt": "2026-11-11T20:22:45Z"
+        },
+        {
+          "field": "jurisdiction",
+          "value": "a city or county notifies the Division before running its own program",
+          "sourceUrl": "https://legislature.idaho.gov/statutesrules/idstat/Title54/T54CH10/SECT54-1001B/",
+          "quote": "A city or county that chooses to conduct its own electrical code enforcement inspections or to receive such inspections from another city or county shall provide the division of occupational and professional licenses notice of such decision in writing at least thirty (30) days prior to implementation.",
+          "fetchedAt": "2026-11-11T20:23:54Z"
+        },
+        {
+          "field": "jurisdiction",
+          "value": "the state chart of where its inspectors work",
+          "sourceUrl": "https://dopl.idaho.gov/ele/ele-faqs/",
+          "quote": "Please refer to this chart showing jurisdiction based on geographical location .",
+          "fetchedAt": "2026-11-11T20:22:45Z"
+        },
+        {
+          "field": "fees",
+          "value": "solar and renewable energy are priced as other installations",
+          "sourceUrl": "https://dopl.idaho.gov/wp-content/uploads/2023/11/ELE-Contractor-Electrical-Permit-Application.pdf",
+          "quote": "OTHER INSTALLATIONS including COMMERCIAL/INDUSTRIAL/SOLAR/RENEWABLE ENERGY",
+          "fetchedAt": "2026-11-11T20:22:58Z"
+        },
+        {
+          "field": "fees",
+          "value": "solar, renewable energy and energy storage systems",
+          "sourceUrl": "https://dopl.idaho.gov/wp-content/uploads/2023/11/ELE-Contractor-Electrical-Permit-Application.pdf",
+          "quote": "Check here if this is a Solar, Renewable Energy, power generation, power production, or energy storage systems:",
+          "fetchedAt": "2026-11-11T20:22:58Z"
+        },
+        {
+          "field": "fees",
+          "value": "on the total cost of the electrical system",
+          "sourceUrl": "https://adminrules.idaho.gov/rules/current/24/243910.pdf",
+          "quote": "The electrical cost shall be the cost to the owner of all labor charges and all other costs that are incurred to complete the installation of all wiring and equipment installed as part of the system.",
+          "fetchedAt": "2026-11-11T20:22:56Z"
+        },
+        {
+          "field": "fees",
+          "value": "$60 plus 2% up to $10,000",
+          "sourceUrl": "https://adminrules.idaho.gov/rules/current/24/243910.pdf",
+          "quote": "Wiring cost not exceeding ten thousand dollars ($10,000): sixty dollars ($60) plus two percent (2%) of total wiring cost.",
+          "fetchedAt": "2026-11-11T20:22:56Z"
+        },
+        {
+          "field": "fees",
+          "value": "$260 plus 1% over $10,000 up to $100,000",
+          "sourceUrl": "https://adminrules.idaho.gov/rules/current/24/243910.pdf",
+          "quote": "Wiring cost over ten thousand dollars ($10,000) but not exceeding one hundred thousand dollars ($100,000): two hundred sixty dollars ($260) plus one percent (1%) of wiring cost in excess of ten thousand dollars ($10,000).",
+          "fetchedAt": "2026-11-11T20:22:56Z"
+        },
+        {
+          "field": "fees",
+          "value": "$1,160 plus 0.5% over $100,000",
+          "sourceUrl": "https://adminrules.idaho.gov/rules/current/24/243910.pdf",
+          "quote": "Wiring cost over one hundred thousand dollars ($100,000): one thousand one hundred sixty dollars ($1,160) plus one-half of one percent (.5%) of the portion of wiring costs exceeding one hundred thousand dollars ($100,000).",
+          "fetchedAt": "2026-11-11T20:22:56Z"
+        },
+        {
+          "field": "fees",
+          "value": "renewable energy requires a plan check",
+          "sourceUrl": "https://dopl.idaho.gov/wp-content/uploads/2023/11/ELE-Contractor-Electrical-Permit-Application.pdf",
+          "quote": "Renewable Energy: Requires plan check prior to final inspection.",
+          "fetchedAt": "2026-11-11T20:22:58Z"
+        },
+        {
+          "field": "fees",
+          "value": "$65 minimum plan check",
+          "sourceUrl": "https://adminrules.idaho.gov/rules/current/24/243910.pdf",
+          "quote": "Plan Check Fee. Sixty-five dollar ($65) minimum for one (1) hour or less.",
+          "fetchedAt": "2026-11-11T20:22:56Z"
+        },
+        {
+          "field": "fees",
+          "value": "$65 reinspection",
+          "sourceUrl": "https://adminrules.idaho.gov/rules/current/24/243910.pdf",
+          "quote": "Reinspection Fees. A fee of sixty-five dollars ($65) per reinspection will be assessed for work not being ready for inspection",
+          "fetchedAt": "2026-11-11T20:22:56Z"
+        },
+        {
+          "field": "documents",
+          "value": "renewable energy and energy storage inspections",
+          "sourceUrl": "https://dopl.idaho.gov/wp-content/uploads/2023/11/ELE-Renewable-Energy-and-Energy-Storage-Systems-on_site-Electrical-Inspection-Requirements-5_24_22.pdf",
+          "quote": "Electrical Inspections for non-grid connected and grid connected renewable energy and energy storage systems.",
+          "fetchedAt": "2026-11-11T20:22:57Z"
+        },
+        {
+          "field": "documents",
+          "value": "one-line diagram",
+          "sourceUrl": "https://dopl.idaho.gov/wp-content/uploads/2023/11/ELE-Renewable-Energy-and-Energy-Storage-Systems-on_site-Electrical-Inspection-Requirements-5_24_22.pdf",
+          "quote": "A One-Line Diagram - To include but not limited to the following:",
+          "fetchedAt": "2026-11-11T20:22:57Z"
+        },
+        {
+          "field": "documents",
+          "value": "load calculations",
+          "sourceUrl": "https://dopl.idaho.gov/wp-content/uploads/2023/11/ELE-Renewable-Energy-and-Energy-Storage-Systems-on_site-Electrical-Inspection-Requirements-5_24_22.pdf",
+          "quote": "Load Calculations in accordance with NEC 220 Part III or IV as applicable",
+          "fetchedAt": "2026-11-11T20:22:57Z"
+        },
+        {
+          "field": "documents",
+          "value": "storage and transfer switches installed before final",
+          "sourceUrl": "https://dopl.idaho.gov/wp-content/uploads/2023/11/ELE-Renewable-Energy-and-Energy-Storage-Systems-on_site-Electrical-Inspection-Requirements-5_24_22.pdf",
+          "quote": "Charge Controllers, Energy Storage System/s, Transfer Switches, Generators, Optional Standby and/or Stand-Alone Panels are required to be installed.",
+          "fetchedAt": "2026-11-11T20:22:57Z"
+        },
+        {
+          "field": "documents",
+          "value": "service changes need their own permit",
+          "sourceUrl": "https://dopl.idaho.gov/wp-content/uploads/2023/11/ELE-Renewable-Energy-and-Energy-Storage-Systems-on_site-Electrical-Inspection-Requirements-5_24_22.pdf",
+          "quote": "Where Service changes and/or upgrades are required and/or done, they shall be done under a separate permit.",
+          "fetchedAt": "2026-11-11T20:22:57Z"
+        }
+      ],
+      "sourceSheet": "ID seeded (authority pages read 2026-11-10)"
     },
     {
       "state": "ID",
@@ -5066,7 +5493,7 @@
     {
       "state": "ID",
       "ahj": "Eagle",
-      "submissionMethod": "EMAIL",
+      "submissionMethod": "https://eagle_permit.portal.iworq.net/portalhome/EAGLE_permit",
       "timeline": "",
       "requiresElectricianSign": false,
       "requiresElectricalStamp": false,
@@ -5080,7 +5507,37 @@
       "requiresFloodplainCheck": false,
       "requiresJurisdictionCheck": true,
       "otherRequirements": "Bid sheet/cost of materials and install",
-      "reviewerNotes": "Online payment portal",
+      "reviewerNotes": "Online payment portal City of Eagle pages (read 2026-11-10): building forms and applications that may be submitted online go through its Contractor Portal (iWorQ); the city issues electrical permits through the same Contractor Portal. State chart (the Division's inspector list of 2023-01-19, which its electrical FAQ links as the chart showing jurisdiction; read 2026-11-11): for this city's ZIP the state's electrical inspector covers the county only, so inside the city limits the electrical permit is the city's own. The chart is from 2023; the state's current answer for one address is its permit map. Seeded from the authority's own pages and the state's, NOT verified.",
+      "citations": [
+        {
+          "field": "submissionMethod",
+          "value": "https://eagle_permit.portal.iworq.net/portalhome/EAGLE_permit",
+          "sourceUrl": "https://www.cityofeagle.org/2153/Building-Permits-Applications-Forms",
+          "quote": "Forms/Applications that may be submitted online are accessed through the Contractor Portal.",
+          "fetchedAt": "2026-11-10T08:24:03Z"
+        },
+        {
+          "field": "electricalPermitIssuer",
+          "value": "city",
+          "sourceUrl": "https://www.cityofeagle.org/1835/Electrical-Permits",
+          "quote": "Please use the Contractor Portal for Electrical Permits.",
+          "fetchedAt": "2026-11-10T08:24:08Z"
+        },
+        {
+          "field": "electricalPermitIssuer",
+          "value": "city (application may also be faxed, emailed, mailed or brought in)",
+          "sourceUrl": "https://www.cityofeagle.org/1835/Electrical-Permits",
+          "quote": "You have the option of faxing, emailing, mailing or bringing the application into the Building Department.",
+          "fetchedAt": "2026-11-10T08:24:08Z"
+        },
+        {
+          "field": "electricalPermitIssuer",
+          "value": "city (state chart: its electrical inspector covers 'County Only' here)",
+          "sourceUrl": "https://dopl.idaho.gov/wp-content/uploads/2023/09/BCRE-Inspector-List-with-Schedules-2023-01-19.pdf",
+          "quote": "EAGLE 83616 ADA MILENKO JOKIC MTW TODD MTW BRUCE HOLLAND MTW RUSS GARDINA 208-616-2901 SCHWENDIMAN 208-867-4192 208-606-5915 County Only",
+          "fetchedAt": "2026-11-11T20:23:00Z"
+        }
+      ],
       "sourceSheet": "ID PROCESS"
     },
     {
@@ -5160,7 +5617,16 @@
       "requiresFloodplainCheck": false,
       "requiresJurisdictionCheck": true,
       "otherRequirements": "",
-      "reviewerNotes": "Permit docs can be in one PDF, plan set needs to be separated into individual pages",
+      "reviewerNotes": "Permit docs can be in one PDF, plan set needs to be separated into individual pages. State chart (the Division's inspector list of 2023-01-19, which its electrical FAQ links as the chart showing jurisdiction; read 2026-11-11): for this city's ZIP the state's electrical inspector covers the county only, so inside the city limits the electrical permit is the city's own. The chart is from 2023; the state's current answer for one address is its permit map. Seeded from the state's own pages, NOT verified.",
+      "citations": [
+        {
+          "field": "electricalPermitIssuer",
+          "value": "city (state chart: its electrical inspector covers 'County Only' here)",
+          "sourceUrl": "https://dopl.idaho.gov/wp-content/uploads/2023/09/BCRE-Inspector-List-with-Schedules-2023-01-19.pdf",
+          "quote": "MERIDIAN 83642 ADA CLINT PIERCE MTW TODD MTW JP SIMONS MTW RUSS GARDINA 208-606-6951 SCHWENDIMAN 208-514-6753 208-606-5915 County Only",
+          "fetchedAt": "2026-11-11T20:23:00Z"
+        }
+      ],
       "sourceSheet": "ID PROCESS"
     },
     {
@@ -5180,7 +5646,16 @@
       "requiresFloodplainCheck": false,
       "requiresJurisdictionCheck": true,
       "otherRequirements": "",
-      "reviewerNotes": "",
+      "reviewerNotes": "State chart (the Division's inspector list of 2023-01-19, which its electrical FAQ links as the chart showing jurisdiction; read 2026-11-11): for this city's ZIP the state's electrical inspector covers the county only, so inside the city limits the electrical permit is the city's own. The chart is from 2023; the state's current answer for one address is its permit map. Seeded from the state's own pages, NOT verified.",
+      "citations": [
+        {
+          "field": "electricalPermitIssuer",
+          "value": "city (state chart: its electrical inspector covers 'County Only' here)",
+          "sourceUrl": "https://dopl.idaho.gov/wp-content/uploads/2023/09/BCRE-Inspector-List-with-Schedules-2023-01-19.pdf",
+          "quote": "NAMPA 83687 CANYON KELLY WEBB MTW DANNY STRAIN MTW DARREN MCRAE MTW ROBERT 208-550-5485 208-870-6824 208-608-3690 CONWAY County Only",
+          "fetchedAt": "2026-11-11T20:23:00Z"
+        }
+      ],
       "sourceSheet": "ID PROCESS"
     },
     {
@@ -5260,8 +5735,217 @@
       "requiresFloodplainCheck": false,
       "requiresJurisdictionCheck": true,
       "otherRequirements": "",
-      "reviewerNotes": "Bid sheet and plan set. Fill out solar application on portal. Upload plans and bid sheet.",
+      "reviewerNotes": "Bid sheet and plan set. Fill out solar application on portal. Upload plans and bid sheet. City of Star pages (read 2026-11-10): all plans are uploaded to the city's iWorQ portal; electrical, mechanical and plumbing permits are in addition to the building permit and are bought at City Hall, in person. State chart (the Division's inspector list of 2023-01-19, which its electrical FAQ links as the chart showing jurisdiction; read 2026-11-11): for this city's ZIP the state's electrical inspector covers the county only, so inside the city limits the electrical permit is the city's own. The chart is from 2023; the state's current answer for one address is its permit map. Seeded from the authority's own pages and the state's, NOT verified.",
+      "citations": [
+        {
+          "field": "submissionMethod",
+          "value": "https://staridpermit.portal.iworq.net/portalhome/staridpermit",
+          "sourceUrl": "https://staridaho.org/DocumentCenter/View/1639/Residential-Submittal-Requirements-2026-02",
+          "quote": "All plans must be submitted and uploaded to the IWORQ Portal.",
+          "fetchedAt": "2026-11-10T08:23:32Z"
+        },
+        {
+          "field": "submissionMethod",
+          "value": "https://staridpermit.portal.iworq.net/portalhome/staridpermit",
+          "sourceUrl": "https://staridaho.org/1243/Building-Department",
+          "quote": "All contractors are required to complete the portal registration form before they can access the permit portal.",
+          "fetchedAt": "2026-11-10T08:23:28Z"
+        },
+        {
+          "field": "electricalPermitIssuer",
+          "value": "city (bought at City Hall)",
+          "sourceUrl": "https://staridaho.org/1249/Fee-Information",
+          "quote": "Electrical, Mechanical, and Plumbing permits are in addition to the building permit and are purchased separately at City Hall.",
+          "fetchedAt": "2026-11-10T08:23:37Z"
+        },
+        {
+          "field": "electricalSubmissionMethod",
+          "value": "In person at City Hall",
+          "sourceUrl": "https://staridaho.org/1249/Fee-Information",
+          "quote": "Electrical, Mechanical, and Plumbing permits are in addition to the building permit and are purchased separately at City Hall.",
+          "fetchedAt": "2026-11-10T08:23:37Z"
+        },
+        {
+          "field": "electricalPermitIssuer",
+          "value": "city (state chart: its electrical inspector covers 'County Only' here)",
+          "sourceUrl": "https://dopl.idaho.gov/wp-content/uploads/2023/09/BCRE-Inspector-List-with-Schedules-2023-01-19.pdf",
+          "quote": "STAR 83669 ADA MILENKO JOKIC MTW TODD MTW DARREN MCRAE MTW RUSS GARDINA 208-616-2901 SCHWENDIMAN 208-608-3690 208-606-5915 County Only",
+          "fetchedAt": "2026-11-11T20:23:00Z"
+        }
+      ],
       "sourceSheet": "ID PROCESS"
+    },
+    {
+      "state": "ID",
+      "ahj": "Kuna",
+      "submissionMethod": "Email: BuildingPermits@KunaID.gov",
+      "timeline": "",
+      "requiresElectricianSign": false,
+      "requiresElectricalStamp": false,
+      "requiresStructuralStamp": false,
+      "requiresElectricalPermitApplication": false,
+      "requiresBuildingPermitApplication": true,
+      "requiresSolarChecklist": false,
+      "requiresPlanSet": true,
+      "requiresUtilityApproval": false,
+      "requiresCustomerSignature": false,
+      "requiresFloodplainCheck": false,
+      "requiresJurisdictionCheck": true,
+      "otherRequirements": "",
+      "reviewerNotes": "City of Kuna pages (read 2026-11-10): residential digital submittals are emailed to the Building Department as individual PDFs, starting with the application. The city's Building Department issues electrical permits. State chart (the Division's inspector list of 2023-01-19, which its electrical FAQ links as the chart showing jurisdiction; read 2026-11-11): for this city's ZIP the state's electrical inspector covers the county only, so inside the city limits the electrical permit is the city's own. The chart is from 2023; the state's current answer for one address is its permit map. Seeded from the authority's own pages and the state's, NOT verified.",
+      "citations": [
+        {
+          "field": "submissionMethod",
+          "value": "BuildingPermits@KunaID.gov",
+          "sourceUrl": "https://kunacity.id.gov/99/Forms-Applications",
+          "quote": "Please email individual PDFs of the following to BuildingPermits@KunaID.gov : Application",
+          "fetchedAt": "2026-11-10T08:22:41Z"
+        },
+        {
+          "field": "electricalPermitIssuer",
+          "value": "city",
+          "sourceUrl": "https://kunacity.id.gov/119/Building-Department",
+          "quote": "Electrical permits are available at City of Kuna Building Department.",
+          "fetchedAt": "2026-11-10T08:21:50Z"
+        },
+        {
+          "field": "electricalPermitIssuer",
+          "value": "city (state chart: its electrical inspector covers 'County Only' here)",
+          "sourceUrl": "https://dopl.idaho.gov/wp-content/uploads/2023/09/BCRE-Inspector-List-with-Schedules-2023-01-19.pdf",
+          "quote": "KUNA 83634 ADA CLINT PIERCE MTW TODD MTW DARREN MCRAE MTW RUSS GARDINA 208-606-6951 SCHWENDIMAN 208-608-3690 208-606-5915 County Only",
+          "fetchedAt": "2026-11-11T20:23:00Z"
+        }
+      ],
+      "sourceSheet": "ID seeded (authority pages read 2026-11-10)"
+    },
+    {
+      "state": "ID",
+      "ahj": "Caldwell",
+      "submissionMethod": "https://www2.citizenserve.com/Portal/PortalController?Action=showHomePage&ctzPagePrefix=Portal_&installationID=263",
+      "timeline": "",
+      "requiresElectricianSign": false,
+      "requiresElectricalStamp": false,
+      "requiresStructuralStamp": false,
+      "requiresElectricalPermitApplication": false,
+      "requiresBuildingPermitApplication": true,
+      "requiresSolarChecklist": true,
+      "requiresPlanSet": true,
+      "requiresUtilityApproval": false,
+      "requiresCustomerSignature": false,
+      "requiresFloodplainCheck": false,
+      "requiresJurisdictionCheck": true,
+      "otherRequirements": "",
+      "reviewerNotes": "City of Caldwell pages (read 2026-11-10): one- and two-family permits are submitted digitally through the city's Online Portal (Citizenserve); paper submittals are no longer accepted. The Building Safety Division takes building and electrical permits through the same portal. The PV checklist says the submittal is reviewed by the Plans Examiner, the Electrical Inspector and Planning & Zoning before the building permit is issued. State chart (the Division's inspector list of 2023-01-19, which its electrical FAQ links as the chart showing jurisdiction; read 2026-11-11): for this city's ZIP the state's electrical inspector covers the county only, so inside the city limits the electrical permit is the city's own. The chart is from 2023; the state's current answer for one address is its permit map. Seeded from the authority's own pages and the state's, NOT verified.",
+      "documents": {
+        "items": [
+          "Residential building permit application",
+          "Residential Photovoltaic Systems Installation Checklist, signed and dated",
+          "Roof plan drawn to scale with exact locations and dimensions",
+          "Structural calculations (where applicable) stamped by a registered design professional; engineering is required over 5 psf added load",
+          "Manufacturer specifications showing listing and label per UL 1703, UL 1741, NEC 110.3(B) and NEC 690.4(B)",
+          "Diagram with equipment location, voltage and current ratings, wire size, disconnect and overcurrent ratings",
+          "ICC-ES Evaluation Report for all mounting hardware",
+          "Certificate of Appropriateness (only in a Historic District)"
+        ],
+        "sourceUrl": "https://www.cityofcaldwell.org/files/assets/city/v/1/building/documents/permit-apps/photovoltaic-checklist.pdf",
+        "quote": "When applying for a Building permit for the installation of Residential Photovoltaic Systems, this checklist must be completed and accompany the required documents and building permit application.",
+        "observedAt": "2026-11-10"
+      },
+      "citations": [
+        {
+          "field": "submissionMethod",
+          "value": "https://www2.citizenserve.com/Portal/PortalController?Action=showHomePage&ctzPagePrefix=Portal_&installationID=263",
+          "sourceUrl": "https://www.cityofcaldwell.org/Departments/Community-Development/Building-Safety-Division/Online-Portal-Services",
+          "quote": "Here you will be able to submit permits, request inspections, and monitor your projects.",
+          "fetchedAt": "2026-11-10T08:24:14Z"
+        },
+        {
+          "field": "submissionMethod",
+          "value": "https://www2.citizenserve.com/Portal/PortalController?Action=showHomePage&ctzPagePrefix=Portal_&installationID=263",
+          "sourceUrl": "https://www.cityofcaldwell.org/Departments/Community-Development/Building-Safety-Division/Applications-and-Forms",
+          "quote": "Note: All Commercial, One- and Two-Family Dwelling, and Multi-Family permits must be submitted digitally through the Online Portal System. Paper submittals will no longer be accepted.",
+          "fetchedAt": "2026-11-10T08:24:16Z"
+        },
+        {
+          "field": "electricalPermitIssuer",
+          "value": "city",
+          "sourceUrl": "https://www.cityofcaldwell.org/Departments/Community-Development/Building-Safety-Division",
+          "quote": "The Building Safety Division utilizes an online permit portal for the submission of the various type of building, electrical, plumbing, mechanical permits, and sign permits.",
+          "fetchedAt": "2026-11-10T08:24:15Z"
+        },
+        {
+          "field": "requiresSolarChecklist",
+          "value": "true",
+          "sourceUrl": "https://www.cityofcaldwell.org/files/assets/city/v/1/building/documents/permit-apps/photovoltaic-checklist.pdf",
+          "quote": "When applying for a Building permit for the installation of Residential Photovoltaic Systems, this checklist must be completed and accompany the required documents and building permit application.",
+          "fetchedAt": "2026-11-10T08:24:23Z"
+        },
+        {
+          "field": "requiresBuildingPermitApplication",
+          "value": "true",
+          "sourceUrl": "https://www.cityofcaldwell.org/files/assets/city/v/1/building/documents/permit-apps/photovoltaic-checklist.pdf",
+          "quote": "This submittal will require a review by the Caldwell Plans Examiner, Electrical Inspector, and Planning & Zoning Department, prior to the issuance of the building permit.",
+          "fetchedAt": "2026-11-10T08:24:23Z"
+        },
+        {
+          "field": "electricalPermitIssuer",
+          "value": "city (state chart: its electrical inspector covers 'County Only' here)",
+          "sourceUrl": "https://dopl.idaho.gov/wp-content/uploads/2023/09/BCRE-Inspector-List-with-Schedules-2023-01-19.pdf",
+          "quote": "CALDWELL 83605 CANYON KELLY WEBB MTW DANNY STRAIN MTW DARREN MCRAE MTW MIKE DAVIS 208-550-5485 208-870-6824 208-608-3690 County Only",
+          "fetchedAt": "2026-11-11T20:23:00Z"
+        }
+      ],
+      "sourceSheet": "ID seeded (authority pages read 2026-11-10)"
+    },
+    {
+      "state": "ID",
+      "ahj": "Twin Falls",
+      "submissionMethod": "https://cityworks.tfid.org/permits/template/login.aspx",
+      "timeline": "",
+      "requiresElectricianSign": false,
+      "requiresElectricalStamp": false,
+      "requiresStructuralStamp": false,
+      "requiresElectricalPermitApplication": true,
+      "requiresBuildingPermitApplication": false,
+      "requiresSolarChecklist": false,
+      "requiresPlanSet": true,
+      "requiresUtilityApproval": false,
+      "requiresCustomerSignature": false,
+      "requiresFloodplainCheck": false,
+      "requiresJurisdictionCheck": true,
+      "otherRequirements": "",
+      "reviewerNotes": "City of Twin Falls pages (read 2026-11-10): solar is applied for through the city's online portal (Cityworks), with plans attached to the application; all electrical work must be permitted by the city; a building permit is needed only when changes to the roof are required. State chart (the Division's inspector list of 2023-01-19, which its electrical FAQ links as the chart showing jurisdiction; read 2026-11-11): for this city's ZIP the state's electrical inspector covers the county only, so inside the city limits the electrical permit is the city's own. The chart is from 2023; the state's current answer for one address is its permit map. Seeded from the authority's own pages and the state's, NOT verified.",
+      "citations": [
+        {
+          "field": "submissionMethod",
+          "value": "https://cityworks.tfid.org/permits/template/login.aspx",
+          "sourceUrl": "https://www.tfid.org/DocumentCenter/View/3510/Solar-Installation-Instructions-Updated-12-4-18",
+          "quote": "Apply for permit through online Portal & attach plans to portal. https://cityworks.tfid.org/permits/template/login.aspx",
+          "fetchedAt": "2026-11-10T08:23:05Z"
+        },
+        {
+          "field": "electricalPermitIssuer",
+          "value": "city",
+          "sourceUrl": "https://www.tfid.org/215/Permit-Requirements",
+          "quote": "All electrical, plumbing, mechanical and gas work must be permitted",
+          "fetchedAt": "2026-11-10T08:22:52Z"
+        },
+        {
+          "field": "requiresBuildingPermitApplication",
+          "value": "false",
+          "sourceUrl": "https://www.tfid.org/DocumentCenter/View/3510/Solar-Installation-Instructions-Updated-12-4-18",
+          "quote": "building permits will be needed if changes to the roof are required",
+          "fetchedAt": "2026-11-10T08:23:05Z"
+        },
+        {
+          "field": "electricalPermitIssuer",
+          "value": "city (state chart: its electrical inspector covers 'County Only' here)",
+          "sourceUrl": "https://dopl.idaho.gov/wp-content/uploads/2023/09/BCRE-Inspector-List-with-Schedules-2023-01-19.pdf",
+          "quote": "TWIN FALLS 83303 TWIN FALLS MARK GREENE MTWRF SHANE MTWRF GARY JENKS MWF 208-490-6541 SCHMECHEL 208-867-9181 County Only",
+          "fetchedAt": "2026-11-11T20:23:00Z"
+        }
+      ],
+      "sourceSheet": "ID seeded (authority pages read 2026-11-10)"
     },
     {
       "state": "TX",
@@ -7639,7 +8323,7 @@
       "requiresCustomerSignature": false,
       "requiresFloodplainCheck": false,
       "requiresJurisdictionCheck": false,
-      "otherRequirements": "Solar Permit Application with a completed Solar PV Packet; site plan showing the location of major components; electrical diagram showing PV array configuration, wiring system, overcurrent protection, inverter, disconnects, required labels and AC connection to the building. Permit is void if work is not commenced within 180 days.",
+      "otherRequirements": "Solar Permit Application with a completed Solar PV Packet; site plan showing the location of major components; electrical diagram showing PV array configuration, wiring system, overcurrent protection, inverter, disconnects, required labels and AC connection to the building. Permit is void if work is not commenced within 180 days. Battery (ESS) jobs: Salt Lake City publishes its own Residential Energy Storage System (ESS) Plan Review Checklist; the solar PV checklist applies in addition. Whether an ESS permit of its own or a fire review is required is not stated on the page.",
       "documents": {
         "items": [
           "Solar Permit Application",
@@ -7652,7 +8336,22 @@
         "observedAt": "2026-10-04"
       },
       "reviewerNotes": "Seeded 2026-10-04 from the city's public information pages (worker-60 web research, issue #109); NOT verified - confirm before relying on it. Information pages are sources, not the portal. Sources: https://www.slc.gov/buildingservices/2026/04/22/solar-pv-systems/ ; https://www.slc.gov/buildingservices/building-permits/electronic-plan-review/",
-      "sourceSheet": "UT seeded (web research 2026-10-04)"
+      "sourceSheet": "UT seeded (web research 2026-10-04)",
+      "citations": [
+        {
+          "field": "submissionMethod",
+          "value": "aca-prod.accela.com/SLCREF",
+          "sourceUrl": "https://www.slc.gov/buildingservices/2026/04/22/solar-pv-systems/",
+          "quote": "Apply for a Permit",
+          "fetchedAt": "2026-11-10T08:24:09Z"
+        },
+        {
+          "field": "ess",
+          "sourceUrl": "https://www.slc.gov/buildingservices/irc-energy-checklist/",
+          "quote": "Salt Lake City Residential ENERGY STORAGE SYSTEM (ESS) Plan Review Checklist For ESS systems also utilizing a string inverter or micro inverter solar PV system, please also see the appropriate City plan review checklist requirements for such solar PV system.",
+          "fetchedAt": "2026-11-10T08:22:21Z"
+        }
+      ]
     },
     {
       "state": "UT",
@@ -7789,6 +8488,444 @@
       },
       "reviewerNotes": "Seeded 2026-10-06 from the city's public information pages (issue #228; read-only sweep, the Cityworks portal itself was never opened); NOT verified - confirm before relying on it. Information pages are sources, not the portal. Retired solar application IDs: DocumentCenter/View/152 and View/12292 (404) — no solar-specific blank expected; generic application View/8000 is a scanned blank. Sources: https://www.saratogasprings-ut.gov/201/Building ; https://www.saratogasprings-ut.gov/221/Additional-Building-Permit-Requirements ; https://www.saratogasprings-ut.gov/265/Permits-Forms ; https://www.saratogasprings-ut.gov/220/Obtaining-a-Building-Permit ; https://www.saratogasprings-ut.gov/209/Applications-Forms ; https://www.saratogasprings-ut.gov/213/Design-Criteria",
       "sourceSheet": "UT seeded (web research 2026-10-06)"
+    },
+    {
+      "state": "UT",
+      "ahj": "Murray City",
+      "submissionMethod": "Murray eProcess360 portal (eProcess360, murray.ut.eprocess360.com): building permit application and plans submitted online",
+      "timeline": "",
+      "requiresElectricianSign": false,
+      "requiresElectricalStamp": false,
+      "requiresStructuralStamp": true,
+      "requiresElectricalPermitApplication": false,
+      "requiresBuildingPermitApplication": true,
+      "requiresSolarChecklist": true,
+      "requiresPlanSet": true,
+      "requiresUtilityApproval": true,
+      "requiresCustomerSignature": false,
+      "requiresFloodplainCheck": false,
+      "requiresJurisdictionCheck": false,
+      "otherRequirements": "Murray City Power (the city-owned utility) approval is required first: the Net Metering Interconnection & Service Agreement goes to Murray City Power (where it is sent is on the city's net metering page; a person verifies that address before anything is sent), which reviews it and returns a signed copy. Residential net meter $250, paid to Murray City Power. The system must include a production/generation meter in addition to the net meter, and a manually operated safety disconnect of its own, with visible contacts, between the inverter and the production meter base, within several feet of the net meter base (meter-base breakers and inverter-integrated disconnects do not satisfy it). One-line diagram: maximum system kW output not to exceed 10 kW. Inside Murray City Power's service area the Murray City Electrical Permit questionnaire is uploaded with the online building permit application. From April 2025 Murray requires NABCEP certification for solar installers, sales and engineers and an S200/S202 electrical license for electricians.",
+      "documents": {
+        "items": [
+          "Murray Power approval: Net Metering Interconnection & Service Agreement (to Murray City Power before the permit)",
+          "Building permit application online, with owner, contractor and subcontractor information and project valuation",
+          "Site plan: north arrow, home, all PV components (main meter, production meter, AC disconnect, arrays, panels, inverters, pass-through boxes) grouped within 6 feet",
+          "One-line diagram: PV system type, main and production meters, disconnect and inverter type and rating, module layout and connection, maximum system kW output (not to exceed 10 kW), labeling, wiring and conduit, fuse/breaker ratings, grounding",
+          "Module, inverter and combiner box list with manufacturer specification sheets and installation guides; engineer of record confirms the roof carries the added load",
+          "Photo of the interconnection panel and any other boxes to be mounted",
+          "Other system components with their UL listing and installation information",
+          "Safety and warning labels: engraved, mechanically fastened labels on meter bases and the safety disconnect, with samples and locations"
+        ],
+        "sourceUrl": "https://murray.utah.gov/DocumentCenter/View/15321/Solar-Check-List-042524",
+        "quote": "The following is a list of items required for residential SOLAR PANEL plan submittal.",
+        "observedAt": "2026-11-10"
+      },
+      "citations": [
+        {
+          "field": "submissionMethod",
+          "value": "murray.ut.eprocess360.com",
+          "sourceUrl": "https://murray.utah.gov/DocumentCenter/View/15321/Solar-Check-List-042524",
+          "quote": "BUILDING PERMIT APPLICATION –online at https://murray.ut.eprocess360.com/",
+          "fetchedAt": "2026-11-10T08:19:28Z"
+        },
+        {
+          "field": "requiresUtilityApproval",
+          "sourceUrl": "https://murray.utah.gov/DocumentCenter/View/15321/Solar-Check-List-042524",
+          "quote": "MURRAY POWER APPROVAL REQUIRED - Please contact Murray Power at netmetering@murray.utah.gov",
+          "fetchedAt": "2026-11-10T08:19:28Z"
+        },
+        {
+          "field": "requiresStructuralStamp",
+          "sourceUrl": "https://murray.utah.gov/DocumentCenter/View/15321/Solar-Check-List-042524",
+          "quote": "Please have engineer of record confirm roof is capable of supporting the additional loads from the new solar array.",
+          "fetchedAt": "2026-11-10T08:19:28Z"
+        },
+        {
+          "field": "otherRequirements",
+          "sourceUrl": "https://murray.utah.gov/DocumentCenter/View/15321/Solar-Check-List-042524",
+          "quote": "Solar system must include a production/generation meter, in addition to the net meter; Murray City Power covers the cost of this meter",
+          "fetchedAt": "2026-11-10T08:19:28Z"
+        },
+        {
+          "field": "otherRequirements",
+          "sourceUrl": "https://murray.utah.gov/DocumentCenter/View/14619/Electrical-Permit-Questionnaire",
+          "quote": "please complete and upload the attached form when submitting your on-line building permit application",
+          "fetchedAt": "2026-11-10T08:19:29Z"
+        },
+        {
+          "field": "otherRequirements",
+          "sourceUrl": "https://murray.utah.gov/77/Net-Metering-and-Solar-Information",
+          "quote": "Starting in April 2025, a NABCEP Installation Certification will be mandatory for all solar installers in Murray City.",
+          "fetchedAt": "2026-11-10T08:22:26Z"
+        }
+      ],
+      "reviewerNotes": "Seeded 2026-11-10 from the city's own public pages (worker-refdata-ut, plain reads; no portal was opened); NOT verified - confirm before relying on it. A person verifies the portal in the dashboard before anything files. Information pages are sources, not the portal. Sources: https://murray.utah.gov/DocumentCenter/View/15321/Solar-Check-List-042524 ; https://murray.utah.gov/DocumentCenter/View/14619/Electrical-Permit-Questionnaire ; https://murray.utah.gov/77/Net-Metering-and-Solar-Information",
+      "sourceSheet": "UT seeded (web research 2026-11-10)"
+    },
+    {
+      "state": "UT",
+      "ahj": "South Jordan",
+      "submissionMethod": "South Jordan CityView Online Portal (CityView, cityview.southjordanutah.gov/cityviewportal): apply for a permit online",
+      "timeline": "",
+      "requiresElectricianSign": false,
+      "requiresElectricalStamp": false,
+      "requiresStructuralStamp": true,
+      "requiresElectricalPermitApplication": false,
+      "requiresBuildingPermitApplication": true,
+      "requiresSolarChecklist": false,
+      "requiresPlanSet": true,
+      "requiresUtilityApproval": false,
+      "requiresCustomerSignature": false,
+      "requiresFloodplainCheck": false,
+      "requiresJurisdictionCheck": false,
+      "otherRequirements": "Photo-voltaic (PV) system plan review requirements: permit application with valuation, address, owner and contractor with state license number; for a roof array a structural engineer's letter (Utah licensed for existing construction) that the roof carries the added load and snow drift; scaled site plan with roof access and IFC 605.11.3 walking clearances (ridge 3 ft, valleys and hips 18 in, eave to ridge 36 in); service size and bus rating, back-fed breaker location and NEC 705.12 compliance with a photo of the service panel; inverter and module cut sheets; rapid shutdown (NEC 690.12) unless micro-inverters; mounting and flashing details; span tables for 115 mph wind; warning signs and their locations. Batteries are reviewed in the same PV plan review: submit cut sheets for batteries, if used, with connection diagrams, fusing and amp-hour and charging capacity, and show how the batteries will be ventilated and protected for their location. Electric utility: Rocky Mountain Power.",
+      "documents": {
+        "items": [
+          "Permit application: valuation, project address, property owner, general contractor and state license number, contact person and other contractors",
+          "Structural engineer's letter that the roof supports the array and added snow drift load (Utah licensed structural engineer for existing construction)",
+          "Scaled site plan: roof access, equipment locations, connections, conductors, disconnects, array wiring, grounding, IFC 605.11.3 walking clearances",
+          "Electrical service size and bus rating, back-fed breaker location and NEC 705.12 compliance, photo of the service panel",
+          "Inverter cut sheets and instructions with model numbers highlighted and listings noted",
+          "Rapid shutdown (NEC 690.12) specification sheets and installation instructions (not for micro-inverter systems)",
+          "PV module cut sheets (Voc, Isc, Pmax, maximum series fuse, Vmp, Imp)",
+          "Battery cut sheets and connection diagrams, if batteries are used",
+          "Array mounting and attachment details, flashing and sealing; span tables for 115 mph wind",
+          "Warning signs (stickers) and their locations"
+        ],
+        "sourceUrl": "https://www.sjc.utah.gov/DocumentCenter/View/427/Residential-Solar-Photovoltaic-System-Plan-Review-Requirements-PDF",
+        "quote": "PHOTO-VOLTAIC (PV) SYSTEM PLAN REVIEW REQUIREMENTS",
+        "observedAt": "2026-11-10"
+      },
+      "citations": [
+        {
+          "field": "submissionMethod",
+          "value": "cityview.southjordanutah.gov/cityviewportal",
+          "sourceUrl": "https://www.sjc.utah.gov/266/Building-Department",
+          "quote": "Apply for a permit or request an inspection on our Online Portal",
+          "fetchedAt": "2026-11-10T08:19:30Z"
+        },
+        {
+          "field": "requiresStructuralStamp",
+          "sourceUrl": "https://www.sjc.utah.gov/DocumentCenter/View/427/Residential-Solar-Photovoltaic-System-Plan-Review-Requirements-PDF",
+          "quote": "If PV array is to be installed on the roof, provide a letter from a structural engineer",
+          "fetchedAt": "2026-11-10T08:20:03Z"
+        },
+        {
+          "field": "ess",
+          "sourceUrl": "https://www.sjc.utah.gov/DocumentCenter/View/427/Residential-Solar-Photovoltaic-System-Plan-Review-Requirements-PDF",
+          "quote": "Submit cut sheets for batteries, if used, and connection diagrams with cable sizes.",
+          "fetchedAt": "2026-11-10T08:20:03Z"
+        },
+        {
+          "field": "ess",
+          "sourceUrl": "https://www.sjc.utah.gov/DocumentCenter/View/427/Residential-Solar-Photovoltaic-System-Plan-Review-Requirements-PDF",
+          "quote": "Show how batteries will be properly ventilated, and how they will be protected depending on their location",
+          "fetchedAt": "2026-11-10T08:20:03Z"
+        }
+      ],
+      "reviewerNotes": "Seeded 2026-11-10 from the city's own public pages (worker-refdata-ut, plain reads; no portal was opened); NOT verified - confirm before relying on it. A person verifies the portal in the dashboard before anything files. Information pages are sources, not the portal. Sources: https://www.sjc.utah.gov/266/Building-Department ; https://www.sjc.utah.gov/DocumentCenter/View/427/Residential-Solar-Photovoltaic-System-Plan-Review-Requirements-PDF",
+      "sourceSheet": "UT seeded (web research 2026-11-10)"
+    },
+    {
+      "state": "UT",
+      "ahj": "West Jordan",
+      "submissionMethod": "West Jordan Public Portal (Cityworks, permit.westjordan.utah.gov/CityworksPortal-LIVE): New Application, Building & Safety, attach plans and submit",
+      "timeline": "Residential: up to 10 business days for the initial review",
+      "requiresElectricianSign": false,
+      "requiresElectricalStamp": false,
+      "requiresStructuralStamp": false,
+      "requiresElectricalPermitApplication": false,
+      "requiresBuildingPermitApplication": true,
+      "requiresSolarChecklist": false,
+      "requiresPlanSet": true,
+      "requiresUtilityApproval": false,
+      "requiresCustomerSignature": false,
+      "requiresFloodplainCheck": false,
+      "requiresJurisdictionCheck": false,
+      "otherRequirements": "From the portal: New Application (Business License or Building Permit), choose Building & Safety, then the category that fits the project; fill in required fields, attach plans and submit. Corrections come with a plan check report in the portal; resubmittals are reviewed within 5 business days. Fees are invoiced after approval. The city's building page publishes no solar-specific checklist. Electric utility: Rocky Mountain Power.",
+      "citations": [
+        {
+          "field": "submissionMethod",
+          "value": "permit.westjordan.utah.gov/CityworksPortal-LIVE",
+          "sourceUrl": "https://www.westjordan.utah.gov/community-development/building-and-safety/",
+          "quote": "Submit your building permit application on the West Jordan Public Portal by clicking the ‘Apply Online’ button below.",
+          "fetchedAt": "2026-11-10T08:20:04Z"
+        },
+        {
+          "field": "submissionMethod",
+          "sourceUrl": "https://www.westjordan.utah.gov/permit-portal-guide/",
+          "quote": "Choose “Building & Safety”, then choose the category that most applies to your project.",
+          "fetchedAt": "2026-11-10T08:19:31Z"
+        },
+        {
+          "field": "timeline",
+          "sourceUrl": "https://www.westjordan.utah.gov/permit-portal-guide/",
+          "quote": "Residential Projects: Allow up to 10 business days (excluding holidays) for the initial review by the Building and Planning Departments (if applicable).",
+          "fetchedAt": "2026-11-10T08:19:31Z"
+        }
+      ],
+      "reviewerNotes": "Seeded 2026-11-10 from the city's own public pages (worker-refdata-ut, plain reads; no portal was opened); NOT verified - confirm before relying on it. A person verifies the portal in the dashboard before anything files. Information pages are sources, not the portal. Sources: https://www.westjordan.utah.gov/community-development/building-and-safety/ ; https://www.westjordan.utah.gov/permit-portal-guide/",
+      "sourceSheet": "UT seeded (web research 2026-11-10)"
+    },
+    {
+      "state": "UT",
+      "ahj": "Ogden",
+      "submissionMethod": "Ogden EnerGov Self Service portal (EnerGov, egselfservice.ogdencity.com/EnerGovProd/SelfService): apply online, Residential category",
+      "timeline": "Allow 1-3 days to process applications",
+      "requiresElectricianSign": false,
+      "requiresElectricalStamp": false,
+      "requiresStructuralStamp": true,
+      "requiresElectricalPermitApplication": false,
+      "requiresBuildingPermitApplication": true,
+      "requiresSolarChecklist": false,
+      "requiresPlanSet": true,
+      "requiresUtilityApproval": false,
+      "requiresCustomerSignature": false,
+      "requiresFloodplainCheck": false,
+      "requiresJurisdictionCheck": false,
+      "otherRequirements": "Apply online in the city's self-service portal (Residential: single family, duplex, triplex and townhomes); verify the address is in Ogden City's jurisdiction first. Construction documents as applicable, one PDF each; drawings sealed, signed and dated by a Utah-licensed design professional; partial submittals are not accepted; $70.50 deposit at application acceptance, deducted from the permit. The page does not name solar among the listed permit types. Electric utility: Rocky Mountain Power.",
+      "citations": [
+        {
+          "field": "submissionMethod",
+          "value": "egselfservice.ogdencity.com/EnerGovProd/SelfService",
+          "sourceUrl": "https://www.ogdencity.gov/188/Permit-Applications",
+          "quote": "Apply online for the following permits: Commercial",
+          "fetchedAt": "2026-11-10T08:21:29Z"
+        },
+        {
+          "field": "submissionMethod",
+          "sourceUrl": "https://www.ogdencity.gov/188/Permit-Applications",
+          "quote": "Residential : Includes Single Family, Duplex, Triplex and Townhomes",
+          "fetchedAt": "2026-11-10T08:21:29Z"
+        },
+        {
+          "field": "requiresStructuralStamp",
+          "sourceUrl": "https://www.ogdencity.gov/188/Permit-Applications",
+          "quote": "Drawings must be sealed, signed and dated by a Utah-licensed design professional.",
+          "fetchedAt": "2026-11-10T08:21:29Z"
+        },
+        {
+          "field": "otherRequirements",
+          "sourceUrl": "https://www.ogdencity.gov/188/Permit-Applications",
+          "quote": "A deposit of $70.50 is due at time of application acceptance.",
+          "fetchedAt": "2026-11-10T08:21:29Z"
+        }
+      ],
+      "reviewerNotes": "Seeded 2026-11-10 from the city's own public pages (worker-refdata-ut, plain reads; no portal was opened); NOT verified - confirm before relying on it. A person verifies the portal in the dashboard before anything files. Information pages are sources, not the portal. Sources: https://www.ogdencity.gov/188/Permit-Applications",
+      "sourceSheet": "UT seeded (web research 2026-11-10)"
+    },
+    {
+      "state": "UT",
+      "ahj": "Syracuse",
+      "submissionMethod": "Syracuse Building Permit Application Portal (CivicReview, app.civicreview.com/application/63bf35f1cc1ef01f6e69f1c9): residential applications and plans submitted digitally",
+      "timeline": "",
+      "requiresElectricianSign": false,
+      "requiresElectricalStamp": false,
+      "requiresStructuralStamp": false,
+      "requiresElectricalPermitApplication": false,
+      "requiresBuildingPermitApplication": true,
+      "requiresSolarChecklist": false,
+      "requiresPlanSet": true,
+      "requiresUtilityApproval": false,
+      "requiresCustomerSignature": false,
+      "requiresFloodplainCheck": false,
+      "requiresJurisdictionCheck": false,
+      "otherRequirements": "All residential building permit applications and their plans are submitted digitally through the city's application portal; review the application portal checklist first. Every permit needs inspections to close. The page names no solar-specific checklist. The portal host is a shared vendor platform: the application id names the city's form. Electric utility: Rocky Mountain Power.",
+      "citations": [
+        {
+          "field": "submissionMethod",
+          "value": "app.civicreview.com/application/63bf35f1cc1ef01f6e69f1c9",
+          "sourceUrl": "https://www.syracuseut.gov/160/Building",
+          "quote": "All residential and commercial building permit applications and associated plans should be submitted digitally by completing the online form: CLICK HERE FOR THE BUILDING PERMIT APPLICATION PORTAL",
+          "fetchedAt": "2026-11-10T08:20:36Z"
+        }
+      ],
+      "reviewerNotes": "Seeded 2026-11-10 from the city's own public pages (worker-refdata-ut, plain reads; no portal was opened); NOT verified - confirm before relying on it. A person verifies the portal in the dashboard before anything files. Information pages are sources, not the portal. Sources: https://www.syracuseut.gov/160/Building",
+      "sourceSheet": "UT seeded (web research 2026-11-10)"
+    },
+    {
+      "state": "UT",
+      "ahj": "Clearfield",
+      "submissionMethod": "Clearfield online building permit application portal (CivicReview, app.civicreview.com/application/626ac1803c76f2ee6a5ff584): Apply Now",
+      "timeline": "",
+      "requiresElectricianSign": false,
+      "requiresElectricalStamp": false,
+      "requiresStructuralStamp": false,
+      "requiresElectricalPermitApplication": false,
+      "requiresBuildingPermitApplication": true,
+      "requiresSolarChecklist": false,
+      "requiresPlanSet": true,
+      "requiresUtilityApproval": false,
+      "requiresCustomerSignature": false,
+      "requiresFloodplainCheck": false,
+      "requiresJurisdictionCheck": false,
+      "otherRequirements": "Building permits: Apply Now on the city's page opens the online application; the application carries its own checklist of required items (no checklist = no additional documents). Plans must meet the state and local design loads. The city's link to the application is wrapped in a link-protection redirect; the target is the CivicReview application above. The portal host is a shared vendor platform: the application id names the city's form. Electric utility: Rocky Mountain Power.",
+      "citations": [
+        {
+          "field": "submissionMethod",
+          "value": "app.civicreview.com/application/626ac1803c76f2ee6a5ff584",
+          "sourceUrl": "https://clearfield.city/business-development/",
+          "quote": "Building Permits Apply Now The city regulates construction and provides safeguards to ensure public safety through its permitting process.",
+          "fetchedAt": "2026-11-10T08:21:47Z"
+        },
+        {
+          "field": "otherRequirements",
+          "sourceUrl": "https://clearfield.city/business-development/",
+          "quote": "All plans must meet the individual design loads for State and Local codes.",
+          "fetchedAt": "2026-11-10T08:21:47Z"
+        }
+      ],
+      "reviewerNotes": "Seeded 2026-11-10 from the city's own public pages (worker-refdata-ut, plain reads; no portal was opened); NOT verified - confirm before relying on it. A person verifies the portal in the dashboard before anything files. Information pages are sources, not the portal. Sources: https://clearfield.city/business-development/",
+      "sourceSheet": "UT seeded (web research 2026-11-10)"
+    },
+    {
+      "state": "UT",
+      "ahj": "Bountiful",
+      "submissionMethod": "Bountiful CityInspect portal (CityInspect, utah.cityinspect.com, Bountiful's registration link): all permits, including the solar permit packet",
+      "timeline": "",
+      "requiresElectricianSign": false,
+      "requiresElectricalStamp": false,
+      "requiresStructuralStamp": true,
+      "requiresElectricalPermitApplication": false,
+      "requiresBuildingPermitApplication": true,
+      "requiresSolarChecklist": true,
+      "requiresPlanSet": true,
+      "requiresUtilityApproval": true,
+      "requiresCustomerSignature": true,
+      "requiresFloodplainCheck": false,
+      "requiresJurisdictionCheck": false,
+      "otherRequirements": "Bountiful City Light & Power (BCLP, the city-owned utility) net metering is applied for inside the same CityInspect solar permit application: the packet carries the Photovoltaic System NET Metered Agreement signed by the property owner and the BCLP One-Line Diagram form, and Planning, Engineering/Building, Fire and Power all approve in CityInspect. $50 application fee paid before submittal (by phone to Engineering); NET Metering $578; building permit $300 city + $3.50 state + $101.50 plan check (total $1,033, packet dated 9/30/25). BCLP approves the production meter base and the visible disconnect switch locations before construction. Residential single-phase PV is limited to 10 kW. Design wind 145 mph Exp B (ASCE 7). On-site inspection only, no Friday inspections. Battery (ESS) systems: a Storage Battery System permit packet of its own through CityInspect, which requires a South Davis Metro Fire Agency approval letter.",
+      "documents": {
+        "items": [
+          "Site plan (bird's-eye) with panel placement, north arrow, scale, date, street names and addresses (more for ground mounts)",
+          "One-line diagram, two sets, following the BCLP sample diagram (Attachment 4)",
+          "Engineer analysis letter on the existing roof structure with the added solar equipment and uplift resistance",
+          "Solar Panel Questions (Attachment 2)",
+          "Photovoltaic System NET Metered Agreement signed by the property owner (Attachment 3)",
+          "Bountiful City Light & Power One Line Diagram form (Attachment 4)",
+          "Spec sheets: solar product information",
+          "Photos of the electrical service (city meter main with disconnect): location 10 ft either side, panel dead front on, panel dead front off",
+          "$50 application fee paid before submittal"
+        ],
+        "sourceUrl": "https://www.bountiful.gov/DocumentCenter/View/343/Solar-Packet-Net-Meter-PDF",
+        "quote": "SOLAR PANEL APPLICATION PACKET ** Applications will be submitted on-line through the Cityinspect portal ** INCOMPLETE APPLICATIONS WILL NOT BE ACCEPTED",
+        "observedAt": "2026-11-10"
+      },
+      "citations": [
+        {
+          "field": "submissionMethod",
+          "value": "utah.cityinspect.com",
+          "sourceUrl": "https://www.bountiful.gov/177/Building",
+          "quote": "All permits are now completed through CityInspect, which is our online portal.",
+          "fetchedAt": "2026-11-10T08:21:01Z"
+        },
+        {
+          "field": "requiresCustomerSignature",
+          "sourceUrl": "https://www.bountiful.gov/DocumentCenter/View/343/Solar-Packet-Net-Meter-PDF",
+          "quote": "Photo Voltaic System NET Metered Agreement (signed by prop. owner) (Attachment 3)",
+          "fetchedAt": "2026-11-10T08:21:07Z"
+        },
+        {
+          "field": "requiresUtilityApproval",
+          "sourceUrl": "https://www.bountiful.gov/DocumentCenter/View/343/Solar-Packet-Net-Meter-PDF",
+          "quote": "Approvals, rejection or comments will be recorded in Cityinspect and available for applicant review.",
+          "fetchedAt": "2026-11-10T08:21:07Z"
+        },
+        {
+          "field": "otherRequirements",
+          "sourceUrl": "https://www.bountiful.gov/DocumentCenter/View/343/Solar-Packet-Net-Meter-PDF",
+          "quote": "For residential single-phase customers, the maximum allowable photovoltaic system size is 10 kW.",
+          "fetchedAt": "2026-11-10T08:21:07Z"
+        },
+        {
+          "field": "otherRequirements",
+          "sourceUrl": "https://www.bountiful.gov/DocumentCenter/View/343/Solar-Packet-Net-Meter-PDF",
+          "quote": "The location of the meter base for the NET Metered Production Meter must be approved by BCL&P prior to construction.",
+          "fetchedAt": "2026-11-10T08:21:07Z"
+        },
+        {
+          "field": "ess",
+          "sourceUrl": "https://www.bountiful.gov/DocumentCenter/View/342/Solar-Packet-Battery-System-PDF",
+          "quote": "SOUTH DAVIS METRO FIRE AGENCY: Approval Letter (See Attachment 5 for guidelines)",
+          "fetchedAt": "2026-11-10T08:21:07Z"
+        },
+        {
+          "field": "ess",
+          "sourceUrl": "https://www.bountiful.gov/DocumentCenter/View/342/Solar-Packet-Battery-System-PDF",
+          "quote": "SUBMIT COMPLETED BATTERY SYSTEM PERMIT APPLICATION PACKET ON THE CITYINSPECT PORTAL",
+          "fetchedAt": "2026-11-10T08:21:07Z"
+        }
+      ],
+      "reviewerNotes": "Seeded 2026-11-10 from the city's own public pages (worker-refdata-ut, plain reads; no portal was opened); NOT verified - confirm before relying on it. A person verifies the portal in the dashboard before anything files. Information pages are sources, not the portal. Sources: https://www.bountiful.gov/177/Building ; https://www.bountiful.gov/DocumentCenter/View/343/Solar-Packet-Net-Meter-PDF ; https://www.bountiful.gov/DocumentCenter/View/342/Solar-Packet-Battery-System-PDF",
+      "sourceSheet": "UT seeded (web research 2026-11-10)"
+    },
+    {
+      "state": "UT",
+      "ahj": "Kaysville",
+      "submissionMethod": "Kaysville online building permit portal (CityInspect, utah.cityinspect.com, Kaysville's registration link): plans submitted online",
+      "timeline": "Allow 10 business days for review",
+      "requiresElectricianSign": false,
+      "requiresElectricalStamp": false,
+      "requiresStructuralStamp": true,
+      "requiresElectricalPermitApplication": false,
+      "requiresBuildingPermitApplication": true,
+      "requiresSolarChecklist": true,
+      "requiresPlanSet": true,
+      "requiresUtilityApproval": true,
+      "requiresCustomerSignature": true,
+      "requiresFloodplainCheck": false,
+      "requiresJurisdictionCheck": false,
+      "otherRequirements": "Kaysville City Power (the city-owned utility): the Net Metering and Interconnection Agreement, signed and notarized, is attached to the online building permit application. The agreement is between Kaysville City and the homeowner (no third parties); not to exceed 15 kW (DC) total; the customer pays for and has a production meter installed; a facility of 11-15 kW needs a lockable, load-break manual disconnect within 10 feet of the utility meter; the city inspects and approves in writing before parallel operation. One-line diagram: maximum system kW output not to exceed 15 kW. Allow 10 business days for review.",
+      "documents": {
+        "items": [
+          "Net meter agreement, signed and notarized (attached online with the application)",
+          "Site plan: home, all PV components (main meter, production meter, AC disconnect, arrays, panels, inverters, pass-through boxes) grouped within 6 feet",
+          "One-line diagram: PV system type, main and production meters, disconnect and inverter type and rating, module layout and connection, maximum system kW output (not to exceed 15 kW), labeling, wiring and conduit, fuse/breaker ratings, grounding",
+          "Module, inverter and combiner box list with manufacturer specification sheets and installation guides; engineer of record confirms the roof carries the added load",
+          "Photo of the interconnection panel and any other boxes to be mounted",
+          "Other system components with their UL listing and installation information",
+          "Signage: engraved, mechanically fastened labels on meter bases and the safety disconnect, with samples and locations"
+        ],
+        "sourceUrl": "https://www.kaysville.gov/DocumentCenter/View/5290/Solar-Checklist",
+        "quote": "Net meter agreement- signed and notarized (attachment available on-line w/application)",
+        "observedAt": "2026-11-10"
+      },
+      "citations": [
+        {
+          "field": "submissionMethod",
+          "value": "utah.cityinspect.com",
+          "sourceUrl": "https://kaysville.gov/182/Building-Permits",
+          "quote": "We are digital! Please submit your plans through our ONLINE BUILDING PERMIT PORTAL",
+          "fetchedAt": "2026-11-10T08:20:29Z"
+        },
+        {
+          "field": "otherRequirements",
+          "sourceUrl": "https://www.kaysville.gov/DocumentCenter/View/1921/RESIDENTIAL-NET-METERING-AGREEMENT",
+          "quote": "Not to exceed 15KW (DC) in total capacity.",
+          "fetchedAt": "2026-11-10T08:20:30Z"
+        },
+        {
+          "field": "otherRequirements",
+          "sourceUrl": "https://www.kaysville.gov/DocumentCenter/View/1921/RESIDENTIAL-NET-METERING-AGREEMENT",
+          "quote": "The net metering agreement is between Kaysville City and the Kaysville City homeowner. No third parties.",
+          "fetchedAt": "2026-11-10T08:20:30Z"
+        },
+        {
+          "field": "requiresStructuralStamp",
+          "sourceUrl": "https://www.kaysville.gov/DocumentCenter/View/5290/Solar-Checklist",
+          "quote": "Please have engineer of record confirm roof is capable of supporting the additional loads from the new solar array.",
+          "fetchedAt": "2026-11-10T08:20:45Z"
+        },
+        {
+          "field": "timeline",
+          "sourceUrl": "https://www.kaysville.gov/DocumentCenter/View/5290/Solar-Checklist",
+          "quote": "Please allow 10 business days for the review.",
+          "fetchedAt": "2026-11-10T08:20:45Z"
+        }
+      ],
+      "reviewerNotes": "Seeded 2026-11-10 from the city's own public pages (worker-refdata-ut, plain reads; no portal was opened); NOT verified - confirm before relying on it. A person verifies the portal in the dashboard before anything files. Information pages are sources, not the portal. Sources: https://kaysville.gov/182/Building-Permits ; https://www.kaysville.gov/DocumentCenter/View/1921/RESIDENTIAL-NET-METERING-AGREEMENT ; https://www.kaysville.gov/DocumentCenter/View/5290/Solar-Checklist",
+      "sourceSheet": "UT seeded (web research 2026-11-10)"
     }
   ]
 }
