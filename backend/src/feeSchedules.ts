@@ -4973,8 +4973,35 @@ function ancillaryCharges(
   schedule: FeeScheduleRecord,
   b: FeeBracket,
   inputs: { electricalReviewRequired?: boolean; kw?: number | null; serviceFeeder?: ServiceLineCounts | null },
+  serviceCharges: readonly FeeChargeBreakdown[] = [],
 ): FeeChargeBreakdown[] {
   const out: FeeChargeBreakdown[] = [];
+  // A LOCAL PERCENT FEE (technology, administrative) IS TAKEN ON THE FILING'S PERMIT FEES, not on the
+  // permit line alone. Paid receipts (owner export 2026-11-23, 19 jurisdictions) print it on every
+  // permit line of the filing, the services/feeders line included (3% of a $150 permit line + a $150
+  // services line = $9.00, not $4.50), and on plan review too where the schedule says so ("of permit
+  // and plan review fees", "of total fees": 10% of $495.50 + $322.08 = $81.76). Services lines are
+  // permit fees by the same rule the state surcharge follows (modeledStateSurcharge.ofUsd). Plan review
+  // itself stays a percent of the permit line, and a surcharge stays where it is: a held state
+  // surcharge rides the services line already (serviceFeederCharges), and adding it here would bill
+  // it twice.
+  const servicesUsd = serviceCharges.filter((s) => isServiceLineBaseKind(s.kind) && s.amountUsd != null)
+    .reduce((sum, s) => sum + (s.amountUsd ?? 0), 0);
+  const ridesThisFiling = (c: FeeAncillaryCharge) => !c.appliesTo || c.appliesTo === schedule.discipline;
+  const planReviewUsd = (b.ancillaryCharges ?? [])
+    .filter((c) => c.kind === "plan_review" && !c.conditional && ridesThisFiling(c))
+    .reduce((sum, c) => sum + (c.percent != null ? round2(b.feeUsd * c.percent / 100) : round2(c.amountUsd ?? 0)), 0);
+  const percentBase = (c: FeeAncillaryCharge): { usd: number; of: string } => {
+    // Only a technology or administrative fee: a "processing" charge is as often plan review under
+    // another name (Portland's "Bldg Plan Rvw/Processing", 65% of the building permit fee).
+    const localPercentFee = c.kind === "technology"
+      || (c.kind === "processing" && /\b(?:technology|administrative|admin)\b/i.test(c.label) && !/\bplan\s*r(?:e)?v/i.test(c.label));
+    if (!localPercentFee) return { usd: b.feeUsd, of: clean(c.percentOf) || "the permit fee" };
+    const withReview = planReviewUsd > 0 && /\bplan\s+review\b|\btotal\b|\ball\s+fees\b/i.test(clean(c.percentOf));
+    const usd = round2(b.feeUsd + servicesUsd + (withReview ? planReviewUsd : 0));
+    const parts = ["the permit fee", ...(servicesUsd > 0 ? ["the services/feeders fees"] : []), ...(withReview ? ["plan review"] : [])];
+    return { usd, of: parts.length > 1 ? `${parts.slice(0, -1).join(", ")} and ${parts[parts.length - 1]}` : clean(c.percentOf) || parts[0] };
+  };
   for (const c of b.ancillaryCharges ?? []) {
     if (c.appliesTo && c.appliesTo !== schedule.discipline) continue;
     // A job's services/feeders lines (a battery's <=200A line, a service upgrade's line in
@@ -4994,9 +5021,10 @@ function ancillaryCharges(
     if (c.kind === "minimum") continue;
     // Rule 2 above: a percentage is a function of the BASE permit fee, evaluated
     // here and rounded here, never a product somebody stored.
-    const amount = c.percent != null ? round2(b.feeUsd * c.percent / 100) : round2(c.amountUsd ?? 0);
-    const basis = c.percent != null
-      ? `${c.percent}% of ${clean(c.percentOf) || "the permit fee"} ($${b.feeUsd.toFixed(2)})`
+    const base = c.percent != null ? percentBase(c) : null;
+    const amount = c.percent != null && base ? round2(base.usd * c.percent / 100) : round2(c.amountUsd ?? 0);
+    const basis = c.percent != null && base
+      ? `${c.percent}% of ${base.of} ($${base.usd.toFixed(2)})`
       : "";
     const known = c.conditional ? conditionalChargeApplies(c.condition, inputs) : true;
     // THE SCHEDULE ANSWERED NO. A charge whose printed trigger is a kVA threshold this project
@@ -5406,7 +5434,7 @@ function evaluateSchedule(
     const serviceCharges = serviceFeederCharges(schedule, eb, inputs, heldSurcharge);
     const pricedCharges = [
       ...permitCharges(schedule, eb, bracketLabel, bracketQuote, stateSurchargeUsd, communitySurchargeUsd),
-      ...ancillaryCharges(schedule, eb, inputs),
+      ...ancillaryCharges(schedule, eb, inputs, serviceCharges),
       ...serviceCharges,
     ];
     const charges = [...pricedCharges, ...unpricedLineCharges(schedule, eb, pricedCharges, lineSurcharge != null)];
@@ -6108,6 +6136,25 @@ function receiptCandidates(parts: ReceiptPart[]): ReceiptCandidate[] {
   return out;
 }
 
+/** The schedule key(s) a receipt belongs to: its BEST-scoring jurisdiction only, never every name
+ *  that clears the bar; same state where both carry one; never a county for a city. */
+function receiptScheduleKeys(groups: ReadonlyMap<string, FeeScheduleRecord[]>, r: ReceiptRow): string[] {
+  let best = 0;
+  let keys: string[] = [];
+  for (const [key, rows] of groups) {
+    const s = rows[0];
+    const rowState = s.state.trim().toUpperCase();
+    if (r.state && rowState && rowState !== r.state) continue;
+    const a = jurisdictionKind(r.receipt.jurisdiction), b = jurisdictionKind(s.ahj);
+    if (a && b && a !== b) continue;
+    const score = knowledgeNameMatchScore(r.receipt.jurisdiction, s.ahj);
+    if (score < 60 || score < best) continue;
+    if (score > best) { best = score; keys = []; }
+    keys.push(key);
+  }
+  return keys;
+}
+
 /** READ-ONLY. Compare every paid receipt with the permit schedule(s) held for the same
  *  jurisdiction — fuzzy name + state, as learnedFee matches — and say, per schedule,
  *  whether the receipts corroborate it. Never writes; never changes a schedule. */
@@ -6117,25 +6164,11 @@ export function reconcileReceiptsWithSchedules(db: AppDb): ReceiptReconciliation
   const groups = new Map<string, FeeScheduleRecord[]>();
   for (const s of usable) groups.set(s.profileKey, [...(groups.get(s.profileKey) ?? []), s]);
 
-  // Each receipt goes to its BEST-scoring jurisdiction only, never to every name
-  // that clears the bar.
   const receipts = receiptsFromHistory(db);
   const byGroup = new Map<string, ReceiptRow[]>();
   let receiptsWithoutSchedule = 0;
   for (const r of receipts) {
-    let best = 0;
-    let keys: string[] = [];
-    for (const [key, rows] of groups) {
-      const s = rows[0];
-      const rowState = s.state.trim().toUpperCase();
-      if (r.state && rowState && rowState !== r.state) continue;
-      const a = jurisdictionKind(r.receipt.jurisdiction), b = jurisdictionKind(s.ahj);
-      if (a && b && a !== b) continue;
-      const score = knowledgeNameMatchScore(r.receipt.jurisdiction, s.ahj);
-      if (score < 60 || score < best) continue;
-      if (score > best) { best = score; keys = []; }
-      keys.push(key);
-    }
+    const keys = receiptScheduleKeys(groups, r);
     if (!keys.length) { receiptsWithoutSchedule++; continue; }
     for (const key of keys) byGroup.set(key, [...(byGroup.get(key) ?? []), r]);
   }
@@ -6188,6 +6221,131 @@ export function reconcileReceiptsWithSchedules(db: AppDb): ReceiptReconciliation
     receiptsRead: receipts.length,
     receiptsWithoutSchedule,
   };
+}
+
+// ── LINE BY LINE: THE SCHEDULE'S PRICE FOR A LINE AGAINST THE PRICE AN ITEMIZED RECEIPT PRINTS ──
+//
+// A receipt's TOTAL is a poor test of a schedule. It mixes the permit line with the state surcharge,
+// plan review, a local technology or administrative fee and partial payments, so a schedule that is
+// right about the permit line can still fail to "explain" the total, and one that is wrong can be
+// explained by a lucky combination. An itemized receipt prints each line's own price ("Renewable
+// energy for electrical systems- 5.01kva through 15kva $94.00"), and that is held directly against
+// the schedule's bracket for the same band. READ-ONLY, like the reconcile above: a disagreement is
+// reported for a person to check against the fee sheet; no schedule is ever changed (rule 3).
+//
+// Two kinds of printed line are compared, both named by the receipt in the jurisdiction's own words:
+//   · a kVA band of a solar / renewable-energy electrical line ("5kva or less", "5.01kva through
+//     15kva"), against the electrical (or undifferentiated) bracket whose kW/kVA range holds the band;
+//   · a prescriptive PV installation fee (not "non prescriptive"), against a flat bracket the
+//     schedule itself labels prescriptive.
+// A formula bracket (a rate per kVA, a percent of cost) is not a price and is not compared.
+
+export type ReceiptLineVerdict = "matches" | "differs" | "no_bracket";
+
+export interface ReceiptLineCheck {
+  profileKey: string;
+  ahj: string;
+  discipline: FeeDiscipline;
+  confidence: FeeConfidence;
+  /** The receipt's jurisdiction and printed line, as the receipt names them. */
+  jurisdiction: string;
+  receiptLine: string;
+  /** The authority's price for the line (its fee amount, not a partial payment of it). */
+  receiptFeeUsd: number;
+  paidAt: string;
+  /** The schedule's price for the same line, before any surcharge; null = no bracket holds it. */
+  scheduleFeeUsd: number | null;
+  scheduleLabel: string;
+  verdict: ReceiptLineVerdict;
+}
+
+export interface ReceiptLineCheckReport {
+  checks: ReceiptLineCheck[];
+  /** Denominators. */
+  receiptsRead: number;
+  itemizedReceipts: number;
+  linesComparable: number;
+  receiptsWithoutSchedule: number;
+}
+
+/** The kVA band a printed solar / renewable-energy electrical line names, or null. */
+export function receiptLineKvaBand(label: string): { min: number; max: number } | null {
+  if (!/\b(?:renewable|solar|photovoltaic|pv)\b/i.test(label) || /\b(?:wind|thermal)\b/i.test(label)) return null;
+  const range = /(\d+(?:\.\d+)?)\s*kva\s+(?:through|to|-)\s+(\d+(?:\.\d+)?)\s*kva\b/i.exec(label);
+  if (range) return { min: Number(range[1]), max: Number(range[2]) };
+  const upTo = /(\d+(?:\.\d+)?)\s*kva\s+or\s+less\b/i.exec(label);
+  return upTo ? { min: 0, max: Number(upTo[1]) } : null;
+}
+
+/** A printed prescriptive PV installation line ("Prescriptive photovoltaic installations"). */
+export function receiptLineIsPrescriptivePv(label: string): boolean {
+  return /\bprescriptive\b/i.test(label) && !/\bnon[-\s]?prescriptive\b/i.test(label)
+    && /\b(?:photovoltaic|solar|pv)\b/i.test(label);
+}
+
+function bracketIsPrice(b: FeeBracket): boolean {
+  const fee = Number(b.feeUsd);
+  return Number.isFinite(fee) && fee > 0 && !bracketDescribesFormula(b.label) && !parseKwRateFormula(b);
+}
+
+/** READ-ONLY. Every comparable line of every itemized receipt, against the schedule(s) on file for
+ *  its jurisdiction. `receipts` defaults to those recorded in permit_fee_history; a caller may pass
+ *  receipts it has only read (a dry run of an import), with state "" when it does not know one. */
+export function checkReceiptLinesAgainstSchedules(
+  db: AppDb,
+  receipts: ReadonlyArray<{ receipt: PaidFeeReceipt; state: string; projectId?: string | null }> = receiptsFromHistory(db),
+): ReceiptLineCheckReport {
+  const all = db.query<Row>("SELECT * FROM fee_schedules WHERE track = 'permit' ORDER BY profile_key, discipline").map(mapSchedule);
+  const usable = all.filter((s) => s.status === "ok" && !s.collectedByProfileKey && s.brackets.length > 0);
+  const groups = new Map<string, FeeScheduleRecord[]>();
+  for (const s of usable) groups.set(s.profileKey, [...(groups.get(s.profileKey) ?? []), s]);
+  const checks: ReceiptLineCheck[] = [];
+  let itemizedReceipts = 0, linesComparable = 0, receiptsWithoutSchedule = 0;
+  for (const r of receipts) {
+    const lines = Array.isArray(r.receipt.lines) ? r.receipt.lines : [];
+    if (!lines.length) continue;
+    itemizedReceipts++;
+    const comparable = lines.filter((l) => Number(l.feeUsd) > 0 && (receiptLineKvaBand(l.label) || receiptLineIsPrescriptivePv(l.label)));
+    linesComparable += comparable.length;
+    if (!comparable.length) continue;
+    const keys = receiptScheduleKeys(groups, { receipt: r.receipt, state: clean(r.state).toUpperCase(), projectId: r.projectId ?? null });
+    if (!keys.length) { receiptsWithoutSchedule++; continue; }
+    for (const key of keys) {
+      const rows = groups.get(key) ?? [];
+      for (const line of comparable) {
+        const band = receiptLineKvaBand(line.label);
+        // The electrical line is held against an electrical, combo or undifferentiated row; the
+        // prescriptive structural line against a structural, combo or undifferentiated row.
+        const fits = rows.filter((s) => band ? s.discipline !== "structural" : s.discipline !== "electrical");
+        let hit: { s: FeeScheduleRecord; b: FeeBracket } | null = null;
+        for (const s of fits) {
+          for (const b of s.brackets) {
+            if (!bracketIsPrice(b)) continue;
+            if (band) {
+              // The bracket whose range holds the band's middle: "5.01 to 15 kVA" holds 10.005.
+              const mid = (band.min + band.max) / 2;
+              if (b.minKw == null && b.maxKw == null) continue;
+              if (mid < (b.minKw ?? 0) || mid > (b.maxKw ?? Infinity)) continue;
+            } else if (!receiptLineIsPrescriptivePv(clean(b.label)) || b.minKw != null || b.maxKw != null) continue;
+            hit = { s, b };
+            break;
+          }
+          if (hit) break;
+        }
+        const receiptFeeUsd = round2(Number(line.feeUsd));
+        const scheduleFeeUsd = hit ? round2(Number(hit.b.feeUsd)) : null;
+        const owner = hit?.s ?? fits[0] ?? rows[0];
+        checks.push({
+          profileKey: key, ahj: owner.ahj, discipline: owner.discipline, confidence: owner.confidence,
+          jurisdiction: clean(r.receipt.jurisdiction), receiptLine: clean(line.label).slice(0, 120), receiptFeeUsd,
+          paidAt: clean(r.receipt.paidAt), scheduleFeeUsd, scheduleLabel: hit ? clean(hit.b.label).slice(0, 120) : "",
+          verdict: scheduleFeeUsd == null ? "no_bracket"
+            : Math.abs(scheduleFeeUsd - receiptFeeUsd) <= RECEIPT_MATCH_TOLERANCE_USD ? "matches" : "differs",
+        });
+      }
+    }
+  }
+  return { checks, receiptsRead: receipts.length, itemizedReceipts, linesComparable, receiptsWithoutSchedule };
 }
 
 export const RECEIPT_REVIEW_ISSUE_TYPE = "Fee schedule disagrees with paid receipts";

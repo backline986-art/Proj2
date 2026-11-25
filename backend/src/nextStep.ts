@@ -52,6 +52,7 @@
 // repository export; keep it that way.
 // ---------------------------------------------------------------------------
 
+import { withReadMemo } from "./readMemo";
 import type { AppDb } from "./db";
 import type {
   ClientAskSent,
@@ -1130,7 +1131,7 @@ export function compactNextStep(step: NextStep): NextStepCompact {
 export function loadFullNextStepFacts(db: AppDb, projectId: string): NextStepFacts {
   const project = getProjectDetail(db, projectId).project;
   const facts = loadNextStepFacts(db, [project]).get(projectId)!;
-  return withoutCodeResearch(() => {
+  return withReadMemo(db, () => withoutCodeResearch(() => {
     const gate = getSubmitGateReport(db, projectId);
     return {
       ...facts,
@@ -1141,7 +1142,7 @@ export function loadFullNextStepFacts(db: AppDb, projectId: string): NextStepFac
       reviewerBlockers: reviewerBlockerList(db, project),
       clientAsks: clientAsksForProject(db, projectId),
     };
-  });
+  }));
 }
 
 /** S1 — the full answer for one project. READ-ONLY. */

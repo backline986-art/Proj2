@@ -167,6 +167,7 @@ const artifactEnvFor = (root: string): Record<string, string> => ({
   REPLAY_CAPTURE_DIR: path.join(root, "replay-captures"),
   PORTAL_SCREENSHOT_DIR: path.join(root, "screenshots"),
   POWERCLERK_DEBUG_DIR: path.join(root, "portal-debug"),
+  PORTAL_PAGE_CAPTURE_DIR: path.join(root, "page-captures"),
 });
 
 // ---------------------------------------------------------------------------------------------

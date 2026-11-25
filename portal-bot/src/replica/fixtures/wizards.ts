@@ -112,6 +112,9 @@ export interface PageSpec {
   controls: Ctl[];
   /** Read-only body copy for notice/review pages. */
   note?: string;
+  /** Accela read-only pages only: extra inert links (href="javascript:void(0)", so the scan reads them) shown above the action bar (a smoke adds a
+   *  "Pay Fees" or "Request Signatures" control here). Clicking one posts nothing. */
+  actions?: Array<{ id: string; label: string }>;
   /** selfserve: this page's controls live in a pop-up dialog opened by `opener` and committed
    *  only by its Save button (closed unsaved = nothing committed). */
   overlay?: { opener: string };
