@@ -3236,6 +3236,11 @@ export class AutoLearnAdapter extends BasePortalAdapter {
    *  search box comes back empty: a read-back, a required sweep or a re-plan must not take that for
    *  a miss and search again (a second identical search, a second location row). */
   private readonly typeaheadEnterPicks = new Map<string, { label: string; held: string }>();
+  /** Boxes a type-ahead answered FROM ITS LIST during this page visit (the box's own id and label;
+   *  never the value). Read by the lookup-button pass: an answered search box is not a blank, and
+   *  its section's search helpers are other ways to ask what the pick already answered. Emptied at
+   *  each page visit — a box the portal sent back is picked again. */
+  private readonly typeaheadListPicks: Array<{ id: string; label: string }> = [];
   /** #139 — manual-entry doors already tried (box selector+label): one click per box per walk. */
   private readonly typeaheadDoorTried = new Set<string>();
   /** #139 — steps a type-ahead's manual-entry door recorded (its click, then each address box it
@@ -6265,7 +6270,12 @@ export class AutoLearnAdapter extends BasePortalAdapter {
    *  text, the section's own text, and its control ids. Each section container, Add New and Edit
    *  is stamped (data-al-csec / data-al-caddnew / data-al-cedit) so the pass can act on exactly
    *  that section. null when the page cannot be read (a stub page) — the positional fallback. */
-  private async acaContactSectionsOnPage(opts: { lookups?: boolean } = {}): Promise<Array<{
+  private async acaContactSectionsOnPage(opts: {
+    lookups?: boolean;
+    /** (with lookups) boxes a type-ahead pick answered (typeaheadAnsweredBoxes): each is stamped
+     *  data-al-ta-picked, named in its section's typeaheadAnswered and never read as a required blank. */
+    typeaheadAnswered?: Array<{ id: string; label: string; holds: boolean }>;
+  } = {}): Promise<Array<{
     key: number; heading: string; instruction: string; text: string;
     addNewId: string; selectId: string; editId: string; hasAddNew: boolean; hasEdit: boolean;
     /** #178 (only with opts.lookups): the section's lookup / populate buttons (portalSafety
@@ -6278,6 +6288,8 @@ export class AutoLearnAdapter extends BasePortalAdapter {
     /** The labels of the section's shown boxes that HOLD a value — what the walk (or the portal)
      *  answered here; a section the walk filled is never stopped as "could not fill". */
     typedLabels: string[];
+    /** The labels of the section's shown boxes a type-ahead pick answered (opts.typeaheadAnswered). */
+    typeaheadAnswered: string[];
     /** A SEARCH THAT WAS TYPED BUT NEVER COMMITTED: shown boxes holding a value that post NOTHING (no
      *  name, no form attribute — a search box, whose value reaches the application only through the
      *  section's search and a picked row), and the section's named hidden inputs, with how many hold a
@@ -6288,9 +6300,9 @@ export class AutoLearnAdapter extends BasePortalAdapter {
     if (!page || typeof page.evaluate !== "function") return null;
     // The lookup words are the SHARED predicate's, asked in the page (never a second list here).
     if (opts.lookups) await page.evaluate(PORTAL_SAFETY_IN_PAGE_SOURCE).catch(() => null);
-    const raw = await page.evaluate((src: { lookups: boolean; global: string }) => {
+    const raw = await page.evaluate((src: { lookups: boolean; global: string; answered: Array<{ id: string; label: string; holds: boolean }> }) => {
       // NO named functions in here: keepNames wraps them in __name, which the page may lack.
-      type Sec = { key: number; heading: string; instruction: string; text: string; addNewId: string; selectId: string; editId: string; hasAddNew: boolean; hasEdit: boolean; lookups: Array<{ lookupKey: number; id: string; label: string; role: "link" | "button" }>; requiredBlank: string[]; typedTotal: number; typedBlank: number; addressTyped: boolean; typedLabels: string[]; searchOnlyFilled: number; hiddenNamed: number; hiddenNamedFilled: number };
+      type Sec = { key: number; heading: string; instruction: string; text: string; addNewId: string; selectId: string; editId: string; hasAddNew: boolean; hasEdit: boolean; lookups: Array<{ lookupKey: number; id: string; label: string; role: "link" | "button" }>; requiredBlank: string[]; typedTotal: number; typedBlank: number; addressTyped: boolean; typedLabels: string[]; typeaheadAnswered: string[]; searchOnlyFilled: number; hiddenNamed: number; hiddenNamedFilled: number };
       const out: Sec[] = [];
       const containers: Element[] = [];
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -6333,7 +6345,7 @@ export class AutoLearnAdapter extends BasePortalAdapter {
           containers.push(container);
           idx = containers.length - 1;
           container.setAttribute("data-al-csec", String(idx));
-          out.push({ key: idx, heading, instruction, text: "", addNewId: "", selectId: "", editId: "", hasAddNew: false, hasEdit: false, lookups: [], requiredBlank: [], typedTotal: 0, typedBlank: 0, addressTyped: false, typedLabels: [], searchOnlyFilled: 0, hiddenNamed: 0, hiddenNamedFilled: 0 });
+          out.push({ key: idx, heading, instruction, text: "", addNewId: "", selectId: "", editId: "", hasAddNew: false, hasEdit: false, lookups: [], requiredBlank: [], typedTotal: 0, typedBlank: 0, addressTyped: false, typedLabels: [], typeaheadAnswered: [], searchOnlyFilled: 0, hiddenNamed: 0, hiddenNamedFilled: 0 });
         }
         const rec = out[idx];
         if (kind === "add" && !rec.hasAddNew) { rec.hasAddNew = true; rec.addNewId = el.id || ""; el.setAttribute("data-al-caddnew", String(idx)); }
@@ -6373,6 +6385,23 @@ export class AutoLearnAdapter extends BasePortalAdapter {
           const grp = el.closest("[class*='element_group'], .form-group, [class*='form-group'], fieldset, [class*='Field'], [class*='field']");
           return !!grp && !!grp.querySelector("[class*='equired']");
         };
+        // THE BOXES A TYPE-AHEAD PICK ANSWERED (src.answered), stamped data-al-ta-picked once per read,
+        // across the document: by the box's own id, else by its label; a list pick must still be shown
+        // in its box (an Enter selection is shown outside it). The stamp is also what the pass's own
+        // section search reads, so it never types over a pick.
+        if (i === 0) {
+          const loose = (s: string) => norm(s).replace(/[*:]/g, " ").replace(/\s+/g, " ").trim().toLowerCase();
+          for (const old of Array.from(document.querySelectorAll("[data-al-ta-picked]"))) old.removeAttribute("data-al-ta-picked");
+          for (const a of src.answered) {
+            const byId = a.id ? document.getElementById(a.id) : null;
+            const boxes = byId ? [byId] : Array.from(document.querySelectorAll("input, textarea")).filter((el) => !!loose(a.label) && loose(labelOf(el)) === loose(a.label));
+            for (const el of boxes) {
+              if (!/^(INPUT|TEXTAREA)$/.test(el.tagName)) continue;
+              if (a.holds && !norm((el as HTMLInputElement).value)) continue;
+              el.setAttribute("data-al-ta-picked", "1");
+            }
+          }
+        }
         let streetBoxes = 0;
         let streetBlank = 0;
         for (const el of Array.from(c.querySelectorAll("input, select, textarea"))) {
@@ -6396,8 +6425,19 @@ export class AutoLearnAdapter extends BasePortalAdapter {
               if (tag === "input" && !el.getAttribute("name") && !el.getAttribute("form")) out[i].searchOnlyFilled++;
             }
             if (/\b(street|house)\s*(no\.?|number|#|num)\b|\bstreet\s*name\b/i.test(lbl)) { streetBoxes++; if (!val) streetBlank++; }
-            if (!val && requiredMark(el)) out[i].requiredBlank.push(lbl || out[i].heading);
+            // A box a type-ahead pick answered is not a blank, though the portal may show the pick
+            // outside it and leave the box itself empty.
+            if (el.hasAttribute("data-al-ta-picked")) out[i].typeaheadAnswered.push(lbl || out[i].heading);
+            else if (!val && requiredMark(el)) out[i].requiredBlank.push(lbl || out[i].heading);
           } else if (!val && ((el as HTMLInputElement).required || el.getAttribute("aria-required") === "true")) {
+            // NOT A VALIDATOR: a disabled control (never validated, never sent), or a control of a form
+            // that is not open — a closed dialog inside the section (the page's own "enter it by hand"
+            // or map pop-up). Those required boxes are that dialog's, asked only once it is opened;
+            // read as this section's blank they sent the pass pressing every button of a section whose
+            // shown boxes were all answered.
+            if (el.matches(":disabled")) continue;
+            const shut = el.closest("dialog, [role='dialog'], [role='alertdialog'], [aria-modal='true'], [class*='modal' i], [class*='popup' i]");
+            if (shut && shut !== c && c.contains(shut) && !vis(shut)) continue;
             // The hidden validator: required by attribute, nothing else. Named by the heading.
             if (!out[i].requiredBlank.includes(out[i].heading)) out[i].requiredBlank.push(out[i].heading);
           }
@@ -6405,7 +6445,7 @@ export class AutoLearnAdapter extends BasePortalAdapter {
         out[i].addressTyped = streetBoxes >= 2 && streetBlank === 0;
       }
       return out;
-    }, { lookups: !!opts.lookups, global: PORTAL_SAFETY_GLOBAL }).catch(() => null);
+    }, { lookups: !!opts.lookups, global: PORTAL_SAFETY_GLOBAL, answered: opts.typeaheadAnswered ?? [] }).catch(() => null);
     return Array.isArray(raw) ? raw : null;
   }
 
@@ -10048,6 +10088,7 @@ export class AutoLearnAdapter extends BasePortalAdapter {
 
       // d) Apply the fills and record each as a RecipeStep.
       let pageFillCount = pageFillCountPre;
+      this.typeaheadListPicks.length = 0; // a new page visit: its list picks are made (or made again) below
       // Fills applied this page, retained so d2 can read them back and confirm they held.
       const appliedThisPage: AppliedFill[] = [];
       for (const fillReq of plan.fills ?? []) {
@@ -12628,6 +12669,14 @@ export class AutoLearnAdapter extends BasePortalAdapter {
     }
     // A pick the portal SELECTED (Enter, or the box's own search control — #198) is shown outside the box.
     if (out.via === "enter" || out.via === "search") this.typeaheadEnterPicks.set(boxKey, { label, held: out.held });
+    else {
+      // A pick the BOX holds: remembered for this page visit by the box's own id and label, so the
+      // lookup-button pass leaves the answered box (and its section's search helpers) alone.
+      const id = loc && typeof loc.evaluate === "function"
+        ? String((await loc.evaluate((el: Element) => el.getAttribute("id") || "", undefined, { timeout: 1500 }).catch(() => "")) ?? "")
+        : "";
+      this.typeaheadListPicks.push({ id, label });
+    }
     // #161: the required selection this pick filled is asked again before the page is left.
     if (mode === "site" && out.resultBoxes?.length) this.locationResultGuard = { boxes: out.resultBoxes, site, label };
     const step: RecipeStep = {
@@ -13357,14 +13406,21 @@ export class AutoLearnAdapter extends BasePortalAdapter {
       await this.waitForDynamicFieldsSettle().catch(() => null);
       // A page that answers with anything but well-formed sections (no lookups list) has no
       // lookup buttons to press: treat it as none instead of throwing out of the page walk.
-      const read = await this.acaContactSectionsOnPage({ lookups: true });
+      // A box a type-ahead pick answered is read as answered in EVERY read of the pass (the candidates,
+      // what a press populated, the stop), never as a required blank.
+      const read = await this.acaContactSectionsOnPage({ lookups: true, typeaheadAnswered: await this.typeaheadAnsweredBoxes() });
       return Array.isArray(read) ? read.filter((s) => !!s && Array.isArray(s.lookups) && Array.isArray(s.requiredBlank)) : null;
     };
+    /** A SECTION WHOSE SEARCH BOX A TYPE-AHEAD PICK ANSWERED: its search-worded helpers ("find it on
+     *  the map", "can't find it?") are other ways to ask what the pick already answered — pressing
+     *  one can replace or undo the pick, so none is pressed. A populate-worded button (Autofill) of
+     *  the same section still is, for a box that really is blank. */
+    const answeredByTypeahead = (s: Sec): boolean => Array.isArray(s.typeaheadAnswered) && s.typeaheadAnswered.length > 0;
     let sections = await readSections();
     if (!sections || !sections.some((s) => s.lookups.length)) return none;
     this.debug?.event({
       type: "lookup_sections", page: ctx.pageCount,
-      sections: sections.filter((s) => s.lookups.length).map((s) => ({ heading: s.heading.slice(0, 40), buttons: s.lookups.map((l) => l.label.slice(0, 30)), blanks: s.requiredBlank.slice(0, 6), typed: `${s.typedTotal - s.typedBlank}/${s.typedTotal}`, address: s.addressTyped, record: s.hasEdit })),
+      sections: sections.filter((s) => s.lookups.length).map((s) => ({ heading: s.heading.slice(0, 40), buttons: s.lookups.map((l) => l.label.slice(0, 30)), blanks: s.requiredBlank.slice(0, 6), typed: `${s.typedTotal - s.typedBlank}/${s.typedTotal}`, address: s.addressTyped, record: s.hasEdit, ...(answeredByTypeahead(s) ? { typeaheadAnswered: s.typeaheadAnswered.slice(0, 4).map((l) => l.slice(0, 60)) } : {}) })),
     });
     let pressed = 0;
     let presses = 0; // every press, including the ones with no effect
@@ -13379,6 +13435,7 @@ export class AutoLearnAdapter extends BasePortalAdapter {
         const ordered = [...usable.filter((l) => isPopulateWord(l.label)), ...usable.filter((l) => !isPopulateWord(l.label))];
         for (const l of ordered) {
           if (this.lookupPressed.has(stateKey(s, l.label))) continue;
+          if (answeredByTypeahead(s) && !isPopulateWord(l.label)) continue; // the pick answered this search
           if (s.addressTyped && !isPopulateWord(l.label)) return l; // rule 1: the address search
           // rule 3: a search the walk TYPED that nothing committed — a box that posts nothing holds the
           // value, and the section's hidden inputs (what a picked row writes) are all still empty.
@@ -13560,6 +13617,9 @@ export class AutoLearnAdapter extends BasePortalAdapter {
                 const r = b.getBoundingClientRect();
                 const cs = getComputedStyle(b);
                 if (!(r.width > 0 && r.height > 0) || cs.visibility === "hidden" || cs.display === "none") continue;
+                // Never the box a type-ahead pick answered (stamped by the section read): typing the
+                // business name into it replaces the pick, and the portal then refuses the page.
+                if (b.hasAttribute("data-al-ta-picked")) continue;
                 const id = b.getAttribute("id");
                 const l = id ? document.querySelector(`label[for="${CSS.escape(id)}"]`) : null;
                 const lbl = [String((l && (l as HTMLElement).innerText) || ""), b.getAttribute("aria-label") || "", b.getAttribute("title") || ""].join(" ");
@@ -13893,7 +13953,9 @@ export class AutoLearnAdapter extends BasePortalAdapter {
       // tab was found first and could not be filled).
       // TYPEABLE boxes only, too (live Tigard run 13: the section heading <h4 aria-label="Add Contact As
       // Contractor"> matched "contractor" by its aria-label and the fill failed — "unusable").
-      const typeable = (page ?? scope).locator("input:not([type=hidden]):not([type=checkbox]):not([type=radio]):not([type=button]):not([type=submit]), textarea");
+      // NEVER A BOX A TYPE-AHEAD PICK ANSWERED (data-al-ta-picked, stamped by the section read): the
+      // business name typed over the picked address is what the portal then refuses the page for.
+      const typeable = (page ?? scope).locator("input:not([type=hidden]):not([type=checkbox]):not([type=radio]):not([type=button]):not([type=submit]):not([data-al-ta-picked]), textarea:not([data-al-ta-picked])");
       let nameBox = scope.getByLabel(/business|company|organi[sz]ation|contractor|licensee/i).and(typeable).filter({ visible: true }).first();
       if (!(await nameBox.count().catch(() => 0))) {
         nameBox = scope.getByLabel(/\bname\b/i).and(typeable).filter({ visible: true }).first();
@@ -13905,7 +13967,7 @@ export class AutoLearnAdapter extends BasePortalAdapter {
       // #221 — A PLAIN "SEARCH" BOX (Tyler EnerGov "Add Contact": the only text box is labelled
       // "Search") when no business- or name-worded box exists, and it is the scope's ONE text box.
       if (!(await nameBox.count().catch(() => 0))) {
-        const lone = scope.locator("input[type='text']:visible, input[type='search']:visible, input:not([type]):visible");
+        const lone = scope.locator("input[type='text']:not([data-al-ta-picked]):visible, input[type='search']:not([data-al-ta-picked]):visible, input:not([type]):not([data-al-ta-picked]):visible");
         if ((await lone.count().catch(() => 0)) === 1) {
           // The box's own LABEL names it a search; its placeholder may list what it searches (Tigard's
           // reads "Name, E-mail, or Company"), so only the label is held to the exclusions.
@@ -14322,6 +14384,17 @@ export class AutoLearnAdapter extends BasePortalAdapter {
     const kept = labels.filter((l) => !answered.has(norm(l)));
     if (kept.length !== labels.length) this.debug?.event({ type: "required_answered_by_enter_selection", labels: labels.filter((l) => !kept.includes(l)).slice(0, 4) });
     return kept;
+  }
+
+  /** THE BOXES A TYPE-AHEAD PICK HAS ANSWERED, for the lookup-button pass: this page visit's list
+   *  picks (`holds`: the box must still show its pick — one the portal cleared is blank again), and
+   *  the Enter / search selections the page still shows (their box is empty by design, #139). */
+  private async typeaheadAnsweredBoxes(): Promise<Array<{ id: string; label: string; holds: boolean }>> {
+    const out = this.typeaheadListPicks.map((p) => ({ id: p.id, label: p.label, holds: true }));
+    for (const [key, pick] of this.typeaheadEnterPicks) {
+      if (await this.enterSelectionShown(key)) out.push({ id: "", label: pick.label, holds: false });
+    }
+    return out;
   }
 
   private async collectUnfilledRequired(): Promise<string[]> {
