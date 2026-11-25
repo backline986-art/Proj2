@@ -148,11 +148,16 @@ async function stagingRefusal(projectId: string, track?: "nem" | "electrical"): 
   }
   throw new Error("prepareSubmission staged a project the reviewer holds");
 }
-const approve = (projectId: string) => repo.createRunApproval(db, { projectId, track: "permit", approver: "A. Person", approverUserId: null });
+// The approver ticks every open review item (review-audit draft 01), so a run stopped here is stopped
+// by the override check under test, never by a missing acknowledgement.
+const approve = (projectId: string) => repo.createRunApproval(db, {
+  projectId, track: "permit", approver: "A. Person", approverUserId: null, acknowledgements: fx.acknowledgeAll(projectId, null),
+});
 
 console.log("reviewer blocker override: a named person pushes past one blocker, with a reason (#640)");
 
 fx.completeRecipe(); // [...fills, stopForReview, final submit click]
+fx.verifyDoor(); // a named person verified where the permit files (automaticSubmitRefusals filingDoor)
 
 // (a) ---------------------------------------------------------------------------------------------
 let aId = "";
@@ -266,7 +271,7 @@ await check("(b) MUST-STOP an override recorded AFTER the approval: staged, fina
 
 await check("(b) the one door: automaticSubmitRefusals refuses overriddenSinceApproval on its own", () => {
   const recipe = fx.completeRecipe();
-  const ok = { recipeId: recipe.id, runApproval: { approver: "A. Person", runId: "r1" }, runId: "r1", env: { PORTAL_ALLOW_FINAL_SUBMIT: "1" } };
+  const ok = { recipeId: recipe.id, runApproval: { approver: "A. Person", runId: "r1" }, runId: "r1", env: { PORTAL_ALLOW_FINAL_SUBMIT: "1" }, filingDoor: { url: fx.FIXTURE_DOOR } };
   assert.deepEqual(repo.automaticSubmitRefusals(db, { ...ok, overriddenSinceApproval: [] }), [], "setup: the clean inputs must pass");
   const refusals = repo.automaticSubmitRefusals(db, { ...ok, overriddenSinceApproval: [RSD] });
   assert.equal(refusals.length, 1);
