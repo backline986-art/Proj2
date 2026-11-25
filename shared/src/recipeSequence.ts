@@ -376,3 +376,48 @@ export function recipeSequenceSentence(problems: readonly RecipeSequenceProblem[
   const shown = ordered.slice(0, max).map((p) => p.detail);
   return shown.join("; ") + (ordered.length > max ? `; +${ordered.length - max} more` : "");
 }
+
+/**
+ * RECORD TIME — ONE CLEAN PASS OF A PAGE WHOSE ADVANCE THE PORTAL REFUSED. The check above reads
+ * saved steps and can only refuse them; the recorder was THERE: it saw the advance come back to its
+ * own form with the portal's notice on it, and did the page again. `refusedAt` are the indexes of
+ * those advances — the recorder's own observation, never a guess made from the steps (two wizard
+ * pages that share a form and a label are two pages, and nothing here can tell).
+ *
+ * For each one, on its own page only (back to, and on to, an advance that worked, a goto, a review
+ * stop or the final submit): a main-page write before it is SUPERSEDED when a write after it targets
+ * the same control — controlKey / namesDisagree / writesNothing, the check's own identity. The
+ * superseded writes and the refused advance are dropped; the later writes and the working advance
+ * stay, in order. Kept as recorded: a write the redo did not repeat (the portal kept its value),
+ * every click, upload and dialog step, every other page, and — when the redo repeated no write, or a
+ * click that may have replaced the form (mayReplaceForm) came before its first one, the same doubt
+ * the check allows — the refused advance itself, for the check to name. A review stop and a final
+ * submit are never dropped and never crossed.
+ */
+export function withoutRefusedAdvancePasses(steps: readonly RecipeStep[], refusedAt: readonly number[]): { steps: RecipeStep[]; dropped: number[] } {
+  const all = [...steps];
+  const refused = new Set(refusedAt.filter((i) => Number.isInteger(i) && i >= 0 && i < all.length && !!all[i] && isHeldPageAdvance(all[i])));
+  const endsPage = (i: number): boolean => all[i].action === "goto" || isTerminal(all[i]) || (isHeldPageAdvance(all[i]) && !refused.has(i));
+  const writeKey = (st: RecipeStep): string | null =>
+    WRITE_ACTIONS.has(st.action) && !isTerminal(st) && !frameOf(st) && !writesNothing(st) ? controlKey(st) : null;
+  const drop = new Set<number>();
+  for (const r of [...refused].sort((a, b) => a - b)) {
+    const before = new Map<string, number[]>();
+    for (let i = r - 1; i >= 0 && !endsPage(i); i--) {
+      const key = writeKey(all[i]);
+      if (key) before.set(key, [...(before.get(key) ?? []), i]);
+    }
+    const superseded: number[] = [];
+    for (let j = r + 1; j < all.length && !endsPage(j); j++) {
+      if (mayReplaceForm(all[j]) && !superseded.length) break;
+      const key = writeKey(all[j]);
+      for (const i of (key ? before.get(key) : undefined) ?? []) {
+        if (!namesDisagree(all[i], all[j]) && !superseded.includes(i)) superseded.push(i);
+      }
+    }
+    if (!superseded.length) continue;
+    for (const i of superseded) drop.add(i);
+    drop.add(r);
+  }
+  return { steps: all.filter((_, i) => !drop.has(i)), dropped: [...drop].sort((a, b) => a - b) };
+}
