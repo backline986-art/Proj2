@@ -111,6 +111,7 @@ import { addAuditLog } from "./audit";
 import { cancelPortalRun } from "./stageCancel";
 import { buildAuthUrl, exchangeCodeForTokens, gmailStatus, pollGmail } from "./gmail";
 import { imapStatus, pollImap, upsertImapSource } from "./emailPoller";
+import { projectFieldHistory } from "./fieldHistory";
 import { answerPortalQuestions, createIntakeRequest, getIntakeRequestPublic, submitIntakeRequest, portalQuestionStatus } from "./intakeRequests";
 import { createCredentialRequest, getCredentialRequestPublic, listCredentialRequests, submitCredentialRequest } from "./credentialRequests";
 import {
@@ -591,7 +592,10 @@ app.put("/api/projects/:id", (req, res) => {
   }
   // Signed in, the save is the person's (an API key or the parser has no person: "front-end parser").
   const editor = AUTH_ENABLED ? staffActorName(req, undefined, "") : "";
-  const updated = updateProject(db, String(req.params.id), payload, { expectedVersion, ...(editor ? { editedBy: editor } : {}) });
+  // Auth off, the dashboard's save (it always sends the version it loaded) still reads as the
+  // dashboard's, not the parser's, on each changed field's history (fieldHistory.ts).
+  const changeSource = expectedVersion !== undefined ? "dashboard" : "front-end parser";
+  const updated = updateProject(db, String(req.params.id), payload, { expectedVersion, changeSource, ...(editor ? { editedBy: editor } : {}) });
   // A re-save from the parser is the repair door for a qc_failed project — the operator fixed
   // the intake, so the chain gets a fresh start. Guarded inside: only statuses the chain owns
   // (parsed/qc_passed/ready_to_stage) do anything; a submitted project no-ops.
@@ -1188,7 +1192,7 @@ app.get("/api/projects/:id/portal-questions", asyncHandler(async (req, res) => {
 // as the public token path (only open questions, only the portal's own options), written
 // through answerPortalQuestions so the snapshot and the v17 columns stay in step.
 app.post("/api/projects/:id/portal-questions", asyncHandler(async (req, res) => {
-  const out = await answerPortalQuestions(db, String(req.params.id), (req.body ?? {}).answers ?? {});
+  const out = await answerPortalQuestions(db, String(req.params.id), (req.body ?? {}).answers ?? {}, staffActorName(req, undefined, "") || undefined);
   // Answers re-run QC; like /qc and /human-verify, the chain continues from wherever QC left it.
   // A post that only closed an already-answered question wrote nothing: nothing to re-drive.
   if (out.written.length) {
@@ -2011,6 +2015,14 @@ app.get("/api/projects/:id/llm-usage", (req, res) => {
   const exists = db.get<{ id: string }>("SELECT id FROM projects WHERE id = ?", [String(req.params.id)]);
   if (!exists) throw new HttpError(404, "Project not found.");
   res.json(llmUsageForProject(db, String(req.params.id)));
+});
+
+// What intake read for each field and every change after it, naming who (fieldHistory.ts). Staff view:
+// values as stored. Under /api/projects/:id, so the project scope guard applies.
+app.get("/api/projects/:id/field-history", (req, res) => {
+  const exists = db.get<{ id: string }>("SELECT id FROM projects WHERE id = ?", [String(req.params.id)]);
+  if (!exists) throw new HttpError(404, "Project not found.");
+  res.json({ fields: projectFieldHistory(db, String(req.params.id)) });
 });
 
 app.get("/api/projects/:id/historical-failures", (req, res) => {

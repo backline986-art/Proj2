@@ -43,7 +43,7 @@ import { addAuditLog } from "./audit";
 
 export type IntakeField = "jobValue" | "homeownerEmail" | "homeownerPhone";
 
-const FIELD_LABELS: Record<IntakeField, string> = {
+export const INTAKE_FIELD_LABELS: Record<IntakeField, string> = {
   jobValue: "Project contract / installed cost (USD)",
   homeownerEmail: "Homeowner email",
   homeownerPhone: "Homeowner phone",
@@ -581,7 +581,7 @@ export function getIntakeRequestPublic(db: AppDb, token: string): {
     // Required = there is nothing on file yet. A prefilled field is shown but not
     // demanded, which is exactly what submitIntakeRequest enforces — the two must
     // not diverge or a client is blocked on a box that already has a value.
-    fields: fields.map((key) => ({ key, label: FIELD_LABELS[key], value: onFile(snap, key), required: !onFile(snap, key) })),
+    fields: fields.map((key) => ({ key, label: INTAKE_FIELD_LABELS[key], value: onFile(snap, key), required: !onFile(snap, key) })),
     // normalizeQuestions (inside parseStored) re-applies the public-key denylist
     // and strips internal recipe vocabulary from the label, so a row written
     // before either tightening still can't leak.
@@ -624,7 +624,7 @@ export function submitIntakeRequest(
     // An email box answered with something that is not an address is refused, before any write;
     // the message names the field and never repeats the answer.
     if (key === "homeownerEmail" && !looksLikeEmail(String(raw))) {
-      throw new HttpError(400, `"${FIELD_LABELS[key]}" must be an email address.`);
+      throw new HttpError(400, `"${INTAKE_FIELD_LABELS[key]}" must be an email address.`);
     }
     payload[key] = String(raw).trim();
   }
@@ -663,7 +663,7 @@ export function submitIntakeRequest(
   // a client is never rejected for a question the form did not show them.
   const missing: string[] = [];
   for (const key of fields) {
-    if (payload[key] == null && !onFile(snap, key)) missing.push(FIELD_LABELS[key]);
+    if (payload[key] == null && !onFile(snap, key)) missing.push(INTAKE_FIELD_LABELS[key]);
   }
   for (const q of questions) {
     if (!questionIsOpen(project, q, columns)) continue;
@@ -680,7 +680,7 @@ export function submitIntakeRequest(
 
   const firstCompletion = row.status !== "completed";
   if (Object.keys(payload).length > 0) {
-    updateProject(db, row.project_id, payload);
+    updateProject(db, row.project_id, payload, { changeSource: "client form" });
     // Answers bound to a per-job answer COLUMN (migration v17) land there too:
     // resolveRecipeFieldValues reads the column directly, so replay sees the
     // installer's answer either way. Column names come only from the allowlist
@@ -732,6 +732,8 @@ export async function answerPortalQuestions(
   db: AppDb,
   projectId: string,
   answers: Record<string, string>,
+  /** The signed-in person answering on the parser page, when there is one: named on the field history. */
+  answeredBy?: string,
 ): Promise<{ written: string[]; alreadyAnswered: Array<{ key: string; label: string; answer: string }>; remaining: number }> {
   const project = getProjectDetail(db, projectId).project;
   const unanswered = await unansweredPortalQuestions(db, project);
@@ -765,7 +767,7 @@ export async function answerPortalQuestions(
     const stillOpen = await unansweredPortalQuestions(db, getProjectDetail(db, projectId).project);
     return { written, alreadyAnswered, remaining: stillOpen.length };
   }
-  updateProject(db, projectId, payload);
+  updateProject(db, projectId, payload, { changeSource: "portal questions", ...(answeredBy?.trim() ? { editedBy: answeredBy.trim() } : {}) });
   for (const [key, column] of Object.entries(PER_JOB_ANSWER_COLUMNS)) {
     const value = payload[key];
     if (value == null || String(value) === "") continue;

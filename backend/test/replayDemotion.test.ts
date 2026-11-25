@@ -64,6 +64,8 @@ await check("classifier: production messages land in the right family (MUST-PASS
     ["Recipe step failed (fill — Email): locator.fill: Target page, context or browser has been closed [url=https://pgenm.powerclerk.com/x]", "not_recipe"],
     ["Recipe step failed (upload — upload site_plan: Please upload your site plan): The site_plan document changed or no longer matches this permit path. Rebuild and restart the run.", "not_recipe"],
     ["Recipe login failed: Timed out after 900s waiting for the portal profile to free up: C:\\profiles\\x", "not_recipe"],
+    // #281: our own ACCOUNT lease refusing to sign in with a login another run or open window is using.
+    ["Portal run errored: Timed out after 900s waiting for the portal login to free up on powerclerk.com: another run, or a window a person is reviewing in, is signed in with the same login", "not_recipe"],
     ["Recipe step failed (click — final submit: Submit (recorded, NOT clicked)): After the submit click the page neither confirmed nor rejected the filing", "not_recipe"],
     ["Recipe step failed (click — final submit): Final submit clicked; outcome unknown — human must verify.", "not_recipe"],
     ["Recipe step failed (check — record type): Record type \"Residential - Structural\" is not offered here — refusing to pick another permit type.", "not_recipe"],

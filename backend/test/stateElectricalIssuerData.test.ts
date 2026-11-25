@@ -13,8 +13,10 @@
 //      vocabulary, and agrees with what the AHJ's own page already said (none is silently ignored);
 //   2. a row the state's page gives to the STATE routes its electrical track to the state authority's
 //      row, and its building track stays with the AHJ; a row it gives to the AHJ routes nowhere else;
-//   3. the state authority's door is NOT on file: no submission method and no door citation. Its
-//      online permit system is a cited note, never a filing door (a person records the door);
+//   3. the state authority's door, where on file, is a SEEDED proposal only (#152): the install root
+//      of its online permit system, cited by one whole submissionMethod citation read on the state's
+//      own government page, fitting the permit track and never the NEM track. It lands seeded like
+//      every row, so a person confirms it before anything files there;
 //   4. the state's fee lines are whole, on a government host, and each quote prints the amounts;
 //   5. EACH ROW LOADS AT THE TIER IT CLAIMS: none claims a tier, so each loads seeded — its KB row is
 //      not verified and not official, and the shared loader's answer for an unclaimed row is "seeded".
@@ -30,6 +32,7 @@ const { wholeCitations, citedElectricalIssuer, electricalIssuerKindOf, stateAuth
 const { projectForTrack, trackIssuer } = await import("../src/permitProcess");
 const { isVerifiedKnowledge, knowledgeProfileKey } = await import("../src/knowledgeBase");
 const { isOfficialSourceHost, shippedRowTier, sourceHostOf, siteOfHost } = await import("../../shared/src/officialSource");
+const { hostFitsTrackAndEntity } = await import("../src/portalChannel");
 
 const db = await openDatabase();
 
@@ -103,10 +106,17 @@ run("a row the state's page gives to the STATE files its electrical permit with 
   }
 });
 
-run("the state authority's door is not on file: its online permit system is a cited note, never a filing door", () => {
+run("the state authority's door is a cited, seeded proposal that fits the permit track only (#152)", () => {
   for (const a of authorities) {
-    assert.equal(String(a.submissionMethod ?? "").trim(), "", `${a.ahj}: no submission method (a person records the door)`);
-    assert.ok(!raw(a).some((c) => c.field === "submissionMethod"), `${a.ahj}: no door citation`);
+    const door = String(a.submissionMethod ?? "").trim();
+    const cites = raw(a).filter((c) => c.field === "submissionMethod");
+    if (!door) { assert.equal(cites.length, 0, `${a.ahj}: no door, no door citation`); continue; }
+    const whole = wholeCitations(a, "submissionMethod");
+    assert.equal(whole.length, cites.length, `${a.ahj}: every door citation is whole`);
+    assert.ok(whole.some((c) => c.value === door), `${a.ahj}: the door is the cited value`);
+    for (const c of whole) assert.equal(isOfficialSourceHost(c.sourceUrl), true, `${a.ahj}: the door was read on the state's own government page`);
+    assert.equal(hostFitsTrackAndEntity("electrical", null, door, "kb").fits, true, `${a.ahj}: the door fits the permit track`);
+    assert.equal(hostFitsTrackAndEntity("nem", null, door, "kb").fits, false, `${a.ahj}: the door never fits the NEM track`);
     assert.doesNotMatch(a.reviewerNotes, /https?:\/\//i, `${a.ahj}: the notes name no address (nothing reads one out of prose)`);
     for (const c of wholeCitations(a, "permitSystem")) assert.equal(isOfficialSourceHost(c.sourceUrl), true, `${a.ahj}: read on the state's own government page`);
     assert.match(a.reviewerNotes, /NOT verified/);

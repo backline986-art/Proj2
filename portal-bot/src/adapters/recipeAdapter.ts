@@ -3,6 +3,7 @@ import path from "path";
 import type { PortalRecipe, ProjectRecord, RecipeSelector, RecipeStep, StagedReviewCapture } from "../../../shared/src/types";
 import { buildStagedReviewCapture, countRecordedControl, openPlaywrightDigestNavigator, readDigestPage, shownOnlyWithScripts, unapprovableStagedReview, walkStagedDraft } from "../reviewDigest";
 import { maskedFullPageScreenshot } from "../secretMask";
+import { PageCaptureLog } from "../pageCapture";
 import { stagedReviewShotsDir } from "../../../backend/src/statePaths";
 import { BasePortalAdapter, HUMAN_REVIEW_MESSAGE, ok, fail, type PortalContext, type PortalStepResult } from "../adapter";
 import { applyFormatHint } from "../formatHint";
@@ -106,7 +107,7 @@ export function looksLikeProjectData(label: string, value: string): boolean {
 import { rankAddressVersions } from "../addressVersion";
 import { jobValueShape } from "../jobValueShape";
 import { isVolatileControlId, volatileControlIdKind } from "../../../shared/src/volatileControlId";
-import { ROW_PICK_WORDS } from "../../../shared/src/rowPick";
+import { COMPANY_SUFFIX_WORDS, ROW_PICK_WORDS } from "../../../shared/src/rowPick";
 import { isCompanyIdentityLabel } from "../../../shared/src/companyFacts";
 import { licenceKeyForLabel } from "../../../shared/src/licenceKinds";
 import { completionEvidence, labelWords } from "../../../shared/src/portalSafety";
@@ -121,7 +122,7 @@ import { reviewComparison, scrapeReviewScreen as scrapeReviewScreenShared, typed
 import { controlReadsUnanswered, pinEmptyRequiredControl, PINNED_CONTROL_ATTR, SWEPT_BLANK_ATTR, sweepEmptyRequiredControls, type EmptyRequired } from "../requiredControlSweep";
 import { openPortal } from "../browser";
 import { selectWithFallback, comboboxFaceInPage, type ComboboxPick } from "../comboboxFill";
-import { fillTypeahead, typeaheadBoxReason, typeaheadFailureLine, typeaheadPortalAnswered, TypeaheadStop } from "../typeaheadFill";
+import { fillTypeahead, LOCATION_FORWARD_WORDS, locationResultRefusal, readLocationResultBoxes, typeaheadBoxReason, typeaheadFailureLine, typeaheadPortalAnswered, TypeaheadStop, type LocationResultBox } from "../typeaheadFill";
 import { typeaheadMatchMode, type TypeaheadSite } from "../typeaheadMatch";
 import { isPrintedDateLabel, resultRowRoleOf, type ResultRowRole } from "../learnDataInSelectors";
 import { assertFilerIdentityHeld, FilerIdentityStop, filerIdentityFieldForSelect, filerIdentityStopMessage, isFilerIdentityField, isUnansweredOption, readNativeSelect, selectFilerIdentity } from "../filerIdentitySelect";
@@ -135,7 +136,7 @@ import { siteOfUrl } from "../siteOf";
 import { isPathTenantedHost, portalHostOf, portalTenantKey, portalTenantOf, trackSafeUrl } from "../../../backend/src/portalChannel";
 import { dialogOpenedSince, readUnlessDialog } from "../personDialogs";
 import { cancelledMessage, cancelRequestOf, ReplayStallWatch, replayReviewTailMsFromEnv, replayStallMsFromEnv, type RunCancelRequest } from "./replayStopControl";
-import { installFilingBackstop, withBackstopWindow, withOwnWriteWindow, withAutomationInput, describeBackstopAbort, backstopSentLine, drainOwnWrites, unsavedAtReviewWarning, portalOwnCallsBlockedAtReview, reviewBlockedCallsLine, isStoppingAbort, type BackstopAbort, type FilingBackstop, type BackstopHumanRequest } from "../filingBackstop";
+import { autosavePending, installFilingBackstop, withBackstopWindow, withOwnWriteWindow, withAutomationInput, describeBackstopAbort, backstopSentLine, drainOwnWrites, unsavedAtReviewWarning, portalOwnCallsBlockedAtReview, reviewBlockedCallsLine, isStoppingAbort, type BackstopAbort, type FilingBackstop, type BackstopHumanRequest } from "../filingBackstop";
 
 /** #333: the run did not hand the review page over — its input watch could not be armed, or (Helm
  *  Should-fix 3) a stopping abort the watch did not flag as the person's is on record, so the run
@@ -328,6 +329,7 @@ import { answerForUnrecordedControl, missingRequiredStopMessage, UNPINNED_CONTRO
 import { answerForRecordedPolicyStep, parsePolicyDefaultNote } from "../recordedPolicyAnswer";
 import { isComputeTotalsStep, prepareComputeSettle, waitForComputeSettled } from "../computeSettle";
 import { portalSaysNotServed } from "../../../shared/src/portalNotServed";
+import { tightenAttachmentSaveStep } from "../attachmentSave";
 import { accessibleNameOf, nameAttributeCss, nameAttributeOf, nameAttributeOfCss, recordedNameAttribute } from "../../../shared/src/recipeSelector";
 
 // RecipeAdapter — replays a recorded portal recipe (see portal_recipes / the recorder).
@@ -1820,6 +1822,8 @@ export class RecipeAdapter extends BasePortalAdapter {
    *  once, at the first fee stop. Carried on the step result (data.feeStop). Read only. */
   private feeStop: FeeStopReading | null = null;
   private pageShotCount = 0;
+  /** The run's masked page captures (pageCapture.ts): made on the first page, null when turned off. */
+  private pageCaptureLog: PageCaptureLog | null | undefined;
   private arrayPass = 1;
   /** Bounds of the recorded array block — the span of steps bound to array1*. -1 when the
    *  recipe has none. */
@@ -1851,6 +1855,10 @@ export class RecipeAdapter extends BasePortalAdapter {
   /** FILLED IS NOT SAVED: every non-secret value this run typed before the review marker, by its
    *  box's label — the review read-back looks each one up (typedValuesOnReview). */
   private typedForReview: TypedValue[] = [];
+  /** A POP-UP THE RECIPE OPENED (#131): set when a "pop-up: open" step lands, cleared by its
+   *  "pop-up: save" (or any advance). While set, the modal dismissor is not run before a step: the
+   *  dialog IS the thing the next steps fill, and its Cancel is what the dismissor would press. */
+  private recipePopupOpen = false;
   /** Recorded uploads this run PERFORMED: the slot's recorded label and the file name the portal
    *  was handed. The read-back for an upload (see uploadSlotsHeld). */
   private uploadsPerformed: Array<{ label: string; fileName: string; docType?: string }> = [];
@@ -2424,6 +2432,10 @@ export class RecipeAdapter extends BasePortalAdapter {
    *  step, click and key press refuses — so a caller that swallows the stop (the re-assert pass)
    *  cannot carry the run on to Next without the address. */
   private typeaheadStop = "";
+  /** #161 — the required read-only box(es) THIS run's location pick filled, and the job's location
+   *  they must hold. Armed by a picked type-ahead (fillTypeaheadStep); asked at the next forward
+   *  click (guardedClick), which an empty or disagreeing box refuses (a sticky stop). */
+  private locationResultGuard: { boxes: LocationResultBox[]; site: TypeaheadSite; parcels: string[]; label: string } | null = null;
   /** #139 — the names (note / label, loose) of search boxes the PORTAL answered on Enter: the box
    *  comes back empty while the selection shows elsewhere, so the required sweep's re-assert must not
    *  take it for a blank and search again (a second identical search, a second location row). */
@@ -3680,11 +3692,16 @@ export class RecipeAdapter extends BasePortalAdapter {
    *  embedded in prose counts) — its value is never compared, printed or kept here. */
   private noteTypedForReview(step: RecipeStep): void {
     if (step.sensitive || isSignatureStep(step)) return;
+    // A LOOKUP'S SEARCH TERM IS NOT A SAVED VALUE: the learner stamps the words it typed into a search
+    // ("lookup(Contractor): business name") — the record the search picked is what the page keeps.
+    if (/^lookup\b/i.test(String(step.note ?? "").trim())) return;
     const label = this.stepLabel(step) || String(step.selector?.name ?? "").trim();
     if (!label || isSensitiveLabel(label)) return;
     if (/account|meter|password|passcode|ssn|social|esi|said|agreement|routing|card/i.test(String(step.field ?? ""))) return;
     const value = String(this.resolveValue(step) ?? "").trim();
     if (!value || typedValueCarriesSecret(value, this.shotMaskSecrets())) return;
+    // The same box typed again: what it holds now is the last value, never both.
+    this.typedForReview = this.typedForReview.filter((t) => t.label !== label);
     if (this.typedForReview.length < 200) this.typedForReview.push({ label, value });
   }
 
@@ -3850,6 +3867,19 @@ export class RecipeAdapter extends BasePortalAdapter {
         closePrevStepTiming();
         return fail(this.replayStop!.message, { ...this.replayStopData(), executed, skipped, healedSteps: this.healedSteps, driftWarnings: this.driftWarnings, agingNotes: this.agingNotes, guardRefusals: this.guardRefusals, failedStepIndex: stepIdx, trace, slowSteps });
       }
+      // THE PORTAL ENDED THE SESSION: STOP NOW, NOT 8 MINUTES LATER (live PGE replay, 2026-11-23). The
+      // page after step 48 read "Session Ended"; step 49 then hung until the stall clock ended the run
+      // and the failure could not be attributed. Asked before every step once one has run: a page that
+      // names itself a session end is never filled or clicked. Same wording as the step-failure path,
+      // so the run is kept as the environment's fault, never the recipe's.
+      if (executed > 0) {
+        const ended = await this.sessionEndedBanner();
+        if (ended) {
+          closePrevStepTiming();
+          trace.push({ i: stepIdx, action: String(recordedStep?.action ?? ""), note: String(recordedStep?.note ?? "").slice(0, 52), outcome: "not run (session ended)", page: await currentPageLabel() });
+          return fail(`THE PORTAL ENDED THIS SESSION mid-run ("${ended}") before step ${stepIdx + 1} — commonly a concurrent login with the same account, or the portal's own time limit. The run stopped here: nothing further was filled or clicked, and nothing was submitted. Check the portal for the partly filled application before staging again.`, { executed, skipped, healedSteps: this.healedSteps, driftWarnings: this.driftWarnings, agingNotes: this.agingNotes, guardRefusals: this.guardRefusals, failedStepIndex: stepIdx, trace, slowSteps });
+        }
+      }
       // #280 — a step of the leading sign-in sequence, in a session the login phase signed in: not
       // replayed. Nothing is located, typed or clicked for it; the note (once) names the steps by
       // number and label, never a value.
@@ -3936,9 +3966,11 @@ export class RecipeAdapter extends BasePortalAdapter {
       // block's controls, so the Nth match IS array N. When the recorded selector is a
       // row-unique id there is no Nth match, the step finds nothing and skips — which
       // leaves array 1 intact rather than corrupting it.
-      const step = (this.arrayPass > 1 && inArrayBlock && recordedStep?.selector)
+      // A recipe learned before the attachment Save's fallback was tightened still names the action
+      // bar's "Save and resume later" as a way to it (attachmentSave.ts): replay the tightened selector.
+      const step = tightenAttachmentSaveStep((this.arrayPass > 1 && inArrayBlock && recordedStep?.selector)
         ? this.arrayPassStep(recordedStep)
-        : recordedStep;
+        : recordedStep);
       closePrevStepTiming();
       prevStart = Date.now();
       prevStep = { i: stepIdx, action: String(step?.action ?? ""), note: String(step?.note ?? "").slice(0, 52) };
@@ -4221,7 +4253,12 @@ export class RecipeAdapter extends BasePortalAdapter {
       // list between the row's tick and the Select (live-shaped smoke: Select then waited on a
       // frame that was gone). A step the learner recorded in a frame opened that frame on purpose.
       const inDialogFrame = !!step.selector?.frame || (step.selector?.fallbacks ?? []).some((f) => !!f.frame);
-      if (!inDialogFrame && (step.action === "click" || step.action === "goto" || step.action === "check" || step.action === "uncheck")) {
+      // NOR INSIDE A POP-UP THE RECIPE OPENED (#131): the learner recorded "pop-up: open", the fills,
+      // then "pop-up: save"; the dismissor read the open dialog as an overlay and pressed its Cancel
+      // before the Save (bench selfserve: the Save then waited on a dialog that was gone).
+      const popupNote = /^pop-up:/i.test(String(step.note ?? "").trim());
+      if (!popupNote && step.phase !== "fill") this.recipePopupOpen = false;
+      if (!inDialogFrame && !popupNote && !this.recipePopupOpen && (step.action === "click" || step.action === "goto" || step.action === "check" || step.action === "uncheck")) {
         await this.dismissModalsGuarded();
         await clearPageOverlays(this.page).catch(() => null);
       }
@@ -4339,6 +4376,8 @@ export class RecipeAdapter extends BasePortalAdapter {
           const notApplicable = done && this.learnStateSkipped?.step === step && this.learnStateSkipped.kind === "conditional";
           if (done && !notApplicable && step.action === "select" && recordedStep?.field) this.landedSelectFields.add(String(recordedStep.field));
           if (done && !notApplicable && !pastReview && step.action === "fill") this.noteTypedForReview(step);
+          if (done && /^pop-up:\s*open\b/i.test(String(step.note ?? "").trim())) this.recipePopupOpen = true;
+          if (/^pop-up:\s*save\b/i.test(String(step.note ?? "").trim())) this.recipePopupOpen = false;
           trace.push({
             i: stepIdx, action: step.action, note: String(step.note ?? "").slice(0, 52),
             outcome: done ? (notApplicable ? "not applicable (not revealed on this job, #237)" : "ok") : "SKIPPED", page: await currentPageLabel(),
@@ -6048,7 +6087,13 @@ export class RecipeAdapter extends BasePortalAdapter {
     const enterGate = (loc: unknown): Promise<string> => this.guardAction({ kind: "press", key: "Enter", target: loc, why: `type-ahead search in "${label}"` });
     // #198: the box's own search control goes through the replay's full click gate, like any click.
     const clickGate = (loc: unknown): Promise<string> => this.guardAction({ kind: "click", target: loc, why: `type-ahead search control beside "${label}"` });
-    const out = await fillTypeahead(this.page, scoped, { value: v, mode, site, enterGate, clickGate });
+    const parcels = [this.fieldValues.parcelNumber, this.fieldValues.parcel].map((p) => String(p ?? "").trim()).filter(Boolean);
+    const out = await fillTypeahead(this.page, scoped, { value: v, mode, site, enterGate, clickGate, parcels });
+    // #161: a pick of the job's location that fills a required read-only selection arms the forward
+    // question: the step's "Next" is clicked only while that selection holds this job's location.
+    if (out.outcome === "picked" && mode === "site" && out.resultBoxes?.length) {
+      this.locationResultGuard = { boxes: out.resultBoxes, site, parcels, label };
+    }
     if (out.outcome === "picked" && (out.via === "enter" || out.via === "search")) {
       // #139: the PORTAL selected the job's address on Enter and shows it outside the box (verified
       // by the address predicate inside fillTypeahead); the search box itself comes back empty, so
@@ -7131,18 +7176,27 @@ export class RecipeAdapter extends BasePortalAdapter {
   // indicator is the platform's own commit signal (data-test-role project-save-state →
   // save-state-saved), so waiting on it is exact, not a guessed sleep. No indicator on the
   // page = nothing to wait for = zero cost on every other portal.
+  //
+  // WAIT WHILE IT SAYS IT IS SAVING, NOT UNTIL IT SAYS "SAVED" (live PGE replay, 2026-11-23). This
+  // waited for the word "saved" and spent its whole 8 s budget whenever the indicator said nothing:
+  // the replay-doctor output showed every PGE contact fill at 8.2-8.7 s, so 48 steps took ~7 min and
+  // the portal's session ended mid-run. It now asks the one reading the review drain already uses
+  // (filingBackstop autosavePending): "Saving…", "Unsaved changes", or any text without "saved" is
+  // still pending; the saved marker, "saved", or an EMPTY indicator is not. "Unsaved changes" read as
+  // committed here before (/saved/ matched it) — the other way round, and now pending too. When the
+  // budget does run out, what the indicator said is noted, so the next run says why.
   private async waitForAutosaveCommitted(): Promise<void> {
     if (!this.page || typeof this.page.locator !== "function") return;
     const state = this.page.locator("[data-test-role='project-save-state']");
     if (typeof state?.evaluate !== "function") return; // test fakes — nothing to wait on
     if (!(await state.count?.().catch(() => 0))) return;
     for (let i = 0; i < 20; i++) {
-      const saved = await state.evaluate((el: Element) =>
-        Boolean(el.querySelector("[data-test-role='save-state-saved']")) || /saved/i.test((el as HTMLElement).innerText || ""),
-      ).catch(() => true);
-      if (saved) return;
+      if (!(await autosavePending(this.page))) return;
       await sleep(400);
     }
+    const said = String(await state.evaluate((el: Element) => ((el as HTMLElement).innerText || el.textContent || "").replace(/\s+/g, " ").trim()).catch(() => "")).slice(0, 40);
+    const note = `the portal's save indicator still read "${said || "(unreadable)"}" after 8 s — went on; the read-back of each value decides whether it held`;
+    if (!this.agingNotes.includes(note)) this.agingNotes.push(note);
   }
 
   /** True only when the page CARRIES the autosave indicator AND it reports committed —
@@ -7155,9 +7209,12 @@ export class RecipeAdapter extends BasePortalAdapter {
     if (typeof state?.evaluate !== "function") return false;
     if (!(await state.count?.().catch(() => 0))) return false;
     await this.waitForAutosaveCommitted();
-    return await state.evaluate((el: Element) =>
-      Boolean(el.querySelector("[data-test-role='save-state-saved']")) || /saved/i.test((el as HTMLElement).innerText || ""),
-    ).catch(() => false);
+    // "Saved" said in words, or the marker — never "Unsaved changes", which /saved/ used to accept.
+    return await state.evaluate((el: Element) => {
+      if (el.querySelector("[data-test-role='save-state-saved']")) return true;
+      const text = (el as HTMLElement).innerText || el.textContent || "";
+      return /\bsaved\b/i.test(text) && !/saving|unsaved|pending/i.test(text);
+    }).catch(() => false);
   }
 
   // data-al-row IS A LEARN-TIME TAG, NOT A SELECTOR. chooseProjectAddressRow stamps it while
@@ -9334,6 +9391,9 @@ export class RecipeAdapter extends BasePortalAdapter {
     return String(found || "");
   }
 
+  /** How long a non-advancing click that seemed to move nothing is looked at again before it is
+   *  called a no-op (a search's results arrive late). Static so a smoke can shorten it. */
+  static LATE_EFFECT_WAIT_MS = 6_000;
   /** How long one click waits for a loading mask to clear. Static so a smoke can shorten it. */
   static LOADING_MASK_WAIT_MS = 20_000;
   /** Masks that outlasted a whole wait once this run: never waited on again (a permanently shown
@@ -9710,6 +9770,7 @@ export class RecipeAdapter extends BasePortalAdapter {
     if (this.typeaheadStop) throw new TypeaheadStop(this.typeaheadStop);
     const reason = await this.guardAction({ kind: "click", target, why, ...flags });
     if (reason) throw new ReplayGuardRefusal(reason);
+    await this.locationForwardCheck(target, why);
     // THE APPROVED FINAL SUBMIT (and its confirm dialog) is the one click whose FILING request
     // the backstop lets through — a named person approved this run and finalSubmitRefusalsNow()
     // passed. A payment endpoint stays blocked even then.
@@ -9721,6 +9782,28 @@ export class RecipeAdapter extends BasePortalAdapter {
     if (flags.finalSubmitApproved || flags.draftCreatingApproved) this.backstop?.allowApprovedFiling(20_000, { page: this.page });
     // #333 — THE FENCE: the run's own click is never recorded as a person's input.
     await withAutomationInput(this.inputPageOf(target), () => (target as { click: (o?: unknown) => Promise<void> }).click(opts));
+  }
+
+  /** #161 — THE FORWARD QUESTION. While a location pick's required selection is armed, a forward
+   *  control ("Next Step", "Continue") is clicked only if that selection, read now, is non-empty and
+   *  is this job's location (typeaheadFill.locationResultRefusal). Asked once, at the first forward
+   *  click after the pick; a refusal is a sticky, named stop — never retried, never clicked through. */
+  private async locationForwardCheck(target: unknown, why: string): Promise<void> {
+    const g = this.locationResultGuard;
+    if (!g) return;
+    const label = await this.controlLabelOf(target);
+    if (!LOCATION_FORWARD_WORDS.test(label)) return;
+    this.locationResultGuard = null;
+    const refusal = locationResultRefusal(await readLocationResultBoxes(this.page, g.boxes), g.site, g.parcels);
+    if (!refusal) return;
+    const line = `REFUSED click (${why}): "${label.slice(0, 60)}" — ${refusal}`;
+    this.guardRefusals.push(line);
+    this.driftWarnings.push(line);
+    const fieldName = g.label.slice(0, 60);
+    if (!this.fieldsUnverified.includes(fieldName)) this.fieldsUnverified.push(fieldName);
+    const msg = `Stopped for a person: "${g.label}" — ${refusal}. Select the location (or correct the project's address) and run again.`;
+    this.typeaheadStop = msg;
+    throw new TypeaheadStop(msg);
   }
 
   /** The page a target acts on (a locator in a popup acts on the popup), else the run's page. */
@@ -10134,6 +10217,17 @@ export class RecipeAdapter extends BasePortalAdapter {
     return String(found || "");
   }
 
+  /** Is the recipe's NEXT step one that needs the freshly mounted page fully up — it types into the
+   *  page (a fill, pick, tick or upload), or it is the review stop / recorded final submit, whose
+   *  read-back and gates read the page? Only then does it get the full wait for an interactive
+   *  control; a plain click's own locator wait covers its target. No next step reads as needing it. */
+  private nextStepNeedsControls(): boolean {
+    const next = this.recipe.steps[this.currentStepIdx + 1];
+    if (!next) return true;
+    if (next.action === "stopForReview" || isFinalSubmitStep(next)) return true;
+    return ["fill", "select", "check", "uncheck", "upload", "press"].includes(String(next.action));
+  }
+
   /** A RECORDED CODE BOX IS A SIGN-IN CODE ONLY ON POSITIVE EVIDENCE (#238). Returns the reason to
    *  pause with, or "" for the payment stop, which is the answer whenever anything is unknown. All
    *  four must hold:
@@ -10410,7 +10504,12 @@ export class RecipeAdapter extends BasePortalAdapter {
     // A recorded Next/Continue advances a Vue wizard to a not-yet-bound section. Wait for an
     // interactive control to mount before the next fill so we never type onto an unmounted page
     // (best-effort; never skips — the retry/reload loop still recovers a genuine miss).
-    await waitForInteractiveControls(this.page);
+    // The FULL budget only when the next step types into something, or is the review stop / final
+    // submit whose gates read the page (the recorded goto cuts it before a click the same way). A page with no input to mount (a lookup page of buttons, a read-only page)
+    // burned the whole 12 s on every such click: the offline bench measured two per Self-Service-
+    // shaped replay, 24 of its 47 s. A next click's own locator wait covers its target, and
+    // assertAdvanced below still holds an advance to having moved.
+    await this.timed("controls-wait", () => waitForInteractiveControls(this.page, this.nextStepNeedsControls() ? undefined : 3000));
     if (computing) {
       // Before the effect comparison below, so "did the click do anything" reads the computed page.
       const computed = await this.timed("compute-settle", () => waitForComputeSettled(this.page));
@@ -10722,7 +10821,14 @@ export class RecipeAdapter extends BasePortalAdapter {
       // grew — any of those settles it as the in-page action the recorder said it was, and
       // there is nothing for a person to check. Only when NOTHING moved is this still the
       // open question it used to always be, and only then does it block a clean score.
-      const afterEffect = beforeEffect ? await this.pageEffect() : "";
+      let afterEffect = beforeEffect ? await this.pageEffect() : "";
+      // A SEARCH ANSWERS LATE (the results arrive on their own request after the click settles —
+      // EnerGov's contractor search, the selfserve replica's): before calling a click a no-op, look
+      // again for a bounded while. Only a click that still moved nothing pays the wait.
+      for (let waited = 0; beforeEffect && afterEffect && afterEffect === beforeEffect && waited < RecipeAdapter.LATE_EFFECT_WAIT_MS; waited += 500) {
+        await sleep(500);
+        afterEffect = await this.pageEffect();
+      }
       if (afterEffect && afterEffect !== beforeEffect) {
         this.agingNotes.push(`click "${String(step.note ?? "click").slice(0, 44)}" acted on the page without advancing it — the in-page action the recipe recorded`);
         return;
@@ -11742,6 +11848,7 @@ export class RecipeAdapter extends BasePortalAdapter {
   private async captureReviewShot(): Promise<void> {
     const page = this.page;
     if (!page || typeof page.screenshot !== "function" || typeof page.evaluate !== "function") return;
+    await this.capturePageForReviewers("review");
     try {
       // A fixed name, never the page's own words (a title could carry a value the mask covers in the
       // picture but not in a file name). The backend serves a folder's picture only by this name.
@@ -11754,6 +11861,23 @@ export class RecipeAdapter extends BasePortalAdapter {
     }
   }
 
+  /** THE PAGE, MASKED, FOR A REVIEWER (pageCapture.ts): each page the run leaves, and the page it stops
+   *  on. A page this portal already has a recent capture of costs one DOM read; a new or stale one gets
+   *  a masked picture and a trimmed snapshot. Separate from the run's own page shots, which stay as
+   *  they were. Read only, never throws. */
+  private async capturePageForReviewers(label: string): Promise<void> {
+    try {
+      if (this.pageCaptureLog === undefined) {
+        this.pageCaptureLog = PageCaptureLog.start({
+          kind: "replay",
+          portal: String(this.recipe?.utility || this.recipe?.ahj || ""),
+          secrets: () => this.shotMaskSecrets(),
+        });
+      }
+      if (this.page) await this.pageCaptureLog?.capture(this.page, label);
+    } catch { /* best-effort: never fail a replay over a capture */ }
+  }
+
   /** #569 — the confirmation screenshot's fields for a step's data: the masked file, or why none. */
   private confirmationShotData(): { confirmationShotPath?: string; confirmationShotRefused?: string } {
     const c = this.confirmationShot;
@@ -11763,6 +11887,7 @@ export class RecipeAdapter extends BasePortalAdapter {
 
   private async capturePageShot(label: string, force = false): Promise<void> {
     if (!this.page || typeof this.page.screenshot !== "function") return;
+    await this.capturePageForReviewers(label);
     // The OUTCOME shot is never dropped for the cap. It is the one picture that says what
     // happened to the filing — the record number on the completion page, or the portal's
     // refusal — and it is taken at the end of a long run, exactly where the cap bites.
@@ -13631,7 +13756,7 @@ export class RecipeAdapter extends BasePortalAdapter {
     let gridTold: "exact" | "shape" | "" = "";
     const scan = async (): Promise<Pick> => {
       gridTold = await this.markResultGrid(step, doc);
-      return await doc.evaluate((args: { role: string; wanted: string[]; tiebreak: string[]; ownGrid: boolean; pickSrc: string }) => {
+      return await doc.evaluate((args: { role: string; wanted: string[]; tiebreak: string[]; ownGrid: boolean; pickSrc: string; suffixSrc: string }) => {
         document.querySelectorAll("[data-al-projrow]").forEach((n) => n.removeAttribute("data-al-projrow"));
         const grid = document.querySelector('[data-al-grid="1"]') as HTMLTableElement | null;
         const all = grid ? Array.from(grid.rows) : Array.from(document.querySelectorAll("tr"));
@@ -13668,7 +13793,7 @@ export class RecipeAdapter extends BasePortalAdapter {
         const NOT_THE_ROW = /\b(favou?rite|note|comment|attachment|file|document)s?\b/i;
         const namesOf = (a: Element): string[] => [(a as HTMLElement).innerText || "", (a as HTMLInputElement).value || "", a.getAttribute("aria-label") || "", a.getAttribute("title") || ""]
           .map((t) => t.replace(/\b[a-z]+_[a-z_]+\b/g, " ").replace(/\s+/g, " ").trim()).filter((t) => t.length > 0);
-        const rows: Array<{ text: string; ctl: Element }> = [];
+        const rows: Array<{ text: string; ctl: Element; cells: string[] }> = [];
         for (const tr of all) {
           if (tr.closest("thead") || !tr.querySelector("td") || tr.querySelector("table")) continue;
           // A ROW THAT IS NOT SHOWN IS NOT A CANDIDATE (live City of Tigard, replay v11 of 2026-11-15): the
@@ -13688,10 +13813,19 @@ export class RecipeAdapter extends BasePortalAdapter {
             : undefined;
           const ctl = tick || act || valueLink;
           if (!ctl) continue;
-          const text = Array.from(tr.querySelectorAll("td, th")).map((c) => (c.textContent || "").replace(/\s+/g, " ").trim()).filter(Boolean).join(" ");
-          rows.push({ text, ctl });
+          const cells = Array.from(tr.querySelectorAll("td, th")).map((c) => (c.textContent || "").replace(/\s+/g, " ").trim()).filter(Boolean);
+          rows.push({ text: cells.join(" "), ctl, cells });
         }
         let hits = args.wanted.length ? rows.filter((r) => args.wanted.some((v) => fits(r.text, v))) : [];
+        // SEVERAL ROWS CARRY THE COMPANY'S WORDS: the one whose own cell IS the company's name (rowPick.ts
+        // companyKey, the learner's reading) — "Kestrel Energy LLC", never "Kestrel Energy Supply Inc".
+        if (hits.length > 1 && args.role === "contact") {
+          const suffix = new RegExp(args.suffixSrc, "g");
+          const key = (v: string): string => v.toLowerCase().replace(/&/g, " and ").replace(suffix, " ").replace(/[^a-z0-9]+/g, " ").trim();
+          const wantKeys = args.wanted.map(key).filter(Boolean);
+          const exact = hits.filter((r) => r.cells.some((c) => wantKeys.includes(key(c))));
+          if (exact.length === 1) hits = exact;
+        }
         if (hits.length > 1 && args.tiebreak.length) {
           const narrowed = hits.filter((r) => args.tiebreak.every((t) => norm(r.text).indexOf(norm(t)) >= 0));
           if (narrowed.length) hits = narrowed;
@@ -13706,7 +13840,7 @@ export class RecipeAdapter extends BasePortalAdapter {
           picked: chosen ? chosen.text.slice(0, 90) : "", how, rows: rows.length, hits: hits.length,
           kind: chosen ? (chosen.ctl.tagName.toLowerCase() === "input" && (ty === "radio" || ty === "checkbox") ? "tick" : "click") : "",
         };
-      }, { role, wanted, tiebreak, ownGrid: gridTold === "exact", pickSrc: ROW_PICK_WORDS.source }).catch(() => ({ picked: "", how: "", rows: 0, hits: 0, kind: "" })) as Pick;
+      }, { role, wanted, tiebreak, ownGrid: gridTold === "exact", pickSrc: ROW_PICK_WORDS.source, suffixSrc: COMPANY_SUFFIX_WORDS.source }).catch(() => ({ picked: "", how: "", rows: 0, hits: 0, kind: "" })) as Pick;
     };
     // AN UNPAINTED GRID IS NOT AN EMPTY GRID (the address-version scan's rule): results land on a
     // postback, so look again briefly before concluding there is nothing to pick.

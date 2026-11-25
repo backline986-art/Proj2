@@ -167,7 +167,7 @@ export async function fillAccountFieldsFromDocuments(db: AppDb, llm: LLMProvider
       });
       return [];
     }
-    updateProject(db, projectId, payload);
+    updateProject(db, projectId, payload, { changeSource: "bill reader" });
   } catch (err) {
     logger.warn("bill-vision", "could not save account fields read from the bill; QC will ask a human", {
       project: projectId, err: err instanceof Error ? err.message : String(err),

@@ -11,7 +11,7 @@ import { knowledgeNameMatchScore } from "../../../backend/src/knowledgeBase";
 import { BasePortalAdapter, HUMAN_REVIEW_MESSAGE, type PortalContext, type PortalStepResult } from "../adapter";
 import { openPortal } from "../browser";
 import { selectWithFallback, readClosedComboboxOptions } from "../comboboxFill";
-import { fillTypeahead, typeaheadBoxReason, typeaheadFailureLine } from "../typeaheadFill";
+import { fillTypeahead, locationResultRefusal, readLocationResultBoxes, typeaheadBoxReason, typeaheadFailureLine, type LocationResultBox } from "../typeaheadFill";
 import { usStateCode } from "../../../backend/src/usState";
 import { typeaheadMatchMode, type TypeaheadSite } from "../typeaheadMatch";
 import { withoutLearnDataInSelectors, type LearnIdentity } from "../learnDataInSelectors";
@@ -31,6 +31,7 @@ import { chooseRow, scanRowChoices, markAddressRow, type AddressRowPick } from "
 import { parseStreetName, parseStreetNumber, parseStreetLine, correctTruncatedAddressFill, isSplitAddressForm } from "../addressParse";
 import { portalUploadCapBytes } from "../uploadCap";
 import { LearnRunDebug } from "../learnDebug";
+import { PageCaptureLog } from "../pageCapture";
 import { armHumanCaptureOnPage } from "../humanCapture";
 import { isStartNewApplicationControl, readExistingApplicationNotice } from "../existingApplicationNotice";
 import { chooseDraftForm, findSiteDraft, isDraftFormRefusal, modificationOnOriginalNotice, readsAsUnsubmittedDraft } from "../draftCreated";
@@ -40,7 +41,7 @@ import { LIST_LINK } from "../statusFinder";
 import { readSignatureRequestStep, stageSignatureRequestStep, type SignatureStepOutcome } from "./signatureRequestStep";
 import type { SignatureRequestApproval } from "../../../shared/src/signatureRequestGate";
 import { nameAttributeCss, nameAttributeOf } from "../../../shared/src/recipeSelector";
-import { ROW_PICK_WORDS } from "../../../shared/src/rowPick";
+import { companyKey, ROW_PICK_WORDS } from "../../../shared/src/rowPick";
 import { readSignatureStatuses, type SignatureCheck } from "./signatureStatusRead";
 import { signatureCompletion } from "../../../shared/src/signatureCompletion";
 
@@ -70,7 +71,7 @@ import { installFilingBackstop, withAutomationInput, withBackstopWindow, withOwn
 // Types only (erased): the information-page door is reached duck-typed on the installed backstop.
 import type { FilingBackstop, InfoPageCandidateTake, InfoPagePassOpen } from "../filingBackstop";
 import { INFO_PAGE_PRIOR_PROGRESS_REFUSAL, infoPageEvidence, infoPageProofOfProgressRefusals, infoPageProofStepRefusals, type InfoPageProofStep, type InfoPageRunState, type InfoPageRunStep } from "../../../shared/src/infoPagePass";
-import type { InfoPageCandidateCapture, InfoPageIncident, VerifiedInfoPage } from "../../../shared/src/types";
+import type { InfoPageCandidateCapture, InfoPageIncident, InfoPageNextInformation, VerifiedInfoPage } from "../../../shared/src/types";
 import { hostOfUrl, sameCredentialScope } from "../siteOf";
 import { attachmentTypeFor, isDocumentTypeList, isPlanSetDocType } from "./attachmentTypes";
 import {
@@ -78,6 +79,7 @@ import {
   type ContactFieldKind, type ContactRole, type ContactTrack,
 } from "../../../shared/src/contactRoles";
 import { portalSaysNotServed } from "../../../shared/src/portalNotServed";
+import { ATTACHMENT_SAVE_CSS } from "../attachmentSave";
 import { computeStaleAtExit, prepareComputeSettle, waitForComputeSettled } from "../computeSettle";
 
 // AutoLearnAdapter — AUTONOMOUSLY learns an unknown AHJ/utility portal form instead of
@@ -382,6 +384,8 @@ export interface LearnResult {
    *  (held exactly as on main), or the page after the verified click did not read as an unfiled
    *  form (the walk stopped, stopReason "info_page_incident"). The backend withdraws each pass. */
   infoPageIncidents?: InfoPageIncident[];
+  /** #279: verified passes whose page after read as another information page (kept; evidence). */
+  infoPageNextInfo?: InfoPageNextInformation[];
   /** VERIFIED information pages this walk was HELD at only because the backend said this project
    *  already made progress on this portal (round 2): the page matched, nothing was sent. A person may
    *  allow the pass once more for the project (project -> Portal runs). */
@@ -511,6 +515,10 @@ const STALL_WATCHDOG_DEFAULT_MS = 300_000;
 const PLANNER_STALL_DEFAULT_MS = 600_000;
 
 export const SUBMIT_INTENT = /\b(continue application|submit application|file application|submit|finish|finalize|confirm submission|place order|complete submission)\b/i;
+/** Accela's every-step advance. Submit-worded, but alone it files only on a page that names itself
+ *  the review step (#271; the shared isFinalSubmitControl rule). */
+const CONTINUE_APPLICATION_WORDS = /\bcontinue\s+application\b/i;
+const CONTINUE_APPLICATION_WORDS_G = /\bcontinue\s+application\b/gi;
 /** A login-worded control ("Sign In", "Log in", "Login", "Log On"). Never a walk advance while its
  *  credential boxes are empty — see the login_advance_refused stop. */
 const LOGIN_ADVANCE = /^\s*(sign\s*-?\s*in|log\s*-?\s*in|login|log\s*on|sign\s*on)\b/i;
@@ -1025,6 +1033,12 @@ export function uploadForbidsSubstitute(label: string | undefined): boolean {
 export function isPayFee(text: string | undefined): boolean {
   return !!text && PAY_FEE.test(text);
 }
+
+/** A typed uploader findTypedUploader found: the commit control's role and visible name (what the
+ *  recipe records), its id selector when it has a plain one, and the file name the box holds. */
+interface TypedUploader { role: "button" | "link"; name: string; css: string; fileName: string }
+const TYPED_UPLOADER_ATTR = "data-al-typed-uploader";
+const TYPED_UPLOADER_COMMIT_ATTR = "data-al-typed-uploader-commit";
 
 export function isSensitiveLabel(label: string): boolean {
   return SENSITIVE_LABEL.test(label);
@@ -2694,6 +2708,35 @@ export function tagUploadControls(): UploadSlot[] {
   // click-to-open trigger. Text that says only this names no document, so it is not a slot label.
   const TRIGGER = /^(browse|upload|choose(\s+file)?|attach|add\s+file|select\s+file|choose\s+files?|upload\s+file)\.{0,3}$/i;
 
+  // A SLOT IS KNOWN BY TEXT A PERSON CAN SEE. Two readings below keep to that:
+  //  - shownText: an element's text without what a browser never paints — <noscript> (with
+  //    scripting on, its content is ONE RAW TEXT NODE, tags included: an upload widget's
+  //    "<p>Please enable JavaScript…</p>" fallback became every slot's heading, and the plan set
+  //    went to the first slot on the page), <script>, <style>, <template>. An element holding none
+  //    of them reads exactly as its textContent, so no existing label changes.
+  //  - hiddenApartFrom: the node is under display:none (the `hidden` attribute and a closed
+  //    <dialog> compute to it) by an ancestor the control does not share. Text hidden TOGETHER
+  //    with its control (a collapsed section) still names it; opacity and clipping never count,
+  //    so a visually-hidden label keeps naming its slot.
+  const UNPAINTED = "noscript, script, style, template";
+  function shownText(node: Element): string {
+    if (!node.querySelector(UNPAINTED)) return node.textContent || "";
+    let out = "";
+    const walker = document.createTreeWalker(node, 4 /* SHOW_TEXT */);
+    for (let t = walker.nextNode(); t; t = walker.nextNode()) {
+      const p = (t as Text).parentElement;
+      if (p && p.closest(UNPAINTED)) continue;
+      out += t.textContent || "";
+    }
+    return out;
+  }
+  function hiddenApartFrom(node: Element, control: Element): boolean {
+    for (let x: Element | null = node; x && !x.contains(control); x = x.parentElement) {
+      if (getComputedStyle(x).display === "none") return true;
+    }
+    return false;
+  }
+
   // A SLOT NAMED BY ITS HEADING (#140). iWorQ renders each required document as
   //   <h3>Plans</h3> <div>(File Types: .pdf):</div>
   //   <div><label for="newfile_…" class="btn">Choose File</label> <input type=file id="newfile_…"> <textarea …></div>
@@ -2719,7 +2762,9 @@ export function tagUploadControls(): UploadSlot[] {
         if (forId && forId !== el.getAttribute("id")) continue;
         // …and so is text wrapping a control of its own (<label><input> I agree</label>).
         if (h.querySelector("input, select, textarea, button")) continue;
-        const t = (h.textContent || "").trim().replace(/\s+/g, " ");
+        // …and a heading the page does not show names nothing.
+        if (hiddenApartFrom(h, el)) continue;
+        const t = shownText(h).trim().replace(/\s+/g, " ");
         if (!t || t.length > 80 || namesNoDocument(t)) continue;
         // Another upload control between this heading and ours means the heading belongs to it.
         if (others.some((o) => (h.compareDocumentPosition(o) & FOLLOWING) !== 0 && (o.compareDocumentPosition(el) & FOLLOWING) !== 0)) return null;
@@ -2769,13 +2814,14 @@ export function tagUploadControls(): UploadSlot[] {
     const isUpload = (n: Element) => n !== el && !n.contains(el) && (n.matches(UPLOADS) || !!n.querySelector(UPLOADS));
     const FOLLOWING = 4; // Node.DOCUMENT_POSITION_FOLLOWING
     // The leaf text chunks of a node in document order: each text node's trimmed text, outside
-    // controls, scripts and table header cells.
+    // controls, text a browser never paints, table header cells, and text the page is not showing
+    // (a hidden caption row between the name and the control, a closed dialog repeating the name).
     const chunks = (node: Node, beforeEl: boolean): string[] => {
       const out: string[] = [];
       const walker = document.createTreeWalker(node, 4 /* SHOW_TEXT */);
       for (let t = walker.nextNode(); t; t = walker.nextNode()) {
         const p = (t as Text).parentElement;
-        if (!p || p.closest(`${CONTROL}, script, style, th, thead`)) continue;
+        if (!p || p.closest(`${CONTROL}, ${UNPAINTED}, th, thead`) || hiddenApartFrom(p, el)) continue;
         if (beforeEl && (t.compareDocumentPosition(el) & FOLLOWING) === 0) break;
         const s = (t.textContent || "").replace(/\s+/g, " ").trim();
         if (s) out.push(s);
@@ -2793,8 +2839,11 @@ export function tagUploadControls(): UploadSlot[] {
       }
       return heading ? { heading, required } : null;
     };
+    // Six levels out, counting only levels that offer something else to read: a wrapper around ONE
+    // element (an upload widget's shells, a cell that is its row's only cell) adds nothing, and
+    // stepping out of it costs no depth — a control four shells deep in its cell still reads its row.
     let anc: Element | null = el.parentElement;
-    for (let depth = 0; anc && depth < 6 && !/^(form|body|html)$/i.test(anc.tagName); depth++, anc = anc.parentElement) {
+    for (let depth = 0; anc && depth < 6 && !/^(form|body|html)$/i.test(anc.tagName); anc = anc.parentElement) {
       // Another upload control before ours inside this ancestor: its text is spoken for.
       if (Array.from(anc.querySelectorAll(UPLOADS)).some((o) => isUpload(o) && (o.compareDocumentPosition(el) & FOLLOWING) !== 0)) return null;
       const own = nameIn(chunks(anc, true));
@@ -2809,6 +2858,7 @@ export function tagUploadControls(): UploadSlot[] {
           return { heading: got.heading, required: got.required || ownStatus };
         }
       }
+      if (!anc.parentElement || anc.parentElement.children.length !== 1) depth++;
     }
     return null;
   }
@@ -2835,21 +2885,21 @@ export function tagUploadControls(): UploadSlot[] {
       // Element's own root, so a label inside the same shadow root is found too.
       const root = el.getRootNode() as Document | ShadowRoot;
       const forLbl = root.querySelector(`label[for="${(window.CSS && CSS.escape) ? CSS.escape(id) : id}"]`);
-      if (forLbl && forLbl.textContent && forLbl.textContent.trim()) return forLbl.textContent.trim();
+      if (forLbl && shownText(forLbl).trim()) return shownText(forLbl).trim();
     }
     const wrapLbl = el.closest("label");
-    if (wrapLbl && wrapLbl.textContent && wrapLbl.textContent.trim()) return wrapLbl.textContent.trim();
+    if (wrapLbl && shownText(wrapLbl).trim()) return shownText(wrapLbl).trim();
     const container = el.closest('[class*="form-group"], [class*="field"], [class*="row"], li, tr, dd, p, div');
     if (container) {
       const lbl = container.querySelector("label, .control-label, .field-label, strong, b, h1, h2, h3, h4, h5, legend");
-      if (lbl && lbl.textContent && lbl.textContent.trim()) return lbl.textContent.trim().replace(/\s+/g, " ");
+      if (lbl && shownText(lbl).trim()) return shownText(lbl).trim().replace(/\s+/g, " ");
       // Fall back to the container's leading text node (e.g. "Cut Sheets" before the Browse box).
-      const own = (container.textContent || "").trim().replace(/\s+/g, " ");
+      const own = shownText(container).trim().replace(/\s+/g, " ");
       if (own) return own.slice(0, 80);
     }
     const aria = el.getAttribute("aria-label");
     if (aria) return aria.trim();
-    return (el.textContent || "").trim() || "Document";
+    return shownText(el).trim() || "Document";
   }
 
   function isRequired(el: Element): boolean {
@@ -3060,6 +3110,8 @@ export class AutoLearnAdapter extends BasePortalAdapter {
   private infoPageCandidateWithHistory = false;
   private infoPagePassed: Array<{ passId: string; where: string }> = [];
   private infoPageIncidents: InfoPageIncident[] = [];
+  /** #279: verified passes whose page after read as ANOTHER information page — kept, not incidents. */
+  private infoPageNextInfo: InfoPageNextInformation[] = [];
   private infoPageHeldVerified: Array<{ passId: string; where: string; why: string[] }> = [];
   /** #344 round 2 — told AT ONCE of every admission (the backend writes the use down before anything
    *  else can happen: a learn that throws later still has it on record). */
@@ -3170,6 +3222,11 @@ export class AutoLearnAdapter extends BasePortalAdapter {
   private readonly typeaheadTried = new Map<string, string>();
   /** #575 — the job's site address, which an address suggestion is judged against (set by learn()). */
   private typeaheadSite: TypeaheadSite = { street: "" };
+  /** #161 — the job's tax lot / parcel numbers, which a location selection may show instead of the street. */
+  private typeaheadParcels: string[] = [];
+  /** #161 — the required read-only box(es) this page's location pick filled; asked before the page is
+   *  left (typeaheadLocationResult): an empty or disagreeing selection ends the walk, named. */
+  private locationResultGuard: { boxes: LocationResultBox[]; site: TypeaheadSite; label: string } | null = null;
   /** #139 — a type-ahead that found no match and had no manual-entry door (or the door failed):
    *  the NAMED stop the page ends with (label, what was typed, the portal's words). Read once the
    *  page's fills are applied, like typeaheadQuestion. `label` joins the run's required misses. */
@@ -5397,6 +5454,10 @@ export class AutoLearnAdapter extends BasePortalAdapter {
         // #139: the one-line address a location search is typed with ("street, city, ST zip").
         state: String(project.state ?? "").trim() || undefined,
       };
+      {
+        const snap = ((project as { parserSnapshot?: Record<string, unknown> }).parserSnapshot ?? {}) as Record<string, unknown>;
+        this.typeaheadParcels = [this.siteContactIdentity?.parcel, snap.apn, snap.parcelNumber].map((p) => String(p ?? "").trim()).filter(Boolean);
+      }
       // The secrets a recorded step binds by name, read from the SAME project fields the replay's
       // value map uses (portalRecipes.resolveRecipeFieldValues: accountNumber / meterNumber).
       this.secretSource = {
@@ -5465,6 +5526,13 @@ export class AutoLearnAdapter extends BasePortalAdapter {
       if (this.infoPageCandidate) result = { ...result, infoPageCandidate: this.infoPageCandidate };
       if (this.infoPagePassed.length) result = { ...result, infoPagePassed: [...this.infoPagePassed] };
       if (this.infoPageIncidents.length) result = { ...result, infoPageIncidents: this.infoPageIncidents.map((i) => ({ ...i, why: i.why.map((w) => this.scrubSecrets(w)) })) };
+      if (this.infoPageNextInfo.length) {
+        result = {
+          ...result,
+          infoPageNextInfo: this.infoPageNextInfo.map((i) => ({ ...i, afterText: this.scrubSecrets(i.afterText) })),
+          message: `${String(result.message ?? "")} A verified information page led to ANOTHER information page (no form, no filing evidence): that verification is kept, and nothing leaves the next page until a person verifies it too.`.trim(),
+        };
+      }
       if (this.infoPageHeldVerified.length) result = { ...result, infoPageHeldVerified: this.infoPageHeldVerified.map((h) => ({ ...h, why: h.why.map((w) => this.scrubSecrets(w)) })) };
       // Hand-off first (the route comes off), then every abort up to that moment is counted.
       await this.disposeBackstopWithin(backstop);
@@ -6192,6 +6260,11 @@ export class AutoLearnAdapter extends BasePortalAdapter {
     /** The labels of the section's shown boxes that HOLD a value — what the walk (or the portal)
      *  answered here; a section the walk filled is never stopped as "could not fill". */
     typedLabels: string[];
+    /** A SEARCH THAT WAS TYPED BUT NEVER COMMITTED: shown boxes holding a value that post NOTHING (no
+     *  name, no form attribute — a search box, whose value reaches the application only through the
+     *  section's search and a picked row), and the section's named hidden inputs, with how many hold a
+     *  value (what a pick writes). Read with the rest; lookupButtonPass's rule 3. */
+    searchOnlyFilled: number; hiddenNamed: number; hiddenNamedFilled: number;
   }> | null> {
     const page = this.page;
     if (!page || typeof page.evaluate !== "function") return null;
@@ -6199,7 +6272,7 @@ export class AutoLearnAdapter extends BasePortalAdapter {
     if (opts.lookups) await page.evaluate(PORTAL_SAFETY_IN_PAGE_SOURCE).catch(() => null);
     const raw = await page.evaluate((src: { lookups: boolean; global: string }) => {
       // NO named functions in here: keepNames wraps them in __name, which the page may lack.
-      type Sec = { key: number; heading: string; instruction: string; text: string; addNewId: string; selectId: string; editId: string; hasAddNew: boolean; hasEdit: boolean; lookups: Array<{ lookupKey: number; id: string; label: string; role: "link" | "button" }>; requiredBlank: string[]; typedTotal: number; typedBlank: number; addressTyped: boolean; typedLabels: string[] };
+      type Sec = { key: number; heading: string; instruction: string; text: string; addNewId: string; selectId: string; editId: string; hasAddNew: boolean; hasEdit: boolean; lookups: Array<{ lookupKey: number; id: string; label: string; role: "link" | "button" }>; requiredBlank: string[]; typedTotal: number; typedBlank: number; addressTyped: boolean; typedLabels: string[]; searchOnlyFilled: number; hiddenNamed: number; hiddenNamedFilled: number };
       const out: Sec[] = [];
       const containers: Element[] = [];
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -6242,7 +6315,7 @@ export class AutoLearnAdapter extends BasePortalAdapter {
           containers.push(container);
           idx = containers.length - 1;
           container.setAttribute("data-al-csec", String(idx));
-          out.push({ key: idx, heading, instruction, text: "", addNewId: "", selectId: "", editId: "", hasAddNew: false, hasEdit: false, lookups: [], requiredBlank: [], typedTotal: 0, typedBlank: 0, addressTyped: false, typedLabels: [] });
+          out.push({ key: idx, heading, instruction, text: "", addNewId: "", selectId: "", editId: "", hasAddNew: false, hasEdit: false, lookups: [], requiredBlank: [], typedTotal: 0, typedBlank: 0, addressTyped: false, typedLabels: [], searchOnlyFilled: 0, hiddenNamed: 0, hiddenNamedFilled: 0 });
         }
         const rec = out[idx];
         if (kind === "add" && !rec.hasAddNew) { rec.hasAddNew = true; rec.addNewId = el.id || ""; el.setAttribute("data-al-caddnew", String(idx)); }
@@ -6286,6 +6359,10 @@ export class AutoLearnAdapter extends BasePortalAdapter {
         let streetBlank = 0;
         for (const el of Array.from(c.querySelectorAll("input, select, textarea"))) {
           const type = String(el.getAttribute("type") || "").toLowerCase();
+          if (type === "hidden" && el.getAttribute("name")) {
+            out[i].hiddenNamed++;
+            if (norm((el as HTMLInputElement).value)) out[i].hiddenNamedFilled++;
+          }
           if (["hidden", "button", "submit", "checkbox", "radio", "file", "image", "reset"].includes(type)) continue;
           const tag = el.tagName.toLowerCase();
           const val = tag === "select"
@@ -6296,7 +6373,10 @@ export class AutoLearnAdapter extends BasePortalAdapter {
           if (shown) {
             out[i].typedTotal++;
             if (!val) out[i].typedBlank++;
-            else out[i].typedLabels.push(lbl || out[i].heading);
+            else {
+              out[i].typedLabels.push(lbl || out[i].heading);
+              if (tag === "input" && !el.getAttribute("name") && !el.getAttribute("form")) out[i].searchOnlyFilled++;
+            }
             if (/\b(street|house)\s*(no\.?|number|#|num)\b|\bstreet\s*name\b/i.test(lbl)) { streetBoxes++; if (!val) streetBlank++; }
             if (!val && requiredMark(el)) out[i].requiredBlank.push(lbl || out[i].heading);
           } else if (!val && ((el as HTMLInputElement).required || el.getAttribute("aria-required") === "true")) {
@@ -6808,15 +6888,168 @@ export class AutoLearnAdapter extends BasePortalAdapter {
     return corrected;
   }
 
+  /**
+   * COMMIT A POP-UP THE WALK OPENED (#131). planHiddenReveal tags the dialog it opened
+   * (`data-al-popup`); once the page's fills are done and the dialog is still shown, its own commit
+   * control is clicked: Save / OK / Done / Apply / Update (optionally "and close" / "changes" /
+   * "details"), never a submit, a payment or a cancel, and the shared predicates have the last word
+   * (SUBMIT_INTENT, isSubmitIntent, isPayFee: one answer at every door). Committed means the dialog
+   * closed; the click is recorded as "pop-up: save (commits the pop-up)". A dialog that will not
+   * close is said in the run log and left for the page's own read-back to name.
+   */
+  /** A pop-up control (its opener, or the dialog's own title) that reads as a filing, a payment or a
+   *  signature request by the shared predicates — the one answer every other door asks. */
+  static popupControlRefused(name: string): boolean {
+    const n = String(name ?? "").trim();
+    return !!n && (SUBMIT_INTENT.test(n) || sharedIsSubmitIntent(n) || isPayFee(n) || isSignatureRequestControl(n));
+  }
+
+  private async popupCommitPass(steps: RecipeStep[], pageCount: number): Promise<boolean> {
+    const page = this.page;
+    if (!page || typeof page.evaluate !== "function" || typeof page.locator !== "function") return false;
+    const found = await page.evaluate((attr: string) => {
+      const dlg = document.querySelector(`[${attr}]`) as HTMLElement | null;
+      if (!dlg) return null;
+      const r = dlg.getBoundingClientRect();
+      const cs = getComputedStyle(dlg);
+      if (!(r.width > 0 && r.height > 0) || cs.display === "none" || cs.visibility === "hidden") return null;
+      // THE DIALOG, NOT ONLY ITS BUTTON (Helm review of #268): its title (the reading planHiddenReveal
+      // uses) and the labels of its boxes, judged in node by the shared predicates.
+      const labelledBy = String(dlg.getAttribute("aria-labelledby") || "").split(/\s+/).filter(Boolean)
+        .map((i) => { const n = document.getElementById(i); return n ? n.textContent || "" : ""; }).join(" ");
+      const head = dlg.querySelector("h1, h2, h3, h4, legend");
+      const title = String(dlg.getAttribute("aria-label") || labelledBy || (head ? head.textContent || "" : "")).replace(/\s+/g, " ").trim().slice(0, 120);
+      const boxes: string[] = [];
+      for (const el of Array.from(dlg.querySelectorAll("input, textarea"))) {
+        const ty = String((el as HTMLInputElement).type || "").toLowerCase();
+        if (["hidden", "button", "submit", "checkbox", "radio", "file", "image", "reset"].includes(ty)) continue;
+        const id = el.getAttribute("id");
+        const lab = id ? document.querySelector(`label[for="${CSS.escape(id)}"]`) : el.closest("label");
+        boxes.push(String((lab ? lab.textContent : "") || el.getAttribute("aria-label") || el.getAttribute("placeholder") || el.getAttribute("title") || "").replace(/\s+/g, " ").trim().slice(0, 120));
+      }
+      const COMMIT = /^\s*(save|ok|okay|done|apply|update)(\s+(and\s+close|&\s+close|changes|details))?\s*$/i;
+      for (const b of Array.from(dlg.querySelectorAll("button, a, [role=button], input[type=button], input[type=submit]"))) {
+        const t = String(b.tagName === "INPUT" ? (b as HTMLInputElement).value : ((b as HTMLElement).innerText || b.textContent || "")).replace(/\s+/g, " ").trim();
+        const br = b.getBoundingClientRect();
+        const bs = getComputedStyle(b);
+        if (!(br.width > 0 && br.height > 0) || bs.display === "none" || bs.visibility === "hidden" || (b as HTMLButtonElement).disabled) continue;
+        if (!COMMIT.test(t)) continue;
+        b.setAttribute("data-al-popup-commit", "1");
+        const id = b.getAttribute("id") || "";
+        return { role: b.tagName === "A" ? "link" : "button", name: t, id: /^[A-Za-z][\w-]*$/.test(id) ? id : "", title, boxes };
+      }
+      return { role: "", name: "", id: "", title, boxes };
+    }, "data-al-popup").catch(() => null) as { role: string; name: string; id: string; title: string; boxes: string[] } | null;
+    if (!found) return false;
+    const signatureBox = (found.boxes ?? []).find((b) => !!b && isSignatureNameLabel(b));
+    if (AutoLearnAdapter.popupControlRefused(found.title) || signatureBox) {
+      // Refused means logged, not clicked: the pop-up is left for the page's read-back to name.
+      this.debug?.event({ type: "popup_commit_refused", page: pageCount, title: String(found.title ?? "").slice(0, 60), why: signatureBox ? "the pop-up holds a signature-name box" : "the pop-up's title reads as a filing, payment or signature" });
+      await page.evaluate(() => { document.querySelectorAll("[data-al-popup], [data-al-popup-commit]").forEach((n) => { n.removeAttribute("data-al-popup"); n.removeAttribute("data-al-popup-commit"); }); }).catch(() => null);
+      return false;
+    }
+    if (!found.name || AutoLearnAdapter.popupControlRefused(found.name)) {
+      this.debug?.event({ type: "popup_no_commit", page: pageCount, name: found.name.slice(0, 40) });
+      return false;
+    }
+    await page.locator("[data-al-popup-commit]").first().click({ timeout: 3000 });
+    await sleep(400);
+    const closed = await page.evaluate((attr: string) => {
+      const dlg = document.querySelector(`[${attr}]`) as HTMLElement | null;
+      if (!dlg) return true;
+      const r = dlg.getBoundingClientRect();
+      const cs = getComputedStyle(dlg);
+      return !(r.width > 0 && r.height > 0) || cs.display === "none" || cs.visibility === "hidden";
+    }, "data-al-popup").catch(() => false);
+    await page.evaluate(() => {
+      document.querySelectorAll("[data-al-popup], [data-al-popup-commit]").forEach((n) => { n.removeAttribute("data-al-popup"); n.removeAttribute("data-al-popup-commit"); });
+    }).catch(() => null);
+    this.debug?.event({ type: closed ? "popup_committed" : "popup_commit_did_not_close", page: pageCount, name: found.name.slice(0, 40) });
+    if (!closed) return false;
+    steps.push({
+      action: "click", phase: "fill",
+      selector: { role: found.role === "link" ? "link" : "button", name: found.name, exact: true, ...(found.id ? { fallbacks: [{ css: `#${found.id}` }] } : {}) },
+      note: "pop-up: save (commits the pop-up)",
+    } as RecipeStep);
+    return true;
+  }
+
+  /**
+   * A TYPED UPLOADER on this page, or null: one container holding a file box, a DOCUMENT-TYPE list
+   * (attachmentTypes.isDocumentTypeList, the one predicate the ACA pass and the replay use) and the
+   * control that commits the pair ("Add Attachment", "Upload", "Attach", "Add", "Save"). Self-service
+   * portals (EnerGov's "Select Type + Add Attachment" rows, the bench's selfserve base) hold the chosen
+   * file in the box until that click; the learn used to leave it there, and the portal kept nothing.
+   * Tags the container and the commit control for accelaAttachmentSavePass. Reads only; clicks nothing.
+   */
+  private async findTypedUploader(): Promise<TypedUploader | null> {
+    const page = this.page;
+    if (!page || typeof page.evaluate !== "function") return null;
+    try {
+      const selects = page.locator("select");
+      const n = Math.min(await selects.count().catch(() => 0), 40);
+      for (let i = 0; i < n; i++) {
+        const sel = selects.nth(i);
+        if (!(await sel.isVisible().catch(() => false))) continue;
+        const texts = await sel.evaluate((el: HTMLSelectElement) => Array.from(el.options).map((o) => (o.text || "").trim())).catch(() => [] as string[]);
+        if (!isDocumentTypeList(texts)) continue;
+        const found = await sel.evaluate((el: Element, a: { box: string; commit: string }) => {
+          // No function declared in here (a named one needs the page's __name shim): the shown-test is inline.
+          const COMMIT = /^\s*(add|upload|attach|save)(\s+(an?\s+)?(attachment|document|file)s?)?\s*$/i;
+          let box: Element | null = el.parentElement;
+          for (let d = 0; box && d < 5; d++, box = box.parentElement) {
+            const file = box.querySelector("input[type=file]") as HTMLInputElement | null;
+            if (!file) continue;
+            const ctl = Array.from(box.querySelectorAll("button, a, input[type=button], input[type=submit]")).find((b) => {
+              const t = b.tagName === "INPUT" ? (b as HTMLInputElement).value : (b.textContent || "");
+              const r = b.getBoundingClientRect();
+              const cs = getComputedStyle(b);
+              const visible = r.width > 0 && r.height > 0 && cs.display !== "none" && cs.visibility !== "hidden";
+              return visible && !(b as HTMLButtonElement).disabled && COMMIT.test(t);
+            });
+            if (!ctl) return null; // the nearest box with the file has no commit: not a typed uploader
+            document.querySelectorAll(`[${a.box}], [${a.commit}]`).forEach((x) => { x.removeAttribute(a.box); x.removeAttribute(a.commit); });
+            box.setAttribute(a.box, "1");
+            ctl.setAttribute(a.commit, "1");
+            const name = (ctl.tagName === "INPUT" ? (ctl as HTMLInputElement).value : (ctl.textContent || "")).replace(/\s+/g, " ").trim();
+            const id = ctl.getAttribute("id");
+            return {
+              role: ctl.tagName === "A" ? "link" : "button",
+              name,
+              css: id && /^[A-Za-z][\w-]*$/.test(id) ? `#${id}` : "",
+              fileName: file.files && file.files[0] ? file.files[0].name : "",
+            };
+          }
+          return null;
+        }, { box: TYPED_UPLOADER_ATTR, commit: TYPED_UPLOADER_COMMIT_ATTR }).catch(() => null);
+        if (!found || !found.name) continue;
+        // ONE ANSWER AT EVERY DOOR (Helm review of #253): the commit's name goes through the shared
+        // submit-intent and pay predicates too, as lookupButtonPass's controls do. COMMIT already refuses
+        // them; this keeps the uploader from ever reading a filing or a payment as "save the file".
+        if (SUBMIT_INTENT.test(found.name) || sharedIsSubmitIntent(found.name) || isPayFee(found.name)) {
+          await page.evaluate((a: { box: string; commit: string }) => {
+            document.querySelectorAll(`[${a.box}], [${a.commit}]`).forEach((x) => { x.removeAttribute(a.box); x.removeAttribute(a.commit); });
+          }, { box: TYPED_UPLOADER_ATTR, commit: TYPED_UPLOADER_COMMIT_ATTR }).catch(() => null);
+          return null;
+        }
+        return found as TypedUploader;
+      }
+    } catch { /* a read that fails is no uploader, never a crash */ }
+    return null;
+  }
+
   // ACA ATTACHMENT step. Accela stages attachments in a pending list that is only
   // COMMITTED by the section's own "Save" button — "Continue Application" alone leaves
   // the files uncommitted (operator-reported, live). Each pending row also demands its
   // own required Description + Type before Save will take it. Deterministic: fill the
   // empty Description/Type on every pending row, click Save (never "Save and resume
   // later"), and wait for the grid to stop reading "No records found".
-  private async accelaAttachmentSavePass(project: ProjectRecord, steps: RecipeStep[]): Promise<boolean> {
+  private async accelaAttachmentSavePass(project: ProjectRecord, steps: RecipeStep[], uploader: TypedUploader | null): Promise<boolean> {
     const page = this.page;
     if (!page) return false;
+    // ACA's row is the whole page's attachment section; a typed uploader is ONE container (findTypedUploader
+    // tagged it), and only its own Type list, Description box and commit control are touched.
+    const scope = uploader ? page.locator(`[${TYPED_UPLOADER_ATTR}]`).first() : page;
     const isElectrical = /elec/i.test(project.permitType ?? "");
     const description = isElectrical
       ? "Solar PV plan set — electrical plans and specifications"
@@ -6851,7 +7084,7 @@ export class AutoLearnAdapter extends BasePortalAdapter {
       } catch { return []; }
     };
     // 1) Document-Type selects: fill only the EMPTY ones (--Select-- reads as "").
-    const allSelects = page.locator("select");
+    const allSelects = scope.locator("select");
     const selCount = await allSelects.count().catch(() => 0);
     let typeSet = 0;
     let sawTypeSelect = false;
@@ -6881,7 +7114,7 @@ export class AutoLearnAdapter extends BasePortalAdapter {
     //    "Description of Work" field on some other step.
     let descFilled = 0;
     if (sawTypeSelect) {
-      const descBoxes = page.locator("textarea");
+      const descBoxes = scope.locator("textarea");
       const descCount = await descBoxes.count().catch(() => 0);
       for (let i = 0; i < descCount; i++) {
         const box = descBoxes.nth(i);
@@ -6898,10 +7131,13 @@ export class AutoLearnAdapter extends BasePortalAdapter {
     //    hand-coded OregonEPermittingAdapter uses the link form for the same reason).
     //    The exact name keeps "Save and resume later:" out (its accessible name is that
     //    control's long img alt text).
-    const saveBtn = page.getByRole("link", { name: /^\s*Save\s*$/i })
-      .or(page.getByRole("button", { name: /^\s*Save\s*$/i }))
-      .or(page.locator("a[id*='btnSave' i], input[type='submit'][value='Save' i], input[type='button'][value='Save' i]"))
-      .first();
+    const saveBtn = uploader
+      ? page.locator(`[${TYPED_UPLOADER_COMMIT_ATTR}]`).first()
+      : page.getByRole("link", { name: /^\s*Save\s*$/i })
+        .or(page.getByRole("button", { name: /^\s*Save\s*$/i }))
+        // Never the action bar's "Save and resume later" (attachmentSave.ts): it also has btnSave in its id.
+        .or(page.locator(`${ATTACHMENT_SAVE_CSS}, input[type='submit'][value='Save' i], input[type='button'][value='Save' i]`))
+        .first();
     // ACA keeps the Save anchor inside a container it reveals with JS only once the
     // uploads finish, and a role locator skips the hidden a11y tree — so WAIT for it
     // instead of counting once.
@@ -6921,7 +7157,11 @@ export class AutoLearnAdapter extends BasePortalAdapter {
         .locator("body").innerText().catch(() => "")) ?? "");
     } catch { gridText = ""; }
     const verifyText = gridText || String((await page.locator("body").innerText().catch(() => "")) ?? "");
-    const committed = Boolean(verifyText) && !/no records found/i.test(verifyText);
+    // A typed uploader's commit lists the file by NAME (the box itself is cleared for the next one):
+    // the name in the page's text, outside the file box, is the evidence. No name known = not proven.
+    const committed = uploader
+      ? Boolean(uploader.fileName) && verifyText.includes(uploader.fileName)
+      : Boolean(verifyText) && !/no records found/i.test(verifyText);
     this.debug?.event({ type: "attachment_save", descFilled, typeSet, committed });
     if (descFilled) steps.push({ action: "fill", phase: "upload", selector: { css: "textarea" }, value: description, note: "attachment: description" });
     // Record the option the pass ACTUALLY selected - a fabricated label would replay as
@@ -6930,16 +7170,20 @@ export class AutoLearnAdapter extends BasePortalAdapter {
     steps.push({
       action: "click",
       phase: "upload",
-      selector: {
-        // LINK role - the live control is an anchor (see the locator note above).
-        role: "link",
-        name: "Save",
-        exact: true,
-        fallbacks: [
-          { css: "a[id*='btnSave' i]" },
-          { role: "button", name: "Save", exact: true },
-        ],
-      },
+      // The note is the replay's attachment-row vocabulary (recordedAttachmentRow): the commit of THIS
+      // row, whatever the portal calls it — ACA's "Save" link, a typed uploader's "Add Attachment".
+      selector: uploader
+        ? { role: uploader.role, name: uploader.name, exact: true, ...(uploader.css ? { fallbacks: [{ css: uploader.css }] } : {}) }
+        : {
+          // LINK role - the live control is an anchor (see the locator note above).
+          role: "link",
+          name: "Save",
+          exact: true,
+          fallbacks: [
+            { css: ATTACHMENT_SAVE_CSS },
+            { role: "button", name: "Save", exact: true },
+          ],
+        },
       note: "attachment: save (commits the upload)",
     });
     return committed;
@@ -7686,6 +7930,7 @@ export class AutoLearnAdapter extends BasePortalAdapter {
     // pNNN-plan.json / pNNN-rescan.json sidecars (see .env.example). Lets the operator see
     // exactly what the bot saw and what it changed without re-running blind. Best-effort only;
     // PNGs alone can be disabled with AUTOLEARN_DEBUG_SCREENSHOTS=0 (sidecars still written).
+    let pageLog: PageCaptureLog | null | undefined;
     const saveDebugShot = async (label: string) => {
       // Bundle PNGs mask a known secret too (the trace stays the documented raw render).
       // Fails closed like the others: a secret typed and no mask buildable = no PNG this time.
@@ -7695,6 +7940,12 @@ export class AutoLearnAdapter extends BasePortalAdapter {
       // And keep the page's own markup, blanked of the operator's data — this is what the
       // offline portal replica is built from (see learnDebug.capturePageHtml).
       await this.debug?.capturePageHtml(this.page, label);
+      // The masked picture and trimmed snapshot a reviewer can be sent (pageCapture.ts): one per
+      // distinct page of the portal, refreshed daily. The bundle above stays the raw forensic copy.
+      try {
+        if (pageLog === undefined) pageLog = PageCaptureLog.start({ kind: "learn", portal: this.portalName, secrets: () => this.knownSecrets() });
+        await pageLog?.capture(this.page, label);
+      } catch { /* best-effort: never fail a learn over a capture */ }
     };
 
     // Required fields that did NOT hold their value after filling (portal silently dropped them).
@@ -8834,26 +9085,72 @@ export class AutoLearnAdapter extends BasePortalAdapter {
       const reviewShaped = hasSubmitIntentBtn || hasAcceptTermsCheckbox || looksLikeReviewUrl(url)
         || fields.some((f) => f.fieldType === "button" && onPageControl(f) && isFinalSubmitControl(f.label));
       const plannerSaidReview = plan.atReview === true;
-      const interstitial = !hasFillable && !reviewShaped && !anyFormMutationRecorded && !entryDisclaimer
+      // #279: THE NEXT INFORMATION PAGE — a verified information page's click led here and the backstop
+      // read this page as another information page (its NEXT INFORMATION PAGE hold is on): it is an
+      // interstitial of the interview even where it reads as a dashboard by structure (no review
+      // words, no submit control), so its forward click asks for its own pass or is held as a candidate.
+      let nextInfoHere = false;
+      if (!hasFillable && !reviewShaped && !entryDisclaimer && this.page) {
+        try {
+          const door = backstopFor(this.page) as Partial<FilingBackstop> | null;
+          nextInfoHere = !!door && typeof door.infoPageProofState === "function" && door.infoPageProofState() === "next_info";
+        } catch { nextInfoHere = false; }
+      }
+      const interstitial = (!hasFillable && !reviewShaped && !anyFormMutationRecorded && !entryDisclaimer
         && !this.continuedDraft && !this.signatureCheck && !signatureDone
         && !this.formPageSeen
         && steps.some((s) => /^(application entry|permit type):/.test(String(s.note ?? "")))
-        && (!isDashboard || plannerSaidReview);
+        && (!isDashboard || plannerSaidReview)) || nextInfoHere;
+      // A READ-ONLY PAGE INSIDE THE WIZARD IS NOT THE REVIEW PAGE (#271). Accela's advance on EVERY
+      // step is "Continue Application »", which is submit-worded, so a page with nothing to fill
+      // after a form page (a "Licensed Professional" step that only shows the account's licence)
+      // read as review: the learn stopped there with 4 of 19 fields, and its Continue was promoted
+      // to the final submit. After a form page, a page with no fillable control is review only on
+      // POSITIVE evidence: its text or URL names the review step, a submit-intent control other
+      // than "Continue Application" alone, a terms gate, or the planner saying so. Otherwise it is
+      // a pass-through page and its click is recorded as an advance. "After a form page" is a
+      // page with a fillable control this run OR form data already recorded (the offline bench's
+      // accela/extra_readonly_page learn entered data without the walk marking a form page seen,
+      // and still stopped at 4 of 19). Before both, the interstitial reading answers, unchanged.
+      const continueOnly = (label: string | null | undefined): boolean =>
+        CONTINUE_APPLICATION_WORDS.test(String(label ?? "")) && !SUBMIT_INTENT.test(String(label ?? "").replace(CONTINUE_APPLICATION_WORDS_G, " "));
+      const strongSubmitIntentBtn = fields.some((f) => f.fieldType === "button" && onPageControl(f)
+        && SUBMIT_INTENT.test(f.label) && !continueOnly(f.label) && !this.isOffLimitsButton(f));
+      // A PAY OR SIGNATURE-REQUEST CONTROL ON THE PAGE IS POSITIVE EVIDENCE TOO (Helm on #290). A
+      // read-only page showing "Pay Fees" or "Request Signatures" beside "Continue Application" is
+      // a checkout or sign-off step, not a pass-through: strongSubmitIntentBtn leaves off-limits
+      // controls out, and "Pay Fees" is not submit-worded, so without this term such a page would
+      // be walked through. It stops as review, as before #271 (its Continue stays unflagged: the
+      // page does not name itself review). Fail-closed on purpose: a stray "Fees" link costs one
+      // page a person finishes. The step navigator is cut, as for the submit test above (Accela
+      // lists "Pay Fees" as a step on every page). Existing-record actions are not counted.
+      const faceWords = (f: ExtractedField): Array<string | undefined> =>
+        [f.label, f.selector?.name, f.selector?.text, f.selector?.shownText];
+      const payOrSignatureCtl = fields.some((f) => f.fieldType === "button" && onPageControl(f)
+        && faceWords(f).some((t) => isPayFee(t) || isSignatureRequestControl(t)));
+      const readOnlyMidWizard = !hasFillable && !isDashboard && (this.formPageSeen || anyFormMutationRecorded)
+        && !reviewSignals && !looksLikeReviewUrl(url) && !strongSubmitIntentBtn && !payOrSignatureCtl
+        && !hasAcceptTermsCheckbox && !plannerSaidReview;
+      if (readOnlyMidWizard) this.debug?.event({ type: "readonly_mid_wizard_pass_through", page: pageCount });
       if (hasFillable) this.formPageSeen = true;
       const isReviewPage =
-        ((!hasFillable && !isDashboard) ||
+        ((!hasFillable && !isDashboard && !readOnlyMidWizard) ||
           (reviewSignals && hasSubmitIntentBtn) ||
           (hasSubmitIntentBtn && hasAcceptTermsCheckbox)) && !entryDisclaimer && !interstitial;
       if (isReviewPage && !plan.atReview) {
         // Promote a planner "advance" that is actually a submit-intent button to finalSubmit.
         let promotedFinal = typeof plan.finalSubmitSelectorIndex === "number" ? plan.finalSubmitSelectorIndex : undefined;
+        // "Continue Application" alone is the filing click only on a page that NAMES itself the
+        // review step (the shared isFinalSubmitControl rule, #271): on a review page proven some
+        // other way (a terms gate, a planner stop) it stays unflagged and a person clicks it.
+        const promotable = (f: ExtractedField | undefined): boolean => !!f && f.fieldType === "button"
+          && SUBMIT_INTENT.test(f.label) && !this.isOffLimitsButton(f) && (!continueOnly(f.label) || reviewSignals);
         if (promotedFinal == null && typeof plan.advanceSelectorIndex === "number") {
-          const adv = fields[plan.advanceSelectorIndex];
-          if (adv && SUBMIT_INTENT.test(adv.label) && !this.isOffLimitsButton(adv)) promotedFinal = plan.advanceSelectorIndex;
+          if (promotable(fields[plan.advanceSelectorIndex])) promotedFinal = plan.advanceSelectorIndex;
         }
         if (promotedFinal == null) {
           // Fall back to the first submit-intent (non-pay) button on the page.
-          const idx = fields.findIndex((f) => f.fieldType === "button" && SUBMIT_INTENT.test(f.label) && !this.isOffLimitsButton(f));
+          const idx = fields.findIndex((f) => promotable(f));
           if (idx >= 0) promotedFinal = idx;
         }
         // Auto-check the required terms/certification gate(s) so the recorded recipe ticks them
@@ -8930,7 +9227,7 @@ export class AutoLearnAdapter extends BasePortalAdapter {
         const norm = (s: unknown): string => String(s ?? "").replace(/\s+/g, " ").trim();
         const fwdCands = fields.map((f, i) => ({ f, i })).filter(({ f }) => f.fieldType === "button" && !f.disabled && !f.tile
           && onPageControl(f) && isInterstitialForwardLabel(f.label) && !this.isOffLimitsButton(f));
-        const oneWay = !isDashboard && fwdCands.length > 0 && fwdCands.length <= 2
+        const oneWay = (!isDashboard || nextInfoHere) && fwdCands.length > 0 && fwdCands.length <= 2
           && new Set(fwdCands.map(({ f }) => norm(f.label).toLowerCase())).size === 1;
         const fwd = oneWay ? fwdCands[0].i : -1;
         const fwdLabel = fwd >= 0 ? norm(fields[fwd].label) : "";
@@ -9005,6 +9302,19 @@ export class AutoLearnAdapter extends BasePortalAdapter {
             plan = { ...plan, finalSubmitSelectorIndex: undefined };
             this.debug?.event({ type: "planner_final_submit_navigator_dropped", page: pageCount, control, atReview: plan.atReview === true });
           }
+        }
+      }
+
+      // c2o) A PLANNER'S "Continue Application" ON A READ-ONLY PAGE THAT DOES NOT NAME ITSELF REVIEW
+      //      IS NEVER THE FINAL SUBMIT (#271). The planner may still stop here (a person reads the
+      //      page at review), but the step it would record as isFinalSubmit is Accela's every-step
+      //      advance: dropped, so no recipe carries a mid-wizard Continue as the filing click.
+      {
+        const fsIdx = plan.finalSubmitSelectorIndex;
+        const fsField = typeof fsIdx === "number" ? fields[fsIdx] : undefined;
+        if (fsField && !hasFillable && !reviewSignals && continueOnly(fsField.label)) {
+          plan = { ...plan, finalSubmitSelectorIndex: undefined };
+          this.debug?.event({ type: "planner_final_submit_continue_dropped", page: pageCount, control: String(fsField.label ?? "").slice(0, 60) });
         }
       }
 
@@ -9516,12 +9826,15 @@ export class AutoLearnAdapter extends BasePortalAdapter {
         // ACA commits attachments only on the section's own Save (Continue Application
         // leaves them pending) — and each pending row needs its Description + Type first.
         // Never on a review page: the Save is a click, and the attach-only pass clicks nothing.
-        if (up.attached > 0 && !reviewUpload && this.isAcaPage(url, fields) && acaAttachmentSaves < 3) {
+        // A TYPED UPLOADER (one file box, a Document Type list and an Add button that commits the
+        // pair) holds its file just as ACA's pending row does: nothing is attached until the Add.
+        const typedUploader = up.attached > 0 && !reviewUpload && !this.isAcaPage(url, fields) ? await this.findTypedUploader() : null;
+        if (up.attached > 0 && !reviewUpload && (this.isAcaPage(url, fields) || typedUploader) && acaAttachmentSaves < 3) {
           acaAttachmentSaves++;
           const saved = await this.withPhaseTimeout(
             "attachment_save",
             90_000,
-            () => this.accelaAttachmentSavePass(_project, steps),
+            () => this.accelaAttachmentSavePass(_project, steps, typedUploader),
             false,
           );
           this.debug?.event({ type: "aca_attachment_save_pass", page: pageCount, saved });
@@ -10116,12 +10429,13 @@ export class AutoLearnAdapter extends BasePortalAdapter {
           // ACA commits an attachment only on its section's Save (see d0). The answers on this
           // page are already in, so commit in place rather than re-entering the page — and say
           // so when the Save did not take, never leave the file silently pending.
-          if (rev.attached > 0 && !reviewUpload && this.isAcaPage(url, fields) && acaAttachmentSaves < 3) {
+          const typedUploader = rev.attached > 0 && !reviewUpload && !this.isAcaPage(url, fields) ? await this.findTypedUploader() : null;
+          if (rev.attached > 0 && !reviewUpload && (this.isAcaPage(url, fields) || typedUploader) && acaAttachmentSaves < 3) {
             acaAttachmentSaves++;
             const saved = await this.withPhaseTimeout(
               "attachment_save",
               90_000,
-              () => this.accelaAttachmentSavePass(_project, steps),
+              () => this.accelaAttachmentSavePass(_project, steps, typedUploader),
               false,
             );
             this.debug?.event({ type: "aca_attachment_save_pass", page: pageCount, saved, pass: "revealed" });
@@ -10198,9 +10512,18 @@ export class AutoLearnAdapter extends BasePortalAdapter {
       //     only resurfaces (if at all) as a blank at the review screen. Read each filled control
       //     back; re-apply once if it didn't hold; record any REQUIRED field that still won't hold
       //     its value so the operator sees exactly what to fix.
+      // What THIS page's read-back reported unheld, and which of those it newly put on the run's
+      // lists: the only labels the re-plan below may take off them again (settleReplannedWrites) —
+      // another page's blank of the same label stays.
+      let didNotHoldHere: string[] = [];
+      const newMissesHere: string[] = [];
+      const newDidNotHoldHere: string[] = [];
       if (appliedThisPage.length > 0) {
         const misses = await this.verifyFillsLanded(appliedThisPage);
+        didNotHoldHere = misses;
         for (const m of misses) {
+          if (!fillVerifyMisses.includes(m)) newMissesHere.push(m);
+          if (!missesDidNotHold.includes(m)) newDidNotHoldHere.push(m);
           if (!fillVerifyMisses.includes(m)) fillVerifyMisses.push(m);
           // TYPED-AND-LOST AND NEVER-TYPED NEED OPPOSITE FIXES, and they were being merged
           // into one list. Ameren's review reports Street, Name, Company, Address blank every
@@ -10210,6 +10533,8 @@ export class AutoLearnAdapter extends BasePortalAdapter {
           if (!missesDidNotHold.includes(m)) missesDidNotHold.push(m);
         }
         if (misses.length) this.debug?.event({ type: "fills_did_not_hold", page: pageCount, labels: misses.slice(0, 8) });
+        // After the read-back's one re-apply: a select of a value the list never offered is not a step.
+        this.dropUnofferedSelectSteps(steps, pageStepsFrom, appliedThisPage, alreadyFilledLabels);
       }
 
       // d4b) REQUIRED-FIELD SWEEP — before advancing, scan the live page for REQUIRED fields
@@ -10230,12 +10555,23 @@ export class AutoLearnAdapter extends BasePortalAdapter {
           const replanKey = scrapedIdentity ? `${scrapedIdentity.where}#${scrapedIdentity.controls}` : deadPageKey(url, fields.length);
           if (!requiredReplanned.has(replanKey)) {
             requiredReplanned.add(replanKey);
+            const replanStepsFrom = steps.length;
+            const replanAppliedFrom = appliedThisPage.length;
             const filled = await this.replanRequiredBlanks({ blanks: unfilled, url, pageTitle, steps, alreadyFilledLabels, appliedThisPage });
             this.debug?.event({ type: "required_blank_replan", page: pageCount, blanks: unfilled.slice(0, 8), filled });
+            // The re-plan's own select of a value the list does not offer is not a step either.
+            this.dropUnofferedSelectSteps(steps, replanStepsFrom, appliedThisPage, alreadyFilledLabels);
             if (filled > 0) {
               await this.waitForAutosaveIndicator(3000);
               await sleep(400);
               unfilled = await this.collectUnfilledRequired();
+              // THE RECIPE AND THE LISTS SAY THE PAGE AS IT IS LEFT: a write the read-back reported
+              // unheld, which the re-plan then wrote and the page now holds, is one step and no blank.
+              await this.settleReplannedWrites({
+                steps, pageStepsFrom, stepsFrom: replanStepsFrom, applied: appliedThisPage, appliedFrom: replanAppliedFrom,
+                didNotHold: didNotHoldHere, unfilled,
+                lists: [{ list: fillVerifyMisses, addedHere: newMissesHere }, { list: missesDidNotHold, addedHere: newDidNotHoldHere }],
+              }).catch(() => null);
             }
           }
         }
@@ -10316,6 +10652,18 @@ export class AutoLearnAdapter extends BasePortalAdapter {
             if (process.env.AUTOLEARN_DEBUG === "1") console.error(`[learn] retracted provisional required-miss now answered: ${m}`);
           }
         }
+      }
+
+      // d4b) A POP-UP THE WALK OPENED AND FILLED IS SAVED (#131): its boxes post nothing until the
+      //      dialog's own Save copies them into the page. Left open, the page advanced with them blank.
+      if (!isDashboard) await this.popupCommitPass(steps, pageCount).catch(() => null);
+
+      // d4b'') THE LOCATION THE PAGE IS LEFT WITH (#161). A location step's pick fills a required
+      //        read-only selection; the step's forward control posts whatever it holds. Empty, or not
+      //        this job's address: the walk ends here, named — the forward control is never clicked.
+      {
+        const stopped = await this.typeaheadLocationResult(steps, pageCount, portalNotices, fillVerifyMisses, pageTrace);
+        if (stopped) return stopped;
       }
 
       // d4c) THE PAGE AS THE WALK LEAVES IT (#536, #534) — a field the portal shows as invalid, a
@@ -10659,9 +11007,26 @@ export class AutoLearnAdapter extends BasePortalAdapter {
           const after = door && typeof door.checkInfoPageAfterClick === "function"
             ? await door.checkInfoPageAfterClick(this.page).catch((e: unknown) => ({ ok: false, refusals: [`the page after the click could not be read (${String((e as { message?: string })?.message ?? e).slice(0, 80)})`] }))
             : { ok: false, refusals: ["the network backstop cannot read the page after the click"] };
-          this.debug?.event({ type: after.ok ? "info_page_after_click_ok" : "info_page_incident", page: pageCount, phase: "after", refusals: after.refusals.slice(0, 6).map((x) => this.scrubSecrets(x).slice(0, 160)) });
-          if (!after.ok) {
-            for (const a of infoAdmitted) this.infoPageIncidents.push({ passId: a.passId, phase: "after", why: after.refusals.slice(0, 6), where: a.where });
+          const nextInfoPage = !after.ok && (after as { nextInfoPage?: boolean }).nextInfoPage === true;
+          // THE PAGE AFTER, KEPT WITH THE RECORD (#279): its text (scrubbed, capped) and a masked
+          // screenshot, so a person can tell a second information page from a receipt.
+          const afterText = redactCaptureText(this.scrubSecrets(String((after as { text?: string }).text ?? "")), 4000);
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const afterPg: any = this.page;
+          const afterShot = after.ok || !afterPg || typeof afterPg.screenshot !== "function" ? undefined
+            : await this.withSecretMask("info page after screenshot", (mask) => afterPg.screenshot({ fullPage: true, mask })).then((b) => (b ? Buffer.from(b as Buffer).toString("base64") : undefined)).catch(() => undefined);
+          this.debug?.event({ type: after.ok ? "info_page_after_click_ok" : nextInfoPage ? "info_page_next_information_page" : "info_page_incident", page: pageCount, phase: "after", refusals: after.refusals.slice(0, 6).map((x) => this.scrubSecrets(x).slice(0, 160)), ...(after.ok ? {} : { afterText, afterScreenshot: !!afterShot }) });
+          if (!after.ok && afterShot) this.debug?.writeFile(`info-page-after-p${pageCount}.png`, Buffer.from(afterShot, "base64"));
+          if (nextInfoPage) {
+            // #279 (owner's option 1): ANOTHER INFORMATION PAGE, not a filing — the verification just
+            // used is KEPT (no incident). Nothing leaves this page unless a person verified it too
+            // (the backstop's NEXT INFORMATION PAGE hold): the walk goes on to it, its forward click
+            // is held and recorded as a candidate for a person (with its screenshot), or passed by
+            // its own verification. No proof of progress is asked here: that belongs to the page the
+            // last pass of the chain leads to.
+            for (const a of infoAdmitted) this.infoPageNextInfo.push({ passId: a.passId, where: a.where, afterText: afterText.slice(0, 1200) });
+          } else if (!after.ok) {
+            for (const a of infoAdmitted) this.infoPageIncidents.push({ passId: a.passId, phase: "after", why: after.refusals.slice(0, 6), where: a.where, afterText: afterText.slice(0, 1200) });
             return {
               ...fail(steps, this.portalName, `STOPPED AFTER A VERIFIED INFORMATION PAGE: the network backstop let "${String(advanceField.label ?? "").slice(0, 40)}" through on the page a person verified, and the page it led to ${after.refusals.slice(0, 3).map((r) => r.replace(/^the page after the click /, "")).join("; ")}. Nothing more was sent, nothing is recorded as filed, and that verification is withdrawn. The verified page may have filed — check the portal for this project before any run continues.`, null, pageCount, portalNotices),
               stopReason: "info_page_incident",
@@ -10672,8 +11037,10 @@ export class AutoLearnAdapter extends BasePortalAdapter {
           // until a fill / select / check bound to one of the job's values is recorded there
           // (applyFill reports it); leaving, ending or stopping first is the incident (learn()'s
           // settleInfoPageProof).
-          this.infoProof = { passes: [...infoAdmitted], page: pageCount, step: null, left: false, candidates: [] };
-          this.debug?.event({ type: "info_page_proof_pending", page: pageCount });
+          if (!nextInfoPage) {
+            this.infoProof = { passes: [...infoAdmitted], page: pageCount, step: null, left: false, candidates: [] };
+            this.debug?.event({ type: "info_page_proof_pending", page: pageCount });
+          }
         }
         if (!res.ok && !controlAbsent) {
           return fail(steps, this.portalName, `Failed to click the advance button on page ${pageCount}: ${res.message ?? "unknown"}`, null, pageCount, portalNotices);
@@ -12178,7 +12545,7 @@ export class AutoLearnAdapter extends BasePortalAdapter {
       return refusal;
     };
     const out = loc
-      ? await fillTypeahead(this.page, loc, { value: v, mode, site, enterGate })
+      ? await fillTypeahead(this.page, loc, { value: v, mode, site, enterGate, parcels: this.typeaheadParcels })
       : { outcome: "unusable" as const, why: "the box could not be located" };
     // Outcome and counts only — never the address or the suggestions themselves.
     this.debug?.event({ type: "typeahead_fill", label: label.slice(0, 60), mode, outcome: out.outcome, ...("offered" in out ? { offered: out.offered.length } : {}), ...(out.outcome === "picked" && out.via ? { via: out.via } : {}) });
@@ -12204,6 +12571,8 @@ export class AutoLearnAdapter extends BasePortalAdapter {
     }
     // A pick the portal SELECTED (Enter, or the box's own search control — #198) is shown outside the box.
     if (out.via === "enter" || out.via === "search") this.typeaheadEnterPicks.set(boxKey, { label, held: out.held });
+    // #161: the required selection this pick filled is asked again before the page is left.
+    if (mode === "site" && out.resultBoxes?.length) this.locationResultGuard = { boxes: out.resultBoxes, site, label };
     const step: RecipeStep = {
       action: "fill",
       phase: "fill",
@@ -12236,6 +12605,27 @@ export class AutoLearnAdapter extends BasePortalAdapter {
       if (s.note) alreadyFilledLabels.push(s.note);
     }
     return fills;
+  }
+
+  /** #161 — THE FORWARD QUESTION, BEFORE THE PAGE IS LEFT. The required read-only selection this
+   *  page's location pick filled ("The location you have selected"), read now: empty, or holding
+   *  something that is not the job's address or tax lot, ends the walk NAMED — the step's forward
+   *  control is never clicked on an empty or wrong location. null when there is nothing to ask. */
+  private async typeaheadLocationResult(steps: RecipeStep[], pageCount: number, portalNotices: string[], fillVerifyMisses: string[], pageTrace: string[]): Promise<LearnResult | null> {
+    const g = this.locationResultGuard;
+    if (!g) return null;
+    this.locationResultGuard = null;
+    const refusal = locationResultRefusal(await readLocationResultBoxes(this.page, g.boxes), g.site, this.typeaheadParcels);
+    if (!refusal) return null;
+    this.debug?.event({ type: "typeahead_location_unselected", page: pageCount, label: g.label.slice(0, 60) });
+    const misses = fillVerifyMisses.includes(g.label) ? [...fillVerifyMisses] : [...fillVerifyMisses, g.label];
+    return {
+      ...fail(steps, this.portalName, `Stopped for a person on page ${pageCount}: 📍 Not selected — "${g.label}": ${refusal}. Select the location by hand (or correct the project's address) and run again; the steps before this page were recorded.`, null, pageCount, portalNotices),
+      stopReason: "typeahead_location_unselected",
+      typeaheadMisses: [...this.typeaheadMisses],
+      requiredFieldMisses: misses,
+      pageTrace: pageTrace.slice(0, 40),
+    };
   }
 
   /** #139 — the NAMED stop a type-ahead with no match (and no working door) ends its page with; null
@@ -12621,7 +13011,10 @@ export class AutoLearnAdapter extends BasePortalAdapter {
           // A CHOICE THE LIST DOES NOT HOLD IS SAID, WITH THE LIST (#530). This miss used to be
           // silent here and surface only later as "fills_did_not_hold" + "required_never_filled",
           // which cannot tell a portal that cleared the answer from one that never offered it.
-          if (!took) await this.noteSelectNotOffered(loc, field.label || "", value, sensitive);
+          // ...AND IT IS NOT A STEP: the scraped control is marked, and the page's read-back drops the
+          // step unless a later attempt at the same control took (dropUnofferedSelectSteps).
+          if (took) this.unofferedSelects.delete(field.selector);
+          else if (await this.noteSelectNotOffered(loc, field.label || "", value, sensitive)) this.unofferedSelects.add(field.selector);
         } else if (action === "check") {
           if (negated) {
             // Explicit false/no → uncheck the box (leave it unchecked).
@@ -12851,6 +13244,9 @@ export class AutoLearnAdapter extends BasePortalAdapter {
     const norm = (s: string) => String(s ?? "").replace(/[*:]/g, " ").replace(/\s+/g, " ").trim().toLowerCase();
     const stateKey = (s: Sec, label: string) => `${path}|${norm(s.heading)}|${norm(label)}|${s.requiredBlank.map(norm).join(",")}|${s.hasEdit ? "record" : "empty"}`;
     const isPopulateWord = (label: string) => /auto-?fill|populate/i.test(label);
+    /** Rule 3's reading (see acaContactSectionsOnPage's searchOnlyFilled): typed into a box that posts
+     *  nothing, and nothing the section posts holds a value — the search was never committed. */
+    const uncommittedSearch = (s: Sec): boolean => s.searchOnlyFilled > 0 && s.hiddenNamed > 0 && s.hiddenNamedFilled === 0 && !s.hasEdit;
     const sectionOwnedByContactPass = (s: Sec): boolean =>
       this.acaFilledSectionHeadings.has(s.heading.toLowerCase())
       || [s.addNewId, s.editId, s.selectId].some((id) => id && (this.acaFilledSectionControls.has(id) || this.acaEmptySectionControls.has(id)));
@@ -12927,6 +13323,9 @@ export class AutoLearnAdapter extends BasePortalAdapter {
         for (const l of ordered) {
           if (this.lookupPressed.has(stateKey(s, l.label))) continue;
           if (s.addressTyped && !isPopulateWord(l.label)) return l; // rule 1: the address search
+          // rule 3: a search the walk TYPED that nothing committed — a box that posts nothing holds the
+          // value, and the section's hidden inputs (what a picked row writes) are all still empty.
+          if (!s.requiredBlank.length && uncommittedSearch(s) && !isPopulateWord(l.label)) return l;
           if (!s.requiredBlank.length) continue;
           if (!isPopulateWord(l.label) && s.typedTotal > 0 && s.typedBlank === s.typedTotal) continue; // a search with nothing typed
           return l;
@@ -13115,6 +13514,9 @@ export class AutoLearnAdapter extends BasePortalAdapter {
           if (widened) { inlineScopeSel = '[data-al-csearch="1"]'; searchHolder = true; }
         }
         // The section is searched as the form only when a visible "Search" box was found in it or beside it.
+        // Rule 3's section: its own typed box IS the search box (it posts nothing; it only drives this
+        // search), so the section is the form even when no box there is labelled "Search".
+        if (pressChangedNothing && !searchHolder && !sec.requiredBlank.length && uncommittedSearch(sec)) searchHolder = true;
         const unchangedInline = pressChangedNothing && searchHolder;
         if (popup || newFrame || overlaySel || inlineFormOpened || unchangedInline) {
           const form = await this.lookupSearchForm({
@@ -13533,9 +13935,7 @@ export class AutoLearnAdapter extends BasePortalAdapter {
       // AHJ/utility fuzzy scorer and not containment (Helm review of PR #247): "Acme Solar Electric"
       // scored 70 against "Acme Solar Roofing" and "Acme Solar" sat inside "Acme Solar of Idaho", so
       // another licensed company's record could be attached as this client's.
-      const companyKey = (v: string): string => v.toLowerCase().replace(/&/g, " and ")
-        .replace(/\b(llc|l\.l\.c|inc|incorporated|corp|corporation|co|company|ltd|limited|lp|llp|pllc|pc|dba)\b/g, " ")
-        .replace(/[^a-z0-9]+/g, " ").trim();
+      // (shared/src/rowPick.ts companyKey — the replay narrows several matching rows by the same key.)
       const ourKey = companyKey(opts.companyName);
       const isOurs = (text: string): boolean => !!ourKey && companyKey(text) === ourKey;
       // ONLY ROWS THE SEARCH BROUGHT COUNT (live Meridian run 10: the licence register's own form is a
@@ -14117,19 +14517,21 @@ export class AutoLearnAdapter extends BasePortalAdapter {
    *  than as a fill the portal took back. Native <select> only (a styled widget's list is not in
    *  the DOM until opened). The wanted value of a sensitive field is never logged. Never throws. */
   private selectNotOfferedSeen = new Set<string>();
+  /** Returns true when the control is a native <select> whose list was read (so the miss is the
+   *  list's, whether or not this call was the one that logged it); false for anything else. */
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  private async noteSelectNotOffered(loc: any, label: string, value: string, sensitive: boolean): Promise<void> {
+  private async noteSelectNotOffered(loc: any, label: string, value: string, sensitive: boolean): Promise<boolean> {
     try {
-      if (!loc || typeof loc.evaluate !== "function") return;
+      if (!loc || typeof loc.evaluate !== "function") return false;
       const offered = await loc.evaluate((el: Element) => {
         if ((el.tagName || "").toLowerCase() !== "select") return null;
         return Array.from((el as HTMLSelectElement).options)
           .map((o) => (o.textContent || "").replace(/\s+/g, " ").trim())
           .filter((t) => t && !/^(please\s+)?(select|choose)\b\.{0,3}|^--/i.test(t));
       }).catch(() => null) as string[] | null;
-      if (!Array.isArray(offered)) return;
+      if (!Array.isArray(offered)) return false;
       const key = sensitive ? label : `${label}\u0000${value}`;
-      if (this.selectNotOfferedSeen.has(key)) return;
+      if (this.selectNotOfferedSeen.has(key)) return true;
       this.selectNotOfferedSeen.add(key);
       this.debug?.event({
         type: "select_value_not_offered",
@@ -14138,7 +14540,100 @@ export class AutoLearnAdapter extends BasePortalAdapter {
         offered: offered.slice(0, 12).map((o) => o.slice(0, 60)),
         ...(offered.length > 12 ? { more: offered.length - 12 } : {}),
       });
-    } catch { /* reporting only */ }
+      return true;
+    } catch { return false; /* reporting only */ }
+  }
+
+  /** The scraped controls (by their selector object, which the recorded step and the page's applied
+   *  record share) whose last select took NONE of a native list's options. Cleared when a later
+   *  attempt at the same control takes — the read-back's one re-apply, for a list that loaded late. */
+  private unofferedSelects = new WeakSet<object>();
+
+  /** A SELECT OF A VALUE THE LIST NEVER OFFERED IS NOT A RECORDED STEP. The planner chose a value a
+   *  required native select does not hold; the step was recorded anyway, the page's re-plan then
+   *  chose an offered one, and the recipe carried both — a replay would select a value that is not
+   *  there, and two different writes to one control on a page are refused by the sequence check.
+   *  Dropped from `steps[from..]` with its applied record, so no later pass re-tries it and the
+   *  recipe says only what the page took. The blank itself is reported as before: a required one
+   *  was already named by the read-back, and the required sweep still finds it. */
+  private dropUnofferedSelectSteps(steps: RecipeStep[], from: number, applied: AppliedFill[], alreadyFilledLabels: string[]): void {
+    for (let k = steps.length - 1; k >= Math.max(0, from); k--) {
+      const st = steps[k];
+      if (st.action !== "select" || !st.selector || !this.unofferedSelects.has(st.selector)) continue;
+      steps.splice(k, 1); // descending order: earlier indices stay valid
+      for (let a = applied.length - 1; a >= 0; a--) if (applied[a].selector === st.selector) applied.splice(a, 1);
+      const at = st.note ? alreadyFilledLabels.lastIndexOf(st.note) : -1;
+      if (at >= 0) alreadyFilledLabels.splice(at, 1);
+      this.debug?.event({ type: "unoffered_select_not_recorded", label: String(st.note ?? "").slice(0, 80) });
+    }
+  }
+
+  /** WHAT THE PAGE'S RE-PLAN WROTE SUCCESSFULLY REPLACES WHAT DID NOT HOLD. `didNotHold` are the
+   *  labels this page's read-back just reported (typed, re-applied once, still not held); the
+   *  re-plan's own writes are `applied[appliedFrom..]` / `steps[stepsFrom..]`. For each re-plan
+   *  write that READS BACK AS HELD:
+   *   - this page's earlier fill / select of the same scraped control, where that write is one the
+   *     read-back said did not hold, leaves the recorded steps (the page never took it; with it the
+   *     recipe writes the control twice, and the sequence check refuses the pair);
+   *   - its label leaves `lists` (the run's blank / typed-but-not-kept lists) when the sweep after
+   *     the re-plan (`unfilled`) no longer names it and no other control of that label on this page
+   *     is still unheld. A list loses only a label THIS page put on it (`addedHere`): another
+   *     page's blank of the same label stays reported. A field still blank is never retracted. */
+  private async settleReplannedWrites(ctx: {
+    steps: RecipeStep[];
+    pageStepsFrom: number;
+    stepsFrom: number;
+    applied: AppliedFill[];
+    appliedFrom: number;
+    didNotHold: string[];
+    unfilled: string[];
+    lists: Array<{ list: string[]; addedHere: string[] }>;
+  }): Promise<void> {
+    if (!ctx.didNotHold.length) return;
+    const norm = (s: string): string => String(s ?? "").replace(/[*:]/g, " ").replace(/\s+/g, " ").trim().toLowerCase();
+    const holds = async (a: AppliedFill): Promise<boolean> => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const loc = (await this.locator(a.selector).catch(() => null)) as any;
+      return !!loc && this.fieldHoldsValue(loc, a);
+    };
+    let { stepsFrom, appliedFrom } = ctx;
+    const answered = new Set<string>();
+    for (const late of ctx.applied.slice(appliedFrom)) {
+      if (late.sensitive || !ctx.didNotHold.includes(late.label) || !(await holds(late))) continue;
+      answered.add(late.label);
+      const key = JSON.stringify(late.selector);
+      let superseded = false;
+      for (let a = appliedFrom - 1; a >= 0; a--) {
+        const early = ctx.applied[a];
+        if (JSON.stringify(early.selector) !== key || !ctx.didNotHold.includes(early.label)) continue;
+        ctx.applied.splice(a, 1);
+        appliedFrom--;
+        superseded = true;
+      }
+      if (!superseded) continue;
+      for (let k = stepsFrom - 1; k >= Math.max(0, ctx.pageStepsFrom); k--) {
+        const st = ctx.steps[k];
+        if ((st.action !== "fill" && st.action !== "select") || JSON.stringify(st.selector) !== key) continue;
+        ctx.steps.splice(k, 1); // descending order: earlier indices stay valid
+        stepsFrom--;
+        this.debug?.event({ type: "unheld_write_superseded", label: late.label.slice(0, 80) });
+      }
+    }
+    const stillBlank = ctx.unfilled.map(norm);
+    for (const label of answered) {
+      if (stillBlank.includes(norm(label))) continue;
+      let allHeld = true;
+      for (const a of ctx.applied) {
+        if (a.label !== label || !a.required || (a.sensitive && !a.secretBinding)) continue;
+        if (!(await holds(a))) { allHeld = false; break; }
+      }
+      if (!allHeld) continue;
+      for (const { list, addedHere } of ctx.lists) {
+        const at = addedHere.includes(label) ? list.indexOf(label) : -1;
+        if (at >= 0) list.splice(at, 1);
+      }
+      this.debug?.event({ type: "did_not_hold_answered", label: label.slice(0, 80) });
+    }
   }
 
   private async verifyFillsLanded(applied: AppliedFill[], opts?: { budgetMs?: number; requiredOnly?: boolean }): Promise<string[]> {
@@ -14203,7 +14698,8 @@ export class AutoLearnAdapter extends BasePortalAdapter {
             if (again.outcome === "ask" && !this.typeaheadQuestion) this.typeaheadQuestion = line;
           }
         } else if (a.fieldType === "select") {
-          if (!(await selectWithFallback(this.page!, loc, a.expected))) await this.noteSelectNotOffered(loc, a.label, a.expected, a.sensitive);
+          if (await selectWithFallback(this.page!, loc, a.expected)) this.unofferedSelects.delete(a.selector);
+          else await this.noteSelectNotOffered(loc, a.label, a.expected, a.sensitive);
         } else if (a.fieldType === "checkbox" || a.fieldType === "radio") {
           if (/^(true|yes|on|1)$/i.test(a.expected) && typeof loc.check === "function") await loc.check({ timeout: 5000 });
         } else if (typeof loc.fill === "function") {
@@ -14692,9 +15188,31 @@ export class AutoLearnAdapter extends BasePortalAdapter {
         await l.evaluate((el: Element) => el.removeAttribute("data-al-hidden-target")).catch(() => {});
         return false;
       }
+      // A POP-UP'S OPENER GOES THROUGH THE SHARED DOORS (Helm review of #268): the in-page word list
+      // misses filing words the shared predicates catch ("Complete Application", "Finalize
+      // Application", "Send Application", "Place Order"), and an aria-haspopup opener needs no title
+      // match. Refused means not clicked, said in the run log, the field skipped as before.
+      if (plan.popup && AutoLearnAdapter.popupControlRefused(plan.popup.name)) {
+        this.debug?.event({ type: "popup_opener_refused", label: (field.label || "").slice(0, 60), opener: plan.popup.name.slice(0, 60) });
+        await this.page.evaluate(() => {
+          document.querySelectorAll("[data-al-reveal], [data-al-popup]").forEach((n) => { n.removeAttribute("data-al-reveal"); n.removeAttribute("data-al-popup"); });
+        }).catch(() => null);
+        await l.evaluate((el: Element) => el.removeAttribute("data-al-hidden-target")).catch(() => {});
+        return false;
+      }
       await this.page.locator("[data-al-reveal]").first().click({ timeout: 3000 });
       await sleep(500);
       const now = typeof l.isVisible === "function" ? await l.isVisible().catch(() => false) : false;
+      // A POP-UP THE WALK OPENED IS PART OF THE RECIPE (#131): a replay must press the same opener
+      // before it can fill the dialog's boxes. Recorded with the fills it opened for (drained by the
+      // caller just ahead of this field's own step); its Save is popupCommitPass's.
+      if (now && plan.popup?.name) {
+        this.typeaheadDoorSteps.push({
+          action: "click", phase: "fill",
+          selector: { role: plan.popup.role, name: plan.popup.name, exact: true, ...(plan.popup.id ? { fallbacks: [{ css: `#${plan.popup.id}` }] } : {}) },
+          note: `pop-up: open (${plan.popup.name.slice(0, 50)})`,
+        } as RecipeStep);
+      }
       this.debug?.event({
         type: now ? "hidden_field_revealed" : "hidden_field_reveal_failed",
         label: (field.label || "").slice(0, 60),

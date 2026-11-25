@@ -2681,10 +2681,13 @@ export interface FireSetbackRule {
 /** A roof-plan fire access dimension (IRC R324.6 / IFC 1205): a pathway's width or the array's
  *  clear setback from a ridge. Hip/valley clearances are not read yet. */
 export type RoofPlanDimensionKind = "pathwayWidth" | "ridgeSetback";
+/** What a plan can STATE: a pathway, a ridge setback, or a "FIRE SETBACK" that names no roof line
+ *  (fireSetback — never compared on its own; evaluateFirePathwayFindings says how it counts). */
+export type StatedRoofPlanDimensionKind = RoofPlanDimensionKind | "fireSetback";
 
 /** One fire access dimension a text STATES (label-anchored), in inches. */
 export interface StatedRoofPlanDimension {
-  kind: RoofPlanDimensionKind;
+  kind: StatedRoofPlanDimensionKind;
   inches: number;
   source: string;
   excerpt: string;
@@ -5215,6 +5218,11 @@ export interface InfoPageCandidateRecord {
    *  INFO_PAGE_PASS_MAX_PROJECTS) — the run was held as on main; a person re-verifies on this card
    *  (the verify replaces the expired pass). null = none. */
   expiredPass: { passId: string; verifiedAt: string; why: string[] } | null;
+  /** #279 (Helm's review of #294): the verified pages whose click led to THIS page. Each such pass
+   *  WAITS (no run may use it) until a person rules here: verifying this page releases it, "not an
+   *  information page" withdraws it as an after-click incident. `afterText` is what the run read on
+   *  this page (redacted); `acknowledgement` is the acknowledgement wording found in it, called out. */
+  ledFromVerified?: Array<{ passId: string; where: string; controlLabel: string; afterText: string; acknowledgement: string[]; at: string }>;
 }
 
 /** A shared pass as GET /api/info-page-passes lists it (critique [5]: no component or value hashes,
@@ -5252,6 +5260,9 @@ export interface InfoPagePassRecord {
   /** #344 round 4: why the verification expired (30 days / 10 projects — the limit reached, never a
    *  count); empty = within both limits. */
   expired: string[];
+  /** #279: the page this verified page last led to was another information page, and no person has
+   *  ruled on it yet. A waiting pass is not live (the admission refuses it). */
+  waiting?: string;
 }
 
 /**
@@ -5269,6 +5280,20 @@ export interface InfoPageIncident {
   why: string[];
   /** origin + path of the page (never a query). */
   where: string;
+  /** #279: phase "after" — the page the verified click led to, as read (scrubbed, capped), so a person
+   *  can tell a receipt from a second information page. Its masked screenshot is in the run's bundle. */
+  afterText?: string;
+}
+
+/** #279 (owner's option 1) — a verified information page's click led to ANOTHER information page (no
+ *  form, at most acknowledgement wording, no filing evidence): the verification is KEPT, nothing
+ *  leaves that page unless a person verifies it too, and this is the evidence. */
+export interface InfoPageNextInformation {
+  passId: string;
+  /** origin + path of the verified page (never a query). */
+  where: string;
+  /** The page after, as read (scrubbed, capped). */
+  afterText: string;
 }
 
 /** #344 round 3 — on a PROJECT's card: a pass this project used was withdrawn by an after-click
@@ -5430,6 +5455,17 @@ export interface PaidFeeReceipt {
   invoiceNumber?: string;
   totalPaidUsd: number;
   paidAt: string;
+  /** The fee lines an itemized receipt prints, when every line read and they add up to the
+   *  receipt (feeReceipts.transactionReceiptLines). What a schedule's own lines are checked against. */
+  lines?: PaidFeeReceiptLine[];
+}
+
+/** One printed fee line: the authority's price for it (`feeUsd`) and what this payment put on it
+ *  (`paidUsd`; a partial payment pays less). The fee item's own name only, never an address. */
+export interface PaidFeeReceiptLine {
+  label: string;
+  feeUsd: number;
+  paidUsd: number;
 }
 
 // ── PER-JOB PERMIT PROCESS (operator steer 2026-09-25: "It needs to look up the right stuff per job") ──

@@ -30,6 +30,7 @@ function bindable(params: SqlParams): unknown[] {
 // call sites are untouched.
 export class AppDb {
   private transactionDepth = 0;
+  private writes = 0;
   private readonly stmtCache = new Map<string, Statement>();
 
   constructor(private readonly db: DB) {}
@@ -40,6 +41,12 @@ export class AppDb {
    *  this a snapshot OF. A backup directory that cannot tell is a directory where a throwaway
    *  test database can quietly file itself alongside the operator's real restore points — which
    *  is not hypothetical, it is what happened. */
+  /** Counts every statement sent through `run` or `exec` on this handle. A read memo (readMemo.ts)
+   *  reuses an answer only while this has not moved, so no write can sit between two readers of it. */
+  get writeSeq(): number {
+    return this.writes;
+  }
+
   get sourcePath(): string {
     return this.db.name;
   }
@@ -69,11 +76,13 @@ export class AppDb {
   }
 
   run(sql: string, params: SqlParams = []): void {
+    this.writes += 1;
     this.prepare(sql).run(...bindable(params));
   }
 
   // Multi-statement DDL/seed scripts. Not parameterized.
   exec(sql: string): void {
+    this.writes += 1;
     this.db.exec(sql);
   }
 
@@ -4003,6 +4012,20 @@ const VERSIONED_MIGRATIONS: VersionedMigration[] = [
           proven_by_run TEXT NOT NULL DEFAULT ''
         )
       `);
+    },
+  },
+  {
+    // v92 (what intake read for each field, and who changed it; fieldHistory.ts). extracted_fields becomes
+    // a per-field history: intake's read at creation, then one row per CHANGED field per save, with the
+    // value before (previous_value, NULL = blank or none recorded) and the named person who made it (changed_by,
+    // '' = not a person: source_method says what). Helm renumbers at merge if the queue changes —
+    // nothing here depends on the number.
+    version: 92,
+    name: "field_change_history",
+    up: (db) => {
+      addColumnIfMissing(db, "extracted_fields", "previous_value", "TEXT");
+      addColumnIfMissing(db, "extracted_fields", "changed_by", "TEXT NOT NULL DEFAULT ''");
+      db.exec("CREATE INDEX IF NOT EXISTS idx_extracted_fields_project ON extracted_fields(project_id, created_at)");
     },
   },
 ];

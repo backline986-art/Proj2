@@ -10113,10 +10113,27 @@ function infoPageCandidateCardsHtml(candidates, projectId) {
     const frames = (Array.isArray(ev.frames) ? ev.frames : []).map((f) => `${esc(f[0])} ${esc(f[1])}`);
     // Round 4: this exact page was verified before, and that verification EXPIRED (30 days / 10 projects).
     const expired = c.expiredPass && typeof c.expiredPass === "object" ? c.expiredPass : null;
+    // #279: verified pages whose click led HERE. Each waits (no run uses it) until a person rules on this page.
+    const ledFrom = Array.isArray(c.ledFromVerified) ? c.ledFromVerified : [];
+    const ledFromHtml = ledFrom.map((w) => {
+      const ack = Array.isArray(w.acknowledgement) ? w.acknowledgement.filter(Boolean) : [];
+      // Escape first, then mark each acknowledgement phrase (matched case-insensitively on the escaped text).
+      let text = esc(w.afterText || "");
+      for (const a of ack) {
+        const e = esc(a).replace(/[.*+?^${}()|[\]\\]/g, "\\$&").replace(/\s+/g, "\\s+");
+        text = text.replace(new RegExp(e, "gi"), (m) => `<mark>${m}</mark>`);
+      }
+      return `<div style="font-size:12px;border-left:3px solid var(--warning, #c80);padding-left:8px;margin:6px 0" data-info-led-from="${esc(w.passId)}">
+        <p><strong>This page came after the verified page ${esc(w.where)}</strong>${w.controlLabel ? ` (its "${esc(w.controlLabel)}")` : ""}${w.at ? `, ${esc(String(w.at).slice(0, 10))}` : ""}. That verification is ON HOLD for every run until you rule here: <strong>verify</strong> if this is another information page (the earlier verification resumes), or <strong>Not an information page</strong> if it is a receipt or anything else (the earlier verification is withdrawn as an incident, and every project that used it is warned it may have filed).</p>
+        ${ack.length ? `<p><strong>Acknowledgement wording on this page:</strong> ${ack.map((a) => `<mark>${esc(a)}</mark>`).join(", ")}. A receipt often reads like this; look at the screenshot before verifying.</p>` : ""}
+        <pre style="white-space:pre-wrap;max-height:160px;overflow:auto;font-size:12px">${text}</pre>
+      </div>`;
+    }).join("");
     return `
     <article class="item warning" data-info-candidate="${esc(c.id)}">
       <div class="item-title"><span>Information page to verify</span><span class="badge warning">${expired ? "verification expired — a person re-verifies" : "held by the network backstop"}</span></div>
       ${expired ? `<p style="font-size:12px" data-info-expired="${esc(expired.passId)}"><strong>Verification expired — a person re-verifies.</strong> This exact page was verified on ${esc(String(expired.verifiedAt || "").slice(0, 10))}; ${esc((Array.isArray(expired.why) ? expired.why : []).join("; "))}. Until a person verifies it again, runs stop here exactly as before it was verified.</p>` : ""}
+      ${ledFromHtml}
       <p>The run stopped at <strong>${esc(c.origin)}${esc(c.path)}</strong>${(c.queryKeys || []).length ? ` (query keys: ${esc(c.queryKeys.join(", "))})` : ""}: its <strong>${esc(c.controlLabel)}</strong> was held because the page's own words read as review. Nothing was sent.</p>
       <p class="muted" style="font-size:12px">Held request: ${esc(req.method)} ${esc(req.where)} · ${esc(req.media)} · fields: ${esc((req.fieldNames || []).join(", ") || "none")} · seen ${esc(String(c.seenCount || 1))} time(s), first ${esc(String(c.firstSeenAt || "").slice(0, 10))}, last ${esc(String(c.lastSeenAt || "").slice(0, 10))}</p>
       <p class="muted" style="font-size:12px">Reached by exactly these steps (a pass never applies after other ones): ${esc((Array.isArray(c.steps) ? c.steps : []).join(" → ") || "none recorded")}</p>
@@ -10264,7 +10281,8 @@ function infoPagePassRowsHtml(passes) {
     const expired = Array.isArray(p.expired) ? p.expired : [];
     return `
     <article class="item ${live ? "info" : "warning"}">
-      <div class="item-title"><span>${esc(p.origin)}${esc(p.path)}</span><span class="badge">${live ? "live" : expired.length ? "verification expired — a person re-verifies" : "no verification on record — never used"}</span></div>
+      <div class="item-title"><span>${esc(p.origin)}${esc(p.path)}</span><span class="badge">${live ? "live" : p.waiting ? "on hold — a person rules on the page it led to" : expired.length ? "verification expired — a person re-verifies" : "no verification on record — never used"}</span></div>
+      ${!live && p.waiting ? `<p class="muted" style="font-size:12px" data-info-pass-waiting="${esc(p.id)}">This verified page ${esc(p.waiting)} (the project's Portal runs card for that page). Until then runs stop here exactly as before it was verified.</p>` : ""}
       ${!live && expired.length ? `<p class="muted" style="font-size:12px">${esc(expired.join("; "))}. A run that reaches the page stops there and offers it on the project's card for a person to verify again.</p>` : ""}
       <p class="muted" style="font-size:12px">Control: <strong>${esc(p.controlLabel)}</strong> (${esc(p.controlName)}) · request ${esc(req.method)} ${esc(req.where)} · ${esc(req.media)} · fields: ${esc((req.fieldNames || []).join(", ") || "none")} · identity ${esc(p.identityPrefix)}…</p>
       <p class="muted" style="font-size:12px">Verified ${esc(String(p.verifiedAt || "").slice(0, 10))}</p>

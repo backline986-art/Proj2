@@ -70,6 +70,7 @@ const ARTIFACT_ENV_VARS = [
   "REPLAY_CAPTURE_DIR",
   "PORTAL_SCREENSHOT_DIR",
   "POWERCLERK_DEBUG_DIR",
+  "PORTAL_PAGE_CAPTURE_DIR",
 ] as const;
 
 /** The env block for one child: each artifact var -> its own sub-folder of `root`. */
@@ -79,6 +80,7 @@ const artifactEnvFor = (root: string): Record<(typeof ARTIFACT_ENV_VARS)[number]
   REPLAY_CAPTURE_DIR: path.join(root, "replay-captures"),
   PORTAL_SCREENSHOT_DIR: path.join(root, "screenshots"),
   POWERCLERK_DEBUG_DIR: path.join(root, "portal-debug"),
+  PORTAL_PAGE_CAPTURE_DIR: path.join(root, "page-captures"),
 });
 
 /** Every file path under `dir`, relative to REPO_ROOT (empty when the folder is absent). */
