@@ -359,6 +359,8 @@ export async function fileTrackByEmail(db: AppDb, input: {
   approval: { approver: string } | null;
   wantsFinalSubmit: boolean;
   relaxedSinceApproval: string[];
+  /** #640: blockers released by an override not in force at the approval (the approver saw them as blockers). */
+  overriddenSinceApproval: string[];
   /** Review-audit draft 01: the approval's acknowledgements no longer cover this filing's open items. */
   unacknowledgedSinceApproval?: string[];
   submitterName: string;
@@ -380,6 +382,7 @@ export async function fileTrackByEmail(db: AppDb, input: {
     ? finalSubmitRefusals({
       channel: "email", envAllows: filingEmailEnvAllows(input.env ?? process.env), runApproval, runId,
       recordProblems, priorSendOnTrack: priorFilingEmailSend(db, project.id, track), relaxedSinceApproval: input.relaxedSinceApproval,
+      overriddenSinceApproval: input.overriddenSinceApproval,
       unacknowledgedSinceApproval: input.unacknowledgedSinceApproval,
     })
     : ["no automatic send was asked for — the email is staged for a person to send"];

@@ -10072,7 +10072,7 @@ export async function prepareSubmission(
       await filingEmail.fileTrackByEmail(db, {
         project: detail.project, track, runId,
         approval: claimedApproval ? { approver: claimedApproval.approver } : null,
-        wantsFinalSubmit, relaxedSinceApproval, unacknowledgedSinceApproval,
+        wantsFinalSubmit, relaxedSinceApproval, overriddenSinceApproval, unacknowledgedSinceApproval,
         submitterName: submittingClient.companyName || submittingClient.legalBusinessName || "",
       });
       return getProjectDetail(db, projectId);
