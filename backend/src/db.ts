@@ -4028,6 +4028,56 @@ const VERSIONED_MIGRATIONS: VersionedMigration[] = [
       db.exec("CREATE INDEX IF NOT EXISTS idx_extracted_fields_project ON extracted_fields(project_id, created_at)");
     },
   },
+  {
+    version: 93,
+    name: "reviewer_blocker_overrides",
+    up: (db) => {
+      // A NAMED PERSON PUSHES PAST ONE REVIEWER BLOCKER ON ONE PROJECT, WITH A REASON (#640; owner
+      // request 2026-11-09). Defaults stay strict: this row is the escape hatch, and the ONLY thing
+      // that turns that one blocker into a visible callout (reviewerOverrides.applyReviewerBlockerOverrides,
+      // folded in by repository.reviewerGateReportFor and nowhere else). Written ONLY by
+      // reviewerOverrides.overrideReviewerBlocker. Bound to what the person saw:
+      //   finding_id:   the reviewer finding released (never city.struct.stamped-engineering-missing or
+      //                 its tile twin, which keep their own door, /structural-letter/confirm, #198).
+      //   fingerprint:  a hash of the finding's plan-derived content (reviewerOverrides.findingFingerprint);
+      //                 when the live finding no longer hashes the same, the override does not apply.
+      //   plan_set_sig: the plan set's identity as the vision cache keys it (reviewerVision.planSetIdentity);
+      //                 a replaced plan set voids it.
+      // Validity is computed on read (reads write nothing); nothing stamps a void here. Withdrawal (or a
+      // newer override of the same finding, "superseded by …") stamps withdrawn_*; rows are never
+      // deleted, so the history stays readable (audit_logs carries every override and withdraw too).
+      // A child of the project: it reaches an org through projects.org_id, so no org_id column here
+      // (CLAUDE.md tenancy model). Created here, never lazily: the gate reads it, and reads write nothing.
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS reviewer_blocker_overrides (
+          id TEXT PRIMARY KEY,
+          project_id TEXT NOT NULL,
+          finding_id TEXT NOT NULL,
+          fingerprint TEXT NOT NULL,
+          plan_set_sig TEXT NOT NULL,
+          reason TEXT NOT NULL,
+          overridden_by TEXT NOT NULL,
+          overridden_by_user_id TEXT NOT NULL DEFAULT '',
+          created_at TEXT NOT NULL,
+          withdrawn_by TEXT NOT NULL DEFAULT '',
+          withdrawn_by_user_id TEXT NOT NULL DEFAULT '',
+          withdrawn_at TEXT NOT NULL DEFAULT '',
+          FOREIGN KEY (project_id) REFERENCES projects(id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_reviewer_blocker_overrides_project ON reviewer_blocker_overrides(project_id, finding_id, created_at);
+      `);
+      // WHAT THE APPROVER SAW RELEASED (#226 for overrides). An override's validity is computed on read
+      // against the CURRENT finding and plan set, so one that was VOID when "Approve & auto-submit" was
+      // clicked (the blocker showed and held) can apply again later (a field edited back). Reading the
+      // gate "as of the approval" cannot tell, because the finding is rebuilt from today's values. So the
+      // approval records, when it is minted (repository.createRunApproval), the overrides that were
+      // releasing a blocker at that moment, as JSON [{overrideId, findingId}]; prepareSubmission lets a
+      // run file past an override only when that override id is in its approval's list. '[]' (also every
+      // approval minted before this column) = nothing was released: any override-relaxed blocker stops
+      // that run at review, the safe direction.
+      addColumnIfMissing(db, "portal_run_approvals", "released_overrides_json", "TEXT NOT NULL DEFAULT '[]'");
+    },
+  },
 ];
 
 /** v47 was edited in place while #218 was open (Helm's review at 0116f98a): a DB that ran an earlier

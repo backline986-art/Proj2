@@ -38,7 +38,7 @@ import { FILING_CONTACT_EMAIL_KEY } from "../../shared/src/filingContactEmail";
 import { usStateCode } from "./permitPath";
 import { provablyDifferentUtility, sameUtilityEntity } from "./utilityIdentity";
 import { sameAgencyName } from "./permitProcessLookup";
-import { labelWords } from "../../shared/src/portalSafety";
+import { isFormDataStep, labelWords, type FormDataStep } from "../../shared/src/portalSafety";
 // A cycle (portalDraft imports this module); safe because it is only called inside a function.
 import { disarmDraftCreatingSubmit, stepsEndOnHealedDraftSubmit } from "./portalDraft";
 import { firstEmail, looksLikeEmail } from "../../shared/src/emailAddress";
@@ -225,23 +225,24 @@ const stripPrevMarker = (notes: unknown): string =>
   String(notes ?? "").replace(PREV_SNAPSHOT_MARKER_RE, "").trim().replace(/^\|\s*/, "").replace(/\s*\|$/, "").trim();
 const carriedPrevMarker = (notes: unknown): string => (String(notes ?? "").match(PREV_SNAPSHOT_MARKER_RE) ?? [])[0]?.trim() ?? "";
 
-/** Fills, selects and checks — the steps that actually put data into a form, and the only
- *  depth measure available on both a stored snapshot and a freshly-saved recording.
- *  Deliberately duplicated from autoLearn.substantiveStepCount rather than imported:
- *  autoLearn imports THIS module, and the reverse import would close a cycle. */
+/** THE ONE DEPTH MEASURE of a recording: the DISTINCT controls its steps entered form data into
+ *  (the shared isFormDataStep — the e-signature steps and terms acknowledgments are not depth,
+ *  #131). Read by the save path and the rollback here and, as substantiveStepCount, by the trust
+ *  gate and the benchmark, so "deeper" can never keep a recipe those score as empty. */
 // DISTINCT controls, not counted steps: a learn that bounced ("Submission Error") and re-filled the
 // same page three times recorded the same fills thrice, and that looped junk read as "deeper" (28)
 // than the honest 12-page re-record that followed it (22) — live City of Bend structural,
 // 2026-11-16 — so the save kept the junk and threw the re-record away. A loop is not depth; the
-// same control counts once (by its field, else its label, name or css, else its note).
-function recipeDepth(steps: Array<{ action?: unknown; field?: unknown; note?: unknown; selector?: { label?: unknown; name?: unknown; css?: unknown } | null }> | undefined): number {
+// same control counts once (by its label, name or css, else its field, else its note).
+export function recipeDepth(steps: Array<{ action?: unknown; field?: unknown; note?: unknown; selector?: { label?: unknown; name?: unknown; css?: unknown } | null }> | undefined): number {
   const keys = new Set<string>();
   for (const st of steps ?? []) {
-    const action = String(st?.action ?? "");
-    if (!["fill", "select", "check"].includes(action)) continue;
+    if (!st) continue;
+    const action = String(st.action ?? "");
+    if (!isFormDataStep({ ...(st as unknown as FormDataStep), action })) continue;
     // The CONTROL's own identity first (its label, name or css), the binding after: many boxes
     // can bind one key (a trust-gate fixture binds sixty to homeownerName), and they are sixty.
-    const ident = String(st?.selector?.label || st?.selector?.name || st?.selector?.css || st?.field || st?.note || "").toLowerCase().replace(/\s+/g, " ").trim();
+    const ident = String(st.selector?.label || st.selector?.name || st.selector?.css || st.field || st.note || "").toLowerCase().replace(/\s+/g, " ").trim();
     keys.add(`${action}|${ident || `#${keys.size}`}`);
   }
   return keys.size;

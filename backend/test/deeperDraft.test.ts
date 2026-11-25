@@ -33,6 +33,26 @@ assert.equal(substantiveStepCount([{ action: "select" }, { action: "check" }, { 
 assert.equal(substantiveStepCount(undefined), 0);
 ok("depth counts fills, selects and checks — a goto and nine clicks is navigation");
 
+// #131 (City of Star): a run that typed ONLY the e-signature (bound to authorizedSignerName, note
+// "e-signature: …") and ticked a terms box read as "filled 1 page(s)" and scored as a recipe
+// with fills. Neither puts this project's data into the form: the signer is the client's name
+// on every job and an agree box is not an application. Depth is form data only.
+assert.equal(substantiveStepCount([
+  { action: "goto" },
+  { action: "click", note: "permit type: Solar Permit" },
+  { action: "check", note: "e-signature: enable type signature" },
+  { action: "fill", field: "authorizedSignerName", note: "e-signature: signer name (consent)" },
+  { action: "fill", field: "authorizedSignerName", note: "e-signature: typed signature" },
+  { action: "check", selector: { label: "I agree to the terms and conditions" } },
+  { action: "check", selector: { css: "input[id$='termAccept']" }, note: "accela: accept entry terms" },
+]), 0);
+assert.equal(substantiveStepCount([
+  { action: "fill", note: "e-signature: typed signature" },
+  { action: "fill", selector: { label: "Description of Work" } },
+  { action: "check", selector: { label: "Battery included" } },
+]), 2);
+ok("the e-signature steps and terms acknowledgments are not depth — only form data is");
+
 // --- MUST KEEP ------------------------------------------------------------------------
 assert.equal(
   shouldKeepDeeperDraft(fills(39), fills(18), { protectComplete: false, hasExisting: true }),

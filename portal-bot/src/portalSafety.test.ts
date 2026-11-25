@@ -344,6 +344,21 @@ await check("recordingHasFormData: fills/selects/checks count; a terms tick and 
   assert.equal(recordingHasFormData([{ action: "check", selector: { name: "Solar PV" } }]), true);
   assert.equal(recordingHasFormData([{ action: "fill", selector: { label: "Job" } }]), true);
   assert.equal(recordingHasFormData([{ action: "select", selector: {} }]), true);
+  // ONE acknowledgment vocabulary (#131 round 2): every phrasing the learner's own gate-checkbox
+  // list knows is an acknowledgment here too, so the learner's "entered form data" and the
+  // backend's depth / trust floor cannot disagree on the same recorded step.
+  for (const label of [
+    "I understand the fee schedule", "I confirm that the plans are complete", "Click to Accept Terms and Conditions",
+    "I agree", "I acknowledge the requirements", "By checking this box you acknowledge that the information is accurate",
+    "I certify under penalty of perjury", "I attest to the above", "Agree to the program rules",
+  ]) {
+    assert.equal(recordingHasFormData([{ action: "check", selector: { label } }]), false, `"${label}" is an acknowledgment, not form data`);
+  }
+  // Css words count (Accela's termAccept); the e-signature steps never do; a real toggle still does.
+  assert.equal(recordingHasFormData([{ action: "check", selector: { css: "input[id$='termAccept']" } }]), false);
+  assert.equal(recordingHasFormData([{ action: "fill", selector: { css: "#signer" }, note: "e-signature: typed signature" }]), false);
+  assert.equal(recordingHasFormData([{ action: "check", selector: { label: "I understand electrical panels — upgrade required" } }]), false, "'I understand' leads the label: an acknowledgment");
+  assert.equal(recordingHasFormData([{ action: "check", selector: { label: "Battery included" } }]), true);
 });
 
 // ---------------------------------------------------------------------------------------------

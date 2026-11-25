@@ -29,6 +29,7 @@
 //   4. jobQueue.recoverStalePortalRecordings: replace mergeRecipeNotes(...) with the bare string.
 //   5. portalRecipes.savePortalRecipeSteps: force `const shallower = false`.
 //   6. portalRecipes.demoteOnReplayFailure: demote regardless of replayFailureBlamesRecipe.
+//   7. portalRecipes.recipeDepth: count every fill/select/check instead of isFormDataStep.
 //
 // Browser-free, scratch DB. Run: tsx backend/test/trustGate.test.ts
 // ---------------------------------------------------------------------------
@@ -284,6 +285,42 @@ run("a DEEPER run still replaces a shallower draft — progress is not blocked",
   const after = savePortalRecipeSteps(db, shallow.id, [...fills(30, "deep"), reviewEnd], { status: "recording" });
   assert.equal(after.steps.length, 31, "a run that got further must be allowed to win");
   assert.equal(after.steps[0].selector?.name, "deep0");
+});
+
+// #131 (City of Star): a run that typed ONLY the e-signature and ticked the agree box. The trust
+// gate scores it as 0 fills (substantiveStepCount); the depth rule in the SAVE and ROLLBACK paths
+// must read the same predicate, or a signer-only snapshot is "deeper" than two real fills and
+// buries them — while the gate scores what it kept as nothing.
+const signerOnly: RecipeStep[] = [
+  { action: "goto", value: "https://gate.example/apply", note: "entry url" } as RecipeStep,
+  { action: "click", phase: "open", selector: { text: "Solar Permit" }, note: "permit type: Solar Permit" } as RecipeStep,
+  { action: "check", selector: { css: "#typeSig" }, note: "e-signature: enable type signature" } as RecipeStep,
+  { action: "fill", selector: { css: "#signer" }, field: "authorizedSignerName", note: "e-signature: typed signature" } as RecipeStep,
+  { action: "check", selector: { label: "I agree to the terms and conditions" } } as RecipeStep,
+];
+
+run("the SAVE path's depth is form data: a signer-only snapshot does not bury two real fills", () => {
+  const scope = freshScope();
+  const row = startPortalRecording(db, { ...scope, portalUrl: "https://gate.example/apply" });
+  savePortalRecipeSteps(db, row.id, signerOnly, { status: "recording", notes: "Auto-learn did not stage cleanly: entered no form data." });
+  startPortalRecording(db, scope);                                   // snapshot = the signer-only walk
+  const after = savePortalRecipeSteps(db, row.id, fills(2, "real"), { status: "recording" });
+  assert.equal(after.steps.length, 2, "the two real fills must land — three steps of signature and consent are not depth");
+  assert.equal(after.steps[0].selector?.name, "real0");
+  assert.doesNotMatch(after.notes, /kept the deeper recording/i, "nothing deeper was kept");
+});
+
+run("the ROLLBACK path's depth is form data: the sweep keeps two real fills over a signer-only snapshot", () => {
+  const scope = freshScope();
+  const row = startPortalRecording(db, { ...scope, portalUrl: "https://gate.example/apply" });
+  savePortalRecipeSteps(db, row.id, signerOnly, { status: "recording", notes: "Auto-learn did not stage cleanly: entered no form data." });
+  startPortalRecording(db, scope);                                   // snapshot = the signer-only walk, unproven
+  savePortalRecipeSteps(db, row.id, fills(2, "live"), { status: "recording" });
+  recoverStalePortalRecordings(db);
+  const swept = getPortalRecipe(db, row.id);
+  assert.equal(swept.status, "needs_rerecord");
+  assert.equal(swept.steps.length, 2, "the two real fills are the deeper record");
+  assert.equal(swept.steps[0].selector?.name, "live0");
 });
 
 run("a verified re-record may legitimately SHORTEN a recipe", () => {

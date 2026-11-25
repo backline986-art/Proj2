@@ -66,7 +66,7 @@ export interface ContinueDraft {
    *  Submit; not signed, or unreadable, it stops on the record page and names why. */
   awaitingSignature?: boolean;
 }
-import { PORTAL_SAFETY_GLOBAL, PORTAL_SAFETY_IN_PAGE_SOURCE, isAutocompleteWidgetClass, isFinalSubmitControl, isLookupButtonLabel, isSubmitIntent as sharedIsSubmitIntent, isInterstitialForwardLabel as sharedIsInterstitialForwardLabel, isSignatureNameLabel, isSignatureRequestControl, isTypeSignatureToggleLabel, looksLikeReviewUrl, redactSecretValues, reviewSignals as sharedReviewSignals, splitSignerName } from "../../../shared/src/portalSafety";
+import { PORTAL_SAFETY_GLOBAL, PORTAL_SAFETY_IN_PAGE_SOURCE, isAutocompleteWidgetClass, isESignatureStep, isFinalSubmitControl, isFormDataStep, isLookupButtonLabel, isSubmitIntent as sharedIsSubmitIntent, isInterstitialForwardLabel as sharedIsInterstitialForwardLabel, isSignatureNameLabel, isSignatureRequestControl, isTypeSignatureToggleLabel, looksLikeReviewUrl, redactSecretValues, reviewSignals as sharedReviewSignals, splitSignerName } from "../../../shared/src/portalSafety";
 import { BATTERY_DECLARATION_QUESTION, batteryAttestationAnswer, batteryControlKind, batteryDeclarationAnswer } from "../../../shared/src/batteryControls";
 import { installFilingBackstop, withAutomationInput, withBackstopWindow, withOwnWriteWindow, describeBackstopAbort, backstopSentLine, backstopFor, isStoppingAbort, drainOwnWrites, unsavedAtReviewWarning, portalOwnCallsBlockedAtReview, reviewBlockedCallsLine } from "../filingBackstop";
 // Types only (erased): the information-page door is reached duck-typed on the installed backstop.
@@ -3300,6 +3300,9 @@ export class AutoLearnAdapter extends BasePortalAdapter {
    *  forward progress. Keyed by path so a label that legitimately recurs on a LATER page
    *  ("Continue" on a multi-step wizard) is still allowed. */
   private readonly navClicksByPath = new Set<string>();
+  /** Permit-type labels the chooser clicked this run (normalized) — the page a type opens can
+   *  carry the same label (a breadcrumb), and clicking it again bounces the walk back (#131). */
+  private readonly typeLabelsChosen = new Set<string>();
   /** #341: has this run been on a page with a fillable control yet? An information interstitial
    *  comes BEFORE the application's form pages; a no-input page after them is the review screen,
    *  whether or not this run recorded a fill (a prefilled draft, a tiles-and-uploads flow). */
@@ -5756,7 +5759,14 @@ export class AutoLearnAdapter extends BasePortalAdapter {
    * authorizedSignerName with no literal. Returns the extracted-field indices of the controls
    * so the planner's fills on them are dropped.
    */
-  private async completeTypedSignature(signer: string, steps: RecipeStep[], fields: ExtractedField[]): Promise<{ ok: boolean; why: string; fieldIdx: Set<number>; noSigner?: boolean }> {
+  private async completeTypedSignature(
+    signer: string,
+    steps: RecipeStep[],
+    fields: ExtractedField[],
+    /** `allowUninventoried`: type by the live marks even when no extracted field carries one — the
+     *  caller has re-read the page once already (a box in a shadow root the inventory never holds). */
+    opts: { allowUninventoried?: boolean } = {},
+  ): Promise<{ ok: boolean; why: string; fieldIdx: Set<number>; noSigner?: boolean; stale?: boolean }> {
     const page = this.page;
     const fieldIdx = new Set<number>();
     if (!page) return { ok: false, why: "no page", fieldIdx };
@@ -5779,6 +5789,13 @@ export class AutoLearnAdapter extends BasePortalAdapter {
     this.signaturePassActive = true;
     try {
       let sig = await this.signatureStepHere();
+      // THE DETECTOR AND THE INVENTORY MUST AGREE BEFORE A FILL (#131). Boxes on the live page and
+      // not one of them among the fields this iteration read means the page changed since it was
+      // read (City of Star: the type tile had navigated; the signer was typed into a form the
+      // planner was never shown). Said before anything is switched or typed; the loop re-reads.
+      if (!opts.allowUninventoried && fieldIdx.size === 0 && (sig?.controls.length ?? 0) > 0) {
+        return { ok: false, stale: true, why: "the signature controls on the page are not in this page's inventory — the page changed since it was read", fieldIdx };
+      }
       const toggle = sig?.controls.find((c) => c.role === "toggle");
       if (toggle) {
         const loc = page.locator("[data-al-sig=toggle]").first();
@@ -7914,6 +7931,33 @@ export class AutoLearnAdapter extends BasePortalAdapter {
     // itself cannot spend the budget re-planning; past the cap the walk behaves as before.
     let pageMovedReplans = 0;
     const PAGE_MOVED_REPLAN_MAX = 4;
+    // THE ONE "HAS THIS RUN ENTERED FORM DATA?" QUESTION (#341, #131). Asked by the entry-
+    // disclaimer guard, the interstitial guard, the terminal page's empty guard and the result's
+    // filledSomething — one closure, read at call time, so none of them can drift apart. The
+    // shared predicate alone (isFormDataStep: no e-signature steps, no terms acknowledgments —
+    // the learner's gate-checkbox phrasings included), the same one the backend's depth and
+    // trust floor read, so a step counts the same on both sides.
+    const isFormData = isFormDataStep;
+    const formDataEnteredThisRun = (): boolean => steps.some(isFormData);
+    // Pages on which form data was recorded, tallied as each page closes — the honest numerator
+    // of "filled N of M page(s)" (#131: pageCount counts iterations, and a run that typed only
+    // the signer on a page it never read said "filled 1 page(s)").
+    let filledPages = 0;
+    let tallyFrom = 0;
+    const closePageTally = (): void => {
+      if (steps.slice(tallyFrom).some(isFormData)) filledPages++;
+      tallyFrom = steps.length;
+    };
+    // The e-signature pass found boxes the inventory does not hold: ONE re-read PER PAGE (#131
+    // risk 3) before the pass may type by the live marks alone on that page. Per run, a stale read
+    // on the first signature page would have waived the detector-and-inventory agreement on every
+    // later one. Keyed by host + path, not the page identity's `where`: the heading can differ
+    // between the stale read (the live page, mid-reveal) and the next scrape, and a key that
+    // missed would refuse the pass again and ride the walk into the recovery budget.
+    const signatureStaleReread = new Set<string>();
+    // host + pathname of a url — no query string (ids), no fragment. The page trace, the page
+    // event and the stale-reread key all speak this one spelling.
+    const hostPathOf = (u: string): string => { try { const p = new URL(u); return p.host + p.pathname; } catch { return (u || "").slice(0, 60); } };
     // The page the last iteration read (pageIdentityOf), how many steps were recorded by then, what
     // its error summary said then (null: not read) and whether that read was itself an advance
     // coming back refused: what "the advance came back to its own form" is asked against.
@@ -8055,6 +8099,7 @@ export class AutoLearnAdapter extends BasePortalAdapter {
         this.debug?.event({ type: "budget_exhausted", page: pageIdx + 1, pagesWalked: pageCount });
         break;
       }
+      closePageTally();
       pageCount++;
       // A page begun is progress (#556 stall watchdog); and where the walk is, should it stall.
       this.walkSteps = steps;
@@ -8207,10 +8252,15 @@ export class AutoLearnAdapter extends BasePortalAdapter {
         }
         lastScrape = scrapedIdentity ? { ...scrapedIdentity, stepsAt: steps.length, said: null, cameBack } : null;
       }
-      const pageMovedUnderPlan = async (phase: "before the planner was asked" | "while the planner worked"): Promise<boolean> => {
+      // `whereOnly`: compare the page's path + heading alone. After the bot's own typed signature
+      // the controls can legitimately differ (EnerGov unlocks its typed box), so that check asks
+      // only whether the walk is still on the page it read — never disarmed, as it was by
+      // signatureDone (#131: the pass that proved the page had moved switched off the detector).
+      const pageMovedUnderPlan = async (phase: "before the page was answered" | "before the planner was asked" | "while the planner worked", opts: { whereOnly?: boolean } = {}): Promise<boolean> => {
         if (!scrapedIdentity || pageMovedReplans >= PAGE_MOVED_REPLAN_MAX) return false;
         const now = await pageIdentityOf(this.page);
-        if (!now || (now.where === scrapedIdentity.where && now.controls === scrapedIdentity.controls)) return false;
+        if (!now) return false;
+        if (opts.whereOnly ? now.where === scrapedIdentity.where : (now.where === scrapedIdentity.where && now.controls === scrapedIdentity.controls)) return false;
         pageMovedReplans++;
         const headingOf = (w: string): string => w.slice(w.indexOf("|") + 1) || "(no heading)";
         const before = new Set(scrapedIdentity.controls.split(",").filter(Boolean));
@@ -8306,6 +8356,10 @@ export class AutoLearnAdapter extends BasePortalAdapter {
       // On either, instead of bailing we re-plan THIS iteration with a loop-aware recovery
       // directive (capped at MAX_RECOVERY) so the model can choose a different action and heal.
       let recoveryHint = pendingHint;
+      // WHERE THE HINT CAME FROM, for the page event: a hint carried from the previous page's
+      // refusal, the stuck/cycle detector, or the signature pass. A bare "recovery: true" read as
+      // the loop recovery firing when it was the signature pass (#131).
+      const recoverySources: string[] = pendingHint ? ["carried"] : [];
       pendingHint = "";
       // #139: the planner was told THIS iteration which validation errors blocked the last advance.
       let validationHinted = false;
@@ -8325,6 +8379,7 @@ export class AutoLearnAdapter extends BasePortalAdapter {
           break;
         }
         recoveryAttempts++;
+        recoverySources.push(cycling ? "cycle" : "stuck");
         this.debug?.event({ type: "recovery_attempt", n: recoveryAttempts, max: MAX_RECOVERY, mode: cycling ? "cycle" : "stuck", page: pageCount });
         const problem = cycling
           ? "You are CYCLING: this page was already visited earlier in this run, so a previous action looped you back to the start."
@@ -8736,7 +8791,14 @@ export class AutoLearnAdapter extends BasePortalAdapter {
         // now, and the deep search's menu clicks and reload of the page it started on are page
         // changes no step records (PGE: the reload resumed the wizard at Preparer, under a plan made
         // for Welcome). A second entry on the page it opened is still found by the one look.
-        const entered = await enterApplicationFlow(this.page, { skipLabels: this.entryLabelsClicked, shallow: this.entryLabelsClicked.size > 0 }).catch(() => null);
+        // Inside once a recorded WAY IN landed — the entry control, the permit type, the single
+        // tile, a programme (#131): after the type tile the walk stood on the form, and
+        // entryLabelsClicked alone would have sent the deep search's menu clicks and reload at it.
+        // By the step's note, not its phase: the planner's "navigate to application" click is also
+        // open-phase, and a dashboard link it chose has not necessarily entered anything.
+        const insideApplication = this.entryLabelsClicked.size > 0
+          || steps.some((st) => st.action === "click" && /^(application entry|permit type|choice tile|application program):/.test(String(st.note ?? "")));
+        const entered = await enterApplicationFlow(this.page, { skipLabels: this.entryLabelsClicked, shallow: insideApplication }).catch(() => null);
         if (entered?.alreadyClicked) {
           this.debug?.event({ type: "application_entry_repeat_ignored", label: (entered.label || "").slice(0, 60) });
         } else if (entered?.ok && entered.label) {
@@ -8784,18 +8846,30 @@ export class AutoLearnAdapter extends BasePortalAdapter {
         // how permiteyes' nine-fill recipe failed at step 2 of 12.
         // Set when the page's ONE choice tile was entered below; the loop then re-scrapes.
         let singleTileEntered = false;
+        // Set when the permit type was clicked: the loop then re-scrapes (#131). A RECORDED
+        // OPEN-PHASE STEP ALWAYS PRECEDES A FRESH INVENTORY. City of Star (iWorQ): the "Solar
+        // Permit" tile NAVIGATED to the permit form, and this iteration fell through with the
+        // home page's inventory — the planner was handed 21 links as a dashboard, the live-DOM
+        // signature pass typed the signer on a page never read, and the run said "filled 1 page(s)".
+        let typeChosen = false;
         if (!applicationStarted && this.page) {
           const track = /elec/i.test(this.permitDiscipline) ? "electrical"
             : /struct|build/i.test(this.permitDiscipline) ? "structural"
             : "solar";
           const picked = await chooseApplicationType(this.page, track, { ownNames: this.contactIdentity.ownNames }).catch(() => null);
-          if (picked && picked.ok) {
+          if (picked && picked.ok && this.typeLabelsChosen.has(normalizeEntryLabel(picked.choice.label))) {
+            // The type was chosen this run already; the page it opened carries the same label (a
+            // breadcrumb, a sidebar). Clicking it again would bounce the walk back.
+            this.debug?.event({ type: "permit_type_repeat_ignored", label: picked.choice.label.slice(0, 60) });
+          } else if (picked && picked.ok) {
             const beforeTypeUrl = typeof this.page.url === "function" ? String(this.page.url() ?? "") : "";
             const beforeTypeFp = await this.pageFingerprint();
             const clicked = await picked.choice.locator.click({ timeout: 8000 }).then(() => true).catch(() => false);
             if (clicked) {
               await this.waitAfterClick(beforeTypeUrl, beforeTypeFp, this.tabCount());
               const label = picked.choice.label;
+              this.typeLabelsChosen.add(normalizeEntryLabel(label));
+              typeChosen = true;
               steps.push({
                 action: "click",
                 phase: "open",
@@ -8902,8 +8976,16 @@ export class AutoLearnAdapter extends BasePortalAdapter {
         const programJustChosen = this.entryLabelsClicked.size > 0 && !this.programChosen
           ? await this.chooseApplicationProgram(steps)
           : false;
-        if (entered?.ok || programJustChosen || singleTileEntered) continue;
+        if (entered?.ok || programJustChosen || singleTileEntered || typeChosen) continue;
       }
+
+      // THE PAGE MUST STILL BE THE ONE READ — BEFORE ANY PASS READS THE LIVE PAGE (#410, #131).
+      // The entry pass above can leave another page on screen without asking the loop to re-read
+      // (PGE: the deep search's reload resumed the wizard at the next form). The dropdown read
+      // and the signature pass below work on the LIVE page while `fields` is the one scraped; on
+      // a page that moved, the signature pass typed the signer where the planner was never shown
+      // a box. Re-read first. Nothing of ours has typed yet, so the full identity is compared.
+      if (await pageMovedUnderPlan("before the page was answered")) continue;
 
       // b9) AN OPTION-LESS DROPDOWN IS UNANSWERABLE. Ask it what it offers, first.
       //
@@ -8971,7 +9053,17 @@ export class AutoLearnAdapter extends BasePortalAdapter {
               stopReason: "signature_no_signer",
             };
           }
-          const done = await this.completeTypedSignature(signer, steps, fields);
+          const done = await this.completeTypedSignature(signer, steps, fields, { allowUninventoried: signatureStaleReread.has(hostPathOf(url)) });
+          if (!done.ok && done.stale) {
+            // THE DETECTOR AND THE INVENTORY DISAGREE: boxes on the live page, none among the
+            // fields this iteration read. The page changed since it was read (#131) — re-read it,
+            // once per page. The LIVE page is the one that was not read, so its host + path is
+            // the key: the next iteration scrapes it, and a box its inventory cannot hold (a
+            // shadow root) is typed on that second look.
+            signatureStaleReread.add(hostPathOf(typeof this.page.url === "function" ? String(this.page.url() ?? "") : url));
+            this.debug?.event({ type: "signature_inventory_stale", page: pageCount, why: done.why });
+            continue;
+          }
           if (!done.ok && done.noSigner) {
             park(`signature_no_signer: ${done.why} — nothing was typed`);
             return {
@@ -8988,6 +9080,7 @@ export class AutoLearnAdapter extends BasePortalAdapter {
           }
           signatureFieldIdx = done.fieldIdx;
           signatureDone = true;
+          recoverySources.push("signature");
           recoveryHint = `${recoveryHint ? `${recoveryHint} ` : ""}The e-signature on this page is already complete (signed by the bot from the client record). Do NOT fill the signature name or the type-signature option. Advance with this page's Next.`;
         }
       }
@@ -8998,10 +9091,6 @@ export class AutoLearnAdapter extends BasePortalAdapter {
       //    THE PLANNER NEVER SEES A SIGNATURE BOX (one signer rule). The signature controls are
       //    taken out of the request; the planner's indices are into that shorter list and are
       //    mapped back here, so every consumer below still indexes `fields`.
-      // THE PAGE MUST STILL BE THE ONE READ (#410). A pass above (the entry pass, the type
-      // chooser) can leave another page on screen without asking the loop to re-read; planning
-      // `fields` then plans a page that is gone. Re-read instead — before paying for the call.
-      // Not after the typed signature: the bot's own signing changes the page it signs.
       // #166: the person-verified record type is ticked here, before the planner sees the page.
       {
         const typeHint = await this.verifiedRecordTypePass(fields, steps, alreadyFilledLabels, pageCount).catch(() => "");
@@ -9017,7 +9106,11 @@ export class AutoLearnAdapter extends BasePortalAdapter {
           continue;
         }
       }
-      if (!signatureDone && await pageMovedUnderPlan("before the planner was asked")) continue;
+      // THE PAGE MUST STILL BE THE ONE READ (#410). A pass above can leave another page on screen
+      // without asking the loop to re-read; planning `fields` then plans a page that is gone.
+      // Re-read instead — before paying for the call. After the typed signature the bot's own
+      // signing changes the page's controls, so only its path + heading are asked then (#131).
+      if (await pageMovedUnderPlan("before the planner was asked", { whereOnly: signatureDone })) continue;
       let plan: LearnPlanResponse;
       const planShot = await this.capturePlanScreenshot();
       const visibleIdx = fields.map((_f, i) => i).filter((i) => !signatureFieldIdx.has(i));
@@ -9059,7 +9152,7 @@ export class AutoLearnAdapter extends BasePortalAdapter {
       }
       // ...AND STILL THE ONE READ WHEN THE PLAN COMES BACK (#410). Nothing has been applied yet:
       // a plan whose page moved while it was being made is dropped and the new page is re-read.
-      if (!signatureDone && await pageMovedUnderPlan("while the planner worked")) continue;
+      if (await pageMovedUnderPlan("while the planner worked", { whereOnly: signatureDone })) continue;
 
       // c2) STRUCTURAL REVIEW GUARD — the Accela "Continue Application" trap.
       // On a review page its primary button (e.g. "Continue Application") SUBMITS, so we
@@ -9074,9 +9167,9 @@ export class AutoLearnAdapter extends BasePortalAdapter {
       // checkbox) ALSO describes Accela's T&C page at the very START of the wizard
       // (CapApplyDisclaimer: terms text + agree box + "Continue Application »") — the live
       // Salem run stopped there at page 2 and promoted an EMPTY recipe to trusted. A true
-      // review/submit screen cannot precede the first recorded fill: when nothing has been
-      // filled yet and the page reads as terms/disclaimer, it is a pass-through page
-      // (accept + continue), never review.
+      // review/submit screen cannot precede the application's first entry: when the walk has
+      // entered nothing yet (beforeFirstEntry, below) and the page reads as terms/disclaimer,
+      // it is a pass-through page (accept + continue), never review.
       const disclaimerish =
         /disclaimer|(^|\/)terms/i.test(url) ||
         /terms and conditions/i.test((bodyText || "").slice(0, 4000));
@@ -9087,18 +9180,21 @@ export class AutoLearnAdapter extends BasePortalAdapter {
       // flipping the T&C page into a forced review stop with its Continue recorded as
       // the final submit. A real review screen with a terms gate at the END of the
       // wizard still re-arms the guard through its earlier genuine fills.
-      const isTermsAcknowledgment = (s: RecipeStep): boolean =>
-        s.action === "check" && (
-          ACCEPT_TERMS.test(String(s.selector?.name ?? "")) ||
-          ACCEPT_TERMS.test(String(s.selector?.label ?? "")) ||
-          /termaccept/i.test(String(s.selector?.css ?? "")) ||
-          /accept entry terms/i.test(String(s.note ?? "")));
-      // THE ONE "HAS THIS RUN ENTERED FORM DATA?" QUESTION (#341). Asked here by the entry-
-      // disclaimer guard and the interstitial guard, and at the end of the page by the terminal
-      // page's empty guard — one closure, read at call time, so the three cannot drift apart.
-      const formDataEnteredThisRun = (): boolean => steps.some(
-        (s) => (s.action === "fill" || s.action === "check" || s.action === "select") && !isTermsAcknowledgment(s));
+      // (formDataEnteredThisRun — the one form-data question — is declared with the loop state.)
       const anyFormMutationRecorded = formDataEnteredThisRun();
+      // THE ONE "IS THE WALK STILL BEFORE THE APPLICATION'S FIRST ENTRY?" QUESTION (#131 round 2,
+      // rule 1). A DIFFERENT question from "has this run entered form data?": the bot's own typed
+      // e-signature is not THIS project's data (the honesty answer), but it IS an entry into the
+      // application — the walk is past the entry disclaimer once it has signed. When the honesty
+      // answer alone armed these doors, a signer-only run (a prefilled or continued flow) reached a
+      // no-field review page whose prose named "Terms and Conditions", read it as the ENTRY
+      // disclaimer, and c2a' converted the planner's final submit into an advance and clicked it.
+      // Run-scoped by the recorded e-signature steps (signatureDone is this iteration's alone),
+      // and never before an entry this run did not make: an opened draft (continuedDraft) or a
+      // record's signature (signatureCheck) carries entries, so the walk is past the start there
+      // too. Asked by the existing-notice guard, the entry-disclaimer door and the interstitial.
+      const beforeFirstEntry = !anyFormMutationRecorded && !steps.some(isESignatureStep)
+        && !this.continuedDraft && !this.signatureCheck && !signatureDone;
       // c2-) A PAGE THAT NAMES AN APPLICATION ALREADY IN PROGRESS IS NEVER RESUMED ON A PLANNER'S SAY-SO
       //      (#351). After the permit-type tile a portal can show a no-field notice — "You have an
       //      application in progress. Draft 2026-0141, 77 Other Ave." — whose Continue opens that
@@ -9111,7 +9207,7 @@ export class AutoLearnAdapter extends BasePortalAdapter {
       //      Resume, the draft's link, the interstitial pass's forward, no plan at all — stops the
       //      walk and names the notice; offered a start-new control the planner did not take, it is
       //      asked once more first. Before c2i (the interstitial's forward) and every other door.
-      if (!hasFillable && !anyFormMutationRecorded && !this.continuedDraft && !this.signatureCheck && !signatureDone) {
+      if (!hasFillable && beforeFirstEntry) {
         // Read from the page's visible LINES (a menu line never runs into the notice), secrets this run
         // knows scrubbed; the line the person reads is then redacted like any status text.
         const read = readExistingApplicationNotice(this.scrubSecrets(await visibleBodyText(this.page))) ?? readExistingApplicationNotice(bodyText);
@@ -9146,7 +9242,7 @@ export class AutoLearnAdapter extends BasePortalAdapter {
           }
         }
       }
-      const entryDisclaimer = disclaimerish && !anyFormMutationRecorded;
+      const entryDisclaimer = disclaimerish && beforeFirstEntry;
       // c2i) AN INFORMATION INTERSTITIAL IS NOT THE REVIEW SCREEN (#341). Portland DevHub, live
       //      2026-10-14: the page behind the "Solar Permit Request" tile is prose ("This is a
       //      permit request only. A Permit Tech will review your submission … click Continue.
@@ -9191,8 +9287,7 @@ export class AutoLearnAdapter extends BasePortalAdapter {
           nextInfoHere = !!door && typeof door.infoPageProofState === "function" && door.infoPageProofState() === "next_info";
         } catch { nextInfoHere = false; }
       }
-      const interstitial = (!hasFillable && !reviewShaped && !anyFormMutationRecorded && !entryDisclaimer
-        && !this.continuedDraft && !this.signatureCheck && !signatureDone
+      const interstitial = (!hasFillable && !reviewShaped && beforeFirstEntry && !entryDisclaimer
         && !this.formPageSeen
         && steps.some((s) => /^(application entry|permit type):/.test(String(s.note ?? "")))
         && (!isDashboard || plannerSaidReview)) || nextInfoHere;
@@ -9417,8 +9512,12 @@ export class AutoLearnAdapter extends BasePortalAdapter {
       //      page. host+pathname only (NO query string — avoids leaking any ids), title
       //      capped, no field values. This is the trace surfaced when a run finds nothing.
       {
-        let hostPath = "";
-        try { const u = new URL(url); hostPath = u.host + u.pathname; } catch { hostPath = (url || "").slice(0, 60); }
+        const hostPath = hostPathOf(url);
+        // READ AT EMISSION, NOT FROM THE SCRAPE (#131): the event once described a page the
+        // browser had left. When the live page differs from the one inventoried, the trace
+        // carries both and the event says so — the plan above is still the scraped page's.
+        const liveHostPath = hostPathOf(typeof this.page?.url === "function" ? String(this.page.url() ?? "") : url);
+        const moved = liveHostPath !== hostPath ? liveHostPath : "";
         const fillCount = fields.filter((f) => f.fieldType !== "button").length;
         const btnCount = fields.filter((f) => f.fieldType === "button").length;
         const linkCount = fields.filter((f) => f.fieldType === "button" && f.selector?.role === "link").length;
@@ -9426,13 +9525,18 @@ export class AutoLearnAdapter extends BasePortalAdapter {
         // Titles go through redactStatusText — portal record pages often title themselves
         // with the record number/applicant address, and the trace is logged + persisted.
         pageTrace.push(
-          `p${pageCount} "${(redactStatusText(pageTitle) || "").slice(0, 40)}" [${hostPath}] ${cls} ` +
+          `p${pageCount} "${(redactStatusText(pageTitle) || "").slice(0, 40)}" [${hostPath}]${moved ? ` now:[${moved}]` : ""} ${cls} ` +
           `fields=${fields.length}(fill=${fillCount},btn=${btnCount},link=${linkCount}) ` +
           `plan:nav=${plan.navigateSelectorIndex ?? "-"} adv=${plan.advanceSelectorIndex ?? "-"} ` +
           `fills=${(plan.fills ?? []).length} review=${plan.atReview}`,
         );
-        // Same breadcrumb into the run bundle's timeline (redacted, host+path only).
-        this.debug?.event({ type: "page", trace: pageTrace[pageTrace.length - 1], recovery: recoveryHint ? true : undefined });
+        // Same breadcrumb into the run bundle's timeline (redacted, host+path only). `recovery`
+        // names the hint's source(s) — "signature" is not the loop recovery firing.
+        this.debug?.event({
+          type: "page", trace: pageTrace[pageTrace.length - 1],
+          recovery: recoveryHint ? recoverySources.join("+") || "hint" : undefined,
+          ...(moved ? { movedTo: moved } : {}),
+        });
 
         // WHAT DID THE PORTAL SAY? Read it here, on every page, before deciding anything —
         // this is the only place that sees a page which advanced INTO an error.
@@ -11319,8 +11423,11 @@ export class AutoLearnAdapter extends BasePortalAdapter {
       // non-fatal — keep the empty default.
     }
 
-    // 6) ok:true only when it reached a review screen, or filled >=1 page cleanly.
-    const filledSomething = steps.some((s) => s.action === "fill" || s.action === "select" || s.action === "check");
+    // 6) ok:true only when it reached a review screen, or entered form data on >=1 page. THE SAME
+    //    QUESTION the walk asked itself (formDataEnteredThisRun): the e-signature steps and terms
+    //    acknowledgments are not form data (#131 — a run that typed only the signer said ok).
+    closePageTally();
+    const filledSomething = formDataEnteredThisRun();
     const ok = reachedReview || filledSomething;
 
     // Compact, redacted page trace for diagnostics. Always logged; appended to the result
@@ -11405,10 +11512,14 @@ export class AutoLearnAdapter extends BasePortalAdapter {
     const message = reachedReview
       ? `${HUMAN_REVIEW_MESSAGE} Auto-learn reached the review screen after ${pageCount} page(s). Verify every field/value below before a human submits.${validationWarning}${docsWarning}${verifyWarning}${exitWarning}${secretWarning}${filerWarning}${noticeWarning}${choiceWarning}`
       : filledSomething
-        ? `Auto-learn filled ${pageCount} page(s) and recorded the steps, but did not reach a review screen. Page trace: ${traceLine}${validationWarning}${docsWarning}${verifyWarning}${exitWarning}${secretWarning}${filerWarning}${noticeWarning}${choiceWarning}`
+        ? `Auto-learn filled ${filledPages} of ${pageCount} page(s) and recorded the steps, but did not reach a review screen. Page trace: ${traceLine}${validationWarning}${docsWarning}${verifyWarning}${exitWarning}${secretWarning}${filerWarning}${noticeWarning}${choiceWarning}`
         : tileStop
           ? `Auto-learn stopped at a page of ${tileStop.tiles.length} choice tile(s): ${tileStop.why}. The page offered: ${tileStop.tiles.map((t) => `"${t}"`).join(" | ")}. If one of these is the way in, a person clicks it; record that step manually. (${pageCount} page(s), no steps recorded.) Page trace: ${traceLine}${validationWarning}${docsWarning}${verifyWarning}${secretWarning}${noticeWarning}${choiceWarning}`
-          : `Auto-learn found nothing fillable on ${pageCount} page(s); no steps recorded.${nothingFillableHint} Page trace: ${traceLine}${validationWarning}${docsWarning}${verifyWarning}${secretWarning}${noticeWarning}${choiceWarning}`;
+          : steps.some((s) => s.action !== "goto")
+            // Steps were recorded, none of them form data (navigation, acknowledgments, the
+            // e-signature): never "filled", never "no steps recorded" (#131).
+            ? `Auto-learn walked ${pageCount} page(s) and recorded ${steps.length} step(s), none of which entered form data (${steps.some(isESignatureStep) ? "the e-signature, " : ""}navigation and acknowledgments only); it did not reach a review screen.${nothingFillableHint} Page trace: ${traceLine}${validationWarning}${docsWarning}${verifyWarning}${exitWarning}${secretWarning}${filerWarning}${noticeWarning}${choiceWarning}`
+            : `Auto-learn found nothing fillable on ${pageCount} page(s); no steps recorded.${nothingFillableHint} Page trace: ${traceLine}${validationWarning}${docsWarning}${verifyWarning}${secretWarning}${noticeWarning}${choiceWarning}`;
 
     // Capture the review page screenshot when we've reached the review screen. fullPage:true so
     // the vision verifier sees the WHOLE review — a viewport-only shot would let an off-screen

@@ -360,7 +360,9 @@ await gapCase("a record page whose only permit links leave its portal (said so, 
   await new Promise<void>((r) => home.listen(0, "127.0.0.1", () => r()));
   const HOME = `http://127.0.0.1:${(home.address() as AddressInfo).port}`;
   process.env.DOCUMENT_FETCH_ALLOW_ORIGINS = `${HOME},${OTHER}`;
-  const { fetchPublicDocument } = await import("../src/documentFetch");
+  const { fetchPublicDocument, _setDocumentFetchPoliteness } = await import("../src/documentFetch");
+  // Five requests to one loopback stub; the 10 s per-host gap (#130) is not what this measures.
+  _setDocumentFetchPoliteness({ minGapMs: 0 });
   const onlyHome = (u: string) => (u.startsWith(`${HOME}/`) ? null : `${u} is not the record's own portal`);
   const control = await fetchPublicDocument(`${HOME}/hop`, { allowBrowser: false });
   check("9a. control: without allowUrl the redirect is followed to the other origin", control.ok && otherHits === 1, `${control.reason} hits=${otherHits}`);
