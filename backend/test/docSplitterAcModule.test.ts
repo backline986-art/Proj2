@@ -215,6 +215,26 @@ console.log("\nE. MUST-EXCLUDE: jobs the rule is not about");
 }
 
 // ---------------------------------------------------------------------------
+console.log("\nI. ONE READ for the module sheet AND the undecided data sheets (the shape of a real set)");
+{
+  // Two title-only EQUIPMENT SPECIFICATION cut sheets the text cannot place, then the module sheet.
+  const EQUIP = (sheet: string): Sheet => ({ lines: titleBlock(sheet, "EQUIPMENT SPECIFICATION"), image: true });
+  const { id } = await projectWith([SLD, EQUIP("DS-2"), EQUIP("DS-3"), MODULE_IMAGE], MICRO);
+  const llm = fakeLlm({ 2: { kind: "other_spec" }, 3: { kind: "racking_spec" }, 4: { kind: "module_spec", integratedInverter: true } });
+  const result = await buildUtilityPackage(db, id, "all", { llm });
+  const parts = JSON.stringify(result.parts.map((p) => [p.docType, p.pages]));
+  run("one page-index call for all three pages, the module sheet first (the page cap never drops it)", JSON.stringify(llm.shown) === "[[4,2,3]]", JSON.stringify(llm.shown));
+  run("MUST-PASS: the module sheet is in both parts", pagesOf(result, "module_spec") === "[4]" && pagesOf(result, "inverter_spec") === "[4]", parts);
+  run("MUST-EXCLUDE: the combiner and racking sheets are in neither", !/\[(?:"module_spec"|"inverter_spec"),\[[^\]]*[23]/.test(parts), parts);
+  run("the undecided pages are reported as the read decided them, the module sheet apart", JSON.stringify(result.specPagesByVision) === JSON.stringify({ 2: "other_spec", 3: "racking_spec" }), JSON.stringify(result.specPagesByVision));
+  run("…and are no longer undecided", (result.undecidedSpecPages ?? []).length === 0, JSON.stringify(result.undecidedSpecPages));
+  run("the read does not re-file the module sheet: its part is not a page-index cut", partNames(id, "module_spec").every((f) => !f.includes("(page-index read)")), JSON.stringify(partNames(id, "module_spec")));
+  run("the inverter part names the module sheet", partNames(id, "inverter_spec").some((f) => f.includes("(AC module data sheet p4)")), JSON.stringify(partNames(id, "inverter_spec")));
+  const after = await reconcileSplitParts(db, id);
+  run("the next reconcile pass withdraws nothing and asks nothing", after.withdrawn.length === 0 && after.moduleSheetsToRead.length === 0, JSON.stringify(after));
+}
+
+// ---------------------------------------------------------------------------
 console.log("\nF. A COMBINED MODULE / INVERTER SHEET fills both upload slots");
 {
   const { id } = await projectWith([SLD, SITE, COMBINED], STRING);
