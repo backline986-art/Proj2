@@ -43,7 +43,13 @@ export function recordRun(db: AppDb, task: string, result = "ok"): void {
  */
 export function startPersistentSchedule(
   db: AppDb,
-  opts: { task: string; days: number; scope: string; tick: () => Promise<void> },
+  opts: {
+    task: string; days: number; scope: string; tick: () => Promise<void>;
+    /** How long after boot the first (catch-up) step runs. Default 60 s. A task that reads portal or
+     *  AHJ hosts gets a later slot of its own, so a restart does not fire every overdue sweep at once
+     *  (live 2026-11-27: the link check and the status sweep both started within a minute of boot). */
+    firstDelayMs?: number;
+  },
 ): void {
   const intervalMs = opts.days * DAY_MS;
   const stepMs = Math.min(intervalMs, DAY_MS);
@@ -72,6 +78,6 @@ export function startPersistentSchedule(
   };
 
   // Catch-up shortly after boot — the case the in-memory version could never handle.
-  setTimeout(() => void step().catch(() => null), 60_000).unref();
+  setTimeout(() => void step().catch(() => null), Math.max(0, opts.firstDelayMs ?? 60_000)).unref();
   setInterval(() => void step().catch(() => null), stepMs).unref();
 }

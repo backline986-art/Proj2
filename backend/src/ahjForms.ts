@@ -43,6 +43,7 @@ import { bcdChecklistAnswers, bcd5952AssumedFacts, bcd5952FailedRows, bcd5952Mis
 import { iowaPvWorksheetValues } from "./iowaPvWorksheet";
 import { documentFetchDisabled } from "./documentFetch";
 import { assertPublicHttpUrl, connectTimeRefusal, judgedFetchInit } from "./publicUrlGuard";
+import { politeFetch } from "./hostThrottle";
 import {
   agencyRowAppliesToJob, agencyRowProvenance, anchorSitesOnce,
   agencyTrackFormTypes, applicationKindForPath, applicationSlotFor, stateIssuerKeepsGenericSlot, explicitSingleFamilyAnswer, formApplicationKind, formAuthorityFor, rowBelongsToAuthority, structureMeaningOf,
@@ -1424,7 +1425,9 @@ async function safeFetchTemplate(rawUrl: string): Promise<Response> {
     // resolutions, and a rebinding resolver can answer them differently.
     let res: Response;
     try {
-      res = await fetch(url, { ...(judgedFetchInit(url) as RequestInit), redirect: "manual" });
+      // One turn per hop on the shared per-host budget (hostThrottle.ts): a paused host is sent
+      // nothing and the caller falls back to the cached blank, as for any failed download.
+      res = await politeFetch(url, { ...(judgedFetchInit(url) as RequestInit), redirect: "manual" }, { feature: "form-template" });
     } catch (err) {
       const refusal = connectTimeRefusal(err);
       if (refusal) throw new HttpError(400, refusal);

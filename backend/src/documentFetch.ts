@@ -58,6 +58,8 @@ import pLimit from "p-limit";
 import { logger } from "./logger";
 import { connectTimeRefusal, judgedFetchInit, publicUrlRefusal } from "./publicUrlGuard";
 import { looksBotBlocked } from "./runAbort";
+import { _resetHostThrottle, HOST_MIN_GAP_MS as SHARED_HOST_MIN_GAP_MS, hostPause as sharedPause, hostPauseLine, markHostRequest, noteHostVerdict, type HostPause } from "./hostThrottle";
+import { rateLimitFromAnswer } from "../../shared/src/rateLimitSignals";
 
 export type FetchVia = "http" | "browser";
 
@@ -197,7 +199,7 @@ const browserGate = pLimit(1);
 // ---------------------------------------------------------------------------
 /** The owner's rule, in one constant: >= 10 s between requests to one host. agencyPageReader's
  *  PAGE_READ_MIN_GAP_MS is this value re-exported. */
-export const HOST_MIN_GAP_MS = 10_000;
+export const HOST_MIN_GAP_MS = SHARED_HOST_MIN_GAP_MS;
 /** A refusal backs a host off for an hour (the server is long-running: one transient 429 must not
  *  silence a host for the life of the process), then it may be asked again — once. */
 export const HOST_BACK_OFF_MS = 60 * 60 * 1000;
@@ -221,7 +223,7 @@ interface PolitenessSeams { sleep: (ms: number) => Promise<void>; now: () => num
 const REAL_POLITENESS: PolitenessSeams = { sleep: (ms) => new Promise<void>((r) => setTimeout(r, ms)), now: () => Date.now(), minGapMs: HOST_MIN_GAP_MS };
 let politeness: PolitenessSeams = { ...REAL_POLITENESS };
 /** Tests only: forget every host (documentFetch.test plays several jurisdictions on one origin). */
-export function _resetHostPoliteness(): void { hostRecords.clear(); hostChain.clear(); }
+export function _resetHostPoliteness(): void { hostRecords.clear(); hostChain.clear(); _resetHostThrottle(); }
 /** Tests only: a clock and a sleep that record instead of waiting, or a zero gap for a suite whose
  *  loopback stub stands in for twenty public hosts. Not an operator knob — the gap is the rule. */
 export function _setDocumentFetchPoliteness(seams: Partial<PolitenessSeams>): void { politeness = { ...REAL_POLITENESS, ...seams }; }
@@ -257,7 +259,13 @@ function hostDocumentRefusal(host: string): { url: string; reason: string; at: n
   if (politeness.now() - r.documentRefusedAt > HOST_BACK_OFF_MS) { delete r.documentRefusedAt; delete r.documentRefusedUrl; delete r.documentRefusedReason; return null; }
   return { url: r.documentRefusedUrl ?? "", reason: r.documentRefusedReason ?? "", at: r.documentRefusedAt };
 }
-function noteRequest(host: string): void { if (host) recordOf(host).lastRequestAt = politeness.now(); }
+function noteRequest(host: string): void {
+  if (!host) return;
+  recordOf(host).lastRequestAt = politeness.now();
+  // The shared per-host clock (hostThrottle) moves too: the status sweep's next read of this host
+  // waits its gap after a document fetch, and counts it against the hour's budget.
+  markHostRequest(host);
+}
 /** The site refused our best permitted try on `url`, answered from `answering` (the redirect
  *  landing host when the ladder followed one — the host that actually said no, which is the one
  *  the next request must not go to; the original host is stamped only when it answered itself).
@@ -292,6 +300,11 @@ function backedOffResult(host: string, refusal: { refusedAt: number; refusedReas
     reason: `${host} refused automated clients ${agoMin} min ago (${refusal.refusedReason}) — backed off: nothing was sent, and the host is not asked again before ${until}.`,
   };
 }
+/** A host paused by the shared throttle (hostThrottle.ts): nothing sent, the staff line as the reason. */
+function pausedResult(host: string, pause: HostPause, url: string): FetchedDocument {
+  return { ok: false, status: 0, contentType: "", via: "http", finalUrl: url, hostBackedOff: true, siteRefused: true, refusedHost: host, reason: hostPauseLine(pause) };
+}
+
 /** The verdict fields a refused result carries, by the scope noteRefused recorded. */
 const refusedFields = (scope: RefusalScope, answering: string): Pick<FetchedDocument, "siteRefused" | "refusedHost"> =>
   scope === "host" ? { siteRefused: true, refusedHost: answering } : { siteRefused: true };
@@ -492,6 +505,16 @@ async function httpAttempt(
         return { ...blank, status: res.status, contentType, server, finalUrl: current, networkError: `document is ${declared} bytes, over the ${opts.maxBytes}-byte cap` };
       }
       const bytes = new Uint8Array(await res.arrayBuffer());
+      // A RATE LIMIT IS EVERY FEATURE'S BUSINESS (hostThrottle.ts): a 429, a Cloudflare 1015 ban or
+      // a 503 with Retry-After pauses the host for the status sweep and the link check too, with the
+      // site's own Retry-After. Walls and challenges stay this module's own (one window per walled
+      // host): a 403 on one object is not a host-wide verdict here.
+      if (res.status >= 400) {
+        const verdict = rateLimitFromAnswer(res.status, (n) => res.headers.get(n), peekText(bytes, contentType) ?? null, Date.now());
+        if (verdict && (verdict.kind === "rate_limited" || verdict.kind === "banned" || verdict.kind === "unavailable")) {
+          noteHostVerdict(current, verdict, "document-fetch");
+        }
+      }
       if (bytes.length > opts.maxBytes) {
         return { ...blank, status: res.status, contentType, server, finalUrl: current, networkError: `document is ${bytes.length} bytes, over the ${opts.maxBytes}-byte cap` };
       }
@@ -536,6 +559,10 @@ export async function fetchPublicDocument(url: string, opts: FetchPublicDocument
   // A host that refused us within the hour is not asked: nothing is sent, and the reason says so.
   const refused = hostRefusal(host);
   if (refused) return backedOffResult(host, refused, url);
+  // A host that rate-limited ANY feature (hostThrottle: a 429 to the status sweep, a Cloudflare 1015
+  // ban, persisted across restarts) is not asked either, until its pause ends.
+  const paused = sharedPause(host);
+  if (paused) return pausedResult(host, paused, url);
   // ONE HOST AT A TIME, >= the gap apart — chained per host, process-wide, the ladder held inside
   // the chain so a window's own requests count too. The refusal is re-read after the wait: ten
   // callers that arrived together must not all climb because none had stamped the host yet.
@@ -545,6 +572,8 @@ export async function fetchPublicDocument(url: string, opts: FetchPublicDocument
     if (wait > 0 && politeness.minGapMs > 0) await politeness.sleep(wait);
     const again = hostRefusal(host);
     if (again) return backedOffResult(host, again, url);
+    const pausedMeanwhile = sharedPause(host);
+    if (pausedMeanwhile) return pausedResult(host, pausedMeanwhile, url);
     return runLadder(checked.url, host, opts);
   });
   hostChain.set(host, run);

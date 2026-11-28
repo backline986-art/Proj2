@@ -4078,6 +4078,45 @@ const VERSIONED_MIGRATIONS: VersionedMigration[] = [
       addColumnIfMissing(db, "portal_run_approvals", "released_overrides_json", "TEXT NOT NULL DEFAULT '[]'");
     },
   },
+  {
+    // v94 (portal rate limits; live 2026-11-27: Cloudflare Error 1015 from Oregon ePermitting after the
+    // link check and the status sweep read it back to back). Helm renumbers at merge if the queue
+    // changes — nothing here depends on the number.
+    version: 94,
+    name: "portal_host_pacing",
+    up: (db) => {
+      // A HOST THAT TOLD AUTOMATION TO STOP (hostThrottle.ts): one row per host, written ONLY by
+      // hostThrottle.noteHostVerdict, read back at boot so a restart inside a ban does not knock again.
+      // kind: rate_limited | banned | challenge | blocked | unavailable; until_at: nothing automatic is
+      // sent to the host before it; strikes / last_strike_at: the exponential back-off's memory (a
+      // strike more than a day after the last starts again at 1). Shared on purpose like portal_recipes:
+      // a portal's rate limit is the same for every tenant (one IP), and the row holds no tenant data.
+      //
+      // HOW GENTLY TO READ A HOST, AS DATA (portal_host_pacing), never a place in code (placeNameGuard):
+      // min_gap_ms only WIDENS the owner's 10 s floor; max_per_hour replaces the default hourly budget
+      // (hostThrottle.DEFAULT_MAX_PER_HOUR). NULL = the default. Set by a person (set_by), never learned.
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS portal_host_pauses (
+          host TEXT PRIMARY KEY,
+          kind TEXT NOT NULL,
+          reason TEXT NOT NULL DEFAULT '',
+          since_at TEXT NOT NULL,
+          until_at TEXT NOT NULL,
+          strikes INTEGER NOT NULL DEFAULT 1,
+          last_strike_at TEXT NOT NULL,
+          feature TEXT NOT NULL DEFAULT ''
+        );
+        CREATE TABLE IF NOT EXISTS portal_host_pacing (
+          host TEXT PRIMARY KEY,
+          min_gap_ms INTEGER,
+          max_per_hour INTEGER,
+          note TEXT NOT NULL DEFAULT '',
+          set_by TEXT NOT NULL DEFAULT '',
+          updated_at TEXT NOT NULL DEFAULT ''
+        );
+      `);
+    },
+  },
 ];
 
 /** v47 was edited in place while #218 was open (Helm's review at 0116f98a): a DB that ran an earlier

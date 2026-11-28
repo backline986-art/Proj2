@@ -331,6 +331,7 @@ import { isComputeTotalsStep, prepareComputeSettle, waitForComputeSettled } from
 import { portalSaysNotServed } from "../../../shared/src/portalNotServed";
 import { tightenAttachmentSaveStep } from "../attachmentSave";
 import { accessibleNameOf, nameAttributeCss, nameAttributeOf, nameAttributeOfCss, recordedNameAttribute } from "../../../shared/src/recipeSelector";
+import { noteHostBlockText, hostPauseLine } from "../../../backend/src/hostThrottle";
 
 // RecipeAdapter — replays a recorded portal recipe (see portal_recipes / the recorder).
 // Works for ANY AHJ or utility portal an admin has taught by recording. It substitutes
@@ -3873,6 +3874,15 @@ export class RecipeAdapter extends BasePortalAdapter {
       // names itself a session end is never filled or clicked. Same wording as the step-failure path,
       // so the run is kept as the environment's fault, never the recipe's.
       if (executed > 0) {
+        // THE PORTAL RATE-LIMITED THIS COMPUTER (live 2026-11-27: Cloudflare Error 1015 on Oregon
+        // ePermitting). A ban page has no wizard on it: stop before anything else is filled or
+        // clicked, say so, and pause the host for every automated read (hostThrottle).
+        const limited = await this.rateLimitPage();
+        if (limited) {
+          closePrevStepTiming();
+          trace.push({ i: stepIdx, action: String(recordedStep?.action ?? ""), note: String(recordedStep?.note ?? "").slice(0, 52), outcome: "not run (rate limited)", page: await currentPageLabel() });
+          return fail(`THE PORTAL RATE-LIMITED THIS RUN before step ${stepIdx + 1}: ${limited} The run stopped here: nothing further was filled or clicked, and nothing was submitted. Wait until then before staging or learning on this portal again; check the portal for the partly filled application.`, { executed, skipped, healedSteps: this.healedSteps, driftWarnings: this.driftWarnings, agingNotes: this.agingNotes, guardRefusals: this.guardRefusals, failedStepIndex: stepIdx, trace, slowSteps });
+        }
         const ended = await this.sessionEndedBanner();
         if (ended) {
           closePrevStepTiming();
@@ -4667,7 +4677,9 @@ export class RecipeAdapter extends BasePortalAdapter {
         // the operator logged in concurrently and PowerClerk — one session per account —
         // killed the bot's. Name the real event when the page itself announces it.
         const ended = await this.sessionEndedBanner();
-        return fail(`${ended ? `THE PORTAL ENDED THIS SESSION mid-run ("${ended}") — commonly a concurrent login with the same account (some portals allow exactly one session per user). The step failure below is the symptom, not the cause. ` : ""}Recipe step failed (${step.action}${step.note ? ` — ${step.note}` : ""}): ${lastErr instanceof Error ? lastErr.message : String(lastErr)}${context}`, { executed, skipped, healedSteps: this.healedSteps, driftWarnings: this.driftWarnings, agingNotes: this.agingNotes, failedStepIndex: stepIdx, trace, slowSteps, requiredStillEmpty: this.requiredStillEmpty, unresolvedFields: this.unresolvedFields, fieldsVerified: this.fieldsVerified, fieldsUnverified: this.fieldsUnverified, requiredFieldsSeen: this.requiredFieldsSeen, stoppedAtPayment: this.stoppedAtPayment, pageShotDir: this.pageShotDir, outcomeShotPath: this.outcomeShotPath });
+        // A step that failed on a rate-limit / ban page failed BECAUSE of it: say that first.
+        const limited = ended ? "" : await this.rateLimitPage();
+        return fail(`${limited ? `THE PORTAL RATE-LIMITED THIS RUN: ${limited} The step failure below is the symptom, not the cause; nothing was submitted. ` : ""}${ended ? `THE PORTAL ENDED THIS SESSION mid-run ("${ended}") — commonly a concurrent login with the same account (some portals allow exactly one session per user). The step failure below is the symptom, not the cause. ` : ""}Recipe step failed (${step.action}${step.note ? ` — ${step.note}` : ""}): ${lastErr instanceof Error ? lastErr.message : String(lastErr)}${context}`, { executed, skipped, healedSteps: this.healedSteps, driftWarnings: this.driftWarnings, agingNotes: this.agingNotes, failedStepIndex: stepIdx, trace, slowSteps, requiredStillEmpty: this.requiredStillEmpty, unresolvedFields: this.unresolvedFields, fieldsVerified: this.fieldsVerified, fieldsUnverified: this.fieldsUnverified, requiredFieldsSeen: this.requiredFieldsSeen, stoppedAtPayment: this.stoppedAtPayment, pageShotDir: this.pageShotDir, outcomeShotPath: this.outcomeShotPath });
       }
       // A COMMIT CLICK AFTER THIS PAGE'S UPLOADS (the attachment Save): the page must LIST the file
       // before the run moves on (runs-finish item 4). An advance leaves the page's uploads behind.
@@ -10523,6 +10535,26 @@ export class RecipeAdapter extends BasePortalAdapter {
 
   /** The page's own words when it has thrown the user out — "Session Ended", "logged out",
    *  "session expired" as a prominent heading — or "" when it hasn't. Best-effort. */
+  /** The page is a CDN rate-limit / ban / browser-check page (shared/src/rateLimitSignals.ts, the one
+   *  classifier): the host is paused for every automated read and the staff line comes back; "" when
+   *  the page is anything else. Reads the page's text only; never clicks. */
+  private async rateLimitPage(): Promise<string> {
+    if (!this.page || typeof this.page.evaluate !== "function") return "";
+    // A block page is small; a wizard page is not. textContent (no layout) sizes the page first: past
+    // 20,000 characters it is never one and nothing more is read. Only then the RENDERED text, which
+    // leaves out scripts (a page's own script may carry any words at all).
+    const text = await this.page.evaluate(() => {
+      const t = document.body?.textContent || "";
+      if (t.length > 20000) return "";
+      return `${document.title}\n${(document.body?.innerText || "").replace(/\s+/g, " ").slice(0, 6000)}`;
+    }).catch(() => "") as string;
+    if (!text) return "";
+    let url = "";
+    try { url = typeof this.page.url === "function" ? String(this.page.url()) : ""; } catch { url = ""; }
+    const pause = url ? noteHostBlockText(url, text, "recipe-run") : null;
+    return pause ? hostPauseLine(pause) : "";
+  }
+
   private async sessionEndedBanner(): Promise<string> {
     if (!this.page || typeof this.page.evaluate !== "function") return "";
     return this.page.evaluate(() => {

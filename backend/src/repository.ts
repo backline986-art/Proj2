@@ -177,7 +177,7 @@ import {
 } from "./knowledgeBase";
 import { canonicalAliasForVerifiedField, canonicalizeSnapshot, compactAlnum, divergedAliases, existingSystemFromSnapshot, fieldAliases, mergeEditOverSnapshot, MICRO_SUPERSEDED_KEY, normalizeProject, recordMicroSupersession, normalizeTokens, TRACK_ISSUER_SNAPSHOT_KEYS, withTrackIssuers } from "./normalize";
 import {
-  classificationDrift, classifyPermitStatusText, effectiveCheckDays, extractStatusDate, isAuthWallText, isNemApprovalOutcome, nextCheckIso, outcomeTrack, portalStatedStatus,
+  checkSpreadMs, classificationDrift, classifyPermitStatusText, effectiveCheckDays, extractStatusDate, isAuthWallText, isNemApprovalOutcome, nextCheckIso, outcomeTrack, portalStatedStatus,
   readingMayFinishTrack, shouldRecordStatusCheck, shouldSkipEmptyRead, trackKind, UNCONFIRMED_READING_LABEL,
   type PermitStatusClassification, type ReadingProvenance, type TrackKind,
 } from "./permitMonitor";
@@ -205,6 +205,7 @@ import { recordFieldChanges, recordIntakeRead } from "./fieldHistory";
 import { isHarnessAbort, looksBotBlocked } from "./runAbort";
 import { finalSubmitEnvAllows, recipeShapeProblems, runApprovalRefusals } from "../../shared/src/portalSafety";
 import { PAGE_READ_MIN_GAP_MS } from "./agencyPageReader";
+import { attachHostThrottleStore, hostPause, HostPausedError, hostPauseLine, noteHostBlockText, withHostTurn, type HostPause } from "./hostThrottle";
 import { parsePerJobPortalQuestion } from "../../shared/src/perJobQuestions";
 import { normalizeProjectClass, parseProjectClassConfirmation, servicePhaseOf, serviceVoltageOf } from "../../shared/src/projectClass";
 import { projectClassHoldReason, projectClassStatusFor } from "./projectClassHold";
@@ -7220,7 +7221,7 @@ export async function recordPermitStatusCheck(
         `UPDATE permit_check_targets
          SET last_checked_at = ?, next_check_at = ?, latest_outcome = ?, latest_status_label = ?, updated_at = ?
          WHERE id = ?`,
-        [ts, nextCheckIso(frequency, new Date(ts)), classification.outcome, classification.statusLabel, ts, input.targetId || null],
+        [ts, nextCheckIso(frequency, new Date(ts), input.targetId || ""), classification.outcome, classification.statusLabel, ts, input.targetId || null],
       );
     }
 
@@ -7387,7 +7388,7 @@ function rescheduleUnreadTarget(db: AppDb, projectId: string, target: Row, track
   const days = effectiveCheckDays(target.check_frequency_days, text(target.latest_outcome));
   db.run("UPDATE permit_check_targets SET last_checked_at = ?, next_check_at = ?, updated_at = ? WHERE id = ?", [
     ts,
-    nextCheckIso(days, new Date(ts)),
+    nextCheckIso(days, new Date(ts), text(target.id)),
     ts,
     text(target.id),
   ]);
@@ -7877,6 +7878,10 @@ export function recipeDisciplineForTarget(targetType: string, permitType: string
 /** THE BACKGROUND SWEEP (scheduler, every 15 minutes; the permit_checks/nem_checks jobs): only the
  *  targets whose next_check_at has passed. A person's click does not come here — it checks NOW
  *  (runPermitChecksNow, #160). */
+/** Filings read per portal host per background sweep (see runDuePermitChecks). Each read is up to a
+ *  handful of requests, 10 s apart on that host; six fit comfortably inside a 15-minute sweep. */
+export const SWEEP_TARGETS_PER_HOST = 6;
+
 export async function runDuePermitChecks(
   db: AppDb,
   targetType: "permit" | "nem" | "all" = "all",
@@ -7885,14 +7890,38 @@ export async function runDuePermitChecks(
   // Kind by trackKind (the ONE answer), judged in JS rather than a raw `target_type = ?` filter
   // that would poll a legacy 'permit'-typed NEM filing in the permit sweep. The 50-per-sweep cap
   // is applied AFTER the kind filter, as the SQL LIMIT was, so a kind-scoped sweep still gets 50.
+  // THE CATCH-UP AFTER A RESTART IS SPREAD, NOT BURST (live 2026-11-27: the operator restarted the
+  // server, the first sweep 30 s later read every filing that had come due while it was off — 28,
+  // several on one state portal — and that portal rate-limited and then banned the IP). At most
+  // SWEEP_TARGETS_PER_HOST filings per portal host per sweep, oldest-due first; the rest stay due
+  // and are read by the next sweeps, 15 minutes apart. Every request inside still takes its host's
+  // turn (hostThrottle). The project's AHJ / utility come along so a filing with no link is grouped
+  // by the portal it would sign in to (permitTargetPaceKey), as the click groups it.
+  const perHost = new Map<string, number>();
+  let heldForNextSweep = 0;
   const due = db.query<Row>(
-    `SELECT * FROM permit_check_targets
-     WHERE active = 1 AND (next_check_at IS NULL OR next_check_at <= ?)
-     ORDER BY next_check_at ASC, created_at ASC`,
+    `SELECT t.*, p.ahj AS project_ahj, p.utility AS project_utility
+     FROM permit_check_targets t LEFT JOIN projects p ON p.id = t.project_id
+     WHERE t.active = 1 AND (t.next_check_at IS NULL OR t.next_check_at <= ?)
+     ORDER BY t.next_check_at ASC, t.created_at ASC`,
     [now],
-  ).filter((row) => targetType === "all" || trackKind(text(row.target_type), text(row.permit_type)) === targetType).slice(0, 50);
+  ).filter((row) => targetType === "all" || trackKind(text(row.target_type), text(row.permit_type)) === targetType)
+    .filter((row) => {
+      const key = permitTargetPaceKey(row);
+      const n = perHost.get(key) ?? 0;
+      if (n >= SWEEP_TARGETS_PER_HOST) { heldForNextSweep += 1; return false; }
+      perHost.set(key, n + 1);
+      return true;
+    })
+    .slice(0, 50);
+  if (heldForNextSweep > 0) {
+    logger.info("monitor", `${heldForNextSweep} due filing(s) wait for the next sweep: at most ${SWEEP_TARGETS_PER_HOST} per portal host per sweep, so a catch-up is spread out`);
+  }
   // A target a person's "check now" already has in hand is left to it (not read twice in a row).
-  const targets = due.filter((row) => !permitTargetsInFlight.has(text(row.id)));
+  // Interleaved across hosts (a, b, a, b): every request still takes its host's turn (hostThrottle,
+  // >= 10 s apart), so one host's gap is spent reading another's instead of waiting.
+  attachHostThrottleStore(db);
+  const targets = interleaveByHost(due.filter((row) => !permitTargetsInFlight.has(text(row.id))));
   return withTargetsInFlight(targets, () => checkPermitTargets(db, targets, null));
 }
 
@@ -7961,6 +7990,42 @@ function interleaveByHost(targets: Row[]): Row[] {
 
 type PermitCheckPacing = { gapMs: number; sleep: (ms: number) => Promise<void>; lastAt: Map<string, number> };
 
+// ── A PORTAL THAT TOLD US TO STOP IS LEFT ALONE UNTIL IT SAYS WE MAY COME BACK (hostThrottle.ts) ──────
+// Live 2026-11-27: a record search answered HTTP 429, the sweep logged "status unreadable this sweep"
+// and went on reading the same host; seconds later Cloudflare banned the server's IP (Error 1015).
+// Now a 429 / 503+Retry-After / Cloudflare ban or challenge, seen by ANY feature, pauses the host
+// (persisted, exponential, the site's own Retry-After honoured), and here:
+//   - a filing whose portal host is paused is not read at all: nothing is sent, its card says
+//     "<host> rate-limited Keelix …; automatic reads of it are paused until <time>", and its next
+//     check is moved to just after the pause (staggered per filing, so they do not all return at once);
+//   - a read that was paused part-way (the first request got the 429) says the same thing instead of
+//     the generic "the public page held no readable status";
+//   - a browser read that lands on a block page (a 1015 page rendered in the window) is not a status:
+//     the page pauses the host and the read counts as unread.
+// Only stops and waits are added: no gate here is relaxed, and nothing is retried automatically.
+/** A filing that waits out a pause comes back within this much after it ends, by its id. */
+const PAUSE_RETURN_SPREAD_MS = 10 * 60 * 1000;
+function pausedReturnIso(pause: HostPause, targetId: string): string {
+  return new Date(Date.parse(pause.until) + (checkSpreadMs(targetId) % PAUSE_RETURN_SPREAD_MS)).toISOString();
+}
+/** The first live pause on any of these URLs' hosts. */
+function firstHostPause(urls: string[]): HostPause | null {
+  for (const u of urls) {
+    const p = u ? hostPause(u) : null;
+    if (p) return p;
+  }
+  return null;
+}
+/** A browser read (the recipe scrape, a saved session, the signed-in record link) takes its host's
+ *  turn like any request. A test's seam opens nothing, so it takes none (and never waits). */
+function browserReadTurn<T>(url: string, seamed: boolean, run: () => Promise<T>): Promise<T> {
+  return seamed || !url ? run() : withHostTurn(url, "status-read", run);
+}
+/** A read that came back as a CDN block page: the host is paused and the text is not a status. */
+function blockPageRead(url: string, readText: string | null | undefined): HostPause | null {
+  return url && readText ? noteHostBlockText(url, readText, "status-read") : null;
+}
+
 // ── A STATUS READ NEVER TAKES A PORTAL SESSION A PERSON OR A RUN HOLDS (#516) ─────────────────────
 // Some portals allow one session per account and end the older one when a second sign-in appears
 // (PowerClerk: recipeAdapter reports "THE PORTAL ENDED THIS SESSION mid-run … commonly a concurrent
@@ -8020,6 +8085,7 @@ export async function runPermitChecksNow(
   orgFilter: string | null,
   opts: { sleep?: (ms: number) => Promise<void>; gapMs?: number } = {},
 ): Promise<PermitCheckNowResponse> {
+  attachHostThrottleStore(db);
   const clause = orgFilter ? "AND p.org_id = ?" : "";
   const params = orgFilter ? [orgFilter] : [];
   const active = db.query<Row>(
@@ -8081,6 +8147,8 @@ async function checkPermitTargets(
 ): Promise<{ checked: number; projects: ProjectDetail[]; results: PermitCheckNowResult[] }> {
   const projects: ProjectDetail[] = [];
   const results: PermitCheckNowResult[] = [];
+  /** Hosts whose pause this run has already logged (one line per host, not one per filing). */
+  const pausedHostsSaid = new Set<string>();
   for (const target of targets) {
     const paceKey = pacing ? permitTargetPaceKey(target) : "";
     if (pacing) {
@@ -8114,6 +8182,21 @@ async function checkPermitTargets(
         reason: track === "nem" ? "the target's URL is an AHJ permit portal, and this is a NEM filing" : "the target's URL is a utility interconnection portal, and this is a permit filing",
       });
     }
+    // A FILING ON A PAUSED PORTAL IS NOT READ (hostThrottle; see the block above checkPermitTargets).
+    const pausedAtDoor = firstHostPause([safeTrackingUrl, safeTargetPortalUrl]);
+    if (pausedAtDoor) {
+      const line = hostPauseLine(pausedAtDoor);
+      db.run("UPDATE permit_check_targets SET read_gap = ?, next_check_at = ?, updated_at = ? WHERE id = ?", [line, pausedReturnIso(pausedAtDoor, text(target.id)), now, text(target.id)]);
+      if (!pausedHostsSaid.has(pausedAtDoor.host)) {
+        pausedHostsSaid.add(pausedAtDoor.host);
+        logger.info("monitor", `not reading filings on ${pausedAtDoor.host} this sweep: ${line}`, { projectId });
+      }
+      results.push(permitCheckResult(db, target, "unreadable", { reason: line }));
+      continue;
+    }
+    /** Every portal URL this read sends (or would send) a request to: a pause on any of them is
+     *  the reason a read that gathered nothing gives. */
+    const triedUrls: string[] = [safeTrackingUrl, safeTargetPortalUrl];
     let source: "portal" | "public_url" | "mock" = safeTargetPortalUrl ? "public_url" : "mock";
     // WHY A READ CAME BACK EMPTY (issue #161): the scrapers report it, and the skip below logs and
     // audits it. "no portal URL/recipe" is said only when there truly was neither.
@@ -8150,7 +8233,11 @@ async function checkPermitTargets(
     if (track === "permit" && safeTrackingUrl && applicationNumbers.length > 0) {
       publicReadUrl = safeTrackingUrl;
       const publicText = await publicStatusFetch(safeTrackingUrl, applicationNumbers).catch(() => null);
-      if (publicText && publicText.length > 40 && !isAuthWallText(publicText)) {
+      const publicBlock = blockPageRead(safeTrackingUrl, publicText);
+      if (publicBlock) {
+        noteReason(hostPauseLine(publicBlock));
+        gap.publicLink = "no_status";
+      } else if (publicText && publicText.length > 40 && !isAuthWallText(publicText)) {
         rawStatusText = publicText;
         source = "public_url";
       } else {
@@ -8192,6 +8279,15 @@ async function checkPermitTargets(
         recipe = null;
       }
       if (recipe?.portalUrl) {
+        triedUrls.push(recipe.portalUrl);
+        const recipePause = hostPause(recipe.portalUrl);
+        if (recipePause) {
+          gap.portalHost = portalHostOf(recipe.portalUrl);
+          noteReason(hostPauseLine(recipePause));
+          recipe = null;
+        }
+      }
+      if (recipe?.portalUrl) {
         // Same credential conventions as the learner/replay: portalType key is "utility" | "AHJ".
         // A PROFILE OF ITS OWN (#517), as the #512 record-link read has: the correction reopen takes
         // portalProfileDir(<client>, <type>, <host>) — the very dir this read used to take — and
@@ -8213,7 +8309,7 @@ async function checkPermitTargets(
         if (!safeTrackingUrl) linkLookupStamp = now;
         const recipeUrl = recipe.portalUrl;
         let reportedLink = "";
-        const scraped = await statusScrape("recipe", applicationNumbers, {
+        const scraped = await browserReadTurn(recipeUrl, Boolean(statusCheckSeams.checkStatus), () => statusScrape("recipe", applicationNumbers, {
           recipe,
           fieldValues: {},
           docsByType: {},
@@ -8225,8 +8321,11 @@ async function checkPermitTargets(
           // (#413). Kept only for a filing with no link yet, and only on the portal this recipe was
           // judged fit for (storeFoundStatusLink).
           onRecordLink: (link: string) => { reportedLink = link; },
-        }).catch((err) => { noteReason(`the status read failed: ${err instanceof Error ? err.message.slice(0, 160) : String(err)}`); return null; });
-        if (scraped && !isAuthWallText(scraped)) {
+        })).catch((err) => { noteReason(err instanceof HostPausedError ? err.message : `the status read failed: ${err instanceof Error ? err.message.slice(0, 160) : String(err)}`); return null; });
+        const recipeBlock = blockPageRead(recipeUrl, scraped);
+        if (recipeBlock) {
+          noteReason(hostPauseLine(recipeBlock));
+        } else if (scraped && !isAuthWallText(scraped)) {
           rawStatusText = scraped;
           source = "portal";
           // Only beside a status that was really read: a link from a sign-in wall is no record's.
@@ -8266,7 +8365,7 @@ async function checkPermitTargets(
       gap.profileUsed = true;
       gap.portalHost ||= portalHostOf(safeTargetPortalUrl);
       gap.hasCredential ||= Boolean(credential);
-      const scraped = await statusScrape(adapterType, applicationNumbers, {
+      const scraped = await browserReadTurn(safeTargetPortalUrl, Boolean(statusCheckSeams.checkStatus), () => statusScrape(adapterType, applicationNumbers, {
         encryptedStorageStatePath: portalProfile.encrypted_storage_state,
         headless: true,
         credential,
@@ -8275,8 +8374,11 @@ async function checkPermitTargets(
         // multi-tenant platform adapter checks status on the RIGHT subdomain.
         loginUrl: safeTargetPortalUrl || undefined,
         onReason: noteReason,
-      }).catch((err) => { noteReason(`the status read failed: ${err instanceof Error ? err.message.slice(0, 160) : String(err)}`); return null; });
-      if (scraped && !isAuthWallText(scraped)) {
+      })).catch((err) => { noteReason(err instanceof HostPausedError ? err.message : `the status read failed: ${err instanceof Error ? err.message.slice(0, 160) : String(err)}`); return null; });
+      const profileBlock = blockPageRead(safeTargetPortalUrl, scraped);
+      if (profileBlock) {
+        noteReason(hostPauseLine(profileBlock));
+      } else if (scraped && !isAuthWallText(scraped)) {
         rawStatusText = scraped;
         source = "portal";
       } else if (scraped) {
@@ -8327,7 +8429,11 @@ async function checkPermitTargets(
       // Not twice: the anonymous-first read above already fetched the status link.
       if (checkUrl && checkUrl !== publicReadUrl) {
         const publicText = await publicStatusFetch(checkUrl, appNums).catch(() => null);
-        if (publicText && publicText.length > 40 && !isAuthWallText(publicText)) {
+        const fallbackBlock = blockPageRead(checkUrl, publicText);
+        if (fallbackBlock) {
+          noteReason(hostPauseLine(fallbackBlock));
+          gap.publicLink = "no_status";
+        } else if (publicText && publicText.length > 40 && !isAuthWallText(publicText)) {
           rawStatusText = publicText;
           source = "public_url";
         } else {
@@ -8367,7 +8473,7 @@ async function checkPermitTargets(
         let signInPage = "";
         let withheld = "";
         let held: "login_refused" | "login_sends_code" | null = null;
-        const read = await signedInLinkRead(linkUrl, appNums, {
+        const read = await browserReadTurn(linkUrl, Boolean(statusCheckSeams.signedInLink), () => signedInLinkRead(linkUrl, appNums, {
           // NO KNOCKING ON A DOOR THAT SAID NO. A login the portal refused the last time is not typed
           // again (lockedOutCredential's rule, the stage gate's own: repeated attempts are what lock an
           // account), and a login the client's record says sends a code at every sign-in is not typed
@@ -8390,7 +8496,7 @@ async function checkPermitTargets(
           },
           headless: true,
           userDataDir: portalProfileDir(profileBase, clientId, "status-read", linkUrl),
-        }).catch((err) => ({ text: null, reason: `the signed-in record read failed: ${err instanceof Error ? err.message.slice(0, 160) : String(err)}`, signedIn: false, loginRefused: false }));
+        })).catch((err) => ({ text: null, reason: err instanceof HostPausedError ? err.message : `the signed-in record read failed: ${err instanceof Error ? err.message.slice(0, 160) : String(err)}`, signedIn: false, loginRefused: false }));
         // LOGIN HEALTH, the learn's own bookkeeping (recordLoginOutcome): a login the portal accepted
         // clears a stale mark, one it refused sets it — so neither the next check nor the next stage
         // knocks again. Diagnostic only: never allowed to change what this check reads.
@@ -8399,7 +8505,10 @@ async function checkPermitTargets(
           else if (signInPage && read.loginRefused) recordLoginOutcome(db, clientId, signInPage, { ok: false, note: `status read: ${read.reason}` });
         } catch { /* diagnostic only */ }
         if (held) gap.signedIn = held;
-        if (read.text && !isAuthWallText(read.text)) {
+        const linkBlock = blockPageRead(linkUrl, read.text);
+        if (linkBlock) {
+          noteReason(hostPauseLine(linkBlock));
+        } else if (read.text && !isAuthWallText(read.text)) {
           rawStatusText = read.text;
           source = "portal";
         } else {
@@ -8424,7 +8533,12 @@ async function checkPermitTargets(
     // Read off the first reason only when the sweep did not decide the outcome itself (throttled, or
     // a stored login held back untyped).
     if (gap.signedIn === "not_tried") gap.signedIn = signedInOutcome(signedInRan, unreadableReason);
-    const readGap = gatheredNothing
+    // A host that told us to stop during this read is the reason, whatever else was noted first.
+    const pausedDuringRead = gatheredNothing ? firstHostPause(triedUrls) : null;
+    if (pausedDuringRead) unreadableReason = hostPauseLine(pausedDuringRead);
+    const readGap = pausedDuringRead
+      ? unreadableReason
+      : gatheredNothing
       ? statusReadGap({
           ...gap,
           track,
@@ -8448,6 +8562,8 @@ async function checkPermitTargets(
         { projectId },
       );
       const said = rescheduleUnreadTarget(db, projectId, target, track, why, now);
+      // Not before the site said we may come back (and not all at once when it does).
+      if (pausedDuringRead) db.run("UPDATE permit_check_targets SET next_check_at = ? WHERE id = ?", [pausedReturnIso(pausedDuringRead, text(target.id)), text(target.id)]);
       results.push(permitCheckResult(db, target, "unreadable", { reason: said }));
       if (pacing) pacing.lastAt.set(paceKey, Date.now());
       continue;
@@ -8457,6 +8573,7 @@ async function checkPermitTargets(
       source,
       rawStatusText,
     });
+    if (pausedDuringRead) db.run("UPDATE permit_check_targets SET next_check_at = ?, read_gap = ? WHERE id = ?", [pausedReturnIso(pausedDuringRead, text(target.id)), readGap, text(target.id)]);
     // THE PORTAL'S OWN FEE, off the same filed record (portalFeeReadings.ts) — after the status
     // is recorded and unable to change it: a failure here is logged and the sweep moves on.
     if (source !== "mock") {
