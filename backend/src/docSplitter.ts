@@ -213,9 +213,25 @@ const INDEX_NAME_WORDS = 6;
 // the first numbered note ("1. SEE …"), or PROJECT DATA — in any case. A sheet NAMED "GENERAL NOTES"
 // in the name column (no colon or dash) is a name, not that block, and does not end it.
 const INDEX_NAMES_END = /\bNOTES?\b\s*(?:[:\-\u2013]|1\b)|(?<!\bGENERAL\s+)\bNOTES?\b|(?:^|\s)1\.\s|\bPROJECT\s+DATA\b/i;
+// A PAPER SIZE IS NOT A SHEET NUMBER (audit 2026-11-28). A title block that prints its sheet size
+// ("ANSI B 11" X 17"", "ARCH D 24 X 36") gave every page, the cover included, two more numbers:
+// B 11 and X 17. With three listed numbers on a page no page had a number of its own, so a data
+// sheet the index names was never reported undecided. A size is told by its SHAPE, in any paper
+// family, never by a list of letters: the number carries an inch mark, or is one side of
+// "<number> X <number>" (the X being the candidate's own letter when it is the second side).
+// A number in quotes (SEE "E-1") is a quoted sheet number, not inches: the mark must not be the
+// closing half of a pair opened right before the letters.
+const SIZE_AFTER = /^(?:"|''|”|″|\s*[xX×]\s*\d)/;
+const SIZE_BEFORE = /\d\s*(?:"|''|”|″)?\s*$/;
+const QUOTE_BEFORE = /(?:"|'|“)$/;
 const sheetNumbers = (text: string) => [...text.matchAll(INDEX_SHEET_NUMBER)]
   .filter((m) => !NOT_A_SHEET_PREFIX.test(m[1]))
-  .map((m) => ({ key: `${m[1]}${m[2]}`, start: m.index ?? 0, end: (m.index ?? 0) + m[0].length }));
+  .map((m) => ({ key: `${m[1]}${m[2]}`, letters: m[1], start: m.index ?? 0, end: (m.index ?? 0) + m[0].length }))
+  .filter((n) => {
+    const before = text.slice(Math.max(0, n.start - 8), n.start);
+    if (SIZE_AFTER.test(text.slice(n.end, n.end + 8)) && !QUOTE_BEFORE.test(before)) return false;
+    return !(n.letters === "X" && SIZE_BEFORE.test(before));
+  });
 /** The first `words` words of `text`, cut at the notes / project-data block. */
 const indexNames = (text: string, words: number) => {
   const end = INDEX_NAMES_END.exec(text);
@@ -233,9 +249,13 @@ const isIndexSpecName = (name: string) => new RegExp(INDEX_SPEC_NAME.source, "i"
  *     same-letter group of the run, back to back, has that many numbers (S-1, S-2 above). Any other
  *     count, or two groups that size, names nothing: the pages stay listed as they were.
  */
-export function indexSpecSheets(pageTexts: string[]): { spec: Set<string>; listed: Set<string> } {
+export function indexSpecSheets(pageTexts: string[]): { spec: Set<string>; listed: Set<string>; names: Map<string, string> } {
   const spec = new Set<string>();
   const listed = new Set<string>();
+  // The name a ROW gives its sheet number (the first row that names it): how a page's own sheet
+  // name is known when the title block's text does not put it beside its label. Columns cannot be
+  // split back into rows, so they name nothing here.
+  const names = new Map<string, string>();
   for (const text of pageTexts) {
     if (!isIndexOrNotesPage(text)) continue;
     const nums = sheetNumbers(text);
@@ -247,7 +267,9 @@ export function indexSpecSheets(pageTexts: string[]): { spec: Set<string>; liste
       const run = nums.slice(i, j + 1);
       for (const n of run) listed.add(n.key);
       if (run.length === 1) {
-        if (isIndexSpecName(indexNames(after, INDEX_NAME_WORDS))) spec.add(run[0].key);
+        const name = indexNames(after, INDEX_NAME_WORDS);
+        if (!names.has(run[0].key)) names.set(run[0].key, name);
+        if (isIndexSpecName(name)) spec.add(run[0].key);
       } else {
         const count = [...indexNames(after, run.length * INDEX_NAME_WORDS).matchAll(INDEX_SPEC_NAME)].length;
         const prefix = (k: string) => k.replace(/[\d.]+$/, "");
@@ -259,14 +281,23 @@ export function indexSpecSheets(pageTexts: string[]): { spec: Set<string>; liste
       i = j + 1;
     }
   }
-  return { spec, listed };
+  return { spec, listed, names };
 }
+
+// The label in any case ("Sheet Number"), and a paper size the text layer puts between the label
+// and its value skipped ("Sheet Size Sheet Number ANSI B 11" X 17" DS 01": the label row, then the
+// value row). The value itself is still UPPERCASE letters then a number.
+const SHEET_NUMBER_LABEL = /\bSHEET\s*(?:NUMBER|NO\.?|#)\s*:?\s*/i;
+const LEADING_PAPER_SIZE = /^(?:(?:ANSI|ARCH|ISO)\s+)?(?:[A-E]\d?\s+)?\d{1,2}(?:\.\d+)?\s*(?:"|''|”|″)?\s*[xX×]\s*\d{1,2}(?:\.\d+)?\s*(?:"|''|”|″)?\s*/i;
 
 /** The page's own sheet number among the index's: the labelled SHEET NUMBER / SHEET NO / SHEET #
  *  when the page has one (a labelled PV-11 that cites "SEE S-1" is PV-11, not S-1), else the only
  *  index number on the page. Anything else is no answer. */
-function pageSheetNumber(text: string, listed: Set<string>): string | null {
-  const labelled = /\bSHEET\s*(?:NUMBER|NO\.?|#)\s*:?\s*([A-Z]{1,3}\s?-?\s?\d{1,2}(?:\.\d{1,2})?)\b/.exec(text);
+export function pageSheetNumber(text: string, listed: Set<string>): string | null {
+  const label = SHEET_NUMBER_LABEL.exec(text);
+  const labelled = label
+    ? /^([A-Z]{1,3}\s?-?\s?\d{1,2}(?:\.\d{1,2})?)\b/.exec(text.slice(label.index + label[0].length).replace(LEADING_PAPER_SIZE, ""))
+    : null;
   if (labelled) {
     const key = sheetNumbers(labelled[1])[0]?.key;
     return key && listed.has(key) ? key : null;
@@ -291,12 +322,22 @@ function pageSheetNumber(text: string, listed: Set<string>): string | null {
 //
 // Exported for docSplitterMirror.test.ts, which pins frontend/parser-review.js scoreSplitPage /
 // specSheetPages (the parser page's split map, read by the submit gate) to this answer (#193).
-export function scorePage(text: string): { docTypes: string[]; byPattern: boolean } {
+//
+// `sheetName` is the name the cover's sheet index gives THIS page's sheet number (indexSpecSheets
+// `names`), when the caller knows it. ON AN ELECTRICAL-NUMBERED SHEET A `words` HIT COUNTS WHEN THE
+// WORD IS THE SHEET'S OWN NAME (audit 2026-11-28): the #33 rule drops `words` on an E x.x sheet
+// because there they are words the sheet uses, and that left a sheet NAMED "PLACARD" and numbered
+// E 1.4 scoring nothing and out of the labels part. The index says what the sheet is called; a
+// notes sheet that only says "PROVIDE PLACARD" is not called that, and a NOTES name never counts for
+// a `wordsSkipNotes` category.
+export function scorePage(text: string, sheetName = ""): { docTypes: string[]; byPattern: boolean } {
   if (isIndexOrNotesPage(text)) return { docTypes: [], byPattern: false };
   const electricalSheet = ELECTRICAL_SHEET.test(text);
   const calcsSheet = CALCS_SHEET.test(text);
   const notesSheet = NOTES_SHEET.test(text);
   const battery = batteryPage(text);
+  const namedBy = (cat: { words?: RegExp[]; wordsSkipNotes?: boolean }) => (!sheetName || (cat.wordsSkipNotes && NOTES_SHEET.test(sheetName))
+    ? 0 : (cat.words ?? []).reduce((n, re) => (re.test(sheetName) ? n + 1 : n), 0));
   let best: { docType: string; score: number; patternHits: number } | null = null;
   for (const cat of CATEGORY_PATTERNS) {
     if (calcsSheet && SPEC_DOC_TYPES.has(cat.docType)) continue;
@@ -306,7 +347,7 @@ export function scorePage(text: string): { docTypes: string[]; byPattern: boolea
     const hits = (res: RegExp[] | undefined) => (res ?? []).reduce((n, re) => (re.test(text) ? n + 1 : n), 0);
     const patternHits = hits(cat.patterns);
     const score = patternHits + hits(cat.sheetNumbers)
-      + (electricalSheet ? 0 : (cat.wordsSkipNotes && notesSheet ? 0 : hits(cat.words)) + (cat.vocabulary?.some((re) => re.test(text)) ? 1 : 0));
+      + (electricalSheet ? namedBy(cat) : (cat.wordsSkipNotes && notesSheet ? 0 : hits(cat.words)) + (cat.vocabulary?.some((re) => re.test(text)) ? 1 : 0));
     if (score > 0 && (!best || score > best.score)) best = { docType: cat.docType, score, patternHits };
   }
   // A battery datasheet found by its BODY (no battery sheet name) is the battery spec unless another
@@ -667,7 +708,7 @@ async function classifyPlanSetPages(planSetPath: string, total: number, job?: Sp
   for (let i = 0; i < total; i++) {
     if (outlinedSet.has(i + 1)) { unclassified.push(i + 1); continue; }
     const text = pageTexts[i] ?? "";
-    const { docTypes, byPattern } = scorePage(text);
+    const { docTypes, byPattern } = scorePage(text, index.names.get(pageSheetNumber(text, index.listed) ?? "") ?? "");
     for (const docType of docTypes) {
       const arr = byCategory.get(docType) ?? [];
       arr.push(i);
