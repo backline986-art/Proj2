@@ -145,6 +145,54 @@ await check("a sheet that does not say it is kept as no_listing (never attached)
   const row = await sheets.runMakerSpecSheetLookup(db, lookup(JSON.stringify({ urls: [url] }), [url]), eq(MAKER, "TQ8M-60-2-US"), { fetchDocument: fetcher({ [url]: { bytes: await pdf(["Models: TQ8M-60-2-US", "Peak output power 300 VA"]) } }) });
   assert.equal(row.status, "no_listing");
 });
+
+// AN ANSWER CUT OFF BEFORE ITS JSON IS NOT "NO LINK" (audit 2026-11-28). KILL (verified red by hand):
+// drop the second ask → (c1) fails; put the token budget back to 400 → (c1) fails on the budget;
+// drop the reason from the detail → (c2), (c4), (c5) fail; ask again on any cut-off → (c3) fails.
+const answers = (seq: Array<Partial<WebLookupResult>>) => ({
+  calls: 0,
+  budgets: [] as number[],
+  async webLookup(input: { user: string; maxTokens?: number }): Promise<WebLookupResult> {
+    this.budgets.push(Number(input.maxTokens ?? 0));
+    const a = seq[Math.min(this.calls++, seq.length - 1)];
+    return { text: "", groundedSearches: 1, stopReason: "end_turn", resultUrls: [], pagesRead: 0, ...a };
+  },
+});
+await check("(c1) MUST-PASS: an answer cut off at the token limit is asked once more, and the sheet is found", async () => {
+  const url = "https://testphase.com/tq10.pdf";
+  const llm = answers([{ stopReason: "max_tokens", resultUrls: ["https://testphase.com/support"] }, { text: JSON.stringify({ urls: [url] }), resultUrls: [url] }]);
+  const row = await sheets.runMakerSpecSheetLookup(db, llm, eq(MAKER, "TQ10-1"), { fetchDocument: fetcher({ [url]: { bytes: await pdf(["Models: TQ10-1", "UL Listed as PV Rapid Shutdown Equipment."]) } }) });
+  assert.equal(row.status, "found", row.detail);
+  assert.equal(llm.calls, 2);
+  assert.ok(llm.budgets.every((b) => b >= 2000), `the lookup's token budget covers a search turn: ${llm.budgets.join(",")}`);
+});
+await check("(c2) cut off both times: asked twice, never a third time, and the row says that is why", async () => {
+  const llm = answers([{ stopReason: "max_tokens", resultUrls: ["https://testphase.com/support"] }]);
+  const row = await sheets.runMakerSpecSheetLookup(db, llm, eq(MAKER, "TQ10-2"), { fetchDocument: (async () => { throw new Error("must not fetch"); }) as never });
+  assert.equal(row.status, "not_found");
+  assert.equal(llm.calls, 2);
+  assert.match(row.detail, /cut off at the token limit both times/);
+});
+await check("(c3) MUST-EXCLUDE: a cut-off answer that already named its links is not asked again", async () => {
+  const url = "https://testphase.com/tq10-3.pdf";
+  const llm = answers([{ stopReason: "max_tokens", text: JSON.stringify({ urls: [url] }), resultUrls: [url] }]);
+  const row = await sheets.runMakerSpecSheetLookup(db, llm, eq(MAKER, "TQ10-3"), { fetchDocument: fetcher({ [url]: { bytes: await pdf(["Models: TQ10-3", "UL Listed as PV Rapid Shutdown Equipment."]) } }) });
+  assert.equal(row.status, "found", row.detail);
+  assert.equal(llm.calls, 1);
+});
+await check("(c4) a complete answer with no link is asked once, and the row says the answer named none", async () => {
+  const llm = answers([{ text: JSON.stringify({ urls: [] }), resultUrls: ["https://testphase.com/support"] }]);
+  const row = await sheets.runMakerSpecSheetLookup(db, llm, eq(MAKER, "TQ10-4"), { fetchDocument: (async () => { throw new Error("must not fetch"); }) as never });
+  assert.equal(llm.calls, 1);
+  assert.match(row.detail, /named no link and the search returned no PDF/);
+});
+await check("(c5) a sheet found only on someone else's site: the row says the host did not fit", async () => {
+  const url = "https://zzfixture-distributor.com/tq10-5.pdf";
+  const llm = answers([{ text: JSON.stringify({ urls: [url] }), resultUrls: [url] }]);
+  const row = await sheets.runMakerSpecSheetLookup(db, llm, eq(MAKER, "TQ10-5"), { fetchDocument: (async () => { throw new Error("must not fetch"); }) as never });
+  assert.equal(row.status, "not_found");
+  assert.match(row.detail, /link\(s\) were found, none on .* own site/);
+});
 await check("a search that returned nothing (model memory) stores not_found and fetches nothing", async () => {
   const row = await sheets.runMakerSpecSheetLookup(db, lookup(JSON.stringify({ urls: ["https://testphase.com/x.pdf"] }), [], 0), eq(MAKER, "TQ9-4"), { fetchDocument: (async () => { throw new Error("must not fetch"); }) as never });
   assert.equal(row.status, "not_found");

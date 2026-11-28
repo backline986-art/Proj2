@@ -210,6 +210,22 @@ export function candidateUrls(make: string, web: Pick<WebLookupResult, "text" | 
   return out;
 }
 
+/** Room for a search turn and the JSON after it (the other web lookups use 4000 to 6000). */
+const LOOKUP_MAX_TOKENS = 2000;
+
+/** WHY no candidate was left, so the stored row says which refusal it was: the answer was cut off,
+ *  it named nothing the search returned, or what was found is not on the maker's own site. */
+function noCandidateReason(make: string, web: Pick<WebLookupResult, "text" | "resultUrls" | "fetchedUrls">, cutOff: boolean): string {
+  if (cutOff) return "the answer was cut off at the token limit both times it was asked, before it named a link";
+  const returned = [...(web.resultUrls ?? []), ...(web.fetchedUrls ?? [])].map(s).filter(Boolean);
+  const picks = urlsFromAnswer(web.text);
+  const grounded = picks.filter((u) => returned.some((r) => sameUrl(r, u)));
+  const found = [...grounded, ...returned.filter((u) => /\.pdf(?:$|[?#])/i.test(u))];
+  if (found.length) return `${found.length} link(s) were found, none on ${make}'s own site`;
+  if (picks.length) return `the ${picks.length} link(s) the answer named were not among the search results`;
+  return "the answer named no link and the search returned no PDF";
+}
+
 export interface LookupDeps {
   fetchDocument?: typeof fetchPublicDocument;
   readPdf?: (filePath: string) => Promise<string>;
@@ -231,16 +247,23 @@ export async function runMakerSpecSheetLookup(
     return row;
   };
   if (!llm.webLookup) return notFound("no web lookup available on this installation");
-  const web = await llm.webLookup({
+  const ask = () => llm.webLookup!({
     label: "makerSpecSheet",
     system: LOOKUP_SYSTEM,
     user: `Manufacturer: ${eq.make}\nModel: ${eq.model}\nFind this product's datasheet PDF on the manufacturer's own website.`,
-    maxTokens: 400,
+    maxTokens: LOOKUP_MAX_TOKENS,
     maxSearches: 2,
   });
+  let web = await ask();
+  // AN ANSWER CUT OFF BEFORE ITS JSON IS NOT "NO LINK" (audit 2026-11-28). The search turn's own
+  // output shares the token budget; at 400 the turn stopped at the cap with no JSON written and the
+  // lookup stored "no datasheet link" for 30 days. Asked once more, and the row says so.
+  const cutOff = (w: WebLookupResult) => (w.stopReason === "max_tokens" || w.stopReason === "pause_turn") && !urlsFromAnswer(w.text).length;
+  const firstCutOff = cutOff(web);
+  if (firstCutOff) web = await ask();
   if (!web.groundedSearches) return notFound(`the search returned nothing${web.error ? ` (${web.error.slice(0, 160)})` : ""}`);
   const candidates = candidateUrls(eq.make, web);
-  if (!candidates.length) return notFound(`no datasheet link on ${eq.make}'s own site among ${web.resultUrls.length} search result(s)`);
+  if (!candidates.length) return notFound(`no datasheet link on ${eq.make}'s own site among ${web.resultUrls.length} search result(s): ${noCandidateReason(eq.make, web, cutOff(web))}`);
   const tried: string[] = [];
   let noListing: MakerSpecSheetRow | null = null;
   for (const url of candidates) {
