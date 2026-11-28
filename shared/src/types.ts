@@ -4315,6 +4315,9 @@ export interface ParserLlmExtraction {
   visionPageRoles?: Array<{ page: number; kind: PlanSheetKind; sheet?: string; title?: string; rotate?: number }>;
   /** Pages that were candidates but NOT read, and why (cap, byte budget, render failure). */
   visionSkipped?: Array<{ page: number; reason: string }>;
+  /** An unattended door tried the image-page read and it failed: the text read stands alone, and
+   *  the parse-review record says so (parserExtraction.extractParserFieldsFromDocuments). */
+  imagePagesReadFailed?: boolean;
   /** Plan-set pages whose TEXT was left out of the text read because the plan text was over the
    *  prompt's character bound (whole pages dropped from the middle, #697). Absent when all fit. */
   planTextPagesNotRead?: number[];
@@ -4358,6 +4361,44 @@ export interface ParserExtractionUncertainty {
   field: string;
   kind: "unreadable" | "guessed" | "inferred" | "conflicting" | "unconfirmed";
   reason: string;
+}
+
+/** One value a parse read but could not vouch for. `saved: false` = the value was WITHHELD from the
+ *  project (the unattended doors: nobody was there to confirm it); `saved: true` = it is on the
+ *  project as read (a person saw it marked on the Parser page, or it is merely unconfirmed). */
+export interface ParseReviewValue {
+  field: string;
+  /** "" for an account / meter field: its reading is never copied here (rule 2). */
+  value: string;
+  kind: string;
+  reason: string;
+  sheet: string;
+  excerpt: string;
+  saved: boolean;
+}
+
+/**
+ * WHAT A PARSE DID NOT SETTLE, saved with the project under the snapshot key `parseReview` by
+ * every intake door (backend/src/parseReview.ts is the one writer-side validator). An OBJECT on
+ * purpose: resolveRecipeFieldValues and the field history skip object values, so nothing here is
+ * a fill value or reaches the planner prompt. A parse that read everything cleanly saves none.
+ */
+export interface ParseReviewRecord {
+  /** "parser_page" | "email_intake" | "bulk_drop". */
+  door: string;
+  recordedAt: string;
+  /** The parse's own review lines (the Parser page's flags; the model's notes at the unattended doors). */
+  flags: string[];
+  uncertain: ParseReviewValue[];
+  /** Fields nothing in the packet states, and who supplies them. */
+  missing: Array<{ field: string; why: string }>;
+  conflicts: Array<{ field: string; readings: Array<{ value: string; source: string; sheet: string }>; note: string }>;
+  /** Image-only plan-set pages read by vision, and the fields that came from them. */
+  visionPages: number[];
+  visionFields: string[];
+  /** Plan-set pages NOBODY read, each with its reason (over the image-page cap, over the text
+   *  bound, text drawn as outlines, a failed render). */
+  pagesNotRead: Array<{ page: number; reason: string }>;
 }
 
 export interface ParserExtractionResolution {

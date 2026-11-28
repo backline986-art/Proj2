@@ -1709,7 +1709,9 @@ export function deleteProject(db: AppDb, projectId: string, deletedBy = "dashboa
 // A paid receipt disagreeing with a SHARED fee schedule (feeSchedules.raiseReceiptContradictionReviews)
 // is about the schedule, not this project's data: it rides the project only because review items
 // need one, and it must never hold that project's submission.
-const ADVISORY_REVIEW_ISSUE_TYPES = new Set(["Run triage", "Background job failed", "Fee schedule disagrees with paid receipts"]);
+// An unattended parse's "read but withheld / pages not read" item (parseReview.PARSE_REVIEW_ISSUE_TYPE)
+// is for a person to look at: it shows what the read did not settle and never holds a gate.
+const ADVISORY_REVIEW_ISSUE_TYPES = new Set(["Run triage", "Background job failed", "Fee schedule disagrees with paid receipts", "Parser read needs a look"]);
 export const NON_QC_REVIEW_FIELDS: ReadonlySet<string> = new Set(["correction", "permit_status", "prepare_submission", "autopilot"]);
 export function isCriticalReviewItem(item: { status: string; fieldName: string; issueType?: string }): boolean {
   // The bill wait (qc.ts) is advisory: read at call time, not in the Set, so no import-order cycle

@@ -3979,7 +3979,7 @@ async function applyStatusOverride() {
 // are MIRRORED here because this file cannot import them — backend/test/submitSeam.test.ts
 // fails the moment they drift from repository.ts.
 const NON_QC_REVIEW_FIELDS = ["correction", "permit_status", "prepare_submission", "autopilot"];
-const ADVISORY_REVIEW_ISSUE_TYPES = ["Run triage", "Background job failed", "Fee schedule disagrees with paid receipts"];
+const ADVISORY_REVIEW_ISSUE_TYPES = ["Run triage", "Background job failed", "Fee schedule disagrees with paid receipts", "Parser read needs a look"];
 function reviewItemBuckets(items) {
   const out = { qc: [], reading: [], notice: [] };
   for (const it of items || []) {
@@ -8443,8 +8443,10 @@ const REVIEW_NEXT_LINE = {
   // A run's note is about the filing itself: it must not read as settled (an older one can name a
   // required question the run left blank), so it says what to do before the filing goes in.
   runNote: "Check this on the portal before you submit. Dismissing it only clears this note.",
+  // An unattended parse left values unsaved or pages unread: there IS something to do.
+  parseReview: "Check each one against the documents and enter the right value on the project. Dismissing it only clears this card.",
 };
-const REVIEW_ADVISORY_TITLES = { "Run triage": "Note from the last portal run" };
+const REVIEW_ADVISORY_TITLES = { "Run triage": "Note from the last portal run", "Parser read needs a look": "The parser did not read everything" };
 
 // The inverter (or microinverter) model and count on file, read from the same keys, in the same
 // order, as the lookup route (server.ts autofill-specs) — so the model shown is the model looked up.
@@ -8586,7 +8588,7 @@ function reviewCardHtml(itemIn, ctxIn) {
     body = `<p style="margin:0 0 4px">${esc(text)}</p>
       ${item.issueType !== "Run triage" && item.sourceExcerpt ? `<p style="margin:0 0 4px"><strong>Source:</strong> ${esc(item.sourceExcerpt)}</p>` : ""}
       ${pending ? `<div class="actions"><button class="secondary" data-review-action="reject" data-review-id="${esc(item.id)}"><i data-lucide="check"></i><span>Dismiss</span></button></div>` : ""}
-      ${next(item.issueType === "Run triage" ? "runNote" : "advisory")}`;
+      ${next(item.issueType === "Run triage" ? "runNote" : item.issueType === "Parser read needs a look" ? "parseReview" : "advisory")}`;
   } else if (isInverter && pending) {
     body = inverterOutputBodyHtml(item, ctx) + next("inverter");
   } else {
@@ -8620,6 +8622,45 @@ function reviewCardHtml(itemIn, ctxIn) {
     </article>`;
 }
 
+// THE PARSE'S OWN REVIEW RECORD (snapshot.parseReview, backend/src/parseReview.ts): the values the
+// read could not vouch for, the documents' disagreements, and the plan-set pages nobody read, with
+// the reason for each. Every string is escaped; the record is validated server-side but it began
+// as model and page text. "" when the project carries no record.
+function parseReviewPanelHtml(review) {
+  if (!review || typeof review !== "object") return "";
+  const list = (v) => (Array.isArray(v) ? v : []);
+  const uncertain = list(review.uncertain);
+  const withheld = uncertain.filter((u) => u && !u.saved);
+  const kept = uncertain.filter((u) => u && u.saved);
+  const conflicts = list(review.conflicts);
+  const unread = list(review.pagesNotRead);
+  const missing = list(review.missing);
+  const flags = list(review.flags);
+  const total = withheld.length + kept.length + conflicts.length + unread.length + missing.length;
+  if (!total && !flags.length) return "";
+  const door = { parser_page: "the Parser page", email_intake: "email intake", bulk_drop: "a bulk drop" }[review.door] || "intake";
+  const valueLine = (u) => `<li><strong>${esc(u.field)}</strong>${u.value ? `: ${esc(u.value)}` : ""} <span class="muted">${esc([u.kind, u.sheet, u.reason].filter(Boolean).join(" · "))}</span></li>`;
+  const section = (title, rows) => (rows.length ? `<p style="margin:8px 0 2px"><strong>${esc(title)}</strong></p><ul style="margin:0 0 4px 18px;padding:0">${rows.join("")}</ul>` : "");
+  const byReason = {};
+  for (const p of unread) { const why = String((p && p.reason) || "not read"); (byReason[why] = byReason[why] || []).push(p.page); }
+  const summary = [
+    withheld.length ? plural(withheld.length, "value") + " read but not saved" : "",
+    kept.length ? plural(kept.length, "saved value") + " not confirmed" : "",
+    conflicts.length ? plural(conflicts.length, "conflict") : "",
+    unread.length ? plural(unread.length, "page") + " not read" : "",
+    missing.length ? plural(missing.length, "field") + " no document states" : "",
+  ].filter(Boolean).join(" · ") || plural(flags.length, "review note");
+  return `<details class="item" data-parse-review style="margin-bottom:.6rem"${withheld.length || unread.length ? " open" : ""}>
+    <summary style="cursor:pointer"><strong>What the parser did not settle</strong> <span class="muted">(${esc(door)}) ${esc(summary)}</span></summary>
+    ${section("Read but NOT saved: check each against the documents, then enter it", withheld.map(valueLine))}
+    ${section("Plan-set pages nobody read", Object.keys(byReason).map((why) => `<li>Page${byReason[why].length === 1 ? "" : "s"} ${esc(byReason[why].join(", "))} <span class="muted">${esc(why)}</span></li>`))}
+    ${section("The documents disagree", conflicts.map((c) => `<li><strong>${esc(c.field)}</strong>: ${esc(list(c.readings).map((r) => [r.value, r.sheet || r.source].filter(Boolean).join(" on ")).join(" vs "))} <span class="muted">${esc(c.note || "")}</span></li>`))}
+    ${section("Saved as read, not confirmed", kept.map(valueLine))}
+    ${section("No document states these", missing.map((m) => `<li><strong>${esc(m.field)}</strong> <span class="muted">${esc(m.why || "")}</span></li>`))}
+    ${section("Parser review notes", flags.map((f) => `<li>${esc(f)}</li>`))}
+  </details>`;
+}
+
 function renderReview() {
   const items = state.detail.humanReviewItems || [];
   const pending = items.filter((x) => x.status === "pending");
@@ -8651,9 +8692,12 @@ function renderReview() {
     ? `<details style="margin-top:.5rem"><summary style="cursor:pointer;color:var(--muted);font-size:13px">${plural(resolved.length, "resolved item")}</summary><div class="stack" style="margin-top:.5rem">${resolved.map(reviewCard).join("")}</div></details>`
     : "";
 
-  $("reviewItems").innerHTML = (pending.length || resolved.length)
+  // What the parse itself did not settle (saved with the project by every intake door): shown here
+  // whether or not a review item exists, so "no review items" never reads as "everything was read".
+  const parseHtml = parseReviewPanelHtml((project.parserSnapshot || {}).parseReview);
+  $("reviewItems").innerHTML = parseHtml + ((pending.length || resolved.length)
     ? `<div class="stack">${pendingHtml}</div>${resolvedHtml}`
-    : `<p class="muted">No human review items.</p>`;
+    : `<p class="muted">No human review items.</p>`);
 
   $("reviewItems").querySelectorAll("button[data-review-action]").forEach((button) => {
     button.addEventListener("click", () => updateReview(button.dataset.reviewId, button.dataset.reviewAction));

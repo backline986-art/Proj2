@@ -1631,7 +1631,68 @@
     return bad ? null : email;
   }
 
+  // -------------------------------------------------------------------------
+  // THE PARSE'S REVIEW RECORD — what this parse did not settle, SAVED with the project.
+  // The page built the review list, the flags and the unread pages, showed them, and dropped all of
+  // it at Save: the project then read "parser completed without explicit review flags" and the
+  // dashboard could not say which pages nobody read. buildParseReviewRecord is what the save sends
+  // (payload.parseReview); the backend validates and bounds it (backend/src/parseReview.ts) and
+  // never copies an account / meter reading. noteParseRead collects, from each server read, the
+  // pages read by vision and the pages NOBODY read (over the image-page cap, over the text bound,
+  // text drawn as outlines).
+  // -------------------------------------------------------------------------
+  function noteParseRead(acc, response) {
+    const out = acc || { visionPages: [], visionFields: [], pagesNotRead: [] };
+    const r = response || {};
+    const page = (n) => Number.isInteger(n) && n > 0;
+    for (const n of Array.isArray(r.visionPages) ? r.visionPages : []) if (page(n) && !out.visionPages.includes(n)) out.visionPages.push(n);
+    for (const f of Array.isArray(r.visionFields) ? r.visionFields : []) if (typeof f === 'string' && !out.visionFields.includes(f)) out.visionFields.push(f);
+    const unread = (n, reason) => { if (page(n) && !out.pagesNotRead.some((p) => p.page === n)) out.pagesNotRead.push({ page: n, reason: String(reason || 'not read') }); };
+    for (const s of Array.isArray(r.visionSkipped) ? r.visionSkipped : []) if (s) unread(s.page, s.reason);
+    const outlined = Array.isArray(r.outlinedTextPages) ? r.outlinedTextPages : (r.details && Array.isArray(r.details.outlinedTextPages) ? r.details.outlinedTextPages : []);
+    for (const n of outlined) unread(n, 'text drawn as outlines; a person reads this page');
+    for (const n of Array.isArray(r.planTextPagesNotRead) ? r.planTextPagesNotRead : []) unread(n, "over the text read's length bound; not read");
+    out.visionPages.sort((a, b) => a - b);
+    out.pagesNotRead.sort((a, b) => a.page - b.page);
+    return out;
+  }
+
+  /** The review line for image pages vision was NOT shown (the cap, the byte budget, a failed
+   *  render). '' when there are none. The outlined and over-the-bound pages have their own lines. */
+  function unreadImagePagesLine(reads) {
+    const skipped = ((reads && reads.pagesNotRead) || []).filter((p) => !/outlines|length bound/.test(p.reason));
+    if (!skipped.length) return '';
+    return `Plan-set page${skipped.length === 1 ? '' : 's'} ${skipped.map((p) => p.page).join(', ')} NOT read: ${[...new Set(skipped.map((p) => p.reason))].join('; ')}. Nothing on ${skipped.length === 1 ? 'it' : 'them'} reached the fields below — check ${skipped.length === 1 ? 'that sheet' : 'those sheets'} by hand.`;
+  }
+
+  function buildParseReviewRecord(input) {
+    const i = input || {};
+    const items = i.reviewItems || {};
+    const reads = i.reads || {};
+    const text = (v) => (v == null ? '' : typeof v === 'object' ? JSON.stringify(v) : String(v));
+    const record = {
+      door: i.door || 'parser_page',
+      flags: (i.flags || []).map(text).filter(Boolean),
+      // A person saw these marked on the page and saved: the value is on the project (saved: true).
+      uncertain: (items.unsure || []).map((u) => ({
+        field: u.field, value: text(u.value), kind: 'unsure', reason: text(u.why),
+        sheet: text(u.evidence && (u.evidence.sheet || u.evidence.source)), excerpt: text(u.evidence && u.evidence.excerpt), saved: true,
+      })),
+      missing: (items.missing || []).map((m) => ({ field: m.field, why: [text(m.why), m.suppliedBy ? `supplied by ${text(m.suppliedBy)}` : ''].filter(Boolean).join('; ') })),
+      conflicts: (items.conflicts || []).map((c) => ({
+        field: c.field, note: text(c.note),
+        readings: (c.readings || []).map((r) => ({ value: text(r.value), source: text(r.source), sheet: text(r.sheet) })),
+      })),
+      visionPages: reads.visionPages || [],
+      visionFields: reads.visionFields || [],
+      pagesNotRead: reads.pagesNotRead || [],
+    };
+    const empty = !record.flags.length && !record.uncertain.length && !record.missing.length && !record.conflicts.length && !record.visionPages.length && !record.pagesNotRead.length;
+    return empty ? null : record;
+  }
+
   return {
+    noteParseRead, unreadImagePagesLine, buildParseReviewRecord,
     looksLikeEmail, firstEmail, emailToSave,
     compareMeters, meterTargets, meterInText,
     mergeNotes, assertsMissingAttached,

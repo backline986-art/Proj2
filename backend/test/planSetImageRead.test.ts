@@ -244,12 +244,17 @@ await check("(e) ONE WRITER, ONE READER: only the plan-scan route writes the not
   const src = (f: string) => fs.readFileSync(path.join(REPO, "backend/src", f), "utf8");
   const server = src("server.ts");
   const route = server.slice(server.indexOf('"/api/parser/plan-scan-extract"'), server.indexOf('app.post("/api/parser/vision-extract"'));
-  assert.match(route, /recordPlanSetImageRead\(db, requestScope\(db, req\)\.orgId, bytes, read\.extraction\)/, "the route notes its own read, under the caller's org");
-  assert.ok(route.indexOf("recordPlanSetImageRead(") > route.indexOf("throw new HttpError(409"), "only after a read that is not the text path");
+  // THE ONE WRITER is the server's own image read (parserExtraction.readPlanSetImagePages), which the
+  // plan-scan route AND the unattended doors (email intake, bulk drop) call — so a set read at either
+  // door leaves the same note. It was the route itself until the unattended doors read image pages.
+  assert.match(route, /readPlanSetImagePages\(db, createLLMProvider\(\), bytes, \{ orgId: requestScope\(db, req\)\.orgId, defaultState \}\)/, "the route reads through the one image read, under the caller's org");
+  const shared = src("parserExtraction.ts");
+  const reader = shared.slice(shared.indexOf("export async function readPlanSetImagePages"), shared.indexOf("export async function extractParserFieldsFromDocuments"));
+  assert.match(reader, /if \(read\.mode !== "text" && read\.extraction\) \{[\s\S]*recordPlanSetImageRead\(db, opts\.orgId, pdfBytes, read\.extraction\)/, "the note is of the bytes it read, only after a read that is not the text path");
   const files = fs.readdirSync(path.join(REPO, "backend/src")).filter((f) => f.endsWith(".ts"));
   const writers = files.filter((f) => /INSERT INTO plan_set_image_reads|recordPlanSetImageRead\(/.test(src(f)) && f !== "planSetImageReads.ts");
-  assert.deepEqual(writers, ["server.ts"], "no other caller writes the note");
-  assert.equal((server.match(/recordPlanSetImageRead\(/g) ?? []).length, 1);
+  assert.deepEqual(writers, ["parserExtraction.ts"], "no other caller writes the note");
+  assert.equal((shared.match(/recordPlanSetImageRead\(/g) ?? []).length, 1);
   assert.match(src("repository.ts"), /planSetImageDisconnectRead = planSetImageDisconnectReadOf\(db, project\.id\)/, "the gate asks the one reader");
   assert.match(src("qc.ts"), /planTextNamesAcDisconnect\(planSetText\) \|\| Boolean\(planSetImageDisconnectRead\(db, projectId\)\)/, "QC asks the one reader");
   const engine = src("reviewerEngine.ts");
