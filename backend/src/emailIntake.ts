@@ -88,12 +88,13 @@ import type { AppDb } from "./db";
 import { DEFAULT_ORG_ID } from "./db";
 import type {
   EmailIntakeFile, EmailIntakeReason, EmailIntakeRunResult, EmailIntakeStatus, EmailIntakeView,
-  ParserExtractionResponse, ParserPayload, ProjectRecord,
+  LLMProvider, ParserExtractionResponse, ParserPayload, ProjectRecord,
 } from "../../shared/src/types";
+import { PARSE_REVIEW_KEY, parseReviewFromExtraction, raiseParseReviewItem, type UncertainRead } from "./parseReview";
 import { redactSecretValues } from "../../shared/src/portalSafety";
 import { addAuditLog } from "./audit";
 import { enqueueStageSteps } from "./autoStageSteps";
-import { classifyDoc, extractPdfText } from "./batchImport";
+import { classifyDoc, extractPdfLayoutText, extractPdfText } from "./batchImport";
 import { BRAND } from "./clientUpdates";
 import { clientEmailsOffFor, ensureStatusShareToken, formatProjectAddress, sendEmail, smtpConfigured, statusShareUrl } from "./clientNotifier";
 import { mapEmailText, renderEmail, type EmailContent, type EmailSection } from "./emailLayout";
@@ -122,7 +123,14 @@ const MAX_FILES = 20;
 export type IntakeSender = (to: string, subject: string, body: string, html?: string, headers?: IntakeReplyHeaders) => Promise<void>;
 /** The reply's way back to the job (#540): Reply-To intake+<tag>@… and a Message-ID naming the project. */
 export interface IntakeReplyHeaders { replyTo?: string; messageId?: string }
-export type IntakeExtractor = (input: { planText: string; utilityBillText: string; structuralLetterText: string }, orgId: string) => Promise<ParserExtractionResponse>;
+/** `documents.planSetPdf`: the plan set's own bytes, for the image-only pages its text layer cannot
+ *  reach (parserExtraction.extractParserFieldsFromDocuments). A separate argument, so the first
+ *  stays the documents' TEXT and nothing else (rule 2: never the email body). */
+export type IntakeExtractor = (
+  input: { planText: string; utilityBillText: string; structuralLetterText: string },
+  orgId: string,
+  documents?: { planSetPdf?: Uint8Array },
+) => Promise<ParserExtractionResponse>;
 
 export interface IntakeOptions {
   /** Org of the polling source. A DB-row IMAP source passes its org and `restrictToOrg`; the
@@ -309,9 +317,30 @@ async function pdfTextOf(content: Buffer): Promise<string> {
   try {
     const file = path.join(dir, "doc.pdf");
     fs.writeFileSync(file, content);
-    return await extractPdfText(file, 60);
+    return await extractPdfText(file, INTAKE_PDF_MAX_PAGES);
   } catch {
     return ""; // an encrypted or broken PDF reads as a scan: kept, never parsed
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+}
+/** How many pages of a PDF this door reads the text of. Pages past it are NAMED as not read. */
+const INTAKE_PDF_MAX_PAGES = 60;
+
+/**
+ * THE PLAN SET'S TEXT AS THE MODEL IS GIVEN IT: page-marked and in reading order
+ * (batchImport.extractPdfLayoutText — the reader the Parser page runs), where pdfTextOf's
+ * stream-order run is what slots and classifies the files. null when it cannot be built: the
+ * caller then falls back to the stream-order text, as before.
+ */
+async function planLayoutTextOf(content: Buffer): Promise<{ text: string; pageCount: number; pagesRead: number } | null> {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "email-intake-"));
+  try {
+    const file = path.join(dir, "doc.pdf");
+    fs.writeFileSync(file, content);
+    return await extractPdfLayoutText(file, INTAKE_PDF_MAX_PAGES);
+  } catch {
+    return null;
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
@@ -380,25 +409,52 @@ export const PARSER_PROJECT_FIELDS: ReadonlySet<string> = new Set([
   "azimuth", "tilt", "roofSlope", "mainServiceRating", "pvArrays", "stampRecommendation",
   "electricalCalcText", "structuralCalcText", "sitePlanNotesText", "roofPlanNotesText", "labelsText",
   "projectDescriptionText", "locateCalloutText",
+  "existingBuildingArea", "buildingHeightFeet", "buildingHeightInches", "numberOfStories", "numberOfBuildings",
+  "invRatedPowerW", "pvMicroRatedPowerW",
 ]);
 
-/** Every confident extracted value the Parser page would save, keyed by its own field ids
- *  (normalizeProject reads them). Low-confidence fields are left out and returned as `unsure`. */
-export function payloadFromExtraction(extraction: Pick<ParserExtractionResponse, "fields" | "lowConfidenceFields">): { payload: ParserPayload; unsure: string[] } {
+/**
+ * Every confident extracted value the Parser page would save, keyed by its own field ids
+ * (normalizeProject reads them).
+ *
+ * A LOW-CONFIDENCE FIELD IS NEVER A FACT HERE, AND NEVER LOST. Nobody is at this door to confirm
+ * a value, so a field the model listed in lowConfidenceFields is WITHHELD from the payload
+ * (`unsure`, as before) — but its reading, kind, reason and evidence now come back in `uncertain`,
+ * which placeIntakeJob saves with the project (parseReview.ts) and raises in the review queue.
+ * Before this the reading was dropped and only the field name reached the audit log, so a person
+ * saw a blank field and a "clean" parse.
+ * ONE KIND IS KEPT: a field whose every uncertainty row says `unconfirmed`. The prompt defines that
+ * as a value PRINTED beside its label and merely not repeated on a second document — stated, not
+ * guessed (the Parser page treats it as stated too). It is saved and still listed (`saved: true`).
+ * A low-confidence field with no uncertainty row, or with any other kind, stays withheld.
+ */
+export function payloadFromExtraction(extraction: Pick<ParserExtractionResponse, "fields" | "lowConfidenceFields" | "uncertainties">): { payload: ParserPayload; unsure: string[]; uncertain: UncertainRead[] } {
   const payload: ParserPayload = {};
   const unsure: string[] = [];
+  const uncertain: UncertainRead[] = [];
   const low = new Set(extraction.lowConfidenceFields ?? []);
   for (const [key, field] of Object.entries(extraction.fields ?? {})) {
     if (!PARSER_PROJECT_FIELDS.has(key)) continue;
     const value = field?.value;
     if (value == null || value === "" || (Array.isArray(value) && !value.length)) continue;
-    if (low.has(key)) { unsure.push(key); continue; }
+    if (low.has(key)) {
+      const rows = (extraction.uncertainties ?? []).filter((u) => u?.field === key);
+      const statedOnly = rows.length > 0 && rows.every((u) => u.kind === "unconfirmed");
+      uncertain.push({
+        field: key, value,
+        kind: rows.find((u) => u.kind !== "unconfirmed")?.kind ?? rows[0]?.kind ?? "unsure",
+        reason: rows.map((u) => u.reason).filter(Boolean).join(" ") || "the read marked this value low confidence and gave no reason",
+        sheet: field?.evidence?.sheet, excerpt: field?.evidence?.excerpt,
+        saved: statedOnly,
+      });
+      if (!statedOnly) { unsure.push(key); continue; }
+    }
     payload[key] = value as ParserPayload[string];
   }
   // The page fills its Racking box from the racking callouts' product (LLM_FIELD_TARGETS), and its
   // save sends that box as `racking`.
   if (payload.rackingSystem != null && payload.racking == null) payload.racking = payload.rackingSystem;
-  return { payload, unsure };
+  return { payload, unsure, uncertain };
 }
 
 /** The street line, normalised: what "the same address" compares. */
@@ -579,7 +635,8 @@ const FIELD_LABELS: Record<string, string> = {
   owner: "Homeowner name", street: "Project address", city: "City", state: "State", zip: "ZIP", ahj: "Permitting jurisdiction (AHJ)",
   utility: "Utility", account: "Utility account number", meter: "Meter number", dcKw: "System size (DC kW)", acKw: "System size (AC kW)",
   moduleMake: "Module make", moduleModel: "Module model", moduleQty: "Module count", invMake: "Inverter make", invModel: "Inverter model",
-  moduleWattage: "Module wattage", invQty: "Inverter count", invOutputW: "Inverter output (W)",
+  moduleWattage: "Module wattage", invQty: "Inverter count", invOutputW: "Inverter output current (A)", invRatedPowerW: "Inverter rated power (W)", pvMicroRatedPowerW: "Microinverter rated power (W)",
+  existingBuildingArea: "Existing house floor area (sq ft)", buildingHeightFeet: "Building height (ft)", buildingHeightInches: "Building height (remaining inches)", numberOfStories: "Number of storeys", numberOfBuildings: "Number of buildings",
   batteryMake: "Battery make", batteryModel: "Battery model", batteryQty: "Battery count",
   pvMicroMake: "Microinverter make", pvMicroModel: "Microinverter model", pvMicroQty: "Microinverter count",
   roofMaterial: "Roof material", roofMaterialSubtype: "Roof material type", mounting: "Mounting type", rackingSystem: "Racking system",
@@ -681,11 +738,14 @@ function messageKey(parsed: ParsedMail, raw: Buffer): string {
   return mid ? `mid:${mid}` : `sha256:${crypto.createHash("sha256").update(raw).digest("hex")}`;
 }
 
-function defaultExtractor(db: AppDb): IntakeExtractor {
-  return async (input, orgId) => {
+/** THE UNATTENDED DOORS' MODEL READ: the documents' text and the plan set's image-only pages, through
+ *  the one function the Parser page's two routes are built from (parserExtraction). `llm` is the
+ *  provider (tests pass a fake one, so the real path runs under it). */
+export function modelIntakeExtractor(db: AppDb, llm?: LLMProvider): IntakeExtractor {
+  return async (input, orgId, documents) => {
     const { createLLMProvider } = await import("./llm");
-    const { extractParserFields } = await import("./parserExtraction");
-    return extractParserFields(db, createLLMProvider(), input, orgId);
+    const { extractParserFieldsFromDocuments } = await import("./parserExtraction");
+    return extractParserFieldsFromDocuments(db, llm ?? createLLMProvider(), { ...input, planSetPdf: documents?.planSetPdf }, orgId);
   };
 }
 
@@ -767,17 +827,34 @@ export async function placeIntakeJob(db: AppDb, input: {
 
   // THE PARSE: the documents' own text only — never the email body (rule 2).
   const textOf = (docType: string) => usable.find((f) => f.docType === docType)?.pdfText ?? "";
-  const texts = { planText: textOf("plan_set"), utilityBillText: textOf("utility_bill"), structuralLetterText: textOf("structural_letter") };
+  // The plan set goes to the model page-marked and in READING ORDER (planLayoutTextOf): rows as the
+  // sheet is displayed, whatever its rotation and whatever order the drawing tool wrote its text in.
+  const planFile = usable.find((f) => f.docType === "plan_set" && f.kind === "pdf");
+  const planLayout = planFile && planFile.pdfText.trim() ? await planLayoutTextOf(planFile.content) : null;
+  const texts = { planText: planLayout ? planLayout.text : textOf("plan_set"), utilityBillText: textOf("utility_bill"), structuralLetterText: textOf("structural_letter") };
   let extraction: ParserExtractionResponse | null = null;
   if (texts.planText.trim() || texts.utilityBillText.trim() || texts.structuralLetterText.trim()) {
-    extraction = await (input.extract ?? defaultExtractor(db))(texts, orgId);
+    // The plan set's own bytes ride beside the text: its image-only pages (datasheets pasted in as
+    // pictures) are read by vision and merged under the text read, exactly as the Parser page does.
+    extraction = await (input.extract ?? modelIntakeExtractor(db))(texts, orgId, planFile && texts.planText.trim() ? { planSetPdf: planFile.content } : undefined);
   }
   const resolution = extraction?.clientResolution;
   if (resolution?.decision === "auto_assign" && resolution.clientId && resolution.clientId !== client.id
     && !input.otherLicenceVouched) {
     return { outcome: "unsorted", reason: "plan_set_names_another_client", files };
   }
-  const { payload, unsure } = extraction ? payloadFromExtraction(extraction) : { payload: {} as ParserPayload, unsure: [] };
+  const { payload, unsure, uncertain } = extraction ? payloadFromExtraction(extraction) : { payload: {} as ParserPayload, unsure: [], uncertain: [] };
+  // WHAT THIS PARSE DID NOT SETTLE, saved with the project it creates: the withheld readings, the
+  // conflicts, and the plan-set pages nobody read (over the image-page cap, outlined text, over the
+  // text bound). The door is the caller's own source ("email_intake", "bulk_drop").
+  // Pages past this door's page cap had no text read at all: named, unless vision read them.
+  const visionRead = new Set(extraction?.visionPages ?? []);
+  const pastCap = planLayout && planLayout.pageCount > planLayout.pagesRead
+    ? Array.from({ length: planLayout.pageCount - planLayout.pagesRead }, (_, i) => planLayout.pagesRead + 1 + i).filter((p) => !visionRead.has(p))
+      .map((page) => ({ page, reason: `past the first ${planLayout.pagesRead} pages; text not read` }))
+    : [];
+  const parseReview = parseReviewFromExtraction(input.source, extraction, uncertain, payload, pastCap);
+  if (parseReview) payload[PARSE_REVIEW_KEY] = parseReview;
   const probe = normalizeProject("probe", payload);
 
   // A REPLY TO THIS JOB'S ACKNOWLEDGEMENT (#540) attaches to it: a project of THIS client in THIS
@@ -795,6 +872,9 @@ export async function placeIntakeJob(db: AppDb, input: {
     projectId = existingId;
   } else {
     projectId = createProject(db, { ...payload, clientId: client.id }, orgId).project.id;
+    // One advisory review-queue item names what was withheld and what was not read (it never holds a
+    // gate). Only on CREATE: an attach applies no payload, so its parse changed nothing on the job.
+    try { raiseParseReviewItem(db, projectId, parseReview); } catch (err) { logger.warn("email-intake", `parse review item not raised for project ${projectId}: ${err instanceof Error ? err.message : String(err)}`); }
   }
   const existingDocs = new Set(
     db.query<Row>("SELECT doc_type, original_filename, size_bytes FROM project_documents WHERE project_id = ?", [projectId])

@@ -672,7 +672,9 @@ export function mergeImagePageRead(textRead: ParserLlmExtraction, imageRead: unk
   // the parser review lists them whether or not vision added a field.
   const outlinedTextPages = (Array.isArray(ir.outlinedTextPages) ? ir.outlinedTextPages : []).map(Number).filter((n) => Number.isInteger(n) && n > 0).slice(0, 200);
   const withOutlined = outlinedTextPages.length ? { outlinedTextPages: [...new Set([...(textRead.outlinedTextPages ?? []), ...outlinedTextPages])].sort((a, b) => a - b) } : {};
-  if (!visionPages.length && !visionFields.length) return outlinedTextPages.length ? { ...textRead, ...withOutlined } : textRead;
+  // No page was read: the pages that were candidates and could NOT be read (a failed render, the
+  // byte budget) still ride along, so the review names them instead of losing them with the read.
+  if (!visionPages.length && !visionFields.length) return outlinedTextPages.length || skipped.length ? { ...textRead, ...withOutlined, ...(skipped.length ? { visionSkipped: skipped } : {}) } : textRead;
   const imageNotes = typeof ir.notes === "string" ? ir.notes.trim().slice(0, 1500) : "";
   const lead = `IMAGE-ONLY PAGES: page${visionPages.length === 1 ? "" : "s"} ${listPages(visionPages)} of this plan set carry no text layer (pictures in the PDF), so ${visionPages.length === 1 ? "it was" : "they were"} read by VISION and merged under the text read — the text layer stays authoritative wherever both answer.${describeSkipped(skipped)} ${visionFields.length ? `Fields from vision: ${visionFields.join(", ")}; verify each against the sheet.` : "No field came from vision that the text had not already answered."}${filledOverAbsence.length ? ` The text read stated no value for ${filledOverAbsence.join(", ")} ("not stated"), so the image page's value is used.` : ""}${disagreed.length ? ` Where an image page disagrees with the text (${disagreed.join(", ")}), both readings are listed as conflicts.` : ""}${visionFields.length ? " A note below from the text read that these pages were unreadable describes the TEXT layer only." : ""}`;
   return {

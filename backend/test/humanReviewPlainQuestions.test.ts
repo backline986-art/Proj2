@@ -62,7 +62,7 @@ const wanted: Array<["function" | "const", string]> = [
   ["const", "REVIEW_WARNING_FIELDS"], ["function", "reviewNotesDisplay"], ["const", "ADVISORY_REVIEW_ISSUE_TYPES"],
   ["const", "REVIEW_NEXT_LINE"], ["const", "REVIEW_ADVISORY_TITLES"], ["function", "inverterSpecsFromSnapshot"],
   ["function", "inverterLookupBasis"], ["function", "inverterOutputBodyHtml"], ["function", "portalQuestionBodyHtml"],
-  ["function", "reviewCardHtml"], ["function", "renderReview"], ["function", "portalQuestionChoice"],
+  ["function", "reviewCardHtml"], ["function", "parseReviewPanelHtml"], ["function", "renderReview"], ["function", "portalQuestionChoice"],
   ["function", "savePortalQuestionAnswer"],
 ];
 const parts: string[] = [];

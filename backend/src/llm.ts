@@ -371,6 +371,29 @@ export function getRecentLlmCalls(sinceEpochMs: number): LlmCallRecord[] {
 // Stub (no API key configured)
 // ---------------------------------------------------------------------------
 
+/**
+ * WHAT EACH IMAGE OF A BILL / METER READ ACTUALLY SHOWS, from the read's own answer ("imageKinds").
+ * The label an image is sent under is only the upload box it was dropped in, so a bill in the meter
+ * box was filed — and later uploaded to a portal — as the meter photo. Validated here, never
+ * trusted: an index outside the images sent, a repeated index or an unknown kind is dropped. Returns
+ * 1-based indexes in the order the images were sent; [] when the read said nothing usable.
+ */
+export function imageKindsFromResponse(raw: string, imageCount: number): Array<{ index: number; shows: "utility_bill" | "meter_photo" | "neither" }> {
+  const block = /"imageKinds"\s*:\s*\[([^\]]*)\]/.exec(String(raw ?? ""));
+  if (!block) return [];
+  const out: Array<{ index: number; shows: "utility_bill" | "meter_photo" | "neither" }> = [];
+  for (const m of block[1].matchAll(/\{[^{}]*\}/g)) {
+    let entry: { index?: unknown; shows?: unknown };
+    try { entry = JSON.parse(m[0]) as { index?: unknown; shows?: unknown }; } catch { continue; }
+    const index = Number(entry.index);
+    const shows = String(entry.shows ?? "");
+    if (!Number.isInteger(index) || index < 1 || index > imageCount || out.some((o) => o.index === index)) continue;
+    if (shows !== "utility_bill" && shows !== "meter_photo" && shows !== "neither") continue;
+    out.push({ index, shows });
+  }
+  return out.sort((a, b) => a.index - b.index);
+}
+
 export class StubLLMProvider implements LLMProvider {
   async extractFields(): Promise<Record<string, unknown>> {
     return { provider: "stub", confidence: 0, notes: "No ANTHROPIC_API_KEY configured. Human review required." };
@@ -2042,8 +2065,10 @@ SYSTEM / EQUIPMENT
 - moduleMake, moduleModel, moduleWattage (number), moduleQty (number)
 - invMake, invModel, invQty (number) — for string inverters
 - invOutputW: string-inverter rated output CURRENT in amps (number; from datasheet/SLD)
+- invRatedPowerW: string-inverter rated (nameplate) AC output POWER in WATTS per unit (number, e.g. 7600 for a 7.6 kW inverter), as the datasheet or the SLD's inverter table prints it. Omit if not stated; never compute it from the amps.
 - pvMicroMake, pvMicroModel, pvMicroQty (number) — for MICROINVERTERS (e.g. Enphase, AP Systems). Use these instead of inv* when the system uses microinverters.
 - pvMicroOutputW: microinverter rated output CURRENT in amps per unit (number; from the micro datasheet)
+- pvMicroRatedPowerW: microinverter rated continuous AC output POWER in WATTS (VA) per unit (number, e.g. 290), as its datasheet or the SLD prints it. Omit if not stated; never compute it from the amps.
 - moduleVoc (number, volts), moduleIsc (number, amps), moduleVocTempCoeff (number, %/°C, negative as printed, e.g. -0.27): the MODULE's open-circuit voltage, short-circuit current and Voc temperature coefficient, read from the module DATASHEET page of the plan set (when the SLD's module table disagrees with the datasheet, the DATASHEET wins and say so in notes — a table copied from an older set is common). Omit when no datasheet page states them.
 - pvMicroMaxDcInputV (number, volts): the microinverter's maximum DC input voltage from its datasheet. Omit if not stated.
 - modulesPerString (number): modules in series in the longest string (string inverters only; from the SLD string table). Omit for microinverters.
@@ -2406,6 +2431,8 @@ You are shown one or more labeled images:
 Return ONLY JSON: {"fields":{"<id>":{"value":<string|number>,"confidence":<0..1>,"evidence":{"source":"utility_bill|meter_photo","sheet":"<region/label>","excerpt":"<verbatim text read>"}}}, "lowConfidenceFields":[...], "uncertainties":[{"field":"<id>","kind":"unreadable|guessed|inferred|conflicting|unconfirmed","reason":"<one short sentence>"}], "notes":"..."}
 Every lowConfidenceFields entry gets an "uncertainties" row saying WHY (a smudged digit, a value inferred from branding, two documents disagreeing).
 
+THE LABELS COME FROM UPLOAD BOXES AND CAN BE WRONG (a bill dropped in the meter box, and the reverse). Add to the JSON an "imageKinds" array with one entry per image, in the order shown: {"index": <1 for the first image, 2 for the second, ...>, "shows": "utility_bill" | "meter_photo" | "neither"} — what the image ACTUALLY shows whatever its label says: a utility bill / statement page, a photograph of the electric meter itself, or neither. When a label is wrong, still extract the fields from what the image shows, and cite the evidence "source" by what it shows.
+
 Include an "evidence" object for every field (where on the document you read it + a short verbatim excerpt) so a human can verify it.
 
 Field ids (omit if not present):
@@ -2442,10 +2469,14 @@ CRITICAL accuracy rules:
         messages: [{ role: "user", content }],
       }),
     );
-    return finalizeExtraction(
-      this.normalizeExtraction(this.textOf(msg), "Could not parse vision response."),
+    const raw = this.textOf(msg);
+    const extraction = finalizeExtraction(
+      this.normalizeExtraction(raw, "Could not parse vision response."),
       [...new Set(input.images.map((i) => (i.kind === "plan_page" ? "plan_set" : i.kind) as ParserFieldEvidence["source"]))],
     );
+    // What each image SHOWS, as the read saw it (the label is only the upload box it came from).
+    const imageKinds = imageKindsFromResponse(raw, input.images.length);
+    return imageKinds.length ? { ...extraction, imageKinds } : extraction;
   }
 
   /** The project object a caller hands in is a source of known secrets too: the payload scan matches

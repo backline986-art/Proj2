@@ -301,7 +301,7 @@
   <script src="/vendor/tesseract-5.1.1.min.js"></script>
   <!-- The review-list rules (meter cross-check, notes, resolution, scope callout, locates)
        live in their own DOM-free file so the backend unit test loads the SAME code. -->
-  <script src="parser-review.js?v=13"></script>
+  <script src="parser-review.js?v=14"></script>
 </head>
 
 <body>
@@ -866,6 +866,7 @@ const state = {
   // instead of each pass pushing its own "Notes:" / "Not fully sure" lines as it lands.
   passes:[],
   reviewItems:null,
+  parseReads:null,
   passNotes:null,
   electricalScope:null,
   // Which company the plan set points at (backend/src/clientMatch.ts), and whether a
@@ -1024,7 +1025,8 @@ async function extractPdfText(file, maxPages=40){
     const content = await page.getTextContent();
     // The layout copy AND the raw item order (parser-review.js pdfPageText): the page's own readers
     // keep both. What is POSTED to the smart read is one copy per page (runLlmAssist, #697).
-    pages.push({page:p, text:ParserReview.pdfPageText(content.items)});
+    // The page's own viewport transform carries /Rotate: lines follow the sheet as displayed.
+    pages.push({page:p, text:ParserReview.pdfPageText(content.items, page.getViewport({ scale: 1 }).transform)});
   }
 
   return {
@@ -3943,6 +3945,12 @@ const LLM_SNAPSHOT_KEYS = new Set([
   // Structural prescriptive-screen fields — evaluatePrescriptiveCriteria answers
   // the AHJ checklist rows from these; dropping them here regresses to [verify].
   'windSpeed','riskCategory','lightFrame','framingType','roofLayers','moduleHeightAboveRoof',
+  // Building geometry the read is ASKED for and the recipe map binds (existing area, height,
+  // storeys, buildings): both save allowlists dropped them, so every portal form took the 0 default.
+  'existingBuildingArea','buildingHeightFeet','buildingHeightInches','numberOfStories','numberOfBuildings',
+  // The inverter's rated POWER per unit. invOutputW / pvMicroOutputW hold AMPS despite their names
+  // (many rules read them as amps), so power has its own keys.
+  'invRatedPowerW','pvMicroRatedPowerW',
   'gravityWindDesign','manufacturerInstallation','rafterExceptionCompliant','moduleFiguresCompliant',
   'attachmentToFraming','attachmentSpacingIn','attachmentEdgeSpacingIn','attachmentsOutsideEdgeZone',
   'standingSeamMethod2Compliant','moduleListingAgency',
@@ -4100,8 +4108,9 @@ function buildEvidenceText(){
 
 async function runLlmAssist(){
   const planText = state.planDoc?.text || '';
-  const utilityBillText = state.ubDoc?.text || '';
-  const meterText = state.meterDoc?.text || '';
+  // let: a photo found in the wrong box is moved to its own (photoSlotFix below) before the text pass.
+  let utilityBillText = state.ubDoc?.text || '';
+  let meterText = state.meterDoc?.text || '';
   const structuralLetterText = state.structuralDoc?.text || '';
   const haveText = planText.trim() || utilityBillText.trim() || meterText.trim() || structuralLetterText.trim();
   // Collect document images for vision (most accurate for account/meter numbers).
@@ -4122,7 +4131,19 @@ async function runLlmAssist(){
     try {
       const v = await postJson('/api/parser/vision-extract', { images: visionImages, defaultState: getVal('state') || undefined });
       if (v.provider === 'stub'){ authOff = true; }
-      else { applyExtraction(v, applied, { vision: true, docsGiven: visionImages.map(i => i.kind) }); ranAny = true; }
+      else {
+        applyExtraction(v, applied, { vision: true, docsGiven: visionImages.map(i => i.kind) }); ranAny = true;
+        // FILE EACH PHOTO AS WHAT IT SHOWS, not as the box it was dropped in (ParserReview.photoSlotFix):
+        // the read says what each image is; a bill in the meter box (or the reverse) is moved to its
+        // own slot BEFORE anything is saved or uploaded, and said in the review flags. Anything the
+        // read leaves ambiguous is only flagged.
+        const slotFix = ParserReview.photoSlotFix(visionImages.map(i => i.kind), v.imageKinds, { utility_bill: !!state.ubFile, meter_photo: !!state.meterFile });
+        if (slotFix.action === 'swap'){ [state.ubFile, state.meterFile] = [state.meterFile, state.ubFile]; [state.ubDoc, state.meterDoc] = [state.meterDoc, state.ubDoc]; }
+        else if (slotFix.action === 'bill_to_meter'){ state.meterFile = state.ubFile; state.meterDoc = state.ubDoc; state.ubFile = null; state.ubDoc = null; }
+        else if (slotFix.action === 'meter_to_bill'){ state.ubFile = state.meterFile; state.ubDoc = state.meterDoc; state.meterFile = null; state.meterDoc = null; }
+        if (slotFix.action !== 'none'){ utilityBillText = state.ubDoc?.text || ''; meterText = state.meterDoc?.text || ''; }
+        slotFix.flags.forEach(f => state.reviewFlags.push(f));
+      }
     } catch (e){
       if (e.status === 502) state.reviewFlags.push(`Smart read (photos): ${e.message}`);
       else state.reviewFlags.push(`Smart read of photos unavailable: ${e.message}. Falling back to text scan for those fields.`);
@@ -4154,6 +4175,7 @@ async function runLlmAssist(){
       const resp = await fetch(`/api/parser/plan-scan-extract${planScanQuery}`, { method:'POST', headers:{'Content-Type':'application/pdf'}, body: state.planFile });
       const v = await resp.json().catch(() => ({}));
       noteOutlined(v);
+      state.parseReads = ParserReview.noteParseRead(state.parseReads, v);
       if (!resp.ok) throw Object.assign(new Error(v.error || `Request failed (${resp.status})`), { status: resp.status });
       if (v.provider === 'stub'){ authOff = true; }
       else {
@@ -4181,6 +4203,7 @@ async function runLlmAssist(){
       const resp = await fetch(`/api/parser/plan-scan-extract${planScanQuery}`, { method:'POST', headers:{'Content-Type':'application/pdf'}, body: state.planFile });
       const v = await resp.json().catch(() => ({}));
       noteOutlined(v);
+      state.parseReads = ParserReview.noteParseRead(state.parseReads, v);
       if (resp.ok && v.provider !== 'stub' && v.planReadMode === 'hybrid' && (v.visionPages || []).length) planImageRead = v;
       else if (!resp.ok && resp.status !== 409) state.reviewFlags.push(`The plan set's image-only pages could not be read by vision: ${v.error || `Request failed (${resp.status})`}. Check the datasheet values by hand.`);
     } catch (e){
@@ -4203,6 +4226,7 @@ async function runLlmAssist(){
       else {
         const docsGiven = [textPlan.trim() ? 'plan_set' : '', utilityBillText.trim() ? 'utility_bill' : '', meterText.trim() ? 'meter_photo' : '', structuralLetterText.trim() ? 'structural_letter' : ''].filter(Boolean);
         applyExtraction(t, applied, { vision: false, docsGiven });
+        state.parseReads = ParserReview.noteParseRead(state.parseReads, t);
         // Over the backend's bound whole pages are dropped from the middle of the set; say which.
         if (Array.isArray(t.planTextPagesNotRead) && t.planTextPagesNotRead.length){
           state.reviewFlags.push(`Plan set too long for one smart read: page(s) ${t.planTextPagesNotRead.join(', ')} were not read. Check those sheets by hand.`);
@@ -4231,6 +4255,16 @@ async function runLlmAssist(){
     state.reviewFlags.push(`Image-only pages in the plan set: read by VISION from pages ${(planImageRead.visionPages || []).join(', ')} — ${(planImageRead.visionFields || []).length ? `fields from vision: ${(planImageRead.visionFields || []).join(', ')}` : 'no field could be read'}. The text pass did not run, so nothing was checked against the text layer. Verify each against the sheet.`);
     ranAny = true;
   }
+
+  // Image pages vision was not shown (the page cap, the byte budget, a failed render): the page
+  // said which pages it READ and never which it did not.
+  // Pages past this page's own text cap were never read as text: named, unless vision read them.
+  const planPagesRead = Array.isArray(state.planDoc?.pages) ? state.planDoc.pages.length : 0;
+  if (planIsPdf && planPagesRead && (state.planDoc.pageCount || 0) > planPagesRead){
+    state.parseReads = ParserReview.noteParseRead(state.parseReads, { visionSkipped: ParserReview.pagesPastTextCap(planPagesRead, state.planDoc.pageCount, state.parseReads) });
+  }
+  const unreadImagePages = ParserReview.unreadImagePagesLine(state.parseReads);
+  if (unreadImagePages) state.reviewFlags.push(unreadImagePages);
 
   if (outlinedPages.length){
     outlinedPages.sort((a, b) => a - b);
@@ -4407,6 +4441,7 @@ async function runParse(){
   state.llmStructureReading = null;
   state.passes = [];
   state.reviewItems = null;
+  state.parseReads = null;
   state.passNotes = null;
   state.suggestedClient = null;
   state.clientResolution = null;
@@ -5739,6 +5774,11 @@ function buildSystemPayload() {
   if (printedLicences.length || clean(sc.contractorCompany)) {
     payload.planSetInstaller = { companyName: clean(sc.contractorCompany), licences: printedLicences };
   }
+  // WHAT THIS PARSE DID NOT SETTLE goes with the project (parser-review.js buildParseReviewRecord):
+  // the review flags, the values read but not vouched for, the conflicts and the pages nobody
+  // read. Before this the save dropped all of it and the project read as a clean parse. null
+  // clears a record an earlier parse of the same project left.
+  payload.parseReview = ParserReview.buildParseReviewRecord({ door: 'parser_page', flags: state.reviewFlags, reviewItems: state.reviewItems, reads: state.parseReads });
   return payload;
 }
 

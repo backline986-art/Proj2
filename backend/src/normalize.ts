@@ -3,6 +3,7 @@ import { nowIso } from "./time";
 import { firstEmail } from "../../shared/src/emailAddress";
 import { isBillHolderName } from "./accountHolders";
 import { isPlaceholderBatteryModel } from "../../shared/src/batteryControls";
+import { PARSE_REVIEW_KEY, parseReviewSummaryLines, sanitizeParseReview } from "./parseReview";
 
 /** THE OPERATOR'S PER-TRACK ISSUER, as it is stored: flat parser-snapshot keys, written by
  *  PUT /api/projects/:id exactly like permitPathOverride / structureTypeOverride (updateProject merges
@@ -74,11 +75,26 @@ function confidenceSummary(payload: ParserPayload): string {
   const flags = payload.reviewFlags;
   const priorities = payload.utilityPriorityFlags;
   const lines: string[] = [];
-  if (Array.isArray(flags) && flags.length) lines.push(`${flags.length} parser review flag(s)`);
+  // THE PARSE'S OWN REVIEW RECORD (parseReview.ts): what every intake door saves of what it did not
+  // settle. Without it a save from any door read "completed without explicit review flags" —
+  // the Parser page never sent its flags, and the unattended doors had nowhere to put theirs.
+  const review = sanitizeParseReview(payload[PARSE_REVIEW_KEY], payload);
+  const flagCount = Array.isArray(flags) && flags.length ? flags.length : review?.flags.length ?? 0;
+  if (flagCount) lines.push(`${flagCount} parser review flag(s)`);
+  lines.push(...parseReviewSummaryLines(review));
   if (Array.isArray(priorities) && priorities.length) lines.push(`${priorities.length} utility/electrical priority flag(s)`);
   const readiness = str(payload, "packetReadinessText");
   if (/MISSING/i.test(readiness)) lines.push("packet readiness has missing items");
   return lines.join("; ") || "parser completed without explicit review flags";
+}
+
+/** The snapshot with its parse-review record validated (it arrives posted by the Parser page) —
+ *  or without the key when there is nothing in it. */
+function withParseReview(snapshot: ParserPayload, payload: ParserPayload): ParserPayload {
+  if (!(PARSE_REVIEW_KEY in snapshot)) return snapshot;
+  const review = sanitizeParseReview(payload[PARSE_REVIEW_KEY], payload);
+  const { [PARSE_REVIEW_KEY]: _posted, ...rest } = snapshot;
+  return review ? { ...rest, [PARSE_REVIEW_KEY]: review } : rest;
 }
 
 // Canonical keys that canonicalizeSnapshot fills FROM A DIFFERENT parser field (first non-empty
@@ -390,7 +406,7 @@ export function normalizeProject(
     status,
     currentStage: status === "parsed" ? "Parsed by front-end engine" : status,
     parserConfidenceSummary: confidenceSummary(payload),
-    parserSnapshot: canonicalizeSnapshot(payload),
+    parserSnapshot: withParseReview(canonicalizeSnapshot(payload), payload),
     existingSystem: existingSystemFromSnapshot(payload),
     ...withTrackIssuers(payload),
     createdAt,
