@@ -797,7 +797,7 @@ function readableDocumentText(text: unknown): boolean {
 }
 
 /** A microinverter design has no DC PV source circuits to label beyond the module leads. */
-function isMicroinverterDesign(project: ProjectRecord, allText: string): boolean {
+export function isMicroinverterDesign(project: ProjectRecord, allText: string): boolean {
   // Same supersession rule as isMicroOrMlpeInverter (#270), so the two readers agree on a row
   // verified away from its micro parse: its DC-circuit labels come back.
   if (!microEvidenceSuperseded(project) && (str(project, "pvMicroModel") || str(project, "pvMicroQty"))) return true;

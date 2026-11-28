@@ -39,7 +39,8 @@ import type { CodeEdition, JobScope, ProjectRecord } from "../../shared/src/type
 import { deriveJobScope, resolveJobScope, scopeHasNewPv } from "./jobScope";
 import { projectDocsByType } from "./projectDocuments";
 import { activeStructuralLetterConfirmation, confirmedByLine } from "./structuralLetter";
-import { duplicateUploads, uploadedSubmissionDocuments } from "./submissionDocuments";
+import { duplicateUploads, splitCutFiles, uploadedSubmissionDocuments } from "./submissionDocuments";
+import { acModuleSheetPagesOfPart } from "./docSplitter";
 import { filledFormsByDocType, applicationKindForPath, loadStoredTemplates, formAllowedForPath, formContradictsPath } from "./ahjForms";
 import { resolvePermitPath, resolveStampRequirement, hasStampedStructuralEvidence } from "./permitPath";
 import { codeLimitProvenance, resolveEffectiveCodeContext } from "./codeProfiles";
@@ -1152,12 +1153,28 @@ export function documentInventory(db: AppDb, project: ProjectRecord): DocumentIn
   // attached once, under the first type. Its row is FLAGGED rather than silently satisfied or
   // silently blocking: one datasheet can legitimately cover both (an AC module's sheet includes its
   // microinverter), and a person confirms which.
-  const duplicates = new Map(duplicateUploads(projectDocsByType(db, project.id)).map((d) => [d.docType, d.sameAs]));
+  const duplicates = new Map(duplicateUploads(projectDocsByType(db, project.id), splitCutFiles(db, project.id)).map((d) => [d.docType, d.sameAs]));
   const presence: DocPresence[] = required.map((item) => {
     const sameAs = duplicates.get(item.docType);
     const p = sameAs && uploads[sameAs]
       ? { present: true, via: `same file as ${sameAs.replace(/_/g, " ")} — attached once; confirm it covers the ${item.docType.replace(/_spec$/, "").replace(/_/g, " ")}` }
       : present(item, project, docsByType, uploads, filledApplications);
+    // AN AC MODULE'S ONE DATA SHEET COVERS THE INVERTER ROW (audit 2026-11-28). The splitter cut the
+    // module data sheet as the inverter spec too because the sheet shows the integrated
+    // microinverter's AC output and UL 1741 listing (docSplitter, the AC-module rule). The row says
+    // which sheet covers it, so nobody looks for a standalone inverter sheet the set does not have.
+    if (item.docType === "inverter_spec" && p.present && p.via === "attached file" && uploads.inverter_spec) {
+      try {
+        const cut = db.get<{ original_filename: string | null }>(
+          "SELECT original_filename FROM project_documents WHERE project_id = ? AND doc_type = 'inverter_spec' AND source = 'split' AND stored_path = ?",
+          [project.id, uploads.inverter_spec],
+        );
+        const pages = acModuleSheetPagesOfPart(String(cut?.original_filename ?? ""));
+        if (pages.length) {
+          return { ...item, present: true, via: `attached file — the module data sheet (plan set page ${pages.join(", ")}): an AC module's one data sheet, which carries the integrated microinverter's AC output and UL 1741 listing` };
+        }
+      } catch { /* the wording is extra: the row stays "attached file" */ }
+    }
     // THE ENGINEER'S LETTER BOUND INTO THE PLAN SET, CONFIRMED BY A NAMED PERSON (#198; owner ruling
     // 2026-10-08). The splitter files it as `structural`, not under a stamped-letter type, so the row
     // read it as missing while the same letter decided the job was engineered. Text matching only

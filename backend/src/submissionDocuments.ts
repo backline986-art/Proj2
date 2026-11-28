@@ -84,7 +84,20 @@ function utilityDocsNamedByAhj(db: AppDb, project: ProjectRecord): Set<string> {
 // is dropped from the upload set and reported, so the inventory can say "same file as …".
 const DUPLICATE_PRECEDENCE = ["plan_set", "sld", "site_plan", "structural", "structural_letter", "stamped_plans", "module_spec", "inverter_spec",
   "racking_spec", "battery_spec", "ess_detail", "labels", "utility_bill", "meter_photo"];
-export function duplicateUploads(docs: Record<string, string>): Array<{ docType: string; sameAs: string }> {
+//
+// ONE SHEET THE SPLITTER CUT UNDER TWO TYPES IS NOT A MIS-SLOT (audit 2026-11-28). A combined
+// "MODULE / INVERTER SPECIFICATION" sheet, and an AC module's one data sheet (docSplitter, the
+// AC-module rule), are cut from the plan set into the module spec AND the inverter spec — the same
+// bytes on purpose. Dropping the second left a portal's inverter-spec slot with no file. So two
+// files that are both splitter cuts (`splitCuts`, splitCutFiles below) are never reported here: each
+// slot gets its sheet. A person's or the intake's byte-identical uploads are still one document.
+// `splitCuts` is required, not optional: a caller that forgot it would silently drop the file again.
+export function splitCutFiles(db: AppDb, projectId: string): Set<string> {
+  return new Set(db.query<{ stored_path: string | null }>(
+    "SELECT stored_path FROM project_documents WHERE project_id = ? AND source = 'split'", [projectId],
+  ).map((r) => String(r.stored_path ?? "")).filter(Boolean));
+}
+export function duplicateUploads(docs: Record<string, string>, splitCuts: ReadonlySet<string>): Array<{ docType: string; sameAs: string }> {
   const rank = (t: string) => { const i = DUPLICATE_PRECEDENCE.indexOf(t); return i < 0 ? DUPLICATE_PRECEDENCE.length : i; };
   const hashes = new Map<string, string>();
   const out: Array<{ docType: string; sameAs: string }> = [];
@@ -102,8 +115,9 @@ export function duplicateUploads(docs: Record<string, string>): Array<{ docType:
     let digest = "";
     try { digest = createHash("sha256").update(fs.readFileSync(file)).digest("hex"); } catch { continue; }
     const first = hashes.get(digest);
-    if (first && first !== type) out.push({ docType: type, sameAs: first });
-    else hashes.set(digest, type);
+    if (first && first !== type) {
+      if (!(splitCuts.has(file) && splitCuts.has(docs[first]))) out.push({ docType: type, sameAs: first });
+    } else hashes.set(digest, type);
   }
   return out;
 }
@@ -112,7 +126,7 @@ export function uploadedSubmissionDocuments(db: AppDb, project: ProjectRecord): 
   const docs = projectDocsByType(db, project.id);
   // A filing's confirmation screenshot (#569) is evidence that it went, never a document to upload.
   delete docs[SUBMISSION_CONFIRMATION_DOC_TYPE];
-  for (const dup of duplicateUploads(docs)) delete docs[dup.docType];
+  for (const dup of duplicateUploads(docs, splitCutFiles(db, project.id))) delete docs[dup.docType];
   const permitPath = resolvePermitPath(project).path;
   const rows = db.query<{ doc_type: string; stored_path: string; original_filename: string }>(
     "SELECT doc_type, stored_path, original_filename FROM project_documents WHERE project_id = ?", [project.id]);

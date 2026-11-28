@@ -85,7 +85,9 @@ export function recordPlanSetImageRead(db: AppDb, orgId: string, pdfBytes: Uint8
     kept.push({ field, value, sheet: String(entry.evidence?.sheet ?? "").replace(/\s+/g, " ").trim().slice(0, 40) });
   }
   const at = nowIso();
-  db.run("DELETE FROM plan_set_image_reads WHERE org_id = ? AND pdf_sha256 = ?", [org, sha]);
+  // Its own fields only: the splitter's note about a module data sheet page (below) is another read
+  // of the same bytes and outlives a re-scan.
+  db.run(`DELETE FROM plan_set_image_reads WHERE org_id = ? AND pdf_sha256 = ? AND field IN (${FIELDS.map(() => "?").join(", ")})`, [org, sha, ...FIELDS]);
   for (const row of kept) {
     db.run(
       "INSERT INTO plan_set_image_reads (org_id, pdf_sha256, field, value, sheet, read_mode, read_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
@@ -146,4 +148,60 @@ export function planSetImageDisconnectRead(db: AppDb, projectId: string): PlanSe
     if (row && value) return { field, value, sheet: String(row.sheet ?? ""), readAt: String(row.read_at ?? "") };
   }
   return null;
+}
+
+// WHAT THE PAGE-INDEX READ SAID ABOUT A MODULE DATA SHEET PAGE (audit 2026-11-28).
+//
+// An AC module (a module with a factory-integrated microinverter) has ONE data sheet: the module data,
+// the microinverter's AC output table and its UL 1741 certificate line. The splitter files that page
+// as the module spec by its sheet name, and when the page is an image only the page-index read can
+// say whether it is the inverter's sheet too. The splitter asks once (docSplitter.buildUtilityPackage)
+// and notes the answer here, keyed like the note above by the plan set's bytes and the job's own org,
+// so the next reconcile pass classifies the page the same way without a second model call and never
+// asks again — including when the read could not run ("unread").
+//
+// Kept: the 1-based page number (in the field name) and the read's own sheet kind, with "+inverter"
+// when it said the sheet carries the integrated inverter. Never page text, never a job field.
+const MODULE_SHEET_FIELD = "moduleSheetPage:";
+const MODULE_SHEET_VALUE = /^(?:[a-z_]{1,24}(?:\+inverter)?|unread)$/;
+/** The value for "this module data sheet is the inverter's data sheet too". */
+export const MODULE_SHEET_WITH_INVERTER = "module_spec+inverter";
+/** The value for "the page was put to the read and no answer came back". */
+export const MODULE_SHEET_UNREAD = "unread";
+
+function orgOfProject(db: AppDb, projectId: string): string {
+  return String(db.query<{ org_id: string | null }>("SELECT org_id FROM projects WHERE id = ?", [projectId])[0]?.org_id || DEFAULT_ORG_ID);
+}
+
+/** Note the page-index read's answer for module data sheet pages of this plan set. The only writer;
+ *  called by the splitter with the bytes it cut. A value without the stored shape is not kept. */
+export function recordModuleSheetReads(db: AppDb, projectId: string, pdfBytes: Uint8Array, reads: Record<string, string>): void {
+  const org = orgOfProject(db, projectId);
+  const sha = planSetPdfSha256(pdfBytes);
+  const at = nowIso();
+  for (const [page, value] of Object.entries(reads)) {
+    if (!/^[1-9][0-9]{0,3}$/.test(page) || !MODULE_SHEET_VALUE.test(value)) continue;
+    db.run("DELETE FROM plan_set_image_reads WHERE org_id = ? AND pdf_sha256 = ? AND field = ?", [org, sha, `${MODULE_SHEET_FIELD}${page}`]);
+    db.run(
+      "INSERT INTO plan_set_image_reads (org_id, pdf_sha256, field, value, sheet, read_mode, read_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+      [org, sha, `${MODULE_SHEET_FIELD}${page}`, value, "", "vision", at],
+    );
+  }
+}
+
+/** THE ONE READER of that note: 1-based page → what the read said, for the plan set stored at
+ *  `planSetFile`, by the job's own org. {} when nothing was noted. Writes nothing. */
+export function moduleSheetReads(db: AppDb, projectId: string, planSetFile: string): Record<string, string> {
+  const sha = shaOfFile(planSetFile);
+  if (!sha) return {};
+  const rows = db.query<{ field: string; value: string }>(
+    "SELECT field, value FROM plan_set_image_reads WHERE org_id = ? AND pdf_sha256 = ? AND field LIKE ?",
+    [orgOfProject(db, projectId), sha, `${MODULE_SHEET_FIELD}%`],
+  );
+  const out: Record<string, string> = {};
+  for (const row of rows) {
+    const page = String(row.field).slice(MODULE_SHEET_FIELD.length);
+    if (/^[1-9][0-9]{0,3}$/.test(page) && MODULE_SHEET_VALUE.test(String(row.value))) out[page] = String(row.value);
+  }
+  return out;
 }

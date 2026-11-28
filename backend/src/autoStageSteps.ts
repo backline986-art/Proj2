@@ -146,11 +146,16 @@ async function runLocalSteps(db: AppDb, projectId: string, opts: StageStepOption
     // type as missing instead of counting the wrong sheet as attached.
     // Counted AFTER the withdrawal: a split whose every part was stale is no split at all.
     let gaps: string[] = [];
+    // Module data sheets of a microinverter job with no inverter spec that the page-index read has not
+    // been asked about (docSplitter, the AC-module rule): this pass holds the model, so it splits again
+    // to ask. Asked once per plan set: the answer, or that none came, is noted and never asked again.
+    let moduleSheetsToRead: number[] = [];
     if (planSet) {
       try {
         const { reconcileSplitParts, undecidedSpecSummary } = await import("./docSplitter");
         const reconciled = await reconcileSplitParts(db, projectId);
         gaps = reconciled.gaps;
+        moduleSheetsToRead = reconciled.moduleSheetsToRead;
         if (reconciled.withdrawn.length) {
           // A withdrawn spec part usually leaves its type to a person (#91): name the spec-named
           // pages they choose from, here too — a pass that does not re-split logs nothing else.
@@ -171,7 +176,7 @@ async function runLocalSteps(db: AppDb, projectId: string, opts: StageStepOption
           [projectId, planSet.uploadedAt],
         )?.n ?? 0)
       : 0;
-    if (planSet && (splitNewer === 0 || gaps.length > 0)) {
+    if (planSet && (splitNewer === 0 || gaps.length > 0 || moduleSheetsToRead.length > 0)) {
       step("split");
       try {
         const { buildUtilityPackage, undecidedSpecSummary } = await import("./docSplitter");
@@ -196,6 +201,9 @@ async function runLocalSteps(db: AppDb, projectId: string, opts: StageStepOption
             ? { specPagesByVision: Object.entries(pkg.specPagesByVision).map(([p, k]) => `${p}(${k})`).join(",") } : {}),
           ...(pkg.specPagesWithheld?.length ? { specPagesWithheld: pkg.specPagesWithheld.join(",") } : {}),
           ...(gaps.length ? { resplitFor: gaps.join(",") } : {}),
+          // The AC-module rule: module data sheets put to the read, and the ones also cut as the inverter spec.
+          ...(moduleSheetsToRead.length ? { moduleSheetsRead: moduleSheetsToRead.join(",") } : {}),
+          ...(pkg.acModuleSheetPages?.length ? { acModuleSheetPages: pkg.acModuleSheetPages.join(",") } : {}),
         });
       } catch (err) {
         logger.warn("stage-auto", "auto-split failed; document gates rule on what exists", {
