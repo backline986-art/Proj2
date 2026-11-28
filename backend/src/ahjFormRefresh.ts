@@ -340,6 +340,11 @@ export function startKbLinkCheckScheduler(db: AppDb): void {
     task: "kb_link_check",
     days,
     scope: "kb-links",
+    // NOT AT BOOT. The status sweep's first run is 30 s after boot and reads every filing that came
+    // due while the server was off; the link check probes dozens of stored portal links. Both at
+    // once on a restart is what got the server's IP banned (2026-11-27). The shared per-host turn
+    // (hostThrottle) already keeps them apart per host; this keeps them apart in time too.
+    firstDelayMs: 7 * 60_000,
     tick: async () => {
       const { createLLMProvider } = await import("./llm");
       const summary = await checkKnowledgeLinks(db, createLLMProvider());
@@ -364,6 +369,8 @@ export function startAhjFormRefreshScheduler(db: AppDb): void {
     task: "ahj_form_refresh",
     days,
     scope: "ahj-forms",
+    // A slot of its own after boot, clear of the status sweep (30 s) and the link check (7 min).
+    firstDelayMs: 12 * 60_000,
     tick: async () => {
       const { createLLMProvider } = await import("./llm");
       const summary = await refreshAhjFormTemplates(db, createLLMProvider());

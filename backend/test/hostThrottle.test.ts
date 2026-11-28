@@ -300,5 +300,26 @@ await check("(s4) MUST-PASS next checks are spread: two filings read in the same
   for (const id of [T5, T6]) assert.ok(checkSpreadMs(id) >= 0 && checkSpreadMs(id) < CHECK_SPREAD_MS);
 });
 
+await check("(s5) MUST-PASS a restart's catch-up is spread: at most SWEEP_TARGETS_PER_HOST filings per host per sweep, the rest next sweep", async () => {
+  db.run("DELETE FROM portal_host_pauses");
+  ht._resetHostThrottle();
+  ht._setHostThrottleSeams({ sleep: async (ms) => { sleeps.push(ms); }, minGapMs: ht.HOST_MIN_GAP_MS });
+  const cap = repo.SWEEP_TARGETS_PER_HOST;
+  // Everything that came due while the server was off: cap + 3 filings on one state portal, one elsewhere.
+  const many = Array.from({ length: cap + 3 }, (_, i) => target(`https://permits.state-portal.example/record/${100 + i}`, `BLD-${100 + i}`, `Town ${i}`));
+  const elsewhere = target("https://permits.elsewhere.example/record/9", "BLD-9", "Elsewhere");
+  only(...many, elsewhere);
+  answerFor = (url) => ({ status: 200, headers: { "content-type": "text/html" }, body: `<html><body><main>Record BLD-${url.split("/").pop()} Record Status: Permit Issued. Inspections may now be scheduled online.</main></body></html>` });
+  await repo.runDuePermitChecks(db, "permit");
+  const stateHits = () => new Set(httpLog.filter((u) => u.includes("state-portal")).map((u) => u.split("/").pop())).size;
+  assert.equal(stateHits(), cap, `the first sweep read ${stateHits()} filings on the state portal, not ${cap}`);
+  assert.ok(httpLog.some((u) => u.includes("elsewhere.example")), "another host is not held back by the cap");
+  const stillDue = many.filter((id) => Date.parse(rowOf(id).next_check_at) <= Date.now());
+  assert.equal(stillDue.length, 3, "the rest stay due for the next sweep (not rescheduled a day out)");
+  httpLog.length = 0;
+  await repo.runDuePermitChecks(db, "permit");
+  assert.equal(stateHits(), 3, "the next sweep reads the rest");
+});
+
 globalThis.fetch = realFetch;
 finish("hostThrottle");

@@ -7878,6 +7878,10 @@ export function recipeDisciplineForTarget(targetType: string, permitType: string
 /** THE BACKGROUND SWEEP (scheduler, every 15 minutes; the permit_checks/nem_checks jobs): only the
  *  targets whose next_check_at has passed. A person's click does not come here — it checks NOW
  *  (runPermitChecksNow, #160). */
+/** Filings read per portal host per background sweep (see runDuePermitChecks). Each read is up to a
+ *  handful of requests, 10 s apart on that host; six fit comfortably inside a 15-minute sweep. */
+export const SWEEP_TARGETS_PER_HOST = 6;
+
 export async function runDuePermitChecks(
   db: AppDb,
   targetType: "permit" | "nem" | "all" = "all",
@@ -7886,12 +7890,33 @@ export async function runDuePermitChecks(
   // Kind by trackKind (the ONE answer), judged in JS rather than a raw `target_type = ?` filter
   // that would poll a legacy 'permit'-typed NEM filing in the permit sweep. The 50-per-sweep cap
   // is applied AFTER the kind filter, as the SQL LIMIT was, so a kind-scoped sweep still gets 50.
+  // THE CATCH-UP AFTER A RESTART IS SPREAD, NOT BURST (live 2026-11-27: the operator restarted the
+  // server, the first sweep 30 s later read every filing that had come due while it was off — 28,
+  // several on one state portal — and that portal rate-limited and then banned the IP). At most
+  // SWEEP_TARGETS_PER_HOST filings per portal host per sweep, oldest-due first; the rest stay due
+  // and are read by the next sweeps, 15 minutes apart. Every request inside still takes its host's
+  // turn (hostThrottle). The project's AHJ / utility come along so a filing with no link is grouped
+  // by the portal it would sign in to (permitTargetPaceKey), as the click groups it.
+  const perHost = new Map<string, number>();
+  let heldForNextSweep = 0;
   const due = db.query<Row>(
-    `SELECT * FROM permit_check_targets
-     WHERE active = 1 AND (next_check_at IS NULL OR next_check_at <= ?)
-     ORDER BY next_check_at ASC, created_at ASC`,
+    `SELECT t.*, p.ahj AS project_ahj, p.utility AS project_utility
+     FROM permit_check_targets t LEFT JOIN projects p ON p.id = t.project_id
+     WHERE t.active = 1 AND (t.next_check_at IS NULL OR t.next_check_at <= ?)
+     ORDER BY t.next_check_at ASC, t.created_at ASC`,
     [now],
-  ).filter((row) => targetType === "all" || trackKind(text(row.target_type), text(row.permit_type)) === targetType).slice(0, 50);
+  ).filter((row) => targetType === "all" || trackKind(text(row.target_type), text(row.permit_type)) === targetType)
+    .filter((row) => {
+      const key = permitTargetPaceKey(row);
+      const n = perHost.get(key) ?? 0;
+      if (n >= SWEEP_TARGETS_PER_HOST) { heldForNextSweep += 1; return false; }
+      perHost.set(key, n + 1);
+      return true;
+    })
+    .slice(0, 50);
+  if (heldForNextSweep > 0) {
+    logger.info("monitor", `${heldForNextSweep} due filing(s) wait for the next sweep: at most ${SWEEP_TARGETS_PER_HOST} per portal host per sweep, so a catch-up is spread out`);
+  }
   // A target a person's "check now" already has in hand is left to it (not read twice in a row).
   // Interleaved across hosts (a, b, a, b): every request still takes its host's turn (hostThrottle,
   // >= 10 s apart), so one host's gap is spent reading another's instead of waiting.
