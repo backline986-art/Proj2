@@ -143,9 +143,12 @@ export function parseReviewFromExtraction(
   extraction: Pick<ParserExtractionResponse, "notes" | "conflicts" | "visionPages" | "visionFields" | "visionSkipped" | "outlinedTextPages" | "planTextPagesNotRead" | "imagePagesReadFailed"> | null | undefined,
   uncertain: readonly UncertainRead[],
   payload?: ParserPayload | null,
+  /** Pages the door itself never took the text of (past its page cap), each with its reason. */
+  alsoNotRead: ReadonlyArray<{ page: number; reason: string }> = [],
 ): ParseReviewRecord | null {
   if (!extraction) return null;
   const pagesNotRead = [
+    ...alsoNotRead,
     ...(extraction.visionSkipped ?? []).map((s) => ({ page: s.page, reason: s.reason })),
     ...(extraction.outlinedTextPages ?? []).map((page) => ({ page, reason: "text drawn as outlines; a person reads this page" })),
     ...(extraction.planTextPagesNotRead ?? []).map((page) => ({ page, reason: "over the text read's length bound; not read" })),

@@ -4,6 +4,7 @@ import { backendDataDir } from "./statePaths";
 import type { AppDb } from "./db";
 import { learnFromHistoricalDocument } from "./knowledgeBase";
 import { pdfjsDocumentOptions } from "./pdfjsOptions";
+import { pageMarkedLayoutText } from "../../shared/src/pageTextLayout";
 
 // ---------------------------------------------------------------------------
 // PDF text extraction (server-side via pdfjs-dist)
@@ -15,7 +16,7 @@ type PdfjsModule = {
 };
 type PdfjsDoc = { numPages: number; getPage: (n: number) => Promise<PdfjsPage> };
 type PdfjsTextItem = { str?: string; hasEOL?: boolean; transform?: number[] };
-type PdfjsPage = { getTextContent: () => Promise<{ items: PdfjsTextItem[] }> };
+type PdfjsPage = { getTextContent: () => Promise<{ items: PdfjsTextItem[] }>; getViewport: (opts: { scale: number }) => { transform: number[] } };
 
 let _pdfjs: PdfjsModule | null = null;
 async function getPdfjs(): Promise<PdfjsModule> {
@@ -40,7 +41,7 @@ const PDFJS_WARN_RE = /^Warning: (TT: undefined function:|Font "[^"]+" is not av
 // Shared pdfjs driver: open the PDF, suppress the harmless image-decode warnings, and run
 // `perPage` over each page's text items, up to maxPages. The extractors below differ only in how
 // they turn a page's items into text.
-async function withPdfPages<T>(filePath: string, maxPages: number, perPage: (items: PdfjsTextItem[]) => T, meta?: { pageCount: number }): Promise<T[]> {
+async function withPdfPages<T>(filePath: string, maxPages: number, perPage: (items: PdfjsTextItem[], page: PdfjsPage) => T, meta?: { pageCount: number }): Promise<T[]> {
   const pdfjs = await getPdfjs();
   const data = new Uint8Array(fs.readFileSync(filePath));
   const origWarn = console.warn;
@@ -56,7 +57,7 @@ async function withPdfPages<T>(filePath: string, maxPages: number, perPage: (ite
     for (let i = 1; i <= pages; i++) {
       const page = await doc.getPage(i);
       const content = await page.getTextContent();
-      out.push(perPage(content.items));
+      out.push(perPage(content.items, page));
     }
     return out;
   } finally {
@@ -74,6 +75,28 @@ const onePageLine = (items: PdfjsTextItem[]) => items.map((item) => item.str ?? 
 export async function extractPdfText(filePath: string, maxPages = 30): Promise<string> {
   // Whole-document cleanup: join raw pages with newlines, THEN collapse whitespace once.
   return (await withPdfPages(filePath, maxPages, onePageLine)).join("\n").replace(/\s{3,}/g, "  ").trim();
+}
+
+/**
+ * THE TEXT THE MODEL IS GIVEN, AT EVERY DOOR: each page under its "--- PAGE n ---" marker, its
+ * lines built from item geometry through the page's own viewport transform (so /Rotate is
+ * honoured) — shared/src/pageTextLayout.ts, the same reader the Parser page runs in the browser.
+ * The unattended doors (email intake, bulk drop) used to hand the model extractPdfText's
+ * stream-order run with no page markers: a table the drawing tool wrote column by column reached
+ * the model as every label, then every value, and an over-long set could not say which pages it
+ * dropped. extractPdfText itself is unchanged: every stored and tuned consumer still reads it.
+ * `pageCount` is the document's own; pages past `maxPages` were not read.
+ */
+export async function extractPdfLayoutText(filePath: string, maxPages = 60): Promise<{ text: string; pageCount: number; pagesRead: number }> {
+  const { pages, pageCount } = await pdfPageLayoutInputs(filePath, maxPages);
+  return { text: pageMarkedLayoutText(pages), pageCount, pagesRead: pages.length };
+}
+
+/** Each page's text items with the page's viewport transform (scale 1): what the layout reader takes. */
+export async function pdfPageLayoutInputs(filePath: string, maxPages = 60): Promise<{ pages: Array<{ items: PdfjsTextItem[]; viewportTransform: number[] }>; pageCount: number }> {
+  const meta = { pageCount: 0 };
+  const pages = await withPdfPages(filePath, maxPages, (items, page) => ({ items, viewportTransform: page.getViewport({ scale: 1 }).transform }), meta);
+  return { pages, pageCount: Math.max(meta.pageCount, pages.length) };
 }
 
 // Per-page text (1-based index → text). Used by the plan-set splitter to map sheets

@@ -94,7 +94,7 @@ import { PARSE_REVIEW_KEY, parseReviewFromExtraction, raiseParseReviewItem, type
 import { redactSecretValues } from "../../shared/src/portalSafety";
 import { addAuditLog } from "./audit";
 import { enqueueStageSteps } from "./autoStageSteps";
-import { classifyDoc, extractPdfText } from "./batchImport";
+import { classifyDoc, extractPdfLayoutText, extractPdfText } from "./batchImport";
 import { BRAND } from "./clientUpdates";
 import { clientEmailsOffFor, ensureStatusShareToken, formatProjectAddress, sendEmail, smtpConfigured, statusShareUrl } from "./clientNotifier";
 import { mapEmailText, renderEmail, type EmailContent, type EmailSection } from "./emailLayout";
@@ -317,9 +317,30 @@ async function pdfTextOf(content: Buffer): Promise<string> {
   try {
     const file = path.join(dir, "doc.pdf");
     fs.writeFileSync(file, content);
-    return await extractPdfText(file, 60);
+    return await extractPdfText(file, INTAKE_PDF_MAX_PAGES);
   } catch {
     return ""; // an encrypted or broken PDF reads as a scan: kept, never parsed
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+}
+/** How many pages of a PDF this door reads the text of. Pages past it are NAMED as not read. */
+const INTAKE_PDF_MAX_PAGES = 60;
+
+/**
+ * THE PLAN SET'S TEXT AS THE MODEL IS GIVEN IT: page-marked and in reading order
+ * (batchImport.extractPdfLayoutText — the reader the Parser page runs), where pdfTextOf's
+ * stream-order run is what slots and classifies the files. null when it cannot be built: the
+ * caller then falls back to the stream-order text, as before.
+ */
+async function planLayoutTextOf(content: Buffer): Promise<{ text: string; pageCount: number; pagesRead: number } | null> {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "email-intake-"));
+  try {
+    const file = path.join(dir, "doc.pdf");
+    fs.writeFileSync(file, content);
+    return await extractPdfLayoutText(file, INTAKE_PDF_MAX_PAGES);
+  } catch {
+    return null;
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
@@ -803,12 +824,15 @@ export async function placeIntakeJob(db: AppDb, input: {
 
   // THE PARSE: the documents' own text only — never the email body (rule 2).
   const textOf = (docType: string) => usable.find((f) => f.docType === docType)?.pdfText ?? "";
-  const texts = { planText: textOf("plan_set"), utilityBillText: textOf("utility_bill"), structuralLetterText: textOf("structural_letter") };
+  // The plan set goes to the model page-marked and in READING ORDER (planLayoutTextOf): rows as the
+  // sheet is displayed, whatever its rotation and whatever order the drawing tool wrote its text in.
+  const planFile = usable.find((f) => f.docType === "plan_set" && f.kind === "pdf");
+  const planLayout = planFile && planFile.pdfText.trim() ? await planLayoutTextOf(planFile.content) : null;
+  const texts = { planText: planLayout ? planLayout.text : textOf("plan_set"), utilityBillText: textOf("utility_bill"), structuralLetterText: textOf("structural_letter") };
   let extraction: ParserExtractionResponse | null = null;
   if (texts.planText.trim() || texts.utilityBillText.trim() || texts.structuralLetterText.trim()) {
     // The plan set's own bytes ride beside the text: its image-only pages (datasheets pasted in as
     // pictures) are read by vision and merged under the text read, exactly as the Parser page does.
-    const planFile = usable.find((f) => f.docType === "plan_set" && f.kind === "pdf");
     extraction = await (input.extract ?? modelIntakeExtractor(db))(texts, orgId, planFile && texts.planText.trim() ? { planSetPdf: planFile.content } : undefined);
   }
   const resolution = extraction?.clientResolution;
@@ -820,7 +844,13 @@ export async function placeIntakeJob(db: AppDb, input: {
   // WHAT THIS PARSE DID NOT SETTLE, saved with the project it creates: the withheld readings, the
   // conflicts, and the plan-set pages nobody read (over the image-page cap, outlined text, over the
   // text bound). The door is the caller's own source ("email_intake", "bulk_drop").
-  const parseReview = parseReviewFromExtraction(input.source, extraction, uncertain, payload);
+  // Pages past this door's page cap had no text read at all: named, unless vision read them.
+  const visionRead = new Set(extraction?.visionPages ?? []);
+  const pastCap = planLayout && planLayout.pageCount > planLayout.pagesRead
+    ? Array.from({ length: planLayout.pageCount - planLayout.pagesRead }, (_, i) => planLayout.pagesRead + 1 + i).filter((p) => !visionRead.has(p))
+      .map((page) => ({ page, reason: `past the first ${planLayout.pagesRead} pages; text not read` }))
+    : [];
+  const parseReview = parseReviewFromExtraction(input.source, extraction, uncertain, payload, pastCap);
   if (parseReview) payload[PARSE_REVIEW_KEY] = parseReview;
   const probe = normalizeProject("probe", payload);
 

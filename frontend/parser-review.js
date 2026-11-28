@@ -1539,32 +1539,55 @@
       .replace(/\n{3,}/g, '\n\n');
   }
 
-  function layoutTextFromItems(items) {
-    const mapped = (items || [])
-      .map(item => {
-        const tx = item.transform || [1, 0, 0, 1, 0, 0];
-        return { str: String(item.str || '').trim(), x: Number(tx[4] || 0), y: Number(tx[5] || 0) };
-      })
-      .filter(item => item.str);
-    if (!mapped.length) return '';
-    // PDF text item order is not always visual order. Group by Y position and sort X left to right.
-    mapped.sort((a, b) => {
-      if (Math.abs(b.y - a.y) > 3) return b.y - a.y;
-      return a.x - b.x;
-    });
-    const lines = [];
-    for (const item of mapped) {
-      const last = lines[lines.length - 1];
-      if (!last || Math.abs(last.y - item.y) > 3) lines.push({ y: item.y, items: [item] });
-      else last.items.push(item);
+  // READING ORDER FROM ITEM GEOMETRY, AT ANY PAGE ROTATION. The browser copy of
+  // shared/src/pageTextLayout.ts (this page is a classic script and cannot import it);
+  // backend/test/pageTextLayout.test.ts pins the two equal. Each item is placed through the page's
+  // VIEWPORT transform (page.getViewport({ scale: 1 }).transform — it carries /Rotate), so a line is
+  // a line as the page is displayed: grouping by the raw matrix position made every "line" a visual
+  // COLUMN on a sheet stored rotated, and a table reached the model as all labels, then all values.
+  // Text turned on the displayed page (a sideways label) is laid out in its own reading frame and
+  // appended. With no transform, or an unrotated page of upright text, the output is what it was.
+  function layoutTextFromItems(items, viewportTransform) {
+    const V = Array.isArray(viewportTransform) && viewportTransform.length === 6 && viewportTransform.every((n) => Number.isFinite(Number(n)))
+      ? viewportTransform.map(Number)
+      : [1, 0, 0, -1, 0, 0];
+    // One list per reading direction on the displayed page: 0 upright, 1 reads downward, 2 upside
+    // down, 3 reads upward.
+    const frames = [[], [], [], []];
+    for (const item of items || []) {
+      const str = String((item && item.str) || '').trim();
+      if (!str) continue;
+      const tx = (item && item.transform) || [1, 0, 0, 1, 0, 0];
+      const a = Number(tx[0] || 0), b = Number(tx[1] || 0), e = Number(tx[4] || 0), f = Number(tx[5] || 0);
+      const px = V[0] * e + V[2] * f + V[4];
+      const py = V[1] * e + V[3] * f + V[5];
+      const dx = V[0] * a + V[2] * b;
+      const dy = V[1] * a + V[3] * b;
+      const frame = Math.abs(dx) >= Math.abs(dy) ? (dx >= 0 ? 0 : 2) : (dy > 0 ? 1 : 3);
+      const uv = frame === 0 ? [px, py] : frame === 2 ? [-px, -py] : frame === 1 ? [py, -px] : [-py, px];
+      frames[frame].push({ str, u: uv[0], v: uv[1] });
     }
-    return lines.map(line => line.items.sort((a, b) => a.x - b.x).map(i => i.str).join(' ')).join('\n');
+    const blocks = [];
+    for (const mapped of frames) {
+      if (!mapped.length) continue;
+      // PDF text item order is not always visual order. Group by line position, then left to right.
+      mapped.sort((p, q) => (Math.abs(p.v - q.v) > 3 ? p.v - q.v : p.u - q.u));
+      const lines = [];
+      for (const item of mapped) {
+        const last = lines[lines.length - 1];
+        if (!last || Math.abs(last.v - item.v) > 3) lines.push({ v: item.v, items: [item] });
+        else last.items.push(item);
+      }
+      blocks.push(lines.map(line => line.items.sort((p, q) => p.u - q.u).map(i => i.str).join(' ')).join('\n'));
+    }
+    return blocks.join('\n');
   }
 
-  /** One page's text as the page's local readers see it: layout copy, blank line, raw item order. */
-  function pdfPageText(items) {
+  /** One page's text as the page's local readers see it: layout copy, blank line, raw item order.
+   *  `viewportTransform` is the page's own (rotation-aware) viewport transform. */
+  function pdfPageText(items, viewportTransform) {
     const linear = (items || []).map(item => item.str || '').join(' ');
-    return normalizeText(`${layoutTextFromItems(items)}\n\n${linear}`);
+    return normalizeText(`${layoutTextFromItems(items, viewportTransform)}\n\n${linear}`);
   }
 
   const PLAN_PAGE_MARKER = /---\s*(?:OCR\s+)?PAGE\s+(\d+)\s*---/gi;
@@ -1657,6 +1680,14 @@
     return out;
   }
 
+  /** Pages past the page's own text cap, minus the ones vision read: nobody took their text. */
+  function pagesPastTextCap(pagesRead, pageCount, reads) {
+    const seen = new Set((reads && reads.visionPages) || []);
+    const out = [];
+    for (let p = Number(pagesRead) + 1; p <= Number(pageCount); p++) if (!seen.has(p)) out.push({ page: p, reason: `past the first ${pagesRead} pages; text not read` });
+    return out;
+  }
+
   /** The review line for image pages vision was NOT shown (the cap, the byte budget, a failed
    *  render). '' when there are none. The outlined and over-the-bound pages have their own lines. */
   function unreadImagePagesLine(reads) {
@@ -1692,7 +1723,7 @@
   }
 
   return {
-    noteParseRead, unreadImagePagesLine, buildParseReviewRecord,
+    noteParseRead, pagesPastTextCap, unreadImagePagesLine, buildParseReviewRecord,
     looksLikeEmail, firstEmail, emailToSave,
     compareMeters, meterTargets, meterInText,
     mergeNotes, assertsMissingAttached,

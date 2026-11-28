@@ -1025,7 +1025,8 @@ async function extractPdfText(file, maxPages=40){
     const content = await page.getTextContent();
     // The layout copy AND the raw item order (parser-review.js pdfPageText): the page's own readers
     // keep both. What is POSTED to the smart read is one copy per page (runLlmAssist, #697).
-    pages.push({page:p, text:ParserReview.pdfPageText(content.items)});
+    // The page's own viewport transform carries /Rotate: lines follow the sheet as displayed.
+    pages.push({page:p, text:ParserReview.pdfPageText(content.items, page.getViewport({ scale: 1 }).transform)});
   }
 
   return {
@@ -4238,6 +4239,11 @@ async function runLlmAssist(){
 
   // Image pages vision was not shown (the page cap, the byte budget, a failed render): the page
   // said which pages it READ and never which it did not.
+  // Pages past this page's own text cap were never read as text: named, unless vision read them.
+  const planPagesRead = Array.isArray(state.planDoc?.pages) ? state.planDoc.pages.length : 0;
+  if (planIsPdf && planPagesRead && (state.planDoc.pageCount || 0) > planPagesRead){
+    state.parseReads = ParserReview.noteParseRead(state.parseReads, { visionSkipped: ParserReview.pagesPastTextCap(planPagesRead, state.planDoc.pageCount, state.parseReads) });
+  }
   const unreadImagePages = ParserReview.unreadImagePagesLine(state.parseReads);
   if (unreadImagePages) state.reviewFlags.push(unreadImagePages);
 
