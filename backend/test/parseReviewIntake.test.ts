@@ -269,6 +269,54 @@ await check("(3d) PIN: the Parser page's save sends the record, and the dashboar
   assert.match(js, /parseReviewPanelHtml\(\(project\.parserSnapshot \|\| \{\}\)\.parseReview\)/, "renderReview shows the panel");
 });
 
+// --- (6) what the read is asked for is saved ----------------------------------------------------
+
+await check("(6a) MUST-PASS: building geometry and the inverter's rated power are saved by the unattended door and reach the recipe values", async () => {
+  const f = (value: unknown) => ({ value, confidence: 0.9 });
+  const read = { provider: "claude", notes: "", lowConfidenceFields: [], fields: {
+    street: f("107 Test St"), city: f("Testville"), state: f("ZZ"), zip: f("00001"),
+    existingBuildingArea: f(1675), buildingHeightFeet: f(15), buildingHeightInches: f(6), numberOfStories: f(2), numberOfBuildings: f(1),
+    invOutputW: f(32), invRatedPowerW: f(7600), pvMicroRatedPowerW: f(290),
+  } };
+  const placed = await placeIntakeJob(db, { client, files: [{ filename: "planset.pdf", content: await hybridSet(3, []) }], extract: async () => read as never, uploadedBy: "tester", source: "bulk_drop" });
+  assert.equal(placed.outcome, "created");
+  if (placed.outcome !== "created") return;
+  const values = resolveRecipeFieldValues(db, getProjectDetail(db, placed.projectId).project, "generic", "building");
+  assert.deepEqual([values.existingBuildingArea, values.buildingHeightFeet, values.buildingHeightInches, values.numberOfStories, values.numberOfBuildings], ["1675", "15", "6", "2", "1"], "the plan set's values, not the 0 default");
+  assert.deepEqual([values.invRatedPowerW, values.pvMicroRatedPowerW, values.invOutputW], ["7600", "290", "32"], "rated power has its own keys; the amps key is untouched");
+});
+
+await check("(6b) PIN: every field the extraction prompt asks for is saved by the doors, or is exempt for a stated reason", async () => {
+  const { PARSER_PROJECT_FIELDS, intakeFieldLabel } = await import("../src/emailIntake");
+  const { RECIPE_FIELD_DESCRIPTIONS } = await import("../src/portalRecipes");
+  const llmSrc = fs.readFileSync(path.join(REPO, "backend", "src", "llm.ts"), "utf8");
+  const from = llmSrc.indexOf("\n- owner: full homeowner name");
+  const to = llmSrc.indexOf("\n", llmSrc.indexOf("\n- locateCalloutText:") + 1);
+  assert.ok(from > 0 && to > from, "the extraction prompt's field list was found");
+  const asked = new Set<string>();
+  const idList = /^- ((?:[a-z][A-Za-z0-9]*(?: \([^)]*\))?)(?:, [a-z][A-Za-z0-9]*(?: \([^)]*\))?)*)(?::| — )/;
+  for (const line of llmSrc.slice(from, to).split("\n")) {
+    const m = idList.exec(line);
+    if (m) for (const part of m[1].replace(/\([^)]*\)/g, "").split(",")) asked.add(part.trim().split(" ")[0]);
+  }
+  assert.ok(asked.size > 90, `read only ${asked.size} field ids from the prompt`);
+  // NOT SAVED, ON PURPOSE — each with its reason. A new prompt field must be saved or listed here.
+  const EXEMPT: Record<string, string> = {
+    structureDescription: "a person's answer; the Parser page derives its basis at save (ParserReview.structureBasis)",
+    structureType: "read by codeReviewRules.structureType but saved by neither door — it changes where application documents go; an owner decision, not this change",
+    contractorCompany: "resolved to the client by clientMatch, never saved as a field", contractorCcb: "as contractorCompany", contractorElectricalLicense: "as contractorCompany",
+    contractorMetroCityLicense: "as contractorCompany", contractorAddress: "as contractorCompany", contractorPhone: "as contractorCompany", contractorEmail: "as contractorCompany",
+    contractorSupervisor: "as contractorCompany", contractorElectricianLicense: "as contractorCompany",
+  };
+  const dropped = [...asked].filter((id) => !PARSER_PROJECT_FIELDS.has(id) && !EXEMPT[id]);
+  assert.deepEqual(dropped, [], "asked of the model and then dropped by the save allowlist");
+  for (const id of ["existingBuildingArea", "buildingHeightFeet", "buildingHeightInches", "numberOfStories", "numberOfBuildings", "invRatedPowerW", "pvMicroRatedPowerW"]) assert.ok(asked.has(id) && PARSER_PROJECT_FIELDS.has(id), id);
+  assert.match(RECIPE_FIELD_DESCRIPTIONS.invOutputW, /AMPS/, "the amps-under-a-watts-name key says what it holds");
+  assert.match(RECIPE_FIELD_DESCRIPTIONS.pvMicroOutputW, /AMPS/);
+  assert.match(RECIPE_FIELD_DESCRIPTIONS.invRatedPowerW, /WATTS/);
+  assert.equal(intakeFieldLabel("invOutputW"), "Inverter output current (A)", "the client-facing label no longer calls amps watts");
+});
+
 console.log(`\nparseReviewIntake: ${passed} passed, ${failures} failed`);
 if (failures) { console.error(`FAIL - parseReviewIntake (${failures})`); process.exit(1); }
 console.log("ok - parseReviewIntake");

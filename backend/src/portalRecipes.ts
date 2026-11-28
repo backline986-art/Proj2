@@ -1821,6 +1821,12 @@ export const RECIPE_FIELD_DESCRIPTIONS: Record<string, string> = {
   // Building geometry + the permit narrative. AHJ applications ask for these directly, and
   // before they were bindable the recipes froze the learn project's house onto every filing.
   existingBuildingArea: "Existing house conditioned floor area in square feet",
+  // THE NAME SAYS W, THE VALUE IS AMPS: these two keys have always held the rated output CURRENT
+  // (many rules read them as amps, so they are not renamed). Rated POWER has its own keys.
+  invOutputW: "String inverter rated output CURRENT in AMPS per unit (despite the key's name) — never a watts or kW box",
+  pvMicroOutputW: "Microinverter rated output CURRENT in AMPS per unit (despite the key's name) — never a watts or kW box",
+  invRatedPowerW: "String inverter rated (nameplate) AC output POWER in WATTS per unit, as the plan set states it",
+  pvMicroRatedPowerW: "Microinverter rated continuous AC output POWER in WATTS (VA) per unit, as the plan set states it",
   buildingHeightFeet: "Existing building height, whole feet (grade to ridge)",
   buildingHeightInches: "Existing building height, remaining inches",
   numberOfStories: "Number of storeys of the existing building",

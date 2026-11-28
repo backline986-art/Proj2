@@ -409,6 +409,8 @@ export const PARSER_PROJECT_FIELDS: ReadonlySet<string> = new Set([
   "azimuth", "tilt", "roofSlope", "mainServiceRating", "pvArrays", "stampRecommendation",
   "electricalCalcText", "structuralCalcText", "sitePlanNotesText", "roofPlanNotesText", "labelsText",
   "projectDescriptionText", "locateCalloutText",
+  "existingBuildingArea", "buildingHeightFeet", "buildingHeightInches", "numberOfStories", "numberOfBuildings",
+  "invRatedPowerW", "pvMicroRatedPowerW",
 ]);
 
 /**
@@ -633,7 +635,8 @@ const FIELD_LABELS: Record<string, string> = {
   owner: "Homeowner name", street: "Project address", city: "City", state: "State", zip: "ZIP", ahj: "Permitting jurisdiction (AHJ)",
   utility: "Utility", account: "Utility account number", meter: "Meter number", dcKw: "System size (DC kW)", acKw: "System size (AC kW)",
   moduleMake: "Module make", moduleModel: "Module model", moduleQty: "Module count", invMake: "Inverter make", invModel: "Inverter model",
-  moduleWattage: "Module wattage", invQty: "Inverter count", invOutputW: "Inverter output (W)",
+  moduleWattage: "Module wattage", invQty: "Inverter count", invOutputW: "Inverter output current (A)", invRatedPowerW: "Inverter rated power (W)", pvMicroRatedPowerW: "Microinverter rated power (W)",
+  existingBuildingArea: "Existing house floor area (sq ft)", buildingHeightFeet: "Building height (ft)", buildingHeightInches: "Building height (remaining inches)", numberOfStories: "Number of storeys", numberOfBuildings: "Number of buildings",
   batteryMake: "Battery make", batteryModel: "Battery model", batteryQty: "Battery count",
   pvMicroMake: "Microinverter make", pvMicroModel: "Microinverter model", pvMicroQty: "Microinverter count",
   roofMaterial: "Roof material", roofMaterialSubtype: "Roof material type", mounting: "Mounting type", rackingSystem: "Racking system",

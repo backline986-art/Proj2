@@ -3945,6 +3945,12 @@ const LLM_SNAPSHOT_KEYS = new Set([
   // Structural prescriptive-screen fields — evaluatePrescriptiveCriteria answers
   // the AHJ checklist rows from these; dropping them here regresses to [verify].
   'windSpeed','riskCategory','lightFrame','framingType','roofLayers','moduleHeightAboveRoof',
+  // Building geometry the read is ASKED for and the recipe map binds (existing area, height,
+  // storeys, buildings): both save allowlists dropped them, so every portal form took the 0 default.
+  'existingBuildingArea','buildingHeightFeet','buildingHeightInches','numberOfStories','numberOfBuildings',
+  // The inverter's rated POWER per unit. invOutputW / pvMicroOutputW hold AMPS despite their names
+  // (many rules read them as amps), so power has its own keys.
+  'invRatedPowerW','pvMicroRatedPowerW',
   'gravityWindDesign','manufacturerInstallation','rafterExceptionCompliant','moduleFiguresCompliant',
   'attachmentToFraming','attachmentSpacingIn','attachmentEdgeSpacingIn','attachmentsOutsideEdgeZone',
   'standingSeamMethod2Compliant','moduleListingAgency',

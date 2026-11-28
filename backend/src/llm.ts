@@ -2042,8 +2042,10 @@ SYSTEM / EQUIPMENT
 - moduleMake, moduleModel, moduleWattage (number), moduleQty (number)
 - invMake, invModel, invQty (number) — for string inverters
 - invOutputW: string-inverter rated output CURRENT in amps (number; from datasheet/SLD)
+- invRatedPowerW: string-inverter rated (nameplate) AC output POWER in WATTS per unit (number, e.g. 7600 for a 7.6 kW inverter), as the datasheet or the SLD's inverter table prints it. Omit if not stated; never compute it from the amps.
 - pvMicroMake, pvMicroModel, pvMicroQty (number) — for MICROINVERTERS (e.g. Enphase, AP Systems). Use these instead of inv* when the system uses microinverters.
 - pvMicroOutputW: microinverter rated output CURRENT in amps per unit (number; from the micro datasheet)
+- pvMicroRatedPowerW: microinverter rated continuous AC output POWER in WATTS (VA) per unit (number, e.g. 290), as its datasheet or the SLD prints it. Omit if not stated; never compute it from the amps.
 - moduleVoc (number, volts), moduleIsc (number, amps), moduleVocTempCoeff (number, %/°C, negative as printed, e.g. -0.27): the MODULE's open-circuit voltage, short-circuit current and Voc temperature coefficient, read from the module DATASHEET page of the plan set (when the SLD's module table disagrees with the datasheet, the DATASHEET wins and say so in notes — a table copied from an older set is common). Omit when no datasheet page states them.
 - pvMicroMaxDcInputV (number, volts): the microinverter's maximum DC input voltage from its datasheet. Omit if not stated.
 - modulesPerString (number): modules in series in the longest string (string inverters only; from the SLD string table). Omit for microinverters.
