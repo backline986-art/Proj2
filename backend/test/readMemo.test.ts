@@ -166,15 +166,16 @@ check("(r4) the as-of-approval gate read (#226) is never shared", () => {
 const file = (name: string, bytes: string) => { const f = path.join(tmp, name); fs.writeFileSync(f, bytes); return f; };
 check("(d1) MUST-EXCLUDE: byte-identical uploads are still found", () => {
   const a = file("a.pdf", "same bytes"), b = file("b.pdf", "same bytes"), c = file("c.pdf", "other length entirely");
-  assert.deepEqual(sub.duplicateUploads({ module_spec: a, inverter_spec: b, plan_set: c }), [{ docType: "inverter_spec", sameAs: "module_spec" }]);
-  assert.deepEqual(sub.duplicateUploads({ module_spec: a, inverter_spec: a }), [{ docType: "inverter_spec", sameAs: "module_spec" }], "one stored file under two types");
+  // No splitter cuts here (the second argument): these are uploads, and identical uploads are one document.
+  assert.deepEqual(sub.duplicateUploads({ module_spec: a, inverter_spec: b, plan_set: c }, new Set()), [{ docType: "inverter_spec", sameAs: "module_spec" }]);
+  assert.deepEqual(sub.duplicateUploads({ module_spec: a, inverter_spec: a }, new Set()), [{ docType: "inverter_spec", sameAs: "module_spec" }], "one stored file under two types");
 });
 check("(d2) MUST-PASS: same length, different bytes, is two documents", () => {
-  assert.deepEqual(sub.duplicateUploads({ module_spec: file("d.pdf", "abcdefgh"), inverter_spec: file("e.pdf", "abcdefgX") }), []);
+  assert.deepEqual(sub.duplicateUploads({ module_spec: file("d.pdf", "abcdefgh"), inverter_spec: file("e.pdf", "abcdefgX") }, new Set()), []);
 });
 check("(d3) a missing file changes nothing: the rest are compared as before", () => {
   const a = file("f.pdf", "same bytes"), b = file("g.pdf", "same bytes");
-  assert.deepEqual(sub.duplicateUploads({ plan_set: path.join(tmp, "gone.pdf"), module_spec: a, inverter_spec: b }), [{ docType: "inverter_spec", sameAs: "module_spec" }]);
+  assert.deepEqual(sub.duplicateUploads({ plan_set: path.join(tmp, "gone.pdf"), module_spec: a, inverter_spec: b }, new Set()), [{ docType: "inverter_spec", sameAs: "module_spec" }]);
 });
 
 memo.setReadMemoForTest(true);

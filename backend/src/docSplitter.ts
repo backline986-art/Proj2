@@ -5,7 +5,7 @@ import { PDFDocument } from "pdf-lib";
 import { extractPdfPages } from "./batchImport";
 import { portalUploadCapBytes } from "../../portal-bot/src/uploadCap";
 import type { AppDb } from "./db";
-import type { LLMProvider, PlanSheetKind } from "../../shared/src/types";
+import type { LLMProvider, PlanSheetKind, ProjectRecord } from "../../shared/src/types";
 import { HttpError } from "./httpError";
 import { outlinedTextPagesOfPdf } from "./outlinedTextPages";
 import { recordOutlinedPagesValue, saveProjectDocument, listProjectDocuments, projectDocsByType, shippedPlanSet, shippedPlanSetDocumentId, documentTypesDeletedSince, withdrawSplitPart } from "./projectDocuments";
@@ -213,9 +213,25 @@ const INDEX_NAME_WORDS = 6;
 // the first numbered note ("1. SEE …"), or PROJECT DATA — in any case. A sheet NAMED "GENERAL NOTES"
 // in the name column (no colon or dash) is a name, not that block, and does not end it.
 const INDEX_NAMES_END = /\bNOTES?\b\s*(?:[:\-\u2013]|1\b)|(?<!\bGENERAL\s+)\bNOTES?\b|(?:^|\s)1\.\s|\bPROJECT\s+DATA\b/i;
+// A PAPER SIZE IS NOT A SHEET NUMBER (audit 2026-11-28). A title block that prints its sheet size
+// ("ANSI B 11" X 17"", "ARCH D 24 X 36") gave every page, the cover included, two more numbers:
+// B 11 and X 17. With three listed numbers on a page no page had a number of its own, so a data
+// sheet the index names was never reported undecided. A size is told by its SHAPE, in any paper
+// family, never by a list of letters: the number carries an inch mark, or is one side of
+// "<number> X <number>" (the X being the candidate's own letter when it is the second side).
+// A number in quotes (SEE "E-1") is a quoted sheet number, not inches: the mark must not be the
+// closing half of a pair opened right before the letters.
+const SIZE_AFTER = /^(?:"|''|”|″|\s*[xX×]\s*\d)/;
+const SIZE_BEFORE = /\d\s*(?:"|''|”|″)?\s*$/;
+const QUOTE_BEFORE = /(?:"|'|“)$/;
 const sheetNumbers = (text: string) => [...text.matchAll(INDEX_SHEET_NUMBER)]
   .filter((m) => !NOT_A_SHEET_PREFIX.test(m[1]))
-  .map((m) => ({ key: `${m[1]}${m[2]}`, start: m.index ?? 0, end: (m.index ?? 0) + m[0].length }));
+  .map((m) => ({ key: `${m[1]}${m[2]}`, letters: m[1], start: m.index ?? 0, end: (m.index ?? 0) + m[0].length }))
+  .filter((n) => {
+    const before = text.slice(Math.max(0, n.start - 8), n.start);
+    if (SIZE_AFTER.test(text.slice(n.end, n.end + 8)) && !QUOTE_BEFORE.test(before)) return false;
+    return !(n.letters === "X" && SIZE_BEFORE.test(before));
+  });
 /** The first `words` words of `text`, cut at the notes / project-data block. */
 const indexNames = (text: string, words: number) => {
   const end = INDEX_NAMES_END.exec(text);
@@ -233,9 +249,13 @@ const isIndexSpecName = (name: string) => new RegExp(INDEX_SPEC_NAME.source, "i"
  *     same-letter group of the run, back to back, has that many numbers (S-1, S-2 above). Any other
  *     count, or two groups that size, names nothing: the pages stay listed as they were.
  */
-export function indexSpecSheets(pageTexts: string[]): { spec: Set<string>; listed: Set<string> } {
+export function indexSpecSheets(pageTexts: string[]): { spec: Set<string>; listed: Set<string>; names: Map<string, string> } {
   const spec = new Set<string>();
   const listed = new Set<string>();
+  // The name a ROW gives its sheet number (the first row that names it): how a page's own sheet
+  // name is known when the title block's text does not put it beside its label. Columns cannot be
+  // split back into rows, so they name nothing here.
+  const names = new Map<string, string>();
   for (const text of pageTexts) {
     if (!isIndexOrNotesPage(text)) continue;
     const nums = sheetNumbers(text);
@@ -247,7 +267,9 @@ export function indexSpecSheets(pageTexts: string[]): { spec: Set<string>; liste
       const run = nums.slice(i, j + 1);
       for (const n of run) listed.add(n.key);
       if (run.length === 1) {
-        if (isIndexSpecName(indexNames(after, INDEX_NAME_WORDS))) spec.add(run[0].key);
+        const name = indexNames(after, INDEX_NAME_WORDS);
+        if (!names.has(run[0].key)) names.set(run[0].key, name);
+        if (isIndexSpecName(name)) spec.add(run[0].key);
       } else {
         const count = [...indexNames(after, run.length * INDEX_NAME_WORDS).matchAll(INDEX_SPEC_NAME)].length;
         const prefix = (k: string) => k.replace(/[\d.]+$/, "");
@@ -259,14 +281,23 @@ export function indexSpecSheets(pageTexts: string[]): { spec: Set<string>; liste
       i = j + 1;
     }
   }
-  return { spec, listed };
+  return { spec, listed, names };
 }
+
+// The label in any case ("Sheet Number"), and a paper size the text layer puts between the label
+// and its value skipped ("Sheet Size Sheet Number ANSI B 11" X 17" DS 01": the label row, then the
+// value row). The value itself is still UPPERCASE letters then a number.
+const SHEET_NUMBER_LABEL = /\bSHEET\s*(?:NUMBER|NO\.?|#)\s*:?\s*/i;
+const LEADING_PAPER_SIZE = /^(?:(?:ANSI|ARCH|ISO)\s+)?(?:[A-E]\d?\s+)?\d{1,2}(?:\.\d+)?\s*(?:"|''|”|″)?\s*[xX×]\s*\d{1,2}(?:\.\d+)?\s*(?:"|''|”|″)?\s*/i;
 
 /** The page's own sheet number among the index's: the labelled SHEET NUMBER / SHEET NO / SHEET #
  *  when the page has one (a labelled PV-11 that cites "SEE S-1" is PV-11, not S-1), else the only
  *  index number on the page. Anything else is no answer. */
-function pageSheetNumber(text: string, listed: Set<string>): string | null {
-  const labelled = /\bSHEET\s*(?:NUMBER|NO\.?|#)\s*:?\s*([A-Z]{1,3}\s?-?\s?\d{1,2}(?:\.\d{1,2})?)\b/.exec(text);
+export function pageSheetNumber(text: string, listed: Set<string>): string | null {
+  const label = SHEET_NUMBER_LABEL.exec(text);
+  const labelled = label
+    ? /^([A-Z]{1,3}\s?-?\s?\d{1,2}(?:\.\d{1,2})?)\b/.exec(text.slice(label.index + label[0].length).replace(LEADING_PAPER_SIZE, ""))
+    : null;
   if (labelled) {
     const key = sheetNumbers(labelled[1])[0]?.key;
     return key && listed.has(key) ? key : null;
@@ -291,12 +322,22 @@ function pageSheetNumber(text: string, listed: Set<string>): string | null {
 //
 // Exported for docSplitterMirror.test.ts, which pins frontend/parser-review.js scoreSplitPage /
 // specSheetPages (the parser page's split map, read by the submit gate) to this answer (#193).
-export function scorePage(text: string): { docTypes: string[]; byPattern: boolean } {
+//
+// `sheetName` is the name the cover's sheet index gives THIS page's sheet number (indexSpecSheets
+// `names`), when the caller knows it. ON AN ELECTRICAL-NUMBERED SHEET A `words` HIT COUNTS WHEN THE
+// WORD IS THE SHEET'S OWN NAME (audit 2026-11-28): the #33 rule drops `words` on an E x.x sheet
+// because there they are words the sheet uses, and that left a sheet NAMED "PLACARD" and numbered
+// E 1.4 scoring nothing and out of the labels part. The index says what the sheet is called; a
+// notes sheet that only says "PROVIDE PLACARD" is not called that, and a NOTES name never counts for
+// a `wordsSkipNotes` category.
+export function scorePage(text: string, sheetName = ""): { docTypes: string[]; byPattern: boolean } {
   if (isIndexOrNotesPage(text)) return { docTypes: [], byPattern: false };
   const electricalSheet = ELECTRICAL_SHEET.test(text);
   const calcsSheet = CALCS_SHEET.test(text);
   const notesSheet = NOTES_SHEET.test(text);
   const battery = batteryPage(text);
+  const namedBy = (cat: { words?: RegExp[]; wordsSkipNotes?: boolean }) => (!sheetName || (cat.wordsSkipNotes && NOTES_SHEET.test(sheetName))
+    ? 0 : (cat.words ?? []).reduce((n, re) => (re.test(sheetName) ? n + 1 : n), 0));
   let best: { docType: string; score: number; patternHits: number } | null = null;
   for (const cat of CATEGORY_PATTERNS) {
     if (calcsSheet && SPEC_DOC_TYPES.has(cat.docType)) continue;
@@ -306,7 +347,7 @@ export function scorePage(text: string): { docTypes: string[]; byPattern: boolea
     const hits = (res: RegExp[] | undefined) => (res ?? []).reduce((n, re) => (re.test(text) ? n + 1 : n), 0);
     const patternHits = hits(cat.patterns);
     const score = patternHits + hits(cat.sheetNumbers)
-      + (electricalSheet ? 0 : (cat.wordsSkipNotes && notesSheet ? 0 : hits(cat.words)) + (cat.vocabulary?.some((re) => re.test(text)) ? 1 : 0));
+      + (electricalSheet ? namedBy(cat) : (cat.wordsSkipNotes && notesSheet ? 0 : hits(cat.words)) + (cat.vocabulary?.some((re) => re.test(text)) ? 1 : 0));
     if (score > 0 && (!best || score > best.score)) best = { docType: cat.docType, score, patternHits };
   }
   // A battery datasheet found by its BODY (no battery sheet name) is the battery spec unless another
@@ -389,6 +430,9 @@ export interface UtilityPackageResult {
    *  as outlines; a person reads this page". Always in `unclassifiedPages` too — never filed under a
    *  type on whatever stray text they carry, and never sent to the page-index read. */
   outlinedTextPages: number[];
+  /** 1-based module data sheet pages ALSO cut into the inverter spec: an AC module's one data sheet,
+   *  which shows the integrated microinverter's AC output and UL 1741 listing. Absent when none. */
+  acModuleSheetPages?: number[];
 }
 
 // A split part that holds a page the page-index read decided (#79) says so in its filename. The
@@ -396,6 +440,49 @@ export interface UtilityPackageResult {
 // reconcile pass (#77) would take the part for a stale pre-#66 cut and withdraw it. A splitter
 // row only: reconcile never touches a person's upload whatever its name.
 const VISION_PART_MARK = " (page-index read)";
+
+// AN AC MODULE'S ONE DATA SHEET IS THE INVERTER'S DATA SHEET TOO (audit 2026-11-28). A module with a
+// factory-integrated microinverter has no standalone inverter sheet: the module data sheet carries
+// the microinverter's AC output table and its UL 1741 certificate line. That page is named a MODULE
+// spec sheet, so it was filed as the module spec only; no inverter spec was cut and the document gate
+// held the job for a sheet the plan set does not have and never will.
+//
+// The rule, for any plan set: on a MICROINVERTER job (codeReviewRules.isMicroinverterDesign, the one
+// predicate — the trigger for looking, never the answer) with no page filed as the inverter spec, a
+// page filed as the module spec is ALSO the inverter spec when the SHEET shows it:
+//   - its text carries an AC output rating AND the UL 1741 listing words (the reviewer's own
+//     INVERTER_LISTING_PATTERNS), or
+//   - its body is an image and the existing page-index read (scannedPlanSet.readUndecidedSpecPages,
+//     same rule 2 screen and budget) says the sheet carries the integrated inverter's AC ratings and
+//     UL 1741 listing. The read is asked once per plan set and its answer is noted by the plan set's
+//     bytes (planSetImageReads.recordModuleSheetReads), so reconcile classifies the same way without a
+//     model call and a pass never asks twice — also when the read could not run.
+// A module sheet that shows neither stays the module spec only, and the gate still asks for the
+// inverter's sheet. The inverter part names the sheet in its filename, which is what the gate words.
+const AC_OUTPUT_ON_SHEET = /\bAC\s+OUTPUT\b|\b(?:MAX(?:IMUM)?\.?|NOMINAL|RATED|PEAK|CONTINUOUS)\s+(?:CONTINUOUS\s+)?(?:AC\s+)?OUTPUT\s+(?:POWER|CURRENT|VOLTAGE)\b/i;
+const AC_MODULE_PART_MARK = " (AC module data sheet p";
+/** The plan-set pages an inverter-spec split part says are the AC module's own data sheet, from its
+ *  filename; [] for any other file. Read by the document gate to say which sheet covers the row. */
+export function acModuleSheetPagesOfPart(filename: string): number[] {
+  const at = String(filename ?? "").indexOf(AC_MODULE_PART_MARK);
+  if (at < 0) return [];
+  const m = /^([0-9]+(?:,[0-9]+)*)\)/.exec(String(filename).slice(at + AC_MODULE_PART_MARK.length));
+  return m ? m[1].split(",").map(Number) : [];
+}
+
+interface SplitJob { snapshot: Record<string, unknown>; reads: Record<string, string> }
+/** What the classifier needs to know about the job: its parsed fields (for the microinverter
+ *  predicate) and what the page-index read already said about this plan set's module sheets. */
+async function splitJob(db: AppDb, projectId: string, planSetFile: string): Promise<SplitJob> {
+  let snapshot: Record<string, unknown> = {};
+  try {
+    const parsed = JSON.parse(String(db.get<{ parser_json: string | null }>("SELECT parser_json FROM projects WHERE id = ?", [projectId])?.parser_json || "{}"));
+    if (parsed && typeof parsed === "object") snapshot = parsed as Record<string, unknown>;
+  } catch { snapshot = {}; }
+  let reads: Record<string, string> = {};
+  try { reads = (await import("./planSetImageReads")).moduleSheetReads(db, projectId, planSetFile); } catch { reads = {}; }
+  return { snapshot, reads };
+}
 
 /** The undecided spec pages for a log line: "4,5,6(structural)" — each page, and the category that
  *  took it when one did (#91). No spaces, so it stays one `key=value` field. */
@@ -444,26 +531,46 @@ export async function buildUtilityPackage(
   const planBytes = fs.readFileSync(planSet.path);
   const source = await PDFDocument.load(planBytes);
   const total = source.getPageCount();
-  const classified = await classifyPlanSetPages(planSet.path, total);
+  const classified = await classifyPlanSetPages(planSet.path, total, await splitJob(db, projectId, planSet.path));
   const { byCategory, unclassified, pageTexts, outlined } = classified;
+  // Module data sheets that are the inverter's sheet too (AC module), and the ones still to ask about.
+  const acModulePages = [...classified.acModule.pages];
+  const askModuleSheets = classified.acModule.ask;
   // The shipped plan set's unread pages, for QC and the submit gate (#696): the split read them anyway.
   try { recordOutlinedPagesValue(db, planSet.id, outlined); } catch { /* the gate reads '' as not checked */ }
   let { undecidedSpec, undecidedSpecFiledAs } = classified;
   const visionTypes = new Set<string>();
   let specPagesByVision: Record<string, PlanSheetKind> | undefined;
   let specPagesWithheld: number[] | undefined;
-  if (opts.llm && undecidedSpec.length) {
+  if (opts.llm && (undecidedSpec.length || askModuleSheets.length)) {
     const { readUndecidedSpecPages } = await import("./scannedPlanSet");
     // A read that cannot run (the renderer failed) leaves every page undecided, as before #79 —
     // never a failed split.
     const { projectSecretValuesById } = await import("./projectSecrets");
     // Rule 2 (#612): every thumbnail is masked with the project's own secrets; unreadable → no read.
-    const read = await readUndecidedSpecPages(opts.llm, planBytes, undecidedSpec, pageTexts, { secrets: projectSecretValuesById(db, projectId) })
+    // One call: the module data sheets to ask about go first, so the page cap never drops them.
+    const read = await readUndecidedSpecPages(opts.llm, planBytes, [...askModuleSheets, ...undecidedSpec], pageTexts, { secrets: projectSecretValuesById(db, projectId) })
       .catch(() => ({ decided: {} as Record<string, PlanSheetKind>, integratedInverter: [] as number[], withheld: [] as number[] }));
-    specPagesByVision = read.decided;
+    const asked = new Set(askModuleSheets);
+    if (undecidedSpec.length) specPagesByVision = Object.fromEntries(Object.entries(read.decided).filter(([p]) => !asked.has(Number(p))));
     if (read.withheld.length) specPagesWithheld = read.withheld;
+    if (askModuleSheets.length) {
+      // Every page asked is noted, whatever came back: "unread" stops the next pass asking again.
+      const { recordModuleSheetReads, MODULE_SHEET_WITH_INVERTER, MODULE_SHEET_UNREAD } = await import("./planSetImageReads");
+      const noted: Record<string, string> = {};
+      for (const page of askModuleSheets) {
+        const kind = read.decided[String(page)];
+        const withInverter = kind === "module_spec" && read.integratedInverter.includes(page);
+        noted[String(page)] = withInverter ? MODULE_SHEET_WITH_INVERTER : kind ?? MODULE_SHEET_UNREAD;
+        if (withInverter) acModulePages.push(page);
+      }
+      try { recordModuleSheetReads(db, projectId, planBytes, noted); } catch { /* not noted: the next pass asks again */ }
+      if (acModulePages.length) byCategory.set("inverter_spec", [...new Set([...(byCategory.get("inverter_spec") ?? []), ...acModulePages.map((p) => p - 1)])].sort((a, b) => a - b));
+    }
     for (const [pageKey, kind] of Object.entries(read.decided)) {
       const page = Number(pageKey);
+      // A module data sheet asked about above is already filed; the read does not re-file it.
+      if (asked.has(page)) continue;
       const into = kind === "module_spec"
         ? (read.integratedInverter.includes(page) ? ["module_spec", "inverter_spec"] : ["module_spec"])
         : kind === "inverter_spec" ? ["inverter_spec"]
@@ -524,7 +631,7 @@ export async function buildUtilityPackage(
     assertStillThePlanSet();
     const saved = saveProjectDocument(db, projectId, {
       docType: cat.docType,
-      filename: `${baseName} - ${cat.label}${visionTypes.has(cat.docType) ? VISION_PART_MARK : ""}.pdf`,
+      filename: `${baseName} - ${cat.label}${visionTypes.has(cat.docType) ? VISION_PART_MARK : ""}${cat.docType === "inverter_spec" && acModulePages.length ? `${AC_MODULE_PART_MARK}${[...acModulePages].sort((a, b) => a - b).join(",")})` : ""}.pdf`,
       contentType: "application/pdf",
       buffer: bytes,
       source: "split",
@@ -567,7 +674,8 @@ export async function buildUtilityPackage(
     .map((c) => c.docType)
     .filter((t) => wanted.includes(t) && !CONDITIONAL_PACKAGE_DOC_TYPES.has(t) && !parts.some((p) => p.docType === t));
   return { target, planSetDocId: planSet.id, pages: total, parts, packagedDocTypes: packaged, missingDocTypes: missing, zipDocumentId: zipDoc.id, unclassifiedPages: unclassified, missingSheetTypes, undecidedSpecPages: undecidedSpec, undecidedSpecFiledAs, outlinedTextPages: outlined,
-    ...(specPagesByVision ? { specPagesByVision } : {}), ...(specPagesWithheld ? { specPagesWithheld } : {}) };
+    ...(specPagesByVision ? { specPagesByVision } : {}), ...(specPagesWithheld ? { specPagesWithheld } : {}),
+    ...(acModulePages.length ? { acModuleSheetPages: [...acModulePages].sort((a, b) => a - b) } : {}) };
 }
 
 // Assign each page of the plan set to its categories (scorePage). 1-based unclassified pages;
@@ -580,7 +688,11 @@ export async function buildUtilityPackage(
 // score: the text cannot say what the sheet is, so filing it would be a guess. It is named in
 // `outlined` so every report says why it was not read. Only pages whose text is already short are
 // opened to check; a normal text page is classified exactly as before.
-async function classifyPlanSetPages(planSetPath: string, total: number): Promise<{ byCategory: Map<string, number[]>; unclassified: number[]; undecidedSpec: number[]; undecidedSpecFiledAs: Record<string, string>; pageTexts: string[]; outlined: number[] }> {
+//
+// `job` (the splitter's and reconcile's callers pass it) adds the AC-module rule above: `acModule.pages`
+// are the module data sheets also put in inverter_spec, `acModule.ask` the ones only the page-index
+// read can answer and that it has not been asked about yet.
+async function classifyPlanSetPages(planSetPath: string, total: number, job?: SplitJob): Promise<{ byCategory: Map<string, number[]>; unclassified: number[]; undecidedSpec: number[]; undecidedSpecFiledAs: Record<string, string>; pageTexts: string[]; outlined: number[]; acModule: { pages: number[]; ask: number[] } }> {
   const pageTexts = await extractPdfPages(planSetPath, 80);
   let outlined: number[] = [];
   try {
@@ -596,7 +708,7 @@ async function classifyPlanSetPages(planSetPath: string, total: number): Promise
   for (let i = 0; i < total; i++) {
     if (outlinedSet.has(i + 1)) { unclassified.push(i + 1); continue; }
     const text = pageTexts[i] ?? "";
-    const { docTypes, byPattern } = scorePage(text);
+    const { docTypes, byPattern } = scorePage(text, index.names.get(pageSheetNumber(text, index.listed) ?? "") ?? "");
     for (const docType of docTypes) {
       const arr = byCategory.get(docType) ?? [];
       arr.push(i);
@@ -612,7 +724,25 @@ async function classifyPlanSetPages(planSetPath: string, total: number): Promise
       if (docTypes.length) undecidedSpecFiledAs[String(i + 1)] = docTypes[0];
     }
   }
-  return { byCategory, unclassified, undecidedSpec, undecidedSpecFiledAs, pageTexts, outlined };
+  const acModule = { pages: [] as number[], ask: [] as number[] };
+  const modulePages = byCategory.get("module_spec") ?? [];
+  if (job && modulePages.length && !(byCategory.get("inverter_spec")?.length)) {
+    const { isMicroinverterDesign, INVERTER_LISTING_PATTERNS } = await import("./codeReviewRules");
+    if (isMicroinverterDesign({ parserSnapshot: job.snapshot } as unknown as ProjectRecord, pageTexts.slice(0, total).join("\n"))) {
+      for (const i of modulePages) {
+        const text = pageTexts[i] ?? "";
+        const noted = job.reads[String(i + 1)];
+        if ((AC_OUTPUT_ON_SHEET.test(text) && INVERTER_LISTING_PATTERNS.some((re) => re.test(text))) || noted === "module_spec+inverter") acModule.pages.push(i + 1);
+        else if (!noted) acModule.ask.push(i + 1);
+      }
+      // One sheet that answers is the answer: nothing is left to ask.
+      if (acModule.pages.length) {
+        acModule.ask = [];
+        byCategory.set("inverter_spec", acModule.pages.map((p) => p - 1));
+      }
+    }
+  }
+  return { byCategory, unclassified, undecidedSpec, undecidedSpecFiledAs, pageTexts, outlined, acModule };
 }
 
 // A page that names a spec sheet, is not a calculations or index page, landed in no spec part, and
@@ -664,7 +794,7 @@ export async function reconcileSplitParts(db: AppDb, projectId: string): Promise
   // The plan set the package ships (#198): one "newest" rule, so reconcile judges the same plan set.
   const shipped = shippedPlanSet(db, projectId);
   const latest = shipped ? { stored_path: shipped.storedPath, uploaded_at: shipped.uploadedAt } : undefined;
-  const none: ReconcileResult = { withdrawn: [], gaps: [], undecidedSpecPages: [], undecidedSpecFiledAs: {}, outlinedTextPages: [] };
+  const none: ReconcileResult = { withdrawn: [], gaps: [], undecidedSpecPages: [], undecidedSpecFiledAs: {}, outlinedTextPages: [], moduleSheetsToRead: [] };
   if (!latest?.stored_path || !fs.existsSync(latest.stored_path)) return none;
   const sheetTypes = CATEGORY_PATTERNS.map((c) => c.docType);
   const splitParts = db.query<{ id: string; doc_type: string; stored_path: string; uploaded_at: string; original_filename: string }>(
@@ -675,8 +805,16 @@ export async function reconcileSplitParts(db: AppDb, projectId: string): Promise
   if (splitParts.length === 0) return none;
   const deletedByPerson = documentTypesDeletedSince(db, projectId, latest.uploaded_at);
   const total = (await PDFDocument.load(fs.readFileSync(latest.stored_path))).getPageCount();
-  const { byCategory, pageTexts, undecidedSpec, undecidedSpecFiledAs, outlined } = await classifyPlanSetPages(latest.stored_path, total);
-  const undecided = { undecidedSpecPages: undecidedSpec, undecidedSpecFiledAs, outlinedTextPages: outlined };
+  const { byCategory, pageTexts, undecidedSpec, undecidedSpecFiledAs, outlined, acModule } = await classifyPlanSetPages(latest.stored_path, total, await splitJob(db, projectId, latest.stored_path));
+  // MODULE DATA SHEETS STILL TO PUT TO THE PAGE-INDEX READ (the AC-module rule above). Its own field,
+  // never a gap: a gap re-splits at every door, and only a split that holds a model can ask. Nothing
+  // to ask once the job has an inverter spec from anywhere, or a person removed that part.
+  // Only when the split would cut this same file: its answer is noted by the bytes it cut, and a
+  // note under other bytes would leave these pages "still to read" on every pass.
+  let sameFile = false;
+  try { sameFile = findPlanSet(db, projectId).path === latest.stored_path; } catch { sameFile = false; }
+  const moduleSheetsToRead = sameFile && acModule.ask.length && !deletedByPerson.has("inverter_spec") && !projectDocsByType(db, projectId).inverter_spec ? acModule.ask : [];
+  const undecided = { undecidedSpecPages: undecidedSpec, undecidedSpecFiledAs, outlinedTextPages: outlined, moduleSheetsToRead };
 
   const withdrawn = new Set<string>();
   if (pageTexts.some((t) => pageKey(t))) {
@@ -718,6 +856,10 @@ export interface ReconcileResult {
   undecidedSpecFiledAs: Record<string, string>;
   /** As UtilityPackageResult's: the newest plan set's pages whose text is drawn as outlines (#696). */
   outlinedTextPages: number[];
+  /** 1-based module data sheet pages of a microinverter job with no inverter spec that the page-index
+   *  read has not been asked about yet (the AC-module rule). The stage pass, the one caller that holds
+   *  a model, splits again to ask; once asked, a page is never listed again. */
+  moduleSheetsToRead: number[];
 }
 
 /**

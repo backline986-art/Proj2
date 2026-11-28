@@ -1389,9 +1389,19 @@
   const INDEX_CALCS_NAME = /\bCALC(?:ULATION)?S?\b/i;
   const INDEX_NAME_WORDS = 6;
   const INDEX_NAMES_END = /\bNOTES?\b\s*(?:[:\-\u2013]|1\b)|(?<!\bGENERAL\s+)\bNOTES?\b|(?:^|\s)1\.\s|\bPROJECT\s+DATA\b/i;
+  // The backend's paper-size rule: a title block's sheet size ("ANSI B 11" X 17"") is not two sheet
+  // numbers. Told by its shape (an inch mark, or one side of "<number> X <number>"), never by a letter list.
+  const SIZE_AFTER = /^(?:"|''|”|″|\s*[xX×]\s*\d)/;
+  const SIZE_BEFORE = /\d\s*(?:"|''|”|″)?\s*$/;
+  const QUOTE_BEFORE = /(?:"|'|“)$/;
   const sheetNumbers = (text) => [...text.matchAll(INDEX_SHEET_NUMBER)]
     .filter((m) => !NOT_A_SHEET_PREFIX.test(m[1]))
-    .map((m) => ({ key: `${m[1]}${m[2]}`, start: m.index, end: m.index + m[0].length }));
+    .map((m) => ({ key: `${m[1]}${m[2]}`, letters: m[1], start: m.index, end: m.index + m[0].length }))
+    .filter((n) => {
+      const before = text.slice(Math.max(0, n.start - 8), n.start);
+      if (SIZE_AFTER.test(text.slice(n.end, n.end + 8)) && !QUOTE_BEFORE.test(before)) return false;
+      return !(n.letters === 'X' && SIZE_BEFORE.test(before));
+    });
   const indexNames = (text, words) => {
     const end = INDEX_NAMES_END.exec(text);
     return (end ? text.slice(0, end.index) : text).trim().split(/\s+/).slice(0, words).join(' ');
@@ -1402,6 +1412,7 @@
   function indexSpecSheets(pageTexts) {
     const spec = new Set();
     const listed = new Set();
+    const names = new Map(); // the name a ROW gives its sheet number, as the backend keeps it
     for (const raw of pageTexts || []) {
       const text = String(raw || '');
       if (!isIndexOrNotesPage(text)) continue;
@@ -1413,7 +1424,9 @@
         const run = nums.slice(i, j + 1);
         for (const n of run) listed.add(n.key);
         if (run.length === 1) {
-          if (isIndexSpecName(indexNames(after, INDEX_NAME_WORDS))) spec.add(run[0].key);
+          const name = indexNames(after, INDEX_NAME_WORDS);
+          if (!names.has(run[0].key)) names.set(run[0].key, name);
+          if (isIndexSpecName(name)) spec.add(run[0].key);
         } else {
           const count = [...indexNames(after, run.length * INDEX_NAME_WORDS).matchAll(INDEX_SPEC_NAME)].length;
           const prefix = (k) => k.replace(/[\d.]+$/, '');
@@ -1425,11 +1438,17 @@
         i = j + 1;
       }
     }
-    return { spec, listed };
+    return { spec, listed, names };
   }
+  // The backend's label reader: the label in any case, a paper size between label and value skipped.
+  const SHEET_NUMBER_LABEL = /\bSHEET\s*(?:NUMBER|NO\.?|#)\s*:?\s*/i;
+  const LEADING_PAPER_SIZE = /^(?:(?:ANSI|ARCH|ISO)\s+)?(?:[A-E]\d?\s+)?\d{1,2}(?:\.\d+)?\s*(?:"|''|”|″)?\s*[xX×]\s*\d{1,2}(?:\.\d+)?\s*(?:"|''|”|″)?\s*/i;
   /** docSplitter.ts pageSheetNumber: the labelled SHEET NUMBER when there is one, else the only index number. */
   function pageSheetNumber(text, listed) {
-    const labelled = /\bSHEET\s*(?:NUMBER|NO\.?|#)\s*:?\s*([A-Z]{1,3}\s?-?\s?\d{1,2}(?:\.\d{1,2})?)\b/.exec(text);
+    const label = SHEET_NUMBER_LABEL.exec(text);
+    const labelled = label
+      ? /^([A-Z]{1,3}\s?-?\s?\d{1,2}(?:\.\d{1,2})?)\b/.exec(text.slice(label.index + label[0].length).replace(LEADING_PAPER_SIZE, ''))
+      : null;
     if (labelled) {
       const key = (sheetNumbers(labelled[1])[0] || {}).key;
       return key && listed.has(key) ? key : null;
@@ -1443,20 +1462,24 @@
 
   /** docSplitter.ts scorePage: the page's single winning category (ties go to the earlier one),
    *  plus the combined MODULE / INV sheet as both specs; `byPattern` when the winner hit a sheet NAME. */
-  function scoreSplitPage(t) {
+  function scoreSplitPage(t, sheetName) {
     if (isIndexOrNotesPage(t)) return { docTypes: [], byPattern: false };
     const electrical = ELECTRICAL_SHEET.test(t);
     const calcs = isCalcsSheet(t);
     const notes = NOTES_SHEET.test(t);
     const battery = batteryPage(t);
     const hits = (res) => (res || []).reduce((n, re) => (re.test(t) ? n + 1 : n), 0);
+    // The backend's rule: on an electrical-numbered sheet a `words` hit counts when the word is the
+    // sheet's own name in the cover's index (a sheet NAMED "PLACARD" and numbered E 1.4).
+    const namedBy = (cat) => (!sheetName || (cat.wordsSkipNotes && NOTES_SHEET.test(sheetName))
+      ? 0 : (cat.words || []).reduce((n, re) => (re.test(sheetName) ? n + 1 : n), 0));
     let best = null;
     for (const cat of SPLIT_CATEGORIES) {
       if (calcs && SPEC_DOC_TYPES.has(cat.docType)) continue;
       if (cat.docType === 'battery_spec' && battery !== 'spec') continue;
       const patternHits = hits(cat.patterns);
       const score = patternHits + hits(cat.sheetNumbers)
-        + (electrical ? 0 : (cat.wordsSkipNotes && notes ? 0 : hits(cat.words)) + ((cat.vocabulary || []).some((re) => re.test(t)) ? 1 : 0));
+        + (electrical ? namedBy(cat) : (cat.wordsSkipNotes && notes ? 0 : hits(cat.words)) + ((cat.vocabulary || []).some((re) => re.test(t)) ? 1 : 0));
       if (score > 0 && (!best || score > best.score)) best = { docType: cat.docType, score, patternHits };
     }
     // A battery datasheet by its body wins over anything but another category's own sheet NAME (#261).
@@ -1491,7 +1514,7 @@
     const index = indexSpecSheets((allPages || pages || []).map((p) => String(p.text || '')));
     for (const p of pages || []) {
       const t = String(p.text || '');
-      const { docTypes } = scoreSplitPage(t);
+      const { docTypes } = scoreSplitPage(t, index.names.get(pageSheetNumber(t, index.listed) || '') || '');
       if (docTypes.includes('module_spec')) moduleSpecs.push(p.page);
       if (docTypes.includes('inverter_spec')) inverterSpecs.push(p.page);
     }
@@ -1501,7 +1524,7 @@
     // found by its content or name, not by a DS sheet code.
     for (const p of allPages || pages || []) {
       const t = String(p.text || '');
-      const scored = scoreSplitPage(t);
+      const scored = scoreSplitPage(t, index.names.get(pageSheetNumber(t, index.listed) || '') || '');
       if (scored.docTypes.includes('battery_spec')) batterySpecs.push(p.page);
       if (isUndecidedSpecPage(t, scored, index)) undecidedSpecs.push(p.page);
     }
@@ -1644,7 +1667,7 @@
     filterTapEvidence, isNoteMention,
     formatReviewList,
     isCalcsSheet, specSheetPages, specMapValue, SPEC_MAP_RULE, scoreSplitPage, SPLIT_CATEGORIES,
-    indexSpecSheets, isUndecidedSpecPage, batteryPage,
+    indexSpecSheets, isUndecidedSpecPage, batteryPage, pageSheetNumber,
     normalizeText, layoutTextFromItems, pdfPageText, collapseDoubledPage, textOncePerPage,
   };
 });

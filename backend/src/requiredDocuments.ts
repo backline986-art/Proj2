@@ -39,7 +39,8 @@ import type { CodeEdition, JobScope, ProjectRecord } from "../../shared/src/type
 import { deriveJobScope, resolveJobScope, scopeHasNewPv } from "./jobScope";
 import { projectDocsByType } from "./projectDocuments";
 import { activeStructuralLetterConfirmation, confirmedByLine } from "./structuralLetter";
-import { duplicateUploads, uploadedSubmissionDocuments } from "./submissionDocuments";
+import { duplicateUploads, splitCutFiles, uploadedSubmissionDocuments } from "./submissionDocuments";
+import { acModuleSheetPagesOfPart } from "./docSplitter";
 import { filledFormsByDocType, applicationKindForPath, loadStoredTemplates, formAllowedForPath, formContradictsPath } from "./ahjForms";
 import { resolvePermitPath, resolveStampRequirement, hasStampedStructuralEvidence } from "./permitPath";
 import { codeLimitProvenance, resolveEffectiveCodeContext } from "./codeProfiles";
@@ -57,7 +58,7 @@ import { filledApplicationForms, heldUnfillableAgencyBlanks } from "./ahjForms";
 import { parsePortalRequiredUpload, requirementSlots } from "./requirementSlots";
 import { deadLinkSentence, stageAcquiresForm, stageAcquisitionFor, type StageAcquiredForm, type StageAcquisition } from "./formAcquisitionPlan";
 import {
-  designText, INVERTER_LISTING_PATTERNS, LOAD_SIDE_CALC_PATTERNS, MODULE_LISTING_PATTERNS, POWER_SOURCE_DIRECTORY_PATTERNS, RAPID_SHUTDOWN_PATTERNS, SUPPLY_SIDE_DETAIL_PATTERNS,
+  designText, INVERTER_LISTING_PATTERNS, inverterListingShown, LOAD_SIDE_CALC_PATTERNS, MODULE_LISTING_PATTERNS, packageListings, POWER_SOURCE_DIRECTORY_PATTERNS, RAPID_SHUTDOWN_PATTERNS, SUPPLY_SIDE_DETAIL_PATTERNS,
 } from "./codeReviewRules";
 import { FIRE_PATHWAY_PATTERNS } from "./projectEvidence";
 import { groundMountFromField } from "./mountKind";
@@ -280,7 +281,8 @@ const PLAN_SHEET_HINTS: Record<string, RegExp> = PLAN_SHEET_HINT_TABLE;
 // EDITION-AWARE. The wording an element is NAMED by follows the jurisdiction's adopted NEC: 690.12
 // moved from the 10 ft boundary (2014) to the array boundary / PV hazard control (2017+), and the
 // supply-side connection moved out of 705.12(A) into its own 705.11 in 2020.
-interface SheetContentElement { element: string; patterns: RegExp[] }
+/** `shown`: a second, non-text way the element is shown (what intake read off a page image), answered by the reviewer's own reader. */
+interface SheetContentElement { element: string; patterns: RegExp[]; shown?: (project: ProjectRecord) => boolean }
 const PV_HAZARD_CONTROL = /\bPV\s*hazard\s*control|\bPVHCS\b/i;
 const POINT_OF_INTERCONNECTION = /\bpoint\s+of\s+(?:inter)?connection\b|\bPOI\b/i;
 // Keyed by PlanSheetType, so a content entry for a sheet the hints do not know is a compile error.
@@ -298,8 +300,10 @@ const SHEET_CONTENT_ELEMENTS: Partial<Record<PlanSheetType, (nec: number | null)
     },
   ],
   site_plan: () => [{ element: "R324.6 fire access pathways", patterns: FIRE_PATHWAY_PATTERNS }],
-  module_spec: () => [{ element: "module listing (UL 61730 / UL 1703)", patterns: MODULE_LISTING_PATTERNS }],
-  inverter_spec: () => [{ element: "UL 1741(-SB) listing", patterns: INVERTER_LISTING_PATTERNS }],
+  // The two listings are also shown by what intake read off a page IMAGE (audit 2026-11-28): the
+  // reviewer's own readers answer, so this check and the reviewer cannot disagree about "shown".
+  module_spec: () => [{ element: "module listing (UL 61730 / UL 1703)", patterns: MODULE_LISTING_PATTERNS, shown: (p) => packageListings(p).module != null }],
+  inverter_spec: () => [{ element: "UL 1741(-SB) listing", patterns: INVERTER_LISTING_PATTERNS, shown: (p) => inverterListingShown(p) != null }],
   labels: (nec) => [
     { element: `${necLabel(nec)} 705.10 power-source directory`, patterns: POWER_SOURCE_DIRECTORY_PATTERNS },
     { element: `${necLabel(nec)} 690.12 rapid shutdown label`, patterns: nec != null && nec >= 2017 ? [...RAPID_SHUTDOWN_PATTERNS, PV_HAZARD_CONTROL] : RAPID_SHUTDOWN_PATTERNS },
@@ -330,17 +334,18 @@ export interface SheetContentGap {
  * No readable body text at all → no rows: nothing was read, which is not evidence of absence.
  */
 export function sheetContentGaps(project: ProjectRecord, presence: DocPresence[], adoptedCodes?: CodeEdition[]): SheetContentGap[] {
-  const body = designText({
+  const read = {
     ...project,
     parserSnapshot: { ...(project.parserSnapshot || {}), splitPagesText: "", packetReadinessText: "" },
-  } as ProjectRecord);
+  } as ProjectRecord;
+  const body = designText(read);
   if (!body.trim()) return [];
   const nec = adoptedNecEdition(adoptedCodes);
   const gaps: SheetContentGap[] = [];
   for (const p of presence) {
     const elements = p.present ? SHEET_CONTENT_ELEMENTS[p.docType as PlanSheetType]?.(nec) : undefined;
     if (!elements) continue;
-    const missing = elements.filter((e) => !e.patterns.some((re) => re.test(body))).map((e) => e.element);
+    const missing = elements.filter((e) => !e.patterns.some((re) => re.test(body)) && !e.shown?.(read)).map((e) => e.element);
     if (missing.length) gaps.push({ docType: p.docType, label: p.label, via: p.via, missing });
   }
   return gaps;
@@ -1152,12 +1157,28 @@ export function documentInventory(db: AppDb, project: ProjectRecord): DocumentIn
   // attached once, under the first type. Its row is FLAGGED rather than silently satisfied or
   // silently blocking: one datasheet can legitimately cover both (an AC module's sheet includes its
   // microinverter), and a person confirms which.
-  const duplicates = new Map(duplicateUploads(projectDocsByType(db, project.id)).map((d) => [d.docType, d.sameAs]));
+  const duplicates = new Map(duplicateUploads(projectDocsByType(db, project.id), splitCutFiles(db, project.id)).map((d) => [d.docType, d.sameAs]));
   const presence: DocPresence[] = required.map((item) => {
     const sameAs = duplicates.get(item.docType);
     const p = sameAs && uploads[sameAs]
       ? { present: true, via: `same file as ${sameAs.replace(/_/g, " ")} — attached once; confirm it covers the ${item.docType.replace(/_spec$/, "").replace(/_/g, " ")}` }
       : present(item, project, docsByType, uploads, filledApplications);
+    // AN AC MODULE'S ONE DATA SHEET COVERS THE INVERTER ROW (audit 2026-11-28). The splitter cut the
+    // module data sheet as the inverter spec too because the sheet shows the integrated
+    // microinverter's AC output and UL 1741 listing (docSplitter, the AC-module rule). The row says
+    // which sheet covers it, so nobody looks for a standalone inverter sheet the set does not have.
+    if (item.docType === "inverter_spec" && p.present && p.via === "attached file" && uploads.inverter_spec) {
+      try {
+        const cut = db.get<{ original_filename: string | null }>(
+          "SELECT original_filename FROM project_documents WHERE project_id = ? AND doc_type = 'inverter_spec' AND source = 'split' AND stored_path = ?",
+          [project.id, uploads.inverter_spec],
+        );
+        const pages = acModuleSheetPagesOfPart(String(cut?.original_filename ?? ""));
+        if (pages.length) {
+          return { ...item, present: true, via: `attached file — the module data sheet (plan set page ${pages.join(", ")}): an AC module's one data sheet, which carries the integrated microinverter's AC output and UL 1741 listing` };
+        }
+      } catch { /* the wording is extra: the row stays "attached file" */ }
+    }
     // THE ENGINEER'S LETTER BOUND INTO THE PLAN SET, CONFIRMED BY A NAMED PERSON (#198; owner ruling
     // 2026-10-08). The splitter files it as `structural`, not under a stamped-letter type, so the row
     // read it as missing while the same letter decided the job was engineered. Text matching only

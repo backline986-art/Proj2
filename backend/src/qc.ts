@@ -604,7 +604,7 @@ export function runQcForProject(db: AppDb, projectId: string, options: QcRunOpti
           `INSERT INTO qc_results (id, project_id, qc_status, rule_id, rule_name, message, severity, created_at)
            VALUES (?, ?, 'warning', ?, 'Required document content', ?, 'info', ?)`,
           [id(), projectId, `docs.${g.docType}.content`,
-            `${g.label} present (${g.via || "on file"}); no ${g.missing.join(" or ")} text found in the extracted package text (uploaded plan-set text where a text layer exists, plus the parser's summary fields — image-only pages are not read). Advisory — confirm the sheet shows it; the code-review findings decide what blocks.`,
+            `${g.label} present (${g.via || "on file"}); no ${g.missing.join(" or ")} text found in what was read: the uploaded plan-set text where a text layer exists, the parser's summary fields, and for the UL listings the words intake recorded from page images. An image-only page intake did not read is not covered. Advisory — confirm the sheet shows it; the code-review findings decide what blocks.`,
             createdAt],
         );
       }
