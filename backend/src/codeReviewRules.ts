@@ -608,7 +608,33 @@ export const MODULE_LISTING_PATTERNS: RegExp[] = [
 const UL_2703_A_SUFFIX = String.raw`(?:-?[Aa]|\s+-?\s*A)\b`;
 export const RACKING_LISTING_PATTERNS: RegExp[] = [new RegExp(String.raw`\b[Uu][Ll]\s*-?\s*2703\b(?!${UL_2703_A_SUFFIX})`)];
 export const ATTACHMENT_LISTING_PATTERNS: RegExp[] = [new RegExp(String.raw`\b[Uu][Ll]\s*(?:[Ss][Uu][Bb][Jj][Ee][Cc][Tt]\s*)?-?\s*2703${UL_2703_A_SUFFIX}`)];
-export const INVERTER_LISTING_PATTERNS: RegExp[] = [/\bUL\s*1741\b/i];
+// "UL 1741SB" / "UL1741SA" / "UL-1741": the supplement letters and a hyphen are how datasheets print
+// it, and a trailing \b refused all three when no bare "UL 1741" stood beside them.
+export const INVERTER_LISTING_PATTERNS: RegExp[] = [/\bUL\s*-?\s*1741(?![0-9])/i];
+
+// WHAT INTAKE READ OFF A PAGE IMAGE IS PACKAGE EVIDENCE TOO (audit 2026-11-28). The parser page's
+// read of an image-only data sheet keeps the printed words it read, per field, in parserEvidenceText
+// ("field = value  [plan set page 11 (DS 01), 85%] "printed words""). Nothing read that key, so the
+// reviewer said "UL listing not shown" and QC said "no UL 1741 / no module listing text found" on
+// jobs whose intake had read exactly those words. THE ONE READER of it: only a plan-set line, only
+// the quoted words (a field's value alone is a reading, never the sheet's words), labelled with
+// where intake read them. The words then go through the same affirmedIn as any other text.
+const INTAKE_EVIDENCE_LINE = /^(\w+) = .*\s\[(plan set[^\]]*?)(?:,\s*\d+%)?\]\s+"(.+)"$/i;
+export function intakeEvidenceFor(project: ProjectRecord, field: (name: string) => boolean): DesignTextSource[] {
+  const out: DesignTextSource[] = [];
+  for (const line of str(project, "parserEvidenceText").split(/\r?\n/)) {
+    const m = INTAKE_EVIDENCE_LINE.exec(line.trim());
+    if (m && field(m[1]) && m[3].trim()) out.push({ label: `Intake's read of the ${m[2].trim()}`, text: m[3].trim() });
+  }
+  return out;
+}
+
+/** Where the package shows the inverter's UL 1741 listing: its text, or the words intake read off
+ *  an inverter field's page. THE ONE READER for the sheet-content check (requiredDocuments). */
+export function inverterListingShown(project: ProjectRecord, extraTexts: DesignTextSource[] = []): Affirmed | null {
+  return affirmedIn(packageTextSources(project, extraTexts), INVERTER_LISTING_PATTERNS)
+    ?? affirmedIn(intakeEvidenceFor(project, (f) => /^(?:inv|inverter|pvMicro)/.test(f)), INVERTER_LISTING_PATTERNS);
+}
 
 /** The products whose listing the UL LISTINGS rule reads, and the printed words that name each. */
 export type ListingProduct = "module" | "racking" | "attachment";
@@ -677,6 +703,9 @@ export function packageListings(project: ProjectRecord, extraTexts: DesignTextSo
   return {
     module: affirmedIn(packageTexts, MODULE_LISTING_PATTERNS)
       ?? (datasheetWords ? affirmedIn([{ label: "Module datasheet (read from the page image)", text: datasheetWords }], MODULE_LISTING_PATTERNS) : null)
+      // The same words when the PARSER PAGE's image read is what found them: it fills the agency and
+      // keeps its excerpt in parserEvidenceText, never in moduleListingAgencyEvidence.
+      ?? affirmedIn(intakeEvidenceFor(project, (f) => f === "moduleListingAgency"), MODULE_LISTING_PATTERNS)
       ?? fromImages("module"),
     racking: affirmedIn(packageTexts, RACKING_LISTING_PATTERNS) ?? fromImages("racking"),
     attachment: affirmedIn(packageTexts, ATTACHMENT_LISTING_PATTERNS) ?? fromImages("attachment"),
