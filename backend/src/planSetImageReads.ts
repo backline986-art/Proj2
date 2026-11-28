@@ -37,6 +37,10 @@ import { nowIso } from "./time";
 //     it is a model's transcription of the sheet and is not needed again.
 // "Shown", never "proven": the gate's finding stays a warning for a person to check on the sheet.
 // The reader below writes nothing (the "reads write nothing" invariant nextStep.test pins).
+//
+// A SECOND NOTE LIVES IN THE SAME TABLE, at the end of this file: what the page-index read said about
+// a module data sheet page (the splitter's AC-module rule). Its rows are named by their own field
+// prefix; the AC-disconnect writer and reader above never touch them, and it never touches theirs.
 
 /** The AC disconnect's plan-set fields, most specific first. */
 const FIELDS: ReadonlyArray<PlanSetImageDisconnectRead["field"]> = ["acDiscMakeModel", "acDiscAmps", "acDiscFused", "acDiscReq"];

@@ -809,7 +809,11 @@ export async function reconcileSplitParts(db: AppDb, projectId: string): Promise
   // MODULE DATA SHEETS STILL TO PUT TO THE PAGE-INDEX READ (the AC-module rule above). Its own field,
   // never a gap: a gap re-splits at every door, and only a split that holds a model can ask. Nothing
   // to ask once the job has an inverter spec from anywhere, or a person removed that part.
-  const moduleSheetsToRead = acModule.ask.length && !deletedByPerson.has("inverter_spec") && !projectDocsByType(db, projectId).inverter_spec ? acModule.ask : [];
+  // Only when the split would cut this same file: its answer is noted by the bytes it cut, and a
+  // note under other bytes would leave these pages "still to read" on every pass.
+  let sameFile = false;
+  try { sameFile = findPlanSet(db, projectId).path === latest.stored_path; } catch { sameFile = false; }
+  const moduleSheetsToRead = sameFile && acModule.ask.length && !deletedByPerson.has("inverter_spec") && !projectDocsByType(db, projectId).inverter_spec ? acModule.ask : [];
   const undecided = { undecidedSpecPages: undecidedSpec, undecidedSpecFiledAs, outlinedTextPages: outlined, moduleSheetsToRead };
 
   const withdrawn = new Set<string>();
