@@ -269,6 +269,49 @@ await check("(3d) PIN: the Parser page's save sends the record, and the dashboar
   assert.match(js, /parseReviewPanelHtml\(\(project\.parserSnapshot \|\| \{\}\)\.parseReview\)/, "renderReview shows the panel");
 });
 
+// --- (5) a photo is filed as what it shows ------------------------------------------------------
+
+await check("(5a) MUST-PASS: crossed photo boxes are swapped; a lone photo in the wrong box is moved; anything ambiguous is only flagged", () => {
+  const fix = ParserReview.photoSlotFix;
+  const both = ["utility_bill", "meter_photo"];
+  const crossed = fix(both, [{ index: 1, shows: "meter_photo" }, { index: 2, shows: "utility_bill" }], { utility_bill: true, meter_photo: true });
+  assert.equal(crossed.action, "swap");
+  assert.match(crossed.flags[0], /each other's boxes/);
+  assert.equal(fix(["utility_bill"], [{ index: 1, shows: "meter_photo" }], { utility_bill: true, meter_photo: false }).action, "bill_to_meter");
+  assert.equal(fix(["meter_photo"], [{ index: 1, shows: "utility_bill" }], { utility_bill: false, meter_photo: true }).action, "meter_to_bill");
+  // MUST-NOT: never move a photo over a document already in the other box (a PDF bill is not among the images sent).
+  const overPdf = fix(["meter_photo"], [{ index: 1, shows: "utility_bill" }], { utility_bill: true, meter_photo: true });
+  assert.equal(overPdf.action, "none");
+  assert.match(overPdf.flags[0], /CHECK THE PHOTO in the meter-photo box: it shows a utility bill/);
+  const twoMeters = fix(both, [{ index: 1, shows: "meter_photo" }, { index: 2, shows: "meter_photo" }], { utility_bill: true, meter_photo: true });
+  assert.deepEqual([twoMeters.action, twoMeters.flags.length], ["none", 1]);
+  const neither = fix(both, [{ index: 1, shows: "utility_bill" }, { index: 2, shows: "neither" }], { utility_bill: true, meter_photo: true });
+  assert.equal(neither.action, "none");
+  assert.match(neither.flags[0], /meter-photo box: it shows neither a bill nor a meter/);
+  for (const quiet of [fix(both, undefined), fix(both, []), fix(both, [{ index: 1, shows: "utility_bill" }, { index: 2, shows: "meter_photo" }]), fix(both, [{ index: 7, shows: "meter_photo" }])]) {
+    assert.deepEqual(quiet, { action: "none", flags: [] }, "a read that did not say, or that agrees with the boxes, changes nothing");
+  }
+});
+
+await check("(5b) MUST-PASS: the read's own answer is validated, and the page applies it before anything is uploaded", async () => {
+  const { imageKindsFromResponse } = await import("../src/llm");
+  const raw = 'noise {"fields":{}, "imageKinds": [{"index": 2, "shows": "utility_bill"}, {"index": 1, "shows": "meter_photo"}, {"index": 1, "shows": "neither"}, {"index": 9, "shows": "meter_photo"}, {"index": 2.5, "shows": "x"}, {bad json}], "notes": ""}';
+  assert.deepEqual(imageKindsFromResponse(raw, 2), [{ index: 1, shows: "meter_photo" }, { index: 2, shows: "utility_bill" }]);
+  assert.deepEqual(imageKindsFromResponse('{"fields":{}}', 2), []);
+  assert.deepEqual(imageKindsFromResponse('{"imageKinds":[{"index":1,"shows":"a bill"}]}', 1), [], "an unknown kind is not a kind");
+  const llmSrc = fs.readFileSync(path.join(REPO, "backend", "src", "llm.ts"), "utf8");
+  assert.match(llmSrc, /THE LABELS COME FROM UPLOAD BOXES AND CAN BE WRONG[^\n]*"imageKinds"/, "the image read is asked what each image shows");
+  assert.match(llmSrc, /const imageKinds = imageKindsFromResponse\(raw, input\.images\.length\);\s*return imageKinds\.length \? \{ \.\.\.extraction, imageKinds \} : extraction;/, "and its answer rides the response");
+  const html = fs.readFileSync(path.join(REPO, "frontend", "parser.html"), "utf8");
+  const fixAt = html.indexOf("ParserReview.photoSlotFix(visionImages.map(i => i.kind), v.imageKinds, { utility_bill: !!state.ubFile, meter_photo: !!state.meterFile })");
+  assert.ok(fixAt > 0, "the Parser page asks for the fix with the boxes' real occupancy");
+  const block = html.slice(fixAt, fixAt + 1200);
+  assert.match(block, /slotFix\.action === 'swap'\)\{ \[state\.ubFile, state\.meterFile\] = \[state\.meterFile, state\.ubFile\];/);
+  assert.match(block, /slotFix\.action === 'bill_to_meter'\)\{ state\.meterFile = state\.ubFile;/);
+  assert.match(block, /slotFix\.flags\.forEach\(f => state\.reviewFlags\.push\(f\)\)/);
+  assert.ok(fixAt < html.indexOf("[state.ubFile, 'utility_bill'],"), "the files are typed for upload from the corrected slots");
+});
+
 // --- (6) what the read is asked for is saved ----------------------------------------------------
 
 await check("(6a) MUST-PASS: building geometry and the inverter's rated power are saved by the unattended door and reach the recipe values", async () => {

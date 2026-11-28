@@ -1680,6 +1680,52 @@
     return out;
   }
 
+  // -------------------------------------------------------------------------
+  // A PHOTO IS FILED AS WHAT IT SHOWS, NOT AS THE BOX IT WAS DROPPED IN.
+  // The two photo boxes typed their files (utility_bill / meter_photo) by the box alone, so a bill
+  // dropped in the meter box was saved — and later uploaded to a portal — as the meter photo.
+  // The image read now says what each image shows (imageKinds); photoSlotFix turns that into ONE
+  // action the page applies before anything is saved. It acts only when the read is unambiguous:
+  //   swap          both boxes hold the other's kind;
+  //   bill_to_meter the bill box holds a meter photo and the meter box is empty (and the reverse);
+  // anything else (two images of the same kind, an image that is neither, a read that did not
+  // say) changes nothing and is a review line a person sees. `kinds` are the boxes of the images
+  // sent, in order; `imageKinds` the read's answer (1-based index, shows).
+  // -------------------------------------------------------------------------
+  function photoSlotFix(kinds, imageKinds, occupied) {
+    const sent = Array.isArray(kinds) ? kinds : [];
+    // `occupied`: which boxes hold ANY file. A box holding a PDF is not among the images sent, and a
+    // photo is never moved into a box that already holds a document.
+    const holds = (slot) => (occupied && typeof occupied[slot] === 'boolean' ? occupied[slot] : sent.includes(slot));
+    const shown = {};
+    for (const k of Array.isArray(imageKinds) ? imageKinds : []) {
+      if (k && Number.isInteger(k.index) && k.index >= 1 && k.index <= sent.length) shown[sent[k.index - 1]] = k.shows;
+    }
+    const name = { utility_bill: 'a utility bill', meter_photo: 'a meter photo', neither: 'neither a bill nor a meter' };
+    const box = { utility_bill: 'utility-bill', meter_photo: 'meter-photo' };
+    const other = { utility_bill: 'meter_photo', meter_photo: 'utility_bill' };
+    const hasBill = holds('utility_bill');
+    const hasMeter = holds('meter_photo');
+    const flags = [];
+    let action = 'none';
+    if (shown.utility_bill === 'meter_photo' && shown.meter_photo === 'utility_bill') {
+      action = 'swap';
+      flags.push("The two photos were in each other's boxes: the image in the utility-bill box shows the meter and the image in the meter-photo box shows the bill. They are filed by what they show (bill as the utility bill, meter as the meter photo).");
+    } else if (hasBill && !hasMeter && shown.utility_bill === 'meter_photo') {
+      action = 'bill_to_meter';
+      flags.push('The image in the utility-bill box shows the electric meter, not a bill: it is filed as the meter photo. No utility bill is attached.');
+    } else if (hasMeter && !hasBill && shown.meter_photo === 'utility_bill') {
+      action = 'meter_to_bill';
+      flags.push('The image in the meter-photo box shows a utility bill, not a meter: it is filed as the utility bill. No meter photo is attached.');
+    } else {
+      for (const slot of ['utility_bill', 'meter_photo']) {
+        if (!sent.includes(slot) || !shown[slot] || shown[slot] === slot) continue;
+        flags.push(`CHECK THE PHOTO in the ${box[slot]} box: it shows ${name[shown[slot]] || 'something else'}${shown[slot] === other[slot] ? ', and the other box does not hold the matching photo' : ''}. It is still filed as it was uploaded — replace it or move it before saving, so the wrong image is not sent to a portal.`);
+      }
+    }
+    return { action, flags };
+  }
+
   /** Pages past the page's own text cap, minus the ones vision read: nobody took their text. */
   function pagesPastTextCap(pagesRead, pageCount, reads) {
     const seen = new Set((reads && reads.visionPages) || []);
@@ -1723,7 +1769,7 @@
   }
 
   return {
-    noteParseRead, pagesPastTextCap, unreadImagePagesLine, buildParseReviewRecord,
+    noteParseRead, pagesPastTextCap, unreadImagePagesLine, buildParseReviewRecord, photoSlotFix,
     looksLikeEmail, firstEmail, emailToSave,
     compareMeters, meterTargets, meterInText,
     mergeNotes, assertsMissingAttached,

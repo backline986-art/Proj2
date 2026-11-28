@@ -4108,8 +4108,9 @@ function buildEvidenceText(){
 
 async function runLlmAssist(){
   const planText = state.planDoc?.text || '';
-  const utilityBillText = state.ubDoc?.text || '';
-  const meterText = state.meterDoc?.text || '';
+  // let: a photo found in the wrong box is moved to its own (photoSlotFix below) before the text pass.
+  let utilityBillText = state.ubDoc?.text || '';
+  let meterText = state.meterDoc?.text || '';
   const structuralLetterText = state.structuralDoc?.text || '';
   const haveText = planText.trim() || utilityBillText.trim() || meterText.trim() || structuralLetterText.trim();
   // Collect document images for vision (most accurate for account/meter numbers).
@@ -4130,7 +4131,19 @@ async function runLlmAssist(){
     try {
       const v = await postJson('/api/parser/vision-extract', { images: visionImages, defaultState: getVal('state') || undefined });
       if (v.provider === 'stub'){ authOff = true; }
-      else { applyExtraction(v, applied, { vision: true, docsGiven: visionImages.map(i => i.kind) }); ranAny = true; }
+      else {
+        applyExtraction(v, applied, { vision: true, docsGiven: visionImages.map(i => i.kind) }); ranAny = true;
+        // FILE EACH PHOTO AS WHAT IT SHOWS, not as the box it was dropped in (ParserReview.photoSlotFix):
+        // the read says what each image is; a bill in the meter box (or the reverse) is moved to its
+        // own slot BEFORE anything is saved or uploaded, and said in the review flags. Anything the
+        // read leaves ambiguous is only flagged.
+        const slotFix = ParserReview.photoSlotFix(visionImages.map(i => i.kind), v.imageKinds, { utility_bill: !!state.ubFile, meter_photo: !!state.meterFile });
+        if (slotFix.action === 'swap'){ [state.ubFile, state.meterFile] = [state.meterFile, state.ubFile]; [state.ubDoc, state.meterDoc] = [state.meterDoc, state.ubDoc]; }
+        else if (slotFix.action === 'bill_to_meter'){ state.meterFile = state.ubFile; state.meterDoc = state.ubDoc; state.ubFile = null; state.ubDoc = null; }
+        else if (slotFix.action === 'meter_to_bill'){ state.ubFile = state.meterFile; state.ubDoc = state.meterDoc; state.meterFile = null; state.meterDoc = null; }
+        if (slotFix.action !== 'none'){ utilityBillText = state.ubDoc?.text || ''; meterText = state.meterDoc?.text || ''; }
+        slotFix.flags.forEach(f => state.reviewFlags.push(f));
+      }
     } catch (e){
       if (e.status === 502) state.reviewFlags.push(`Smart read (photos): ${e.message}`);
       else state.reviewFlags.push(`Smart read of photos unavailable: ${e.message}. Falling back to text scan for those fields.`);

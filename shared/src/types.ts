@@ -4318,6 +4318,9 @@ export interface ParserLlmExtraction {
   /** An unattended door tried the image-page read and it failed: the text read stands alone, and
    *  the parse-review record says so (parserExtraction.extractParserFieldsFromDocuments). */
   imagePagesReadFailed?: boolean;
+  /** A bill / meter image read only: what each image ACTUALLY shows (1-based, in the order sent),
+   *  whatever upload box it was labelled from. Absent when the read did not say. */
+  imageKinds?: Array<{ index: number; shows: "utility_bill" | "meter_photo" | "neither" }>;
   /** Plan-set pages whose TEXT was left out of the text read because the plan text was over the
    *  prompt's character bound (whole pages dropped from the middle, #697). Absent when all fit. */
   planTextPagesNotRead?: number[];
