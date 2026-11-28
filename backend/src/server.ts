@@ -58,6 +58,7 @@ import { createUser, getUserWorkload, listUsers, updateUser, assignProjectToUser
 import { listBackups, runBackup, startBackupScheduler } from "./backup";
 import { startArtifactRetention } from "./artifactRetention";
 import { startMonitorScheduler } from "./scheduler";
+import { attachHostThrottleStore, hostPauseLine, listHostPauses } from "./hostThrottle";
 import { startStaffDigestScheduler } from "./staffAlerts";
 import { startAhjFormRefreshScheduler, startKbLinkCheckScheduler } from "./ahjFormRefresh";
 import { startCecSyncScheduler, primeCecCache, syncCecEquipment } from "./cecEquipment";
@@ -270,6 +271,10 @@ const app = express();
 })();
 
 const db = await openDatabase();
+// Portal pauses (a host that rate-limited or banned us) are read back BEFORE any scheduler or job can
+// read a portal: a restart inside a Cloudflare ban must not knock again (hostThrottle.ts).
+attachHostThrottleStore(db);
+listHostPauses().forEach((p) => logger.warn("host-throttle", `still paused after restart: ${hostPauseLine(p)}`, { host: p.host }));
 // FRONTEND_DIR pins the dashboard WITH the backend (production 2026-09-27). The pinned server ran
 // 4bbd911's backend from .probe/prod-pinned but served frontend/ from the working directory — the
 // dev tree — so every frontend commit went live against the old backend: parser.html posted

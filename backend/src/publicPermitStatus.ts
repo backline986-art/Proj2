@@ -9,6 +9,13 @@
 // when setting up a permit_check_target — no manual platform selection required.
 //
 // SAFETY: read-only fetches only. Never submits, modifies, or pays.
+//
+// POLITE (hostThrottle.ts): every request here takes its host's turn — >= 10 s after the last request
+// to that host from ANY feature, inside the host's hourly budget — and its answer is judged: a 429, a
+// 503 with Retry-After or a Cloudflare 1015 / challenge page pauses the host for every feature, and a
+// paused host is sent nothing (the read comes back empty and the sweep words the pause on the card).
+
+import { HostPausedError, politeFetch } from "./hostThrottle";
 
 export type PortalPlatform =
   | "accela"
@@ -246,7 +253,7 @@ export async function searchAccelaRecordByNumber(
       if (!opts.allowUrl(at)) return { refused: `${at.slice(0, 200)} is not this filing's AHJ portal` };
       let res: Response;
       try {
-        res = await doFetch(at, {
+        res = await politeFetch(at, {
           method: form ? "POST" : "GET",
           redirect: "manual",
           signal: AbortSignal.timeout(15000),
@@ -256,8 +263,10 @@ export async function searchAccelaRecordByNumber(
             ...(form ? { "Content-Type": "application/x-www-form-urlencoded" } : {}),
           },
           ...(form ? { body: form.toString() } : {}),
-        });
+        }, { feature: "record-search", fetchImpl: doFetch });
       } catch (err) {
+        // A paused host was sent nothing: say so in the staff's words, not as a network failure.
+        if (err instanceof HostPausedError) return { refused: err.message };
         return { refused: `the portal did not answer (${err instanceof Error ? err.message.slice(0, 120) : String(err)})` };
       }
       keepCookies(res);
@@ -391,7 +400,7 @@ async function fetchEnerGovStatus(portalUrl: string, applicationNumbers: string[
     const apiBase = portalUrl.replace(/#.*$/, "").replace(/\/selfservice.*$/, "");
     const apiUrl = `${apiBase}/api/permit/search?permitNumber=${encodeURIComponent(num)}&pageNumber=1&pageSize=5`;
     try {
-      const res = await fetch(apiUrl, { signal: AbortSignal.timeout(10000) });
+      const res = await politeFetch(apiUrl, { signal: AbortSignal.timeout(10000) }, { feature: "status-read" });
       if (res.ok) {
         const json = await res.json().catch(() => null);
         if (json) return JSON.stringify(json).slice(0, 3000);
@@ -424,10 +433,10 @@ async function fetchSolarAppStatus(portalUrl: string, applicationNumbers: string
 // ---------------------------------------------------------------------------
 export async function fetchHtml(url: string): Promise<string | null> {
   try {
-    const res = await fetch(url, {
+    const res = await politeFetch(url, {
       signal: AbortSignal.timeout(12000),
       headers: { "User-Agent": "Mozilla/5.0 (compatible; permit-status-bot/1.0)" },
-    });
+    }, { feature: "status-read" });
     if (!res.ok) return null;
     return await res.text();
   } catch {

@@ -855,10 +855,28 @@ export function effectiveCheckDays(storedDays: unknown, latestOutcome: string | 
   return FINISHED_OUTCOMES.has(String(latestOutcome ?? "").trim()) ? stored : Math.min(stored, OPEN_FILING_CHECK_DAYS);
 }
 
-export function nextCheckIso(days: number, from = new Date()): string {
+export function nextCheckIso(days: number, from = new Date(), spreadKey = ""): string {
   const next = new Date(from);
   next.setDate(next.getDate() + Math.max(1, Math.floor(days || 7)));
+  if (spreadKey) next.setTime(next.getTime() + checkSpreadMs(spreadKey));
   return next.toISOString();
+}
+
+// SPREAD, DON'T BURST (live 2026-11-27). A sweep reads every due filing in one go and stamps each
+// "next check" exactly N days after ITS read, so filings read together stay due together, every
+// day, at the same minute: a burst on a shared portal host (Oregon ePermitting) that grew with the
+// book of business until the site rate-limited the server. Each filing's next check is moved by a
+// stable offset of its own (0 to CHECK_SPREAD_MS, from its id), so one burst becomes four sweeps'
+// worth of reads the next day. Stable, not random: a test can predict it, and two reads of one
+// filing never land on the same sweep by chance.
+export const CHECK_SPREAD_MS = 60 * 60 * 1000;
+export function checkSpreadMs(key: string): number {
+  let h = 2166136261;
+  for (let i = 0; i < key.length; i += 1) {
+    h ^= key.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  return (h >>> 0) % CHECK_SPREAD_MS;
 }
 
 // ---------------------------------------------------------------------------

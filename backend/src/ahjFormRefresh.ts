@@ -6,6 +6,7 @@ import { parseJson } from "./json";
 import { buildFieldMapForPdf, documentDateForPdf, fetchPdf, sha256, storeAhjFormTemplate, VerifiedTemplateRefusal, type StoredFieldMap } from "./ahjFormAuto";
 import { isVerifiedKnowledge, knowledgeResearchHint } from "./knowledgeBase";
 import { startPersistentSchedule } from "./schedulerState";
+import { attachHostThrottleStore, hostPause, HostPausedError, politeFetch, throttleHostOf } from "./hostThrottle";
 
 // ---------------------------------------------------------------------------
 // Keep auto-acquired AHJ form templates current. AHJs revise their PDF forms
@@ -194,7 +195,8 @@ export interface KbLinkCheckSummary {
   replaced: number;
 }
 
-type LinkState = "ok" | "unknown" | "dead";
+/** "paused": the host is rate-limit paused (hostThrottle) and was not probed — nothing is stamped. */
+type LinkState = "ok" | "unknown" | "dead" | "paused";
 
 // Replace (not stack) any previous link-check note segment, so a fortnightly
 // sweep doesn't grow the notes field forever.
@@ -203,12 +205,19 @@ function withLinkNote(notes: string, addition: string): string {
   return [...kept, addition].join(" | ");
 }
 
+// POLITE (hostThrottle.ts, live 2026-11-27): this sweep probed 40 stored links back to back, and a
+// state's AHJs share one portal host (Oregon ePermitting), so one sweep was dozens of requests to one
+// site in a few minutes, just before that site rate-limited and then banned the server's IP. Each probe
+// now takes its host's turn (>= 10 s apart, inside the hourly budget, shared with the status sweep),
+// a 429 / 1015 / challenge pauses the host for every feature, and a paused host is not probed at all:
+// "unknown", never "dead" (a rate limit is not evidence a link is stale).
 async function probeUrl(url: string): Promise<LinkState> {
   try {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 15000);
     try {
-      const res = await fetch(url, { redirect: "follow", signal: controller.signal });
+      const res = await politeFetch(url, { redirect: "follow", signal: controller.signal }, { feature: "kb-links" });
+      await res.body?.cancel().catch(() => {});
       if (res.ok) return "ok";
       // Login walls / bot blocks / rate limits are NOT evidence the link is stale.
       if ([401, 403, 405, 429, 503].includes(res.status)) return "unknown";
@@ -216,9 +225,25 @@ async function probeUrl(url: string): Promise<LinkState> {
     } finally {
       clearTimeout(timer);
     }
-  } catch {
+  } catch (err) {
+    if (err instanceof HostPausedError) return "paused";
     return "dead";
   }
+}
+
+/** Round-robin the rows across hosts (a, b, a, b — never a, a, a, b), each host keeping its own
+ *  order, so one host's 10 s gap is spent probing the others. */
+function interleaveRowsByHost<T extends { portal_url: string }>(rows: T[]): T[] {
+  const groups = new Map<string, T[]>();
+  for (const r of rows) {
+    const key = throttleHostOf(r.portal_url) || r.portal_url;
+    const g = groups.get(key);
+    if (g) g.push(r); else groups.set(key, [r]);
+  }
+  const out: T[] = [];
+  const lists = [...groups.values()];
+  for (let i = 0; out.length < rows.length; i += 1) for (const g of lists) if (g[i]) out.push(g[i]);
+  return out;
 }
 
 export async function checkKnowledgeLinks(
@@ -242,10 +267,15 @@ export async function checkKnowledgeLinks(
   );
   const summary: KbLinkCheckSummary = { checked: 0, ok: 0, unknown: 0, dead: 0, replaced: 0 };
   let researched = 0;
+  attachHostThrottleStore(db);
 
-  for (const row of rows) {
-    summary.checked += 1;
+  for (const row of interleaveRowsByHost(rows)) {
+    // A host that rate-limited us is not probed, and the row is not stamped: it stays first in line
+    // for the next sweep after the pause.
+    if (hostPause(row.portal_url)) continue;
     const state = await probeUrl(row.portal_url);
+    if (state === "paused") continue;
+    summary.checked += 1;
     const ts = nowIso();
     if (state === "ok") {
       summary.ok += 1;

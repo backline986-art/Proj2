@@ -87,6 +87,11 @@ globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) =>
   if (body) return new Response(new Uint8Array(body), { headers: { "Content-Type": "application/pdf" } });
   throw new TypeError(`fetch failed: unit tests are offline (backend/test/_isolate.ts) — refused ${url}`);
 }) as typeof fetch;
+// Every request that would leave is refused above, so the per-host 10 s gap (backend/src/hostThrottle.ts)
+// protects nobody here and would only make a suite wait between refusals. A global symbol, read when
+// hostThrottle loads (after this): no env var or setting an operator could set does this. A suite that
+// asserts the gap passes minGapMs to _setHostThrottleSeams itself (hostThrottle.test).
+(globalThis as Record<symbol, unknown>)[Symbol.for("keelix.hostThrottle.offlineTestNoGap")] = true;
 
 // Best-effort removal. An open SQLite handle can hold a file on Windows; a leftover
 // temp dir is harmless, a leftover folder in the repo was the bug.
